@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+**/.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Large ML training data — not needed for dashboard
+data_store/mc_cache/
+data_store/nn_spx_model.pt
+data_store/nn_vix_model.pt
+
+# Generated images and HTML reports
+data_store/backtest/reports/
+data_store/backtest/delta_hedge_attribution.png
+data_store/greeks/vomma_heatmap.png
+data_store/parquet/
+
+# Empty placeholder DB
+data_store/market_data.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

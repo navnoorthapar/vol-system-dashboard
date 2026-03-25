@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}SPX/VIX Vol System{% endblock %}</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a0a;
+      --surface:  #111111;
+      --surface2: #161616;
+      --border:   #1f1f1f;
+      --border2:  #2a2a2a;
+      --accent:   #00ff88;
+      --accent2:  #00cc6a;
+      --text:     #e4e4e4;
+      --text2:    #888888;
+      --text3:    #555555;
+      --red:      #ff3333;
+      --red2:     #cc1111;
+      --blue:     #3388ff;
+      --yellow:   #ffcc00;
+      --orange:   #ff8833;
+      --purple:   #aa44ff;
+      --radius:   6px;
+      --radius2:  10px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Navigation ─────────────────────────────────────────────────────── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0d0d0d;
+      border-bottom: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      height: 52px;
+      gap: 0;
+    }
+
+    .nav-brand {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-right: 36px;
+      white-space: nowrap;
+    }
+    .nav-brand span { color: var(--text2); font-weight: 400; }
+
+    .nav-links { display: flex; gap: 0; }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 18px;
+      height: 52px;
+      color: var(--text2);
+      text-decoration: none;
+      font-size: 12.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
+    .nav-link.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .nav-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.6;
+    }
+
+    .nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text3);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Page Layout ─────────────────────────────────────────────────────── */
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 28px 28px 60px;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .page-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text3);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .page-badge {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text3);
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Grid Helpers ────────────────────────────────────────────────────── */
+    .grid       { display: grid; gap: 16px; }
+    .grid-2     { grid-template-columns: repeat(2, 1fr); }
+    .grid-3     { grid-template-columns: repeat(3, 1fr); }
+    .grid-4     { grid-template-columns: repeat(4, 1fr); }
+    .grid-5     { grid-template-columns: repeat(5, 1fr); }
+    .col-2      { grid-column: span 2; }
+    .col-3      { grid-column: span 3; }
+    .col-4      { grid-column: span 4; }
+    .col-full   { grid-column: 1 / -1; }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius2);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent);
+    }
+
+    .card-sm { padding: 16px; }
+    .card-lg { padding: 28px; }
+
+    .card-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 8px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      font-family: 'Menlo', 'Courier New', monospace;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .card-value.lg { font-size: 40px; }
+    .card-value.sm { font-size: 22px; }
+    .card-value.green { color: var(--accent); }
+    .card-value.red   { color: var(--red); }
+    .card-value.blue  { color: var(--blue); }
+    .card-value.yellow{ color: var(--yellow); }
+    .card-value.dim   { color: var(--text2); }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 5px;
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Stat Row ─────────────────────────────────────────────────────────── */
+    .stat-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+    .stat-change { font-family: 'Menlo', monospace; }
+    .stat-change.up   { color: var(--accent); }
+    .stat-change.down { color: var(--red); }
+
+    /* ── Regime Badge ─────────────────────────────────────────────────────── */
+    .regime-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      border: 1px solid;
+    }
+
+    /* ── Banner ───────────────────────────────────────────────────────────── */
+    .banner {
+      border-radius: var(--radius2);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid;
+    }
+    .banner-warn {
+      background: rgba(255,51,51,0.06);
+      border-color: rgba(255,51,51,0.25);
+    }
+    .banner-info {
+      background: rgba(0,255,136,0.04);
+      border-color: rgba(0,255,136,0.2);
+    }
+    .banner-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .banner-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .banner-body {
+      font-size: 12.5px;
+      color: var(--text2);
+      line-height: 1.6;
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 9px 12px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Menlo', 'Courier New', monospace;
+      font-size: 12.5px;
+      color: var(--text2);
+    }
+    .data-table td:first-child { color: var(--text); font-family: inherit; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: var(--surface2); }
+    .data-table .green { color: var(--accent); }
+    .data-table .red   { color: var(--red); }
+
+    /* ── Chart Container ──────────────────────────────────────────────────── */
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+    }
+    .chart-wrap.tall   { height: 340px; }
+    .chart-wrap.xtall  { height: 420px; }
+    .chart-wrap.short  { height: 180px; }
+    .chart-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 14px;
+    }
+
+    /* ── Heatmap Table ────────────────────────────────────────────────────── */
+    .heatmap-wrap { overflow-x: auto; }
+    .heatmap {
+      border-collapse: collapse;
+      font-size: 11px;
+      width: 100%;
+    }
+    .heatmap th {
+      padding: 5px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text3);
+      white-space: nowrap;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .heatmap th.row-head { text-align: left; padding-right: 12px; }
+    .heatmap td {
+      width: 72px;
+      height: 44px;
+      text-align: center;
+      vertical-align: middle;
+      font-family: 'Menlo', monospace;
+      font-size: 10px;
+      border: 1px solid #0a0a0a;
+      transition: transform 0.1s;
+      cursor: default;
+    }
+    .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
+    .heatmap td.empty { background: #0d0d0d; }
+    .heatmap td.unstable {
+      border: 2px solid #ff3333 !important;
+      box-shadow: 0 0 8px rgba(255,51,51,0.4);
+    }
+    .heatmap .mat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text2);
+      font-family: inherit;
+      padding-right: 14px;
+      white-space: nowrap;
+    }
+
+    /* ── Progress Bars ────────────────────────────────────────────────────── */
+    .progress-bar-wrap { margin-top: 10px; }
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .progress-label {
+      width: 90px;
+      font-size: 11px;
+      color: var(--text2);
+      flex-shrink: 0;
+    }
+    .progress-track {
+      flex: 1;
+      height: 6px;
+      background: var(--border2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .progress-val {
+      width: 44px;
+      font-size: 11px;
+      color: var(--text2);
+      text-align: right;
+      font-family: 'Menlo', monospace;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 16px 0;
+    }
+
+    /* ── Tag/Pill ─────────────────────────────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .tag-green { background: rgba(0,255,136,0.12); color: var(--accent); border: 1px solid rgba(0,255,136,0.25); }
+    .tag-red   { background: rgba(255,51,51,0.1);  color: var(--red);    border: 1px solid rgba(255,51,51,0.25); }
+    .tag-blue  { background: rgba(51,136,255,0.1); color: var(--blue);   border: 1px solid rgba(51,136,255,0.25); }
+    .tag-dim   { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
+
+    /* ── Feller / Param Box ───────────────────────────────────────────────── */
+    .param-box {
+      text-align: center;
+      padding: 18px 12px;
+    }
+    .param-sym {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text3);
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .param-val {
+      font-size: 26px;
+      font-weight: 700;
+      font-family: 'Menlo', monospace;
+      letter-spacing: -0.02em;
+    }
+    .param-desc {
+      font-size: 10.5px;
+      color: var(--text3);
+      margin-top: 5px;
+    }
+
+    /* ── Utilities ────────────────────────────────────────────────────────── */
+    .mono { font-family: 'Menlo', 'Courier New', monospace; }
+    .bold { font-weight: 700; }
+    .mt8  { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+    .mt16 { margin-top: 16px; }
+    .mt20 { margin-top: 20px; }
+    .mb12 { margin-bottom: 12px; }
+    .flex { display: flex; align-items: center; }
+    .gap8 { gap: 8px; }
+    .gap12{ gap: 12px; }
+    .space-between { justify-content: space-between; }
+    .text-right { text-align: right; }
+    .opacity-50 { opacity: 0.5; }
+    .green { color: var(--accent); }
+    .red   { color: var(--red); }
+    .blue  { color: var(--blue); }
+    .dim   { color: var(--text2); }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Chart.js global overrides ────────────────────────────────────────── */
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
+  <div class="nav-links">
+    <a href="/"            class="nav-link {% if page=='market'      %}active{% endif %}">
+      <span class="nav-dot"></span>Live Market
+    </a>
+    <a href="/calibration" class="nav-link {% if page=='calibration' %}active{% endif %}">
+      <span class="nav-dot"></span>Calibration
+    </a>
+    <a href="/greeks"      class="nav-link {% if page=='greeks'      %}active{% endif %}">
+      <span class="nav-dot"></span>Greeks Monitor
+    </a>
+    <a href="/backtest"    class="nav-link {% if page=='backtest'    %}active{% endif %}">
+      <span class="nav-dot"></span>Backtest
+    </a>
+  </div>
+  <div class="nav-status">
+    <div class="status-dot"></div>
+    LIVE DATA
+  </div>
+</nav>
+
+<main class="page">
+  {% block content %}{% endblock %}
+</main>
+
+<script>
+  // Chart.js global dark-theme defaults
+  Chart.defaults.color            = '#666';
+  Chart.defaults.borderColor      = '#1f1f1f';
+  Chart.defaults.plugins.legend.labels.color = '#888';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
+  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
+  Chart.defaults.plugins.tooltip.borderWidth       = 1;
+  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
+  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
+  Chart.defaults.plugins.tooltip.padding           = 10;
+
+  function makeLineOpts(yLabel) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+
+  function makeBarOpts(yLabel, horizontal) {
+    return {
+      indexAxis: horizontal ? 'y' : 'x',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+</script>
+
+{% block scripts %}{% endblock %}
+
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "as_of_date": "2026-03-24",
+  "description": "Baseline calibration \u2014 C4 joint calibrator on 2026-03-24 live market data",
+  "params": {
+    "kappa": 4.6213176193778605,
+    "theta": 0.07641449297851698,
+    "sigma": 0.8406653896239384,
+    "rho": -0.99,
+    "v0": 0.056129661711285944
+  },
+  "losses": {
+    "spx_iv_rmse": 3.8333588958635674,
+    "vix_futures_rmse": 1.150224339532592,
+    "vix_options_rmse": 37.14461573029584,
+    "total_loss": 0.02837886303271954
+  },
+  "S": 6581.0,
+  "r": 0.045,
+  "q": 0.013,
+  "fit_time_s": 42.597315073013306
+}

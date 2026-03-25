@@ -1,0 +1,352 @@
+{% extends "base.html" %}
+{% set page = "calibration" %}
+{% block title %}Calibration — Vol System{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div class="page-title">Joint Calibration Results</div>
+  <div class="page-subtitle">Heston 5-parameter · DE + L-BFGS-B</div>
+  <div class="page-badge">{{ d.as_of }}  ·  SPX = {{ d.S }}  ·  r = {{ d.r_pct }}%</div>
+</div>
+
+<!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
+{% if d.rho_at_boundary %}
+<div class="banner banner-warn" style="margin-bottom:20px;">
+  <div class="banner-icon">⚠</div>
+  <div>
+    <div class="banner-title" style="color:#ff8833;">
+      ρ = {{ d.rho }}  —  AT THE LOWER BOUNDARY (−0.99)
+    </div>
+    <div class="banner-body">
+      The Heston correlation parameter has hit its lower bound during calibration.
+      This indicates the model <strong style="color:var(--text);">cannot fully reproduce the steep 2026 SPX left skew</strong>
+      with a pure diffusion structure — jump risk or a non-affine model (e.g. rough Heston) is required.
+      The extreme negative ρ is the model's best approximation of the leverage effect,
+      but it compresses the VIX options fit (RMSE {{ d.vix_opt_rmse }} pts), revealing model misspecification.
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- ── Feller Condition Banner ────────────────────────────────────────────── -->
+<div class="banner {% if d.feller_pass %}banner-info{% else %}banner-warn{% endif %}" style="margin-bottom:20px;">
+  <div class="banner-icon">{% if d.feller_pass %}✓{% else %}✗{% endif %}</div>
+  <div>
+    <div class="banner-title" style="color:{% if d.feller_pass %}#00ff88{% else %}#ff8833{% endif %};">
+      Feller Condition:  2κθ {% if d.feller_pass %}&gt;{% else %}&lt;{% endif %} σ²
+       —  {% if d.feller_pass %}PASS{% else %}FAIL (BARELY){% endif %}
+    </div>
+    <div class="banner-body">
+      2κθ = 2 × {{ d.kappa }} × {{ d.theta }} = <strong style="color:var(--text);">{{ d.feller_lhs }}</strong>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+      σ² = {{ d.sigma }}² = <strong style="color:var(--text);">{{ d.feller_rhs }}</strong>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+      Margin = <strong style="color:{% if d.feller_pass %}#00ff88{% else %}#ff8833{% endif %};">{{ "{:+.6f}".format(d.feller_margin) }}</strong>
+      <br>
+      {% if not d.feller_pass %}
+      The variance process can touch zero — the Heston SDE is not well-posed at current parameters.
+      Practically this causes numerical instability in Monte Carlo paths and occasional negative variance.
+      {% else %}
+      The variance process stays strictly positive — the Heston SDE is well-posed.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ── Parameter Cards ───────────────────────────────────────────────────── -->
+<div class="grid grid-5" style="margin-bottom:16px;">
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">κ  (kappa)</div>
+      <div class="param-val" style="color:var(--blue);">{{ d.kappa }}</div>
+      <div class="param-desc">Mean reversion speed</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = {{ "{:.1f}".format(0.693/d.kappa*252) }}d</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">θ  (theta)</div>
+      <div class="param-val" style="color:var(--yellow);">{{ d.theta }}</div>
+      <div class="param-desc">Long-run variance</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = {{ d.theta_vol }}% ann vol</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">σ  (vol-of-vol)</div>
+      <div class="param-val" style="color:var(--orange);">{{ d.sigma }}</div>
+      <div class="param-desc">Vol of variance</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Controls smile curvature</div>
+    </div>
+  </div>
+
+  <div class="card" style="{% if d.rho_at_boundary %}border-color:rgba(255,136,51,0.4);background:rgba(255,136,51,0.04);{% endif %}">
+    <div class="param-box">
+      <div class="param-sym">ρ  (rho)</div>
+      <div class="param-val" style="color:{% if d.rho_at_boundary %}#ff8833{% else %}var(--text){% endif %};">{{ d.rho }}</div>
+      <div class="param-desc">Spot-vol correlation</div>
+      {% if d.rho_at_boundary %}
+      <div style="margin-top:6px;"><span class="tag tag-red">AT BOUNDARY</span></div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">v₀  (v-naught)</div>
+      <div class="param-val" style="color:var(--accent);">{{ d.v0 }}</div>
+      <div class="param-desc">Initial variance</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = {{ d.v0_vol }}% spot vol</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── RMSE Cards ────────────────────────────────────────────────────────── -->
+<div class="grid grid-4" style="margin-bottom:16px;">
+
+  <div class="card">
+    <div class="card-label">SPX IV RMSE</div>
+    <div class="card-value sm {% if d.spx_rmse > 5 %}red{% elif d.spx_rmse > 2 %}yellow{% else %}green{% endif %}">
+      {{ d.spx_rmse }} vol pts
+    </div>
+    <div class="card-sub mt8">
+      {% if d.spx_rmse > 5 %}Poor fit — skew too steep for Heston
+      {% elif d.spx_rmse > 2 %}Moderate — acceptably close
+      {% else %}Good fit
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">VIX Futures RMSE</div>
+    <div class="card-value sm {% if d.vix_fut_rmse > 2 %}red{% elif d.vix_fut_rmse > 0.5 %}yellow{% else %}green{% endif %}">
+      {{ d.vix_fut_rmse }} pts
+    </div>
+    <div class="card-sub mt8">
+      {% if d.vix_fut_rmse > 2 %}Poor futures curve fit
+      {% elif d.vix_fut_rmse > 0.5 %}Acceptable futures fit
+      {% else %}Good futures fit
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">VIX Options RMSE</div>
+    <div class="card-value sm {% if d.vix_opt_rmse > 10 %}red{% elif d.vix_opt_rmse > 3 %}yellow{% else %}green{% endif %}">
+      {{ d.vix_opt_rmse }} pts
+    </div>
+    <div class="card-sub mt8">
+      {% if d.vix_opt_rmse > 10 %}Model misspecification — Heston cannot joint-fit VIX options
+      {% elif d.vix_opt_rmse > 3 %}Acceptable
+      {% else %}Good
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Calibration Performance</div>
+    <div class="card-value sm green">{{ d.fit_time }}s</div>
+    <div class="card-sub mt8">{{ "{:,}".format(d.n_evals) }} evaluations</div>
+    <div class="card-sub">DE (120 iter × 40) + L-BFGS-B</div>
+  </div>
+
+</div>
+
+<!-- ── SPX Smile + Info ───────────────────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- Multi-maturity smile -->
+  <div class="card">
+    <div class="chart-title">SPX Implied Volatility Smile — All Maturities</div>
+    <div class="chart-wrap tall">
+      <canvas id="smileChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Calibration summary table -->
+  <div class="card">
+    <div class="chart-title">Calibrated Parameter Summary</div>
+
+    <table class="data-table mt8">
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Symbol</th>
+          <th>Value</th>
+          <th>Interpretation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Mean reversion</td>
+          <td class="mono">κ</td>
+          <td class="mono blue">{{ d.kappa }}</td>
+          <td>Half-life ≈ {{ "{:.0f}".format(0.693/d.kappa*252) }} trading days</td>
+        </tr>
+        <tr>
+          <td>Long-run vol</td>
+          <td class="mono">√θ</td>
+          <td class="mono yellow">{{ d.theta_vol }}%</td>
+          <td>Steady-state implied vol target</td>
+        </tr>
+        <tr>
+          <td>Vol-of-vol</td>
+          <td class="mono">σ</td>
+          <td class="mono" style="color:var(--orange);">{{ d.sigma }}</td>
+          <td>High: drives strong skew / smile</td>
+        </tr>
+        <tr>
+          <td>Correlation</td>
+          <td class="mono">ρ</td>
+          <td class="mono" style="color:{% if d.rho_at_boundary %}#ff8833{% else %}var(--text){% endif %};">
+            {{ d.rho }}
+            {% if d.rho_at_boundary %}<span class="tag tag-red" style="font-size:9px;margin-left:6px;">⚠ BOUNDARY</span>{% endif %}
+          </td>
+          <td>Extreme leverage effect — needs jumps</td>
+        </tr>
+        <tr>
+          <td>Spot vol</td>
+          <td class="mono">√v₀</td>
+          <td class="mono green">{{ d.v0_vol }}%</td>
+          <td>Current instantaneous vol</td>
+        </tr>
+        <tr>
+          <td>Risk-free rate</td>
+          <td class="mono">r</td>
+          <td class="mono">{{ d.r_pct }}%</td>
+          <td>USD 6M SOFR (2026-03)</td>
+        </tr>
+        <tr>
+          <td>Dividend yield</td>
+          <td class="mono">q</td>
+          <td class="mono">{{ d.q_pct }}%</td>
+          <td>SPX continuous div yield</td>
+        </tr>
+        <tr>
+          <td>Feller margin</td>
+          <td class="mono">2κθ − σ²</td>
+          <td class="mono {% if d.feller_pass %}green{% else %}red{% endif %}">
+            {{ "{:+.6f}".format(d.feller_margin) }}
+          </td>
+          <td>{% if d.feller_pass %}PASS — variance stays positive{% else %}FAIL — variance can touch zero{% endif %}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="divider"></div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
+      <div>SPX level: <span class="mono green">{{ d.S }}</span></div>
+      <div>As-of date: <span class="mono">{{ d.as_of }}</span></div>
+      <div>Fit time: <span class="mono green">{{ d.fit_time }}s</span></div>
+      <div>DE evaluations: <span class="mono">{{ "{:,}".format(d.n_evals) }}</span></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── RMSE bar comparison ────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">RMSE Decomposition — Loss Components</div>
+  <div class="chart-wrap short">
+    <canvas id="rmseChart"></canvas>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Multi-maturity smile chart
+  const smileCtx = document.getElementById('smileChart').getContext('2d');
+  const matSmiles = {{ d.mat_smiles | tojson }};
+
+  new Chart(smileCtx, {
+    type: 'line',
+    data: {
+      datasets: matSmiles.map(s => ({
+        label: s.T + 'd',
+        data: s.lm.map((x, i) => ({ x, y: s.iv[i] })),
+        borderColor: s.color,
+        backgroundColor: 'transparent',
+        tension: 0.25,
+        pointRadius: 3,
+        pointBackgroundColor: s.color,
+        borderWidth: 2,
+      }))
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          labels: { color: '#888', font: { family: 'Menlo', size: 10 }, boxWidth: 20 }
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} vol pts`
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'Log-Moneyness  ln(K/F)', color: '#444', font: { size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 }, callback: v => v.toFixed(1) + '%' },
+          title: { display: true, text: 'Implied Vol (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+
+  // RMSE comparison bar
+  const rmseCtx = document.getElementById('rmseChart').getContext('2d');
+  new Chart(rmseCtx, {
+    type: 'bar',
+    data: {
+      labels: ['SPX IV RMSE', 'VIX Futures RMSE', 'VIX Options RMSE'],
+      datasets: [{
+        data: [{{ d.spx_rmse }}, {{ d.vix_fut_rmse }}, {{ d.vix_opt_rmse }}],
+        backgroundColor: ['#3388ff', '#00ff88', '#ff3333'],
+        borderRadius: 4,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  RMSE: ${ctx.parsed.y.toFixed(3)} pts`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#888', font: { size: 11 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'RMSE (vol pts / VIX pts)', color: '#444', font: { size: 10 } },
+        },
+      }
+    }
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,339 @@
+{% extends "base.html" %}
+{% set page = "market" %}
+{% block title %}Live Market — Vol System{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div class="page-title">Live Market Overview</div>
+  <div class="page-subtitle">Real-time regime + term structure</div>
+  <div class="page-badge">{{ d.spx_date }}  ·  SPX/VIX/PDV</div>
+</div>
+
+<!-- ── Row 1: Key stats ──────────────────────────────────────────────────── -->
+<div class="grid grid-4" style="margin-bottom:16px;">
+
+  <!-- SPX -->
+  <div class="card card-sm">
+    <div class="card-label">S&P 500</div>
+    <div class="card-value">{{ "{:,.2f}".format(d.spx) }}</div>
+    <div class="stat-row">
+      <span class="stat-change {{ 'up' if d.spx_up else 'down' }}">
+        {{ '+' if d.spx_up else '' }}{{ d.spx_chg }}%
+      </span>
+      <span style="color:var(--text3)">vs prev close</span>
+    </div>
+    <div class="card-sub" style="margin-top:10px;">{{ d.spx_date }}</div>
+  </div>
+
+  <!-- VIX -->
+  <div class="card card-sm">
+    <div class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></div>
+    <div class="card-value {% if d.vix > 25 %}red{% elif d.vix > 18 %}yellow{% else %}green{% endif %}">
+      {{ "{:.2f}".format(d.vix) }}
+    </div>
+    <div class="card-sub" style="margin-top:10px;">
+      {% if d.vix > 30 %}🔴 ELEVATED — fear regime
+      {% elif d.vix > 20 %}🟡 ELEVATED — caution
+      {% elif d.vix > 15 %}🟢 NORMAL range
+      {% else %}🟢 LOW — complacency risk
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- VVIX -->
+  <div class="card card-sm">
+    <div class="card-label">VVIX  <span style="color:var(--text3);font-size:9px;">VOL-OF-VOL</span></div>
+    <div class="card-value {% if d.vvix > 120 %}red{% elif d.vvix > 100 %}yellow{% else %}dim{% endif %}">
+      {{ "{:.2f}".format(d.vvix) if d.vvix else "—" }}
+    </div>
+    <div class="card-sub" style="margin-top:10px;">
+      {% if d.vvix > 120 %}Extreme vol-of-vol
+      {% elif d.vvix > 100 %}Elevated VVIX
+      {% elif d.vvix > 80 %}Normal VVIX
+      {% else %}Low VVIX
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- TS Regime -->
+  <div class="card card-sm">
+    <div class="card-label">Term Structure</div>
+    <div class="card-value sm" style="color:{{ d.ts_regime_color }};">
+      {{ d.ts_regime }}
+    </div>
+    {% if d.ts_values|length >= 2 %}
+    <div class="card-sub" style="margin-top:8px;">
+      Front={{ d.ts_values[0] }}  →  Back={{ d.ts_values[-1] }}
+    </div>
+    <div class="card-sub">
+      Slope={{ "{:+.2f}".format(d.ts_values[-1] - d.ts_values[0]) }} pts
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- ── Row 2: Regime + PDV ───────────────────────────────────────────────── -->
+<div class="grid grid-3" style="margin-bottom:16px;">
+
+  <!-- Current Regime -->
+  <div class="card" style="grid-column: span 1;">
+    <div class="card-label">Current Regime — C8 Classifier</div>
+
+    <div class="flex gap12 mt8" style="align-items:flex-start;">
+      <div style="flex:1;">
+        <div style="
+          display:inline-flex; align-items:center; gap:10px;
+          padding:10px 18px; border-radius:8px;
+          background:{{ d.regime_color }}18;
+          border:1px solid {{ d.regime_color }}44;
+          margin-bottom:12px;
+        ">
+          <div style="width:10px;height:10px;border-radius:50%;background:{{ d.regime_color }};box-shadow:0 0 8px {{ d.regime_color }};"></div>
+          <span style="font-size:16px;font-weight:800;letter-spacing:0.04em;color:{{ d.regime_color }};">
+            {{ d.regime_label }} · {{ d.regime_name }}
+          </span>
+        </div>
+
+        <div class="flex space-between" style="margin-bottom:6px;">
+          <span style="font-size:12px;color:var(--text2);">Confidence</span>
+          <span class="mono" style="font-size:14px;font-weight:700;color:{{ d.regime_color }};">{{ d.regime_conf }}%</span>
+        </div>
+
+        <!-- Probability bars -->
+        <div class="progress-bar-wrap">
+          <div class="progress-row">
+            <div class="progress-label" style="font-size:10px;">R0 LONG γ</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:{{ d.prob_r0 }}%;background:#3388ff;"></div>
+            </div>
+            <div class="progress-val">{{ d.prob_r0 }}%</div>
+          </div>
+          <div class="progress-row">
+            <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:{{ d.prob_r1 }}%;background:#00ff88;"></div>
+            </div>
+            <div class="progress-val">{{ d.prob_r1 }}%</div>
+          </div>
+          <div class="progress-row">
+            <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:{{ d.prob_r2 }}%;background:#ff3333;"></div>
+            </div>
+            <div class="progress-val">{{ d.prob_r2 }}%</div>
+          </div>
+        </div>
+
+        <div class="card-sub mt8">As of {{ d.regime_date }}</div>
+      </div>
+    </div>
+
+    <!-- Regime legend -->
+    <div class="divider"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:10.5px;">
+      <div style="padding:8px;border-radius:6px;background:rgba(51,136,255,0.07);border:1px solid rgba(51,136,255,0.2);">
+        <div style="color:#3388ff;font-weight:700;margin-bottom:2px;">R0</div>
+        <div style="color:var(--text3);">Low VIX / backwardation → buy straddles</div>
+      </div>
+      <div style="padding:8px;border-radius:6px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.18);">
+        <div style="color:#00ff88;font-weight:700;margin-bottom:2px;">R1</div>
+        <div style="color:var(--text3);">Normal contango → sell premium</div>
+      </div>
+      <div style="padding:8px;border-radius:6px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.2);">
+        <div style="color:#ff3333;font-weight:700;margin-bottom:2px;">R2</div>
+        <div style="color:var(--text3);">High VVIX → vomma trades</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDV Forecast vs ATM -->
+  <div class="card" style="grid-column: span 1;">
+    <div class="card-label">PDV Model Forecast vs ATM Implied</div>
+    <div class="mt8">
+      <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
+        <div>
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">CURRENT VIX (30D IMPLIED)</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">{{ "{:.2f}".format(d.vix) }}%</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">PDV FORECAST (REALISED)</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:#ffcc00;">{{ "{:.2f}".format(d.pdv_forecast) }}%</div>
+        </div>
+      </div>
+
+      <div style="padding:14px 0;text-align:center;">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">IMPLIED − REALISED SPREAD</div>
+        <div class="mono" style="font-size:36px;font-weight:800;color:{% if d.pdv_spread > 5 %}#ff8833{% elif d.pdv_spread > 0 %}#00ff88{% else %}#ff3333{% endif %};">
+          {{ "{:+.2f}".format(d.pdv_spread) }}pp
+        </div>
+        <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
+          {% if d.pdv_spread > 10 %}Implied vol significantly overstates expected realised → premium selling environment
+          {% elif d.pdv_spread > 3 %}Moderate vol risk premium → favours short vol strategies
+          {% elif d.pdv_spread > 0 %}Small risk premium → neutral positioning
+          {% else %}VIX underestimates model forecast → elevated realised vol expected
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:var(--text2);">
+        <div>σ₁ (5d EWMA): <span class="mono green">{{ "{:.2f}".format(d.pdv_sigma1) }}%</span></div>
+        <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">{{ "{:.2f}".format(d.pdv_sigma2) }}%</span></div>
+        <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
+        <div>Updated: <span class="mono">{{ d.pdv_date }}</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIX Term Structure Chart -->
+  <div class="card" style="grid-column: span 1;">
+    <div class="card-label">VIX Term Structure</div>
+    <div class="chart-wrap tall" style="margin-top:12px;">
+      <canvas id="tsChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Row 3: VIX History + Regime Timeline ─────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- Regime Probability History (static info card) -->
+  <div class="card">
+    <div class="card-label">C8 Classifier — Full-Period Statistics (2015 – 2025)</div>
+    <div class="mt12">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;text-align:center;">
+        <div style="padding:16px;border-radius:8px;background:rgba(51,136,255,0.06);border:1px solid rgba(51,136,255,0.18);">
+          <div style="font-size:11px;color:#3388ff;margin-bottom:4px;font-weight:600;">R0 LONG GAMMA</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">12.7%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">350 / 2,757 days</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Buy straddles</div>
+        </div>
+        <div style="padding:16px;border-radius:8px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);">
+          <div style="font-size:11px;color:#00ff88;margin-bottom:4px;font-weight:600;">R1 SHORT GAMMA</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">42.8%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,180 / 2,757 days</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Sell premium</div>
+        </div>
+        <div style="padding:16px;border-radius:8px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.18);">
+          <div style="font-size:11px;color:#ff3333;margin-bottom:4px;font-weight:600;">R2 VOMMA ACTIVE</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">44.5%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,227 / 2,757 days</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Vomma trades</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
+        <div>Overall Accuracy: <span class="mono green">86.95%</span></div>
+        <div>F1 Macro: <span class="mono green">0.85</span></div>
+        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (36%)</span></div>
+        <div>2nd Feature: <span class="mono" style="color:var(--yellow);">VVIX (34%)</span></div>
+        <div>Model: <span class="mono">XGBoost 3-class</span></div>
+        <div>Train cutoff: <span class="mono">2019-12-31</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDV Model Details -->
+  <div class="card">
+    <div class="card-label">PDV Model — Guyon-Lekeufack (2023)</div>
+    <div class="mt12">
+
+      <div style="
+        background:var(--surface2); border-radius:8px; padding:14px;
+        border:1px solid var(--border); font-family:'Menlo',monospace;
+        font-size:12px; color:#aaa; line-height:2;
+      ">
+        <span style="color:#666;">σ̂(t) = </span>
+        <span style="color:#ffcc00;">0.354</span>
+        <span style="color:#666;"> × σ₁ + </span>
+        <span style="color:#ffcc00;">0.241</span>
+        <span style="color:#666;"> × σ₂ − </span>
+        <span style="color:#ffcc00;">1.496</span>
+        <span style="color:#666;"> × lev + </span>
+        <span style="color:#ffcc00;">0.0346</span>
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
+        <div>σ₁ half-life: <span class="mono">5 days (EWMA)</span></div>
+        <div>σ₂ half-life: <span class="mono">60 days (EWMA)</span></div>
+        <div>Walk-fwd R² (linear): <span class="mono green">0.31</span></div>
+        <div>Walk-fwd R² (kernel): <span class="mono" style="color:#ffcc00;">0.23</span></div>
+        <div>GARCH persistence: <span class="mono">0.979</span></div>
+        <div>GARCH β: <span class="mono">0.890</span></div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="padding:10px;border-radius:6px;background:rgba(255,136,51,0.07);border:1px solid rgba(255,136,51,0.2);">
+        <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">COVID Stress Test — 2020-03-16</div>
+        <div style="font-size:11.5px;color:var(--text2);">
+          PDV predicted <span class="mono" style="color:#ffcc00;">92.4%</span> ann vol.
+          Actual realised: <span class="mono red">202.6%</span>.
+          Error: <span class="mono red">−110pp</span> — structural limitation of backward-looking models.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // VIX Term Structure chart
+  const tsCtx = document.getElementById('tsChart').getContext('2d');
+  const tsLabels = {{ d.ts_tenors | tojson }};
+  const tsValues = {{ d.ts_values | tojson }};
+
+  new Chart(tsCtx, {
+    type: 'line',
+    data: {
+      labels: tsLabels,
+      datasets: [{
+        label: 'VIX Term Structure',
+        data: tsValues,
+        borderColor: '#00ff88',
+        backgroundColor: 'rgba(0,255,136,0.07)',
+        fill: true,
+        tension: 0.35,
+        pointRadius: 5,
+        pointBackgroundColor: '#00ff88',
+        pointBorderColor: '#0a0a0a',
+        pointBorderWidth: 2,
+        borderWidth: 2.5,
+      }]
+    },
+    options: {
+      ...makeLineOpts('VIX Points'),
+      plugins: {
+        ...makeLineOpts().plugins,
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.parsed.y.toFixed(2)} VIX pts`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 11 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 11 },
+                   callback: v => v.toFixed(1) },
+          title: { display: true, text: 'Implied Vol (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+</script>
+{% endblock %}

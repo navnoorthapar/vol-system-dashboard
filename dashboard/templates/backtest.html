@@ -1,0 +1,429 @@
+{% extends "base.html" %}
+{% set page = "backtest" %}
+{% block title %}Backtest — Vol System{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div class="page-title">C10 Backtest Results — 2018 → 2025</div>
+  <div class="page-subtitle">Delta-hedged straddle portfolio · 4 strategies · $1M initial capital</div>
+  <div class="page-badge">
+    NAV: ${{ "{:,.0f}".format(d.final_nav) }}  ·  P&L: ${{ "{:+,.0f}".format(d.total_pnl) }}
+  </div>
+</div>
+
+<!-- ── Equity Curve ───────────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="flex space-between mb12">
+    <div class="chart-title" style="margin-bottom:0;">Portfolio Equity Curve — % Return from $1M</div>
+    <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
+      <span style="color:#00ff88;">── Portfolio</span>
+      <span style="color:#3388ff;">── S1 IVR</span>
+      <span style="color:#ffcc00;">── S2 VIX TS</span>
+      <span style="color:#ff8833;">── S3 Disp</span>
+      <span style="color:#aa44ff;">── Combined</span>
+    </div>
+  </div>
+  <div class="chart-wrap xtall">
+    <canvas id="equityChart"></canvas>
+  </div>
+</div>
+
+<!-- ── Metrics + Signal P&L ─────────────────────────────────────────────── -->
+<div class="grid grid-3" style="margin-bottom:16px;">
+
+  <!-- Metrics Table -->
+  <div class="card">
+    <div class="chart-title">Key Performance Metrics</div>
+    <table class="data-table mt8">
+      <tbody>
+        {% for row in d.metrics_rows %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td class="mono {% if row.positive %}green{% else %}red{% endif %}" style="text-align:right;">
+            {{ row.value }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Signal P&L Bar Chart -->
+  <div class="card col-2">
+    <div class="chart-title">Total P&L by Signal (in $000s)</div>
+    <div class="chart-wrap tall">
+      <canvas id="signalPnlChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Annual Returns + Walk-Forward ────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- Annual Returns -->
+  <div class="card">
+    <div class="chart-title">Annual Return — 2018 → 2025</div>
+    <div class="chart-wrap">
+      <canvas id="annualChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Walk-Forward Sharpe -->
+  <div class="card">
+    <div class="flex space-between mb12">
+      <div class="chart-title" style="margin-bottom:0;">Walk-Forward Sharpe — 6-Month OOS Windows</div>
+      <div style="font-size:11px;color:var(--text3);">
+        <span class="red bold">{{ d.wf_neg }}</span>/{{ d.wf_total }} negative
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="wfChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Per-Signal Metrics Table ──────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">Per-Signal Performance Breakdown</div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>Signal</th>
+        <th>Sharpe</th>
+        <th>Ann. Return</th>
+        <th>Win Rate</th>
+        <th>N Trades</th>
+        <th>Total P&L</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in d.signal_metrics %}
+      <tr>
+        <td style="font-weight:600;">{{ s.label }}</td>
+        <td class="mono {% if s.green %}green{% else %}red{% endif %}">{{ s.sharpe }}</td>
+        <td class="mono {% if s.green %}green{% else %}red{% endif %}">{{ s.ann_ret }}</td>
+        <td class="mono">{{ s.win_rate }}</td>
+        <td class="mono">{{ s.n_trades }}</td>
+        <td class="mono {% if s.green %}green{% else %}red{% endif %}">{{ s.total_pnl }}</td>
+        <td>
+          {% if s.green %}
+          <span class="tag tag-green">POSITIVE</span>
+          {% else %}
+          <span class="tag tag-red">NEGATIVE</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- ── Analysis Banner ───────────────────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+  <div class="card" style="border-color:rgba(255,51,51,0.2);background:rgba(255,51,51,0.03);">
+    <div class="chart-title" style="color:#ff8833;">Key Finding — Why the Strategy Underperformed</div>
+    <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
+      <div style="margin-bottom:8px;">
+        <span class="tag tag-red" style="margin-right:8px;">S1 −$502,671</span>
+        S1 (IVR/PDV) goes short gamma when IVR is high relative to PDV.
+        In 2018, 2019, and 2024 — all elevated-vol years — realised vol stayed elevated,
+        meaning premium sellers systematically underpriced tail risk.
+      </div>
+      <div style="margin-bottom:8px;">
+        <span class="tag tag-dim" style="margin-right:8px;">COSTS −$334,537</span>
+        Total transaction costs (bid-ask + commissions + slippage) consumed
+        <strong style="color:var(--text);">$334k</strong> over 7 years — offsetting any alpha in the signal.
+      </div>
+      <div>
+        <span class="tag tag-red" style="margin-right:8px;">REGIME MISMATCH</span>
+        52.9% of backtest days were R2 (VOMMA_ACTIVE) — a regime favouring
+        vomma trades, not gamma strategies. S1 and S2 were trading in the wrong regime
+        for 952 / 1800 days.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="border-color:rgba(0,255,136,0.15);background:rgba(0,255,136,0.02);">
+    <div class="chart-title" style="color:#00ff88;">Only Profitable Signal — S3 Dispersion</div>
+    <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
+      <div style="margin-bottom:8px;">
+        <span class="tag tag-green" style="margin-right:8px;">S3 +$21,003</span>
+        S3 (VIX/VVIX ratio proxy) is long-only — buys when volatility appears cheap
+        relative to vol-of-vol. 14 trades in 7 years with <strong style="color:#00ff88;">92.9% win rate</strong>.
+      </div>
+      <div style="margin-bottom:8px;">
+        The strategy's rarity is its strength: it fires only when the signal is extreme,
+        and it tends to correctly identify vol spikes after entry.
+      </div>
+      <div>
+        <span class="tag tag-green" style="margin-right:8px;">BEST DAY</span>
+        <span class="mono">2024-12-20  +3.69%</span>  — day after the worst day,
+        as the FOMC panic resolved and vol mean-reverted.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Annual Heatmap (text-based) ──────────────────────────────────────── -->
+<div class="card">
+  <div class="chart-title">Annual Returns Heatmap</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+    {% for i in range(d.ann_years|length) %}
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:{% if d.ann_rets[i] > 0 %}rgba(0,200,112,0.12){% else %}rgba(255,51,51,0.1){% endif %};
+      border:1px solid {% if d.ann_rets[i] > 0 %}rgba(0,200,112,0.3){% else %}rgba(255,51,51,0.25){% endif %};
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">{{ d.ann_years[i] }}</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:{% if d.ann_rets[i] > 0 %}#00c870{% else %}#ff3333{% endif %};">
+        {{ "{:+.1f}".format(d.ann_rets[i]) }}%
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // ── Equity Curve ──────────────────────────────────────────────────────────
+  const eqCtx = document.getElementById('equityChart').getContext('2d');
+  const eqDates = {{ d.eq_dates | tojson }};
+
+  new Chart(eqCtx, {
+    type: 'line',
+    data: {
+      labels: eqDates,
+      datasets: [
+        {
+          label: 'Portfolio',
+          data: {{ d.eq_nav | tojson }},
+          borderColor: '#00ff88',
+          backgroundColor: 'rgba(0,255,136,0.04)',
+          fill: true,
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 2.5,
+          order: 1,
+        },
+        {
+          label: 'S1 IVR',
+          data: {{ d.eq_nav_s1 | tojson }},
+          borderColor: '#3388ff',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 2,
+        },
+        {
+          label: 'S2 VIX TS',
+          data: {{ d.eq_nav_s2 | tojson }},
+          borderColor: '#ffcc00',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 3,
+        },
+        {
+          label: 'S3 Disp',
+          data: {{ d.eq_nav_s3 | tojson }},
+          borderColor: '#ff8833',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 4,
+        },
+        {
+          label: 'Combined',
+          data: {{ d.eq_nav_comb | tojson }},
+          borderColor: '#aa44ff',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 5,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: false,  // custom legend in header
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.dataset.label}: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#111' },
+          ticks: { color: '#444', maxTicksLimit: 10, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+          },
+          title: { display: true, text: 'Cumulative Return (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+
+  // ── Signal P&L Bars ───────────────────────────────────────────────────────
+  const signalCtx = document.getElementById('signalPnlChart').getContext('2d');
+  const signalPnl = {{ d.signal_pnl | tojson }};
+
+  new Chart(signalCtx, {
+    type: 'bar',
+    data: {
+      labels: {{ d.signal_labels | tojson }},
+      datasets: [{
+        data: signalPnl,
+        backgroundColor: signalPnl.map(v => v > 0
+          ? 'rgba(0,200,112,0.7)'
+          : 'rgba(255,51,51,0.6)'),
+        borderColor: signalPnl.map(v => v > 0 ? '#00c870' : '#ff3333'),
+        borderWidth: 1,
+        borderRadius: 5,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  P&L: $${(ctx.parsed.x * 1000).toLocaleString('en-US', {minimumFractionDigits:0})}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => '$' + v + 'k'
+          },
+          title: { display: true, text: 'Total P&L ($000s)', color: '#444', font: { size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#aaa', font: { size: 11 } },
+        },
+      }
+    }
+  });
+
+  // ── Annual Returns ────────────────────────────────────────────────────────
+  const annCtx = document.getElementById('annualChart').getContext('2d');
+  const annRets = {{ d.ann_rets | tojson }};
+
+  new Chart(annCtx, {
+    type: 'bar',
+    data: {
+      labels: {{ d.ann_years | tojson }},
+      datasets: [{
+        data: annRets,
+        backgroundColor: annRets.map(v => v > 0 ? 'rgba(0,200,112,0.7)' : 'rgba(255,51,51,0.6)'),
+        borderColor:      annRets.map(v => v > 0 ? '#00c870' : '#ff3333'),
+        borderWidth: 1,
+        borderRadius: 4,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#888', font: { family: 'Menlo', size: 11 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+          },
+        }
+      }
+    }
+  });
+
+  // ── Walk-Forward ──────────────────────────────────────────────────────────
+  const wfCtx = document.getElementById('wfChart').getContext('2d');
+  const wfSharpes = {{ d.wf_sharpes | tojson }};
+
+  new Chart(wfCtx, {
+    type: 'bar',
+    data: {
+      labels: {{ d.wf_periods | tojson }},
+      datasets: [
+        {
+          data: wfSharpes,
+          backgroundColor: wfSharpes.map(v => v >= 0 ? 'rgba(0,200,112,0.7)' : 'rgba(255,51,51,0.6)'),
+          borderColor:      wfSharpes.map(v => v >= 0 ? '#00c870' : '#ff3333'),
+          borderWidth: 1,
+          borderRadius: 4,
+          borderSkipped: false,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  Sharpe: ${ctx.parsed.y.toFixed(2)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 9 }, maxRotation: 45 },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'Sharpe Ratio (6M OOS)', color: '#444', font: { size: 10 } },
+        },
+      }
+    }
+  });
+</script>
+{% endblock %}
