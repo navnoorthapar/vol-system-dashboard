@@ -195,6 +195,9 @@ def load_page1() -> dict[str, Any]:
         d["pdv_forecast"] = 0
         d["pdv_spread"]   = 0
         d["pdv_date"]     = "N/A"
+        d["pdv_sigma1"]   = 0
+        d["pdv_sigma2"]   = 0
+        d["pdv_spread_positive"] = False
 
     return _clean(d)
 
@@ -242,10 +245,14 @@ def load_page2() -> dict[str, Any]:
     except Exception as e:
         d["cal_error"] = str(e)
         for k in ["kappa", "theta", "sigma", "rho", "v0", "spx_rmse",
-                  "vix_fut_rmse", "vix_opt_rmse"]:
+                  "vix_fut_rmse", "vix_opt_rmse", "total_loss",
+                  "theta_vol", "v0_vol", "S", "r_pct", "q_pct",
+                  "fit_time", "n_evals", "feller_lhs", "feller_rhs", "feller_margin"]:
             d.setdefault(k, 0)
         d.setdefault("feller_pass", False)
         d.setdefault("rho_at_boundary", False)
+        d.setdefault("as_of", "N/A")
+        d.setdefault("mat_smiles", [])
 
     # SPX smile from greeks surface (91-day, closest to standard 3M)
     try:
@@ -378,10 +385,21 @@ def load_page3() -> dict[str, Any]:
         d["heatmap_cols"] = []
         d["unstable_nodes"] = []
         d["n_unstable"] = 0
+        d["n_cells"] = 0
+        d["vomma_max"] = 0
+        d["vomma_min"] = 0
+        d["vomma_mean"] = 0
         d["qv_labels"] = []
         d["qv_mean"] = []
+        d["qv_max"] = []
         d["vanna_labels"] = []
         d["vanna_values"] = []
+        d["vega_labels"] = []
+        d["vega_values"] = []
+        d["scatter_lm"] = []
+        d["scatter_z"] = []
+        d["scatter_T"] = []
+        d["scatter_iv"] = []
 
     return _clean(d)
 
@@ -488,6 +506,8 @@ def load_page4() -> dict[str, Any]:
         d["metrics_rows"] = []
         d["signal_metrics"] = []
         d["signal_pnl"] = []
+        d["signal_labels"] = []
+        d["signal_colors"] = []
 
     # ── Annual returns ───────────────────────────────────────────────────────
     try:
