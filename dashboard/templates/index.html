@@ -175,14 +175,57 @@
           {% endif %}
         </div>
 
-        <!-- Historical context (Bug 3) -->
+        <!-- Historical context — percentile warning (Fix 2) -->
         <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;">
-          <div style="display:flex;justify-content:space-between;color:var(--text2);margin-bottom:4px;">
-            <span>2015–2025 mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span></span>
-            <span style="color:{{ d.pdv_spread_label_color }};font-weight:600;">{{ d.pdv_spread_pct }}th pct</span>
+
+          <!-- Percentile badge — large and prominent -->
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
+            <div style="font-size:28px;font-weight:800;color:#ff9900;font-family:'Menlo','Monaco',monospace;line-height:1;">
+              {{ d.pdv_spread_pct }}th
+            </div>
+            <div style="color:var(--text2);font-size:11px;line-height:1.4;">
+              percentile<br>
+              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span></span>
+            </div>
           </div>
-          <div style="color:{{ d.pdv_spread_label_color }};font-size:10.5px;margin-bottom:8px;">{{ d.pdv_spread_label }}</div>
+
+          <!-- Amber warning box when percentile is high -->
+          {% if d.pdv_spread_pct >= 80 %}
+          <div style="
+            background: rgba(255,153,0,0.08);
+            border: 1px solid rgba(255,153,0,0.35);
+            border-radius: 6px;
+            padding: 9px 12px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            line-height: 1.6;
+            color: #cc8800;
+          ">
+            <span style="font-weight:700;color:#ff9900;">&#9888; Spread at {{ d.pdv_spread_pct }}th percentile</span>
+            — implied vol is pricing extreme fear relative to 10-year history.
+            Historical mean spread: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span>.
+            Current: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread) }}pp</span>.
+          </div>
+          {% elif d.pdv_spread_pct <= 20 %}
+          <div style="
+            background: rgba(51,136,255,0.07);
+            border: 1px solid rgba(51,136,255,0.3);
+            border-radius: 6px;
+            padding: 9px 12px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            line-height: 1.6;
+            color: #5588cc;
+          ">
+            <span style="font-weight:700;color:#3388ff;">&#9432; Spread at {{ d.pdv_spread_pct }}th percentile</span>
+            — vol appears cheap relative to 10-year history.
+            Historical mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span>.
+            Current: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread) }}pp</span>.
+          </div>
+          {% endif %}
+
           {% if d.pdv_sparkline %}
+          <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">Implied–Realised spread — last 60 trading days</div>
           <div style="position:relative;height:32px;">
             <canvas id="sparklineChart"></canvas>
           </div>

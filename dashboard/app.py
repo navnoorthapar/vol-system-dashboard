@@ -509,51 +509,107 @@ def load_page4() -> dict[str, Any]:
 
     except Exception as e:
         d["eq_error"] = str(e)
-        d["eq_dates"] = []
-        d["eq_nav"]   = []
-        d["final_nav"] = 0
+        d["eq_dates"]    = []
+        d["eq_nav"]      = []
+        d["eq_nav_s1"]   = []
+        d["eq_nav_s2"]   = []
+        d["eq_nav_s3"]   = []
+        d["eq_nav_comb"] = []
+        d["final_nav"]   = 0
+        d["start_nav"]   = 0
+        d["total_pnl"]   = 0
 
-    # ── Metrics from pickle ──────────────────────────────────────────────────
+    # ── Metrics — computed entirely from parquet (no pickle import needed) ───
+    # This avoids pickle loading joint_vol_calibration.backtest.TradeRecord
+    # objects which require the full codebase installed on Railway.
     try:
-        with open(DATA / "backtest" / "full_results.pkl", "rb") as f:
-            bt = pickle.load(f)
-        m = bt["metrics"]
+        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
+        eq.index = pd.to_datetime(eq.index)
+        n_days = len(eq)
+        ann_factor = np.sqrt(252)
 
-        def _pct(x): return f"{x*100:.2f}%" if x is not None and not (isinstance(x, float) and np.isnan(x)) else "—"
-        def _f2(x):  return f"{x:.3f}"       if x is not None and not (isinstance(x, float) and np.isnan(x)) else "—"
-        def _dol(x): return f"${x:,.0f}"     if x is not None and not (isinstance(x, float) and np.isnan(x)) else "—"
+        def _pct(x): return f"{x*100:.2f}%" if x is not None and np.isfinite(float(x)) else "—"
+        def _f2(x):  return f"{x:.3f}"       if x is not None and np.isfinite(float(x)) else "—"
+        def _dol(x): return f"${x:,.0f}"     if x is not None and np.isfinite(float(x)) else "—"
+
+        def _metrics_for(nav_col: str, pnl_col: str, pos_col: str):
+            nav  = eq[nav_col]
+            rets = nav.pct_change().fillna(0)
+            pnl  = eq[pnl_col]
+            # Sharpe (excess over 5% rf)
+            ex   = rets - 0.05 / 252
+            sh   = float(ex.mean() / ex.std() * ann_factor) if rets.std() > 1e-10 else 0.0
+            # Sortino (downside only)
+            down = ex[ex < 0]
+            srt  = float(ex.mean() / down.std() * ann_factor) if len(down) > 1 else 0.0
+            # Max drawdown
+            roll_max = nav.cummax()
+            dd_series = (nav / roll_max) - 1
+            mdd  = float(dd_series.min())
+            # DD duration (longest consecutive drawdown)
+            in_dd = (dd_series < 0).astype(int)
+            max_dur = 0
+            cur_dur = 0
+            for v in in_dd:
+                if v: cur_dur += 1
+                else: cur_dur = 0
+                max_dur = max(max_dur, cur_dur)
+            # Calmar
+            years = n_days / 252
+            ann_ret = float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1) if years > 0 else 0
+            calmar  = float(ann_ret / abs(mdd)) if abs(mdd) > 1e-10 else 0.0
+            # Win rate (by trading day P&L)
+            active_pnl = pnl[pnl != 0]
+            win_rate = float((active_pnl > 0).mean()) if len(active_pnl) > 0 else 0.0
+            # N trades (position changes)
+            pos = eq[pos_col]
+            n_trades = int((pos.diff().fillna(0) != 0).sum())
+            # Total P&L
+            total_pnl = float(nav.iloc[-1] - nav.iloc[0])
+            cum_ret = float((nav.iloc[-1] - nav.iloc[0]) / nav.iloc[0])
+            avg_pnl = total_pnl / n_trades if n_trades > 0 else 0.0
+            return dict(
+                cum_ret=cum_ret, ann_ret=ann_ret, sharpe=sh, sortino=srt,
+                mdd=mdd, dd_dur=max_dur, calmar=calmar, win_rate=win_rate,
+                avg_pnl=avg_pnl, best_day=float(rets.max()), worst_day=float(rets.min()),
+                n_trades=n_trades, total_pnl=total_pnl,
+            )
+
+        m  = _metrics_for("nav",          "daily_pnl",  "s1_position")  # portfolio
+        m1 = _metrics_for("nav_s1",       "pnl_s1",     "s1_position")
+        m2 = _metrics_for("nav_s2",       "pnl_s2",     "s2_position")
+        m3 = _metrics_for("nav_s3",       "pnl_s3",     "s3_position")
+        mc = _metrics_for("nav_combined",  "pnl_combined","combined_pos")
 
         d["metrics_rows"] = [
-            {"label": "Cumulative Return",  "value": _pct(m.get("cumulative_return")),
-             "positive": (m.get("cumulative_return") or 0) > 0},
-            {"label": "Ann. Return",        "value": _pct(m.get("ann_return")),
-             "positive": (m.get("ann_return") or 0) > 0},
-            {"label": "Sharpe (rf=5%)",     "value": _f2(m.get("sharpe")),
-             "positive": (m.get("sharpe") or 0) > 0},
-            {"label": "Sortino",            "value": _f2(m.get("sortino")),
-             "positive": (m.get("sortino") or 0) > 0},
-            {"label": "Max Drawdown",       "value": _pct(m.get("max_drawdown")),
-             "positive": False},
-            {"label": "DD Duration",        "value": f"{int(m.get('dd_duration_days', 0))} days",
-             "positive": False},
-            {"label": "Calmar",             "value": _f2(m.get("calmar")),
-             "positive": (m.get("calmar") or 0) > 0},
-            {"label": "Win Rate",           "value": _pct(m.get("win_rate")),
-             "positive": (m.get("win_rate") or 0) > 0.5},
-            {"label": "Avg P&L / Trade",    "value": _dol(m.get("avg_pnl_per_trade")),
-             "positive": (m.get("avg_pnl_per_trade") or 0) > 0},
-            {"label": "Best Day",           "value": _pct(m.get("best_day")),  "positive": True},
-            {"label": "Worst Day",          "value": _pct(m.get("worst_day")), "positive": False},
-            {"label": "N Trades",           "value": str(int(m.get("n_trades", 0))), "positive": True},
-            {"label": "N Days",             "value": str(int(m.get("n_days",   0))), "positive": True},
+            {"label": "Cumulative Return", "value": _pct(m["cum_ret"]),
+             "positive": m["cum_ret"] > 0},
+            {"label": "Ann. Return",       "value": _pct(m["ann_ret"]),
+             "positive": m["ann_ret"] > 0},
+            {"label": "Sharpe (rf=5%)",    "value": _f2(m["sharpe"]),
+             "positive": m["sharpe"] > 0},
+            {"label": "Sortino",           "value": _f2(m["sortino"]),
+             "positive": m["sortino"] > 0},
+            {"label": "Max Drawdown",      "value": _pct(m["mdd"]),     "positive": False},
+            {"label": "DD Duration",       "value": f"{m['dd_dur']} days","positive": False},
+            {"label": "Calmar",            "value": _f2(m["calmar"]),
+             "positive": m["calmar"] > 0},
+            {"label": "Win Rate",          "value": _pct(m["win_rate"]),
+             "positive": m["win_rate"] > 0.5},
+            {"label": "Avg P&L / Trade",   "value": _dol(m["avg_pnl"]),
+             "positive": m["avg_pnl"] > 0},
+            {"label": "Best Day",          "value": _pct(m["best_day"]),  "positive": True},
+            {"label": "Worst Day",         "value": _pct(m["worst_day"]), "positive": False},
+            {"label": "N Trades",          "value": str(m["n_trades"]),   "positive": True},
+            {"label": "N Days",            "value": str(n_days),          "positive": True},
         ]
 
         # Signal P&L bar chart
         signal_pnl = [
-            round(float(m.get("s1_total_pnl",        0)) / 1000, 1),
-            round(float(m.get("s2_total_pnl",        0)) / 1000, 1),
-            round(float(m.get("s3_total_pnl",        0)) / 1000, 1),
-            round(float(m.get("combined_total_pnl",  0)) / 1000, 1),
+            round(m1["total_pnl"] / 1000, 1),
+            round(m2["total_pnl"] / 1000, 1),
+            round(m3["total_pnl"] / 1000, 1),
+            round(mc["total_pnl"] / 1000, 1),
         ]
         d["signal_labels"] = ["S1  IVR / PDV", "S2  VIX TS", "S3  Dispersion", "Combined"]
         d["signal_pnl"]    = signal_pnl
@@ -561,25 +617,24 @@ def load_page4() -> dict[str, Any]:
 
         # Per-signal metrics table
         d["signal_metrics"] = []
-        for sig, lbl in [("s1","S1 IVR"),("s2","S2 VIX TS"),("s3","S3 Disp"),("combined","Combined")]:
-            pnl = float(m.get(f"{sig}_total_pnl", 0))
+        for mx, lbl in [(m1,"S1 IVR"),(m2,"S2 VIX TS"),(m3,"S3 Disp"),(mc,"Combined")]:
             d["signal_metrics"].append({
-                "label":    lbl,
-                "sharpe":   _f2(m.get(f"{sig}_sharpe")),
-                "ann_ret":  _pct(m.get(f"{sig}_ann_return")),
-                "win_rate": _pct(m.get(f"{sig}_win_rate")),
-                "n_trades": str(int(m.get(f"{sig}_n_trades", 0))),
-                "total_pnl": _dol(pnl),
-                "green": pnl > 0,
+                "label":     lbl,
+                "sharpe":    _f2(mx["sharpe"]),
+                "ann_ret":   _pct(mx["ann_ret"]),
+                "win_rate":  _pct(mx["win_rate"]),
+                "n_trades":  str(mx["n_trades"]),
+                "total_pnl": _dol(mx["total_pnl"]),
+                "green":     mx["total_pnl"] > 0,
             })
 
     except Exception as e:
         d["pkl_error"] = str(e)
-        d["metrics_rows"] = []
+        d["metrics_rows"]   = []
         d["signal_metrics"] = []
-        d["signal_pnl"] = []
-        d["signal_labels"] = []
-        d["signal_colors"] = []
+        d["signal_pnl"]     = []
+        d["signal_labels"]  = []
+        d["signal_colors"]  = []
 
     # ── Annual returns ───────────────────────────────────────────────────────
     try:
