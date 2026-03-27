@@ -6,7 +6,7 @@
 <div class="page-header">
   <div class="page-title">Live Market Overview</div>
   <div class="page-subtitle">Real-time regime + term structure</div>
-  <div class="page-badge">{{ d.spx_date }}  ·  SPX/VIX/PDV</div>
+  <div class="page-badge">Data: {{ d.spx_date }}  ·  Calibration: {{ d.calib_date }}  ·  Regime: {{ d.regime_date }}</div>
 </div>
 
 <!-- ── Row 1: Key stats ──────────────────────────────────────────────────── -->
@@ -174,6 +174,20 @@
           {% else %}VIX underestimates model forecast → elevated realised vol expected
           {% endif %}
         </div>
+
+        <!-- Historical context (Bug 3) -->
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;">
+          <div style="display:flex;justify-content:space-between;color:var(--text2);margin-bottom:4px;">
+            <span>2015–2025 mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span></span>
+            <span style="color:{{ d.pdv_spread_label_color }};font-weight:600;">{{ d.pdv_spread_pct }}th pct</span>
+          </div>
+          <div style="color:{{ d.pdv_spread_label_color }};font-size:10.5px;margin-bottom:8px;">{{ d.pdv_spread_label }}</div>
+          {% if d.pdv_sparkline %}
+          <div style="position:relative;height:32px;">
+            <canvas id="sparklineChart"></canvas>
+          </div>
+          {% endif %}
+        </div>
       </div>
 
       <div class="divider"></div>
@@ -335,5 +349,37 @@
       },
     }
   });
+
+  // Sparkline — PDV spread last 60 days (Bug 3)
+  {% if d.pdv_sparkline %}
+  const spkCtx = document.getElementById('sparklineChart');
+  if (spkCtx) {
+    const spkData = {{ d.pdv_sparkline | tojson }};
+    const spkDates = {{ d.pdv_sparkline_dates | tojson }};
+    new Chart(spkCtx, {
+      type: 'line',
+      data: {
+        labels: spkDates,
+        datasets: [{
+          data: spkData,
+          borderColor: '#00ff88',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: { target: 'origin', above: 'rgba(0,255,136,0.08)', below: 'rgba(255,51,51,0.08)' },
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { display: false },
+          y: { display: false },
+        }
+      }
+    });
+  }
+  {% endif %}
 </script>
 {% endblock %}

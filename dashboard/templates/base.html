@@ -464,9 +464,67 @@
 
     /* ── Chart.js global overrides ────────────────────────────────────────── */
     canvas { display: block; }
+
+    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
+    .top-banner {
+      height: 36px;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 12px;
+      font-size: 11px;
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .top-banner-links a {
+      color: #555;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      transition: color 0.15s;
+    }
+    .top-banner-links a:hover { color: #00ff88; }
+    .top-banner-sep { color: #333; }
+
+    /* ── Responsive grid (Bug 6) ───────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+      .page { padding: 16px !important; }
+      .nav { padding: 0 12px; }
+      .nav-brand { margin-right: 16px; }
+    }
+    @media (max-width: 540px) {
+      .grid-4 { grid-template-columns: 1fr !important; }
+      .grid-3 { grid-template-columns: 1fr !important; }
+      .grid-2 { grid-template-columns: 1fr !important; }
+      .page { padding: 10px !important; }
+      .card { padding: 14px !important; }
+      .card-value { font-size: 28px !important; }
+      .nav-brand span { display: none; }
+      .top-banner-text { font-size: 10px; }
+    }
   </style>
 </head>
 <body>
+
+<div class="top-banner">
+  <div class="top-banner-text">
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 10 components &nbsp;·&nbsp; 374 tests &nbsp;·&nbsp; live market data &nbsp;·&nbsp; by Navnoor Bawa
+  </div>
+  <div class="top-banner-links">
+    <a href="https://github.com/NavnoorBawa" target="_blank" rel="noopener">GitHub</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
+  </div>
+</div>
 
 <nav class="nav">
   <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>

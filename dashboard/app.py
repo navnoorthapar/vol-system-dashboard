@@ -147,11 +147,42 @@ def load_page1() -> dict[str, Any]:
         d["ts_regime"] = "N/A"
         d["ts_regime_color"] = "#666"
 
-    # ── Regime ──────────────────────────────────────────────────────────────
+    # ── Regime — live inference from current market data ───────────────────
     try:
-        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
-        latest = rl.iloc[-1]
-        reg = int(latest["regime"])
+        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
+            clf = pickle.load(f)
+
+        # SPX history for realized-vol features
+        con2 = _db()
+        spx_hist = pd.read_sql(
+            "SELECT date, close FROM spx_ohlcv ORDER BY date DESC LIMIT 30", con2
+        )
+        con2.close()
+        spx_hist = spx_hist.sort_values("date").reset_index(drop=True)
+        spx_rets = spx_hist["close"].pct_change().dropna()
+
+        rv_20d    = float(spx_rets.iloc[-20:].std()  * np.sqrt(252)) if len(spx_rets) >= 20 else 0.15
+        rv_5d     = float(spx_rets.iloc[-5:].std()   * np.sqrt(252)) if len(spx_rets) >= 5  else rv_20d
+        rv_5d_lag = float(spx_rets.iloc[-10:-5].std()* np.sqrt(252)) if len(spx_rets) >= 10 else rv_5d
+
+        # Features in same units as training data (VIX/100, VVIX/100)
+        vix_dec  = (d.get("vix")  or 0) / 100
+        vix3m_dec= (d.get("vix3m") or d.get("vix") or 0) / 100
+        vvix_dec = (d.get("vvix") or 0) / 100
+        pdv_dec  = (d.get("pdv_forecast") or 0) / 100
+
+        feat_live = pd.DataFrame([{
+            "vix":          vix_dec,
+            "ts_slope":     vix3m_dec - vix_dec,          # (VIX3M - VIX)/100; < 0 = backwardation
+            "fear_premium": vix_dec / rv_20d if rv_20d > 0 else 1.0,
+            "rv_change_5d": rv_5d - rv_5d_lag,
+            "pdv_iv_spread":pdv_dec - vix_dec,            # PDV - IV; < 0 = IV > PDV
+            "vvix":         vvix_dec,                     # > 1.0 triggers R2
+        }])
+
+        proba = clf.predict_proba(feat_live)[0]
+        reg   = int(np.argmax(proba))
+
         names  = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
         colors = ["#3388ff", "#00ff88", "#ff3333"]
         labels = ["R0", "R1", "R2"]
@@ -159,11 +190,11 @@ def load_page1() -> dict[str, Any]:
         d["regime_name"]  = names[reg]
         d["regime_color"] = colors[reg]
         d["regime_label"] = labels[reg]
-        d["regime_conf"]  = round(float(latest["confidence"]) * 100, 1)
-        d["regime_date"]  = str(rl.index[-1].date())
-        d["prob_r0"]      = round(float(latest["prob_0"]) * 100, 1)
-        d["prob_r1"]      = round(float(latest["prob_1"]) * 100, 1)
-        d["prob_r2"]      = round(float(latest["prob_2"]) * 100, 1)
+        d["regime_conf"]  = round(float(proba[reg]) * 100, 1)
+        d["regime_date"]  = d.get("spx_date", "live")
+        d["prob_r0"]      = round(float(proba[0]) * 100, 1)
+        d["prob_r1"]      = round(float(proba[1]) * 100, 1)
+        d["prob_r2"]      = round(float(proba[2]) * 100, 1)
     except Exception as e:
         d["regime_error"] = str(e)
         d["regime"] = -1
@@ -172,6 +203,14 @@ def load_page1() -> dict[str, Any]:
         d["regime_label"] = "—"
         d["regime_conf"]  = 0
         d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
+
+    # Calibration date for timestamp (Bug 7)
+    try:
+        with open(DATA / "calibrations" / "joint_cal_2026-03-24.pkl", "rb") as f:
+            _cal_tmp = pickle.load(f)
+        d["calib_date"] = str(_cal_tmp.get("as_of_date", "2026-03-24"))
+    except Exception:
+        d["calib_date"] = "2026-03-24"
 
     # ── PDV Forecast vs ATM ──────────────────────────────────────────────────
     try:
@@ -198,6 +237,39 @@ def load_page1() -> dict[str, Any]:
         d["pdv_sigma1"]   = 0
         d["pdv_sigma2"]   = 0
         d["pdv_spread_positive"] = False
+
+    # ── PDV spread historical context (Bug 3) ────────────────────────────
+    try:
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
+        # pdv_iv_spread in parquet = PDV − VIX (decimal) → negate to get implied−realised (pp)
+        hist_spread_pp = -rl["pdv_iv_spread"] * 100
+        cur_spread = d.get("pdv_spread", 0) or 0
+        d["pdv_spread_mean"] = round(float(hist_spread_pp.mean()), 2)
+        d["pdv_spread_pct"]  = round(
+            float((hist_spread_pp < cur_spread).mean() * 100), 1
+        )
+        # elevated / cheap label
+        pct = d["pdv_spread_pct"]
+        if pct >= 80:
+            d["pdv_spread_label"] = f"Top {100-pct:.0f}% — premium selling regime"
+            d["pdv_spread_label_color"] = "#ff8833"
+        elif pct <= 20:
+            d["pdv_spread_label"] = f"Bottom {pct:.0f}% — vol cheap, long vol regime"
+            d["pdv_spread_label_color"] = "#3388ff"
+        else:
+            d["pdv_spread_label"] = f"{pct:.0f}th percentile — neutral"
+            d["pdv_spread_label_color"] = "#888"
+        # Sparkline: last 60 trading days of spread
+        recent = hist_spread_pp.iloc[-60:]
+        d["pdv_sparkline"]       = [round(float(x), 2) for x in recent.tolist()]
+        d["pdv_sparkline_dates"] = [str(dt.date()) for dt in recent.index]
+    except Exception:
+        d.setdefault("pdv_spread_mean", 0)
+        d.setdefault("pdv_spread_pct", 50)
+        d.setdefault("pdv_spread_label", "")
+        d.setdefault("pdv_spread_label_color", "#888")
+        d.setdefault("pdv_sparkline", [])
+        d.setdefault("pdv_sparkline_dates", [])
 
     return _clean(d)
 
