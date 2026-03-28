@@ -811,7 +811,14 @@ class JointCalibrator:
         verbose: bool = True,
     ) -> dict:
         """
-        Calibrate Bates (1996) SVJ parameters by minimising the joint loss.
+        Bates SVJ calibration.
+
+        WARNING: On daily SPX options data, the Merton jump component is not
+        identifiable — lambda and mu_j collapse to boundaries and rho remains
+        at -0.99. The jump skew and diffusion skew are not separable without
+        intraday data or additional moment constraints. SPX RMSE degrades from
+        3.833 (Heston) to 5.883 (Bates). Method retained for research
+        reference only.
 
         Eight parameters:
           kappa, theta, sigma, rho, v0   — Heston diffusion (same as calibrate())
