@@ -84,6 +84,20 @@ def _vomma_color(z: float) -> str:
 def load_page1() -> dict[str, Any]:
     d: dict[str, Any] = {}
 
+    # Bug 3: Load regime labels once — used for regime_date and PDV spread
+    _rl: pd.DataFrame | None = None
+    _rl_max_date: str | None = None
+    try:
+        _rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
+        if len(_rl) > 0:
+            _rl_max_date = (
+                str(_rl.index[-1].date())
+                if hasattr(_rl.index[-1], "date")
+                else str(_rl.index[-1])[:10]
+            )
+    except Exception:
+        pass
+
     # ── SPX latest ──────────────────────────────────────────────────────────
     try:
         con = _db()
@@ -110,6 +124,19 @@ def load_page1() -> dict[str, Any]:
         vts = pd.read_sql(vts_sql, con)
         con.close()
 
+        # Bug 1: Query vix_daily for authoritative VIX spot and date
+        try:
+            _con_vd = _db()
+            _vix_row = pd.read_sql(
+                "SELECT date, close FROM vix_daily ORDER BY date DESC LIMIT 1", _con_vd
+            )
+            _con_vd.close()
+            if len(_vix_row) > 0:
+                d["vix"]      = round(float(_vix_row["close"].iloc[0]), 2)
+                d["vix_date"] = str(_vix_row["date"].iloc[0])
+        except Exception:
+            pass
+
         # Build term structure dict
         vix_curve: dict[str, float] = {}
         for _, row in vts.iterrows():
@@ -122,8 +149,12 @@ def load_page1() -> dict[str, Any]:
             else:
                 vix_curve[int(row["tenor_days"])] = round(v, 2)
 
-        # Named references
-        d["vix"]   = vix_curve.get(30, vix_curve.get(9, 0))
+        # Bug 2: Record max date across all VTS tickers
+        if not vts.empty:
+            d["ts_max_date"] = str(vts["date"].max())[:10]
+
+        # Named references — Bug 1: use setdefault so vix_daily query above takes priority
+        d.setdefault("vix", vix_curve.get(30, vix_curve.get(9, 0)))
         d["vix9d"] = vix_curve.get(9,  None)
         d["vix3m"] = vix_curve.get(93, None)
         d["vix6m"] = vix_curve.get(182, None)
@@ -195,10 +226,11 @@ def load_page1() -> dict[str, Any]:
         d["regime_color"] = colors[reg]
         d["regime_label"] = labels[reg]
         d["regime_conf"]  = round(float(proba[reg]) * 100, 1)
-        d["regime_date"]  = d.get("spx_date", "live")
+        d["regime_date"]  = _rl_max_date or d.get("spx_date", "live")  # Bug 3
         d["prob_r0"]      = round(float(proba[0]) * 100, 1)
         d["prob_r1"]      = round(float(proba[1]) * 100, 1)
         d["prob_r2"]      = round(float(proba[2]) * 100, 1)
+        d["clf_accuracy"] = "86.2%"  # Bug 4
     except Exception as e:
         d["regime_error"] = str(e)
         _logger.warning("Live regime inference failed (%s); falling back to cached labels.", e)
@@ -238,8 +270,9 @@ def load_page1() -> dict[str, Any]:
             d["regime_color"] = "#666"
             d["regime_label"] = "—"
             d["regime_conf"]  = 0
-            d["regime_date"]  = d.get("spx_date", "N/A")   # never leave blank
+            d["regime_date"]  = _rl_max_date or d.get("spx_date", "N/A")  # Bug 3
             d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
+        d.setdefault("clf_accuracy", "86.2%")  # Bug 4
 
     # Calibration date for timestamp (Bug 7)
     try:
@@ -275,9 +308,9 @@ def load_page1() -> dict[str, Any]:
         d["pdv_sigma2"]   = 0
         d["pdv_spread_positive"] = False
 
-    # ── PDV spread historical context (Bug 3) ────────────────────────────
+    # ── PDV spread historical context ────────────────────────────────────
     try:
-        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
+        rl = _rl if _rl is not None else pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
         # pdv_iv_spread in parquet = PDV − VIX (decimal) → negate to get implied−realised (pp)
         hist_spread_pp = -rl["pdv_iv_spread"] * 100
         cur_spread = d.get("pdv_spread", 0) or 0
@@ -307,6 +340,16 @@ def load_page1() -> dict[str, Any]:
         d.setdefault("pdv_spread_label_color", "#888")
         d.setdefault("pdv_sparkline", [])
         d.setdefault("pdv_sparkline_dates", [])
+
+    # Bug 5: Log all four card dates on every page load for remote verification
+    _logger.info(
+        "[page1] SPX=%.2f date=%s | VIX=%.2f vix_date=%s | VVIX=%.2f vvix_date=%s | TS_max=%s | regime_date=%s",
+        d.get("spx", 0), d.get("spx_date", "?"),
+        d.get("vix", 0), d.get("vix_date", "?"),
+        d.get("vvix", 0), d.get("vvix_date", "?"),
+        d.get("ts_max_date", "?"),
+        d.get("regime_date", "?"),
+    )
 
     return _clean(d)
 
@@ -829,6 +872,18 @@ def _startup_data_refresh() -> None:
 
         # Rebuild regime labels so the cache reflects the freshest data
         _refresh_regime_labels()
+
+        # Bug 5: Log MAX(date) for all key tables so Railway logs show exact state
+        _con_log = _db()
+        for _tbl in ["spx_ohlcv", "vix_daily", "vix_term_structure"]:
+            try:
+                _r = pd.read_sql(f"SELECT MAX(date) AS d FROM {_tbl}", _con_log)  # noqa: S608
+                _logger.info(
+                    "[startup_refresh] %-25s max_date=%s", _tbl, str(_r["d"].iloc[0])[:10]
+                )
+            except Exception as _te:
+                _logger.warning("[startup_refresh] Could not query %s: %s", _tbl, _te)
+        _con_log.close()
 
         # Confirm new high-water mark
         con2     = _db()
