@@ -13,7 +13,10 @@ Coverage:
   9.  Edge cases            — all-flat, single-day, NaN handling
   10. Constants sanity      — S1/S2/S3 thresholds in valid ranges
 
-Total: 30 tests across 10 test classes.
+Total: 70 tests across 13 test classes.
+  11. generate_signal1_regime_filtered — R2 zeroing, resume after R2, columns
+  12. compare_s1_regime_filter         — dict keys, P&L math, trade decomposition
+  13. SignalEngine S1RF integration    — engine output columns, summary key
 """
 
 import tempfile
@@ -27,6 +30,7 @@ from joint_vol_calibration.signals.signal_engine import (
     S1_ENTRY_THRESHOLD,
     S1_MAX_HOLD,
     S1_MAX_KELLY,
+    S1_RF_REGIME2_SCALE,
     S2_MAX_HOLD,
     S2_ZSCORE_ENTRY,
     S3_MAX_HOLD,
@@ -34,7 +38,9 @@ from joint_vol_calibration.signals.signal_engine import (
     SignalEngine,
     _run_statemachine,
     combine_signals,
+    compare_s1_regime_filter,
     generate_signal1,
+    generate_signal1_regime_filtered,
     generate_signal2,
     generate_signal3,
     signal_summary,
@@ -602,3 +608,229 @@ class TestConstants:
     def test_s3_zscore_entry_negative(self):
         """Signal 3 enters on low ratio → z-score must be negative threshold."""
         assert S3_ZSCORE_ENTRY < 0
+
+    def test_s1rf_regime2_scale_is_zero(self):
+        """R2 days must be fully zeroed (scale = 0.0)."""
+        assert S1_RF_REGIME2_SCALE == 0.0
+
+
+# ── 11. generate_signal1_regime_filtered ─────────────────────────────────────
+
+class TestGenerateSignal1RF:
+    def test_s1rf_columns_present(self):
+        """Output must have s1rf_* prefixed columns."""
+        feats = _inject_spread(_make_flat_features(), 5, 30, 0.05)
+        regs  = _make_regimes(value=0)
+        s1rf  = generate_signal1_regime_filtered(feats, regs)
+        for col in ["s1rf_position", "s1rf_strength", "s1rf_regime_entry",
+                    "s1rf_days_held", "s1rf_kelly", "s1rf_exp_pnl"]:
+            assert col in s1rf.columns, f"Missing column: {col}"
+
+    def test_r2_days_have_zero_position(self):
+        """Every R2 day must produce position=0 in the filtered variant."""
+        feats = _inject_spread(_make_flat_features(n=60), 0, 60, 0.05)
+        # R0 for first 20, R2 for next 20, R0 for last 20
+        regimes_vals = np.array([0]*20 + [2]*20 + [0]*20)
+        regs = pd.Series(regimes_vals, index=feats.index)
+        s1rf = generate_signal1_regime_filtered(feats, regs)
+        r2_positions = s1rf["s1rf_position"].iloc[20:40]
+        assert (r2_positions == 0).all()
+
+    def test_r2_days_have_zero_kelly(self):
+        """Kelly must be 0.0 on R2 days."""
+        feats = _inject_spread(_make_flat_features(n=60), 0, 60, 0.05)
+        regimes_vals = np.array([0]*20 + [2]*20 + [0]*20)
+        regs = pd.Series(regimes_vals, index=feats.index)
+        s1rf = generate_signal1_regime_filtered(feats, regs)
+        assert (s1rf["s1rf_kelly"].iloc[20:40] == 0.0).all()
+
+    def test_r2_days_have_zero_strength(self):
+        """Strength must be 0.0 on R2 days."""
+        feats = _inject_spread(_make_flat_features(n=60), 0, 60, 0.05)
+        regimes_vals = np.array([0]*20 + [2]*20 + [0]*20)
+        regs = pd.Series(regimes_vals, index=feats.index)
+        s1rf = generate_signal1_regime_filtered(feats, regs)
+        assert (s1rf["s1rf_strength"].iloc[20:40] == 0.0).all()
+
+    def test_r0r1_positions_match_s1(self):
+        """On non-R2 days, s1rf_position must match s1_position exactly."""
+        feats = _inject_spread(_make_flat_features(n=40), 0, 40, 0.05)
+        regs  = _make_regimes(n=40, value=0)   # all R0
+        s1    = generate_signal1(feats, regs)
+        s1rf  = generate_signal1_regime_filtered(feats, regs)
+        pd.testing.assert_series_equal(
+            s1["s1_position"].rename("pos"),
+            s1rf["s1rf_position"].rename("pos"),
+            check_names=False,
+        )
+
+    def test_s1rf_not_more_active_than_s1(self):
+        """S1RF can only be flat or equal to S1 — never more active."""
+        feats = _inject_spread(_make_flat_features(n=60), 5, 55, 0.05)
+        regimes_vals = np.array([0]*30 + [2]*15 + [0]*15)
+        regs = pd.Series(regimes_vals, index=feats.index)
+        s1   = generate_signal1(feats, regs)
+        s1rf = generate_signal1_regime_filtered(feats, regs)
+        n_active_s1   = (s1["s1_position"]   != 0).sum()
+        n_active_s1rf = (s1rf["s1rf_position"] != 0).sum()
+        assert n_active_s1rf <= n_active_s1
+
+    def test_s1rf_resumes_after_r2(self):
+        """Trade entered in R0, passes through R2, resumes in R0 (within max_hold)."""
+        n = 12
+        feats = _inject_spread(_make_flat_features(n=n), 0, n, 0.05)
+        # R0 days 0-3, R2 days 4-7, R0 days 8-11
+        regimes_vals = np.array([0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 0])
+        regs = pd.Series(regimes_vals, index=feats.index)
+
+        s1   = generate_signal1(feats, regs, max_hold=21)
+        s1rf = generate_signal1_regime_filtered(feats, regs, max_hold=21)
+
+        # S1: should be +1 on all days (enters day 0, no exit triggered)
+        assert s1["s1_position"].iloc[0] == 1
+        assert s1["s1_position"].iloc[4] == 1   # R2 day — S1 still holds
+        assert s1["s1_position"].iloc[8] == 1   # back in R0 — S1 still holds
+
+        # S1RF: +1 in R0, 0 in R2, +1 again in R0
+        assert s1rf["s1rf_position"].iloc[0] == 1
+        assert s1rf["s1rf_position"].iloc[4] == 0   # R2 day zeroed
+        assert s1rf["s1rf_position"].iloc[8] == 1   # trade resumes after R2
+
+    def test_all_r2_gives_all_flat(self):
+        """When every day is R2, S1RF is always 0."""
+        feats = _inject_spread(_make_flat_features(n=40), 0, 40, 0.05)
+        regs  = _make_regimes(n=40, value=2)
+        s1rf  = generate_signal1_regime_filtered(feats, regs)
+        assert (s1rf["s1rf_position"] == 0).all()
+
+
+# ── 12. compare_s1_regime_filter ─────────────────────────────────────────────
+
+def _make_signals_df(n=60, r2_start=20, r2_end=30, spread_val=0.05):
+    """Build a minimal signals DataFrame for compare_s1_regime_filter tests."""
+    feats = _inject_spread(_make_flat_features(n=n), 0, n, spread_val)
+    regimes_arr = np.zeros(n, dtype=int)
+    regimes_arr[r2_start:r2_end] = 2
+    regs = pd.Series(regimes_arr, index=feats.index)
+
+    s1   = generate_signal1(feats, regs)
+    s1rf = generate_signal1_regime_filtered(feats, regs)
+    return pd.concat([s1, s1rf, feats, regs.rename("regime")], axis=1)
+
+
+class TestCompareS1RegimeFilter:
+    def test_returns_dict(self):
+        df = _make_signals_df()
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        assert isinstance(result, dict)
+
+    def test_required_keys(self):
+        df = _make_signals_df()
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        for key in ["s1_total_pnl", "s1rf_total_pnl", "pnl_difference",
+                    "n_trades", "n_trades_with_r2", "n_trades_without_r2",
+                    "r2_days_zeroed", "s1_pnl_series", "s1rf_pnl_series"]:
+            assert key in result, f"Missing key: {key}"
+
+    def test_pnl_difference_correct(self):
+        """pnl_difference must equal s1rf_total_pnl − s1_total_pnl."""
+        df = _make_signals_df()
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        expected = result["s1rf_total_pnl"] - result["s1_total_pnl"]
+        assert abs(result["pnl_difference"] - expected) < 1e-6
+
+    def test_n_trades_nonnegative(self):
+        df = _make_signals_df()
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        assert result["n_trades"] >= 0
+        assert result["n_trades_with_r2"] >= 0
+        assert result["n_trades_without_r2"] >= 0
+
+    def test_trade_counts_sum_correctly(self):
+        """n_trades_with_r2 + n_trades_without_r2 == n_trades."""
+        df = _make_signals_df()
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        assert result["n_trades_with_r2"] + result["n_trades_without_r2"] == result["n_trades"]
+
+    def test_r2_days_zeroed_correct(self):
+        """r2_days_zeroed must equal days where regime==2 AND s1_position!=0."""
+        df = _make_signals_df(r2_start=5, r2_end=15, spread_val=0.05)
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        expected = int(((df["regime"] == 2) & (df["s1_position"] != 0)).sum())
+        assert result["r2_days_zeroed"] == expected
+
+    def test_s1rf_pnl_le_s1_pnl_when_r2_costly(self):
+        """When S1 holds positions through R2 and gains, S1RF earns less (zeroed)."""
+        # Use positive spread so long position earns positive daily proxy P&L
+        df = _make_signals_df(r2_start=5, r2_end=20, spread_val=0.08)
+        result = compare_s1_regime_filter(df, start_date="2022-01-01", end_date="2023-12-31")
+        # If S1 has any non-zero days in R2 with positive spread, S1RF has less PnL
+        if result["r2_days_zeroed"] > 0 and result["s1_total_pnl"] > 0:
+            assert result["s1rf_total_pnl"] <= result["s1_total_pnl"]
+
+    def test_missing_column_raises(self):
+        """ValueError when required column is absent."""
+        df = _make_signals_df()
+        bad_df = df.drop(columns=["s1_days_held"])
+        with pytest.raises(ValueError, match="s1_days_held"):
+            compare_s1_regime_filter(bad_df, start_date="2022-01-01", end_date="2023-12-31")
+
+    def test_empty_date_range_raises(self):
+        """ValueError when no rows fall in the date range."""
+        df = _make_signals_df()
+        with pytest.raises(ValueError):
+            compare_s1_regime_filter(df, start_date="2000-01-01", end_date="2000-01-31")
+
+
+# ── 13. SignalEngine includes s1rf columns ────────────────────────────────────
+
+class TestSignalEngineS1RF:
+    @pytest.fixture
+    def spx_df(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        dates = pd.bdate_range("2020-01-02", periods=n)
+        closes = 3000 * np.cumprod(1 + rng.normal(0, 0.01, n))
+        log_ret = np.concatenate([[np.nan], np.diff(np.log(closes))])
+        return pd.DataFrame({
+            "date": dates, "open": closes, "high": closes*1.01,
+            "low": closes*0.99, "close": closes,
+            "volume": np.ones(n, dtype=int), "log_return": log_ret,
+        })
+
+    @pytest.fixture
+    def vix_df(self, spx_df):
+        rng = np.random.default_rng(99)
+        n = len(spx_df)
+        vix   = rng.uniform(12, 40, n)
+        vvix  = rng.uniform(70, 140, n)
+        vix3m = vix + rng.uniform(-5, 5, n)
+        return pd.DataFrame({
+            "date":  spx_df["date"].values,
+            "^VIX":  vix, "^VIX3M": vix3m,
+            "^VIX6M": vix3m + 1, "^VIX9D": vix - 1,
+            "^VVIX": vvix,
+            "ts_slope_3m9d": vix3m - (vix - 1),
+            "ts_slope_6m1m": (vix3m + 1) - vix,
+        })
+
+    def test_engine_output_has_s1rf_columns(self, spx_df, vix_df):
+        """SignalEngine.generate() must include s1rf_position and s1rf_kelly."""
+        engine = SignalEngine()
+        df = engine.generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
+        assert "s1rf_position" in df.columns
+        assert "s1rf_kelly"    in df.columns
+        assert "s1rf_strength" in df.columns
+
+    def test_s1rf_never_more_active_than_s1_in_engine(self, spx_df, vix_df):
+        """Within engine output, S1RF active days ≤ S1 active days."""
+        engine = SignalEngine()
+        df = engine.generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
+        assert (df["s1rf_position"] != 0).sum() <= (df["s1_position"] != 0).sum()
+
+    def test_signal_summary_includes_s1rf(self, spx_df, vix_df):
+        """signal_summary() returns 'Signal1_RF' key when s1rf columns present."""
+        engine = SignalEngine()
+        df = engine.generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
+        summary = signal_summary(df)
+        assert "Signal1_RF" in summary

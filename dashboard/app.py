@@ -8,13 +8,17 @@ URL:  http://localhost:5000
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 import sqlite3
 import sys
+import threading
 import webbrowser
 from pathlib import Path
 from threading import Timer
 from typing import Any
+
+_logger = logging.getLogger("vol_dashboard")
 
 import numpy as np
 import pandas as pd
@@ -197,12 +201,45 @@ def load_page1() -> dict[str, Any]:
         d["prob_r2"]      = round(float(proba[2]) * 100, 1)
     except Exception as e:
         d["regime_error"] = str(e)
-        d["regime"] = -1
-        d["regime_name"] = "UNKNOWN"
-        d["regime_color"] = "#666"
-        d["regime_label"] = "—"
-        d["regime_conf"]  = 0
-        d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
+        _logger.warning("Live regime inference failed (%s); falling back to cached labels.", e)
+        # Fallback: read last known regime from regime_labels.parquet so the
+        # page always shows a valid regime and a non-blank "As of" date.
+        _cached = False
+        try:
+            rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
+            if "regime" in rl.columns and len(rl) > 0:
+                reg = int(rl["regime"].iloc[-1])
+                cache_dt = (
+                    str(rl.index[-1].date())
+                    if hasattr(rl.index[-1], "date")
+                    else str(rl.index[-1])[:10]
+                )
+                if 0 <= reg <= 2:
+                    _names  = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
+                    _colors = ["#3388ff", "#00ff88", "#ff3333"]
+                    _labels = ["R0", "R1", "R2"]
+                    d["regime"]       = reg
+                    d["regime_name"]  = _names[reg]
+                    d["regime_color"] = _colors[reg]
+                    d["regime_label"] = _labels[reg]
+                    d["regime_conf"]  = 0
+                    d["regime_date"]  = f"{cache_dt} (cached)"
+                    d["prob_r0"] = 100.0 if reg == 0 else 0.0
+                    d["prob_r1"] = 100.0 if reg == 1 else 0.0
+                    d["prob_r2"] = 100.0 if reg == 2 else 0.0
+                    _cached = True
+                    _logger.info("Regime fallback: R%d from %s", reg, cache_dt)
+        except Exception as fe:
+            _logger.error("Regime cache fallback also failed: %s", fe)
+
+        if not _cached:
+            d["regime"]       = -1
+            d["regime_name"]  = "UNKNOWN"
+            d["regime_color"] = "#666"
+            d["regime_label"] = "—"
+            d["regime_conf"]  = 0
+            d["regime_date"]  = d.get("spx_date", "N/A")   # never leave blank
+            d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
 
     # Calibration date for timestamp (Bug 7)
     try:
@@ -701,6 +738,113 @@ def load_page4() -> dict[str, Any]:
     return _clean(d)
 
 
+# ── Startup data refresh (Bug 2 fix) ──────────────────────────────────────────
+
+def _refresh_regime_labels() -> None:
+    """
+    Re-run the regime classifier on the latest DB data and overwrite
+    data_store/signals/regime_labels.parquet.
+
+    Called after daily_refresh() completes so that the cached labels
+    used by the live-regime fallback (Bug 1) reflect today's data.
+    """
+    try:
+        from joint_vol_calibration.data.database import (
+            get_spx_ohlcv,
+            get_vix_term_structure_wide,
+        )
+        from joint_vol_calibration.signals.regime_classifier import (
+            build_features,
+        )
+
+        today       = pd.Timestamp.today().strftime("%Y-%m-%d")
+        spx_df      = get_spx_ohlcv(as_of_date=today)
+        vix_wide_df = get_vix_term_structure_wide(as_of_date=today)
+
+        # Use the PDV model for pdv_iv_spread if available
+        pdv_model = None
+        try:
+            with open(DATA / "pdv_model.pkl", "rb") as _f:
+                pdv_model = pickle.load(_f)
+        except Exception:
+            pass
+
+        feats = build_features(spx_df, vix_wide_df, pdv_model=pdv_model)
+
+        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as _f:
+            clf = pickle.load(_f)
+
+        labels = clf.predict_series(feats.dropna())
+        rl     = feats.reindex(labels.index).copy()
+        rl["regime"] = labels
+
+        out_path = DATA / "signals" / "regime_labels.parquet"
+        rl.to_parquet(out_path)
+        _logger.info(
+            "[startup_refresh] regime_labels.parquet updated: %d rows, last date %s",
+            len(rl),
+            str(rl.index[-1].date()),
+        )
+    except Exception as exc:
+        _logger.error("[startup_refresh] regime_labels.parquet refresh failed: %s", exc)
+
+
+def _startup_data_refresh() -> None:
+    """
+    Background thread entry-point — called once when the app starts.
+
+    Checks whether SPX data is stale (> 3 calendar days behind today).
+    If stale: runs DataPipeline.daily_refresh() then rebuilds regime_labels.parquet.
+    Logs every step so Railway logs show exactly which dates were added.
+    """
+    try:
+        con = _db()
+        row = pd.read_sql("SELECT MAX(date) AS last_date FROM spx_ohlcv", con)
+        con.close()
+        last_str  = str(row["last_date"].iloc[0])[:10]
+        last_date = pd.Timestamp(last_str)
+        today     = pd.Timestamp.today().normalize()
+
+        # 3-day lag covers weekends + public holidays without false triggers
+        if last_date >= today - pd.Timedelta(days=3):
+            _logger.info(
+                "[startup_refresh] Data is current (last SPX: %s). No refresh needed.",
+                last_str,
+            )
+            return
+
+        _logger.info(
+            "[startup_refresh] Stale data: last SPX=%s, today=%s. Starting refresh...",
+            last_str,
+            today.strftime("%Y-%m-%d"),
+        )
+
+        from joint_vol_calibration.data.pipeline import DataPipeline
+        pipe    = DataPipeline()
+        results = pipe.daily_refresh()
+
+        for src, n_rows in results.items():
+            if n_rows:
+                _logger.info("[startup_refresh] %-30s  +%d rows", src, n_rows)
+
+        # Rebuild regime labels so the cache reflects the freshest data
+        _refresh_regime_labels()
+
+        # Confirm new high-water mark
+        con2     = _db()
+        row2     = pd.read_sql("SELECT MAX(date) AS last_date FROM spx_ohlcv", con2)
+        con2.close()
+        new_last = str(row2["last_date"].iloc[0])[:10]
+        _logger.info(
+            "[startup_refresh] Done. SPX now current to %s (was %s).",
+            new_last,
+            last_str,
+        )
+
+    except Exception as exc:
+        _logger.error("[startup_refresh] Startup refresh failed: %s", exc)
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 @app.route("/")
 def page_market():
@@ -735,7 +879,13 @@ def _find_free_port(preferred: int = 5000) -> int:
 if __name__ == "__main__":
     # Railway / Render / Fly.io inject PORT — fall back to local auto-detect
     import os as _os
-    port = int(_os.environ.get("PORT", _find_free_port(5000)))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    port  = int(_os.environ.get("PORT", _find_free_port(5000)))
     local = not _os.environ.get("PORT")           # True when running locally
     url   = f"http://localhost:{port}"
 
@@ -743,6 +893,16 @@ if __name__ == "__main__":
     print("  │   Joint SPX/VIX Volatility System — Dashboard    │")
     print(f"  │   {url:<44}  │")
     print("  └──────────────────────────────────────────────────┘\n")
+
+    # Kick off data refresh in background so the app binds to its port
+    # immediately (Railway health-checks require fast startup).
+    _refresh_thread = threading.Thread(
+        target=_startup_data_refresh,
+        name="startup-refresh",
+        daemon=True,
+    )
+    _refresh_thread.start()
+    _logger.info("Startup refresh thread launched (daemon=True).")
 
     if local:
         Timer(1.2, lambda: webbrowser.open(url)).start()

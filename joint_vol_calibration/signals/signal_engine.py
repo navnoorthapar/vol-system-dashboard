@@ -19,6 +19,22 @@ Signal 1 — IV vs Realised Spread Trade
   Exit            : spread reverts to zero OR max-hold 21 days
   Sizing          : Kelly fraction = tanh(|spread|/0.04) × 0.20, capped at 20 %
 
+Signal 1 — Regime-Filtered Variant (S1_regime_filtered)
+---------------------------------------------------------
+  Identical to Signal 1 except that on any day the current regime is R2
+  (VOMMA_ACTIVE), the effective position output is scaled to 0.0 regardless
+  of whether a trade is open.
+
+  Motivation: S1 entry gates block new positions in R2, but an open trade
+  entered in R0 or R1 can persist through a regime transition to R2. The
+  original backtest (2018-2025) showed that such "regime overhang" trades
+  contributed significantly to the −$503K S1 loss. The filtered variant
+  zero-scales the position on R2 days while leaving the state machine running
+  so that positions resume in R0/R1 if the max-hold has not elapsed.
+
+  Output columns: s1rf_* (position, strength, regime_entry, days_held,
+                           kelly, exp_pnl)
+
 Signal 2 — VIX Term-Structure Curve Trade
 ------------------------------------------
   Edge: VIX 3M–1M slope deviates from its 252-day rolling mean.
@@ -120,6 +136,7 @@ S1_ENTRY_THRESHOLD: float = 0.02     # 2 vol points (decimal)
 S1_MAX_HOLD: int          = 21       # trading days
 S1_MAX_KELLY: float       = 0.20     # cap at 20 % of notional
 S1_STRENGTH_SCALE: float  = 0.04     # tanh(spread / scale) saturates at this spread
+S1_RF_REGIME2_SCALE: float = 0.0    # position multiplier on R2 days for regime-filtered variant
 
 # Signal 2 — VIX term-structure trade
 S2_ZSCORE_ENTRY: float    = 1.0      # enter short when z > 1 std
@@ -277,6 +294,141 @@ def generate_signal1(
     result["kelly"]    = kelly
     result["exp_pnl"]  = result["strength"].fillna(0.0) * kelly * 100.0
     return result.rename(columns={c: f"s1_{c}" for c in result.columns})
+
+
+# ── Signal 1 Regime-Filtered Variant ──────────────────────────────────────────
+
+def generate_signal1_regime_filtered(
+    features:  pd.DataFrame,
+    regimes:   pd.Series,
+    threshold: float = S1_ENTRY_THRESHOLD,
+    max_hold:  int   = S1_MAX_HOLD,
+    max_kelly: float = S1_MAX_KELLY,
+) -> pd.DataFrame:
+    """
+    Signal 1 — Regime-Filtered Variant (S1RF).
+
+    Runs the identical state machine as generate_signal1() but zeroes the
+    effective output (position, strength, kelly, exp_pnl) on every day where
+    regime == 2 (VOMMA_ACTIVE).
+
+    The underlying state machine keeps advancing through R2 days so that a
+    trade entered in R0 or R1 can resume when the regime returns to R0/R1 —
+    provided max_hold has not elapsed.
+
+    Returns
+    -------
+    pd.DataFrame with columns prefixed ``s1rf_``:
+        s1rf_position, s1rf_strength, s1rf_regime_entry, s1rf_days_held,
+        s1rf_kelly, s1rf_exp_pnl
+    """
+    base = generate_signal1(features, regimes, threshold=threshold,
+                            max_hold=max_hold, max_kelly=max_kelly)
+
+    result = base.rename(columns={c: c.replace("s1_", "s1rf_", 1) for c in base.columns})
+
+    r2_mask = (regimes == 2).reindex(result.index, fill_value=False)
+    result.loc[r2_mask, "s1rf_position"] = S1_RF_REGIME2_SCALE
+    result.loc[r2_mask, "s1rf_strength"] = 0.0
+    result.loc[r2_mask, "s1rf_kelly"]    = 0.0
+    result.loc[r2_mask, "s1rf_exp_pnl"]  = 0.0
+
+    return result
+
+
+def compare_s1_regime_filter(
+    signals_df: pd.DataFrame,
+    start_date: str   = "2018-01-01",
+    end_date:   str   = "2025-03-24",
+    notional:   float = 1_000_000.0,
+) -> dict:
+    """
+    Compare S1 (original) vs S1_regime_filtered over a date range.
+
+    Edge-proxy P&L (first-order approximation):
+        daily_pnl = position × pdv_iv_spread × kelly × notional / 252
+
+    Classifies each S1 trade by whether it had any Regime-2 exposure while
+    open (trade persisted through R2 after entering in R0/R1).
+
+    Parameters
+    ----------
+    signals_df  : output of SignalEngine.generate() — must contain s1_*,
+                  s1rf_*, pdv_iv_spread, regime columns.
+    start_date  : inclusive left bound (YYYY-MM-DD).
+    end_date    : inclusive right bound (YYYY-MM-DD).
+    notional    : portfolio notional in dollars.
+
+    Returns
+    -------
+    dict with keys:
+        s1_total_pnl         float   total proxy P&L, original S1
+        s1rf_total_pnl       float   total proxy P&L, S1 regime-filtered
+        pnl_difference       float   s1rf_total_pnl − s1_total_pnl
+        n_trades             int     distinct S1 trades in window
+        n_trades_with_r2     int     trades that had ≥1 R2 day while open
+        n_trades_without_r2  int     trades with no R2 exposure
+        r2_days_zeroed       int     days where S1 non-zero but S1RF forced 0
+        s1_pnl_series        pd.Series  daily S1 proxy P&L
+        s1rf_pnl_series      pd.Series  daily S1RF proxy P&L
+    """
+    df = signals_df.copy()
+    start_ts = pd.Timestamp(start_date)
+    end_ts   = pd.Timestamp(end_date)
+    mask = (df.index >= start_ts) & (df.index <= end_ts)
+    df   = df[mask]
+
+    if len(df) == 0:
+        raise ValueError(f"No data in [{start_date}, {end_date}]")
+
+    required = [
+        "s1_position", "s1_kelly", "s1_days_held",
+        "s1rf_position", "s1rf_kelly",
+        "pdv_iv_spread", "regime",
+    ]
+    for col in required:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: '{col}'")
+
+    spread = df["pdv_iv_spread"].fillna(0.0)
+
+    s1_pnl   = df["s1_position"]   * spread * df["s1_kelly"]   * notional / 252.0
+    s1rf_pnl = df["s1rf_position"] * spread * df["s1rf_kelly"] * notional / 252.0
+
+    # Identify distinct trades: days_held == 1 marks a new trade start
+    dh          = df["s1_days_held"].values
+    regime_vals = df["regime"].values
+
+    trade_id   = np.zeros(len(df), dtype=int)
+    current_id = 0
+    for i in range(len(dh)):
+        if dh[i] == 1:
+            current_id += 1
+        if dh[i] > 0:
+            trade_id[i] = current_id
+
+    n_with_r2    = 0
+    n_without_r2 = 0
+    for tid in range(1, current_id + 1):
+        mask_tid = trade_id == tid
+        if np.any(regime_vals[mask_tid] == 2):
+            n_with_r2 += 1
+        else:
+            n_without_r2 += 1
+
+    r2_days_zeroed = int(((df["regime"] == 2) & (df["s1_position"] != 0)).sum())
+
+    return {
+        "s1_total_pnl":        float(s1_pnl.sum()),
+        "s1rf_total_pnl":      float(s1rf_pnl.sum()),
+        "pnl_difference":      float(s1rf_pnl.sum() - s1_pnl.sum()),
+        "n_trades":            current_id,
+        "n_trades_with_r2":    n_with_r2,
+        "n_trades_without_r2": n_without_r2,
+        "r2_days_zeroed":      r2_days_zeroed,
+        "s1_pnl_series":       s1_pnl,
+        "s1rf_pnl_series":     s1rf_pnl,
+    }
 
 
 # ── Signal 2: VIX Term-Structure Curve ────────────────────────────────────────
@@ -588,9 +740,10 @@ class SignalEngine:
         )
 
         # ── Generate individual signals ───────────────────────────────────────
-        s1 = generate_signal1(feats, regimes)
-        s2 = generate_signal2(feats, regimes)
-        s3 = generate_signal3(feats, regimes)
+        s1   = generate_signal1(feats, regimes)
+        s1rf = generate_signal1_regime_filtered(feats, regimes)
+        s2   = generate_signal2(feats, regimes)
+        s3   = generate_signal3(feats, regimes)
 
         # ── Combine ───────────────────────────────────────────────────────────
         combined = combine_signals(
@@ -599,16 +752,17 @@ class SignalEngine:
         )
 
         # ── Assemble output DataFrame ─────────────────────────────────────────
-        df = pd.concat([s1, s2, s3, combined, feats, regimes.rename("regime")], axis=1)
+        df = pd.concat([s1, s1rf, s2, s3, combined, feats, regimes.rename("regime")], axis=1)
         self._result = df
 
-        n_s1  = (df["s1_position"] != 0).sum()
-        n_s2  = (df["s2_position"] != 0).sum()
-        n_s3  = (df["s3_position"] != 0).sum()
-        n_cb  = (df["combined_pos"] != 0).sum()
+        n_s1   = (df["s1_position"]   != 0).sum()
+        n_s1rf = (df["s1rf_position"] != 0).sum()
+        n_s2   = (df["s2_position"]   != 0).sum()
+        n_s3   = (df["s3_position"]   != 0).sum()
+        n_cb   = (df["combined_pos"]  != 0).sum()
         logger.info(
-            "Active days — S1: %d | S2: %d | S3: %d | Combined: %d",
-            n_s1, n_s2, n_s3, n_cb,
+            "Active days — S1: %d | S1RF: %d | S2: %d | S3: %d | Combined: %d",
+            n_s1, n_s1rf, n_s2, n_s3, n_cb,
         )
         return df
 
@@ -731,7 +885,7 @@ def signal_summary(df: pd.DataFrame) -> dict:
     """
     stats = {}
 
-    for prefix, label in [("s1", "Signal1_IVR"), ("s2", "Signal2_TS"), ("s3", "Signal3_Disp")]:
+    for prefix, label in [("s1", "Signal1_IVR"), ("s1rf", "Signal1_RF"), ("s2", "Signal2_TS"), ("s3", "Signal3_Disp")]:
         pos_col = f"{prefix}_position"
         if pos_col not in df.columns:
             continue
