@@ -35,7 +35,7 @@ This is model misspecification made visible — which is more useful than a mode
 
 ## System Overview
 
-10 components, 15,863 lines of Python, 374 passing tests, zero look-ahead bias.
+11 components, 15,863 lines of Python, 440 passing tests, zero look-ahead bias.
 
 | Component | Description | Tests |
 |-----------|-------------|-------|
@@ -47,9 +47,10 @@ This is model misspecification made visible — which is more useful than a mode
 | **C6** Greeks Monitor | Vomma/vanna/volga surface, 69-cell grid, unstable-node detection | 42 |
 | **C7** Delta-Hedge Simulation | P&L attribution: Γ + ν + Θ + residual, hedge efficiency metric | 54 |
 | **C8** Regime Classifier | XGBoost 3-regime classifier, 86.2% accuracy, 95.1% R2 recall | 53 |
-| **C9** Signal Engine | 3 trading signals (IVR/PDV, VIX term structure, dispersion) | 49 |
+| **C9** Signal Engine | 3 trading signals (IVR/PDV, VIX term structure, dispersion) + S1RF variant | 70 |
 | **C10** Backtest Engine | Full 2018–2025 backtest, walk-forward validation, HTML reports | 49 |
-| **Total** | | **374** |
+| **C11** Regime-Switching PDV | Merton (1976) jump component on R2 tail days, tail MLE calibration | 45 |
+| **Total** | | **440** |
 
 ---
 
@@ -264,7 +265,7 @@ python -m joint_vol_calibration.backtest.run_backtest
 
 ```bash
 pytest joint_vol_calibration/tests/ -v
-# 374 tests, 0 failures
+# 440 tests, 0 failures
 # Includes explicit look-ahead bias checks (test_lookahead.py)
 ```
 
@@ -295,7 +296,7 @@ vol-system-dashboard/
 │   ├── greeks/                 # C6: risk_monitor.py
 │   ├── backtest/               # C7: delta_hedger.py · C10: backtest_engine.py
 │   ├── signals/                # C8: regime_classifier.py · C9: signal_engine.py
-│   └── tests/                  # 374 tests across all components
+│   └── tests/                  # 440 tests across all components
 ├── data_store/
 │   ├── vol_system.db           # SQLite: SPX/VIX/options/regime tables
 │   ├── calibrations/           # joint_cal_2026-03-24.pkl

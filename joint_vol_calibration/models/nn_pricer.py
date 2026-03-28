@@ -26,8 +26,8 @@ Performance targets (per config.py)
 Why this matters
 ----------------
   The calibration loop calls the SPX pricer ~5 000 times per calibration run.
-  At inference the NN evaluates 50 options in a single forward pass (~0.1ms)
-  vs ~2ms for the batch Heston pricer — a genuine 20x improvement per evaluation.
+  At inference the NN evaluates 500 options in a single forward pass and achieves
+  an 8.1× speedup over the batch Heston pricer + IV inversion (measured benchmark).
   For backtesting over 10 years (2500 trading days), that difference compounds to
   hours vs minutes.
 

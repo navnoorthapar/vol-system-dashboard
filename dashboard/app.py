@@ -295,7 +295,9 @@ def load_page1() -> dict[str, Any]:
         pdv_forecast = float(coefs[0] * s1 + coefs[1] * s2 + coefs[2] * lev + intcpt) * 100
         d["pdv_forecast"] = round(pdv_forecast, 2)
         d["pdv_spread"]   = round((d.get("vix", 0) or 0) - pdv_forecast, 2)
-        d["pdv_date"]     = str(pdv._features.index[-1].date())
+        # FIX 2: show the regime-labels max date (reflects freshest DB data), not
+        # the model's training cutoff which stays at its last fit date.
+        d["pdv_date"]     = _rl_max_date or str(pdv._features.index[-1].date())
         d["pdv_sigma1"]   = round(s1 * 100, 2)
         d["pdv_sigma2"]   = round(s2 * 100, 2)
         d["pdv_spread_positive"] = d["pdv_spread"] > 0
@@ -455,9 +457,21 @@ def load_page3() -> dict[str, Any]:
         gdf["lm_bin"] = (np.floor(gdf["log_moneyness"] / 0.05) * 0.05).round(2)
         lm_bins = sorted(gdf["lm_bin"].unique().tolist())
 
+        # FIX 3: Compute unstable nodes directly from raw gdf — before binning —
+        # so that two unstable nodes sharing the same lm_bin are both captured.
+        unstable_nodes: list[dict] = []
+        for _, ur in gdf[gdf["is_unstable"]].iterrows():
+            unstable_nodes.append({
+                "T_days": int(ur["T_days"]),
+                "lm":     round(float(ur["log_moneyness"]), 4),
+                "K":      round(float(ur["K"]), 0),
+                "vomma":  round(float(ur["vomma"]), 1),
+                "z":      round(float(ur["vomma_zscore"]), 2),
+                "iv":     round(float(ur["iv"]) * 100, 1),
+            })
+
         # Build heatmap: rows = maturity, cols = lm_bin
         heatmap_rows: list[dict] = []
-        unstable_nodes: list[dict] = []
 
         for T in maturities:
             sub = gdf[gdf["T_days"] == T]
@@ -482,15 +496,6 @@ def load_page3() -> dict[str, Any]:
                         "bg":       _vomma_color(z),
                         "fg":       "#fff" if unstable or abs(z) > 1 else "#aaa",
                     }
-                    if unstable:
-                        unstable_nodes.append({
-                            "T_days": int(T),
-                            "lm":     round(lm, 2),
-                            "K":      round(K, 0),
-                            "vomma":  round(v, 1),
-                            "z":      round(z, 2),
-                            "iv":     round(iv, 1),
-                        })
                     cells.append(cell)
             heatmap_rows.append({
                 "T":     int(T),
