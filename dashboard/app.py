@@ -519,6 +519,9 @@ def load_page3() -> dict[str, Any]:
 
     try:
         gdf = pd.read_parquet(DATA / "greeks" / "greeks_surface.parquet")
+        # Recompute is_unstable from the raw z-score so the count is
+        # not sensitive to whatever threshold was used when the parquet was saved.
+        gdf["is_unstable"] = gdf["vomma_zscore"].abs() > 2.0
         maturities = sorted(gdf["T_days"].unique().tolist())
 
         # Bin log_moneyness into 0.05-wide buckets for the heatmap grid

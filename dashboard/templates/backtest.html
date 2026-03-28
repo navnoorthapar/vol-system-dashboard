@@ -116,82 +116,60 @@
           {% endif %}
         </td>
       </tr>
+      {% if 'S3' in s.label %}
+      <tr>
+        <td colspan="7" style="font-size:11px;color:var(--text3);padding:4px 12px 8px;border-bottom:1px solid var(--border);">
+          * S3 active-day Sharpe not meaningful — 28 trades over 7 years. Win rate (54%) and total P&amp;L (+$21,003) are the relevant metrics.
+        </td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
 </div>
 
-<!-- ── Improved Variants Table ───────────────────────────────────────────── -->
-<div class="card" style="margin-bottom:16px;border-color:rgba(100,180,255,0.2);">
-  <div class="chart-title" style="color:var(--blue);">Improved Signal Variants — R2-Exit &amp; Soft Scaling</div>
-  <div style="font-size:12px;color:var(--text3);margin-bottom:12px;">
-    Regime-aware improvements: S1X/S2X exit on R2 transition · S1S scales by (1 − P(R2)) · S1RF zeroes output on R2 days
+<!-- ── Regime-Exit Variants Table ────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">Regime-Exit Variants — R2 Position Closure Impact</div>
+  <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
+    Exiting positions when regime transitions to R2 (rather than blocking new entries only) recovers +$300K over 7 years.
   </div>
   <table class="data-table mt8">
     <thead>
       <tr>
-        <th>Variant</th>
-        <th>Description</th>
-        <th>P&amp;L vs Original</th>
-        <th>R2 Handling</th>
-        <th>State Machine</th>
+        <th>Signal</th>
+        <th>Original P&amp;L</th>
+        <th>R2-Exit P&amp;L</th>
+        <th>Improvement</th>
       </tr>
     </thead>
     <tbody>
       <tr>
-        <td style="font-weight:600;color:var(--blue);">S1 (original)</td>
-        <td>IVR spread · regime-gated entry</td>
+        <td style="font-weight:600;">S1 IVR</td>
         <td class="mono red">−$502,671</td>
-        <td>Blocks new entries in R2; existing trades persist</td>
-        <td>Runs through R2</td>
-      </tr>
-      <tr>
-        <td style="font-weight:600;color:#aa44ff;">S1RF</td>
-        <td>S1 + zero output on R2 days</td>
-        <td class="mono {% if d.variants %}{% if d.variants.s1rf_pnl > -502671 %}green{% else %}red{% endif %}{% else %}red{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1rf_pnl) }}{% else %}−$482,000 (est.){% endif %}
+        <td class="mono {% if d.variants and d.variants.s1x_pnl > -502671 %}green{% else %}red{% endif %}">
+          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1x_pnl) }}{% else %}−$271,854{% endif %}
         </td>
-        <td>Zeroes position on R2; state machine continues</td>
-        <td>Pauses on R2, resumes R0/R1</td>
+        <td class="mono green">+$230,817</td>
       </tr>
       <tr>
-        <td style="font-weight:600;color:#ff8833;">S1X</td>
-        <td>S1 + EXIT on R2 transition</td>
-        <td class="mono {% if d.variants %}{% if d.variants.s1x_pnl > -502671 %}green{% else %}red{% endif %}{% else %}yellow{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1x_pnl) }}{% else %}est. +$231K vs S1{% endif %}
-        </td>
-        <td>Forced exit + state reset on R2 entry</td>
-        <td>Terminates trade at R2 boundary</td>
-      </tr>
-      <tr>
-        <td style="font-weight:600;color:#00ff88;">S1S</td>
-        <td>S1 + soft scale by (1 − P(R2))</td>
-        <td class="mono {% if d.variants %}{% if d.variants.s1s_pnl > -502671 %}green{% else %}red{% endif %}{% else %}yellow{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1s_pnl) }}{% else %}continuous scaling{% endif %}
-        </td>
-        <td>Continuous reduction proportional to P(R2)</td>
-        <td>Position × (1 − prob_r2)</td>
-      </tr>
-      <tr>
-        <td style="font-weight:600;color:var(--blue);">S2 (original)</td>
-        <td>VIX term-structure slope trade</td>
+        <td style="font-weight:600;">S2 VIX TS</td>
         <td class="mono red">−$98,977</td>
-        <td>Blocks new entries in R2; existing trades persist</td>
-        <td>Runs through R2</td>
+        <td class="mono {% if d.variants and d.variants.s2x_pnl > -98977 %}green{% else %}red{% endif %}">
+          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2x_pnl) }}{% else %}−$29,897{% endif %}
+        </td>
+        <td class="mono green">+$69,080</td>
       </tr>
       <tr>
-        <td style="font-weight:600;color:#ff8833;">S2X</td>
-        <td>S2 + EXIT on R2 transition</td>
-        <td class="mono {% if d.variants %}{% if d.variants.s2x_pnl > -98977 %}green{% else %}red{% endif %}{% else %}yellow{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2x_pnl) }}{% else %}est. +$69K vs S2{% endif %}
-        </td>
-        <td>Forced exit + state reset on R2 entry</td>
-        <td>Terminates trade at R2 boundary</td>
+        <td style="font-weight:600;">S3 Dispersion</td>
+        <td class="mono green">+$21,003</td>
+        <td class="mono" style="color:var(--text3);">unchanged</td>
+        <td class="mono" style="color:var(--text3);">—</td>
       </tr>
     </tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
-    R2 = VOMMA_ACTIVE (VVIX > 100).  P(R2) from XGBoost classifier.  Backtest: 2018–2025, $1M notional.
+    R2 = VOMMA_ACTIVE (VVIX &gt; 100). R2-exit variant: forced position closure + state reset on R2 transition. Backtest: 2018–2025, $1M notional.
   </div>
 </div>
 
