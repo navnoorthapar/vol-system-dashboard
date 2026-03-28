@@ -260,6 +260,71 @@ class PDVLinear:
         )
 
 
+# ── Model 1b: PDV Linear 4-Factor (OLS + VIX) ────────────────────────────────
+
+class PDVLinear4F:
+    """
+    Four-factor PDV: OLS regression on (sigma1, sigma2, lev, vix).
+
+    y_hat(t) = a*sigma1(t) + b*sigma2(t) + c*lev(t) + e*vix(t) + d
+
+    Adds VIX (decimal, e.g. 0.20 = VIX 20) as a fourth regressor to
+    capture the forward-looking volatility expectation embedded in options
+    prices.  VIX is orthogonal to the pure path-dependent features (σ₁, σ₂,
+    lev) because it contains market expectations about future jumps and
+    macro uncertainty that realised-return EMAs cannot anticipate.
+
+    Zero look-ahead: the 'vix' column in the feature DataFrame is already
+    the lagged (t-1) VIX value when features are shifted inside SignalEngine /
+    build_dataset.  No extra shifting is done here.
+
+    Usage
+    -----
+    Model is fit and accessed identically to PDVLinear:
+        m4 = PDVLinear4F().fit(X, y)
+        preds = m4.predict(X)
+
+    The PDVModel wrapper uses PDVLinear internally; to use this model in
+    compare_covid_2020() or forecast(), pass it directly to RegimePDV or
+    use it standalone.
+    """
+
+    _XCOLS = ["sigma1", "sigma2", "lev", "vix"]
+
+    def __init__(self):
+        self.coef_: Optional[np.ndarray] = None
+        self.intercept_: Optional[float] = None
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "PDVLinear4F":
+        """OLS on four regressors."""
+        Xm = X[self._XCOLS].values
+        ym = y.values
+        Xb = np.column_stack([Xm, np.ones(len(Xm))])
+        try:
+            coeffs, _, _, _ = np.linalg.lstsq(Xb, ym, rcond=None)
+        except np.linalg.LinAlgError:
+            coeffs = np.zeros(Xb.shape[1])
+        self.coef_      = coeffs[:-1]
+        self.intercept_ = float(coeffs[-1])
+        return self
+
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        if self.coef_ is None:
+            raise RuntimeError("PDVLinear4F not fitted. Call .fit() first.")
+        Xm    = X[self._XCOLS].values
+        y_hat = Xm @ self.coef_ + self.intercept_
+        return pd.Series(np.maximum(y_hat, 1e-4), index=X.index)
+
+    def __repr__(self) -> str:
+        if self.coef_ is None:
+            return "PDVLinear4F(not fitted)"
+        a, b, c, e = self.coef_
+        return (
+            f"PDVLinear4F(sigma1={a:.3f}, sigma2={b:.3f}, "
+            f"lev={c:.3f}, vix={e:.3f}, intercept={self.intercept_:.4f})"
+        )
+
+
 # ── Model 2: PDV Kernel (Nadaraya-Watson) ─────────────────────────────────────
 
 class PDVKernel:

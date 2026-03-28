@@ -257,6 +257,85 @@
   </div>
 </div>
 
+<!-- ── Bates SVJ vs Heston Comparison ───────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;border-color:rgba(100,180,255,0.2);">
+  <div class="chart-title" style="color:var(--blue);">Bates (1996) SVJ vs Heston — Model Comparison</div>
+  <div style="font-size:12px;color:var(--text3);margin-bottom:14px;">
+    8-parameter Stochastic Volatility + Jumps (SVJ) model · Same joint loss objective · DE + L-BFGS-B
+  </div>
+
+  {% if d.bates %}
+  <div class="grid grid-2" style="gap:16px;">
+
+    <!-- Bates Parameters -->
+    <div>
+      <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em;">Bates Parameters</div>
+      <table class="data-table">
+        <tbody>
+          <tr><td class="mono" style="color:var(--text3);">κ  (kappa)</td>   <td class="mono blue">{{ d.bates.kappa }}</td>  <td style="color:var(--text3);font-size:11px;">Mean reversion</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">θ  (theta)</td>   <td class="mono yellow">{{ d.bates.theta }}</td> <td style="color:var(--text3);font-size:11px;">Long-run variance</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">σ  (sigma)</td>   <td class="mono" style="color:var(--orange);">{{ d.bates.sigma }}</td> <td style="color:var(--text3);font-size:11px;">Vol-of-vol</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">ρ  (rho)</td>     <td class="mono {% if d.bates.rho_freed %}green{% else %}red{% endif %}">{{ d.bates.rho }}</td> <td style="color:var(--text3);font-size:11px;">{% if d.bates.rho_freed %}Freed from boundary{% else %}Still at boundary{% endif %}</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">v₀</td>           <td class="mono green">{{ d.bates.v0 }}</td>    <td style="color:var(--text3);font-size:11px;">Initial variance</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">λ  (lam)</td>     <td class="mono" style="color:#aa44ff;">{{ d.bates.lam }} /yr</td>   <td style="color:var(--text3);font-size:11px;">Jump intensity</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">μⱼ (mu_j)</td>   <td class="mono" style="color:#ff8833;">{{ d.bates.mu_j }}%</td>     <td style="color:var(--text3);font-size:11px;">Mean jump size</td></tr>
+          <tr><td class="mono" style="color:var(--text3);">σⱼ (sigma_j)</td><td class="mono" style="color:#ff8833;">{{ d.bates.sigma_j }}%</td>  <td style="color:var(--text3);font-size:11px;">Jump size std</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- RMSE Comparison -->
+    <div>
+      <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em;">Fit Quality — Heston vs Bates</div>
+      <table class="data-table">
+        <thead><tr><th>Metric</th><th>Heston</th><th>Bates SVJ</th><th>Delta</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>SPX RMSE</td>
+            <td class="mono red">{{ d.spx_rmse }} vp</td>
+            <td class="mono {% if d.bates.spx_rmse < d.spx_rmse %}green{% else %}red{% endif %}">{{ d.bates.spx_rmse }} vp</td>
+            <td class="mono {% if d.bates.spx_delta < 0 %}green{% else %}red{% endif %}">{{ "{:+.3f}".format(d.bates.spx_delta) }}</td>
+          </tr>
+          <tr>
+            <td>VIX Futures RMSE</td>
+            <td class="mono {% if d.vix_fut_rmse > 2 %}red{% else %}yellow{% endif %}">{{ d.vix_fut_rmse }} pts</td>
+            <td class="mono {% if d.bates.vix_rmse < d.vix_fut_rmse %}green{% else %}yellow{% endif %}">{{ d.bates.vix_rmse }} pts</td>
+            <td class="mono {% if d.bates.vix_delta < 0 %}green{% else %}red{% endif %}">{{ "{:+.3f}".format(d.bates.vix_delta) }}</td>
+          </tr>
+          <tr>
+            <td>Fit time</td>
+            <td class="mono">{{ d.fit_time }}s</td>
+            <td class="mono">{{ d.bates.fit_time }}s</td>
+            <td class="mono" style="color:var(--text3);">+3 params</td>
+          </tr>
+          <tr>
+            <td>ρ freed from −0.99?</td>
+            <td class="mono red">No</td>
+            <td class="mono {% if d.bates.rho_freed %}green{% else %}red{% endif %}">{% if d.bates.rho_freed %}Yes{% else %}No{% endif %}</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+      {% if d.bates.rho_freed %}
+      <div class="banner banner-info" style="margin-top:12px;padding:10px 14px;">
+        <div style="font-size:12px;color:#00ff88;">
+          ✓  Bates allows ρ to move off the −0.99 boundary — the jump component
+          absorbs the steep left skew that Heston had to approximate via extreme negative correlation.
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+  </div>
+  {% else %}
+  <div style="color:var(--text3);font-size:12px;padding:20px 0;">
+    Bates calibration not yet run.
+    Call <span class="mono">JointCalibrator.calibrate_bates()</span> and store result to enable this panel.
+  </div>
+  {% endif %}
+
+</div>
+
 {% endblock %}
 
 {% block scripts %}

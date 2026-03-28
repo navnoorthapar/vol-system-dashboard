@@ -251,6 +251,101 @@ def _run_statemachine(
     )
 
 
+# ── R2-Exit State Machine ─────────────────────────────────────────────────────
+
+def _run_statemachine_r2exit(
+    entry_long:  pd.Series,
+    entry_short: pd.Series,
+    exit_cond:   pd.Series,
+    strength:    pd.Series,
+    regime:      pd.Series,
+    max_hold:    int,
+) -> pd.DataFrame:
+    """
+    State machine variant that EXITS positions when regime transitions INTO R2.
+
+    When the regime transitions from a non-R2 value to R2 (VOMMA_ACTIVE) while
+    a position is open, the position is immediately closed and the state machine
+    reset.  Entry gates remain: no new entries are taken in R2.
+
+    Differs from the S1RF (regime-filtered) variant, which zeroes the output
+    on R2 days but leaves the state machine running.  This variant TERMINATES
+    the trade at the R2 boundary — the position is gone, not paused.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+      position, strength, regime_entry, days_held, r2_exit (bool flag)
+    """
+    n   = len(entry_long)
+    idx = entry_long.index
+
+    position   = np.zeros(n, dtype=float)
+    str_out    = np.zeros(n, dtype=float)
+    regime_out = np.full(n, np.nan)
+    days_held  = np.zeros(n, dtype=int)
+    r2_exit    = np.zeros(n, dtype=bool)
+
+    cur_pos    = 0
+    cur_str    = 0.0
+    cur_regime = np.nan
+    cur_days   = 0
+    prev_reg   = -1.0   # -1 sentinel = "no prior regime"
+
+    for i in range(n):
+        el      = bool(entry_long.iloc[i])
+        es      = bool(entry_short.iloc[i])
+        ec      = bool(exit_cond.iloc[i])
+        cur_reg = float(regime.iloc[i]) if pd.notna(regime.iloc[i]) else -1.0
+
+        if cur_pos != 0:
+            cur_days += 1
+
+            # R2 transition: previous day was NOT R2, today IS R2 → forced exit
+            if prev_reg != 2.0 and cur_reg == 2.0:
+                cur_pos    = 0
+                cur_str    = 0.0
+                cur_regime = np.nan
+                cur_days   = 0
+                r2_exit[i] = True
+
+            # Normal exit
+            elif ec or cur_days >= max_hold:
+                cur_pos    = 0
+                cur_str    = 0.0
+                cur_regime = np.nan
+                cur_days   = 0
+
+        if cur_pos == 0:
+            if el and not es:
+                cur_pos    = +1
+                cur_str    = float(strength.iloc[i])
+                cur_regime = cur_reg
+                cur_days   = 1
+            elif es and not el:
+                cur_pos    = -1
+                cur_str    = float(strength.iloc[i])
+                cur_regime = cur_reg
+                cur_days   = 1
+
+        position[i]   = cur_pos
+        str_out[i]    = cur_str
+        regime_out[i] = cur_regime
+        days_held[i]  = cur_days
+        prev_reg      = cur_reg
+
+    return pd.DataFrame(
+        {
+            "position":     position,
+            "strength":     str_out,
+            "regime_entry": regime_out,
+            "days_held":    days_held,
+            "r2_exit":      r2_exit,
+        },
+        index=idx,
+    )
+
+
 # ── Signal 1: IVR Spread ──────────────────────────────────────────────────────
 
 def generate_signal1(
@@ -431,6 +526,98 @@ def compare_s1_regime_filter(
     }
 
 
+# ── Signal 1 R2-Exit Variant ───────────────────────────────────────────────────
+
+def generate_signal1_r2exit(
+    features:  pd.DataFrame,
+    regimes:   pd.Series,
+    threshold: float = S1_ENTRY_THRESHOLD,
+    max_hold:  int   = S1_MAX_HOLD,
+    max_kelly: float = S1_MAX_KELLY,
+) -> pd.DataFrame:
+    """
+    Signal 1 — R2-Exit Variant (S1X).
+
+    When regime TRANSITIONS into R2 (prev day not R2, today R2) while a
+    position is open, the position is closed immediately and the state machine
+    is reset.  Entry gates remain: no new entries are allowed in R2.
+
+    Compare with S1RF: that variant zeroes the output but keeps the state
+    machine running so trades can resume when regime returns to R0/R1.
+    S1X TERMINATES the trade at the R2 boundary.
+
+    Returns
+    -------
+    pd.DataFrame with columns prefixed ``s1x_``:
+        s1x_position, s1x_strength, s1x_regime_entry, s1x_days_held,
+        s1x_kelly, s1x_exp_pnl, s1x_r2_exit
+    """
+    spread   = features["pdv_iv_spread"]
+    strength = np.tanh(spread.abs() / S1_STRENGTH_SCALE)
+
+    entry_long  = (spread >  threshold) & (regimes == 0)
+    entry_short = (spread < -threshold) & (regimes == 1)
+    exit_cond   = spread.abs() < 0.005
+
+    result = _run_statemachine_r2exit(
+        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+    )
+
+    kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
+    result["kelly"]   = kelly
+    result["exp_pnl"] = result["strength"].fillna(0.0) * kelly * 100.0
+    return result.rename(columns={c: f"s1x_{c}" for c in result.columns})
+
+
+# ── Signal 1 Soft Regime-Scaling Variant ──────────────────────────────────────
+
+def generate_signal1_soft(
+    features:  pd.DataFrame,
+    regimes:   pd.Series,
+    prob_r2:   pd.Series,
+    threshold: float = S1_ENTRY_THRESHOLD,
+    max_hold:  int   = S1_MAX_HOLD,
+    max_kelly: float = S1_MAX_KELLY,
+) -> pd.DataFrame:
+    """
+    Signal 1 — Soft Regime-Scaling Variant (S1S).
+
+    Position is scaled continuously by (1 − prob_r2) where prob_r2 is the
+    classifier's predicted probability of Regime 2 (VOMMA_ACTIVE).
+
+    Unlike S1RF (hard zero on R2 days) or S1X (exit on R2 transition), soft
+    scaling gives a continuous position reduction proportional to the
+    probability of entering a dangerous regime.
+
+    Parameters
+    ----------
+    prob_r2 : pd.Series — predicted P(regime == 2), aligned with features index.
+              Must already be shifted 1 day (same as features) — no extra shift.
+
+    Returns
+    -------
+    pd.DataFrame with columns prefixed ``s1s_``:
+        s1s_position, s1s_strength, s1s_regime_entry, s1s_days_held,
+        s1s_kelly, s1s_exp_pnl, s1s_scale
+    """
+    base = generate_signal1(
+        features, regimes, threshold=threshold, max_hold=max_hold, max_kelly=max_kelly
+    )
+    result = base.rename(columns={c: c.replace("s1_", "s1s_", 1) for c in base.columns})
+
+    # Align prob_r2 to result index; clip to [0, 1]
+    prob_r2_a = prob_r2.reindex(result.index).fillna(0.0).clip(0.0, 1.0)
+    scale = 1.0 - prob_r2_a
+
+    result["s1s_scale"]    = scale
+    result["s1s_position"] = result["s1s_position"] * scale
+    result["s1s_strength"] = result["s1s_strength"] * scale
+    result["s1s_kelly"]    = result["s1s_kelly"]    * scale
+    result["s1s_exp_pnl"]  = result["s1s_exp_pnl"]  * scale
+
+    return result
+
+
 # ── Signal 2: VIX Term-Structure Curve ────────────────────────────────────────
 
 def generate_signal2(
@@ -508,6 +695,76 @@ def generate_signal2(
     result["kelly"]    = kelly
     result["exp_pnl"]  = result["strength"].fillna(0.0) * kelly * 100.0
     return result.rename(columns={c: f"s2_{c}" for c in result.columns})
+
+
+# ── Signal 2 R2-Exit Variant ───────────────────────────────────────────────────
+
+def generate_signal2_r2exit(
+    features:      pd.DataFrame,
+    regimes:       pd.Series,
+    zscore_entry:  float = S2_ZSCORE_ENTRY,
+    zscore_exit:   float = S2_ZSCORE_EXIT,
+    lookback:      int   = S2_LOOKBACK,
+    max_hold:      int   = S2_MAX_HOLD,
+    stop_loss_pct: float = S2_STOP_LOSS_PCT,
+    max_kelly:     float = S2_MAX_KELLY,
+) -> pd.DataFrame:
+    """
+    Signal 2 — R2-Exit Variant (S2X).
+
+    Identical to generate_signal2() except that positions are forcibly closed
+    when regime transitions INTO R2 (prev day not R2, today R2).
+
+    Returns
+    -------
+    pd.DataFrame with columns prefixed ``s2x_``.
+    """
+    slope     = features["ts_slope"]
+    mu_slope  = slope.rolling(lookback, min_periods=lookback // 2).mean()
+    std_slope = slope.rolling(lookback, min_periods=lookback // 2).std().clip(lower=1e-6)
+    z_slope   = (slope - mu_slope) / std_slope
+
+    strength = (z_slope.abs() / S2_STRENGTH_SCALE).clip(upper=1.0)
+
+    regime_ok   = regimes.isin([0, 1])
+    entry_long  = (slope < 0)               & regime_ok
+    entry_short = (z_slope > zscore_entry)  & regime_ok
+    exit_cond   = z_slope.abs() < zscore_exit
+
+    result = _run_statemachine_r2exit(
+        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+    )
+
+    # Stop-loss: slope moved 15 % of entry level against position
+    pos     = result["position"].values
+    dh      = result["days_held"].values
+    slope_v = slope.values
+    stop    = np.zeros(len(slope_v), dtype=bool)
+
+    entry_slope_ref = 0.0
+    for i in range(len(pos)):
+        if dh[i] == 1:
+            entry_slope_ref = slope_v[i]
+        if dh[i] > 1 and entry_slope_ref != 0:
+            pct_move = (slope_v[i] - entry_slope_ref) / abs(entry_slope_ref)
+            if (pos[i] == -1 and pct_move >  stop_loss_pct) or \
+               (pos[i] == +1 and pct_move < -stop_loss_pct):
+                stop[i] = True
+                entry_slope_ref = 0.0
+
+    pos_with_stop = pos.copy()
+    for i in range(len(pos_with_stop)):
+        if stop[i]:
+            pos_with_stop[i] = 0.0
+    result["position"] = pos_with_stop
+    result.loc[result["position"] == 0, "strength"]     = 0.0
+    result.loc[result["position"] == 0, "regime_entry"] = np.nan
+    result.loc[result["position"] == 0, "days_held"]    = 0
+
+    kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
+    result["kelly"]   = kelly
+    result["exp_pnl"] = result["strength"].fillna(0.0) * kelly * 100.0
+    return result.rename(columns={c: f"s2x_{c}" for c in result.columns})
 
 
 # ── Signal 3: Dispersion Proxy ────────────────────────────────────────────────

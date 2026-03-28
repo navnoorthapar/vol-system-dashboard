@@ -721,3 +721,196 @@ class TestIntegration:
             assert result["jump_adj"] > 0.001, (
                 f"jump_adj={result['jump_adj']:.4f} should be > 0.001 on COVID crash"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. PDVLinear4F
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from joint_vol_calibration.models.pdv import PDVLinear4F
+
+
+def _make_4f_df(n: int = 80, seed: int = 0) -> pd.DataFrame:
+    """Synthetic DataFrame with the 4 required features."""
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2018-01-02", periods=n)
+    return pd.DataFrame(
+        {
+            "sigma1": rng.uniform(0.08, 0.35, n),
+            "sigma2": rng.uniform(0.10, 0.30, n),
+            "lev":    rng.uniform(-0.04, 0.04, n),
+            "vix":    rng.uniform(0.10, 0.45, n),
+        },
+        index=idx,
+    )
+
+
+class TestPDVLinear4F:
+
+    def test_predict_before_fit_raises(self):
+        m = PDVLinear4F()
+        X = _make_4f_df()
+        with pytest.raises(RuntimeError, match="not fitted"):
+            m.predict(X)
+
+    def test_fit_returns_self(self):
+        m = PDVLinear4F()
+        X = _make_4f_df()
+        y = pd.Series(np.random.default_rng(1).uniform(0.1, 0.4, len(X)), index=X.index)
+        assert m.fit(X, y) is m
+
+    def test_predict_returns_series_with_correct_index(self):
+        X = _make_4f_df()
+        y = pd.Series(np.random.default_rng(2).uniform(0.1, 0.4, len(X)), index=X.index)
+        m = PDVLinear4F().fit(X, y)
+        pred = m.predict(X)
+        assert isinstance(pred, pd.Series)
+        assert list(pred.index) == list(X.index)
+
+    def test_predict_clips_to_1e4_minimum(self):
+        """Negative fitted values must be clipped to 1e-4."""
+        X = _make_4f_df(n=20)
+        # Target: all very negative → OLS will predict negative
+        y = pd.Series(np.full(20, -1.0), index=X.index)
+        m = PDVLinear4F().fit(X, y)
+        pred = m.predict(X)
+        assert (pred >= 1e-4).all(), "All predictions must be >= 1e-4"
+
+    def test_coef_has_4_elements(self):
+        X = _make_4f_df()
+        y = pd.Series(np.random.default_rng(3).uniform(0.1, 0.4, len(X)), index=X.index)
+        m = PDVLinear4F().fit(X, y)
+        assert m.coef_ is not None
+        assert len(m.coef_) == 4, f"Expected 4 coefficients, got {len(m.coef_)}"
+
+    def test_perfect_linear_fit(self):
+        """If y = 0.5*sigma1 + 0.3*sigma2 + 0.1*lev + 0.2*vix + 0.01,
+        the model should recover those coefficients and predict perfectly."""
+        X = _make_4f_df(n=200, seed=7)
+        y = (
+            0.5 * X["sigma1"]
+            + 0.3 * X["sigma2"]
+            + 0.1 * X["lev"]
+            + 0.2 * X["vix"]
+            + 0.01
+        )
+        m = PDVLinear4F().fit(X, y)
+        pred = m.predict(X)
+        np.testing.assert_allclose(pred.values, y.values, atol=1e-6,
+                                   err_msg="Perfect linear data: prediction should match exactly")
+
+    def test_repr_fitted(self):
+        X = _make_4f_df()
+        y = pd.Series(np.random.default_rng(4).uniform(0.1, 0.4, len(X)), index=X.index)
+        m = PDVLinear4F().fit(X, y)
+        r = repr(m)
+        assert "PDVLinear4F" in r
+        assert "sigma1" in r
+        assert "vix" in r
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. compute_bns_ratio
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestComputeBnsRatio:
+
+    def test_returns_series(self):
+        model = _build_regime_pdv(n_days=200)
+        dates = model._regime_labels.index
+        as_of = dates[-1].strftime("%Y-%m-%d")
+        result = model.compute_bns_ratio(as_of)
+        assert isinstance(result, pd.Series)
+
+    def test_values_in_0_1(self):
+        model = _build_regime_pdv(n_days=200)
+        dates = model._regime_labels.index
+        as_of = dates[-1].strftime("%Y-%m-%d")
+        result = model.compute_bns_ratio(as_of)
+        assert (result >= 0.0).all() and (result <= 1.0).all(), (
+            f"BNS ratio must be in [0,1]; got range [{result.min():.3f}, {result.max():.3f}]"
+        )
+
+    def test_zero_lookahead_no_dates_on_or_after_as_of(self):
+        """All returned dates must be strictly before as_of_date."""
+        model = _build_regime_pdv(n_days=300)
+        dates = model._regime_labels.index
+        # Use a mid-series date
+        as_of = dates[150].strftime("%Y-%m-%d")
+        result = model.compute_bns_ratio(as_of)
+        cutoff = pd.to_datetime(as_of)
+        assert (result.index < cutoff).all(), (
+            "BNS ratio must not include data on or after as_of_date"
+        )
+
+    def test_requires_loaded(self):
+        """compute_bns_ratio raises RuntimeError when model not loaded."""
+        model = RegimePDV(
+            pdv_model_path=Path("/nonexistent/pdv.pkl"),
+            regime_labels_path=Path("/nonexistent/lbl.parquet"),
+        )
+        with pytest.raises(RuntimeError, match="load"):
+            model.compute_bns_ratio("2022-01-01")
+
+    def test_large_jump_day_high_ratio(self):
+        """A day with |r_t| >> |r_prev| should have a ratio close to 1.
+
+        BNS at position i:
+          r_curr[i] = r_lag1.shift(-1).iloc[i] = r_lag1.iloc[i+1]
+          r_prev[i] = r_lag1.iloc[i]
+        Set r_lag1[50]=0.0001 (tiny prev), r_lag1[51]=0.15 (large current).
+        Then at date feats.index[50]: BV = (π/2)*0.15*0.0001 << RV = 0.15² → ratio ≈ 0.999.
+        Use date-based lookup since dropna() removes position 0 (r_prev=NaN).
+        """
+        model = _build_regime_pdv(n_days=100)
+        feats = model._pdv._features.copy()
+        feats.iloc[50, feats.columns.get_loc("r_lag1")] = 0.0001   # prev tiny
+        feats.iloc[51, feats.columns.get_loc("r_lag1")] = 0.15     # current large
+        model._pdv._features = feats
+
+        target_date = feats.index[50]  # the date we expect a high ratio
+        dates = model._regime_labels.index
+        as_of = dates[-1].strftime("%Y-%m-%d")
+        result = model.compute_bns_ratio(as_of)
+
+        assert target_date in result.index, (
+            f"Date {target_date} not found in BNS result index after dropna()"
+        )
+        assert result.loc[target_date] > 0.90, (
+            f"Large jump day should have BNS ratio > 0.90, got {result.loc[target_date]:.3f}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. calibrate_jump_tail — BNS union filter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCalibrateJumpTailBNS:
+
+    def test_bns_threshold_cache_key_distinct(self):
+        """Different bns_threshold values must use different cache entries."""
+        model = _build_regime_pdv_with_crash(n_days=600)
+        dates = model._regime_labels.index
+        as_of = dates[-1].strftime("%Y-%m-%d")
+
+        p1 = model.calibrate_jump_tail(as_of, bns_threshold=0.3)
+        p2 = model.calibrate_jump_tail(as_of, bns_threshold=0.5)
+        # Each call generates a different cache key
+        assert len(model._jump_tail_cache) >= 2
+
+    def test_bns_zero_threshold_selects_more_days(self):
+        """bns_threshold=0.0 should union-select >= as many days as default threshold."""
+        model = _build_regime_pdv_with_crash(n_days=600, n_crash_days=30)
+        dates  = model._regime_labels.index
+        as_of  = dates[-1].strftime("%Y-%m-%d")
+
+        # Run tail calibration with very tight bns threshold (selects many bns days)
+        p_tight = model.calibrate_jump_tail(as_of, bns_threshold=0.0)
+        # Run with strict bns threshold (fewer bns days selected)
+        p_strict = model.calibrate_jump_tail(as_of, bns_threshold=0.99)
+        # Both must be valid MertonJumpParams
+        assert isinstance(p_tight, MertonJumpParams)
+        assert isinstance(p_strict, MertonJumpParams)
+        # With bns_threshold=0 all days pass bns filter, so n_r2_days should be >= strict
+        assert p_tight.n_r2_days >= p_strict.n_r2_days
+

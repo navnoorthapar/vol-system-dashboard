@@ -364,6 +364,18 @@ class RegimeClassifier:
         """Return predictions as a Series indexed like X."""
         return pd.Series(self.predict(X), index=X.index, name="regime")
 
+    def predict_proba_series(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Return class probabilities as DataFrame indexed like X.
+
+        Returns
+        -------
+        pd.DataFrame with columns ['prob_r0', 'prob_r1', 'prob_r2'], indexed like X.
+        """
+        proba = self.predict_proba(X)
+        return pd.DataFrame(
+            proba, index=X.index, columns=["prob_r0", "prob_r1", "prob_r2"]
+        )
+
     def feature_importance(self) -> pd.Series:
         """Return XGBoost feature importances (weight/gain)."""
         self._require_fitted()
@@ -886,3 +898,207 @@ def _write_labels_to_db(
         logger.info("Wrote %d regime label rows to SQLite", n)
     except Exception as exc:
         logger.warning("DB write failed: %s", exc)
+
+
+# ── HMM Regime Classifier (C5 variant) ────────────────────────────────────────
+
+class HMMRegimeClassifier:
+    """
+    3-state Gaussian HMM regime classifier using hmmlearn.
+
+    Learns latent market regimes from four observable features:
+        (vix, vvix, ts_slope, fear_premium)
+
+    States are unordered integers (0, 1, 2) — after fitting they are mapped
+    to regime labels (R0=LONG_GAMMA, R1=SHORT_GAMMA, R2=VOMMA_ACTIVE) by
+    comparing per-state mean VIX to the known ordering:
+        R0 (low vol), R1 (moderate vol), R2 (high vol, VVIX > 100).
+
+    Training window: 2010-2019 (avoids COVID look-ahead in backtest).
+
+    Usage
+    -----
+      hmm = HMMRegimeClassifier()
+      hmm.fit(X_train)                       # X must contain the 4 HMM features
+      proba_df = hmm.hmm_predict_proba(X)    # DataFrame (prob_r0, prob_r1, prob_r2)
+      labels   = hmm.predict(X)              # int array aligned to regime labelling
+    """
+
+    HMM_FEATURES = ["vix", "vvix", "ts_slope", "fear_premium"]
+
+    def __init__(
+        self,
+        n_components: int = 3,
+        n_iter: int = 200,
+        random_state: int = RANDOM_SEED,
+    ):
+        self.n_components  = n_components
+        self.n_iter        = n_iter
+        self.random_state  = random_state
+        self._model        = None
+        self._state_to_regime: Optional[Dict[int, int]] = None
+        self.is_fitted: bool = False
+
+    def fit(self, X: pd.DataFrame) -> "HMMRegimeClassifier":
+        """
+        Fit Gaussian HMM on features X.
+
+        Parameters
+        ----------
+        X : DataFrame — must contain HMM_FEATURES columns.
+
+        After fitting, HMM states are re-labelled to match the R0/R1/R2
+        ordering based on the mean VIX level of each state:
+          lowest mean VIX  → R0 (LONG_GAMMA)
+          middle mean VIX  → R1 (SHORT_GAMMA)
+          highest mean VIX → R2 (VOMMA_ACTIVE)
+        """
+        try:
+            from hmmlearn.hmm import GaussianHMM
+        except ImportError as exc:
+            raise ImportError("hmmlearn is required: pip install hmmlearn") from exc
+
+        Xm = X[self.HMM_FEATURES].dropna().values.astype(float)
+
+        model = GaussianHMM(
+            n_components=self.n_components,
+            covariance_type="full",
+            n_iter=self.n_iter,
+            random_state=self.random_state,
+        )
+        model.fit(Xm)
+        self._model = model
+
+        # Map HMM state → regime by ascending mean VIX (index 0 = 'vix' feature)
+        vix_idx = self.HMM_FEATURES.index("vix")
+        mean_vix = [float(model.means_[s][vix_idx]) for s in range(self.n_components)]
+        ranked   = sorted(range(self.n_components), key=lambda s: mean_vix[s])
+        # ranked[0] = state with lowest mean VIX → R0
+        # ranked[1] = state with middle mean VIX → R1
+        # ranked[2] = state with highest mean VIX → R2
+        self._state_to_regime = {ranked[i]: i for i in range(self.n_components)}
+
+        self.is_fitted = True
+        logger.info(
+            "HMMRegimeClassifier fitted on %d rows. "
+            "State→Regime mapping: %s  |  mean_vix per state: %s",
+            len(Xm),
+            self._state_to_regime,
+            {s: round(mean_vix[s], 4) for s in range(self.n_components)},
+        )
+        return self
+
+    def _require_fitted(self):
+        if not self.is_fitted:
+            raise RuntimeError("HMMRegimeClassifier not fitted. Call .fit() first.")
+
+    def _predict_raw_states(self, X: pd.DataFrame) -> np.ndarray:
+        """Return raw HMM state indices (0..n_components-1), shape (N,)."""
+        self._require_fitted()
+        Xm = X[self.HMM_FEATURES].fillna(method="ffill").values.astype(float)
+        return self._model.predict(Xm)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Return regime labels (0/1/2), shape (N,), aligned to R0/R1/R2."""
+        self._require_fitted()
+        raw = self._predict_raw_states(X)
+        return np.array([self._state_to_regime[s] for s in raw])
+
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Return posterior state probabilities, shape (N, n_components)."""
+        self._require_fitted()
+        Xm = X[self.HMM_FEATURES].fillna(method="ffill").values.astype(float)
+        _, posteriors = self._model.score_samples(Xm)
+        return posteriors
+
+    def hmm_predict_proba(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return regime probabilities as DataFrame indexed like X.
+
+        The raw HMM posteriors (indexed by HMM state) are reordered so that
+        column 0 = P(R0), column 1 = P(R1), column 2 = P(R2).
+
+        Returns
+        -------
+        pd.DataFrame with columns ['prob_r0', 'prob_r1', 'prob_r2'], indexed like X.
+        """
+        self._require_fitted()
+        raw_proba = self.predict_proba_raw(X)  # shape (N, n_components)
+
+        # Reorder columns: col i in output = P(regime i)
+        # _state_to_regime maps {hmm_state: regime_label}
+        # We need the inverse: {regime_label: hmm_state}
+        regime_to_state = {v: k for k, v in self._state_to_regime.items()}
+
+        ordered = np.column_stack([
+            raw_proba[:, regime_to_state[r]]
+            for r in range(self.n_components)
+        ])
+
+        return pd.DataFrame(
+            ordered, index=X.index, columns=["prob_r0", "prob_r1", "prob_r2"]
+        )
+
+    def compare_with_xgboost(
+        self,
+        X: pd.DataFrame,
+        y_true: pd.Series,
+        xgb_clf: "RegimeClassifier",
+    ) -> dict:
+        """
+        Compare HMM predictions with XGBoost predictions on the same data.
+
+        Returns
+        -------
+        dict with accuracy, per-class metrics, and average P(R2) comparison.
+        """
+        self._require_fitted()
+        xgb_clf._require_fitted()
+
+        hmm_preds = self.predict(X)
+        xgb_preds = xgb_clf.predict(X)
+        y          = y_true.values
+
+        hmm_acc = float(accuracy_score(y, hmm_preds))
+        xgb_acc = float(accuracy_score(y, xgb_preds))
+
+        # Average P(R2) on R2 days
+        r2_mask = y == 2
+        hmm_p_r2 = self.hmm_predict_proba(X)["prob_r2"]
+        xgb_p_r2 = pd.DataFrame(
+            xgb_clf.predict_proba(X), index=X.index, columns=["prob_r0", "prob_r1", "prob_r2"]
+        )["prob_r2"]
+
+        return {
+            "hmm_accuracy":        hmm_acc,
+            "xgb_accuracy":        xgb_acc,
+            "hmm_avg_p_r2_on_r2":  float(hmm_p_r2[r2_mask].mean()) if r2_mask.any() else float("nan"),
+            "xgb_avg_p_r2_on_r2":  float(xgb_p_r2[r2_mask].mean()) if r2_mask.any() else float("nan"),
+            "n_r2_days":           int(r2_mask.sum()),
+            "n_total":             int(len(y)),
+        }
+
+    def save(self, path: Path) -> Path:
+        """Pickle the HMM classifier."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as fh:
+            pickle.dump(self, fh)
+        logger.info("HMMRegimeClassifier saved to %s", path)
+        return path
+
+    @classmethod
+    def load(cls, path: Path) -> "HMMRegimeClassifier":
+        """Load a pickled HMMRegimeClassifier."""
+        with open(path, "rb") as fh:
+            obj = pickle.load(fh)
+        if not isinstance(obj, cls):
+            raise TypeError(f"Expected HMMRegimeClassifier, got {type(obj)}")
+        return obj
+
+    def __repr__(self) -> str:
+        status = "fitted" if self.is_fitted else "not fitted"
+        return (
+            f"HMMRegimeClassifier(n_components={self.n_components}, "
+            f"n_iter={self.n_iter}, status={status})"
+        )

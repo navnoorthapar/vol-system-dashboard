@@ -34,6 +34,7 @@ from joint_vol_calibration.signals.regime_classifier import (
     VVIX_REGIME2_THRESHOLD,
     RegimeClassifier,
     RegimePipeline,
+    HMMRegimeClassifier,
     build_dataset,
     build_features,
     build_regime_labels,
@@ -481,3 +482,117 @@ class TestConstants:
     def test_validation_dates_list(self):
         assert "2020-03-16" in REGIME2_VALIDATION_DATES
         assert "2025-04-09" in REGIME2_VALIDATION_DATES
+
+
+# ── 11. predict_proba_series ──────────────────────────────────────────────────
+
+class TestPredictProbaSeries:
+
+    def test_returns_dataframe_with_3_columns(self, fitted_clf):
+        clf, X, _ = fitted_clf
+        proba_df = clf.predict_proba_series(X)
+        assert isinstance(proba_df, pd.DataFrame)
+        assert set(proba_df.columns) == {"prob_r0", "prob_r1", "prob_r2"}
+
+    def test_proba_rows_sum_to_one(self, fitted_clf):
+        clf, X, _ = fitted_clf
+        proba_df = clf.predict_proba_series(X)
+        row_sums = proba_df.sum(axis=1)
+        np.testing.assert_allclose(row_sums.values, 1.0, atol=1e-6,
+                                   err_msg="Each row of predict_proba_series must sum to 1")
+
+    def test_index_matches_input(self, fitted_clf):
+        clf, X, _ = fitted_clf
+        proba_df = clf.predict_proba_series(X)
+        assert list(proba_df.index) == list(X.index)
+
+
+# ── 12. HMMRegimeClassifier ───────────────────────────────────────────────────
+
+def _make_hmm_features(n: int = 300, seed: int = 42) -> pd.DataFrame:
+    """Synthetic HMM feature DataFrame with 3 'regimes': low/mid/high VIX."""
+    rng   = np.random.default_rng(seed)
+    idx   = pd.bdate_range("2010-01-04", periods=n)
+    # Three blocks with distinct VIX levels to help HMM distinguish states
+    block = n // 3
+    vix   = np.concatenate([
+        rng.uniform(0.10, 0.18, block),      # low-vol block
+        rng.uniform(0.18, 0.28, block),      # mid-vol block
+        rng.uniform(0.28, 0.45, n - 2*block),  # high-vol block
+    ])
+    vvix      = vix * rng.uniform(3.5, 5.0, n)
+    ts_slope  = rng.uniform(-0.005, 0.005, n)
+    fear_prem = rng.uniform(0.95, 1.15, n)
+    return pd.DataFrame(
+        {"vix": vix, "vvix": vvix, "ts_slope": ts_slope, "fear_premium": fear_prem},
+        index=idx,
+    )
+
+
+@pytest.fixture
+def fitted_hmm():
+    X   = _make_hmm_features(n=400)
+    hmm = HMMRegimeClassifier(n_components=3, n_iter=50, random_state=42)
+    hmm.fit(X)
+    return hmm, X
+
+
+class TestHMMRegimeClassifier:
+
+    def test_require_fitted_raises_before_fit(self):
+        hmm = HMMRegimeClassifier()
+        X   = _make_hmm_features(n=10)
+        with pytest.raises(RuntimeError, match="not fitted"):
+            hmm.predict(X)
+
+    def test_fit_sets_is_fitted(self, fitted_hmm):
+        hmm, _ = fitted_hmm
+        assert hmm.is_fitted is True
+
+    def test_state_to_regime_covers_all_3(self, fitted_hmm):
+        hmm, _ = fitted_hmm
+        assert hmm._state_to_regime is not None
+        assert set(hmm._state_to_regime.values()) == {0, 1, 2}
+
+    def test_predict_returns_array_in_012(self, fitted_hmm):
+        hmm, X = fitted_hmm
+        labels = hmm.predict(X)
+        assert isinstance(labels, np.ndarray)
+        assert set(labels).issubset({0, 1, 2})
+
+    def test_predict_shape_matches_input(self, fitted_hmm):
+        hmm, X = fitted_hmm
+        labels = hmm.predict(X)
+        assert len(labels) == len(X)
+
+    def test_hmm_predict_proba_columns(self, fitted_hmm):
+        hmm, X = fitted_hmm
+        proba_df = hmm.hmm_predict_proba(X)
+        assert isinstance(proba_df, pd.DataFrame)
+        assert set(proba_df.columns) == {"prob_r0", "prob_r1", "prob_r2"}
+
+    def test_hmm_predict_proba_rows_sum_to_1(self, fitted_hmm):
+        hmm, X = fitted_hmm
+        proba_df = hmm.hmm_predict_proba(X)
+        row_sums = proba_df.sum(axis=1)
+        np.testing.assert_allclose(row_sums.values, 1.0, atol=1e-6)
+
+    def test_hmm_predict_proba_index_matches_input(self, fitted_hmm):
+        hmm, X = fitted_hmm
+        proba_df = hmm.hmm_predict_proba(X)
+        assert list(proba_df.index) == list(X.index)
+
+    def test_save_load_roundtrip(self, fitted_hmm, tmp_path):
+        hmm, X = fitted_hmm
+        path = tmp_path / "hmm_test.pkl"
+        hmm.save(path)
+        hmm2 = HMMRegimeClassifier.load(path)
+        # Predictions should be identical after reload
+        labels1 = hmm.predict(X)
+        labels2 = hmm2.predict(X)
+        np.testing.assert_array_equal(labels1, labels2)
+
+    def test_hmm_features_constant(self, fitted_hmm):
+        """HMM_FEATURES class attribute must contain the 4 expected columns."""
+        hmm, _ = fitted_hmm
+        assert set(hmm.HMM_FEATURES) == {"vix", "vvix", "ts_slope", "fear_premium"}

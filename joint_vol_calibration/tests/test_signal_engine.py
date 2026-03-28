@@ -37,11 +37,15 @@ from joint_vol_calibration.signals.signal_engine import (
     S3_ZSCORE_ENTRY,
     SignalEngine,
     _run_statemachine,
+    _run_statemachine_r2exit,
     combine_signals,
     compare_s1_regime_filter,
     generate_signal1,
     generate_signal1_regime_filtered,
+    generate_signal1_r2exit,
+    generate_signal1_soft,
     generate_signal2,
+    generate_signal2_r2exit,
     generate_signal3,
     signal_summary,
 )
@@ -834,3 +838,243 @@ class TestSignalEngineS1RF:
         df = engine.generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
         summary = signal_summary(df)
         assert "Signal1_RF" in summary
+
+
+# ── 14. _run_statemachine_r2exit ─────────────────────────────────────────────
+
+class TestRunStatemachineR2Exit:
+
+    def _run(self, entry_l, entry_s, exit_c, regimes, strength=None, max_hold=10):
+        n   = len(entry_l)
+        idx = pd.RangeIndex(n)
+        if strength is None:
+            strength = pd.Series(np.ones(n), index=idx)
+        return _run_statemachine_r2exit(
+            pd.Series(entry_l, index=idx),
+            pd.Series(entry_s, index=idx),
+            pd.Series(exit_c,  index=idx),
+            strength,
+            pd.Series(regimes, index=idx),
+            max_hold=max_hold,
+        )
+
+    def test_returns_expected_columns(self):
+        df = self._run([1,0,0,0], [0,0,0,0], [0,0,0,0], [0,0,0,0])
+        assert set(df.columns) == {"position", "strength", "regime_entry", "days_held", "r2_exit"}
+
+    def test_no_r2_transition_normal_exit(self):
+        """Without R2 transition, behaves like normal state machine."""
+        # Enter long day 0, hold until max_hold
+        entry = [1] + [0]*9
+        df = self._run(entry, [0]*10, [0]*10, [0]*10, max_hold=5)
+        assert df["position"].iloc[0] == 1
+        assert int(df["days_held"].iloc[3]) == 4    # day 3: 4 days held (exit resets cur_days)
+        assert df["position"].iloc[4] == 0          # exits on day 4 (5th day, max_hold=5 reached)
+
+    def test_r2_transition_exits_open_long(self):
+        """Regime transitions 0→2 while long → position closes, r2_exit flagged."""
+        # Enter long day 0 (regime=0), regime becomes 2 on day 3
+        entry  = [1,0,0,0,0]
+        regime = [0,0,0,2,2]
+        df = self._run(entry, [0]*5, [0]*5, regime, max_hold=10)
+        assert df["position"].iloc[0] == 1   # in trade days 0-2
+        assert df["position"].iloc[1] == 1
+        assert df["position"].iloc[2] == 1
+        assert df["position"].iloc[3] == 0   # force exit on R2 entry
+        assert df["r2_exit"].iloc[3]         # r2_exit flag set
+
+    def test_r2_transition_exits_open_short(self):
+        """Short position also closes on 0→2 R2 transition."""
+        entry_s = [1,0,0,0]
+        regime  = [1,1,2,2]
+        df = self._run([0]*4, entry_s, [0]*4, regime, max_hold=10)
+        assert df["position"].iloc[0] == -1
+        assert df["position"].iloc[1] == -1
+        assert df["position"].iloc[2] == 0   # exits on R2 transition
+        assert df["r2_exit"].iloc[2]
+
+    def test_already_in_r2_no_double_exit(self):
+        """Persisting in R2 (no transition) does not fire r2_exit repeatedly."""
+        entry  = [1,0,0,0,0]
+        regime = [2,2,2,2,2]  # already in R2 from day 0 (no prior non-R2)
+        df = self._run(entry, [0]*5, [0]*5, regime, max_hold=10)
+        # No entry should occur because entry_long fires but it re-enters in same iteration
+        # Actually entry fires on day0 when cur_pos==0; prev_reg starts at -1 ≠ 2 so no R2 exit
+        # The entry condition for S1 would be checked separately (regime gate outside)
+        # Here we just test r2_exit doesn't incorrectly fire on day 1+
+        assert df["r2_exit"].sum() == 0  # no R2 transition (was already R2 or never had prior)
+
+    def test_r2_does_not_prevent_new_entry_after_exit(self):
+        """After R2-forced exit, a new entry can occur when regime returns to R0/R1."""
+        entry  = [1,0,0,0,1,0,0]  # enter day0, regime 0→2 on day2, entry again day4 in R0
+        regime = [0,0,2,2,0,0,0]
+        df = self._run(entry, [0]*7, [0]*7, regime, max_hold=10)
+        assert df["position"].iloc[0] == 1
+        assert df["position"].iloc[2] == 0   # force exit
+        assert df["r2_exit"].iloc[2]
+        assert df["position"].iloc[4] == 1   # new entry in R0 after R2
+
+    def test_r2_exit_column_dtype(self):
+        df = self._run([0]*5, [0]*5, [0]*5, [0]*5)
+        assert df["r2_exit"].dtype == bool or df["r2_exit"].dtype == np.bool_
+
+
+# ── 15. generate_signal1_r2exit ──────────────────────────────────────────────
+
+class TestGenerateSignal1R2Exit:
+
+    def _make_entry_features(self, n=40):
+        idx = pd.bdate_range("2022-01-03", periods=n)
+        return pd.DataFrame({
+            "vix":           np.full(n, 0.18),
+            "ts_slope":      np.full(n, 0.002),
+            "fear_premium":  np.full(n, 1.05),
+            "rv_change_5d":  np.zeros(n),
+            "pdv_iv_spread": np.full(n, 0.05),   # S1 long entry spread
+            "vvix":          np.full(n, 0.92),
+        }, index=idx)
+
+    def test_columns_prefixed_s1x(self):
+        feat    = self._make_entry_features()
+        regimes = pd.Series(0, index=feat.index)
+        result  = generate_signal1_r2exit(feat, regimes)
+        for col in ["s1x_position", "s1x_strength", "s1x_kelly", "s1x_exp_pnl",
+                    "s1x_regime_entry", "s1x_days_held", "s1x_r2_exit"]:
+            assert col in result.columns, f"Missing column: {col}"
+
+    def test_r2_transition_closes_s1x_trade(self):
+        """S1X exits an open long when regime transitions into R2."""
+        n = 20
+        idx = pd.bdate_range("2022-01-03", periods=n)
+        feat = pd.DataFrame({
+            "pdv_iv_spread": np.full(n, 0.05),
+            "vix": np.full(n, 0.18),
+            "ts_slope": np.full(n, 0.002),
+            "fear_premium": np.full(n, 1.05),
+            "rv_change_5d": np.zeros(n),
+            "vvix": np.full(n, 0.92),
+        }, index=idx)
+        # R0 for first 5, then R2
+        reg = [0]*5 + [2]*15
+        regimes = pd.Series(reg, index=idx)
+        result  = generate_signal1_r2exit(feat, regimes)
+        # Position should be open for days 0-4 (or until spread goes to 0), then 0 at R2 entry
+        assert result["s1x_position"].iloc[5] == 0
+        assert result["s1x_r2_exit"].iloc[5]
+
+    def test_no_entry_while_in_r2(self):
+        """S1X must not enter new positions while regime is R2."""
+        n = 20
+        idx     = pd.bdate_range("2022-01-03", periods=n)
+        feat    = pd.DataFrame({
+            "pdv_iv_spread": np.full(n, 0.05),
+            "vix": np.full(n, 0.18), "ts_slope": np.full(n, 0.002),
+            "fear_premium": np.full(n, 1.05), "rv_change_5d": np.zeros(n),
+            "vvix": np.full(n, 0.92),
+        }, index=idx)
+        regimes = pd.Series(2, index=idx)   # permanently R2
+        result  = generate_signal1_r2exit(feat, regimes)
+        assert (result["s1x_position"] == 0).all()
+
+    def test_kelly_non_negative(self):
+        feat    = self._make_entry_features()
+        regimes = pd.Series(0, index=feat.index)
+        result  = generate_signal1_r2exit(feat, regimes)
+        assert (result["s1x_kelly"] >= 0).all()
+
+
+# ── 16. generate_signal2_r2exit ──────────────────────────────────────────────
+
+class TestGenerateSignal2R2Exit:
+
+    def test_columns_prefixed_s2x(self):
+        n   = 60
+        idx = pd.bdate_range("2022-01-03", periods=n)
+        # Build features with enough backwardation to trigger entry
+        ts  = [-0.05]*n   # persistent backwardation triggers long entry
+        feat = pd.DataFrame({
+            "vix": np.full(n, 0.18), "ts_slope": ts,
+            "fear_premium": np.full(n, 1.05), "rv_change_5d": np.zeros(n),
+            "pdv_iv_spread": np.zeros(n), "vvix": np.full(n, 0.92),
+        }, index=idx)
+        regimes = pd.Series(0, index=feat.index)
+        result  = generate_signal2_r2exit(feat, regimes)
+        for col in ["s2x_position", "s2x_strength", "s2x_kelly",
+                    "s2x_exp_pnl", "s2x_r2_exit"]:
+            assert col in result.columns, f"Missing column: {col}"
+
+    def test_r2_transition_exits_s2x(self):
+        n   = 20
+        idx = pd.bdate_range("2022-01-03", periods=n)
+        feat = pd.DataFrame({
+            "vix": np.full(n, 0.18), "ts_slope": np.full(n, -0.05),
+            "fear_premium": np.full(n, 1.05), "rv_change_5d": np.zeros(n),
+            "pdv_iv_spread": np.zeros(n), "vvix": np.full(n, 0.92),
+        }, index=idx)
+        reg = [0]*5 + [2]*15
+        regimes = pd.Series(reg, index=idx)
+        result  = generate_signal2_r2exit(feat, regimes)
+        # If trade was entered in R0, it must close when regime hits R2
+        if result["s2x_position"].iloc[4] != 0:
+            assert result["s2x_position"].iloc[5] == 0
+            assert result["s2x_r2_exit"].iloc[5]
+
+
+# ── 17. generate_signal1_soft ────────────────────────────────────────────────
+
+class TestGenerateSignal1Soft:
+
+    def _make_features(self, n=40, spread=0.05):
+        idx = pd.bdate_range("2022-01-03", periods=n)
+        return pd.DataFrame({
+            "vix": np.full(n, 0.18), "ts_slope": np.full(n, 0.002),
+            "fear_premium": np.full(n, 1.05), "rv_change_5d": np.zeros(n),
+            "pdv_iv_spread": np.full(n, spread), "vvix": np.full(n, 0.92),
+        }, index=idx)
+
+    def test_columns_prefixed_s1s(self):
+        feat    = self._make_features()
+        regimes = pd.Series(0, index=feat.index)
+        prob_r2 = pd.Series(0.0, index=feat.index)
+        result  = generate_signal1_soft(feat, regimes, prob_r2)
+        for col in ["s1s_position", "s1s_strength", "s1s_kelly",
+                    "s1s_exp_pnl", "s1s_scale"]:
+            assert col in result.columns, f"Missing column: {col}"
+
+    def test_zero_prob_r2_equals_s1(self):
+        """When prob_r2 = 0 everywhere, S1S = S1 (scale = 1)."""
+        feat    = self._make_features()
+        regimes = pd.Series(0, index=feat.index)
+        prob_r2 = pd.Series(0.0, index=feat.index)
+        s1      = generate_signal1(feat, regimes)
+        s1s     = generate_signal1_soft(feat, regimes, prob_r2)
+        np.testing.assert_array_almost_equal(
+            s1["s1_position"].values, s1s["s1s_position"].values
+        )
+
+    def test_one_prob_r2_zeros_position(self):
+        """When prob_r2 = 1 everywhere, position = 0."""
+        feat    = self._make_features()
+        regimes = pd.Series(0, index=feat.index)
+        prob_r2 = pd.Series(1.0, index=feat.index)
+        result  = generate_signal1_soft(feat, regimes, prob_r2)
+        assert (result["s1s_position"] == 0).all()
+
+    def test_partial_scaling(self):
+        """prob_r2 = 0.5 → position = 0.5 × base."""
+        feat    = self._make_features()
+        regimes = pd.Series(0, index=feat.index)
+        prob_r2 = pd.Series(0.5, index=feat.index)
+        s1      = generate_signal1(feat, regimes)
+        s1s     = generate_signal1_soft(feat, regimes, prob_r2)
+        np.testing.assert_array_almost_equal(
+            s1s["s1s_position"].values, s1["s1_position"].values * 0.5
+        )
+
+    def test_scale_column_equals_one_minus_prob_r2(self):
+        feat    = self._make_features()
+        regimes = pd.Series(0, index=feat.index)
+        prob_r2 = pd.Series(np.linspace(0, 1, len(feat)), index=feat.index)
+        result  = generate_signal1_soft(feat, regimes, prob_r2)
+        expected_scale = 1.0 - prob_r2
+        np.testing.assert_array_almost_equal(result["s1s_scale"].values, expected_scale.values)

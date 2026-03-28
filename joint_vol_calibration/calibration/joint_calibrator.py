@@ -51,6 +51,7 @@ from joint_vol_calibration.models.heston import (
     implied_vol_from_price,
     implied_vol_batch,
     black_scholes_call,
+    bates_call_batch,
 )
 
 logger = logging.getLogger(__name__)
@@ -732,6 +733,226 @@ class JointCalibrator:
             self._print_result(result)
 
         return result
+
+    # ── Bates (1996) SVJ Calibration ──────────────────────────────────────────
+
+    def _bates_joint_loss(self, params_vec: np.ndarray) -> float:
+        """
+        Joint loss for 8-parameter Bates SVJ model.
+
+        Params: [kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j]
+        """
+        kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j = params_vec
+
+        # Hard bounds
+        bnds = HESTON_BOUNDS
+        if not (bnds["kappa"][0] <= kappa <= bnds["kappa"][1]):  return 1e6
+        if not (bnds["theta"][0] <= theta <= bnds["theta"][1]):  return 1e6
+        if not (bnds["sigma"][0] <= sigma <= bnds["sigma"][1]):  return 1e6
+        if not (bnds["rho"][0]   <= rho   <= bnds["rho"][1]):    return 1e6
+        if not (bnds["v0"][0]    <= v0    <= bnds["v0"][1]):     return 1e6
+        if lam < 0 or lam > 10:      return 1e6
+        if mu_j < -0.15 or mu_j > 0: return 1e6
+        if sigma_j < 0.01 or sigma_j > 0.15: return 1e6
+
+        # Feller condition penalty
+        feller_viol    = max(0.0, sigma**2 - 2.0 * kappa * theta)
+        feller_penalty = _FELLER_PENALTY * feller_viol**2
+
+        l1 = self._bates_spx_leg(kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j)
+        l2 = self._vix_futures_leg(kappa, theta, sigma, v0)
+        l3 = self._vix_options_leg(kappa, theta, sigma, v0) if self.w3 > 0 else 0.0
+
+        return self.w1 * l1 + self.w2 * l2 + self.w3 * l3 + feller_penalty
+
+    def _bates_spx_leg(
+        self, kappa: float, theta: float, sigma: float, rho: float, v0: float,
+        lam: float, mu_j: float, sigma_j: float,
+    ) -> float:
+        """SPX leg using Bates batch pricer instead of Heston."""
+        if self.spx_surface.empty:
+            return 0.0
+
+        df  = self.spx_surface
+        sse = 0.0
+        n   = 0
+
+        for T_val, group in df.groupby("time_to_expiry"):
+            T        = float(T_val)
+            strikes  = group["strike"].values.astype(float)
+            rights   = group["right"].values
+            mkt_px   = group["market_price_f"].values.astype(float)
+            bs_vegas = group["bs_vega"].values.astype(float)
+
+            model_calls = bates_call_batch(
+                self.S, strikes, T, self.r, self.q,
+                kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j
+            )
+
+            put_mask     = (rights == "P")
+            model_prices = model_calls.copy()
+            model_prices[put_mask] = (
+                model_calls[put_mask]
+                - self.S * np.exp(-self.q * T)
+                + strikes[put_mask] * np.exp(-self.r * T)
+            )
+
+            err  = (model_prices - mkt_px) / bs_vegas
+            sse += np.sum(err**2)
+            n   += len(err)
+
+        return sse / max(n, 1)
+
+    def calibrate_bates(
+        self,
+        de_maxiter: int = 200,
+        de_popsize: int = 10,
+        polish: bool = True,
+        verbose: bool = True,
+    ) -> dict:
+        """
+        Calibrate Bates (1996) SVJ parameters by minimising the joint loss.
+
+        Eight parameters:
+          kappa, theta, sigma, rho, v0   — Heston diffusion (same as calibrate())
+          lam                            — jump intensity (jumps/year) ∈ [0, 10]
+          mu_j                           — mean log jump size ∈ [−0.15, 0]
+          sigma_j                        — jump size std ∈ [0.01, 0.15]
+
+        Steps: Differential Evolution (global) → L-BFGS-B polish.
+
+        Returns
+        -------
+        dict with keys: params, loss, leg_losses, fit_time, n_evals, success,
+                        heston_comparison (if Heston already calibrated)
+        """
+        logger.info("Starting Bates calibration for %s", self.as_of_date)
+
+        bounds = [
+            HESTON_BOUNDS["kappa"],
+            HESTON_BOUNDS["theta"],
+            HESTON_BOUNDS["sigma"],
+            HESTON_BOUNDS["rho"],
+            HESTON_BOUNDS["v0"],
+            (0.0, 10.0),      # lam
+            (-0.15, 0.0),     # mu_j
+            (0.01, 0.15),     # sigma_j
+        ]
+
+        self._n_evals = 0
+        t0 = time.time()
+
+        if verbose:
+            print(f"\n[C4-Bates] Bates SVJ calibration: {self.as_of_date}  |  "
+                  f"S={self.S:.0f}  |  {len(self.spx_surface)} SPX opts")
+            print(f"     DE: maxiter={de_maxiter}, popsize={de_popsize} × 8 = "
+                  f"{de_popsize*8} members...")
+
+        de_result = optimize.differential_evolution(
+            self._bates_joint_loss,
+            bounds=bounds,
+            maxiter=de_maxiter,
+            popsize=de_popsize,
+            tol=1e-6,
+            seed=RANDOM_SEED,
+            mutation=(0.5, 1.5),
+            recombination=0.9,
+            init="latinhypercube",
+            workers=1,
+        )
+
+        best_params = de_result.x
+        best_loss   = de_result.fun
+
+        if verbose:
+            print(f"     DE done: loss={best_loss:.6f}, evals={self._n_evals}")
+
+        if polish:
+            if verbose:
+                print("     Polishing with L-BFGS-B...")
+            polish_result = optimize.minimize(
+                self._bates_joint_loss,
+                best_params,
+                method="L-BFGS-B",
+                bounds=bounds,
+                options={"maxiter": 500, "ftol": 1e-10, "gtol": 1e-7},
+            )
+            if polish_result.fun < best_loss:
+                best_params = polish_result.x
+                best_loss   = polish_result.fun
+            if verbose:
+                print(f"     Polish done: loss={best_loss:.6f}, evals={self._n_evals}")
+
+        fit_time = time.time() - t0
+
+        kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j = best_params
+        bates_params = {
+            "kappa": float(kappa), "theta": float(theta),
+            "sigma": float(sigma), "rho":   float(rho),
+            "v0":    float(v0),    "lam":   float(lam),
+            "mu_j":  float(mu_j),  "sigma_j": float(sigma_j),
+        }
+
+        l1 = self._bates_spx_leg(kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j)
+        l2 = self._vix_futures_leg(kappa, theta, sigma, v0)
+        l3 = self._vix_options_leg(kappa, theta, sigma, v0) if self.w3 > 0 else 0.0
+        bates_losses = {
+            "spx_iv_rmse":      float(np.sqrt(l1)) * 100,
+            "vix_futures_rmse": float(np.sqrt(l2)) * 100,
+            "vix_options_rmse": float(np.sqrt(l3)) * 100,
+            "total_loss":       float(best_loss),
+        }
+
+        result = {
+            "params":     bates_params,
+            "loss":       best_loss,
+            "leg_losses": bates_losses,
+            "fit_time":   fit_time,
+            "n_evals":    self._n_evals,
+            "success":    bool(de_result.success),
+            "feller_ok":  bool(2 * kappa * theta >= sigma**2),
+        }
+
+        # Attach Heston comparison if available
+        if self.params is not None:
+            result["heston_comparison"] = {
+                "heston_spx_rmse": self.losses["spx_iv_rmse"],
+                "bates_spx_rmse":  bates_losses["spx_iv_rmse"],
+                "heston_vix_rmse": self.losses["vix_futures_rmse"],
+                "bates_vix_rmse":  bates_losses["vix_futures_rmse"],
+                "heston_rho":      self.params["rho"],
+                "bates_rho":       float(rho),
+            }
+
+        if verbose:
+            self._print_bates_result(result)
+
+        return result
+
+    def _print_bates_result(self, result: dict):
+        p  = result["params"]
+        ll = result["leg_losses"]
+        print(f"\n── Calibrated Bates SVJ Parameters ({self.as_of_date}) ──")
+        print(f"  kappa   = {p['kappa']:.4f}")
+        print(f"  theta   = {p['theta']:.4f}  (vol={np.sqrt(p['theta'])*100:.1f}%)")
+        print(f"  sigma   = {p['sigma']:.4f}")
+        print(f"  rho     = {p['rho']:.4f}")
+        print(f"  v0      = {p['v0']:.4f}  (vol={np.sqrt(p['v0'])*100:.1f}%)")
+        print(f"  lam     = {p['lam']:.3f} jumps/yr")
+        print(f"  mu_j    = {p['mu_j']*100:.2f}%")
+        print(f"  sigma_j = {p['sigma_j']*100:.2f}%")
+        print(f"  Feller  : 2κθ={2*p['kappa']*p['theta']:.4f} {'≥' if result['feller_ok'] else '<'} σ²={p['sigma']**2:.4f}")
+        print(f"\n── Bates Loss Breakdown ─────────────────────────────")
+        print(f"  SPX smile RMSE    : {ll['spx_iv_rmse']:.3f} vol pts")
+        print(f"  VIX futures RMSE  : {ll['vix_futures_rmse']:.3f} vol pts")
+        print(f"  VIX options RMSE  : {ll['vix_options_rmse']:.3f} vol pts")
+        print(f"  Fit time          : {result['fit_time']:.1f}s")
+        if "heston_comparison" in result:
+            hc = result["heston_comparison"]
+            print(f"\n── Bates vs Heston ──────────────────────────────────")
+            print(f"  SPX RMSE: Heston {hc['heston_spx_rmse']:.3f} → Bates {hc['bates_spx_rmse']:.3f} vol pts")
+            print(f"  VIX RMSE: Heston {hc['heston_vix_rmse']:.3f} → Bates {hc['bates_vix_rmse']:.3f} vol pts")
+            print(f"  rho:      Heston {hc['heston_rho']:.4f} → Bates {hc['bates_rho']:.4f}")
 
     # ── Validation ────────────────────────────────────────────────────────────
 

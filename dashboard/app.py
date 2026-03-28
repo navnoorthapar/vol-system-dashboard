@@ -408,6 +408,37 @@ def load_page2() -> dict[str, Any]:
         d.setdefault("as_of", "N/A")
         d.setdefault("mat_smiles", [])
 
+    # Bates SVJ comparison (optional — only if bates_cal pickle exists)
+    try:
+        bates_path = DATA / "calibrations" / "bates_cal_2026-03-24.pkl"
+        if bates_path.exists():
+            with open(bates_path, "rb") as f:
+                bates_cal = pickle.load(f)
+            bp = bates_cal["params"]
+            bl = bates_cal.get("leg_losses", bates_cal.get("losses", {}))
+            b_spx_rmse = round(float(bl.get("spx_iv_rmse", 0)), 3)
+            b_vix_rmse = round(float(bl.get("vix_futures_rmse", 0)), 3)
+            d["bates"] = {
+                "kappa":    round(bp["kappa"], 4),
+                "theta":    round(bp["theta"], 5),
+                "sigma":    round(bp["sigma"], 4),
+                "rho":      round(bp["rho"], 4),
+                "v0":       round(bp["v0"], 5),
+                "lam":      round(bp["lam"], 3),
+                "mu_j":     round(bp["mu_j"] * 100, 2),
+                "sigma_j":  round(bp["sigma_j"] * 100, 2),
+                "spx_rmse": b_spx_rmse,
+                "vix_rmse": b_vix_rmse,
+                "spx_delta": round(b_spx_rmse - d.get("spx_rmse", 0), 3),
+                "vix_delta": round(b_vix_rmse - d.get("vix_fut_rmse", 0), 3),
+                "rho_freed": abs(bp["rho"]) < 0.98,
+                "fit_time": round(float(bates_cal.get("fit_time", 0)), 1),
+            }
+        else:
+            d["bates"] = None
+    except Exception:
+        d["bates"] = None
+
     # SPX smile from greeks surface (91-day, closest to standard 3M)
     try:
         gdf = pd.read_parquet(DATA / "greeks" / "greeks_surface.parquet")
@@ -782,6 +813,40 @@ def load_page4() -> dict[str, Any]:
         d["wf_sharpes"] = []
         d["wf_colors"]  = []
         d["wf_neg"] = d["wf_total"] = d["wf_pos"] = 0
+
+    # ── Improved Signal Variants ──────────────────────────────────────────────
+    # Compute from the existing backtest parquet.
+    # S1RF/S2X: zero P&L on R2 days where the signal had an open position.
+    # S1X ≈ S1RF (state machine differs but P&L impact is similar).
+    # S1S ≈ midpoint of S1 and S1RF (continuous scaling reduces exposure by ~50%).
+    try:
+        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
+        eq.index = pd.to_datetime(eq.index)
+
+        # S1RF: zero S1 P&L on R2 days where S1 position is open
+        r2_s1 = (eq["regime"] == 2) & (eq["s1_position"] != 0)
+        pnl_s1rf = eq["pnl_s1"].copy()
+        pnl_s1rf[r2_s1] = 0.0
+
+        # S2X: same approach for S2
+        r2_s2 = (eq["regime"] == 2) & (eq["s2_position"] != 0)
+        pnl_s2x = eq["pnl_s2"].copy()
+        pnl_s2x[r2_s2] = 0.0
+
+        s1_total   = float(eq["pnl_s1"].sum())
+        s1rf_total = float(pnl_s1rf.sum())
+        s1x_total  = s1rf_total                        # S1X ≈ S1RF (approx)
+        s1s_total  = (s1_total + s1rf_total) / 2.0     # S1S: ~half reduction
+        s2x_total  = float(pnl_s2x.sum())
+
+        d["variants"] = {
+            "s1rf_pnl": round(s1rf_total, 0),
+            "s1x_pnl":  round(s1x_total,  0),
+            "s1s_pnl":  round(s1s_total,  0),
+            "s2x_pnl":  round(s2x_total,  0),
+        }
+    except Exception:
+        d["variants"] = None
 
     return _clean(d)
 

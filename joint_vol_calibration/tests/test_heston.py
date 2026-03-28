@@ -28,6 +28,11 @@ from joint_vol_calibration.models.heston import (
     implied_vol_from_price,
     black_scholes_call,
     HestonModel,
+    heston_call_batch,
+    bates_characteristic_function,
+    bates_call_price,
+    bates_call_batch,
+    characteristic_function,
 )
 
 # Default parameters for tests (stable, near-ATM)
@@ -309,6 +314,141 @@ class TestHestonModelClass:
             assert abs(model.params[key] - model2.params[key]) < 1e-10, (
                 f"Parameter {key} changed after save/load"
             )
+
+
+# ── Bates (1996) SVJ Model ────────────────────────────────────────────────────
+
+# Shared Bates params (lam=0 → pure Heston)
+_BATES_PARAMS = dict(**_PARAMS, lam=2.0, mu_j=-0.05, sigma_j=0.07)
+_B_S = _S
+_B_K = _K_atm
+_B_T = _T
+_B_r = _r
+_B_q = _q
+
+
+class TestBatesCharacteristicFunction:
+
+    def _heston_cf(self, phi):
+        return characteristic_function(
+            phi, _B_S, _B_T, _B_r, _B_q,
+            **_PARAMS
+        )
+
+    def _bates_cf(self, phi, lam, mu_j, sigma_j):
+        return bates_characteristic_function(
+            phi, _B_S, _B_T, _B_r, _B_q,
+            **_PARAMS, lam=lam, mu_j=mu_j, sigma_j=sigma_j,
+        )
+
+    def test_lam_zero_equals_heston(self):
+        """When lam=0, Bates CF collapses to Heston CF (jump term = exp(0) = 1)."""
+        phi = 2.5 + 0.0j
+        h = self._heston_cf(phi)
+        b = self._bates_cf(phi, lam=0.0, mu_j=-0.05, sigma_j=0.05)
+        assert abs(b - h) < 1e-10, f"lam=0 Bates should equal Heston: {b} vs {h}"
+
+    def test_returns_complex(self):
+        """Output must be a complex number."""
+        phi = 1.0 + 0.5j
+        result = self._bates_cf(phi, lam=1.0, mu_j=-0.02, sigma_j=0.05)
+        assert isinstance(result, complex)
+
+    def test_nonzero_lam_differs_from_heston(self):
+        """With lam>0, Bates CF should differ from Heston CF."""
+        phi = 3.0 + 0.0j
+        h = self._heston_cf(phi)
+        b = self._bates_cf(phi, lam=3.0, mu_j=-0.05, sigma_j=0.08)
+        assert abs(b - h) > 1e-8, "Non-zero lam should change CF"
+
+
+class TestBatesCallPrice:
+
+    def _call(self, K=_B_K, T=_B_T, lam=2.0, mu_j=-0.05, sigma_j=0.07):
+        return bates_call_price(
+            _B_S, K, T, _B_r, _B_q,
+            **_PARAMS, lam=lam, mu_j=mu_j, sigma_j=sigma_j,
+        )
+
+    def test_lam_zero_matches_heston_call_price(self):
+        """Bates with lam=0 should price identically to Heston call price."""
+        bates0 = self._call(lam=0.0, mu_j=0.0, sigma_j=0.01)
+        heston = heston_call_price(_B_S, _B_K, _B_T, _B_r, _B_q, **_PARAMS)
+        assert abs(bates0 - heston) < 0.05, (
+            f"lam=0 Bates={bates0:.4f} vs Heston={heston:.4f}"
+        )
+
+    def test_nonnegative(self):
+        """Call price must be >= 0."""
+        price = self._call()
+        assert price >= 0.0
+
+    def test_t_zero_early_return(self):
+        """T=0 → price is intrinsic value."""
+        price = bates_call_price(
+            _B_S, _B_K, 0.0, _B_r, _B_q,
+            **_PARAMS, lam=2.0, mu_j=-0.05, sigma_j=0.07,
+        )
+        intrinsic = max(_B_S - _B_K, 0.0)
+        assert abs(price - intrinsic) < 1e-8
+
+    def test_otm_lower_than_atm(self):
+        """Deep OTM call should be cheaper than ATM call."""
+        atm  = self._call(K=_B_S)
+        deep = self._call(K=_B_S * 1.30)
+        assert deep < atm
+
+
+class TestBatesCallBatch:
+
+    def _strikes(self):
+        return np.array([4000.0, 4250.0, 4500.0, 4750.0, 5000.0])
+
+    def _batch(self, lam=2.0, mu_j=-0.05, sigma_j=0.07):
+        return bates_call_batch(
+            _B_S, self._strikes(), _B_T, _B_r, _B_q,
+            **_PARAMS, lam=lam, mu_j=mu_j, sigma_j=sigma_j,
+        )
+
+    def test_shape(self):
+        strikes = self._strikes()
+        result  = self._batch()
+        assert result.shape == strikes.shape
+
+    def test_lam_zero_matches_heston_batch(self):
+        """Bates batch with lam=0 should closely match heston_call_batch."""
+        strikes  = self._strikes()
+        bates0   = bates_call_batch(
+            _B_S, strikes, _B_T, _B_r, _B_q,
+            **_PARAMS, lam=0.0, mu_j=0.0, sigma_j=0.01,
+        )
+        heston_b = heston_call_batch(
+            _B_S, strikes, _B_T, _B_r, _B_q, **_PARAMS,
+        )
+        np.testing.assert_allclose(bates0, heston_b, atol=0.05,
+                                   err_msg="lam=0 Bates batch should ≈ Heston batch")
+
+    def test_no_arbitrage_all_nonnegative(self):
+        """All batch prices must be non-negative."""
+        prices = self._batch()
+        assert np.all(prices >= 0.0), f"Negative prices found: {prices}"
+
+    def test_monotone_decreasing_in_strike(self):
+        """Call prices must be weakly decreasing in strike."""
+        prices = self._batch()
+        assert np.all(np.diff(prices) <= 1e-6), (
+            f"Call prices not monotone in strike: {prices}"
+        )
+
+    def test_t_zero_early_return(self):
+        """T=0 returns intrinsic values."""
+        strikes = self._strikes()
+        prices  = bates_call_batch(
+            _B_S, strikes, 0.0, _B_r, _B_q,
+            **_PARAMS, lam=2.0, mu_j=-0.05, sigma_j=0.07,
+        )
+        intrinsic = np.maximum(_B_S - strikes, 0.0)
+        np.testing.assert_allclose(prices, intrinsic, atol=1e-8)
 
 
 if __name__ == "__main__":

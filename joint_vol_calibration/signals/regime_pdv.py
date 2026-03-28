@@ -499,6 +499,51 @@ class RegimePDV:
 
         return r_r2, sigma_d_daily, pdv_vol_ann, valid_dates
 
+    # ── BN-S Daily Jump Ratio ─────────────────────────────────────────────────
+
+    def compute_bns_ratio(self, as_of_date: str) -> pd.Series:
+        """
+        Barndorff-Nielsen & Shephard (BN-S) daily jump ratio.
+
+        Approximates bipower variation via adjacent daily returns:
+            BV_t  = (π/2) * |r_t| * |r_{t-1}|
+            RV_t  = r_t²
+            jump_ratio_t = max(0,  1 − BV_t / RV_t)
+
+        A value near 0 means the day's variance was well-explained by
+        diffusion (BV ≈ RV).  A value near 1 means most variance came from
+        a discrete jump (BV << RV).
+
+        Zero look-ahead: only days strictly before `as_of_date` are included.
+
+        Parameters
+        ----------
+        as_of_date : str 'YYYY-MM-DD'
+
+        Returns
+        -------
+        pd.Series indexed by date, values in [0, 1].
+        Days with jump_ratio > 0.3 are BN-S flagged jump days.
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Call .load() before .compute_bns_ratio().")
+
+        feats  = self._pdv._features.copy()
+        feats.index = pd.to_datetime(feats.index)
+        cutoff = pd.to_datetime(as_of_date)
+        feats  = feats[feats.index < cutoff]
+
+        # r_t = current day's return (r_lag1 at t+1 = r at t)
+        r_curr = feats["r_lag1"].shift(-1)
+        r_prev = feats["r_lag1"]
+
+        bv    = (np.pi / 2.0) * r_curr.abs() * r_prev.abs()
+        rv    = r_curr ** 2
+        ratio = 1.0 - bv / rv.clip(lower=1e-16)
+        ratio = ratio.clip(lower=0.0, upper=1.0)
+
+        return ratio.dropna()
+
     # ── Full-R2 calibration (all R2 days) ─────────────────────────────────────
 
     def calibrate_jump(self, as_of_date: str) -> MertonJumpParams:
@@ -548,6 +593,7 @@ class RegimePDV:
         self,
         as_of_date: str,
         zscore_threshold: float = 2.0,
+        bns_threshold: float = 0.3,
     ) -> MertonJumpParams:
         """
         Calibrate Merton jump parameters on the TAIL of R2 days.
@@ -566,8 +612,12 @@ class RegimePDV:
                actual_rv  = rv_hist_20d  (backward-looking 20-day RV, known at close)
                error      = actual_rv − σ_PDV  (positive = PDV underpredicted)
         3. Standardise: error_z = (error − mean(error)) / std(error)
-        4. Keep only days where error_z > zscore_threshold.
-        5. Run MLE on tail using _BOUNDS_TAIL (crash-appropriate bounds).
+        4. Compute BN-S jump ratio for each R2 day (see compute_bns_ratio()).
+        5. Union filter: keep days where error_z > zscore_threshold OR
+               bns_ratio > bns_threshold.  The union captures crash days that
+               manifest either as large PDV prediction errors OR as bipower-
+               variation evidence of a discrete jump.
+        6. Run MLE on the union tail using _BOUNDS_TAIL (crash-appropriate bounds).
 
         Falls back to full-R2 calibration if tail has < MIN_TAIL_DAYS observations.
 
@@ -590,7 +640,7 @@ class RegimePDV:
         if not self.is_loaded:
             raise RuntimeError("Call .load() before .calibrate_jump_tail().")
 
-        cache_key = f"{as_of_date}|z{zscore_threshold:.2f}"
+        cache_key = f"{as_of_date}|z{zscore_threshold:.2f}|b{bns_threshold:.2f}"
         if cache_key in self._jump_tail_cache:
             return self._jump_tail_cache[cache_key]
 
@@ -651,15 +701,27 @@ class RegimePDV:
             self._jump_tail_cache[cache_key] = params
             return params
 
-        # ── Filter to tail: days where PDV severely under-predicted ──────────
-        error_z    = (error - error.mean()) / err_std
-        tail_mask  = error_z > zscore_threshold
+        # ── Filter to tail: union of error_z filter and BN-S jump flag ─────
+        error_z   = (error - error.mean()) / err_std
+        zscore_mask = error_z > zscore_threshold
 
-        n_tail = int(tail_mask.sum())
+        # BN-S ratio for R2 days (zero look-ahead: only days < as_of_date)
+        bns_series = self.compute_bns_ratio(as_of_date)
+        bns_r2 = bns_series.reindex(valid_dates[valid_rv]).fillna(0.0).values
+        bns_mask   = bns_r2 > bns_threshold
+
+        tail_mask = zscore_mask | bns_mask
+
+        n_tail       = int(tail_mask.sum())
+        n_z_only     = int((zscore_mask & ~bns_mask).sum())
+        n_bns_only   = int((bns_mask & ~zscore_mask).sum())
+        n_both       = int((zscore_mask & bns_mask).sum())
         logger.info(
-            "Tail filter z>%.1f on %d R2 days before %s → %d tail days (%.1f%%)",
-            zscore_threshold, len(r_r2), as_of_date,
-            n_tail, 100 * n_tail / len(r_r2),
+            "Tail filter (z>%.1f OR bns>%.2f) on %d R2 days before %s → "
+            "%d tail days (%.1f%%) [z-only=%d, bns-only=%d, both=%d]",
+            zscore_threshold, bns_threshold, len(r_r2), as_of_date,
+            n_tail, 100 * n_tail / max(len(r_r2), 1),
+            n_z_only, n_bns_only, n_both,
         )
 
         if n_tail < MIN_TAIL_DAYS:

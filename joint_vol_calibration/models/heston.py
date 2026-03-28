@@ -371,6 +371,183 @@ def implied_vol_from_price(
         return None
 
 
+# ── Bates (1996) SVJ Model ────────────────────────────────────────────────────
+
+def bates_characteristic_function(
+    phi: complex,
+    S: float,
+    T: float,
+    r: float,
+    q: float,
+    kappa: float,
+    theta: float,
+    sigma: float,
+    rho: float,
+    v0: float,
+    lam: float,
+    mu_j: float,
+    sigma_j: float,
+) -> complex:
+    """
+    Bates (1996) SVJ characteristic function.
+
+    φ_Bates = φ_Heston × exp(λT(e^{iφμⱼ − ½φ²σⱼ²} − 1))
+
+    The Heston CF already encodes the stochastic variance dynamics.  The Bates
+    extension multiplies by the CF of a compound Poisson jump process where
+    each jump is log-normally distributed: J ~ N(μⱼ, σⱼ²).
+
+    Parameters
+    ----------
+    phi     : complex — CF argument
+    lam     : float  — annualised jump intensity λ (jumps per year)
+    mu_j    : float  — mean log jump size (decimal; e.g. -0.05 = -5%)
+    sigma_j : float  — std of log jump size (decimal; > 0)
+
+    All Heston parameters (kappa, theta, sigma, rho, v0) are unchanged.
+
+    Returns
+    -------
+    complex — Bates CF evaluated at phi.
+    """
+    heston_cf = characteristic_function(
+        phi, S, T, r, q, kappa, theta, sigma, rho, v0
+    )
+    # Jump CF: exp(λT(E[e^{iφJ}] − 1)) where E[e^{iφJ}] = e^{iφμⱼ − ½φ²σⱼ²}
+    jump_cf = np.exp(
+        lam * T * (np.exp(1j * phi * mu_j - 0.5 * phi**2 * sigma_j**2) - 1.0)
+    )
+    return heston_cf * jump_cf
+
+
+def bates_call_price(
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    q: float,
+    kappa: float,
+    theta: float,
+    sigma: float,
+    rho: float,
+    v0: float,
+    lam: float,
+    mu_j: float,
+    sigma_j: float,
+    damping_alpha: float = 1.5,
+    n_integration_points: int = 128,
+) -> float:
+    """
+    Price a European call under the Bates (1996) SVJ model via Carr-Madan.
+
+    Uses the same damped-CF integration as heston_call_price() but substitutes
+    the Bates CF (Heston CF × jump CF).
+
+    Returns
+    -------
+    float — call price (present value).
+    """
+    if T <= 0:
+        return max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
+
+    alpha = damping_alpha
+    k = np.log(K)   # log of dollar strike
+
+    def integrand_real(v: float) -> float:
+        phi = v - (alpha + 1.0) * 1j
+        cf  = bates_characteristic_function(
+            phi, S, T, r, q, kappa, theta, sigma, rho, v0, lam, mu_j, sigma_j
+        )
+        numerator   = np.exp(-r * T) * cf
+        denominator = alpha**2 + alpha - v**2 + 1j * v * (2.0 * alpha + 1.0)
+        psi = numerator / denominator
+        return np.real(np.exp(-1j * v * k) * psi)
+
+    result, _ = integrate.quad(integrand_real, 0.0, 200.0,
+                                limit=500, epsabs=1e-8, epsrel=1e-6)
+    call = (np.exp(-alpha * k) / np.pi) * result
+
+    F     = S * np.exp((r - q) * T)
+    call  = np.clip(call,
+                    max(F - K, 0.0) * np.exp(-r * T),
+                    F * np.exp(-r * T))
+    return float(call)
+
+
+def bates_call_batch(
+    S: float,
+    strikes: np.ndarray,
+    T: float,
+    r: float,
+    q: float,
+    kappa: float,
+    theta: float,
+    sigma: float,
+    rho: float,
+    v0: float,
+    lam: float,
+    mu_j: float,
+    sigma_j: float,
+    n_points: int = 512,
+    v_upper: float = 300.0,
+) -> np.ndarray:
+    """
+    Batch-price European calls under Bates (1996) SVJ, vectorised over strikes.
+
+    Algorithm: Carr-Madan damped-CF integration, vectorised over strikes.
+    Identical to heston_call_batch() but CF includes jump term.
+
+    Returns
+    -------
+    np.ndarray, shape (M,) — call prices, clipped to no-arbitrage bounds.
+    """
+    if T <= 0:
+        F = S * np.exp((r - q) * T)
+        return np.maximum(F - strikes, 0.0) * np.exp(-r * T)
+
+    strikes = np.asarray(strikes, dtype=float)
+    alpha   = 1.5
+
+    v   = np.linspace(1e-6, v_upper, n_points)
+    phi = v - (alpha + 1.0) * 1j
+
+    # ── Heston CF (vectorised over phi) ──
+    x    = np.log(S)
+    d    = np.sqrt((rho * sigma * phi * 1j - kappa)**2
+                   - sigma**2 * (-1j * phi - phi**2))
+    g    = (kappa - rho * sigma * phi * 1j - d) / (kappa - rho * sigma * phi * 1j + d)
+    edt  = np.exp(-d * T)
+    C_cf = ((r - q) * phi * 1j * T
+            + (kappa * theta / sigma**2) * (
+                (kappa - rho * sigma * phi * 1j - d) * T
+                - 2.0 * np.log((1.0 - g * edt) / (1.0 - g))))
+    D_cf = ((kappa - rho * sigma * phi * 1j - d) / sigma**2) * (
+                (1.0 - edt) / (1.0 - g * edt))
+    heston_cf = np.exp(C_cf + D_cf * v0 + 1j * phi * x)
+
+    # ── Jump CF (vectorised over phi) ──
+    jump_cf = np.exp(
+        lam * T * (np.exp(1j * phi * mu_j - 0.5 * phi**2 * sigma_j**2) - 1.0)
+    )
+
+    cf    = heston_cf * jump_cf
+    denom = alpha**2 + alpha - v**2 + 1j * v * (2.0 * alpha + 1.0)
+    psi   = np.exp(-r * T) * cf / denom
+
+    k         = np.log(strikes)
+    integrand = np.real(
+        np.exp(-1j * v[np.newaxis, :] * k[:, np.newaxis])
+        * psi[np.newaxis, :]
+    )
+    integral = np.trapz(integrand, v, axis=1)
+    calls    = np.exp(-alpha * k) / np.pi * integral
+
+    F     = S * np.exp((r - q) * T)
+    lower = np.maximum(F - strikes, 0.0) * np.exp(-r * T)
+    upper = F * np.exp(-r * T)
+    return np.clip(calls, lower, upper)
+
+
 # ── Greeks ────────────────────────────────────────────────────────────────────
 
 def heston_greeks(
