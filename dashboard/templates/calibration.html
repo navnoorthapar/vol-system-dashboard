@@ -323,6 +323,16 @@
           absorbs the steep left skew that Heston had to approximate via extreme negative correlation.
         </div>
       </div>
+      {% else %}
+      <div style="margin-top:12px;padding:10px 14px;border-radius:6px;background:rgba(255,51,51,0.07);border:1px solid rgba(255,51,51,0.25);">
+        <div style="font-size:11px;font-weight:600;color:#ff3333;margin-bottom:4px;">Bates calibration inconclusive on this surface</div>
+        <div style="font-size:11.5px;color:var(--text2);line-height:1.6;">
+          Jump parameters are degenerate (λ hits bound, μⱼ near zero). ρ remains at −0.99.
+          Single-factor Heston-J requires intraday data for reliable jump identification —
+          daily close-to-close options cannot disentangle diffusion skew from jump skew
+          on a surface this steep. Use Heston parameters for production pricing.
+        </div>
+      </div>
       {% endif %}
     </div>
 
@@ -333,6 +343,17 @@
     Call <span class="mono">JointCalibrator.calibrate_bates()</span> and store result to enable this panel.
   </div>
   {% endif %}
+
+  <!-- HMM classifier note -->
+  <div style="margin-top:16px;padding:10px 14px;border-radius:6px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);">
+    <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">HMM Regime Classifier — Limitations</div>
+    <div style="font-size:11.5px;color:var(--text2);line-height:1.6;">
+      HMM trained 2010–2019. Out-of-distribution on 2025 tariff regime — misclassifies 2025-04-09 as R1.
+      Use XGBoost for production classification.
+      HMM is available as a research alternative via <span class="mono">HMMRegimeClassifier</span> in
+      <span class="mono">regime_classifier.py</span>.
+    </div>
+  </div>
 
 </div>
 

@@ -325,6 +325,15 @@
         <div>GARCH β: <span class="mono">0.890</span></div>
       </div>
 
+      {% if d.pdv_r2_note %}
+      <div class="divider"></div>
+      <div style="font-size:11px;color:var(--text3);padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border);">
+        <span style="font-weight:600;color:var(--text2);">Active model: {{ d.pdv_model_name }}</span>
+        &nbsp;·&nbsp; {{ d.pdv_r2_note }}
+      </div>
+      {% endif %}
+      </div>
+
       <div class="divider"></div>
 
       <div style="padding:10px;border-radius:6px;background:rgba(255,136,51,0.07);border:1px solid rgba(255,136,51,0.2);">

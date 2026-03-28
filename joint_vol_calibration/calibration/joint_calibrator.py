@@ -751,9 +751,9 @@ class JointCalibrator:
         if not (bnds["sigma"][0] <= sigma <= bnds["sigma"][1]):  return 1e6
         if not (bnds["rho"][0]   <= rho   <= bnds["rho"][1]):    return 1e6
         if not (bnds["v0"][0]    <= v0    <= bnds["v0"][1]):     return 1e6
-        if lam < 0 or lam > 10:      return 1e6
-        if mu_j < -0.15 or mu_j > 0: return 1e6
-        if sigma_j < 0.01 or sigma_j > 0.15: return 1e6
+        if lam < 0.5 or lam > 8.0:         return 1e6
+        if mu_j < -0.10 or mu_j > -0.005: return 1e6
+        if sigma_j < 0.02 or sigma_j > 0.12: return 1e6
 
         # Feller condition penalty
         feller_viol    = max(0.0, sigma**2 - 2.0 * kappa * theta)
@@ -834,10 +834,34 @@ class JointCalibrator:
             HESTON_BOUNDS["sigma"],
             HESTON_BOUNDS["rho"],
             HESTON_BOUNDS["v0"],
-            (0.0, 10.0),      # lam
-            (-0.15, 0.0),     # mu_j
-            (0.01, 0.15),     # sigma_j
+            (0.5,  8.0),      # lam  — floor at 0.5 forces genuine jump component
+            (-0.10, -0.005),  # mu_j — forced negative (left-tail jumps)
+            (0.02,  0.12),    # sigma_j
         ]
+
+        # Build 5 deterministic seed vectors covering genuine jump territory.
+        # Seeds are in [0,1] normalized space: (x - lo) / (hi - lo) per bound.
+        def _n(v, lo, hi):
+            return float(np.clip((v - lo) / (hi - lo), 0.0, 1.0))
+
+        _b = bounds  # alias
+        _base_h = [4.6, 0.076, 0.84, -0.7, 0.056]  # Heston params near 2026-03-24 fit
+        _seeds_raw = [
+            _base_h + [1.0, -0.030, 0.05],
+            _base_h + [0.5, -0.050, 0.05],
+            _base_h + [2.0, -0.050, 0.05],
+            _base_h + [4.0, -0.050, 0.05],
+            _base_h + [6.0, -0.050, 0.05],
+        ]
+        _seed_pop = np.array([
+            [_n(v, lo, hi) for v, (lo, hi) in zip(row, _b)]
+            for row in _seeds_raw
+        ])
+        # Fill remaining population (popsize×8 − 5 rows) with seeded random samples
+        _n_total = de_popsize * len(bounds)
+        _rng_fill = np.random.RandomState(RANDOM_SEED)
+        _fill_pop = _rng_fill.uniform(0.0, 1.0, size=(_n_total - len(_seeds_raw), len(bounds)))
+        _init_pop = np.vstack([_seed_pop, _fill_pop])
 
         self._n_evals = 0
         t0 = time.time()
@@ -845,19 +869,17 @@ class JointCalibrator:
         if verbose:
             print(f"\n[C4-Bates] Bates SVJ calibration: {self.as_of_date}  |  "
                   f"S={self.S:.0f}  |  {len(self.spx_surface)} SPX opts")
-            print(f"     DE: maxiter={de_maxiter}, popsize={de_popsize} × 8 = "
-                  f"{de_popsize*8} members...")
+            print(f"     DE: maxiter={de_maxiter}, pop={_n_total} ({len(_seeds_raw)} seeds + {_n_total-len(_seeds_raw)} random)...")
 
         de_result = optimize.differential_evolution(
             self._bates_joint_loss,
             bounds=bounds,
             maxiter=de_maxiter,
-            popsize=de_popsize,
             tol=1e-6,
             seed=RANDOM_SEED,
             mutation=(0.5, 1.5),
             recombination=0.9,
-            init="latinhypercube",
+            init=_init_pop,
             workers=1,
         )
 

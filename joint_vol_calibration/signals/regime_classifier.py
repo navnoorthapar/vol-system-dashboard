@@ -995,7 +995,7 @@ class HMMRegimeClassifier:
     def _predict_raw_states(self, X: pd.DataFrame) -> np.ndarray:
         """Return raw HMM state indices (0..n_components-1), shape (N,)."""
         self._require_fitted()
-        Xm = X[self.HMM_FEATURES].fillna(method="ffill").values.astype(float)
+        Xm = X[self.HMM_FEATURES].ffill().values.astype(float)
         return self._model.predict(Xm)
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -1007,7 +1007,7 @@ class HMMRegimeClassifier:
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
         """Return posterior state probabilities, shape (N, n_components)."""
         self._require_fitted()
-        Xm = X[self.HMM_FEATURES].fillna(method="ffill").values.astype(float)
+        Xm = X[self.HMM_FEATURES].ffill().values.astype(float)
         _, posteriors = self._model.score_samples(Xm)
         return posteriors
 

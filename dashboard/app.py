@@ -295,12 +295,48 @@ def load_page1() -> dict[str, Any]:
         pdv_forecast = float(coefs[0] * s1 + coefs[1] * s2 + coefs[2] * lev + intcpt) * 100
         d["pdv_forecast"] = round(pdv_forecast, 2)
         d["pdv_spread"]   = round((d.get("vix", 0) or 0) - pdv_forecast, 2)
-        # FIX 2: show the regime-labels max date (reflects freshest DB data), not
-        # the model's training cutoff which stays at its last fit date.
         d["pdv_date"]     = _rl_max_date or str(pdv._features.index[-1].date())
         d["pdv_sigma1"]   = round(s1 * 100, 2)
         d["pdv_sigma2"]   = round(s2 * 100, 2)
         d["pdv_spread_positive"] = d["pdv_spread"] > 0
+
+        # PDVLinear3F vs PDVLinear4F comparison (walk-forward R² on stored features)
+        try:
+            from joint_vol_calibration.models.pdv import PDVLinear, PDVLinear4F
+            feats = pdv._features.copy()
+            xcols_3f = ["sigma1", "sigma2", "lev"]
+            xcols_4f = ["sigma1", "sigma2", "lev", "vix"]
+            if all(c in feats.columns for c in xcols_4f) and "rv_hist_20d" in feats.columns:
+                y = feats["rv_hist_20d"].shift(-1)
+                mask = feats[xcols_4f].notna().all(axis=1) & y.notna()
+                X_v, y_v = feats[mask][xcols_4f], y[mask]
+                t_n = int(len(X_v) * 0.60)
+                X_tr, X_te = X_v.iloc[:t_n], X_v.iloc[t_n:]
+                y_tr, y_te = y_v.iloc[:t_n], y_v.iloc[t_n:]
+                def _r2(preds, actuals):
+                    ss_res = float(np.sum((actuals - preds)**2))
+                    ss_tot = float(np.sum((actuals - actuals.mean())**2))
+                    return round(1.0 - ss_res / ss_tot, 4) if ss_tot > 0 else 0.0
+                r2_3f = _r2(PDVLinear().fit(X_tr[xcols_3f], y_tr).predict(X_te[xcols_3f]).values, y_te.values)
+                r2_4f = _r2(PDVLinear4F().fit(X_tr, y_tr).predict(X_te).values, y_te.values)
+                d["pdv_r2_3f"] = r2_3f
+                d["pdv_r2_4f"] = r2_4f
+                d["pdv_model_name"] = "PDVLinear4F" if r2_4f > r2_3f else "PDVLinear3F (4F adds no signal)"
+                d["pdv_r2_note"] = (
+                    f"PDVLinear3F R²={r2_3f} | PDVLinear4F R²={r2_4f} | "
+                    + ("VIX adds incremental signal." if r2_4f > r2_3f
+                       else "VIX adds no incremental signal vs realized vol target.")
+                )
+            else:
+                # vix column absent from stored features — 4F can't be tested here
+                d["pdv_r2_3f"]      = None
+                d["pdv_r2_4f"]      = None
+                d["pdv_model_name"] = "PDVLinear3F"
+                d["pdv_r2_note"]    = "PDVLinear4F requires VIX column in stored features."
+        except Exception:
+            d.setdefault("pdv_model_name", "PDVLinear3F")
+            d.setdefault("pdv_r2_note", "")
+
     except Exception as e:
         d["pdv_error"] = str(e)
         d["pdv_forecast"] = 0
@@ -309,6 +345,8 @@ def load_page1() -> dict[str, Any]:
         d["pdv_sigma1"]   = 0
         d["pdv_sigma2"]   = 0
         d["pdv_spread_positive"] = False
+        d.setdefault("pdv_model_name", "PDVLinear3F")
+        d.setdefault("pdv_r2_note", "")
 
     # ── PDV spread historical context ────────────────────────────────────
     try:

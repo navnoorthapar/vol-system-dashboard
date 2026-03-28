@@ -630,7 +630,14 @@ def train_network(
     model.eval()
     with torch.no_grad():
         val_pred_np = model(X_val_t).cpu().numpy()
-    mae_vol_pts = float(np.mean(np.abs(val_pred_np - y_val))) * 100  # in vol pts
+    # mae_vol_pts units differ by model:
+    #   SPX (NN-1): target is IV decimal (e.g. 0.25), so mae_vol_pts = MAE × 100 in vol pts
+    #               e.g. mae_vol_pts=0.065 means 0.065 vol pts absolute error.
+    #   VIX (NN-2): target is VIX index pts (e.g. 25.0), so mae_vol_pts = MAE × 100 in VIX pts
+    #               e.g. mae_vol_pts=5.96 means 5.96 VIX index pts absolute error, NOT 5.96 vol pts.
+    # VIX MAE in VIX index points (e.g. 5.96 = 5.96 VIX pts), not decimal fraction.
+    # SPX MAE is in vol pts decimal.
+    mae_vol_pts = float(np.mean(np.abs(val_pred_np - y_val))) * 100  # see unit note above
 
     if verbose:
         print(f"\n[{model_name}] Training complete:")
