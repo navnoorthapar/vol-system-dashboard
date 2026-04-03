@@ -99,7 +99,10 @@ class DataPipeline:
         # 5. VIX term structure (free proxy for VIX futures term structure)
         results["vix_term_structure"] = self._load_vix_term_structure()
 
-        # 6. Snapshot today's options chains
+        # 6. T-bill rates (^IRX)
+        results["tbill_rates"] = self._load_tbill_rates()
+
+        # 7. Snapshot today's options chains
         results["spx_options_snapshot"] = self._snapshot_options("SPX")
         results["vix_options_snapshot"] = self._snapshot_options("VIX")
 
@@ -165,6 +168,16 @@ class DataPipeline:
         except Exception as e:
             logger.error("VIX term structure refresh failed: %s", e)
             results["vix_term_structure"] = 0
+
+        # T-bill rates — last 5 days to catch any gaps
+        try:
+            start = (datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+            df_tb = yf_dl.download_tbill_rate(start=start, end=today)
+            if not df_tb.empty:
+                results["tbill_rates"] = db.insert_tbill_rates(df_tb)
+        except Exception as e:
+            logger.error("T-bill rate refresh failed: %s", e)
+            results["tbill_rates"] = 0
 
         # Options snapshots — full chain snapshot
         results["spx_options"] = self._snapshot_options("SPX")
@@ -339,6 +352,18 @@ class DataPipeline:
             return db.insert_vix_futures_settlements(df)
         except Exception as e:
             logger.error("Failed to load VIX futures settlements: %s", e)
+            return 0
+
+    def _load_tbill_rates(self) -> int:
+        """Download and store 3-month T-bill rate history (^IRX)."""
+        try:
+            df = yf_dl.download_tbill_rate(start=self.hist_start, end=self.hist_end)
+            if df.empty:
+                logger.warning("T-bill rate download returned empty")
+                return 0
+            return db.insert_tbill_rates(df)
+        except Exception as e:
+            logger.error("Failed to load T-bill rates: %s", e)
             return 0
 
     def _snapshot_options(self, underlying: str) -> int:

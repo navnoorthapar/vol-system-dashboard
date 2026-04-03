@@ -22,7 +22,8 @@
       This indicates the model <strong style="color:var(--text);">cannot fully reproduce the steep 2026 SPX left skew</strong>
       with a pure diffusion structure — jump risk or a non-affine model (e.g. rough Heston) is required.
       The extreme negative ρ is the model's best approximation of the leverage effect,
-      but it compresses the VIX options fit (RMSE {{ d.vix_opt_rmse }} pts), revealing model misspecification.
+      revealing model misspecification.
+      <strong style="color:#ff8833;">VIX options leg is disabled (w₃ = 0.0)</strong> — RMSE was 37.14 vol pts, a structural failure of the CIR density, not a calibration failure.
       Bates SVJ calibration was attempted — jump params degenerate on daily data (see Barndorff-Nielsen &amp; Shephard 2004). Heston remains the active model.
     </div>
   </div>
@@ -135,16 +136,12 @@
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-label">VIX Options RMSE</div>
-    <div class="card-value sm {% if d.vix_opt_rmse > 10 %}red{% elif d.vix_opt_rmse > 3 %}yellow{% else %}green{% endif %}">
-      {{ d.vix_opt_rmse }} pts
-    </div>
-    <div class="card-sub mt8">
-      {% if d.vix_opt_rmse > 10 %}Model misspecification — Heston cannot joint-fit VIX options
-      {% elif d.vix_opt_rmse > 3 %}Acceptable
-      {% else %}Good
-      {% endif %}
+  <div class="card" style="border-color:rgba(100,100,100,0.3);background:rgba(50,50,50,0.04);">
+    <div class="card-label" style="color:var(--text2);">VIX Options RMSE</div>
+    <div class="card-value sm" style="color:#555;">DISABLED</div>
+    <div class="card-sub mt8" style="color:#555;">
+      Heston CIR density underestimates vol-of-vol path uncertainty.
+      RMSE was 37.14 pts — structural failure. w₃ = 0.0 (was 0.2).
     </div>
   </div>
 

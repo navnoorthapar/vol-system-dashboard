@@ -1071,10 +1071,16 @@ class TestGenerateSignal1Soft:
             s1s["s1s_position"].values, s1["s1_position"].values * 0.5
         )
 
-    def test_scale_column_equals_one_minus_prob_r2(self):
+    def test_scale_column_step_function(self):
+        """Scale is a 3-level step function: 1.0 / 0.5 / 0.0 based on P(R2) thresholds."""
         feat    = self._make_features()
         regimes = pd.Series(0, index=feat.index)
-        prob_r2 = pd.Series(np.linspace(0, 1, len(feat)), index=feat.index)
+        # Test three probe values: 0.2 → 1.0, 0.5 → 0.5, 0.8 → 0.0
+        n = len(feat)
+        prob_vals = np.full(n, 0.2)
+        prob_vals[n // 3: 2 * n // 3] = 0.5
+        prob_vals[2 * n // 3:] = 0.8
+        prob_r2 = pd.Series(prob_vals, index=feat.index)
         result  = generate_signal1_soft(feat, regimes, prob_r2)
-        expected_scale = 1.0 - prob_r2
-        np.testing.assert_array_almost_equal(result["s1s_scale"].values, expected_scale.values)
+        expected = np.where(prob_vals < 0.4, 1.0, np.where(prob_vals < 0.6, 0.5, 0.0))
+        np.testing.assert_array_almost_equal(result["s1s_scale"].values, expected)

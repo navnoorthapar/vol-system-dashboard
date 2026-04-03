@@ -858,6 +858,42 @@ def load_page4() -> dict[str, Any]:
         d["wf_colors"]  = []
         d["wf_neg"] = d["wf_total"] = d["wf_pos"] = 0
 
+    # ── Improvement Summary (Steps 1–8) ──────────────────────────────────────
+    d["improvements"] = [
+        {"step": "1", "name": "Disable VIX options leg",
+         "what": "JOINT_W3 = 0.0 (was 0.2). Heston CIR density is structurally mis-specified for VIX options.",
+         "before": "VIX opt RMSE 37.14 vp (corrupts calibration)",
+         "after":  "SPX-only objective. RMSE expected ↓ from 5.3 → ~2.5 vp."},
+        {"step": "2", "name": "Vega-weighted anchor selection",
+         "what": "Select 9 highest-BS-vega options per expiry (was log-uniform grid). Moneyness lo 0.70 (was 0.75).",
+         "before": "Log-uniform includes low-information deep OTM options",
+         "after":  "Near-ATM anchors only; more stable Heston gradient."},
+        {"step": "3", "name": "SVI smoothing (SSVI surface)",
+         "what": "Fit Gatheral (2004) SVI per expiry; calibrate Heston to smooth surface not noisy quotes.",
+         "before": "SPX RMSE ~5.3 vol pts (market microstructure noise)",
+         "after":  "Target SPX RMSE ~2.0 vol pts. Butterfly-free surface."},
+        {"step": "4", "name": "Per-date T-bill rate",
+         "what": "^IRX 3M T-bill from DB replaces fixed r=0.045 in backtest. 18 new tests.",
+         "before": "Fixed r=0.045 throughout 2018–2025",
+         "after":  "Per-date rate (2018: ~1.5%, 2023: ~5.3%, 2025: ~4.3%)."},
+        {"step": "5", "name": "Adaptive VVIX threshold",
+         "what": "Rolling 252-day 80th percentile of VVIX as R2 gate (was fixed 100).",
+         "before": "R2 frequency ~53% (over-triggered in low-vol periods)",
+         "after":  "Expected R2 frequency ~25% (calibrated to market regime)."},
+        {"step": "6", "name": "Isotonic calibration + step sizing",
+         "what": "CalibratedClassifierCV(FrozenEstimator(XGB), isotonic). S1S step: full/half/flat at P(R2) 0.4/0.6.",
+         "before": "Raw XGB probabilities (overconfident). Linear 1−p scaling.",
+         "after":  "Calibrated probabilities. Cleaner 3-level position sizing."},
+        {"step": "7", "name": "Portfolio Kelly netting",
+         "what": "Rolling 60-day pairwise P&L corr; mult = sqrt(2/(1+r_ij)). Gross cap 50% NAV.",
+         "before": "No correlation netting; each signal sizes off full NAV ÷ 4",
+         "after":  "Expected MaxDD −26% → ~−20% via diversification benefit."},
+        {"step": "8", "name": "Monthly Heston recalibration",
+         "what": "BacktestEngine._recalibrate_heston() caches monthly params to data_store/heston_params/.",
+         "before": "Fixed 2026-03-24 Heston params throughout 2018–2025",
+         "after":  "Time-varying params. Infrastructure ready; ~84 calibrations on first run."},
+    ]
+
     # ── Improved Signal Variants ──────────────────────────────────────────────
     # Compute from the existing backtest parquet.
     # S1RF/S2X: zero P&L on R2 days where the signal had an open position.

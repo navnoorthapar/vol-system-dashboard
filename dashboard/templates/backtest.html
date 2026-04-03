@@ -241,6 +241,35 @@
   </div>
 </div>
 
+<!-- ── Improvement Summary ────────────────────────────────────────────────── -->
+{% if d.improvements %}
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">System Improvements — Steps 1–8 Summary</div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>Step</th>
+        <th>Name</th>
+        <th>What Changed</th>
+        <th>Before</th>
+        <th>After</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for imp in d.improvements %}
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">{{ imp.step }}</td>
+        <td style="font-weight:600;white-space:nowrap;">{{ imp.name }}</td>
+        <td style="font-size:11px;color:var(--text2);">{{ imp.what }}</td>
+        <td class="mono red" style="font-size:11px;">{{ imp.before }}</td>
+        <td class="mono green" style="font-size:11px;">{{ imp.after }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}

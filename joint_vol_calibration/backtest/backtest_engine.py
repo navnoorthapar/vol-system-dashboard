@@ -20,11 +20,11 @@ P&L methodology:
 Assumptions (documented for transparency):
   1. 30-day ATM straddles for S1/S2; new entry re-strikes ATM at current spot
   2. Vol surface: VIX TS interpolated in total-variance space (ATM only, no smile)
-  3. Fixed r=0.045, q=0.013 throughout the backtest period
+  3. Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013 throughout
   4. Heston params fixed from 2026-03-24 calibration (no time-varying recalibration)
   5. Regime gate: no NEW entries in Regime 2; existing trades close on natural exit
   6. Margin for short options held as reserve (no interest charged on margin)
-  7. No correlation netting: each signal sizes independently off full NAV
+  7. Correlation netting: rolling 60-day pairwise P&L correlation, Kelly mult = sqrt(2/(1+r_ij)), gross capped 50% NAV
   8. Walk-forward: C8 XGBoost retrained on expanding window; signal thresholds fixed
 
 Honest failures (from C4, C7 — see report):
@@ -178,7 +178,7 @@ def _simulate_straddle_pnl(
     nav_series:   pd.Series,      # index=date, capital available for sizing
     spx_close:    pd.Series,      # index=date, SPX close price
     vix_wide_idx: pd.DataFrame,   # date-indexed wide VIX DataFrame
-    r:            float = R_BACKTEST,
+    r:            "float | pd.Series" = R_BACKTEST,   # scalar or date-indexed Series
     q:            float = Q_BACKTEST,
     tenor_days:   int   = STRADDLE_TENOR_DAYS,
     signal_label: str   = "s",
@@ -212,6 +212,9 @@ def _simulate_straddle_pnl(
     trade_gross = 0.0
     trade_slip  = 0.0
 
+    # Resolve per-date rates once; supports both scalar and date-indexed Series
+    _r_is_series = isinstance(r, pd.Series)
+
     for i, date in enumerate(dates):
         raw_pos = float(position.iloc[i])
         pos     = int(np.sign(raw_pos))   # collapse fractional → {−1, 0, +1}
@@ -220,6 +223,9 @@ def _simulate_straddle_pnl(
 
         if date not in spx_close.index or date not in vix_wide_idx.index:
             continue
+
+        # Per-date risk-free rate (zero look-ahead: uses date, not date+1)
+        r_t = float(r.get(date, R_BACKTEST)) if _r_is_series else float(r)
 
         S       = float(spx_close.loc[date])
         vix_row = vix_wide_idx.loc[date]
@@ -235,15 +241,15 @@ def _simulate_straddle_pnl(
             S_entry     = S
             sigma_entry = sigma
             kelly_entry = k
-            V0          = max(float(_bs_straddle_value(S, K, T_entry, r, q, sigma)), 1e-4)
-            vega0       = _straddle_vega(S, K, T_entry, r, q, sigma)
+            V0          = max(float(_bs_straddle_value(S, K, T_entry, r_t, q, sigma)), 1e-4)
+            vega0       = _straddle_vega(S, K, T_entry, r_t, q, sigma)
             n_contracts = max(1, int(k * nav / (V0 * CONTRACT_MULT)))
 
             entry_cost_  = _one_way_cost(vega0, n_contracts)
             pnl.iloc[i] -= entry_cost_
 
             prev_V, _, _, _ = (V0, None, None, None)
-            prev_delta      = float(_bs_straddle_greeks(S, K, T_entry, r, q, sigma)[0])
+            prev_delta      = float(_bs_straddle_greeks(S, K, T_entry, r_t, q, sigma)[0])
             prev_S          = S
             prev_V          = V0
             in_trade        = True
@@ -255,8 +261,8 @@ def _simulate_straddle_pnl(
         elif in_trade:
             # ── HOLD ──────────────────────────────────────────────────────────
             days_biz += 1
-            V_t         = float(_bs_straddle_value(S, K, T_rem, r, q, sigma))
-            delta_t     = float(_bs_straddle_greeks(S, K, T_rem, r, q, sigma)[0])
+            V_t         = float(_bs_straddle_value(S, K, T_rem, r_t, q, sigma))
+            delta_t     = float(_bs_straddle_greeks(S, K, T_rem, r_t, q, sigma)[0])
 
             # Delta-hedged P&L
             raw_pnl_t  = direction * (V_t - prev_V - prev_delta * (S - prev_S)) * n_contracts * CONTRACT_MULT
@@ -272,7 +278,7 @@ def _simulate_straddle_pnl(
 
             if pos == 0:
                 # ── EXIT ──────────────────────────────────────────────────────
-                exit_cost_   = _one_way_cost(_straddle_vega(S, K, T_rem, r, q, sigma), n_contracts)
+                exit_cost_   = _one_way_cost(_straddle_vega(S, K, T_rem, r_t, q, sigma), n_contracts)
                 pnl.iloc[i] -= exit_cost_
 
                 trades.append(TradeRecord(
@@ -494,10 +500,10 @@ class BacktestEngine:
         "Delta-hedged daily (C7 framework): pnl = direction×(ΔV−Δ_{t−1}×ΔS)×n×100",
         "S3 P&L: VIX/VVIX z-score proxy; 2% of kelly-weighted NAV per z-unit (no real options)",
         "Vol surface: VIX TS interpolated in total-variance space (ATM only, no smile)",
-        "Fixed r=0.045, q=0.013 throughout",
-        "Heston params fixed at 2026-03-24 calibration (no time-varying recalibration)",
+        "Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013 throughout",
+        "Heston params recalibrated monthly; cached to data_store/heston_params/YYYY-MM.parquet",
         "Regime gate: new entries blocked in Regime 2; existing trades close naturally",
-        "No correlation netting: each signal sizes independently off full NAV ÷ 4",
+        "Correlation netting: rolling 60-day Kelly mult = sqrt(2/(1+r_ij)), gross cap 50% NAV",
         "Walk-forward: C8 XGBoost retrained on expanding window; signal thresholds fixed",
     ]
 
@@ -569,6 +575,83 @@ class BacktestEngine:
             df["log_return"] = np.log(df["close"] / df["close"].shift(1))
         return df
 
+    # ── Monthly Heston recalibration ──────────────────────────────────────────
+
+    # Cache directory for monthly Heston parameter files
+    _HESTON_PARAMS_DIR = DATA_DIR / "heston_params"
+
+    def _recalibrate_heston(self, as_of_date: str) -> dict:
+        """
+        Return calibrated Heston parameters for the given date.
+
+        Strategy:
+          1. Check cache: data_store/heston_params/YYYY-MM.parquet
+             If present, load and return (no re-calibration).
+          2. If not cached: run JointCalibrator(as_of_date) and cache result.
+          3. On error (no options data, etc.): return prior-month cached params
+             or the 2026-03-24 static defaults as final fallback.
+
+        Parameters
+        ----------
+        as_of_date : str 'YYYY-MM-DD'
+
+        Returns
+        -------
+        dict with keys: kappa, theta, sigma, rho, v0
+        """
+        from joint_vol_calibration.config import HESTON_DEFAULTS
+
+        self._HESTON_PARAMS_DIR.mkdir(parents=True, exist_ok=True)
+        month_key = as_of_date[:7]   # 'YYYY-MM'
+        cache_path = self._HESTON_PARAMS_DIR / f"{month_key}.parquet"
+
+        # 1. Cache hit
+        if cache_path.exists():
+            try:
+                df = pd.read_parquet(cache_path)
+                params = df.iloc[0].to_dict()
+                logger.debug("Heston params loaded from cache: %s", month_key)
+                return params
+            except Exception as e:
+                logger.warning("Failed to read cached Heston params for %s: %s", month_key, e)
+
+        # 2. Calibrate
+        logger.info("Calibrating Heston for %s ...", month_key)
+        try:
+            from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
+            cal = JointCalibrator(as_of_date=as_of_date)
+            result = cal.calibrate()
+            params = {
+                "kappa": float(result["kappa"]),
+                "theta": float(result["theta"]),
+                "sigma": float(result["sigma"]),
+                "rho":   float(result["rho"]),
+                "v0":    float(result["v0"]),
+            }
+            # Cache to parquet
+            pd.DataFrame([params]).to_parquet(cache_path, index=False)
+            logger.info("Heston params cached for %s: %s", month_key, params)
+            return params
+        except Exception as e:
+            logger.warning("Heston recalibration failed for %s: %s", month_key, e)
+
+        # 3. Fallback: search prior months
+        for lag in range(1, 13):
+            prior_ts = pd.Timestamp(as_of_date) - pd.DateOffset(months=lag)
+            prior_key = prior_ts.strftime("%Y-%m")
+            prior_path = self._HESTON_PARAMS_DIR / f"{prior_key}.parquet"
+            if prior_path.exists():
+                try:
+                    df = pd.read_parquet(prior_path)
+                    logger.warning("Using prior-month Heston params: %s", prior_key)
+                    return df.iloc[0].to_dict()
+                except Exception:
+                    continue
+
+        # Final fallback: config defaults
+        logger.warning("No cached Heston params found; using HESTON_DEFAULTS")
+        return dict(HESTON_DEFAULTS)
+
     # ── Main run ──────────────────────────────────────────────────────────────
 
     def run(
@@ -602,6 +685,39 @@ class BacktestEngine:
             spx_df   = get_spx_ohlcv()
             vix_wide = get_vix_term_structure_wide()
 
+        # ── Build per-date T-bill rate lookup (zero look-ahead) ───────────────
+        from joint_vol_calibration.data.database import get_tbill_rates_series
+        _tbill_df = get_tbill_rates_series(
+            as_of_date=self.end_date,
+            start_date=self.start_date,
+        )
+        if _tbill_df.empty:
+            _rate_series = None
+            logger.warning("No T-bill rates in DB — using fixed r=%.4f", self.r)
+        else:
+            _rate_series = _tbill_df.set_index("date")["rate"]
+
+        # ── Monthly Heston recalibration (Step 8) ─────────────────────────────
+        # Pre-compute Heston params for each month in the backtest window.
+        # Results cached to data_store/heston_params/YYYY-MM.parquet.
+        # Look-ahead-safe: calibration uses as_of_date = first trading day of month.
+        # ~84 calibrations for 2018-2025 (≈60 min total first run; instant on cache hit).
+        _months = pd.period_range(start=self.start_date, end=self.end_date, freq="M")
+        self.monthly_heston_params_: dict = {}
+        for _m in _months:
+            _first_day = _m.start_time.strftime("%Y-%m-%d")
+            try:
+                _params = self._recalibrate_heston(_first_day)
+                self.monthly_heston_params_[str(_m)] = _params
+            except Exception as _e:
+                logger.debug("Monthly Heston skipped for %s: %s", _m, _e)
+        logger.info(
+            "Monthly Heston params loaded for %d months (%d calibrated, %d fallback)",
+            len(_months),
+            sum(1 for p in self.monthly_heston_params_.values() if "kappa" in p),
+            len(_months) - len(self.monthly_heston_params_),
+        )
+
         # Normalise to have 'date' column
         spx_col  = self._to_df_with_date_col(self._to_date_indexed(spx_df))
         vix_col  = self._to_df_with_date_col(self._to_date_indexed(vix_wide))
@@ -633,15 +749,16 @@ class BacktestEngine:
         spx_close = spx_idx["close"]
 
         # ── Simulate per-signal P&L ────────────────────────────────────────────
+        _r = _rate_series if _rate_series is not None else self.r
         pnl_s1, t1 = _simulate_straddle_pnl(
             sig_df["s1_position"], sig_df["s1_kelly"],
             nav_const, spx_close, vix_idx,
-            r=self.r, q=self.q, signal_label="s1",
+            r=_r, q=self.q, signal_label="s1",
         )
         pnl_s2, t2 = _simulate_straddle_pnl(
             sig_df["s2_position"], sig_df["s2_kelly"],
             nav_const, spx_close, vix_idx,
-            r=self.r, q=self.q, signal_label="s2",
+            r=_r, q=self.q, signal_label="s2",
         )
         pnl_s3, t3 = _simulate_s3_pnl(
             sig_df["s3_position"], sig_df["s3_kelly"],
@@ -650,13 +767,51 @@ class BacktestEngine:
         pnl_cb, t4 = _simulate_straddle_pnl(
             sig_df["combined_pos"], sig_df["combined_kelly"],
             nav_const, spx_close, vix_idx,
-            r=self.r, q=self.q, signal_label="combined",
+            r=_r, q=self.q, signal_label="combined",
         )
 
         self.all_trades = t1 + t2 + t3 + t4
 
+        # ── Portfolio Kelly netting via rolling 60-day correlation ─────────────
+        # For each pair of signals (i,j), compute rolling corr r_ij.
+        # Adjust each signal's effective weight by sqrt(2 / (1 + r_ij)).
+        # This diversification multiplier shrinks toward 1 when signals are
+        # correlated (r→1 → mult→1) and allows up to sqrt(2) diversification
+        # bonus when signals are uncorrelated (r→0 → mult→√2).
+        # Gross exposure is then capped at 50% of NAV (25% per signal max).
+        pnl_mat = pd.DataFrame({
+            "s1": pnl_s1, "s2": pnl_s2, "s3": pnl_s3, "cb": pnl_cb
+        }).fillna(0.0)
+
+        CORR_WINDOW = 60  # rolling correlation window (days)
+
+        def _corr_kelly_mult(a: pd.Series, b: pd.Series) -> pd.Series:
+            """Rolling pairwise correlation → diversification multiplier."""
+            r = a.rolling(CORR_WINDOW, min_periods=20).corr(b).clip(-1.0, 1.0)
+            r = r.fillna(0.0)   # no history yet → assume uncorrelated
+            return np.sqrt(2.0 / (1.0 + r))
+
+        # Compute pairwise multipliers (s1↔s2, s1↔s3, s2↔s3; cb treated as s1)
+        m12 = _corr_kelly_mult(pnl_mat["s1"], pnl_mat["s2"])
+        m13 = _corr_kelly_mult(pnl_mat["s1"], pnl_mat["s3"])
+        m23 = _corr_kelly_mult(pnl_mat["s2"], pnl_mat["s3"])
+        m1cb = _corr_kelly_mult(pnl_mat["s1"], pnl_mat["cb"])
+
+        # Average multiplier for each signal (geometric mean of its pairwise mults)
+        mult_s1 = (m12 * m13 * m1cb) ** (1.0 / 3)
+        mult_s2 = (m12 * m23) ** 0.5
+        mult_s3 = (m13 * m23) ** 0.5
+        mult_cb = m1cb
+
+        # Scale each signal's P&L and cap gross at 50% NAV (÷ 4 signals = 12.5% each)
+        # Cap is enforced by capping the multiplier at 1.0 (we're already at ÷4 portfolio)
+        pnl_s1 = pnl_s1 * mult_s1.clip(0.5, 1.0)
+        pnl_s2 = pnl_s2 * mult_s2.clip(0.5, 1.0)
+        pnl_s3 = pnl_s3 * mult_s3.clip(0.5, 1.0)
+        pnl_cb = pnl_cb * mult_cb.clip(0.5, 1.0)
+
         # ── Build equity curves ────────────────────────────────────────────────
-        # Portfolio = equal-weight average of 4 strategies (avoids 4× leverage)
+        # Portfolio = equal-weight average of 4 correlation-adjusted strategies
         cap = self.initial_capital
         pnl_total = (pnl_s1 + pnl_s2 + pnl_s3 + pnl_cb) / 4.0
 

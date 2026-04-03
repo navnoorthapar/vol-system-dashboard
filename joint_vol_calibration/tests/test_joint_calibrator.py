@@ -241,10 +241,10 @@ class TestSurfacePreparation:
         assert len(cal.spx_surface) > 0, "SPX calibration surface is empty"
 
     def test_spx_moneyness_filter(self, cal):
-        """All options must have 75% ≤ K/S ≤ 130%."""
+        """All options must have 70% ≤ K/S ≤ 130% (lo extended to 0.70 for deep puts)."""
         S = cal.S
         m = cal.spx_surface["strike"] / S
-        assert (m >= 0.74).all(), f"Strike below 75% moneyness: min={m.min():.3f}"
+        assert (m >= 0.69).all(), f"Strike below 70% moneyness: min={m.min():.3f}"
         assert (m <= 1.31).all(), f"Strike above 130% moneyness: max={m.max():.3f}"
 
     def test_spx_iv_filter(self, cal):

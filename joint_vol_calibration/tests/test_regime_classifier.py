@@ -182,11 +182,11 @@ class TestBuildRegimeLabels:
         assert set(labels_series.unique()).issubset({0, 1, 2})
 
     def test_regime2_when_vvix_high(self, spx_df):
-        """When VVIX > 100 → Regime 2 overrides all."""
+        """When VVIX > 100 → Regime 2 overrides all (fixed threshold)."""
         vix = _make_vix(spx_df)
-        # Force VVIX > 100 for all days
+        # Force VVIX > 100 for all days; use explicit threshold=100 (not adaptive)
         vix["^VVIX"] = 150.0
-        labels = build_regime_labels(spx_df, vix)
+        labels = build_regime_labels(spx_df, vix, vvix_threshold=100.0)
         # All non-NaN labels must be 2
         assert (labels == 2).all(), "Expected all Regime 2 when VVIX=150"
 
@@ -211,11 +211,11 @@ class TestBuildRegimeLabels:
         assert (valid == 1).mean() > 0.5, "Expected mostly Regime 1 when IV=80%"
 
     def test_regime2_overrides_rv_iv(self, spx_df):
-        """VVIX > 100 → Regime 2 even when rv > iv."""
+        """VVIX > 100 → Regime 2 even when rv > iv (fixed threshold)."""
         vix = _make_vix(spx_df)
         vix["^VIX"]  = 5.0    # low IV (would give Regime 0)
-        vix["^VVIX"] = 120.0  # high VVIX → Regime 2
-        labels = build_regime_labels(spx_df, vix)
+        vix["^VVIX"] = 120.0  # high VVIX → Regime 2 with explicit threshold
+        labels = build_regime_labels(spx_df, vix, vvix_threshold=100.0)
         valid = labels.dropna()
         assert (valid == 2).all(), "Regime 2 must override Regime 0"
 

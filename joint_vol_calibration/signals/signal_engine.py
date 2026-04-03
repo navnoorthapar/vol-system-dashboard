@@ -582,12 +582,15 @@ def generate_signal1_soft(
     """
     Signal 1 — Soft Regime-Scaling Variant (S1S).
 
-    Position is scaled continuously by (1 − prob_r2) where prob_r2 is the
-    classifier's predicted probability of Regime 2 (VOMMA_ACTIVE).
+    Position is scaled by a step function of calibrated P(Regime 2):
+      - P(R2) < 0.4  →  scale = 1.0  (full position)
+      - P(R2) ∈ [0.4, 0.6)  →  scale = 0.5  (half position)
+      - P(R2) ≥ 0.6  →  scale = 0.0  (flat / no trade)
 
-    Unlike S1RF (hard zero on R2 days) or S1X (exit on R2 transition), soft
-    scaling gives a continuous position reduction proportional to the
-    probability of entering a dangerous regime.
+    The step function respects the CalibratedClassifierCV output (isotonic
+    regression) and avoids over-sensitivity to small probability changes.
+    Unlike continuous (1 − prob_r2), the three-level step gives cleaner
+    risk-sizing behaviour.
 
     Parameters
     ----------
@@ -606,14 +609,17 @@ def generate_signal1_soft(
     result = base.rename(columns={c: c.replace("s1_", "s1s_", 1) for c in base.columns})
 
     # Align prob_r2 to result index; clip to [0, 1]
-    prob_r2_a = prob_r2.reindex(result.index).fillna(0.0).clip(0.0, 1.0)
-    scale = 1.0 - prob_r2_a
+    prob_r2_a = prob_r2.reindex(result.index).fillna(0.0).clip(0.0, 1.0).values
 
-    result["s1s_scale"]    = scale
-    result["s1s_position"] = result["s1s_position"] * scale
-    result["s1s_strength"] = result["s1s_strength"] * scale
-    result["s1s_kelly"]    = result["s1s_kelly"]    * scale
-    result["s1s_exp_pnl"]  = result["s1s_exp_pnl"]  * scale
+    # Three-level step function: full / half / flat
+    scale = np.where(prob_r2_a < 0.4, 1.0, np.where(prob_r2_a < 0.6, 0.5, 0.0))
+    scale_s = pd.Series(scale, index=result.index)
+
+    result["s1s_scale"]    = scale_s
+    result["s1s_position"] = result["s1s_position"] * scale_s
+    result["s1s_strength"] = result["s1s_strength"] * scale_s
+    result["s1s_kelly"]    = result["s1s_kelly"]    * scale_s
+    result["s1s_exp_pnl"]  = result["s1s_exp_pnl"]  * scale_s
 
     return result
 

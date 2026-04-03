@@ -80,6 +80,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -241,18 +243,26 @@ def build_features(
 def build_regime_labels(
     spx_df: pd.DataFrame,
     vix_wide_df: pd.DataFrame,
-    vvix_threshold: float = VVIX_REGIME2_THRESHOLD,
+    vvix_threshold: "Optional[float]" = VVIX_REGIME2_THRESHOLD,
 ) -> pd.Series:
     """
     Assign rule-based regime labels to each trading day.
 
     Rules (applied in priority order)
     ----------------------------------
-    REGIME 2  : VVIX(t) > vvix_threshold   (overrides 0/1)
-    REGIME 0  : rv_20d(t) > VIX(t)/100     (realized > implied)
-    REGIME 1  : rv_20d(t) ≤ VIX(t)/100     (implied > realized)
+    REGIME 2  : VVIX(t) > threshold(t)      (overrides 0/1)
+    REGIME 0  : rv_20d(t) > VIX(t)/100      (realized > implied)
+    REGIME 1  : rv_20d(t) ≤ VIX(t)/100      (implied > realized)
 
     Labels are defined by same-day observables — no look-ahead bias.
+
+    Parameters
+    ----------
+    vvix_threshold : float or None.
+        - float  : fixed threshold (backward-compatible; default 100.0).
+        - None   : adaptive rolling 252-day 80th percentile of VVIX.
+                   Uses only past data, so zero look-ahead is preserved.
+                   Produces ~25% R2 days (vs ~53% with fixed 100).
 
     Returns
     -------
@@ -277,6 +287,15 @@ def build_regime_labels(
     vix_iv = df["^VIX"] / 100.0
     vvix   = df["^VVIX"] if "^VVIX" in df.columns else pd.Series(0.0, index=df.index)
 
+    # Compute per-date R2 gate
+    if vvix_threshold is None:
+        # Adaptive: rolling 252-day 80th percentile of VVIX (look-ahead-free)
+        # min_periods=63 (~3 months) to avoid NaN for most of history
+        vvix_gate = vvix.rolling(252, min_periods=63).quantile(0.80)
+        r2_mask = vvix > vvix_gate
+    else:
+        r2_mask = vvix > vvix_threshold
+
     # Default: Regime 1 (short gamma / neutral)
     labels = pd.Series(1, index=df.index, dtype=int)
 
@@ -284,7 +303,7 @@ def build_regime_labels(
     labels[rv_20d > vix_iv] = 0
 
     # Regime 2: elevated vol-of-vol (overrides 0/1)
-    labels[vvix > vvix_threshold] = 2
+    labels[r2_mask] = 2
 
     # Drop days with insufficient history (rv_20d NaN = first 19 trading days)
     labels[rv_20d.isna()] = pd.NA
@@ -336,15 +355,23 @@ class RegimeClassifier:
         if use_sample_weights:
             sample_weight = compute_sample_weight("balanced", y.values)
 
-        self.model_ = xgb.XGBClassifier(**self.params)
-        self.model_.fit(
+        xgb_clf = xgb.XGBClassifier(**self.params)
+        xgb_clf.fit(
             X.values,
             y.values,
             sample_weight=sample_weight,
             verbose=False,
         )
+
+        # Wrap with isotonic regression to calibrate probabilities.
+        # FrozenEstimator prevents re-fitting when CalibratedClassifierCV wraps it.
+        # This improves P(R2) reliability for the soft-sizing step function
+        # in generate_signal1_soft() (Step 6).
+        self.model_ = CalibratedClassifierCV(FrozenEstimator(xgb_clf), method="isotonic")
+        self.model_.fit(X.values, y.values, sample_weight=sample_weight)
+
         logger.info(
-            "RegimeClassifier fitted on %d samples, classes %s",
+            "RegimeClassifier fitted (XGBoost + isotonic calibration) on %d samples, classes %s",
             len(y),
             np.unique(y.values).tolist(),
         )
@@ -377,10 +404,17 @@ class RegimeClassifier:
         )
 
     def feature_importance(self) -> pd.Series:
-        """Return XGBoost feature importances (weight/gain)."""
+        """Return XGBoost feature importances (weight/gain).
+
+        self.model_ is a CalibratedClassifierCV wrapping the XGBoost estimator.
+        Access the underlying XGBoost model via .estimator.
+        """
         self._require_fitted()
-        # XGBoost 3.x: use feature_importances_ directly (sklearn API)
-        imp_values = self.model_.feature_importances_
+        # CalibratedClassifierCV(FrozenEstimator(xgb)) structure:
+        # .estimator is FrozenEstimator; FrozenEstimator.estimator is the XGBoost model
+        inner = getattr(self.model_, "estimator", self.model_)
+        base_clf = getattr(inner, "estimator", inner)
+        imp_values = base_clf.feature_importances_
         return pd.Series(
             imp_values,
             index=self.feature_names_,
@@ -427,7 +461,7 @@ def build_dataset(
     spx_df: pd.DataFrame,
     vix_wide_df: pd.DataFrame,
     pdv_model=None,
-    vvix_threshold: float = VVIX_REGIME2_THRESHOLD,
+    vvix_threshold: "Optional[float]" = None,
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Build (X, y) aligned dataset.
@@ -487,7 +521,7 @@ def train_classifier(
     pdv_model=None,
     train_end: str = TRAIN_END_DATE,
     params: Optional[dict] = None,
-    vvix_threshold: float = VVIX_REGIME2_THRESHOLD,
+    vvix_threshold: "Optional[float]" = None,
 ) -> Tuple["RegimeClassifier", pd.DataFrame, pd.Series]:
     """
     Full training pipeline: build dataset → split → fit → return.

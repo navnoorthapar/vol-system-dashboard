@@ -124,6 +124,15 @@ CREATE TABLE IF NOT EXISTS regime_labels (
     vix_slope       REAL,
     rv_20d          REAL
 );
+
+-- 3-month T-bill daily rates (^IRX via Yahoo Finance)
+-- rate is annualised decimal (e.g. 0.045 = 4.5%)
+-- Used to replace fixed r=0.045 assumption in backtest engine.
+-- Zero look-ahead: always read via get_tbill_rate(as_of_date).
+CREATE TABLE IF NOT EXISTS tbill_rates (
+    date    TEXT PRIMARY KEY,   -- YYYY-MM-DD
+    rate    REAL NOT NULL       -- annualised decimal (e.g. 0.045)
+);
 """
 
 
@@ -502,6 +511,87 @@ def get_regime_labels(as_of_date: str, start_date: Optional[str] = None) -> pd.D
     sql = "SELECT * FROM regime_labels WHERE date <= ?"
     params: list = [as_of_date]
     if start_date:
+        sql += " AND date >= ?"
+        params.append(start_date)
+    sql += " ORDER BY date ASC"
+    with _connect() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+# ── T-Bill Rates ──────────────────────────────────────────────────────────────
+
+def insert_tbill_rates(df: pd.DataFrame) -> int:
+    """
+    Upsert 3-month T-bill daily rates.
+
+    Parameters
+    ----------
+    df : DataFrame with columns [date, rate].
+         rate must be annualised decimal (e.g. 0.045 for 4.5%).
+
+    Returns
+    -------
+    int : number of rows inserted/replaced.
+    """
+    df = _normalise_date_column(df)
+    rows = df[["date", "rate"]].to_dict("records")
+    sql = """
+        INSERT OR REPLACE INTO tbill_rates (date, rate)
+        VALUES (:date, :rate)
+    """
+    with _connect() as conn:
+        conn.executemany(sql, rows)
+    logger.info("Upserted %d T-bill rate rows", len(rows))
+    return len(rows)
+
+
+def get_tbill_rate(as_of_date: str, fallback: float = 0.045) -> float:
+    """
+    Return the 3-month T-bill rate as of as_of_date (most recent on or before).
+
+    LOOK-AHEAD GUARD: date <= as_of_date strictly.
+
+    Parameters
+    ----------
+    as_of_date : str 'YYYY-MM-DD' — upper bound (inclusive).
+    fallback   : float — default rate if no data found (historical default 4.5%).
+
+    Returns
+    -------
+    float : annualised decimal rate (e.g. 0.045).
+    """
+    _validate_date(as_of_date)
+    sql = """
+        SELECT rate FROM tbill_rates
+        WHERE date <= ?
+        ORDER BY date DESC
+        LIMIT 1
+    """
+    with _connect() as conn:
+        row = conn.execute(sql, [as_of_date]).fetchone()
+    if row is None:
+        logger.warning("No T-bill rate found for %s — using fallback %.4f", as_of_date, fallback)
+        return fallback
+    return float(row["rate"])
+
+
+def get_tbill_rates_series(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+    """
+    Return full T-bill rate series up to as_of_date.
+
+    LOOK-AHEAD GUARD: date <= as_of_date strictly.
+
+    Returns
+    -------
+    DataFrame with columns [date, rate], sorted ascending by date.
+    """
+    _validate_date(as_of_date)
+    sql = "SELECT * FROM tbill_rates WHERE date <= ?"
+    params: list = [as_of_date]
+    if start_date:
+        _validate_date(start_date)
         sql += " AND date >= ?"
         params.append(start_date)
     sql += " ORDER BY date ASC"

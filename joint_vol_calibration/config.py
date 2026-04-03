@@ -60,7 +60,13 @@ MC_ANTITHETIC = True
 # ── Joint Calibration Loss Weights ────────────────────────────────────────────
 JOINT_W1 = 0.5   # SPX implied vol MSE weight
 JOINT_W2 = 0.3   # VIX futures price MSE weight
-JOINT_W3 = 0.2   # VIX options implied vol MSE weight
+# VIX options leg disabled: Heston CIR transition density underestimates
+# vol-of-vol path uncertainty. RMSE was 37.14 vol pts — structural failure,
+# not calibration failure. Documented in dashboard.
+JOINT_W3 = 0.0   # was 0.2
+
+# ── Data Tickers ──────────────────────────────────────────────────────────────
+TBILL_TICKER = "^IRX"   # 3-month T-bill rate (yfinance) — annualised %
 
 # ── Neural Network ────────────────────────────────────────────────────────────
 NN_HIDDEN_DIM   = 256

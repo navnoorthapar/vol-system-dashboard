@@ -147,6 +147,64 @@ def download_vix_index(
     return df
 
 
+# ── 3-Month T-Bill Rate (^IRX) ────────────────────────────────────────────────
+
+def download_tbill_rate(
+    start: str = "2010-01-01",
+    end: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Download 3-month US T-bill annualised yield from Yahoo Finance (^IRX).
+
+    ^IRX is the 13-week Treasury bill rate quoted as an annualised percentage
+    (e.g. 4.5 means 4.5%). We convert to decimal (0.045) for use as risk-free
+    rate in option pricing and backtest P&L calculations.
+
+    Zero look-ahead: callers must gate reads via get_tbill_rate(as_of_date).
+
+    Returns
+    -------
+    DataFrame with columns [date, rate] where rate is in decimal (e.g. 0.045).
+    """
+    if end is None:
+        end = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    logger.info("Downloading 3M T-bill rate (^IRX) from %s to %s ...", start, end)
+
+    df = yf.download("^IRX", start=start, end=end, interval="1d",
+                     auto_adjust=False, progress=False)
+
+    if df.empty:
+        logger.error("yfinance returned empty DataFrame for ^IRX")
+        return pd.DataFrame()
+
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    df.reset_index(inplace=True)
+    df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
+
+    rename_map = {"datetime": "date", "date": "date"}
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+
+    if "close" not in df.columns:
+        logger.error("^IRX DataFrame missing 'close' column: %s", df.columns.tolist())
+        return pd.DataFrame()
+
+    df = df[["date", "close"]].copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df.dropna(subset=["close"], inplace=True)
+    df = df[df["close"] > 0].copy()
+
+    # Convert annualised percent → decimal (e.g. 4.5 → 0.045)
+    df["rate"] = df["close"] / 100.0
+    df = df[["date", "rate"]]
+
+    df.sort_values("date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    logger.info("Downloaded %d T-bill rate rows", len(df))
+    return df
+
+
 # ── SPX / VIX Options Chains ──────────────────────────────────────────────────
 
 def snapshot_spx_options() -> pd.DataFrame:
