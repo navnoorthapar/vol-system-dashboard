@@ -7,16 +7,19 @@ URL:  http://localhost:5000
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import pickle
 import sqlite3
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 from threading import Timer
 from typing import Any
+from zoneinfo import ZoneInfo
 
 _logger = logging.getLogger("vol_dashboard")
 
@@ -1011,6 +1014,78 @@ def _startup_data_refresh() -> None:
         _logger.error("[startup_refresh] Startup refresh failed: %s", exc)
 
 
+# ── Scheduled 4-hour refresh ──────────────────────────────────────────────────
+
+_refresh_lock = threading.Lock()   # prevents concurrent refresh runs
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _scheduled_data_refresh() -> None:
+    """
+    Daemon thread: sleeps 4 hours then re-runs the data refresh pipeline,
+    but only on weekdays between 09:00–22:00 ET (covers market hours +
+    after-hours data availability).  Skips silently if another refresh is
+    already in progress.
+    """
+    _INTERVAL_S = 4 * 3600  # 4 hours
+
+    while True:
+        time.sleep(_INTERVAL_S)
+
+        now_et = datetime.datetime.now(tz=_ET)
+        # weekday() 0=Mon … 6=Sun; skip weekends and off-hours
+        if now_et.weekday() >= 5 or not (9 <= now_et.hour < 22):
+            _logger.info(
+                "[scheduled_refresh] Skipped — outside window (%s ET, weekday=%d).",
+                now_et.strftime("%H:%M"),
+                now_et.weekday(),
+            )
+            continue
+
+        if not _refresh_lock.acquire(blocking=False):
+            _logger.info("[scheduled_refresh] Skipped — another refresh is already running.")
+            continue
+
+        try:
+            _logger.info(
+                "[scheduled_refresh] Starting refresh at %s ET.",
+                now_et.strftime("%Y-%m-%d %H:%M"),
+            )
+            _startup_data_refresh()
+
+            # Log new market snapshot after refresh
+            try:
+                with sqlite3.connect(str(DATA / "vol_system.db")) as _con:
+                    _spx = pd.read_sql(
+                        "SELECT close, date FROM spx_ohlcv"
+                        " WHERE date = (SELECT MAX(date) FROM spx_ohlcv)",
+                        _con,
+                    )
+                    _vix = pd.read_sql(
+                        "SELECT close, date FROM vix_term_structure"
+                        " WHERE ticker='^VIX'"
+                        " AND date=(SELECT MAX(date) FROM vix_term_structure WHERE ticker='^VIX')",
+                        _con,
+                    )
+                    _vvix = pd.read_sql(
+                        "SELECT close, date FROM vix_term_structure"
+                        " WHERE ticker='^VVIX'"
+                        " AND date=(SELECT MAX(date) FROM vix_term_structure WHERE ticker='^VVIX')",
+                        _con,
+                    )
+                _logger.info(
+                    "[scheduled_refresh] Done.  SPX=%.2f (%s)  VIX=%.2f (%s)  VVIX=%.2f (%s)",
+                    float(_spx["close"].iloc[0]),  str(_spx["date"].iloc[0])[:10],
+                    float(_vix["close"].iloc[0]),  str(_vix["date"].iloc[0])[:10],
+                    float(_vvix["close"].iloc[0]), str(_vvix["date"].iloc[0])[:10],
+                )
+            except Exception as _le:
+                _logger.warning("[scheduled_refresh] Could not log market snapshot: %s", _le)
+        finally:
+            _refresh_lock.release()
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 @app.route("/")
 def page_market():
@@ -1069,6 +1144,14 @@ if __name__ == "__main__":
     )
     _refresh_thread.start()
     _logger.info("Startup refresh thread launched (daemon=True).")
+
+    _sched_thread = threading.Thread(
+        target=_scheduled_data_refresh,
+        name="scheduled-refresh",
+        daemon=True,
+    )
+    _sched_thread.start()
+    _logger.info("Scheduled refresh thread launched (4h interval, weekdays 09:00–22:00 ET).")
 
     if local:
         Timer(1.2, lambda: webbrowser.open(url)).start()
