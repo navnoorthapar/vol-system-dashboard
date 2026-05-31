@@ -277,13 +277,16 @@ def load_page1() -> dict[str, Any]:
             d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
         d.setdefault("clf_accuracy", "86.2%")  # Bug 4
 
-    # Calibration date for timestamp (Bug 7)
+    # Calibration date for timestamp (Bug 7) — use latest joint_cal pickle
     try:
-        with open(DATA / "calibrations" / "joint_cal_2026-03-24.pkl", "rb") as f:
+        import glob as _glob
+        _cals = sorted(_glob.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
+        _cal_path = _cals[-1] if _cals else str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
+        with open(_cal_path, "rb") as f:
             _cal_tmp = pickle.load(f)
-        d["calib_date"] = str(_cal_tmp.get("as_of_date", "2026-03-24"))
+        d["calib_date"] = str(_cal_tmp.get("as_of_date", "2026-05-31"))
     except Exception:
-        d["calib_date"] = "2026-03-24"
+        d["calib_date"] = "2026-05-31"
 
     # ── PDV Forecast vs ATM ──────────────────────────────────────────────────
     try:
@@ -402,7 +405,7 @@ def load_page2() -> dict[str, Any]:
     d: dict[str, Any] = {}
 
     try:
-        with open(DATA / "calibrations" / "joint_cal_2026-03-24.pkl", "rb") as f:
+        with open(DATA / "calibrations" / "joint_cal_2026-05-31.pkl", "rb") as f:
             cal = pickle.load(f)
 
         p = cal["params"]
@@ -435,7 +438,7 @@ def load_page2() -> dict[str, Any]:
         d["feller_pass"]   = bool(feller_lhs > feller_rhs)
 
         # Rho boundary flag
-        d["rho_at_boundary"] = abs(p["rho"]) >= 0.99
+        d["rho_at_boundary"] = abs(p["rho"]) >= 0.94
 
     except Exception as e:
         d["cal_error"] = str(e)
@@ -479,6 +482,40 @@ def load_page2() -> dict[str, Any]:
             d["bates"] = None
     except Exception:
         d["bates"] = None
+
+    # Quintic OU research calibration (C13 — optional)
+    try:
+        quintic_path = DATA / "calibrations" / "quintic_cal_2026-03-24.pkl"
+        if quintic_path.exists():
+            with open(quintic_path, "rb") as f:
+                qcal = pickle.load(f)
+            qp = qcal["params"]
+            ql = qcal.get("leg_losses", {})
+            q_spx_rmse = round(float(ql.get("spx_iv_rmse", 0)), 3)
+            q_vix_rmse = round(float(ql.get("vix_futures_rmse", 0)), 3)
+            q_vix_opt_rmse = round(float(ql.get("vix_options_rmse", 0)), 2)
+            d["quintic"] = {
+                "lam_x":        round(float(qp.lam_x), 3),
+                "lam_y":        round(float(qp.lam_y), 3),
+                "theta":        round(float(qp.theta), 4),
+                "alpha0":       round(float(qp.alpha0), 4),
+                "alpha1":       round(float(qp.alpha1), 4),
+                "alpha3":       round(float(qp.alpha3), 4),
+                "alpha5":       round(float(qp.alpha5), 4),
+                "epsilon":      round(float(qp.epsilon), 4),
+                "spx_rmse":     q_spx_rmse,
+                "vix_rmse":     q_vix_rmse,
+                "vix_opt_rmse": q_vix_opt_rmse,
+                "spx_delta":    round(q_spx_rmse - d.get("spx_rmse", 0), 3),
+                "vix_delta":    round(q_vix_rmse - d.get("vix_fut_rmse", 0), 3),
+                "eps_saturated": abs(float(qp.epsilon) + 0.99) < 0.02,
+                "fit_time":     round(float(qcal.get("fit_time", 0)), 1),
+                "n_evals":      int(qcal.get("n_evals", 0)),
+            }
+        else:
+            d["quintic"] = None
+    except Exception:
+        d["quintic"] = None
 
     # SPX smile from greeks surface (91-day, closest to standard 3M)
     try:

@@ -48,7 +48,7 @@ HESTON_BOUNDS = {
     "kappa": (0.1,  20.0),
     "theta": (1e-4,  1.0),
     "sigma": (1e-3,  2.0),
-    "rho":   (-0.99, 0.0),
+    "rho":   (-0.95, 0.0),
     "v0":    (1e-4,  1.0),
 }
 
@@ -59,7 +59,7 @@ MC_ANTITHETIC = True
 
 # ── Joint Calibration Loss Weights ────────────────────────────────────────────
 JOINT_W1 = 0.5   # SPX implied vol MSE weight
-JOINT_W2 = 0.3   # VIX futures price MSE weight
+JOINT_W2 = 0.6   # VIX futures price MSE weight (doubled from 0.3 to pull RMSE back below 1.5)
 # VIX options leg disabled: Heston CIR transition density underestimates
 # vol-of-vol path uncertainty. RMSE was 37.14 vol pts — structural failure,
 # not calibration failure. Documented in dashboard.

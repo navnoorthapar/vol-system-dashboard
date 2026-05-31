@@ -218,7 +218,7 @@ class TestJointLoss:
         """Random params should have higher loss than calibrated params."""
         # Use params far from optimum
         p_bad  = np.array([0.1, 0.001, 0.1, -0.1, 0.001])  # unlikely to fit
-        p_good = np.array([4.6, 0.076, 0.84, -0.99, 0.056]) # near calibrated
+        p_good = np.array([4.6, 0.076, 0.84, -0.94, 0.056]) # near calibrated
 
         loss_bad  = calibrator.joint_loss(p_bad)
         loss_good = calibrator.joint_loss(p_good)

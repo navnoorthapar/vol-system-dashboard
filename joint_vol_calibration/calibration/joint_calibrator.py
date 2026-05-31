@@ -421,19 +421,16 @@ class JointCalibrator:
 
     def _prepare_spx_surface(self) -> pd.DataFrame:
         """
-        Filter SPX options, fit SVI per expiry slice, return smooth SSVI surface.
+        Filter SPX options and select vega-weighted anchor points per expiry.
 
         Design:
           - 6 target expiry buckets: 14d, 30d, 60d, 91d, 180d, 365d
-          - For each bucket: fit Gatheral (2004) SVI to observed (k, w) pairs
-          - Evaluate SVI on a dense 15-point strike grid per expiry
-          - Surface is butterfly-free and calendar-spread-free by construction
-          - Falls back to raw market quotes if SVI fit fails for any slice
+          - For each bucket: select top-9 strikes by BS vega (vega-weighted anchors)
           - Prefer OTM options (calls for K≥S, puts for K<S)
 
-        SVI target surface reduces noise-driven oscillations that cause the
-        Heston optimizer to chase idiosyncratic market microstructure.
-        Expected SPX RMSE improvement: ~5.3 → ~2.0 vol pts.
+        Vega-based selection concentrates calibration anchors near ATM where
+        Heston parameters are most identifiable. Direct calibration against
+        market quotes (no SVI pre-smoothing).
         The full raw surface is retained in self.spx_surface_full for validation.
         """
         raw = db.get_options_surface(as_of_date=self.as_of_date, underlying="SPX")
@@ -515,17 +512,6 @@ class JointCalibrator:
 
         cal_df = pd.DataFrame(selected_rows).reset_index(drop=True)
         cal_df["market_price_f"] = cal_df["mid_price"].astype(float)
-
-        # ── SVI smoothing: replace raw quotes with smooth SSVI surface ────────
-        # Build per-expiry SVI fits using the 6-bucket vega-selected quotes,
-        # then evaluate on a dense grid. Falls back to raw quotes if fit fails.
-        ssvi_df = _build_ssvi_surface(
-            cal_df, S=S, r=self.r, q=self.q, n_points=_CAL_STRIKES_PER_EXPIRY
-        )
-        if not ssvi_df.empty:
-            logger.info("  SVI smoothing: %d → %d anchor points",
-                        len(cal_df), len(ssvi_df))
-            return ssvi_df
 
         return cal_df.sort_values(["time_to_expiry", "strike"]).reset_index(drop=True)
 

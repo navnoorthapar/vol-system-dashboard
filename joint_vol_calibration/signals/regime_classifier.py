@@ -461,7 +461,7 @@ def build_dataset(
     spx_df: pd.DataFrame,
     vix_wide_df: pd.DataFrame,
     pdv_model=None,
-    vvix_threshold: "Optional[float]" = None,
+    vvix_threshold: "Optional[float]" = VVIX_REGIME2_THRESHOLD,
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Build (X, y) aligned dataset.
@@ -521,7 +521,7 @@ def train_classifier(
     pdv_model=None,
     train_end: str = TRAIN_END_DATE,
     params: Optional[dict] = None,
-    vvix_threshold: "Optional[float]" = None,
+    vvix_threshold: "Optional[float]" = VVIX_REGIME2_THRESHOLD,
 ) -> Tuple["RegimeClassifier", pd.DataFrame, pd.Series]:
     """
     Full training pipeline: build dataset → split → fit → return.

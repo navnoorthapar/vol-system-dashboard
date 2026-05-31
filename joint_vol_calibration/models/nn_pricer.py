@@ -83,7 +83,7 @@ _VIX_MODEL_PATH  = DATA_DIR / "nn_vix_model.pt"
 
 _VIX_WINDOW = 30.0 / 365.0
 _DEFAULT_CAL_PARAMS = {          # fallback if baseline file not found
-    "kappa": 4.62, "theta": 0.0764, "sigma": 0.8407, "rho": -0.99, "v0": 0.0561,
+    "kappa": 4.62, "theta": 0.0764, "sigma": 0.8407, "rho": -0.95, "v0": 0.0561,
 }
 
 # ── Vectorised Black-Scholes IV (Newton-Raphson) ──────────────────────────────
