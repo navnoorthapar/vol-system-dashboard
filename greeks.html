@@ -1,0 +1,1802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Greeks Monitor — Vol System</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a0a;
+      --surface:  #111111;
+      --surface2: #161616;
+      --border:   #1f1f1f;
+      --border2:  #2a2a2a;
+      --accent:   #00ff88;
+      --accent2:  #00cc6a;
+      --text:     #e4e4e4;
+      --text2:    #888888;
+      --text3:    #555555;
+      --red:      #ff3333;
+      --red2:     #cc1111;
+      --blue:     #3388ff;
+      --yellow:   #ffcc00;
+      --orange:   #ff8833;
+      --purple:   #aa44ff;
+      --radius:   6px;
+      --radius2:  10px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Navigation ─────────────────────────────────────────────────────── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0d0d0d;
+      border-bottom: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      height: 52px;
+      gap: 0;
+    }
+
+    .nav-brand {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-right: 36px;
+      white-space: nowrap;
+    }
+    .nav-brand span { color: var(--text2); font-weight: 400; }
+
+    .nav-links { display: flex; gap: 0; }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 18px;
+      height: 52px;
+      color: var(--text2);
+      text-decoration: none;
+      font-size: 12.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
+    .nav-link.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .nav-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.6;
+    }
+
+    .nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text3);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Page Layout ─────────────────────────────────────────────────────── */
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 28px 28px 60px;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .page-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text3);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .page-badge {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text3);
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Grid Helpers ────────────────────────────────────────────────────── */
+    .grid       { display: grid; gap: 16px; }
+    .grid-2     { grid-template-columns: repeat(2, 1fr); }
+    .grid-3     { grid-template-columns: repeat(3, 1fr); }
+    .grid-4     { grid-template-columns: repeat(4, 1fr); }
+    .grid-5     { grid-template-columns: repeat(5, 1fr); }
+    .col-2      { grid-column: span 2; }
+    .col-3      { grid-column: span 3; }
+    .col-4      { grid-column: span 4; }
+    .col-full   { grid-column: 1 / -1; }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius2);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent);
+    }
+
+    .card-sm { padding: 16px; }
+    .card-lg { padding: 28px; }
+
+    .card-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 8px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      font-family: 'Menlo', 'Courier New', monospace;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .card-value.lg { font-size: 40px; }
+    .card-value.sm { font-size: 22px; }
+    .card-value.green { color: var(--accent); }
+    .card-value.red   { color: var(--red); }
+    .card-value.blue  { color: var(--blue); }
+    .card-value.yellow{ color: var(--yellow); }
+    .card-value.dim   { color: var(--text2); }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 5px;
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Stat Row ─────────────────────────────────────────────────────────── */
+    .stat-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+    .stat-change { font-family: 'Menlo', monospace; }
+    .stat-change.up   { color: var(--accent); }
+    .stat-change.down { color: var(--red); }
+
+    /* ── Regime Badge ─────────────────────────────────────────────────────── */
+    .regime-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      border: 1px solid;
+    }
+
+    /* ── Banner ───────────────────────────────────────────────────────────── */
+    .banner {
+      border-radius: var(--radius2);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid;
+    }
+    .banner-warn {
+      background: rgba(255,51,51,0.06);
+      border-color: rgba(255,51,51,0.25);
+    }
+    .banner-info {
+      background: rgba(0,255,136,0.04);
+      border-color: rgba(0,255,136,0.2);
+    }
+    .banner-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .banner-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .banner-body {
+      font-size: 12.5px;
+      color: var(--text2);
+      line-height: 1.6;
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 9px 12px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Menlo', 'Courier New', monospace;
+      font-size: 12.5px;
+      color: var(--text2);
+    }
+    .data-table td:first-child { color: var(--text); font-family: inherit; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: var(--surface2); }
+    .data-table .green { color: var(--accent); }
+    .data-table .red   { color: var(--red); }
+
+    /* ── Chart Container ──────────────────────────────────────────────────── */
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+    }
+    .chart-wrap.tall   { height: 340px; }
+    .chart-wrap.xtall  { height: 420px; }
+    .chart-wrap.short  { height: 180px; }
+    .chart-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 14px;
+    }
+
+    /* ── Heatmap Table ────────────────────────────────────────────────────── */
+    .heatmap-wrap { overflow-x: auto; }
+    .heatmap {
+      border-collapse: collapse;
+      font-size: 11px;
+      width: 100%;
+    }
+    .heatmap th {
+      padding: 5px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text3);
+      white-space: nowrap;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .heatmap th.row-head { text-align: left; padding-right: 12px; }
+    .heatmap td {
+      width: 72px;
+      height: 44px;
+      text-align: center;
+      vertical-align: middle;
+      font-family: 'Menlo', monospace;
+      font-size: 10px;
+      border: 1px solid #0a0a0a;
+      transition: transform 0.1s;
+      cursor: default;
+    }
+    .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
+    .heatmap td.empty { background: #0d0d0d; }
+    .heatmap td.unstable {
+      border: 2px solid #ff3333 !important;
+      box-shadow: 0 0 8px rgba(255,51,51,0.4);
+    }
+    .heatmap .mat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text2);
+      font-family: inherit;
+      padding-right: 14px;
+      white-space: nowrap;
+    }
+
+    /* ── Progress Bars ────────────────────────────────────────────────────── */
+    .progress-bar-wrap { margin-top: 10px; }
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .progress-label {
+      width: 90px;
+      font-size: 11px;
+      color: var(--text2);
+      flex-shrink: 0;
+    }
+    .progress-track {
+      flex: 1;
+      height: 6px;
+      background: var(--border2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .progress-val {
+      width: 44px;
+      font-size: 11px;
+      color: var(--text2);
+      text-align: right;
+      font-family: 'Menlo', monospace;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 16px 0;
+    }
+
+    /* ── Tag/Pill ─────────────────────────────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .tag-green { background: rgba(0,255,136,0.12); color: var(--accent); border: 1px solid rgba(0,255,136,0.25); }
+    .tag-red   { background: rgba(255,51,51,0.1);  color: var(--red);    border: 1px solid rgba(255,51,51,0.25); }
+    .tag-blue  { background: rgba(51,136,255,0.1); color: var(--blue);   border: 1px solid rgba(51,136,255,0.25); }
+    .tag-dim   { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
+
+    /* ── Feller / Param Box ───────────────────────────────────────────────── */
+    .param-box {
+      text-align: center;
+      padding: 18px 12px;
+    }
+    .param-sym {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text3);
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .param-val {
+      font-size: 26px;
+      font-weight: 700;
+      font-family: 'Menlo', monospace;
+      letter-spacing: -0.02em;
+    }
+    .param-desc {
+      font-size: 10.5px;
+      color: var(--text3);
+      margin-top: 5px;
+    }
+
+    /* ── Utilities ────────────────────────────────────────────────────────── */
+    .mono { font-family: 'Menlo', 'Courier New', monospace; }
+    .bold { font-weight: 700; }
+    .mt8  { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+    .mt16 { margin-top: 16px; }
+    .mt20 { margin-top: 20px; }
+    .mb12 { margin-bottom: 12px; }
+    .flex { display: flex; align-items: center; }
+    .gap8 { gap: 8px; }
+    .gap12{ gap: 12px; }
+    .space-between { justify-content: space-between; }
+    .text-right { text-align: right; }
+    .opacity-50 { opacity: 0.5; }
+    .green { color: var(--accent); }
+    .red   { color: var(--red); }
+    .blue  { color: var(--blue); }
+    .dim   { color: var(--text2); }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Chart.js global overrides ────────────────────────────────────────── */
+    canvas { display: block; }
+
+    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
+    .top-banner {
+      height: 36px;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 12px;
+      font-size: 11px;
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .top-banner-links a {
+      color: #555;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      transition: color 0.15s;
+    }
+    .top-banner-links a:hover { color: #00ff88; }
+    .top-banner-sep { color: #333; }
+
+    /* ── Responsive grid (Bug 6) ───────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+      .page { padding: 16px !important; }
+      .nav { padding: 0 12px; }
+      .nav-brand { margin-right: 16px; }
+    }
+    @media (max-width: 540px) {
+      .grid-4 { grid-template-columns: 1fr !important; }
+      .grid-3 { grid-template-columns: 1fr !important; }
+      .grid-2 { grid-template-columns: 1fr !important; }
+      .page { padding: 10px !important; }
+      .card { padding: 14px !important; }
+      .card-value { font-size: 28px !important; }
+      .nav-brand span { display: none; }
+      .top-banner-text { font-size: 10px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="top-banner">
+  <div class="top-banner-text">
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 573 tests &nbsp;·&nbsp; live market data &nbsp;·&nbsp; by Navnoor Bawa
+  </div>
+  <div class="top-banner-links">
+    <a href="https://github.com/NavnoorBawa" target="_blank" rel="noopener">GitHub</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
+  </div>
+</div>
+
+<nav class="nav">
+  <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
+  <div class="nav-links">
+    <a href="index.html"            class="nav-link ">
+      <span class="nav-dot"></span>Live Market
+    </a>
+    <a href="calibration.html" class="nav-link ">
+      <span class="nav-dot"></span>Calibration
+    </a>
+    <a href="greeks.html"      class="nav-link active">
+      <span class="nav-dot"></span>Greeks Monitor
+    </a>
+    <a href="backtest.html"    class="nav-link ">
+      <span class="nav-dot"></span>Backtest
+    </a>
+  </div>
+  <div class="nav-status">
+    <div class="status-dot"></div>
+    LIVE DATA
+  </div>
+</nav>
+
+<main class="page">
+  
+<div class="page-header">
+  <div class="page-title">Second-Order Greeks Risk Monitor</div>
+  <div class="page-subtitle">Vomma · Volga · Vanna · QV Convexity — C6</div>
+  <div class="page-badge">69 nodes  ·  6 maturities  ·  2026-03-24</div>
+</div>
+
+<!-- ── Unstable Nodes Banner ─────────────────────────────────────────────── -->
+
+<div class="banner banner-warn" style="margin-bottom:20px;">
+  <div class="banner-icon">⚠</div>
+  <div style="flex:1;">
+    <div class="banner-title" style="color:#ff8833;">
+      3 Unstable Nodes  —  |vomma z-score| > 2.0
+    </div>
+    <div class="banner-body">
+      The following option nodes have extreme vomma exposure.
+      Large vol-of-vol moves cause convex P&amp;L on these positions.
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;">
+      
+      <div style="
+        padding:8px 14px; border-radius:6px;
+        background:rgba(255,51,51,0.08); border:1px solid rgba(255,51,51,0.3);
+        font-family:'Menlo',monospace; font-size:11px; color:#e4e4e4;
+      ">
+        <span style="color:#ff5555;font-weight:700;">T=365d</span>
+        &nbsp;·&nbsp;K=7,755
+        &nbsp;·&nbsp;IV=21.1%
+        &nbsp;·&nbsp;vomma=4,086
+        &nbsp;·&nbsp;<span style="color:#ff3333;font-weight:700;">z=+2.37</span>
+      </div>
+      
+      <div style="
+        padding:8px 14px; border-radius:6px;
+        background:rgba(255,51,51,0.08); border:1px solid rgba(255,51,51,0.3);
+        font-family:'Menlo',monospace; font-size:11px; color:#e4e4e4;
+      ">
+        <span style="color:#ff5555;font-weight:700;">T=365d</span>
+        &nbsp;·&nbsp;K=5,034
+        &nbsp;·&nbsp;IV=31.0%
+        &nbsp;·&nbsp;vomma=4,070
+        &nbsp;·&nbsp;<span style="color:#ff3333;font-weight:700;">z=+2.36</span>
+      </div>
+      
+      <div style="
+        padding:8px 14px; border-radius:6px;
+        background:rgba(255,51,51,0.08); border:1px solid rgba(255,51,51,0.3);
+        font-family:'Menlo',monospace; font-size:11px; color:#e4e4e4;
+      ">
+        <span style="color:#ff5555;font-weight:700;">T=365d</span>
+        &nbsp;·&nbsp;K=5,236
+        &nbsp;·&nbsp;IV=30.2%
+        &nbsp;·&nbsp;vomma=3,705
+        &nbsp;·&nbsp;<span style="color:#ff3333;font-weight:700;">z=+2.05</span>
+      </div>
+      
+    </div>
+  </div>
+</div>
+
+
+<!-- ── Summary Stats ─────────────────────────────────────────────────────── -->
+<div class="grid grid-4" style="margin-bottom:16px;">
+  <div class="card card-sm">
+    <div class="card-label">Unstable Nodes</div>
+    <div class="card-value red">
+      3 / 69
+    </div>
+    <div class="card-sub mt8">|vomma_z| > 2.0</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-label">Max Vomma</div>
+    <div class="card-value sm yellow">4,086</div>
+    <div class="card-sub mt8">365d maturity nodes</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-label">Min Vomma</div>
+    <div class="card-value sm dim">-119</div>
+    <div class="card-sub mt8">Near-expiry nodes</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-label">Mean Vomma</div>
+    <div class="card-value sm green">1,268</div>
+    <div class="card-sub mt8">Across all 69 nodes</div>
+  </div>
+</div>
+
+<!-- ── Vomma Heatmap ─────────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="flex space-between mb12">
+    <div class="chart-title" style="margin-bottom:0;">Vomma Heatmap — Maturity × Log-Moneyness</div>
+    <div style="display:flex;gap:12px;align-items:center;font-size:11px;color:var(--text3);">
+      <div style="display:flex;align-items:center;gap:5px;">
+        <div style="width:24px;height:10px;background:linear-gradient(90deg,#152850,#2060c0);border-radius:2px;"></div>
+        <span>Low vomma</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:5px;">
+        <div style="width:24px;height:10px;background:linear-gradient(90deg,#111,#00be56);border-radius:2px;"></div>
+        <span>High vomma</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:5px;">
+        <div style="width:24px;height:10px;background:#cc1111;border-radius:2px;border:2px solid #ff3333;"></div>
+        <span>Unstable (z > 2)</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="heatmap-wrap">
+    <table class="heatmap">
+      <thead>
+        <tr>
+          <th class="row-head">Maturity</th>
+          
+          <th>-0.30</th>
+          
+          <th>-0.25</th>
+          
+          <th>-0.20</th>
+          
+          <th>-0.15</th>
+          
+          <th>-0.10</th>
+          
+          <th>-0.05</th>
+          
+          <th>+0.00</th>
+          
+          <th>+0.05</th>
+          
+          <th>+0.10</th>
+          
+          <th>+0.15</th>
+          
+          <th>+0.20</th>
+          
+        </tr>
+      </thead>
+      <tbody>
+        
+        <tr>
+          <td class="mat-label">14d</td>
+          
+            
+            <td
+              class=""
+              style="background:#1d3772;color:#fff;"
+              title="T=14d  K=4881.0  IV=38.9%  vomma=7.6  z=-1.06"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                8
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1c356b;color:#aaa;"
+              title="T=14d  K=5280.0  IV=35.8%  vomma=87.6  z=-0.99"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                88
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1a305f;color:#aaa;"
+              title="T=14d  K=5492.0  IV=34.1%  vomma=248.7  z=-0.86"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.9</div>
+              <div style="font-size:10px;font-weight:500;">
+                249
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#172545;color:#aaa;"
+              title="T=14d  K=5712.0  IV=32.3%  vomma=589.7  z=-0.57"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.6</div>
+              <div style="font-size:10px;font-weight:500;">
+                590
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#111214;color:#aaa;"
+              title="T=14d  K=6179.0  IV=28.1%  vomma=1221.3  z=-0.04"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                1221
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#192a50;color:#aaa;"
+              title="T=14d  K=6426.0  IV=25.5%  vomma=437.9  z=-0.7"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.7</div>
+              <div style="font-size:10px;font-weight:500;">
+                438
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1b3060;color:#aaa;"
+              title="T=14d  K=6684.0  IV=22.4%  vomma=231.9  z=-0.87"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.9</div>
+              <div style="font-size:10px;font-weight:500;">
+                232
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1c3670;color:#fff;"
+              title="T=14d  K=7230.0  IV=12.1%  vomma=31.8  z=-1.04"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                32
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3771;color:#fff;"
+              title="T=14d  K=7520.0  IV=16.4%  vomma=11.5  z=-1.06"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                12
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3772;color:#fff;"
+              title="T=14d  K=7821.0  IV=20.8%  vomma=6.7  z=-1.06"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                7
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3772;color:#fff;"
+              title="T=14d  K=8135.0  IV=24.9%  vomma=3.8  z=-1.06"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                4
+              </div>
+            </td>
+            
+          
+        </tr>
+        
+        <tr>
+          <td class="mat-label">30d</td>
+          
+            
+            <td
+              class=""
+              style="background:#1a2e5b;color:#aaa;"
+              title="T=30d  K=4888.0  IV=38.2%  vomma=296.4  z=-0.82"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.8</div>
+              <div style="font-size:10px;font-weight:500;">
+                296
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#151e32;color:#aaa;"
+              title="T=30d  K=5288.0  IV=35.2%  vomma=827.2  z=-0.37"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.4</div>
+              <div style="font-size:10px;font-weight:500;">
+                827
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#111214;color:#aaa;"
+              title="T=30d  K=5500.0  IV=33.6%  vomma=1219.3  z=-0.04"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                1219
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0e271a;color:#aaa;"
+              title="T=30d  K=5720.0  IV=31.8%  vomma=1580.5  z=0.26"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.3</div>
+              <div style="font-size:10px;font-weight:500;">
+                1580
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#111213;color:#aaa;"
+              title="T=30d  K=6188.0  IV=27.8%  vomma=1231.2  z=-0.03"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                1231
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1a2e59;color:#aaa;"
+              title="T=30d  K=6435.0  IV=25.3%  vomma=323.8  z=-0.79"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.8</div>
+              <div style="font-size:10px;font-weight:500;">
+                324
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1b3366;color:#aaa;"
+              title="T=30d  K=6693.0  IV=22.4%  vomma=159.7  z=-0.93"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.9</div>
+              <div style="font-size:10px;font-weight:500;">
+                160
+              </div>
+            </td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3772;color:#fff;"
+              title="T=30d  K=7530.0  IV=5.0%  vomma=0.0  z=-1.07"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                0
+              </div>
+            </td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3772;color:#fff;"
+              title="T=30d  K=8146.0  IV=10.3%  vomma=0.0  z=-1.07"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                0
+              </div>
+            </td>
+            
+          
+        </tr>
+        
+        <tr>
+          <td class="mat-label">60d</td>
+          
+            
+            <td
+              class=""
+              style="background:#101512;color:#aaa;"
+              title="T=60d  K=4901.0  IV=37.0%  vomma=1330.6  z=0.05"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                1331
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0b4426;color:#aaa;"
+              title="T=60d  K=5302.0  IV=34.1%  vomma=1974.0  z=0.59"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.6</div>
+              <div style="font-size:10px;font-weight:500;">
+                1974
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0a532c;color:#aaa;"
+              title="T=60d  K=5514.0  IV=32.6%  vomma=2174.8  z=0.76"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.8</div>
+              <div style="font-size:10px;font-weight:500;">
+                2175
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0a512c;color:#aaa;"
+              title="T=60d  K=5735.0  IV=31.0%  vomma=2152.6  z=0.75"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.8</div>
+              <div style="font-size:10px;font-weight:500;">
+                2153
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#121720;color:#aaa;"
+              title="T=60d  K=6204.0  IV=27.2%  vomma=1068.9  z=-0.17"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.2</div>
+              <div style="font-size:10px;font-weight:500;">
+                1069
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1a3060;color:#aaa;"
+              title="T=60d  K=6452.0  IV=25.0%  vomma=235.7  z=-0.87"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.9</div>
+              <div style="font-size:10px;font-weight:500;">
+                236
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1c346a;color:#aaa;"
+              title="T=60d  K=6711.0  IV=22.5%  vomma=105.5  z=-0.98"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                106
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0b4b29;color:#aaa;"
+              title="T=60d  K=6980.0  IV=19.4%  vomma=2069.8  z=0.68"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.7</div>
+              <div style="font-size:10px;font-weight:500;">
+                2070
+              </div>
+            </td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+        </tr>
+        
+        <tr>
+          <td class="mat-label">91d</td>
+          
+            
+            <td
+              class=""
+              style="background:#0a512c;color:#aaa;"
+              title="T=91d  K=4914.0  IV=35.9%  vomma=2148.4  z=0.74"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.7</div>
+              <div style="font-size:10px;font-weight:500;">
+                2148
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#076e38;color:#fff;"
+              title="T=91d  K=5316.0  IV=33.2%  vomma=2554.8  z=1.08"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                2555
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#076d38;color:#fff;"
+              title="T=91d  K=5529.0  IV=31.8%  vomma=2537.4  z=1.07"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                2537
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#095a30;color:#aaa;"
+              title="T=91d  K=5751.0  IV=30.3%  vomma=2276.7  z=0.85"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.8</div>
+              <div style="font-size:10px;font-weight:500;">
+                2277
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#141a29;color:#aaa;"
+              title="T=91d  K=6221.0  IV=26.8%  vomma=946.0  z=-0.27"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.3</div>
+              <div style="font-size:10px;font-weight:500;">
+                946
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1b3264;color:#aaa;"
+              title="T=91d  K=6470.0  IV=24.9%  vomma=186.1  z=-0.91"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.9</div>
+              <div style="font-size:10px;font-weight:500;">
+                186
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1c356c;color:#fff;"
+              title="T=91d  K=6729.0  IV=22.7%  vomma=73.4  z=-1.01"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                73
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0e2b1c;color:#aaa;"
+              title="T=91d  K=6999.0  IV=20.1%  vomma=1637.6  z=0.31"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.3</div>
+              <div style="font-size:10px;font-weight:500;">
+                1638
+              </div>
+            </td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+        </tr>
+        
+        <tr>
+          <td class="mat-label">180d</td>
+          
+            
+            <td
+              class=""
+              style="background:#02a750;color:#fff;"
+              title="T=180d  K=4953.0  IV=33.5%  vomma=3336.9  z=1.74"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.7</div>
+              <div style="font-size:10px;font-weight:500;">
+                3337
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#03994a;color:#fff;"
+              title="T=180d  K=5358.0  IV=31.3%  vomma=3137.4  z=1.57"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.6</div>
+              <div style="font-size:10px;font-weight:500;">
+                3137
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#067e3f;color:#fff;"
+              title="T=180d  K=5572.0  IV=30.2%  vomma=2775.5  z=1.27"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.3</div>
+              <div style="font-size:10px;font-weight:500;">
+                2776
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0a562e;color:#aaa;"
+              title="T=180d  K=5796.0  IV=28.9%  vomma=2218.6  z=0.8"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.8</div>
+              <div style="font-size:10px;font-weight:500;">
+                2219
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#16213b;color:#aaa;"
+              title="T=180d  K=6269.0  IV=26.3%  vomma=715.6  z=-0.46"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.5</div>
+              <div style="font-size:10px;font-weight:500;">
+                716
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1c356b;color:#aaa;"
+              title="T=180d  K=6521.0  IV=24.8%  vomma=93.7  z=-0.99"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.0</div>
+              <div style="font-size:10px;font-weight:500;">
+                94
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3772;color:#fff;"
+              title="T=180d  K=6782.0  IV=23.2%  vomma=7.9  z=-1.06"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                8
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#131927;color:#aaa;"
+              title="T=180d  K=7054.0  IV=21.6%  vomma=977.0  z=-0.24"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.2</div>
+              <div style="font-size:10px;font-weight:500;">
+                977
+              </div>
+            </td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+        </tr>
+        
+        <tr>
+          <td class="mat-label">365d</td>
+          
+            
+            <td
+              class="unstable"
+              style="background:#cc1111;color:#fff;"
+              title="T=365d  K=5034.0  IV=31.0%  vomma=4069.9  z=2.36"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+2.4</div>
+              <div style="font-size:10px;font-weight:700;">
+                4070
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#039d4c;color:#fff;"
+              title="T=365d  K=5445.0  IV=29.4%  vomma=3202.2  z=1.63"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.6</div>
+              <div style="font-size:10px;font-weight:500;">
+                3202
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#077039;color:#fff;"
+              title="T=365d  K=5664.0  IV=28.6%  vomma=2572.0  z=1.1"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                2572
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#0c3b22;color:#aaa;"
+              title="T=365d  K=5890.0  IV=27.8%  vomma=1847.5  z=0.49"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+0.5</div>
+              <div style="font-size:10px;font-weight:500;">
+                1848
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#192b53;color:#aaa;"
+              title="T=365d  K=6372.0  IV=26.0%  vomma=407.6  z=-0.72"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.7</div>
+              <div style="font-size:10px;font-weight:500;">
+                408
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1d3977;color:#fff;"
+              title="T=365d  K=6627.0  IV=25.1%  vomma=-59.2  z=-1.12"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.1</div>
+              <div style="font-size:10px;font-weight:500;">
+                -59
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#1e3b7b;color:#fff;"
+              title="T=365d  K=6893.0  IV=24.2%  vomma=-119.1  z=-1.17"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-1.2</div>
+              <div style="font-size:10px;font-weight:500;">
+                -119
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class=""
+              style="background:#182a50;color:#aaa;"
+              title="T=365d  K=7169.0  IV=23.2%  vomma=442.4  z=-0.69"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=-0.7</div>
+              <div style="font-size:10px;font-weight:500;">
+                442
+              </div>
+            </td>
+            
+          
+            
+            <td
+              class="unstable"
+              style="background:#cc1111;color:#fff;"
+              title="T=365d  K=7755.0  IV=21.1%  vomma=4086.5  z=2.37"
+            >
+              <div style="font-size:9px;opacity:0.7;">z=+2.4</div>
+              <div style="font-size:10px;font-weight:700;">
+                4086
+              </div>
+            </td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+            
+            <td class="empty"></td>
+            
+          
+        </tr>
+        
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:12px;font-size:11px;color:var(--text3);">
+    Cells show vomma value (∂²V/∂σ²) and z-score.
+    X-axis = log-moneyness ln(K/S) bins (0.05 wide).
+    Red-bordered cells: |z| > 2 — P&L convex to vol-of-vol shocks.
+    All three unstable nodes are at the 1-year maturity.
+  </div>
+</div>
+
+<!-- ── Charts Row ─────────────────────────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- QV Convexity -->
+  <div class="card">
+    <div class="chart-title">QV Convexity × 10⁴ — by Maturity</div>
+    <div class="chart-wrap">
+      <canvas id="qvChart"></canvas>
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:var(--text3);">
+      Quadratic variation convexity measures the sensitivity of the straddle P&L to
+      variance path roughness. Higher values at long maturities reflect accumulated vomma exposure.
+    </div>
+  </div>
+
+  <!-- Vanna -->
+  <div class="card">
+    <div class="chart-title">Mean Vanna — by Maturity  (∂²V/∂S∂σ)</div>
+    <div class="chart-wrap">
+      <canvas id="vannaChart"></canvas>
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:var(--text3);">
+      Vanna is the cross-greek measuring how delta changes with implied vol.
+      Negative mean vanna at short maturities reflects the leverage effect:
+      rising spot → falling IV → negative delta adjustment.
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Vomma Z-score Scatter ──────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">Vomma Z-Score vs Log-Moneyness — All Maturities</div>
+  <div class="chart-wrap tall">
+    <canvas id="vommaScatter"></canvas>
+  </div>
+  <div style="margin-top:10px;font-size:11px;color:var(--text3);">
+    Points above z=+2 (dashed red line) are flagged as unstable.
+    Longer maturities (darker points) show higher absolute vomma due to greater vol-of-vol accumulation time.
+  </div>
+</div>
+
+<!-- ── Unstable Nodes Detail Table ───────────────────────────────────────── -->
+
+<div class="card">
+  <div class="chart-title">Unstable Node Details</div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>Maturity</th>
+        <th>Strike K</th>
+        <th>Log-Moneyness</th>
+        <th>Implied Vol</th>
+        <th>Vomma</th>
+        <th>Z-Score</th>
+        <th>Risk Flag</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+      <tr>
+        <td>365d</td>
+        <td class="mono">7,755</td>
+        <td class="mono">+0.132</td>
+        <td class="mono">21.1%</td>
+        <td class="mono yellow">4,086</td>
+        <td class="mono red bold">+2.37</td>
+        <td><span class="tag tag-red">UNSTABLE</span></td>
+      </tr>
+      
+      <tr>
+        <td>365d</td>
+        <td class="mono">5,034</td>
+        <td class="mono">-0.300</td>
+        <td class="mono">31.0%</td>
+        <td class="mono yellow">4,070</td>
+        <td class="mono red bold">+2.36</td>
+        <td><span class="tag tag-red">UNSTABLE</span></td>
+      </tr>
+      
+      <tr>
+        <td>365d</td>
+        <td class="mono">5,236</td>
+        <td class="mono">-0.261</td>
+        <td class="mono">30.2%</td>
+        <td class="mono yellow">3,705</td>
+        <td class="mono red bold">+2.05</td>
+        <td><span class="tag tag-red">UNSTABLE</span></td>
+      </tr>
+      
+    </tbody>
+  </table>
+</div>
+
+
+
+</main>
+
+<script>
+  // Chart.js global dark-theme defaults
+  Chart.defaults.color            = '#666';
+  Chart.defaults.borderColor      = '#1f1f1f';
+  Chart.defaults.plugins.legend.labels.color = '#888';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
+  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
+  Chart.defaults.plugins.tooltip.borderWidth       = 1;
+  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
+  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
+  Chart.defaults.plugins.tooltip.padding           = 10;
+
+  function makeLineOpts(yLabel) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+
+  function makeBarOpts(yLabel, horizontal) {
+    return {
+      indexAxis: horizontal ? 'y' : 'x',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+</script>
+
+
+<script>
+  // QV Convexity chart
+  const qvCtx = document.getElementById('qvChart').getContext('2d');
+  new Chart(qvCtx, {
+    type: 'bar',
+    data: {
+      labels: ["14d", "30d", "60d", "91d", "180d", "365d"],
+      datasets: [
+        {
+          label: 'Mean QV Convexity ×1e4',
+          data: [0.0068, 0.0592, 0.3696, 1.0296, 4.6242, 15.9343],
+          backgroundColor: 'rgba(0,255,136,0.6)',
+          borderColor: '#00ff88',
+          borderWidth: 1,
+          borderRadius: 4,
+        },
+        {
+          label: 'Max QV Convexity ×1e4',
+          data: [0.0068, 0.0592, 0.3696, 1.0296, 4.6242, 15.9343],
+          backgroundColor: 'rgba(255,204,0,0.3)',
+          borderColor: '#ffcc00',
+          borderWidth: 1,
+          borderRadius: 4,
+        },
+      ]
+    },
+    options: {
+      ...makeBarOpts('QV Convexity × 10⁴'),
+      plugins: {
+        legend: {
+          display: true, position: 'top',
+          labels: { color: '#888', font: { family: 'Menlo', size: 10 } }
+        }
+      }
+    }
+  });
+
+  // Vanna chart
+  const vannaCtx = document.getElementById('vannaChart').getContext('2d');
+  const vannaVals = [-0.1144, -0.2247, -0.2335, -0.2738, -0.1435, -0.0045];
+  new Chart(vannaCtx, {
+    type: 'bar',
+    data: {
+      labels: ["14d", "30d", "60d", "91d", "180d", "365d"],
+      datasets: [{
+        label: 'Mean Vanna',
+        data: vannaVals,
+        backgroundColor: vannaVals.map(v => v < 0 ? 'rgba(255,51,51,0.5)' : 'rgba(51,136,255,0.5)'),
+        borderColor: vannaVals.map(v => v < 0 ? '#ff3333' : '#3388ff'),
+        borderWidth: 1,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      ...makeBarOpts('Vanna (∂²V/∂S∂σ)'),
+      scales: {
+        ...makeBarOpts().scales,
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+        }
+      }
+    }
+  });
+
+  // Vomma z-score scatter
+  const scatterCtx = document.getElementById('vommaScatter').getContext('2d');
+  const scatterLm = [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0929, 0.1321, 0.1714, 0.2107, 0.25, -0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.1321, 0.2107, 0.25, -0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, -0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, -0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, 0.0929, -0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, 0.0929, 0.1321];
+  const scatterZ  = [-1.061, -1.044, -0.994, -0.858, -0.571, -0.167, -0.039, -0.699, -0.872, -1.04, -1.058, -1.062, -1.064, -1.065, -0.818, -0.636, -0.371, -0.041, 0.264, 0.345, -0.031, -0.795, -0.933, -1.067, -1.067, -1.061, 0.053, 0.335, 0.595, 0.764, 0.745, 0.442, -0.167, -0.869, -0.978, 0.676, 0.742, 0.955, 1.084, 1.069, 0.85, 0.389, -0.271, -0.911, -1.005, 0.312, 1.742, 1.724, 1.574, 1.27, 0.801, 0.194, -0.465, -0.988, -1.061, -0.245, 1.837, 2.36, 2.052, 1.629, 1.098, 0.488, -0.148, -0.724, -1.117, -1.167, -0.695, 0.463, 2.373];
+  const scatterT  = [14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 365, 365, 365, 365, 365, 365, 365, 365, 365, 365, 365, 365];
+
+  // Color by maturity
+  const matColorMap = {14:'#ff3333', 30:'#ff8844', 60:'#ffcc00', 91:'#00ff88', 180:'#44aaff', 365:'#aa44ff'};
+  const scatterColors = scatterT.map(t => matColorMap[t] || '#888');
+
+  new Chart(scatterCtx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        {
+          label: 'Vomma Z-score',
+          data: scatterLm.map((x, i) => ({ x, y: scatterZ[i] })),
+          backgroundColor: scatterColors,
+          pointRadius: 7,
+          pointHoverRadius: 9,
+        },
+        // Zero line
+        {
+          label: 'Zero',
+          data: [{x: -0.4, y: 0}, {x: 0.25, y: 0}],
+          type: 'line',
+          borderColor: '#333',
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          fill: false,
+        },
+        // Unstable threshold line +2
+        {
+          label: '|z| = 2 (unstable)',
+          data: [{x: -0.4, y: 2}, {x: 0.25, y: 2}],
+          type: 'line',
+          borderColor: 'rgba(255,51,51,0.5)',
+          borderWidth: 1.5,
+          borderDash: [6, 3],
+          pointRadius: 0,
+          fill: false,
+        },
+        // Unstable threshold line -2
+        {
+          label: '',
+          data: [{x: -0.4, y: -2}, {x: 0.25, y: -2}],
+          type: 'line',
+          borderColor: 'rgba(255,51,51,0.5)',
+          borderWidth: 1.5,
+          borderDash: [6, 3],
+          pointRadius: 0,
+          fill: false,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: true, position: 'top',
+          labels: {
+            color: '#888', font: { family: 'Menlo', size: 10 },
+            filter: item => item.text !== ''
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              if (ctx.datasetIndex === 0) {
+                const i = ctx.dataIndex;
+                return [
+                  `  lm=${ctx.parsed.x.toFixed(3)}`,
+                  `  z=${ctx.parsed.y.toFixed(3)}`,
+                  `  T=${scatterT[i]}d`,
+                ];
+              }
+              return null;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'Log-Moneyness', color: '#444', font: { size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'Vomma Z-Score', color: '#444', font: { size: 10 } },
+        },
+      }
+    }
+  });
+</script>
+
+
+</body>
+</html>

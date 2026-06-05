@@ -1,0 +1,1593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Backtest — Vol System</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a0a;
+      --surface:  #111111;
+      --surface2: #161616;
+      --border:   #1f1f1f;
+      --border2:  #2a2a2a;
+      --accent:   #00ff88;
+      --accent2:  #00cc6a;
+      --text:     #e4e4e4;
+      --text2:    #888888;
+      --text3:    #555555;
+      --red:      #ff3333;
+      --red2:     #cc1111;
+      --blue:     #3388ff;
+      --yellow:   #ffcc00;
+      --orange:   #ff8833;
+      --purple:   #aa44ff;
+      --radius:   6px;
+      --radius2:  10px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Navigation ─────────────────────────────────────────────────────── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0d0d0d;
+      border-bottom: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      height: 52px;
+      gap: 0;
+    }
+
+    .nav-brand {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-right: 36px;
+      white-space: nowrap;
+    }
+    .nav-brand span { color: var(--text2); font-weight: 400; }
+
+    .nav-links { display: flex; gap: 0; }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 18px;
+      height: 52px;
+      color: var(--text2);
+      text-decoration: none;
+      font-size: 12.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
+    .nav-link.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .nav-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.6;
+    }
+
+    .nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text3);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Page Layout ─────────────────────────────────────────────────────── */
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 28px 28px 60px;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .page-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text3);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .page-badge {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text3);
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Grid Helpers ────────────────────────────────────────────────────── */
+    .grid       { display: grid; gap: 16px; }
+    .grid-2     { grid-template-columns: repeat(2, 1fr); }
+    .grid-3     { grid-template-columns: repeat(3, 1fr); }
+    .grid-4     { grid-template-columns: repeat(4, 1fr); }
+    .grid-5     { grid-template-columns: repeat(5, 1fr); }
+    .col-2      { grid-column: span 2; }
+    .col-3      { grid-column: span 3; }
+    .col-4      { grid-column: span 4; }
+    .col-full   { grid-column: 1 / -1; }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius2);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent);
+    }
+
+    .card-sm { padding: 16px; }
+    .card-lg { padding: 28px; }
+
+    .card-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 8px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      font-family: 'Menlo', 'Courier New', monospace;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .card-value.lg { font-size: 40px; }
+    .card-value.sm { font-size: 22px; }
+    .card-value.green { color: var(--accent); }
+    .card-value.red   { color: var(--red); }
+    .card-value.blue  { color: var(--blue); }
+    .card-value.yellow{ color: var(--yellow); }
+    .card-value.dim   { color: var(--text2); }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 5px;
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Stat Row ─────────────────────────────────────────────────────────── */
+    .stat-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+    .stat-change { font-family: 'Menlo', monospace; }
+    .stat-change.up   { color: var(--accent); }
+    .stat-change.down { color: var(--red); }
+
+    /* ── Regime Badge ─────────────────────────────────────────────────────── */
+    .regime-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      border: 1px solid;
+    }
+
+    /* ── Banner ───────────────────────────────────────────────────────────── */
+    .banner {
+      border-radius: var(--radius2);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid;
+    }
+    .banner-warn {
+      background: rgba(255,51,51,0.06);
+      border-color: rgba(255,51,51,0.25);
+    }
+    .banner-info {
+      background: rgba(0,255,136,0.04);
+      border-color: rgba(0,255,136,0.2);
+    }
+    .banner-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .banner-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .banner-body {
+      font-size: 12.5px;
+      color: var(--text2);
+      line-height: 1.6;
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 9px 12px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Menlo', 'Courier New', monospace;
+      font-size: 12.5px;
+      color: var(--text2);
+    }
+    .data-table td:first-child { color: var(--text); font-family: inherit; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: var(--surface2); }
+    .data-table .green { color: var(--accent); }
+    .data-table .red   { color: var(--red); }
+
+    /* ── Chart Container ──────────────────────────────────────────────────── */
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+    }
+    .chart-wrap.tall   { height: 340px; }
+    .chart-wrap.xtall  { height: 420px; }
+    .chart-wrap.short  { height: 180px; }
+    .chart-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 14px;
+    }
+
+    /* ── Heatmap Table ────────────────────────────────────────────────────── */
+    .heatmap-wrap { overflow-x: auto; }
+    .heatmap {
+      border-collapse: collapse;
+      font-size: 11px;
+      width: 100%;
+    }
+    .heatmap th {
+      padding: 5px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text3);
+      white-space: nowrap;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .heatmap th.row-head { text-align: left; padding-right: 12px; }
+    .heatmap td {
+      width: 72px;
+      height: 44px;
+      text-align: center;
+      vertical-align: middle;
+      font-family: 'Menlo', monospace;
+      font-size: 10px;
+      border: 1px solid #0a0a0a;
+      transition: transform 0.1s;
+      cursor: default;
+    }
+    .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
+    .heatmap td.empty { background: #0d0d0d; }
+    .heatmap td.unstable {
+      border: 2px solid #ff3333 !important;
+      box-shadow: 0 0 8px rgba(255,51,51,0.4);
+    }
+    .heatmap .mat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text2);
+      font-family: inherit;
+      padding-right: 14px;
+      white-space: nowrap;
+    }
+
+    /* ── Progress Bars ────────────────────────────────────────────────────── */
+    .progress-bar-wrap { margin-top: 10px; }
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .progress-label {
+      width: 90px;
+      font-size: 11px;
+      color: var(--text2);
+      flex-shrink: 0;
+    }
+    .progress-track {
+      flex: 1;
+      height: 6px;
+      background: var(--border2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .progress-val {
+      width: 44px;
+      font-size: 11px;
+      color: var(--text2);
+      text-align: right;
+      font-family: 'Menlo', monospace;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 16px 0;
+    }
+
+    /* ── Tag/Pill ─────────────────────────────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .tag-green { background: rgba(0,255,136,0.12); color: var(--accent); border: 1px solid rgba(0,255,136,0.25); }
+    .tag-red   { background: rgba(255,51,51,0.1);  color: var(--red);    border: 1px solid rgba(255,51,51,0.25); }
+    .tag-blue  { background: rgba(51,136,255,0.1); color: var(--blue);   border: 1px solid rgba(51,136,255,0.25); }
+    .tag-dim   { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
+
+    /* ── Feller / Param Box ───────────────────────────────────────────────── */
+    .param-box {
+      text-align: center;
+      padding: 18px 12px;
+    }
+    .param-sym {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text3);
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .param-val {
+      font-size: 26px;
+      font-weight: 700;
+      font-family: 'Menlo', monospace;
+      letter-spacing: -0.02em;
+    }
+    .param-desc {
+      font-size: 10.5px;
+      color: var(--text3);
+      margin-top: 5px;
+    }
+
+    /* ── Utilities ────────────────────────────────────────────────────────── */
+    .mono { font-family: 'Menlo', 'Courier New', monospace; }
+    .bold { font-weight: 700; }
+    .mt8  { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+    .mt16 { margin-top: 16px; }
+    .mt20 { margin-top: 20px; }
+    .mb12 { margin-bottom: 12px; }
+    .flex { display: flex; align-items: center; }
+    .gap8 { gap: 8px; }
+    .gap12{ gap: 12px; }
+    .space-between { justify-content: space-between; }
+    .text-right { text-align: right; }
+    .opacity-50 { opacity: 0.5; }
+    .green { color: var(--accent); }
+    .red   { color: var(--red); }
+    .blue  { color: var(--blue); }
+    .dim   { color: var(--text2); }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Chart.js global overrides ────────────────────────────────────────── */
+    canvas { display: block; }
+
+    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
+    .top-banner {
+      height: 36px;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 12px;
+      font-size: 11px;
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .top-banner-links a {
+      color: #555;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      transition: color 0.15s;
+    }
+    .top-banner-links a:hover { color: #00ff88; }
+    .top-banner-sep { color: #333; }
+
+    /* ── Responsive grid (Bug 6) ───────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+      .page { padding: 16px !important; }
+      .nav { padding: 0 12px; }
+      .nav-brand { margin-right: 16px; }
+    }
+    @media (max-width: 540px) {
+      .grid-4 { grid-template-columns: 1fr !important; }
+      .grid-3 { grid-template-columns: 1fr !important; }
+      .grid-2 { grid-template-columns: 1fr !important; }
+      .page { padding: 10px !important; }
+      .card { padding: 14px !important; }
+      .card-value { font-size: 28px !important; }
+      .nav-brand span { display: none; }
+      .top-banner-text { font-size: 10px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="top-banner">
+  <div class="top-banner-text">
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 573 tests &nbsp;·&nbsp; live market data &nbsp;·&nbsp; by Navnoor Bawa
+  </div>
+  <div class="top-banner-links">
+    <a href="https://github.com/NavnoorBawa" target="_blank" rel="noopener">GitHub</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
+  </div>
+</div>
+
+<nav class="nav">
+  <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
+  <div class="nav-links">
+    <a href="index.html"            class="nav-link ">
+      <span class="nav-dot"></span>Live Market
+    </a>
+    <a href="calibration.html" class="nav-link ">
+      <span class="nav-dot"></span>Calibration
+    </a>
+    <a href="greeks.html"      class="nav-link ">
+      <span class="nav-dot"></span>Greeks Monitor
+    </a>
+    <a href="backtest.html"    class="nav-link active">
+      <span class="nav-dot"></span>Backtest
+    </a>
+  </div>
+  <div class="nav-status">
+    <div class="status-dot"></div>
+    LIVE DATA
+  </div>
+</nav>
+
+<main class="page">
+  
+<div class="page-header">
+  <div class="page-title">C10 Backtest Results — 2018 → 2025</div>
+  <div class="page-subtitle">Delta-hedged straddle portfolio · 4 strategies · $1M initial capital</div>
+  <div class="page-badge">
+    NAV: $790,579  ·  P&L: $-209,421
+  </div>
+</div>
+
+<!-- ── Equity Curve ───────────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="flex space-between mb12">
+    <div class="chart-title" style="margin-bottom:0;">Portfolio Equity Curve — % Return from $1M</div>
+    <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
+      <span style="color:#00ff88;">── Portfolio</span>
+      <span style="color:#3388ff;">── S1 IVR</span>
+      <span style="color:#ffcc00;">── S2 VIX TS</span>
+      <span style="color:#ff8833;">── S3 Disp</span>
+      <span style="color:#aa44ff;">── Combined</span>
+    </div>
+  </div>
+  <div class="chart-wrap xtall">
+    <canvas id="equityChart"></canvas>
+  </div>
+</div>
+
+<!-- ── C14 Research Signals ──────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;border-color:rgba(0,200,255,0.2);background:rgba(0,200,255,0.02);">
+  <div class="flex space-between mb12">
+    <div>
+      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C14 Research Signals — S1C Contrarian PDV &amp; S4 VRP</div>
+      <div style="font-size:11.5px;color:var(--text2);">
+        Standalone research equity curves — not included in the main portfolio. Isolation prevents anti-correlation cancellation with S1.
+      </div>
+    </div>
+    <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
+      <span style="color:#00ccff;">── S1C Contrarian</span>
+      <span style="color:#ff44aa;">── S4 VRP</span>
+    </div>
+  </div>
+  <div class="chart-wrap tall">
+    <canvas id="researchChart"></canvas>
+  </div>
+
+  <!-- Research stats row -->
+  <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
+    <!-- S1C Card -->
+    <div style="flex:1;min-width:260px;padding:14px 16px;border-radius:8px;background:rgba(0,200,255,0.06);border:1px solid rgba(0,200,255,0.2);">
+      <div style="font-size:12px;color:#00ccff;font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S1C — CONTRARIAN PDV SIGNAL</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11.5px;">
+        <span style="color:var(--text3);">Total P&amp;L</span>
+        <span class="mono green">$93,720</span>
+        <span style="color:var(--text3);">Sharpe</span>
+        <span class="mono green">-0.274</span>
+        <span style="color:var(--text3);">Win Rate</span>
+        <span class="mono">45.90%</span>
+        <span style="color:var(--text3);">N Trades</span>
+        <span class="mono">76</span>
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
+        PDV model overestimates vol in fear regimes (R0). S1C shorts when PDV &gt; ATM IV
+        (model panic &gt; market), longs when market premium stays elevated (R1).
+        <strong style="color:#00ccff;">S1 direction was backwards</strong> —
+        the spread is a contrarian indicator. Gross alpha +$291K eaten 68% by costs.
+      </div>
+    </div>
+    <!-- S4 Card -->
+    <div style="flex:1;min-width:260px;padding:14px 16px;border-radius:8px;background:rgba(255,68,170,0.05);border:1px solid rgba(255,68,170,0.2);">
+      <div style="font-size:12px;color:#ff44aa;font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S4 — VOLATILITY RISK PREMIUM (VRP)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11.5px;">
+        <span style="color:var(--text3);">Total P&amp;L</span>
+        <span class="mono red">$-221,386</span>
+        <span style="color:var(--text3);">Sharpe</span>
+        <span class="mono red">-1.264</span>
+        <span style="color:var(--text3);">Win Rate</span>
+        <span class="mono">34.50%</span>
+        <span style="color:var(--text3);">N Trades</span>
+        <span class="mono">91</span>
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
+        VRP z-score &gt; 1.0 fires when fear premium is <em>unusually elevated</em> —
+        a pre-event signal, not post-event mean-reversion. Selling straddles into
+        rising-vol events is a negative-expectancy trade at retail bid-ask.
+        <strong style="color:#ff44aa;">VRP is structurally unextractable at retail transaction costs.</strong>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Metrics + Signal P&L ─────────────────────────────────────────────── -->
+<div class="grid grid-3" style="margin-bottom:16px;">
+
+  <!-- Metrics Table -->
+  <div class="card">
+    <div class="chart-title">Key Performance Metrics</div>
+    <table class="data-table mt8">
+      <tbody>
+        
+        <tr>
+          <td>Cumulative Return</td>
+          <td class="mono red" style="text-align:right;">
+            -20.94%
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Ann. Return</td>
+          <td class="mono red" style="text-align:right;">
+            -3.24%
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Sharpe (rf=5%)</td>
+          <td class="mono red" style="text-align:right;">
+            -1.591
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Sortino</td>
+          <td class="mono red" style="text-align:right;">
+            -1.754
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Max Drawdown</td>
+          <td class="mono red" style="text-align:right;">
+            -23.61%
+          </td>
+        </tr>
+        
+        <tr>
+          <td>DD Duration</td>
+          <td class="mono red" style="text-align:right;">
+            1648 days
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Calmar</td>
+          <td class="mono red" style="text-align:right;">
+            -0.137
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Win Rate</td>
+          <td class="mono green" style="text-align:right;">
+            50.41%
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Avg P&amp;L / Trade</td>
+          <td class="mono red" style="text-align:right;">
+            $-2,756
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Best Day</td>
+          <td class="mono green" style="text-align:right;">
+            3.07%
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Worst Day</td>
+          <td class="mono red" style="text-align:right;">
+            -6.77%
+          </td>
+        </tr>
+        
+        <tr>
+          <td>N Trades</td>
+          <td class="mono green" style="text-align:right;">
+            76
+          </td>
+        </tr>
+        
+        <tr>
+          <td>N Days</td>
+          <td class="mono green" style="text-align:right;">
+            1800
+          </td>
+        </tr>
+        
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Signal P&L Bar Chart -->
+  <div class="card col-2">
+    <div class="chart-title">Total P&L by Signal (in $000s)</div>
+    <div class="chart-wrap tall">
+      <canvas id="signalPnlChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Annual Returns + Walk-Forward ────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- Annual Returns -->
+  <div class="card">
+    <div class="chart-title">Annual Return — 2018 → 2025</div>
+    <div class="chart-wrap">
+      <canvas id="annualChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Walk-Forward Sharpe -->
+  <div class="card">
+    <div class="flex space-between mb12">
+      <div class="chart-title" style="margin-bottom:0;">Walk-Forward Sharpe — 6-Month OOS Windows</div>
+      <div style="font-size:11px;color:var(--text3);">
+        <span class="red bold">11</span>/13 negative
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="wfChart"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Per-Signal Metrics Table ──────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">Per-Signal Performance Breakdown</div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>Signal</th>
+        <th>Sharpe</th>
+        <th>Ann. Return</th>
+        <th>Win Rate</th>
+        <th>N Trades</th>
+        <th>Total P&L</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+      
+      <tr>
+        <td style="font-weight:600;">S1 IVR</td>
+      
+        <td class="mono red">-0.655</td>
+        <td class="mono red">-9.01%</td>
+        <td class="mono">46.96%</td>
+        <td class="mono">76</td>
+        <td class="mono red">$-490,616</td>
+        <td>
+          
+          <span class="tag tag-red">NEGATIVE</span>
+          
+        </td>
+      </tr>
+      
+      
+      
+      <tr>
+        <td style="font-weight:600;">S2 VIX TS</td>
+      
+        <td class="mono red">-1.544</td>
+        <td class="mono red">-1.49%</td>
+        <td class="mono">45.00%</td>
+        <td class="mono">64</td>
+        <td class="mono red">$-101,703</td>
+        <td>
+          
+          <span class="tag tag-red">NEGATIVE</span>
+          
+        </td>
+      </tr>
+      
+      
+      
+      <tr>
+        <td style="font-weight:600;">S3 Disp</td>
+      
+        <td class="mono green">-13.707</td>
+        <td class="mono green">0.27%</td>
+        <td class="mono">54.21%</td>
+        <td class="mono">26</td>
+        <td class="mono green">$19,367</td>
+        <td>
+          
+          <span class="tag tag-green">POSITIVE</span>
+          
+        </td>
+      </tr>
+      
+      <tr>
+        <td colspan="7" style="font-size:11px;color:var(--text3);padding:4px 12px 8px;border-bottom:1px solid var(--border);">
+          * S3 active-day Sharpe not meaningful — 28 trades over 7 years. Win rate (54%) and total P&amp;L (+$21,003) are the relevant metrics.
+        </td>
+      </tr>
+      
+      
+      
+      <tr>
+        <td style="font-weight:600;">Combined</td>
+      
+        <td class="mono red">-1.661</td>
+        <td class="mono red">-4.21%</td>
+        <td class="mono">44.60%</td>
+        <td class="mono">102</td>
+        <td class="mono red">$-264,732</td>
+        <td>
+          
+          <span class="tag tag-red">NEGATIVE</span>
+          
+        </td>
+      </tr>
+      
+      
+      
+      <tr style="opacity:0.75;background:rgba(0,200,255,0.02);">
+        <td style="font-weight:600;">
+          S1C Contrarian
+          <span class="tag" style="background:rgba(0,200,255,0.15);color:#00ccff;border-color:rgba(0,200,255,0.3);font-size:9px;margin-left:6px;">RESEARCH</span>
+        </td>
+      
+        <td class="mono green">-0.274</td>
+        <td class="mono green">1.26%</td>
+        <td class="mono">45.90%</td>
+        <td class="mono">76</td>
+        <td class="mono green">$93,720</td>
+        <td>
+          
+          <span class="tag" style="background:rgba(0,200,255,0.15);color:#00ccff;border-color:rgba(0,200,255,0.3);">STANDALONE</span>
+          
+        </td>
+      </tr>
+      
+      
+      
+      <tr style="opacity:0.75;background:rgba(0,200,255,0.02);">
+        <td style="font-weight:600;">
+          S4 VRP
+          <span class="tag" style="background:rgba(0,200,255,0.15);color:#00ccff;border-color:rgba(0,200,255,0.3);font-size:9px;margin-left:6px;">RESEARCH</span>
+        </td>
+      
+        <td class="mono red">-1.264</td>
+        <td class="mono red">-3.44%</td>
+        <td class="mono">34.50%</td>
+        <td class="mono">91</td>
+        <td class="mono red">$-221,386</td>
+        <td>
+          
+          <span class="tag" style="background:rgba(0,200,255,0.15);color:#00ccff;border-color:rgba(0,200,255,0.3);">STANDALONE</span>
+          
+        </td>
+      </tr>
+      
+      
+    </tbody>
+  </table>
+  <div style="margin-top:8px;font-size:11px;color:var(--text3);">
+    RESEARCH signals (S1C, S4) are standalone equity curves — not part of the main portfolio. See C14 panel above for full analysis.
+  </div>
+</div>
+
+<!-- ── Regime-Exit Variants Table ────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">Regime-Exit Variants — R2 Position Closure Impact</div>
+  <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
+    Exiting positions when regime transitions to R2 (rather than blocking new entries only) recovers +$300K over 7 years.
+  </div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>Signal</th>
+        <th>Original P&amp;L</th>
+        <th>R2-Exit P&amp;L</th>
+        <th>Improvement</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="font-weight:600;">S1 IVR</td>
+        <td class="mono red">−$502,671</td>
+        <td class="mono green">
+          $-223,696
+        </td>
+        <td class="mono green">+$230,817</td>
+      </tr>
+      <tr>
+        <td style="font-weight:600;">S2 VIX TS</td>
+        <td class="mono red">−$98,977</td>
+        <td class="mono green">
+          $-49,604
+        </td>
+        <td class="mono green">+$69,080</td>
+      </tr>
+      <tr>
+        <td style="font-weight:600;">S3 Dispersion</td>
+        <td class="mono green">+$21,003</td>
+        <td class="mono" style="color:var(--text3);">unchanged</td>
+        <td class="mono" style="color:var(--text3);">—</td>
+      </tr>
+    </tbody>
+  </table>
+  <div style="margin-top:10px;font-size:11px;color:var(--text3);">
+    R2 = VOMMA_ACTIVE (VVIX &gt; 100). R2-exit variant: forced position closure + state reset on R2 transition. Backtest: 2018–2025, $1M notional.
+  </div>
+</div>
+
+<!-- ── Analysis Banner ───────────────────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+  <div class="card" style="border-color:rgba(255,51,51,0.2);background:rgba(255,51,51,0.03);">
+    <div class="chart-title" style="color:#ff8833;">Key Finding — Why the Strategy Underperformed</div>
+    <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
+      <div style="margin-bottom:8px;">
+        <span class="tag tag-red" style="margin-right:8px;">S1 −$502,671</span>
+        S1 (IVR/PDV) goes short gamma when IVR is high relative to PDV.
+        In 2018, 2019, and 2024 — all elevated-vol years — realised vol stayed elevated,
+        meaning premium sellers systematically underpriced tail risk.
+      </div>
+      <div style="margin-bottom:8px;">
+        <span class="tag tag-dim" style="margin-right:8px;">COSTS −$334,537</span>
+        Total transaction costs (bid-ask + commissions + slippage) consumed
+        <strong style="color:var(--text);">$334k</strong> over 7 years — offsetting any alpha in the signal.
+      </div>
+      <div>
+        <span class="tag tag-red" style="margin-right:8px;">REGIME MISMATCH</span>
+        52.9% of backtest days were R2 (VOMMA_ACTIVE) — a regime favouring
+        vomma trades, not gamma strategies. S1 and S2 were trading in the wrong regime
+        for 952 / 1800 days.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="border-color:rgba(0,255,136,0.15);background:rgba(0,255,136,0.02);">
+    <div class="chart-title" style="color:#00ff88;">Only Profitable Signal — S3 Dispersion</div>
+    <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
+      <div style="margin-bottom:8px;">
+        <span class="tag tag-green" style="margin-right:8px;">S3 +$21,003</span>
+        S3 (VIX/VVIX ratio proxy) is long-only — buys when volatility appears cheap
+        relative to vol-of-vol. 14 trades in 7 years with <strong style="color:#00ff88;">92.9% win rate</strong>.
+      </div>
+      <div style="margin-bottom:8px;">
+        The strategy's rarity is its strength: it fires only when the signal is extreme,
+        and it tends to correctly identify vol spikes after entry.
+      </div>
+      <div>
+        <span class="tag tag-green" style="margin-right:8px;">BEST DAY</span>
+        <span class="mono">2024-12-20  +3.69%</span>  — day after the worst day,
+        as the FOMC panic resolved and vol mean-reverted.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Annual Heatmap (text-based) ──────────────────────────────────────── -->
+<div class="card">
+  <div class="chart-title">Annual Returns Heatmap</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(255,51,51,0.1);
+      border:1px solid rgba(255,51,51,0.25);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2018</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#ff3333;">
+        -8.8%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(255,51,51,0.1);
+      border:1px solid rgba(255,51,51,0.25);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2019</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#ff3333;">
+        -4.2%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(255,51,51,0.1);
+      border:1px solid rgba(255,51,51,0.25);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2020</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#ff3333;">
+        -0.0%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(0,200,112,0.12);
+      border:1px solid rgba(0,200,112,0.3);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2021</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#00c870;">
+        +1.1%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(255,51,51,0.1);
+      border:1px solid rgba(255,51,51,0.25);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2022</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#ff3333;">
+        -3.5%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(0,200,112,0.12);
+      border:1px solid rgba(0,200,112,0.3);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2023</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#00c870;">
+        +3.5%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(255,51,51,0.1);
+      border:1px solid rgba(255,51,51,0.25);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2024</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#ff3333;">
+        -6.1%
+      </div>
+    </div>
+    
+    <div style="
+      flex:1; min-width:90px; max-width:140px;
+      padding:16px 12px;
+      border-radius:8px;
+      background:rgba(255,51,51,0.1);
+      border:1px solid rgba(255,51,51,0.25);
+      text-align:center;
+    ">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">2025</div>
+      <div class="mono" style="font-size:22px;font-weight:800;color:#ff3333;">
+        -3.3%
+      </div>
+    </div>
+    
+  </div>
+</div>
+
+<!-- ── Improvement Summary ────────────────────────────────────────────────── -->
+
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">System Improvements — Steps 1–8 Summary</div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>Step</th>
+        <th>Name</th>
+        <th>What Changed</th>
+        <th>Before</th>
+        <th>After</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">1</td>
+        <td style="font-weight:600;white-space:nowrap;">Disable VIX options leg</td>
+        <td style="font-size:11px;color:var(--text2);">JOINT_W3 = 0.0 (was 0.2). Heston CIR density is structurally mis-specified for VIX options.</td>
+        <td class="mono red" style="font-size:11px;">VIX opt RMSE 37.14 vp (corrupts calibration)</td>
+        <td class="mono green" style="font-size:11px;">SPX-only objective. RMSE expected ↓ from 5.3 → ~2.5 vp.</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">2</td>
+        <td style="font-weight:600;white-space:nowrap;">Vega-weighted anchor selection</td>
+        <td style="font-size:11px;color:var(--text2);">Select 9 highest-BS-vega options per expiry (was log-uniform grid). Moneyness lo 0.70 (was 0.75).</td>
+        <td class="mono red" style="font-size:11px;">Log-uniform includes low-information deep OTM options</td>
+        <td class="mono green" style="font-size:11px;">Near-ATM anchors only; more stable Heston gradient.</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">3</td>
+        <td style="font-weight:600;white-space:nowrap;">SVI smoothing (SSVI surface)</td>
+        <td style="font-size:11px;color:var(--text2);">Fit Gatheral (2004) SVI per expiry; calibrate Heston to smooth surface not noisy quotes.</td>
+        <td class="mono red" style="font-size:11px;">SPX RMSE ~5.3 vol pts (market microstructure noise)</td>
+        <td class="mono green" style="font-size:11px;">Target SPX RMSE ~2.0 vol pts. Butterfly-free surface.</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">4</td>
+        <td style="font-weight:600;white-space:nowrap;">Per-date T-bill rate</td>
+        <td style="font-size:11px;color:var(--text2);">^IRX 3M T-bill from DB replaces fixed r=0.045 in backtest. 18 new tests.</td>
+        <td class="mono red" style="font-size:11px;">Fixed r=0.045 throughout 2018–2025</td>
+        <td class="mono green" style="font-size:11px;">Per-date rate (2018: ~1.5%, 2023: ~5.3%, 2025: ~4.3%).</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">5</td>
+        <td style="font-weight:600;white-space:nowrap;">Adaptive VVIX threshold</td>
+        <td style="font-size:11px;color:var(--text2);">Rolling 252-day 80th percentile of VVIX as R2 gate (was fixed 100).</td>
+        <td class="mono red" style="font-size:11px;">R2 frequency ~53% (over-triggered in low-vol periods)</td>
+        <td class="mono green" style="font-size:11px;">Expected R2 frequency ~25% (calibrated to market regime).</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">6</td>
+        <td style="font-weight:600;white-space:nowrap;">Isotonic calibration + step sizing</td>
+        <td style="font-size:11px;color:var(--text2);">CalibratedClassifierCV(FrozenEstimator(XGB), isotonic). S1S step: full/half/flat at P(R2) 0.4/0.6.</td>
+        <td class="mono red" style="font-size:11px;">Raw XGB probabilities (overconfident). Linear 1−p scaling.</td>
+        <td class="mono green" style="font-size:11px;">Calibrated probabilities. Cleaner 3-level position sizing.</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">7</td>
+        <td style="font-weight:600;white-space:nowrap;">Portfolio Kelly netting</td>
+        <td style="font-size:11px;color:var(--text2);">Rolling 60-day pairwise P&amp;L corr; mult = sqrt(2/(1+r_ij)). Gross cap 50% NAV.</td>
+        <td class="mono red" style="font-size:11px;">No correlation netting; each signal sizes off full NAV ÷ 4</td>
+        <td class="mono green" style="font-size:11px;">Expected MaxDD −26% → ~−20% via diversification benefit.</td>
+      </tr>
+      
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">8</td>
+        <td style="font-weight:600;white-space:nowrap;">Monthly Heston recalibration</td>
+        <td style="font-size:11px;color:var(--text2);">BacktestEngine._recalibrate_heston() caches monthly params to data_store/heston_params/.</td>
+        <td class="mono red" style="font-size:11px;">Fixed 2026-03-24 Heston params throughout 2018–2025</td>
+        <td class="mono green" style="font-size:11px;">Time-varying params. Infrastructure ready; ~84 calibrations on first run.</td>
+      </tr>
+      
+    </tbody>
+  </table>
+</div>
+
+
+
+</main>
+
+<script>
+  // Chart.js global dark-theme defaults
+  Chart.defaults.color            = '#666';
+  Chart.defaults.borderColor      = '#1f1f1f';
+  Chart.defaults.plugins.legend.labels.color = '#888';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
+  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
+  Chart.defaults.plugins.tooltip.borderWidth       = 1;
+  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
+  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
+  Chart.defaults.plugins.tooltip.padding           = 10;
+
+  function makeLineOpts(yLabel) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+
+  function makeBarOpts(yLabel, horizontal) {
+    return {
+      indexAxis: horizontal ? 'y' : 'x',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+</script>
+
+
+<script>
+  // ── Equity Curve ──────────────────────────────────────────────────────────
+  const eqCtx = document.getElementById('equityChart').getContext('2d');
+  const eqDates = ["2018-01-02", "2018-01-05", "2018-01-10", "2018-01-16", "2018-01-19", "2018-01-24", "2018-01-29", "2018-02-01", "2018-02-06", "2018-02-09", "2018-02-14", "2018-02-20", "2018-02-23", "2018-02-28", "2018-03-05", "2018-03-08", "2018-03-13", "2018-03-16", "2018-03-21", "2018-03-26", "2018-03-29", "2018-04-04", "2018-04-09", "2018-04-12", "2018-04-17", "2018-04-20", "2018-04-25", "2018-04-30", "2018-05-03", "2018-05-08", "2018-05-11", "2018-05-16", "2018-05-21", "2018-05-24", "2018-05-30", "2018-06-04", "2018-06-07", "2018-06-12", "2018-06-15", "2018-06-20", "2018-06-25", "2018-06-28", "2018-07-03", "2018-07-09", "2018-07-12", "2018-07-17", "2018-07-20", "2018-07-25", "2018-07-30", "2018-08-02", "2018-08-07", "2018-08-10", "2018-08-15", "2018-08-20", "2018-08-23", "2018-08-28", "2018-08-31", "2018-09-06", "2018-09-11", "2018-09-14", "2018-09-19", "2018-09-24", "2018-09-27", "2018-10-02", "2018-10-05", "2018-10-10", "2018-10-15", "2018-10-18", "2018-10-23", "2018-10-26", "2018-10-31", "2018-11-05", "2018-11-08", "2018-11-13", "2018-11-16", "2018-11-21", "2018-11-27", "2018-11-30", "2018-12-06", "2018-12-11", "2018-12-14", "2018-12-19", "2018-12-24", "2018-12-28", "2019-01-03", "2019-01-08", "2019-01-11", "2019-01-16", "2019-01-22", "2019-01-25", "2019-01-30", "2019-02-04", "2019-02-07", "2019-02-12", "2019-02-15", "2019-02-21", "2019-02-26", "2019-03-01", "2019-03-06", "2019-03-11", "2019-03-14", "2019-03-19", "2019-03-22", "2019-03-27", "2019-04-01", "2019-04-04", "2019-04-09", "2019-04-12", "2019-04-17", "2019-04-23", "2019-04-26", "2019-05-01", "2019-05-06", "2019-05-09", "2019-05-14", "2019-05-17", "2019-05-22", "2019-05-28", "2019-05-31", "2019-06-05", "2019-06-10", "2019-06-13", "2019-06-18", "2019-06-21", "2019-06-26", "2019-07-01", "2019-07-09", "2019-07-12", "2019-07-17", "2019-07-22", "2019-07-25", "2019-07-30", "2019-08-02", "2019-08-07", "2019-08-12", "2019-08-15", "2019-08-20", "2019-08-23", "2019-08-28", "2019-09-03", "2019-09-06", "2019-09-11", "2019-09-16", "2019-09-19", "2019-09-24", "2019-09-27", "2019-10-02", "2019-10-07", "2019-10-10", "2019-10-15", "2019-10-18", "2019-10-23", "2019-10-28", "2019-10-31", "2019-11-05", "2019-11-08", "2019-11-13", "2019-11-18", "2019-11-21", "2019-11-26", "2019-12-02", "2019-12-05", "2019-12-10", "2019-12-13", "2019-12-18", "2019-12-23", "2019-12-27", "2020-01-02", "2020-01-07", "2020-01-10", "2020-01-15", "2020-01-21", "2020-01-24", "2020-01-29", "2020-02-03", "2020-02-06", "2020-02-11", "2020-02-14", "2020-02-20", "2020-02-25", "2020-02-28", "2020-03-04", "2020-03-09", "2020-03-12", "2020-03-17", "2020-03-20", "2020-03-25", "2020-03-30", "2020-04-02", "2020-04-07", "2020-04-13", "2020-04-16", "2020-04-21", "2020-04-24", "2020-04-29", "2020-05-04", "2020-05-07", "2020-05-12", "2020-05-15", "2020-05-20", "2020-05-26", "2020-05-29", "2020-06-03", "2020-06-08", "2020-06-15", "2020-06-18", "2020-06-23", "2020-06-26", "2020-07-01", "2020-07-07", "2020-07-10", "2020-07-15", "2020-07-20", "2020-07-23", "2020-07-28", "2020-07-31", "2020-08-05", "2020-08-10", "2020-08-13", "2020-08-18", "2020-08-21", "2020-08-26", "2020-08-31", "2020-09-03", "2020-09-09", "2020-09-14", "2020-09-17", "2020-09-22", "2020-09-25", "2020-09-30", "2020-10-05", "2020-10-08", "2020-10-13", "2020-10-16", "2020-10-21", "2020-10-26", "2020-10-29", "2020-11-03", "2020-11-06", "2020-11-11", "2020-11-16", "2020-11-19", "2020-11-24", "2020-11-30", "2020-12-03", "2020-12-08", "2020-12-11", "2020-12-16", "2020-12-21", "2020-12-24", "2020-12-30", "2021-01-05", "2021-01-08", "2021-01-13", "2021-01-19", "2021-01-26", "2021-01-29", "2021-02-03", "2021-02-08", "2021-02-11", "2021-02-19", "2021-02-24", "2021-03-01", "2021-03-04", "2021-03-09", "2021-03-12", "2021-03-17", "2021-03-22", "2021-03-25", "2021-03-30", "2021-04-05", "2021-04-08", "2021-04-13", "2021-04-16", "2021-04-21", "2021-04-26", "2021-04-29", "2021-05-04", "2021-05-13", "2021-05-18", "2021-05-27", "2021-06-02", "2021-06-07", "2021-06-10", "2021-06-15", "2021-06-18", "2021-06-23", "2021-06-28", "2021-07-01", "2021-07-07", "2021-07-12", "2021-07-15", "2021-07-20", "2021-07-23", "2021-07-28", "2021-08-02", "2021-08-05", "2021-08-10", "2021-08-13", "2021-08-18", "2021-08-23", "2021-08-26", "2021-08-31", "2021-09-03", "2021-09-09", "2021-09-14", "2021-09-17", "2021-09-22", "2021-09-27", "2021-09-30", "2021-10-05", "2021-10-08", "2021-10-13", "2021-10-18", "2021-10-21", "2021-10-26", "2021-10-29", "2021-11-03", "2021-11-08", "2021-11-11", "2021-11-16", "2021-11-19", "2021-11-24", "2021-11-30", "2021-12-03", "2021-12-08", "2021-12-13", "2021-12-16", "2021-12-21", "2021-12-27", "2021-12-30", "2022-01-04", "2022-01-07", "2022-01-12", "2022-01-18", "2022-01-21", "2022-01-26", "2022-01-31", "2022-02-03", "2022-02-08", "2022-02-11", "2022-02-16", "2022-02-22", "2022-02-25", "2022-03-02", "2022-03-07", "2022-03-10", "2022-03-15", "2022-03-18", "2022-03-23", "2022-03-28", "2022-03-31", "2022-04-05", "2022-04-08", "2022-04-13", "2022-04-19", "2022-04-22", "2022-04-27", "2022-05-02", "2022-05-05", "2022-05-10", "2022-05-13", "2022-05-18", "2022-05-23", "2022-05-26", "2022-06-01", "2022-06-06", "2022-06-09", "2022-06-14", "2022-06-17", "2022-06-23", "2022-06-28", "2022-07-01", "2022-07-07", "2022-07-12", "2022-07-15", "2022-07-20", "2022-07-25", "2022-07-28", "2022-08-02", "2022-08-05", "2022-08-10", "2022-08-15", "2022-08-18", "2022-08-23", "2022-08-26", "2022-08-31", "2022-09-06", "2022-09-09", "2022-09-14", "2022-09-19", "2022-09-22", "2022-09-27", "2022-09-30", "2022-10-05", "2022-10-10", "2022-10-13", "2022-10-18", "2022-10-21", "2022-10-26", "2022-10-31", "2022-11-03", "2022-11-08", "2022-11-11", "2022-11-16", "2022-11-21", "2022-11-25", "2022-11-30", "2022-12-05", "2022-12-08", "2022-12-13", "2022-12-16", "2022-12-21", "2022-12-27", "2022-12-30", "2023-01-05", "2023-01-10", "2023-01-13", "2023-01-19", "2023-01-24", "2023-01-27", "2023-02-01", "2023-02-06", "2023-02-09", "2023-02-14", "2023-02-17", "2023-02-23", "2023-02-28", "2023-03-03", "2023-03-08", "2023-03-13", "2023-03-16", "2023-03-21", "2023-03-24", "2023-03-29", "2023-04-03", "2023-04-06", "2023-04-12", "2023-04-17", "2023-04-20", "2023-04-25", "2023-04-28", "2023-05-03", "2023-05-08", "2023-05-11", "2023-05-16", "2023-05-19", "2023-05-24", "2023-05-30", "2023-06-02", "2023-06-07", "2023-06-12", "2023-06-15", "2023-06-21", "2023-06-26", "2023-06-29", "2023-07-05", "2023-07-10", "2023-07-13", "2023-07-18", "2023-07-21", "2023-07-26", "2023-07-31", "2023-08-03", "2023-08-08", "2023-08-11", "2023-08-16", "2023-08-21", "2023-08-24", "2023-08-29", "2023-09-01", "2023-09-07", "2023-09-12", "2023-09-15", "2023-09-20", "2023-09-25", "2023-09-28", "2023-10-03", "2023-10-06", "2023-10-11", "2023-10-16", "2023-10-19", "2023-10-24", "2023-10-27", "2023-11-01", "2023-11-06", "2023-11-09", "2023-11-14", "2023-11-17", "2023-11-22", "2023-11-28", "2023-12-01", "2023-12-06", "2023-12-11", "2023-12-14", "2023-12-19", "2023-12-22", "2023-12-28", "2024-01-03", "2024-01-08", "2024-01-11", "2024-01-17", "2024-01-22", "2024-01-25", "2024-01-30", "2024-02-02", "2024-02-07", "2024-02-12", "2024-02-15", "2024-02-21", "2024-02-26", "2024-02-29", "2024-03-05", "2024-03-08", "2024-03-13", "2024-03-18", "2024-03-21", "2024-03-26", "2024-04-01", "2024-04-04", "2024-04-09", "2024-04-12", "2024-04-17", "2024-04-22", "2024-04-25", "2024-04-30", "2024-05-03", "2024-05-08", "2024-05-13", "2024-05-16", "2024-05-21", "2024-05-24", "2024-05-30", "2024-06-04", "2024-06-07", "2024-06-12", "2024-06-17", "2024-06-21", "2024-06-26", "2024-07-01", "2024-07-05", "2024-07-10", "2024-07-15", "2024-07-18", "2024-07-23", "2024-07-26", "2024-07-31", "2024-08-05", "2024-08-08", "2024-08-13", "2024-08-16", "2024-08-21", "2024-08-26", "2024-08-29", "2024-09-04", "2024-09-09", "2024-09-12", "2024-09-17", "2024-09-20", "2024-09-25", "2024-09-30", "2024-10-03", "2024-10-08", "2024-10-11", "2024-10-16", "2024-10-21", "2024-10-24", "2024-10-29", "2024-11-01", "2024-11-06", "2024-11-11", "2024-11-14", "2024-11-19", "2024-11-22", "2024-11-27", "2024-12-03", "2024-12-06", "2024-12-11", "2024-12-16", "2024-12-19", "2024-12-24", "2024-12-30", "2025-01-03", "2025-01-08", "2025-01-14", "2025-01-17", "2025-01-23", "2025-01-28", "2025-01-31", "2025-02-05", "2025-02-10", "2025-02-13", "2025-02-19", "2025-02-24", "2025-02-27", "2025-03-04", "2025-03-07", "2025-03-12", "2025-03-17", "2025-03-20"];
+
+  new Chart(eqCtx, {
+    type: 'line',
+    data: {
+      labels: eqDates,
+      datasets: [
+        {
+          label: 'Portfolio',
+          data: [0.0, -0.25, -0.09, -0.63, -0.52, -0.46, -0.4, -0.27, -0.27, -0.27, -0.27, -0.27, -0.27, -0.27, -0.27, -0.59, -0.69, -0.69, -0.69, -0.69, -0.69, -0.69, -0.6, -1.16, -1.63, -1.63, -1.61, -1.61, -1.61, -1.64, -1.18, -1.18, -0.93, -0.62, -1.15, -1.19, -1.16, -1.16, -1.16, -1.16, -1.19, -1.38, -1.39, -1.47, -1.44, -0.79, -0.57, -0.25, -0.45, 0.48, 0.59, 0.36, 0.17, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, -0.07, -2.31, -5.21, -7.6, -7.6, -7.6, -7.6, -7.56, -8.08, -7.47, -7.64, -7.64, -7.64, -7.64, -7.59, -7.53, -7.59, -7.59, -7.59, -7.99, -8.11, -9.13, -9.81, -9.91, -9.81, -10.09, -10.12, -10.24, -10.31, -10.75, -11.09, -11.39, -11.56, -11.73, -11.77, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.62, -11.28, -11.28, -11.31, -10.98, -10.83, -10.8, -10.28, -10.13, -10.09, -10.06, -10.06, -10.06, -10.06, -10.07, -13.05, -14.85, -14.85, -14.85, -13.1, -13.58, -13.83, -15.2, -15.38, -15.44, -15.6, -15.71, -15.49, -16.62, -15.7, -15.62, -14.53, -14.41, -14.26, -14.05, -13.91, -13.96, -13.47, -13.38, -13.14, -12.92, -12.76, -13.18, -13.29, -13.29, -13.33, -13.39, -13.28, -13.23, -13.4, -13.74, -13.15, -12.83, -12.8, -13.04, -13.68, -13.91, -14.97, -14.88, -14.71, -14.67, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.79, -14.68, -14.69, -14.26, -14.04, -13.69, -13.53, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.46, -13.18, -12.95, -12.79, -12.79, -12.67, -12.5, -12.4, -12.2, -12.34, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.85, -13.2, -13.34, -13.09, -11.28, -11.55, -11.73, -11.31, -11.98, -12.4, -12.54, -13.34, -13.05, -13.72, -13.05, -13.04, -13.04, -13.04, -13.05, -13.02, -13.77, -14.2, -14.11, -14.08, -13.89, -14.54, -14.55, -14.51, -14.98, -14.85, -14.67, -14.98, -14.76, -14.71, -14.7, -14.35, -14.3, -14.27, -14.46, -14.51, -14.29, -15.3, -16.23, -15.39, -15.51, -15.88, -16.91, -15.42, -15.67, -15.56, -15.59, -15.67, -15.37, -14.89, -15.01, -14.81, -14.51, -14.61, -14.69, -14.76, -14.61, -14.48, -14.56, -14.4, -14.07, -14.14, -14.84, -14.36, -14.44, -14.44, -14.44, -14.29, -14.07, -13.89, -13.76, -13.66, -13.96, -13.74, -13.91, -13.77, -13.53, -13.37, -13.3, -13.62, -13.79, -13.39, -12.96, -13.04, -12.88, -12.75, -12.74, -12.58, -12.56, -12.56, -12.58, -12.57, -12.56, -12.55, -12.54, -12.53, -12.53, -12.54, -12.53, -12.51, -12.51, -12.51, -12.53, -12.52, -12.52, -12.52, -12.51, -12.51, -12.52, -12.65, -12.78, -12.79, -12.79, -12.8, -12.98, -13.37, -11.97, -11.92, -11.92, -11.92, -12.21, -12.75, -13.1, -13.24, -13.34, -13.18, -13.17, -13.07, -13.16, -12.94, -13.02, -12.99, -12.84, -12.94, -12.93, -12.93, -12.94, -12.93, -12.94, -12.96, -12.99, -13.0, -13.05, -13.05, -13.08, -13.16, -12.92, -12.87, -12.61, -12.46, -12.44, -12.42, -12.51, -12.71, -13.4, -13.52, -13.91, -15.45, -15.48, -15.48, -15.48, -15.48, -15.5, -15.54, -15.48, -15.11, -14.9, -14.79, -14.75, -14.68, -14.66, -14.63, -14.63, -14.64, -14.64, -14.64, -14.48, -14.92, -15.04, -19.49, -16.82, -15.79, -15.16, -15.34, -15.3, -15.39, -14.95, -16.15, -16.71, -16.82, -17.04, -16.87, -16.83, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.06, -17.0, -17.0, -17.0, -17.03, -16.92, -17.31, -17.27, -21.19, -17.31, -18.43, -18.04, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.37, -19.85, -20.14, -20.72, -20.55, -20.89, -20.94, -20.94],
+          borderColor: '#00ff88',
+          backgroundColor: 'rgba(0,255,136,0.04)',
+          fill: true,
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 2.5,
+          order: 1,
+        },
+        {
+          label: 'S1 IVR',
+          data: [0.0, -0.68, -0.25, -1.69, -1.39, -1.22, -1.06, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -0.72, -1.61, -1.86, -1.86, -1.86, -1.86, -1.86, -1.86, -1.78, -3.63, -5.1, -5.1, -5.04, -5.04, -5.04, -5.11, -3.9, -3.88, -3.22, -2.41, -3.81, -3.91, -3.83, -3.83, -3.83, -3.83, -3.92, -4.42, -4.47, -4.66, -4.59, -2.86, -2.26, -1.4, -1.96, 0.54, 0.79, 0.77, 0.19, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -0.15, -6.11, -13.83, -20.2, -20.2, -20.2, -20.2, -20.08, -21.72, -19.84, -20.36, -20.36, -20.36, -20.36, -20.22, -19.95, -19.95, -19.95, -19.95, -19.95, -17.75, -19.88, -21.82, -22.12, -21.73, -22.62, -22.7, -23.0, -23.2, -24.38, -25.28, -26.08, -26.53, -27.0, -27.09, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.69, -25.78, -25.78, -25.87, -25.0, -24.58, -24.52, -23.12, -22.72, -22.61, -22.54, -22.54, -22.54, -22.54, -22.57, -30.52, -35.31, -35.31, -35.31, -30.52, -31.83, -32.52, -36.25, -37.21, -37.75, -38.04, -38.18, -37.83, -41.14, -38.45, -38.2, -34.93, -34.31, -34.31, -34.31, -34.31, -34.83, -33.31, -33.05, -32.12, -31.28, -30.58, -30.8, -30.63, -30.7, -30.71, -30.71, -30.71, -30.71, -30.93, -32.25, -29.61, -28.32, -28.21, -29.21, -31.79, -31.78, -37.39, -37.4, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.41, -37.5, -37.22, -37.22, -35.91, -35.32, -34.38, -33.96, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -33.81, -32.62, -31.69, -30.99, -31.01, -30.6, -29.91, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -29.79, -30.75, -31.69, -32.07, -31.4, -26.57, -27.27, -27.77, -26.65, -28.43, -29.54, -29.92, -32.05, -31.28, -33.07, -31.27, -31.27, -31.27, -31.27, -31.27, -31.19, -33.35, -34.57, -34.32, -34.23, -33.7, -35.54, -35.57, -35.46, -36.73, -36.36, -35.9, -36.71, -36.13, -36.0, -35.97, -35.04, -34.91, -34.84, -35.34, -35.47, -34.86, -37.66, -40.22, -37.9, -36.53, -37.23, -41.19, -35.33, -35.33, -35.32, -35.4, -35.62, -34.8, -33.55, -33.88, -33.31, -32.48, -32.75, -32.99, -33.19, -32.58, -32.56, -32.93, -32.32, -31.46, -31.68, -33.33, -32.06, -32.15, -32.15, -32.14, -31.54, -30.66, -29.94, -29.26, -28.91, -29.0, -29.2, -29.2, -29.36, -29.36, -29.36, -29.36, -29.36, -29.36, -27.54, -26.41, -26.49, -26.03, -25.63, -25.47, -25.42, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.37, -25.44, -25.95, -26.5, -26.5, -26.5, -26.57, -27.14, -28.22, -24.36, -24.22, -24.22, -24.22, -24.98, -26.41, -27.33, -27.55, -27.85, -27.22, -27.21, -26.78, -27.3, -27.09, -26.95, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.79, -26.87, -27.08, -26.4, -26.26, -25.51, -25.08, -25.04, -24.98, -25.24, -25.79, -27.77, -28.11, -29.24, -33.63, -33.71, -33.71, -33.71, -33.71, -33.71, -33.71, -34.02, -32.88, -32.28, -31.93, -31.81, -31.56, -31.45, -31.39, -31.39, -31.39, -31.39, -31.39, -31.39, -31.43, -31.79, -44.51, -36.86, -33.93, -32.12, -32.25, -32.31, -32.27, -32.72, -36.88, -38.02, -38.03, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.04, -38.23, -39.06, -38.99, -49.95, -40.31, -42.33, -41.42, -41.96, -41.96, -41.96, -41.96, -41.96, -41.96, -41.96, -41.96, -41.96, -42.25, -45.66, -46.57, -48.37, -47.83, -48.89, -49.06, -49.06],
+          borderColor: '#3388ff',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 2,
+        },
+        {
+          label: 'S2 VIX TS',
+          data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.01, 0.12, -0.02, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.24, -0.17, -1.09, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -0.95, -1.44, -1.44, -1.44, -1.44, -1.44, -1.44, -1.44, -1.45, -1.42, -1.42, -1.42, -1.42, -1.42, -1.42, -1.42, -1.61, -1.65, -1.65, -1.65, -2.76, -4.58, -5.78, -5.78, -5.78, -5.78, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.9, -5.59, -5.22, -4.93, -5.55, -5.14, -5.14, -5.14, -5.14, -5.22, -5.77, -5.2, -4.29, -3.75, -3.41, -2.94, -2.84, -2.78, -2.78, -2.78, -4.39, -4.96, -4.96, -4.96, -5.19, -4.77, -4.59, -4.64, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.74, -4.72, -4.76, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -5.01, -6.07, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.7, -6.78, -6.58, -7.81, -6.67, -7.46, -6.66, -5.65, -5.1, -4.82, -6.12, -6.12, -6.2, -5.61, -5.83, -5.64, -5.45, -5.65, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.14, -5.0, -4.3, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -4.81, -5.2, -5.03, -5.03, -5.03, -5.03, -5.03, -5.03, -5.11, -4.35, -4.24, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.92, -4.98, -4.23, -4.9, -4.93, -10.41, -6.87, -8.67, -8.53, -8.53, -8.53, -8.53, -8.53, -8.53, -8.53, -8.53, -8.53, -8.53, -8.66, -10.17, -10.17, -10.17, -10.17, -10.17, -10.17, -10.17],
+          borderColor: '#ffcc00',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 3,
+        },
+        {
+          label: 'S3 Disp',
+          data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.06, 0.02, 0.01, -0.01, -0.05, -0.02, -0.05, -0.02, -0.06, 0.06, 0.05, 0.09, -0.03, -0.05, -0.05, -0.01, 0.0, 0.08, 0.06, 0.02, 0.04, 0.1, 0.24, 0.24, 0.24, 0.24, 0.21, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.34, 0.33, 0.26, 0.26, 0.18, 0.2, 0.28, 0.28, 0.33, 0.35, 0.33, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.32, 0.34, 0.27, 0.27, 0.33, 0.4, 0.43, 0.43, 0.43, 0.43, 0.43, 0.43, 0.43, 0.41, 0.42, 0.4, 0.4, 0.32, 0.19, 0.31, 0.24, 0.34, 0.28, 0.22, 0.32, 0.29, 0.38, 0.4, 0.29, 0.29, 0.28, 0.26, 0.22, 0.29, 0.36, 0.4, 0.39, 0.3, 0.34, 0.37, 0.43, 0.46, 0.52, 0.52, 0.47, 0.5, 0.57, 0.6, 0.59, 0.51, 0.53, 0.55, 0.54, 0.57, 0.6, 0.6, 0.62, 0.63, 0.59, 0.6, 0.61, 0.62, 0.62, 0.62, 0.62, 0.62, 0.62, 0.62, 0.62, 0.61, 0.61, 0.63, 0.65, 0.65, 0.6, 0.63, 0.62, 0.68, 0.7, 0.7, 0.73, 0.76, 0.75, 0.74, 0.76, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.79, 0.77, 0.96, 0.96, 0.96, 0.96, 0.95, 1.0, 0.95, 1.02, 1.0, 0.96, 0.98, 1.05, 1.05, 1.05, 1.05, 1.05, 1.05, 1.05, 1.05, 1.0, 1.11, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.17, 1.16, 1.22, 1.22, 1.22, 1.21, 1.12, 1.02, 1.16, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94, 1.94],
+          borderColor: '#ff8833',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 4,
+        },
+        {
+          label: 'Combined',
+          data: [0.0, -0.34, -0.12, -0.85, -0.69, -0.61, -0.53, -0.36, -0.36, -0.36, -0.36, -0.36, -0.36, -0.36, -0.36, -0.77, -0.88, -0.88, -0.88, -0.88, -0.88, -0.89, -0.75, -0.97, -1.16, -1.17, -1.16, -1.16, -1.16, -1.19, -0.59, -0.58, -0.25, 0.16, -0.54, -0.59, -0.55, -0.55, -0.55, -0.55, -0.59, -0.85, -0.87, -0.97, -0.93, -0.07, 0.23, 0.66, 0.38, 1.63, 1.76, 1.75, 1.46, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, 1.29, -1.69, -5.55, -8.74, -8.74, -8.74, -8.74, -8.7, -9.19, -8.63, -8.79, -8.79, -8.79, -8.79, -8.71, -8.55, -8.77, -8.77, -8.77, -9.27, -10.1, -10.87, -11.62, -11.74, -11.71, -11.86, -11.89, -12.04, -12.14, -12.73, -13.18, -13.58, -13.81, -14.04, -14.09, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.94, -13.88, -13.43, -13.43, -13.48, -13.04, -12.83, -12.8, -12.1, -11.9, -11.84, -11.81, -11.81, -11.81, -11.81, -11.82, -15.8, -18.2, -18.2, -18.2, -15.98, -16.59, -16.91, -18.63, -18.72, -18.79, -19.43, -19.13, -19.0, -20.18, -19.22, -19.13, -17.96, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -17.6, -18.04, -18.04, -18.29, -18.29, -18.29, -18.29, -18.43, -19.37, -18.0, -17.61, -16.9, -16.86, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.21, -17.25, -17.11, -17.11, -16.46, -16.16, -15.69, -15.48, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.36, -15.14, -14.37, -14.88, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.48, -15.96, -16.43, -16.62, -16.28, -13.87, -14.22, -14.47, -13.91, -14.8, -15.35, -15.54, -16.61, -16.22, -17.12, -16.22, -16.22, -16.22, -16.22, -16.22, -16.19, -17.05, -17.54, -17.44, -17.4, -17.19, -17.93, -17.94, -17.88, -18.52, -18.33, -18.1, -18.51, -18.22, -18.15, -18.14, -17.67, -17.61, -17.57, -17.82, -17.88, -17.61, -18.86, -19.99, -18.96, -19.74, -19.89, -20.07, -19.95, -20.99, -20.54, -20.58, -20.69, -20.28, -19.65, -19.79, -19.55, -19.19, -19.31, -19.41, -19.41, -19.41, -19.0, -19.0, -18.99, -18.55, -18.58, -19.75, -19.1, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.33, -19.37, -20.09, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.12, -20.27, -20.74, -19.03, -18.97, -18.97, -18.97, -19.35, -20.06, -20.52, -20.87, -20.98, -20.98, -20.98, -20.98, -20.98, -20.98, -20.98, -21.06, -20.45, -20.88, -20.88, -20.88, -20.88, -20.88, -20.98, -21.02, -21.17, -21.21, -21.41, -21.41, -21.45, -21.53, -21.26, -21.2, -20.9, -20.73, -20.72, -20.69, -20.8, -21.02, -21.81, -21.94, -22.4, -24.15, -24.18, -24.18, -24.18, -24.18, -24.28, -24.41, -24.06, -23.7, -23.48, -23.37, -23.34, -23.34, -23.34, -23.34, -23.34, -23.34, -23.34, -23.41, -22.79, -24.47, -24.61, -29.7, -26.64, -25.47, -24.74, -24.89, -24.95, -25.42, -23.2, -23.85, -24.94, -25.4, -26.19, -26.24, -26.19, -26.41, -26.41, -26.41, -26.41, -26.41, -26.41, -26.41, -26.41, -26.41, -26.41, -26.43, -26.24, -26.24, -26.24, -26.32, -26.32, -26.32, -26.32, -26.36, -24.0, -24.64, -24.13, -24.44, -24.44, -24.44, -24.44, -24.44, -24.44, -24.44, -24.44, -24.44, -24.53, -25.5, -25.76, -26.28, -26.12, -26.42, -26.47, -26.47],
+          borderColor: '#aa44ff',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 3],
+          order: 5,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: false,  // custom legend in header
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.dataset.label}: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#111' },
+          ticks: { color: '#444', maxTicksLimit: 10, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+          },
+          title: { display: true, text: 'Cumulative Return (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+
+  // ── Signal P&L Bars ───────────────────────────────────────────────────────
+  const signalCtx = document.getElementById('signalPnlChart').getContext('2d');
+  const signalPnl = [-490.6, -101.7, 19.4, -264.7];
+
+  new Chart(signalCtx, {
+    type: 'bar',
+    data: {
+      labels: ["S1  IVR / PDV", "S2  VIX TS", "S3  Dispersion", "Combined"],
+      datasets: [{
+        data: signalPnl,
+        backgroundColor: signalPnl.map(v => v > 0
+          ? 'rgba(0,200,112,0.7)'
+          : 'rgba(255,51,51,0.6)'),
+        borderColor: signalPnl.map(v => v > 0 ? '#00c870' : '#ff3333'),
+        borderWidth: 1,
+        borderRadius: 5,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  P&L: $${(ctx.parsed.x * 1000).toLocaleString('en-US', {minimumFractionDigits:0})}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => '$' + v + 'k'
+          },
+          title: { display: true, text: 'Total P&L ($000s)', color: '#444', font: { size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#aaa', font: { size: 11 } },
+        },
+      }
+    }
+  });
+
+  // ── Annual Returns ────────────────────────────────────────────────────────
+  const annCtx = document.getElementById('annualChart').getContext('2d');
+  const annRets = [-8.76, -4.23, -0.04, 1.09, -3.54, 3.52, -6.12, -3.27];
+
+  new Chart(annCtx, {
+    type: 'bar',
+    data: {
+      labels: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
+      datasets: [{
+        data: annRets,
+        backgroundColor: annRets.map(v => v > 0 ? 'rgba(0,200,112,0.7)' : 'rgba(255,51,51,0.6)'),
+        borderColor:      annRets.map(v => v > 0 ? '#00c870' : '#ff3333'),
+        borderWidth: 1,
+        borderRadius: 4,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#888', font: { family: 'Menlo', size: 11 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+          },
+        }
+      }
+    }
+  });
+
+  // ── Research Signals Chart (S1C + S4) ────────────────────────────────────
+  const resCtx = document.getElementById('researchChart').getContext('2d');
+  const resEqDates = eqDates;  // same date axis
+
+  const s1cData = [0.0, 0.02, -0.46, 0.7, 0.2, -0.02, -0.2, -0.6, -0.6, -0.6, -0.6, -0.6, -0.6, -0.6, -0.6, 0.07, -0.01, -0.01, -0.01, -0.01, -0.01, -0.01, -0.26, 1.48, 2.87, 2.81, 2.57, 2.57, 2.57, 2.45, 1.12, 1.01, 0.29, -0.57, 0.58, 0.5, 0.41, 0.41, 0.41, 0.41, 0.47, 0.83, 0.84, 0.65, 0.34, -1.49, -2.19, -3.31, -2.99, -5.81, -6.18, -6.17, -5.75, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -5.48, -0.05, 6.83, 12.39, 12.39, 12.39, 12.39, 12.03, 13.53, 11.51, 11.81, 11.81, 11.81, 11.81, 11.51, 11.05, 11.05, 11.05, 11.05, 11.05, 8.58, 10.54, 12.42, 12.64, 12.14, 12.97, 13.03, 13.07, 13.17, 14.25, 15.03, 15.77, 16.15, 16.57, 16.66, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.31, 16.17, 15.18, 15.18, 15.06, 14.11, 13.62, 13.49, 11.95, 11.49, 11.36, 11.29, 11.29, 11.29, 11.29, 11.31, 18.63, 22.87, 22.87, 22.87, 17.67, 18.88, 19.45, 22.96, 23.83, 24.29, 24.51, 24.37, 23.92, 27.0, 24.14, 23.7, 20.15, 19.38, 19.38, 19.38, 19.38, 19.63, 18.05, 17.76, 16.73, 15.85, 15.0, 15.13, 14.82, 14.87, 14.88, 14.88, 14.88, 14.88, 14.66, 15.82, 12.98, 11.49, 11.09, 11.85, 13.95, 13.21, 18.07, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 18.08, 17.99, 17.63, 17.53, 16.09, 15.42, 14.46, 13.95, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.66, 13.56, 12.35, 11.35, 10.54, 10.42, 9.84, 9.09, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 8.92, 9.65, 10.49, 10.79, 9.99, 4.96, 5.56, 5.99, 4.67, 6.4, 7.46, 7.77, 9.81, 8.85, 10.54, 8.48, 8.48, 8.48, 8.48, 8.48, 8.24, 10.31, 11.42, 11.12, 11.01, 10.46, 12.22, 12.25, 12.03, 13.25, 12.81, 12.27, 12.99, 12.37, 12.13, 11.91, 10.93, 10.6, 10.46, 10.84, 10.71, 10.0, 12.74, 15.19, 12.55, 11.01, 11.55, 15.14, 8.78, 8.77, 8.77, 8.69, 8.84, 7.92, 6.5, 6.61, 5.92, 5.03, 5.14, 5.31, 5.43, 4.75, 4.57, 4.88, 4.22, 3.28, 3.44, 5.02, 3.73, 3.77, 3.77, 3.52, 2.82, 1.89, 1.15, 0.39, 0.01, 0.05, 0.18, 0.19, 0.33, 0.33, 0.33, 0.33, 0.33, 0.33, -1.92, -3.11, -3.13, -3.67, -4.08, -4.27, -4.34, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.38, -4.34, -3.92, -3.48, -3.48, -3.48, -3.43, -3.03, -2.3, -6.33, -6.77, -6.77, -6.77, -6.28, -4.95, -4.07, -4.04, -4.03, -4.78, -4.95, -5.44, -5.08, -5.31, -5.46, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.64, -5.73, -5.63, -6.38, -6.62, -7.48, -7.92, -8.01, -8.14, -7.91, -7.47, -5.85, -5.6, -4.75, -0.99, -0.98, -0.98, -0.98, -0.98, -0.98, -0.98, -0.88, -2.07, -2.75, -3.19, -3.35, -3.62, -3.75, -3.81, -3.81, -3.81, -3.81, -3.81, -3.81, -3.77, -3.7, 8.86, 1.13, -1.88, -3.85, -3.83, -3.89, -3.95, -3.59, 0.03, 0.93, 0.93, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.76, 1.39, 1.2, 11.91, 2.12, 3.87, 2.85, 3.25, 3.25, 3.25, 3.25, 3.25, 3.25, 3.25, 3.25, 3.25, 3.2, 6.43, 7.22, 8.83, 8.21, 9.2, 9.37, 9.37];
+  const s4Data  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.12, -0.32, 0.2, 1.33, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.12, 0.09, 3.73, 3.73, 3.73, 3.73, 3.52, 5.39, 5.89, 6.01, 6.81, 6.81, 6.61, 6.28, 5.97, 5.67, 5.62, 5.64, 5.58, 5.56, 5.17, 5.08, 4.59, 4.45, 4.45, 4.45, 4.45, 4.36, 4.95, 5.92, 6.37, 4.34, 4.76, 4.76, 4.76, 4.76, 4.76, 4.76, 4.76, 4.76, 4.64, 1.95, -2.22, -2.22, -2.22, -2.22, -2.22, -2.22, -2.22, -2.37, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.7, -2.2, -2.2, -1.62, -2.51, -3.03, -3.41, -3.41, -3.41, -3.41, -3.41, -4.34, -5.26, -5.26, -5.26, -5.26, -5.33, -5.61, -5.61, -5.61, -5.73, -5.04, -4.65, -3.19, -5.0, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -5.58, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.11, -6.87, -7.33, -8.1, -7.43, -6.41, -6.41, -6.47, -6.21, -7.46, -8.16, -8.4, -9.46, -9.46, -9.46, -9.46, -9.46, -9.46, -9.46, -9.48, -10.16, -8.49, -8.49, -8.49, -8.49, -8.49, -8.49, -8.68, -8.38, -8.38, -8.38, -8.41, -7.79, -7.79, -7.79, -7.79, -7.83, -8.09, -8.19, -8.43, -7.01, -7.5, -7.93, -7.92, -7.91, -7.91, -7.86, -7.79, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.54, -7.61, -7.13, -6.07, -6.19, -8.88, -8.88, -8.88, -8.88, -8.88, -8.88, -8.88, -8.88, -8.88, -8.88, -10.79, -9.14, -10.3, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.76, -9.35, -9.47, -9.47, -9.47, -10.17, -8.8, -8.8, -8.8, -8.8, -8.8, -8.8, -8.8, -8.91, -10.39, -9.53, -9.53, -9.53, -9.53, -9.53, -10.12, -10.12, -10.23, -10.3, -10.09, -10.97, -11.39, -11.6, -11.74, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.82, -11.99, -13.07, -12.3, -12.72, -13.58, -13.58, -13.58, -13.58, -13.58, -13.58, -12.69, -14.48, -15.81, -15.81, -15.81, -15.81, -15.81, -16.96, -17.39, -18.86, -20.27, -21.12, -21.12, -21.12, -21.12, -21.12, -21.12, -21.12, -21.12, -21.12, -21.12, -21.86, -21.68, -24.09, -23.56, -23.56, -23.56, -23.56, -23.56, -23.56, -23.56, -23.4, -23.57, -26.59, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.8, -17.89, -18.64, -19.42, -19.43, -19.92, -19.87, -19.87, -19.87, -19.87, -19.87, -19.87, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -20.27, -21.05];
+
+  new Chart(resCtx, {
+    type: 'line',
+    data: {
+      labels: resEqDates,
+      datasets: [
+        {
+          label: 'S1C Contrarian PDV',
+          data: s1cData,
+          borderColor: '#00ccff',
+          backgroundColor: 'rgba(0,200,255,0.04)',
+          fill: true,
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 2,
+          order: 1,
+        },
+        {
+          label: 'S4 VRP',
+          data: s4Data,
+          borderColor: '#ff44aa',
+          backgroundColor: 'rgba(255,68,170,0.04)',
+          fill: true,
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 2,
+          order: 2,
+        },
+        {
+          label: 'Portfolio (ref)',
+          data: [0.0, -0.25, -0.09, -0.63, -0.52, -0.46, -0.4, -0.27, -0.27, -0.27, -0.27, -0.27, -0.27, -0.27, -0.27, -0.59, -0.69, -0.69, -0.69, -0.69, -0.69, -0.69, -0.6, -1.16, -1.63, -1.63, -1.61, -1.61, -1.61, -1.64, -1.18, -1.18, -0.93, -0.62, -1.15, -1.19, -1.16, -1.16, -1.16, -1.16, -1.19, -1.38, -1.39, -1.47, -1.44, -0.79, -0.57, -0.25, -0.45, 0.48, 0.59, 0.36, 0.17, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, -0.07, -2.31, -5.21, -7.6, -7.6, -7.6, -7.6, -7.56, -8.08, -7.47, -7.64, -7.64, -7.64, -7.64, -7.59, -7.53, -7.59, -7.59, -7.59, -7.99, -8.11, -9.13, -9.81, -9.91, -9.81, -10.09, -10.12, -10.24, -10.31, -10.75, -11.09, -11.39, -11.56, -11.73, -11.77, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.66, -11.62, -11.28, -11.28, -11.31, -10.98, -10.83, -10.8, -10.28, -10.13, -10.09, -10.06, -10.06, -10.06, -10.06, -10.07, -13.05, -14.85, -14.85, -14.85, -13.1, -13.58, -13.83, -15.2, -15.38, -15.44, -15.6, -15.71, -15.49, -16.62, -15.7, -15.62, -14.53, -14.41, -14.26, -14.05, -13.91, -13.96, -13.47, -13.38, -13.14, -12.92, -12.76, -13.18, -13.29, -13.29, -13.33, -13.39, -13.28, -13.23, -13.4, -13.74, -13.15, -12.83, -12.8, -13.04, -13.68, -13.91, -14.97, -14.88, -14.71, -14.67, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.75, -14.79, -14.68, -14.69, -14.26, -14.04, -13.69, -13.53, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.43, -13.46, -13.18, -12.95, -12.79, -12.79, -12.67, -12.5, -12.4, -12.2, -12.34, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.49, -12.85, -13.2, -13.34, -13.09, -11.28, -11.55, -11.73, -11.31, -11.98, -12.4, -12.54, -13.34, -13.05, -13.72, -13.05, -13.04, -13.04, -13.04, -13.05, -13.02, -13.77, -14.2, -14.11, -14.08, -13.89, -14.54, -14.55, -14.51, -14.98, -14.85, -14.67, -14.98, -14.76, -14.71, -14.7, -14.35, -14.3, -14.27, -14.46, -14.51, -14.29, -15.3, -16.23, -15.39, -15.51, -15.88, -16.91, -15.42, -15.67, -15.56, -15.59, -15.67, -15.37, -14.89, -15.01, -14.81, -14.51, -14.61, -14.69, -14.76, -14.61, -14.48, -14.56, -14.4, -14.07, -14.14, -14.84, -14.36, -14.44, -14.44, -14.44, -14.29, -14.07, -13.89, -13.76, -13.66, -13.96, -13.74, -13.91, -13.77, -13.53, -13.37, -13.3, -13.62, -13.79, -13.39, -12.96, -13.04, -12.88, -12.75, -12.74, -12.58, -12.56, -12.56, -12.58, -12.57, -12.56, -12.55, -12.54, -12.53, -12.53, -12.54, -12.53, -12.51, -12.51, -12.51, -12.53, -12.52, -12.52, -12.52, -12.51, -12.51, -12.52, -12.65, -12.78, -12.79, -12.79, -12.8, -12.98, -13.37, -11.97, -11.92, -11.92, -11.92, -12.21, -12.75, -13.1, -13.24, -13.34, -13.18, -13.17, -13.07, -13.16, -12.94, -13.02, -12.99, -12.84, -12.94, -12.93, -12.93, -12.94, -12.93, -12.94, -12.96, -12.99, -13.0, -13.05, -13.05, -13.08, -13.16, -12.92, -12.87, -12.61, -12.46, -12.44, -12.42, -12.51, -12.71, -13.4, -13.52, -13.91, -15.45, -15.48, -15.48, -15.48, -15.48, -15.5, -15.54, -15.48, -15.11, -14.9, -14.79, -14.75, -14.68, -14.66, -14.63, -14.63, -14.64, -14.64, -14.64, -14.48, -14.92, -15.04, -19.49, -16.82, -15.79, -15.16, -15.34, -15.3, -15.39, -14.95, -16.15, -16.71, -16.82, -17.04, -16.87, -16.83, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.05, -17.06, -17.0, -17.0, -17.0, -17.03, -16.92, -17.31, -17.27, -21.19, -17.31, -18.43, -18.04, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.25, -18.37, -19.85, -20.14, -20.72, -20.55, -20.89, -20.94, -20.94],
+          borderColor: 'rgba(0,255,136,0.25)',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1,
+          borderDash: [4, 4],
+          order: 3,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.dataset.label}: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#111' },
+          ticks: { color: '#444', maxTicksLimit: 10, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: {
+            color: '#555', font: { family: 'Menlo', size: 10 },
+            callback: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+          },
+          title: { display: true, text: 'Cumulative Return (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+
+  // ── Walk-Forward ──────────────────────────────────────────────────────────
+  const wfCtx = document.getElementById('wfChart').getContext('2d');
+  const wfSharpes = [-2.63, -1.69, -1.57, -1.64, -2.48, 0.0, -0.8, -2.47, 1.19, -3.11, -3.64, -0.95, -4.0];
+
+  new Chart(wfCtx, {
+    type: 'bar',
+    data: {
+      labels: ["2019-H1", "2019-H2", "2020-H1", "2020-H2", "2021-H1", "2021-H2", "2022-H1", "2022-H2", "2023-H1", "2023-H2", "2024-H1", "2024-H2", "2025-H1"],
+      datasets: [
+        {
+          data: wfSharpes,
+          backgroundColor: wfSharpes.map(v => v >= 0 ? 'rgba(0,200,112,0.7)' : 'rgba(255,51,51,0.6)'),
+          borderColor:      wfSharpes.map(v => v >= 0 ? '#00c870' : '#ff3333'),
+          borderWidth: 1,
+          borderRadius: 4,
+          borderSkipped: false,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  Sharpe: ${ctx.parsed.y.toFixed(2)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 9 }, maxRotation: 45 },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'Sharpe Ratio (6M OOS)', color: '#444', font: { size: 10 } },
+        },
+      }
+    }
+  });
+</script>
+
+
+</body>
+</html>
