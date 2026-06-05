@@ -694,12 +694,10 @@ def load_page4() -> dict[str, Any]:
 
         d["eq_dates"]    = [dt.strftime("%Y-%m-%d") for dt in eq_ds.index]
         d["eq_nav"]      = _norm("nav")
-        d["eq_nav_s1"]   = _norm("nav_s1")
-        d["eq_nav_s2"]   = _norm("nav_s2")
-        d["eq_nav_s3"]   = _norm("nav_s3")
-        d["eq_nav_comb"] = _norm("nav_combined")
         d["eq_nav_s1c"]  = _norm("nav_s1c") if "nav_s1c" in eq_ds.columns else []
+        d["eq_nav_s3"]   = _norm("nav_s3")
         d["eq_nav_s4"]   = _norm("nav_s4")  if "nav_s4"  in eq_ds.columns else []
+        d["eq_nav_s1"]   = _norm("nav_s1")  # reference line
 
         # Final NAV for display
         d["final_nav"]   = round(float(eq["nav"].iloc[-1]), 0)
@@ -710,12 +708,10 @@ def load_page4() -> dict[str, Any]:
         d["eq_error"] = str(e)
         d["eq_dates"]    = []
         d["eq_nav"]      = []
-        d["eq_nav_s1"]   = []
-        d["eq_nav_s2"]   = []
-        d["eq_nav_s3"]   = []
-        d["eq_nav_comb"] = []
         d["eq_nav_s1c"]  = []
+        d["eq_nav_s3"]   = []
         d["eq_nav_s4"]   = []
+        d["eq_nav_s1"]   = []
         d["final_nav"]   = 0
         d["start_nav"]   = 0
         d["total_pnl"]   = 0
@@ -776,13 +772,12 @@ def load_page4() -> dict[str, Any]:
                 n_trades=n_trades, total_pnl=total_pnl,
             )
 
-        m   = _metrics_for("nav",          "daily_pnl",    "s1_position")  # portfolio
-        m1  = _metrics_for("nav_s1",       "pnl_s1",       "s1_position")
-        m2  = _metrics_for("nav_s2",       "pnl_s2",       "s2_position")
-        m3  = _metrics_for("nav_s3",       "pnl_s3",       "s3_position")
-        mc  = _metrics_for("nav_combined", "pnl_combined", "combined_pos")
-        m1c = _metrics_for("nav_s1c",      "pnl_s1c",      "s1c_position") if "nav_s1c" in eq.columns else None
-        m4  = _metrics_for("nav_s4",       "pnl_s4",       "s4_position")  if "nav_s4"  in eq.columns else None
+        m   = _metrics_for("nav",     "daily_pnl", "s1c_position")  # portfolio
+        m1c = _metrics_for("nav_s1c", "pnl_s1c",  "s1c_position") if "nav_s1c" in eq.columns else None
+        m3  = _metrics_for("nav_s3",  "pnl_s3",   "s3_position")
+        m4  = _metrics_for("nav_s4",  "pnl_s4",   "s4_position")  if "nav_s4"  in eq.columns else None
+        m1  = _metrics_for("nav_s1",  "pnl_s1",   "s1_position")
+        m2  = _metrics_for("nav_s2",  "pnl_s2",   "s2_position")
 
         d["metrics_rows"] = [
             {"label": "Cumulative Return", "value": _pct(m["cum_ret"]),
@@ -807,26 +802,24 @@ def load_page4() -> dict[str, Any]:
             {"label": "N Days",            "value": str(n_days),          "positive": True},
         ]
 
-        # Signal P&L bar chart
+        # Signal P&L bar chart — main 3-signal portfolio (S1C + S3 + S4)
         signal_pnl = [
-            round(m1["total_pnl"] / 1000, 1),
-            round(m2["total_pnl"] / 1000, 1),
-            round(m3["total_pnl"] / 1000, 1),
-            round(mc["total_pnl"] / 1000, 1),
+            round((m1c["total_pnl"] if m1c else 0) / 1000, 1),
+            round(m3["total_pnl"]  / 1000, 1),
+            round((m4["total_pnl"]  if m4  else 0) / 1000, 1),
         ]
-        d["signal_labels"] = ["S1  IVR / PDV", "S2  VIX TS", "S3  Dispersion", "Combined"]
+        d["signal_labels"] = ["S1C  Contrarian PDV", "S3  Dispersion", "S4  VRP"]
         d["signal_pnl"]    = signal_pnl
         d["signal_colors"] = ["#00c870" if v > 0 else "#ff3333" for v in signal_pnl]
 
-        # Per-signal metrics table (core signals + research variants)
+        # Per-signal metrics table — main signals first, reference signals dimmed
         d["signal_metrics"] = []
         for mx, lbl, is_research in [
-            (m1,  "S1 IVR",          False),
-            (m2,  "S2 VIX TS",       False),
-            (m3,  "S3 Disp",         False),
-            (mc,  "Combined",        False),
-            (m1c, "S1C Contrarian",  True),
-            (m4,  "S4 VRP",          True),
+            (m1c, "S1C Contrarian",  False),
+            (m3,  "S3 Dispersion",   False),
+            (m4,  "S4 VRP",          False),
+            (m1,  "S1 IVR (ref)",    True),
+            (m2,  "S2 VIX TS (ref)", True),
         ]:
             if mx is None:
                 continue

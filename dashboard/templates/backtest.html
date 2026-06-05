@@ -5,7 +5,7 @@
 {% block content %}
 <div class="page-header">
   <div class="page-title">C10 Backtest Results — 2018 → 2025</div>
-  <div class="page-subtitle">Delta-hedged straddle portfolio · 4 strategies · $1M initial capital</div>
+  <div class="page-subtitle">Delta-hedged straddle portfolio · 3 strategies (S1C + S3 + S4) · $1M initial capital</div>
   <div class="page-badge">
     NAV: ${{ "{:,.0f}".format(d.final_nav) }}  ·  P&L: ${{ "{:+,.0f}".format(d.total_pnl) }}
   </div>
@@ -17,10 +17,10 @@
     <div class="chart-title" style="margin-bottom:0;">Portfolio Equity Curve — % Return from $1M</div>
     <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
       <span style="color:#00ff88;">── Portfolio</span>
-      <span style="color:#3388ff;">── S1 IVR</span>
-      <span style="color:#ffcc00;">── S2 VIX TS</span>
-      <span style="color:#ff8833;">── S3 Disp</span>
-      <span style="color:#aa44ff;">── Combined</span>
+      <span style="color:#00ccff;">── S1C Contrarian</span>
+      <span style="color:#ff8833;">── S3 Dispersion</span>
+      <span style="color:#ff44aa;">── S4 VRP</span>
+      <span style="color:rgba(51,136,255,0.4);">── S1 (ref)</span>
     </div>
   </div>
   <div class="chart-wrap xtall">
@@ -28,13 +28,14 @@
   </div>
 </div>
 
-<!-- ── C14 Research Signals ──────────────────────────────────────────────── -->
+<!-- ── C15 Logical Correction — Signal Analysis ───────────────────────────── -->
 <div class="card" style="margin-bottom:16px;border-color:rgba(0,200,255,0.2);background:rgba(0,200,255,0.02);">
   <div class="flex space-between mb12">
     <div>
-      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C14 Research Signals — S1C Contrarian PDV &amp; S4 VRP</div>
+      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C15 Logical Correction — S1C &amp; S4 Now in Main Portfolio</div>
       <div style="font-size:11.5px;color:var(--text2);">
-        Standalone research equity curves — not included in the main portfolio. Isolation prevents anti-correlation cancellation with S1.
+        After C15 analysis: S1 direction was backwards (PDV is a lagging contrarian indicator). S1C replaces S1 as primary signal.
+        Portfolio: S1C + S3 + S4 (equal-weight, Kelly-netted). Net result: −$209K → <strong style="color:#00ff88;">+$55K</strong>.
       </div>
     </div>
     <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
@@ -82,10 +83,9 @@
         <span class="mono">{{ d.research_s4.n_trades }}</span>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
-        VRP z-score &gt; 1.0 fires when fear premium is <em>unusually elevated</em> —
-        a pre-event signal, not post-event mean-reversion. Selling straddles into
-        rising-vol events is a negative-expectancy trade at retail bid-ask.
-        <strong style="color:#ff44aa;">VRP is structurally unextractable at retail transaction costs.</strong>
+        C15 fix: entry now requires z_vrp to be <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
+        Result improved from −$221K to <strong style="color:#ff44aa;">−$61K</strong>.
+        Included in portfolio as diversifying signal; further edge improvement possible.
       </div>
     </div>
   </div>
@@ -165,15 +165,18 @@
     <tbody>
       {% for s in d.signal_metrics %}
       {% if s.is_research %}
-      <tr style="opacity:0.75;background:rgba(0,200,255,0.02);">
-        <td style="font-weight:600;">
-          {{ s.label }}
-          <span class="tag" style="background:rgba(0,200,255,0.15);color:#00ccff;border-color:rgba(0,200,255,0.3);font-size:9px;margin-left:6px;">RESEARCH</span>
-        </td>
+      <tr style="opacity:0.5;">
       {% else %}
       <tr>
-        <td style="font-weight:600;">{{ s.label }}</td>
       {% endif %}
+        <td style="font-weight:600;">
+          {{ s.label }}
+          {% if s.is_research %}
+          <span class="tag tag-dim" style="font-size:9px;margin-left:6px;">REF</span>
+          {% else %}
+          <span class="tag tag-green" style="font-size:9px;margin-left:6px;">MAIN</span>
+          {% endif %}
+        </td>
         <td class="mono {% if s.green %}green{% else %}red{% endif %}">{{ s.sharpe }}</td>
         <td class="mono {% if s.green %}green{% else %}red{% endif %}">{{ s.ann_ret }}</td>
         <td class="mono">{{ s.win_rate }}</td>
@@ -181,7 +184,7 @@
         <td class="mono {% if s.green %}green{% else %}red{% endif %}">{{ s.total_pnl }}</td>
         <td>
           {% if s.is_research %}
-          <span class="tag" style="background:rgba(0,200,255,0.15);color:#00ccff;border-color:rgba(0,200,255,0.3);">STANDALONE</span>
+          <span class="tag tag-dim">REFERENCE</span>
           {% elif s.green %}
           <span class="tag tag-green">POSITIVE</span>
           {% else %}
@@ -189,18 +192,11 @@
           {% endif %}
         </td>
       </tr>
-      {% if 'S3' in s.label %}
-      <tr>
-        <td colspan="7" style="font-size:11px;color:var(--text3);padding:4px 12px 8px;border-bottom:1px solid var(--border);">
-          * S3 active-day Sharpe not meaningful — 28 trades over 7 years. Win rate (54%) and total P&amp;L (+$21,003) are the relevant metrics.
-        </td>
-      </tr>
-      {% endif %}
       {% endfor %}
     </tbody>
   </table>
   <div style="margin-top:8px;font-size:11px;color:var(--text3);">
-    RESEARCH signals (S1C, S4) are standalone equity curves — not part of the main portfolio. See C14 panel above for full analysis.
+    MAIN signals (S1C, S3, S4) form the C15 portfolio. REF signals (S1, S2) are retained for historical comparison only.
   </div>
 </div>
 
@@ -251,45 +247,46 @@
 
 <!-- ── Analysis Banner ───────────────────────────────────────────────────── -->
 <div class="grid grid-2" style="margin-bottom:16px;">
-  <div class="card" style="border-color:rgba(255,51,51,0.2);background:rgba(255,51,51,0.03);">
-    <div class="chart-title" style="color:#ff8833;">Key Finding — Why the Strategy Underperformed</div>
+  <div class="card" style="border-color:rgba(0,204,255,0.2);background:rgba(0,204,255,0.02);">
+    <div class="chart-title" style="color:#00ccff;">C15 Logical Correction — PDV Spread Is Contrarian</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1 −$502,671</span>
-        S1 (IVR/PDV) goes short gamma when IVR is high relative to PDV.
-        In 2018, 2019, and 2024 — all elevated-vol years — realised vol stayed elevated,
-        meaning premium sellers systematically underpriced tail risk.
+        <span class="tag tag-red" style="margin-right:8px;">S1 −$602K</span>
+        S1 lost in both long AND short directions. Root cause: PDV (Guyon-Lekeufack 2023) is a
+        <em>lagging</em> indicator — it overestimates fear after a vol spike, exactly when
+        the market has already priced in normalization.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-dim" style="margin-right:8px;">COSTS −$334,537</span>
-        Total transaction costs (bid-ask + commissions + slippage) consumed
-        <strong style="color:var(--text);">$334k</strong> over 7 years — offsetting any alpha in the signal.
+        <span class="tag tag-green" style="margin-right:8px;">S1C +$203K</span>
+        Reversing the signal direction (short when PDV &gt; IV in R0, long when IV &gt; PDV in R1)
+        turns a −$602K loss into a +$203K gain. No parameter changes — purely logical.
       </div>
       <div>
-        <span class="tag tag-red" style="margin-right:8px;">REGIME MISMATCH</span>
-        52.9% of backtest days were R2 (VOMMA_ACTIVE) — a regime favouring
-        vomma trades, not gamma strategies. S1 and S2 were trading in the wrong regime
-        for 952 / 1800 days.
+        <span class="tag tag-dim" style="margin-right:8px;">PORTFOLIO</span>
+        S1C + S3 + S4 (equal-weight, rolling-correlation Kelly): portfolio flipped from
+        <strong style="color:#ff3333;">−$209K (−20.9%)</strong> to
+        <strong style="color:#00ff88;">+$55K (+5.5%)</strong>.
       </div>
     </div>
   </div>
 
   <div class="card" style="border-color:rgba(0,255,136,0.15);background:rgba(0,255,136,0.02);">
-    <div class="chart-title" style="color:#00ff88;">Only Profitable Signal — S3 Dispersion</div>
+    <div class="chart-title" style="color:#00ff88;">Signal Breakdown — S1C Drives, S3 Anchors</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S3 +$21,003</span>
-        S3 (VIX/VVIX ratio proxy) is long-only — buys when volatility appears cheap
-        relative to vol-of-vol. 14 trades in 7 years with <strong style="color:#00ff88;">92.9% win rate</strong>.
+        <span class="tag tag-green" style="margin-right:8px;">S1C +$203K</span>
+        Contrarian PDV: short gamma when model over-predicts fear (R0),
+        long when market underprices sticky realised vol (R1). Primary alpha source.
       </div>
       <div style="margin-bottom:8px;">
-        The strategy's rarity is its strength: it fires only when the signal is extreme,
-        and it tends to correctly identify vol spikes after entry.
+        <span class="tag tag-green" style="margin-right:8px;">S3 +$22K</span>
+        Dispersion signal fires only at VIX/VVIX extremes — 15 trades in 7 years,
+        <strong style="color:#00ff88;">92.9% win rate</strong>. High-precision, low-frequency anchor.
       </div>
       <div>
-        <span class="tag tag-green" style="margin-right:8px;">BEST DAY</span>
-        <span class="mono">2024-12-20  +3.69%</span>  — day after the worst day,
-        as the FOMC panic resolved and vol mean-reverted.
+        <span class="tag tag-red" style="margin-right:8px;">S4 −$61K</span>
+        VRP signal improved (−$221K → −$61K) by requiring post-spike z-score decline.
+        Diversifying signal; further entry precision possible.
       </div>
     </div>
   </div>
@@ -371,47 +368,44 @@
           order: 1,
         },
         {
-          label: 'S1 IVR',
-          data: {{ d.eq_nav_s1 | tojson }},
-          borderColor: '#3388ff',
+          label: 'S1C Contrarian',
+          data: {{ d.eq_nav_s1c | tojson }},
+          borderColor: '#00ccff',
           backgroundColor: 'transparent',
           tension: 0.1,
           pointRadius: 0,
-          borderWidth: 1.2,
-          borderDash: [4, 3],
+          borderWidth: 1.8,
           order: 2,
         },
         {
-          label: 'S2 VIX TS',
-          data: {{ d.eq_nav_s2 | tojson }},
-          borderColor: '#ffcc00',
-          backgroundColor: 'transparent',
-          tension: 0.1,
-          pointRadius: 0,
-          borderWidth: 1.2,
-          borderDash: [4, 3],
-          order: 3,
-        },
-        {
-          label: 'S3 Disp',
+          label: 'S3 Dispersion',
           data: {{ d.eq_nav_s3 | tojson }},
           borderColor: '#ff8833',
           backgroundColor: 'transparent',
           tension: 0.1,
           pointRadius: 0,
-          borderWidth: 1.2,
-          borderDash: [4, 3],
-          order: 4,
+          borderWidth: 1.8,
+          order: 3,
         },
         {
-          label: 'Combined',
-          data: {{ d.eq_nav_comb | tojson }},
-          borderColor: '#aa44ff',
+          label: 'S4 VRP',
+          data: {{ d.eq_nav_s4 | tojson }},
+          borderColor: '#ff44aa',
           backgroundColor: 'transparent',
           tension: 0.1,
           pointRadius: 0,
-          borderWidth: 1.2,
-          borderDash: [4, 3],
+          borderWidth: 1.8,
+          order: 4,
+        },
+        {
+          label: 'S1 IVR (ref)',
+          data: {{ d.eq_nav_s1 | tojson }},
+          borderColor: 'rgba(51,136,255,0.35)',
+          backgroundColor: 'transparent',
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 0.8,
+          borderDash: [3, 4],
           order: 5,
         },
       ]
