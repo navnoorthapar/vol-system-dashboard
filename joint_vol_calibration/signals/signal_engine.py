@@ -913,12 +913,17 @@ def generate_signal4(
     mu_vrp  = vrp.rolling(lookback, min_periods=lookback // 2).mean()
     std_vrp = vrp.rolling(lookback, min_periods=lookback // 2).std().clip(lower=1e-6)
     z_vrp   = (vrp - mu_vrp) / std_vrp
+    z_vrp_prev = z_vrp.shift(1)  # yesterday's z-score to detect peak/trough
 
     strength = (z_vrp.abs() / S4_STRENGTH_SCALE).clip(upper=1.0)
 
-    # Regime-specific entries: confirm the regime supports the trade direction
-    entry_short = (z_vrp >  z_entry_short) & (regimes == 1)   # sell vol in R1 only
-    entry_long  = (z_vrp <  z_entry_long)  & (regimes == 0)   # buy vol in R0 only
+    # Regime-specific entries: require z_vrp to have PEAKED and be declining
+    # before selling vol (or TROUGHED and rising before buying).
+    # Rationale: z_vrp > threshold fires at the peak of fear — entering a short
+    # straddle INTO a vol spike is negative-expectancy. Waiting for the z to turn
+    # (start declining) means the event has happened and we are in mean-reversion.
+    entry_short = (z_vrp >  z_entry_short) & (z_vrp < z_vrp_prev) & (regimes == 1)
+    entry_long  = (z_vrp <  z_entry_long)  & (z_vrp > z_vrp_prev) & (regimes == 0)
 
     exit_cond = z_vrp.abs() < z_exit
 
@@ -1061,16 +1066,24 @@ class SignalEngine:
 
     def generate(
         self,
-        spx_df:     pd.DataFrame,
-        vix_wide_df: pd.DataFrame,
-        start_date:  str = "2015-01-01",
-        end_date:    str = "2025-12-31",
+        spx_df:              pd.DataFrame,
+        vix_wide_df:         pd.DataFrame,
+        start_date:          str = "2015-01-01",
+        end_date:            str = "2025-12-31",
+        precomputed_regimes: "Optional[pd.Series]" = None,
     ) -> pd.DataFrame:
         """
         Generate all signals for [start_date, end_date].
 
         Zero look-ahead: features are shifted 1 day inside this method
         before passing to signal generators.
+
+        Parameters
+        ----------
+        precomputed_regimes : optional pre-built walk-forward regime labels.
+            If supplied, bypasses the internal classifier/rule-based labels.
+            Use this to inject walk-forward-trained regime labels from the
+            backtest engine to eliminate look-ahead bias in the classifier.
 
         Returns
         -------
@@ -1080,15 +1093,18 @@ class SignalEngine:
         feats_raw = build_features(spx_df, vix_wide_df, pdv_model=self.pdv_model)
 
         # ── Compute regime labels ────────────────────────────────────────────
-        regimes_raw = build_regime_labels(spx_df, vix_wide_df)
-
-        # ── Optionally override with classifier predictions ──────────────────
-        if self.clf is not None and self.clf.model_ is not None:
+        if precomputed_regimes is not None:
+            # Walk-forward regimes supplied externally (no look-ahead bias)
+            regimes_raw = precomputed_regimes
+        elif self.clf is not None and self.clf.model_ is not None:
             try:
                 preds = self.clf.predict_series(feats_raw.dropna())
                 regimes_raw = preds
             except Exception as exc:
                 logger.warning("Classifier prediction failed (%s); using rule-based regimes", exc)
+                regimes_raw = build_regime_labels(spx_df, vix_wide_df)
+        else:
+            regimes_raw = build_regime_labels(spx_df, vix_wide_df)
 
         # ── Shift by 1: X(t-1) predicts y(t) ───────────────────────────────
         feats   = feats_raw.shift(1)
@@ -1122,10 +1138,15 @@ class SignalEngine:
         s3   = generate_signal3(feats, regimes)
         s4   = generate_signal4(feats, regimes)
 
-        # ── Combine ───────────────────────────────────────────────────────────
+        # ── Combine (S1C + S3 + S4 — the three logically sound signals) ─────────
+        # S1 removed: PDV spread is a lagging indicator — backwards as directional signal.
+        # S2 removed: no mechanistic basis for TS slope predicting vol direction.
+        # S1C: correct (contrarian) use of PDV lag.
+        # S3: clear mechanism — VVIX/VIX extreme → second-order fear precedes vol spike.
+        # S4: VRP mean-reversion after z peaks (fixed entry — post-spike, not pre-spike).
         combined = combine_signals(
-            s1["s1_position"], s2["s2_position"], s3["s3_position"],
-            s1["s1_strength"], s2["s2_strength"], s3["s3_strength"],
+            s1c["s1c_position"], s3["s3_position"], s4["s4_position"],
+            s1c["s1c_strength"], s3["s3_strength"], s4["s4_strength"],
         )
 
         # ── Assemble output DataFrame ─────────────────────────────────────────

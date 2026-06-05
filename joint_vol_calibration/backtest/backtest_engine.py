@@ -653,6 +653,100 @@ class BacktestEngine:
         logger.warning("No cached Heston params found; using HESTON_DEFAULTS")
         return dict(HESTON_DEFAULTS)
 
+    # ── Walk-forward regime classifier ───────────────────────────────────────
+
+    def _build_walkforward_regimes(
+        self,
+        spx_df:      pd.DataFrame,
+        vix_wide_df: pd.DataFrame,
+    ) -> pd.Series:
+        """
+        Build walk-forward regime labels with zero look-ahead bias.
+
+        For each backtest year Y, train a fresh RegimeClassifier on ALL data
+        strictly before January 1 of Y, then predict regimes for year Y.
+        This eliminates the look-ahead bias that occurs when a single
+        classifier trained on 2010-2025 is used to label 2018 data.
+
+        Minimum training requirement: 500 samples (~2 years of daily data).
+        Falls back to rule-based labels if insufficient training data.
+        """
+        from joint_vol_calibration.signals.regime_classifier import (
+            build_dataset, build_features, RegimeClassifier,
+        )
+
+        backtest_start = pd.Timestamp(self.start_date)
+        backtest_end   = pd.Timestamp(self.end_date)
+
+        all_preds: list[pd.Series] = []
+
+        for year in range(backtest_start.year, backtest_end.year + 1):
+            cutoff    = pd.Timestamp(f"{year}-01-01")
+            year_end  = pd.Timestamp(f"{year}-12-31")
+
+            # ── Train on strictly pre-cutoff data ────────────────────────────
+            # Filter by date — support both 'date' column and DatetimeIndex
+            if "date" in spx_df.columns:
+                spx_train = spx_df[pd.to_datetime(spx_df["date"]) < cutoff]
+                vix_train = vix_wide_df[pd.to_datetime(vix_wide_df["date"]) < cutoff]
+            else:
+                spx_train = spx_df[spx_df.index < cutoff]
+                vix_train = vix_wide_df[vix_wide_df.index < cutoff]
+
+            try:
+                X_train, y_train = build_dataset(spx_train, vix_train)
+            except Exception as e:
+                logger.warning("WF regime: dataset build failed for year %d: %s", year, e)
+                continue
+
+            if len(X_train) < 500:
+                logger.warning(
+                    "WF regime: insufficient training data for year %d (%d samples) — skipping",
+                    year, len(X_train),
+                )
+                continue
+
+            clf_wf = RegimeClassifier()
+            try:
+                clf_wf.fit(X_train, y_train)
+            except Exception as e:
+                logger.warning("WF regime: classifier fit failed for year %d: %s", year, e)
+                continue
+
+            # ── Predict for this calendar year ───────────────────────────────
+            # Use FULL spx/vix for feature rolling windows but only predict
+            # for dates in [cutoff, year_end] to avoid look-ahead in signals.
+            try:
+                feats_full = build_features(spx_df, vix_wide_df).shift(1)
+                feats_year = feats_full.loc[
+                    (feats_full.index >= cutoff) & (feats_full.index <= year_end)
+                ].dropna()
+                # Only keep columns the classifier was trained on
+                feat_cols  = X_train.columns.tolist()
+                feats_year = feats_year[[c for c in feat_cols if c in feats_year.columns]]
+                if len(feats_year) == 0:
+                    continue
+                preds_year = clf_wf.predict_series(feats_year)
+                all_preds.append(preds_year)
+                logger.info(
+                    "WF regime year %d: trained on %d samples → predicted %d days",
+                    year, len(X_train), len(preds_year),
+                )
+            except Exception as e:
+                logger.warning("WF regime: prediction failed for year %d: %s", year, e)
+
+        if not all_preds:
+            logger.warning("WF regime: no predictions generated — falling back to None")
+            return None
+
+        combined = pd.concat(all_preds).sort_index()
+        combined = combined[~combined.index.duplicated(keep="first")]
+        logger.info(
+            "WF regime labels built: %d days (%s → %s)",
+            len(combined), combined.index.min().date(), combined.index.max().date(),
+        )
+        return combined
+
     # ── Main run ──────────────────────────────────────────────────────────────
 
     def run(
@@ -728,6 +822,14 @@ class BacktestEngine:
         spx_idx  = self._to_date_indexed(spx_col)
         vix_idx  = self._to_date_indexed(vix_col)
 
+        # ── Walk-forward regime labels (zero look-ahead bias fix) ─────────────
+        # Train one classifier per backtest year using only pre-year data.
+        # Pass spx_col (has 'date' column + DatetimeIndex) for compatibility.
+        logger.info("Building walk-forward regime labels ...")
+        wf_regimes = self._build_walkforward_regimes(spx_col, vix_col)
+        if wf_regimes is None:
+            logger.warning("Walk-forward regimes unavailable; falling back to classifier labels")
+
         # ── Generate C9 signals ────────────────────────────────────────────────
         if clf is None:
             clf = self._load_clf()
@@ -737,6 +839,7 @@ class BacktestEngine:
             spx_col, vix_col,
             start_date=self.start_date,
             end_date=self.end_date,
+            precomputed_regimes=wf_regimes,
         )
         self.signals_df = sig_df
 
@@ -783,67 +886,86 @@ class BacktestEngine:
 
         self.all_trades = t1 + t2 + t3 + t4 + t5 + t6
 
-        # ── Portfolio Kelly netting via rolling 60-day correlation ─────────────
-        # For each pair of signals (i,j), compute rolling corr r_ij.
-        # Adjust each signal's effective weight by sqrt(2 / (1 + r_ij)).
-        # This diversification multiplier shrinks toward 1 when signals are
-        # correlated (r→1 → mult→1) and allows up to sqrt(2) diversification
-        # bonus when signals are uncorrelated (r→0 → mult→√2).
-        # Gross exposure is then capped at 50% of NAV (÷ 5 signals = 10% each)
-        # ── Portfolio Kelly netting (original S1+S2+S3+combined only) ────────────
-        # S1C and S4 are RESEARCH VARIANTS — tracked independently but not mixed
-        # into the main portfolio. Mixing S1 and S1C (which are anti-correlated)
-        # would cancel each other; S4 is documented as a negative finding.
-        pnl_mat = pd.DataFrame({
-            "s1": pnl_s1, "s2": pnl_s2, "s3": pnl_s3, "cb": pnl_cb
-        }).fillna(0.0)
-
-        CORR_WINDOW = 60  # rolling correlation window (days)
+        # ── Portfolio Kelly netting via rolling 60-day pairwise correlation ────
+        # NEW PORTFOLIO (logically corrected):
+        #   S1C (contrarian PDV) + S3 (VVIX/VIX dispersion) + S4 (VRP post-spike)
+        #
+        # S1 REMOVED: PDV spread is backwards as a directional signal (lagging
+        #   indicator overestimates fear; market prices normalization correctly).
+        # S2 REMOVED: no mechanistic basis — TS slope z-score has no theoretical
+        #   reason to predict vol direction; empirically -$101K.
+        # Combined REMOVED: was redundant (= (S1+S2+S3)/3) and included broken signals.
+        #
+        # S1 and S2 kept as RESEARCH reference curves (no portfolio weight).
+        CORR_WINDOW = 60
 
         def _corr_kelly_mult(a: pd.Series, b: pd.Series) -> pd.Series:
             """Rolling pairwise correlation → diversification multiplier."""
             r = a.rolling(CORR_WINDOW, min_periods=20).corr(b).clip(-1.0, 1.0)
-            r = r.fillna(0.0)   # no history yet → assume uncorrelated
-            return np.sqrt(2.0 / (1.0 + r))
+            return np.sqrt(2.0 / (1.0 + r.fillna(0.0)))
 
-        # Compute pairwise multipliers (s1↔s2, s1↔s3, s2↔s3; cb treated as s1)
-        m12 = _corr_kelly_mult(pnl_mat["s1"], pnl_mat["s2"])
-        m13 = _corr_kelly_mult(pnl_mat["s1"], pnl_mat["s3"])
-        m23 = _corr_kelly_mult(pnl_mat["s2"], pnl_mat["s3"])
-        m1cb = _corr_kelly_mult(pnl_mat["s1"], pnl_mat["cb"])
+        pnl_mat = pd.DataFrame({
+            "s1c": pnl_s1c, "s3": pnl_s3, "s4": pnl_s4,
+        }).fillna(0.0)
 
-        # Average multiplier for each signal (geometric mean of its pairwise mults)
-        mult_s1 = (m12 * m13 * m1cb) ** (1.0 / 3)
-        mult_s2 = (m12 * m23) ** 0.5
-        mult_s3 = (m13 * m23) ** 0.5
-        mult_cb = m1cb
+        m_s1c_s3 = _corr_kelly_mult(pnl_mat["s1c"], pnl_mat["s3"])
+        m_s1c_s4 = _corr_kelly_mult(pnl_mat["s1c"], pnl_mat["s4"])
+        m_s3_s4  = _corr_kelly_mult(pnl_mat["s3"],  pnl_mat["s4"])
 
-        # Scale each signal's P&L and cap gross at 50% NAV (÷ 4 signals = 12.5% each)
-        pnl_s1 = pnl_s1 * mult_s1.clip(0.5, 1.0)
-        pnl_s2 = pnl_s2 * mult_s2.clip(0.5, 1.0)
-        pnl_s3 = pnl_s3 * mult_s3.clip(0.5, 1.0)
-        pnl_cb = pnl_cb * mult_cb.clip(0.5, 1.0)
+        # Geometric mean of each signal's pairwise multipliers
+        mult_s1c = (m_s1c_s3 * m_s1c_s4) ** 0.5
+        mult_s3  = (m_s1c_s3 * m_s3_s4)  ** 0.5
+        mult_s4  = (m_s1c_s4 * m_s3_s4)  ** 0.5
+
+        pnl_s1c_adj = pnl_s1c * mult_s1c.clip(0.5, 1.0)
+        pnl_s3_adj  = pnl_s3  * mult_s3.clip(0.5, 1.0)
+        pnl_s4_adj  = pnl_s4  * mult_s4.clip(0.5, 1.0)
+
+        # Net-of-cost Kelly scaling:
+        # Reduce position sizing when a signal has been deeply loss-making over
+        # the trailing year. Scale is 0.5× when rolling Sharpe < -1, 1× when >= 0.
+        # Conservative: we do NOT upsize when Sharpe is positive (avoid overfitting).
+        # Minimum scale floor: 0.5 (never fully turn off a signal mid-backtest).
+        def _net_kelly_scale(pnl: pd.Series, window: int = 252) -> pd.Series:
+            rets = pnl
+            mu   = rets.rolling(window, min_periods=90).mean()
+            sig  = rets.rolling(window, min_periods=90).std().clip(lower=1e-8)
+            sh   = (mu / sig * np.sqrt(252)).fillna(0.0)
+            # Sharpe >= 0 → scale = 1.0 (no reduction)
+            # Sharpe = -1  → scale = 0.75
+            # Sharpe = -2  → scale = 0.5 (floor)
+            scale = (1.0 + sh.clip(-2.0, 0.0) / 4.0).clip(0.5, 1.0)
+            return scale
+
+        scale_s1c = _net_kelly_scale(pnl_s1c_adj)
+        scale_s3  = _net_kelly_scale(pnl_s3_adj)
+        scale_s4  = _net_kelly_scale(pnl_s4_adj)
+
+        pnl_s1c_adj = pnl_s1c_adj * scale_s1c
+        pnl_s3_adj  = pnl_s3_adj  * scale_s3
+        pnl_s4_adj  = pnl_s4_adj  * scale_s4
 
         # ── Build equity curves ────────────────────────────────────────────────
-        # Main portfolio = equal-weight average of 4 correlation-adjusted strategies
-        # S1C and S4 are stored as standalone research equity curves.
         cap = self.initial_capital
-        pnl_total = (pnl_s1 + pnl_s2 + pnl_s3 + pnl_cb) / 4.0
+        pnl_total = (pnl_s1c_adj + pnl_s3_adj + pnl_s4_adj) / 3.0
 
         eq = pd.DataFrame({
             "nav":          cap + pnl_total.cumsum(),
             "daily_pnl":    pnl_total,
+            # Main portfolio signals
+            "nav_s1c":      cap + pnl_s1c_adj.cumsum(),
+            "nav_s3":       cap + pnl_s3_adj.cumsum(),
+            "nav_s4":       cap + pnl_s4_adj.cumsum(),
+            # Research reference curves (not in portfolio)
             "nav_s1":       cap + pnl_s1.cumsum(),
             "nav_s2":       cap + pnl_s2.cumsum(),
-            "nav_s3":       cap + pnl_s3.cumsum(),
-            "nav_s4":       cap + pnl_s4.cumsum(),
-            "nav_s1c":      cap + pnl_s1c.cumsum(),
             "nav_combined": cap + pnl_cb.cumsum(),
+            # Raw P&L columns
+            "pnl_s1c":      pnl_s1c_adj,
+            "pnl_s3":       pnl_s3_adj,
+            "pnl_s4":       pnl_s4_adj,
             "pnl_s1":       pnl_s1,
             "pnl_s2":       pnl_s2,
-            "pnl_s3":       pnl_s3,
-            "pnl_s4":       pnl_s4,
-            "pnl_s1c":      pnl_s1c,
             "pnl_combined": pnl_cb,
         }, index=sig_df.index)
 
@@ -852,6 +974,10 @@ class BacktestEngine:
                     "s4_position", "combined_pos", "regime"]:
             if col in sig_df.columns:
                 eq[col] = sig_df[col]
+
+        # Backwards-compat alias: pnl_s3 (used by load_page4 metrics)
+        if "pnl_s3" not in eq.columns:
+            eq["pnl_s3"] = pnl_s3_adj
 
         self.equity_df = eq
         logger.info(
