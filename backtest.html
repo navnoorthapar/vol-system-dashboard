@@ -828,6 +828,7 @@
       </tr>
       
       
+      
       <tr>
       
         <td style="font-weight:600;">
@@ -836,7 +837,7 @@
           <span class="tag tag-green" style="font-size:9px;margin-left:6px;">MAIN</span>
           
         </td>
-        <td class="mono green">-14.724</td>
+        <td class="mono green">N/A*</td>
         <td class="mono green">0.28%</td>
         <td class="mono">53.22%</td>
         <td class="mono">30</td>
@@ -847,6 +848,13 @@
           
         </td>
       </tr>
+      
+      <tr>
+        <td colspan="7" style="font-size:11px;color:var(--text3);padding:3px 12px 8px;border-bottom:1px solid var(--border);">
+          * Sharpe N/A — S3 has 30 trades over 7 years (mostly flat NAV → near-zero std → ratio diverges). Use win rate (53.22%) and total P&amp;L ($22,404) instead.
+        </td>
+      </tr>
+      
       
       
       <tr>
@@ -870,6 +878,7 @@
       </tr>
       
       
+      
       <tr style="opacity:0.5;">
       
         <td style="font-weight:600;">
@@ -889,6 +898,7 @@
           
         </td>
       </tr>
+      
       
       
       <tr style="opacity:0.5;">
@@ -911,6 +921,7 @@
         </td>
       </tr>
       
+      
     </tbody>
   </table>
   <div style="margin-top:8px;font-size:11px;color:var(--text3);">
@@ -920,9 +931,12 @@
 
 <!-- ── Regime-Exit Variants Table ────────────────────────────────────────── -->
 <div class="card" style="margin-bottom:16px;">
-  <div class="chart-title">Regime-Exit Variants — R2 Position Closure Impact</div>
+  <div class="flex space-between mb12">
+    <div class="chart-title" style="margin-bottom:0;">Regime-Exit Variants — Historical S1/S2 Research</div>
+    <span class="tag tag-dim" style="font-size:10px;">PRE-C15 REFERENCE</span>
+  </div>
   <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
-    Exiting positions when regime transitions to R2 (rather than blocking new entries only) recovers +$300K over 7 years.
+    Before C15, S1 and S2 were the main signals. These variants show the impact of exiting positions when the regime transitions to R2 (rather than blocking new entries only). S1 has since been replaced by S1C Contrarian in the main portfolio.
   </div>
   <table class="data-table mt8">
     <thead>
@@ -935,31 +949,31 @@
     </thead>
     <tbody>
       <tr>
-        <td style="font-weight:600;">S1 IVR</td>
-        <td class="mono red">−$502,671</td>
+        <td style="font-weight:600;">S1 IVR <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
+        <td class="mono red">$-602,170</td>
         <td class="mono green">
           $-237,573
         </td>
-        <td class="mono green">+$230,817</td>
+        <td class="mono green">$+364,597</td>
       </tr>
       <tr>
-        <td style="font-weight:600;">S2 VIX TS</td>
-        <td class="mono red">−$98,977</td>
+        <td style="font-weight:600;">S2 VIX TS <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
+        <td class="mono red">$-25,276</td>
         <td class="mono green">
           $+62,891
         </td>
-        <td class="mono green">+$69,080</td>
+        <td class="mono green">$+88,167</td>
       </tr>
       <tr>
-        <td style="font-weight:600;">S3 Dispersion</td>
-        <td class="mono green">+$21,003</td>
+        <td style="font-weight:600;">S3 Dispersion <span class="tag tag-green" style="font-size:9px;">MAIN</span></td>
+        <td class="mono green">$+22,404</td>
         <td class="mono" style="color:var(--text3);">unchanged</td>
         <td class="mono" style="color:var(--text3);">—</td>
       </tr>
     </tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
-    R2 = VOMMA_ACTIVE (VVIX &gt; 100). R2-exit variant: forced position closure + state reset on R2 transition. Backtest: 2018–2025, $1M notional.
+    R2 = VOMMA_ACTIVE (adaptive VVIX threshold, rolling 252d 80th percentile). R2-exit: forced closure + state reset on R2 transition. Backtest: 2018–2025, $1M notional.
   </div>
 </div>
 
