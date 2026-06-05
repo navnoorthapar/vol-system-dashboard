@@ -698,6 +698,8 @@ def load_page4() -> dict[str, Any]:
         d["eq_nav_s2"]   = _norm("nav_s2")
         d["eq_nav_s3"]   = _norm("nav_s3")
         d["eq_nav_comb"] = _norm("nav_combined")
+        d["eq_nav_s1c"]  = _norm("nav_s1c") if "nav_s1c" in eq_ds.columns else []
+        d["eq_nav_s4"]   = _norm("nav_s4")  if "nav_s4"  in eq_ds.columns else []
 
         # Final NAV for display
         d["final_nav"]   = round(float(eq["nav"].iloc[-1]), 0)
@@ -712,6 +714,8 @@ def load_page4() -> dict[str, Any]:
         d["eq_nav_s2"]   = []
         d["eq_nav_s3"]   = []
         d["eq_nav_comb"] = []
+        d["eq_nav_s1c"]  = []
+        d["eq_nav_s4"]   = []
         d["final_nav"]   = 0
         d["start_nav"]   = 0
         d["total_pnl"]   = 0
@@ -772,11 +776,13 @@ def load_page4() -> dict[str, Any]:
                 n_trades=n_trades, total_pnl=total_pnl,
             )
 
-        m  = _metrics_for("nav",          "daily_pnl",  "s1_position")  # portfolio
-        m1 = _metrics_for("nav_s1",       "pnl_s1",     "s1_position")
-        m2 = _metrics_for("nav_s2",       "pnl_s2",     "s2_position")
-        m3 = _metrics_for("nav_s3",       "pnl_s3",     "s3_position")
-        mc = _metrics_for("nav_combined",  "pnl_combined","combined_pos")
+        m   = _metrics_for("nav",          "daily_pnl",    "s1_position")  # portfolio
+        m1  = _metrics_for("nav_s1",       "pnl_s1",       "s1_position")
+        m2  = _metrics_for("nav_s2",       "pnl_s2",       "s2_position")
+        m3  = _metrics_for("nav_s3",       "pnl_s3",       "s3_position")
+        mc  = _metrics_for("nav_combined", "pnl_combined", "combined_pos")
+        m1c = _metrics_for("nav_s1c",      "pnl_s1c",      "s1c_position") if "nav_s1c" in eq.columns else None
+        m4  = _metrics_for("nav_s4",       "pnl_s4",       "s4_position")  if "nav_s4"  in eq.columns else None
 
         d["metrics_rows"] = [
             {"label": "Cumulative Return", "value": _pct(m["cum_ret"]),
@@ -812,18 +818,44 @@ def load_page4() -> dict[str, Any]:
         d["signal_pnl"]    = signal_pnl
         d["signal_colors"] = ["#00c870" if v > 0 else "#ff3333" for v in signal_pnl]
 
-        # Per-signal metrics table
+        # Per-signal metrics table (core signals + research variants)
         d["signal_metrics"] = []
-        for mx, lbl in [(m1,"S1 IVR"),(m2,"S2 VIX TS"),(m3,"S3 Disp"),(mc,"Combined")]:
+        for mx, lbl, is_research in [
+            (m1,  "S1 IVR",          False),
+            (m2,  "S2 VIX TS",       False),
+            (m3,  "S3 Disp",         False),
+            (mc,  "Combined",        False),
+            (m1c, "S1C Contrarian",  True),
+            (m4,  "S4 VRP",          True),
+        ]:
+            if mx is None:
+                continue
             d["signal_metrics"].append({
-                "label":     lbl,
-                "sharpe":    _f2(mx["sharpe"]),
-                "ann_ret":   _pct(mx["ann_ret"]),
-                "win_rate":  _pct(mx["win_rate"]),
-                "n_trades":  str(mx["n_trades"]),
-                "total_pnl": _dol(mx["total_pnl"]),
-                "green":     mx["total_pnl"] > 0,
+                "label":       lbl,
+                "sharpe":      _f2(mx["sharpe"]),
+                "ann_ret":     _pct(mx["ann_ret"]),
+                "win_rate":    _pct(mx["win_rate"]),
+                "n_trades":    str(mx["n_trades"]),
+                "total_pnl":   _dol(mx["total_pnl"]),
+                "green":       mx["total_pnl"] > 0,
+                "is_research": is_research,
             })
+
+        # Research variant summary for dedicated panel
+        d["research_s1c"] = {
+            "total_pnl": _dol(m1c["total_pnl"]) if m1c else "—",
+            "sharpe":    _f2(m1c["sharpe"])      if m1c else "—",
+            "win_rate":  _pct(m1c["win_rate"])   if m1c else "—",
+            "n_trades":  str(m1c["n_trades"])    if m1c else "—",
+            "green":     (m1c["total_pnl"] > 0)  if m1c else False,
+        }
+        d["research_s4"] = {
+            "total_pnl": _dol(m4["total_pnl"])   if m4 else "—",
+            "sharpe":    _f2(m4["sharpe"])        if m4 else "—",
+            "win_rate":  _pct(m4["win_rate"])     if m4 else "—",
+            "n_trades":  str(m4["n_trades"])      if m4 else "—",
+            "green":     (m4["total_pnl"] > 0)    if m4 else False,
+        }
 
     except Exception as e:
         d["pkl_error"] = str(e)
@@ -832,6 +864,8 @@ def load_page4() -> dict[str, Any]:
         d["signal_pnl"]     = []
         d["signal_labels"]  = []
         d["signal_colors"]  = []
+        d["research_s1c"]   = {}
+        d["research_s4"]    = {}
 
     # ── Annual returns ───────────────────────────────────────────────────────
     try:
