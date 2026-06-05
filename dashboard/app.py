@@ -814,24 +814,25 @@ def load_page4() -> dict[str, Any]:
 
         # Per-signal metrics table — main signals first, reference signals dimmed
         d["signal_metrics"] = []
-        for mx, lbl, is_research in [
-            (m1c, "S1C Contrarian",  False),
-            (m3,  "S3 Dispersion",   False),
-            (m4,  "S4 VRP",          False),
-            (m1,  "S1 IVR (ref)",    True),
-            (m2,  "S2 VIX TS (ref)", True),
+        for mx, lbl, is_research, is_sparse in [
+            (m1c, "S1C Contrarian",  False, False),
+            (m3,  "S3 Dispersion",   False, True),   # 30 trades over 7y → Sharpe not meaningful
+            (m4,  "S4 VRP",          False, False),
+            (m1,  "S1 IVR (ref)",    True,  False),
+            (m2,  "S2 VIX TS (ref)", True,  False),
         ]:
             if mx is None:
                 continue
             d["signal_metrics"].append({
                 "label":       lbl,
-                "sharpe":      _f2(mx["sharpe"]),
+                "sharpe":      "N/A*" if is_sparse else _f2(mx["sharpe"]),
                 "ann_ret":     _pct(mx["ann_ret"]),
                 "win_rate":    _pct(mx["win_rate"]),
                 "n_trades":    str(mx["n_trades"]),
                 "total_pnl":   _dol(mx["total_pnl"]),
                 "green":       mx["total_pnl"] > 0,
                 "is_research": is_research,
+                "is_sparse":   is_sparse,
             })
 
         # Research variant summary for dedicated panel
@@ -983,11 +984,18 @@ def load_page4() -> dict[str, Any]:
         s1s_total  = (s1_total + s1rf_total) / 2.0     # S1S: ~half reduction
         s2x_total  = float(pnl_s2x.sum())
 
+        s2_total = float(eq["pnl_s2"].sum())
+
         d["variants"] = {
+            "s1_pnl":   round(s1_total,   0),
             "s1rf_pnl": round(s1rf_total, 0),
             "s1x_pnl":  round(s1x_total,  0),
             "s1s_pnl":  round(s1s_total,  0),
+            "s1_impr":  round(s1rf_total - s1_total, 0),
+            "s2_pnl":   round(s2_total,   0),
             "s2x_pnl":  round(s2x_total,  0),
+            "s2_impr":  round(s2x_total - s2_total, 0),
+            "s3_pnl":   round(float(eq["pnl_s3"].sum()), 0),
         }
     except Exception:
         d["variants"] = None
