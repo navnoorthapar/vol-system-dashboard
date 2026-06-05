@@ -8,3 +8,4 @@ xgboost>=2.0.0
 gunicorn>=21.0.0
 yfinance>=0.2.40
 hmmlearn>=0.3.0
+matplotlib>=3.7.0
