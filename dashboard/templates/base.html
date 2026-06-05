@@ -503,22 +503,125 @@
     .top-banner-links a:hover { color: #00ff88; }
     .top-banner-sep { color: #333; }
 
-    /* ── Responsive grid (Bug 6) ───────────────────────────────────────────── */
-    @media (max-width: 900px) {
-      .grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
-      .page { padding: 16px !important; }
-      .nav { padding: 0 12px; }
-      .nav-brand { margin-right: 16px; }
+    /* ── Hamburger button (hidden on desktop) ──────────────────────────────── */
+    .nav-toggle {
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      gap: 5px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 8px;
+      margin-left: auto;
+      margin-right: 4px;
     }
-    @media (max-width: 540px) {
-      .grid-4 { grid-template-columns: 1fr !important; }
-      .grid-3 { grid-template-columns: 1fr !important; }
-      .grid-2 { grid-template-columns: 1fr !important; }
-      .page { padding: 10px !important; }
-      .card { padding: 14px !important; }
-      .card-value { font-size: 28px !important; }
-      .nav-brand span { display: none; }
-      .top-banner-text { font-size: 10px; }
+    .nav-toggle span {
+      display: block;
+      width: 22px;
+      height: 2px;
+      background: var(--text2);
+      border-radius: 2px;
+      transition: all 0.2s;
+    }
+    .nav-toggle.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .nav-toggle.open span:nth-child(2) { opacity: 0; }
+    .nav-toggle.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+    /* ── Tablet (≤ 900px) ─────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .grid-4, .grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
+      .col-4, .col-3   { grid-column: 1 / -1 !important; }
+      .page  { padding: 16px !important; }
+      .nav   { padding: 0 12px; }
+      .nav-brand { margin-right: 12px; }
+    }
+
+    /* ── Mobile nav: hamburger (≤ 768px) ──────────────────────────────────── */
+    @media (max-width: 768px) {
+      .nav-toggle { display: flex; }
+      .nav-status { display: none; }          /* hide LIVE DATA text — too crowded */
+
+      .nav-links {
+        display: none;
+        position: absolute;
+        top: 52px; left: 0; right: 0;
+        background: #0d0d0d;
+        border-bottom: 1px solid var(--border2);
+        flex-direction: column;
+        padding: 6px 0;
+        z-index: 99;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      }
+      .nav-links.open { display: flex; }
+
+      .nav-link {
+        height: 44px;
+        padding: 0 20px;
+        border-bottom: none;
+        border-left: 2px solid transparent;
+      }
+      .nav-link.active {
+        border-left-color: var(--accent);
+        border-bottom-color: transparent;
+        background: rgba(0,255,136,0.05);
+      }
+
+      /* Tables: horizontal scroll instead of overflow */
+      .data-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        white-space: nowrap;
+      }
+      .data-table td:first-child { white-space: normal; min-width: 120px; }
+
+      /* Page header: badge drops below title */
+      .page-header { flex-wrap: wrap; gap: 4px; }
+      .page-badge  { margin-left: 0 !important; width: 100%; padding-top: 2px; }
+
+      /* Top banner: wrap instead of nowrap */
+      .top-banner {
+        height: auto;
+        padding: 6px 14px;
+        flex-wrap: wrap;
+        white-space: normal;
+        gap: 4px;
+      }
+
+      /* Col spans collapse on mobile */
+      .col-2 { grid-column: 1 / -1 !important; }
+    }
+
+    /* ── Small phone (≤ 480px) ───────────────────────────────────────────── */
+    @media (max-width: 480px) {
+      .grid-4, .grid-5,
+      .grid-3, .grid-2  { grid-template-columns: 1fr !important; }
+      .col-2, .col-3,
+      .col-4, .col-full { grid-column: 1 / -1 !important; }
+
+      .page       { padding: 10px !important; }
+      .card       { padding: 14px !important; }
+      .card-value { font-size: 26px !important; }
+      .card-value.lg { font-size: 30px !important; }
+
+      .chart-wrap       { height: 200px !important; }
+      .chart-wrap.tall  { height: 240px !important; }
+      .chart-wrap.xtall { height: 280px !important; }
+      .chart-wrap.short { height: 150px !important; }
+
+      .param-val  { font-size: 20px !important; }
+      .param-desc { font-size: 10px !important; }
+
+      .nav-brand span      { display: none; }
+      .top-banner-links    { display: none; }  /* hide GitHub/Substack/LinkedIn on tiny screens */
+      .top-banner-text     { font-size: 10px; }
+
+      .page-title    { font-size: 17px; }
+      .page-subtitle { display: none; }        /* "Real-time regime + term structure" — skip on phone */
+
+      .banner { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .banner-icon { font-size: 18px; }
     }
   </style>
 </head>
@@ -537,9 +640,12 @@
   </div>
 </div>
 
-<nav class="nav">
+<nav class="nav" style="position:relative;">
   <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
-  <div class="nav-links">
+  <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="nav-links" id="navLinks">
     <a href="/"            class="nav-link {% if page=='market'      %}active{% endif %}">
       <span class="nav-dot"></span>Live Market
     </a>
@@ -564,6 +670,34 @@
 </main>
 
 <script>
+  // Hamburger nav toggle
+  (function() {
+    var btn   = document.getElementById('navToggle');
+    var links = document.getElementById('navLinks');
+    if (!btn || !links) return;
+    btn.addEventListener('click', function() {
+      var open = links.classList.toggle('open');
+      btn.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', open);
+    });
+    // Close menu when any nav link is tapped (SPA-style)
+    links.querySelectorAll('.nav-link').forEach(function(a) {
+      a.addEventListener('click', function() {
+        links.classList.remove('open');
+        btn.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+    // Close menu when tapping outside
+    document.addEventListener('click', function(e) {
+      if (!btn.contains(e.target) && !links.contains(e.target)) {
+        links.classList.remove('open');
+        btn.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
+
   // Chart.js global dark-theme defaults
   Chart.defaults.color            = '#666';
   Chart.defaults.borderColor      = '#1f1f1f';
