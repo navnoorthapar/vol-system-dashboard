@@ -405,7 +405,10 @@ def load_page2() -> dict[str, Any]:
     d: dict[str, Any] = {}
 
     try:
-        with open(DATA / "calibrations" / "joint_cal_2026-05-31.pkl", "rb") as f:
+        import glob as _glob2
+        _cals2 = sorted(_glob2.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
+        _cal_path2 = _cals2[-1] if _cals2 else str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
+        with open(_cal_path2, "rb") as f:
             cal = pickle.load(f)
 
         p = cal["params"]
@@ -419,11 +422,11 @@ def load_page2() -> dict[str, Any]:
         d["S"]         = round(float(cal.get("S", 0)), 1)
         d["r_pct"]     = round(float(cal.get("r", 0)) * 100, 2)
         d["q_pct"]     = round(float(cal.get("q", 0)) * 100, 2)
-        d["as_of"]     = str(cal.get("as_of_date", "2026-03-24"))
+        d["as_of"]     = str(cal.get("as_of_date", "2026-05-31"))
         d["fit_time"]  = round(float(cal.get("fit_time", 0)), 1)
         d["n_evals"]   = int(cal.get("n_evals", 0))
 
-        losses = cal.get("losses", {})
+        losses = cal.get("leg_losses", cal.get("losses", {}))
         d["spx_rmse"]     = round(float(losses.get("spx_iv_rmse", 0)), 3)
         d["vix_fut_rmse"] = round(float(losses.get("vix_futures_rmse", 0)), 3)
         d["vix_opt_rmse"] = round(float(losses.get("vix_options_rmse", 0)), 2)
