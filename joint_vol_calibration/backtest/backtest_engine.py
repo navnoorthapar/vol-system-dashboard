@@ -3,7 +3,8 @@ backtest_engine.py — C10: Full Backtest & Reporting Engine
 
 Period:   2018-01-01 → 2025-03-24
 Capital:  $1,000,000 (initial)
-Signals:  S1 (IVR Spread), S2 (VIX TS Curve), S3 (Dispersion Proxy), Combined
+Signals:  S1 (IVR Spread), S2 (VIX TS Curve), S3 (Dispersion Proxy),
+          S4 (VRP — Volatility Risk Premium), Combined
 
 Cost model (non-negotiable):
   Bid-ask:    0.15 vol pts per leg  → 0.15 × 0.01 × vega × n_contracts × 100
@@ -682,8 +683,8 @@ class BacktestEngine:
                 get_spx_ohlcv,
                 get_vix_term_structure_wide,
             )
-            spx_df   = get_spx_ohlcv()
-            vix_wide = get_vix_term_structure_wide()
+            spx_df   = get_spx_ohlcv(as_of_date=self.end_date)
+            vix_wide = get_vix_term_structure_wide(as_of_date=self.end_date)
 
         # ── Build per-date T-bill rate lookup (zero look-ahead) ───────────────
         from joint_vol_calibration.data.database import get_tbill_rates_series
@@ -769,8 +770,18 @@ class BacktestEngine:
             nav_const, spx_close, vix_idx,
             r=_r, q=self.q, signal_label="combined",
         )
+        pnl_s4, t5 = _simulate_straddle_pnl(
+            sig_df["s4_position"], sig_df["s4_kelly"],
+            nav_const, spx_close, vix_idx,
+            r=_r, q=self.q, signal_label="s4",
+        )
+        pnl_s1c, t6 = _simulate_straddle_pnl(
+            sig_df["s1c_position"], sig_df["s1c_kelly"],
+            nav_const, spx_close, vix_idx,
+            r=_r, q=self.q, signal_label="s1c",
+        )
 
-        self.all_trades = t1 + t2 + t3 + t4
+        self.all_trades = t1 + t2 + t3 + t4 + t5 + t6
 
         # ── Portfolio Kelly netting via rolling 60-day correlation ─────────────
         # For each pair of signals (i,j), compute rolling corr r_ij.
@@ -778,7 +789,11 @@ class BacktestEngine:
         # This diversification multiplier shrinks toward 1 when signals are
         # correlated (r→1 → mult→1) and allows up to sqrt(2) diversification
         # bonus when signals are uncorrelated (r→0 → mult→√2).
-        # Gross exposure is then capped at 50% of NAV (25% per signal max).
+        # Gross exposure is then capped at 50% of NAV (÷ 5 signals = 10% each)
+        # ── Portfolio Kelly netting (original S1+S2+S3+combined only) ────────────
+        # S1C and S4 are RESEARCH VARIANTS — tracked independently but not mixed
+        # into the main portfolio. Mixing S1 and S1C (which are anti-correlated)
+        # would cancel each other; S4 is documented as a negative finding.
         pnl_mat = pd.DataFrame({
             "s1": pnl_s1, "s2": pnl_s2, "s3": pnl_s3, "cb": pnl_cb
         }).fillna(0.0)
@@ -804,14 +819,14 @@ class BacktestEngine:
         mult_cb = m1cb
 
         # Scale each signal's P&L and cap gross at 50% NAV (÷ 4 signals = 12.5% each)
-        # Cap is enforced by capping the multiplier at 1.0 (we're already at ÷4 portfolio)
         pnl_s1 = pnl_s1 * mult_s1.clip(0.5, 1.0)
         pnl_s2 = pnl_s2 * mult_s2.clip(0.5, 1.0)
         pnl_s3 = pnl_s3 * mult_s3.clip(0.5, 1.0)
         pnl_cb = pnl_cb * mult_cb.clip(0.5, 1.0)
 
         # ── Build equity curves ────────────────────────────────────────────────
-        # Portfolio = equal-weight average of 4 correlation-adjusted strategies
+        # Main portfolio = equal-weight average of 4 correlation-adjusted strategies
+        # S1C and S4 are stored as standalone research equity curves.
         cap = self.initial_capital
         pnl_total = (pnl_s1 + pnl_s2 + pnl_s3 + pnl_cb) / 4.0
 
@@ -821,15 +836,20 @@ class BacktestEngine:
             "nav_s1":       cap + pnl_s1.cumsum(),
             "nav_s2":       cap + pnl_s2.cumsum(),
             "nav_s3":       cap + pnl_s3.cumsum(),
+            "nav_s4":       cap + pnl_s4.cumsum(),
+            "nav_s1c":      cap + pnl_s1c.cumsum(),
             "nav_combined": cap + pnl_cb.cumsum(),
             "pnl_s1":       pnl_s1,
             "pnl_s2":       pnl_s2,
             "pnl_s3":       pnl_s3,
+            "pnl_s4":       pnl_s4,
+            "pnl_s1c":      pnl_s1c,
             "pnl_combined": pnl_cb,
         }, index=sig_df.index)
 
         # Attach signal columns
-        for col in ["s1_position", "s2_position", "s3_position", "combined_pos", "regime"]:
+        for col in ["s1_position", "s1c_position", "s2_position", "s3_position",
+                    "s4_position", "combined_pos", "regime"]:
             if col in sig_df.columns:
                 eq[col] = sig_df[col]
 
@@ -851,7 +871,8 @@ class BacktestEngine:
         m = compute_metrics(df, trade_log=self.all_trades)
 
         # Per-signal Sharpe and annualised return
-        for sig, nav_col in [("s1","nav_s1"),("s2","nav_s2"),("s3","nav_s3"),("combined","nav_combined")]:
+        for sig, nav_col in [("s1","nav_s1"),("s2","nav_s2"),("s3","nav_s3"),
+                              ("s4","nav_s4"),("s1c","nav_s1c"),("combined","nav_combined")]:
             if nav_col in df.columns:
                 sub = pd.DataFrame({"nav": df[nav_col]})
                 sm  = compute_metrics(sub)

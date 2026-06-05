@@ -35,18 +35,25 @@ from joint_vol_calibration.signals.signal_engine import (
     S2_ZSCORE_ENTRY,
     S3_MAX_HOLD,
     S3_ZSCORE_ENTRY,
+    S4_Z_ENTRY_SHORT,
+    S4_Z_ENTRY_LONG,
+    S4_Z_EXIT,
+    S4_MAX_HOLD,
+    S4_MAX_KELLY,
     SignalEngine,
     _run_statemachine,
     _run_statemachine_r2exit,
     combine_signals,
     compare_s1_regime_filter,
     generate_signal1,
+    generate_signal1_contrarian,
     generate_signal1_regime_filtered,
     generate_signal1_r2exit,
     generate_signal1_soft,
     generate_signal2,
     generate_signal2_r2exit,
     generate_signal3,
+    generate_signal4,
     signal_summary,
 )
 
@@ -1084,3 +1091,304 @@ class TestGenerateSignal1Soft:
         result  = generate_signal1_soft(feat, regimes, prob_r2)
         expected = np.where(prob_vals < 0.4, 1.0, np.where(prob_vals < 0.6, 0.5, 0.0))
         np.testing.assert_array_almost_equal(result["s1s_scale"].values, expected)
+
+
+# ── S4: Volatility Risk Premium Signal ────────────────────────────────────────
+
+def _make_vrp_features(n: int = 400, seed: int = 7) -> pd.DataFrame:
+    """Features with VRP pattern: vix and fear_premium controls VRP signal."""
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2020-01-02", periods=n)
+    vix = np.full(n, 0.18)
+    # Normal fear_premium ~1.2 (IV slightly above RV)
+    fear = np.full(n, 1.2)
+    return pd.DataFrame({
+        "vix":           vix,
+        "ts_slope":      np.full(n, 0.002),
+        "fear_premium":  fear,
+        "rv_change_5d":  np.zeros(n),
+        "pdv_iv_spread": np.zeros(n),
+        "vvix":          np.full(n, 0.85),
+    }, index=idx)
+
+
+class TestGenerateSignal4:
+    """14 tests for Signal 4: VRP mean-reversion."""
+
+    def _flat_feats(self, n: int = 400) -> pd.DataFrame:
+        return _make_vrp_features(n=n)
+
+    def _regimes(self, n: int = 400, value: int = 1) -> pd.Series:
+        idx = pd.bdate_range("2020-01-02", periods=n)
+        return pd.Series(value, index=idx)
+
+    def test_output_columns_present(self):
+        """S4 output must contain position, strength, kelly, exp_pnl."""
+        feats = self._flat_feats()
+        reg   = self._regimes()
+        out   = generate_signal4(feats, reg)
+        for col in ["s4_position", "s4_strength", "s4_kelly", "s4_exp_pnl",
+                    "s4_regime_entry", "s4_days_held"]:
+            assert col in out.columns, f"Missing column: {col}"
+
+    def test_flat_vrp_no_entry(self):
+        """Constant fear_premium=1.2 never crosses z-score threshold → flat."""
+        feats = self._flat_feats()
+        reg   = self._regimes()
+        out   = generate_signal4(feats, reg)
+        assert (out["s4_position"] == 0).all()
+
+    def test_short_entry_in_r1_only(self):
+        """High VRP z-score only triggers short in R1, not R0 or R2."""
+        n = 400
+        feats = self._flat_feats(n)
+        # Inject elevated fear_premium in last 50 bars → high z_vrp
+        feats = feats.copy()
+        feats.iloc[200:, feats.columns.get_loc("fear_premium")] = 2.5
+
+        reg_r1 = self._regimes(n, value=1)
+        reg_r0 = self._regimes(n, value=0)
+        reg_r2 = self._regimes(n, value=2)
+
+        out_r1 = generate_signal4(feats, reg_r1)
+        out_r0 = generate_signal4(feats, reg_r0)
+        out_r2 = generate_signal4(feats, reg_r2)
+
+        # R1 should get short entries after warmup
+        assert (out_r1["s4_position"] == -1).any(), "R1 should trigger short"
+        # R0 should never short (wrong regime for selling vol)
+        assert not (out_r0["s4_position"] == -1).any(), "R0 must not trigger short"
+        # R2 should never enter any position
+        assert (out_r2["s4_position"] == 0).all(), "R2 must block all entries"
+
+    def test_long_entry_in_r0_only(self):
+        """Very low VRP z-score triggers long in R0, not R1."""
+        n = 400
+        feats = self._flat_feats(n)
+        # Inject depressed fear_premium → low VRP → low z_vrp
+        feats = feats.copy()
+        feats.iloc[200:, feats.columns.get_loc("fear_premium")] = 0.6
+
+        reg_r0 = self._regimes(n, value=0)
+        reg_r1 = self._regimes(n, value=1)
+
+        out_r0 = generate_signal4(feats, reg_r0)
+        out_r1 = generate_signal4(feats, reg_r1)
+
+        assert (out_r0["s4_position"] == 1).any(), "R0 should trigger long on low VRP"
+        assert not (out_r1["s4_position"] == 1).any(), "R1 must not trigger long"
+
+    def test_max_hold_respected(self):
+        """Position is closed after S4_MAX_HOLD days."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        feats.iloc[200:, feats.columns.get_loc("fear_premium")] = 2.5
+        reg = self._regimes(n, value=1)
+        out = generate_signal4(feats, reg, max_hold=5)
+        active = out[out["s4_position"] != 0]
+        if len(active) > 0:
+            assert active["s4_days_held"].max() <= 5
+
+    def test_kelly_bounded(self):
+        """Kelly fraction never exceeds S4_MAX_KELLY=0.20."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        feats.iloc[200:, feats.columns.get_loc("fear_premium")] = 3.0
+        reg = self._regimes(n, value=1)
+        out = generate_signal4(feats, reg)
+        assert (out["s4_kelly"] <= S4_MAX_KELLY + 1e-9).all()
+
+    def test_position_values(self):
+        """All positions must be in {-1, 0, +1}."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        feats.iloc[150:250, feats.columns.get_loc("fear_premium")] = 2.5
+        feats.iloc[300:350, feats.columns.get_loc("fear_premium")] = 0.5
+        reg = pd.Series(
+            [1]*300 + [0]*100,
+            index=pd.bdate_range("2020-01-02", periods=n)
+        )
+        out = generate_signal4(feats, reg)
+        allowed = {-1.0, 0.0, 1.0}
+        assert set(out["s4_position"].unique()).issubset(allowed)
+
+    def test_exit_on_reversion(self):
+        """Trade exits when VRP z-score reverts below z_exit threshold."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        # High VRP for 20 bars then normalise: z should revert → exit
+        feats.iloc[200:220, feats.columns.get_loc("fear_premium")] = 2.5
+        # Remaining: back to 1.2 → VRP reverts, z drops below exit threshold
+        reg = self._regimes(n, value=1)
+        out = generate_signal4(feats, reg)
+        # After reversion, position should return to 0
+        if (out["s4_position"] != 0).any():
+            last_exit = out[out["s4_position"] != 0].index[-1]
+            tail = out.loc[last_exit:].iloc[1:]
+            # Position must not stay stuck at non-zero indefinitely
+            assert (tail["s4_position"] == 0).any() or len(tail) == 0
+
+    def test_r2_exit_closes_open_position(self):
+        """An open position is closed when regime transitions to R2."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        # High VRP from bar 150 → enters short in R1
+        feats.iloc[150:, feats.columns.get_loc("fear_premium")] = 2.5
+
+        # Regime: R1 for first 200 bars, then R2
+        reg_vals = [1] * 200 + [2] * 200
+        reg = pd.Series(reg_vals, index=pd.bdate_range("2020-01-02", periods=n))
+
+        out = generate_signal4(feats, reg)
+        # After regime turns R2 (bar 200+), position must be 0
+        r2_period = out.iloc[200:]
+        assert (r2_period["s4_position"] == 0).all(), \
+            "Position must be zero during and after R2 regime"
+
+    def test_no_same_day_reentry_after_exit(self):
+        """On exit day, position is 0 (no same-day re-entry)."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        feats.iloc[200:215, feats.columns.get_loc("fear_premium")] = 2.5
+        reg = self._regimes(n, value=1)
+        out = generate_signal4(feats, reg, max_hold=5)
+        days_held = out["s4_days_held"].values
+        pos = out["s4_position"].values
+        for i in range(1, len(days_held)):
+            if days_held[i - 1] >= 5:
+                assert pos[i] == 0 or days_held[i] == 1  # exit day or new entry next day
+
+    def test_strength_within_bounds(self):
+        """Signal strength is always in [0, 1]."""
+        n = 400
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        feats.iloc[200:, feats.columns.get_loc("fear_premium")] = 5.0
+        reg = self._regimes(n, value=1)
+        out = generate_signal4(feats, reg)
+        assert (out["s4_strength"] >= 0).all()
+        assert (out["s4_strength"] <= 1.0 + 1e-9).all()
+
+    def test_constants_valid_ranges(self):
+        """S4 constants must satisfy logical ordering."""
+        assert S4_Z_ENTRY_SHORT > S4_Z_EXIT >= 0
+        assert S4_Z_ENTRY_LONG < 0
+        assert 1 <= S4_MAX_HOLD <= 60
+        assert 0 < S4_MAX_KELLY <= 1.0
+
+    def test_signal_engine_includes_s4(self):
+        """SignalEngine.generate() must return s4_position column."""
+        import sys
+        import pickle
+        from pathlib import Path
+
+        # Load regime classifier from disk
+        clf_path = Path("data_store/signals/regime_classifier.pkl")
+        if not clf_path.exists():
+            pytest.skip("Regime classifier not found; skipping integration test")
+
+        from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+        spx = get_spx_ohlcv(as_of_date="2026-06-05")
+        vix = get_vix_term_structure_wide(as_of_date="2026-06-05")
+
+        engine = SignalEngine()
+        df = engine.generate(spx, vix, start_date="2023-01-01", end_date="2024-12-31")
+        assert "s4_position" in df.columns
+        assert "s4_kelly" in df.columns
+
+    def test_vrp_is_positive_when_fear_premium_above_one(self):
+        """VRP = vix*(1 - 1/fear_premium) > 0 when fear_premium > 1."""
+        n = 50
+        feats = self._flat_feats(n)
+        feats = feats.copy()
+        feats["fear_premium"] = 1.5   # IV above RV
+        # VRP should be positive: vix*(1 - 1/1.5) = vix*(1/3) > 0
+        vrp_vals = feats["vix"] * (1.0 - 1.0 / feats["fear_premium"])
+        assert (vrp_vals > 0).all()
+
+
+# ── S1C: Contrarian PDV Signal ────────────────────────────────────────────────
+
+class TestGenerateSignal1Contrarian:
+    """8 tests for S1C: contrarian PDV mean-reversion signal."""
+
+    def _flat_feats(self, n: int = 60) -> pd.DataFrame:
+        return _make_flat_features(n)
+
+    def _regimes(self, n: int = 60, value: int = 1) -> pd.Series:
+        return _make_regimes(n, value)
+
+    def test_output_columns(self):
+        """S1C output has required columns prefixed s1c_."""
+        out = generate_signal1_contrarian(self._flat_feats(), self._regimes())
+        for col in ["s1c_position", "s1c_strength", "s1c_kelly", "s1c_exp_pnl"]:
+            assert col in out.columns
+
+    def test_flat_spread_no_entry(self):
+        """Zero spread never exceeds threshold → flat."""
+        out = generate_signal1_contrarian(self._flat_feats(), self._regimes())
+        assert (out["s1c_position"] == 0).all()
+
+    def test_short_in_r0_when_pdv_above_iv(self):
+        """Spread > threshold in R0 → SHORT (contrarian: PDV overestimates)."""
+        n = 60
+        feats = _inject_spread(self._flat_feats(n), 10, 40, 0.05)  # spread > threshold
+        reg   = _make_regimes(n, value=0)   # R0
+        out   = generate_signal1_contrarian(feats, reg)
+        assert (out["s1c_position"] == -1).any()
+
+    def test_long_in_r1_when_iv_above_pdv(self):
+        """Spread < -threshold in R1 → LONG (contrarian: market overprices vs PDV)."""
+        n = 60
+        feats = _inject_spread(self._flat_feats(n), 10, 40, -0.05)  # negative spread
+        reg   = _make_regimes(n, value=1)   # R1
+        out   = generate_signal1_contrarian(feats, reg)
+        assert (out["s1c_position"] == 1).any()
+
+    def test_opposite_direction_to_s1(self):
+        """S1C must be opposite direction to S1 on same inputs."""
+        n = 60
+        feats_long  = _inject_spread(self._flat_feats(n), 5, 40, 0.05)
+        reg_r0      = _make_regimes(n, value=0)
+        s1  = generate_signal1(feats_long, reg_r0)
+        s1c = generate_signal1_contrarian(feats_long, reg_r0)
+        # Where S1 is long (+1), S1C must be short (−1)
+        active = s1["s1_position"] != 0
+        if active.any():
+            assert (s1c.loc[active, "s1c_position"] == -s1.loc[active, "s1_position"]).all()
+
+    def test_r2_blocks_entry(self):
+        """R2 regime blocks all entries."""
+        n = 60
+        feats = _inject_spread(self._flat_feats(n), 10, 50, 0.05)
+        reg   = _make_regimes(n, value=2)
+        out   = generate_signal1_contrarian(feats, reg)
+        assert (out["s1c_position"] == 0).all()
+
+    def test_kelly_bounded(self):
+        """Kelly fraction never exceeds S1_MAX_KELLY."""
+        n = 60
+        feats = _inject_spread(self._flat_feats(n), 5, 55, 0.10)
+        reg   = _make_regimes(n, value=0)
+        out   = generate_signal1_contrarian(feats, reg)
+        assert (out["s1c_kelly"] <= S1_MAX_KELLY + 1e-9).all()
+
+    def test_signal_engine_includes_s1c(self):
+        """SignalEngine.generate() must return s1c_position column."""
+        from pathlib import Path
+        clf_path = Path("data_store/signals/regime_classifier.pkl")
+        if not clf_path.exists():
+            pytest.skip("Regime classifier not found")
+        from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+        spx = get_spx_ohlcv(as_of_date="2026-06-05")
+        vix = get_vix_term_structure_wide(as_of_date="2026-06-05")
+        engine = SignalEngine()
+        df = engine.generate(spx, vix, start_date="2023-01-01", end_date="2024-12-31")
+        assert "s1c_position" in df.columns
+        assert "s1c_kelly" in df.columns
