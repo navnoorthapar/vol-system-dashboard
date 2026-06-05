@@ -1,0 +1,74 @@
+name: Daily Market Refresh
+
+# Runs every weekday at 11pm UTC (6:30am IST next day / 6pm ET same day)
+# That's 30+ min after US options market close — yfinance data is settled
+on:
+  schedule:
+    - cron: "0 23 * * 1-5"
+  workflow_dispatch:          # manual trigger from GitHub UI anytime
+
+permissions:
+  contents: write             # needed to commit updated data files back to main
+
+jobs:
+  refresh:
+    name: Refresh data + redeploy site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20       # calibration takes ~15s; hard cap at 20min
+
+    steps:
+      # ── 1. Checkout source (main branch) ──────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. Python setup ───────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. Run full refresh pipeline ─────────────────────────────────────
+      - name: Run cloud_refresh.py
+        run: python scripts/cloud_refresh.py
+
+      # ── 4. Commit updated data files back to main ─────────────────────────
+      # Only regime_labels.parquet and joint_cal_*.pkl change daily.
+      # The SQLite DB is NOT committed (binary bloat — rebuilt fresh each run).
+      - name: Commit updated data files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data_store/signals/regime_labels.parquet
+          git add data_store/calibrations/joint_cal_*.pkl
+          # Only commit if something actually changed
+          if git diff --staged --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "Auto-refresh $(date -u +%Y-%m-%d): regime labels + Heston recalibration"
+            git push origin main
+          fi
+
+      # ── 5. Deploy .site-build/ to gh-pages ───────────────────────────────
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token:  ${{ secrets.GITHUB_TOKEN }}
+          publish_dir:   .site-build
+          publish_branch: gh-pages
+          force_orphan:  false           # preserve gh-pages history
+          user_name:     "github-actions[bot]"
+          user_email:    "github-actions[bot]@users.noreply.github.com"
+          commit_message: "Deploy ${{ github.run_id }}: $(date -u +%Y-%m-%d)"
+          cname:         navnoorbawa.me  # preserve custom domain
