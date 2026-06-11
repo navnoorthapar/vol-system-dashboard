@@ -20,15 +20,22 @@ P&L methodology:
 
 Assumptions (documented for transparency):
   1. 30-day ATM straddles for S1/S2; new entry re-strikes ATM at current spot
-  2. Vol surface: VIX TS interpolated in total-variance space (ATM only, no smile)
-  3. Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013 throughout
-  4. Heston params fixed from 2026-03-24 calibration (no time-varying recalibration)
-  5. Regime gate: no NEW entries in Regime 2; existing trades close on natural exit
-  6. Margin for short options held as reserve (no interest charged on margin)
+  2. Vol surface: VIX TS interpolated in total-variance space (ATM only, no
+     smile). NO historical option prices exist in the DB — all option P&L is
+     MARK-TO-MODEL (BS), which flatters short-straddle P&L (no skew dynamics,
+     no pin risk). The Heston/joint-calibration stack is NOT in this P&L
+     path; it serves C6 (Greeks) and C7 (hedge simulation).
+  3. Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013;
+     Sharpe/Sortino use the same per-date T-bill series as the cash hurdle
+  4. Regime labels: lagged deterministic rule (rv_20d vs VIX; VVIX>100 → R2).
+     Persistence predictor = 90.0% next-day accuracy on 2020+ vs 63.4% for
+     walk-forward XGBoost — the ML classifier is demoted from the trading loop
+  5. Regime gate: no NEW entries in Regime 2; S1C/S4 also force-close open
+     positions when the regime transitions INTO R2
+  6. Margin ENFORCED: short straddles capped at nav/(0.20 × K × 100) contracts
   7. Correlation netting EX-ANTE: trailing 60d corr / 252d Sharpe multipliers,
      shifted 1 day, applied to Kelly sizing in a second simulation pass
-  8. Walk-forward: C8 XGBoost (vvix excluded) and PDVLinear retrained per year
-     on strictly pre-year data; signal thresholds fixed
+  8. PDVLinear retrained per year on strictly pre-year data (walk-forward)
 
 Honest failures (from C4, C7 — see report):
   • PDV over-forecast in 2020: σ_PDV=91.6% vs σ_ATM=55.4% on COVID crash
@@ -248,6 +255,16 @@ def _simulate_straddle_pnl(
             vega0       = _straddle_vega(S, K, T_entry, r_t, q, sigma)
             n_contracts = max(1, int(k * nav / (V0 * CONTRACT_MULT)))
 
+            # Margin cap on short straddles: initial margin = 20% of strike
+            # notional per contract must fit within NAV. Long straddles are
+            # premium-capped by construction (k·nav sizing above).
+            if direction < 0:
+                margin_per_contract = MARGIN_RATIO * K * CONTRACT_MULT
+                n_margin_cap = int(nav / margin_per_contract)
+                if n_margin_cap < 1:
+                    continue   # NAV cannot support even one short contract
+                n_contracts = min(n_contracts, n_margin_cap)
+
             entry_cost_  = _one_way_cost(vega0, n_contracts)
             pnl.iloc[i] -= entry_cost_
 
@@ -383,6 +400,7 @@ def compute_metrics(
     equity_df: pd.DataFrame,
     rf:        float = RISK_FREE_RATE,
     trade_log: Optional[List[TradeRecord]] = None,
+    rf_series: Optional[pd.Series] = None,
 ) -> Dict:
     """
     Compute full set of performance metrics from an equity curve.
@@ -390,8 +408,13 @@ def compute_metrics(
     Parameters
     ----------
     equity_df : DataFrame with column 'nav' (portfolio value, date-indexed)
-    rf        : annualised risk-free rate (default 5%)
+    rf        : annualised risk-free rate (scalar fallback, default 5%)
     trade_log : optional list of TradeRecord objects for trade-level stats
+    rf_series : optional date-indexed annualised T-bill rates (^IRX). When
+                supplied, daily excess returns use the per-date rate instead
+                of the scalar — Sharpe/Sortino are then measured against the
+                actual cash hurdle of the period (~0% in 2020-21, ~5% in
+                2023-24), consistent with the per-date r used in pricing.
 
     Returns
     -------
@@ -416,12 +439,17 @@ def compute_metrics(
             "n_trades": len(tl), "n_days": n, "cumulative_return": 0.0,
         }
 
-    rf_daily = rf / TRADING_DAYS
+    if rf_series is not None and len(rf_series) > 0:
+        rf_daily = (
+            rf_series.reindex(rets.index).ffill().fillna(rf) / TRADING_DAYS
+        )
+    else:
+        rf_daily = rf / TRADING_DAYS
     ann_ret  = float((nav.iloc[-1] / nav.iloc[0]) ** (TRADING_DAYS / n) - 1.0)
     excess   = rets - rf_daily
     sharpe   = float(excess.mean() / excess.std() * np.sqrt(TRADING_DAYS)) if excess.std() > 0 else 0.0
 
-    downside = rets[rets < rf_daily] - rf_daily
+    downside = excess[excess < 0]
     sortino  = (float(excess.mean() / downside.std() * np.sqrt(TRADING_DAYS))
                 if len(downside) > 1 and downside.std() > 0 else 0.0)
 
@@ -510,14 +538,20 @@ class BacktestEngine:
         "30-day ATM straddles for S1/S2; re-struck at each new entry",
         "Delta-hedged daily (C7 framework): pnl = direction×(ΔV−Δ_{t−1}×ΔS)×n×100",
         "S3 P&L: VIX/VVIX z-score proxy; 2% of kelly-weighted NAV per z-unit (no real options)",
-        "Vol surface: VIX TS interpolated in total-variance space (ATM only, no smile)",
-        "Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013 throughout",
-        "Heston params recalibrated monthly; cached to data_store/heston_params/YYYY-MM.parquet",
-        "Regime gate: new entries blocked in Regime 2; existing trades close naturally",
+        "MARK-TO-MODEL P&L: no historical option prices in DB — straddles priced "
+        "via Black-Scholes on VIX-TS-interpolated ATM vol (no smile, no pin risk); "
+        "the Heston/joint-calibration stack is NOT in the backtest P&L path",
+        "Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013; "
+        "Sharpe/Sortino measured against the same per-date T-bill series",
+        "Margin ENFORCED: short straddles capped at nav/(0.20×K×100) contracts",
+        "Regime labels: lagged deterministic rule (rv_20d vs VIX; VVIX>100→R2). "
+        "Persistence predictor = 90.0% next-day acc on 2020+ vs 63.4% for "
+        "walk-forward XGBoost — ML classifier demoted from the trading loop (C17)",
+        "Regime gate: new entries blocked in R2; S1C/S4 force-close open "
+        "positions on transition INTO R2",
         "Kelly netting EX-ANTE: trailing 60d corr + trailing 252d Sharpe multipliers, "
         "shifted 1 day, applied to position size in a second simulation pass",
-        "Walk-forward: C8 XGBoost retrained per year on pre-year data, vvix excluded "
-        "from features; PDVLinear retrained per year on pre-year returns",
+        "Walk-forward PDVLinear retrained per year on pre-year returns",
     ]
 
     HONEST_FAILURES: List[str] = [
@@ -531,8 +565,20 @@ class BacktestEngine:
         "S1C DATA SNOOPING: contrarian direction was chosen AFTER observing S1 lose "
         "on 2018-2025 — its backtest P&L is in-sample by construction and needs "
         "confirmation on post-2026-06 data before being trusted",
-        "Regime classifier accuracy (86.2%) was inflated by the circular vvix feature "
-        "(R2 label is defined as VVIX>threshold); vvix now excluded at training",
+        "S1C pseudo-OOS (2013-2017) is CONFOUNDED: that window was the best "
+        "systematic short-vol era in modern history (pre-Volmageddon), so its "
+        "profit may be short-vol beta, not contrarian alpha; entry thresholds "
+        "are also shared with the discovery window",
+        "Regime classifier accuracy (86.2%) was inflated by the circular vvix feature; "
+        "after removing it, honest accuracy 63.4% LOSES to the trivial persistence "
+        "baseline (90.0%) — the ML classifier adds negative value for next-day "
+        "regime prediction and was removed from the trading loop (C17)",
+        "P&L CONCENTRATION: portfolio profit is dominated by the COVID-2020 window; "
+        "ex-crisis the portfolio is roughly flat — with ~2 dozen trades, no result "
+        "here is statistically significant",
+        "Returns below cash: cumulative return is positive but annualised return "
+        "is below the T-bill path for most configurations — this is a research "
+        "artifact and audit trail, not a deployable edge",
     ]
 
     def __init__(
@@ -594,83 +640,6 @@ class BacktestEngine:
             df = df.sort_values("date").copy()
             df["log_return"] = np.log(df["close"] / df["close"].shift(1))
         return df
-
-    # ── Monthly Heston recalibration ──────────────────────────────────────────
-
-    # Cache directory for monthly Heston parameter files
-    _HESTON_PARAMS_DIR = DATA_DIR / "heston_params"
-
-    def _recalibrate_heston(self, as_of_date: str) -> dict:
-        """
-        Return calibrated Heston parameters for the given date.
-
-        Strategy:
-          1. Check cache: data_store/heston_params/YYYY-MM.parquet
-             If present, load and return (no re-calibration).
-          2. If not cached: run JointCalibrator(as_of_date) and cache result.
-          3. On error (no options data, etc.): return prior-month cached params
-             or the 2026-03-24 static defaults as final fallback.
-
-        Parameters
-        ----------
-        as_of_date : str 'YYYY-MM-DD'
-
-        Returns
-        -------
-        dict with keys: kappa, theta, sigma, rho, v0
-        """
-        from joint_vol_calibration.config import HESTON_DEFAULTS
-
-        self._HESTON_PARAMS_DIR.mkdir(parents=True, exist_ok=True)
-        month_key = as_of_date[:7]   # 'YYYY-MM'
-        cache_path = self._HESTON_PARAMS_DIR / f"{month_key}.parquet"
-
-        # 1. Cache hit
-        if cache_path.exists():
-            try:
-                df = pd.read_parquet(cache_path)
-                params = df.iloc[0].to_dict()
-                logger.debug("Heston params loaded from cache: %s", month_key)
-                return params
-            except Exception as e:
-                logger.warning("Failed to read cached Heston params for %s: %s", month_key, e)
-
-        # 2. Calibrate
-        logger.info("Calibrating Heston for %s ...", month_key)
-        try:
-            from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
-            cal = JointCalibrator(as_of_date=as_of_date)
-            result = cal.calibrate()
-            params = {
-                "kappa": float(result["kappa"]),
-                "theta": float(result["theta"]),
-                "sigma": float(result["sigma"]),
-                "rho":   float(result["rho"]),
-                "v0":    float(result["v0"]),
-            }
-            # Cache to parquet
-            pd.DataFrame([params]).to_parquet(cache_path, index=False)
-            logger.info("Heston params cached for %s: %s", month_key, params)
-            return params
-        except Exception as e:
-            logger.warning("Heston recalibration failed for %s: %s", month_key, e)
-
-        # 3. Fallback: search prior months
-        for lag in range(1, 13):
-            prior_ts = pd.Timestamp(as_of_date) - pd.DateOffset(months=lag)
-            prior_key = prior_ts.strftime("%Y-%m")
-            prior_path = self._HESTON_PARAMS_DIR / f"{prior_key}.parquet"
-            if prior_path.exists():
-                try:
-                    df = pd.read_parquet(prior_path)
-                    logger.warning("Using prior-month Heston params: %s", prior_key)
-                    return df.iloc[0].to_dict()
-                except Exception:
-                    continue
-
-        # Final fallback: config defaults
-        logger.warning("No cached Heston params found; using HESTON_DEFAULTS")
-        return dict(HESTON_DEFAULTS)
 
     # ── Walk-forward PDV model ────────────────────────────────────────────────
 
@@ -891,27 +860,16 @@ class BacktestEngine:
             logger.warning("No T-bill rates in DB — using fixed r=%.4f", self.r)
         else:
             _rate_series = _tbill_df.set_index("date")["rate"]
+        # Keep for compute_metrics: Sharpe/Sortino use the same cash hurdle
+        self._rate_series = _rate_series
 
-        # ── Monthly Heston recalibration (Step 8) ─────────────────────────────
-        # Pre-compute Heston params for each month in the backtest window.
-        # Results cached to data_store/heston_params/YYYY-MM.parquet.
-        # Look-ahead-safe: calibration uses as_of_date = first trading day of month.
-        # ~84 calibrations for 2018-2025 (≈60 min total first run; instant on cache hit).
-        _months = pd.period_range(start=self.start_date, end=self.end_date, freq="M")
-        self.monthly_heston_params_: dict = {}
-        for _m in _months:
-            _first_day = _m.start_time.strftime("%Y-%m-%d")
-            try:
-                _params = self._recalibrate_heston(_first_day)
-                self.monthly_heston_params_[str(_m)] = _params
-            except Exception as _e:
-                logger.debug("Monthly Heston skipped for %s: %s", _m, _e)
-        logger.info(
-            "Monthly Heston params loaded for %d months (%d calibrated, %d fallback)",
-            len(_months),
-            sum(1 for p in self.monthly_heston_params_.values() if "kappa" in p),
-            len(_months) - len(self.monthly_heston_params_),
-        )
+        # NOTE (C17): the former "monthly Heston recalibration" loop was
+        # removed. There is no historical options data before the 2026
+        # snapshots, so every monthly calibration failed and fell back to
+        # static defaults — and the resulting parameters were never consumed
+        # by any P&L path. Backtest pricing is Black-Scholes on the
+        # VIX-term-structure-interpolated ATM vol; the Heston/joint
+        # calibration stack serves C6 (Greeks) and C7 (hedge sim), not C10.
 
         # Normalise to have 'date' column
         spx_col  = self._to_df_with_date_col(self._to_date_indexed(spx_df))
@@ -922,13 +880,17 @@ class BacktestEngine:
         spx_idx  = self._to_date_indexed(spx_col)
         vix_idx  = self._to_date_indexed(vix_col)
 
-        # ── Walk-forward regime labels (zero look-ahead bias fix) ─────────────
-        # Train one classifier per backtest year using only pre-year data.
-        # Pass spx_col (has 'date' column + DatetimeIndex) for compatibility.
-        logger.info("Building walk-forward regime labels ...")
-        wf_regimes = self._build_walkforward_regimes(spx_col, vix_col)
-        if wf_regimes is None:
-            logger.warning("Walk-forward regimes unavailable; falling back to classifier labels")
+        # ── Regime labels: lagged deterministic rule (C17) ─────────────────────
+        # The regime label is DEFINED by same-day observables (rv_20d vs VIX;
+        # VVIX > threshold → R2), so yesterday's label is fully known at the
+        # close of t−1. Benchmarking showed this persistence predictor hits
+        # 90.0% next-day accuracy on 2020+ vs 63.4% for the walk-forward
+        # XGBoost — the ML classifier is therefore DEMOTED from the trading
+        # loop and kept only as a research component (C8). SignalEngine
+        # shifts these labels by 1 day before any signal uses them, which is
+        # exactly the persistence predictor.
+        logger.info("Building rule-based regime labels (persistence predictor) ...")
+        rule_regimes = build_regime_labels(spx_col, vix_col)
 
         # ── Walk-forward PDV vol forecasts (zero look-ahead) ───────────────────
         # Retrain PDVLinear per backtest year on strictly pre-year returns so
@@ -946,7 +908,7 @@ class BacktestEngine:
             spx_col, vix_col,
             start_date=self.start_date,
             end_date=self.end_date,
-            precomputed_regimes=wf_regimes,
+            precomputed_regimes=rule_regimes,
             precomputed_pdv_vol=wf_pdv_vol,
         )
         self.signals_df = sig_df
@@ -1121,14 +1083,15 @@ class BacktestEngine:
         if df is None:
             raise RuntimeError("No equity DataFrame. Call run() first.")
 
-        m = compute_metrics(df, trade_log=self.all_trades)
+        _rf_series = getattr(self, "_rate_series", None)
+        m = compute_metrics(df, trade_log=self.all_trades, rf_series=_rf_series)
 
         # Per-signal Sharpe and annualised return
         for sig, nav_col in [("s1","nav_s1"),("s2","nav_s2"),("s3","nav_s3"),
                               ("s4","nav_s4"),("s1c","nav_s1c"),("combined","nav_combined")]:
             if nav_col in df.columns:
                 sub = pd.DataFrame({"nav": df[nav_col]})
-                sm  = compute_metrics(sub)
+                sm  = compute_metrics(sub, rf_series=_rf_series)
                 m[f"{sig}_sharpe"]     = sm.get("sharpe", np.nan)
                 m[f"{sig}_ann_return"] = sm.get("ann_return", np.nan)
 

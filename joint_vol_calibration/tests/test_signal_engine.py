@@ -1392,3 +1392,15 @@ class TestGenerateSignal1Contrarian:
         df = engine.generate(spx, vix, start_date="2023-01-01", end_date="2024-12-31")
         assert "s1c_position" in df.columns
         assert "s1c_kelly" in df.columns
+
+    def test_r2_transition_forces_exit(self):
+        """C17: open S1C position must close when regime transitions INTO R2."""
+        n = 60
+        feats = _inject_spread(self._flat_feats(n), 5, 55, 0.05)
+        reg   = _make_regimes(n, value=0)
+        reg.iloc[30:] = 2          # transition into R2 at bar 30
+        out = generate_signal1_contrarian(feats, reg)
+        assert (out["s1c_position"].iloc[:30] == -1).any(), "trade never opened pre-R2"
+        assert (out["s1c_position"].iloc[30:] == 0).all(), "position survived R2 transition"
+        assert "s1c_r2_exit" in out.columns
+        assert bool(out["s1c_r2_exit"].iloc[30]), "r2_exit flag not set at transition"

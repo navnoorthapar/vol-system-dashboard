@@ -73,7 +73,7 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
     print(sep)
     print(f"  Cumulative return :  {_p(m.get('cumulative_return'))}")
     print(f"  Ann. return       :  {_p(m.get('ann_return'))}")
-    print(f"  Sharpe (rf=5%)    :  {_f(m.get('sharpe'))}")
+    print(f"  Sharpe (rf=Tbill) :  {_f(m.get('sharpe'))}")
     print(f"  Sortino           :  {_f(m.get('sortino'))}")
     print(f"  Max Drawdown      :  {_p(m.get('max_drawdown'))}")
     print(f"  DD Duration       :  {_i(m.get('dd_duration_days'))} days")
@@ -90,7 +90,7 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
     hdr = f"  {'Signal':<12} {'Sharpe':>8} {'AnnRet':>8} {'WinRate':>9} {'NTrades':>9} {'TotalP&L':>12}"
     print(hdr)
     print("  " + "─" * (len(hdr) - 2))
-    for sig, lbl in [("s1","S1 IVR"),("s2","S2 VIX TS"),("s3","S3 Disp"),("combined","Combined")]:
+    for sig, lbl in [("s1c","S1C Contr"),("s3","S3 Disp"),("s4","S4 VRP"),("s1","S1 ref"),("s2","S2 ref"),("combined","Combined")]:
         sh = m.get(f"{sig}_sharpe")
         ar = m.get(f"{sig}_ann_return")
         wr = m.get(f"{sig}_win_rate")

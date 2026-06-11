@@ -235,6 +235,9 @@ def load_page1() -> dict[str, Any]:
         d["prob_r2"]      = round(float(proba[2]) * 100, 1)
         # C16: vvix removed from training features (circular with the R2 label
         # definition). Honest OOS accuracy without it: 63.4% (was 86.2% inflated).
+        # C17: 63.4% LOSES to the trivial persistence baseline (y_t = y_{t-1},
+        # 90.0% on 2020+) — classifier demoted from the trading loop; the
+        # backtest uses the lagged deterministic rule labels directly.
         d["clf_accuracy"] = "63.4%"
     except Exception as e:
         d["regime_error"] = str(e)
@@ -784,12 +787,23 @@ def load_page4() -> dict[str, Any]:
         m1  = _metrics_for("nav_s1",  "pnl_s1",   "s1_position")
         m2  = _metrics_for("nav_s2",  "pnl_s2",   "s2_position")
 
+        # C17: prefer the engine's headline Sharpe/Sortino (measured against
+        # the per-date ^IRX T-bill path) over the flat-5% parquet recompute.
+        try:
+            with open(DATA / "backtest" / "full_results.pkl", "rb") as _fh:
+                _em = (pickle.load(_fh).get("metrics") or {})
+            for _k in ("sharpe", "sortino"):
+                if _em.get(_k) is not None and np.isfinite(float(_em[_k])):
+                    m[_k] = float(_em[_k])
+        except Exception:
+            pass
+
         d["metrics_rows"] = [
             {"label": "Cumulative Return", "value": _pct(m["cum_ret"]),
              "positive": m["cum_ret"] > 0},
             {"label": "Ann. Return",       "value": _pct(m["ann_ret"]),
              "positive": m["ann_ret"] > 0},
-            {"label": "Sharpe (rf=5%)",    "value": _f2(m["sharpe"]),
+            {"label": "Sharpe (rf=T-bill)", "value": _f2(m["sharpe"]),
              "positive": m["sharpe"] > 0},
             {"label": "Sortino",           "value": _f2(m["sortino"]),
              "positive": m["sortino"] > 0},
@@ -960,10 +974,14 @@ def load_page4() -> dict[str, Any]:
                  "second simulation pass (ex-ante; contracts & costs reflect real size).",
          "before": "No correlation netting; each signal sizes off full NAV ÷ 4",
          "after":  "Ex-ante diversification sizing; no same-day information in sizing."},
-        {"step": "8", "name": "Monthly Heston recalibration",
-         "what": "BacktestEngine._recalibrate_heston() caches monthly params to data_store/heston_params/.",
-         "before": "Fixed 2026-03-24 Heston params throughout 2018–2025",
-         "after":  "Time-varying params. Infrastructure ready; ~84 calibrations on first run."},
+        {"step": "8", "name": "Monthly Heston recalibration — REMOVED (C17)",
+         "what": "The C13 monthly-recalibration loop was dead code: no historical "
+                 "options data exists before the 2026 snapshots, so every monthly "
+                 "calibration fell back to static defaults — and the resulting "
+                 "parameters were never consumed by any P&L path. Removed in C17.",
+         "before": "ASSUMPTIONS claimed time-varying Heston params in the backtest",
+         "after":  "Honest: backtest P&L is BS on VIX-TS ATM vol; the calibration "
+                   "stack serves C6 Greeks / C7 hedge sim, not C10 P&L."},
     ]
 
     # ── Improved Signal Variants ──────────────────────────────────────────────

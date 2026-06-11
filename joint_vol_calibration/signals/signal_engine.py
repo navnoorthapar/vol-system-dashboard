@@ -60,8 +60,8 @@ Signal 3 — Dispersion Proxy Trade
   Substitution note: we use VIX/VVIX as a proxy for the index-vol /
   single-stock-vol ratio because historical single-stock options data
   is not in the database (only SPX and VIX index options available).
-  The ratio VIX/VVIX correlates strongly with CBOE's Implied Correlation
-  Index (ICJ) in available data.
+  No implied-correlation index data is in the DB, so the proxy's link
+  to true dispersion pricing is a hypothesis, not a verified relation.
 
   Entry: z_ratio < −1.0  AND  regime in {0, 1}  → long dispersion (+1)
   Exit : z_ratio > −0.30  OR  max-hold 30 days
@@ -429,6 +429,12 @@ def generate_signal1_contrarian(
       PDV > VIX + threshold  AND  regime == 0  → SHORT straddle (−1)
       VIX > PDV + threshold  AND  regime == 1  → LONG  straddle (+1)
 
+    Exit: spread reverts to ~0  OR  max_hold  OR  regime transitions INTO
+    R2 (forced close via _run_statemachine_r2exit — C17). An open short
+    straddle riding through a VVIX spike for up to 21 days with no stop
+    was the single largest production tail risk; the R2 boundary now
+    terminates the trade the same way S1X/S2X/S4 do.
+
     DATA-SNOOPING WARNING
     ---------------------
     This signal was constructed by observing that S1 LOST money over
@@ -449,7 +455,7 @@ def generate_signal1_contrarian(
 
     exit_cond   = spread.abs() < 0.005
 
-    result = _run_statemachine(
+    result = _run_statemachine_r2exit(
         entry_long, entry_short, exit_cond, strength, regimes, max_hold
     )
 

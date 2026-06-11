@@ -57,3 +57,4 @@ data_store/market_data.db
 .idea/
 *.swp
 *.swo
+.claude/

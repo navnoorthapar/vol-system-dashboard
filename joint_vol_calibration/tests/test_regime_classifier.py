@@ -376,6 +376,14 @@ class TestEvaluateClassifier:
         result = evaluate_classifier(clf, X, y)
         assert set(result["per_class"].keys()) == {0, 1, 2}
 
+    def test_persistence_baseline_reported(self, fitted_clf, dataset):
+        """C17: eval must report the no-skill persistence baseline y_hat(t)=y(t-1)."""
+        clf, X, y = fitted_clf
+        result = evaluate_classifier(clf, X, y)
+        assert "persistence_baseline_accuracy" in result
+        assert 0.0 <= result["persistence_baseline_accuracy"] <= 1.0
+        assert isinstance(result["beats_persistence"], bool)
+
 
 # ── 7. validate_regime2_dates ────────────────────────────────────────────────
 

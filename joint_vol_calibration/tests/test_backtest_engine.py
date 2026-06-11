@@ -580,3 +580,46 @@ class TestConstants:
         from joint_vol_calibration.backtest.backtest_engine import BacktestEngine
         assert len(BacktestEngine.ASSUMPTIONS) >= 5, "At least 5 assumptions must be documented"
         assert len(BacktestEngine.HONEST_FAILURES) >= 3, "At least 3 honest failures must be documented"
+
+
+# ── 12. C17 redteam fixes ─────────────────────────────────────────────────────
+
+class TestC17Fixes:
+    def test_margin_cap_on_short_straddles(self):
+        """C17: short straddle contracts capped at nav/(MARGIN_RATIO·K·100)."""
+        from joint_vol_calibration.backtest.backtest_engine import (
+            _simulate_straddle_pnl, MARGIN_RATIO, CONTRACT_MULT,
+        )
+        n   = 100
+        spx = _make_spx(n)
+        vix = _make_vix(spx)
+        dates = pd.to_datetime(spx["date"])
+        pos   = pd.Series(0.0, index=dates)
+        pos.iloc[10:30] = -1.0          # short straddle for 20 days
+        kelly = pd.Series(0.20, index=dates)
+        nav   = pd.Series(1_000_000.0, index=dates)
+        spx_close = spx.set_index(pd.to_datetime(spx["date"]))["close"]
+        vix_idx   = vix.set_index(pd.to_datetime(vix["date"]))
+        _, trades = _simulate_straddle_pnl(
+            pos, kelly, nav, spx_close, vix_idx, signal_label="test",
+        )
+        assert trades, "expected at least one completed short trade"
+        for t in trades:
+            cap = int(1_000_000.0 / (MARGIN_RATIO * t.K * CONTRACT_MULT))
+            assert t.n_contracts <= cap, (
+                f"margin cap violated: {t.n_contracts} > {cap} at K={t.K:.0f}"
+            )
+
+    def test_compute_metrics_accepts_rf_series(self):
+        """C17: per-date T-bill series lowers the Sharpe hurdle vs scalar 5%."""
+        from joint_vol_calibration.backtest.backtest_engine import compute_metrics
+        rng   = np.random.default_rng(3)
+        dates = pd.bdate_range("2020-01-01", periods=252)
+        nav   = pd.Series(
+            1e6 * np.cumprod(1 + rng.normal(0.0002, 0.01, 252)), index=dates,
+        )
+        df   = pd.DataFrame({"nav": nav})
+        rf_s = pd.Series(0.0, index=dates)        # ZIRP era
+        m_scalar = compute_metrics(df, rf=0.05)
+        m_series = compute_metrics(df, rf=0.05, rf_series=rf_s)
+        assert m_series["sharpe"] > m_scalar["sharpe"]

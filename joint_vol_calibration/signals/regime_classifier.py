@@ -592,6 +592,14 @@ def evaluate_classifier(
     -------
     dict with:
       accuracy           : overall accuracy
+      persistence_baseline_accuracy : accuracy of the no-skill rule
+                           y_hat(t) = y(t-1). The label is built from
+                           same-day observables, so yesterday's label is
+                           known at close of t-1 — this is a legitimate
+                           causal predictor and the floor any model must
+                           beat. Regimes are sticky (~90% next-day
+                           persistence), so accuracy alone overstates skill.
+      beats_persistence  : bool — accuracy > persistence baseline
       per_class          : dict of {class: {precision, recall, f1}}
       confusion_matrix   : np.ndarray (3×3)
       regime2_recall     : recall for Regime 2 specifically
@@ -601,6 +609,13 @@ def evaluate_classifier(
     y_pred = clf.predict(X_test)
 
     acc   = accuracy_score(y_test.values, y_pred)
+
+    # No-skill persistence baseline: predict today's regime = yesterday's
+    # true label. Computed on the same test window for direct comparison.
+    y_prev = y_test.shift(1).dropna()
+    persistence_acc = float(
+        (y_test.reindex(y_prev.index) == y_prev).mean()
+    ) if len(y_prev) > 0 else np.nan
     cm    = confusion_matrix(y_test.values, y_pred, labels=[0, 1, 2])
     report_dict = classification_report(
         y_test.values, y_pred, labels=[0, 1, 2],
@@ -623,6 +638,8 @@ def evaluate_classifier(
 
     return {
         "accuracy":          acc,
+        "persistence_baseline_accuracy": persistence_acc,
+        "beats_persistence": bool(pd.notna(persistence_acc) and acc > persistence_acc),
         "per_class":         {
             i: {
                 "precision": report_dict.get(REGIME_NAMES[i], {}).get("precision", np.nan),

@@ -32,12 +32,16 @@
 <div class="card" style="margin-bottom:16px;border-color:rgba(0,200,255,0.2);background:rgba(0,200,255,0.02);">
   <div class="flex space-between mb12">
     <div>
-      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C15/C16 — Contrarian Portfolio Under Corrected Methodology</div>
+      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C15–C17 — Contrarian Portfolio Under Fully Corrected Methodology</div>
       <div style="font-size:11.5px;color:var(--text2);">
-        C15: S1 direction was backwards (PDV is a lagging contrarian indicator) → S1C replaces S1.
-        C16: walk-forward PDV (no look-ahead), vvix removed from classifier features, ex-ante Kelly sizing.
-        Portfolio S1C + S3 + S4: <strong style="color:#00ff88;">+19.1% cumulative</strong>, max DD −10.1%
-        (Sharpe −0.47 vs rf 5% — honest: returns are spike-driven, not smooth carry).
+        C15: S1 direction flipped → S1C. C16: walk-forward PDV, vvix removed from classifier, ex-ante Kelly.
+        C17: regime labels switched to the lagged deterministic rule (the ML classifier lost to the
+        persistence baseline 63.4% vs 90.0%), margin enforced on shorts, S1C force-closes on R2 transition,
+        Sharpe measured vs the actual T-bill path.
+        Result: portfolio S1C + S3 + S4 <strong style="color:#ff4444;">−9.1% cumulative</strong>, max DD −19.1%,
+        Sharpe −0.99. <strong style="color:#ffaa33;">The earlier +19.1% (C16) was an artifact of noisy ML regime
+        labels</strong> — under accurate causal labels the apparent edge disappears. This page is a documented
+        negative result, not a deployable strategy.
       </div>
     </div>
     <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
@@ -67,11 +71,14 @@
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
         PDV model overestimates vol in fear regimes (R0). S1C shorts when PDV &gt; ATM IV
         (model panic &gt; market), longs when market premium stays elevated (R1).
-        <strong style="color:#00ccff;">S1 direction was backwards</strong> — the spread is contrarian.
-        <strong style="color:#ffaa33;">Data-snooping caveat:</strong> the flip was discovered on
-        2018–2025 results, so this P&amp;L is in-sample by construction. Pseudo-OOS check on
-        2013–2017 (window never used in the discovery): S1C <strong style="color:#00ff88;">+$785K</strong>
-        while S1 lost −$1.31M — direction survives, but true validation needs post-2026 data.
+        <strong style="color:#ff4444;">C17 verdict: the contrarian edge was an artifact.</strong>
+        Under C16's ML regime labels S1C showed +$640K — but those labels lost to the trivial
+        persistence baseline (63.4% vs 90.0%). With accurate lagged rule labels, margin caps and
+        R2 force-exits, S1C is <strong style="color:#ff4444;">−$97K</strong> on 2018–2025 and the
+        pseudo-OOS 2013–2017 check collapses from +$785K to
+        <strong style="color:#ff4444;">−$333K</strong>. The "edge" lived in classifier
+        misclassifications, not in the PDV spread. In-sample discovery + artifact sensitivity =
+        no validated signal.
       </div>
     </div>
     <!-- S4 Card -->
@@ -88,10 +95,10 @@
         <span class="mono">{{ d.research_s4.n_trades }}</span>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
-        C15 fix: entry now requires z_vrp to be <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
-        C16 (walk-forward PDV + ex-ante Kelly): <strong style="color:#ff44aa;">−$94K</strong>
-        (vs −$221K pre-C15). Pseudo-OOS 2013–2017 also negative (−$275K) —
-        consistent conclusion: VRP is not extractable at retail costs. Kept small as a diversifier.
+        C15 fix: entry requires z_vrp to be <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
+        C17 (accurate regime labels + margin caps): <strong style="color:#ff44aa;">−$199K</strong>
+        on 2018–2025; pseudo-OOS 2013–2017 also negative (−$250K) —
+        consistent conclusion across every methodology revision: VRP is not extractable at retail costs.
       </div>
     </div>
   </div>
@@ -209,7 +216,7 @@
     </tbody>
   </table>
   <div style="margin-top:8px;font-size:11px;color:var(--text3);">
-    MAIN signals (S1C, S3, S4) form the C15 portfolio. REF signals (S1, S2) are retained for historical comparison only.
+    MAIN signals (S1C, S3, S4) form the audited portfolio — all numbers under the fully corrected C17 pipeline. REF signals (S1, S2) are retained for historical comparison only.
   </div>
 </div>
 
@@ -257,57 +264,58 @@
     </tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
-    R2 = VOMMA_ACTIVE (adaptive VVIX threshold, rolling 252d 80th percentile). R2-exit: forced closure + state reset on R2 transition. Backtest: 2018–2025, $1M notional.
+    R2 = VOMMA_ACTIVE (deterministic rule: VVIX &gt; 100). C17: regime labels are the lagged rule itself (persistence predictor) — the ML classifier is research-only. R2-exit: forced closure + state reset on R2 transition (S1C, S1X, S2X, S4). Backtest: 2018–2025, $1M notional.
   </div>
 </div>
 
 <!-- ── Analysis Banner ───────────────────────────────────────────────────── -->
 <div class="grid grid-2" style="margin-bottom:16px;">
   <div class="card" style="border-color:rgba(0,204,255,0.2);background:rgba(0,204,255,0.02);">
-    <div class="chart-title" style="color:#00ccff;">C15/C16 — PDV Spread Is Contrarian</div>
+    <div class="chart-title" style="color:#00ccff;">C17 — The Contrarian "Edge" Was a Label Artifact</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1 −$1.47M</span>
-        S1 lost in both long AND short directions. Root cause: PDV (Guyon-Lekeufack 2023) is a
-        <em>lagging</em> indicator — it overestimates fear after a vol spike, exactly when
-        the market has already priced in normalization. Under C16's true walk-forward PDV
-        forecasts the wrong-way loss is even larger than the old rv-proxy suggested.
+        <span class="tag tag-red" style="margin-right:8px;">S1 −$1.53M</span>
+        S1 lost in both directions: PDV (Guyon-Lekeufack 2023) is a <em>lagging</em>
+        indicator — it overestimates fear after a vol spike, exactly when the market has
+        already priced in normalization. This diagnosis still stands.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1C +$640K</span>
-        Reversing the direction (short when PDV &gt; IV in R0, long when IV &gt; PDV in R1)
-        flips the loss into a gain. Direction also holds on pseudo-OOS 2013–2017 (+$785K),
-        a window never used in forming the hypothesis.
+        <span class="tag tag-red" style="margin-right:8px;">S1C −$97K</span>
+        The contrarian flip looked profitable (+$640K under C16) only while regime labels came
+        from an ML classifier that <strong style="color:#ffaa33;">loses to the trivial
+        "yesterday's regime" baseline (63.4% vs 90.0%)</strong>. Under accurate lagged rule
+        labels the profit disappears in-sample AND in pseudo-OOS (2013–17: +$785K → −$333K).
+        The P&amp;L lived in label noise, not in the PDV spread.
       </div>
       <div>
         <span class="tag tag-dim" style="margin-right:8px;">PORTFOLIO</span>
-        S1C + S3 + S4 (equal-weight, ex-ante correlation Kelly):
-        <strong style="color:#00ff88;">+19.1% cumulative</strong>, max DD −10.1%.
-        Sharpe −0.47 vs 5% rf — gains are concentrated in vol-spike episodes
-        (COVID +21.1%, Tariffs-2025 +3.2%), not smooth carry.
+        S1C + S3 + S4 under the fully corrected pipeline:
+        <strong style="color:#ff4444;">−9.1% cumulative</strong>, max DD −19.1%, Sharpe −0.99
+        vs the actual T-bill path. Crisis windows stay positive (COVID +3.9%, Tariffs +3.1%)
+        but cannot pay for the bleed between them.
       </div>
     </div>
   </div>
 
   <div class="card" style="border-color:rgba(0,255,136,0.15);background:rgba(0,255,136,0.02);">
-    <div class="chart-title" style="color:#00ff88;">Signal Breakdown — S1C Drives, S3 Anchors</div>
+    <div class="chart-title" style="color:#00ff88;">Signal Breakdown — Only S3's Timing Survives</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1C +$640K</span>
-        Contrarian PDV: short gamma when model over-predicts fear (R0),
-        long when market underprices sticky realised vol (R1). Primary alpha source —
-        26% win rate, a few large vol-spike winners carry many small losses.
+        <span class="tag tag-green" style="margin-right:8px;">S3 +$25K</span>
+        Dispersion proxy fires only at VIX/VVIX extremes — 17 trades in 7 years,
+        <strong style="color:#00ff88;">88% win rate</strong>, positive at every tested P&amp;L
+        scale (0.5%–4%/z-unit: +$5K…+$52K) and in pseudo-OOS (+$20K). The timing signal is the
+        one robust finding; the dollar magnitude is proxy-scaled, not market-derived.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S3 +$26K</span>
-        Dispersion signal fires only at VIX/VVIX extremes — 18 trades in 7 years,
-        <strong style="color:#00ff88;">89% win rate</strong> at every tested P&amp;L scale
-        (0.5%–4%/z-unit sensitivity: +$5K…+$53K). Timing real; dollar magnitude is proxy-scaled.
+        <span class="tag tag-red" style="margin-right:8px;">S1C −$97K</span>
+        48% win rate, 67 trades under corrected labels (R2 force-exits cut holding periods).
+        No demonstrated edge after artifact removal — retained only as the audit's subject.
       </div>
       <div>
-        <span class="tag tag-red" style="margin-right:8px;">S4 −$94K</span>
-        VRP signal improved (−$221K → −$94K) by requiring post-spike z-score decline.
-        Still negative in-sample AND on pseudo-OOS 2013–2017 — kept small as a diversifier.
+        <span class="tag tag-red" style="margin-right:8px;">S4 −$199K</span>
+        VRP mean-reversion negative in-sample (−$199K) and pseudo-OOS (−$250K) under every
+        methodology revision — consistent: VRP is not extractable at retail cost levels.
       </div>
     </div>
   </div>
@@ -315,9 +323,10 @@
 
 <!-- ── C16 Methodology Audit ─────────────────────────────────────────────── -->
 <div class="card" style="margin-bottom:16px;border-color:rgba(255,170,51,0.25);background:rgba(255,170,51,0.02);">
-  <div class="chart-title" style="color:#ffaa33;">C16 Methodology Audit — Five Flaws Found, Three Fixed, Two Quantified</div>
+  <div class="chart-title" style="color:#ffaa33;">C16/C17 Methodology Audit — Nine Flaws Found, Seven Fixed, Two Quantified</div>
   <div style="font-size:11.5px;color:var(--text2);margin-bottom:12px;">
-    Self-audit of the backtest methodology (2026-06-11). All numbers on this page are produced under the corrected pipeline.
+    Self-audit of the backtest methodology (C16: 2026-06-11, C17 redteam: same week). All numbers on this page are produced under the fully corrected pipeline.
+    Each successive fix made the backtest <em>worse</em> — the original "edge" was a stack of artifacts.
   </div>
   <table class="data-table mt8">
     <thead>
@@ -338,8 +347,8 @@
       <tr>
         <td class="mono" style="color:var(--accent);font-weight:700;">2</td>
         <td style="font-weight:600;">Circular classifier feature</td>
-        <td style="font-size:11px;color:var(--text2);">FIXED — vvix removed from training features (the R2 label is defined as VVIX&gt;threshold, so the old 86.2% accuracy partly measured rule-recovery).</td>
-        <td class="mono green" style="font-size:11px;">Classifier must now predict R2 from market structure</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED — vvix removed from training features (the R2 label is defined as VVIX&gt;threshold, so the old 86.2% accuracy partly measured rule-recovery). Honest accuracy: 63.4%.</td>
+        <td class="mono" style="font-size:11px;color:#ffaa33;">See flaw #6 — the honest number then lost to the baseline</td>
       </tr>
       <tr>
         <td class="mono" style="color:var(--accent);font-weight:700;">3</td>
@@ -350,20 +359,45 @@
       <tr>
         <td class="mono" style="color:var(--accent);font-weight:700;">4</td>
         <td style="font-weight:600;">S1C data snooping</td>
-        <td style="font-size:11px;color:var(--text2);">QUANTIFIED — direction was chosen after observing S1 fail on 2018–2025; cannot be fixed in code. Tested on 2013–2017, a window never used in the discovery.</td>
-        <td class="mono" style="font-size:11px;color:#ffaa33;">Pseudo-OOS: S1C +$785K, S1 −$1.31M — direction holds</td>
+        <td style="font-size:11px;color:var(--text2);">QUANTIFIED — direction was chosen after observing S1 fail on 2018–2025; cannot be fixed in code. Tested on 2013–2017, a window never used in the discovery. C17 re-ran the test under corrected labels.</td>
+        <td class="mono" style="font-size:11px;color:#ff4444;">Pseudo-OOS under C17: S1C −$333K — the apparent edge was an artifact</td>
       </tr>
       <tr>
         <td class="mono" style="color:var(--accent);font-weight:700;">5</td>
         <td style="font-weight:600;">S3 arbitrary P&amp;L scale</td>
         <td style="font-size:11px;color:var(--text2);">QUANTIFIED — the 2%/z-unit proxy scale is assumed (no single-stock options data). Sensitivity run at 0.5%/1%/2%/4% per z-unit.</td>
-        <td class="mono" style="font-size:11px;color:#ffaa33;">P&amp;L +$5K…+$53K, win rate 89–94% at every scale</td>
+        <td class="mono" style="font-size:11px;color:#ffaa33;">P&amp;L +$5K…+$52K, win 15–17 of 17 at every scale</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:#ff8855;font-weight:700;">6</td>
+        <td style="font-weight:600;">Classifier never benchmarked vs persistence</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED (C17) — the no-skill baseline "predict yesterday's regime" scores 90.0% on 2020+ (labels are same-day observables, so y(t−1) is known at t−1). The honest 63.4% classifier LOSES by 27 points. ML demoted from the trading loop; backtest uses lagged rule labels directly.</td>
+        <td class="mono" style="font-size:11px;color:#ff4444;">63.4% vs 90.0% — the ML added negative value</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:#ff8855;font-weight:700;">7</td>
+        <td style="font-weight:600;">Margin model documented but not enforced</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED (C17) — MARGIN_RATIO was defined but never used: short straddles had unlimited capacity. Now capped at nav/(0.20·K·100) contracts at entry.</td>
+        <td class="mono green" style="font-size:11px;">Cost model now matches its documentation</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:#ff8855;font-weight:700;">8</td>
+        <td style="font-weight:600;">S1C had no R2 exit (unbounded tail)</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED (C17) — an open S1C short straddle could ride a VVIX spike for up to 21 days with no stop. S1C now force-closes when the regime transitions into R2, same as S1X/S2X/S4.</td>
+        <td class="mono green" style="font-size:11px;">Worst-case short-gamma exposure now bounded by the R2 rule</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:#ff8855;font-weight:700;">9</td>
+        <td style="font-weight:600;">Dead "monthly Heston recalibration" + wrong rf</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED (C17) — the monthly-recalibration loop never produced a single calibration (no pre-2026 options data) and its output was never consumed; removed. Sharpe/Sortino now measured against the per-date ^IRX T-bill path instead of a flat 5%.</td>
+        <td class="mono green" style="font-size:11px;">Backtest claims now match what the code does</td>
       </tr>
     </tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
-    Honest read: S1C's edge is plausible (survives one falsification attempt) but unproven — confirmation requires live data after 2026-06.
-    Portfolio Sharpe remains below the 5% risk-free hurdle; the system's value is concentrated in crisis convexity, not steady carry.
+    Honest read: after removing every identified artifact, the portfolio is <strong style="color:#ff4444;">−9.1%</strong> and no signal except S3's
+    timing shows robustness. This dashboard documents a negative result with full methodology — the infrastructure (calibration, Greeks, hedging,
+    walk-forward harness) is the deliverable; the trading signals are the case study in why most backtests flatter themselves.
   </div>
 </div>
 
