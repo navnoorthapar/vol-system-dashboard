@@ -670,7 +670,7 @@
 <div class="page-header">
   <div class="page-title">Live Market Overview</div>
   <div class="page-subtitle">Real-time regime + term structure</div>
-  <div class="page-badge">Data: 2026-06-05  ·  Calibration: 2026-06-05  ·  Regime: 2026-06-05</div>
+  <div class="page-badge">Data: 2026-06-05  ·  Calibration: 2026-06-05  ·  Regime: 2026-05-29</div>
 </div>
 
 <!-- ── Row 1: Key stats ──────────────────────────────────────────────────── -->
@@ -755,7 +755,7 @@
 
         <div class="flex space-between" style="margin-bottom:6px;">
           <span style="font-size:12px;color:var(--text2);">Confidence</span>
-          <span class="mono" style="font-size:14px;font-weight:700;color:#00ff88;">100.0%</span>
+          <span class="mono" style="font-size:14px;font-weight:700;color:#00ff88;">72.3%</span>
         </div>
 
         <!-- Probability bars -->
@@ -770,20 +770,20 @@
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:100.0%;background:#00ff88;"></div>
+              <div class="progress-fill" style="width:72.3%;background:#00ff88;"></div>
             </div>
-            <div class="progress-val">100.0%</div>
+            <div class="progress-val">72.3%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:0.0%;background:#ff3333;"></div>
+              <div class="progress-fill" style="width:27.7%;background:#ff3333;"></div>
             </div>
-            <div class="progress-val">0.0%</div>
+            <div class="progress-val">27.7%</div>
           </div>
         </div>
 
-        <div class="card-sub mt8">As of 2026-06-05</div>
+        <div class="card-sub mt8">As of 2026-05-29</div>
       </div>
     </div>
 
@@ -836,15 +836,31 @@
           <!-- Percentile badge — large and prominent -->
           <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
             <div style="font-size:28px;font-weight:800;color:#ff9900;font-family:'Menlo','Monaco',monospace;line-height:1;">
-              61.8th
+              84.7th
             </div>
             <div style="color:var(--text2);font-size:11px;line-height:1.4;">
               percentile<br>
-              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+7.01pp</span></span>
+              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+3.70pp</span></span>
             </div>
           </div>
 
           <!-- Amber warning box when percentile is high -->
+          
+          <div style="
+            background: rgba(255,153,0,0.08);
+            border: 1px solid rgba(255,153,0,0.35);
+            border-radius: 6px;
+            padding: 9px 12px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            line-height: 1.6;
+            color: #cc8800;
+          ">
+            <span style="font-weight:700;color:#ff9900;">&#9888; Spread at 84.7th percentile</span>
+            — implied vol is pricing extreme fear relative to 10-year history.
+            Historical mean spread: <span class="mono">+3.70pp</span>.
+            Current: <span class="mono">+7.58pp</span>.
+          </div>
           
 
           
@@ -861,7 +877,7 @@
         <div>σ₁ (5d EWMA): <span class="mono green">8.71%</span></div>
         <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">14.32%</span></div>
         <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
-        <div>Updated: <span class="mono">2026-06-05</span></div>
+        <div>Updated: <span class="mono">2026-05-29</span></div>
       </div>
     </div>
   </div>
@@ -907,12 +923,17 @@
       <div class="divider"></div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
-        <div>Overall Accuracy: <span class="mono green">86.2%</span></div>
-        <div>F1 Macro: <span class="mono green">0.85</span></div>
-        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (36%)</span></div>
-        <div>2nd Feature: <span class="mono" style="color:var(--yellow);">VVIX (34%)</span></div>
+        <div>Overall Accuracy: <span class="mono green">63.4%</span></div>
+        <div>Features: <span class="mono">5 (vvix excluded — C16)</span></div>
+        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (39%)</span></div>
+        <div>2nd Feature: <span class="mono" style="color:var(--yellow);">pdv_iv_spread (25%)</span></div>
         <div>Model: <span class="mono">XGBoost 3-class</span></div>
         <div>Train cutoff: <span class="mono">2019-12-31</span></div>
+      </div>
+      <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
+        C16 note: vvix was removed from training — the R2 label is defined as VVIX&gt;threshold,
+        so including it inflated accuracy to 86.2% by letting the model recover its own labelling rule.
+        63.4% is the honest out-of-sample number.
       </div>
     </div>
   </div>
@@ -1119,8 +1140,8 @@
   
   const spkCtx = document.getElementById('sparklineChart');
   if (spkCtx) {
-    const spkData = [11.39, 10.78, 8.89, 8.67, 8.82, 7.98, 7.89, 7.89, 8.24, 8.24, 5.5, 6.42, 6.51, 4.26, 5.49, 5.82, 7.52, 9.92, 7.75, 7.5, 7.41, 8.9, 9.77, 10.75, 10.96, 11.89, 12.8, 12.21, 12.88, 12.5, 12.9, 12.34, 11.19, 12.1, 11.28, 11.73, 12.2, 12.19, 13.37, 12.21, 13.19, 14.48, 13.64, 14.11, 14.2, 12.35, 11.58, 10.49, 11.05, 10.62, 11.04, 12.05, 11.25, 11.31, 11.07, 11.07, 11.56, 10.15, 9.99, 8.66];
-    const spkDates = ["2026-03-12", "2026-03-13", "2026-03-16", "2026-03-17", "2026-03-18", "2026-03-19", "2026-03-20", "2026-03-23", "2026-03-24", "2026-03-25", "2026-03-26", "2026-03-27", "2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02", "2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-13", "2026-04-14", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-27", "2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"];
+    const spkData = [4.83, 5.55, 5.92, 7.39, 8.11, 10.43, 7.08, 4.17, 4.56, 4.44, 6.59, 6.4, 6.09, 7.34, 8.61, 7.37, 8.72, 7.09, 5.22, 5.78, 6.93, 8.6, 10.43, 8.07, 10.64, 16.25, 13.84, 13.36, 12.72, 14.55, 15.55, 11.33, 10.17, 12.1, 11.07, 0.59, 0.83, 1.17, 0.94, 5.35, 3.18, 3.25, 4.56, 3.36, 5.32, 5.13, 4.88, 6.59, 6.94, 6.99, 6.09, 7.19, 6.61, 6.83, 6.17, 5.57, 5.79, 5.89, 5.31, 4.57];
+    const spkDates = ["2025-12-29", "2025-12-30", "2026-02-03", "2026-02-04", "2026-02-05", "2026-02-06", "2026-02-09", "2026-02-10", "2026-02-11", "2026-02-12", "2026-02-13", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-23", "2026-02-24", "2026-02-25", "2026-02-26", "2026-02-27", "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-09", "2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13", "2026-03-16", "2026-03-17", "2026-03-18", "2026-03-19", "2026-03-20", "2026-04-24", "2026-04-27", "2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29"];
     new Chart(spkCtx, {
       type: 'line',
       data: {
