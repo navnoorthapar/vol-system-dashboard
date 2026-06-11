@@ -124,7 +124,10 @@ def extend_regime_labels() -> int:
         log.info("  No new dates to predict; regime labels already current")
         return 0
 
-    regime_vals = clf.predict(new_feats.values)
+    # Pass the DataFrame, not .values: RegimeClassifier.predict() selects the
+    # columns it was trained on via feature_names_ (works for both the legacy
+    # 6-feature pickle and the C16 5-feature pickle that excludes vvix).
+    regime_vals = clf.predict(new_feats)
 
     new_rows = new_feats.copy()
     new_rows["regime"] = regime_vals

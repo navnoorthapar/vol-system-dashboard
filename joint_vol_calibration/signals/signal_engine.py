@@ -122,6 +122,7 @@ from joint_vol_calibration.data.database import (
 )
 from joint_vol_calibration.signals.regime_classifier import (
     FEATURE_COLS,
+    VVIX_REGIME2_THRESHOLD,
     RegimeClassifier,
     build_features,
     build_regime_labels,
@@ -428,8 +429,14 @@ def generate_signal1_contrarian(
       PDV > VIX + threshold  AND  regime == 0  → SHORT straddle (−1)
       VIX > PDV + threshold  AND  regime == 1  → LONG  straddle (+1)
 
-    Full-sample Sharpe 0.55; OOS 2022-2025 Sharpe 0.42 (3/4 years positive).
-    Reference: PDV model (Guyon-Lekeufack 2023) systematic bias analysis.
+    DATA-SNOOPING WARNING
+    ---------------------
+    This signal was constructed by observing that S1 LOST money over
+    2018-2025 and flipping its direction. The "contrarian" hypothesis was
+    formed on the SAME data used to evaluate it, so the backtest P&L of
+    S1C is in-sample by construction and overstates expected live
+    performance. Treat results as a hypothesis to be confirmed on data
+    after the discovery date (2026-06), not as validated edge.
     """
     spread = features["pdv_iv_spread"]
 
@@ -1071,6 +1078,7 @@ class SignalEngine:
         start_date:          str = "2015-01-01",
         end_date:            str = "2025-12-31",
         precomputed_regimes: "Optional[pd.Series]" = None,
+        precomputed_pdv_vol: "Optional[pd.Series]" = None,
     ) -> pd.DataFrame:
         """
         Generate all signals for [start_date, end_date].
@@ -1084,13 +1092,22 @@ class SignalEngine:
             If supplied, bypasses the internal classifier/rule-based labels.
             Use this to inject walk-forward-trained regime labels from the
             backtest engine to eliminate look-ahead bias in the classifier.
+        precomputed_pdv_vol : optional walk-forward PDV vol forecast Series
+            (annualised decimal, date-indexed). If supplied, the
+            pdv_iv_spread feature is built from these forecasts instead of
+            a full-sample-fitted PDV model, eliminating look-ahead bias in
+            the S1/S1C entry signal.
 
         Returns
         -------
         pd.DataFrame indexed by date with all signal and combined columns.
         """
         # ── Build feature matrix ─────────────────────────────────────────────
-        feats_raw = build_features(spx_df, vix_wide_df, pdv_model=self.pdv_model)
+        feats_raw = build_features(
+            spx_df, vix_wide_df,
+            pdv_model=self.pdv_model,
+            pdv_vol_series=precomputed_pdv_vol,
+        )
 
         # ── Compute regime labels ────────────────────────────────────────────
         if precomputed_regimes is not None:
@@ -1105,6 +1122,18 @@ class SignalEngine:
                 regimes_raw = build_regime_labels(spx_df, vix_wide_df)
         else:
             regimes_raw = build_regime_labels(spx_df, vix_wide_df)
+
+        # ── Deterministic R2 risk-gate override (C16) ────────────────────────
+        # R2 is DEFINED as elevated vol-of-vol (VVIX > threshold) — it is a
+        # hard risk rule, not a prediction problem. Since vvix was removed
+        # from the classifier features (circularity fix), the rule is applied
+        # directly here on the observable VVIX level. Zero look-ahead: the
+        # regime series is shifted 1 day below before any signal uses it.
+        if "vvix" in feats_raw.columns:
+            r2_rule = feats_raw["vvix"] > (VVIX_REGIME2_THRESHOLD / 100.0)
+            regimes_raw = regimes_raw.copy()
+            r2_mask = r2_rule.reindex(regimes_raw.index, fill_value=False)
+            regimes_raw.loc[r2_mask] = 2
 
         # ── Shift by 1: X(t-1) predicts y(t) ───────────────────────────────
         feats   = feats_raw.shift(1)

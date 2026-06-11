@@ -233,7 +233,9 @@ def load_page1() -> dict[str, Any]:
         d["prob_r0"]      = round(float(proba[0]) * 100, 1)
         d["prob_r1"]      = round(float(proba[1]) * 100, 1)
         d["prob_r2"]      = round(float(proba[2]) * 100, 1)
-        d["clf_accuracy"] = "86.2%"  # Bug 4
+        # C16: vvix removed from training features (circular with the R2 label
+        # definition). Honest OOS accuracy without it: 63.4% (was 86.2% inflated).
+        d["clf_accuracy"] = "63.4%"
     except Exception as e:
         d["regime_error"] = str(e)
         _logger.warning("Live regime inference failed (%s); falling back to cached labels.", e)
@@ -275,7 +277,7 @@ def load_page1() -> dict[str, Any]:
             d["regime_conf"]  = 0
             d["regime_date"]  = _rl_max_date or d.get("spx_date", "N/A")  # Bug 3
             d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
-        d.setdefault("clf_accuracy", "86.2%")  # Bug 4
+        d.setdefault("clf_accuracy", "63.4%")  # C16 honest no-vvix accuracy
 
     # Calibration date for timestamp (Bug 7) — use latest joint_cal pickle
     try:
@@ -953,9 +955,11 @@ def load_page4() -> dict[str, Any]:
          "before": "Raw XGB probabilities (overconfident). Linear 1−p scaling.",
          "after":  "Calibrated probabilities. Cleaner 3-level position sizing."},
         {"step": "7", "name": "Portfolio Kelly netting",
-         "what": "Rolling 60-day pairwise P&L corr; mult = sqrt(2/(1+r_ij)). Gross cap 50% NAV.",
+         "what": "Rolling 60-day pairwise P&L corr; mult = sqrt(2/(1+r_ij)). "
+                 "C16: multipliers shifted 1 day, applied to position size in a "
+                 "second simulation pass (ex-ante; contracts & costs reflect real size).",
          "before": "No correlation netting; each signal sizes off full NAV ÷ 4",
-         "after":  "Expected MaxDD −26% → ~−20% via diversification benefit."},
+         "after":  "Ex-ante diversification sizing; no same-day information in sizing."},
         {"step": "8", "name": "Monthly Heston recalibration",
          "what": "BacktestEngine._recalibrate_heston() caches monthly params to data_store/heston_params/.",
          "before": "Fixed 2026-03-24 Heston params throughout 2018–2025",

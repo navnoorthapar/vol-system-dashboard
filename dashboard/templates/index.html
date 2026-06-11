@@ -285,11 +285,16 @@
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
         <div>Overall Accuracy: <span class="mono green">{{ d.clf_accuracy }}</span></div>
-        <div>F1 Macro: <span class="mono green">0.85</span></div>
-        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (36%)</span></div>
-        <div>2nd Feature: <span class="mono" style="color:var(--yellow);">VVIX (34%)</span></div>
+        <div>Features: <span class="mono">5 (vvix excluded — C16)</span></div>
+        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (39%)</span></div>
+        <div>2nd Feature: <span class="mono" style="color:var(--yellow);">pdv_iv_spread (25%)</span></div>
         <div>Model: <span class="mono">XGBoost 3-class</span></div>
         <div>Train cutoff: <span class="mono">2019-12-31</span></div>
+      </div>
+      <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
+        C16 note: vvix was removed from training — the R2 label is defined as VVIX&gt;threshold,
+        so including it inflated accuracy to 86.2% by letting the model recover its own labelling rule.
+        63.4% is the honest out-of-sample number.
       </div>
     </div>
   </div>

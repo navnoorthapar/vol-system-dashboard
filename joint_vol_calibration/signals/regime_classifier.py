@@ -122,6 +122,16 @@ FEATURE_COLS: List[str] = [
     "vvix",
 ]
 
+# Training feature set for the classifier: excludes 'vvix'.
+# The R2 label is DEFINED as VVIX > threshold, so feeding vvix to the model
+# lets XGBoost trivially reproduce the labelling rule — the reported accuracy
+# then measures rule-recovery, not prediction. Training on the remaining five
+# features forces the model to learn genuine R0/R1/R2 structure.
+# build_features() still outputs the vvix column (Signal 3 and the HMM use it),
+# and previously pickled classifiers keep working because predict() selects
+# columns via the feature_names_ stored at fit time.
+CLASSIFIER_FEATURE_COLS: List[str] = [c for c in FEATURE_COLS if c != "vvix"]
+
 # Stress dates that must be classified as Regime 2
 REGIME2_VALIDATION_DATES: List[str] = [
     "2020-03-16",   # COVID crash: VIX=82.7, VVIX=207.6
@@ -164,6 +174,7 @@ def build_features(
     spx_df: pd.DataFrame,
     vix_wide_df: pd.DataFrame,
     pdv_model=None,
+    pdv_vol_series: "Optional[pd.Series]" = None,
 ) -> pd.DataFrame:
     """
     Build the six-column feature matrix for the regime classifier.
@@ -174,6 +185,13 @@ def build_features(
     vix_wide_df : Wide VIX TS DataFrame with columns ['^VIX', '^VIX3M', '^VVIX', ...]
     pdv_model   : Optional PDVModel instance (for pdv_iv_spread feature).
                   If None, falls back to rv_20d - vix as spread proxy.
+    pdv_vol_series : Optional date-indexed Series of PDV vol forecasts
+                  (annualised decimal). Takes precedence over pdv_model.
+                  Pass walk-forward predictions here to keep the
+                  pdv_iv_spread feature free of look-ahead bias: a model
+                  pickled after full-sample fitting (pdv_model.pkl) has
+                  coefficients contaminated by future data and must NOT be
+                  used to build backtest features.
 
     Returns
     -------
@@ -218,7 +236,15 @@ def build_features(
     df["rv_change_5d"] = rv_5d - rv_5d.shift(5)
 
     # ── Feature 5: PDV vs ATM IV spread ──────────────────────────────────────
-    if pdv_model is not None:
+    if pdv_vol_series is not None:
+        # Walk-forward PDV forecasts supplied externally (zero look-ahead).
+        # Days without a forecast (e.g. warm-up years) fall back to the
+        # trailing rv_20d proxy so the feature has no gaps.
+        pdv_vol = pdv_vol_series.reindex(df.index)
+        spread  = pdv_vol - df["^VIX"] / 100.0
+        fallback = rv_20d - df["^VIX"] / 100.0
+        df["pdv_iv_spread"] = spread.fillna(fallback)
+    elif pdv_model is not None:
         try:
             log_ret_s = log_ret.dropna()
             pdv_feats  = extract_pdv_features(log_ret_s)
@@ -543,7 +569,11 @@ def train_classifier(
     logger.info("Test  regime dist: %s", y_test.value_counts().sort_index().to_dict())
 
     clf = RegimeClassifier(params=params)
-    clf.fit(X_train, y_train)
+    # Train WITHOUT vvix: the R2 label is defined by VVIX > threshold, so
+    # including vvix as a feature lets the model trivially recover the rule
+    # and inflates accuracy. predict() keeps working on 6-column inputs
+    # because it selects columns via feature_names_ stored at fit time.
+    clf.fit(X_train[CLASSIFIER_FEATURE_COLS], y_train)
     clf.train_end_date_ = train_end
     return clf, X_test, y_test
 

@@ -25,8 +25,10 @@ Assumptions (documented for transparency):
   4. Heston params fixed from 2026-03-24 calibration (no time-varying recalibration)
   5. Regime gate: no NEW entries in Regime 2; existing trades close on natural exit
   6. Margin for short options held as reserve (no interest charged on margin)
-  7. Correlation netting: rolling 60-day pairwise P&L correlation, Kelly mult = sqrt(2/(1+r_ij)), gross capped 50% NAV
-  8. Walk-forward: C8 XGBoost retrained on expanding window; signal thresholds fixed
+  7. Correlation netting EX-ANTE: trailing 60d corr / 252d Sharpe multipliers,
+     shifted 1 day, applied to Kelly sizing in a second simulation pass
+  8. Walk-forward: C8 XGBoost (vvix excluded) and PDVLinear retrained per year
+     on strictly pre-year data; signal thresholds fixed
 
 Honest failures (from C4, C7 — see report):
   • PDV over-forecast in 2020: σ_PDV=91.6% vs σ_ATM=55.4% on COVID crash
@@ -312,6 +314,12 @@ def _simulate_s3_pnl(
     Entry/exit cost: 0.1% of kelly-weighted notional (proxy for execution spread).
 
     A full mean-reversion (z: −1.0 → −0.3, ~15 days) yields ≈ 1.4% × kelly × nav gross.
+
+    WARNING — the S3_Z_SCALE factor is ASSUMED, not derived from any option
+    prices or dispersion-trade mechanics. The z-score timing signal is real,
+    but the dollar P&L magnitude is arbitrary up to that constant: doubling
+    S3_Z_SCALE doubles reported S3 P&L. Treat S3's contribution as
+    illustrative of timing quality, never as a dollar-accurate backtest.
     """
     dates  = position.index
     pnl    = pd.Series(0.0, index=dates, dtype=float)
@@ -343,6 +351,8 @@ def _simulate_s3_pnl(
                 dz = z - float(z_ratio.loc[dates[i - 1]])
             else:
                 dz = 0.0
+            if not np.isfinite(dz):
+                dz = 0.0   # missing z-ratio (NaN gap) → no P&L that day, not NaN NAV
 
             notional    = k * nav
             raw_pnl_t   = notional * dz * S3_Z_SCALE   # long-only
@@ -504,8 +514,10 @@ class BacktestEngine:
         "Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013 throughout",
         "Heston params recalibrated monthly; cached to data_store/heston_params/YYYY-MM.parquet",
         "Regime gate: new entries blocked in Regime 2; existing trades close naturally",
-        "Correlation netting: rolling 60-day Kelly mult = sqrt(2/(1+r_ij)), gross cap 50% NAV",
-        "Walk-forward: C8 XGBoost retrained on expanding window; signal thresholds fixed",
+        "Kelly netting EX-ANTE: trailing 60d corr + trailing 252d Sharpe multipliers, "
+        "shifted 1 day, applied to position size in a second simulation pass",
+        "Walk-forward: C8 XGBoost retrained per year on pre-year data, vvix excluded "
+        "from features; PDVLinear retrained per year on pre-year returns",
     ]
 
     HONEST_FAILURES: List[str] = [
@@ -513,7 +525,14 @@ class BacktestEngine:
         "hedge efficiency Run B = 0.303 vs Run A = 0.016",
         "Heston rho=−0.99 boundary convergence (2026 calibration); steep skew under-modelled",
         "C6: 3 unstable vomma nodes; delta-only hedge insufficient on those days",
-        "S3 is a proxy: no real single-stock options data in DB; P&L scaling approximate",
+        "S3 is a proxy: no real single-stock options data in DB; the 2%-per-z-unit "
+        "P&L scale (S3_Z_SCALE) is assumed, not derived from market prices — "
+        "S3 P&L magnitude is therefore illustrative, not a real backtest",
+        "S1C DATA SNOOPING: contrarian direction was chosen AFTER observing S1 lose "
+        "on 2018-2025 — its backtest P&L is in-sample by construction and needs "
+        "confirmation on post-2026-06 data before being trusted",
+        "Regime classifier accuracy (86.2%) was inflated by the circular vvix feature "
+        "(R2 label is defined as VVIX>threshold); vvix now excluded at training",
     ]
 
     def __init__(
@@ -653,6 +672,83 @@ class BacktestEngine:
         logger.warning("No cached Heston params found; using HESTON_DEFAULTS")
         return dict(HESTON_DEFAULTS)
 
+    # ── Walk-forward PDV model ────────────────────────────────────────────────
+
+    def _build_walkforward_pdv_vol(self, spx_df: pd.DataFrame) -> Optional[pd.Series]:
+        """
+        Build walk-forward PDV vol forecasts with zero look-ahead bias.
+
+        For each backtest year Y, fit a fresh PDVLinear (Guyon-Lekeufack
+        features: sigma1, sigma2, lev) on log-returns strictly before
+        January 1 of Y, then predict sigma_PDV for the days of year Y.
+
+        This replaces two flawed alternatives:
+          • the pickled full-sample PDVModel (coefficients contaminated by
+            future data — look-ahead bias), and
+          • the trailing rv_20d − VIX proxy (look-ahead-free but not a PDV
+            model at all, so S1/S1C never actually traded the PDV signal).
+
+        Feature rows at date t use returns through t; SignalEngine shifts
+        features by one day before signal generation, so the spread used on
+        day t is built from t−1 information — fully causal.
+
+        Returns
+        -------
+        pd.Series of annualised vol forecasts (decimal), or None if no year
+        had the minimum 504 training observations.
+        """
+        from joint_vol_calibration.models.pdv import (
+            PDVLinear, build_xy, extract_pdv_features,
+        )
+
+        df = spx_df.copy()
+        if "date" in df.columns:
+            df = df.set_index(pd.to_datetime(df["date"]))
+        df = df.sort_index()
+        log_ret = df["log_return"].dropna()
+        log_ret = log_ret[~log_ret.index.duplicated(keep="first")]
+
+        # Full-history features: EMAs at year boundaries stay warm (the EMA
+        # recursion only ever uses past returns, so this is look-ahead-free).
+        feats_full = extract_pdv_features(log_ret)
+
+        backtest_start = pd.Timestamp(self.start_date)
+        backtest_end   = pd.Timestamp(self.end_date)
+
+        preds: List[pd.Series] = []
+        for year in range(backtest_start.year, backtest_end.year + 1):
+            cutoff   = pd.Timestamp(f"{year}-01-01")
+            year_end = pd.Timestamp(f"{year}-12-31")
+
+            r_train = log_ret[log_ret.index < cutoff]
+            if len(r_train) < 504:
+                logger.warning(
+                    "WF PDV: insufficient training data for %d (%d obs) — "
+                    "rv proxy fallback for that year", year, len(r_train),
+                )
+                continue
+
+            feats_train  = extract_pdv_features(r_train)
+            X_tr, y_tr   = build_xy(r_train, feats_train, horizon=1)
+            model        = PDVLinear().fit(X_tr, y_tr)
+
+            mask   = (feats_full.index >= cutoff) & (feats_full.index <= year_end)
+            X_year = feats_full.loc[mask].dropna(subset=PDVLinear._XCOLS)
+            if len(X_year) == 0:
+                continue
+            preds.append(model.predict(X_year))
+            logger.info(
+                "WF PDV year %d: trained on %d obs → predicted %d days  (%s)",
+                year, len(X_tr), len(X_year), model,
+            )
+
+        if not preds:
+            logger.warning("WF PDV: no forecasts generated — rv proxy fallback")
+            return None
+
+        out = pd.concat(preds).sort_index()
+        return out[~out.index.duplicated(keep="first")]
+
     # ── Walk-forward regime classifier ───────────────────────────────────────
 
     def _build_walkforward_regimes(
@@ -672,7 +768,7 @@ class BacktestEngine:
         Falls back to rule-based labels if insufficient training data.
         """
         from joint_vol_calibration.signals.regime_classifier import (
-            build_dataset, build_features, RegimeClassifier,
+            CLASSIFIER_FEATURE_COLS, build_dataset, build_features, RegimeClassifier,
         )
 
         backtest_start = pd.Timestamp(self.start_date)
@@ -695,6 +791,10 @@ class BacktestEngine:
 
             try:
                 X_train, y_train = build_dataset(spx_train, vix_train)
+                # Drop vvix from the training features: the R2 label is
+                # defined as VVIX > threshold, so keeping it lets XGBoost
+                # trivially recover the labelling rule (circular feature).
+                X_train = X_train[CLASSIFIER_FEATURE_COLS]
             except Exception as e:
                 logger.warning("WF regime: dataset build failed for year %d: %s", year, e)
                 continue
@@ -830,6 +930,13 @@ class BacktestEngine:
         if wf_regimes is None:
             logger.warning("Walk-forward regimes unavailable; falling back to classifier labels")
 
+        # ── Walk-forward PDV vol forecasts (zero look-ahead) ───────────────────
+        # Retrain PDVLinear per backtest year on strictly pre-year returns so
+        # the pdv_iv_spread feature used by S1/S1C is a genuine PDV forecast
+        # with no future data in the coefficients.
+        logger.info("Building walk-forward PDV forecasts ...")
+        wf_pdv_vol = self._build_walkforward_pdv_vol(spx_col)
+
         # ── Generate C9 signals ────────────────────────────────────────────────
         if clf is None:
             clf = self._load_clf()
@@ -840,6 +947,7 @@ class BacktestEngine:
             start_date=self.start_date,
             end_date=self.end_date,
             precomputed_regimes=wf_regimes,
+            precomputed_pdv_vol=wf_pdv_vol,
         )
         self.signals_df = sig_df
 
@@ -884,9 +992,7 @@ class BacktestEngine:
             r=_r, q=self.q, signal_label="s1c",
         )
 
-        self.all_trades = t1 + t2 + t3 + t4 + t5 + t6
-
-        # ── Portfolio Kelly netting via rolling 60-day pairwise correlation ────
+        # ── Portfolio Kelly netting — EX-ANTE two-pass (zero look-ahead) ───────
         # NEW PORTFOLIO (logically corrected):
         #   S1C (contrarian PDV) + S3 (VVIX/VIX dispersion) + S4 (VRP post-spike)
         #
@@ -897,6 +1003,17 @@ class BacktestEngine:
         # Combined REMOVED: was redundant (= (S1+S2+S3)/3) and included broken signals.
         #
         # S1 and S2 kept as RESEARCH reference curves (no portfolio weight).
+        #
+        # Methodology (replaces the old retrospective P&L rescaling):
+        #   Pass 1 (above) simulated each portfolio signal at its base Kelly.
+        #   From pass-1 P&L we compute per-day sizing multipliers using ONLY
+        #   trailing windows, then SHIFT BY 1 DAY so the multiplier applied on
+        #   day t is computable at the close of t−1. Pass 2 re-simulates the
+        #   trades with kelly × multiplier, so contract counts, entry/exit
+        #   costs and slippage all reflect the reduced size. The multipliers
+        #   are derived from pass-1 (base-size) P&L — a causal approximation,
+        #   since trailing correlation/Sharpe of the base strategy is a valid
+        #   t−1-observable statistic.
         CORR_WINDOW = 60
 
         def _corr_kelly_mult(a: pd.Series, b: pd.Series) -> pd.Series:
@@ -917,33 +1034,43 @@ class BacktestEngine:
         mult_s3  = (m_s1c_s3 * m_s3_s4)  ** 0.5
         mult_s4  = (m_s1c_s4 * m_s3_s4)  ** 0.5
 
-        pnl_s1c_adj = pnl_s1c * mult_s1c.clip(0.5, 1.0)
-        pnl_s3_adj  = pnl_s3  * mult_s3.clip(0.5, 1.0)
-        pnl_s4_adj  = pnl_s4  * mult_s4.clip(0.5, 1.0)
-
         # Net-of-cost Kelly scaling:
         # Reduce position sizing when a signal has been deeply loss-making over
-        # the trailing year. Scale is 0.5× when rolling Sharpe < -1, 1× when >= 0.
+        # the trailing year. Scale is 0.5× when rolling Sharpe < -2, 1× when >= 0.
         # Conservative: we do NOT upsize when Sharpe is positive (avoid overfitting).
-        # Minimum scale floor: 0.5 (never fully turn off a signal mid-backtest).
         def _net_kelly_scale(pnl: pd.Series, window: int = 252) -> pd.Series:
-            rets = pnl
-            mu   = rets.rolling(window, min_periods=90).mean()
-            sig  = rets.rolling(window, min_periods=90).std().clip(lower=1e-8)
-            sh   = (mu / sig * np.sqrt(252)).fillna(0.0)
-            # Sharpe >= 0 → scale = 1.0 (no reduction)
-            # Sharpe = -1  → scale = 0.75
-            # Sharpe = -2  → scale = 0.5 (floor)
-            scale = (1.0 + sh.clip(-2.0, 0.0) / 4.0).clip(0.5, 1.0)
-            return scale
+            mu  = pnl.rolling(window, min_periods=90).mean()
+            sig = pnl.rolling(window, min_periods=90).std().clip(lower=1e-8)
+            sh  = (mu / sig * np.sqrt(252)).fillna(0.0)
+            # Sharpe >= 0 → scale = 1.0 | Sharpe = -1 → 0.75 | Sharpe <= -2 → 0.5
+            return (1.0 + sh.clip(-2.0, 0.0) / 4.0).clip(0.5, 1.0)
 
-        scale_s1c = _net_kelly_scale(pnl_s1c_adj)
-        scale_s3  = _net_kelly_scale(pnl_s3_adj)
-        scale_s4  = _net_kelly_scale(pnl_s4_adj)
+        # Combined multiplier per signal, shifted 1 day → strictly ex-ante.
+        # Day-t sizing uses only P&L history through t−1. fillna(1.0) covers
+        # the warm-up window (insufficient history → no reduction).
+        k_mult_s1c = (mult_s1c.clip(0.5, 1.0) * _net_kelly_scale(pnl_s1c)).shift(1).fillna(1.0)
+        k_mult_s3  = (mult_s3.clip(0.5, 1.0)  * _net_kelly_scale(pnl_s3)).shift(1).fillna(1.0)
+        k_mult_s4  = (mult_s4.clip(0.5, 1.0)  * _net_kelly_scale(pnl_s4)).shift(1).fillna(1.0)
 
-        pnl_s1c_adj = pnl_s1c_adj * scale_s1c
-        pnl_s3_adj  = pnl_s3_adj  * scale_s3
-        pnl_s4_adj  = pnl_s4_adj  * scale_s4
+        # ── Pass 2: re-simulate portfolio signals at adjusted Kelly ───────────
+        pnl_s1c_adj, t6b = _simulate_straddle_pnl(
+            sig_df["s1c_position"], sig_df["s1c_kelly"] * k_mult_s1c,
+            nav_const, spx_close, vix_idx,
+            r=_r, q=self.q, signal_label="s1c",
+        )
+        pnl_s3_adj, t3b = _simulate_s3_pnl(
+            sig_df["s3_position"], sig_df["s3_kelly"] * k_mult_s3,
+            nav_const, z_ratio,
+        )
+        pnl_s4_adj, t5b = _simulate_straddle_pnl(
+            sig_df["s4_position"], sig_df["s4_kelly"] * k_mult_s4,
+            nav_const, spx_close, vix_idx,
+            r=_r, q=self.q, signal_label="s4",
+        )
+
+        # Trade log: pass-2 records for portfolio signals (actual sizing);
+        # pass-1 records for the S1/S2/Combined research references.
+        self.all_trades = t1 + t2 + t4 + t3b + t5b + t6b
 
         # ── Build equity curves ────────────────────────────────────────────────
         cap = self.initial_capital
@@ -1114,6 +1241,9 @@ class BacktestEngine:
         train_end: pd.Timestamp,
     ) -> RegimeClassifier:
         """Re-train C8 XGBoost on data up to train_end (expanding window)."""
+        from joint_vol_calibration.signals.regime_classifier import (
+            CLASSIFIER_FEATURE_COLS,
+        )
         feats  = build_features(spx_df, vix_wide)
         labels = build_regime_labels(spx_df, vix_wide)
 
@@ -1126,7 +1256,8 @@ class BacktestEngine:
             raise ValueError(f"Insufficient training data: {len(X_train)} rows")
 
         clf = RegimeClassifier()
-        clf.fit(X_train, y_train)
+        # vvix excluded: it defines the R2 label (circular feature).
+        clf.fit(X_train[CLASSIFIER_FEATURE_COLS], y_train)
         return clf
 
     # ── Persistence ───────────────────────────────────────────────────────────

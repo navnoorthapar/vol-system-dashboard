@@ -32,10 +32,12 @@
 <div class="card" style="margin-bottom:16px;border-color:rgba(0,200,255,0.2);background:rgba(0,200,255,0.02);">
   <div class="flex space-between mb12">
     <div>
-      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C15 Logical Correction — S1C &amp; S4 Now in Main Portfolio</div>
+      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C15/C16 — Contrarian Portfolio Under Corrected Methodology</div>
       <div style="font-size:11.5px;color:var(--text2);">
-        After C15 analysis: S1 direction was backwards (PDV is a lagging contrarian indicator). S1C replaces S1 as primary signal.
-        Portfolio: S1C + S3 + S4 (equal-weight, Kelly-netted). Net result: −$209K → <strong style="color:#00ff88;">+$55K</strong>.
+        C15: S1 direction was backwards (PDV is a lagging contrarian indicator) → S1C replaces S1.
+        C16: walk-forward PDV (no look-ahead), vvix removed from classifier features, ex-ante Kelly sizing.
+        Portfolio S1C + S3 + S4: <strong style="color:#00ff88;">+19.1% cumulative</strong>, max DD −10.1%
+        (Sharpe −0.47 vs rf 5% — honest: returns are spike-driven, not smooth carry).
       </div>
     </div>
     <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
@@ -65,8 +67,11 @@
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
         PDV model overestimates vol in fear regimes (R0). S1C shorts when PDV &gt; ATM IV
         (model panic &gt; market), longs when market premium stays elevated (R1).
-        <strong style="color:#00ccff;">S1 direction was backwards</strong> —
-        the spread is a contrarian indicator. Gross alpha +$291K eaten 68% by costs.
+        <strong style="color:#00ccff;">S1 direction was backwards</strong> — the spread is contrarian.
+        <strong style="color:#ffaa33;">Data-snooping caveat:</strong> the flip was discovered on
+        2018–2025 results, so this P&amp;L is in-sample by construction. Pseudo-OOS check on
+        2013–2017 (window never used in the discovery): S1C <strong style="color:#00ff88;">+$785K</strong>
+        while S1 lost −$1.31M — direction survives, but true validation needs post-2026 data.
       </div>
     </div>
     <!-- S4 Card -->
@@ -84,8 +89,9 @@
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
         C15 fix: entry now requires z_vrp to be <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
-        Result improved from −$221K to <strong style="color:#ff44aa;">−$61K</strong>.
-        Included in portfolio as diversifying signal; further edge improvement possible.
+        C16 (walk-forward PDV + ex-ante Kelly): <strong style="color:#ff44aa;">−$94K</strong>
+        (vs −$221K pre-C15). Pseudo-OOS 2013–2017 also negative (−$275K) —
+        consistent conclusion: VRP is not extractable at retail costs. Kept small as a diversifier.
       </div>
     </div>
   </div>
@@ -228,23 +234,23 @@
     <tbody>
       <tr>
         <td style="font-weight:600;">S1 IVR <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
-        <td class="mono red">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s1_pnl) }}{% else %}−$602,170{% endif %}</td>
+        <td class="mono red">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s1_pnl) }}{% else %}—{% endif %}</td>
         <td class="mono {% if d.variants and d.variants.s1rf_pnl > d.variants.s1_pnl %}green{% else %}red{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1rf_pnl) }}{% else %}−$237,573{% endif %}
+          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1rf_pnl) }}{% else %}—{% endif %}
         </td>
-        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1_impr) }}{% else %}+$364,597{% endif %}</td>
+        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1_impr) }}{% else %}—{% endif %}</td>
       </tr>
       <tr>
         <td style="font-weight:600;">S2 VIX TS <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
-        <td class="mono red">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s2_pnl) }}{% else %}−$25,276{% endif %}</td>
+        <td class="mono red">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s2_pnl) }}{% else %}—{% endif %}</td>
         <td class="mono {% if d.variants and d.variants.s2x_pnl > d.variants.s2_pnl %}green{% else %}red{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2x_pnl) }}{% else %}+$62,891{% endif %}
+          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2x_pnl) }}{% else %}—{% endif %}
         </td>
-        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2_impr) }}{% else %}+$88,167{% endif %}</td>
+        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2_impr) }}{% else %}—{% endif %}</td>
       </tr>
       <tr>
         <td style="font-weight:600;">S3 Dispersion <span class="tag tag-green" style="font-size:9px;">MAIN</span></td>
-        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s3_pnl) }}{% else %}+$22,404{% endif %}</td>
+        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s3_pnl) }}{% else %}—{% endif %}</td>
         <td class="mono" style="color:var(--text3);">unchanged</td>
         <td class="mono" style="color:var(--text3);">—</td>
       </tr>
@@ -258,24 +264,27 @@
 <!-- ── Analysis Banner ───────────────────────────────────────────────────── -->
 <div class="grid grid-2" style="margin-bottom:16px;">
   <div class="card" style="border-color:rgba(0,204,255,0.2);background:rgba(0,204,255,0.02);">
-    <div class="chart-title" style="color:#00ccff;">C15 Logical Correction — PDV Spread Is Contrarian</div>
+    <div class="chart-title" style="color:#00ccff;">C15/C16 — PDV Spread Is Contrarian</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1 −$602K</span>
+        <span class="tag tag-red" style="margin-right:8px;">S1 −$1.47M</span>
         S1 lost in both long AND short directions. Root cause: PDV (Guyon-Lekeufack 2023) is a
         <em>lagging</em> indicator — it overestimates fear after a vol spike, exactly when
-        the market has already priced in normalization.
+        the market has already priced in normalization. Under C16's true walk-forward PDV
+        forecasts the wrong-way loss is even larger than the old rv-proxy suggested.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1C +$203K</span>
-        Reversing the signal direction (short when PDV &gt; IV in R0, long when IV &gt; PDV in R1)
-        turns a −$602K loss into a +$203K gain. No parameter changes — purely logical.
+        <span class="tag tag-green" style="margin-right:8px;">S1C +$640K</span>
+        Reversing the direction (short when PDV &gt; IV in R0, long when IV &gt; PDV in R1)
+        flips the loss into a gain. Direction also holds on pseudo-OOS 2013–2017 (+$785K),
+        a window never used in forming the hypothesis.
       </div>
       <div>
         <span class="tag tag-dim" style="margin-right:8px;">PORTFOLIO</span>
-        S1C + S3 + S4 (equal-weight, rolling-correlation Kelly): portfolio flipped from
-        <strong style="color:#ff3333;">−$209K (−20.9%)</strong> to
-        <strong style="color:#00ff88;">+$55K (+5.5%)</strong>.
+        S1C + S3 + S4 (equal-weight, ex-ante correlation Kelly):
+        <strong style="color:#00ff88;">+19.1% cumulative</strong>, max DD −10.1%.
+        Sharpe −0.47 vs 5% rf — gains are concentrated in vol-spike episodes
+        (COVID +21.1%, Tariffs-2025 +3.2%), not smooth carry.
       </div>
     </div>
   </div>
@@ -284,21 +293,77 @@
     <div class="chart-title" style="color:#00ff88;">Signal Breakdown — S1C Drives, S3 Anchors</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1C +$203K</span>
+        <span class="tag tag-green" style="margin-right:8px;">S1C +$640K</span>
         Contrarian PDV: short gamma when model over-predicts fear (R0),
-        long when market underprices sticky realised vol (R1). Primary alpha source.
+        long when market underprices sticky realised vol (R1). Primary alpha source —
+        26% win rate, a few large vol-spike winners carry many small losses.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S3 +$22K</span>
-        Dispersion signal fires only at VIX/VVIX extremes — 15 trades in 7 years,
-        <strong style="color:#00ff88;">92.9% win rate</strong>. High-precision, low-frequency anchor.
+        <span class="tag tag-green" style="margin-right:8px;">S3 +$26K</span>
+        Dispersion signal fires only at VIX/VVIX extremes — 18 trades in 7 years,
+        <strong style="color:#00ff88;">89% win rate</strong> at every tested P&amp;L scale
+        (0.5%–4%/z-unit sensitivity: +$5K…+$53K). Timing real; dollar magnitude is proxy-scaled.
       </div>
       <div>
-        <span class="tag tag-red" style="margin-right:8px;">S4 −$61K</span>
-        VRP signal improved (−$221K → −$61K) by requiring post-spike z-score decline.
-        Diversifying signal; further entry precision possible.
+        <span class="tag tag-red" style="margin-right:8px;">S4 −$94K</span>
+        VRP signal improved (−$221K → −$94K) by requiring post-spike z-score decline.
+        Still negative in-sample AND on pseudo-OOS 2013–2017 — kept small as a diversifier.
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ── C16 Methodology Audit ─────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;border-color:rgba(255,170,51,0.25);background:rgba(255,170,51,0.02);">
+  <div class="chart-title" style="color:#ffaa33;">C16 Methodology Audit — Five Flaws Found, Three Fixed, Two Quantified</div>
+  <div style="font-size:11.5px;color:var(--text2);margin-bottom:12px;">
+    Self-audit of the backtest methodology (2026-06-11). All numbers on this page are produced under the corrected pipeline.
+  </div>
+  <table class="data-table mt8">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Flaw</th>
+        <th>Resolution</th>
+        <th>Evidence</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">1</td>
+        <td style="font-weight:600;">PDV look-ahead bias</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED — PDVLinear retrained per backtest year on strictly pre-year returns (walk-forward), injected into the pdv_iv_spread feature.</td>
+        <td class="mono green" style="font-size:11px;">S1/S1C now trade a true causal PDV forecast</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">2</td>
+        <td style="font-weight:600;">Circular classifier feature</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED — vvix removed from training features (the R2 label is defined as VVIX&gt;threshold, so the old 86.2% accuracy partly measured rule-recovery).</td>
+        <td class="mono green" style="font-size:11px;">Classifier must now predict R2 from market structure</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">3</td>
+        <td style="font-weight:600;">Retrospective Kelly netting</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED — correlation/Sharpe multipliers now shifted 1 day and applied to position size in a second simulation pass (contracts &amp; costs reflect real size).</td>
+        <td class="mono green" style="font-size:11px;">Ex-ante sizing; no same-day information</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">4</td>
+        <td style="font-weight:600;">S1C data snooping</td>
+        <td style="font-size:11px;color:var(--text2);">QUANTIFIED — direction was chosen after observing S1 fail on 2018–2025; cannot be fixed in code. Tested on 2013–2017, a window never used in the discovery.</td>
+        <td class="mono" style="font-size:11px;color:#ffaa33;">Pseudo-OOS: S1C +$785K, S1 −$1.31M — direction holds</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:var(--accent);font-weight:700;">5</td>
+        <td style="font-weight:600;">S3 arbitrary P&amp;L scale</td>
+        <td style="font-size:11px;color:var(--text2);">QUANTIFIED — the 2%/z-unit proxy scale is assumed (no single-stock options data). Sensitivity run at 0.5%/1%/2%/4% per z-unit.</td>
+        <td class="mono" style="font-size:11px;color:#ffaa33;">P&amp;L +$5K…+$53K, win rate 89–94% at every scale</td>
+      </tr>
+    </tbody>
+  </table>
+  <div style="margin-top:10px;font-size:11px;color:var(--text3);">
+    Honest read: S1C's edge is plausible (survives one falsification attempt) but unproven — confirmation requires live data after 2026-06.
+    Portfolio Sharpe remains below the 5% risk-free hurdle; the system's value is concentrated in crisis convexity, not steady carry.
   </div>
 </div>
 
