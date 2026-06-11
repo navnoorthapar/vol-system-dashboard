@@ -8,7 +8,7 @@
   <meta property="og:type"         content="website">
   <meta property="og:url"          content="https://navnoorbawa.me/">
   <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
-  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 573 tests. Live dashboard.">
+  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 577 tests. Live dashboard.">
   <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
   <meta property="og:image:width"  content="1200">
   <meta property="og:image:height" content="630">
@@ -629,7 +629,7 @@
 
 <div class="top-banner">
   <div class="top-banner-text">
-    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 573 tests &nbsp;·&nbsp; live market data &nbsp;·&nbsp; by Navnoor Bawa
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 577 tests &nbsp;·&nbsp; live market data &nbsp;·&nbsp; by Navnoor Bawa
   </div>
   <div class="top-banner-links">
     <a href="https://github.com/NavnoorBawa" target="_blank" rel="noopener">GitHub</a>
@@ -1035,7 +1035,7 @@
         <strong style="color:var(--green);">Key advance over Heston:</strong>
         VIX options are analytically tractable via 2D Gauss-Hermite quadrature — no structural failure of the pricing kernel.
         The non-affine polynomial structure captures steep SPX left skew without rho saturating.
-        VIX futures fit to <span class="mono">0.001 pts</span> (ξ₀ bootstrapped from the VIX term structure).
+        VIX futures fit to <span class="mono">0.001 pts</span> — <strong style="color:#ff8833;">by construction, not model skill</strong>: ξ₀ is bootstrapped from the same VIX term structure being fit (and no tradable futures prices exist in the DB; the "futures" leg is an index proxy). Quote the SPX-leg RMSE (2.34 vp) as the real fit quality.
         Model: <span class="mono">models/quintic_ou.py</span> ·
         Calibrator: <span class="mono">calibration/quintic_calibrator.py</span>
       </div>
