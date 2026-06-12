@@ -40,6 +40,9 @@ import numpy as np
 import pandas as pd
 from scipy import optimize, stats
 
+# np.trapz was removed in NumPy 2.0 (renamed np.trapezoid)
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 from joint_vol_calibration.config import (
     HESTON_BOUNDS, HESTON_DEFAULTS, JOINT_W1, JOINT_W2, JOINT_W3,
     RANDOM_SEED, DATA_DIR,
@@ -317,7 +320,7 @@ def heston_vix_call_price(
 
     # Payoff and integral
     payoff = np.maximum(vix_grid - K_vix, 0.0)
-    price  = np.trapz(payoff * pdf_v, v_grid) * np.exp(-r * T)
+    price  = _trapz(payoff * pdf_v, v_grid) * np.exp(-r * T)
     return float(max(price, 0.0))
 
 

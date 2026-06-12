@@ -52,6 +52,9 @@ import pandas as pd
 from scipy import integrate, optimize
 from scipy.stats import norm
 
+# np.trapz was removed in NumPy 2.0 (renamed np.trapezoid)
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 from joint_vol_calibration.config import (
     HESTON_DEFAULTS, HESTON_BOUNDS, MC_PATHS, MC_STEPS_PER_YEAR,
     MC_ANTITHETIC, RANDOM_SEED, MC_CACHE_DIR,
@@ -279,7 +282,7 @@ def heston_call_batch(
         np.exp(-1j * v[np.newaxis, :] * k[:, np.newaxis])
         * psi[np.newaxis, :]
     )                                                  # shape (M, N)
-    integral = np.trapz(integrand, v, axis=1)          # shape (M,)
+    integral = _trapz(integrand, v, axis=1)          # shape (M,)
     calls    = np.exp(-alpha * k) / np.pi * integral
 
     # Clip to no-arbitrage bounds
@@ -539,7 +542,7 @@ def bates_call_batch(
         np.exp(-1j * v[np.newaxis, :] * k[:, np.newaxis])
         * psi[np.newaxis, :]
     )
-    integral = np.trapz(integrand, v, axis=1)
+    integral = _trapz(integrand, v, axis=1)
     calls    = np.exp(-alpha * k) / np.pi * integral
 
     F     = S * np.exp((r - q) * T)
