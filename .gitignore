@@ -58,3 +58,6 @@ data_store/market_data.db
 *.swp
 *.swo
 .claude/
+
+# Personal / session files
+GRILL_NOTES.md
