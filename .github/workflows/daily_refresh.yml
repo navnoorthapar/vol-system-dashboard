@@ -15,17 +15,19 @@ jobs:
     name: Refresh data + redeploy site
     runs-on: ubuntu-latest
     timeout-minutes: 20       # calibration takes ~15s; hard cap at 20min
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # opt-in ahead of June 16 cutover
 
     steps:
       # ── 1. Checkout source (main branch) ──────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       # ── 2. Python setup ───────────────────────────────────────────────────
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5.3.0
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
