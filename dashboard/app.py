@@ -44,6 +44,35 @@ def _db() -> sqlite3.Connection:
     return sqlite3.connect(DATA / "vol_system.db")
 
 
+def latest_good_calibration_path() -> str:
+    """Return the newest joint_cal_*.pkl that passes the degeneracy gate.
+
+    Daily cloud refreshes occasionally produce degenerate Heston fits (sigma->0,
+    rho->0) from thin intraday option snapshots. We show the most recent
+    NON-degenerate calibration so the calibration page never displays a
+    constant-variance corner as the headline result. Falls back to the newest
+    file if (somehow) none pass, and finally to the 2026-05-31 showcase fit.
+    """
+    import glob as _glob
+    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+
+    cals = sorted(_glob.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
+    for path in reversed(cals):          # newest first
+        try:
+            with open(path, "rb") as f:
+                cal = pickle.load(f)
+            losses = cal.get("leg_losses", cal.get("losses", {}))
+            spx_rmse = losses.get("spx_iv_rmse", None)
+            ok, _ = is_acceptable_calibration(cal.get("params", {}), spx_rmse)
+            if ok:
+                return path
+        except Exception:
+            continue
+    if cals:
+        return cals[-1]
+    return str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
+
+
 def _clean(obj: Any) -> Any:
     """Recursively convert numpy / pandas scalars to plain Python types."""
     if isinstance(obj, dict):
@@ -282,12 +311,9 @@ def load_page1() -> dict[str, Any]:
             d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
         d.setdefault("clf_accuracy", "63.4%")  # C16 honest no-vvix accuracy
 
-    # Calibration date for timestamp (Bug 7) — use latest joint_cal pickle
+    # Calibration date for timestamp (Bug 7) — latest NON-degenerate joint_cal
     try:
-        import glob as _glob
-        _cals = sorted(_glob.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
-        _cal_path = _cals[-1] if _cals else str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
-        with open(_cal_path, "rb") as f:
+        with open(latest_good_calibration_path(), "rb") as f:
             _cal_tmp = pickle.load(f)
         d["calib_date"] = str(_cal_tmp.get("as_of_date", "2026-05-31"))
     except Exception:
@@ -410,10 +436,7 @@ def load_page2() -> dict[str, Any]:
     d: dict[str, Any] = {}
 
     try:
-        import glob as _glob2
-        _cals2 = sorted(_glob2.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
-        _cal_path2 = _cals2[-1] if _cals2 else str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
-        with open(_cal_path2, "rb") as f:
+        with open(latest_good_calibration_path(), "rb") as f:
             cal = pickle.load(f)
 
         p = cal["params"]

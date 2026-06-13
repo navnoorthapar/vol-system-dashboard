@@ -87,6 +87,39 @@ _VIX_TS_TENORS = {
 }
 
 
+# ── Calibration quality gate ──────────────────────────────────────────────────
+
+def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None) -> tuple:
+    """Reject degenerate Heston fits before they are published.
+
+    Live yfinance option snapshots (especially intraday) are often too thin and
+    noisy to identify a 5-parameter Heston. When that happens the optimiser
+    collapses to a constant-variance corner — vol-of-vol σ→0 and ρ→0 — which
+    trivially fits the VIX-futures leg while abandoning the SPX skew entirely.
+    Such a fit (e.g. κ=20, σ=0.0015, ρ=0, SPX RMSE 5.7vp) is strictly worse than
+    keeping the previous good calibration, so the daily refresh must not let it
+    overwrite the showcased result.
+
+    Degeneracy signature: κ, σ and ρ all pin to their bounds
+    (κ∈[0.1,20], σ∈[0.001,2], ρ∈[-0.95,0]).
+
+    Returns (ok: bool, reason: str).
+    """
+    sigma = float(params.get("sigma", 0.0))
+    rho   = float(params.get("rho", 0.0))
+    kappa = float(params.get("kappa", 0.0))
+
+    if sigma < 0.05:
+        return False, f"vol-of-vol collapsed (sigma={sigma:.4f} < 0.05)"
+    if abs(rho) < 0.10:
+        return False, f"no skew (|rho|={abs(rho):.4f} < 0.10)"
+    if kappa <= 0.11 or kappa >= 19.9:
+        return False, f"kappa pinned at bound (kappa={kappa:.2f})"
+    if spx_iv_rmse is not None and spx_iv_rmse > 3.0:
+        return False, f"SPX RMSE too high ({spx_iv_rmse:.2f}vp > 3.0)"
+    return True, "ok"
+
+
 # ── SVI/SSVI surface smoothing ────────────────────────────────────────────────
 
 def _svi_total_var(k: np.ndarray, a: float, b: float, rho: float,

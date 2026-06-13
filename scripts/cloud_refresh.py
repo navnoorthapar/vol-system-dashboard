@@ -201,6 +201,8 @@ def recalibrate_heston() -> bool:
 
     log.info("  Running JointCalibrator...")
     try:
+        from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+
         cal = JointCalibrator(as_of_date=TODAY)
         result = cal.calibrate()
 
@@ -209,15 +211,30 @@ def recalibrate_heston() -> bool:
         result["S"] = float(spx_df["close"].iloc[-1]) if not spx_df.empty else 0.0
         result["r"] = get_tbill_rate(TODAY)
 
+        p = result.get("params", {})
+        l = result.get("leg_losses", {})
+        spx_rmse = l.get("spx_iv_rmse", None)
+
+        # Quality gate: a thin/noisy live snapshot can drive Heston into a
+        # degenerate corner (sigma->0, rho->0). Do NOT let that overwrite the
+        # showcased calibration — the dashboard then keeps the last good fit.
+        ok, reason = is_acceptable_calibration(p, spx_rmse)
+        if not ok:
+            log.warning(
+                "  Calibration REJECTED (%s): kappa=%.4f sigma=%.4f rho=%.4f SPX RMSE=%.3f vp "
+                "-- keeping previous good calibration, not writing today's pkl",
+                reason, p.get("kappa", 0), p.get("sigma", 0), p.get("rho", 0),
+                spx_rmse if spx_rmse is not None else -1,
+            )
+            return False
+
         out = DATA / "calibrations" / f"joint_cal_{TODAY}.pkl"
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "wb") as f:
             pickle.dump(result, f)
 
-        p = result.get("params", {})
-        l = result.get("leg_losses", {})
         log.info(
-            "  Done: kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE=%.3f vp | VIX RMSE=%.3f",
+            "  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE=%.3f vp | VIX RMSE=%.3f",
             p.get("kappa", 0), p.get("sigma", 0), p.get("rho", 0),
             l.get("spx_iv_rmse", 0), l.get("vix_futures_rmse", 0),
         )

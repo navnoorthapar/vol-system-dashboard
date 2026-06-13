@@ -40,6 +40,7 @@ from joint_vol_calibration.calibration.joint_calibrator import (
     JointCalibrator,
     heston_vix_call_price,
     heston_vix_put_price,
+    is_acceptable_calibration,
 )
 from joint_vol_calibration.models.heston import (
     heston_call_batch,
@@ -383,6 +384,49 @@ class TestFullCalibration:
             assert abs(loaded["params"][k] - cal.params[k]) < 1e-10, (
                 f"Param {k} changed after save/load"
             )
+
+
+class TestCalibrationQualityGate:
+    """is_acceptable_calibration() must reject degenerate corner fits."""
+
+    def test_good_local_fits_pass(self):
+        # 2026-05-31 and 2026-03-24 showcase calibrations
+        ok1, _ = is_acceptable_calibration(
+            {"kappa": 1.77, "sigma": 0.46, "rho": -0.95}, spx_iv_rmse=0.52
+        )
+        ok2, _ = is_acceptable_calibration(
+            {"kappa": 4.62, "sigma": 0.84, "rho": -0.99}, spx_iv_rmse=None
+        )
+        assert ok1 and ok2
+
+    def test_vol_of_vol_collapse_rejected(self):
+        # Cloud 2026-06-12 degenerate corner: sigma->0, rho->0, kappa pinned
+        ok, reason = is_acceptable_calibration(
+            {"kappa": 20.0, "sigma": 0.0015, "rho": -0.0003}, spx_iv_rmse=5.74
+        )
+        assert not ok
+        assert "sigma" in reason
+
+    def test_no_skew_rejected(self):
+        ok, reason = is_acceptable_calibration(
+            {"kappa": 2.0, "sigma": 0.4, "rho": -0.02}, spx_iv_rmse=1.0
+        )
+        assert not ok
+        assert "skew" in reason
+
+    def test_kappa_pinned_rejected(self):
+        ok, reason = is_acceptable_calibration(
+            {"kappa": 0.10, "sigma": 0.3, "rho": -0.5}, spx_iv_rmse=1.0
+        )
+        assert not ok
+        assert "kappa" in reason
+
+    def test_high_rmse_rejected(self):
+        ok, reason = is_acceptable_calibration(
+            {"kappa": 2.0, "sigma": 0.4, "rho": -0.6}, spx_iv_rmse=4.5
+        )
+        assert not ok
+        assert "RMSE" in reason
 
 
 if __name__ == "__main__":
