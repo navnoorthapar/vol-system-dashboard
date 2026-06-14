@@ -927,6 +927,7 @@ def load_page4() -> dict[str, Any]:
         d["signal_pnl"]     = []
         d["signal_labels"]  = []
         d["signal_colors"]  = []
+        d["research_s1"]    = {}
         d["research_s1c"]   = {}
         d["research_s4"]    = {}
 
