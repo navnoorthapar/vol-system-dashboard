@@ -32,16 +32,20 @@
 <div class="card" style="margin-bottom:16px;border-color:rgba(0,200,255,0.2);background:rgba(0,200,255,0.02);">
   <div class="flex space-between mb12">
     <div>
-      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C15–C17 — Contrarian Portfolio Under Fully Corrected Methodology</div>
+      <div class="chart-title" style="margin-bottom:4px;color:#00ccff;">C18 — A Strike-Rolling Bug Contaminated Every Prior Backtest Number</div>
       <div style="font-size:11.5px;color:var(--text2);">
-        C15: S1 direction flipped → S1C. C16: walk-forward PDV, vvix removed from classifier, ex-ante Kelly.
-        C17: regime labels switched to the lagged deterministic rule (the ML classifier lost to the
-        persistence baseline 63.4% vs 90.0%), margin enforced on shorts, S1C force-closes on R2 transition,
-        Sharpe measured vs the actual T-bill path.
-        Result: portfolio S1C + S3 + S4 <strong style="color:#ff4444;">−9.1% cumulative</strong>, max DD −19.1%,
-        Sharpe −0.99. <strong style="color:#ffaa33;">The earlier +19.1% (C16) was an artifact of noisy ML regime
-        labels</strong> — under accurate causal labels the apparent edge disappears. This page is a documented
-        negative result, not a deployable strategy.
+        The straddle engine re-entered a position the same day it exited, so the position series never
+        returned to flat. A continuously-held position is one trade: the strike was fixed at first entry
+        and the tenor decayed to its 1-day floor — instead of rolling a fresh 30-day ATM straddle every
+        max-hold. So the book held a single <strong style="color:#ffaa33;">stale-strike, perpetually-expiring
+        straddle</strong> — a directional |S−K| bet, not a vol trade. This contaminated all P&amp;L from C10–C17.
+        <strong style="color:#ffaa33;">Fixed: positions now roll correctly</strong>, and the correction inverts the
+        contrarian thesis. The "catastrophic" S1 (−$1.53M) that motivated flipping its direction into S1C was the
+        artifact — corrected, <strong style="color:#00ff88;">S1 is a regime-gated short-VRP harvester (+$463K, 76% win)</strong>
+        with a fat crisis tail, and the contrarian inversion <strong style="color:#ff4444;">S1C collapses to −$404K</strong>.
+        The (S1C + S3 + S4) portfolio is <strong style="color:#ff4444;">−19.0% cumulative</strong>, Sharpe −1.57, max DD −25.9%.
+        <strong style="color:#00ff88;">S3 dispersion timing (+$23K, 73% win) is the lone signal positive across every correction.</strong>
+        Still a documented research result, not a deployable strategy: mark-to-model, concentrated, tail-heavy.
       </div>
     </div>
     <div style="display:flex;gap:16px;font-size:11px;color:var(--text3);align-items:center;">
@@ -53,11 +57,42 @@
     <canvas id="researchChart"></canvas>
   </div>
 
+  <!-- C18 finding banner -->
+  <div style="margin-top:14px;padding:12px 14px;border-radius:8px;background:rgba(255,170,51,0.06);border:1px solid rgba(255,170,51,0.25);font-size:11.5px;color:var(--text2);line-height:1.6;">
+    <strong style="color:#ffaa33;">The stale-strike bug, mechanically:</strong> max-hold exits that still met the entry
+    condition re-entered the same day, so <code>position</code> never returned to 0. In the P&amp;L engine a
+    never-zero position is a single trade whose 30-day straddle is struck once and then marked past expiry at the
+    1-day tenor floor. Fixing it (forcing a flat day, so straddles roll) re-prices every signal — and shows the
+    contrarian story was built on the artifact, not on a real edge.
+  </div>
+
   <!-- Research stats row -->
   <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
-    <!-- S1C Card -->
+    <!-- S1 Card (headline corrected result) -->
+    <div style="flex:1;min-width:260px;padding:14px 16px;border-radius:8px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.22);">
+      <div style="font-size:12px;color:#00ff88;font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S1 — IVR SHORT-VRP (CORRECTED)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11.5px;">
+        <span style="color:var(--text3);">Total P&amp;L</span>
+        <span class="mono {% if d.research_s1.green %}green{% else %}red{% endif %}">{{ d.research_s1.total_pnl }}</span>
+        <span style="color:var(--text3);">Sharpe</span>
+        <span class="mono {% if d.research_s1.green %}green{% else %}red{% endif %}">{{ d.research_s1.sharpe }}</span>
+        <span style="color:var(--text3);">Win Rate</span>
+        <span class="mono">{{ d.research_s1.win_rate }}</span>
+        <span style="color:var(--text3);">N Trades</span>
+        <span class="mono">{{ d.research_s1.n_trades }}</span>
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
+        53 of 54 trades are short straddles selling rich implied vol in R1 — a regime-gated VRP harvester.
+        Its prior <strong style="color:#ff4444;">−$1.53M "catastrophe" was the stale-strike bug.</strong>
+        Corrected: <strong style="color:#00ff88;">+$463K, 76% win</strong>, positive in 2018/19/21/23/24.
+        But this is <em>not</em> a green light — the payoff is fat-tailed (a single −$333K COVID trade; 2022 −$99K)
+        and concentrated (top-5 trades = 73% of profit), and it is mark-to-model. Honest read: short-VRP
+        earns the premium in calm regimes and pays it back in spikes.
+      </div>
+    </div>
+    <!-- S1C Card (thesis collapse) -->
     <div style="flex:1;min-width:260px;padding:14px 16px;border-radius:8px;background:rgba(0,200,255,0.06);border:1px solid rgba(0,200,255,0.2);">
-      <div style="font-size:12px;color:#00ccff;font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S1C — CONTRARIAN PDV SIGNAL</div>
+      <div style="font-size:12px;color:#00ccff;font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S1C — CONTRARIAN PDV (DEMOTED)</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11.5px;">
         <span style="color:var(--text3);">Total P&amp;L</span>
         <span class="mono {% if d.research_s1c.green %}green{% else %}red{% endif %}">{{ d.research_s1c.total_pnl }}</span>
@@ -69,16 +104,11 @@
         <span class="mono">{{ d.research_s1c.n_trades }}</span>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
-        PDV model overestimates vol in fear regimes (R0). S1C shorts when PDV &gt; ATM IV
-        (model panic &gt; market), longs when market premium stays elevated (R1).
-        <strong style="color:#ff4444;">C17 verdict: the contrarian edge was an artifact.</strong>
-        Under C16's ML regime labels S1C showed +$640K — but those labels lost to the trivial
-        persistence baseline (63.4% vs 90.0%). With accurate lagged rule labels, margin caps and
-        R2 force-exits, S1C is <strong style="color:#ff4444;">−$97K</strong> on 2018–2025 and the
-        pseudo-OOS 2013–2017 check collapses from +$785K to
-        <strong style="color:#ff4444;">−$333K</strong>. The "edge" lived in classifier
-        misclassifications, not in the PDV spread. In-sample discovery + artifact sensitivity =
-        no validated signal.
+        S1C flipped S1's direction on the premise that S1 lost both ways, so the PDV spread had to be contrarian.
+        <strong style="color:#ff4444;">C18 verdict: that premise was the bug.</strong> Once S1 rolls its straddles
+        properly it is profitable, so inverting it is the <em>wrong</em> trade — S1C is
+        <strong style="color:#ff4444;">−$404K</strong> on 2018–2025. Demoted, like the ML classifier in C17:
+        a thesis that only held under a bug is not a signal.
       </div>
     </div>
     <!-- S4 Card -->
@@ -95,10 +125,10 @@
         <span class="mono">{{ d.research_s4.n_trades }}</span>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
-        C15 fix: entry requires z_vrp to be <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
-        C17 (accurate regime labels + margin caps): <strong style="color:#ff44aa;">−$199K</strong>
-        on 2018–2025; pseudo-OOS 2013–2017 also negative (−$250K) —
-        consistent conclusion across every methodology revision: VRP is not extractable at retail costs.
+        Entry requires z_vrp <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
+        Under correct straddle rolling + accurate regime labels + margin caps:
+        <strong style="color:#ff44aa;">−$189K</strong> on 2018–2025 —
+        consistent conclusion across every revision: VRP is not extractable at retail costs.
       </div>
     </div>
   </div>
@@ -227,7 +257,7 @@
     <span class="tag tag-dim" style="font-size:10px;">PRE-C15 REFERENCE</span>
   </div>
   <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
-    Before C15, S1 and S2 were the main signals. These variants show the impact of exiting positions when the regime transitions to R2 (rather than blocking new entries only). S1 has since been replaced by S1C Contrarian in the main portfolio.
+    Before C15, S1 and S2 were the main signals. These variants show the impact of exiting positions when the regime transitions to R2 (rather than blocking new entries only). S1 was replaced by S1C Contrarian in the main portfolio at C15 — a decision C18 reverses in spirit: once straddles roll correctly, S1 (the short-VRP harvester) is the stronger leg and the contrarian inversion S1C is the weaker one.
   </div>
   <table class="data-table mt8">
     <thead>
@@ -271,27 +301,27 @@
 <!-- ── Analysis Banner ───────────────────────────────────────────────────── -->
 <div class="grid grid-2" style="margin-bottom:16px;">
   <div class="card" style="border-color:rgba(0,204,255,0.2);background:rgba(0,204,255,0.02);">
-    <div class="chart-title" style="color:#00ccff;">C17 — The Contrarian "Edge" Was a Label Artifact</div>
+    <div class="chart-title" style="color:#00ccff;">C18 — The Contrarian Thesis Was a Strike-Rolling Artifact</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1 −$1.53M</span>
-        S1 lost in both directions: PDV (Guyon-Lekeufack 2023) is a <em>lagging</em>
-        indicator — it overestimates fear after a vol spike, exactly when the market has
-        already priced in normalization. This diagnosis still stands.
+        <span class="tag tag-green" style="margin-right:8px;">S1 +$463K</span>
+        The "S1 loses both ways" diagnosis that launched the contrarian idea was the bug:
+        positions never rolled, so S1 held one stale-strike straddle past expiry. Rolling
+        properly, <strong style="color:#00ff88;">S1 is a regime-gated short-VRP harvester</strong>
+        — profitable in calm regimes, with a fat crisis tail.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1C −$97K</span>
-        The contrarian flip looked profitable (+$640K under C16) only while regime labels came
-        from an ML classifier that <strong style="color:#ffaa33;">loses to the trivial
-        "yesterday's regime" baseline (63.4% vs 90.0%)</strong>. Under accurate lagged rule
-        labels the profit disappears in-sample AND in pseudo-OOS (2013–17: +$785K → −$333K).
-        The P&amp;L lived in label noise, not in the PDV spread.
+        <span class="tag tag-red" style="margin-right:8px;">S1C −$404K</span>
+        Inverting a signal that is actually <em>profitable</em> is the wrong trade. The contrarian
+        flip only looked good while S1 looked catastrophic — and that was the artifact.
+        <strong style="color:#ff4444;">S1C is demoted</strong>, exactly like the ML classifier in C17:
+        a thesis that holds only under a bug is not a signal.
       </div>
       <div>
         <span class="tag tag-dim" style="margin-right:8px;">PORTFOLIO</span>
-        S1C + S3 + S4 under the fully corrected pipeline:
-        <strong style="color:#ff4444;">−9.1% cumulative</strong>, max DD −19.1%, Sharpe −0.99
-        vs the actual T-bill path. Crisis windows stay positive (COVID +3.9%, Tariffs +3.1%)
+        The (S1C + S3 + S4) construction, still anchored on the discredited contrarian leg:
+        <strong style="color:#ff4444;">−19.0% cumulative</strong>, max DD −25.9%, Sharpe −1.57
+        vs the actual T-bill path. Crisis windows stay positive (COVID, Fed, Tariffs all small +)
         but cannot pay for the bleed between them.
       </div>
     </div>
@@ -301,21 +331,22 @@
     <div class="chart-title" style="color:#00ff88;">Signal Breakdown — Only S3's Timing Survives</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S3 +$25K</span>
-        Dispersion proxy fires only at VIX/VVIX extremes — 17 trades in 7 years,
-        <strong style="color:#00ff88;">88% win rate</strong>, positive at every tested P&amp;L
-        scale (0.5%–4%/z-unit: +$5K…+$52K) and in pseudo-OOS (+$20K). The timing signal is the
-        one robust finding; the dollar magnitude is proxy-scaled, not market-derived.
+        <span class="tag tag-green" style="margin-right:8px;">S3 +$23K</span>
+        Dispersion proxy fires only at VIX/VVIX extremes — 22 trades in 7 years,
+        <strong style="color:#00ff88;">73% win rate</strong>, positive at every tested P&amp;L
+        scale (0.5%–4%/z-unit) and in pseudo-OOS. Unchanged by the strike-rolling fix — the one
+        robust finding; dollar magnitude is proxy-scaled, not market-derived.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1C −$97K</span>
-        48% win rate, 67 trades under corrected labels (R2 force-exits cut holding periods).
-        No demonstrated edge after artifact removal — retained only as the audit's subject.
+        <span class="tag tag-green" style="margin-right:8px;">S1 +$463K</span>
+        76% win, but <strong style="color:#ffaa33;">not deployable</strong>: fat-tailed (one −$333K
+        COVID trade), concentrated (top-5 = 73% of profit), and mark-to-model. Short-VRP earns the
+        premium in calm regimes and pays it back in spikes.
       </div>
       <div>
-        <span class="tag tag-red" style="margin-right:8px;">S4 −$199K</span>
-        VRP mean-reversion negative in-sample (−$199K) and pseudo-OOS (−$250K) under every
-        methodology revision — consistent: VRP is not extractable at retail cost levels.
+        <span class="tag tag-red" style="margin-right:8px;">S4 −$189K</span>
+        VRP mean-reversion negative in-sample under every revision — consistent:
+        VRP is not extractable at retail cost levels.
       </div>
     </div>
   </div>
@@ -323,7 +354,7 @@
 
 <!-- ── C16 Methodology Audit ─────────────────────────────────────────────── -->
 <div class="card" style="margin-bottom:16px;border-color:rgba(255,170,51,0.25);background:rgba(255,170,51,0.02);">
-  <div class="chart-title" style="color:#ffaa33;">C16/C17 Methodology Audit — Nine Flaws Found, Seven Fixed, Two Quantified</div>
+  <div class="chart-title" style="color:#ffaa33;">C16–C18 Methodology Audit — Ten Flaws Found, Eight Fixed, Two Quantified</div>
   <div style="font-size:11.5px;color:var(--text2);margin-bottom:12px;">
     Self-audit of the backtest methodology (C16: 2026-06-11, C17 redteam: same week). All numbers on this page are produced under the fully corrected pipeline.
     Each successive fix made the backtest <em>worse</em> — the original "edge" was a stack of artifacts.
@@ -392,12 +423,21 @@
         <td style="font-size:11px;color:var(--text2);">FIXED (C17) — the monthly-recalibration loop never produced a single calibration (no pre-2026 options data) and its output was never consumed; removed. Sharpe/Sortino now measured against the per-date ^IRX T-bill path instead of a flat 5%.</td>
         <td class="mono green" style="font-size:11px;">Backtest claims now match what the code does</td>
       </tr>
+      <tr style="background:rgba(255,170,51,0.05);">
+        <td class="mono" style="color:#ffaa33;font-weight:700;">10</td>
+        <td style="font-weight:600;">Straddles never rolled (stale strike, decayed tenor)</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED (C18) — the state machine re-entered the same day it exited, so the position never went flat: the engine held one straddle struck once and marked past expiry at the 1-day tenor floor, instead of rolling a fresh 30-day ATM straddle each cycle. Now forces a flat day so positions roll. This contaminated every P&amp;L number in C10–C17.</td>
+        <td class="mono" style="font-size:11px;color:#ff4444;">Inverted the thesis: S1 −$1.53M→+$463K, S1C −$97K→−$404K, portfolio −9.1%→−19.0%; S3 unchanged</td>
+      </tr>
     </tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
-    Honest read: after removing every identified artifact, the portfolio is <strong style="color:#ff4444;">−9.1%</strong> and no signal except S3's
-    timing shows robustness. This dashboard documents a negative result with full methodology — the infrastructure (calibration, Greeks, hedging,
-    walk-forward harness) is the deliverable; the trading signals are the case study in why most backtests flatter themselves.
+    Honest read: after removing every identified artifact — including the strike-rolling bug that had been
+    distorting the P&amp;L the whole time — the portfolio is <strong style="color:#ff4444;">−19.0%</strong> and the
+    only signal with cross-correction robustness is S3's timing. S1 is a real short-VRP harvester (+$463K in-sample)
+    but fat-tailed, concentrated and mark-to-model — not deployable. This dashboard documents a negative result with
+    full methodology: the infrastructure (calibration, Greeks, hedging, walk-forward harness) is the deliverable;
+    the trading signals are the case study in why most backtests flatter themselves.
   </div>
 </div>
 

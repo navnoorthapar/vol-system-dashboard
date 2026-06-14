@@ -231,6 +231,15 @@ def _simulate_straddle_pnl(
         k       = float(kelly.iloc[i])
         nav     = float(nav_series.iloc[i])
 
+        # Defensive: a direct sign flip while holding (+1→−1 with no flat day)
+        # must not be silently ignored — the old `if not in_trade`/`if pos==0`
+        # branches would otherwise keep the original direction. The state
+        # machines now force a flat day between opposite positions, so this
+        # never triggers; if upstream ever changes, treat the flip as a close
+        # today (the opposite leg is opened on the next flat→entry day).
+        if in_trade and pos != 0 and pos != direction:
+            pos = 0
+
         if date not in spx_close.index or date not in vix_wide_idx.index:
             continue
 
@@ -449,9 +458,12 @@ def compute_metrics(
     excess   = rets - rf_daily
     sharpe   = float(excess.mean() / excess.std() * np.sqrt(TRADING_DAYS)) if excess.std() > 0 else 0.0
 
-    downside = excess[excess < 0]
-    sortino  = (float(excess.mean() / downside.std() * np.sqrt(TRADING_DAYS))
-                if len(downside) > 1 and downside.std() > 0 else 0.0)
+    # Sortino denominator = downside deviation about the target (rf), i.e.
+    # sqrt(mean(min(0, excess)^2)) over ALL days — not the sample std of the
+    # negative subset about its own mean (which understates downside risk).
+    downside_dev = float(np.sqrt((excess.clip(upper=0.0) ** 2).mean()))
+    sortino  = (float(excess.mean() / downside_dev * np.sqrt(TRADING_DAYS))
+                if downside_dev > 0 else 0.0)
 
     roll_max = nav.cummax()
     dd       = (nav - roll_max) / roll_max

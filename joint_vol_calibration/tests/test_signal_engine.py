@@ -167,6 +167,42 @@ class TestRunStatemachine:
         )
         assert (r["position"] == 0).all()
 
+    def test_no_same_day_reentry_after_exit(self):
+        """A max_hold exit must leave the book flat for one day even when the
+        entry condition still holds — otherwise max_hold never flattens."""
+        result = _run_statemachine(
+            pd.Series([True] * 6),     # entry_long true every day
+            pd.Series([False] * 6),
+            pd.Series([False] * 6),
+            pd.Series(np.ones(6)),
+            pd.Series(np.zeros(6)),
+            max_hold=2,
+        )
+        pos = result["position"].tolist()
+        # Day0 enter, Day1 hits max_hold → exit (flat), Day2 re-enter, ...
+        assert pos[0] == 1
+        assert pos[1] == 0, "must be flat the day after a max_hold exit"
+        assert pos[2] == 1
+        assert 0 in pos, "max_hold must produce at least one flat day"
+
+    def test_no_direct_long_short_flip(self):
+        """The machine must never emit +1 then -1 with no flat day between."""
+        result = _run_statemachine(
+            pd.Series([True, False, False, False, False, False]),
+            pd.Series([False, False, True, True, True, True]),   # short pressure after
+            pd.Series([False, True, False, False, False, False]),  # exit long on day1
+            pd.Series(np.ones(6)),
+            pd.Series(np.zeros(6)),
+            max_hold=10,
+        )
+        pos = result["position"].tolist()
+        # day0 +1, day1 exit→0 (no same-day short), day2 enter -1
+        assert pos[0] == 1
+        assert pos[1] == 0
+        # no adjacent +1→-1 transition anywhere
+        for a, b in zip(pos, pos[1:]):
+            assert not (a == 1 and b == -1), "direct +1→-1 flip with no flat day"
+
     def test_days_held_increments(self):
         r = self._run(
             entry_l=[True] + [False]*4,

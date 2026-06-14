@@ -767,9 +767,10 @@ def load_page4() -> dict[str, Any]:
             # Sharpe (excess over 5% rf)
             ex   = rets - 0.05 / 252
             sh   = float(ex.mean() / ex.std() * ann_factor) if rets.std() > 1e-10 else 0.0
-            # Sortino (downside only)
-            down = ex[ex < 0]
-            srt  = float(ex.mean() / down.std() * ann_factor) if len(down) > 1 else 0.0
+            # Sortino: downside deviation about target = sqrt(mean(min(0,ex)^2))
+            # over all days (not std of the negative subset about its own mean).
+            down_dev = float(np.sqrt((ex.clip(upper=0.0) ** 2).mean()))
+            srt  = float(ex.mean() / down_dev * ann_factor) if down_dev > 1e-12 else 0.0
             # Max drawdown
             roll_max = nav.cummax()
             dd_series = (nav / roll_max) - 1
@@ -784,7 +785,15 @@ def load_page4() -> dict[str, Any]:
                 max_dur = max(max_dur, cur_dur)
             # Calmar
             years = n_days / 252
-            ann_ret = float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1) if years > 0 else 0
+            # Geometric annualisation is only defined while NAV stays positive.
+            # Reference signals (e.g. S1 −$1.53M) can drive a standalone NAV path
+            # negative; raising a negative ratio to a fractional power yields NaN
+            # (the "invalid value in scalar power" RuntimeWarning). Fall back to
+            # the simple cumulative return there — the account has blown up.
+            if years > 0 and nav.iloc[0] > 0 and nav.iloc[-1] > 0:
+                ann_ret = float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1)
+            else:
+                ann_ret = float(nav.iloc[-1] / nav.iloc[0] - 1) if nav.iloc[0] > 0 else 0.0
             calmar  = float(ann_ret / abs(mdd)) if abs(mdd) > 1e-10 else 0.0
             # Win rate (by trading day P&L)
             active_pnl = pnl[pnl != 0]
@@ -812,6 +821,7 @@ def load_page4() -> dict[str, Any]:
 
         # C17: prefer the engine's headline Sharpe/Sortino (measured against
         # the per-date ^IRX T-bill path) over the flat-5% parquet recompute.
+        _em: dict = {}
         try:
             with open(DATA / "backtest" / "full_results.pkl", "rb") as _fh:
                 _em = (pickle.load(_fh).get("metrics") or {})
@@ -820,6 +830,26 @@ def load_page4() -> dict[str, Any]:
                     m[_k] = float(_em[_k])
         except Exception:
             pass
+
+        # Per-signal cards/table use the engine's TRADE-LOG stats (round-trip
+        # trades, win rate by trade, Sharpe vs T-bill) — the canonical numbers
+        # from run_backtest — not the dashboard's daily-P&L recompute, which
+        # counts each entry+exit as a separate "trade" and wins by day.
+        def _sig_card(sig: str, fallback: dict | None) -> dict:
+            tp = _em.get(f"{sig}_total_pnl")
+            nt = _em.get(f"{sig}_n_trades")
+            wr = _em.get(f"{sig}_win_rate")
+            sh = _em.get(f"{sig}_sharpe")
+            if tp is None and fallback is not None:
+                tp, nt, wr, sh = (fallback.get("total_pnl"), fallback.get("n_trades"),
+                                  fallback.get("win_rate"), fallback.get("sharpe"))
+            return {
+                "total_pnl": _dol(tp) if tp is not None else "—",
+                "sharpe":    _f2(sh) if sh is not None else "—",
+                "win_rate":  _pct(wr) if wr is not None else "—",
+                "n_trades":  str(int(nt)) if nt is not None else "—",
+                "green":     (tp or 0) > 0,
+            }
 
         d["metrics_rows"] = [
             {"label": "Cumulative Return", "value": _pct(m["cum_ret"]),
@@ -846,52 +876,49 @@ def load_page4() -> dict[str, Any]:
 
         # Signal P&L bar chart — main 3-signal portfolio (S1C + S3 + S4)
         signal_pnl = [
-            round((m1c["total_pnl"] if m1c else 0) / 1000, 1),
-            round(m3["total_pnl"]  / 1000, 1),
-            round((m4["total_pnl"]  if m4  else 0) / 1000, 1),
+            round(_em.get("s1c_total_pnl", (m1c["total_pnl"] if m1c else 0)) / 1000, 1),
+            round(_em.get("s3_total_pnl",  m3["total_pnl"]) / 1000, 1),
+            round(_em.get("s4_total_pnl",  (m4["total_pnl"] if m4 else 0)) / 1000, 1),
         ]
         d["signal_labels"] = ["S1C  Contrarian PDV", "S3  Dispersion", "S4  VRP"]
         d["signal_pnl"]    = signal_pnl
         d["signal_colors"] = ["#00c870" if v > 0 else "#ff3333" for v in signal_pnl]
 
-        # Per-signal metrics table — main signals first, reference signals dimmed
+        # Per-signal metrics table — main signals first, reference signals dimmed.
+        # Stats sourced from the engine trade-log (canonical), keyed by signal.
         d["signal_metrics"] = []
-        for mx, lbl, is_research, is_sparse in [
-            (m1c, "S1C Contrarian",  False, False),
-            (m3,  "S3 Dispersion",   False, True),   # 30 trades over 7y → Sharpe not meaningful
-            (m4,  "S4 VRP",          False, False),
-            (m1,  "S1 IVR (ref)",    True,  False),
-            (m2,  "S2 VIX TS (ref)", True,  False),
+        for sig, mx, lbl, is_research, is_sparse in [
+            ("s1c", m1c, "S1C Contrarian",  False, False),
+            ("s3",  m3,  "S3 Dispersion",   False, True),   # 22 trades, proxy-scaled → Sharpe not meaningful
+            ("s4",  m4,  "S4 VRP",          False, False),
+            ("s1",  m1,  "S1 IVR (ref)",    True,  False),
+            ("s2",  m2,  "S2 VIX TS (ref)", True,  False),
         ]:
             if mx is None:
                 continue
+            _tp = _em.get(f"{sig}_total_pnl", mx["total_pnl"])
+            _nt = _em.get(f"{sig}_n_trades",  mx["n_trades"])
+            _wr = _em.get(f"{sig}_win_rate",  mx["win_rate"])
+            _sh = _em.get(f"{sig}_sharpe",    mx["sharpe"])
+            _ar = _em.get(f"{sig}_ann_return", mx["ann_ret"])
             d["signal_metrics"].append({
                 "label":       lbl,
-                "sharpe":      "N/A*" if is_sparse else _f2(mx["sharpe"]),
-                "ann_ret":     _pct(mx["ann_ret"]),
-                "win_rate":    _pct(mx["win_rate"]),
-                "n_trades":    str(mx["n_trades"]),
-                "total_pnl":   _dol(mx["total_pnl"]),
-                "green":       mx["total_pnl"] > 0,
+                "sharpe":      "N/A*" if is_sparse else _f2(_sh),
+                "ann_ret":     _pct(_ar),
+                "win_rate":    _pct(_wr),
+                "n_trades":    str(int(_nt)),
+                "total_pnl":   _dol(_tp),
+                "green":       _tp > 0,
                 "is_research": is_research,
                 "is_sparse":   is_sparse,
             })
 
-        # Research variant summary for dedicated panel
-        d["research_s1c"] = {
-            "total_pnl": _dol(m1c["total_pnl"]) if m1c else "—",
-            "sharpe":    _f2(m1c["sharpe"])      if m1c else "—",
-            "win_rate":  _pct(m1c["win_rate"])   if m1c else "—",
-            "n_trades":  str(m1c["n_trades"])    if m1c else "—",
-            "green":     (m1c["total_pnl"] > 0)  if m1c else False,
-        }
-        d["research_s4"] = {
-            "total_pnl": _dol(m4["total_pnl"])   if m4 else "—",
-            "sharpe":    _f2(m4["sharpe"])        if m4 else "—",
-            "win_rate":  _pct(m4["win_rate"])     if m4 else "—",
-            "n_trades":  str(m4["n_trades"])      if m4 else "—",
-            "green":     (m4["total_pnl"] > 0)    if m4 else False,
-        }
+        # Research variant summary for dedicated panel (canonical trade-log stats)
+        d["research_s1c"] = _sig_card("s1c", m1c)
+        d["research_s4"]  = _sig_card("s4",  m4)
+        # C18: S1 (original IVR short-VRP) — the signal whose "catastrophic"
+        # loss was the stale-strike artifact. Now the headline corrected result.
+        d["research_s1"]  = _sig_card("s1",  m1)
 
     except Exception as e:
         d["pkl_error"] = str(e)

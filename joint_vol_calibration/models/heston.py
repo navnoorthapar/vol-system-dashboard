@@ -416,9 +416,15 @@ def bates_characteristic_function(
     heston_cf = characteristic_function(
         phi, S, T, r, q, kappa, theta, sigma, rho, v0
     )
-    # Jump CF: exp(λT(E[e^{iφJ}] − 1)) where E[e^{iφJ}] = e^{iφμⱼ − ½φ²σⱼ²}
+    # Jump CF with risk-neutral compensator. The compound-Poisson term is
+    #   exp(λT(E[e^{iφJ}] − 1)),  E[e^{iφJ}] = e^{iφμⱼ − ½φ²σⱼ²},
+    # but the drift must be compensated by −λ·k̄ (k̄ = E[e^J − 1] = e^{μⱼ+½σⱼ²}−1)
+    # so that E[S_T] = S₀e^{(r−q)T} and the discounted price stays a martingale.
+    # Without the −iφλT·k̄ term the model over-prices (φ_Bates(−i) = forward·e^{λTk̄}).
+    kbar    = np.exp(mu_j + 0.5 * sigma_j**2) - 1.0
     jump_cf = np.exp(
-        lam * T * (np.exp(1j * phi * mu_j - 0.5 * phi**2 * sigma_j**2) - 1.0)
+        lam * T * (np.exp(1j * phi * mu_j - 0.5 * phi**2 * sigma_j**2) - 1.0
+                   - 1j * phi * kbar)
     )
     return heston_cf * jump_cf
 
@@ -528,9 +534,11 @@ def bates_call_batch(
                 (1.0 - edt) / (1.0 - g * edt))
     heston_cf = np.exp(C_cf + D_cf * v0 + 1j * phi * x)
 
-    # ── Jump CF (vectorised over phi) ──
+    # ── Jump CF (vectorised over phi), with risk-neutral compensator −iφλT·k̄ ──
+    kbar    = np.exp(mu_j + 0.5 * sigma_j**2) - 1.0
     jump_cf = np.exp(
-        lam * T * (np.exp(1j * phi * mu_j - 0.5 * phi**2 * sigma_j**2) - 1.0)
+        lam * T * (np.exp(1j * phi * mu_j - 0.5 * phi**2 * sigma_j**2) - 1.0
+                   - 1j * phi * kbar)
     )
 
     cf    = heston_cf * jump_cf
@@ -731,7 +739,10 @@ def heston_vix_futures_curve(
     NOTE: This is an approximation. Exact computation requires E[sqrt(VIX^2)]
     which doesn't have a closed form. The Jensen's inequality correction is:
       E[sqrt(X)] ≈ sqrt(E[X]) - Var(X) / (8 * E[X]^{3/2})
-    We apply this correction for accuracy.
+    We deliberately do NOT apply this correction (see the inline comment in the
+    loop): the Var[VIX^2] term needs a nested integration and is numerically
+    unstable, and the Jensen error (<0.3 VIX pts) is small relative to the
+    1.5–3.5 pt Heston-VIX gap being measured. F_VIX ≈ sqrt(E[VIX^2]).
 
     Parameters
     ----------

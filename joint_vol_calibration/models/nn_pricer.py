@@ -886,6 +886,10 @@ class NNPricer:
             np.full(n_options, sigma), np.full(n_options, rho),
             np.full(n_options, v0),
         ]).astype(np.float32)
+        # Warm up once: the first forward pass carries PyTorch graph-build and
+        # allocation overhead (cold-start speedup can dip to ~1×). The benchmark
+        # is meant to report steady-state inference speed, so discard the first.
+        _ = self.spx_iv_batch(feats)
         t0 = time.time()
         nn_ivs = self.spx_iv_batch(feats)
         nn_time = time.time() - t0

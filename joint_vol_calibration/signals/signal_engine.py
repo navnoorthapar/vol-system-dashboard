@@ -238,7 +238,12 @@ def _run_statemachine(
                 cur_days   = 0
                 # Position is 0 on exit day (already set by cur_pos = 0 above)
 
-        if cur_pos == 0:
+        # `elif`, not `if`: when we started the day in a trade we never open a
+        # new one the same day. This enforces the documented "no same-day
+        # re-entry after exit" (otherwise a max_hold exit that still meets the
+        # entry condition reopens instantly, defeating max_hold) and prevents a
+        # direct +1↔−1 flip with no flat day in between.
+        elif cur_pos == 0:
             # Flat — check entry (no same-day re-entry after exit)
             if el and not es:
                 cur_pos    = +1
@@ -332,7 +337,9 @@ def _run_statemachine_r2exit(
                 cur_regime = np.nan
                 cur_days   = 0
 
-        if cur_pos == 0:
+        # `elif` (not `if`): no same-day re-entry after any exit — including the
+        # R2 forced exit, which must leave the book flat that day, not reopen.
+        elif cur_pos == 0:
             if el and not es:
                 cur_pos    = +1
                 cur_str    = float(strength.iloc[i])
