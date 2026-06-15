@@ -5,9 +5,41 @@
 {% block content %}
 <div class="page-header">
   <div class="page-title">Live Market Overview</div>
-  <div class="page-subtitle">Real-time regime + term structure</div>
-  <div class="page-badge">Data: {{ d.spx_date }}  ·  Calibration: {{ d.calib_date }}  ·  Regime: {{ d.regime_date }}</div>
+  <div class="page-subtitle">End-of-day regime + term structure</div>
+  <div class="page-badge" id="freshness-badge">
+    <span data-date="{{ d.spx_date }}">Last close: {{ d.spx_date }}</span>
+    &nbsp;·&nbsp; Calibration: {{ d.calib_date }}
+    &nbsp;·&nbsp; Regime: {{ d.regime_date }}
+  </div>
 </div>
+<script>
+/* View-time data-freshness check. The site is a static end-of-day snapshot,
+   refreshed daily after the US close. This compares the snapshot's last-close
+   date against the most recent US session that SHOULD have data by now (in the
+   viewer's clock), so a Friday close viewed on a Monday morning reads
+   "latest session" instead of looking stale. */
+(function () {
+  var badge = document.getElementById('freshness-badge');
+  if (!badge) return;
+  var span = badge.querySelector('[data-date]');
+  var dd = span && span.getAttribute('data-date');
+  if (!dd || !/^\d{4}-\d{2}-\d{2}$/.test(dd)) return;
+  var d = new Date(dd + 'T00:00:00Z');
+  var probe = new Date();                                  // viewer's now
+  // US cash equities settle EOD data by ~22:00 UTC; before that, "today" has no close yet.
+  if (probe.getUTCHours() < 22) probe.setUTCDate(probe.getUTCDate() - 1);
+  while (probe.getUTCDay() === 0 || probe.getUTCDay() === 6) probe.setUTCDate(probe.getUTCDate() - 1);
+  var expected = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
+  var dataDay  = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  var note = document.createElement('span');
+  if (dataDay >= expected) {
+    note.innerHTML = ' &nbsp;·&nbsp; <span style="color:#00ff88;">✓ latest U.S. session</span>';
+  } else {
+    note.innerHTML = ' &nbsp;·&nbsp; <span style="color:#ffaa33;">⟳ refreshes after next U.S. close</span>';
+  }
+  badge.appendChild(note);
+})();
+</script>
 
 <!-- ── Row 1: Key stats ──────────────────────────────────────────────────── -->
 <div class="grid grid-4" style="margin-bottom:16px;">
