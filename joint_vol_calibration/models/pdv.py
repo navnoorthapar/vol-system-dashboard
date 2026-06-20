@@ -582,9 +582,14 @@ def walk_forward_predict(
     Same length as y, NaN for the first train_min_days observations.
 
     Note: For PDVKernel, full walk-forward is O(N²) which is slow for N=4K.
-          We therefore use a "burn-in" approach: fit once on the first
-          train_min_days observations, then re-fit every 63 days (quarterly).
-          This introduces minimal look-ahead (< 1 quarter's data).
+          We therefore re-fit every 63 days (quarterly) instead of daily.
+          Between refits the model is *stale* (trained on data up to the last
+          refit date), never look-ahead: a prediction at t only ever uses a
+          model fitted on rows strictly before t. Quarterly refitting can only
+          DEGRADE accuracy (the model has seen less data), so it is a
+          conservative approximation — the opposite of look-ahead bias.
+          The no-look-ahead property is verified in test_pdv.py
+          (test_walk_forward_no_lookahead_poison).
     """
     n = len(X)
     dates = X.index

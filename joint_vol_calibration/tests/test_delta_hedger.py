@@ -490,3 +490,73 @@ class TestConstants:
     def test_r_q_reasonable(self):
         assert 0 < R < 0.05
         assert 0 < Q < 0.03
+
+
+# ── run_simulation end-to-end (covers the core P&L loop) ──────────────────────
+
+class TestRunSimulationIntegration:
+    """Exercise the actual run_simulation driver (not the hand-built mini_sim_df).
+
+    This is the 280-line P&L loop that produces every delta-hedge result and
+    was previously untested end-to-end. Uses a short real-data window so the
+    test stays fast (~2s) while covering the loop, state advancement, and the
+    attribution bookkeeping.
+    """
+
+    @pytest.fixture(scope="class")
+    def sim(self):
+        # Short January-2020 window → ~21 trading days, fast.
+        return run_simulation(entry_date="2020-01-02", exit_date="2020-01-31")
+
+    def test_output_structure(self, sim):
+        for col in ("S", "T_rem", "sigma_atm", "straddle_value", "delta",
+                    "gamma", "vega", "theta", "pnl_total", "pnl_gamma",
+                    "pnl_vega_a", "pnl_vega_b", "pnl_theta", "pnl_residual_a",
+                    "pnl_residual_b", "cum_pnl_a", "cum_pnl_b"):
+            assert col in sim.columns, f"missing column {col}"
+        assert isinstance(sim.index, pd.DatetimeIndex)
+        assert len(sim) >= 15
+
+    def test_entry_day_pnl_is_nan(self, sim):
+        # The first (initialisation) row books no P&L.
+        assert np.isnan(sim["pnl_total"].iloc[0])
+        assert np.isnan(sim["pnl_gamma"].iloc[0])
+
+    def test_attribution_identity_run_a(self, sim):
+        """Every non-entry row: pnl_total == gamma + vega_a + theta + residual_a
+        (exact, since residual_a is defined as the remainder)."""
+        rows = sim.iloc[1:]
+        recon = (rows["pnl_gamma"] + rows["pnl_vega_a"]
+                 + rows["pnl_theta"] + rows["pnl_residual_a"])
+        np.testing.assert_allclose(rows["pnl_total"].values, recon.values,
+                                   atol=1e-9)
+
+    def test_attribution_identity_run_b(self, sim):
+        rows = sim.iloc[1:]
+        recon = (rows["pnl_gamma"] + rows["pnl_vega_b"]
+                 + rows["pnl_theta"] + rows["pnl_residual_b"])
+        np.testing.assert_allclose(rows["pnl_total"].values, recon.values,
+                                   atol=1e-9)
+
+    def test_cum_pnl_a_equals_cum_pnl_b(self, sim):
+        """Run B only re-attributes vega; residual_b absorbs the difference, so
+        BOTH decompositions sum to the same total P&L. The cumulative curves are
+        therefore identical by construction — the A-vs-B distinction lives in
+        hedge EFFICIENCY (residual variance), never in total P&L. Locking this
+        in prevents anyone misreading cum_pnl_b as a different strategy."""
+        np.testing.assert_allclose(sim["cum_pnl_a"].values,
+                                   sim["cum_pnl_b"].values, atol=1e-9)
+
+    def test_greeks_signs(self, sim):
+        # Long straddle: gamma and vega strictly non-negative everywhere.
+        assert (sim["gamma"] >= 0).all()
+        assert (sim["vega"] >= 0).all()
+
+    def test_time_decays_monotonically(self, sim):
+        # T_rem must strictly decrease each day (no negative or flat steps).
+        assert (sim["T_rem"].diff().iloc[1:] < 0).all()
+        assert (sim["T_rem"] > 0).all()
+
+    def test_hedge_efficiency_attrs_present(self, sim):
+        assert "hedge_efficiency_a" in sim.attrs
+        assert "hedge_efficiency_b" in sim.attrs
