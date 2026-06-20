@@ -133,7 +133,7 @@ All free, no Bloomberg or paid feed.
 ## Running Locally
 
 ```bash
-git clone https://github.com/NavnoorBawa/vol-system-dashboard
+git clone https://github.com/navnoorthapar/vol-system-dashboard
 cd vol-system-dashboard
 pip install -r requirements.txt
 python dashboard/app.py        # auto-selects a free port (5000→5001→5050→8080)
