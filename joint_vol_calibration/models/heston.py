@@ -1083,6 +1083,9 @@ def heston_monte_carlo(
         half = n_paths // 2
         Z1 = rng.standard_normal((half, n_steps, 2))
         Z = np.concatenate([Z1, -Z1], axis=0)
+        # Antithetic gives 2*half paths; if n_paths was odd this is n_paths-1.
+        # Re-sync n_paths so the path arrays below match Z exactly.
+        n_paths = Z.shape[0]
     else:
         Z = rng.standard_normal((n_paths, n_steps, 2))
 
@@ -1097,7 +1100,6 @@ def heston_monte_carlo(
     paths_v[:, 0] = v0
 
     sqrt_dt = np.sqrt(dt)
-    drift_S = (r - q - 0.5) * dt   # will multiply by v later
 
     for i in range(n_steps):
         v_t = paths_v[:, i]

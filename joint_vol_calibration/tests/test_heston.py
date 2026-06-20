@@ -33,6 +33,8 @@ from joint_vol_calibration.models.heston import (
     bates_call_price,
     bates_call_batch,
     characteristic_function,
+    heston_monte_carlo,
+    mc_option_price,
 )
 
 # Default parameters for tests (stable, near-ATM)
@@ -449,6 +451,88 @@ class TestBatesCallBatch:
         )
         intrinsic = np.maximum(_B_S - strikes, 0.0)
         np.testing.assert_allclose(prices, intrinsic, atol=1e-8)
+
+
+# ── Monte Carlo pricer ↔ analytic cross-validation ────────────────────────────
+
+class TestMonteCarlo:
+    """The Monte Carlo simulator (heston_monte_carlo / mc_option_price) was the
+    last untested pricing path. The decisive check is cross-validation: an
+    INDEPENDENT MC estimate must agree with the analytic Carr-Madan price within
+    Monte Carlo error. If either pricer had a bug, they would disagree by many
+    standard errors. This simultaneously validates both engines."""
+
+    @pytest.fixture(scope="class")
+    def paths(self):
+        # Feller satisfied (2κθ=0.16 > σ²=0.09); 40K antithetic paths, fixed seed.
+        pS, pV = heston_monte_carlo(
+            _S, _T, _r, _q, **_PARAMS,
+            n_paths=40_000, n_steps_per_year=252, seed=42,
+        )
+        return pS, pV
+
+    def test_mc_matches_analytic_atm(self, paths):
+        pS, _ = paths
+        analytic = heston_call_price(_S, _K_atm, _T, _r, _q, **_PARAMS)
+        mc, se = mc_option_price(pS, _K_atm, _T, _r, right="C")
+        # Agreement within 4 standard errors (~99.99% CI) — a real bug in either
+        # engine would blow far past this.
+        assert abs(mc - analytic) < 4 * se, (
+            f"ATM MC={mc:.4f} vs analytic={analytic:.4f} "
+            f"({abs(mc-analytic)/se:.2f} stderr)"
+        )
+
+    def test_mc_matches_analytic_otm_call(self, paths):
+        pS, _ = paths
+        K = 4800.0
+        analytic = heston_call_price(_S, K, _T, _r, _q, **_PARAMS)
+        mc, se = mc_option_price(pS, K, _T, _r, right="C")
+        assert abs(mc - analytic) < 4 * se, (
+            f"OTM MC={mc:.4f} vs analytic={analytic:.4f} "
+            f"({abs(mc-analytic)/se:.2f} stderr)"
+        )
+
+    def test_mc_put_matches_analytic(self, paths):
+        pS, _ = paths
+        analytic = heston_put_price(_S, _K_atm, _T, _r, _q, **_PARAMS)
+        mc, se = mc_option_price(pS, _K_atm, _T, _r, right="P")
+        assert abs(mc - analytic) < 4 * se, (
+            f"PUT MC={mc:.4f} vs analytic={analytic:.4f} "
+            f"({abs(mc-analytic)/se:.2f} stderr)"
+        )
+
+    def test_variance_paths_nonnegative(self, paths):
+        # Full-truncation Euler must keep every variance node ≥ 0.
+        _, pV = paths
+        assert (pV >= 0).all()
+
+    def test_spot_paths_strictly_positive(self, paths):
+        # Log-Euler spot update can never produce a non-positive price.
+        pS, _ = paths
+        assert (pS > 0).all()
+
+    def test_initial_conditions(self, paths):
+        pS, pV = paths
+        np.testing.assert_allclose(pS[:, 0], _S)
+        np.testing.assert_allclose(pV[:, 0], _PARAMS["v0"])
+
+    def test_mc_price_discounted_and_stderr_positive(self, paths):
+        pS, _ = paths
+        mc, se = mc_option_price(pS, _K_atm, _T, _r, right="C")
+        assert mc > 0
+        assert se > 0
+
+    def test_odd_n_paths_antithetic_no_crash(self):
+        """Regression: antithetic variates with an ODD n_paths previously
+        allocated mismatched arrays and crashed on broadcast. Now n_paths is
+        re-synced to the actual antithetic count (n_paths-1)."""
+        pS, pV = heston_monte_carlo(_S, _T, _r, _q, **_PARAMS,
+                                    n_paths=9_999, seed=1)
+        assert pS.shape[0] == 9_998        # 2 * (9999 // 2)
+        assert pS.shape == pV.shape
+        # And it still prices sanely.
+        mc, se = mc_option_price(pS, _K_atm, _T, _r, right="C")
+        assert mc > 0 and se > 0
 
 
 if __name__ == "__main__":
