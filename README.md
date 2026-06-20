@@ -1,226 +1,132 @@
 # Joint SPX/VIX Smile Calibration System
 
-**Joint SPX/VIX smile calibration system — the "holy grail of volatility modelling." Live at https://navnoorbawa.me**
+**Joint SPX/VIX volatility calibration, risk, and signal-research system — plus a fully documented negative trading result. Live at https://navnoorbawa.me**
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
-[![Tests](https://img.shields.io/badge/tests-374%20passing-00ff88?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-585%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 
 ---
 
-## The Core Finding
+## What this is — and what it isn't
 
-On 2026-03-24 (SPX = 6,581, VIX = 26.62, VVIX = 122.82):
+This is **calibration and risk infrastructure plus an honest research log**, not a profitable strategy.
+
+The headline result is a **negative backtest, presented without adjustment**. Over eighteen months of work the trading layer was corrected four times — for look-ahead bias, a circular classifier feature, label noise, and finally a strike-rolling bug that had contaminated *every* prior P&L number. Each correction made the result worse or inverted a thesis I had previously believed. **That audit trail is the deliverable.** Curve-fitting a strategy to look profitable in-sample is easy; understanding precisely why a plausible one *doesn't* work is the harder and more useful exercise.
+
+If you want the short version: the calibration engine is solid, the risk tooling is solid, and the one trading signal that survived every correction (S3, dispersion timing) makes +$23K over seven years — real, but too small and too rare to call a business.
+
+---
+
+## The headline numbers (must match the dashboard)
+
+```
+Backtest 2018–2025 · $1M initial capital · delta-hedged straddle portfolio
+  Portfolio = (S1C + S3 + S4) / 3
+
+  NAV:               $809,972
+  Cumulative P&L:    −$190,028   (−19.0%)
+  Sharpe (vs ^IRX):  −1.57
+  Max drawdown:      −25.9%
+
+By signal:
+  S1  IVR short-VRP (reference)   +$462,976   Sharpe  0.257   76% win   54 trades
+  S1C Contrarian PDV (DEMOTED)    −$404,183   Sharpe −0.622   45% win   88 trades
+  S3  Dispersion (survivor)       + $23,212   73% win   22 trades   ← positive at every scale + pseudo-OOS
+  S4  Volatility risk premium     −$188,519   Sharpe −1.164   32% win   31 trades
+```
+
+**The single most important caveat:** every P&L number is **mark-to-model** — Black-Scholes on the VIX-term-structure ATM vol, because the database holds *zero* historical option prices (options are a single 2026-03-24 snapshot). The signals are real; the realised dollars are model-implied, not traded fills.
+
+---
+
+## The four corrections (the actual story)
+
+| # | Correction | Effect |
+|---|-----------|--------|
+| C16 | Walk-forward PDV per year; removed circular `vvix` feature; ex-ante Kelly | Headline +19% was a **label-noise artifact** |
+| C17 | Benchmarked the regime classifier against a *persistence baseline* | Classifier 63.4% **loses** to 90.0% "predict yesterday's regime" → demoted from the trading loop |
+| C18 | **Strike-rolling bug**: same-day re-entry meant positions never rolled — the engine held one stale-strike straddle marked past expiry | Contaminated **every** backtest C10→C17; fixing it **inverted my own thesis** |
+| C19 | S2 stop-loss propagation, dead-code removal, signal-summary coverage; data-gap repair | Cleanup; canonical numbers unchanged |
+
+**The C18 inversion is the centrepiece.** I had built a contrarian signal (S1C) on the premise that my base signal S1 was a "−$1.53M catastrophe." That catastrophe was the bug. Corrected, **S1 is a profitable regime-gated short-VRP harvester (+$463K, 76% win, 53/54 trades short straddles)** — and **S1C, the inversion, is the artifact (−$404K)**. Inverting a profitable signal is the wrong trade, so S1C is demoted, exactly like the ML classifier in C17: *a thesis that holds only under a bug is not a signal.*
+
+S1's profit is **not** a green light either — it is fat-tailed (a single −$333K COVID trade; −$99K in 2022), concentrated (top-5 trades = 73% of profit), and mark-to-model. Honest read: short-VRP earns premium in calm regimes and pays it back in spikes.
+
+---
+
+## The Calibration Finding
+
+The current showcase calibration (2026-05-31 snapshot, SPX = 7,580, VIX ≈ 15, r = 4.5%):
 
 ```
 Calibrated Heston parameters:
-  κ = 4.6213    θ = 0.07605    σ = 0.8400
-  ρ = -0.9900   v₀ = 0.05607
+  κ = 1.77    θ = 0.067    σ = 0.46
+  ρ = −0.95   v₀ = 0.0127   (√v₀ = 11.25% spot vol)
 
-  SPX smile RMSE:     3.83 vol pts
-  VIX futures RMSE:   1.15 pts
-  VIX options RMSE:  37.14 pts   ← structural failure
-  Feller condition:  2κθ = 0.70622 < σ² = 0.70677   FAIL (by −0.00055)
+  SPX smile RMSE:    0.52 vol pts
+  VIX futures RMSE:  0.53 pts
+  Feller condition:  2κθ = 0.2372 > σ² = 0.2116   PASS
 ```
 
-**ρ hit the lower boundary (−0.99) during calibration.** The optimizer ran into the wall and stopped there.
-
-This is not a numerical accident. The 2026 SPX left skew is too steep for Heston's pure-diffusion framework to fit. Heston's correlation parameter ρ encodes leverage effect via Brownian covariance — but it cannot produce the sharp, asymmetric left wing that post-COVID equity skew requires. The model needs jump risk (Bates, SVJ) or a richer variance kernel to match observed market prices.
-
-**The VIX options RMSE of 37.14 pts is not a bug.** It reflects a genuine structural mismatch: Heston's CIR variance process cannot simultaneously match the SPX smile curvature and the VVIX-implied vol-of-vol surface. Calibrating one degrades the other. The joint calibration loss function makes this tradeoff explicit.
-
-This is model misspecification made visible — which is more useful than a model that hides it.
+The SPX leg fits well and Feller passes — but **ρ is still pinned at its lower boundary (−0.95)**, the dashboard flags this, and the **VIX options leg is deliberately disabled** (`w₃ = 0.0`). ρ at the wall means even after tightening the bound the optimizer wants more leverage skew than Heston's diffusion can supply — the same misspecification, just no longer catastrophic for the SPX fit. When it was active, Heston's CIR variance density produced a **37.14 vol-pt RMSE on VIX options**: a *structural* failure, not a calibration failure. Heston cannot simultaneously match the SPX smile curvature and the VVIX-implied vol-of-vol surface; calibrating one degrades the other. Rather than hide that with a fudged weight, the loss function makes the tradeoff explicit and the leg is switched off with the reason documented. A two-factor **Quintic OU** model (also in the repo) recovers the VIX options leg to 17.5 vol-pts — better, but still short of the <10 target. Model misspecification, made visible.
 
 ---
 
 ## System Overview
 
-11 components, 15,863 lines of Python, 440 passing tests, zero look-ahead bias.
+14 components, ~15,300 lines of Python (ex-tests), **585 passing tests**, zero look-ahead bias.
 
-| Component | Description | Tests |
-|-----------|-------------|-------|
-| **C1** Data Infrastructure | SQLite + Parquet pipeline, CBOE + Yahoo Finance downloaders | 18 |
-| **C2** Heston Engine | Carr-Madan FFT pricer, vectorised batch pricing (160× speedup) | 32 |
-| **C3** PDV Model | Guyon-Lekeufack (2023) path-dependent vol, GARCH(1,1) baseline | — |
-| **C4** Joint Calibration | DE + L-BFGS-B, joint SPX/VIX loss, 42.6s on live data | 33 |
-| **C5** NN Acceleration | HestonNet surrogate pricer, 8.1× speedup, MAE < 0.07 vol pts | 44 |
-| **C6** Greeks Monitor | Vomma/vanna/volga surface, 69-cell grid, unstable-node detection | 42 |
-| **C7** Delta-Hedge Simulation | P&L attribution: Γ + ν + Θ + residual, hedge efficiency metric | 54 |
-| **C8** Regime Classifier | XGBoost 3-regime classifier, 86.2% accuracy, 95.1% R2 recall | 53 |
-| **C9** Signal Engine | 3 trading signals (IVR/PDV, VIX term structure, dispersion) + S1RF variant | 70 |
-| **C10** Backtest Engine | Full 2018–2025 backtest, walk-forward validation, HTML reports | 49 |
-| **C11** Regime-Switching PDV | Merton (1976) jump component on R2 tail days, tail MLE calibration | 45 |
-| **Total** | | **440** |
+| Component | Description | 
+|-----------|-------------|
+| **C1** Data Infrastructure | SQLite + Parquet pipeline, Yahoo Finance + CBOE downloaders, T-bill (`^IRX`) rate curve |
+| **C2** Heston Engine | Carr-Madan FFT pricer, vectorised batch pricing |
+| **C3** PDV Model | Guyon-Lekeufack (2023) path-dependent vol; walk-forward R² = 0.31 |
+| **C4** Joint Calibration | DE + L-BFGS-B, joint SPX/VIX loss; SPX RMSE 0.52 vp |
+| **C5** NN Acceleration | HestonNet surrogate pricer, 8.1× speedup, MAE < 0.07 vol pts |
+| **C6** Greeks Monitor | Vomma/vanna/volga surface, 69-cell grid, unstable-node detection |
+| **C7** Delta-Hedge Simulation | P&L attribution: Γ + ν + Θ + residual, hedge-efficiency metric |
+| **C8** Regime Classifier | XGBoost 3-regime; honest OOS 63.4% — **loses to persistence baseline, demoted** |
+| **C9** Signal Engine | S1/S1C (IVR/PDV), S2 (VIX term structure), S3 (dispersion), S4 (VRP) |
+| **C10** Backtest Engine | Full 2018–2025 backtest, walk-forward validation, ex-ante Kelly, HTML reports |
+| **C11** Regime-Switching PDV | Merton (1976) jump component on R2 tail days, BNS jump filter |
+| **C12** Bates SVJ + HMM | Bates (1996) jump-diffusion CF; Gaussian-HMM regime alternative |
+| **C13** Improvements | SVI/SSVI smoothing, vega anchors, adaptive VVIX, isotonic calibration, portfolio Kelly |
+| **C13b** Two-factor Quintic OU | Recovers VIX options leg to 17.5 vp; VIX futures by-construction |
 
 ---
 
 ## Live Dashboard
 
-**[https://navnoorbawa.me](https://navnoorbawa.me)**
+**[https://navnoorbawa.me](https://navnoorbawa.me)** — four pages, served as frozen HTML from stored artifacts:
 
-Four pages, updated from stored calibration and live market data:
-
-- **Live Market** — SPX/VIX/VVIX, regime classification (R0/R1/R2), PDV forecast vs implied, VIX term structure
-- **Calibration** — Heston parameter surface, Feller condition, SPX smile overlay, ρ boundary warning
+- **Live Market** — SPX/VIX/VVIX, end-of-day regime (R0/R1/R2), PDV forecast vs implied, VIX term structure (data current to 2026-06-18)
+- **Calibration** — Heston parameter surface, Feller condition, SPX smile overlay, RMSE decomposition, Quintic OU comparison
 - **Greeks Monitor** — Vomma heatmap, unstable nodes, vanna/QV convexity by maturity
-- **Backtest** — Full equity curve 2018–2025, per-signal attribution, walk-forward Sharpe
-
-> *Screenshot placeholder — visit [navnoorbawa.me](https://navnoorbawa.me) for live view.*
+- **Backtest** — Equity curve 2018–2025, per-signal attribution, the full C16→C18 correction log, and a "weaknesses found vs fixed" table
 
 ---
 
-## Key Results
+## The Regime Classifier — why it's demoted
 
-### PDV Model (C3) — Guyon-Lekeufack Path-Dependent Volatility
-
-```
-Walk-forward R²:   0.31 (linear OLS)
-                   0.23 (Nadaraya-Watson kernel)
-Naive baseline R²: ~0.08
-
-Fitted equation:   σ̂ = 0.354·σ₁ + 0.241·σ₂ − 1.496·lev + 3.46%
-  where σ₁ = 5-day EWMA vol, σ₂ = 60-day EWMA vol, lev = 10-day EMA returns
-
-COVID stress test (2020-03-16):
-  PDV forecast:  92.4% annualised vol
-  Actual:       202.6% annualised vol
-  Error:        −110pp  (PDV cannot price tail-driven vol jumps)
-```
-
-R² = 0.31 is 4× the naive baseline, but the COVID error illustrates the hard limit of any path-dependent model without jump terms.
-
-### Joint Calibration (C4)
-
-```
-As of:             2026-03-24
-SPX spot:          ~6,576
-VIX (30d implied): 26.62
-VVIX:              122.82
-
-SPX smile RMSE:    3.83 vol pts   (48 options across 6 expiries)
-VIX futures RMSE:  1.15 pts       (term structure proxy via VIX9D/3M/6M)
-VIX options RMSE: 37.14 pts       (14 options across 2 expiries — structural failure)
-Calibration time:  42.6 seconds   (DE: 120 iter × 40 members + L-BFGS-B polish)
-```
-
-### Regime Classifier (C8)
-
-```
-Train: 2010–2019 (2,493 samples)    Test: 2020–2025 (1,500 samples)
-
-Test accuracy:   86.2%
-R0 (LONG_GAMMA)  F1 = 0.696
-R1 (SHORT_GAMMA) F1 = 0.839
-R2 (VOMMA_ACTIVE) F1 = 0.905   recall = 95.1%
-
-Validation:
-  2020-03-16 (COVID crash, VVIX=207):   → R2  ✓
-  2025-04-09 (tariff spike, VVIX=142):  → R2  ✓
-  Current (2026-03-24, VVIX=122.82):    → R2 at 99.4% confidence
-```
-
-### Backtest (C10) — 2018 to 2025, $1M initial capital
-
-```
-Cumulative return:  -22.19%
-Annualised return:   -3.45%
-Sharpe (rf=5%):      -1.527
-Max drawdown:        -26.33%
-N trades:             129
-N days:             1,799
-
-By signal:
-  S1 IVR/PDV:        -$502,671   Sharpe -0.652   win rate 48.6%
-  S2 VIX term str:    -$98,977   Sharpe -1.143   win rate 36.7%
-  S3 Dispersion:      +$21,003   Sharpe -13.59   win rate 92.9%   ← only profitable signal
-  Combined:          -$306,953   Sharpe -1.720
-
-Walk-forward: 11/13 six-month windows have Sharpe < 0
-Crisis performance: COVID 2020 +0.1% (Sharpe 3.18)
-```
-
-**The negative backtest is a feature, not a bug.** The backtest is honest. Three findings:
-
-1. S1 and S2 went short gamma during elevated-vol regimes (R2 days = 52.9% of the sample) where short-gamma strategies systematically lose. The regime classifier was built after the signals — in live use, C8 would filter these entries.
-
-2. S3 (dispersion, long-only, 14 trades in 7 years) is profitable with 92.9% win rate precisely because it fires rarely and only at extreme signal values. High selectivity beats raw frequency.
-
-3. Transaction costs consumed ~$334k over 7 years on options strategies. The signal alpha is marginal relative to implementation costs — a known structural problem in vol trading.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Joint SPX/VIX Vol System                         │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-          ┌──────────────────▼──────────────────┐
-          │         C1: Data Infrastructure      │
-          │  SQLite (vol_system.db) + Parquet    │
-          │  CBOE options · Yahoo OHLCV · VIX TS │
-          └──┬───────────────┬───────────────────┘
-             │               │
-    ┌─────────▼────┐   ┌─────▼──────────────────────────────┐
-    │  C2: Heston  │   │  C3: PDV Model                     │
-    │  FFT pricer  │   │  Path-dependent vol (Guyon 2023)   │
-    │  batch + NN  │   │  GARCH(1,1) + OLS + kernel         │
-    └─────────┬────┘   └─────────────────┬──────────────────┘
-              │                          │
-    ┌─────────▼──────────────────────────▼──────────────────┐
-    │                 C4: Joint Calibration                  │
-    │   loss = w₁·MSE(SPX IV) + w₂·MSE(VIX fut)            │
-    │          + w₃·MSE(VIX options)                        │
-    │   DE (120×40) → L-BFGS-B polish → 42.6s              │
-    └─────────┬──────────────────────────────────────────────┘
-              │
-    ┌─────────▼────┐   ┌──────────────────────────────────┐
-    │  C5: NN      │   │  C6: Greeks Monitor              │
-    │  HestonNet   │   │  Vomma/vanna/volga surface       │
-    │  8.1× speed  │   │  69 cells · 3 unstable nodes     │
-    └──────────────┘   └──────────────────────────────────┘
-              │
-    ┌─────────▼────────────────────────────────────────────┐
-    │                   C7: Delta-Hedger                   │
-    │   P&L = Γ-PnL + ν-PnL + Θ-PnL + residual           │
-    │   Hedge efficiency A=0.0164 · B=0.3034 (PDV)        │
-    └─────────┬────────────────────────────────────────────┘
-              │
-    ┌─────────▼────┐   ┌──────────────────────────────────┐
-    │  C8: Regime  │   │  C9: Signal Engine               │
-    │  XGBoost     │   │  S1: IVR/PDV spread              │
-    │  86.2% acc   │   │  S2: VIX term structure          │
-    │  3 regimes   │   │  S3: VIX/VVIX dispersion         │
-    └─────────┬────┘   └──────────────┬───────────────────┘
-              │                       │
-    ┌─────────▼───────────────────────▼───────────────────┐
-    │               C10: Backtest Engine                  │
-    │   2018–2025 · $1M · 129 trades · HTML reports      │
-    └─────────┬───────────────────────────────────────────┘
-              │
-    ┌─────────▼───────────────────────────────────────────┐
-    │             Flask Dashboard (navnoorbawa.me)        │
-    │   4 pages · dark theme · Chart.js · read-only      │
-    └─────────────────────────────────────────────────────┘
-```
+The classifier scores **86.2% in-sample** but only **63.4% out-of-sample** — and that 63.4% **loses by 27 points** to a no-skill baseline. The regime labels are defined by *same-day observables* (`rv_20d` vs VIX for R0/R1; `VVIX > threshold` for R2), so "predict yesterday's regime" is a legitimate causal predictor that scores **90.0%** on 2020+. The ML model adds *negative* value. It is therefore **research-only**; the backtest uses the lagged rule labels directly, never the classifier's forward prediction. This is the kind of result that's embarrassing to find and important to report.
 
 ---
 
 ## Data Sources
 
-All free, no Bloomberg or paid data.
+All free, no Bloomberg or paid feed.
 
 | Dataset | Source | Coverage | Rows |
 |---------|--------|----------|------|
-| SPX OHLCV | Yahoo Finance (`^GSPC`) | 2010–2026 | 4,078 |
-| VIX daily | CBOE CDN (`VIX_History.csv`) | 2010–2026 | 4,051 |
-| VIX term structure | Yahoo Finance (`^VIX9D`, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`) | 2010–2026 | 20,130 |
-| SPX options | CBOE (snapshot) | 2026-03-24 | 15,362 |
-| VIX options | CBOE (snapshot) | 2026-03-24 | 591 |
-| VIX futures | CBOE CDN — **403 blocked by Cloudflare** | — | 0 |
+| SPX OHLCV | Yahoo Finance (`^GSPC`) | 2010 → 2026-06-18 | 4,139 |
+| VIX term structure | Yahoo (`^VIX9D`/`^VIX`/`^VIX3M`/`^VIX6M`/`^VVIX`) | 2010 → 2026-06-18 | ~20,135 |
+| SPX options | CBOE (single snapshot) | 2026-03-24 | 15,362 |
+| VIX options | CBOE (single snapshot) | 2026-03-24 | 591 |
+| T-bill rate | Yahoo (`^IRX`) | 2010 → 2026 | daily |
+| VIX futures | CBOE CDN — **403 blocked by Cloudflare** | — | 0 (proxied via `^VIX3M`/`^VIX6M`) |
 
-VIX futures are proxied via the `^VIX3M`/`^VIX6M` term structure. The CBOE CDN block is noted in the calibration output.
+**Single-snapshot options** is a real limitation: a production system needs daily CBOE options data. It is also *why* the backtest is mark-to-model.
 
 ---
 
@@ -230,102 +136,44 @@ VIX futures are proxied via the `^VIX3M`/`^VIX6M` term structure. The CBOE CDN b
 git clone https://github.com/NavnoorBawa/vol-system-dashboard
 cd vol-system-dashboard
 pip install -r requirements.txt
-python dashboard/app.py
-# opens http://localhost:5001 automatically
+python dashboard/app.py        # auto-selects a free port (5000→5001→5050→8080)
 ```
 
-The repository includes pre-computed `data_store/` artifacts (calibration pickle, Greeks surface, regime labels, backtest parquet). No re-calibration needed to run the dashboard.
-
-**To re-run the full pipeline** (requires ~30 min for calibration + NN training):
-
-```bash
-# C1: Download data
-python -m joint_vol_calibration.data.pipeline
-
-# C3: Fit PDV model
-python -m joint_vol_calibration.models.pdv
-
-# C4: Joint calibration (42.6s on 2026-03-24 data)
-python -m joint_vol_calibration.calibration.joint_calibrator
-
-# C5: Train NN surrogate (23 min CPU)
-python -m joint_vol_calibration.models.nn_pricer
-
-# C6: Greeks surface
-python -m joint_vol_calibration.greeks.risk_monitor
-
-# C8: Fit regime classifier
-python -m joint_vol_calibration.signals.regime_classifier
-
-# C10: Full backtest
-python -m joint_vol_calibration.backtest.run_backtest
-```
+The repository ships pre-computed `data_store/` artifacts (calibration pickles, Greeks surface, regime labels, backtest parquet), so the dashboard runs with no re-calibration.
 
 ### Testing
 
 ```bash
-pytest joint_vol_calibration/tests/ -v
-# 440 tests, 0 failures
+pytest joint_vol_calibration/tests/ -q
+# 585 passed
 # Includes explicit look-ahead bias checks (test_lookahead.py)
 ```
 
 ### Requirements
 
 ```
-Python 3.11+
-flask · pandas · numpy · pyarrow
+Python 3.11+ · flask · pandas · numpy · pyarrow
 scikit-learn · scipy · xgboost
-gunicorn (production)
 ```
 
 No QuantLib. No Bloomberg. No paid data.
 
 ---
 
-## Repository Structure
-
-```
-vol-system-dashboard/
-├── dashboard/
-│   ├── app.py                  # Flask app — 4 routes, read-only from data_store/
-│   └── templates/              # base, index, calibration, greeks, backtest
-├── joint_vol_calibration/
-│   ├── data/                   # C1: pipeline, SQLite, CBOE/Yahoo downloaders
-│   ├── models/                 # C2: heston.py · C3: pdv.py · C5: nn_pricer.py
-│   ├── calibration/            # C4: joint_calibrator.py
-│   ├── greeks/                 # C6: risk_monitor.py
-│   ├── backtest/               # C7: delta_hedger.py · C10: backtest_engine.py
-│   ├── signals/                # C8: regime_classifier.py · C9: signal_engine.py
-│   └── tests/                  # 440 tests across all components
-├── data_store/
-│   ├── vol_system.db           # SQLite: SPX/VIX/options/regime tables
-│   ├── calibrations/           # joint_cal_2026-03-24.pkl
-│   ├── greeks/                 # greeks_surface.parquet
-│   ├── signals/                # regime_classifier.pkl · regime_labels.parquet
-│   └── backtest/               # full_results.parquet
-├── requirements.txt
-├── Procfile                    # gunicorn for Railway
-└── README.md
-```
-
----
-
 ## Known Limitations
 
-- **Heston is misspecified for 2026 skew.** ρ = −0.99 boundary hit. Jump-diffusion (Bates/SVJ) would fit better but adds calibration complexity and non-uniqueness.
-- **VIX options structural failure.** RMSE = 37.14 pts. Heston's CIR process cannot simultaneously fit SPX curvature and VVIX-implied vol-of-vol.
-- **PDV fails in tail events.** COVID March 2020: −110pp forecast error. No path-dependent model without jumps can price tail risk correctly.
-- **Backtest costs.** Options transaction costs (~$334k over 7 years) erode marginal signal alpha. Not modelled with realistic slippage curves.
-- **VIX futures proxy.** Real VIX futures settlement data blocked by CBOE Cloudflare. `^VIX3M`/`^VIX6M` is an approximation.
-- **Single-snapshot options data.** SPX and VIX options are from a single day (2026-03-24). A production system needs daily CBOE data or a paid feed.
+- **All backtest P&L is mark-to-model.** Black-Scholes on VIX-ATM vol; the DB holds no historical option prices. This is the dominant caveat.
+- **Heston is misspecified for the VIX surface.** VIX options leg disabled (`w₃ = 0.0`); the 37.14-vp RMSE is structural. Quintic OU improves but does not solve it.
+- **The trading layer is not deployable.** The only robust signal (S3) makes +$23K over 7 years and fires 22 times; the profitable-looking signal (S1) is fat-tailed, concentrated, and mark-to-model.
+- **Regime classifier loses to a persistence baseline** and is research-only.
+- **Single-snapshot options data** (2026-03-24). Production needs a daily feed.
+- **VIX futures proxied** via `^VIX3M`/`^VIX6M` (CBOE CDN Cloudflare-blocked).
 
 ---
 
 ## Author
 
 **Navnoor Bawa** — 3rd year CS, Thapar Institute of Engineering & Technology
-
-Previous work: Heston engine (30K paths, 20M+ steps/sec), SABR (14.1% smile error), Transformer statistical arbitrage, WTI ML pipeline.
 
 - Website: [navnoorbawa.me](https://navnoorbawa.me)
 - Substack: [navnoorbawa.substack.com](https://navnoorbawa.substack.com)
@@ -334,4 +182,4 @@ Previous work: Heston engine (30K paths, 20M+ steps/sec), SABR (14.1% smile erro
 
 ---
 
-*The negative backtest is presented without adjustment. Curve-fitting a strategy to look profitable in-sample is straightforward. The harder and more useful exercise is understanding precisely why it doesn't work — and this system documents that honestly.*
+*The negative backtest is presented without adjustment. Every correction — look-ahead → circular feature → label noise → stale-strike bug — made the result worse or flipped a thesis. The audit trail is the point.*
