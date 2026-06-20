@@ -178,7 +178,7 @@ No QuantLib. No Bloomberg. No paid data.
 - Website: [navnoorbawa.me](https://navnoorbawa.me)
 - Substack: [navnoorbawa.substack.com](https://navnoorbawa.substack.com)
 - LinkedIn: [linkedin.com/in/navnoorbawa](https://www.linkedin.com/in/navnoorbawa/)
-- GitHub: [github.com/NavnoorBawa](https://github.com/NavnoorBawa)
+- GitHub: [github.com/navnoorthapar](https://github.com/navnoorthapar)
 
 ---
 
