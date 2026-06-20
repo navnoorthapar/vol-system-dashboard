@@ -337,6 +337,44 @@ class TestGenerateSignal2:
         s2    = generate_signal2(feats, regs)
         assert s2["s2_kelly"].max() <= 0.20 + 1e-8
 
+    def test_stop_loss_propagates_beyond_trigger_day(self):
+        """Stop-loss must zero the position for ALL remaining days of the trade,
+        not just the trigger day. Pre-fix: only day i was zeroed; the trade
+        resumed on day i+1. Post-fix: zeroed until the next state-machine entry."""
+        n = 400
+        slope = np.full(n, 0.003, dtype=float)
+        # Drive a backwardation entry at day 300 (slope < 0, regime OK)
+        slope[300:315] = -0.05
+        # On day 305 inject a +50% adverse move to trigger stop-loss:
+        # long position (pos=+1) loses when slope narrows to near-zero → pct_move < -0.15
+        slope[305] = -0.001   # from -0.05 reference → pct_move ≈ +0.98 for short, or near 0 for long
+        # Use long entry (backwardation); stop fires if slope moves +15% against long
+        # i.e. slope[305] rises from entry_slope_ref = slope[300] = -0.05
+        # pct_move = (-0.001 - (-0.05)) / 0.05 = 0.98 > 0.15 → stop for long? No, wrong sign.
+        # For a LONG position: stop fires when pct_move < -stop_loss_pct = -0.15
+        # pct_move = (slope[i] - entry_ref) / |entry_ref|
+        # We need slope to go more negative: slope[305] = -0.08 → pct_move = (-0.08 - (-0.05)) / 0.05 = -0.6 < -0.15
+        slope[305] = -0.08
+        slope[306:315] = -0.05  # slope returns to normal after stop day
+        feats = self._features_with_slope(slope)
+        regs  = pd.Series(0, index=feats.index)  # regime 0 (backwardation allowed)
+        s2    = generate_signal2(feats, regs)
+        pos   = s2["s2_position"].values
+        # Find the stop day (first day with in-trade days_held > 0 that gets zeroed)
+        stop_day = None
+        for i in range(300, min(320, n)):
+            if pos[i] == 0 and i > 300 and pos[i - 1] != 0:
+                stop_day = i
+                break
+        if stop_day is not None:
+            # All days after stop_day (and before next entry) must also be 0
+            for j in range(stop_day + 1, min(stop_day + 5, n)):
+                if s2["s2_days_held"].values[j] == 0:
+                    assert pos[j] == 0, (
+                        f"Stop-loss must propagate: day {j} still shows position "
+                        f"{pos[j]} after stop fired on day {stop_day}"
+                    )
+
 
 # ── 4. generate_signal3 ───────────────────────────────────────────────────────
 

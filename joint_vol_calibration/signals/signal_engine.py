@@ -398,11 +398,7 @@ def generate_signal1(
     entry_long  = (spread >  threshold) & (regimes == 0)
     entry_short = (spread < -threshold) & (regimes == 1)
 
-    # Exit when spread crosses zero (reverts)
-    exit_cond   = (spread.shift(-1).fillna(spread) * spread.shift(1).fillna(spread) < 0) | \
-                  (spread.abs() < 0.005)
-    # Note: using shift(-1) would be look-ahead; instead use threshold-of-zero crossing
-    exit_cond   = spread.abs() < 0.005   # pure spread-at-zero exit (no future info)
+    exit_cond   = spread.abs() < 0.005   # exit when spread reverts to ~zero
 
     result = _run_statemachine(
         entry_long, entry_short, exit_cond, strength, regimes, max_hold
@@ -768,11 +764,20 @@ def generate_signal2(
                 stop[i] = True
                 entry_slope_ref = 0.0
 
-    # Apply stop-loss: zero out from stop day onward until next entry
+    # Apply stop-loss: zero out from stop day onward until the state machine
+    # starts a NEW trade (dh == 1). A single-day zero is not a real exit —
+    # the trade would resume on the next bar without this propagation.
     pos_with_stop = pos.copy()
+    stopped = False
     for i in range(len(pos_with_stop)):
         if stop[i]:
             pos_with_stop[i] = 0.0
+            stopped = True
+        elif stopped:
+            if dh[i] == 1:  # new entry in the state machine → stop cleared
+                stopped = False
+            else:
+                pos_with_stop[i] = 0.0
     result["position"] = pos_with_stop
     result.loc[result["position"] == 0, "strength"] = 0.0
     result.loc[result["position"] == 0, "regime_entry"] = np.nan
@@ -840,9 +845,16 @@ def generate_signal2_r2exit(
                 entry_slope_ref = 0.0
 
     pos_with_stop = pos.copy()
+    stopped = False
     for i in range(len(pos_with_stop)):
         if stop[i]:
             pos_with_stop[i] = 0.0
+            stopped = True
+        elif stopped:
+            if dh[i] == 1:
+                stopped = False
+            else:
+                pos_with_stop[i] = 0.0
     result["position"] = pos_with_stop
     result.loc[result["position"] == 0, "strength"]     = 0.0
     result.loc[result["position"] == 0, "regime_entry"] = np.nan
@@ -1330,7 +1342,14 @@ def signal_summary(df: pd.DataFrame) -> dict:
     """
     stats = {}
 
-    for prefix, label in [("s1", "Signal1_IVR"), ("s1rf", "Signal1_RF"), ("s2", "Signal2_TS"), ("s3", "Signal3_Disp")]:
+    for prefix, label in [
+        ("s1",   "Signal1_IVR"),
+        ("s1c",  "Signal1C_Contrarian"),
+        ("s1rf", "Signal1_RF"),
+        ("s2",   "Signal2_TS"),
+        ("s3",   "Signal3_Disp"),
+        ("s4",   "Signal4_VRP"),
+    ]:
         pos_col = f"{prefix}_position"
         if pos_col not in df.columns:
             continue

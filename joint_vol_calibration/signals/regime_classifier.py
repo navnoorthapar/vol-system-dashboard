@@ -308,7 +308,7 @@ def build_regime_labels(
     )
 
     log_ret = df["log_return"]
-    rv_20d  = np.sqrt((log_ret**2).rolling(20).mean() * 252)
+    rv_20d  = np.sqrt((log_ret**2).rolling(20, min_periods=15).mean() * 252)
 
     vix_iv = df["^VIX"] / 100.0
     vvix   = df["^VVIX"] if "^VVIX" in df.columns else pd.Series(0.0, index=df.index)
