@@ -41,6 +41,9 @@ from joint_vol_calibration.calibration.joint_calibrator import (
     heston_vix_call_price,
     heston_vix_put_price,
     is_acceptable_calibration,
+    _svi_total_var,
+    _fit_svi_slice,
+    _build_ssvi_surface,
 )
 from joint_vol_calibration.models.heston import (
     heston_call_batch,
@@ -427,6 +430,72 @@ class TestCalibrationQualityGate:
         )
         assert not ok
         assert "RMSE" in reason
+
+
+# ── SVI / SSVI surface smoothing (C13 Step 3) ─────────────────────────────────
+
+class TestSVI:
+    """The SVI slice fit and SSVI surface builder smooth the Heston calibration
+    targets. They were untested. Raw SVI: w(k) = a + b(ρ(k-m) + √((k-m)²+σ²))."""
+
+    _TRUE = dict(a=0.02, b=0.15, rho=-0.4, m=0.0, sigma=0.1)
+
+    def test_total_var_nonnegative_and_convex(self):
+        k = np.linspace(-0.4, 0.4, 41)
+        w = _svi_total_var(k, **self._TRUE)
+        assert (w >= 0).all()
+        # b ≥ 0 ⇒ w convex in k (necessary butterfly-free condition).
+        assert (np.diff(w, 2) >= -1e-9).all()
+
+    def test_total_var_minimum_near_m(self):
+        # The SVI smile minimum sits at k ≈ m (here m=0).
+        k = np.linspace(-0.5, 0.5, 201)
+        w = _svi_total_var(k, **self._TRUE)
+        k_min = k[int(np.argmin(w))]
+        assert abs(k_min - self._TRUE["m"]) < 0.05
+
+    def test_fit_recovers_slice(self):
+        """Fit SVI to data generated FROM a known SVI — w_fit must match."""
+        k = np.linspace(-0.3, 0.3, 11)
+        w = _svi_total_var(k, **self._TRUE)
+        fit = _fit_svi_slice(k, w)
+        assert fit is not None
+        w_fit = _svi_total_var(k, *fit)
+        assert np.max(np.abs(w_fit - w)) < 0.01
+
+    def test_fit_respects_constraints(self):
+        k = np.linspace(-0.3, 0.3, 11)
+        w = _svi_total_var(k, **self._TRUE)
+        a, b, rho, m, sigma = _fit_svi_slice(k, w)
+        assert b >= 0
+        assert abs(rho) < 1.0
+        assert sigma > 0
+
+    def test_fit_too_few_points_returns_none(self):
+        k = np.array([-0.1, 0.0, 0.1])
+        w = _svi_total_var(k, **self._TRUE)
+        assert _fit_svi_slice(k, w) is None
+
+    def test_build_ssvi_surface_structure(self):
+        S = 100.0
+        rows = []
+        for T in (0.1, 0.5):
+            for Kp in (80, 90, 100, 110, 120):
+                rows.append(dict(strike=float(Kp),
+                                 implied_vol=0.20 + 0.001 * (100 - Kp),
+                                 time_to_expiry=T))
+        out = _build_ssvi_surface(pd.DataFrame(rows), S=S, r=0.03, q=0.0,
+                                  n_points=15)
+        for col in ("strike", "right", "time_to_expiry", "implied_vol",
+                    "mid_price", "bs_vega", "market_price_f"):
+            assert col in out.columns
+        # Strikes clipped to the [0.70S, 1.30S] band.
+        assert out["strike"].between(0.70 * S, 1.30 * S).all()
+        # IVs sane, vega floored at 0.5.
+        assert (out["implied_vol"] > 0.01).all() and (out["implied_vol"] < 2.0).all()
+        assert (out["bs_vega"] >= 0.5).all()
+        # Both expiries represented.
+        assert set(out["time_to_expiry"].unique()) == {0.1, 0.5}
 
 
 if __name__ == "__main__":

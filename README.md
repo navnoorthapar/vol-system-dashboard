@@ -3,7 +3,7 @@
 **Joint SPX/VIX volatility calibration, risk, and signal-research system — plus a fully documented negative trading result. Live at https://navnoorbawa.me**
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
-[![Tests](https://img.shields.io/badge/tests-622%20passing-00ff88?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-628%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 
 ---
@@ -75,7 +75,7 @@ The SPX leg fits well and Feller passes — but **ρ is still pinned at its lowe
 
 ## System Overview
 
-14 components, ~15,300 lines of Python (ex-tests), **622 passing tests**, zero look-ahead bias.
+14 components, ~15,300 lines of Python (ex-tests), **628 passing tests**, zero look-ahead bias.
 
 | Component | Description | 
 |-----------|-------------|
@@ -145,7 +145,7 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 
 ```bash
 pytest joint_vol_calibration/tests/ -q
-# 622 passed
+# 628 passed
 # Includes explicit look-ahead bias checks (test_lookahead.py)
 ```
 

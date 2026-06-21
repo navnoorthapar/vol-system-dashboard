@@ -141,11 +141,16 @@ def _fit_svi_slice(log_moneyness: np.ndarray,
     Returns (a, b, rho, m, sigma) or None if fit fails.
 
     Constraints enforced:
-      - b ≥ 0         (total variance is bowl-shaped)
+      - b ≥ 0         (slope bound; makes w(k) convex in k by construction)
       - |rho| < 1     (strict)
       - sigma > 0     (smoothing parameter)
-      - w(k) ≥ 0 everywhere (non-negative total variance)
-      - Butterfly arbitrage: d²w/dk² ≥ 0 at each grid point (checked post-fit)
+      - w(k) ≥ 0 everywhere (non-negative total variance; checked post-fit)
+
+    Note: with b ≥ 0 the raw-SVI w(k) is automatically convex (d²w/dk² ≥ 0),
+    a *necessary* butterfly-free condition. The full Gatheral-Jacquier
+    butterfly-free condition g(k) ≥ 0 is NOT separately enforced — this SVI fit
+    is a smoothing preprocessor for the Heston calibration targets, not a
+    certified arbitrage-free surface.
     """
     from scipy.optimize import minimize
 
