@@ -24,6 +24,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+# np.trapz was removed in NumPy 2.0 (renamed np.trapezoid) — same cross-version
+# helper used in heston.py / joint_calibrator.py.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 # Module-level picklable stub (cannot be defined inside a test method)
 class _FakePDVModel:
     is_fitted = True
@@ -192,7 +196,7 @@ class TestMertonLogDensity:
         sigma_d = np.full_like(grid, 0.012)            # ~19% annualised diffusion
         ld = merton_log_density(grid, sigma_d, lam_daily=0.05,
                                 mu_j=-0.04, sigma_j=0.06)
-        integral = np.trapz(np.exp(ld), grid)
+        integral = _trapz(np.exp(ld), grid)
         assert integral == pytest.approx(1.0, abs=1e-4)
 
     def test_density_integrates_to_one_no_jumps(self):
@@ -201,7 +205,7 @@ class TestMertonLogDensity:
         sigma_d = np.full_like(grid, 0.012)
         ld = merton_log_density(grid, sigma_d, lam_daily=1e-9,
                                 mu_j=0.0, sigma_j=0.01)
-        assert np.trapz(np.exp(ld), grid) == pytest.approx(1.0, abs=1e-4)
+        assert _trapz(np.exp(ld), grid) == pytest.approx(1.0, abs=1e-4)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
