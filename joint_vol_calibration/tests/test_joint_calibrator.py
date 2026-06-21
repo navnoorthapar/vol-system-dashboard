@@ -34,7 +34,6 @@ Run with:
 import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import patch, MagicMock
 
 from joint_vol_calibration.calibration.joint_calibrator import (
     JointCalibrator,
@@ -108,7 +107,7 @@ class TestHestonVixCallPricing:
 
         # Forward VIX (approximate)
         from joint_vol_calibration.models.heston import (
-            heston_vix_futures_curve, heston_expected_variance
+            heston_expected_variance
         )
         import numpy as np
         ev_T = heston_expected_variance(T, _P["kappa"], _P["theta"], _P["v0"])

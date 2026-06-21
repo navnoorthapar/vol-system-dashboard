@@ -29,7 +29,7 @@ import logging
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -42,10 +42,8 @@ import pandas as pd
 from joint_vol_calibration.config import DATA_DIR
 from joint_vol_calibration.backtest.backtest_engine import (
     CRISIS_PERIODS,
-    REPORTS_DIR,
     REPORT_PATH,
     BacktestEngine,
-    TradeRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -622,7 +620,7 @@ class ReportGenerator:
     def _wf_failures_text(self) -> str:
         if self.wf_df is None or len(self.wf_df) == 0:
             return "Walk-forward results not computed."
-        neg = self.wf_df[self.wf_df["below_zero_sharpe"] == True]
+        neg = self.wf_df[self.wf_df["below_zero_sharpe"].astype(bool)]
         if len(neg) == 0:
             return "All walk-forward windows show positive Sharpe — no negative windows."
         lines = [

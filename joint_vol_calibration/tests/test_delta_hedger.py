@@ -19,10 +19,6 @@ Tests cover:
 """
 
 import math
-import pickle
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -35,7 +31,6 @@ from joint_vol_calibration.backtest.delta_hedger import (
     K_ENTRY,
     R,
     Q,
-    T_ENTRY,
     DeltaHedger,
     _bs_straddle_greeks,
     _bs_straddle_value,

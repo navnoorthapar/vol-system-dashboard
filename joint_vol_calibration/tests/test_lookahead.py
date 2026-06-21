@@ -15,12 +15,6 @@ Run with:
 All tests use synthetic in-memory data so no real download is required.
 """
 
-import sqlite3
-import tempfile
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import numpy as np
 import pandas as pd

@@ -94,7 +94,7 @@ from scipy.optimize import minimize
 from scipy.stats import poisson as scipy_poisson
 
 from joint_vol_calibration.config import DATA_DIR, RANDOM_SEED
-from joint_vol_calibration.models.pdv import PDVModel, extract_pdv_features
+from joint_vol_calibration.models.pdv import PDVModel
 
 logger = logging.getLogger(__name__)
 

@@ -26,7 +26,6 @@ import pytest
 from joint_vol_calibration.models.pdv import (
     extract_pdv_features,
     build_xy,
-    PDVNaive,
     PDVLinear,
     PDVKernel,
     GARCH11,

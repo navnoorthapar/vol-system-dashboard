@@ -63,7 +63,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from joint_vol_calibration.config import DATA_DIR, RANDOM_SEED
+from joint_vol_calibration.config import DATA_DIR
 from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
 from joint_vol_calibration.models.pdv import extract_pdv_features
 from joint_vol_calibration.greeks.risk_monitor import (
@@ -412,7 +412,6 @@ def run_simulation(
     prev_gamma = gamma0
     prev_vega  = vega0
     prev_theta = theta0
-    prev_T_rem = T0_rem
     prev_vomma = _compute_vomma_at(S_entry, k_entry, T0_rem, r, q, sigma0_for_greeks)
 
     # Entry day row — no P&L yet (this is the initialisation day)
@@ -538,7 +537,7 @@ def run_simulation(
         prev_gamma = gamma_t
         prev_vega  = vega_t
         prev_theta = theta_t
-        prev_T_rem = T_rem_t
+        # (T_rem is recomputed each iteration from days_elapsed — no prev needed)
 
     # ── Build output DataFrame ─────────────────────────────────────────────────
     df = pd.DataFrame(records)

@@ -105,9 +105,8 @@ Outputs
 """
 
 import logging
-import pickle
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -115,13 +114,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from joint_vol_calibration.config import DATA_DIR, RANDOM_SEED
-from joint_vol_calibration.data.database import (
-    get_spx_ohlcv,
-    get_vix_term_structure_wide,
-)
+from joint_vol_calibration.config import DATA_DIR
 from joint_vol_calibration.signals.regime_classifier import (
-    FEATURE_COLS,
     VVIX_REGIME2_THRESHOLD,
     RegimeClassifier,
     build_features,

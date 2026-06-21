@@ -42,9 +42,7 @@ The VIX Gap (why Heston fails):
 """
 
 import logging
-import os
 import pickle
-from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -1269,11 +1267,14 @@ class HestonModel:
         S: float,
         strikes: np.ndarray,
         maturities: np.ndarray,
-        r: Optional[float] = None,
-        q: Optional[float] = None,
     ) -> pd.DataFrame:
         """
         Compute the full Heston implied vol smile surface.
+
+        Uses the calibrated rate/dividend (self._r, self._q), consistent with
+        .price(), .implied_vol() and .greeks(). (A per-call rate override was
+        removed: it was never threaded into the pricer, and Heston implied vol
+        is essentially rate-invariant in forward-moneyness terms anyway.)
 
         Parameters
         ----------
@@ -1282,11 +1283,10 @@ class HestonModel:
 
         Returns
         -------
-        DataFrame with columns [strike, maturity, implied_vol_call, implied_vol_put]
+        DataFrame with columns [strike, maturity, moneyness, log_moneyness,
+        implied_vol_c, implied_vol_p]
         """
         self._check_calibrated()
-        r_ = r or self._r
-        q_ = q or self._q
         rows = []
         for T in maturities:
             for K in strikes:

@@ -16,11 +16,8 @@ import math
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-from pathlib import Path
-from scipy.special import ndtr  # standard normal CDF (no circular import)
 
-from joint_vol_calibration.config import HESTON_BOUNDS, RANDOM_SEED
+from joint_vol_calibration.config import HESTON_BOUNDS
 from joint_vol_calibration.models.nn_pricer import (
     HestonNet,
     NNPricer,

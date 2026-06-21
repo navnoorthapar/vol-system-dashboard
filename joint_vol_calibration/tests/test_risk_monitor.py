@@ -13,12 +13,9 @@ Coverage (20 tests across 6 classes):
 import numpy as np
 import pandas as pd
 import pytest
-from pathlib import Path
 
 from joint_vol_calibration.greeks.risk_monitor import (
     RiskMonitor,
-    _bs_call_price,
-    _bs_d1d2,
     _bs_delta,
     _bs_vanna,
     _bs_vega,

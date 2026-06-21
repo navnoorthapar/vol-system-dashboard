@@ -19,8 +19,6 @@ Total: 70 tests across 13 test classes.
   13. SignalEngine S1RF integration    — engine output columns, summary key
 """
 
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -1358,8 +1356,6 @@ class TestGenerateSignal4:
 
     def test_signal_engine_includes_s4(self):
         """SignalEngine.generate() must return s4_position column."""
-        import sys
-        import pickle
         from pathlib import Path
 
         # Load regime classifier from disk

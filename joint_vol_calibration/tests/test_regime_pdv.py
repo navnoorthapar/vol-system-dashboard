@@ -17,9 +17,8 @@ Test coverage (42 tests across 10 test classes):
 """
 
 import pickle
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -37,12 +36,9 @@ class _FakePDVModel:
 from joint_vol_calibration.signals.regime_pdv import (
     ANNUALISE,
     MIN_R2_DAYS,
-    MIN_TAIL_DAYS,
     _BOUNDS_TAIL,
-    REGIME_NAMES,
     MertonJumpParams,
     RegimePDV,
-    _moment_match_fallback,
     calibrate_jump_mle,
     merton_log_density,
 )

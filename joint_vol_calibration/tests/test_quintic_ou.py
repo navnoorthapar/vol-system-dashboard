@@ -14,7 +14,6 @@ Coverage:
   29–30 : QuinticOUParams dataclass helpers
 """
 
-import math
 import numpy as np
 import pytest
 
@@ -30,7 +29,6 @@ from joint_vol_calibration.models.quintic_ou import (
     price_vix_futures,
     price_vix_option,
     price_spx_options_mc,
-    QuinticOUModel,
     QUINTIC_DEFAULTS,
     QUINTIC_BOUNDS,
 )

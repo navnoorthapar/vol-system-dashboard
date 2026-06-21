@@ -17,8 +17,7 @@ Tables:
 
 import sqlite3
 import logging
-from datetime import date, datetime
-from pathlib import Path
+from datetime import datetime
 from typing import Optional
 
 import numpy as np

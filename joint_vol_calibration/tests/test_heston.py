@@ -317,6 +317,31 @@ class TestHestonModelClass:
                 f"Parameter {key} changed after save/load"
             )
 
+    @staticmethod
+    def _calibrated_model():
+        model = HestonModel()
+        model.params = dict(kappa=2.0, theta=0.04, sigma=0.3, rho=-0.7, v0=0.04)
+        model._S = 4500.0
+        model._r = 0.045
+        model._q = 0.013
+        model.is_calibrated = True
+        return model
+
+    def test_smile_surface_shape_and_columns(self):
+        model = self._calibrated_model()
+        strikes = np.array([4200.0, 4500.0, 4800.0])
+        mats = np.array([0.25, 0.5])
+        surf = model.smile_surface(S=4500.0, strikes=strikes, maturities=mats)
+        assert len(surf) == len(strikes) * len(mats)   # 3 × 2 = 6
+        for col in ("strike", "maturity", "moneyness", "log_moneyness",
+                    "implied_vol_c", "implied_vol_p"):
+            assert col in surf.columns
+        # Inverted implied vols should be present, positive and sane.
+        assert surf["implied_vol_c"].notna().all()
+        assert (surf["implied_vol_c"] > 0).all()
+        assert (surf["implied_vol_c"] < 2.0).all()
+        assert (surf["implied_vol_p"] > 0).all()
+
 
 # ── Bates (1996) SVJ Model ────────────────────────────────────────────────────
 

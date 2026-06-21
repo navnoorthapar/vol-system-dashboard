@@ -16,10 +16,6 @@ Test coverage:
 Total: 28 tests across 10 test classes.
 """
 
-import pickle
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -29,7 +25,6 @@ from joint_vol_calibration.signals.regime_classifier import (
     FEATURE_COLS,
     REGIME2_VALIDATION_DATES,
     REGIME_NAMES,
-    TEST_START_DATE,
     TRAIN_END_DATE,
     VVIX_REGIME2_THRESHOLD,
     RegimeClassifier,

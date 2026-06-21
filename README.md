@@ -4,7 +4,7 @@
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
 [![CI](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
-[![Tests](https://img.shields.io/badge/tests-628%20passing-00ff88?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-629%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 
 ---
@@ -76,7 +76,7 @@ The SPX leg fits well and Feller passes — but **ρ is still pinned at its lowe
 
 ## System Overview
 
-14 components, ~15,300 lines of Python (ex-tests), **628 passing tests**, zero look-ahead bias.
+14 components, ~15,300 lines of Python (ex-tests), **629 passing tests**, zero look-ahead bias.
 
 | Component | Description | 
 |-----------|-------------|
@@ -146,8 +146,8 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 
 ```bash
 pytest joint_vol_calibration/tests/ -q
-# 628 passed locally (with trained NN weights present)
-# 610 passed, 18 skipped on a clean clone — the NN-pricer tests need the
+# 629 passed locally (with trained NN weights present)
+# 611 passed, 18 skipped on a clean clone — the NN-pricer tests need the
 # gitignored .pt weights and skip gracefully without them (see CI badge).
 # Includes explicit look-ahead bias checks (test_lookahead.py) and a
 # Monte-Carlo ↔ analytic cross-validation of the Heston pricer.

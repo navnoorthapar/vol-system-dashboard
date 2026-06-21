@@ -33,7 +33,6 @@ Requirements
 import logging
 import pickle
 import time
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -44,7 +43,7 @@ from scipy import optimize, stats
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
 from joint_vol_calibration.config import (
-    HESTON_BOUNDS, HESTON_DEFAULTS, JOINT_W1, JOINT_W2, JOINT_W3,
+    HESTON_BOUNDS, JOINT_W1, JOINT_W2, JOINT_W3,
     RANDOM_SEED, DATA_DIR,
 )
 from joint_vol_calibration.data import database as db
@@ -52,7 +51,6 @@ from joint_vol_calibration.models.heston import (
     heston_call_batch,
     heston_vix_futures_curve,
     implied_vol_from_price,
-    implied_vol_batch,
     black_scholes_call,
     bates_call_batch,
 )
@@ -252,8 +250,8 @@ def _build_ssvi_surface(df: pd.DataFrame, S: float, r: float, q: float,
             # BS vega
             d1 = (np.log(S / K_i) + (r - q + 0.5 * iv_i**2) * T) / (iv_i * np.sqrt(T))
             vega = max(S * np.exp(-q * T) * _norm.pdf(d1) * np.sqrt(T), 0.5)
-            # Black-Scholes price as synthetic market price
-            from joint_vol_calibration.models.heston import black_scholes_call
+            # Black-Scholes price as synthetic market price (black_scholes_call
+            # is imported at module top).
             if right == "C":
                 price = black_scholes_call(S, K_i, T, r, q, iv_i)
             else:
@@ -1161,14 +1159,14 @@ class JointCalibrator:
         print(f"  mu_j    = {p['mu_j']*100:.2f}%")
         print(f"  sigma_j = {p['sigma_j']*100:.2f}%")
         print(f"  Feller  : 2κθ={2*p['kappa']*p['theta']:.4f} {'≥' if result['feller_ok'] else '<'} σ²={p['sigma']**2:.4f}")
-        print(f"\n── Bates Loss Breakdown ─────────────────────────────")
+        print("\n── Bates Loss Breakdown ─────────────────────────────")
         print(f"  SPX smile RMSE    : {ll['spx_iv_rmse']:.3f} vol pts")
         print(f"  VIX futures RMSE  : {ll['vix_futures_rmse']:.3f} vol pts")
         print(f"  VIX options RMSE  : {ll['vix_options_rmse']:.3f} vol pts")
         print(f"  Fit time          : {result['fit_time']:.1f}s")
         if "heston_comparison" in result:
             hc = result["heston_comparison"]
-            print(f"\n── Bates vs Heston ──────────────────────────────────")
+            print("\n── Bates vs Heston ──────────────────────────────────")
             print(f"  SPX RMSE: Heston {hc['heston_spx_rmse']:.3f} → Bates {hc['bates_spx_rmse']:.3f} vol pts")
             print(f"  VIX RMSE: Heston {hc['heston_vix_rmse']:.3f} → Bates {hc['bates_vix_rmse']:.3f} vol pts")
             print(f"  rho:      Heston {hc['heston_rho']:.4f} → Bates {hc['bates_rho']:.4f}")
@@ -1323,7 +1321,7 @@ class JointCalibrator:
         print(f"  rho   = {p['rho']:.4f}  (spot-vol correlation)")
         print(f"  v0    = {p['v0']:.4f}  (spot var,  vol={np.sqrt(p['v0'])*100:.1f}%)")
         print(f"  Feller: 2κθ={2*p['kappa']*p['theta']:.4f} {'≥' if result['feller_ok'] else '<'} σ²={p['sigma']**2:.4f}")
-        print(f"\n── Loss Breakdown ───────────────────────────────────")
+        print("\n── Loss Breakdown ───────────────────────────────────")
         print(f"  SPX smile RMSE    : {ll['spx_iv_rmse']:.2f} vol pts")
         print(f"  VIX futures RMSE  : {ll['vix_futures_rmse']:.2f} vol pts")
         print(f"  VIX options RMSE  : {ll['vix_options_rmse']:.2f} vol pts")

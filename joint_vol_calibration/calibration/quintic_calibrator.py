@@ -29,14 +29,11 @@ import pandas as pd
 from scipy import optimize
 
 from joint_vol_calibration.config import (
-    DATA_DIR, JOINT_W1, JOINT_W2, JOINT_W3, RANDOM_SEED,
+    DATA_DIR, JOINT_W1, JOINT_W2, RANDOM_SEED,
 )
 from joint_vol_calibration.data import database as db
 from joint_vol_calibration.models.quintic_ou import (
-    QuinticOUParams, QuinticOUModel,
-    QUINTIC_BOUNDS, QUINTIC_DEFAULTS,
-    eval_poly, ep_squared, var_Z, g0_at,
-    price_vix_futures, price_vix_option,
+    QuinticOUParams, QUINTIC_BOUNDS, price_vix_futures, price_vix_option,
     implied_vol_surface_mc, vix_option_implied_vol,
 )
 

@@ -18,14 +18,9 @@ Coverage
 Total: 49 tests  →  325 + 49 = 374 total
 """
 
-import io
-import pickle
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 # ── Helpers shared across tests ────────────────────────────────────────────────
 
@@ -484,7 +479,6 @@ class TestReportGenerator:
         assert rg.engine is not None
 
     def test_generate_creates_file(self, tmp_path):
-        from joint_vol_calibration.backtest.report_generator import ReportGenerator
         rg   = self._make_rg()
         path = tmp_path / "test_report.html"
         out  = rg.generate(save_path=path, auto_open=False)

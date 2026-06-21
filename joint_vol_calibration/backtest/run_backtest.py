@@ -14,11 +14,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import time
-from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -98,7 +95,7 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
         tp = m.get(f"{sig}_total_pnl")
         print(f"  {lbl:<12} {_f(sh):>8} {_p(ar):>8} {_p(wr):>9} {_i(nt):>9} {_d(tp):>12}")
 
-    print(f"\n  Crisis performance:")
+    print("\n  Crisis performance:")
     for name, d in crisis.items():
         if d.get("n_days", 0) == 0:
             print(f"  {name:<20} — no data")

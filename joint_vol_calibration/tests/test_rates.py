@@ -13,14 +13,11 @@ test_rates.py — C10-Step4: Tests for per-date T-bill rate integration.
 """
 
 import sqlite3
-from datetime import date, timedelta
-from unittest.mock import patch, MagicMock
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data.database import (
     insert_tbill_rates,
     get_tbill_rate,

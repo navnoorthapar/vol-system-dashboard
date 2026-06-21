@@ -40,7 +40,6 @@ entire conceptual difference.
 
 import logging
 import pickle
-from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -48,7 +47,6 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import pearsonr
 
-from joint_vol_calibration.config import RANDOM_SEED, MC_CACHE_DIR
 
 logger = logging.getLogger(__name__)
 

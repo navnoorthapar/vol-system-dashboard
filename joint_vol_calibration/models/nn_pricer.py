@@ -64,7 +64,6 @@ from joint_vol_calibration.config import (
     NN_MAX_EPOCHS,
     NN_N_LAYERS,
     NN_TRAIN_SAMPLES,
-    NN_VOL_ERROR_TARGET,
     RANDOM_SEED,
 )
 from joint_vol_calibration.models.heston import heston_call_batch, heston_vix_futures_curve

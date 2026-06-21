@@ -5,7 +5,6 @@ All paths, seeds, date ranges, and hyperparameters live here.
 Changing one value here propagates everywhere — no magic numbers in model code.
 """
 
-import os
 from pathlib import Path
 
 # ── Reproducibility ──────────────────────────────────────────────────────────
