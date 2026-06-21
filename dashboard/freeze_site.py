@@ -56,10 +56,44 @@ for route, fname in ROUTES.items():
           f"{len(html):7d} bytes  status={resp.status_code}"
           f"{'  <-- ERROR IN PAGE' if broken else ''}")
 
+from datetime import date as _date
+
 with open(os.path.join(OUT, "CNAME"), "w") as f:
     f.write("navnoorbawa.me\n")
 with open(os.path.join(OUT, ".nojekyll"), "w") as f:
     f.write("")
+
+# robots.txt + sitemap.xml — let crawlers index the four pages cleanly
+with open(os.path.join(OUT, "robots.txt"), "w") as f:
+    f.write("User-agent: *\nAllow: /\nSitemap: https://navnoorbawa.me/sitemap.xml\n")
+
+_today = _date.today().isoformat()
+_urls = "".join(
+    f"  <url><loc>https://navnoorbawa.me/{p}</loc>"
+    f"<lastmod>{_today}</lastmod></url>\n"
+    for p in ("", "calibration.html", "greeks.html", "backtest.html")
+)
+with open(os.path.join(OUT, "sitemap.xml"), "w") as f:
+    f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            f"{_urls}</urlset>\n")
+
+# Branded 404 — GitHub Pages serves /404.html on unknown paths
+with open(os.path.join(OUT, "404.html"), "w") as f:
+    f.write(
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>404 · SPX/VIX Vol System</title>"
+        "<link rel='icon' href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%2300ff88' stroke-width='3' stroke-linecap='round'/></svg>\">"
+        "<style>html,body{height:100%;margin:0}body{background:#0a0a0a;color:#e8e8e8;"
+        "font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;"
+        "align-items:center;justify-content:center;text-align:center}"
+        "h1{font-size:72px;margin:0;color:#00ff88}p{color:#8a8a8a}"
+        "a{color:#00ff88;text-decoration:none;font-weight:700}</style></head>"
+        "<body><div><h1>404</h1>"
+        "<p>That page isn't part of the vol system.</p>"
+        "<p><a href='/'>← Back to the dashboard</a></p></div></body></html>"
+    )
 
 # Copy the social-preview card so the absolute og:image URL resolves
 # (regenerate it with `python dashboard/make_og_image.py`).
