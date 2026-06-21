@@ -137,7 +137,7 @@
   <div class="card">
     <div class="chart-title">QV Convexity × 10⁴ — by Maturity</div>
     <div class="chart-wrap">
-      <canvas id="qvChart"></canvas>
+      <canvas id="qvChart" role="img" aria-label="Quadratic variation convexity by maturity"></canvas>
     </div>
     <div style="margin-top:10px;font-size:11px;color:var(--text3);">
       Quadratic variation convexity measures the sensitivity of the straddle P&L to
@@ -149,7 +149,7 @@
   <div class="card">
     <div class="chart-title">Mean Vanna — by Maturity  (∂²V/∂S∂σ)</div>
     <div class="chart-wrap">
-      <canvas id="vannaChart"></canvas>
+      <canvas id="vannaChart" role="img" aria-label="Vanna across maturities"></canvas>
     </div>
     <div style="margin-top:10px;font-size:11px;color:var(--text3);">
       Vanna is the cross-greek measuring how delta changes with implied vol.
@@ -164,7 +164,7 @@
 <div class="card" style="margin-bottom:16px;">
   <div class="chart-title">Vomma Z-Score vs Log-Moneyness — All Maturities</div>
   <div class="chart-wrap tall">
-    <canvas id="vommaScatter"></canvas>
+    <canvas id="vommaScatter" role="img" aria-label="Vomma surface scatter plot"></canvas>
   </div>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
     Points above z=+2 (dashed red line) are flagged as unstable.

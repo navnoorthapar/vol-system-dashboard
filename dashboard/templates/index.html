@@ -259,7 +259,7 @@
           {% if d.pdv_sparkline %}
           <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">Implied–Realised spread — last 60 trading days</div>
           <div style="position:relative;height:32px;">
-            <canvas id="sparklineChart"></canvas>
+            <canvas id="sparklineChart" role="img" aria-label="SPX price sparkline"></canvas>
           </div>
           {% endif %}
         </div>
@@ -279,7 +279,7 @@
   <div class="card" style="grid-column: span 1;">
     <div class="card-label">VIX Term Structure</div>
     <div class="chart-wrap tall" style="margin-top:12px;">
-      <canvas id="tsChart"></canvas>
+      <canvas id="tsChart" role="img" aria-label="VIX term structure curve"></canvas>
     </div>
   </div>
 
