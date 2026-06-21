@@ -6,6 +6,7 @@
 [![CI](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
 [![Tests](https://img.shields.io/badge/tests-631%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-00ff88?style=flat-square)](LICENSE)
 
 ---
 
@@ -186,6 +187,15 @@ No QuantLib. No Bloomberg. No paid data.
 - Substack: [navnoorbawa.substack.com](https://navnoorbawa.substack.com)
 - LinkedIn: [linkedin.com/in/navnoorbawa](https://www.linkedin.com/in/navnoorbawa/)
 - GitHub: [github.com/navnoorthapar](https://github.com/navnoorthapar)
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE) — © 2026 Navnoor Bawa. Free to use,
+copy, modify, and distribute with attribution. Market data is sourced from
+free public feeds (Yahoo Finance, CBOE) and is subject to those providers'
+own terms.
 
 ---
 
