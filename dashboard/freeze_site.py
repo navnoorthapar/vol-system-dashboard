@@ -61,5 +61,15 @@ with open(os.path.join(OUT, "CNAME"), "w") as f:
 with open(os.path.join(OUT, ".nojekyll"), "w") as f:
     f.write("")
 
+# Copy the social-preview card so the absolute og:image URL resolves
+# (regenerate it with `python dashboard/make_og_image.py`).
+import shutil
+og_src = os.path.join(ROOT, "dashboard", "og-image.png")
+if os.path.exists(og_src):
+    shutil.copy(og_src, os.path.join(OUT, "og-image.png"))
+    print(f"COPIED og-image.png -> {OUT}")
+else:
+    print("WARN  og-image.png not found — run dashboard/make_og_image.py")
+
 print(f"{'WROTE' if all_ok else 'WROTE (WITH ERRORS)'} CNAME + .nojekyll -> {OUT}")
 sys.exit(0 if all_ok else 1)
