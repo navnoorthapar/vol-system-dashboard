@@ -1,0 +1,52 @@
+name: tests
+
+# Run the full pytest suite on every push / PR to main so the "passing"
+# badge is CI-verified rather than a manual claim. The repo is public →
+# GitHub Actions minutes are unlimited.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # match daily_refresh.yml
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies (CPU-only torch for a smaller/faster wheel)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run test suite
+        # The 18 NN-pricer tests skip automatically without the gitignored .pt
+        # model weights, so a clean CI checkout reports "610 passed, 18 skipped".
+        run: pytest joint_vol_calibration/tests/ -q

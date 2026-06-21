@@ -3,6 +3,7 @@
 **Joint SPX/VIX volatility calibration, risk, and signal-research system — plus a fully documented negative trading result. Live at https://navnoorbawa.me**
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
+[![CI](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
 [![Tests](https://img.shields.io/badge/tests-628%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 
@@ -145,9 +146,15 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 
 ```bash
 pytest joint_vol_calibration/tests/ -q
-# 628 passed
-# Includes explicit look-ahead bias checks (test_lookahead.py)
+# 628 passed locally (with trained NN weights present)
+# 610 passed, 18 skipped on a clean clone — the NN-pricer tests need the
+# gitignored .pt weights and skip gracefully without them (see CI badge).
+# Includes explicit look-ahead bias checks (test_lookahead.py) and a
+# Monte-Carlo ↔ analytic cross-validation of the Heston pricer.
 ```
+
+Every push to `main` runs the full suite in GitHub Actions (the **CI** badge
+above), so "passing" is machine-verified, not a hand-typed number.
 
 ### Requirements
 
