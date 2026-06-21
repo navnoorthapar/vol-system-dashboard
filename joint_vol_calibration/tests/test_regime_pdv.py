@@ -184,6 +184,25 @@ class TestMertonLogDensity:
         d_large = merton_log_density(r, sd, lam, mu_j=0.0, sigma_j=0.050)
         assert d_large[0] < d_small[0], "Larger sigma_j should reduce density at r=0"
 
+    def test_density_integrates_to_one(self):
+        """A probability density must integrate to 1 over the return support.
+        This is the decisive normalization check: a wrong variance combination,
+        a missing Jacobian, or a mis-weighted Poisson term would break it."""
+        grid = np.linspace(-1.0, 1.0, 200_001)        # wide, fine grid
+        sigma_d = np.full_like(grid, 0.012)            # ~19% annualised diffusion
+        ld = merton_log_density(grid, sigma_d, lam_daily=0.05,
+                                mu_j=-0.04, sigma_j=0.06)
+        integral = np.trapz(np.exp(ld), grid)
+        assert integral == pytest.approx(1.0, abs=1e-4)
+
+    def test_density_integrates_to_one_no_jumps(self):
+        """With λ→0 the mixture collapses to a single Gaussian — still unit mass."""
+        grid = np.linspace(-1.0, 1.0, 200_001)
+        sigma_d = np.full_like(grid, 0.012)
+        ld = merton_log_density(grid, sigma_d, lam_daily=1e-9,
+                                mu_j=0.0, sigma_j=0.01)
+        assert np.trapz(np.exp(ld), grid) == pytest.approx(1.0, abs=1e-4)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. calibrate_jump_mle
