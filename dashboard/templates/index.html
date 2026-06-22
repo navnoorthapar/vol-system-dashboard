@@ -110,7 +110,7 @@
 
   <!-- Current Regime -->
   <div class="card" style="grid-column: span 1;">
-    <div class="card-label">Current Regime — C8 Classifier</div>
+    <div class="card-label">Current Regime — rule-based label</div>
 
     <div class="flex gap12 mt8" style="align-items:flex-start;">
       <div style="flex:1;">
@@ -119,20 +119,29 @@
           padding:10px 18px; border-radius:8px;
           background:{{ d.regime_color }}18;
           border:1px solid {{ d.regime_color }}44;
-          margin-bottom:12px;
+          margin-bottom:8px;
         ">
           <div style="width:10px;height:10px;border-radius:50%;background:{{ d.regime_color }};box-shadow:0 0 8px {{ d.regime_color }};"></div>
           <span style="font-size:16px;font-weight:800;letter-spacing:0.04em;color:{{ d.regime_color }};">
             {{ d.regime_label }} · {{ d.regime_name }}
           </span>
         </div>
-
-        <div class="flex space-between" style="margin-bottom:6px;">
-          <span style="font-size:12px;color:var(--text2);">Confidence</span>
-          <span class="mono" style="font-size:14px;font-weight:700;color:{{ d.regime_color }};">{{ d.regime_conf }}%</span>
+        <div class="card-sub" style="margin-bottom:14px;">
+          Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
+          trades on. As of {{ d.regime_date }}.
         </div>
 
-        <!-- Probability bars -->
+        <!-- ML classifier: research-only (demoted, C17) -->
+        <div class="flex space-between" style="margin-bottom:6px;">
+          <span style="font-size:11px;color:var(--text2);">
+            ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
+          </span>
+          <span class="mono" style="font-size:13px;font-weight:700;color:{{ d.clf_color }};">
+            {{ d.clf_label }} · {{ d.clf_conf }}%
+          </span>
+        </div>
+
+        <!-- Probability bars (classifier output) -->
         <div class="progress-bar-wrap">
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R0 LONG γ</div>
@@ -157,7 +166,9 @@
           </div>
         </div>
 
-        <div class="card-sub mt8">As of {{ d.regime_date }}</div>
+        <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
+          {% if not d.clf_agrees %}Classifier disagrees with the rule label here — {% endif %}63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+        </div>
       </div>
     </div>
 

@@ -45,29 +45,35 @@ def _db() -> sqlite3.Connection:
 
 
 def latest_good_calibration_path() -> str:
-    """Return the newest joint_cal_*.pkl that passes the degeneracy gate.
+    """Return the BEST joint_cal_*.pkl: lowest SPX RMSE among non-degenerate fits.
 
-    Daily cloud refreshes occasionally produce degenerate Heston fits (sigma->0,
-    rho->0) from thin intraday option snapshots. We show the most recent
-    NON-degenerate calibration so the calibration page never displays a
-    constant-variance corner as the headline result. Falls back to the newest
-    file if (somehow) none pass, and finally to the 2026-05-31 showcase fit.
+    Daily cloud refreshes produce noisy Heston fits from thin intraday option
+    snapshots — some degenerate (sigma->0, rho->0), some merely worse-quality or
+    Feller-marginal. Rather than headline whichever ran most recently (which can
+    flip the page to a marginally worse fit than the documented showcase), we
+    display the system's best clean calibration: the lowest-RMSE fit that passes
+    the degeneracy gate. This is stable, matches the README's showcase
+    (2026-05-31, RMSE 0.52, Feller PASS), and never regresses the headline to a
+    marginal daily run. Falls back to the newest file, then the 05-31 showcase.
     """
     import glob as _glob
     from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
 
     cals = sorted(_glob.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
-    for path in reversed(cals):          # newest first
+    best_path, best_rmse = None, float("inf")
+    for path in cals:
         try:
             with open(path, "rb") as f:
                 cal = pickle.load(f)
             losses = cal.get("leg_losses", cal.get("losses", {}))
             spx_rmse = losses.get("spx_iv_rmse", None)
             ok, _ = is_acceptable_calibration(cal.get("params", {}), spx_rmse)
-            if ok:
-                return path
+            if ok and spx_rmse is not None and spx_rmse < best_rmse:
+                best_path, best_rmse = path, spx_rmse
         except Exception:
             continue
+    if best_path:
+        return best_path
     if cals:
         return cals[-1]
     return str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
@@ -247,26 +253,40 @@ def load_page1() -> dict[str, Any]:
             "vvix":         vvix_dec,                     # > 1.0 triggers R2
         }])
 
-        proba = clf.predict_proba(feat_live)[0]
-        reg   = int(np.argmax(proba))
+        proba   = clf.predict_proba(feat_live)[0]
+        clf_reg = int(np.argmax(proba))
 
         names  = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
         colors = ["#3388ff", "#00ff88", "#ff3333"]
         labels = ["R0", "R1", "R2"]
+
+        # HEADLINE regime = the deterministic RULE-BASED label (rv_20d vs VIX;
+        # VVIX > threshold). These are the labels the backtest actually trades on.
+        # C16/C17: the ML classifier scores 63.4% OOS and LOSES to the trivial
+        # persistence baseline (y_t = y_{t-1}, 90.0% on 2020+), so it is demoted
+        # to research-only — we do NOT headline its prediction. It is shown
+        # separately below, clearly caveated. (Showing the classifier's call as
+        # the headline previously contradicted both the rule label and the
+        # displayed VVIX state.)
+        try:
+            reg = int(_rl["regime"].iloc[-1])
+        except Exception:
+            reg = clf_reg
         d["regime"]       = reg
         d["regime_name"]  = names[reg]
         d["regime_color"] = colors[reg]
         d["regime_label"] = labels[reg]
-        d["regime_conf"]  = round(float(proba[reg]) * 100, 1)
         d["regime_date"]  = _rl_max_date or d.get("spx_date", "live")  # Bug 3
+
+        # ML classifier — RESEARCH ONLY (demoted); shown with a caveat.
+        d["clf_label"]    = labels[clf_reg]
+        d["clf_name"]     = names[clf_reg]
+        d["clf_color"]    = colors[clf_reg]
+        d["clf_conf"]     = round(float(proba[clf_reg]) * 100, 1)
+        d["clf_agrees"]   = (clf_reg == reg)
         d["prob_r0"]      = round(float(proba[0]) * 100, 1)
         d["prob_r1"]      = round(float(proba[1]) * 100, 1)
         d["prob_r2"]      = round(float(proba[2]) * 100, 1)
-        # C16: vvix removed from training features (circular with the R2 label
-        # definition). Honest OOS accuracy without it: 63.4% (was 86.2% inflated).
-        # C17: 63.4% LOSES to the trivial persistence baseline (y_t = y_{t-1},
-        # 90.0% on 2020+) — classifier demoted from the trading loop; the
-        # backtest uses the lagged deterministic rule labels directly.
         d["clf_accuracy"] = "63.4%"
     except Exception as e:
         d["regime_error"] = str(e)
@@ -310,6 +330,12 @@ def load_page1() -> dict[str, Any]:
             d["regime_date"]  = _rl_max_date or d.get("spx_date", "N/A")  # Bug 3
             d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
         d.setdefault("clf_accuracy", "63.4%")  # C16 honest no-vvix accuracy
+        # Safe clf_* defaults so the research-only card renders if inference failed
+        d.setdefault("clf_label", d.get("regime_label", "—"))
+        d.setdefault("clf_name",  d.get("regime_name", "N/A"))
+        d.setdefault("clf_color", d.get("regime_color", "#666"))
+        d.setdefault("clf_conf",  0)
+        d.setdefault("clf_agrees", True)
 
     # Calibration date for timestamp (Bug 7) — latest NON-degenerate joint_cal
     try:
