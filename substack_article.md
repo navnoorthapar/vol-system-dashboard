@@ -23,7 +23,7 @@ Over eighteen months and 14 components, the system covers the full pipeline from
 - **C10**: Full backtest engine with walk-forward validation and HTML reporting
 - **C11–C13b**: Regime-switching jumps (Merton/BNS), Bates SVJ, SVI/SSVI smoothing, two-factor Quintic OU
 
-631 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
+634 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
 
 ---
 
@@ -69,7 +69,7 @@ So the classifier is research-only now. The backtest uses the lagged rule labels
 
 ## What actually survived
 
-**PDV: R² = 0.31 vs 0.08 naive.** The naive model — predict tomorrow's realised vol from the last 20-day RV — explains 8% of variance. PDV explains 31%, a 4× improvement using three features (two EWMA vol estimates and a leverage term), a linear model, no neural network. The Guyon-Lekeufack formulation is that clean.
+**PDV: ~30% of next-day |return| variance, walk-forward — but the "4x over naive" I first claimed was a strawman.** I originally wrote "R² = 0.31 vs 0.08 naive, a 4x win." That comparison was unfair to the baseline, and a reviewer caught it. The 0.08 is a 20-day realised-vol forecast's *uncalibrated* R²: a 20-day RV runs about 25% hot versus E|r| (RV tracks σ, but E|r| ≈ 0.8σ), so it gets penalised for scale, not for lack of information. PDV is OLS-fit, so it gets that rescaling for free. On a fair, scale-invariant basis (squared correlation), PDV explains ~0.30, a 20-day moving average ~0.20, and a parameter-free RiskMetrics EWMA or a GARCH(1,1) ~0.24. So the path-dependent Guyon-Lekeufack structure does add genuine skill over a trivial vol forecaster — but the honest margin is ~0.30 vs ~0.24, a modest edge, not 4x. Volatility is the most forecastable object in markets; most of what any of these models captures is plain vol clustering. (Reproducible: `forecast_skill_comparison()`.)
 
 **S3 dispersion: +$23K, 73% win, 22 trades in seven years.** The VIX/VVIX ratio as a proxy for implied correlation flagged low-correlation regimes where long dispersion was cheap. No short leg, no complex hedging — a directional bet on a z-score with a 30-day max hold. It is the **only** signal positive at every tested P&L scale and in pseudo-OOS, and it was **unchanged by the strike-rolling fix** because it never re-entered same-day. The simplest signal in the system was the only one with a positive expectation that survived every correction. It's also too small and too rare to be a business.
 
@@ -79,7 +79,7 @@ So the classifier is research-only now. The backtest uses the lagged rule labels
 
 Every hedge fund backtest showing Sharpe > 2 has look-ahead bias somewhere — in the feature construction, the regime labels, the vol surface used for pricing, or the cost model. Usually more than one.
 
-The 631 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
+The 634 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
 
 The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
 

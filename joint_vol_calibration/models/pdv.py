@@ -555,12 +555,13 @@ def walk_forward_predict(
     X: pd.DataFrame,
     y: pd.Series,
     train_min_days: int = 504,
+    horizon: int = 1,
 ) -> pd.Series:
     """
     Walk-forward (expanding window) prediction for kernel/linear models.
 
     At each date t (from train_min_days onwards):
-      - Fit model on X[0:t], y[0:t]
+      - Fit model on X[0:t-embargo], y[0:t-embargo]
       - Predict y_hat[t] using X[t]
 
     This is the proper no-look-ahead evaluation. No test data ever
@@ -573,11 +574,21 @@ def walk_forward_predict(
     X             : full feature DataFrame (all dates)
     y             : full target Series (all dates)
     train_min_days: int   — minimum training observations before first prediction
+    horizon       : int   — forecast horizon of the target (trading days). For
+                            horizon h, y(t) is realised vol over [t+1, t+h], so
+                            consecutive targets OVERLAP by h-1 days. We PURGE the
+                            last (h-1) training rows before each fit (embargo): a
+                            label y(i) is used to predict y(t) only if its window
+                            ends at or before t, i.e. i <= t-h. For horizon=1
+                            (the default and the headline target) embargo=0 and
+                            this is the standard 1-step walk-forward. Skipping
+                            this purge inflates OOS R^2 via overlapping windows
+                            (Lopez de Prado, Advances in Financial ML, 2018, ch 7).
 
     Returns
     -------
     pd.Series of out-of-sample predictions, indexed by date.
-    Same length as y, NaN for the first train_min_days observations.
+    Same length as y, NaN for the first (train_min_days + embargo) observations.
 
     Note: For PDVKernel, full walk-forward is O(N²) which is slow for N=4K.
           We therefore re-fit every 63 days (quarterly) instead of daily.
@@ -593,15 +604,20 @@ def walk_forward_predict(
     dates = X.index
     y_hat = pd.Series(np.nan, index=dates)
 
+    embargo = max(int(horizon) - 1, 0)    # purge overlapping target windows
+
     # For kernel: refit quarterly (every 63 trading days)
     is_kernel = model_cls is PDVKernel
     refit_freq = 63 if is_kernel else 1   # daily refit for linear (fast)
 
     model = None
-    for t in range(train_min_days, n):
-        if model is None or (t - train_min_days) % refit_freq == 0:
+    start = train_min_days + embargo
+    for t in range(start, n):
+        # Training rows whose target window ends at or before t: iloc[:t-embargo]
+        fit_end = t - embargo
+        if model is None or (t - start) % refit_freq == 0:
             model = model_cls(**model_kwargs)
-            model.fit(X.iloc[:t], y.iloc[:t])
+            model.fit(X.iloc[:fit_end], y.iloc[:fit_end])
 
         # Predict at time t using features X[t]
         pred = model.predict(X.iloc[[t]])
@@ -668,6 +684,68 @@ def compute_metrics(
         med_ae=round(med_ae * 100, 4), bias=round(bias * 100, 4),
     )
     return metrics
+
+
+def forecast_skill_comparison(
+    log_returns: pd.Series,
+    train_min_days: int = 504,
+    annualise: int = 252,
+) -> dict:
+    """Honest, scale-invariant comparison of next-day |return| forecast skill.
+
+    Target: y(t) = |r_{t+1}| * sqrt(252)  (next-day annualised absolute return).
+
+    We report squared correlation (corr^2) for each forecaster, which measures
+    information content AFTER optimal linear rescaling. This matters because a
+    raw 20-day realised-vol forecast runs systematically hot (RV ~ sigma, but
+    E|r| = sigma*sqrt(2/pi) ~ 0.8*sigma), so its uncalibrated R^2 (1 - SSres/SStot)
+    badly understates its information. PDVLinear is OLS-fit, so it gets that
+    rescaling for free; comparing PDV's calibrated R^2 to a naive predictor's
+    *uncalibrated* R^2 is apples-to-oranges and overstates the structural edge.
+
+    Returns a dict keyed by model name with {corr2, r2_uncalibrated, n}. The
+    honest read is the corr2 column: PDV beats simple baselines, but by a modest
+    margin over a trivial EWMA/GARCH, not the ~4x that the uncalibrated-naive
+    comparison implies.
+    """
+    r = log_returns.dropna()
+    target = r.abs().shift(-1) * np.sqrt(annualise)
+
+    def _both(f: pd.Series) -> dict:
+        d = pd.concat([f.rename("f"), target.rename("t")], axis=1).dropna()
+        if len(d) < 100:
+            return {"corr2": np.nan, "r2_uncalibrated": np.nan, "n": len(d)}
+        c2 = float(np.corrcoef(d["f"], d["t"])[0, 1] ** 2)
+        ss_res = float(np.sum((d["t"] - d["f"]) ** 2))
+        ss_tot = float(np.sum((d["t"] - d["t"].mean()) ** 2))
+        r2u = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        return {"corr2": round(c2, 4), "r2_uncalibrated": round(r2u, 4), "n": len(d)}
+
+    out = {}
+
+    # PDVLinear, genuine walk-forward (calibrated by OLS)
+    feats = extract_pdv_features(r)
+    X, y = build_xy(r, feats, horizon=1)
+    pdv_pred = walk_forward_predict(PDVLinear, {}, X, y,
+                                    train_min_days=train_min_days, horizon=1)
+    out["pdv_walk_forward"] = _both(pdv_pred.reindex(target.index))
+
+    # Naive: trailing 20-day realised vol (the strawman baseline; note how far
+    # its uncalibrated R^2 sits below its corr^2 — that gap is pure scale bias)
+    out["naive_rv20"] = _both(feats["rv_hist_20d"])
+
+    # RiskMetrics EWMA, lambda = 0.94 (parameter-free industry standard)
+    ewma94 = np.sqrt((r ** 2).ewm(alpha=0.06, adjust=False).mean() * annualise)
+    out["ewma_riskmetrics_0p94"] = _both(ewma94)
+
+    # GARCH(1,1), in-sample (one fit; an upper bound on its OOS skill)
+    try:
+        g = GARCH11().fit(r)
+        out["garch11_in_sample"] = _both(g.predict().reindex(r.index))
+    except Exception:
+        out["garch11_in_sample"] = {"corr2": np.nan, "r2_uncalibrated": np.nan, "n": 0}
+
+    return out
 
 
 def stress_test_date(

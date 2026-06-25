@@ -31,6 +31,7 @@ from joint_vol_calibration.models.pdv import (
     GARCH11,
     walk_forward_predict,
     compute_metrics,
+    forecast_skill_comparison,
 )
 
 ANNUALISE = 252
@@ -272,6 +273,29 @@ class TestNoLookAhead:
             check_exact=True,
         )
 
+    def test_embargo_purges_overlapping_labels(self, xy):
+        """For a horizon-h target, consecutive labels overlap by h-1 days, so the
+        walk-forward must PURGE the last h-1 training rows (embargo). Corrupting a
+        target at position j must NOT move predictions at j+1..j+h-1 (purged), but
+        MUST move the prediction at j+h. The contrast with horizon=1 (where the
+        very next prediction DOES move) proves the embargo is actually applied."""
+        X, y = xy
+        tm, j, h = 200, 400, 5
+        clean = walk_forward_predict(PDVLinear, {}, X, y, train_min_days=tm, horizon=h)
+        yp = y.copy(); yp.iloc[j] = 999.0
+        pois = walk_forward_predict(PDVLinear, {}, X, yp, train_min_days=tm, horizon=h)
+        # Embargo protects the h-1 predictions immediately after the poisoned label
+        pd.testing.assert_series_equal(
+            clean.iloc[j + 1:j + h], pois.iloc[j + 1:j + h], check_exact=True
+        )
+        # The poison bites exactly at j+h (non-vacuous)
+        assert not np.isclose(clean.iloc[j + h], pois.iloc[j + h])
+        # Contrast: with horizon=1 there is no embargo, so the very next
+        # prediction DOES change — confirming the purge is what protects j+1..j+h-1.
+        c1 = walk_forward_predict(PDVLinear, {}, X, y,  train_min_days=tm, horizon=1)
+        p1 = walk_forward_predict(PDVLinear, {}, X, yp, train_min_days=tm, horizon=1)
+        assert not np.isclose(c1.iloc[j + 1], p1.iloc[j + 1])
+
     def test_poison_actually_bites_later(self, xy):
         """Guard against a vacuous test: predictions that DO train on poisoned
         targets must visibly change, confirming the poison is potent."""
@@ -285,3 +309,31 @@ class TestNoLookAhead:
                                         train_min_days=tm)
         # Well past the cutoff the training window includes poisoned rows.
         assert not np.isclose(clean.iloc[450], poisoned.iloc[450])
+
+
+# ── Honest effect size: PDV vs simple baselines, scale-invariant ──────────────
+
+class TestForecastSkill:
+    """Locks the correction to the oversold 'R^2=0.31 vs 0.08 naive, 4x' claim.
+    The 0.08 was the naive predictor's UNCALIBRATED R^2; on a fair scale-invariant
+    basis (corr^2) the gap to a trivial EWMA/GARCH is modest, not 4x. Real-data
+    magnitudes (PDV ~0.30, GARCH/EWMA ~0.24, 20d MA ~0.20) are reproducible via
+    forecast_skill_comparison(); here we lock the structural insight on the
+    synthetic fixture (absolute numbers are small by construction)."""
+
+    def test_comparison_structure(self, returns):
+        out = forecast_skill_comparison(returns, train_min_days=300)
+        for k in ("pdv_walk_forward", "naive_rv20",
+                  "ewma_riskmetrics_0p94", "garch11_in_sample"):
+            assert k in out
+            assert np.isfinite(out[k]["corr2"])
+
+    def test_naive_uncalibrated_r2_understates_information(self, returns):
+        """A 20-day RV runs hot vs E|r| (RV ~ sigma, E|r| ~ 0.8 sigma), so its
+        uncalibrated R^2 sits FAR below its corr^2. That scale penalty is exactly
+        what made '0.08 naive' an apples-to-oranges comparison against PDV's
+        OLS-calibrated R^2. The same penalty hits the raw EWMA forecast."""
+        out = forecast_skill_comparison(returns, train_min_days=300)
+        assert out["naive_rv20"]["r2_uncalibrated"] < out["naive_rv20"]["corr2"]
+        assert (out["ewma_riskmetrics_0p94"]["r2_uncalibrated"]
+                < out["ewma_riskmetrics_0p94"]["corr2"])
