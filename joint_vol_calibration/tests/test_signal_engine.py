@@ -1474,3 +1474,68 @@ class TestGenerateSignal1Contrarian:
         assert (out["s1c_position"].iloc[30:] == 0).all(), "position survived R2 transition"
         assert "s1c_r2_exit" in out.columns
         assert bool(out["s1c_r2_exit"].iloc[30]), "r2_exit flag not set at transition"
+
+
+# ── End-to-end no-look-ahead: poison the whole pipeline ───────────────────────
+
+class TestEndToEndNoLookAhead:
+    """The decisive leakage artifact. Corrupt ALL market data strictly after a
+    cutoff, re-run the entire SignalEngine pipeline (feature build -> regime
+    labels -> 1-day shift -> trailing z-scores -> signal state machines), and
+    assert every signal value on or before the cutoff is byte-identical. If any
+    stage reaches forward (a full-sample z-score, a missing shift, a non-causal
+    feature) a pre-cutoff signal would move and this fails. A second assertion
+    forces the poison to change a post-cutoff signal so the test is not vacuous."""
+
+    @staticmethod
+    def _synthetic_market(n: int = 800, seed: int = 11):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2016-01-04", periods=n)
+        s2 = np.empty(n); r = np.empty(n)
+        s2[0] = 1e-4; r[0] = rng.normal(0.0, np.sqrt(s2[0]))
+        for t in range(1, n):
+            s2[t] = 3e-6 + 0.08 * r[t - 1] ** 2 + 0.90 * s2[t - 1]
+            r[t] = rng.normal(0.0, np.sqrt(s2[t]))
+        close = 3000.0 * np.exp(np.cumsum(r))
+        spx = pd.DataFrame({"date": dates, "close": close, "log_return": r})
+        rv_ann = np.sqrt(s2 * 252)
+        vix = np.clip(15 + 35 * (rv_ann - rv_ann.mean()) / rv_ann.std()
+                      + rng.normal(0, 1.5, n), 9, 60)
+        vix3m = vix + rng.normal(1.5, 1.0, n)                 # mostly contango
+        vvix = np.clip(90 + 12 * (vix - vix.mean()) / vix.std()
+                       + rng.normal(0, 4, n), 75, 160)
+        vixw = pd.DataFrame({"date": dates, "^VIX": vix,
+                             "^VIX3M": vix3m, "^VVIX": vvix})
+        return spx, vixw
+
+    def test_full_pipeline_no_lookahead_poison(self):
+        spx, vix = self._synthetic_market()
+        start, end = "2016-01-01", "2020-01-01"
+        clean = SignalEngine().generate(spx, vix, start_date=start, end_date=end)
+        assert len(clean) > 100
+
+        cutoff = clean.index[int(len(clean) * 0.6)]
+
+        spx_p, vix_p = spx.copy(), vix.copy()
+        ms = pd.to_datetime(spx_p["date"]) > cutoff
+        mv = pd.to_datetime(vix_p["date"]) > cutoff
+        spx_p.loc[ms, "close"] *= 5.0
+        spx_p.loc[ms, "log_return"] = 0.25      # absurd future returns
+        vix_p.loc[mv, "^VIX"] = 5.0
+        vix_p.loc[mv, "^VIX3M"] = 90.0
+        vix_p.loc[mv, "^VVIX"] = 999.0          # forces R2 after the cutoff
+
+        poisoned = SignalEngine().generate(spx_p, vix_p, start_date=start, end_date=end)
+
+        num_cols = [c for c in clean.columns if clean[c].dtype.kind in "fiub"]
+        a = clean.loc[:cutoff, num_cols]
+        b = poisoned.loc[:cutoff, num_cols]
+        # Same dates and byte-identical values on or before the cutoff
+        pd.testing.assert_frame_equal(a, b, check_exact=True)
+
+        # Non-vacuous: the future poison must move at least one signal after cutoff
+        after = clean.index[clean.index > cutoff]
+        if len(after) > 5:
+            changed = (clean.loc[after, num_cols].fillna(-7.0).round(8)
+                       != poisoned.loc[after, num_cols].fillna(-7.0).round(8)).any().any()
+            assert changed, "poison changed nothing after the cutoff (possibly vacuous)"
