@@ -1,0 +1,1267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Calibration — Vol System</title>
+  <!-- Inline SVG favicon (volatility smile, brand colours) — no file needed -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%2300ff88' stroke-width='3' stroke-linecap='round'/></svg>">
+  <meta name="theme-color" content="#0a0a0a">
+  <!-- Open Graph — LinkedIn / Twitter / Substack link preview -->
+  <meta property="og:type"         content="website">
+  <meta property="og:url"          content="https://navnoorbawa.me/">
+  <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
+  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 635 tests. Live dashboard.">
+  <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
+  <meta property="og:image:width"  content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 635 tests, documented negative result.">
+  <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
+  <meta name="author"              content="Navnoor Bawa">
+  <link rel="canonical"            href="https://navnoorbawa.me/">
+  <meta name="twitter:card"        content="summary_large_image">
+  <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
+  <meta name="description"         content="Joint SPX/VIX smile calibration system. Heston, SVI/SSVI, Quintic OU, regime classifier, full backtest 2018–2025.">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a0a;
+      --surface:  #111111;
+      --surface2: #161616;
+      --border:   #1f1f1f;
+      --border2:  #2a2a2a;
+      --accent:   #00ff88;
+      --accent2:  #00cc6a;
+      --text:     #e4e4e4;
+      --text2:    #888888;
+      --text3:    #555555;
+      --red:      #ff3333;
+      --red2:     #cc1111;
+      --blue:     #3388ff;
+      --yellow:   #ffcc00;
+      --orange:   #ff8833;
+      --purple:   #aa44ff;
+      --radius:   6px;
+      --radius2:  10px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Navigation ─────────────────────────────────────────────────────── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0d0d0d;
+      border-bottom: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      height: 52px;
+      gap: 0;
+    }
+
+    .nav-brand {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-right: 36px;
+      white-space: nowrap;
+    }
+    .nav-brand span { color: var(--text2); font-weight: 400; }
+
+    .nav-links { display: flex; gap: 0; }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 18px;
+      height: 52px;
+      color: var(--text2);
+      text-decoration: none;
+      font-size: 12.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
+    .nav-link.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .nav-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.6;
+    }
+
+    .nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text3);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Page Layout ─────────────────────────────────────────────────────── */
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 28px 28px 60px;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .page-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text3);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .page-badge {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text3);
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Grid Helpers ────────────────────────────────────────────────────── */
+    .grid       { display: grid; gap: 16px; }
+    .grid-2     { grid-template-columns: repeat(2, 1fr); }
+    .grid-3     { grid-template-columns: repeat(3, 1fr); }
+    .grid-4     { grid-template-columns: repeat(4, 1fr); }
+    .grid-5     { grid-template-columns: repeat(5, 1fr); }
+    .col-2      { grid-column: span 2; }
+    .col-3      { grid-column: span 3; }
+    .col-4      { grid-column: span 4; }
+    .col-full   { grid-column: 1 / -1; }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius2);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent);
+    }
+
+    .card-sm { padding: 16px; }
+    .card-lg { padding: 28px; }
+
+    .card-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 8px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      font-family: 'Menlo', 'Courier New', monospace;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .card-value.lg { font-size: 40px; }
+    .card-value.sm { font-size: 22px; }
+    .card-value.green { color: var(--accent); }
+    .card-value.red   { color: var(--red); }
+    .card-value.blue  { color: var(--blue); }
+    .card-value.yellow{ color: var(--yellow); }
+    .card-value.dim   { color: var(--text2); }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 5px;
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Stat Row ─────────────────────────────────────────────────────────── */
+    .stat-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+    .stat-change { font-family: 'Menlo', monospace; }
+    .stat-change.up   { color: var(--accent); }
+    .stat-change.down { color: var(--red); }
+
+    /* ── Regime Badge ─────────────────────────────────────────────────────── */
+    .regime-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      border: 1px solid;
+    }
+
+    /* ── Banner ───────────────────────────────────────────────────────────── */
+    .banner {
+      border-radius: var(--radius2);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid;
+    }
+    .banner-warn {
+      background: rgba(255,51,51,0.06);
+      border-color: rgba(255,51,51,0.25);
+    }
+    .banner-info {
+      background: rgba(0,255,136,0.04);
+      border-color: rgba(0,255,136,0.2);
+    }
+    .banner-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .banner-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .banner-body {
+      font-size: 12.5px;
+      color: var(--text2);
+      line-height: 1.6;
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 9px 12px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Menlo', 'Courier New', monospace;
+      font-size: 12.5px;
+      color: var(--text2);
+    }
+    .data-table td:first-child { color: var(--text); font-family: inherit; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: var(--surface2); }
+    .data-table .green { color: var(--accent); }
+    .data-table .red   { color: var(--red); }
+
+    /* ── Chart Container ──────────────────────────────────────────────────── */
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+    }
+    .chart-wrap.tall   { height: 340px; }
+    .chart-wrap.xtall  { height: 420px; }
+    .chart-wrap.short  { height: 180px; }
+    .chart-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 14px;
+    }
+
+    /* ── Heatmap Table ────────────────────────────────────────────────────── */
+    .heatmap-wrap { overflow-x: auto; }
+    .heatmap {
+      border-collapse: collapse;
+      font-size: 11px;
+      width: 100%;
+    }
+    .heatmap th {
+      padding: 5px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text3);
+      white-space: nowrap;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .heatmap th.row-head { text-align: left; padding-right: 12px; }
+    .heatmap td {
+      width: 72px;
+      height: 44px;
+      text-align: center;
+      vertical-align: middle;
+      font-family: 'Menlo', monospace;
+      font-size: 10px;
+      border: 1px solid #0a0a0a;
+      transition: transform 0.1s;
+      cursor: default;
+    }
+    .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
+    .heatmap td.empty { background: #0d0d0d; }
+    .heatmap td.unstable {
+      border: 2px solid #ff3333 !important;
+      box-shadow: 0 0 8px rgba(255,51,51,0.4);
+    }
+    .heatmap .mat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text2);
+      font-family: inherit;
+      padding-right: 14px;
+      white-space: nowrap;
+    }
+
+    /* ── Progress Bars ────────────────────────────────────────────────────── */
+    .progress-bar-wrap { margin-top: 10px; }
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .progress-label {
+      width: 90px;
+      font-size: 11px;
+      color: var(--text2);
+      flex-shrink: 0;
+    }
+    .progress-track {
+      flex: 1;
+      height: 6px;
+      background: var(--border2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .progress-val {
+      width: 44px;
+      font-size: 11px;
+      color: var(--text2);
+      text-align: right;
+      font-family: 'Menlo', monospace;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 16px 0;
+    }
+
+    /* ── Tag/Pill ─────────────────────────────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .tag-green { background: rgba(0,255,136,0.12); color: var(--accent); border: 1px solid rgba(0,255,136,0.25); }
+    .tag-red   { background: rgba(255,51,51,0.1);  color: var(--red);    border: 1px solid rgba(255,51,51,0.25); }
+    .tag-blue  { background: rgba(51,136,255,0.1); color: var(--blue);   border: 1px solid rgba(51,136,255,0.25); }
+    .tag-dim   { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
+
+    /* ── Feller / Param Box ───────────────────────────────────────────────── */
+    .param-box {
+      text-align: center;
+      padding: 18px 12px;
+    }
+    .param-sym {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text3);
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .param-val {
+      font-size: 26px;
+      font-weight: 700;
+      font-family: 'Menlo', monospace;
+      letter-spacing: -0.02em;
+    }
+    .param-desc {
+      font-size: 10.5px;
+      color: var(--text3);
+      margin-top: 5px;
+    }
+
+    /* ── Utilities ────────────────────────────────────────────────────────── */
+    .mono { font-family: 'Menlo', 'Courier New', monospace; }
+    .bold { font-weight: 700; }
+    .mt8  { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+    .mt16 { margin-top: 16px; }
+    .mt20 { margin-top: 20px; }
+    .mb12 { margin-bottom: 12px; }
+    .flex { display: flex; align-items: center; }
+    .gap8 { gap: 8px; }
+    .gap12{ gap: 12px; }
+    .space-between { justify-content: space-between; }
+    .text-right { text-align: right; }
+    .opacity-50 { opacity: 0.5; }
+    .green { color: var(--accent); }
+    .red   { color: var(--red); }
+    .blue  { color: var(--blue); }
+    .dim   { color: var(--text2); }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Chart.js global overrides ────────────────────────────────────────── */
+    canvas { display: block; }
+
+    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
+    .top-banner {
+      height: 36px;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 12px;
+      font-size: 11px;
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .top-banner-links a {
+      color: #555;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      transition: color 0.15s;
+    }
+    .top-banner-links a:hover { color: #00ff88; }
+    .top-banner-sep { color: #333; }
+
+    /* ── Hamburger button (hidden on desktop) ──────────────────────────────── */
+    .nav-toggle {
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      gap: 5px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 8px;
+      margin-left: auto;
+      margin-right: 4px;
+    }
+    .nav-toggle span {
+      display: block;
+      width: 22px;
+      height: 2px;
+      background: var(--text2);
+      border-radius: 2px;
+      transition: all 0.2s;
+    }
+    .nav-toggle.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .nav-toggle.open span:nth-child(2) { opacity: 0; }
+    .nav-toggle.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+    /* ── Tablet (≤ 900px) ─────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .grid-4, .grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
+      .col-4, .col-3   { grid-column: 1 / -1 !important; }
+      .page  { padding: 16px !important; }
+      .nav   { padding: 0 12px; }
+      .nav-brand { margin-right: 12px; }
+    }
+
+    /* ── Mobile nav: hamburger (≤ 768px) ──────────────────────────────────── */
+    @media (max-width: 768px) {
+      .nav-toggle { display: flex; }
+      .nav-status { display: none; }          /* hide LIVE DATA text — too crowded */
+
+      .nav-links {
+        display: none;
+        position: absolute;
+        top: 52px; left: 0; right: 0;
+        background: #0d0d0d;
+        border-bottom: 1px solid var(--border2);
+        flex-direction: column;
+        padding: 6px 0;
+        z-index: 99;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      }
+      .nav-links.open { display: flex; }
+
+      .nav-link {
+        height: 44px;
+        padding: 0 20px;
+        border-bottom: none;
+        border-left: 2px solid transparent;
+      }
+      .nav-link.active {
+        border-left-color: var(--accent);
+        border-bottom-color: transparent;
+        background: rgba(0,255,136,0.05);
+      }
+
+      /* Tables: horizontal scroll instead of overflow */
+      .data-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        white-space: nowrap;
+      }
+      .data-table td:first-child { white-space: normal; min-width: 120px; }
+
+      /* Page header: badge drops below title */
+      .page-header { flex-wrap: wrap; gap: 4px; }
+      .page-badge  { margin-left: 0 !important; width: 100%; padding-top: 2px; }
+
+      /* Top banner: wrap instead of nowrap */
+      .top-banner {
+        height: auto;
+        padding: 6px 14px;
+        flex-wrap: wrap;
+        white-space: normal;
+        gap: 4px;
+      }
+
+      /* Col spans collapse on mobile */
+      .col-2 { grid-column: 1 / -1 !important; }
+    }
+
+    /* ── Small phone (≤ 480px) ───────────────────────────────────────────── */
+    @media (max-width: 480px) {
+      .grid-4, .grid-5,
+      .grid-3, .grid-2  { grid-template-columns: 1fr !important; }
+      .col-2, .col-3,
+      .col-4, .col-full { grid-column: 1 / -1 !important; }
+
+      .page       { padding: 10px !important; }
+      .card       { padding: 14px !important; }
+      .card-value { font-size: 26px !important; }
+      .card-value.lg { font-size: 30px !important; }
+
+      .chart-wrap       { height: 200px !important; }
+      .chart-wrap.tall  { height: 240px !important; }
+      .chart-wrap.xtall { height: 280px !important; }
+      .chart-wrap.short { height: 150px !important; }
+
+      .param-val  { font-size: 20px !important; }
+      .param-desc { font-size: 10px !important; }
+
+      .nav-brand span      { display: none; }
+      .top-banner-links    { display: none; }  /* hide GitHub/Substack/LinkedIn on tiny screens */
+      .top-banner-text     { font-size: 10px; }
+
+      .page-title    { font-size: 17px; }
+      .page-subtitle { display: none; }        /* "End-of-day regime + term structure" — skip on phone */
+
+      .banner { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .banner-icon { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="top-banner">
+  <div class="top-banner-text">
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 635 tests &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
+  </div>
+  <div class="top-banner-links">
+    <a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
+  </div>
+</div>
+
+<nav class="nav" style="position:relative;">
+  <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
+  <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="nav-links" id="navLinks">
+    <a href="index.html"            class="nav-link ">
+      <span class="nav-dot"></span>Live Market
+    </a>
+    <a href="calibration.html" class="nav-link active">
+      <span class="nav-dot"></span>Calibration
+    </a>
+    <a href="greeks.html"      class="nav-link ">
+      <span class="nav-dot"></span>Greeks Monitor
+    </a>
+    <a href="backtest.html"    class="nav-link ">
+      <span class="nav-dot"></span>Backtest
+    </a>
+  </div>
+  <div class="nav-status" title="End-of-day snapshot, auto-refreshed daily after the US market close">
+    <div class="status-dot"></div>
+    EOD DATA
+  </div>
+</nav>
+
+<main class="page">
+  
+<div class="page-header">
+  <div class="page-title">Joint Calibration Results</div>
+  <div class="page-subtitle">Heston 5-parameter · DE + L-BFGS-B</div>
+  <div class="page-badge">2026-05-31  ·  SPX = 7580.1  ·  r = 4.5%</div>
+</div>
+
+<!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
+
+<div class="banner banner-warn" style="margin-bottom:20px;">
+  <div class="banner-icon">⚠</div>
+  <div>
+    <div class="banner-title" style="color:#ff8833;">
+      ρ = -0.95  —  AT THE LOWER BOUNDARY (−0.95)
+    </div>
+    <div class="banner-body">
+      The Heston correlation parameter has hit its lower bound during calibration.
+      This indicates the model <strong style="color:var(--text);">cannot fully reproduce the steep 2026 SPX left skew</strong>
+      with a pure diffusion structure — jump risk or a non-affine model (e.g. rough Heston) is required.
+      The extreme negative ρ is the model's best approximation of the leverage effect,
+      revealing model misspecification.
+      <strong style="color:#ff8833;">VIX options leg is disabled (w₃ = 0.0)</strong> — RMSE was 37.14 vol pts, a structural failure of the CIR density, not a calibration failure.
+      Bates SVJ calibration was attempted — jump params degenerate on daily data (see Barndorff-Nielsen &amp; Shephard 2004). Heston remains the active model.
+    </div>
+  </div>
+</div>
+
+
+<!-- ── Feller Condition Banner ────────────────────────────────────────────── -->
+<div class="banner banner-info" style="margin-bottom:20px;">
+  <div class="banner-icon">✓</div>
+  <div>
+    <div class="banner-title" style="color:#00ff88;">
+      Feller Condition:  2κθ &gt; σ²
+       —  PASS
+    </div>
+    <div class="banner-body">
+      2κθ = 2 × 1.7685 × 0.06656 = <strong style="color:var(--text);">0.23543</strong>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+      σ² = 0.4603² = <strong style="color:var(--text);">0.21187</strong>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+      Margin = <strong style="color:#00ff88;">+0.023562</strong>
+      <br>
+      
+      The variance process stays strictly positive — the Heston SDE is well-posed.
+      
+    </div>
+  </div>
+</div>
+
+<!-- ── Parameter Cards ───────────────────────────────────────────────────── -->
+<div class="grid grid-5" style="margin-bottom:16px;">
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">κ  (kappa)</div>
+      <div class="param-val" style="color:var(--blue);">1.7685</div>
+      <div class="param-desc">Mean reversion speed</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = 98.7d</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">θ  (theta)</div>
+      <div class="param-val" style="color:var(--yellow);">0.06656</div>
+      <div class="param-desc">Long-run variance</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = 25.8% ann vol</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">σ  (vol-of-vol)</div>
+      <div class="param-val" style="color:var(--orange);">0.4603</div>
+      <div class="param-desc">Vol of variance</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Controls smile curvature</div>
+    </div>
+  </div>
+
+  <div class="card" style="border-color:rgba(255,136,51,0.4);background:rgba(255,136,51,0.04);">
+    <div class="param-box">
+      <div class="param-sym">ρ  (rho)</div>
+      <div class="param-val" style="color:#ff8833;">-0.95</div>
+      <div class="param-desc">Spot-vol correlation</div>
+      
+      <div style="margin-top:6px;"><span class="tag tag-red">AT BOUNDARY</span></div>
+      
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="param-box">
+      <div class="param-sym">v₀  (v-naught)</div>
+      <div class="param-val" style="color:var(--accent);">0.01265</div>
+      <div class="param-desc">Initial variance</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = 11.25% spot vol</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── RMSE Cards ────────────────────────────────────────────────────────── -->
+<div class="grid grid-4" style="margin-bottom:16px;">
+
+  <div class="card">
+    <div class="card-label">SPX IV RMSE</div>
+    <div class="card-value sm green">
+      0.523 vol pts
+    </div>
+    <div class="card-sub mt8">
+      Good fit
+      
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">VIX Futures RMSE</div>
+    <div class="card-value sm yellow">
+      0.528 pts
+    </div>
+    <div class="card-sub mt8">
+      Acceptable futures fit
+      
+    </div>
+  </div>
+
+  <div class="card" style="border-color:rgba(100,100,100,0.3);background:rgba(50,50,50,0.04);">
+    <div class="card-label" style="color:var(--text2);">VIX Options RMSE</div>
+    <div class="card-value sm" style="color:#555;">DISABLED</div>
+    <div class="card-sub mt8" style="color:#555;">
+      Heston CIR density underestimates vol-of-vol path uncertainty.
+      RMSE was 37.14 pts — structural failure. w₃ = 0.0 (was 0.2).
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Calibration Performance</div>
+    <div class="card-value sm green">11.1s</div>
+    <div class="card-sub mt8">7,974 evaluations</div>
+    <div class="card-sub">DE (120 iter × 40) + L-BFGS-B</div>
+  </div>
+
+</div>
+
+<!-- ── SPX Smile + Info ───────────────────────────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- Multi-maturity smile -->
+  <div class="card">
+    <div class="chart-title">SPX Implied Volatility Smile — All Maturities</div>
+    <div class="chart-wrap tall">
+      <canvas id="smileChart" role="img" aria-label="SPX implied volatility smile vs strike"></canvas>
+    </div>
+  </div>
+
+  <!-- Calibration summary table -->
+  <div class="card">
+    <div class="chart-title">Calibrated Parameter Summary</div>
+
+    <table class="data-table mt8">
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Symbol</th>
+          <th>Value</th>
+          <th>Interpretation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Mean reversion</td>
+          <td class="mono">κ</td>
+          <td class="mono blue">1.7685</td>
+          <td>Half-life ≈ 99 trading days</td>
+        </tr>
+        <tr>
+          <td>Long-run vol</td>
+          <td class="mono">√θ</td>
+          <td class="mono yellow">25.8%</td>
+          <td>Steady-state implied vol target</td>
+        </tr>
+        <tr>
+          <td>Vol-of-vol</td>
+          <td class="mono">σ</td>
+          <td class="mono" style="color:var(--orange);">0.4603</td>
+          <td>High: drives strong skew / smile</td>
+        </tr>
+        <tr>
+          <td>Correlation</td>
+          <td class="mono">ρ</td>
+          <td class="mono" style="color:#ff8833;">
+            -0.95
+            <span class="tag tag-red" style="font-size:9px;margin-left:6px;">⚠ BOUNDARY</span>
+          </td>
+          <td>Extreme leverage effect — needs jumps</td>
+        </tr>
+        <tr>
+          <td>Spot vol</td>
+          <td class="mono">√v₀</td>
+          <td class="mono green">11.25%</td>
+          <td>Current instantaneous vol</td>
+        </tr>
+        <tr>
+          <td>Risk-free rate</td>
+          <td class="mono">r</td>
+          <td class="mono">4.5%</td>
+          <td>USD 6M SOFR (2026-03)</td>
+        </tr>
+        <tr>
+          <td>Dividend yield</td>
+          <td class="mono">q</td>
+          <td class="mono">1.3%</td>
+          <td>SPX continuous div yield</td>
+        </tr>
+        <tr>
+          <td>Feller margin</td>
+          <td class="mono">2κθ − σ²</td>
+          <td class="mono green">
+            +0.023562
+          </td>
+          <td>PASS — variance stays positive</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="divider"></div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
+      <div>SPX level: <span class="mono green">7580.1</span></div>
+      <div>As-of date: <span class="mono">2026-05-31</span></div>
+      <div>Fit time: <span class="mono green">11.1s</span></div>
+      <div>DE evaluations: <span class="mono">7,974</span></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── RMSE bar comparison ────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="chart-title">RMSE Decomposition — Loss Components</div>
+  <div class="chart-wrap short">
+    <canvas id="rmseChart" role="img" aria-label="Calibration RMSE comparison across legs"></canvas>
+  </div>
+</div>
+
+<!-- HMM classifier note -->
+<div class="card" style="margin-bottom:16px;">
+  <div style="padding:10px 14px;border-radius:6px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);">
+    <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">HMM Regime Classifier — Limitations</div>
+    <div style="font-size:11.5px;color:var(--text2);line-height:1.6;">
+      HMM trained 2010–2019. Out-of-distribution on 2025 tariff regime — misclassifies 2025-04-09 as R1.
+      Use XGBoost for production classification.
+      HMM is available as a research alternative via <span class="mono">HMMRegimeClassifier</span> in
+      <span class="mono">regime_classifier.py</span>.
+    </div>
+  </div>
+</div>
+
+<!-- ── C13: Quintic OU Research Panel ────────────────────────────────────── -->
+
+<div class="card" style="margin-bottom:16px;border-color:rgba(0,255,136,0.2);background:rgba(0,255,136,0.02);">
+  <div class="chart-title" style="color:var(--green);">C13 — Two-Factor Quintic OU Model (Research)</div>
+  <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">
+    σ(t) = g₀(t) · p(Z_t) &nbsp;·&nbsp; Z_t = θX_t + (1−θ)Y_t &nbsp;·&nbsp;
+    p(z) = α₀ + α₁z + α₃z³ + α₅z⁵ &nbsp;·&nbsp;
+    VIX priced via 2D Gauss-Hermite ≈ 500 pts
+  </div>
+
+  <div class="grid grid-2" style="gap:16px;">
+
+    <!-- Parameters table -->
+    <div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Parameter</th>
+            <th>Symbol</th>
+            <th>Value</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Fast OU speed</td>
+            <td class="mono">λx</td>
+            <td class="mono blue">168.48</td>
+            <td>Fast factor half-life ≈ 1.04d</td>
+          </tr>
+          <tr>
+            <td>Slow OU speed</td>
+            <td class="mono">λy</td>
+            <td class="mono blue">10.543</td>
+            <td>Slow factor half-life ≈ 16.6d</td>
+          </tr>
+          <tr>
+            <td>Factor weight</td>
+            <td class="mono">θ</td>
+            <td class="mono yellow">2.8539</td>
+            <td>Fast-factor loading in Z_t</td>
+          </tr>
+          <tr>
+            <td>Poly constant</td>
+            <td class="mono">α₀</td>
+            <td class="mono">0.4061</td>
+            <td>Sets vol floor</td>
+          </tr>
+          <tr>
+            <td>Poly linear</td>
+            <td class="mono">α₁</td>
+            <td class="mono">-0.9404</td>
+            <td>Linear skew driver</td>
+          </tr>
+          <tr>
+            <td>Poly cubic</td>
+            <td class="mono">α₃</td>
+            <td class="mono">0.8877</td>
+            <td>Smile curvature</td>
+          </tr>
+          <tr>
+            <td>Poly quintic</td>
+            <td class="mono">α₅</td>
+            <td class="mono">-0.4895</td>
+            <td>Wing correction</td>
+          </tr>
+          <tr>
+            <td>Leverage (corr)</td>
+            <td class="mono">ε</td>
+            <td class="mono green">
+              -0.1823
+              
+            </td>
+            <td>Spot-vol correlation (leverage)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- RMSE comparison -->
+    <div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Metric</th><th>Heston</th><th>Quintic OU</th><th>Δ</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SPX IV RMSE (vp)</td>
+            <td class="mono">0.523</td>
+            <td class="mono yellow">
+              2.343
+            </td>
+            <td class="mono red">
+              +1.820
+            </td>
+          </tr>
+          <tr>
+            <td>VIX Fut RMSE (pts)</td>
+            <td class="mono">0.528</td>
+            <td class="mono green">
+              0.001
+            </td>
+            <td class="mono green">
+              -0.527
+            </td>
+          </tr>
+          <tr>
+            <td>VIX Opt RMSE (vp)</td>
+            <td class="mono" style="color:#555;">DISABLED</td>
+            <td class="mono yellow">
+              17.53
+            </td>
+            <td class="mono" style="color:#555;">—</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
+        <div>Fit time: <span class="mono green">2751.8s</span></div>
+        <div>Evaluations: <span class="mono">2,813</span></div>
+        <div>MC paths: <span class="mono">6,000/expiry</span></div>
+        <div>VIX quad: <span class="mono">18² = 324 pts</span></div>
+      </div>
+
+      <div style="margin-top:12px;padding:8px 10px;border-radius:4px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.15);font-size:11px;color:var(--text2);line-height:1.6;">
+        <strong style="color:var(--green);">Key advance over Heston:</strong>
+        VIX options are analytically tractable via 2D Gauss-Hermite quadrature — no structural failure of the pricing kernel.
+        The non-affine polynomial structure captures steep SPX left skew without rho saturating.
+        VIX futures fit to <span class="mono">0.001 pts</span> — <strong style="color:#ff8833;">by construction, not model skill</strong>: ξ₀ is bootstrapped from the same VIX term structure being fit (and no tradable futures prices exist in the DB; the "futures" leg is an index proxy). Quote the SPX-leg RMSE (2.34 vp) as the real fit quality.
+        Model: <span class="mono">models/quintic_ou.py</span> ·
+        Calibrator: <span class="mono">calibration/quintic_calibrator.py</span>
+      </div>
+
+      <div style="margin-top:8px;padding:8px 10px;border-radius:4px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);font-size:11px;color:var(--text2);line-height:1.6;">
+        <strong style="color:#ff8833;">Honest limitation:</strong>
+        VIX-option RMSE of <span class="mono">~17.5 vp</span> beats Heston's <span class="mono">37.1 vp</span> (a ~53% reduction)
+        but does not yet reach the <span class="mono">&lt;10 vp</span> research target. The residual is in the VIX-smile wings —
+        the degree-5 polynomial under-fits far-OTM VIX calls. A higher-degree map or a second
+        stochastic driver is the next step. Reported as measured, not as a hit target.
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+</main>
+
+<script>
+  // Hamburger nav toggle
+  (function() {
+    var btn   = document.getElementById('navToggle');
+    var links = document.getElementById('navLinks');
+    if (!btn || !links) return;
+    btn.addEventListener('click', function() {
+      var open = links.classList.toggle('open');
+      btn.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', open);
+    });
+    // Close menu when any nav link is tapped (SPA-style)
+    links.querySelectorAll('.nav-link').forEach(function(a) {
+      a.addEventListener('click', function() {
+        links.classList.remove('open');
+        btn.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+    // Close menu when tapping outside
+    document.addEventListener('click', function(e) {
+      if (!btn.contains(e.target) && !links.contains(e.target)) {
+        links.classList.remove('open');
+        btn.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
+
+  // Chart.js global dark-theme defaults
+  Chart.defaults.color            = '#666';
+  Chart.defaults.borderColor      = '#1f1f1f';
+  Chart.defaults.plugins.legend.labels.color = '#888';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
+  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
+  Chart.defaults.plugins.tooltip.borderWidth       = 1;
+  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
+  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
+  Chart.defaults.plugins.tooltip.padding           = 10;
+
+  function makeLineOpts(yLabel) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+
+  function makeBarOpts(yLabel, horizontal) {
+    return {
+      indexAxis: horizontal ? 'y' : 'x',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+</script>
+
+
+<script>
+  // Multi-maturity smile chart
+  const smileCtx = document.getElementById('smileChart').getContext('2d');
+  const matSmiles = [{"T": 14, "color": "#ff3333", "iv": [38.916, 37.399, 35.808, 34.122, 32.304, 30.312, 28.087, 25.519, 22.379, 12.105, 16.357, 20.773, 24.906, 28.746], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0929, 0.1321, 0.1714, 0.2107, 0.25]}, {"T": 30, "color": "#ff8844", "iv": [38.159, 36.718, 35.19, 33.56, 31.804, 29.888, 27.758, 25.323, 22.401, 4.999, 10.251, 20.155], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.1321, 0.2107, 0.25]}, {"T": 60, "color": "#ffcc00", "iv": [36.955, 35.59, 34.148, 32.616, 30.973, 29.194, 27.237, 25.04, 22.49, 19.365], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536]}, {"T": 91, "color": "#00ff88", "iv": [35.869, 34.582, 33.227, 31.793, 30.265, 28.623, 26.839, 24.87, 22.652, 20.081], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536]}, {"T": 180, "color": "#44aaff", "iv": [33.538, 32.458, 31.332, 30.157, 28.925, 27.629, 26.258, 24.8, 23.24, 21.557, 19.72], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, 0.0929]}, {"T": 365, "color": "#aa44ff", "iv": [30.971, 30.205, 29.419, 28.611, 27.781, 26.925, 26.043, 25.13, 24.184, 23.2, 22.174, 21.101], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, 0.0929, 0.1321]}];
+
+  new Chart(smileCtx, {
+    type: 'line',
+    data: {
+      datasets: matSmiles.map(s => ({
+        label: s.T + 'd',
+        data: s.lm.map((x, i) => ({ x, y: s.iv[i] })),
+        borderColor: s.color,
+        backgroundColor: 'transparent',
+        tension: 0.25,
+        pointRadius: 3,
+        pointBackgroundColor: s.color,
+        borderWidth: 2,
+      }))
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          labels: { color: '#888', font: { family: 'Menlo', size: 10 }, boxWidth: 20 }
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} vol pts`
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'Log-Moneyness  ln(K/F)', color: '#444', font: { size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 }, callback: v => v.toFixed(1) + '%' },
+          title: { display: true, text: 'Implied Vol (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+
+  // RMSE comparison bar
+  const rmseCtx = document.getElementById('rmseChart').getContext('2d');
+  new Chart(rmseCtx, {
+    type: 'bar',
+    data: {
+      labels: ['SPX IV RMSE', 'VIX Futures RMSE', 'VIX Options RMSE'],
+      datasets: [{
+        data: [0.523, 0.528, 0.0],
+        backgroundColor: ['#3388ff', '#00ff88', '#ff3333'],
+        borderRadius: 4,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  RMSE: ${ctx.parsed.y.toFixed(3)} pts`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#888', font: { size: 11 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: true, text: 'RMSE (vol pts / VIX pts)', color: '#444', font: { size: 10 } },
+        },
+      }
+    }
+  });
+</script>
+
+
+</body>
+</html>

@@ -1,0 +1,1228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Market — Vol System</title>
+  <!-- Inline SVG favicon (volatility smile, brand colours) — no file needed -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%2300ff88' stroke-width='3' stroke-linecap='round'/></svg>">
+  <meta name="theme-color" content="#0a0a0a">
+  <!-- Open Graph — LinkedIn / Twitter / Substack link preview -->
+  <meta property="og:type"         content="website">
+  <meta property="og:url"          content="https://navnoorbawa.me/">
+  <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
+  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 635 tests. Live dashboard.">
+  <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
+  <meta property="og:image:width"  content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 635 tests, documented negative result.">
+  <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
+  <meta name="author"              content="Navnoor Bawa">
+  <link rel="canonical"            href="https://navnoorbawa.me/">
+  <meta name="twitter:card"        content="summary_large_image">
+  <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
+  <meta name="description"         content="Joint SPX/VIX smile calibration system. Heston, SVI/SSVI, Quintic OU, regime classifier, full backtest 2018–2025.">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Reset & Base ────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a0a;
+      --surface:  #111111;
+      --surface2: #161616;
+      --border:   #1f1f1f;
+      --border2:  #2a2a2a;
+      --accent:   #00ff88;
+      --accent2:  #00cc6a;
+      --text:     #e4e4e4;
+      --text2:    #888888;
+      --text3:    #555555;
+      --red:      #ff3333;
+      --red2:     #cc1111;
+      --blue:     #3388ff;
+      --yellow:   #ffcc00;
+      --orange:   #ff8833;
+      --purple:   #aa44ff;
+      --radius:   6px;
+      --radius2:  10px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Navigation ─────────────────────────────────────────────────────── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0d0d0d;
+      border-bottom: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      height: 52px;
+      gap: 0;
+    }
+
+    .nav-brand {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-right: 36px;
+      white-space: nowrap;
+    }
+    .nav-brand span { color: var(--text2); font-weight: 400; }
+
+    .nav-links { display: flex; gap: 0; }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 18px;
+      height: 52px;
+      color: var(--text2);
+      text-decoration: none;
+      font-size: 12.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
+    .nav-link.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .nav-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.6;
+    }
+
+    .nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text3);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Page Layout ─────────────────────────────────────────────────────── */
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 28px 28px 60px;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .page-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text3);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .page-badge {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text3);
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Grid Helpers ────────────────────────────────────────────────────── */
+    .grid       { display: grid; gap: 16px; }
+    .grid-2     { grid-template-columns: repeat(2, 1fr); }
+    .grid-3     { grid-template-columns: repeat(3, 1fr); }
+    .grid-4     { grid-template-columns: repeat(4, 1fr); }
+    .grid-5     { grid-template-columns: repeat(5, 1fr); }
+    .col-2      { grid-column: span 2; }
+    .col-3      { grid-column: span 3; }
+    .col-4      { grid-column: span 4; }
+    .col-full   { grid-column: 1 / -1; }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius2);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent);
+    }
+
+    .card-sm { padding: 16px; }
+    .card-lg { padding: 28px; }
+
+    .card-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 8px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      font-family: 'Menlo', 'Courier New', monospace;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .card-value.lg { font-size: 40px; }
+    .card-value.sm { font-size: 22px; }
+    .card-value.green { color: var(--accent); }
+    .card-value.red   { color: var(--red); }
+    .card-value.blue  { color: var(--blue); }
+    .card-value.yellow{ color: var(--yellow); }
+    .card-value.dim   { color: var(--text2); }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 5px;
+      font-family: 'Menlo', 'Courier New', monospace;
+    }
+
+    /* ── Stat Row ─────────────────────────────────────────────────────────── */
+    .stat-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text2);
+    }
+    .stat-change { font-family: 'Menlo', monospace; }
+    .stat-change.up   { color: var(--accent); }
+    .stat-change.down { color: var(--red); }
+
+    /* ── Regime Badge ─────────────────────────────────────────────────────── */
+    .regime-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      border: 1px solid;
+    }
+
+    /* ── Banner ───────────────────────────────────────────────────────────── */
+    .banner {
+      border-radius: var(--radius2);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid;
+    }
+    .banner-warn {
+      background: rgba(255,51,51,0.06);
+      border-color: rgba(255,51,51,0.25);
+    }
+    .banner-info {
+      background: rgba(0,255,136,0.04);
+      border-color: rgba(0,255,136,0.2);
+    }
+    .banner-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .banner-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .banner-body {
+      font-size: 12.5px;
+      color: var(--text2);
+      line-height: 1.6;
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 9px 12px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Menlo', 'Courier New', monospace;
+      font-size: 12.5px;
+      color: var(--text2);
+    }
+    .data-table td:first-child { color: var(--text); font-family: inherit; }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:hover td { background: var(--surface2); }
+    .data-table .green { color: var(--accent); }
+    .data-table .red   { color: var(--red); }
+
+    /* ── Chart Container ──────────────────────────────────────────────────── */
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+    }
+    .chart-wrap.tall   { height: 340px; }
+    .chart-wrap.xtall  { height: 420px; }
+    .chart-wrap.short  { height: 180px; }
+    .chart-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 14px;
+    }
+
+    /* ── Heatmap Table ────────────────────────────────────────────────────── */
+    .heatmap-wrap { overflow-x: auto; }
+    .heatmap {
+      border-collapse: collapse;
+      font-size: 11px;
+      width: 100%;
+    }
+    .heatmap th {
+      padding: 5px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text3);
+      white-space: nowrap;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .heatmap th.row-head { text-align: left; padding-right: 12px; }
+    .heatmap td {
+      width: 72px;
+      height: 44px;
+      text-align: center;
+      vertical-align: middle;
+      font-family: 'Menlo', monospace;
+      font-size: 10px;
+      border: 1px solid #0a0a0a;
+      transition: transform 0.1s;
+      cursor: default;
+    }
+    .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
+    .heatmap td.empty { background: #0d0d0d; }
+    .heatmap td.unstable {
+      border: 2px solid #ff3333 !important;
+      box-shadow: 0 0 8px rgba(255,51,51,0.4);
+    }
+    .heatmap .mat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text2);
+      font-family: inherit;
+      padding-right: 14px;
+      white-space: nowrap;
+    }
+
+    /* ── Progress Bars ────────────────────────────────────────────────────── */
+    .progress-bar-wrap { margin-top: 10px; }
+    .progress-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .progress-label {
+      width: 90px;
+      font-size: 11px;
+      color: var(--text2);
+      flex-shrink: 0;
+    }
+    .progress-track {
+      flex: 1;
+      height: 6px;
+      background: var(--border2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .progress-val {
+      width: 44px;
+      font-size: 11px;
+      color: var(--text2);
+      text-align: right;
+      font-family: 'Menlo', monospace;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 16px 0;
+    }
+
+    /* ── Tag/Pill ─────────────────────────────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .tag-green { background: rgba(0,255,136,0.12); color: var(--accent); border: 1px solid rgba(0,255,136,0.25); }
+    .tag-red   { background: rgba(255,51,51,0.1);  color: var(--red);    border: 1px solid rgba(255,51,51,0.25); }
+    .tag-blue  { background: rgba(51,136,255,0.1); color: var(--blue);   border: 1px solid rgba(51,136,255,0.25); }
+    .tag-dim   { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
+
+    /* ── Feller / Param Box ───────────────────────────────────────────────── */
+    .param-box {
+      text-align: center;
+      padding: 18px 12px;
+    }
+    .param-sym {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text3);
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .param-val {
+      font-size: 26px;
+      font-weight: 700;
+      font-family: 'Menlo', monospace;
+      letter-spacing: -0.02em;
+    }
+    .param-desc {
+      font-size: 10.5px;
+      color: var(--text3);
+      margin-top: 5px;
+    }
+
+    /* ── Utilities ────────────────────────────────────────────────────────── */
+    .mono { font-family: 'Menlo', 'Courier New', monospace; }
+    .bold { font-weight: 700; }
+    .mt8  { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+    .mt16 { margin-top: 16px; }
+    .mt20 { margin-top: 20px; }
+    .mb12 { margin-bottom: 12px; }
+    .flex { display: flex; align-items: center; }
+    .gap8 { gap: 8px; }
+    .gap12{ gap: 12px; }
+    .space-between { justify-content: space-between; }
+    .text-right { text-align: right; }
+    .opacity-50 { opacity: 0.5; }
+    .green { color: var(--accent); }
+    .red   { color: var(--red); }
+    .blue  { color: var(--blue); }
+    .dim   { color: var(--text2); }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Chart.js global overrides ────────────────────────────────────────── */
+    canvas { display: block; }
+
+    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
+    .top-banner {
+      height: 36px;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 12px;
+      font-size: 11px;
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .top-banner-links a {
+      color: #555;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      transition: color 0.15s;
+    }
+    .top-banner-links a:hover { color: #00ff88; }
+    .top-banner-sep { color: #333; }
+
+    /* ── Hamburger button (hidden on desktop) ──────────────────────────────── */
+    .nav-toggle {
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      gap: 5px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 8px;
+      margin-left: auto;
+      margin-right: 4px;
+    }
+    .nav-toggle span {
+      display: block;
+      width: 22px;
+      height: 2px;
+      background: var(--text2);
+      border-radius: 2px;
+      transition: all 0.2s;
+    }
+    .nav-toggle.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .nav-toggle.open span:nth-child(2) { opacity: 0; }
+    .nav-toggle.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+    /* ── Tablet (≤ 900px) ─────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .grid-4, .grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
+      .col-4, .col-3   { grid-column: 1 / -1 !important; }
+      .page  { padding: 16px !important; }
+      .nav   { padding: 0 12px; }
+      .nav-brand { margin-right: 12px; }
+    }
+
+    /* ── Mobile nav: hamburger (≤ 768px) ──────────────────────────────────── */
+    @media (max-width: 768px) {
+      .nav-toggle { display: flex; }
+      .nav-status { display: none; }          /* hide LIVE DATA text — too crowded */
+
+      .nav-links {
+        display: none;
+        position: absolute;
+        top: 52px; left: 0; right: 0;
+        background: #0d0d0d;
+        border-bottom: 1px solid var(--border2);
+        flex-direction: column;
+        padding: 6px 0;
+        z-index: 99;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      }
+      .nav-links.open { display: flex; }
+
+      .nav-link {
+        height: 44px;
+        padding: 0 20px;
+        border-bottom: none;
+        border-left: 2px solid transparent;
+      }
+      .nav-link.active {
+        border-left-color: var(--accent);
+        border-bottom-color: transparent;
+        background: rgba(0,255,136,0.05);
+      }
+
+      /* Tables: horizontal scroll instead of overflow */
+      .data-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        white-space: nowrap;
+      }
+      .data-table td:first-child { white-space: normal; min-width: 120px; }
+
+      /* Page header: badge drops below title */
+      .page-header { flex-wrap: wrap; gap: 4px; }
+      .page-badge  { margin-left: 0 !important; width: 100%; padding-top: 2px; }
+
+      /* Top banner: wrap instead of nowrap */
+      .top-banner {
+        height: auto;
+        padding: 6px 14px;
+        flex-wrap: wrap;
+        white-space: normal;
+        gap: 4px;
+      }
+
+      /* Col spans collapse on mobile */
+      .col-2 { grid-column: 1 / -1 !important; }
+    }
+
+    /* ── Small phone (≤ 480px) ───────────────────────────────────────────── */
+    @media (max-width: 480px) {
+      .grid-4, .grid-5,
+      .grid-3, .grid-2  { grid-template-columns: 1fr !important; }
+      .col-2, .col-3,
+      .col-4, .col-full { grid-column: 1 / -1 !important; }
+
+      .page       { padding: 10px !important; }
+      .card       { padding: 14px !important; }
+      .card-value { font-size: 26px !important; }
+      .card-value.lg { font-size: 30px !important; }
+
+      .chart-wrap       { height: 200px !important; }
+      .chart-wrap.tall  { height: 240px !important; }
+      .chart-wrap.xtall { height: 280px !important; }
+      .chart-wrap.short { height: 150px !important; }
+
+      .param-val  { font-size: 20px !important; }
+      .param-desc { font-size: 10px !important; }
+
+      .nav-brand span      { display: none; }
+      .top-banner-links    { display: none; }  /* hide GitHub/Substack/LinkedIn on tiny screens */
+      .top-banner-text     { font-size: 10px; }
+
+      .page-title    { font-size: 17px; }
+      .page-subtitle { display: none; }        /* "End-of-day regime + term structure" — skip on phone */
+
+      .banner { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .banner-icon { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="top-banner">
+  <div class="top-banner-text">
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 635 tests &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
+  </div>
+  <div class="top-banner-links">
+    <a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
+    <span class="top-banner-sep">·</span>
+    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
+  </div>
+</div>
+
+<nav class="nav" style="position:relative;">
+  <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
+  <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="nav-links" id="navLinks">
+    <a href="index.html"            class="nav-link active">
+      <span class="nav-dot"></span>Live Market
+    </a>
+    <a href="calibration.html" class="nav-link ">
+      <span class="nav-dot"></span>Calibration
+    </a>
+    <a href="greeks.html"      class="nav-link ">
+      <span class="nav-dot"></span>Greeks Monitor
+    </a>
+    <a href="backtest.html"    class="nav-link ">
+      <span class="nav-dot"></span>Backtest
+    </a>
+  </div>
+  <div class="nav-status" title="End-of-day snapshot, auto-refreshed daily after the US market close">
+    <div class="status-dot"></div>
+    EOD DATA
+  </div>
+</nav>
+
+<main class="page">
+  
+<div class="page-header">
+  <div class="page-title">Live Market Overview</div>
+  <div class="page-subtitle">End-of-day regime + term structure</div>
+  <div class="page-badge" id="freshness-badge">
+    <span data-date="2026-06-18">Last close: 2026-06-18</span>
+    &nbsp;·&nbsp; Calibration: 2026-05-31
+    &nbsp;·&nbsp; Regime: 2026-06-24
+  </div>
+</div>
+<script>
+/* View-time data-freshness check. The site is a static end-of-day snapshot,
+   refreshed daily after the US close. This compares the snapshot's last-close
+   date against the most recent US session that SHOULD have data by now (in the
+   viewer's clock), so a Friday close viewed on a Monday morning reads
+   "latest session" instead of looking stale. */
+(function () {
+  var badge = document.getElementById('freshness-badge');
+  if (!badge) return;
+  var span = badge.querySelector('[data-date]');
+  var dd = span && span.getAttribute('data-date');
+  if (!dd || !/^\d{4}-\d{2}-\d{2}$/.test(dd)) return;
+  var d = new Date(dd + 'T00:00:00Z');
+  var probe = new Date();                                  // viewer's now
+  // US cash equities settle EOD data by ~22:00 UTC; before that, "today" has no close yet.
+  if (probe.getUTCHours() < 22) probe.setUTCDate(probe.getUTCDate() - 1);
+  while (probe.getUTCDay() === 0 || probe.getUTCDay() === 6) probe.setUTCDate(probe.getUTCDate() - 1);
+  var expected = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
+  var dataDay  = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  var note = document.createElement('span');
+  if (dataDay >= expected) {
+    note.innerHTML = ' &nbsp;·&nbsp; <span style="color:#00ff88;">✓ latest U.S. session</span>';
+  } else {
+    note.innerHTML = ' &nbsp;·&nbsp; <span style="color:#ffaa33;">⟳ refreshes after next U.S. close</span>';
+  }
+  badge.appendChild(note);
+})();
+</script>
+
+<!-- ── Row 1: Key stats ──────────────────────────────────────────────────── -->
+<div class="grid grid-4" style="margin-bottom:16px;">
+
+  <!-- SPX -->
+  <div class="card card-sm">
+    <div class="card-label">S&P 500</div>
+    <div class="card-value">7,500.58</div>
+    <div class="stat-row">
+      <span class="stat-change up">
+        +1.08%
+      </span>
+      <span style="color:var(--text3)">vs prev close</span>
+    </div>
+    <div class="card-sub" style="margin-top:10px;">2026-06-18</div>
+  </div>
+
+  <!-- VIX -->
+  <div class="card card-sm">
+    <div class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></div>
+    <div class="card-value green">
+      16.40
+    </div>
+    <div class="card-sub" style="margin-top:10px;">
+      🟢 NORMAL range
+      
+    </div>
+  </div>
+
+  <!-- VVIX -->
+  <div class="card card-sm">
+    <div class="card-label">VVIX  <span style="color:var(--text3);font-size:9px;">VOL-OF-VOL</span></div>
+    <div class="card-value dim">
+      88.43
+    </div>
+    <div class="card-sub" style="margin-top:10px;">
+      Normal VVIX
+      
+    </div>
+  </div>
+
+  <!-- TS Regime -->
+  <div class="card card-sm">
+    <div class="card-label">Term Structure</div>
+    <div class="card-value sm" style="color:#00ff88;">
+      CONTANGO
+    </div>
+    
+    <div class="card-sub" style="margin-top:8px;">
+      Front=13.93  →  Back=21.99
+    </div>
+    <div class="card-sub">
+      Slope=+8.06 pts
+    </div>
+    
+  </div>
+
+</div>
+
+<!-- ── Row 2: Regime + PDV ───────────────────────────────────────────────── -->
+<div class="grid grid-3" style="margin-bottom:16px;">
+
+  <!-- Current Regime -->
+  <div class="card" style="grid-column: span 1;">
+    <div class="card-label">Current Regime — rule-based label</div>
+
+    <div class="flex gap12 mt8" style="align-items:flex-start;">
+      <div style="flex:1;">
+        <div style="
+          display:inline-flex; align-items:center; gap:10px;
+          padding:10px 18px; border-radius:8px;
+          background:#3388ff18;
+          border:1px solid #3388ff44;
+          margin-bottom:8px;
+        ">
+          <div style="width:10px;height:10px;border-radius:50%;background:#3388ff;box-shadow:0 0 8px #3388ff;"></div>
+          <span style="font-size:16px;font-weight:800;letter-spacing:0.04em;color:#3388ff;">
+            R0 · LONG GAMMA
+          </span>
+        </div>
+        <div class="card-sub" style="margin-bottom:14px;">
+          Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
+          trades on. As of 2026-06-24.
+        </div>
+
+        <!-- ML classifier: research-only (demoted, C17) -->
+        <div class="flex space-between" style="margin-bottom:6px;">
+          <span style="font-size:11px;color:var(--text2);">
+            ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
+          </span>
+          <span class="mono" style="font-size:13px;font-weight:700;color:#ff3333;">
+            R2 · 70.0%
+          </span>
+        </div>
+
+        <!-- Probability bars (classifier output) -->
+        <div class="progress-bar-wrap">
+          <div class="progress-row">
+            <div class="progress-label" style="font-size:10px;">R0 LONG γ</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:2.3%;background:#3388ff;"></div>
+            </div>
+            <div class="progress-val">2.3%</div>
+          </div>
+          <div class="progress-row">
+            <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:27.7%;background:#00ff88;"></div>
+            </div>
+            <div class="progress-val">27.7%</div>
+          </div>
+          <div class="progress-row">
+            <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:70.0%;background:#ff3333;"></div>
+            </div>
+            <div class="progress-val">70.0%</div>
+          </div>
+        </div>
+
+        <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
+          Classifier disagrees with the rule label here — 63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+        </div>
+      </div>
+    </div>
+
+    <!-- Regime legend -->
+    <div class="divider"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:10.5px;">
+      <div style="padding:8px;border-radius:6px;background:rgba(51,136,255,0.07);border:1px solid rgba(51,136,255,0.2);">
+        <div style="color:#3388ff;font-weight:700;margin-bottom:2px;">R0</div>
+        <div style="color:var(--text3);">Low VIX / backwardation → buy straddles</div>
+      </div>
+      <div style="padding:8px;border-radius:6px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.18);">
+        <div style="color:#00ff88;font-weight:700;margin-bottom:2px;">R1</div>
+        <div style="color:var(--text3);">Normal contango → sell premium</div>
+      </div>
+      <div style="padding:8px;border-radius:6px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.2);">
+        <div style="color:#ff3333;font-weight:700;margin-bottom:2px;">R2</div>
+        <div style="color:var(--text3);">High VVIX → vomma trades</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDV Forecast vs ATM -->
+  <div class="card" style="grid-column: span 1;">
+    <div class="card-label">PDV Model Forecast vs ATM Implied</div>
+    <div class="mt8">
+      <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
+        <div>
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">CURRENT VIX (30D IMPLIED)</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">16.40%</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">PDV FORECAST (REALISED)</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:#ffcc00;">8.37%</div>
+        </div>
+      </div>
+
+      <div style="padding:14px 0;text-align:center;">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">IMPLIED − REALISED SPREAD</div>
+        <div class="mono" style="font-size:36px;font-weight:800;color:#ff8833;">
+          +8.03pp
+        </div>
+        <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
+          Moderate vol risk premium → favours short vol strategies
+          
+        </div>
+
+        <!-- Historical context — percentile warning (Fix 2) -->
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;">
+
+          <!-- Percentile badge — large and prominent -->
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
+            <div style="font-size:28px;font-weight:800;color:#ff9900;font-family:'Menlo','Monaco',monospace;line-height:1;">
+              0.1th
+            </div>
+            <div style="color:var(--text2);font-size:11px;line-height:1.4;">
+              percentile<br>
+              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+1.84pp</span></span>
+            </div>
+          </div>
+
+          <!-- Amber warning box when percentile is high -->
+          
+          <div style="
+            background: rgba(51,136,255,0.07);
+            border: 1px solid rgba(51,136,255,0.3);
+            border-radius: 6px;
+            padding: 9px 12px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            line-height: 1.6;
+            color: #5588cc;
+          ">
+            <span style="font-weight:700;color:#3388ff;">&#9432; Spread at 0.1th percentile</span>
+            — vol appears cheap relative to 10-year history.
+            Historical mean: <span class="mono">+1.84pp</span>.
+            Current: <span class="mono">+8.03pp</span>.
+          </div>
+          
+
+          
+          <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">Implied–Realised spread — last 60 trading days</div>
+          <div style="position:relative;height:32px;">
+            <canvas id="sparklineChart" role="img" aria-label="SPX price sparkline"></canvas>
+          </div>
+          
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:var(--text2);">
+        <div>σ₁ (5d EWMA): <span class="mono green">8.71%</span></div>
+        <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">14.32%</span></div>
+        <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
+        <div>Updated: <span class="mono">2026-06-24</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIX Term Structure Chart -->
+  <div class="card" style="grid-column: span 1;">
+    <div class="card-label">VIX Term Structure</div>
+    <div class="chart-wrap tall" style="margin-top:12px;">
+      <canvas id="tsChart" role="img" aria-label="VIX term structure curve"></canvas>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Row 3: VIX History + Regime Timeline ─────────────────────────────── -->
+<div class="grid grid-2" style="margin-bottom:16px;">
+
+  <!-- Regime Probability History (static info card) -->
+  <div class="card">
+    <div class="card-label">C8 Classifier — Full-Period Statistics (2015 – 2025)</div>
+    <div class="mt12">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;text-align:center;">
+        <div style="padding:16px;border-radius:8px;background:rgba(51,136,255,0.06);border:1px solid rgba(51,136,255,0.18);">
+          <div style="font-size:11px;color:#3388ff;margin-bottom:4px;font-weight:600;">R0 LONG GAMMA</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">12.7%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">350 / 2,757 days</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Buy straddles</div>
+        </div>
+        <div style="padding:16px;border-radius:8px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);">
+          <div style="font-size:11px;color:#00ff88;margin-bottom:4px;font-weight:600;">R1 SHORT GAMMA</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">42.8%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,180 / 2,757 days</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Sell premium</div>
+        </div>
+        <div style="padding:16px;border-radius:8px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.18);">
+          <div style="font-size:11px;color:#ff3333;margin-bottom:4px;font-weight:600;">R2 VOMMA ACTIVE</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">44.5%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,227 / 2,757 days</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Vomma trades</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
+        <div>Overall Accuracy: <span class="mono" style="color:#ffaa33;">63.4%</span></div>
+        <div>Persistence baseline: <span class="mono red">90.0%</span></div>
+        <div>Features: <span class="mono">5 (vvix excluded — C16)</span></div>
+        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (39%)</span></div>
+        <div>Model: <span class="mono">XGBoost 3-class</span></div>
+        <div>Status: <span class="mono red">RESEARCH ONLY (C17)</span></div>
+      </div>
+      <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
+        C16: vvix removed from training — the R2 label is defined as VVIX&gt;threshold, so including
+        it inflated accuracy to 86.2% by letting the model recover its own labelling rule; 63.4% is
+        the honest out-of-sample number. <strong style="color:#ff4444;">C17: 63.4% loses to the
+        no-skill persistence baseline</strong> ("predict yesterday's regime" scores 90.0% on 2020+,
+        and yesterday's label is fully observable). The classifier is demoted from the trading loop —
+        the backtest uses the lagged deterministic rule labels directly. Kept here as a documented
+        negative result: regimes are too sticky for daily ML classification to add value.
+      </div>
+    </div>
+  </div>
+
+  <!-- PDV Model Details -->
+  <div class="card">
+    <div class="card-label">PDV Model — Guyon-Lekeufack (2023)</div>
+    <div class="mt12">
+
+      <div style="
+        background:var(--surface2); border-radius:8px; padding:14px;
+        border:1px solid var(--border); font-family:'Menlo',monospace;
+        font-size:12px; color:#aaa; line-height:2;
+      ">
+        <span style="color:#666;">σ̂(t) = </span>
+        <span style="color:#ffcc00;">0.354</span>
+        <span style="color:#666;"> × σ₁ + </span>
+        <span style="color:#ffcc00;">0.241</span>
+        <span style="color:#666;"> × σ₂ − </span>
+        <span style="color:#ffcc00;">1.496</span>
+        <span style="color:#666;"> × lev + </span>
+        <span style="color:#ffcc00;">0.0346</span>
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
+        <div>σ₁ half-life: <span class="mono">5 days (EWMA)</span></div>
+        <div>σ₂ half-life: <span class="mono">60 days (EWMA)</span></div>
+        <div>Walk-fwd R² (linear): <span class="mono green">0.31</span></div>
+        <div>Walk-fwd R² (kernel): <span class="mono" style="color:#ffcc00;">0.23</span></div>
+        <div>GARCH persistence: <span class="mono">0.979</span></div>
+        <div>GARCH β: <span class="mono">0.890</span></div>
+      </div>
+
+      
+      <div class="divider"></div>
+      <div style="font-size:11px;color:var(--text3);padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border);">
+        <span style="font-weight:600;color:var(--text2);">Active model: PDVLinear3F</span>
+        &nbsp;·&nbsp; PDVLinear4F requires VIX column in stored features.
+      </div>
+      
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="padding:10px;border-radius:6px;background:rgba(255,136,51,0.07);border:1px solid rgba(255,136,51,0.2);">
+        <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">COVID Stress Test — 2020-03-16</div>
+        <div style="font-size:11.5px;color:var(--text2);">
+          PDV predicted <span class="mono" style="color:#ffcc00;">92.4%</span> ann vol.
+          Actual realised: <span class="mono red">202.6%</span>.
+          Error: <span class="mono red">−110pp</span> — structural limitation of backward-looking models.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+
+</main>
+
+<script>
+  // Hamburger nav toggle
+  (function() {
+    var btn   = document.getElementById('navToggle');
+    var links = document.getElementById('navLinks');
+    if (!btn || !links) return;
+    btn.addEventListener('click', function() {
+      var open = links.classList.toggle('open');
+      btn.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', open);
+    });
+    // Close menu when any nav link is tapped (SPA-style)
+    links.querySelectorAll('.nav-link').forEach(function(a) {
+      a.addEventListener('click', function() {
+        links.classList.remove('open');
+        btn.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+    // Close menu when tapping outside
+    document.addEventListener('click', function(e) {
+      if (!btn.contains(e.target) && !links.contains(e.target)) {
+        links.classList.remove('open');
+        btn.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
+
+  // Chart.js global dark-theme defaults
+  Chart.defaults.color            = '#666';
+  Chart.defaults.borderColor      = '#1f1f1f';
+  Chart.defaults.plugins.legend.labels.color = '#888';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
+  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
+  Chart.defaults.plugins.tooltip.borderWidth       = 1;
+  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
+  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
+  Chart.defaults.plugins.tooltip.padding           = 10;
+
+  function makeLineOpts(yLabel) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+
+  function makeBarOpts(yLabel, horizontal) {
+    return {
+      indexAxis: horizontal ? 'y' : 'x',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { mode: 'index' },
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
+        },
+      },
+    };
+  }
+</script>
+
+
+<script>
+  // VIX Term Structure chart
+  const tsCtx = document.getElementById('tsChart').getContext('2d');
+  const tsLabels = ["9d", "30d", "93d", "182d"];
+  const tsValues = [13.93, 16.4, 19.57, 21.99];
+
+  new Chart(tsCtx, {
+    type: 'line',
+    data: {
+      labels: tsLabels,
+      datasets: [{
+        label: 'VIX Term Structure',
+        data: tsValues,
+        borderColor: '#00ff88',
+        backgroundColor: 'rgba(0,255,136,0.07)',
+        fill: true,
+        tension: 0.35,
+        pointRadius: 5,
+        pointBackgroundColor: '#00ff88',
+        pointBorderColor: '#0a0a0a',
+        pointBorderWidth: 2,
+        borderWidth: 2.5,
+      }]
+    },
+    options: {
+      ...makeLineOpts('VIX Points'),
+      plugins: {
+        ...makeLineOpts().plugins,
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `  ${ctx.parsed.y.toFixed(2)} VIX pts`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 11 } },
+        },
+        y: {
+          grid: { color: '#141414' },
+          ticks: { color: '#555', font: { family: 'Menlo', size: 11 },
+                   callback: v => v.toFixed(1) },
+          title: { display: true, text: 'Implied Vol (%)', color: '#444', font: { size: 10 } },
+        },
+      },
+    }
+  });
+
+  // Sparkline — PDV spread last 60 days (Bug 3)
+  
+  const spkCtx = document.getElementById('sparklineChart');
+  if (spkCtx) {
+    const spkData = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1.11, 2.57, 1.85];
+    const spkDates = ["2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02", "2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-13", "2026-04-14", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-27", "2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-22", "2026-06-23", "2026-06-24"];
+    new Chart(spkCtx, {
+      type: 'line',
+      data: {
+        labels: spkDates,
+        datasets: [{
+          data: spkData,
+          borderColor: '#00ff88',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: { target: 'origin', above: 'rgba(0,255,136,0.08)', below: 'rgba(255,51,51,0.08)' },
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { display: false },
+          y: { display: false },
+        }
+      }
+    });
+  }
+  
+</script>
+
+
+</body>
+</html>
