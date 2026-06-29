@@ -492,6 +492,64 @@
 </div>
 {% endif %}
 
+<!-- ── Roadmap — what more resources would unlock ───────────────────────────── -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="card-label">Roadmap — Where This Goes With More Resources</div>
+  <div class="card-sub" style="margin:8px 0 18px;line-height:1.65;">
+    Everything above was built on <strong>free data</strong>, and the single ceiling is
+    data, not method. The honest negative result proves the infrastructure and the
+    discipline; the paid-tier version is where you find out whether the edge is real.
+    <strong>Rigor first, then capital</strong> — that progression is the plan. Each item
+    below maps a limitation we documented to the concrete unlock that would lift it.
+  </div>
+
+  <div class="grid grid-2" style="gap:14px;">
+
+    <div style="padding:14px;border-radius:8px;background:var(--surface2);border:1px solid var(--border2);">
+      <div style="color:var(--accent);font-weight:700;font-size:13px;margin-bottom:7px;">1 · Real historical option prices</div>
+      <div style="font-size:11.5px;color:var(--text2);line-height:1.65;">
+        <span style="color:var(--red);font-weight:600;">Now:</span> all P&amp;L is Black-Scholes on VIX-ATM vol — the database holds a single options snapshot (2026-03-24), so every dollar is mark-to-model, not a traded fill.<br>
+        <span style="color:var(--accent);font-weight:600;">Unlocks:</span> real fillable prices across the smile turn the backtest from an estimate into evidence. The single highest-leverage change in the whole project.<br>
+        <span style="color:var(--text3);">≈ $50–250/mo for EOD option chains; OptionMetrics-grade is institutional.</span>
+      </div>
+    </div>
+
+    <div style="padding:14px;border-radius:8px;background:var(--surface2);border:1px solid var(--border2);">
+      <div style="color:var(--accent);font-weight:700;font-size:13px;margin-bottom:7px;">2 · Intraday / high-frequency data</div>
+      <div style="font-size:11.5px;color:var(--text2);line-height:1.65;">
+        <span style="color:var(--red);font-weight:600;">Now:</span> jump parameters are <em>unidentifiable</em> on daily returns (Bates λ collapses) — daily data can't separate frequent small jumps from rare large ones.<br>
+        <span style="color:var(--accent);font-weight:600;">Unlocks:</span> the Barndorff-Nielsen-Shephard bipower-variation decomposition separates continuous vol from jumps, making the Bates / Merton leg estimable and the VIX-options fit tractable.<br>
+        <span style="color:var(--text3);">High-frequency bars; the missing ingredient for the jump models.</span>
+      </div>
+    </div>
+
+    <div style="padding:14px;border-radius:8px;background:var(--surface2);border:1px solid var(--border2);">
+      <div style="color:var(--accent);font-weight:700;font-size:13px;margin-bottom:7px;">3 · Breadth — a real book, not a few trades</div>
+      <div style="font-size:11.5px;color:var(--text2);line-height:1.65;">
+        <span style="color:var(--red);font-weight:600;">Now:</span> the only signal robust across every correction (S3 dispersion) fires <strong>22 times in 7 years</strong> — by Grinold's Fundamental Law, that breadth is fatal.<br>
+        <span style="color:var(--accent);font-weight:600;">Unlocks:</span> running dispersion across S&amp;P constituents and more underlyings turns a handful of bets into hundreds of near-independent ones — the regime where a thin edge becomes a usable information ratio.<br>
+        <span style="color:var(--text3);">Single-name vol data + universe construction.</span>
+      </div>
+    </div>
+
+    <div style="padding:14px;border-radius:8px;background:var(--surface2);border:1px solid var(--border2);">
+      <div style="color:var(--accent);font-weight:700;font-size:13px;margin-bottom:7px;">4 · Realistic execution + more compute</div>
+      <div style="font-size:11.5px;color:var(--text2);line-height:1.65;">
+        <span style="color:var(--red);font-weight:600;">Now:</span> a flat cost assumption, and the two-factor Quintic OU calibration takes ~46 min on 8 cores while the VIX-options fit sits at 17.5 vp (target &lt; 10).<br>
+        <span style="color:var(--accent);font-weight:600;">Unlocks:</span> fitting bid-ask and slippage curves to real quotes tests whether the thin vol-carry edge survives the round trip; more cores or a GPU plus a stronger global optimizer push the joint fit under 10 vp and let it run intraday.<br>
+        <span style="color:var(--text3);">Quote-level cost data + compute.</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="card-sub" style="margin-top:16px;font-size:11px;color:var(--text3);line-height:1.6;">
+    None of these change the honest conclusion that the current edge is thin. They change
+    whether it can be <em>measured</em> and <em>scaled</em> — which is the actual research
+    program, and the part that needs resources rather than more code.
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
