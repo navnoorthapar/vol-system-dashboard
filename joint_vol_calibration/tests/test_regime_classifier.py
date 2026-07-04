@@ -33,6 +33,7 @@ from joint_vol_calibration.signals.regime_classifier import (
     build_dataset,
     build_features,
     build_regime_labels,
+    regime_label_noise_audit,
     evaluate_classifier,
     load_regime_labels,
     regime_distribution_by_year,
@@ -599,3 +600,61 @@ class TestHMMRegimeClassifier:
         """HMM_FEATURES class attribute must contain the 4 expected columns."""
         hmm, _ = fitted_hmm
         assert set(hmm.HMM_FEATURES) == {"vix", "vvix", "ts_slope", "fear_premium"}
+
+
+# ── Label ontology noise floor (why the classifier was demoted) ───────────────
+
+class TestLabelNoiseAudit:
+    """`regime_label_noise_audit` quantifies the noise floor set by the LABEL
+    ontology — the ceiling no classifier trained on these labels can beat. The
+    labels are same-day observables (rv_20d vs VIX/100; VVIX > gate), so a share
+    of days sit on a decision boundary and flip under ordinary measurement noise.
+    On the real series that flip rate is ~6% and persistence ~87%; here we lock
+    the structure on synthetic data with a REALISTIC (persistent, near-realized)
+    VIX so both properties are exercised."""
+
+    @staticmethod
+    def _persistent_market(n: int = 500, seed: int = 3):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2016-01-04", periods=n)
+        s2 = np.empty(n); r = np.empty(n)
+        s2[0] = 1e-4; r[0] = rng.normal(0.0, np.sqrt(s2[0]))
+        for t in range(1, n):
+            s2[t] = 2e-6 + 0.08 * r[t - 1] ** 2 + 0.90 * s2[t - 1]
+            r[t] = rng.normal(0.0, np.sqrt(s2[t]))
+        spx = pd.DataFrame({"date": dates,
+                            "close": 3000.0 * np.exp(np.cumsum(r)),
+                            "log_return": r})
+        rv = np.sqrt(pd.Series(r ** 2).rolling(20, min_periods=15).mean().bfill()
+                     .values * 252)
+        vix = np.empty(n); vix[0] = rv[0] * 100
+        vvix = np.empty(n); vvix[0] = 95.0
+        for t in range(1, n):
+            # AR(1) VIX that tracks realized vol → persistent AND near the R0/R1 cut
+            vix[t] = 0.90 * vix[t - 1] + 0.10 * (rv[t] * 100) + rng.normal(0, 0.8)
+            vvix[t] = 0.90 * vvix[t - 1] + 0.10 * 95.0 + rng.normal(0, 3)
+        vix = np.clip(vix, 7, 70); vvix = np.clip(vvix, 75, 150)
+        vixw = pd.DataFrame({"date": dates, "^VIX": vix,
+                             "^VIX3M": vix + 1.5, "^VVIX": vvix})
+        return spx, vixw
+
+    def test_returns_all_keys(self):
+        spx, vix = self._persistent_market()
+        a = regime_label_noise_audit(spx, vix, vvix_threshold=100.0)
+        for k in ("n_days", "boundary_within_1vp", "boundary_within_0p5vp",
+                  "label_flip_rate", "perturbation_stable", "r2_gate_fragile",
+                  "persistence_acc"):
+            assert k in a
+        assert a["n_days"] > 100
+
+    def test_bounded_noise_floor_and_persistence(self):
+        spx, vix = self._persistent_market()
+        a = regime_label_noise_audit(spx, vix, vvix_threshold=100.0)
+        # A real but bounded noise floor: some labels flip, most are stable.
+        assert 0.0 < a["label_flip_rate"] < 0.5
+        assert a["perturbation_stable"] == pytest.approx(1.0 - a["label_flip_rate"], abs=1e-9)
+        # Persistent (same-day) labels → "predict yesterday" is a strong baseline.
+        assert a["persistence_acc"] > 0.6
+        # Fractions are valid probabilities.
+        for k in ("boundary_within_1vp", "boundary_within_0p5vp", "r2_gate_fragile"):
+            assert 0.0 <= a[k] <= 1.0

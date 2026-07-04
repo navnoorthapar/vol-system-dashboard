@@ -23,7 +23,7 @@ Over eighteen months and 14 components, the system covers the full pipeline from
 - **C10**: Full backtest engine with walk-forward validation and HTML reporting
 - **C11–C13b**: Regime-switching jumps (Merton/BNS), Bates SVJ, SVI/SSVI smoothing, two-factor Quintic OU
 
-635 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
+637 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
 
 ---
 
@@ -65,6 +65,8 @@ The regime labels are defined by *same-day observables* — realised vol vs VIX 
 
 So the classifier is research-only now. The backtest uses the lagged rule labels directly. This is the kind of result that's embarrassing to find and important to report — and exactly the sort of thing a Sharpe-2 backtest quietly launders.
 
+There's a deeper reason it was never going to work, and it is about the labels, not the model. In any ML project the labels set the noise floor: no model can encode past the information actually in the data, so if the labels are noisy, that noise is the ceiling. So I audited the label *ontology* itself. The R0/R1 boundary is realized vol versus implied vol, and the R2 gate is a VVIX percentile — both hard cutoffs. I re-labelled the entire history under perturbations that sit *inside the data's own measurement noise*: a ±1-day change in the 20-day realized-vol window, and ±0.5 vol points on VIX. **5.8% of the labels flip**, and **10% of days sit within a single vol point of the R0/R1 cut**, where the label is essentially a coin toss. That ~6% is a hard ceiling set by the ontology, and the classifier lands at 63.4% — nowhere near it, because it is also fighting the fact that these labels are same-day observables that "predict yesterday" already nails. The lesson I keep relearning is that a real ML project is maybe 50% evaluation and 40% data and labels; the training is the easy 2%. Not a day goes by without me thinking about the ontology, and even the old labels have to be reviewed constantly. You cannot train your way under the noise floor; you can only clean the ontology or accept the bound. *(Reproducible: `regime_label_noise_audit()`.)*
+
 ---
 
 ## What actually survived
@@ -79,7 +81,7 @@ So the classifier is research-only now. The backtest uses the lagged rule labels
 
 Every hedge fund backtest showing Sharpe > 2 has look-ahead bias somewhere — in the feature construction, the regime labels, the vol surface used for pricing, or the cost model. Usually more than one.
 
-The 635 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
+The 637 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
 
 The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
 

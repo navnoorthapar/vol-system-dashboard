@@ -337,6 +337,95 @@ def build_regime_labels(
     return labels.dropna().astype(int)
 
 
+def regime_label_noise_audit(
+    spx_df: pd.DataFrame,
+    vix_wide_df: pd.DataFrame,
+    vvix_threshold: Optional[float] = None,
+) -> dict:
+    """Measure the NOISE FLOOR of the R0/R1/R2 label ontology.
+
+    "The model cannot lower the noise floor — that's the optimal bound of the
+    encoding of your data." In an ML project the labels set that floor, and here
+    the labels are defined by same-day observables: rv_20d vs VIX/100 for R0/R1,
+    and VVIX > gate for R2. Two consequences fall out, and both are the reason
+    the C8 classifier was demoted rather than tuned:
+
+      1. Because the label at t is a function of information known at t,
+         "predict yesterday's label" (the persistence baseline) is a legitimate
+         causal predictor and is very hard to beat.
+      2. Days sitting on a decision boundary flip their label under ordinary
+         measurement noise. That flip rate is a hard ceiling on ANY classifier
+         trained on these labels, set by the ONTOLOGY, not the model.
+
+    This function quantifies (2) by relabelling under perturbations that are all
+    within the data's own measurement noise:
+      - realized-vol window: 20d -> 19d and 21d,
+      - VIX level: +/- 0.5 vol points.
+
+    Returns a dict:
+      n_days, boundary_within_1vp, boundary_within_0p5vp  (fraction of days near
+      the R0/R1 cut), label_flip_rate, perturbation_stable (= 1 - flip_rate),
+      r2_gate_fragile (fraction within 3 VVIX pts of the R2 gate),
+      persistence_acc (P[y_t == y_{t-1}]).
+    """
+    spx = spx_df.copy()
+    spx["date"] = pd.to_datetime(spx["date"])
+    spx = spx.set_index("date").sort_index()
+    vix = vix_wide_df.copy()
+    vix["date"] = pd.to_datetime(vix["date"])
+    vix = vix.set_index("date").sort_index()
+
+    df = spx[["log_return"]].join(
+        vix[[c for c in ["^VIX", "^VVIX"] if c in vix.columns]], how="inner"
+    )
+    log_ret = df["log_return"]
+    vix_iv  = df["^VIX"] / 100.0
+    vvix    = df["^VVIX"] if "^VVIX" in df.columns else pd.Series(0.0, index=df.index)
+
+    if vvix_threshold is None:
+        gate = vvix.rolling(252, min_periods=63).quantile(0.80)
+    else:
+        gate = pd.Series(float(vvix_threshold), index=df.index)
+
+    def _rv(w: int) -> pd.Series:
+        return np.sqrt((log_ret ** 2).rolling(w, min_periods=max(w - 5, 1)).mean() * 252)
+
+    def _label(rv: pd.Series, iv: pd.Series) -> pd.Series:
+        lab = pd.Series(1.0, index=df.index)
+        lab[rv > iv] = 0.0
+        lab[vvix > gate] = 2.0     # R2 overrides, matches build_regime_labels
+        lab[rv.isna()] = np.nan
+        return lab
+
+    rv20 = _rv(20)
+    base = _label(rv20, vix_iv)
+    mask = base.notna()
+    n    = int(mask.sum())
+    gap  = (rv20 - vix_iv)[mask].abs()
+
+    flip = pd.Series(False, index=df.index)
+    for w in (19, 21):
+        pert = _label(_rv(w), vix_iv)
+        flip |= (pert != base) & pert.notna() & base.notna()
+    for dv in (0.005, -0.005):
+        pert = _label(rv20, vix_iv + dv)
+        flip |= (pert != base) & pert.notna() & base.notna()
+    flip = flip[mask]
+
+    r2_fragile = float(((vvix[mask] - gate[mask]).abs() < 3.0).mean())
+    persist    = float((base[mask].shift(1) == base[mask]).mean())
+
+    return {
+        "n_days":                n,
+        "boundary_within_1vp":   round(float((gap < 0.01).mean()), 4),
+        "boundary_within_0p5vp": round(float((gap < 0.005).mean()), 4),
+        "label_flip_rate":       round(float(flip.mean()), 4),
+        "perturbation_stable":   round(float(1.0 - flip.mean()), 4),
+        "r2_gate_fragile":       round(r2_fragile, 4),
+        "persistence_acc":       round(persist, 4),
+    }
+
+
 # ── Regime classifier ─────────────────────────────────────────────────────────
 
 class RegimeClassifier:
