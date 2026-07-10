@@ -678,9 +678,9 @@
   <div class="page-title">Live Market Overview</div>
   <div class="page-subtitle">End-of-day regime + term structure</div>
   <div class="page-badge" id="freshness-badge">
-    <span data-date="2026-07-08">Last close: 2026-07-08</span>
+    <span data-date="2026-07-09">Last close: 2026-07-09</span>
     &nbsp;·&nbsp; Calibration: 2026-07-01
-    &nbsp;·&nbsp; Regime: 2026-07-08
+    &nbsp;·&nbsp; Regime: 2026-07-09
   </div>
 </div>
 <script>
@@ -718,21 +718,21 @@
   <!-- SPX -->
   <div class="card card-sm">
     <div class="card-label">S&P 500</div>
-    <div class="card-value">7,482.71</div>
+    <div class="card-value">7,543.64</div>
     <div class="stat-row">
-      <span class="stat-change down">
-        -0.28%
+      <span class="stat-change up">
+        +0.81%
       </span>
       <span style="color:var(--text3)">vs prev close</span>
     </div>
-    <div class="card-sub" style="margin-top:10px;">2026-07-08</div>
+    <div class="card-sub" style="margin-top:10px;">2026-07-09</div>
   </div>
 
   <!-- VIX -->
   <div class="card card-sm">
     <div class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></div>
     <div class="card-value green">
-      16.90
+      15.84
     </div>
     <div class="card-sub" style="margin-top:10px;">
       🟢 NORMAL range
@@ -744,7 +744,7 @@
   <div class="card card-sm">
     <div class="card-label">VVIX  <span style="color:var(--text3);font-size:9px;">VOL-OF-VOL</span></div>
     <div class="card-value dim">
-      91.38
+      88.78
     </div>
     <div class="card-sub" style="margin-top:10px;">
       Normal VVIX
@@ -760,10 +760,10 @@
     </div>
     
     <div class="card-sub" style="margin-top:8px;">
-      Front=14.41  →  Back=21.56
+      Front=12.5  →  Back=21.32
     </div>
     <div class="card-sub">
-      Slope=+7.15 pts
+      Slope=+8.82 pts
     </div>
     
   </div>
@@ -793,7 +793,7 @@
         </div>
         <div class="card-sub" style="margin-bottom:14px;">
           Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
-          trades on. As of 2026-07-08.
+          trades on. As of 2026-07-09.
         </div>
 
         <!-- ML classifier: research-only (demoted, C17) -->
@@ -802,7 +802,7 @@
             ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
           </span>
           <span class="mono" style="font-size:13px;font-weight:700;color:#00ff88;">
-            R1 · 70.0%
+            R1 · 64.3%
           </span>
         </div>
 
@@ -811,23 +811,23 @@
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R0 LONG γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:2.4%;background:#3388ff;"></div>
+              <div class="progress-fill" style="width:0.0%;background:#3388ff;"></div>
             </div>
-            <div class="progress-val">2.4%</div>
+            <div class="progress-val">0.0%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:70.0%;background:#00ff88;"></div>
+              <div class="progress-fill" style="width:64.3%;background:#00ff88;"></div>
             </div>
-            <div class="progress-val">70.0%</div>
+            <div class="progress-val">64.3%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:27.7%;background:#ff3333;"></div>
+              <div class="progress-fill" style="width:35.7%;background:#ff3333;"></div>
             </div>
-            <div class="progress-val">27.7%</div>
+            <div class="progress-val">35.7%</div>
           </div>
         </div>
 
@@ -862,7 +862,7 @@
       <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
         <div>
           <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">CURRENT VIX (30D IMPLIED)</div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">16.90%</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">15.84%</div>
         </div>
         <div style="text-align:right;">
           <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">PDV FORECAST (REALISED)</div>
@@ -873,7 +873,7 @@
       <div style="padding:14px 0;text-align:center;">
         <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">IMPLIED − REALISED SPREAD</div>
         <div class="mono" style="font-size:36px;font-weight:800;color:#ff8833;">
-          +8.53pp
+          +7.47pp
         </div>
         <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
           Moderate vol risk premium → favours short vol strategies
@@ -890,7 +890,7 @@
             </div>
             <div style="color:var(--text2);font-size:11px;line-height:1.4;">
               percentile<br>
-              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+0.79pp</span></span>
+              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+0.81pp</span></span>
             </div>
           </div>
 
@@ -908,8 +908,8 @@
           ">
             <span style="font-weight:700;color:#3388ff;">&#9432; Spread at 0.3th percentile</span>
             — vol appears cheap relative to 10-year history.
-            Historical mean: <span class="mono">+0.79pp</span>.
-            Current: <span class="mono">+8.53pp</span>.
+            Historical mean: <span class="mono">+0.81pp</span>.
+            Current: <span class="mono">+7.47pp</span>.
           </div>
           
 
@@ -927,7 +927,7 @@
         <div>σ₁ (5d EWMA): <span class="mono green">8.71%</span></div>
         <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">14.32%</span></div>
         <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
-        <div>Updated: <span class="mono">2026-07-08</span></div>
+        <div>Updated: <span class="mono">2026-07-09</span></div>
       </div>
     </div>
   </div>
@@ -1144,7 +1144,7 @@
   // VIX Term Structure chart
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = ["9d", "30d", "93d", "182d"];
-  const tsValues = [14.41, 16.9, 19.46, 21.56];
+  const tsValues = [12.5, 15.84, 18.99, 21.32];
 
   new Chart(tsCtx, {
     type: 'line',
@@ -1194,8 +1194,8 @@
   
   const spkCtx = document.getElementById('sparklineChart');
   if (spkCtx) {
-    const spkData = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1.11, 2.57, 1.85, 2.11, 1.75, 0.5, -0.9, -0.77, -1.01, -1.73, 1.6, 2.37];
-    const spkDates = ["2026-04-13", "2026-04-14", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-27", "2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07", "2026-07-08"];
+    const spkData = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1.11, 2.57, 1.85, 2.11, 1.75, 0.5, -0.9, -0.77, -1.01, -1.73, 1.6, 2.37, 1.06];
+    const spkDates = ["2026-04-14", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-27", "2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09"];
     new Chart(spkCtx, {
       type: 'line',
       data: {
