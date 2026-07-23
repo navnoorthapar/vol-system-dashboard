@@ -677,7 +677,7 @@
 <div class="page-header">
   <div class="page-title">Joint Calibration Results</div>
   <div class="page-subtitle">Heston 5-parameter · DE + L-BFGS-B</div>
-  <div class="page-badge">2026-07-22  ·  SPX = 7509.2  ·  r = 3.73%</div>
+  <div class="page-badge">2026-07-23  ·  SPX = 7499.0  ·  r = 3.74%</div>
 </div>
 
 <!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
@@ -702,23 +702,22 @@
 
 
 <!-- ── Feller Condition Banner ────────────────────────────────────────────── -->
-<div class="banner banner-warn" style="margin-bottom:20px;">
-  <div class="banner-icon">✗</div>
+<div class="banner banner-info" style="margin-bottom:20px;">
+  <div class="banner-icon">✓</div>
   <div>
-    <div class="banner-title" style="color:#ff8833;">
-      Feller Condition:  2κθ &lt; σ²
-       —  FAIL (BARELY)
+    <div class="banner-title" style="color:#00ff88;">
+      Feller Condition:  2κθ &gt; σ²
+       —  PASS
     </div>
     <div class="banner-body">
-      2κθ = 2 × 5.7729 × 0.04158 = <strong style="color:var(--text);">0.48007</strong>
+      2κθ = 2 × 2.2627 × 0.05482 = <strong style="color:var(--text);">0.24807</strong>
         &nbsp;&nbsp;|&nbsp;&nbsp;
-      σ² = 0.6929² = <strong style="color:var(--text);">0.48007</strong>
+      σ² = 0.4745² = <strong style="color:var(--text);">0.22513</strong>
         &nbsp;&nbsp;|&nbsp;&nbsp;
-      Margin = <strong style="color:#ff8833;">-0.000000</strong>
+      Margin = <strong style="color:#00ff88;">+0.022936</strong>
       <br>
       
-      The variance process can touch zero — the Heston SDE is not well-posed at current parameters.
-      Practically this causes numerical instability in Monte Carlo paths and occasional negative variance.
+      The variance process stays strictly positive — the Heston SDE is well-posed.
       
     </div>
   </div>
@@ -730,25 +729,25 @@
   <div class="card">
     <div class="param-box">
       <div class="param-sym">κ  (kappa)</div>
-      <div class="param-val" style="color:var(--blue);">5.7729</div>
+      <div class="param-val" style="color:var(--blue);">2.2627</div>
       <div class="param-desc">Mean reversion speed</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = 30.3d</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = 77.2d</div>
     </div>
   </div>
 
   <div class="card">
     <div class="param-box">
       <div class="param-sym">θ  (theta)</div>
-      <div class="param-val" style="color:var(--yellow);">0.04158</div>
+      <div class="param-val" style="color:var(--yellow);">0.05482</div>
       <div class="param-desc">Long-run variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = 20.39% ann vol</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = 23.41% ann vol</div>
     </div>
   </div>
 
   <div class="card">
     <div class="param-box">
       <div class="param-sym">σ  (vol-of-vol)</div>
-      <div class="param-val" style="color:var(--orange);">0.6929</div>
+      <div class="param-val" style="color:var(--orange);">0.4745</div>
       <div class="param-desc">Vol of variance</div>
       <div class="param-desc" style="margin-top:4px;color:var(--text2);">Controls smile curvature</div>
     </div>
@@ -768,9 +767,9 @@
   <div class="card">
     <div class="param-box">
       <div class="param-sym">v₀  (v-naught)</div>
-      <div class="param-val" style="color:var(--accent);">0.01601</div>
+      <div class="param-val" style="color:var(--accent);">0.01902</div>
       <div class="param-desc">Initial variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = 12.65% spot vol</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = 13.79% spot vol</div>
     </div>
   </div>
 
@@ -782,7 +781,7 @@
   <div class="card">
     <div class="card-label">SPX IV RMSE</div>
     <div class="card-value sm green">
-      0.241 vol pts
+      0.049 vol pts
     </div>
     <div class="card-sub mt8">
       Good fit
@@ -793,7 +792,7 @@
   <div class="card">
     <div class="card-label">VIX Futures RMSE</div>
     <div class="card-value sm green">
-      0.046 pts
+      0.003 pts
     </div>
     <div class="card-sub mt8">
       Good futures fit
@@ -812,8 +811,8 @@
 
   <div class="card">
     <div class="card-label">Calibration Performance</div>
-    <div class="card-value sm green">36.0s</div>
-    <div class="card-sub mt8">10,098 evaluations</div>
+    <div class="card-value sm green">32.2s</div>
+    <div class="card-sub mt8">9,024 evaluations</div>
     <div class="card-sub">DE (120 iter × 40) + L-BFGS-B</div>
   </div>
 
@@ -847,19 +846,19 @@
         <tr>
           <td>Mean reversion</td>
           <td class="mono">κ</td>
-          <td class="mono blue">5.7729</td>
-          <td>Half-life ≈ 30 trading days</td>
+          <td class="mono blue">2.2627</td>
+          <td>Half-life ≈ 77 trading days</td>
         </tr>
         <tr>
           <td>Long-run vol</td>
           <td class="mono">√θ</td>
-          <td class="mono yellow">20.39%</td>
+          <td class="mono yellow">23.41%</td>
           <td>Steady-state implied vol target</td>
         </tr>
         <tr>
           <td>Vol-of-vol</td>
           <td class="mono">σ</td>
-          <td class="mono" style="color:var(--orange);">0.6929</td>
+          <td class="mono" style="color:var(--orange);">0.4745</td>
           <td>High: drives strong skew / smile</td>
         </tr>
         <tr>
@@ -874,13 +873,13 @@
         <tr>
           <td>Spot vol</td>
           <td class="mono">√v₀</td>
-          <td class="mono green">12.65%</td>
+          <td class="mono green">13.79%</td>
           <td>Current instantaneous vol</td>
         </tr>
         <tr>
           <td>Risk-free rate</td>
           <td class="mono">r</td>
-          <td class="mono">3.73%</td>
+          <td class="mono">3.74%</td>
           <td>USD 6M SOFR (2026-03)</td>
         </tr>
         <tr>
@@ -892,10 +891,10 @@
         <tr>
           <td>Feller margin</td>
           <td class="mono">2κθ − σ²</td>
-          <td class="mono red">
-            -0.000000
+          <td class="mono green">
+            +0.022936
           </td>
-          <td>FAIL — variance can touch zero</td>
+          <td>PASS — variance stays positive</td>
         </tr>
       </tbody>
     </table>
@@ -903,10 +902,10 @@
     <div class="divider"></div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
-      <div>SPX level: <span class="mono green">7509.2</span></div>
-      <div>As-of date: <span class="mono">2026-07-22</span></div>
-      <div>Fit time: <span class="mono green">36.0s</span></div>
-      <div>DE evaluations: <span class="mono">10,098</span></div>
+      <div>SPX level: <span class="mono green">7499.0</span></div>
+      <div>As-of date: <span class="mono">2026-07-23</span></div>
+      <div>Fit time: <span class="mono green">32.2s</span></div>
+      <div>DE evaluations: <span class="mono">9,024</span></div>
     </div>
   </div>
 
@@ -1021,22 +1020,22 @@
         <tbody>
           <tr>
             <td>SPX IV RMSE (vp)</td>
-            <td class="mono">0.241</td>
+            <td class="mono">0.049</td>
             <td class="mono yellow">
               2.343
             </td>
             <td class="mono red">
-              +2.102
+              +2.294
             </td>
           </tr>
           <tr>
             <td>VIX Fut RMSE (pts)</td>
-            <td class="mono">0.046</td>
+            <td class="mono">0.003</td>
             <td class="mono green">
               0.001
             </td>
             <td class="mono green">
-              -0.045
+              -0.002
             </td>
           </tr>
           <tr>
@@ -1231,7 +1230,7 @@
     data: {
       labels: ['SPX IV RMSE', 'VIX Futures RMSE', 'VIX Options RMSE'],
       datasets: [{
-        data: [0.241, 0.046, 0.0],
+        data: [0.049, 0.003, 0.0],
         backgroundColor: ['#3388ff', '#00ff88', '#ff3333'],
         borderRadius: 4,
         borderSkipped: false,
