@@ -4,7 +4,7 @@ Every options desk runs two separate calibration routines: one for the SPX smile
 
 The open problem is joint calibration: find one set of parameters that fits both the SPX smile *and* VIX options *simultaneously*, with the constraint that they're driven by the same instantaneous variance process V(t). That's what this project attempted.
 
-What I want to write about here isn't the calibration. It's the four times I had to correct my own backtest — and the last correction, which inverted a thesis I'd spent weeks building on top of.
+What I want to write about here isn't the calibration. It's the five times I had to correct my own work — the fourth inverted a thesis I'd spent weeks building on top of, and the fifth I found only after the system had been running unattended for a month.
 
 ---
 
@@ -23,7 +23,7 @@ Over eighteen months and 14 components, the system covers the full pipeline from
 - **C10**: Full backtest engine with walk-forward validation and HTML reporting
 - **C11–C13b**: Regime-switching jumps (Merton/BNS), Bates SVJ, SVI/SSVI smoothing, two-factor Quintic OU
 
-637 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
+647 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
 
 ---
 
@@ -39,6 +39,29 @@ SPX smile RMSE = 0.52 vol pts   ·   Feller PASS
 The SPX leg fits cleanly now — but **ρ is still pinned at its lower boundary** (−0.95, after I'd already tightened it from −0.99). The optimiser still wants more leverage skew than a pure-diffusion model can supply.
 
 In Heston, ρ governs the leverage effect: when the underlying falls, volatility rises, and the correlation between those Brownian motions sets how steep the put skew is. The market's skew geometry wants either discontinuous paths (jumps, à la Bates 1996) or a vol process with long memory (rough vol, Gatheral 2018). ρ at the wall is Heston waving a white flag — not a calibration failure, a diagnostic. And when I turned the **VIX options leg** on, it priced them at a **37-vol-pt RMSE**: a single σ cannot satisfy both the SPX smile curvature and the VVIX-implied vol-of-vol. I disabled the leg (w₃ = 0.0) and documented the reason rather than hide it behind a fudged weight.
+
+It turns out ρ has company. The Feller condition 2κθ ≥ σ² is enforced by a soft penalty whose gradient dies at the boundary, so when the smile wants more vol-of-vol than Feller allows, the optimiser parks *exactly* on the constraint. Across 19 archived fits, 11 sit at 2κθ − σ² ≈ −1e-6 — σ matching √(2κθ) to six significant figures. My code called that "Feller FAIL." It isn't a failure; it's a binding constraint, and I'd been reporting an active constraint as a broken model. Corrected, the honest statement is sharper than the original one: **two of five parameters are set by boundaries rather than by the market, so Heston fits this joint surface with three effective degrees of freedom.**
+
+---
+
+## The fifth correction: my selector was rewarding broken data
+
+I said there were four corrections. There are five. This one I found a month after the system went on autopilot, and it is the one I'd least like to have explained in an interview without having caught it first.
+
+The dashboard headlines the best archived calibration, ranked by SPX smile RMSE. Reasonable — except Yahoo intermittently returns `^VIX` without `^VIX9D/3M/6M`, and my term-structure builder took the last row of a pivot without checking it was complete. On those days the VIX leg had **one tenor**.
+
+One tenor is one data point. A five-parameter model hits it exactly — VIX RMSE 0.003 — and all five parameters are then free to chase the SPX smile alone. So the fit gets *better looking* precisely when the data is broken:
+
+| VIX tenors | κ | σ | SPX RMSE |
+|---|---|---|---|
+| 4 (well-constrained) | ~2.2 | ~0.45 | 0.4 – 2.0 vp |
+| 1 (leg unidentified) | 8.9 – 9.9 | ~0.83 | 0.3 – 1.8 vp |
+
+Rank those on RMSE and you don't select the best calibration — **you select the days your data feed failed.** The 2026-07-23 fit (one tenor, SPX RMSE 0.049 vp, roughly ten times "better" than any honest fit) was headlining my live site. The number was advertising that Heston fits the joint surface beautifully, which is the precise opposite of this project's finding. The joint tension *is* the result; I had accidentally published the one day there was no joint tension to have.
+
+Two things made it invisible. The quality gate was working — most 1-tenor days collapsed to a degenerate corner (σ→0.001, ρ→0) and were correctly rejected, which made a two-week data outage look like ordinary noise. And no calibration recorded how much data produced it, so nothing on the artifact could have told me. I reconstructed the tenor counts from CI logs.
+
+The fix is unglamorous: require ≥3 VIX tenors before a fit is written or selected, and persist the input counts with every calibration. The lesson is the one this project keeps teaching: **a metric that improves when your data degrades is not a quality metric.** Goodness-of-fit without a degrees-of-freedom check is exactly that metric, and I'd shipped it.
 
 ---
 
@@ -81,7 +104,7 @@ There's a deeper reason it was never going to work, and it is about the labels, 
 
 Every hedge fund backtest showing Sharpe > 2 has look-ahead bias somewhere — in the feature construction, the regime labels, the vol surface used for pricing, or the cost model. Usually more than one.
 
-The 637 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
+The 647 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
 
 The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
 

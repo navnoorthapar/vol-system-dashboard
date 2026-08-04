@@ -218,7 +218,9 @@ def recalibrate_heston() -> bool:
         # Quality gate: a thin/noisy live snapshot can drive Heston into a
         # degenerate corner (sigma->0, rho->0). Do NOT let that overwrite the
         # showcased calibration — the dashboard then keeps the last good fit.
-        ok, reason = is_acceptable_calibration(p, spx_rmse)
+        ok, reason = is_acceptable_calibration(
+            p, spx_rmse, result.get("n_vix_tenors")
+        )
         if not ok:
             log.warning(
                 "  Calibration REJECTED (%s): kappa=%.4f sigma=%.4f rho=%.4f SPX RMSE=%.3f vp "
@@ -234,9 +236,12 @@ def recalibrate_heston() -> bool:
             pickle.dump(result, f)
 
         log.info(
-            "  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE=%.3f vp | VIX RMSE=%.3f",
+            "  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE=%.3f vp | "
+            "VIX RMSE=%.3f | %s SPX opts, %s VIX tenors | Feller %s",
             p.get("kappa", 0), p.get("sigma", 0), p.get("rho", 0),
             l.get("spx_iv_rmse", 0), l.get("vix_futures_rmse", 0),
+            result.get("n_spx_options", "?"), result.get("n_vix_tenors", "?"),
+            result.get("feller_state", "?"),
         )
         return True
 

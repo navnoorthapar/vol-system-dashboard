@@ -45,16 +45,26 @@ def _db() -> sqlite3.Connection:
 
 
 def latest_good_calibration_path() -> str:
-    """Return the BEST joint_cal_*.pkl: lowest SPX RMSE among non-degenerate fits.
+    """Return the BEST joint_cal_*.pkl: lowest SPX RMSE among *well-identified*,
+    non-degenerate fits.
 
     Daily cloud refreshes produce noisy Heston fits from thin intraday option
     snapshots — some degenerate (sigma->0, rho->0), some merely worse-quality or
     Feller-marginal. Rather than headline whichever ran most recently (which can
     flip the page to a marginally worse fit than the documented showcase), we
-    display the system's best clean calibration: the lowest-RMSE fit that passes
-    the degeneracy gate. This is stable, matches the README's showcase
-    (2026-05-31, RMSE 0.52, Feller PASS), and never regresses the headline to a
-    marginal daily run. Falls back to the newest file, then the 05-31 showcase.
+    display the system's best clean calibration.
+
+    Ranking on SPX RMSE alone is NOT sufficient, and got this wrong in
+    production. If the VIX term structure degrades to a single tenor (Yahoo
+    intermittently returns ^VIX without ^VIX9D/3M/6M), the VIX-futures leg
+    becomes one data point that Heston matches exactly, freeing all five
+    parameters to fit the SPX smile alone. The result is a spuriously excellent
+    SPX RMSE — 2026-07-23 scored 0.049vp against 0.4–2.0vp on full 4-tenor days
+    — so a pure min-RMSE rule *preferentially selects the days the data broke*,
+    and headlined a fit that is not a joint calibration at all. Data sufficiency
+    is therefore a hard precondition, checked before RMSE is even consulted.
+
+    Falls back to the newest sufficient file, then the 05-31 showcase.
     """
     import glob as _glob
     from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
@@ -67,7 +77,9 @@ def latest_good_calibration_path() -> str:
                 cal = pickle.load(f)
             losses = cal.get("leg_losses", cal.get("losses", {}))
             spx_rmse = losses.get("spx_iv_rmse", None)
-            ok, _ = is_acceptable_calibration(cal.get("params", {}), spx_rmse)
+            ok, _ = is_acceptable_calibration(
+                cal.get("params", {}), spx_rmse, cal.get("n_vix_tenors")
+            )
             if ok and spx_rmse is not None and spx_rmse < best_rmse:
                 best_path, best_rmse = path, spx_rmse
         except Exception:
@@ -486,13 +498,31 @@ def load_page2() -> dict[str, Any]:
         d["vix_opt_rmse"] = round(float(losses.get("vix_options_rmse", 0)), 2)
         d["total_loss"]   = round(float(losses.get("total_loss", 0)), 6)
 
-        # Feller condition: 2κθ > σ²
+        # Feller condition: 2κθ vs σ², reported as PASS / BINDING / VIOLATED.
+        # The solver uses a soft exterior penalty, so when the constraint binds
+        # it lands ~1e-6 outside the feasible set. A strict boolean renders that
+        # as a hard failure; it is really an active constraint.
+        from joint_vol_calibration.calibration.joint_calibrator import (
+            classify_feller, count_pinned_params,
+        )
         feller_lhs = 2 * p["kappa"] * p["theta"]
         feller_rhs = p["sigma"] ** 2
+        state, margin = classify_feller(p["kappa"], p["theta"], p["sigma"])
         d["feller_lhs"]    = round(feller_lhs, 5)
         d["feller_rhs"]    = round(feller_rhs, 5)
-        d["feller_margin"] = round(feller_lhs - feller_rhs, 6)
-        d["feller_pass"]   = bool(feller_lhs > feller_rhs)
+        d["feller_margin"] = round(margin, 8)
+        d["feller_state"]  = state
+        d["feller_pass"]   = state == "PASS"
+        d["feller_binding"] = state == "BINDING"
+
+        # Boundary pinning → effective degrees of freedom
+        pinned = cal.get("pinned_params") or count_pinned_params(p, state)
+        d["pinned_params"] = pinned
+        d["effective_dof"] = 5 - len(pinned)
+
+        # Data provenance: how much market data produced this fit
+        d["n_spx_options"] = cal.get("n_spx_options")
+        d["n_vix_tenors"]  = cal.get("n_vix_tenors")
 
         # Rho boundary flag
         d["rho_at_boundary"] = abs(p["rho"]) >= 0.94
@@ -505,6 +535,12 @@ def load_page2() -> dict[str, Any]:
                   "fit_time", "n_evals", "feller_lhs", "feller_rhs", "feller_margin"]:
             d.setdefault(k, 0)
         d.setdefault("feller_pass", False)
+        d.setdefault("feller_binding", False)
+        d.setdefault("feller_state", "UNKNOWN")
+        d.setdefault("pinned_params", [])
+        d.setdefault("effective_dof", 5)
+        d.setdefault("n_spx_options", None)
+        d.setdefault("n_vix_tenors", None)
         d.setdefault("rho_at_boundary", False)
         d.setdefault("as_of", "N/A")
         d.setdefault("mat_smiles", [])

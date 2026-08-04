@@ -61,6 +61,25 @@ logger = logging.getLogger(__name__)
 
 _VIX_WINDOW  = 30.0 / 365.0   # VIX 30-day integration window
 _FELLER_PENALTY = 50.0         # large penalty keeps solver in Feller region
+
+# Feller reporting tolerance. The penalty above is a *soft exterior* penalty:
+# its gradient vanishes at the boundary, so the optimiser converges to a point
+# marginally OUTSIDE the feasible set whenever the constraint binds (the SPX
+# smile wants more vol-of-vol than 2*kappa*theta >= sigma**2 allows). Observed
+# residuals on real fits are 1e-7..1e-6 in variance-rate units, i.e. sigma
+# agrees with sqrt(2*kappa*theta) to six significant figures. Reporting that as
+# a hard "Feller FAIL" is wrong: it is a *binding* constraint, not a violated
+# one. Anything inside this tolerance is classified BINDING.
+_FELLER_TOL = 1e-4
+
+# Minimum VIX term-structure tenors for the joint calibration to be identified.
+# The VIX-futures leg fits a curve; with a single tenor it is one data point,
+# which a 5-parameter Heston matches exactly (RMSE ~0). The joint problem then
+# silently degenerates into an SPX-only fit -- all five parameters are freed to
+# chase the SPX smile, which produces a spuriously LOW SPX RMSE. Requiring >= 2
+# keeps a genuine curve in the loss; 3 is the safe default.
+_MIN_VIX_TENORS = 3
+
 _MIN_T_DAYS  = 7               # minimum expiry to include (days)
 _MAX_T_YEARS = 2.0             # maximum expiry to include (years)
 _MONEYNESS_LO = 0.70           # K/S lower bound for filtered surface (extended for deep puts)
@@ -87,19 +106,77 @@ _VIX_TS_TENORS = {
 
 # ── Calibration quality gate ──────────────────────────────────────────────────
 
-def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None) -> tuple:
-    """Reject degenerate Heston fits before they are published.
+def classify_feller(kappa: float, theta: float, sigma: float,
+                    tol: float = _FELLER_TOL) -> tuple:
+    """Classify the Feller condition as PASS / BINDING / VIOLATED.
+
+    The plain boolean ``2*kappa*theta >= sigma**2`` is a knife edge, and the
+    solver sits exactly on that edge by construction (see ``_FELLER_TOL``). A
+    margin of -1e-7 is numerically indistinguishable from equality but renders
+    as a hard failure, which misrepresents a binding constraint as a broken
+    model.
+
+    Returns (state, margin) where state is one of "PASS", "BINDING",
+    "VIOLATED" and margin = 2*kappa*theta - sigma**2.
+    """
+    margin = 2.0 * float(kappa) * float(theta) - float(sigma) ** 2
+    if margin > tol:
+        return "PASS", margin
+    if margin >= -tol:
+        return "BINDING", margin
+    return "VIOLATED", margin
+
+
+def count_pinned_params(params: dict, feller_state: Optional[str] = None,
+                        rel_tol: float = 1e-3) -> list:
+    """Return the names of parameters sitting on a constraint boundary.
+
+    Two of Heston's five parameters routinely pin during joint SPX/VIX fits:
+    rho at its -0.95 floor (the SPX skew wants more correlation than the bound
+    allows) and sigma at the Feller ceiling sqrt(2*kappa*theta). A fit with two
+    pinned parameters has three effective degrees of freedom, not five -- which
+    is a direct, quantitative statement of model misspecification and belongs in
+    the published diagnostics rather than buried in the parameter vector.
+    """
+    pinned = []
+    for name in ("kappa", "theta", "sigma", "rho", "v0"):
+        if name not in params or name not in HESTON_BOUNDS:
+            continue
+        val = float(params[name])
+        lo, hi = HESTON_BOUNDS[name]
+        span = (hi - lo) or 1.0
+        if abs(val - lo) <= rel_tol * span or abs(val - hi) <= rel_tol * span:
+            pinned.append(name)
+    # sigma pinned at the Feller ceiling is a boundary too, even though sigma is
+    # nowhere near its own [0.001, 2] box bound.
+    if feller_state == "BINDING" and "sigma" not in pinned:
+        pinned.append("sigma")
+    return pinned
+
+
+def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None,
+                              n_vix_tenors: Optional[int] = None) -> tuple:
+    """Reject degenerate or under-identified Heston fits before publishing.
 
     Live yfinance option snapshots (especially intraday) are often too thin and
-    noisy to identify a 5-parameter Heston. When that happens the optimiser
-    collapses to a constant-variance corner — vol-of-vol σ→0 and ρ→0 — which
-    trivially fits the VIX-futures leg while abandoning the SPX skew entirely.
-    Such a fit (e.g. κ=20, σ=0.0015, ρ=0, SPX RMSE 5.7vp) is strictly worse than
-    keeping the previous good calibration, so the daily refresh must not let it
-    overwrite the showcased result.
+    noisy to identify a 5-parameter Heston. Two distinct failure modes:
 
-    Degeneracy signature: κ, σ and ρ all pin to their bounds
-    (κ∈[0.1,20], σ∈[0.001,2], ρ∈[-0.95,0]).
+    1. **Degenerate corner.** The optimiser collapses to constant variance —
+       vol-of-vol σ→0 and ρ→0 — which trivially fits the VIX-futures leg while
+       abandoning the SPX skew entirely (e.g. κ=20, σ=0.0015, ρ=0, RMSE 5.7vp).
+       Signature: κ, σ and ρ all pin to their bounds.
+
+    2. **Under-identified joint problem.** If the VIX term structure degrades to
+       a single tenor, the VIX-futures leg is one data point that Heston matches
+       exactly, so all five parameters chase the SPX smile alone. This produces
+       a spuriously *excellent* SPX RMSE (observed: 0.049vp on 2026-07-23 versus
+       0.4–2.0vp on full 4-tenor days) and a parameter vector from a completely
+       different regime (κ≈9 rather than κ≈2.2). Because it looks like the best
+       fit ever recorded, an RMSE-ranked selector promotes it — so this must be
+       caught here, at write time.
+
+    Either way the fit is strictly worse than keeping the previous good
+    calibration, so the daily refresh must not let it overwrite the showcase.
 
     Returns (ok: bool, reason: str).
     """
@@ -115,6 +192,9 @@ def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None)
         return False, f"kappa pinned at bound (kappa={kappa:.2f})"
     if spx_iv_rmse is not None and spx_iv_rmse > 3.0:
         return False, f"SPX RMSE too high ({spx_iv_rmse:.2f}vp > 3.0)"
+    if n_vix_tenors is not None and n_vix_tenors < _MIN_VIX_TENORS:
+        return False, (f"VIX leg under-identified ({n_vix_tenors} tenor(s) "
+                       f"< {_MIN_VIX_TENORS}) — joint fit degenerates to SPX-only")
     return True, "ok"
 
 
@@ -451,12 +531,26 @@ class JointCalibrator:
         self.vix_options = self._prepare_vix_options()
         logger.info("  VIX options: %d liquid contracts", len(self.vix_options))
 
-        # Adjust weights if VIX options are sparse
+        # Adjust weights if VIX options are sparse.
+        # NOTE: both weights must be renormalised against the ORIGINAL total.
+        # Assigning self.w1 first and then dividing w2 by (self.w1 + self.w2)
+        # uses the already-updated w1, so the weights do not sum to 1 (with the
+        # configured 0.5/0.6 they summed to 1.0235, over-weighting the VIX leg).
         if len(self.vix_options) < 5:
             logger.warning("  VIX options too sparse — setting w3=0")
             self.w3 = 0.0
-            self.w1 = self.w1 / (self.w1 + self.w2)
-            self.w2 = self.w2 / (self.w1 + self.w2) if (self.w1 + self.w2) > 0 else 0.0
+            total = self.w1 + self.w2
+            if total > 0:
+                self.w1, self.w2 = self.w1 / total, self.w2 / total
+
+        # Warn when the VIX term structure is too thin to identify the joint fit.
+        if len(self.vix_ts) < _MIN_VIX_TENORS:
+            logger.warning(
+                "  VIX term structure has only %d tenor(s) (< %d): the VIX-futures "
+                "leg cannot identify a curve and the joint fit degenerates toward "
+                "an SPX-only calibration",
+                len(self.vix_ts), _MIN_VIX_TENORS,
+            )
 
     def _prepare_spx_surface(self) -> pd.DataFrame:
         """
@@ -906,6 +1000,7 @@ class JointCalibrator:
             "total_loss":     float(best_loss),
         }
 
+        feller_state, feller_margin = classify_feller(kappa, theta, sigma)
         result = {
             "params":     self.params,
             "loss":       best_loss,
@@ -914,6 +1009,19 @@ class JointCalibrator:
             "n_evals":    self._n_evals,
             "success":    bool(de_result.success),
             "feller_ok":  bool(2 * kappa * theta >= sigma**2),
+            # Feller as a three-state diagnostic: the solver sits exactly on the
+            # boundary whenever the constraint binds, which the bare boolean
+            # above reports as a failure.
+            "feller_state":  feller_state,
+            "feller_margin": float(feller_margin),
+            "pinned_params": count_pinned_params(self.params, feller_state),
+            # Data provenance — without these a fit cannot be audited after the
+            # fact, and an RMSE-ranked selector cannot tell a well-constrained
+            # joint fit from an under-identified one.
+            "n_spx_options": int(len(self.spx_surface)),
+            "n_vix_tenors":  int(len(self.vix_ts)),
+            "n_vix_options": int(len(self.vix_options)),
+            "weights":       {"w1": self.w1, "w2": self.w2, "w3": self.w3},
         }
         self.result = result
 
@@ -1128,6 +1236,10 @@ class JointCalibrator:
             "n_evals":    self._n_evals,
             "success":    bool(de_result.success),
             "feller_ok":  bool(2 * kappa * theta >= sigma**2),
+            "feller_state":  classify_feller(kappa, theta, sigma)[0],
+            "feller_margin": float(classify_feller(kappa, theta, sigma)[1]),
+            "n_spx_options": int(len(self.spx_surface)),
+            "n_vix_tenors":  int(len(self.vix_ts)),
         }
 
         # Attach Heston comparison if available
@@ -1320,7 +1432,16 @@ class JointCalibrator:
         print(f"  sigma = {p['sigma']:.4f}  (vol-of-vol)")
         print(f"  rho   = {p['rho']:.4f}  (spot-vol correlation)")
         print(f"  v0    = {p['v0']:.4f}  (spot var,  vol={np.sqrt(p['v0'])*100:.1f}%)")
-        print(f"  Feller: 2κθ={2*p['kappa']*p['theta']:.4f} {'≥' if result['feller_ok'] else '<'} σ²={p['sigma']**2:.4f}")
+        state, margin = classify_feller(p["kappa"], p["theta"], p["sigma"])
+        print(f"  Feller: 2κθ={2*p['kappa']*p['theta']:.4f} vs σ²={p['sigma']**2:.4f}"
+              f"  → {state} (margin {margin:+.2e})")
+        pinned = result.get("pinned_params") or count_pinned_params(p, state)
+        if pinned:
+            print(f"  Pinned: {', '.join(pinned)} at boundary "
+                  f"→ {5 - len(pinned)} effective d.o.f. of 5")
+        if result.get("n_vix_tenors") is not None:
+            print(f"  Data  : {result.get('n_spx_options', '?')} SPX opts, "
+                  f"{result['n_vix_tenors']} VIX tenors")
         print("\n── Loss Breakdown ───────────────────────────────────")
         print(f"  SPX smile RMSE    : {ll['spx_iv_rmse']:.2f} vol pts")
         print(f"  VIX futures RMSE  : {ll['vix_futures_rmse']:.2f} vol pts")

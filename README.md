@@ -4,7 +4,7 @@
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
 [![CI](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
-[![Tests](https://img.shields.io/badge/tests-637%20passing-00ff88?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-647%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-00ff88?style=flat-square)](LICENSE)
 
@@ -42,7 +42,7 @@ By signal:
 
 ---
 
-## The four corrections (the actual story)
+## The corrections (the actual story)
 
 | # | Correction | Effect |
 |---|-----------|--------|
@@ -50,6 +50,7 @@ By signal:
 | C17 | Benchmarked the regime classifier against a *persistence baseline* | Classifier 63.4% **loses** to 90.0% "predict yesterday's regime" → demoted from the trading loop |
 | C18 | **Strike-rolling bug**: same-day re-entry meant positions never rolled — the engine held one stale-strike straddle marked past expiry | Contaminated **every** backtest C10→C17; fixing it **inverted my own thesis** |
 | C19 | S2 stop-loss propagation, dead-code removal, signal-summary coverage; data-gap repair | Cleanup; canonical numbers unchanged |
+| C20 | **Calibration selector rewarded broken data**: ranked archived fits on SPX RMSE with no data-sufficiency check, so 1-tenor VIX days (an under-identified joint fit) scored *best* and headlined the live site | The published "best calibration" was the day the VIX feed failed; now gated on **≥3 VIX tenors** + provenance recorded on every fit. Feller re-reported as PASS/**BINDING**/VIOLATED |
 
 **The C18 inversion is the centrepiece.** I had built a contrarian signal (S1C) on the premise that my base signal S1 was a "−$1.53M catastrophe." That catastrophe was the bug. Corrected, **S1 is a profitable regime-gated short-VRP harvester (+$463K, 76% win, 53/54 trades short straddles)** — and **S1C, the inversion, is the artifact (−$404K)**. Inverting a profitable signal is the wrong trade, so S1C is demoted, exactly like the ML classifier in C17: *a thesis that holds only under a bug is not a signal.*
 
@@ -73,11 +74,55 @@ Calibrated Heston parameters:
 
 The SPX leg fits well and Feller passes — but **ρ is still pinned at its lower boundary (−0.95)**, the dashboard flags this, and the **VIX options leg is deliberately disabled** (`w₃ = 0.0`). ρ at the wall means even after tightening the bound the optimizer wants more leverage skew than Heston's diffusion can supply — the same misspecification, just no longer catastrophic for the SPX fit. When it was active, Heston's CIR variance density produced a **37.14 vol-pt RMSE on VIX options**: a *structural* failure, not a calibration failure. Heston cannot simultaneously match the SPX smile curvature and the VVIX-implied vol-of-vol surface; calibrating one degrades the other. Rather than hide that with a fudged weight, the loss function makes the tradeoff explicit and the leg is switched off with the reason documented. A two-factor **Quintic OU** model (also in the repo) recovers the VIX options leg to 17.5 vol-pts — better, but still short of the <10 target. Model misspecification, made visible.
 
+### Effective degrees of freedom
+
+ρ is not the only parameter set by a constraint rather than by the market. The
+Feller penalty is a *soft exterior* penalty, `50·max(0, σ²−2κθ)²`, whose gradient
+vanishes at the boundary — so whenever the smile wants more vol-of-vol than
+Feller permits, the optimizer settles a whisker outside the feasible set. Across
+19 archived fits, **11 land at 2κθ − σ² ≈ −1e-7 … −4e-6**, i.e. σ agrees with
+√(2κθ) to six significant figures. That is a *binding* constraint, not a broken
+model, and the dashboard now reports Feller as **PASS / BINDING / VIOLATED**
+rather than a knife-edge boolean that called an active constraint a failure.
+
+The consequence is worth stating plainly: on a typical joint fit **two of five
+parameters (ρ and σ) sit on boundaries**, so Heston is fitting the joint surface
+with **three effective degrees of freedom**, not five. The dashboard publishes
+that count. It is the same misspecification story as the disabled VIX-options
+leg, expressed as a number instead of a narrative.
+
+### Why the headline fit is chosen on data sufficiency, not RMSE
+
+The daily bot recalibrates on a live yfinance snapshot, and the dashboard
+headlines the best archived fit. Ranking those on SPX RMSE alone is wrong, and
+was wrong in production for two weeks.
+
+Yahoo intermittently returns `^VIX` without `^VIX9D/3M/6M`. The term-structure
+builder took the last row of a pivot with no completeness check, so those days
+produced a **single VIX tenor**. With one tenor the VIX-futures leg is one data
+point that a 5-parameter Heston matches exactly (RMSE 0.003), which frees all
+five parameters to fit the SPX smile alone. The result is a spuriously excellent
+SPX RMSE and a parameter vector from an entirely different regime:
+
+| VIX tenors | κ | θ | σ | SPX RMSE |
+|---|---|---|---|---|
+| 4 (well-constrained) | ~2.2 | ~0.058 | ~0.45 | 0.4 – 2.0 vp |
+| 1 (leg unidentified) | 8.9 – 9.9 | ~0.035 | ~0.83 | 0.3 – 1.8 vp |
+
+Because a 1-tenor fit looks like the best calibration ever recorded, a min-RMSE
+selector *preferentially picks the days the data broke*. The 2026-07-23 fit
+(1 tenor, SPX RMSE 0.049 vp) headlined the live site until this was caught — a
+number that quietly contradicted the whole point of the project, since the joint
+tension between the SPX and VIX legs is the finding. Data sufficiency (**≥ 3 VIX
+tenors**) is now a hard precondition checked before RMSE is consulted, enforced
+both at write time and at selection time, and every calibration records the
+option and tenor counts that produced it.
+
 ---
 
 ## System Overview
 
-14 components, ~15,300 lines of Python (ex-tests), **637 passing tests**, zero look-ahead bias.
+14 components, ~15,300 lines of Python (ex-tests), **647 passing tests**, zero look-ahead bias.
 
 | Component | Description | 
 |-----------|-------------|
@@ -147,7 +192,7 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 
 ```bash
 pytest joint_vol_calibration/tests/ -q
-# 637 passed locally (with trained NN weights present)
+# 647 passed locally (with trained NN weights present)
 # 619 passed, 18 skipped on a clean clone — the NN-pricer tests need the
 # gitignored .pt weights and skip gracefully without them (see CI badge).
 # Includes explicit look-ahead bias checks (test_lookahead.py) and a

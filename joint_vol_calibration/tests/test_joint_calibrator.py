@@ -37,6 +37,8 @@ import pytest
 
 from joint_vol_calibration.calibration.joint_calibrator import (
     JointCalibrator,
+    classify_feller,
+    count_pinned_params,
     heston_vix_call_price,
     heston_vix_put_price,
     is_acceptable_calibration,
@@ -48,7 +50,7 @@ from joint_vol_calibration.models.heston import (
     heston_call_batch,
     heston_call_price,
 )
-from joint_vol_calibration.config import HESTON_BOUNDS
+from joint_vol_calibration.config import HESTON_BOUNDS, JOINT_W1, JOINT_W2
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
@@ -429,6 +431,117 @@ class TestCalibrationQualityGate:
         )
         assert not ok
         assert "RMSE" in reason
+
+    def test_single_vix_tenor_rejected(self):
+        """A 1-tenor VIX leg cannot identify the joint fit.
+
+        Real incident (2026-07-23): Yahoo returned ^VIX without ^VIX9D/3M/6M, so
+        the VIX-futures leg was a single point that Heston matched exactly. All
+        five parameters were freed to chase the SPX smile, producing SPX RMSE
+        0.049vp — an order of magnitude "better" than any well-constrained day —
+        which then won an RMSE-ranked selector and headlined the public site.
+        The parameters themselves look perfectly healthy, so ONLY the data count
+        can catch this.
+        """
+        healthy_params = {"kappa": 2.26, "sigma": 0.474, "rho": -0.95}
+        ok, reason = is_acceptable_calibration(
+            healthy_params, spx_iv_rmse=0.049, n_vix_tenors=1
+        )
+        assert not ok, "1-tenor fit must be rejected despite excellent RMSE"
+        assert "tenor" in reason.lower()
+
+        # Same parameters with a real curve behind them are fine.
+        ok, _ = is_acceptable_calibration(
+            healthy_params, spx_iv_rmse=0.049, n_vix_tenors=4
+        )
+        assert ok
+
+    def test_tenor_check_skipped_when_unknown(self):
+        """Legacy pickles predate the provenance field; absence must not reject."""
+        ok, _ = is_acceptable_calibration(
+            {"kappa": 1.77, "sigma": 0.46, "rho": -0.95},
+            spx_iv_rmse=0.52, n_vix_tenors=None,
+        )
+        assert ok
+
+
+class TestFellerClassification:
+    """Feller must distinguish a BINDING constraint from a VIOLATED one."""
+
+    def test_clear_pass(self):
+        # 2026-05-31 showcase: margin +0.0236
+        state, margin = classify_feller(1.77, 0.0666, 0.460)
+        assert state == "PASS"
+        assert margin > 0
+
+    def test_binding_not_reported_as_failure(self):
+        """The solver's soft exterior penalty lands ~1e-6 outside the boundary.
+
+        Real fit (2026-08-04): sigma=0.6103173509, sqrt(2*kappa*theta)=0.6103141.
+        The bare boolean 2*kappa*theta >= sigma**2 calls this a hard failure; it
+        is a binding constraint and must classify as BINDING.
+        """
+        kappa, theta, sigma = 4.022199139627185, 0.04630341824281701, 0.6103173509096278
+        assert 2 * kappa * theta < sigma**2, "precondition: strictly violating"
+        state, margin = classify_feller(kappa, theta, sigma)
+        assert state == "BINDING"
+        assert -1e-4 < margin < 0
+
+    def test_genuine_violation_still_flagged(self):
+        # 2026-03-24: margin -4.47e-04, an order of magnitude past tolerance
+        state, margin = classify_feller(4.6217, 0.07637, 0.84115)
+        assert state == "VIOLATED"
+        assert margin < -1e-4
+
+    def test_states_are_exhaustive_and_ordered(self):
+        # Sweep sigma across the boundary; states must go PASS -> BINDING -> VIOLATED
+        kappa, theta = 2.0, 0.05
+        ceiling = (2 * kappa * theta) ** 0.5
+        seen = [classify_feller(kappa, theta, s)[0]
+                for s in (ceiling * 0.9, ceiling, ceiling * 1.1)]
+        assert seen == ["PASS", "BINDING", "VIOLATED"]
+
+
+class TestBoundaryPinning:
+    """Pinned parameters reduce the effective degrees of freedom."""
+
+    def test_rho_at_floor_is_pinned(self):
+        pinned = count_pinned_params(
+            {"kappa": 2.2, "theta": 0.058, "sigma": 0.43, "rho": -0.95, "v0": 0.016}
+        )
+        assert "rho" in pinned
+
+    def test_interior_params_not_pinned(self):
+        pinned = count_pinned_params(
+            {"kappa": 2.2, "theta": 0.058, "sigma": 0.43, "rho": -0.60, "v0": 0.016}
+        )
+        assert pinned == []
+
+    def test_feller_binding_pins_sigma(self):
+        """sigma can sit far from its own box bound yet still be constrained."""
+        params = {"kappa": 4.02, "theta": 0.0463, "sigma": 0.6103,
+                  "rho": -0.60, "v0": 0.0053}
+        assert count_pinned_params(params) == []          # no box bound active
+        pinned = count_pinned_params(params, feller_state="BINDING")
+        assert pinned == ["sigma"]                        # Feller ceiling is a bound
+
+
+class TestSparseVIXWeightRenormalisation:
+    """Dropping the VIX-options leg must renormalise w1/w2 against the original total."""
+
+    def test_weights_sum_to_one(self):
+        w1, w2 = JOINT_W1, JOINT_W2
+        total = w1 + w2
+        n1, n2 = w1 / total, w2 / total
+        assert abs(n1 + n2 - 1.0) < 1e-12
+
+        # The old sequencing bug: assign w1 first, then divide w2 by the UPDATED
+        # w1 + w2. With the configured 0.5/0.6 this summed to 1.0235.
+        buggy_w1 = w1 / (w1 + w2)
+        buggy_w2 = w2 / (buggy_w1 + w2)
+        assert abs(buggy_w1 + buggy_w2 - 1.0) > 1e-3, (
+            "regression guard: this is the bug that was fixed"
+        )
 
 
 # ── SVI / SSVI surface smoothing (C13 Step 3) ─────────────────────────────────

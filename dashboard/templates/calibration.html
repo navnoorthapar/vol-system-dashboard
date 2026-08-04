@@ -31,26 +31,64 @@
 {% endif %}
 
 <!-- ── Feller Condition Banner ────────────────────────────────────────────── -->
-<div class="banner {% if d.feller_pass %}banner-info{% else %}banner-warn{% endif %}" style="margin-bottom:20px;">
-  <div class="banner-icon">{% if d.feller_pass %}✓{% else %}✗{% endif %}</div>
+{% set f_ok = d.feller_state == 'PASS' %}
+{% set f_bind = d.feller_state == 'BINDING' %}
+{% set f_col = '#00ff88' if f_ok else ('#ffcc33' if f_bind else '#ff8833') %}
+<div class="banner {% if f_ok %}banner-info{% else %}banner-warn{% endif %}" style="margin-bottom:20px;">
+  <div class="banner-icon">{% if f_ok %}✓{% elif f_bind %}≡{% else %}✗{% endif %}</div>
   <div>
-    <div class="banner-title" style="color:{% if d.feller_pass %}#00ff88{% else %}#ff8833{% endif %};">
-      Feller Condition:  2κθ {% if d.feller_pass %}&gt;{% else %}&lt;{% endif %} σ²
-       —  {% if d.feller_pass %}PASS{% else %}FAIL (BARELY){% endif %}
+    <div class="banner-title" style="color:{{ f_col }};">
+      Feller Condition:  2κθ {% if f_ok %}&gt;{% elif f_bind %}={% else %}&lt;{% endif %} σ²
+       —  {{ d.feller_state }}
     </div>
     <div class="banner-body">
       2κθ = 2 × {{ d.kappa }} × {{ d.theta }} = <strong style="color:var(--text);">{{ d.feller_lhs }}</strong>
         &nbsp;&nbsp;|&nbsp;&nbsp;
       σ² = {{ d.sigma }}² = <strong style="color:var(--text);">{{ d.feller_rhs }}</strong>
         &nbsp;&nbsp;|&nbsp;&nbsp;
-      Margin = <strong style="color:{% if d.feller_pass %}#00ff88{% else %}#ff8833{% endif %};">{{ "{:+.6f}".format(d.feller_margin) }}</strong>
+      Margin = <strong style="color:{{ f_col }};">{{ "{:+.2e}".format(d.feller_margin) }}</strong>
       <br>
-      {% if not d.feller_pass %}
+      {% if f_bind %}
+      The constraint is <strong>active</strong>, not broken. The calibrator applies a soft
+      exterior penalty <span class="mono">50·max(0, σ²−2κθ)²</span> whose gradient vanishes at the
+      boundary, so when the SPX smile wants more vol-of-vol than Feller permits the optimiser
+      settles a whisker outside the feasible set — here σ agrees with √(2κθ) to six significant
+      figures. Reporting that as a failure would be a rounding artefact. What it does mean is
+      economically real: <strong>the market smile is asking for more vol-of-vol than a
+      Feller-satisfying Heston can supply</strong>, so σ is pinned by the constraint rather than
+      by the data.
+      {% elif f_ok %}
+      The variance process stays strictly positive — the Heston SDE is well-posed.
+      {% else %}
       The variance process can touch zero — the Heston SDE is not well-posed at current parameters.
       Practically this causes numerical instability in Monte Carlo paths and occasional negative variance.
-      {% else %}
-      The variance process stays strictly positive — the Heston SDE is well-posed.
       {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ── Identification / provenance banner ─────────────────────────────────── -->
+<div class="banner banner-info" style="margin-bottom:20px;">
+  <div class="banner-icon">◧</div>
+  <div>
+    <div class="banner-title">Fit identification — {{ d.effective_dof }} of 5 effective degrees of freedom</div>
+    <div class="banner-body">
+      {% if d.pinned_params %}
+      Pinned at a boundary: <strong style="color:var(--text);">{{ d.pinned_params|join(', ') }}</strong>.
+      A pinned parameter is set by its constraint, not by the market data, so this
+      5-parameter model is effectively fitting with {{ d.effective_dof }}. ρ pins at its −0.95
+      floor on nearly every joint fit: the SPX skew wants more spot–vol correlation than Heston
+      is allowed to express. That is the misspecification this project documents, stated as a number.
+      {% else %}
+      No parameter sits on a boundary — all five are identified by the data.
+      {% endif %}
+      <br>
+      Fit from
+      <strong style="color:var(--text);">{{ d.n_spx_options if d.n_spx_options is not none else '—' }}</strong> SPX options and
+      <strong style="color:var(--text);">{{ d.n_vix_tenors if d.n_vix_tenors is not none else '—' }}</strong> VIX tenors.
+      The VIX-futures leg needs at least 3 tenors to identify a curve; fits below that
+      threshold are rejected, because a single tenor is one data point that Heston matches
+      exactly and the joint fit silently collapses into an SPX-only calibration.
     </div>
   </div>
 </div>
@@ -227,10 +265,33 @@
         <tr>
           <td>Feller margin</td>
           <td class="mono">2κθ − σ²</td>
-          <td class="mono {% if d.feller_pass %}green{% else %}red{% endif %}">
-            {{ "{:+.6f}".format(d.feller_margin) }}
+          <td class="mono {% if d.feller_state == 'PASS' %}green{% elif d.feller_state == 'BINDING' %}amber{% else %}red{% endif %}">
+            {{ "{:+.2e}".format(d.feller_margin) }}
           </td>
-          <td>{% if d.feller_pass %}PASS — variance stays positive{% else %}FAIL — variance can touch zero{% endif %}</td>
+          <td>
+            {%- if d.feller_state == 'PASS' %}PASS — variance stays strictly positive
+            {%- elif d.feller_state == 'BINDING' %}BINDING — constraint active; σ set by Feller, not by the data
+            {%- else %}VIOLATED — variance can touch zero{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td>Effective d.o.f.</td>
+          <td class="mono">5 − |pinned|</td>
+          <td class="mono {% if d.effective_dof >= 5 %}green{% elif d.effective_dof >= 4 %}amber{% else %}red{% endif %}">
+            {{ d.effective_dof }} / 5
+          </td>
+          <td>
+            {%- if d.pinned_params %}Pinned: {{ d.pinned_params|join(', ') }} — set by constraints, not data
+            {%- else %}All parameters identified by the data{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td>Calibration inputs</td>
+          <td class="mono">n<sub>SPX</sub> / n<sub>VIX</sub></td>
+          <td class="mono {% if d.n_vix_tenors and d.n_vix_tenors >= 3 %}green{% else %}red{% endif %}">
+            {{ d.n_spx_options if d.n_spx_options is not none else '—' }} / {{ d.n_vix_tenors if d.n_vix_tenors is not none else '—' }}
+          </td>
+          <td>SPX options / VIX tenors — ≥3 tenors required to identify the VIX leg</td>
         </tr>
       </tbody>
     </table>
