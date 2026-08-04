@@ -760,10 +760,10 @@
     </div>
     
     <div class="card-sub" style="margin-top:8px;">
-      Front=13.28  →  Back=21.2
+      Front=16.85  →  Back=22.28
     </div>
     <div class="card-sub">
-      Slope=+7.92 pts
+      Slope=+5.43 pts
     </div>
     
   </div>
@@ -801,8 +801,8 @@
           <span style="font-size:11px;color:var(--text2);">
             ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
           </span>
-          <span class="mono" style="font-size:13px;font-weight:700;color:#00ff88;">
-            R1 · 76.4%
+          <span class="mono" style="font-size:13px;font-weight:700;color:#ff3333;">
+            R2 · 55.9%
           </span>
         </div>
 
@@ -818,21 +818,21 @@
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:76.4%;background:#00ff88;"></div>
+              <div class="progress-fill" style="width:44.1%;background:#00ff88;"></div>
             </div>
-            <div class="progress-val">76.4%</div>
+            <div class="progress-val">44.1%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:23.6%;background:#ff3333;"></div>
+              <div class="progress-fill" style="width:55.9%;background:#ff3333;"></div>
             </div>
-            <div class="progress-val">23.6%</div>
+            <div class="progress-val">55.9%</div>
           </div>
         </div>
 
         <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
-          63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+          Classifier disagrees with the rule label here — 63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
         </div>
       </div>
     </div>
@@ -1144,7 +1144,7 @@
   // VIX Term Structure chart
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = ["9d", "30d", "93d", "182d"];
-  const tsValues = [13.28, 15.86, 18.93, 21.2];
+  const tsValues = [16.85, 15.86, 20.54, 22.28];
 
   new Chart(tsCtx, {
     type: 'line',
