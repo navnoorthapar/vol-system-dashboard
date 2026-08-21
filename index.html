@@ -678,9 +678,9 @@
   <div class="page-title">Live Market Overview</div>
   <div class="page-subtitle">End-of-day regime + term structure</div>
   <div class="page-badge" id="freshness-badge">
-    <span data-date="2026-08-19">Last close: 2026-08-19</span>
+    <span data-date="2026-08-20">Last close: 2026-08-20</span>
     &nbsp;·&nbsp; Calibration: 2026-07-23
-    &nbsp;·&nbsp; Regime: 2026-08-19
+    &nbsp;·&nbsp; Regime: 2026-08-20
   </div>
 </div>
 <script>
@@ -718,24 +718,24 @@
   <!-- SPX -->
   <div class="card card-sm">
     <div class="card-label">S&P 500</div>
-    <div class="card-value">7,707.98</div>
+    <div class="card-value">7,641.16</div>
     <div class="stat-row">
-      <span class="stat-change up">
-        +0.21%
+      <span class="stat-change down">
+        -0.87%
       </span>
       <span style="color:var(--text3)">vs prev close</span>
     </div>
-    <div class="card-sub" style="margin-top:10px;">2026-08-19</div>
+    <div class="card-sub" style="margin-top:10px;">2026-08-20</div>
   </div>
 
   <!-- VIX -->
   <div class="card card-sm">
     <div class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></div>
     <div class="card-value green">
-      14.89
+      16.01
     </div>
     <div class="card-sub" style="margin-top:10px;">
-      🟢 LOW — complacency risk
+      🟢 NORMAL range
       
     </div>
   </div>
@@ -744,7 +744,7 @@
   <div class="card card-sm">
     <div class="card-label">VVIX  <span style="color:var(--text3);font-size:9px;">VOL-OF-VOL</span></div>
     <div class="card-value dim">
-      86.53
+      89.86
     </div>
     <div class="card-sub" style="margin-top:10px;">
       Normal VVIX
@@ -793,7 +793,7 @@
         </div>
         <div class="card-sub" style="margin-bottom:14px;">
           Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
-          trades on. As of 2026-08-19.
+          trades on. As of 2026-08-20.
         </div>
 
         <!-- ML classifier: research-only (demoted, C17) -->
@@ -801,8 +801,8 @@
           <span style="font-size:11px;color:var(--text2);">
             ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
           </span>
-          <span class="mono" style="font-size:13px;font-weight:700;color:#ff3333;">
-            R2 · 55.8%
+          <span class="mono" style="font-size:13px;font-weight:700;color:#00ff88;">
+            R1 · 88.4%
           </span>
         </div>
 
@@ -811,28 +811,28 @@
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R0 LONG γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:2.0%;background:#3388ff;"></div>
+              <div class="progress-fill" style="width:0.0%;background:#3388ff;"></div>
             </div>
-            <div class="progress-val">2.0%</div>
+            <div class="progress-val">0.0%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:42.2%;background:#00ff88;"></div>
+              <div class="progress-fill" style="width:88.4%;background:#00ff88;"></div>
             </div>
-            <div class="progress-val">42.2%</div>
+            <div class="progress-val">88.4%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:55.8%;background:#ff3333;"></div>
+              <div class="progress-fill" style="width:11.6%;background:#ff3333;"></div>
             </div>
-            <div class="progress-val">55.8%</div>
+            <div class="progress-val">11.6%</div>
           </div>
         </div>
 
         <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
-          63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+          Classifier disagrees with the rule label here — 63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
         </div>
       </div>
     </div>
@@ -862,7 +862,7 @@
       <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
         <div>
           <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">CURRENT VIX (30D IMPLIED)</div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">14.89%</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">16.01%</div>
         </div>
         <div style="text-align:right;">
           <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">PDV FORECAST (REALISED)</div>
@@ -873,7 +873,7 @@
       <div style="padding:14px 0;text-align:center;">
         <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">IMPLIED − REALISED SPREAD</div>
         <div class="mono" style="font-size:36px;font-weight:800;color:#ff8833;">
-          +6.52pp
+          +7.64pp
         </div>
         <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
           Moderate vol risk premium → favours short vol strategies
@@ -886,11 +886,11 @@
           <!-- Percentile badge — large and prominent -->
           <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
             <div style="font-size:28px;font-weight:800;color:#ff9900;font-family:'Menlo','Monaco',monospace;line-height:1;">
-              0.8th
+              0.9th
             </div>
             <div style="color:var(--text2);font-size:11px;line-height:1.4;">
               percentile<br>
-              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+3.15pp</span></span>
+              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">+3.14pp</span></span>
             </div>
           </div>
 
@@ -906,10 +906,10 @@
             line-height: 1.6;
             color: #5588cc;
           ">
-            <span style="font-weight:700;color:#3388ff;">&#9432; Spread at 0.8th percentile</span>
+            <span style="font-weight:700;color:#3388ff;">&#9432; Spread at 0.9th percentile</span>
             — vol appears cheap relative to 10-year history.
-            Historical mean: <span class="mono">+3.15pp</span>.
-            Current: <span class="mono">+6.52pp</span>.
+            Historical mean: <span class="mono">+3.14pp</span>.
+            Current: <span class="mono">+7.64pp</span>.
           </div>
           
 
@@ -927,7 +927,7 @@
         <div>σ₁ (5d EWMA): <span class="mono green">8.71%</span></div>
         <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">14.32%</span></div>
         <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
-        <div>Updated: <span class="mono">2026-08-19</span></div>
+        <div>Updated: <span class="mono">2026-08-20</span></div>
       </div>
     </div>
   </div>
@@ -1144,7 +1144,7 @@
   // VIX Term Structure chart
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = ["9d", "30d", "93d", "182d"];
-  const tsValues = [13.93, 14.89, 19.57, 21.99];
+  const tsValues = [13.93, 16.01, 19.57, 21.99];
 
   new Chart(tsCtx, {
     type: 'line',
@@ -1194,8 +1194,8 @@
   
   const spkCtx = document.getElementById('sparklineChart');
   if (spkCtx) {
-    const spkData = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1.11, 2.57, 1.85, 2.11, 1.75, 0.5, -0.9, -0.77, -1.01, -1.73, 1.6, 2.37, 1.06, 1.35, 4.63, 4.02, 4.55, 5.65, 7.95, 8.51, 6.52, 7.44, 8.54, 8.42, 8.51, 8.9, 10.26, 5.18, 3.83, 2.88, 2.16, 1.49, 1.11, 0.77, 1.61, 1.45, 0.76, 0.52, 0.85, 1.07, 1.62, 1.12];
-    const spkDates = ["2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24", "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18", "2026-08-19"];
+    const spkData = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1.11, 2.57, 1.85, 2.11, 1.75, 0.5, -0.9, -0.77, -1.01, -1.73, 1.6, 2.37, 1.06, 1.35, 4.63, 4.02, 4.55, 5.65, 7.95, 8.51, 6.52, 7.44, 8.54, 8.42, 8.51, 8.9, 10.26, 5.18, 3.83, 2.88, 2.16, 1.49, 1.11, 0.77, 1.61, 1.45, 0.76, 0.52, 0.85, 1.07, 1.62, 1.12, 2.97];
+    const spkDates = ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24", "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"];
     new Chart(spkCtx, {
       type: 'line',
       data: {
