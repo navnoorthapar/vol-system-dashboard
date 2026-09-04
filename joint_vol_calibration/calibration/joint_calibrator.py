@@ -514,6 +514,8 @@ class JointCalibrator:
         if spx_hist.empty:
             raise ValueError(f"No SPX OHLCV data available for {self.as_of_date}")
         self.S = float(spx_hist.iloc[-1]["close"])
+        # The session this fit describes. Every other leg is pinned to it.
+        self.spot_date = str(spx_hist.iloc[-1]["date"])[:10]
         logger.info("  SPX spot S = %.2f (date: %s)",
                     self.S, spx_hist.iloc[-1]["date"])
 
@@ -650,7 +652,7 @@ class JointCalibrator:
 
     def _prepare_vix_term_structure(self) -> pd.DataFrame:
         """
-        Extract the most recent VIX term structure as market VIX futures proxies.
+        Extract the VIX term structure on the SPX spot session as VIX futures proxies.
 
         Uses VIX9D (9d), VIX (30d), VIX3M (91d), VIX6M (182d) as the four term
         structure anchor points. These are the real-time VIX indices published by
@@ -664,7 +666,22 @@ class JointCalibrator:
         if ts_wide.empty:
             return pd.DataFrame(columns=["tenor_years", "market_price"])
 
-        latest = ts_wide.iloc[-1]
+        # Pin the VIX leg to the SPX spot session. Taking the last row instead
+        # silently paired today's spot with whatever date the feed last
+        # delivered — and when Yahoo's sub-tenor row was missing, borrowed a
+        # 1-tenor row that let the joint fit degenerate to SPX-only (C20). A
+        # missing row now yields an empty leg, which the ≥3-tenor gate rejects.
+        spot = getattr(self, "spot_date", None)
+        if spot is not None and "date" in ts_wide.columns:
+            on_spot = ts_wide[ts_wide["date"].astype(str).str[:10] == spot]
+            if on_spot.empty:
+                logger.warning("  VIX term structure has no row for spot session %s "
+                               "(latest available %s) -- VIX leg left empty",
+                               spot, str(ts_wide["date"].iloc[-1])[:10])
+                return pd.DataFrame(columns=["tenor_years", "market_price"])
+            latest = on_spot.iloc[-1]
+        else:
+            latest = ts_wide.iloc[-1]
         rows = []
         for col, tenor in _VIX_TS_TENORS.items():
             if col in latest and pd.notna(latest[col]) and latest[col] > 0:
@@ -1020,6 +1037,7 @@ class JointCalibrator:
             # joint fit from an under-identified one.
             "n_spx_options": int(len(self.spx_surface)),
             "n_vix_tenors":  int(len(self.vix_ts)),
+            "spot_date":     getattr(self, "spot_date", None),
             "n_vix_options": int(len(self.vix_options)),
             "weights":       {"w1": self.w1, "w2": self.w2, "w3": self.w3},
         }
@@ -1240,6 +1258,7 @@ class JointCalibrator:
             "feller_margin": float(classify_feller(kappa, theta, sigma)[1]),
             "n_spx_options": int(len(self.spx_surface)),
             "n_vix_tenors":  int(len(self.vix_ts)),
+            "spot_date":     getattr(self, "spot_date", None),
         }
 
         # Attach Heston comparison if available

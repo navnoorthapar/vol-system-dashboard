@@ -4,7 +4,7 @@
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
 [![CI](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
-[![Tests](https://img.shields.io/badge/tests-647%20passing-00ff88?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-657%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-00ff88?style=flat-square)](LICENSE)
 
@@ -118,11 +118,29 @@ tenors**) is now a hard precondition checked before RMSE is consulted, enforced
 both at write time and at selection time, and every calibration records the
 option and tenor counts that produced it.
 
+**Follow-up (2026-09-04): the outage was self-inflicted.** Auditing a month of
+unattended runs showed the tenor loss was not random feed flakiness. `^VIX9D`,
+`^VIX3M` and `^VIX6M` exist on Yahoo only as a *current-day* row (no history),
+and `yfinance` treats its `end` date as **exclusive** while the downloader
+documented it as inclusive. A run on the session date therefore dropped the
+session that had just closed — SPX, VIX and T-bill included — so every run that
+fired before midnight UTC was one session stale and could never see the
+sub-tenor row. The only 4-tenor fits in August came from runs GitHub happened to
+delay past midnight; 6 of the 14 fits it accepted were under-identified. Fixes:
+end dates are truly inclusive at the downloader layer; the VIX term-structure
+row is taken strictly on the SPX spot session (a missing row leaves the leg
+empty for the gate instead of borrowing yesterday's); calibrations are named by
+the session they describe rather than the run date; and the cron moved to
+21:30 UTC so even a delayed run lands inside the window. The August–September
+pickles had their tenor counts backfilled from CI logs, and the 1-tenor ones are
+now excluded by the gate. The tests that pin all of this live in
+`joint_vol_calibration/tests/test_data_pipeline.py`.
+
 ---
 
 ## System Overview
 
-14 components, ~15,300 lines of Python (ex-tests), **647 passing tests**, zero look-ahead bias.
+14 components, ~15,300 lines of Python (ex-tests), **657 passing tests**, zero look-ahead bias.
 
 | Component | Description | 
 |-----------|-------------|
@@ -147,7 +165,7 @@ option and tenor counts that produced it.
 
 **[https://navnoorbawa.me](https://navnoorbawa.me)** — four pages, served as frozen HTML from stored artifacts:
 
-- **Live Market** — SPX/VIX/VVIX, end-of-day regime (R0/R1/R2), PDV forecast vs implied, VIX term structure (data current to 2026-06-18)
+- **Live Market** — SPX/VIX/VVIX, end-of-day regime (R0/R1/R2), PDV forecast vs implied, VIX term structure (auto-refreshed after every U.S. session)
 - **Calibration** — Heston parameter surface, Feller condition, SPX smile overlay, RMSE decomposition, Quintic OU comparison
 - **Greeks Monitor** — Vomma heatmap, unstable nodes, vanna/QV convexity by maturity
 - **Backtest** — Equity curve 2018–2025, per-signal attribution, the full C16→C18 correction log, and a "weaknesses found vs fixed" table
@@ -192,7 +210,7 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 
 ```bash
 pytest joint_vol_calibration/tests/ -q
-# 647 passed locally (with trained NN weights present)
+# 657 passed locally (with trained NN weights present)
 # 619 passed, 18 skipped on a clean clone — the NN-pricer tests need the
 # gitignored .pt weights and skip gracefully without them (see CI badge).
 # Includes explicit look-ahead bias checks (test_lookahead.py) and a

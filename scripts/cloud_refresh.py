@@ -5,7 +5,8 @@ Daily auto-refresh for GitHub Actions.
 Runs every weekday after US market close:
   1. Download last 400 days of SPX/VIX/T-bill from yfinance -> SQLite DB
   2. Extend regime_labels.parquet with new trading days
-  3. Download SPX options + recalibrate Heston -> save joint_cal_YYYY-MM-DD.pkl
+  3. Download SPX options + recalibrate Heston -> save joint_cal_<session>.pkl
+     (named by the closed SPX session the fit describes, not the run date)
   4. Freeze Flask app to static HTML -> .site-build/
 
 The workflow then commits updated data files and pushes .site-build/ to gh-pages.
@@ -30,6 +31,24 @@ import numpy as np
 TODAY = date.today().isoformat()
 DATA  = ROOT / "data_store"
 DB    = DATA / "vol_system.db"
+
+
+def latest_session_date(spx_df) -> "str | None":
+    """Date (YYYY-MM-DD) of the most recent CLOSED SPX session in ``spx_df``.
+
+    This is what a calibration actually describes. It equals the run date only
+    when the job fires before midnight UTC; a cron delayed past midnight (which
+    GitHub does routinely) would otherwise mint a pickle named for a day that
+    has not traded yet.
+    """
+    if spx_df is None or len(spx_df) == 0:
+        return None
+    return str(spx_df["date"].iloc[-1])[:10]
+
+
+def calibration_path(session_date: str) -> pathlib.Path:
+    """Canonical location of the joint calibration for one closed session."""
+    return DATA / "calibrations" / f"joint_cal_{session_date}.pkl"
 
 
 # -- Step 1: Market data -------------------------------------------------------
@@ -150,12 +169,19 @@ def recalibrate_heston() -> bool:
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate
 
-    log.info("[3/4] Downloading SPX options for %s", TODAY)
+    # Name the fit by the session it describes, not by the run date: exact
+    # provenance, holiday runs skip naturally, and a delayed cron cannot write a
+    # second fit for one close. (Pickles dated before 2026-09-08 carry the run
+    # date — see scripts/backfill_calibration_provenance.py.)
+    spot_date = latest_session_date(get_spx_ohlcv(as_of_date=TODAY))
+    if spot_date is None:
+        log.warning("  No SPX sessions in DB; skipping recalibration")
+        return False
+    log.info("[3/4] Downloading SPX options for session %s (run date %s)", spot_date, TODAY)
 
-    # Skip if already calibrated today
-    existing = list((DATA / "calibrations").glob(f"joint_cal_{TODAY}.pkl"))
-    if existing:
-        log.info("  Calibration already exists for today; skipping")
+    out = calibration_path(spot_date)
+    if out.exists():
+        log.info("  Calibration for session %s already exists; skipping", spot_date)
         return True
 
     try:
@@ -207,7 +233,8 @@ def recalibrate_heston() -> bool:
         result = cal.calibrate()
 
         spx_df = get_spx_ohlcv(as_of_date=TODAY)
-        result["as_of_date"] = TODAY
+        result["as_of_date"] = spot_date   # the session the fit describes
+        result["run_date"]   = TODAY
         result["S"] = float(spx_df["close"].iloc[-1]) if not spx_df.empty else 0.0
         result["r"] = get_tbill_rate(TODAY)
 
@@ -230,18 +257,17 @@ def recalibrate_heston() -> bool:
             )
             return False
 
-        out = DATA / "calibrations" / f"joint_cal_{TODAY}.pkl"
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "wb") as f:
             pickle.dump(result, f)
 
         log.info(
             "  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE=%.3f vp | "
-            "VIX RMSE=%.3f | %s SPX opts, %s VIX tenors | Feller %s",
+            "VIX RMSE=%.3f | %s SPX opts, %s VIX tenors | Feller %s | session %s",
             p.get("kappa", 0), p.get("sigma", 0), p.get("rho", 0),
             l.get("spx_iv_rmse", 0), l.get("vix_futures_rmse", 0),
             result.get("n_spx_options", "?"), result.get("n_vix_tenors", "?"),
-            result.get("feller_state", "?"),
+            result.get("feller_state", "?"), spot_date,
         )
         return True
 

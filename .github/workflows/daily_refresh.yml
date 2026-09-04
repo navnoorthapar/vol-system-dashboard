@@ -1,10 +1,19 @@
 name: Daily Market Refresh
 
-# Runs every weekday at 11pm UTC (6:30am IST next day / 6pm ET same day)
-# That's 30+ min after US options market close — yfinance data is settled
+# Runs every weekday at 21:30 UTC (17:30 ET, ~75 min after the 16:15 ET VIX
+# settlement; 03:00 IST). Why this slot:
+#   * Yahoo publishes the session's SPX/VIX/^IRX bars within minutes of the
+#     close, and the download end-dates are inclusive (yf_downloader._yf_end),
+#     so a run on the session date captures that session.
+#   * ^VIX9D/^VIX3M/^VIX6M exist on Yahoo ONLY as a current-day row (no
+#     history). The job must run after the close and before Yahoo rolls that
+#     row to the next date (~04:00 UTC), or the joint fit is left with one VIX
+#     tenor and degenerates (see README, "Calibration provenance").
+#   * GitHub cron is best-effort and routinely fires 30-90 min late, at times
+#     hours. Starting at 21:30 keeps even a badly delayed run inside the window.
 on:
   schedule:
-    - cron: "0 23 * * 1-5"
+    - cron: "30 21 * * 1-5"
   workflow_dispatch:          # manual trigger from GitHub UI anytime
 
 permissions:

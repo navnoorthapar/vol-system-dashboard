@@ -85,7 +85,8 @@
       <br>
       Fit from
       <strong style="color:var(--text);">{{ d.n_spx_options if d.n_spx_options is not none else '—' }}</strong> SPX options and
-      <strong style="color:var(--text);">{{ d.n_vix_tenors if d.n_vix_tenors is not none else '—' }}</strong> VIX tenors.
+      <strong style="color:var(--text);">{{ d.n_vix_tenors if d.n_vix_tenors is not none else '—' }}</strong> VIX tenors{% if d.spot_date %},
+      all taken on the closed SPX session of <strong style="color:var(--text);">{{ d.spot_date }}</strong>{% endif %}.
       The VIX-futures leg needs at least 3 tenors to identify a curve; fits below that
       threshold are rejected, because a single tenor is one data point that Heston matches
       exactly and the joint fit silently collapses into an SPX-only calibration.

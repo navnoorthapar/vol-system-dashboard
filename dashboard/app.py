@@ -523,6 +523,7 @@ def load_page2() -> dict[str, Any]:
         # Data provenance: how much market data produced this fit
         d["n_spx_options"] = cal.get("n_spx_options")
         d["n_vix_tenors"]  = cal.get("n_vix_tenors")
+        d["spot_date"]     = cal.get("spot_date")   # closed SPX session the fit describes
 
         # Rho boundary flag
         d["rho_at_boundary"] = abs(p["rho"]) >= 0.94
@@ -541,6 +542,7 @@ def load_page2() -> dict[str, Any]:
         d.setdefault("effective_dof", 5)
         d.setdefault("n_spx_options", None)
         d.setdefault("n_vix_tenors", None)
+        d.setdefault("spot_date", None)
         d.setdefault("rho_at_boundary", False)
         d.setdefault("as_of", "N/A")
         d.setdefault("mat_smiles", [])

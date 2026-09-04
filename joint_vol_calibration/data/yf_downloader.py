@@ -12,6 +12,8 @@ Limitations to be aware of:
   - For historical options chains we must rely on snapshots accumulated over time
     (see pipeline.py which calls this daily) or CBOE bulk data files.
   - yfinance data has occasional gaps/errors — we validate and flag them.
+  - yfinance treats ``end`` as EXCLUSIVE. Every function here takes an
+    INCLUSIVE end and shifts it internally via ``_yf_end`` — do not pre-shift.
 
 Financial context:
   SPX OHLCV is the primary time series for:
@@ -30,6 +32,20 @@ import pandas as pd
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+
+def _yf_end(end: str) -> str:
+    """Convert an INCLUSIVE end date to the EXCLUSIVE form yfinance expects.
+
+    Every download function in this module documents ``end`` as inclusive, but
+    ``yfinance`` (both ``download`` and ``Ticker.history``) stops one day
+    *before* ``end``. Passing the run date straight through therefore dropped
+    the session that had just closed on every run that fired before midnight
+    UTC — the site was one session stale and the VIX9D/3M/6M indices, which
+    Yahoo exposes only as a current-day row, were never captured. Shift by one
+    calendar day so the last requested session is actually returned.
+    """
+    return (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
 
 # ── SPX OHLCV ─────────────────────────────────────────────────────────────────
 
@@ -61,7 +77,7 @@ def download_spx_ohlcv(
     ticker = yf.Ticker("^GSPC")
     df = ticker.history(
         start=start,
-        end=end,
+        end=_yf_end(end),
         interval="1d",
         auto_adjust=True,   # adjusts for splits and dividends
         back_adjust=False,
@@ -122,7 +138,7 @@ def download_vix_index(
 
     logger.info("Downloading VIX index from Yahoo Finance %s to %s ...", start, end)
 
-    df = yf.download("^VIX", start=start, end=end, interval="1d",
+    df = yf.download("^VIX", start=start, end=_yf_end(end), interval="1d",
                      auto_adjust=True, progress=False)
 
     if df.empty:
@@ -171,7 +187,7 @@ def download_tbill_rate(
 
     logger.info("Downloading 3M T-bill rate (^IRX) from %s to %s ...", start, end)
 
-    df = yf.download("^IRX", start=start, end=end, interval="1d",
+    df = yf.download("^IRX", start=start, end=_yf_end(end), interval="1d",
                      auto_adjust=False, progress=False)
 
     if df.empty:
@@ -428,7 +444,7 @@ def download_vix_term_structure(
     logger.info("Downloading VIX term structure indices from %s to %s ...", start, end)
 
     tickers_str = " ".join(_VIX_TERM_TICKERS.keys())
-    raw = yf.download(tickers_str, start=start, end=end, interval="1d",
+    raw = yf.download(tickers_str, start=start, end=_yf_end(end), interval="1d",
                       auto_adjust=True, progress=False)
 
     if raw.empty:

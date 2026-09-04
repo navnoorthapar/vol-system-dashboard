@@ -67,3 +67,7 @@ data_store/market_data.db
 
 # Personal / session files
 GRILL_NOTES.md
+
+# SQLite WAL sidecars (transient)
+data_store/vol_system.db-wal
+data_store/vol_system.db-shm
