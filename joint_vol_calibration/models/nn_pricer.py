@@ -871,12 +871,27 @@ class NNPricer:
         log_m_vals = np.log(strikes / F)
         sqrt_T     = np.sqrt(T)
 
+        # Timing: best-of-N with perf_counter on BOTH sides. A single wall-clock
+        # sample of a few-millisecond kernel is dominated by scheduler jitter
+        # (observed: identical code reporting 0.8x and 3x on the same laptop),
+        # which is noise about the machine, not information about the pricer.
+        # The minimum over repeats is the standard steady-state estimator.
+        def _best_of(fn, repeats: int = 5):
+            best = float("inf")
+            for _ in range(repeats):
+                t0 = time.perf_counter()
+                out = fn()
+                best = min(best, time.perf_counter() - t0)
+            return out, best
+
         # ── Heston batch + IV inversion ──
-        t0 = time.time()
-        model_calls = heston_call_batch(S, strikes, T, r, q, kappa, theta, sigma, rho, v0)
         F_arr = np.full(n_options, F); T_arr = np.full(n_options, T); r_arr = np.full(n_options, r)
-        heston_ivs = _bs_iv_vectorized(model_calls, F_arr, strikes, T_arr, r_arr)
-        heston_time = time.time() - t0
+
+        def _heston_leg():
+            calls = heston_call_batch(S, strikes, T, r, q, kappa, theta, sigma, rho, v0)
+            return _bs_iv_vectorized(calls, F_arr, strikes, T_arr, r_arr)
+
+        heston_ivs, heston_time = _best_of(_heston_leg)
 
         # ── NN inference ──
         feats = np.column_stack([
@@ -889,9 +904,7 @@ class NNPricer:
         # allocation overhead (cold-start speedup can dip to ~1×). The benchmark
         # is meant to report steady-state inference speed, so discard the first.
         _ = self.spx_iv_batch(feats)
-        t0 = time.time()
-        nn_ivs = self.spx_iv_batch(feats)
-        nn_time = time.time() - t0
+        nn_ivs, nn_time = _best_of(lambda: self.spx_iv_batch(feats))
 
         # Accuracy on valid rows: filter out near-zero IVs (deep OTM options with
         # < 2% IV are excluded from calibration and outside the training distribution)
