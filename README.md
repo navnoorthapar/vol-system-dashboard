@@ -211,7 +211,7 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 ```bash
 pytest joint_vol_calibration/tests/ -q
 # 657 passed locally (with trained NN weights present)
-# 619 passed, 18 skipped on a clean clone — the NN-pricer tests need the
+# 633 passed, 24 skipped on a clean clone — the NN-pricer tests need the
 # gitignored .pt weights and skip gracefully without them (see CI badge).
 # Includes explicit look-ahead bias checks (test_lookahead.py) and a
 # Monte-Carlo ↔ analytic cross-validation of the Heston pricer.
