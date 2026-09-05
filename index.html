@@ -11,11 +11,11 @@
   <meta property="og:type"         content="website">
   <meta property="og:url"          content="https://navnoorbawa.me/">
   <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
-  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 657 tests. Live dashboard.">
+  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 666 tests. Live dashboard.">
   <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
   <meta property="og:image:width"  content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 657 tests, documented negative result.">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 666 tests, documented negative result.">
   <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
   <meta name="author"              content="Navnoor Bawa">
   <link rel="canonical"            href="https://navnoorbawa.me/">
@@ -638,7 +638,7 @@
 
 <div class="top-banner">
   <div class="top-banner-text">
-    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 657 tests &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 666 tests &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
   </div>
   <div class="top-banner-links">
     <a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub</a>
@@ -762,10 +762,10 @@
     </div>
     
     <div class="card-sub" style="margin-top:8px;">
-      Front=11.97  →  Back=19.89
+      Front=16.85  →  Back=22.28
     </div>
     <div class="card-sub">
-      Slope=+7.92 pts
+      Slope=+5.43 pts
     </div>
     
   </div>
@@ -803,8 +803,8 @@
           <span style="font-size:11px;color:var(--text2);">
             ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
           </span>
-          <span class="mono" style="font-size:13px;font-weight:700;color:#00ff88;">
-            R1 · 76.4%
+          <span class="mono" style="font-size:13px;font-weight:700;color:#ff3333;">
+            R2 · 64.5%
           </span>
         </div>
 
@@ -820,21 +820,21 @@
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:76.4%;background:#00ff88;"></div>
+              <div class="progress-fill" style="width:35.5%;background:#00ff88;"></div>
             </div>
-            <div class="progress-val">76.4%</div>
+            <div class="progress-val">35.5%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:23.6%;background:#ff3333;"></div>
+              <div class="progress-fill" style="width:64.5%;background:#ff3333;"></div>
             </div>
-            <div class="progress-val">23.6%</div>
+            <div class="progress-val">64.5%</div>
           </div>
         </div>
 
         <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
-          63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+          Classifier disagrees with the rule label here — 63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
         </div>
       </div>
     </div>
@@ -929,7 +929,7 @@
         <div>σ₁ (5d EWMA): <span class="mono green">8.71%</span></div>
         <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">14.32%</span></div>
         <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
-        <div>Updated: <span class="mono">2026-09-04</span></div>
+        <div>Updated: <span class="mono">2025-12-30</span></div>
       </div>
     </div>
   </div>
@@ -949,25 +949,25 @@
 
   <!-- Regime Probability History (static info card) -->
   <div class="card">
-    <div class="card-label">C8 Classifier — Full-Period Statistics (2015 – 2025)</div>
+    <div class="card-label">Rule-Label Distribution — Full Period (2010 – 2026)</div>
     <div class="mt12">
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;text-align:center;">
         <div style="padding:16px;border-radius:8px;background:rgba(51,136,255,0.06);border:1px solid rgba(51,136,255,0.18);">
           <div style="font-size:11px;color:#3388ff;margin-bottom:4px;font-weight:600;">R0 LONG GAMMA</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">12.7%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">350 / 2,757 days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">10.2%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">428 / 4,177 days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Buy straddles</div>
         </div>
         <div style="padding:16px;border-radius:8px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);">
           <div style="font-size:11px;color:#00ff88;margin-bottom:4px;font-weight:600;">R1 SHORT GAMMA</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">42.8%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,180 / 2,757 days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">67.9%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">2,837 / 4,177 days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Sell premium</div>
         </div>
         <div style="padding:16px;border-radius:8px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.18);">
           <div style="font-size:11px;color:#ff3333;margin-bottom:4px;font-weight:600;">R2 VOMMA ACTIVE</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">44.5%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,227 / 2,757 days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">21.8%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">912 / 4,177 days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Vomma trades</div>
         </div>
       </div>
@@ -1146,7 +1146,7 @@
   // VIX Term Structure chart
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = ["9d", "30d", "93d", "182d"];
-  const tsValues = [11.97, 14.53, 17.61, 19.89];
+  const tsValues = [16.85, 14.53, 20.54, 22.28];
 
   new Chart(tsCtx, {
     type: 'line',
