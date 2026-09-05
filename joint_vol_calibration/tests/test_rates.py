@@ -35,6 +35,37 @@ def ensure_schema():
     init_database()
 
 
+# The window the synthetic fixtures below overwrite. Kept deliberately wider
+# than the fixture dates so a future edit to `sample_rates` stays covered.
+_FIXTURE_WINDOW = ("2020-01-01", "2020-01-31")
+
+
+@pytest.fixture(autouse=True)
+def protect_production_rates():
+    """Snapshot and restore the real ^IRX rows these tests overwrite.
+
+    DB_PATH here is the tracked production database, and several tests call
+    ``insert_tbill_rates(sample_rates)`` directly rather than through a
+    fixture. Those synthetic rows -- ``np.linspace(0.015, 0.020, 7)`` -- used
+    to persist, and for a long time they were the ONLY T-bill rows inside the
+    2018-2025 backtest window. Because ``compute_metrics`` forward-fills the
+    rate series, a unit-test fixture silently became the cash hurdle behind
+    the published "Sharpe vs ^IRX". Restoring the window keeps the assertions
+    below intact while making that impossible to repeat.
+    """
+    lo, hi = _FIXTURE_WINDOW
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        before = conn.execute(
+            "SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?", (lo, hi)
+        ).fetchall()
+    yield
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.execute("DELETE FROM tbill_rates WHERE date BETWEEN ? AND ?", (lo, hi))
+        conn.executemany(
+            "INSERT OR REPLACE INTO tbill_rates (date, rate) VALUES (?, ?)", before
+        )
+
+
 @pytest.fixture
 def sample_rates() -> pd.DataFrame:
     """Small set of test rates: 2020-01-02 through 2020-01-10 (weekdays)."""

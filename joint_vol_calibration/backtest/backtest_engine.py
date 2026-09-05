@@ -248,7 +248,14 @@ def _simulate_straddle_pnl(
 
         S       = float(spx_close.loc[date])
         vix_row = vix_wide_idx.loc[date]
-        T_rem   = max(T_entry - days_biz / TRADING_DAYS, 1.0 / 365.0) if in_trade else T_entry
+        # days_biz is incremented in the HOLD branch BELOW, so at this point it
+        # still holds the count as of the previous bar. Being in_trade here
+        # means one more session has elapsed, hence days_biz + 1: without it
+        # the first holding day carried no time decay at all and every later
+        # mark valued the straddle one day too rich, which systematically
+        # understated short-straddle P&L (S1 is 53 of 54 short).
+        T_rem   = (max(T_entry - (days_biz + 1) / TRADING_DAYS, 1.0 / 365.0)
+                   if in_trade else T_entry)
         sigma   = float(_interp_atm_iv(vix_row, T_rem))
         if not (sigma > 0) or np.isnan(sigma):
             sigma = 0.20
@@ -867,11 +874,34 @@ class BacktestEngine:
             as_of_date=self.end_date,
             start_date=self.start_date,
         )
+        # An emptiness check is not enough. The shipped DB once held exactly 7
+        # T-bill rows inside this window (a unit-test fixture that leaked into
+        # the tracked database), and because compute_metrics forward-fills the
+        # series, those 7 synthetic days silently became the cash hurdle for
+        # five years. Require the series to actually SPAN the backtest window
+        # before trusting it as a per-date hurdle.
+        _rate_series = None
         if _tbill_df.empty:
-            _rate_series = None
             logger.warning("No T-bill rates in DB — using fixed r=%.4f", self.r)
         else:
-            _rate_series = _tbill_df.set_index("date")["rate"]
+            _first = pd.Timestamp(_tbill_df["date"].iloc[0])
+            _last = pd.Timestamp(_tbill_df["date"].iloc[-1])
+            _span_days = max((pd.Timestamp(self.end_date) - pd.Timestamp(self.start_date)).days, 1)
+            _expected = _span_days / 7 * 5 * 0.80   # 80% of business days in the window
+            if (
+                _first > pd.Timestamp(self.start_date) + pd.Timedelta(days=10)
+                or _last < pd.Timestamp(self.end_date) - pd.Timedelta(days=10)
+                or len(_tbill_df) < _expected
+            ):
+                logger.warning(
+                    "T-bill series does not span the backtest window "
+                    "(%d rows, %s → %s, need ~%d covering %s → %s) — "
+                    "falling back to fixed r=%.4f rather than forward-filling a stub",
+                    len(_tbill_df), _first.date(), _last.date(), _expected,
+                    self.start_date, self.end_date, self.r,
+                )
+            else:
+                _rate_series = _tbill_df.set_index("date")["rate"]
         # Keep for compute_metrics: Sharpe/Sortino use the same cash hurdle
         self._rate_series = _rate_series
 
