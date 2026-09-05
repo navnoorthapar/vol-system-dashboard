@@ -23,7 +23,7 @@ Over eighteen months and 14 components, the system covers the full pipeline from
 - **C10**: Full backtest engine with walk-forward validation and HTML reporting
 - **C11–C13b**: Regime-switching jumps (Merton/BNS), Bates SVJ, SVI/SSVI smoothing, two-factor Quintic OU
 
-657 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
+666 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
 
 ---
 
@@ -78,7 +78,7 @@ Fixing it inverted my own thesis. I had built a *contrarian* signal (S1C) on the
 
 So S1C is demoted. *A thesis that holds only under a bug is not a signal.* And S1's profit isn't a green light either: it's fat-tailed (one −$333K COVID trade, −$99K in 2022), concentrated (top-5 trades = 73% of the profit), and — the caveat that dominates everything — **mark-to-model**. The database holds no historical option prices, so all P&L is Black-Scholes on the VIX-ATM vol, not traded fills.
 
-The final, honest portfolio (S1C + S3 + S4, equally weighted): **−19.0% cumulative, Sharpe −1.57, max drawdown −25.9%.**
+The final, honest portfolio (S1C + S3 + S4, equally weighted): **−26.1% cumulative, Sharpe −1.80, max drawdown −31.5%.**
 
 ---
 
@@ -106,7 +106,7 @@ There's a deeper reason it was never going to work, and it is about the labels, 
 
 Every hedge fund backtest showing Sharpe > 2 has look-ahead bias somewhere — in the feature construction, the regime labels, the vol surface used for pricing, or the cost model. Usually more than one.
 
-The 657 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
+The 666 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
 
 The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
 

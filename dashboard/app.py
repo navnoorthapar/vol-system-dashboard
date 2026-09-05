@@ -300,6 +300,21 @@ def load_page1() -> dict[str, Any]:
         d["prob_r1"]      = round(float(proba[1]) * 100, 1)
         d["prob_r2"]      = round(float(proba[2]) * 100, 1)
         d["clf_accuracy"] = "63.4%"
+
+        # Regime frequency card: computed from the shipped labels, never
+        # hard-coded. The previous constants were stale by ~2x on R2 and
+        # contradicted the backtest page's own adaptive-gate story.
+        try:
+            _rc = _rl["regime"].astype(int)
+            _tot = int(len(_rc))
+            d["reg_total"] = _tot
+            for _k in (0, 1, 2):
+                _n = int((_rc == _k).sum())
+                d[f"reg{_k}_n"] = _n
+                d[f"reg{_k}_pct"] = round(100.0 * _n / _tot, 1) if _tot else 0.0
+            d["reg_span"] = f"{_rc.index[0].year} – {_rc.index[-1].year}"
+        except Exception:
+            pass
     except Exception as e:
         d["regime_error"] = str(e)
         _logger.warning("Live regime inference failed (%s); falling back to cached labels.", e)
@@ -370,7 +385,11 @@ def load_page1() -> dict[str, Any]:
         pdv_forecast = float(coefs[0] * s1 + coefs[1] * s2 + coefs[2] * lev + intcpt) * 100
         d["pdv_forecast"] = round(pdv_forecast, 2)
         d["pdv_spread"]   = round((d.get("vix", 0) or 0) - pdv_forecast, 2)
-        d["pdv_date"]     = _rl_max_date or str(pdv._features.index[-1].date())
+        # The PDV features are computed from the DB, which can lag the regime
+        # labels. Stamping the label date here presented a forecast built from
+        # months-old features as if it were today's.
+        d["pdv_date"]     = str(pdv._features.index[-1].date())
+        d["pdv_stale"]    = bool(_rl_max_date and str(pdv._features.index[-1].date()) < _rl_max_date)
         d["pdv_sigma1"]   = round(s1 * 100, 2)
         d["pdv_sigma2"]   = round(s2 * 100, 2)
         d["pdv_spread_positive"] = d["pdv_spread"] > 0
@@ -877,6 +896,15 @@ def load_page4() -> dict[str, Any]:
             )
 
         m   = _metrics_for("nav",     "daily_pnl", "s1c_position")  # portfolio
+        # The portfolio holds S1C + S3 + S4, so counting only s1c_position
+        # transitions understated it (and inflated avg P&L/trade by dividing
+        # total portfolio P&L by one signal's trade count).
+        _pos_cols = [c for c in ("s1c_position", "s3_position", "s4_position") if c in eq.columns]
+        if _pos_cols:
+            m["n_trades"] = int(sum(
+                (eq[c].diff().fillna(0) != 0).sum() for c in _pos_cols
+            ))
+            m["avg_pnl"] = (m["total_pnl"] / m["n_trades"]) if m["n_trades"] else 0.0
         m1c = _metrics_for("nav_s1c", "pnl_s1c",  "s1c_position") if "nav_s1c" in eq.columns else None
         m3  = _metrics_for("nav_s3",  "pnl_s3",   "s3_position")
         m4  = _metrics_for("nav_s4",  "pnl_s4",   "s4_position")  if "nav_s4"  in eq.columns else None

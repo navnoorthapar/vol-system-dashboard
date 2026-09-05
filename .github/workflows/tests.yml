@@ -47,6 +47,6 @@ jobs:
           pip install pytest pytest-cov
 
       - name: Run test suite
-        # The 18 NN-pricer tests skip automatically without the gitignored .pt
-        # model weights, so a clean CI checkout reports "610 passed, 18 skipped".
+        # The NN-pricer tests skip automatically without the gitignored .pt
+        # model weights, so a clean CI checkout reports "633 passed, 24 skipped".
         run: pytest joint_vol_calibration/tests/ -q

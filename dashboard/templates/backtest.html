@@ -43,7 +43,7 @@
         contrarian thesis. The "catastrophic" S1 (−$1.53M) that motivated flipping its direction into S1C was the
         artifact — corrected, <strong style="color:#00ff88;">S1 is a regime-gated short-VRP harvester (+$463K, 76% win)</strong>
         with a fat crisis tail, and the contrarian inversion <strong style="color:#ff4444;">S1C collapses to −$404K</strong>.
-        The (S1C + S3 + S4) portfolio is <strong style="color:#ff4444;">−19.0% cumulative</strong>, Sharpe −1.57, max DD −25.9%.
+        The (S1C + S3 + S4) portfolio is <strong style="color:#ff4444;">−26.1% cumulative</strong>, Sharpe −1.80, max DD −31.5%.
         <strong style="color:#00ff88;">S3 dispersion timing (+$23K, 73% win) is the lone signal positive across every correction.</strong>
         Still a documented research result, not a deployable strategy: mark-to-model, concentrated, tail-heavy.
       </div>
@@ -271,19 +271,19 @@
     <tbody>
       <tr>
         <td style="font-weight:600;">S1 IVR <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
-        <td class="mono red">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s1_pnl) }}{% else %}—{% endif %}</td>
+        <td class="mono {% if d.variants and d.variants.s1_pnl > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s1_pnl) }}{% else %}—{% endif %}</td>
         <td class="mono {% if d.variants and d.variants.s1rf_pnl > d.variants.s1_pnl %}green{% else %}red{% endif %}">
           {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1rf_pnl) }}{% else %}—{% endif %}
         </td>
-        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1_impr) }}{% else %}—{% endif %}</td>
+        <td class="mono {% if d.variants and d.variants.s1_impr > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1_impr) }}{% else %}—{% endif %}</td>
       </tr>
       <tr>
         <td style="font-weight:600;">S2 VIX TS <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
-        <td class="mono red">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s2_pnl) }}{% else %}—{% endif %}</td>
+        <td class="mono {% if d.variants and d.variants.s2_pnl > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s2_pnl) }}{% else %}—{% endif %}</td>
         <td class="mono {% if d.variants and d.variants.s2x_pnl > d.variants.s2_pnl %}green{% else %}red{% endif %}">
           {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2x_pnl) }}{% else %}—{% endif %}
         </td>
-        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2_impr) }}{% else %}—{% endif %}</td>
+        <td class="mono {% if d.variants and d.variants.s2_impr > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2_impr) }}{% else %}—{% endif %}</td>
       </tr>
       <tr>
         <td style="font-weight:600;">S3 Dispersion <span class="tag tag-green" style="font-size:9px;">MAIN</span></td>
@@ -320,7 +320,7 @@
       <div>
         <span class="tag tag-dim" style="margin-right:8px;">PORTFOLIO</span>
         The (S1C + S3 + S4) construction, still anchored on the discredited contrarian leg:
-        <strong style="color:#ff4444;">−19.0% cumulative</strong>, max DD −25.9%, Sharpe −1.57
+        <strong style="color:#ff4444;">−26.1% cumulative</strong>, max DD −31.5%, Sharpe −1.80
         vs the actual T-bill path. Crisis windows stay positive (COVID, Fed, Tariffs all small +)
         but cannot pay for the bleed between them.
       </div>
@@ -429,12 +429,18 @@
         <td style="font-size:11px;color:var(--text2);">FIXED (C18) — the state machine re-entered the same day it exited, so the position never went flat: the engine held one straddle struck once and marked past expiry at the 1-day tenor floor, instead of rolling a fresh 30-day ATM straddle each cycle. Now forces a flat day so positions roll. This contaminated every P&amp;L number in C10–C17.</td>
         <td class="mono" style="font-size:11px;color:#ff4444;">Inverted the thesis: S1 −$1.53M→+$463K, S1C −$97K→−$404K, portfolio −9.1%→−19.0%; S3 unchanged</td>
       </tr>
+      <tr style="background:rgba(255,170,51,0.05);">
+        <td class="mono" style="color:#ffaa33;font-weight:700;">11</td>
+        <td style="font-weight:600;">Cash hurdle was a unit-test fixture; straddles marked a day too rich</td>
+        <td style="font-size:11px;color:var(--text2);">FIXED (C21) — two independent defects found by an adversarial audit. (a) The only T-bill rows inside the backtest window were seven synthetic days written by <span class="mono">test_rates.py</span> into the tracked database and forward-filled for five years, so "Sharpe vs ^IRX" was measured against <span class="mono">np.linspace(0.015, 0.020)</span>; the real ^IRX history is now loaded (1,809 rows) and the tests can no longer write to it. (b) <span class="mono">T_rem</span> was computed from the pre-increment day count, so the first holding day carried no time decay and every later mark valued the straddle one day too rich — which systematically flattered the short-vol side.</td>
+        <td class="mono" style="font-size:11px;color:#ff4444;">Portfolio −19.0%→−26.1%, Sharpe −1.57→−1.80, max DD −25.9%→−31.5%; S1 +$463K→+$694K, S1C −$404K→−$600K; S3 unchanged again</td>
+      </tr>
     </tbody>
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
     Honest read: after removing every identified artifact — including the strike-rolling bug that had been
-    distorting the P&amp;L the whole time — the portfolio is <strong style="color:#ff4444;">−19.0%</strong> and the
-    only signal with cross-correction robustness is S3's timing. S1 is a real short-VRP harvester (+$463K in-sample)
+    distorting the P&amp;L the whole time — the portfolio is <strong style="color:#ff4444;">−26.1%</strong> and the
+    only signal with cross-correction robustness is S3's timing. S1 is a real short-VRP harvester (+$694K in-sample)
     but fat-tailed, concentrated and mark-to-model — not deployable. This dashboard documents a negative result with
     full methodology: the infrastructure (calibration, Greeks, hedging, walk-forward harness) is the deliverable;
     the trading signals are the case study in why most backtests flatter themselves.

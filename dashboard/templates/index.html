@@ -301,25 +301,25 @@
 
   <!-- Regime Probability History (static info card) -->
   <div class="card">
-    <div class="card-label">C8 Classifier — Full-Period Statistics (2015 – 2025)</div>
+    <div class="card-label">Rule-Label Distribution — Full Period ({{ d.reg_span or "2015 – 2026" }})</div>
     <div class="mt12">
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;text-align:center;">
         <div style="padding:16px;border-radius:8px;background:rgba(51,136,255,0.06);border:1px solid rgba(51,136,255,0.18);">
           <div style="font-size:11px;color:#3388ff;margin-bottom:4px;font-weight:600;">R0 LONG GAMMA</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">12.7%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">350 / 2,757 days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">{{ d.reg0_pct if d.reg0_pct is not none else "—" }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ "{:,}".format(d.reg0_n) if d.reg0_n is not none else "—" }} / {{ "{:,}".format(d.reg_total) if d.reg_total else "—" }} days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Buy straddles</div>
         </div>
         <div style="padding:16px;border-radius:8px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);">
           <div style="font-size:11px;color:#00ff88;margin-bottom:4px;font-weight:600;">R1 SHORT GAMMA</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">42.8%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,180 / 2,757 days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">{{ d.reg1_pct if d.reg1_pct is not none else "—" }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ "{:,}".format(d.reg1_n) if d.reg1_n is not none else "—" }} / {{ "{:,}".format(d.reg_total) if d.reg_total else "—" }} days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Sell premium</div>
         </div>
         <div style="padding:16px;border-radius:8px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.18);">
           <div style="font-size:11px;color:#ff3333;margin-bottom:4px;font-weight:600;">R2 VOMMA ACTIVE</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">44.5%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">1,227 / 2,757 days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">{{ d.reg2_pct if d.reg2_pct is not none else "—" }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ "{:,}".format(d.reg2_n) if d.reg2_n is not none else "—" }} / {{ "{:,}".format(d.reg_total) if d.reg_total else "—" }} days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Vomma trades</div>
         </div>
       </div>

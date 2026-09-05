@@ -4,7 +4,7 @@
 
 [![Live Dashboard](https://img.shields.io/badge/dashboard-live-00ff88?style=flat-square)](https://navnoorbawa.me)
 [![CI](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
-[![Tests](https://img.shields.io/badge/tests-657%20passing-00ff88?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-666%20passing-00ff88?style=flat-square)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11-blue?style=flat-square)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-00ff88?style=flat-square)](LICENSE)
 
@@ -23,22 +23,24 @@ If you want the short version: the calibration engine is solid, the risk tooling
 ## The headline numbers (must match the dashboard)
 
 ```
-Backtest 2018–2025 · $1M initial capital · delta-hedged straddle portfolio
+Backtest 2018-01-01 → 2025-03-24 (7.2 yrs, 1,808 sessions) · $1M · delta-hedged straddles
   Portfolio = (S1C + S3 + S4) / 3
 
-  NAV:               $809,972
-  Cumulative P&L:    −$190,028   (−19.0%)
-  Sharpe (vs ^IRX):  −1.57
-  Max drawdown:      −25.9%
+  NAV:               $738,794
+  Cumulative P&L:    −$261,206   (−26.1%)
+  Sharpe (vs ^IRX):  −1.80
+  Max drawdown:      −31.5%
 
 By signal:
-  S1  IVR short-VRP (reference)   +$462,976   Sharpe  0.257   76% win   54 trades
-  S1C Contrarian PDV (DEMOTED)    −$404,183   Sharpe −0.622   45% win   88 trades
+  S1  IVR short-VRP (reference)   +$693,938   Sharpe  0.485   76% win   54 trades
+  S1C Contrarian PDV (DEMOTED)    −$599,995   Sharpe −0.722   36% win   88 trades
   S3  Dispersion (survivor)       + $23,212   73% win   22 trades   ← positive at every scale + pseudo-OOS
-  S4  Volatility risk premium     −$188,519   Sharpe −1.164   32% win   31 trades
+  S4  Volatility risk premium     −$206,437   Sharpe −1.155   26% win   31 trades
 ```
 
-**The single most important caveat:** every P&L number is **mark-to-model** — Black-Scholes on the VIX-term-structure ATM vol, because the database holds *zero* historical option prices (options are a single 2026-03-24 snapshot). The signals are real; the realised dollars are model-implied, not traded fills.
+**The single most important caveat:** every P&L number is **mark-to-model** — Black-Scholes on the VIX-term-structure ATM vol. The database holds **zero option prices inside the 2018–2025 backtest window**; every chain it contains is a 2026 snapshot (SPX: 2026-03-24, 03-28, 05-31, 06-20; 61,815 rows). The signals are real; the realised dollars are model-implied, not traded fills.
+
+**Why the backtest stops at 2025-03-24:** that is the window the published metrics were computed over and every correction below was re-run against. Market data now runs to the current session, so extending it is a re-run, not new research — but the numbers here are the ones that have actually been audited, so they are the ones reported.
 
 ---
 
@@ -140,7 +142,7 @@ now excluded by the gate. The tests that pin all of this live in
 
 ## System Overview
 
-14 components, ~15,300 lines of Python (ex-tests), **657 passing tests**, zero look-ahead bias.
+14 components, ~15,300 lines of Python (ex-tests), **666 passing tests**, zero look-ahead bias.
 
 | Component | Description | 
 |-----------|-------------|
@@ -153,7 +155,7 @@ now excluded by the gate. The tests that pin all of this live in
 | **C7** Delta-Hedge Simulation | P&L attribution: Γ + ν + Θ + residual, hedge-efficiency metric |
 | **C8** Regime Classifier | XGBoost 3-regime; honest OOS 63.4% — **loses to persistence baseline, demoted** |
 | **C9** Signal Engine | S1/S1C (IVR/PDV), S2 (VIX term structure), S3 (dispersion), S4 (VRP) |
-| **C10** Backtest Engine | Full 2018–2025 backtest, walk-forward validation, ex-ante Kelly, HTML reports |
+| **C10** Backtest Engine | Full 2018-01-01 → 2025-03-24 backtest, walk-forward validation, ex-ante Kelly, HTML reports |
 | **C11** Regime-Switching PDV | Merton (1976) jump component on R2 tail days, BNS jump filter |
 | **C12** Bates SVJ + HMM | Bates (1996) jump-diffusion CF; Gaussian-HMM regime alternative |
 | **C13** Improvements | SVI/SSVI smoothing, vega anchors, adaptive VVIX, isotonic calibration, portfolio Kelly |
@@ -168,7 +170,7 @@ now excluded by the gate. The tests that pin all of this live in
 - **Live Market** — SPX/VIX/VVIX, end-of-day regime (R0/R1/R2), PDV forecast vs implied, VIX term structure (auto-refreshed after every U.S. session)
 - **Calibration** — Heston parameter surface, Feller condition, SPX smile overlay, RMSE decomposition, Quintic OU comparison
 - **Greeks Monitor** — Vomma heatmap, unstable nodes, vanna/QV convexity by maturity
-- **Backtest** — Equity curve 2018–2025, per-signal attribution, the full C16→C18 correction log, and a "weaknesses found vs fixed" table
+- **Backtest** — Equity curve 2018-01-01 → 2025-03-24, per-signal attribution, the full C16→C21 correction log, and a "weaknesses found vs fixed" table
 
 ---
 
@@ -210,7 +212,7 @@ The repository ships pre-computed `data_store/` artifacts (calibration pickles, 
 
 ```bash
 pytest joint_vol_calibration/tests/ -q
-# 657 passed locally (with trained NN weights present)
+# 666 passed locally (with trained NN weights present)
 # 633 passed, 24 skipped on a clean clone — the NN-pricer tests need the
 # gitignored .pt weights and skip gracefully without them (see CI badge).
 # Includes explicit look-ahead bias checks (test_lookahead.py) and a

@@ -310,17 +310,24 @@ class TestRealisedVolLookAhead:
         # The RV value on date T should equal the std of returns up to T-1 (window days)
         # Verify: if we truncate the input at some date D and recompute,
         # the RV at D should be identical.
-        test_date = "2020-03-01"
+        # MUST be a business day: the fixture is a bdate_range, so a weekend
+        # date yields no row and the guarded assertion below silently never
+        # runs. 2020-03-01 was a Sunday, which made this test vacuous — it
+        # passed even against a deliberately centred (forward-looking) window.
+        test_date = "2020-03-02"
         rv_full  = rv_df[rv_df["date"] == test_date]["rv_20d"].values
         rv_trunc = yf_dl.compute_realised_vol(
             df[df["date"] <= test_date], window=20
         )
         rv_trunc_val = rv_trunc[rv_trunc["date"] == test_date]["rv_20d"].values
 
-        if len(rv_full) > 0 and len(rv_trunc_val) > 0:
-            assert abs(rv_full[0] - rv_trunc_val[0]) < 1e-10, (
-                f"RV differs when future data is removed: {rv_full[0]} vs {rv_trunc_val[0]}"
-            )
+        assert len(rv_full) == 1 and len(rv_trunc_val) == 1, (
+            f"no RV row for {test_date} — the fixture stopped producing it, so "
+            "this test would silently assert nothing"
+        )
+        assert abs(rv_full[0] - rv_trunc_val[0]) < 1e-10, (
+            f"RV differs when future data is removed: {rv_full[0]} vs {rv_trunc_val[0]}"
+        )
 
     def test_rv_nan_for_insufficient_history(self):
         """First (window-1) rows must be NaN — no partial-window estimates."""
