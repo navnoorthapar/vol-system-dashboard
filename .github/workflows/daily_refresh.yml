@@ -1,7 +1,11 @@
 name: Daily Market Refresh
 
-# Runs every weekday at 21:30 UTC (17:30 ET, ~75 min after the 16:15 ET VIX
-# settlement; 03:00 IST). Why this slot:
+# Runs every weekday at 22:00 UTC. Note the US close moves in UTC with DST:
+# 16:00 ET is 20:00 UTC under EDT but 21:00 UTC under EST, so this slot is
+# ~105 min after the 16:15 ET VIX settlement in summer and ~45 min in winter.
+# (21:30 UTC was tried first and is wrong for ~5 months of the year: it lands
+# 15 min after the winter settlement, before Yahoo has published a settled
+# daily bar.) Why this slot:
 #   * Yahoo publishes the session's SPX/VIX/^IRX bars within minutes of the
 #     close, and the download end-dates are inclusive (yf_downloader._yf_end),
 #     so a run on the session date captures that session.
@@ -10,10 +14,10 @@ name: Daily Market Refresh
 #     row to the next date (~04:00 UTC), or the joint fit is left with one VIX
 #     tenor and degenerates (see README, "Calibration provenance").
 #   * GitHub cron is best-effort and routinely fires 30-90 min late, at times
-#     hours. Starting at 21:30 keeps even a badly delayed run inside the window.
+#     hours. Starting at 22:00 still leaves ~6 h of slack before that rollover.
 on:
   schedule:
-    - cron: "30 21 * * 1-5"
+    - cron: "0 22 * * 1-5"
   workflow_dispatch:          # manual trigger from GitHub UI anytime
 
 permissions:

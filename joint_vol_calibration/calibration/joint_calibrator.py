@@ -570,7 +570,14 @@ class JointCalibrator:
         """
         raw = db.get_options_surface(as_of_date=self.as_of_date, underlying="SPX")
         if raw.empty:
+            self.spx_snapshot_date = None
             return pd.DataFrame()
+
+        # Which snapshot this fit is actually built on. get_options_surface
+        # returns the most recent snapshot <= as_of_date, which can be months
+        # stale; without recording it, a fit against a frozen surface is
+        # indistinguishable from a live one.
+        self.spx_snapshot_date = str(raw["snapshot_date"].iloc[0])[:10]
 
         S = self.S
         df = raw.copy()
@@ -1038,6 +1045,7 @@ class JointCalibrator:
             "n_spx_options": int(len(self.spx_surface)),
             "n_vix_tenors":  int(len(self.vix_ts)),
             "spot_date":     getattr(self, "spot_date", None),
+            "spx_snapshot_date": getattr(self, "spx_snapshot_date", None),
             "n_vix_options": int(len(self.vix_options)),
             "weights":       {"w1": self.w1, "w2": self.w2, "w3": self.w3},
         }
@@ -1259,6 +1267,7 @@ class JointCalibrator:
             "n_spx_options": int(len(self.spx_surface)),
             "n_vix_tenors":  int(len(self.vix_ts)),
             "spot_date":     getattr(self, "spot_date", None),
+            "spx_snapshot_date": getattr(self, "spx_snapshot_date", None),
         }
 
         # Attach Heston comparison if available

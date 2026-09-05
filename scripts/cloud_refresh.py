@@ -32,6 +32,11 @@ TODAY = date.today().isoformat()
 DATA  = ROOT / "data_store"
 DB    = DATA / "vol_system.db"
 
+# Calendar days of history fetched before relabelling. The R2 gate is a rolling
+# 252-TRADING-day quantile, so this must comfortably exceed 252 business days.
+LABEL_LOOKBACK_DAYS = 900
+_ADAPTIVE_WINDOW = 252
+
 
 def latest_session_date(spx_df) -> "str | None":
     """Date (YYYY-MM-DD) of the most recent CLOSED SPX session in ``spx_df``.
@@ -108,20 +113,38 @@ def refresh_market_data() -> bool:
 # -- Step 2: Regime labels -----------------------------------------------------
 
 def extend_regime_labels() -> int:
-    """Append predictions for dates missing from regime_labels.parquet. Returns new row count."""
+    """Extend regime_labels.parquet with DETERMINISTIC RULE labels, and repair
+    any stored label that disagrees with the rule. Returns rows added.
+
+    This used to append ``clf.predict(...)`` — the XGBoost classifier's output.
+    That is the model C16/C17 demoted: it scores 63.4% out-of-sample and loses
+    to a 90.0% "predict-yesterday" baseline, so it is research-only and is not
+    supposed to drive anything. But dashboard/app.py headlines the LAST ROW of
+    this parquet as "the deterministic rule label, the label the backtest
+    trades on", so every day the bot appended a prediction, the front page
+    published the demoted model under a caption saying it was the rule.
+
+    Two details matter for reproducing the historical labels exactly:
+      * the R2 gate is ADAPTIVE (rolling 252-day 80th percentile of VVIX),
+        i.e. ``vvix_threshold=None``. The fixed 100.0 default disagrees with
+        the shipped history on 19.7% of days; adaptive reproduces all 4,125
+        of them exactly.
+      * that rolling gate therefore needs >= 252 trading days of VVIX history
+        before it is meaningful, so the fetch window is ~900 calendar days
+        rather than the 60 days the feature builder alone would need.
+    """
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
-    from joint_vol_calibration.signals.regime_classifier import build_features, FEATURE_COLS
+    from joint_vol_calibration.signals.regime_classifier import (
+        build_features, build_regime_labels, FEATURE_COLS,
+    )
 
     rl_path = DATA / "signals" / "regime_labels.parquet"
     rl      = pd.read_parquet(rl_path)
     last_dt = rl.index.max()
     log.info("[2/4] Regime labels last date: %s -- extending to %s", last_dt.date(), TODAY)
 
-    with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
-        clf = pickle.load(f)
-
-    # Fetch enough history for rolling-window features (>=20 days lookback)
-    lookback_start = str((last_dt - timedelta(days=60)).date())
+    # Long enough that the trailing dates get a FULL 252-day adaptive window.
+    lookback_start = str((last_dt - timedelta(days=LABEL_LOOKBACK_DAYS)).date())
     spx = get_spx_ohlcv(as_of_date=TODAY, start_date=lookback_start)
     vix = get_vix_term_structure_wide(as_of_date=TODAY, start_date=lookback_start)
 
@@ -138,25 +161,46 @@ def extend_regime_labels() -> int:
             feats[col] = feats[col].ffill()
     feats.dropna(inplace=True)
 
-    new_feats = feats[feats.index > last_dt][FEATURE_COLS]
-    if new_feats.empty:
-        log.info("  No new dates to predict; regime labels already current")
+    labels = build_regime_labels(spx, vix, vvix_threshold=None)
+    if labels.empty:
+        log.warning("  Rule labels could not be computed; skipping")
         return 0
 
-    # Pass the DataFrame, not .values: RegimeClassifier.predict() selects the
-    # columns it was trained on via feature_names_ (works for both the legacy
-    # 6-feature pickle and the C16 5-feature pickle that excludes vvix).
-    regime_vals = clf.predict(new_feats)
+    # Only trust dates whose adaptive gate saw a full 252-day window inside
+    # this fetch; earlier ones would be computed from a truncated history.
+    if len(labels) <= _ADAPTIVE_WINDOW:
+        log.warning("  Only %d labelled days fetched (< %d needed for the adaptive "
+                    "gate); skipping to avoid rewriting history from a short window",
+                    len(labels), _ADAPTIVE_WINDOW)
+        return 0
+    safe_from = labels.index[_ADAPTIVE_WINDOW]
 
-    new_rows = new_feats.copy()
-    new_rows["regime"] = regime_vals
+    new_idx = feats.index[(feats.index > last_dt) & feats.index.isin(labels.index)]
+    n = 0
+    if len(new_idx):
+        new_rows = feats.loc[new_idx, FEATURE_COLS].copy()
+        new_rows["regime"] = labels.reindex(new_idx).astype(int)
+        rl = pd.concat([rl, new_rows])
+        rl = rl[~rl.index.duplicated(keep="last")].sort_index()
+        n = len(new_rows)
+    else:
+        log.info("  No new dates to label; regime labels already current")
 
-    combined = pd.concat([rl, new_rows])
-    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-    combined.to_parquet(rl_path)
+    # Self-heal: overwrite any stored label in the trustworthy window that the
+    # rule disagrees with. This is what repairs the rows the classifier wrote.
+    repair_idx = rl.index[(rl.index >= safe_from) & rl.index.isin(labels.index)]
+    if len(repair_idx):
+        stored = rl.loc[repair_idx, "regime"].astype(int)
+        truth  = labels.reindex(repair_idx).astype(int)
+        differ = stored != truth
+        if differ.any():
+            rl.loc[repair_idx[differ], "regime"] = truth[differ]
+            log.info("  Repaired %d stored label(s) that disagreed with the rule "
+                     "(%s → %s)", int(differ.sum()),
+                     repair_idx[differ][0].date(), repair_idx[differ][-1].date())
 
-    n = len(new_rows)
-    log.info("  Added %d new rows -> regime_labels now at %s", n, combined.index.max().date())
+    rl.to_parquet(rl_path)
+    log.info("  Added %d new rows -> regime_labels now at %s", n, rl.index.max().date())
     return n
 
 
@@ -167,7 +211,9 @@ def recalibrate_heston() -> bool:
     import yfinance as yf
     import sqlite3
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
-    from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate
+    from joint_vol_calibration.data.database import (
+        get_spx_ohlcv, get_tbill_rate, insert_options_snapshot,
+    )
 
     # Name the fit by the session it describes, not by the run date: exact
     # provenance, holiday runs skip naturally, and a delayed cron cannot write a
@@ -211,15 +257,45 @@ def recalibrate_heston() -> bool:
 
         opts = pd.concat(frames, ignore_index=True)
         opts = opts[opts["impliedVolatility"] > 0.01].copy()
-        opts["implied_vol"]   = opts["impliedVolatility"]
-        opts["snapshot_date"] = TODAY
 
-        con = sqlite3.connect(str(DB))
-        opts[["strike", "expiration", "option_type", "implied_vol", "snapshot_date"]].to_sql(
-            "spx_options", con, if_exists="replace", index=False
+        # This used to write a 5-column frame to a table called `spx_options`.
+        # Nothing reads that table: JointCalibrator reads `options_snapshots`
+        # via db.get_options_surface, which returns the most recent snapshot
+        # <= as_of_date. So every "daily recalibration" was in fact refitting
+        # the newest COMMITTED snapshot (2026-06-20) with today's spot and
+        # today's time-to-expiry -- pricing a 14-day expiry as a 90-day one
+        # against a June quote. Map the chain onto the real schema instead.
+        opts["snapshot_date"]  = spot_date
+        opts["expiry"]         = pd.to_datetime(opts["expiration"]).dt.strftime("%Y-%m-%d")
+        opts["right"]          = opts["option_type"].str[0].str.upper()   # call/put -> C/P
+        opts["implied_vol"]    = opts["impliedVolatility"]
+        _bid = pd.to_numeric(opts.get("bid"), errors="coerce")
+        _ask = pd.to_numeric(opts.get("ask"), errors="coerce")
+        _last = pd.to_numeric(opts.get("lastPrice"), errors="coerce")
+        _mid = (_bid + _ask) / 2.0
+        opts["mid_price"]      = _mid.where((_bid > 0) & (_ask > 0), _last)
+        opts["time_to_expiry"] = (
+            (pd.to_datetime(opts["expiry"]) - pd.Timestamp(spot_date)).dt.days / 365.0
         )
+        opts = opts[(opts["mid_price"] > 0) & (opts["time_to_expiry"] > 0)]
+        opts = opts.dropna(subset=["strike", "mid_price", "implied_vol", "right"])
+
+        if opts.empty:
+            log.warning("  No usable option rows after cleaning; skipping calibration")
+            return False
+
+        # insert_options_snapshot uses a plain INSERT, so clear any partial
+        # write for this session first (re-runs must not duplicate the chain).
+        con = sqlite3.connect(str(DB))
+        con.execute(
+            "DELETE FROM options_snapshots WHERE underlying='SPX' AND snapshot_date=?",
+            (spot_date,),
+        )
+        con.commit()
         con.close()
-        log.info("  Saved %d option contracts", len(opts))
+
+        n_opt = insert_options_snapshot(opts, "SPX")
+        log.info("  Saved %d option contracts as the %s SPX snapshot", n_opt, spot_date)
 
     except Exception as e:
         log.error("  Options download failed: %s; skipping calibration", e)
@@ -248,6 +324,13 @@ def recalibrate_heston() -> bool:
         ok, reason = is_acceptable_calibration(
             p, spx_rmse, result.get("n_vix_tenors")
         )
+        # A fit is only "today's" if its SPX leg really is today's chain.
+        _snap = result.get("spx_snapshot_date")
+        if ok and _snap != spot_date:
+            ok, reason = False, (
+                f"SPX surface is stale (snapshot {_snap}, session {spot_date}) — "
+                "refusing to publish a fit built on an old chain"
+            )
         if not ok:
             log.warning(
                 "  Calibration REJECTED (%s): kappa=%.4f sigma=%.4f rho=%.4f SPX RMSE=%.3f vp "
