@@ -734,10 +734,10 @@
   <div class="card card-sm">
     <div class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></div>
     <div class="card-value green">
-      14.53
+      15.30
     </div>
     <div class="card-sub" style="margin-top:10px;">
-      🟢 LOW — complacency risk
+      🟢 NORMAL range
       
     </div>
   </div>
@@ -804,7 +804,7 @@
             ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
           </span>
           <span class="mono" style="font-size:13px;font-weight:700;color:#ff3333;">
-            R2 · 64.5%
+            R2 · 77.0%
           </span>
         </div>
 
@@ -820,16 +820,16 @@
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:35.5%;background:#00ff88;"></div>
+              <div class="progress-fill" style="width:23.0%;background:#00ff88;"></div>
             </div>
-            <div class="progress-val">35.5%</div>
+            <div class="progress-val">23.0%</div>
           </div>
           <div class="progress-row">
             <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
             <div class="progress-track">
-              <div class="progress-fill" style="width:64.5%;background:#ff3333;"></div>
+              <div class="progress-fill" style="width:77.0%;background:#ff3333;"></div>
             </div>
-            <div class="progress-val">64.5%</div>
+            <div class="progress-val">77.0%</div>
           </div>
         </div>
 
@@ -864,7 +864,7 @@
       <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
         <div>
           <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">CURRENT VIX (30D IMPLIED)</div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">14.53%</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">15.30%</div>
         </div>
         <div style="text-align:right;">
           <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">PDV FORECAST (REALISED)</div>
@@ -875,7 +875,7 @@
       <div style="padding:14px 0;text-align:center;">
         <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">IMPLIED − REALISED SPREAD</div>
         <div class="mono" style="font-size:36px;font-weight:800;color:#ff8833;">
-          +6.16pp
+          +6.93pp
         </div>
         <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
           Moderate vol risk premium → favours short vol strategies
@@ -911,7 +911,7 @@
             <span style="font-weight:700;color:#3388ff;">&#9432; Spread at 1.0th percentile</span>
             — vol appears cheap relative to 10-year history.
             Historical mean: <span class="mono">+3.45pp</span>.
-            Current: <span class="mono">+6.16pp</span>.
+            Current: <span class="mono">+6.93pp</span>.
           </div>
           
 
@@ -1146,7 +1146,7 @@
   // VIX Term Structure chart
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = ["9d", "30d", "93d", "182d"];
-  const tsValues = [16.85, 14.53, 20.54, 22.28];
+  const tsValues = [16.85, 15.3, 20.54, 22.28];
 
   new Chart(tsCtx, {
     type: 'line',
