@@ -679,7 +679,7 @@
 <div class="page-header">
   <div class="page-title">Joint Calibration Results</div>
   <div class="page-subtitle">Heston 5-parameter · DE + L-BFGS-B</div>
-  <div class="page-badge">2026-09-11  ·  SPX = 7657.0  ·  r = 3.91%</div>
+  <div class="page-badge">2026-09-25  ·  SPX = 7743.4  ·  r = 4.07%</div>
 </div>
 
 <!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
@@ -707,29 +707,22 @@
 
 
 
-<div class="banner banner-warn" style="margin-bottom:20px;">
-  <div class="banner-icon">≡</div>
+<div class="banner banner-info" style="margin-bottom:20px;">
+  <div class="banner-icon">✓</div>
   <div>
-    <div class="banner-title" style="color:#ffcc33;">
-      Feller Condition:  2κθ = σ²
-       —  BINDING
+    <div class="banner-title" style="color:#00ff88;">
+      Feller Condition:  2κθ &gt; σ²
+       —  PASS
     </div>
     <div class="banner-body">
-      2κθ = 2 × 4.9997 × 0.04314 = <strong style="color:var(--text);">0.43133</strong>
+      2κθ = 2 × 3.3207 × 0.04617 = <strong style="color:var(--text);">0.30665</strong>
         &nbsp;&nbsp;|&nbsp;&nbsp;
-      σ² = 0.6568² = <strong style="color:var(--text);">0.43133</strong>
+      σ² = 0.295² = <strong style="color:var(--text);">0.08705</strong>
         &nbsp;&nbsp;|&nbsp;&nbsp;
-      Margin = <strong style="color:#ffcc33;">-1.10e-07</strong>
+      Margin = <strong style="color:#00ff88;">+2.20e-01</strong>
       <br>
       
-      The constraint is <strong>active</strong>, not broken. The calibrator applies a soft
-      exterior penalty <span class="mono">50·max(0, σ²−2κθ)²</span> whose gradient vanishes at the
-      boundary, so when the SPX smile wants more vol-of-vol than Feller permits the optimiser
-      settles a whisker outside the feasible set — here σ agrees with √(2κθ) to six significant
-      figures. Reporting that as a failure would be a rounding artefact. What it does mean is
-      economically real: <strong>the market smile is asking for more vol-of-vol than a
-      Feller-satisfying Heston can supply</strong>, so σ is pinned by the constraint rather than
-      by the data.
+      The variance process stays strictly positive — the Heston SDE is well-posed.
       
     </div>
   </div>
@@ -739,12 +732,12 @@
 <div class="banner banner-info" style="margin-bottom:20px;">
   <div class="banner-icon">◧</div>
   <div>
-    <div class="banner-title">Fit identification — 3 of 5 effective degrees of freedom</div>
+    <div class="banner-title">Fit identification — 4 of 5 effective degrees of freedom</div>
     <div class="banner-body">
       
-      Pinned at a boundary: <strong style="color:var(--text);">rho, sigma</strong>.
+      Pinned at a boundary: <strong style="color:var(--text);">rho</strong>.
       A pinned parameter is set by its constraint, not by the market data, so this
-      5-parameter model is effectively fitting with 3. ρ pins at its −0.95
+      5-parameter model is effectively fitting with 4. ρ pins at its −0.95
       floor on nearly every joint fit: the SPX skew wants more spot–vol correlation than Heston
       is allowed to express. That is the misspecification this project documents, stated as a number.
       
@@ -752,7 +745,7 @@
       Fit from
       <strong style="color:var(--text);">9</strong> SPX options and
       <strong style="color:var(--text);">4</strong> VIX tenors,
-      all taken on the closed SPX session of <strong style="color:var(--text);">2026-09-11</strong>.
+      all taken on the closed SPX session of <strong style="color:var(--text);">2026-09-25</strong>.
       The VIX-futures leg needs at least 3 tenors to identify a curve; fits below that
       threshold are rejected, because a single tenor is one data point that Heston matches
       exactly and the joint fit silently collapses into an SPX-only calibration.
@@ -766,25 +759,25 @@
   <div class="card">
     <div class="param-box">
       <div class="param-sym">κ  (kappa)</div>
-      <div class="param-val" style="color:var(--blue);">4.9997</div>
+      <div class="param-val" style="color:var(--blue);">3.3207</div>
       <div class="param-desc">Mean reversion speed</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = 34.9d</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = 52.6d</div>
     </div>
   </div>
 
   <div class="card">
     <div class="param-box">
       <div class="param-sym">θ  (theta)</div>
-      <div class="param-val" style="color:var(--yellow);">0.04314</div>
+      <div class="param-val" style="color:var(--yellow);">0.04617</div>
       <div class="param-desc">Long-run variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = 20.77% ann vol</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = 21.49% ann vol</div>
     </div>
   </div>
 
   <div class="card">
     <div class="param-box">
       <div class="param-sym">σ  (vol-of-vol)</div>
-      <div class="param-val" style="color:var(--orange);">0.6568</div>
+      <div class="param-val" style="color:var(--orange);">0.295</div>
       <div class="param-desc">Vol of variance</div>
       <div class="param-desc" style="margin-top:4px;color:var(--text2);">Controls smile curvature</div>
     </div>
@@ -804,9 +797,9 @@
   <div class="card">
     <div class="param-box">
       <div class="param-sym">v₀  (v-naught)</div>
-      <div class="param-val" style="color:var(--accent);">0.01088</div>
+      <div class="param-val" style="color:var(--accent);">0.00958</div>
       <div class="param-desc">Initial variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = 10.43% spot vol</div>
+      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = 9.79% spot vol</div>
     </div>
   </div>
 
@@ -818,7 +811,7 @@
   <div class="card">
     <div class="card-label">SPX IV RMSE</div>
     <div class="card-value sm green">
-      0.215 vol pts
+      0.041 vol pts
     </div>
     <div class="card-sub mt8">
       Good fit
@@ -829,7 +822,7 @@
   <div class="card">
     <div class="card-label">VIX Futures RMSE</div>
     <div class="card-value sm green">
-      0.266 pts
+      0.092 pts
     </div>
     <div class="card-sub mt8">
       Good futures fit
@@ -848,8 +841,8 @@
 
   <div class="card">
     <div class="card-label">Calibration Performance</div>
-    <div class="card-value sm green">7.3s</div>
-    <div class="card-sub mt8">8,406 evaluations</div>
+    <div class="card-value sm green">4.3s</div>
+    <div class="card-sub mt8">7,124 evaluations</div>
     <div class="card-sub">DE (120 iter × 40) + L-BFGS-B</div>
   </div>
 
@@ -883,19 +876,19 @@
         <tr>
           <td>Mean reversion</td>
           <td class="mono">κ</td>
-          <td class="mono blue">4.9997</td>
-          <td>Half-life ≈ 35 trading days</td>
+          <td class="mono blue">3.3207</td>
+          <td>Half-life ≈ 53 trading days</td>
         </tr>
         <tr>
           <td>Long-run vol</td>
           <td class="mono">√θ</td>
-          <td class="mono yellow">20.77%</td>
+          <td class="mono yellow">21.49%</td>
           <td>Steady-state implied vol target</td>
         </tr>
         <tr>
           <td>Vol-of-vol</td>
           <td class="mono">σ</td>
-          <td class="mono" style="color:var(--orange);">0.6568</td>
+          <td class="mono" style="color:var(--orange);">0.295</td>
           <td>High: drives strong skew / smile</td>
         </tr>
         <tr>
@@ -910,13 +903,13 @@
         <tr>
           <td>Spot vol</td>
           <td class="mono">√v₀</td>
-          <td class="mono green">10.43%</td>
+          <td class="mono green">9.79%</td>
           <td>Current instantaneous vol</td>
         </tr>
         <tr>
           <td>Risk-free rate</td>
           <td class="mono">r</td>
-          <td class="mono">3.91%</td>
+          <td class="mono">4.07%</td>
           <td>USD 6M SOFR (2026-03)</td>
         </tr>
         <tr>
@@ -928,19 +921,19 @@
         <tr>
           <td>Feller margin</td>
           <td class="mono">2κθ − σ²</td>
-          <td class="mono amber">
-            -1.10e-07
+          <td class="mono green">
+            +2.20e-01
           </td>
-          <td>BINDING — constraint active; σ set by Feller, not by the data
+          <td>PASS — variance stays strictly positive
           </td>
         </tr>
         <tr>
           <td>Effective d.o.f.</td>
           <td class="mono">5 − |pinned|</td>
-          <td class="mono red">
-            3 / 5
+          <td class="mono amber">
+            4 / 5
           </td>
-          <td>Pinned: rho, sigma — set by constraints, not data
+          <td>Pinned: rho — set by constraints, not data
           </td>
         </tr>
         <tr>
@@ -957,10 +950,10 @@
     <div class="divider"></div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
-      <div>SPX level: <span class="mono green">7657.0</span></div>
-      <div>As-of date: <span class="mono">2026-09-11</span></div>
-      <div>Fit time: <span class="mono green">7.3s</span></div>
-      <div>DE evaluations: <span class="mono">8,406</span></div>
+      <div>SPX level: <span class="mono green">7743.4</span></div>
+      <div>As-of date: <span class="mono">2026-09-25</span></div>
+      <div>Fit time: <span class="mono green">4.3s</span></div>
+      <div>DE evaluations: <span class="mono">7,124</span></div>
     </div>
   </div>
 
@@ -1075,22 +1068,22 @@
         <tbody>
           <tr>
             <td>SPX IV RMSE (vp)</td>
-            <td class="mono">0.215</td>
+            <td class="mono">0.041</td>
             <td class="mono yellow">
               2.343
             </td>
             <td class="mono red">
-              +2.128
+              +2.302
             </td>
           </tr>
           <tr>
             <td>VIX Fut RMSE (pts)</td>
-            <td class="mono">0.266</td>
+            <td class="mono">0.092</td>
             <td class="mono green">
               0.001
             </td>
             <td class="mono green">
-              -0.265
+              -0.091
             </td>
           </tr>
           <tr>
@@ -1285,7 +1278,7 @@
     data: {
       labels: ['SPX IV RMSE', 'VIX Futures RMSE', 'VIX Options RMSE'],
       datasets: [{
-        data: [0.215, 0.266, 0.0],
+        data: [0.041, 0.092, 0.0],
         backgroundColor: ['#3388ff', '#00ff88', '#ff3333'],
         borderRadius: 4,
         borderSkipped: false,
