@@ -291,6 +291,15 @@ class TestS3:
             assert t.direction == -1 and t.K > 0 and t.n_contracts >= 1
         assert sum(t.net_pnl for t in s3) == pytest.approx(engine.equity_df["pnl_s3"].sum(), rel=1e-9)
 
+    def test_leg_direction_is_explicit(self):
+        spx, vix = _rw_market()
+        eng = BacktestEngine(start_date="2018-01-02", end_date="2019-09-30", s3_leg_direction=1)
+        eng.run(spx, vix)
+        s3 = [t for t in eng.all_trades if t.signal == "s3"]
+        assert s3 and all(t.direction == 1 for t in s3)
+        with pytest.raises(ValueError):
+            BacktestEngine(s3_leg_direction=0)
+
     def test_null_test_exposes_the_z_proxy_bias(self, engine):
         """Random walks carry no information, yet the pre-C22 z-unit proxy
         books positive P&L on them: its mean is significantly > 0."""

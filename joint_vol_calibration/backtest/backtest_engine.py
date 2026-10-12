@@ -177,6 +177,13 @@ REFERENCE_SIGNALS: Tuple[str, ...] = ("s1", "s2", "combined")
 # Sentinel: "use regime_classifier.build_regime_labels' own default gate"
 _DEFAULT_GATE = object()
 
+# Straddle direction of the S3 index leg per unit of s3_position (+1 = the
+# signal is on). −1: long dispersion ⇒ SHORT SPX straddle (the C22 reading:
+# a dispersion trade is short index vol). The signal's own documentation may
+# read +1 as "the VIX/VVIX ratio reverts up", i.e. long index vol; pass
+# s3_leg_direction=+1 to price that reading instead.
+S3_LEG_DIRECTION: int = -1
+
 
 # ── C22 correction switches ────────────────────────────────────────────────────
 
@@ -223,8 +230,9 @@ class TradeRecord:
     One straddle trade (or one S3 proxy trade).
 
     ``direction`` is the STRADDLE direction (+1 long, −1 short). For S3 the
-    signal is long dispersion, which the index leg trades as a SHORT SPX
-    straddle (direction −1); the legacy z-proxy records +1.
+    signal is long dispersion, which the index leg trades by default as a
+    SHORT SPX straddle (direction −1, see S3_LEG_DIRECTION); the legacy
+    z-proxy records +1.
     ``is_open`` marks the trade still open on the last backtest date; its
     exit_date is that date, its P&L is mark-to-model and no closing cost
     has been charged.
@@ -1056,6 +1064,7 @@ class BacktestEngine:
         corrections:     Optional[C22Corrections] = None,
         vvix_threshold   = _DEFAULT_GATE,
         pdv_horizon:     Optional[int] = None,
+        s3_leg_direction: int = S3_LEG_DIRECTION,
     ):
         """
         atm_to_vix_ratio : β in σ_ATM = β·VIX-TS (1.0 = pre-C22 "VIX is ATM vol")
@@ -1067,6 +1076,8 @@ class BacktestEngine:
                            VVIX level, None the adaptive 80th percentile.
         pdv_horizon      : build_xy horizon of the walk-forward PDV behind
                            pdv_iv_spread (default PDV_SPREAD_HORIZON)
+        s3_leg_direction : straddle direction of the S3 index leg when the
+                           signal is on (see S3_LEG_DIRECTION)
         """
         self.start_date      = start_date
         self.end_date        = end_date
@@ -1078,6 +1089,9 @@ class BacktestEngine:
         self.corrections     = corrections or C22Corrections()
         self.vvix_threshold  = vvix_threshold
         self.pdv_horizon     = int(pdv_horizon if pdv_horizon is not None else PDV_SPREAD_HORIZON)
+        if s3_leg_direction not in (-1, 1):
+            raise ValueError("s3_leg_direction must be -1 (short straddle) or +1 (long)")
+        self.s3_leg_direction = int(s3_leg_direction)
         np.random.seed(seed)
 
         self.equity_df:   Optional[pd.DataFrame] = None
@@ -1332,8 +1346,8 @@ class BacktestEngine:
 
         def _s3(kel):
             if c.s3_index_leg:
-                # Long dispersion = SHORT the SPX straddle (index leg)
-                return _straddle(-sig_df["s3_position"], kel, "s3")
+                # Index leg: long dispersion = SHORT the SPX straddle (default)
+                return _straddle(self.s3_leg_direction * sig_df["s3_position"], kel, "s3")
             return _simulate_s3_pnl(sig_df["s3_position"], kel, nav_const, z_ratio,
                                     corrections=c)
 
@@ -1545,6 +1559,7 @@ class BacktestEngine:
                     corrections=self.corrections,
                     vvix_threshold=self.vvix_threshold,
                     pdv_horizon=self.pdv_horizon,
+                    s3_leg_direction=self.s3_leg_direction,
                 )
                 eq_sub = sub.run(spx_col, vix_col)
                 m_sub  = sub.compute_metrics(eq_sub)
@@ -1592,6 +1607,7 @@ class BacktestEngine:
             "seed":            self.seed,
             "atm_to_vix_ratio": self.atm_to_vix_ratio,
             "pdv_horizon":     self.pdv_horizon,
+            "s3_leg_direction": self.s3_leg_direction,
             "corrections":     {f.name: getattr(self.corrections, f.name)
                                 for f in fields(self.corrections)},
             "metrics":         self.metrics_,
@@ -1626,6 +1642,7 @@ class BacktestEngine:
             atm_to_vix_ratio = state.get("atm_to_vix_ratio", 1.0),
             corrections     = C22Corrections(**corr) if corr else C22Corrections.legacy(),
             pdv_horizon     = state.get("pdv_horizon"),
+            s3_leg_direction = state.get("s3_leg_direction", S3_LEG_DIRECTION),
         )
         engine.equity_df  = eq_df
         engine.metrics_   = state.get("metrics")
@@ -1671,7 +1688,12 @@ def s3_timing_null_test(
                   predictability, which is why it is not evidence of edge.
 
     p_value = (1 + #{null ≥ real}) / (n_paths + 1), one-sided.
-    Requires engine.run() to have been called.
+
+    The real statistic is recomputed through the SAME pipeline as the null
+    paths (generate_signal3 on the backtest-window features), so the
+    comparison is like-for-like even if SignalEngine builds S3's trailing
+    z-score from longer history; ``engine_pass1_pnl`` is the engine's own S3
+    pass-1 P&L for reference. Requires engine.run() to have been called.
     """
     from joint_vol_calibration.signals.signal_engine import (
         S3_LOOKBACK, generate_signal3,
@@ -1695,7 +1717,8 @@ def s3_timing_null_test(
         s3 = generate_signal3(f, regimes)
         pos, kel = s3["s3_position"], s3["s3_kelly"]
         leg, _ = _simulate_straddle_pnl(
-            -pos, kel, nav, mk["spx_close"], mk["vix_idx"], r=mk["r"], q=engine.q,
+            engine.s3_leg_direction * pos, kel, nav, mk["spx_close"], mk["vix_idx"],
+            r=mk["r"], q=engine.q,
             signal_label="s3", atm_to_vix_ratio=engine.atm_to_vix_ratio, corrections=c,
         )
         ratio = f["vix"] / f["vvix"].clip(lower=1e-6)
@@ -1735,6 +1758,7 @@ def s3_timing_null_test(
 
     return {
         "method": method, "n_paths": n_paths, "seed": seed,
+        "engine_pass1_pnl": float(engine._pass1_pnl["s3"].sum()) if "s3" in engine._pass1_pnl else np.nan,
         "real_trades": real_n, "null_mean_trades": float(np.mean(null_n)),
         "index_leg": _summ(real_leg, null_leg),
         "z_proxy": _summ(real_proxy, null_proxy),
