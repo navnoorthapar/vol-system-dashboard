@@ -18,6 +18,7 @@ itself (no source greps, no re-implemented logic):
   ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol
   sub-periods     no classifier re-training
   report          portfolio sleeves shown, labels follow the convention
+  c22_bridge      upstream probes detect the fixed behaviour
 """
 
 import json
@@ -504,3 +505,57 @@ class TestReport:
         assert monthly.index[0] == eng.equity_df.index[0].to_period("M")
         first_month_end = eng.equity_df["nav"].resample("ME").last().iloc[0]
         assert monthly.iloc[0] == pytest.approx((first_month_end / eng.initial_capital - 1) * 100)
+
+
+# ── c22_bridge probes ──────────────────────────────────────────────────────────
+
+class TestBridgeProbes:
+    """The probes must recognise both the old and the fixed upstream
+    behaviour, whichever is installed (they run before and after the
+    signals/PDV chains merge)."""
+
+    def test_pdv_probe_tells_leaking_from_forward_window(self, monkeypatch):
+        from joint_vol_calibration.backtest import c22_bridge
+        from joint_vol_calibration.models import pdv
+        orig = pdv.build_xy
+
+        def with_target(shift_for):
+            def build(log_returns, features_df, horizon=1, **kw):
+                X, _ = orig(log_returns, features_df, horizon=1, **kw)
+                r2 = log_returns ** 2
+                y = np.sqrt(r2.shift(-shift_for(horizon)).rolling(horizon).mean() * 252)
+                idx = X.index.intersection(y.dropna().index)
+                return X.loc[idx], y.loc[idx]
+            return build
+
+        monkeypatch.setattr(pdv, "build_xy", with_target(lambda h: 1))     # pre-C22 window
+        assert c22_bridge.probe_pdv_forward_window() is False
+        monkeypatch.setattr(pdv, "build_xy", with_target(lambda h: h))     # [t+1, t+h]
+        assert c22_bridge.probe_pdv_forward_window() is True
+
+    def test_r2_probe_reads_the_regimes_signal_engine_returns(self, monkeypatch):
+        from joint_vol_calibration.backtest import c22_bridge
+        from joint_vol_calibration.signals import signal_engine
+
+        def fake(value):
+            def generate(self, spx_df, vix_wide_df, start_date, end_date, precomputed_regimes=None, **kw):
+                idx = pd.to_datetime(spx_df["date"])
+                return pd.DataFrame({"regime": value}, index=idx)
+            return generate
+
+        monkeypatch.setattr(signal_engine.SignalEngine, "generate", fake(2))   # override present
+        assert c22_bridge.probe_r2_override_removed() is False
+        monkeypatch.setattr(signal_engine.SignalEngine, "generate", fake(1))   # labels kept
+        assert c22_bridge.probe_r2_override_removed() is True
+
+    def test_legacy_interpolation_context_restores_state(self):
+        from joint_vol_calibration.backtest import c22_bridge, delta_hedger
+        before = (delta_hedger.DAYS_PER_YEAR, dict(delta_hedger.VIX_TENORS))
+        with c22_bridge.legacy_vix_interpolation():
+            assert delta_hedger.VIX_TENORS["^VIX6M"] == 182.0
+        assert (delta_hedger.DAYS_PER_YEAR, dict(delta_hedger.VIX_TENORS)) == before
+
+    def test_legacy_switches_are_all_off(self):
+        legacy = C22Corrections.legacy()
+        assert not any(vars(legacy).values())
+        assert all(vars(C22Corrections()).values())
