@@ -74,7 +74,7 @@ from __future__ import annotations
 
 import logging
 import pickle
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -750,7 +750,10 @@ def compute_metrics(
         )
     else:
         rf_daily = rf / TRADING_DAYS
-    ann_ret  = float((nav.iloc[-1] / nav.iloc[0]) ** (TRADING_DAYS / n) - 1.0)
+    growth   = float(nav.iloc[-1] / nav.iloc[0])
+    # A NAV at or below zero has lost everything; a fractional power of a
+    # non-positive ratio is NaN, so report the total loss instead.
+    ann_ret  = growth ** (TRADING_DAYS / n) - 1.0 if growth > 0 else -1.0
     excess   = rets - rf_daily
     ex_mu, ex_sd = float(excess.mean()), float(excess.std())
     if ex_sd > 1e-12 * max(abs(ex_mu), 1e-12):
@@ -764,8 +767,11 @@ def compute_metrics(
     # sqrt(mean(min(0, excess)^2)) over ALL days — not the sample std of the
     # negative subset about its own mean (which understates downside risk).
     downside_dev = float(np.sqrt((excess.clip(upper=0.0) ** 2).mean()))
-    sortino  = (float(excess.mean() / downside_dev * np.sqrt(TRADING_DAYS))
-                if downside_dev > 0 else 0.0)
+    if downside_dev > 0:
+        sortino = float(excess.mean() / downside_dev * np.sqrt(TRADING_DAYS))
+    else:
+        # No day below the target: same convention as the Sharpe above.
+        sortino = float(np.sign(ex_mu) * np.inf) if ex_mu != 0 else 0.0
 
     roll_max = nav.cummax()
     dd       = (nav - roll_max) / roll_max

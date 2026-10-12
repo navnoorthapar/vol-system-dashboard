@@ -23,7 +23,6 @@ import sqlite3
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import pandas as pd
 
 # ── Logging ───────────────────────────────────────────────────────────────────

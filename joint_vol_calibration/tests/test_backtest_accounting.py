@@ -369,6 +369,16 @@ class TestSharpeConvention:
         assert m["sharpe"] == pytest.approx(bte.compute_metrics(df, rf=0.0)["sharpe"])
         assert m["sharpe"] > bte.compute_metrics(df, rf_series=eng._rate_series)["sharpe"] + 1.0
 
+    def test_riskless_gain_is_not_reported_as_zero(self):
+        m = bte.compute_metrics(self._nav([0.002] * 50))
+        assert m["sharpe"] == np.inf and m["sortino"] == np.inf
+
+    def test_wiped_out_nav_has_total_loss_not_nan(self):
+        df = self._nav([0.0] * 10)
+        df.iloc[-1, 0] = -50_000.0
+        m = bte.compute_metrics(df)
+        assert m["ann_return"] == -1.0
+
     def test_crisis_sharpe_uses_the_same_convention(self):
         rets = np.random.default_rng(10).normal(0.0, 0.003, 600)
         df = self._nav(rets)

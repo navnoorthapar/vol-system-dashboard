@@ -514,9 +514,12 @@ class TestEdgeCases:
         from joint_vol_calibration.backtest.backtest_engine import BacktestEngine
         spx = _make_spx(200)
         vix = _make_vix(spx)
-        # Force VVIX > 100 everywhere → all Regime 2
+        # Force VVIX > 100 everywhere and use the FIXED 100 gate → all Regime 2
+        # (a constant VVIX never exceeds its own rolling percentile, so the
+        # adaptive gate would label nothing R2).
         vix["^VVIX"] = 150.0
-        bt  = BacktestEngine(start_date="2018-01-02", end_date="2018-12-31")
+        bt  = BacktestEngine(start_date="2018-01-02", end_date="2018-12-31",
+                             vvix_threshold=100.0)
         eq  = bt.run(spx, vix)
         # Combined pos should be mostly flat (Regime 2 blocks entries)
         # Allow for some non-zero (positions held from before R2 entry)
