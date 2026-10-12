@@ -1,24 +1,31 @@
 """
 test_regime_pdv.py — Tests for C11: Regime-Switching PDV with Merton Jump Component
 
-Test coverage (42 tests across 10 test classes):
-  1. merton_log_density          — output shape, finite, n=0 reduces to Normal
-  2. calibrate_jump_mle          — output types, bounds, convergence on synthetic data
+Test coverage (13 test classes):
+  1. merton_log_density          — output shape, finite, n=0 reduces to Normal,
+                                   integrates to one
+  2. calibrate_jump_mle          — types, bounds, parameter recovery on simulated
+                                   Merton data, success=False handling, clipped
+                                   fallback, bound-activity reporting
   3. MertonJumpParams            — properties (jump_variance_annual, jump_vol_annual, repr)
-  4. RegimePDV.load              — FileNotFoundError on missing paths
+  4. RegimePDV.load              — FileNotFoundError on missing paths; returns
+                                   taken from the pickle
   5. RegimePDV.calibrate_jump    — zero look-ahead, fallback when too few R2 days
-  6. RegimePDV.calibrate_jump_tail — tail filter, cache key, fallback, bounds, look-ahead
+  6. RegimePDV.calibrate_jump_tail — detected-jump estimator, cache key, fallback
   7. RegimePDV.forecast          — R0/R1 zero jump_adj, R2 positive jump_adj,
-                                   uses tail calibration, result keys
-  8. compare_covid_2020          — shape, columns, R2 non-negative jump_adj
-  9. Zero look-ahead             — full and tail both respect the cutoff
-  10. Integration                — end-to-end on saved artifacts: tail params in expected
-                                   range, COVID crash R2, jump_adj materially > old 0.16pp
+                                   result keys, staleness
+  8. compare_covid_2020          — columns, scoring against the NEXT day's return
+  9. Zero look-ahead             — future labels, future returns (poison), and the
+                                   ex-ante diffusion vol
+  10. Integration                — end-to-end on saved artifacts
+  11. PDVLinear4F
+  12. daily_jump_test            — size under Gaussian and GARCH nulls, power,
+                                   causality
+  13. calibrate_jump_tail alpha  — smaller alpha flags fewer jumps
 """
 
 import pickle
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -27,6 +34,7 @@ import pytest
 # np.trapz was removed in NumPy 2.0 (renamed np.trapezoid) — same cross-version
 # helper used in heston.py / joint_calibrator.py.
 _trapz = getattr(np, "trapezoid", None) or np.trapz
+
 
 # Module-level picklable stub (cannot be defined inside a test method)
 class _FakePDVModel:
@@ -37,13 +45,19 @@ class _FakePDVModel:
     )
 
 
+from joint_vol_calibration.models.pdv import PDVModel
+from joint_vol_calibration.signals import regime_pdv as rp
 from joint_vol_calibration.signals.regime_pdv import (
     ANNUALISE,
     MIN_R2_DAYS,
-    _BOUNDS_TAIL,
+    MIN_TAIL_DAYS,
+    _BOUNDS_FULL,
+    _moment_match_fallback,
     MertonJumpParams,
     RegimePDV,
     calibrate_jump_mle,
+    daily_jump_test,
+    jump_test_critical_value,
     merton_log_density,
 )
 
@@ -52,94 +66,64 @@ from joint_vol_calibration.signals.regime_pdv import (
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _make_pdv_mock(
-    n: int = 500,
+def _make_returns(
+    n: int = 600,
     seed: int = 42,
     start: str = "2010-01-04",
-) -> MagicMock:
-    """
-    Build a minimal mock of a fitted PDVModel.
-
-    _features has sigma1, sigma2, lev, r_lag1, rv_hist_20d.
-    linear_.predict() returns sigma1 (a reasonable proxy).
-    """
+    jump_prob: float = 0.03,
+    jump_mu: float = -0.02,
+    jump_sd: float = 0.03,
+) -> pd.Series:
+    """GARCH(1,1) daily log returns with occasional Gaussian jumps."""
     rng = np.random.default_rng(seed)
-    dates = pd.bdate_range(start, periods=n)
-    daily_r = rng.normal(0, 0.012, n)
-    sigma1 = np.maximum(
-        pd.Series(daily_r**2 * ANNUALISE).ewm(span=9, adjust=False).mean().values**0.5,
-        0.01,
-    )
-    sigma2 = np.maximum(
-        pd.Series(daily_r**2 * ANNUALISE).ewm(span=119, adjust=False).mean().values**0.5,
-        0.01,
-    )
-    lev = pd.Series(daily_r).ewm(span=19, adjust=False).mean().values * (ANNUALISE**0.5)
-
-    feats = pd.DataFrame(
-        {
-            "sigma1":      sigma1,
-            "sigma2":      sigma2,
-            "lev":         lev,
-            "r_lag1":      np.concatenate([[np.nan], daily_r[:-1]]),
-            "rv_hist_20d": np.maximum(
-                pd.Series(daily_r**2).rolling(20).mean().values**0.5 * ANNUALISE**0.5,
-                0.01,
-            ),
-        },
-        index=dates,
-    )
-
-    # linear_ mock: predict returns sigma1
-    linear_mock = MagicMock()
-    def _linear_predict(df):
-        vals = df["sigma1"].values.copy()
-        return pd.Series(vals, index=df.index)
-    linear_mock.predict.side_effect = _linear_predict
-
-    pdv_mock = MagicMock()
-    pdv_mock.is_fitted = True
-    pdv_mock._features = feats
-    pdv_mock.linear_ = linear_mock
-    return pdv_mock
+    s2 = np.empty(n)
+    r = np.empty(n)
+    s2[0] = 1e-4
+    for t in range(n):
+        if t:
+            s2[t] = 2e-6 + 0.08 * r[t - 1] ** 2 + 0.90 * s2[t - 1]
+        r[t] = rng.normal(0.0, np.sqrt(s2[t]))
+        if rng.random() < jump_prob:
+            r[t] += rng.normal(jump_mu, jump_sd)
+    return pd.Series(r, index=pd.bdate_range(start, periods=n), name="log_return")
 
 
 def _make_regime_labels(
-    pdv_mock,
+    index: pd.DatetimeIndex,
     r2_fraction: float = 0.25,
     seed: int = 0,
 ) -> pd.DataFrame:
-    """Build synthetic regime labels aligned with pdv_mock._features.index."""
-    dates = pdv_mock._features.index
-    rng   = np.random.default_rng(seed)
-    n     = len(dates)
-    # Assign R2 to ~25% of days, spread across the series
-    regimes = np.ones(n, dtype=int)  # default R1
-    r2_idx  = rng.choice(n, size=int(n * r2_fraction), replace=False)
+    """Synthetic regime labels (default R1, ~r2_fraction R2)."""
+    rng = np.random.default_rng(seed)
+    n = len(index)
+    regimes = np.ones(n, dtype=int)
+    r2_idx = rng.choice(n, size=int(n * r2_fraction), replace=False)
     regimes[r2_idx] = 2
-    return pd.DataFrame({"regime": regimes}, index=dates)
+    return pd.DataFrame({"regime": regimes}, index=index)
 
 
 def _build_regime_pdv(
     r2_fraction: float = 0.30,
     n_days: int = 600,
     seed: int = 42,
+    jump_prob: float = 0.03,
+    jump_mu: float = -0.02,
 ) -> RegimePDV:
-    """
-    Build a RegimePDV instance with injected mock artifacts — no disk I/O.
-    """
-    pdv_mock = _make_pdv_mock(n=n_days, seed=seed)
-    lbl      = _make_regime_labels(pdv_mock, r2_fraction=r2_fraction, seed=seed)
+    """A loaded RegimePDV on synthetic in-memory data — no disk I/O."""
+    r = _make_returns(n=n_days, seed=seed, jump_prob=jump_prob, jump_mu=jump_mu)
+    lbl = _make_regime_labels(r.index, r2_fraction=r2_fraction, seed=seed)
+    return RegimePDV.from_data(r, lbl)
 
-    model = RegimePDV(
-        pdv_model_path=Path("/nonexistent/pdv_model.pkl"),
-        regime_labels_path=Path("/nonexistent/regime_labels.parquet"),
-    )
-    # Inject mocks directly
-    model._pdv = pdv_mock
-    model._regime_labels = lbl
-    model.is_loaded = True
-    return model
+
+def _simulate_merton(T, lam, mu_j, sigma_j, sigma_d=0.15, seed=42):
+    rng = np.random.default_rng(seed)
+    sd = sigma_d / np.sqrt(ANNUALISE)
+    r = rng.normal(0.0, sd, T)
+    n_jumps = rng.poisson(lam / ANNUALISE, T)
+    for t, k in enumerate(n_jumps):
+        if k > 0:
+            r[t] += rng.normal(mu_j, sigma_j, k).sum()
+    return r, np.full(T, sd)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -168,14 +152,9 @@ class TestMertonLogDensity:
         rng = np.random.default_rng(1)
         r = rng.normal(0, 0.01, 100)
         sd = self._sigma_d(100)
-
-        # Almost-zero jump intensity
         out_jump = merton_log_density(r, sd, lam_daily=1e-9, mu_j=0.0, sigma_j=0.001)
-
-        # Pure Normal log-density
         from scipy.stats import norm
         log_norm = norm.logpdf(r, 0.0, sd)
-
         np.testing.assert_allclose(out_jump, log_norm, atol=1e-4)
 
     def test_larger_sigma_j_increases_variance(self):
@@ -183,17 +162,14 @@ class TestMertonLogDensity:
         r    = np.array([0.0])
         sd   = np.array([0.01 / np.sqrt(ANNUALISE)])
         lam  = 3.0 / ANNUALISE
-        # Large sigma_j → lower peak
         d_small = merton_log_density(r, sd, lam, mu_j=0.0, sigma_j=0.005)
         d_large = merton_log_density(r, sd, lam, mu_j=0.0, sigma_j=0.050)
         assert d_large[0] < d_small[0], "Larger sigma_j should reduce density at r=0"
 
     def test_density_integrates_to_one(self):
-        """A probability density must integrate to 1 over the return support.
-        This is the decisive normalization check: a wrong variance combination,
-        a missing Jacobian, or a mis-weighted Poisson term would break it."""
-        grid = np.linspace(-1.0, 1.0, 200_001)        # wide, fine grid
-        sigma_d = np.full_like(grid, 0.012)            # ~19% annualised diffusion
+        """A probability density must integrate to 1 over the return support."""
+        grid = np.linspace(-1.0, 1.0, 200_001)
+        sigma_d = np.full_like(grid, 0.012)
         ld = merton_log_density(grid, sigma_d, lam_daily=0.05,
                                 mu_j=-0.04, sigma_j=0.06)
         integral = _trapz(np.exp(ld), grid)
@@ -214,53 +190,76 @@ class TestMertonLogDensity:
 
 class TestCalibrateJumpMle:
 
-    def _synthetic_merton(
-        self, T: int = 300, lam: float = 4.0, mu_j: float = -0.01,
-        sigma_j: float = 0.025, sigma_d: float = 0.15, seed: int = 42
-    ):
-        rng = np.random.default_rng(seed)
-        lam_d = lam / ANNUALISE
-        sd    = sigma_d / np.sqrt(ANNUALISE)
-        r     = rng.normal(0.0, sd, T)
-        # Add jumps
-        n_jumps = rng.poisson(lam_d, T)
-        for t, k in enumerate(n_jumps):
-            if k > 0:
-                r[t] += rng.normal(mu_j, sigma_j, k).sum()
-        return r, np.full(T, sd)
-
     def test_output_type(self):
-        r, sd = self._synthetic_merton()
-        params = calibrate_jump_mle(r, sd)
-        assert isinstance(params, MertonJumpParams)
+        r, sd = _simulate_merton(300, 4.0, -0.01, 0.025)
+        assert isinstance(calibrate_jump_mle(r, sd), MertonJumpParams)
 
     def test_bounds_respected(self):
-        r, sd = self._synthetic_merton()
+        r, sd = _simulate_merton(300, 4.0, -0.01, 0.025)
         params = calibrate_jump_mle(r, sd)
-        assert 0.1 <= params.lam <= 50.0, "λ must be in [0.1, 50]"
-        assert -0.10 <= params.mu_j <= 0.02, "μ_j must be in [-0.10, 0.02]"
-        assert 0.001 <= params.sigma_j <= 0.20, "σ_j must be in [0.001, 0.20]"
+        (l0, l1), (m0, m1), (s0, s1) = _BOUNDS_FULL
+        assert l0 <= params.lam <= l1
+        assert m0 <= params.mu_j <= m1
+        assert s0 <= params.sigma_j <= s1
 
     def test_n_r2_days_stored(self):
-        r, sd = self._synthetic_merton(T=200)
-        params = calibrate_jump_mle(r, sd)
-        assert params.n_r2_days == 200
+        r, sd = _simulate_merton(200, 4.0, -0.01, 0.025)
+        assert calibrate_jump_mle(r, sd).n_r2_days == 200
 
     def test_nll_is_finite(self):
-        r, sd = self._synthetic_merton()
-        params = calibrate_jump_mle(r, sd)
-        assert np.isfinite(params.nll), "NLL must be finite"
+        r, sd = _simulate_merton(300, 4.0, -0.01, 0.025)
+        assert np.isfinite(calibrate_jump_mle(r, sd).nll)
 
-    def test_recovers_approximate_params(self):
-        """
-        With 500 R2-day sample, calibrated λ should be reasonably close to truth.
-        We allow ±60% tolerance because daily returns are very noisy.
-        """
-        true_lam = 5.0
-        r, sd = self._synthetic_merton(T=500, lam=true_lam, seed=99)
-        params = calibrate_jump_mle(r, sd, random_seed=99)
-        # Jump intensity should be in a reasonable range
-        assert 0.5 <= params.lam <= 30.0, f"λ={params.lam:.2f} out of plausible range"
+    def test_recovers_crash_parameters_on_simulated_merton_data(self):
+        """λ=4/yr, μ_j=−4%, σ_j=3% over 5000 days (~80 jumps): every
+        parameter within ±50% of the truth and no bound active."""
+        r, sd = _simulate_merton(5000, 4.0, -0.04, 0.03, seed=7)
+        p = calibrate_jump_mle(r, sd)
+        assert p.lam == pytest.approx(4.0, rel=0.5)
+        assert p.mu_j == pytest.approx(-0.04, rel=0.5)
+        assert p.sigma_j == pytest.approx(0.03, rel=0.5)
+        assert p.bound_active == ()
+
+    def test_success_false_keeps_the_best_optimum(self, monkeypatch):
+        """L-BFGS-B often reports success=False (line-search termination) at
+        a good point. Pre-C22 that discarded the optimum for a moment-matching
+        fallback that ignored the bounds (λ=50 under a λ≤20 box)."""
+        rng = np.random.default_rng(3)
+        r = rng.standard_t(3, 300) * 0.01
+        sd = np.full(300, 0.01)
+        bounds = [(0.1, 20.0), (-0.15, 0.05), (0.005, 0.15)]
+        honest = calibrate_jump_mle(r, sd, bounds=bounds)
+
+        real_minimize = rp.minimize
+
+        def flaky(*a, **k):
+            res = real_minimize(*a, **k)
+            res.success = False
+            res.message = "ABNORMAL_TERMINATION_IN_LNSRCH"
+            return res
+
+        monkeypatch.setattr(rp, "minimize", flaky)
+        p = calibrate_jump_mle(r, sd, bounds=bounds)
+        assert (p.lam, p.mu_j, p.sigma_j) == (honest.lam, honest.mu_j, honest.sigma_j)
+        assert p.method == "mle"
+        for v, (lo, hi) in zip((p.lam, p.mu_j, p.sigma_j), bounds):
+            assert lo <= v <= hi
+
+    def test_moment_fallback_is_clipped_into_bounds(self):
+        rng = np.random.default_rng(3)
+        r = rng.standard_t(3, 300) * 0.01
+        sd = np.full(300, 0.001)
+        bounds = [(0.1, 20.0), (-0.15, 0.05), (0.005, 0.15)]
+        lam, mu, sig = _moment_match_fallback(r, sd, bounds)
+        for v, (lo, hi) in zip((lam, mu, sig), bounds):
+            assert lo <= v <= hi
+        assert lam == 20.0          # unclipped it would exceed the box
+
+    def test_bound_activity_is_reported(self):
+        """A box that excludes the truth must be flagged, not silently used."""
+        r, sd = _simulate_merton(3000, 40.0, -0.01, 0.02, seed=5)
+        p = calibrate_jump_mle(r, sd, bounds=[(0.1, 2.0), (-0.2, 0.2), (1e-4, 0.25)])
+        assert "lam" in p.bound_active
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -284,14 +283,16 @@ class TestMertonJumpParams:
         assert abs(p.jump_vol_annual - expected) < 1e-12
 
     def test_repr_contains_key_fields(self):
-        p = MertonJumpParams(lam=3.0, mu_j=-0.008, sigma_j=0.015, n_r2_days=500)
+        p = MertonJumpParams(lam=3.0, mu_j=-0.008, sigma_j=0.015, n_r2_days=500,
+                             bound_active=("lam",))
         s = repr(p)
         assert "λ=" in s
         assert "n_days=500" in s
+        assert "bound_active=['lam']" in s
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. RegimePDV.load — missing files
+# 4. RegimePDV.load
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestRegimePDVLoad:
@@ -308,7 +309,6 @@ class TestRegimePDVLoad:
         pdv_path = tmp_path / "pdv_model.pkl"
         with open(pdv_path, "wb") as f:
             pickle.dump(_FakePDVModel(), f)
-
         model = RegimePDV(
             pdv_model_path=pdv_path,
             regime_labels_path=tmp_path / "missing_labels.parquet",
@@ -316,330 +316,267 @@ class TestRegimePDVLoad:
         with pytest.raises(FileNotFoundError, match="Regime labels not found"):
             model.load()
 
+    def test_load_uses_the_returns_stored_in_the_pickle(self, tmp_path):
+        r = _make_returns(400)
+        PDVModel().fit(r).save(str(tmp_path / "pdv.pkl"))
+        _make_regime_labels(r.index).to_parquet(tmp_path / "lbl.parquet")
+        m = RegimePDV(tmp_path / "pdv.pkl", tmp_path / "lbl.parquet").load()
+        pd.testing.assert_series_equal(m._log_returns, r.astype(float),
+                                       check_names=False, check_freq=False)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5. RegimePDV.calibrate_jump — zero look-ahead & fallback
+# 5. RegimePDV.calibrate_jump
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestRegimePDVCalibrateJump:
 
     def test_no_r2_data_before_date_returns_zero_jump(self):
-        """If all R2 days are AFTER as_of_date, result should be zero-jump fallback."""
         model = _build_regime_pdv(n_days=600)
-        # Set all R2 days to 2015+, then request forecast for 2010
-        model._regime_labels["regime"] = 1  # all R1
-        # Only 2 R2 days in 2014 — not enough
+        model._regime_labels["regime"] = 1
         dates = model._regime_labels.index
         model._regime_labels.loc[dates[:2], "regime"] = 2
-
-        as_of = dates[0].strftime("%Y-%m-%d")
-        params = model.calibrate_jump(as_of)
-        assert params.lam == 0.0, "Should return zero-jump when too few R2 days"
+        params = model.calibrate_jump(dates[400].strftime("%Y-%m-%d"))
+        assert params.lam == 0.0 and params.method == "none"
 
     def test_result_is_cached(self):
         model = _build_regime_pdv(n_days=600)
-        dates = model._regime_labels.index
-        as_of = dates[350].strftime("%Y-%m-%d")
-
-        p1 = model.calibrate_jump(as_of)
-        p2 = model.calibrate_jump(as_of)
-        assert p1 is p2, "Second call must return cached object"
+        as_of = model._regime_labels.index[450].strftime("%Y-%m-%d")
+        assert model.calibrate_jump(as_of) is model.calibrate_jump(as_of)
 
     def test_zero_lookahead_r2_days_are_strictly_before_cutoff(self):
-        """
-        Inspect calibration: R2 days used must all be < as_of_date.
-        We set R2 days only in the future and verify zero-jump fallback.
-        """
-        model = _build_regime_pdv(n_days=400)
+        """R2 labels only on/after the cutoff → nothing to calibrate on."""
+        model = _build_regime_pdv(n_days=500)
         dates = model._regime_labels.index
-        # Cut date = 200th day
-        cutoff_idx = 200
-        cutoff = dates[cutoff_idx].strftime("%Y-%m-%d")
-
-        # Force R2 only on dates >= cutoff
+        cutoff_idx = 400
         model._regime_labels["regime"] = 1
         model._regime_labels.iloc[cutoff_idx:, 0] = 2
-
-        params = model.calibrate_jump(cutoff)
-        # Should see zero R2 days before cutoff → zero-jump fallback
+        params = model.calibrate_jump(dates[cutoff_idx].strftime("%Y-%m-%d"))
         assert params.lam == 0.0
 
     def test_sufficient_r2_days_produces_nonzero_lambda(self):
-        """With enough R2 days, calibrated λ should be > 0."""
-        model = _build_regime_pdv(r2_fraction=0.40, n_days=500)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        params = model.calibrate_jump(as_of)
-        assert params.lam > 0.0, "Should find a positive jump intensity"
+        model = _build_regime_pdv(r2_fraction=0.40, n_days=600)
+        params = model.calibrate_jump(model._regime_labels.index[-1].strftime("%Y-%m-%d"))
+        assert params.lam > 0.0
         assert params.n_r2_days >= MIN_R2_DAYS
 
-    def test_params_within_bounds(self):
-        model = _build_regime_pdv(r2_fraction=0.35, n_days=500)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        params = model.calibrate_jump(as_of)
-        if params.lam > 0:
-            assert 0.1 <= params.lam <= 50.0
-            assert 0.001 <= params.sigma_j <= 0.20
+    def test_calibration_sample_is_days_after_an_r2_close(self):
+        """Conditioning matches forecast(): the label at t-1 selects r_t."""
+        model = _build_regime_pdv(n_days=600)
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        _, _, _, dates = model._get_r2_data(as_of)
+        lbl = model._regime_labels["regime"].reindex(model._log_returns.index)
+        prev = lbl.shift(1)
+        assert (prev.loc[dates] == 2).all()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6. RegimePDV.calibrate_jump_tail — tail filter, cache key, fallback, bounds
+# 6. RegimePDV.calibrate_jump_tail — detected-jump estimator
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def _build_regime_pdv_with_crash(
-    n_days: int = 600,
-    r2_fraction: float = 0.30,
-    n_crash_days: int = 20,
-    crash_vol_boost: float = 0.30,
-    seed: int = 42,
-) -> RegimePDV:
-    """
-    Like _build_regime_pdv but injects `n_crash_days` R2 days with large
-    rv_hist_20d (boosted by crash_vol_boost above the PDV prediction).
-    This gives the tail filter genuine high-error days to select.
-    """
-    model = _build_regime_pdv(r2_fraction=r2_fraction, n_days=n_days, seed=seed)
-
-    feats = model._pdv._features.copy()
-    feats.index = pd.to_datetime(feats.index)
-
-    # Find R2 indices and inflate rv_hist_20d on a subset
-    r2_idx = np.where(model._regime_labels["regime"] == 2)[0]
-    rng    = np.random.default_rng(seed + 1)
-    if len(r2_idx) >= n_crash_days:
-        crash_idx = rng.choice(r2_idx, size=n_crash_days, replace=False)
-        crash_dates = model._regime_labels.index[crash_idx]
-        feats.loc[crash_dates, "rv_hist_20d"] = (
-            feats.loc[crash_dates, "rv_hist_20d"] + crash_vol_boost
-        )
-        model._pdv._features = feats
-
-    return model
-
 
 class TestCalibrateJumpTail:
 
-    def test_tail_result_is_merton_jump_params(self):
-        model = _build_regime_pdv_with_crash(n_days=600)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        params = model.calibrate_jump_tail(as_of)
-        assert isinstance(params, MertonJumpParams)
+    def _model(self):
+        return _build_regime_pdv(r2_fraction=0.5, n_days=900, jump_prob=0.06,
+                                 jump_mu=-0.05)
 
-    def test_tail_cache_key_includes_zscore(self):
-        """Different zscore_threshold values must use different cache entries."""
-        model = _build_regime_pdv_with_crash(n_days=600)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
+    def test_tail_result_is_threshold_estimate(self):
+        model = self._model()
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        p = model.calibrate_jump_tail(as_of)
+        assert isinstance(p, MertonJumpParams)
+        assert p.method == "threshold"
 
-        p1 = model.calibrate_jump_tail(as_of, zscore_threshold=2.0)
-        p2 = model.calibrate_jump_tail(as_of, zscore_threshold=1.0)
-        # Both should be cached separately
+    def test_lambda_is_detected_jump_frequency_per_r2_day(self):
+        """λ refers to every post-R2 day, not only to the flagged ones."""
+        model = self._model()
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        p = model.calibrate_jump_tail(as_of)
+        _, _, _, dates = model._get_r2_data(as_of)
+        flags = model.compute_jump_flags(as_of)["jump"].reindex(dates).fillna(False)
+        assert p.lam == pytest.approx(ANNUALISE * flags.sum() / len(dates))
+        assert p.n_r2_days == len(dates)
+
+    def test_cache_key_includes_alpha(self):
+        model = self._model()
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        model.calibrate_jump_tail(as_of, alpha=0.01)
+        model.calibrate_jump_tail(as_of, alpha=0.05)
         assert len(model._jump_tail_cache) == 2
 
     def test_tail_cached_second_call(self):
-        model = _build_regime_pdv_with_crash(n_days=600)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        p1 = model.calibrate_jump_tail(as_of)
-        p2 = model.calibrate_jump_tail(as_of)
-        assert p1 is p2
+        model = self._model()
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        assert model.calibrate_jump_tail(as_of) is model.calibrate_jump_tail(as_of)
 
-    def test_tail_fallback_when_too_few_tail_days(self):
-        """
-        If z-score filter retains fewer than MIN_TAIL_DAYS days, should
-        fall back to full-R2 MLE rather than crashing.
-        """
-        # Set a very high zscore_threshold so almost no days pass
-        model = _build_regime_pdv(r2_fraction=0.30, n_days=500)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        # zscore_threshold=10 → virtually no days pass
-        params = model.calibrate_jump_tail(as_of, zscore_threshold=10.0)
-        assert isinstance(params, MertonJumpParams)
-        assert np.isfinite(params.lam)
+    def test_fallback_to_mle_when_too_few_jumps_detected(self):
+        model = _build_regime_pdv(r2_fraction=0.30, n_days=500, jump_prob=0.0)
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        p = model.calibrate_jump_tail(as_of, alpha=1e-4)
+        assert p.method in ("mle", "none")
+        assert np.isfinite(p.lam)
 
     def test_tail_zero_jump_fallback_when_no_r2_data(self):
-        """No R2 days before cutoff → zero-jump fallback, same as full calibration."""
         model = _build_regime_pdv(n_days=500)
-        model._regime_labels["regime"] = 1  # all R1
-        dates = model._regime_labels.index
-        as_of = dates[10].strftime("%Y-%m-%d")
-        params = model.calibrate_jump_tail(as_of)
-        assert params.lam == 0.0
-
-    def test_tail_lambda_within_tail_bounds(self):
-        """Tail-calibrated λ must satisfy _BOUNDS_TAIL upper limit (≤ 20)."""
-        model = _build_regime_pdv_with_crash(n_days=600, n_crash_days=30)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        params = model.calibrate_jump_tail(as_of, zscore_threshold=1.5)
-        if params.lam > 0:
-            lo, hi = _BOUNDS_TAIL[0]
-            assert params.lam <= hi, f"λ={params.lam:.2f} exceeds tail bound {hi}"
-
-    def test_tail_sigma_j_within_tail_bounds(self):
-        model = _build_regime_pdv_with_crash(n_days=600, n_crash_days=30)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        params = model.calibrate_jump_tail(as_of, zscore_threshold=1.5)
-        if params.lam > 0:
-            lo, hi = _BOUNDS_TAIL[2]
-            assert lo <= params.sigma_j <= hi
-
-    def test_tail_n_r2_days_is_tail_count(self):
-        """n_r2_days in result should reflect the tail subset size, not all R2 days."""
-        model = _build_regime_pdv_with_crash(n_days=600, n_crash_days=30)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        full_params = model.calibrate_jump(as_of)
-        tail_params = model.calibrate_jump_tail(as_of, zscore_threshold=1.5)
-        # Tail should have fewer days than full (when tail filter fired)
-        if tail_params.n_r2_days > 0 and full_params.n_r2_days > 0:
-            assert tail_params.n_r2_days <= full_params.n_r2_days
+        model._regime_labels["regime"] = 1
+        p = model.calibrate_jump_tail(model._regime_labels.index[-1].strftime("%Y-%m-%d"))
+        assert p.lam == 0.0
 
     def test_tail_zero_lookahead(self):
-        """
-        Adding R2 days AFTER as_of_date must not change tail params.
-        """
-        model = _build_regime_pdv_with_crash(n_days=500, n_crash_days=25)
+        """Adding R2 labels and huge returns after as_of must not change it."""
+        model = self._model()
         dates = model._regime_labels.index
-        cutoff_idx = 400
-        cutoff = dates[cutoff_idx].strftime("%Y-%m-%d")
+        cutoff = dates[700].strftime("%Y-%m-%d")
+        before = model.calibrate_jump_tail(cutoff)
 
-        params_before = model.calibrate_jump_tail(cutoff)
-
-        # Add R2 days after cutoff and clear cache
-        model._regime_labels.iloc[cutoff_idx + 1:, 0] = 2
-        model._jump_tail_cache.clear()
-        params_after = model.calibrate_jump_tail(cutoff)
-
-        assert params_before.lam == params_after.lam
-        assert params_before.mu_j == params_after.mu_j
-        assert params_before.sigma_j == params_after.sigma_j
+        r = model._log_returns.copy()
+        r.iloc[701:] *= 10
+        lbl = model._regime_labels.copy()
+        lbl.iloc[701:, 0] = 2
+        after = RegimePDV.from_data(r, lbl).calibrate_jump_tail(cutoff)
+        assert (before.lam, before.mu_j, before.sigma_j) == (after.lam, after.mu_j, after.sigma_j)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 7. RegimePDV.forecast — regime switching
+# 7. RegimePDV.forecast
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestRegimePDVForecast:
 
     def test_r1_returns_zero_jump_adj(self):
-        """R1 days must have jump_adj=0 and total_vol==pdv_vol."""
-        model = _build_regime_pdv(n_days=400)
-        dates = model._regime_labels.index
-
-        # Force the last date to R1
+        model = _build_regime_pdv(n_days=500)
         model._regime_labels.iloc[-1, 0] = 1
-        last_date = dates[-1].strftime("%Y-%m-%d")
-        result = model.forecast(last_date)
-
+        result = model.forecast(model._regime_labels.index[-1].strftime("%Y-%m-%d"))
         assert result["regime"] == "SHORT_GAMMA"
         assert result["jump_adj"] == 0.0
         assert result["total_vol"] == result["pdv_vol"]
 
     def test_r0_returns_zero_jump_adj(self):
-        """R0 days must also have jump_adj=0."""
-        model = _build_regime_pdv(n_days=400)
-        dates = model._regime_labels.index
+        model = _build_regime_pdv(n_days=500)
         model._regime_labels.iloc[-1, 0] = 0
-        last_date = dates[-1].strftime("%Y-%m-%d")
-        result = model.forecast(last_date)
-
+        result = model.forecast(model._regime_labels.index[-1].strftime("%Y-%m-%d"))
         assert result["regime"] == "LONG_GAMMA"
         assert result["jump_adj"] == 0.0
 
-    def test_r2_returns_positive_jump_adj(self):
-        """R2 days with sufficient calibration data must have jump_adj > 0."""
-        model = _build_regime_pdv(r2_fraction=0.35, n_days=500)
-        dates = model._regime_labels.index
-
-        # Force last date to R2
+    def test_r2_adds_the_calibrated_jump_variance(self):
+        """R2 with λ > 0: total_vol² − pdv_vol² must equal λ(μ_j²+σ_j²) > 0."""
+        model = _build_regime_pdv(r2_fraction=0.35, n_days=600)
         model._regime_labels.iloc[-1, 0] = 2
-        last_date = dates[-1].strftime("%Y-%m-%d")
-        result = model.forecast(last_date)
-
+        result = model.forecast(model._regime_labels.index[-1].strftime("%Y-%m-%d"))
         assert result["regime"] == "VOMMA_ACTIVE"
-        # jump_adj ≥ 0 always; it's > 0 when λ > 0
-        assert result["jump_adj"] >= 0.0
-        assert result["total_vol"] >= result["pdv_vol"]
+        assert result["lambda"] > 0
+        assert result["jump_adj"] > 0
+        jv = result["lambda"] * (result["mu_j"] ** 2 + result["sigma_j"] ** 2)
+        assert result["total_vol"] ** 2 - result["pdv_vol"] ** 2 == pytest.approx(jv, rel=1e-9)
 
     def test_total_vol_greater_or_equal_pdv_vol(self):
-        """total_vol must always be ≥ pdv_vol (jump adds variance, not removes it)."""
         model = _build_regime_pdv(r2_fraction=0.30, n_days=500)
-        dates = model._regime_labels.index
-
+        last = model._regime_labels.index[-1].strftime("%Y-%m-%d")
         for regime_code in [0, 1, 2]:
             model._regime_labels.iloc[-1, 0] = regime_code
-            result = model.forecast(dates[-1].strftime("%Y-%m-%d"))
+            result = model.forecast(last)
             assert result["total_vol"] >= result["pdv_vol"] - 1e-10
 
     def test_forecast_result_keys(self):
-        """Forecast dict must contain all required keys."""
         model = _build_regime_pdv(n_days=400)
-        dates = model._regime_labels.index
-        result = model.forecast(dates[-1].strftime("%Y-%m-%d"))
+        result = model.forecast(model._regime_labels.index[-1].strftime("%Y-%m-%d"))
         required = {
             "pdv_vol", "jump_adj", "total_vol", "regime",
             "lambda", "mu_j", "sigma_j", "n_r2_cal_days", "as_of_date",
+            "feature_date", "regime_date", "stale", "bound_active",
+            "jump_method", "diffusion_scale",
         }
         assert required.issubset(set(result.keys()))
 
     def test_pdv_vol_is_positive(self):
-        model = _build_regime_pdv(n_days=300)
-        dates = model._regime_labels.index
-        result = model.forecast(dates[-1].strftime("%Y-%m-%d"))
-        assert result["pdv_vol"] > 0.0
+        model = _build_regime_pdv(n_days=400)
+        assert model.forecast(model._regime_labels.index[-1].strftime("%Y-%m-%d"))["pdv_vol"] > 0.0
+
+    def test_stale_features_raise_unless_allowed(self):
+        """Pre-C22 forecast('2026-09-23') silently used 2025-12-30 features."""
+        model = _build_regime_pdv(n_days=400)
+        last = model._log_returns.index[-1]
+        later = (last + pd.offsets.BDay(10)).strftime("%Y-%m-%d")
+        model._regime_labels.loc[pd.Timestamp(later), "regime"] = 1
+        with pytest.raises(ValueError, match="business days old"):
+            model.forecast(later)
+        res = model.forecast(later, allow_stale=True)
+        assert res["stale"] is True
+        assert res["feature_date"] == str(last.date())
+        assert res["regime_date"] == later
+
+    def test_one_day_gap_is_reported_not_stale(self):
+        model = _build_regime_pdv(n_days=400)
+        last = model._log_returns.index[-1]
+        nxt = (last + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
+        res = model.forecast(nxt)
+        assert res["stale"] is False and res["feature_date"] == str(last.date())
+
+    def test_pdv_vol_is_scaled_forecast_from_pre_as_of_fit(self):
+        """σ_PDV = k · PDVLinear(features at as_of) with PDVLinear fit only on
+        returns before as_of (here: re-derived by hand)."""
+        from joint_vol_calibration.models.pdv import PDVLinear, build_xy, extract_pdv_features
+        from scipy.stats import norm
+        model = _build_regime_pdv(n_days=500)
+        as_of = model._log_returns.index[450]
+        r = model._log_returns[model._log_returns.index < as_of]
+        f = extract_pdv_features(r)
+        X, y = build_xy(r, f, horizon=1, target="abs_return")
+        lin = PDVLinear().fit(X, y)
+        k = np.median(y.values / lin.predict(X).values) / norm.ppf(0.75)
+        p = lin.predict(model._features.loc[[as_of]]).iloc[0]
+        res = model.forecast(as_of.strftime("%Y-%m-%d"))
+        assert res["pdv_vol"] == pytest.approx(k * p, rel=1e-10)
+        assert res["diffusion_scale"] == pytest.approx(k, rel=1e-10)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 8. compare_covid_2020 / compare over a date range
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(scope="module")
+def frame():
+    model = _build_regime_pdv(r2_fraction=0.25, n_days=900, seed=7)
+    dates = model._features.index
+    df = model.compare_covid_2020(start=dates[600].strftime("%Y-%m-%d"),
+                                  end=dates[760].strftime("%Y-%m-%d"))
+    return model, df
+
+
 class TestCompareDateRange:
 
-    def _model_covering_2020(self) -> RegimePDV:
-        """Build a model whose features span 2010 → 2021 so 2020 is covered."""
-        return _build_regime_pdv(r2_fraction=0.25, n_days=2800, seed=7)
-
-    def test_returns_dataframe(self):
-        model = self._model_covering_2020()
-        dates = model._pdv._features.index
-        start = dates[2400].strftime("%Y-%m-%d")
-        end   = dates[2500].strftime("%Y-%m-%d")
-        df = model.compare_covid_2020(start=start, end=end)
-        assert isinstance(df, pd.DataFrame)
-
-    def test_has_required_columns(self):
-        model = self._model_covering_2020()
-        dates = model._pdv._features.index
-        start = dates[2400].strftime("%Y-%m-%d")
-        end   = dates[2500].strftime("%Y-%m-%d")
-        df = model.compare_covid_2020(start=start, end=end)
-        for col in ("regime", "pdv_vol", "jump_adj", "total_vol",
-                    "rv_actual_20d", "error_pdv", "error_jump", "improvement"):
+    def test_has_required_columns(self, frame):
+        _, df = frame
+        for col in ("regime", "pdv_vol", "jump_adj", "total_vol", "rv_next_1d",
+                    "rv_fwd_21d", "qlike_pdv", "qlike_jump", "se_pdv",
+                    "se_jump", "improvement"):
             assert col in df.columns, f"Missing column: {col}"
 
-    def test_r2_days_have_nonneg_jump_adj(self):
-        model = self._model_covering_2020()
-        dates = model._pdv._features.index
-        start = dates[2200].strftime("%Y-%m-%d")
-        end   = dates[2400].strftime("%Y-%m-%d")
-        df = model.compare_covid_2020(start=start, end=end)
-        r2_rows = df[df["regime"] == "VOMMA_ACTIVE"]
-        if len(r2_rows) > 0:
-            assert (r2_rows["jump_adj"] >= 0).all()
+    def test_r2_days_have_positive_jump_adj_and_others_zero(self, frame):
+        _, df = frame
+        r2 = df[df["regime"] == "VOMMA_ACTIVE"]
+        assert len(r2) > 0 and (r2["jump_adj"] > 0).all()
+        assert (df[df["regime"] != "VOMMA_ACTIVE"]["jump_adj"] == 0.0).all()
 
-    def test_non_r2_days_have_zero_jump_adj(self):
-        model = self._model_covering_2020()
-        dates = model._pdv._features.index
-        start = dates[2200].strftime("%Y-%m-%d")
-        end   = dates[2400].strftime("%Y-%m-%d")
-        df = model.compare_covid_2020(start=start, end=end)
-        non_r2 = df[df["regime"] != "VOMMA_ACTIVE"]
-        assert (non_r2["jump_adj"] == 0.0).all()
+    def test_scored_against_the_next_days_return(self, frame):
+        """Pre-C22 the 'actual' was the BACKWARD 20-day RV of the same day."""
+        model, df = frame
+        t = df.index[40]
+        nxt = model._log_returns.shift(-1).loc[t]
+        x = ANNUALISE * nxt ** 2
+        row = df.loc[t]
+        assert row["rv_next_1d"] == pytest.approx(abs(nxt) * np.sqrt(ANNUALISE))
+        assert row["qlike_pdv"] == pytest.approx(x / row["pdv_vol"] ** 2 + np.log(row["pdv_vol"] ** 2))
+        assert row["improvement"] == pytest.approx(row["qlike_pdv"] - row["qlike_jump"])
+
+    def test_forecasts_do_not_use_future_returns(self, frame):
+        model, df = frame
+        end = df.index[-1]
+        r = model._log_returns.copy()
+        r[r.index > end] *= 10
+        m2 = RegimePDV.from_data(r, model._regime_labels)
+        df2 = m2.compare_covid_2020(start=str(df.index[0].date()), end=str(end.date()))
+        pd.testing.assert_series_equal(df["total_vol"], df2["total_vol"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -649,31 +586,61 @@ class TestCompareDateRange:
 class TestZeroLookAhead:
 
     def test_calibration_uses_no_future_r2_data(self):
-        """
-        Mark the last 100 days all as R2, then request calibration for
-        the day JUST BEFORE those 100 days. The calibrated params must
-        not depend on those future R2 days at all.
-        """
-        model = _build_regime_pdv(r2_fraction=0.20, n_days=500)
+        model = _build_regime_pdv(r2_fraction=0.30, n_days=600)
         dates = model._regime_labels.index
-        cutoff_idx = 400
-
-        # Override: clear all R2 on and after cutoff
+        cutoff_idx = 450
         model._regime_labels.iloc[cutoff_idx:, 0] = 1
-
         cutoff_date = dates[cutoff_idx].strftime("%Y-%m-%d")
         params_before = model.calibrate_jump(cutoff_date)
-
-        # Now add many R2 days AFTER the cutoff — should not affect params
         model._regime_labels.iloc[cutoff_idx + 1:, 0] = 2
-        # Clear cache to force re-evaluation
         model._jump_cache.clear()
         params_after = model.calibrate_jump(cutoff_date)
+        assert (params_before.lam, params_before.mu_j, params_before.sigma_j) == \
+               (params_after.lam, params_after.mu_j, params_after.sigma_j)
 
-        # The resulting params should be identical since we only look at < cutoff
-        assert params_before.lam == params_after.lam
-        assert params_before.mu_j == params_after.mu_j
-        assert params_before.sigma_j == params_after.sigma_j
+    def test_future_returns_cannot_move_the_calibration(self, tmp_path):
+        """Poison: ×10 every return on/after as_of and rebuild the pickled
+        PDVModel from the poisoned history. Pre-C22 the full-sample pickle
+        coefficients moved and so did the 'zero look-ahead' calibration."""
+        r = _make_returns(700, seed=3)
+        lbl = _make_regime_labels(r.index, r2_fraction=0.4, seed=3)
+        lbl.to_parquet(tmp_path / "lbl.parquet")
+        as_of = r.index[550]
+        poisoned = r.copy()
+        poisoned[poisoned.index >= as_of] *= 10
+        out = []
+        for name, series in (("clean", r), ("poison", poisoned)):
+            PDVModel().fit(series).save(str(tmp_path / f"{name}.pkl"))
+            m = RegimePDV(tmp_path / f"{name}.pkl", tmp_path / "lbl.parquet").load()
+            p = m.calibrate_jump(as_of.strftime("%Y-%m-%d"))
+            out.append((p.lam, p.mu_j, p.sigma_j))
+        assert out[0] == out[1]
+
+    def test_diffusion_vol_for_r_t_ignores_r_t(self):
+        """σ_d for the return of day t is the forecast made at t−1. Pre-C22 it
+        used the features AT t, so a big r_t inflated its own diffusion vol."""
+        model = _build_regime_pdv(r2_fraction=0.5, n_days=600)
+        r = model._log_returns
+        lbl = model._regime_labels.copy()
+        as_of = r.index[-1].strftime("%Y-%m-%d")
+        k = 500
+        lbl.iloc[k - 1, 0] = 2            # day k is in the sample
+        lbl.iloc[k, 0] = 2                # and so is day k+1
+        base = RegimePDV.from_data(r, lbl)
+        shocked_r = r.copy()
+        shocked_r.iloc[k] = -0.09
+        shocked = RegimePDV.from_data(shocked_r, lbl)
+        # use the same diffusion fit for both (isolate the timing question)
+        shocked._diffusion_cache[as_of] = dict(base._diffusion(as_of))
+        shocked._diffusion_cache[as_of]["p"] = base._diffusion(as_of)["model"].predict(
+            shocked._features[["sigma1", "sigma2", "lev"]])
+        _, sd0, _, d0 = base._get_r2_data(as_of)
+        _, sd1, _, d1 = shocked._get_r2_data(as_of)
+        s0 = pd.Series(sd0, index=d0)
+        s1 = pd.Series(sd1, index=d1)
+        day_k, day_k1 = r.index[k], r.index[k + 1]
+        assert s1.loc[day_k] == s0.loc[day_k]          # σ_d,k does not see r_k
+        assert s1.loc[day_k1] > 1.5 * s0.loc[day_k1]   # σ_d,k+1 does
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -683,63 +650,51 @@ class TestZeroLookAhead:
 from joint_vol_calibration.signals.regime_pdv import PDV_MODEL_PATH, REGIME_LBL_PATH
 
 
+@pytest.fixture(scope="module")
+def integration_model():
+    m = RegimePDV()
+    m.load()
+    return m
+
+
 @pytest.mark.skipif(
     not (PDV_MODEL_PATH.exists() and REGIME_LBL_PATH.exists()),
     reason="Saved PDV model / regime labels not found — skipping integration test",
 )
 class TestIntegration:
 
-    @pytest.fixture(scope="class")
-    def model(self):
-        m = RegimePDV()
-        m.load()
-        return m
+    def test_load_succeeds(self, integration_model):
+        assert integration_model.is_loaded
+        assert integration_model._log_returns is not None
+        assert integration_model._regime_labels is not None
 
-    def test_load_succeeds(self, model):
-        assert model.is_loaded
-        assert model._pdv is not None
-        assert model._regime_labels is not None
-
-    def test_forecast_2026_03_24(self, model):
-        result = model.forecast("2026-03-24")
-        assert result["pdv_vol"] > 0.05, "PDV vol should be > 5% in 2026"
+    def test_forecast_2026_03_24(self, integration_model):
+        result = integration_model.forecast("2026-03-24")
+        assert result["feature_date"] == "2026-03-24"
+        assert result["stale"] is False
+        assert result["pdv_vol"] > 0.05
         assert result["regime"] in {"LONG_GAMMA", "SHORT_GAMMA", "VOMMA_ACTIVE"}
         assert result["total_vol"] >= result["pdv_vol"]
 
-    def test_covid_crash_r2(self, model):
+    def test_covid_crash_r2(self, integration_model):
         """2020-03-16 (VIX=82, VVIX=207) must be classified as VOMMA_ACTIVE."""
-        result = model.forecast("2020-03-16")
-        assert result["regime"] == "VOMMA_ACTIVE", (
-            f"COVID crash day must be R2, got {result['regime']}"
-        )
-        assert result["jump_adj"] >= 0.0
-
-    def test_tail_params_in_expected_range(self, model):
-        """
-        Tail-calibrated params on 15 years of data should give crash-like values.
-        λ < 20/yr and σ_j > 0.005 (0.5% per jump), not the λ=50 tiny-jump collapse.
-        """
-        params = model.calibrate_jump_tail("2026-03-24")
-        assert params.lam <= 20.0, (
-            f"Tail λ={params.lam:.2f} hit the 50/yr ceiling — tail filter not working"
-        )
-        assert params.sigma_j >= 0.005, "σ_j should be at least 0.5% for crash jumps"
-
-    def test_tail_jump_adj_materially_larger_than_full(self, model):
-        """
-        On 2020-03-16 (COVID crash), tail-calibrated jump_adj should be
-        materially larger than the previous 0.16pp produced by full-R2 MLE.
-        """
-        result = model.forecast("2020-03-16")
+        result = integration_model.forecast("2020-03-16")
         assert result["regime"] == "VOMMA_ACTIVE"
-        # Old full-R2 result was ~0.16pp. Tail should do better.
-        # We allow zero (if tail falls back) but never negative.
-        assert result["jump_adj"] >= 0.0, "jump_adj must be non-negative"
-        # If tail calibration actually fired (lam > 0), the jump should be > 0.001
-        if result["lambda"] > 0:
-            assert result["jump_adj"] > 0.001, (
-                f"jump_adj={result['jump_adj']:.4f} should be > 0.001 on COVID crash"
-            )
+        assert result["lambda"] > 0 and result["jump_adj"] > 0
+
+    def test_jump_mle_is_interior(self, integration_model):
+        """Pre-C22 both fits ended ON their λ bound (20 and 50/yr) and the
+        old test restated the bounds. No parameter may sit within 1% of a
+        bound now."""
+        p = integration_model.calibrate_jump("2026-03-24")
+        assert p.bound_active == ()
+        for v, (lo, hi) in zip((p.lam, p.mu_j, p.sigma_j), _BOUNDS_FULL):
+            assert lo + 0.01 * (hi - lo) < v < hi - 0.01 * (hi - lo)
+
+    def test_forecast_beyond_the_data_is_refused(self, integration_model):
+        last = integration_model._log_returns.index[-1]
+        with pytest.raises(ValueError, match="business days old"):
+            integration_model.forecast((last + pd.offsets.BDay(30)).strftime("%Y-%m-%d"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -767,10 +722,8 @@ def _make_4f_df(n: int = 80, seed: int = 0) -> pd.DataFrame:
 class TestPDVLinear4F:
 
     def test_predict_before_fit_raises(self):
-        m = PDVLinear4F()
-        X = _make_4f_df()
         with pytest.raises(RuntimeError, match="not fitted"):
-            m.predict(X)
+            PDVLinear4F().predict(_make_4f_df())
 
     def test_fit_returns_self(self):
         m = PDVLinear4F()
@@ -781,155 +734,112 @@ class TestPDVLinear4F:
     def test_predict_returns_series_with_correct_index(self):
         X = _make_4f_df()
         y = pd.Series(np.random.default_rng(2).uniform(0.1, 0.4, len(X)), index=X.index)
-        m = PDVLinear4F().fit(X, y)
-        pred = m.predict(X)
+        pred = PDVLinear4F().fit(X, y).predict(X)
         assert isinstance(pred, pd.Series)
         assert list(pred.index) == list(X.index)
 
     def test_predict_clips_to_1e4_minimum(self):
-        """Negative fitted values must be clipped to 1e-4."""
         X = _make_4f_df(n=20)
-        # Target: all very negative → OLS will predict negative
         y = pd.Series(np.full(20, -1.0), index=X.index)
-        m = PDVLinear4F().fit(X, y)
-        pred = m.predict(X)
-        assert (pred >= 1e-4).all(), "All predictions must be >= 1e-4"
+        assert (PDVLinear4F().fit(X, y).predict(X) >= 1e-4).all()
 
     def test_coef_has_4_elements(self):
         X = _make_4f_df()
         y = pd.Series(np.random.default_rng(3).uniform(0.1, 0.4, len(X)), index=X.index)
         m = PDVLinear4F().fit(X, y)
-        assert m.coef_ is not None
-        assert len(m.coef_) == 4, f"Expected 4 coefficients, got {len(m.coef_)}"
+        assert m.coef_ is not None and len(m.coef_) == 4
 
     def test_perfect_linear_fit(self):
-        """If y = 0.5*sigma1 + 0.3*sigma2 + 0.1*lev + 0.2*vix + 0.01,
-        the model should recover those coefficients and predict perfectly."""
         X = _make_4f_df(n=200, seed=7)
-        y = (
-            0.5 * X["sigma1"]
-            + 0.3 * X["sigma2"]
-            + 0.1 * X["lev"]
-            + 0.2 * X["vix"]
-            + 0.01
-        )
-        m = PDVLinear4F().fit(X, y)
-        pred = m.predict(X)
-        np.testing.assert_allclose(pred.values, y.values, atol=1e-6,
-                                   err_msg="Perfect linear data: prediction should match exactly")
+        y = (0.5 * X["sigma1"] + 0.3 * X["sigma2"] + 0.1 * X["lev"]
+             + 0.2 * X["vix"] + 0.01)
+        pred = PDVLinear4F().fit(X, y).predict(X)
+        np.testing.assert_allclose(pred.values, y.values, atol=1e-6)
 
     def test_repr_fitted(self):
         X = _make_4f_df()
         y = pd.Series(np.random.default_rng(4).uniform(0.1, 0.4, len(X)), index=X.index)
-        m = PDVLinear4F().fit(X, y)
-        r = repr(m)
-        assert "PDVLinear4F" in r
-        assert "sigma1" in r
-        assert "vix" in r
+        r = repr(PDVLinear4F().fit(X, y))
+        assert "PDVLinear4F" in r and "sigma1" in r and "vix" in r
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 12. compute_bns_ratio
+# 12. daily_jump_test (replaces the single-pair "BN-S ratio")
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestComputeBnsRatio:
+class TestDailyJumpTest:
 
-    def test_returns_series(self):
-        model = _build_regime_pdv(n_days=200)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        result = model.compute_bns_ratio(as_of)
-        assert isinstance(result, pd.Series)
+    def test_critical_value_is_deterministic_and_above_gaussian(self):
+        c = jump_test_critical_value(20, 0.01)
+        assert c == jump_test_critical_value(20, 0.01)
+        assert 2.576 < c < 3.2       # estimated scale fattens the tails
 
-    def test_values_in_0_1(self):
-        model = _build_regime_pdv(n_days=200)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        result = model.compute_bns_ratio(as_of)
-        assert (result >= 0.0).all() and (result <= 1.0).all(), (
-            f"BNS ratio must be in [0,1]; got range [{result.min():.3f}, {result.max():.3f}]"
-        )
+    def test_size_under_iid_gaussian_null(self):
+        """The old ratio flagged 26.7% of pure-diffusion days."""
+        rng = np.random.default_rng(123)
+        r = pd.Series(rng.normal(0, 0.01, 100_000))
+        rate = daily_jump_test(r, alpha=0.01)["jump"].mean()
+        assert 0.008 < rate < 0.012
 
-    def test_zero_lookahead_no_dates_on_or_after_as_of(self):
-        """All returned dates must be strictly before as_of_date."""
+    def test_size_under_garch_null_within_twice_alpha(self):
+        rng = np.random.default_rng(321)
+        n = 50_000
+        s2 = np.empty(n)
+        x = np.empty(n)
+        s2[0] = 1e-4
+        for t in range(n):
+            if t:
+                s2[t] = 2e-6 + 0.09 * x[t - 1] ** 2 + 0.89 * s2[t - 1]
+            x[t] = rng.normal(0, np.sqrt(s2[t]))
+        rate = daily_jump_test(pd.Series(x), alpha=0.01)["jump"].mean()
+        assert 0.005 < rate < 0.02
+
+    def test_eight_sigma_return_is_flagged(self):
+        rng = np.random.default_rng(9)
+        r = pd.Series(rng.normal(0, 0.01, 300))
+        r.iloc[200] = -0.08
+        out = daily_jump_test(r)
+        assert bool(out["jump"].iloc[200])
+        assert out["stat"].iloc[200] < -out["crit"].iloc[200]
+
+    def test_statistic_is_causal(self):
+        """L_t uses r_t and returns strictly before t only."""
+        rng = np.random.default_rng(10)
+        r = pd.Series(rng.normal(0, 0.01, 300))
+        a = daily_jump_test(r)
+        r2 = r.copy()
+        r2.iloc[151:] *= 5
+        b = daily_jump_test(r2)
+        pd.testing.assert_frame_equal(a.iloc[:151], b.iloc[:151])
+        r3 = r.copy()
+        r3.iloc[150] *= 5           # r_t itself changes only the numerator
+        c = daily_jump_test(r3)
+        assert c["sigma_local"].iloc[150] == a["sigma_local"].iloc[150]
+
+    def test_flags_strictly_before_as_of(self):
         model = _build_regime_pdv(n_days=300)
-        dates = model._regime_labels.index
-        # Use a mid-series date
-        as_of = dates[150].strftime("%Y-%m-%d")
-        result = model.compute_bns_ratio(as_of)
-        cutoff = pd.to_datetime(as_of)
-        assert (result.index < cutoff).all(), (
-            "BNS ratio must not include data on or after as_of_date"
-        )
+        as_of = model._regime_labels.index[150]
+        flags = model.compute_jump_flags(as_of.strftime("%Y-%m-%d"))
+        assert (flags.index < as_of).all()
 
     def test_requires_loaded(self):
-        """compute_bns_ratio raises RuntimeError when model not loaded."""
         model = RegimePDV(
             pdv_model_path=Path("/nonexistent/pdv.pkl"),
             regime_labels_path=Path("/nonexistent/lbl.parquet"),
         )
         with pytest.raises(RuntimeError, match="load"):
-            model.compute_bns_ratio("2022-01-01")
-
-    def test_large_jump_day_high_ratio(self):
-        """A day with |r_t| >> |r_prev| should have a ratio close to 1.
-
-        BNS at position i:
-          r_curr[i] = r_lag1.shift(-1).iloc[i] = r_lag1.iloc[i+1]
-          r_prev[i] = r_lag1.iloc[i]
-        Set r_lag1[50]=0.0001 (tiny prev), r_lag1[51]=0.15 (large current).
-        Then at date feats.index[50]: BV = (π/2)*0.15*0.0001 << RV = 0.15² → ratio ≈ 0.999.
-        Use date-based lookup since dropna() removes position 0 (r_prev=NaN).
-        """
-        model = _build_regime_pdv(n_days=100)
-        feats = model._pdv._features.copy()
-        feats.iloc[50, feats.columns.get_loc("r_lag1")] = 0.0001   # prev tiny
-        feats.iloc[51, feats.columns.get_loc("r_lag1")] = 0.15     # current large
-        model._pdv._features = feats
-
-        target_date = feats.index[50]  # the date we expect a high ratio
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-        result = model.compute_bns_ratio(as_of)
-
-        assert target_date in result.index, (
-            f"Date {target_date} not found in BNS result index after dropna()"
-        )
-        assert result.loc[target_date] > 0.90, (
-            f"Large jump day should have BNS ratio > 0.90, got {result.loc[target_date]:.3f}"
-        )
+            model.compute_jump_flags("2022-01-01")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 13. calibrate_jump_tail — BNS union filter
+# 13. calibrate_jump_tail — test level
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestCalibrateJumpTailBNS:
+class TestCalibrateJumpTailAlpha:
 
-    def test_bns_threshold_cache_key_distinct(self):
-        """Different bns_threshold values must use different cache entries."""
-        model = _build_regime_pdv_with_crash(n_days=600)
-        dates = model._regime_labels.index
-        as_of = dates[-1].strftime("%Y-%m-%d")
-
-        p1 = model.calibrate_jump_tail(as_of, bns_threshold=0.3)
-        p2 = model.calibrate_jump_tail(as_of, bns_threshold=0.5)
-        # Each call generates a different cache key
-        assert len(model._jump_tail_cache) >= 2
-
-    def test_bns_zero_threshold_selects_more_days(self):
-        """bns_threshold=0.0 should union-select >= as many days as default threshold."""
-        model = _build_regime_pdv_with_crash(n_days=600, n_crash_days=30)
-        dates  = model._regime_labels.index
-        as_of  = dates[-1].strftime("%Y-%m-%d")
-
-        # Run tail calibration with very tight bns threshold (selects many bns days)
-        p_tight = model.calibrate_jump_tail(as_of, bns_threshold=0.0)
-        # Run with strict bns threshold (fewer bns days selected)
-        p_strict = model.calibrate_jump_tail(as_of, bns_threshold=0.99)
-        # Both must be valid MertonJumpParams
-        assert isinstance(p_tight, MertonJumpParams)
-        assert isinstance(p_strict, MertonJumpParams)
-        # With bns_threshold=0 all days pass bns filter, so n_r2_days should be >= strict
-        assert p_tight.n_r2_days >= p_strict.n_r2_days
-
+    def test_smaller_alpha_flags_fewer_days(self):
+        model = _build_regime_pdv(r2_fraction=0.5, n_days=900, jump_prob=0.06)
+        as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
+        loose = model.compute_jump_flags(as_of, alpha=0.05)["jump"].sum()
+        strict = model.compute_jump_flags(as_of, alpha=0.001)["jump"].sum()
+        assert strict < loose
