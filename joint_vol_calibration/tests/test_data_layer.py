@@ -8,8 +8,10 @@ which opens the shipped file READ-ONLY. Clocks are frozen by monkeypatching
 ``database._utcnow``; Yahoo and Cboe are replaced by in-process fakes or by
 captured fixtures (tests/fixtures/cboe_*). No test touches the network.
 """
+import ast
 import importlib.util
 import logging
+import pickle
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -321,6 +323,19 @@ class TestTbillUnits:
         con.close()
         assert disc == pytest.approx(0.04)
         assert rate == pytest.approx(0.0407620, abs=1e-7)
+
+    def test_backfill_guard_admits_march_2020_but_not_unit_errors(self):
+        mod = _load_script("backfill_tbill_history")
+        rates = pd.DataFrame({"date": ["a", "b", "c", "d"], "rate": [-0.00105, 0.05, 0.30, -0.02]})
+        assert mod.out_of_range(rates)["date"].tolist() == ["c", "d"]
+        # The backtest window comes from config, not a second literal.
+        tree = ast.parse((REPO / "scripts" / "backfill_tbill_history.py").read_text())
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                    and n.module == "joint_vol_calibration.config" for a in n.names}
+        assigned = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
+                    if isinstance(t, ast.Name)}
+        assert {"BT_START", "BT_END"} <= imported and not {"BT_START", "BT_END"} & assigned
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Download windows (data-daily-refresh-drops-current-session)
@@ -774,3 +789,55 @@ class TestDatesAndConfig:
 # Provenance backfill script (data-provenance-stale-chain-fits)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _load_script(name):
+    spec = importlib.util.spec_from_file_location(f"{name}_under_test", REPO / "scripts" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestProvenanceBackfill:
+    PARAMS = {"kappa": 2.0, "theta": 0.05, "sigma": 0.4, "rho": -0.7, "v0": 0.02}
+    SNAPS = ["2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-09-11"]
+
+    def _write(self, d, date, **extra):
+        with open(d / f"joint_cal_{date}.pkl", "wb") as f:
+            pickle.dump({"params": dict(self.PARAMS), "as_of_date": date, **extra}, f)
+
+    def _bytes(self, d):
+        return {p.name: p.read_bytes() for p in sorted(d.glob("*.pkl"))}
+
+    def _read(self, d, date):
+        with open(d / f"joint_cal_{date}.pkl", "rb") as f:
+            return pickle.load(f)
+
+    def test_marks_stale_chains_never_overwrites_and_is_idempotent(self, tmp_path):
+        mod = _load_script("backfill_calibration_provenance")
+        d = tmp_path / "cal"
+        d.mkdir()
+        self._write(d, "2026-05-31")                                       # legacy showcase (a Sunday)
+        self._write(d, "2026-06-23", n_spx_options=54, n_vix_tenors=4)
+        self._write(d, "2026-09-04", spot_date="2026-09-04", n_spx_options=40, n_vix_tenors=4)
+        # a live-recorded fit, shaped like the real 09-11 pickle (no `provenance` key)
+        self._write(d, "2026-09-11", spot_date="2026-09-11", spx_snapshot_date="2026-09-11",
+                    n_spx_options=9, n_vix_tenors=4, feller_state="PASS", feller_margin=0.1,
+                    pinned_params=[])
+        untouched = self._bytes(d)["joint_cal_2026-09-11.pkl"]
+
+        assert mod.backfill(apply=True, cal_dir=d, snapshots=self.SNAPS) == 3
+        after_first = self._bytes(d)
+        assert after_first["joint_cal_2026-09-11.pkl"] == untouched
+        assert "provenance" not in self._read(d, "2026-09-04")             # its counts were live
+
+        showcase = self._read(d, "2026-05-31")
+        assert (showcase["spx_snapshot_date"], showcase["stale_spx_chain"]) == ("2026-05-29", False)
+        assert showcase["n_spx_options"] is None
+        jun23 = self._read(d, "2026-06-23")
+        assert (jun23["spx_snapshot_date"], jun23["spx_chain_age_days"], jun23["stale_spx_chain"]) == \
+            ("2026-06-18", 5, True)
+        sep04 = self._read(d, "2026-09-04")
+        assert (sep04["spx_snapshot_date"], sep04["spx_chain_age_days"]) == ("2026-06-18", 78)
+        assert sep04["n_spx_options"] == 40                                 # recorded value kept
+
+        assert mod.backfill(apply=True, cal_dir=d, snapshots=self.SNAPS) == 0
+        assert self._bytes(d) == after_first
