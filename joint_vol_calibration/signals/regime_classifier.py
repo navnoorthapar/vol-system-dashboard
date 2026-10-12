@@ -1691,6 +1691,14 @@ class HMMRegimeClassifier:
     0.53 when the rest of 2020 was in the input.) The filter starts from the
     fitted start distribution at the first row of X.
 
+    Fitting: EM from n_init starts (seeds random_state, random_state+1, …),
+    keeping the highest log-likelihood. A single start (pre-C22) often
+    converged to a local optimum with two states on the same means (2010-2019
+    features, seed 42: two states at VIX 0.141/0.142, log-lik 14,129 vs
+    15,271 with 5 starts), leaving only two distinct "regimes". Even with
+    distinct states the filtered labels match the rule labels on only ~28%
+    of 2020-2025 sessions: the HMM finds its own clusters.
+
     State → regime mapping (follows the RULE semantics)
     ---------------------------------------------------
       R2 (VOMMA_ACTIVE) : the state with the highest mean vvix
@@ -1717,6 +1725,7 @@ class HMMRegimeClassifier:
         n_components: int = 3,
         n_iter: int = 200,
         random_state: int = RANDOM_SEED,
+        n_init: int = 5,
     ):
         if n_components != 3:
             raise ValueError("HMMRegimeClassifier maps states onto R0/R1/R2 and "
@@ -1724,6 +1733,8 @@ class HMMRegimeClassifier:
         self.n_components  = n_components
         self.n_iter        = n_iter
         self.random_state  = random_state
+        self.n_init        = max(int(n_init), 1)
+        self.log_likelihood_: Optional[float] = None
         self._model        = None
         self._state_to_regime: Optional[Dict[int, int]] = None
         self.is_fitted: bool = False
@@ -1742,14 +1753,21 @@ class HMMRegimeClassifier:
 
         Xm = X[self.HMM_FEATURES].dropna().values.astype(float)
 
-        model = GaussianHMM(
-            n_components=self.n_components,
-            covariance_type="full",
-            n_iter=self.n_iter,
-            random_state=self.random_state,
-        )
-        model.fit(Xm)
+        best, best_ll = None, -np.inf
+        for k in range(self.n_init):
+            model = GaussianHMM(
+                n_components=self.n_components,
+                covariance_type="full",
+                n_iter=self.n_iter,
+                random_state=self.random_state + k,
+            )
+            model.fit(Xm)
+            ll = float(model.score(Xm))
+            if ll > best_ll:
+                best, best_ll = model, ll
+        model = best
         self._model = model
+        self.log_likelihood_ = best_ll
 
         col = {f: i for i, f in enumerate(self.HMM_FEATURES)}
         means = np.asarray(model.means_, dtype=float)

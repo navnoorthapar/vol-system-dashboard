@@ -919,6 +919,25 @@ class TestHMMRegimeClassifier:
         with pytest.raises(ValueError):
             HMMRegimeClassifier(n_components=2)
 
+    def test_multi_start_fit_separates_distinct_clusters(self):
+        """Three well-separated clusters: single-start EM (seed 42) merges two
+        of them and splits the third; the best of n_init starts separates all
+        three, and the mapping names them by rule semantics."""
+        rng = np.random.default_rng(0)
+        state = np.repeat([1, 0, 2, 1, 0, 2, 1, 0, 2], 100)
+        mu = {0: (0.20, 0.95, 0.002, 0.85),      # trailing RV > IV  → R0
+              1: (0.13, 0.85, 0.015, 1.45),      # calm, IV ≥ RV     → R1
+              2: (0.30, 1.35, -0.010, 1.20)}     # vol-of-vol spike  → R2
+        sd = (0.01, 0.03, 0.002, 0.04)
+        X = pd.DataFrame([[rng.normal(m, s_) for m, s_ in zip(mu[k], sd)] for k in state],
+                         columns=HMMRegimeClassifier.HMM_FEATURES,
+                         index=pd.bdate_range("2012-01-02", periods=len(state)))
+        single = HMMRegimeClassifier(n_iter=100, n_init=1).fit(X)
+        multi = HMMRegimeClassifier(n_iter=100).fit(X)
+        assert multi.log_likelihood_ > single.log_likelihood_
+        pred = multi.predict(X)
+        np.testing.assert_array_equal(pred, state)
+
 
 # ── Label ontology noise floor (why the classifier was demoted) ───────────────
 
