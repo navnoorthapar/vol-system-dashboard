@@ -36,7 +36,8 @@ Tables:
                             futures) plus ^VVIX
   vix_futures_daily       — VX futures daily settlement/OHLC per contract,
                             keyed (date, expiry_date)
-  vix_futures_settlements — VX final settlement values (Cboe VRO)
+  vix_futures_settlements — VX final settlement values (monthly contracts:
+                            expiry-day settle, Cboe VRO before mid-2013)
   options_snapshots       — SPX/VIX option chains keyed by quote session
   tbill_rates             — ^IRX 13-week bill: continuously compounded rate
                             plus the raw bank-discount yield
@@ -473,8 +474,9 @@ _TABLE_DDL = {
         source      TEXT              -- 'cboe' | 'yfinance'; NULL = unrecorded (pre-C22)
     )""",
     "vix_futures_settlements": """
-    -- VX final settlement values (Cboe VRO = special opening quotation of VIX
-    -- on the expiry morning). One row per expiry, weeklies included.
+    -- VX final settlement values: the special opening quotation of VIX on the
+    -- expiry morning, from the contract's own expiry-day settle (Cboe's VRO
+    -- index where no contract file exists). One row per expiry.
     CREATE TABLE IF NOT EXISTS vix_futures_settlements (
         settlement_date  TEXT NOT NULL,   -- the contract's expiry date
         expiry_month     TEXT NOT NULL,   -- YYYY-MM contract month
@@ -1232,9 +1234,10 @@ def insert_options_snapshot(df: pd.DataFrame, underlying: str) -> int:
     ----------
     df : DataFrame with columns matching options_snapshots (snapshot_date must
          be set and should be the NY session the quotes belong to). Optional
-         columns are filled: `root` from `contract_symbol` when that is an OCC
-         symbol (else ''), `settlement` from the root, `time_to_expiry` from
-         ``time_to_settlement``.
+         columns are filled: `root` from `contract_symbol` (or yfinance's
+         `contractSymbol`) when that is an OCC symbol (else ''), `settlement`
+         from the root, `time_to_expiry` from ``time_to_settlement`` — which
+         also replaces a supplied value wherever the settlement style is known.
     underlying : 'SPX' or 'VIX'
 
     The delete and the insert run in one transaction, so a re-run of the same
@@ -1265,9 +1268,21 @@ def insert_options_snapshot(df: pd.DataFrame, underlying: str) -> int:
     df["root"] = df["root"].fillna("").astype(str)
     if "settlement" not in df.columns:
         df["settlement"] = [settlement_for_root(r) for r in df["root"]]
-    if "time_to_expiry" not in df.columns or df["time_to_expiry"].isna().any():
-        tte = _tte_column(df)
-        df["time_to_expiry"] = df["time_to_expiry"].fillna(tte) if "time_to_expiry" in df.columns else tte
+    # time_to_expiry follows time_to_settlement(): computed where missing, and
+    # where the settlement style is known a writer's own value is replaced so
+    # the column never contradicts `settlement` (e.g. whole days for an AM
+    # contract overstate T by 6.5 hours).
+    tte = _tte_column(df)
+    if "time_to_expiry" not in df.columns:
+        df["time_to_expiry"] = tte
+    else:
+        given = pd.to_numeric(df["time_to_expiry"], errors="coerce")
+        known = df["settlement"].isin(["AM", "PM"])
+        off = known & ~np.isclose(given, tte, rtol=0.0, atol=1e-9)
+        if off.any():
+            logger.warning("%s snapshot: %d time_to_expiry value(s) recomputed from the AM/PM "
+                           "settlement time", und, int(off.sum()))
+        df["time_to_expiry"] = given.where(~known & given.notna(), tte)
 
     for snap in sorted(df["snapshot_date"].unique()):
         if not is_nyse_session(snap):

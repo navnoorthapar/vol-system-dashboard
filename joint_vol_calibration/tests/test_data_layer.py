@@ -247,6 +247,24 @@ class TestOptionSnapshots:
         assert calls.loc["SPX", "settlement"] == "AM" and calls.loc["SPXW", "settlement"] == "PM"
         assert calls.loc["SPXW", "time_to_expiry"] > calls.loc["SPX", "time_to_expiry"]
 
+    def test_supplied_whole_day_tte_is_replaced_where_settlement_is_known(self, tmp_db, caplog):
+        """cloud_refresh supplies (expiry - session).days/365 for every row; an AM row must not keep it."""
+        rows = [("2026-10-16", 7800.0, "C", "SPX", 59.7, 60.4), ("2026-10-16", 7800.0, "C", "", 59.7, 60.4)]
+        df = chain("2026-10-09", rows, time_to_expiry=7 / 365)
+        with caplog.at_level(logging.WARNING):
+            db.insert_options_snapshot(df, "SPX")
+        surf = db.get_options_surface("2026-10-09", "SPX").set_index("root")
+        assert surf.loc["SPX", "time_to_expiry"] == pytest.approx((7 * 1440 - 390) / 525_600)
+        assert surf.loc["", "time_to_expiry"] == pytest.approx(7 / 365)      # unknown root: kept
+        assert "1 time_to_expiry value(s) recomputed" in caplog.text
+
+    def test_yfinance_contract_symbol_column_is_understood(self, tmp_db):
+        df = chain("2026-10-09", [("2026-10-16", 7800.0, "C", "", 61.7, 62.0)]).drop(columns=["root"])
+        df["contractSymbol"] = "SPXW261016C07800000"
+        db.insert_options_snapshot(df, "SPX")
+        row = db.get_options_surface("2026-10-09", "SPX").iloc[0]
+        assert (row["root"], row["settlement"], row["contract_symbol"]) == ("SPXW", "PM", "SPXW261016C07800000")
+
     def test_repeated_key_in_one_chain_keeps_the_last(self, tmp_db, caplog):
         rows = self.ROWS + [("2026-10-16", 7800.0, "C", "SPX", 1.0, 2.0)]
         with caplog.at_level(logging.WARNING):
