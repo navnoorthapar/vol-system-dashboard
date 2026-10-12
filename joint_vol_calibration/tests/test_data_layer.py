@@ -20,7 +20,9 @@ import pandas as pd
 import pytest
 
 from joint_vol_calibration import config
+from joint_vol_calibration.data import cboe_downloader as cb
 from joint_vol_calibration.data import database as db
+from joint_vol_calibration.data import pipeline as pl
 from joint_vol_calibration.data import yf_downloader as yfd
 
 REPO = Path(__file__).resolve().parents[2]
@@ -344,7 +346,64 @@ class _Recorder:
         return _T()
 
 
+@pytest.fixture
+def offline_pipeline(tmp_db, monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(yfd.yf, "download", rec.download)
+    monkeypatch.setattr(yfd.yf, "Ticker", rec.ticker)
+    snaps = []
+
+    def no_cboe(*a, **k):
+        raise cb.requests.HTTPError("offline")
+    monkeypatch.setattr(cb, "download_vix_history", no_cboe)
+    monkeypatch.setattr(cb, "download_vix_term_structure_history", no_cboe)
+    vx_calls = []
+    monkeypatch.setattr(cb, "download_vix_futures_daily_history",
+                        lambda **k: vx_calls.append(k) or pd.DataFrame())
+    monkeypatch.setattr(cb, "download_vix_futures_settlements", lambda *a, **k: pd.DataFrame())
+    rec.vx_calls = vx_calls
+    monkeypatch.setattr(cb, "download_cboe_options_snapshot", lambda u, now=None: snaps.append(u) or pd.DataFrame())
+    monkeypatch.setattr(yfd, "snapshot_spx_options", lambda: snaps.append("yf-SPX") or pd.DataFrame())
+    monkeypatch.setattr(yfd, "snapshot_vix_options", lambda: snaps.append("yf-VIX") or pd.DataFrame())
+    return rec, snaps
+
+
 class TestDownloadWindows:
+    def test_evening_refresh_requests_the_session_that_just_closed(self, offline_pipeline, monkeypatch):
+        rec, snaps = offline_pipeline
+        freeze(monkeypatch, "2026-10-09T22:00:00Z")            # Friday 18:00 ET
+        pl.DataPipeline().daily_refresh()
+        assert {t for t, _ in rec.calls} == {"^GSPC", "^VIX", "^VIX9D ^VIX ^VIX3M ^VIX6M ^VVIX", "^IRX"}
+        for ticker, kw in rec.calls:
+            assert kw["end"] == "2026-10-10", f"{ticker}: the 10-09 session must be inside the exclusive end"
+            assert kw["start"] == "2026-09-29"
+        assert snaps == ["SPX", "yf-SPX", "VIX", "yf-VIX"]       # Cboe first, Yahoo fallback
+        assert rec.vx_calls == [{"start": "2026-09-29", "end": "2026-10-09"}]
+
+    def test_vx_refresh_fills_the_gap_since_the_last_stored_session(self, offline_pipeline, monkeypatch):
+        rec, _ = offline_pipeline
+        db.insert_vix_futures_daily(pd.DataFrame({"date": ["2026-08-14"], "expiry_date": ["2026-09-16"],
+                                                  "settle": [18.0]}))
+        freeze(monkeypatch, "2026-10-09T22:00:00Z")
+        pl.DataPipeline().daily_refresh()
+        assert rec.vx_calls == [{"start": "2026-08-14", "end": "2026-10-09"}]
+
+    def test_refresh_reaches_back_to_the_last_stored_session(self, offline_pipeline, monkeypatch):
+        rec, _ = offline_pipeline
+        db.insert_spx_ohlcv(spx_frame(["2026-06-17", "2026-06-18"]))
+        freeze(monkeypatch, "2026-10-09T22:00:00Z")
+        pl.DataPipeline().daily_refresh()
+        starts = {t: kw["start"] for t, kw in rec.calls}
+        assert starts["^GSPC"] == "2026-06-18"                  # not 2026-09-29: no silent gap
+        assert starts["^IRX"] == "2026-09-29"                   # empty table: the normal window
+
+    def test_intraday_refresh_stops_at_the_previous_session_and_skips_chains(self, offline_pipeline, monkeypatch):
+        rec, snaps = offline_pipeline
+        freeze(monkeypatch, "2026-10-09T15:00:00Z")            # Friday 11:00 ET
+        pl.DataPipeline().daily_refresh()
+        assert {kw["end"] for _, kw in rec.calls} == {"2026-10-09"}   # inclusive end 10-08
+        assert snaps == []
+
     @pytest.mark.parametrize("fn", [yfd.download_vix_index, yfd.download_tbill_rate,
                                     yfd.download_vix_term_structure])
     def test_default_end_is_the_last_closed_session(self, monkeypatch, fn):
@@ -353,6 +412,12 @@ class TestDownloadWindows:
         freeze(monkeypatch, "2026-10-11T12:00:00Z")            # Sunday
         fn(start="2026-10-01")
         assert rec.calls[0][1]["end"] == "2026-10-10"           # Friday 10-09 inclusive
+
+    def test_hist_end_none_means_last_closed_session(self, tmp_db, monkeypatch):
+        freeze(monkeypatch, "2026-10-11T12:00:00Z")
+        assert config.HIST_END is None
+        assert pl.DataPipeline().hist_end == "2026-10-09"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Validation hooks (data-no-cross-source-or-calendar-validation)
@@ -385,6 +450,26 @@ class TestValidationHooks:
         db.insert_vix_daily(vix.assign(source="yfinance"))
         db.insert_vix_term_structure(vix[["date", "close"]].assign(ticker="^VIX"))
 
+    def test_cross_check_flags_the_yahoo_bad_print_and_the_gap(self, tmp_db, monkeypatch, caplog):
+        self._store_yahoo_vix()
+        ref = cb.download_index_history.__wrapped__ if hasattr(cb.download_index_history, "__wrapped__") else None
+        monkeypatch.setattr(cb._SESSION, "get", lambda url, timeout=None: _FileResp(FIX / "cboe_VIX_History.csv"))
+        ref = cb.download_index_history("VIX").assign(ticker="^VIX")
+        with caplog.at_level(logging.WARNING):
+            res = db.cross_check_vix(ref)
+        mism = res[res["issue"] == "mismatch"]
+        assert set(mism["table"]) == {"vix_daily", "vix_term_structure"}
+        assert set(mism["date"]) == {"2026-02-06"}
+        assert mism["stored"].iloc[0] == pytest.approx(20.37) and mism["reference"].iloc[0] == pytest.approx(17.76)
+        gaps = res[res["issue"] == "missing_in_db"]
+        assert "2026-06-12" in set(gaps["date"])
+        assert "2026-01-19" not in set(res["date"])             # Cboe's MLK-day print is not a session
+        assert "20.37 vs 17.76" in caplog.text
+
+    def test_pipeline_does_not_ingest_cboe_holiday_prints(self):
+        df = pd.DataFrame({"date": ["2026-01-16", "2026-01-19", "2026-01-20"], "close": [1.0, 2.0, 3.0]})
+        assert pl._sessions_only(df, "t")["date"].tolist() == ["2026-01-16", "2026-01-20"]
+
     def test_upsert_keeps_a_session_the_source_dropped(self, tmp_db, caplog):
         dates = ["2026-09-21", "2026-09-22", "2026-09-23"]
         db.insert_spx_ohlcv(spx_frame(dates))
@@ -393,6 +478,14 @@ class TestValidationHooks:
         stored = db.get_spx_ohlcv("2026-09-30")["date"].dt.strftime("%Y-%m-%d").tolist()
         assert stored == dates
         assert "no longer returns 1 stored row" in caplog.text and "2026-09-22" in caplog.text
+
+
+class _FileResp:
+    def __init__(self, path):
+        self.text, self.status_code = Path(path).read_text(), 200
+
+    def raise_for_status(self):
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -547,6 +640,35 @@ class TestTermStructureTenors:
 # ══════════════════════════════════════════════════════════════════════════════
 # Cboe -> Yahoo fallbacks (data-cboe-downloader-broken, pipeline side)
 # ══════════════════════════════════════════════════════════════════════════════
+
+class TestPipelineFallbacks:
+    def test_vix_backfill_falls_back_to_yahoo_when_cboe_fails(self, tmp_db, monkeypatch):
+        def boom():
+            raise cb.requests.HTTPError("403")
+        monkeypatch.setattr(cb, "download_vix_history", boom)
+        yahoo = pd.DataFrame({"date": ["2020-01-02", "2020-01-03"], "open": 12.0, "high": 13.0,
+                              "low": 11.0, "close": [12.5, 14.0], "source": "yfinance"})
+        monkeypatch.setattr(yfd, "download_vix_index", lambda start, end: yahoo)
+        pipe = pl.DataPipeline(hist_start="2020-01-01", hist_end="2020-01-31")
+        assert pipe._load_vix_daily() == 2                     # was 0: the fallback was unreachable
+        assert db.get_vix_daily("2020-01-31")["close"].tolist() == [12.5, 14.0]
+
+    def test_snapshot_prefers_cboe_and_falls_back_to_yahoo(self, tmp_db, monkeypatch):
+        freeze(monkeypatch, "2026-10-09T22:00:00Z")
+        pipe = pl.DataPipeline()
+        cboe_chain = chain("2026-10-09", TestOptionSnapshots.ROWS, source="cboe")
+        monkeypatch.setattr(cb, "download_cboe_options_snapshot", lambda u, now=None: cboe_chain)
+        monkeypatch.setattr(yfd, "snapshot_spx_options", lambda: pytest.fail("Yahoo must not be called"))
+        assert pipe._snapshot_options("SPX") == 2
+
+        def down(u, now=None):
+            raise cb.requests.HTTPError("403")
+        yahoo_chain = chain("2026-10-09", TestOptionSnapshots.ROWS[:1], source="yfinance")
+        monkeypatch.setattr(cb, "download_cboe_options_snapshot", down)
+        monkeypatch.setattr(yfd, "snapshot_spx_options", lambda: yahoo_chain)
+        assert pipe._snapshot_options("SPX") == 1
+        assert set(db.get_options_surface("2026-10-09", "SPX")["source"]) == {"yfinance"}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Persistence (ops-db-not-persisted / data-daily-chains-discarded, data side)
