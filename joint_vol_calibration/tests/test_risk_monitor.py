@@ -1,35 +1,56 @@
 """
 test_risk_monitor.py — Test suite for C6: Second-Order Greeks Risk Monitor.
 
-Coverage (20 tests across 6 classes):
+Coverage:
   1. Analytical BS Greeks — shapes, signs, magnitudes
-  2. Vomma sign analysis — positive far-OTM, negative near-ATM
-  3. Volga numerical == Vomma analytical (BS cross-check)
-  4. QV convexity MC — non-negative, zero σ, monotone in σ and T
-  5. Greeks surface — shape, columns, value ranges
-  6. Flagging, persistence, RiskMonitor class
+  2. Vomma sign analysis — positive in the wings, negative near ATM
+  3. Vomma analytic vs central finite difference (same Greek, a.k.a. volga)
+  4. QV convexity — exact CIR closed form vs quadrature; MC cross-check
+  5. Greeks surface — every node vs an independent quad + brentq reference,
+     no well-posed node missing, drops recorded, columns and units
+  6. Vomma-instability measure — absolute, per node, scales with the shock
+  7. Persistence and provenance (parquet metadata), calibration-file entry
+     point and CLI
+  8. RiskMonitor class; torch-free import
 """
+
+import pickle
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import integrate, optimize
+from scipy.stats import norm
 
+from joint_vol_calibration.greeks import risk_monitor as rm
 from joint_vol_calibration.greeks.risk_monitor import (
+    GREEKS_UNITS,
+    MIN_OTM_PRICE_REL,
     RiskMonitor,
     _bs_delta,
     _bs_vanna,
     _bs_vega,
     _bs_volga_numerical,
     _bs_vomma,
+    _bs_vomma_numerical,
+    build_surface_from_calibration,
     compute_greeks_surface,
     flag_unstable_hedges,
+    load_greeks_surface,
+    model_iv_shock,
+    qv_variance_exact,
     save_greeks_surface,
     simulate_qv_convexity,
 )
+from joint_vol_calibration.config import ROOT_DIR
+from joint_vol_calibration.models.heston import characteristic_function
+from joint_vol_calibration.models.implied_vol import IV_NOT_CONVERGED, IV_OK
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
-# Calibrated 2026-03-24 Heston params
+# 2026-03-24 legacy fit (the one the published surface was built from)
 _PARAMS = {
     "kappa": 4.62, "theta": 0.0764, "sigma": 0.84, "rho": -0.99, "v0": 0.0561,
 }
@@ -38,7 +59,6 @@ _S, _r, _q = 6581.0, 0.045, 0.013
 # Small grid for fast surface tests
 _FAST_MATURITIES = np.array([30, 91]) / 365.0
 _FAST_STRIKES    = np.array([5800.0, 6200.0, 6581.0, 7000.0, 7400.0])
-_FAST_MC         = dict(mc_n_paths=500, mc_n_steps=30)
 
 
 def _make_surface() -> pd.DataFrame:
@@ -46,8 +66,56 @@ def _make_surface() -> pd.DataFrame:
     return compute_greeks_surface(
         S=_S, r=_r, q=_q, params=_PARAMS,
         strikes=_FAST_STRIKES, maturities=_FAST_MATURITIES,
-        verbose=False, **_FAST_MC,
+        verbose=False,
     )
+
+
+def _ref_otm_and_iv(S, K, T, r, q, p):
+    """
+    Independent reference for one node: Lewis formula by scipy.quad, then the
+    OTM option inverted with scipy brentq on the textbook BS formula.
+    Returns (undiscounted OTM price / F, implied vol or NaN).
+    """
+    F = S * np.exp((r - q) * T)
+    x = np.log(K / F)
+
+    def integrand(u):
+        cf = characteristic_function(np.array([u - 0.5j]), 1.0, T, 0.0, 0.0, **p)[0]
+        return np.real(np.exp(-1j * u * x) * cf) / (u * u + 0.25)
+
+    val, _ = integrate.quad(integrand, 0, np.inf, limit=2000, epsabs=1e-15, epsrel=1e-13)
+    c = 1.0 - np.exp(x / 2) / np.pi * val
+    otm = c if x >= 0 else c - (1.0 - np.exp(x))
+
+    def bs_otm(sig):
+        d1 = (-x + 0.5 * sig * sig * T) / (sig * np.sqrt(T))
+        d2 = d1 - sig * np.sqrt(T)
+        if x >= 0:
+            return norm.cdf(d1) - np.exp(x) * norm.cdf(d2)
+        return np.exp(x) * norm.cdf(-d2) - norm.cdf(-d1)
+
+    if otm <= 1e-13:
+        return otm, np.nan
+    iv = optimize.brentq(lambda s: bs_otm(s) - otm, 1e-4, 5.0, xtol=1e-14, rtol=1e-14)
+    return otm, iv
+
+
+def _cal_pickle(tmp_path, q="missing", name="joint_cal_2026-09-11.pkl"):
+    """A calibration pickle in the live format (2026-09-11 fit; q not recorded)."""
+    cal = {
+        "params": {"kappa": 4.999651331591191, "theta": 0.043135521895477605,
+                   "sigma": 0.6567535677361634, "rho": -0.9499997077161061,
+                   "v0": 0.010880541693622658},
+        "leg_losses": {"spx_iv_rmse": 0.2152171959941077},
+        "as_of_date": "2026-09-11", "spot_date": "2026-09-11", "run_date": "2026-09-11",
+        "S": 7656.97998046875, "r": 0.03913000106811523,
+    }
+    if q != "missing":
+        cal["q"] = q
+    path = tmp_path / name
+    with open(path, "wb") as f:
+        pickle.dump(cal, f)
+    return path
 
 
 # ── 1. Analytical BS Greeks ───────────────────────────────────────────────────
@@ -76,46 +144,34 @@ class TestAnalyticBsGreeks:
 
     def test_delta_atm_approx_half(self):
         """ATM call delta ≈ 0.5 (with small dividend adjustment)."""
-        S_ = np.array([100.0]); K_ = np.array([100.0])
-        T_ = np.array([0.25]);  r_ = np.array([0.05]); q_ = np.array([0.0])
-        s_ = np.array([0.25])
-        d  = _bs_delta(S_, K_, T_, r_, q_, s_)[0]
+        d = _bs_delta(np.array([100.0]), np.array([100.0]), np.array([0.25]),
+                      np.array([0.05]), np.array([0.0]), np.array([0.25]))[0]
         assert abs(d - 0.5) < 0.10, f"ATM delta {d:.4f} too far from 0.5"
 
     def test_itm_delta_greater_than_otm(self):
         """ITM call delta > OTM call delta (call delta monotone decreasing in K)."""
-        S_ = np.full(2, 100.0); T_ = np.full(2, 0.25)
-        r_ = np.full(2, 0.05);  q_ = np.full(2, 0.02)
-        s_ = np.full(2, 0.25)
-        K_itm = np.array([80.0]); K_otm = np.array([120.0])
-        d_itm = _bs_delta(np.array([100.0]), K_itm, np.array([0.25]),
-                          np.array([0.05]), np.array([0.02]), np.array([0.25]))[0]
-        d_otm = _bs_delta(np.array([100.0]), K_otm, np.array([0.25]),
-                          np.array([0.05]), np.array([0.02]), np.array([0.25]))[0]
+        args = (np.array([0.25]), np.array([0.05]), np.array([0.02]), np.array([0.25]))
+        d_itm = _bs_delta(np.array([100.0]), np.array([80.0]), *args)[0]
+        d_otm = _bs_delta(np.array([100.0]), np.array([120.0]), *args)[0]
         assert d_itm > d_otm, f"ITM delta {d_itm:.4f} must exceed OTM delta {d_otm:.4f}"
 
     def test_vanna_sign_otm_call(self):
         """OTM call (K > F): d2 < 0 → Vanna = -exp(-qT)·N'(d1)·d2/σ > 0."""
-        # K = 120 > F ≈ 100·exp(0.03·0.25) ≈ 100.75
-        S_ = np.array([100.0]); K_ = np.array([120.0])
-        T_ = np.array([0.25]);  r_ = np.array([0.05]); q_ = np.array([0.02])
-        s_ = np.array([0.25])
-        van = _bs_vanna(S_, K_, T_, r_, q_, s_)[0]
+        van = _bs_vanna(np.array([100.0]), np.array([120.0]), np.array([0.25]),
+                        np.array([0.05]), np.array([0.02]), np.array([0.25]))[0]
         assert van > 0, f"Vanna for OTM call must be positive, got {van:.6f}"
 
     def test_vanna_sign_itm_call(self):
         """Deep ITM call (K << F): d2 > 0 → Vanna < 0."""
-        S_ = np.array([100.0]); K_ = np.array([70.0])
-        T_ = np.array([0.25]);  r_ = np.array([0.05]); q_ = np.array([0.02])
-        s_ = np.array([0.25])
-        van = _bs_vanna(S_, K_, T_, r_, q_, s_)[0]
+        van = _bs_vanna(np.array([100.0]), np.array([70.0]), np.array([0.25]),
+                        np.array([0.05]), np.array([0.02]), np.array([0.25]))[0]
         assert van < 0, f"Vanna for deep ITM call must be negative, got {van:.6f}"
 
 
 # ── 2. Vomma Sign Analysis ────────────────────────────────────────────────────
 
 class TestVommaSign:
-    """Validate the key property: Vomma > 0 for far OTM/ITM calls."""
+    """Validate the key property: Vomma > 0 in both wings."""
 
     def _vomma(self, S, K, T, r, q, sigma):
         return _bs_vomma(
@@ -124,305 +180,379 @@ class TestVommaSign:
         )[0]
 
     def test_vomma_positive_deep_otm_call(self):
-        """Deep OTM call (K/F ≈ 1.25): d1 < 0, d2 < d1 → d1·d2 > 0 → Vomma > 0."""
-        # F ≈ 100, K = 130 (log_m ≈ +0.26)
         v = self._vomma(S=100, K=130, T=0.5, r=0.05, q=0.01, sigma=0.25)
         assert v > 0, f"Deep OTM call Vomma should be positive, got {v:.6f}"
 
     def test_vomma_positive_deep_itm_call(self):
-        """Deep ITM call (K/F ≈ 0.75): d1 >> 0, d2 >> 0 → d1·d2 > 0 → Vomma > 0."""
         v = self._vomma(S=100, K=75, T=0.5, r=0.05, q=0.01, sigma=0.25)
         assert v > 0, f"Deep ITM call Vomma should be positive, got {v:.6f}"
 
     def test_vomma_negative_near_atm(self):
-        """Near-ATM (K=F, short T): d1 > 0, d2 < 0 → d1·d2 < 0 → Vomma < 0.
-        This is expected and NOT a bug: ATM options are locally concave in vol."""
-        # ATM (K=S, r=q=0): d1=σ√T/2 > 0, d2=-σ√T/2 < 0
+        """Near-ATM (K=F): d1 > 0 > d2 → Vomma < 0 (locally concave in vol)."""
         v = self._vomma(S=100, K=100, T=0.10, r=0.0, q=0.0, sigma=0.20)
         assert v < 0, f"ATM call Vomma expected negative near ATM, got {v:.6f}"
 
     def test_vomma_full_surface_far_otm_positive(self):
-        """For the calibrated Heston surface, all far-OTM nodes have Vomma > 0."""
+        """The fast surface HAS far-OTM-call nodes (the old solver dropped or
+        mangled them) and all of them have Vomma > 0."""
         df = _make_surface()
         far_otm = df[df["log_moneyness"] > 0.10]
-        if len(far_otm) > 0:
-            assert (far_otm["vomma"] > 0).all(), (
-                f"Far-OTM nodes should have Vomma > 0:\n"
-                f"{far_otm[['K', 'T', 'log_moneyness', 'vomma']]}"
-            )
+        assert len(far_otm) >= 1, "far-OTM call nodes are missing from the surface"
+        assert (far_otm["vomma"] > 0).all(), far_otm[["K", "T", "log_moneyness", "vomma"]]
 
 
-# ── 3. Volga Numerical ≈ Vomma Analytical ────────────────────────────────────
+# ── 3. Vomma analytic vs finite difference ───────────────────────────────────
 
-class TestVolgaVommaConsistency:
-    """Numerical Volga (central diff on price) must match analytical Vomma."""
+class TestVommaFiniteDifference:
+    """Central difference on the price must match analytic vomma (same Greek)."""
 
     def _single(self, S, K, T, r, q, sigma):
-        S_ = np.array([S]); K_ = np.array([K])
-        T_ = np.array([T]); r_ = np.array([r]); q_ = np.array([q])
-        s_ = np.array([sigma])
-        vomma = _bs_vomma(S_, K_, T_, r_, q_, s_)[0]
-        volga = _bs_volga_numerical(S_, K_, T_, r_, q_, s_)[0]
-        return vomma, volga
+        a = [np.array([v]) for v in (S, K, T, r, q, sigma)]
+        return _bs_vomma(*a)[0], _bs_vomma_numerical(*a)[0]
 
-    def test_volga_matches_vomma_atm(self):
-        """ATM: numerical Volga ≈ analytical Vomma within 1%."""
-        vomma, volga = self._single(100, 100, 0.5, 0.05, 0.02, 0.25)
-        rel_err = abs(volga - vomma) / (abs(vomma) + 1e-6)
-        assert rel_err < 0.01, (
-            f"ATM: Vomma={vomma:.6f}, Volga={volga:.6f}, rel_err={rel_err:.4f}"
-        )
+    def test_matches_atm(self):
+        vomma, fd = self._single(100, 100, 0.5, 0.05, 0.02, 0.25)
+        assert abs(fd - vomma) / (abs(vomma) + 1e-6) < 0.01
 
-    def test_volga_matches_vomma_otm(self):
-        """OTM: numerical Volga ≈ analytical Vomma within 1%."""
-        vomma, volga = self._single(100, 120, 0.5, 0.05, 0.02, 0.25)
-        rel_err = abs(volga - vomma) / (abs(vomma) + 1e-6)
-        assert rel_err < 0.01, (
-            f"OTM: Vomma={vomma:.6f}, Volga={volga:.6f}, rel_err={rel_err:.4f}"
-        )
+    def test_matches_otm(self):
+        vomma, fd = self._single(100, 120, 0.5, 0.05, 0.02, 0.25)
+        assert abs(fd - vomma) / (abs(vomma) + 1e-6) < 0.01
 
-    def test_volga_matches_vomma_across_surface(self):
-        """Surface-wide: |Volga_num - Vomma_analytical| < 5% + 1e-4 for all nodes."""
+    def test_volga_name_is_the_same_function(self):
+        assert _bs_volga_numerical is _bs_vomma_numerical
+
+    def test_surface_publishes_one_name(self):
+        """'volga' was published as a second column holding the same Greek."""
         df = _make_surface()
-        rel_err = np.abs(df["volga"] - df["vomma"]) / (np.abs(df["vomma"]) + 1e-4)
-        assert (rel_err < 0.05).all(), (
-            f"Max relative error: {rel_err.max():.4f} (threshold 5%)"
-        )
+        assert "vomma" in df.columns and "volga" not in df.columns
 
 
-# ── 4. QV Convexity (MC) ──────────────────────────────────────────────────────
+# ── 4. QV Convexity ───────────────────────────────────────────────────────────
+
+def _qv_quad(kappa, theta, sigma, v0, T):
+    def var_v(s):
+        return (v0 * sigma**2 / kappa * (np.exp(-kappa * s) - np.exp(-2 * kappa * s))
+                + theta * sigma**2 / (2 * kappa) * (1 - np.exp(-kappa * s)) ** 2)
+    return integrate.quad(lambda s: 2 * var_v(s) * (-np.expm1(-kappa * (T - s))) / kappa,
+                          0, T, epsabs=0, epsrel=1e-13)[0]
+
 
 class TestQvConvexity:
-    """MC simulation of CIR variance process."""
 
     _BASE = dict(kappa=4.62, theta=0.0764, sigma=0.84, v0=0.0561)
 
-    def test_nonnegative(self):
-        """Var[QV] ≥ 0 always (variance is a non-negative quantity)."""
-        qv = simulate_qv_convexity(**self._BASE, T=0.25, n_paths=1000, n_steps=30)
-        assert qv >= 0, f"QV convexity must be non-negative, got {qv}"
+    @pytest.mark.parametrize("kappa", [0.1, 1.0, 4.62, 20.0])
+    @pytest.mark.parametrize("T", [1 / 365, 14 / 365, 1.0, 5.0])
+    def test_exact_matches_quadrature(self, kappa, T):
+        for theta, sigma, v0 in [(0.0764, 0.84, 0.0561), (0.03, 0.3, 1e-4), (0.2, 1.5, 0.36)]:
+            exact = qv_variance_exact(kappa, theta, sigma, v0, T)
+            ref = _qv_quad(kappa, theta, sigma, v0, T)
+            assert exact == pytest.approx(ref, rel=1e-11)
+
+    def test_small_kappa_limit(self):
+        """κ → 0: Var[∫v dt] → σ²·v0·T³/3."""
+        assert qv_variance_exact(1e-12, 0.05, 0.5, 0.04, 1.0) == pytest.approx(0.25 * 0.04 / 3, rel=1e-9)
 
     def test_zero_for_zero_sigma(self):
-        """When σ=0, variance is deterministic → Var[QV] ≈ 0."""
-        qv = simulate_qv_convexity(
-            kappa=4.62, theta=0.0764, sigma=0.0, v0=0.0561,
-            T=0.5, n_paths=2000, n_steps=50,
-        )
-        assert qv < 1e-6, f"σ=0 should give Var[QV]≈0, got {qv:.2e}"
+        assert qv_variance_exact(4.62, 0.0764, 0.0, 0.0561, 1.0) == 0.0
+        qv = simulate_qv_convexity(kappa=4.62, theta=0.0764, sigma=0.0, v0=0.0561,
+                                   T=0.5, n_paths=2000, n_steps=50)
+        assert qv < 1e-12
 
-    def test_increases_with_sigma(self):
-        """Higher vol-of-vol σ → larger Var[QV] (more spread in realised variance)."""
-        rng = np.random.default_rng(0)
-        qv_lo = simulate_qv_convexity(
-            kappa=4.62, theta=0.0764, sigma=0.20, v0=0.0561,
-            T=0.5, n_paths=5000, n_steps=50, rng=np.random.default_rng(0),
-        )
-        qv_hi = simulate_qv_convexity(
-            kappa=4.62, theta=0.0764, sigma=1.20, v0=0.0561,
-            T=0.5, n_paths=5000, n_steps=50, rng=np.random.default_rng(0),
-        )
-        assert qv_hi > qv_lo, (
-            f"Higher σ should increase QV convexity: σ=0.20→{qv_lo:.4e}, σ=1.20→{qv_hi:.4e}"
-        )
+    def test_monotone_in_sigma_and_T(self):
+        f = qv_variance_exact
+        assert f(4.62, 0.0764, 1.2, 0.0561, 0.5) > f(4.62, 0.0764, 0.2, 0.0561, 0.5)
+        assert f(4.62, 0.0764, 0.84, 0.0561, 1.0) > f(4.62, 0.0764, 0.84, 0.0561, 0.1)
 
-    def test_increases_with_T(self):
-        """Longer T → more accumulated uncertainty → larger Var[QV]."""
-        rng0 = np.random.default_rng(42)
-        qv_short = simulate_qv_convexity(**self._BASE, T=0.1,
-                                          n_paths=3000, n_steps=50, rng=rng0)
-        rng1 = np.random.default_rng(42)
-        qv_long  = simulate_qv_convexity(**self._BASE, T=1.0,
-                                          n_paths=3000, n_steps=50, rng=rng1)
-        assert qv_long > qv_short, (
-            f"Longer T should increase QV convexity: T=0.1→{qv_short:.4e}, T=1.0→{qv_long:.4e}"
-        )
+    def test_mc_cross_check(self):
+        """Full-truncation MC with the trapezoid rule agrees with the closed form
+        within its sampling error (seeded)."""
+        T = 0.25
+        exact = qv_variance_exact(**self._BASE, T=T)
+        mc = simulate_qv_convexity(**self._BASE, T=T, n_paths=40_000, n_steps=100,
+                                   rng=np.random.default_rng(0))
+        assert abs(mc / exact - 1) < 0.03
+
+    def test_surface_uses_exact_value(self):
+        """The published qv_convexity is the closed form (was a 10k-path MC
+        estimate, 0.6-2.9% off the exact value)."""
+        df = _make_surface()
+        for T, grp in df.groupby("T"):
+            expected = qv_variance_exact(_PARAMS["kappa"], _PARAMS["theta"], _PARAMS["sigma"],
+                                         _PARAMS["v0"], T)
+            np.testing.assert_allclose(grp["qv_convexity"], expected, rtol=1e-12)
 
 
 # ── 5. Greeks Surface ─────────────────────────────────────────────────────────
 
 class TestGreeksSurface:
-    """Validate the full surface output."""
 
-    def test_returns_dataframe(self):
+    def test_default_grid_matches_independent_reference(self):
+        """
+        Every node of the default grid (4 maturities × 15 strikes) against an
+        independent quad + brentq reference: each node is either present with
+        |IV − ref| < 1e-8, or genuinely below the price floor and recorded as
+        dropped. The old surface silently dropped 21/90 nodes (13 well-posed,
+        up to $153) and published IVs fabricated from pricer noise in the
+        14d/30d call wings (e.g. 28.7% where the true price is ~1e-14).
+        """
+        mats = np.array([14, 30, 180, 365]) / 365.0
+        df = compute_greeks_surface(_S, _r, _q, _PARAMS, maturities=mats, verbose=False)
+        prov = df.attrs["provenance"]
+        dropped = {(d["T_days"], round(d["log_moneyness"], 4)) for d in prov["dropped_nodes"]}
+        present = {(int(r.T_days), round(r.log_moneyness, 4)): r.iv for r in df.itertuples()}
+        assert prov["n_grid_nodes"] == 60
+        assert len(present) + len(dropped) == 60
+        for T in mats:
+            F = _S * np.exp((_r - _q) * T)
+            for x in rm.DEFAULT_LOG_MONEYNESS:
+                otm, ref_iv = _ref_otm_and_iv(_S, F * np.exp(x), T, _r, _q, _PARAMS)
+                key = (int(round(T * 365)), round(float(x), 4))
+                if otm >= MIN_OTM_PRICE_REL:
+                    assert key in present, f"well-posed node {key} (OTM {otm:.2e}·F) missing"
+                    assert abs(present[key] - ref_iv) < 1e-8, (key, present[key], ref_iv)
+                else:
+                    assert key in dropped, f"node {key} below the floor was not recorded"
+
+    def test_fast_grid_nodes_accounted_for(self):
+        """2 maturities × 5 strikes: every node is present or recorded as dropped."""
         df = _make_surface()
-        assert isinstance(df, pd.DataFrame), "Surface must be a DataFrame"
-        assert len(df) > 0, "Surface must be non-empty"
+        prov = df.attrs["provenance"]
+        assert prov["n_grid_nodes"] == 10
+        assert prov["n_nodes"] + len(prov["dropped_nodes"]) == 10
+        assert len(df) == prov["n_nodes"]
+        for d in prov["dropped_nodes"]:
+            assert d["otm_fwd_rel"] < MIN_OTM_PRICE_REL and d["reason"]
 
     def test_required_columns(self):
-        """All downstream (C7) columns must be present."""
         df = _make_surface()
-        required = {"K", "T", "T_days", "log_moneyness",
-                    "iv", "delta", "vega", "vomma", "volga", "vanna", "qv_convexity"}
-        missing = required - set(df.columns)
-        assert not missing, f"Missing columns: {missing}"
+        required = {"K", "T", "T_days", "log_moneyness", "strike_index", "iv", "otm_price",
+                    "delta", "vega", "vomma", "vanna", "qv_convexity", "iv_shock"}
+        assert not (required - set(df.columns))
 
-    def test_row_count(self):
-        """2 maturities × 5 strikes = 10 rows (all valid IVs)."""
-        df = _make_surface()
-        assert len(df) <= 10, f"Expected ≤10 rows for 2×5 grid, got {len(df)}"
-        assert len(df) >= 6,  f"Expected ≥6 valid rows, got {len(df)}"
+    def test_every_column_has_units(self):
+        flagged = flag_unstable_hedges(_make_surface())
+        for col in flagged.columns:
+            assert col in GREEKS_UNITS, f"column {col} has no stated unit"
+
+    def test_iv_reprices_heston(self):
+        """BS at the published IV reproduces the Heston OTM value."""
+        m = RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS, as_of_date="2026-03-24")
+        m.build(strikes=_FAST_STRIKES, maturities=_FAST_MATURITIES, verbose=False)
+        assert m.validate()["iv_reprices"]
 
     def test_vega_strictly_positive(self):
-        """BS vega > 0 everywhere — fundamental sanity check."""
-        df = _make_surface()
-        assert (df["vega"] > 0).all(), f"All vega must be positive:\n{df['vega']}"
+        assert (_make_surface()["vega"] > 0).all()
 
     def test_iv_realistic_range(self):
-        """IV ∈ (0.01, 3.0) — catches unit bugs (e.g., IV returned as %)."""
         df = _make_surface()
-        assert (df["iv"] > 0.01).all(), f"IV too small:\n{df['iv'].describe()}"
-        assert (df["iv"] < 3.0).all(),  f"IV too large:\n{df['iv'].describe()}"
+        assert (df["iv"] > 0.01).all() and (df["iv"] < 3.0).all()
 
     def test_delta_in_valid_range(self):
-        """Call delta ∈ (0, 1) for all nodes."""
         df = _make_surface()
-        assert (df["delta"] > 0).all() and (df["delta"] < 1).all(), (
-            f"Delta out of (0, 1):\n{df['delta'].describe()}"
-        )
+        assert (df["delta"] > 0).all() and (df["delta"] < 1).all()
 
     def test_as_of_date_column_added(self):
-        """as_of_date column is added when provided."""
         df = compute_greeks_surface(
             S=_S, r=_r, q=_q, params=_PARAMS,
             strikes=_FAST_STRIKES, maturities=_FAST_MATURITIES,
-            as_of_date="2026-03-25", verbose=False, **_FAST_MC,
+            as_of_date="2026-03-24", verbose=False,
         )
-        assert "as_of_date" in df.columns
-        assert (df["as_of_date"] == "2026-03-25").all()
+        assert (df["as_of_date"] == "2026-03-24").all()
+        assert df.attrs["provenance"]["as_of_date"] == "2026-03-24"
 
-    def test_qv_convexity_nonneg(self):
-        """QV convexity must be ≥ 0 (variance is non-negative)."""
+    def test_out_of_bounds_params_recorded(self):
+        """The published surface used ρ = −0.99, outside HESTON_BOUNDS, with no
+        record of it anywhere."""
+        prov = _make_surface().attrs["provenance"]
+        assert prov["params_outside_heston_bounds"] == ["rho"]
+        ok = compute_greeks_surface(_S, _r, _q, {**_PARAMS, "rho": -0.9}, strikes=_FAST_STRIKES,
+                                    maturities=_FAST_MATURITIES, verbose=False)
+        assert ok.attrs["provenance"]["params_outside_heston_bounds"] == []
+
+    def test_inversion_failure_raises(self, monkeypatch):
+        """A node above the price floor that fails to invert is a bug: raise."""
+        real = rm.implied_vol_black
+
+        def broken(*args, **kwargs):
+            iv, status = real(*args, **kwargs)
+            status = np.array(status, copy=True)
+            status[np.flatnonzero(status == IV_OK)[:1]] = IV_NOT_CONVERGED
+            return np.where(status == IV_OK, iv, np.nan), status
+
+        monkeypatch.setattr(rm, "implied_vol_black", broken)
+        with pytest.raises(RuntimeError, match="IV inversion failed"):
+            _make_surface()
+
+    def test_qv_method_mc_still_available(self):
+        df = compute_greeks_surface(_S, _r, _q, _PARAMS, strikes=_FAST_STRIKES,
+                                    maturities=_FAST_MATURITIES, verbose=False,
+                                    qv_method="mc", mc_n_paths=500, mc_n_steps=20)
+        assert (df["qv_convexity"] > 0).all()
+
+
+# ── 6. Vomma-instability measure ──────────────────────────────────────────────
+
+class TestUnstableMeasure:
+
+    def test_ratio_formula(self):
+        """vomma_pnl_ratio = ½·vomma·|Δσ|/vega = ½·d1·d2·|Δσ|/σ."""
+        df = flag_unstable_hedges(_make_surface())
+        F = _S * np.exp((_r - _q) * df["T"])
+        d1 = (np.log(F / df["K"]) + 0.5 * df["iv"] ** 2 * df["T"]) / (df["iv"] * np.sqrt(df["T"]))
+        d2 = d1 - df["iv"] * np.sqrt(df["T"])
+        np.testing.assert_allclose(df["vomma_pnl_ratio"],
+                                   0.5 * d1 * d2 * df["iv_shock"] / df["iv"], rtol=1e-9)
+        assert (df["is_unstable"] == (df["vomma_pnl_ratio"].abs() > rm.UNSTABLE_RATIO_THRESHOLD)).all()
+
+    def test_no_flags_without_vol_shock(self):
         df = _make_surface()
-        assert (df["qv_convexity"] >= 0).all(), (
-            f"QV convexity must be non-negative:\n{df['qv_convexity']}"
-        )
+        assert not flag_unstable_hedges(df, iv_shock=0.0)["is_unstable"].any()
+        assert np.all(model_iv_shock({**_PARAMS, "sigma": 0.0}, np.array([0.1, 1.0])) == 0.0)
 
-
-# ── 6. Flag Unstable Hedges ───────────────────────────────────────────────────
-
-class TestFlagUnstableHedges:
-    """Validate the flagging logic."""
-
-    def test_adds_required_columns(self):
-        """flag_unstable_hedges adds 'is_unstable' and 'vomma_zscore'."""
+    def test_not_scale_invariant(self):
+        """A pooled z-score flags the same nodes whatever the vomma level; the
+        absolute measure must react when vomma is 10× larger."""
         df = _make_surface()
-        flagged = flag_unstable_hedges(df)
-        assert "is_unstable"  in flagged.columns
-        assert "vomma_zscore" in flagged.columns
+        base = flag_unstable_hedges(df)["is_unstable"].sum()
+        scaled = flag_unstable_hedges(df.assign(vomma=df["vomma"] * 10))["is_unstable"].sum()
+        assert scaled > base
 
-    def test_is_unstable_is_bool(self):
-        """is_unstable must be a boolean column."""
-        df = _make_surface()
-        flagged = flag_unstable_hedges(df)
-        assert flagged["is_unstable"].dtype == bool, (
-            f"is_unstable dtype: {flagged['is_unstable'].dtype}"
-        )
+    def test_per_node_not_cross_sectional(self):
+        """A node's flag must not depend on which other nodes are on the surface
+        (the z-score did: it always flagged the ~3 most extreme nodes)."""
+        mats = np.array([14, 30, 91, 365]) / 365.0
+        df = compute_greeks_surface(_S, _r, _q, _PARAMS, maturities=mats, verbose=False)
+        full = flag_unstable_hedges(df)
+        part = flag_unstable_hedges(df[df["T_days"] >= 91])
+        np.testing.assert_array_equal(full.loc[part.index, "is_unstable"], part["is_unstable"])
 
-    def test_zscore_matches_threshold(self):
-        """Flagged rows must have |zscore| > threshold_sigma."""
-        df = _make_surface()
-        flagged = flag_unstable_hedges(df, threshold_sigma=1.5)
-        unstable = flagged[flagged["is_unstable"]]
-        assert (unstable["vomma_zscore"].abs() > 1.5).all(), (
-            "Flagged rows must all have |zscore| > threshold"
-        )
+    def test_calm_vs_stressed(self):
+        """More vol-of-vol and higher variance → larger model shock and more flags."""
+        calm = {**_PARAMS, "sigma": 0.3, "v0": 0.01, "rho": -0.7}
+        stress = {**_PARAMS, "sigma": 1.5, "v0": 0.36, "rho": -0.7}
+        T = np.array([14, 365]) / 365.0
+        assert np.all(model_iv_shock(stress, T) > 3 * model_iv_shock(calm, T))
+        n = [flag_unstable_hedges(compute_greeks_surface(7000.0, 0.04, 0.013, p,
+                                                         verbose=False))["is_unstable"].sum()
+             for p in (calm, stress)]
+        assert n[0] != n[1]
+
+    def test_model_iv_shock_formula(self):
+        """Δσ = n·σ_v·√(v0·h)·B/(2σ̄) with B = (1−e^{−κT})/(κT)."""
+        T, h, n = 0.25, 1 / 252, 2.0
+        k, th, sv, v0 = (_PARAMS[k] for k in ("kappa", "theta", "sigma", "v0"))
+        B = (1 - np.exp(-k * T)) / (k * T)
+        expected = n * sv * np.sqrt(v0 * h) * B / (2 * np.sqrt(th + (v0 - th) * B))
+        assert model_iv_shock(_PARAMS, T, h, n) == pytest.approx(expected, rel=1e-12)
 
     def test_injected_extreme_value_gets_flagged(self):
-        """Manually inject a giant vomma → that node must be flagged."""
         df = _make_surface().copy()
-        # Inject extreme vomma 100× the current max
-        df.loc[df.index[0], "vomma"] = df["vomma"].abs().max() * 100
-        flagged = flag_unstable_hedges(df, threshold_sigma=2.0)
-        assert flagged.loc[flagged.index[0], "is_unstable"], (
-            "Injected extreme vomma must be flagged as unstable"
-        )
+        df.loc[df.index[0], "vomma"] = df["vega"].iloc[0] * 1e3
+        assert flag_unstable_hedges(df).loc[df.index[0], "is_unstable"]
 
-    def test_original_df_not_mutated(self):
-        """flag_unstable_hedges returns a copy and does not modify the original."""
+    def test_descriptive_zscore_kept(self):
+        flagged = flag_unstable_hedges(_make_surface())
+        z = flagged["vomma_zscore"]
+        assert abs(z.mean()) < 1e-9 and z.std(ddof=1) == pytest.approx(1.0)
+
+    def test_is_unstable_is_bool_and_original_not_mutated(self):
         df = _make_surface()
-        df_original_cols = set(df.columns)
-        _ = flag_unstable_hedges(df)
-        assert set(df.columns) == df_original_cols, (
-            "Original DataFrame must not be mutated"
-        )
+        cols = set(df.columns)
+        flagged = flag_unstable_hedges(df)
+        assert flagged["is_unstable"].dtype == bool
+        assert set(df.columns) == cols
 
 
-# ── 7. Persistence ────────────────────────────────────────────────────────────
+# ── 7. Persistence, provenance, entry points ─────────────────────────────────
 
 class TestPersistence:
-    """Verify parquet save/load round-trip."""
 
-    def test_save_creates_parquet(self, tmp_path):
-        df   = _make_surface()
-        path = tmp_path / "test_surface.parquet"
-        out  = save_greeks_surface(df, path)
-        assert out == path
-        assert path.exists(), "save_greeks_surface must create the parquet file"
+    def test_round_trip_with_provenance(self, tmp_path):
+        df = flag_unstable_hedges(_make_surface())
+        path = save_greeks_surface(df, tmp_path / "surface.parquet")
+        plain = pd.read_parquet(path)
+        pd.testing.assert_frame_equal(df.reset_index(drop=True), plain.reset_index(drop=True),
+                                      check_like=True)
+        loaded = load_greeks_surface(path)
+        prov = loaded.attrs["provenance"]
+        assert prov["params"] == {k: float(v) for k, v in _PARAMS.items()}
+        assert (prov["S"], prov["r"], prov["q"]) == (_S, _r, _q)
+        assert prov["n_grid_nodes"] == 10 and prov["units"]["vomma"]
+        assert prov["unstable_rule"]["threshold"] == rm.UNSTABLE_RATIO_THRESHOLD
 
-    def test_load_preserves_row_count(self, tmp_path):
-        df   = _make_surface()
-        path = tmp_path / "surface.parquet"
-        save_greeks_surface(df, path)
-        df2  = pd.read_parquet(path)
-        assert len(df2) == len(df), (
-            f"Row count mismatch after load: {len(df2)} != {len(df)}"
-        )
+    def test_legacy_file_has_no_provenance(self, tmp_path):
+        path = tmp_path / "legacy.parquet"
+        _make_surface().to_parquet(path, index=False)
+        assert load_greeks_surface(path).attrs["provenance"] is None
 
-    def test_load_preserves_columns(self, tmp_path):
-        df   = _make_surface()
-        path = tmp_path / "surface2.parquet"
-        save_greeks_surface(df, path)
-        df2  = pd.read_parquet(path)
-        assert set(df.columns) == set(df2.columns), (
-            f"Column mismatch: {set(df.columns) ^ set(df2.columns)}"
-        )
 
-    def test_load_values_identical(self, tmp_path):
-        df   = _make_surface()
-        path = tmp_path / "surface3.parquet"
-        save_greeks_surface(df, path)
-        df2  = pd.read_parquet(path)
-        pd.testing.assert_frame_equal(
-            df.reset_index(drop=True),
-            df2.reset_index(drop=True),
-            check_like=True,
-        )
+class TestCalibrationEntryPoint:
+
+    def test_from_calibration_records_source(self, tmp_path):
+        m = RiskMonitor.from_calibration(_cal_pickle(tmp_path))
+        assert m.as_of_date == "2026-09-11"
+        assert m.S == pytest.approx(7656.97998046875)
+        # q not recorded in live pickles → the calibrator's own default
+        from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
+        import inspect
+        assert m.q == inspect.signature(JointCalibrator.__init__).parameters["q"].default
+        assert "JointCalibrator default" in m.source["q_source"]
+        assert m.source["calibration_file"].endswith("joint_cal_2026-09-11.pkl")
+
+    def test_recorded_q_is_used(self, tmp_path):
+        m = RiskMonitor.from_calibration(_cal_pickle(tmp_path, q=0.0125))
+        assert m.q == 0.0125 and m.source["q_source"] == "calibration file"
+
+    def test_no_run_date_default(self):
+        """as_of_date used to default to date.today() (the run date)."""
+        assert RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS).as_of_date is None
+
+    def test_build_surface_from_calibration(self, tmp_path):
+        out = tmp_path / "g.parquet"
+        df = build_surface_from_calibration(_cal_pickle(tmp_path), out)
+        loaded = load_greeks_surface(out)
+        prov = loaded.attrs["provenance"]
+        assert prov["as_of_date"] == "2026-09-11"
+        assert prov["source"]["calibration_file"].endswith("joint_cal_2026-09-11.pkl")
+        assert prov["n_nodes"] == len(loaded) == len(df)
+        assert prov["n_grid_nodes"] == 90
+        assert "is_unstable" in loaded.columns and (loaded["as_of_date"] == "2026-09-11").all()
+
+    def test_cli(self, tmp_path, capsys):
+        out = tmp_path / "cli.parquet"
+        assert rm.main(["--calibration", str(_cal_pickle(tmp_path)), "--out", str(out)]) == 0
+        assert out.exists()
+        assert "as_of 2026-09-11" in capsys.readouterr().out
 
 
 # ── 8. RiskMonitor Class ──────────────────────────────────────────────────────
 
 class TestRiskMonitor:
-    """End-to-end tests for the RiskMonitor orchestration class."""
 
     def _monitor(self):
-        m = RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS, as_of_date="2026-03-25")
-        m.build(strikes=_FAST_STRIKES, maturities=_FAST_MATURITIES,
-                verbose=False, **_FAST_MC)
+        m = RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS, as_of_date="2026-03-24")
+        m.build(strikes=_FAST_STRIKES, maturities=_FAST_MATURITIES, verbose=False)
         return m
 
     def test_build_returns_dataframe(self):
         m = self._monitor()
-        assert isinstance(m.surface, pd.DataFrame)
-        assert len(m.surface) > 0
+        assert isinstance(m.surface, pd.DataFrame) and len(m.surface) > 0
 
     def test_flag_adds_columns(self):
-        m = self._monitor()
-        flagged = m.flag()
-        assert "is_unstable" in flagged.columns
+        flagged = self._monitor().flag()
+        assert {"is_unstable", "vomma_pnl_ratio", "vomma_zscore"} <= set(flagged.columns)
 
     def test_validate_all_pass(self):
-        m = self._monitor()
-        checks = m.validate()
-        assert isinstance(checks, dict)
+        checks = self._monitor().validate()
         failures = {k: v for k, v in checks.items() if not v}
-        assert not failures, f"Validate() failures: {failures}"
+        assert not failures, f"validate() failures: {failures}"
+        assert "vomma_fd_check" in checks and "volga_close_to_vomma" not in checks
 
     def test_repr(self):
         m = self._monitor()
         r = repr(m)
-        assert "RiskMonitor" in r
-        assert "2026-03-25" in r
-        assert str(len(m.surface)) in r
+        assert "RiskMonitor" in r and "2026-03-24" in r and str(len(m.surface)) in r
 
     def test_plot_returns_figure(self, tmp_path):
         import matplotlib.pyplot as plt
@@ -434,16 +564,21 @@ class TestRiskMonitor:
         plt.close(fig)
 
     def test_save_creates_file(self, tmp_path):
-        m = self._monitor()
-        path = m.save(path=tmp_path / "surface.parquet")
-        assert path.exists()
+        assert self._monitor().save(path=tmp_path / "surface.parquet").exists()
 
     def test_build_before_flag_raises(self):
-        m = RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS)
         with pytest.raises(RuntimeError):
-            m.flag()
+            RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS).flag()
 
     def test_build_before_plot_raises(self):
-        m = RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS)
         with pytest.raises(RuntimeError):
-            m.plot()
+            RiskMonitor(S=_S, r=_r, q=_q, params=_PARAMS).plot()
+
+
+def test_import_does_not_load_torch():
+    """The Greeks monitor (and the backtest engine through delta_hedger) used to
+    import torch and sklearn only to reach a numpy IV helper in nn_pricer."""
+    code = ("import sys, joint_vol_calibration.greeks.risk_monitor, "
+            "joint_vol_calibration.models.implied_vol; "
+            "sys.exit(int('torch' in sys.modules or 'sklearn' in sys.modules))")
+    assert subprocess.run([sys.executable, "-c", code], cwd=str(ROOT_DIR)).returncode == 0
