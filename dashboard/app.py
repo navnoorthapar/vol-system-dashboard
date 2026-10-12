@@ -13,8 +13,9 @@ overwrote the tracked regime_labels.parquet with the DEMOTED classifier's
 predictions — the exact defect C21 removed from cloud_refresh — whenever the
 local DB was more than three days old, i.e. on every fresh clone.)
 
-A loader that records a failure in ``d["errors"]`` gets a visible error banner,
-and freeze_site.py refuses to publish a page that carries one.
+Every loader reports failures in ``d["errors"]``; the templates render them as a
+visible error banner instead of zeros, and freeze_site.py refuses to publish a
+page that carries one.
 
 Run a local preview (read-only, bound to 127.0.0.1):
     python dashboard/app.py
@@ -1104,304 +1105,263 @@ def load_page3() -> dict[str, Any]:
 
 
 # ── PAGE 4 DATA: Backtest Results ─────────────────────────────────────────────
+def half_year_sharpes(nav: pd.Series) -> list[dict]:
+    """Per half-year Sharpe of ONE in-sample backtest run, via the engine's metrics.
+
+    Each window's first return is measured from the previous window's last NAV
+    (slicing dropped it), and the Sharpe comes from
+    backtest_engine.compute_metrics with rf = 0: the NAV is the option P&L on
+    $1M of collateral that is assumed to earn ^IRX separately, so the P&L is
+    already an excess return (the Sharpe convention adopted for the site in
+    C22; the headline KPIs are whatever the stored engine results record). The
+    old chart charged a flat 5% hurdle, clipped at ±4 and called the slices
+    'walk-forward OOS'.
+    A window with a flat NAV has no defined Sharpe and is returned as None.
+    """
+    from joint_vol_calibration.backtest.backtest_engine import compute_metrics
+
+    nav = nav.dropna()
+    out = []
+    for year in sorted(set(nav.index.year)):
+        for half, (s, e) in enumerate(((f"{year}-01-01", f"{year}-06-30"),
+                                       (f"{year}-07-01", f"{year}-12-31")), 1):
+            sub = nav.loc[s:e]
+            if sub.empty:
+                continue
+            prior = nav.loc[:pd.Timestamp(s) - pd.Timedelta(days=1)]
+            window = pd.concat([prior.iloc[-1:], sub]) if len(prior) else sub
+            rets = window.pct_change().dropna()
+            if len(rets) < 2:
+                continue
+            flat = bool(rets.abs().max() < 1e-10)
+            sharpe = None if flat else _num(compute_metrics(
+                pd.DataFrame({"nav": window}), rf=0.0).get("sharpe"))
+            out.append({
+                "period": f"{year}-H{half}", "start": str(sub.index[0].date()),
+                "end": str(sub.index[-1].date()), "sharpe": sharpe, "flat": flat,
+                "partial": bool(sub.index[-1] < pd.Timestamp(e) - pd.Timedelta(days=7)
+                                and sub.index[-1] == nav.index[-1]),
+            })
+    return out
+
+
+def annual_returns(nav: pd.Series) -> list[dict]:
+    """Calendar-year returns based on the previous year's last NAV.
+
+    Using each year's first NAV as the base dropped the first session of every
+    year, so the years did not compound to the total.
+    """
+    nav = nav.dropna()
+    year_end = nav.groupby(nav.index.year).last()
+    out, base = [], float(nav.iloc[0])
+    for yr, end in year_end.items():
+        out.append({"year": int(yr), "ret_pct": (float(end) / base - 1.0) * 100.0,
+                    "partial": bool(yr == nav.index[-1].year and nav.index[-1].month < 12)})
+        base = float(end)
+    return out
+
+
+def _trade_summary(trades: list, sig: str) -> dict:
+    """Per-signal trade-log facts quoted in the page prose."""
+    tr = [t for t in trades if getattr(t, "signal", None) == sig]
+    if not tr:
+        return {}
+    pnl = np.array([float(t.net_pnl) for t in tr])
+    total = float(pnl.sum())
+    worst = tr[int(np.argmin(pnl))]
+    by_year: dict[int, float] = {}
+    for t in tr:
+        y = int(pd.Timestamp(t.exit_date).year)
+        by_year[y] = by_year.get(y, 0.0) + float(t.net_pnl)
+    top5 = float(np.sort(pnl)[::-1][:5].sum())
+    return {
+        "n": len(tr), "total": total,
+        "win_rate": float((pnl > 0).mean()),
+        "n_short": int(sum(1 for t in tr if getattr(t, "direction", 0) < 0)),
+        "worst_pnl": float(pnl.min()),
+        "worst_entry": str(pd.Timestamp(worst.entry_date).date()),
+        "worst_exit": str(pd.Timestamp(worst.exit_date).date()),
+        "by_year": [{"year": y, "pnl": v} for y, v in sorted(by_year.items())],
+        "positive_years": [y for y, v in sorted(by_year.items()) if v > 0],
+        "negative_years": [{"year": y, "pnl": v} for y, v in sorted(by_year.items()) if v < 0],
+        "top5_share": (top5 / total) if total > 0 else None,
+    }
+
+
 def load_page4() -> dict[str, Any]:
-    d: dict[str, Any] = {}
+    d: dict[str, Any] = {"errors": [], "metrics_rows": [], "signal_metrics": [],
+                         "signal_pnl": [], "signal_labels": [],
+                         "research_s1": {}, "research_s1c": {}, "research_s4": {},
+                         "eq_dates": [], "eq_nav": [], "eq_nav_s1c": [], "eq_nav_s3": [],
+                         "eq_nav_s4": [], "eq_nav_s1": [], "ann": [], "ann_years": [],
+                         "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
+                         "crisis": [], "sleeves": {}}
+    for k in ("final_nav", "total_pnl", "start_date", "end_date",
+              "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date"):
+        d[k] = None
 
-    # ── Equity curve ────────────────────────────────────────────────────────
+    eq: Optional[pd.DataFrame] = None
     try:
         eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
         eq.index = pd.to_datetime(eq.index)
+        nav = eq["nav"]
+        d["start_date"] = str(eq.index[0].date())
+        d["end_date"] = str(eq.index[-1].date())
+        d["final_nav"] = round(float(nav.iloc[-1]), 0)
+        d["total_pnl"] = round(float(nav.iloc[-1] - nav.iloc[0]), 0)
 
-        # Downsample to ≤600 points
-        step = max(1, len(eq) // 600)
-        eq_ds = eq.iloc[::step]
+        # Full-resolution curves (1.8k points): the old [::3] downsample
+        # dropped the final session and clipped extremes.
+        def _norm(col: str) -> list:
+            if col not in eq.columns:
+                return []
+            s = eq[col]
+            return ((s / float(s.iloc[0]) * 100) - 100).round(2).tolist()
 
-        # Normalise each NAV series to % gain from 100
-        def _norm(col: str) -> list[float]:
-            s = eq_ds[col]
-            base = float(s.iloc[0])
-            return ((s / base * 100) - 100).round(2).tolist()
+        d["eq_dates"] = [t.strftime("%Y-%m-%d") for t in eq.index]
+        d["eq_nav"] = _norm("nav")
+        d["eq_nav_s1c"] = _norm("nav_s1c")
+        d["eq_nav_s3"] = _norm("nav_s3")
+        d["eq_nav_s4"] = _norm("nav_s4")
+        d["eq_nav_s1"] = _norm("nav_s1")
 
-        d["eq_dates"]    = [dt.strftime("%Y-%m-%d") for dt in eq_ds.index]
-        d["eq_nav"]      = _norm("nav")
-        d["eq_nav_s1c"]  = _norm("nav_s1c") if "nav_s1c" in eq_ds.columns else []
-        d["eq_nav_s3"]   = _norm("nav_s3")
-        d["eq_nav_s4"]   = _norm("nav_s4")  if "nav_s4"  in eq_ds.columns else []
-        d["eq_nav_s1"]   = _norm("nav_s1")  # reference line
+        d["ann"] = annual_returns(nav)
+        d["ann_years"] = [a["year"] for a in d["ann"]]
+        d["ann_rets"] = [round(a["ret_pct"], 2) for a in d["ann"]]
 
-        # Final NAV for display
-        d["final_nav"]   = round(float(eq["nav"].iloc[-1]), 0)
-        d["start_nav"]   = round(float(eq["nav"].iloc[0]), 0)
-        d["total_pnl"]   = round(d["final_nav"] - d["start_nav"], 0)
+        d["wf"] = half_year_sharpes(nav)
+        d["wf_periods"] = [w["period"] + (" (partial)" if w["partial"] else "") for w in d["wf"]]
+        d["wf_sharpes"] = [None if w["sharpe"] is None else round(w["sharpe"], 2) for w in d["wf"]]
+        defined = [w["sharpe"] for w in d["wf"] if w["sharpe"] is not None]
+        d["wf_neg"] = sum(1 for s in defined if s < 0)
+        d["wf_total"] = len(defined)
+        d["wf_flat"] = sum(1 for w in d["wf"] if w["flat"])
 
+        from joint_vol_calibration.backtest.backtest_engine import compute_crisis_performance
+        d["crisis"] = [{"name": k, "total_return": v.get("total_return"),
+                        "n_days": v.get("n_days")}
+                       for k, v in compute_crisis_performance(eq).items()]
     except Exception as e:
-        d["eq_error"] = str(e)
-        d["eq_dates"]    = []
-        d["eq_nav"]      = []
-        d["eq_nav_s1c"]  = []
-        d["eq_nav_s3"]   = []
-        d["eq_nav_s4"]   = []
-        d["eq_nav_s1"]   = []
-        d["final_nav"]   = 0
-        d["start_nav"]   = 0
-        d["total_pnl"]   = 0
+        _record_error(d, "backtest equity curve (full_results.parquet)", e)
+        eq = None
 
-    # ── Metrics — computed entirely from parquet (no pickle import needed) ───
-    # This avoids pickle loading joint_vol_calibration.backtest.TradeRecord
-    # objects which require the full codebase installed on Railway.
+    # ── Engine metrics + trade log: the single source for every KPI ──────────
     try:
-        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
-        eq.index = pd.to_datetime(eq.index)
-        n_days = len(eq)
-        ann_factor = np.sqrt(252)
+        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
+            state = pickle.load(fh)
+        em = state.get("metrics") or {}
+        trades = state.get("all_trades") or []
+        if not em:
+            raise ValueError("full_results.pkl carries no engine metrics")
+        d["run_date"] = _date_str(state.get("run_date"))
+        d["sharpe_convention"] = em.get("sharpe_convention") or state.get("sharpe_convention")
 
-        def _pct(x): return f"{x*100:.2f}%" if x is not None and np.isfinite(float(x)) else "—"
-        def _f2(x):  return f"{x:.3f}"       if x is not None and np.isfinite(float(x)) else "—"
-        def _dol(x): return f"${x:,.0f}"     if x is not None and np.isfinite(float(x)) else "—"
+        if eq is not None:
+            # Both artifacts must come from the same engine run.
+            cum = float(eq["nav"].iloc[-1] / eq["nav"].iloc[0] - 1.0)
+            if abs(cum - float(em["cumulative_return"])) > 1e-9:
+                raise ValueError(
+                    f"full_results.parquet (cum {cum:.6f}) and full_results.pkl "
+                    f"(cum {float(em['cumulative_return']):.6f}) are from different runs")
+            # The portfolio must be the equal-weight mean of PORTFOLIO_SLEEVES.
+            pcols = [f"pnl_{s}" for s in PORTFOLIO_SLEEVES]
+            if all(c in eq.columns for c in pcols):
+                resid = (eq["daily_pnl"] - eq[pcols].sum(axis=1) / len(pcols)).abs().max()
+                if resid > 1e-6 * max(1.0, float(eq["daily_pnl"].abs().max())):
+                    raise ValueError("portfolio daily_pnl is not the equal-weight mean of "
+                                     + "/".join(PORTFOLIO_SLEEVES))
 
-        def _metrics_for(nav_col: str, pnl_col: str, pos_col: str):
-            nav  = eq[nav_col]
-            rets = nav.pct_change().fillna(0)
-            pnl  = eq[pnl_col]
-            # Sharpe (excess over 5% rf)
-            ex   = rets - 0.05 / 252
-            sh   = float(ex.mean() / ex.std() * ann_factor) if rets.std() > 1e-10 else 0.0
-            # Sortino: downside deviation about target = sqrt(mean(min(0,ex)^2))
-            # over all days (not std of the negative subset about its own mean).
-            down_dev = float(np.sqrt((ex.clip(upper=0.0) ** 2).mean()))
-            srt  = float(ex.mean() / down_dev * ann_factor) if down_dev > 1e-12 else 0.0
-            # Max drawdown
-            roll_max = nav.cummax()
-            dd_series = (nav / roll_max) - 1
-            mdd  = float(dd_series.min())
-            # DD duration (longest consecutive drawdown)
-            in_dd = (dd_series < 0).astype(int)
-            max_dur = 0
-            cur_dur = 0
-            for v in in_dd:
-                if v: cur_dur += 1
-                else: cur_dur = 0
-                max_dur = max(max_dur, cur_dur)
-            # Calmar
-            years = n_days / 252
-            # Geometric annualisation is only defined while NAV stays positive.
-            # Reference signals (e.g. S1 −$1.53M) can drive a standalone NAV path
-            # negative; raising a negative ratio to a fractional power yields NaN
-            # (the "invalid value in scalar power" RuntimeWarning). Fall back to
-            # the simple cumulative return there — the account has blown up.
-            if years > 0 and nav.iloc[0] > 0 and nav.iloc[-1] > 0:
-                ann_ret = float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1)
-            else:
-                ann_ret = float(nav.iloc[-1] / nav.iloc[0] - 1) if nav.iloc[0] > 0 else 0.0
-            calmar  = float(ann_ret / abs(mdd)) if abs(mdd) > 1e-10 else 0.0
-            # Win rate (by trading day P&L)
-            active_pnl = pnl[pnl != 0]
-            win_rate = float((active_pnl > 0).mean()) if len(active_pnl) > 0 else 0.0
-            # N trades (position changes)
-            pos = eq[pos_col]
-            n_trades = int((pos.diff().fillna(0) != 0).sum())
-            # Total P&L
-            total_pnl = float(nav.iloc[-1] - nav.iloc[0])
-            cum_ret = float((nav.iloc[-1] - nav.iloc[0]) / nav.iloc[0])
-            avg_pnl = total_pnl / n_trades if n_trades > 0 else 0.0
-            return dict(
-                cum_ret=cum_ret, ann_ret=ann_ret, sharpe=sh, sortino=srt,
-                mdd=mdd, dd_dur=max_dur, calmar=calmar, win_rate=win_rate,
-                avg_pnl=avg_pnl, best_day=float(rets.max()), worst_day=float(rets.min()),
-                n_trades=n_trades, total_pnl=total_pnl,
-            )
+        # Portfolio trade statistics from the engine's per-sleeve trade-log
+        # stats. (The engine's top-level n_trades also counts the reference
+        # sleeves; counting position changes double-counted round trips.)
+        n_rt = sum(int(em.get(f"{s}_n_trades") or 0) for s in PORTFOLIO_SLEEVES)
+        wins = sum(float(em.get(f"{s}_win_rate") or 0.0) * int(em.get(f"{s}_n_trades") or 0)
+                   for s in PORTFOLIO_SLEEVES)
+        port_pnl = d["total_pnl"]
+        kpi = {
+            "cum_ret": _num(em.get("cumulative_return")),
+            "ann_ret": _num(em.get("ann_return")),
+            "sharpe": _num(em.get("sharpe")),
+            "sortino": _num(em.get("sortino")),
+            "mdd": _num(em.get("max_drawdown")),
+            "dd_dur": em.get("dd_duration_days"),
+            "calmar": _num(em.get("calmar")),
+            "best_day": _num(em.get("best_day")),
+            "worst_day": _num(em.get("worst_day")),
+            "n_days": em.get("n_days"),
+            "n_round_trips": n_rt,
+            "win_rate": (wins / n_rt) if n_rt else None,
+            "avg_pnl": (port_pnl / n_rt) if (n_rt and port_pnl is not None) else None,
+        }
+        d["kpi"] = kpi
 
-        m   = _metrics_for("nav",     "daily_pnl", "s1c_position")  # portfolio
-        # The portfolio holds S1C + S3 + S4, so counting only s1c_position
-        # transitions understated it (and inflated avg P&L/trade by dividing
-        # total portfolio P&L by one signal's trade count).
-        _pos_cols = [c for c in ("s1c_position", "s3_position", "s4_position") if c in eq.columns]
-        if _pos_cols:
-            m["n_trades"] = int(sum(
-                (eq[c].diff().fillna(0) != 0).sum() for c in _pos_cols
-            ))
-            m["avg_pnl"] = (m["total_pnl"] / m["n_trades"]) if m["n_trades"] else 0.0
-        m1c = _metrics_for("nav_s1c", "pnl_s1c",  "s1c_position") if "nav_s1c" in eq.columns else None
-        m3  = _metrics_for("nav_s3",  "pnl_s3",   "s3_position")
-        m4  = _metrics_for("nav_s4",  "pnl_s4",   "s4_position")  if "nav_s4"  in eq.columns else None
-        m1  = _metrics_for("nav_s1",  "pnl_s1",   "s1_position")
-        m2  = _metrics_for("nav_s2",  "pnl_s2",   "s2_position")
+        def _pct(x):
+            return "—" if x is None else f"{x * 100:.2f}%"
 
-        # C17: prefer the engine's headline Sharpe/Sortino (measured against
-        # the per-date ^IRX T-bill path) over the flat-5% parquet recompute.
-        _em: dict = {}
-        try:
-            with open(DATA / "backtest" / "full_results.pkl", "rb") as _fh:
-                _em = (pickle.load(_fh).get("metrics") or {})
-            for _k in ("sharpe", "sortino"):
-                if _em.get(_k) is not None and np.isfinite(float(_em[_k])):
-                    m[_k] = float(_em[_k])
-        except Exception:
-            pass
+        def _f(x, n=3):
+            return "—" if x is None else f"{x:.{n}f}"
 
-        # Per-signal cards/table use the engine's TRADE-LOG stats (round-trip
-        # trades, win rate by trade, Sharpe vs T-bill) — the canonical numbers
-        # from run_backtest — not the dashboard's daily-P&L recompute, which
-        # counts each entry+exit as a separate "trade" and wins by day.
-        def _sig_card(sig: str, fallback: dict | None) -> dict:
-            tp = _em.get(f"{sig}_total_pnl")
-            nt = _em.get(f"{sig}_n_trades")
-            wr = _em.get(f"{sig}_win_rate")
-            sh = _em.get(f"{sig}_sharpe")
-            if tp is None and fallback is not None:
-                tp, nt, wr, sh = (fallback.get("total_pnl"), fallback.get("n_trades"),
-                                  fallback.get("win_rate"), fallback.get("sharpe"))
-            return {
-                "total_pnl": _dol(tp) if tp is not None else "—",
-                "sharpe":    _f2(sh) if sh is not None else "—",
-                "win_rate":  _pct(wr) if wr is not None else "—",
-                "n_trades":  str(int(nt)) if nt is not None else "—",
-                "green":     (tp or 0) > 0,
-            }
+        def _dol(x):
+            return "—" if x is None else (f"−${abs(x):,.0f}" if x < 0 else f"${x:,.0f}")
 
         d["metrics_rows"] = [
-            {"label": "Cumulative Return", "value": _pct(m["cum_ret"]),
-             "positive": m["cum_ret"] > 0},
-            {"label": "Ann. Return",       "value": _pct(m["ann_ret"]),
-             "positive": m["ann_ret"] > 0},
-            {"label": "Sharpe (rf=T-bill)", "value": _f2(m["sharpe"]),
-             "positive": m["sharpe"] > 0},
-            {"label": "Sortino",           "value": _f2(m["sortino"]),
-             "positive": m["sortino"] > 0},
-            {"label": "Max Drawdown",      "value": _pct(m["mdd"]),     "positive": False},
-            {"label": "DD Duration",       "value": f"{m['dd_dur']} days","positive": False},
-            {"label": "Calmar",            "value": _f2(m["calmar"]),
-             "positive": m["calmar"] > 0},
-            {"label": "Win Rate",          "value": _pct(m["win_rate"]),
-             "positive": m["win_rate"] > 0.5},
-            {"label": "Avg P&L / Trade",   "value": _dol(m["avg_pnl"]),
-             "positive": m["avg_pnl"] > 0},
-            {"label": "Best Day",          "value": _pct(m["best_day"]),  "positive": True},
-            {"label": "Worst Day",         "value": _pct(m["worst_day"]), "positive": False},
-            {"label": "N Trades",          "value": str(m["n_trades"]),   "positive": True},
-            {"label": "N Days",            "value": str(n_days),          "positive": True},
+            {"label": "Cumulative Return", "value": _pct(kpi["cum_ret"]), "positive": (kpi["cum_ret"] or 0) > 0},
+            {"label": "Ann. Return", "value": _pct(kpi["ann_ret"]), "positive": (kpi["ann_ret"] or 0) > 0},
+            {"label": "Sharpe", "value": _f(kpi["sharpe"]), "positive": (kpi["sharpe"] or 0) > 0},
+            {"label": "Sortino", "value": _f(kpi["sortino"]), "positive": (kpi["sortino"] or 0) > 0},
+            {"label": "Max Drawdown", "value": _pct(kpi["mdd"]), "positive": False},
+            {"label": "DD Duration", "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur'])} sessions", "positive": False},
+            {"label": "Calmar", "value": _f(kpi["calmar"]), "positive": (kpi["calmar"] or 0) > 0},
+            {"label": "Win Rate (per round trip)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
+            {"label": "Avg P&L / Round Trip", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
+            {"label": "Best Day", "value": _pct(kpi["best_day"]), "positive": True},
+            {"label": "Worst Day", "value": _pct(kpi["worst_day"]), "positive": False},
+            {"label": "Round-Trip Trades", "value": str(n_rt), "positive": True},
+            {"label": "Return Days", "value": "—" if kpi["n_days"] is None else str(int(kpi["n_days"])), "positive": True},
         ]
 
-        # Signal P&L bar chart — main 3-signal portfolio (S1C + S3 + S4)
-        signal_pnl = [
-            round(_em.get("s1c_total_pnl", (m1c["total_pnl"] if m1c else 0)) / 1000, 1),
-            round(_em.get("s3_total_pnl",  m3["total_pnl"]) / 1000, 1),
-            round(_em.get("s4_total_pnl",  (m4["total_pnl"] if m4 else 0)) / 1000, 1),
-        ]
+        sleeves = {}
+        for sig in ("s1c", "s3", "s4", "s1", "s2"):
+            tp = _num(em.get(f"{sig}_total_pnl"))
+            sleeves[sig] = {
+                "total_pnl": tp, "sharpe": _num(em.get(f"{sig}_sharpe")),
+                "ann_ret": _num(em.get(f"{sig}_ann_return")),
+                "win_rate": _num(em.get(f"{sig}_win_rate")),
+                "n_trades": em.get(f"{sig}_n_trades"),
+                "summary": _trade_summary(trades, sig),
+            }
+        d["sleeves"] = sleeves
+
+        def _card(sig: str) -> dict:
+            s = sleeves[sig]
+            return {"total_pnl": _dol(s["total_pnl"]), "sharpe": _f(s["sharpe"]),
+                    "win_rate": _pct(s["win_rate"]),
+                    "n_trades": "—" if s["n_trades"] is None else str(int(s["n_trades"])),
+                    "green": (s["total_pnl"] or 0) > 0}
+
+        d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
+
         d["signal_labels"] = ["S1C  Contrarian PDV", "S3  Dispersion", "S4  VRP"]
-        d["signal_pnl"]    = signal_pnl
-        d["signal_colors"] = ["#00c870" if v > 0 else "#ff3333" for v in signal_pnl]
+        d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None else round(sleeves[s]["total_pnl"] / 1000, 1)
+                           for s in PORTFOLIO_SLEEVES]
 
-        # Per-signal metrics table — main signals first, reference signals dimmed.
-        # Stats sourced from the engine trade-log (canonical), keyed by signal.
-        d["signal_metrics"] = []
-        for sig, mx, lbl, is_research, is_sparse in [
-            ("s1c", m1c, "S1C Contrarian",  False, False),
-            ("s3",  m3,  "S3 Dispersion",   False, True),   # 22 trades, proxy-scaled → Sharpe not meaningful
-            ("s4",  m4,  "S4 VRP",          False, False),
-            ("s1",  m1,  "S1 IVR (ref)",    True,  False),
-            ("s2",  m2,  "S2 VIX TS (ref)", True,  False),
-        ]:
-            if mx is None:
+        for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", "S3 Dispersion", False),
+                                 ("s4", "S4 VRP", False), ("s1", "S1 IVR (ref)", True),
+                                 ("s2", "S2 VIX TS (ref)", True)):
+            s = sleeves[sig]
+            if s["total_pnl"] is None:
                 continue
-            _tp = _em.get(f"{sig}_total_pnl", mx["total_pnl"])
-            _nt = _em.get(f"{sig}_n_trades",  mx["n_trades"])
-            _wr = _em.get(f"{sig}_win_rate",  mx["win_rate"])
-            _sh = _em.get(f"{sig}_sharpe",    mx["sharpe"])
-            _ar = _em.get(f"{sig}_ann_return", mx["ann_ret"])
             d["signal_metrics"].append({
-                "label":       lbl,
-                "sharpe":      "N/A*" if is_sparse else _f2(_sh),
-                "ann_ret":     _pct(_ar),
-                "win_rate":    _pct(_wr),
-                "n_trades":    str(int(_nt)),
-                "total_pnl":   _dol(_tp),
-                "green":       _tp > 0,
-                "is_research": is_research,
-                "is_sparse":   is_sparse,
+                "label": lbl, "sharpe": _f(s["sharpe"]), "ann_ret": _pct(s["ann_ret"]),
+                "win_rate": _pct(s["win_rate"]),
+                "n_trades": "—" if s["n_trades"] is None else str(int(s["n_trades"])),
+                "total_pnl": _dol(s["total_pnl"]), "green": s["total_pnl"] > 0,
+                "is_research": is_ref,
             })
-
-        # Research variant summary for dedicated panel (canonical trade-log stats)
-        d["research_s1c"] = _sig_card("s1c", m1c)
-        d["research_s4"]  = _sig_card("s4",  m4)
-        # C18: S1 (original IVR short-VRP) — the signal whose "catastrophic"
-        # loss was the stale-strike artifact. Now the headline corrected result.
-        d["research_s1"]  = _sig_card("s1",  m1)
-
     except Exception as e:
-        d["pkl_error"] = str(e)
-        d["metrics_rows"]   = []
-        d["signal_metrics"] = []
-        d["signal_pnl"]     = []
-        d["signal_labels"]  = []
-        d["signal_colors"]  = []
-        d["research_s1"]    = {}
-        d["research_s1c"]   = {}
-        d["research_s4"]    = {}
+        _record_error(d, "backtest engine results (full_results.pkl)", e)
 
-    # ── Annual returns ───────────────────────────────────────────────────────
-    try:
-        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
-        eq.index = pd.to_datetime(eq.index)
-        ann_years: list[int] = []
-        ann_rets:  list[float] = []
-        ann_colors: list[str] = []
-        ann_labels: list[str] = []
-        for yr, g in eq.groupby(eq.index.year):
-            ret = round((float(g["nav"].iloc[-1]) - float(g["nav"].iloc[0]))
-                        / float(g["nav"].iloc[0]) * 100, 2)
-            ann_years.append(int(yr))
-            ann_rets.append(ret)
-            ann_colors.append("#00c870" if ret > 0 else "#ff3333")
-            ann_labels.append(f"{ret:+.2f}%")
-        d["ann_years"]  = ann_years
-        d["ann_rets"]   = ann_rets
-        d["ann_colors"] = ann_colors
-        d["ann_labels"] = ann_labels
-    except Exception as e:
-        d["ann_error"] = str(e)
-        d["ann_years"] = []
-        d["ann_rets"]  = []
-
-    # ── Walk-forward (computed from equity curve) ────────────────────────────
-    try:
-        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
-        eq.index = pd.to_datetime(eq.index)
-        wf_periods: list[str]  = []
-        wf_sharpes: list[float] = []
-        wf_colors:  list[str]  = []
-        for year in range(2019, 2026):
-            for half, (s, e) in enumerate(
-                [(f"{year}-01-01", f"{year}-06-30"),
-                 (f"{year}-07-01", f"{year}-12-31")], 1
-            ):
-                sub = eq.loc[s:e, "nav"]
-                if len(sub) < 5:
-                    continue
-                rets = sub.pct_change().dropna()
-                if rets.abs().max() < 1e-10 or rets.std() < 1e-10:
-                    sh = 0.0
-                else:
-                    ex = rets - 0.05 / 252
-                    sh = float(ex.mean() / ex.std() * np.sqrt(252))
-                sh = round(max(min(sh, 4.0), -4.0), 2)
-                wf_periods.append(f"{year}-H{half}")
-                wf_sharpes.append(sh)
-                wf_colors.append("#00c870" if sh >= 0 else "#ff3333")
-        d["wf_periods"]   = wf_periods
-        d["wf_sharpes"]   = wf_sharpes
-        d["wf_colors"]    = wf_colors
-        d["wf_neg"]       = sum(1 for s in wf_sharpes if s < 0)
-        d["wf_total"]     = len(wf_sharpes)
-        d["wf_pos"]       = d["wf_total"] - d["wf_neg"]
-    except Exception as e:
-        d["wf_error"] = str(e)
-        d["wf_periods"] = []
-        d["wf_sharpes"] = []
-        d["wf_colors"]  = []
-        d["wf_neg"] = d["wf_total"] = d["wf_pos"] = 0
-
-    # ── Improvement Summary (Steps 1–8) ──────────────────────────────────────
+    # ── Improvement Summary (Steps 1–8) — a historical change log ─────────────
     d["improvements"] = [
         {"step": "1", "name": "Disable VIX options leg",
          "what": "JOINT_W3 = 0.0 (was 0.2). Heston CIR density is structurally mis-specified for VIX options.",
@@ -1442,48 +1402,6 @@ def load_page4() -> dict[str, Any]:
          "after":  "Honest: backtest P&L is BS on VIX-TS ATM vol; the calibration "
                    "stack serves C6 Greeks / C7 hedge sim, not C10 P&L."},
     ]
-
-    # ── Improved Signal Variants ──────────────────────────────────────────────
-    # Compute from the existing backtest parquet.
-    # S1RF/S2X: zero P&L on R2 days where the signal had an open position.
-    # S1X ≈ S1RF (state machine differs but P&L impact is similar).
-    # S1S ≈ midpoint of S1 and S1RF (continuous scaling reduces exposure by ~50%).
-    try:
-        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
-        eq.index = pd.to_datetime(eq.index)
-
-        # S1RF: zero S1 P&L on R2 days where S1 position is open
-        r2_s1 = (eq["regime"] == 2) & (eq["s1_position"] != 0)
-        pnl_s1rf = eq["pnl_s1"].copy()
-        pnl_s1rf[r2_s1] = 0.0
-
-        # S2X: same approach for S2
-        r2_s2 = (eq["regime"] == 2) & (eq["s2_position"] != 0)
-        pnl_s2x = eq["pnl_s2"].copy()
-        pnl_s2x[r2_s2] = 0.0
-
-        s1_total   = float(eq["pnl_s1"].sum())
-        s1rf_total = float(pnl_s1rf.sum())
-        s1x_total  = s1rf_total                        # S1X ≈ S1RF (approx)
-        s1s_total  = (s1_total + s1rf_total) / 2.0     # S1S: ~half reduction
-        s2x_total  = float(pnl_s2x.sum())
-
-        s2_total = float(eq["pnl_s2"].sum())
-
-        d["variants"] = {
-            "s1_pnl":   round(s1_total,   0),
-            "s1rf_pnl": round(s1rf_total, 0),
-            "s1x_pnl":  round(s1x_total,  0),
-            "s1s_pnl":  round(s1s_total,  0),
-            "s1_impr":  round(s1rf_total - s1_total, 0),
-            "s2_pnl":   round(s2_total,   0),
-            "s2x_pnl":  round(s2x_total,  0),
-            "s2_impr":  round(s2x_total - s2_total, 0),
-            "s3_pnl":   round(float(eq["pnl_s3"].sum()), 0),
-        }
-    except Exception:
-        d["variants"] = None
-
     return _clean(d)
 
 

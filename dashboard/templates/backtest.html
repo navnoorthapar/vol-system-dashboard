@@ -3,11 +3,17 @@
 {% block title %}Backtest — Vol System{% endblock %}
 
 {% block content %}
+{% set sl = d.sleeves or {} %}
+{% set s1 = sl.get('s1') or {} %}{% set s1t = s1.get('summary') or {} %}
+{% set s1c = sl.get('s1c') or {} %}
+{% set s3 = sl.get('s3') or {} %}
+{% set s4 = sl.get('s4') or {} %}
+{% set k = d.kpi or {} %}
 <div class="page-header">
   <div class="page-title">C10 Backtest Results — 2018 → 2025</div>
   <div class="page-subtitle">Delta-hedged straddle portfolio · 3 strategies (S1C + S3 + S4) · $1M initial capital</div>
   <div class="page-badge">
-    NAV: ${{ "{:,.0f}".format(d.final_nav) }}  ·  P&L: ${{ "{:+,.0f}".format(d.total_pnl) }}
+    {% if d.final_nav is not none %}NAV: ${{ "{:,.0f}".format(d.final_nav) }}  ·  P&amp;L: {{ '−' if d.total_pnl < 0 else '+' }}${{ "{:,.0f}".format(d.total_pnl|abs) }}  ·  {{ d.start_date }} → {{ d.end_date }}{% else %}NAV: —{% endif %}
   </div>
 </div>
 
@@ -41,10 +47,10 @@
         straddle</strong> — a directional |S−K| bet, not a vol trade. This contaminated all P&amp;L from C10–C17.
         <strong style="color:#ffaa33;">Fixed: positions now roll correctly</strong>, and the correction inverts the
         contrarian thesis. The "catastrophic" S1 (−$1.53M) that motivated flipping its direction into S1C was the
-        artifact — corrected, <strong style="color:#00ff88;">S1 is a regime-gated short-VRP harvester (+$463K, 76% win)</strong>
-        with a fat crisis tail, and the contrarian inversion <strong style="color:#ff4444;">S1C collapses to −$404K</strong>.
-        The (S1C + S3 + S4) portfolio is <strong style="color:#ff4444;">−26.1% cumulative</strong>, Sharpe −1.80, max DD −31.5%.
-        <strong style="color:#00ff88;">S3 dispersion timing (+$23K, 73% win) is the lone signal positive across every correction.</strong>
+        artifact — corrected, <strong style="color:#00ff88;">S1 is a regime-gated short-VRP harvester ({{ s1.get('total_pnl')|usd_k }}, {{ s1.get('win_rate')|pct(0, false) }} win)</strong>
+        with a fat crisis tail, and the contrarian inversion <strong style="color:#ff4444;">S1C collapses to {{ s1c.get('total_pnl')|usd_k }}</strong>.
+        The (S1C + S3 + S4) portfolio is <strong style="color:#ff4444;">{{ k.get('cum_ret')|pct }} cumulative</strong>, Sharpe {{ k.get('sharpe')|fmt(".2f") }}, max DD {{ k.get('mdd')|pct }}.
+        <strong style="color:#00ff88;">S3 dispersion timing ({{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the lone signal positive across every correction.</strong>
         Still a documented research result, not a deployable strategy: mark-to-model, concentrated, tail-heavy.
       </div>
     </div>
@@ -82,11 +88,11 @@
         <span class="mono">{{ d.research_s1.n_trades }}</span>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
-        53 of 54 trades are short straddles selling rich implied vol in R1 — a regime-gated VRP harvester.
+        {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles selling rich implied vol in R1 — a regime-gated VRP harvester.
         Its prior <strong style="color:#ff4444;">−$1.53M "catastrophe" was the stale-strike bug.</strong>
-        Corrected: <strong style="color:#00ff88;">+$463K, 76% win</strong>, positive in 2018/19/21/23/24.
-        But this is <em>not</em> a green light — the payoff is fat-tailed (a single −$333K COVID trade; 2022 −$99K)
-        and concentrated (top-5 trades = 73% of profit), and it is mark-to-model. Honest read: short-VRP
+        Corrected: <strong style="color:#00ff88;">{{ s1.get('total_pnl')|usd_k }}, {{ s1.get('win_rate')|pct(0, false) }} win</strong>{% if s1t.get('positive_years') %}, positive (by exit year) in {{ s1t.positive_years|join(', ') }}{% endif %}.
+        But this is <em>not</em> a green light — the payoff is fat-tailed (worst single trade {{ s1t.get('worst_pnl')|usd_k }}, {{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}{% if s1t.get('negative_years') %}; losing exit years: {% for y in s1t.negative_years %}{{ y.year }} {{ y.pnl|usd_k }}{{ ', ' if not loop.last else '' }}{% endfor %}{% endif %})
+        and concentrated (top-5 trades = {{ s1t.get('top5_share')|pct(0, false) }} of net profit), and it is mark-to-model. Honest read: short-VRP
         earns the premium in calm regimes and pays it back in spikes.
       </div>
     </div>
@@ -107,7 +113,7 @@
         S1C flipped S1's direction on the premise that S1 lost both ways, so the PDV spread had to be contrarian.
         <strong style="color:#ff4444;">C18 verdict: that premise was the bug.</strong> Once S1 rolls its straddles
         properly it is profitable, so inverting it is the <em>wrong</em> trade — S1C is
-        <strong style="color:#ff4444;">−$404K</strong> on 2018–2025. Demoted, like the ML classifier in C17:
+        <strong style="color:#ff4444;">{{ s1c.get('total_pnl')|usd_k }}</strong> on {{ (d.start_date or '')[:4] }}–{{ (d.end_date or '')[:4] }}. Demoted, like the ML classifier in C17:
         a thesis that only held under a bug is not a signal.
       </div>
     </div>
@@ -127,7 +133,7 @@
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
         Entry requires z_vrp <em>declining</em> from peak (post-spike mean-reversion, not pre-event entry).
         Under correct straddle rolling + accurate regime labels + margin caps:
-        <strong style="color:#ff44aa;">−$189K</strong> on 2018–2025 —
+        <strong style="color:#ff44aa;">{{ s4.get('total_pnl')|usd_k }}</strong> on {{ (d.start_date or '')[:4] }}–{{ (d.end_date or '')[:4] }} —
         consistent conclusion across every revision: VRP is not extractable at retail costs.
       </div>
     </div>
@@ -152,6 +158,11 @@
         {% endfor %}
       </tbody>
     </table>
+    <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
+      All values are the backtest engine's own metrics and trade log (full_results.pkl).
+      Sharpe/Sortino{% if d.sharpe_convention %}: {{ d.sharpe_convention }}{% else %} convention is not recorded in the stored results{% endif %}.
+      Trades are round trips of the three portfolio sleeves; avg P&amp;L is the portfolio's P&amp;L per round trip.
+    </div>
   </div>
 
   <!-- Signal P&L Bar Chart -->
@@ -164,27 +175,33 @@
 
 </div>
 
-<!-- ── Annual Returns + Walk-Forward ────────────────────────────────────── -->
+<!-- ── Annual Returns + Half-year Sharpe ─────────────────────────────────── -->
 <div class="grid grid-2" style="margin-bottom:16px;">
 
   <!-- Annual Returns -->
   <div class="card">
-    <div class="chart-title">Annual Return — 2018 → 2025</div>
+    <div class="chart-title">Annual Return — {{ (d.start_date or '')[:4] }} → {{ d.end_date|fmt }} (vs prior year-end NAV)</div>
     <div class="chart-wrap">
       <canvas id="annualChart" role="img" aria-label="Annual returns by year"></canvas>
     </div>
   </div>
 
-  <!-- Walk-Forward Sharpe -->
+  <!-- Half-year Sharpe (in-sample sub-periods) -->
   <div class="card">
     <div class="flex space-between mb12">
-      <div class="chart-title" style="margin-bottom:0;">Walk-Forward Sharpe — 6-Month OOS Windows</div>
+      <div class="chart-title" style="margin-bottom:0;">Half-Year Sharpe — In-Sample Sub-Periods</div>
       <div style="font-size:11px;color:var(--text3);">
-        <span class="red bold">{{ d.wf_neg }}</span>/{{ d.wf_total }} negative
+        <span class="red bold">{{ d.wf_neg|fmt }}</span>/{{ d.wf_total|fmt }} negative{% if d.wf_flat %} · {{ d.wf_flat }} flat{% endif %}
       </div>
     </div>
     <div class="chart-wrap">
-      <canvas id="wfChart" role="img" aria-label="Walk-forward Sharpe ratio by window"></canvas>
+      <canvas id="wfChart" role="img" aria-label="Half-year Sharpe ratio of the single backtest run"></canvas>
+    </div>
+    <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
+      Sub-periods of ONE backtest run — nothing is refitted per window, so this is not walk-forward or out-of-sample evidence.
+      Sharpe from the engine's <span class="mono">compute_metrics</span> with rf = 0 on the option P&amp;L (excess return; the
+      collateral is assumed to earn ^IRX). Each window's first return is measured from the previous window's close; values
+      are not clipped. A window with a flat NAV (no position) has no Sharpe and is left blank.
     </div>
   </div>
 
@@ -235,13 +252,6 @@
           {% endif %}
         </td>
       </tr>
-      {% if s.is_sparse %}
-      <tr>
-        <td colspan="7" style="font-size:11px;color:var(--text3);padding:3px 12px 8px;border-bottom:1px solid var(--border);">
-          * Sharpe N/A — S3 has {{ s.n_trades }} trades over 7 years (mostly flat NAV → near-zero std → ratio diverges). Use win rate ({{ s.win_rate }}) and total P&amp;L ({{ s.total_pnl }}) instead.
-        </td>
-      </tr>
-      {% endif %}
       {% endfor %}
     </tbody>
   </table>
@@ -250,51 +260,17 @@
   </div>
 </div>
 
-<!-- ── Regime-Exit Variants Table ────────────────────────────────────────── -->
+<!-- ── Regime-Exit Variants ────────────────────────────────────────────────── -->
 <div class="card" style="margin-bottom:16px;">
   <div class="flex space-between mb12">
     <div class="chart-title" style="margin-bottom:0;">Regime-Exit Variants — Historical S1/S2 Research</div>
-    <span class="tag tag-dim" style="font-size:10px;">PRE-C15 REFERENCE</span>
+    <span class="tag tag-dim" style="font-size:10px;">NOT SIMULATED</span>
   </div>
-  <div style="font-size:12px;color:var(--text2);margin-bottom:12px;">
-    Before C15, S1 and S2 were the main signals. These variants show the impact of exiting positions when the regime transitions to R2 (rather than blocking new entries only). S1 was replaced by S1C Contrarian in the main portfolio at C15 — a decision C18 reverses in spirit: once straddles roll correctly, S1 (the short-VRP harvester) is the stronger leg and the contrarian inversion S1C is the weaker one.
-  </div>
-  <table class="data-table mt8">
-    <thead>
-      <tr>
-        <th>Signal</th>
-        <th>Original P&amp;L</th>
-        <th>R2-Exit P&amp;L</th>
-        <th>Improvement</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td style="font-weight:600;">S1 IVR <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
-        <td class="mono {% if d.variants and d.variants.s1_pnl > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s1_pnl) }}{% else %}—{% endif %}</td>
-        <td class="mono {% if d.variants and d.variants.s1rf_pnl > d.variants.s1_pnl %}green{% else %}red{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1rf_pnl) }}{% else %}—{% endif %}
-        </td>
-        <td class="mono {% if d.variants and d.variants.s1_impr > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s1_impr) }}{% else %}—{% endif %}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:600;">S2 VIX TS <span class="tag tag-dim" style="font-size:9px;">REF</span></td>
-        <td class="mono {% if d.variants and d.variants.s2_pnl > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:,.0f}".format(d.variants.s2_pnl) }}{% else %}—{% endif %}</td>
-        <td class="mono {% if d.variants and d.variants.s2x_pnl > d.variants.s2_pnl %}green{% else %}red{% endif %}">
-          {% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2x_pnl) }}{% else %}—{% endif %}
-        </td>
-        <td class="mono {% if d.variants and d.variants.s2_impr > 0 %}green{% else %}red{% endif %}">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s2_impr) }}{% else %}—{% endif %}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:600;">S3 Dispersion <span class="tag tag-green" style="font-size:9px;">MAIN</span></td>
-        <td class="mono green">{% if d.variants %}${{ "{:+,.0f}".format(d.variants.s3_pnl) }}{% else %}—{% endif %}</td>
-        <td class="mono" style="color:var(--text3);">unchanged</td>
-        <td class="mono" style="color:var(--text3);">—</td>
-      </tr>
-    </tbody>
-  </table>
-  <div style="margin-top:10px;font-size:11px;color:var(--text3);">
-    R2 = VOMMA_ACTIVE (deterministic rule: VVIX &gt; 100). C17: regime labels are the lagged rule itself (persistence predictor) — the ML classifier is research-only. R2-exit: forced closure + state reset on R2 transition (S1C, S1X, S2X, S4). Backtest: 2018–2025, $1M notional.
+  <div style="font-size:12px;color:var(--text2);line-height:1.6;">
+    The R2-exit variants (S1X, S2X, S1RF) are not part of the stored backtest, so no figures are shown here.
+    The table previously on this page approximated them by zeroing P&amp;L on R2 days instead of simulating the
+    exit (closing the straddle, paying exit costs, forgoing later P&amp;L, re-entering at a new strike); that
+    approximation got the sign of the S2 effect wrong.
   </div>
 </div>
 
@@ -304,14 +280,14 @@
     <div class="chart-title" style="color:#00ccff;">C18 — The Contrarian Thesis Was a Strike-Rolling Artifact</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1 +$463K</span>
+        <span class="tag tag-green" style="margin-right:8px;">S1 {{ s1.get('total_pnl')|usd_k }}</span>
         The "S1 loses both ways" diagnosis that launched the contrarian idea was the bug:
         positions never rolled, so S1 held one stale-strike straddle past expiry. Rolling
         properly, <strong style="color:#00ff88;">S1 is a regime-gated short-VRP harvester</strong>
         — profitable in calm regimes, with a fat crisis tail.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-red" style="margin-right:8px;">S1C −$404K</span>
+        <span class="tag tag-red" style="margin-right:8px;">S1C {{ s1c.get('total_pnl')|usd_k }}</span>
         Inverting a signal that is actually <em>profitable</em> is the wrong trade. The contrarian
         flip only looked good while S1 looked catastrophic — and that was the artifact.
         <strong style="color:#ff4444;">S1C is demoted</strong>, exactly like the ML classifier in C17:
@@ -320,9 +296,9 @@
       <div>
         <span class="tag tag-dim" style="margin-right:8px;">PORTFOLIO</span>
         The (S1C + S3 + S4) construction, still anchored on the discredited contrarian leg:
-        <strong style="color:#ff4444;">−26.1% cumulative</strong>, max DD −31.5%, Sharpe −1.80
-        vs the actual T-bill path. Crisis windows stay positive (COVID, Fed, Tariffs all small +)
-        but cannot pay for the bleed between them.
+        <strong style="color:#ff4444;">{{ k.get('cum_ret')|pct }} cumulative</strong>, max DD {{ k.get('mdd')|pct }}, Sharpe {{ k.get('sharpe')|fmt(".2f") }}.
+        Crisis windows: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} {{ c.total_return|pct }}{{ ', ' if not loop.last else '' }}{% endfor %}
+        — {% if d.crisis and (d.crisis|selectattr('total_return', 'gt', 0)|list|length) == (d.crisis|length) %}all positive, but they{% else %}they{% endif %} cannot pay for the bleed between them.
       </div>
     </div>
   </div>
@@ -331,20 +307,20 @@
     <div class="chart-title" style="color:#00ff88;">Signal Breakdown — Only S3's Timing Survives</div>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S3 +$23K</span>
-        Dispersion proxy fires only at VIX/VVIX extremes — 22 trades in 7 years,
-        <strong style="color:#00ff88;">73% win rate</strong>, positive at every tested P&amp;L
+        <span class="tag tag-green" style="margin-right:8px;">S3 {{ s3.get('total_pnl')|usd_k }}</span>
+        Dispersion proxy fires only at VIX/VVIX extremes — {{ s3.get('n_trades')|fmt }} trades in {{ (d.start_date or '')[:4] }}–{{ (d.end_date or '')[:4] }},
+        <strong style="color:#00ff88;">{{ s3.get('win_rate')|pct(0, false) }} win rate</strong>, positive at every tested P&amp;L
         scale (0.5%–4%/z-unit) and in pseudo-OOS. Unchanged by the strike-rolling fix — the one
         robust finding; dollar magnitude is proxy-scaled, not market-derived.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1 +$463K</span>
-        76% win, but <strong style="color:#ffaa33;">not deployable</strong>: fat-tailed (one −$333K
-        COVID trade), concentrated (top-5 = 73% of profit), and mark-to-model. Short-VRP earns the
+        <span class="tag tag-green" style="margin-right:8px;">S1 {{ s1.get('total_pnl')|usd_k }}</span>
+        {{ s1.get('win_rate')|pct(0, false) }} win, but <strong style="color:#ffaa33;">not deployable</strong>: fat-tailed (worst trade
+        {{ s1t.get('worst_pnl')|usd_k }}, exited {{ s1t.get('worst_exit')|fmt }}), concentrated (top-5 = {{ s1t.get('top5_share')|pct(0, false) }} of net profit), and mark-to-model. Short-VRP earns the
         premium in calm regimes and pays it back in spikes.
       </div>
       <div>
-        <span class="tag tag-red" style="margin-right:8px;">S4 −$189K</span>
+        <span class="tag tag-red" style="margin-right:8px;">S4 {{ s4.get('total_pnl')|usd_k }}</span>
         VRP mean-reversion negative in-sample under every revision — consistent:
         VRP is not extractable at retail cost levels.
       </div>
@@ -439,8 +415,8 @@
   </table>
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
     Honest read: after removing every identified artifact — including the strike-rolling bug that had been
-    distorting the P&amp;L the whole time — the portfolio is <strong style="color:#ff4444;">−26.1%</strong> and the
-    only signal with cross-correction robustness is S3's timing. S1 is a real short-VRP harvester (+$694K in-sample)
+    distorting the P&amp;L the whole time — the portfolio is <strong style="color:#ff4444;">{{ k.get('cum_ret')|pct }}</strong> and the
+    only signal with cross-correction robustness is S3's timing. S1 is a real short-VRP harvester ({{ s1.get('total_pnl')|usd_k }} in-sample)
     but fat-tailed, concentrated and mark-to-model — not deployable. This dashboard documents a negative result with
     full methodology: the infrastructure (calibration, Greeks, hedging, walk-forward harness) is the deliverable;
     the trading signals are the case study in why most backtests flatter themselves.
@@ -460,7 +436,7 @@
       border:1px solid {% if d.ann_rets[i] > 0 %}rgba(0,200,112,0.3){% else %}rgba(255,51,51,0.25){% endif %};
       text-align:center;
     ">
-      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">{{ d.ann_years[i] }}</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;font-weight:600;">{{ d.ann_years[i] }}{% if d.ann[i].partial %} (to {{ d.end_date[5:] }}){% endif %}</div>
       <div class="mono" style="font-size:22px;font-weight:800;color:{% if d.ann_rets[i] > 0 %}#00c870{% else %}#ff3333{% endif %};">
         {{ "{:+.1f}".format(d.ann_rets[i]) }}%
       </div>
@@ -822,7 +798,7 @@
     }
   });
 
-  // ── Walk-Forward ──────────────────────────────────────────────────────────
+  // ── Half-year Sharpe (in-sample sub-periods) ────────────────────────────
   const wfCtx = document.getElementById('wfChart').getContext('2d');
   const wfSharpes = {{ d.wf_sharpes | tojson }};
 
@@ -833,8 +809,8 @@
       datasets: [
         {
           data: wfSharpes,
-          backgroundColor: wfSharpes.map(v => v >= 0 ? 'rgba(0,200,112,0.7)' : 'rgba(255,51,51,0.6)'),
-          borderColor:      wfSharpes.map(v => v >= 0 ? '#00c870' : '#ff3333'),
+          backgroundColor: wfSharpes.map(v => v === null ? 'transparent' : (v >= 0 ? 'rgba(0,200,112,0.7)' : 'rgba(255,51,51,0.6)')),
+          borderColor:      wfSharpes.map(v => v === null ? 'transparent' : (v >= 0 ? '#00c870' : '#ff3333')),
           borderWidth: 1,
           borderRadius: 4,
           borderSkipped: false,
@@ -848,7 +824,7 @@
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: ctx => `  Sharpe: ${ctx.parsed.y.toFixed(2)}`
+            label: ctx => ctx.parsed.y === null ? '  flat NAV — no Sharpe' : `  Sharpe: ${ctx.parsed.y.toFixed(2)}`
           }
         }
       },
@@ -860,7 +836,7 @@
         y: {
           grid: { color: '#141414' },
           ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: true, text: 'Sharpe Ratio (6M OOS)', color: '#444', font: { size: 10 } },
+          title: { display: true, text: 'Sharpe (half-year, in-sample, rf = 0)', color: '#444', font: { size: 10 } },
         },
       }
     }

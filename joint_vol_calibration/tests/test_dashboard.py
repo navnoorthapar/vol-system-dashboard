@@ -17,6 +17,8 @@ Every test pins a defect the C22 audit found on the live site:
   * the classifier card was fed pdv_iv_spread = −VIX;
   * loader failures rendered zeros with confident prose and still deployed;
   * the smile chart and Greeks came from a different, gate-rejected fit;
+  * KPIs double-counted round trips, the 'walk-forward' chart was an in-sample
+    slice at a flat 5% hurdle clipped at ±4, annual returns did not compound;
   * the heatmap silently dropped 16 of 69 nodes;
   * every page declared the home page as its canonical URL.
 
@@ -504,6 +506,7 @@ def test_term_structure_is_taken_from_one_date(dash, tmp_path, monkeypatch, synt
 
 @pytest.mark.parametrize("victim, route, component", [
     ("greeks/greeks_surface.parquet", "/greeks", "Greeks surface"),
+    ("backtest/full_results.pkl", "/backtest", "backtest engine results"),
     ("pdv_model.pkl", "/", "PDV forecast"),
 ])
 def test_missing_input_renders_an_error_not_zeros(dash, synth, route, victim, component):
@@ -630,3 +633,73 @@ def test_greeks_provenance_metadata_is_read_and_checked(dash, synth, same_fit):
 
 
 # ── backtest page: one source for every metric ───────────────────────────────
+
+@pytest.fixture(scope="module")
+def engine_state():
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        return pickle.load(f)
+
+
+def test_kpis_are_round_trips_of_the_portfolio_sleeves(dash, engine_state):
+    """283 counted entries AND exits; the per-signal table shows 88+22+31 = 141."""
+    m = engine_state["metrics"]
+    d = dash.load_page4()
+    rows = {r["label"]: r["value"] for r in d["metrics_rows"]}
+    n = sum(m[f"{s}_n_trades"] for s in dash.PORTFOLIO_SLEEVES)
+    assert rows["Round-Trip Trades"] == str(n)
+    assert n == sum(int(s["n_trades"]) for s in d["signal_metrics"] if not s["is_research"])
+    trades = [t for t in engine_state["all_trades"] if t.signal in dash.PORTFOLIO_SLEEVES]
+    assert d["kpi"]["win_rate"] == pytest.approx(np.mean([t.net_pnl > 0 for t in trades]), abs=1e-12)
+    assert d["kpi"]["avg_pnl"] == pytest.approx(d["total_pnl"] / n, abs=1e-9)
+    assert rows["Sharpe"] == f"{m['sharpe']:.3f}"
+
+
+def test_s3_sharpe_is_the_engine_value_not_hidden(dash, engine_state):
+    s3 = next(s for s in dash.load_page4()["signal_metrics"] if s["label"].startswith("S3"))
+    assert s3["sharpe"] == f"{engine_state['metrics']['s3_sharpe']:.3f}"
+    html = dash.app.test_client().get("/backtest").get_data(as_text=True)
+    assert "N/A*" not in html and "ratio diverges" not in html
+
+
+def test_half_year_sharpes_use_engine_metrics_unclipped(dash):
+    from joint_vol_calibration.backtest.backtest_engine import compute_metrics
+
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    nav = eq["nav"]
+    nav.index = pd.to_datetime(nav.index)
+    wf = dash.half_year_sharpes(nav)
+    for w in wf:
+        sub = nav.loc[w["start"]:w["end"]]
+        prior = nav.loc[:pd.Timestamp(w["start"]) - pd.Timedelta(days=1)]
+        win = pd.concat([prior.iloc[-1:], sub])
+        if w["flat"]:
+            assert w["sharpe"] is None
+        else:
+            ref = compute_metrics(pd.DataFrame({"nav": win}), rf=0.0)["sharpe"]
+            assert w["sharpe"] == pytest.approx(ref, abs=1e-12)
+    html = dash.app.test_client().get("/backtest").get_data(as_text=True)
+    assert "OOS Windows" not in html and "Walk-Forward Sharpe" not in html
+
+    # no clipping: a steady riser has a Sharpe far above the old ±4 cap
+    idx = pd.bdate_range("2021-01-04", "2021-12-31")
+    steady = pd.Series(1e6 * np.exp(np.cumsum(np.random.default_rng(2).normal(4e-4, 1e-4, len(idx)))), index=idx)
+    hy = dash.half_year_sharpes(steady)
+    assert len(hy) == 2 and min(w["sharpe"] for w in hy) > 20
+
+
+def test_annual_returns_compound_to_the_total(dash):
+    d = dash.load_page4()
+    total = np.prod([1 + a["ret_pct"] / 100 for a in d["ann"]]) - 1
+    assert total == pytest.approx(d["kpi"]["cum_ret"], abs=1e-10)
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    assert d["eq_dates"][-1] == str(pd.Timestamp(eq.index[-1]).date())
+
+
+def test_backtest_prose_is_rendered_from_the_results(dash, engine_state):
+    html = dash.app.test_client().get("/backtest").get_data(as_text=True)
+    for stale in ("+$463K, 76% win", "S1C collapses to −$404K", "−$189K", "−$333K COVID",
+                  "73% of profit", "R2-Exit P&amp;L"):
+        assert stale not in html
+    m = engine_state["metrics"]
+    for key in ("s1_total_pnl", "s1c_total_pnl", "s4_total_pnl"):
+        assert dash._usd_k(m[key]) in html
