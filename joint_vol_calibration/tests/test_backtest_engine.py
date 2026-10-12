@@ -3,24 +3,27 @@ test_backtest_engine.py — C10: Unit tests for BacktestEngine and ReportGenerat
 
 Coverage
 --------
-  TestBSHelpers          (5)  : straddle value, vega, cost, interp
-  TestCostModel          (4)  : entry cost, S3 cost, margin, slippage
-  TestStraddlePnL        (6)  : long/short direction, entry deducted, no-position, delta-hedge
-  TestS3PnL              (4)  : proxy P&L, entry/exit cost, no-trade, long-only
-  TestMetrics            (6)  : Sharpe, Sortino, max_drawdown, Calmar, win_rate, crisis_perf
-  TestEquityCurve        (4)  : starts at capital, nav tracking, columns present, trade log
-  TestBacktestEngine     (5)  : run returns DataFrame, save/load, repr, combined pos
-  TestWalkForward        (3)  : returns DataFrame, correct columns, flags negative Sharpe
-  TestReportGenerator    (4)  : instantiation, generate creates file, chart b64, failures text
-  TestEdgeCases          (3)  : all regime-2, empty period graceful, zero-kelly no crash
-  TestConstants          (5)  : cost params positive, margins, tenor, crisis keys, assumptions
+  TestBSHelpers          : straddle value, vega, cost, interp
+  TestCostModel          : entry cost, S3 cost, margin, slippage
+  TestStraddlePnL        : long/short direction, entry deducted, no-position, delta-hedge
+  TestS3PnL              : legacy proxy P&L, entry/exit cost, no-trade, long-only
+  TestMetrics            : Sharpe, Sortino, max_drawdown, Calmar, win_rate, crisis_perf
+  TestEquityCurve        : starts at capital, nav tracking, columns present, trade log
+  TestBacktestEngine     : run returns DataFrame, save/load, repr, combined pos
+  TestWalkForward        : sub-period windows — DataFrame, columns, negative-Sharpe flag
+  TestReportGenerator    : instantiation, generate creates file, chart b64, sections
+  TestEdgeCases          : all regime-2, empty period graceful, zero-kelly fallback
+  TestConstants          : cost params positive, margins, tenor, crisis keys, assumptions
 
-Total: 49 tests  →  325 + 49 = 374 total
+The C22 accounting corrections (hedge costs, financing, expiry, rates,
+sizing, S3, netting, Sharpe convention, β) are pinned in
+test_backtest_accounting.py.
 """
 
 
 import numpy as np
 import pandas as pd
+import pytest
 
 # ── Helpers shared across tests ────────────────────────────────────────────────
 
@@ -534,8 +537,8 @@ class TestEdgeCases:
         except ValueError:
             pass   # ValueError("No data in ...") is also acceptable
 
-    def test_zero_kelly_no_contracts(self):
-        """Zero kelly fraction should result in 0 contracts (no trade, just cost-free entry)."""
+    def test_zero_kelly_trades_the_one_contract_minimum(self):
+        """A zero Kelly fraction still opens the documented 1-contract minimum."""
         from joint_vol_calibration.backtest.backtest_engine import _simulate_straddle_pnl
         n     = 100
         pos   = _make_position(n, 20, 40)
@@ -545,9 +548,9 @@ class TestEdgeCases:
         vix   = _make_vix(spx)
         spx_idx = spx.set_index("date")["close"]
         vix_idx = vix.set_index("date")
-        pnl, _ = _simulate_straddle_pnl(pos, kelly, nav, spx_idx, vix_idx)
-        # With max(1, int(0)) = 1 contract fallback, just check no exception raised
-        assert isinstance(pnl, pd.Series)
+        pnl, trades = _simulate_straddle_pnl(pos, kelly, nav, spx_idx, vix_idx)
+        assert trades and all(t.n_contracts == 1 for t in trades)
+        assert sum(t.net_pnl for t in trades) == pytest.approx(pnl.sum())
 
 
 # ── 11. TestConstants ─────────────────────────────────────────────────────────
