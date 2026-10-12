@@ -17,6 +17,7 @@ Every test pins a defect the C22 audit found on the live site:
   * the classifier card was fed pdv_iv_spread = −VIX;
   * loader failures rendered zeros with confident prose and still deployed;
   * the smile chart and Greeks came from a different, gate-rejected fit;
+  * the heatmap silently dropped 16 of 69 nodes;
   * every page declared the home page as its canonical URL.
 
 Synthetic market data is seeded; no test touches the network or writes under
@@ -502,6 +503,7 @@ def test_term_structure_is_taken_from_one_date(dash, tmp_path, monkeypatch, synt
 # ── loader failures: visible, and never deployed ──────────────────────────────
 
 @pytest.mark.parametrize("victim, route, component", [
+    ("greeks/greeks_surface.parquet", "/greeks", "Greeks surface"),
     ("pdv_model.pkl", "/", "PDV forecast"),
 ])
 def test_missing_input_renders_an_error_not_zeros(dash, synth, route, victim, component):
@@ -539,6 +541,13 @@ def test_any_loader_error_blocks_the_publish(dash, freezer, tmp_path, monkeypatc
     assert not out.exists() or not any(out.iterdir())
 
 
+def test_freeze_fails_closed_and_writes_nothing(dash, freezer, synth, tmp_path):
+    (synth["data"] / "greeks" / "greeks_surface.parquet").unlink()
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 1
+    assert not out.exists() or not any(out.iterdir())
+
+
 def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
     out = tmp_path / "site"
     assert freezer.freeze(str(out), dash) == 0
@@ -557,6 +566,8 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
     assert f"<loc>{dash.SITE_URL}</loc><lastmod>{p1['latest_session']}</lastmod>" in sitemap
     p2 = dash.load_page2()
     assert f"calibration.html</loc><lastmod>{p2['session']}</lastmod>" in sitemap
+    g = dash.load_page3()
+    assert f"greeks.html</loc><lastmod>{g['surface_date']}</lastmod>" in sitemap
 
 
 def test_external_scripts_carry_subresource_integrity(dash):
@@ -568,5 +579,54 @@ def test_external_scripts_carry_subresource_integrity(dash):
 
 
 # ── Greeks page ───────────────────────────────────────────────────────────────
+
+def test_heatmap_draws_every_node(dash):
+    """0.05-wide bins on a 0.039-spaced grid hid 16 of 69 nodes (one unstable)."""
+    d = dash.load_page3()
+    gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
+    cells = [c for row in d["heatmap_rows"] for c in row["cells"] if c]
+    assert len(cells) == d["n_cells"] == len(gdf)
+    assert sum(c["unstable"] for c in cells) == d["n_unstable"] == int((gdf["vomma_zscore"].abs() > 2).sum())
+    html = dash.app.test_client().get("/greeks").get_data(as_text=True)
+    assert len(re.findall(r'class="node unstable"', html)) == d["n_unstable"]
+    assert "ln(K/S)" not in html and "2026-03-24" not in html and "All three unstable" not in html
+
+
+def test_greeks_badge_and_staleness_come_from_the_surface(dash):
+    d = dash.load_page3()
+    gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
+    assert d["surface_date"] == str(gdf["as_of_date"].iloc[0])[:10]
+    assert d["greeks_age"] == dash.session_age(d["surface_date"], dash._latest_market_session())
+    assert d["qv_values"] and len(d["qv_values"]) == d["n_maturities"]
+
+
+@pytest.mark.parametrize("same_fit", [True, False])
+def test_greeks_provenance_metadata_is_read_and_checked(dash, synth, same_fit):
+    """Contract for the surface builder: parquet metadata key b"provenance"."""
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    last = str(synth["dates"][-1].date())
+    with open(synth["data"] / "calibrations" / f"joint_cal_{last}.pkl", "rb") as f:
+        params = dict(pickle.load(f)["params"])
+    if not same_fit:
+        params["kappa"] += 0.5
+    path = synth["data"] / "greeks" / "greeks_surface.parquet"
+    table = pa.Table.from_pandas(pd.read_parquet(path))
+    prov = {"source_calibration": f"joint_cal_{last}.pkl", "spot_date": last,
+            "S": 6000.0, "r": 0.04, "q": 0.013, "params": params}
+    meta = dict(table.schema.metadata or {})
+    meta[b"provenance"] = json.dumps(prov).encode()
+    pq.write_table(table.replace_schema_metadata(meta), path)
+
+    d = dash.load_page3()
+    assert d["provenance"]["source_calibration"] == f"joint_cal_{last}.pkl"
+    assert d["source_matches_headline"] is same_fit
+    assert d["surface_date"] == last and d["greeks_age"] == 0
+    html = dash.app.test_client().get("/greeks").get_data(as_text=True)
+    assert ("not the parameters of the calibration-page headline fit" in html) is (not same_fit)
+
 
 # ── backtest page: one source for every metric ───────────────────────────────

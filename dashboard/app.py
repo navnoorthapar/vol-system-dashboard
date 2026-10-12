@@ -979,121 +979,126 @@ def load_page2() -> dict[str, Any]:
 
 
 # ── PAGE 3 DATA: Greeks Risk Monitor ─────────────────────────────────────────
+def _greeks_provenance(path: Path) -> dict:
+    """Provenance stored with the surface (parquet metadata 'provenance' JSON)."""
+    prov: dict = {}
+    try:
+        import pyarrow.parquet as pq
+        meta = pq.read_schema(path).metadata or {}
+        raw = meta.get(b"provenance")
+        if raw:
+            prov = json.loads(raw.decode())
+    except Exception as exc:
+        _logger.info("greeks provenance unreadable: %s", exc)
+    return prov
+
+
 def load_page3() -> dict[str, Any]:
-    d: dict[str, Any] = {}
+    d: dict[str, Any] = {"errors": [], "stale": [], "heatmap_rows": [], "heatmap_cols": [],
+                         "unstable_nodes": [], "qv_labels": [], "qv_values": [],
+                         "vanna_labels": [], "vanna_values": [], "scatter_lm": [],
+                         "scatter_z": [], "scatter_T": [], "unstable_maturities": []}
+    for k in ("n_unstable", "n_cells", "n_grid", "n_missing", "n_maturities", "as_of", "surface_date",
+              "vomma_max", "vomma_max_at", "vomma_min", "vomma_min_at", "vomma_mean",
+              "provenance", "source_matches_headline", "greeks_age"):
+        d[k] = None
 
     try:
-        gdf = pd.read_parquet(DATA / "greeks" / "greeks_surface.parquet")
-        # Recompute is_unstable from the raw z-score so the count is
-        # not sensitive to whatever threshold was used when the parquet was saved.
+        path = DATA / "greeks" / "greeks_surface.parquet"
+        gdf = pd.read_parquet(path).copy()
+        # Recompute the flag from the raw z-score so the count does not depend
+        # on whichever threshold was used when the parquet was written.
         gdf["is_unstable"] = gdf["vomma_zscore"].abs() > 2.0
-        maturities = sorted(gdf["T_days"].unique().tolist())
+        # Columns are the surface's own strike grid in ln(K/F): every maturity
+        # uses the same log-moneyness grid by construction. Binning it into
+        # 0.05-wide buckets (grid spacing 0.039) and drawing only the first node
+        # per bucket hid 16 of 69 nodes, one of the three unstable ones among them.
+        gdf["lm_key"] = gdf["log_moneyness"].round(4)
+        dup = gdf.duplicated(["T_days", "lm_key"])
+        if dup.any():
+            raise ValueError(f"{int(dup.sum())} Greeks nodes share a (maturity, log-moneyness) cell")
+        maturities = sorted(int(t) for t in gdf["T_days"].unique())
+        cols = sorted(float(x) for x in gdf["lm_key"].unique())
+        d["n_maturities"] = len(maturities)
+        d["n_cells"] = int(len(gdf))
+        d["n_grid"] = len(maturities) * len(cols)
+        d["n_missing"] = d["n_grid"] - d["n_cells"]
+        if "as_of_date" in gdf.columns and gdf["as_of_date"].notna().any():
+            d["as_of"] = _date_str(gdf["as_of_date"].dropna().iloc[0])
 
-        # Bin log_moneyness into 0.05-wide buckets for the heatmap grid
-        gdf = gdf.copy()
-        gdf["lm_bin"] = (np.floor(gdf["log_moneyness"] / 0.05) * 0.05).round(2)
-        lm_bins = sorted(gdf["lm_bin"].unique().tolist())
-
-        # FIX 3: Compute unstable nodes directly from raw gdf — before binning —
-        # so that two unstable nodes sharing the same lm_bin are both captured.
-        unstable_nodes: list[dict] = []
-        for _, ur in gdf[gdf["is_unstable"]].iterrows():
-            unstable_nodes.append({
-                "T_days": int(ur["T_days"]),
-                "lm":     round(float(ur["log_moneyness"]), 4),
-                "K":      round(float(ur["K"]), 0),
-                "vomma":  round(float(ur["vomma"]), 1),
-                "z":      round(float(ur["vomma_zscore"]), 2),
-                "iv":     round(float(ur["iv"]) * 100, 1),
-            })
-
-        # Build heatmap: rows = maturity, cols = lm_bin
-        heatmap_rows: list[dict] = []
-
+        cell = {(int(r.T_days), float(r.lm_key)): r for r in gdf.itertuples()}
         for T in maturities:
-            sub = gdf[gdf["T_days"] == T]
-            cells: list[dict | None] = []
-            for lm in lm_bins:
-                cell_df = sub[sub["lm_bin"] == lm]
-                if len(cell_df) == 0:
+            cells: list[Optional[dict]] = []
+            for lm in cols:
+                r = cell.get((T, lm))
+                if r is None:
                     cells.append(None)
-                else:
-                    r = cell_df.iloc[0]
-                    z    = float(r["vomma_zscore"])
-                    v    = float(r["vomma"])
-                    iv   = float(r["iv"]) * 100
-                    K    = float(r["K"])
-                    unstable = bool(r["is_unstable"])
-                    cell = {
-                        "vomma":    round(v, 1),
-                        "z":        round(z, 2),
-                        "iv":       round(iv, 1),
-                        "K":        round(K, 0),
-                        "unstable": unstable,
-                        "bg":       _vomma_color(z),
-                        "fg":       "#fff" if unstable or abs(z) > 1 else "#aaa",
-                    }
-                    cells.append(cell)
-            heatmap_rows.append({
-                "T":     int(T),
-                "label": f"{int(T)}d",
-                "cells": cells,
-            })
+                    continue
+                z = float(r.vomma_zscore)
+                cells.append({
+                    "vomma": round(float(r.vomma), 1), "z": round(z, 2),
+                    "iv": round(float(r.iv) * 100, 1), "K": round(float(r.K), 0),
+                    "lm": lm, "unstable": bool(r.is_unstable), "bg": _vomma_color(z),
+                    "fg": "#fff" if bool(r.is_unstable) or abs(z) > 1 else "#aaa",
+                })
+            d["heatmap_rows"].append({"T": T, "label": f"{T}d", "cells": cells})
+        d["heatmap_cols"] = [f"{c:+.3f}" for c in cols]
 
-        d["heatmap_rows"] = heatmap_rows
-        d["heatmap_cols"] = [f"{b:+.2f}" for b in lm_bins]
-        d["unstable_nodes"] = sorted(unstable_nodes, key=lambda x: x["z"], reverse=True)
-        d["n_unstable"]     = len(unstable_nodes)
+        unstable = gdf[gdf["is_unstable"]]
+        d["unstable_nodes"] = sorted((
+            {"T_days": int(u.T_days), "lm": round(float(u.log_moneyness), 4),
+             "K": round(float(u.K), 0), "vomma": round(float(u.vomma), 1),
+             "z": round(float(u.vomma_zscore), 2), "iv": round(float(u.iv) * 100, 1)}
+            for u in unstable.itertuples()), key=lambda x: x["z"], reverse=True)
+        d["n_unstable"] = len(d["unstable_nodes"])
+        d["unstable_maturities"] = sorted({n["T_days"] for n in d["unstable_nodes"]})
 
-        # Vomma surface statistics
-        d["vomma_max"]  = round(float(gdf["vomma"].max()), 1)
-        d["vomma_min"]  = round(float(gdf["vomma"].min()), 1)
+        imax, imin = gdf["vomma"].idxmax(), gdf["vomma"].idxmin()
+        d["vomma_max"] = round(float(gdf.loc[imax, "vomma"]), 1)
+        d["vomma_max_at"] = {"T_days": int(gdf.loc[imax, "T_days"]),
+                             "lm": round(float(gdf.loc[imax, "log_moneyness"]), 3)}
+        d["vomma_min"] = round(float(gdf.loc[imin, "vomma"]), 1)
+        d["vomma_min_at"] = {"T_days": int(gdf.loc[imin, "T_days"]),
+                             "lm": round(float(gdf.loc[imin, "log_moneyness"]), 3)}
         d["vomma_mean"] = round(float(gdf["vomma"].mean()), 1)
-        d["n_cells"]    = len(gdf)
 
-        # QV convexity per maturity
-        qv = gdf.groupby("T_days")["qv_convexity"].agg(["mean", "max"]).reset_index()
-        d["qv_labels"]    = [f"{int(t)}d" for t in qv["T_days"]]
-        d["qv_mean"]      = (qv["mean"] * 1e4).round(4).tolist()  # ×1e4 for display
-        d["qv_max"]       = (qv["max"]  * 1e4).round(4).tolist()
+        # QV convexity = Var[∫v dt] per maturity: one number per maturity (it
+        # does not depend on strike), so a single series is plotted.
+        qv = gdf.groupby("T_days")["qv_convexity"].agg(["mean", "min", "max"])
+        if ((qv["max"] - qv["min"]).abs() > 1e-12 * qv["max"].abs().clip(lower=1)).any():
+            _logger.info("qv_convexity varies within a maturity; plotting the mean")
+        d["qv_labels"] = [f"{int(t)}d" for t in qv.index]
+        d["qv_values"] = (qv["mean"] * 1e4).round(4).tolist()
 
-        # Vanna per maturity
-        vanna = gdf.groupby("T_days")["vanna"].mean().reset_index()
-        d["vanna_labels"] = [f"{int(t)}d" for t in vanna["T_days"]]
-        d["vanna_values"] = vanna["vanna"].round(4).tolist()
+        vanna = gdf.groupby("T_days")["vanna"].mean()
+        d["vanna_labels"] = [f"{int(t)}d" for t in vanna.index]
+        d["vanna_values"] = vanna.round(4).tolist()
 
-        # Vega per maturity
-        vega = gdf.groupby("T_days")["vega"].mean().reset_index()
-        d["vega_labels"]  = [f"{int(t)}d" for t in vega["T_days"]]
-        d["vega_values"]  = vega["vega"].round(2).tolist()
+        d["scatter_lm"] = gdf["log_moneyness"].round(4).tolist()
+        d["scatter_z"] = gdf["vomma_zscore"].round(3).tolist()
+        d["scatter_T"] = gdf["T_days"].astype(int).tolist()
 
-        # Vomma z-score scatter (for chart)
-        d["scatter_lm"]    = gdf["log_moneyness"].round(4).tolist()
-        d["scatter_z"]     = gdf["vomma_zscore"].round(3).tolist()
-        d["scatter_T"]     = gdf["T_days"].astype(int).tolist()
-        d["scatter_iv"]    = (gdf["iv"] * 100).round(2).tolist()
-
+        # Provenance + staleness. The shipped surface records no source fit;
+        # when it does (parquet metadata), compare with the headline calibration.
+        prov = _greeks_provenance(path)
+        d["provenance"] = prov or None
+        if prov.get("params"):
+            try:
+                _, hcal = load_headline_calibration()
+                hp = hcal["params"]
+                d["source_matches_headline"] = all(
+                    abs(float(prov["params"][k]) - float(hp[k])) <= 1e-9 * max(1.0, abs(float(hp[k])))
+                    for k in ("kappa", "theta", "sigma", "rho", "v0"))
+            except Exception as exc:
+                _logger.info("headline comparison unavailable: %s", exc)
+        surface_date = _date_str(prov.get("spot_date")) or d["as_of"]
+        ref = _latest_market_session()
+        item = _staleness("greeks", "Greeks surface", surface_date, ref)
+        d["greeks_age"] = item["age"]
+        d["surface_date"] = surface_date
+        d["stale"] = [item]
     except Exception as e:
-        d["greeks_error"] = str(e)
-        d["heatmap_rows"] = []
-        d["heatmap_cols"] = []
-        d["unstable_nodes"] = []
-        d["n_unstable"] = 0
-        d["n_cells"] = 0
-        d["vomma_max"] = 0
-        d["vomma_min"] = 0
-        d["vomma_mean"] = 0
-        d["qv_labels"] = []
-        d["qv_mean"] = []
-        d["qv_max"] = []
-        d["vanna_labels"] = []
-        d["vanna_values"] = []
-        d["vega_labels"] = []
-        d["vega_values"] = []
-        d["scatter_lm"] = []
-        d["scatter_z"] = []
-        d["scatter_T"] = []
-        d["scatter_iv"] = []
+        _record_error(d, "Greeks surface (greeks_surface.parquet)", e)
 
     return _clean(d)
 
