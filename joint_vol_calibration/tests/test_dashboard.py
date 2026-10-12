@@ -4,9 +4,12 @@ static-site freezer (dashboard/freeze_site.py) — correction round C22.
 
 Every test pins a defect the C22 audit found on the live site:
 
+  * the calibration selector headlined the LOWEST-RMSE archived fit, which
+    rewards thin data (one SPX expiry, one VIX tenor);
   * `python dashboard/app.py` overwrote the tracked regime_labels.parquet with the
     demoted classifier's predictions;
   * loader failures rendered zeros with confident prose and still deployed;
+  * the smile chart and Greeks came from a different, gate-rejected fit;
   * every page declared the home page as its canonical URL.
 
 Synthetic market data is seeded; no test touches the network or writes under
@@ -223,11 +226,156 @@ def test_local_preview_binds_loopback(monkeypatch):
 
 # ── calibration selection ─────────────────────────────────────────────────────
 
+def test_selector_takes_newest_acceptable_fit_not_lowest_rmse(dash, tmp_path, monkeypatch):
+    data = tmp_path / "data_store"
+    _write_cals(data / "calibrations", {
+        "joint_cal_2026-07-01.pkl": _cal("2026-07-01", 0.20),            # best RMSE, older
+        "joint_cal_2026-09-04.pkl": _cal("2026-09-04", 1.90),            # newest acceptable
+        "joint_cal_2026-09-10.pkl": _cal("2026-09-10", 0.05, n_vix=1),   # newest, gate-rejected
+    })
+    monkeypatch.setattr(dash, "DATA", data)
+    assert Path(dash.latest_good_calibration_path()).name == "joint_cal_2026-09-04.pkl"
+
+
+def test_selector_never_falls_back_to_a_rejected_fit(dash, tmp_path, monkeypatch):
+    data = tmp_path / "data_store"
+    _write_cals(data / "calibrations", {
+        "joint_cal_2026-09-10.pkl": _cal("2026-09-10", 0.05, n_vix=1),
+        "joint_cal_2026-09-11.pkl": _cal("2026-09-11", 4.00),
+    })
+    monkeypatch.setattr(dash, "DATA", data)
+    assert dash.latest_good_calibration_path() is None
+
+
+def test_selector_passes_new_gate_arguments_by_name(dash, tmp_path, monkeypatch):
+    """A gate that grows an SPX-sufficiency argument is honoured without
+    touching the dashboard (the old call was positional and fixed)."""
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+
+    def gate(params, spx_iv_rmse=None, n_vix_tenors=None, n_spx_expiries=None):
+        if n_spx_expiries is not None and n_spx_expiries < 3:
+            return False, "one expiry"
+        return True, "ok"
+
+    monkeypatch.setattr(jc, "is_acceptable_calibration", gate)
+    data = tmp_path / "data_store"
+    _write_cals(data / "calibrations", {
+        "joint_cal_2026-09-04.pkl": _cal("2026-09-04", 1.9, n_spx_expiries=4),
+        "joint_cal_2026-09-11.pkl": _cal("2026-09-11", 0.2, n_spx=9, n_spx_expiries=1),
+    })
+    monkeypatch.setattr(dash, "DATA", data)
+    assert Path(dash.latest_good_calibration_path()).name == "joint_cal_2026-09-04.pkl"
+
+
+def test_calibration_page_shows_age_and_staleness_banner(dash, synth):
+    """A headline fit 10 sessions older than the newest session is flagged."""
+    dates = synth["dates"]
+    old = str(dates[-11].date())
+    cal_dir = synth["data"] / "calibrations"
+    for p in cal_dir.glob("*.pkl"):
+        p.unlink()
+    _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0)})
+    d = dash.load_page2()
+    assert d["session"] == old and d["calib_age"] == 10
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert 'class="banner banner-stale-error"' in html
+    assert "Heston calibration is 10 NYSE sessions old" in html
+
+
+def test_legacy_fits_are_labelled_when_the_library_can_tell(dash, synth, monkeypatch):
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+
+    monkeypatch.setattr(jc, "calibration_is_legacy", lambda cal: True, raising=False)
+    assert dash.load_page2()["legacy"] is True
+    assert "PRE-C22 FIT" in dash.app.test_client().get("/calibration").get_data(as_text=True)
+    monkeypatch.delattr(jc, "calibration_is_legacy", raising=False)
+    assert dash.load_page2()["legacy"] is None
+
+
+def test_carry_is_shown_only_when_the_fit_recorded_it(dash, synth):
+    """A lone stored r is a post-fit T-bill close, and q=0 was a display default."""
+    cal_dir = synth["data"] / "calibrations"
+    last = str(synth["dates"][-1].date())
+    _write_cals(cal_dir, {f"joint_cal_{last}.pkl": _cal(last, 1.0, r=0.03913)})
+    d = dash.load_page2()
+    assert d["r_pct"] is None and d["q_pct"] is None and d["carry_recorded"] is False
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert "SOFR" not in html and "r = n/a" in html
+
+    _write_cals(cal_dir, {f"joint_cal_{last}.pkl": _cal(last, 1.0, r=0.045, q=0.013)})
+    d = dash.load_page2()
+    assert (d["r_pct"], d["q_pct"]) == (4.5, 1.3)
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_single_expiry_fit_is_flagged_not_called_good(dash, synth, monkeypatch, recorded):
+    """Display check, independent of whether the gate admits such a fit."""
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+
+    monkeypatch.setattr(jc, "is_acceptable_calibration", lambda params, *a, **k: (True, "ok"))
+    last = str(synth["dates"][-1].date())
+    extra = {} if recorded else {"n_spx_expiries": None}      # legacy: count not stored
+    _write_cals(synth["data"] / "calibrations",
+                {f"joint_cal_{last}.pkl": _cal(last, 0.2, n_spx=9, **extra)})
+    d = dash.load_page2()
+    assert d["n_spx_expiries"] == 1 and d["spx_underidentified"]
+    assert d["n_spx_expiries_inferred"] is (not recorded)
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert "Good fit" not in html and "Not comparable" in html
+
+
+def test_model_smile_is_the_headline_fits_heston_smile(dash, synth):
+    """The chart showed the Greeks parquet (another, gate-rejected fit)."""
+    from scipy.optimize import brentq
+    from scipy.stats import norm
+
+    from joint_vol_calibration.models.heston import heston_call_batch
+
+    last = str(synth["dates"][-1].date())
+    cal = _cal(last, 1.0, params={"kappa": 3.0, "theta": 0.047, "sigma": 0.5, "rho": -0.9, "v0": 0.012})
+    _write_cals(synth["data"] / "calibrations", {f"joint_cal_{last}.pkl": cal})
+    p = cal["params"]
+    d = dash.load_page2()
+    assert d["kappa"] == p["kappa"]
+    assert d["mat_smiles"], "no smile rendered"
+    for s in d["mat_smiles"]:
+        T = s["T"] / 365.0
+        k = np.array(s["lm"])
+        K = np.exp(k)
+        # independent reference: finer integration grid + direct BS inversion
+        calls = heston_call_batch(1.0, K, T, 0.0, 0.0, p["kappa"], p["theta"], p["sigma"],
+                                  p["rho"], p["v0"], n_points=20000, v_upper=2000.0)
+        for ki, Ki, c, iv_pct in zip(k, K, calls, s["iv"]):
+            def bs(vol):
+                d1 = (-np.log(Ki) + 0.5 * vol * vol * T) / (vol * np.sqrt(T))
+                return norm.cdf(d1) - Ki * norm.cdf(d1 - vol * np.sqrt(T)) - c
+            ref = brentq(bs, 1e-4, 5.0, xtol=1e-12)
+            assert abs(iv_pct - ref * 100) < 2e-3, (s["T"], ki, iv_pct, ref * 100)
+
+
+def test_quintic_is_compared_with_the_same_snapshot_heston(dash):
+    q = dash.load_page2()["quintic"]
+    assert q is not None and q["heston"] is not None
+    assert q["heston"]["file"] == f"joint_cal_{q['as_of']}.pkl"
+    with open(SHIPPED / "calibrations" / q["heston"]["file"], "rb") as f:
+        h = pickle.load(f)
+    assert q["heston"]["spx_delta"] == pytest.approx(
+        q["spx_rmse"] - dash._cal_losses(h)["spx_iv_rmse"], abs=1e-12)
+
+
 # ── PDV card ──────────────────────────────────────────────────────────────────
 
 # ── front page: rule label, classifier, term structure ───────────────────────
 
 # ── loader failures: visible, and never deployed ──────────────────────────────
+
+def test_missing_calibration_renders_an_error_not_a_500(dash, synth):
+    for p in (synth["data"] / "calibrations").glob("*.pkl"):
+        p.unlink()
+    resp = dash.app.test_client().get("/calibration")
+    assert resp.status_code == 200
+    assert "headline calibration" in resp.headers["X-Dashboard-Error-Components"]
+
 
 def test_any_loader_error_blocks_the_publish(dash, freezer, tmp_path, monkeypatch):
     """freeze_site only failed on HTTP 500 or a 'Traceback' string, so pages
@@ -258,6 +406,9 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
         assert canon == og == dash.canonical_url(route)
         assert canon in locs
         assert 'href="/' not in html.replace('href="/"', "")   # nav links are relative
+    # lastmod is the date of the data each page shows, never "today"
+    p2 = dash.load_page2()
+    assert f"calibration.html</loc><lastmod>{p2['session']}</lastmod>" in sitemap
 
 
 def test_external_scripts_carry_subresource_integrity(dash):

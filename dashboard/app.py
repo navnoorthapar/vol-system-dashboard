@@ -293,52 +293,216 @@ def _vomma_color(z: Optional[float]) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-# ── Calibration selection ──────────────────────────────────────────────────────
-def latest_good_calibration_path() -> str:
-    """Return the BEST joint_cal_*.pkl: lowest SPX RMSE among *well-identified*,
-    non-degenerate fits.
+# ── Market data readers (DB) ───────────────────────────────────────────────────
+def _read_spx() -> pd.DataFrame:
+    """SPX closes and log returns, date-indexed, ascending."""
+    with _db() as con:
+        df = pd.read_sql("SELECT date, close, log_return FROM spx_ohlcv ORDER BY date", con)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.set_index("date")
 
-    Daily cloud refreshes produce noisy Heston fits from thin intraday option
-    snapshots — some degenerate (sigma->0, rho->0), some merely worse-quality or
-    Feller-marginal. Rather than headline whichever ran most recently (which can
-    flip the page to a marginally worse fit than the documented showcase), we
-    display the system's best clean calibration.
 
-    Ranking on SPX RMSE alone is NOT sufficient, and got this wrong in
-    production. If the VIX term structure degrades to a single tenor (Yahoo
-    intermittently returns ^VIX without ^VIX9D/3M/6M), the VIX-futures leg
-    becomes one data point that Heston matches exactly, freeing all five
-    parameters to fit the SPX smile alone. The result is a spuriously excellent
-    SPX RMSE — 2026-07-23 scored 0.049vp against 0.4–2.0vp on full 4-tenor days
-    — so a pure min-RMSE rule *preferentially selects the days the data broke*,
-    and headlined a fit that is not a joint calibration at all. Data sufficiency
-    is therefore a hard precondition, checked before RMSE is even consulted.
+def _read_vix_daily() -> pd.Series:
+    with _db() as con:
+        df = pd.read_sql("SELECT date, close FROM vix_daily ORDER BY date", con)
+    return pd.Series(df["close"].values, index=pd.to_datetime(df["date"]), name="vix")
 
-    Falls back to the newest sufficient file, then the 05-31 showcase.
+
+def _read_vix_wide() -> pd.DataFrame:
+    """VIX term-structure closes, one column per ticker, date-indexed."""
+    with _db() as con:
+        df = pd.read_sql("SELECT date, ticker, close FROM vix_term_structure", con)
+    df["date"] = pd.to_datetime(df["date"])
+    wide = df.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
+    wide.columns.name = None
+    return wide.sort_index()
+
+
+def _latest_market_session() -> Optional[str]:
+    """Newest session any dashboard input knows about (DB close or rule label).
+
+    The reference date for every staleness age: an input is 'n sessions old'
+    relative to the newest session the site has data for.
     """
-    import glob as _glob
-    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+    dates = []
+    try:
+        with _db() as con:
+            row = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()
+        if row and row[0]:
+            dates.append(str(row[0])[:10])
+    except Exception as exc:  # reported by the loaders that need the DB
+        _logger.info("latest session: DB unavailable (%s)", exc)
+    try:
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
+        if len(rl):
+            dates.append(str(pd.Timestamp(rl.index[-1]).date()))
+    except Exception as exc:
+        _logger.info("latest session: regime labels unavailable (%s)", exc)
+    return max(dates) if dates else None
 
-    cals = sorted(_glob.glob(str(DATA / "calibrations" / "joint_cal_*.pkl")))
-    best_path, best_rmse = None, float("inf")
-    for path in cals:
+
+# ── Calibration selection ──────────────────────────────────────────────────────
+def _calibration_session(cal: dict, path: str | Path) -> Optional[str]:
+    """The market session a calibration describes (spot_date > as_of_date > file name)."""
+    for key in ("spot_date", "as_of_date"):
+        s = _date_str(cal.get(key))
+        if s:
+            return s
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", Path(path).name)
+    return m.group(1) if m else None
+
+
+def _cal_losses(cal: dict) -> dict:
+    return cal.get("leg_losses") or cal.get("losses") or {}
+
+
+def calibration_gate(cal: dict) -> tuple[bool, str]:
+    """Apply joint_calibrator.is_acceptable_calibration to a stored result.
+
+    The gate is the single source of truth for what may be published, and its
+    signature grows as checks are added (SPX data sufficiency, snapshot
+    freshness, ...). Its arguments are therefore bound BY NAME from the stored
+    result: `params` <- result["params"], `spx_iv_rmse` <- the SPX leg RMSE, a
+    parameter called `result`/`cal`/`calibration` <- the whole dict, and any
+    other parameter <- the result key of the same name. A new gate argument is
+    picked up here without editing the dashboard.
+    """
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+
+    gate = jc.is_acceptable_calibration
+    losses = _cal_losses(cal)
+    args, kwargs = [], {}
+    for name, p in inspect.signature(gate).parameters.items():
+        if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+            continue
+        if name == "params":
+            val, have = cal.get("params", {}), True
+        elif name in ("result", "cal", "calibration"):
+            val, have = cal, True
+        elif name in ("spx_iv_rmse", "spx_rmse"):
+            val = losses.get("spx_iv_rmse")
+            have = val is not None
+        elif name in cal:
+            val, have = cal[name], True
+        elif name in losses:
+            val, have = losses[name], True
+        else:
+            val, have = None, False
+        if not have:
+            if p.default is p.empty:
+                return False, f"result lacks '{name}', required by the quality gate"
+            continue
+        if p.kind is p.POSITIONAL_ONLY:
+            args.append(val)
+        else:
+            kwargs[name] = val
+    ok, reason = gate(*args, **kwargs)
+    return bool(ok), str(reason)
+
+
+def calibration_is_legacy(cal: dict) -> Optional[bool]:
+    """joint_calibrator.calibration_is_legacy(cal) when the library provides it.
+
+    Returns None (unknown) on library versions without the helper.
+    """
+    try:
+        from joint_vol_calibration.calibration import joint_calibrator as jc
+        fn = getattr(jc, "calibration_is_legacy", None)
+        return bool(fn(cal)) if callable(fn) else None
+    except Exception as exc:
+        _logger.info("calibration_is_legacy unavailable (%s)", exc)
+        return None
+
+
+def latest_good_calibration_path(cal_dir: str | Path | None = None) -> Optional[str]:
+    """Return the NEWEST joint_cal_*.pkl that passes the quality gate, or None.
+
+    Selection is by market session (spot_date, else as_of_date, else the date
+    in the file name), never by RMSE. Ranking archived fits by RMSE is a
+    selection bias that rewards thin data: a one-tenor VIX leg (2026-07-23,
+    0.049 vp) and later a one-expiry SPX leg (2026-09-11, 0.215 vp; 2026-09-25,
+    0.041 vp) each scored the best RMSE on record precisely because the data
+    had broken, and an RMSE-ranked selector headlined them over newer, better
+    identified fits. What may be published is decided by the gate
+    (``calibration_gate``); the dashboard shows the latest such fit together
+    with its age, and never falls back to a fit the gate rejected.
+    """
+    cal_dir = Path(cal_dir) if cal_dir is not None else DATA / "calibrations"
+    candidates = []
+    for path in glob.glob(str(cal_dir / "joint_cal_*.pkl")):
         try:
             with open(path, "rb") as f:
                 cal = pickle.load(f)
-            losses = cal.get("leg_losses", cal.get("losses", {}))
-            spx_rmse = losses.get("spx_iv_rmse", None)
-            ok, _ = is_acceptable_calibration(
-                cal.get("params", {}), spx_rmse, cal.get("n_vix_tenors")
-            )
-            if ok and spx_rmse is not None and spx_rmse < best_rmse:
-                best_path, best_rmse = path, spx_rmse
-        except Exception:
+            ok, reason = calibration_gate(cal)
+        except Exception as exc:
+            _logger.warning("calibration %s unreadable: %s", Path(path).name, exc)
             continue
-    if best_path:
-        return best_path
-    if cals:
-        return cals[-1]
-    return str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
+        session = _calibration_session(cal, path)
+        if ok and session:
+            candidates.append((session, str(cal.get("run_date") or ""), path))
+        elif not ok:
+            _logger.info("calibration %s rejected by gate: %s", Path(path).name, reason)
+    if not candidates:
+        return None
+    return max(candidates)[2]
+
+
+def load_headline_calibration() -> tuple[str, dict]:
+    """(path, result) of the headline calibration; raises when none is acceptable."""
+    path = latest_good_calibration_path()
+    if path is None:
+        raise FileNotFoundError(
+            "no joint_cal_*.pkl in data_store/calibrations passes the quality gate"
+        )
+    with open(path, "rb") as f:
+        return path, pickle.load(f)
+
+
+# ── Heston model smile (calibration page) ──────────────────────────────────────
+SMILE_MATURITIES_DAYS = (14, 30, 60, 91, 180, 365)
+SMILE_LOG_MONEYNESS = np.round(np.linspace(-0.30, 0.25, 23), 4)
+# OTM forward prices below this (as a fraction of the forward) are dropped:
+# inverting a price that small turns pricer round-off into a fake implied vol
+# (the old Greeks-surface smile showed a 30-day "IV" of 5.0% that way).
+SMILE_PRICE_FLOOR = 1e-6
+
+
+def heston_model_smile(params: dict,
+                       maturities_days: Iterable[int] = SMILE_MATURITIES_DAYS,
+                       log_moneyness: Iterable[float] = SMILE_LOG_MONEYNESS) -> list[dict]:
+    """Heston implied-vol smiles of `params` against ln(K/F).
+
+    With deterministic rates the forward-normalised Heston smile does not
+    depend on r or q, so it is priced with S = F = 1 and r = q = 0 and needs
+    nothing beyond the five parameters. OTM prices (puts below the forward,
+    calls above) come from the vectorised Carr-Madan pricer on a converged
+    integration grid and are inverted with Black-Scholes; nodes whose OTM price
+    is below SMILE_PRICE_FLOOR are omitted rather than shown.
+    """
+    from joint_vol_calibration.models.heston import heston_call_batch, implied_vol_from_price
+
+    k = np.asarray(list(log_moneyness), dtype=float)
+    K = np.exp(k)
+    out = []
+    for T_days in maturities_days:
+        T = float(T_days) / 365.0
+        calls = heston_call_batch(
+            1.0, K, T, 0.0, 0.0,
+            params["kappa"], params["theta"], params["sigma"], params["rho"], params["v0"],
+            n_points=4096, v_upper=1000.0,
+        )
+        otm = np.where(k < 0, calls - (1.0 - K), calls)
+        lm, iv = [], []
+        for ki, Ki, price in zip(k, K, otm):
+            if not np.isfinite(price) or price < SMILE_PRICE_FLOOR:
+                continue
+            vol = implied_vol_from_price(float(price), 1.0, float(Ki), T, 0.0, 0.0,
+                                         "P" if ki < 0 else "C", tol=1e-10)
+            if vol is not None:
+                lm.append(round(float(ki), 4))
+                iv.append(float(vol))
+        out.append({"T": int(T_days), "lm": lm, "iv": iv})
+    return out
 
 
 # ── PAGE 1 DATA: Live Market Overview ─────────────────────────────────────────
@@ -700,180 +864,174 @@ def load_page1() -> dict[str, Any]:
 
 
 # ── PAGE 2 DATA: Calibration Results ─────────────────────────────────────────
+def _optimizer_settings(cal: dict) -> Optional[str]:
+    """Human-readable optimiser settings when the result records them."""
+    opt = cal.get("optimizer") or cal.get("de_config") or {}
+    maxiter = opt.get("maxiter", cal.get("de_maxiter"))
+    popsize = opt.get("popsize", cal.get("de_popsize"))
+    if maxiter is None or popsize is None:
+        return None
+    return f"DE (maxiter {int(maxiter)}, popsize {int(popsize)} × 5) + L-BFGS-B"
+
+
 def load_page2() -> dict[str, Any]:
-    d: dict[str, Any] = {}
+    d: dict[str, Any] = {"errors": [], "stale": [], "mat_smiles": [], "anchors": [],
+                         "quintic": None, "rmse_bars": []}
+    for k in ("kappa", "theta", "theta_vol", "sigma", "rho", "v0", "v0_vol", "S",
+              "r_pct", "q_pct", "session", "fit_time", "n_evals",
+              "spx_rmse", "vix_fut_rmse", "vix_opt_rmse", "feller_lhs", "feller_rhs",
+              "feller_margin", "feller_state", "effective_dof", "n_spx_options",
+              "n_vix_tenors", "spot_date", "n_spx_expiries", "half_life_days",
+              "optimizer", "legacy", "calib_file", "calib_age"):
+        d[k] = None
+    d.update(pinned_params=[], rho_at_boundary=False, spx_underidentified=None,
+             n_spx_expiries_inferred=False, carry_recorded=False)
 
     try:
-        with open(latest_good_calibration_path(), "rb") as f:
-            cal = pickle.load(f)
-
+        path, cal = load_headline_calibration()
         p = cal["params"]
-        d["kappa"]     = round(p["kappa"], 4)
-        d["theta"]     = round(p["theta"], 5)
+        d["calib_file"] = Path(path).name
+        d["session"] = _calibration_session(cal, path)
+        d["kappa"] = round(p["kappa"], 4)
+        d["theta"] = round(p["theta"], 5)
         d["theta_vol"] = round(np.sqrt(p["theta"]) * 100, 2)
-        d["sigma"]     = round(p["sigma"], 4)
-        d["rho"]       = round(p["rho"], 4)
-        d["v0"]        = round(p["v0"], 5)
-        d["v0_vol"]    = round(np.sqrt(p["v0"]) * 100, 2)
-        d["S"]         = round(float(cal.get("S", 0)), 1)
-        d["r_pct"]     = round(float(cal.get("r", 0)) * 100, 2)
-        d["q_pct"]     = round(float(cal.get("q", 0)) * 100, 2)
-        d["as_of"]     = str(cal.get("as_of_date", "2026-05-31"))
-        d["fit_time"]  = round(float(cal.get("fit_time", 0)), 1)
-        d["n_evals"]   = int(cal.get("n_evals", 0))
+        d["sigma"] = round(p["sigma"], 4)
+        d["rho"] = round(p["rho"], 4)
+        d["v0"] = round(p["v0"], 5)
+        d["v0_vol"] = round(np.sqrt(p["v0"]) * 100, 2)
+        d["half_life_days"] = (np.log(2) / p["kappa"] * 252) if p["kappa"] > 0 else None
+        d["S"] = round(float(cal["S"]), 1) if _num(cal.get("S")) is not None else None
+        d["fit_time"] = round(float(cal["fit_time"]), 1) if _num(cal.get("fit_time")) is not None else None
+        d["n_evals"] = int(cal["n_evals"]) if _num(cal.get("n_evals")) is not None else None
+        d["optimizer"] = _optimizer_settings(cal)
+        d["legacy"] = calibration_is_legacy(cal)
 
-        losses = cal.get("leg_losses", cal.get("losses", {}))
-        d["spx_rmse"]     = round(float(losses.get("spx_iv_rmse", 0)), 3)
-        d["vix_fut_rmse"] = round(float(losses.get("vix_futures_rmse", 0)), 3)
-        d["vix_opt_rmse"] = round(float(losses.get("vix_options_rmse", 0)), 2)
-        d["total_loss"]   = round(float(losses.get("total_loss", 0)), 6)
+        # Carry inputs: shown only when the RESULT records both r and q. Daily
+        # fits before C22 ran with the calibrator's default carry while the
+        # pickle stored a T-bill close written after the fit (and no q), so a
+        # lone stored r is not the rate the fit used.
+        if _num(cal.get("r")) is not None and _num(cal.get("q")) is not None:
+            d["carry_recorded"] = True
+            d["r_pct"] = round(float(cal["r"]) * 100, 2)
+            d["q_pct"] = round(float(cal["q"]) * 100, 2)
 
-        # Feller condition: 2κθ vs σ², reported as PASS / BINDING / VIOLATED.
-        # The solver uses a soft exterior penalty, so when the constraint binds
-        # it lands ~1e-6 outside the feasible set. A strict boolean renders that
-        # as a hard failure; it is really an active constraint.
+        losses = _cal_losses(cal)
+        d["spx_rmse"] = round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None else None
+        d["vix_fut_rmse"] = round(float(losses["vix_futures_rmse"]), 3) if _num(losses.get("vix_futures_rmse")) is not None else None
+        w3 = (cal.get("weights") or {}).get("w3")
+        vix_opt_active = bool(w3) or bool(cal.get("n_vix_options"))
+        if vix_opt_active and _num(losses.get("vix_options_rmse")) is not None:
+            d["vix_opt_rmse"] = round(float(losses["vix_options_rmse"]), 2)
+        d["vix_opt_disabled"] = not vix_opt_active
+        d["rmse_bars"] = [b for b in (
+            {"label": "SPX IV RMSE (vol pts)", "value": d["spx_rmse"], "color": "#3388ff"},
+            {"label": "VIX leg RMSE (index pts)", "value": d["vix_fut_rmse"], "color": "#00ff88"},
+            {"label": "VIX options RMSE (vol pts)", "value": d["vix_opt_rmse"], "color": "#ff3333"},
+        ) if b["value"] is not None]
+
+        # Feller: PASS / BINDING / VIOLATED (soft exterior penalty -> an active
+        # constraint lands a whisker outside the feasible set).
         from joint_vol_calibration.calibration.joint_calibrator import (
-            classify_feller, count_pinned_params,
+            _CAL_STRIKES_PER_EXPIRY, classify_feller, count_pinned_params,
         )
-        feller_lhs = 2 * p["kappa"] * p["theta"]
-        feller_rhs = p["sigma"] ** 2
         state, margin = classify_feller(p["kappa"], p["theta"], p["sigma"])
-        d["feller_lhs"]    = round(feller_lhs, 5)
-        d["feller_rhs"]    = round(feller_rhs, 5)
-        d["feller_margin"] = round(margin, 8)
-        d["feller_state"]  = state
-        d["feller_pass"]   = state == "PASS"
-        d["feller_binding"] = state == "BINDING"
-
-        # Boundary pinning → effective degrees of freedom
+        d["feller_lhs"] = round(2 * p["kappa"] * p["theta"], 5)
+        d["feller_rhs"] = round(p["sigma"] ** 2, 5)
+        d["feller_margin"] = margin
+        d["feller_state"] = state
         pinned = cal.get("pinned_params") or count_pinned_params(p, state)
-        d["pinned_params"] = pinned
+        d["pinned_params"] = list(pinned)
         d["effective_dof"] = 5 - len(pinned)
-
-        # Data provenance: how much market data produced this fit
-        d["n_spx_options"] = cal.get("n_spx_options")
-        d["n_vix_tenors"]  = cal.get("n_vix_tenors")
-        d["spot_date"]     = cal.get("spot_date")   # closed SPX session the fit describes
-
-        # Rho boundary flag
         d["rho_at_boundary"] = abs(p["rho"]) >= 0.94
 
+        # Data provenance. The SPX leg keeps _CAL_STRIKES_PER_EXPIRY strikes per
+        # expiry bucket, so an unrecorded expiry count is bounded by
+        # n_options / strikes-per-bucket (a bucket can repeat an expiry, so this
+        # is an upper bound, labelled as inferred).
+        d["n_spx_options"] = cal.get("n_spx_options")
+        d["n_vix_tenors"] = cal.get("n_vix_tenors")
+        d["spot_date"] = _date_str(cal.get("spot_date"))
+        n_exp = cal.get("n_spx_expiries")
+        if n_exp is None and _num(d["n_spx_options"]) is not None:
+            n_exp = int(d["n_spx_options"]) // _CAL_STRIKES_PER_EXPIRY
+            d["n_spx_expiries_inferred"] = True
+        d["n_spx_expiries"] = n_exp
+        if n_exp is not None:
+            d["spx_underidentified"] = n_exp < 3
+
+        # Market anchors (when the result stores them): market vs model IV.
+        for a in cal.get("anchors") or []:
+            try:
+                T_days = a.get("T_days", (a.get("T") or 0) * 365.0)
+                d["anchors"].append({
+                    "T_days": int(round(float(T_days))),
+                    "lm": float(a["k"] if "k" in a else a["log_moneyness"]),
+                    "market_iv": float(a["market_iv"]) * 100,
+                    "model_iv": float(a["model_iv"]) * 100 if a.get("model_iv") is not None else None,
+                })
+            except Exception as exc:
+                _logger.info("skipping malformed anchor %r: %s", a, exc)
+
+        # Model smile implied by THESE parameters (not the Greeks parquet,
+        # which was built from a different, gate-rejected 2026-03-24 fit).
+        colors = {14: "#ff3333", 30: "#ff8844", 60: "#ffcc00",
+                  91: "#00ff88", 180: "#44aaff", 365: "#aa44ff"}
+        for s in heston_model_smile(p):
+            d["mat_smiles"].append({
+                "T": s["T"], "lm": s["lm"],
+                "iv": [round(v * 100, 3) for v in s["iv"]],
+                "color": colors.get(s["T"], "#888"),
+            })
+
+        ref = _latest_market_session()
+        item = _staleness("calibration", "Heston calibration", d["session"], ref)
+        d["calib_age"] = item["age"]
+        d["stale"] = [item]
     except Exception as e:
-        d["cal_error"] = str(e)
-        for k in ["kappa", "theta", "sigma", "rho", "v0", "spx_rmse",
-                  "vix_fut_rmse", "vix_opt_rmse", "total_loss",
-                  "theta_vol", "v0_vol", "S", "r_pct", "q_pct",
-                  "fit_time", "n_evals", "feller_lhs", "feller_rhs", "feller_margin"]:
-            d.setdefault(k, 0)
-        d.setdefault("feller_pass", False)
-        d.setdefault("feller_binding", False)
-        d.setdefault("feller_state", "UNKNOWN")
-        d.setdefault("pinned_params", [])
-        d.setdefault("effective_dof", 5)
-        d.setdefault("n_spx_options", None)
-        d.setdefault("n_vix_tenors", None)
-        d.setdefault("spot_date", None)
-        d.setdefault("rho_at_boundary", False)
-        d.setdefault("as_of", "N/A")
-        d.setdefault("mat_smiles", [])
+        _record_error(d, "headline calibration", e)
 
-    # Bates SVJ comparison (optional — only if bates_cal pickle exists)
+    # ── Quintic OU research fit vs the Heston fit of the SAME snapshot ───────
     try:
-        bates_path = DATA / "calibrations" / "bates_cal_2026-03-24.pkl"
-        if bates_path.exists():
-            with open(bates_path, "rb") as f:
-                bates_cal = pickle.load(f)
-            bp = bates_cal["params"]
-            bl = bates_cal.get("leg_losses", bates_cal.get("losses", {}))
-            b_spx_rmse = round(float(bl.get("spx_iv_rmse", 0)), 3)
-            b_vix_rmse = round(float(bl.get("vix_futures_rmse", 0)), 3)
-            d["bates"] = {
-                "kappa":    round(bp["kappa"], 4),
-                "theta":    round(bp["theta"], 5),
-                "sigma":    round(bp["sigma"], 4),
-                "rho":      round(bp["rho"], 4),
-                "v0":       round(bp["v0"], 5),
-                "lam":      round(bp["lam"], 3),
-                "mu_j":     round(bp["mu_j"] * 100, 2),
-                "sigma_j":  round(bp["sigma_j"] * 100, 2),
-                "spx_rmse": b_spx_rmse,
-                "vix_rmse": b_vix_rmse,
-                "spx_delta": round(b_spx_rmse - d.get("spx_rmse", 0), 3),
-                "vix_delta": round(b_vix_rmse - d.get("vix_fut_rmse", 0), 3),
-                "rho_freed": abs(bp["rho"]) < 0.98,
-                "fit_time": round(float(bates_cal.get("fit_time", 0)), 1),
-            }
-        else:
-            d["bates"] = None
-    except Exception:
-        d["bates"] = None
-
-    # Quintic OU research calibration (C13 — optional)
-    try:
-        quintic_path = DATA / "calibrations" / "quintic_cal_2026-03-24.pkl"
-        if quintic_path.exists():
-            with open(quintic_path, "rb") as f:
+        qpaths = sorted(glob.glob(str(DATA / "calibrations" / "quintic_cal_*.pkl")))
+        if qpaths:
+            qpath = qpaths[-1]
+            with open(qpath, "rb") as f:
                 qcal = pickle.load(f)
             qp = qcal["params"]
+            qp = qp if isinstance(qp, dict) else vars(qp)
             ql = qcal.get("leg_losses", {})
-            q_spx_rmse = round(float(ql.get("spx_iv_rmse", 0)), 3)
-            q_vix_rmse = round(float(ql.get("vix_futures_rmse", 0)), 3)
-            q_vix_opt_rmse = round(float(ql.get("vix_options_rmse", 0)), 2)
-            d["quintic"] = {
-                "lam_x":        round(float(qp.lam_x), 3),
-                "lam_y":        round(float(qp.lam_y), 3),
-                "theta":        round(float(qp.theta), 4),
-                "alpha0":       round(float(qp.alpha0), 4),
-                "alpha1":       round(float(qp.alpha1), 4),
-                "alpha3":       round(float(qp.alpha3), 4),
-                "alpha5":       round(float(qp.alpha5), 4),
-                "epsilon":      round(float(qp.epsilon), 4),
-                "spx_rmse":     q_spx_rmse,
-                "vix_rmse":     q_vix_rmse,
-                "vix_opt_rmse": q_vix_opt_rmse,
-                "spx_delta":    round(q_spx_rmse - d.get("spx_rmse", 0), 3),
-                "vix_delta":    round(q_vix_rmse - d.get("vix_fut_rmse", 0), 3),
-                "eps_saturated": abs(float(qp.epsilon) + 0.99) < 0.02,
-                "fit_time":     round(float(qcal.get("fit_time", 0)), 1),
-                "n_evals":      int(qcal.get("n_evals", 0)),
+            q_date = _calibration_session(qcal, qpath)
+            q = {
+                "as_of": q_date,
+                "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
+                "theta": round(float(qp["theta"]), 4), "alpha0": round(float(qp["alpha0"]), 4),
+                "alpha1": round(float(qp["alpha1"]), 4), "alpha3": round(float(qp["alpha3"]), 4),
+                "alpha5": round(float(qp["alpha5"]), 4), "epsilon": round(float(qp["epsilon"]), 4),
+                "spx_rmse": _num(ql.get("spx_iv_rmse")), "vix_rmse": _num(ql.get("vix_futures_rmse")),
+                "vix_opt_rmse": _num(ql.get("vix_options_rmse")),
+                "eps_saturated": abs(float(qp["epsilon"]) + 0.99) < 0.02,
+                "fit_time": _num(qcal.get("fit_time")), "n_evals": qcal.get("n_evals"),
+                "converged": qcal.get("success"),
+                "heston": None,
             }
-        else:
-            d["quintic"] = None
-    except Exception:
-        d["quintic"] = None
-
-    # SPX smile from greeks surface (91-day, closest to standard 3M)
-    try:
-        gdf = pd.read_parquet(DATA / "greeks" / "greeks_surface.parquet")
-        smile = gdf[gdf["T_days"] == 91].sort_values("log_moneyness")
-        if len(smile) == 0:
-            smile = gdf[gdf["T_days"] == gdf["T_days"].unique()[3]].sort_values("log_moneyness")
-        d["smile_lm"] = smile["log_moneyness"].round(4).tolist()
-        d["smile_iv"] = (smile["iv"] * 100).round(3).tolist()
-        d["smile_mat"] = f"{int(smile['T_days'].iloc[0])}d (≈3M)"
+            # A cross-date Δ (Quintic on 2026-03-24 vs today's Heston headline)
+            # compares different chains and flipped the sign of the SPX Δ.
+            hpath = DATA / "calibrations" / f"joint_cal_{q_date}.pkl"
+            if q_date and hpath.exists():
+                with open(hpath, "rb") as f:
+                    hcal = pickle.load(f)
+                hl = _cal_losses(hcal)
+                ok, reason = calibration_gate(hcal)
+                h_spx, h_vix = _num(hl.get("spx_iv_rmse")), _num(hl.get("vix_futures_rmse"))
+                q["heston"] = {
+                    "file": hpath.name, "spx_rmse": h_spx, "vix_rmse": h_vix,
+                    "gate_ok": ok, "gate_reason": reason,
+                    "spx_delta": (q["spx_rmse"] - h_spx) if None not in (q["spx_rmse"], h_spx) else None,
+                    "vix_delta": (q["vix_rmse"] - h_vix) if None not in (q["vix_rmse"], h_vix) else None,
+                }
+            d["quintic"] = q
     except Exception as e:
-        d["smile_error"] = str(e)
-        d["smile_lm"] = []
-        d["smile_iv"] = []
-        d["smile_mat"] = ""
-
-    # Multi-maturity smile overlay
-    try:
-        gdf = pd.read_parquet(DATA / "greeks" / "greeks_surface.parquet")
-        mat_smiles: list[dict] = []
-        colors_map = {14: "#ff3333", 30: "#ff8844", 60: "#ffcc00",
-                      91: "#00ff88", 180: "#44aaff", 365: "#aa44ff"}
-        for T in sorted(gdf["T_days"].unique()):
-            sub = gdf[gdf["T_days"] == T].sort_values("log_moneyness")
-            mat_smiles.append({
-                "T": int(T),
-                "lm": sub["log_moneyness"].round(4).tolist(),
-                "iv": (sub["iv"] * 100).round(3).tolist(),
-                "color": colors_map.get(int(T), "#888"),
-            })
-        d["mat_smiles"] = mat_smiles
-    except Exception as e:
-        d["mat_smiles"] = []
+        _record_error(d, "Quintic OU research calibration", e)
 
     return _clean(d)
 
