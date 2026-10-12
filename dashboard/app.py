@@ -505,361 +505,303 @@ def heston_model_smile(params: dict,
     return out
 
 
+# ── PDV forecast series (index page) ───────────────────────────────────────────
+def pdv_features(pdv: Any, log_returns: pd.Series) -> pd.DataFrame:
+    """PDV state variables rebuilt from `log_returns` with the model's own half-lives."""
+    from joint_vol_calibration.models.pdv import extract_pdv_features
+
+    return extract_pdv_features(
+        log_returns.dropna(),
+        halflife_fast=getattr(pdv, "halflife_fast", 5.0),
+        halflife_slow=getattr(pdv, "halflife_slow", 60.0),
+        halflife_lev=getattr(pdv, "halflife_lev", 10.0),
+        n_lags=getattr(pdv, "n_lags", 5),
+    )
+
+
+def pdv_forecast_series(pdv: Any, log_returns: pd.Series) -> pd.Series:
+    """PDV linear forecast (annualised decimal) for every date of `log_returns`.
+
+    The features are rebuilt from the supplied returns and fed to the pickled
+    model's fitted OLS (its coefficients are unchanged; dates after the fit
+    window are out of sample). Re-using the pickle's stored TRAINING features
+    instead froze the published forecast at their last date (2025-12-30) while
+    it was subtracted from the current VIX.
+    """
+    return pdv.linear_.predict(pdv_features(pdv, log_returns)).rename("pdv_vol")
+
+
+def spread_percentile(history: pd.Series, current: float) -> tuple[Optional[float], int]:
+    """(percent of the history strictly below `current`, number of valid points).
+
+    NaN history rows are dropped before ranking. Counting them in the
+    denominator (NaN < x is False) pinned the published percentile near zero:
+    4,125 of 4,189 rows were NaN and the card read '1.1th percentile, vol
+    cheap' for a spread above its own mean.
+    """
+    hist = pd.to_numeric(history, errors="coerce").dropna()
+    if len(hist) == 0 or _num(current) is None:
+        return None, int(len(hist))
+    return float((hist < current).mean() * 100.0), int(len(hist))
+
+
+PDV_MIN_HISTORY = 252   # fewer valid history points -> no percentile is shown
+
+
+def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
+                        stress_date: str = "2020-03-16") -> Optional[dict]:
+    """Ex-ante PDV-linear forecast of |r| on `stress_date`, made at the prior close.
+
+    Out of sample: the OLS is refitted on the rows whose labels were already
+    known at the forecast origin (labels of rows before the origin), and it
+    predicts from the origin's features, which use returns through the origin
+    only. The previous card quoted the in-sample KERNEL value for the next day
+    (it memorised |r| of 2020-03-17, 92.4%) against the same day's move.
+    """
+    from joint_vol_calibration.models.pdv import PDVLinear, build_xy
+
+    r = log_returns.dropna()
+    target = pd.Timestamp(stress_date)
+    if target not in r.index:
+        return None
+    pos = r.index.get_loc(target)
+    if pos < 1:
+        return None
+    origin = r.index[pos - 1]
+    horizon = int(getattr(pdv, "horizon", 1))
+    feats = pdv_features(pdv, r)
+    X, y = build_xy(r, feats, horizon=horizon)
+    # y(t) is realised over sessions t+1..t+h, so it is known at the origin's
+    # close only if the session h steps after t is on or before the origin.
+    label_end = pd.Series(r.index, index=r.index).shift(-horizon).reindex(X.index)
+    train = (label_end <= origin).to_numpy()
+    model = PDVLinear().fit(X[train], y[train])
+    forecast = float(model.predict(feats.loc[[origin]]).iloc[0])
+    window = r.iloc[pos:pos + horizon]          # the sessions the forecast covers
+    actual = float(np.sqrt((window ** 2).mean() * 252))
+    return {
+        "stress_date": str(target.date()), "origin": str(origin.date()),
+        "forecast_pct": forecast * 100.0, "actual_pct": actual * 100.0,
+        "error_pp": (forecast - actual) * 100.0, "n_train": int(np.sum(train)),
+        "horizon": horizon,
+    }
+
+
 # ── PAGE 1 DATA: Live Market Overview ─────────────────────────────────────────
 def load_page1() -> dict[str, Any]:
-    d: dict[str, Any] = {}
+    d: dict[str, Any] = {"errors": []}
 
-    # Bug 3: Load regime labels once — used for regime_date and PDV spread
-    _rl: pd.DataFrame | None = None
-    _rl_max_date: str | None = None
+    # Defaults: None renders as '—'. Nothing here may default to a plausible number.
+    for k in ("spx", "spx_chg", "spx_up", "spx_date", "vix", "vix_date",
+              "vvix", "vvix_date", "ts_date", "regime", "regime_date",
+              "reg_total", "reg0_n", "reg1_n", "reg2_n", "reg0_pct", "reg1_pct",
+              "reg2_pct", "reg_span", "calib_date", "pdv_forecast", "pdv_spread",
+              "pdv_date", "pdv_spread_mean", "pdv_spread_pct", "pdv_hist_n",
+              "pdv_hist_start", "pdv_hist_end", "pdv_sigma1", "pdv_sigma2",
+              "pdv_age", "stress", "pdv_vix", "pdv_horizon", "pdv_coef", "pdv_intercept",
+              "pdv_halflives", "pdv_garch_beta", "pdv_garch_persistence",
+              "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
+              "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
+              "latest_session"):
+        d[k] = None
+    d.update(regime_name="UNAVAILABLE", regime_color="#666", regime_label="—",
+             clf_color="#666")
+    d.update(ts_tenors=[], ts_values=[], ts_regime="N/A", ts_regime_color="#666",
+             pdv_sparkline=[], pdv_sparkline_dates=[], pdv_stale=False,
+             clf_available=False, stale=[])
+
+    # ── Market snapshot (DB) ─────────────────────────────────────────────────
+    spx_df: Optional[pd.DataFrame] = None
+    vix_daily: Optional[pd.Series] = None
+    vix_wide: Optional[pd.DataFrame] = None
     try:
-        _rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
-        if len(_rl) > 0:
-            _rl_max_date = (
-                str(_rl.index[-1].date())
-                if hasattr(_rl.index[-1], "date")
-                else str(_rl.index[-1])[:10]
-            )
-    except Exception:
-        pass
+        spx_df = _read_spx()
+        if len(spx_df) < 2:
+            raise ValueError("spx_ohlcv has fewer than two sessions")
+        last, prev = spx_df["close"].iloc[-1], spx_df["close"].iloc[-2]
+        d["spx"] = round(float(last), 2)
+        d["spx_date"] = str(spx_df.index[-1].date())
+        d["spx_chg"] = round((float(last) - float(prev)) / float(prev) * 100, 2)
+        d["spx_up"] = bool(last >= prev)
 
-    # ── SPX latest ──────────────────────────────────────────────────────────
-    try:
-        con = _db()
-        spx = pd.read_sql(
-            "SELECT date, close FROM spx_ohlcv ORDER BY date DESC LIMIT 2", con
-        )
-        d["spx"]       = round(float(spx["close"].iloc[0]), 2)
-        d["spx_prev"]  = round(float(spx["close"].iloc[1]), 2)
-        d["spx_date"]  = str(spx["date"].iloc[0])
-        d["spx_chg"]   = round((d["spx"] - d["spx_prev"]) / d["spx_prev"] * 100, 2)
-        d["spx_up"]    = d["spx"] >= d["spx_prev"]
+        vix_daily = _read_vix_daily()
+        if len(vix_daily):
+            d["vix"] = round(float(vix_daily.iloc[-1]), 2)
+            d["vix_date"] = str(vix_daily.index[-1].date())
 
-        # VIX term structure — latest value per ticker (may differ in date)
-        vts_sql = """
-            SELECT t.ticker, t.tenor_days, t.close, t.date, t.is_vvix
-            FROM vix_term_structure t
-            INNER JOIN (
-                SELECT ticker, MAX(date) as max_date
-                FROM vix_term_structure
-                GROUP BY ticker
-            ) m ON t.ticker = m.ticker AND t.date = m.max_date
-            ORDER BY t.is_vvix, t.tenor_days
-        """
-        vts = pd.read_sql(vts_sql, con)
-        con.close()
+        vix_wide = _read_vix_wide()
+        if "^VVIX" in vix_wide.columns and vix_wide["^VVIX"].notna().any():
+            vv = vix_wide["^VVIX"].dropna()
+            d["vvix"] = round(float(vv.iloc[-1]), 2)
+            d["vvix_date"] = str(vv.index[-1].date())
 
-        # Bug 1: Query vix_daily for authoritative VIX spot and date
-        try:
-            _con_vd = _db()
-            _vix_row = pd.read_sql(
-                "SELECT date, close FROM vix_daily ORDER BY date DESC LIMIT 1", _con_vd
-            )
-            _con_vd.close()
-            if len(_vix_row) > 0:
-                d["vix"]      = round(float(_vix_row["close"].iloc[0]), 2)
-                d["vix_date"] = str(_vix_row["date"].iloc[0])
-        except Exception:
-            pass
-
-        # Build term structure dict
-        vix_curve: dict[str, float] = {}
-        for _, row in vts.iterrows():
-            v = float(row["close"])
-            if v < 5:
-                v *= 100  # fraction → points
-            if row["is_vvix"]:
-                d["vvix"] = round(v, 2)
-                d["vvix_date"] = str(row["date"])
-            else:
-                vix_curve[int(row["tenor_days"])] = round(v, 2)
-
-        # Bug 2: Record max date across all VTS tickers
-        if not vts.empty:
-            d["ts_max_date"] = str(vts["date"].max())[:10]
-
-        # Named references — Bug 1: use setdefault so vix_daily query above takes priority
-        d.setdefault("vix", vix_curve.get(30, vix_curve.get(9, 0)))
-        d["vix9d"] = vix_curve.get(9,  None)
-        d["vix3m"] = vix_curve.get(93, None)
-        d["vix6m"] = vix_curve.get(182, None)
-        d.setdefault("vvix", 0)
-
-        # Chart data — term structure
-        ts_pts = [(t, v) for t, v in sorted(vix_curve.items())]
-        d["ts_tenors"] = [f"{t}d" for t, _ in ts_pts]
-        d["ts_values"] = [v for _, v in ts_pts]
-
-        # Contango check
-        if len(ts_pts) >= 2:
-            d["ts_regime"] = "CONTANGO" if ts_pts[-1][1] > ts_pts[0][1] else "BACKWARDATION"
+        # Term structure from ONE date: the latest session on which every curve
+        # tenor has a close. Taking each ticker's own latest row mixed today's
+        # VIX with older 9D/3M/6M closes whenever Yahoo omitted the sub-tenors.
+        tenor_days = {"^VIX9D": 9, "^VIX": 30, "^VIX3M": 93, "^VIX6M": 182}
+        curve_cols = [c for c in tenor_days if c in vix_wide.columns]
+        recent = vix_wide.loc[vix_wide.index >= vix_wide.index.max() - pd.Timedelta(days=90)]
+        curve_cols = [c for c in curve_cols if recent[c].notna().any()]
+        full = vix_wide[curve_cols].dropna()
+        if len(curve_cols) >= 2 and len(full):
+            ts_row = full.iloc[-1]
+            d["ts_date"] = str(full.index[-1].date())
+            pts = sorted((tenor_days[c], float(ts_row[c])) for c in curve_cols)
+            d["ts_tenors"] = [f"{t}d" for t, _ in pts]
+            d["ts_values"] = [round(v, 2) for _, v in pts]
+            d["ts_regime"] = "CONTANGO" if pts[-1][1] > pts[0][1] else "BACKWARDATION"
             d["ts_regime_color"] = "#00ff88" if d["ts_regime"] == "CONTANGO" else "#ff3333"
-        else:
-            d["ts_regime"] = "N/A"
-            d["ts_regime_color"] = "#666"
-
     except Exception as e:
-        d["db_error"] = str(e)
-        for k in ["spx", "vix", "vvix", "spx_chg"]:
-            d.setdefault(k, 0)
-        d["ts_tenors"] = []
-        d["ts_values"] = []
-        d["ts_regime"] = "N/A"
-        d["ts_regime_color"] = "#666"
+        _record_error(d, "market data (vol_system.db)", e)
+        spx_df = vix_daily = vix_wide = None
 
-    # ── Regime — live inference from current market data ───────────────────
+    # ── Rule regime + frequencies (regime_labels.parquet only) ───────────────
+    # The headline is the deterministic RULE label. It is never replaced by the
+    # research classifier's output, whatever fails.
     try:
-        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
-            clf = pickle.load(f)
-
-        # SPX history for realized-vol features
-        con2 = _db()
-        spx_hist = pd.read_sql(
-            "SELECT date, close FROM spx_ohlcv ORDER BY date DESC LIMIT 30", con2
-        )
-        con2.close()
-        spx_hist = spx_hist.sort_values("date").reset_index(drop=True)
-        spx_rets = spx_hist["close"].pct_change().dropna()
-
-        rv_20d    = float(spx_rets.iloc[-20:].std()  * np.sqrt(252)) if len(spx_rets) >= 20 else 0.15
-        rv_5d     = float(spx_rets.iloc[-5:].std()   * np.sqrt(252)) if len(spx_rets) >= 5  else rv_20d
-        rv_5d_lag = float(spx_rets.iloc[-10:-5].std()* np.sqrt(252)) if len(spx_rets) >= 10 else rv_5d
-
-        # Features in same units as training data (VIX/100, VVIX/100)
-        vix_dec  = (d.get("vix")  or 0) / 100
-        vix3m_dec= (d.get("vix3m") or d.get("vix") or 0) / 100
-        vvix_dec = (d.get("vvix") or 0) / 100
-        pdv_dec  = (d.get("pdv_forecast") or 0) / 100
-
-        feat_live = pd.DataFrame([{
-            "vix":          vix_dec,
-            "ts_slope":     vix3m_dec - vix_dec,          # (VIX3M - VIX)/100; < 0 = backwardation
-            "fear_premium": vix_dec / rv_20d if rv_20d > 0 else 1.0,
-            "rv_change_5d": rv_5d - rv_5d_lag,
-            "pdv_iv_spread":pdv_dec - vix_dec,            # PDV - IV; < 0 = IV > PDV
-            "vvix":         vvix_dec,                     # > 1.0 triggers R2
-        }])
-
-        proba   = clf.predict_proba(feat_live)[0]
-        clf_reg = int(np.argmax(proba))
-
-        names  = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
-        colors = ["#3388ff", "#00ff88", "#ff3333"]
-        labels = ["R0", "R1", "R2"]
-
-        # HEADLINE regime = the deterministic RULE-BASED label (rv_20d vs VIX;
-        # VVIX > threshold). These are the labels the backtest actually trades on.
-        # C16/C17: the ML classifier scores 63.4% OOS and LOSES to the trivial
-        # persistence baseline (y_t = y_{t-1}, 90.0% on 2020+), so it is demoted
-        # to research-only — we do NOT headline its prediction. It is shown
-        # separately below, clearly caveated. (Showing the classifier's call as
-        # the headline previously contradicted both the rule label and the
-        # displayed VVIX state.)
-        try:
-            reg = int(_rl["regime"].iloc[-1])
-        except Exception:
-            reg = clf_reg
-        d["regime"]       = reg
-        d["regime_name"]  = names[reg]
-        d["regime_color"] = colors[reg]
-        d["regime_label"] = labels[reg]
-        d["regime_date"]  = _rl_max_date or d.get("spx_date", "live")  # Bug 3
-
-        # ML classifier — RESEARCH ONLY (demoted); shown with a caveat.
-        d["clf_label"]    = labels[clf_reg]
-        d["clf_name"]     = names[clf_reg]
-        d["clf_color"]    = colors[clf_reg]
-        d["clf_conf"]     = round(float(proba[clf_reg]) * 100, 1)
-        d["clf_agrees"]   = (clf_reg == reg)
-        d["prob_r0"]      = round(float(proba[0]) * 100, 1)
-        d["prob_r1"]      = round(float(proba[1]) * 100, 1)
-        d["prob_r2"]      = round(float(proba[2]) * 100, 1)
-        d["clf_accuracy"] = "63.4%"
-
-        # Regime frequency card: computed from the shipped labels, never
-        # hard-coded. The previous constants were stale by ~2x on R2 and
-        # contradicted the backtest page's own adaptive-gate story.
-        try:
-            _rc = _rl["regime"].astype(int)
-            _tot = int(len(_rc))
-            d["reg_total"] = _tot
-            for _k in (0, 1, 2):
-                _n = int((_rc == _k).sum())
-                d[f"reg{_k}_n"] = _n
-                d[f"reg{_k}_pct"] = round(100.0 * _n / _tot, 1) if _tot else 0.0
-            d["reg_span"] = f"{_rc.index[0].year} – {_rc.index[-1].year}"
-        except Exception:
-            pass
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
+        reg_series = rl["regime"].dropna().astype(int)
+        if reg_series.empty:
+            raise ValueError("regime_labels.parquet has no labels")
+        reg = int(reg_series.iloc[-1])
+        if reg not in (0, 1, 2):
+            raise ValueError(f"unknown regime label {reg}")
+        d["regime"] = reg
+        d["regime_name"] = _REGIME_NAMES[reg]
+        d["regime_color"] = _REGIME_COLORS[reg]
+        d["regime_label"] = _REGIME_LABELS[reg]
+        d["regime_date"] = str(pd.Timestamp(reg_series.index[-1]).date())
+        tot = int(len(reg_series))
+        d["reg_total"] = tot
+        for k in (0, 1, 2):
+            n = int((reg_series == k).sum())
+            d[f"reg{k}_n"] = n
+            d[f"reg{k}_pct"] = round(100.0 * n / tot, 1)
+        d["reg_span"] = f"{reg_series.index[0].year} – {reg_series.index[-1].year}"
     except Exception as e:
-        d["regime_error"] = str(e)
-        _logger.warning("Live regime inference failed (%s); falling back to cached labels.", e)
-        # Fallback: read last known regime from regime_labels.parquet so the
-        # page always shows a valid regime and a non-blank "As of" date.
-        _cached = False
-        try:
-            rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
-            if "regime" in rl.columns and len(rl) > 0:
-                reg = int(rl["regime"].iloc[-1])
-                cache_dt = (
-                    str(rl.index[-1].date())
-                    if hasattr(rl.index[-1], "date")
-                    else str(rl.index[-1])[:10]
-                )
-                if 0 <= reg <= 2:
-                    _names  = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
-                    _colors = ["#3388ff", "#00ff88", "#ff3333"]
-                    _labels = ["R0", "R1", "R2"]
-                    d["regime"]       = reg
-                    d["regime_name"]  = _names[reg]
-                    d["regime_color"] = _colors[reg]
-                    d["regime_label"] = _labels[reg]
-                    d["regime_conf"]  = 0
-                    d["regime_date"]  = f"{cache_dt} (cached)"
-                    d["prob_r0"] = 100.0 if reg == 0 else 0.0
-                    d["prob_r1"] = 100.0 if reg == 1 else 0.0
-                    d["prob_r2"] = 100.0 if reg == 2 else 0.0
-                    _cached = True
-                    _logger.info("Regime fallback: R%d from %s", reg, cache_dt)
-        except Exception as fe:
-            _logger.error("Regime cache fallback also failed: %s", fe)
+        _record_error(d, "rule regime labels (regime_labels.parquet)", e)
 
-        if not _cached:
-            d["regime"]       = -1
-            d["regime_name"]  = "UNKNOWN"
-            d["regime_color"] = "#666"
-            d["regime_label"] = "—"
-            d["regime_conf"]  = 0
-            d["regime_date"]  = _rl_max_date or d.get("spx_date", "N/A")  # Bug 3
-            d["prob_r0"] = d["prob_r1"] = d["prob_r2"] = 33.3
-        d.setdefault("clf_accuracy", "63.4%")  # C16 honest no-vvix accuracy
-        # Safe clf_* defaults so the research-only card renders if inference failed
-        d.setdefault("clf_label", d.get("regime_label", "—"))
-        d.setdefault("clf_name",  d.get("regime_name", "N/A"))
-        d.setdefault("clf_color", d.get("regime_color", "#666"))
-        d.setdefault("clf_conf",  0)
-        d.setdefault("clf_agrees", True)
-
-    # Calibration date for timestamp (Bug 7) — latest NON-degenerate joint_cal
-    try:
-        with open(latest_good_calibration_path(), "rb") as f:
-            _cal_tmp = pickle.load(f)
-        d["calib_date"] = str(_cal_tmp.get("as_of_date", "2026-05-31"))
-    except Exception:
-        d["calib_date"] = "2026-05-31"
-
-    # ── PDV Forecast vs ATM ──────────────────────────────────────────────────
+    # ── PDV forecast vs VIX, with a like-for-like history ────────────────────
+    pdv = None
+    pdv_vol: Optional[pd.Series] = None
     try:
         with open(DATA / "pdv_model.pkl", "rb") as f:
             pdv = pickle.load(f)
-        feat    = pdv._features.iloc[-1]
-        coefs   = pdv.linear_.coef_
-        intcpt  = float(pdv.linear_.intercept_)
-        s1  = float(feat["sigma1"])
-        s2  = float(feat["sigma2"])
-        lev = float(feat["lev"])
-        pdv_forecast = float(coefs[0] * s1 + coefs[1] * s2 + coefs[2] * lev + intcpt) * 100
-        d["pdv_forecast"] = round(pdv_forecast, 2)
-        d["pdv_spread"]   = round((d.get("vix", 0) or 0) - pdv_forecast, 2)
-        # The PDV features are computed from the DB, which can lag the regime
-        # labels. Stamping the label date here presented a forecast built from
-        # months-old features as if it were today's.
-        d["pdv_date"]     = str(pdv._features.index[-1].date())
-        d["pdv_stale"]    = bool(_rl_max_date and str(pdv._features.index[-1].date()) < _rl_max_date)
-        d["pdv_sigma1"]   = round(s1 * 100, 2)
-        d["pdv_sigma2"]   = round(s2 * 100, 2)
-        d["pdv_spread_positive"] = d["pdv_spread"] > 0
+        if spx_df is None or vix_daily is None:
+            raise RuntimeError("needs the market data that failed to load")
+        feats = pdv_features(pdv, spx_df["log_return"])
+        pdv_vol = pdv.linear_.predict(feats).rename("pdv_vol")
+        spread = (vix_daily - 100.0 * pdv_vol).dropna()   # VIX pts − forecast vol pts
+        if spread.empty:
+            raise ValueError("no date has both a VIX close and a PDV forecast")
+        cur_date = spread.index[-1]
+        d["pdv_date"] = str(cur_date.date())
+        d["pdv_forecast"] = round(float(pdv_vol.loc[cur_date]) * 100, 2)
+        d["pdv_vix"] = round(float(vix_daily.loc[cur_date]), 2)
+        d["pdv_spread"] = round(float(spread.iloc[-1]), 2)
+        d["pdv_horizon"] = int(getattr(pdv, "horizon", 1))
+        coef = np.asarray(pdv.linear_.coef_, dtype=float)
+        d["pdv_coef"] = [round(float(c), 3) for c in coef]
+        d["pdv_intercept"] = round(float(pdv.linear_.intercept_), 4)
+        d["pdv_halflives"] = [getattr(pdv, "halflife_fast", None),
+                              getattr(pdv, "halflife_slow", None)]
+        g = getattr(pdv, "garch_", None)
+        if g is not None and getattr(g, "beta_", None) is not None:
+            d["pdv_garch_beta"] = round(float(g.beta_), 3)
+            d["pdv_garch_persistence"] = round(float(g.alpha_ + g.beta_), 3)
 
-        # PDVLinear3F vs PDVLinear4F comparison (walk-forward R² on stored features)
-        try:
-            from joint_vol_calibration.models.pdv import PDVLinear, PDVLinear4F
-            feats = pdv._features.copy()
-            xcols_3f = ["sigma1", "sigma2", "lev"]
-            xcols_4f = ["sigma1", "sigma2", "lev", "vix"]
-            if all(c in feats.columns for c in xcols_4f) and "rv_hist_20d" in feats.columns:
-                y = feats["rv_hist_20d"].shift(-1)
-                mask = feats[xcols_4f].notna().all(axis=1) & y.notna()
-                X_v, y_v = feats[mask][xcols_4f], y[mask]
-                t_n = int(len(X_v) * 0.60)
-                X_tr, X_te = X_v.iloc[:t_n], X_v.iloc[t_n:]
-                y_tr, y_te = y_v.iloc[:t_n], y_v.iloc[t_n:]
-                def _r2(preds, actuals):
-                    ss_res = float(np.sum((actuals - preds)**2))
-                    ss_tot = float(np.sum((actuals - actuals.mean())**2))
-                    return round(1.0 - ss_res / ss_tot, 4) if ss_tot > 0 else 0.0
-                r2_3f = _r2(PDVLinear().fit(X_tr[xcols_3f], y_tr).predict(X_te[xcols_3f]).values, y_te.values)
-                r2_4f = _r2(PDVLinear4F().fit(X_tr, y_tr).predict(X_te).values, y_te.values)
-                d["pdv_r2_3f"] = r2_3f
-                d["pdv_r2_4f"] = r2_4f
-                d["pdv_model_name"] = "PDVLinear4F" if r2_4f > r2_3f else "PDVLinear3F (4F adds no signal)"
-                d["pdv_r2_note"] = (
-                    f"PDVLinear3F R²={r2_3f} | PDVLinear4F R²={r2_4f} | "
-                    + ("VIX adds incremental signal." if r2_4f > r2_3f
-                       else "VIX adds no incremental signal vs realized vol target.")
-                )
-            else:
-                # vix column absent from stored features — 4F can't be tested here
-                d["pdv_r2_3f"]      = None
-                d["pdv_r2_4f"]      = None
-                d["pdv_model_name"] = "PDVLinear3F"
-                d["pdv_r2_note"]    = "PDVLinear4F requires VIX column in stored features."
-        except Exception:
-            d.setdefault("pdv_model_name", "PDVLinear3F")
-            d.setdefault("pdv_r2_note", "")
+        # State variables on the forecast date
+        d["pdv_sigma1"] = round(float(feats.loc[cur_date, "sigma1"]) * 100, 2)
+        d["pdv_sigma2"] = round(float(feats.loc[cur_date, "sigma2"]) * 100, 2)
 
+        # History = the SAME quantity (VIX − this model's forecast) on prior dates.
+        hist = spread.iloc[:-1]
+        pct, n_hist = spread_percentile(hist, float(spread.iloc[-1]))
+        d["pdv_hist_n"] = n_hist
+        if n_hist >= PDV_MIN_HISTORY:
+            d["pdv_spread_pct"] = round(pct, 1)
+            d["pdv_spread_mean"] = round(float(hist.mean()), 2)
+            d["pdv_hist_start"] = str(hist.index[0].date())
+            d["pdv_hist_end"] = str(hist.index[-1].date())
+        recent = spread.iloc[-60:]
+        d["pdv_sparkline"] = [round(float(x), 2) for x in recent.tolist()]
+        d["pdv_sparkline_dates"] = [str(t.date()) for t in recent.index]
     except Exception as e:
-        d["pdv_error"] = str(e)
-        d["pdv_forecast"] = 0
-        d["pdv_spread"]   = 0
-        d["pdv_date"]     = "N/A"
-        d["pdv_sigma1"]   = 0
-        d["pdv_sigma2"]   = 0
-        d["pdv_spread_positive"] = False
-        d.setdefault("pdv_model_name", "PDVLinear3F")
-        d.setdefault("pdv_r2_note", "")
+        _record_error(d, "PDV forecast (pdv_model.pkl)", e)
+        pdv_vol = None
 
-    # ── PDV spread historical context ────────────────────────────────────
+    # COVID stress test, computed ex ante from the DB returns
     try:
-        rl = _rl if _rl is not None else pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
-        # pdv_iv_spread in parquet = PDV − VIX (decimal) → negate to get implied−realised (pp)
-        hist_spread_pp = -rl["pdv_iv_spread"] * 100
-        cur_spread = d.get("pdv_spread", 0) or 0
-        d["pdv_spread_mean"] = round(float(hist_spread_pp.mean()), 2)
-        d["pdv_spread_pct"]  = round(
-            float((hist_spread_pp < cur_spread).mean() * 100), 1
+        if pdv is not None and spx_df is not None:
+            d["stress"] = pdv_stress_forecast(pdv, spx_df["log_return"])
+    except Exception as e:
+        _record_error(d, "PDV COVID stress test", e)
+
+    # ── Research-only classifier card ────────────────────────────────────────
+    # Features come from build_features — the code path the classifier was
+    # trained on — with the PDV forecast series computed above. (Building them
+    # by hand fed it pdv_iv_spread = −VIX, because the PDV forecast was read
+    # before it had been computed, and used different RV definitions.)
+    try:
+        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
+            clf = pickle.load(f)
+        if spx_df is None or vix_wide is None or pdv_vol is None:
+            raise RuntimeError("needs the market data and PDV forecast that failed to load")
+        from joint_vol_calibration.signals.regime_classifier import build_features
+
+        feats = build_features(
+            spx_df.reset_index()[["date", "close", "log_return"]],
+            vix_wide.reset_index().rename(columns={"index": "date"}),
+            pdv_vol_series=pdv_vol,
         )
-        # elevated / cheap label
-        pct = d["pdv_spread_pct"]
-        if pct >= 80:
-            d["pdv_spread_label"] = f"Top {100-pct:.0f}% — premium selling regime"
-            d["pdv_spread_label_color"] = "#ff8833"
-        elif pct <= 20:
-            d["pdv_spread_label"] = f"Bottom {pct:.0f}% — vol cheap, long vol regime"
-            d["pdv_spread_label_color"] = "#3388ff"
-        else:
-            d["pdv_spread_label"] = f"{pct:.0f}th percentile — neutral"
-            d["pdv_spread_label_color"] = "#888"
-        # Sparkline: last 60 trading days of spread
-        recent = hist_spread_pp.iloc[-60:]
-        d["pdv_sparkline"]       = [round(float(x), 2) for x in recent.tolist()]
-        d["pdv_sparkline_dates"] = [str(dt.date()) for dt in recent.index]
-    except Exception:
-        d.setdefault("pdv_spread_mean", 0)
-        d.setdefault("pdv_spread_pct", 50)
-        d.setdefault("pdv_spread_label", "")
-        d.setdefault("pdv_spread_label_color", "#888")
-        d.setdefault("pdv_sparkline", [])
-        d.setdefault("pdv_sparkline_dates", [])
+        cols = list(getattr(clf, "feature_names_", None) or feats.columns)
+        row = feats.dropna(subset=cols).iloc[[-1]]
+        proba = np.asarray(clf.predict_proba(row[cols])[0], dtype=float)
+        c_reg = int(np.argmax(proba))
+        d["clf_available"] = True
+        d["clf_feature_date"] = str(row.index[0].date())
+        d["clf_label"] = _REGIME_LABELS[c_reg]
+        d["clf_color"] = _REGIME_COLORS[c_reg]
+        d["clf_conf"] = round(float(proba[c_reg]) * 100, 1)
+        d["prob_r0"], d["prob_r1"], d["prob_r2"] = (round(float(p) * 100, 1) for p in proba[:3])
+        d["clf_agrees"] = (d["regime"] == c_reg) if d.get("regime_date") == d["clf_feature_date"] else None
+        try:
+            imp = clf.feature_importance()
+            d["clf_top_feature"] = str(imp.index[0])
+            d["clf_top_importance"] = round(float(imp.iloc[0]) * 100, 0)
+        except Exception as exc:
+            _logger.info("feature importance unavailable: %s", exc)
+    except Exception as e:
+        _record_error(d, "research classifier (regime_classifier.pkl)", e)
 
-    # Bug 5: Log all four card dates on every page load for remote verification
+    # ── Headline calibration (date only) ─────────────────────────────────────
+    try:
+        path, cal = load_headline_calibration()
+        d["calib_date"] = _calibration_session(cal, path)
+    except Exception as e:
+        _record_error(d, "headline calibration", e)
+
+    # ── Staleness of every dated input vs the newest session ─────────────────
+    known = [x for x in (d["spx_date"], d["vix_date"], d["regime_date"]) if x]
+    ref = max(known) if known else None
+    d["latest_session"] = ref
+    d["stale"] = [
+        _staleness("market", "Last close (SPX)", d["spx_date"], ref),
+        _staleness("regime", "Rule regime label", d["regime_date"], ref),
+        _staleness("calibration", "Heston calibration", d["calib_date"], ref),
+        _staleness("pdv", "PDV forecast", d["pdv_date"], ref),
+    ]
+    pdv_item = d["stale"][3]
+    d["pdv_age"] = pdv_item["age"]
+    d["pdv_stale"] = bool(pdv_item["age"] is not None and pdv_item["age"] >= 1)
+    d["holidays"] = [str(h.date()) for h in nyse_holidays(
+        f"{(ref or '2026')[:4]}-01-01", f"{int((ref or '2026')[:4]) + 2}-12-31")]
+
     _logger.info(
-        "[page1] SPX=%.2f date=%s | VIX=%.2f vix_date=%s | VVIX=%.2f vvix_date=%s | TS_max=%s | regime_date=%s",
-        d.get("spx", 0), d.get("spx_date", "?"),
-        d.get("vix", 0), d.get("vix_date", "?"),
-        d.get("vvix", 0), d.get("vvix_date", "?"),
-        d.get("ts_max_date", "?"),
-        d.get("regime_date", "?"),
+        "[page1] SPX=%s (%s) | VIX=%s (%s) | VVIX=%s (%s) | TS=%s | regime=%s | PDV=%s | errors=%d",
+        d["spx"], d["spx_date"], d["vix"], d["vix_date"], d["vvix"], d["vvix_date"],
+        d["ts_date"], d["regime_date"], d["pdv_date"], len(d["errors"]),
     )
-
     return _clean(d)
 
 

@@ -6,37 +6,44 @@
 <div class="page-header">
   <div class="page-title">Live Market Overview</div>
   <div class="page-subtitle">End-of-day regime + term structure</div>
-  <div class="page-badge" id="freshness-badge">
-    <span data-date="{{ d.spx_date }}">Last close: {{ d.spx_date }}</span>
-    &nbsp;·&nbsp; Calibration: {{ d.calib_date }}
-    &nbsp;·&nbsp; Regime: {{ d.regime_date }}
+  <div class="page-badge" id="freshness-badge" data-holidays='{{ d.holidays|tojson }}'>
+    <span data-date="{{ d.spx_date or '' }}">Last close: {{ d.spx_date|fmt }}</span>
+    {% for s in d.stale %}{% if s.component != 'market' %}
+    &nbsp;·&nbsp; {{ {'regime': 'Regime', 'calibration': 'Calibration', 'pdv': 'PDV'}[s.component] }}: {{ s.date|fmt }}{% if s.age %} <span class="age-{{ s.level }}">({{ s.age }} session{{ 's' if s.age != 1 else '' }} old)</span>{% endif %}
+    {% endif %}{% endfor %}
   </div>
 </div>
 <script>
-/* View-time data-freshness check. The site is a static end-of-day snapshot,
-   refreshed daily after the US close. This compares the snapshot's last-close
-   date against the most recent US session that SHOULD have data by now (in the
-   viewer's clock), so a Friday close viewed on a Monday morning reads
-   "latest session" instead of looking stale. */
+/* View-time freshness check. The site is a static end-of-day snapshot, rebuilt
+   after each US close. This counts the NYSE sessions between the snapshot's last
+   close and the most recent session that SHOULD have data by now (viewer's clock),
+   skipping weekends and the NYSE holidays emitted by the server, and escalates
+   with the same thresholds as the server-side banners (2 = amber, 5 = red). */
 (function () {
   var badge = document.getElementById('freshness-badge');
   if (!badge) return;
   var span = badge.querySelector('[data-date]');
   var dd = span && span.getAttribute('data-date');
   if (!dd || !/^\d{4}-\d{2}-\d{2}$/.test(dd)) return;
-  var d = new Date(dd + 'T00:00:00Z');
-  var probe = new Date();                                  // viewer's now
-  // US cash equities settle EOD data by ~22:00 UTC; before that, "today" has no close yet.
-  if (probe.getUTCHours() < 22) probe.setUTCDate(probe.getUTCDate() - 1);
-  while (probe.getUTCDay() === 0 || probe.getUTCDay() === 6) probe.setUTCDate(probe.getUTCDate() - 1);
-  var expected = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
-  var dataDay  = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  var holidays = {};
+  try { JSON.parse(badge.getAttribute('data-holidays') || '[]').forEach(function (h) { holidays[h] = true; }); } catch (e) {}
+  function iso(t) { return new Date(t).toISOString().slice(0, 10); }
+  function isSession(t) { var w = new Date(t).getUTCDay(); return w !== 0 && w !== 6 && !holidays[iso(t)]; }
+  var DAY = 86400000;
+  var probe = new Date();
+  // EOD data for a session is published after ~22:00 UTC; before that, today has no close yet.
+  var t = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
+  if (probe.getUTCHours() < 22) t -= DAY;
+  while (!isSession(t)) t -= DAY;
+  var dataDay = Date.parse(dd + 'T00:00:00Z');
+  var behind = 0;
+  for (var x = t; x > dataDay && behind < 400; x -= DAY) { if (isSession(x)) behind++; }
   var note = document.createElement('span');
-  if (dataDay >= expected) {
-    note.innerHTML = ' &nbsp;·&nbsp; <span style="color:#00ff88;">✓ latest U.S. session</span>';
-  } else {
-    note.innerHTML = ' &nbsp;·&nbsp; <span style="color:#ffaa33;">⟳ refreshes after next U.S. close</span>';
-  }
+  var html;
+  if (behind === 0) html = '<span style="color:#00ff88;">✓ latest U.S. session</span>';
+  else if (behind === 1) html = '<span style="color:#ffaa33;">⟳ refreshes after the next U.S. close</span>';
+  else html = '<span style="color:' + (behind >= 5 ? '#ff5555' : '#ffaa33') + ';font-weight:700;">⚠ ' + behind + ' sessions stale</span>';
+  note.innerHTML = ' &nbsp;·&nbsp; ' + html;
   badge.appendChild(note);
 })();
 </script>
@@ -47,19 +54,22 @@
   <!-- SPX -->
   <div class="card card-sm">
     <div class="card-label">S&P 500</div>
-    <div class="card-value">{{ "{:,.2f}".format(d.spx) }}</div>
+    <div class="card-value">{{ d.spx|fmt(",.2f") }}</div>
+    {% if d.spx_chg is not none %}
     <div class="stat-row">
       <span class="stat-change {{ 'up' if d.spx_up else 'down' }}">
         {{ '+' if d.spx_up else '' }}{{ d.spx_chg }}%
       </span>
       <span style="color:var(--text3)">vs prev close</span>
     </div>
-    <div class="card-sub" style="margin-top:10px;">{{ d.spx_date }}</div>
+    {% endif %}
+    <div class="card-sub" style="margin-top:10px;">{{ d.spx_date|fmt }}</div>
   </div>
 
   <!-- VIX -->
   <div class="card card-sm">
     <div class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></div>
+    {% if d.vix is not none %}
     <div class="card-value {% if d.vix > 25 %}red{% elif d.vix > 18 %}yellow{% else %}green{% endif %}">
       {{ "{:.2f}".format(d.vix) }}
     </div>
@@ -69,14 +79,19 @@
       {% elif d.vix > 15 %}🟢 NORMAL range
       {% else %}🟢 LOW — complacency risk
       {% endif %}
+      {% if d.vix_date and d.vix_date != d.spx_date %}<br>as of {{ d.vix_date }}{% endif %}
     </div>
+    {% else %}
+    <div class="card-value dim">—</div>
+    {% endif %}
   </div>
 
   <!-- VVIX -->
   <div class="card card-sm">
     <div class="card-label">VVIX  <span style="color:var(--text3);font-size:9px;">VOL-OF-VOL</span></div>
+    {% if d.vvix is not none %}
     <div class="card-value {% if d.vvix > 120 %}red{% elif d.vvix > 100 %}yellow{% else %}dim{% endif %}">
-      {{ "{:.2f}".format(d.vvix) if d.vvix else "—" }}
+      {{ "{:.2f}".format(d.vvix) }}
     </div>
     <div class="card-sub" style="margin-top:10px;">
       {% if d.vvix > 120 %}Extreme vol-of-vol
@@ -84,7 +99,11 @@
       {% elif d.vvix > 80 %}Normal VVIX
       {% else %}Low VVIX
       {% endif %}
+      {% if d.vvix_date and d.vvix_date != d.spx_date %}<br>as of {{ d.vvix_date }}{% endif %}
     </div>
+    {% else %}
+    <div class="card-value dim">—</div>
+    {% endif %}
   </div>
 
   <!-- TS Regime -->
@@ -100,6 +119,9 @@
     <div class="card-sub">
       Slope={{ "{:+.2f}".format(d.ts_values[-1] - d.ts_values[0]) }} pts
     </div>
+    <div class="card-sub" {% if d.ts_date != d.vix_date %}style="color:#ffaa33;"{% endif %}>
+      All tenors as of {{ d.ts_date }}{% if d.ts_date != d.vix_date %} (latest full curve; VIX is from {{ d.vix_date|fmt }}){% endif %}
+    </div>
     {% endif %}
   </div>
 
@@ -114,6 +136,7 @@
 
     <div class="flex gap12 mt8" style="align-items:flex-start;">
       <div style="flex:1;">
+        {% if d.regime is not none %}
         <div style="
           display:inline-flex; align-items:center; gap:10px;
           padding:10px 18px; border-radius:8px;
@@ -130,8 +153,12 @@
           Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
           trades on. As of {{ d.regime_date }}.
         </div>
+        {% else %}
+        <div class="card-value sm dim" style="margin-bottom:14px;">Rule label unavailable</div>
+        {% endif %}
 
         <!-- ML classifier: research-only (demoted, C17) -->
+        {% if d.clf_available %}
         <div class="flex space-between" style="margin-bottom:6px;">
           <span style="font-size:11px;color:var(--text2);">
             ML classifier <span style="color:#ffaa33;font-weight:600;">· research only</span>
@@ -167,128 +194,124 @@
         </div>
 
         <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
-          {% if not d.clf_agrees %}Classifier disagrees with the rule label here — {% endif %}63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+          Next-session forecast from the features of {{ d.clf_feature_date }}.
+          {% if d.clf_agrees == false %}Classifier disagrees with the rule label here — {% endif %}63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
         </div>
+        {% else %}
+        <div class="card-sub mt8" style="color:var(--text3);font-size:10.5px;">
+          ML classifier (research only): unavailable — see the error above. The rule label is unaffected.
+        </div>
+        {% endif %}
       </div>
     </div>
 
-    <!-- Regime legend -->
+    <!-- Regime legend: the rule, as build_regime_labels applies it -->
     <div class="divider"></div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:10.5px;">
       <div style="padding:8px;border-radius:6px;background:rgba(51,136,255,0.07);border:1px solid rgba(51,136,255,0.2);">
         <div style="color:#3388ff;font-weight:700;margin-bottom:2px;">R0</div>
-        <div style="color:var(--text3);">Low VIX / backwardation → buy straddles</div>
+        <div style="color:var(--text3);">Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</div>
       </div>
       <div style="padding:8px;border-radius:6px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.18);">
         <div style="color:#00ff88;font-weight:700;margin-bottom:2px;">R1</div>
-        <div style="color:var(--text3);">Normal contango → sell premium</div>
+        <div style="color:var(--text3);">Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</div>
       </div>
       <div style="padding:8px;border-radius:6px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.2);">
         <div style="color:#ff3333;font-weight:700;margin-bottom:2px;">R2</div>
-        <div style="color:var(--text3);">High VVIX → vomma trades</div>
+        <div style="color:var(--text3);">VVIX above its gate (overrides R0/R1) → vomma trades</div>
       </div>
     </div>
   </div>
 
-  <!-- PDV Forecast vs ATM -->
+  <!-- PDV Forecast vs VIX -->
   <div class="card" style="grid-column: span 1;">
     <div class="card-label">PDV Model Forecast vs ATM Implied</div>
+    {% if d.pdv_forecast is not none %}
     <div class="mt8">
+      {% if d.pdv_stale %}
+      <div id="pdv-stale-flag" role="status" style="background:rgba(255,170,51,0.10);border:1px solid rgba(255,170,51,0.55);border-radius:6px;padding:9px 12px;margin-bottom:8px;font-size:11.5px;line-height:1.5;color:#ffbb55;">
+        <strong style="color:#ffaa33;">⚠ STALE FORECAST</strong> — built from returns through
+        <span class="mono">{{ d.pdv_date }}</span>, {{ d.pdv_age }} session{{ 's' if d.pdv_age != 1 else '' }}
+        before the latest session ({{ d.latest_session }}). The interpretation is suppressed until the
+        market data catches up.
+      </div>
+      {% endif %}
       <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
         <div>
-          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">CURRENT VIX (30D IMPLIED)</div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">{{ "{:.2f}".format(d.vix) }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">VIX (30D IMPLIED) · {{ d.pdv_date }}</div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">{{ d.pdv_vix|fmt(".2f") }}%</div>
         </div>
         <div style="text-align:right;">
-          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">PDV FORECAST (REALISED)</div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:#ffcc00;">{{ "{:.2f}".format(d.pdv_forecast) }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">
+            PDV FORECAST · {% if d.pdv_horizon == 1 %}NEXT-DAY |r|, ANNUALISED{% else %}NEXT {{ d.pdv_horizon }}-DAY RV{% endif %}
+          </div>
+          <div class="mono" style="font-size:28px;font-weight:700;color:#ffcc00;">{{ d.pdv_forecast|fmt(".2f") }}%</div>
         </div>
       </div>
 
       <div style="padding:14px 0;text-align:center;">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">IMPLIED − REALISED SPREAD</div>
-        <div class="mono" style="font-size:36px;font-weight:800;color:{% if d.pdv_spread > 5 %}#ff8833{% elif d.pdv_spread > 0 %}#00ff88{% else %}#ff3333{% endif %};">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">VIX − PDV FORECAST</div>
+        {% set _pct = d.pdv_spread_pct %}
+        <div class="mono" style="font-size:36px;font-weight:800;color:{% if _pct is none %}var(--text2){% elif _pct >= 80 %}#ff8833{% elif _pct <= 20 %}#3388ff{% else %}var(--text){% endif %};">
           {{ "{:+.2f}".format(d.pdv_spread) }}pp
         </div>
+        {% if not d.pdv_stale and _pct is not none %}
         <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
-          {% if d.pdv_spread > 10 %}Implied vol significantly overstates expected realised → premium selling environment
-          {% elif d.pdv_spread > 3 %}Moderate vol risk premium → favours short vol strategies
-          {% elif d.pdv_spread > 0 %}Small risk premium → neutral positioning
-          {% else %}VIX underestimates model forecast → elevated realised vol expected
+          {% if _pct >= 80 %}Implied vol is rich versus this spread's own history (top {{ (100 - _pct)|round|int }}%)
+          {% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history (bottom {{ _pct|round|int }}%)
+          {% else %}Within this spread's usual range
           {% endif %}
         </div>
+        {% endif %}
 
-        <!-- Historical context — percentile warning (Fix 2) -->
+        <!-- Historical context: the SAME quantity (VIX − this model's forecast) on prior sessions -->
         <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;">
-
-          <!-- Percentile badge — large and prominent -->
+          {% if _pct is not none %}
           <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
-            <div style="font-size:28px;font-weight:800;color:#ff9900;font-family:'Menlo','Monaco',monospace;line-height:1;">
-              {{ d.pdv_spread_pct }}th
+            <div id="pdv-percentile" style="font-size:28px;font-weight:800;color:#ff9900;font-family:'Menlo','Monaco',monospace;line-height:1;">
+              {{ _pct|ordinal }}
             </div>
-            <div style="color:var(--text2);font-size:11px;line-height:1.4;">
-              percentile<br>
-              <span style="color:var(--text3);">2015–2025 mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span></span>
+            <div style="color:var(--text2);font-size:11px;line-height:1.4;text-align:left;">
+              percentile of {{ "{:,}".format(d.pdv_hist_n) }} prior sessions<br>
+              <span style="color:var(--text3);">{{ d.pdv_hist_start[:4] }}–{{ d.pdv_hist_end[:4] }} mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span></span>
             </div>
           </div>
-
-          <!-- Amber warning box when percentile is high -->
-          {% if d.pdv_spread_pct >= 80 %}
-          <div style="
-            background: rgba(255,153,0,0.08);
-            border: 1px solid rgba(255,153,0,0.35);
-            border-radius: 6px;
-            padding: 9px 12px;
-            margin-bottom: 8px;
-            font-size: 11px;
-            line-height: 1.6;
-            color: #cc8800;
-          ">
-            <span style="font-weight:700;color:#ff9900;">&#9888; Spread at {{ d.pdv_spread_pct }}th percentile</span>
-            — implied vol is pricing extreme fear relative to 10-year history.
-            Historical mean spread: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span>.
-            Current: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread) }}pp</span>.
-          </div>
-          {% elif d.pdv_spread_pct <= 20 %}
-          <div style="
-            background: rgba(51,136,255,0.07);
-            border: 1px solid rgba(51,136,255,0.3);
-            border-radius: 6px;
-            padding: 9px 12px;
-            margin-bottom: 8px;
-            font-size: 11px;
-            line-height: 1.6;
-            color: #5588cc;
-          ">
-            <span style="font-weight:700;color:#3388ff;">&#9432; Spread at {{ d.pdv_spread_pct }}th percentile</span>
-            — vol appears cheap relative to 10-year history.
-            Historical mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span>.
-            Current: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread) }}pp</span>.
+          {% else %}
+          <div style="color:var(--text3);margin-bottom:8px;">
+            Percentile hidden: only {{ d.pdv_hist_n|fmt }} valid history points (at least 252 needed).
           </div>
           {% endif %}
 
           {% if d.pdv_sparkline %}
-          <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">Implied–Realised spread — last 60 trading days</div>
+          <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">VIX − PDV forecast — last {{ d.pdv_sparkline|length }} sessions to {{ d.pdv_date }}</div>
           <div style="position:relative;height:32px;">
-            <canvas id="sparklineChart" role="img" aria-label="SPX price sparkline"></canvas>
+            <canvas id="sparklineChart" role="img" aria-label="VIX minus PDV forecast, recent sessions"></canvas>
           </div>
           {% endif %}
+          <div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.5;text-align:left;">
+            The forecast target is {% if d.pdv_horizon == 1 %}next-day |r|·√252, about 0.8σ for Gaussian returns{% else %}{{ d.pdv_horizon }}-day realised vol{% endif %},
+            so the spread's level carries a structural positive offset that is not a risk premium.
+            Read it against its own history (the percentile), not against zero.
+          </div>
         </div>
       </div>
 
       <div class="divider"></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:var(--text2);">
-        <div>σ₁ (5d EWMA): <span class="mono green">{{ "{:.2f}".format(d.pdv_sigma1) }}%</span></div>
-        <div>σ₂ (60d EWMA): <span class="mono" style="color:var(--yellow);">{{ "{:.2f}".format(d.pdv_sigma2) }}%</span></div>
-        <div>Model: <span class="mono">OLS + GARCH(1,1)</span></div>
-        <div>Updated: <span class="mono">{{ d.pdv_date }}</span></div>
+        <div>σ₁ ({{ d.pdv_halflives[0]|fmt }}d EWMA): <span class="mono green">{{ d.pdv_sigma1|fmt(".2f") }}%</span></div>
+        <div>σ₂ ({{ d.pdv_halflives[1]|fmt }}d EWMA): <span class="mono" style="color:var(--yellow);">{{ d.pdv_sigma2|fmt(".2f") }}%</span></div>
+        <div>Model: <span class="mono">PDVLinear (OLS)</span></div>
+        <div>Forecast date: <span class="mono">{{ d.pdv_date }}</span></div>
       </div>
     </div>
+    {% else %}
+    <div class="card-value sm dim mt8">Forecast unavailable</div>
+    {% endif %}
   </div>
 
   <!-- VIX Term Structure Chart -->
   <div class="card" style="grid-column: span 1;">
-    <div class="card-label">VIX Term Structure</div>
+    <div class="card-label">VIX Term Structure{% if d.ts_date %} · {{ d.ts_date }}{% endif %}</div>
     <div class="chart-wrap tall" style="margin-top:12px;">
       <canvas id="tsChart" role="img" aria-label="VIX term structure curve"></canvas>
     </div>
@@ -296,30 +319,30 @@
 
 </div>
 
-<!-- ── Row 3: VIX History + Regime Timeline ─────────────────────────────── -->
+<!-- ── Row 3: Rule-label distribution + PDV model ────────────────────────── -->
 <div class="grid grid-2" style="margin-bottom:16px;">
 
-  <!-- Regime Probability History (static info card) -->
+  <!-- Rule-label distribution -->
   <div class="card">
-    <div class="card-label">Rule-Label Distribution — Full Period ({{ d.reg_span or "2015 – 2026" }})</div>
+    <div class="card-label">Rule-Label Distribution — Full Period ({{ d.reg_span or "—" }})</div>
     <div class="mt12">
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;text-align:center;">
         <div style="padding:16px;border-radius:8px;background:rgba(51,136,255,0.06);border:1px solid rgba(51,136,255,0.18);">
           <div style="font-size:11px;color:#3388ff;margin-bottom:4px;font-weight:600;">R0 LONG GAMMA</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">{{ d.reg0_pct if d.reg0_pct is not none else "—" }}%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ "{:,}".format(d.reg0_n) if d.reg0_n is not none else "—" }} / {{ "{:,}".format(d.reg_total) if d.reg_total else "—" }} days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#3388ff;">{{ d.reg0_pct|fmt }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ d.reg0_n|fmt(",") }} / {{ d.reg_total|fmt(",") }} days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Buy straddles</div>
         </div>
         <div style="padding:16px;border-radius:8px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);">
           <div style="font-size:11px;color:#00ff88;margin-bottom:4px;font-weight:600;">R1 SHORT GAMMA</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">{{ d.reg1_pct if d.reg1_pct is not none else "—" }}%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ "{:,}".format(d.reg1_n) if d.reg1_n is not none else "—" }} / {{ "{:,}".format(d.reg_total) if d.reg_total else "—" }} days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#00ff88;">{{ d.reg1_pct|fmt }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ d.reg1_n|fmt(",") }} / {{ d.reg_total|fmt(",") }} days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Sell premium</div>
         </div>
         <div style="padding:16px;border-radius:8px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.18);">
           <div style="font-size:11px;color:#ff3333;margin-bottom:4px;font-weight:600;">R2 VOMMA ACTIVE</div>
-          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">{{ d.reg2_pct if d.reg2_pct is not none else "—" }}%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ "{:,}".format(d.reg2_n) if d.reg2_n is not none else "—" }} / {{ "{:,}".format(d.reg_total) if d.reg_total else "—" }} days</div>
+          <div class="mono" style="font-size:26px;font-weight:700;color:#ff3333;">{{ d.reg2_pct|fmt }}%</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ d.reg2_n|fmt(",") }} / {{ d.reg_total|fmt(",") }} days</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">Vomma trades</div>
         </div>
       </div>
@@ -327,10 +350,10 @@
       <div class="divider"></div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
-        <div>Overall Accuracy: <span class="mono" style="color:#ffaa33;">{{ d.clf_accuracy }}</span></div>
+        <div>Overall Accuracy: <span class="mono" style="color:#ffaa33;">63.4%</span></div>
         <div>Persistence baseline: <span class="mono red">90.0%</span></div>
         <div>Features: <span class="mono">5 (vvix excluded — C16)</span></div>
-        <div>Top Feature: <span class="mono" style="color:var(--yellow);">fear_premium (39%)</span></div>
+        <div>Top Feature: <span class="mono" style="color:var(--yellow);">{% if d.clf_top_feature %}{{ d.clf_top_feature }} ({{ d.clf_top_importance|fmt(".0f") }}%){% else %}—{% endif %}</span></div>
         <div>Model: <span class="mono">XGBoost 3-class</span></div>
         <div>Status: <span class="mono red">RESEARCH ONLY (C17)</span></div>
       </div>
@@ -351,52 +374,48 @@
     <div class="card-label">PDV Model — Guyon-Lekeufack (2023)</div>
     <div class="mt12">
 
+      {% if d.pdv_coef %}
       <div style="
         background:var(--surface2); border-radius:8px; padding:14px;
         border:1px solid var(--border); font-family:'Menlo',monospace;
         font-size:12px; color:#aaa; line-height:2;
       ">
         <span style="color:#666;">σ̂(t) = </span>
-        <span style="color:#ffcc00;">0.354</span>
-        <span style="color:#666;"> × σ₁ + </span>
-        <span style="color:#ffcc00;">0.241</span>
-        <span style="color:#666;"> × σ₂ − </span>
-        <span style="color:#ffcc00;">1.496</span>
-        <span style="color:#666;"> × lev + </span>
-        <span style="color:#ffcc00;">0.0346</span>
+        <span style="color:#ffcc00;">{{ "{:.3f}".format(d.pdv_coef[0]) }}</span>
+        <span style="color:#666;"> × σ₁ {{ '+' if d.pdv_coef[1] >= 0 else '−' }} </span>
+        <span style="color:#ffcc00;">{{ "{:.3f}".format(d.pdv_coef[1]|abs) }}</span>
+        <span style="color:#666;"> × σ₂ {{ '+' if d.pdv_coef[2] >= 0 else '−' }} </span>
+        <span style="color:#ffcc00;">{{ "{:.3f}".format(d.pdv_coef[2]|abs) }}</span>
+        <span style="color:#666;"> × lev {{ '+' if d.pdv_intercept >= 0 else '−' }} </span>
+        <span style="color:#ffcc00;">{{ "{:.4f}".format(d.pdv_intercept|abs) }}</span>
       </div>
+      {% endif %}
 
       <div class="divider"></div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text2);">
-        <div>σ₁ half-life: <span class="mono">5 days (EWMA)</span></div>
-        <div>σ₂ half-life: <span class="mono">60 days (EWMA)</span></div>
+        <div>σ₁ half-life: <span class="mono">{{ d.pdv_halflives[0]|fmt if d.pdv_halflives else '—' }} days (EWMA)</span></div>
+        <div>σ₂ half-life: <span class="mono">{{ d.pdv_halflives[1]|fmt if d.pdv_halflives else '—' }} days (EWMA)</span></div>
         <div>Walk-fwd R² (linear): <span class="mono green">0.31</span></div>
         <div>Walk-fwd R² (kernel): <span class="mono" style="color:#ffcc00;">0.23</span></div>
-        <div>GARCH persistence: <span class="mono">0.979</span></div>
-        <div>GARCH β: <span class="mono">0.890</span></div>
-      </div>
-
-      {% if d.pdv_r2_note %}
-      <div class="divider"></div>
-      <div style="font-size:11px;color:var(--text3);padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border);">
-        <span style="font-weight:600;color:var(--text2);">Active model: {{ d.pdv_model_name }}</span>
-        &nbsp;·&nbsp; {{ d.pdv_r2_note }}
-      </div>
-      {% endif %}
-      </div>
-
-      <div class="divider"></div>
-
-      <div style="padding:10px;border-radius:6px;background:rgba(255,136,51,0.07);border:1px solid rgba(255,136,51,0.2);">
-        <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">COVID Stress Test — 2020-03-16</div>
-        <div style="font-size:11.5px;color:var(--text2);">
-          PDV predicted <span class="mono" style="color:#ffcc00;">92.4%</span> ann vol.
-          Actual realised: <span class="mono red">202.6%</span>.
-          Error: <span class="mono red">−110pp</span> — structural limitation of backward-looking models.
-        </div>
+        <div>GARCH(1,1) benchmark persistence: <span class="mono">{{ d.pdv_garch_persistence|fmt(".3f") }}</span></div>
+        <div>GARCH(1,1) benchmark β: <span class="mono">{{ d.pdv_garch_beta|fmt(".3f") }}</span></div>
       </div>
     </div>
+
+    <div class="divider"></div>
+
+    {% if d.stress %}
+    <div style="padding:10px;border-radius:6px;background:rgba(255,136,51,0.07);border:1px solid rgba(255,136,51,0.2);">
+      <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">COVID Stress Test — {{ d.stress.stress_date }}</div>
+      <div style="font-size:11.5px;color:var(--text2);">
+        PDV-linear forecast made at the {{ d.stress.origin }} close (refitted on the {{ "{:,}".format(d.stress.n_train) }} labels known then):
+        <span class="mono" style="color:#ffcc00;">{{ "{:.1f}".format(d.stress.forecast_pct) }}%</span> ann vol.
+        Realised on {{ d.stress.stress_date }}: <span class="mono red">{{ "{:.1f}".format(d.stress.actual_pct) }}%</span>.
+        Error: <span class="mono red">{{ "{:+.1f}".format(d.stress.error_pp) }}pp</span> — a backward-looking model cannot see a jump coming.
+      </div>
+    </div>
+    {% endif %}
   </div>
 
 </div>
@@ -454,7 +473,7 @@
     }
   });
 
-  // Sparkline — PDV spread last 60 days (Bug 3)
+  // Sparkline — VIX − PDV forecast, recent sessions
   {% if d.pdv_sparkline %}
   const spkCtx = document.getElementById('sparklineChart');
   if (spkCtx) {

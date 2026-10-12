@@ -6,8 +6,15 @@ Every test pins a defect the C22 audit found on the live site:
 
   * the calibration selector headlined the LOWEST-RMSE archived fit, which
     rewards thin data (one SPX expiry, one VIX tenor);
+  * the PDV percentile counted 4,125 NaN history rows as "not below" and read
+    '1.1th percentile, vol cheap' for a spread above its own mean;
+  * the PDV forecast was frozen at the pickle's 2025-12-30 training features and
+    its staleness flag was computed but never rendered;
   * `python dashboard/app.py` overwrote the tracked regime_labels.parquet with the
     demoted classifier's predictions;
+  * a broken research-classifier pickle returned HTTP 500 for the front page, and
+    a missing label file made it headline the classifier as the rule label;
+  * the classifier card was fed pdv_iv_spread = −VIX;
   * loader failures rendered zeros with confident prose and still deployed;
   * the smile chart and Greeks came from a different, gate-rejected fit;
   * every page declared the home page as its canonical URL.
@@ -365,9 +372,148 @@ def test_quintic_is_compared_with_the_same_snapshot_heston(dash):
 
 # ── PDV card ──────────────────────────────────────────────────────────────────
 
+def test_pdv_percentile_excludes_nan_and_ranks_like_for_like(dash, synth):
+    """History = VIX − this model's forecast on prior sessions, NaNs excluded."""
+    from joint_vol_calibration.models.pdv import extract_pdv_features
+
+    d = dash.load_page1()
+    with open(synth["data"] / "pdv_model.pkl", "rb") as f:
+        pdv = pickle.load(f)
+    r = synth["r"].iloc[1:]
+    fc = pdv.linear_.predict(extract_pdv_features(r))
+    spread = (synth["vix"] - 100 * fc).dropna()
+    expected = float((spread.iloc[:-1] < spread.iloc[-1]).mean() * 100)
+    assert d["pdv_spread_pct"] == pytest.approx(expected, abs=0.051)
+    assert d["pdv_hist_n"] == len(spread) - 1
+    assert d["pdv_spread_mean"] == pytest.approx(spread.iloc[:-1].mean(), abs=0.006)
+    # the parquet's mostly-NaN column must play no part
+    nan_based = float(((-synth["labels"]["pdv_iv_spread"] * 100) < d["pdv_spread"]).mean() * 100)
+    assert abs(d["pdv_spread_pct"] - nan_based) > 1.0
+
+
+def test_spread_percentile_helper_drops_nan(dash):
+    hist = pd.Series([1.0, 2.0, 3.0, 4.0] + [np.nan] * 96)
+    pct, n = dash.spread_percentile(hist, 3.5)
+    assert (pct, n) == (75.0, 4)
+
+
+def test_pdv_forecast_uses_current_features_and_its_own_date(dash, synth):
+    """The forecast was the pickle's 2025-12-30 training row paired with today's VIX."""
+    from joint_vol_calibration.models.pdv import extract_pdv_features
+
+    d = dash.load_page1()
+    last = synth["dates"][-1]
+    assert d["pdv_date"] == str(last.date())
+    with open(synth["data"] / "pdv_model.pkl", "rb") as f:
+        pdv = pickle.load(f)
+    fc = pdv.linear_.predict(extract_pdv_features(synth["r"].iloc[1:])).iloc[-1]
+    assert d["pdv_forecast"] == pytest.approx(fc * 100, abs=0.006)
+    assert d["pdv_spread"] == pytest.approx(synth["vix"].iloc[-1] - fc * 100, abs=0.006)
+    assert d["pdv_stale"] is False
+
+
+def test_stale_pdv_forecast_is_flagged_on_the_page(dash, synth):
+    """Labels newer than the market data -> the forecast is stale and says so."""
+    dates = _sessions(dash, "2022-01-03", "2024-07-15")
+    _write_labels(synth["data"] / "signals" / "regime_labels.parquet", dates)
+    d = dash.load_page1()
+    assert d["pdv_stale"] is True and d["pdv_age"] == len(dates) - len(synth["dates"])
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert 'id="pdv-stale-flag"' in html and "STALE FORECAST" in html
+    assert "Within this spread's usual range" not in html and "rich versus" not in html
+
+
+def test_covid_stress_forecast_is_ex_ante(dash):
+    """Changing the stress-day return must not move its own forecast."""
+    with open(SHIPPED / "pdv_model.pkl", "rb") as f:
+        pdv = pickle.load(f)
+    dates = pd.bdate_range("2017-01-02", "2020-06-30")
+    r = pd.Series(np.random.default_rng(5).normal(0, 0.01, len(dates)), index=dates)
+    a = dash.pdv_stress_forecast(pdv, r, "2020-03-16")
+    r2 = r.copy()
+    r2.loc["2020-03-16"] = -0.12
+    b = dash.pdv_stress_forecast(pdv, r2, "2020-03-16")
+    assert a["origin"] == "2020-03-13"
+    assert a["forecast_pct"] == pytest.approx(b["forecast_pct"], abs=1e-12)
+    assert b["actual_pct"] == pytest.approx(12.0 * np.sqrt(252), rel=1e-12)
+
+
+def test_shipped_front_page_drops_the_hardcoded_stress_and_window_claims(dash):
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    for stale in ("92.4%", "−110pp", "2015–2025", "10-year history", "OLS + GARCH(1,1)"):
+        assert stale not in html
+
+
 # ── front page: rule label, classifier, term structure ───────────────────────
 
+def test_classifier_card_uses_the_training_feature_path(dash):
+    """The card fed pdv_iv_spread = −VIX (PDV read before it was computed)."""
+    from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+    from joint_vol_calibration.signals.regime_classifier import build_features
+
+    d = dash.load_page1()
+    as_of = d["clf_feature_date"]
+    with open(SHIPPED / "signals" / "regime_classifier.pkl", "rb") as f:
+        clf = pickle.load(f)
+    with open(SHIPPED / "pdv_model.pkl", "rb") as f:
+        pdv = pickle.load(f)
+    feats = build_features(get_spx_ohlcv(as_of_date=as_of),
+                           get_vix_term_structure_wide(as_of_date=as_of), pdv_model=pdv)
+    proba = clf.predict_proba(feats.dropna(subset=clf.feature_names_).iloc[[-1]])[0] * 100
+    assert [d["prob_r0"], d["prob_r1"], d["prob_r2"]] == pytest.approx(list(proba), abs=0.051)
+
+
+def test_corrupt_classifier_keeps_the_rule_label_and_reports_an_error(dash, synth):
+    (synth["data"] / "signals" / "regime_classifier.pkl").write_bytes(b"not a pickle")
+    resp = dash.app.test_client().get("/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert resp.headers["X-Dashboard-Loader-Errors"] == "1"
+    lab = int(synth["labels"]["regime"].iloc[-1])
+    assert f"{['R0', 'R1', 'R2'][lab]} · {['LONG GAMMA', 'SHORT GAMMA', 'VOMMA ACTIVE'][lab]}" in html
+    assert "research classifier" in html and "Data unavailable" in html
+
+
+def test_missing_labels_never_headline_the_classifier(dash, synth):
+    (synth["data"] / "signals" / "regime_labels.parquet").unlink()
+    resp = dash.app.test_client().get("/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Rule label unavailable" in html
+    assert dash.load_page1()["regime"] is None
+
+
+def test_term_structure_is_taken_from_one_date(dash, tmp_path, monkeypatch, synth):
+    """When the newest session lacks the sub-tenors the curve must not mix dates."""
+    data = synth["data"]
+    (data / "vol_system.db").unlink()
+    _write_market_db(data / "vol_system.db", synth["dates"], drop_subtenors_on_last=True)
+    d = dash.load_page1()
+    assert d["vix_date"] == str(synth["dates"][-1].date())
+    assert d["ts_date"] == str(synth["dates"][-2].date())
+    con = sqlite3.connect(data / "vol_system.db")
+    want = [r[0] for r in con.execute(
+        "SELECT close FROM vix_term_structure WHERE date=? AND is_vvix=0 ORDER BY tenor_days",
+        (d["ts_date"],))]
+    con.close()
+    assert d["ts_values"] == pytest.approx([round(v, 2) for v in want])
+
+
 # ── loader failures: visible, and never deployed ──────────────────────────────
+
+@pytest.mark.parametrize("victim, route, component", [
+    ("pdv_model.pkl", "/", "PDV forecast"),
+])
+def test_missing_input_renders_an_error_not_zeros(dash, synth, route, victim, component):
+    (synth["data"] / victim).unlink()
+    resp = dash.app.test_client().get(route)
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert int(resp.headers["X-Dashboard-Loader-Errors"]) >= 1
+    assert component in resp.headers["X-Dashboard-Error-Components"]
+    assert "Data unavailable" in html
+    assert "0 / 0" not in html and "NAV: $0" not in html and "0.00%" not in html
+
 
 def test_missing_calibration_renders_an_error_not_a_500(dash, synth):
     for p in (synth["data"] / "calibrations").glob("*.pkl"):
@@ -407,6 +553,8 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
         assert canon in locs
         assert 'href="/' not in html.replace('href="/"', "")   # nav links are relative
     # lastmod is the date of the data each page shows, never "today"
+    p1 = dash.load_page1()
+    assert f"<loc>{dash.SITE_URL}</loc><lastmod>{p1['latest_session']}</lastmod>" in sitemap
     p2 = dash.load_page2()
     assert f"calibration.html</loc><lastmod>{p2['session']}</lastmod>" in sitemap
 
