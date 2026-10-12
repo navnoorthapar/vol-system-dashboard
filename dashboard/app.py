@@ -13,6 +13,9 @@ overwrote the tracked regime_labels.parquet with the DEMOTED classifier's
 predictions — the exact defect C21 removed from cloud_refresh — whenever the
 local DB was more than three days old, i.e. on every fresh clone.)
 
+A loader that records a failure in ``d["errors"]`` gets a visible error banner,
+and freeze_site.py refuses to publish a page that carries one.
+
 Run a local preview (read-only, bound to 127.0.0.1):
     python dashboard/app.py
 """
@@ -59,6 +62,113 @@ app = Flask(
     static_folder=str(Path(__file__).resolve().parent / "static"),
 )
 
+# ── Site map ───────────────────────────────────────────────────────────────────
+SITE_URL = "https://navnoorbawa.me/"
+
+# route -> (frozen file name, nav id). freeze_site.py imports this map so the
+# frozen file names, the canonical URLs and the sitemap can never drift apart.
+ROUTES: dict[str, str] = {
+    "/":            "index.html",
+    "/calibration": "calibration.html",
+    "/greeks":      "greeks.html",
+    "/backtest":    "backtest.html",
+}
+
+
+def canonical_url(route: str) -> str:
+    """Absolute public URL of a route's frozen page (the home page is the bare root)."""
+    fname = ROUTES.get(route, "index.html")
+    return SITE_URL if fname == "index.html" else SITE_URL + fname
+
+
+# ── Staleness thresholds (NYSE sessions) ───────────────────────────────────────
+STALE_WARN_SESSIONS = 2     # amber banner from this age on
+STALE_ERROR_SESSIONS = 5    # red banner from this age on
+
+# Regime presentation (index = rule label 0/1/2)
+_REGIME_NAMES = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
+_REGIME_COLORS = ["#3388ff", "#00ff88", "#ff3333"]
+_REGIME_LABELS = ["R0", "R1", "R2"]
+
+# The backtest portfolio is the equal-weight mean of these sleeves
+# (BacktestEngine.run: pnl_total = (s1c + s3 + s4) / 3). load_page4 VERIFIES
+# this against the stored equity curve instead of trusting the constant.
+PORTFOLIO_SLEEVES = ("s1c", "s3", "s4")
+
+
+# ── NYSE session calendar ──────────────────────────────────────────────────────
+class NYSEHolidayCalendar(AbstractHolidayCalendar):
+    """Full-day NYSE closures from rules (2010 onwards).
+
+    Differs from the US federal calendar: Good Friday closes, Columbus and
+    Veterans Day do not; a Saturday New Year's Day is NOT observed on the Friday
+    before; Juneteenth closes from 2022. Verified against every SPX session in
+    data_store/vol_system.db (2010-01-04 .. 2026-06-18: zero mismatches).
+    """
+    rules = [
+        Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),
+        USMartinLutherKingJr,
+        USPresidentsDay,
+        GoodFriday,
+        USMemorialDay,
+        Holiday("Juneteenth", month=6, day=19, start_date="2022-01-01",
+                observance=nearest_workday),
+        Holiday("Independence Day", month=7, day=4, observance=nearest_workday),
+        USLaborDay,
+        USThanksgivingDay,
+        Holiday("Christmas Day", month=12, day=25, observance=nearest_workday),
+    ]
+
+
+# One-off closures the rules cannot express (Hurricane Sandy, national days of
+# mourning for Presidents G.H.W. Bush and Carter).
+_NYSE_SPECIAL_CLOSURES = ("2012-10-29", "2012-10-30", "2018-12-05", "2025-01-09")
+
+
+def nyse_holidays(start: str = "2010-01-01", end: str = "2030-12-31") -> pd.DatetimeIndex:
+    """NYSE full-day holidays (weekday closures) between start and end."""
+    hol = NYSEHolidayCalendar().holidays(start, end)
+    special = pd.to_datetime(list(_NYSE_SPECIAL_CLOSURES))
+    special = special[(special >= pd.Timestamp(start)) & (special <= pd.Timestamp(end))]
+    out = hol.union(special)
+    return out[out.dayofweek < 5]   # a Saturday New Year's Day closes nothing
+
+
+def session_age(date: Optional[str], ref: Optional[str]) -> Optional[int]:
+    """Number of NYSE sessions in (date, ref]: 0 when date is the ref session.
+
+    Returns None when either date is unknown. A date after ref (possible when
+    the local DB lags the committed artifacts) has age 0.
+    """
+    if not date or not ref:
+        return None
+    d0 = pd.Timestamp(str(date)[:10])
+    d1 = pd.Timestamp(str(ref)[:10])
+    if d0 >= d1:
+        return 0
+    hol = nyse_holidays(str(d0.date()), str(d1.date()))
+    return int(np.busday_count(
+        (d0 + pd.Timedelta(days=1)).date(), (d1 + pd.Timedelta(days=1)).date(),
+        holidays=[h.date() for h in hol],
+    ))
+
+
+def stale_level(age: Optional[int]) -> str:
+    """'ok' / 'warn' / 'error' for an age in sessions ('unknown' if None)."""
+    if age is None:
+        return "unknown"
+    if age >= STALE_ERROR_SESSIONS:
+        return "error"
+    if age >= STALE_WARN_SESSIONS:
+        return "warn"
+    return "ok"
+
+
+def _staleness(component: str, label: str, date: Optional[str], ref: Optional[str]) -> dict:
+    age = session_age(date, ref)
+    return {"component": component, "label": label, "date": date,
+            "ref": ref, "age": age, "level": stale_level(age)}
+
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
 def _db() -> sqlite3.Connection:
@@ -71,8 +181,119 @@ def _db() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
+def _record_error(d: dict, component: str, exc: Any) -> None:
+    """Attach a loader failure to the page; templates render it as a red banner."""
+    msg = str(exc) or exc.__class__.__name__
+    d.setdefault("errors", []).append({"component": component, "message": msg})
+    _logger.warning("[%s] loader error: %s", component, msg)
 
 
+def _date_str(x: Any) -> Optional[str]:
+    if x is None:
+        return None
+    if isinstance(x, (pd.Timestamp, np.datetime64)):
+        return str(pd.Timestamp(x).date())
+    s = str(x)[:10]
+    return s if re.match(r"^\d{4}-\d{2}-\d{2}$", s) else None
+
+
+def _clean(obj: Any) -> Any:
+    """Recursively convert numpy / pandas scalars to plain Python types.
+
+    Non-finite floats become None, so a missing number renders as '—' (and as
+    JSON null in chart data) rather than as 'nan' or a fabricated zero.
+    """
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return [_clean(v) for v in obj.tolist()]
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        f = float(obj)
+        return f if math.isfinite(f) else None
+    if isinstance(obj, pd.Timestamp):
+        return str(obj.date())
+    return obj
+
+
+def _num(x: Any) -> Optional[float]:
+    """float(x) if x is a finite number, else None."""
+    try:
+        f = float(x)
+    except Exception:          # TypeError/ValueError, or a Jinja Undefined
+        return None
+    return f if math.isfinite(f) else None
+
+
+def ordinal(n: Any) -> str:
+    """1 -> '1st', 2 -> '2nd', 11 -> '11th', 75 -> '75th' (rounded to an integer)."""
+    if _num(n) is None:
+        return "—"
+    k = int(round(float(n)))
+    suffix = "th" if 10 <= k % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(k % 10, "th")
+    return f"{k}{suffix}"
+
+
+def _fmt(value: Any, spec: str = "", default: str = "—") -> str:
+    """Jinja filter: format a number, or render `default` when it is missing."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(float(value)):
+            return default
+        return format(value, spec)
+    return str(value)
+
+
+def _usd_k(value: Any, signed: bool = True) -> str:
+    """Prose dollars in thousands: 693938 -> '+$694K', -599995 -> '−$600K'."""
+    x = _num(value)
+    if x is None:
+        return "—"
+    sign = "−" if x < 0 else ("+" if signed else "")
+    return f"{sign}${abs(x) / 1000:,.0f}K"
+
+
+def _pct_prose(value: Any, digits: int = 1, signed: bool = True) -> str:
+    """Prose percent of a decimal: -0.2612 -> '−26.1%'."""
+    x = _num(value)
+    if x is None:
+        return "—"
+    sign = "−" if x < 0 else ("+" if signed and x > 0 else "")
+    return f"{sign}{abs(x) * 100:.{digits}f}%"
+
+
+app.jinja_env.filters["fmt"] = _fmt
+app.jinja_env.filters["ordinal"] = ordinal
+app.jinja_env.filters["usd_k"] = _usd_k
+app.jinja_env.filters["pct"] = _pct_prose
+
+
+def _vomma_color(z: Optional[float]) -> str:
+    """Map a vomma z-score to a CSS colour for the heatmap."""
+    if z is None or (isinstance(z, float) and np.isnan(z)):
+        return "#1a1a1a"
+    if abs(z) > 2.0:
+        return "#cc1111"   # danger red
+    if z > 0:
+        t = min(z / 2.0, 1.0)
+        r = int(17 + (0 - 17) * t)
+        g = int(17 + (190 - 17) * t)
+        b = int(17 + (90 - 17) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    t = min(abs(z) / 2.0, 1.0)
+    r = int(17 + (40 - 17) * t)
+    g = int(17 + (90 - 17) * t)
+    b = int(17 + (200 - 17) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# ── Calibration selection ──────────────────────────────────────────────────────
 def latest_good_calibration_path() -> str:
     """Return the BEST joint_cal_*.pkl: lowest SPX RMSE among *well-identified*,
     non-degenerate fits.
@@ -118,45 +339,6 @@ def latest_good_calibration_path() -> str:
     if cals:
         return cals[-1]
     return str(DATA / "calibrations" / "joint_cal_2026-05-31.pkl")
-
-
-def _clean(obj: Any) -> Any:
-    """Recursively convert numpy / pandas scalars to plain Python types."""
-    if isinstance(obj, dict):
-        return {k: _clean(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_clean(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.bool_):
-        return bool(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, pd.Timestamp):
-        return str(obj.date())
-    return obj
-
-
-def _vomma_color(z: float) -> str:
-    """Map vomma z-score to a CSS color string for the heatmap."""
-    if z is None or (isinstance(z, float) and np.isnan(z)):
-        return "#1a1a1a"
-    if abs(z) > 2.0:
-        return "#cc1111"   # danger red
-    if z > 0:
-        t = min(z / 2.0, 1.0)
-        r = int(17 + (0 - 17) * t)
-        g = int(17 + (190 - 17) * t)
-        b = int(17 + (90 - 17) * t)
-        return f"#{r:02x}{g:02x}{b:02x}"
-    else:
-        t = min(abs(z) / 2.0, 1.0)
-        r = int(17 + (40 - 17) * t)
-        g = int(17 + (90 - 17) * t)
-        b = int(17 + (200 - 17) * t)
-        return f"#{r:02x}{g:02x}{b:02x}"
 
 
 # ── PAGE 1 DATA: Live Market Overview ─────────────────────────────────────────
@@ -1200,25 +1382,63 @@ def load_page4() -> dict[str, Any]:
     return _clean(d)
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+# ── Rendering ──────────────────────────────────────────────────────────────────
+# Per-route data date for the sitemap (freeze_site.py reads the header).
+_DATA_DATE_KEYS = {"/": "latest_session", "/calibration": "session",
+                   "/greeks": "surface_date", "/backtest": "run_date"}
+
+
+@app.context_processor
+def _page_context() -> dict:
+    route = request.path if request.path in ROUTES else "/"
+    return {"canonical": canonical_url(route), "page_file": ROUTES[route]}
+
+
+def _render(template: str, d: dict):
+    """Render a page and expose its loader errors / data date as headers.
+
+    freeze_site.py refuses to publish when X-Dashboard-Loader-Errors != 0, so a
+    page whose data failed to load is never deployed (the previous good build
+    stays live). The same errors are rendered on the page as a red banner.
+    """
+    errors = d.get("errors") or []
+    worst = "ok"
+    for item in d.get("stale") or []:
+        if item.get("level") == "error" or (item.get("level") == "warn" and worst == "ok"):
+            worst = item["level"]
+    d["worst_stale"] = worst
+    resp = make_response(render_template(template, d=d))
+    resp.headers["X-Dashboard-Loader-Errors"] = str(len(errors))
+    if errors:
+        resp.headers["X-Dashboard-Error-Components"] = "; ".join(e["component"] for e in errors)
+    stale = [f"{s['component']}={s['age']}" for s in d.get("stale") or []
+             if s.get("level") in ("warn", "error")]
+    if stale:
+        resp.headers["X-Dashboard-Stale"] = ", ".join(stale)
+    data_date = d.get(_DATA_DATE_KEYS.get(request.path, ""))
+    if data_date:
+        resp.headers["X-Dashboard-Data-Date"] = str(data_date)
+    return resp
+
+
 @app.route("/")
 def page_market():
-    return render_template("index.html", d=load_page1())
+    return _render("index.html", load_page1())
 
 
 @app.route("/calibration")
 def page_calibration():
-    return render_template("calibration.html", d=load_page2())
+    return _render("calibration.html", load_page2())
 
 
 @app.route("/greeks")
 def page_greeks():
-    return render_template("greeks.html", d=load_page3())
+    return _render("greeks.html", load_page3())
 
 
 @app.route("/backtest")
 def page_backtest():
-    return render_template("backtest.html", d=load_page4())
+    return _render("backtest.html", load_page4())
 
 
 # ── Local preview ──────────────────────────────────────────────────────────────

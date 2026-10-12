@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0a0a0a">
   <!-- Open Graph — LinkedIn / Twitter / Substack link preview -->
   <meta property="og:type"         content="website">
-  <meta property="og:url"          content="https://navnoorbawa.me/">
+  <meta property="og:url"          content="{{ canonical }}">
   <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
   <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 666 tests. Live dashboard.">
   <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
@@ -18,11 +18,15 @@
   <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 666 tests, documented negative result.">
   <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
   <meta name="author"              content="Navnoor Bawa">
-  <link rel="canonical"            href="https://navnoorbawa.me/">
+  <link rel="canonical"            href="{{ canonical }}">
   <meta name="twitter:card"        content="summary_large_image">
   <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
   <meta name="description"         content="Joint SPX/VIX smile calibration system. Heston, SVI/SSVI, Quintic OU, regime classifier, full backtest 2018–2025.">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <!-- Pinned npm build (not jsDelivr's generated .min.js wrapper, which is not
+       stable enough for SRI); integrity = sha384 of chart.js@4.4.3/dist/chart.umd.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js"
+          integrity="sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54"
+          crossorigin="anonymous"></script>
   <style>
     /* ── Reset & Base ────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -126,6 +130,8 @@
       box-shadow: 0 0 6px var(--accent);
       animation: pulse 2s infinite;
     }
+    .status-dot.warn  { background: #ffaa33; box-shadow: 0 0 6px #ffaa33; }
+    .status-dot.error { background: var(--red); box-shadow: 0 0 6px var(--red); animation: none; }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.4; }
@@ -271,6 +277,28 @@
       background: rgba(0,255,136,0.04);
       border-color: rgba(0,255,136,0.2);
     }
+    /* Loader failure: the numbers for this component are NOT shown */
+    .banner-error {
+      background: rgba(255,51,51,0.12);
+      border-color: rgba(255,51,51,0.6);
+    }
+    .banner-error .banner-title { color: #ff5555; }
+    /* Staleness: amber from STALE_WARN_SESSIONS, red from STALE_ERROR_SESSIONS */
+    .banner-stale-warn {
+      background: rgba(255,170,51,0.08);
+      border-color: rgba(255,170,51,0.45);
+    }
+    .banner-stale-warn .banner-title { color: #ffaa33; }
+    .banner-stale-error {
+      background: rgba(255,51,51,0.08);
+      border-color: rgba(255,51,51,0.45);
+    }
+    .banner-stale-error .banner-title { color: #ff5555; }
+    .banner-stack { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+    .banner-body ul { margin: 4px 0 0 18px; }
+    .age-ok    { color: var(--text3); }
+    .age-warn  { color: #ffaa33; font-weight: 600; }
+    .age-error { color: #ff5555; font-weight: 700; }
     .banner-icon {
       font-size: 22px;
       flex-shrink: 0;
@@ -668,13 +696,47 @@
       <span class="nav-dot"></span>Backtest
     </a>
   </div>
-  <div class="nav-status" title="End-of-day snapshot, auto-refreshed daily after the US market close">
-    <div class="status-dot"></div>
-    EOD DATA
+  {% set _worst = 'error' if (d and d.errors) else ((d and d.worst_stale) or 'ok') %}
+  <div class="nav-status" title="End-of-day snapshot, refreshed daily after the US market close">
+    <div class="status-dot {% if _worst in ('warn', 'error') %}{{ _worst }}{% endif %}"></div>
+    {% if d and d.errors %}DATA ERROR{% elif _worst == 'error' %}STALE DATA{% elif _worst == 'warn' %}EOD DATA · LAGGING{% else %}EOD DATA{% endif %}
   </div>
 </nav>
 
 <main class="page">
+  {% if d and (d.errors or (d.stale and d.stale|selectattr('level', 'in', ['warn', 'error'])|list)) %}
+  <div class="banner-stack">
+    {% if d.errors %}
+    <div class="banner banner-error" role="alert" data-loader-errors="{{ d.errors|length }}">
+      <div class="banner-icon">✗</div>
+      <div>
+        <div class="banner-title">Data unavailable — {{ d.errors|length }} component{{ 's' if d.errors|length > 1 else '' }} failed to load</div>
+        <div class="banner-body">
+          The values that depend on {{ 'these inputs' if d.errors|length > 1 else 'this input' }} are not shown (no placeholder numbers are substituted).
+          <ul>
+            {% for e in d.errors %}<li><strong>{{ e.component }}</strong>: {{ e.message }}</li>{% endfor %}
+          </ul>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% for s in d.stale or [] %}{% if s.level in ('warn', 'error') %}
+    <div class="banner banner-stale-{{ s.level }}" data-stale="{{ s.component }}" data-age="{{ s.age }}">
+      <div class="banner-icon">{% if s.level == 'error' %}⚠{% else %}⟳{% endif %}</div>
+      <div>
+        <div class="banner-title">{{ s.label }} is {{ s.age }} NYSE session{{ 's' if s.age != 1 else '' }} old</div>
+        <div class="banner-body">
+          {{ s.label }} as of <span class="mono">{{ s.date }}</span>; the newest session the site has data for is
+          <span class="mono">{{ s.ref }}</span>.
+          {% if s.component == 'calibration' %}No newer fit passed the quality gate, so the latest accepted fit is shown.{% endif %}
+          {% if s.component == 'pdv' %}The spread below pairs VIX and the forecast on that date only.{% endif %}
+          {% if s.component == 'market' %}The market database lags the other inputs on this page.{% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}{% endfor %}
+  </div>
+  {% endif %}
   {% block content %}{% endblock %}
 </main>
 

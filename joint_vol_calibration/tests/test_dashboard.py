@@ -6,6 +6,8 @@ Every test pins a defect the C22 audit found on the live site:
 
   * `python dashboard/app.py` overwrote the tracked regime_labels.parquet with the
     demoted classifier's predictions;
+  * loader failures rendered zeros with confident prose and still deployed;
+  * every page declared the home page as its canonical URL.
 
 Synthetic market data is seeded; no test touches the network or writes under
 data_store/ (tests that need different inputs point the app at a temp copy).
@@ -65,6 +67,14 @@ NYSE_CLOSURES_2022_2024 = [
 
 def _sessions(dash, start: str, end: str) -> pd.DatetimeIndex:
     return pd.bdate_range(start, end, freq="C", holidays=NYSE_CLOSURES_2022_2024)
+
+
+def test_nyse_calendar_matches_published_closures(dash):
+    got = [str(h.date()) for h in dash.nyse_holidays("2022-01-01", "2024-12-31")]
+    assert got == NYSE_CLOSURES_2022_2024
+    assert dash.session_age("2026-09-04", "2026-09-08") == 1      # Labor Day 09-07
+    assert dash.session_age("2026-09-08", "2026-09-04") == 0
+    assert dash.stale_level(1) == "ok" and dash.stale_level(2) == "warn" and dash.stale_level(5) == "error"
 
 
 def _write_market_db(path: Path, dates: pd.DatetimeIndex, seed: int = 11,
@@ -170,7 +180,7 @@ def test_rendering_writes_nothing(dash):
     """Every loader and route on the shipped data leaves data_store byte-identical."""
     before = _tree_digest(SHIPPED)
     client = dash.app.test_client()
-    for route in ("/", "/calibration", "/greeks", "/backtest"):
+    for route in dash.ROUTES:
         assert client.get(route).status_code == 200
     assert _tree_digest(SHIPPED) == before
 
@@ -218,6 +228,45 @@ def test_local_preview_binds_loopback(monkeypatch):
 # ── front page: rule label, classifier, term structure ───────────────────────
 
 # ── loader failures: visible, and never deployed ──────────────────────────────
+
+def test_any_loader_error_blocks_the_publish(dash, freezer, tmp_path, monkeypatch):
+    """freeze_site only failed on HTTP 500 or a 'Traceback' string, so pages
+    whose loaders had swallowed an exception were deployed."""
+    real = dash.load_page3
+
+    def broken():
+        d = real()
+        d.setdefault("errors", []).append({"component": "greeks", "message": "boom"})
+        return d
+
+    monkeypatch.setattr(dash, "load_page3", broken)
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 1
+    assert not out.exists() or not any(out.iterdir())
+
+
+def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 0
+    sitemap = (out / "sitemap.xml").read_text()
+    locs = re.findall(r"<loc>([^<]+)</loc>", sitemap)
+    assert len(set(locs)) == len(dash.ROUTES)
+    for route, fname in dash.ROUTES.items():
+        html = (out / fname).read_text()
+        canon = re.search(r'<link rel="canonical"\s+href="([^"]+)"', html).group(1)
+        og = re.search(r'<meta property="og:url"\s+content="([^"]+)"', html).group(1)
+        assert canon == og == dash.canonical_url(route)
+        assert canon in locs
+        assert 'href="/' not in html.replace('href="/"', "")   # nav links are relative
+
+
+def test_external_scripts_carry_subresource_integrity(dash):
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    tags = re.findall(r"<script[^>]+src=\"https?://[^>]+>", html)
+    assert tags
+    for tag in tags:
+        assert 'integrity="sha384-' in tag and 'crossorigin="anonymous"' in tag
+
 
 # ── Greeks page ───────────────────────────────────────────────────────────────
 
