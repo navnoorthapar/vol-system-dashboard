@@ -1,31 +1,52 @@
 """
-dashboard/app.py — Joint SPX/VIX Volatility System — Live Dashboard
-C-Suite grade display layer. Reads exclusively from data_store/.
+dashboard/app.py — Joint SPX/VIX Volatility System — display layer.
 
-Run:  python dashboard/app.py
-URL:  http://localhost:5000
+Renders the four dashboard pages from the artifacts under data_store/. It is a
+pure READ path: rendering a page never downloads data, never writes a file and
+never retrains or re-labels anything. The daily data refresh, the regime-label
+extension and the Heston recalibration belong to scripts/cloud_refresh.py; the
+static site is produced by dashboard/freeze_site.py.
+
+(An earlier version started "startup" and "every 4 hours" refresh threads from
+``__main__``. They downloaded market data into the tracked SQLite DB and then
+overwrote the tracked regime_labels.parquet with the DEMOTED classifier's
+predictions — the exact defect C21 removed from cloud_refresh — whenever the
+local DB was more than three days old, i.e. on every fresh clone.)
+
+Run a local preview (read-only, bound to 127.0.0.1):
+    python dashboard/app.py
 """
 from __future__ import annotations
 
-import datetime
+import glob
+import inspect
 import json
 import logging
+import math
 import pickle
+import re
 import sqlite3
 import sys
-import threading
-import time
-import webbrowser
 from pathlib import Path
-from threading import Timer
-from typing import Any
-from zoneinfo import ZoneInfo
-
-_logger = logging.getLogger("vol_dashboard")
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import pandas as pd
-from flask import Flask, render_template
+from flask import Flask, make_response, render_template, request
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar,
+    GoodFriday,
+    Holiday,
+    USLaborDay,
+    USMartinLutherKingJr,
+    USMemorialDay,
+    USPresidentsDay,
+    USThanksgivingDay,
+    nearest_workday,
+    sunday_to_monday,
+)
+
+_logger = logging.getLogger("vol_dashboard")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,7 +62,15 @@ app = Flask(
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
 def _db() -> sqlite3.Connection:
-    return sqlite3.connect(DATA / "vol_system.db")
+    """Read-only connection: the display layer must never write to the DB.
+
+    mode=ro also refuses to create an empty database when the file is missing,
+    so a missing DB surfaces as a loader error instead of an empty page.
+    """
+    path = (DATA / "vol_system.db").resolve()
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
 
 
 def latest_good_calibration_path() -> str:
@@ -1171,197 +1200,6 @@ def load_page4() -> dict[str, Any]:
     return _clean(d)
 
 
-# ── Startup data refresh (Bug 2 fix) ──────────────────────────────────────────
-
-def _refresh_regime_labels() -> None:
-    """
-    Re-run the regime classifier on the latest DB data and overwrite
-    data_store/signals/regime_labels.parquet.
-
-    Called after daily_refresh() completes so that the cached labels
-    used by the live-regime fallback (Bug 1) reflect today's data.
-    """
-    try:
-        from joint_vol_calibration.data.database import (
-            get_spx_ohlcv,
-            get_vix_term_structure_wide,
-        )
-        from joint_vol_calibration.signals.regime_classifier import (
-            build_features,
-        )
-
-        today       = pd.Timestamp.today().strftime("%Y-%m-%d")
-        spx_df      = get_spx_ohlcv(as_of_date=today)
-        vix_wide_df = get_vix_term_structure_wide(as_of_date=today)
-
-        # Use the PDV model for pdv_iv_spread if available
-        pdv_model = None
-        try:
-            with open(DATA / "pdv_model.pkl", "rb") as _f:
-                pdv_model = pickle.load(_f)
-        except Exception:
-            pass
-
-        feats = build_features(spx_df, vix_wide_df, pdv_model=pdv_model)
-
-        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as _f:
-            clf = pickle.load(_f)
-
-        labels = clf.predict_series(feats.dropna())
-        rl     = feats.reindex(labels.index).copy()
-        rl["regime"] = labels
-
-        out_path = DATA / "signals" / "regime_labels.parquet"
-        rl.to_parquet(out_path)
-        _logger.info(
-            "[startup_refresh] regime_labels.parquet updated: %d rows, last date %s",
-            len(rl),
-            str(rl.index[-1].date()),
-        )
-    except Exception as exc:
-        _logger.error("[startup_refresh] regime_labels.parquet refresh failed: %s", exc)
-
-
-def _startup_data_refresh() -> None:
-    """
-    Background thread entry-point — called once when the app starts.
-
-    Checks whether SPX data is stale (> 3 calendar days behind today).
-    If stale: runs DataPipeline.daily_refresh() then rebuilds regime_labels.parquet.
-    Logs every step so Railway logs show exactly which dates were added.
-    """
-    try:
-        con = _db()
-        row = pd.read_sql("SELECT MAX(date) AS last_date FROM spx_ohlcv", con)
-        con.close()
-        last_str  = str(row["last_date"].iloc[0])[:10]
-        last_date = pd.Timestamp(last_str)
-        today     = pd.Timestamp.today().normalize()
-
-        # 3-day lag covers weekends + public holidays without false triggers
-        if last_date >= today - pd.Timedelta(days=3):
-            _logger.info(
-                "[startup_refresh] Data is current (last SPX: %s). No refresh needed.",
-                last_str,
-            )
-            return
-
-        _logger.info(
-            "[startup_refresh] Stale data: last SPX=%s, today=%s. Starting refresh...",
-            last_str,
-            today.strftime("%Y-%m-%d"),
-        )
-
-        from joint_vol_calibration.data.pipeline import DataPipeline
-        pipe    = DataPipeline()
-        results = pipe.daily_refresh()
-
-        for src, n_rows in results.items():
-            if n_rows:
-                _logger.info("[startup_refresh] %-30s  +%d rows", src, n_rows)
-
-        # Rebuild regime labels so the cache reflects the freshest data
-        _refresh_regime_labels()
-
-        # Bug 5: Log MAX(date) for all key tables so Railway logs show exact state
-        _con_log = _db()
-        for _tbl in ["spx_ohlcv", "vix_daily", "vix_term_structure"]:
-            try:
-                _r = pd.read_sql(f"SELECT MAX(date) AS d FROM {_tbl}", _con_log)  # noqa: S608
-                _logger.info(
-                    "[startup_refresh] %-25s max_date=%s", _tbl, str(_r["d"].iloc[0])[:10]
-                )
-            except Exception as _te:
-                _logger.warning("[startup_refresh] Could not query %s: %s", _tbl, _te)
-        _con_log.close()
-
-        # Confirm new high-water mark
-        con2     = _db()
-        row2     = pd.read_sql("SELECT MAX(date) AS last_date FROM spx_ohlcv", con2)
-        con2.close()
-        new_last = str(row2["last_date"].iloc[0])[:10]
-        _logger.info(
-            "[startup_refresh] Done. SPX now current to %s (was %s).",
-            new_last,
-            last_str,
-        )
-
-    except Exception as exc:
-        _logger.error("[startup_refresh] Startup refresh failed: %s", exc)
-
-
-# ── Scheduled 4-hour refresh ──────────────────────────────────────────────────
-
-_refresh_lock = threading.Lock()   # prevents concurrent refresh runs
-
-_ET = ZoneInfo("America/New_York")
-
-
-def _scheduled_data_refresh() -> None:
-    """
-    Daemon thread: sleeps 4 hours then re-runs the data refresh pipeline,
-    but only on weekdays between 09:00–22:00 ET (covers market hours +
-    after-hours data availability).  Skips silently if another refresh is
-    already in progress.
-    """
-    _INTERVAL_S = 4 * 3600  # 4 hours
-
-    while True:
-        time.sleep(_INTERVAL_S)
-
-        now_et = datetime.datetime.now(tz=_ET)
-        # weekday() 0=Mon … 6=Sun; skip weekends and off-hours
-        if now_et.weekday() >= 5 or not (9 <= now_et.hour < 22):
-            _logger.info(
-                "[scheduled_refresh] Skipped — outside window (%s ET, weekday=%d).",
-                now_et.strftime("%H:%M"),
-                now_et.weekday(),
-            )
-            continue
-
-        if not _refresh_lock.acquire(blocking=False):
-            _logger.info("[scheduled_refresh] Skipped — another refresh is already running.")
-            continue
-
-        try:
-            _logger.info(
-                "[scheduled_refresh] Starting refresh at %s ET.",
-                now_et.strftime("%Y-%m-%d %H:%M"),
-            )
-            _startup_data_refresh()
-
-            # Log new market snapshot after refresh
-            try:
-                with sqlite3.connect(str(DATA / "vol_system.db")) as _con:
-                    _spx = pd.read_sql(
-                        "SELECT close, date FROM spx_ohlcv"
-                        " WHERE date = (SELECT MAX(date) FROM spx_ohlcv)",
-                        _con,
-                    )
-                    _vix = pd.read_sql(
-                        "SELECT close, date FROM vix_term_structure"
-                        " WHERE ticker='^VIX'"
-                        " AND date=(SELECT MAX(date) FROM vix_term_structure WHERE ticker='^VIX')",
-                        _con,
-                    )
-                    _vvix = pd.read_sql(
-                        "SELECT close, date FROM vix_term_structure"
-                        " WHERE ticker='^VVIX'"
-                        " AND date=(SELECT MAX(date) FROM vix_term_structure WHERE ticker='^VVIX')",
-                        _con,
-                    )
-                _logger.info(
-                    "[scheduled_refresh] Done.  SPX=%.2f (%s)  VIX=%.2f (%s)  VVIX=%.2f (%s)",
-                    float(_spx["close"].iloc[0]),  str(_spx["date"].iloc[0])[:10],
-                    float(_vix["close"].iloc[0]),  str(_vix["date"].iloc[0])[:10],
-                    float(_vvix["close"].iloc[0]), str(_vvix["date"].iloc[0])[:10],
-                )
-            except Exception as _le:
-                _logger.warning("[scheduled_refresh] Could not log market snapshot: %s", _le)
-        finally:
-            _refresh_lock.release()
-
-
 # ── Routes ─────────────────────────────────────────────────────────────────────
 @app.route("/")
 def page_market():
@@ -1383,53 +1221,27 @@ def page_backtest():
     return render_template("backtest.html", d=load_page4())
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Local preview ──────────────────────────────────────────────────────────────
 def _find_free_port(preferred: int = 5000) -> int:
     import socket
     for port in [preferred, 5001, 5050, 8080, 8888]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("localhost", port)) != 0:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
                 return port
     return preferred
 
 
 if __name__ == "__main__":
-    # Railway / Render / Fly.io inject PORT — fall back to local auto-detect
-    import os as _os
+    # A read-only local preview of exactly what freeze_site.py publishes. It
+    # does not refresh data: run scripts/cloud_refresh.py for that.
+    import os
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-
-    port  = int(_os.environ.get("PORT", _find_free_port(5000)))
-    local = not _os.environ.get("PORT")           # True when running locally
-    url   = f"http://localhost:{port}"
-
-    print("\n  ┌──────────────────────────────────────────────────┐")
-    print("  │   Joint SPX/VIX Volatility System — Dashboard    │")
-    print(f"  │   {url:<44}  │")
-    print("  └──────────────────────────────────────────────────┘\n")
-
-    # Kick off data refresh in background so the app binds to its port
-    # immediately (Railway health-checks require fast startup).
-    _refresh_thread = threading.Thread(
-        target=_startup_data_refresh,
-        name="startup-refresh",
-        daemon=True,
-    )
-    _refresh_thread.start()
-    _logger.info("Startup refresh thread launched (daemon=True).")
-
-    _sched_thread = threading.Thread(
-        target=_scheduled_data_refresh,
-        name="scheduled-refresh",
-        daemon=True,
-    )
-    _sched_thread.start()
-    _logger.info("Scheduled refresh thread launched (4h interval, weekdays 09:00–22:00 ET).")
-
-    if local:
-        Timer(1.2, lambda: webbrowser.open(url)).start()
-
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", _find_free_port(5000)))
+    print(f"\n  Joint SPX/VIX Volatility System — local preview: http://{host}:{port}\n")
+    app.run(host=host, port=port, debug=False, use_reloader=False)
