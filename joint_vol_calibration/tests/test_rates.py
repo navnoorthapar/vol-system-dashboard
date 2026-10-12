@@ -1,69 +1,63 @@
 """
 test_rates.py — C10-Step4: Tests for per-date T-bill rate integration.
 
-18 tests covering:
+Tests covering:
   - database schema: tbill_rates table exists
   - insert_tbill_rates() round-trip
   - get_tbill_rate() look-ahead guard
   - get_tbill_rate() fallback when no data
   - get_tbill_rates_series() date range filter
-  - yf_downloader.download_tbill_rate() structure (mock)
+  - yf_downloader.download_tbill_rate() structure (mocked yfinance)
   - BacktestEngine._simulate_straddle_pnl accepts Series r
   - Zero look-ahead: rate series never returns future dates
+
+Every test runs against a fresh temporary database. These tests once wrote
+``np.linspace(0.015, 0.020, 7)`` into the TRACKED production database, where
+it became the backtest's cash hurdle (C21); a later snapshot-and-restore
+fixture still left the file polluted whenever a run was killed between insert
+and teardown. Now the tracked file is never opened for writing at all, and
+``TestIsolation`` proves it.
 """
 
+import hashlib
 import sqlite3
+from contextlib import closing
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import joint_vol_calibration.data.database as db_module
+from joint_vol_calibration import config
 from joint_vol_calibration.data.database import (
     insert_tbill_rates,
     get_tbill_rate,
     get_tbill_rates_series,
     init_database,
 )
-from joint_vol_calibration.config import DB_PATH
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-@pytest.fixture(autouse=True)
-def ensure_schema():
-    """Make sure the DB schema includes tbill_rates table."""
-    init_database()
+def _md5(path) -> str:
+    return hashlib.md5(open(path, "rb").read()).hexdigest() if path.exists() else ""
 
 
-# The window the synthetic fixtures below overwrite. Kept deliberately wider
-# than the fixture dates so a future edit to `sample_rates` stays covered.
-_FIXTURE_WINDOW = ("2020-01-01", "2020-01-31")
-
-
-@pytest.fixture(autouse=True)
-def protect_production_rates():
-    """Snapshot and restore the real ^IRX rows these tests overwrite.
-
-    DB_PATH here is the tracked production database, and several tests call
-    ``insert_tbill_rates(sample_rates)`` directly rather than through a
-    fixture. Those synthetic rows -- ``np.linspace(0.015, 0.020, 7)`` -- used
-    to persist, and for a long time they were the ONLY T-bill rows inside the
-    2018-2025 backtest window. Because ``compute_metrics`` forward-fills the
-    rate series, a unit-test fixture silently became the cash hurdle behind
-    the published "Sharpe vs ^IRX". Restoring the window keeps the assertions
-    below intact while making that impossible to repeat.
-    """
-    lo, hi = _FIXTURE_WINDOW
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        before = conn.execute(
-            "SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?", (lo, hi)
-        ).fetchall()
+@pytest.fixture(scope="module", autouse=True)
+def tracked_db_untouched():
+    """The tracked database must be byte-identical before and after this module."""
+    before = _md5(config.DB_PATH)
     yield
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        conn.execute("DELETE FROM tbill_rates WHERE date BETWEEN ? AND ?", (lo, hi))
-        conn.executemany(
-            "INSERT OR REPLACE INTO tbill_rates (date, rate) VALUES (?, ?)", before
-        )
+    assert _md5(config.DB_PATH) == before, "test_rates.py modified the tracked database"
+
+
+@pytest.fixture(autouse=True)
+def temp_db(tmp_path, monkeypatch):
+    """Point the database module at a fresh temporary file with the full schema."""
+    path = tmp_path / "rates_test.db"
+    monkeypatch.setattr(db_module, "DB_PATH", path)
+    init_database()
+    return path
 
 
 @pytest.fixture
@@ -86,7 +80,7 @@ def loaded_rates(sample_rates) -> pd.DataFrame:
 class TestSchema:
     def test_tbill_rates_table_exists(self):
         """tbill_rates table must be created by init_database()."""
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with closing(sqlite3.connect(str(db_module.DB_PATH))) as conn:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='tbill_rates'"
             ).fetchone()
@@ -94,7 +88,7 @@ class TestSchema:
 
     def test_tbill_rates_columns(self):
         """tbill_rates must have 'date' and 'rate' columns."""
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with closing(sqlite3.connect(str(db_module.DB_PATH))) as conn:
             cursor = conn.execute("PRAGMA table_info(tbill_rates)")
             cols = {row[1] for row in cursor.fetchall()}
         assert "date" in cols, "'date' column missing from tbill_rates"
@@ -117,7 +111,7 @@ class TestInsertTbillRates:
     def test_insert_rate_decimal(self, sample_rates):
         """Rates must be stored as decimal (< 1.0), not percent."""
         insert_tbill_rates(sample_rates)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with closing(sqlite3.connect(str(db_module.DB_PATH))) as conn:
             rows = conn.execute(
                 "SELECT rate FROM tbill_rates WHERE date >= '2020-01-02' AND date <= '2020-01-10'"
             ).fetchall()
@@ -266,3 +260,24 @@ class TestTbillPipelineIntegration:
         from joint_vol_calibration.data.database import get_tbill_rate
         with pytest.raises(ValueError, match="Invalid date format"):
             get_tbill_rate("20200101")  # wrong format
+
+
+class TestDownloadTbillRate:
+    def test_structure_and_units(self, monkeypatch):
+        """download_tbill_rate() returns [date, rate, discount_yield]; ^IRX percent -> cc decimal."""
+        from joint_vol_calibration.data import yf_downloader as dl
+
+        idx = pd.DatetimeIndex(["2024-06-03", "2024-06-04"], name="Date")
+        monkeypatch.setattr(dl.yf, "download",
+                            lambda *a, **k: pd.DataFrame({"Close": [5.243, 5.25]}, index=idx))
+        df = dl.download_tbill_rate(start="2024-06-01", end="2024-06-04")
+        assert df.columns.tolist() == ["date", "rate", "discount_yield"]
+        assert df["discount_yield"].tolist() == pytest.approx([0.05243, 0.0525])
+        # continuously compounded: exp(-r * 91/365) is the bill's discount price
+        assert np.allclose(np.exp(-df["rate"] * 91 / 365), 1 - df["discount_yield"] * 91 / 360)
+
+
+class TestIsolation:
+    def test_database_module_points_at_a_temp_file(self):
+        assert db_module.DB_PATH != config.DB_PATH
+        assert "rates_test.db" in str(db_module.DB_PATH)
