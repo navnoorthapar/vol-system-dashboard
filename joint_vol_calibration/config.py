@@ -67,6 +67,20 @@ JOINT_W3 = 0.0   # was 0.2
 # ── Data Tickers ──────────────────────────────────────────────────────────────
 TBILL_TICKER = "^IRX"   # 3-month T-bill rate (yfinance) — annualised %
 
+# ── VIX term-structure indices ────────────────────────────────────────────────
+# Cboe constant-maturity volatility indices. Each one is a SPOT-starting
+# variance-swap rate: expected volatility from TODAY to its horizon, i.e.
+# VIX_T^2 = (1/T) * integral_0^T E[v_s] ds. They are NOT VIX futures (a future
+# expiring at T settles on the 30-day vol over [T, T+30d]). Horizons are in
+# calendar days per Cboe's index methodology. Single source of truth for every
+# module that maps a ticker to a tenor.
+VIX_INDEX_TENOR_DAYS = {
+    "^VIX9D": 9,
+    "^VIX":   30,
+    "^VIX3M": 93,
+    "^VIX6M": 184,
+}
+
 # ── Neural Network ────────────────────────────────────────────────────────────
 NN_HIDDEN_DIM   = 256
 NN_N_LAYERS     = 4
