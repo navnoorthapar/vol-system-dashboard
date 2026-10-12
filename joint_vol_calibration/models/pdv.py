@@ -1,29 +1,59 @@
 """
 pdv.py — Path-Dependent Volatility (PDV) Model
-            Guyon & Lekeufack, "Volatility is (Mostly) Path-Dependent" (2023)
+            after Guyon & Lekeufack, "Volatility is (Mostly) Path-Dependent",
+            Quantitative Finance 23(9), 2023
 
-Core claim: instantaneous vol is a deterministic function of recent realized
-returns — not a hidden stochastic factor.
+Core claim: volatility is to a large extent a function of the past path of
+returns, not a hidden stochastic factor.
 
-    sigma(t) = f(r_{t-1}, r_{t-2}, ..., r_{t-L})
+What Guyon-Lekeufack (G-L) actually fit
+---------------------------------------
+    sigma_t = beta0 + beta1 * R1_t + beta2 * sqrt(R2_t)
+    R1_t = sum_{t_i <= t} K1(t - t_i) * r_{t_i}        (trend / leverage)
+    R2_t = sum_{t_i <= t} K2(t - t_i) * r_{t_i}^2      (activity)
 
-In the Guyon-Lekeufack formulation, f is parameterised via two "path-dependent"
-state variables:
+with FITTED time-shifted power-law kernels K(tau) ∝ (tau + delta)^(-alpha)
+(their Markovian "4FMPDV" variant replaces each kernel by a convex
+combination of two exponentials with fitted decay rates). Their targets are
+the VIX level and a high-frequency realised volatility.
 
-    f1(t) = EMA_{fast}( r² )   — short-memory variance component (halflife ~5d)
-    f2(t) = EMA_{slow}( r² )   — long-memory variance component (halflife ~60d)
+What this module fits (an EWMA approximation, NOT a G-L replication)
+--------------------------------------------------------------------
+    sigma1(t) = sqrt(EWMA_{5d half-life}(r^2) * 252)
+    sigma2(t) = sqrt(EWMA_{60d half-life}(r^2) * 252)
+    lev(t)    = EWMA_{10d half-life}(r) * sqrt(252)
+    y_hat(t)  = a*sigma1 + b*sigma2 + c*lev + d          (OLS)
 
-The conditional expected vol is then estimated non-parametrically by
-Nadaraya-Watson kernel regression.
+Differences from G-L, stated plainly:
+  * kernels: three exponentials with FIXED half-lives (5/60/10 days, never
+    optimised) instead of fitted power laws;
+  * activity enters as a sum of two square roots (a*sigma1 + b*sigma2) rather
+    than beta2*sqrt(R2) of one kernel;
+  * inputs: daily close-to-close returns only (no intraday data);
+  * targets: either the very noisy next-day |r_{t+1}| (an E|r| forecast, used
+    for the walk-forward R^2 table) or the 21-day forward RMS volatility
+    (variance-consistent, horizon-matched with the 30-day VIX; this is the
+    forecast that must be used whenever PDV is compared with implied vol —
+    see walk_forward_vol_forecast());
+  * the Nadaraya-Watson PDVKernel is this project's addition, not part of G-L.
+An R^2 from this module is therefore not comparable with the R^2 values G-L
+report for the VIX or for intraday realised vol.
 
-This module provides three estimators:
+Estimators provided:
 
-  1. PDVNaive      — rolling historical vol, baseline (no params)
-  2. PDVLinear     — OLS on (f1, f2, leverage) — interpretable, competitive
-  3. PDVKernel     — Nadaraya-Watson in 2D (f1, f2) — the main model
+  1. PDVNaive      — trailing 20-day realised vol, baseline (no params)
+  2. PDVLinear     — OLS on (sigma1, sigma2, lev) — the production model
+  3. PDVKernel     — Nadaraya-Watson on (sigma1, sigma2[, lev]), with a linear
+                     fallback outside the support of the training data
+  4. GARCH11       — GARCH(1,1) baseline
 
-All three share the same feature extraction, fit interface, and validation
+All share the same feature extraction, fit interface, and validation
 framework so results are directly comparable.
+
+Units: a model fit on the 1-day target y = |r_{t+1}|*sqrt(252) learns
+E|r_{t+1}|*sqrt(252), which is about sqrt(2/pi) ~ 0.8 of the conditional
+volatility under normality and ~0.66 of the unconditional RMS volatility on
+SPX. It is NOT a volatility and must not be subtracted from the VIX.
 
 Financial interpretation of the features:
   f1 (fast): reacts to yesterday's big move. If the market dropped 5% today,
@@ -33,9 +63,9 @@ Financial interpretation of the features:
   leverage:  EMA of r (not r²). Negative leverage → negative recent drift →
              vol tends to rise (the leverage effect / volatility feedback).
 
-The Heston model needs BOTH f1 and f2 as STOCHASTIC factors (v_t).
-PDV replaces that hidden stochasticity with OBSERVED history. That is the
-entire conceptual difference.
+A stochastic-volatility model such as Heston treats variance as a hidden
+STOCHASTIC factor (v_t). PDV replaces that hidden factor with functions of the
+OBSERVED return history. That is the entire conceptual difference.
 """
 
 import copy
@@ -58,6 +88,12 @@ logger = logging.getLogger(__name__)
 # returns. See extract_pdv_features() and build_xy().
 EWM_BURN_IN = 60
 
+# The horizon of the volatility forecast that is compared with the VIX: the
+# VIX is (approximately) sqrt of the risk-neutral expected variance over the
+# next 30 calendar days = 21 trading days.
+VIX_HORIZON_DAYS = 21
+
+_PDV_XCOLS = ["sigma1", "sigma2", "lev"]
 
 
 # ── Feature Engineering ───────────────────────────────────────────────────────
@@ -836,6 +872,155 @@ def walk_forward_predict(
     return y_hat
 
 
+def walk_forward_vol_forecast(
+    log_returns: pd.Series,
+    horizon: int = VIX_HORIZON_DAYS,
+    train_min_days: int = 504,
+    embargo: Optional[int] = None,
+    target: str = "rv",
+    burn_in: int = EWM_BURN_IN,
+    halflife_fast: float = 5.0,
+    halflife_slow: float = 60.0,
+    halflife_lev: float = 10.0,
+    annualise: int = 252,
+) -> pd.Series:
+    """
+    Out-of-sample PDVLinear volatility forecast, one value per trading day.
+
+    The value on row t is the forecast, made at the close of day t with
+    information through t only, of
+
+        y_h(t) = sqrt(annualise/h * sum_{i=1..h} r_{t+i}^2)     (target='rv')
+
+    i.e. the RMS volatility realised over the NEXT h trading days. With the
+    default h = 21 this is variance-consistent and horizon-matched with the
+    30-day VIX, so `VIX(t) - forecast(t)` is a genuine implied-minus-expected-
+    realised spread. (The 1-day |r| model learns E|r| ≈ 0.66 × RMS vol on SPX:
+    subtracting it from the VIX manufactured ~3 vol points of spurious
+    "premium".)
+
+    Purged walk-forward: the model used on row t is refit daily on the label
+    rows i whose window [i+1, i+h] ends at or before t - (embargo - h), i.e.
+    i <= t - embargo. The default and minimum embargo is h, which makes every
+    training label fully observed at the close of t and non-overlapping with
+    the label being forecast. Unlike walk_forward_predict(), forecasts are
+    also produced for the last h rows, whose own labels are not yet known —
+    so the final value is the live forecast (see latest_vol_forecast()).
+
+    Parameters
+    ----------
+    log_returns    : pd.Series of daily log returns indexed by date. NaNs are
+                     dropped (pass a gap-free series).
+    horizon        : forecast horizon in trading days (default 21).
+    train_min_days : minimum number of training labels before the first
+                     forecast.
+    embargo        : rows between the last training label row and the
+                     forecast row; must be >= horizon (default = horizon).
+    target         : 'rv' (default) or 'abs_return' — see forward_target().
+    burn_in        : leading feature rows excluded from training.
+
+    Returns
+    -------
+    pd.Series (annualised decimal) indexed by every date with a forecast,
+    named f"pdv_vol_{h}d".
+    """
+    horizon = int(horizon)
+    embargo = horizon if embargo is None else int(embargo)
+    if embargo < horizon:
+        raise ValueError(
+            f"embargo ({embargo}) must be >= horizon ({horizon}): a shorter "
+            "embargo trains on labels that are not yet observed at the "
+            "forecast origin"
+        )
+    r = log_returns.dropna().astype(float)
+    feats = extract_pdv_features(r, halflife_fast=halflife_fast,
+                                 halflife_slow=halflife_slow,
+                                 halflife_lev=halflife_lev,
+                                 annualise=annualise)
+    y = forward_target(r, horizon=horizon, target=target, annualise=annualise)
+
+    Xall = feats[_PDV_XCOLS].to_numpy(dtype=float)
+    yall = y.to_numpy(dtype=float)
+    n = len(r)
+    first = int(burn_in)
+    trainable = np.isfinite(Xall).all(axis=1) & np.isfinite(yall)
+    trainable[:first] = False
+    n_trainable_cum = np.cumsum(trainable)      # labels usable in rows [0, i]
+
+    out = np.full(n, np.nan)
+    for t in range(n):
+        last = t - embargo                       # last usable label row
+        if last < 0 or n_trainable_cum[last] < train_min_days:
+            continue
+        if not np.isfinite(Xall[t]).all():
+            continue
+        rows = trainable[:last + 1]
+        Xb = np.column_stack([Xall[:last + 1][rows], np.ones(int(rows.sum()))])
+        coef, _, _, _ = np.linalg.lstsq(Xb, yall[:last + 1][rows], rcond=None)
+        out[t] = max(float(Xall[t] @ coef[:-1] + coef[-1]), 1e-4)
+    return pd.Series(out, index=r.index, name=f"pdv_vol_{horizon}d").dropna()
+
+
+def latest_vol_forecast(
+    log_returns: pd.Series,
+    horizon: int = VIX_HORIZON_DAYS,
+    embargo: Optional[int] = None,
+    target: str = "rv",
+    burn_in: int = EWM_BURN_IN,
+    annualise: int = 252,
+) -> dict:
+    """
+    The live PDV forecast: fit on every label observed by the last return
+    date and predict from that date's features.
+
+    Equal to the last value of walk_forward_vol_forecast() (one fit instead
+    of thousands). Use this for any 'today' display.
+
+    Returns
+    -------
+    dict with
+      vol          : float — annualised forecast of the RMS vol over the next
+                     `horizon` trading days (target='rv'), decimal
+      feature_date : pd.Timestamp — date of the last return used (the
+                     forecast origin; stamp it next to the number)
+      horizon      : int
+      target       : str
+      train_start, train_end : first / last label row used in the fit
+      n_train      : int
+      coef         : dict {sigma1, sigma2, lev, intercept}
+    """
+    horizon = int(horizon)
+    embargo = horizon if embargo is None else int(embargo)
+    if embargo < horizon:
+        raise ValueError(f"embargo ({embargo}) must be >= horizon ({horizon})")
+    r = log_returns.dropna().astype(float)
+    feats = extract_pdv_features(r, annualise=annualise)
+    X, y = build_xy(r, feats, horizon=horizon, target=target,
+                    annualise=annualise, burn_in=burn_in)
+    if len(r) - 1 - embargo < 0:
+        raise ValueError("not enough history for a PDV forecast")
+    last_label_date = r.index[len(r) - 1 - embargo]
+    X, y = X[X.index <= last_label_date], y[y.index <= last_label_date]
+    if len(X) == 0:
+        raise ValueError("not enough history for a PDV forecast")
+    model = PDVLinear().fit(X, y)
+    x_now = feats[_PDV_XCOLS].iloc[[-1]]
+    if x_now.isna().any(axis=None):
+        raise ValueError("features at the last return date are NaN")
+    a, b, c = (float(v) for v in model.coef_)
+    return {
+        "vol":          float(model.predict(x_now).iloc[0]),
+        "feature_date": pd.Timestamp(r.index[-1]),
+        "horizon":      horizon,
+        "target":       target,
+        "train_start":  pd.Timestamp(X.index[0]),
+        "train_end":    pd.Timestamp(X.index[-1]),
+        "n_train":      int(len(X)),
+        "coef":         {"sigma1": a, "sigma2": b, "lev": c,
+                         "intercept": float(model.intercept_)},
+    }
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def compute_metrics(
@@ -1108,7 +1293,9 @@ class PDVModel:
     -------
     horizon=1 (default)        : |r_{t+1}|·sqrt(252) — an E|r| forecast; this is
                                  the target of the walk-forward R^2 table.
-    horizon=h, target='rv'     : forward h-day RMS vol (variance-consistent).
+    horizon=21, target='rv'    : forward 21-day RMS vol — the forecast to compare
+                                 with the VIX. data_store/pdv_model.pkl holds this
+                                 configuration (see build_pdv_model()).
 
     Usage:
       model = PDVModel()
@@ -1181,7 +1368,8 @@ class PDVModel:
 
         This is the IN-SAMPLE fit: its coefficients have seen every date in
         `log_returns`, so its predictions for those dates are NOT forecasts.
-        For out-of-sample numbers use .validate().
+        For out-of-sample numbers use .validate(), walk_forward_vol_forecast()
+        or latest_vol_forecast().
 
         Parameters
         ----------
@@ -1439,3 +1627,143 @@ def _print_model_interpretation(model: PDVLinear) -> None:
     total_w = a + b
     print(f"    fast/slow split              : {a/total_w*100:.0f}% / {b/total_w*100:.0f}%")
 
+
+# ── Honest skill report ───────────────────────────────────────────────────────
+
+def walk_forward_skill_report(
+    log_returns: pd.Series,
+    train_min_days: int = 504,
+    horizons: Tuple[int, ...] = (1, VIX_HORIZON_DAYS),
+    exclude_year: int = 2020,
+) -> dict:
+    """
+    Walk-forward R^2 of PDVLinear, by target, pooled / ex-`exclude_year` /
+    per calendar year.
+
+    Targets: horizon 1 → |r_{t+1}|·sqrt(252) (E|r| target, the historical
+    headline); horizon h > 1 → forward h-day RMS vol (walk_forward_vol_forecast,
+    purged). The pooled R^2 of the noisy 1-day target is dominated by a few
+    crisis days, which is why the ex-2020 and median yearly values are
+    reported next to it.
+
+    Returns
+    -------
+    {"summary": DataFrame indexed by target name with columns
+                [r2, r2_ex, median_yearly_r2, n_obs, oos_start, oos_end],
+     "yearly":  DataFrame (year x target) of per-year R^2}
+    """
+    r = log_returns.dropna()
+    summary, yearly = {}, {}
+    for h in horizons:
+        h = int(h)
+        if h == 1:
+            feats = extract_pdv_features(r)
+            X, y = build_xy(r, feats, horizon=1)
+            pred = walk_forward_predict(PDVLinear, {}, X, y,
+                                        train_min_days=train_min_days)
+            name = "1d |r| (E|r| target)"
+        else:
+            pred = walk_forward_vol_forecast(r, horizon=h,
+                                             train_min_days=train_min_days)
+            y = forward_target(r, horizon=h, target="rv")
+            name = f"{h}d forward RMS vol"
+        both = pd.concat([y.rename("y"), pred.rename("p")], axis=1,
+                         join="inner").dropna()
+        m_all = compute_metrics(both["y"], both["p"])
+        ex = both[both.index.year != exclude_year]
+        m_ex = compute_metrics(ex["y"], ex["p"])
+        per_year = {
+            int(yr): compute_metrics(g["y"], g["p"]).get("r2", np.nan)
+            for yr, g in both.groupby(both.index.year) if len(g) >= 50
+        }
+        yearly[name] = per_year
+        summary[name] = {
+            "r2": m_all.get("r2", np.nan),
+            "r2_ex": m_ex.get("r2", np.nan),
+            "median_yearly_r2": float(np.median(list(per_year.values()))) if per_year else np.nan,
+            "n_obs": m_all.get("n_obs", 0),
+            "oos_start": both.index[0].date() if len(both) else None,
+            "oos_end": both.index[-1].date() if len(both) else None,
+        }
+    return {
+        "summary": pd.DataFrame(summary).T,
+        "yearly": pd.DataFrame(yearly),
+    }
+
+
+# ── Building the shipped artifact ─────────────────────────────────────────────
+
+def spx_log_returns_from_db(as_of_date: str, start_date: Optional[str] = None) -> pd.Series:
+    """
+    SPX daily log returns from the project database, recomputed from closes.
+
+    The stored `log_return` column has holes (e.g. NaN on 2025-05-08 although
+    both closes exist); dropping such a row would silently merge two days of
+    returns into the features' history, so returns are rebuilt from closes.
+    """
+    from joint_vol_calibration.data.database import get_spx_ohlcv
+
+    df = get_spx_ohlcv(as_of_date=as_of_date, start_date=start_date)
+    close = df.set_index(pd.to_datetime(df["date"]))["close"].astype(float)
+    close = close[~close.index.duplicated(keep="last")].sort_index()
+    r = np.log(close).diff().dropna()
+    return r.rename("log_return")
+
+
+def build_pdv_model(
+    log_returns: pd.Series,
+    horizon: int = VIX_HORIZON_DAYS,
+    target: str = "rv",
+    path: Optional[str] = None,
+) -> PDVModel:
+    """
+    Fit the PDV model that downstream code loads from data_store/pdv_model.pkl.
+
+    Default: horizon 21, target 'rv' — `linear_.predict(features)` is then the
+    in-sample-coefficient forecast of the next-21-day RMS vol, i.e. the
+    quantity that may be compared with the VIX. For a historical series use
+    walk_forward_vol_forecast() instead (the pickled coefficients have seen
+    the whole sample); for today's value use latest_vol_forecast().
+    """
+    model = PDVModel(horizon=horizon, target=target).fit(log_returns)
+    if path is not None:
+        model.save(str(path))
+    return model
+
+
+def _main(argv: Optional[list] = None) -> int:
+    import argparse
+    from joint_vol_calibration.config import DATA_DIR
+
+    ap = argparse.ArgumentParser(
+        description="Rebuild data_store/pdv_model.pkl from the project DB "
+                    "and print the honest walk-forward skill table."
+    )
+    ap.add_argument("--as-of", default=pd.Timestamp.today().strftime("%Y-%m-%d"),
+                    help="last date of SPX data used (inclusive)")
+    ap.add_argument("--horizon", type=int, default=VIX_HORIZON_DAYS)
+    ap.add_argument("--out", default=str(DATA_DIR / "pdv_model.pkl"))
+    ap.add_argument("--report", action="store_true",
+                    help="also print walk_forward_skill_report()")
+    args = ap.parse_args(argv)
+
+    # Build through the importable module, not __main__: objects created from
+    # classes defined in __main__ (python -m ...) pickle as __main__.PDVModel,
+    # which no consumer can unpickle.
+    from joint_vol_calibration.models import pdv as pdv_module
+
+    r = spx_log_returns_from_db(args.as_of)
+    model = pdv_module.build_pdv_model(r, horizon=args.horizon, path=args.out)
+    print(f"Saved {args.out}: {model.describe()}")
+    live = latest_vol_forecast(r, horizon=args.horizon)
+    print(f"Live {args.horizon}d forecast: {live['vol']:.4f} "
+          f"(feature date {live['feature_date'].date()})")
+    if args.report:
+        rep = walk_forward_skill_report(r)
+        print(rep["summary"].to_string())
+        print(rep["yearly"].round(3).to_string())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

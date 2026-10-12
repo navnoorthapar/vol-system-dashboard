@@ -21,7 +21,9 @@ Test coverage:
  11. GARCH timing          — predict() on row t is the forecast for t+1
  12. kernel support        — no silent 1-nearest-neighbour extrapolation
  13. stress test alignment — forecast for day d never uses r_d or later labels
- 14. real SPX fixture      — the published COVID stress number, ex ante
+ 14. horizon-matched vol forecast — walk_forward_vol_forecast / latest_vol_forecast
+ 15. real SPX fixture      — units vs realised vol and the VIX
+ 16. shipped artifact      — the CLI-built pickle loads with the consumer API
 """
 
 from pathlib import Path
@@ -41,6 +43,9 @@ from joint_vol_calibration.models.pdv import (
     GARCH11,
     walk_forward_predict,
     walk_forward_garch,
+    walk_forward_vol_forecast,
+    latest_vol_forecast,
+    walk_forward_skill_report,
     compute_metrics,
     forecast_skill_comparison,
     stress_test_date,
@@ -586,7 +591,82 @@ class TestStressTestAlignment:
         assert out.attrs["fit"] == "walk-forward"
 
 
-# ── 14. Real SPX fixture (captured from the project DB, 2010-2025) ────────────
+# ── 14. Horizon-matched vol forecast (C22: E|r| was subtracted from the VIX) ──
+
+def _fat_tailed_returns(n=2500, seed=21):
+    """GARCH(1,1) with Student-t(4) shocks: E|r|/RMS well below sqrt(2/pi)."""
+    rng = np.random.default_rng(seed)
+    z = rng.standard_t(4, n) / np.sqrt(2.0)          # unit variance
+    s2 = np.empty(n)
+    r = np.empty(n)
+    s2[0] = 1e-4
+    for t in range(n):
+        if t:
+            s2[t] = 2e-6 + 0.08 * r[t - 1] ** 2 + 0.90 * s2[t - 1]
+        r[t] = np.sqrt(s2[t]) * z[t]
+    return pd.Series(r, index=pd.bdate_range("2012-01-02", periods=n))
+
+
+class TestWalkForwardVolForecast:
+    def test_no_lookahead_poison(self, returns):
+        cut = 600
+        a = walk_forward_vol_forecast(returns, horizon=21, train_min_days=300)
+        p = returns.copy()
+        p.iloc[cut:] *= 10
+        b = walk_forward_vol_forecast(p, horizon=21, train_min_days=300)
+        before = a.index[a.index < returns.index[cut]]
+        assert len(before) > 100
+        pd.testing.assert_series_equal(a.loc[before], b.loc[before])
+
+    def test_embargo_must_cover_the_horizon(self, returns):
+        with pytest.raises(ValueError):
+            walk_forward_vol_forecast(returns, horizon=21, embargo=5)
+
+    def test_one_day_abs_target_equals_walk_forward_predict(self, returns):
+        a = walk_forward_vol_forecast(returns, horizon=1, target="abs_return",
+                                      train_min_days=300)
+        feats = extract_pdv_features(returns)
+        X, y = build_xy(returns, feats, horizon=1)
+        b = walk_forward_predict(PDVLinear, {}, X, y, train_min_days=300).dropna()
+        common = a.index.intersection(b.index)
+        assert len(common) == len(b)
+        np.testing.assert_allclose(a.loc[common], b.loc[common], rtol=1e-10)
+
+    def test_forecasts_reach_the_last_date(self, returns):
+        """The last h rows have no label yet but must still get a forecast:
+        the final value is the live forecast."""
+        a = walk_forward_vol_forecast(returns, horizon=21, train_min_days=300)
+        assert a.index[-1] == returns.index[-1]
+        live = latest_vol_forecast(returns, horizon=21)
+        assert live["vol"] == pytest.approx(a.iloc[-1], rel=1e-10)
+        assert live["feature_date"] == returns.index[-1]
+        assert live["train_end"] == returns.index[-1 - 21]
+
+    def test_rms_target_is_variance_consistent_and_eabs_is_not(self):
+        r = _fat_tailed_returns()
+        f21 = walk_forward_vol_forecast(r, horizon=21, train_min_days=500)
+        f1 = walk_forward_vol_forecast(r, horizon=1, target="abs_return",
+                                       train_min_days=500)
+        y21 = forward_target(r, 21, "rv")
+        both = pd.concat([f21.rename("f21"), f1.rename("f1"), y21.rename("y")],
+                         axis=1, join="inner").dropna()
+        assert both["y"].mean() / both["f21"].mean() == pytest.approx(1.0, abs=0.1)
+        assert both["f1"].mean() / both["y"].mean() < 0.85
+
+
+class TestSkillReport:
+    def test_pooled_r2_matches_compute_metrics(self, returns):
+        rep = walk_forward_skill_report(returns, train_min_days=300, horizons=(1,))
+        feats = extract_pdv_features(returns)
+        X, y = build_xy(returns, feats)
+        p = walk_forward_predict(PDVLinear, {}, X, y, train_min_days=300)
+        m = compute_metrics(y, p)
+        row = rep["summary"].iloc[0]
+        assert row["r2"] == pytest.approx(m["r2"], abs=1e-12)
+        assert row["n_obs"] == m["n_obs"]
+
+
+# ── 15. Real SPX fixture (captured from the project DB, 2010-2025) ────────────
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "pdv_spx_vix_daily_2010_2025.csv.gz"
 
@@ -598,6 +678,22 @@ def spx():
 
 
 class TestRealSPX:
+    def test_21d_forecast_matches_realised_scale(self, spx):
+        r = spx["log_return"]
+        f21 = walk_forward_vol_forecast(r, horizon=21)
+        y21 = forward_target(r, 21, "rv")
+        both = pd.concat([f21.rename("f"), y21.rename("y")], axis=1, join="inner").dropna()
+        assert both["y"].mean() / both["f"].mean() == pytest.approx(1.0, abs=0.1)
+
+    def test_vix_spread_long_trigger_is_not_permanent(self, spx):
+        """With the 1-day E|r| model, 'VIX > PDV + 2pp' held on 96% of days —
+        a units artefact. The horizon-matched forecast must not."""
+        r, vix = spx["log_return"], spx["vix_close"] / 100.0
+        f21 = walk_forward_vol_forecast(r, horizon=21)
+        d = pd.concat([f21.rename("f"), vix.rename("v")], axis=1, join="inner").dropna()
+        share = ((d["f"] - d["v"]) < -0.02).mean()
+        assert share < 0.8
+
     def test_covid_stress_forecast_is_ex_ante(self, spx):
         """Forecast for 2020-03-16 made at the 2020-03-13 close by the
         walk-forward linear model: 70.0% (realised 202.6%). The pre-C22 card
@@ -610,3 +706,35 @@ class TestRealSPX:
         assert row["actual_ann_vol"] == pytest.approx(202.64, abs=0.01)
         assert row["pred_linear"] == pytest.approx(70.0, abs=0.5)
 
+
+# ── 16. The shipped artifact ──────────────────────────────────────────────────
+
+_DB = Path(__file__).resolve().parents[2] / "data_store" / "vol_system.db"
+
+
+@pytest.mark.skipif(not _DB.exists(), reason="project DB not present")
+class TestBuildArtifact:
+    def test_cli_pickle_is_loadable_by_consumers(self, tmp_path):
+        """`python -m joint_vol_calibration.models.pdv` must pickle the
+        importable classes (not __main__.PDVModel) with the consumer API:
+        _features, linear_.coef_ (3), linear_.predict, horizon 21, stored
+        returns. Reads the DB, writes only to tmp_path."""
+        import pickle
+        import subprocess
+        import sys
+
+        out = tmp_path / "pdv_model.pkl"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run(
+            [sys.executable, "-m", "joint_vol_calibration.models.pdv",
+             "--as-of", "2015-12-31", "--out", str(out)],
+            cwd=root, check=True, capture_output=True, text=True, timeout=600,
+        )
+        raw = out.read_bytes()
+        assert b"__main__" not in raw
+        m = pickle.loads(raw)
+        assert type(m).__module__ == "joint_vol_calibration.models.pdv"
+        assert m.horizon == 21 and len(m.linear_.coef_) == 3
+        assert m._features.index[-1] == m._log_returns.index[-1]
+        pred = m.linear_.predict(m._features[["sigma1", "sigma2", "lev"]].iloc[[-1]])
+        assert 0.05 < pred.iloc[0] < 1.0
