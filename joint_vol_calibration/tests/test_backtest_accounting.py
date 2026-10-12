@@ -17,6 +17,7 @@ itself (no source greps, no re-implemented logic):
   metrics         Sharpe on excess P&L (rf = 0)
   ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol
   sub-periods     no classifier re-training
+  report          portfolio sleeves shown, labels follow the convention
 """
 
 import json
@@ -441,3 +442,46 @@ class TestSubPeriods:
         wf = eng.walk_forward_validation(spx, vix, n_windows=1, window_months=6)
         assert calls == []
         assert len(wf) == 1 and np.isfinite(wf["sharpe"].iloc[0])
+
+
+# ── report ─────────────────────────────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def rendered(tmp_path_factory):
+    from joint_vol_calibration.backtest.report_generator import ReportGenerator
+    spx = _make_spx(400)
+    vix = _make_vix(spx)
+    eng = BacktestEngine(start_date="2018-01-02", end_date="2019-06-28")
+    eq = eng.run(spx, vix)
+    m = eng.compute_metrics(eq)
+    rg = ReportGenerator(eng, eq, m, eng.crisis_performance(eq),
+                         c7_path=tmp_path_factory.mktemp("c7") / "missing.parquet")
+    out = rg.generate(save_path=tmp_path_factory.mktemp("rep") / "r.html", auto_open=False)
+    return rg, eng, m, out.read_text(encoding="utf-8")
+
+
+class TestReport:
+    def test_portfolio_sleeves_and_convention_shown(self, rendered):
+        _, _, _, html = rendered
+        for s in ("S1C Contrarian PDV", "S3 Dispersion (index leg)", "S4 VRP", "(ref)"):
+            assert s in html
+        assert "Sharpe (rf=0 on excess P&amp;L)" in html or "Sharpe (rf=0 on excess P&L)" in html
+        assert "5% rf" not in html and "rf = 5%" not in html
+        assert "T-bill" in html
+
+    def test_portfolio_trade_count_is_the_three_sleeves(self, rendered):
+        _, eng, m, _ = rendered
+        assert m["n_trades"] == sum(1 for t in eng.all_trades if t.signal in ("s1c", "s3", "s4"))
+
+    def test_honest_failures_rendered_from_engine(self, rendered):
+        _, _, _, html = rendered
+        for f in BacktestEngine.HONEST_FAILURES:
+            title = f.partition(": ")[0]
+            assert title.replace("&", "&amp;") in html
+
+    def test_monthly_returns_include_first_month(self, rendered):
+        rg, eng, _, _ = rendered
+        monthly = rg._monthly_returns()
+        assert monthly.index[0] == eng.equity_df.index[0].to_period("M")
+        first_month_end = eng.equity_df["nav"].resample("ME").last().iloc[0]
+        assert monthly.iloc[0] == pytest.approx((first_month_end / eng.initial_capital - 1) * 100)
