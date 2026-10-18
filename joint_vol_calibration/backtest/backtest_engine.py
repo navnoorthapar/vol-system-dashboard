@@ -176,6 +176,9 @@ BACKTEST_DIR = DATA_DIR / "backtest"
 RESULTS_PATH = BACKTEST_DIR / "full_results.parquet"
 REPORTS_DIR  = BACKTEST_DIR / "reports"
 REPORT_PATH  = REPORTS_DIR / "full_report.html"
+# float_format of the committed CSV artifacts (beta_sensitivity.csv,
+# c22_bridge.csv); test_backtest_reproducibility re-serialises rows with it
+ARTIFACT_CSV_FLOAT_FORMAT = "%.6g"
 
 # Crisis periods (start, end) for reporting
 CRISIS_PERIODS: Dict[str, Tuple[str, str]] = {
@@ -206,9 +209,13 @@ class C22Corrections:
     Switches for the C22 correction round (audit finding id in brackets).
 
     Every default is the corrected behaviour. ``C22Corrections.legacy()``
-    turns them all off and, together with ``atm_to_vix_ratio=1.0`` and the
-    fixed VVIX>100 gate, reproduces the published C21 headline
-    (NAV $738,794 / P&L −$261,206 / Sharpe −1.80 / MaxDD −31.5%).
+    turns them all off; together with ``atm_to_vix_ratio=1.0``, the fixed
+    VVIX>100 gate, the 1-day PDV spread and the legacy VIX interpolation it
+    is the C21 ENGINE. On the C21 signal/PDV code and database it reproduced
+    the published C21 headline (NAV $738,794 / P&L −$261,206 / Sharpe −1.80
+    / MaxDD −31.5%); on today's signal code it does not: c22_bridge row 0
+    gives NAV $734,577 / P&L −$265,423, the gap being upstream changes these
+    switches cannot turn off (S2 stop direction, z-score warm-up, …).
     They exist so c22_bridge.py can apply the corrections one at a time;
     nothing else should switch them off.
     """
@@ -595,7 +602,8 @@ def _simulate_s3_pnl(
     DO NOT read this as evidence of edge: z is a standardised statistic
     that drifts back toward 0 through its own rolling normalisation, so
     "enter at z<−1, exit at z>−0.3" books positive P&L on pure random walks
-    (~98% of seeded random-walk paths; see s3_timing_null_test). The engine
+    (199 of the 200 seeded random-walk paths of the canonical 2018-2025
+    s3_timing_null_test, 99.5%; its null p-value 0.010). The engine
     now prices S3 as the short-SPX-straddle index leg instead.
 
     With corrections.s3_exit_day the notional is fixed at entry (kelly at
@@ -743,6 +751,7 @@ def compute_metrics(
     rf:        float = SHARPE_RF,
     trade_log: Optional[List[TradeRecord]] = None,
     rf_series: Optional[pd.Series] = None,
+    base_nav:  Optional[float] = None,
 ) -> Dict:
     """
     Compute full set of performance metrics from an equity curve.
@@ -759,6 +768,20 @@ def compute_metrics(
     rf_series : optional date-indexed annualised rates. Supply it only for a
                 FUNDED NAV (one that already accrues interest on its cash);
                 daily excess returns then use the per-date rate.
+    base_nav  : the NAV at the close BEFORE the curve's first row: the
+                initial capital for a full run, the last NAV before the
+                window for a slice of a longer curve. Every row is then a
+                session with a return measured from the row before it (the
+                first from base_nav), so the first session's P&L (e.g. the
+                entry costs of a position opened on it) counts in the
+                returns, Sharpe, drawdown and cumulative return, and
+                n_days = len(nav). BacktestEngine.compute_metrics always
+                passes it.
+                Default None (backward compatible): the first row IS the
+                base — a starting value, not a session — so its own P&L is
+                not measured and n_days = len(nav) − 1. Right only for a
+                curve whose first row is the capital (or the NAV before the
+                window), e.g. a slice with the prior session's NAV prepended.
 
     Returns
     -------
@@ -767,7 +790,17 @@ def compute_metrics(
                n_trades, n_days, cumulative_return
     """
     nav  = equity_df["nav"].dropna()
-    rets = nav.pct_change().dropna()
+    if base_nav is None:
+        rets  = nav.pct_change().dropna()
+        start = float(nav.iloc[0]) if len(nav) else np.nan
+    else:
+        start = float(base_nav)
+        if not (np.isfinite(start) and start > 0):
+            raise ValueError(f"base_nav must be a positive NAV, got {base_nav!r}")
+        prev = nav.shift(1)
+        if len(prev):
+            prev.iloc[0] = start
+        rets = nav / prev - 1.0
     n    = len(rets)
     if n == 0:
         return {}
@@ -796,7 +829,7 @@ def compute_metrics(
         )
     else:
         rf_daily = rf / TRADING_DAYS
-    growth   = float(nav.iloc[-1] / nav.iloc[0])
+    growth   = float(nav.iloc[-1] / start)
     # A NAV at or below zero has lost everything; a fractional power of a
     # non-positive ratio is NaN, so report the total loss instead.
     ann_ret  = growth ** (TRADING_DAYS / n) - 1.0 if growth > 0 else -1.0
@@ -820,6 +853,8 @@ def compute_metrics(
         sortino = float(np.sign(ex_mu) * np.inf) if ex_mu != 0 else 0.0
 
     roll_max = nav.cummax()
+    if base_nav is not None:
+        roll_max = roll_max.clip(lower=start)     # the peak includes the base
     dd       = (nav - roll_max) / roll_max
     max_dd   = float(dd.min())
 
@@ -833,7 +868,7 @@ def compute_metrics(
             cur = 0
 
     calmar   = float(ann_ret / abs(max_dd)) if abs(max_dd) > 1e-6 else 0.0
-    cum_ret  = float(nav.iloc[-1] / nav.iloc[0] - 1.0)
+    cum_ret  = float(nav.iloc[-1] / start - 1.0)
 
     # Trade-level stats
     tl = trade_log or []
@@ -861,21 +896,36 @@ def compute_metrics(
 def compute_crisis_performance(
     equity_df: pd.DataFrame,
     periods:   Dict[str, Tuple[str, str]] = CRISIS_PERIODS,
+    base_nav:  Optional[float] = None,
 ) -> Dict[str, Dict]:
     """
     Performance metrics for each named crisis period.
+
+    Each window is measured from the NAV at the close before its first
+    session: the curve's last NAV before the window or, for a window that
+    starts on the curve's first row, ``base_nav`` (the NAV before that row,
+    e.g. the initial capital). The window's first session therefore counts
+    in its return, drawdown and Sharpe. Only a window that starts on the
+    first row with no base_nav falls back to its first NAV as the base.
+    (Before this was fixed the base was always the window's first NAV, which
+    dropped the first session: on the canonical run COVID_2020 read +1.76%
+    for +1.69% and FedHikes_2022 +5.12% for +4.71%.)
 
     Sharpe uses rf = 0 on the strategy's excess P&L, the same convention as
     compute_metrics' default.
     """
     results = {}
+    nav_all = equity_df["nav"]
     for name, (start, end) in periods.items():
-        mask = (equity_df.index >= pd.Timestamp(start)) & (equity_df.index <= pd.Timestamp(end))
-        sub  = equity_df.loc[mask]
-        if len(sub) < 2:
+        s, e  = pd.Timestamp(start), pd.Timestamp(end)
+        sub   = nav_all.loc[(nav_all.index >= s) & (nav_all.index <= e)].dropna()
+        prior = nav_all.loc[nav_all.index < s].dropna()
+        base  = float(prior.iloc[-1]) if len(prior) else base_nav
+        nav   = (sub.reset_index(drop=True) if base is None
+                 else pd.Series(np.r_[float(base), sub.to_numpy(dtype=float)]))
+        if len(sub) == 0 or len(nav) < 2:
             results[name] = {"n_days": 0, "note": "No data in period"}
             continue
-        nav  = sub["nav"]
         rets = nav.pct_change().dropna()
         dd   = (nav - nav.cummax()) / nav.cummax()
         results[name] = {
@@ -1523,6 +1573,17 @@ class BacktestEngine:
         portfolio sleeves only; the research references have their own
         per-signal keys. ``cash_cum_return`` is what the $1M collateral
         would have earned in T-bills over the same dates.
+
+        Every curve is measured from the NAV before its first session
+        (``_nav_before``): the initial capital for this run's own curve
+        (each sleeve and each sub-period window starts flat on it), the
+        last NAV before the slice for a later slice of it. The first
+        session's P&L — the entry costs of a position opened on it — is
+        thus in every return, Sharpe and drawdown, and n_days counts every
+        session of the frame. (Until this was fixed the base was the first
+        row's NAV, after that session's P&L: on the 2019-07-01 sub-period
+        window the −$678.52 of first-day costs were dropped and the
+        cumulative return read −3.746% for −3.811%.)
         """
         df = equity_df if equity_df is not None else self.equity_df
         if df is None:
@@ -1531,7 +1592,8 @@ class BacktestEngine:
         c = self.corrections
         _rf_series = None if c.sharpe_rf_zero else getattr(self, "_rate_series", None)
         _rf = SHARPE_RF if c.sharpe_rf_zero else 0.05
-        m = compute_metrics(df, rf=_rf, trade_log=self.portfolio_trades(), rf_series=_rf_series)
+        m = compute_metrics(df, rf=_rf, trade_log=self.portfolio_trades(), rf_series=_rf_series,
+                            base_nav=self._nav_before(df, "nav"))
         m["sharpe_convention"] = ("excess P&L, rf=0 (collateral earns T-bills)"
                                   if c.sharpe_rf_zero else "NAV minus per-date ^IRX (pre-C22)")
 
@@ -1540,13 +1602,15 @@ class BacktestEngine:
                               ("s4","nav_s4"),("s1c","nav_s1c"),("combined","nav_combined")]:
             if nav_col in df.columns:
                 sub = pd.DataFrame({"nav": df[nav_col]})
-                sm  = compute_metrics(sub, rf=_rf, rf_series=_rf_series)
+                sm  = compute_metrics(sub, rf=_rf, rf_series=_rf_series,
+                                      base_nav=self._nav_before(df, nav_col))
                 m[f"{sig}_sharpe"]     = sm.get("sharpe", np.nan)
                 m[f"{sig}_ann_return"] = sm.get("ann_return", np.nan)
                 m[f"{sig}_max_drawdown"] = sm.get("max_drawdown", np.nan)
 
-        if "nav_tbill" in df.columns and len(df) > 1:
-            m["cash_cum_return"] = float(df["nav_tbill"].iloc[-1] / df["nav_tbill"].iloc[0] - 1.0)
+        if "nav_tbill" in df.columns and len(df) > 0:
+            m["cash_cum_return"] = float(df["nav_tbill"].iloc[-1]
+                                         / self._nav_before(df, "nav_tbill") - 1.0)
 
         # Per-signal trade stats
         from collections import defaultdict
@@ -1566,12 +1630,30 @@ class BacktestEngine:
         self.metrics_ = m
         return m
 
+    def _nav_before(self, df: pd.DataFrame, col: str) -> float:
+        """
+        NAV of ``col`` at the close before df's first session — the base its
+        returns are measured from. When df is a later slice of this run's
+        equity curve, that is the column's last value in the curve before
+        the slice; otherwise df starts on the run's first session and the
+        base is the initial capital, where every NAV column of run()
+        (portfolio, sleeves, T-bill cash) starts.
+        """
+        first = df[col].first_valid_index() if len(df) else None
+        full = self.equity_df
+        if first is not None and full is not None and col in full.columns:
+            prior = full.loc[full.index < first, col].dropna()
+            if len(prior):
+                return float(prior.iloc[-1])
+        return float(self.initial_capital)
+
     def crisis_performance(self, equity_df: Optional[pd.DataFrame] = None) -> Dict[str, Dict]:
-        """Compute performance metrics for each crisis period (rf = 0)."""
+        """Compute performance metrics for each crisis period (rf = 0), each
+        measured from the NAV before its first session."""
         df = equity_df if equity_df is not None else self.equity_df
         if df is None:
             raise RuntimeError("No equity DataFrame. Call run() first.")
-        return compute_crisis_performance(df)
+        return compute_crisis_performance(df, base_nav=self._nav_before(df, "nav"))
 
     # ── Sub-period stability ───────────────────────────────────────────────────
 
@@ -1597,6 +1679,11 @@ class BacktestEngine:
         (Before C22 this method also re-trained the C8 classifier per
         window, ~6 min each, and passed it to run(), which ignores it —
         regimes are the precomputed rule labels.)
+
+        Each window's metrics are measured from its fresh capital (the
+        window's engine computes them from its own initial_capital), so a
+        position opened on the window's first session pays its entry costs
+        inside the window's return, Sharpe and drawdown.
 
         Returns
         -------
@@ -1762,12 +1849,23 @@ def s3_timing_null_test(
     same spx/VIX history, precomputed regimes and PDV series, trailing
     z-scores warmed up on pre-window data, entries only inside the window.
     ^VVIX feeds nothing but S3, so every other input — the regime gate, the
-    SPX/VIX market the straddles are priced on, β, the corrections and base
-    (pass-1) sizing — is the real one. Only S3's timing changes.
+    SPX/VIX market the straddles are priced on, β and the corrections — is
+    the real one. Only S3's timing changes.
+
+    SIZE: every path, the real one included, is sized at S3's BASE kelly
+    (the engine's pass 1), NOT through the pass-2 ex-ante sizing overlay
+    (correlation netting × trailing net-Sharpe scale) that produces the
+    S3 P&L the engine reports (equity_df['pnl_s3'], the trade log, the
+    metrics' s3_total_pnl). The overlay rescales the same entries and
+    exits, so the timing tested is the timing traded, but the dollar
+    statistic is not the published one: on 2018-2025 the tested "real"
+    is +$41,952 at base size while the published S3 is +$56,471 after
+    the overlay. Both are returned (engine_pass1_pnl, engine_overlay_pnl);
+    the p-value belongs to the first. The overlay is not re-run per path.
 
     Two statistics are compared with their null distributions:
-      index_leg : total P&L of S3 priced as a short SPX straddle (the
-                  engine's S3 model) — the test of S3's timing
+      index_leg : total base-size P&L of S3 priced as a short SPX straddle
+                  (the engine's S3 model) — the test of S3's timing
       z_proxy   : the pre-C22 z-unit proxy P&L. Its null distribution is
                   shifted far above zero: positive "P&L" on series with no
                   predictability, which is why it is not evidence of edge.
@@ -1775,9 +1873,9 @@ def s3_timing_null_test(
     p_value = (1 + #{null ≥ real}) / (n_paths + 1), one-sided.
 
     The real statistic goes through the same function on the real ^VVIX, so
-    it IS the engine's pass-1 S3 P&L: ``engine_pass1_pnl`` (the engine's
-    own number) must equal index_leg['real'] (z_proxy['real'] when the
-    engine runs the legacy proxy). Before this was re-based on
+    it IS the engine's pass-1 (base-size) S3 P&L: ``engine_pass1_pnl``
+    (the engine's own number) must equal index_leg['real'] (z_proxy['real']
+    when the engine runs the legacy proxy). Before this was re-based on
     SignalEngine, the null re-built S3 from the backtest-window features
     alone, so its "real" S3 warmed its 252-day z-score up inside the window
     and was not the S3 the engine trades (2018-2025: 26 entries, first on
@@ -1853,7 +1951,13 @@ def s3_timing_null_test(
 
     return {
         "method": method, "n_paths": n_paths, "seed": seed,
+        # the tested statistic's engine twin: S3 at base (pass-1) size
         "engine_pass1_pnl": float(engine._pass1_pnl["s3"].sum()) if "s3" in engine._pass1_pnl else np.nan,
+        # the S3 P&L the engine reports, after the pass-2 sizing overlay —
+        # NOT the statistic the p-values refer to
+        "engine_overlay_pnl": (float(engine.equity_df["pnl_s3"].sum())
+                               if engine.equity_df is not None and "pnl_s3" in engine.equity_df
+                               else np.nan),
         # entries (flat → on), not trade records: an S3 position held past
         # the straddle's 21-session expiry is rolled into a new record
         "real_trades": real_n, "null_mean_trades": float(np.mean(null_n)) if null_n else np.nan,

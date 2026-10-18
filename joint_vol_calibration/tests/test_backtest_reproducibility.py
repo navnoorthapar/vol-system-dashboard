@@ -4,24 +4,46 @@ reproduce from the code.
 
 Re-runs the canonical backtest (exactly what
 ``python -m joint_vol_calibration.backtest.run_backtest`` does, minus the
-S3 null test and the sub-period windows) on the shipped database and
-compares it with data_store/backtest/full_results.{parquet,pkl}, the β = 0.82
-row of beta_sensitivity.csv and the last row of c22_bridge.csv — the files
-README's headline block, β grid and waterfall are read from. A code change
-that moves any of these numbers fails here until the artifacts are
-regenerated (README "Regenerating every artifact") and the published copy is
-updated.
+S3 null test and the sub-period windows) on the shipped database once, and
+compares it with the files README's headline block, β grid and waterfall
+are read from. What is checked, exactly:
+
+  full_results.parquet   every column of the equity curve: same columns,
+                         order and index; float columns within 1e-6 (not
+                         a byte comparison of the file), the others equal
+  full_results.pkl       every stored metric (rel 1e-9) except
+                         s3_null_p_value, and no metric missing or extra;
+                         the trade log (signal, dates, contracts, open
+                         flag, net P&L); the run settings
+  beta_sensitivity.csv   the β = 0.82 row only, rebuilt by run_backtest's
+                         own row builder and CSV format: the line and the
+                         header must equal the committed text byte for
+                         byte. The other five β rows are NOT re-run here
+                         (five more full backtests)
+  c22_bridge.csv         the last row (pdv_h21 = the canonical run) only,
+                         rebuilt by c22_bridge's own row builder: every
+                         field byte for byte except d_pnl, which needs row
+                         13's unrounded P&L and is checked to the CSV's 6
+                         significant digits. Rows 0-13 are NOT re-run here
+  delta_hedge_2020.parquet  the C7 study re-run (DeltaHedger, ~2 s): same
+                         columns, index, values (exact) and attrs
+  s3_null_p_value        NOT re-run (200 paths, ~4 min); only checked to be
+                         a valid 200-path p-value, (1 + k)/201. Its pipeline
+                         is pinned in test_backtest_accounting.py
+
+A code change that moves any of these numbers fails here until the
+artifacts are regenerated (README "Regenerating every artifact") and the
+published copy is updated.
 
 Also pins that every entry point gives the same run: BacktestEngine().run()
 with no data must equal run_backtest's (data from 2015, PDV-21 history from
 2010). Before C22 the no-argument run gave NAV $729,697 against the
 published $738,794. And that the engine's default β is the estimate from
 the real SPX chains (run_backtest --estimate-beta).
-
-The S3 null-test p-value (200 paths, ~4 min) is not re-run here; its
-pipeline is pinned in test_backtest_accounting.py.
 """
 
+import csv
+import io
 import pickle
 
 import numpy as np
@@ -29,6 +51,7 @@ import pandas as pd
 import pytest
 
 from joint_vol_calibration.backtest.backtest_engine import (
+    ARTIFACT_CSV_FLOAT_FORMAT,
     ATM_TO_VIX_RATIO,
     BETA_ESTIMATION_SESSIONS,
     BACKTEST_DIR,
@@ -83,6 +106,7 @@ def test_metrics_and_trade_log_reproduce(committed, canonical):
     _, state = committed
     eng, _, m = canonical
     stored = state["metrics"]
+    assert set(stored) == set(m) | {"s3_null_p_value"}
     for k, v in stored.items():
         if k == "s3_null_p_value":            # 200-path null test, not re-run here
             continue
@@ -120,6 +144,62 @@ def test_beta_grid_and_waterfall_end_on_the_canonical_run(canonical):
             assert r[f"{s}_pnl"] == pytest.approx(m[f"{s}_total_pnl"], rel=2e-6), s
             assert r[f"{s}_trades"] == m[f"{s}_n_trades"], s
     assert last["step"] == "pdv_h21"
+
+
+def _csv_rows(text: str) -> list:
+    return list(csv.reader(io.StringIO(text)))
+
+
+def test_beta_grid_canonical_row_is_byte_identical(canonical):
+    """The β = 0.82 line of beta_sensitivity.csv, every column, as the
+    --beta-sensitivity writer would print it from the canonical run."""
+    from joint_vol_calibration.backtest.run_backtest import beta_row
+    eng, eq, m = canonical
+    committed = (BACKTEST_DIR / "beta_sensitivity.csv").read_text().splitlines()
+    rebuilt = pd.DataFrame([beta_row(ATM_TO_VIX_RATIO, eng, eq, m)]).to_csv(
+        index=False, float_format=ARTIFACT_CSV_FLOAT_FORMAT).splitlines()
+    assert rebuilt[0] == committed[0]                                   # header
+    (line,) = [ln for ln in committed[1:] if ln.split(",")[0] == f"{ATM_TO_VIX_RATIO:g}"]
+    assert rebuilt[1] == line
+
+
+def test_bridge_last_row_is_byte_identical(canonical):
+    """The last c22_bridge.csv row (pdv_h21, the canonical run), every field
+    as c22_bridge's writer prints it; d_pnl to the CSV's precision."""
+    from joint_vol_calibration.backtest import c22_bridge
+    eng, eq, m = canonical
+    rows = _csv_rows((BACKTEST_DIR / "c22_bridge.csv").read_text())
+    header, prev, last = rows[0], rows[-2], rows[-1]
+    step = c22_bridge.build_steps()[-1]
+    rec = {"step": step["key"], "label": step["label"], "note": step.get("note", ""),
+           **c22_bridge.result_row(eng, eq, m), "d_pnl": np.nan}
+    rebuilt = pd.DataFrame([rec], index=[int(last[0])]).to_csv(
+        index_label="row", float_format=ARTIFACT_CSV_FLOAT_FORMAT)
+    (h2, r2) = _csv_rows(rebuilt)
+    assert h2 == header
+    i = header.index("d_pnl")
+    assert r2[:i] + r2[i + 1:] == last[:i] + last[i + 1:]
+    pnl = rec["pnl"] - float(prev[header.index("pnl")])
+    assert float(last[i]) == pytest.approx(pnl, abs=1.0)    # row 13's P&L is rounded to 6 digits
+
+
+def test_c7_delta_hedge_study_reproduces():
+    """delta_hedge_2020.parquet is DeltaHedger().run() (run_backtest --c7)."""
+    from joint_vol_calibration.backtest.delta_hedger import OUTPUT_PARQUET, DeltaHedger
+    committed = pd.read_parquet(OUTPUT_PARQUET)
+    df = DeltaHedger().run()
+    pd.testing.assert_frame_equal(df, committed, check_exact=True)
+    assert df.attrs.keys() == committed.attrs.keys()
+    for k, v in committed.attrs.items():
+        assert df.attrs[k] == (pytest.approx(v, rel=1e-12) if isinstance(v, float) else v), k
+
+
+def test_stored_null_p_value_is_a_200_path_p_value(committed):
+    """Not re-run (~4 min): the stored p must at least be (1 + k)/201."""
+    _, state = committed
+    p = state["metrics"]["s3_null_p_value"]
+    k = p * 201 - 1
+    assert 0 <= k <= 200 and k == pytest.approx(round(k), abs=1e-9)
 
 
 def test_default_beta_is_the_estimate_from_the_real_chains():

@@ -17,7 +17,8 @@ itself (no source greps, no re-implemented logic):
                   statistic is the engine's own S3
   sizing overlay  correlation netting reduces size when sleeves co-move;
                   run() applies it one session late
-  metrics         Sharpe on excess P&L (rf = 0)
+  metrics         Sharpe on excess P&L (rf = 0); returns measured from the
+                  NAV before the first session (capital / prior NAV)
   ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol;
                   a live chain needs a time-matched VIX
   sub-periods     no classifier re-training
@@ -380,6 +381,27 @@ class TestS3:
         res = bte.s3_timing_null_test(eng, n_paths=1, seed=1)
         assert res["z_proxy"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
 
+    def test_null_says_its_statistic_is_base_size_not_the_reported_s3(self, engine):
+        """The null's 'real' is S3 at BASE (pass-1) size; the S3 the engine
+        reports is after the pass-2 sizing overlay (2018-2025: +$41,952 vs
+        +$56,471). The report labelled the base-size number "engine P&L" and
+        said the null kept the real "sizing", while the p-value was quoted
+        next to the overlay-sized S3."""
+        from joint_vol_calibration.backtest.report_generator import ReportGenerator
+        res = bte.s3_timing_null_test(engine, n_paths=2, seed=1)
+        overlay = engine.equity_df["pnl_s3"].sum()
+        assert res["engine_overlay_pnl"] == pytest.approx(overlay, rel=1e-12)
+        assert res["engine_overlay_pnl"] == pytest.approx(engine.metrics_["s3_total_pnl"], rel=1e-9)
+        assert res["index_leg"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
+        # the fixture exercises the overlay: the two sizes differ
+        assert res["engine_overlay_pnl"] != pytest.approx(res["engine_pass1_pnl"], rel=1e-6)
+        rg = ReportGenerator(engine, engine.equity_df, engine.metrics_, {}, s3_null=res)
+        html = rg._null_html()
+        assert "engine P&L" not in html and "market and sizing" not in html
+        assert "at base size, before the sizing overlay" in html
+        assert f"${overlay:,.0f} for the real S3" in html
+        assert "before the sizing overlay" in rg._failures_html()
+
     def test_null_paths_change_only_vvix(self, engine, monkeypatch):
         """Each null path re-runs SignalEngine on the full history with ^VVIX
         replaced; ^VIX, the regimes and the PDV series are the engine's."""
@@ -481,8 +503,10 @@ class TestSharpeConvention:
         eng.equity_df = df
         eng._rate_series = pd.Series(0.05, index=df.index)
         m = eng.compute_metrics()
-        assert m["sharpe"] == pytest.approx(bte.compute_metrics(df, rf=0.0)["sharpe"])
-        assert m["sharpe"] > bte.compute_metrics(df, rf_series=eng._rate_series)["sharpe"] + 1.0
+        base = eng.initial_capital
+        assert m["sharpe"] == pytest.approx(bte.compute_metrics(df, rf=0.0, base_nav=base)["sharpe"])
+        assert m["sharpe"] > bte.compute_metrics(df, rf_series=eng._rate_series,
+                                                 base_nav=base)["sharpe"] + 1.0
 
     def test_riskless_gain_is_not_reported_as_zero(self):
         m = bte.compute_metrics(self._nav([0.002] * 50))
@@ -500,7 +524,103 @@ class TestSharpeConvention:
         df.index = pd.bdate_range("2019-06-03", periods=len(df))
         cp = bte.compute_crisis_performance(df)["COVID_2020"]
         sub = df.loc["2020-02-19":"2020-04-30"]
-        assert cp["sharpe"] == pytest.approx(bte.compute_metrics(sub)["sharpe"])
+        prior = float(df.loc[:"2020-02-18", "nav"].iloc[-1])
+        assert cp["sharpe"] == pytest.approx(bte.compute_metrics(sub, base_nav=prior)["sharpe"])
+
+
+class TestFirstSessionBase:
+    """Returns are measured from the NAV BEFORE the first session (the
+    capital, or the prior NAV for a slice). They used to start from the
+    first row's NAV, i.e. after the first session's P&L, so a position
+    opened on the first session never paid its entry costs in the metrics
+    (2019-07-01 sub-period window: −$678.52 dropped, cumulative return
+    −3.746% reported for −3.811%)."""
+
+    NAV = [999_000.0, 1_001_000.0, 1_000_500.0, 1_002_000.0, 1_001_000.0]
+
+    def _df(self, start="2021-01-04"):
+        return pd.DataFrame({"nav": self.NAV}, index=pd.bdate_range(start, periods=len(self.NAV)))
+
+    def test_first_session_counts_from_the_base(self):
+        m = bte.compute_metrics(self._df(), base_nav=1_000_000.0)
+        rets = np.diff(np.r_[1_000_000.0, self.NAV]) / np.r_[1_000_000.0, self.NAV][:-1]
+        assert m["n_days"] == len(self.NAV)
+        assert m["cumulative_return"] == pytest.approx(self.NAV[-1] / 1_000_000.0 - 1.0)
+        assert m["worst_day"] == pytest.approx(-0.001)          # the first session's cost
+        assert m["max_drawdown"] == pytest.approx(-0.001)        # below the base on day 1
+        assert m["sharpe"] == pytest.approx(rets.mean() / rets.std(ddof=1) * np.sqrt(TRADING_DAYS))
+        assert m["ann_return"] == pytest.approx(
+            (self.NAV[-1] / 1_000_000.0) ** (TRADING_DAYS / len(self.NAV)) - 1.0)
+        with pytest.raises(ValueError):
+            bte.compute_metrics(self._df(), base_nav=0.0)
+
+    def test_default_keeps_the_first_row_as_the_base(self):
+        """Callers that pass no base (e.g. a slice with the prior NAV
+        prepended) keep the old meaning: the first row is the base."""
+        m = bte.compute_metrics(self._df())
+        assert m["n_days"] == len(self.NAV) - 1
+        assert m["cumulative_return"] == pytest.approx(self.NAV[-1] / self.NAV[0] - 1.0)
+        with_prior = pd.concat([pd.DataFrame({"nav": [1_000_000.0]},
+                                             index=[pd.Timestamp("2020-12-31")]), self._df()])
+        a = bte.compute_metrics(with_prior)
+        b = bte.compute_metrics(self._df(), base_nav=1_000_000.0)
+        for k in ("sharpe", "sortino", "max_drawdown", "cumulative_return", "ann_return", "n_days"):
+            assert a[k] == pytest.approx(b[k]), k
+
+    def test_engine_run_is_measured_from_its_capital(self, engine):
+        """The fixture's run opens S1C/S1 on its first session."""
+        eq = engine.equity_df
+        cap = engine.initial_capital
+        assert eq["daily_pnl"].iloc[0] < 0 and eq["pnl_s1c"].iloc[0] < 0     # precondition
+        m = engine.compute_metrics()
+        assert m["n_days"] == len(eq)
+        assert m["cumulative_return"] == pytest.approx(eq["nav"].iloc[-1] / cap - 1.0, rel=1e-12)
+        for s in ("s1c", "s3", "s4", "s1", "s2", "combined"):
+            ref = bte.compute_metrics(pd.DataFrame({"nav": eq[f"nav_{s}"]}), base_nav=cap)
+            assert m[f"{s}_sharpe"] == pytest.approx(ref["sharpe"], rel=1e-12), s
+        legacy = bte.compute_metrics(eq)          # what the engine used to report
+        assert legacy["cumulative_return"] != pytest.approx(m["cumulative_return"], rel=1e-6)
+        assert m["s1c_sharpe"] != pytest.approx(
+            bte.compute_metrics(pd.DataFrame({"nav": eq["nav_s1c"]}))["sharpe"], rel=1e-6)
+
+    def test_a_slice_is_measured_from_the_nav_before_it(self, engine):
+        eq = engine.equity_df
+        k = 100
+        try:
+            m = engine.compute_metrics(eq.iloc[k:])
+        finally:
+            engine.compute_metrics()              # the module fixture keeps the full run's metrics_
+        assert m["n_days"] == len(eq) - k
+        assert m["cumulative_return"] == pytest.approx(
+            eq["nav"].iloc[-1] / eq["nav"].iloc[k - 1] - 1.0, rel=1e-12)
+        assert m["cash_cum_return"] == pytest.approx(
+            eq["nav_tbill"].iloc[-1] / eq["nav_tbill"].iloc[k - 1] - 1.0, rel=1e-12)
+
+    def test_sub_period_window_pays_its_first_session(self, engine):
+        spx, vix = _rw_market()
+        wf = engine.sub_period_stability(spx, vix, n_windows=1, window_months=6)
+        sub = BacktestEngine(start_date=wf["test_start"].iloc[0], end_date=wf["test_end"].iloc[0],
+                             pdv_vol_series=engine.pdv_vol_)
+        eq = sub.run(spx, vix)
+        assert eq["daily_pnl"].iloc[0] != 0                                    # precondition
+        growth = eq["nav"].iloc[-1] / sub.initial_capital
+        assert wf["ann_return"].iloc[0] == pytest.approx(growth ** (TRADING_DAYS / len(eq)) - 1.0,
+                                                         rel=1e-12)
+
+    def test_crisis_window_counts_its_first_session(self):
+        idx = pd.bdate_range("2020-02-14", "2020-05-05")
+        nav = pd.Series(1_000_000.0, index=idx)
+        nav.loc["2020-02-19":] -= 5_000.0          # the window's first session loses $5k
+        nav.loc["2020-03-02":] += 1_000.0
+        cp = bte.compute_crisis_performance(pd.DataFrame({"nav": nav}))["COVID_2020"]
+        assert cp["total_return"] == pytest.approx(-4_000.0 / 1_000_000.0)
+        assert cp["worst_day"] == pytest.approx(-0.005)
+        assert cp["max_drawdown"] == pytest.approx(-0.005)
+        assert cp["n_days"] == len(nav.loc["2020-02-19":"2020-04-30"])
+        # a window that starts on the curve's first row uses the base passed in
+        first = pd.DataFrame({"nav": nav.loc["2020-02-19":]})
+        cp0 = bte.compute_crisis_performance(first, base_nav=1_000_000.0)["COVID_2020"]
+        assert cp0["total_return"] == pytest.approx(cp["total_return"])
 
 
 # ── ATM vol = β · VIX ──────────────────────────────────────────────────────────

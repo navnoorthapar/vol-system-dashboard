@@ -40,6 +40,7 @@ from joint_vol_calibration.data.database import (
     get_vix_term_structure_wide,
 )
 from joint_vol_calibration.backtest.backtest_engine import (
+    ARTIFACT_CSV_FLOAT_FORMAT,
     ATM_TO_VIX_RATIO,
     BETA_ESTIMATION_SESSIONS,
     Q_BACKTEST,
@@ -263,17 +264,21 @@ def run_beta_sensitivity(
     for b in betas:
         eng = BacktestEngine(atm_to_vix_ratio=b, pdv_vol_series=pdv_vol)
         eq = eng.run(spx_df, vix_wide)
-        m = eng.compute_metrics()
-        row = {"beta": b, "nav": float(eq["nav"].iloc[-1]),
-               "pnl": float(eq["nav"].iloc[-1] - eng.initial_capital),
-               "sharpe": m["sharpe"], "max_dd": m["max_drawdown"]}
-        for s in ("s1c", "s3", "s4", "s1", "s2"):
-            row[f"{s}_pnl"] = m.get(f"{s}_total_pnl", 0.0)
-            row[f"{s}_sharpe"] = m.get(f"{s}_sharpe")
-            row[f"{s}_win"] = m.get(f"{s}_win_rate")
-            row[f"{s}_trades"] = m.get(f"{s}_n_trades")
-        rows.append(row)
+        rows.append(beta_row(b, eng, eq, eng.compute_metrics()))
     return pd.DataFrame(rows)
+
+
+def beta_row(beta: float, eng: BacktestEngine, eq: pd.DataFrame, m: Dict) -> Dict:
+    """One row of the β grid (beta_sensitivity.csv) from a finished run."""
+    row = {"beta": beta, "nav": float(eq["nav"].iloc[-1]),
+           "pnl": float(eq["nav"].iloc[-1] - eng.initial_capital),
+           "sharpe": m["sharpe"], "max_dd": m["max_drawdown"]}
+    for s in ("s1c", "s3", "s4", "s1", "s2"):
+        row[f"{s}_pnl"] = m.get(f"{s}_total_pnl", 0.0)
+        row[f"{s}_sharpe"] = m.get(f"{s}_sharpe")
+        row[f"{s}_win"] = m.get(f"{s}_win_rate")
+        row[f"{s}_trades"] = m.get(f"{s}_n_trades")
+    return row
 
 
 def run_pseudo_oos(start: str = "2013-01-01", end: str = "2017-12-31") -> Dict:
@@ -362,10 +367,12 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
 
 def _print_null(null: Dict) -> None:
     print(f"\n  S3 timing null test ({null['method']}, {null['n_paths']} paths, seed {null['seed']}):")
-    print(f"  real S3 entries {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}"
-          f"  (engine S3 pass-1 P&L ${null['engine_pass1_pnl']:,.0f})")
-    for key, lbl in (("index_leg", "S3 index leg (short SPX straddle)"),
-                     ("z_proxy", "pre-C22 z-unit proxy")):
+    print(f"  real S3 entries {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}")
+    print(f"  tested statistic: S3 P&L at base (pass-1) size; engine pass-1 S3 "
+          f"${null['engine_pass1_pnl']:,.0f}. The reported S3 after the sizing overlay, "
+          f"${null.get('engine_overlay_pnl', float('nan')):,.0f}, is not what p refers to.")
+    for key, lbl in (("index_leg", "S3 index leg at base size"),
+                     ("z_proxy", "pre-C22 z-unit proxy at base size")):
         s = null[key]
         print(f"  {lbl:<36} real ${s['real']:>10,.0f} | null mean ${s['null_mean']:>10,.0f} "
               f"sd ${s['null_std']:>9,.0f} | P(null>0) {s['null_frac_positive']:.2f} "
@@ -482,7 +489,7 @@ if __name__ == "__main__":
         with pd.option_context("display.width", 250, "display.max_columns", 40):
             print(sens.round(3).to_string(index=False))
         if args.csv:
-            sens.to_csv(args.csv, index=False, float_format="%.6g")
+            sens.to_csv(args.csv, index=False, float_format=ARTIFACT_CSV_FLOAT_FORMAT)
     elif args.pseudo_oos:
         print(run_pseudo_oos())
     elif args.c7:

@@ -605,19 +605,27 @@ class ReportGenerator:
     def _null_html(self) -> str:
         n = self.s3_null
         rows = []
-        for key, lbl in (("index_leg", "S3 index leg (short SPX straddle) — engine P&L"),
-                         ("z_proxy", "Pre-C22 z-unit proxy P&L")):
+        for key, lbl in (("index_leg", "S3 index leg (short SPX straddle) at base size, "
+                                       "before the sizing overlay"),
+                         ("z_proxy", "Pre-C22 z-unit proxy P&amp;L at base size")):
             s = n[key]
             rows.append(
                 f"<tr><td>{lbl}</td><td>${s['real']:,.0f}</td><td>${s['null_mean']:,.0f}</td>"
                 f"<td>${s['null_std']:,.0f}</td><td>{s['null_frac_positive']:.0%}</td>"
                 f"<td><b>{s['p_value']:.3f}</b></td></tr>"
             )
+        overlay = n.get("engine_overlay_pnl", self.metrics.get("s3_total_pnl"))
+        overlay_txt = (f" (${overlay:,.0f} for the real S3)"
+                       if overlay is not None and pd.notna(overlay) else "")
         return (
             f"<p style='font-size:.82rem;color:#555;margin-bottom:.5rem'>The S3 entry/exit rule "
             f"was re-run on {n['n_paths']} synthetic VIX/VVIX ratio paths ({_esc(n['method'])}, "
-            f"seed {n['seed']}) that carry no information, keeping the real regime gate, market "
-            f"and sizing. Real S3: {n['real_trades']} entries; null mean "
+            f"seed {n['seed']}) that carry no information, keeping the real regime gate and "
+            f"market. Every path, the real one included, is sized at S3's base kelly (the "
+            f"engine's first pass): the tested statistic is the base-size P&amp;L, not the S3 "
+            f"P&amp;L reported in the signal table, which is after the ex-ante sizing overlay"
+            f"{overlay_txt}. The overlay rescales the same entries and exits and is not re-run "
+            f"on the null paths. Real S3: {n['real_trades']} entries; null mean "
             f"{n['null_mean_trades']:.1f}. p = (1 + #null ≥ real)/(N + 1).</p>"
             "<table><thead><tr><th>Statistic</th><th>Real</th><th>Null mean</th><th>Null sd</th>"
             "<th>Null paths &gt; 0</th><th>p-value</th></tr></thead>"
@@ -708,8 +716,10 @@ class ReportGenerator:
             p = self.s3_null["index_leg"]["p_value"]
             failures.append((
                 "S3 timing vs random timing",
-                f"S3's index-leg P&L has a null-test p-value of {p:.3f} against "
-                f"{self.s3_null['n_paths']} random-timing paths.",
+                f"S3's timing has a null-test p-value of {p:.3f} against "
+                f"{self.s3_null['n_paths']} random-timing paths. The statistic is S3's "
+                f"index-leg P&L at base size, before the sizing overlay that produces "
+                f"the S3 P&L in the signal table.",
             ))
         failures.append(("Sub-period windows with Sharpe < 0", self._wf_failures_text()))
 
