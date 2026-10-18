@@ -272,6 +272,16 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert res["r_reference"] == pytest.approx(0.0400, abs=1e-12)
     assert res["r_reference_source"].startswith("^IRX") and "cc" in res["r_reference_source"]
     assert res["chain_diagnostics"]["r_ref"] == res["r_reference"]     # one rate, cleaning and fit
+    # Wed 21:30 ET: the live book is the Cboe GTH session trading for Thursday,
+    # so T runs from the quote time (not the 16:00 close), and the stored
+    # snapshot records that time for a refit.
+    assert cal["chain"]["quote_time"] == "2026-09-24T01:30:00Z"
+    assert cal["chain"]["t_origin"] == "2026-09-23T21:30:00-04:00"
+    assert res["methods"]["T_origin"] == "2026-09-23T21:30:00-04:00"
+    assert "Global Trading Hours" in res["methods"]["T"]
+    assert "residual timing mismatch" in res["methods"]["vix_leg_timing"]
+    assert res["anchors_by_expiry"][0]["T_days"] < (date.fromisoformat(
+        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days
     # Stored: the observed two-sided quotes (incl. the one too wide for the
     # cleaner), never a one-sided line.
     n, n_two_sided = _spx_snapshot_rows(SESSION)
@@ -287,6 +297,7 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     chain_file = dbm.options_snapshot_path(SESSION, "SPX")
     assert chain_file.exists() and str(chain_file) in st["persisted"]
     assert len(pd.read_parquet(chain_file)) == n
+    assert set(pd.read_parquet(chain_file)["quote_time"]) == {"2026-09-24T01:30:00Z"}
     # The committed chain reproduces the committed fit's inputs: a calibrator
     # built from the stored snapshot (fresh DB loaded from the parquet) has the
     # same carry, anchors and out-of-sample surface as the live run.
@@ -297,6 +308,7 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
     again = JointCalibrator(as_of_date=SESSION)
     prov = again._provenance()
+    assert prov["chain_diagnostics"]["t_origin"] == res["chain_diagnostics"]["t_origin"]
     assert prov["carry_by_expiry"] == res["carry_by_expiry"]
     assert prov["anchors_by_expiry"] == res["anchors_by_expiry"]
     assert len(again.spx_surface_full) - len(again.spx_surface) == res["oos"]["n_spx_oos"]
@@ -359,6 +371,84 @@ def test_intraday_run_never_stores_or_labels_the_open_session(env, monkeypatch):
     assert code == 0
     assert seen["end"] == "2026-09-22" and seen["labels_as_of"] == "2026-09-22"
     assert SESSION not in _spx_dates()
+
+
+# ── Session guard: the live book must belong to the session it is labelled ────
+
+_GUARD_CASES = [
+    # manual dispatch at Thu 14:00 ET (09-23 has no fit yet): Thursday's intraday book
+    (datetime(2026, 9, 24, 18, 0, tzinfo=timezone.utc), "2026-09-23",
+     "holds session 2026-09-24's quotes"),
+    # Tue 02:30 UTC slot after the MLK holiday: the Mon-evening GTH book trades for Tuesday
+    (datetime(2027, 1, 19, 2, 30, tzinfo=timezone.utc), "2027-01-15",
+     "NYSE holiday 2027-01-18"),
+    (datetime(2027, 1, 19, 13, 0, tzinfo=timezone.utc), "2027-01-15",     # Tue 08:00 ET
+     "NYSE holiday 2027-01-18"),
+    # normal Tue 02:30 UTC slot: Monday's session, GTH book (T from the quote time)
+    (datetime(2026, 10, 20, 2, 30, tzinfo=timezone.utc), "2026-10-19", None),
+    # weekend run: Friday's closing book
+    (datetime(2026, 10, 18, 15, 0, tzinfo=timezone.utc), "2026-10-16", None),
+    # Saturday 02:30 UTC slot: Friday evening keeps the closing book
+    (datetime(2026, 10, 17, 2, 30, tzinfo=timezone.utc), "2026-10-16", None),
+]
+
+
+@pytest.mark.parametrize("now, expected, refused", _GUARD_CASES)
+def test_session_guard(now, expected, refused):
+    cr = _load()
+    from joint_vol_calibration.data import option_chain as oc
+    assert oc.last_closed_session(now).isoformat() == expected
+    reason = cr.session_guard(now, expected)
+    if refused is None:
+        assert reason is None
+    else:
+        assert refused in reason and f"as {expected}" in reason
+
+
+@pytest.mark.parametrize("now, expected, refused", _GUARD_CASES)
+def test_calibrate_refuses_a_book_of_another_session(env, now, expected, refused):
+    """recalibrate_heston with the DB current through ``expected``: a refused
+    run is "skipped" before any download (no chain, no pickle, no snapshot);
+    an allowed one downloads the book (here empty, so the quote-state gate
+    skips it)."""
+    days = [d.strftime("%Y-%m-%d") for d in dbm.nyse_sessions("2026-09-01", expected)]
+    dbm.insert_spx_ohlcv(pd.DataFrame({"date": days, "open": 7600.0, "high": 7650.0,
+                                       "low": 7550.0, "close": 7600.0, "volume": 1e9}))
+    built = []
+
+    def ticker(symbol):
+        built.append(symbol)
+        return _EmptyBookTicker(symbol)
+    st = env.recalibrate_heston(now, ticker_factory=ticker)
+    assert st["status"] == "skipped" and st["session"] == expected
+    if refused is None:
+        assert built and "no live two-sided quotes" in st["reason"]
+    else:
+        assert not built and refused in st["reason"]
+    assert _spx_snapshot_rows(expected)[0] == 0
+    assert not (env.DATA / "calibrations" / f"joint_cal_{expected}.pkl").exists()
+
+
+def test_intraday_dispatch_does_not_store_todays_book_as_yesterdays(env):
+    """Review finding: market,calibrate,freeze dispatched at 14:00 ET while
+    the previous session had no fit downloaded TODAY's intraday chain and
+    saved it as the previous session's calibration and snapshot (accepted,
+    session 2026-09-23). Now: skipped with the reason, nothing stored, and no
+    hard failure while the headline fit is fresh."""
+    _accepted_pickle(env, "2026-09-22")
+    during = datetime(2026, 9, 24, 18, 0, tzinfo=timezone.utc)          # Thu 14:00 ET
+    status = env.DATA.parent / "status.json"
+    code = env.main(["--steps", "market,calibrate", "--status-file", str(status)],
+                    now_utc=during, ticker_factory=_FakeTicker,
+                    calibrate_kwargs={"de_maxiter": 5, "de_popsize": 5, "verbose": False})
+    st = json.loads(status.read_text())
+    cal = st["calibration"]
+    assert cal["status"] == "skipped", cal
+    assert "holds session 2026-09-24's quotes" in cal["reason"]
+    assert not (env.DATA / "calibrations" / f"joint_cal_{SESSION}.pkl").exists()
+    assert _spx_snapshot_rows(SESSION)[0] == 0
+    assert not dbm.options_snapshot_path(SESSION, "SPX").exists()
+    assert code == 0 and st["headline_calibration"]["date"] == "2026-09-22"
 
 
 def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch):
@@ -529,9 +619,15 @@ def test_cboe_vix_print_overrides_yahoo(env, monkeypatch):
         raise OSError("cdn.cboe.com unreachable")
     monkeypatch.setattr(cboe, "download_vix_history", boom)
     monkeypatch.setattr(dl, "download_vix_index", lambda start, end: pd.DataFrame(
-        [{**row, "date": "2026-09-22", "close": 15.0, "source": "yfinance"}]))
+        [{**row, "date": "2026-09-22", "close": 15.0, "source": "yfinance"},
+         {**row, "close": 20.37, "source": "yfinance"}]))
     assert _run(env, "market")[0] == 0
-    assert _vix_close("2026-09-22") == (15.0, "yfinance")
+    assert _vix_close("2026-09-22") == (15.0, "yfinance")       # no Cboe row: Yahoo fills it
+    # Review finding: the outage run replaced the official closes with Yahoo's
+    # for the whole window (275 rows) and committed them.
+    assert _vix_close(SESSION) == (17.76, "cboe")
+    part = pd.read_parquet(dbm.MARKET_DIR / "vix_daily" / "vix_daily_2026.parquet")
+    assert part.loc[part["date"] == SESSION, ["close", "source"]].values.tolist() == [[17.76, "cboe"]]
 
 
 def test_download_window_reaches_back_to_the_last_stored_session():

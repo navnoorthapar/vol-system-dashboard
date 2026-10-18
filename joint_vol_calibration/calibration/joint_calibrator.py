@@ -25,9 +25,13 @@ fit worse — those are the honest numbers):
   * SPX data. Quotes are cleaned by data/option_chain.py: two-sided only,
     never lastPrice, per-expiry put-call-parity forward F_T and discount D_T,
     own Black-76 IVs (Yahoo's IV is a diagnostic only). The SPX leg prices
-    each slice off (F_T, D_T); there is no assumed r/q. T is measured from the
-    session whose quotes the snapshot holds (a Sunday snapshot holds Friday's
-    book), to 16:00 ET (PM) or 09:30 ET (AM) settlement.
+    each slice off (F_T, D_T); there is no assumed r/q. T runs to 16:00 ET
+    (PM) or 09:30 ET (AM) settlement from option_chain.t_origin: the 16:00 ET
+    close of the session whose quotes the snapshot holds for a closing book
+    (a Sunday snapshot holds Friday's book), the quote time for a Cboe Global
+    Trading Hours book (the Mon-Thu book slots, 21:30-00:30 ET). The VIX
+    index leg still uses the session's 16:15 ET closes, so a GTH fit carries
+    a residual SPX/VIX timing mismatch (methods["vix_leg_timing"]).
   * Anchors. The 9 highest-vega strikes were adjacent ATM-call strikes — the
     fit never saw the put wing. Anchors are now the strikes nearest a
     standardised forward-moneyness grid z = ln(K/F)/(sigma_atm*sqrt(T)) in
@@ -659,7 +663,8 @@ class JointCalibrator:
 
         Design (C22):
           - quotes: two-sided, parity F_T / D_T per expiry, own Black-76 IVs
-            (option_chain.clean_option_chain); T from the quote session
+            (option_chain.clean_option_chain); T from option_chain.t_origin
+            (session close, or the quote time of a GTH book)
           - surface: OTM against F_T, 7d <= T <= 2y, 0.70 <= K/F <= 1.30,
             mid >= $0.50, 1% <= IV <= 200% (kept in self.spx_surface_full
             for the out-of-sample RMSE and validation)
@@ -1104,6 +1109,22 @@ class JointCalibrator:
             "weights": {"w1": self.w1, "w2": self.w2, "w3": self.w3},
         }
 
+    def _t_methods(self) -> dict:
+        """Where T was measured from (clean_option_chain's diagnostics)."""
+        d = getattr(self, "spx_chain_diagnostics", None) or {}
+        origin = d.get("t_origin")
+        gth = str(d.get("t_origin_basis", "")).startswith("quote_time")
+        start = (f"the quote time {origin} (Cboe Global Trading Hours book)" if gth
+                 else "the quote session's 16:00 ET close (closing book)")
+        return {
+            "T": f"from {start} to 16:00 ET (PM) / 09:30 ET (AM) settlement, /365d",
+            "T_origin": origin,
+            "vix_leg_timing": (
+                "VIX index leg: the spot session's Cboe closes (16:15 ET)"
+                + ("; the SPX quotes are from the later GTH book, a residual timing "
+                   "mismatch the fit does not correct" if gth else "")),
+        }
+
     def _methods(self, de_cfg: dict) -> dict:
         return {
             "vix_leg": "spot_index_term_structure (heston_vix_term_index, Cboe 9/30/93/184d)",
@@ -1112,7 +1133,7 @@ class JointCalibrator:
             "carry": self.carry,
             "anchors": "z-grid linspace(-2.5,1.5,9), OTM vs F_T, >=3 puts at K/F<0.97",
             "expiries": f"nearest listed to {list(_CAL_EXPIRY_TARGETS_DAYS)}d, unique, within 50%",
-            "T": "quote session 16:00 ET -> 16:00 ET (PM) / 09:30 ET (AM) settlement, /365d",
+            **self._t_methods(),
             "feller": self.feller,
             "weights": "active legs normalised to sum to 1",
             "optimizer": de_cfg,

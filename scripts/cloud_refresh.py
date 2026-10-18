@@ -10,7 +10,10 @@ Steps (run all, or a subset with --steps):
   calibrate  Download the SPX option chain for the last CLOSED NYSE session,
              clean it (data/option_chain.py), fit the joint Heston model and,
              if the quality gate accepts it, save joint_cal_<session>.pkl and
-             only then store the chain as that session's options snapshot
+             only then store the chain (with its quote time) as that
+             session's options snapshot. Refused ("skipped") when the live
+             book cannot be that session's: during the next session (09:30
+             ET to the 16:15 cutoff) or after an NYSE holiday (session_guard)
   freeze     Freeze the Flask app to static HTML -> .site-build/
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
@@ -28,6 +31,10 @@ close Cboe's book empties until Global Trading Hours open (20:15 ET; Friday
 evenings keep the closing book), so the workflow should run `market,labels`
 after the close and `calibrate` when the book is live; a mistimed run fails
 closed at the quote-state gate instead of fitting a stale/empty book.
+The Mon-Thu book slots therefore see the Global Trading Hours book, which
+trades for the NEXT session: T is measured from the quote time for such a
+book and from the 16:00 ET close for a closing book (option_chain.t_origin);
+the VIX index leg still uses the session's 16:15 ET closes.
 
 Exit status (main() returns it):
   0  success, or a calibration REJECTED/SKIPPED while the newest accepted
@@ -323,7 +330,43 @@ def extend_regime_labels(today: "date | None" = None) -> int:
 
 # -- Step 3: Heston recalibration ----------------------------------------------
 
-def _persist_snapshot(raw, clean, session: str, spot: float) -> int:
+def session_guard(now_utc: datetime, expected: str) -> "str | None":
+    """Why the live option book at ``now_utc`` cannot be session ``expected``'s
+    (the last closed session), or None when it can.
+
+    The calibrate step labels whatever book Yahoo serves as ``expected``.
+    That is wrong in two cases, both refused:
+      * the book belongs to a later session: from the 09:30 ET open to the
+        16:15 ET cutoff (database.quote_session(now) != expected), e.g. a
+        manual dispatch at 14:00 ET would store today's intraday chain as
+        yesterday's calibration and snapshot;
+      * an NYSE holiday (a weekday) lies between ``expected`` and today in
+        New York: after a Monday holiday the Monday-evening Global Trading
+        Hours book trades for Tuesday, not for Friday.
+    """
+    from joint_vol_calibration.data import database as dbm
+    from joint_vol_calibration.data import option_chain as oc
+
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    ny = now_utc.astimezone(oc.NY_TZ)
+    shown = dbm.quote_session(now_utc)
+    if shown != expected:
+        return (f"the live option book at {ny:%Y-%m-%d %H:%M} ET holds session {shown}'s "
+                f"quotes, not the last closed session {expected}: refusing to store them "
+                f"as {expected} (calibrate after the 16:15 ET cutoff)")
+    after = (date.fromisoformat(expected) + timedelta(days=1)).isoformat()
+    hol = dbm.nyse_holidays(after, oc.ny_date(now_utc).isoformat())
+    if hol:
+        return (f"NYSE holiday {', '.join(hol)} lies between session {expected} and "
+                f"{ny:%Y-%m-%d %H:%M} ET: the live book is not session {expected}'s (Global "
+                f"Trading Hours after a holiday trade for the next session); refusing to "
+                f"store it as {expected}")
+    return None
+
+
+def _persist_snapshot(raw, clean, session: str, spot: float,
+                      quote_time: "str | None" = None) -> int:
     """Store an ACCEPTED session's observed two-sided quotes as its SPX snapshot.
 
     Called only after the quality gate accepted the fit, so a rejected or
@@ -334,12 +377,16 @@ def _persist_snapshot(raw, clean, session: str, spot: float) -> int:
     a refit from data_store/options/spx_<session>.parquet reproduces the
     committed pickle. insert_options_snapshot replaces any chain already
     stored for the session in one transaction (re-runs never duplicate).
+    ``quote_time`` (ISO UTC, database.utc_iso) is stored with every row: it
+    sets the T origin when the snapshot is cleaned again (option_chain.t_origin),
+    so it must be the exact value the live clean used.
     """
     from joint_vol_calibration.data import database as dbm
     from joint_vol_calibration.data import option_chain as oc
 
     opts = oc.observed_quotes(raw, clean, spot=spot)
     opts["snapshot_date"] = session
+    opts["quote_time"] = quote_time
     return dbm.insert_options_snapshot(opts, "SPX")
 
 
@@ -369,13 +416,15 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     Returns a status dict: {"status": accepted|rejected|skipped|exists|failed,
     "reason", "session", "path", "summary" (fit numbers), "chain" (quote-state
     diagnostics)}. Nothing is written to options_snapshots unless accepted.
+    A run whose live book cannot be the last closed session's (session_guard)
+    is "skipped" before anything is downloaded.
     """
     import pandas as pd
     from joint_vol_calibration.calibration.joint_calibrator import (
         JointCalibrator, is_acceptable_calibration,
     )
     from joint_vol_calibration.data import option_chain as oc
-    from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate
+    from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate, utc_iso
 
     now_utc = now_utc or _utcnow()
     expected = oc.last_closed_session(now_utc).isoformat()
@@ -398,10 +447,18 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         st.update(status="exists", reason=f"calibration for session {spot_date} already exists")
         log.info("  %s; skipping", st["reason"])
         return st
+    refused = session_guard(now_utc, expected)
+    if refused:
+        st["reason"] = refused
+        log.warning("  %s", refused)
+        return st
 
     spx = get_spx_ohlcv(as_of_date=spot_date)
     S = float(spx["close"].iloc[-1])
     r_ref = get_tbill_rate(spot_date)      # ^IRX, stored continuously compounded
+    # One string for the live clean and the stored snapshot, so a refit from
+    # the stored chain measures T from exactly the same origin.
+    quote_time = utc_iso(now_utc)
 
     try:
         raw, meta = oc.fetch_spx_chain(spot_date, ticker_factory=ticker_factory)
@@ -414,14 +471,16 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         st["reason"] = "no SPX option chain returned"
         return st
 
-    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=r_ref)
+    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=r_ref, quote_time=quote_time)
     d = clean.diagnostics
     st["chain"].update({k: d.get(k) for k in ("n_raw", "n_two_sided", "n_near_atm",
                                               "near_atm_two_sided_share", "n_clean",
-                                              "n_expiries_with_carry")})
+                                              "n_expiries_with_carry", "quote_time",
+                                              "t_origin", "t_origin_basis")})
     log.info("  Chain hygiene: %s raw -> %s two-sided -> %s clean rows; near-ATM two-sided "
-             "share %.0f%%", d.get("n_raw"), d.get("n_two_sided"), d.get("n_clean", 0),
-             100 * (d.get("near_atm_two_sided_share") or 0))
+             "share %.0f%%; T from %s (%s)", d.get("n_raw"), d.get("n_two_sided"),
+             d.get("n_clean", 0), 100 * (d.get("near_atm_two_sided_share") or 0),
+             d.get("t_origin"), d.get("t_origin_basis"))
     if not clean.ok:
         st.update(status="skipped", reason=clean.reason)
         st["diagnostic_chain"] = _save_rejected_chain(raw, spot_date, clean.reason)
@@ -469,7 +528,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     with open(out, "wb") as f:
         pickle.dump(result, f)
     try:
-        n_opt = _persist_snapshot(raw, clean, spot_date, S)
+        n_opt = _persist_snapshot(raw, clean, spot_date, S, quote_time)
         log.info("  Saved %d observed two-sided quotes as the %s SPX snapshot", n_opt, spot_date)
     except Exception as e:     # the fit stands, but its input record is missing
         st["snapshot_error"] = f"could not store the accepted {spot_date} chain: {e}"
@@ -617,6 +676,8 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
                 f"{_fmt(ch.get('near_atm_two_sided_share'), '.0%')} of {ch.get('n_near_atm', '—')}; "
                 f"{ch.get('n_clean', '—')} clean |",
             ]
+            if ch.get("t_origin"):
+                lines.append(f"| T origin | {ch.get('t_origin')} ({ch.get('t_origin_basis')}) |")
             if s:
                 lines += [
                     f"| fit data | {s.get('n_spx_options', '—')} SPX anchors / "

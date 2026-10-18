@@ -354,6 +354,28 @@ class TestTbillUnits:
                     if isinstance(t, ast.Name)}
         assert {"BT_START", "BT_END"} <= imported and not {"BT_START", "BT_END"} & assigned
 
+    def test_backfill_writes_the_partitions_the_bot_restores_from(self, tmp_db, tmp_path, monkeypatch):
+        """Every bot run starts with import_market_partitions (INSERT OR REPLACE
+        from the committed partitions). A backfill written only to the DB was
+        undone by the next run for every year older than the 400-day export
+        window; --apply now merges what it wrote into those partitions."""
+        mod = _load_script("backfill_tbill_history")
+        # committed history: the 2020 test-fixture rate the backfill exists to repair
+        db.insert_tbill_rates(pd.DataFrame({"date": ["2020-01-02", "2026-10-15"],
+                                            "rate": [0.015, 0.0400]}))
+        db.export_market_partitions(tables=["tbill_rates"])
+        fixed = pd.DataFrame({"date": ["2020-01-02", "2020-01-03", "2026-10-15"],
+                              "rate": [0.01544, 0.01528, 0.0401],
+                              "discount_yield": [0.0152, 0.0150, 0.0393]})
+        monkeypatch.setattr(mod.dl, "download_tbill_rate", lambda start, end: fixed.copy())
+        assert mod.main("2010-01-01", apply=True, end="2026-10-16") == 0
+        part = pd.read_parquet(tmp_path / "market" / "tbill_rates" / "tbill_rates_2020.parquet")
+        assert part["rate"].tolist() == [0.01544, 0.01528]
+        # the next bot run restores the partitions first: the fix survives
+        db.import_market_partitions()
+        assert db.get_tbill_rate("2020-01-02") == pytest.approx(0.01544)
+        assert db.get_tbill_rate("2020-01-03") == pytest.approx(0.01528)
+
     def test_backfill_default_end_is_the_last_closed_session(self, tmp_db, monkeypatch):
         """Not the machine's date: mid-session that asked Yahoo for a forming ^IRX bar."""
         mod = _load_script("backfill_tbill_history")
@@ -512,6 +534,33 @@ class TestValidationHooks:
     def test_pipeline_does_not_ingest_cboe_holiday_prints(self):
         df = pd.DataFrame({"date": ["2026-01-16", "2026-01-19", "2026-01-20"], "close": [1.0, 2.0, 3.0]})
         assert pl._sessions_only(df, "t")["date"].tolist() == ["2026-01-16", "2026-01-20"]
+
+    def test_yahoo_never_overwrites_a_stored_cboe_close(self, tmp_db, caplog):
+        """Cboe's VIX_History.csv is the official print (2026-02-06: Yahoo
+        20.37, Cboe 17.76). With the Cboe download down, the bot's Yahoo upsert
+        used to replace every stored Cboe close in its 400-day window."""
+        def rows(dates, closes, source):
+            df = pd.DataFrame({"date": dates, "close": closes, "source": source})
+            return df.assign(open=df["close"], high=df["close"], low=df["close"])
+
+        def stored():
+            con = raw_conn(tmp_db)
+            out = {d: (c, s) for d, c, s in con.execute("SELECT date, close, source FROM vix_daily")}
+            con.close()
+            return out
+        db.insert_vix_daily(rows(["2026-02-05", "2026-02-06"], [21.77, 17.76], "cboe"))
+        db.insert_vix_daily(rows(["2026-02-04"], [18.0], None))               # unrecorded (pre-C22)
+        with caplog.at_level(logging.INFO):
+            n = db.insert_vix_daily(rows(["2026-02-04", "2026-02-05", "2026-02-06", "2026-02-09"],
+                                         [18.1, 21.70, 20.37, 17.36], "yfinance"))
+        assert n == 2 and "kept 2 stored Cboe close(s)" in caplog.text
+        assert stored() == {"2026-02-04": (18.1, "yfinance"), "2026-02-05": (21.77, "cboe"),
+                            "2026-02-06": (17.76, "cboe"), "2026-02-09": (17.36, "yfinance")}
+        db.insert_vix_daily(rows(["2026-02-06"], [17.70], None))               # nor an unrecorded row
+        assert stored()["2026-02-06"] == (17.76, "cboe")
+        db.insert_vix_daily(rows(["2026-02-06", "2026-02-09"], [17.75, 17.40], "cboe"))
+        assert stored()["2026-02-06"] == (17.75, "cboe")                       # Cboe replaces Cboe
+        assert stored()["2026-02-09"] == (17.40, "cboe")                       # ... and Yahoo
 
     def test_upsert_keeps_a_session_the_source_dropped(self, tmp_db, caplog):
         dates = ["2026-09-21", "2026-09-22", "2026-09-23"]

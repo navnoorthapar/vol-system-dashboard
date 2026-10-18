@@ -134,6 +134,93 @@ def test_year_fraction_am_settlement_is_earlier():
     assert (pm - am) * 365 * 24 == pytest.approx(6.5)
 
 
+# ── T origin: closing book vs Cboe Global Trading Hours book ──────────────────
+
+@pytest.mark.parametrize("quote_time, session, origin", [
+    # Tue 02:30 UTC book slot: Monday-evening GTH book (trades for Tuesday)
+    ("2026-10-20T02:30:00Z", "2026-10-19", "2026-10-19T22:30:00-04:00"),
+    ("2026-10-20T04:30:00Z", "2026-10-19", "2026-10-20T00:30:00-04:00"),   # retry, after midnight ET
+    ("2027-01-27T02:30:00Z", "2027-01-26", "2027-01-26T21:30:00-05:00"),   # EST
+    ("2026-10-19T00:30:00Z", "2026-10-16", "2026-10-18T20:30:00-04:00"),   # Sunday-evening GTH (Monday)
+    ("2026-10-20T00:15:00Z", "2026-10-19", "2026-10-19T20:15:00-04:00"),   # GTH open: inclusive
+    ("2026-10-20T13:15:00Z", "2026-10-19", "2026-10-19T16:00:00-04:00"),   # 09:15 ET: GTH closed
+    ("2026-10-17T02:30:00Z", "2026-10-16", "2026-10-16T16:00:00-04:00"),   # Fri evening: closing book
+    ("2026-10-18T15:22:12Z", "2026-10-16", "2026-10-16T16:00:00-04:00"),   # Sunday (the 10-16 fit)
+    ("2026-10-19T23:00:00Z", "2026-10-19", "2026-10-19T16:00:00-04:00"),   # 19:00 ET, before GTH
+    (None, "2026-10-19", "2026-10-19T16:00:00-04:00"),                      # no recorded quote time
+])
+def test_t_origin_is_the_quote_time_only_for_a_gth_book(quote_time, session, origin):
+    assert oc.t_origin(quote_time, session).isoformat() == origin
+
+
+def test_year_fraction_from_a_gth_quote_time():
+    """The review trace: Tue 2026-10-20 02:30 UTC book slot, session Mon
+    10-19, PM expiry 11-03. From the 16:00 close T = 15/365 = 0.04110; the
+    quotes are from 22:30 ET, 6.5 hours later: 0.04035 (New York wall-clock
+    minutes; the 11-01 DST change is not counted, as in the whole-day count)."""
+    o = oc.t_origin("2026-10-20T02:30:00Z", "2026-10-19")
+    assert oc.year_fraction("2026-10-19", "2026-11-03") == 15 / 365
+    assert oc.year_fraction("2026-10-19", "2026-11-03", origin=o) == pytest.approx(
+        (15 - 6.5 / 24) / 365, rel=1e-14)
+    assert round(oc.year_fraction("2026-10-19", "2026-11-03", origin=o), 5) == 0.04035
+    # an explicit session-close origin is the default, exactly
+    for settle in ("PM", "AM"):
+        assert oc.year_fraction("2026-10-19", "2026-11-20", settle,
+                                origin=oc.session_close("2026-10-19")) == \
+            oc.year_fraction("2026-10-19", "2026-11-20", settle)
+
+
+def test_clean_chain_measures_T_from_a_gth_quote_time():
+    """A Mon-evening GTH book priced with T from its quote time: cleaned with
+    that quote time the 14-day smile comes back exactly; measured from the
+    16:00 close (the old rule) its IVs are ~1% low. A stored copy carrying
+    the quote_time column cleans identically without being told."""
+    S, session, qt = 7700.0, "2026-10-19", "2026-10-20T02:30:00Z"
+    expiry = "2026-11-02"
+    T = oc.year_fraction(session, expiry, origin=oc.t_origin(qt, session))
+    F, D = S * math.exp((0.042 - 0.011) * T), math.exp(-0.042 * T)
+    raw = _synthetic_chain(F, D, 14, session=session, T=T)
+
+    gth = oc.clean_option_chain(raw, session, S, r_ref=0.042, quote_time=qt)
+    assert gth.ok
+    assert gth.diagnostics["quote_time"] == qt
+    assert gth.diagnostics["t_origin"] == "2026-10-19T22:30:00-04:00"
+    assert gth.diagnostics["t_origin_basis"].startswith("quote_time")
+    assert (gth.quotes["time_to_expiry"] == T).all()
+    true_iv = 0.18 - 0.4 * np.log(gth.quotes["strike"] / F)
+    assert np.abs(gth.quotes["implied_vol"] - true_iv).max() < 1e-6
+
+    old = oc.clean_option_chain(raw, session, S, r_ref=0.042)
+    assert old.diagnostics["t_origin_basis"].startswith("session close")
+    assert (old.quotes["time_to_expiry"] == 14 / 365).all()
+    atm = (old.quotes["strike"] - F).abs() < 50
+    rel = (old.quotes.loc[atm, "implied_vol"] / (0.18 - 0.4 * np.log(old.quotes.loc[atm, "strike"] / F)))
+    assert rel.between(0.988, 0.992).all()           # sqrt(T / (14/365)) - 1 = -0.97%
+
+    stored = oc.observed_quotes(raw, gth, spot=S).assign(snapshot_date=session, quote_time=qt)
+    again = oc.clean_option_chain(stored, session, S, r_ref=0.042)
+    cols = [c for c in oc._QUOTE_COLS if c != "yahoo_iv"]
+    pd.testing.assert_frame_equal(again.quotes[cols], gth.quotes[cols], check_exact=True)
+    pd.testing.assert_frame_equal(again.carry, gth.carry, check_exact=True)
+    assert again.diagnostics["t_origin"] == gth.diagnostics["t_origin"]
+
+
+def test_closing_book_and_legacy_snapshots_clean_exactly_as_before():
+    """The committed fits were cleaned from the session close. A stored chain
+    with no quote time (every snapshot before quote times were recorded) and
+    a weekend closing book with its quote time (the fixture was fetched
+    Sunday 2026-10-18 08:10 UTC) must clean bit for bit as before."""
+    raw = _live()
+    base = oc.clean_option_chain(raw, "2026-10-16", S_1016, r_ref=0.041)
+    for variant in (oc.clean_option_chain(raw.assign(quote_time=None), "2026-10-16", S_1016,
+                                          r_ref=0.041),
+                    oc.clean_option_chain(raw, "2026-10-16", S_1016, r_ref=0.041,
+                                          quote_time="2026-10-18T08:10:00Z")):
+        pd.testing.assert_frame_equal(variant.quotes, base.quotes, check_exact=True)
+        pd.testing.assert_frame_equal(variant.carry, base.carry, check_exact=True)
+        assert variant.diagnostics["t_origin"] == "2026-10-16T16:00:00-04:00"
+
+
 def test_tbill_discount_to_cc():
     assert oc.tbill_discount_to_cc(0.04) == pytest.approx(0.04075, abs=2e-5)
 
@@ -266,9 +353,11 @@ def test_spread_cap_applies():
 
 # ── Synthetic chain: exact recovery of F_T, D_T ──────────────────────────────
 
-def _synthetic_chain(F, D, T_days, session="2026-09-23", root="SPXW", spread=0.2):
+def _synthetic_chain(F, D, T_days, session="2026-09-23", root="SPXW", spread=0.2, T=None):
+    """Black-76 chain for the expiry T_days after ``session``, priced with
+    T = T_days/365 (from the session close) unless ``T`` is given."""
     K = np.arange(round(F * 0.85 / 5) * 5, F * 1.15, 5.0)
-    T = T_days / 365.0
+    T = T_days / 365.0 if T is None else T
     vol = 0.18 - 0.4 * np.log(K / F)                       # skewed smile
     expiry = date.fromordinal(date.fromisoformat(session).toordinal() + T_days).isoformat()
     rows = []

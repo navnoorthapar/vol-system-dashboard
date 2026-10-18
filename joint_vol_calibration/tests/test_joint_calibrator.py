@@ -486,6 +486,25 @@ class TestVxFuturesOutOfSample:
         assert cal.vx_futures["price"].tolist() == [24.32, 24.15]
 
 
+def test_gth_book_measures_T_from_its_quote_time_and_says_so():
+    """A stored chain whose quote_time falls in the Global Trading Hours
+    window of the next session (Wed 21:30 ET) is a GTH book: every slice's T
+    runs from the quote time, and the methods record that origin and the
+    VIX leg's residual timing mismatch (its indices are the 16:15 closes)."""
+    chain = _heston_chain().assign(quote_time="2026-09-24T01:30:00Z")
+    with pytest.MonkeyPatch.context() as mp:
+        _patch_db(mp)
+        cal = JointCalibrator(as_of_date=_SESSION, spx_chain=chain)
+    origin = oc.t_origin("2026-09-24T01:30:00Z", _SESSION)
+    for exp, T in cal.spx_surface.groupby("expiry")["time_to_expiry"].first().items():
+        assert T == oc.year_fraction(_SESSION, exp, "PM", origin=origin)
+        assert T < oc.year_fraction(_SESSION, exp, "PM")
+    m = cal._methods({})
+    assert m["T_origin"] == "2026-09-23T21:30:00-04:00"
+    assert "quote time 2026-09-23T21:30:00-04:00" in m["T"] and "Global Trading Hours" in m["T"]
+    assert "16:15 ET" in m["vix_leg_timing"] and "residual timing mismatch" in m["vix_leg_timing"]
+
+
 class TestSyntheticCalibration:
     def test_recovers_generating_parameters(self, synth_fit):
         _, res = synth_fit
@@ -517,6 +536,10 @@ class TestSyntheticCalibration:
         assert res["r"] == pytest.approx(float(np.median(-np.log(used) / T)))
         assert res["feller"] == "off" and "feller" not in res["pinned_params"]
         assert res["methods"]["optimizer"]["scipy_polish"] is False
+        # no quote time: a closing book, T from the session's 16:00 ET close
+        assert res["methods"]["T_origin"] == "2026-09-23T16:00:00-04:00"
+        assert "16:00 ET close (closing book)" in res["methods"]["T"]
+        assert res["chain_diagnostics"]["t_origin"] == res["methods"]["T_origin"]
         assert res["spx_snapshot_session"] == res["spot_date"] == _SESSION
         ok, reason = is_acceptable_calibration(res)
         assert ok, reason
