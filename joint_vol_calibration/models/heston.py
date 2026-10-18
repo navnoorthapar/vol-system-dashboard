@@ -1037,9 +1037,11 @@ def heston_vix_futures_upper_bound(
     This is the forward-starting 30-day variance-swap rate. It ignores the
     concavity of the square root and does not depend on sigma; the true futures
     price heston_vix_future_exact() is lower by an amount that grows with
-    vol-of-vol and expiry (0.15-1.9 VIX points across the 38 archived joint
-    fits at 30-182 day expiries; median 0.6 at 30d, 1.4 at 182d).
-    Kept, under an explicit name, for the variance-swap interpretation.
+    vol-of-vol and expiry. At 30-182 day expiries the gap is 0.15-1.8 VIX
+    points on the 36 pre-C22 joint fits (sigma 0.24-0.85; median 0.6 at 30d,
+    1.4 at 182d) and 2.3-5.9 points on the four model_version 2 fits
+    (sigma 1.6-2.0). Kept, under an explicit name, for the variance-swap
+    interpretation.
     """
     T = np.asarray(expiry_times, dtype=float)
     ev_T = heston_expected_variance(T, kappa, theta, v0)
