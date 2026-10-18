@@ -660,6 +660,20 @@ class TestStochasticVolAttribution:
         # and the cross terms are not negligible on these paths
         assert (v["pnl_vanna"] + v["pnl_volga"]).abs().mean() > 2 * v["pnl_residual_a"].abs().mean()
 
+    @pytest.mark.parametrize("moneyness", [0.85, 1.15])
+    def test_volga_explains_pure_vol_moves(self, moneyness):
+        """Spot pinned, implied vol moving 2 pts a day, strike off the money
+        (where volga is large): without ½·volga·Δσ² the residual carries
+        4-7% of the P&L variance; with it, < 0.1%."""
+        dates = pd.bdate_range("2021-01-04", periods=80)
+        rng = np.random.default_rng(8)
+        sig = np.clip(0.20 + np.cumsum(rng.normal(0, 0.02, len(dates))), 0.1, 0.5)
+        S0 = 3257.85
+        df = hedge_attribution(dates, np.full(len(dates), S0), sig, S0 * moneyness, 0.5, R, Q)
+        v = df.dropna(subset=["pnl_total"])
+        assert v["pnl_residual_a"].var() / v["pnl_total"].var() < 2e-3
+        assert v["pnl_volga"].abs().mean() > 0.1 * v["pnl_total"].abs().mean()
+
 
 class TestCrossGreeks:
     def test_vanna_volga_match_finite_differences(self, atm_params):
@@ -717,6 +731,17 @@ class TestVolOfVolFlag:
 
     def test_quiet_without_vol_of_vol(self):
         assert int(self._path(spike=False)["is_unstable"].sum()) == 0
+
+    def test_zscore_is_against_the_trailing_window_ending_yesterday(self):
+        """z_t = (x_t − mean(x_{t−252..t−1})) / sd(x_{t−252..t−1}), with x the
+        expected next-day volga P&L ½·|volga_t|·Var_20(Δσ)."""
+        df = self._path(spike=True)
+        x = df["exp_volga_pnl"].to_numpy()
+        for t in (141, 150, 165, 199):      # history with vol-of-vol (sd > 0)
+            hist = x[max(0, t - 252):t]
+            hist = hist[np.isfinite(hist)]
+            expected = (x[t] - hist.mean()) / hist.std(ddof=1)
+            assert df["vomma_zscore"].iloc[t] == pytest.approx(expected, rel=1e-9)
 
     def test_flag_is_ex_ante(self):
         """Truncating the future must not change past flags."""

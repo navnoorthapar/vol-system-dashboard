@@ -347,6 +347,32 @@ def _resolve_rates(
     return np.array([float(s.get(d, R_BACKTEST)) for d in dates])
 
 
+def rate_series_spans_window(dates: "pd.Series | pd.Index", start: str, end: str) -> bool:
+    """
+    True if a rate series with these print dates covers [start, end]: its
+    first print inside the window is within 10 days of ``start``, its last
+    print within 10 days of ``end``, and it has at least 80% of the
+    window's business days.
+
+    An emptiness check is not enough: the shipped DB once held exactly 7
+    T-bill rows inside the window (a unit-test fixture that leaked into the
+    tracked database); forward-filled, those 7 synthetic days became the
+    rate for five years (C21).
+    """
+    d = pd.DatetimeIndex(pd.to_datetime(pd.Series(dates))).sort_values()
+    start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    inside = d[d >= start_ts]
+    if len(inside) == 0:
+        return False
+    span_days = max((end_ts - start_ts).days, 1)
+    expected = span_days / 7 * 5 * 0.80
+    return bool(
+        inside[0] <= start_ts + pd.Timedelta(days=10)
+        and d[-1] >= end_ts - pd.Timedelta(days=10)
+        and len(inside) >= expected
+    )
+
+
 # ── Core P&L simulators ────────────────────────────────────────────────────────
 
 @dataclass
@@ -1159,13 +1185,9 @@ class BacktestEngine:
     def _load_rate_series(self) -> Optional[pd.Series]:
         """
         Per-date ^IRX series from the DB, or None if it does not span the
-        window. Read from 40 days before the start so the first backtest
-        dates have a previous print to carry forward.
-
-        An emptiness check is not enough. The shipped DB once held exactly 7
-        T-bill rows inside this window (a unit-test fixture that leaked into
-        the tracked database); forward-filled, those 7 synthetic days became
-        the rate for five years. The series must actually SPAN the window.
+        window (rate_series_spans_window: a stub must not be forward-filled
+        into a five-year hurdle). Read from 40 days before the start so the
+        first backtest dates have a previous print to carry forward.
         """
         from joint_vol_calibration.data.database import get_tbill_rates_series
 
@@ -1176,21 +1198,12 @@ class BacktestEngine:
             return None
         df = df.copy()
         df["date"] = pd.to_datetime(df["date"])
-        inside = df[df["date"] >= pd.Timestamp(self.start_date)]
-        first = pd.Timestamp(inside["date"].iloc[0]) if len(inside) else pd.Timestamp.max
-        last = pd.Timestamp(df["date"].iloc[-1])
-        span_days = max((pd.Timestamp(self.end_date) - pd.Timestamp(self.start_date)).days, 1)
-        expected = span_days / 7 * 5 * 0.80   # 80% of business days in the window
-        if (
-            first > pd.Timestamp(self.start_date) + pd.Timedelta(days=10)
-            or last < pd.Timestamp(self.end_date) - pd.Timedelta(days=10)
-            or len(inside) < expected
-        ):
+        if not rate_series_spans_window(df["date"], self.start_date, self.end_date):
             logger.warning(
                 "T-bill series does not span the backtest window "
-                "(%d rows, %s → %s, need ~%d covering %s → %s) — "
+                "(%d rows, %s → %s, window %s → %s) — "
                 "falling back to fixed r=%.4f rather than forward-filling a stub",
-                len(inside), first.date() if len(inside) else None, last.date(), expected,
+                len(df), df["date"].iloc[0].date(), df["date"].iloc[-1].date(),
                 self.start_date, self.end_date, self.r,
             )
             return None

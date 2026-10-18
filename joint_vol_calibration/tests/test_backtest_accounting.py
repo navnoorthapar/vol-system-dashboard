@@ -230,6 +230,39 @@ class TestRateGaps:
         pd.testing.assert_series_equal(a, b)
 
 
+class TestRateSeriesSpan:
+    """The engine's guard against forward-filling a stub (C21: seven
+    synthetic ^IRX rows had become the hurdle for five years)."""
+
+    START, END = "2018-01-01", "2025-03-24"
+
+    def test_spanning_series_accepted_stubs_rejected(self):
+        full = pd.bdate_range("2017-11-20", self.END)
+        span = bte.rate_series_spans_window
+        assert span(full, self.START, self.END)
+        assert not span(pd.bdate_range("2020-01-02", periods=7), self.START, self.END)
+        assert not span(pd.bdate_range("2018-03-01", self.END), self.START, self.END)   # starts late
+        assert not span(pd.bdate_range("2017-11-20", "2024-12-31"), self.START, self.END)  # ends early
+        assert not span(full[::3], self.START, self.END)                                 # too sparse
+        assert not span(pd.DatetimeIndex([]), self.START, self.END)
+
+    def test_engine_refuses_a_stub_and_loads_a_full_series(self, monkeypatch):
+        from joint_vol_calibration.data import database
+        eng = BacktestEngine(start_date=self.START, end_date=self.END)
+
+        def serve(dates):
+            return lambda **kw: pd.DataFrame({"date": dates.strftime("%Y-%m-%d"),
+                                              "rate": 0.02})
+
+        monkeypatch.setattr(database, "get_tbill_rates_series",
+                            serve(pd.bdate_range("2020-01-02", periods=7)))
+        assert eng._load_rate_series() is None
+        monkeypatch.setattr(database, "get_tbill_rates_series",
+                            serve(pd.bdate_range("2017-11-20", self.END)))
+        r = eng._load_rate_series()
+        assert r is not None and len(r) > 1500 and (r == 0.02).all()
+
+
 # ── bookkeeping and sizing ─────────────────────────────────────────────────────
 
 class TestBookkeeping:
@@ -393,6 +426,37 @@ class TestCorrelationNetting:
         for y in (x, -x, np.random.default_rng(5).normal(size=200)):
             legacy = bte._legacy_corr_kelly_mult(pd.Series(x), pd.Series(y))
             assert (legacy.clip(0.5, 1.0) == 1.0).all()
+
+    def test_engine_applies_the_overlay_one_session_late(self, monkeypatch):
+        """run() must feed the netting multiplier into pass 2, shifted one
+        session: a multiplier first computable at the close of d sizes
+        trades from d+1 on, never on d itself (no look-ahead)."""
+        switch = {}
+
+        def fake_corr(pnl_mat, *a, **k):
+            m = pd.DataFrame(1.0, index=pnl_mat.index, columns=pnl_mat.columns)
+            switch["i"] = 100
+            m.iloc[100:] = 0.6
+            return m
+
+        monkeypatch.setattr(bte, "_corr_netting_multipliers", fake_corr)
+        monkeypatch.setattr(bte, "_net_kelly_scale",
+                            lambda pnl, *a, **k: pd.Series(1.0, index=pnl.index))
+        spx, vix = _rw_market()
+        eng = BacktestEngine(start_date="2018-01-02", end_date="2019-09-30")
+        eng.run(spx, vix)
+        i = switch["i"]
+        sig = eng.signals_df
+        sized_after = 0
+        for s in bte.PORTFOLIO_SIGNALS:
+            km = eng._k_mult[s]
+            assert (km.iloc[:i + 1] == 1.0).all(), s
+            assert km.iloc[i + 1:].to_numpy() == pytest.approx(0.6), s
+            for t in eng.all_trades:
+                if t.signal == s and sig.index.get_loc(t.entry_date) > i:
+                    assert t.kelly_frac == pytest.approx(0.6 * sig.loc[t.entry_date, f"{s}_kelly"])
+                    sized_after += 1
+        assert sized_after > 0, "no pass-2 entry after the switch to check"
 
 
 # ── metrics ────────────────────────────────────────────────────────────────────
