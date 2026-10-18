@@ -360,7 +360,7 @@
 <script>
 vsCharts(function () {
   // VIX Term Structure chart — x = tenor in calendar days on a LINEAR axis
-  // (a category axis spaced 9/30/93/182 days evenly and the spline bent the curve)
+  // (a category axis spaced the 9/30/93/184-day tenors evenly and the spline bent the curve)
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = {{ d.ts_tenors | tojson }};
   const tsValues = {{ d.ts_values | tojson }};

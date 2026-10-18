@@ -64,7 +64,7 @@ def freezer():
 
 # ── synthetic inputs ──────────────────────────────────────────────────────────
 
-CURVE = (("^VIX9D", 9), ("^VIX", 30), ("^VIX3M", 93), ("^VIX6M", 182))
+CURVE = (("^VIX9D", 9), ("^VIX", 30), ("^VIX3M", 93), ("^VIX6M", 184))
 
 
 # NYSE full-day closures as published by the exchange (independent of app.py's
@@ -1421,3 +1421,16 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="z">([^<]+)</div>', g_html)]
     assert zz == [f"{abs(x):.2f}" for x in gdf["vomma_pnl_ratio"]]
     assert "3,267" in vv and "3,268" not in vv
+
+
+def test_vix_index_tenors_come_from_config(dash, pages):
+    """The front page hard-coded ^VIX6M at 182 days ('9d 20.12 → 182d 21.67' and
+    the chart's x position); the system's tenor map is 184 days."""
+    from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+
+    d = dash.load_page1()
+    assert d["ts_tenors"] == [f"{VIX_INDEX_TENOR_DAYS[t]}d" for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M")]
+    assert d["ts_tenors"][-1] == "184d"
+    text = _visible_text(pages["/"])
+    assert f"9d {d['ts_values'][0]:.2f} → 184d {d['ts_values'][-1]:.2f}" in text
+    assert "182d" not in pages["/"]

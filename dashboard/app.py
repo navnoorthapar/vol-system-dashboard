@@ -727,7 +727,10 @@ def load_page1() -> dict[str, Any]:
         # Term structure from ONE date: the latest session on which every curve
         # tenor has a close. Taking each ticker's own latest row mixed today's
         # VIX with older 9D/3M/6M closes whenever Yahoo omitted the sub-tenors.
-        tenor_days = {"^VIX9D": 9, "^VIX": 30, "^VIX3M": 93, "^VIX6M": 182}
+        # Tenors are config.VIX_INDEX_TENOR_DAYS, the one map every module uses
+        # (Cboe: 9/30/93/184 calendar days); a local copy labelled ^VIX6M 182d.
+        from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+        tenor_days = dict(VIX_INDEX_TENOR_DAYS)
         curve_cols = [c for c in tenor_days if c in vix_wide.columns]
         recent = vix_wide.loc[vix_wide.index >= vix_wide.index.max() - pd.Timedelta(days=90)]
         curve_cols = [c for c in curve_cols if recent[c].notna().any()]
