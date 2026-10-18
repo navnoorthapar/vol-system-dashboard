@@ -62,6 +62,16 @@ def test_select_expiries_never_reuses_an_expiry():
     assert len(got) == len(set(got))
 
 
+def test_used_expiry_is_not_offered_to_the_next_target():
+    """The output is a set, so a duplicate cannot show up in it; what reuse
+    changes is the SELECTION. 20d is nearest to both 14d and (tied with 40d)
+    30d: with reuse, 30d takes 20d again and 40d is never fitted (2 slices
+    instead of 3)."""
+    session = date(2026, 9, 1)
+    listed = ["2026-09-21", "2026-10-11", "2026-10-15"]           # 20, 40, 44 days
+    assert oc.select_calibration_expiries(listed, session) == listed
+
+
 def test_first_eight_listed_expiries_were_one_bucket():
     """The pre-C22 bug: the first 8 dailies from 09-23 give one >=7d bucket."""
     session = date(2026, 9, 23)
@@ -100,6 +110,16 @@ def test_known_holidays_and_sessions():
 ])
 def test_last_closed_session(now, expected):
     assert oc.last_closed_session(now) == expected
+
+
+def test_one_calendar_special_closures():
+    """option_chain uses database.py's NYSE calendar. Its own rule-based copy
+    (removed) called these closures sessions: a fit or session check on
+    those dates would have used a day the exchange never opened."""
+    for d in (date(2001, 9, 11), date(2001, 9, 14), date(2004, 6, 11), date(2007, 1, 2)):
+        assert not oc.is_nyse_session(d), d
+    assert oc.previous_session(date(2007, 1, 3)) == date(2006, 12, 29)
+    assert oc.last_closed_session(datetime(2004, 6, 11, 22, 0, tzinfo=timezone.utc)) == date(2004, 6, 10)
 
 
 def test_sessions_between_skips_weekends_and_holidays():
@@ -199,6 +219,40 @@ def test_empty_book_fails_closed_with_reason():
     assert cc.quotes.empty
 
 
+def test_observed_quotes_reproduce_the_clean_chain_exactly():
+    """What the pipeline stores for an accepted session (observed_quotes) is a
+    complete input: cleaning it again gives EXACTLY the live clean (same
+    forwards, discounts, quotes, IVs), so a refit from the committed chain
+    reproduces the committed fit. It holds every two-sided line (here one
+    too wide for the cleaner), no one-sided line, no lastPrice, no Yahoo IV,
+    and only the settlement root the cleaner uses."""
+    raw = _live()
+    sel = (raw.expiration == "2027-01-15") & (raw.option_type == "call") & (raw.strike >= 8200)
+    i = raw.index[sel & (raw.bid > 0)][0]
+    raw.loc[i, "ask"] = 3.0 * raw.loc[i, "bid"]                     # two-sided, 100% spread
+    cc = oc.clean_option_chain(raw, "2026-10-16", S_1016, r_ref=0.041)
+    obs = oc.observed_quotes(raw, cc, spot=S_1016)
+
+    assert ((obs["bid"] > 0) & (obs["ask"] >= obs["bid"])).all()
+    assert not {"lastPrice", "impliedVolatility", "yahoo_iv"} & set(obs.columns)
+    assert set(obs.loc[obs.expiry == "2027-01-15", "root"]) == {"SPXW"}     # AM lines unused
+    wide = (obs.expiry == "2027-01-15") & (obs.right == "C") & (obs.strike == raw.loc[i, "strike"])
+    assert wide.sum() == 1 and np.isnan(obs.loc[wide, "implied_vol"]).all()
+    assert len(obs) > len(cc.quotes)
+    assert (obs["underlying_price"] == S_1016).all()
+
+    again = oc.clean_option_chain(obs.assign(snapshot_date="2026-10-16"), "2026-10-16",
+                                  S_1016, r_ref=0.041)
+    cols = [c for c in oc._QUOTE_COLS if c != "yahoo_iv"]
+    pd.testing.assert_frame_equal(again.quotes[cols], cc.quotes[cols], check_exact=True)
+    pd.testing.assert_frame_equal(again.carry, cc.carry, check_exact=True)
+    # implied_vol stored = this module's IV on every quote the cleaner kept
+    kept = obs.merge(cc.quotes[["expiry", "strike", "right", "implied_vol"]],
+                     on=["expiry", "strike", "right"], suffixes=("", "_clean"))
+    assert len(kept) == len(cc.quotes)
+    assert np.array_equal(kept["implied_vol"], kept["implied_vol_clean"])
+
+
 def test_spread_cap_applies():
     raw = _live()
     i = raw.index[(raw.strike == 7650) & (raw.expiration == "2027-01-15")
@@ -280,3 +334,41 @@ def test_fetch_downloads_only_selected_expiries():
     assert asked == meta["requested"]
     assert len(asked) == 6
     assert set(raw["expiration"]) == set(asked)
+
+
+def test_fetch_retries_transient_failures():
+    """~18 Yahoo requests per run: one transient failure (empty JSON, 429)
+    must not cost a slice or the run; a persistent one is recorded."""
+    class _Chain:
+        def __init__(self):
+            df = _synthetic_chain(7720.0, 0.995, 30)
+            self.calls = df[df.option_type == "call"].drop(columns=["expiration", "option_type"])
+            self.puts = df[df.option_type == "put"].drop(columns=["expiration", "option_type"])
+
+    calls = {"listing": 0}
+    listed = tuple(_daily_expiries(date(2026, 9, 24), 300))
+
+    class _Ticker:
+        def __init__(self, sym):
+            pass
+
+        @property
+        def options(self):
+            calls["listing"] += 1
+            if calls["listing"] == 1:
+                raise ValueError("Expecting value: line 1 column 1 (char 0)")
+            return listed
+
+        def option_chain(self, exp):
+            calls[exp] = calls.get(exp, 0) + 1
+            if exp == bad or calls[exp] == 1:                  # every expiry fails once
+                raise ConnectionError("429 Too Many Requests")
+            return _Chain()
+
+    bad = oc.select_calibration_expiries(listed, "2026-09-23")[2]
+    slept = []
+    raw, meta = oc.fetch_spx_chain("2026-09-23", ticker_factory=_Ticker, neighbours=0,
+                                   sleep=slept.append)
+    assert meta["failed"] == [bad] and calls[bad] == 3
+    assert len(meta["requested"]) == 6 and raw["expiration"].nunique() == 5
+    assert calls["listing"] == 2 and all(s > 0 for s in slept)
