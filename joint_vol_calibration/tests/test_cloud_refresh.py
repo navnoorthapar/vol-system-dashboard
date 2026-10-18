@@ -361,6 +361,84 @@ def test_intraday_run_never_stores_or_labels_the_open_session(env, monkeypatch):
     assert SESSION not in _spx_dates()
 
 
+# ── Session guard: the live book must belong to the session it is labelled ────
+
+_GUARD_CASES = [
+    # manual dispatch at Thu 14:00 ET (09-23 has no fit yet): Thursday's intraday book
+    (datetime(2026, 9, 24, 18, 0, tzinfo=timezone.utc), "2026-09-23",
+     "holds session 2026-09-24's quotes"),
+    # Tue 02:30 UTC slot after the MLK holiday: the Mon-evening GTH book trades for Tuesday
+    (datetime(2027, 1, 19, 2, 30, tzinfo=timezone.utc), "2027-01-15",
+     "NYSE holiday 2027-01-18"),
+    (datetime(2027, 1, 19, 13, 0, tzinfo=timezone.utc), "2027-01-15",     # Tue 08:00 ET
+     "NYSE holiday 2027-01-18"),
+    # normal Tue 02:30 UTC slot: Monday's session, GTH book (T from the quote time)
+    (datetime(2026, 10, 20, 2, 30, tzinfo=timezone.utc), "2026-10-19", None),
+    # weekend run: Friday's closing book
+    (datetime(2026, 10, 18, 15, 0, tzinfo=timezone.utc), "2026-10-16", None),
+    # Saturday 02:30 UTC slot: Friday evening keeps the closing book
+    (datetime(2026, 10, 17, 2, 30, tzinfo=timezone.utc), "2026-10-16", None),
+]
+
+
+@pytest.mark.parametrize("now, expected, refused", _GUARD_CASES)
+def test_session_guard(now, expected, refused):
+    cr = _load()
+    from joint_vol_calibration.data import option_chain as oc
+    assert oc.last_closed_session(now).isoformat() == expected
+    reason = cr.session_guard(now, expected)
+    if refused is None:
+        assert reason is None
+    else:
+        assert refused in reason and f"as {expected}" in reason
+
+
+@pytest.mark.parametrize("now, expected, refused", _GUARD_CASES)
+def test_calibrate_refuses_a_book_of_another_session(env, now, expected, refused):
+    """recalibrate_heston with the DB current through ``expected``: a refused
+    run is "skipped" before any download (no chain, no pickle, no snapshot);
+    an allowed one downloads the book (here empty, so the quote-state gate
+    skips it)."""
+    days = [d.strftime("%Y-%m-%d") for d in dbm.nyse_sessions("2026-09-01", expected)]
+    dbm.insert_spx_ohlcv(pd.DataFrame({"date": days, "open": 7600.0, "high": 7650.0,
+                                       "low": 7550.0, "close": 7600.0, "volume": 1e9}))
+    built = []
+
+    def ticker(symbol):
+        built.append(symbol)
+        return _EmptyBookTicker(symbol)
+    st = env.recalibrate_heston(now, ticker_factory=ticker)
+    assert st["status"] == "skipped" and st["session"] == expected
+    if refused is None:
+        assert built and "no live two-sided quotes" in st["reason"]
+    else:
+        assert not built and refused in st["reason"]
+    assert _spx_snapshot_rows(expected)[0] == 0
+    assert not (env.DATA / "calibrations" / f"joint_cal_{expected}.pkl").exists()
+
+
+def test_intraday_dispatch_does_not_store_todays_book_as_yesterdays(env):
+    """Review finding: market,calibrate,freeze dispatched at 14:00 ET while
+    the previous session had no fit downloaded TODAY's intraday chain and
+    saved it as the previous session's calibration and snapshot (accepted,
+    session 2026-09-23). Now: skipped with the reason, nothing stored, and no
+    hard failure while the headline fit is fresh."""
+    _accepted_pickle(env, "2026-09-22")
+    during = datetime(2026, 9, 24, 18, 0, tzinfo=timezone.utc)          # Thu 14:00 ET
+    status = env.DATA.parent / "status.json"
+    code = env.main(["--steps", "market,calibrate", "--status-file", str(status)],
+                    now_utc=during, ticker_factory=_FakeTicker,
+                    calibrate_kwargs={"de_maxiter": 5, "de_popsize": 5, "verbose": False})
+    st = json.loads(status.read_text())
+    cal = st["calibration"]
+    assert cal["status"] == "skipped", cal
+    assert "holds session 2026-09-24's quotes" in cal["reason"]
+    assert not (env.DATA / "calibrations" / f"joint_cal_{SESSION}.pkl").exists()
+    assert _spx_snapshot_rows(SESSION)[0] == 0
+    assert not dbm.options_snapshot_path(SESSION, "SPX").exists()
+    assert code == 0 and st["headline_calibration"]["date"] == "2026-09-22"
+
+
 def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch):
     """Label rows come from build_rule_label_frame. The forward-fill the step
     used to apply stored the previous session's ts_slope under later dates
