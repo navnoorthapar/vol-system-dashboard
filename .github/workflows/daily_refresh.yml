@@ -9,12 +9,14 @@ name: Daily Market Refresh
 #          races a "rollover" (the August 2026 outage was the exclusive yfinance end
 #          date, fixed in 236509e). Commits the labels and the market partitions.
 #
-#   book   01:30 UTC Tue-Sat   market,calibrate,freeze   (+ retry 03:30 UTC)
+#   book   02:30 UTC Tue-Sat   market,calibrate,freeze   (+ retry 04:30 UTC)
 #          The SPX option chain needs live two-sided quotes. After 16:15 ET Cboe's book
 #          is empty until Global Trading Hours open at 20:15 ET (00:15 UTC under EDT,
 #          01:15 UTC under EST); Friday evening keeps the closing book, hence Saturday
-#          UTC. A mistimed run fails closed at the quote-state gate. The retry is free:
-#          a session whose calibration already exists is skipped ("exists").
+#          UTC. 02:30 UTC leaves 75 min after the EST open for Yahoo's ~15-min delayed
+#          quotes (01:30 left 15 min); GTH runs to 09:15 ET, so a late start is still
+#          inside the live book. A mistimed run fails closed at the quote-state gate.
+#          The retry is free: a session whose calibration already exists is skipped.
 #
 # GitHub starts scheduled runs late under load (87-139 min for the old :00 slot in
 # Sep 2026; the top of the hour is the worst time), so the close slot sits off the hour.
@@ -23,8 +25,8 @@ name: Daily Market Refresh
 on:
   schedule:
     - cron: "7 22 * * 1-5"     # close
-    - cron: "30 1 * * 2-6"     # book
-    - cron: "30 3 * * 2-6"     # book, retry
+    - cron: "30 2 * * 2-6"     # book
+    - cron: "30 4 * * 2-6"     # book, retry
   workflow_dispatch:
     inputs:
       steps:

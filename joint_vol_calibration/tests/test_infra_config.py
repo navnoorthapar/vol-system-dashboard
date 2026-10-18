@@ -19,7 +19,11 @@ def _crons(text):
 
 def test_daily_cron_is_split_by_data_source():
     crons = _crons(DAILY)
-    assert "30 1 * * 2-6" in crons and "30 3 * * 2-6" in crons     # live Cboe book + retry
+    book = [c for c in crons if c.split()[4] == "2-6"]               # live Cboe book + retry
+    assert len(book) == 2
+    # Global Trading Hours open at 01:15 UTC under EST and quotes reach Yahoo ~15 min
+    # late: a book slot must start at least an hour after that open.
+    assert all(int(c.split()[1]) * 60 + int(c.split()[0]) >= 2 * 60 + 15 for c in book)
     close = [c for c in crons if c.split()[1] == "22"]
     assert close and close[0].split()[0] != "0"                    # off the top of the hour
     assert '"market,labels"' in DAILY and "market,calibrate,freeze" in DAILY
