@@ -103,7 +103,8 @@ class NYSEHolidayCalendar(AbstractHolidayCalendar):
     Differs from the US federal calendar: Good Friday closes, Columbus and
     Veterans Day do not; a Saturday New Year's Day is NOT observed on the Friday
     before; Juneteenth closes from 2022. Verified against every SPX session in
-    data_store/vol_system.db (2010-01-04 .. 2026-06-18: zero mismatches).
+    data_store/vol_system.db (2010-01-04 .. 2026-10-16, with the special
+    closures below: zero mismatches).
     """
     rules = [
         Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),

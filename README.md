@@ -24,7 +24,8 @@ understanding precisely why a plausible one *doesn't* work is the harder and mor
 The short version: the pricing and calibration engines are now validated against independent references, the risk
 tooling is honest about what it measures, and **no signal in the system makes money robustly**. The one that is positive in
 the canonical run (S3, +$56K over seven years) is a mark-to-model index-leg proxy whose sign depends on an estimated
-parameter, and the former "profitable" short-VRP signal (S1) exists only if you price ATM options at the VIX.
+parameter and whose timing does not beat random entry dates (p = 0.075); the former "profitable" short-VRP signal (S1)
+exists only if you price ATM options at the VIX.
 
 ---
 
@@ -43,7 +44,7 @@ Backtest 2018-01-02 → 2025-03-24 (1,816 sessions) · $1M per sleeve · delta-h
 
 By signal (each on its own $1M sleeve):
   S1C Contrarian PDV (portfolio)   −$431,203   Sharpe −0.57   35% win   123 trades
-  S3  Dispersion, index leg        + $56,471   Sharpe  0.18   49% win    39 trades   timing null test p = 0.035
+  S3  Dispersion, index leg        + $56,471   Sharpe  0.18   49% win    39 trades   timing null p = 0.075 (n.s.)
   S4  Volatility risk premium      −$273,544   Sharpe −0.79   37% win    46 trades
   S1  PDV short-VRP (reference)    −$287,644   Sharpe −0.15   59% win    69 trades   (all short)
   S2  VIX term structure (ref.)    −$149,900   Sharpe −0.38   38% win    45 trades
@@ -54,8 +55,11 @@ Source: `data_store/backtest/full_results.pkl` (metrics) and `full_results.parqu
 
 **The single most important caveat:** every P&L number is **mark-to-model**: Black-Scholes at σ_ATM = β·VIX, delta-hedged
 daily. The database holds **zero option prices inside the 2018–2025 backtest window**; every chain it contains is a 2026
-snapshot. β itself is estimated from the five real 2026 chains available (four in the DB, one live capture; 0.80–0.84,
-mean 0.82) and assumed constant over 2018–2025. The signals are real; the dollars are model-implied, not traded fills.
+snapshot. β itself is estimated from five real 2026 chains (four in the DB, one live capture; 0.80–0.84, mean 0.82) and
+assumed constant over 2018–2025. That estimation set is frozen, so the canonical run does not move each time the daily job
+stores a chain; later chains are reported as out-of-sample checks. The first, **2026-10-16** (VVIX 110, an R2 session),
+gives **β = 0.70**, which would put the all-chain mean at 0.80: β is not constant across regimes, and the grid below
+includes 0.80. The signals are real; the dollars are model-implied, not traded fills.
 
 **β is the number that decides the sign of S1.** The β sensitivity grid (`data_store/backtest/beta_sensitivity.csv`):
 
@@ -65,6 +69,7 @@ mean 0.82) and assumed constant over 2018–2025. The signals are real; the doll
 | 0.90 | $782,241 | −$217,759 | −0.97 | +$559,802 | +$216,321 |
 | 0.85 | $778,938 | −$221,062 | −0.92 | −$49,549 | +$111,897 |
 | **0.82 (estimate, canonical)** | **$783,908** | **−$216,092** | **−0.88** | **−$287,644** | **+$56,471** |
+| 0.80 (all-chain mean incl. 2026-10-16) | $793,966 | −$206,034 | −0.82 | −$436,036 | +$26,414 |
 | 0.78 | $813,733 | −$186,267 | −0.69 | −$544,623 | −$12,493 |
 
 The portfolio is negative at every β. S1's profit and most of S3's exist only because the VIX, a variance-swap rate that
@@ -86,7 +91,7 @@ April 2025 tariff shock is therefore *not* in the backtest.
 | C19 | S2 stop-loss propagation, dead-code removal, signal-summary coverage; data-gap repair | Cleanup; canonical numbers unchanged |
 | C20 | **Calibration selector rewarded broken data**: ranked archived fits on SPX RMSE with no data-sufficiency check, so 1-tenor VIX days scored *best* and headlined the live site | Gate on ≥ 3 VIX tenors + provenance on every fit |
 | C21 | **The cash hurdle was a unit-test fixture** (seven synthetic ^IRX rows written into the tracked DB and forward-filled for five years); straddles were **marked one session too rich**; the daily bot published the demoted classifier's output as "rule labels" and refit a frozen option surface | Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, MaxDD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K |
-| C22 | **Full-system audit (~270 findings, each reproduced before fixing).** Backtest: ATM vol was the VIX; hedge open/unwind and financing were free; sizing off $1M not the sleeve's NAV; correlation netting was a no-op; S3's P&L was a z-score scaled by an assumed 2%; Sharpe charged cash twice. Signals: two different R2 gates; a hard-coded VVIX > 100 override; inverted S2 stop; PDV spread compared the 30-day VIX with a 1-day E\|r\| forecast. Calibration: VIX indices fitted as if they were futures; ATM-call-only anchors; flat r/q; a self-imposed Feller penalty; a broken VIX-options pricer. Live pipeline: a month-long calibration outage (below) | NAV $738,794 → **$783,908**, P&L −26.1% → **−21.6%**, Sharpe −1.80 → **−0.88**, MaxDD −31.5% → **−21.6%**; S1 +$693,938 → **−$287,644**; S3 +$23,212 (z-units) → **+$56,471** (index leg); headline Heston fit replaced (below) |
+| C22 | **Full-system audit (~270 findings, each reproduced before fixing).** Backtest: ATM vol was the VIX; hedge open/unwind and financing were free; sizing off $1M not the sleeve's NAV; correlation netting was a no-op; S3's P&L was a z-score scaled by an assumed 2%; Sharpe charged cash twice. Signals: two different R2 gates; a hard-coded VVIX > 100 override; inverted S2 stop; PDV spread compared the 30-day VIX with a 1-day E\|r\| forecast. Calibration: VIX indices fitted as if they were futures; ATM-call-only anchors; flat r/q; a self-imposed Feller penalty; a broken VIX-options pricer. Live pipeline: a month-long calibration outage (below) | NAV $738,794 → **$783,908**, P&L −26.1% → **−21.6%**, Sharpe −1.80 → **−0.88**, MaxDD −31.5% → **−21.6%**; S1 +$693,938 → **−$287,644**; S3 +$23,212 (z-units) → **+$56,471** (index leg; timing p = 0.075, not significant); headline Heston fit replaced (below) |
 
 **The C18 inversion was the centrepiece of the first five rounds.** I had built a contrarian signal (S1C) on the premise
 that my base signal S1 was a "−$1.53M catastrophe." That catastrophe was the bug; corrected, S1 looked like a profitable
@@ -123,14 +128,17 @@ cumulative):
 Two rows dominate, in opposite directions. β = 0.82 *helps* the portfolio (+$108K) because S1C and S4 are mostly long
 straddles, which were bought "at the VIX" too dear. The single R2 gate *hurts* (−$134K): the backtest had traded a fixed
 VVIX > 100 gate (≈ 48% of the window in R2) while the published labels used the adaptive gate (≈ 23%), so moving to one
-gate puts a quarter of the window back into R1, where S1C buys straddles. S1 moves from +$722K (row 0) to −$508K at row
-11: β alone removes it.
+gate puts a quarter of the window back into R1, where S1C buys straddles. S1 moves from +$723K (row 0) to +$576K by row
+10 and to −$508K at row 11: β alone removes it.
 
-**S3 is the survivor, with caveats.** It is now priced as the index leg of a dispersion trade (long dispersion ⇒ short SPX
-straddle) on the same engine, a proxy because there is no single-stock options data. Its timing beats 200 random-walk
-null paths (p = 0.035), but it is positive only for β ≳ 0.8 (−$12K at β = 0.78), its Sharpe is 0.18, and below the
-T-bill return. The pre-C22 "+$23K, positive at every scale" figure was a z-score times an assumed 2%, positive on 98% of
-random-walk null paths, i.e. it measured mean reversion of a ratio, not option P&L.
+**No signal survives.** S3 is now priced as the index leg of a dispersion trade (long dispersion ⇒ short SPX straddle) on
+the same engine, a proxy because there is no single-stock options data. Its timing does **not** beat random entry dates at
+the 5% level: p = 0.075 against 200 random-walk null paths (permutation p = 0.080; Monte Carlo standard error ≈ 0.02),
+where each null path re-runs the engine's own S3 with only ^VVIX replaced. It is positive only for β ≳ 0.8 (+$26K at
+0.80, −$12K at 0.78), its Sharpe is 0.18, and it earns less than T-bills. The pre-C22 "+$23K, positive at every scale"
+figure was a z-score times an assumed 2%, positive on 99.5% of random-walk null paths, i.e. it measured mean reversion of
+a ratio, not option P&L. (An earlier C22 draft of this README reported p = 0.035: that null test re-built S3 from the
+backtest-window features only, a different S3 from the one the engine trades; fixed before publication.)
 
 S1C's pseudo-out-of-sample check (2013–2017, a window not used to design it) still fails under the corrected engine:
 −$261,085, Sharpe −0.87, 29% win, 58 trades (`run_backtest --pseudo-oos`).
@@ -142,32 +150,38 @@ S1C's pseudo-out-of-sample check (2013–2017, a window not used to design it) s
 ### Calibration provenance
 
 The headline calibration is the **newest model_version 2 fit that passes the quality gate**, not the lowest-RMSE fit. Today
-that is the 2026-06-18 session (SPX 7,500.58, VIX 16.40), `data_store/calibrations/joint_cal_2026-06-18.pkl`:
+that is the 2026-10-16 session (SPX 7,659.44, VIX 19.99), fitted by the corrected daily pipeline on the live Friday book,
+`data_store/calibrations/joint_cal_2026-10-16.pkl`:
 
 ```
-Heston parameters (2026-06-18 session):
-  κ = 5.016    θ = 0.0613    σ = 1.591    ρ = −0.698    v₀ = 0.0173  (√v₀ = 13.1% spot vol)
-  No parameter on a bound (ρ interior); no active constraints
+Heston parameters (2026-10-16 session):
+  κ = 4.992    θ = 0.0499    σ = 2.000    ρ = −0.753    v₀ = 0.0344  (√v₀ = 18.5% spot vol)
+  Active constraint: σ on its box ceiling (2.0), so 4 of 5 parameters are set by the market
 
-  SPX smile RMSE:    0.85 vol pts in-sample (53 anchors, 6 expiries, 33 puts / 20 calls)
-                     1.83 vol pts OUT-OF-SAMPLE (6,976 OTM quotes, 43 expiries; put wing 2.37)
-  VIX index RMSE:    0.51 VIX pts (^VIX9D / ^VIX / ^VIX3M / ^VIX6M as spot-starting indices)
-  VX futures RMSE:   1.84 VIX pts (8 real Cboe futures, out of sample: not fitted)
-  Carry:             parity-implied per expiry; medians r = 4.27%, q = 0.71% (^IRX reference 3.80% cc)
-  Feller:            2κθ = 0.615 < σ² = 2.532  VIOLATED, not imposed (a diagnostic, not a no-arbitrage condition)
-  Optimiser:         DE (maxiter 200, popsize 10 → 50 members, seed 42) + one L-BFGS-B polish
+  SPX smile RMSE:    1.34 vol pts in-sample (53 anchors, 6 expiries, 32 puts / 21 calls; put wing in all 6)
+                     2.96 vol pts OUT-OF-SAMPLE (2,860 OTM quotes; put wing 3.90)
+  VIX index RMSE:    0.82 VIX pts (^VIX9D / ^VIX / ^VIX3M / ^VIX6M as spot-starting indices)
+  Carry:             parity-implied per expiry; medians r = 4.43%, q = 0.93% (^IRX reference 4.15% cc)
+  Feller:            2κθ = 0.499 < σ² = 4.000  VIOLATED, not imposed (a diagnostic, not a no-arbitrage condition)
+  Optimiser:         DE (maxiter 200, popsize 10 → 50 members, seed 42) + one L-BFGS-B polish; 5,018 evaluations
+  Chain:             100% of 1,613 near-ATM lines two-sided; 7,583 raw → 6,191 two-sided → 5,120 clean quotes
 ```
 
-All four committed SPX snapshots were recalibrated with the corrected calibrator; the fits are consistent with one another:
+Every committed SPX snapshot is fitted with the same calibrator (the four earlier ones were refit after the ^IRX reference
+fix below); the fits are consistent with one another:
 
-| Session | κ | θ | σ | ρ | v₀ | SPX in-sample / OOS (vp) | VIX index (pts) |
-|---|---|---|---|---|---|---|---|
-| 2026-03-24 | 6.140 | 0.0653 | 2.000* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 |
-| 2026-03-27 | 4.292 | 0.0733 | 1.833 | −0.785 | 0.0929 | 1.365 / 1.538 | 0.852 |
-| 2026-05-29 | 5.233 | 0.0595 | 1.707 | −0.656 | 0.0130 | 0.911 / 1.285 | 0.523 |
-| 2026-06-18 | 5.016 | 0.0613 | 1.591 | −0.698 | 0.0173 | 0.853 / 1.834 | 0.508 |
+| Session | κ | θ | σ | ρ | v₀ | SPX in-sample / OOS (vp) | VIX index (pts) | VX futures, OOS (pts) |
+|---|---|---|---|---|---|---|---|---|
+| 2026-03-24 | 6.142 | 0.0653 | 2.000* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.32 |
+| 2026-03-27 | 4.290 | 0.0733 | 1.834 | −0.785 | 0.0928 | 1.365 / 1.538 | 0.852 | 3.12 |
+| 2026-05-29 | 5.233 | 0.0595 | 1.707 | −0.656 | 0.0130 | 0.911 / 1.285 | 0.523 | 2.56 |
+| 2026-06-18 | 4.999 | 0.0614 | 1.592 | −0.697 | 0.0173 | 0.855 / 1.833 | 0.510 | 1.85 |
+| **2026-10-16** | **4.992** | **0.0499** | **2.000\*** | **−0.753** | **0.0344** | **1.336 / 2.955** | **0.823** | n/a† |
 
 \* σ on its box ceiling (2.0), reported by the fit as an active constraint. Every fit violates Feller; none imposes it.
+† The DB's Cboe VX futures history ends 2026-10-09, before this session. The ^IRX reference rate had been converted to a
+continuously compounded rate twice (it is stored cc), 7 bp too high; the refit moved κ by at most 0.017 and no RMSE by more
+than 0.002.
 
 ### What C22 changed in this story, and why
 
@@ -200,10 +214,11 @@ reproducible reason:
   sessions to fit it routinely, not because of a demonstrated structural failure.
 
 The honest calibration finding is now narrower and better supported. With carry, anchors and instruments right, Heston
-fits the SPX surface to ~1 vp in-sample and ~1.3–2.0 vp out-of-sample and the VIX index term structure to ~0.5–0.9 pts,
-**but only with a vol-of-vol (σ ≈ 1.6–2.0) that violates Feller by a wide margin** and with κ ≈ 4–6, i.e. variance
-half-lives of 1.4–1.9 months. The model reprices the 8 real VX futures 1.8 pts off out of sample, and prices VIX options poorly
-when asked (35 vp). Joint SPX/VIX calibration is hard for one-factor diffusive SV models, as the literature has said for
+fits the SPX surface to 0.9–1.4 vp in-sample and 1.3–3.0 vp out-of-sample and the VIX index term structure to 0.5–0.9 pts,
+**but only with a vol-of-vol (σ ≈ 1.6–2.0, on the 2.0 ceiling in two of five sessions) that violates Feller by a wide
+margin** and with κ ≈ 4–6, i.e. variance half-lives of 1.4–1.9 months. The out-of-sample error is largest in the put wing
+and on the most stressed session (2026-10-16: 3.9 vp in the wing). The model reprices real VX futures 1.8–3.1 pts off out of
+sample, and prices VIX options poorly when asked (35 vp). Joint SPX/VIX calibration is hard for one-factor diffusive SV models, as the literature has said for
 years (Guyon 2020; Abi Jaber, Illand & Li 2022); this repo shows *where* it is hard with numbers you can regenerate.
 
 ### The Quintic OU comparison
@@ -235,8 +250,8 @@ RMSE is wrong, and was wrong in production twice:
 
 The gate (`is_acceptable_calibration`) now requires ≥ 4 SPX expiries, ≥ 30 options, a put wing in ≥ 3 expiries, ≥ 3 VIX
 tenors, a snapshot dated to the spot session, and `model_version = 2`. The dashboard headlines the **newest** passing fit and
-shows a staleness banner in NYSE sessions. Of the 40 archived `joint_cal_*.pkl` files, the 4 model_version 2 fits pass;
-the 36 pre-C22 fits are kept as labelled legacy evidence and are never ranked.
+shows a staleness banner in NYSE sessions. Of the 42 archived `joint_cal_*.pkl` files, the 5 model_version 2 fits pass;
+the 37 pre-C22 fits are kept as labelled legacy evidence and are never ranked.
 
 ### The live calibration outage (2026-09-05 → 2026-10), and its root causes
 
@@ -258,28 +273,36 @@ each used 9 options on a single expiry. All runs were green. Root causes, all fi
 4. The chain was stored as "the most recent snapshot" *before* the gate ran, and `r` was overwritten after the fit with a
    rate the fit never used. The chain is now stored only after acceptance, and the result records the r/q it used.
 
-The tests that pin this are `tests/test_option_chain.py`, `tests/test_cloud_refresh.py`, `tests/test_joint_calibrator.py` and
-`tests/test_data_pipeline.py`.
+**Resolved.** Run as the workflow runs it, the corrected pipeline accepted the 2026-10-16 session on the live Friday book
+(the current headline, above) and rejected the degenerate cases it should: one expiry ("1 expiry < 4", out-of-sample error
+7.7 vp), one VIX tenor, the 2026-06-18 chain presented as current (stale), and an empty book (fails closed). The stored
+chain is the observed two-sided quotes, and a refit from the committed parquet reproduces the live fit bit for bit. A stale
+calibration now fails the job but still publishes the site with its staleness banner (`publishable` output), so a rejected
+fit can no longer freeze the market pages. The book slot runs at 02:30 UTC (retry 04:30): 75 minutes after the overnight
+session opens even under EST, when quotes reach Yahoo about 15 minutes late.
+
+The tests that pin this are `tests/test_option_chain.py`, `tests/test_cloud_refresh.py`, `tests/test_joint_calibrator.py`,
+`tests/test_data_pipeline.py` and `tests/test_infra_config.py`.
 
 ---
 
 ## System Overview
 
-14 components, ~26,700 lines of Python outside the tests (package, dashboard and scripts), causal by construction and by
-test (mutation-checked look-ahead tests in `test_lookahead.py`).
+14 components, ~27,500 lines of Python outside the tests (package, dashboard and scripts) and ~16,900 lines of tests, causal
+by construction and by test (mutation-checked look-ahead tests in `test_lookahead.py`).
 
 | Component | Description |
 |-----------|-------------|
 | **C1** Data Infrastructure | SQLite (schema v1) + Yahoo and Cboe downloaders; rule-based NYSE calendar; session-dated, idempotent option snapshots; ^IRX converted from bank-discount to a continuously compounded rate; option-chain hygiene (two-sided quotes, parity forwards, own Black-76 IVs) |
 | **C2** Heston / Bates Engine | Lewis (2001) contour integral with a Black-Scholes control variate on the "little trap" CF (Albrecher et al. 2007), adaptive trapezoid, validated against independent quadrature; exact VIX index and VIX futures (CIR Laplace transform); Andersen (2008) QE Monte Carlo. No FFT |
-| **C3** PDV Model | EWMA approximation of Guyon & Lekeufack (2023), not a replication (fixed half-lives, daily returns). 21-day RMS-vol forecast, walk-forward R² 0.29 (ex-2020 0.27); next-day \|r\| target R² 0.31 (ex-2020 0.20) |
-| **C4** Joint Calibration | DE + L-BFGS-B on SPX z-grid anchors (put wing, parity carry) + VIX spot-index leg; headline 0.85 vp in-sample / 1.83 vp out-of-sample; quality gate on data sufficiency |
-| **C5** NN Surrogate | Research prototype on no production path. Trained weights are not in the repo, so no speed or accuracy figure is claimed here (`NNPricer.benchmark()` reproduces them); the C22 fits (σ ≈ 1.6–2.0) lie outside its training box (σ ≤ 1.2). The VIX network is deprecated: the closed form it approximates is faster |
-| **C6** Greeks Monitor | Vomma/vanna/QV surface from exact Heston prices of the headline fit; 79 of 90 grid nodes (11 below a one-tick price floor, recorded); per-node vomma-P&L instability rule (31 of 79 flagged); exact QV convexity |
+| **C3** PDV Model | EWMA approximation of Guyon & Lekeufack (2023), not a replication (fixed half-lives, daily returns). 21-day RMS-vol forecast, purged walk-forward R² 0.29 (ex-2020 0.27) over 2012-03-30 → 2025-11-28; next-day \|r\| target R² 0.31 (ex-2020 0.20). The pooled R² mostly reflects tracking the vol level across regimes: within calendar years it is usually negative (median −0.31), and a walk-forward GARCH(1,1) gets 0.26 on the same 21-day target (0.20 ex-2020) |
+| **C4** Joint Calibration | DE + L-BFGS-B on SPX z-grid anchors (put wing, parity carry) + VIX spot-index leg; headline (2026-10-16) 1.34 vp in-sample / 2.96 vp out-of-sample; quality gate on data sufficiency, freshness and schema |
+| **C5** NN Surrogate | Research prototype on no production path. Weights committed (`data_store/nn_spx_model.pt`, retrained in C22 with recorded provenance) on a domain that covers every committed fit (κ 0.5–15, θ 0.01–0.2, σ 0.1–2.0, ρ −0.99…−0.3, v₀ 1e-4–0.25, T 0.02–2y); out-of-domain inputs are refused. Held-out MAE 0.019 vp (p99 0.10, max 1.1); 0.015 vp on the 2026-06-18 fit; 14–23× faster than the Fourier pricer, single-threaded (`NNPricer.benchmark()`). The VIX network is deprecated: the closed form it approximates is faster |
+| **C6** Greeks Monitor | Vomma/vanna/QV surface from exact Heston prices of the headline (2026-10-16) fit; 83 of 90 grid nodes (7 below a 5·10⁻⁶·F price floor, recorded with reasons); per-node vomma-P&L instability rule (41 of 83 flagged); exact QV convexity |
 | **C7** Delta-Hedge Simulation | 2020 attribution Γ + ν + vanna + volga + calendar Θ + financing; unexplained-variance ratio 0.0001 (run A); walk-forward PDV in run B |
 | **C8** Regime Classifier | XGBoost 3-regime, holdout isotonic calibration; 75% out-of-sample vs 87% for "predict yesterday", **demoted, research-only** |
 | **C9** Signal Engine | S1/S1C (PDV vs implied), S2 (VIX term structure), S3 (dispersion timing), S4 (VRP); one adaptive R2 gate |
-| **C10** Backtest Engine | 2018-01-02 → 2025-03-24, β·VIX ATM proxy, hedge and carry accounting, sleeve-NAV sizing, ex-ante Kelly, S3 null test, sub-period stability (in-sample), HTML report |
+| **C10** Backtest Engine | 2018-01-02 → 2025-03-24, β·VIX ATM proxy, hedge and carry accounting, sleeve-NAV sizing, ex-ante Kelly, S3 timing null test, sub-period stability (in-sample), HTML report; every committed artifact rebuilds byte-identically (`test_backtest_reproducibility.py`) |
 | **C11** Regime-Switching PDV | Merton (1976) jumps fitted on post-R2 days; Lee-Mykland-style daily jump test (the old "BNS filter" was not the BNS test and is removed) |
 | **C12** Bates SVJ + HMM | Bates (1996) CF and VIX formulas; the stored Bates fit did not converge, so it is not a result. Gaussian HMM with causal (filtered) inference, research only |
 | **C13** Improvements | Adaptive VVIX gate (now the only gate), holdout isotonic calibration, portfolio Kelly. Withdrawn in C22: SVI/SSVI smoothing (never wired in; removed) and top-vega anchors (replaced by the z-grid) |
@@ -311,14 +334,22 @@ read-only renderer (the DB is opened `mode=ro`), and `freeze_site.py` refuses to
 
 ## Live Dashboard
 
-**[https://navnoorbawa.me](https://navnoorbawa.me)**: four pages, served as frozen HTML from the stored artifacts:
+**[https://navnoorbawa.me](https://navnoorbawa.me)**: four pages, served as frozen HTML from the stored artifacts and rebuilt
+by the daily job. Every number on them is read from an artifact, not typed into a template; a page whose inputs fail to load
+shows an error state and blocks the publish.
 
-- **Live Market**: SPX/VIX/VVIX, end-of-day rule regime (R0/R1/R2), the 21-day PDV forecast vs implied with a like-for-like
-  percentile, the VIX term structure
-- **Calibration**: the headline fit with its age, carry, anchors and gate status; SPX smile; RMSE decomposition; same-session
-  Heston vs Quintic comparison
-- **Greeks Monitor**: vomma heatmap on the surface's own ln(K/F) grid, unstable nodes, vanna/QV by maturity, provenance
-- **Backtest**: equity curves per sleeve with the T-bill benchmark, per-signal attribution and the C16→C22 audit table
+- **Market**: SPX/VIX/VVIX, the end-of-day rule regime (R0/R1/R2) with its inputs, the 21-day PDV forecast vs implied vol
+  with a walk-forward percentile, the VIX term structure, and the research classifier (shown as research-only)
+- **Calibration**: the headline fit with its age, carry, gate status and active constraints; fit quality by leg; the model
+  smile; the same-session Heston vs Quintic comparison
+- **Greeks**: vomma heatmap on the surface's own ln(K/F) grid, unstable nodes by the surface's recorded rule, vanna/QV by
+  maturity, provenance
+- **Backtest**: equity curves per sleeve, headline KPIs (including the T-bill benchmark and the S3 null test), per-signal
+  attribution, the β grid, the C22 waterfall and the C16→C22 audit table
+
+The pages meet WCAG 2.2 AA (axe-core reports no violations), have one `h1` and landmarks each, and give every chart an
+accessible name and a data-table fallback (no JavaScript, blocked CDN, reduced motion); layouts are checked at
+1440/1024/768/390 px and in print. The structural guarantees are pinned in `tests/test_dashboard.py`.
 
 ---
 
@@ -339,23 +370,24 @@ and **10.2%** of days sit within one vol point of the R0/R1 cut (`regime_label_n
 
 ## Data Sources
 
-All free; no Bloomberg or paid feed. Counts are from the committed `data_store/vol_system.db`, whose market history ends
-2026-06-18 (the daily job extends its own copy).
+All free; no Bloomberg or paid feed. Counts are from the committed `data_store/vol_system.db`, whose market history runs to
+the 2026-10-16 session. The DB is a rebuildable cache: the daily job commits parquet captures (`data_store/market/`,
+`data_store/options/`) and restores the DB from them on every run, so nothing it captured is lost if a source later revises
+or drops a row.
 
 | Dataset | Source | Coverage | Rows |
 |---------|--------|----------|------|
-| SPX OHLCV | Yahoo (`^GSPC`) | 2010-01-04 → 2026-06-18 | 4,140 |
-| VIX daily | Yahoo, cross-checked against Cboe's official files | 2010-01-04 → 2026-06-18 | 4,167 |
-| VIX term structure | Yahoo (`^VIX9D` from 2011-01-03, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`) | 2010-01-04 → 2026-06-18 | 20,431 |
-| SPX options | Yahoo, 4 end-of-day chains (sessions 2026-03-24, 03-27, 05-29, 06-18) | none inside the backtest window | 61,815 |
-| VIX options | Yahoo, same 4 sessions | none inside the backtest window | 1,896 |
+| SPX OHLCV | Yahoo (`^GSPC`) | 2010-01-04 → 2026-10-16 | 4,223 |
+| VIX daily | Yahoo, cross-checked against Cboe's official files | 2010-01-04 → 2026-10-16 | 4,252 |
+| VIX term structure | Yahoo (`^VIX9D` from 2011-01-03, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`) | 2010-01-04 → 2026-10-16 | 20,856 |
+| SPX options | Yahoo: 4 full end-of-day chains (2026-03-24, 03-27, 05-29, 06-18) and the daily job's two-sided capture of 2026-10-16 | none inside the backtest window | 68,006 |
+| VIX options | Yahoo, the first 4 sessions | none inside the backtest window | 1,896 |
 | VX futures | Cboe per-contract files (174 monthly contracts expiring 2013-01 → 2027-06) | 2013-01-02 → 2026-10-09 | 30,963 |
 | VX final settlements | Cboe (expiry-day settles; VRO before mid-2013) | 2010-01-20 → 2026-09-16 | 201 |
-| T-bill rate | Yahoo (`^IRX`, stored as cc rate + raw discount yield; negative 2020 bills kept) | 2010-01-04 → 2026-09-04 | 4,192 |
+| T-bill rate | Yahoo (`^IRX`, stored as cc rate + raw discount yield; negative 2020 bills kept) | 2010-01-04 → 2026-10-16 | 4,221 |
 
-The daily job now stores every SPX chain that passes the calibration gate under its quote session (and the data layer can
-persist chains and market partitions as parquet), so the options history grows going forward; it cannot reach back into the
-backtest window, which is *why* the backtest is mark-to-model. The Cboe downloader was rebuilt in C22 (the old endpoints
+The daily job stores every SPX chain that passes the calibration gate under its quote session, so the options history grows
+from here; it cannot reach back into the backtest window, which is *why* the backtest is mark-to-model. The Cboe downloader was rebuilt in C22 (the old endpoints
 returned 403 and the parser read fields the payload does not have).
 
 ---
@@ -365,7 +397,7 @@ returned 403 and the parser read fields the payload does not have).
 ```bash
 git clone https://github.com/navnoorthapar/vol-system-dashboard
 cd vol-system-dashboard
-pip install -r requirements.txt pytest
+pip install -r requirements-lock.txt     # the exact, tested set CI and the daily job use (Python 3.11, CPU torch)
 python dashboard/app.py        # read-only preview on 127.0.0.1 (first free port of 5000, 5001, 5050, 8080, 8888)
 python dashboard/freeze_site.py .site-build   # the static site exactly as published
 ```
@@ -381,12 +413,13 @@ results), so the dashboard runs with no network access and no recalibration. Ren
 | `data_store/backtest/beta_sensitivity.csv` | `python -m joint_vol_calibration.backtest.run_backtest --beta-sensitivity --csv data_store/backtest/beta_sensitivity.csv` |
 | `data_store/backtest/c22_bridge.csv` | `python -m joint_vol_calibration.backtest.c22_bridge --csv data_store/backtest/c22_bridge.csv` |
 | `data_store/backtest/delta_hedge_2020.parquet` (C7) | `python -m joint_vol_calibration.backtest.run_backtest --c7` |
-| β estimate from the DB chains (add `--live` for a Yahoo chain) | `python -m joint_vol_calibration.backtest.run_backtest --estimate-beta` |
+| β estimate from the frozen chain set, plus later chains as out-of-sample checks (add `--live` for a Yahoo chain) | `python -m joint_vol_calibration.backtest.run_backtest --estimate-beta` |
 | S1C pseudo-OOS 2013–2017 | `python -m joint_vol_calibration.backtest.run_backtest --pseudo-oos` |
-| `data_store/calibrations/joint_cal_<session>.pkl` | `python -c "from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator as J; c = J(as_of_date='2026-06-18'); c.calibrate(); c.save()"` |
+| `data_store/calibrations/joint_cal_<session>.pkl` | `python -c "from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator as J; c = J(as_of_date='2026-10-16'); c.calibrate(); c.save()"` |
 | `data_store/calibrations/quintic_cal_2026-03-24.pkl` | `python -m joint_vol_calibration.calibration.quintic_calibrator` |
 | `data_store/calibrations/baseline_2026-03-24.json` | `python scripts/heston_quintic_baseline.py 2026-03-24` |
-| `data_store/greeks/greeks_surface.parquet` | `python -m joint_vol_calibration.greeks.risk_monitor --calibration data_store/calibrations/joint_cal_2026-06-18.pkl` |
+| `data_store/greeks/greeks_surface.parquet` | `python -m joint_vol_calibration.greeks.risk_monitor --calibration data_store/calibrations/joint_cal_2026-10-16.pkl` |
+| `data_store/nn_spx_model.pt` | `python -m joint_vol_calibration.models.nn_pricer train --jobs 2 --epochs 120 --patience 15` |
 | `data_store/pdv_model.pkl` | `python -m joint_vol_calibration.models.pdv --as-of <date>` |
 | Daily refresh (labels, calibration, site) | `python scripts/cloud_refresh.py --steps market,labels,calibrate,freeze` |
 | Calibration provenance backfill | `python scripts/backfill_calibration_provenance.py --apply` |
@@ -396,13 +429,12 @@ The backtest and calibration runs are seeded (seed 42) and deterministic on the 
 ### Testing
 
 ```bash
-python -m pytest joint_vol_calibration/tests -q -p no:cacheprovider
-# At the C22 commit: 1,342 passed, 8 skipped in ~5 min. The 8 skips are NN-surrogate tests
-# that need the gitignored trained weights / training caches.
+python -m pytest joint_vol_calibration/tests -q -p no:cacheprovider     # ~6 min on 4 cores; nothing is skipped on a clean clone
 ```
 
-Every push runs the full suite in GitHub Actions (the **CI** badge above), so "passing" is machine-verified rather than a
-hand-typed count. The suite includes mutation-checked look-ahead tests (`test_lookahead.py`), Heston prices against an
+Every push and pull request runs the full suite, a lint pass and a render of the site in GitHub Actions (the **CI** badge
+above; a weekly run also tests `main` as the daily bot leaves it), so "passing" is machine-verified rather than a hand-typed
+count. The suite runs against a private copy of `data_store/` and fails if anything under it changes. It includes mutation-checked look-ahead tests (`test_lookahead.py`), Heston prices against an
 independent quadrature reference (`test_heston_reference.py`), Monte Carlo vs analytic cross-checks, the β / bridge /
 accounting invariants of the backtest (`test_backtest_accounting.py`), and tests that no dashboard route writes to
 `data_store/`.
@@ -411,8 +443,12 @@ accounting invariants of the backtest (`test_backtest_accounting.py`), and tests
 
 ```
 Python 3.11+ · flask · pandas · numpy · pyarrow · scipy · scikit-learn · xgboost · hmmlearn · yfinance · matplotlib
-torch (only for the research NN surrogate)
+torch (CPU build; the research NN surrogate and its tests)
 ```
+
+`requirements.txt` holds compatible ranges; `requirements-lock.txt` pins the exact set that CI tests and the daily job
+installs. The shipped pickles need NumPy 2, pandas 3 and XGBoost 3 (`requirements.txt` explains each floor), and a test
+loads every one of them with version-skew warnings treated as errors.
 
 No QuantLib. No Bloomberg. No paid data.
 
@@ -421,18 +457,22 @@ No QuantLib. No Bloomberg. No paid data.
 ## Known Limitations
 
 - **All backtest P&L is mark-to-model.** Black-Scholes at β·VIX with one β (0.82) estimated from five 2026 chains and held
-  constant over 2018–2025. β moves S1 by ~$3M across 0.78–1.00; the portfolio is negative at every β tested.
-- **S3 is a proxy.** Only the index leg of the dispersion trade is priced (no single-stock options); its positive P&L needs
-  β ≳ 0.8 and is below the T-bill return.
+  constant over 2018–2025. The first later chain (2026-10-16, an R2 day) gives β = 0.70, so β is regime-dependent; a
+  constant β is the main modelling simplification left. β moves S1 by ~$3M across 0.78–1.00; the portfolio is negative at
+  every β tested.
+- **S3 is a proxy, and its timing is not significant.** Only the index leg of the dispersion trade is priced (no
+  single-stock options); its positive P&L needs β ≳ 0.8, is below the T-bill return, and its entry timing does not beat
+  random dates at the 5% level (p = 0.075).
 - **No signal is deployable.** The portfolio loses 21.6% while T-bills earn 19.1%; the former short-VRP "edge" is the skew
   premium inside the VIX.
-- **Heston needs Feller-violating vol-of-vol** (σ ≈ 1.6–2.0) to fit SPX and the VIX indices together, misses the real VX
-  futures by ~1.8 pts out of sample, and is not fitted to VIX options (leg off: too few sessions of VIX option quotes).
-  The Quintic OU fit that does price VIX options did not converge.
-- **The headline calibration is old.** It is the 2026-06-18 session (78 NYSE sessions before C22 landed) until the corrected
-  live pipeline produces a passing fit; the dashboard shows the staleness.
+- **Heston needs Feller-violating vol-of-vol** (σ ≈ 1.6–2.0, on the 2.0 box ceiling in the current headline fit) to fit SPX
+  and the VIX indices together, misses the real VX futures by 1.8–3.1 pts out of sample, and is not fitted to VIX options
+  (leg off: too few sessions of VIX option quotes). The Quintic OU fit that does price VIX options did not converge.
 - **Regime classifier loses to a persistence baseline** and is research-only.
-- **Options history is thin**: four committed end-of-day chains (Mar–Jun 2026), none inside the backtest window.
+- **Options history is thin**: five committed SPX chains (Mar–Oct 2026, growing by one per session from here), VIX options
+  for four of them, none inside the backtest window.
+- **The PDV coefficients are refit by hand.** The daily job recomputes the forecast from fresh returns but not the model's
+  coefficients (`python -m joint_vol_calibration.models.pdv --as-of <date>`).
 
 ---
 
