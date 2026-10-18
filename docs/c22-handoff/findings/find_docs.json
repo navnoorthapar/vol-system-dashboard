@@ -1,0 +1,494 @@
+{
+ "findings": [
+  {
+   "id": "docs-headline-calibration-1expiry",
+   "title": "The live dashboard's headline calibration is a one-expiry SPX fit (2026-09-11, 9 options) and has not matched the README/Substack 2026-05-31 showcase since July",
+   "severity": "critical",
+   "category": "published-claim",
+   "locations": [
+    "README.md:65-75",
+    "README.md:152",
+    "substack_article.md:32-36",
+    "dashboard/app.py:47-91",
+    "joint_vol_calibration/calibration/joint_calibrator.py:94",
+    "joint_vol_calibration/calibration/joint_calibrator.py:157-197",
+    "dashboard/templates/calibration.html:74-93"
+   ],
+   "description": "README says the showcase is the 2026-05-31 fit (\u03ba 1.77, \u03b8 0.067, \u03c3 0.46, SPX 0.52 vp, Feller PASS) under a heading saying the numbers 'must match the dashboard'. The dashboard instead headlines whichever fit has the lowest SPX RMSE among fits that pass is_acceptable_calibration(). That gate checks only VIX tenors, so the live headline is joint_cal_2026-09-11: \u03ba 4.9997, \u03c3 0.6568, SPX RMSE 0.215 vp, Feller BINDING, 3 of 5 degrees of freedom, fit from n_spx_options=9. The calibrator keeps 9 strikes per expiry (_CAL_STRIKES_PER_EXPIRY = 9), so 9 options means exactly ONE SPX expiry. With one expiry the smile's term structure, and therefore \u03ba, is not identified. The fit also has the lowest SPX RMSE of any accepted fit precisely because it has the least data. That is the C20 failure ('a metric that improves when your data degrades') again, this time on the SPX leg. Even before 09-11 the README did not match: from 07-01 onward the selector picked joint_cal_2026-07-01 (0.375 vp < 0.523 vp). Commit 9058371 ('Headline stays 2026-07-01') documents that, but the README was never updated.",
+   "evidence": "Replayed the selector over all 33 pickles in the copy: accepted fits ranked by SPX RMSE give 2026-09-11 (0.2152 vp, nspx=9, nten=4) < 07-01 (0.3749, 54) < 05-31 (0.5233, legacy). Live https://navnoorbawa.me/calibration shows '2026-09-11 \u00b7 SPX = 7657.0', 'Fit from 9 SPX options and 4 VIX tenors', 'SPX IV RMSE 0.215', 'Feller ... BINDING', '3 of 5 effective degrees of freedom'. joint_calibrator.py:94 `_CAL_STRIKES_PER_EXPIRY = 9`; :648 `slice_df.nlargest(_CAL_STRIKES_PER_EXPIRY, 'bs_vega')`. is_acceptable_calibration has no SPX expiry/option-count test (lines 183-197).",
+   "proposed_fix": "(1) Add SPX sufficiency to is_acceptable_calibration: persist n_spx_expiries in every pickle and reject fits with fewer than 3 expiries (or n_spx_options < 27). Backfill n_spx_expiries = n_spx_options // 9 for existing pickles. (2) Pin the published showcase explicitly, e.g. SHOWCASE_CAL = 'joint_cal_2026-07-01.pkl' in config, and show the latest accepted daily fit separately as 'latest daily fit'. (3) Generate the README calibration block from that pickle with a script, and add a test asserting that the README numbers equal load_page2() on the showcase. Test: after the gate change, latest_good_calibration_path() must not return joint_cal_2026-09-11.pkl, and a unit test must reject {n_spx_options: 9}.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-s1-s1c-stale-after-c21",
+   "title": "S1/S1C/S4 dollar figures and S1 tail statistics are pre-C21 in the README, the Substack and 9 places on the backtest page",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "README.md:57",
+    "README.md:59",
+    "substack_article.md:76-79",
+    "dashboard/templates/backtest.html:44-45",
+    "dashboard/templates/backtest.html:87-89",
+    "dashboard/templates/backtest.html:110",
+    "dashboard/templates/backtest.html:130",
+    "dashboard/templates/backtest.html:307",
+    "dashboard/templates/backtest.html:314",
+    "dashboard/templates/backtest.html:341-343",
+    "dashboard/templates/backtest.html:347"
+   ],
+   "description": "C21 (commit 15b4db5) moved S1 from +$463K to +$694K, S1C from \u2212$404K to \u2212$600K and S4 from \u2212$189K to \u2212$206K. The headline table and the dynamic cards were updated; the prose was not. The live S1 card shows 'Total P&L $693,938' and, three lines below, 'Corrected: +$463K'. The S1 tail statistics used to argue 'not deployable' are also stale. The Substack mixes post-C21 portfolio numbers (\u221226.1%, \u22121.80) with pre-C21 per-signal numbers in the same section.",
+   "evidence": "From full_results.pkl all_trades (net_pnl): S1 total 693,938, 53/54 short, win 75.9%. Worst S1 trade \u2212$299,415 (entry 2020-02-21, exit 2020-03-17), not '\u2212$333K'. S1 2022 = \u2212$74,007 by exit year (\u2212$74,670 by calendar daily P&L), not '\u2212$99K'. Top-5 trades = $364,262 = 52.5% of profit, not '73%'. By exit year S1 is positive in 2018, 2019, 2021, 2023, 2024 and 2025 YTD (+$10K). Metrics: s1c_total_pnl \u2212599,995; s4_total_pnl \u2212206,437. Live backtest.txt lines 33-34, 56-58, 72, 85, 189-215 show +$463K / \u2212$404K / \u2212$189K / \u2212$333K / 73%.",
+   "proposed_fix": "Remove every hard-coded dollar figure from backtest.html. Compute worst trade, worst year, top-5 share and positive years in load_page4() from all_trades and render them. Update README:57/59 and Substack:76-79 to +$694K / \u2212$600K, \u2212$299K COVID trade, \u2212$74K in 2022, top-5 = 52%. Add a doc-consistency test that parses README/backtest.html for $-amounts next to S1/S1C/S4 and compares them with full_results.pkl metrics.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-regime-gate-backtest-vs-site",
+   "title": "The backtest trades the FIXED VVIX>100 gate, but the site shows adaptive-gate labels captioned 'the label the backtest trades on' and presents the adaptive gate as a completed improvement",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:935",
+    "joint_vol_calibration/signals/regime_classifier.py:272",
+    "scripts/cloud_refresh.py:164",
+    "dashboard/templates/index.html:130-131",
+    "dashboard/app.py:1089-1120",
+    "README.md:161",
+    "dashboard/templates/backtest.html:297"
+   ],
+   "description": "backtest_engine calls build_regime_labels(spx_col, vix_col), which uses the default vvix_threshold=100.0. The signal engine's C16 override also uses VVIX_REGIME2_THRESHOLD/100. The daily bot writes regime_labels.parquet with vvix_threshold=None (adaptive 252-day 80th percentile). The front page shows the adaptive label as 'Deterministic rule ... the label the backtest trades on'. Improvements Step 5 ('Adaptive VVIX threshold ... was fixed 100') and README C13 ('adaptive VVIX') claim an improvement that the published backtest does not use. The 90.0% persistence baseline reproduces only for the fixed labels.",
+   "evidence": "Recomputed from the DB: backtest parquet 'regime' vs build_regime_labels(threshold=100).shift(1) agree 100.00%; vs adaptive.shift(1) only 69.8%. R2 share in the backtest window: fixed 47.7% vs adaptive 23.3%. Persistence accuracy 2020-2025: fixed labels 0.8999 (= the published 90.0%), adaptive labels 0.8660. Full-history R2 share: adaptive 22.1%, fixed 32.5% (Step 5 says the 'before' was ~53%).",
+   "proposed_fix": "Pick one gate and use it everywhere. Option A: pass vvix_threshold=None in backtest_engine.py:935 and in the SignalEngine override, re-run the backtest and republish every number. Option B: keep the fixed gate, have the front page compute and show the fixed-100 rule label for 'the label the backtest trades on' (the adaptive label can be shown separately), and relabel Step 5 as 'live labels only'. Add a test asserting that the backtest regime series equals build_regime_labels(..., threshold=X).shift(1) for the same X that cloud_refresh uses.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "docs-pdv-spread-percentile-nan",
+   "title": "Front page: '1.1th percentile \u2014 vol appears cheap vs 10-year history' is computed over a 98.5%-NaN column; the PDV forecast is 9 months stale and not flagged",
+   "severity": "high",
+   "category": "bug",
+   "locations": [
+    "dashboard/app.py:449-456",
+    "dashboard/app.py:386-392",
+    "dashboard/templates/index.html:231",
+    "dashboard/templates/index.html:248",
+    "dashboard/templates/index.html:264",
+    "dashboard/templates/index.html:283-284"
+   ],
+   "description": "hist_spread_pp comes from regime_labels.parquet['pdv_iv_spread'], which is non-null on only 64 of 4,189 rows (2026-06-22 \u2192 2026-09-23). (hist < cur).mean() counts NaN as 'not below', so the percentile collapses to about 1%. The page then says 'Spread at 1.1th percentile \u2014 vol appears cheap relative to 10-year history' while printing a current spread (+6.81pp) that is ABOVE the quoted 'historical mean' (+4.06pp). That 'mean' is a 3-month mean, not '2015\u20132025'. The PDV forecast itself uses features dated 2025-12-30 ('Updated: 2025-12-30') but is compared with today's VIX. d['pdv_stale'] is computed but never rendered, although commit 75b4844 says the card 'flags staleness'. The card also says 'Model: OLS + GARCH(1,1)', but the forecast is OLS only.",
+   "evidence": "In the copy: non-null 64, null 4125. Percentile as coded 1.15; over non-null values only 75.0. Mean of non-null values 4.06 (the published '2015\u20132025 mean'). Live index: 'IMPLIED \u2212 REALISED SPREAD +6.81pp', '1.1th percentile', '2015\u20132025 mean: +4.06pp', 'vol appears cheap', 'Updated: 2025-12-30'. grep: pdv_stale appears only at app.py:392 and in no template.",
+   "proposed_fix": "Build the historical spread from a full-history series: the walk-forward PDV vol the backtest already computes, or recompute PDV on the DB returns. dropna() before the percentile, label the true window, and fix the ordinal ('1st'). Render a staleness banner when pdv_stale is true, or refresh PDV features in cloud_refresh daily. Change 'OLS + GARCH(1,1)' to 'PDVLinear (OLS)'. Test: with a 99%-NaN series the percentile must equal the non-null percentile.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-covid-stress-offbyone",
+   "title": "COVID stress-test card: PDV 'predicted 92.4%' is an in-sample kernel value for the NEXT day, compared with the same day's move (look-ahead misalignment)",
+   "severity": "high",
+   "category": "look-ahead",
+   "locations": [
+    "dashboard/templates/index.html:391-397",
+    "joint_vol_calibration/models/pdv.py:796-798",
+    "joint_vol_calibration/models/pdv.py:91-92"
+   ],
+   "description": "extract_pdv_features documents that row t uses r_1..r_t, including r_t. stress_test_date nevertheless predicts with features AT dt and compares the result with |r_dt|, and its comment falsely says those features use 'returns up to and including dt-1'. The published '92.4%' is PDVKernel's output on 2020-03-16 features. The kernel was fit in-sample and reproduces its training target, |r_03-17| = 92.43%. So the card compares a memorised next-day value with the same-day 202.6% move and reports a \u2212110pp 'structural' error. The honest out-of-sample number is the forecast made at the 03-13 close: linear PDV 63.9% vs actual 202.6% (\u2212138.7pp). The card also labels the model 'OLS + GARCH', not the kernel.",
+   "evidence": "Ran stress_test_date(lr, pdv._features, {linear, kernel, naive}). Kernel pred on 2020-03-13 = 202.64 (= actual 03-16); on 03-16 = 92.42 (= actual 03-17 92.43); on 03-17 = 84.49 (= actual 03-18). That is exact memorisation shifted by one day. Linear pred with 03-13 features = 63.93%. abs_r_ann: 03-16 202.6%, 03-17 92.4%.",
+   "proposed_fix": "In stress_test_date use features.shift(1).loc[[dt]] (the prior close) and walk-forward (not in-sample) models. Add a unit test asserting that the prediction for dt uses no r_dt (mutate r_dt and check the prediction is unchanged). Regenerate the card: 'PDV (walk-forward, 03-13 close) 63.9% vs realised 202.6%'. Also backtest_engine.py:41 and :577 ('\u03c3_PDV=91.6% on COVID crash') use the same same-day features.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-local-run-overwrites-labels",
+   "title": "Following the README quickstart overwrites the rule labels with the DEMOTED classifier's output (the defect 90dc851 fixed only in cloud_refresh)",
+   "severity": "high",
+   "category": "bug",
+   "locations": [
+    "README.md:200-209",
+    "dashboard/app.py:1176-1216",
+    "dashboard/app.py:1225-1264",
+    "dashboard/app.py:3"
+   ],
+   "description": "`python dashboard/app.py` starts _startup_data_refresh. The committed DB ends 2026-06-18, more than 3 days old, so the app runs DataPipeline.daily_refresh() (network, writes to the tracked vol_system.db) and then _refresh_regime_labels(). That function writes clf.predict_series(...), the XGBoost output demoted in C17, into data_store/signals/regime_labels.parquet. The front page then headlines classifier output as 'Deterministic rule ... the label the backtest trades on'. Commit 90dc851 fixed exactly this in cloud_refresh.extend_regime_labels but left app.py unchanged. README says the dashboard 'runs with no re-calibration' from shipped artifacts, and the app docstring says it 'Reads exclusively from data_store/'. Both are false: the app downloads data and rewrites tracked files.",
+   "evidence": "In the private copy, called app._refresh_regime_labels(): rows 4189 \u2192 4088 (history truncated to 2026-06-18, 101 bot rows lost). Agreement with the shipped rule labels 67.7%. R2 share 40.9% vs 21.8%. `git status` then showed ' M data_store/signals/regime_labels.parquet' (restored afterwards).",
+   "proposed_fix": "Replace _refresh_regime_labels with the cloud_refresh path: build_regime_labels(spx, vix, vvix_threshold=None) plus merge-and-repair. Gate the startup refresh behind an env flag (e.g. VOL_DASH_REFRESH=1, off by default for local runs), and fix the docstring. In the README, say that a local run is offline by default and how to enable refresh. Test: run _refresh_regime_labels on fixture data and assert the labels equal build_regime_labels(...).",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-sharpe-cash-double-count",
+   "title": "'Sharpe (vs ^IRX)' subtracts T-bill yield from a NAV that never earns interest; S3's Sharpe (\u22125.6) is hidden as 'N/A \u2014 ratio diverges'; no cash benchmark is shown",
+   "severity": "high",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:458-466",
+    "dashboard/app.py:998",
+    "dashboard/templates/backtest.html:238-243",
+    "README.md:31",
+    "README.md:37"
+   ],
+   "description": "The engine computes excess = rets \u2212 rf_daily, but NAV P&L is option/hedge P&L only. Idle cash and collateral accrue nothing, so the T-bill hurdle is effectively charged twice: once as forgone interest and again in the Sharpe. C21 made the hurdle 'real' but did not credit interest, so the headline Sharpe (\u22121.80) is biased low. The S3 table cell is forced to 'N/A*' with a false explanation ('near-zero std \u2192 ratio diverges'). The engine's own S3 Sharpe is well defined at \u22125.605, because S3 earns 0.32%/yr against a ~2.5% T-bill. The README headline also omits the obvious benchmark: $1M in T-bills over the window grows to $1,187,466 (+18.7%). The headline portfolio still contains S1C, which the README itself labels DEMOTED, without saying why. The non-demoted mix (S1+S3+S4)/3 = +17.0%, which is still below cash.",
+   "evidence": "Stored metrics: s3_sharpe \u22125.605, s3_ann_return +0.32%. Recomputed from the parquet: Sharpe with the ^IRX hurdle = portfolio \u22121.799, S3 \u22125.605, S1 0.485. If idle NAV earned the T-bill rate (Sharpe of the un-hurdled P&L): portfolio \u22121.144, S3 +0.903, S1 0.690. prod(1+IRX/252) over 2018-01-02..2025-03-24 = 1.1875. (nav_s1+nav_s3+nav_s4)/3 final = $1,170,106. grep: no interest accrual in backtest_engine.py.",
+   "proposed_fix": "Either credit rf_t \u00d7 cash to daily NAV in the engine and keep the excess-return Sharpe, or keep the P&L as is and compute Sharpe with rf=0, labelled 'excess over cash (collateral earns T-bills)'. Show the real S3 Sharpe with a one-line explanation (sparse overlay on an idle $1M sleeve). Add a 'T-bills' equity line and a 'cash +18.7%' row to the README headline, and state why S1C (not S1) remains in the headline (avoids post-hoc selection). Test: a zero-trade backtest must report Sharpe \u2248 0 vs cash, not \u2248 \u2212\u221e.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "docs-s3-proxy-and-sensitivity",
+   "title": "S3 'survivor' is a synthetic z-score proxy (README calls it 'real'); the published sensitivity '+$5K\u2026+$52K, 15\u201317 of 17' and pseudo-OOS '\u2212$333K' cannot be reproduced",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "README.md:19",
+    "README.md:37",
+    "README.md:240",
+    "dashboard/templates/backtest.html:394",
+    "dashboard/templates/backtest.html:400",
+    "dashboard/templates/backtest.html:336-338",
+    "substack_article.md:101",
+    "joint_vol_calibration/backtest/backtest_engine.py:96",
+    "joint_vol_calibration/backtest/backtest_engine.py:581-583"
+   ],
+   "description": "S3 P&L is position \u00d7 kelly \u00d7 NAV \u00d7 \u0394z \u00d7 S3_Z_SCALE with an assumed 2% scale. No option is priced, and the engine itself says it is 'illustrative, not a real backtest'. The README calls the +$23K 'real' and never discloses that S3 is a proxy. The dashboard's robustness evidence, 'P&L +$5K\u2026+$52K, win 15\u201317 of 17 at every scale', contradicts the canonical 22-trade S3. No code in the repo produces either that sweep or the 2013\u20132017 S1C pseudo-OOS figure (\u2212$333K).",
+   "evidence": "Re-ran BacktestEngine in the copy with S3_Z_SCALE patched (6 s per run, reproduces the canonical run exactly at 2%): 0.5% \u2192 +$4,376; 1% \u2192 +$10,661; 2% \u2192 +$23,212; 4% \u2192 +$48,384. Every scale: 22 trades, 16 wins (72.7%). S3 Sharpe vs ^IRX \u221215.6 / \u221210.6 / \u22125.6 / \u22122.45. grep -rn 'pseudo' finds only strings in backtest_engine.py and backtest.html; there is no sweep or pseudo-OOS script.",
+   "proposed_fix": "Add scripts/s3_sensitivity.py and scripts/s1c_pseudo_oos.py that write a JSON artifact, and render the dashboard row from it ('+$4.4K\u2026+$48.4K, 16 of 22 at every scale; below cash at every scale'). In the README headline, mark S3 as 'proxy P&L (assumed 2%/z-unit), not option P&L' and drop 'real'. Test: the sensitivity script's 2% row must equal the canonical s3_total_pnl.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-r-q-not-used-in-fit",
+   "title": "Calibration page shows r = 3.91% ('USD 6M SOFR (2026-03)') and q = 0.0%, but the live fit used r = 4.5% and q = 1.3%",
+   "severity": "medium",
+   "category": "data-integrity",
+   "locations": [
+    "scripts/cloud_refresh.py:308-315",
+    "joint_vol_calibration/calibration/joint_calibrator.py:476-479",
+    "dashboard/app.py:508-509",
+    "dashboard/templates/calibration.html:258",
+    "dashboard/templates/calibration.html:264"
+   ],
+   "description": "cloud_refresh builds JointCalibrator(as_of_date=TODAY) with the defaults r=0.045 and q=0.013 and runs the fit. After the fit it overwrites result['r'] with get_tbill_rate(TODAY), and it never stores q. The dashboard therefore publishes an r and a q that did not produce the parameters, and labels r with a stale, wrong source ('USD 6M SOFR (2026-03)'; it is ^IRX 13-week).",
+   "evidence": "joint_cal_2026-09-11.pkl keys contain 'r'=0.03913 and no 'q'. The calibrator never updates self.r (grep 'self.r =' \u2192 only line 492). Live page: 'Risk-free rate r 3.91% USD 6M SOFR (2026-03)', 'Dividend yield q 0.0% SPX continuous div yield'. The legacy 05-31 pickle correctly stores r 0.045 / q 0.013.",
+   "proposed_fix": "Pass r=get_tbill_rate(spot_date) (converted to continuous compounding) and q into JointCalibrator before calibrate(), and persist both from the calibrator, not post hoc. Template: label '^IRX 13-week T-bill, <date>' and render q from the pickle. Test: pickle['r'] == calibrator.r used in pricing.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-test-count-claims",
+   "title": "Test counts disagree: '666 passing' badge and README, '666 tests' on the site, '631 tests' on the live social card, '633 passed' in the CI comment; a clean clone runs 642 passed + 24 skipped",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "README.md:7",
+    "README.md:145",
+    "README.md:215-217",
+    "README.md:222-223",
+    "substack_article.md:26",
+    "substack_article.md:109",
+    "dashboard/templates/base.html:14",
+    "dashboard/templates/base.html:18",
+    "dashboard/templates/base.html:641",
+    "dashboard/make_og_image.py:73",
+    "dashboard/og-image.png",
+    ".github/workflows/tests.yml:51"
+   ],
+   "description": "The shields.io 'tests-666 passing' badge is static text, while the README says 'passing is machine-verified, not a hand-typed number'. 666 is the collected count; on a clean clone or in CI, 24 NN tests skip. The OG image served at navnoorbawa.me/og-image.png, the card LinkedIn and Substack show, still says '631 tests'.",
+   "evidence": "`pytest --collect-only -q` \u2192 '666 tests collected'. The CI run on 2026-09-05 was green with 642 passed and 24 skipped (per commit ec78543). og-image.png md5 is identical live and in the repo, and the image reads '631 tests'. make_og_image.py:73 has ('631','tests'); tests.yml:51 says '633 passed, 24 skipped'.",
+   "proposed_fix": "Keep one source of truth. Have CI write a shields endpoint JSON (or use a dynamic badge) with passed/skipped counts, and state '642 passing \u00b7 24 skipped without NN weights' everywhere. Read the count in make_og_image.py from that file and regenerate og-image.png. Update base.html meta and banner and the Substack.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-corrections-log-incomplete",
+   "title": "The corrections story is inconsistent: README table stops at C20, prose says 'four corrections\u2026 finally strike-rolling', site table is titled 'C16\u2013C18 \u2026 Ten Flaws' but has 11 rows; the cron time is wrong",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "README.md:17",
+    "README.md:47-55",
+    "README.md:135-136",
+    "README.md:173",
+    "README.md:267",
+    "substack_article.md:7",
+    "substack_article.md:49",
+    "substack_article.md:109",
+    "dashboard/templates/backtest.html:249",
+    "dashboard/templates/backtest.html:357-359"
+   ],
+   "description": "C21 (real ^IRX hurdle + decay fix) moved every headline number (\u221219.0% \u2192 \u221226.1%) but is missing from the README's 'The corrections (the actual story)' table and from the Substack ('five times'). README:173 promises 'the full C16\u2192C21 correction log' on the dashboard. The dashboard table is titled 'C16\u2013C18 Methodology Audit \u2014 Ten Flaws Found, Eight Fixed, Two Quantified' but lists 11 rows (9 fixed, 2 quantified), includes C21, and omits C19/C20. backtest.html:249 still says 'fully corrected C17 pipeline'. README:135-136 says the cron moved to 21:30 UTC, but the workflow is '0 22 * * 1-5' (commit 90dc851), and GitHub actually fires it at 23:27\u201300:18 UTC.",
+   "evidence": "daily_refresh.yml: `cron: \"0 22 * * 1-5\"`. GitHub API run_started_at for recent scheduled runs: 23:27Z\u201300:18Z. The backtest.html table has rows #1\u2013#11 with #11 'FIXED (C21)'. README table rows are C16..C20 only.",
+   "proposed_fix": "Add a C21 row to the README table ('Cash hurdle was a test fixture; straddles marked a day rich \u2192 \u221219.0% \u2192 \u221226.1%, Sharpe \u22121.57 \u2192 \u22121.80'). Rewrite L17/L267 as 'six corrections'. Retitle the dashboard table 'C16\u2013C21 \u2014 Eleven flaws, nine fixed, two quantified' and add the C19/C20 rows. Replace 'C17 pipeline' with 'C21'. Fix the cron text to 22:00 UTC and note typical actual start times of 23:30\u201300:20 UTC.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "docs-data-sources-table-stale",
+   "title": "README Data Sources table and Known Limitations contradict the DB and README's own caveat (it says 'single snapshot', but there are 4 snapshots / 61,815 rows)",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "README.md:187-196",
+    "README.md:242",
+    "README.md:43",
+    "dashboard/templates/backtest.html:517"
+   ],
+   "description": "The table still describes the pre-C21 DB. README:41 was corrected to four SPX snapshots, but the table, Known Limitations and the dashboard roadmap still say 'single snapshot (2026-03-24)'. Row counts and coverage are also off. 'Market data now runs to the current session' is true only of the CI runner's DB; a clone's DB ends 2026-06-18.",
+   "evidence": "sqlite: spx_ohlcv 4,140 rows 2010-01-04..2026-06-18 (README 4,139). vix_term_structure 20,431 (README ~20,135); ^VIX9D starts 2011-01-03. options_snapshots SPX = 61,815 rows over 2026-03-24/03-28/05-31/06-20 (README row: 'single snapshot 2026-03-24 15,362'). VIX options 1,896 rows over 4 snapshots (README 591). tbill_rates 4,185 rows through 2026-09-04. Live backtest page: 'the database holds a single options snapshot (2026-03-24)'.",
+   "proposed_fix": "Generate the table with a script (scripts/data_inventory.py \u2192 README fragment) from the DB. Replace 'single snapshot' with '4 end-of-day snapshots (Mar\u2013Jun 2026), none inside the backtest window' in Known Limitations and backtest.html:517. State that the committed DB ends 2026-06-18 and the bot extends it per run without committing it.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-feller-and-tenor-stats-stale",
+   "title": "Showcase Feller numbers are computed from rounded params; the '11 of 19 fits' and tenor-table statistics are frozen and no longer describe the archive",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "README.md:74",
+    "README.md:84-86",
+    "README.md:109-112",
+    "substack_article.md:43",
+    "substack_article.md:55-60"
+   ],
+   "description": "The README's Feller line uses \u03ba=1.77, \u03b8=0.067, \u03c3=0.46 (rounded), which gives 0.2372/0.2116. The stored fit gives 0.2354/0.2119, and the dashboard would print the latter. 'Across 19 archived fits, 11 \u2026 \u2248 \u22121e-7\u2026\u22124e-6' is stale. In the 1-tenor/4-tenor table, the 1-tenor row (\u03ba 8.9\u20139.9, \u03c3 ~0.83) describes only 07-14..07-17. The flagship example the text cites, 07-23, has \u03ba 2.26 and \u03c3 0.47, inside the '4-tenor' band. The Substack's 'roughly ten times better than any honest fit' is 7.6\u00d7 (vs 07-01), and 4.4\u00d7 vs the current headline.",
+   "evidence": "joint_cal_2026-05-31: 2\u03ba\u03b8 = 0.235431, \u03c3\u00b2 = 0.211869, margin 2.356e-2. classify_feller over 33 pickles: BINDING 25, PASS 7, VIOLATED 1; BINDING margins \u22128.4e-8\u2026\u22121.1e-5. All 12 one-tenor fits: \u03ba 2.26\u201312.89, \u03c3 0.47\u20130.85. 19 accepted 4-tenor fits: \u03ba 1.73\u20135.00, \u03c3 0.25\u20130.66, SPX RMSE 0.215\u20132.78.",
+   "proposed_fix": "Print the Feller line from the pickle (0.2354 > 0.2119). Restate the archive statistics with an as-of date, or generate them with a script over data_store/calibrations. Replace the table's 1-tenor row with the full ranges and note that the 07-23 fit is not separable by \u03ba, which is exactly why the tenor gate (not a parameter heuristic) is needed.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-quintic-citations-and-comparison",
+   "title": "Quintic OU: both citations misattributed, the model is not cited in the README, 17.5 vp comes from a non-converged fit, and the Heston-vs-Quintic \u0394 compares different dates",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/models/quintic_ou.py:6-9",
+    "README.md:77",
+    "README.md:162",
+    "dashboard/app.py:623-624",
+    "dashboard/templates/calibration.html:340",
+    "dashboard/templates/calibration.html:455-456",
+    "dashboard/templates/calibration.html:470-473"
+   ],
+   "description": "quintic_ou.py cites 'Carr, Pelts & Tehranchi (2022) arXiv:2212.10917'. That paper is by Abi Jaber, Illand & Li, and its model is ONE-factor. It also cites 'Bourgey & de Marco (2025) arXiv:2503.14158', which is by Abi Jaber & Li. The README presents 'two-factor Quintic OU' with no citation. The cited paper jointly fits SPX and VIX smiles with the same degree-5 polynomial, yet the dashboard attributes the 17.5 vp VIX-option RMSE to 'the degree-5 polynomial under-fits'. The stored quintic fit reports success=False after 2,813 evaluations. The comparison table subtracts the headline Heston (2026-09-11, 9 options) from the Quintic (2026-03-24), a different surface, which shows Quintic 'worse' by +2.128 vp. The same panel says 'Gauss-Hermite \u2248 500 pts' and '18\u00b2 = 324 pts', while the calibrator uses 10\u00b2 = 100. It says 'MC paths: 6,000/expiry', while the code uses 5,000 (10,000 for the final eval).",
+   "evidence": "arxiv.org/abs/2212.10917 \u2192 'Eduardo Abi Jaber, Camille Illand, Shaun (Xiaoyuan) Li \u2026 polynomial of degree five of a single OU process'. arxiv.org/abs/2503.14158 \u2192 Abi Jaber & Li. quintic_cal_2026-03-24.pkl: success False, n_evals 2813, SPX 2.3427, VIX-opt 17.5297. joint_cal_2026-03-24 (same date) SPX RMSE 3.8334, so the same-date \u0394 = \u22121.49 (Quintic better). quintic_calibrator.py:55-57: _MC_PATHS_CAL=5_000, _VIX_QUAD_OUTER=10.",
+   "proposed_fix": "Fix both references, and add a README References section: Heston 1993, Carr\u2013Madan 1999, Bates 1996, Gatheral 2004 / Gatheral\u2013Jacquier 2014, Guyon\u2013Lekeufack 2023, Abi Jaber\u2013Illand\u2013Li 2022, Guyon 2020, BNS 2004. Describe the variant as 'two-timescale extension of the one-factor quintic OU'. Compare the Quintic with joint_cal_2026-03-24 (same date). Read the quadrature and path counts from constants. Report the Quintic fit as 'not converged (success=False)' and drop the 'polynomial under-fits' conclusion until a converged fit exists.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-greeks-smile-from-rejected-fit",
+   "title": "Greeks Monitor and the calibration page's 'SPX smile' come from the 03-24 fit that the project's own gate rejects, and include IV-inversion artefacts",
+   "severity": "medium",
+   "category": "data-integrity",
+   "locations": [
+    "dashboard/app.py:634-660",
+    "dashboard/templates/calibration.html:201",
+    "dashboard/templates/greeks.html:9",
+    "dashboard/templates/greeks.html:127",
+    "dashboard/templates/greeks.html:155-157",
+    "joint_vol_calibration/greeks/risk_monitor.py:54-58"
+   ],
+   "description": "greeks_surface.parquet was built from the 2026-03-24 Heston fit (\u03ba 4.62, \u03c3 0.84, \u03c1 \u22120.99; SPX RMSE 3.83 > 3.0, Feller VIOLATED), which is_acceptable_calibration now rejects. The calibration page plots those model IVs as 'SPX Implied Volatility Smile \u2014 All Maturities' beneath a 2026-09-11 header, with no market data and no overlay (README:171 promises an 'SPX smile overlay'). Several wing nodes are numerical failures. The Greeks page says X = ln(K/S), but the column is ln(K/F). The vanna note ('negative at short maturities reflects the leverage effect') is wrong: mean vanna is negative at every maturity, most negative at 91d, and BS vanna depends on moneyness, not spot-vol correlation. The badge says 2026-03-24 while the parquet as_of is 2026-03-25.",
+   "evidence": "parquet T=30d: ln(K/F)=+0.132 iv 0.0500, vega 0.0000, vomma 0.0000; +0.211 iv 0.1025, vega 0. T=14d: 0.2238 \u2192 0.1210 \u2192 0.2875 (V-shape). Screenshot of the live calibration page shows the 30d curve dipping to 5%. K=4881.31 at ln=\u22120.30, T=14d implies F from S=6581 (the 03-24 spot). Vanna means by T: \u22120.114, \u22120.225, \u22120.234, \u22120.274, \u22120.144, \u22120.005.",
+   "proposed_fix": "Rebuild the Greeks surface from the showcase fit (after fixing its gate) and store params, date and source in the parquet. Mask nodes whose IV inversion hits a floor (vega==0) before z-scoring. On the calibration page, plot market mid IVs from the fit's own snapshot with the model overlay. Fix the axis label to ln(K/F) and rewrite the vanna note. Read the badge date from the parquet.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "docs-backtest-kpi-trade-count",
+   "title": "Backtest KPI 'N Trades 283 / Avg P&L per trade \u2212$923 / Win rate 28.16%' is neither the portfolio's round trips nor the engine's figure",
+   "severity": "medium",
+   "category": "bug",
+   "locations": [
+    "dashboard/app.py:896-907",
+    "dashboard/app.py:874-883"
+   ],
+   "description": "Commit 75b4844 says the real portfolio trade count is '141 round trips', but the fix counts position changes (entries and exits) across the S1C, S3 and S4 columns, which gives 283. Win rate is computed per active DAY. The engine's own metrics.n_trades=292 / avg \u2212$1,806 sum all six sleeves, including the reference S1, S2 and 'combined'. The published KPI row therefore disagrees with the commit and with the engine, and none of them equals the portfolio's 88+22+31 = 141 trades (avg \u2212$1,852.5; the trade-weighted win rate follows from the per-signal logs).",
+   "evidence": "load_page4() in the copy: N Trades 283, Avg \u2212$923, Win Rate 28.16%. Engine metrics: n_trades 292, avg_pnl_per_trade \u22121805.63 (= \u2212527,244/292, i.e. the sum over s1, s2, s3, s4, s1c and combined totals). Trade log: s1c 88, s3 22, s4 31.",
+   "proposed_fix": "Compute portfolio trade stats from all_trades filtered to {s1c, s3, s4}: n=141, win rate by trade, avg P&L = total/141 (on the \u2153-weighted basis). Fix engine compute_metrics so portfolio-level n_trades/avg exclude the reference sleeves. Test: KPI n_trades == sum of MAIN signal trade counts.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-walkforward-chart-mislabeled",
+   "title": "'Walk-Forward Sharpe \u2014 6-Month OOS Windows' is in-sample half-year slices at a flat 5% hurdle, clipped at \u00b14",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "dashboard/app.py:1054-1080",
+    "dashboard/templates/backtest.html:181-184",
+    "README.md:158"
+   ],
+   "description": "No parameter is refit per window, so these are sub-period Sharpes of one fixed-rule backtest, not out-of-sample windows. They use rf=5% flat, contradicting the page's own 'Sharpe (rf=T-bill)' and the C21 story, and they are clipped to [\u22124, 4], so 8 of 13 bars read exactly \u22124.0. 2021-H2, when NAV was flat, is shown as 0.0 although it is \u2212\u221e vs 5% (\u221281.8 vs ^IRX). The engine's real walk_forward_validation (WF_N_WINDOWS=12) is not used.",
+   "evidence": "Dashboard values: [\u22124, \u22124, \u22120.12, \u22124, \u22124, 0.0, \u22120.41, \u22120.63, \u22124, \u22124, \u22124, \u22120.34, 0.92], '11/13 negative'. Unclipped with ^IRX: 2019-H1 \u22127.41, 2020-H1 +0.91, 2020-H2 \u22122.70, 2022-H1 +1.25, 2023-H2 \u22125.21, 2025-H1 +1.06, i.e. 10/13 negative.",
+   "proposed_fix": "Either render engine.walk_forward_validation() output saved at backtest time, or rename the chart 'Half-year sub-period Sharpe (in-sample, vs ^IRX)'. Use the ^IRX series, drop the clipping (use a symlog axis or annotate the values), and treat flat windows as N/A.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-regime-legend-wrong",
+   "title": "Front-page regime legend describes R0/R1 as 'Low VIX / backwardation' and 'Normal contango', which is not the rule",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/templates/index.html:178-189"
+   ],
+   "description": "The rule (regime_classifier.py:279-281) is R0 = rv_20d > VIX/100 and R1 = rv_20d \u2264 VIX/100, with R2 = the VVIX gate. R0 days are not low-VIX and are almost never in backwardation. The README describes the rule correctly, so the site contradicts the README.",
+   "evidence": "Adaptive labels vs DB: R0 median VIX 17.73 (R1 15.75). Backwardation (VIX3M < VIX) on 4.7% of R0 days and 1.0% of R1 days; R2 29.6%.",
+   "proposed_fix": "Legend: 'R0 \u00b7 realised > implied (rv\u2082\u2080 > VIX) \u2192 long gamma', 'R1 \u00b7 implied \u2265 realised \u2192 short premium', 'R2 \u00b7 VVIX above gate \u2192 no new entries'.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "docs-classifier-claims",
+   "title": "Classifier display uses the wrong feature, and the 86.2% / 63.4% claims are inconsistent and not reproducible from shipped artifacts",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/app.py:257",
+    "dashboard/app.py:264",
+    "dashboard/app.py:302",
+    "README.md:179",
+    "substack_article.md:87-89",
+    "dashboard/templates/index.html:338-340",
+    "joint_vol_calibration/backtest/backtest_engine.py:591"
+   ],
+   "description": "The live inference reads d['pdv_forecast'] before the PDV block computes it, so pdv_iv_spread = \u2212VIX, and the displayed 'ML classifier R? \u00b7 xx%' is computed from a wrong input. On 86.2%, the README calls it 'in-sample', the Substack implies it is the 2020\u20132025 test accuracy, and the index page and engine call it the accuracy WITH the circular vvix feature. The shipped model's in-sample accuracy is 74.7%. '63.4%' is hard-coded (no code computes it). Recomputed with shipped artifacts, OOS accuracy vs the fixed labels is 66.5% (2020\u20132025), so the gap to persistence is about 24 points, not 27.",
+   "evidence": "Same features with the real PDV forecast: R2 60.5% vs the displayed 70.0% (copy DB). build_dataset(threshold=100) + shipped classifier: train (\u22642019) acc 0.7473; 2020-01..2025-12-31 acc 0.6651 (n=1481), persistence 0.9007; to 2025-03-24 acc 0.6554. grep: '63.4' and '86.2' appear only as string literals.",
+   "proposed_fix": "Move the PDV block above the classifier block, or pass the stored bot pdv_iv_spread. Add scripts/eval_classifier.py that writes accuracy JSON for (fixed, adaptive) \u00d7 (with, without vvix) and render from it. Use one consistent definition of 86.2% ('OOS accuracy with the circular vvix feature', if that is what it was) in the README and Substack.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "docs-calibration-banner-claims",
+   "title": "Calibration-page copy: Bates failure blamed on 'daily data'; 'rough Heston' called non-affine; HMM note recommends the demoted XGBoost for production",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/templates/calibration.html:22-23",
+    "dashboard/templates/calibration.html:27",
+    "dashboard/templates/calibration.html:325-326"
+   ],
+   "description": "The Bates pickle shows an optimiser failure: success False, n_evals 0, \u03bb=7.9999 at its bound, and SPX RMSE 5.88, worse than nested Heston's 3.83. It is not 'jump params degenerate on daily data'; Bates is calibrated to an option surface. Barndorff-Nielsen & Shephard (2004) is a jump-detection paper and does not support that sentence. Rough Heston is an affine Volterra model with a fractional-Riccati characteristic function (El Euch & Rosenbaum, Math. Finance 2019), so 'non-affine model (e.g. rough Heston)' is wrong. 'Use XGBoost for production classification' contradicts C17's demotion.",
+   "evidence": "bates_cal_2026-03-24.pkl: {'success': False, 'n_evals': 0, lam 7.99987, mu_j \u22120.005, spx_iv_rmse 5.883, heston_spx_rmse 3.833}. arXiv:1609.02108 abstract: the rough Heston characteristic function is expressed through a fractional Riccati equation.",
+   "proposed_fix": "Reword: 'Bates calibration did not converge (fit worse than nested Heston); not yet a result'. 'Jumps or rough volatility (e.g. rough Heston, an affine Volterra model)'. HMM note: 'Neither classifier is used for trading (both lose to persistence)'.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "docs-readme-reproducibility",
+   "title": "README falls short of research-repo standards: no regeneration commands, references, architecture diagram, or pinned environment for the shipped pickles",
+   "severity": "medium",
+   "category": "maintainability",
+   "locations": [
+    "README.md:200-232",
+    "requirements.txt:1-13",
+    "joint_vol_calibration/backtest/run_backtest.py:8",
+    "joint_vol_calibration/models/nn_pricer.py:24",
+    "joint_vol_calibration/models/nn_pricer.py:30"
+   ],
+   "description": "Nothing tells a reader how to regenerate full_results.parquet, greeks_surface.parquet, pdv_model.pkl, regime_classifier.pkl, the quintic fit or the NN weights. run_backtest's usage says cd \"Volatility Trading System\", a stale path. Requirements are unpinned, but the pickles were written with scikit-learn 1.7.1 and an older XGBoost, so they load with InconsistentVersionWarning under current releases. The README 'Requirements' list omits torch, yfinance, hmmlearn and matplotlib. pytest is not in requirements.txt, so the README's `pip install -r requirements.txt && pytest` fails on a clean environment. The NN weights are gitignored, so C5's '8.1\u00d7 / 0.068 vp' cannot be verified, and nn_pricer's docstring claims both '~100x' and '8.1\u00d7' (commits report 5\u201332\u00d7). There is no References section or CITATION.cff, and no architecture diagram.",
+   "evidence": "Loading regime_classifier.pkl: 'InconsistentVersionWarning: Trying to unpickle estimator CalibratedClassifierCV from version 1.7.1 when using version 1.9.1 \u2026 invalid results' plus the XGBoost 'serialized model \u2026 older version' warning. requirements.txt has no pytest; tests.yml installs it separately. .gitignore: data_store/nn_spx_model.pt, nn_vix_model.pt.",
+   "proposed_fix": "Add a lock file (pip-compile) pinned to the versions that wrote the pickles, a `requirements-dev.txt` with pytest, and a Makefile or `scripts/reproduce_all.sh` with one target per artifact (backtest, greeks, pdv, classifier, quintic, nn, site). Add a Reproducibility table (artifact \u2192 command \u2192 runtime), a References section, CITATION.cff, and a mermaid architecture diagram (data \u2192 calibration/models \u2192 signals/backtest \u2192 freeze \u2192 Pages). Publish the NN weights as a release asset, or state '8.1\u00d7 (single benchmark; 5\u201332\u00d7 observed)'.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "docs-substack-literature",
+   "title": "Substack: joint calibration framed as an 'open problem' without prior art; EWMA skill misreported; GARCH in-sample not disclosed; the noise-ceiling logic is muddled",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "substack_article.md:5",
+    "substack_article.md:93",
+    "substack_article.md:99"
+   ],
+   "description": "Guyon (Risk, 2020) solved the joint SPX/VIX smile problem exactly (nonparametric), and Abi Jaber\u2013Illand\u2013Li (2022) did it parametrically with the quintic OU that this repo implements. Calling it 'the open problem' without citing either misstates the literature. '...RiskMetrics EWMA or a GARCH(1,1) ~0.24': EWMA measures 0.205, the same as naive RV20, so PDV's edge over the parameter-free EWMA is 0.31 vs 0.20. The 0.24 is in-sample GARCH, an upper bound, which the article does not say. 'That ~6% is a hard ceiling': a 5.8% flip rate implies roughly a 94% accuracy ceiling, and persistence (90%) is already near it.",
+   "evidence": "forecast_skill_comparison(returns \u22642025-12-31): pdv_walk_forward corr\u00b2 0.3082; naive_rv20 0.2005 (uncalibrated 0.0698); ewma_riskmetrics_0p94 0.2048; garch11_in_sample 0.245. regime_label_noise_audit(adaptive): label_flip_rate 0.0584, boundary_within_1vp 0.1008. Guyon 2020: risk.net/cutting-edge/banking/7518926.",
+   "proposed_fix": "Cite Guyon 2020 and Abi Jaber et al. 2022, and reframe as 'joint calibration is hard for classical parametric SV like Heston'. Correct the skill sentence to 'PDV 0.31 vs RV20 0.20, EWMA 0.20, in-sample GARCH 0.24'. Rephrase the ceiling as '~94% accuracy ceiling; persistence already reaches 90%'.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "docs-eighteen-months",
+   "title": "'Over eighteen months of work' is contradicted by the public record (repo created 2026-03-25)",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "README.md:17",
+    "substack_article.md:13"
+   ],
+   "description": "The GitHub repo was created 2026-03-25, the earliest data artifact is 2026-03-24, and the backtest page dates the C16 audit 2026-06-11. That is about 6 months of verifiable history. The GitHub description ('Volatility Trading System') also contradicts README:15 ('not a profitable strategy'). The repo has no homepage URL or topics set.",
+   "evidence": "api.github.com/repos/navnoorthapar/vol-system-dashboard \u2192 created_at 2026-03-25T13:41:48Z, description 'Joint SPX/VIX Volatility Trading System \u2014 \u2026', homepage None, topics [].",
+   "proposed_fix": "State 'since March 2026' (or cite the earlier private work explicitly). Set the repo description to 'Joint SPX/VIX calibration & risk research system + documented negative backtest', homepage https://navnoorbawa.me, and topics (volatility, heston, vix, quant-finance).",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "docs-stale-docstrings-comments",
+   "title": "Stale or incorrect quantitative claims in docstrings, workflow comments and the improvements table",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/signals/signal_engine.py:31",
+    "joint_vol_calibration/backtest/backtest_engine.py:590-601",
+    "joint_vol_calibration/backtest/backtest_engine.py:39-40",
+    "joint_vol_calibration/signals/regime_classifier.py:20",
+    "joint_vol_calibration/signals/regime_classifier.py:29",
+    "joint_vol_calibration/signals/regime_classifier.py:291",
+    "dashboard/app.py:1089-1105",
+    ".github/workflows/daily_refresh.yml:15",
+    "redeploy_site.sh:4-5",
+    "dashboard/app.py:3"
+   ],
+   "description": "signal_engine cites the '\u2212$503K S1 loss' (S1 is +$694K). HONEST_FAILURES says 'portfolio profit is dominated by COVID\u2026 cumulative return is positive' (it is \u221226.1%) and 'rho=\u22120.99' (the bound is \u22120.95). regime_classifier says 'VVIX 100 = 75th percentile' and 'Produces ~25% R2 (vs ~53% with fixed 100)'. Improvements Step 4 T-bill levels are wrong. Steps 1/3 show 'expected/target' RMSEs in a green 'After' column. daily_refresh.yml points to a README section 'Calibration provenance' that does not exist. redeploy_site.sh says the site 'does not auto-update' and force-pushes gh-pages, while the Action preserves history. Auto-refresh commits are named by run date (two 'Auto-refresh 2026-09-22', two '2026-09-15').",
+   "evidence": "VVIX \u2264 100 on 67.6% of days (q75 = 104.3). R2 share, full history: adaptive 22.1%, fixed 32.5%; backtest window 23.3% vs 47.7%. ^IRX annual means: 2018 1.92% (claimed ~1.5), 2023 5.05% (~5.3), 2025 4.05% (~4.3). `git log --oneline` shows ef47f93 and e722eec both 'Auto-refresh 2026-09-22'.",
+   "proposed_fix": "Update or delete each string. Derive the improvements table from data or mark it 'historical'. Name bot commits by spot session (reuse latest_session_date). Point the workflow comment at README '### Why the headline fit is chosen on data sufficiency'. Rewrite the redeploy_site.sh header (or delete the script) and drop `push -f`.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "docs-rmse-chart-and-formatting",
+   "title": "Small UX/honesty issues: disabled VIX-options leg plotted as a 0.000 RMSE bar, '$-261,206' sign placement, wrong aria-label",
+   "severity": "low",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/calibration.html:547-549",
+    "dashboard/templates/backtest.html:10",
+    "dashboard/templates/backtest.html:274-286",
+    "dashboard/templates/index.html:273"
+   ],
+   "description": "The RMSE Decomposition bar chart plots vix_opt_rmse=0.0 for the disabled leg, so the tooltip reads 'RMSE: 0.000 pts' (a perfect fit) next to a card that says the leg failed at 37.14. The page badge renders 'P&L: $-261,206', and tables print '$-599,995' / '$-923' (the typographic convention is \u2212$261,206). The PDV-spread sparkline's aria-label is 'SPX price sparkline'.",
+   "evidence": "Live calibration screenshot: the VIX Options RMSE bar is empty with the label present. The live backtest badge renders 'P&L: $-261,206'. index.html:273 `aria-label=\"SPX price sparkline\"`.",
+   "proposed_fix": "Drop the third bar, or render it hatched with the label 'disabled (w\u2083=0)'. Use a sign-aware money formatter, e.g. a Jinja filter `money` \u2192 '\u2212$261,206'. Fix the aria-label to 'Implied\u2212realised spread, last 60 days'.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  }
+ ],
+ "checked_ok": [
+  "README headline table matches data_store/backtest/full_results.pkl exactly: NAV $738,794, cum \u221226.12%, Sharpe \u22121.799, MDD \u221231.54%, 1,808 sessions (2018-01-02..2025-03-24, 7.2y); S1 +693,938 / 0.485 / 75.9% / 54; S1C \u2212599,995 / \u22120.722 / 36.4% / 88; S3 +23,212 / 72.7% / 22; S4 \u2212206,437 / \u22121.155 / 25.8% / 31",
+  "Portfolio NAV equals (nav_s1c+nav_s3+nav_s4)/3 exactly (max diff 0.00), matching 'Portfolio = (S1C + S3 + S4)/3'",
+  "Re-running BacktestEngine in the private copy reproduces the canonical S3 (+$23,212, 22 trades) and portfolio (\u221226.12%) exactly, so the C21 artifacts are internally consistent",
+  "S1: 53 of 54 trades are short; S3: all 22 trades long, S3_MAX_HOLD = 30 trading days ('30-day max hold' OK)",
+  "Crisis windows stay positive: COVID +2.34%, FedHikes 2022 +2.27%, Tariffs 2025 +2.23%",
+  "^IRX: 4,185 rows, 1,809 inside the backtest window (C21 row claim OK); zero option rows inside 2018\u20132025 (README:41 OK); SPX snapshots 2026-03-24/03-28/05-31/06-20 totalling 61,815 rows (README:41 OK)",
+  "Showcase 2026-05-31 pickle: \u03ba 1.7685, \u03b8 0.06656, \u03c3 0.4603, \u03c1 \u22120.95, v0 0.01265, \u221av0 11.25%, SPX 0.523 vp, VIX-fut 0.528, r 4.5%, Feller PASS; values match README apart from the rounded Feller line",
+  "37.14 vp VIX-options RMSE = joint_cal_2026-03-24 vix_options_rmse 37.1446; Quintic VIX-opt 17.53 vp; 53% reduction; fit 2751.8 s \u2248 46 min; JOINT_W3 = 0.0 (was 0.2); \u03c1 bound \u22120.95",
+  "2026-07-23 was a 1-tenor fit with SPX RMSE 0.0492 vp; Aug\u2013Sep 1-tenor fits (08-19/20/21/24/25/28) are rejected by the gate",
+  "Persistence baseline 90.0% reproduces (0.8999) for the fixed-100 labels on 2020\u20132025; classifier has 5 features, fear_premium importance 39.3%, train_end 2019-12-31",
+  "regime_label_noise_audit reproduces the Substack's 5.8% flip rate (0.0584) and 10% within 1 vol point (0.1008)",
+  "PDV: walk-forward corr\u00b2 0.308 (R\u00b2 0.31 OK), naive RV20 0.20 and uncalibrated 0.07 (the '0.08' OK), in-sample GARCH 0.245; E|r| = 0.798\u03c3 ('25% hot' OK); coefficients 0.354/0.241/\u22121.496/0.0346, half-lives 5/60/10 d, GARCH \u03b1+\u03b2 = 0.979, \u03b2 = 0.890 all match pdv_model.pkl",
+  "Greeks surface: 69 nodes, 6 maturities, 3 unstable nodes all at 365d (hard-coded copy correct for the current parquet)",
+  "VVIX 207.6 on 2020-03-16 (series max) and 142.5 on 2025-04-09 as docstrings state",
+  "666 tests collected; 24 NN tests skip without weights, giving 642 passed on a clean clone (CI green 2026-09-05); TestMonteCarlo MC\u2194analytic tests and test_lookahead.py (18 tests) exist as README says",
+  "Line count: joint_vol_calibration ex-tests = 15,632 lines (README '~15,300' is within ~2%; all non-test Python incl. dashboard/scripts = 17,888)",
+  "14 components listed (C1\u2013C13 + C13b) matches the '14 components' claim",
+  "LICENSE is standard MIT, \u00a9 2026 Navnoor Bawa, consistent with README and GitHub license detection",
+  "README #testing anchor resolves; repo, Substack and sitemap URLs return 200; og-image.png is served and identical to the repo copy",
+  "Live pages render with no JS console errors and no horizontal overflow at 1366px and 390px (Chart.js served locally because of the sandbox TLS proxy)",
+  "Feller BINDING tolerance (1e-4) covers every archived binding margin (\u22128.4e-8\u2026\u22121.1e-5); '\u03c3 agrees with \u221a(2\u03ba\u03b8) to six significant figures' holds for the current headline (margin \u22121.1e-7)",
+  "Private copy left clean (git status empty after restoring the regime_labels.parquet test write); nothing written under /home/user/vol-system-dashboard (its untracked wheel files predate this audit and were not created by it)"
+ ]
+}

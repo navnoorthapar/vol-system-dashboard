@@ -1,0 +1,466 @@
+{
+ "findings": [
+  {
+   "id": "dashux-pdv-percentile-nan",
+   "title": "Front-page PDV percentile is computed over a 98%-NaN series: shows '1.1th percentile, vol cheap vs 10-year history' when the true figure is ~75th percentile of 64 days",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/app.py:446-465",
+    "dashboard/templates/index.html:222-268",
+    "data_store/signals/regime_labels.parquet (pdv_iv_spread column)"
+   ],
+   "description": "The percentile is `(hist_spread_pp < cur_spread).mean()` over `-rl['pdv_iv_spread']*100`. 4,125 of 4,189 rows of pdv_iv_spread are NaN, because only rows written by the daily bot since 2026-06-22 carry features. `NaN < x` is False, so every NaN row counts as 'not below', which pushes the percentile toward 0. The live page therefore says '1.1th percentile', shows the blue 'vol appears cheap relative to 10-year history' box and a '2015\u20132025 mean: +4.06pp' label. Two things are wrong: the +4.06pp is the mean of only 64 days (2026-06-22..2026-09-23), not 2015\u20132025, and the current +6.81pp is ABOVE that mean. The card contradicts itself on screen: the spread number is orange ('moderate VRP, favours short vol') while the box right under it says vol is cheap. This is the most prominent interpretive statement on the home page, and it is wrong.",
+   "evidence": "python: rl=read_parquet(regime_labels); s=-rl.pdv_iv_spread*100 \u2192 n=4189, nan=4125, mean=4.0646, first non-NaN 2026-06-22. For cur=6.81: (s<cur).mean()=1.15% (what the page shows) vs (s.dropna()<cur).mean()=75.0%. Local build with cur=8.03: 1.29% vs 84.4%. Live HTML (curl https://navnoorbawa.me/): '1.1th \u2026 percentile \u2026 2015\u20132025 mean: +4.06pp' plus '&#9432; Spread at 1.1th percentile \u2014 vol appears cheap relative to 10-year history. Historical mean: +4.06pp. Current: +6.81pp.' The same NaN pattern exists in the committed parquet at every commit back to 64d0e7a (2026-07-27: 25 non-NaN rows).",
+   "proposed_fix": "In load_page1: `hist = (-rl['pdv_iv_spread']*100).dropna()`. If len(hist) < 252, hide the percentile badge and both warning boxes and render 'insufficient history (n=64 days since 2026-06-22)'. Otherwise compute the percentile on hist and build the label from the data: f\"{hist.index[0]:%Y}\u2013{hist.index[-1]:%Y} mean (n={len(hist)})\". Remove the hard-coded '2015\u20132025' and '10-year history' text from index.html. Longer term, backfill pdv_iv_spread for the full history (build_features over 2010\u2192today with the PDV model) so the percentile really is historical. Tests: (1) a synthetic parquet with 90% NaN spreads must give the NaN-excluded percentile; (2) rendering index.html from shipped data must not contain '2015\u20132025' unless hist starts \u22642015.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-pdv-stale-forecast",
+   "title": "Headline 'PDV forecast' comes from features that end 2025-12-30 (9 months old), is shown against today's VIX with no warning, and disagrees with the card's own sparkline",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/app.py:376-395",
+    "dashboard/templates/index.html:195-219",
+    "dashboard/templates/index.html:280-285"
+   ],
+   "description": "load_page1 builds pdv_forecast from `pdv._features.iloc[-1]`, the last row of the PDV model's training set. It then subtracts that from today's VIX and headlines the result as 'IMPLIED \u2212 REALISED SPREAD', with a trading interpretation ('favours short vol strategies'). The C21 fix (75b4844) computes `d['pdv_stale']`, but no template or test ever reads it, so the fix is incomplete. The only cue is a grey 'Updated: 2025-12-30' in 11px text. The same card's sparkline is built from the bot's same-day pdv_iv_spread, and its last point for 2026-09-23 is +4.45pp while the headline says +6.81pp. That is two different values for the same quantity on the same day in one card.",
+   "evidence": "pdv_model.pkl: _features index 2010-01-05..2025-12-30. Last row sigma1=0.08708, sigma2=0.14324, lev=0.01085, which with coef [0.35413, 0.24085, -1.49593] and intercept 0.034594 gives 8.37%, matching the live page. Live page: 'PDV FORECAST (REALISED) 8.37%', 'Updated: 2025-12-30', '+6.81pp'. regime_labels 2026-09-23 pdv_iv_spread=-0.044526, i.e. +4.45pp (sparkline end). `grep -rn pdv_stale` finds only app.py:392; there are no template or test references.",
+   "proposed_fix": "Use one source for the number. Take the headline spread from the same row as the sparkline (`-rl['pdv_iv_spread'].dropna().iloc[-1]*100`, with its date), or recompute PDV features from the current DB (models.pdv build_features over get_spx_ohlcv(as_of)) instead of reusing training features. Render `d.pdv_stale` as an amber banner ('forecast built from data ending {pdv_date}, N sessions old') and suppress the VRP interpretation sentence while stale. Tests: rendering index.html with pdv feature date < label date must show the banner; the headline spread must equal the sparkline's last value to within 0.01pp.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-headline-single-expiry-fit",
+   "title": "Headline 'Joint Calibration' on the live site is a 9-option, single-expiry fit (2026-09-11), which the dashboard selector prefers because thin data gives the lowest RMSE",
+   "severity": "high",
+   "category": "data-integrity",
+   "locations": [
+    "dashboard/app.py:47-91",
+    "joint_vol_calibration/calibration/joint_calibrator.py:157-198",
+    "joint_vol_calibration/calibration/joint_calibrator.py:94",
+    "dashboard/templates/calibration.html:86-93",
+    "dashboard/templates/calibration.html:152-162"
+   ],
+   "description": "The selector latest_good_calibration_path() ranks by SPX RMSE after is_acceptable_calibration(). That gate checks VIX tenors (\u22653) but not how many SPX expiries were fitted. The calibrator takes 9 highest-vega strikes per expiry, so n_spx_options=9 means exactly one smile slice. A single slice cannot identify the term-structure parameters (\u03ba, \u03b8 vs v0), and a 5-parameter model matches 9 points on one slice easily. The result is RMSE 0.215 vp, the best of all 34 archived fits, so the dashboard headlines it. This is the same 'selector rewards broken data' pathology fixed for the VIX leg in 35690a2, now on the SPX leg, and it is caused by the daily-expiry outage. The page presents it as 'SPX IV RMSE 0.215 vol pts \u2014 Good fit' (green) and says 'Fit from 9 SPX options' without flagging that this is one expiry. \u03ba=4.99965 (sitting at the DE seed value) is consistent with \u03ba being unidentified.",
+   "evidence": "latest_good_calibration_path() \u2192 joint_cal_2026-09-11.pkl: n_spx_options=9, n_vix_tenors=4, spx_iv_rmse=0.2152, kappa=4.999651. All other 4-tenor fits have n_spx_options 36\u201354 and RMSE 0.375\u20132.553. joint_calibrator.py:94 `_CAL_STRIKES_PER_EXPIRY = 9`, :648 `nlargest(_CAL_STRIKES_PER_EXPIRY,'bs_vega')`. is_acceptable_calibration(params, 0.215, 4) returns (True,'ok'). The live calibration.html shows '0.215 vol pts \u2026 Good fit' and 'Fit from 9 SPX options and 4 VIX tenors'.",
+   "proposed_fix": "Persist n_spx_expiries in the result (count of expiry buckets used). In is_acceptable_calibration require n_spx_expiries \u2265 3, falling back to n_spx_options \u2265 3*_CAL_STRIKES_PER_EXPIRY for legacy pickles, and apply the same check in latest_good_calibration_path. On calibration.html show 'n expiries' next to n_SPX, and turn the fit-identification banner amber when expiries < 3. Test: with the shipped pickles the selector must NOT return 09-11 (expect 07-01); a unit test must reject {n_spx_options: 9}.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-calib-r-q-mismatch",
+   "title": "Calibration page shows r=3.91% ('USD 6M SOFR (2026-03)') and q=0.0%, but the fit ran with the defaults r=4.5% and q=1.3%",
+   "severity": "high",
+   "category": "math-correctness",
+   "locations": [
+    "scripts/cloud_refresh.py:308-315",
+    "joint_vol_calibration/calibration/joint_calibrator.py:474-493",
+    "dashboard/app.py:508-509",
+    "dashboard/templates/calibration.html:9",
+    "dashboard/templates/calibration.html:254-265"
+   ],
+   "description": "cloud_refresh constructs `JointCalibrator(as_of_date=TODAY)`, so the pricer uses the defaults r=0.045 and q=0.013 for every forward, BS vega and IV inversion. After the fit it overwrites `result['r'] = get_tbill_rate(TODAY)` (^IRX 3M T-bill, a discount-basis yield) and stores no q. The dashboard then displays r=3.91% in the page badge and parameter table, labelled 'USD 6M SOFR (2026-03)', which is neither the instrument nor the date. It displays q as 0.0% 'SPX continuous div yield' because `cal.get('q', 0)` defaults to 0. Both inputs shown are not the ones that produced the parameters. A reader reproducing the fit from the page would get different forwards (about 2.1%/yr of carry difference).",
+   "evidence": "joint_calibrator.py:477-478 `r: float = 0.045, q: float = 0.013`, used at :619, :840, :1349 via self.r/self.q. cloud_refresh.py:308 `cal = JointCalibrator(as_of_date=TODAY)` and :315 `result['r'] = get_tbill_rate(TODAY)`. Pickles: 07-01 r=0.03732 q=None, 09-04 r=0.03757 q=None, 09-11 r=0.03913 q=None. Live page: 'r = 3.91%' and 'USD 6M SOFR (2026-03)', 'q 0.0% SPX continuous div yield'.",
+   "proposed_fix": "In cloud_refresh, fetch r (convert ^IRX to continuous: r=ln(1+y) or the appropriate discount-yield conversion) and q (a documented constant or an implied-forward estimate) BEFORE calibrating, pass them to JointCalibrator(as_of_date, r=r, q=q), and persist both. In app.py display cal['r'] and cal['q'], and mark '(default, not stored)' when q is missing. Replace the hard-coded 'USD 6M SOFR (2026-03)' with f\"3M T-bill (^IRX), {spot_date}\". Test: calibrate on a fixture and assert result['r']==cal.r and result['q']==cal.q; the template must not contain 'SOFR'.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-app-refresh-writes-classifier-labels",
+   "title": "`python dashboard/app.py` (README's run command) overwrites the tracked regime_labels.parquet with demoted-classifier predictions: 32% of labels change, R2 share goes 21.8%\u219240.9%, 101 rows lost",
+   "severity": "high",
+   "category": "data-integrity",
+   "locations": [
+    "dashboard/app.py:1176-1222",
+    "dashboard/app.py:1225-1290",
+    "dashboard/app.py:1414-1430",
+    "README.md:206"
+   ],
+   "description": "Commit 90dc851 fixed cloud_refresh.extend_regime_labels(), which had been writing clf.predict() output into regime_labels.parquet (the file the front page headlines as 'the deterministic rule label'). The same defect survives in app.py. `_refresh_regime_labels()` calls `clf.predict_series(feats.dropna())` and overwrites the parquet, dropping every row without features. It runs from `_startup_data_refresh` whenever SPX data is more than 3 days old, which is always true on a fresh clone because the committed DB ends 2026-06-18. It also runs every 4 h from the scheduled thread. So following README line 206 silently corrupts a tracked data file, and the next commit or freeze would publish classifier labels as rule labels.",
+   "evidence": "In the scratch copy I called dashboard.app._refresh_regime_labels() and compared with the shipped file: rows 4189 (2010-01-26..2026-09-23) \u2192 4088 (..2026-06-18). Label disagreement with the shipped rule labels on common dates: 32.3%. R2 share 21.8% \u2192 40.9%. Log line: '[startup_refresh] regime_labels.parquet updated: 4088 rows, last date 2026-06-18'. The local DB max(date) for spx_ohlcv is 2026-06-18, so the >3-day staleness trigger fires today.",
+   "proposed_fix": "Delete _refresh_regime_labels. Make the startup and scheduled refresh call the same rule-based path as cloud_refresh (build_regime_labels(..., vvix_threshold=None) with repair-in-place, never truncating history). Better, drop the background refresh threads from the dashboard entirely: the site is frozen static HTML and the dashboard should be read-only. Test: monkeypatch the DB and assert that after _startup_data_refresh the parquet labels equal build_regime_labels(adaptive) and len(after) \u2265 len(before).",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-backtest-stale-prose",
+   "title": "Backtest page prints pre-C21 numbers (S1 +$463K, S1C \u2212$404K, S4 \u2212$189K, \u2212$333K COVID trade, top-5=73%) right next to the computed values ($693,938 / \u2212$599,995 / \u2212$206,437)",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/templates/backtest.html:44-47",
+    "dashboard/templates/backtest.html:85-90",
+    "dashboard/templates/backtest.html:108-110",
+    "dashboard/templates/backtest.html:130",
+    "dashboard/templates/backtest.html:307-318",
+    "dashboard/templates/backtest.html:334-349",
+    "dashboard/templates/backtest.html:249",
+    "dashboard/templates/backtest.html:357-359",
+    "dashboard/templates/backtest.html:517",
+    "README.md:57-59",
+    "substack_article.md:76-79"
+   ],
+   "description": "C21 (15b4db5) moved S1 +$463K\u2192+$694K, S1C \u2212$404K\u2192\u2212$600K and S4 to \u2212$206K, but the hand-written prose was not updated. The page shows 'S1 +$463K, 76% win' in five places, 'S1C \u2212$404K' in four and 'S4 \u2212$189K' in two. The metric cards directly above show $693,938, $-599,995 and $-206,437, and the 'Honest read' paragraph and flaw #11 say +$694K and \u2212$600K, so the page contradicts itself. The S1 risk statistics are also stale: recomputed from the shipped trade log (net = gross \u2212 entry \u2212 exit \u2212 slippage, which reproduces $693,938), the worst trade is \u2212$299K (not \u2212$333K), 2022 is \u2212$61K (not \u2212$99K), top-5 trades are 52.5% of net profit (not 73%), and 2025 was also positive. Other stale text: 'Ten Flaws Found, Eight Fixed, Two Quantified' above an 11-row table; 'all numbers under the fully corrected C17 pipeline'; the roadmap's 'the database holds a single options snapshot (2026-03-24)', which 75b4844 already corrected in the README (four SPX snapshots); 'S3 \u2026 win 15\u201317 of 17' against 22 trades elsewhere. README and substack repeat +$463K/\u2212$404K/\u2212$333K/73%.",
+   "evidence": "Rendered text (Playwright inner_text of live backtest.html): line 17 '$693,938', line 24 'Corrected: +$463K, 76% win \u2026 a single \u2212$333K COVID trade; 2022 \u2212$99K \u2026 top-5 trades = 73% of profit', line 27 '$-599,995', line 34 'S1C is \u2212$404K', line 37 '$-206,437', line 44 '\u2212$189K', line 102 '+$694K in-sample'. From full_results.pkl all_trades (54 S1 trades): net sum 693,938, worst \u2212299,415 (entry 2020-02-21), by year {2022: \u221261,356, 2025: +28,050}, top-5/net = 0.525.",
+   "proposed_fix": "Remove every hard-coded dollar figure from backtest.html. In load_page4 compute from full_results.pkl (metrics + all_trades) and pass s1_worst_trade, s1_by_year, s1_top5_share, s1c_total, s4_total, n_flaws and snapshot counts, then render with Jinja. Make README/substack numbers generated (or CI-checked) from the same dict. Add a test that renders backtest.html and asserts every '$\u2026K' token in prose is within 0.5% of a value in the metrics dict, and that 'single options snapshot' is absent.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "dashux-ntrades-double-count",
+   "title": "The C21 fix for portfolio 'N Trades' is itself wrong: 283 counts entries and exits (2\u00d7 the 141 round trips), so 'Avg P&L / Trade' is \u2212$923 instead of \u2212$1,852",
+   "severity": "medium",
+   "category": "math-correctness",
+   "locations": [
+    "dashboard/app.py:898-907",
+    "dashboard/app.py:959-965"
+   ],
+   "description": "Commit 75b4844 says the KPI row should use 'the real 141 round trips'. The code sums `(pos.diff()!=0).sum()` over the three position columns, which counts every entry and every exit, giving 283. Avg P&L/Trade = \u2212261,206/283 = \u2212$923 understates the loss per round trip by half. The KPI 'Win Rate 28.16%' is the share of positive DAYS among non-zero-P&L days, while the per-signal table 20 px below reports per-TRADE win rates (36.4%, 72.7%, 25.8%), under the same label.",
+   "evidence": "Rendered: 'N Trades 283', 'Avg P&L / Trade $-923', 'Win Rate 28.16%'. Engine metrics: s1c_n_trades 88 + s3 22 + s4 31 = 141 (the table rows show 88/22/31). python: sum((eq[c].diff().fillna(0)!=0).sum() for s1c/s3/s4) = 283. \u2212261,206/141 = \u22121,852.5.",
+   "proposed_fix": "Set m['n_trades'] = sum(_em[f'{s}_n_trades'] for s in ('s1c','s3','s4')) (fall back to the transition count /2 only if metrics are missing), and m['avg_pnl'] = total/n_trades. Rename the KPI to 'Win rate (days)', or replace it with trade-weighted win rate from all_trades. Test: load_page4 on shipped data gives N Trades == '141' and Avg P&L/Trade == '$-1,853' (or '\u2212$1,853').",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-walkforward-flat-rf",
+   "title": "'Walk-Forward Sharpe \u2014 6-Month OOS Windows' uses a flat 5% hurdle (page claims T-bill), silently clips at \u00b14, and the windows are in-sample slices, not OOS",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "dashboard/app.py:1050-1086",
+    "dashboard/templates/backtest.html:179-189",
+    "dashboard/templates/backtest.html:323-324"
+   ],
+   "description": "The chart computes `ex = rets - 0.05/252` for 2019\u20132025, although the same page states Sharpe is 'vs the actual T-bill path' and C21 removed the flat-5% hurdle from the engine. T-bills paid about 0.05\u20131.5% in 2019\u20132021, so the flat hurdle pushes those windows negative. Values are clipped to \u00b14 with no annotation (8 of 13 bars sit at \u22124). No model is refit per window: these are half-year slices of one in-sample backtest, so 'walk-forward' and 'OOS' overstate the validation.",
+   "evidence": "Recomputed with the DB's tbill_rates (^IRX, 2018\u20132025 fully covered): 2020-H1 \u22120.12 \u2192 +0.91, 2022-H1 \u22120.41 \u2192 +1.25. Negative windows with real rf = 9 of 13 (dashboard shows '11/13 negative'). Unclipped values reach \u22127.41 (2019-H1), \u22126.35 (2024-H1).",
+   "proposed_fix": "Align get_tbill_rates_series() to eq.index (ffill within the series, and refuse if the window is not spanned, as the engine does) and subtract rf_t/252. Drop the clip, or draw clipped bars hatched with the true value in the tooltip. Retitle to 'Half-year Sharpe (in-sample, rf = 3M T-bill)'. Test: on shipped data, wf_neg == 9 and wf_total == 13.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-heatmap-hidden-nodes",
+   "title": "Vomma heatmap silently drops 16 of 69 nodes (bin collisions), including one of the 3 'unstable' nodes; axis says ln(K/S) but the data is ln(K/F); min-vomma caption is wrong",
+   "severity": "medium",
+   "category": "bug",
+   "locations": [
+    "dashboard/app.py:681-730",
+    "dashboard/templates/greeks.html:9",
+    "dashboard/templates/greeks.html:52-66",
+    "dashboard/templates/greeks.html:125-130"
+   ],
+   "description": "Nodes lie on a 0.0393-spaced log-moneyness grid, but the heatmap bins with floor(lm/0.05)*0.05 and keeps only `cell_df.iloc[0]` per bin. \u22120.300 and \u22120.261 both floor to \u22120.30, \u22120.143 and \u22120.104 both to \u22120.15, and 0.25 floors to 0.20 through floating-point error, so every maturity loses 2\u20133 nodes. The banner says '3 Unstable Nodes \u2026 all three at the 1-year maturity', but only 2 red cells are drawn: the 365d z=+2.05 node at lm \u22120.261 is hidden behind the \u22120.300 node. Column headers show bin lower edges, so values appear under the wrong moneyness. The footnote says 'ln(K/S)', but K/exp(lm) differs by maturity (6589 at 14d \u2192 6795 at 365d), i.e. the forward, and the calibration page correctly says ln(K/F). 'Min Vomma \u2212119 \u2014 Near-expiry nodes' is hard-coded, and the minimum is actually the 365d ATM node. The badge '69 nodes \u00b7 6 maturities \u00b7 2026-03-24' is hard-coded, while the parquet's as_of_date is 2026-03-25.",
+   "evidence": "python on greeks_surface.parquet: 69 nodes \u2192 53 (T,bin) cells \u2192 16 hidden, e.g. (365, \u22120.30, lm \u22120.2607, z 2.05), (180, 0.05, lm 0.0929, z 1.84). The desktop_greeks screenshot shows two red cells. min vomma row: T_days 365, lm 0.0143, vomma \u2212119.06. Implied base per T: 14d 6589.08, 30d 6598.33, 91d 6633.71, 365d 6795.0.",
+   "proposed_fix": "Pivot on the actual node grid: columns = sorted unique round(log_moneyness, 4), each cell = the node itself (or use np.round(lm/step) with step = the grid spacing). Assert that no bin receives more than one node. Build headers from the real lm values and change the footnote to ln(K/F). Compute the min/max captions from the argmin/argmax rows and the badge from the data (n_cells, n maturities, gdf.as_of_date). Test: number of non-empty heatmap <td> == len(gdf), and number of td.unstable == n_unstable.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-smile-chart-wrong-surface",
+   "title": "Calibration page's only chart shows a different date's model surface (2026-03-25 Greeks grid, not the headline fit), including IV-solver failures (30d IV = 4.9992%), with tooltips that mix strikes",
+   "severity": "medium",
+   "category": "ux",
+   "locations": [
+    "dashboard/app.py:634-665",
+    "dashboard/templates/calibration.html:199-205",
+    "dashboard/templates/calibration.html:492-540"
+   ],
+   "description": "'SPX Implied Volatility Smile \u2014 All Maturities' is built from greeks/greeks_surface.parquet (as_of 2026-03-25), not from the headline calibration (2026-09-11) whose parameters surround it, and the chart states no date. It is model-only: no market quotes and no residuals, which is the core exhibit of any calibration report. The grid contains failed inversions: 30d K=7530 IV=0.049992 (the solver floor, vomma 4.7e-13) and 30d K=8146 IV 10.25% next to neighbours at 16\u201322%. These draw the visible V-shaped plunge to about 5% vol on the right wing. `interaction.mode: 'index'` on a linear x-axis pairs points by array index across maturities of different lengths, so one tooltip lists values at different strikes.",
+   "evidence": "parquet as_of_date ['2026-03-25']. Rows: (30d, lm 0.1321, iv 0.049992, vomma 4.74e-13), (30d, lm 0.2107, iv 0.102512), (14d, lm 0.0929, iv 0.121). Playwright getElementsAtEventForMode(\u2026,'index') at dataset 1 index 9 returns 14d@x=0.1321, 30d@x=0.2107, 180d@x=0.0929, 365d@x=0.0929 in one tooltip.",
+   "proposed_fix": "Persist per-expiry market IVs, model IVs and strikes for the calibration anchors in the joint_cal pickle (the calibrator already computes model_iv at joint_calibrator.py:1349). Plot market as points and model as lines per expiry, titled with as_of, n expiries and n options. Drop nodes with iv \u2264 solver floor+1e-4 or vomma < 1e-6. Use `interaction: {mode:'nearest', intersect:true}` (or 'x' with per-dataset lookup). Test: assert mat_smiles as_of == calibration as_of and that no plotted IV sits at the solver floor.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "dashux-staleness-signalling",
+   "title": "Staleness is not communicated: green '\u2713 latest U.S. session' and an always-pulsing green 'EOD DATA' dot while the calibration is 13 days old, the PDV 9 months and the Greeks 6 months",
+   "severity": "medium",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/index.html:9-41",
+    "dashboard/templates/base.html:122-132",
+    "dashboard/templates/base.html:671-674",
+    "dashboard/templates/greeks.html:9",
+    "dashboard/templates/calibration.html:9"
+   ],
+   "description": "The only freshness check (index.html JS) compares the SPX close date to the expected session and paints '\u2713 latest U.S. session' green. It ignores the other dates in the same badge ('Calibration: 2026-09-11', 13 days old during the known outage) and the PDV features (2025-12-30). Calibration, Greeks and Backtest pages have no freshness indicator. The Greeks 'Risk Monitor' is a 2026-03-24/25 surface presented as current, with the date hard-coded in the badge. The nav 'EOD DATA' dot is always green and pulsing, whatever the data state. The JS has no US holiday calendar, so on NYSE holidays it wrongly shows '\u27f3 refreshes after next U.S. close'. Best-practice research dashboards (e.g. FRED and Our World in Data 'last updated' metadata) give each panel its own as-of and flag lagging inputs.",
+   "evidence": "Live index badge: 'Last close: 2026-09-23 \u00b7 Calibration: 2026-09-11 \u00b7 Regime: 2026-09-23 \u00b7 \u2713 latest U.S. session'. PDV 'Updated: 2025-12-30'. greeks.html:9 literal '6 maturities  \u00b7  2026-03-24'. The status-dot CSS animation has no state input (base.html:122-128).",
+   "proposed_fix": "In app.py add a freshness dict {spx_date, calib_date, pdv_date, greeks_date, backtest_end} with session-age thresholds (e.g. calib > 3 sessions, pdv > 5, greeks > 5 = stale) and pass it to base.html. Render a site-wide amber strip listing stale components, and drive the nav dot colour and label from the worst state (green OK / amber stale / red failed). Emit the NYSE holiday list as JSON from Python (pandas_market_calendars, or a list maintained in config) for the JS check. Replace hard-coded badge dates with data. Test: render with calib_date = spx_date \u2212 10 sessions and assert the stale strip is present and the dot class is 'stale'.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "dashux-clf-pdv-ordering",
+   "title": "Research-classifier card is fed pdv_iv_spread = \u2212VIX because pdv_forecast is read before it is computed (published R1 76.4% vs 67.7% with the correct feature)",
+   "severity": "medium",
+   "category": "bug",
+   "locations": [
+    "dashboard/app.py:254-268",
+    "dashboard/app.py:385-386"
+   ],
+   "description": "The regime block (app.py:236+) computes `pdv_dec = (d.get('pdv_forecast') or 0)/100`, but d['pdv_forecast'] is only set later in the PDV block (line 386). The classifier's second most important feature (pdv_iv_spread, importance 24.7%) is therefore always \u2212VIX, and the probability bars and the 'R1 \u00b7 76.4%' shown on the home page are wrong.",
+   "evidence": "clf.feature_names_ = ['vix','ts_slope','fear_premium','rv_change_5d','pdv_iv_spread']. Importances: fear_premium 0.393, pdv_iv_spread 0.247. With the parquet's 2026-09-23 features, predict_proba = [0, 67.7, 32.3]; with pdv_iv_spread = 0 \u2212 vix it is [0, 76.4, 23.6], exactly what the live page shows ('R1 \u00b7 76.4%', R2 23.6%).",
+   "proposed_fix": "Move the PDV block above the regime block, or take pdv_iv_spread (and all classifier features) from the last row of regime_labels.parquet so the card uses the same features the bot stored. Test: assert load_page1()['prob_r1'] equals clf.predict_proba(rl.iloc[[-1]][feature_names_]) to within 0.1.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-silent-zero-render",
+   "title": "Any data-load failure renders zeros with confident interpretive text, and freeze_site still reports OK and deploys",
+   "severity": "medium",
+   "category": "reliability",
+   "locations": [
+    "dashboard/app.py:226-233",
+    "dashboard/app.py:434-443",
+    "dashboard/app.py:765-785",
+    "dashboard/freeze_site.py:44-56"
+   ],
+   "description": "Every loader catches Exception and stores d['*_error'] with zero defaults, but no template ever renders an *_error key. freeze_site only fails on HTTP status or the literal 'Traceback'. A missing or corrupt pickle therefore publishes a clean-looking page: PDV 0.00% with the text 'VIX underestimates model forecast \u2192 elevated realised vol expected', and a green-free Greeks page with '0 / 0' unstable nodes and an empty heatmap. The daily Action deploys it with exit 0.",
+   "evidence": "In the scratch copy I moved pdv_model.pkl and greeks_surface.parquet aside and ran freeze_site: 'OK / \u2026 OK /greeks \u2026 WROTE', exit=0. index.html: 'PDV FORECAST (REALISED) 0.00% IMPLIED \u2212 REALISED SPREAD +0.00pp VIX underestimates model forecast \u2192 elevated realised vol expected'. greeks.html card values ['', '0 / 0', '0', '0'] and 1 heatmap row. `grep -c _error dashboard/templates/*.html` \u2192 0 in every template.",
+   "proposed_fix": "In freeze_site, call load_page1..4 directly and exit(1) if any returned dict contains a key ending in '_error', so the deploy step is skipped and the last good gh-pages build stays live. In the templates, render an error card instead of numbers when *_error is set. Test: monkeypatch DATA to a directory missing pdv_model.pkl, then assert freeze_site exits non-zero and index.html contains the error card.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-a11y-structure",
+   "title": "No headings at all on any page, charts have no text alternative (one aria-label is wrong), scroll regions not keyboard-focusable, no aria-current, no reduced-motion handling",
+   "severity": "medium",
+   "category": "accessibility",
+   "locations": [
+    "dashboard/templates/base.html:639-679",
+    "dashboard/templates/base.html:122-132",
+    "dashboard/templates/index.html:7",
+    "dashboard/templates/index.html:273",
+    "dashboard/templates/greeks.html:89-90",
+    "dashboard/templates/base.html:579-586"
+   ],
+   "description": "All four pages contain zero h1\u2013h6 elements: page titles, card labels and chart titles are divs, so screen-reader users cannot navigate by heading (WCAG 1.3.1). The top banner sits outside any landmark, and nav has no aria-label. The active link uses only a CSS class, with no aria-current. Every chart is a canvas with role=img and a generic aria-label and no data alternative. The sparkline is labelled 'SPX price sparkline' although it plots the implied\u2212realised spread. On mobile, data tables and the heatmap become horizontal scroll regions that cannot receive keyboard focus (axe scrollable-region-focusable). After the 7 nav links, Tab goes straight to BODY: no chart, table or tooltip is keyboard-reachable. The status dot pulses indefinitely, and Chart.js animations run with no prefers-reduced-motion rule.",
+   "evidence": "Playwright on the live pages: heads=[] for index/calibration/greeks/backtest. axe-core 4.10.2: page-has-heading-one and region on every page; scrollable-region-focusable \u00d71 calibration, \u00d72 greeks, \u00d74 backtest at 390px. Tab order on backtest: GitHub, Substack, LinkedIn, 4 nav links, then BODY. stylesheet scan: no 'prefers-reduced-motion' and no 'print' media rules.",
+   "proposed_fix": "base.html: wrap the top banner in <header>, add <nav aria-label='Primary'>, set aria-current='page' on the active link, and add a skip link. Page titles become <h1 class='page-title'>, card-label/chart-title become <h2>/<h3> (same CSS). For each canvas add aria-describedby pointing to a visually-hidden <table> or a summary sentence with the key numbers (e.g. 'VIX term structure: 9d 13.45, 30d 15.18, 93d 18.11, 182d 20.11'). Fix the sparkline label. Give scroll wrappers tabindex='0' role='region' aria-label. Add @media (prefers-reduced-motion: reduce){.status-dot{animation:none}} and set Chart.defaults.animation=false when matchMedia matches. Test: add a Playwright+axe CI step failing on serious/critical violations.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "dashux-contrast",
+   "title": "Systemic WCAG AA contrast failures: --text3 #555 (2.5:1) on labels, chart ticks #555, axis titles #444 (1.9:1), white-on-green heatmap cells (2.7:1)",
+   "severity": "medium",
+   "category": "accessibility",
+   "locations": [
+    "dashboard/templates/base.html:37-40",
+    "dashboard/templates/base.html:199-206",
+    "dashboard/templates/base.html:498-513",
+    "dashboard/templates/base.html:711-766",
+    "dashboard/app.py:113-130",
+    "dashboard/app.py:723",
+    "dashboard/templates/backtest.html:23",
+    "dashboard/templates/backtest.html:616-621"
+   ],
+   "description": "Neon #00ff88 on black is fine (14.8:1). The failures are the grey scale: --text3 #555 is used for every card label, table header, subtitle, badge and footnote. It gives 2.53:1 on #111 and 2.66:1 on #0a0a0a, against the 4.5:1 needed for text. Chart tick labels are #555 and axis titles #444 (1.94:1), which fails both 1.4.3 and the 1.4.11 3:1 non-text minimum. The top banner is #666/#555 on #111 (3.28/2.53). Heatmap cells with z in (1.4, 2] use white text on a bright green up to #00b556 (2.71:1), and the 9px z-labels at opacity 0.7 are lower still. The S1 reference line/legend uses rgba(51,136,255,0.35\u20130.4), about 1.7:1. Red 'unstable' next to green 'high' also collides for deuteranopes.",
+   "evidence": "axe-core color-contrast violations (desktop/mobile): index 29/27, calibration 32/31, greeks 26/23, backtest 50/55 nodes, e.g. '.page-subtitle 2.65 (#555 on #0a0a0a)', '.top-banner-text 3.28', 'a[target=_blank] 2.53'. Computed: #444 on #111 = 1.94, white on #00b556 = 2.71, white on #02a44f = 3.27.",
+   "proposed_fix": "Raise --text3 to about #8c8c8c (\u22655:1 on #111) and --text2 to #a0a0a0. Chart ticks #9a9a9a, axis titles #8a8a8a, gridlines #262626. In _vomma_color pick the fg per cell by contrast (black on bright green, white on dark blue), and drop the 0.7 opacity. Use a colour-blind-safe diverging ramp (blue\u2013white\u2013orange) with red reserved for the outline plus a text badge. Draw the S1 reference line at alpha \u22650.8 with a dash pattern. Test: axe color-contrast = 0 in the Playwright CI step.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-mobile-clipping",
+   "title": "On phones, content is clipped and unreadable inside cards: the Quintic OU panel loses about 190px (tables and text cut mid-word), the R2 regime tile is cut, and the equity-chart header is crushed",
+   "severity": "medium",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/calibration.html:343-476",
+    "dashboard/templates/index.html:306-325",
+    "dashboard/templates/backtest.html:16-25",
+    "dashboard/templates/backtest.html:33-55",
+    "dashboard/templates/base.html:180-187"
+   ],
+   "description": "There is no page-level horizontal overflow at 390/360/320px, which is good. But .card has overflow:hidden, and several inner layouts exceed it. (1) calibration C13: the inline `.grid.grid-2` children default to min-width:auto, so the nowrap tables force the track to 531px inside a 340px card. The \u0394 column, the Description column and the 'Key advance / Honest limitation' text are cut off and cannot be scrolled. (2) index Rule-Label Distribution: a fixed 3-column inline grid with 16px padding and 26px numerals is 360px wide in a 340px card, so the R2 tile is visibly cut (90px at 320px). (3) backtest: the equity-curve title and custom legend share a non-wrapping flex row, squeezing the title into a 1-word-per-line column. The C18 card puts its legend beside the paragraph, making the paragraph a narrow column.",
+   "evidence": "Playwright scan at 390px (elements with scrollWidth > clientWidth and no overflow scroll): calibration 'DIV.grid grid-2 sw=531 cw=340'; index 'DIV.mt12 sw=360 cw=340'; backtest 'DIV.flex space-between mb12 sw=349 cw=310'. Screenshots mobile_calibration_part3.png (text cut at the right edge) and mobile_index_part1.png (R2 tile cut).",
+   "proposed_fix": "Add `.grid > * { min-width: 0; }` to base.html so the tables' own overflow-x:auto takes effect. Change the inline 3-column grids to `grid-template-columns: repeat(auto-fit, minmax(96px, 1fr))`. Add `flex-wrap: wrap; gap: 8px` to the `.flex.space-between` headers and move the custom legends below the title on \u2264768px. Test: a Playwright assertion at 320/360/390px that no .card descendant has scrollWidth > clientWidth + 1 unless its overflow-x is auto/scroll.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-regime-text-contradicts-rule",
+   "title": "Regime descriptions contradict the rule actually used: R0 'Low VIX / backwardation' (rule: rv20 > VIX), 'R2 = VVIX > 100' (rule: adaptive 80th pct), and 'Use XGBoost for production' (XGBoost is demoted)",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/templates/index.html:177-190",
+    "dashboard/templates/backtest.html:297",
+    "dashboard/templates/calibration.html:323-329",
+    "joint_vol_calibration/signals/regime_classifier.py:269-291"
+   ],
+   "description": "build_regime_labels defines R2 as VVIX > threshold (adaptive rolling 252-day 80th percentile, per 90dc851), R0 as rv_20d > VIX/100 and R1 as rv_20d \u2264 VIX/100. The index legend describes R0 as 'Low VIX / backwardation \u2192 buy straddles' and R1 as 'Normal contango', which are term-structure conditions the rule never tests, while the card text above it correctly says 'rv\u2082\u2080 vs VIX \u00b7 VVIX gate'. The backtest footnote says 'R2 = VOMMA_ACTIVE (deterministic rule: VVIX > 100)'. 90dc851 showed the fixed-100 gate disagrees with shipped labels on 19.7% of days, and the same page's improvement step 5 says the gate is adaptive. The calibration page's HMM card says 'Use XGBoost for production classification', contradicting 'RESEARCH ONLY (C17)' on the home page.",
+   "evidence": "regime_classifier.py:279-281 rules. index.html:180 'Low VIX / backwardation \u2192 buy straddles'. backtest.html:297 'VVIX &gt; 100'. calibration.html:326 'Use XGBoost for production classification.' Rendered backtest improvement row 5: 'Rolling 252-day 80th percentile of VVIX as R2 gate (was fixed 100)'.",
+   "proposed_fix": "R0: 'Realised > implied (rv\u2082\u2080 > VIX) \u2192 long gamma'. R1: 'Implied \u2265 realised \u2192 sell premium'. R2: 'VVIX above its rolling 252-day 80th percentile \u2192 vomma'. Backtest footnote: state the adaptive gate. HMM card: 'Neither classifier trades; the backtest uses the lagged rule labels.' Better, have app.py emit these strings from the regime_classifier constants. Test: template grep for 'VVIX &gt; 100' and 'production classification' fails.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-pdv-scale-mismatch",
+   "title": "'Implied \u2212 realised spread' compares VIX (\u03c3 scale) to a PDV forecast of E|r|\u00b7\u221a252 (\u22480.8\u03c3), inflating the displayed VRP by about 2pp",
+   "severity": "medium",
+   "category": "math-correctness",
+   "locations": [
+    "dashboard/app.py:385-387",
+    "dashboard/templates/index.html:195-219",
+    "joint_vol_calibration/models/pdv.py:128"
+   ],
+   "description": "The PDV model's regression target y is next-day |r|\u00b7\u221a252 (horizon=1; pdv.py:128 abs_r_ann; pdv._y on 2020-03-13 = 2.026 = |r(03-16)|\u00b7\u221a252). OLS on |r| estimates E|r| = \u03c3\u00b7\u221a(2/\u03c0) \u2248 0.80\u03c3 under normality. The project's own substack (line 99) acknowledges 'E|r| \u2248 0.8\u03c3'. The dashboard subtracts this E|r|-scale number from VIX (a \u03c3-scale, 30-day quantity) and calls the difference the vol risk premium, which biases it upward by about 0.2\u03c3. At \u03c3\u224810% that is about 2pp: 8.37%/0.798 = 10.49% \u03c3-equivalent \u2192 spread 4.69pp, not 6.81pp. The horizons also differ (1-day vs 30-day).",
+   "evidence": "pdv_model.pkl: horizon=1. _y 2020-03-12..18 = [1.4098, 2.0264, 0.9243, 0.8449, 0.0746], equal to next-day |r|\u00b7\u221a252. substack_article.md:99: 'a 20-day RV runs about 25% hot versus E|r| (RV tracks \u03c3, but E|r| \u2248 0.8\u03c3)'. 15.18 \u2212 8.37/\u221a(2/\u03c0) = 4.69.",
+   "proposed_fix": "Convert before comparing: sigma_hat = pdv_forecast/\u221a(2/\u03c0) (or fit the PDV target on a \u03c3-scale quantity such as 21-day forward realised vol), label it 'PDV \u03c3-equivalent forecast', and compute the spread and percentile history on the same scale (pdv_iv_spread in build_features too). Test: simulate Gaussian returns with \u03c3=0.2, fit the PDV and assert the displayed sigma_hat \u2248 20% \u00b1 1pp.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "dashux-calib-hardcoded-claims",
+   "title": "Calibration page hard-codes implementation facts that disagree with the code and with each other; Heston-vs-Quintic \u0394 compares fits from different dates; RMSE chart plots a disabled leg as 0",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/templates/calibration.html:191",
+    "dashboard/templates/calibration.html:338-341",
+    "dashboard/templates/calibration.html:452-457",
+    "dashboard/templates/calibration.html:412-447",
+    "dashboard/templates/calibration.html:312-318",
+    "dashboard/templates/calibration.html:542-578",
+    "dashboard/templates/calibration.html:22"
+   ],
+   "description": "'DE (120 iter \u00d7 40)': JointCalibrator.calibrate defaults are de_maxiter=200 and popsize 10\u00d75=50, and cloud_refresh calls calibrate() with defaults. The Quintic panel states VIX quadrature three ways ('\u2248 500 pts', '18\u00b2 = 324 pts', while quintic_calibrator uses _VIX_QUAD_OUTER=10 \u2192 100 pts) and 'MC paths 6,000/expiry' (code: _MC_PATHS_CAL=5,000, and 10,000 for the final eval). The 'Heston vs Quintic OU' table and \u0394 column compare the 2026-09-11 9-option Heston fit with the 2026-03-24 Quintic fit, different chains on different dates, and colour the difference as a model verdict (+2.128 red). The 'RMSE Decomposition' bar chart plots VIX Options RMSE = 0.0 for a disabled leg (tooltip 'RMSE: 0.000 pts', reads as a perfect fit), mixes vol points and VIX points on one axis, and is not a decomposition of the loss. 'steep 2026 SPX left skew' is hard-coded, and C13 \u03b5=\u22120.18 is shown in green although that panel's claim is about saturation.",
+   "evidence": "joint_calibrator.py:919-920 de_maxiter=200, de_popsize=10. quintic_calibrator.py:55-62 _MC_PATHS_CAL=5_000, _VIX_QUAD_OUTER=10, _DE_MAXITER=40, _DE_POPSIZE=8. quintic_ou.py:49 _N_QUAD_OUTER=22 (484). Live page shows 'VIX priced via 2D Gauss-Hermite \u2248 500 pts' and 'VIX quad: 18\u00b2 = 324 pts' in the same card, and 'Heston 0.215 | Quintic 2.343 | \u0394 +2.128'. rmseChart data = [0.215, 0.266, 0.0].",
+   "proposed_fix": "Persist optimiser settings (de_maxiter, popsize, n_quad, n_paths) in each calibration pickle and render them from the pickle. Import module constants for the Quintic facts. Show Heston and Quintic side by side with their own as-of dates and n options, and drop \u0394 unless both were fitted on the same chain, or refit Heston on 2026-03-24 for the comparison. In the RMSE chart remove the disabled leg (or show it greyed with a 'disabled' label and no value) and use two panels or a table for the different units. Test: assert the template has no literal '120 iter', '324', '6,000'.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-backtest-window-and-crisis-claims",
+   "title": "Backtest page never discloses the 2025-03-24 cutoff, shows Q1-2025 as an 'Annual Return', calls a pre-shock Q1 window 'Tariffs', and slightly miscomputes annual returns",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/templates/backtest.html:7",
+    "dashboard/templates/backtest.html:172",
+    "dashboard/templates/backtest.html:323-325",
+    "dashboard/templates/backtest.html:450-470",
+    "dashboard/app.py:1034-1040",
+    "dashboard/app.py:799-801",
+    "joint_vol_calibration/backtest/backtest_engine.py:113"
+   ],
+   "description": "The README (75b4844) now states the backtest ends 2025-03-24, but the dashboard still says '2018 \u2192 2025' everywhere and presents 2025 (+2.2%, 57 sessions) as an annual return. 'Crisis windows stay positive (COVID, Fed, Tariffs all small +)': the 'Tariffs_2025' window is 2025-01-01..2025-03-24, before the April 2\u20139 2025 tariff shock, which lies outside the backtest, so the page claims crisis resilience for an event the backtest never saw. Annual returns use first-to-last NAV within each calendar year, which drops each year's first-day return (2019 \u221212.42% vs \u221212.52% year-end to year-end, 2023 \u221210.48% vs \u221210.37%, 2020 +1.77% vs +1.71%), and the bars no longer compound to the cumulative return (\u221226.06% vs \u221226.12%). The equity-curve downsample `iloc[::3]` ends at 2025-03-21, not at the last session.",
+   "evidence": "backtest_engine.py:113 '\"Tariffs_2025\": (\"2025-01-01\", \"2025-03-24\")'. full_results.parquet index 2018-01-02..2025-03-24 (1808 rows). Recomputed year-end-to-year-end returns as quoted. Downsample: step=3 \u2192 last point 2025-03-21 (\u221226.11% vs \u221226.12%).",
+   "proposed_fix": "Title: 'C10 Backtest \u2014 2018-01-02 \u2192 2025-03-24 (1,808 sessions)'. Label the 2025 bar 'YTD to 03-24'. Rename the crisis window 'Q1-2025' and drop 'Tariffs' from the prose, or extend the backtest past April 2025. Annual return = nav.groupby(year).last() / previous year-end \u2212 1 (first year vs initial NAV). Always append the last row to the downsampled series. Test: prod(1+annual) \u2212 1 == cumulative within 1e-9.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-greeks-labels",
+   "title": "Greeks charts mislabel what they show: QV 'Mean' and 'Max' are identical by construction, the vanna y-axis title is dropped, CSS uppercase turns \u03c3 into \u03a3, and the scatter has no maturity legend",
+   "severity": "low",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/greeks.html:8",
+    "dashboard/templates/greeks.html:136-146",
+    "dashboard/templates/greeks.html:150",
+    "dashboard/templates/greeks.html:264-273",
+    "dashboard/templates/greeks.html:165-172",
+    "dashboard/templates/greeks.html:283-296",
+    "dashboard/templates/base.html:328-335",
+    "joint_vol_calibration/greeks/risk_monitor.py:223-245"
+   ],
+   "description": "(1) qv_convexity = Var[\u222b\u2080\u1d40 v_t dt] depends only on maturity, not strike, so the 'Mean' and 'Max' QV bars are identical for every maturity. The caption calls it 'sensitivity of the straddle P&L to variance path roughness', which it is not. (2) The vanna chart replaces scales.y and loses its axis title. No Greek has units anywhere (per 1.00 \u03c3 or per vol point?). (3) .chart-title has text-transform:uppercase, so '(\u2202\u00b2V/\u2202S\u2202\u03c3)' renders as '(\u2202\u00b2V/\u2202S\u2202\u03a3)', changing the symbol. (4) The subtitle lists 'Vomma \u00b7 Volga' as two Greeks, but they are synonyms. (5) The scatter colours points by maturity with no legend; the caption says 'darker points' for longer maturities while the palette is a rainbow; the only legend swatch ('Vomma Z-score') shows the first point's red. (6) 'Points above z=+2 \u2026 are flagged' although the rule is |z|>2.",
+   "evidence": "parquet: per-maturity qv_convexity std = 0.0 and mean == max (e.g. 365d 15.9343e-4). Desktop screenshot shows 'MEAN VANNA \u2014 BY MATURITY (\u2202\u00b2V/\u2202S\u2202\u03a3)' and a vanna chart without a y-title. greeks.html:283 matColorMap rainbow; legend lists only 'Vomma Z-score', 'Zero', '|z| = 2'.",
+   "proposed_fix": "Plot a single QV series with a correct caption ('Var of integrated variance under the calibrated Heston CIR, by maturity'). Merge the vanna options instead of replacing y, and add units (e.g. 'vanna per 1% spot \u00d7 1 vol pt'). Wrap Greek symbols in <span style='text-transform:none'>. Subtitle: 'Vomma (Volga) \u00b7 Vanna \u00b7 QV'. For the scatter, create one dataset per maturity so the legend names each colour, and draw both \u00b12 bands with the label '|z| > 2'. Test: visual review plus a template check that the chart-title span with \u03c3 has text-transform none.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-cdn-sri-fonts",
+   "title": "Chart.js loads render-blocking from a CDN with no SRI and no fallback (CDN failure kills every chart); chart fonts 'Menlo' with no fallback render as serif Times on Linux/Windows",
+   "severity": "low",
+   "category": "security",
+   "locations": [
+    "dashboard/templates/base.html:25",
+    "dashboard/templates/base.html:710-767",
+    "dashboard/templates/calibration.html:518",
+    "dashboard/templates/greeks.html:242"
+   ],
+   "description": "<script src='https://cdn.jsdelivr.net/npm/chart.js@4.4.3/\u2026'> is version-pinned (good) but has no integrity/crossorigin, so a compromised or tampered CDN response executes on the site, and it is parser-blocking in <head>. If it fails to load, the base inline script throws 'Chart is not defined' and every chart is blank with no message. Chart tick and legend fonts are `{family: 'Menlo'}` with no generic fallback, so on non-macOS systems canvas falls back to the default serif, visible as Times-like tick labels in the Chromium screenshots.",
+   "evidence": "Playwright with jsdelivr aborted: pageerror ['Chart is not defined', 'Chart is not defined']. openssl sha384 of chart.umd.min.js@4.4.3 = JUh163oCRItcbPme8pYnROHQMC6fNKTBWtRG3I3I0erJkzNgL7uxKlNwcrcFKeqF. Crop crop_qv.png shows serif tick and legend text.",
+   "proposed_fix": "Preferred: vendor chart.umd.min.js into dashboard/static, have freeze_site copy it, and reference it with `defer`, wrapping page scripts in DOMContentLoaded. Otherwise add integrity='sha384-JUh163oCRItcbPme8pYnROHQMC6fNKTBWtRG3I3I0erJkzNgL7uxKlNwcrcFKeqF' crossorigin='anonymous' plus a `window.Chart || document.write(local copy)` fallback, and show a 'charts unavailable' note on failure. Set Chart.defaults.font.family = \"Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', monospace\" and remove the per-axis family overrides. Test: Playwright with the CDN blocked still renders the charts.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-seo-meta",
+   "title": "Every page declares canonical and og:url = the homepage; sitemap lastmod is always today; the OG image says '631 tests' while the pages say 666",
+   "severity": "low",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/base.html:11-24",
+    "dashboard/freeze_site.py:70-78",
+    "dashboard/make_og_image.py:73",
+    "dashboard/templates/base.html:641"
+   ],
+   "description": "base.html hard-codes <link rel='canonical' href='https://navnoorbawa.me/'> and og:url for all four pages. That tells search engines that calibration, greeks and backtest are duplicates of the home page, which conflicts with the sitemap listing them; Google's rel=canonical guidance treats pointing distinct pages at another URL as a mistake that drops them from the index. og:title and description are also identical on every page. The sitemap stamps lastmod=today on every page every run, although three pages do not change daily. The social card (og-image.png, from make_og_image.py) shows '631 tests' while the page banner, og:description and og:image:alt say '666 tests', and CI runs 642 passed + 24 skipped. The count is maintained by hand in four places.",
+   "evidence": "curl live pages: all contain href=\"https://navnoorbawa.me/\" as canonical. make_og_image.py:73 ('631', 'tests'). Live sitemap: all four <lastmod>2026-09-24</lastmod>. Reference: developers.google.com/search/docs/crawling-indexing/consolidate-duplicate-urls and the '5 common mistakes with rel=canonical' post.",
+   "proposed_fix": "Pass the page path from each route and render canonical/og:url = https://navnoorbawa.me/{{ path }}, with per-page og:title and og:description. Sitemap lastmod = the data date that drives each page (spx_date, calib as_of, greeks as_of, backtest end). Put a single TEST_COUNT (written by CI) in one place and use it in base.html and make_og_image.py, and regenerate the card. Test: freeze and assert each page's canonical ends with its own filename.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-print-sticky",
+   "title": "Nav is not sticky (inline style overrides it); print output has no print CSS, near-invisible neon-on-white text and a truncated equity chart",
+   "severity": "low",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/base.html:61-72",
+    "dashboard/templates/base.html:652",
+    "dashboard/templates/base.html:26-635"
+   ],
+   "description": "`.nav {position: sticky}` is overridden by `<nav class='nav' style='position:relative;'>`, so the nav scrolls away on the 6,000-px backtest page. Sticky is already a positioned containing block for the mobile dropdown, so the inline style is unnecessary. Print: there are no @media print rules. Browsers drop the dark backgrounds, leaving #00ff88 text on white (about 1.3:1). Chart.js canvases are not resized on beforeprint, so the printed equity curve is clipped: its axis ends at 2021-09-01, losing about 3.5 years. There is also no `color-scheme: dark` declaration.",
+   "evidence": "Playwright: getComputedStyle(nav).position='relative'; nav top after scrolling 2000px = \u22121964. page.pdf(print media) of backtest: the first page's equity chart x-axis ends '2021-09-01' (print_p0.png). The stylesheet scan finds no 'print' media rule.",
+   "proposed_fix": "Remove the inline style. Add `@media print { :root{--bg:#fff;--surface:#fff;--text:#111;--text2:#333;--text3:#555;--accent:#007a43} .nav,.top-banner{display:none} .card{break-inside:avoid} }`. Add `window.addEventListener('beforeprint', () => Object.values(Chart.instances).forEach(c => c.resize()))` (per Chart.js responsive docs) and an afterprint resize. Add <meta name='color-scheme' content='dark'>. Test: Playwright print PDF, check that the last x tick is \u2265 2025.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "dashux-frontpage-label-nits",
+   "title": "Front-page labels are inconsistent: VIX colour and text thresholds disagree, 'Model: OLS + GARCH(1,1)' for a pure OLS number, the COVID stress numbers don't reproduce, a categorical term-structure axis, and '1.1th' / '$-261,206' formatting",
+   "severity": "low",
+   "category": "ux",
+   "locations": [
+    "dashboard/templates/index.html:63-71",
+    "dashboard/templates/index.html:283",
+    "dashboard/templates/index.html:391-398",
+    "dashboard/templates/index.html:226-228",
+    "dashboard/templates/index.html:409-455",
+    "dashboard/templates/backtest.html:10",
+    "dashboard/app.py:164-173"
+   ],
+   "description": "(1) VIX card: colour is red >25 and yellow >18, but the text is >30 fear, >20 caution, >15 NORMAL. VIX 19 renders yellow with '\ud83d\udfe2 NORMAL range', and VIX 27 renders red with '\ud83d\udfe1 ELEVATED \u2014 caution'. (2) 'Model: OLS + GARCH(1,1)': the displayed forecast is linear_.coef_\u00b7x + intercept only. (3) COVID card: 'PDV predicted 92.4% \u2026 Actual realised 202.6%'. The shipped model's forecast made on 2020-03-16 is 91.6% (and 63.9% for the 03-16 session made on 03-13). 92.4% is actually the realised |r|\u00b7\u221a252 of 2020-03-17, and 202.6% is a single day's |r|\u00b7\u221a252 (2020-03-16), not a realised volatility. (4) The VIX term-structure chart uses a category axis, so 9/30/93/182-day tenors are equally spaced and spline-smoothed (tension 0.35), which distorts the curve's shape. The underlying query takes each ticker's own MAX(date) ('may differ in date') and shows no per-tenor dates, so a Yahoo ^VIX-only day would mix sessions silently. (5) '1.1th percentile' ordinal. Negative currency prints as '$-261,206', '$-599,995', '$+458,120'.",
+   "evidence": "index.html:63 `d.vix > 25 \u2026 > 18` vs :67-70 `> 30 / > 20 / > 15`. pdv_model.pkl: forecast 2020-03-16 = 91.6%, 2020-03-13 = 63.9%; abs_r_ann 2020-03-16 = 202.6%; _y(2020-03-16) = 0.9243. Rendered backtest: 'P&L: $-261,206', '$+458,120'.",
+   "proposed_fix": "Share one threshold table for VIX colour and text (e.g. <15 low, 15\u201320 normal, 20\u201330 elevated, >30 stress). Label the model 'OLS (PDV linear)'. Compute the COVID card from pdv_model at render time and label the 'actual' honestly (next-day |r|\u00b7\u221a252, or 21-day realised). Use `type:'linear'` x with tenor days, tension 0, and show the per-tenor date in the tooltip, requiring same-date tenors for the contango label. Add a Jinja money filter producing '\u2212$261,206' and a proper ordinal/rounded percentile ('1st', '75th'). Test: template-level unit tests for the filters.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  }
+ ],
+ "checked_ok": [
+  "No page-level horizontal overflow at 1440/390/360/320px on any of the 4 pages or 404 (documentElement.scrollWidth == clientWidth)",
+  "No console errors, page errors or failed requests on any live page when Chart.js loads",
+  "<html lang='en'> present on all pages; titles distinct per page; favicon (inline SVG) present",
+  "og:image is an absolute URL, returns 200 image/png, 1200x630 matching og:image:width/height; twitter:card summary_large_image set",
+  "robots.txt and sitemap.xml are served; unknown paths return HTTP 404 with the branded 404.html",
+  "Chart.js version is pinned (chart.js@4.4.3); external links use rel=noopener; GitHub/Substack links resolve (LinkedIn 999 is its bot block)",
+  "Keyboard focus ring is visible on nav links (UA default outline not removed); the hamburger toggles aria-expanded correctly",
+  "Live frozen calibration/greeks/backtest pages are byte-identical to a local freeze from the repo; only index differs (the live DB is newer)",
+  "PDV card coefficients (0.354, 0.241, \u22121.496, 0.0346), EWMA half-lives 5/60d, GARCH persistence 0.979 and \u03b2 0.890 match pdv_model.pkl",
+  "Top feature fear_premium 39% matches clf.feature_importance()",
+  "Rule-label distribution (R0 10.2% / R1 68.0% / R2 21.8% of 4,189 days) is computed from the parquet, not hard-coded (the C21 fix is correct)",
+  "Calibration derived numbers are correct: \u221a\u03b8=20.77%, \u221av0=10.43%, half-life ln2/\u03ba\u00b7252 = 34.9 trading days, Feller margin \u22121.10e\u221207 BINDING, pinned [rho, sigma] consistent with count_pinned_params",
+  "Backtest KPI cumulative \u221226.12%, annualised \u22124.13% (7.17y geometric), Sharpe \u22121.799 and max DD \u221231.54% agree with the engine metrics and the C21 commit",
+  "Variants table colouring is now sign-driven (the C21 fix is correct)",
+  "Neon accent #00ff88 on #0a0a0a/#111 passes AA (14.8:1 / 14.1:1); red #ff3333 5.2:1 and blue #3388ff 5.5:1 pass for text"
+ ]
+}

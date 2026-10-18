@@ -1,0 +1,317 @@
+{
+ "findings": [
+  {
+   "id": "tests-spx-sufficiency-gate-and-selector-untested",
+   "title": "Single-expiry (9-option) SPX fits pass the quality gate and win the untested dashboard selector, so the live headline is now an under-identified fit",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:157-200",
+    "dashboard/app.py:47-91",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:393-465",
+    "data_store/calibrations/joint_cal_2026-09-25.pkl"
+   ],
+   "description": "The C20 fix added a data-sufficiency precondition for the VIX leg only (n_vix_tenors >= 3). Nothing checks whether the SPX leg is sufficient. Since the daily bot started taking the first 8 yfinance expiries of a daily-expiry chain, every accepted fit has used 9 SPX options from one expiry: 09-11, 09-25, 09-28, 10-02, 10-07 and 10-09. Fitting 5 Heston parameters to one smile plus 4 VIX points gives a spuriously excellent SPX RMSE, which is the C20 failure mode moved to the other leg. The min-RMSE selector latest_good_calibration_path() then headlines that fit. The selector has zero test coverage, so neither its tenor check nor any future SPX check is pinned. Its docstring also says it 'Falls back to the newest sufficient file', but app.py:90 returns cals[-1], the newest file whether or not it was accepted.",
+   "evidence": "Shipped pickles (n_spx_options, n_vix_tenors, spx_iv_rmse): 09-11 (9, 4, 0.215), 09-25 (9, 4, 0.041), 09-28 (9, 4, 0.649), 10-02 (9, 4, 0.195), 10-07 (9, 4, 0.295), 10-09 (9, 4, 1.796). _CAL_STRIKES_PER_EXPIRY = 9.\n\nIn my copy, latest_good_calibration_path() returns joint_cal_2026-09-25.pkl: kappa 3.32, sigma 0.295, rho -0.95 (at its bound), v0 0.00958.\n\nThe live page https://navnoorbawa.me/calibration reads: '2026-09-25 ... SPX IV RMSE 0.041 vol pts Good fit ... Fit from 9 SPX options and 4 VIX tenors ... sqrt(v0) = 9.79% spot vol'.\n\nSynthetic reproduction: _prepare_spx_surface on the live first-8 expiries (0,1,2,3,4,7,8,9 days) gives anchors=9, expiries=1.\n\nCoverage: dashboard/app.py is 817 statements at 0%.\n\nMutant M03 (selector call changed to is_acceptable_calibration(params, rmse, None)) SURVIVED: 73 passed across test_joint_calibrator, test_data_pipeline and test_c21.\n\nWith an n_spx_options >= 27 (3+ expiry) precondition the selector would pick joint_cal_2026-07-01.pkl (0.375 vp, 54 options).\n\nREADME:118-121 claims sufficiency is 'enforced both at write time and at selection time'.",
+   "proposed_fix": "1. Persist n_spx_expiries in JointCalibrator.calibrate() results.\n2. Add an n_spx_expiries argument to is_acceptable_calibration and reject fits with fewer than _MIN_SPX_EXPIRIES = 3. For legacy pickles, fall back to n_spx_options >= 27.\n3. Pass it at write time (cloud_refresh.py:324) and in the selector (app.py:80).\n4. Make the selector fall back only to a sufficient file. If none exists, use the documented showcase.\n\nTests to add:\n(a) is_acceptable_calibration({'kappa':3.3,'sigma':0.3,'rho':-0.9}, 0.041, n_vix_tenors=4, n_spx_expiries=1) is rejected.\n(b) Write three pickles into tmp_path (1-tenor RMSE 0.049, 1-expiry RMSE 0.041, healthy RMSE 0.375), monkeypatch app.DATA, and assert the healthy one is returned.\n(c) With only insufficient pickles, assert the showcase fallback is returned.\n(d) Re-run mutant M03; it must be killed.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "tests-cloud-refresh-daily-path-untested",
+   "title": "The daily bot's calibration path has 12% coverage, and no test would catch the live daily-expiry outage",
+   "severity": "high",
+   "category": "reliability",
+   "locations": [
+    "scripts/cloud_refresh.py:241",
+    "scripts/cloud_refresh.py:268-281",
+    "scripts/cloud_refresh.py:308",
+    "scripts/cloud_refresh.py:379-390",
+    "joint_vol_calibration/tests/test_data_pipeline.py:136-153",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:156-198"
+   ],
+   "description": "recalibrate_heston() has no behavioural test. That covers the expiry selection `exps[:8]`, the chain-to-options_snapshots mapping, the JointCalibrator(as_of_date=TODAY) call and the rejection handling. The only cloud_refresh tests check latest_session_date/calibration_path plus three source-string greps. On a chain with daily expiries, the first 8 listed expiries span 0-9 days, so the calibrator's 14..365d buckets can only ever be served by one expiry. That is the outage in production. __main__ also ignores the return value of recalibrate_heston(), so the job succeeds when every fit is rejected.",
+   "evidence": "Coverage, exact for these files because only test_data_pipeline and test_c21 touch them: scripts/cloud_refresh.py has 216 statements, 191 missed (12%), missing lines 63-110, 136-204, 211-359, 365-374 and 380-394. Steps 1-4 of the bot are all uncovered.\n\nLive yfinance ^SPX on 2026-10-12: 55 expiries listed. The first 8 are 2026-10-12..10-21, i.e. [0,1,2,3,4,7,8,9] days. Buckets reachable from those 8: [9] only. Buckets reachable from all listed expiries: [14,30,53,95,186,368].\n\nMutant M01 (exps[:8] changed to exps[:1]) SURVIVED with 19 passed.\n\nMutant M02 (opts['right'] = ...str[0] without .upper(), so every row fails the calibrator's `right == 'C'/'P'` OTM mask and the surface is empty) SURVIVED with 19 passed.",
+   "proposed_fix": "Refactor cloud_refresh into testable units:\n- select_calibration_expiries(expiries, session_date): for each _CAL_EXPIRY_TARGETS_DAYS target, pick the nearest listed expiry >= _MIN_T_DAYS, deduplicated.\n- chain_to_snapshot(df, session_date): the mapping currently at lines 268-281.\n- Make recalibrate_heston return a status, and have __main__ exit non-zero or emit a ::warning:: annotation after N consecutive rejected sessions.\n- Move os.chdir and logging.basicConfig under __main__.\n\nTests:\n(1) A synthetic list of business-day expiries for 60 days plus monthlies to 2 years: the selection must cover >= 4 of the 6 buckets.\n(2) chain_to_snapshot maps call/put to C/P, falls back to lastPrice when there is no bid/ask, uses T in years, and drops 0DTE.\n(3) End-to-end: monkeypatch yf.Ticker with a fake daily-expiry chain, use a temp DB (see the conftest finding), stub JointCalibrator.calibrate to capture cal.spx_surface, and assert time_to_expiry.nunique() >= 4.\n(4) A run whose fits are all rejected returns non-zero.\nRe-run mutants M01 and M02; both must be killed.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "tests-prior-fix-regression-guards-vacuous",
+   "title": "The regression tests for the C20/C21 fixes don't exercise production code: tautologies, re-implemented guards and source greps",
+   "severity": "high",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/tests/test_joint_calibrator.py:529-544",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:51-64",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:66-85",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:104-113",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:156-198",
+    "joint_vol_calibration/calibration/joint_calibrator.py:542-546",
+    "joint_vol_calibration/backtest/backtest_engine.py:887-904",
+    "joint_vol_calibration/backtest/backtest_engine.py:458-461"
+   ],
+   "description": "Commit 35690a2 claims 'a regression guard on the weight renormalisation', and 75b4844 says test_c21 'pins every fix above'. In practice:\n- TestSparseVIXWeightRenormalisation recomputes the correct and the buggy formula inside the test and never calls JointCalibrator.\n- test_engine_falls_back_when_series_does_not_span_window copies the guard's condition into the test and asserts its own copy. Its caplog argument is unused.\n- test_metrics_reject_a_stub_rate_series asserts only isfinite. compute_metrics still forward-fills the stub, which is exactly what its docstring says must not happen.\n- test_engine_marks_use_incremented_day_count greps the source for a string. A real decay regression passes it, and a behaviour-preserving refactor fails it.\n- The cloud_refresh fixes are protected only by substring checks.\n- None of the dashboard fixes in 75b4844 (regime-frequency card, PDV staleness stamp, KPI trade count, variant colours) has a test.",
+   "evidence": "Weight renormalisation: mutant M04 (the sequential w1/w2 bug reintroduced) SURVIVED with 64 passed. Coverage shows lines 542-546 (the renormalisation branch) never execute. The 2026-03-24 fixture has 14 VIX options, and the branch needs fewer than 5.\n\nRate-series guard: mutant M08 (span guard disabled) SURVIVED with 35 passed.\n\nStub forward-fill: compute_metrics(nav, rf_series=7-row stub) gives Sharpe -141.813873, identical to a hand-built series forward-filled to 1.5% from June (-141.813873).\n\nMark-to-model decay: mutant M10 moves the days_biz increment before T_rem while keeping the '(days_biz + 1)' text, which double-counts decay. It SURVIVED with 38 passed, including the grep test. Mutant M11 is the semantically identical `(1 + days_biz)` and was KILLED at test_c21_audit_fixes.py:109.",
+   "proposed_fix": "(a) Build a JointCalibrator through monkeypatched db getters returning 3 VIX options. Assert w3 == 0, w1 + w2 == 1 and w1/w2 == 0.5/0.6.\n(b) Call BacktestEngine.run on a short synthetic window with a monkeypatched get_tbill_rates_series returning a 7-row stub. Assert engine._rate_series is None and caplog contains 'does not span'.\n(c) Make compute_metrics ignore an rf_series covering < 80% of the window (fall back to the scalar rf). Assert m_stub['sharpe'] == compute_metrics(nav, rf=0.05)['sharpe'].\n(d) Replace the inspect.getsource test with a behavioural mark test: with constant S and VIX, _simulate_straddle_pnl's day-1 mark must equal _bs_straddle_value(S, K, T_entry - 1/252, ...), checked through the daily P&L with zero costs.\n(e) Replace the source greps with the cloud_refresh unit tests from the previous finding.\nAll of M04, M08 and M10 must then be killed.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "tests-db-written-by-suite-no-conftest",
+   "title": "test_rates writes synthetic rows into the tracked production DB, the restore isn't crash-safe, and there is no conftest DB redirect",
+   "severity": "high",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/tests/test_rates.py:27",
+    "joint_vol_calibration/tests/test_rates.py:43-81",
+    "joint_vol_calibration/tests/test_rates.py:107-126",
+    "joint_vol_calibration/tests/test_rates.py:258-262",
+    "joint_vol_calibration/config.py"
+   ],
+   "description": "After C21 the suite still writes np.linspace(0.015, 0.020, 7) into data_store/vol_system.db, the tracked DB that the backtest hurdle reads, and relies on a snapshot/restore fixture to undo it. On a clean run the restore works and the file is byte-identical. If the runner is killed before teardown (CI timeout, OOM, cancel, Ctrl-C during teardown), the synthetic rows persist. That is the exact state that produced the C21 Sharpe incident. Only test_lookahead redirects to a temp DB, and there is no conftest.py or pytest config for shared isolation.",
+   "evidence": "Hard-kill reproduction, using a private plugin that calls os._exit(137) in pytest_runtest_teardown after test_insert_rate_decimal: the production DB then holds 2020-01-02..10 = [0.015, 0.015833, 0.016667, 0.0175, 0.018333, 0.019167, 0.02] instead of the real ^IRX values (0.01495, 0.01473, ...). After a WAL checkpoint, `git status` shows ' M data_store/vol_system.db' and sha1 changes from ab4f5933... to 8f850a5f....\n\nClean run of test_rates.py: 18 passed, content and sha1 unchanged, but the DB is opened read-write (mtime 08:45).\n\n`find . -name conftest.py`, pytest.ini and pyproject.toml: none exist.",
+   "proposed_fix": "Add joint_vol_calibration/tests/conftest.py with a session-scoped autouse fixture that copies data_store/vol_system.db into tmp_path_factory and patches joint_vol_calibration.config.DB_PATH, joint_vol_calibration.data.database.DB_PATH and PARQUET_DIR (pytest.MonkeyPatch.context()). In test_rates, read db_module.DB_PATH at call time instead of importing DB_PATH at module load. Add a CI step `git diff --exit-code -- data_store` after pytest. Re-run the hard-kill reproduction: the production DB must stay untouched.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-lookahead-vix-ts-query-untested",
+   "title": "There is no look-ahead test for get_vix_term_structure(_wide) or get_regime_labels; removing the as_of filter passes every test",
+   "severity": "medium",
+   "category": "look-ahead",
+   "locations": [
+    "joint_vol_calibration/data/database.py:457",
+    "joint_vol_calibration/data/database.py:507-519",
+    "joint_vol_calibration/tests/test_lookahead.py:128-270"
+   ],
+   "description": "The project's headline claim is 'zero look-ahead bias enforced at the database query level'. test_lookahead covers get_spx_ohlcv, get_vix_daily, get_vix_futures_curve and get_options_surface. It does not cover get_vix_term_structure/_wide, which feeds the calibrator's VIX leg, the regime labels and the signal features. get_regime_labels is never executed by any test.",
+   "evidence": "Mutant M21 changes database.py:457 to `WHERE (date <= ? OR 1=1)`. It SURVIVED across test_lookahead, test_c21, test_data_pipeline, test_regime_classifier and test_joint_calibrator (221 s, rc 0).\n\nCoverage of database.py misses 434-444, 479, 494-504 and 509-519, i.e. insert_vix_term_structure, part of the wide pivot, and insert/get_regime_labels.",
+   "proposed_fix": "In test_lookahead, using its temp_db fixture:\n- Insert term-structure rows for 3 dates. Assert get_vix_term_structure(_wide)(as_of=middle) has max(date) == middle and excludes the later row. Assert start_date filtering.\n- Do the same for get_regime_labels and get_tbill_rates_series.\nMutant M21 must then be killed.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-tautological-pricing-tests-hide-vix-put-bug",
+   "title": "The put-call parity tests are identities, and they hide negative VIX put prices and a T=0 VIX call discontinuity",
+   "severity": "medium",
+   "category": "math-correctness",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:399-401",
+    "joint_vol_calibration/calibration/joint_calibrator.py:443-453",
+    "joint_vol_calibration/calibration/joint_calibrator.py:907",
+    "joint_vol_calibration/models/heston.py:197-205",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:73-77",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:99-126",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:139-142",
+    "joint_vol_calibration/tests/test_heston.py:51-73"
+   ],
+   "description": "Both put pricers are defined by parity, so both parity tests compare a formula with itself; the 3.0, 0.10 and 0.50 tolerances are irrelevant. The VIX put uses sqrt(E[VIX^2]) as the forward instead of E[VIX], a Jensen gap of about 1.2 VIX points at the calibrated parameters. That makes model puts negative. These puts are what the VIX-options leg (joint_calibrator.py:907) fits against. The site attributes that leg's 37.14 vp failure to 'a structural failure of the CIR density', and that attribution was never tested against this pricing defect.\n\nThe T<=0 branch prices off sqrt(theta) instead of VIX(0) from v0. The tests 'deep ITM call >= intrinsic' and 'T=0 returns intrinsic' only assert p >= 0, so neither problem can surface.",
+   "evidence": "VIX parity residual: 8.9e-16 (test tolerance 3.0). Heston parity residual: 4.5e-13 (tolerances 0.10 and 0.50).\n\nheston_vix_put_price at kappa 4.62, theta 0.0764, sigma 0.84, v0 0.0561 (2026-03-24 calibrated parameters), compared with direct integration of max(K-VIX, 0) over the same ncx2 density:\n- K=15, T=30d: -0.9927 vs 0.1842\n- K=18, T=30d: -0.4899 vs 0.6863\n- K=22, T=60d: 0.7107 vs 2.2938\nE[VIX] = 24.29.\n\nheston_vix_call_price(15, T, kappa=3, theta=0.04, sigma=0.5, v0=0.09) returns 5.0000 at T=0 and 14.0334 at T=1e-4. The true VIX(0) is 29.04.\n\nMutant M16 (density Jacobian 2c changed to 2.4c, +20% on every VIX call) SURVIVED with 7 passed.\n\nThe leg is currently off (config JOINT_W3 = 0.0).",
+   "proposed_fix": "Price VIX puts by integrating max(K - VIX, 0) against pdf_v, or use parity with E[VIX] = integral of vix_grid * pdf_v. In the T<=0 branch, use 100*sqrt(theta*(1-f) + v0*f).\n\nTests:\n- put >= 0, and put >= e^{-rT} * (K - E[VIX]).\n- Parity against the integrated E[VIX] forward within 1e-3.\n- |C(T=0) - C(T=1e-4)| < 0.05 with v0 != theta.\n- Replace the Heston parity test with an independent put (MC put already exists in TestMonteCarlo) or a published reference value.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-core-math-mutants-survive",
+   "title": "Mutation testing: 18 of 20 behaviour-changing mutants in load-bearing code survive the suite",
+   "severity": "medium",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:801",
+    "joint_vol_calibration/backtest/delta_hedger.py:473",
+    "joint_vol_calibration/models/heston.py:425",
+    "joint_vol_calibration/models/heston.py:539",
+    "joint_vol_calibration/calibration/joint_calibrator.py:81",
+    "joint_vol_calibration/calibration/joint_calibrator.py:93",
+    "joint_vol_calibration/calibration/joint_calibrator.py:102",
+    "joint_vol_calibration/calibration/joint_calibrator.py:191",
+    "joint_vol_calibration/backtest/backtest_engine.py:460",
+    "joint_vol_calibration/signals/signal_engine.py:766-775"
+   ],
+   "description": "Beyond the mutants listed in other findings, single-line plausible bugs in the pricing, hedging, gate and metrics code pass the full relevant test files. Only 2 mutants were killed. M09 (Sharpe x252) was killed incidentally by the Sortino >= Sharpe check. M15 (build_dataset without shift) was killed by test_feature_shift_zero_lookahead. The harness is scratchpad/audit/tests_mutate.py; each mutant ran the test files that import the module, in a private copy.",
+   "evidence": "Each line shows the mutant, its effect, and the test run that SURVIVED.\n- M05: Feller penalty zeroed. 54 passed; test_feller_penalty_active asserts only isfinite.\n- M12: hedge sign flipped, pnl_total = dV + delta*dS. 62 passed; the attribution identity holds by construction.\n- M13: Bates compensator removed. 53 passed. phi_Bates(-i)/F is 1.0000000 with the compensator and 0.97705 without it, a 2.3% forward error.\n- M06: _CAL_EXPIRY_TARGETS_DAYS = [30]. 64 passed.\n- M07: _MIN_VIX_TENORS changed 3 -> 2. 64 passed.\n- M17: 50% bucket tolerance removed. 64 passed.\n- M18: rf_series bfill, i.e. a future-rate look-ahead in Sharpe. Passed.\n- M19: kappa upper-bound gate dropped. 64 passed.\n- M20: VIX3M tenor 91d changed to 30d. 64 passed.\n- M14: S2 stop-loss propagation removed. 6 passed.\n- M16: VIX density x1.2. 7 passed.",
+   "proposed_fix": "Add targeted tests, then re-run the harness. Every mutant should be killed.\n- M05: joint_loss([0.5, 0.01, 0.3, -0.7, 0.01]) - joint_loss with the penalty constant monkeypatched to 0 == 50 * (0.09 - 0.01)**2.\n- M12: for a short window, assert sum(pnl_total) == (V_T - V_0) - sum(delta_{t-1} * dS_t), computed independently from the sim columns.\n- M13: assert |bates_characteristic_function(-1j, ...) / (S e^{(r-q)T}) - 1| < 1e-10.\n- M07: is_acceptable_calibration(..., n_vix_tenors=2) is rejected.\n- M19: kappa = 19.95 is rejected.\n- M20: assert the tenor_years list equals [9, 30, 91, 182]/365.\n- M18: a step-function rf_series must give a different Sharpe if back-filled.\n- M06, M17: a monthly-style chain yields 6 distinct expiries and no duplicated rows.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "tests-literal-tautologies",
+   "title": "Some assertions cannot fail: 'or True', 'x == 0 or x != 0', checks of a fixture against itself, and formulas re-derived in the test",
+   "severity": "medium",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/tests/test_signal_engine.py:265",
+    "joint_vol_calibration/tests/test_signal_engine.py:292",
+    "joint_vol_calibration/tests/test_signal_engine.py:306",
+    "joint_vol_calibration/tests/test_signal_engine.py:403",
+    "joint_vol_calibration/tests/test_signal_engine.py:367-374",
+    "joint_vol_calibration/tests/test_signal_engine.py:1301-1305",
+    "joint_vol_calibration/tests/test_signal_engine.py:1375-1383",
+    "joint_vol_calibration/tests/test_delta_hedger.py:272-292",
+    "joint_vol_calibration/tests/test_delta_hedger.py:520-543",
+    "joint_vol_calibration/tests/test_regime_classifier.py:162-168",
+    "joint_vol_calibration/tests/test_quintic_ou.py:206-219",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:207-220"
+   ],
+   "description": "Examples:\n- `assert pos[k] == 0 or pos[k] != 0` (line 265).\n- Three `assert ... or True` (292, 306, 403).\n- test_exit_on_reversion: tail is taken after the LAST non-zero row, so it is all zeros by definition.\n- test_vrp_is_positive_when_fear_premium_above_one tests its own arithmetic.\n- The S2 stop-loss test asserts pos == 0 only where days_held == 0, but signal_engine.py:778 zeroes days_held exactly where position is 0.\n- TestAttributionIdentity (4 tests) checks the hand-built mini_sim_df against the identity used to build it.\n- The run_simulation attribution and cum_pnl_a == cum_pnl_b tests are identities, because the residual is defined as the remainder.\n- test_no_future_data_used asserts len(feats) <= len(spx).\n- test_vix2_increases_with_xt asserts only > 0.\n- test_feller_penalty_active asserts only finiteness.",
+   "evidence": "Mutant M14 (stop-loss propagation removed) SURVIVED with 6 passed. The guard does fire: stop_day=305, positions 298..316 = [0,0,1,1,1,1,1,0,0,0,0,0,1,...], yet the inner assert is vacuous.\n\nM12 and M05 SURVIVED (see the mutation finding).\n\ncompute_vix2 at x = 0, 2, 3 gives 399.8, 747.1 and 2408.7, so the monotonicity the test's name claims is real but never asserted.",
+   "proposed_fix": "Replace each with the property it names:\n- S2 stop-loss: after stop_day, pos[j] == 0 until the next days_held == 1 in the raw state machine. Capture that before the zeroing, or assert the run [306..310] is all 0.\n- S4 reversion: the position returns to 0 within S4_MAX_HOLD bars of the last spike.\n- Delete the self-checking delta-hedger fixture tests, or point them at run_simulation output with an independent P&L recomputation.\n- regime_classifier: truncation-invariance like test_c21::test_rule_labels_are_same_day_observable, applied to build_features.\n- quintic: assert v_high > v_at0.\nAdd a lint step (grep for 'or True' / 'or .* != ') in CI.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-cwd-order-dependence",
+   "title": "Test outcome depends on working directory and on test order, because cloud_refresh does os.chdir at import",
+   "severity": "medium",
+   "category": "reliability",
+   "locations": [
+    "scripts/cloud_refresh.py:17-25",
+    "joint_vol_calibration/tests/test_data_pipeline.py:138-143",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:135",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:160",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:191",
+    "joint_vol_calibration/tests/test_signal_engine.py:1362",
+    "joint_vol_calibration/tests/test_signal_engine.py:1455"
+   ],
+   "description": "Several tests use paths relative to the CWD: 'data_store/signals/regime_labels.parquet', 'scripts/cloud_refresh.py' and 'data_store/signals/regime_classifier.pkl'. The S4/S1C integration tests silently pytest.skip when the path is missing. test_data_pipeline exec_module()s scripts/cloud_refresh.py, which at import runs os.chdir(ROOT), sys.path.insert and logging.basicConfig. That mutates process state for every later test. Run from the repo root everything passes. From anywhere else, the outcome depends on whether test_data_pipeline ran first.",
+   "evidence": "Run from joint_vol_calibration/:\n- `pytest tests/test_c21_audit_fixes.py <S4/S1C integration>` gives 3 failed (FileNotFoundError 'data_store/signals/regime_labels.parquet', 'scripts/cloud_refresh.py' x2) and 2 skipped ('Regime classifier not found').\n- Same tests with tests/test_data_pipeline.py placed first: 21 passed.\n\nWith pytest-randomly over c21 + data_pipeline + signal_engine from the same directory:\n- seeds 2, 5, 6: 134 passed\n- seed 1: 3 failed, 131 passed\n- seeds 3, 4: 3 failed, 129 passed, 2 skipped",
+   "proposed_fix": "Use ROOT = Path(__file__).resolve().parents[2] for every data path in the tests. In cloud_refresh.py, move os.chdir, sys.path and logging.basicConfig under `if __name__ == '__main__'`. Add a pytest.ini with testpaths and rootdir. Add a CI job that runs `pytest -p randomly` from a non-root CWD.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-ci-not-run-on-bot-commits",
+   "title": "CI never runs on the daily bot's commits, the refresh job runs no tests, and CI uses an unpinned pytest",
+   "severity": "medium",
+   "category": "devops",
+   "locations": [
+    ".github/workflows/daily_refresh.yml:53-75",
+    ".github/workflows/tests.yml:47-56"
+   ],
+   "description": "The bot pushes with GITHUB_TOKEN, and GitHub does not start workflows from such pushes. The pickles and regime_labels.parquet it commits daily, which tests such as test_adaptive_gate_reproduces_shipped_labels read, have never been through CI. daily_refresh.yml commits and deploys without running any tests. tests.yml installs `pytest pytest-cov` unpinned, so the 4 PytestRemovedIn10Warning sites become errors when pytest 10 lands. Its comment still says '633 passed, 24 skipped'.",
+   "evidence": "`gh api repos/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/runs`: the newest run is 2026-09-05T11:40Z ('README: clean-clone figure from CI'). Every Auto-refresh commit since then, 2026-09-08 through 2026-10-10 (about 20), has no test run.",
+   "proposed_fix": "In daily_refresh.yml, before the commit step, run `pytest joint_vol_calibration/tests -q -m 'not slow' -x` and `git diff --exit-code -- data_store/vol_system.db`. Either trigger tests.yml with `workflow_run: [Daily Market Refresh]`, or push with a PAT or app token. Pin `pytest>=9,<10` until the fixture deprecations are fixed, and update the comment.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-class-scoped-fixture-deprecation",
+   "title": "Four class-scoped fixtures defined as instance methods raise PytestRemovedIn10Warning",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/tests/test_delta_hedger.py:501",
+    "joint_vol_calibration/tests/test_heston.py:490",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:333",
+    "joint_vol_calibration/tests/test_regime_pdv.py:692"
+   ],
+   "description": "pytest 9.1.1 warns 'Class-scoped fixture defined as instance method is deprecated', and the pattern is removed in pytest 10. CI installs pytest unpinned, so these 4 fixtures (TestRunSimulationIntegration.sim, TestMonteCarlo.paths, TestFullCalibration.calibrated, TestIntegration.model) will error on the next major release.",
+   "evidence": "From the coverage run's warnings summary: '_pytest/fixtures.py:1313: PytestRemovedIn10Warning: Class-scoped fixture defined as instance method is deprecated' at test_delta_hedger::TestRunSimulationIntegration, test_heston::TestMonteCarlo, test_joint_calibrator::TestFullCalibration and test_regime_pdv::TestIntegration. grep shows the 4 `@pytest.fixture(scope=\"class\")` sites.",
+   "proposed_fix": "Move each fixture to module level with scope='module' (or decorate with @classmethod), keeping the names. Run `pytest -W error::pytest.PytestRemovedIn10Warning` in CI.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-pickle-version-drift",
+   "title": "Shipped model pickles load with version-mismatch warnings, and the engine silently swallows load failures",
+   "severity": "low",
+   "category": "reliability",
+   "locations": [
+    "data_store/signals/regime_classifier.pkl",
+    "joint_vol_calibration/backtest/backtest_engine.py:648-653",
+    "dashboard/app.py:237",
+    "requirements.txt"
+   ],
+   "description": "regime_classifier.pkl was pickled with scikit-learn 1.7.1 and an older XGBoost. With sklearn 1.9.1 and xgboost 3.2.0, loading it emits InconsistentVersionWarning and an XGBoost serialization warning. Every BacktestEngine.run() in the unit tests loads it, and BacktestEngine._load_clf catches any exception and falls back silently, so a broken pickle can't fail a test. requirements.txt has only lower bounds. sklearn also warns in test_regime_classifier that sample weights are not passed to the FrozenEstimator base model, so use_sample_weights=True does not do what it says.",
+   "evidence": "pickle.load(regime_classifier.pkl) gives InconsistentVersionWarning for FrozenEstimator, IsotonicRegression (x3) and CalibratedClassifierCV ('from version 1.7.1 when using version 1.9.1'), plus the XGBoost 'loading a serialized model ... generated by an older version' UserWarning.\n\nThe coverage run's warnings summary shows 13 of each sklearn warning from test_backtest_engine.py, and 26 instances of 'FrozenEstimator does not appear to accept sample_weight' from test_regime_classifier.py.",
+   "proposed_fix": "Pin exact versions in requirements (or add a lock file). Persist XGBoost via Booster.save_model(JSON) and sklearn parts with the version recorded. Add a test that loads each shipped pickle under `warnings.simplefilter('error', InconsistentVersionWarning)`. Make _load_clf log at ERROR, and give tests a strict mode that raises.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-published-test-count",
+   "title": "The published '666 passing tests' counts 24 tests that always skip in CI, and the NN accuracy/speed claims are never verified in CI",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "README.md:7",
+    "README.md:145",
+    "README.md:153",
+    "substack_article.md:18",
+    "substack_article.md:26",
+    "substack_article.md:109",
+    "joint_vol_calibration/tests/test_nn_pricer.py:46-50"
+   ],
+   "description": "The badge, README, substack and site header all say '666 passing'. On a clean clone and in CI the result is 642 passed, 24 skipped, because the NN weights and training caches are gitignored and _make_pricer() calls pytest.skip. So the published 'C5 ... 8.1x speedup, MAE < 0.07 vol pts' is covered only by tests that cannot run in CI. Those tests also check the looser bounds MAE < 0.1 and speedup > 1.",
+   "evidence": "Coverage run: 639 passed, 24 skipped, 3 deselected, and 639 + 24 + 3 = 666. The live site header reads '14 components \u00b7 666 tests'. nn_pricer.py coverage is 28%.",
+   "proposed_fix": "Publish '642 passed, 24 skipped (NN tests need local weights)', or generate the badge from CI. Either ship a small NN weight artifact (or a CI cache) so test_benchmark_target_passed runs, or label the NN figures as local-only measurements with the exact command used.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "tests-loose-tolerances",
+   "title": "Many tolerances are orders of magnitude looser than the behaviour under test, including one that accepts a degenerate jump-MLE fit",
+   "severity": "low",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/tests/test_joint_calibrator.py:150-160",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:366-372",
+    "joint_vol_calibration/tests/test_quintic_ou.py:230-234",
+    "joint_vol_calibration/tests/test_quintic_ou.py:275-284",
+    "joint_vol_calibration/tests/test_regime_pdv.py:254-263",
+    "joint_vol_calibration/tests/test_regime_pdv.py:728-742"
+   ],
+   "description": "Examples:\n- The batch-vs-scalar Heston tolerance is 5.0 index points; the docstring says 0.5 vol points.\n- The SPX smile RMSE test allows 15 vp while the production gate rejects above 3 vp.\n- The Quintic ATM call band is 50..500.\n- The VIX futures band is 5..80, and the Jensen bound F <= 20 is never asserted.\n- The jump-MLE recovery test accepts lambda in 0.5..30 for a true value of 5, and never checks sigma_j. On its own fixture the fit collapses to the sigma_j lower bound.\n- The COVID jump test promises 'materially larger than 0.16pp' but asserts > 0.001.",
+   "evidence": "- max|batch - scalar| = 1.8e-4 at T = 0.1..1.0, against a tolerance of 5.0.\n- Quintic ATM call = 190.96 (IV 17.2%).\n- Quintic 1m VIX future = 19.997.\n- calibrate_jump_mle(seed 99, T=500, true lambda 5, sigma_j 0.025) gives lambda 3.397 and sigma_j 0.001, which is the bound.\n- With T=5000, the MLE recovers lambda 23.4 (true 20) and sigma_j 0.0297 (true 0.03), so a tight test is feasible.\n- _build_regime_pdv(0.35, 500).calibrate_jump gives lambda = 50.0, the upper bound, and test_params_within_bounds accepts it.",
+   "proposed_fix": "- Batch vs scalar: atol 1e-3.\n- SPX RMSE: < 3.0, matching the gate.\n- Quintic: assert ATM IV in [0.15, 0.22], and assert 15 < F <= 20 + 1e-6.\n- Jump MLE: T=5000 synthetic with |lambda_hat/lambda - 1| < 0.3, |sigma_j_hat/sigma_j - 1| < 0.2, and sigma_j_hat strictly inside its bounds.\n- Fail when the full-R2 MLE hits the lambda bound.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-duplicate-expiry-anchors",
+   "title": "SPX bucket selection can pick the same expiry for two targets and duplicate its 9 anchors; the tests count nunique so they can't see it",
+   "severity": "low",
+   "category": "math-correctness",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:633-652",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:266-269"
+   ],
+   "description": "_prepare_spx_surface picks the closest available expiry for each target independently and never marks it as used. When one expiry lies within 50% of two targets, its slice is appended twice, which double-weights that maturity in the SPX loss. test_spx_at_most_6_expiries checks nunique() <= 6, so neither duplicates nor too few expiries fail it.",
+   "evidence": "Synthetic chain with only a 20-day expiry: anchors=18, distinct expiries=1, duplicated rows=9. A monthly-style chain [14,30,60,91,180,365] gives 54 anchors, 6 expiries, 0 duplicates.\n\nMutant M17 (tolerance check removed) SURVIVED with 64 passed. Mutant M06 (single target) SURVIVED with 64 passed.",
+   "proposed_fix": "Keep a set of used expiries and skip any best_T already selected. Tests: no duplicated (strike, T, right) rows, and a well-populated chain yields >= 5 distinct expiries.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "tests-slow-walk-forward",
+   "title": "TestWalkForward re-runs a full 7-year walk-forward with production XGBoost settings once in each of its 3 tests, and dominates suite time",
+   "severity": "low",
+   "category": "performance",
+   "locations": [
+    "joint_vol_calibration/tests/test_backtest_engine.py:438-460",
+    "joint_vol_calibration/backtest/backtest_engine.py:1160-1270",
+    "joint_vol_calibration/signals/regime_classifier.py:151-166"
+   ],
+   "description": "_run_wf() is a plain helper, not a fixture, so walk_forward_validation runs 3 times. Each run retrains RegimeClassifier with XGB_PARAMS (n_estimators=300, n_jobs=-1, wrapped in a calibrator). n_jobs=-1 oversubscribes cores on a shared runner. The rest of the suite injects small test params (n_estimators=20, n_jobs=1) into the classifier; the WF path cannot. CI has a 20-minute job timeout.",
+   "evidence": "On this contended 4-core host: the suite without the 3 WF tests finished 639 passed + 24 skipped in 743 s (12m23s). The full run (--durations) spent more than 48 min wall and 15 CPU-min still inside the first WF test before I stopped it; py-spy showed it in _retrain_classifier -> xgboost update. An earlier run was killed by the 30-min limit inside the WF tests, so I could not collect a complete --durations=25 table under this load.",
+   "proposed_fix": "Make the walk-forward result a class or module fixture (run once). Let BacktestEngine.walk_forward_validation accept clf_params, and pass {'n_estimators': 20, 'n_jobs': 1} in tests. Mark it @pytest.mark.slow and run slow tests in a separate CI job. Then run `pytest --durations=25` again to confirm the suite is near the ~60 s baseline.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  }
+ ],
+ "checked_ok": [
+  "The shared repo /home/user/vol-system-dashboard was never modified (git status clean, DB mtime 2026-09-24). All runs used private copies under scratchpad/audit/.",
+  "Full suite excluding the 3 WalkForward tests, with coverage: 639 passed, 24 skipped, 3 deselected, EXIT=0, TOTAL 69%. git status in that copy was clean afterwards.",
+  "Clean (uninterrupted) test_rates run: the protect_production_rates fixture restores the 2020-01 window byte-identically (sha1 ab4f5933... unchanged; 21 rows, sum 0.3165 before and after).",
+  "test_lookahead's temp_db fixture isolates correctly: database.py resolves DB_PATH and PARQUET_DIR at call time, so the monkeypatch takes effect.",
+  "The C21 fix to test_rv_uses_only_past_data is correct: it now uses a business day with a hard precondition and runs non-vacuously.",
+  "The PDV walk-forward poison, embargo/purge and 'poison bites later' tests, and the end-to-end SignalEngine poison test, are genuine non-vacuous look-ahead proofs.",
+  "Heston MC vs analytic cross-validation (40K antithetic paths, 4 SE), Merton density integrating to 1, Feller PASS/BINDING/VIOLATED sweep, Gaussian moment recurrence and g0 normalisation are genuine independent checks.",
+  "These guarded tests do execute their assertions (guard conditions verified true): S2 backwardation, S2 contango, S3 low-ratio, S2X r2-exit, S4 max-hold, lookahead log_return, all-R2 combined_pos, far-OTM surface rows (1), and regime_pdv tail lambda > 0.",
+  "Mutants killed: M09 (Sharpe annualised x252, caught by Sortino >= Sharpe), M15 (build_dataset without .shift(1), caught by test_feature_shift_zero_lookahead), and M11 (an equivalent refactor that should not have been caught, which shows the grep test is brittle).",
+  "Randomness: all stochastic code paths used in tests are seeded (DE seed=RANDOM_SEED, QV MC default rng seeded, NN benchmark rng 42, HMM random_state). The only unseeded call is np.random.choice in TestSignalSummary.test_returns_dict, which only asserts dict type.",
+  "No test needs network access: the yfinance calls in test_data_pipeline are monkeypatched fakes.",
+  "test_c21::test_shipped_db_covers_the_backtest_window currently passes on real data: 4,185 T-bill rows from 2010-01-04, and Jan-2020 is real ^IRX, not linspace."
+ ]
+}

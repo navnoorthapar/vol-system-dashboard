@@ -1,0 +1,380 @@
+{
+ "findings": [
+  {
+   "id": "signals-r2-gate-adaptive-vs-fixed",
+   "title": "The backtest uses a fixed VVIX>100 R2 gate, but the site and docs say the adaptive gate is what the backtest trades on. A hard-coded override means the adaptive gate can never take effect.",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:935",
+    "joint_vol_calibration/signals/signal_engine.py:1151-1155",
+    "joint_vol_calibration/signals/regime_classifier.py:20",
+    "joint_vol_calibration/signals/regime_classifier.py:29",
+    "dashboard/app.py:275-276",
+    "dashboard/app.py:1106-1109",
+    "dashboard/templates/index.html (live card: 'the label the backtest trades on')",
+    "scripts/cloud_refresh.py:164"
+   ],
+   "description": "Two different R2 gates are in use. The live and published labels in regime_labels.parquet, plus the dashboard's 'Rule-Label Distribution' card (R2 21.8%), use the ADAPTIVE gate (rolling 252-day 80th percentile, vvix_threshold=None). The backtest calls build_regime_labels(spx_col, vix_col) with the default FIXED 100. SignalEngine.generate() then applies a hard-coded override, regimes_raw[VVIX>100]=2, on top of any precomputed labels. The result is the UNION of the two gates, so the adaptive gate can never lower R2 frequency in the trading path. Even so, the live card says the adaptive label is 'the label the backtest trades on', and the dashboard's improvement step 5 says the adaptive gate replaced the fixed 100 ('R2 ~53% \u2192 ~25%'). Other documented facts do not hold either. The module docstring says 100 is the '75th percentile of VVIX history', but it is the 67th percentile over 2010-2026 and the 52nd over the 2018-01-01..2025-03-24 backtest window. The '90.0% persistence' is measured on the fixed labels, while the card next to it shows the adaptive distribution, whose persistence is 86.6%. The choice of gate also dominates the headline: it moves the portfolio from \u221226% to \u221251%.",
+   "evidence": "Labels on the local DB: fixed-100 R2 share in the backtest window 47.7%, adaptive 23.3%. The two gates disagree on 30.1% of the 1,816 backtest-window days. Shipped parquet vs adaptive: 4125/4125 agree; vs fixed: 80.3%. VVIX percentile of 100: 0.674 (full history), 0.518 (2018-2025/03). Persistence 2020-2025: fixed 0.8998, adaptive 0.866. Backtest (run_backtest._load_data, DATA_START 2015):\n  as shipped (fixed + override): NAV 738,794, R2 share 0.480, S1 +693,938, S1C \u2212599,995, S4 \u2212206,437\n  adaptive labels + existing override: NAV 734,529, R2 0.508 (union)\n  adaptive labels, override disabled: NAV 485,973, R2 0.235, S1 +1,878,283, S1C \u22121,311,869, S4 \u2212256,379\nLive site text: 'Deterministic rule (rv\u2082\u2080 vs VIX \u00b7 VVIX gate) \u2014 the label the backtest trades on' next to 'R2 VOMMA ACTIVE 21.8% 912 / 4,189 days' and 'Persistence baseline: 90.0%'.",
+   "proposed_fix": "Choose ONE gate and use it everywhere. (a) Add a module constant R2_GATE (e.g. 'fixed100' or 'adaptive80') in regime_classifier.py. Have build_regime_labels, cloud_refresh.extend_regime_labels, BacktestEngine.run and the SignalEngine R2 override all read it. (b) Remove the hard-coded VVIX_REGIME2_THRESHOLD override in SignalEngine.generate, or make it apply the same gate as the labels. When precomputed_regimes is supplied it must not be modified. (c) If adaptive is chosen, re-run the backtest and republish every number. If fixed is kept, remove improvement step 5, change the live-card caption, and recompute the distribution card from the fixed labels. Correct the '75th percentile' docstring. Report persistence for the gate that is actually displayed. Test: assert (SignalEngine.generate(..., precomputed_regimes=L)['regime'] == L.shift(1)).all() on the overlap, and assert the parquet labels equal build_regime_labels(..., gate used by BacktestEngine).",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "signals-pdv-spread-units-mean-abs-vs-vol",
+   "title": "S1/S1C spread compares a mean-absolute-return forecast (1-day horizon) with the 30-day VIX. This units error biases the spread by about \u22128 vp and makes the S1 entry filter nearly non-binding.",
+   "severity": "high",
+   "category": "math-correctness",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:720",
+    "joint_vol_calibration/models/pdv.py:166-167",
+    "joint_vol_calibration/signals/regime_classifier.py:239-246",
+    "joint_vol_calibration/signals/signal_engine.py:387-395",
+    "joint_vol_calibration/signals/signal_engine.py:444-453",
+    "README.md:35-36"
+   ],
+   "description": "The walk-forward PDV that builds pdv_iv_spread is fit by build_xy(horizon=1), whose target is y = |r_{t+1}|\u00b7\u221a252. That is an estimate of E|r|, not of volatility \u03c3: under a Gaussian E|r| = \u03c3\u00b7\u221a(2/\u03c0) \u2248 0.80\u03c3, and fat tails push the ratio lower. The forecast therefore averages 11.7% against a forward 21-day realised vol of 16.5% (ratio 0.71), and is compared with VIX, a 30-calendar-day variance-swap vol. This is a horizon mismatch as well as a units mismatch. Guyon & Lekeufack (2023) target VIX or an intraday realised-vol estimator, not |r|. As a result pdv_iv_spread averages \u22128.0 vp. The S1 short condition (spread < \u22120.02) holds on 96.5% of R1 days, so S1 amounts to 'short straddle whenever flat in R1' and S1C to 'long straddle whenever flat in R1'. The published S1 (+$694K) and S1C (\u2212$600K) numbers are highly sensitive to this error. The live 'PDV FORECAST (REALISED) 8.37% / spread +6.81pp' is inflated for the same reason. Note also that 'IVR' is a misnomer: no implied-vol rank is computed anywhere.",
+   "evidence": "Over 2018..2025-03-24: E[pdv]=0.1172, E[|r_{t+1}|\u221a252]=0.1296, E[fwd RV21]=0.165, E[VIX]=0.1981. E[pdv]/E[rv21_fwd]=0.710 (\u221a(2/\u03c0)=0.798). RMS of next-day return (annualised \u03c3)=0.1969 vs mean |r| annualised 0.1296. pdv_iv_spread mean \u22128.01 vp. P(spread<\u22120.02 | R1)=0.965, P(spread>+0.02 | R0)=0.012. S1 days short 1020, long 20. Rerunning the canonical backtest with the WF PDV scaled by \u221a(\u03c0/2): NAV 738,794 \u2192 780,957; S1 +693,938 \u2192 +291,181 (56 trades); S1C \u2212599,995 \u2192 \u2212485,143 (82 trades); S3/S4 unchanged. Even after rescaling, P(spread<\u22120.02 | R1)=0.813, so the variance risk premium (VRP) still dominates the filter.",
+   "proposed_fix": "For the spread feature, fit the PDV on a variance target and compare in \u03c3 units at a matched horizon. Use y = sqrt(mean(r\u00b2_{t+1..t+21})\u00b7252) (build_xy horizon=21) or an intraday RV estimator, then \u03c3\u0302 = sqrt(forecast variance). Alternatively, at minimum multiply the |r| forecast by \u221a(\u03c0/2) and document the Gaussian assumption. Either de-mean the spread against its trailing mean (a z-score, like S2-S4) so the filter measures deviation from the structural VRP, or rename S1 honestly as 'regime-gated unconditional short vol'. Rename 'IVR' to 'PDV\u2013IV spread'. Re-run and republish S1/S1C and the portfolio. Test: on simulated Gaussian returns with constant \u03c3=0.2, assert the WF PDV forecast mean is within 3% of 0.20.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "signals-s3-mechanical-zscore-pnl",
+   "title": "The S3 'survivor' P&L is measured in z-score units, so it is positive by construction: 98-99% of pure random walks give positive P&L with a 68% win rate",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:381-391",
+    "joint_vol_calibration/signals/signal_engine.py:886-900",
+    "README.md:19",
+    "README.md:37",
+    "README.md:240",
+    "substack_article.md:101",
+    "dashboard/templates/backtest.html:47",
+    "dashboard/templates/backtest.html:335-337",
+    "dashboard/templates/backtest.html:400"
+   ],
+   "description": "S3 P&L is notional \u00d7 \u0394z \u00d7 0.02, where z = (ratio \u2212 rolling mean)/rolling std. The position enters at z<\u22121 and exits at z>\u22120.3 or after 30 days. A standardised statistic drifts back toward 0 through normalisation alone: the rolling mean and std move toward the current value. The rule therefore books positive 'P&L' on series with no predictability at all. 25% of S3's gross P&L comes purely from rolling mean/std drift, with no move in the VIX/VVIX ratio. The published evidence for S3 is 'positive at every scale', '73% win', 'unchanged by the strike-rolling and time-decay fixes', and 'the one signal that survived every correction'. None of this is evidence of edge. Positivity at every scale follows from linearity. The fixes left S3 unchanged because its P&L never touches option pricing. And the win rate is what a random walk gives. The dashboard's '17 trades' at every scale also contradicts the 22 trades in the headline.",
+   "evidence": "Reconstructed S3 on real data: +$23,333, 22 trades, win 0.727 (published +$23,212). Null tests with the identical pipeline (shifted features, 252-day rolling z, same entry/exit, _simulate_s3_pnl):\n  Gaussian random-walk log-ratio with the same daily vol and the real regime gate, 300 paths: mean +$7,876, median +$7,251, P(P&L>0)=0.983, mean win rate 0.681, mean trades 14.6, 95th percentile $16,600, p(null \u2265 real)=0.007.\n  Shuffled real increments with all-R1 gate, 200 paths: mean +$12,230, P(>0)=0.99, win 0.677, fraction \u2265 $23,212 = 0.06.\nDecomposition over real trades: gross on \u0394z $24,193 vs gross on \u0394ratio/\u03c3_entry (frozen normalisation) $18,073, so 25% comes from normalisation drift.",
+   "proposed_fix": "Stop presenting S3 P&L as evidence of edge. (1) Compute S3 P&L on the ratio itself with the normalisation frozen at entry: \u0394ratio/\u03c3_entry. Better still, price a tradeable instrument (e.g. a short SPX straddle vs a long basket of single-stock straddles, or VIX futures) or label it 'timing score, not P&L'. (2) Add a permutation/random-walk null to the report and publish the p-value. (3) Rewrite the 'survivor / positive at every scale / 73% win' claims in README, substack and backtest.html. Test: a unit test that runs the S3 pipeline on a seeded Gaussian random walk and asserts the reported edge statistic, measured against the null, is \u22480.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "signals-s2-stoploss-inverted",
+   "title": "The S2 stop-loss fires on favourable vol moves, so it acts as a take-profit and never stops a losing trade",
+   "severity": "medium",
+   "category": "bug",
+   "locations": [
+    "joint_vol_calibration/signals/signal_engine.py:752-759",
+    "joint_vol_calibration/signals/signal_engine.py:834-839",
+    "joint_vol_calibration/tests/test_signal_engine.py:338-376"
+   ],
+   "description": "s2_position is traded as an SPX straddle (+1 = long vol in backwardation, \u22121 = short vol in steep contango; backtest_engine.py:974-978). A short straddle loses when front vol rises. Front vol rising means VIX rises relative to VIX3M, so slope = VIX3M\u2212VIX falls (pct_move<0). The code instead stops shorts when pct_move > +15% and longs when pct_move < \u221215%, i.e. when the trade is winning. The inline comment ('Short loses when slope widens') treats the position as a bet on the slope, which contradicts the docstring and the instrument actually traded. The existing unit test encodes the inverted direction, and flipping the sign (mutation M15) passes all 211 tests.",
+   "evidence": "Canonical run: all 8 S2 stop events fired on favourable moves. Longs were stopped as VIX rose (2018-04-10: 21.49\u219221.77; 2018-12-10: 21.19\u219223.23). Shorts were stopped as VIX fell (2019-09-16: 15.00\u219213.74; 2019-10-16: 14.57\u219213.54; 2019-10-31: 13.11\u219212.33; 2023-04-20: 17.07\u219216.46; 2024-09-26: 16.33\u219215.41; 2024-12-09: 13.51\u219212.77). S2 P&L: shipped \u2212$76,064 (29 trades, worst \u2212$44,412); corrected-sign stop \u2212$171,527 (worst \u2212$116,553); no stop \u2212$38,255.",
+   "proposed_fix": "In generate_signal2 and generate_signal2_r2exit, swap the conditions: stop a short (\u22121) when pct_move < \u2212stop_loss_pct and a long (+1) when pct_move > +stop_loss_pct. Better, express the stop in straddle P&L or VIX terms so the rule does not depend on the sign of the slope. Fix the comment. Rewrite test_stop_loss_propagates_beyond_trigger_day so that a long straddle is stopped when backwardation NORMALISES and not when it deepens, and add the mirror-image test for shorts. Republish S2 \u2212$76K on backtest.html.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-live-pdv-percentile-nan",
+   "title": "The live site shows 'Spread at 1.1th percentile \u2014 vol appears cheap' for a spread above its own historical mean: 4,125 of 4,189 history rows are NaN and are counted as 'below'",
+   "severity": "medium",
+   "category": "data-integrity",
+   "locations": [
+    "dashboard/app.py:449-466",
+    "data_store/signals/regime_labels.parquet",
+    "scripts/cloud_refresh.py:171-175"
+   ],
+   "description": "regime_labels.parquet has NaN features (vix, vvix, pdv_iv_spread, ...) on every row before 2026-06-22. Only the 64 rows appended by the bot have features. The dashboard computes pct = mean(hist < cur) over all 4,189 rows. NaN < x is False, so the percentile is capped at 64/4189 = 1.5% and the card always says 'Bottom X% \u2014 vol cheap, long vol regime'. The copy calls this '2015\u20132025 mean' and '10-year history', but the history covers 2026-06-22..2026-09-23. Its values are the rv_20d\u2212VIX fallback, not PDV, while the 'current' value is VIX minus a PDV forecast dated 2025-12-30.",
+   "evidence": "Parquet NaN share per year: 1.00 for 2010-2025, 0.64 for 2026; non-NaN rows 64 (2026-06-22..2026-09-23). load_page1() in the private copy returns pdv_spread=8.03, pdv_spread_mean=4.06, pdv_spread_pct=1.3, label 'Bottom 1% \u2014 vol cheap, long vol regime'. The correct percentile over the non-NaN rows is 84.4. Live https://navnoorbawa.me: 'IMPLIED \u2212 REALISED SPREAD +6.81pp ... 1.1th percentile 2015\u20132025 mean: +4.06pp ... Spread at 1.1th percentile \u2014 vol appears cheap relative to 10-year history ... Current: +6.81pp'.",
+   "proposed_fix": "Backfill the feature columns in regime_labels.parquet from build_features for the full history, or build the history from a dedicated spread series. Use hist.dropna() for both the mean and the percentile. Compare like with like: the same model and horizon for the current and historical spread. Derive the date-span text from the data. Show 'insufficient history' when n < 252. Test: a dashboard unit test with a history containing NaNs asserting pct == (hist.dropna() < cur).mean(), plus a test that the regime_labels.parquet feature columns are \u2265 99% non-NaN.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-nan-vvix-drops-sessions",
+   "title": "A missing VVIX print drops the next whole session from the signal frame and the backtest, and silently turns an R2 day into R1",
+   "severity": "medium",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/signals/signal_engine.py:1162",
+    "joint_vol_calibration/signals/regime_classifier.py:314-323",
+    "joint_vol_calibration/signals/signal_engine.py:1152"
+   ],
+   "description": "common_idx = feats.dropna().index removes every row where any shifted feature is NaN. VVIX is NaN on 10 dates, so the following session vanishes from sig_df and therefore from the equity curve. That happens even though S1/S1C/S2/S4 never use vvix. Open straddles skip a hedge rebalance, P&L folds into the next day, and max_hold counts rows rather than sessions. Separately, build_regime_labels evaluates vvix > threshold as False when VVIX is NaN, so the R2 gate fails OPEN. For example, 2020-06-11 (VIX close 40.8, VVIX 116.5 the day before and 151.6 the day after) is labelled R1 SHORT_GAMMA.",
+   "evidence": "There are 1,816 SPX sessions in 2018-01-01..2025-03-24 but only 1,808 backtest rows (published '1,808 sessions'). Missing: 2019-07-08, 2020-06-12, 2021-01-25, 2021-02-18, 2021-05-06, 2021-05-12, 2021-05-21, 2021-05-26, each one day after a NaN VVIX. NaN-VVIX days labelled 1 between R2 neighbours: 2020-06-11, 2021-01-22, 2021-02-17, 2021-05-05, 2021-05-11, 2021-05-20, 2021-05-25. With VVIX ffill(limit=1): 1,816 rows, NAV 740,085 (vs 738,794), S1 688,382 (vs 693,938), S1C \u2212596,112 (vs \u2212599,995), S3 23,202 (vs 23,212), Sharpe \u22121.788 (vs \u22121.80), MDD \u221231.4% (vs \u221231.5%).",
+   "proposed_fix": "Forward-fill VVIX (limit 1-2 sessions) in build_features and build_regime_labels, or treat a NaN VVIX as 'gate unknown \u2192 carry forward yesterday's regime'. Only drop rows whose REQUIRED columns are NaN for each signal: dropna(subset=[...]). Log dropped sessions. Test: synthetic data with one NaN VVIX asserts len(signals) == number of sessions, and asserts the label on the NaN day equals the previous label.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-lookahead-tests-miss-shift-removal",
+   "title": "The look-ahead tests do not catch removal of the 1-day feature/regime shift, a full-sample S3 z-score, a forward-looking R2 override, or a t+1 return in the labels",
+   "severity": "medium",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/tests/test_signal_engine.py:1481-1541",
+    "joint_vol_calibration/tests/test_lookahead.py",
+    "joint_vol_calibration/tests/test_signal_engine.py:284-306",
+    "joint_vol_calibration/tests/test_signal_engine.py:396-403",
+    "joint_vol_calibration/tests/test_signal_engine.py:435-445",
+    "joint_vol_calibration/tests/test_regime_classifier.py:163-169",
+    "README.md:218"
+   ],
+   "description": "The README points to test_lookahead.py as the look-ahead check, but that file has no tests for signals, regimes or the backtest. The end-to-end poison test poisons data strictly AFTER the cutoff, so a same-day dependency (the missing 1-day shift that makes 'signal at t trades at close t' honest) is invisible to it. So is a 1-day forward look that the shift hides. It also compares only discrete positions, so a full-sample z-score in a signal that happens not to trade before the cutoff also goes undetected. Several tests are vacuous: 'assert ... or True' at lines 292, 306 and 403. TestGenerateSignal3.test_max_hold_respected never opens a position (z needs 126 obs; max days_held = 0). test_no_future_data_used only checks len(feats) \u2264 len(spx).",
+   "evidence": "Mutations run in the private copy against test_signal_engine, test_regime_classifier, test_lookahead and test_c21_audit_fixes (211 tests):\n  M1 remove feats_raw.shift(1): 211 passed\n  M2 remove regimes_raw.shift(1): 211 passed\n  M5 S3 full-sample mean/std: 211 passed\n  M13 R2 override uses vvix.shift(-1): 211 passed\n  M15 S2 stop sign flipped: 211 passed\n  M8 label rv uses r(t+1): caught only by the data-file test test_adaptive_gate_reproduces_shipped_labels (skips without the DB)\n  M3 shift(-1), M4/M7 center=True, M6, M10, M11: caught\nNo test references k_mult, _build_walkforward_regimes or _retrain_classifier. The proposed test (below) passes on HEAD (8/8) and fails on M1 (8 failed), M2 (5 failed), M8 (4 failed) and M13 (4 failed).",
+   "proposed_fix": "Add a same-day poison test. Poison data dated >= cutoff and require rows <= cutoff to be byte-identical. Use two opposite poisons (ret=0.25/VIX=5/VVIX=999 and ret=0/VIX=90/VVIX=50) at several cutoffs chosen where clean['regime']==1, so a forward label is forced to flip. Also expose the continuous statistics (s2_z, s3_z, s4_z, the R2 gate value) as output columns so poison tests compare them, not just positions. Move or duplicate the signal-level causality tests into test_lookahead.py. Replace the 'or True' asserts with real expectations. Make the S3 max-hold test warm up for 126 rows before injecting the low ratio.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-app-refresh-writes-classifier-labels",
+   "title": "The C21 fix is incomplete: dashboard/app.py still overwrites regime_labels.parquet with the demoted classifier's predictions",
+   "severity": "medium",
+   "category": "reliability",
+   "locations": [
+    "dashboard/app.py:1176-1222",
+    "dashboard/app.py:1264",
+    "dashboard/app.py:1331",
+    "dashboard/app.py:1416-1430",
+    "joint_vol_calibration/tests/test_c21_audit_fixes.py:156-170"
+   ],
+   "description": "C21 removed clf.predict from cloud_refresh.extend_regime_labels because the dashboard headlines the last row of regime_labels.parquet as the rule label. dashboard/app.py:_refresh_regime_labels still loads regime_classifier.pkl and pdv_model.pkl (full-sample fit, which is look-ahead), predicts on unshifted features (a forecast for t+1 stored at t), and OVERWRITES the whole parquet. It destroys the 4,125 adaptive rule labels. It runs from _startup_data_refresh whenever `python dashboard/app.py` starts with SPX data more than 3 days stale (the committed DB ends 2026-06-18), and again every 4 hours from the scheduler thread. cloud_refresh's self-heal repairs only the last ~900\u2212252 days, so older labels would stay as classifier output and could be committed by the next bot run. The C21 regression test only greps cloud_refresh.py.",
+   "evidence": "app.py:1204-1212: 'with open(DATA / \"signals\" / \"regime_classifier.pkl\", \"rb\") ... labels = clf.predict_series(feats.dropna()) ... rl.to_parquet(out_path)'. Docstring: 'Re-run the regime classifier ... and overwrite data_store/signals/regime_labels.parquet'. Committed DB max(spx_ohlcv.date) = 2026-06-18 (more than 3 days stale \u2192 refresh branch taken). test_refresh_labels_with_rule_not_classifier inspects only scripts/cloud_refresh.py.",
+   "proposed_fix": "Replace _refresh_regime_labels with a call to the same rule-based extend_regime_labels used by cloud_refresh (move it into joint_vol_calibration so both import it), or delete it. Extend the C21 test to scan dashboard/app.py for 'regime_classifier.pkl' plus 'to_parquet', and add a test that calls the refresh against a temp copy and asserts labels == build_regime_labels(..., gate).",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-stale-s1-numbers-and-repro",
+   "title": "Published S1/S1C figures are stale across README, substack and backtest.html, and the documented BacktestEngine().run() gives different numbers from run_backtest.py",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "README.md:57",
+    "README.md:59",
+    "substack_article.md:76-77",
+    "dashboard/templates/backtest.html:44-45",
+    "dashboard/templates/backtest.html:87",
+    "dashboard/templates/backtest.html:110",
+    "dashboard/templates/backtest.html:307",
+    "dashboard/templates/backtest.html:314",
+    "dashboard/templates/backtest.html:341",
+    "joint_vol_calibration/backtest/run_backtest.py:40",
+    "joint_vol_calibration/backtest/backtest_engine.py:546-549",
+    "joint_vol_calibration/backtest/backtest_engine.py:887-893"
+   ],
+   "description": "The headline block (S1 +$693,938, S1C \u2212$599,995) is current. The narrative still quotes the pre-15b4db5 numbers: S1 +$463K, S1C \u2212$404K, 'a single \u2212$333K COVID trade', '\u2212$99K in 2022', 'top-5 trades = 73% of profit'. Separately, the reported numbers depend on how much pre-2018 history is loaded, because the walk-forward PDV trains on everything before each year. run_backtest.py uses DATA_START=2015-01-01. The class docstring's usage, BacktestEngine().run() with no data, loads from 2010 and gives different S1/S1C results. Positions diverge from 2018-12-24.",
+   "evidence": "Canonical run (run_backtest._load_data): NAV 738,794; S1 +693,938 (54 trades, 53 short, win 0.759); S1C \u2212599,995 (88 trades); worst S1 trade \u2212$299,415; top-5 share 52.5%; S1 P&L by year: 2018 +98,473, 2019 +257,273, 2020 \u2212204,575, 2021 +58,629, 2022 \u221274,670, 2023 +320,822, 2024 +208,272, 2025 +29,714. BacktestEngine().run() with no args: NAV 729,697; S1 +647,349 (53 trades); S1C \u2212627,288 (86 trades). S2/S3/S4 and regime are bit-identical; s1_position differs on 72 days and s1c on 43.",
+   "proposed_fix": "Generate the narrative numbers from the metrics dict: template them in backtest.html and use a script that rewrites the README/substack tables, so they cannot drift. Put DATA_START inside BacktestEngine (or make the WF PDV training window explicit, e.g. a fixed 3-year rolling or expanding-from-2010 window) so every entry point gives the same result. Add a regression test that BacktestEngine().run() reproduces the published NAV to $1.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-variants-table-fabricated",
+   "title": "The dashboard's 'R2-Exit P&L' variant table is an approximation, not a simulation, and shows S2's R2-exit as an improvement when a real simulation makes S2 worse",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "dashboard/app.py:1135-1169",
+    "dashboard/templates/backtest.html:255-296",
+    "joint_vol_calibration/signals/signal_engine.py:602-640",
+    "joint_vol_calibration/signals/signal_engine.py:788-860"
+   ],
+   "description": "generate_signal1_r2exit and generate_signal2_r2exit exist, but the dashboard never uses them. 'R2-Exit P&L' is computed by zeroing daily P&L on R2 days while a position is open. S1X is then set equal to S1RF ('approx') and S1S to the midpoint. A true R2 exit closes the straddle at the transition, pays exit costs, forfeits later non-R2 P&L, and can re-enter at a new strike, so the approximation gets both magnitude and sign wrong.",
+   "evidence": "Dashboard approximation: S1 'R2-exit' $458,120 (\u0394 \u2212$235,818); S2 'R2-exit' \u2212$31,799 (\u0394 +$44,265, rendered green). True simulations through _simulate_straddle_pnl on the canonical signals: S1X +$84,114 (\u0394 \u2212$609,824); S2X \u2212$173,953 (\u0394 \u2212$97,889); S1RF (position zeroed on R2 days) +$16,424.",
+   "proposed_fix": "Compute the variant rows in BacktestEngine.run by simulating s1x/s2x/s1rf positions with _simulate_straddle_pnl, and store them in full_results.parquet. Have the dashboard read them. Delete the \u2248 approximations. Test: the dashboard variant values equal the engine's simulated totals.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-classifier-claims",
+   "title": "Classifier accuracy claims are mislabelled: '63.4%' uses a look-ahead PDV feature and is not walk-forward, '86.2% in-sample' is wrong, and the 'circular vvix' rationale is false for lagged features",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/signals/regime_classifier.py:125-133",
+    "joint_vol_calibration/signals/regime_classifier.py:982-996",
+    "joint_vol_calibration/backtest/backtest_engine.py:29-31",
+    "joint_vol_calibration/backtest/backtest_engine.py:590-595",
+    "README.md:179",
+    "substack_article.md:93",
+    "dashboard/templates/index.html:341"
+   ],
+   "description": "(1) The published 63.4% OOS comes from RegimePipeline.run, which loads pdv_model.pkl. That is a full-sample fit whose own docstring (regime_classifier.py:190-194) says it must not be used for backtest features, because it looks ahead. Clean features give 62.3%. (2) The backtest docs call it 'walk-forward XGBoost', but the per-year walk-forward classifier scores 65.5%. (3) The README says '86.2% in-sample but only 63.4% out-of-sample'. In fact in-sample without vvix is 82.8%, and ~87% is the OUT-of-sample accuracy WITH vvix. (4) Features are lagged (X(t\u22121) \u2192 y(t)), so vvix(t\u22121) is a legitimate predictor of 1{VVIX(t)>100}, the same information persistence uses. It is not 'circular' and does not 'recover the labelling rule'. The demotion still stands: XGB with vvix and y(t\u22121) scores 87.5% < 90.1%. (5) The substack sets a 5.8% 'noise floor' (adaptive gate) against a 63.4% classifier trained on fixed-100 labels. A perturbation flip rate is a sensitivity measure, not a Bayes-error ceiling.",
+   "evidence": "Test 2020-01-02..2025-12-31, 1,481 rows, fixed-100 labels: persistence 0.9007. No-vvix XGB with rv-fallback features: OOS 0.6232, in-sample 0.8311. With pdv_model.pkl features: OOS 0.6327, in-sample 0.8283. With vvix: OOS 0.8704-0.8717, in-sample 0.8833-0.8933. With vvix + y_lag: 0.8751. Shipped pickle: 0.6651 (pdv features). Walk-forward per-year (_build_walkforward_regimes): 0.655. regime_label_noise_audit: adaptive flip 0.0586, persistence 0.8658; fixed flip 0.0514, persistence 0.8793.",
+   "proposed_fix": "Re-run the evaluation with walk-forward PDV features (or the rv fallback) and publish one clearly defined number, e.g. 'single split 2010-19 \u2192 2020-25: 62.3%; per-year walk-forward: 65.5%; persistence 90.1% on the same rows'. Replace the 'circular / 86.2% in-sample' narrative with the with-vvix and with-lag benchmarks (87.0% and 87.5%, both below persistence). Compute the noise floor on the same label set as the accuracy. Make RegimePipeline default to pdv_model=None. Test: evaluate_classifier result keys include the gate and feature-set provenance.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-isotonic-insample-calibration",
+   "title": "Isotonic 'calibration' is fit in-sample with balanced class weights and makes out-of-sample P(R2) calibration worse",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/signals/regime_classifier.py:469-486",
+    "dashboard/app.py:1110-1113",
+    "joint_vol_calibration/signals/signal_engine.py:645-695"
+   ],
+   "description": "CalibratedClassifierCV(FrozenEstimator(xgb)) is fitted on the same (X, y) the booster was trained on, and receives the 'balanced' sample weights. sklearn warns: 'sample weights will only be used for the calibration itself ... the result of the calibration is likely to be incorrect'. In-sample isotonic calibration learns the overfit training scores and targets the reweighted class prior, not the true frequency. Dashboard step 6 claims 'Calibrated probabilities'. The live card shows P(R2), and S1S uses 0.4/0.6 thresholds on it.",
+   "evidence": "OOS 2020-2025, P(R2), base rate 0.517: raw XGB Brier 0.2287 / ECE 0.1270; shipped isotonic Brier 0.2483 / ECE 0.1747 (worse); in-sample ECE of the shipped calibrator 0.0913. Reliability of the shipped pickle: p\u2208(0.8,1] mean 0.897 \u2192 observed 0.721; p\u2208[0,0.2] mean 0.084 \u2192 observed 0.237. The pytest run emits the sklearn UserWarning quoted above.",
+   "proposed_fix": "Calibrate on a disjoint, time-later holdout (e.g. fit XGB on data through T\u22122y, calibrate on the last 2 years) without class weights, or use CalibratedClassifierCV(cv=TimeSeriesSplit) with unweighted data. Report Brier/ECE out of sample. Given the regime shift, prefer sigmoid or no calibration and remove the 'calibrated' claim. Test: OOS ECE of the calibrated model \u2264 OOS ECE of the raw model.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-regime-ontology-no-exante-meaning",
+   "title": "R0 'LONG_GAMMA' has no forward meaning: after R0 days, forward RV exceeds VIX no more often than after R1 days, which undercuts the long-leg gates in S1 and S4",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/signals/regime_classifier.py:9-17",
+    "joint_vol_calibration/signals/signal_engine.py:13-16",
+    "joint_vol_calibration/signals/signal_engine.py:157",
+    "dashboard/templates/index.html (live card 'R0 Low VIX / backwardation \u2192 buy straddles')"
+   ],
+   "description": "The docstring says R0 (rv_20d > VIX) means 'Long gamma trades are profitable', and S1/S4 allow LONG straddles only in R0. Ex ante, the probability that forward 21-day RV exceeds VIX is no higher after an R0 day than after an R1 day, and the mean forward RV\u2212VIX gap is more negative in R0. The live-site legend 'R0 Low VIX / backwardation' is also factually wrong: R0 has the HIGHER mean VIX, and only 4.1% of R0 days are in backwardation.",
+   "evidence": "2010-2025, fixed labels, forward RV over t+1..t+21: R0 n=367 P(fwdRV>VIX)=0.144, mean fwdRV\u2212VIX \u22123.56 vp; R1 n=2362 P=0.158, \u22123.02 vp; R2 n=1259 P=0.162, \u22124.86 vp. Mean VIX by label: R0 0.182, R1 0.157, R2 0.234. Share of days in backwardation (ts_slope<0): R0 0.041, R1 0.011, R2 0.207.",
+   "proposed_fix": "Describe R0/R1 as descriptive (trailing) states, not profitability regimes, and correct the legend (R0 = 'trailing realised above implied'). Or redefine the long-gamma regime from a forward-looking forecast, e.g. PDV \u03c3\u0302 (in correct units) minus VIX, validated as above. Add a report table of P(fwdRV>VIX | regime) so the gate's economic premise is checked every run.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "signals-hmm-smoothing-lookahead",
+   "title": "HMMRegimeClassifier uses full-sequence smoothing and Viterbi decoding (look-ahead) and maps states to R0/R1 in the wrong order",
+   "severity": "low",
+   "category": "look-ahead",
+   "locations": [
+    "joint_vol_calibration/signals/regime_classifier.py:1165-1182",
+    "joint_vol_calibration/signals/regime_classifier.py:1142-1149",
+    "joint_vol_calibration/signals/regime_classifier.py:1087-1088"
+   ],
+   "description": "predict() calls GaussianHMM.predict (Viterbi over the whole input) and predict_proba_raw calls score_samples (forward-backward). Both condition state t on observations after t, so any evaluation or use on a test sequence looks ahead, despite the 'avoids COVID look-ahead' docstring. States are also mapped by ascending mean VIX (lowest \u2192 R0), but under the rule R1 has the lowest VIX (R0 0.182 > R1 0.157). R0 and R1 therefore come out swapped, and compare_with_xgboost compares mismatched labels. The HMM is research-only, and calibration.html presents it as an alternative.",
+   "evidence": "HMM fit on 2010-2019 features, applied to 2020-2025. P(R2) on 2020-02-21 using data through 02-21 (filtered): 0.0754; using the full 2020-2025 sequence: 0.5261. Viterbi label on 2020-02-21: truncated 0, full 2. Filtered and full-sequence Viterbi labels differ on 5/150 sampled dates. Accuracy vs rule labels: 0.311 as mapped, 0.504 with R0/R1 swapped.",
+   "proposed_fix": "Use forward-filtered probabilities: run the forward algorithm, or call score_samples on X[:t+1] incrementally, or use predict_proba on an expanding window and take the last row. Remove Viterbi from any evaluation. Map states by a feature that matches the rule semantics (e.g. mean fear_premium<1 \u2192 R0; highest vvix \u2192 R2), or stop naming HMM states R0/R1/R2. Test: truncation invariance, i.e. hmm_predict_proba(X[:k]).iloc[-1] == hmm_predict_proba(X).iloc[k-1].",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-kelly-corr-netting-noop",
+   "title": "The published 'ex-ante correlation Kelly netting' does nothing: sqrt(2/(1+r)) \u2265 1, so clip(0.5, 1.0) always returns 1",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:1023-1039",
+    "joint_vol_calibration/backtest/backtest_engine.py:1055-1057",
+    "dashboard/app.py:1114-1118",
+    "README.md:161",
+    "joint_vol_calibration/signals/signal_engine.py:401"
+   ],
+   "description": "_corr_kelly_mult returns sqrt(2/(1+r)) with r \u2208 [\u22121,1] and NaN\u21920, so the value is always \u2265 1 (\u221a2 on flat or NaN windows). The result is then clipped to [0.5, 1.0], which makes mult_s1c/mult_s3/mult_s4 identically 1.0. Only the trailing-Sharpe scale has any effect, yet the assumptions list, dashboard step 7 and README present 60-day correlation netting. Also, the 'Kelly' fraction is strength\u00d70.20, a heuristic size with no edge or variance estimate, not a Kelly criterion. The shift(1) timing is correctly ex-ante.",
+   "evidence": "min over r\u2208[\u22120.999, 1] of sqrt(2/(1+r)) = 1.0; np.unique(np.clip(m, 0.5, 1.0)) = [1.].",
+   "proposed_fix": "Either remove the correlation step and its claims, or implement a real reduction: e.g. mult = sqrt(2/(1+max(r,0)))^{-1} = sqrt((1+r)/2) floored at 0.5, or inverse-covariance risk parity on trailing P&L. Rename 'kelly' to 'size_frac', or derive a Kelly fraction from trailing mean/variance of trade P&L. Test: with perfectly correlated synthetic P&L streams, the multiplier is < 1.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-s1-exit-band-vs-doc",
+   "title": "The S1/S1C/S1X exit is documented as 'spread crosses zero', but the code only exits inside |spread| < 0.005, and 10 of 23 sign flips jump over that band",
+   "severity": "low",
+   "category": "bug",
+   "locations": [
+    "joint_vol_calibration/signals/signal_engine.py:19",
+    "joint_vol_calibration/signals/signal_engine.py:385",
+    "joint_vol_calibration/signals/signal_engine.py:395",
+    "joint_vol_calibration/signals/signal_engine.py:453",
+    "joint_vol_calibration/signals/signal_engine.py:631"
+   ],
+   "description": "The median daily move of the spread is 0.55 vp, so the spread can cross zero without ever landing in the \u00b10.5 vp band. The trade then keeps running until max_hold.",
+   "evidence": "Canonical signals: 10 of 23 sign flips of pdv_iv_spread skip the band. S1 trade entered 2022-06-13 crossed zero on 2022-06-24 (day 9) and ran to day 20. S1C trade entered 2022-06-23 crossed on 2022-06-24 (day 2) and ran to day 20.",
+   "proposed_fix": "Exit on sign(spread) != sign(spread at entry) OR |spread| < 0.005 (pass the entry sign into the state machine, or build exit_cond from a crossing test against the entry-day sign). Add a unit test in which the spread jumps from +0.03 to \u22120.01 and assert the exit.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "signals-db-regime-table-wrong",
+   "title": "The regime_labels table in _write_labels_to_db stores rv_20d = 2\u00b7VIX \u2212 RV, features from t\u22121 under date t, and classifier predictions labelled 'regime'",
+   "severity": "low",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/signals/regime_classifier.py:1048-1070",
+    "data_store/vol_system.db (table regime_labels)"
+   ],
+   "description": "The code writes rv_20d = X['vix'] \u2212 X['pdv_iv_spread']. Since spread = rv \u2212 vix, that equals 2\u00b7vix \u2212 rv (the correct value is vix + spread). X comes from build_dataset, which is shifted by 1, so every row dated t holds t\u22121 features. The 'regime' column is the classifier's prediction, not the rule label. The table is write-only today (get_regime_labels has no callers), but the shipped DB contains the wrong values.",
+   "evidence": "Shipped DB, 2025-12-30: vix_level 14.20 (= VIX of 12-29; VIX(12-30)=14.33); rv_20d 0.2015 vs true rv(t\u22121) 0.0865. 2020-03-16: vix_level 57.83 (= VIX of 03-13; actual 82.69); rv_20d 0.5173 vs true 0.7044.",
+   "proposed_fix": "Write unshifted same-day features and the rule label. Compute rv_20d directly, not from the spread. Or drop the table and insert_regime_labels. Test: a round-trip asserting rv_20d equals sqrt(mean(r\u00b2)\u00b7252) on the same date.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-stale-orphan-artifacts",
+   "title": "signals_2015_2025.parquet is stale and orphaned, and ivr_spread_panel.parquet is orphaned with the opposite sign convention",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "data_store/signals/signals_2015_2025.parquet",
+    "data_store/ivr_spread_panel.parquet",
+    "joint_vol_calibration/signals/signal_engine.py:170"
+   ],
+   "description": "Nothing in the repo reads either file, and no script produces ivr_spread_panel.parquet. The signals parquet is named 2015-2025 but covers 2018-01-02..2025-03-24. It has no s1c_* or s4_* columns (the portfolio signals), and its s1 positions predate the current pipeline. The IVR panel defines spread = VIX \u2212 PDV, the opposite sign to pdv_iv_spread, and its PDV provenance is unknown. Anyone reusing these files gets wrong or contradictory data.",
+   "evidence": "grep finds no reference to 'ivr_spread_panel', 'spread_h1' or 'signals_2015' outside signal_engine.py:170 (SIGNALS_PATH, only used by save()). Old vs canonical signals: s1_position differs on 386/1808 days, s2 on 49, s3 on 10, pdv_iv_spread on 1807. spread_h1 == vix \u2212 pdv_h1 \u2192 True.",
+   "proposed_fix": "Delete both files, or regenerate signals via SignalEngine.save() in run_backtest.py under a truthful name (signals_2018_2025Q1.parquet) with a provenance column. Add a test that every tracked data_store file is referenced by some code path.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-combine-semantics",
+   "title": "combine_signals: the docstring and code disagree, and S3's '+1 = long dispersion (net short index vol)' is counted as agreeing with long SPX straddles",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/signals/signal_engine.py:70-81",
+    "joint_vol_calibration/signals/signal_engine.py:1039-1052",
+    "joint_vol_calibration/signals/signal_engine.py:53-58",
+    "joint_vol_calibration/signals/signal_engine.py:1193",
+    "joint_vol_calibration/backtest/backtest_engine.py:983-986"
+   ],
+   "description": "The module docstring says single signals and 'all flat or conflicted' give 0. The code gives a lone signal 0.5 weight, the same as two agreeing signals, so agreement earns nothing. S3's docstring defines +1 as long dispersion (short index vol). The combiner comment calls it 'second-order fear precedes vol spike' (long vol), and combined_pos is traded as an SPX straddle, so S3's direction contradicts itself. combined_kelly caps with S1/S2/S3 maxima but not S4's. The combined curve is research-only and not published.",
+   "evidence": "combine_signals, k==2 and k==1 branches: both use direction\u00d70.5 and mean_strength\u00d70.5. The backtest simulates combined_pos with _simulate_straddle_pnl (combined \u2212$395,390, 67 trades).",
+   "proposed_fix": "Pick one semantic for S3's sign (either an index-vol direction or a separate dispersion book) and either exclude it from the straddle combiner or flip it. Give k=2 more weight than k=1 (e.g. 0.75), or document equal weighting. Use max over the combined signals' caps. Align the docstring.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "signals-wf-validation-dead-classifier",
+   "title": "walk_forward_validation retrains a classifier that is never used, with unshifted features; _build_walkforward_regimes is dead code",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/backtest/backtest_engine.py:1164-1241",
+    "joint_vol_calibration/backtest/backtest_engine.py:1243-1268",
+    "joint_vol_calibration/backtest/backtest_engine.py:742-838"
+   ],
+   "description": "BacktestEngine.run always passes precomputed_regimes=rule_regimes, so the clf passed by walk_forward_validation has no effect, despite the docstring 'Run backtest ... using retrained classifier'. _retrain_classifier fits X(t) \u2192 y(t) on contemporaneous features, which is inconsistent with the X(t\u22121) \u2192 y(t) protocol. _build_walkforward_regimes is never called. This is wasted compute and a misleading description of the walk-forward validation.",
+   "evidence": "grep: _build_walkforward_regimes has only its definition; run() line 953 passes precomputed_regimes unconditionally. _retrain_classifier line 1252: feats = build_features(spx_df, vix_wide) with no .shift(1).",
+   "proposed_fix": "Remove the retrain step and correct the docstring to say that WF windows re-run the rule-based pipeline per window. Or, if classifier WF is wanted for research, keep _build_walkforward_regimes (which shifts correctly) and delete _retrain_classifier.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  }
+ ],
+ "checked_ok": [
+  "Regime-rule units are correct: rv_20d = sqrt(mean(r\u00b2)\u00b7252) is annualised decimal and is compared with VIX/100 (regime_classifier.py:218, 311). Trailing windows only; no center=True or shift(-1) anywhere in signal_engine.py or regime_classifier.py.",
+  "SignalEngine shifts both features and regimes by 1 row. The backtest enters and exits at the close of t using t\u22121 information (a conservative 1-day implementation lag). S3 P&L accrues from the day after entry.",
+  "The persistence baseline is on the same rows and horizon as the classifier: evaluate_classifier compares on the identical 2020-01-02..2025-12-31 test set (1,481 rows; persistence on 1,480 pairs), both at a 1-day horizon. 90.07% reproduced exactly on the fixed-100 labels.",
+  "The demotion conclusion is robust. XGB with vvix gets 87.0%, and XGB with vvix plus the lagged label gets 87.5%; both are below persistence at 90.1%.",
+  "The adaptive VVIX gate is causal (rolling 252 including the current day; truncation test passes). The shipped regime_labels.parquet reproduces the adaptive rule on 4125/4125 days.",
+  "Walk-forward PDV per year trains strictly on returns before Jan 1 of that year, and the output is deterministic (max diff 0.0 across reruns).",
+  "Trailing-Sharpe Kelly scale is shifted 1 day (ex-ante). Straddle size is fixed at entry from that day's multiplier.",
+  "train_test_split_temporal has a strict boundary. The build_dataset shift is protected by test_feature_shift_zero_lookahead (mutations M10 and M11 caught).",
+  "The existing post-cutoff poison test catches shift(-1) features (M3) and centred rolling windows in S2 and in rv (M4, M7). The S4 z_prev forward shift (M6) is caught by a unit test.",
+  "Canonical backtest via run_backtest._load_data reproduces the published headline exactly: NAV $738,794, Sharpe \u22121.799, S1 +$693,938/54 trades, S1C \u2212$599,995/88, S2 \u2212$76,064, S3 +$23,212/22, S4 \u2212$206,437/31.",
+  "The state machines enforce no same-day re-entry and no direct +1\u2194\u22121 flip. The R2-exit variant closes on the transition only.",
+  "regime_label_noise_audit numbers in the substack (5.8% flips, 10.1% within 1 vp) reproduce with the adaptive gate.",
+  "The S4 VRP reconstruction vix\u00b7(1\u22121/fear) equals VIX \u2212 max(rv, 0.01) when fear \u2264 10, and the entry gates match the docstring.",
+  "Private copies used: /tmp/claude-0/-home-user-vol-system-dashboard/017612b3-569a-51ba-baa9-4b3f10b4b51c/scratchpad/audit/signals (mutations; restored to clean git status), .../audit/signals_exp (experiments), .../audit/mut (proposed-test validation). Scratch scripts are in .../scratchpad/sig/ (test_sameday_poison2.py is the validated proposed test). The shared repo was not touched."
+ ]
+}

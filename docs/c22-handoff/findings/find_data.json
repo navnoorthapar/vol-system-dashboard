@@ -1,0 +1,317 @@
+{
+ "findings": [
+  {
+   "id": "data-vix-ts-index-fit-as-futures",
+   "title": "VIX term-structure indices are stored and fitted as if they were VIX futures, which biases every published joint calibration",
+   "severity": "high",
+   "category": "math-correctness",
+   "locations": [
+    "joint_vol_calibration/data/yf_downloader.py:392-414",
+    "joint_vol_calibration/data/database.py:105-106",
+    "joint_vol_calibration/calibration/joint_calibrator.py:97-102",
+    "joint_vol_calibration/calibration/joint_calibrator.py:862-880",
+    "joint_vol_calibration/models/heston.py:719-777",
+    "README.md:65-75",
+    "substack_article.md:17"
+   ],
+   "description": "The data layer labels ^VIX9D/^VIX/^VIX3M/^VIX6M as a 'free proxy for VIX futures' (DDL comment; yf_downloader lines 397-401 claim VIX_futures(T) \u2248 VIX_Td(today), within 0.5-2 pts). These Cboe indices measure expected volatility from today to T: VIX_T^2 = (1/T)\u222b_0^T E[v_s]ds = \u03b8 + (v0-\u03b8)(1-e^{-\u03baT})/(\u03baT). The calibrator instead fits them with heston_vix_futures_curve, which prices the 30-day volatility over [T, T+30d], i.e. a VIX future expiring at T. So the model value for '^VIX' is the one-month future, not spot VIX. The tenor constants also disagree between modules: the DB uses 93/182 days, the calibrator 91/182, and Cboe uses 93/184 for VIX3M/VIX6M. Because of this the VIX leg is biased by 1.7-3.9 vol points per tenor, and the optimiser absorbs that bias into \u03ba, \u03c3 and \u03b8. Every published calibration (README showcase, dashboard headline, substack) is a fit to the wrong object.",
+   "evidence": "(1) Stored params, model used vs the correct term-index model at T=[9,30,91,182]d: 2026-07-01 gives [14.67,16.11,18.98,21.34] vs [13.01,13.94,16.02,18.07] (+1.7..+3.3 vp). 2026-09-11 gives +2.7..+3.1 vp. 2026-05-31 gives +1.9..+3.9 vp.\n(2) Recalibrated the README showcase (as_of 2026-05-31) in a private copy with the correct model and Cboe tenors 9/30/93/184. Published fit: \u03ba=1.77 \u03b8=0.0665 \u03c3=0.460 \u03c1=-0.95 v0=0.0127, SPX RMSE 0.523, VIX 0.528, Feller PASS. Correct model: \u03ba=6.03 \u03b8=0.0502 \u03c3=0.779 \u03c1=-0.95 v0=0.0129, SPX RMSE 1.389 vp, VIX 1.189 vp, Feller BINDING.\n(3) Real data on 2026-09-22. Cboe settlement CSV: Oct VX (expires 10-21, 29d) 17.36, Nov 18.20, Dec 18.60, Jan 19.41. Cboe index CSVs: VIX 14.21, VIX3M 17.61, VIX6M 19.79. At 30 days the index is 3.15 points below the future, outside the '0.5-2 pts' the code comment claims.\n(4) Web: Macroption says the term-structure indices share 'the same starting point (today)'; the literature gives VIX3M=93 and VIX6M=184 calendar days.",
+   "proposed_fix": "Add heston_vix_term_index(kappa, theta, sigma, v0, T) = 100*sqrt(theta + (v0-theta)*(1-exp(-kappa*T))/(kappa*T)) to models/heston.py. Use it in JointCalibrator._vix_futures_leg (rename to _vix_term_leg, and rename the vix_futures_rmse key with a back-compat alias). Define one tenor map, {'^VIX9D':9,'^VIX':30,'^VIX3M':93,'^VIX6M':184}, in config.py and import it in yf_downloader, joint_calibrator and dashboard. Option (b), which is better: ingest real VX settlements (see data-cboe-downloader-broken) and keep the futures model for true futures with actual expiry dates. Fix the yf_downloader/DDL comments and the README/substack wording ('VIX futures' becomes 'VIX term-structure indices'). Tests: (i) with v0==theta both formulas return 100*sqrt(theta); (ii) the term index at T=30/365 equals the analytic 30-day variance-swap vol; (iii) a regression test that the calibrator's VIX leg calls the term-index model for ^VIX* tickers. Then re-run the showcase and all archived fits, and republish the numbers.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "data-cboe-downloader-broken",
+   "title": "CBOE downloader is dead code: wrong symbols, a parser that can never match the real payload, dead futures URLs, and a VX parser that crashes on the real format",
+   "severity": "high",
+   "category": "reliability",
+   "locations": [
+    "joint_vol_calibration/data/cboe_downloader.py:36-47",
+    "joint_vol_calibration/data/cboe_downloader.py:314-361",
+    "joint_vol_calibration/data/cboe_downloader.py:235-262",
+    "joint_vol_calibration/data/cboe_downloader.py:379-409",
+    "joint_vol_calibration/data/pipeline.py:297-314",
+    "joint_vol_calibration/data/pipeline.py:377-380",
+    "README.md:195"
+   ],
+   "description": "The CBOE fallback cannot rescue the Yahoo outage and returns zero rows on every path.\n(a) The quote API is formatted with 'SPX'/'VIX'. Index options need '_SPX'/'_VIX'.\n(b) Even with the right URL, the parser reads expiration_date/expiration/strike/option_type. The payload has none of these: each row carries an OCC symbol in 'option' (e.g. SPX261016C07700000), so every row is skipped.\n(c) VX_History.csv and vx-historical-settlement-data.csv return 403 AccessDenied. That is S3 'object missing', not Cloudflare as the README says. The real data is free: per-contract CSVs at cdn.cboe.com/data/us/futures/market_statistics/historical_data/VX/VX_<expiry>.csv and a daily all-contract settlement CSV at www.cboe.com/us/futures/market_statistics/settlement/csv?dt=YYYY-MM-DD.\n(d) The VX parser renames settle to close while a 'close' column already exists, producing duplicate columns and a TypeError on the real file.\n(e) _normalise_expiry_month cannot parse 'V (Oct 2026)' and maps 'Jan-24' to '1-01'.\n(f) Expiry is taken as BMonthEnd, but VX expires on the Wednesday 30 days before the third Friday of the following month. Weekly VX contracts also collide on PK (date, expiry_month).\n(g) _load_vix_daily's Yahoo fallback is unreachable: raise_for_status raises, the except branch returns 0 before the fallback runs.",
+   "evidence": "curl results: .../delayed_quotes/options/SPX.json returns 403. _SPX.json returns 200 (13.5 MB, 30,470 contracts, 58 expiries 2026-09-22..2031-12-19, bid/ask/iv/greeks/OI; roots SPX 9,742 and SPXW 20,728). _VIX.json returns 200. VX_History.csv returns 403 and vx-historical-settlement-data.csv returns 403. VX/VX_2026-10-21.csv returns 200 (last row: 2026-09-22 settle 17.3607). settlement/csv?dt=2026-09-22 returns 200 (VX/V6 2026-10-21 17.3607, VX/X6 2026-11-18 18.2032 ...).\nPrivate-copy runs: download_cboe_options_snapshot('SPX') raises HTTPError 403. With the URL patched to _SPX it logs 'Parsed 0 rows'. download_vix_futures_daily_history on the real VX_2026-10-21.csv raises 'TypeError: arg must be a list, tuple, 1-d array, or Series' at cboe_downloader.py:251. _normalise_expiry_month(['V (Oct 2026)','F (Jan 2024)','Jan-24']) returns ['V (Oct 2026)','F (Jan 2024)','1-01']. BMonthEnd(2026-10) is 2026-10-30, but the actual final settlement is 2026-10-21. The DB tables vix_futures_daily and vix_futures_settlements have 0 rows.",
+   "proposed_fix": "Rewrite download_cboe_options_snapshot:\n- Use URL f'.../options/_{und}.json' for indices.\n- Parse 'option' with the regex ^(?P<root>[A-Z]+)(?P<exp>\\d{6})(?P<cp>[CP])(?P<k>\\d{8})$ (strike = k/1000). Keep root and settlement style (SPX is AM, SPXW is PM).\n- Take snapshot_date from data.last_trade_time (NY session date), not datetime.today(). Record data.close as underlying_price.\n\nReplace the futures loaders with:\n(i) the daily settlement CSV, filtered to Product=='VX', using the 'Expiration Date' column directly;\n(ii) per-contract VX_<expiry>.csv for history. Use 'Settle' as the price, drop the 'Close' rename, and key on (date, expiry_date) so weeklies do not collide.\n\nIn _load_vix_daily, catch the CBOE exception and then call the Yahoo fallback. Make _snapshot_options prefer CBOE (one request, all expiries, greeks) over 56 Yahoo requests.\n\nTests: fixture JSON/CSV snippets captured from the live endpoints (offline) asserting row counts, parsed strikes/expiries, and 2026-10 \u2192 2026-10-21. Update the README row 'VIX futures ... 403 blocked by Cloudflare'.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "data-snapshot-date-wallclock-weekend",
+   "title": "Options snapshots are dated by wall-clock date, not market session: 3 of 4 committed chains carry weekend dates and understate T by 2 days, which moves the showcase fit",
+   "severity": "high",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/data/yf_downloader.py:286",
+    "joint_vol_calibration/data/yf_downloader.py:352-355",
+    "joint_vol_calibration/data/cboe_downloader.py:311-333",
+    "joint_vol_calibration/data/database.py:79-100",
+    "README.md:65-75"
+   ],
+   "description": "_fetch_yf_options and the CBOE path set snapshot_date = datetime.today() (machine-local date) and measure time_to_expiry from it. A chain pulled on a weekend or holiday holds the previous session's quotes but is labelled with a later date, so every T is too short. The committed snapshots are:\n- 2026-03-28 (Saturday; quotes from Fri 03-27)\n- 2026-05-31 (Sunday; quotes from Fri 05-29) \u2014 the README showcase\n- 2026-06-20 (Saturday; quotes from Thu 06-18, because 06-19 was Juneteenth)\n\nThe calibrator prices mids at these shortened T with the correct session spot, which biases short-dated buckets. T is also measured midnight-to-midnight, ignoring AM settlement (SPX monthlies and VIX settle at 09:30 ET) versus PM settlement. cloud_refresh.py's own mapping (snapshot_date=spot_date) is correct; the library path is not.",
+   "evidence": "Snapshot weekdays: 03-24 Tue, 03-28 Sat, 05-31 Sun, 06-20 Sat. spx_ohlcv has no 06-19 row (holiday). For every row, time_to_expiry equals (expiry \u2212 snapshot_date)/365, so all T are measured from the wrong date.\nATM IV-scale error for the showcase buckets, sqrt((d+2)/d)\u22121: 15d 6.46%, 30d 3.28%, 61d 1.63%, 92d 1.08%.\nRe-calibration in a private copy with the 05-31 chain relabelled to its true session 2026-05-29 (only T changed): published \u03ba=1.7695 \u03b8=0.0665 \u03c3=0.4603 v0=0.0127 SPX 0.523 VIX 0.528. With correct T: \u03ba=2.058 (+16%) \u03b8=0.0626 \u03c3=0.4995 (+8.5%) v0=0.0117 SPX 0.469 VIX 0.442.",
+   "proposed_fix": "1. Add data/calendar.py with last_closed_session(now_utc), which uses America/New_York and an NYSE holiday calendar (exchange_calendars or pandas_market_calendars) and a 16:15 ET cutoff. Use it for snapshot_date in yf_downloader and cboe_downloader. For CBOE, cross-check it against data.last_trade_time.\n2. Compute T as minutes from the 16:00 ET session close to settlement (09:30 ET for AM roots, 16:00 ET for PM roots) divided by 525,600, as in the Cboe VIX methodology. Store the settlement style.\n3. Migrate the DB: UPDATE options_snapshots SET snapshot_date=<session>, time_to_expiry=(julianday(expiry)-julianday(<session>))/365 for 03-28\u219203-27, 05-31\u219205-29 and 06-20\u219206-18. Rename the 2026-05-31 showcase to 2026-05-29 and re-run it.\n4. Tests: a Saturday or Sunday run returns Friday; 2026-06-20 returns 2026-06-18; a 23:30 UTC Friday run returns Friday.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "data-provenance-stale-chain-fits",
+   "title": "Provenance backfill hid that every bot fit from 06-16 to 09-04 used a frozen, up-to-76-day-old SPX chain; the script also destroys newer provenance if re-run",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "scripts/backfill_calibration_provenance.py:138-199",
+    "dashboard/app.py:73-90",
+    "joint_vol_calibration/data/database.py:391-427",
+    "README.md:115-123"
+   ],
+   "description": "Commit 90dc851 established that the bot never wrote the chains it downloaded. Every daily fit therefore refit the newest committed snapshot: the 05-31 chain for the 06-16 fit, and the 06-20 chain for 06-23..09-04 (3 to 76 days stale). That stale SPX leg was paired with a same-day VIX leg. backfill_calibration_provenance.py recovered only tenor counts and stamped all of these 'counts backfilled from CI logs' without recording spx_snapshot_date or a stale flag. The selector (latest_good_calibration_path) checks neither staleness nor expiry count. Consequences:\n1. The README/commit 35690a2 'honest' headline 2026-07-01 (SPX 0.375 vp) is a fit of the 06-18 quotes with a 07-01 VIX leg. It fits well partly because the 07-01 spot (7499.36) happens to equal the chain's own spot (7500.58).\n2. The current live headline 2026-09-11 has n_spx_options=9, meaning one expiry (see the known outage). SPX RMSE 0.215 vp wins the RMSE ranking by the same under-identification failure C20 fixed for the VIX leg. If it is excluded, the selector falls back to the stale 07-01 fit.\n3. Re-running the script with --apply sets n_spx_options/n_vix_tenors=None and 'legacy fit' on any pickle not in CI_COUNTS, which erases the 09-11 record. It also overwrites the live-recorded counts of the re-written 09-04 pickle.",
+   "evidence": "n_spx_options per fit falls 54 \u2192 45 \u2192 36 in whole multiples of 9 (6 \u2192 5 \u2192 4 expiry buckets \u00d7 9 strikes), which is what happens when a frozen chain's expiries roll off. All 06-16..09-04 pickles have spx_snapshot_date=None.\nSelector emulation in a private copy: picks 2026-09-11 (ok, SPX 0.215, n_spx=9, 4 tenors, snapshot 09-11). Excluding it: picks 2026-07-01 (SPX 0.375, 54 options, implied chain 2026-06-20).\nDry run of the script prints '2026-09-11  tenors=None ...' (its pickle currently has n_spx_options=9, n_vix_tenors=4, spot_date/spx_snapshot_date=2026-09-11).\nLive calibration.html shows 2026-09-11 parameters.",
+   "proposed_fix": "1. Extend the script to write spx_snapshot_date for historical fits. It can be derived deterministically as the max committed snapshot_date <= fit date: 2026-05-31 for 06-16, 2026-06-20 for 06-23..09-04. Also write spx_chain_age_days and stale_spx_chain=True.\n2. Make the script idempotent and non-destructive. Only fill keys that are missing, never overwrite non-None counts, and skip pickles that already have spot_date. Do not rewrite unchanged files.\n3. In is_acceptable_calibration / latest_good_calibration_path, require spx_snapshot_date == spot_date and n_spx_expiries >= 3. Store n_spx_expiries in the result.\n4. Re-state the README headline history.\n5. Tests: the selector rejects a pickle with a missing or mismatched spx_snapshot_date and a 1-expiry pickle; running the script twice yields byte-identical pickles; the script leaves 09-11 untouched.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "data-rq-units-and-provenance",
+   "title": "Published r/q are not the r/q the fit used; ^IRX discount yield stored as a continuously-compounded rate; negative bill rates dropped",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "scripts/cloud_refresh.py:308-315",
+    "dashboard/app.py:508-509",
+    "dashboard/templates/calibration.html:255-264",
+    "joint_vol_calibration/calibration/joint_calibrator.py:476-493",
+    "joint_vol_calibration/data/yf_downloader.py:208-214",
+    "joint_vol_calibration/data/database.py:127-134",
+    "scripts/backfill_tbill_history.py:70"
+   ],
+   "description": "The rate problems:\n- cloud_refresh builds JointCalibrator(as_of_date=TODAY), so the fit uses the defaults r=0.045 and q=0.013. After the fit it overwrites result['r'] with get_tbill_rate(TODAY) and stores no 'q'.\n- The dashboard then publishes r=3.91% labelled 'USD 6M SOFR (2026-03)' and q=0.0% for the headline fit; neither is what was used, nor what the label says.\n- ^IRX is the 13-week bill bank-discount rate. It is stored as d/100 and documented as an 'annualised decimal', and JointCalibrator documents r as continuously compounded. The correct conversion is r_cc = -ln(1 - d\u00b791/360)\u00b7365/91.\n- download_tbill_rate keeps close>0 only, and the backfill guard refuses rate<=0. This silently drops the genuine negative prints of 2020-03-19..27, leaving 7 backtest sessions without a rate (they get forward-filled).\n\nBest practice is to take the forward from put-call parity per expiry (the Cboe VIX methodology), not from assumed r and q.",
+   "evidence": "Live https://navnoorbawa.me/calibration.html: 'Risk-free rate r 3.91% USD 6M SOFR (2026-03) \u2026 Dividend yield q 0.0%'. The joint_cal_2026-09-11.pkl keys include r=0.03913 and no 'q'.\nConversion error: over 2018-01-01..2025-03-24 the mean discount rate is 2.395% vs 2.441% continuously compounded (mean +4.6 bp, max +11.1 bp). Today d=4.028% gives r_cc\u22484.11%.\nyf.download('^IRX') for 2020-03-19..27: -0.028, -0.033, -0.040, -0.033, -0.070, -0.105, -0.058. The DB is missing exactly these 7 sessions.\nParity-implied carry r\u2212q on the 2026-06-20 chain, 180-365d: 3.3-3.8%, vs the assumed 3.2%.",
+   "proposed_fix": "1. In cloud_refresh, compute r = tbill_cc(get_tbill_rate(spot_date)) before the fit, pass r and q into JointCalibrator, and persist exactly those values. Better: add db.get_implied_forward(snapshot, expiry), regressing (C\u2212P) on K near ATM, and price with F and D.\n2. In download_tbill_rate, store rate_discount and rate_cc (or convert once and document), and allow rates > -0.01.\n3. In the backfill script, change the guard to (-0.01, 0.25].\n4. In the template, relabel r as '^IRX 13-week T-bill (cc)' and show q, or 'parity-implied'.\n5. Tests: tbill_cc(0.04) \u2248 0.04075; a negative-rate row survives; the dashboard r_pct/q_pct equal the calibrator's self.r/self.q.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "data-options-snapshot-not-idempotent",
+   "title": "Options snapshot writes are not idempotent (plain INSERT, no natural key); the dashboard's 4-hourly refresh duplicates and mixes intraday chains; schema loses root, settlement and quote time",
+   "severity": "medium",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/data/database.py:83-103",
+    "joint_vol_calibration/data/database.py:347-388",
+    "joint_vol_calibration/data/database.py:8",
+    "joint_vol_calibration/data/pipeline.py:182-184",
+    "joint_vol_calibration/data/pipeline.py:369-389",
+    "dashboard/app.py:1225-1331",
+    "joint_vol_calibration/data/yf_downloader.py:322-366"
+   ],
+   "description": "The module docstring promises idempotent writes, but insert_options_snapshot uses a plain INSERT and options_snapshots has no UNIQUE natural key. DataPipeline._snapshot_options does not delete first. The dashboard's startup refresh (which runs whenever the DB is more than 3 days old, which is always, since the tracked DB ends 2026-06-18) and its 4-hourly scheduled refresh (09:00-22:00 ET, i.e. during market hours) both call daily_refresh. Each call appends another full chain under the same snapshot_date, and get_options_surface returns all of them, mixing intraday quote sets. Only cloud_refresh works around this with a manual DELETE.\nThe schema also drops:\n- contractSymbol, although Yahoo's ^SPX chain mixes AM-settled SPX and PM-settled SPXW under the same expiry date;\n- the underlying price at quote time;\n- the quote timestamp (lastTradeDate).\nThe 'implied_vol' column is Yahoo's opaque IV and is inconsistent with the stored mids.",
+   "evidence": "Private-copy repro: two identical insert_options_snapshot calls, then get_options_surface('2026-09-23','SPX') returns 4 rows (expected 2).\nLive yfinance ^SPX 2026-10-16 calls: contractSymbol prefix counts SPX2 278 and SPXW 183 in one expiry.\nOn the 2026-06-20 snapshot (5,291 OTM rows, 14d-1y), Yahoo IV minus IV implied from the stored mid (S=7500.58, r=4.5%, q=1.3%): median by tenor 14-30d +0.12, 60-120d -0.79, 200-365d -2.01 vol pts; overall MAD 1.19 vp.",
+   "proposed_fix": "1. Add a migration with columns root, contract_symbol, settlement ('AM'/'PM'), underlying_price, quote_time, source and iv_mid. Add CREATE UNIQUE INDEX ux_opt ON options_snapshots(snapshot_date, underlying, root, expiry, strike, right).\n2. Make insert_options_snapshot a single transaction: DELETE WHERE snapshot_date=? AND underlying=? AND source=?, then INSERT (or INSERT OR REPLACE).\n3. Recompute IV from mid with the parity-implied forward in the data layer, and keep Yahoo IV only as a raw column.\n4. Change the dashboard refresh threads to skip options snapshots before 16:15 ET.\n5. Test: inserting twice leaves the row count unchanged; a PM and an AM contract at the same strike and expiry coexist.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "data-daily-refresh-drops-current-session",
+   "title": "DataPipeline.daily_refresh still drops the just-closed session for the VIX term structure (the C20 bug persists on this path)",
+   "severity": "medium",
+   "category": "bug",
+   "locations": [
+    "joint_vol_calibration/data/pipeline.py:161-170",
+    "joint_vol_calibration/data/yf_downloader.py:72-73",
+    "joint_vol_calibration/data/yf_downloader.py:136-137",
+    "joint_vol_calibration/data/yf_downloader.py:185-186",
+    "joint_vol_calibration/data/yf_downloader.py:441-442"
+   ],
+   "description": "The C20 fix made end inclusive via _yf_end, but every downloader still defaults end=None to 'yesterday' by machine-local date. daily_refresh passes end=today for SPX and T-bill but calls download_vix_term_structure(start=...) with no end. An evening run therefore gets today's SPX but yesterday's VIX9D/VIX/VIX3M/VIX6M. JointCalibrator pins the VIX leg to the SPX spot session, so the leg is empty and the \u22653-tenor gate rejects the fit. This is the same failure mode C20 documented, on the path the dashboard's live refresh uses. No test covers daily_refresh's arguments.",
+   "evidence": "pipeline.py:163-165 calls `yf_dl.download_vix_term_structure(start=(datetime.today() - timedelta(days=5)).strftime(...))` with no end argument. yf_downloader.py:441-442 sets `end = (datetime.today() - timedelta(days=1))`. A live call download_vix_term_structure(start='2026-09-18') at 2026-09-24 00:50 UTC returned max date 2026-09-23, i.e. local yesterday; run at 22:00 UTC on a session day, the same call would stop at the previous session.",
+   "proposed_fix": "Pass end=today in daily_refresh. Change all four defaults to the last closed NY session (shared helper, see data-snapshot-date-wallclock-weekend) instead of machine-local yesterday. Add a test that monkeypatches yf.download, runs DataPipeline.daily_refresh, and asserts every download received end=today (i.e. the exclusive end is tomorrow).",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-no-cross-source-or-calendar-validation",
+   "title": "No calendar or cross-source validation: Yahoo bad prints, a missing session and VVIX gaps flow into features and labels",
+   "severity": "medium",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/data/yf_downloader.py:52-163",
+    "joint_vol_calibration/data/yf_downloader.py:417-485",
+    "joint_vol_calibration/data/database.py:161-253",
+    "scripts/cloud_refresh.py:61-110"
+   ],
+   "description": "The VIX family (the regime-rule and VIX-leg inputs) comes from Yahoo with no validation against Cboe's official daily CSVs, which are free (VIX/VIX9D/VIX3M/VIX6M/VVIX _History.csv all return 200). There is no NYSE-calendar completeness check. Re-downloading 400 days with INSERT OR REPLACE silently rewrites history, so nothing is point-in-time. Holiday VIX rows (28 in vix_daily) are stored, and the dashboard's 'latest VIX' reads vix_daily with ORDER BY date DESC, so it can display a holiday date.",
+   "evidence": "1. Yahoo ^VIX close on 2026-02-06 is 20.37, while Cboe official is 17.76 (low 17.27). The Yahoo value, identical to that day's ^VIX3M, is stored in both vix_daily and vix_term_structure.\n2. Yahoo currently has no 2026-09-22 bar for ^GSPC, ^SPX, ^VIX or ^IRX, although SPY traded all day (hourly bars 09:30-15:30) and Cboe shows VIX 14.21. The committed regime_labels.parquet does contain 09-22, so Yahoo dropped the bar after the fact.\n3. In the backtest window, ^VVIX differs from Cboe by more than 0.5 on 5 days (max 5.00 on 2019-08-12: Yahoo 105.31 vs Cboe 110.31), and 8 VVIX days are missing although Cboe has them (2019-07-05, 2020-06-11, 2021-01-22 \u2026). ^VIX9D is off by more than 0.05 on 43 days.\n4. Rebuilding build_regime_labels with Cboe ^VIX/^VVIX changes 7 of 1,816 labels in 2018-01-01..2025-03-24 (2019-08-09 1\u21922, 2020-02-20 1\u21922, 2020-06-11 1\u21922, 2021-05-11 1\u21922, 2021-05-20 1\u21922, 2021-06-09 2\u21921, 2021-07-08 2\u21921).\n5. Yahoo now also serves 06-15..06-17 sub-tenors that the tracked DB lacks.",
+   "proposed_fix": "1. Make Cboe _History.csv files the authoritative source for VIX, VIX9D, VIX3M, VIX6M and VVIX. They lag by one day, so use Yahoo only for the same-evening row and overwrite it with Cboe on the next run. Add a 'source' column.\n2. Add validate_sessions(df, start, end) against an NYSE calendar that fails loudly on missing or extra sessions.\n3. Flag |Yahoo \u2212 Cboe| > 0.25 pt.\n4. Keep an append-only raw download log (date, source, value, fetched_at) for point-in-time replay.\n5. Re-run the regime labels and backtest on the validated series and report the delta.\n6. Test: a frame missing a session raises; a synthetic 20.37-vs-17.76 print is flagged.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "data-readme-data-claims-false",
+   "title": "README, workflow and substack data claims contradict the DB and live endpoints",
+   "severity": "medium",
+   "category": "published-claim",
+   "locations": [
+    "README.md:41",
+    "README.md:115-123",
+    "README.md:189-196",
+    "README.md:242-243",
+    ".github/workflows/daily_refresh.yml:12-15",
+    ".github/workflows/daily_refresh.yml:62-63",
+    "substack_article.md:66"
+   ],
+   "description": "The 'Data Sources' table and the narrative contradict each other and the DB:\n- Row counts are stale.\n- The options rows say 'CBOE (single snapshot) 2026-03-24'. There are 4 snapshots per underlying, all from yfinance: delta/gamma/vega are NULL in 100% of rows, while CBOE supplies greeks.\n- Known Limitations still says 'Single-snapshot options data (2026-03-24)', contradicting line 41.\n- 'VIX futures: CBOE CDN 403 blocked by Cloudflare' is wrong: the old URLs are dead S3 keys and working endpoints exist.\n- The C20 postmortem, repeated in the workflow comment and the substack, says '^VIX9D, ^VIX3M and ^VIX6M exist on Yahoo only as a current-day row (no history)'. That is false, and the cron-window rationale rests on it.\n- The README says the cron moved to 21:30 UTC; the workflow runs at 22:00.\n- The workflow says 'The SQLite DB is NOT committed (\u2026 rebuilt fresh each run)', but vol_system.db is tracked, and each run starts from the stale committed copy (SPX to 2026-06-18).",
+   "evidence": "DB counts: spx_ohlcv 4,140 (README 4,139); vix_term_structure 20,431 (README ~20,135).\nOptions snapshots: SPX 03-24/03-28/05-31/06-20 = 15,362+13,573+15,945+16,935 = 61,815; VIX 591+414+375+516 = 1,896. delta_na = 1.0 for every snapshot.\nyf.download('^VIX9D ^VIX3M ^VIX6M', start='2026-08-20') returns daily history for every session. The DB holds 3,885 / 4,137 / 4,137 Yahoo rows back to 2010-2011.\n`git ls-files` lists data_store/vol_system.db.\ndaily_refresh.yml:20 has cron '0 22 * * 1-5'.",
+   "proposed_fix": "Generate the README data table in CI from db.get_data_coverage() (add per-snapshot counts and a source column), or add a test asserting README numbers equal DB counts. Correct the Yahoo-history claim in README, substack and the workflow comment. Replace the 'Cloudflare' line with the working VX endpoints (or '0 rows, not yet ingested'). Fix the cron time. Change the workflow comment to 'DB is tracked but NOT updated by the bot'.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "data-daily-chains-discarded",
+   "title": "The 'build option history by snapshotting daily' design never persists anything: ~65 sessions of real chains were downloaded and thrown away",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    ".github/workflows/daily_refresh.yml:61-69",
+    "joint_vol_calibration/data/pipeline.py:118-121",
+    "joint_vol_calibration/data/yf_downloader.py:12-13",
+    "scripts/cloud_refresh.py:287-298"
+   ],
+   "description": "Both pipeline.py and yf_downloader.py state that historical options data is built by snapshotting daily. The README's dominant caveat is that the backtest is mark-to-model because no option prices exist. Yet the workflow commits only regime_labels.parquet and joint_cal_*.pkl: every chain the bot downloads into the ephemeral DB is discarded when the runner exits. The committed DB still holds only the four hand-run snapshots, while the bot has fetched a chain on each of ~65 sessions since 2026-06-20.",
+   "evidence": "The workflow's git add covers only data_store/signals/regime_labels.parquet and data_store/calibrations/joint_cal_*.pkl. `git log -- data_store/vol_system.db` shows the last change on 2026-09-05. options_snapshots max snapshot_date is 2026-06-20.\nMeasured size of one full CBOE _SPX chain (30,470 rows) as zstd parquet: 1.77 MB. Filtered to 0.7-1.3 moneyness, T \u2264 2y, bid > 0 (25,115 rows): 0.71 MB.",
+   "proposed_fix": "Per session, write data_store/options/{spx,vix}_{session}.parquet with the filtered chain plus underlying_price and quote_time. Commit it, or better, append it to a 'data' branch or monthly GitHub Release asset to keep main small. Have get_options_surface read from that store. Add a CI check that today's session file exists after the run. This also lets later auditors reconstruct any fit exactly.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "data-get-options-surface-staleness",
+   "title": "get_options_surface returns an arbitrarily old snapshot with time-to-expiry measured from the snapshot, not as_of_date",
+   "severity": "medium",
+   "category": "look-ahead",
+   "locations": [
+    "joint_vol_calibration/data/database.py:391-427",
+    "joint_vol_calibration/calibration/quintic_calibrator.py:182-188",
+    "joint_vol_calibration/calibration/joint_calibrator.py:571-587"
+   ],
+   "description": "The getter picks MAX(snapshot_date) <= as_of_date with no age limit. It returns the stored time_to_expiry, which is relative to the snapshot date, while callers pair it with the as_of_date spot and VIX term structure. This is the mechanism behind the stale-chain fits (see data-provenance-stale-chain-fits). Only cloud_refresh checks staleness; QuinticCalibrator, the Bates calibration and any library caller do not.",
+   "evidence": "Private-copy repro: after inserting a 2026-09-23 chain, get_options_surface('2026-10-10','SPX') returns snapshot 2026-09-23 with time_to_expiry=0.063014 (23 days) for the 2026-10-16 expiry, whose true remaining T at as_of is 6 days.",
+   "proposed_fix": "Add max_age_days: int = 0 (sessions) and return_meta, or raise StaleDataError when the newest snapshot is older than allowed. Optionally recompute time_to_expiry relative to the snapshot session and always return the snapshot date so callers can pair spot correctly. Test: a stale snapshot raises unless max_age_days allows it.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-log-return-null-on-upsert",
+   "title": "insert_spx_ohlcv nulls log_return at the first row of every upsert window",
+   "severity": "low",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/data/database.py:174-187"
+   ],
+   "description": "log_return is computed inside the incoming batch with shift(1), so the first row of each batch is NaN. INSERT OR REPLACE then overwrites the correct stored value with NULL. Every CI run nulls the return at today\u2212400d, and the tracked DB already has a spurious NULL at 2025-05-08. Downstream rolling RV silently uses 19 of 20 returns (min_periods=15). Label impact is currently zero.",
+   "evidence": "The tracked DB has log_return NULL at 2010-01-04 (legitimate) and 2025-05-08 (spurious). Repro in a temp DB: insert 2026-09-01..10, then re-insert from 2026-09-07; get_spx_ohlcv shows 2026-09-07 log_return NaN. Rebuilding rule labels with the NULLs vs recomputed returns: 0 differences.",
+   "proposed_fix": "Before computing, fetch the last stored close with date < df.date.min() and prepend it. Or recompute after the upsert: UPDATE spx_ohlcv SET log_return = ln(close/prev) using LAG(close) OVER (ORDER BY date), or do it in pandas and re-upsert. Test: an overlapping re-insert leaves no NULL log_return after the first row of the table.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-tests-write-production-db",
+   "title": "test_rates.py writes into the tracked production DB and relies on teardown to undo it",
+   "severity": "low",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/tests/test_rates.py:32-81"
+   ],
+   "description": "The C21 fix snapshots and restores the Jan-2020 T-bill rows around each test. It still writes synthetic np.linspace rates into data_store/vol_system.db. A run that is killed (Ctrl-C, CI timeout, OOM) between insert and teardown re-creates the exact C21 contamination of the backtest cash hurdle. test_lookahead.py already shows the right pattern (monkeypatched temp DB).",
+   "evidence": "The full suite (642 passed, 24 skipped) left the DB byte-identical (md5 8fedd4f3\u2026 before and after), so the restore works when it runs. Without teardown, a direct insert_tbill_rates(linspace fixture) changed 2020-01-06 from 0.01488 to 0.016667 and the max rowid from 6791 to 6798. The private copy was then restored from the original.",
+   "proposed_fix": "Add joint_vol_calibration/tests/conftest.py with an autouse fixture that copies the DB to tmp_path and monkeypatches both config.DB_PATH and database.DB_PATH (and PARQUET_DIR). Remove protect_production_rates. Add a guard test asserting database.DB_PATH is not the repo DB during tests.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-sqlite-connection-wal",
+   "title": "'with sqlite3.connect()' never closes connections; the git-tracked DB is left in WAL mode",
+   "severity": "low",
+   "category": "reliability",
+   "locations": [
+    "joint_vol_calibration/data/database.py:140-156",
+    "joint_vol_calibration/data/database.py:184-186",
+    ".gitignore:74-76"
+   ],
+   "description": "The sqlite3 context manager only commits or rolls back; it does not close. Every getter and inserter leaks the connection until garbage collection. Python 3.13+ emits a ResourceWarning for unclosed connections, and the project advertises 'Python 3.11+'. _connect also switches the tracked DB file persistently to journal_mode=WAL while .gitignore excludes -wal/-shm, so a commit made while any process holds the DB (e.g. the Flask refresh threads) can capture a .db missing un-checkpointed pages. PRAGMA foreign_keys=ON has no effect: there are no foreign keys.",
+   "evidence": "Repro: conn=db._connect(); `with conn: ...`; afterwards conn.execute('select 1') still works, so the connection is not closed. PRAGMA journal_mode on the tracked DB returns 'wal'. The Python docs say the context manager 'neither implicitly opens a new transaction nor closes the connection'. Python 3.13 adds the ResourceWarning (alexwlchan.net notes; cpython#105539).",
+   "proposed_fix": "Change _connect to a @contextmanager that yields conn inside try/commit/except rollback/finally conn.close(), or use contextlib.closing. Keep WAL only for the live app and run PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE before committing the artifact (or stop tracking the binary DB). Drop the foreign_keys pragma. Test: run under -W error::ResourceWarning on 3.13.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-orphan-tables-apis",
+   "title": "Orphan and misleading tables and APIs: regime_labels holds demoted-classifier output, plus an unused spx_options table and a write-only parquet mirror",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/data/database.py:117-125",
+    "joint_vol_calibration/data/database.py:492-519",
+    "joint_vol_calibration/signals/regime_classifier.py:1057-1067",
+    "joint_vol_calibration/data/database.py:383-385"
+   ],
+   "description": "db.get_regime_labels() is a public 'regime labels' API, but the regime_labels table holds XGBoost classifier predictions (confidence column), not the rule labels the dashboard and backtest use. This is the same confusion C21 fixed in the parquet. The table ends 2025-12-30. spx_options (16,450 rows, 2026-06-05) is a dead table left by the old bot. The Parquet 'mirror' is written, gitignored and never read, and is overwritten per call while SQLite appends, so the two diverge. get_regime_labels also does not validate start_date.",
+   "evidence": "regime_labels (DB) vs the shipped parquet: they disagree on 1,108 of 3,993 days (27.7%); confidence ranges 0.362-0.996. `grep` finds no reader of spx_options, get_regime_labels or PARQUET_DIR files. get_regime_labels('2026-09-10', start_date='garbage') is accepted.",
+   "proposed_fix": "DROP spx_options. Rename the table to classifier_predictions, or point get_regime_labels at the rule parquet. Delete the parquet mirror, or read from it. Validate start_date. Test: get_regime_labels matches build_regime_labels on a sample window.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-config-dead-window-sideeffects",
+   "title": "config.py's 'single source of truth' is not one: dead backtest window constants and import-time mkdir",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/config.py:20-31",
+    "joint_vol_calibration/config.py:85-86",
+    "joint_vol_calibration/backtest/backtest_engine.py:77-78",
+    "joint_vol_calibration/backtest/run_backtest.py:41",
+    "scripts/backfill_tbill_history.py:44",
+    "joint_vol_calibration/signals/signal_engine.py:507-508"
+   ],
+   "description": "config says 'Changing one value here propagates everywhere'. But BACKTEST_START/END ('2018-01-02'/'2025-12-31'), TRAIN_YEARS, TEST_MONTHS and SPX_/VIX_/SPXW_/TBILL_TICKER are unused. The real window (2018-01-01..2025-03-24) is hard-coded in 5 files. HIST_END='2025-12-31' is the DataPipeline default, so a fresh historical_backfill stops 9 months before the data the README describes. Importing config also creates data_store/, parquet/, mc_cache/ and logs/, which fails on read-only installs and creates directories in any cwd layout.",
+   "evidence": "grep finds no import of BACKTEST_START, BACKTEST_END, TRAIN_YEARS or TEST_MONTHS. BT_END='2025-03-24' appears in backtest_engine.py:78, run_backtest.py:41, backfill_tbill_history.py:44 and signal_engine.py:508.",
+   "proposed_fix": "Set BT_START='2018-01-01' and BT_END='2025-03-24' in config and import them everywhere. Remove the dead constants. Set HIST_END=None, meaning 'last closed session'. Move mkdir into an ensure_dirs() called by writers. Test: grep-based test that the window literal appears only in config.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "data-normalise-date-robustness",
+   "title": "_normalise_date_column fails on a DatetimeIndex named 'Date' and takes UTC dates without converting to New York time",
+   "severity": "low",
+   "category": "bug",
+   "locations": [
+    "joint_vol_calibration/data/database.py:605-615"
+   ],
+   "description": "After reset_index, only a column literally named 'index' is renamed to 'date'. yfinance's index is named 'Date', so a frame passed with its index raises KeyError. Tz-aware timestamps are converted with .dt.strftime on their own zone, so a UTC 22:00+ timestamp from an evening NY session would be labelled with the next day.",
+   "evidence": "_normalise_date_column(DataFrame(index=DatetimeIndex([...], name='Date'))) raises KeyError: 'date'.",
+   "proposed_fix": "Rename the first column when it came from the index (index.name or 'index') to 'date'. If the column is tz-aware, tz_convert('America/New_York') before taking the date. Add unit tests for both cases.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  }
+ ],
+ "checked_ok": [
+  "_yf_end correctly turns the inclusive end into yfinance's exclusive end at all 4 call sites. A live call with end='2026-09-23' returned the 09-23 session for SPX, VIX, ^IRX and the term structure.",
+  "Timezones: Ticker.history returns an America/New_York tz-aware index, and tz_localize(None) keeps the NY wall date. yf.download returns a naive index. Dates are correct for the current pandas 3.0.6 / yfinance 1.7.0.",
+  "All four yf downloaders run correctly live under pandas 3.0 (StringDtype dates, int volume, bool is_vvix).",
+  "Every SQL getter enforces date <= as_of_date (spx, vix_daily, term structure, tbill, regime, options). get_options_surface also requires expiry > as_of_date. No row-level look-ahead was found.",
+  "spx_ohlcv: no weekend rows, no OHLC inconsistencies, and stored log_return equals ln(C_t/C_{t-1}) wherever non-null. The only gap over 4 days is 2012-10-31 (Hurricane Sandy, legitimate).",
+  "Committed options snapshots have no duplicate (expiry, strike, right) within a snapshot, and time_to_expiry equals (expiry \u2212 snapshot_date)/365 on all 63,711 rows (the snapshot_date itself is the problem).",
+  "vix_term_structure's primary key (date, ticker) prevents duplicates, so the pivot to wide format is safe.",
+  "^IRX percent-to-decimal unit is correct (/100). The backfill's (0, 0.25] guard catches percent/decimal mix-ups. Real ^IRX now covers the backtest window (1,809 rows; the only gap is the negative-rate week).",
+  "vix_daily matches Cboe official closes on 4,166 of 4,167 dates (the exception is 2026-02-06).",
+  "The shipped regime_labels.parquet equals build_regime_labels(adaptive) on DB data for 100% of backtest-window dates.",
+  "The full test suite (642 passed, 24 skipped) leaves the tracked DB byte-identical (md5 8fedd4f3\u2026 before and after).",
+  "cloud_refresh's own chain mapping (snapshot_date = spot_date, T from spot_date, delete-then-insert) is correct; the library path is not.",
+  "Live headline 2026-09-11: n_spx_options=9 (one expiry), consistent with the known outage. The outage auditor covers root cause; this audit covers only the selector and provenance implications.",
+  "Private scratch copy: /tmp/claude-0/-home-user-vol-system-dashboard/017612b3-569a-51ba-baa9-4b3f10b4b51c/scratchpad/audit/data. Experiment scripts are in the scratchpad (exp_T.py, exp_ts.py). The shared repo was not modified: its DB md5 still matches the original."
+ ]
+}

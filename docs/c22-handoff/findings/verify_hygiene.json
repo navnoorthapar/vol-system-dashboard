@@ -1,0 +1,194 @@
+{
+ "verdicts": [
+  {
+   "id": "hygiene-iv-newton-inverter",
+   "verdict": "confirmed",
+   "adjusted_severity": "high",
+   "reasoning": "I re-ran this in my copy (verify-hygiene) using the 03-24 pickle params: S=6581, r=0.045, q=0.013, rho=-0.99. Newton keeps exactly 69 of the 90 default nodes. Median |IV diff| against the published greeks_surface.parquet is 4.45e-5, so this is the inverter that built the published surface. Newton differs from brentq by more than 1e-4 at 23 nodes, 11 of them with price > $1. Example: 365d lm=0.171, price 152.66, Newton 0.0001 vs brentq 0.1997. Two of the wrong values were kept in the published surface, both on noise-level prices: 30d lm 0.132 (price ~0, Newton 0.04999) and 30d lm 0.211 (price 6.5e-4, Newton 0.1025). I recomputed vomma z-scores with brentq IVs. All 90 nodes give 5 unstable nodes: (180,0.132), (180,0.171), (365,0.171), (365,0.211), (365,0.25), with max z 4.47. Masking prices below 1e-3, 0.01 or 0.05 still gives the same 5 nodes (z 4.21/4.17/4.15). The published nodes are 365d at -0.30, -0.26 and +0.13, and greeks.html:129 hard-codes 'All three...'. The live greeks.html still shows '69 nodes ... 3 Unstable Nodes'. NN benchmark (seed 42, 500 options): 194 are excluded, the smallest excluded K/F is 1.0802, the largest excluded price is $73.55, and brentq returns a finite IV for all 500. Training-label replication (150 sets x 100): exactly 14,996 / 2,186 / 21, as the auditor reported. The function's docstring claims 'NaN where inversion fails' and 'guaranteed to converge'. Both are false.",
+   "fix_notes": "(1) Not every one of the 21 surviving 'wrong labels' is a Newton failure. In my replication the largest error was a deep-ITM call (T=0.025, lm=-0.298) where brentq hit its own 1e-4 floor because the price is about intrinsic plus quadrature noise, so neither value means anything there. Inverting OTM options only (puts via parity for K<F) fixes both cases. The price-accuracy mask must be applied to the parity-derived put price too: Heston call quadrature error (~1e-3 abs) passes straight into the OTM put. (2) Test (c), '90 nodes', contradicts the proposed price mask: with the 03-24 params only 76 nodes have price > 1e-3. Instead assert that every dropped node is logged with a reason and that no node returns a clip value (1e-4 or 5.0). (3) Manaster-Koehler sigma0 = sqrt(2|ln(F/K)|/T) is 0 at K=F, so floor it (e.g. max(sigma0, 0.1)). Keep a per-element bracket and per-element convergence, not the current batch-wide nanmax(|delta|) test, which never fires while any element bounces. Jaeckel's 'Let's be rational' (py_vollib_vectorized) is the reference implementation if a dependency is acceptable. (4) This also changes the published '8.1x speedup': see the missed item hygiene-nn-speedup-inflated. (5) Regenerating greeks_surface: choose explicitly which calibration it represents (see the missed item about the 03-24 pickle using rho=-0.99), and render the as-of date from the parquet's as_of_date column instead of the hard-coded '2026-03-24' badge. (6) Moving the inverter to a torch-free module also removes the accidental torch import chain behind the published backtest Sharpe (missed item hygiene-backtest-kpi-torch-import-chain). Do that before any requirements split."
+  },
+  {
+   "id": "hygiene-dashboard-relabels-with-demoted-classifier",
+   "verdict": "confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "I called app._refresh_regime_labels() in my copy. Rows went 4201 -> 4088. The range went from 2010-01-26..2026-10-09 to 2010-02-02..2026-06-18. Labels changed on 1,320 of 4,088 common dates. The mix went from R1 68.1/R2 21.7/R0 10.2 to R1 56.5/R2 40.9/R0 2.6. git status showed ' M data_store/signals/regime_labels.parquet'. The committed DB has max(spx_ohlcv.date)=2026-06-18, so the >3-day staleness branch fires on any clone that runs `python dashboard/app.py` (the README 'Running Locally' step), and again every 4 h through _scheduled_data_refresh. I lowered severity: the deployed site is built by freeze_site/cloud_refresh, which import app but never run __main__, so published numbers are not affected today. The damage reaches the site only if a developer commits the parquet or runs redeploy_site.sh, which force-pushes a site rendered from the local data_store. A committed relabel would also not self-heal: cloud_refresh.extend_regime_labels only repairs labels inside its ~900-day lookback window (safe_from), so 2010-2023 would stay as classifier labels permanently.",
+   "fix_notes": "Also disable _scheduled_data_refresh, which calls the same path every 4 h on weekdays. DataPipeline.daily_refresh in that path also writes option snapshots and market rows into the tracked vol_system.db (see hygiene-duplicate-divergent-ingestion). Simplest correct fix: delete _refresh_regime_labels, _startup_data_refresh and _scheduled_data_refresh. They exist only for the abandoned Railway deployment; the Procfile is dead. The behavioural test should hash both regime_labels.parquet and vol_system.db before and after starting the app with network mocked. Also guard the parquet in CI with a test that it matches build_regime_labels(..., vvix_threshold=None) on the full window. The existing test_adaptive_gate_reproduces_shipped_labels already fails after a relabel (0.677 < 0.99), but it reads a CWD-relative path."
+  },
+  {
+   "id": "hygiene-selector-headlines-1-expiry-fit",
+   "verdict": "confirmed",
+   "adjusted_severity": "high",
+   "reasoning": "latest_good_calibration_path() in my copy returns joint_cal_2026-09-25.pkl (n_spx_options=9, n_vix_tenors=4, SPX RMSE 0.041, kappa 3.32). Every post-09-05 pickle has 9 options and 4 tenors. 54/45/36 options correspond to 6/5/4 buckets x 9 strikes. The CI log for job 114096310910 (fetched via the GitHub MCP) shows 'SPX surface: 9 liquid options across 1 expiries' and then 'Done (accepted) ... 9 SPX opts, 4 VIX tenors'. The live calibration.html badge reads '2026-09-25 \u00b7 SPX = 7743.4 \u00b7 r = 4.07%'. is_acceptable_calibration (joint_calibrator.py:157-196) has no SPX-coverage term.",
+   "fix_notes": "PITFALL: the proposed 'n_spx_options >= 27' gate can be passed by two expiries. _prepare_spx_surface (joint_calibrator.py:634-650) does not de-duplicate expiries across bucket targets. A chain with 21d and 45d expiries yields 27 anchors (21d selected by both the 14d and 30d targets, so 9 duplicated rows), and a single 21d expiry yields 18 (see missed item hygiene-spx-anchor-duplicate-buckets). Gate on n_spx_expiries = spx_surface['time_to_expiry'].nunique() after de-duplication, not on the row count. For legacy pickles without the field, derive expiries as n_spx_options/9 only for pre-09-05 bot fits (54/45/36). Raw-RMSE ranking across fits with different anchor counts is biased toward thin data by construction, so prefer 'newest sufficient fit'. With the gate, the headline reverts to 07-01 (54 options, 0.375 vp), which is more than 3 months old. The staleness banner is therefore required, not optional. It depends on the outage fix (fetching more than the first 8 daily expiries) to ever produce a sufficient fit again. Also fix the docstring/behaviour mismatch: the fallback returns cals[-1] even when it is gate-rejected."
+  },
+  {
+   "id": "hygiene-calibration-rate-provenance",
+   "verdict": "confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "cloud_refresh.py:308 calls `JointCalibrator(as_of_date=TODAY)`, which picks up the defaults r=0.045, q=0.013 (joint_calibrator.py:477-478). Those values are used in the price-space SPX loss: heston_call_batch(self.S, ..., self.r, self.q) plus put-call parity (lines 838-851), and in the vega weights. calibrate()'s result dict (lines 1028-1050) holds neither r nor q. cloud_refresh line 315 then sets result['r']=get_tbill_rate(TODAY) after the fit. Pickles: 09-11 has r=0.03913 and no q key, and the 06-16..10-09 bot pickles all carry ^IRX-like r (0.036-0.041) with q=None. Only save() (lines 1436-1437) writes r and q, and only the legacy 03-24 pickle went through it. Live calibration.html shows 'Risk-free rate r 4.07% USD 6M SOFR (2026-03)' and 'Dividend yield q 0.0%'. Size of the error: re-pricing with the displayed r=4.07%, q=0 instead of the fitted 4.5%/1.3% shifts carry by 0.87%/yr. That is negligible at 14d (~0.2 vp ATM) but material at 1y, where the forward moves by about 67 SPX points.",
+   "fix_notes": "Migrate the existing bot pickles: set r=0.045, q=0.013 and rate_source='JointCalibrator default (not ^IRX)'. Do not leave the post-hoc ^IRX value, which was never used in the fit. ^IRX is a 13-week discount-basis yield in percent, already divided by 100 in get_tbill_rate. Convert it to a continuously compounded rate if it feeds pricing (small difference, but document it). Better practice: imply the forward, and so r-q, from the chain's own put-call parity at each expiry, which removes the separate q assumption. Use spot_date rather than TODAY for the rate lookup. Template: render rate_source from the pickle; never hard-code it."
+  },
+  {
+   "id": "hygiene-silent-failure-freeze-gate",
+   "verdict": "confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "I deleted greeks_surface.parquet and corrupted every joint_cal_*.pkl in a second copy (vh-freeze) and ran freeze_site. Result: 'OK /greeks -> greeks.html 33852 bytes status=200'. The page text reads '0 nodes \u00b7 6 maturities \u00b7 2026-03-24 Unstable Nodes 0 / 0 ... Mean Vomma 0 Across all 69 nodes ... All three unstable nodes are at the 1-year maturity'. index.html shows 'Calibration: 2026-05-31'. /calibration returns 500 with ZeroDivisionError at calibration.html:105 (0.693/d.kappa*252), and freeze_site exits 1 on that one. grep -c _error over the templates gives 0 for all 5. ruff: BLE001=74 in non-test code (29 in app.py) and S110=7 (the auditor said 6; trivial).",
+   "fix_notes": "The most consequential instance of this is not a missing file but an import-chain failure. When full_results.pkl cannot be unpickled (e.g. torch missing), load_page4's `except Exception: pass` silently swaps the headline Sharpe/Sortino and the per-signal cards to the flat-5% dashboard recompute while the label still reads 'rf=T-bill' (see missed item hygiene-backtest-kpi-torch-import-chain). Include that case in the parametrised freeze test: run with sys.modules['torch']=None and with each artifact deleted or corrupted. freeze_site should fail on a response header (e.g. X-Dashboard-Errors) set by an after_request hook from d['errors'], rather than grepping HTML."
+  },
+  {
+   "id": "hygiene-dashboard-metric-reimplementation",
+   "verdict": "confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "I recomputed the half-year Sharpes from full_results.parquet and the DB tbill_rates (4,185 rows), matching the auditor: 2020-H1 -0.12 vs +0.91; 2022-H1 -0.41 vs +1.25; 2020-H2 -18.02 (clipped to -4) vs -2.70; 2021-H1 -10.92 vs -2.61. Negative half-years: 11 with flat 5% vs 9 with ^IRX, out of 13. load_page4 in my copy gives Win Rate 28.16%, N Trades 283, N Days 1808, against the engine metrics in full_results.pkl: win_rate 0.4555, n_trades 292, n_days 1807. The auditor missed one more: Avg P&L / Trade is -$923 on the page vs -$1,806 in the engine (avg_pnl_per_trade), because it divides by the dashboard's own trade count. Sharpe -1.799, Sortino -3.280, Calmar -0.131, DD duration 1729 and cumulative/annual return do match the engine.",
+   "fix_notes": "The 'not out-of-sample' wording deserves care. The models inside the run are walk-forward (PDV retrained per year, rule labels), so each half-year slice is OOS for the models but not for the strategy design, which was tuned on the full sample (the 'Improvement Summary Steps 1-8'). Call it 'Half-year Sharpe (single full-sample run, ^IRX hurdle)' instead of '6-Month OOS Windows'. Also stop clipping to +/-4 without saying so, or annotate clipped bars. Persist metrics as JSON (not inside the pickle) so the page does not depend on unpickling TradeRecord (see missed item hygiene-backtest-kpi-torch-import-chain)."
+  },
+  {
+   "id": "hygiene-live-classifier-feature-bug",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "I wrapped the unpickled classifier's predict_proba in my copy and called load_page1. Captured input: pdv_iv_spread=-0.164000 = -vix, against an expected (8.37-16.4)/100 = -0.0803. fear_premium was 0.995455. The cause is ordering: d['pdv_forecast'] is assigned in the PDV block (~line 382), after feat_live is built (~line 257). Effect on published numbers: probabilities go from [2.3, 27.7, 70.0] as published to [2.9, 36.6, 60.5] with the corrected feature, and the argmax (R2) is unchanged on this date. I lowered severity because the card is explicitly labelled 'research only / not used for trading' and the headline regime comes from the rule labels.",
+   "fix_notes": "Serve from build_features() (last row) so the feature definitions cannot drift from training: RMS of log returns vs the sample std of simple returns, and the clip on fear_premium. Note that build_features has three pdv_iv_spread variants (walk-forward series, pdv_model, rv_20d fallback). Serving must use the same variant the shipped classifier was trained on. Check RegimeClassifier.fit/build_dataset before choosing. Pass only CLASSIFIER_FEATURE_COLS (vvix is excluded from training) to avoid relying on predict_proba's column handling."
+  },
+  {
+   "id": "hygiene-pickle-artifacts-and-dependency-floors",
+   "verdict": "partially-confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "Confirmed. Loading regime_classifier.pkl under sklearn 1.9.1 / xgboost 3.2.0 emits InconsistentVersionWarning 'from version 1.7.1' 5 times (CalibratedClassifierCV, FrozenEstimator, IsotonicRegression x3) plus XGBoost's 'serialized model ... older version' warning. regime_classifier.py:84 imports sklearn.frozen.FrozenEstimator (added in scikit-learn 1.6) while requirements.txt says scikit-learn>=1.3.0. All requirements are unpinned floors, and the CI log shows the daily job installing whatever is newest (pandas 3.0.6, sklearn 1.9.1, torch 2.14.1). Overstated: the 'security' framing. The pickles are written by the repo owner or by the bot from its own computation, inside the same trust domain as the code; anyone able to plant a malicious pickle can edit app.py directly. The real risk is reliability and reproducibility. A future sklearn/xgboost release that cannot unpickle these artifacts would be swallowed by the broad excepts and silently degrade the published pages, the same failure mode I demonstrated with torch.",
+   "fix_notes": "Re-categorise as reliability. The checkpoint stores only lists and Python floats (scaler_mean/scale are .tolist(); mae_vol_pts is float()), so weights_only=True should work. Verify best_val_mse is a Python float and not a numpy scalar before switching. For full_results.pkl, persist metrics and the trade log as JSON/parquet. That pickle is what drags backtest_engine -> delta_hedger -> risk_monitor -> nn_pricer -> torch into the site build. A lock file must be used by BOTH workflows, and tests.yml already installs CPU torch from the PyTorch index; keep that in the lock (--extra-index-url). The warnings-as-errors artifact test needs an allowlist for the known benign sklearn sample_weight UserWarning."
+  },
+  {
+   "id": "hygiene-ci-dependencies-and-actions",
+   "verdict": "partially-confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "Confirmed from the job 114096310910 log (GitHub MCP get_job_logs): torch-2.14.1 (554.6 MB), nvidia_cudnn_cu13 553.1 MB, cublas 423.1 MB, nccl_cu12 351.5 MB, triton 247.9 MB and others are downloaded. The install step ran 01:20:28 -> 01:22:13. The log shows 'Cache hit occurred on the primary key ..., not saving cache.' The gh-pages commit is literally 'Deploy 38012780844: $(date -u +%Y-%m-%d) 16a130a...'. The Node 20 deprecation warning appears even with FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 set. redeploy_site.sh does `git init` + `push -f` of a fresh gh-pages. REFUTED sub-claim: 'Neither cloud_refresh nor the dashboard imports torch.' Rendering /backtest unpickles full_results.pkl, which imports backtest_engine -> delta_hedger -> risk_monitor -> nn_pricer, and nn_pricer imports torch at line 52 (traced with an __import__ hook: 'torch' is in sys.modules only after /backtest). freeze_site, and therefore cloud_refresh, imports torch today. Line refs are wrong: tests.yml is 52 lines, so '107-141'/'139-140' do not exist; the '633 passed' comment is at tests.yml:50-51.",
+   "fix_notes": "DANGER: removing torch from the daily job before decoupling the import chain silently changes a published headline. With sys.modules['torch']=None, load_page4 returns 'Sharpe (rf=T-bill) -2.519' and 'Sortino -4.466' (the flat-5% recompute) instead of -1.799/-3.280, with status 200, so freeze_site passes. Order the work: (1) move the BS IV inverter to a torch-free module and lazy-import torch inside nn_pricer's training/inference functions; (2) persist backtest metrics as JSON; (3) only then split requirements. Cheapest immediate win with no behaviour change: copy tests.yml's `pip install torch --index-url https://download.pytorch.org/whl/cpu` before `pip install -r requirements.txt` (CPU wheel, no CUDA stack). Severity is low: cost and hygiene, and the action-pinning point is defence in depth for a first-party-owned repo."
+  },
+  {
+   "id": "hygiene-daily-option-chains-discarded",
+   "verdict": "confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "The workflow (daily_refresh.yml:61-69) adds only regime_labels.parquet and joint_cal_*.pkl. `git check-ignore -v` shows data_store/parquet/ is ignored at .gitignore:56 (not :69 as cited). The committed DB holds SPX snapshots for 2026-03-24, 03-28, 05-31 and 06-20 only (61,815 SPX rows, matching README:41). The CI log shows 'Inserted 2795 SPX options rows for 2026-10-09' and then a commit with '2 files changed ... create mode ... joint_cal_2026-10-09.pkl'. The workflow comment 'rebuilt fresh each run' is wrong: the tracked DB (SPX to 06-18) is reused and topped up with a 400-day download.",
+   "fix_notes": "Store raw bid, ask, lastPrice, lastTradeDate, volume and openInterest alongside mid. The bot currently falls back to lastPrice when bid/ask are 0, so a later user needs to filter stale prints. Today's chains cover only the first 8 (daily) expiries because of the outage. Fix the fetch first, or the archived history will be mostly 0-10-day options. Use the session date in the filename and make the write idempotent (overwrite the same session). Growth of about 50-60 KB/day zstd is about 15 MB/yr, which is acceptable in git."
+  },
+  {
+   "id": "hygiene-duplicate-divergent-ingestion",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "I confirmed the divergences by reading the code. pipeline.daily_refresh uses datetime.today() for SPX/TB windows of 5 days. download_vix_term_structure(start=...) with no end defaults to yesterday (yf_downloader.py:441-442). yf_downloader._fetch_yf_options stamps snapshot_date = datetime.today() local time (line 286/355) and applies a 20% spread filter (line 375-379). cloud_refresh takes exps[:8], uses no spread filter and falls back to lastPrice. HIST_END='2025-12-31'. insert_options_snapshot is a plain INSERT (database.py:383) despite the 'idempotent' docstring. The committed DB has 0 rows in vix_futures_daily and vix_futures_settlements. I lowered severity: the only production path is cloud_refresh, and DataPipeline.daily_refresh is reachable only from the local dashboard's refresh threads, which are themselves the defect in hygiene-dashboard-relabels-with-demoted-classifier.",
+   "fix_notes": "Prefer deletion over a new unified module. Removing the dashboard refresh threads leaves DataPipeline.daily_refresh with no caller, and the CBOE paths have never produced a row. That makes effort small instead of large. If DataPipeline stays for historical_backfill, add the UNIQUE(snapshot_date, underlying, expiry, strike, right) constraint through a migration that first de-duplicates existing rows, or CREATE UNIQUE INDEX will fail."
+  },
+  {
+   "id": "hygiene-test-isolation-and-brittle-guards",
+   "verdict": "confirmed",
+   "adjusted_severity": "medium",
+   "reasoning": "There is no conftest.py, pytest.ini, pyproject.toml or setup.cfg. Running `pytest tests/test_c21_audit_fixes.py -k 'bot_writes or rule_not_classifier or adaptive_gate'` from joint_vol_calibration/ fails first on test_adaptive_gate_reproduces_shipped_labels with FileNotFoundError, because it reads a CWD-relative 'data_store/signals/regime_labels.parquet'. So at least 3 C21 guards depend on CWD, not 2. test_rates.py's autouse protect_production_rates fixture writes to and restores the tracked DB_PATH, which is not crash-safe. The source-grep guards only inspect scripts/cloud_refresh.py, which is why the app.py relabel path was not caught.",
+   "fix_notes": "PITFALL with the proposed conftest: database.py does `from joint_vol_calibration.config import DB_PATH, PARQUET_DIR` at import (line 26), and _connect() reads the module-level name. Monkeypatching config.DB_PATH after import has no effect; database.DB_PATH must be patched, or (more robust) config should read an env var (e.g. VOL_DATA_DIR) and conftest should set os.environ before importing any project module. Seven modules import DATA_DIR by value (risk_monitor.GREEKS_DIR, nn_pricer._SPX_MODEL_PATH, app.DATA, ...), so the env-var approach is the only one that covers them all. config.py also mkdirs at import, so the env var must be set before the first import."
+  },
+  {
+   "id": "hygiene-docs-and-docstrings-inaccurate",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "`grep np.fft|scipy.fft|numpy.fft` returns nothing. heston_call_price(100,100,1,0.05,0,kappa=2,theta=0.04,sigma=1e-3,rho=-0.5,v0=0.04) = 10.45098, against BS discounted 10.45058 and undiscounted 10.98640, so the 'undiscounted' docstring is wrong. The same docstring also claims 'FFT is used in calibration batch mode', which is false. heston.py:1039 says 'Broadie-Kaya exact scheme' while line 1041 and the code say full-truncation Euler. validate_no_lookahead has no caller outside pipeline.py and uses assert. README rows 191-192/196/242 still say 'single snapshot 2026-03-24' while README:41 lists four. The CI log disproves the cron rationale ('^VIX9D/^VIX3M/^VIX6M exist ONLY as a current-day row'): 'Downloaded 1382 VIX term structure rows (dates: 2025-09-05 to 2026-10-09)', which is about 5 tickers x 276 sessions. The latest_good_calibration_path fallback returns cals[-1] regardless of sufficiency (app.py:87-88).",
+   "fix_notes": "tests.yml line refs are wrong: the file has 52 lines and the '633 passed' comment is at lines 50-51. The README itself now says 666 tests while CI reports 642 passed / 24 skipped; derive both from one CI artifact. When fixing the cron comment, keep the true constraint: run after the close so the session's bar exists. The 'before Yahoo rolls the row' rationale is unsupported."
+  },
+  {
+   "id": "hygiene-sqlite-connections-never-closed",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "database._connect() returns a bare connection, and `with conn:` only commits or rolls back. A minimal Python 3.13 reproduction (`with sqlite3.connect(':memory:') as c: ...`) emits 'ResourceWarning: unclosed database in <sqlite3.Connection ...>'. The shared repo's DB header bytes 18/19 = 2/2 (WAL format), and a 0-byte vol_system.db-wal plus a -shm sidecar exist there (both gitignored). Python 3.11 in production is unaffected functionally.",
+   "fix_notes": "WAL mode makes a committed .db potentially miss pages that still sit in a non-empty -wal. Before committing the DB, run PRAGMA wal_checkpoint(TRUNCATE). Switching to journal_mode=DELETE for a git-tracked DB is simpler. contextlib.closing() is enough for app.py's _db() call sites."
+  },
+  {
+   "id": "hygiene-print-instead-of-logging",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "Counts reproduced: joint_calibrator 53, run_backtest 32, pdv 19, nn_pricer 16, quintic_calibrator 9 (129 in total, excluding tests). quintic_calibrator.py:576 calls warnings.filterwarnings('ignore'). LOG_LEVEL/LOG_DIR are unused, and LOG_DIR is created at import. CI log: '01:22:29 INFO Refresh complete...' is followed by the '[C4] Joint calibration: 2026-10-10 | S=7812 | 9 SPX opts' block that was printed during step 3.",
+   "fix_notes": "An immediate one-line mitigation is `PYTHONUNBUFFERED: 1` in daily_refresh.yml env. The [C4] print labels the fit with the run date (2026-10-10) while the pickle is the 10-09 session. Use spot_date in the message when converting it to logging."
+  },
+  {
+   "id": "hygiene-dead-code-and-packaging",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "Checked: joint_vol_calibration/dashboard/ holds only an empty __init__.py. The Procfile is a gunicorn/Railway line. Table counts: vix_futures_settlements 0, vix_futures_daily 0, spx_options 16,450, regime_labels 3,993. `git grep -lw` finds each of implied_vol_batch, calibrate_bates, compare_with_xgboost, get_vix_futures_settlements, get_regime_labels, _build_walkforward_regimes, _cond_var_components and QuinticOUModel only in its defining file. requirements.txt has no pytest.",
+   "fix_notes": "Before deleting calibrate_bates, note that the dashboard displays bates_cal_2026-03-24.pkl. Either keep a regeneration entry point or label the Bates card as a frozen 03-24 artifact. Dropping the spx_options table requires the owner to commit the DB (the bot does not), and test_c21's source guard still mentions 'spx_options'."
+  },
+  {
+   "id": "hygiene-provenance-backfill-destructive",
+   "verdict": "confirmed",
+   "adjusted_severity": "low",
+   "reasoning": "backfill() (scripts/backfill_calibration_provenance.py:76-116) sets n_spx_options/n_vix_tenors=None and provenance='legacy fit; data counts unrecorded' for every date missing from CI_COUNTS. That includes 2026-09-11 and later, which already hold calibrator-recorded counts (09-11: 9/4). is_acceptable_calibration skips the tenor gate when n_vix_tenors is None. It is only harmful if re-run with --apply.",
+   "fix_notes": "Deleting the script is simplest now that the one-shot backfill is done. If it is kept, skip any pickle that has 'spot_date' or 'spx_snapshot_date' (calibrator-written provenance), not just files with existing keys."
+  }
+ ],
+ "missed": [
+  {
+   "id": "hygiene-backtest-kpi-torch-import-chain",
+   "title": "Published backtest Sharpe/Sortino silently depend on torch being importable; if full_results.pkl fails to unpickle, the page shows the flat-5% recompute labelled 'rf=T-bill'",
+   "severity": "medium",
+   "category": "reliability",
+   "locations": [
+    "dashboard/app.py:914-922",
+    "joint_vol_calibration/backtest/backtest_engine.py:61",
+    "joint_vol_calibration/backtest/delta_hedger.py:69",
+    "joint_vol_calibration/greeks/risk_monitor.py:80",
+    "joint_vol_calibration/models/nn_pricer.py:52",
+    "dashboard/templates/backtest.html:423"
+   ],
+   "description": "load_page4 takes the engine's ^IRX-hurdle Sharpe/Sortino and per-signal cards from pickle.load(full_results.pkl). Unpickling TradeRecord imports backtest_engine, which imports delta_hedger, then risk_monitor (for the BS IV inverter), then nn_pricer, which does `import torch` at module level. Any failure in that chain (torch absent, a CUDA/torch install problem, a renamed class, a library that can no longer unpickle) is swallowed by `except Exception: pass`. The page then publishes the dashboard's flat-5% recompute under the label 'Sharpe (rf=T-bill)', and freeze_site still reports OK. This turns the hygiene auditor's own proposal (drop torch from the daily job) into a silent regression of a headline number.",
+   "evidence": "An __import__ hook in my copy shows 'torch' absent from sys.modules after rendering /, /calibration and /greeks, and present after /backtest. The stack runs app.py:919 pickle.load -> backtest_engine.py:61 -> delta_hedger.py:69 -> risk_monitor.py:80 -> nn_pricer.py:52 import torch. With sys.modules['torch']=None set before importing app: load_page4() gives 'Sharpe (rf=T-bill)' -2.519 and 'Sortino' -4.466 (normal: -1.799 / -3.280), and client.get('/backtest') returns 200.",
+   "proposed_fix": "(1) Move _bs_iv_vectorized (fixed) into a torch-free module (e.g. joint_vol_calibration/models/black_scholes.py) and import it from risk_monitor and delta_hedger. Lazy-import torch inside nn_pricer's functions. (2) At backtest time, write the engine metrics to data_store/backtest/metrics.json and have load_page4 read only that. (3) When the engine metrics cannot be loaded, show '\u2014' and record an error that fails freeze_site; never relabel a fallback. Test: with sys.modules['torch']=None, freezing /backtest must either show -1.799 or exit non-zero.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "hygiene-spx-anchor-duplicate-buckets",
+   "title": "_prepare_spx_surface can select the same expiry for two bucket targets, duplicating 9 anchors (double weight) and inflating n_spx_options",
+   "severity": "medium",
+   "category": "bug",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:630-658",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1045"
+   ],
+   "description": "For each target in [14,30,60,91,180,365] days, the code takes the closest available expiry within 50% of the target. Nothing stops two targets from choosing the same expiry. That slice's 9 top-vega rows are then appended twice: it is double-weighted in the SPX loss and counted twice in n_spx_options. This matters now that thin chains are the norm, and it defeats any row-count sufficiency gate such as the 'n_spx_options >= 27' proposed in hygiene-selector-headlines-1-expiry-fit.",
+   "evidence": "I mocked db.get_options_surface in my copy and called _prepare_spx_surface with S=7000. A single 21-day expiry gives 18 rows, 1 unique expiry and 9 duplicated (strike, right, T) rows. Expiries at 21 and 45 days give 27 rows and 2 unique expiries; the 21d slice is selected by both the 14d and 30d targets, giving value_counts {21d: 18, 45d: 9}.",
+   "proposed_fix": "Track the expiries already used and skip a target whose best_T is already selected; alternatively, match targets to expiries one-to-one. Persist n_spx_expiries = cal_df['time_to_expiry'].nunique() and gate on it. Test: the 21d-only chain yields 9 rows and 1 expiry; the 21d+45d chain yields 18 rows and 2 expiries.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "hygiene-greeks-built-from-rejected-03-24-fit",
+   "title": "Published Greeks surface is built from the 03-24 pickle (rho=-0.99, outside current bounds; SPX RMSE 3.83 > 3.0 gate) while the same-date baseline JSON used by the NN records rho=-0.95",
+   "severity": "low",
+   "category": "data-integrity",
+   "locations": [
+    "data_store/greeks/greeks_surface.parquet",
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/baseline_2026-03-24.json",
+    "joint_vol_calibration/config.py:46-52",
+    "dashboard/templates/greeks.html:9"
+   ],
+   "description": "Two artifacts that claim to be the same 2026-03-24 fit, with identical losses (spx 3.8334, vix_fut 1.1502, vix_opt 37.1446), disagree on rho: -0.99 in the pickle and -0.95 in the JSON. The Greeks page (static, never regenerated) is built from the -0.99 pickle. That value lies outside the current HESTON_BOUNDS rho floor of -0.95, and is_acceptable_calibration rejects the fit (RMSE 3.83 > 3.0). Meanwhile the calibration page headlines a different (2026-09-25) fit, and the Greeks badge hard-codes '2026-03-24' with no note that the fit fails the system's own gate.",
+   "evidence": "Rebuilding the surface with the pickle params (rho=-0.99) reproduces 69 nodes, with a median |IV diff| of 4.45e-5 against the published parquet. With the JSON params (rho=-0.95) I get 68 nodes, which does not match. The selector run in my copy marks 2026-03-24 as False (not acceptable). config.HESTON_BOUNDS['rho'] = (-0.95, 0.0). The parquet's as_of_date column reads 2026-03-25 while the page badge says 2026-03-24.",
+   "proposed_fix": "Decide on one canonical 03-24 record: either correct the JSON to -0.99 or document the clip. When regenerating the Greeks surface after the IV-inverter fix, build it from latest_good_calibration_path() (the same fit the calibration page shows) inside cloud_refresh, and render its as-of date, calibration date and gate status from the parquet's metadata. Test: the Greeks page as-of date equals the calibration page's as-of date.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "hygiene-nn-speedup-inflated",
+   "title": "The published '8.1x NN speedup' is measured against a Heston leg that always runs 50 Newton iterations, because non-converging wing elements block the batch early exit",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/models/nn_pricer.py:146-155",
+    "joint_vol_calibration/models/nn_pricer.py:888-893",
+    "README.md:153",
+    "substack_article.md:18"
+   ],
+   "description": "_bs_iv_vectorized breaks out of its loop only when max|delta| over ALL valid elements is below tol. In the benchmark's 500-option set, 194 OTM-call elements bounce between the clip values forever, so every timing of the 'Heston + IV inversion' leg pays for all 50 iterations. About half of the benchmarked Heston time is spent in the broken inverter, so the published speedup ratio depends on the bug and will change once the inverter is fixed.",
+   "evidence": "Best-of-5 perf_counter on the benchmark inputs (seed 42, T=0.25): heston_call_batch 15.9 ms; _bs_iv_vectorized on all 500 options 17.2 ms; on the 306 convergent options 1.07 ms. The Heston leg is therefore about 33 ms, of which the inverter is about 17 ms. A converging inverter would bring it to about 17-18 ms, roughly halving the speedup (estimate; the NN side cannot be timed here because the .pt weights are gitignored).",
+   "proposed_fix": "After fixing the inverter, re-run nn_pricer.benchmark and update README/substack from its output. Report the Heston pricing and IV-inversion times separately, and report the MAE on all strikes (including K/F > 1.08), not only where the old inverter converged.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  }
+ ]
+}

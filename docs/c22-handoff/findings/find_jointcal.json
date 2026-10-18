@@ -1,0 +1,280 @@
+{
+ "findings": [
+  {
+   "id": "jointcal-vix-leg-forward-vs-spot",
+   "title": "VIX 'futures' leg compares a forward-starting model quantity with spot-starting VIX indices, so the published 0.53 / 0.266 VIX RMSE is an artefact",
+   "severity": "critical",
+   "category": "math-correctness",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:97-104",
+    "joint_vol_calibration/calibration/joint_calibrator.py:660-700",
+    "joint_vol_calibration/calibration/joint_calibrator.py:860-879",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1022",
+    "joint_vol_calibration/models/heston.py:719-783",
+    "README.md:65-75",
+    "substack_article.md:33-37",
+    "dashboard/templates/calibration.html:166-173"
+   ],
+   "description": "_vix_futures_leg calls heston_vix_futures_curve(tenors). For each index tenor T_i that function returns 100*sqrt(E[VIX^2(T_i)]), which is the 30-day variance over the window [T_i, T_i+30d]. The market side is ^VIX9D/^VIX/^VIX3M/^VIX6M. These are CBOE constant-maturity indices, each the expected variance over [0, tenor] as seen today; none of them is a futures price. Examples: for ^VIX the model uses the window [30d, 60d] and the market uses [0, 30d]; for ^VIX6M the model uses [182d, 212d] and the market uses the average over [0, 184d]. The tenors are also wrong: the code uses 91d and 182d, but the Cboe methodology fixes VIX3M at 93 days and VIX6M at 184 days (the DB stores 93 for VIX3M). The docstring says these indices 'closely track the corresponding VIX futures prices'. They do not: on 2026-05-29 ^VIX was 15.32 while the Jun VX future was 17.59. Because the leg measures the wrong quantity, every calibrated kappa/theta/v0 is biased, and the README, substack and live dashboard all publish the wrong number.",
+   "evidence": "1) Showcase params (pickle 2026-05-31), market [12.59, 15.32, 18.66, 21.60]: code model [13.61, 15.22, 18.51, 21.40] gives RMSE 0.528, which is the published figure. The correct spot-starting index model 100*sqrt(th+(v0-th)(1-e^{-k tau})/(k tau)) at tau=[9,30,93,184]d gives [11.75, 12.80, 15.22, 17.58], so RMSE is 2.96. The model's own VIX is 12.80 against a market 15.32. 2) Live 09-11 params against Yahoo closes [14.47, 15.84, 18.60, 20.39]: code model [14.05, 16.00, 18.85, 20.24] reproduces the published 0.266 ('Good futures fit'); the correct model [11.31, 12.92, 15.78, 17.71] gives RMSE about 2.90. 3) Recalibrating 05-31 with only the leg fixed (scratchpad/recal_idx.py): kappa 6.03, theta 0.0502, sigma 0.779, rho -0.95, v0 0.0129; SPX RMSE 1.39 vp, VIX 1.19; Feller BINDING. 4) Out-of-sample check against real CBOE VX settlements for 2026-05-29 (downloaded from cdn.cboe.com/.../VX_2026-06-17.csv etc.; expiries 19..201d = 17.59, 19.94, 20.84, 21.40, 22.12, 22.13, 21.98): the showcase params' sqrt(E[VIX^2(T)]) gives RMSE 2.28; the fix with balanced anchors plus the correct index leg gives RMSE 0.93, and it was never fitted to futures. 5) Cboe 'Selected SPX Target Expected Volatility Term Indices' methodology PDF lists 'VIX3M 93 days ... 93 Day Bracket Method' and 'VIX6M 184 days'.",
+   "proposed_fix": "Replace _vix_futures_leg with an index leg: model_idx(tau) = 100*sqrt(theta + (v0-theta)*(1-exp(-kappa*tau))/(kappa*tau)) (heston_integrated_variance already exists), with tau read from the DB's tenor_days column instead of the hard-coded _VIX_TS_TENORS. Correct VIX6M to 184 days in the DB/downloader and VIX3M to 93 in the code. Rename the result key and all published labels from 'VIX futures RMSE' to 'VIX index term-structure RMSE'. Optionally add a separate true VX-futures leg from the free CBOE settlement CSVs, with model price E[VIX_T] = integral of sqrt(a+b v) p(v) dv using the CIR density already used in heston_vix_call_price. Tests: (a) the leg is 0 when market = model_idx(tau) at the DB tenors; (b) model at tau=30d equals heston_vix_index(); (c) regression that the 05-31 showcase params give VIX index RMSE > 2 pts. Then re-run and republish README/substack/dashboard numbers.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "jointcal-anchors-atm-only",
+   "title": "SPX anchor selection (top-9 by spot-based BS vega) samples no put skew, so the headline 0.52 vp 'smile RMSE' is an ATM-only number and the pinned rho is partly an artefact of it",
+   "severity": "high",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:593-596",
+    "joint_vol_calibration/calibration/joint_calibrator.py:605-650",
+    "README.md:65-77",
+    "substack_article.md:31-41"
+   ],
+   "description": "For each bucket the calibrator keeps the 9 strikes with the largest BS vega. Vega is computed from spot and peaks near K = S*exp((r-q+iv^2/2)T), and OTM is also defined relative to spot. With 5-25 pt SPX strike spacing, the 9 anchors are adjacent strikes in a band a few tenths of a percent to a few percent wide, and at maturities of 30d and longer they are all calls above spot. So the 'joint SPX smile' calibration never sees the put wing, the feature that identifies rho and drives the SPX/VIX tension. The published 'SPX smile RMSE 0.52 vp' is measured only on these anchors. rho pinned at the -0.95 box floor, presented as proof that 'Heston cannot supply the leverage skew', disappears on 2 of the 3 committed snapshots once the smile is actually sampled.",
+   "evidence": "Repro on 05-31 (scratchpad/repro.py): anchor moneyness by expiry is 15d 0.993-1.009, 30d 1.0007-1.0059, 61d 1.0046-1.0099, 92d 1.0079-1.0145, 173d 1.009-1.036, 355d 1.039-1.065. 45 of 54 anchors are calls and there is no put below 0.9927*S. Out-of-sample IV RMSE of the showcase fit on 1278 OTM bid/ask quotes (0.80-1.10 K/S) at the same 6 expiries is 4.17 vp; puts below 0.98 give 4.94 vp; the 15d 80-90% bucket error is -11.5 vp (scratchpad/oos.py). Balanced anchors (9 strikes per expiry spaced in z=ln(K/F)/(atm_iv*sqrt T) over [-2, 1], scratchpad/recal_anchor.py): rho -0.9135 (interior), OOS 3.75 vp. Adding the correct VIX index leg gives rho -0.926 and OOS 2.50 vp. On the 06-20 snapshot the code's anchors pin rho at -0.95 while balanced anchors give rho -0.932. On 03-24 rho stays pinned either way.",
+   "proposed_fix": "In _prepare_spx_surface, pick strikes on a standardised-moneyness or delta grid per expiry (for example 10D, 15D, 25D, 35D puts, ATM-forward, 35D, 25D, 15D calls), with OTM defined relative to the forward F_T and not spot. Require at least 2 strikes on each wing. Keep vega normalisation of the errors. Headline an out-of-sample IV RMSE over the full filtered OTM surface next to the in-sample anchor RMSE. Tests: at least 3 puts with K/F<0.97 and at least 2 calls with K/F>1.02 in every accepted slice; anchor K/S span per expiry > 3*atm_iv*sqrt(T).",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "jointcal-gate-spx-underidentified",
+   "title": "The quality gate has no SPX data-sufficiency check: the live headline (09-11) is a 1-expiry, 9-option fit, and the bucket logic can double-count one expiry",
+   "severity": "high",
+   "category": "reliability",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:157-198",
+    "joint_vol_calibration/calibration/joint_calibrator.py:631-658",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1045-1051",
+    "scripts/cloud_refresh.py:324-336",
+    "dashboard/app.py:72-91"
+   ],
+   "description": "is_acceptable_calibration applies the 'under-identified leg' reasoning (C20) to the VIX leg only. A fit built on one SPX expiry has no term structure, so kappa, theta and v0 are free, and the fit posts a spuriously low RMSE. The selector ranks on RMSE, so that fit wins the headline, which is the C20 failure repeated on the other leg. Two more problems: (1) the bucket loop never removes an expiry once chosen, so a single expiry can fill several target buckets; its rows are appended twice and n_spx_options is inflated; (2) the stale-snapshot check was added only in cloud_refresh.py, not in the shared gate, so the dashboard selector still accepts the Jun-Sep frozen-surface refits (for example 07-01, 0.375 vp, no spx_snapshot_date). The gate also ignores v0 at its floor (08-29 accepted with v0=0.00099, sqrt = 3.1% spot vol) and DE success=False (08-07 accepted).",
+   "evidence": "GitHub Actions job 103456185508 (run 34658592921, 2026-09-11): 'SPX surface: 9 liquid options across 1 expiries' then 'Done (accepted): ... SPX RMSE=0.215 vp ... 9 SPX opts, 4 VIX tenors'. Live navnoorbawa.me/calibration.html today shows 'Fit from 9 SPX options and 4 VIX tenors', 'SPX IV RMSE 0.215 vol pts Good fit', and compares it with the Quintic 2.343 from 03-24. Reproduced with the live 09-23 chain (scratchpad/live923_cal.py, first 8 yfinance expiries): 1 expiry (2026-10-05, 12d), 9 anchors at K/S 0.9986-1.0044, RMSE 0.32 vp, is_acceptable_calibration returns (True, 'ok'). Duplicate demo (scratchpad/dup.py, only the 20d expiry kept): 18 rows, 1 unique expiry, 9 duplicate rows. Gate over the archive: 07-01 (stale-surface refit) is OK at 0.375; 08-29 is OK with pinned ['rho','v0','sigma'].",
+   "proposed_fix": "Make is_acceptable_calibration(result: dict) the single source of truth for both cloud_refresh and app.py. Require: n_spx_expiries (unique, recorded in the result) >= 3 spanning >= 60 days; >= 5 anchors per expiry covering both wings; spx_snapshot_date == spot_date, rejecting when unknown except for an explicit legacy allow-list; n_vix_tenors >= 3; v0 and theta not within a factor of 2 of the lower bound; Feller not VIOLATED; optimiser success. Derive kappa thresholds from HESTON_BOUNDS instead of the literals 0.11/19.9. In _prepare_spx_surface, remove best_T from available_expiries after it is used. Raise or flag when fewer than 3 buckets are filled. Tests: a 1-expiry result is rejected with reason 'SPX term structure under-identified'; the duplicate-bucket case yields 9 rows, not 18; a result with snapshot != spot is rejected by the shared gate.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-rates-hardcoded-and-misreported",
+   "title": "r and q are hard-coded at 4.5% / 1.3%, the stored and published r is not the r used in the fit, and the carry mismatch creates a 0.5-0.8 vp put/call IV jump",
+   "severity": "high",
+   "category": "data-integrity",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:474-496",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1028-1051",
+    "scripts/cloud_refresh.py:308-315",
+    "dashboard/app.py:508-509",
+    "dashboard/templates/calibration.html:255-264"
+   ],
+   "description": "JointCalibrator defaults r=0.045, q=0.013, and cloud_refresh never passes values, so every production fit runs with those two numbers. calibrate() does not put r or q in its result. cloud_refresh then writes result['r'] = get_tbill_rate(TODAY) after the fit and stores no q. The pickle and the live page therefore report r=3.91% and q=0.0% (labelled 'USD 6M SOFR (2026-03)') for a fit that used 4.5% and 1.3%. Separately, a fixed r/q does not reproduce the market forward. Anchors are puts below spot and calls above spot, so the resulting put/call IV discontinuity at spot enters the target smile directly. The error is the same size as the headline RMSE.",
+   "evidence": "Live calibration.html: 'r = 3.91%', 'Risk-free rate r 3.91% USD 6M SOFR (2026-03)', 'Dividend yield q 0.0%'. The 09-11 pickle has r=0.03913 and no q; the code path is JointCalibrator(as_of_date=TODAY) with defaults (cloud_refresh.py:308). Put-call-parity regression of C-P on K on the 05-31 snapshot (scratchpad/fwd.py) gives r_imp about 4.2-4.3% and q_imp about 0.8-1.0% for 82-382d expiries (3M T-bill on 05-29 was 3.588%). Mean |IV_put - IV_call| at the same strike under the code's r/q: 15d 0.80 vp, 30d 0.49, 92d 0.08, 355d 0.63. With parity-implied forwards: 0.09 / 0.04 / 0.00 / 0.00 vp.",
+   "proposed_fix": "At load time, estimate per-expiry forward F_T and discount D_T by regressing (C-P) on K over near-ATM strikes that have two-sided quotes. Price each slice with S*e^{-qT} -> D_T*F_T and e^{-rT} -> D_T (equivalently r_T=-ln D_T/T, q_T=r_T-ln(F_T/S)/T), and define OTM relative to F_T. Put r_T, q_T (or F_T, D_T) and the scalar summary in the calibrate() result. Delete the post-hoc result['r'] overwrite in cloud_refresh, and fix the template label. Test: after the fix, put and call mid-IVs at the same strike agree within 0.15 vp on the 05-31 snapshot, and the r stored in the result equals the r used in _spx_leg.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "jointcal-feller-self-imposed",
+   "title": "The Feller penalty is a self-imposed constraint (not a no-arbitrage requirement) that drives the '3 effective d.o.f.' narrative; removing it cuts out-of-sample smile error about 3x and un-pins rho",
+   "severity": "high",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:63-73",
+    "joint_vol_calibration/calibration/joint_calibrator.py:130-154",
+    "joint_vol_calibration/calibration/joint_calibrator.py:799-807",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1466-1469",
+    "README.md:79-94",
+    "substack_article.md:43",
+    "dashboard/templates/calibration.html:74-77"
+   ],
+   "description": "Heston prices and the affine CF are well defined when 2*kappa*theta < sigma^2; the variance simply touches zero and reflects. Market-calibrated Heston parameters routinely violate Feller, which is why Andersen (2008) built the QE scheme for exactly that regime. The calibrator enforces Feller anyway (soft penalty 50*viol^2). The README, substack and dashboard then read the binding constraint as model misspecification ('two of five parameters are set by boundaries... three effective degrees of freedom'; 'the market smile is asking for more vol-of-vol than a Feller-satisfying Heston can supply'). The output 'Pinned: rho, sigma at boundary' is also misleading: sigma is nowhere near its [0.001, 2] box, and the Feller surface constrains (kappa, theta, sigma) jointly. The count of one lost d.o.f. is right, but naming sigma is an arbitrary choice. The counting itself (5 minus active constraints) is fine; the interpretation is not.",
+   "evidence": "05-31 with balanced anchors and the correct VIX index leg (scratchpad/recal_anchor.py both): kappa 5.12, sigma 0.768, rho -0.926, Feller BINDING, SPX 1.276 vp, VIX 0.71, OOS 2.50 vp. Same setup with _FELLER_PENALTY=0 (scratchpad/recal_nofeller.py): kappa 5.36, theta 0.0597, sigma 1.868, rho -0.583 (interior), pinned [], SPX 1.276 -> 0.739 vp, VIX 0.71 -> 0.405, OOS over 1278 OTM quotes 2.50 -> 0.856 vp, put wing 2.80 -> 0.90 vp. Pricer validity at these parameters was checked against an independent Lewis (2001) quad implementation: |dIV| < 0.01 vp on all non-negligible quotes (scratchpad/pricecheck.py). The 09-11 CI log prints 'Pinned: rho, sigma at boundary -> 3 effective d.o.f. of 5' with sigma=0.657.",
+   "proposed_fix": "Make the Feller penalty opt-in (feller: 'off' | 'soft' | 'hard'), defaulting to off for pricing calibration, and report the Feller margin as a diagnostic. Otherwise publish both constrained and unconstrained fits and state that the binding is caused by a modelling choice. Rename the diagnostic to active constraints, for example 'rho >= -0.95 (box floor); 2*kappa*theta >= sigma^2 (Feller, imposed)', and stop attributing it to sigma alone. Rewrite README 'Effective degrees of freedom' and substack line 43 accordingly. Test: with feller='off' the loss has no penalty term (mutation test), and the result records which constraint set was used.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-T-from-snapshot-not-spot",
+   "title": "Time to expiry is taken from the snapshot date while spot comes from the session, so T in the 05-31 showcase is 2 days short",
+   "severity": "medium",
+   "category": "look-ahead",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:513-518",
+    "joint_vol_calibration/calibration/joint_calibrator.py:571-590"
+   ],
+   "description": "The calibrator uses the stored time_to_expiry, measured from snapshot_date, but spot S comes from the last SPX session on or before as_of_date. The 05-31 showcase snapshot was taken on a Sunday: T is measured from 05-31 while S is Friday 05-29's close, so every T is 2 days short. On the 15d slice that is a 12% error in T, about 6% in IV. 06-20 has the same problem (snapshot 06-20, spot 06-18). The showcase would fail the production pipeline's own 'snapshot must equal session' rule. Nothing in the calibrator checks that spx_snapshot_date matches spot_date, and AM- and PM-settled expiries are treated alike.",
+   "evidence": "Repro prints spot 2026-05-29, spx_snapshot_date 2026-05-31. Refit with T recomputed as (expiry - 2026-05-29)/365 (scratchpad/tshift.py): kappa 1.77 -> 2.058, theta 0.0666 -> 0.0626, sigma 0.460 -> 0.4995, v0 0.0127 -> 0.0117, SPX RMSE 0.523 -> 0.469, VIX 0.528 -> 0.442. /multi.py 06-20: 'spot 2026-06-18 snap 2026-06-20'.",
+   "proposed_fix": "In _prepare_spx_surface, recompute T = (expiry_datetime - spot_session_close)/365d from the expiry column, with AM settlement (09:30 ET on expiry day) for SPX monthlies and 16:00 ET for SPXW, and ignore the stored time_to_expiry. Log and record the snapshot-vs-spot gap, and reject in the shared gate when it exceeds one session. Test: a synthetic snapshot dated Sunday with S from Friday gives T = calendar days from Friday.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-validate-uses-yahoo-iv",
+   "title": "validate()/smile_reconstruction_error compare model IV with Yahoo's impliedVolatility, not with IV from the mid prices actually fitted, so the same fit scores 1.92 vp there and 0.52 vp in the loss",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:1316-1363",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1376-1382",
+    "joint_vol_calibration/calibration/joint_calibrator.py:605-628"
+   ],
+   "description": "The loss fits mid prices using the calibrator's r/q. The 'market_iv' column in validate() is Yahoo's implied_vol field, computed by Yahoo under unknown conventions. The quality report therefore disagrees with the optimiser's objective by about 4x and shows a spurious -1.6 vp bias. The same Yahoo IV feeds bs_vega, the anchor ranking and the _MIN_IV/_MAX_IV filters.",
+   "evidence": "Repro on 05-31: loss RMSE 0.523 vp. validate(): 'SPX smile RMSE 1.92 vol pts ... bias -1.64'. Per expiry, Yahoo IV minus mid-implied IV (r=4.5%, q=1.3%): 15d -0.56, 30d +0.91, 61d +1.41, 92d +1.74, 173d +2.31, 355d +3.04 vp. RMSE of model against mid-IV is 0.5234, matching the loss exactly, so the vega-normalised price error is a faithful IV proxy (scratchpad/ivcheck.py).",
+   "proposed_fix": "At load, invert mid_price with the calibrator's own per-expiry forward and discount (see the rates finding) into a 'mid_iv' column. Use it for vega, filters, anchor selection and validate(). Keep Yahoo's IV only as a sanity diagnostic. Test: validate()['smile_rmse_vol_pts'] equals leg_losses['spx_iv_rmse'] within 0.05 vp.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-vix-options-leg-bugs",
+   "title": "The VIX options leg has pricing and data errors (Jensen-biased put parity, wrong T=0 value, spot-VIX vegas, stale June chain), so the published '37.14 vp structural failure' is not a clean model verdict",
+   "severity": "medium",
+   "category": "math-correctness",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:399-401",
+    "joint_vol_calibration/calibration/joint_calibrator.py:443-453",
+    "joint_vol_calibration/calibration/joint_calibrator.py:702-777",
+    "joint_vol_calibration/calibration/joint_calibrator.py:536-546",
+    "README.md:77",
+    "dashboard/templates/calibration.html:180-184"
+   ],
+   "description": "(1) heston_vix_put_price uses put-call parity with F = sqrt(E[VIX^2]) instead of E[VIX_T] from the density the call integrates, so puts are biased low by DF*Jensen gap. (2) For T<=0 the call returns max(100*sqrt(theta)-K, 0) where it should use the current model VIX, which depends on v0. (3) Vegas and moneyness use spot VIX with drift r. VIX options are written on the VX future of the same expiry, which is why Yahoo's VIX IVs come out at 150-190%. (4) _prepare_vix_options has no snapshot-date check, so production reads the 2026-06-20 VIX chain (the only VIX snapshot in the DB) with June time_to_expiry. The stale count of 6 then decides whether w1/w2 get renormalised, and n_vix_options is recorded as provenance. (5) The quadrature starts at v=1e-8 on a linear grid, which under-resolves the integrable singularity when d=4*kappa*theta/sigma^2 < 2. The leg is disabled (w3=0), but the README and dashboard still publish its 37.14 vp result as proof of 'structural failure'.",
+   "evidence": "scratchpad/vixopt.py at the showcase params: T=30d E[VIX_T]=14.52 vs sqrt(E[VIX^2])=15.22 (gap 0.70); T=60d gap 1.04. K=15 put: code 1.405 vs density-consistent 2.103 at 30d, 0.788 vs 1.818 at 60d. T=0, K=12 call: code 13.80, while the model spot VIX is 12.80 so the correct value is 0.80. 05-31 VIX anchors: Yahoo implied_vol 1.52-1.92; per-option errors -58 to -136 vp (RMSE 89.6), mostly a level error: the model VIX forward at 19d is about 14.4 vs the Jun VX settle of 17.59. db.get_options_surface(as_of_date='2026-09-11', underlying='VIX') returns snapshot 2026-06-20. The 09-11 pickle has n_vix_options=6.",
+   "proposed_fix": "Compute E[VIX_T] by the same CIR-density quadrature and use it for put parity and forwards. At T<=0 use heston_vix_index(kappa, theta, v0). Take the VX future for each expiry from the CBOE CSVs (or at least the model forward) as the Black-76 underlying for vega and IV. Require the VIX snapshot date to equal spot_date, otherwise leave the leg empty. Integrate in x=sqrt(v), or use ncx2.cdf-based payoff integration, near 0. Re-derive and republish the 37.14 figure. Tests: C-P = DF*(E[VIX_T]-K) to 1e-3; the T=0 call equals max(model_VIX-K, 0); a stale VIX chain gives an empty leg.",
+   "affects_published_numbers": true,
+   "effort": "medium"
+  },
+  {
+   "id": "jointcal-bates-bounds-exclude-heston",
+   "title": "Bates bounds exclude the nested Heston model, so 'Bates is worse than Heston (5.88 vs 3.83 vp)' is an optimiser/bounds artefact; n_evals is always 0",
+   "severity": "medium",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:1061-1088",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1128-1169",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1138-1149"
+   ],
+   "description": "Bates nests Heston at lam=0 (or mu_j=sigma_j=0), so at a true optimum its loss can never exceed Heston's. The bounds lam in [0.5, 8], mu_j in [-0.10, -0.005] and sigma_j in [0.02, 0.12] force a jump component. The published fit sits on three of those bounds: lam=8.0 (upper), mu_j=-0.005 (the bound closest to zero) and sigma_j=0.0213 (about 0.02). The optimiser is pushing towards 'no jumps', and success=False. The docstring states different bounds ([0,10], [-0.15,0], [0.01,0.15]) and concludes the jump component 'is not identifiable ... not separable without intraday data', which the evidence does not support. _bates_joint_loss never increments self._n_evals, so the stored n_evals is 0.",
+   "evidence": "bates_cal_2026-03-24.pkl: lam 7.99987, mu_j -0.005, sigma_j 0.02132, rho -0.99, success False, n_evals 0, spx_iv_rmse 5.883 vs heston 3.833.",
+   "proposed_fix": "Use bounds that contain the nested model (lam in [0, 10], mu_j in [-0.3, 0.1], sigma_j in [0, 0.3]). Seed the DE population with the Heston optimum plus lam=0. Increment _n_evals in _bates_joint_loss. Correct the docstring and the dashboard claim. Test: _bates_joint_loss(heston_params + [0, *, *]) equals joint_loss(heston_params) to 1e-10, and the calibrated Bates loss is <= the Heston loss.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-tests-mutation-survivors",
+   "title": "Calibrator tests do not pin the fixed behaviour: a reintroduced weight bug and a deleted Feller penalty both pass all 642 tests",
+   "severity": "medium",
+   "category": "test-quality",
+   "locations": [
+    "joint_vol_calibration/tests/test_joint_calibrator.py:207-220",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:529-544",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:299-317",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:99-126",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:139-142",
+    "joint_vol_calibration/tests/test_joint_calibrator.py:150-160"
+   ],
+   "description": "test_feller_penalty_active only asserts that both losses are finite. TestSparseVIXWeightRenormalisation does arithmetic inside the test and never runs JointCalibrator._load_market_data. test_vix_leg_zero_at_exact_fit builds the 'market' from heston_vix_futures_curve, so it enshrines the forward-vs-spot error. test_put_call_parity_approx uses the implementation's own sqrt(E[VIX^2]) forward with a 3.0-point tolerance, which hides the 0.7-1.0 pt Jensen bias. test_zero_maturity_returns_intrinsic asserts only p>=0, but the true value is 0.80 and the code returns 13.80. test_batch_vs_scalar allows a 5.0 price-unit gap while its docstring claims 0.5 vp. Nothing tests SPX anchor coverage, the duplicate-bucket bug, T vs spot_date, or the r/q provenance.",
+   "evidence": "Mutation run in the private copy: (a) restored the old sequential renormalisation (self.w1 = w1/total; self.w2 = w2/(self.w1+self.w2)); (b) set _FELLER_PENALTY = 0.0. 'pytest joint_vol_calibration/tests -q' gives '642 passed, 24 skipped' (and 54 passed for test_joint_calibrator.py alone).",
+   "proposed_fix": "Feller: assert joint_loss(p_violate) - (w1*l1+w2*l2) == 50*viol^2 with the legs monkeypatched to 0. Weights: monkeypatch db so _prepare_vix_options returns fewer than 5 rows, construct JointCalibrator, and assert w1+w2 == 1 and w1/w2 == JOINT_W1/JOINT_W2. VIX leg: assert against the closed-form index formula at the DB tenors. VIX PCP: compare against a density-computed E[VIX_T] at 1e-3. T=0: exact intrinsic against the model VIX. Add tests for anchor coverage, no duplicate buckets, a 1-expiry rejection and r/q provenance. Tighten the batch/scalar check to |dIV| < 0.05 vp.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-svi-dead-and-overconstrained",
+   "title": "'SVI/SSVI smoothing' is advertised but never used, is raw SVI rather than SSVI, and its a>=0 bound rejects valid slices",
+   "severity": "low",
+   "category": "published-claim",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:201-357",
+    "README.md:161",
+    "substack_article.md:24",
+    "dashboard/templates/base.html:14",
+    "dashboard/templates/base.html:24"
+   ],
+   "description": "_build_ssvi_surface and _fit_svi_slice are called only from tests; _prepare_spx_surface explicitly says 'no SVI pre-smoothing'. The site meta descriptions and README C13 still list 'SVI/SSVI smoothing'. The code fits raw SVI slice by slice, not Gatheral-Jacquier SSVI. Implementation issues: bound a>=0, where the correct condition is a + b*sigma*sqrt(1-rho^2) >= 0; Lee's wing bound b(1+|rho|) <= 2 is not enforced (the b<=2, |rho|<=0.999 box allows about 4); the comment 'Calendar-spread guard' labels a positivity floor; 'Butterfly-free check: w non-decreasing' actually checks only w>=0; K is clipped to [0.7S, 1.3S] after the IV was evaluated at the unclipped k, so strike and IV no longer correspond; right is chosen against spot, not the forward.",
+   "evidence": "Gatheral-Jacquier raw example (a=-0.041, b=0.1331, rho=0.306, m=0.3586, sigma=0.4153) on k in [-1.5, 1.5]: fit returns a=0.0 and max total-variance error 0.0085. Short-dated slice (T=0.05, a=-0.002, b=0.08, rho=-0.7, m=0.02, sigma=0.05): max IV error 4.54 vp. grep shows _build_ssvi_surface used only in tests/test_joint_calibrator.py.",
+   "proposed_fix": "Either remove the SVI/SSVI claims from README, substack and meta tags, or wire the smoother in properly: lower bound a >= -b*sigma*sqrt(1-rho^2), Lee constraint b(1+|rho|) <= 2, Gatheral-Jacquier g(k) >= 0 and calendar monotonicity of w across slices checked post-fit, no strike clipping after IV evaluation, OTM chosen relative to the forward. Rename the function to _build_svi_surface. Test: recover the Gatheral-Jacquier example to 1e-4 in total variance.",
+   "affects_published_numbers": false,
+   "effort": "medium"
+  },
+  {
+   "id": "jointcal-pinned-v0-false-positive",
+   "title": "count_pinned_params uses a linear 1e-3*span tolerance, so v0 of about 1e-3 (10x its floor) is reported as pinned and d.o.f. is understated",
+   "severity": "low",
+   "category": "bug",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:130-154"
+   ],
+   "description": "theta and v0 have boxes spanning [1e-4, 1], so the tolerance is about 1e-3 and anything below 1.1e-3 counts as 'at bound', even when it is an order of magnitude away from the 1e-4 floor. The published pinned list and the effective-d.o.f. count are then wrong.",
+   "evidence": "08-07 pickle v0=0.0010366 and 08-29 v0=0.00098977 are both stored with pinned_params ['rho','v0','sigma'] (effective d.o.f. 2). The v0 bound is 1e-4.",
+   "proposed_fix": "For positive scale parameters, use a tolerance relative to the bound value (|val-lo| <= rel_tol*max(|lo|, tiny) or a log-space distance). Better, classify a parameter as active using the projected gradient at the solution (KKT). Test: v0=1.04e-3 is not pinned, v0=1.0001e-4 is pinned.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-weight-normalisation-inconsistent",
+   "title": "Loss weights are renormalised only when the (disabled) VIX-options leg is sparse, and w2 was tuned to hit a target RMSE",
+   "severity": "low",
+   "category": "methodology",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:536-546",
+    "joint_vol_calibration/config.py:59-65"
+   ],
+   "description": "With w3 already 0 in the config, weights stay at 0.5/0.6 (sum 1.1) when there are 5 or more VIX options, and become 0.4545/0.5455 otherwise. The argmin is scale-invariant, but the Feller penalty (50*viol^2) is not scaled, so the effective penalty strength and the reported total_loss change by about 10% depending on how many contracts a stale, disabled leg happens to hold. In production that leg is fed from the 06-20 June chain. The config comment says w2 was 'doubled from 0.3 to pull RMSE back below 1.5', i.e. chosen to improve the published metric.",
+   "evidence": "09-11 fit: n_vix_options=6, so weights {'w1':0.5,'w2':0.6}. The 09-23 reproduction with an empty VIX chain logs 'VIX options too sparse - setting w3=0', giving 0.4545/0.5455. config.py:61 comment quoted above.",
+   "proposed_fix": "Always normalise the active weights to sum to 1 (or never), independent of the disabled leg. Choose the leg weights from measurement noise (for example inverse squared bid-ask in vol points per observation) and report RMSE sensitivity to w2 in the docs. Test: the weights stored in the result are identical whether the VIX chain has 0 or 8 rows when w3=0.",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-empty-surface-keyerror",
+   "title": "An empty SPX surface crashes with KeyError('time_to_expiry'), and the SPX leg silently returns 0 when there are no anchors",
+   "severity": "low",
+   "category": "reliability",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:522-526",
+    "joint_vol_calibration/calibration/joint_calibrator.py:571-574",
+    "joint_vol_calibration/calibration/joint_calibrator.py:652-653",
+    "joint_vol_calibration/calibration/joint_calibrator.py:824-825"
+   ],
+   "description": "_prepare_spx_surface returns a column-less DataFrame when there is no snapshot or no anchor, and the next logging line indexes ['time_to_expiry']. The resulting error is an opaque KeyError; cloud_refresh catches it and logs \"Calibration failed: 'time_to_expiry'\". If construction did survive, _spx_leg returns 0.0 for an empty surface, so the 'joint' fit would quietly become VIX-only.",
+   "evidence": "JointCalibrator(as_of_date='2026-01-05') raises KeyError('time_to_expiry').",
+   "proposed_fix": "Raise ValueError('no usable SPX anchors for <date>: N raw rows, M after filters, K expiries') when the surface is empty or has fewer than 3 expiries. Never return 0.0 from a data leg that has weight > 0. Test: pytest.raises(ValueError, match='SPX anchors').",
+   "affects_published_numbers": false,
+   "effort": "small"
+  },
+  {
+   "id": "jointcal-result-provenance-and-labels",
+   "title": "Result/persistence schema is incomplete and inconsistent; the dashboard hard-codes wrong DE settings; README Feller numbers come from rounded params",
+   "severity": "low",
+   "category": "maintainability",
+   "locations": [
+    "joint_vol_calibration/calibration/joint_calibrator.py:967-1000",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1028-1051",
+    "joint_vol_calibration/calibration/joint_calibrator.py:1416-1443",
+    "dashboard/templates/calibration.html:191",
+    "README.md:74"
+   ],
+   "description": "calibrate() leaves out r, q, DE settings and n_spx_expiries. save() writes a different schema ('losses' instead of 'leg_losses', no feller_state, pinned, counts or dates) from what cloud_refresh pickles, which forces fallbacks in the dashboard. feller_ok=False sits next to feller_state='BINDING'. scipy's differential_evolution polishes with L-BFGS-B by default (polish=True), and the code then polishes a second time. The template states 'DE (120 iter x 40)' while the code runs maxiter=200 with 50 members. The README's Feller line (2*kappa*theta = 0.2372, sigma^2 = 0.2116) uses rounded parameters; the pickle gives 0.2354 and 0.2119 (margin 0.0236, not 0.0256).",
+   "evidence": "Repro log: 'DE done: loss=0.000030, evals=10056' then 'Polish done ... evals=10074'; DE's internal polish consumed evaluations before the explicit one. calibration.html:191. 05-31 pickle: 2*1.76849*0.066563 = 0.23543; 0.460292^2 = 0.21187.",
+   "proposed_fix": "Return one result dict carrying params, leg losses, r/q (or forwards), DE config {maxiter, popsize, seed, tol, polish}, n_spx_expiries, dates and constraint set, and have save() persist exactly that dict. Drop feller_ok or derive it from feller_state. Pass polish=False to differential_evolution. Render the DE settings and r/q from the result in the template. Recompute README numbers from the pickle.",
+   "affects_published_numbers": true,
+   "effort": "small"
+  }
+ ],
+ "checked_ok": [
+  "Showcase reproduction: running JointCalibrator('2026-05-31').calibrate() in the private copy gives kappa 1.7695, theta 0.06654, sigma 0.4603, rho -0.95, v0 0.01265, SPX RMSE 0.5234 vp, VIX RMSE 0.5280, Feller PASS (margin +0.0236), 54 SPX options, 4 VIX tenors, 8 VIX options. This matches the README (1.77/0.067/0.46/-0.95/0.0127, 0.52/0.53) within rounding, although those numbers are wrong for the reasons in the findings. Deterministic (seed 42). About 53 s locally against the 11.1 s recorded.",
+  "The vega-normalised price error is a faithful IV-error proxy for the SPX anchors: an exact IV inversion of model vs mid gives RMSE 0.52342, the same as the loss's 0.52336.",
+  "heston_call_batch (Carr-Madan, alpha=1.5, 512 pts to v=300) agrees with an independent Lewis (2001) quad pricer to <0.01 vp at both the showcase and the no-Feller (sigma=1.87) parameters for 15d/61d/355d at K/S 0.8-1.1; it only differs on near-zero deep-OTM prices.",
+  "Put-call-parity conversion of model calls to puts in _spx_leg, _bates_spx_leg and smile_reconstruction_error is consistent with the r/q used for pricing.",
+  "SPX leg MSE and VIX leg MSE are in the same units (vol-decimal squared; VIX points /100), so the w1/w2 combination is dimensionally consistent.",
+  "The weight renormalisation arithmetic (w1, w2 = w1/total, w2/total) is correct as written. Only its test is tautological.",
+  "The Heston CIR transition-density parameters in heston_vix_call_price (c, d=4*kappa*theta/sigma^2, lambda=2*c*v0*e^{-kappa T}) and VIX^2 = theta(1-f) + f*v_T are correct; the density integrates to 0.9998 when Feller holds.",
+  "classify_feller three-state logic and the 1e-4 tolerance behave as documented; the soft exterior penalty yields margins of -1e-7 to -4e-6, as README states.",
+  "The VIX term-structure leg is pinned to the SPX spot session (C20/C21 fix): 05-31 uses the 05-29 VIX row, and a missing row gives an empty leg that the 3-tenor gate rejects.",
+  "differential_evolution is configured validly: popsize 10 x 5 = 50 members, LHS init, seed 42, bounds identical to the loss's hard walls. The L-BFGS-B finite differences respect the bounds.",
+  "calibration/__init__.py is empty (0 lines); nothing depends on package-level exports.",
+  "The shared repo /home/user/vol-system-dashboard was never modified; all runs used the private copy, whose git status is clean after the mutation tests were reverted.",
+  "Sources used: Cboe 'Selected SPX Target Expected Volatility Term Indices' methodology (VIX3M = 93 days, VIX6M = 184 days); CBOE CFE VX historical settlement CSVs (cdn.cboe.com/data/us/futures/market_statistics/historical_data/VX/); Andersen (2008), J. Comp. Finance, on routine Feller violation in market-calibrated Heston; Gatheral & Jacquier (2014) arbitrage-free SVI conditions; Guyon's joint SPX/VIX calibration literature (continuous-path Heston cannot fit both smiles)."
+ ]
+}
