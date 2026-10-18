@@ -241,7 +241,8 @@
     .page-title { font-size: 22px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; line-height: 1.3; }
     .page-subtitle { font-size: 13px; color: var(--text2); flex-basis: 100%; }
     .page-badge { font-size: 12.5px; color: var(--text2); flex-basis: 100%; }
-    .page-badge .sep { color: var(--text3); padding: 0 6px; }
+    /* inline-block: a line can break at every separator, even between no-wrap items */
+    .page-badge .sep { color: var(--text3); padding: 0 6px; display: inline-block; }
     .page-note { font-size: 13px; color: var(--text2); margin: 0 0 20px; max-width: 110ch; line-height: 1.6; }
     .section-title {
       font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;

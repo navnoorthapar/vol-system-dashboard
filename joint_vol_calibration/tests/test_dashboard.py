@@ -1551,3 +1551,13 @@ def test_no_double_negative_losses(pages):
     """'it loses −$274K' / 'It loses −$431K' read as gains."""
     for route, html in pages.items():
         assert not re.search(r"\blos(?:es|t|e)\s+[−-]\$", _visible_text(html)), route
+
+
+def test_page_header_can_wrap_at_every_separator():
+    """Header items are no-wrap spans joined by '·' separators with no spaces;
+    without a break opportunity at the separator the whole line is one
+    unbreakable run (497 px wide at a 390 px viewport). The separator must be
+    an inline-block, which browsers may break around."""
+    css = (ROOT / "dashboard" / "templates" / "base.html").read_text()
+    rule = re.search(r"\.page-badge \.sep\s*\{([^}]*)\}", css)
+    assert rule and "display: inline-block" in rule.group(1)
