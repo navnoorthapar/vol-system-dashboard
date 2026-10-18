@@ -1178,9 +1178,10 @@ def get_vix_futures_curve(as_of_date: str, include_weeklies: bool = False) -> pd
 
     Live contracts only (expiry_date > as_of_date), front month first. Weekly
     contracts are excluded by default: on days a weekly does not trade, Cboe
-    publishes the same-month monthly's settle as its daily settlement (seen
-    on every untraded weekly in the 2026-10 files), which is not an
-    independent price.
+    publishes a monthly contract's settle as its daily settlement (every
+    untraded weekly in the 2026-10 files; on 2026-10-16 the November-month
+    weeklies VX44/X6 and VX45/X6 carried the OCTOBER monthly's 19.9075), which
+    is not an independent price.
 
     LOOK-AHEAD GUARD: only prices observed on as_of_date are returned.
 
