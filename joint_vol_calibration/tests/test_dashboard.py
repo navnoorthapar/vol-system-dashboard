@@ -1312,3 +1312,58 @@ def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
     got = dash.window_returns(toy, {"jump": ("2022-01-01", "2022-01-07"), "head": ("2021-12-01", "2021-12-31")})
     assert got[0]["total_return"] == pytest.approx(0.10) and got[0]["n_days"] == 5
     assert got[1]["total_return"] == pytest.approx(0.0) and got[1]["n_days"] == 4
+
+
+LIVE_BETA_CAPTURE = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "spx_chain_live_20261012.json"
+
+
+def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
+    """'β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84)': the five
+    were 4 DB chains and a live capture, the range was typed in, and the later
+    2026-10-16 DB chain (0.70; mean over every chain 0.80) went unmentioned."""
+    from joint_vol_calibration.backtest.backtest_engine import BETA_ESTIMATION_SESSIONS
+    from joint_vol_calibration.backtest.run_backtest import estimate_beta
+
+    t = estimate_beta(include_live=False)
+    inc = t[t["status"].str.startswith("included")]
+    oos = t[t["status"].str.startswith("out-of-sample")].sort_values("session")
+    assert sorted(inc["session"]) == sorted(BETA_ESTIMATION_SESSIONS)
+    est = list(inc["ratio"]) + [json.loads(LIVE_BETA_CAPTURE.read_text())["ratio_full_chain"]]
+    every = est + list(oos["ratio"])
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        beta = pickle.load(f)["atm_to_vix_ratio"]
+    assert round(float(np.mean(est)), 2) == beta
+    first = oos.iloc[0]
+    want = (f"β = {beta:.2f} = mean of {len(inc)} DB chains and 1 live capture "
+            f"({min(est):.2f}–{max(est):.2f}); the first later chain, {first['session']}, gives "
+            f"{first['ratio']:.2f} — the mean over all {len(every)} chains, {np.mean(every):.2f}, "
+            f"is a row of the β grid")
+    assert want == ("β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later "
+                    "chain, 2026-10-16, gives 0.70 — the mean over all 6 chains, 0.80, is a row of the β grid")
+    text = _visible_text(pages["/backtest"])
+    assert want in text
+    assert "five real 2026 SPX chains" not in text
+    # every chain is listed with its ratio and use
+    d = dash.load_page4()
+    assert [(c["session"], round(c["ratio"], 3)) for c in d["beta_est"]["chains"] if c["kind"] == "DB chain"] == \
+        [(s, round(r, 3)) for s, r in zip(t["session"], t["ratio"])]
+    # the grid on the page is the CSV, including the row at the mean over every chain
+    grid = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")
+    html = pages["/backtest"]
+    assert len(re.findall(r'<tr data-beta="', html)) == len(grid)
+    row = grid[np.isclose(grid["beta"], round(float(np.mean(every)), 2))].iloc[0]
+    cells = re.search(rf'<tr data-beta="{row["beta"]:.2f}"[^>]*>(.*?)</tr>', html, re.S).group(1)
+    for col in ("pnl", "s1c_pnl", "s3_pnl", "s4_pnl", "s1_pnl"):
+        assert dash._usd_k(row[col]) in cells, col
+
+
+def test_a_beta_that_disagrees_with_its_chains_is_a_loader_error(dash, synth):
+    path = synth["data"] / "backtest" / "full_results.pkl"
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    state["atm_to_vix_ratio"] = 0.90
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+    d = dash.load_page4()
+    assert any(e["component"].startswith("β estimation chains") for e in d["errors"])
+    assert d["beta_est"] is None

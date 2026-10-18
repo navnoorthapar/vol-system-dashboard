@@ -1548,6 +1548,88 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     return out
 
 
+# The fifth chain behind β is a live Yahoo ^SPX capture (Cboe global trading
+# hours, 2026-10-12 04:39 ET, run_backtest.fetch_live_spx_chain). The DB holds
+# end-of-day chains only, so the capture is kept with the test fixtures.
+BETA_LIVE_CAPTURE = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "spx_chain_live_20261012.json"
+_BETA_CACHE: dict = {}
+
+
+def _import_run_backtest():
+    """joint_vol_calibration.backtest.run_backtest without its logging side effect.
+
+    The module calls logging.basicConfig(level=INFO) at import. The freeze runs
+    as a subprocess of cloud_refresh, which relays every stderr line as a
+    warning, so that call would turn every later INFO record into a warning.
+    """
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    try:
+        from joint_vol_calibration.backtest import run_backtest
+    finally:
+        for h in [h for h in root.handlers if h not in handlers]:
+            root.removeHandler(h)
+        root.setLevel(level)
+    return run_backtest
+
+
+def beta_estimation(regimes: Optional[pd.Series] = None) -> dict:
+    """The SPX chains behind β (backtest_engine.ATM_TO_VIX_RATIO) and the later checks.
+
+    Per-chain ratios (30-day ATM-forward implied vol over the same-time VIX)
+    are run_backtest.estimate_beta(include_live=False) on the project DB: DB
+    chains in BETA_ESTIMATION_SESSIONS are "included", later ones are
+    "out-of-sample" checks that the frozen β does not absorb. The live
+    capture's ratio is the one recorded with it (ratio_full_chain). The page
+    said "estimated from five real 2026 SPX chains (0.80–0.84)" with the
+    range typed in, beside a DB that holds five chains of its own — a
+    different five, one of which (2026-10-16) gives 0.70.
+    """
+    from joint_vol_calibration.backtest.backtest_engine import BETA_ESTIMATION_SESSIONS
+
+    rb = _import_run_backtest()
+    db = Path(rb.DB_PATH)
+    st = db.stat()
+    key = (str(db.resolve()), st.st_mtime_ns, st.st_size)
+    if key not in _BETA_CACHE:            # ~1.5 s; the test-suite renders the page many times
+        _BETA_CACHE[key] = rb.estimate_beta(include_live=False)
+    table = _BETA_CACHE[key]
+    live = json.loads(BETA_LIVE_CAPTURE.read_text())
+
+    def regime_on(session: Optional[str]) -> Optional[str]:
+        if regimes is None or not session:
+            return None
+        lab = regimes.get(pd.Timestamp(session))
+        return _REGIME_LABELS[int(lab)] if _num(lab) is not None else None
+
+    chains = []
+    for r in table.to_dict("records"):
+        status = str(r.get("status") or "")
+        role = ("estimation" if status.startswith("included") else
+                "later" if status.startswith("out-of-sample") else "excluded")
+        session = _date_str(r.get("session")) or str(r.get("source") or "")
+        chains.append({"kind": "DB chain", "session": session, "ratio": _num(r.get("ratio")),
+                       "role": role, "status": status, "regime": regime_on(session)})
+    chains.append({"kind": "live capture", "session": str(live["as_of_et"])[:16] + " ET",
+                   "ratio": _num(live["ratio_full_chain"]), "role": "estimation",
+                   "status": str(live.get("note") or ""), "regime": None})
+    est = [c for c in chains if c["role"] == "estimation" and c["ratio"] is not None]
+    later = [c for c in chains if c["role"] == "later" and c["ratio"] is not None]
+    missing = sorted(set(BETA_ESTIMATION_SESSIONS)
+                     - {c["session"] for c in est if c["kind"] == "DB chain"})
+    if missing:
+        raise ValueError("β estimation chain(s) missing or excluded: " + ", ".join(missing))
+    r_est = [c["ratio"] for c in est]
+    r_all = r_est + [c["ratio"] for c in later]
+    return {
+        "chains": chains, "later": later,
+        "n_db": sum(1 for c in est if c["kind"] == "DB chain"),
+        "n_live": sum(1 for c in est if c["kind"] == "live capture"),
+        "mean": float(np.mean(r_est)), "lo": float(min(r_est)), "hi": float(max(r_est)),
+        "mean_all": float(np.mean(r_all)), "n_all": len(r_all),
+    }
+
+
 def load_page4() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "metrics_rows": [], "signal_metrics": [],
                          "signal_pnl": [], "signal_labels": [],
@@ -1756,6 +1838,24 @@ def load_page4() -> dict[str, Any]:
         d["bridge"] = bridge_evidence(bridge, grid)
     except Exception as e:
         _record_error(d, "C22 bridge / β grid (c22_bridge.csv, beta_sensitivity.csv)", e)
+
+    # ── β: the chains it was estimated from, and the later checks ────────────
+    d["beta_est"] = None
+    try:
+        try:
+            regimes = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])["regime"]
+        except Exception as exc:          # the chain table then shows no regime
+            _logger.info("regime labels unavailable for the β chains: %s", exc)
+            regimes = None
+        be = beta_estimation(regimes)
+        if d["beta"] is not None and round(be["mean"], 2) != round(d["beta"], 2):
+            raise ValueError(f"the estimation chains average {be['mean']:.4f}, but the stored "
+                             f"run used β = {d['beta']}")
+        grid_betas = [float(r["beta"]) for r in ((d["bridge"] or {}).get("grid") or [])]
+        be["mean_all_in_grid"] = any(abs(g - round(be["mean_all"], 2)) < 1e-9 for g in grid_betas)
+        d["beta_est"] = be
+    except Exception as e:
+        _record_error(d, "β estimation chains (run_backtest.estimate_beta)", e)
 
     # ── Facts the change log quotes, recomputed from the DB ──────────────────
     # (the log hard-coded "2018: ~1.5%" for a year whose ^IRX averaged 1.95%,

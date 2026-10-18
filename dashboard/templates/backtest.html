@@ -18,6 +18,11 @@
 {% set yrs = (d.start_date or '')[:4] ~ '–' ~ (d.end_date or '')[:4] %}
 {% set _p = k.get('s3_null_p') %}
 {% set s3_timing_txt = ('its timing beats random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if (_p is not none and _p < 0.05) else (('its timing does not beat random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if _p is not none else 'its timing null test is not recorded') %}
+{% set be = d.beta_est %}
+{% if be %}{% set _later = be.later[0] if be.later else none %}
+{% set beta_src_txt = beta_txt ~ ' = mean of ' ~ be.n_db ~ ' DB chain' ~ ('s' if be.n_db != 1 else '') ~ ' and ' ~ be.n_live ~ ' live capture' ~ ('s' if be.n_live != 1 else '') ~ ' (' ~ (be.lo|fmt('.2f')) ~ '–' ~ (be.hi|fmt('.2f')) ~ ')' %}
+{% set beta_check_txt = ('the first later chain, ' ~ _later.session ~ ', gives ' ~ (_later.ratio|fmt('.2f')) ~ ' — the mean over all ' ~ be.n_all ~ ' chains, ' ~ (be.mean_all|fmt('.2f')) ~ (', is a row of the β grid' if be.mean_all_in_grid else ', is not in the β grid')) if _later else 'no later chain is stored yet' %}
+{% else %}{% set beta_src_txt = beta_txt %}{% set beta_check_txt = 'the estimation chains are not available' %}{% endif %}
 {% set _sh = d.r2_share or {} %}
 {% set r2_txt = (((_sh.fixed * 100)|fmt('.0f')) ~ '% vs ' ~ ((_sh.adaptive * 100)|fmt('.0f')) ~ '% of the backtest sessions in R2') if (_sh.get('fixed') is not none and _sh.get('adaptive') is not none) else 'R2 shares not available' %}
 <div class="page-header">
@@ -294,6 +299,75 @@
 </div>
 
 
+<!-- ── β: estimation chains and sensitivity grid ────────────────────────── -->
+{% set grid = b.get('grid') or [] %}
+{% if be or grid %}
+<div class="grid grid-2 row" id="beta">
+  <div class="card">
+    <h2 class="chart-title" id="beta-chains-title">β = ATM vol / VIX <span class="qual">· the chains behind it</span></h2>
+    {% if be %}
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="beta-chains-title">
+    <table class="data-table compact" id="beta-chains">
+      <thead><tr><th scope="col">Chain</th><th scope="col">Session</th><th scope="col">Rule regime</th><th scope="col" class="num">ATM 30d / VIX</th><th scope="col">Use</th></tr></thead>
+      <tbody>
+        {% for c in be.chains %}
+        <tr{% if c.role != 'estimation' %} class="muted"{% endif %}>
+          <td>{{ c.kind }}</td>
+          <td style="white-space:nowrap;">{{ c.session }}</td>
+          <td>{{ c.regime or '—' }}</td>
+          <td class="num">{{ c.ratio|fmt('.3f') }}</td>
+          <td>{% if c.role == 'estimation' %}estimation{% elif c.role == 'later' %}later, out of sample{% else %}excluded: {{ c.status[10:] }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="chart-note">
+      30-day ATM-forward implied vol (Black-76 on put–call-parity forwards) over the same-time VIX
+      (<code>run_backtest --estimate-beta</code>). {{ beta_txt }} is the mean of the estimation rows, {{ be.mean|fmt('.3f') }}.
+      The estimation set is frozen so that the canonical backtest does not move with every stored chain; {{ beta_check_txt }}.
+      No ATM-IV history exists before 2026, so β is assumed constant over {{ yrs }}.
+    </p>
+    {% else %}
+    <p class="prose">The estimation chains are not available.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2 class="chart-title" id="beta-grid-title">β sensitivity grid <span class="qual">· the full C22 backtest re-run at each β</span></h2>
+    {% if grid %}
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="beta-grid-title">
+    <table class="data-table compact" id="beta-grid">
+      <thead><tr><th scope="col" class="num">β</th><th scope="col" class="num">Portfolio</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">S1C</th><th scope="col" class="num">S3</th><th scope="col" class="num">S4</th><th scope="col" class="num">S1 (ref)</th></tr></thead>
+      <tbody>
+        {% for g in grid|sort(attribute='beta', reverse=true) %}
+        {% set _canon = d.beta is not none and (g.beta - d.beta)|abs < 1e-9 %}
+        {% set _all = be and (g.beta - (be.mean_all|round(2)))|abs < 1e-9 %}
+        <tr data-beta="{{ g.beta|fmt('.2f') }}"{% if _canon %} style="color:var(--text);font-weight:600;"{% endif %}>
+          <td class="num" style="white-space:nowrap;">{{ g.beta|fmt('.2f') }}{% if _canon %} ●{% endif %}{% if _all %} ◆{% endif %}</td>
+          <td class="num">{{ g.pnl|usd_k }}</td>
+          <td class="num">{{ g.sharpe|fmt('.2f') }}</td>
+          <td class="num">{{ g.s1c_pnl|usd_k }}</td>
+          <td class="num">{{ g.s3_pnl|usd_k }}</td>
+          <td class="num">{{ g.s4_pnl|usd_k }}</td>
+          <td class="num">{{ g.s1_pnl|usd_k }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="chart-note">
+      P&amp;L over {{ yrs }} from <code>run_backtest --beta-sensitivity</code> (<code>beta_sensitivity.csv</code>), every other
+      setting as in this page's run. ● this page's run ({{ beta_txt }}){% if be and be.mean_all_in_grid %}; ◆ the mean over all
+      {{ be.n_all }} chains ({{ be.mean_all|fmt('.2f') }}){% endif %}.
+    </p>
+    {% else %}
+    <p class="prose">The β grid is not available.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 <!-- ── C16–C22 methodology audit ─────────────────────────────────────────── -->
 {# Rows as data: the heading's counts are computed from them (the hand-typed
    "Ten Flaws Found, Eight Fixed" sat above an 11-row table). C16–C21 evidence is
@@ -340,7 +414,7 @@
    "body": "two independent defects found by an adversarial audit. (a) The only T-bill rows inside the backtest window were seven synthetic days written by <code>test_rates.py</code> into the tracked database and forward-filled for five years, so “Sharpe vs ^IRX” was measured against <code>np.linspace(0.015, 0.020)</code>; the real ^IRX history is now loaded (1,809 rows) and the tests can no longer write to it. (b) <code>T_rem</code> was computed from the pre-increment day count, so the first holding day carried no time decay and every later mark valued the straddle one day too rich — which systematically flattered the short-vol side.",
    "evidence": "Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, max DD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K; S3 unchanged again"},
   {"round": "C22", "status": "FIXED", "flaw": "ATM straddles priced at the VIX", "tone": "red",
-   "body": "the VIX is a 30-day variance-swap rate that contains the skew premium; straddles were priced and marked at it. ATM vol is now β·VIX with " ~ beta_txt ~ ", estimated from five real 2026 SPX chains (0.80–0.84), with a sensitivity grid.",
+   "body": "the VIX is a 30-day variance-swap rate that contains the skew premium; straddles were priced and marked at it. ATM vol is now β·VIX with " ~ beta_src_txt ~ "; " ~ beta_check_txt ~ ".",
    "evidence": ev.get('beta', 'C22 bridge unavailable')},
   {"round": "C22", "status": "FIXED", "flaw": "Two R2 gates and a hard-coded VVIX override", "tone": "red",
    "body": "the published labels used the adaptive gate (rolling 252-day 80th percentile of VVIX) while the backtest traded a fixed 100-point VVIX gate (" ~ r2_txt ~ "), and the signal engine OR-ed a VVIX-above-100 override onto any labels. One adaptive gate everywhere; no override.",
@@ -453,7 +527,7 @@
   <div class="card">
     <h2 class="chart-title">Limitations and what would lift them</h2>
     <div class="prose">
-      <p><strong>Option prices.</strong> All P&amp;L is Black–Scholes on β·VIX — the database holds no option prices inside the backtest window{% if d.option_snapshots and d.option_snapshots.dates %} (its {{ d.option_snapshots.dates|length }} SPX chain{{ 's' if d.option_snapshots.dates|length != 1 else '' }}, {{ "{:,}".format(d.option_snapshots.n_rows) }} rows, are snapshots from {{ d.option_snapshots.dates[0] }}{% if d.option_snapshots.dates|length > 1 %} to {{ d.option_snapshots.dates[-1] }}{% endif %}){% endif %}. Historical end-of-day chains would turn the backtest from an estimate into evidence.</p>
+      <p><strong>Option prices.</strong> All P&amp;L is Black–Scholes on β·VIX — the database holds no option prices inside the backtest window{% if d.option_snapshots and d.option_snapshots.dates %} (its {{ d.option_snapshots.dates|length }} SPX chain{{ 's' if d.option_snapshots.dates|length != 1 else '' }}, {{ "{:,}".format(d.option_snapshots.n_rows) }} rows, are snapshots from {{ d.option_snapshots.dates[0] }}{% if d.option_snapshots.dates|length > 1 %} to {{ d.option_snapshots.dates[-1] }}{% endif %}{% if be %}; β comes from {{ be.n_db }} of them plus a live capture, and {{ be.later|length }} {{ 'is a later check' if be.later|length == 1 else 'are later checks' }}{% endif %}){% endif %}. Historical end-of-day chains would turn the backtest from an estimate into evidence.</p>
       <p><strong>Jumps.</strong> The one Bates SVJ fit did not converge (λ ended at its bound and the fit was worse than nested Heston), and daily returns cannot separate frequent small jumps from rare large ones; intraday data (bipower variation) would.</p>
       <p><strong>Breadth.</strong> S3 fires {{ s3.get('n_trades')|fmt }} times in {{ yrs }}; by the fundamental law of active management that breadth cannot support an information ratio. Single-name option data across index constituents would.</p>
       <p><strong>Execution.</strong> Costs are a flat assumption; quote-level bid–ask data would test whether a thin vol-carry edge survives the round trip. The Monte-Carlo-priced Quintic OU calibration is slow (see the calibration page).</p>
