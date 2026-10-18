@@ -1559,6 +1559,8 @@ def heston_monte_carlo(
             paths_v[:, i + 1] = v
 
     if cache_file is not None:
+        # the cache dir is gitignored and config no longer creates it at import
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_file, "wb") as f:
             pickle.dump((paths_S, paths_v), f)
         logger.info("Cached MC paths to %s", cache_file)

@@ -799,6 +799,16 @@ class TestMonteCarlo:
         np.testing.assert_array_equal(b, c)     # served from the qe cache file
         assert len(list(tmp_path.glob("k__*.pkl"))) == 2
 
+    def test_cache_dir_is_created_when_missing(self, tmp_path, monkeypatch):
+        """data_store/mc_cache is gitignored and config no longer creates it at
+        import: on a fresh clone the first cached run raised FileNotFoundError."""
+        missing = tmp_path / "fresh_clone" / "mc_cache"
+        monkeypatch.setattr(heston_mod, "MC_CACHE_DIR", missing)
+        a, _ = heston_monte_carlo(_S, _T, _r, _q, **_PARAMS, n_paths=200, seed=9, cache_key="k")
+        assert (missing / "k__qe_anti.pkl").is_file()
+        b, _ = heston_monte_carlo(_S, _T, _r, _q, **_PARAMS, n_paths=200, seed=10, cache_key="k")
+        np.testing.assert_array_equal(a, b)     # second call is served from the cache
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
