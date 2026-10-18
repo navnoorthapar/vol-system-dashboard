@@ -3,19 +3,14 @@ test_delta_hedger.py — Unit tests for C7: Delta-Hedged P&L Simulation.
 
 Tests cover:
   1. BS straddle pricing and put-call parity
-  2. BS straddle Greeks (signs, symmetry, limits)
-  3. VIX term-structure IV interpolation
-  4. PDV forecast extraction interface
-  5. Simulation output structure and zero look-ahead
-  6. P&L attribution identity (components sum to total)
-  7. Hedge efficiency: Var(residual_B) < Var(residual_A) check
-  8. Stress test (COVID crash date isolation)
-  9. Vomma flag logic
-  10. Persistence (save / load)
-  11. DeltaHedger class interface
-  12. compute_hedge_metrics return shape
-
-235 lines — 22 test methods across 8 test classes.
+  2. BS straddle Greeks (signs, symmetry, limits; vanna/volga vs finite differences)
+  3. VIX term-structure IV interpolation (config tenors, 365-day year)
+  4. Simulation output structure; Run B's PDV fitted strictly before entry
+  5. P&L attribution: book-keeping identity on real data, and the
+     unexplained-variance ratio in a pure Black-Scholes world (C22)
+  6. Stress test (COVID crash date isolation)
+  7. Vol-of-vol (vomma) flag: fires on a vol-of-vol spike, quiet otherwise
+  8. Persistence (save / load), DeltaHedger interface, compute_hedge_metrics
 """
 
 import math
@@ -31,7 +26,9 @@ from joint_vol_calibration.backtest.delta_hedger import (
     K_ENTRY,
     R,
     Q,
+    VIX_TENORS,
     DeltaHedger,
+    _bs_straddle_cross_greeks,
     _bs_straddle_greeks,
     _bs_straddle_value,
     _compute_vomma_at,
@@ -39,6 +36,7 @@ from joint_vol_calibration.backtest.delta_hedger import (
     _is_unstable,
     _zscore,
     compute_hedge_metrics,
+    hedge_attribution,
     run_simulation,
     save_results,
     load_results,
@@ -489,6 +487,12 @@ class TestConstants:
 
 # ── run_simulation end-to-end (covers the core P&L loop) ──────────────────────
 
+@pytest.fixture(scope="module")
+def sim():
+    # Short January-2020 window → ~21 trading days, fast.
+    return run_simulation(entry_date="2020-01-02", exit_date="2020-01-31")
+
+
 class TestRunSimulationIntegration:
     """Exercise the actual run_simulation driver (not the hand-built mini_sim_df).
 
@@ -497,11 +501,6 @@ class TestRunSimulationIntegration:
     test stays fast (~2s) while covering the loop, state advancement, and the
     attribution bookkeeping.
     """
-
-    @pytest.fixture(scope="class")
-    def sim(self):
-        # Short January-2020 window → ~21 trading days, fast.
-        return run_simulation(entry_date="2020-01-02", exit_date="2020-01-31")
 
     def test_output_structure(self, sim):
         for col in ("S", "T_rem", "sigma_atm", "straddle_value", "delta",
@@ -517,21 +516,50 @@ class TestRunSimulationIntegration:
         assert np.isnan(sim["pnl_total"].iloc[0])
         assert np.isnan(sim["pnl_gamma"].iloc[0])
 
+    _COMMON = ("pnl_gamma", "pnl_theta", "pnl_vanna", "pnl_volga", "pnl_financing")
+
     def test_attribution_identity_run_a(self, sim):
-        """Every non-entry row: pnl_total == gamma + vega_a + theta + residual_a
-        (exact, since residual_a is defined as the remainder)."""
+        """Book-keeping only: the components plus the residual add up to the
+        total (residual_a is the remainder by definition). Attribution
+        QUALITY is tested in TestPureBlackScholesAttribution."""
         rows = sim.iloc[1:]
-        recon = (rows["pnl_gamma"] + rows["pnl_vega_a"]
-                 + rows["pnl_theta"] + rows["pnl_residual_a"])
+        recon = rows[list(self._COMMON)].sum(axis=1) + rows["pnl_vega_a"] + rows["pnl_residual_a"]
         np.testing.assert_allclose(rows["pnl_total"].values, recon.values,
                                    atol=1e-9)
 
     def test_attribution_identity_run_b(self, sim):
         rows = sim.iloc[1:]
-        recon = (rows["pnl_gamma"] + rows["pnl_vega_b"]
-                 + rows["pnl_theta"] + rows["pnl_residual_b"])
+        recon = rows[list(self._COMMON)].sum(axis=1) + rows["pnl_vega_b"] + rows["pnl_residual_b"]
         np.testing.assert_allclose(rows["pnl_total"].values, recon.values,
                                    atol=1e-9)
+
+    def test_total_is_hedged_mtm_plus_financing(self, sim):
+        """pnl_total = ΔV − Δ_{t−1}·ΔS + r(Δ_{t−1}S_{t−1} − V_{t−1})ΔT − qΔ_{t−1}S_{t−1}ΔT."""
+        prev, cur = sim.iloc[:-1], sim.iloc[1:]
+        dT = prev["T_rem"].values - cur["T_rem"].values
+        fin = (R * (prev["delta"].values * prev["S"].values - prev["straddle_value"].values)
+               - Q * prev["delta"].values * prev["S"].values) * dT
+        expected = (cur["straddle_value"].values - prev["straddle_value"].values
+                    - prev["delta"].values * (cur["S"].values - prev["S"].values) + fin)
+        np.testing.assert_allclose(cur["pnl_total"].values, expected, rtol=1e-12, atol=1e-9)
+
+    def test_theta_charged_on_the_calendar_clock(self, sim):
+        """θ·(T_{t−1} − T_t): a Friday→Monday step decays three days, not one."""
+        prev, cur = sim.iloc[:-1], sim.iloc[1:]
+        expected = prev["theta"].values * (prev["T_rem"].values - cur["T_rem"].values)
+        np.testing.assert_allclose(cur["pnl_theta"].values, expected, rtol=1e-12)
+        gaps = sim.index.to_series().diff().dt.days.iloc[1:].values
+        mon = cur["pnl_theta"].values[gaps == 3]
+        mid = cur["pnl_theta"].values[gaps == 1]
+        assert len(mon) and len(mid)
+        assert np.mean(mon) / np.mean(mid) > 2.5
+
+    def test_run_b_pdv_fitted_strictly_before_entry(self, sim):
+        """Run B must not use the full-sample pdv_model.pkl (fitted through
+        2025, i.e. on the very 2020 it attributes)."""
+        assert sim.attrs.get("pdv_train_end") is not None
+        assert pd.Timestamp(sim.attrs["pdv_train_end"]) < pd.Timestamp("2020-01-01")
+        assert sim["sigma_pdv"].notna().all()
 
     def test_cum_pnl_a_equals_cum_pnl_b(self, sim):
         """Run B only re-attributes vega; residual_b absorbs the difference, so
@@ -555,3 +583,145 @@ class TestRunSimulationIntegration:
     def test_hedge_efficiency_attrs_present(self, sim):
         assert "hedge_efficiency_a" in sim.attrs
         assert "hedge_efficiency_b" in sim.attrs
+
+
+# ── C22: attribution quality, cross-Greeks, tenors, vol-of-vol flag ───────────
+
+def _bs_path(n_days: int, sigma: float, seed: int, S0: float = 3257.85):
+    """Business-day GBM path under Q with a constant vol (calendar-clock T)."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2021-01-04", periods=n_days)
+    dt = 1.0 / 252.0
+    z = rng.standard_normal(n_days - 1)
+    logS = np.log(S0) + np.r_[0.0, np.cumsum((R - Q - 0.5 * sigma ** 2) * dt + sigma * np.sqrt(dt) * z)]
+    return dates, np.exp(logS)
+
+
+@pytest.fixture(scope="module")
+def paths():
+    out = []
+    for seed in range(40):
+        dates, S = _bs_path(126, 0.20, seed)
+        out.append(hedge_attribution(dates, S, np.full(len(S), 0.20),
+                                     float(S[0]), 1.0, R, Q))
+    return pd.concat(out)
+
+
+class TestPureBlackScholesAttribution:
+    """In a BS world (constant σ) the Greek expansion must explain the
+    hedged P&L. With θ/252 on a calendar clock the weekend decay landed in
+    the residual (Var ratio ≈ 0.14 and Monday residuals ≈ −1.7 vs +0.5)."""
+
+    def test_unexplained_variance_ratio_small(self, paths):
+        v = paths.dropna(subset=["pnl_total"])
+        ratio = v["pnl_residual_a"].var() / v["pnl_total"].var()
+        assert ratio < 0.02, f"Var(resid)/Var(total) = {ratio:.4f}"
+
+    def test_no_weekend_pattern_in_residual(self, paths):
+        v = paths.dropna(subset=["pnl_total"]).copy()
+        v["gap"] = (v["dT"] * 365.0).round().astype(int)
+        mon = v.loc[v["gap"] == 3, "pnl_residual_a"]
+        mid = v.loc[v["gap"] == 1, "pnl_residual_a"]
+        # A missing two-day theta would put ~2·θ/365 ≈ −0.9 $/day on Mondays.
+        assert abs(mon.mean() - mid.mean()) < 0.1, (mon.mean(), mid.mean())
+
+    def test_carry_plus_gamma_is_the_textbook_hedged_pnl(self, paths):
+        """Θ·ΔT + financing = −½σ²S²Γ·ΔT (BS PDE): the explained P&L is
+        ½Γ(ΔS² − σ²S²ΔT), whose mean is ~0 when realised = implied vol."""
+        v = paths.dropna(subset=["pnl_total"])
+        prevS = v["S"] - v["dS"]
+        # gamma at t−1 is recovered from the gamma P&L where ΔS ≠ 0
+        g = 2.0 * v["pnl_gamma"] / v["dS"] ** 2
+        lhs = v["pnl_theta"] + v["pnl_financing"]
+        rhs = -0.5 * 0.20 ** 2 * prevS ** 2 * g * v["dT"]
+        np.testing.assert_allclose(lhs.values, rhs.values, rtol=1e-6, atol=1e-6)
+
+
+@pytest.fixture(scope="module")
+def sv_paths():
+    out = []
+    for seed in range(20):
+        dates, S = _bs_path(60, 0.20, seed)
+        rng = np.random.default_rng(100 + seed)
+        sig = np.clip(0.20 + np.cumsum(rng.normal(0, 0.012, len(S))), 0.08, 0.6)
+        out.append(hedge_attribution(dates, S, sig, float(S[0]) * 1.05, 1.0, R, Q))
+    return pd.concat(out).dropna(subset=["pnl_total"])
+
+
+class TestStochasticVolAttribution:
+    """With moving implied vol, vanna and volga carry real P&L: dropping them
+    (the pre-C22 expansion stopped at Γ and ν) leaves it in the residual."""
+
+    def test_cross_greeks_explain_variance(self, sv_paths):
+        """Measured: 5e-5 with vanna+volga, 1.1e-3 without (20× worse)."""
+        v = sv_paths
+        ratio = v["pnl_residual_a"].var() / v["pnl_total"].var()
+        assert ratio < 3e-4, ratio
+        # and the cross terms are not negligible on these paths
+        assert (v["pnl_vanna"] + v["pnl_volga"]).abs().mean() > 2 * v["pnl_residual_a"].abs().mean()
+
+
+class TestCrossGreeks:
+    def test_vanna_volga_match_finite_differences(self, atm_params):
+        S, K, T, r, q, sig = (atm_params[k] for k in ["S", "K", "T", "r", "q", "sigma"])
+        S = S * 1.07   # off the money so both are material
+        vanna, volga = _bs_straddle_cross_greeks(S, K, T, r, q, sig)
+        hS, hv = 0.5, 1e-4
+        V = lambda s, v: _bs_straddle_value(s, K, T, r, q, v)
+        fd_vanna = (V(S + hS, sig + hv) - V(S + hS, sig - hv)
+                    - V(S - hS, sig + hv) + V(S - hS, sig - hv)) / (4 * hS * hv)
+        fd_volga = (V(S, sig + hv) - 2 * V(S, sig) + V(S, sig - hv)) / hv ** 2
+        assert vanna == pytest.approx(fd_vanna, rel=1e-4)
+        assert volga == pytest.approx(fd_volga, rel=1e-3)
+
+    def test_straddle_volga_is_twice_call_vomma(self, atm_params):
+        S, K, T, r, q, sig = (atm_params[k] for k in ["S", "K", "T", "r", "q", "sigma"])
+        _, volga = _bs_straddle_cross_greeks(S * 1.1, K, T, r, q, sig)
+        assert volga == pytest.approx(2.0 * _compute_vomma_at(S * 1.1, K, T, r, q, sig), rel=1e-9)
+
+
+class TestVixTenors:
+    def test_tenors_come_from_config(self):
+        from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+        for tk, days in VIX_TENORS.items():
+            assert days == VIX_INDEX_TENOR_DAYS[tk]
+
+    def test_183_days_interpolates_between_vix3m_and_vix6m(self, sample_vix_row):
+        """^VIX6M is a 184-day index: 183 days must still interpolate (the old
+        182-day tenor on a 365.25 year extrapolated flat here)."""
+        iv = _interp_atm_iv(sample_vix_row, 183.0 / 365.0)
+        lo = sample_vix_row["^VIX6M"] / 100.0
+        assert iv > lo + 1e-5
+
+    def test_30_days_is_exactly_vix(self, sample_vix_row):
+        assert _interp_atm_iv(sample_vix_row, 30.0 / 365.0) == pytest.approx(0.30, abs=1e-12)
+
+
+class TestVolOfVolFlag:
+    """The pre-C22 flag z-scored a single call's vomma at 2020 spot against
+    the C6 surface at S≈6,581 and never fired (0/253 days, COVID included)."""
+
+    def _path(self, spike: bool):
+        dates, S = _bs_path(200, 0.20, seed=3)
+        sig = np.full(len(S), 0.20)
+        if spike:
+            rng = np.random.default_rng(5)
+            sig[140:170] = 0.20 + rng.choice([-0.06, 0.06], 30)
+        return hedge_attribution(dates, S, sig, float(S[0]) * 1.08, 1.0, R, Q)
+
+    def test_fires_on_vol_of_vol_spike(self):
+        df = self._path(spike=True)
+        flagged = df.index[df["is_unstable"]]
+        assert len(flagged) >= 1
+        assert flagged.min() >= df.index[140]
+
+    def test_quiet_without_vol_of_vol(self):
+        assert int(self._path(spike=False)["is_unstable"].sum()) == 0
+
+    def test_flag_is_ex_ante(self):
+        """Truncating the future must not change past flags."""
+        full = self._path(spike=True)
+        dates, S = _bs_path(200, 0.20, seed=3)
+        sig = full["sigma_atm"].values
+        cut = hedge_attribution(dates[:155], S[:155], sig[:155], float(S[0]) * 1.08, 1.0, R, Q)
+        pd.testing.assert_series_equal(full["is_unstable"].iloc[:155], cut["is_unstable"])
