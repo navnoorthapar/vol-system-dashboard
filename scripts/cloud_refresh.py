@@ -2,53 +2,87 @@
 """
 Daily auto-refresh for GitHub Actions.
 
-Runs every weekday after US market close:
-  1. Download last 400 days of SPX/VIX/T-bill from yfinance -> SQLite DB
-  2. Extend regime_labels.parquet with new trading days
-  3. Download SPX options + recalibrate Heston -> save joint_cal_<session>.pkl
-     (named by the closed SPX session the fit describes, not the run date)
-  4. Freeze Flask app to static HTML -> .site-build/
+Steps (run all, or a subset with --steps):
+  market     Download the last 400 days of SPX/VIX/T-bill from yfinance -> SQLite DB
+  labels     Extend regime_labels.parquet with new trading days (rule labels)
+  calibrate  Download the SPX option chain for the last CLOSED NYSE session,
+             clean it (data/option_chain.py), fit the joint Heston model and,
+             if the quality gate accepts it, save joint_cal_<session>.pkl and
+             only then store the chain as that session's options snapshot
+  freeze     Freeze the Flask app to static HTML -> .site-build/
 
-The workflow then commits updated data files and pushes .site-build/ to gh-pages.
+The option step needs a book with live two-sided quotes. After the 16:15 ET
+close Cboe's book empties until Global Trading Hours open (20:15 ET; Friday
+evenings keep the closing book), so the workflow should run `market,labels`
+after the close and `calibrate` when the book is live; a mistimed run fails
+closed at the quote-state gate instead of fitting a stale/empty book.
+
+Exit status (main() returns it):
+  0  success, or a calibration REJECTED/SKIPPED while the newest accepted
+     calibration is at most --max-calibration-age sessions old
+  1  hard failure: empty SPX download, the expected NYSE session missing from
+     the DB, a step that crashed, freeze failure, or a rejected/skipped
+     calibration while the newest accepted one is too old
+
+Every run writes a machine-readable status JSON (--status-file, default
+.refresh-status.json at the repo root) with the session, the steps run, the
+calibration outcome and reason, and the headline calibration's date and age;
+a Markdown summary goes to $GITHUB_STEP_SUMMARY and key=value pairs to
+$GITHUB_OUTPUT when those are set.
+
+Importing this module has no side effects (no chdir, no logging setup, no
+frozen date): everything happens in main().
 """
-import sys, os, pathlib, logging, subprocess, pickle
-from datetime import date, timedelta
+import argparse
+import json
+import logging
+import os
+import pathlib
+import pickle
+import subprocess
+import sys
+from datetime import date, datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-os.chdir(ROOT)
+DATA = ROOT / "data_store"
+DEFAULT_STATUS_FILE = ROOT / ".refresh-status.json"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger("cloud_refresh")
-
-import pandas as pd
-import numpy as np
-
-TODAY = date.today().isoformat()
-DATA  = ROOT / "data_store"
-DB    = DATA / "vol_system.db"
 
 # Calendar days of history fetched before relabelling. The R2 gate is a rolling
 # 252-TRADING-day quantile, so this must comfortably exceed 252 business days.
 LABEL_LOOKBACK_DAYS = 900
 _ADAPTIVE_WINDOW = 252
+DEFAULT_MAX_CAL_AGE_SESSIONS = 3
+ALL_STEPS = ("market", "labels", "calibrate", "freeze")
 
 
-def latest_session_date(spx_df) -> "str | None":
+def _bootstrap_path() -> None:
+    """Make the repo importable when run as a script (called from main())."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def latest_session_date(spx_df, now_utc: "datetime | None" = None) -> "str | None":
     """Date (YYYY-MM-DD) of the most recent CLOSED SPX session in ``spx_df``.
 
-    This is what a calibration actually describes. It equals the run date only
-    when the job fires before midnight UTC; a cron delayed past midnight (which
-    GitHub does routinely) would otherwise mint a pickle named for a day that
-    has not traded yet.
+    This is what a calibration describes. yfinance's daily history includes
+    the in-progress bar during the session, so a last row dated today (New
+    York) is dropped until 16:15 ET (a workflow_dispatch at 14:00 ET must not
+    label an intraday bar as the close). With ``now_utc`` None the wall clock
+    is used.
     """
     if spx_df is None or len(spx_df) == 0:
         return None
-    return str(spx_df["date"].iloc[-1])[:10]
+    from joint_vol_calibration.data import option_chain as oc
+    dates = [str(d)[:10] for d in spx_df["date"]]
+    closed = oc.last_closed_session(now_utc).isoformat()
+    dates = [d for d in dates if d <= closed]
+    return dates[-1] if dates else None
 
 
 def calibration_path(session_date: str) -> pathlib.Path:
@@ -56,63 +90,95 @@ def calibration_path(session_date: str) -> pathlib.Path:
     return DATA / "calibrations" / f"joint_cal_{session_date}.pkl"
 
 
+def _annotate(level: str, title: str, message: str) -> None:
+    """GitHub Actions workflow command (shows as an annotation on the run)."""
+    msg = str(message).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::{level} title={title}::{msg}", flush=True)
+
+
+class _Group:
+    """::group:: / ::endgroup:: around one step's log lines."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __enter__(self):
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::group::{self.name}", flush=True)
+        return self
+
+    def __exit__(self, *exc):
+        if os.environ.get("GITHUB_ACTIONS"):
+            print("::endgroup::", flush=True)
+        return False
+
+
 # -- Step 1: Market data -------------------------------------------------------
 
-def refresh_market_data() -> bool:
-    """Download last 400 calendar days into the SQLite DB. Returns True on success."""
+def refresh_market_data(today: "date | None" = None) -> dict:
+    """Download the last 400 calendar days into the SQLite DB.
+
+    Returns {"ok", "hard_failure", "reason", "rows"}; an empty or failed SPX
+    download is a hard failure (the run must not publish the committed DB's
+    stale close as current).
+    """
     from joint_vol_calibration.data import yf_downloader as dl
     from joint_vol_calibration.data.database import (
         insert_spx_ohlcv, insert_vix_daily,
         insert_vix_term_structure, insert_tbill_rates,
     )
 
-    start = (date.today() - timedelta(days=400)).isoformat()
-    log.info("[1/4] Downloading market data from %s -> %s", start, TODAY)
-
-    ok = True
+    today = today or date.today()
+    start = (today - timedelta(days=400)).isoformat()
+    end = today.isoformat()
+    log.info("[market] Downloading market data from %s -> %s", start, end)
+    out = {"ok": True, "hard_failure": False, "reason": "ok", "rows": {}}
 
     try:
-        spx = dl.download_spx_ohlcv(start=start, end=TODAY)
-        if not spx.empty:
-            n = insert_spx_ohlcv(spx)
-            log.info("  SPX OHLCV: %d rows", n)
+        spx = dl.download_spx_ohlcv(start=start, end=end)
+        if spx is not None and not spx.empty:
+            out["rows"]["spx_ohlcv"] = insert_spx_ohlcv(spx)
+            log.info("  SPX OHLCV: %d rows", out["rows"]["spx_ohlcv"])
         else:
-            log.warning("  SPX OHLCV: empty download")
-            ok = False
+            out.update(ok=False, hard_failure=True, reason="SPX OHLCV download returned no rows")
+            log.error("  SPX OHLCV: empty download")
     except Exception as e:
+        out.update(ok=False, hard_failure=True, reason=f"SPX OHLCV download failed: {e}")
         log.error("  SPX OHLCV failed: %s", e)
-        ok = False
 
-    try:
-        vix = dl.download_vix_index(start=start, end=TODAY)
-        if not vix.empty:
-            n = insert_vix_daily(vix)
-            log.info("  VIX daily: %d rows", n)
-    except Exception as e:
-        log.warning("  VIX daily failed: %s", e)
+    for key, fn, ins in (("vix_daily", dl.download_vix_index, insert_vix_daily),
+                         ("vix_term_structure", dl.download_vix_term_structure,
+                          insert_vix_term_structure),
+                         ("tbill_rates", dl.download_tbill_rate, insert_tbill_rates)):
+        try:
+            df = fn(start=start, end=end)
+            if df is not None and not df.empty:
+                out["rows"][key] = ins(df)
+                log.info("  %s: %d rows", key, out["rows"][key])
+            else:
+                log.warning("  %s: empty download", key)
+        except Exception as e:
+            log.warning("  %s failed: %s", key, e)
+    return out
 
-    try:
-        ts = dl.download_vix_term_structure(start=start, end=TODAY)
-        if not ts.empty:
-            n = insert_vix_term_structure(ts)
-            log.info("  VIX term structure: %d rows", n)
-    except Exception as e:
-        log.warning("  VIX term structure failed: %s", e)
 
-    try:
-        tbill = dl.download_tbill_rate(start=start, end=TODAY)
-        if not tbill.empty:
-            n = insert_tbill_rates(tbill)
-            log.info("  T-bill rates: %d rows", n)
-    except Exception as e:
-        log.warning("  T-bill rates failed: %s", e)
+def check_expected_session(now_utc: datetime) -> dict:
+    """The DB must contain the last closed NYSE session (by the calendar)."""
+    from joint_vol_calibration.data import option_chain as oc
+    from joint_vol_calibration.data.database import get_spx_ohlcv
 
-    return ok
+    expected = oc.last_closed_session(now_utc).isoformat()
+    session = latest_session_date(get_spx_ohlcv(as_of_date=expected), now_utc)
+    if session != expected:
+        return {"ok": False, "expected": expected, "session": session,
+                "reason": (f"expected NYSE session {expected} is missing from the DB "
+                           f"(latest SPX row: {session})")}
+    return {"ok": True, "expected": expected, "session": session, "reason": "ok"}
 
 
 # -- Step 2: Regime labels -----------------------------------------------------
 
-def extend_regime_labels() -> int:
+def extend_regime_labels(today: "date | None" = None) -> int:
     """Extend regime_labels.parquet with DETERMINISTIC RULE labels, and repair
     any stored label that disagrees with the rule. Returns rows added.
 
@@ -133,20 +199,22 @@ def extend_regime_labels() -> int:
         before it is meaningful, so the fetch window is ~900 calendar days
         rather than the 60 days the feature builder alone would need.
     """
+    import pandas as pd
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
     from joint_vol_calibration.signals.regime_classifier import (
         build_features, build_regime_labels, FEATURE_COLS,
     )
 
+    today_s = (today or date.today()).isoformat()
     rl_path = DATA / "signals" / "regime_labels.parquet"
     rl      = pd.read_parquet(rl_path)
     last_dt = rl.index.max()
-    log.info("[2/4] Regime labels last date: %s -- extending to %s", last_dt.date(), TODAY)
+    log.info("[labels] Regime labels last date: %s -- extending to %s", last_dt.date(), today_s)
 
     # Long enough that the trailing dates get a FULL 252-day adaptive window.
     lookback_start = str((last_dt - timedelta(days=LABEL_LOOKBACK_DAYS)).date())
-    spx = get_spx_ohlcv(as_of_date=TODAY, start_date=lookback_start)
-    vix = get_vix_term_structure_wide(as_of_date=TODAY, start_date=lookback_start)
+    spx = get_spx_ohlcv(as_of_date=today_s, start_date=lookback_start)
+    vix = get_vix_term_structure_wide(as_of_date=today_s, start_date=lookback_start)
 
     if spx.empty or vix.empty:
         log.warning("  Insufficient market data for feature computation; skipping")
@@ -206,189 +274,373 @@ def extend_regime_labels() -> int:
 
 # -- Step 3: Heston recalibration ----------------------------------------------
 
-def recalibrate_heston() -> bool:
-    """Download SPX options via yfinance + run JointCalibrator. Returns True on success."""
-    import yfinance as yf
-    import sqlite3
-    from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
-    from joint_vol_calibration.data.database import (
-        get_spx_ohlcv, get_tbill_rate, insert_options_snapshot,
-    )
+def _persist_snapshot(clean, session: str) -> int:
+    """Store an ACCEPTED, cleaned chain as the session's SPX snapshot.
 
-    # Name the fit by the session it describes, not by the run date: exact
-    # provenance, holiday runs skip naturally, and a delayed cron cannot write a
-    # second fit for one close. (Pickles dated before 2026-09-08 carry the run
-    # date — see scripts/backfill_calibration_provenance.py.)
-    spot_date = latest_session_date(get_spx_ohlcv(as_of_date=TODAY))
+    Called only after the quality gate accepted the fit, so a rejected or
+    empty-book chain never becomes "the most recent snapshot <= as_of" for a
+    later caller. insert_options_snapshot uses a plain INSERT, so any partial
+    write for this session is cleared first (re-runs must not duplicate).
+    """
+    import sqlite3
+    from joint_vol_calibration.data import database as dbm
+
+    opts = clean.quotes.copy()
+    opts["snapshot_date"] = session
+    con = sqlite3.connect(str(dbm.DB_PATH))
+    try:
+        con.execute("DELETE FROM options_snapshots WHERE underlying='SPX' AND snapshot_date=?",
+                    (session,))
+        con.commit()
+    finally:
+        con.close()
+    return dbm.insert_options_snapshot(opts, "SPX")
+
+
+def _save_rejected_chain(raw, session: str, reason: str) -> "str | None":
+    """Keep a rejected raw chain for post-mortems, OUTSIDE options_snapshots
+    (data_store/parquet/ is gitignored and nothing reads diag_* files)."""
+    try:
+        d = DATA / "parquet"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"diag_options_spx_{session}_rejected.parquet"
+        df = raw.copy()
+        df["rejection_reason"] = reason
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].astype(str)
+        df.to_parquet(path, index=False)
+        return str(path)
+    except Exception as e:
+        log.warning("  could not save the rejected chain for diagnostics: %s", e)
+        return None
+
+
+def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
+                       calibrate_kwargs: "dict | None" = None) -> dict:
+    """Download the SPX chain for the last closed session and fit the joint model.
+
+    Returns a status dict: {"status": accepted|rejected|skipped|exists|failed,
+    "reason", "session", "path", "summary" (fit numbers), "chain" (quote-state
+    diagnostics)}. Nothing is written to options_snapshots unless accepted.
+    """
+    import pandas as pd
+    from joint_vol_calibration.calibration.joint_calibrator import (
+        JointCalibrator, is_acceptable_calibration,
+    )
+    from joint_vol_calibration.data import option_chain as oc
+    from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate
+
+    now_utc = now_utc or _utcnow()
+    expected = oc.last_closed_session(now_utc).isoformat()
+    spot_date = latest_session_date(get_spx_ohlcv(as_of_date=expected), now_utc)
+    st = {"status": "skipped", "reason": "", "session": spot_date, "path": None,
+          "summary": {}, "chain": {}}
     if spot_date is None:
-        log.warning("  No SPX sessions in DB; skipping recalibration")
-        return False
-    log.info("[3/4] Downloading SPX options for session %s (run date %s)", spot_date, TODAY)
+        st["reason"] = "no SPX sessions in DB"
+        return st
+    if spot_date != expected:
+        st["reason"] = (f"DB's latest session {spot_date} is not the last closed NYSE "
+                        f"session {expected}; refusing to label today's chain as {spot_date}")
+        return st
+    log.info("[calibrate] SPX options for session %s (run %s UTC)", spot_date,
+             now_utc.strftime("%Y-%m-%d %H:%M"))
 
     out = calibration_path(spot_date)
+    st["path"] = str(out)
     if out.exists():
-        log.info("  Calibration for session %s already exists; skipping", spot_date)
-        return True
+        st.update(status="exists", reason=f"calibration for session {spot_date} already exists")
+        log.info("  %s; skipping", st["reason"])
+        return st
+
+    spx = get_spx_ohlcv(as_of_date=spot_date)
+    S = float(spx["close"].iloc[-1])
+    r_ref = oc.tbill_discount_to_cc(get_tbill_rate(spot_date))
 
     try:
-        spx_ticker = yf.Ticker("^SPX")
-        exps = spx_ticker.options
-        if not exps:
-            log.warning("  ^SPX returned no expirations; trying ^GSPC")
-            spx_ticker = yf.Ticker("^GSPC")
-            exps = spx_ticker.options
-
-        exps = [e for e in (exps or [])[:8]]
-        frames = []
-        for exp in exps:
-            try:
-                chain = spx_ticker.option_chain(exp)
-                for side, df in [("call", chain.calls), ("put", chain.puts)]:
-                    df = df.copy()
-                    df["expiration"]  = exp
-                    df["option_type"] = side
-                    frames.append(df)
-            except Exception as ee:
-                log.warning("  Expiry %s failed: %s", exp, ee)
-
-        if not frames:
-            log.warning("  No options data available; skipping recalibration")
-            return False
-
-        opts = pd.concat(frames, ignore_index=True)
-        opts = opts[opts["impliedVolatility"] > 0.01].copy()
-
-        # This used to write a 5-column frame to a table called `spx_options`.
-        # Nothing reads that table: JointCalibrator reads `options_snapshots`
-        # via db.get_options_surface, which returns the most recent snapshot
-        # <= as_of_date. So every "daily recalibration" was in fact refitting
-        # the newest COMMITTED snapshot (2026-06-20) with today's spot and
-        # today's time-to-expiry -- pricing a 14-day expiry as a 90-day one
-        # against a June quote. Map the chain onto the real schema instead.
-        opts["snapshot_date"]  = spot_date
-        opts["expiry"]         = pd.to_datetime(opts["expiration"]).dt.strftime("%Y-%m-%d")
-        opts["right"]          = opts["option_type"].str[0].str.upper()   # call/put -> C/P
-        opts["implied_vol"]    = opts["impliedVolatility"]
-        _bid = pd.to_numeric(opts.get("bid"), errors="coerce")
-        _ask = pd.to_numeric(opts.get("ask"), errors="coerce")
-        _last = pd.to_numeric(opts.get("lastPrice"), errors="coerce")
-        _mid = (_bid + _ask) / 2.0
-        opts["mid_price"]      = _mid.where((_bid > 0) & (_ask > 0), _last)
-        opts["time_to_expiry"] = (
-            (pd.to_datetime(opts["expiry"]) - pd.Timestamp(spot_date)).dt.days / 365.0
-        )
-        opts = opts[(opts["mid_price"] > 0) & (opts["time_to_expiry"] > 0)]
-        opts = opts.dropna(subset=["strike", "mid_price", "implied_vol", "right"])
-
-        if opts.empty:
-            log.warning("  No usable option rows after cleaning; skipping calibration")
-            return False
-
-        # insert_options_snapshot uses a plain INSERT, so clear any partial
-        # write for this session first (re-runs must not duplicate the chain).
-        con = sqlite3.connect(str(DB))
-        con.execute(
-            "DELETE FROM options_snapshots WHERE underlying='SPX' AND snapshot_date=?",
-            (spot_date,),
-        )
-        con.commit()
-        con.close()
-
-        n_opt = insert_options_snapshot(opts, "SPX")
-        log.info("  Saved %d option contracts as the %s SPX snapshot", n_opt, spot_date)
-
+        raw, meta = oc.fetch_spx_chain(spot_date, ticker_factory=ticker_factory)
     except Exception as e:
-        log.error("  Options download failed: %s; skipping calibration", e)
-        return False
+        st.update(status="failed", reason=f"option chain download failed: {e}")
+        return st
+    st["chain"] = {"symbol": meta.get("symbol"), "n_listed": len(meta.get("listed", [])),
+                   "requested": meta.get("requested", []), "failed": meta.get("failed", [])}
+    if raw.empty:
+        st["reason"] = "no SPX option chain returned"
+        return st
 
-    log.info("  Running JointCalibrator...")
+    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=r_ref)
+    d = clean.diagnostics
+    st["chain"].update({k: d.get(k) for k in ("n_raw", "n_two_sided", "n_near_atm",
+                                              "near_atm_two_sided_share", "n_clean",
+                                              "n_expiries_with_carry")})
+    log.info("  Chain hygiene: %s raw -> %s two-sided -> %s clean rows; near-ATM two-sided "
+             "share %.0f%%", d.get("n_raw"), d.get("n_two_sided"), d.get("n_clean", 0),
+             100 * (d.get("near_atm_two_sided_share") or 0))
+    if not clean.ok:
+        st.update(status="skipped", reason=clean.reason)
+        st["diagnostic_chain"] = _save_rejected_chain(raw, spot_date, clean.reason)
+        return st
+
     try:
-        from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
-
-        cal = JointCalibrator(as_of_date=TODAY)
-        result = cal.calibrate()
-
-        spx_df = get_spx_ohlcv(as_of_date=TODAY)
-        result["as_of_date"] = spot_date   # the session the fit describes
-        result["run_date"]   = TODAY
-        result["S"] = float(spx_df["close"].iloc[-1]) if not spx_df.empty else 0.0
-        result["r"] = get_tbill_rate(TODAY)
-
-        p = result.get("params", {})
-        l = result.get("leg_losses", {})
-        spx_rmse = l.get("spx_iv_rmse", None)
-
-        # Quality gate: a thin/noisy live snapshot can drive Heston into a
-        # degenerate corner (sigma->0, rho->0). Do NOT let that overwrite the
-        # showcased calibration — the dashboard then keeps the last good fit.
-        ok, reason = is_acceptable_calibration(
-            p, spx_rmse, result.get("n_vix_tenors")
-        )
-        # A fit is only "today's" if its SPX leg really is today's chain.
-        _snap = result.get("spx_snapshot_date")
-        if ok and _snap != spot_date:
-            ok, reason = False, (
-                f"SPX surface is stale (snapshot {_snap}, session {spot_date}) — "
-                "refusing to publish a fit built on an old chain"
-            )
-        if not ok:
-            log.warning(
-                "  Calibration REJECTED (%s): kappa=%.4f sigma=%.4f rho=%.4f SPX RMSE=%.3f vp "
-                "-- keeping previous good calibration, not writing today's pkl",
-                reason, p.get("kappa", 0), p.get("sigma", 0), p.get("rho", 0),
-                spx_rmse if spx_rmse is not None else -1,
-            )
-            return False
-
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with open(out, "wb") as f:
-            pickle.dump(result, f)
-
-        log.info(
-            "  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE=%.3f vp | "
-            "VIX RMSE=%.3f | %s SPX opts, %s VIX tenors | Feller %s | session %s",
-            p.get("kappa", 0), p.get("sigma", 0), p.get("rho", 0),
-            l.get("spx_iv_rmse", 0), l.get("vix_futures_rmse", 0),
-            result.get("n_spx_options", "?"), result.get("n_vix_tenors", "?"),
-            result.get("feller_state", "?"), spot_date,
-        )
-        return True
-
+        cal = JointCalibrator(as_of_date=spot_date, r=r_ref, spx_chain=clean)
+        result = cal.calibrate(**(calibrate_kwargs or {}))
     except Exception as e:
-        log.error("  Calibration failed: %s", e)
-        return False
+        st.update(status="failed", reason=f"calibration failed: {e}")
+        log.error("  %s", st["reason"])
+        return st
+
+    result["as_of_date"] = spot_date              # the session the fit describes
+    result["run_utc"] = now_utc.isoformat(timespec="seconds")
+    p, ll = result["params"], result["leg_losses"]
+    st["summary"] = {
+        "params": p, "spx_iv_rmse": ll.get("spx_iv_rmse"),
+        "spx_oos_iv_rmse": ll.get("spx_oos_iv_rmse"),
+        "vix_index_rmse": ll.get("vix_index_rmse"),
+        "n_spx_expiries": result.get("n_spx_expiries"),
+        "n_spx_options": result.get("n_spx_options"),
+        "n_vix_tenors": result.get("n_vix_tenors"),
+        "feller_state": result.get("feller_state"), "r": result.get("r"), "q": result.get("q"),
+    }
+
+    ok, reason = is_acceptable_calibration(result)
+    if not ok:
+        st.update(status="rejected", reason=reason)
+        st["diagnostic_chain"] = _save_rejected_chain(raw, spot_date, reason)
+        log.warning("  Calibration REJECTED (%s): kappa=%.4f sigma=%.4f rho=%.4f "
+                    "SPX RMSE=%.3f vp -- keeping previous good calibration",
+                    reason, p["kappa"], p["sigma"], p["rho"], ll.get("spx_iv_rmse", -1))
+        return st
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "wb") as f:
+        pickle.dump(result, f)
+    try:
+        n_opt = _persist_snapshot(clean, spot_date)
+        log.info("  Saved %d cleaned option quotes as the %s SPX snapshot", n_opt, spot_date)
+    except Exception as e:     # the fit stands; the snapshot is a convenience
+        log.warning("  could not store the accepted chain: %s", e)
+    st.update(status="accepted", reason="ok")
+    log.info("  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE %.3f vp "
+             "(OOS %.3f) | VIX index RMSE %.3f | %d opts / %d expiries, %d VIX tenors | "
+             "Feller %s | session %s", p["kappa"], p["sigma"], p["rho"],
+             ll["spx_iv_rmse"], ll["spx_oos_iv_rmse"], ll["vix_index_rmse"],
+             result["n_spx_options"], result["n_spx_expiries"], result["n_vix_tenors"],
+             result["feller_state"], spot_date)
+    return st
+
+
+def headline_calibration(session: "str | None") -> dict:
+    """Newest calibration that passes the CURRENT gate, and its age in NYSE
+    sessions relative to ``session``. Legacy (pre-C22) pickles do not count."""
+    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+    from joint_vol_calibration.data import option_chain as oc
+
+    best = None
+    for path in sorted((DATA / "calibrations").glob("joint_cal_*.pkl")):
+        try:
+            with open(path, "rb") as f:
+                cal = pickle.load(f)
+        except Exception:
+            continue
+        if not isinstance(cal, dict) or not is_acceptable_calibration(cal)[0]:
+            continue
+        d = str(cal.get("spot_date") or cal.get("as_of_date") or path.stem[-10:])[:10]
+        if best is None or d > best["date"]:
+            best = {"date": d, "path": str(path)}
+    if best is None:
+        return {"date": None, "path": None, "age_sessions": None}
+    best["age_sessions"] = (oc.sessions_between(best["date"], session)
+                            if session else None)
+    return best
 
 
 # -- Step 4: Freeze static site ------------------------------------------------
 
-def freeze_site() -> None:
-    log.info("[4/4] Freezing static site -> .site-build/")
+def freeze_site() -> dict:
+    log.info("[freeze] Freezing static site -> .site-build/")
     result = subprocess.run(
         [sys.executable, "dashboard/freeze_site.py"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, cwd=str(ROOT),
     )
     for line in result.stdout.splitlines():
         log.info("  %s", line)
+    for line in result.stderr.splitlines():          # warnings matter on success too
+        log.warning("  [freeze stderr] %s", line)
     if result.returncode != 0:
-        log.error("freeze_site.py exited %d:\n%s", result.returncode, result.stderr)
-        sys.exit(1)
+        return {"ok": False, "reason": f"freeze_site.py exited {result.returncode}"}
+    return {"ok": True, "reason": "ok"}
+
+
+# -- Reporting -----------------------------------------------------------------
+
+def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
+    if status_file is not None:
+        status_file = pathlib.Path(status_file)
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        status_file.write_text(json.dumps(status, indent=2, default=str))
+        log.info("Status written to %s", status_file)
+
+    cal = status.get("calibration") or {}
+    head = status.get("headline_calibration") or {}
+    out_path = os.environ.get("GITHUB_OUTPUT")
+    if out_path:
+        with open(out_path, "a") as f:
+            f.write(f"session={status.get('session') or ''}\n")
+            f.write(f"calibration={cal.get('status', 'not-run')}\n")
+            f.write(f"reason={str(cal.get('reason', '')).splitlines()[0] if cal.get('reason') else ''}\n")
+            f.write(f"labels_added={status.get('labels_added', 0)}\n")
+            f.write(f"headline_calibration={head.get('date') or ''}\n")
+            f.write(f"exit_code={status.get('exit_code')}\n")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        s = cal.get("summary") or {}
+        ch = cal.get("chain") or {}
+        lines = [
+            f"## Daily refresh — session {status.get('session')}",
+            "",
+            "| item | value |", "|---|---|",
+            f"| steps | {', '.join(status.get('steps', []))} |",
+            f"| exit code | {status.get('exit_code')} |",
+            f"| market rows | {status.get('market', {}).get('rows', {})} |",
+            f"| labels added | {status.get('labels_added', '—')} |",
+            f"| calibration | **{cal.get('status', 'not run')}** {cal.get('reason', '')} |",
+            f"| chain | {ch.get('n_raw', '—')} raw, {ch.get('n_two_sided', '—')} two-sided, "
+            f"near-ATM two-sided {ch.get('near_atm_two_sided_share', '—')} |",
+            f"| fit | {s.get('n_spx_options', '—')} opts / {s.get('n_spx_expiries', '—')} expiries; "
+            f"SPX {s.get('spx_iv_rmse', '—')} vp (OOS {s.get('spx_oos_iv_rmse', '—')}); "
+            f"VIX index {s.get('vix_index_rmse', '—')} |",
+            f"| headline calibration | {head.get('date')} ({head.get('age_sessions')} sessions old) |",
+        ]
+        for e in status.get("errors", []):
+            lines.append(f"| error | {e} |")
+        with open(summary_path, "a") as f:
+            f.write("\n".join(lines) + "\n")
 
 
 # -- Entry point ---------------------------------------------------------------
 
+def _parse_args(argv):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--steps", default=",".join(ALL_STEPS),
+                    help="comma-separated subset of: " + ",".join(ALL_STEPS))
+    ap.add_argument("--status-file", default=str(DEFAULT_STATUS_FILE),
+                    help="machine-readable status JSON ('' to disable)")
+    ap.add_argument("--max-calibration-age", type=int, default=DEFAULT_MAX_CAL_AGE_SESSIONS,
+                    help="sessions a rejected/skipped run tolerates before failing")
+    ap.add_argument("--now", default=None,
+                    help="override the clock (ISO UTC, e.g. 2026-10-17T01:30:00Z)")
+    args = ap.parse_args(argv)
+    steps = [s.strip() for s in args.steps.split(",") if s.strip()]
+    bad = [s for s in steps if s not in ALL_STEPS]
+    if bad:
+        ap.error(f"unknown step(s): {bad}")
+    return args, steps
+
+
+def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
+         calibrate_kwargs: "dict | None" = None) -> int:
+    """Run the selected steps; return the process exit status."""
+    args, steps = _parse_args(argv if argv is not None else sys.argv[1:])
+    _bootstrap_path()
+    os.chdir(ROOT)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                            format="%(asctime)s %(levelname)s %(message)s",
+                            datefmt="%H:%M:%S")
+    if args.now:
+        now_utc = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    now_utc = now_utc or _utcnow()
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    from joint_vol_calibration.data import option_chain as oc
+    today = oc.ny_date(now_utc)
+    status = {"run_utc": now_utc.isoformat(timespec="seconds"), "steps": steps,
+              "expected_session": oc.last_closed_session(now_utc).isoformat(),
+              "session": None, "errors": [], "warnings": []}
+    hard_fail = False
+    log.info("=" * 60)
+    log.info("Daily auto-refresh -- %s UTC -- steps: %s", status["run_utc"], ",".join(steps))
+    log.info("=" * 60)
+
+    market_ok = True
+    if "market" in steps:
+        with _Group("market data"):
+            m = refresh_market_data(today)
+            status["market"] = m
+            if m["hard_failure"]:
+                hard_fail, market_ok = True, False
+                status["errors"].append(m["reason"])
+                _annotate("error", "Market data", m["reason"])
+
+    sess = None
+    if market_ok:
+        try:
+            chk = check_expected_session(now_utc)
+        except Exception as e:
+            chk = {"ok": False, "session": None, "reason": f"session check failed: {e}"}
+        sess = chk.get("session")
+        status["session"] = sess
+        if not chk["ok"] and any(s in steps for s in ("market", "calibrate")):
+            hard_fail, market_ok = True, False
+            status["errors"].append(chk["reason"])
+            _annotate("error", "Missing session", chk["reason"])
+
+    if "labels" in steps:
+        with _Group("regime labels"):
+            if market_ok:
+                try:
+                    status["labels_added"] = extend_regime_labels(today)
+                except Exception as e:
+                    hard_fail = True
+                    status["errors"].append(f"labels step failed: {e}")
+                    log.exception("labels step failed")
+            else:
+                status["labels_added"] = 0
+                log.warning("  skipped: market data is not current")
+
+    if "calibrate" in steps:
+        with _Group("option chain + joint calibration"):
+            if market_ok:
+                try:
+                    cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs)
+                except Exception as e:
+                    cal = {"status": "failed", "reason": f"calibrate step crashed: {e}"}
+                    log.exception("calibrate step crashed")
+            else:
+                cal = {"status": "skipped", "reason": "market data is not current"}
+            status["calibration"] = cal
+            head = headline_calibration(sess or status["expected_session"])
+            status["headline_calibration"] = head
+            if cal["status"] in ("rejected", "skipped", "failed"):
+                _annotate("warning", f"Calibration {cal['status']}", cal["reason"])
+                status["warnings"].append(f"calibration {cal['status']}: {cal['reason']}")
+                age = head.get("age_sessions")
+                if head.get("date") is None or age is None or age > args.max_calibration_age:
+                    hard_fail = True
+                    msg = (f"newest accepted calibration is {head.get('date')} "
+                           f"({age} sessions old > {args.max_calibration_age})"
+                           if head.get("date") else "no calibration passes the current gate")
+                    status["errors"].append(msg)
+                    _annotate("error", "Calibration stale", msg)
+
+    if "freeze" in steps:
+        with _Group("freeze site"):
+            fz = freeze_site()
+            status["freeze"] = fz
+            if not fz["ok"]:
+                hard_fail = True
+                status["errors"].append(fz["reason"])
+                _annotate("error", "Freeze", fz["reason"])
+
+    status["exit_code"] = 1 if hard_fail else 0
+    _write_reports(status, pathlib.Path(args.status_file) if args.status_file else None)
+    log.info("=" * 60)
+    log.info("Refresh %s (exit %d)", "FAILED" if hard_fail else "complete", status["exit_code"])
+    log.info("=" * 60)
+    return status["exit_code"]
+
+
 if __name__ == "__main__":
-    log.info("=" * 60)
-    log.info("Daily auto-refresh -- %s", TODAY)
-    log.info("=" * 60)
-
-    market_ok = refresh_market_data()
-    if not market_ok:
-        log.warning("Market data incomplete -- continuing with existing DB")
-
-    extend_regime_labels()
-    recalibrate_heston()
-    freeze_site()
-
-    log.info("=" * 60)
-    log.info("Refresh complete. Site rebuilt at .site-build/")
-    log.info("=" * 60)
+    sys.exit(main())

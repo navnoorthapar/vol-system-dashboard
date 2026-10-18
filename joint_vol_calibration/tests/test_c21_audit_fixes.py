@@ -157,7 +157,10 @@ class TestRegimeLabelProvenance:
         """The bot must not append classifier predictions to the label file."""
         import pathlib
 
-        src = pathlib.Path("scripts/cloud_refresh.py").read_text()
+        # Resolved from this file, not the CWD: cloud_refresh no longer chdirs
+        # on import (C22), so a CWD-relative path made this order-dependent.
+        src = (pathlib.Path(__file__).resolve().parents[2]
+               / "scripts" / "cloud_refresh.py").read_text()
         head = src[src.index("def extend_regime_labels"):src.index("# -- Step 3")]
         # Check for the classifier being LOADED/CALLED, not merely named: the
         # function's docstring legitimately explains the old clf.predict path.
@@ -188,11 +191,14 @@ def test_bot_writes_the_table_the_calibrator_reads():
     """The daily chain must land in options_snapshots, not a dead table."""
     import pathlib
 
-    src = pathlib.Path("scripts/cloud_refresh.py").read_text()
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "scripts" / "cloud_refresh.py").read_text()
     assert 'to_sql(\n            "spx_options"' not in src and '"spx_options", con' not in src, (
         "the bot is writing the chain to `spx_options`, which nothing reads — "
         "JointCalibrator reads options_snapshots via get_options_surface, so "
         "every 'daily recalibration' refits the newest COMMITTED snapshot"
     )
     assert "insert_options_snapshot(opts" in src
-    assert "spx_snapshot_date" in src, "stale-surface guard missing"
+    # C22: the stale-surface guard moved into the shared gate, which the bot
+    # applies to the full result (snapshot session vs spot session).
+    assert "is_acceptable_calibration(result)" in src, "stale-surface guard missing"
