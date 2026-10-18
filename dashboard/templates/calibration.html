@@ -294,8 +294,8 @@
           <tr><th scope="col">Parameter</th><th scope="col">Symbol</th><th scope="col" class="num">Value</th><th scope="col">Role</th></tr>
         </thead>
         <tbody>
-          <tr><td>Fast OU speed</td><td>λx</td><td class="num">{{ q.lam_x|fmt(".3f") }}</td><td class="small wrap">Fast-factor half-life ln 2/λx ≈ {{ (0.693147 / q.lam_x * 365)|fmt(".2f") }} calendar days</td></tr>
-          <tr><td>Slow OU speed</td><td>λy</td><td class="num">{{ q.lam_y|fmt(".3f") }}</td><td class="small wrap">Slow-factor half-life ln 2/λy ≈ {{ (0.693147 / q.lam_y * 365)|fmt(".1f") }} calendar days</td></tr>
+          <tr><td>Fast OU speed</td><td>λx</td><td class="num">{{ q.lam_x|fmt(".3f") }}</td><td class="small wrap">Fast-factor half-life ln 2/λx ≈ {{ q.hl_x_days|fmt(".2f") }} calendar days</td></tr>
+          <tr><td>Slow OU speed</td><td>λy</td><td class="num">{{ q.lam_y|fmt(".3f") }}</td><td class="small wrap">Slow-factor half-life ln 2/λy ≈ {{ q.hl_y_days|fmt(".1f") }} calendar days</td></tr>
           <tr><td>Factor weight</td><td>θ</td><td class="num">{{ q.theta|fmt(".4f") }}</td><td class="small wrap">Fast-factor loading in Z_t</td></tr>
           <tr><td>Poly constant</td><td>α₀</td><td class="num">{{ q.alpha0|fmt(".4f") }}</td><td class="small wrap">Constant term (σ is signed; no floor)</td></tr>
           <tr><td>Poly linear</td><td>α₁</td><td class="num">{{ q.alpha1|fmt(".4f") }}</td><td class="small wrap">Linear skew driver</td></tr>

@@ -64,7 +64,7 @@ def freezer():
 
 # ── synthetic inputs ──────────────────────────────────────────────────────────
 
-CURVE = (("^VIX9D", 9), ("^VIX", 30), ("^VIX3M", 93), ("^VIX6M", 182))
+CURVE = (("^VIX9D", 9), ("^VIX", 30), ("^VIX3M", 93), ("^VIX6M", 184))
 
 
 # NYSE full-day closures as published by the exchange (independent of app.py's
@@ -674,6 +674,13 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
     assert f"calibration.html</loc><lastmod>{p2['session']}</lastmod>" in sitemap
     g = dash.load_page3()
     assert f"greeks.html</loc><lastmod>{g['surface_date']}</lastmod>" in sitemap
+    # the backtest page's data date is the last session of its equity curve
+    # (it read a "run_date" key full_results.pkl never had, so it had no lastmod)
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    last = str(pd.Timestamp(eq.index[-1]).date())
+    assert f"backtest.html</loc><lastmod>{last}</lastmod>" in sitemap
+    assert sitemap.count("<lastmod>") == len(dash.ROUTES)
+    assert dash.app.test_client().get("/backtest").headers["X-Dashboard-Data-Date"] == last
 
 
 def test_no_third_party_script_and_the_vendored_chartjs_matches_its_sri(dash, freezer):
@@ -766,11 +773,13 @@ def test_kpis_are_round_trips_of_the_portfolio_sleeves(dash, engine_state):
     d = dash.load_page4()
     rows = {r["label"]: r["value"] for r in d["metrics_rows"]}
     n = sum(m[f"{s}_n_trades"] for s in dash.PORTFOLIO_SLEEVES)
-    assert rows["Round-Trip Trades"] == str(n)
-    assert n == sum(int(s["n_trades"]) for s in d["signal_metrics"] if not s["is_research"])
     trades = [t for t in engine_state["all_trades"] if t.signal in dash.PORTFOLIO_SLEEVES]
-    assert d["kpi"]["win_rate"] == pytest.approx(np.mean([t.net_pnl > 0 for t in trades]), abs=1e-12)
-    assert d["kpi"]["avg_pnl"] == pytest.approx(d["total_pnl"] / n, abs=1e-9)
+    closed = [t for t in trades if not t.is_open]
+    assert d["kpi"]["n_trades"] == n == len(trades)
+    assert rows["Trades"] == f"{n:,}" + (f" ({n - len(closed)} open)" if len(closed) < n else "")
+    assert n == sum(int(s["n_trades"].split()[0]) for s in d["signal_metrics"] if not s["is_research"])
+    assert d["kpi"]["win_rate"] == pytest.approx(np.mean([t.net_pnl > 0 for t in closed]), abs=1e-12)
+    assert d["kpi"]["avg_pnl"] == pytest.approx(sum(t.net_pnl for t in closed) / 3 / len(closed), abs=1e-9)
     assert rows["Sharpe"] == f"{m['sharpe']:.3f}".replace("-", "\u2212")
 
 
@@ -1132,10 +1141,14 @@ def test_audit_evidence_is_read_from_the_c22_bridge(dash, pages):
     rows = list(bridge.index)
     prev = bridge.loc[rows[rows.index("beta") - 1]]
     text = _visible_text(pages["/backtest"])
+    # the bridge's pre-β S1 is at β = 1 but before the later C22 steps; the grid's
+    # β = 1 row is the full C22 configuration, and the evidence says which is which
     want = (f"C22 bridge row {int(bridge.loc['beta', 'row'])}: S1 {dash._usd_k(prev['s1_pnl'])} → "
-            f"{dash._usd_k(bridge.loc['beta', 's1_pnl'])} from β alone; at β = 1 S1 would show "
+            f"{dash._usd_k(bridge.loc['beta', 's1_pnl'])} from β alone, before the later C22 steps; "
+            f"at β = 1 under the full C22 configuration (β grid), S1 shows "
             f"{dash._usd_k(grid.loc[1.0, 's1_pnl'])}")
     assert want in text
+    assert "S1 would show" not in text
     assert f"C22 bridge row {int(bridge.loc['r2_gate', 'row'])}: portfolio {dash._usd_k(bridge.loc['r2_gate', 'd_pnl'])}" in text
     assert "+$722K → −$508K" not in text
     with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
@@ -1281,3 +1294,260 @@ def test_page_header_dates_never_break_across_lines(dash, route):
     # Strip the no-wrap spans; no ISO date may remain outside one.
     outside = re.sub(r'<span class="nowrap"[^>]*>.*?</span>', "", body, flags=re.S)
     assert not re.search(r"\d{4}-\d{2}-\d{2}", outside), (route, outside)
+
+
+# ── Independent review of 8bf9aa6: every displayed number equals its artifact ─
+
+def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
+    """compute_crisis_performance divided by the window's FIRST NAV, dropping the
+    first session's return: 'FedHikes 2022 (2022-01-01 → 2022-12-31) +5.1%' sat
+    beside a 2022 annual return of +4.71% for the same sessions."""
+    d = dash.load_page4()
+    crisis = {c["name"]: c for c in d["crisis"]}
+    ann = {a["year"]: a["ret_pct"] / 100 for a in d["ann"]}
+    assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(ann[2022], abs=1e-12)
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    nav = eq["nav"]
+    nav.index = pd.to_datetime(nav.index)
+    for name, c in crisis.items():
+        base = nav[nav.index < pd.Timestamp(c["start"])].iloc[-1]
+        assert c["total_return"] == pytest.approx(nav.loc[c["start"]:c["end"]].iloc[-1] / base - 1, abs=1e-12)
+    assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(0.0470983, abs=1e-6)
+    assert crisis["COVID_2020"]["total_return"] == pytest.approx(0.0168672, abs=1e-6)
+    assert crisis["Tariffs_2025"]["total_return"] == pytest.approx(-0.0113131, abs=1e-6)
+    text = _visible_text(pages["/backtest"])
+    assert "FedHikes 2022 (2022-01-01 → 2022-12-31) +4.7%" in text
+    assert "COVID 2020 (2020-02-19 → 2020-04-30) +1.7%" in text
+    assert "+5.1%" not in text and "+1.8%" not in text
+    # a jump on the window's first session counts; a window at the curve's start uses its first NAV
+    idx = pd.bdate_range("2021-12-27", "2022-01-07")
+    toy = pd.Series([100.0] * 5 + [110.0] * 5, index=idx)
+    got = dash.window_returns(toy, {"jump": ("2022-01-01", "2022-01-07"), "head": ("2021-12-01", "2021-12-31")})
+    assert got[0]["total_return"] == pytest.approx(0.10) and got[0]["n_days"] == 5
+    assert got[1]["total_return"] == pytest.approx(0.0) and got[1]["n_days"] == 4
+
+
+LIVE_BETA_CAPTURE = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "spx_chain_live_20261012.json"
+
+
+def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
+    """'β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84)': the five
+    were 4 DB chains and a live capture, the range was typed in, and the later
+    2026-10-16 DB chain (0.70; mean over every chain 0.80) went unmentioned."""
+    from joint_vol_calibration.backtest.backtest_engine import BETA_ESTIMATION_SESSIONS
+    from joint_vol_calibration.backtest.run_backtest import estimate_beta
+
+    t = estimate_beta(include_live=False)
+    inc = t[t["status"].str.startswith("included")]
+    oos = t[t["status"].str.startswith("out-of-sample")].sort_values("session")
+    assert sorted(inc["session"]) == sorted(BETA_ESTIMATION_SESSIONS)
+    est = list(inc["ratio"]) + [json.loads(LIVE_BETA_CAPTURE.read_text())["ratio_full_chain"]]
+    every = est + list(oos["ratio"])
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        beta = pickle.load(f)["atm_to_vix_ratio"]
+    assert round(float(np.mean(est)), 2) == beta
+    first = oos.iloc[0]
+    want = (f"β = {beta:.2f} = mean of {len(inc)} DB chains and 1 live capture "
+            f"({min(est):.2f}–{max(est):.2f}); the first later chain, {first['session']}, gives "
+            f"{first['ratio']:.2f} — the mean over all {len(every)} chains, {np.mean(every):.2f}, "
+            f"is a row of the β grid")
+    assert want == ("β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later "
+                    "chain, 2026-10-16, gives 0.70 — the mean over all 6 chains, 0.80, is a row of the β grid")
+    text = _visible_text(pages["/backtest"])
+    assert want in text
+    assert "five real 2026 SPX chains" not in text
+    # every chain is listed with its ratio and use
+    d = dash.load_page4()
+    assert [(c["session"], round(c["ratio"], 3)) for c in d["beta_est"]["chains"] if c["kind"] == "DB chain"] == \
+        [(s, round(r, 3)) for s, r in zip(t["session"], t["ratio"])]
+    # the grid on the page is the CSV, including the row at the mean over every chain
+    grid = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")
+    html = pages["/backtest"]
+    assert len(re.findall(r'<tr data-beta="', html)) == len(grid)
+    row = grid[np.isclose(grid["beta"], round(float(np.mean(every)), 2))].iloc[0]
+    cells = re.search(rf'<tr data-beta="{row["beta"]:.2f}"[^>]*>(.*?)</tr>', html, re.S).group(1)
+    for col in ("pnl", "s1c_pnl", "s3_pnl", "s4_pnl", "s1_pnl"):
+        assert dash._usd_k(row[col]) in cells, col
+
+
+def test_a_beta_that_disagrees_with_its_chains_is_a_loader_error(dash, synth):
+    path = synth["data"] / "backtest" / "full_results.pkl"
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    state["atm_to_vix_ratio"] = 0.90
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+    d = dash.load_page4()
+    assert any(e["component"].startswith("β estimation chains") for e in d["errors"])
+    assert d["beta_est"] is None
+
+
+def test_trade_kpis_keep_the_open_trade_out_of_the_win_rate(dash, engine_state, pages):
+    """'Round trips 208, win rate 38.0%, average −$1,039' counted the S4 straddle
+    opened on the last session (is_open, net = its −$433 entry cost) as a closed,
+    losing round trip."""
+    trades = [t for t in engine_state["all_trades"] if t.signal in dash.PORTFOLIO_SLEEVES]
+    open_ = [t for t in trades if t.is_open]
+    closed = [t for t in trades if not t.is_open]
+    assert [(t.signal, str(t.entry_date.date())) for t in open_] == [("s4", "2025-03-24")]
+    assert (len(trades), len(closed)) == (208, 207)
+    win = np.mean([t.net_pnl > 0 for t in closed])
+    avg = sum(t.net_pnl for t in closed) / 3 / len(closed)
+    assert (round(win * 100, 1), round(avg)) == (38.2, -1043)
+    text = _visible_text(pages["/backtest"])
+    assert (f"Trades 208 1 open at the end; over the 207 closed: win rate {win * 100:.1f}%, "
+            f"average {dash._usd(avg)} of portfolio P&L per trade") in text
+    assert "Round trips" not in text and "38.0%" not in text and "−$1,039" not in text
+    assert "S4 VRP −$273,544" in text and "46 (1 open)" in text
+    assert "S4's count includes a straddle opened on the last session (2025-03-24)" in text
+
+
+def test_displayed_numbers_are_rounded_once(dash, pages):
+    """Values rounded in the loader and again in the template printed S3's final
+    +5.647% as '+5.7%', the 365-day smile's 12.4249 as '12.43', and Greeks vomma
+    3,267.496 as '3,268' (via 3,267.5)."""
+    m = dash.MINUS
+    # equity-curve table: final / lowest / highest from the unrounded curves
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    table = re.search(r'id="equityChart-data">(.*?)</div>', pages["/backtest"], re.S).group(1)
+    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
+                      ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+        rel = eq[col] / eq[col].iloc[0] - 1
+        want = "".join(f"<td>{dash._pct_prose(x)}</td>" for x in (rel.iloc[-1], rel.min(), rel.max()))
+        assert f"<tr><td>{name}</td>{want}</tr>" in table, name
+    assert "<tr><td>S3 Dispersion</td><td>+5.6%</td>" in table
+    # model smile table: the Heston smile of the headline fit, formatted once
+    _, cal = dash.load_headline_calibration()
+    smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
+    cal_html = pages["/calibration"]
+    s365 = smile[365]
+    assert f"{s365['lm'][-1]:+.3f}: {s365['iv'][-1] * 100:.2f}" in cal_html
+    assert "+0.250: 12.42" in cal_html and "+0.250: 12.43" not in cal_html
+    # Greeks heatmap: every cell's vomma and flag metric from the stored surface
+    gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
+    gdf = gdf.assign(lm_key=gdf["log_moneyness"].round(4)).sort_values(["T_days", "lm_key"])
+    g_html = pages["/greeks"]
+    vv = re.findall(r'<div class="vv">([^<]+)</div>', g_html)
+    assert vv == [f"{x:,.0f}".replace("-", m) for x in gdf["vomma"]]
+    zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="z">([^<]+)</div>', g_html)]
+    assert zz == [f"{abs(x):.2f}" for x in gdf["vomma_pnl_ratio"]]
+    assert "3,267" in vv and "3,268" not in vv
+
+
+def test_vix_index_tenors_come_from_config(dash, pages):
+    """The front page hard-coded ^VIX6M at 182 days ('9d 20.12 → 182d 21.67' and
+    the chart's x position); the system's tenor map is 184 days."""
+    from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+
+    d = dash.load_page1()
+    assert d["ts_tenors"] == [f"{VIX_INDEX_TENOR_DAYS[t]}d" for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M")]
+    assert d["ts_tenors"][-1] == "184d"
+    text = _visible_text(pages["/"])
+    assert f"9d {d['ts_values'][0]:.2f} → 184d {d['ts_values'][-1]:.2f}" in text
+    assert "182d" not in pages["/"]
+
+
+@pytest.mark.parametrize("last_vix, big, tail, lead", [
+    (95.0, "Record high", "Implied vol is rich versus this spread's own history (highest on record)", "above all"),
+    (0.5, "Record low", "Implied vol is cheap versus this spread's own history (lowest on record)", "at or below all"),
+])
+def test_record_pdv_spreads_read_as_records(dash, synth, last_vix, big, tail, lead):
+    """A spread above (below) its whole history rendered 'top 0%' and '100th
+    percentile' ('bottom 0%', '0th'). Synthetic history: today's VIX is pushed
+    far above (below) anything before it."""
+    con = sqlite3.connect(synth["data"] / "vol_system.db")
+    con.execute("UPDATE vix_daily SET close = ? WHERE date = ?", (last_vix, str(synth["dates"][-1].date())))
+    con.commit()
+    con.close()
+    d = dash.load_page1()
+    assert d["pdv_spread_pct"] == (100.0 if last_vix > 50 else 0.0)
+    text = _visible_text(dash.app.test_client().get("/").get_data(as_text=True))
+    assert tail in text
+    assert f"{big} {lead} {d['pdv_hist_n']:,} prior sessions" in text
+    for bad in (r"\btop 0%", r"\bbottom 0%", r"\b100th\b", r"\b0th\b"):
+        assert not re.search(bad, text), bad
+
+
+def test_percentile_wording_is_capped_short_of_a_record(dash):
+    assert dash.percentile_rank(99.6) == {"record": None, "big": "99th", "tail": "top 1%"}
+    assert dash.percentile_rank(0.3) == {"record": None, "big": "1st", "tail": "bottom 1%"}
+    assert dash.percentile_rank(85.2) == {"record": None, "big": "85th", "tail": "top 15%"}
+    assert dash.percentile_rank(50.0)["tail"] is None and dash.percentile_rank(None) is None
+
+
+def test_pre_c22_spread_statistics_are_computed_from_the_data(dash, pages, monkeypatch):
+    """'σ̂ averaged 0.71× ... held on 95% of sessions' was typed text (the code
+    comments say ~96% and ≈0.66×). Both figures are now the engine's own pre-C22
+    replay (pdv_horizon = 1) on the engine's data window."""
+    from joint_vol_calibration.backtest.backtest_engine import BacktestEngine
+    from joint_vol_calibration.backtest.run_backtest import _load_data
+    from joint_vol_calibration.models.pdv import forward_target
+
+    d = dash.load_page4()
+    pc = d["pre_c22_spread"]
+    spx, vix_wide = _load_data()                       # the engine's loader, independent of app.py
+    sig = BacktestEngine(start_date=d["start_date"], end_date=d["end_date"],
+                         pdv_horizon=1)._build_walkforward_pdv_vol(spx)
+    vix = vix_wide.set_index(pd.to_datetime(vix_wide["date"]))["^VIX"] / 100
+    w = pd.concat([sig.rename("f"), vix.rename("v")], axis=1, join="inner").loc[d["start_date"]:d["end_date"]].dropna()
+    assert pc["share"] == pytest.approx(((w["v"] - w["f"]) > 0.02).mean(), abs=1e-12)
+    assert pc["n"] == len(w) == len(pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet"))
+    close = spx.set_index(pd.to_datetime(spx["date"]))["close"]
+    y = forward_target(np.log(close).diff().dropna(), horizon=21, target="rv")
+    both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner").loc[d["start_date"]:d["end_date"]].dropna()
+    assert pc["ratio"] == pytest.approx(both["f"].mean() / both["y"].mean(), abs=1e-12)
+    text = _visible_text(pages["/backtest"])
+    assert (f"averaged {pc['ratio']:.2f}× the realised RMS vol of the next 21 sessions in the backtest window, "
+            f"so “VIX > σ̂ + 2 vol pts” held on {pc['share'] * 100:.0f}% of its {pc['n']:,} sessions") in text
+    # the page follows the computation, not a typed figure
+    monkeypatch.setattr(dash, "pre_c22_spread_facts", lambda *a, **k: {**pc, "share": 0.5, "ratio": 0.9})
+    text = _visible_text(dash.app.test_client().get("/backtest").get_data(as_text=True))
+    assert "averaged 0.90×" in text and "held on 50% of its" in text
+
+
+def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, pages, synth):
+    """The p = 0.075 sat next to S3's +$56,471, but s3_timing_null_test sizes every
+    path, the real one included, at S3's base (pass-1) kelly: its real statistic is
+    +$41,952, before the sizing overlay. The page says so, and shows the base-size
+    figure only when the stored results record it."""
+    m = engine_state["metrics"]
+    text = _visible_text(pages["/backtest"])
+    p = f"{m['s3_null_p_value']:.3f}"
+    assert ("its timing, tested on S3 at base (pass-1) size, before the sizing overlay, does not beat "
+            f"random entry dates at the 5% level (p = {p})") in text
+    assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
+    assert f"timing null test on S3 at base (pass-1) size, before the sizing overlay: p = {p}" in text
+    assert "null p =" not in text and "S3 entries vs random entry dates" not in text
+    if "s3_null_real_pnl" not in m:
+        assert "+$41,952" not in text                    # never typed in
+    # when the results record the base-size statistic, it is quoted
+    path = synth["data"] / "backtest" / "full_results.pkl"
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    state["metrics"]["s3_null_real_pnl"] = 41951.87
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+    text = _visible_text(dash.app.test_client().get("/backtest").get_data(as_text=True))
+    assert "tested on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text
+
+
+def test_s3_trade_count_is_explained_as_entries_plus_rolls(dash, engine_state, pages):
+    """S3's 39 trade records are 26 entries and 13 expiry rolls; 'S3 fires 39 times'
+    overstated its breadth."""
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    pos = eq["s3_position"]
+    entries = int(((pos != 0) & (pos.shift(1, fill_value=0) == 0)).sum())
+    s3 = [t for t in engine_state["all_trades"] if t.signal == "s3"]
+    exp = {t.exit_date for t in s3 if t.exit_reason == "expiry"}
+    rolls = sum(1 for t in s3 if t.entry_date in exp)
+    assert (len(s3), entries, rolls) == (39, 26, 13)
+    text = _visible_text(pages["/backtest"])
+    assert (f"{len(s3)} trades in 2018–2025 ({entries} entries plus {rolls} rolls of a position held "
+            f"past its straddle's expiry)") in text
+    assert f"S3 enters {entries} times in 2018–2025" in text and "S3 fires 39 times" not in text
+
+
+def test_no_double_negative_losses(pages):
+    """'it loses −$274K' / 'It loses −$431K' read as gains."""
+    for route, html in pages.items():
+        assert not re.search(r"\blos(?:es|t|e)\s+[−-]\$", _visible_text(html)), route

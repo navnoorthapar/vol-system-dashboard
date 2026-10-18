@@ -574,6 +574,29 @@ def spread_percentile(history: pd.Series, current: float) -> tuple[Optional[floa
 PDV_MIN_HISTORY = 252   # fewer valid history points -> no percentile is shown
 
 
+def percentile_rank(pct: Any) -> Optional[dict]:
+    """Wording for a percentile = percent of prior sessions strictly below today.
+
+    100 (above every prior session) and 0 (none below) printed as numbers read
+    "100th percentile" / "top 0%" and "0th" / "bottom 0%"; they are records.
+    Anything else is shown as an integer percentile capped at 1st..99th so
+    rounding cannot produce those strings, and the tail share is the
+    complement of that integer ("85th" with "top 15%").
+    Returns {"record": "high" | "low" | None, "big": the headline figure,
+    "tail": "top 15%" / "bottom 3%" / "highest on record" / ... or None}.
+    """
+    x = _num(pct)
+    if x is None:
+        return None
+    if x >= 100.0:
+        return {"record": "high", "big": "Record high", "tail": "highest on record"}
+    if x <= 0.0:
+        return {"record": "low", "big": "Record low", "tail": "lowest on record"}
+    k = min(99, max(1, math.floor(x + 0.5)))
+    tail = f"top {100 - k}%" if x >= 80 else (f"bottom {k}%" if x <= 20 else None)
+    return {"record": None, "big": ordinal(k), "tail": tail}
+
+
 def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
                         stress_date: str = "2020-03-16") -> Optional[dict]:
     """Ex-ante PDV-linear forecast of |r| on `stress_date`, made at the prior close.
@@ -686,7 +709,7 @@ def load_page1() -> dict[str, Any]:
               "reg2_pct", "reg_span", "calib_date", "pdv_forecast", "pdv_spread",
               "pdv_date", "pdv_spread_mean", "pdv_spread_pct", "pdv_hist_n",
               "pdv_hist_start", "pdv_hist_end", "pdv_sigma1", "pdv_sigma2",
-              "pdv_age", "stress", "pdv_vix", "pdv_horizon", "pdv_coef", "pdv_intercept",
+              "pdv_age", "pdv_rank", "stress", "pdv_vix", "pdv_horizon", "pdv_coef", "pdv_intercept",
               "pdv_halflives", "pdv_garch_beta", "pdv_garch_persistence",
               "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
               "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
@@ -727,7 +750,10 @@ def load_page1() -> dict[str, Any]:
         # Term structure from ONE date: the latest session on which every curve
         # tenor has a close. Taking each ticker's own latest row mixed today's
         # VIX with older 9D/3M/6M closes whenever Yahoo omitted the sub-tenors.
-        tenor_days = {"^VIX9D": 9, "^VIX": 30, "^VIX3M": 93, "^VIX6M": 182}
+        # Tenors are config.VIX_INDEX_TENOR_DAYS, the one map every module uses
+        # (Cboe: 9/30/93/184 calendar days); a local copy labelled ^VIX6M 182d.
+        from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+        tenor_days = dict(VIX_INDEX_TENOR_DAYS)
         curve_cols = [c for c in tenor_days if c in vix_wide.columns]
         recent = vix_wide.loc[vix_wide.index >= vix_wide.index.max() - pd.Timedelta(days=90)]
         curve_cols = [c for c in curve_cols if recent[c].notna().any()]
@@ -834,7 +860,8 @@ def load_page1() -> dict[str, Any]:
         pct, n_hist = spread_percentile(hist, float(spread.iloc[-1]))
         d["pdv_hist_n"] = n_hist
         if n_hist >= PDV_MIN_HISTORY:
-            d["pdv_spread_pct"] = round(pct, 1)
+            d["pdv_spread_pct"] = pct          # unrounded: formatted once on the page
+            d["pdv_rank"] = percentile_rank(pct)
             d["pdv_spread_mean"] = round(float(hist.mean()), 2)
             d["pdv_hist_start"] = str(hist.index[0].date())
             d["pdv_hist_end"] = str(hist.index[-1].date())
@@ -1101,9 +1128,11 @@ def load_page2() -> dict[str, Any]:
 
         # Model smile implied by THESE parameters (not the Greeks parquet,
         # which was built from a different, gate-rejected 2026-03-24 fit).
+        # Unrounded: the template formats each value once (rounding to 3 dp
+        # here and to 2 dp there printed 12.4249 as 12.43).
         for s in heston_model_smile(p):
             d["mat_smiles"].append({"T": s["T"], "lm": s["lm"],
-                                    "iv": [round(v * 100, 3) for v in s["iv"]]})
+                                    "iv": [v * 100 for v in s["iv"]]})
 
         ref = _latest_market_session()
         item = _staleness("calibration", "Heston calibration", d["session"], ref)
@@ -1144,7 +1173,10 @@ def load_page2() -> dict[str, Any]:
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
                 "theta": round(float(qp["theta"]), 4), "alpha0": round(float(qp["alpha0"]), 4),
                 "alpha1": round(float(qp["alpha1"]), 4), "alpha3": round(float(qp["alpha3"]), 4),
-                "alpha5": round(float(qp["alpha5"]), 4), "epsilon": round(float(qp["epsilon"]), 4),
+                "alpha5": round(float(qp["alpha5"]), 4), "epsilon": float(qp["epsilon"]),
+                # OU half-lives in calendar days, from the unrounded speeds
+                "hl_x_days": math.log(2.0) / float(qp["lam_x"]) * 365.0,
+                "hl_y_days": math.log(2.0) / float(qp["lam_y"]) * 365.0,
                 "spx_rmse": _num(ql.get("spx_iv_rmse")),
                 "spx_rmse_fresh": _num(ql.get("spx_iv_rmse_fresh_paths")),
                 # model E[VIX_T] vs the VIX-option parity forward (no VX futures)
@@ -1307,35 +1339,39 @@ def load_page3() -> dict[str, Any]:
                 # colour = the flag metric relative to its threshold (full at the threshold)
                 shade = 2.0 * min(m / flag_thr, 1.0) if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr else z
                 bg = _vomma_color(shade)
-                cells.append({
-                    "vomma": round(float(r.vomma), 1), "z": round(z, 2), "metric": round(m, 3),
-                    "iv": round(float(r.iv) * 100, 1), "K": round(float(r.K), 0),
+                cells.append({        # unrounded: each value is formatted once, in the template
+                    "vomma": float(r.vomma), "z": z, "metric": m,
+                    "iv": float(r.iv) * 100, "K": round(float(r.K), 0),
                     "lm": lm, "unstable": bool(r.is_unstable), "bg": bg,
                     # text colour chosen per cell for contrast (white on bright green was 2.7:1)
                     "fg": _text_colour_on(bg),
                 })
             d["heatmap_rows"].append({"T": T, "label": f"{T}d", "cells": cells})
-        d["heatmap_cols"] = [_fmt(c, "+.3f") for c in cols]
+        # Column labels from the stored ln(K/F), not from the 4-dp grouping key.
+        raw_lm: dict = {}
+        for x in list(gdf["log_moneyness"]) + list(grid_lm):
+            raw_lm.setdefault(round(float(x), 4), float(x))
+        d["heatmap_cols"] = [_fmt(raw_lm.get(c, c), "+.3f") for c in cols]
 
         unstable = gdf[gdf["is_unstable"]]
         d["unstable_nodes"] = sorted((
-            {"T_days": int(u.T_days), "lm": round(float(u.log_moneyness), 4),
-             "K": round(float(u.K), 0), "vomma": round(float(u.vomma), 1),
-             "z": round(float(u.vomma_zscore), 2), "iv": round(float(u.iv) * 100, 1),
-             "metric": round(float(u.flag_metric), 3)}
+            {"T_days": int(u.T_days), "lm": float(u.log_moneyness),
+             "K": round(float(u.K), 0), "vomma": float(u.vomma),
+             "z": float(u.vomma_zscore), "iv": float(u.iv) * 100,
+             "metric": float(u.flag_metric)}
             for u in unstable.itertuples()), key=lambda x: x["metric"], reverse=True)
         d["n_unstable"] = len(d["unstable_nodes"])
         d["unstable_maturities"] = sorted({n["T_days"] for n in d["unstable_nodes"]})
         d["unstable_by_maturity"] = {int(t): int(n) for t, n in gdf.groupby("T_days")["is_unstable"].sum().items()}
 
         imax, imin = gdf["vomma"].idxmax(), gdf["vomma"].idxmin()
-        d["vomma_max"] = round(float(gdf.loc[imax, "vomma"]), 1)
+        d["vomma_max"] = float(gdf.loc[imax, "vomma"])
         d["vomma_max_at"] = {"T_days": int(gdf.loc[imax, "T_days"]),
                              "lm": round(float(gdf.loc[imax, "log_moneyness"]), 3)}
-        d["vomma_min"] = round(float(gdf.loc[imin, "vomma"]), 1)
+        d["vomma_min"] = float(gdf.loc[imin, "vomma"])
         d["vomma_min_at"] = {"T_days": int(gdf.loc[imin, "T_days"]),
                              "lm": round(float(gdf.loc[imin, "log_moneyness"]), 3)}
-        d["vomma_mean"] = round(float(gdf["vomma"].mean()), 1)
+        d["vomma_mean"] = float(gdf["vomma"].mean())
 
         # QV convexity = Var[∫v dt] per maturity: one number per maturity (it
         # does not depend on strike), so a single series is plotted.
@@ -1343,14 +1379,14 @@ def load_page3() -> dict[str, Any]:
         if ((qv["max"] - qv["min"]).abs() > 1e-12 * qv["max"].abs().clip(lower=1)).any():
             _logger.info("qv_convexity varies within a maturity; plotting the mean")
         d["qv_labels"] = [f"{int(t)}d" for t in qv.index]
-        d["qv_values"] = (qv["mean"] * 1e4).round(4).tolist()
+        d["qv_values"] = (qv["mean"] * 1e4).tolist()
 
         vanna = gdf.groupby("T_days")["vanna"].mean()
         d["vanna_labels"] = [f"{int(t)}d" for t in vanna.index]
         d["vanna_values"] = vanna.round(4).tolist()
 
         d["scatter_lm"] = gdf["log_moneyness"].round(4).tolist()
-        d["scatter_z"] = gdf["flag_metric"].round(4).tolist()      # the flag metric (ratio, or |z| fallback)
+        d["scatter_z"] = gdf["flag_metric"].tolist()      # the flag metric (ratio, or |z| fallback)
         d["scatter_T"] = gdf["T_days"].astype(int).tolist()
 
         # Provenance + staleness. The shipped surface records no source fit;
@@ -1434,6 +1470,32 @@ def annual_returns(nav: pd.Series) -> list[dict]:
     return out
 
 
+def window_returns(nav: pd.Series, periods: dict, end: Optional[str] = None) -> list[dict]:
+    """Return over each named (start, end) window, based on the last NAV before it opens.
+
+    backtest_engine.compute_crisis_performance divides the window's last NAV
+    by its FIRST NAV, which drops the first session's return: the page read
+    "FedHikes 2022 (2022-01-01 → 2022-12-31) +5.1%" beside a 2022 annual
+    return of +4.71% for the same sessions. As in annual_returns and
+    half_year_sharpes, the base is the close of the session before the window
+    (a window opening on the first session of the curve is based on that
+    session's NAV). Windows are clipped at `end`.
+    """
+    nav = nav.dropna()
+    out = []
+    for name, (start, stop) in periods.items():
+        stop = min(stop, end) if (stop and end) else (stop or end)
+        sub = nav.loc[start:stop]
+        prior = nav[nav.index < pd.Timestamp(start)]
+        row = {"name": name, "start": start, "end": stop, "total_return": None, "n_days": 0}
+        if len(sub) and (len(prior) or len(sub) > 1):
+            base = float(prior.iloc[-1]) if len(prior) else float(sub.iloc[0])
+            row["total_return"] = float(sub.iloc[-1]) / base - 1.0
+            row["n_days"] = int(len(sub) if len(prior) else len(sub) - 1)   # returns in the window
+        out.append(row)
+    return out
+
+
 def _trade_summary(trades: list, sig: str) -> dict:
     """Per-signal trade-log facts quoted in the page prose."""
     tr = [t for t in trades if getattr(t, "signal", None) == sig]
@@ -1459,6 +1521,26 @@ def _trade_summary(trades: list, sig: str) -> dict:
         "negative_years": [{"year": y, "pnl": v} for y, v in sorted(by_year.items()) if v < 0],
         "top5_share": (top5 / total) if total > 0 else None,
     }
+
+
+def _entries_and_rolls(trades: list, sig: str, eq: Optional[pd.DataFrame]) -> dict:
+    """How a sleeve's trade records split into entries and expiry rolls.
+
+    A position held past its straddle's expiry is closed with exit_reason
+    "expiry" and continued as a new record entered that day, so a sleeve's
+    trade count is its entries (flat -> on in the stored position series)
+    plus those rolls: S3's 39 trades are 26 entries and 13 rolls. Returns
+    {"entries", "rolls"} only when the two add up to the trade count.
+    """
+    col = f"{sig}_position"
+    tr = [t for t in trades if getattr(t, "signal", None) == sig]
+    if eq is None or col not in eq.columns or not tr:
+        return {}
+    pos = pd.to_numeric(eq[col], errors="coerce").fillna(0.0)
+    entries = int(((pos != 0) & (pos.shift(1, fill_value=0.0) == 0)).sum())
+    expiry_exits = {pd.Timestamp(t.exit_date) for t in tr if getattr(t, "exit_reason", None) == "expiry"}
+    rolls = sum(1 for t in tr if pd.Timestamp(t.entry_date) in expiry_exits)
+    return {"entries": entries, "rolls": rolls} if entries + rolls == len(tr) else {}
 
 
 def _read_csv_rows(path: Path) -> list[dict]:
@@ -1496,13 +1578,21 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     out["s1_at_beta1"] = at_one[0]["s1_pnl"] if at_one else None
 
     # Evidence sentences for the audit table, each from one bridge row.
+    # The β row's "before" value is the previous bridge row (already β = 1,
+    # but before the later C22 steps); the grid re-runs the FULL C22
+    # configuration, so its β = 1 figure is a different backtest and is
+    # labelled as such ("at β = 1 S1 would show +$2.6M" beside "+$576K → …"
+    # read as a contradiction).
     ev: dict[str, str] = {}
     r = rows.get("beta")
     if r and r.get("prev"):
+        later = [x for x in order if int(x["row"]) > int(r["row"])]
         txt = (f"C22 bridge row {r['row']}: S1 {_usd_k(r['prev']['s1_pnl'])} → "
-               f"{_usd_k(r['s1_pnl'])} from β alone")
+               f"{_usd_k(r['s1_pnl'])} from β alone"
+               + (", before the later C22 steps" if later else ""))
         if out["s1_at_beta1"] is not None:
-            txt += f"; at β = 1 S1 would show {_usd_k(out['s1_at_beta1'])}"
+            txt += (f"; at β = 1 under the full C22 configuration (β grid), S1 shows "
+                    f"{_usd_k(out['s1_at_beta1'])}")
         ev["beta"] = txt
     for step in ("r2_gate", "pdv_h21"):
         r = rows.get(step)
@@ -1522,16 +1612,144 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     return out
 
 
+_PRE_C22_CACHE: dict = {}
+
+
+def pre_c22_spread_facts(spx: pd.DataFrame, vix: pd.Series, start: str, end: str,
+                         history_start: str) -> Optional[dict]:
+    """How the pre-C22 PDV spread behaved in the backtest window, from the data.
+
+    σ̂ is the pre-C22 forecast as the engine replays it for the C22 bridge
+    (BacktestEngine with pdv_horizon = 1: one PDVLinear per year on the
+    1-day |r|·√252 target, fitted on returns before January 1), on the
+    engine's own data window (SPX from `history_start`, the stored
+    log_return column). Returns the share of sessions in [start, end] on
+    which VIX − σ̂ exceeded the S1 entry threshold (signal_engine
+    S1_ENTRY_THRESHOLD, 2 vol pts), and mean σ̂ over the mean realised RMS
+    vol of the next PDV_SPREAD_HORIZON (21) sessions. The audit row quoted
+    both numbers as typed text ("0.71×", "95%"), while the code comments
+    say ~96% and ≈0.66×.
+    """
+    from joint_vol_calibration.backtest.backtest_engine import PDV_SPREAD_HORIZON, BacktestEngine
+    from joint_vol_calibration.models.pdv import forward_target
+    from joint_vol_calibration.signals.signal_engine import S1_ENTRY_THRESHOLD
+
+    frame = spx.loc[history_start:end, ["close", "log_return"]]
+    v = pd.to_numeric(vix, errors="coerce").loc[history_start:end]
+    key = (start, end, history_start, len(frame), float(frame["close"].sum()),
+           float(frame["log_return"].fillna(0).abs().sum()), len(v), float(v.fillna(0).sum()))
+    if key in _PRE_C22_CACHE:
+        return _PRE_C22_CACHE[key]
+    eng = BacktestEngine(start_date=start, end_date=end, pdv_horizon=1)
+    sig = eng._build_walkforward_pdv_vol(frame.rename_axis("date").reset_index())
+    out = None
+    if sig is not None and not sig.empty:
+        sig.index = pd.to_datetime(sig.index)
+        w = pd.concat([sig.rename("f"), (v / 100.0).rename("v")], axis=1, join="inner").loc[start:end].dropna()
+        r = np.log(frame["close"].astype(float)).diff().dropna()
+        y = forward_target(r, horizon=PDV_SPREAD_HORIZON, target="rv")
+        both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner").loc[start:end].dropna()
+        if len(w) and len(both):
+            out = {"share": float(((w["v"] - w["f"]) > S1_ENTRY_THRESHOLD).mean()),
+                   "n": int(len(w)), "threshold_vp": float(S1_ENTRY_THRESHOLD) * 100.0,
+                   "ratio": float(both["f"].mean() / both["y"].mean()),
+                   "horizon": int(PDV_SPREAD_HORIZON), "history_start": history_start}
+    _PRE_C22_CACHE[key] = out
+    return out
+
+
+# The fifth chain behind β is a live Yahoo ^SPX capture (Cboe global trading
+# hours, 2026-10-12 04:39 ET, run_backtest.fetch_live_spx_chain). The DB holds
+# end-of-day chains only, so the capture is kept with the test fixtures.
+BETA_LIVE_CAPTURE = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "spx_chain_live_20261012.json"
+_BETA_CACHE: dict = {}
+
+
+def _import_run_backtest():
+    """joint_vol_calibration.backtest.run_backtest without its logging side effect.
+
+    The module calls logging.basicConfig(level=INFO) at import. The freeze runs
+    as a subprocess of cloud_refresh, which relays every stderr line as a
+    warning, so that call would turn every later INFO record into a warning.
+    """
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    try:
+        from joint_vol_calibration.backtest import run_backtest
+    finally:
+        for h in [h for h in root.handlers if h not in handlers]:
+            root.removeHandler(h)
+        root.setLevel(level)
+    return run_backtest
+
+
+def beta_estimation(regimes: Optional[pd.Series] = None) -> dict:
+    """The SPX chains behind β (backtest_engine.ATM_TO_VIX_RATIO) and the later checks.
+
+    Per-chain ratios (30-day ATM-forward implied vol over the same-time VIX)
+    are run_backtest.estimate_beta(include_live=False) on the project DB: DB
+    chains in BETA_ESTIMATION_SESSIONS are "included", later ones are
+    "out-of-sample" checks that the frozen β does not absorb. The live
+    capture's ratio is the one recorded with it (ratio_full_chain). The page
+    said "estimated from five real 2026 SPX chains (0.80–0.84)" with the
+    range typed in, beside a DB that holds five chains of its own — a
+    different five, one of which (2026-10-16) gives 0.70.
+    """
+    from joint_vol_calibration.backtest.backtest_engine import BETA_ESTIMATION_SESSIONS
+
+    rb = _import_run_backtest()
+    db = Path(rb.DB_PATH)
+    st = db.stat()
+    key = (str(db.resolve()), st.st_mtime_ns, st.st_size)
+    if key not in _BETA_CACHE:            # ~1.5 s; the test-suite renders the page many times
+        _BETA_CACHE[key] = rb.estimate_beta(include_live=False)
+    table = _BETA_CACHE[key]
+    live = json.loads(BETA_LIVE_CAPTURE.read_text())
+
+    def regime_on(session: Optional[str]) -> Optional[str]:
+        if regimes is None or not session:
+            return None
+        lab = regimes.get(pd.Timestamp(session))
+        return _REGIME_LABELS[int(lab)] if _num(lab) is not None else None
+
+    chains = []
+    for r in table.to_dict("records"):
+        status = str(r.get("status") or "")
+        role = ("estimation" if status.startswith("included") else
+                "later" if status.startswith("out-of-sample") else "excluded")
+        session = _date_str(r.get("session")) or str(r.get("source") or "")
+        chains.append({"kind": "DB chain", "session": session, "ratio": _num(r.get("ratio")),
+                       "role": role, "status": status, "regime": regime_on(session)})
+    chains.append({"kind": "live capture", "session": str(live["as_of_et"])[:16] + " ET",
+                   "ratio": _num(live["ratio_full_chain"]), "role": "estimation",
+                   "status": str(live.get("note") or ""), "regime": None})
+    est = [c for c in chains if c["role"] == "estimation" and c["ratio"] is not None]
+    later = [c for c in chains if c["role"] == "later" and c["ratio"] is not None]
+    missing = sorted(set(BETA_ESTIMATION_SESSIONS)
+                     - {c["session"] for c in est if c["kind"] == "DB chain"})
+    if missing:
+        raise ValueError("β estimation chain(s) missing or excluded: " + ", ".join(missing))
+    r_est = [c["ratio"] for c in est]
+    r_all = r_est + [c["ratio"] for c in later]
+    return {
+        "chains": chains, "later": later,
+        "n_db": sum(1 for c in est if c["kind"] == "DB chain"),
+        "n_live": sum(1 for c in est if c["kind"] == "live capture"),
+        "mean": float(np.mean(r_est)), "lo": float(min(r_est)), "hi": float(max(r_est)),
+        "mean_all": float(np.mean(r_all)), "n_all": len(r_all),
+    }
+
+
 def load_page4() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "metrics_rows": [], "signal_metrics": [],
                          "signal_pnl": [], "signal_labels": [],
                          "research_s1": {}, "research_s1c": {}, "research_s4": {},
                          "eq_dates": [], "eq_nav": [], "eq_nav_s1c": [], "eq_nav_s3": [],
-                         "eq_nav_s4": [], "eq_nav_s1": [], "ann": [], "ann_years": [],
+                         "eq_nav_s4": [], "eq_nav_s1": [], "eq_summary": [], "ann": [], "ann_years": [],
                          "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
-                         "crisis": [], "sleeves": {}}
+                         "crisis": [], "sleeves": {}, "open_trades": []}
     for k in ("final_nav", "total_pnl", "start_date", "end_date",
-              "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date",
+              "wf_neg", "wf_total", "kpi", "sharpe_convention",
               "beta", "bridge"):
         d[k] = None
 
@@ -1567,6 +1785,16 @@ def load_page4() -> dict[str, Any]:
             return ((s / float(s.iloc[0]) * 100) - 100).round(2).tolist()
 
         d["eq_dates"] = [t.strftime("%Y-%m-%d") for t in eq.index]
+        # Final / lowest / highest of each curve for the table alternative, from
+        # the unrounded curves: printing the 2-dp chart series at 1 dp showed S3's
+        # final +5.647% as "+5.7%".
+        d["eq_summary"] = []
+        for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
+                          ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+            if col in eq.columns and eq[col].notna().any():
+                rel = eq[col].dropna() / float(eq[col].dropna().iloc[0]) - 1.0
+                d["eq_summary"].append({"name": name, "final": float(rel.iloc[-1]),
+                                        "low": float(rel.min()), "high": float(rel.max())})
         d["eq_nav"] = _norm("nav")
         d["eq_nav_s1c"] = _norm("nav_s1c")
         d["eq_nav_s3"] = _norm("nav_s3")
@@ -1585,16 +1813,10 @@ def load_page4() -> dict[str, Any]:
         d["wf_total"] = len(defined)
         d["wf_flat"] = sum(1 for w in d["wf"] if w["flat"])
 
-        from joint_vol_calibration.backtest.backtest_engine import (
-            CRISIS_PERIODS, compute_crisis_performance)
+        from joint_vol_calibration.backtest.backtest_engine import CRISIS_PERIODS
         # The window dates are shown with each return: "Tariffs_2025" ends at the
         # backtest's last session (2025-03-24), before the April 2025 shock.
-        d["crisis"] = [{"name": k, "total_return": v.get("total_return"),
-                        "n_days": v.get("n_days"),
-                        "start": CRISIS_PERIODS.get(k, (None, None))[0],
-                        "end": min(CRISIS_PERIODS.get(k, (None, d["end_date"]))[1] or d["end_date"],
-                                   d["end_date"])}
-                       for k, v in compute_crisis_performance(eq).items()]
+        d["crisis"] = window_returns(nav, CRISIS_PERIODS, end=d["end_date"])
     except Exception as e:
         _record_error(d, "backtest equity curve (full_results.parquet)", e)
         eq = None
@@ -1607,7 +1829,6 @@ def load_page4() -> dict[str, Any]:
         trades = state.get("all_trades") or []
         if not em:
             raise ValueError("full_results.pkl carries no engine metrics")
-        d["run_date"] = _date_str(state.get("run_date"))
         d["sharpe_convention"] = em.get("sharpe_convention") or state.get("sharpe_convention")
         d["beta"] = _num(state.get("atm_to_vix_ratio", em.get("atm_to_vix_ratio")))
 
@@ -1626,13 +1847,29 @@ def load_page4() -> dict[str, Any]:
                     raise ValueError("portfolio daily_pnl is not the equal-weight mean of "
                                      + "/".join(PORTFOLIO_SLEEVES))
 
-        # Portfolio trade statistics from the engine's per-sleeve trade-log
-        # stats. (The engine's top-level n_trades also counts the reference
-        # sleeves; counting position changes double-counted round trips.)
+        # Portfolio trade statistics from the trade log of the three sleeves.
+        # (The engine's top-level n_trades also counts the reference sleeves;
+        # counting position changes double-counted round trips.) The log
+        # includes the position still open on the last session (is_open: its
+        # net P&L is the entry cost alone), which the engine's win rates count
+        # as a loss; the page showed "Round trips 208, win rate 38.0%" with it.
+        # Win rate and average are taken over the CLOSED trades; the average
+        # is portfolio dollars per trade (the portfolio is the equal-weight
+        # mean of the sleeves, so each trade contributes 1/3 of its P&L).
         n_rt = sum(int(em.get(f"{s}_n_trades") or 0) for s in PORTFOLIO_SLEEVES)
-        wins = sum(float(em.get(f"{s}_win_rate") or 0.0) * int(em.get(f"{s}_n_trades") or 0)
-                   for s in PORTFOLIO_SLEEVES)
+        ptr = [t for t in trades if getattr(t, "signal", None) in PORTFOLIO_SLEEVES]
+        if len(ptr) != n_rt:
+            raise ValueError(f"the trade log has {len(ptr)} portfolio trades, the engine metrics {n_rt}")
         port_pnl = d["total_pnl"]
+        if port_pnl is not None and abs(sum(float(t.net_pnl) for t in ptr) / len(PORTFOLIO_SLEEVES)
+                                        - port_pnl) > 1.0:
+            raise ValueError("the portfolio trades do not add up to the portfolio P&L")
+        closed = np.array([float(t.net_pnl) for t in ptr if not getattr(t, "is_open", False)])
+        n_closed = int(len(closed))
+        d["open_trades"] = [{"signal": t.signal, "entry": str(pd.Timestamp(t.entry_date).date()),
+                             "net_pnl": float(t.net_pnl)}
+                            for t in trades if getattr(t, "is_open", False)
+                            and t.signal in PORTFOLIO_SLEEVES + ("s1", "s2")]
         kpi = {
             "cum_ret": _num(em.get("cumulative_return")),
             "ann_ret": _num(em.get("ann_return")),
@@ -1644,10 +1881,16 @@ def load_page4() -> dict[str, Any]:
             "best_day": _num(em.get("best_day")),
             "worst_day": _num(em.get("worst_day")),
             "n_days": em.get("n_days"),
-            "n_round_trips": n_rt,
-            "win_rate": (wins / n_rt) if n_rt else None,
-            "avg_pnl": (port_pnl / n_rt) if (n_rt and port_pnl is not None) else None,
+            "n_trades": n_rt, "n_closed": n_closed, "n_open": n_rt - n_closed,
+            "win_rate": float((closed > 0).mean()) if n_closed else None,
+            "avg_pnl": float(closed.sum()) / len(PORTFOLIO_SLEEVES) / n_closed if n_closed else None,
+            # The null test sizes every path, the real one included, at S3's
+            # BASE kelly (the engine's pass 1); the S3 P&L the page reports is
+            # after the pass-2 sizing overlay (+$41,952 vs +$56,471 on
+            # 2018-2025). The base-size figure is shown only when the results
+            # record it (metrics["s3_null_real_pnl"]); it is never typed in.
             "s3_null_p": _num(em.get("s3_null_p_value")),
+            "s3_null_real": _num(em.get("s3_null_real_pnl")),
             "cash_ret": _num(em.get("cash_cum_return")),
         }
         d["kpi"] = kpi
@@ -1669,11 +1912,12 @@ def load_page4() -> dict[str, Any]:
             {"label": "Max Drawdown", "value": _pct(kpi["mdd"]), "positive": False},
             {"label": "DD Duration", "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur']):,} sessions", "positive": False},
             {"label": "Calmar", "value": _f(kpi["calmar"]), "positive": (kpi["calmar"] or 0) > 0},
-            {"label": "Win Rate (per round trip)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
-            {"label": "Avg P&L / Round Trip", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
+            {"label": "Win Rate (closed trades)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
+            {"label": "Avg Portfolio P&L / Closed Trade", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
             {"label": "Best Day", "value": _pct(kpi["best_day"]), "positive": True},
             {"label": "Worst Day", "value": _pct(kpi["worst_day"]), "positive": False},
-            {"label": "Round-Trip Trades", "value": f"{n_rt:,}", "positive": True},
+            {"label": "Trades", "value": f"{n_rt:,}" + (f" ({n_rt - n_closed} open)" if n_rt > n_closed else ""),
+             "positive": True},
             {"label": "Return Days", "value": "—" if kpi["n_days"] is None else f"{int(kpi['n_days']):,}", "positive": True},
         ]
 
@@ -1685,15 +1929,22 @@ def load_page4() -> dict[str, Any]:
                 "ann_ret": _num(em.get(f"{sig}_ann_return")),
                 "win_rate": _num(em.get(f"{sig}_win_rate")),
                 "n_trades": em.get(f"{sig}_n_trades"),
+                "n_open": sum(1 for t in trades if getattr(t, "signal", None) == sig
+                              and getattr(t, "is_open", False)),
                 "summary": _trade_summary(trades, sig),
+                **_entries_and_rolls(trades, sig, eq),
             }
         d["sleeves"] = sleeves
+
+        def _n_trades(s: dict) -> str:
+            if s["n_trades"] is None:
+                return "—"
+            return str(int(s["n_trades"])) + (f" ({s['n_open']} open)" if s["n_open"] else "")
 
         def _card(sig: str) -> dict:
             s = sleeves[sig]
             return {"total_pnl": _dol(s["total_pnl"]), "sharpe": _f(s["sharpe"]),
-                    "win_rate": _pct(s["win_rate"]),
-                    "n_trades": "—" if s["n_trades"] is None else str(int(s["n_trades"])),
+                    "win_rate": _pct(s["win_rate"]), "n_trades": _n_trades(s),
                     "green": (s["total_pnl"] or 0) > 0}
 
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
@@ -1710,8 +1961,7 @@ def load_page4() -> dict[str, Any]:
                 continue
             d["signal_metrics"].append({
                 "label": lbl, "sharpe": _f(s["sharpe"]), "ann_ret": _pct(s["ann_ret"]),
-                "win_rate": _pct(s["win_rate"]),
-                "n_trades": "—" if s["n_trades"] is None else str(int(s["n_trades"])),
+                "win_rate": _pct(s["win_rate"]), "n_trades": _n_trades(s),
                 "total_pnl": _dol(s["total_pnl"]), "green": s["total_pnl"] > 0,
                 "is_research": is_ref,
             })
@@ -1736,6 +1986,36 @@ def load_page4() -> dict[str, Any]:
         d["bridge"] = bridge_evidence(bridge, grid)
     except Exception as e:
         _record_error(d, "C22 bridge / β grid (c22_bridge.csv, beta_sensitivity.csv)", e)
+
+    # ── β: the chains it was estimated from, and the later checks ────────────
+    d["beta_est"] = None
+    try:
+        try:
+            regimes = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])["regime"]
+        except Exception as exc:          # the chain table then shows no regime
+            _logger.info("regime labels unavailable for the β chains: %s", exc)
+            regimes = None
+        be = beta_estimation(regimes)
+        if d["beta"] is not None and round(be["mean"], 2) != round(d["beta"], 2):
+            raise ValueError(f"the estimation chains average {be['mean']:.4f}, but the stored "
+                             f"run used β = {d['beta']}")
+        grid_betas = [float(r["beta"]) for r in ((d["bridge"] or {}).get("grid") or [])]
+        be["mean_all_in_grid"] = any(abs(g - round(be["mean_all"], 2)) < 1e-9 for g in grid_betas)
+        d["beta_est"] = be
+    except Exception as e:
+        _record_error(d, "β estimation chains (run_backtest.estimate_beta)", e)
+
+    # ── The pre-C22 PDV spread (audit row): how often it signalled short vol ─
+    d["pre_c22_spread"] = None
+    try:
+        if d["start_date"] and d["end_date"]:
+            rb = _import_run_backtest()
+            d["pre_c22_spread"] = pre_c22_spread_facts(
+                _read_spx(), _read_vix_wide()["^VIX"], d["start_date"], d["end_date"], rb.DATA_START)
+            if d["pre_c22_spread"] is None:
+                raise ValueError("no pre-C22 PDV forecast could be built for the backtest window")
+    except Exception as e:
+        _record_error(d, "pre-C22 PDV spread facts (BacktestEngine, pdv_horizon = 1)", e)
 
     # ── Facts the change log quotes, recomputed from the DB ──────────────────
     # (the log hard-coded "2018: ~1.5%" for a year whose ^IRX averaged 1.95%,
@@ -1832,9 +2112,12 @@ def load_page4() -> dict[str, Any]:
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────────
-# Per-route data date for the sitemap (freeze_site.py reads the header).
+# Per-route data date for the sitemap (freeze_site.py reads the header): the
+# date of the data each page shows. The backtest page used "run_date", a key
+# full_results.pkl never had, so it got no lastmod; its data date is the last
+# session of the stored equity curve.
 _DATA_DATE_KEYS = {"/": "latest_session", "/calibration": "session",
-                   "/greeks": "surface_date", "/backtest": "run_date"}
+                   "/greeks": "surface_date", "/backtest": "end_date"}
 
 
 # Chart.js is vendored (dashboard/static, copied into the site by freeze_site.py)
