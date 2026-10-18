@@ -21,10 +21,10 @@
 {% set _sh = d.r2_share or {} %}
 {% set r2_txt = (((_sh.fixed * 100)|fmt('.0f')) ~ '% vs ' ~ ((_sh.adaptive * 100)|fmt('.0f')) ~ '% of the backtest sessions in R2') if (_sh.get('fixed') is not none and _sh.get('adaptive') is not none) else 'R2 shares not available' %}
 <div class="page-header">
-  <h1 class="page-title">C10 Backtest Results — {{ d.start_date|fmt }} → {{ d.end_date|fmt }}{% if d.eq_dates %} ({{ "{:,}".format(d.eq_dates|length) }} sessions){% endif %}</h1>
+  <h1 class="page-title">C10 Backtest Results — <span class="nowrap">{{ d.start_date|fmt }} → {{ d.end_date|fmt }}</span>{% if d.eq_dates %} ({{ "{:,}".format(d.eq_dates|length) }} sessions){% endif %}</h1>
   <div class="page-subtitle">Delta-hedged straddle portfolio: equal-weight S1C + S3 + S4 on $1M of collateral, after every correction from C16 to C22.</div>
   <div class="page-badge">
-    {% if d.final_nav is not none %}Final NAV ${{ "{:,.0f}".format(d.final_nav) }}<span class="sep">·</span>P&amp;L {{ '−' if d.total_pnl < 0 else '+' }}${{ "{:,.0f}".format(d.total_pnl|abs) }}<span class="sep">·</span>straddles marked at ATM vol = {{ beta_txt }} × VIX{% else %}NAV —{% endif %}
+    {% if d.final_nav is not none %}Final NAV ${{ "{:,.0f}".format(d.final_nav) }}<span class="sep">·</span><span class="nowrap">P&amp;L {{ '−' if d.total_pnl < 0 else '+' }}${{ "{:,.0f}".format(d.total_pnl|abs) }}</span><span class="sep">·</span>straddles marked at ATM vol = {{ beta_txt }} × VIX{% else %}NAV —{% endif %}
   </div>
 </div>
 
@@ -44,7 +44,7 @@
   <div class="card card-sm">
     <h2 class="card-label">Sharpe</h2>
     <div class="card-value">{{ k.get('sharpe')|fmt(".2f") }}</div>
-    <div class="card-sub">Sortino {{ k.get('sortino')|fmt(".2f") }}; excess P&amp;L, rf = 0</div>
+    <div class="card-sub">Sortino {{ k.get('sortino')|fmt(".2f") }}; excess P&amp;L, rf&nbsp;=&nbsp;0</div>
   </div>
   <div class="card card-sm">
     <h2 class="card-label">Max drawdown</h2>
@@ -54,7 +54,7 @@
   <div class="card card-sm">
     <h2 class="card-label">Round trips</h2>
     <div class="card-value">{{ k.get('n_round_trips')|fmt }}</div>
-    <div class="card-sub">Win rate {{ (k.get('win_rate') * 100 if k.get('win_rate') is not none else none)|fmt(".1f") }}%; average {{ k.get('avg_pnl')|usd }} per trade</div>
+    <div class="card-sub">Win rate {{ (k.get('win_rate') * 100 if k.get('win_rate') is not none else none)|fmt(".1f") }}%; average <span class="nowrap">{{ k.get('avg_pnl')|usd }}</span> per trade</div>
   </div>
   <div class="card card-sm">
     <h2 class="card-label">T-bill benchmark</h2>

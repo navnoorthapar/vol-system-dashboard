@@ -11,7 +11,7 @@
 <div class="page-header">
   <h1 class="page-title">Second-Order Greeks Monitor</h1>
   <div class="page-subtitle">Vomma (volga), vanna and quadratic-variation convexity of the stored Heston surface (C6).</div>
-  <div class="page-badge">Surface {{ d.surface_date|fmt }}{% if d.greeks_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.greeks_age }} sessions old)</span>{% endif %}<span class="sep">·</span>{{ d.n_cells|fmt }} of {{ d.n_grid|fmt }} grid nodes<span class="sep">·</span>{{ d.n_maturities|fmt }} maturities</div>
+  <div class="page-badge"><span class="nowrap">Surface {{ d.surface_date|fmt }}</span>{% if d.greeks_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.greeks_age }} sessions old)</span>{% endif %}<span class="sep">·</span>{{ d.n_cells|fmt }} of {{ d.n_grid|fmt }} grid nodes<span class="sep">·</span>{{ d.n_maturities|fmt }} maturities</div>
 </div>
 
 {% if d.n_cells is not none %}

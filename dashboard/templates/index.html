@@ -10,8 +10,8 @@
   <h1 class="page-title">Market Overview</h1>
   <div class="page-subtitle">End-of-day rule regime, implied versus forecast volatility, and the VIX term structure.</div>
   <div class="page-badge" id="freshness-badge" data-holidays='{{ d.holidays|tojson }}'>
-    <span data-date="{{ d.spx_date or '' }}">Last close {{ d.spx_date|fmt }}</span>
-    {% for s in d.stale %}{% if s.component != 'market' %}<span class="sep">·</span>{{ _names[s.component] }} {{ s.date|fmt }}{% if s.age %} <span class="age-{{ s.level }}">({{ s.age }} session{{ 's' if s.age != 1 else '' }} old)</span>{% endif %}{% endif %}{% endfor %}
+    <span class="nowrap" data-date="{{ d.spx_date or '' }}">Last close {{ d.spx_date|fmt }}</span>
+    {% for s in d.stale %}{% if s.component != 'market' %}<span class="sep">·</span><span class="nowrap">{{ _names[s.component] }} {{ s.date|fmt }}</span>{% if s.age %} <span class="age-{{ s.level }}">({{ s.age }} session{{ 's' if s.age != 1 else '' }} old)</span>{% endif %}{% endif %}{% endfor %}
   </div>
 </div>
 <script>

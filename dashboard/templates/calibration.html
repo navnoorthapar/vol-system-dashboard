@@ -9,7 +9,7 @@
   <h1 class="page-title">Joint SPX/VIX Heston Calibration</h1>
   <div class="page-subtitle">Five-parameter Heston fitted jointly to the SPX smile and the VIX index term structure (differential evolution, then L-BFGS-B).</div>
   <div class="page-badge">
-    Session {{ d.session|fmt }}{% if d.calib_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.calib_age }} session{{ 's' if d.calib_age != 1 else '' }} old)</span>{% endif %}
+    <span class="nowrap">Session {{ d.session|fmt }}</span>{% if d.calib_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.calib_age }} session{{ 's' if d.calib_age != 1 else '' }} old)</span>{% endif %}
     <span class="sep">·</span>SPX = {{ d.S|fmt(",.1f") }}
     <span class="sep">·</span>r = {% if d.carry_recorded %}{{ d.r_pct|fmt(".2f") }}%{% if d.carry_mode == 'parity' %} (parity-implied median){% endif %}{% else %}n/a{% endif %}{% if d.r_ref_pct is not none %}<span class="sep">·</span>^IRX {{ d.r_ref_pct|fmt(".2f") }}%{% endif %}
     {% if d.legacy %}<span class="sep">·</span><span class="tag tag-dim" title="Fitted before the C22 schema (calibration_is_legacy)">PRE-C22 FIT</span>{% endif %}

@@ -1267,3 +1267,16 @@ def test_s3_timing_claim_follows_the_stored_null_test(dash, monkeypatch, p, says
     assert says in text
     assert ("not significant at 5%" in text) is (p >= 0.05)
     assert "Timing Survives" not in text
+
+
+@pytest.mark.parametrize("route", ["/", "/calibration", "/greeks", "/backtest"])
+def test_page_header_dates_never_break_across_lines(dash, route):
+    """A date in the page header must sit inside a no-wrap element: at phone
+    width the browser otherwise breaks '2026-10-16' at a hyphen."""
+    html = dash.app.test_client().get(route).get_data(as_text=True)
+    badge = re.search(r'<div class="page-badge"[^>]*>(.*?)</div>', html, re.S)
+    assert badge, route
+    body = badge.group(1)
+    # Strip the no-wrap spans; no ISO date may remain outside one.
+    outside = re.sub(r'<span class="nowrap"[^>]*>.*?</span>', "", body, flags=re.S)
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", outside), (route, outside)
