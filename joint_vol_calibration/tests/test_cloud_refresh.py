@@ -272,6 +272,16 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert res["r_reference"] == pytest.approx(0.0400, abs=1e-12)
     assert res["r_reference_source"].startswith("^IRX") and "cc" in res["r_reference_source"]
     assert res["chain_diagnostics"]["r_ref"] == res["r_reference"]     # one rate, cleaning and fit
+    # Wed 21:30 ET: the live book is the Cboe GTH session trading for Thursday,
+    # so T runs from the quote time (not the 16:00 close), and the stored
+    # snapshot records that time for a refit.
+    assert cal["chain"]["quote_time"] == "2026-09-24T01:30:00Z"
+    assert cal["chain"]["t_origin"] == "2026-09-23T21:30:00-04:00"
+    assert res["methods"]["T_origin"] == "2026-09-23T21:30:00-04:00"
+    assert "Global Trading Hours" in res["methods"]["T"]
+    assert "residual timing mismatch" in res["methods"]["vix_leg_timing"]
+    assert res["anchors_by_expiry"][0]["T_days"] < (date.fromisoformat(
+        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days
     # Stored: the observed two-sided quotes (incl. the one too wide for the
     # cleaner), never a one-sided line.
     n, n_two_sided = _spx_snapshot_rows(SESSION)
@@ -287,6 +297,7 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     chain_file = dbm.options_snapshot_path(SESSION, "SPX")
     assert chain_file.exists() and str(chain_file) in st["persisted"]
     assert len(pd.read_parquet(chain_file)) == n
+    assert set(pd.read_parquet(chain_file)["quote_time"]) == {"2026-09-24T01:30:00Z"}
     # The committed chain reproduces the committed fit's inputs: a calibrator
     # built from the stored snapshot (fresh DB loaded from the parquet) has the
     # same carry, anchors and out-of-sample surface as the live run.
@@ -297,6 +308,7 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
     again = JointCalibrator(as_of_date=SESSION)
     prov = again._provenance()
+    assert prov["chain_diagnostics"]["t_origin"] == res["chain_diagnostics"]["t_origin"]
     assert prov["carry_by_expiry"] == res["carry_by_expiry"]
     assert prov["anchors_by_expiry"] == res["anchors_by_expiry"]
     assert len(again.spx_surface_full) - len(again.spx_surface) == res["oos"]["n_spx_oos"]

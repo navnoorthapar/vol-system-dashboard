@@ -32,7 +32,14 @@ What this module does instead:
      the caller must fail closed rather than fit garbage.
   4. Session helpers on database.py's NYSE calendar (date-object API): which
      session a wall-clock time belongs to, so snapshots are labelled by the
-     session whose quotes they hold, and T from that session's close.
+     session whose quotes they hold.
+  5. The origin T is measured from (``t_origin``): the session's 16:00 ET
+     close for a closing book, but the quote time for a Cboe Global Trading
+     Hours book. The book slots run at 21:30-00:30 ET, when the live book is
+     the GTH session trading for the NEXT session (20:15 ET the evening
+     before it to 09:15 ET on it); measuring T from the 16:00 close there
+     overstated T by 5.5-8.5 hours (14-day expiry: 1.6%, short-dated IVs ~1%
+     low). A stored chain without a quote time keeps the session close.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
@@ -72,6 +79,8 @@ SESSION_CLOSE_ET = time(16, 0)
 PM_SETTLE_ET = time(16, 0)             # SPXW (PM-settled) expiries
 AM_SETTLE_ET = time(9, 30)             # SPX monthlies (AM, SOQ-settled)
 SESSION_CLOSED_AFTER_ET = time(16, 15) # daily bar treated as final after this
+GTH_OPEN_ET = time(20, 15)             # Cboe Global Trading Hours open (evening before a session)
+GTH_CLOSE_ET = time(9, 15)             # ... and close (morning of that session)
 _MINUTES_PER_YEAR = 365.0 * 24.0 * 60.0
 
 
@@ -141,19 +150,98 @@ def ny_date(now_utc: Optional[datetime] = None) -> date:
     return _now_et(now_utc).date()
 
 
-def year_fraction(session, expiry, settlement: str = "PM") -> float:
-    """Time from the session's 16:00 ET close to expiry settlement, in years.
+def next_session(d) -> date:
+    """First NYSE session strictly after ``d``."""
+    d = _as_date(d)
+    return _db.nyse_sessions(d + timedelta(days=1), d + timedelta(days=14))[0].date()
 
-    Calendar minutes / 525,600 (the Cboe VIX methodology convention). PM
-    settlement is 16:00 ET on the expiry date, so T = days/365 exactly; AM
-    settlement (SPX monthlies, SOQ) is 09:30 ET, 6.5 hours earlier.
+
+def session_close(session) -> datetime:
+    """16:00 ET on ``session`` (New York, tz-aware): the default T origin."""
+    return datetime.combine(_as_date(session), SESSION_CLOSE_ET, tzinfo=NY_TZ)
+
+
+def gth_window(session) -> tuple:
+    """(open, close) of the Cboe Global Trading Hours session that trades FOR
+    ``session``: 20:15 ET on the calendar evening before it (Sunday evening
+    for a Monday, Monday evening for a Tuesday after a Monday holiday) to
+    09:15 ET on it. New York, tz-aware."""
+    s = _as_date(session)
+    return (datetime.combine(s - timedelta(days=1), GTH_OPEN_ET, tzinfo=NY_TZ),
+            datetime.combine(s, GTH_CLOSE_ET, tzinfo=NY_TZ))
+
+
+def _as_instant(when) -> Optional[datetime]:
+    """A quote time (datetime, pandas Timestamp or ISO string) as a tz-aware
+    datetime; naive values are taken as UTC (database.utc_iso writes UTC).
+    None/NaN/'' -> None."""
+    if when is None or (isinstance(when, str) and not when.strip()):
+        return None
+    try:
+        if pd.isna(when):
+            return None
+    except (TypeError, ValueError):
+        pass
+    ts = pd.Timestamp(when)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.to_pydatetime()
+
+
+def t_origin(quote_time, session) -> datetime:
+    """The New York time T is measured from, for quotes of ``session``
+    observed at ``quote_time`` (UTC instant; ISO string or datetime).
+
+    A quote time inside the GTH window of the session AFTER ``session``
+    (``gth_window(next_session(session))``) is a Global Trading Hours book —
+    what the Mon-Thu book slots download at 21:30-00:30 ET — and T runs from
+    the quote time. Anything else is the session's closing book (weekend and
+    holiday runs; on weekday evenings the book is empty 16:15-20:15 ET and
+    the quote-state gate fails the run closed) and T runs from the 16:00 ET
+    close, as does a chain with no recorded quote time (every snapshot stored
+    before quote times were recorded).
     """
-    days = (_as_date(expiry) - _as_date(session)).days
-    minutes = days * 1440.0
-    if str(settlement).upper() == "AM":
-        minutes -= (SESSION_CLOSE_ET.hour * 60 + SESSION_CLOSE_ET.minute
-                    - AM_SETTLE_ET.hour * 60 - AM_SETTLE_ET.minute)
-    return minutes / _MINUTES_PER_YEAR
+    close = session_close(session)
+    qt = _as_instant(quote_time)
+    if qt is None:
+        return close
+    lo, hi = gth_window(next_session(session))
+    qt = qt.astimezone(NY_TZ)
+    return qt if lo <= qt < hi else close
+
+
+def _chain_quote_time(raw: pd.DataFrame):
+    """The quote time a stored chain records (options_snapshots.quote_time,
+    ISO UTC): the latest non-empty value, or None (legacy snapshots)."""
+    if raw is None or "quote_time" not in raw.columns:
+        return None
+    vals = [t for t in (_as_instant(v) for v in raw["quote_time"].unique()) if t is not None]
+    return max(vals) if vals else None
+
+
+def year_fraction(session, expiry, settlement: str = "PM", origin=None) -> float:
+    """Time from the T origin to expiry settlement, in years.
+
+    ``origin`` None (the default) is the session's 16:00 ET close; otherwise
+    a datetime (tz-aware, or naive = UTC) or ISO string, e.g. the quote time
+    of a Global Trading Hours book (``t_origin``). Minutes are New York
+    wall-clock minutes / 525,600 (the Cboe VIX methodology convention; a DST
+    change in between is not counted, as with the whole-day count). PM
+    settlement is 16:00 ET on the expiry date, so from the close T =
+    days/365 exactly; AM settlement (SPX monthlies, SOQ) is 09:30 ET, 6.5
+    hours earlier.
+    """
+    if origin is None:
+        days = (_as_date(expiry) - _as_date(session)).days
+        minutes = days * 1440.0
+        if str(settlement).upper() == "AM":
+            minutes -= (SESSION_CLOSE_ET.hour * 60 + SESSION_CLOSE_ET.minute
+                        - AM_SETTLE_ET.hour * 60 - AM_SETTLE_ET.minute)
+        return minutes / _MINUTES_PER_YEAR
+    settle_et = AM_SETTLE_ET if str(settlement).upper() == "AM" else PM_SETTLE_ET
+    settle = datetime.combine(_as_date(expiry), settle_et)            # NY wall clock
+    start = _as_instant(origin).astimezone(NY_TZ).replace(tzinfo=None)
+    return (settle - start).total_seconds() / 60.0 / _MINUTES_PER_YEAR
 
 
 # ── Rates ─────────────────────────────────────────────────────────────────────
@@ -444,7 +532,8 @@ class CleanChain:
                   volume, open_interest, snapshot_date)
     carry       : one row per usable expiry (expiry, T, forward, discount,
                   r, q, method, n_pairs, resid_rmse)
-    diagnostics : counts and the quote-state gate inputs
+    diagnostics : counts, the quote-state gate inputs and the T origin
+                  (quote_time, t_origin, t_origin_basis)
     ok, reason  : False (with a reason) when the chain must not be used
     """
     quotes: pd.DataFrame
@@ -469,6 +558,7 @@ def clean_option_chain(
     min_two_sided_share: float = MIN_TWO_SIDED_SHARE,
     atm_band: float = ATM_GATE_BAND,
     min_days: int = CAL_MIN_EXPIRY_DAYS,
+    quote_time=None,
 ) -> CleanChain:
     """Clean a raw SPX chain into quotes the calibrator can trust.
 
@@ -477,14 +567,29 @@ def clean_option_chain(
     raw          : yfinance chain rows (contractSymbol, strike, bid, ask,
                    impliedVolatility, expiration, option_type, ...) or a
                    stored options_snapshots frame (expiry, right, bid, ask, ...)
-    session_date : the NYSE session whose closing book these quotes are
+    session_date : the NYSE session these quotes are labelled with (the last
+                   closed session when they were downloaded)
     spot         : SPX close of that session (used for the near-ATM bands
                    and to express carry as q_T; pricing uses F_T, D_T)
     r_ref        : reference continuously-compounded rate (T-bill), used only
                    when an expiry's parity discount is implausible
+    quote_time   : when the quotes were observed (UTC; ISO string or
+                   datetime). None: the frame's ``quote_time`` column if it
+                   has one (stored snapshots), else unknown. It sets the T
+                   origin (``t_origin``): the quote time for a Global Trading
+                   Hours book, the session's 16:00 ET close otherwise.
     """
-    diag = {"session": str(_as_date(session_date)), "n_raw": int(len(raw)),
-            "r_ref": None if r_ref is None else float(r_ref)}
+    sess = _as_date(session_date)
+    if quote_time is None:
+        quote_time = _chain_quote_time(raw)
+    qt = _as_instant(quote_time)
+    origin = t_origin(qt, sess)
+    gth = origin != session_close(sess)
+    diag = {"session": str(sess), "n_raw": 0 if raw is None else int(len(raw)),
+            "r_ref": None if r_ref is None else float(r_ref),
+            "quote_time": None if qt is None else _db.utc_iso(qt),
+            "t_origin": origin.isoformat(timespec="seconds"),
+            "t_origin_basis": "quote_time (Cboe GTH book)" if gth else "session close 16:00 ET"}
     empty = CleanChain(pd.DataFrame(columns=_QUOTE_COLS),
                        pd.DataFrame(columns=["expiry", "T", "forward", "discount",
                                              "r", "q", "method", "n_pairs",
@@ -494,8 +599,10 @@ def clean_option_chain(
         return empty
     df = _normalise(raw)
     df = _resolve_settlement(df)
-    sess = _as_date(session_date)
-    df["time_to_expiry"] = [year_fraction(sess, e, s)
+    # The default (session close) keeps year_fraction's whole-day arithmetic,
+    # so a chain without a GTH quote time cleans bit for bit as before.
+    t0 = origin if gth else None
+    df["time_to_expiry"] = [year_fraction(sess, e, s, origin=t0)
                             for e, s in zip(df["expiry"], df["settlement"])]
     df = df[df["time_to_expiry"] >= min_days / 365.0].copy()
     diag["n_after_expiry_filter"] = int(len(df))
