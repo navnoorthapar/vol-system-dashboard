@@ -67,11 +67,13 @@ Signal 3 — VIX/VVIX Ratio ("Dispersion Proxy") Trade
   Entry when the VIX / VVIX ratio is below its 252-day rolling mean by ≥ 1σ:
   VIX is calm relative to the vol-of-vol market.
 
-  What +1 means operationally: a bet that the ratio REVERTS UP — VIX rising
-  relative to VVIX. That is what the backtest's S3 P&L proxy rewards
-  (P&L ∝ Δz of the ratio) and how the straddle combiner below counts it
-  (long index vol). The original "long dispersion (short index vol)"
-  reading would be the opposite sign; it is a hypothesis, not what is traded.
+  What +1 means operationally: the signal is ON — long dispersion. The
+  backtest trades it as the INDEX LEG of a dispersion trade, i.e. a SHORT
+  delta-hedged SPX straddle (backtest_engine.S3_LEG_DIRECTION = −1); the
+  pre-C22 P&L proxy (P&L ∝ Δz of the ratio) is gone. The research-only
+  combiner below still counts S3 = +1 as LONG index vol (the old reading),
+  the opposite of what the backtest trades, so its "combined" sleeve is not
+  a coherent strategy and is not reported.
 
   Substitution note: no single-stock options or implied-correlation data are
   in the database, so the link to true dispersion pricing is unverified.
@@ -969,9 +971,9 @@ def generate_signal3(
 
     ratio = vix_feature / vvix_feature  = (^VIX / ^VVIX)
     A depressed ratio means VIX is calm relative to the vol-of-vol market.
-    +1 is a bet that the ratio reverts UP (VIX rising relative to VVIX) —
-    what the backtest's Δz P&L proxy rewards; see the module docstring for
-    why the "long dispersion (short index vol)" reading is not what is traded.
+    +1 = long dispersion. The backtest trades it as a SHORT SPX straddle
+    (the index leg; backtest_engine.S3_LEG_DIRECTION = −1); see the module
+    docstring for how the research-only combiner reads it.
 
     Entry: z_ratio < zscore_entry (= −1.0)  AND  regime ∈ {0, 1}
     Exit : z_ratio > zscore_exit  (= −0.30) OR   days_held >= max_hold
@@ -1348,8 +1350,9 @@ class SignalEngine:
         # S1 removed: PDV spread is a lagging indicator — backwards as directional signal.
         # S2 removed: no mechanistic basis for TS slope predicting vol direction.
         # S1C: contrarian use of the spread (±1 = long/short straddle).
-        # S3: +1 = VIX/VVIX ratio expected to revert up (VIX rising relative to
-        #     VVIX), counted as long index vol — the direction its P&L proxy pays.
+        # S3: +1 counted as long index vol — the pre-C22 reading. The backtest
+        #     trades S3 as a SHORT SPX straddle (S3_LEG_DIRECTION = −1), so this
+        #     research-only combination is not the traded book (not reported).
         # S4: VRP mean-reversion after z peaks (±1 = long/short straddle).
         combined = combine_signals(
             s1c["s1c_position"], s3["s3_position"], s4["s4_position"],
