@@ -60,11 +60,12 @@ regime known at the forecast origin). No day is selected on its outcome.
 Result on SPX, as_of 2026-03-24 (900 post-R2 days): the MLE is interior at
 λ ≈ 61 jumps/yr, μ_j ≈ −0.25%, σ_j ≈ 1.0% — the data prefer frequent small
 jumps (a fat-tailed scale mixture) over rare crashes. The profile likelihood
-is flat within one log-likelihood point for λ ≈ 50-150/yr, and λ = 1-5/yr is
-rejected by 18-36 points. The detected-jump estimator gives λ ≈ 15/yr,
-μ_j ≈ −1.2%, σ_j ≈ 3.2% for the large jumps alone. (The pre-C22 docstring
-promised λ = 2-8/yr, μ_j = −3..−8%, σ_j = 3-6%, and its fits sat on their
-λ bounds of 20 and 50/yr.)
+is within one log-likelihood point of its maximum for λ ≈ 35-110/yr (two
+points: 28-144/yr), and λ = 1-5/yr is rejected by 18-36 points. The
+detected-jump estimator gives λ ≈ 15/yr, μ_j ≈ −1.2%, σ_j ≈ 3.2% for the
+large jumps alone. (The pre-C22 docstring promised λ = 2-8/yr,
+μ_j = −3..−8%, σ_j = 3-6%, and its fits sat on their λ bounds of 20 and
+50/yr.)
 
 Daily jump test (replaces the pre-C22 "BN-S jump filter")
 ---------------------------------------------------------

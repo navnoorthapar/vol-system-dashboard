@@ -22,6 +22,7 @@ from joint_vol_calibration.models.implied_vol import (
     IV_NO_TIME_VALUE,
     IV_NOT_CONVERGED,
     IV_OK,
+    IV_UNRESOLVED,
     _bs_iv_vectorized,
     black_price,
     bs_delta,
@@ -196,6 +197,65 @@ class TestIllPosed:
         for price, F_, K_, T_, call, expected in cases:
             iv, status = implied_vol_black(price, F_, K_, T_, call, full_output=True)
             assert np.isnan(iv) and status == expected, (price, K_, T_, status)
+
+    def test_unresolvable_prices_are_nan_not_a_guess(self):
+        """When float64 rounding of the price does not determine σ, the solver
+        must say so instead of returning whichever σ reproduces the rounded
+        price. Two cases: a price within a few ulps of its upper bound (total
+        vol σ√T ≳ 14; a 900%-vol 5-year put came back as 7.49 with status ok),
+        and an ITM input whose time value (~1e-13·F) is lost in the parity
+        subtraction. Everything that is still returned is accurate."""
+        F = 100.0
+        x = np.linspace(-2.0, 2.0, 41)
+        T = np.array([0.25, 1.0, 5.0, 20.0])
+        s = np.array([2.0, 5.0, 9.0])
+        X, TT, SS = (a.ravel() for a in np.meshgrid(x, T, s, indexing="ij"))
+        K = F * np.exp(X)
+        for is_call in (True, False):
+            iv, status = implied_vol_black(black_price(F, K, TT, SS, is_call), F, K, TT,
+                                           is_call, full_output=True)
+            ok = status == IV_OK
+            assert np.all(np.abs(iv[ok] - SS[ok]) <= 1e-5 * SS[ok]), "a wrong σ came back as ok"
+            assert np.all(status[~ok] != IV_NOT_CONVERGED)
+            huge = SS * np.sqrt(TT) >= 20
+            assert huge.any() and not ok[huge].any()
+        # prices a few ulps below their upper bound (F for the call, K for the
+        # put): any σ above ~15 reproduces them
+        for K, call, bound in [(F * np.exp(0.5), True, F), (F * np.exp(-0.5), False, F * np.exp(-0.5))]:
+            for k in (2, 8, 64):
+                price = bound * (1.0 - k * np.finfo(float).eps)
+                iv, status = implied_vol_black(price, F, K, 4.0, call, sigma_max=50.0, full_output=True)
+                assert np.isnan(iv) and status == IV_UNRESOLVED, (K, k, iv, status)
+        # time value below 1000 ulps of the ITM call price
+        K, T, sig = F * np.exp(-0.3), 7 / 365, 0.30
+        c = black_price(F, K, T, sig, True)
+        assert black_price(F, K, T, sig, False) < 1e-12 * F
+        iv, status = implied_vol_black(c, F, K, T, True, full_output=True)
+        assert np.isnan(iv) and status == IV_UNRESOLVED
+        # the same option quoted as its (OTM) put is perfectly resolvable
+        iv_put = implied_vol_black(black_price(F, K, T, sig, False), F, K, T, False)
+        assert iv_put == pytest.approx(sig, abs=1e-10)
+
+    def test_tiny_prices_keep_their_digits(self):
+        """Prices near 1e-319 (F = 5,000): black_price formed F·exp(ln(p/F)), and
+        the solver ln(otm/F), each through a subnormal intermediate with a few
+        significant bits (7.5% price error, 5e-5 relative σ error). Both now
+        work with ln p − ln F. Reference: 60-digit mpmath."""
+        mp = pytest.importorskip("mpmath")
+        mp.mp.dps = 60
+        F, T = 5000.0, 1 / 365
+        for x, sig in [(0.4, 0.2), (-0.4, 0.2), (2.0, 1.0)]:
+            K = F * np.exp(x)
+            sq = mp.mpf(sig) * mp.sqrt(T)
+            d1 = (mp.log(mp.mpf(F) / mp.mpf(K)) + sq**2 / 2) / sq
+            d2 = d1 - sq
+            ref = (F * mp.ncdf(d1) - K * mp.ncdf(d2) if x >= 0
+                   else K * mp.ncdf(-d2) - F * mp.ncdf(-d1))
+            p = black_price(F, K, T, sig, x >= 0)
+            assert 0 < p < 1e-300
+            assert float(abs(p - ref) / ref) < 1e-4          # subnormal: ~15 bits left
+            for price in (p, float(ref)):
+                assert implied_vol_black(price, F, K, T, x >= 0) == pytest.approx(sig, rel=1e-7)
 
     def test_price_floor(self):
         price = black_price(100.0, 130.0, 0.05, 0.2)       # ~1e-13

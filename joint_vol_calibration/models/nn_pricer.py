@@ -16,24 +16,30 @@ on it.
               instrument for the spot indices). σ is kept as an input for
               checkpoint compatibility; the index does not depend on it.
               DEPRECATED: the closed form it approximates is itself cheaper
-              than the network (NNPricer.benchmark_vix: ~14 µs for
-              heston_vix_term_index vs ~87 µs for the NN-2 forward pass,
-              8 tenors), and exact, so NN-2 accelerates nothing; it is kept
+              than the network (NNPricer.benchmark_vix, 8 tenors: 7-14 µs
+              for heston_vix_term_index vs 70-90 µs for the NN-2 forward
+              pass), and exact, so NN-2 accelerates nothing; it is kept
               only so old checkpoints and results can be reproduced.
 
 Training domain (stored in every checkpoint; inference refuses inputs outside it)
 ---------------------------------------------------------------------------------
   The old surrogate was trained on a ±30% box around one day's fit, which
-  none of the archived calibrations fall inside (v0 alone ranges 1e-4..0.056
-  across them). SPX_TRAINING_DOMAIN is a box that contains every archived
-  joint_cal_*.pkl fit (κ 1.7–12.9, θ 0.022–0.076, σ 0.24–0.85, ρ −0.99..−0.73,
-  v0 1e-4..0.056) with margin:
+  none of the archived calibrations fall inside (v0 alone ranges 1e-4..0.093
+  across them). SPX_TRAINING_DOMAIN contains every archived joint_cal_*.pkl
+  fit: the legacy daily fits (κ 1.7–12.9, θ 0.022–0.066, σ 0.24–0.85,
+  ρ = −0.95..−0.73, v0 1e-4..0.022) and the C22 model_version 2 refits
+  (κ 4.3–6.1, θ 0.060–0.073, σ 1.59–2.00, ρ −0.82..−0.66, v0 0.013–0.093).
+  The σ range is the calibrator's full bound (HESTON_BOUNDS σ ≤ 2, which the
+  2026-03-24 refit reaches); the other ranges cover the fits with margin:
 
       κ ∈ [0.5, 15]  (log-uniform)     θ ∈ [0.01, 0.20] (log-uniform)
-      σ ∈ [0.1, 1.2]                   ρ ∈ [−0.99, −0.30]
+      σ ∈ [0.1, 2.0]                   ρ ∈ [−0.99, −0.30]
       v0 ∈ [1e-4, 0.25] (log-uniform)  T ∈ [0.02, 2] (√T uniform)
       x ∈ [−0.30, 0.25] and z = x/(σ_ref√T) ∈ [−6, 4],
       σ_ref² = θ + (v0 − θ)(1 − e^{−κT})/(κT)  (expected average variance)
+
+  (The first C22 box stopped at σ = 1.2 and excluded all four refits, the
+  headline 2026-06-18 fit among them.)
 
   The z constraint keeps strikes within a sensible number of standard
   deviations when total variance is small (otherwise most of [−0.30, 0.25]
@@ -44,9 +50,11 @@ Labels
   Exact Heston prices (Lewis/Fourier, ~1e-14·F; implied_vol.fourier_otm_price)
   inverted on the OTM side by the robust solver. Options whose OTM value is
   below NN_LABEL_MIN_OTM_PRICE_REL·F (1e-6) are not labelled: their implied
-  vol is not meaningful. The old generator used heston_call_batch plus a
-  Newton loop that failed on 28% of OTM calls and silently dropped them,
-  biasing the labels away from the OTM-call wing.
+  vol is not meaningful. Any other unlabelled option (Fourier pricer not
+  converged, inversion failure) is counted and logged separately, never
+  reported as "below the floor". The old generator used heston_call_batch
+  plus a Newton loop that failed on 28% of OTM calls and silently dropped
+  them, biasing the labels away from the OTM-call wing.
 
 Splits and reporting
 --------------------
@@ -64,7 +72,11 @@ Benchmark
   OTM-call wing), scores the NN against the exact reference on every
   well-posed option (never filtering on the NN's own output), and times the
   NN forward pass against heston_call_batch + IV inversion on the same
-  options. Numbers depend on the machine; the result records it.
+  options. Both legs are timed single-threaded by default (torch pinned to
+  one thread; the numpy reference pricer is single-threaded): a multi-thread
+  torch forward pass on a shared machine is dominated by thread contention
+  (median 0.3-0.5 s instead of 2 ms for 500 options under a load of ~10 on 4
+  cores). Numbers depend on the machine; the result records it.
 
 Usage
 -----
@@ -142,7 +154,7 @@ _PARAM_NAMES = ("kappa", "theta", "sigma", "rho", "v0")
 SPX_TRAINING_DOMAIN = {
     "kappa": [0.5, 15.0],
     "theta": [0.01, 0.20],
-    "sigma": [0.10, 1.20],
+    "sigma": [0.10, 2.00],
     "rho":   [-0.99, -0.30],
     "v0":    [1e-4, 0.25],
     "T":     [0.02, 2.0],
@@ -152,7 +164,7 @@ SPX_TRAINING_DOMAIN = {
 VIX_TRAINING_DOMAIN = {
     "kappa": [0.5, 15.0],
     "theta": [0.01, 0.20],
-    "sigma": [0.10, 1.20],
+    "sigma": [0.10, 2.00],
     "v0":    [1e-4, 0.25],
     "tenor_years": [0.02, 1.5],
 }
@@ -307,8 +319,11 @@ def _spx_rows_for_sets(args) -> pd.DataFrame:
     """
     Worker: exact labels for a block of parameter sets (deterministic per
     set_id). Prices every slice, then inverts the whole block in one solver
-    call. With a part_path the block is written there (atomically) and
-    reused if it already exists, so an interrupted generation resumes.
+    call. Every sampled option is returned: iv_target is NaN where there is
+    no label (OTM value below the floor; otm_rel is also NaN where the
+    Fourier pricer did not converge), so the caller can count why. With a
+    part_path the block is written there (atomically) and reused if it
+    already exists, so an interrupted generation resumes.
     """
     set_ids, params, domain, n_T, n_K, seed, floor, part_path = args
     if part_path is not None and Path(part_path).exists():
@@ -333,7 +348,6 @@ def _spx_rows_for_sets(args) -> pd.DataFrame:
     iv = _iv_from_otm_rel(block["otm_rel"].to_numpy(), block["x"].to_numpy(),
                           block["sqrt_T"].to_numpy() ** 2, floor)
     block.insert(len(block.columns) - 1, "iv_target", iv)
-    block = block[np.isfinite(iv)].reset_index(drop=True)
     if part_path is not None:
         tmp = Path(str(part_path) + ".tmp")
         block.to_parquet(tmp, index=False)
@@ -352,18 +366,39 @@ def _read_cached(path: Path, meta_expected: dict) -> Optional[pd.DataFrame]:
         logger.info("Cached training data %s was generated with different settings; regenerating", path)
         return None
     logger.info("Loading cached training data from %s", path)
-    return pd.read_parquet(path)
+    df = pd.read_parquet(path)
+    counts = json.loads(meta.get(b"nn_training_counts", b"{}").decode())
+    df.attrs["nn_training_meta"] = {**found, **counts}
+    return df
 
 
-def _write_cached(df: pd.DataFrame, path: Path, meta: dict) -> None:
+def _write_cached(df: pd.DataFrame, path: Path, meta: dict, counts: Optional[dict] = None) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pandas(df, preserve_index=False)
     md = dict(table.schema.metadata or {})
-    md[b"nn_training_meta"] = json.dumps(meta).encode()
+    md[b"nn_training_meta"] = json.dumps(meta).encode()       # compared on reuse
+    if counts:
+        md[b"nn_training_counts"] = json.dumps(counts).encode()
     pq.write_table(table.replace_schema_metadata(md), path)
     logger.info("Saved %d rows to %s", len(df), path)
+
+
+def spx_data_meta(
+    n_samples: int = NN_TRAIN_SAMPLES,
+    *,
+    domain: Optional[dict] = None,
+    n_T: int = 6,
+    n_K: int = 10,
+    seed: int = RANDOM_SEED,
+    min_otm_price_rel: float = NN_LABEL_MIN_OTM_PRICE_REL,
+) -> dict:
+    """Settings that determine the NN-1 training data (cache key; stored in checkpoints)."""
+    domain = domain or SPX_TRAINING_DOMAIN
+    return {"version": 2, "domain": domain, "n_param_sets": max(n_samples // (n_T * n_K), 1),
+            "n_T": n_T, "n_K": n_K, "seed": seed, "min_otm_price_rel": min_otm_price_rel,
+            "labels": "Lewis/Fourier Heston price + implied_vol_black (OTM)"}
 
 
 def generate_spx_training_data(
@@ -391,14 +426,16 @@ def generate_spx_training_data(
 
     Returns
     -------
-    DataFrame [set_id, x, sqrt_T, kappa, theta, sigma, rho, v0, iv_target, otm_rel]
+    DataFrame [set_id, x, sqrt_T, kappa, theta, sigma, rho, v0, iv_target, otm_rel];
+    attrs["nn_training_meta"] holds the settings and the counts of options
+    sampled, below the floor and unpriceable (train_spx stores it in the
+    checkpoint).
     """
     domain = domain or SPX_TRAINING_DOMAIN
     path = Path(path) if path else _SPX_DATA_PATH
-    n_sets = max(n_samples // (n_T * n_K), 1)
-    meta = {"version": 2, "domain": domain, "n_param_sets": n_sets, "n_T": n_T,
-            "n_K": n_K, "seed": seed, "min_otm_price_rel": min_otm_price_rel,
-            "labels": "Lewis/Fourier Heston price + implied_vol_black (OTM)"}
+    meta = spx_data_meta(n_samples, domain=domain, n_T=n_T, n_K=n_K, seed=seed,
+                         min_otm_price_rel=min_otm_price_rel)
+    n_sets = meta["n_param_sets"]
     if not force_regen:
         cached = _read_cached(path, meta)
         if cached is not None:
@@ -436,13 +473,26 @@ def generate_spx_training_data(
             parts.append(_spx_rows_for_sets(t))
             _progress(len(parts))
     df = pd.concat([p for p in parts if len(p)], ignore_index=True)
-    df = df.sort_values(["set_id", "sqrt_T", "x"], kind="mergesort").reset_index(drop=True)
+    otm = df["otm_rel"].to_numpy(dtype=float)
+    labelled = np.isfinite(df["iv_target"].to_numpy(dtype=float))
+    with np.errstate(invalid="ignore"):
+        below = np.isfinite(otm) & ((otm < min_otm_price_rel) | (otm <= 0))
+    unpriceable = ~labelled & ~below
+    counts = {"n_sampled": int(len(df)), "n_labelled": int(labelled.sum()),
+              "n_below_floor": int(below.sum()), "n_unpriceable": int(unpriceable.sum())}
+    if counts["n_unpriceable"]:
+        bad = df.loc[unpriceable, "set_id"].unique()
+        logger.warning("%d options above the floor could not be priced or inverted (Fourier "
+                       "pricer not converged) and are not labelled; parameter sets %s",
+                       counts["n_unpriceable"], bad[:20].tolist())
+    df = df[labelled].sort_values(["set_id", "sqrt_T", "x"], kind="mergesort").reset_index(drop=True)
 
-    n_attempted = n_sets * n_T * n_K
-    logger.info("SPX training data: %d labelled of %d sampled options (%.1f%% below the "
-                "%.0e·F floor) in %.0fs", len(df), n_attempted,
-                100 * (1 - len(df) / n_attempted), min_otm_price_rel, time.time() - t0)
-    _write_cached(df, path, meta)
+    logger.info("SPX training data: %d labelled of %d sampled options (%d below the %.0e·F "
+                "floor, %d unpriceable) in %.0fs", counts["n_labelled"], counts["n_sampled"],
+                counts["n_below_floor"], min_otm_price_rel, counts["n_unpriceable"],
+                time.time() - t0)
+    _write_cached(df, path, meta, counts)
+    df.attrs["nn_training_meta"] = {**meta, **counts}
     import shutil
     shutil.rmtree(parts_dir, ignore_errors=True)
     return df
@@ -669,6 +719,9 @@ def _fit(
                 print(f"  [{model_name}] early stop at epoch {epoch} (best epoch {best_epoch})", flush=True)
             break
 
+    if best_state is None:
+        raise RuntimeError(f"[{model_name}] validation loss was never finite "
+                           f"(last {val_mse!r}); nothing to keep")
     model.load_state_dict(best_state)
     model.eval()
     return {"best_val_mse": best_val, "best_epoch": best_epoch, "epochs_run": epoch,
@@ -868,6 +921,7 @@ def train_spx(
     seed: int = RANDOM_SEED,
     n_jobs: int = 1,
     verbose: bool = True,
+    command: Optional[str] = None,
 ) -> dict:
     """
     Generate (or load) exact SPX training data and train NN-1 (SPXImpliedVolNet).
@@ -875,7 +929,9 @@ def train_spx(
     `data` lets callers (tests) pass a prepared frame with SPX_FEATURES,
     set_id and iv_target. Accuracy is reported on held-out parameter sets in
     vol points; passed_target compares the test MAE with
-    config.NN_VOL_ERROR_TARGET (0.1 vol point).
+    config.NN_VOL_ERROR_TARGET (0.1 vol point). The checkpoint records the
+    training settings, the data-generation settings and counts (df.attrs),
+    and `command` (the CLI line that produced it, when given).
     """
     df = data if data is not None else generate_spx_training_data(
         n_samples, force_regen, n_jobs=n_jobs)
@@ -926,6 +982,7 @@ def train_spx(
         "n_layers":     int(n_layers),
         "domain":       SPX_TRAINING_DOMAIN,
         "label_floor_otm_rel": NN_LABEL_MIN_OTM_PRICE_REL,
+        "data":         df.attrs.get("nn_training_meta"),
         "units":        "implied vol, decimal; metrics in vol points",
         "best_val_mse": float(fit["best_val_mse"]),
         "best_epoch":   int(fit["best_epoch"]),
@@ -937,6 +994,7 @@ def train_spx(
                          "patience": patience, "epochs_run": int(fit["epochs_run"]),
                          "train_time_s": float(fit["train_time"]),
                          "torch_threads": int(torch.get_num_threads()),
+                         "command": command,
                          "split": split},
     }
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1186,6 +1244,7 @@ class NNPricer:
         seed: int = RANDOM_SEED + 1000,
         repeats: int = 5,
         verbose: bool = True,
+        torch_threads: Optional[int] = 1,
     ) -> dict:
         """
         Accuracy and speed of NN-1 on a calibration-like workload.
@@ -1199,7 +1258,13 @@ class NNPricer:
         on the NN's output. Speed: per parameter set, one NN forward pass vs
         heston_call_batch + _bs_iv_vectorized for the same options (one call
         per maturity), best of `repeats`; the speedup is reported as the
-        median and inter-quartile range over parameter sets.
+        median and inter-quartile range over parameter sets. torch is pinned
+        to `torch_threads` threads for the run (default 1, like the numpy
+        reference; None leaves torch's setting alone) and restored after.
+
+        Options without a reference IV because the exact pricer failed (not
+        because they are below the floor) are counted in n_reference_failed
+        rather than silently left out of the MAE.
 
         Returns a dict with the legacy keys (n_options, heston_ms, nn_ms,
         speedup, mae_vol_pts, rmse_vol_pts, target_passed) plus p99/max error,
@@ -1208,6 +1273,17 @@ class NNPricer:
         """
         if self._spx_model is None:
             raise RuntimeError("NN-1 not loaded")
+        threads_before = torch.get_num_threads()
+        if torch_threads is not None:
+            torch.set_num_threads(int(torch_threads))
+        try:
+            return self._benchmark(S, r, q, n_options, n_param_sets, maturities_days,
+                                   param_sets, seed, repeats, verbose)
+        finally:
+            torch.set_num_threads(threads_before)
+
+    def _benchmark(self, S, r, q, n_options, n_param_sets, maturities_days,
+                   param_sets, seed, repeats, verbose) -> dict:
         domain = self._spx_domain or SPX_TRAINING_DOMAIN
         rng = np.random.default_rng(seed)
         if param_sets is None:
@@ -1226,6 +1302,7 @@ class NNPricer:
 
         all_x, all_T, all_nn, all_ref, all_prod = [], [], [], [], []
         heston_t, nn_t = [], []
+        n_ref_failed = 0
         for p in param_sets:
             xs = []
             for T in mats:
@@ -1236,7 +1313,17 @@ class NNPricer:
                                 + [np.full(n_per, p[k]) for k in _PARAM_NAMES])
                 for x, T in zip(xs, mats)
             ])
-            ref = np.concatenate([heston_iv_exact(x, T, p)[0] for x, T in zip(xs, mats)])
+            refs = []
+            for x, T in zip(xs, mats):
+                otm, ok = _heston_otm_rel(x, T, p)
+                if ok:
+                    iv = _iv_from_otm_rel(otm, x, np.full(x.shape, T), NN_LABEL_MIN_OTM_PRICE_REL)
+                    n_ref_failed += int((np.isnan(iv) & (otm >= NN_LABEL_MIN_OTM_PRICE_REL)).sum())
+                else:                      # prices unreliable: no option of the slice is scored
+                    iv = np.full(x.shape, np.nan)
+                    n_ref_failed += len(x)
+                refs.append(iv)
+            ref = np.concatenate(refs)
 
             Fs = [S * np.exp((r - q) * T) for T in mats]
             Ks = [F * np.exp(x) for F, x in zip(Fs, xs)]
@@ -1269,6 +1356,7 @@ class NNPricer:
         result = {
             "n_options":      int(len(ref)),
             "n_well_posed":   int(ok.sum()),
+            "n_reference_failed": int(n_ref_failed),
             "n_param_sets":   len(param_sets),
             "heston_ms":      float(np.median(heston_t) * 1000),
             "nn_ms":          float(np.median(nn_t) * 1000),
@@ -1292,8 +1380,9 @@ class NNPricer:
         }
         if verbose:
             print(f"\n── NN-1 benchmark: {len(param_sets)} parameter sets × {len(ref) // len(param_sets)} "
-                  f"options ({ok.sum()} well-posed) ──")
-            print(f"  heston_call_batch + IV : {result['heston_ms']:.2f} ms per set (median)")
+                  f"options ({ok.sum()} well-posed, {n_ref_failed} reference failures) ──")
+            print(f"  heston_call_batch + IV : {result['heston_ms']:.2f} ms per set (median; "
+                  f"torch threads {torch.get_num_threads()})")
             print(f"  NN forward pass        : {result['nn_ms']:.2f} ms per set (median)")
             print(f"  Speedup                : {result['speedup']:.1f}× "
                   f"(IQR {result['speedup_iqr'][0]:.1f}–{result['speedup_iqr'][1]:.1f}×)")
@@ -1373,15 +1462,17 @@ def train_vix(force_regen: bool = False, *, model_path: Optional[Path] = None, *
 
 def main(argv=None) -> int:
     """
-    Reproduce the published NN-1 numbers:
+    Reproduce the shipped NN-1 checkpoint and its numbers:
 
-      python -m joint_vol_calibration.models.nn_pricer train [--jobs 4] [--epochs 80] [--vix]
+      python -m joint_vol_calibration.models.nn_pricer train [--jobs 4] [--epochs N] [--patience P] [--vix]
       python -m joint_vol_calibration.models.nn_pricer benchmark [--sets 20]
 
     `train` generates (or reuses the cached) exact training data and writes
-    data_store/nn_spx_model.pt; `benchmark` prints the benchmark dict as JSON.
-    Training is pinned to one torch thread so runs are reproducible and do
-    not oversubscribe a shared machine.
+    data_store/nn_spx_model.pt; the command line is recorded in the
+    checkpoint (training.command), so `train` with the recorded options
+    rebuilds it. `benchmark` prints the benchmark dict as JSON. Training is
+    pinned to one torch thread so runs are reproducible and do not
+    oversubscribe a shared machine.
     """
     import argparse
     parser = argparse.ArgumentParser(description=main.__doc__,
@@ -1390,6 +1481,7 @@ def main(argv=None) -> int:
     tr = sub.add_parser("train")
     tr.add_argument("--jobs", type=int, default=1, help="processes for label generation")
     tr.add_argument("--epochs", type=int, default=NN_MAX_EPOCHS)
+    tr.add_argument("--patience", type=int, default=15, help="early-stopping patience (epochs)")
     tr.add_argument("--vix", action="store_true", help="also train the deprecated NN-2")
     bm = sub.add_parser("benchmark")
     bm.add_argument("--sets", type=int, default=20)
@@ -1397,8 +1489,11 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     torch.set_num_threads(1)
     if args.cmd == "train":
+        command = (f"python -m joint_vol_calibration.models.nn_pricer train --epochs {args.epochs} "
+                   f"--patience {args.patience}")
         generate_spx_training_data(n_jobs=args.jobs)
-        print(json.dumps(train_spx(max_epochs=args.epochs), default=str, indent=1))
+        print(json.dumps(train_spx(max_epochs=args.epochs, patience=args.patience,
+                                   command=command), default=str, indent=1))
         if args.vix:
             print(json.dumps(train_vix(), default=str, indent=1))
     else:

@@ -9,18 +9,23 @@ of the loss must then vanish, which pins the target construction (put-call-
 parity forwards, Black-76 on the forward, consistent discounting) and the
 fact that every leg — including the VIX-forward leg — depends on the
 parameters. Data-guard tests (same-session pinning, staleness, sufficiency)
-and the committed 2026-03-24 pickle's provenance are covered at the end.
+follow. The last two classes read the shipped files: the committed 2026-03-24
+fit must be reproduced by the current code from the DB at its stored
+parameters (the published RMSEs are its stored legs), and the like-for-like
+Heston baseline JSON must be what scripts/heston_quintic_baseline.py computes.
 """
 
+import json
 import math
 import pickle
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from joint_vol_calibration.calibration import quintic_calibrator as qc
-from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+from joint_vol_calibration.config import DATA_DIR, DB_PATH, VIX_INDEX_TENOR_DAYS
 from joint_vol_calibration.models import quintic_ou as q
 
 SPOT_DATE = "2026-03-24"
@@ -295,6 +300,16 @@ class TestForwardVariance:
         for t, lvl in VIX_LEVELS.items():
             assert qc._spot_vix(VIX_INDEX_TENOR_DAYS[t] / 365.0, fv) == pytest.approx(lvl, abs=1e-10)
 
+    def test_model_spot_vix_is_the_vix_index(self):
+        # At T = 0, X = Y = 0: VIX²_0 = (100²/Δ)∫_0^Δ ξ_0 for ANY parameters.
+        # With ξ_0 bootstrapped at the Cboe tenors this is ^VIX² only if the
+        # model's VIX window Δ is the 30/365 the bootstrap uses for ^VIX (a
+        # 30/360 window reaches into the 30→93-day forward variance).
+        fv = _fwd_var()
+        for x in (X_TRUE, np.array([150.0, 0.3, 0.5, 20.0, 1.0, 5.0, -0.3])):
+            v2 = q.compute_vix2(0.0, 0.0, 0.0, qc.search_to_params(x), fv)
+            assert math.sqrt(v2) == pytest.approx(VIX_LEVELS["^VIX"], rel=1e-10)
+
     def test_integrated_and_breakpoints(self):
         fv = qc._PiecewiseConstVar(np.array([0.1, 0.3]), np.array([0.04, 0.09]))
         assert fv.integrated(0.2) == pytest.approx(0.1 * 0.04 + 0.1 * 0.09)
@@ -354,3 +369,109 @@ class TestCalibrateAndSave:
             again = pickle.load(f)
         assert again["leg_losses"] == res["leg_losses"]
         assert again["provenance"]["spx_snapshot_date"] == SPOT_DATE
+
+
+# ── the committed 2026-03-24 fit and its like-for-like Heston baseline ───────
+
+_CAL_DIR = DATA_DIR / "calibrations"
+_COMMITTED = _CAL_DIR / "quintic_cal_2026-03-24.pkl"
+_BASELINE = _CAL_DIR / "baseline_2026-03-24.json"
+_HAVE_COMMITTED = _COMMITTED.exists() and Path(DB_PATH).exists()
+
+
+@pytest.fixture(scope="module")
+def committed():
+    with open(_COMMITTED, "rb") as f:
+        res = pickle.load(f)
+    return res, qc.QuinticCalibrator(res["provenance"]["as_of_date"])
+
+
+@pytest.mark.skipif(not _HAVE_COMMITTED, reason="committed Quintic fit or project DB not present")
+class TestCommittedFit:
+    """The published Quintic numbers (README / dashboard) are the stored leg
+    RMSEs of quintic_cal_2026-03-24.pkl. They must be what the current code
+    computes from the DB at the stored parameters, on the stored targets."""
+
+    def test_targets_are_rebuilt_from_the_db(self, committed):
+        res, cal = committed
+        prov = res["provenance"]
+        assert prov["spot_date"] == prov["spx_snapshot_date"] == prov["vix_snapshot_date"] \
+            == cal.spot_date
+        assert prov["S"] == cal.S and prov["r"] == cal.r
+        np.testing.assert_array_equal([r["market_iv"] for r in res["spx_rows"]],
+                                      cal.spx_surface["market_iv"].values)
+        np.testing.assert_array_equal([r["market_iv"] for r in res["vix_rows"]],
+                                      cal.vix_opts_surface["market_iv"].values)
+        np.testing.assert_array_equal([r["forward_mkt"] for r in res["vix_forward_rows"]],
+                                      cal.vix_forwards["forward"].values)
+        np.testing.assert_allclose(cal.fwd_var_func.xi_nodes, prov["xi0_nodes"], rtol=1e-15)
+
+    def test_stored_leg_rmses_are_the_loss_at_the_stored_parameters(self, committed):
+        res, cal = committed
+        p = res["params"]
+        np.testing.assert_allclose(qc.search_to_params(list(res["search_vector"].values())).to_array(),
+                                   p.to_array(), rtol=1e-12)
+        ev = cal.evaluate(p)
+        ll = res["leg_losses"]
+        assert cal._loss_from_eval(ev) == pytest.approx(res["loss"], rel=1e-9)
+        rmse = lambda a: math.sqrt(np.mean(np.asarray(a) ** 2))
+        assert 100 * rmse(ev["spx_resid"]) == pytest.approx(ll["spx_iv_rmse"], rel=1e-9)
+        assert 100 * rmse(ev["vix_resid"]) == pytest.approx(ll["vix_options_rmse"], rel=1e-9)
+        assert rmse(ev["vix_fwd_resid_pts"]) == pytest.approx(ll["vix_futures_rmse"], rel=1e-9)
+        mc = res["provenance"]["mc"]
+        fresh = cal.evaluate(p, n_paths=mc["check_n_paths"], seed=mc["check_seed"])
+        assert 100 * rmse(fresh["spx_resid"]) == pytest.approx(ll["spx_iv_rmse_fresh_paths"],
+                                                               rel=1e-9)
+
+    def test_convergence_and_boundary_flags_are_consistent(self, committed):
+        res, _ = committed
+        c = res["convergence"]
+        assert res["success"] == (c["de_success"] and c["polish_success"])
+        assert res["n_evals"] == c["de_nfev"] + c["polish_nfev"]
+        for name, v in res["search_vector"].items():
+            lo, hi = res["search_bounds"][name]
+            assert res["at_bound"][name] == (min(v - lo, hi - v) <= 0.01 * (hi - lo))
+
+
+def _baseline_module():
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / "scripts" / "heston_quintic_baseline.py"
+    spec = importlib.util.spec_from_file_location("heston_quintic_baseline", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.skipif(not (_COMMITTED.exists() and _BASELINE.exists()
+                         and (_CAL_DIR / "joint_cal_2026-03-24.pkl").exists()),
+                    reason="committed calibration files not present")
+class TestHestonBaseline:
+    """baseline_2026-03-24.json is regenerated by scripts/heston_quintic_baseline.py
+    from the two same-session pickles; a stale JSON (e.g. after a pricer change)
+    fails here — regenerate it with `python scripts/heston_quintic_baseline.py 2026-03-24`."""
+
+    def test_committed_json_is_what_the_script_computes(self):
+        mod = _baseline_module()
+        out = mod.compute_baseline("2026-03-24", _CAL_DIR)
+        with open(_BASELINE) as f:
+            committed = json.load(f)
+        assert out["params"] == committed["params"]
+        for block in ("heston", "own_targets", "on_quintic_targets", "quintic"):
+            for key, want in committed[block].items():
+                got = out[block][key]
+                if isinstance(want, float):
+                    assert got == pytest.approx(want, rel=1e-9, abs=1e-12), (block, key)
+                else:
+                    assert got == want, (block, key)
+
+    def test_refuses_fits_from_different_sessions(self, tmp_path):
+        mod = _baseline_module()
+        for name in ("quintic_cal_2026-03-24.pkl", "joint_cal_2026-03-24.pkl"):
+            (tmp_path / name).write_bytes((_CAL_DIR / name).read_bytes())
+        with open(tmp_path / "joint_cal_2026-03-24.pkl", "rb") as f:
+            h = pickle.load(f)
+        h["spx_snapshot_date"] = "2026-03-20"
+        with open(tmp_path / "joint_cal_2026-03-24.pkl", "wb") as f:
+            pickle.dump(h, f)
+        with pytest.raises(ValueError, match="not like-for-like"):
+            mod.compute_baseline("2026-03-24", tmp_path)
