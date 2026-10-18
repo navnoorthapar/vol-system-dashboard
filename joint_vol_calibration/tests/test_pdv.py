@@ -373,16 +373,21 @@ class TestForwardTarget:
         r.iloc[k] = size
         return r, idx, k
 
+    @pytest.mark.parametrize("target", ["rv", "abs_return"])
     @pytest.mark.parametrize("h", [1, 5, 21])
-    def test_spike_enters_label_exactly_for_t_in_k_minus_h_to_k_minus_1(self, h):
+    def test_spike_enters_label_exactly_for_t_in_k_minus_h_to_k_minus_1(self, h, target):
         """y(t) must cover [t+1, t+h]: a single large return at position k is
         inside the window exactly for t = k-h .. k-1. The pre-C22 window
         r2.shift(-1).rolling(h) covered [t-h+2, t+1] and lit up t = k-1..k+h-2
-        (h-1 of those labels were already in the feature information set)."""
+        (h-1 of those labels were already in the feature information set).
+        Both target definitions (RMS and E|r|) must use the forward window."""
         r, idx, k = self._spike()
         feats = extract_pdv_features(r)
-        _, y = build_xy(r, feats, horizon=h)
-        hit = [idx.get_loc(d) for d in y[y > 0.2].index]
+        _, y = build_xy(r, feats, horizon=h, target=target)
+        # threshold between the flat-path label (0.001*sqrt(252) = 0.016) and
+        # the smallest spike-window label ((0.10 + 20*0.001)/21*sqrt(252) =
+        # 0.091, E|r| target at h = 21)
+        hit = [idx.get_loc(d) for d in y[y > 0.05].index]
         assert hit == list(range(k - h, k))
 
     def test_rv_target_formula(self):
@@ -635,6 +640,24 @@ class TestWalkForwardVolForecast:
     def test_embargo_must_cover_the_horizon(self, returns):
         with pytest.raises(ValueError):
             walk_forward_vol_forecast(returns, horizon=21, embargo=5)
+
+    def test_forecast_uses_exactly_the_labels_observed_at_the_origin(self, returns):
+        """Row t is an OLS fit on the label rows i ≤ t - h (window [i+1, i+h]
+        ends by t), never on row t - h + 1, whose label already contains
+        r_{t+1}: a one-day leak would match the second fit, not the first."""
+        h, t = 21, 650
+        a = walk_forward_vol_forecast(returns, horizon=h, train_min_days=300)
+        feats = extract_pdv_features(returns)
+        X, y = build_xy(returns, feats, horizon=h, target="rv")
+        x_t = feats[["sigma1", "sigma2", "lev"]].iloc[[t]]
+
+        def fit_through(last):
+            keep = X.index <= returns.index[last]
+            return PDVLinear().fit(X[keep], y[keep]).predict(x_t).iloc[0]
+
+        honest, leaky = fit_through(t - h), fit_through(t - h + 1)
+        assert a.loc[returns.index[t]] == pytest.approx(honest, rel=1e-10)
+        assert not np.isclose(honest, leaky, rtol=1e-8, atol=0.0)
 
     def test_one_day_abs_target_equals_walk_forward_predict(self, returns):
         a = walk_forward_vol_forecast(returns, horizon=1, target="abs_return",
