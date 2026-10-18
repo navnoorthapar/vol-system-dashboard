@@ -1,18 +1,17 @@
 {% extends "base.html" %}
 {% set page = "market" %}
-{% block title %}Live Market — Vol System{% endblock %}
-{% block og_title %}Live Market — SPX/VIX Vol System{% endblock %}
+{% block title %}Market — SPX/VIX Vol System{% endblock %}
+{% block og_title %}Market Overview — SPX/VIX Vol System{% endblock %}
 {% block og_description %}End-of-day SPX/VIX regime (rule label), VIX term structure and the PDV realised-vol forecast against implied vol.{% endblock %}
 
 {% block content %}
+{% set _names = {'regime': 'Regime', 'calibration': 'Calibration', 'pdv': 'PDV forecast'} %}
 <div class="page-header">
-  <h1 class="page-title">Live Market Overview</h1>
-  <div class="page-subtitle">End-of-day regime + term structure</div>
+  <h1 class="page-title">Market Overview</h1>
+  <div class="page-subtitle">End-of-day rule regime, implied versus forecast volatility, and the VIX term structure.</div>
   <div class="page-badge" id="freshness-badge" data-holidays='{{ d.holidays|tojson }}'>
-    <span data-date="{{ d.spx_date or '' }}">Last close: {{ d.spx_date|fmt }}</span>
-    {% for s in d.stale %}{% if s.component != 'market' %}
-    &nbsp;·&nbsp; {{ {'regime': 'Regime', 'calibration': 'Calibration', 'pdv': 'PDV'}[s.component] }}: {{ s.date|fmt }}{% if s.age %} <span class="age-{{ s.level }}">({{ s.age }} session{{ 's' if s.age != 1 else '' }} old)</span>{% endif %}
-    {% endif %}{% endfor %}
+    <span data-date="{{ d.spx_date or '' }}">Last close {{ d.spx_date|fmt }}</span>
+    {% for s in d.stale %}{% if s.component != 'market' %}<span class="sep">·</span>{{ _names[s.component] }} {{ s.date|fmt }}{% if s.age %} <span class="age-{{ s.level }}">({{ s.age }} session{{ 's' if s.age != 1 else '' }} old)</span>{% endif %}{% endif %}{% endfor %}
   </div>
 </div>
 <script>
@@ -41,285 +40,226 @@
   var behind = 0;
   for (var x = t; x > dataDay && behind < 400; x -= DAY) { if (isSession(x)) behind++; }
   var note = document.createElement('span');
-  var html;
-  if (behind === 0) html = '<span style="color:var(--accent);">✓ latest U.S. session</span>';
-  else if (behind === 1) html = '<span style="color:var(--amber);">⟳ refreshes after the next U.S. close</span>';
-  else html = '<span style="color:' + (behind >= 5 ? '#ff5555' : '#ffaa33') + ';font-weight:700;">⚠ ' + behind + ' sessions stale</span>';
-  note.innerHTML = ' &nbsp;·&nbsp; ' + html;
+  var cls, txt;
+  if (behind === 0) { cls = 'age-ok'; txt = 'current as of the latest U.S. session'; }
+  else if (behind === 1) { cls = 'age-ok'; txt = 'refreshes after the next U.S. close'; }
+  else { cls = behind >= 5 ? 'age-error' : 'age-warn'; txt = behind + ' sessions behind today'; }
+  note.innerHTML = '<span class="sep">·</span><span class="' + cls + '"></span>';
+  note.lastChild.textContent = txt;
   badge.appendChild(note);
 })();
 </script>
 
-<!-- ── Row 1: Key stats ──────────────────────────────────────────────────── -->
-<div class="grid grid-4" style="margin-bottom:16px;">
+<!-- ── Row 1: market snapshot ─────────────────────────────────────────────── -->
+<div class="grid grid-4 row">
 
-  <!-- SPX -->
   <div class="card card-sm">
-    <h2 class="card-label">S&P 500</h2>
+    <h2 class="card-label">S&amp;P 500</h2>
     <div class="card-value">{{ d.spx|fmt(",.2f") }}</div>
     {% if d.spx_chg is not none %}
     <div class="stat-row">
-      <span class="stat-change {{ 'up' if d.spx_up else 'down' }}">
-        {{ '+' if d.spx_up else '' }}{{ d.spx_chg }}%
-      </span>
-      <span style="color:var(--text3)">vs prev close</span>
+      <span class="stat-change {{ 'up' if d.spx_up else 'down' }}">{{ d.spx_chg|fmt("+.2f") }}%</span>
+      <span>vs previous close</span>
     </div>
     {% endif %}
-    <div class="card-sub" style="margin-top:10px;">{{ d.spx_date|fmt }}</div>
+    <div class="card-sub">Close {{ d.spx_date|fmt }}</div>
   </div>
 
-  <!-- VIX -->
   <div class="card card-sm">
-    <h2 class="card-label">VIX  <span style="color:var(--text3);font-size:9px;letter-spacing:0.05em;">30-DAY IMPLIED</span></h2>
+    <h2 class="card-label">VIX  <span class="qual">30-day implied</span></h2>
     {% if d.vix is not none %}
-    {# One threshold table drives both the colour and the words (they disagreed:
+    {# One threshold table drives both the chip colour and its words (they disagreed:
        VIX 19 was yellow beside "NORMAL", VIX 27 red beside "caution"). #}
-    {% set _vb = ('red', 'STRESS — above 30') if d.vix > 30 else (('yellow', 'ELEVATED — 20 to 30') if d.vix > 20 else (('green', 'NORMAL — 15 to 20') if d.vix >= 15 else ('green', 'LOW — below 15, complacency risk'))) %}
-    <div class="card-value {{ _vb[0] }}">
-      {{ "{:.2f}".format(d.vix) }}
-    </div>
-    <div class="card-sub" style="margin-top:10px;">
-      {{ _vb[1] }}
-      {% if d.vix_date and d.vix_date != d.spx_date %}<br>as of {{ d.vix_date }}{% endif %}
-    </div>
+    {% set _vb = ('red', 'STRESS — above 30') if d.vix > 30 else (('yellow', 'ELEVATED — 20 to 30') if d.vix > 20 else (('green', 'NORMAL — 15 to 20') if d.vix >= 15 else ('dim', 'LOW — below 15'))) %}
+    <div class="card-value">{{ d.vix|fmt(".2f") }}</div>
+    <div class="stat-row"><span class="chip chip-{{ _vb[0] }}">{{ _vb[1] }}</span></div>
+    <div class="card-sub">{% if d.vix_date and d.vix_date != d.spx_date %}As of {{ d.vix_date }}{% else %}Close {{ d.vix_date|fmt }}{% endif %}</div>
     {% else %}
     <div class="card-value dim">—</div>
     {% endif %}
   </div>
-
   <!-- VVIX -->
   <div class="card card-sm">
-    <h2 class="card-label">VVIX  <span style="color:var(--text3);font-size:9px;">VOL-OF-VOL</span></h2>
+    <h2 class="card-label">VVIX  <span class="qual">vol of VIX</span></h2>
     {% if d.vvix is not none %}
-    <div class="card-value {% if d.vvix > 120 %}red{% elif d.vvix > 100 %}yellow{% else %}dim{% endif %}">
-      {{ "{:.2f}".format(d.vvix) }}
+    <div class="card-value">{{ d.vvix|fmt(".2f") }}</div>
+    {% if d.rule and d.rule.gate is not none and d.rule.date == d.vvix_date %}
+    <div class="stat-row">
+      {% if d.vvix > d.rule.gate %}<span class="chip chip-red">ABOVE R2 GATE</span>{% else %}<span class="chip">BELOW R2 GATE</span>{% endif %}
     </div>
-    <div class="card-sub" style="margin-top:10px;">
-      {% if d.vvix > 120 %}Extreme vol-of-vol
-      {% elif d.vvix > 100 %}Elevated VVIX
-      {% elif d.vvix > 80 %}Normal VVIX
-      {% else %}Low VVIX
-      {% endif %}
-      {% if d.vvix_date and d.vvix_date != d.spx_date %}<br>as of {{ d.vvix_date }}{% endif %}
-    </div>
+    <div class="card-sub">Gate {{ d.rule.gate|fmt(".2f") }}: rolling 252-day 80th percentile</div>
+    {% endif %}
+    {% if d.vvix_date and d.vvix_date != d.spx_date %}<div class="card-sub">As of {{ d.vvix_date }}</div>{% endif %}
     {% else %}
     <div class="card-value dim">—</div>
     {% endif %}
   </div>
 
-  <!-- TS Regime -->
   <div class="card card-sm">
-    <h2 class="card-label">Term Structure</h2>
-    <div class="card-value sm" style="color:{{ d.ts_regime_color }};">
-      {{ d.ts_regime }}
-    </div>
+    <h2 class="card-label">VIX term structure</h2>
     {% if d.ts_values|length >= 2 %}
-    <div class="card-sub" style="margin-top:8px;">
-      Front={{ d.ts_values[0] }}  →  Back={{ d.ts_values[-1] }}
-    </div>
-    <div class="card-sub">
-      Slope={{ "{:+.2f}".format(d.ts_values[-1] - d.ts_values[0]) }} pts
-    </div>
+    <div class="card-value sm">{{ d.ts_regime|title }}</div>
+    <div class="card-sub">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|fmt("+.2f") }} pts)</div>
     <div class="card-sub" {% if d.ts_date != d.vix_date %}style="color:var(--amber);"{% endif %}>
-      All tenors as of {{ d.ts_date }}{% if d.ts_date != d.vix_date %} (latest full curve; VIX is from {{ d.vix_date|fmt }}){% endif %}
+      All tenors {{ d.ts_date }}{% if d.ts_date != d.vix_date %} (latest full curve; VIX is from {{ d.vix_date|fmt }}){% endif %}
     </div>
+    {% else %}
+    <div class="card-value dim">—</div>
     {% endif %}
   </div>
 
 </div>
 
-<!-- ── Row 2: Regime + PDV ───────────────────────────────────────────────── -->
-<div class="grid grid-3" style="margin-bottom:16px;">
+<!-- ── Row 2: regime · PDV vs implied · term-structure chart ─────────────── -->
+<div class="grid grid-3 row">
 
-  <!-- Current Regime -->
-  <div class="card" style="grid-column: span 1;">
-    <h2 class="card-label">Current Regime — rule-based label</h2>
-
-    <div class="flex gap12 mt8" style="align-items:flex-start;">
-      <div style="flex:1;">
-        {% if d.regime is not none %}
-        <div style="
-          display:inline-flex; align-items:center; gap:10px;
-          padding:10px 18px; border-radius:8px;
-          background:{{ d.regime_color }}18;
-          border:1px solid {{ d.regime_color }}44;
-          margin-bottom:8px;
-        ">
-          <div style="width:10px;height:10px;border-radius:50%;background:{{ d.regime_color }};box-shadow:0 0 8px {{ d.regime_color }};"></div>
-          <span style="font-size:16px;font-weight:800;letter-spacing:0.04em;color:{{ d.regime_color }};">
-            {{ d.regime_label }} · {{ d.regime_name }}
-          </span>
-        </div>
-        <div class="card-sub" style="margin-bottom:14px;">
-          Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
-          trades on. As of {{ d.regime_date }}.
-        </div>
-        {% else %}
-        <div class="card-value sm dim" style="margin-bottom:14px;">Rule label unavailable</div>
-        {% endif %}
-
-        <!-- ML classifier: research-only (demoted, C17) -->
-        {% if d.clf_available %}
-        <div class="flex space-between" style="margin-bottom:6px;">
-          <span style="font-size:11px;color:var(--text2);">
-            ML classifier <span style="color:var(--amber);font-weight:600;">· research only</span>
-          </span>
-          <span class="mono" style="font-size:13px;font-weight:700;color:{{ d.clf_color }};">
-            {{ d.clf_label }} · {{ d.clf_conf }}%
-          </span>
-        </div>
-
-        <!-- Probability bars (classifier output) -->
-        <div class="progress-bar-wrap">
-          <div class="progress-row">
-            <div class="progress-label" style="font-size:10px;">R0 LONG γ</div>
-            <div class="progress-track">
-              <div class="progress-fill" style="width:{{ d.prob_r0 }}%;background:#3388ff;"></div>
-            </div>
-            <div class="progress-val">{{ d.prob_r0 }}%</div>
-          </div>
-          <div class="progress-row">
-            <div class="progress-label" style="font-size:10px;">R1 SHORT γ</div>
-            <div class="progress-track">
-              <div class="progress-fill" style="width:{{ d.prob_r1 }}%;background:#00ff88;"></div>
-            </div>
-            <div class="progress-val">{{ d.prob_r1 }}%</div>
-          </div>
-          <div class="progress-row">
-            <div class="progress-label" style="font-size:10px;">R2 VOMMA</div>
-            <div class="progress-track">
-              <div class="progress-fill" style="width:{{ d.prob_r2 }}%;background:#ff3333;"></div>
-            </div>
-            <div class="progress-val">{{ d.prob_r2 }}%</div>
-          </div>
-        </div>
-
-        <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
-          Next-session forecast from the features of {{ d.clf_feature_date }}.
-          {% if d.clf_agrees == false %}Classifier disagrees with the rule label here — {% endif %}{% if d.clf_oos_acc is not none %}{{ d.clf_oos_acc|fmt }}% out-of-sample, it loses to the {{ d.clf_persistence_acc|fmt }}% “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong> (shown for research only).
-        </div>
-        {% else %}
-        <div class="card-sub mt8" style="color:var(--text3);font-size:10.5px;">
-          ML classifier (research only): unavailable — see the error above. The rule label is unaffected.
-        </div>
-        {% endif %}
+  <!-- Current regime: the deterministic rule label -->
+  <div class="card">
+    <h2 class="card-label">Current regime <span class="qual">· rule label</span></h2>
+    {% if d.regime is not none %}
+    <div class="card-value sm" style="display:flex;align-items:center;gap:10px;">
+      <span aria-hidden="true" style="width:10px;height:10px;border-radius:2px;background:{{ d.regime_color }};flex-shrink:0;"></span>
+      <span>{{ d.regime_label }} · {{ d.regime_name }}</span>
+    </div>
+    <div class="card-sub">
+      Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
+      trades on. As of {{ d.regime_date }}.
+    </div>
+    {% if d.rule %}
+    {% set r = d.rule %}
+    <div class="subcard mt12" id="rule-inputs">
+      <div class="small faint" style="margin-bottom:4px;">Rule inputs on {{ r.date }}</div>
+      <div class="kv-2" style="grid-template-columns:repeat(2,minmax(0,1fr));">
+        <div>rv₂₀ <span class="v">{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f") }}%</span></div>
+        <div>VIX <span class="v">{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f") }}%</span></div>
+        <div>VVIX <span class="v">{{ r.vvix|fmt(".2f") }}</span></div>
+        <div>R2 gate <span class="v">{{ r.gate|fmt(".2f") }}</span></div>
+      </div>
+      <div class="small dim" style="margin-top:6px;">
+        {% if r.vvix is not none and r.gate is not none and r.vvix > r.gate %}VVIX above the gate → R2.
+        {% elif r.rv20 is not none and r.vix is not none %}VVIX below the gate; rv₂₀ {{ '>' if r.rv20 > r.vix else '≤' }} VIX → R{{ 0 if r.rv20 > r.vix else 1 }}.{% endif %}
+        {% if r.stored is not none and r.stored != r.label %}<span class="amber">Recomputed label R{{ r.label }} differs from the stored label.</span>{% endif %}
       </div>
     </div>
+    {% endif %}
+    {% else %}
+    <div class="card-value sm dim">Rule label unavailable</div>
+    {% endif %}
+
+    <!-- ML classifier: research-only (demoted, C17) -->
+    <div class="divider"></div>
+    {% if d.clf_available %}
+    <div class="flex space-between" style="margin-bottom:4px;">
+      <span class="small dim">ML classifier <span class="chip chip-amber" style="margin-left:4px;">research only</span></span>
+      <span class="small" style="font-weight:600;">{{ d.clf_label }} · {{ d.clf_conf|fmt(".1f") }}%</span>
+    </div>
+    <div class="progress-bar-wrap" role="group" aria-label="Classifier probabilities">
+      {% for lbl, pr in [('R0 long γ', d.prob_r0), ('R1 short γ', d.prob_r1), ('R2 vomma', d.prob_r2)] %}
+      <div class="progress-row">
+        <div class="progress-label">{{ lbl }}</div>
+        <div class="progress-track"><div class="progress-fill" style="width:{{ pr }}%;"></div></div>
+        <div class="progress-val">{{ pr|fmt(".1f") }}%</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="card-sub small">
+      Next-session forecast from the features of {{ d.clf_feature_date }}.
+      {% if d.clf_agrees == false %}Classifier disagrees with the rule label here — {% endif %}{% if d.clf_oos_acc is not none %}{{ d.clf_oos_acc|fmt }}% out-of-sample, it loses to the {{ d.clf_persistence_acc|fmt }}% “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong> (shown for research only).
+    </div>
+    {% else %}
+    <div class="card-sub small">ML classifier (research only): unavailable — see the error above. The rule label is unaffected.</div>
+    {% endif %}
 
     <!-- Regime legend: the rule, as build_regime_labels applies it -->
     <div class="divider"></div>
-    <div class="tiles" style="font-size:10.5px;" aria-label="Rule-label definitions" role="group">
-      <div style="padding:8px;border-radius:6px;background:rgba(51,136,255,0.07);border:1px solid rgba(51,136,255,0.2);">
-        <div style="color:var(--blue);font-weight:700;margin-bottom:2px;">R0</div>
-        <div style="color:var(--text3);">Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</div>
-      </div>
-      <div style="padding:8px;border-radius:6px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.18);">
-        <div style="color:var(--accent);font-weight:700;margin-bottom:2px;">R1</div>
-        <div style="color:var(--text3);">Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</div>
-      </div>
-      <div style="padding:8px;border-radius:6px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.2);">
-        <div style="color:var(--red);font-weight:700;margin-bottom:2px;">R2</div>
-        <div style="color:var(--text3);">VVIX above its rolling 252-day 80th percentile (overrides R0/R1) → vomma trades</div>
-      </div>
-    </div>
+    <dl class="defs" aria-label="Rule-label definitions">
+      <dt style="border-left-color:var(--blue);">R0</dt><dd>Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</dd>
+      <dt style="border-left-color:var(--accent);">R1</dt><dd>Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</dd>
+      <dt style="border-left-color:var(--red);">R2</dt><dd>VVIX above its rolling 252-day 80th percentile (overrides R0/R1) → vomma trades</dd>
+    </dl>
   </div>
 
-  <!-- PDV Forecast vs VIX -->
-  <div class="card" style="grid-column: span 1;">
-    <h2 class="card-label">PDV Model Forecast vs ATM Implied</h2>
+  <!-- PDV forecast vs VIX -->
+  <div class="card">
+    <h2 class="card-label">PDV forecast vs implied vol</h2>
     {% if d.pdv_forecast is not none %}
-    <div class="mt8">
-      {% if d.pdv_stale %}
-      <div id="pdv-stale-flag" role="status" style="background:rgba(255,170,51,0.10);border:1px solid rgba(255,170,51,0.55);border-radius:6px;padding:9px 12px;margin-bottom:8px;font-size:11.5px;line-height:1.5;color:#ffbb55;">
-        <strong style="color:var(--amber);">⚠ STALE FORECAST</strong> — built from returns through
-        <span class="mono">{{ d.pdv_date }}</span>, {{ d.pdv_age }} session{{ 's' if d.pdv_age != 1 else '' }}
+    {% if d.pdv_stale %}
+    <div id="pdv-stale-flag" class="banner banner-stale-warn" role="status" style="margin-bottom:12px;">
+      <div class="banner-icon" aria-hidden="true">!</div>
+      <div class="banner-body"><strong class="amber">STALE FORECAST</strong> — built from returns through
+        {{ d.pdv_date }}, {{ d.pdv_age }} session{{ 's' if d.pdv_age != 1 else '' }}
         before the latest session ({{ d.latest_session }}). The interpretation is suppressed until the
-        market data catches up.
+        market data catches up.</div>
+    </div>
+    {% endif %}
+    <div class="grid grid-2" style="gap:12px;">
+      <div>
+        <div class="small faint">VIX · {{ d.pdv_date }}</div>
+        <div class="card-value">{{ d.pdv_vix|fmt(".2f") }}<span class="unit">%</span></div>
       </div>
-      {% endif %}
-      <div class="flex space-between" style="padding:12px 0;border-bottom:1px solid var(--border);">
-        <div>
-          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">VIX (30D IMPLIED) · {{ d.pdv_date }}</div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:var(--text);">{{ d.pdv_vix|fmt(".2f") }}%</div>
-        </div>
-        <div style="text-align:right;">
-          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">
-            PDV FORECAST · {% if d.pdv_horizon == 1 %}NEXT-DAY |r|, ANNUALISED{% else %}NEXT {{ d.pdv_horizon }}-DAY RV{% endif %}
-          </div>
-          <div class="mono" style="font-size:28px;font-weight:700;color:var(--yellow);">{{ d.pdv_forecast|fmt(".2f") }}%</div>
-        </div>
-      </div>
-
-      <div style="padding:14px 0;text-align:center;">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">VIX − PDV FORECAST</div>
-        {% set _pct = d.pdv_spread_pct %}
-        <div class="mono" style="font-size:36px;font-weight:800;color:{% if _pct is none %}var(--text2){% elif _pct >= 80 %}#ff8833{% elif _pct <= 20 %}#3388ff{% else %}var(--text){% endif %};">
-          {{ "{:+.2f}".format(d.pdv_spread) }}pp
-        </div>
-        {% if not d.pdv_stale and _pct is not none %}
-        <div style="font-size:11.5px;color:var(--text2);margin-top:6px;">
-          {% if _pct >= 80 %}Implied vol is rich versus this spread's own history (top {{ (100 - _pct)|round|int }}%)
-          {% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history (bottom {{ _pct|round|int }}%)
-          {% else %}Within this spread's usual range
-          {% endif %}
-        </div>
-        {% endif %}
-
-        <!-- Historical context: the SAME quantity (VIX − this model's forecast) on prior sessions -->
-        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;">
-          {% if _pct is not none %}
-          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
-            <div id="pdv-percentile" style="font-size:28px;font-weight:800;color:#ff9900;font-family:var(--mono);line-height:1;">
-              {{ _pct|ordinal }}
-            </div>
-            <div style="color:var(--text2);font-size:11px;line-height:1.4;text-align:left;">
-              percentile of {{ "{:,}".format(d.pdv_hist_n) }} prior sessions<br>
-              <span style="color:var(--text3);">{{ d.pdv_hist_start[:4] }}–{{ d.pdv_hist_end[:4] }} mean: <span class="mono">{{ "{:+.2f}".format(d.pdv_spread_mean) }}pp</span></span>
-            </div>
-          </div>
-          {% else %}
-          <div style="color:var(--text3);margin-bottom:8px;">
-            Percentile hidden: only {{ d.pdv_hist_n|fmt }} valid history points (at least 252 needed).
-          </div>
-          {% endif %}
-
-          {% if d.pdv_sparkline %}
-          <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">VIX − PDV forecast — last {{ d.pdv_sparkline|length }} sessions to {{ d.pdv_date }}</div>
-          <div class="chart-wrap spark">
-            <canvas id="sparklineChart" role="img" aria-label="Sparkline: VIX minus PDV forecast, last {{ d.pdv_sparkline|length }} sessions" aria-describedby="sparklineChart-data"></canvas>
-          </div>
-          {% set _sp = d.pdv_sparkline|reject('none')|list %}
-          <p class="chart-data sr-only" id="sparklineChart-data">
-            VIX minus PDV forecast from {{ d.pdv_sparkline_dates[0] }} to {{ d.pdv_sparkline_dates[-1] }}:
-            first {{ d.pdv_sparkline[0]|fmt("+.2f") }}pp, last {{ d.pdv_sparkline[-1]|fmt("+.2f") }}pp{% if _sp %},
-            range {{ _sp|min|fmt("+.2f") }} to {{ _sp|max|fmt("+.2f") }}pp{% endif %}.
-          </p>
-          {% endif %}
-          <div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.5;text-align:left;">
-            The forecast target is {% if d.pdv_horizon == 1 %}next-day |r|·√252, about 0.8σ for Gaussian returns{% else %}{{ d.pdv_horizon }}-day realised vol{% endif %},
-            so the spread's level carries a structural positive offset that is not a risk premium.
-            Read it against its own history (the percentile), not against zero.
-          </div>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-      <div class="kv-2" style="font-size:11px;color:var(--text2);">
-        <div>σ₁ ({{ d.pdv_halflives[0]|fmt }}d EWMA): <span class="mono green">{{ d.pdv_sigma1|fmt(".2f") }}%</span></div>
-        <div>σ₂ ({{ d.pdv_halflives[1]|fmt }}d EWMA): <span class="mono" style="color:var(--yellow);">{{ d.pdv_sigma2|fmt(".2f") }}%</span></div>
-        <div>Model: <span class="mono">PDVLinear (OLS)</span></div>
-        <div>Forecast date: <span class="mono">{{ d.pdv_date }}</span></div>
+      <div>
+        <div class="small faint">PDV forecast · {% if d.pdv_horizon == 1 %}next-day |r|, annualised{% else %}next {{ d.pdv_horizon }}-day realised vol{% endif %}</div>
+        <div class="card-value">{{ d.pdv_forecast|fmt(".2f") }}<span class="unit">%</span></div>
       </div>
     </div>
+    <div class="divider"></div>
+    {% set _pct = d.pdv_spread_pct %}
+    <div class="small faint">VIX − PDV forecast</div>
+    <div class="card-value lg">{{ d.pdv_spread|fmt("+.2f") }}<span class="unit">vol pts</span></div>
+    {% if not d.pdv_stale and _pct is not none %}
+    <div class="card-sub">
+      {% if _pct >= 80 %}Implied vol is rich versus this spread's own history (top {{ (100 - _pct)|round|int }}%)
+      {% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history (bottom {{ _pct|round|int }}%)
+      {% else %}Within this spread's usual range
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Historical context: the SAME quantity (VIX − this model's forecast) on prior sessions -->
+    <div class="subcard mt12">
+      {% if _pct is not none %}
+      <div style="display:flex;align-items:baseline;gap:10px;">
+        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">{{ _pct|ordinal }}</div>
+        <div class="small dim">percentile of {{ "{:,}".format(d.pdv_hist_n) }} prior sessions ({{ d.pdv_hist_start }} → {{ d.pdv_hist_end }}); mean {{ d.pdv_spread_mean|fmt("+.2f") }} vol pts</div>
+      </div>
+      {% else %}
+      <div class="small faint">Percentile hidden: only {{ d.pdv_hist_n|fmt }} valid history points (at least 252 needed).</div>
+      {% endif %}
+      {% if d.pdv_sparkline %}
+      <div class="small faint" style="margin:10px 0 2px;">Last {{ d.pdv_sparkline|length }} sessions to {{ d.pdv_date }} (shaded above zero)</div>
+      <div class="chart-wrap spark">
+        <canvas id="sparklineChart" role="img" aria-label="Sparkline: VIX minus PDV forecast, last {{ d.pdv_sparkline|length }} sessions" aria-describedby="sparklineChart-data"></canvas>
+      </div>
+      {% set _sp = d.pdv_sparkline|reject('none')|list %}
+      <p class="chart-data sr-only" id="sparklineChart-data">
+        VIX minus PDV forecast from {{ d.pdv_sparkline_dates[0] }} to {{ d.pdv_sparkline_dates[-1] }}:
+        first {{ d.pdv_sparkline[0]|fmt("+.2f") }} vol pts, last {{ d.pdv_sparkline[-1]|fmt("+.2f") }} vol pts{% if _sp %},
+        range {{ _sp|min|fmt("+.2f") }} to {{ _sp|max|fmt("+.2f") }} vol pts{% endif %}.
+      </p>
+      {% endif %}
+    </div>
+    <p class="chart-note">
+      {% if d.pdv_horizon == 1 %}The forecast target is next-day |r|·√252, about 0.8σ for Gaussian returns, so the spread's
+      level carries a structural positive offset that is not a risk premium.
+      {% else %}The forecast is the expected realised vol (RMS) of the next {{ d.pdv_horizon }} sessions, the VIX horizon.
+      VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity
+      gap (E[σ] &lt; √E[σ²]); it is not a pure premium.{% endif %}
+      Forecast and history are the purged walk-forward forecast (refitted daily on labels known at each close), so the
+      percentile ranks today against out-of-sample values only, not against zero.
+    </p>
+    <div class="kv-2 mt8">
+      <div>σ₁ ({{ d.pdv_halflives[0]|fmt }}-day EWMA) <span class="v">{{ d.pdv_sigma1|fmt(".2f") }}%</span></div>
+      <div>σ₂ ({{ d.pdv_halflives[1]|fmt }}-day EWMA) <span class="v">{{ d.pdv_sigma2|fmt(".2f") }}%</span></div>
+    </div>
     {% else %}
-    <div class="card-value sm dim mt8">Forecast unavailable</div>
+    <div class="card-value sm dim">Forecast unavailable</div>
     {% endif %}
   </div>
 
-  <!-- VIX Term Structure Chart -->
-  <div class="card" style="grid-column: span 1;">
-    <h2 class="card-label">VIX Term Structure{% if d.ts_date %} · {{ d.ts_date }}{% endif %}</h2>
-    <div class="chart-wrap tall" style="margin-top:12px;">
+  <!-- VIX term-structure chart -->
+  <div class="card">
+    <h2 class="card-label">VIX term structure{% if d.ts_date %} <span class="qual">· {{ d.ts_date }}</span>{% endif %}</h2>
+    <div class="chart-wrap tall">
       <canvas id="tsChart" role="img" aria-label="Line chart: VIX index term structure by tenor{% if d.ts_date %} on {{ d.ts_date }}{% endif %}" aria-describedby="tsChart-data"></canvas>
     </div>
     <div class="chart-data sr-only" id="tsChart-data">
@@ -331,107 +271,82 @@
       </table>
       {% else %}No term-structure data.{% endif %}
     </div>
-    <p class="chart-note">X axis is the index tenor in calendar days on a linear scale, so the spacing between points is the real spacing between tenors; points are joined by straight lines (no smoothing).</p>
+    <p class="chart-note">^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session. The x axis is the tenor in calendar days on a linear scale; points are joined by straight lines (no smoothing).</p>
   </div>
 
 </div>
 
-<!-- ── Row 3: Rule-label distribution + PDV model ────────────────────────── -->
-<div class="grid grid-2" style="margin-bottom:16px;">
+<!-- ── Row 3: label history + classifier · PDV model ─────────────────────── -->
+<div class="grid grid-2 row">
 
-  <!-- Rule-label distribution -->
   <div class="card">
-    <h2 class="card-label">Rule-Label Distribution — Full Period ({{ d.reg_span or "—" }})</h2>
-    <div class="mt12">
-      <div class="tiles" style="gap:12px;text-align:center;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));">
-        <div style="padding:14px 8px;border-radius:8px;background:rgba(51,136,255,0.06);border:1px solid rgba(51,136,255,0.18);">
-          <div style="font-size:11px;color:var(--blue);margin-bottom:4px;font-weight:600;">R0 LONG GAMMA</div>
-          <div class="mono" style="font-size:24px;font-weight:700;color:var(--blue);">{{ d.reg0_pct|fmt }}%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ d.reg0_n|fmt(",") }} / {{ d.reg_total|fmt(",") }} days</div>
-          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Buy straddles</div>
-        </div>
-        <div style="padding:14px 8px;border-radius:8px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);">
-          <div style="font-size:11px;color:var(--accent);margin-bottom:4px;font-weight:600;">R1 SHORT GAMMA</div>
-          <div class="mono" style="font-size:24px;font-weight:700;color:var(--accent);">{{ d.reg1_pct|fmt }}%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ d.reg1_n|fmt(",") }} / {{ d.reg_total|fmt(",") }} days</div>
-          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Sell premium</div>
-        </div>
-        <div style="padding:14px 8px;border-radius:8px;background:rgba(255,51,51,0.06);border:1px solid rgba(255,51,51,0.18);">
-          <div style="font-size:11px;color:var(--red);margin-bottom:4px;font-weight:600;">R2 VOMMA ACTIVE</div>
-          <div class="mono" style="font-size:24px;font-weight:700;color:var(--red);">{{ d.reg2_pct|fmt }}%</div>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:4px;">{{ d.reg2_n|fmt(",") }} / {{ d.reg_total|fmt(",") }} days</div>
-          <div style="font-size:10px;color:var(--text3);margin-top:2px;">Vomma trades</div>
-        </div>
+    <h2 class="card-label">Rule-label distribution <span class="qual">· {{ d.reg_span or "—" }}</span></h2>
+    <div class="tiles" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+      {% for k, name, col in [(0, 'R0 long gamma', 'var(--blue)'), (1, 'R1 short gamma', 'var(--accent)'), (2, 'R2 vomma active', 'var(--red)')] %}
+      <div class="subcard" style="border-top:2px solid {{ col }};">
+        <div class="small dim">{{ name }}</div>
+        <div class="card-value sm">{{ d['reg%d_pct' % k]|fmt(".1f") }}<span class="unit">%</span></div>
+        <div class="small faint">{{ d['reg%d_n' % k]|fmt(",") }} of {{ d.reg_total|fmt(",") }} sessions</div>
       </div>
-
-      <div class="divider"></div>
-
-      <div class="kv-2" style="font-size:12px;color:var(--text2);">
-        <div>Out-of-sample accuracy: <span class="mono" style="color:var(--amber);">{{ d.clf_oos_acc|fmt }}%</span></div>
-        <div>Persistence baseline: <span class="mono red">{{ d.clf_persistence_acc|fmt }}%</span></div>
-        <div>Features: <span class="mono">5 (vvix excluded — C16)</span></div>
-        <div>Top Feature: <span class="mono" style="color:var(--yellow);">{% if d.clf_top_feature %}{{ d.clf_top_feature }} ({{ d.clf_top_importance|fmt(".0f") }}%){% else %}—{% endif %}</span></div>
-        <div>Model: <span class="mono">XGBoost 3-class</span></div>
-        <div>Status: <span class="mono red">RESEARCH ONLY (C17)</span></div>
-      </div>
-      <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
-        Accuracy is the shipped model's own evaluation{% if d.clf_test_window %} on {{ d.clf_test_window }}
-        ({{ d.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}.
-        <strong style="color:var(--red);">C17: the classifier loses to the no-skill persistence
-        baseline</strong> ("predict yesterday's regime"; yesterday's label is fully observable).
-        History: C16 reported 86.2% (fixed 100-point VVIX gate, vvix as a feature) and C17 63.4% vs
-        90.0% (fixed labels, a full-sample PDV feature with look-ahead); C22 retrained it on the one
-        adaptive gate with holdout calibration, and the conclusion did not change. The classifier is demoted from the trading loop —
-        the backtest uses the lagged deterministic rule labels directly. Kept here as a documented
-        negative result: regimes are too sticky for daily ML classification to add value.
-      </div>
-    </div>
-  </div>
-
-  <!-- PDV Model Details -->
-  <div class="card">
-    <h2 class="card-label">PDV Model — Guyon-Lekeufack (2023)</h2>
-    <div class="mt12">
-
-      {% if d.pdv_coef %}
-      <div style="
-        background:var(--surface2); border-radius:8px; padding:14px;
-        border:1px solid var(--border); font-family:var(--mono);
-        font-size:12px; color:#aaa; line-height:2;
-      ">
-        <span style="color:var(--text2);">σ̂(t) = </span>
-        <span style="color:var(--yellow);">{{ "{:.3f}".format(d.pdv_coef[0]) }}</span>
-        <span style="color:var(--text2);"> × σ₁ {{ '+' if d.pdv_coef[1] >= 0 else '−' }} </span>
-        <span style="color:var(--yellow);">{{ "{:.3f}".format(d.pdv_coef[1]|abs) }}</span>
-        <span style="color:var(--text2);"> × σ₂ {{ '+' if d.pdv_coef[2] >= 0 else '−' }} </span>
-        <span style="color:var(--yellow);">{{ "{:.3f}".format(d.pdv_coef[2]|abs) }}</span>
-        <span style="color:var(--text2);"> × lev {{ '+' if d.pdv_intercept >= 0 else '−' }} </span>
-        <span style="color:var(--yellow);">{{ "{:.4f}".format(d.pdv_intercept|abs) }}</span>
-      </div>
-      {% endif %}
-
-      <div class="divider"></div>
-
-      <div class="kv-2" style="font-size:12px;color:var(--text2);">
-        <div>σ₁ half-life: <span class="mono">{{ d.pdv_halflives[0]|fmt if d.pdv_halflives else '—' }} days (EWMA)</span></div>
-        <div>σ₂ half-life: <span class="mono">{{ d.pdv_halflives[1]|fmt if d.pdv_halflives else '—' }} days (EWMA)</span></div>
-        <div>Walk-fwd R² (linear): <span class="mono green">0.31</span></div>
-        <div>Walk-fwd R² (kernel): <span class="mono" style="color:var(--yellow);">0.23</span></div>
-        <div>GARCH(1,1) benchmark persistence: <span class="mono">{{ d.pdv_garch_persistence|fmt(".3f") }}</span></div>
-        <div>GARCH(1,1) benchmark β: <span class="mono">{{ d.pdv_garch_beta|fmt(".3f") }}</span></div>
-      </div>
+      {% endfor %}
     </div>
 
     <div class="divider"></div>
 
+    <div class="kv-2">
+      <div>Out-of-sample accuracy: <span class="v">{{ d.clf_oos_acc|fmt }}%</span></div>
+      <div>Persistence baseline: <span class="v">{{ d.clf_persistence_acc|fmt }}%</span></div>
+      <div>Features: <span class="v">{{ d.clf_n_features|fmt }}</span> (vvix excluded — C16)</div>
+      <div>Top feature: <span class="v">{% if d.clf_top_feature %}<code>{{ d.clf_top_feature }}</code> ({{ d.clf_top_importance|fmt(".0f") }}%){% else %}—{% endif %}</span></div>
+      <div>Model: <span class="v">XGBoost, 3 classes</span></div>
+      <div>Status: <span class="chip chip-red">Research only (C17)</span></div>
+    </div>
+    <p class="chart-note">
+      Accuracy is the shipped model's own evaluation{% if d.clf_test_window %} on {{ d.clf_test_window }}
+      ({{ d.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}{% if d.clf_feature_source == 'rv20_proxy' %};
+      its spread feature is the rv₂₀ proxy it was trained on{% endif %}.
+      <strong>C17: the classifier loses to the no-skill persistence baseline</strong> (“predict yesterday's regime”;
+      yesterday's label is fully observable). History: C16 reported 86.2% (fixed 100-point VVIX gate, vvix as a
+      feature) and C17 63.4% vs 90.0% (fixed labels, a full-sample PDV feature with look-ahead); C22 retrained it on
+      the one adaptive gate with holdout calibration, and the conclusion did not change. The backtest uses the lagged
+      deterministic rule labels; a Gaussian HMM in <code>regime_classifier.py</code> is research-only as well.
+      Regimes are too persistent for daily ML classification to add value.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2 class="card-label">PDV model <span class="qual">· EWMA approximation of Guyon–Lekeufack (2023)</span></h2>
+    {% if d.pdv_coef %}
+    <div class="subcard" style="font-size:13px;">
+      <code style="color:var(--text);font-size:13px;">σ̂(t) = {{ d.pdv_coef[0]|fmt(".3f") }}·σ₁ {{ '+' if d.pdv_coef[1] >= 0 else '−' }} {{ d.pdv_coef[1]|abs|fmt(".3f") }}·σ₂ {{ '+' if d.pdv_coef[2] >= 0 else '−' }} {{ d.pdv_coef[2]|abs|fmt(".3f") }}·lev {{ '+' if d.pdv_intercept >= 0 else '−' }} {{ d.pdv_intercept|abs|fmt(".4f") }}</code>
+    </div>
+    {% endif %}
+    <div class="kv-2 mt12">
+      <div>σ₁ half-life: <span class="v">{{ d.pdv_halflives[0]|fmt if d.pdv_halflives else '—' }} days</span></div>
+      <div>σ₂ half-life: <span class="v">{{ d.pdv_halflives[1]|fmt if d.pdv_halflives else '—' }} days</span></div>
+      <div id="pdv-skill">Walk-forward R²: <span class="v">{% if d.pdv_skill %}{{ d.pdv_skill.r2|fmt(".2f") }}{% if d.pdv_skill.r2_ex is not none %} (ex-{{ d.pdv_skill.exclude_year }} {{ d.pdv_skill.r2_ex|fmt(".2f") }}){% endif %}{% else %}—{% endif %}</span></div>
+      <div>GARCH(1,1) benchmark persistence: <span class="v">{{ d.pdv_garch_persistence|fmt(".3f") }}</span></div>
+    </div>
+    {% if d.pdv_skill %}
+    <p class="chart-note">R² of the daily-refitted (purged) walk-forward forecast against realised {{ d.pdv_skill.horizon }}-day RMS vol,
+      {{ "{:,}".format(d.pdv_skill.n) }} forecasts {{ d.pdv_skill.start }} → {{ d.pdv_skill.end }}, recomputed from the database at build time.
+      The equation is the shipped model's full-sample fit; the forecast on the card is the walk-forward one.</p>
+    {% endif %}
+
     {% if d.stress %}
-    <div style="padding:10px;border-radius:6px;background:rgba(255,136,51,0.07);border:1px solid rgba(255,136,51,0.2);">
-      <div style="font-size:11px;font-weight:600;color:var(--orange);margin-bottom:4px;">COVID Stress Test — {{ d.stress.stress_date }}</div>
-      <div style="font-size:11.5px;color:var(--text2);">
-        PDV-linear forecast made at the {{ d.stress.origin }} close (refitted on the {{ "{:,}".format(d.stress.n_train) }} labels known then):
-        <span class="mono" style="color:var(--yellow);">{{ "{:.1f}".format(d.stress.forecast_pct) }}%</span> ann vol.
-        Outcome on {{ d.stress.stress_date }} (the model's target: that day's |r|·√252, one day's move annualised, not a realised volatility): <span class="mono red">{{ "{:.1f}".format(d.stress.actual_pct) }}%</span>.
-        Error: <span class="mono red">{{ "{:+.1f}".format(d.stress.error_pp) }}pp</span> — a backward-looking model cannot see a jump coming.
+    {% set st = d.stress %}
+    <div class="banner banner-warn mt12">
+      <div class="banner-icon" aria-hidden="true">!</div>
+      <div>
+        <div class="banner-title">COVID stress test — {{ st.stress_date }}</div>
+        <div class="banner-body">
+          PDV-linear forecast made at the {{ st.origin }} close (refitted on the {{ "{:,}".format(st.n_train) }} labels known then):
+          <strong>{{ st.forecast_pct|fmt(".1f") }}%</strong>.
+          {% if st.horizon == 1 %}Outcome on {{ st.stress_date }} (the model's target: that day's |r|·√252, one day's move annualised, not a realised volatility):
+          {% else %}Realised over its {{ st.n_window }}-session horizon ({{ st.stress_date }} → {{ st.window_end }}, RMS, annualised):
+          {% endif %}<strong class="red">{{ st.actual_pct|fmt(".1f") }}%</strong>.
+          Error <strong class="red">{{ st.error_pp|fmt("+.1f") }} vol pts</strong> — a backward-looking model cannot see a jump coming.
+        </div>
       </div>
     </div>
     {% endif %}
@@ -455,17 +370,14 @@ vsCharts(function () {
     type: 'line',
     data: {
       datasets: [{
-        label: 'VIX Term Structure',
+        label: 'VIX term structure',
         data: tsDays.map((x, i) => ({ x, y: tsValues[i], tenor: tsLabels[i] })),
-        borderColor: '#00ff88',
-        backgroundColor: 'rgba(0,255,136,0.07)',
-        fill: true,
+        borderColor: VS.series.info,
+        backgroundColor: VS.series.info,
         tension: 0,
-        pointRadius: 5,
-        pointBackgroundColor: '#00ff88',
-        pointBorderColor: '#0a0a0a',
-        pointBorderWidth: 2,
-        borderWidth: 2.5,
+        pointRadius: 4,
+        pointHoverRadius: 5,
+        borderWidth: 2,
       }]
     },
     options: {
@@ -476,20 +388,21 @@ vsCharts(function () {
         tooltip: {
           callbacks: {
             title: items => items.length ? `${items[0].raw.tenor} index{% if d.ts_date %} · {{ d.ts_date }}{% endif %}` : '',
-            label: ctx => `  ${ctx.parsed.y.toFixed(2)} vol pts`
+            label: ctx => `  ${vsNum(ctx.parsed.y, 2)} vol pts`
           }
         }
       },
       scales: {
         x: {
           type: 'linear',
-          ticks: { font: { size: 11 }, callback: v => v + 'd' },
-          title: { display: true, text: 'Tenor (calendar days)', color: VS.title },
+          min: 0,
+          grid: { display: false },
+          ticks: { stepSize: 30, callback: v => v + 'd' },
+          title: { display: true, text: 'Tenor (calendar days)' },
         },
         y: {
-          ticks: { font: { size: 11 },
-                   callback: v => v.toFixed(1) },
-          title: { display: true, text: 'Index level (vol pts)', color: VS.title },
+          ticks: { callback: v => vsNum(v, 1) },
+          title: { display: true, text: 'Index level (vol pts)' },
         },
       },
     }
@@ -507,21 +420,18 @@ vsCharts(function () {
         labels: spkDates,
         datasets: [{
           data: spkData,
-          borderColor: '#00ff88',
-          borderWidth: 1.5,
+          borderColor: VS.title,
+          borderWidth: 1.4,
           pointRadius: 0,
-          fill: { target: 'origin', above: 'rgba(0,255,136,0.08)', below: 'rgba(255,51,51,0.08)' },
-          tension: 0.3,
+          fill: { target: 'origin', above: 'rgba(127,173,247,0.16)', below: 'rgba(240,120,124,0.16)' },
+          tension: 0,
         }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
         animation: false,
         plugins: { legend: { display: false }, tooltip: { enabled: false } },
-        scales: {
-          x: { display: false },
-          y: { display: false },
-        }
+        scales: { x: { display: false }, y: { display: false } }
       }
     });
   }
