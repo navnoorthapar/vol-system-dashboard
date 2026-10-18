@@ -438,7 +438,14 @@ def test_covid_stress_forecast_is_ex_ante(dash):
     b = dash.pdv_stress_forecast(pdv, r2, "2020-03-16")
     assert a["origin"] == "2020-03-13"
     assert a["forecast_pct"] == pytest.approx(b["forecast_pct"], abs=1e-12)
-    assert b["actual_pct"] == pytest.approx(12.0 * np.sqrt(252), rel=1e-12)
+    # The realised side covers the forecast's own horizon (the shipped model is
+    # the 21-session RMS-vol forecast), starting on the stress day.
+    h = int(getattr(pdv, "horizon", 1))
+    assert b["horizon"] == h
+    window = r2.loc["2020-03-16":].iloc[:h]
+    assert b["actual_pct"] == pytest.approx(
+        100.0 * np.sqrt((window ** 2).mean() * 252), rel=1e-12)
+    assert b["actual_pct"] != pytest.approx(a["actual_pct"])   # the stress move counts
 
 
 def test_shipped_front_page_drops_the_hardcoded_stress_and_window_claims(dash):

@@ -496,7 +496,8 @@ class TestCalibrationEntryPoint:
         # q not recorded in live pickles → the calibrator's own default
         from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
         import inspect
-        assert m.q == inspect.signature(JointCalibrator.__init__).parameters["q"].default
+        from joint_vol_calibration.calibration.joint_calibrator import FLAT_CARRY_Q
+        assert m.q == FLAT_CARRY_Q
         assert "JointCalibrator default" in m.source["q_source"]
         assert m.source["calibration_file"].endswith("joint_cal_2026-09-11.pkl")
 

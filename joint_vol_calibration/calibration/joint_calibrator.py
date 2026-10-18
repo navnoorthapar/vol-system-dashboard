@@ -115,6 +115,11 @@ _FELLER_TOL = 1e-4
 # with a spuriously LOW SPX RMSE (C20).
 _MIN_VIX_TENORS = 3
 
+# SPX dividend yield assumed by carry="flat" (and for legacy results that never
+# recorded a q). The default carry="parity" takes q per expiry from put-call
+# parity instead and records it in the result.
+FLAT_CARRY_Q = 0.013
+
 # SPX data sufficiency (C22). The SPX leg has the same failure mode as the VIX
 # leg: fewer data, lower RMSE. A one-expiry fit (every production run
 # 2026-09-08..09-23) has no term structure, so kappa/theta/v0 are free.
@@ -538,7 +543,7 @@ class JointCalibrator:
             self.r_reference_source = f"^IRX 13w bill {d:.4%} discount -> cc"
         # Back-compat attributes (scalar summaries; set from parity below)
         self.r = self.r_reference
-        self.q = 0.013 if self._q_arg is None else float(self._q_arg)
+        self.q = FLAT_CARRY_Q if self._q_arg is None else float(self._q_arg)
 
         self.spx_surface = self._prepare_spx_surface()
         logger.info("  SPX surface: %d anchors across %d expiries (%d puts at K/F<%.2f); "

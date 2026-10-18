@@ -752,10 +752,13 @@ def load_greeks_surface(path: Optional[Path] = None) -> pd.DataFrame:
 # ── RiskMonitor Class ─────────────────────────────────────────────────────────
 
 def _calibrator_default_q() -> float:
-    """The dividend yield JointCalibrator uses when none is recorded."""
-    import inspect
-    from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
-    return float(inspect.signature(JointCalibrator.__init__).parameters["q"].default)
+    """The flat dividend yield JointCalibrator assumes when none is recorded.
+
+    Only legacy (pre-C22) results lack a recorded q; model_version 2 results
+    store the parity-implied median q they actually used.
+    """
+    from joint_vol_calibration.calibration.joint_calibrator import FLAT_CARRY_Q
+    return float(FLAT_CARRY_Q)
 
 
 class RiskMonitor:
