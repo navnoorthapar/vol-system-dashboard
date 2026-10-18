@@ -49,6 +49,7 @@ from joint_vol_calibration.models.heston import (
 )
 from joint_vol_calibration.tests.test_heston_reference import (
     ARCHIVED_FITS,
+    V2_FITS,
     ref_otm_prices,
 )
 
@@ -688,6 +689,9 @@ _MC_CASES = {
     "2026-08-19": _p("2026-08-19"),   # v0 = 1e-4, 2*kappa*theta ~ sigma^2
     "2026-09-11": _p("2026-09-11"),
     "feller_violated": dict(kappa=0.5, theta=0.04, sigma=1.0, rho=-0.9, v0=0.04),
+    # model_version 2 refit: sigma at its 2.0 ceiling, 2 kappa theta / sigma^2 =
+    # 0.2, so most QE steps take the exponential branch (psi > 1.5)
+    "v2:2026-03-24": dict(zip(("kappa", "theta", "sigma", "rho", "v0"), V2_FITS["v2:2026-03-24"])),
 }
 
 
@@ -737,6 +741,33 @@ class TestMonteCarlo:
         half = pS.shape[0] // 2
         pm = 0.5 * (pS[:half, -1] + pS[half:, -1])
         assert abs(pm.mean() - F) < 4 * pm.std(ddof=1) / np.sqrt(half)
+
+    def test_martingale_correction_at_coarse_steps(self):
+        """Monthly steps with kappa*dt ~ 1 (2026-08-19 fit): without Andersen's
+        martingale correction E[S_T] is ~0.4% (15+ SE) above the forward; with
+        it the discretised log-price is an exact martingale step by step."""
+        p = _p("2026-08-19")
+        T = 1.0
+        pS, _ = heston_monte_carlo(_S, T, _r, _q, **p, n_paths=100_000,
+                                   n_steps_per_year=12, seed=7)
+        F = _S * np.exp((_r - _q) * T)
+        half = pS.shape[0] // 2
+        pm = 0.5 * (pS[:half, -1] + pS[half:, -1])
+        assert abs(pm.mean() - F) < 4 * pm.std(ddof=1) / np.sqrt(half)
+
+    @pytest.mark.parametrize("m", [1.0, 1.1])
+    def test_full_truncation_is_not_absorption(self, m):
+        """Full truncation carries the raw (possibly negative) variance; the
+        pre-C22 code floored the state ('absorption'), which priced the 1.1F
+        call at 3x its value at these Feller-binding, v0-floor parameters."""
+        p = _p("2026-08-19")
+        pS, pV = heston_monte_carlo(_S, _T, _r, _q, **p, n_paths=60_000, seed=4,
+                                    scheme="full_truncation")
+        assert (pV >= 0).all()
+        F = _S * np.exp((_r - _q) * _T)
+        analytic = heston_call_price(_S, m * F, _T, _r, _q, **p)
+        mc, se = mc_option_price(pS, m * F, _T, _r, right="C")
+        assert abs(mc - analytic) < 4 * se, (m, mc, analytic, se)
 
     def test_full_truncation_matches_analytic_at_moderate_params(self):
         p = _p("2026-09-11")
@@ -798,6 +829,16 @@ class TestMonteCarlo:
                                   cache_key="k", scheme="qe")
         np.testing.assert_array_equal(b, c)     # served from the qe cache file
         assert len(list(tmp_path.glob("k__*.pkl"))) == 2
+
+    def test_cache_dir_is_created_when_missing(self, tmp_path, monkeypatch):
+        """data_store/mc_cache is gitignored and config no longer creates it at
+        import: on a fresh clone the first cached run raised FileNotFoundError."""
+        missing = tmp_path / "fresh_clone" / "mc_cache"
+        monkeypatch.setattr(heston_mod, "MC_CACHE_DIR", missing)
+        a, _ = heston_monte_carlo(_S, _T, _r, _q, **_PARAMS, n_paths=200, seed=9, cache_key="k")
+        assert (missing / "k__qe_anti.pkl").is_file()
+        b, _ = heston_monte_carlo(_S, _T, _r, _q, **_PARAMS, n_paths=200, seed=10, cache_key="k")
+        np.testing.assert_array_equal(a, b)     # second call is served from the cache
 
 
 if __name__ == "__main__":
