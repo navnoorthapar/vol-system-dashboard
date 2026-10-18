@@ -1545,3 +1545,9 @@ def test_s3_trade_count_is_explained_as_entries_plus_rolls(dash, engine_state, p
     assert (f"{len(s3)} trades in 2018–2025 ({entries} entries plus {rolls} rolls of a position held "
             f"past its straddle's expiry)") in text
     assert f"S3 enters {entries} times in 2018–2025" in text and "S3 fires 39 times" not in text
+
+
+def test_no_double_negative_losses(pages):
+    """'it loses −$274K' / 'It loses −$431K' read as gains."""
+    for route, html in pages.items():
+        assert not re.search(r"\blos(?:es|t|e)\s+[−-]\$", _visible_text(html)), route

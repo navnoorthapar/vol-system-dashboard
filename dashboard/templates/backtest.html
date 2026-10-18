@@ -283,8 +283,8 @@
       <div>Trades <span class="v">{{ d.research_s1c.n_trades }}</span></div>
     </div>
     <p class="chart-note">
-      S1C flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. It loses
-      {{ s1c.get('total_pnl')|usd_k }} on {{ yrs }} and on its 2013–2017 pseudo-out-of-sample check. It stays a sleeve
+      S1C flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. Its P&amp;L
+      on {{ yrs }} is {{ s1c.get('total_pnl')|usd_k }}, and it also lost on its 2013–2017 pseudo-out-of-sample check. It stays a sleeve
       because the portfolio's composition is held fixed across correction rounds so they remain comparable.
     </p>
   </div>
@@ -298,7 +298,7 @@
     </div>
     <p class="chart-note">
       Entry requires z_vrp <em>declining</em> from its peak (post-spike mean reversion, not pre-event entry). With rolling
-      straddles, the rule labels and margin caps it loses {{ s4.get('total_pnl')|usd_k }} on {{ yrs }}; the conclusion has
+      straddles, the rule labels and margin caps, its P&amp;L on {{ yrs }} is {{ s4.get('total_pnl')|usd_k }}; the conclusion has
       held in every revision: VRP is not extractable at these cost levels.
     </p>
   </div>
