@@ -1,0 +1,5 @@
+# Test and lint tools on top of the runtime set.
+-r requirements.txt
+pytest>=9,<10
+pytest-cov>=7,<8
+ruff>=0.6

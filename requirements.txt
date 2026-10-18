@@ -1,13 +1,30 @@
-flask>=3.0.0
-pandas>=2.0.0
-numpy>=1.26.0
-pyarrow>=14.0.0
-scikit-learn>=1.3.0
-scipy>=1.11.0
-xgboost>=2.0.0
-gunicorn>=21.0.0
-yfinance>=0.2.40
-hmmlearn>=0.3.0
-matplotlib>=3.7.0
-requests>=2.31.0
-torch>=2.0.0
+# Runtime dependencies as compatible ranges (`pip install -r requirements.txt`).
+#
+# CI and the daily bot do not resolve these freshly: they install the exact,
+# tested set in requirements-lock.txt (regenerate it with the command at the
+# top of that file whenever this list changes, and let tests.yml gate it).
+#
+# Floors that the shipped artifacts need:
+#   numpy >= 2   data_store pickles reference numpy._core (NumPy 2 layout)
+#   pandas >= 3  data_store/pdv_model.pkl stores pandas-3 ArrowStringArray
+#                columns (pyarrow-backed strings); pandas 2 cannot rebuild them
+#   xgboost >= 3 regime_classifier.pkl carries the booster as XGBoost 3 JSON
+#                (no sklearn/xgboost class pickles remain in data_store/)
+flask>=3.0,<4
+numpy>=2.0,<3
+pandas>=3.0,<4
+pyarrow>=17.0
+scipy>=1.11,<2
+scikit-learn>=1.6,<2
+# Same `xgboost` module; on Linux the -cpu build skips the ~350 MB NCCL wheel.
+xgboost>=3.0,<4; sys_platform != "linux"
+xgboost-cpu>=3.0,<4; sys_platform == "linux"
+hmmlearn>=0.3,<0.4
+matplotlib>=3.7,<4
+requests>=2.31,<3
+yfinance>=0.2.54,<2
+# Needed at runtime: the dashboard's backtest page unpickles TradeRecord, whose
+# import chain reaches models/nn_pricer.py (imports torch at module level).
+# On Linux without a GPU install the CPU wheel:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.4,<3
