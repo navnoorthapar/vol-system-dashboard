@@ -1,8 +1,31 @@
 # I built the 'holy grail of volatility modelling' — then found the bug that faked my P&L
 
+> **Correction (October 2026, C22).** After this article was published, a full audit of the system (about 270 findings,
+> each reproduced before it was fixed) changed several of its central claims. In short:
+>
+> - **The backtest priced ATM straddles at the VIX.** The VIX is a variance-swap rate that contains the skew premium; real
+>   2026 SPX chains put 30-day ATM vol at about 0.82 × VIX. Re-priced at that ratio, with hedge and financing costs, one
+>   consistent R2 gate and a horizon-matched PDV forecast, **S1's "+$463K" (later +$694K) becomes −$288K**. Its profit
+>   existed only at β ≈ 1. The portfolio (S1C + S3 + S4) is **−21.6%, Sharpe −0.88** (rf = 0 on excess P&L, against
+>   T-bills +19.1% over the window), max drawdown −21.6%, NAV $783,908.
+> - **S3's "+$23K" was not option P&L**: it was a z-score change times an assumed 2%, positive on 98% of random-walk null
+>   paths. Priced as the index leg of the dispersion trade it makes +$56K (null-test p = 0.035), positive only for β ≳ 0.8.
+> - **The calibration finding below was mostly an artifact.** ρ pinned at −0.95 came from ATM-call-only anchors; the
+>   "binding Feller constraint" came from a Feller penalty the calibrator imposed on itself; the VIX indices were fitted as
+>   if they were futures; and the 37-vol-pt VIX-options RMSE came from a broken pricer. The corrected 2026-06-18 fit has ρ
+>   = −0.70 (interior), σ = 1.59 (Feller violated, not imposed), SPX 0.85 vp in-sample / 1.83 vp out-of-sample, VIX
+>   index 0.51 pts. There is no "three effective degrees of freedom" result.
+> - The live daily calibration was **effectively down from 2026-09-05 to October**: it fetched too few expiries, sampled an
+>   empty after-hours book, and reported every run as green. That is fixed.
+> - Smaller fixes: "Carr-Madan FFT" (no FFT was used; the engine is now a Lewis contour integral), "eighteen months" (the
+>   project started in March 2026), the classifier figures, the PDV skill comparison and the test count.
+>
+> Claims that are now false are struck through below, with the corrected statement next to them. The full before/after
+> waterfall is in the [README](https://github.com/navnoorthapar/vol-system-dashboard#c22-waterfall-from-the-published-c21-headline-to-todays-number).
+
 Every options desk runs two separate calibration routines: one for the SPX smile and one for the VIX term structure. They're run independently, stored in different systems, and never asked to agree. This works until it doesn't — and when it doesn't, you get a book that's simultaneously long skew and short correlation, or a delta hedge that blows up on a VIX spike your SPX model called "small".
 
-The open problem is joint calibration: find one set of parameters that fits both the SPX smile *and* VIX options *simultaneously*, with the constraint that they're driven by the same instantaneous variance process V(t). That's what this project attempted.
+The hard problem is joint calibration: find one set of parameters that fits both the SPX smile *and* VIX options *simultaneously*, with the constraint that they're driven by the same instantaneous variance process V(t). That's what this project attempted. *(C22: it is not an open problem in the literature — Guyon (2020) and Abi Jaber, Illand & Li (2022) solve it with richer models; it is hard for classical one-factor diffusions like Heston, which is what this project measures.)*
 
 What I want to write about here isn't the calibration. It's the five times I had to correct my own work — the fourth inverted a thesis I'd spent weeks building on top of, and the fifth I found only after the system had been running unattended for a month.
 
@@ -10,24 +33,24 @@ What I want to write about here isn't the calibration. It's the five times I had
 
 ## What we built
 
-Over eighteen months and 14 components, the system covers the full pipeline from raw data to live dashboard:
+~~Over eighteen months~~ Since March 2026, across 14 components, the system covers the full pipeline from raw data to live dashboard:
 
-- **C1–C2**: Data infrastructure + Heston engine (Carr-Madan FFT, vectorised batch pricing)
+- **C1–C2**: Data infrastructure + Heston engine (~~Carr-Madan FFT~~ Lewis (2001) contour integral with a Black-Scholes control variate, vectorised batch pricing; no FFT)
 - **C3**: PDV model (Guyon-Lekeufack 2023) — path-dependent vol from realised path statistics
-- **C4**: Joint calibration engine — one (κ, θ, σ, ρ, v₀) fitting the SPX smile + VIX futures
-- **C5**: Neural network acceleration layer (8.1× speedup, MAE = 0.068 vol pts)
-- **C6**: Second-order Greeks monitor — vomma, vanna, volga across a 69-node surface
+- **C4**: Joint calibration engine — one (κ, θ, σ, ρ, v₀) fitting the SPX smile + ~~VIX futures~~ the VIX term-structure indices (spot-starting, not futures)
+- **C5**: Neural network acceleration layer ~~(8.1× speedup, MAE = 0.068 vol pts)~~ (research prototype; the trained weights are not published, so no speed or accuracy figure is claimed)
+- **C6**: Second-order Greeks monitor — vomma, vanna ~~, volga across a 69-node surface~~ and QV convexity on 79 of 90 grid nodes (volga is vomma)
 - **C7**: Delta-hedged P&L simulation with full attribution (Γ, ν, Θ, residual)
 - **C8**: Volatility regime classifier — XGBoost, 3-way
-- **C9**: Regime-gated trading signals (IVR/PDV, VIX term structure, dispersion, VRP)
+- **C9**: Regime-gated trading signals (~~IVR~~/PDV, VIX term structure, dispersion, VRP)
 - **C10**: Full backtest engine with walk-forward validation and HTML reporting
-- **C11–C13b**: Regime-switching jumps (Merton/BNS), Bates SVJ, SVI/SSVI smoothing, two-factor Quintic OU
+- **C11–C13b**: Regime-switching jumps (Merton; ~~BNS~~ a Lee-Mykland-style daily jump test), Bates SVJ, ~~SVI/SSVI smoothing~~ (never wired in; removed), two-factor Quintic OU
 
-666 unit tests. Zero look-ahead bias enforced at the database query level. Live at [navnoorbawa.me](https://navnoorbawa.me).
+~~666 unit tests~~ A test suite that CI runs on every push (1,342 passed at the C22 commit). Zero look-ahead bias, enforced at the database query level and by mutation-checked look-ahead tests. Live at [navnoorbawa.me](https://navnoorbawa.me).
 
 ---
 
-## The calibration finding: ρ at the boundary
+## The calibration finding: ρ at the boundary *(withdrawn in C22 — see the correction note)*
 
 The Heston model calibrated to the 2026-05-31 surface (SPX = 7,580, VIX ≈ 15) returned:
 
@@ -36,11 +59,19 @@ The Heston model calibrated to the 2026-05-31 surface (SPX = 7,580, VIX ≈ 15) 
 SPX smile RMSE = 0.52 vol pts   ·   Feller PASS
 ```
 
-The SPX leg fits cleanly now — but **ρ is still pinned at its lower boundary** (−0.95, after I'd already tightened it from −0.99). The optimiser still wants more leverage skew than a pure-diffusion model can supply.
+*Correction (C22): that fit used 54 anchors of which 45 were ATM calls, flat r/q, a Sunday-dated snapshot and a VIX leg that
+compared spot-starting indices with model futures (at these parameters the correct index model misses by ~2.95 pts, not
+0.53). Refitted on the same quotes (session 2026-05-29) with the corrected calibrator: κ = 5.23, θ = 0.0595, σ = 1.71,
+ρ = −0.656, v₀ = 0.0130, SPX 0.91 vp in-sample / 1.28 vp out-of-sample, VIX index 0.52 pts, Feller violated (not
+imposed), no parameter on a bound.*
 
-In Heston, ρ governs the leverage effect: when the underlying falls, volatility rises, and the correlation between those Brownian motions sets how steep the put skew is. The market's skew geometry wants either discontinuous paths (jumps, à la Bates 1996) or a vol process with long memory (rough vol, Gatheral 2018). ρ at the wall is Heston waving a white flag — not a calibration failure, a diagnostic. And when I turned the **VIX options leg** on, it priced them at a **37-vol-pt RMSE**: a single σ cannot satisfy both the SPX smile curvature and the VVIX-implied vol-of-vol. I disabled the leg (w₃ = 0.0) and documented the reason rather than hide it behind a fudged weight.
+~~The SPX leg fits cleanly now — but **ρ is still pinned at its lower boundary** (−0.95, after I'd already tightened it from −0.99). The optimiser still wants more leverage skew than a pure-diffusion model can supply.~~ *C22: ρ was pinned because the anchors had no put wing to fit. With a real put wing ρ is interior (−0.66 to −0.82) on every snapshot.*
 
-It turns out ρ has company. The Feller condition 2κθ ≥ σ² is enforced by a soft penalty whose gradient dies at the boundary, so when the smile wants more vol-of-vol than Feller allows, the optimiser parks *exactly* on the constraint. Across 19 archived fits, 11 sit at 2κθ − σ² ≈ −1e-6 — σ matching √(2κθ) to six significant figures. My code called that "Feller FAIL." It isn't a failure; it's a binding constraint, and I'd been reporting an active constraint as a broken model. Corrected, the honest statement is sharper than the original one: **two of five parameters are set by boundaries rather than by the market, so Heston fits this joint surface with three effective degrees of freedom.**
+In Heston, ρ governs the leverage effect: when the underlying falls, volatility rises, and the correlation between those Brownian motions sets how steep the put skew is. The market's skew geometry wants either discontinuous paths (jumps, à la Bates 1996) or a vol process with long memory (rough vol, Gatheral 2018). ~~ρ at the wall is Heston waving a white flag — not a calibration failure, a diagnostic. And when I turned the **VIX options leg** on, it priced them at a **37-vol-pt RMSE**: a single σ cannot satisfy both the SPX smile curvature and the VVIX-implied vol-of-vol.~~ *C22: the 37 vp came from a broken VIX-options pricer (puts by parity with √E[VIX²], spot-VIX vegas, a stale chain). Like for like on 2026-03-24, Heston re-priced on 61 VIX options gives 35.2 vp against the Quintic OU's 2.77 vp, but Heston was not fitted to them, and on the same SPX targets Heston (1.21 vp) beats the Quintic (1.31 vp), whose fit did not converge.* I disabled the leg (w₃ = 0.0) and documented the reason rather than hide it behind a fudged weight *(it stays off because the database holds VIX option quotes for too few sessions)*.
+
+~~It turns out ρ has company. The Feller condition 2κθ ≥ σ² is enforced by a soft penalty whose gradient dies at the boundary, so when the smile wants more vol-of-vol than Feller allows, the optimiser parks *exactly* on the constraint. Across 19 archived fits, 11 sit at 2κθ − σ² ≈ −1e-6 — σ matching √(2κθ) to six significant figures. My code called that "Feller FAIL." It isn't a failure; it's a binding constraint, and I'd been reporting an active constraint as a broken model. Corrected, the honest statement is sharper than the original one: **two of five parameters are set by boundaries rather than by the market, so Heston fits this joint surface with three effective degrees of freedom.**~~
+
+*C22: the constraint was binding because my calibrator imposed a Feller penalty by default. Feller is not a no-arbitrage condition, and the pricer is validated where it fails. With the penalty off, the fits want σ ≈ 1.6–2.0 and violate Feller by a wide margin (2026-06-18: 2κθ = 0.615 vs σ² = 2.532). The corrected finding is narrower: Heston fits the SPX surface (~1 vp in-sample, 1.3–2.0 vp out-of-sample) and the VIX index term structure (0.5–0.9 pts) together only with a Feller-violating vol-of-vol, misses the real VX futures by ~1.8 pts out of sample, and prices VIX options poorly when asked.*
 
 ---
 
@@ -61,9 +92,11 @@ Rank those on RMSE and you don't select the best calibration — **you select th
 
 Two things made it invisible. The quality gate was working — most 1-tenor days collapsed to a degenerate corner (σ→0.001, ρ→0) and were correctly rejected, which made a two-week data outage look like ordinary noise. And no calibration recorded how much data produced it, so nothing on the artifact could have told me. I reconstructed the tenor counts from CI logs.
 
-The fix is unglamorous: require ≥3 VIX tenors before a fit is written or selected, and persist the input counts with every calibration. The lesson is the one this project keeps teaching: **a metric that improves when your data degrades is not a quality metric.** Goodness-of-fit without a degrees-of-freedom check is exactly that metric, and I'd shipped it.
+The fix is unglamorous: require ≥3 VIX tenors before a fit is written or selected, and persist the input counts with every calibration. *(C22 found the same failure on the SPX side — a fit from a single expiry, 9 options, headlined the site on 2026-09-11 at 0.215 vp — so the gate now also requires ≥ 4 SPX expiries, ≥ 30 options and a put wing, and the dashboard headlines the newest passing fit, never the lowest-RMSE one.)* The lesson is the one this project keeps teaching: **a metric that improves when your data degrades is not a quality metric.** Goodness-of-fit without a degrees-of-freedom check is exactly that metric, and I'd shipped it.
 
 **Postscript, five weeks later: the outage was self-inflicted.** The sub-tenor indices exist on Yahoo only as a current-day row, and yfinance treats its end date as exclusive while my downloader documented it as inclusive. A run on the session date dropped the session that had just closed. Every run that fired before midnight UTC was one session stale and could never see those tenors; the only well-identified August calibrations came from runs GitHub happened to delay past midnight, and six of the fourteen it accepted were one-tenor fits. The failure was legible in my own timestamps the whole time. The fix is one day added to an end date, a term-structure row pinned to the spot session, calibrations named by the session they describe, and a cron moved earlier — plus tests that pin all three. The lesson compounds the last one: when a feed fails "intermittently," check whether the intermittency is your own clock.
+
+*Second postscript (C22): it happened again, louder. Until 2026-09-04 the bot never stored the chain it downloaded, so every "daily" fit had refitted a committed snapshot 5–78 days old. When it switched to a live chain on 2026-09-05 it fetched only the first 8 listed expiries, kept Yahoo's implied vols and fell back to last prices, and fired into Cboe's empty after-hours book; from 2026-09-07 the Monday–Thursday fits were rejected and the few accepted ones were single-expiry fits. Every run was green because the script ignored its own return values. The pipeline now selects expiries by tenor, keeps only two-sided quotes with its own parity-forward IVs, fails closed on an empty book, and fails the job when the newest accepted calibration is stale.*
 
 ---
 
@@ -73,32 +106,32 @@ Here's the correction that matters. My straddle backtest engine **re-entered a p
 
 Fixing it inverted my own thesis. I had built a *contrarian* signal (S1C) on the premise that my base signal S1 was a "−$1.53M catastrophe" — clearly, I reasoned, the right move is to do the opposite. That catastrophe was the bug. Corrected:
 
-- **S1 is a profitable regime-gated short-VRP harvester: +$463K, 76% win, 53 of 54 trades short straddles.** It sells rich implied vol in calm regimes.
-- **S1C — the inversion — is the artifact: −$404K.** Inverting a profitable signal is the wrong trade.
+- ~~**S1 is a profitable regime-gated short-VRP harvester: +$463K, 76% win, 53 of 54 trades short straddles.** It sells rich implied vol in calm regimes.~~ *C22: S1 −$287,644 (59% win, 69 trades, all short). It looked profitable because straddles were sold at the VIX instead of ATM vol (≈ 0.82 × VIX); at β = 1 it makes +$2.6M, at β = 0.85 −$50K.*
+- **S1C — the inversion — is the artifact: ~~−$404K~~ −$431,203 (C22).** ~~Inverting a profitable signal is the wrong trade.~~ *C22: neither S1 nor its inversion makes money; S1C also fails its 2013–2017 pseudo-out-of-sample check (−$261K).*
 
-So S1C is demoted. *A thesis that holds only under a bug is not a signal.* And S1's profit isn't a green light either: it's fat-tailed (one −$333K COVID trade, −$99K in 2022), concentrated (top-5 trades = 73% of the profit), and — the caveat that dominates everything — **mark-to-model**. The database holds no historical option prices, so all P&L is Black-Scholes on the VIX-ATM vol, not traded fills.
+So S1C is demoted. *A thesis that holds only under a bug is not a signal.* ~~And S1's profit isn't a green light either: it's fat-tailed (one −$333K COVID trade, −$99K in 2022), concentrated (top-5 trades = 73% of the profit), and~~ *(C22: there is no S1 profit to qualify.)* The caveat that dominates everything: **mark-to-model**. The database holds no historical option prices, so all P&L is Black-Scholes ~~on the VIX-ATM vol~~ at 0.82 × VIX, a ratio estimated from five 2026 chains, not traded fills.
 
-The final, honest portfolio (S1C + S3 + S4, equally weighted): **−26.1% cumulative, Sharpe −1.80, max drawdown −31.5%.**
+The final, honest portfolio (S1C + S3 + S4, equally weighted): ~~**−26.1% cumulative, Sharpe −1.80, max drawdown −31.5%.**~~ **−21.6% cumulative (NAV $783,908), Sharpe −0.88 (rf = 0 on excess P&L; T-bills +19.1% over the window), max drawdown −21.6%, 208 trades** (C22).
 
 ---
 
 ## What broke — the classifier loses to "predict yesterday"
 
-I was proud of the regime classifier: 86.2% accuracy, trained 2010–2019, tested 2020–2025. Then I benchmarked it against a no-skill baseline.
+I was proud of the regime classifier: 86.2% accuracy, trained 2010–2019, tested 2020–2025. Then I benchmarked it against a no-skill baseline. *(C22: the figures in this section were measured on fixed VVIX > 100 labels with a PDV feature that carried look-ahead. On the single adaptive gate the system now uses, the retrained classifier scores 78.7% in-sample and 75.0% out-of-sample against 86.7% for persistence. The conclusion is unchanged.)*
 
-The regime labels are defined by *same-day observables* — realised vol vs VIX for R0/R1, and VVIX above a threshold for R2. That means "predict yesterday's regime" is a perfectly legitimate causal predictor. It scores **90.0%** on 2020+. My honest out-of-sample classifier scores **63.4%** — it *loses by 27 points* to the lag. Part of the original 86.2% was the model recovering its own labelling rule through a circular feature (VVIX, which defines R2). I removed the feature, and the ML model added negative value.
+The regime labels are defined by *same-day observables* — realised vol vs VIX for R0/R1, and VVIX above a threshold for R2. That means "predict yesterday's regime" is a perfectly legitimate causal predictor. It scores **90.0%** on 2020+ *(C22 labels: 86.7%)*. My honest out-of-sample classifier scores **63.4%** *(C22: 75.0%)* — it *loses* to the lag. Part of the original 86.2% was the model recovering its own labelling rule through a circular feature (VVIX, which defines R2). I removed the feature, and the ML model added negative value. *(C22: lagged VVIX is a legitimate predictor, not circular; with it the classifier scores 72.4% out of sample, still below persistence.)*
 
 So the classifier is research-only now. The backtest uses the lagged rule labels directly. This is the kind of result that's embarrassing to find and important to report — and exactly the sort of thing a Sharpe-2 backtest quietly launders.
 
-There's a deeper reason it was never going to work, and it is about the labels, not the model. In any ML project the labels set the noise floor: no model can encode past the information actually in the data, so if the labels are noisy, that noise is the ceiling. So I audited the label *ontology* itself. The R0/R1 boundary is realized vol versus implied vol, and the R2 gate is a VVIX percentile — both hard cutoffs. I re-labelled the entire history under perturbations that sit *inside the data's own measurement noise*: a ±1-day change in the 20-day realized-vol window, and ±0.5 vol points on VIX. **5.8% of the labels flip**, and **10% of days sit within a single vol point of the R0/R1 cut**, where the label is essentially a coin toss. That ~6% is a hard ceiling set by the ontology, and the classifier lands at 63.4% — nowhere near it, because it is also fighting the fact that these labels are same-day observables that "predict yesterday" already nails. The lesson I keep relearning is that a real ML project is maybe 50% evaluation and 40% data and labels; the training is the easy 2%. Not a day goes by without me thinking about the ontology, and even the old labels have to be reviewed constantly. You cannot train your way under the noise floor; you can only clean the ontology or accept the bound. *(Reproducible: `regime_label_noise_audit()`.)*
+There's a deeper reason it was never going to work, and it is about the labels, not the model. In any ML project the labels set the noise floor: no model can encode past the information actually in the data, so if the labels are noisy, that noise is the ceiling. So I audited the label *ontology* itself. The R0/R1 boundary is realized vol versus implied vol, and the R2 gate is a VVIX percentile — both hard cutoffs. I re-labelled the entire history under perturbations that sit *inside the data's own measurement noise*: a ±1-day change in the 20-day realized-vol window, and ±0.5 vol points on VIX. **5.8% of the labels flip**, and **10% of days sit within a single vol point of the R0/R1 cut**, where the label is essentially a coin toss. That ~6% flip rate puts the accuracy ceiling near 94%, persistence already reaches ~87–90%, and the classifier lands at 63.4% *(C22: 75.0%)* — nowhere near it, because it is also fighting the fact that these labels are same-day observables that "predict yesterday" already nails. The lesson I keep relearning is that a real ML project is maybe 50% evaluation and 40% data and labels; the training is the easy 2%. Not a day goes by without me thinking about the ontology, and even the old labels have to be reviewed constantly. You cannot train your way under the noise floor; you can only clean the ontology or accept the bound. *(Reproducible: `regime_label_noise_audit()`.)*
 
 ---
 
 ## What actually survived
 
-**PDV: ~30% of next-day |return| variance, walk-forward — but the "4x over naive" I first claimed was a strawman.** I originally wrote "R² = 0.31 vs 0.08 naive, a 4x win." That comparison was unfair to the baseline, and a reviewer caught it. The 0.08 is a 20-day realised-vol forecast's *uncalibrated* R²: a 20-day RV runs about 25% hot versus E|r| (RV tracks σ, but E|r| ≈ 0.8σ), so it gets penalised for scale, not for lack of information. PDV is OLS-fit, so it gets that rescaling for free. On a fair, scale-invariant basis (squared correlation), PDV explains ~0.30, a 20-day moving average ~0.20, and a parameter-free RiskMetrics EWMA or a GARCH(1,1) ~0.24. So the path-dependent Guyon-Lekeufack structure does add genuine skill over a trivial vol forecaster — but the honest margin is ~0.30 vs ~0.24, a modest edge, not 4x. Volatility is the most forecastable object in markets; most of what any of these models captures is plain vol clustering. (Reproducible: `forecast_skill_comparison()`.)
+**PDV: ~30% of next-day |return| variance, walk-forward — but the "4x over naive" I first claimed was a strawman.** *(C22: much of that pooled 0.31 comes from 2020; ex-2020 it is 0.20. The forecast compared with the VIX is now a 21-day RMS-vol forecast, walk-forward R² 0.29, ex-2020 0.27.)* I originally wrote "R² = 0.31 vs 0.08 naive, a 4x win." That comparison was unfair to the baseline, and a reviewer caught it. The 0.08 is a 20-day realised-vol forecast's *uncalibrated* R²: a 20-day RV runs about 25% hot versus E|r| (RV tracks σ, but E|r| ≈ 0.8σ), so it gets penalised for scale, not for lack of information. PDV is OLS-fit, so it gets that rescaling for free. On a fair, scale-invariant basis (squared correlation, every model scored on the same out-of-sample rows), PDV explains ~~~0.30, a 20-day moving average ~0.20, and a parameter-free RiskMetrics EWMA or a GARCH(1,1) ~0.24~~ 0.31, a 20-day moving average 0.21, a RiskMetrics EWMA 0.21, and a walk-forward GARCH(1,1) 0.25 (0.27 if GARCH is fitted in-sample) (C22). So the path-dependent structure (an EWMA approximation of Guyon-Lekeufack, not a replication) does add skill over a trivial vol forecaster — but the honest margin over GARCH is ~0.31 vs ~0.25, a modest edge, not 4x. Volatility is the most forecastable object in markets; most of what any of these models captures is plain vol clustering. (Reproducible: `forecast_skill_comparison()`.)
 
-**S3 dispersion: +$23K, 73% win, 22 trades in seven years.** The VIX/VVIX ratio as a proxy for implied correlation flagged low-correlation regimes where long dispersion was cheap. No short leg, no complex hedging — a directional bet on a z-score with a 30-day max hold. It is the **only** signal positive at every tested P&L scale and in pseudo-OOS, and it was **unchanged by the strike-rolling fix** because it never re-entered same-day. The simplest signal in the system was the only one with a positive expectation that survived every correction. It's also too small and too rare to be a business.
+**S3 dispersion: ~~+$23K, 73% win, 22 trades in seven years~~ +$56K, 49% win, 39 trades in seven years (C22).** The VIX/VVIX ratio as a proxy for implied correlation flagged low-correlation regimes where long dispersion was cheap. ~~No short leg, no complex hedging — a directional bet on a z-score with a 30-day max hold. It is the **only** signal positive at every tested P&L scale and in pseudo-OOS, and it was **unchanged by the strike-rolling fix** because it never re-entered same-day.~~ *C22: the old P&L was a z-score change times an assumed 2% per unit — not option P&L, and positive on 98% of random-walk null paths. S3 is now priced as the index leg of the dispersion trade (a short SPX straddle) on the same engine; its timing beats 200 null paths (p = 0.035), but it is positive only for β ≳ 0.8 and earns less than T-bills.* The simplest signal in the system is still the only one with a positive number in the canonical run. It's also too small, too model-dependent and too rare to be a business.
 
 ---
 
@@ -106,12 +139,12 @@ There's a deeper reason it was never going to work, and it is about the labels, 
 
 Every hedge fund backtest showing Sharpe > 2 has look-ahead bias somewhere — in the feature construction, the regime labels, the vol surface used for pricing, or the cost model. Usually more than one.
 
-The 666 tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. The correction history reads: look-ahead → circular feature → label noise → stale-strike bug. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
+The ~~666~~ tests in this system (1,342 at the C22 commit) exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. *(C22 showed what tests of the code cannot catch: an assumption — straddles priced at the VIX — that no test questioned.)* The correction history reads: look-ahead → circular feature → label noise → stale-strike bug *→ broken-data selector → test-fixture cash hurdle → VIX-as-ATM-vol*. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
 
-The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
+The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ~~ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would~~ *(C22: ρ at the boundary turned out to be my anchors, not the model)* — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
 
 The code is at [github.com/navnoorthapar/vol-system-dashboard](https://github.com/navnoorthapar/vol-system-dashboard). The live dashboard is at [navnoorbawa.me](https://navnoorbawa.me).
 
 ---
 
-*Built in Python. Heston via Carr-Madan FFT. PDV after Guyon & Lekeufack (2023). Joint calibration via differential evolution + L-BFGS-B polish. All backtest P&L is mark-to-model (Black-Scholes on VIX-ATM vol). Data: Yahoo Finance, CBOE free historical.*
+*Built in Python. Heston via ~~Carr-Madan FFT~~ the Lewis (2001) contour integral. PDV after Guyon & Lekeufack (2023). Joint calibration via differential evolution + L-BFGS-B polish. All backtest P&L is mark-to-model (Black-Scholes at 0.82 × VIX). Data: Yahoo Finance, Cboe free historical (including VX futures).*
