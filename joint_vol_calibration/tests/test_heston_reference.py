@@ -19,8 +19,14 @@ The references are written from scratch here:
 The parameter sets include every archived production fit as of 2026-10-12
 (data_store/calibrations/joint_cal_*.pkl, captured below so the test does not
 depend on files that change daily), six of which have v0 at its 1e-4 floor,
-plus Feller-violating and moment-explosion corners.
+the four model_version 2 refits (sigma 1.6-2.0, Feller violated by a wide
+margin), Feller-violating and moment-explosion corners, and the slow-decay
+corners of HESTON_BOUNDS. Those last ones are checked against a separate
+reference (ref_otm_prices_qawf: scipy.quad's QAWF Fourier-integral routine to
+infinity), because the CF there decays too slowly for the Gauss-Legendre one.
 """
+
+import warnings
 
 import numpy as np
 import pytest
@@ -91,6 +97,16 @@ ARCHIVED_FITS = {
     "2026-10-09": (3.045683566327438, 0.047224295186613204, 0.536340311688529, -0.9499983810735141, 0.00841088583081257),
 }
 
+# (kappa, theta, sigma, rho, v0) of the four model_version 2 refits committed with
+# C22 (joint_cal_2026-03-24/03-27/05-29/06-18.pkl, captured 2026-10-18): the
+# parameters the dashboard and the Greeks surface now use.
+V2_FITS = {
+    "v2:2026-03-24": (6.139935672918504, 0.06527375451942208, 1.9999999626631524, -0.822745050048642, 0.07315170233939909),
+    "v2:2026-03-27": (4.291927145055175, 0.07331212683029609, 1.8333848837061908, -0.7851294342326364, 0.09285163585217106),
+    "v2:2026-05-29": (5.233313786335099, 0.059523928095091924, 1.7068916622559518, -0.6559327601165581, 0.013005990771043753),
+    "v2:2026-06-18": (5.01580541633441, 0.061304632479580554, 1.5912446338071686, -0.6977308480420479, 0.017277326025855404),
+}
+
 STRESS_SETS = {
     "base":           (2.0, 0.04, 0.3, -0.7, 0.04),
     "feller_violated": (0.5, 0.04, 1.0, -0.9, 0.04),
@@ -99,7 +115,15 @@ STRESS_SETS = {
     "small_sigma":    (2.0, 0.04, 1e-3, -0.5, 0.04),
 }
 
-ALL_SETS = {**ARCHIVED_FITS, **STRESS_SETS}
+# Corners of HESTON_BOUNDS where the CIR variance is stuck near 0 with rare huge
+# excursions (Feller ratio 2 kappa theta / sigma^2 = 5e-6): the CF decays very
+# slowly AND the log-price has fat tails, so the trapezoid needs ~1M nodes.
+SLOW_DECAY_CORNERS = {
+    "corner_rho095": (0.1, 1e-4, 2.0, -0.95, 1e-4),
+    "corner_rho0":   (0.1, 1e-4, 2.0, 0.0, 1e-4),
+}
+
+ALL_SETS = {**ARCHIVED_FITS, **V2_FITS, **STRESS_SETS}
 
 _S, _R, _Q = 7600.0, 0.037, 0.013
 
@@ -186,6 +210,50 @@ def ref_otm_prices(S, strikes, T, r, q, params, jumps=(0.0, 0.0, 0.0)):
     return prices, np.where(is_call, "C", "P")
 
 
+def ref_otm_prices_qawf(S, strikes, T, r, q, params):
+    """
+    Out-of-the-money prices by the Lewis formula with a different quadrature:
+    adaptive scipy.quad on [0, A] and QUADPACK's QAWF routine (scipy.quad with
+    weight='cos'/'sin' and an infinite upper limit) on [A, inf). QAWF sums the
+    oscillatory tail cycle by cycle with extrapolation, so it needs no
+    truncation point and handles a CF that decays slowly. Returns (prices, rights).
+    """
+    kappa, theta, sigma, rho, v0 = params
+    F = S * np.exp((r - q) * T)
+    df = np.exp(-r * T)
+    w = theta * T + (v0 - theta) * (-np.expm1(-kappa * T)) / kappa
+    A = 40.0 / np.sqrt(w)
+
+    def cf(u):
+        return np.exp(_ref_log_cf(u - 0.5j, T, kappa, theta, sigma, rho, v0))
+
+    re = lambda u: float(cf(u).real) / (u * u + 0.25)
+    im = lambda u: float(cf(u).imag) / (u * u + 0.25)
+    prices, rights = [], []
+    for K in np.asarray(strikes, dtype=float):
+        x = float(np.log(F / K))
+        full = lambda u: float((np.exp(1j * u * x) * cf(u)).real) / (u * u + 0.25)
+        edges = np.concatenate([[0.0], np.geomspace(0.05 / np.sqrt(w), A, 40)])
+        head = 0.0
+        for a, b in zip(edges[:-1], edges[1:]):
+            pieces = np.linspace(a, b, max(1, int(np.ceil(abs(x) * (b - a) / (40 * np.pi)))) + 1)
+            for aa, bb in zip(pieces[:-1], pieces[1:]):
+                head += integrate.quad(full, aa, bb, limit=400, epsabs=1e-15, epsrel=1e-13)[0]
+        if abs(x) < 1e-3:       # (near-)ATM: no oscillation to exploit
+            tail = integrate.quad(full, A, np.inf, limit=2000, epsabs=1e-15, epsrel=1e-13)[0]
+        else:
+            # int_A^inf Re(e^{iux} cf) = int_0^inf [cos(x(A+t)) re(A+t) - sin(x(A+t)) im(A+t)] dt
+            c, s = np.cos(A * x), np.sin(A * x)
+            qawf = lambda f, kind: integrate.quad(lambda t: f(A + t), 0, np.inf, weight=kind,
+                                                 wvar=x, limlst=400, epsabs=1e-15)[0]
+            tail = ((c * qawf(re, "cos") - s * qawf(re, "sin"))
+                    - (s * qawf(im, "cos") + c * qawf(im, "sin")))
+        is_call = K >= F
+        prices.append(df * ((F if is_call else K) - np.sqrt(F * K) / np.pi * (head + tail)))
+        rights.append("C" if is_call else "P")
+    return np.array(prices), np.array(rights)
+
+
 def _black76(F, K, T, df, vol, right):
     sd = vol * np.sqrt(T)
     d1 = np.log(F / K) / sd + 0.5 * sd
@@ -241,6 +309,18 @@ class TestReferenceIsSound:
             call = np.exp(-_R * T) * (F * p1 - K * p2)
             gp = _otm_from_call(call, _S, K, T, _R, _Q, right)
             assert abs(gp - px) < 1e-7, (K / F, gp, px)
+
+
+    @pytest.mark.parametrize("name", ["base", "2026-08-19", "v2:2026-03-24"])
+    def test_qawf_reference_matches_gauss_legendre_reference(self, name):
+        """The two references share only the CF; their quadratures differ."""
+        p = ALL_SETS[name]
+        for T in [7 / 365, 91 / 365, 1.0]:
+            F = _S * np.exp((_R - _Q) * T)
+            strikes = np.array([0.7, 0.9, 1.0, 1.1, 1.3]) * F
+            gl, _ = ref_otm_prices(_S, strikes, T, _R, _Q, p)
+            qw, _ = ref_otm_prices_qawf(_S, strikes, T, _R, _Q, p)
+            np.testing.assert_allclose(qw, gl, rtol=0, atol=1e-9 * F)
 
 
 # ── Pricing engine vs reference ──────────────────────────────────────────────
@@ -318,6 +398,30 @@ class TestBatchPricerAccuracy:
         refs, rights = ref_otm_prices(_S, strikes, T, _R, _Q, p)
         model = [_otm_from_call(c, _S, K, T, _R, _Q, rt) for c, K, rt in zip(calls, strikes, rights)]
         np.testing.assert_allclose(model, refs, atol=0.01)
+
+    @pytest.mark.parametrize("name", list(SLOW_DECAY_CORNERS))
+    def test_slow_decay_corners_of_the_bounds(self, name):
+        """theta = v0 = 1e-4, sigma = 2, kappa = 0.1: the step must be small (fat
+        tails) and the truncation point large (slow CF decay). With the former
+        2**16 node cap the engine stopped refining and was 0.8 vp (1y, rho
+        -0.95) and 0.14 vp (rho 0) off, three times the price on a 1y 1.3F call."""
+        p = SLOW_DECAY_CORNERS[name]
+        worst = 0.0
+        for Td in [30, 91, 365]:
+            T = Td / 365.0
+            F = _S * np.exp((_R - _Q) * T)
+            strikes = np.array([0.7, 0.8, 0.9, 0.97, 1.03, 1.1, 1.2, 1.3]) * F
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)   # the cap may still be hit
+                calls = heston_call_batch(_S, strikes, T, _R, _Q, *p)
+            refs, rights = ref_otm_prices_qawf(_S, strikes, T, _R, _Q, p)
+            for K, c, ref, right in zip(strikes, calls, refs, rights):
+                model = _otm_from_call(c, _S, K, T, _R, _Q, right)
+                assert abs(model - ref) < 1e-6 * F, (Td, K / F, model, ref)
+                if ref >= 1e-5 * F:
+                    worst = max(worst, abs(ref_iv(model, _S, K, T, _R, _Q, right)
+                                           - ref_iv(ref, _S, K, T, _R, _Q, right)) * 100.0)
+        assert worst < 0.01, f"{name}: max IV error {worst:.4f} vp"
 
     @pytest.mark.parametrize("name", ["base", "2026-08-19", "sigma2_rho095"])
     def test_single_pricer_is_the_batch_engine(self, name):
@@ -469,7 +573,8 @@ def _ncx2_expected_vix(kappa, theta, sigma, v0, T, tau=30 / 365, jump_var=0.0):
 
 class TestVixFuturesExact:
 
-    _SETS = ["2026-05-31", "2026-03-24", "2026-08-19", "base", "feller_violated"]
+    _SETS = ["2026-05-31", "2026-03-24", "2026-08-19", "base", "feller_violated",
+             "v2:2026-03-24", "v2:2026-06-18"]
 
     @pytest.mark.parametrize("name", _SETS)
     def test_matches_ncx2_quadrature(self, name):
@@ -479,7 +584,7 @@ class TestVixFuturesExact:
         ref = [_ncx2_expected_vix(kappa, theta, sigma, v0, t) for t in T]
         np.testing.assert_allclose(got, ref, rtol=0, atol=1e-8)
 
-    @pytest.mark.parametrize("name", ["2026-05-31", "2026-03-24", "2026-08-19"])
+    @pytest.mark.parametrize("name", ["2026-05-31", "2026-03-24", "2026-08-19", "v2:2026-03-24"])
     def test_matches_exact_cir_sampling(self, name):
         kappa, theta, sigma, rho, v0 = ALL_SETS[name]
         rng = np.random.default_rng(20261012)

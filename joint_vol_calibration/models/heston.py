@@ -216,7 +216,13 @@ def characteristic_function(
 # accurate: the old fixed 512-point / v<=300 grid was not.
 
 _PRICE_RTOL = 1e-10          # target quadrature error, as a fraction of DF*F
-_LEWIS_MAX_NODES = 2**16     # cap on trapezoid nodes per slice (degenerate corners)
+# Cap on trapezoid nodes per slice. Only near-degenerate corners reach it:
+# theta = v0 = 1e-4 with sigma = 2 and kappa = 0.1 (CIR stuck near zero with
+# rare huge excursions) needs both a slowly decaying CF (large U) and fat
+# tails (small h), ~0.9M nodes at T = 1y. 2**16 was too low there (0.8 vp
+# error at 1y, with a warning); 2**20 is accurate to 5e-9 * F on every corner
+# of HESTON_BOUNDS at ~1 s per slice. Typical slices use a few hundred nodes.
+_LEWIS_MAX_NODES = 2**20
 _LEWIS_BLOCK = 4096          # nodes per vectorised block (bounds memory)
 
 
@@ -436,9 +442,12 @@ def heston_call_batch(
     an independent Lewis/Gauss-Legendre reference to < 0.01 implied-vol points
     for T from 1 day to 1 year, K/F in [0.7, 1.3] (options worth at least
     1e-5 x F), on every archived fit including those with v0 at its 1e-4
-    floor (tests/test_heston_reference.py). Typical cost: ~1 ms per 25-strike
-    slice; degenerate corners (e.g. theta = v0 = 1e-4 with sigma = 2) hit the
-    node cap, cost ~0.1 s and emit a RuntimeWarning.
+    floor, the model_version 2 fits (sigma 1.6-2.0) and the slow-decay corners
+    of HESTON_BOUNDS (tests/test_heston_reference.py). Typical cost: 1-3 ms
+    per 25-strike slice (~10 ms at 1 day with v0 = 1e-4); the degenerate
+    corner theta = v0 = 1e-4, sigma = 2, kappa = 0.1 needs up to ~1M nodes
+    (~1 s per slice). A RuntimeWarning is emitted whenever the step
+    refinement cannot confirm the 1e-10 target within the node cap.
 
     Parameters
     ----------
