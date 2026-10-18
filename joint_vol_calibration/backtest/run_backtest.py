@@ -333,7 +333,8 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
 
 def _print_null(null: Dict) -> None:
     print(f"\n  S3 timing null test ({null['method']}, {null['n_paths']} paths, seed {null['seed']}):")
-    print(f"  real trades {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}")
+    print(f"  real S3 entries {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}"
+          f"  (engine S3 pass-1 P&L ${null['engine_pass1_pnl']:,.0f})")
     for key, lbl in (("index_leg", "S3 index leg (short SPX straddle)"),
                      ("z_proxy", "pre-C22 z-unit proxy")):
         s = null[key]

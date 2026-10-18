@@ -1374,8 +1374,11 @@ class BacktestEngine:
         nav_const = pd.Series(self.initial_capital, index=sig_df.index, dtype=float)
         spx_close = spx_idx["close"]
         _r = _rate_series if _rate_series is not None else self.r
+        # Everything the S3 null test needs to re-run SignalEngine exactly as
+        # here (full history, same regimes and PDV series) on synthetic ratios.
         self._market = {"spx_close": spx_close, "vix_idx": vix_idx, "r": _r,
-                        "nav_base": nav_const}
+                        "nav_base": nav_const, "spx_col": spx_col, "vix_col": vix_col,
+                        "regimes": rule_regimes, "pdv_vol": wf_pdv_vol}
 
         def _straddle(pos, kel, label):
             return _simulate_straddle_pnl(
@@ -1723,8 +1726,14 @@ def s3_timing_null_test(
                              real daily log-change std, started at the real
                              first value
       method='permutation' : the real daily log-changes in shuffled order
-    Each null path keeps the real regime gate, the real SPX/VIX market,
-    the engine's β and corrections, and base (pass-1) sizing.
+    Each path replaces ^VVIX by ^VIX / synthetic ratio over the WHOLE
+    history the engine was given (sessions with no real VVIX print stay
+    missing) and re-runs SignalEngine.generate exactly as engine.run() did:
+    same spx/VIX history, precomputed regimes and PDV series, trailing
+    z-scores warmed up on pre-window data, entries only inside the window.
+    ^VVIX feeds nothing but S3, so every other input — the regime gate, the
+    SPX/VIX market the straddles are priced on, β, the corrections and base
+    (pass-1) sizing — is the real one. Only S3's timing changes.
 
     Two statistics are compared with their null distributions:
       index_leg : total P&L of S3 priced as a short SPX straddle (the
@@ -1735,62 +1744,72 @@ def s3_timing_null_test(
 
     p_value = (1 + #{null ≥ real}) / (n_paths + 1), one-sided.
 
-    The real statistic is recomputed through the SAME pipeline as the null
-    paths (generate_signal3 on the backtest-window features), so the
-    comparison is like-for-like even if SignalEngine builds S3's trailing
-    z-score from longer history; ``engine_pass1_pnl`` is the engine's own S3
-    pass-1 P&L for reference. Requires engine.run() to have been called.
+    The real statistic goes through the same function on the real ^VVIX, so
+    it IS the engine's pass-1 S3 P&L: ``engine_pass1_pnl`` (the engine's
+    own number) must equal index_leg['real'] (z_proxy['real'] when the
+    engine runs the legacy proxy). Before this was re-based on
+    SignalEngine, the null re-built S3 from the backtest-window features
+    alone, so its "real" S3 warmed its 252-day z-score up inside the window
+    and was not the S3 the engine trades (2018-2025: 26 entries, first on
+    2018-07-16, +$110,675, against the engine's first entry on 2018-01-04
+    and +$41,952 at pass-1 size). Requires engine.run() to have been called.
     """
-    from joint_vol_calibration.signals.signal_engine import (
-        S3_LOOKBACK, generate_signal3,
-    )
-
+    if method not in ("random_walk", "permutation"):
+        raise ValueError(f"unknown method {method!r}")
     if engine.signals_df is None or not engine._market:
         raise RuntimeError("Run the engine before the S3 null test.")
-    sig = engine.signals_df
     mk = engine._market
     c = engine.corrections
-    feats = sig[["vix", "vvix"]].copy()
-    regimes = sig["regime"].astype(int)
     nav = mk["nav_base"]
+    vix_col = mk["vix_col"]
+    sig_engine = SignalEngine(clf=None)
 
-    def _z(ratio: pd.Series) -> pd.Series:
-        mu = ratio.rolling(S3_LOOKBACK, min_periods=S3_LOOKBACK // 2).mean()
-        sd = ratio.rolling(S3_LOOKBACK, min_periods=S3_LOOKBACK // 2).std().clip(lower=1e-6)
-        return (ratio - mu) / sd
-
-    def _stats(f: pd.DataFrame) -> Tuple[float, float, int]:
-        s3 = generate_signal3(f, regimes)
-        pos, kel = s3["s3_position"], s3["s3_kelly"]
+    def _stats(vix_df: pd.DataFrame) -> Tuple[float, float, int]:
+        sig = sig_engine.generate(
+            mk["spx_col"], vix_df,
+            start_date=engine.start_date, end_date=engine.end_date,
+            precomputed_regimes=mk["regimes"], precomputed_pdv_vol=mk["pdv_vol"],
+        )
+        pos, kel = sig["s3_position"], sig["s3_kelly"]
         leg, _ = _simulate_straddle_pnl(
             engine.s3_leg_direction * pos, kel, nav, mk["spx_close"], mk["vix_idx"],
             r=mk["r"], q=engine.q,
             signal_label="s3", atm_to_vix_ratio=engine.atm_to_vix_ratio, corrections=c,
         )
-        ratio = f["vix"] / f["vvix"].clip(lower=1e-6)
-        proxy, _ = _simulate_s3_pnl(pos, kel, nav, _z(ratio), corrections=c)
-        n_trades = int(((pos != 0) & (pos.shift(1, fill_value=0) == 0)).sum())
-        return float(leg.sum()), float(proxy.sum()), n_trades
+        z = _build_s3_zscore(vix_df).reindex(sig.index)
+        proxy, _ = _simulate_s3_pnl(pos, kel, nav, z, corrections=c)
+        n_entries = int(((pos != 0) & (pos.shift(1, fill_value=0) == 0)).sum())
+        return float(leg.sum()), float(proxy.sum()), n_entries
 
-    real_leg, real_proxy, real_n = _stats(feats)
+    se_logger = logging.getLogger(SignalEngine.__module__)
+    level = se_logger.level
+    se_logger.setLevel(max(level, logging.WARNING))     # one INFO line per path otherwise
+    try:
+        real_leg, real_proxy, real_n = _stats(vix_col)
 
-    log_ratio = np.log((feats["vix"] / feats["vvix"].clip(lower=1e-6)).clip(lower=1e-9))
-    steps = log_ratio.diff().dropna().values
-    rng = np.random.default_rng(seed)
-    null_leg, null_proxy, null_n = [], [], []
-    for _ in range(n_paths):
-        if method == "random_walk":
-            inc = rng.normal(0.0, steps.std(ddof=1), len(log_ratio) - 1)
-        elif method == "permutation":
-            inc = rng.permutation(steps)
-        else:
-            raise ValueError(f"unknown method {method!r}")
-        path = log_ratio.iloc[0] + np.concatenate([[0.0], np.cumsum(inc)])
-        f = pd.DataFrame({"vix": np.exp(path), "vvix": 1.0}, index=feats.index)
-        a, b, n = _stats(f)
-        null_leg.append(a)
-        null_proxy.append(b)
-        null_n.append(n)
+        vix = pd.to_numeric(vix_col["^VIX"], errors="coerce").to_numpy(dtype=float)
+        vvix = pd.to_numeric(vix_col["^VVIX"], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(vix) & np.isfinite(vvix) & (vix > 0) & (vvix > 0)
+        log_ratio = np.log(vix[ok] / vvix[ok])
+        steps = np.diff(log_ratio)
+        rng = np.random.default_rng(seed)
+        null_leg, null_proxy, null_n = [], [], []
+        for _ in range(n_paths):
+            if method == "random_walk":
+                inc = rng.normal(0.0, steps.std(ddof=1), len(steps))
+            else:
+                inc = rng.permutation(steps)
+            path = log_ratio[0] + np.concatenate([[0.0], np.cumsum(inc)])
+            syn = np.full(len(vix_col), np.nan)
+            syn[ok] = vix[ok] / np.exp(path)
+            f = vix_col.copy()
+            f["^VVIX"] = syn
+            a, b, n = _stats(f)
+            null_leg.append(a)
+            null_proxy.append(b)
+            null_n.append(n)
+    finally:
+        se_logger.setLevel(level)
 
     def _summ(real: float, null: List[float]) -> Dict:
         arr = np.asarray(null)
@@ -1805,7 +1824,9 @@ def s3_timing_null_test(
     return {
         "method": method, "n_paths": n_paths, "seed": seed,
         "engine_pass1_pnl": float(engine._pass1_pnl["s3"].sum()) if "s3" in engine._pass1_pnl else np.nan,
-        "real_trades": real_n, "null_mean_trades": float(np.mean(null_n)),
+        # entries (flat → on), not trade records: an S3 position held past
+        # the straddle's 21-session expiry is rolled into a new record
+        "real_trades": real_n, "null_mean_trades": float(np.mean(null_n)) if null_n else np.nan,
         "index_leg": _summ(real_leg, null_leg),
         "z_proxy": _summ(real_proxy, null_proxy),
     }

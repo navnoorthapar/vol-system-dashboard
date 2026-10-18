@@ -319,6 +319,52 @@ class TestS3:
         with pytest.raises(ValueError):
             bte.s3_timing_null_test(engine, n_paths=1, method="bootstrap")
 
+    def test_null_real_statistic_is_the_engines_s3(self, engine):
+        """The null's 'real' must be the S3 the engine trades. It used to be
+        rebuilt from the window's features alone, so its z-score warmed up
+        inside the window and missed the engine's early-window trades (on
+        2018-2025: 26 entries from 2018-07-16, +$110,675, vs the engine's
+        +$41,952 from 2018-01-04)."""
+        sig = engine.signals_df
+        first = sig.index[sig["s3_position"] != 0][0]
+        # the fixture must exercise the warm-up: S3 trades before a 126-session
+        # in-window warm-up could have completed
+        assert sig.index.get_loc(first) < 126
+        res = bte.s3_timing_null_test(engine, n_paths=2, seed=1)
+        assert res["index_leg"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
+        entries = int(((sig["s3_position"] != 0) & (sig["s3_position"].shift(1, fill_value=0) == 0)).sum())
+        assert res["real_trades"] == entries
+
+    def test_null_real_statistic_is_the_legacy_proxy_when_engine_runs_it(self):
+        spx, vix = _rw_market()
+        eng = BacktestEngine(start_date="2018-01-02", end_date="2019-09-30",
+                             corrections=C22Corrections().with_(s3_index_leg=False))
+        eng.run(spx, vix)
+        res = bte.s3_timing_null_test(eng, n_paths=1, seed=1)
+        assert res["z_proxy"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
+
+    def test_null_paths_change_only_vvix(self, engine, monkeypatch):
+        """Each null path re-runs SignalEngine on the full history with ^VVIX
+        replaced; ^VIX, the regimes and the PDV series are the engine's."""
+        from joint_vol_calibration.signals import signal_engine as se
+        seen = []
+        orig = se.SignalEngine.generate
+
+        def spy(self, spx_df, vix_wide_df, **kw):
+            seen.append((vix_wide_df, kw))
+            return orig(self, spx_df, vix_wide_df, **kw)
+
+        monkeypatch.setattr(se.SignalEngine, "generate", spy)
+        bte.s3_timing_null_test(engine, n_paths=1, seed=5)
+        (real, kw_real), (null, kw_null) = seen
+        mk = engine._market
+        assert real is mk["vix_col"] and len(null) == len(mk["vix_col"])
+        pd.testing.assert_series_equal(null["^VIX"], real["^VIX"])
+        assert not np.allclose(null["^VVIX"], real["^VVIX"])
+        assert kw_null["precomputed_regimes"] is mk["regimes"]
+        assert kw_null["precomputed_pdv_vol"] is mk["pdv_vol"]
+        assert kw_null["start_date"] == engine.start_date
+
 
 # ── sizing overlay ─────────────────────────────────────────────────────────────
 
