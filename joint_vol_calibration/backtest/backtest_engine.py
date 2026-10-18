@@ -140,7 +140,14 @@ STRADDLE_TENOR_DAYS: int = 30       # 30-calendar-day ATM straddle at entry
 #   dropped from the DB in C22.) All five chains are from 2026; no
 #   history of ATM IV exists in the DB, so β is assumed constant over
 #   2018-2025. Pre-C22 the engine used β = 1 (VIX as ATM vol).
+# The estimation set is frozen (BETA_ESTIMATION_SESSIONS): the daily bot now
+# stores a chain every session, and a default that moved with each one would
+# re-define the canonical backtest daily. Later chains are reported by
+# --estimate-beta as out-of-sample checks: the first, 2026-10-16 (VVIX 110,
+# an R2 day), gives 0.702, which would pull the all-chain mean to 0.80. β is
+# therefore not constant across regimes; the β grid includes 0.80.
 ATM_TO_VIX_RATIO:  float = 0.82
+BETA_ESTIMATION_SESSIONS: Tuple[str, ...] = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18")
 
 # Horizon (sessions) of the walk-forward PDV forecast behind pdv_iv_spread.
 # 21 (canonical, C22): the forecast of the RMS vol over the next 21 sessions

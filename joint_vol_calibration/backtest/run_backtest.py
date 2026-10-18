@@ -41,6 +41,7 @@ from joint_vol_calibration.data.database import (
 )
 from joint_vol_calibration.backtest.backtest_engine import (
     ATM_TO_VIX_RATIO,
+    BETA_ESTIMATION_SESSIONS,
     Q_BACKTEST,
     BacktestEngine,
     estimate_atm_to_vix_ratio,
@@ -182,7 +183,9 @@ def estimate_beta(include_live: bool = True) -> pd.DataFrame:
     (weekend snapshots hold the prior session's closing quotes) and kept only
     if the chain's parity-implied spot is within SNAPSHOT_SPOT_TOL of that
     session's SPX close — otherwise the quotes are from another time and the
-    session's VIX close is not the same-time VIX.
+    session's VIX close is not the same-time VIX. Only sessions in
+    BETA_ESTIMATION_SESSIONS are "included" in the estimate behind the
+    default; later chains are reported as "out-of-sample" checks.
     """
     rows = []
     for source, sd, quotes in _db_chain_snapshots():
@@ -200,11 +203,15 @@ def estimate_beta(include_live: bool = True) -> pd.DataFrame:
             continue
         gap = est["implied_spot"] / mk["spx"] - 1.0
         ok = abs(gap) <= SNAPSHOT_SPOT_TOL
+        if not ok:
+            status = (f"excluded: implied spot {est['implied_spot']:.0f} vs close "
+                      f"{mk['spx']:.0f} ({gap:+.1%}) — quotes not from this session")
+        elif mk["session"] in BETA_ESTIMATION_SESSIONS:
+            status = "included"
+        else:
+            status = "out-of-sample: after the frozen estimation set"
         rows.append({**rec, "session": mk["session"], **est, "session_close": mk["spx"],
-                     "spot_gap": gap,
-                     "status": "included" if ok else
-                     f"excluded: implied spot {est['implied_spot']:.0f} vs close "
-                     f"{mk['spx']:.0f} ({gap:+.1%}) — quotes not from this session"})
+                     "spot_gap": gap, "status": status})
     if include_live:
         try:
             chain, as_of, vix, r, vix_time = fetch_live_spx_chain()
@@ -234,6 +241,11 @@ def _print_beta(table: pd.DataFrame) -> None:
         print(f"\n  β estimate: mean {inc['ratio'].mean():.4f}  median {inc['ratio'].median():.4f}"
               f"  sd {inc['ratio'].std(ddof=1):.4f}  n={len(inc)}"
               f"  (engine default ATM_TO_VIX_RATIO = {ATM_TO_VIX_RATIO:.2f})")
+    oos = table[table["status"].str.startswith("out-of-sample")]
+    if len(oos):
+        allr = pd.concat([inc["ratio"], oos["ratio"]])
+        print(f"  out-of-sample chains: {', '.join(f'{s} {r:.3f}' for s, r in zip(oos['session'], oos['ratio']))}"
+              f"  → mean over every chain {allr.mean():.4f} (n={len(allr)})")
 
 
 # ── Sensitivity / pseudo-OOS runners ──────────────────────────────────────────
@@ -241,7 +253,7 @@ def _print_beta(table: pd.DataFrame) -> None:
 def run_beta_sensitivity(
     spx_df: pd.DataFrame,
     vix_wide: pd.DataFrame,
-    betas: Sequence[float] = (1.00, 0.90, 0.85, ATM_TO_VIX_RATIO, 0.78),
+    betas: Sequence[float] = (1.00, 0.90, 0.85, ATM_TO_VIX_RATIO, 0.80, 0.78),
     pdv_vol: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Re-run the backtest for each β; one row per β with headline and per-signal stats."""
@@ -453,7 +465,7 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true",
                         help="With --estimate-beta: also fetch a live Yahoo ^SPX chain")
     parser.add_argument("--beta-sensitivity", action="store_true",
-                        help="Re-run the backtest for β ∈ {1.00, 0.90, 0.85, default, 0.78}")
+                        help="Re-run the backtest for β ∈ {1.00, 0.90, 0.85, default, 0.80, 0.78}")
     parser.add_argument("--pseudo-oos", action="store_true",
                         help="S1C on 2013-2017 (confounded pseudo out-of-sample)")
     parser.add_argument("--csv", help="With --beta-sensitivity: also write the table to this CSV "

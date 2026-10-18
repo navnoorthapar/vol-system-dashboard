@@ -30,6 +30,7 @@ import pytest
 
 from joint_vol_calibration.backtest.backtest_engine import (
     ATM_TO_VIX_RATIO,
+    BETA_ESTIMATION_SESSIONS,
     BACKTEST_DIR,
     RESULTS_PATH,
     BacktestEngine,
@@ -122,7 +123,7 @@ def test_beta_grid_and_waterfall_end_on_the_canonical_run(canonical):
 
 
 def test_default_beta_is_the_estimate_from_the_real_chains():
-    """ATM_TO_VIX_RATIO is the mean β over every real SPX chain (2 dp): the
+    """ATM_TO_VIX_RATIO is the mean β over the frozen estimation set (2 dp): the
     four time-matched DB sessions plus the captured live GTH chain."""
     import json
     from pathlib import Path
@@ -130,8 +131,11 @@ def test_default_beta_is_the_estimate_from_the_real_chains():
 
     table = estimate_beta(include_live=False)
     inc = table[table["status"].str.startswith("included")]
-    assert list(inc["session"]) == ["2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18"]
+    assert list(inc["session"]) == list(BETA_ESTIMATION_SESSIONS)
     assert ((inc["ratio"] > 0.80) & (inc["ratio"] < 0.85)).all()
+    # Chains the bot stores later are reported, never folded into the default.
+    later = table[table["session"].fillna("") > max(BETA_ESTIMATION_SESSIONS)]
+    assert later["status"].str.startswith(("out-of-sample", "excluded")).all()
     meta = json.loads((Path(__file__).parent / "fixtures" / "spx_chain_live_20261012.json").read_text())
     ratios = list(inc["ratio"]) + [meta["ratio_full_chain"]]
     assert round(float(np.mean(ratios)), 2) == ATM_TO_VIX_RATIO
