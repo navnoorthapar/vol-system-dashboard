@@ -844,6 +844,8 @@ def test_page_charts_wait_for_chartjs(pages):
 
 def test_social_meta_and_card_carry_no_test_count(pages):
     """The card said '631 tests', the meta '666', CI '642 passed, 24 skipped'."""
+    og = _load("og_card_under_test", "dashboard/make_og_image.py")
+    assert not any(re.search(r"\btests?\b", label) for _, label in og.STATS)
     for route, html in pages.items():
         assert not re.search(r"\d+\s+tests", html), route
         title = re.search(r'<meta property="og:title"\s+content="([^"]+)"', html).group(1)
