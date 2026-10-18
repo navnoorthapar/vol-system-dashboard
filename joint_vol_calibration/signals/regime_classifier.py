@@ -21,10 +21,10 @@ Three regimes (descriptive states, not profitability regimes)
 
   The names are historical. R0/R1 describe the TRAILING 20-day window; they
   are not forecasts. Measured ex post (2010-2025, canonical gate, forward RV
-  over t+1..t+21): after an R0 day forward realised vol still ends up BELOW
-  VIX 81% of the time (P(fwd RV > VIX) = 0.19 vs 0.15 after R1; mean gap
-  −3.3 vs −3.5 vol points). With the old fixed-100 gate R0 was even lower
-  than R1 (0.14 vs 0.16). So "R0 → long gamma is profitable" is not
+  over t+1..t+21, shipped DB): after an R0 day forward realised vol still
+  ends up BELOW VIX 82% of the time (P(fwd RV > VIX) = 0.18 vs 0.15 after
+  R1; mean gap −3.5 vol points after both). With the old fixed-100 gate R0
+  was even lower than R1 (0.14 vs 0.16). So "R0 → long gamma is profitable" is not
   supported; regime_forward_premium_table() recomputes the check on any data.
 
   The R2 gate (ONE gate, used everywhere)
