@@ -51,11 +51,12 @@ def temp_db(tmp_path, monkeypatch):
     Each test gets a fresh empty database.
     """
     tmp_db = tmp_path / "test_vol.db"
-    tmp_parquet = tmp_path / "parquet"
-    tmp_parquet.mkdir()
 
     monkeypatch.setattr(db_module, "DB_PATH", tmp_db)
-    monkeypatch.setattr(db_module, "PARQUET_DIR", tmp_parquet)
+    # Persistence roots (the write-only parquet mirror these tests used to
+    # redirect is gone; nothing here exports, but keep any export local).
+    monkeypatch.setattr(db_module, "MARKET_DIR", tmp_path / "market")
+    monkeypatch.setattr(db_module, "OPTIONS_DIR", tmp_path / "options")
 
     # Re-import to pick up patched paths
     init_database()
@@ -272,6 +273,50 @@ class TestOptionsSnapshotLookAhead:
         assert all(d == "2020-01-14" for d in snap_str), (
             f"Expected snapshot 2020-01-14, got {snap_str}"
         )
+
+
+def _dates_of(df: pd.DataFrame, col: str = "date") -> list:
+    return sorted(pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d").unique())
+
+
+class TestRemainingGettersLookAhead:
+    """The other dated getters: the VIX term structure feeds the calibrator's
+    VIX leg, the regime labels and every signal feature; T-bill rates feed
+    pricing and the cash hurdle. (Removing the as_of filter from
+    get_vix_term_structure used to pass the whole suite.)"""
+
+    DATES = ["2020-01-13", "2020-01-14", "2020-01-15"]
+
+    def test_vix_term_structure_long_and_wide(self):
+        rows = [{"date": d, "ticker": t, "close": c + i}
+                for i, d in enumerate(self.DATES)
+                for t, c in (("^VIX", 14.0), ("^VIX3M", 16.0), ("^VIX9D", 13.0), ("^VVIX", 90.0))]
+        db_module.insert_vix_term_structure(pd.DataFrame(rows))
+        long = db_module.get_vix_term_structure("2020-01-14")
+        assert _dates_of(long) == self.DATES[:2]
+        wide = db_module.get_vix_term_structure_wide("2020-01-14")
+        assert _dates_of(wide) == self.DATES[:2]
+        assert wide["^VIX"].iloc[-1] == pytest.approx(15.0)       # the 01-14 value, not 01-15's
+        assert _dates_of(db_module.get_vix_term_structure("2020-01-15", start_date="2020-01-14")) \
+            == self.DATES[1:]
+
+    def test_tbill_rates(self):
+        db_module.insert_tbill_rates(pd.DataFrame({"date": self.DATES, "rate": [0.015, 0.016, 0.017]}))
+        assert _dates_of(db_module.get_tbill_rates_series("2020-01-14")) == self.DATES[:2]
+        assert db_module.get_tbill_rate("2020-01-14") == pytest.approx(0.016)
+
+    def test_classifier_predictions(self):
+        db_module.insert_classifier_predictions(pd.DataFrame({
+            "date": self.DATES, "regime": [0, 1, 2], "confidence": 0.5,
+            "vix_level": 15.0, "vix_slope": 1.0, "rv_20d": 0.1}))
+        assert _dates_of(db_module.get_classifier_predictions("2020-01-14")) == self.DATES[:2]
+        assert _dates_of(db_module.get_regime_labels("2020-01-14")) == self.DATES[:2]
+
+    def test_vix_futures_settlements(self):
+        db_module.insert_vix_futures_settlements(pd.DataFrame({
+            "settlement_date": ["2019-12-18", "2020-01-22"], "settlement_price": [12.4, 12.6]}))
+        got = db_module.get_vix_futures_settlements("2020-01-21")
+        assert _dates_of(got, "settlement_date") == ["2019-12-18"]
 
 
 # ── Category 2: Date Validation ───────────────────────────────────────────────
