@@ -375,7 +375,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
 
     spx = get_spx_ohlcv(as_of_date=spot_date)
     S = float(spx["close"].iloc[-1])
-    r_ref = oc.tbill_discount_to_cc(get_tbill_rate(spot_date))
+    r_ref = get_tbill_rate(spot_date)      # ^IRX, stored continuously compounded
 
     try:
         raw, meta = oc.fetch_spx_chain(spot_date, ticker_factory=ticker_factory)

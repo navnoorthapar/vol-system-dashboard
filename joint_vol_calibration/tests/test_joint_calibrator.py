@@ -99,7 +99,11 @@ def _patch_db(mp, session=_SESSION, S=_SPOT, vix_row=None, spx_surface=None,
                spx[spx["date"] <= as_of_date].reset_index(drop=True))
     mp.setattr(jc.db, "get_vix_term_structure_wide", lambda as_of_date, start_date=None:
                _index_row() if vix_row is None else vix_row)
+    # tbill_rates stores the ^IRX bank-discount yield AND its cc conversion;
+    # get_tbill_rate returns the cc rate (4.03% discount -> 4.10% cc)
     mp.setattr(jc.db, "get_tbill_rate", lambda as_of_date, fallback=0.045: 0.0410)
+    mp.setattr(jc.db, "get_tbill_rates_series", lambda as_of_date, start_date=None:
+               pd.DataFrame({"date": [dates[-1]], "rate": [0.0410], "discount_yield": [0.0403]}))
     mp.setattr(jc.db, "get_vix_futures_curve", lambda as_of_date:
                pd.DataFrame(columns=["expiry_month", "close", "days_to_expiry"]))
 
@@ -280,21 +284,42 @@ class TestSyntheticMarket:
         assert synth.w1 + synth.w2 == pytest.approx(1.0)
         assert synth.w1 / synth.w2 == pytest.approx(JOINT_W1 / JOINT_W2)
 
+    def test_reference_rate_is_the_stored_cc_rate(self, synth):
+        """tbill_rates.rate is already continuously compounded. The first C22
+        version converted it a second time (4.10% -> 4.18%, labelled as a
+        discount yield)."""
+        assert synth.r_reference == 0.0410
+        assert synth.r_reference_source == (
+            f"^IRX 13-week bill {_SESSION}: 4.0300% bank discount = 4.1000% cc")
+
+
+def _vix_chain(n, snapshot_date=_SESSION):
+    rows = []
+    for i in range(n):
+        for right in ("C", "P"):
+            rows.append({"snapshot_date": snapshot_date, "expiry": "2026-10-21",
+                         "strike": 12.0 + i, "right": right,
+                         "bid": 1.0 + (right == "C") * (8 - i) * 0.3,
+                         "ask": 1.2 + (right == "C") * (8 - i) * 0.3,
+                         "mid_price": 1.1, "implied_vol": 0.9})
+    return pd.DataFrame(rows)
+
 
 class TestWeightsWithVixChain:
+    def test_stale_vix_chain_leaves_the_leg_empty(self):
+        """Pre-C22 every fit read the only VIX chain in the DB (2026-06-20)
+        with its June time_to_expiry, and its row count toggled the weights."""
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp, vix_surface=_vix_chain(8, snapshot_date="2026-09-16"),
+                      spx_dates=["2026-09-15", "2026-09-16", "2026-09-22", _SESSION])
+            cal = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain(
+                expiries=_EXPIRIES[:6]))
+        assert cal.vix_options.empty
+
     def test_weights_identical_with_0_or_8_vix_options(self):
         """Pre-C22: 0.50/0.60 with >= 5 (stale) VIX options, 0.4545/0.5455
         otherwise — the disabled leg changed the effective Feller strength."""
-        def vix_chain(n):
-            rows = []
-            for i in range(n):
-                for right in ("C", "P"):
-                    rows.append({"snapshot_date": _SESSION, "expiry": "2026-10-21",
-                                 "strike": 12.0 + i, "right": right,
-                                 "bid": 1.0 + (right == "C") * (8 - i) * 0.3,
-                                 "ask": 1.2 + (right == "C") * (8 - i) * 0.3,
-                                 "mid_price": 1.1, "implied_vol": 0.9})
-            return pd.DataFrame(rows)
+        vix_chain = _vix_chain
         got = []
         for n in (0, 8):
             with pytest.MonkeyPatch.context() as mp:
@@ -395,6 +420,17 @@ class TestSessionTiming:
             _patch_db(mp)
             with pytest.raises(ValueError, match="SPX anchors"):
                 JointCalibrator(as_of_date=_SESSION)
+
+    def test_spx_leg_never_returns_zero_without_anchors(self, synth):
+        """A weighted data leg with no data must raise, not return 0 (which
+        would turn the 'joint' fit into a VIX-only fit)."""
+        orig = synth.spx_surface
+        try:
+            synth.spx_surface = orig.iloc[0:0]
+            with pytest.raises(ValueError, match="no anchors"):
+                synth._spx_leg(**_TRUE)
+        finally:
+            synth.spx_surface = orig
 
     def test_empty_book_raises_value_error(self):
         chain = _heston_chain()
@@ -505,6 +541,15 @@ class TestCalibrationQualityGate:
     def test_stale_surface_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(spx_snapshot_session="2026-06-18",
                                                             spx_snapshot_date="2026-06-20"))
+        assert not ok and "stale" in reason
+
+    def test_staleness_is_the_reason_reported_first(self):
+        """A months-old chain seen from a later session has few unexpired
+        slices left (the 2026-06-18 chain at 2026-10-16: 3 expiries); the
+        reason must name the staleness, not the symptom."""
+        ok, reason = is_acceptable_calibration(_fake_result(
+            spx_snapshot_session="2026-06-18", spx_snapshot_date="2026-06-18",
+            spot_date="2026-10-16", n_spx_expiries=3, n_spx_options=26))
         assert not ok and "stale" in reason
 
     def test_legacy_result_rejected_unless_allowed(self):

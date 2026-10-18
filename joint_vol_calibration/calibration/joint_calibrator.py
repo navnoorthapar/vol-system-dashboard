@@ -266,16 +266,16 @@ def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None,
       * the pre-C22 positional form (params, spx_iv_rmse, n_vix_tenors, ...)
         — checks whose inputs are None are skipped.
 
-    Checks:
-      1. degenerate corner (sigma < 0.05, |rho| < 0.10, kappa at a bound,
-         v0/theta within 2x of their floor);
-      2. in-sample SPX RMSE <= 3 vp;
-      3. VIX leg identified (>= 3 tenors) — C20;
-      4. SPX leg identified (>= 4 expiries, >= 30 options, put wing present
-         in >= 3 expiries) — C22, the same failure mode on the other leg;
-      5. surface freshness: the session whose quotes the SPX snapshot holds
+    Checks (the first failing one is the reason returned):
+      1. surface freshness: the session whose quotes the SPX snapshot holds
          must be the spot session;
-      6. model_version >= 2.
+      2. model_version >= 2;
+      3. degenerate corner (sigma < 0.05, |rho| < 0.10, kappa at a bound,
+         v0/theta within 2x of their floor);
+      4. in-sample SPX RMSE <= 3 vp;
+      5. VIX leg identified (>= 3 tenors) — C20;
+      6. SPX leg identified (>= 4 expiries, >= 30 options, put wing present
+         in >= 3 expiries) — C22, the same failure mode on the other leg.
 
     Returns (ok: bool, reason: str).
     """
@@ -305,6 +305,15 @@ def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None,
     kappa = float(params.get("kappa", 0.0))
     k_lo, k_hi = HESTON_BOUNDS["kappa"]
 
+    # Provenance first: a stale surface or an old model version invalidates
+    # every other number, so it is the reason reported (a months-old chain
+    # also has few unexpired slices left, which would otherwise be named).
+    if spot_date is not None and spx_snapshot_session is not None \
+            and str(spx_snapshot_session)[:10] != str(spot_date)[:10]:
+        return False, (f"SPX surface is stale (quotes from session "
+                       f"{str(spx_snapshot_session)[:10]}, spot session {str(spot_date)[:10]})")
+    if model_version is not None and int(model_version) < MODEL_VERSION:
+        return False, f"model_version {model_version} < {MODEL_VERSION}"
     if sigma < 0.05:
         return False, f"vol-of-vol collapsed (sigma={sigma:.4f} < 0.05)"
     if abs(rho) < 0.10:
@@ -330,12 +339,6 @@ def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None,
         return False, (f"SPX put wing missing ({n_put_wing_expiries} expiries with "
                        f">= {_MIN_WING_PUTS_PER_EXPIRY} puts at K/F < {_PUT_WING_KF} "
                        f"< {_MIN_PUT_WING_EXPIRIES})")
-    if spot_date is not None and spx_snapshot_session is not None \
-            and str(spx_snapshot_session)[:10] != str(spot_date)[:10]:
-        return False, (f"SPX surface is stale (quotes from session "
-                       f"{str(spx_snapshot_session)[:10]}, spot session {str(spot_date)[:10]})")
-    if model_version is not None and int(model_version) < MODEL_VERSION:
-        return False, f"model_version {model_version} < {MODEL_VERSION}"
     return True, "ok"
 
 
@@ -485,8 +488,8 @@ class JointCalibrator:
         as_of_date : 'YYYY-MM-DD' — the latest date whose data may be used;
                      the fit describes the last SPX session on or before it
         r          : reference continuously-compounded rate. None: the ^IRX
-                     13-week bill for the spot session, converted from bank
-                     discount to cc. Used to discount VIX options and as the
+                     13-week bill for the spot session (db.get_tbill_rate,
+                     stored cc). Used to discount VIX options and as the
                      fallback discount when an expiry's parity slope is
                      implausible; the SPX leg prices off parity D_T, F_T.
         q          : dividend yield, used only with carry="flat"
@@ -538,9 +541,7 @@ class JointCalibrator:
             self.r_reference = float(self._r_arg)
             self.r_reference_source = "argument"
         else:
-            d = db.get_tbill_rate(self.spot_date)
-            self.r_reference = oc.tbill_discount_to_cc(d)
-            self.r_reference_source = f"^IRX 13w bill {d:.4%} discount -> cc"
+            self.r_reference, self.r_reference_source = self._reference_rate()
         # Back-compat attributes (scalar summaries; set from parity below)
         self.r = self.r_reference
         self.q = FLAT_CARRY_Q if self._q_arg is None else float(self._q_arg)
@@ -579,6 +580,31 @@ class JointCalibrator:
                 "  VIX term structure has only %d tenor(s) (< %d): the VIX leg "
                 "cannot identify a curve and the joint fit degenerates toward "
                 "an SPX-only calibration", len(self.vix_ts), _MIN_VIX_TENORS)
+
+    def _reference_rate(self) -> tuple:
+        """(rate, label) of the ^IRX 13-week bill for the spot session.
+
+        tbill_rates.rate is ALREADY continuously compounded (the data layer
+        converts the ^IRX bank-discount yield on download, and migrated the
+        old rows), so it is used as is. The first C22 version converted it a
+        second time, which put the reference rate ~7 bp too high (2026-06-18:
+        3.80% instead of 3.73% cc) and labelled the cc rate a discount yield.
+        """
+        r = float(db.get_tbill_rate(self.spot_date))
+        label = f"^IRX 13-week bill, {r:.4%} cc"
+        try:
+            start = (pd.Timestamp(self.spot_date) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+            ser = db.get_tbill_rates_series(self.spot_date, start_date=start)
+        except Exception:                      # label detail only
+            ser = None
+        if ser is not None and len(ser) and np.isclose(float(ser["rate"].iloc[-1]), r,
+                                                       rtol=0.0, atol=1e-12):
+            row = ser.iloc[-1]
+            d = row.get("discount_yield")
+            label = (f"^IRX 13-week bill {str(row['date'])[:10]}: "
+                     + (f"{float(d):.4%} bank discount = " if d is not None and pd.notna(d) else "")
+                     + f"{r:.4%} cc")
+        return r, label
 
     def _session_for(self, snapshot_date) -> Optional[str]:
         """Session whose closing book a snapshot taken on ``snapshot_date``
