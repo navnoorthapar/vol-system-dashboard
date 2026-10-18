@@ -17,10 +17,16 @@ fallback across 2018-19 (when they actually paid ~2%).
 
 The daily refresh bot only pulls a 400-day window, so it can never repair
 history. This script does the one-time load; the bot's upserts then keep the
-tail current. ``test_rates.py`` now snapshots and restores the rows it touches,
-so the fixture cannot re-pollute the window.
+tail current. ``test_rates.py`` now runs against a temporary copy of the
+schema and never opens the tracked database.
 
-Usage:  python scripts/backfill_tbill_history.py [--start 2010-01-01] [--apply]
+Units (C22): ^IRX is a bank-discount yield in percent. The downloader now
+stores the continuously compounded rate the pricers assume
+(``database.tbill_discount_to_cc``) next to the raw quote, and keeps zero and
+negative prints -- the 2020-03-19..27 bills printed below zero, and the old
+"> 0" filter silently left those seven sessions without a rate.
+
+Usage:  python scripts/backfill_tbill_history.py [--start 2010-01-01] [--end YYYY-MM-DD] [--apply]
 """
 from __future__ import annotations
 
@@ -33,6 +39,7 @@ from datetime import date
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from joint_vol_calibration.config import BT_END, BT_START          # noqa: E402
 from joint_vol_calibration.data import yf_downloader as dl        # noqa: E402
 from joint_vol_calibration.data.database import (                 # noqa: E402
     get_tbill_rates_series,
@@ -40,8 +47,17 @@ from joint_vol_calibration.data.database import (                 # noqa: E402
     insert_tbill_rates,
 )
 
-# The window every published backtest metric is computed over.
-BT_START, BT_END = "2018-01-01", "2025-03-24"
+# Plausible range for a continuously compounded 13-week bill rate, as a
+# decimal. The upper bound catches a percent/decimal mix-up (4.2 rather than
+# 0.042 would make the cash hurdle 420%); the lower bound admits the genuine
+# negative prints of March 2020 (as low as -0.105%) but not a sign error.
+RATE_RANGE = (-0.01, 0.25)
+
+
+def out_of_range(rates):
+    """Rows whose rate is outside (RATE_RANGE[0], RATE_RANGE[1]]."""
+    lo, hi = RATE_RANGE
+    return rates[(rates["rate"] <= lo) | (rates["rate"] > hi) | rates["rate"].isna()]
 
 
 def _coverage(as_of: str) -> tuple:
@@ -52,30 +68,30 @@ def _coverage(as_of: str) -> tuple:
     return len(df), str(df["date"].iloc[0])[:10], str(df["date"].iloc[-1])[:10]
 
 
-def main(start: str, apply: bool) -> int:
+def main(start: str, apply: bool, end: str | None = None) -> int:
     init_database()
 
     before = _coverage(BT_END)
     print(f"before: {before[0]} rows in {BT_START}..{BT_END} (first={before[1]} last={before[2]})")
 
-    end = date.today().isoformat()
+    end = end or date.today().isoformat()
     rates = dl.download_tbill_rate(start=start, end=end)
     if rates.empty:
         print("download returned nothing; aborting")
         return 1
 
-    # ^IRX is quoted as an annualised percentage and the downloader already
-    # converts to decimal. Guard the unit anyway: a 4.2 here rather than 0.042
-    # would silently make the cash hurdle 420%.
-    bad = rates[(rates["rate"] <= 0) | (rates["rate"] > 0.25)]
+    bad = out_of_range(rates)
     if len(bad):
-        print(f"refusing to insert: {len(bad)} row(s) outside (0, 0.25] decimal range")
+        lo, hi = RATE_RANGE
+        print(f"refusing to insert: {len(bad)} row(s) outside ({lo}, {hi}] decimal range")
         print(bad.head().to_string())
         return 1
 
-    print(f"downloaded {len(rates)} ^IRX rows ({rates['date'].iloc[0]} -> {rates['date'].iloc[-1]})")
+    print(f"downloaded {len(rates)} ^IRX rows ({rates['date'].iloc[0]} -> {rates['date'].iloc[-1]}); "
+          f"{int((rates['rate'] <= 0).sum())} at or below zero")
     yearly = rates.assign(y=rates["date"].str[:4]).groupby("y")["rate"].mean() * 100
-    print("annual mean (%):", ", ".join(f"{y}:{v:.2f}" for y, v in yearly.items()))
+    print("annual mean, continuously compounded (%):",
+          ", ".join(f"{y}:{v:.2f}" for y, v in yearly.items()))
 
     if not apply:
         print("\ndry run -- pass --apply to write")
@@ -91,6 +107,7 @@ def main(start: str, apply: bool) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2010-01-01")
+    ap.add_argument("--end", default=None, help="inclusive end date (default: today)")
     ap.add_argument("--apply", action="store_true", help="write to the database")
     a = ap.parse_args()
-    raise SystemExit(main(a.start, a.apply))
+    raise SystemExit(main(a.start, a.apply, a.end))

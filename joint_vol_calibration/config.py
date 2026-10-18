@@ -1,8 +1,14 @@
 """
 config.py — Global configuration for the Joint SPX/VIX Calibration System.
 
-All paths, seeds, date ranges, and hyperparameters live here.
-Changing one value here propagates everywhere — no magic numbers in model code.
+Paths, seeds, date ranges, tickers and hyperparameters that more than one
+module needs. A constant here is a promise: every module that needs the value
+imports it from here rather than restating it. (Not every constant has reached
+every caller yet — modules that still hard-code a value this file defines are
+listed in the C22 integration notes.)
+
+Importing this module has no side effects: it creates no directories. Code
+that writes a file creates the file's parent directory itself.
 """
 
 from pathlib import Path
@@ -14,26 +20,22 @@ RANDOM_SEED: int = 42
 ROOT_DIR   = Path(__file__).parent.parent
 DATA_DIR   = ROOT_DIR / "data_store"
 DB_PATH    = DATA_DIR / "vol_system.db"
-PARQUET_DIR = DATA_DIR / "parquet"
-MC_CACHE_DIR = DATA_DIR / "mc_cache"   # pre-computed Monte Carlo results
-
-for _dir in [DATA_DIR, PARQUET_DIR, MC_CACHE_DIR]:
-    _dir.mkdir(parents=True, exist_ok=True)
+MC_CACHE_DIR = DATA_DIR / "mc_cache"   # pre-computed Monte Carlo results (gitignored)
 
 # ── Data Date Range ──────────────────────────────────────────────────────────
 HIST_START = "2010-01-04"   # first day of data we pull
-HIST_END   = "2025-12-31"   # inclusive upper bound for historical work
+HIST_END   = None           # inclusive upper bound; None = the last closed NYSE session
 
-# Backtest windows (walk-forward)
-BACKTEST_START  = "2018-01-02"
-BACKTEST_END    = "2025-12-31"
-TRAIN_YEARS     = 2          # rolling training window
-TEST_MONTHS     = 6          # out-of-sample test window
+# The window every published backtest metric is computed over (inclusive).
+BT_START = "2018-01-01"
+BT_END   = "2025-03-24"
 
-# ── Tickers ──────────────────────────────────────────────────────────────────
-SPX_TICKER  = "^GSPC"
-VIX_TICKER  = "^VIX"
-SPXW_TICKER = "^SPX"        # yfinance options chain ticker for SPX
+# ── Tickers (Yahoo Finance) ──────────────────────────────────────────────────
+SPX_TICKER          = "^GSPC"   # S&P 500 index daily OHLCV
+VIX_TICKER          = "^VIX"    # VIX index daily OHLC
+TBILL_TICKER        = "^IRX"    # 13-week T-bill, bank-discount yield in percent
+SPX_OPTIONS_TICKER  = "^SPX"    # Yahoo option chain for SPX (mixes SPX and SPXW roots)
+VIX_OPTIONS_TICKER  = "^VIX"    # Yahoo option chain for VIX (VIX and VIXW roots)
 
 # ── Heston Model Defaults ─────────────────────────────────────────────────────
 HESTON_DEFAULTS = {
@@ -58,14 +60,11 @@ MC_ANTITHETIC = True
 
 # ── Joint Calibration Loss Weights ────────────────────────────────────────────
 JOINT_W1 = 0.5   # SPX implied vol MSE weight
-JOINT_W2 = 0.6   # VIX futures price MSE weight (doubled from 0.3 to pull RMSE back below 1.5)
+JOINT_W2 = 0.6   # VIX-leg MSE weight: Cboe VIX term-structure indices (doubled from 0.3 to pull RMSE back below 1.5)
 # VIX options leg disabled: Heston CIR transition density underestimates
 # vol-of-vol path uncertainty. RMSE was 37.14 vol pts — structural failure,
 # not calibration failure. Documented in dashboard.
 JOINT_W3 = 0.0   # was 0.2
-
-# ── Data Tickers ──────────────────────────────────────────────────────────────
-TBILL_TICKER = "^IRX"   # 3-month T-bill rate (yfinance) — annualised %
 
 # ── VIX term-structure indices ────────────────────────────────────────────────
 # Cboe constant-maturity volatility indices. Each one is a SPOT-starting
@@ -80,6 +79,9 @@ VIX_INDEX_TENOR_DAYS = {
     "^VIX3M": 93,
     "^VIX6M": 184,
 }
+# ^VVIX is the 30-day implied volatility of VIX (from VIX options); it is
+# stored alongside the indices above with this horizon.
+VVIX_TENOR_DAYS = 30
 
 # ── Neural Network ────────────────────────────────────────────────────────────
 NN_HIDDEN_DIM   = 256
@@ -88,13 +90,4 @@ NN_LEARNING_RATE = 1e-3
 NN_BATCH_SIZE   = 2048
 NN_MAX_EPOCHS   = 200
 NN_TRAIN_SAMPLES = 500_000   # MC samples for NN training
-NN_VOL_ERROR_TARGET = 0.001  # 0.1 vol point in decimal
-
-# ── Risk Thresholds ───────────────────────────────────────────────────────────
-SIGNAL_VOL_EDGE_THRESHOLD = 0.02   # 2 vol points to trigger gamma trade
-SIGNAL_VIX_EDGE_THRESHOLD = 0.50   # $0.50 VIX futures mispricing threshold
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-LOG_LEVEL = "INFO"
-LOG_DIR   = ROOT_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+NN_VOL_ERROR_TARGET = 0.001  # 0.1 vol point in decimal (accuracy target quoted in nn_pricer)
