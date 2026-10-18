@@ -674,6 +674,13 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
     assert f"calibration.html</loc><lastmod>{p2['session']}</lastmod>" in sitemap
     g = dash.load_page3()
     assert f"greeks.html</loc><lastmod>{g['surface_date']}</lastmod>" in sitemap
+    # the backtest page's data date is the last session of its equity curve
+    # (it read a "run_date" key full_results.pkl never had, so it had no lastmod)
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    last = str(pd.Timestamp(eq.index[-1]).date())
+    assert f"backtest.html</loc><lastmod>{last}</lastmod>" in sitemap
+    assert sitemap.count("<lastmod>") == len(dash.ROUTES)
+    assert dash.app.test_client().get("/backtest").headers["X-Dashboard-Data-Date"] == last
 
 
 def test_no_third_party_script_and_the_vendored_chartjs_matches_its_sri(dash, freezer):

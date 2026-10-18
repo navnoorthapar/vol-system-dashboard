@@ -1683,7 +1683,7 @@ def load_page4() -> dict[str, Any]:
                          "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
                          "crisis": [], "sleeves": {}, "open_trades": []}
     for k in ("final_nav", "total_pnl", "start_date", "end_date",
-              "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date",
+              "wf_neg", "wf_total", "kpi", "sharpe_convention",
               "beta", "bridge"):
         d[k] = None
 
@@ -1763,7 +1763,6 @@ def load_page4() -> dict[str, Any]:
         trades = state.get("all_trades") or []
         if not em:
             raise ValueError("full_results.pkl carries no engine metrics")
-        d["run_date"] = _date_str(state.get("run_date"))
         d["sharpe_convention"] = em.get("sharpe_convention") or state.get("sharpe_convention")
         d["beta"] = _num(state.get("atm_to_vix_ratio", em.get("atm_to_vix_ratio")))
 
@@ -2028,9 +2027,12 @@ def load_page4() -> dict[str, Any]:
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────────
-# Per-route data date for the sitemap (freeze_site.py reads the header).
+# Per-route data date for the sitemap (freeze_site.py reads the header): the
+# date of the data each page shows. The backtest page used "run_date", a key
+# full_results.pkl never had, so it got no lastmod; its data date is the last
+# session of the stored equity curve.
 _DATA_DATE_KEYS = {"/": "latest_session", "/calibration": "session",
-                   "/greeks": "surface_date", "/backtest": "run_date"}
+                   "/greeks": "surface_date", "/backtest": "end_date"}
 
 
 # Chart.js is vendored (dashboard/static, copied into the site by freeze_site.py)
