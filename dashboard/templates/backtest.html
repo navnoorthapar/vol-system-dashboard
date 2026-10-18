@@ -57,9 +57,9 @@
     <div class="card-sub">{{ k.get('dd_dur')|fmt(",") }} sessions under water</div>
   </div>
   <div class="card card-sm">
-    <h2 class="card-label">Round trips</h2>
-    <div class="card-value">{{ k.get('n_round_trips')|fmt }}</div>
-    <div class="card-sub">Win rate {{ (k.get('win_rate') * 100 if k.get('win_rate') is not none else none)|fmt(".1f") }}%; average <span class="nowrap">{{ k.get('avg_pnl')|usd }}</span> per trade</div>
+    <h2 class="card-label">Trades</h2>
+    <div class="card-value">{{ k.get('n_trades')|fmt }}</div>
+    <div class="card-sub">{% if k.get('n_open') %}{{ k.n_open }} open at the end; over the {{ k.get('n_closed')|fmt }} closed: {% endif %}win rate {{ (k.get('win_rate') * 100 if k.get('win_rate') is not none else none)|fmt(".1f") }}%, average <span class="nowrap">{{ k.get('avg_pnl')|usd }}</span> of portfolio P&amp;L per trade</div>
   </div>
   <div class="card card-sm">
     <h2 class="card-label">T-bill benchmark</h2>
@@ -137,6 +137,8 @@
       Portfolio sleeves (S1C, S3, S4) form the audited portfolio; S1 and S2 are reference strategies kept for comparison
       and are not in it. Every number is from the C22 run, the latest correction that re-ran the backtest.
       Sharpe: {{ d.sharpe_convention or 'convention not recorded in the stored results' }}.
+      {% for t in d.open_trades %}{{ t.signal|upper }}'s count includes a straddle opened on the last session ({{ t.entry }}) and still
+      open, carrying only its entry cost ({{ t.net_pnl|usd(true) }}); the engine's win rate counts it as a loss.{% endfor %}
     </p>
   </div>
 
@@ -211,8 +213,10 @@
     </table>
     </div>
     <p class="chart-note">
-      The backtest engine's own metrics and trade log (<code>full_results.pkl</code>). Trades are round trips of the
-      three portfolio sleeves; average P&amp;L is the portfolio's P&amp;L per round trip.
+      The backtest engine's own metrics and trade log (<code>full_results.pkl</code>). Trades are the trade records of the
+      three portfolio sleeves{% if k.get('n_open') %}, {{ k.n_open }} of them still open on the last session{% endif %}. Win rate
+      and average are over the {{ k.get('n_closed')|fmt }} closed trades; the average is portfolio P&amp;L per trade (each sleeve
+      trade contributes a third of its P&amp;L to the equal-weight portfolio).
     </p>
   </div>
 

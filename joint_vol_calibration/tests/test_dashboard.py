@@ -766,11 +766,13 @@ def test_kpis_are_round_trips_of_the_portfolio_sleeves(dash, engine_state):
     d = dash.load_page4()
     rows = {r["label"]: r["value"] for r in d["metrics_rows"]}
     n = sum(m[f"{s}_n_trades"] for s in dash.PORTFOLIO_SLEEVES)
-    assert rows["Round-Trip Trades"] == str(n)
-    assert n == sum(int(s["n_trades"]) for s in d["signal_metrics"] if not s["is_research"])
     trades = [t for t in engine_state["all_trades"] if t.signal in dash.PORTFOLIO_SLEEVES]
-    assert d["kpi"]["win_rate"] == pytest.approx(np.mean([t.net_pnl > 0 for t in trades]), abs=1e-12)
-    assert d["kpi"]["avg_pnl"] == pytest.approx(d["total_pnl"] / n, abs=1e-9)
+    closed = [t for t in trades if not t.is_open]
+    assert d["kpi"]["n_trades"] == n == len(trades)
+    assert rows["Trades"] == f"{n:,}" + (f" ({n - len(closed)} open)" if len(closed) < n else "")
+    assert n == sum(int(s["n_trades"].split()[0]) for s in d["signal_metrics"] if not s["is_research"])
+    assert d["kpi"]["win_rate"] == pytest.approx(np.mean([t.net_pnl > 0 for t in closed]), abs=1e-12)
+    assert d["kpi"]["avg_pnl"] == pytest.approx(sum(t.net_pnl for t in closed) / 3 / len(closed), abs=1e-9)
     assert rows["Sharpe"] == f"{m['sharpe']:.3f}".replace("-", "\u2212")
 
 
@@ -1367,3 +1369,23 @@ def test_a_beta_that_disagrees_with_its_chains_is_a_loader_error(dash, synth):
     d = dash.load_page4()
     assert any(e["component"].startswith("β estimation chains") for e in d["errors"])
     assert d["beta_est"] is None
+
+
+def test_trade_kpis_keep_the_open_trade_out_of_the_win_rate(dash, engine_state, pages):
+    """'Round trips 208, win rate 38.0%, average −$1,039' counted the S4 straddle
+    opened on the last session (is_open, net = its −$433 entry cost) as a closed,
+    losing round trip."""
+    trades = [t for t in engine_state["all_trades"] if t.signal in dash.PORTFOLIO_SLEEVES]
+    open_ = [t for t in trades if t.is_open]
+    closed = [t for t in trades if not t.is_open]
+    assert [(t.signal, str(t.entry_date.date())) for t in open_] == [("s4", "2025-03-24")]
+    assert (len(trades), len(closed)) == (208, 207)
+    win = np.mean([t.net_pnl > 0 for t in closed])
+    avg = sum(t.net_pnl for t in closed) / 3 / len(closed)
+    assert (round(win * 100, 1), round(avg)) == (38.2, -1043)
+    text = _visible_text(pages["/backtest"])
+    assert (f"Trades 208 1 open at the end; over the 207 closed: win rate {win * 100:.1f}%, "
+            f"average {dash._usd(avg)} of portfolio P&L per trade") in text
+    assert "Round trips" not in text and "38.0%" not in text and "−$1,039" not in text
+    assert "S4 VRP −$273,544" in text and "46 (1 open)" in text
+    assert "S4's count includes a straddle opened on the last session (2025-03-24)" in text

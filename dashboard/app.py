@@ -1637,7 +1637,7 @@ def load_page4() -> dict[str, Any]:
                          "eq_dates": [], "eq_nav": [], "eq_nav_s1c": [], "eq_nav_s3": [],
                          "eq_nav_s4": [], "eq_nav_s1": [], "ann": [], "ann_years": [],
                          "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
-                         "crisis": [], "sleeves": {}}
+                         "crisis": [], "sleeves": {}, "open_trades": []}
     for k in ("final_nav", "total_pnl", "start_date", "end_date",
               "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date",
               "beta", "bridge"):
@@ -1728,13 +1728,29 @@ def load_page4() -> dict[str, Any]:
                     raise ValueError("portfolio daily_pnl is not the equal-weight mean of "
                                      + "/".join(PORTFOLIO_SLEEVES))
 
-        # Portfolio trade statistics from the engine's per-sleeve trade-log
-        # stats. (The engine's top-level n_trades also counts the reference
-        # sleeves; counting position changes double-counted round trips.)
+        # Portfolio trade statistics from the trade log of the three sleeves.
+        # (The engine's top-level n_trades also counts the reference sleeves;
+        # counting position changes double-counted round trips.) The log
+        # includes the position still open on the last session (is_open: its
+        # net P&L is the entry cost alone), which the engine's win rates count
+        # as a loss; the page showed "Round trips 208, win rate 38.0%" with it.
+        # Win rate and average are taken over the CLOSED trades; the average
+        # is portfolio dollars per trade (the portfolio is the equal-weight
+        # mean of the sleeves, so each trade contributes 1/3 of its P&L).
         n_rt = sum(int(em.get(f"{s}_n_trades") or 0) for s in PORTFOLIO_SLEEVES)
-        wins = sum(float(em.get(f"{s}_win_rate") or 0.0) * int(em.get(f"{s}_n_trades") or 0)
-                   for s in PORTFOLIO_SLEEVES)
+        ptr = [t for t in trades if getattr(t, "signal", None) in PORTFOLIO_SLEEVES]
+        if len(ptr) != n_rt:
+            raise ValueError(f"the trade log has {len(ptr)} portfolio trades, the engine metrics {n_rt}")
         port_pnl = d["total_pnl"]
+        if port_pnl is not None and abs(sum(float(t.net_pnl) for t in ptr) / len(PORTFOLIO_SLEEVES)
+                                        - port_pnl) > 1.0:
+            raise ValueError("the portfolio trades do not add up to the portfolio P&L")
+        closed = np.array([float(t.net_pnl) for t in ptr if not getattr(t, "is_open", False)])
+        n_closed = int(len(closed))
+        d["open_trades"] = [{"signal": t.signal, "entry": str(pd.Timestamp(t.entry_date).date()),
+                             "net_pnl": float(t.net_pnl)}
+                            for t in trades if getattr(t, "is_open", False)
+                            and t.signal in PORTFOLIO_SLEEVES + ("s1", "s2")]
         kpi = {
             "cum_ret": _num(em.get("cumulative_return")),
             "ann_ret": _num(em.get("ann_return")),
@@ -1746,9 +1762,9 @@ def load_page4() -> dict[str, Any]:
             "best_day": _num(em.get("best_day")),
             "worst_day": _num(em.get("worst_day")),
             "n_days": em.get("n_days"),
-            "n_round_trips": n_rt,
-            "win_rate": (wins / n_rt) if n_rt else None,
-            "avg_pnl": (port_pnl / n_rt) if (n_rt and port_pnl is not None) else None,
+            "n_trades": n_rt, "n_closed": n_closed, "n_open": n_rt - n_closed,
+            "win_rate": float((closed > 0).mean()) if n_closed else None,
+            "avg_pnl": float(closed.sum()) / len(PORTFOLIO_SLEEVES) / n_closed if n_closed else None,
             "s3_null_p": _num(em.get("s3_null_p_value")),
             "cash_ret": _num(em.get("cash_cum_return")),
         }
@@ -1771,11 +1787,12 @@ def load_page4() -> dict[str, Any]:
             {"label": "Max Drawdown", "value": _pct(kpi["mdd"]), "positive": False},
             {"label": "DD Duration", "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur']):,} sessions", "positive": False},
             {"label": "Calmar", "value": _f(kpi["calmar"]), "positive": (kpi["calmar"] or 0) > 0},
-            {"label": "Win Rate (per round trip)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
-            {"label": "Avg P&L / Round Trip", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
+            {"label": "Win Rate (closed trades)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
+            {"label": "Avg Portfolio P&L / Closed Trade", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
             {"label": "Best Day", "value": _pct(kpi["best_day"]), "positive": True},
             {"label": "Worst Day", "value": _pct(kpi["worst_day"]), "positive": False},
-            {"label": "Round-Trip Trades", "value": f"{n_rt:,}", "positive": True},
+            {"label": "Trades", "value": f"{n_rt:,}" + (f" ({n_rt - n_closed} open)" if n_rt > n_closed else ""),
+             "positive": True},
             {"label": "Return Days", "value": "—" if kpi["n_days"] is None else f"{int(kpi['n_days']):,}", "positive": True},
         ]
 
@@ -1787,15 +1804,21 @@ def load_page4() -> dict[str, Any]:
                 "ann_ret": _num(em.get(f"{sig}_ann_return")),
                 "win_rate": _num(em.get(f"{sig}_win_rate")),
                 "n_trades": em.get(f"{sig}_n_trades"),
+                "n_open": sum(1 for t in trades if getattr(t, "signal", None) == sig
+                              and getattr(t, "is_open", False)),
                 "summary": _trade_summary(trades, sig),
             }
         d["sleeves"] = sleeves
 
+        def _n_trades(s: dict) -> str:
+            if s["n_trades"] is None:
+                return "—"
+            return str(int(s["n_trades"])) + (f" ({s['n_open']} open)" if s["n_open"] else "")
+
         def _card(sig: str) -> dict:
             s = sleeves[sig]
             return {"total_pnl": _dol(s["total_pnl"]), "sharpe": _f(s["sharpe"]),
-                    "win_rate": _pct(s["win_rate"]),
-                    "n_trades": "—" if s["n_trades"] is None else str(int(s["n_trades"])),
+                    "win_rate": _pct(s["win_rate"]), "n_trades": _n_trades(s),
                     "green": (s["total_pnl"] or 0) > 0}
 
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
@@ -1812,8 +1835,7 @@ def load_page4() -> dict[str, Any]:
                 continue
             d["signal_metrics"].append({
                 "label": lbl, "sharpe": _f(s["sharpe"]), "ann_ret": _pct(s["ann_ret"]),
-                "win_rate": _pct(s["win_rate"]),
-                "n_trades": "—" if s["n_trades"] is None else str(int(s["n_trades"])),
+                "win_rate": _pct(s["win_rate"]), "n_trades": _n_trades(s),
                 "total_pnl": _dol(s["total_pnl"]), "green": s["total_pnl"] > 0,
                 "is_research": is_ref,
             })
