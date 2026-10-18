@@ -555,6 +555,26 @@ class TestBetaEstimator:
         assert est["ratio"] == pytest.approx(0.797, abs=0.001)
         assert 7_800 < est["implied_spot"] < 7_870
 
+    @pytest.mark.parametrize("vix_lag, included", [
+        (pd.Timedelta(minutes=15), True),      # Yahoo's usual ^VIX delay
+        (pd.Timedelta(hours=38), False),       # Sunday chain vs Friday-close VIX
+    ])
+    def test_live_chain_needs_a_time_matched_vix(self, monkeypatch, vix_lag, included):
+        """A Sunday --live run compared stale quotes, timed from Sunday, with
+        Friday's VIX close and was averaged in (β = 0.72)."""
+        from joint_vol_calibration.backtest import run_backtest as rb
+        as_of = pd.Timestamp("2026-06-01 10:00")
+        chain = _synthetic_chain(7000.0, 0.04, as_of, [21, 27, 34, 41], lambda T: 0.16)
+        monkeypatch.setattr(rb, "_db_chain_snapshots", lambda: [])
+        monkeypatch.setattr(rb, "fetch_live_spx_chain",
+                            lambda: (chain, as_of, 20.0, 0.04, as_of - vix_lag))
+        (row,) = rb.estimate_beta(include_live=True).to_dict("records")
+        assert row["status"].startswith("included") is included
+        if included:
+            assert row["ratio"] == pytest.approx(0.80, abs=1e-4)
+        else:
+            assert "not time-matched" in row["status"] and "ratio" not in row
+
 
 # ── sub-period stability ───────────────────────────────────────────────────────
 

@@ -133,10 +133,11 @@ STRADDLE_TENOR_DAYS: int = 30       # 30-calendar-day ATM straddle at entry
 # time-matched VIX print (run_backtest --estimate-beta --live):
 #   DB 2026-03-24 0.824 · 2026-03-27 0.841 · 2026-05-29 0.813 ·
 #   2026-06-18 0.814 · live Yahoo GTH chain 2026-10-12 04:38 ET 0.796
-#   → mean 0.818, median 0.814, sd 0.017, n = 5. The DB's 2026-06-05
-#   chain is excluded: its parity-implied spot (7,543) is 2.2% above that
-#   session's close, so the quotes are not from the close whose VIX
-#   (21.5) they would be compared with. All five chains are from 2026; no
+#   → mean 0.818, median 0.814, sd 0.017, n = 5. (A sixth, 2026-06-05
+#   chain in the old spx_options table was excluded — its parity-implied
+#   spot was 2.2% above that session's close, so its quotes were not from
+#   the close whose VIX they would be compared with — and the table was
+#   dropped from the DB in C22.) All five chains are from 2026; no
 #   history of ATM IV exists in the DB, so β is assumed constant over
 #   2018-2025. Pre-C22 the engine used β = 1 (VIX as ATM vol).
 ATM_TO_VIX_RATIO:  float = 0.82
