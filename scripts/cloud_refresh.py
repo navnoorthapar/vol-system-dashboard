@@ -11,6 +11,16 @@ Steps (run all, or a subset with --steps):
              only then store the chain as that session's options snapshot
   freeze     Freeze the Flask app to static HTML -> .site-build/
 
+Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and is
+not what the bot commits. Before any download the run upserts the committed
+captures into it (yearly market partitions under data_store/market/ and the
+per-session SPX chains under data_store/options/, via the data layer's
+import_* helpers), and after the steps it exports what it captured back to
+those files (export_* helpers merge and never drop a stored row). The
+workflow commits those two directories, so a session Yahoo later drops, or a
+chain that is only quoted once, survives every later run and every clean
+clone.
+
 The option step needs a book with live two-sided quotes. After the 16:15 ET
 close Cboe's book empties until Global Trading Hours open (20:15 ET; Friday
 evenings keep the closing book), so the workflow should run `market,labels`
@@ -115,8 +125,18 @@ class _Group:
 
 # -- Step 1: Market data -------------------------------------------------------
 
+def download_start(today: date, last_stored: "str | None") -> date:
+    """First date to download: 400 days back, or earlier when the newest stored
+    session is older than that, so no gap can open between what is stored
+    (DB + persisted partitions) and the download window."""
+    start = today - timedelta(days=400)
+    if last_stored:
+        start = min(start, date.fromisoformat(last_stored[:10]) - timedelta(days=10))
+    return start
+
+
 def refresh_market_data(today: "date | None" = None) -> dict:
-    """Download the last 400 calendar days into the SQLite DB.
+    """Download the market series into the SQLite DB, from download_start().
 
     Returns {"ok", "hard_failure", "reason", "rows"}; an empty or failed SPX
     download is a hard failure (the run must not publish the committed DB's
@@ -124,15 +144,15 @@ def refresh_market_data(today: "date | None" = None) -> dict:
     """
     from joint_vol_calibration.data import yf_downloader as dl
     from joint_vol_calibration.data.database import (
-        insert_spx_ohlcv, insert_vix_daily,
+        get_latest_date, insert_spx_ohlcv, insert_vix_daily,
         insert_vix_term_structure, insert_tbill_rates,
     )
 
     today = today or date.today()
-    start = (today - timedelta(days=400)).isoformat()
+    start = download_start(today, get_latest_date("spx_ohlcv")).isoformat()
     end = today.isoformat()
     log.info("[market] Downloading market data from %s -> %s", start, end)
-    out = {"ok": True, "hard_failure": False, "reason": "ok", "rows": {}}
+    out = {"ok": True, "hard_failure": False, "reason": "ok", "rows": {}, "start": start}
 
     try:
         spx = dl.download_spx_ohlcv(start=start, end=end)
@@ -430,6 +450,39 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     return st
 
 
+# -- Persistence of captures -----------------------------------------------------
+
+def restore_captures() -> dict:
+    """Upsert the committed captures (market partitions, SPX/VIX chains) into the DB."""
+    from joint_vol_calibration.data import database as dbm
+    out = {"market": dbm.import_market_partitions(), "options_rows": dbm.import_options_snapshots()}
+    log.info("[persist] Restored committed captures into the DB: market %s, option rows %d",
+             out["market"], out["options_rows"])
+    return out
+
+
+def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
+    """Export what this run captured to the committed parquet files.
+
+    Market partitions are merged for every year >= ``market_since`` (None:
+    skip); each session in ``chain_sessions`` gets its stored SPX chain
+    written to data_store/options/spx_<session>.parquet. Returns the paths
+    that changed.
+    """
+    from joint_vol_calibration.data import database as dbm
+    written = []
+    if market_since:
+        written += dbm.export_market_partitions(since=market_since)
+    for s in chain_sessions:
+        p = dbm.export_options_snapshot(s, "SPX")
+        if p is not None:
+            written.append(p)
+    written = [str(p) for p in written]
+    log.info("[persist] %d capture file(s) changed%s", len(written),
+             "".join(f"\n  {p}" for p in written))
+    return written
+
+
 def headline_calibration(session: "str | None") -> dict:
     """Newest calibration that passes the CURRENT gate, and its age in NYSE
     sessions relative to ``session``. Legacy (pre-C22) pickles do not count."""
@@ -490,6 +543,7 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
             f.write(f"calibration={cal.get('status', 'not-run')}\n")
             f.write(f"reason={str(cal.get('reason', '')).splitlines()[0] if cal.get('reason') else ''}\n")
             f.write(f"labels_added={status.get('labels_added', 0)}\n")
+            f.write(f"persisted={len(status.get('persisted') or [])}\n")
             f.write(f"headline_calibration={head.get('date') or ''}\n")
             f.write(f"exit_code={status.get('exit_code')}\n")
 
@@ -505,6 +559,7 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
             f"| exit code | {status.get('exit_code')} |",
             f"| market rows | {status.get('market', {}).get('rows', {})} |",
             f"| labels added | {status.get('labels_added', '—')} |",
+            f"| capture files changed | {len(status.get('persisted') or [])} |",
             f"| calibration | **{cal.get('status', 'not run')}** {cal.get('reason', '')} |",
             f"| chain | {ch.get('n_raw', '—')} raw, {ch.get('n_two_sided', '—')} two-sided, "
             f"near-ATM two-sided {ch.get('near_atm_two_sided_share', '—')} |",
@@ -529,6 +584,8 @@ def _parse_args(argv):
                     help="machine-readable status JSON ('' to disable)")
     ap.add_argument("--max-calibration-age", type=int, default=DEFAULT_MAX_CAL_AGE_SESSIONS,
                     help="sessions a rejected/skipped run tolerates before failing")
+    ap.add_argument("--no-persist", action="store_true",
+                    help="do not restore/export the committed parquet captures")
     ap.add_argument("--now", default=None,
                     help="override the clock (ISO UTC, e.g. 2026-10-17T01:30:00Z)")
     args = ap.parse_args(argv)
@@ -564,6 +621,18 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     log.info("=" * 60)
     log.info("Daily auto-refresh -- %s UTC -- steps: %s", status["run_utc"], ",".join(steps))
     log.info("=" * 60)
+
+    persist = not args.no_persist and any(s in steps for s in ("market", "labels", "calibrate"))
+    if persist:
+        with _Group("restore committed captures"):
+            try:
+                status["restored"] = restore_captures()
+            except Exception as e:
+                hard_fail = True
+                msg = f"could not restore the committed captures: {e}"
+                status["errors"].append(msg)
+                _annotate("error", "Persistence", msg)
+                log.exception(msg)
 
     market_ok = True
     if "market" in steps:
@@ -625,6 +694,20 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                            if head.get("date") else "no calibration passes the current gate")
                     status["errors"].append(msg)
                     _annotate("error", "Calibration stale", msg)
+
+    if persist:
+        with _Group("persist captures"):
+            since = status.get("market", {}).get("start") if "market" in steps else None
+            chains = ([status["calibration"]["session"]]
+                      if (status.get("calibration") or {}).get("status") == "accepted" else [])
+            try:
+                status["persisted"] = persist_captures(since, chains)
+            except Exception as e:
+                hard_fail = True
+                msg = f"could not export the captures: {e}"
+                status["errors"].append(msg)
+                _annotate("error", "Persistence", msg)
+                log.exception(msg)
 
     if "freeze" in steps:
         with _Group("freeze site"):
