@@ -6,19 +6,25 @@ Coverage:
   2. _bs_iv_vectorized re-export (strict round trips; the solver itself is
      covered in test_implied_vol.py)
   3. _sample_heston_params (legacy ±perturb sampler)
-  4. Training domain: archived fits inside, out-of-domain detection
-  5. Exact labels and training-data generation (small, in tmp_path)
+  4. Training domain: every archived calibration inside, out-of-domain detection
+  5. Exact labels and training-data generation (small, in tmp_path), with
+     unlabelled options counted by reason
   6. Training: runs on the installed torch, seeded and deterministic, split
      by parameter set, metrics and targets in the right units, checkpoint
-     loads with weights_only=True
+     loads with weights_only=True and records how it was made
   7. NNPricer on a tiny freshly trained model: load, domain guard, benchmark
-     scoring every well-posed option (never filtered on NN output)
-  8. NNPricer on the shipped weights (skipped when data_store/nn_*_model.pt
-     are absent — they are not tracked by git)
-  9. Cached training data (skipped when absent) and baseline params
+     scoring every well-posed option (never filtered on NN output) and
+     counting reference failures, single-thread timing
+  8. NNPricer on the shipped weights (data_store/nn_spx_model.pt is tracked):
+     provenance matches this code's data settings, accuracy on the headline
+     fit and on fresh domain draws, speed-up
+  9. Baseline params
 """
 
+import glob
+import logging
 import math
+import pickle
 import sys
 import warnings
 
@@ -28,7 +34,7 @@ import pytest
 import torch
 from scipy import integrate
 
-from joint_vol_calibration.config import HESTON_BOUNDS, NN_VOL_ERROR_TARGET
+from joint_vol_calibration.config import DATA_DIR, HESTON_BOUNDS, NN_VOL_ERROR_TARGET
 from joint_vol_calibration.models import implied_vol
 from joint_vol_calibration.models import nn_pricer as nnp
 from joint_vol_calibration.models.heston import characteristic_function
@@ -41,9 +47,7 @@ from joint_vol_calibration.models.nn_pricer import (
     HestonNet,
     NNPricer,
     SPXImpliedVolNet,
-    _SPX_DATA_PATH,
     _SPX_MODEL_PATH,
-    _VIX_DATA_PATH,
     _bs_iv_vectorized,
     _load_baseline_params,
     _sample_domain_params,
@@ -52,6 +56,7 @@ from joint_vol_calibration.models.nn_pricer import (
     generate_spx_training_data,
     generate_vix_training_data,
     heston_iv_exact,
+    spx_data_meta,
     spx_out_of_domain,
     train_network,
     train_spx,
@@ -100,15 +105,19 @@ def _ref_iv(x, T, p):
 
 _BASE = dict(kappa=4.62, theta=0.0764, sigma=0.8407, rho=-0.99, v0=0.0561)
 
-# Extremes of the archived joint_cal_*.pkl fits (2026-03-24 .. 2026-10-09)
-_ARCHIVED_EXTREMES = [
-    dict(kappa=4.6213, theta=0.0764, sigma=0.8407, rho=-0.99, v0=0.0561),   # 03-24 (legacy)
-    dict(kappa=1.7284, theta=0.0654, sigma=0.4754, rho=-0.95, v0=0.0185),   # 06-16 (min kappa)
-    dict(kappa=12.8895, theta=0.0269, sigma=0.8332, rho=-0.95, v0=1e-4),    # 08-25 (max kappa)
-    dict(kappa=12.0888, theta=0.0218, sigma=0.7257, rho=-0.95, v0=1e-4),    # 08-28 (min theta)
-    dict(kappa=3.3002, theta=0.0471, sigma=0.2360, rho=-0.95, v0=0.0092),   # 10-02 (min sigma)
-    dict(kappa=4.1442, theta=0.0516, sigma=0.6540, rho=-0.727, v0=0.022),   # 07-20 (max rho)
-]
+def _archived_fits() -> dict:
+    """Parameters of every committed data_store/calibrations/joint_cal_*.pkl."""
+    out = {}
+    for path in sorted(glob.glob(str(DATA_DIR / "calibrations" / "joint_cal_*.pkl"))):
+        with open(path, "rb") as f:
+            cal = pickle.load(f)
+        out[path.rsplit("/", 1)[-1]] = {k: float(cal["params"][k])
+                                        for k in ("kappa", "theta", "sigma", "rho", "v0")}
+    return out
+
+
+# The C22 headline calibration (newest model_version 2 fit passing the gate)
+_HEADLINE = "joint_cal_2026-06-18.pkl"
 
 
 # ── 1. Architecture ───────────────────────────────────────────────────────────
@@ -225,15 +234,23 @@ class TestTrainingDomain:
 
     def test_archived_fits_inside_domain(self):
         """The old ±30% box around one day's fit contained 0 of the archived
-        calibrations; the domain must contain all of them."""
-        for p in _ARCHIVED_EXTREMES:
+        calibrations, and the first C22 box (σ ≤ 1.2) none of the four
+        model_version 2 refits (σ 1.59–2.00, the headline fit included). The
+        domain must contain every committed calibration."""
+        fits = _archived_fits()
+        assert len(fits) >= 30 and _HEADLINE in fits
+        for name, p in fits.items():
             feats = _features([0.0], 0.25, p)
-            assert not spx_out_of_domain(feats)[0], p
+            assert not spx_out_of_domain(feats)[0], (name, p)
             assert all(VIX_TRAINING_DOMAIN[k][0] <= p[k] <= VIX_TRAINING_DOMAIN[k][1]
-                       for k in ("kappa", "theta", "sigma", "v0"))
+                       for k in ("kappa", "theta", "sigma", "v0")), (name, p)
+
+    def test_domain_covers_calibrator_sigma_bound(self):
+        """The calibrator's σ bound is reached by a committed fit (2026-03-24)."""
+        assert SPX_TRAINING_DOMAIN["sigma"][1] >= HESTON_BOUNDS["sigma"][1]
 
     @pytest.mark.parametrize("bad", [
-        dict(rho=-0.2), dict(v0=0.5), dict(kappa=0.2), dict(theta=0.5), dict(sigma=1.5),
+        dict(rho=-0.2), dict(v0=0.5), dict(kappa=0.2), dict(theta=0.5), dict(sigma=2.5),
     ])
     def test_parameter_outside(self, bad):
         assert spx_out_of_domain(_features([0.0], 0.25, {**_BASE, **bad}))[0]
@@ -324,7 +341,8 @@ class TestDataGeneration:
         args = (ids, {k: v[ids] for k, v in params.items()}, SPX_TRAINING_DOMAIN, 4, 10,
                 nnp.RANDOM_SEED)
         unfloored = nnp._spx_rows_for_sets(args + (0.0, None))
-        assert len(unfloored) == 5 * 4 * 10          # without a floor every option inverts
+        assert len(unfloored) == 5 * 4 * 10
+        assert np.isfinite(unfloored["iv_target"]).all()   # without a floor every option inverts
         kept = df[df["set_id"].isin(ids)]
         missing = len(unfloored) - len(kept)
         assert missing == (unfloored["otm_rel"] < NN_LABEL_MIN_OTM_PRICE_REL).sum()
@@ -354,6 +372,32 @@ class TestDataGeneration:
         resumed = generate_spx_training_data(1200, path=path, n_T=4, n_K=10)
         pd.testing.assert_frame_equal(df, resumed)
         assert not list(tmp_path.glob("resume.parts-*"))
+
+    def test_unlabelled_options_counted_by_reason(self, small_data, tmp_path, monkeypatch, caplog):
+        """An option the exact pricer cannot price is not 'below the floor':
+        it is counted separately and logged (it used to vanish into the
+        below-floor percentage)."""
+        df, _ = small_data
+        meta = df.attrs["nn_training_meta"]
+        assert meta["n_sampled"] == 30 * 4 * 10 and meta["n_unpriceable"] == 0
+        assert meta["n_labelled"] == len(df) == meta["n_sampled"] - meta["n_below_floor"]
+        real = nnp._heston_otm_rel
+        calls = {"n": 0}
+
+        def flaky(x, T, p):
+            calls["n"] += 1
+            otm, ok = real(x, T, p)
+            return (otm, False) if calls["n"] == 3 else (otm, ok)   # one slice fails
+
+        monkeypatch.setattr(nnp, "_heston_otm_rel", flaky)
+        with caplog.at_level(logging.WARNING, logger=nnp.__name__):
+            bad = generate_spx_training_data(1200, path=tmp_path / "flaky.parquet", n_T=4, n_K=10)
+        m = bad.attrs["nn_training_meta"]
+        assert m["n_unpriceable"] == 10 and m["n_below_floor"] <= meta["n_below_floor"]
+        assert len(bad) == m["n_labelled"] == m["n_sampled"] - m["n_below_floor"] - 10
+        assert "could not be priced" in caplog.text
+        cached = generate_spx_training_data(1200, path=tmp_path / "flaky.parquet", n_T=4, n_K=10)
+        assert cached.attrs["nn_training_meta"]["n_unpriceable"] == 10
 
     def test_cache_with_other_settings_is_not_reused(self, small_data):
         df, path = small_data
@@ -409,6 +453,15 @@ class TestTraining:
         meta = a["training"]
         assert meta["seed"] == nnp.RANDOM_SEED and len(meta["data_sha256"]) == 64
         assert a["domain"] == SPX_TRAINING_DOMAIN and a["format"] == "spx_iv_net_v2"
+        assert a["data"] == df.attrs["nn_training_meta"]
+        assert a["data"]["n_param_sets"] == 30 and a["data"]["n_labelled"] == len(df)
+
+    def test_fit_refuses_nan_validation_loss(self, tmp_path):
+        df = pd.DataFrame({"set_id": np.repeat(np.arange(30), 10),
+                           "a": np.linspace(0, 1, 300), "y": np.full(300, np.nan)})
+        with pytest.raises(RuntimeError, match="never finite"):
+            train_network(df, ["a"], "y", tmp_path / "m.pt", hidden_dim=4, n_layers=1,
+                          max_epochs=2, verbose=False)
 
     def test_train_network_native_units_and_target(self, tmp_path):
         rng = np.random.default_rng(0)
@@ -517,6 +570,35 @@ class TestNNPricerTiny:
         wing_mae, wing_n = res["mae_by_moneyness_vp"]["[+0.10,+0.25]"]
         assert wing_n > 0 and wing_mae is not None
         assert res["machine"]["torch"] and res["speedup_iqr"][0] <= res["speedup"]
+        assert res["n_reference_failed"] == 0
+
+    def test_benchmark_times_single_threaded_and_restores(self, tiny_pricer):
+        """Both legs are timed on one thread (the numpy reference is single-
+        threaded; a multi-thread torch pass on a loaded machine measured
+        0.3-0.5 s instead of 2 ms), and the caller's torch setting survives."""
+        pricer, _ = tiny_pricer
+        before = torch.get_num_threads()
+        torch.set_num_threads(2)
+        try:
+            res = pricer.benchmark(n_options=12, n_param_sets=1, repeats=1, verbose=False)
+            assert res["machine"]["torch_threads"] == 1
+            assert torch.get_num_threads() == 2
+            res = pricer.benchmark(n_options=12, n_param_sets=1, repeats=1, verbose=False,
+                                   torch_threads=None)
+            assert res["machine"]["torch_threads"] == 2
+        finally:
+            torch.set_num_threads(before)
+
+    def test_benchmark_counts_reference_failures(self, tiny_pricer, monkeypatch):
+        """Options the exact pricer fails on are reported, not silently dropped
+        from the MAE as if they were below the price floor."""
+        pricer, _ = tiny_pricer
+        real = nnp._heston_otm_rel
+        monkeypatch.setattr(nnp, "_heston_otm_rel",
+                            lambda x, T, p: (real(x, T, p)[0], T <= 0.4))   # 182d, 365d fail
+        res = pricer.benchmark(n_options=24, n_param_sets=2, repeats=1, verbose=False)
+        assert res["n_reference_failed"] == 2 * 2 * 4      # 2 sets × 2 maturities × 4 options
+        assert res["n_well_posed"] <= res["n_options"] - res["n_reference_failed"]
 
     def test_vix_optional_and_deprecated(self, tiny_pricer, tmp_path):
         pricer, _ = tiny_pricer
@@ -535,11 +617,10 @@ class TestNNPricerTiny:
                 p2.vix_prices(4.62, 0.0764, 0.84, 0.0561, np.array([3.0]))
 
 
-# ── 8. Shipped weights (skipped when absent) ─────────────────────────────────
+# ── 8. Shipped weights (data_store/nn_spx_model.pt is tracked) ───────────────
 
 def _make_pricer() -> NNPricer:
-    if not _SPX_MODEL_PATH.exists():
-        pytest.skip("Trained model files not found — run train_spx() first")
+    assert _SPX_MODEL_PATH.exists(), "data_store/nn_spx_model.pt is tracked: it must be present"
     return NNPricer.load()
 
 
@@ -558,6 +639,42 @@ class TestShippedModel:
         assert meta.get("format") == "spx_iv_net_v2", "legacy checkpoint: retrain with train_spx()"
         assert meta["domain"] == SPX_TRAINING_DOMAIN
         assert meta["test_metrics_vp"]["n"] > 10_000
+        assert meta["test_metrics_vp"]["mae"] < NN_VOL_ERROR_TARGET * 100
+
+    def test_checkpoint_was_trained_on_this_codes_data(self):
+        """The shipped weights must come from the training data this code
+        generates by default (domain, sampling, seed, label floor), with the
+        unlabelled options counted, and record the command that made them.
+        (The first shipped checkpoint had none of this: its data hash is
+        reproduced only with the pre-C22 Heston CF, which dropped 2 of the
+        8,333 parameter sets, and its box stopped at σ = 1.2.)"""
+        meta = _make_pricer()._spx_meta
+        data = meta["data"]
+        expected = spx_data_meta()
+        assert {k: data[k] for k in expected} == expected
+        assert data["n_labelled"] == sum(meta["training"][k] for k in ("n_train", "n_val", "n_test"))
+        assert data["n_labelled"] + data["n_below_floor"] + data["n_unpriceable"] == data["n_sampled"]
+        # 40 of 499,980: 7-20 day slices with v0 ≈ 1e-4 and σ ≈ 1.4-1.8, where
+        # the Fourier truncation hits its u_max cap; counted, not hidden
+        assert data["n_unpriceable"] <= 1e-3 * data["n_sampled"]
+        assert meta["training"]["command"].startswith("python -m joint_vol_calibration.models.nn_pricer train")
+
+    def test_headline_fit_in_domain_and_accurate(self):
+        """The C22 headline fit (σ = 1.59) is priced by the surrogate, not
+        refused, to within a few hundredths of a vol point of the exact IVs."""
+        p = _archived_fits()[_HEADLINE]
+        pricer = _make_pricer()
+        errs = []
+        for T in (30 / 365, 91 / 365, 1.0):
+            lo, hi = nnp._x_interval(T, p, SPX_TRAINING_DOMAIN)
+            x = np.linspace(lo, hi, 25)
+            ref, _ = heston_iv_exact(x, T, p)
+            nn = pricer.spx_iv_batch(_features(x, T, p))       # raises if out of domain
+            ok = np.isfinite(ref)
+            assert ok.sum() >= 20
+            errs.append(np.abs(nn[ok] - ref[ok]) * 100)
+        errs = np.concatenate(errs)
+        assert errs.mean() < 0.1 and errs.max() < 1.0, (errs.mean(), errs.max())
 
     def test_reasonable_atm_level(self):
         pricer = _make_pricer()
@@ -578,11 +695,18 @@ class TestShippedModel:
         res = pricer.benchmark(n_options=120, n_param_sets=8, repeats=1, verbose=False)
         recorded = pricer._spx_meta["test_metrics_vp"]["mae"]
         assert 0 < res["mae_vol_pts"] < 3 * recorded + 0.05
+        assert res["n_reference_failed"] == 0
         assert res["target_passed"] == (res["mae_vol_pts"] < NN_VOL_ERROR_TARGET * 100)
 
     def test_benchmark_speedup_positive(self):
-        """Wall-clock: best of 3 samples, so transient CPU contention does not
-        flip a genuine order-of-magnitude advantage."""
+        """The NN is faster than heston_call_batch + IV inversion on the same
+        options, batch against batch. Measured single-threaded: 14-23x median
+        (IQR 10-35x) for 500 options. The test asks for 2x, a margin of 7x or
+        more. It is load-robust: both legs run on one thread (benchmark's
+        default), each timing is the best of 5 runs (the least-contended
+        one), and a sample is retaken up to 3 times. The old test timed torch
+        on 4 threads; under a load of ~10-18 on 4 cores, OpenMP contention made
+        the forward pass 100x slower and the measured "speedup" 0.2."""
         if sys.gettrace() is not None:
             # coverage/debugger tracing taxes the Python-heavy reference pricer
             # and the NN path unequally; the ratio would measure the tracer.
@@ -590,31 +714,15 @@ class TestShippedModel:
         pricer = _make_pricer()
         speedups = []
         for _ in range(3):
-            speedups.append(pricer.benchmark(n_options=300, n_param_sets=3, repeats=3,
-                                             verbose=False)["speedup"])
-            if speedups[-1] > 1.0:
+            res = pricer.benchmark(n_options=300, n_param_sets=3, repeats=5, verbose=False)
+            assert res["machine"]["torch_threads"] == 1
+            speedups.append(res["speedup"])
+            if speedups[-1] > 2.0:
                 break
-        assert max(speedups) > 1.0, speedups
+        assert max(speedups) > 2.0, speedups
 
 
-# ── 9. Cached training data (skipped when absent) and baseline params ────────
-
-class TestTrainingDataCache:
-
-    def test_spx_cache_schema(self):
-        if not _SPX_DATA_PATH.exists():
-            pytest.skip("SPX training data cache not found")
-        df = pd.read_parquet(_SPX_DATA_PATH)
-        assert {"set_id", *SPX_FEATURES, "iv_target", "otm_rel"} <= set(df.columns)
-        assert np.isfinite(df["iv_target"]).all()
-        assert (df["otm_rel"] >= NN_LABEL_MIN_OTM_PRICE_REL).all()
-
-    def test_vix_cache_schema(self):
-        if not _VIX_DATA_PATH.exists():
-            pytest.skip("VIX training data cache not found")
-        df = pd.read_parquet(_VIX_DATA_PATH)
-        assert {"set_id", *VIX_FEATURES, "vix_target"} <= set(df.columns)
-
+# ── 9. Baseline params ────────────────────────────────────────────────────────
 
 class TestLoadBaselineParams:
 
