@@ -36,8 +36,9 @@ Which variant this is, and where it departs from the papers
     redundant. The calibrator fixes α5 = 1 as the paper does, keeps
     α0, α1, α3 ≥ 0 (Abi Jaber, Illand & Li: same-sign ATM skew as ε) and
     ε ≤ 0. S is a true martingale whenever α5 > 0 and ε ≤ 0 (proved for one
-    factor in Abi Jaber, Illand & Li, Prop. A.1; stated for two factors by
-    Abi Jaber & Li). The dataclass below accepts any real coefficients;
+    factor with a flat-g_0 forward-variance curve in Abi Jaber, Illand & Li,
+    Prop. A.1; stated for two factors in Abi Jaber & Li, Remark 2.1). The
+    dataclass below accepts any real coefficients;
     `admissibility_violations` reports what falls outside that set.
   • θ is restricted to [0, 1] by the calibrator; the paper only requires
     θ ≥ 0 (its reported fits have θ between 0.678 and 0.964).
@@ -170,7 +171,7 @@ QUINTIC_DEFAULTS = QuinticOUParams(
 # units of the stationary std of Z (see quintic_calibrator), so the α bounds
 # here are only sign constraints.
 QUINTIC_BOUNDS = [
-    (1.0,    300.0),     # lam_x  (step convergence checked up to 300; see tests)
+    (1.0,    300.0),     # lam_x  (Richardson step convergence tested at 31.8 and 300)
     (0.01,   20.0),      # lam_y
     (0.0,    1.0),       # theta  (convex combination of the two factors)
     (0.0,    math.inf),  # alpha0

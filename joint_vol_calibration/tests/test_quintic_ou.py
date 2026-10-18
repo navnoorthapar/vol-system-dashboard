@@ -54,6 +54,14 @@ def default_params():
     )
 
 
+# The committed 2026-03-24 Quintic fit (data_store/calibrations/quintic_cal_2026-03-24.pkl).
+CALIBRATED_2026_03_24 = QuinticOUParams(
+    lam_x=46.12588848887135, lam_y=6.811753422611144, theta=0.4503364461545721,
+    alpha0=0.004309392433029417, alpha1=0.012296027381957519, alpha3=0.03641774315696228,
+    alpha5=1.0, epsilon=-0.99,
+)
+
+
 @pytest.fixture
 def flat_fwd_var():
     """Flat ξ_0 = 0.04  (20% vol)."""
@@ -411,12 +419,14 @@ class TestSpxMC:
         bs = float(q.black76_price(F, S0, T, 0.20, True, math.exp(-r * T)))
         assert prices[0] == pytest.approx(bs, rel=0.03)
 
-    @pytest.mark.parametrize("which", ["fixture", "paper"])
+    @pytest.mark.parametrize("which", ["fixture", "paper", "calibrated"])
     @pytest.mark.parametrize("T", [0.25, 1.0])
     def test_martingale(self, which, T, default_params):
         # E[S_T/F] = 1 for the discrete left-point scheme; the pre-C22 scheme
         # (σ from X_{t+dt} times the same shock) gave 0.963 ± 0.0004 at T = 1.
-        p = default_params if which == "fixture" else QUINTIC_DEFAULTS
+        # "calibrated" is the committed 2026-03-24 fit (ε on its −0.99 bound).
+        p = {"fixture": default_params, "paper": QUINTIC_DEFAULTS,
+             "calibrated": CALIBRATED_2026_03_24}[which]
         x = np.exp(q.simulate_terminal_log_spot(T, p, _StepCurve(), n_paths=40_000, seed=11))
         n = len(x) // 2
         pair = 0.5 * (x[:n] + x[n:])
@@ -433,6 +443,48 @@ class TestSpxMC:
         se_pairs = (0.5 * (x[:n] + x[n:])).std(ddof=1) / math.sqrt(n)
         se_iid = x.std(ddof=1) / math.sqrt(2 * n)
         assert se_pairs < 0.5 * se_iid
+
+    def test_first_steps_of_the_simulation_have_the_exact_law(self):
+        # Two steps from X_0 = Y_0 = 0 with θ = 1 and p(z) = 1 + z (> 0 here):
+        #  - σ_0 = g0_0·p(0) is deterministic, so V_1 = σ_0² h must equal the
+        #    step-average ξ_0 times h EXACTLY — g0 is evaluated where Z is, at
+        #    the step start (E[p(Z_0)²] = α0²);
+        #  - Z_1 = I_X is recovered from V_2 − V_1 = σ_1² h and ΔW_0 from
+        #    A_1 = σ_0 ΔW_0. Their covariance must be the exact
+        #    (1 − e^{−λx h})/λx; at λx h = 1.19 the correlation is 0.947, while
+        #    one shared normal for the OU innovation and ΔW (pre-C22) gives 1.
+        lam_x, h = 300.0, 1.0 / 252
+        p = QuinticOUParams(lam_x=lam_x, lam_y=1.0, theta=1.0, alpha0=1.0, alpha1=1.0,
+                            alpha3=0.0, alpha5=0.0, epsilon=-0.5)
+        fv = _StepCurve()
+        t = np.array([0.0, h, 2 * h])
+        n = 50_000
+        sims = q._simulate_integrals(p, fv, t, np.array([1, 2]), n, seed=8)
+        np.testing.assert_allclose(sims["V"][0], fv.integrated(h), rtol=1e-12)
+        g0 = q._g0_on_grid(p, fv, t)
+        dW0 = sims["A"][0][:n] / (g0[0] * p.alpha0)          # first half: independent
+        Z1 = np.sqrt((sims["V"][1][:n] - sims["V"][0][:n]) / h) / g0[1] - p.alpha0
+        prod = dW0 * Z1
+        exact_cov = (1.0 - math.exp(-lam_x * h)) / lam_x
+        assert abs(prod.mean() - exact_cov) < 4.0 * prod.std(ddof=1) / math.sqrt(n)
+        assert np.var(dW0) == pytest.approx(h, rel=0.03)
+        vx = (1.0 - math.exp(-2.0 * lam_x * h)) / (2.0 * lam_x)
+        assert np.var(Z1) == pytest.approx(vx, rel=0.03)
+        assert np.corrcoef(dW0, Z1)[0, 1] < 0.96
+
+    def test_mixing_estimator_prices_on_the_exact_forward(self):
+        # The conditional estimator rescales M1 = exp(εA − ½ε²V) to sample
+        # mean 1, so the simulated law of S_T has mean exactly F on ANY path
+        # sample: per-path call minus put premia average to F − K at every
+        # strike (the property that rules out sub-intrinsic prices).
+        rng = np.random.default_rng(0)
+        A = rng.normal(0.0, 0.25, 4000)
+        V = rng.uniform(0.01, 0.09, 4000)
+        F, K = np.full(3, 100.0), np.array([80.0, 100.0, 125.0])
+        call = q._mixing_otm_premia(A, V, -0.7, F, K, np.ones(3, dtype=bool))
+        put = q._mixing_otm_premia(A, V, -0.7, F, K, np.zeros(3, dtype=bool))
+        assert np.all(call >= 0.0) and np.all(put >= 0.0)
+        np.testing.assert_allclose((call - put).mean(axis=0), F - K, atol=1e-9)
 
     def test_simulated_variance_matches_forward_variance(self):
         # E[∫_0^T σ² dt] = ∫_0^T ξ_0 exactly (no floor on σ). The paper's p has
@@ -463,7 +515,7 @@ class TestSpxMC:
         assert np.all(np.abs(cond["call"] - plain["call"]) < 4 * se)
 
     def test_parity_and_no_arbitrage(self):
-        # Exact put-call parity (control variate on M1), deep-ITM call above
+        # Exact put-call parity (M1 rescaled to sample mean 1), deep-ITM call above
         # intrinsic, and a convex decreasing call curve — at the paper's
         # parameters where the pre-C22 pricer returned sub-intrinsic prices.
         fv, T, F = _StepCurve(), 0.5, 100.0
@@ -477,13 +529,14 @@ class TestSpxMC:
         iv = q.black76_implied_vol(np.where(K >= F, res["call"], res["put"]), F, K, T, K >= F)
         assert np.all(np.isfinite(iv))
 
-    def test_step_convergence_with_richardson(self):
+    @pytest.mark.parametrize("lam_x", [31.8, 300.0])
+    def test_step_convergence_with_richardson(self, lam_x):
         # The plain left-point scheme's O(h) bias is ~1 vp in the 1y call wing
         # at 252 steps/yr for the paper's λx = 31.8 (18.13 vs 17.10 % on a fine
         # grid, 0.3 vp ATM). The Richardson-extrapolated default must sit within
         # 0.3 vp of the same estimator on a 2× finer grid (seed noise of the
-        # difference here ≈ 0.06–0.09 vp).
-        p, fv = QUINTIC_DEFAULTS, (lambda t: 0.07)
+        # difference here ≈ 0.06–0.09 vp), also at the λx upper bound (300).
+        p, fv = dataclasses.replace(QUINTIC_DEFAULTS, lam_x=lam_x), (lambda t: 0.07)
         T = 1.0
         K = 6600.0 * np.exp(np.array([0.0, 0.15]))
         F = np.full(2, 6600.0)

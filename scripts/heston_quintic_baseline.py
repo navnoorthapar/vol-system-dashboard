@@ -90,12 +90,18 @@ def heston_vix_ivs(p: dict, rows: list) -> tuple[np.ndarray, dict]:
     return out, fwd
 
 
-def build(session: str | None = None) -> Path:
+def compute_baseline(session: str | None = None, cal_dir: Path = CAL_DIR) -> dict:
+    """The baseline record for `session` (reads the two pickles, writes nothing).
+
+    Raises ValueError unless the Quintic and Heston fits describe the same spot
+    session and the same SPX option snapshot.
+    """
+    cal_dir = Path(cal_dir)
     if session is None:
-        qpath = sorted(CAL_DIR.glob("quintic_cal_*.pkl"))[-1]
+        qpath = sorted(cal_dir.glob("quintic_cal_*.pkl"))[-1]
         session = qpath.stem.replace("quintic_cal_", "")
-    qpath = CAL_DIR / f"quintic_cal_{session}.pkl"
-    hpath = CAL_DIR / f"joint_cal_{session}.pkl"
+    qpath = cal_dir / f"quintic_cal_{session}.pkl"
+    hpath = cal_dir / f"joint_cal_{session}.pkl"
     with open(qpath, "rb") as f:
         q = pickle.load(f)
     with open(hpath, "rb") as f:
@@ -187,7 +193,13 @@ def build(session: str | None = None) -> Path:
         "code_sha": sha,
         "generator": "scripts/heston_quintic_baseline.py",
     }
-    path = CAL_DIR / f"baseline_{session}.json"
+    return out
+
+
+def build(session: str | None = None, cal_dir: Path = CAL_DIR) -> Path:
+    """Write cal_dir/baseline_<session>.json (see compute_baseline)."""
+    out = compute_baseline(session, cal_dir)
+    path = Path(cal_dir) / f"baseline_{out['session']}.json"
     path.write_text(json.dumps(out, indent=2) + "\n")
     return path
 
