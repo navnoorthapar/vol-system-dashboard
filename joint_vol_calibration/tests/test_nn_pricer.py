@@ -277,7 +277,11 @@ class TestExactLabels:
         x ≈ 0.091, 0.117, 0.154 (worth ~$48, $16, $1.3) have reference IVs
         0.1773, 0.1572, 0.1292 (audit, x rounded to 3 dp). The old pipeline
         returned 1e-4 for all three and the benchmark excluded them."""
-        iv, _ = heston_iv_exact(np.array([0.091, 0.117, 0.154]), 0.25, _load_baseline_params())
+        # The audit used the pre-C22 2026-03-24 baseline fit; the shipped
+        # baseline JSON now holds the model_version 2 refit, so pin the audit's set.
+        audit_params = {"kappa": 4.6213176193778605, "theta": 0.07641449297851698,
+                        "sigma": 0.8406653896239384, "rho": -0.95, "v0": 0.056129661711285944}
+        iv, _ = heston_iv_exact(np.array([0.091, 0.117, 0.154]), 0.25, audit_params)
         np.testing.assert_allclose(iv, [0.1773, 0.1572, 0.1292], atol=1e-3)
 
 

@@ -1,21 +1,77 @@
 {
+  "session": "2026-03-24",
   "as_of_date": "2026-03-24",
-  "description": "Baseline calibration \u2014 C4 joint calibrator on 2026-03-24 live market data",
+  "description": "Like-for-like Heston baseline for the Quintic OU research fit: the model_version 2 joint Heston calibration of the same session, on its own targets and re-priced on the Quintic's targets",
   "params": {
-    "kappa": 4.6213176193778605,
-    "theta": 0.07641449297851698,
-    "sigma": 0.8406653896239384,
-    "rho": -0.95,
-    "v0": 0.056129661711285944
+    "kappa": 6.139935672918504,
+    "theta": 0.06527375451942208,
+    "sigma": 1.9999999626631524,
+    "rho": -0.822745050048642,
+    "v0": 0.07315170233939909
   },
-  "losses": {
-    "spx_iv_rmse": 3.8333588958635674,
-    "vix_futures_rmse": 1.150224339532592,
-    "vix_options_rmse": 37.14461573029584,
-    "total_loss": 0.02837886303271954
+  "heston": {
+    "file": "joint_cal_2026-03-24.pkl",
+    "model_version": 2,
+    "gate_ok": true,
+    "gate_reason": "ok",
+    "feller": "off",
+    "feller_state": "VIOLATED",
+    "feller_margin": -3.1984465428943607,
+    "active_constraints": [
+      "sigma = 2 (box ceiling)"
+    ],
+    "S": 6556.3701171875,
+    "r": 0.038898083624448423,
+    "q": -0.002144399746495558,
+    "r_reference": 0.037559146364021696,
+    "spx_snapshot_date": "2026-03-24",
+    "n_spx_options": 52,
+    "n_spx_expiries": 6,
+    "n_vix_tenors": 4
   },
-  "S": 6581.0,
-  "r": 0.045,
-  "q": 0.013,
-  "fit_time_s": 42.597315073013306
+  "own_targets": {
+    "spx_iv_rmse": 1.2066424476320712,
+    "spx_iv_rmse_definition": "vol points, in-sample z-grid anchors (vega-approximated)",
+    "spx_oos_iv_rmse": 1.9796835759760791,
+    "spx_oos_put_wing_rmse": 2.8835384832266278,
+    "n_spx_oos": 6622,
+    "vix_index_rmse": 0.8882660259202025,
+    "vix_index_definition": "VIX points, ^VIX9D/^VIX/^VIX3M/^VIX6M vs heston_vix_term_index",
+    "vx_futures_rmse_oos": 2.3170451442115954
+  },
+  "on_quintic_targets": {
+    "spx_iv_rmse": 1.214476287117559,
+    "n_spx": 66,
+    "n_spx_rows": 66,
+    "vix_forward_rmse": 2.3049873743797544,
+    "vix_forward_rel_rmse": 0.09755829480105063,
+    "n_vix_forwards": 8,
+    "vix_options_rmse": 35.17416031596708,
+    "n_vix_options": 61,
+    "n_vix_option_rows": 61,
+    "note": "Heston was not fitted to these targets (VIX-options weight 0, different SPX strike set); the Quintic was."
+  },
+  "quintic": {
+    "file": "quintic_cal_2026-03-24.pkl",
+    "spx_iv_rmse": 1.308715443086568,
+    "spx_iv_rmse_fresh_paths": 1.3104174334641618,
+    "vix_forward_rmse": 0.3762499429148655,
+    "vix_forward_rel_rmse": 0.01589869300044627,
+    "vix_options_rmse": 2.771656894189623,
+    "xi0_index_reproduction_rmse": 2.5121479338940403e-15,
+    "success": false,
+    "at_bound": [
+      "epsilon"
+    ],
+    "n_spx_options": 66,
+    "n_vix_options": 61,
+    "spx_snapshot_date": "2026-03-24",
+    "vix_snapshot_date": "2026-03-24",
+    "r": 0.036871733499746685,
+    "r_source": "^IRX",
+    "code_sha": "2ab2dbbd267820b5976637501bc22f92de047cec"
+  },
+  "built_at_utc": "2026-10-18T09:10:34Z",
+  "code_sha": "2ab2dbbd267820b5976637501bc22f92de047cec",
+  "generator": "scripts/heston_quintic_baseline.py"
 }
