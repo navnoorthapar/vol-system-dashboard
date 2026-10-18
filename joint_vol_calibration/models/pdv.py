@@ -1476,15 +1476,18 @@ class PDVModel:
         metrics_df = pd.DataFrame(metrics_list).set_index("label")
 
         if verbose:
-            print("\n" + "=" * 70)
-            print("  PDV WALK-FORWARD VALIDATION RESULTS")
-            print(f"  Target: {self.target_description}")
-            print(f"  OOS period: {y_oos.index[0].date()} -> {y_oos.index[-1].date()}"
-                  f" ({len(y_oos)} rows)")
-            print("=" * 70)
-            print(metrics_df[["r2", "mae", "rmse", "corr", "bias"]].to_string())
-            print()
-            _print_model_interpretation(self.linear_)
+            lines = [
+                "=" * 70,
+                "  PDV WALK-FORWARD VALIDATION RESULTS",
+                f"  Target: {self.target_description}",
+                f"  OOS period: {y_oos.index[0].date()} -> {y_oos.index[-1].date()}"
+                f" ({len(y_oos)} rows)",
+                "=" * 70,
+                metrics_df[["r2", "mae", "rmse", "corr", "bias"]].to_string(),
+                "",
+                *_model_interpretation_lines(self.linear_),
+            ]
+            logger.info("\n%s", "\n".join(lines))
 
         return {
             "metrics":     metrics_df,
@@ -1528,18 +1531,20 @@ class PDVModel:
         )
 
         if verbose:
-            print("\n" + "=" * 70)
-            print(f"  PDV STRESS TEST: {stress_date}  (walk-forward, prior-close origin)")
-            print(f"  Target: {self.target_description}")
-            print("=" * 70)
-            print(result.to_string(index=False))
+            lines = [
+                "=" * 70,
+                f"  PDV STRESS TEST: {stress_date}  (walk-forward, prior-close origin)",
+                f"  Target: {self.target_description}",
+                "=" * 70,
+                result.to_string(index=False),
+            ]
 
             # Feature breakdown at the forecast origin of the stress date
             hit = result[result["date"] == pd.to_datetime(stress_date).strftime("%Y-%m-%d")]
             if len(hit):
                 origin = pd.to_datetime(hit["forecast_origin"].iloc[0])
                 feat_row = features.loc[origin]
-                print(f"\n  Features on {origin.date()} (forecast origin for {stress_date}):")
+                lines += ["", f"  Features on {origin.date()} (forecast origin for {stress_date}):"]
                 key_feats = {
                     "sigma1 (fast vol, ann)": f"{feat_row['sigma1']*100:.1f}%",
                     "sigma2 (slow vol, ann)": f"{feat_row['sigma2']*100:.1f}%",
@@ -1547,8 +1552,8 @@ class PDVModel:
                     "r_lag1":                 f"{feat_row['r_lag1']*100:.2f}%",
                     "r_lag2":                 f"{feat_row['r_lag2']*100:.2f}%",
                 }
-                for k, v in key_feats.items():
-                    print(f"    {k:<30s}: {v}")
+                lines += [f"    {k:<30s}: {v}" for k, v in key_feats.items()]
+            logger.info("\n%s", "\n".join(lines))
 
         return result
 
@@ -1611,21 +1616,23 @@ class PDVModel:
 
 # ── Interpretation helper ─────────────────────────────────────────────────────
 
-def _print_model_interpretation(model: PDVLinear) -> None:
+def _model_interpretation_lines(model: PDVLinear) -> list:
     if model.coef_ is None:
-        return
+        return []
     a, b, c = model.coef_
     d = model.intercept_
-    print("  PDVLinear coefficients (vol-space):")
-    print(f"    sigma1 (fast, ~5d EWMA vol) : {a:.4f}  "
-          f"{'↑' if a>0 else '↓'} short-term vol drives forecast")
-    print(f"    sigma2 (slow, ~60d EWMA vol): {b:.4f}  "
-          f"{'↑' if b>0 else '↓'} long-term regime matters")
-    print(f"    lev    (EMA of return)       : {c:.4f}  "
-          f"{'negative return → higher vol' if c<0 else 'positive return → higher vol'}")
-    print(f"    intercept (floor vol)        : {d*100:.2f}%")
     total_w = a + b
-    print(f"    fast/slow split              : {a/total_w*100:.0f}% / {b/total_w*100:.0f}%")
+    return [
+        "  PDVLinear coefficients (vol-space):",
+        f"    sigma1 (fast, ~5d EWMA vol) : {a:.4f}  "
+        f"{'↑' if a>0 else '↓'} short-term vol drives forecast",
+        f"    sigma2 (slow, ~60d EWMA vol): {b:.4f}  "
+        f"{'↑' if b>0 else '↓'} long-term regime matters",
+        f"    lev    (EMA of return)       : {c:.4f}  "
+        f"{'negative return → higher vol' if c<0 else 'positive return → higher vol'}",
+        f"    intercept (floor vol)        : {d*100:.2f}%",
+        f"    fast/slow split              : {a/total_w*100:.0f}% / {b/total_w*100:.0f}%",
+    ]
 
 
 # ── Honest skill report ───────────────────────────────────────────────────────
