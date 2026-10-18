@@ -20,6 +20,14 @@ history. This script does the one-time load; the bot's upserts then keep the
 tail current. ``test_rates.py`` now runs against a temporary copy of the
 schema and never opens the tracked database.
 
+Persistence: the database is not the record. Every bot run starts by
+upserting the committed yearly partitions (data_store/market/tbill_rates/,
+database.import_market_partitions) into it, so a fix written only to the
+database is silently undone for every year older than the bot's 400-day
+export window. With --apply the script therefore also merges what it wrote
+into those partitions (export_market_partitions, every year from --start);
+commit them together with the database.
+
 Units (C22): ^IRX is a bank-discount yield in percent. The downloader now
 stores the continuously compounded rate the pricers assume
 (``database.tbill_discount_to_cc``) next to the raw quote, and keeps zero and
@@ -41,6 +49,7 @@ sys.path.insert(0, str(ROOT))
 from joint_vol_calibration.config import BT_END, BT_START          # noqa: E402
 from joint_vol_calibration.data import yf_downloader as dl        # noqa: E402
 from joint_vol_calibration.data.database import (                 # noqa: E402
+    export_market_partitions,
     get_tbill_rates_series,
     init_database,
     insert_tbill_rates,
@@ -102,6 +111,14 @@ def main(start: str, apply: bool, end: str | None = None) -> int:
     after = _coverage(BT_END)
     print(f"inserted/replaced {n} rows")
     print(f"after:  {after[0]} rows in {BT_START}..{BT_END} (first={after[1]} last={after[2]})")
+    # The committed partitions are what the bot restores from: without this
+    # its next run re-imports the old values for every year it does not export.
+    written = export_market_partitions(tables=["tbill_rates"], since=start)
+    if written:
+        print(f"merged into {len(written)} partition file(s); commit them:"
+              + "".join(f"\n  {p}" for p in written))
+    else:
+        print("the data_store/market/tbill_rates partitions already hold these rows")
     return 0
 
 
@@ -109,6 +126,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2010-01-01")
     ap.add_argument("--end", default=None, help="inclusive end date (default: the last closed NYSE session)")
-    ap.add_argument("--apply", action="store_true", help="write to the database")
+    ap.add_argument("--apply", action="store_true",
+                    help="write to the database and the data_store/market partitions")
     a = ap.parse_args()
     raise SystemExit(main(a.start, a.apply, a.end))

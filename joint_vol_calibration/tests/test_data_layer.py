@@ -354,6 +354,28 @@ class TestTbillUnits:
                     if isinstance(t, ast.Name)}
         assert {"BT_START", "BT_END"} <= imported and not {"BT_START", "BT_END"} & assigned
 
+    def test_backfill_writes_the_partitions_the_bot_restores_from(self, tmp_db, tmp_path, monkeypatch):
+        """Every bot run starts with import_market_partitions (INSERT OR REPLACE
+        from the committed partitions). A backfill written only to the DB was
+        undone by the next run for every year older than the 400-day export
+        window; --apply now merges what it wrote into those partitions."""
+        mod = _load_script("backfill_tbill_history")
+        # committed history: the 2020 test-fixture rate the backfill exists to repair
+        db.insert_tbill_rates(pd.DataFrame({"date": ["2020-01-02", "2026-10-15"],
+                                            "rate": [0.015, 0.0400]}))
+        db.export_market_partitions(tables=["tbill_rates"])
+        fixed = pd.DataFrame({"date": ["2020-01-02", "2020-01-03", "2026-10-15"],
+                              "rate": [0.01544, 0.01528, 0.0401],
+                              "discount_yield": [0.0152, 0.0150, 0.0393]})
+        monkeypatch.setattr(mod.dl, "download_tbill_rate", lambda start, end: fixed.copy())
+        assert mod.main("2010-01-01", apply=True, end="2026-10-16") == 0
+        part = pd.read_parquet(tmp_path / "market" / "tbill_rates" / "tbill_rates_2020.parquet")
+        assert part["rate"].tolist() == [0.01544, 0.01528]
+        # the next bot run restores the partitions first: the fix survives
+        db.import_market_partitions()
+        assert db.get_tbill_rate("2020-01-02") == pytest.approx(0.01544)
+        assert db.get_tbill_rate("2020-01-03") == pytest.approx(0.01528)
+
     def test_backfill_default_end_is_the_last_closed_session(self, tmp_db, monkeypatch):
         """Not the machine's date: mid-session that asked Yahoo for a forming ^IRX bar."""
         mod = _load_script("backfill_tbill_history")
