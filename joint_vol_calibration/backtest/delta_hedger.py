@@ -55,7 +55,7 @@ Unstable-hedge flag (vomma)
   (up to 252 sessions, at least 20; ex-ante: the window ends at t−1).
   Unstable day: z > 2. On the 2020 straddle the flag fires on 29 days, all
   in the Feb–Apr COVID window, and the next day's realised |volga P&L| on
-  flagged days is ~20× that on other days.
+  flagged days is ~25× that on other days.
 
   (Before C22 the flag z-scored a single CALL's vomma at 2020 spot against
   the C6 surface built at S≈6,581 across all strikes and maturities. Vomma
