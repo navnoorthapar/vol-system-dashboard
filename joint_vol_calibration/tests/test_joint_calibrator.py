@@ -105,7 +105,7 @@ def _patch_db(mp, session=_SESSION, S=_SPOT, vix_row=None, spx_surface=None,
     mp.setattr(jc.db, "get_tbill_rates_series", lambda as_of_date, start_date=None:
                pd.DataFrame({"date": [dates[-1]], "rate": [0.0410], "discount_yield": [0.0403]}))
     mp.setattr(jc.db, "get_vix_futures_curve", lambda as_of_date:
-               pd.DataFrame(columns=["expiry_month", "close", "days_to_expiry"]))
+               pd.DataFrame(columns=["expiry_month", "settle", "close", "price", "days_to_expiry"]))
 
     def _surface(as_of_date, underlying):
         if underlying == "VIX":
@@ -450,6 +450,40 @@ def synth_fit():
         cal = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain())
         res = cal.calibrate(de_maxiter=40, de_popsize=8, verbose=False)
     return cal, res
+
+
+class TestVxFuturesOutOfSample:
+    """Real VX futures are scored at their SETTLEMENT (database ``price`` =
+    COALESCE(settle, close)), not the last trade: on 2026-03-24 the front
+    closes sat 0.4-0.6 pts from the settles, and a contract with no trade that
+    day (no close) was dropped."""
+
+    def _cal(self, fut):
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp)
+            mp.setattr(jc.db, "get_vix_futures_curve", lambda as_of_date: fut)
+            return JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain())
+
+    def test_scored_at_settlement_and_untraded_contracts_kept(self):
+        fut = pd.DataFrame({
+            "expiry_month": ["2026-10", "2026-11", "2026-12"],
+            "settle": [24.94, 24.15, 23.85],
+            "close": [24.32, 23.62, np.nan],          # December did not trade
+            "days_to_expiry": [22, 57, 85],
+        })
+        fut["price"] = fut["settle"].fillna(fut["close"])
+        cal = self._cal(fut)
+        assert len(cal.vx_futures) == 3
+        k, th, sg, v0 = 3.0, 0.04, 0.6, 0.03
+        model = heston_vix_future_exact(k, th, sg, v0, fut["days_to_expiry"].to_numpy(float) / 365.0)
+        want = float(np.sqrt(np.mean((np.atleast_1d(model) - fut["settle"].to_numpy()) ** 2)))
+        assert cal._vx_futures_oos(k, th, sg, v0) == pytest.approx(want, rel=1e-12)
+
+    def test_frame_without_price_column_falls_back_to_settle_then_close(self):
+        fut = pd.DataFrame({"expiry_month": ["2026-10", "2026-11"], "settle": [np.nan, 24.15],
+                            "close": [24.32, 23.62], "days_to_expiry": [22, 57]})
+        cal = self._cal(fut)
+        assert cal.vx_futures["price"].tolist() == [24.32, 24.15]
 
 
 class TestSyntheticCalibration:

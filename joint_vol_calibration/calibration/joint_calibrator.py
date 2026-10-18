@@ -54,10 +54,12 @@ E[VIX_T] from the same CIR law, T = 0 uses the model's spot VIX, the payoff is
 integrated against the CIR survival function, which is smooth where the
 density is singular) and the chain is now read only when its quote session is
 the spot session, with Black-76 vegas/moneyness on the parity-implied VX
-forward. It stays disabled: the only VIX option snapshot in the DB is from
-2026-06-20, so no current fit has data for it, and its old 37 vp "structural
-failure" figure was measured with the broken put pricer, spot-VIX vegas and a
-stale chain, so it says nothing about the model.
+forward. It stays disabled: the DB holds same-session VIX chains for only four
+sessions (2026-03-24, 03-27, 05-29, 06-18; 0-7 liquid options each after
+filtering) and the daily job captures SPX only, so the leg cannot be part of
+the routine fit. Its old 37 vp "structural failure" figure was measured with
+the broken put pricer, spot-VIX vegas and a stale chain, so it says nothing
+about the model.
 
 Usage
 -----
@@ -783,23 +785,31 @@ class JointCalibrator:
         return pd.DataFrame(rows).sort_values("tenor_years").reset_index(drop=True)
 
     def _prepare_vx_futures(self) -> pd.DataFrame:
-        """True VX futures closes on the spot session, if the DB has any
-        (vix_futures_daily). Scored out of sample only; empty table -> no-op."""
+        """True VX futures on the spot session, if the DB has any
+        (vix_futures_daily), at their daily SETTLEMENT (``price`` =
+        COALESCE(settle, close)): the last trade can be hours stale on a thin
+        back month, and a contract with no trade that day has no close at all.
+        Scored out of sample only; empty table -> no-op."""
+        cols = ["expiry_month", "price", "days_to_expiry"]
         try:
             fut = db.get_vix_futures_curve(self.spot_date)
         except Exception as exc:          # table absent in a minimal DB
             logger.debug("  VX futures unavailable: %s", exc)
-            return pd.DataFrame(columns=["expiry_month", "close", "days_to_expiry"])
+            return pd.DataFrame(columns=cols)
         if fut is None or fut.empty:
-            return pd.DataFrame(columns=["expiry_month", "close", "days_to_expiry"])
-        fut = fut[(fut["days_to_expiry"] > 0) & (fut["close"] > 0)]
+            return pd.DataFrame(columns=cols)
+        if "price" not in fut.columns:    # a caller-supplied frame
+            settle = fut["settle"] if "settle" in fut.columns else pd.Series(np.nan, index=fut.index)
+            fut = fut.assign(price=settle.fillna(fut["close"]) if "close" in fut.columns else settle)
+        fut = fut[(fut["days_to_expiry"] > 0) & (fut["price"] > 0)]
         return fut.reset_index(drop=True)
 
     def _prepare_vix_options(self) -> pd.DataFrame:
         """
         VIX options for the (disabled) third leg — read only when the chain's
-        quote session is the spot session (the DB's only VIX chain is from
-        2026-06-20; pre-C22 it was used for every fit with its June T).
+        quote session is the spot session (pre-C22 one June chain was used
+        for every fit with its June T; the DB now holds same-session VIX
+        chains for 2026-03-24, 03-27, 05-29 and 06-18).
 
         Per expiry the VX forward F_T is implied from put-call parity of the
         two-sided quotes (VIX options are written on the future), and the mid
@@ -1043,7 +1053,7 @@ class JointCalibrator:
             return None
         T = self.vx_futures["days_to_expiry"].to_numpy(float) / 365.0
         model = np.atleast_1d(heston_vix_future_exact(kappa, theta, sigma, v0, T))
-        return float(np.sqrt(np.mean((model - self.vx_futures["close"].to_numpy(float)) ** 2)))
+        return float(np.sqrt(np.mean((model - self.vx_futures["price"].to_numpy(float)) ** 2)))
 
     def _provenance(self) -> dict:
         """Data provenance shared by the Heston and Bates results."""

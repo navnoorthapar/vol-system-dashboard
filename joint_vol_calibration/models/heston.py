@@ -1129,8 +1129,10 @@ def compute_heston_vix_gap(
 
     Parameters
     ----------
-    market_vix_futures : DataFrame with columns [expiry_month, close, days_to_expiry]
-                         as returned by database.get_vix_futures_curve()
+    market_vix_futures : DataFrame with columns [expiry_month, days_to_expiry] and
+                         ``price`` (the settlement where there is one, as returned
+                         by database.get_vix_futures_curve()); ``settle``/``close``
+                         are used if ``price`` is absent
 
     Returns
     -------
@@ -1149,7 +1151,14 @@ def compute_heston_vix_gap(
     model_prices = heston_vix_futures_curve(kappa, theta, sigma, v0, expiry_times)
 
     df["model_price"] = model_prices
-    df.rename(columns={"close": "market_price"}, inplace=True)
+    # Score against the settlement where there is one (database.get_vix_futures_curve
+    # returns it as ``price``); a last trade can be stale or missing.
+    if "price" in df.columns:
+        df["market_price"] = df["price"]
+    elif "settle" in df.columns:
+        df["market_price"] = df["settle"].fillna(df["close"]) if "close" in df.columns else df["settle"]
+    else:
+        df["market_price"] = df["close"]
     df["gap"]      = df["model_price"] - df["market_price"]
     df["abs_gap"]  = df["gap"].abs()
     df["gap_pct"]  = (df["gap"] / df["market_price"] * 100.0).round(2)

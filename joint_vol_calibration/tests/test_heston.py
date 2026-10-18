@@ -409,6 +409,21 @@ class TestHestonVIX:
             heston_vix_futures_curve(p["kappa"], p["theta"], p["sigma"], p["v0"],
                                      np.array([30, 60, 90]) / 365.0))
 
+    def test_vix_gap_scores_the_settlement_not_the_last_trade(self):
+        """database.get_vix_futures_curve returns ``price`` = COALESCE(settle,
+        close); a stale last trade (or none) must not replace the settle."""
+        p = _PARAMS
+        market = pd.DataFrame({
+            "expiry_month": ["2026-04", "2026-05"],
+            "settle": [24.94, 24.15], "close": [24.32, np.nan],
+            "price": [24.94, 24.15], "days_to_expiry": [22, 57],
+        })
+        gap_df = compute_heston_vix_gap(p["kappa"], p["theta"], p["sigma"], p["v0"], market)
+        assert gap_df["market_price"].tolist() == [24.94, 24.15]
+        no_price = market.drop(columns="price")
+        gap2 = compute_heston_vix_gap(p["kappa"], p["theta"], p["sigma"], p["v0"], no_price)
+        assert gap2["market_price"].tolist() == [24.94, 24.15]
+
     def test_integrated_variance_reduces_to_v0_at_zero(self):
         """int_0^0 v_s ds / 0 → v0 (limit as T→0)."""
         p = _PARAMS
