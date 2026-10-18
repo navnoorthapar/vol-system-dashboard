@@ -197,8 +197,8 @@ class ReportGenerator:
   <h2>{_esc(self._wf_heading())}</h2>
   <p style="font-size:.8rem;color:#555;margin-bottom:.5rem">
     Each window re-runs the same rules from a flat book with fresh capital. Nothing
-    is re-fitted per window (the PDV refit per year is the same as in the main run),
-    and the rules were chosen on the whole sample — this is a stability check, not
+    is re-fitted per window (each reads the main run's causal PDV forecast), and
+    the rules were chosen on the whole sample — this is a stability check, not
     an out-of-sample test. Sharpe uses rf = 0 on the excess P&L.
   </p>
   <img class="chart" src="data:image/png;base64,{wf_b64}" alt="Sub-period Sharpe">

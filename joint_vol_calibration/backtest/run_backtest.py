@@ -65,6 +65,14 @@ PDV_HISTORY_START = "2010-01-01"
 # before its quotes are compared with that session's VIX close.
 SNAPSHOT_SPOT_TOL = 0.005
 
+# A live chain is compared with the latest ^VIX print only if that print is
+# this recent. Yahoo's ^VIX runs ~15 minutes behind (the 2026-10-12 capture:
+# print 04:24 ET, chain 04:39 ET). Outside Cboe's trading hours (weekends,
+# the daily halt) the quotes are stale and the last VIX print can be days
+# old, so the chain's time to expiry (measured from now) and the VIX are not
+# from the same time (a Sunday run gave β = 0.72 against a Friday-close VIX).
+LIVE_MAX_VIX_GAP = pd.Timedelta(minutes=30)
+
 
 def _load_data(start: str = DATA_START, end: str = BT_END) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load SPX OHLCV and VIX wide from SQLite."""
@@ -135,13 +143,14 @@ def _session_market(snapshot_date: str) -> Optional[Dict]:
             "r": float(r[0]) if r else 0.04}
 
 
-def fetch_live_spx_chain(min_days: int = 7, max_days: int = 75) -> Tuple[pd.DataFrame, pd.Timestamp, float, float, str]:
+def fetch_live_spx_chain(min_days: int = 7, max_days: int = 75) -> Tuple[pd.DataFrame, pd.Timestamp, float, float, pd.Timestamp]:
     """
-    Live ^SPX chain (SPXW, PM-settled) and the ^VIX print closest in time.
+    Live ^SPX chain (SPXW, PM-settled) and the latest ^VIX print.
 
-    Returns (quotes, as_of [naive US/Eastern], vix, r, note). Outside regular
-    hours Yahoo serves Cboe global-trading-hours quotes for both SPXW options
-    and VIX, so the pair is still time-matched; the note records the gap.
+    Returns (quotes, as_of, vix, r, vix_time), both times naive US/Eastern.
+    During Cboe global trading hours Yahoo serves live GTH quotes for SPXW
+    options and VIX alike, so the pair is time-matched; when the market is
+    closed it is not, and estimate_beta excludes the chain (LIVE_MAX_VIX_GAP).
     """
     import yfinance as yf
 
@@ -161,8 +170,8 @@ def fetch_live_spx_chain(min_days: int = 7, max_days: int = 75) -> Tuple[pd.Data
     v = yf.Ticker("^VIX").history(period="1d", interval="1m")
     vix_ts = v.index[-1].tz_convert("America/New_York")
     irx = yf.Ticker("^IRX").history(period="5d")["Close"]
-    note = f"VIX print {vix_ts:%Y-%m-%d %H:%M} ET, chain {now:%Y-%m-%d %H:%M} ET"
-    return chain, now.tz_localize(None), float(v["Close"].iloc[-1]), float(irx.iloc[-1]) / 100.0, note
+    return (chain, now.tz_localize(None), float(v["Close"].iloc[-1]),
+            float(irx.iloc[-1]) / 100.0, vix_ts.tz_localize(None))
 
 
 def estimate_beta(include_live: bool = True) -> pd.DataFrame:
@@ -198,12 +207,20 @@ def estimate_beta(include_live: bool = True) -> pd.DataFrame:
                      f"{mk['spx']:.0f} ({gap:+.1%}) — quotes not from this session"})
     if include_live:
         try:
-            chain, as_of, vix, r, note = fetch_live_spx_chain()
-            est = estimate_atm_to_vix_ratio(chain, as_of, vix, r, Q_BACKTEST)
-            rows.append({"source": "yahoo-live ^SPX", "session": str(as_of)[:16], **est,
-                         "status": f"included ({note})"})
-        except Exception as exc:          # network / closed market
+            chain, as_of, vix, r, vix_time = fetch_live_spx_chain()
+        except Exception as exc:          # network
             rows.append({"source": "yahoo-live ^SPX", "status": f"unavailable: {exc}"})
+        else:
+            note = f"VIX print {vix_time:%Y-%m-%d %H:%M} ET, chain {as_of:%Y-%m-%d %H:%M} ET"
+            rec = {"source": "yahoo-live ^SPX", "session": str(as_of)[:16]}
+            if abs(as_of - vix_time) > LIVE_MAX_VIX_GAP:
+                rows.append({**rec, "status": f"excluded: not time-matched, market closed? ({note})"})
+            else:
+                try:
+                    est = estimate_atm_to_vix_ratio(chain, as_of, vix, r, Q_BACKTEST)
+                    rows.append({**rec, **est, "status": f"included ({note})"})
+                except ValueError as exc:
+                    rows.append({**rec, "status": f"excluded: {exc} ({note})"})
     return pd.DataFrame(rows)
 
 
@@ -333,7 +350,8 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
 
 def _print_null(null: Dict) -> None:
     print(f"\n  S3 timing null test ({null['method']}, {null['n_paths']} paths, seed {null['seed']}):")
-    print(f"  real trades {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}")
+    print(f"  real S3 entries {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}"
+          f"  (engine S3 pass-1 P&L ${null['engine_pass1_pnl']:,.0f})")
     for key, lbl in (("index_leg", "S3 index leg (short SPX straddle)"),
                      ("z_proxy", "pre-C22 z-unit proxy")):
         s = null[key]

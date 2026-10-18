@@ -8,14 +8,18 @@ itself (no source greps, no re-implemented logic):
   financing       r on the cash account (−V + ΔS), q on the stock leg;
                   hedged P&L is unbiased in a Black-Scholes world
   expiry / roll   straddles settle at expiry and roll; no T_rem floor
-  rate gaps       previous ^IRX print, negative yields kept
+  rate gaps       previous ^IRX print, negative yields kept; a stub
+                  series is refused, not forward-filled
   bookkeeping     open trade logged; Σ trade net P&L == sleeve P&L;
                   sizing off the sleeve's running NAV
   S3              proxy exit day; index leg priced as a short straddle;
-                  random-walk null test of the timing rule
-  sizing overlay  correlation netting reduces size when sleeves co-move
+                  random-walk null test of the timing rule, whose "real"
+                  statistic is the engine's own S3
+  sizing overlay  correlation netting reduces size when sleeves co-move;
+                  run() applies it one session late
   metrics         Sharpe on excess P&L (rf = 0)
-  ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol
+  ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol;
+                  a live chain needs a time-matched VIX
   sub-periods     no classifier re-training
   report          portfolio sleeves shown, labels follow the convention
   c22_bridge      upstream probes detect the fixed behaviour
@@ -230,6 +234,39 @@ class TestRateGaps:
         pd.testing.assert_series_equal(a, b)
 
 
+class TestRateSeriesSpan:
+    """The engine's guard against forward-filling a stub (C21: seven
+    synthetic ^IRX rows had become the hurdle for five years)."""
+
+    START, END = "2018-01-01", "2025-03-24"
+
+    def test_spanning_series_accepted_stubs_rejected(self):
+        full = pd.bdate_range("2017-11-20", self.END)
+        span = bte.rate_series_spans_window
+        assert span(full, self.START, self.END)
+        assert not span(pd.bdate_range("2020-01-02", periods=7), self.START, self.END)
+        assert not span(pd.bdate_range("2018-03-01", self.END), self.START, self.END)   # starts late
+        assert not span(pd.bdate_range("2017-11-20", "2024-12-31"), self.START, self.END)  # ends early
+        assert not span(full[::3], self.START, self.END)                                 # too sparse
+        assert not span(pd.DatetimeIndex([]), self.START, self.END)
+
+    def test_engine_refuses_a_stub_and_loads_a_full_series(self, monkeypatch):
+        from joint_vol_calibration.data import database
+        eng = BacktestEngine(start_date=self.START, end_date=self.END)
+
+        def serve(dates):
+            return lambda **kw: pd.DataFrame({"date": dates.strftime("%Y-%m-%d"),
+                                              "rate": 0.02})
+
+        monkeypatch.setattr(database, "get_tbill_rates_series",
+                            serve(pd.bdate_range("2020-01-02", periods=7)))
+        assert eng._load_rate_series() is None
+        monkeypatch.setattr(database, "get_tbill_rates_series",
+                            serve(pd.bdate_range("2017-11-20", self.END)))
+        r = eng._load_rate_series()
+        assert r is not None and len(r) > 1500 and (r == 0.02).all()
+
+
 # ── bookkeeping and sizing ─────────────────────────────────────────────────────
 
 class TestBookkeeping:
@@ -319,6 +356,52 @@ class TestS3:
         with pytest.raises(ValueError):
             bte.s3_timing_null_test(engine, n_paths=1, method="bootstrap")
 
+    def test_null_real_statistic_is_the_engines_s3(self, engine):
+        """The null's 'real' must be the S3 the engine trades. It used to be
+        rebuilt from the window's features alone, so its z-score warmed up
+        inside the window and missed the engine's early-window trades (on
+        2018-2025: 26 entries from 2018-07-16, +$110,675, vs the engine's
+        +$41,952 from 2018-01-04)."""
+        sig = engine.signals_df
+        first = sig.index[sig["s3_position"] != 0][0]
+        # the fixture must exercise the warm-up: S3 trades before a 126-session
+        # in-window warm-up could have completed
+        assert sig.index.get_loc(first) < 126
+        res = bte.s3_timing_null_test(engine, n_paths=2, seed=1)
+        assert res["index_leg"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
+        entries = int(((sig["s3_position"] != 0) & (sig["s3_position"].shift(1, fill_value=0) == 0)).sum())
+        assert res["real_trades"] == entries
+
+    def test_null_real_statistic_is_the_legacy_proxy_when_engine_runs_it(self):
+        spx, vix = _rw_market()
+        eng = BacktestEngine(start_date="2018-01-02", end_date="2019-09-30",
+                             corrections=C22Corrections().with_(s3_index_leg=False))
+        eng.run(spx, vix)
+        res = bte.s3_timing_null_test(eng, n_paths=1, seed=1)
+        assert res["z_proxy"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
+
+    def test_null_paths_change_only_vvix(self, engine, monkeypatch):
+        """Each null path re-runs SignalEngine on the full history with ^VVIX
+        replaced; ^VIX, the regimes and the PDV series are the engine's."""
+        from joint_vol_calibration.signals import signal_engine as se
+        seen = []
+        orig = se.SignalEngine.generate
+
+        def spy(self, spx_df, vix_wide_df, **kw):
+            seen.append((vix_wide_df, kw))
+            return orig(self, spx_df, vix_wide_df, **kw)
+
+        monkeypatch.setattr(se.SignalEngine, "generate", spy)
+        bte.s3_timing_null_test(engine, n_paths=1, seed=5)
+        (real, kw_real), (null, kw_null) = seen
+        mk = engine._market
+        assert real is mk["vix_col"] and len(null) == len(mk["vix_col"])
+        pd.testing.assert_series_equal(null["^VIX"], real["^VIX"])
+        assert not np.allclose(null["^VVIX"], real["^VVIX"])
+        assert kw_null["precomputed_regimes"] is mk["regimes"]
+        assert kw_null["precomputed_pdv_vol"] is mk["pdv_vol"]
+        assert kw_null["start_date"] == engine.start_date
+
 
 # ── sizing overlay ─────────────────────────────────────────────────────────────
 
@@ -347,6 +430,37 @@ class TestCorrelationNetting:
         for y in (x, -x, np.random.default_rng(5).normal(size=200)):
             legacy = bte._legacy_corr_kelly_mult(pd.Series(x), pd.Series(y))
             assert (legacy.clip(0.5, 1.0) == 1.0).all()
+
+    def test_engine_applies_the_overlay_one_session_late(self, monkeypatch):
+        """run() must feed the netting multiplier into pass 2, shifted one
+        session: a multiplier first computable at the close of d sizes
+        trades from d+1 on, never on d itself (no look-ahead)."""
+        switch = {}
+
+        def fake_corr(pnl_mat, *a, **k):
+            m = pd.DataFrame(1.0, index=pnl_mat.index, columns=pnl_mat.columns)
+            switch["i"] = 100
+            m.iloc[100:] = 0.6
+            return m
+
+        monkeypatch.setattr(bte, "_corr_netting_multipliers", fake_corr)
+        monkeypatch.setattr(bte, "_net_kelly_scale",
+                            lambda pnl, *a, **k: pd.Series(1.0, index=pnl.index))
+        spx, vix = _rw_market()
+        eng = BacktestEngine(start_date="2018-01-02", end_date="2019-09-30")
+        eng.run(spx, vix)
+        i = switch["i"]
+        sig = eng.signals_df
+        sized_after = 0
+        for s in bte.PORTFOLIO_SIGNALS:
+            km = eng._k_mult[s]
+            assert (km.iloc[:i + 1] == 1.0).all(), s
+            assert km.iloc[i + 1:].to_numpy() == pytest.approx(0.6), s
+            for t in eng.all_trades:
+                if t.signal == s and sig.index.get_loc(t.entry_date) > i:
+                    assert t.kelly_frac == pytest.approx(0.6 * sig.loc[t.entry_date, f"{s}_kelly"])
+                    sized_after += 1
+        assert sized_after > 0, "no pass-2 entry after the switch to check"
 
 
 # ── metrics ────────────────────────────────────────────────────────────────────
@@ -444,6 +558,26 @@ class TestBetaEstimator:
         assert est["ratio"] == pytest.approx(meta["ratio_full_chain"], abs=1e-6)
         assert est["ratio"] == pytest.approx(0.797, abs=0.001)
         assert 7_800 < est["implied_spot"] < 7_870
+
+    @pytest.mark.parametrize("vix_lag, included", [
+        (pd.Timedelta(minutes=15), True),      # Yahoo's usual ^VIX delay
+        (pd.Timedelta(hours=38), False),       # Sunday chain vs Friday-close VIX
+    ])
+    def test_live_chain_needs_a_time_matched_vix(self, monkeypatch, vix_lag, included):
+        """A Sunday --live run compared stale quotes, timed from Sunday, with
+        Friday's VIX close and was averaged in (β = 0.72)."""
+        from joint_vol_calibration.backtest import run_backtest as rb
+        as_of = pd.Timestamp("2026-06-01 10:00")
+        chain = _synthetic_chain(7000.0, 0.04, as_of, [21, 27, 34, 41], lambda T: 0.16)
+        monkeypatch.setattr(rb, "_db_chain_snapshots", lambda: [])
+        monkeypatch.setattr(rb, "fetch_live_spx_chain",
+                            lambda: (chain, as_of, 20.0, 0.04, as_of - vix_lag))
+        (row,) = rb.estimate_beta(include_live=True).to_dict("records")
+        assert row["status"].startswith("included") is included
+        if included:
+            assert row["ratio"] == pytest.approx(0.80, abs=1e-4)
+        else:
+            assert "not time-matched" in row["status"] and "ratio" not in row
 
 
 # ── sub-period stability ───────────────────────────────────────────────────────
