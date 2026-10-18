@@ -1558,13 +1558,21 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     out["s1_at_beta1"] = at_one[0]["s1_pnl"] if at_one else None
 
     # Evidence sentences for the audit table, each from one bridge row.
+    # The β row's "before" value is the previous bridge row (already β = 1,
+    # but before the later C22 steps); the grid re-runs the FULL C22
+    # configuration, so its β = 1 figure is a different backtest and is
+    # labelled as such ("at β = 1 S1 would show +$2.6M" beside "+$576K → …"
+    # read as a contradiction).
     ev: dict[str, str] = {}
     r = rows.get("beta")
     if r and r.get("prev"):
+        later = [x for x in order if int(x["row"]) > int(r["row"])]
         txt = (f"C22 bridge row {r['row']}: S1 {_usd_k(r['prev']['s1_pnl'])} → "
-               f"{_usd_k(r['s1_pnl'])} from β alone")
+               f"{_usd_k(r['s1_pnl'])} from β alone"
+               + (", before the later C22 steps" if later else ""))
         if out["s1_at_beta1"] is not None:
-            txt += f"; at β = 1 S1 would show {_usd_k(out['s1_at_beta1'])}"
+            txt += (f"; at β = 1 under the full C22 configuration (β grid), S1 shows "
+                    f"{_usd_k(out['s1_at_beta1'])}")
         ev["beta"] = txt
     for step in ("r2_gate", "pdv_h21"):
         r = rows.get(step)

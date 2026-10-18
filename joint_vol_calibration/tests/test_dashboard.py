@@ -1134,10 +1134,14 @@ def test_audit_evidence_is_read_from_the_c22_bridge(dash, pages):
     rows = list(bridge.index)
     prev = bridge.loc[rows[rows.index("beta") - 1]]
     text = _visible_text(pages["/backtest"])
+    # the bridge's pre-β S1 is at β = 1 but before the later C22 steps; the grid's
+    # β = 1 row is the full C22 configuration, and the evidence says which is which
     want = (f"C22 bridge row {int(bridge.loc['beta', 'row'])}: S1 {dash._usd_k(prev['s1_pnl'])} → "
-            f"{dash._usd_k(bridge.loc['beta', 's1_pnl'])} from β alone; at β = 1 S1 would show "
+            f"{dash._usd_k(bridge.loc['beta', 's1_pnl'])} from β alone, before the later C22 steps; "
+            f"at β = 1 under the full C22 configuration (β grid), S1 shows "
             f"{dash._usd_k(grid.loc[1.0, 's1_pnl'])}")
     assert want in text
+    assert "S1 would show" not in text
     assert f"C22 bridge row {int(bridge.loc['r2_gate', 'row'])}: portfolio {dash._usd_k(bridge.loc['r2_gate', 'd_pnl'])}" in text
     assert "+$722K → −$508K" not in text
     with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
