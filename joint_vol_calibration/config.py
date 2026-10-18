@@ -59,11 +59,19 @@ MC_STEPS_PER_YEAR = 252
 MC_ANTITHETIC = True
 
 # ── Joint Calibration Loss Weights ────────────────────────────────────────────
-JOINT_W1 = 0.5   # SPX implied vol MSE weight
-JOINT_W2 = 0.6   # VIX-leg MSE weight: Cboe VIX term-structure indices (doubled from 0.3 to pull RMSE back below 1.5)
-# VIX options leg disabled: Heston CIR transition density underestimates
-# vol-of-vol path uncertainty. RMSE was 37.14 vol pts — structural failure,
-# not calibration failure. Documented in dashboard.
+# Raw weights; JointCalibrator normalises the ACTIVE legs to sum to one
+# (0.5/0.6 -> 0.455/0.545 with w3 = 0). Units differ by leg: the SPX term is
+# an IV MSE in decimal vol, the VIX term an MSE of index levels in decimal
+# vol, so the ratio is a judgement call, not an estimate.
+JOINT_W1 = 0.5   # SPX implied-vol MSE weight
+JOINT_W2 = 0.6   # VIX index leg (^VIX9D/^VIX/^VIX3M/^VIX6M vs heston_vix_term_index).
+                 # Raised from 0.3 before C22 when the leg still fitted these spot
+                 # indices with the futures mapping; kept at 0.6 for C22, and not
+                 # re-tuned against any RMSE target.
+# VIX options leg: off. Its pre-C22 RMSE (37.14 vol pts) came from a broken
+# put pricer, spot-VIX vegas and a stale chain, so it said nothing about the
+# model; the pricer is fixed (CIR transition law), but the DB holds VIX option
+# quotes for too few sessions to make the leg part of the daily fit.
 JOINT_W3 = 0.0   # was 0.2
 
 # ── VIX term-structure indices ────────────────────────────────────────────────
