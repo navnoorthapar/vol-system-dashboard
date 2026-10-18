@@ -24,7 +24,7 @@ understanding precisely why a plausible one *doesn't* work is the harder and mor
 The short version: the pricing and calibration engines are now validated against independent references, the risk
 tooling is honest about what it measures, and **no signal in the system makes money robustly**. The one that is positive in
 the canonical run (S3, +$56K over seven years) is a mark-to-model index-leg proxy whose sign depends on an estimated
-parameter and whose timing does not beat random entry dates (p = 0.075); the former "profitable" short-VRP signal (S1)
+parameter and whose entry timing does not beat random dates (p = 0.075, tested at base size); the former "profitable" short-VRP signal (S1)
 exists only if you price ATM options at the VIX.
 
 ---
@@ -39,12 +39,12 @@ Backtest 2018-01-02 → 2025-03-24 (1,816 sessions) · $1M per sleeve · delta-h
   Cumulative P&L:    −$216,092   (−21.6%)
   Sharpe:            −0.88       (rf = 0 on excess P&L: collateral is assumed to earn ^IRX)
   Max drawdown:      −21.6%      (the portfolio never regained its starting NAV)
-  Trades:            208         (S1C 123 + S3 39 + S4 46)
+  Trades:            208         (S1C 123 + S3 39 + S4 46; one S4 trade still open at the end)
   Cash benchmark:    T-bills (^IRX) +19.1% over the same window
 
 By signal (each on its own $1M sleeve):
   S1C Contrarian PDV (portfolio)   −$431,203   Sharpe −0.57   35% win   123 trades
-  S3  Dispersion, index leg        + $56,471   Sharpe  0.18   49% win    39 trades   timing null p = 0.075 (n.s.)
+  S3  Dispersion, index leg        + $56,471   Sharpe  0.18   49% win    39 trades   timing null p = 0.075 (n.s.)¹
   S4  Volatility risk premium      −$273,544   Sharpe −0.79   37% win    46 trades
   S1  PDV short-VRP (reference)    −$287,644   Sharpe −0.15   59% win    69 trades   (all short)
   S2  VIX term structure (ref.)    −$149,900   Sharpe −0.38   38% win    45 trades
@@ -57,19 +57,23 @@ Source: `data_store/backtest/full_results.pkl` (metrics) and `full_results.parqu
 daily. The database holds **zero option prices inside the 2018–2025 backtest window**; every chain it contains is a 2026
 snapshot. β itself is estimated from five real 2026 chains (four in the DB, one live capture; 0.80–0.84, mean 0.82) and
 assumed constant over 2018–2025. That estimation set is frozen, so the canonical run does not move each time the daily job
-stores a chain; later chains are reported as out-of-sample checks. The first, **2026-10-16** (VVIX 110, an R2 session),
-gives **β = 0.70**, which would put the all-chain mean at 0.80: β is not constant across regimes, and the grid below
-includes 0.80. The signals are real; the dollars are model-implied, not traded fills.
+stores a chain; later chains are reported as out-of-sample checks. The first, **2026-10-16** (VVIX 110), gives
+**β = 0.70**, which would put the all-chain mean at 0.80, so β is not constant, and the grid below includes 0.80. It is not
+simply a stress effect: the two earlier R2 sessions in the set (2026-03-24, 03-27) gave 0.82 and 0.84. The signals are
+real; the dollars are model-implied, not traded fills.
+
+¹ The timing null test scores S3 at its base size (+$41,952) before the portfolio sizing overlay; see the S3 paragraph
+below. S3's 39 trades are 26 entries and 13 expiry rolls.
 
 **β is the number that decides the sign of S1.** The β sensitivity grid (`data_store/backtest/beta_sensitivity.csv`):
 
 | β (ATM vol / VIX) | Portfolio NAV | Portfolio P&L | Sharpe | S1 (reference) | S3 |
 |---|---|---|---|---|---|
 | 1.00 (pre-C22 assumption) | $816,366 | −$183,634 | −0.87 | **+$2,625,731** | +$395,457 |
-| 0.90 | $782,241 | −$217,759 | −0.97 | +$559,802 | +$216,321 |
+| 0.90 | $782,241 | −$217,759 | −0.96 | +$559,802 | +$216,321 |
 | 0.85 | $778,938 | −$221,062 | −0.92 | −$49,549 | +$111,897 |
 | **0.82 (estimate, canonical)** | **$783,908** | **−$216,092** | **−0.88** | **−$287,644** | **+$56,471** |
-| 0.80 (all-chain mean incl. 2026-10-16) | $793,966 | −$206,034 | −0.82 | −$436,036 | +$26,414 |
+| 0.80 (all-chain mean incl. 2026-10-16) | $793,966 | −$206,034 | −0.81 | −$436,036 | +$26,414 |
 | 0.78 | $813,733 | −$186,267 | −0.69 | −$544,623 | −$12,493 |
 
 The portfolio is negative at every β. S1's profit and most of S3's exist only because the VIX, a variance-swap rate that
@@ -110,7 +114,7 @@ cumulative):
 |---|---|---|---|---|---|---|
 | — | **C21 as published** | $738,794 | −$261,206 | | −1.80 | −31.5% |
 | 0 | C21 engine on today's signal code (upstream changes that cannot be switched off) | $734,577 | −$265,423 | −$4,217 | −1.84 | −32.1% |
-| 1 | VIX tenors 9/30/93/184 d, 365-day year | $734,053 | −$265,947 | −$524 | −1.85 | −32.2% |
+| 1 | VIX tenors 9/30/93/184 d, 365-day year | $734,053 | −$265,947 | −$524 | −1.84 | −32.2% |
 | 2 | Sharpe on excess P&L, rf = 0 | $734,053 | −$265,947 | $0 | −1.17 | −32.2% |
 | 3 | ^IRX gaps filled with the previous print | $734,053 | −$265,947 | $0 | −1.17 | −32.2% |
 | 4 | S3 proxy exit-day P&L and cost | $732,712 | −$267,288 | −$1,341 | −1.18 | −32.2% |
@@ -310,7 +314,7 @@ by construction and by test (mutation-checked look-ahead tests in `test_lookahea
 | **C7** Delta-Hedge Simulation | 2020 attribution Γ + ν + vanna + volga + calendar Θ + financing; unexplained-variance ratio 0.0001 (run A); walk-forward PDV in run B |
 | **C8** Regime Classifier | XGBoost 3-regime, holdout isotonic calibration; 75% out-of-sample vs 87% for "predict yesterday", **demoted, research-only** |
 | **C9** Signal Engine | S1/S1C (PDV vs implied), S2 (VIX term structure), S3 (dispersion timing), S4 (VRP); one adaptive R2 gate |
-| **C10** Backtest Engine | 2018-01-02 → 2025-03-24, β·VIX ATM proxy, hedge and carry accounting, sleeve-NAV sizing, ex-ante Kelly, S3 timing null test, sub-period stability (in-sample), HTML report; every committed artifact rebuilds byte-identically (`test_backtest_reproducibility.py`) |
+| **C10** Backtest Engine | 2018-01-02 → 2025-03-24, β·VIX ATM proxy, hedge and carry accounting, sleeve-NAV sizing, ex-ante Kelly, S3 timing null test, sub-period stability (in-sample), HTML report. Every committed artifact rebuilds from the README commands; `test_backtest_reproducibility.py` re-runs the canonical backtest in the suite and checks its equity curve (1e-6), every metric, the β = 0.82 grid row, the final bridge row and the C7 parquet |
 | **C11** Regime-Switching PDV | Merton (1976) jumps fitted on post-R2 days; Lee-Mykland-style daily jump test (the old "BNS filter" was not the BNS test and is removed) |
 | **C12** Bates SVJ + HMM | Bates (1996) CF and VIX formulas; the stored Bates fit did not converge, so it is not a result. Gaussian HMM with causal (filtered) inference, research only |
 | **C13** Improvements | Adaptive VVIX gate (now the only gate), holdout isotonic calibration, portfolio Kelly. Withdrawn in C22: SVI/SSVI smoothing (never wired in; removed) and top-vega anchors (replaced by the z-grid) |
@@ -465,8 +469,8 @@ No QuantLib. No Bloomberg. No paid data.
 ## Known Limitations
 
 - **All backtest P&L is mark-to-model.** Black-Scholes at β·VIX with one β (0.82) estimated from five 2026 chains and held
-  constant over 2018–2025. The first later chain (2026-10-16, an R2 day) gives β = 0.70, so β is regime-dependent; a
-  constant β is the main modelling simplification left. β moves S1 by ~$3M across 0.78–1.00; the portfolio is negative at
+  constant over 2018–2025. The first later chain (2026-10-16) gives β = 0.70 against 0.80–0.84 for the five in the set
+  (two of them R2 sessions), so β is not constant; a constant β is the main modelling simplification left. β moves S1 by ~$3M across 0.78–1.00; the portfolio is negative at
   every β tested.
 - **S3 is a proxy, and its timing is not significant.** Only the index leg of the dispersion trade is priced (no
   single-stock options); its positive P&L needs β ≳ 0.8, is below the T-bill return, and its entry timing does not beat
