@@ -1058,8 +1058,9 @@ class BacktestEngine:
         "β is one constant from 2026 chains: ATM vol is mapped from VIX with a "
         "single ratio estimated on five 2026 SPX chains; there is no 2018-2025 "
         "ATM-IV history and the ratio moves with skew. At β = 0.82 the model's "
-        "30-day ATM vol averages 0.5 vol pt BELOW the next 21 days' realised vol "
-        "over 2018-2025 (median 1.2 pt above); at β = 1 it is 3.1 pt above. If "
+        "30-day ATM vol averages 0.3 vol pt BELOW the realised vol of the next "
+        "21 sessions over 2018-2025 (median 1.2 pt above); at β = 1 it averages "
+        "3.3 pt above (median 4.4). If "
         "ATM implied exceeded realised on average in this window, as most SPX "
         "studies find, the steep-skew 2026 chains understate β for it. Short-vol "
         "P&L is very sensitive to β (run_backtest --beta-sensitivity)",
@@ -1571,12 +1572,13 @@ class BacktestEngine:
         Re-run the full pipeline on consecutive 6-month windows (2019 →).
 
         Each window starts flat with fresh capital and the same rules and
-        parameters (β, corrections, gate, PDV horizon). The PDV is refitted
-        per year on pre-year data exactly as in the main run, and nothing
-        else is fitted at all — so this measures how stable the strategy is
-        across sub-periods. It is NOT an out-of-sample test: the signal
-        rules, thresholds and S1C's direction were chosen on the whole
-        2018-2025 sample.
+        parameters (β, corrections, gate, PDV horizon), and reads the same
+        causal PDV forecast as the main run (the PDV-21 σ̂ series, each value
+        dated ≤ its session; with pdv_horizon = 1 the per-year refit on
+        pre-year data). Nothing is fitted per window — so this measures how
+        stable the strategy is across sub-periods. It is NOT an
+        out-of-sample test: the signal rules, thresholds and S1C's direction
+        were chosen on the whole 2018-2025 sample.
 
         (Before C22 this method also re-trained the C8 classifier per
         window, ~6 min each, and passed it to run(), which ignores it —

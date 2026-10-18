@@ -8,14 +8,18 @@ itself (no source greps, no re-implemented logic):
   financing       r on the cash account (−V + ΔS), q on the stock leg;
                   hedged P&L is unbiased in a Black-Scholes world
   expiry / roll   straddles settle at expiry and roll; no T_rem floor
-  rate gaps       previous ^IRX print, negative yields kept
+  rate gaps       previous ^IRX print, negative yields kept; a stub
+                  series is refused, not forward-filled
   bookkeeping     open trade logged; Σ trade net P&L == sleeve P&L;
                   sizing off the sleeve's running NAV
   S3              proxy exit day; index leg priced as a short straddle;
-                  random-walk null test of the timing rule
-  sizing overlay  correlation netting reduces size when sleeves co-move
+                  random-walk null test of the timing rule, whose "real"
+                  statistic is the engine's own S3
+  sizing overlay  correlation netting reduces size when sleeves co-move;
+                  run() applies it one session late
   metrics         Sharpe on excess P&L (rf = 0)
-  ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol
+  ATM vol         σ_ATM = β·VIX; β estimator recovers a known 30-day vol;
+                  a live chain needs a time-matched VIX
   sub-periods     no classifier re-training
   report          portfolio sleeves shown, labels follow the convention
   c22_bridge      upstream probes detect the fixed behaviour
