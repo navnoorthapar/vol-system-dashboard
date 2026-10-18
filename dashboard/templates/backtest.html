@@ -16,6 +16,8 @@
 {% set beta_txt = ('β = ' ~ (d.beta|fmt('.2f'))) if d.beta is not none else 'β (not recorded)' %}
 {% set s3_beta_txt = ('positive for β ≥ ' ~ (s3f.hi|fmt('.2f')) ~ ' in the sensitivity grid, negative at ' ~ (s3f.lo|fmt('.2f'))) if (s3f and s3f.positive_above) else 'its sign depends on β (see the sensitivity grid)' %}
 {% set yrs = (d.start_date or '')[:4] ~ '–' ~ (d.end_date or '')[:4] %}
+{% set _p = k.get('s3_null_p') %}
+{% set s3_timing_txt = ('its timing beats random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if (_p is not none and _p < 0.05) else (('its timing does not beat random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if _p is not none else 'its timing null test is not recorded') %}
 {% set _sh = d.r2_share or {} %}
 {% set r2_txt = (((_sh.fixed * 100)|fmt('.0f')) ~ '% vs ' ~ ((_sh.adaptive * 100)|fmt('.0f')) ~ '% of the backtest sessions in R2') if (_sh.get('fixed') is not none and _sh.get('adaptive') is not none) else 'R2 shares not available' %}
 <div class="page-header">
@@ -29,7 +31,7 @@
 <p class="page-note">
   A documented negative result. Every option is marked to model (Black–Scholes on β·VIX) — the database holds no option
   prices inside the backtest window — so no figure here is a traded fill. After the corrections below, the portfolio
-  loses money and the only positive sleeve (S3) depends on β.
+  loses money. No sleeve survives on every count: S3 is the only positive one, its P&amp;L depends on β, and {{ s3_timing_txt }}.
 </p>
 
 <!-- ── Headline KPIs ──────────────────────────────────────────────────────── -->
@@ -62,7 +64,7 @@
   <div class="card card-sm">
     <h2 class="card-label">S3 timing null test</h2>
     <div class="card-value">p = {{ k.get('s3_null_p')|fmt(".3f") }}</div>
-    <div class="card-sub">S3 entries vs random-walk entry dates</div>
+    <div class="card-sub">S3 entries vs random entry dates: {% if _p is not none and _p < 0.05 %}significant at 5%{% elif _p is not none %}<strong>not</strong> significant at 5%{% else %}not recorded{% endif %}</div>
   </div>
 </div>
 
@@ -233,7 +235,7 @@
       <p>
         <strong>S3 · dispersion (index leg)</strong> fires only at VIX/VVIX extremes: {{ s3.get('n_trades')|fmt }} trades in {{ yrs }},
         {{ s3.get('win_rate')|pct(0, false) }} win rate. Since C22 it is priced as the index leg of the dispersion trade (a short SPX
-        straddle; there is no single-stock options data), and its timing beats a random-walk null (p = {{ k.get('s3_null_p')|fmt(".3f") }}).
+        straddle; there is no single-stock options data), and {{ s3_timing_txt }}.
         The pre-C22 “+$23K at every z-scale” was not option P&amp;L.
       </p>
       <p>
@@ -347,7 +349,7 @@
    "body": "the opening hedge and closing unwind were free, the self-financing book earned no carry, size and margin used $1M instead of the sleeve's running NAV, and the correlation netting factor was clipped into a no-op.",
    "evidence": ev.get('costs', 'C22 bridge unavailable')},
   {"round": "C22", "status": "FIXED", "flaw": "S3 P&amp;L was a z-score times an assumed 2%", "tone": "red",
-   "body": "the “survivor” was positive on 98% of random-walk null paths: it measured mean reversion of a ratio, not option P&amp;L. S3 is now the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.",
+   "body": "the “survivor” was positive on 99.5% of random-walk null paths: it measured mean reversion of a ratio, not option P&amp;L. S3 is now the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.",
    "evidence": "S3 +$23K (z-units, as published in C21) → " ~ (s3.get('total_pnl')|usd_k) ~ " (index leg), null p = " ~ (k.get('s3_null_p')|fmt('.3f')) ~ "; " ~ s3_beta_txt},
   {"round": "C22", "status": "FIXED", "flaw": "PDV spread compared the 30-day VIX with a 1-day E|r| forecast", "tone": "amber",
    "body": "σ̂ averaged 0.71× the forward 21-day RMS vol in the backtest window, so “VIX &gt; σ̂ + 2 vol pts” held on 95% of sessions. The spread now uses a 21-day RMS-vol forecast, refit daily on labels fully observed at the forecast origin.",

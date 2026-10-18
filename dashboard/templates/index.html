@@ -244,7 +244,8 @@
       {% else %}The forecast is the expected realised vol (RMS) of the next {{ d.pdv_horizon }} sessions, the VIX horizon.
       VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity
       gap (E[σ] &lt; √E[σ²]); it is not a pure premium.{% endif %}
-      The percentile ranks today against this model's own fitted history, not against zero.
+      Forecast and history are the purged walk-forward forecast (refitted daily on labels known at each close), so the
+      percentile ranks today against out-of-sample values only, not against zero.
     </p>
     <div class="kv-2 mt8">
       <div>σ₁ ({{ d.pdv_halflives[0]|fmt }}-day EWMA) <span class="v">{{ d.pdv_sigma1|fmt(".2f") }}%</span></div>
@@ -329,7 +330,7 @@
     {% if d.pdv_skill %}
     <p class="chart-note">R² of the daily-refitted (purged) walk-forward forecast against realised {{ d.pdv_skill.horizon }}-day RMS vol,
       {{ "{:,}".format(d.pdv_skill.n) }} forecasts {{ d.pdv_skill.start }} → {{ d.pdv_skill.end }}, recomputed from the database at build time.
-      The displayed forecast uses the shipped model's fitted coefficients.</p>
+      The equation is the shipped model's full-sample fit; the forecast on the card is the walk-forward one.</p>
     {% endif %}
 
     {% if d.stress %}

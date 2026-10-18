@@ -165,7 +165,8 @@ def synth(dash, tmp_path, monkeypatch):
     """A complete, small data_store in tmp_path; DATA points at it."""
     data = tmp_path / "data_store"
     (data / "signals").mkdir(parents=True)
-    dates = _sessions(dash, "2022-01-03", "2024-06-28")
+    # long enough for the purged walk-forward PDV forecast to have > 252 sessions
+    dates = _sessions(dash, "2019-01-02", "2024-06-28")
     mkt = _write_market_db(data / "vol_system.db", dates)
     labels = _write_labels(data / "signals" / "regime_labels.parquet", dates)
     shutil.copy(SHIPPED / "signals" / "regime_classifier.pkl", data / "signals")
@@ -414,16 +415,27 @@ def test_quintic_is_compared_with_the_same_snapshot_heston(dash):
 
 # ── PDV card ──────────────────────────────────────────────────────────────────
 
-def test_pdv_percentile_excludes_nan_and_ranks_like_for_like(dash, synth):
-    """History = VIX − this model's forecast on prior sessions, NaNs excluded."""
-    from joint_vol_calibration.models.pdv import extract_pdv_features
+def _synth_walk_forward(synth) -> pd.Series:
+    """The causal PDV forecast the signals trade on, rebuilt independently for the synthetic DB."""
+    from joint_vol_calibration.models.pdv import walk_forward_vol_forecast
 
-    d = dash.load_page1()
     with open(synth["data"] / "pdv_model.pkl", "rb") as f:
         pdv = pickle.load(f)
-    r = synth["r"].iloc[1:]
-    fc = pdv.linear_.predict(extract_pdv_features(r))
+    con = sqlite3.connect(synth["data"] / "vol_system.db")
+    close = pd.Series(dict(con.execute("SELECT date, close FROM spx_ohlcv ORDER BY date").fetchall()))
+    con.close()
+    close.index = pd.to_datetime(close.index)
+    return walk_forward_vol_forecast(np.log(close).diff().dropna(), horizon=pdv.horizon,
+                                     target=pdv.target, train_min_days=pdv.train_min_days)
+
+
+def test_pdv_percentile_excludes_nan_and_ranks_like_for_like(dash, synth):
+    """History = VIX − the causal (walk-forward) forecast on prior sessions, NaNs
+    excluded; full-sample coefficients on past dates would be look-ahead."""
+    d = dash.load_page1()
+    fc = _synth_walk_forward(synth)
     spread = (synth["vix"] - 100 * fc).dropna()
+    assert len(spread) > 260
     expected = float((spread.iloc[:-1] < spread.iloc[-1]).mean() * 100)
     assert d["pdv_spread_pct"] == pytest.approx(expected, abs=0.051)
     assert d["pdv_hist_n"] == len(spread) - 1
@@ -440,15 +452,22 @@ def test_spread_percentile_helper_drops_nan(dash):
 
 
 def test_pdv_forecast_uses_current_features_and_its_own_date(dash, synth):
-    """The forecast was the pickle's 2025-12-30 training row paired with today's VIX."""
-    from joint_vol_calibration.models.pdv import extract_pdv_features
+    """The forecast was the pickle's 2025-12-30 training row paired with today's VIX;
+    it is now the live walk-forward forecast (= models.pdv.latest_vol_forecast)."""
+    from joint_vol_calibration.models.pdv import latest_vol_forecast
 
     d = dash.load_page1()
     last = synth["dates"][-1]
     assert d["pdv_date"] == str(last.date())
+    fc = _synth_walk_forward(synth).iloc[-1]
     with open(synth["data"] / "pdv_model.pkl", "rb") as f:
         pdv = pickle.load(f)
-    fc = pdv.linear_.predict(extract_pdv_features(synth["r"].iloc[1:])).iloc[-1]
+    con = sqlite3.connect(synth["data"] / "vol_system.db")
+    close = pd.Series(dict(con.execute("SELECT date, close FROM spx_ohlcv ORDER BY date").fetchall()))
+    con.close()
+    close.index = pd.to_datetime(close.index)
+    live = latest_vol_forecast(np.log(close).diff().dropna(), horizon=pdv.horizon)["vol"]
+    assert fc == pytest.approx(live, rel=1e-9)
     assert d["pdv_forecast"] == pytest.approx(fc * 100, abs=0.006)
     assert d["pdv_spread"] == pytest.approx(synth["vix"].iloc[-1] - fc * 100, abs=0.006)
     assert d["pdv_stale"] is False
@@ -456,7 +475,7 @@ def test_pdv_forecast_uses_current_features_and_its_own_date(dash, synth):
 
 def test_stale_pdv_forecast_is_flagged_on_the_page(dash, synth):
     """Labels newer than the market data -> the forecast is stale and says so."""
-    dates = _sessions(dash, "2022-01-03", "2024-07-15")
+    dates = _sessions(dash, "2019-01-02", "2024-07-15")
     _write_labels(synth["data"] / "signals" / "regime_labels.parquet", dates)
     d = dash.load_page1()
     assert d["pdv_stale"] is True and d["pdv_age"] == len(dates) - len(synth["dates"])
@@ -687,9 +706,10 @@ def test_heatmap_draws_every_node(dash):
     """0.05-wide bins on a 0.039-spaced grid hid 16 of 69 nodes (one unstable)."""
     d = dash.load_page3()
     gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
-    cells = [c for row in d["heatmap_rows"] for c in row["cells"] if c]
+    cells = [c for row in d["heatmap_rows"] for c in row["cells"] if not c.get("empty")]
     assert len(cells) == d["n_cells"] == len(gdf)
-    assert sum(c["unstable"] for c in cells) == d["n_unstable"] == int((gdf["vomma_zscore"].abs() > 2).sum())
+    # the surface's own flag (vomma P&L ratio rule), not a re-derived pooled z-score
+    assert sum(c["unstable"] for c in cells) == d["n_unstable"] == int(gdf["is_unstable"].sum())
     html = dash.app.test_client().get("/greeks").get_data(as_text=True)
     assert len(re.findall(r'class="node unstable"', html)) == d["n_unstable"]
     assert "ln(K/S)" not in html and "2026-03-24" not in html and "All three unstable" not in html
@@ -892,7 +912,7 @@ def test_colour_tokens_meet_wcag_aa(dash, pages):
 def test_heatmap_text_contrasts_with_every_cell(dash):
     """White text on the bright-green cells was 2.7:1; the z labels sat at 0.7 opacity."""
     d = dash.load_page3()
-    cells = [c for row in d["heatmap_rows"] for c in row["cells"] if c]
+    cells = [c for row in d["heatmap_rows"] for c in row["cells"] if not c.get("empty")]
     assert cells
     for c in cells:
         assert dash.contrast_ratio(c["fg"], c["bg"]) >= 4.5, c
@@ -1181,6 +1201,69 @@ def test_pdv_features_use_returns_rebuilt_from_closes(dash, synth):
     close.index = pd.to_datetime(close.index)
     with open(synth["data"] / "pdv_model.pkl", "rb") as f:
         pdv = pickle.load(f)
-    fc = pdv.linear_.predict(extract_pdv_features(np.log(close).diff().dropna())).iloc[-1]
+    feats = extract_pdv_features(np.log(close).diff().dropna())
     d = dash.load_page1()
-    assert d["pdv_forecast"] == pytest.approx(fc * 100, abs=0.006)
+    assert d["pdv_sigma1"] == pytest.approx(feats["sigma1"].iloc[-1] * 100, abs=0.006)
+    assert d["pdv_forecast"] == pytest.approx(_synth_walk_forward(synth).iloc[-1] * 100, abs=0.006)
+
+
+def test_unstable_nodes_follow_the_surfaces_recorded_rule(dash, pages):
+    """load_page3 re-derived the flag as |z| > 2 (5 of 79) over the surface's own
+    vomma-P&L-ratio rule (31 of 79, as the README states)."""
+    import pyarrow.parquet as pq
+
+    path = SHIPPED / "greeks" / "greeks_surface.parquet"
+    gdf = pd.read_parquet(path)
+    rule = json.loads(pq.read_schema(path).metadata[b"greeks_provenance"])["unstable_rule"]
+    d = dash.load_page3()
+    assert d["unstable_rule"]["kind"] == "pnl_ratio"
+    assert d["unstable_rule"]["threshold"] == rule["threshold"]
+    assert d["n_unstable"] == int(gdf["is_unstable"].sum()) == int((gdf["vomma_pnl_ratio"].abs() > rule["threshold"]).sum())
+    text = _visible_text(pages["/greeks"])
+    assert f"{d['n_unstable']} of {d['n_cells']}" in text
+    assert f"vomma P&L ratio ½·vomma·|Δσ|/vega > {rule['threshold']:.2f}" in text
+    assert "|vomma z-score| > 2" not in text and "pooled score" not in text
+    # every dropped grid node says why
+    empties = [c for row in d["heatmap_rows"] for c in row["cells"] if c.get("empty")]
+    assert len(empties) == d["n_missing"] and all(c["reason"] for c in empties)
+
+
+def test_unstable_falls_back_to_z_only_without_the_ratio_and_says_so(dash, synth):
+    path = synth["data"] / "greeks" / "greeks_surface.parquet"
+    gdf = pd.read_parquet(path).drop(columns=["vomma_pnl_ratio"])
+    gdf.to_parquet(path)
+    d = dash.load_page3()
+    assert d["unstable_rule"]["kind"] == "zscore"
+    assert d["n_unstable"] == int((gdf["vomma_zscore"].abs() > 2).sum())
+    html = dash.app.test_client().get("/greeks").get_data(as_text=True)
+    assert "fallback: the surface records no vomma P&amp;L ratio" in html
+
+
+def test_model_smile_never_carries_a_nan(dash, monkeypatch):
+    """implied_vol_from_price returns NaN (not None) for ill-posed inputs."""
+    from joint_vol_calibration.models import heston
+
+    params = {"kappa": 2.0, "theta": 0.04, "sigma": 0.5, "rho": -0.7, "v0": 0.04}
+    # a deep out-of-the-money node with a near-zero price is omitted, never NaN
+    deep = dash.heston_model_smile(params, maturities_days=(14,), log_moneyness=(-1.5, -0.8, 0.0, 0.1))
+    assert all(np.isfinite(v) for s in deep for v in s["iv"]) and 0.0 in deep[0]["lm"]
+    assert -1.5 not in deep[0]["lm"]
+    real = heston.implied_vol_from_price
+    monkeypatch.setattr(heston, "implied_vol_from_price",
+                        lambda price, *a, **k: float("nan") if a[1] > 1.05 else real(price, *a, **k))
+    out = dash.heston_model_smile(params, maturities_days=(30,), log_moneyness=(-0.1, 0.0, 0.1))
+    assert out[0]["lm"] == [-0.1, 0.0]
+    assert all(np.isfinite(v) for v in out[0]["iv"])
+
+
+@pytest.mark.parametrize("p, says", [(0.0746, "does not beat random entry dates at the 5% level (p = 0.075)"),
+                                     (0.0348, "beats random entry dates at the 5% level (p = 0.035)")])
+def test_s3_timing_claim_follows_the_stored_null_test(dash, monkeypatch, p, says):
+    """'Only S3's timing survives' / 'its timing beats a random-walk null' were
+    hard-coded; the regenerated null test gives p = 0.075, not significant."""
+    base = dash.load_page4()
+    monkeypatch.setattr(dash, "load_page4", lambda: {**base, "kpi": {**base["kpi"], "s3_null_p": p}})
+    text = _visible_text(dash.app.test_client().get("/backtest").get_data(as_text=True))
+    assert says in text
+    assert ("not significant at 5%" in text) is (p >= 0.05)
+    assert "Timing Survives" not in text

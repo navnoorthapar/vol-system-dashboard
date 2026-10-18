@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% set page = "greeks" %}
+{% set ur = d.unstable_rule or {} %}
+{% if ur.kind == 'pnl_ratio' %}{% set rule_txt = 'vomma P&L ratio ½·vomma·|Δσ|/vega > ' ~ (ur.get('threshold')|fmt('.2f') if ur.get('threshold') is not none else 'the recorded threshold') %}{% set rule_short = 'ratio > ' ~ (ur.get('threshold')|fmt('.2f') if ur.get('threshold') is not none else 'threshold') %}{% set metric_name = 'Vomma P&L ratio' %}{% set metric_lower = 'vomma P&L ratio' %}
+{% else %}{% set rule_txt = '|vomma z-score| > 2 (fallback: the surface records no vomma P&L ratio)' %}{% set rule_short = '|z| > 2' %}{% set metric_name = '|Vomma z-score|' %}{% set metric_lower = '|vomma z-score|' %}{% endif %}
 {% block title %}Greeks — SPX/VIX Vol System{% endblock %}
 {% block og_title %}Second-Order Greeks Monitor — SPX/VIX Vol System{% endblock %}
 {% block og_description %}Vomma heatmap, vanna and quadratic-variation convexity of the stored Heston Greeks surface, with its provenance and age.{% endblock %}
@@ -20,7 +23,7 @@
     <div class="banner-body">
       {% if d.provenance %}
       Built from <code>{{ d.provenance.source_calibration|fmt }}</code> at S = {{ d.provenance.S|fmt(",.1f") }}
-      (r = {{ (d.provenance.r * 100)|fmt(".2f") if d.provenance.r is not none else '—' }}%, q = {{ (d.provenance.q * 100)|fmt(".2f") if d.provenance.q is not none else '—' }}%),
+      (r = {{ (d.provenance.get('r') * 100)|fmt(".2f") if d.provenance.get('r') is not none else '—' }}%, q = {{ (d.provenance.get('q') * 100)|fmt(".2f") if d.provenance.get('q') is not none else '—' }}%),
       session {{ d.provenance.spot_date|fmt }}{% if d.source_matches_headline %}, the parameters of the calibration-page headline fit{% endif %}.
       {% if d.source_matches_headline == false %}<strong class="amber">These are not the parameters of the calibration-page headline fit.</strong>{% endif %}
       {% else %}
@@ -38,7 +41,7 @@
   <div class="card card-sm">
     <h2 class="card-label">Unstable nodes</h2>
     <div class="card-value {% if d.n_unstable > 0 %}red{% endif %}">{{ d.n_unstable }}<span class="unit">of {{ d.n_cells }}</span></div>
-    <div class="card-sub">|vomma z-score| &gt; 2, pooled across maturities</div>
+    <div class="card-sub">{{ rule_txt }}{% if ur.kind == 'pnl_ratio' and ur.iv_shock %}; Δσ = {{ ur.iv_shock }}{% endif %}</div>
   </div>
   <div class="card card-sm">
     <h2 class="card-label">Max vomma</h2>
@@ -62,15 +65,15 @@
   <div class="card-head">
     <h2 class="chart-title" id="heatmap-title">Vomma by maturity and log-moneyness <span class="sym">ln(K/F)</span></h2>
     <div class="legend" aria-hidden="true">
-      <span><span class="heat-key" style="background:linear-gradient(90deg,#1c2026,#3362b5);"></span>z &lt; 0</span>
-      <span><span class="heat-key" style="background:linear-gradient(90deg,#1c2026,#bd6e2a);"></span>z &gt; 0</span>
-      <span><span class="heat-key" style="background:#bd6e2a;outline:2px solid var(--red);outline-offset:-2px;"></span>⚠ unstable (|z| &gt; 2)</span>
+      {% if ur.kind != 'pnl_ratio' %}<span><span class="heat-key" style="background:linear-gradient(90deg,#1c2026,#3362b5);"></span>z &lt; 0</span>{% endif %}
+      <span><span class="heat-key" style="background:linear-gradient(90deg,#1c2026,#bd6e2a);"></span>{% if ur.kind == 'pnl_ratio' %}ratio, 0 → threshold{% else %}z &gt; 0{% endif %}</span>
+      <span><span class="heat-key" style="background:#bd6e2a;outline:2px solid var(--red);outline-offset:-2px;"></span>⚠ unstable ({{ rule_short }})</span>
     </div>
   </div>
 
   <div class="heatmap-wrap" tabindex="0" role="region" aria-labelledby="heatmap-title">
     <table class="heatmap" id="vomma-heatmap">
-      <caption class="sr-only">Vomma and its z-score at each maturity (rows) and ln(K/F) strike (columns); ⚠ marks |z| &gt; 2; empty cells have no stored Greeks.</caption>
+      <caption class="sr-only">Vomma and the {{ metric_lower }} at each maturity (rows) and ln(K/F) strike (columns); ⚠ marks {{ rule_short }}; empty cells have no stored Greeks.</caption>
       <thead>
         <tr>
           <th class="row-head" scope="col">T</th>
@@ -84,16 +87,16 @@
         <tr>
           <th class="mat-label" scope="row">{{ row.label }}</th>
           {% for cell in row.cells %}
-            {% if cell is none %}
-            <td class="empty" title="T={{ row.T }}d  ln(K/F)={{ d.heatmap_cols[loop.index0] }}: no Greeks stored for this node"><span class="sr-only">no data</span></td>
+            {% if cell.empty %}
+            <td class="empty" title="T={{ row.T }}d  ln(K/F)={{ d.heatmap_cols[loop.index0] }}: no Greeks — {{ cell.reason or 'not stored' }}"><span class="sr-only">no data{% if cell.reason %}: {{ cell.reason }}{% endif %}</span></td>
             {% else %}
             <td
               class="node{% if cell.unstable %} unstable{% endif %}"
               style="background:{{ cell.bg }};color:{{ cell.fg }};"
-              title="T={{ row.T }}d  ln(K/F)={{ cell.lm|fmt('+.4f') }}  K={{ cell.K|fmt(',.0f') }}  IV={{ cell.iv|fmt('.1f') }}%  vomma={{ cell.vomma|fmt(',.1f') }}  z={{ cell.z|fmt('+.2f') }}"
+              title="T={{ row.T }}d  ln(K/F)={{ cell.lm|fmt('+.4f') }}  K={{ cell.K|fmt(',.0f') }}  IV={{ cell.iv|fmt('.1f') }}%  vomma={{ cell.vomma|fmt(',.1f') }}  {{ metric_name }}={{ cell.metric|fmt('.3f') }}  z={{ cell.z|fmt('+.2f') }}"
             >
               <div class="vv">{{ cell.vomma|fmt(",.0f") }}</div>
-              <div class="z">{% if cell.unstable %}⚠ {% endif %}z {{ cell.z|fmt("+.1f") }}</div>
+              <div class="z">{% if cell.unstable %}⚠ {% endif %}{% if ur.kind == 'pnl_ratio' %}{{ cell.metric|fmt(".2f") }}{% else %}z {{ cell.z|fmt("+.1f") }}{% endif %}</div>
             </td>
             {% endif %}
           {% endfor %}
@@ -104,19 +107,21 @@
   </div>
 
   <p class="chart-note">
-    Cells show Black–Scholes vomma (∂²V/∂σ², per unit index, per (1.00 vol)²) and its z-score across all {{ d.n_cells }} nodes.
-    Columns are the surface's own strike grid in ln(K/F) — one column per strike, so every computed node is drawn;
-    empty cells are grid nodes the stored surface has no Greeks for. Outlined cells marked ⚠ have |z| &gt; 2;
-    blue = vomma below the surface mean, orange = above.
-    {% if d.unstable_maturities %}Unstable nodes sit at the {{ d.unstable_maturities|join('d, ') }}d maturit{{ 'y' if d.unstable_maturities|length == 1 else 'ies' }}:
-    the z-score pools all maturities and Black–Scholes vomma grows roughly with √T, so the pooled score mostly flags the longest maturities.{% endif %}
+    Cells show Black–Scholes vomma (∂²V/∂σ², per unit index, per (1.00 vol)²) and, below it,
+    {% if ur.kind == 'pnl_ratio' %}the vomma P&amp;L ratio — the second-order share of a vol move's P&amp;L, ½·vomma·|Δσ|/vega, with Δσ the
+    surface's per-maturity model shock. Shading runs from 0 to the {{ ur.threshold|fmt('.2f') }} threshold; outlined cells marked ⚠ exceed it
+    (the surface's own rule, as recorded in its provenance).
+    {% else %}the vomma z-score across all {{ d.n_cells }} nodes (fallback: the stored surface records no vomma P&amp;L ratio). Outlined cells marked ⚠ have |z| &gt; 2.{% endif %}
+    Columns are the surface's own strike grid in ln(K/F), one column per strike; empty cells are grid nodes the builder
+    dropped (hover for the reason).
+    {% if d.unstable_by_maturity %}Unstable nodes by maturity: {% for t, n in d.unstable_by_maturity|dictsort %}{{ t }}d {{ n }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}
   </p>
 </div>
 
 <!-- ── Unstable node details ───────────────────────────────────────────────── -->
 {% if d.n_unstable > 0 %}
 <div class="card row">
-  <h2 class="chart-title">Unstable nodes <span class="qual">· |z| &gt; 2, sorted by z</span></h2>
+  <h2 class="chart-title">Unstable nodes <span class="qual">· {{ rule_short }}, sorted by {{ metric_lower }}</span></h2>
   <div class="table-scroll" tabindex="0" role="region" aria-label="Unstable node details (scrollable)">
   <table class="data-table">
     <thead>
@@ -126,6 +131,7 @@
         <th scope="col" class="num">ln(K/F)</th>
         <th scope="col" class="num">Implied vol</th>
         <th scope="col" class="num">Vomma</th>
+        <th scope="col" class="num">{{ metric_name }}</th>
         <th scope="col" class="num">z-score</th>
         <th scope="col">Flag</th>
       </tr>
@@ -138,7 +144,8 @@
         <td class="num">{{ node.lm|fmt("+.3f") }}</td>
         <td class="num">{{ node.iv|fmt(".1f") }}%</td>
         <td class="num">{{ node.vomma|fmt(",.0f") }}</td>
-        <td class="num red">{{ node.z|fmt("+.2f") }}</td>
+        <td class="num red">{{ node.metric|fmt(".3f") }}</td>
+        <td class="num">{{ node.z|fmt("+.2f") }}</td>
         <td><span class="tag tag-red">UNSTABLE</span></td>
       </tr>
       {% endfor %}
@@ -192,18 +199,17 @@
 
 <!-- ── Vomma z-score scatter ──────────────────────────────────────────────── -->
 <div class="card row">
-  <h2 class="chart-title">Vomma z-score against <span class="sym">ln(K/F)</span> <span class="qual">· all maturities</span></h2>
+  <h2 class="chart-title">{{ metric_name }} against <span class="sym">ln(K/F)</span> <span class="qual">· all maturities</span></h2>
   <div class="chart-wrap tall">
-    <canvas id="vommaScatter" role="img" aria-label="Scatter chart: vomma z-score against ln(K/F), coloured by maturity" aria-describedby="vommaScatter-data"></canvas>
+    <canvas id="vommaScatter" role="img" aria-label="Scatter chart: {{ metric_lower }} against ln(K/F), coloured by maturity" aria-describedby="vommaScatter-data"></canvas>
   </div>
   <p class="chart-data sr-only" id="vommaScatter-data">
-    {{ d.scatter_z|length if d.scatter_z else 0 }} nodes{% if d.scatter_z %}; z-scores range from {{ d.scatter_z|min|fmt("+.2f") }} to {{ d.scatter_z|max|fmt("+.2f") }}{% endif %};
-    {{ d.n_unstable }} beyond |z| = 2{% if d.unstable_nodes %} ({% for n in d.unstable_nodes %}{{ n.T_days }}d at ln(K/F) {{ n.lm|fmt("+.3f") }}, z {{ n.z|fmt("+.2f") }}{{ '; ' if not loop.last else '' }}{% endfor %}){% endif %}.
-    The heatmap table above lists every node.
+    {{ d.scatter_z|length if d.scatter_z else 0 }} nodes{% if d.scatter_z %}; {{ metric_lower }} from {{ d.scatter_z|min|fmt(".3f") }} to {{ d.scatter_z|max|fmt(".3f") }}{% endif %};
+    {{ d.n_unstable }} flagged ({{ rule_short }}). The heatmap table above lists every node.
   </p>
   <p class="chart-note">
-    Points outside the dashed lines (|z| &gt; 2) are flagged as unstable. Colour = maturity, light (short) to violet (long).
-    Longer maturities show larger vomma because Black–Scholes vomma scales roughly with √T.
+    Points above the dashed line ({{ rule_short }}) are flagged as unstable. Colour = maturity, light (short) to violet (long).
+    {% if ur.kind == 'pnl_ratio' %}The ratio is largest at short maturities away from the money (both wings), where a vol move's P&amp;L is mostly convexity rather than vega.{% endif %}
   </p>
 </div>
 {% endif %}
@@ -270,8 +276,9 @@ vsCharts(function () {
       pointRadius: 4,
       pointHoverRadius: 6,
     }));
-    [2, -2].forEach((lvl, j) => datasets.push({
-      label: j === 0 ? '|z| = 2' : '',
+    const thr = {{ (ur.get('threshold') if ur.get('threshold') is not none else 2.0)|tojson }};
+    [thr].forEach((lvl, j) => datasets.push({
+      label: {{ rule_short|tojson }},
       data: [{x: xs[0], y: lvl}, {x: xs[1], y: lvl}],
       type: 'line',
       borderColor: VS.series.neg,
@@ -292,7 +299,7 @@ vsCharts(function () {
           tooltip: {
             callbacks: {
               label: (ctx) => ctx.raw && ctx.raw.T !== undefined
-                ? `  ${ctx.raw.T}d · ln(K/F) ${vsNum(ctx.parsed.x, 3, true)} · z ${vsNum(ctx.parsed.y, 2, true)}`
+                ? `  ${ctx.raw.T}d · ln(K/F) ${vsNum(ctx.parsed.x, 3, true)} · ${vsNum(ctx.parsed.y, 3)}`
                 : null
             }
           }
@@ -300,9 +307,8 @@ vsCharts(function () {
         scales: {
           x: { type: 'linear', grid: { display: false }, ticks: { callback: v => vsNum(v, 2, true) },
                title: { display: true, text: 'Log-moneyness ln(K/F)' } },
-          y: { ticks: { callback: v => vsNum(v, 0) },
-               grid: { color: c => c.tick && c.tick.value === 0 ? VS.zero : VS.grid },
-               title: { display: true, text: 'Vomma z-score' } },
+          y: { min: 0, ticks: { callback: v => vsNum(v, 1) },
+               title: { display: true, text: {{ metric_name|tojson }} } },
         }
       }
     });

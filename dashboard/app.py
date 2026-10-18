@@ -534,7 +534,8 @@ def heston_model_smile(params: dict,
                 continue
             vol = implied_vol_from_price(float(price), 1.0, float(Ki), T, 0.0, 0.0,
                                          "P" if ki < 0 else "C", tol=1e-10)
-            if vol is not None:
+            # implied_vol_from_price returns NaN (not None) for ill-posed inputs
+            if vol is not None and np.isfinite(vol):
                 lm.append(round(float(ki), 4))
                 iv.append(float(vol))
         out.append({"T": int(T_days), "lm": lm, "iv": iv})
@@ -553,18 +554,6 @@ def pdv_features(pdv: Any, log_returns: pd.Series) -> pd.DataFrame:
         halflife_lev=getattr(pdv, "halflife_lev", 10.0),
         n_lags=getattr(pdv, "n_lags", 5),
     )
-
-
-def pdv_forecast_series(pdv: Any, log_returns: pd.Series) -> pd.Series:
-    """PDV linear forecast (annualised decimal) for every date of `log_returns`.
-
-    The features are rebuilt from the supplied returns and fed to the pickled
-    model's fitted OLS (its coefficients are unchanged; dates after the fit
-    window are out of sample). Re-using the pickle's stored TRAINING features
-    instead froze the published forecast at their last date (2025-12-30) while
-    it was subtracted from the current VIX.
-    """
-    return pdv.linear_.predict(pdv_features(pdv, log_returns)).rename("pdv_vol")
 
 
 def spread_percentile(history: pd.Series, current: float) -> tuple[Optional[float], int]:
@@ -624,39 +613,49 @@ def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
     }
 
 
-def pdv_walk_forward_skill(pdv: Any, log_returns: pd.Series,
-                           exclude_year: int = 2020) -> Optional[dict]:
-    """Walk-forward R² of PDVLinear on the shipped model's own target.
+def pdv_walk_forward_series(pdv: Any, spx: pd.DataFrame) -> pd.Series:
+    """The causal PDV forecast at the shipped model's horizon, one value per session.
 
-    models.pdv.walk_forward_vol_forecast refits the OLS daily on labels fully
-    observed at each forecast origin (purged; embargo = horizon), so every
-    forecast is out of sample. R² is taken against the realised target over
-    the rows whose label is complete, pooled and without `exclude_year`.
+    regime_classifier.walk_forward_pdv_vol (the series the signals and the
+    backtest trade on): row t is the forecast made at the close of t by a
+    PDVLinear refitted daily on the labels fully observed by t (purged,
+    embargo = horizon), from returns rebuilt from closes. Its last value is
+    the live forecast (= models.pdv.latest_vol_forecast). Ranking today's
+    spread against a history built with the pickle's FULL-SAMPLE
+    coefficients compared an out-of-sample value with in-sample fits.
     """
-    from joint_vol_calibration.models.pdv import forward_target, walk_forward_vol_forecast
+    from joint_vol_calibration.signals.regime_classifier import walk_forward_pdv_vol
+
+    horizon = int(getattr(pdv, "horizon", 1))
+    kwargs = {"target": str(getattr(pdv, "target", "rv")),
+              "train_min_days": int(getattr(pdv, "train_min_days", 504)),
+              "halflife_fast": getattr(pdv, "halflife_fast", 5.0),
+              "halflife_slow": getattr(pdv, "halflife_slow", 60.0),
+              "halflife_lev": getattr(pdv, "halflife_lev", 10.0)}
+    close = pd.to_numeric(spx["close"], errors="coerce")
+    # ~1 s of daily refits: memoised on the exact inputs (a preview server and
+    # the test-suite render the same data many times).
+    key = (horizon, tuple(sorted(kwargs.items())), len(close), str(spx["date"].iloc[0]),
+           str(spx["date"].iloc[-1]), float(close.sum()), float((close * close).sum()))
+    if key not in _WF_CACHE:
+        _WF_CACHE[key] = walk_forward_pdv_vol(spx, horizon=horizon, **kwargs).rename("pdv_vol")
+    return _WF_CACHE[key].copy()
+
+
+def pdv_walk_forward_skill(pdv: Any, log_returns: pd.Series, pred: pd.Series,
+                           exclude_year: int = 2020) -> Optional[dict]:
+    """Walk-forward R² of `pred` (pdv_walk_forward_series) on the model's own target.
+
+    R² is taken against the realised target over the rows whose label is
+    complete, pooled and without `exclude_year`.
+    """
+    from joint_vol_calibration.models.pdv import forward_target
 
     horizon = int(getattr(pdv, "horizon", 1))
     target = str(getattr(pdv, "target", "rv"))
-    if horizon < 2:
-        return None          # the 1-day |r| target has its own (yearly) harness
     r = log_returns.dropna()
-    if r.empty:
+    if r.empty or pred is None or pred.empty:
         return None
-    # ~1 s of daily refits: memoised on the exact inputs (a preview server and
-    # the test-suite render the same data many times).
-    key = (horizon, target, len(r), str(r.index[0]), str(r.index[-1]), float(r.sum()),
-           float((r * r).sum()), exclude_year,
-           tuple(getattr(pdv, k, None) for k in ("train_min_days", "halflife_fast",
-                                                 "halflife_slow", "halflife_lev")))
-    if key in _SKILL_CACHE:
-        return dict(_SKILL_CACHE[key])
-    pred = walk_forward_vol_forecast(
-        r, horizon=horizon, target=target,
-        train_min_days=int(getattr(pdv, "train_min_days", 504)),
-        halflife_fast=getattr(pdv, "halflife_fast", 5.0),
-        halflife_slow=getattr(pdv, "halflife_slow", 60.0),
-        halflife_lev=getattr(pdv, "halflife_lev", 10.0),
-    )
     y = forward_target(r, horizon=horizon, target=target)
     both = pd.concat([y.rename("y"), pred.rename("p")], axis=1, join="inner").dropna()
     if len(both) < 30:
@@ -666,15 +665,13 @@ def pdv_walk_forward_skill(pdv: Any, log_returns: pd.Series,
         return float(1.0 - ((df["y"] - df["p"]) ** 2).sum() / ((df["y"] - df["y"].mean()) ** 2).sum())
 
     ex = both[both.index.year != exclude_year]
-    out = {"horizon": horizon, "target": target, "r2": r2(both),
-           "r2_ex": r2(ex) if len(ex) >= 30 else None, "exclude_year": exclude_year,
-           "n": int(len(both)), "start": str(both.index[0].date()),
-           "end": str(both.index[-1].date())}
-    _SKILL_CACHE[key] = dict(out)
-    return out
+    return {"horizon": horizon, "target": target, "r2": r2(both),
+            "r2_ex": r2(ex) if len(ex) >= 30 else None, "exclude_year": exclude_year,
+            "n": int(len(both)), "start": str(both.index[0].date()),
+            "end": str(both.index[-1].date())}
 
 
-_SKILL_CACHE: dict = {}
+_WF_CACHE: dict = {}
 
 
 # ── PAGE 1 DATA: Live Market Overview ─────────────────────────────────────────
@@ -806,8 +803,8 @@ def load_page1() -> dict[str, Any]:
             pdv = pickle.load(f)
         if spx_df is None or vix_daily is None:
             raise RuntimeError("needs the market data that failed to load")
-        feats = pdv_features(pdv, spx_df["close_return"])
-        pdv_vol = pdv.linear_.predict(feats).rename("pdv_vol")
+        feats = pdv_features(pdv, spx_df["close_return"])          # state variables shown on the card
+        pdv_vol = pdv_walk_forward_series(pdv, spx_df.reset_index()[["date", "close", "log_return"]])
         spread = (vix_daily - 100.0 * pdv_vol).dropna()   # VIX pts − forecast vol pts
         if spread.empty:
             raise ValueError("no date has both a VIX close and a PDV forecast")
@@ -831,7 +828,7 @@ def load_page1() -> dict[str, Any]:
         d["pdv_sigma1"] = round(float(feats.loc[cur_date, "sigma1"]) * 100, 2)
         d["pdv_sigma2"] = round(float(feats.loc[cur_date, "sigma2"]) * 100, 2)
 
-        # History = the SAME quantity (VIX − this model's forecast) on prior dates.
+        # History = the SAME quantity (VIX − the causal walk-forward forecast) on prior sessions.
         hist = spread.iloc[:-1]
         pct, n_hist = spread_percentile(hist, float(spread.iloc[-1]))
         d["pdv_hist_n"] = n_hist
@@ -858,8 +855,8 @@ def load_page1() -> dict[str, Any]:
     # recomputed from the DB (the card hard-coded 0.31 / 0.23, the R² of the
     # superseded next-day |r| model and of the kernel, beside a 21-day model).
     try:
-        if pdv is not None and spx_df is not None:
-            d["pdv_skill"] = pdv_walk_forward_skill(pdv, spx_df["close_return"])
+        if pdv is not None and spx_df is not None and pdv_vol is not None:
+            d["pdv_skill"] = pdv_walk_forward_skill(pdv, spx_df["close_return"], pdv_vol)
     except Exception as e:
         _record_error(d, "PDV walk-forward skill", e)
 
@@ -1224,7 +1221,7 @@ def _greeks_provenance(path: Path) -> dict:
             prov = json.loads(raw.decode())
     except Exception as exc:
         _logger.info("greeks provenance unreadable: %s", exc)
-    if not isinstance(prov, dict):
+    if not isinstance(prov, dict) or not prov:
         return {}
     src = prov.get("source") if isinstance(prov.get("source"), dict) else {}
     if not prov.get("source_calibration") and src.get("calibration_file"):
@@ -1238,18 +1235,44 @@ def load_page3() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "heatmap_rows": [], "heatmap_cols": [],
                          "unstable_nodes": [], "qv_labels": [], "qv_values": [],
                          "vanna_labels": [], "vanna_values": [], "scatter_lm": [],
-                         "scatter_z": [], "scatter_T": [], "unstable_maturities": []}
+                         "scatter_z": [], "scatter_T": [], "unstable_maturities": [],
+                         "unstable_by_maturity": {}}
     for k in ("n_unstable", "n_cells", "n_grid", "n_missing", "n_maturities", "as_of", "surface_date",
               "vomma_max", "vomma_max_at", "vomma_min", "vomma_min_at", "vomma_mean",
-              "provenance", "source_matches_headline", "greeks_age"):
+              "provenance", "source_matches_headline", "greeks_age", "unstable_rule"):
         d[k] = None
 
     try:
         path = DATA / "greeks" / "greeks_surface.parquet"
         gdf = pd.read_parquet(path).copy()
-        # Recompute the flag from the raw z-score so the count does not depend
-        # on whichever threshold was used when the parquet was written.
-        gdf["is_unstable"] = gdf["vomma_zscore"].abs() > 2.0
+        prov = _greeks_provenance(path)
+        # The unstable flag is the surface's own rule (risk_monitor: per-node
+        # vomma-P&L ratio ½·vomma·|Δσ|/vega above a threshold, recorded in the
+        # provenance). Re-deriving it from a pooled |z| > 2 overrode that rule
+        # and showed 5 of 79 nodes where the surface flags 31. Only a surface
+        # without the ratio column falls back to the z-score, labelled as such.
+        rule = prov.get("unstable_rule") if isinstance(prov.get("unstable_rule"), dict) else {}
+        if "vomma_pnl_ratio" in gdf.columns and "is_unstable" in gdf.columns:
+            gdf["is_unstable"] = gdf["is_unstable"].astype(bool)
+            thr = _num(rule.get("threshold"))
+            if thr is not None and ((gdf["vomma_pnl_ratio"].abs() > thr) != gdf["is_unstable"]).any():
+                raise ValueError("greeks_surface.parquet: is_unstable disagrees with its recorded "
+                                 f"rule |vomma_pnl_ratio| > {thr}")
+            d["unstable_rule"] = {"kind": "pnl_ratio", "threshold": thr,
+                                  "metric": rule.get("metric"), "iv_shock": rule.get("iv_shock")}
+            gdf["flag_metric"] = gdf["vomma_pnl_ratio"].abs()
+        else:
+            gdf["is_unstable"] = gdf["vomma_zscore"].abs() > 2.0
+            d["unstable_rule"] = {"kind": "zscore", "threshold": 2.0}
+            gdf["flag_metric"] = gdf["vomma_zscore"].abs()
+        flag_thr = d["unstable_rule"]["threshold"]
+        # Grid nodes the builder dropped, with its reason (shown on the empty cells)
+        dropped = {}
+        for item in (prov.get("grid") or {}).get("dropped_nodes") or prov.get("dropped_nodes") or []:
+            try:
+                dropped[(int(item["T_days"]), round(float(item["log_moneyness"]), 4))] = str(item.get("reason") or "")
+            except Exception:
+                continue
         # Columns are the surface's own strike grid in ln(K/F): every maturity
         # uses the same log-moneyness grid by construction. Binning it into
         # 0.05-wide buckets (grid spacing 0.039) and drawing only the first node
@@ -1260,6 +1283,9 @@ def load_page3() -> dict[str, Any]:
             raise ValueError(f"{int(dup.sum())} Greeks nodes share a (maturity, log-moneyness) cell")
         maturities = sorted(int(t) for t in gdf["T_days"].unique())
         cols = sorted(float(x) for x in gdf["lm_key"].unique())
+        grid_lm = ((prov.get("grid") or {}).get("log_moneyness")) or []
+        if grid_lm:   # the builder's full grid, so a column with no surviving node still shows
+            cols = sorted(set(cols) | {round(float(x), 4) for x in grid_lm})
         d["n_maturities"] = len(maturities)
         d["n_cells"] = int(len(gdf))
         d["n_grid"] = len(maturities) * len(cols)
@@ -1273,15 +1299,19 @@ def load_page3() -> dict[str, Any]:
             for lm in cols:
                 r = cell.get((T, lm))
                 if r is None:
-                    cells.append(None)
+                    cells.append({"empty": True, "reason": dropped.get((T, round(lm, 4)))})
                     continue
                 z = float(r.vomma_zscore)
+                m = float(r.flag_metric)
+                # colour = the flag metric relative to its threshold (full at the threshold)
+                shade = 2.0 * min(m / flag_thr, 1.0) if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr else z
+                bg = _vomma_color(shade)
                 cells.append({
-                    "vomma": round(float(r.vomma), 1), "z": round(z, 2),
+                    "vomma": round(float(r.vomma), 1), "z": round(z, 2), "metric": round(m, 3),
                     "iv": round(float(r.iv) * 100, 1), "K": round(float(r.K), 0),
-                    "lm": lm, "unstable": bool(r.is_unstable), "bg": _vomma_color(z),
+                    "lm": lm, "unstable": bool(r.is_unstable), "bg": bg,
                     # text colour chosen per cell for contrast (white on bright green was 2.7:1)
-                    "fg": _text_colour_on(_vomma_color(z)),
+                    "fg": _text_colour_on(bg),
                 })
             d["heatmap_rows"].append({"T": T, "label": f"{T}d", "cells": cells})
         d["heatmap_cols"] = [_fmt(c, "+.3f") for c in cols]
@@ -1290,10 +1320,12 @@ def load_page3() -> dict[str, Any]:
         d["unstable_nodes"] = sorted((
             {"T_days": int(u.T_days), "lm": round(float(u.log_moneyness), 4),
              "K": round(float(u.K), 0), "vomma": round(float(u.vomma), 1),
-             "z": round(float(u.vomma_zscore), 2), "iv": round(float(u.iv) * 100, 1)}
-            for u in unstable.itertuples()), key=lambda x: x["z"], reverse=True)
+             "z": round(float(u.vomma_zscore), 2), "iv": round(float(u.iv) * 100, 1),
+             "metric": round(float(u.flag_metric), 3)}
+            for u in unstable.itertuples()), key=lambda x: x["metric"], reverse=True)
         d["n_unstable"] = len(d["unstable_nodes"])
         d["unstable_maturities"] = sorted({n["T_days"] for n in d["unstable_nodes"]})
+        d["unstable_by_maturity"] = {int(t): int(n) for t, n in gdf.groupby("T_days")["is_unstable"].sum().items()}
 
         imax, imin = gdf["vomma"].idxmax(), gdf["vomma"].idxmin()
         d["vomma_max"] = round(float(gdf.loc[imax, "vomma"]), 1)
@@ -1317,12 +1349,11 @@ def load_page3() -> dict[str, Any]:
         d["vanna_values"] = vanna.round(4).tolist()
 
         d["scatter_lm"] = gdf["log_moneyness"].round(4).tolist()
-        d["scatter_z"] = gdf["vomma_zscore"].round(3).tolist()
+        d["scatter_z"] = gdf["flag_metric"].round(4).tolist()      # the flag metric (ratio, or |z| fallback)
         d["scatter_T"] = gdf["T_days"].astype(int).tolist()
 
         # Provenance + staleness. The shipped surface records no source fit;
         # when it does (parquet metadata), compare with the headline calibration.
-        prov = _greeks_provenance(path)
         d["provenance"] = prov or None
         if prov.get("params"):
             try:
