@@ -65,7 +65,7 @@ includes 0.80. The signals are real; the dollars are model-implied, not traded f
 
 | β (ATM vol / VIX) | Portfolio NAV | Portfolio P&L | Sharpe | S1 (reference) | S3 |
 |---|---|---|---|---|---|
-| 1.00 (pre-C22 assumption) | $816,366 | −$183,634 | −0.87 | **+$2,625,730** | +$395,457 |
+| 1.00 (pre-C22 assumption) | $816,366 | −$183,634 | −0.87 | **+$2,625,731** | +$395,457 |
 | 0.90 | $782,241 | −$217,759 | −0.97 | +$559,802 | +$216,321 |
 | 0.85 | $778,938 | −$221,062 | −0.92 | −$49,549 | +$111,897 |
 | **0.82 (estimate, canonical)** | **$783,908** | **−$216,092** | **−0.88** | **−$287,644** | **+$56,471** |
@@ -121,7 +121,7 @@ cumulative):
 | 9 | Size off the sleeve's NAV | $788,089 | −$211,911 | +$50,572 | −1.36 | −24.1% |
 | 10 | Real correlation netting | $805,966 | −$194,034 | +$17,877 | −1.34 | −22.2% |
 | 11 | **ATM vol = 0.82 × VIX** | $913,923 | −$86,077 | +$107,957 | −0.37 | −15.3% |
-| 12 | S3 = short SPX straddle (index leg) | $878,361 | −$121,639 | −$35,562 | −0.57 | −17.4% |
+| 12 | S3 = short SPX straddle (index leg) | $878,361 | −$121,639 | −$35,563 | −0.57 | −17.4% |
 | 13 | **One adaptive R2 gate** (rolling 252-day 80th percentile of VVIX) | $744,114 | −$255,886 | −$134,247 | −1.15 | −25.7% |
 | 14 | PDV spread on the 21-day RMS-vol forecast (= canonical run) | **$783,908** | **−$216,092** | +$39,794 | **−0.88** | **−21.6%** |
 
@@ -134,7 +134,9 @@ gate puts a quarter of the window back into R1, where S1C buys straddles. S1 mov
 **No signal survives.** S3 is now priced as the index leg of a dispersion trade (long dispersion ⇒ short SPX straddle) on
 the same engine, a proxy because there is no single-stock options data. Its timing does **not** beat random entry dates at
 the 5% level: p = 0.075 against 200 random-walk null paths (permutation p = 0.080; Monte Carlo standard error ≈ 0.02),
-where each null path re-runs the engine's own S3 with only ^VVIX replaced. It is positive only for β ≳ 0.8 (+$26K at
+where each null path re-runs the engine's own S3 with only ^VVIX replaced. The test scores S3 at its base size
+(+$41,952, before the portfolio sizing overlay that takes it to the published +$56,471). Its 39 trades are 26 entries and 13
+expiry rolls of a held position. It is positive only for β ≳ 0.8 (+$26K at
 0.80, −$12K at 0.78), its Sharpe is 0.18, and it earns less than T-bills. The pre-C22 "+$23K, positive at every scale"
 figure was a z-score times an assumed 2%, positive on 99.5% of random-walk null paths, i.e. it measured mean reversion of
 a ratio, not option P&L. (An earlier C22 draft of this README reported p = 0.035: that null test re-built S3 from the
@@ -172,16 +174,17 @@ fix below); the fits are consistent with one another:
 
 | Session | κ | θ | σ | ρ | v₀ | SPX in-sample / OOS (vp) | VIX index (pts) | VX futures, OOS (pts) |
 |---|---|---|---|---|---|---|---|---|
-| 2026-03-24 | 6.142 | 0.0653 | 2.000* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.32 |
-| 2026-03-27 | 4.290 | 0.0733 | 1.834 | −0.785 | 0.0928 | 1.365 / 1.538 | 0.852 | 3.12 |
+| 2026-03-24 | 6.142 | 0.0653 | 2.000* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.66 |
+| 2026-03-27 | 4.290 | 0.0733 | 1.834 | −0.785 | 0.0928 | 1.365 / 1.538 | 0.852 | 3.18 |
 | 2026-05-29 | 5.233 | 0.0595 | 1.707 | −0.656 | 0.0130 | 0.911 / 1.285 | 0.523 | 2.56 |
 | 2026-06-18 | 4.999 | 0.0614 | 1.592 | −0.697 | 0.0173 | 0.855 / 1.833 | 0.510 | 1.85 |
 | **2026-10-16** | **4.992** | **0.0499** | **2.000\*** | **−0.753** | **0.0344** | **1.336 / 2.955** | **0.823** | n/a† |
 
 \* σ on its box ceiling (2.0), reported by the fit as an active constraint. Every fit violates Feller; none imposes it.
-† The DB's Cboe VX futures history ends 2026-10-09, before this session. The ^IRX reference rate had been converted to a
-continuously compounded rate twice (it is stored cc), 7 bp too high; the refit moved κ by at most 0.017 and no RMSE by more
-than 0.002.
+VX futures are scored at their daily settlement (out of sample, not fitted). † The DB's Cboe VX futures history ends
+2026-10-09, before this session. The ^IRX reference rate had been converted to a
+continuously compounded rate twice (it is stored cc), 7 bp too high; the refit moved κ by at most 0.017 and no SPX or VIX-index RMSE by
+more than 0.002.
 
 ### What C22 changed in this story, and why
 
@@ -216,9 +219,12 @@ reproducible reason:
 The honest calibration finding is now narrower and better supported. With carry, anchors and instruments right, Heston
 fits the SPX surface to 0.9–1.4 vp in-sample and 1.3–3.0 vp out-of-sample and the VIX index term structure to 0.5–0.9 pts,
 **but only with a vol-of-vol (σ ≈ 1.6–2.0, on the 2.0 ceiling in two of five sessions) that violates Feller by a wide
-margin** and with κ ≈ 4–6, i.e. variance half-lives of 1.4–1.9 months. The out-of-sample error is largest in the put wing
-and on the most stressed session (2026-10-16: 3.9 vp in the wing). The model reprices real VX futures 1.8–3.1 pts off out of
-sample, and prices VIX options poorly when asked (35 vp). Joint SPX/VIX calibration is hard for one-factor diffusive SV models, as the literature has said for
+margin** and with κ ≈ 4–6, i.e. variance half-lives of 1.4–1.9 months. The out-of-sample error is largest in the put wing,
+and the latest session is the outlier: 2026-10-16 scores 2.96 vp out of sample (3.9 vp in the wing) on its 17 stored
+expiries, against 1.26–1.35 vp for the four earlier sessions on the same kind of universe (the selected expiries plus one
+neighbour each; their published figures use the full 40–43-expiry chains). It is not the most stressed of the five (VIX 20.0
+against 27–31 on 03-24 and 03-27); σ sits on its 2.0 ceiling there. The model reprices real VX futures 1.9–3.2 pts off at
+their settlements out of sample, and prices VIX options poorly when asked (35 vp). Joint SPX/VIX calibration is hard for one-factor diffusive SV models, as the literature has said for
 years (Guyon 2020; Abi Jaber, Illand & Li 2022); this repo shows *where* it is hard with numbers you can regenerate.
 
 ### The Quintic OU comparison
@@ -234,7 +240,9 @@ polynomial of Abi Jaber, Illand & Li 2022) against the same-session Heston fit
 | Model E[VIX_T] vs VIX-option parity forwards (8) | 2.30 pts | 0.38 pts |
 
 The Quintic fit **did not converge** (DE hit its iteration limit; the polish stopped at its limit) and its leverage
-parameter ε sits on its −0.99 bound, so these are research numbers, not a solved joint calibration.
+parameter ε sits on its −0.99 bound, so these are research numbers, not a solved joint calibration. One known
+approximation is left in this research fit: its VIX-option maturities are counted in whole days, ignoring the 09:30 ET
+(AM) settlement, so T is up to 1.2% long at the shortest (22-day) expiry.
 
 ### Why the headline fit is chosen on data sufficiency, not RMSE
 
@@ -295,7 +303,7 @@ by construction and by test (mutation-checked look-ahead tests in `test_lookahea
 |-----------|-------------|
 | **C1** Data Infrastructure | SQLite (schema v1) + Yahoo and Cboe downloaders; rule-based NYSE calendar; session-dated, idempotent option snapshots; ^IRX converted from bank-discount to a continuously compounded rate; option-chain hygiene (two-sided quotes, parity forwards, own Black-76 IVs) |
 | **C2** Heston / Bates Engine | Lewis (2001) contour integral with a Black-Scholes control variate on the "little trap" CF (Albrecher et al. 2007), adaptive trapezoid, validated against independent quadrature; exact VIX index and VIX futures (CIR Laplace transform); Andersen (2008) QE Monte Carlo. No FFT |
-| **C3** PDV Model | EWMA approximation of Guyon & Lekeufack (2023), not a replication (fixed half-lives, daily returns). 21-day RMS-vol forecast, purged walk-forward R² 0.29 (ex-2020 0.27) over 2012-03-30 → 2025-11-28; next-day \|r\| target R² 0.31 (ex-2020 0.20). The pooled R² mostly reflects tracking the vol level across regimes: within calendar years it is usually negative (median −0.31), and a walk-forward GARCH(1,1) gets 0.26 on the same 21-day target (0.20 ex-2020) |
+| **C3** PDV Model | EWMA approximation of Guyon & Lekeufack (2023), not a replication (fixed half-lives, daily returns). 21-day RMS-vol forecast, purged walk-forward R² 0.29 (ex-2020 0.27) over 2012-04-30 → 2025-11-28 (returns through 2025-12-30; the dashboard recomputes it on current data); next-day \|r\| target R² 0.31 (ex-2020 0.20). The pooled R² mostly reflects tracking the vol level across regimes: within calendar years it is usually negative (median −0.33), and a walk-forward GARCH(1,1) gets 0.25 on the same 21-day target (0.20 ex-2020) |
 | **C4** Joint Calibration | DE + L-BFGS-B on SPX z-grid anchors (put wing, parity carry) + VIX spot-index leg; headline (2026-10-16) 1.34 vp in-sample / 2.96 vp out-of-sample; quality gate on data sufficiency, freshness and schema |
 | **C5** NN Surrogate | Research prototype on no production path. Weights committed (`data_store/nn_spx_model.pt`, retrained in C22 with recorded provenance) on a domain that covers every committed fit (κ 0.5–15, θ 0.01–0.2, σ 0.1–2.0, ρ −0.99…−0.3, v₀ 1e-4–0.25, T 0.02–2y); out-of-domain inputs are refused. Held-out MAE 0.019 vp (p99 0.10, max 1.1); 0.015 vp on the 2026-06-18 fit; 14–23× faster than the Fourier pricer, single-threaded (`NNPricer.benchmark()`). The VIX network is deprecated: the closed form it approximates is faster |
 | **C6** Greeks Monitor | Vomma/vanna/QV surface from exact Heston prices of the headline (2026-10-16) fit; 83 of 90 grid nodes (7 below a 5·10⁻⁶·F price floor, recorded with reasons); per-node vomma-P&L instability rule (41 of 83 flagged); exact QV convexity |
@@ -466,7 +474,7 @@ No QuantLib. No Bloomberg. No paid data.
 - **No signal is deployable.** The portfolio loses 21.6% while T-bills earn 19.1%; the former short-VRP "edge" is the skew
   premium inside the VIX.
 - **Heston needs Feller-violating vol-of-vol** (σ ≈ 1.6–2.0, on the 2.0 box ceiling in the current headline fit) to fit SPX
-  and the VIX indices together, misses the real VX futures by 1.8–3.1 pts out of sample, and is not fitted to VIX options
+  and the VIX indices together, misses the real VX futures by 1.9–3.2 pts out of sample, and is not fitted to VIX options
   (leg off: too few sessions of VIX option quotes). The Quintic OU fit that does price VIX options did not converge.
 - **Regime classifier loses to a persistence baseline** and is research-only.
 - **Options history is thin**: five committed SPX chains (Mar–Oct 2026, growing by one per session from here), VIX options
