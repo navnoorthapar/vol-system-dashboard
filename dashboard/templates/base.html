@@ -7,27 +7,32 @@
   <!-- Inline SVG favicon (volatility smile, brand colours) — no file needed -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%2300ff88' stroke-width='3' stroke-linecap='round'/></svg>">
   <meta name="theme-color" content="#0a0a0a">
-  <!-- Open Graph — LinkedIn / Twitter / Substack link preview -->
+  <meta name="color-scheme" content="dark">
+  <!-- Open Graph — LinkedIn / Twitter / Substack link preview. No test count here:
+       a hand-typed count went stale in four places (C22); README/CI carry it. -->
   <meta property="og:type"         content="website">
-  <meta property="og:url"          content="https://navnoorbawa.me/">
-  <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
-  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 666 tests. Live dashboard.">
+  <meta property="og:url"          content="{{ canonical }}">
+  <meta property="og:title"        content="{% block og_title %}Vol System — Joint SPX/VIX Smile Calibration{% endblock %}">
+  <meta property="og:description"  content="{% block og_description %}Vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · PDV · regime rule · delta-hedged straddle backtest 2018–2025 with its full correction log. End-of-day dashboard.{% endblock %}">
   <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
   <meta property="og:image:width"  content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 666 tests, documented negative result.">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, a 2018–25 backtest and a documented negative result.">
   <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
   <meta name="author"              content="Navnoor Bawa">
-  <link rel="canonical"            href="https://navnoorbawa.me/">
+  <link rel="canonical"            href="{{ canonical }}">
   <meta name="twitter:card"        content="summary_large_image">
   <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
-  <meta name="description"         content="Joint SPX/VIX smile calibration system. Heston, SVI/SSVI, Quintic OU, regime classifier, full backtest 2018–2025.">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <meta name="description"         content="{{ self.og_description() }}">
   <style>
     /* ── Reset & Base ────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* Colour tokens. Every text token reaches WCAG 2.2 AA (>= 4.5:1) on --bg,
+       --surface, --surface2 and the tinted banner backgrounds; the ratios are
+       checked by test_dashboard.py::test_colour_tokens_meet_wcag_aa. */
     :root {
+      color-scheme: dark;
       --bg:       #0a0a0a;
       --surface:  #111111;
       --surface2: #161616;
@@ -36,30 +41,74 @@
       --accent:   #00ff88;
       --accent2:  #00cc6a;
       --text:     #e4e4e4;
-      --text2:    #888888;
-      --text3:    #555555;
-      --red:      #ff3333;
+      --text2:    #a3a3a3;   /* was #888 */
+      --text3:    #8f8f8f;   /* was #555 (2.5:1 — failed AA everywhere it was used) */
+      --red:      #ff5555;   /* was #ff3333 (4.4:1 on the amber tint) */
       --red2:     #cc1111;
-      --blue:     #3388ff;
+      --blue:     #4d94ff;   /* was #3388ff */
       --yellow:   #ffcc00;
+      --amber:    #ffaa33;
       --orange:   #ff8833;
-      --purple:   #aa44ff;
+      --purple:   #b77bff;   /* was #aa44ff (4.1:1 on the tooltip) */
+      --cyan:     #00ccff;
+      --pink:     #ff44aa;
+      --focus:    #00ff88;
+      --mono:     Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+      --sans:     system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       --radius:   6px;
       --radius2:  10px;
     }
 
     html, body {
-      height: 100%;
       background: var(--bg);
       color: var(--text);
-      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-family: var(--sans);
       font-size: 14px;
       line-height: 1.5;
     }
+    body { min-height: 100%; }
+    h1, h2, h3 { font: inherit; }
+    a { color: var(--accent); }
+    code { font-family: var(--mono); }
+
+    /* ── Accessibility helpers ──────────────────────────────────────────── */
+    .sr-only {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .skip-link {
+      position: absolute;
+      left: 12px; top: -48px;
+      z-index: 200;
+      padding: 8px 14px;
+      background: var(--accent);
+      color: #000;
+      font-weight: 700;
+      border-radius: var(--radius);
+      text-decoration: none;
+    }
+    .skip-link:focus { top: 8px; }
+    :focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .nav-link:focus-visible { outline-offset: -2px; }
+    /* Horizontal scroll regions are keyboard-focusable (tabindex=0) */
+    .table-scroll, .heatmap-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      max-width: 100%;
+    }
+    .table-scroll:focus-visible, .heatmap-wrap:focus-visible { outline-offset: 0; }
 
     /* ── Navigation ─────────────────────────────────────────────────────── */
     .nav {
-      position: sticky;
+      position: sticky;     /* a direct child of <body>, so it sticks for the whole page */
       top: 0;
       z-index: 100;
       background: #0d0d0d;
@@ -100,7 +149,8 @@
       white-space: nowrap;
     }
     .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
-    .nav-link.active {
+    .nav-link.active,
+    .nav-link[aria-current="page"] {
       color: var(--accent);
       border-bottom-color: var(--accent);
     }
@@ -126,6 +176,8 @@
       box-shadow: 0 0 6px var(--accent);
       animation: pulse 2s infinite;
     }
+    .status-dot.warn  { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+    .status-dot.error { background: var(--red); box-shadow: 0 0 6px var(--red); animation: none; }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.4; }
@@ -141,7 +193,8 @@
     .page-header {
       display: flex;
       align-items: baseline;
-      gap: 14px;
+      flex-wrap: wrap;
+      gap: 6px 14px;
       margin-bottom: 28px;
       border-bottom: 1px solid var(--border);
       padding-bottom: 16px;
@@ -162,19 +215,33 @@
       margin-left: auto;
       font-size: 11px;
       color: var(--text3);
-      font-family: 'Menlo', 'Courier New', monospace;
+      font-family: var(--mono);
     }
+    .page-note { font-size: 11.5px; color: var(--text3); margin: -14px 0 18px; }
 
     /* ── Grid Helpers ────────────────────────────────────────────────────── */
     .grid       { display: grid; gap: 16px; }
-    .grid-2     { grid-template-columns: repeat(2, 1fr); }
-    .grid-3     { grid-template-columns: repeat(3, 1fr); }
-    .grid-4     { grid-template-columns: repeat(4, 1fr); }
-    .grid-5     { grid-template-columns: repeat(5, 1fr); }
+    /* min-width:0 lets wide children (tables) scroll inside their own wrapper
+       instead of forcing the grid track wider than the card (C22: mobile clipping) */
+    .grid > *   { min-width: 0; }
+    .grid-2     { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3     { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4     { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid-5     { grid-template-columns: repeat(5, minmax(0, 1fr)); }
     .col-2      { grid-column: span 2; }
     .col-3      { grid-column: span 3; }
     .col-4      { grid-column: span 4; }
     .col-full   { grid-column: 1 / -1; }
+    /* Small tiles that reflow instead of overflowing a narrow card */
+    .tiles      { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+    .tiles > *  { min-width: 0; }
+    .kv-2       { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+    /* Card header row: title + legend; wraps instead of squeezing the title */
+    .card-head  { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 12px; }
+    .card-head > .chart-title { margin-bottom: 0; }
+    .legend     { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11px; color: var(--text2); align-items: center; }
+    .legend .swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid currentColor; vertical-align: middle; margin-right: 5px; }
+    .legend .swatch.dashed { border-top-style: dashed; }
 
     /* ── Cards ───────────────────────────────────────────────────────────── */
     .card {
@@ -208,10 +275,11 @@
     .card-value {
       font-size: 32px;
       font-weight: 700;
-      font-family: 'Menlo', 'Courier New', monospace;
+      font-family: var(--mono);
       color: var(--text);
       letter-spacing: -0.02em;
       line-height: 1.1;
+      overflow-wrap: anywhere;
     }
     .card-value.lg { font-size: 40px; }
     .card-value.sm { font-size: 22px; }
@@ -225,19 +293,20 @@
       font-size: 12px;
       color: var(--text2);
       margin-top: 5px;
-      font-family: 'Menlo', 'Courier New', monospace;
+      font-family: var(--mono);
     }
 
     /* ── Stat Row ─────────────────────────────────────────────────────────── */
     .stat-row {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       align-items: center;
       margin-top: 8px;
       font-size: 12px;
       color: var(--text2);
     }
-    .stat-change { font-family: 'Menlo', monospace; }
+    .stat-change { font-family: var(--mono); }
     .stat-change.up   { color: var(--accent); }
     .stat-change.down { color: var(--red); }
 
@@ -271,6 +340,28 @@
       background: rgba(0,255,136,0.04);
       border-color: rgba(0,255,136,0.2);
     }
+    /* Loader failure: the numbers for this component are NOT shown */
+    .banner-error {
+      background: rgba(255,51,51,0.12);
+      border-color: rgba(255,51,51,0.6);
+    }
+    .banner-error .banner-title { color: var(--red); }
+    /* Staleness: amber from STALE_WARN_SESSIONS, red from STALE_ERROR_SESSIONS */
+    .banner-stale-warn {
+      background: rgba(255,170,51,0.08);
+      border-color: rgba(255,170,51,0.45);
+    }
+    .banner-stale-warn .banner-title { color: var(--amber); }
+    .banner-stale-error {
+      background: rgba(255,51,51,0.08);
+      border-color: rgba(255,51,51,0.45);
+    }
+    .banner-stale-error .banner-title { color: var(--red); }
+    .banner-stack { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+    .banner-body ul { margin: 4px 0 0 18px; }
+    .age-ok    { color: var(--text3); }
+    .age-warn  { color: var(--amber); font-weight: 600; }
+    .age-error { color: var(--red); font-weight: 700; }
     .banner-icon {
       font-size: 22px;
       flex-shrink: 0;
@@ -305,7 +396,7 @@
     .data-table td {
       padding: 9px 12px;
       border-bottom: 1px solid var(--border);
-      font-family: 'Menlo', 'Courier New', monospace;
+      font-family: var(--mono);
       font-size: 12.5px;
       color: var(--text2);
     }
@@ -316,6 +407,7 @@
     .data-table .red   { color: var(--red); }
     /* amber = constraint binding / partially identified — neither pass nor fail */
     .data-table .amber { color: #ffcc33; }
+    .data-table tr.muted td { color: var(--text3); }
 
     /* ── Chart Container ──────────────────────────────────────────────────── */
     .chart-wrap {
@@ -325,6 +417,7 @@
     .chart-wrap.tall   { height: 340px; }
     .chart-wrap.xtall  { height: 420px; }
     .chart-wrap.short  { height: 180px; }
+    .chart-wrap.spark  { height: 32px !important; }   /* sparkline: fixed at every width */
     .chart-title {
       font-size: 11px;
       font-weight: 600;
@@ -333,9 +426,31 @@
       color: var(--text3);
       margin-bottom: 14px;
     }
+    /* Greek symbols must not be upper-cased (σ -> Σ changes the symbol) */
+    .sym { text-transform: none; letter-spacing: 0; }
+    .chart-note { margin-top: 10px; font-size: 11px; color: var(--text3); line-height: 1.5; }
+    /* Data alternative of a chart: visually hidden unless the chart library fails */
+    .chart-data table { border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+    .chart-data th, .chart-data td { padding: 2px 8px; border-bottom: 1px solid var(--border); text-align: left; font-family: var(--mono); }
+    .chart-fallback { display: none; }
+    .charts-failed .chart-wrap { height: auto !important; }
+    .charts-failed .chart-wrap canvas { display: none; }
+    .charts-failed .chart-fallback {
+      display: block;
+      padding: 10px 12px;
+      border: 1px dashed rgba(255,170,51,0.5);
+      border-radius: var(--radius);
+      font-size: 11.5px;
+      color: var(--amber);
+    }
+    .charts-failed .chart-data.sr-only {
+      position: static !important;
+      width: auto; height: auto; margin: 8px 0 0;
+      overflow: visible; clip: auto; white-space: normal;
+      font-size: 11.5px; color: var(--text2);
+    }
 
     /* ── Heatmap Table ────────────────────────────────────────────────────── */
-    .heatmap-wrap { overflow-x: auto; }
     .heatmap {
       border-collapse: collapse;
       font-size: 11px;
@@ -354,11 +469,11 @@
     }
     .heatmap th.row-head { text-align: left; padding-right: 12px; }
     .heatmap td {
-      width: 72px;
+      min-width: 56px;
       height: 44px;
       text-align: center;
       vertical-align: middle;
-      font-family: 'Menlo', monospace;
+      font-family: var(--mono);
       font-size: 10px;
       border: 1px solid #0a0a0a;
       transition: transform 0.1s;
@@ -366,8 +481,10 @@
     }
     .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
     .heatmap td.empty { background: #0d0d0d; }
+    /* Unstable = an outline AND a text marker, not colour alone (colour-blind safe) */
     .heatmap td.unstable {
-      border: 2px solid #ff3333 !important;
+      outline: 3px solid #ff5555;
+      outline-offset: -3px;
       box-shadow: 0 0 8px rgba(255,51,51,0.4);
     }
     .heatmap .mat-label {
@@ -378,6 +495,7 @@
       padding-right: 14px;
       white-space: nowrap;
     }
+    .heatmap .z { font-size: 9px; }
 
     /* ── Progress Bars ────────────────────────────────────────────────────── */
     .progress-bar-wrap { margin-top: 10px; }
@@ -410,7 +528,7 @@
       font-size: 11px;
       color: var(--text2);
       text-align: right;
-      font-family: 'Menlo', monospace;
+      font-family: var(--mono);
     }
 
     /* ── Divider ──────────────────────────────────────────────────────────── */
@@ -449,8 +567,9 @@
     .param-val {
       font-size: 26px;
       font-weight: 700;
-      font-family: 'Menlo', monospace;
+      font-family: var(--mono);
       letter-spacing: -0.02em;
+      overflow-wrap: anywhere;
     }
     .param-desc {
       font-size: 10.5px;
@@ -459,14 +578,16 @@
     }
 
     /* ── Utilities ────────────────────────────────────────────────────────── */
-    .mono { font-family: 'Menlo', 'Courier New', monospace; }
+    .mono { font-family: var(--mono); }
     .bold { font-weight: 700; }
     .mt8  { margin-top: 8px; }
     .mt12 { margin-top: 12px; }
     .mt16 { margin-top: 16px; }
     .mt20 { margin-top: 20px; }
     .mb12 { margin-bottom: 12px; }
+    .mb16 { margin-bottom: 16px; }
     .flex { display: flex; align-items: center; }
+    .flex-wrap { flex-wrap: wrap; }
     .gap8 { gap: 8px; }
     .gap12{ gap: 12px; }
     .space-between { justify-content: space-between; }
@@ -475,19 +596,21 @@
     .green { color: var(--accent); }
     .red   { color: var(--red); }
     .blue  { color: var(--blue); }
+    .yellow{ color: var(--yellow); }
+    .amber { color: var(--amber); }
     .dim   { color: var(--text2); }
+    .faint { color: var(--text3); }
 
     /* ── Scrollbar ────────────────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg); }
-    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
 
-    /* ── Chart.js global overrides ────────────────────────────────────────── */
     canvas { display: block; }
 
-    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
+    /* ── Site header (context line + profile links) ──────────────────────── */
     .top-banner {
-      height: 36px;
+      min-height: 36px;
       background: #111;
       border-bottom: 1px solid #222;
       display: flex;
@@ -495,22 +618,22 @@
       padding: 0 20px;
       gap: 12px;
       font-size: 11px;
-      color: #666;
+      color: var(--text2);
       white-space: nowrap;
       overflow: hidden;
     }
     .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; list-style: none; }
     .top-banner-links a {
-      color: #555;
+      color: var(--text2);
       text-decoration: none;
       font-size: 11px;
       font-weight: 500;
       letter-spacing: 0.04em;
       transition: color 0.15s;
     }
-    .top-banner-links a:hover { color: #00ff88; }
-    .top-banner-sep { color: #333; }
+    .top-banner-links a:hover { color: var(--accent); }
+    .top-banner-sep { color: var(--text3); }
 
     /* ── Hamburger button (hidden on desktop) ──────────────────────────────── */
     .nav-toggle {
@@ -539,8 +662,9 @@
 
     /* ── Tablet (≤ 900px) ─────────────────────────────────────────────────── */
     @media (max-width: 900px) {
-      .grid-4, .grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
-      .col-4, .col-3   { grid-column: 1 / -1 !important; }
+      .grid-4, .grid-5 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+      .grid-3          { grid-template-columns: minmax(0, 1fr) !important; }
+      .col-4, .col-3, .col-2 { grid-column: 1 / -1 !important; }
       .page  { padding: 16px !important; }
       .nav   { padding: 0 12px; }
       .nav-brand { margin-right: 12px; }
@@ -549,7 +673,7 @@
     /* ── Mobile nav: hamburger (≤ 768px) ──────────────────────────────────── */
     @media (max-width: 768px) {
       .nav-toggle { display: flex; }
-      .nav-status { display: none; }          /* hide LIVE DATA text — too crowded */
+      .nav-status { display: none; }          /* the status is repeated in the page banners */
 
       .nav-links {
         display: none;
@@ -570,42 +694,36 @@
         border-bottom: none;
         border-left: 2px solid transparent;
       }
-      .nav-link.active {
+      .nav-link.active,
+      .nav-link[aria-current="page"] {
         border-left-color: var(--accent);
         border-bottom-color: transparent;
         background: rgba(0,255,136,0.05);
       }
 
-      /* Tables: horizontal scroll instead of overflow */
-      .data-table {
-        display: block;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        white-space: nowrap;
-      }
-      .data-table td:first-child { white-space: normal; min-width: 120px; }
+      /* Tables scroll inside their focusable .table-scroll wrapper */
+      .table-scroll .data-table { white-space: nowrap; }
+      .table-scroll .data-table td.wrap,
+      .table-scroll .data-table td:first-child { white-space: normal; min-width: 120px; }
+      .table-scroll .data-table td.wrap { min-width: 220px; }
 
       /* Page header: badge drops below title */
-      .page-header { flex-wrap: wrap; gap: 4px; }
       .page-badge  { margin-left: 0 !important; width: 100%; padding-top: 2px; }
 
       /* Top banner: wrap instead of nowrap */
       .top-banner {
-        height: auto;
         padding: 6px 14px;
         flex-wrap: wrap;
         white-space: normal;
         gap: 4px;
       }
-
-      /* Col spans collapse on mobile */
-      .col-2 { grid-column: 1 / -1 !important; }
+      .grid-2 { grid-template-columns: minmax(0, 1fr) !important; }
     }
 
     /* ── Small phone (≤ 480px) ───────────────────────────────────────────── */
     @media (max-width: 480px) {
       .grid-4, .grid-5,
-      .grid-3, .grid-2  { grid-template-columns: 1fr !important; }
+      .grid-3, .grid-2  { grid-template-columns: minmax(0, 1fr) !important; }
       .col-2, .col-3,
       .col-4, .col-full { grid-column: 1 / -1 !important; }
 
@@ -614,67 +732,126 @@
       .card-value { font-size: 26px !important; }
       .card-value.lg { font-size: 30px !important; }
 
-      .chart-wrap       { height: 200px !important; }
-      .chart-wrap.tall  { height: 240px !important; }
-      .chart-wrap.xtall { height: 280px !important; }
-      .chart-wrap.short { height: 150px !important; }
+      .chart-wrap       { height: 220px !important; }
+      .chart-wrap.tall  { height: 260px !important; }
+      .chart-wrap.xtall { height: 300px !important; }
+      .chart-wrap.short { height: 160px !important; }
+      .chart-wrap.spark { height: 32px !important; }
 
       .param-val  { font-size: 20px !important; }
-      .param-desc { font-size: 10px !important; }
+      .param-desc { font-size: 10.5px !important; }
 
       .nav-brand span      { display: none; }
-      .top-banner-links    { display: none; }  /* hide GitHub/Substack/LinkedIn on tiny screens */
-      .top-banner-text     { font-size: 10px; }
+      .top-banner-text     { font-size: 10.5px; }
 
       .page-title    { font-size: 17px; }
-      .page-subtitle { display: none; }        /* "End-of-day regime + term structure" — skip on phone */
 
-      .banner { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .banner { flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px 16px; }
       .banner-icon { font-size: 18px; }
     }
+
+    /* ── Reduced motion ───────────────────────────────────────────────────── */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+      .heatmap td:hover { transform: none; }
+    }
+
+    /* ── Print ────────────────────────────────────────────────────────────── */
+    @media print {
+      :root {
+        color-scheme: light;
+        --bg: #ffffff; --surface: #ffffff; --surface2: #f4f4f4;
+        --border: #cccccc; --border2: #bbbbbb;
+        --text: #111111; --text2: #333333; --text3: #555555;
+        --accent: #00703c; --accent2: #00703c; --red: #b00020; --blue: #0b4fb3; --yellow: #7a5c00;
+        --amber: #8a4b00; --orange: #a04400; --purple: #5b2a9e; --cyan: #005f80; --pink: #a3125f;
+      }
+      html, body { background: #fff !important; color: #111 !important; }
+      .nav, .top-banner, .skip-link, .nav-toggle { display: none !important; }
+      .page { max-width: none; padding: 0 !important; }
+      .card, .banner { break-inside: avoid; box-shadow: none !important; background: #fff !important; border-color: #ccc !important; }
+      .card::before { display: none; }
+      .table-scroll, .heatmap-wrap { overflow: visible !important; }
+      .table-scroll .data-table { white-space: normal !important; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9px; color: #555; }
+      .chart-wrap { break-inside: avoid; }
+    }
   </style>
+  {% block head %}{% endblock %}
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<div class="top-banner">
-  <div class="top-banner-text">
-    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 666 tests &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
-  </div>
-  <div class="top-banner-links">
-    <a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub</a>
-    <span class="top-banner-sep">·</span>
-    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
-    <span class="top-banner-sep">·</span>
-    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
-  </div>
-</div>
+<header class="top-banner">
+  <p class="top-banner-text">
+    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
+  </p>
+  <ul class="top-banner-links" aria-label="Author links">
+    <li><a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></li>
+    <li class="top-banner-sep" aria-hidden="true">·</li>
+    <li><a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack<span class="sr-only"> (opens in a new tab)</span></a></li>
+    <li class="top-banner-sep" aria-hidden="true">·</li>
+    <li><a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn<span class="sr-only"> (opens in a new tab)</span></a></li>
+  </ul>
+</header>
 
-<nav class="nav" style="position:relative;">
+<nav class="nav" aria-label="Primary">
   <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
-  <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false">
+  <button class="nav-toggle" id="navToggle" type="button" aria-label="Menu" aria-controls="navLinks" aria-expanded="false">
     <span></span><span></span><span></span>
   </button>
   <div class="nav-links" id="navLinks">
-    <a href="/"            class="nav-link {% if page=='market'      %}active{% endif %}">
-      <span class="nav-dot"></span>Live Market
+    {% for href, nav_id, label in [('/', 'market', 'Live Market'), ('/calibration', 'calibration', 'Calibration'), ('/greeks', 'greeks', 'Greeks Monitor'), ('/backtest', 'backtest', 'Backtest')] %}
+    <a href="{{ href }}" class="nav-link{% if page == nav_id %} active{% endif %}"{% if page == nav_id %} aria-current="page"{% endif %}>
+      <span class="nav-dot" aria-hidden="true"></span>{{ label }}
     </a>
-    <a href="/calibration" class="nav-link {% if page=='calibration' %}active{% endif %}">
-      <span class="nav-dot"></span>Calibration
-    </a>
-    <a href="/greeks"      class="nav-link {% if page=='greeks'      %}active{% endif %}">
-      <span class="nav-dot"></span>Greeks Monitor
-    </a>
-    <a href="/backtest"    class="nav-link {% if page=='backtest'    %}active{% endif %}">
-      <span class="nav-dot"></span>Backtest
-    </a>
+    {% endfor %}
   </div>
-  <div class="nav-status" title="End-of-day snapshot, auto-refreshed daily after the US market close">
-    <div class="status-dot"></div>
-    EOD DATA
+  {% set _worst = 'error' if (d and d.errors) else ((d and d.worst_stale) or 'ok') %}
+  <div class="nav-status" title="End-of-day snapshot, refreshed daily after the US market close">
+    <div class="status-dot {% if _worst in ('warn', 'error') %}{{ _worst }}{% endif %}" aria-hidden="true"></div>
+    {% if d and d.errors %}DATA ERROR{% elif _worst == 'error' %}STALE DATA{% elif _worst == 'warn' %}EOD DATA · LAGGING{% else %}EOD DATA{% endif %}
   </div>
 </nav>
 
-<main class="page">
+<main class="page" id="main" tabindex="-1">
+  {% if d and (d.errors or (d.stale and d.stale|selectattr('level', 'in', ['warn', 'error'])|list)) %}
+  <div class="banner-stack">
+    {% if d.errors %}
+    <div class="banner banner-error" role="alert" data-loader-errors="{{ d.errors|length }}">
+      <div class="banner-icon" aria-hidden="true">✗</div>
+      <div>
+        <div class="banner-title">Data unavailable — {{ d.errors|length }} component{{ 's' if d.errors|length > 1 else '' }} failed to load</div>
+        <div class="banner-body">
+          The values that depend on {{ 'these inputs' if d.errors|length > 1 else 'this input' }} are not shown (no placeholder numbers are substituted).
+          <ul>
+            {% for e in d.errors %}<li><strong>{{ e.component }}</strong>: {{ e.message }}</li>{% endfor %}
+          </ul>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% for s in d.stale or [] %}{% if s.level in ('warn', 'error') %}
+    <div class="banner banner-stale-{{ s.level }}" data-stale="{{ s.component }}" data-age="{{ s.age }}">
+      <div class="banner-icon" aria-hidden="true">{% if s.level == 'error' %}⚠{% else %}⟳{% endif %}</div>
+      <div>
+        <div class="banner-title">{{ s.label }} is {{ s.age }} NYSE session{{ 's' if s.age != 1 else '' }} old</div>
+        <div class="banner-body">
+          {{ s.label }} as of <span class="mono">{{ s.date }}</span>; the newest session the site has data for is
+          <span class="mono">{{ s.ref }}</span>.
+          {% if s.component == 'calibration' %}No newer fit passed the quality gate, so the latest accepted fit is shown.{% endif %}
+          {% if s.component == 'pdv' %}The spread below pairs VIX and the forecast on that date only.{% endif %}
+          {% if s.component == 'market' %}The market database lags the other inputs on this page.{% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}{% endfor %}
+  </div>
+  {% endif %}
   {% block content %}{% endblock %}
 </main>
 
@@ -684,42 +861,120 @@
     var btn   = document.getElementById('navToggle');
     var links = document.getElementById('navLinks');
     if (!btn || !links) return;
-    btn.addEventListener('click', function() {
-      var open = links.classList.toggle('open');
+    function setOpen(open) {
+      links.classList.toggle('open', open);
       btn.classList.toggle('open', open);
-      btn.setAttribute('aria-expanded', open);
-    });
-    // Close menu when any nav link is tapped (SPA-style)
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    btn.addEventListener('click', function() { setOpen(!links.classList.contains('open')); });
     links.querySelectorAll('.nav-link').forEach(function(a) {
-      a.addEventListener('click', function() {
-        links.classList.remove('open');
-        btn.classList.remove('open');
-        btn.setAttribute('aria-expanded', 'false');
-      });
+      a.addEventListener('click', function() { setOpen(false); });
     });
-    // Close menu when tapping outside
     document.addEventListener('click', function(e) {
-      if (!btn.contains(e.target) && !links.contains(e.target)) {
-        links.classList.remove('open');
-        btn.classList.remove('open');
-        btn.setAttribute('aria-expanded', 'false');
-      }
+      if (!btn.contains(e.target) && !links.contains(e.target)) setOpen(false);
+    });
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && links.classList.contains('open')) { setOpen(false); btn.focus(); }
     });
   })();
+</script>
 
-  // Chart.js global dark-theme defaults
-  Chart.defaults.color            = '#666';
-  Chart.defaults.borderColor      = '#1f1f1f';
-  Chart.defaults.plugins.legend.labels.color = '#888';
-  Chart.defaults.plugins.legend.labels.usePointStyle = true;
-  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
-  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
-  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
-  Chart.defaults.plugins.tooltip.borderWidth       = 1;
-  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
-  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
-  Chart.defaults.plugins.tooltip.padding           = 10;
+<!-- Chart.js {{ chartjs.version }}, vendored (dashboard/static) so the site has no
+     third-party script on its critical path; freeze_site.py refuses to publish if
+     the file's sha384 differs from {{ chartjs.sri }}. (No integrity attribute on the
+     same-origin copy: browsers enforce SRI only on CORS-enabled loads, which a
+     file:// preview is not.) If the local copy fails, the pinned CDN build is tried
+     WITH that SRI; if that fails too, every chart is replaced by its data summary
+     instead of the page throwing 'Chart is not defined'. -->
+<script src="{{ chartjs.src }}"></script>
+<script>
+  // Shared chart styling (colours meet WCAG AA on the card surface)
+  var VS = {
+    mono:  "Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace",
+    tick:  '#8f8f8f',   // --text3
+    title: '#a3a3a3',   // --text2
+    grid:  '#262626',
+  };
 
+  // vsCharts(fn): run a page's chart code once Chart.js is available.
+  (function () {
+    var queue = [];
+    var state = 'pending';
+    function setup() {
+      Chart.defaults.font.family = VS.mono;
+      Chart.defaults.font.size = 10;
+      Chart.defaults.color            = VS.tick;
+      Chart.defaults.borderColor      = VS.grid;
+      Chart.defaults.scale.grid.color = VS.grid;
+      Chart.defaults.plugins.legend.labels.color = VS.title;
+      Chart.defaults.plugins.legend.labels.usePointStyle = true;
+      Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
+      Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
+      Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
+      Chart.defaults.plugins.tooltip.borderWidth       = 1;
+      Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
+      Chart.defaults.plugins.tooltip.bodyColor         = '#c8c8c8';
+      Chart.defaults.plugins.tooltip.padding           = 10;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        Chart.defaults.animation = false;
+      }
+      // Re-lay out the charts for paper (Chart.js responsive docs: resize on beforeprint)
+      var printColours = { tick: '#333333', title: '#111111', grid: '#cccccc' };
+      function restyle(c) {
+        Chart.defaults.color = c.tick;
+        Chart.defaults.borderColor = c.grid;
+        Chart.defaults.scale.grid.color = c.grid;
+        Chart.defaults.plugins.legend.labels.color = c.title;
+        // per-chart options are resolved at creation, so set them on each chart too
+        Object.values(Chart.instances).forEach(function (ch) {
+          Object.values(ch.options.scales || {}).forEach(function (sc) {
+            if (sc.grid) sc.grid.color = c.grid;
+            if (sc.ticks) sc.ticks.color = c.tick;
+            if (sc.title) sc.title.color = c.title;
+          });
+          var lg = ch.options.plugins && ch.options.plugins.legend;
+          if (lg && lg.labels) lg.labels.color = c.title;
+          ch.resize();
+          ch.update('none');
+        });
+      }
+      window.addEventListener('beforeprint', function () { restyle(printColours); });
+      window.addEventListener('afterprint',  function () { restyle(VS); });
+      state = 'ready';
+    }
+    function run(fn) {
+      try { fn(); } catch (e) { console.error('chart rendering failed:', e); }
+    }
+    function fail() {
+      state = 'failed';
+      queue = [];
+      document.documentElement.classList.add('charts-failed');
+      document.querySelectorAll('.chart-wrap').forEach(function (w) {
+        var p = document.createElement('p');
+        p.className = 'chart-fallback';
+        p.textContent = 'Chart unavailable: the charting library could not be loaded. The values are listed below.';
+        w.appendChild(p);
+      });
+    }
+    window.vsCharts = function (fn) {
+      if (state === 'ready') run(fn);
+      else if (state === 'pending') queue.push(fn);
+    };
+    if (window.Chart) { setup(); return; }
+    var s = document.createElement('script');
+    s.src = {{ chartjs.cdn|tojson }};
+    s.integrity = {{ chartjs.sri|tojson }};
+    s.crossOrigin = 'anonymous';
+    s.onload = function () {
+      if (!window.Chart) return fail();
+      setup();
+      queue.splice(0).forEach(run);
+    };
+    s.onerror = fail;
+    document.head.appendChild(s);
+  })();
+
+  // Axis option helpers (colours and fonts come from Chart.defaults above)
   function makeLineOpts(yLabel) {
     return {
       responsive: true,
@@ -730,15 +985,8 @@
         tooltip: { mode: 'index' },
       },
       scales: {
-        x: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
-        },
-        y: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
-        },
+        x: { ticks: { maxTicksLimit: 8 } },
+        y: { title: { display: !!yLabel, text: yLabel, color: VS.title } },
       },
     };
   }
@@ -753,15 +1001,8 @@
         tooltip: { mode: 'index' },
       },
       scales: {
-        x: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-        },
-        y: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
-        },
+        x: {},
+        y: { title: { display: !!yLabel, text: yLabel, color: VS.title } },
       },
     };
   }
