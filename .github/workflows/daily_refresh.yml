@@ -117,8 +117,12 @@ jobs:
 
       # Committed even when the refresh exits 1 (e.g. a stale calibration): what it
       # did capture is valid, and a failed download or rejected fit writes nothing.
-      # vol_system.db is a rebuildable cache and is not committed; the parquet
-      # captures under data_store/market and data_store/options are the record.
+      # data_store/vol_system.db is git-tracked, but the bot never commits it: it is
+      # a rebuildable cache (every run first restores the committed parquet captures
+      # under data_store/market and data_store/options into it; those are the record).
+      # Every run modifies it, so it is an unstaged change here and the rebase in the
+      # push loop must --autostash it: a plain `git pull --rebase` refuses ("You have
+      # unstaged changes") and the run lost its captures whenever main had moved.
       - name: Commit data files
         id: commit
         if: always() && steps.refresh.outcome != 'skipped' && steps.tests.outcome == 'success'
@@ -154,7 +158,7 @@ jobs:
               fi
               echo "Push rejected (attempt $i); rebasing onto origin/main"
               sleep $((i * 10))
-              git -c http.https://github.com/.extraheader="$auth" pull --rebase origin main || {
+              git -c http.https://github.com/.extraheader="$auth" pull --rebase --autostash origin main || {
                 git rebase --abort || true; echo "::error::rebase onto main failed"; exit 1; }
             done
             [ "$pushed" = 1 ] || { echo "::error::push to main failed after 4 attempts"; exit 1; }

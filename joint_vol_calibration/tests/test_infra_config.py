@@ -100,3 +100,19 @@ def test_a_stale_calibration_does_not_block_the_deploy():
     assert "steps.refresh.outputs.publishable == 'true'" in cond
     assert "steps.refresh.outcome" not in cond
     assert "steps.tests.outcome == 'success'" in cond
+
+
+def test_push_retry_rebase_survives_the_unstaged_database():
+    # data_store/vol_system.db is tracked, every run modifies it and the bot never
+    # stages it. A plain "git pull --rebase" then refuses ("You have unstaged
+    # changes"), "rebase --abort" finds no rebase, and the step exited 1 -- losing
+    # the run's captures -- whenever main moved during the run.
+    commit = _step(DAILY, "Commit data files")
+    assert (ROOT / "data_store" / "vol_system.db").exists()
+    pulls = re.findall(r"pull --rebase[^\n]*", commit)
+    assert pulls and all("--autostash" in p for p in pulls), pulls
+    staged = re.search(r"for p in (.*?); do", commit, re.S).group(1)
+    assert "data_store/market" in staged and "vol_system.db" not in staged
+    # and the comment no longer claims the database is not committed/tracked
+    assert "rebuildable cache and is not committed" not in DAILY
+    assert "git-tracked" in DAILY
