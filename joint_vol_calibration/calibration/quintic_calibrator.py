@@ -811,8 +811,8 @@ class QuinticCalibrator:
                 "nan_residual": _NAN_RESIDUAL,
                 "mc": {"n_paths": self.n_paths, "seed": self.seed,
                        "steps_per_year": self.steps_per_year, "min_steps": self.min_steps,
-                       "estimator": "conditional (mixing) + antithetic pairs + M1 control "
-                                    "variate + Richardson (h, h/2)",
+                       "estimator": "conditional (mixing) + antithetic pairs + empirical "
+                                    "martingale correction of M1 + Richardson (h, h/2)",
                        "check_n_paths": _MC_PATHS_CHECK, "check_seed": self.seed + 1000},
                 "vix_quadrature": {"rule": "uniform lattice on the standard-normal plane, |z| <= 8",
                                    "points_per_dim": self.n_outer, "gl_per_piece": self.n_inner},
