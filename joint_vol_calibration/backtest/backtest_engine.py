@@ -209,9 +209,13 @@ class C22Corrections:
     Switches for the C22 correction round (audit finding id in brackets).
 
     Every default is the corrected behaviour. ``C22Corrections.legacy()``
-    turns them all off and, together with ``atm_to_vix_ratio=1.0`` and the
-    fixed VVIX>100 gate, reproduces the published C21 headline
-    (NAV $738,794 / P&L −$261,206 / Sharpe −1.80 / MaxDD −31.5%).
+    turns them all off; together with ``atm_to_vix_ratio=1.0``, the fixed
+    VVIX>100 gate, the 1-day PDV spread and the legacy VIX interpolation it
+    is the C21 ENGINE. On the C21 signal/PDV code and database it reproduced
+    the published C21 headline (NAV $738,794 / P&L −$261,206 / Sharpe −1.80
+    / MaxDD −31.5%); on today's signal code it does not: c22_bridge row 0
+    gives NAV $734,577 / P&L −$265,423, the gap being upstream changes these
+    switches cannot turn off (S2 stop direction, z-score warm-up, …).
     They exist so c22_bridge.py can apply the corrections one at a time;
     nothing else should switch them off.
     """
@@ -598,7 +602,8 @@ def _simulate_s3_pnl(
     DO NOT read this as evidence of edge: z is a standardised statistic
     that drifts back toward 0 through its own rolling normalisation, so
     "enter at z<−1, exit at z>−0.3" books positive P&L on pure random walks
-    (~98% of seeded random-walk paths; see s3_timing_null_test). The engine
+    (199 of the 200 seeded random-walk paths of the canonical 2018-2025
+    s3_timing_null_test, 99.5%; its null p-value 0.010). The engine
     now prices S3 as the short-SPX-straddle index leg instead.
 
     With corrections.s3_exit_day the notional is fixed at entry (kelly at
