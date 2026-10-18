@@ -76,3 +76,23 @@ def test_redeploy_script_cannot_push_gh_pages():
 def test_dead_procfile_is_gone():
     assert not (ROOT / "Procfile").exists()
     assert "gunicorn" not in (ROOT / "requirements.txt").read_text()
+
+
+def _step(text, name):
+    """The YAML block of the workflow step called ``name`` (up to the next step)."""
+    m = re.search(rf"- name: {re.escape(name)}\n(.*?)(?=\n\s*- name: |\Z)", text, re.S)
+    assert m, name
+    return m.group(1)
+
+
+def test_a_stale_calibration_does_not_block_the_deploy():
+    # cloud_refresh exits 1 when the newest accepted fit is too old, which made
+    # "steps.refresh.outcome == 'success'" skip the deploy: the site (market data,
+    # labels, staleness banner) froze until a calibration passed. The deploy keys
+    # on the publishable output instead, and needs always() to run after a red step.
+    deploy = _step(DAILY, "Deploy to GitHub Pages")
+    cond = re.search(r"if:\s*>?\s*(.*?)\n\s*uses:", deploy, re.S).group(1)
+    assert "always()" in cond
+    assert "steps.refresh.outputs.publishable == 'true'" in cond
+    assert "steps.refresh.outcome" not in cond
+    assert "steps.tests.outcome == 'success'" in cond

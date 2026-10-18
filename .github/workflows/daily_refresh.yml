@@ -159,10 +159,15 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # A stale calibration fails the job (exit 1) but does not block the deploy: the
+      # site states the headline fit's age in its staleness banner. cloud_refresh sets
+      # publishable=false for what must block it (freeze failed, market data not
+      # current, captures not restored/persisted).
       - name: Deploy to GitHub Pages
         if: >
-          steps.refresh.outcome == 'success' && steps.tests.outcome == 'success' &&
-          steps.commit.outcome == 'success' && contains(steps.plan.outputs.steps, 'freeze')
+          always() && steps.refresh.outputs.publishable == 'true' &&
+          steps.tests.outcome == 'success' && steps.commit.outcome == 'success' &&
+          contains(steps.plan.outputs.steps, 'freeze')
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:
           github_token: ${{ github.token }}

@@ -128,7 +128,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from joint_vol_calibration.config import DATA_DIR
+from joint_vol_calibration.config import BT_END, BT_START, DATA_DIR
 from joint_vol_calibration.signals.regime_classifier import (
     PDV_WALK_FORWARD,
     R2_GATE,
@@ -587,8 +587,8 @@ def generate_signal1_regime_filtered(
 
 def compare_s1_regime_filter(
     signals_df: pd.DataFrame,
-    start_date: str   = "2018-01-01",
-    end_date:   str   = "2025-03-24",
+    start_date: str   = BT_START,
+    end_date:   str   = BT_END,
     notional:   float = 1_000_000.0,
 ) -> dict:
     """

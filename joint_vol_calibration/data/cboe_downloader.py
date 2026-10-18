@@ -303,9 +303,12 @@ def parse_vx_settlement_csv(text: str, trade_date: str) -> pd.DataFrame:
     for ``trade_date``, keeping VX (not the VXM mini) rows.
 
     Symbols: 'VX/V6' is the standard monthly, 'VX41/V6' a weekly (week 41).
-    Note: on days a weekly does not trade, Cboe prints the same-month monthly's
-    settlement for it (every untraded weekly in the 2026-10-09 file) — see
-    database.get_vix_futures_curve, which excludes weeklies by default.
+    Note: on days a weekly does not trade, Cboe prints a MONTHLY contract's
+    settlement for it, not always the one of its own contract month: on
+    2026-10-16 the weeklies expiring 10-28 to 11-11 (VX43/V6 .. VX45/X6) all
+    showed the October monthly's 19.9075 and those expiring 11-24 and 12-01 the
+    November monthly's 19.2382. See database.get_vix_futures_curve, which
+    excludes weeklies by default.
 
     Returns
     -------

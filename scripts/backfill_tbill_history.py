@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
-from datetime import date
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -45,6 +44,7 @@ from joint_vol_calibration.data.database import (                 # noqa: E402
     get_tbill_rates_series,
     init_database,
     insert_tbill_rates,
+    last_closed_session,
 )
 
 # Plausible range for a continuously compounded 13-week bill rate, as a
@@ -74,7 +74,8 @@ def main(start: str, apply: bool, end: str | None = None) -> int:
     before = _coverage(BT_END)
     print(f"before: {before[0]} rows in {BT_START}..{BT_END} (first={before[1]} last={before[2]})")
 
-    end = end or date.today().isoformat()
+    # Not the machine's date: during a session that would fetch a still-forming bar.
+    end = end or last_closed_session()
     rates = dl.download_tbill_rate(start=start, end=end)
     if rates.empty:
         print("download returned nothing; aborting")
@@ -107,7 +108,7 @@ def main(start: str, apply: bool, end: str | None = None) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2010-01-01")
-    ap.add_argument("--end", default=None, help="inclusive end date (default: today)")
+    ap.add_argument("--end", default=None, help="inclusive end date (default: the last closed NYSE session)")
     ap.add_argument("--apply", action="store_true", help="write to the database")
     a = ap.parse_args()
     raise SystemExit(main(a.start, a.apply, a.end))
