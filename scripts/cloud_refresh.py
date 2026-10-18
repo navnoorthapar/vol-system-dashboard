@@ -230,6 +230,15 @@ def extend_regime_labels(today: "date | None" = None) -> int:
     """Extend regime_labels.parquet with DETERMINISTIC RULE labels, and repair
     any stored label that disagrees with the rule. Returns rows added.
 
+    ``today`` is the as-of session (main() passes the last closed NYSE
+    session). Rows come from regime_classifier.build_rule_label_frame: each
+    session's same-day features next to the rule label they produced, plus the
+    pdv_iv_spread_source tag (label files are built by appending, so rows made
+    under a different spread definition stay distinguishable). A missing
+    observable is stored as NaN: the forward-fill this function used to apply
+    stored the previous session's value under a later date (a missing ^VIX3M
+    print on 2 sessions stored the 3rd-last session's ts_slope on both).
+
     This used to append ``clf.predict(...)`` — the XGBoost classifier's output.
     That is the model C16/C17 demoted: it loses to the "predict-yesterday"
     baseline (C22, adaptive labels: 75.0% vs 86.7% out of sample), so it is research-only and is not
@@ -250,7 +259,7 @@ def extend_regime_labels(today: "date | None" = None) -> int:
     import pandas as pd
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
     from joint_vol_calibration.signals.regime_classifier import (
-        build_features, build_regime_labels, FEATURE_COLS,
+        build_rule_label_frame, FEATURE_COLS,
     )
 
     today_s = (today or date.today()).isoformat()
@@ -268,34 +277,26 @@ def extend_regime_labels(today: "date | None" = None) -> int:
         log.warning("  Insufficient market data for feature computation; skipping")
         return 0
 
-    feats = build_features(spx, vix)
-
-    # Forward-fill slow-moving features across data gaps (VIX TS weekends, etc.)
-    FFILL = ["fear_premium", "rv_change_5d", "ts_slope", "vvix", "pdv_iv_spread"]
-    for col in FFILL:
-        if col in feats.columns:
-            feats[col] = feats[col].ffill()
-    feats.dropna(inplace=True)
-
-    labels = build_regime_labels(spx, vix, vvix_threshold=None)
-    if labels.empty:
+    frame = build_rule_label_frame(spx, vix, vvix_threshold=None)
+    if frame.empty:
         log.warning("  Rule labels could not be computed; skipping")
         return 0
 
     # Only trust dates whose adaptive gate saw a full 252-day window inside
     # this fetch; earlier ones would be computed from a truncated history.
-    if len(labels) <= _ADAPTIVE_WINDOW:
+    if len(frame) <= _ADAPTIVE_WINDOW:
         log.warning("  Only %d labelled days fetched (< %d needed for the adaptive "
                     "gate); skipping to avoid rewriting history from a short window",
-                    len(labels), _ADAPTIVE_WINDOW)
+                    len(frame), _ADAPTIVE_WINDOW)
         return 0
-    safe_from = labels.index[_ADAPTIVE_WINDOW]
+    safe_from = frame.index[_ADAPTIVE_WINDOW]
+    truth_all = frame["regime"].astype(int)
 
-    new_idx = feats.index[(feats.index > last_dt) & feats.index.isin(labels.index)]
+    new_idx = frame.index[frame.index > last_dt]
     n = 0
     if len(new_idx):
-        new_rows = feats.loc[new_idx, FEATURE_COLS].copy()
-        new_rows["regime"] = labels.reindex(new_idx).astype(int)
+        new_rows = frame.loc[new_idx, list(FEATURE_COLS) + ["regime", "pdv_iv_spread_source"]].copy()
+        new_rows["regime"] = new_rows["regime"].astype(int)
         rl = pd.concat([rl, new_rows])
         rl = rl[~rl.index.duplicated(keep="last")].sort_index()
         n = len(new_rows)
@@ -304,10 +305,10 @@ def extend_regime_labels(today: "date | None" = None) -> int:
 
     # Self-heal: overwrite any stored label in the trustworthy window that the
     # rule disagrees with. This is what repairs the rows the classifier wrote.
-    repair_idx = rl.index[(rl.index >= safe_from) & rl.index.isin(labels.index)]
+    repair_idx = rl.index[(rl.index >= safe_from) & rl.index.isin(frame.index)]
     if len(repair_idx):
         stored = rl.loc[repair_idx, "regime"].astype(int)
-        truth  = labels.reindex(repair_idx).astype(int)
+        truth  = truth_all.reindex(repair_idx)
         differ = stored != truth
         if differ.any():
             rl.loc[repair_idx[differ], "regime"] = truth[differ]

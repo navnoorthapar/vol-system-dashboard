@@ -361,6 +361,41 @@ def test_intraday_run_never_stores_or_labels_the_open_session(env, monkeypatch):
     assert SESSION not in _spx_dates()
 
 
+def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch):
+    """Label rows come from build_rule_label_frame. The forward-fill the step
+    used to apply stored the previous session's ts_slope under later dates
+    when ^VIX3M was missing; the rows must carry NaN, the rule label and the
+    pdv_iv_spread source tag."""
+    from joint_vol_calibration.signals.regime_classifier import (
+        FEATURE_COLS, build_rule_label_frame)
+    idx = pd.bdate_range("2024-01-01", periods=420)
+    rng = np.random.default_rng(7)
+    ret = rng.normal(0, 0.01, len(idx))
+    spx = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "log_return": ret,
+                        "close": 4000 * np.exp(np.cumsum(ret))})
+    vix = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"),
+                        "^VIX": 16 + rng.normal(0, 1.5, len(idx)).cumsum() * 0.05,
+                        "^VIX9D": 15.0, "^VIX3M": 18.0, "^VIX6M": 19.0,
+                        "^VVIX": 95 + rng.normal(0, 4, len(idx))})
+    vix.loc[vix.index[-2:], "^VIX3M"] = np.nan                # two missing prints
+    monkeypatch.setattr(dbm, "get_spx_ohlcv", lambda as_of_date, start_date=None:
+                        spx[spx["date"] <= as_of_date].reset_index(drop=True))
+    monkeypatch.setattr(dbm, "get_vix_term_structure_wide", lambda as_of_date, start_date=None:
+                        vix[vix["date"] <= as_of_date].reset_index(drop=True))
+    frame = build_rule_label_frame(spx, vix, vvix_threshold=None)
+    seed = frame.iloc[:-5][list(FEATURE_COLS) + ["regime"]]        # stored history
+    (env.DATA / "signals").mkdir()
+    seed.to_parquet(env.DATA / "signals" / "regime_labels.parquet")
+
+    added = env.extend_regime_labels(date.fromisoformat(spx["date"].iloc[-1]))
+    rl = pd.read_parquet(env.DATA / "signals" / "regime_labels.parquet")
+    assert added == 5 and rl.index.max() == frame.index.max()
+    tail = rl.iloc[-5:]
+    assert tail["ts_slope"].iloc[-2:].isna().all()               # not the 3rd-last value
+    assert (tail["regime"] == frame["regime"].iloc[-5:]).all()
+    assert tail["pdv_iv_spread_source"].notna().all()
+
+
 # ── Publishable vs exit status (the workflow deploys on publishable) ──────────
 
 class _FreezeOK:

@@ -174,7 +174,7 @@ class TestRegimeLabelProvenance:
             "the dashboard headlines as the deterministic rule label"
         )
         assert "clf.predict(new_feats)" not in head
-        assert "build_regime_labels" in head and "vvix_threshold=None" in head
+        assert "build_rule_label_frame" in head and "vvix_threshold=None" in head
 
     def test_rule_labels_are_same_day_observable(self):
         """Truncating the future must not change a past label."""
