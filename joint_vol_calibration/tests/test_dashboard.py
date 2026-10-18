@@ -1389,3 +1389,35 @@ def test_trade_kpis_keep_the_open_trade_out_of_the_win_rate(dash, engine_state, 
     assert "Round trips" not in text and "38.0%" not in text and "−$1,039" not in text
     assert "S4 VRP −$273,544" in text and "46 (1 open)" in text
     assert "S4's count includes a straddle opened on the last session (2025-03-24)" in text
+
+
+def test_displayed_numbers_are_rounded_once(dash, pages):
+    """Values rounded in the loader and again in the template printed S3's final
+    +5.647% as '+5.7%', the 365-day smile's 12.4249 as '12.43', and Greeks vomma
+    3,267.496 as '3,268' (via 3,267.5)."""
+    m = dash.MINUS
+    # equity-curve table: final / lowest / highest from the unrounded curves
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    table = re.search(r'id="equityChart-data">(.*?)</div>', pages["/backtest"], re.S).group(1)
+    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
+                      ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+        rel = eq[col] / eq[col].iloc[0] - 1
+        want = "".join(f"<td>{dash._pct_prose(x)}</td>" for x in (rel.iloc[-1], rel.min(), rel.max()))
+        assert f"<tr><td>{name}</td>{want}</tr>" in table, name
+    assert "<tr><td>S3 Dispersion</td><td>+5.6%</td>" in table
+    # model smile table: the Heston smile of the headline fit, formatted once
+    _, cal = dash.load_headline_calibration()
+    smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
+    cal_html = pages["/calibration"]
+    s365 = smile[365]
+    assert f"{s365['lm'][-1]:+.3f}: {s365['iv'][-1] * 100:.2f}" in cal_html
+    assert "+0.250: 12.42" in cal_html and "+0.250: 12.43" not in cal_html
+    # Greeks heatmap: every cell's vomma and flag metric from the stored surface
+    gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
+    gdf = gdf.assign(lm_key=gdf["log_moneyness"].round(4)).sort_values(["T_days", "lm_key"])
+    g_html = pages["/greeks"]
+    vv = re.findall(r'<div class="vv">([^<]+)</div>', g_html)
+    assert vv == [f"{x:,.0f}".replace("-", m) for x in gdf["vomma"]]
+    zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="z">([^<]+)</div>', g_html)]
+    assert zz == [f"{abs(x):.2f}" for x in gdf["vomma_pnl_ratio"]]
+    assert "3,267" in vv and "3,268" not in vv

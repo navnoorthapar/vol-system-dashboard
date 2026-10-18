@@ -834,7 +834,7 @@ def load_page1() -> dict[str, Any]:
         pct, n_hist = spread_percentile(hist, float(spread.iloc[-1]))
         d["pdv_hist_n"] = n_hist
         if n_hist >= PDV_MIN_HISTORY:
-            d["pdv_spread_pct"] = round(pct, 1)
+            d["pdv_spread_pct"] = pct          # unrounded: formatted once on the page
             d["pdv_spread_mean"] = round(float(hist.mean()), 2)
             d["pdv_hist_start"] = str(hist.index[0].date())
             d["pdv_hist_end"] = str(hist.index[-1].date())
@@ -1101,9 +1101,11 @@ def load_page2() -> dict[str, Any]:
 
         # Model smile implied by THESE parameters (not the Greeks parquet,
         # which was built from a different, gate-rejected 2026-03-24 fit).
+        # Unrounded: the template formats each value once (rounding to 3 dp
+        # here and to 2 dp there printed 12.4249 as 12.43).
         for s in heston_model_smile(p):
             d["mat_smiles"].append({"T": s["T"], "lm": s["lm"],
-                                    "iv": [round(v * 100, 3) for v in s["iv"]]})
+                                    "iv": [v * 100 for v in s["iv"]]})
 
         ref = _latest_market_session()
         item = _staleness("calibration", "Heston calibration", d["session"], ref)
@@ -1144,7 +1146,10 @@ def load_page2() -> dict[str, Any]:
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
                 "theta": round(float(qp["theta"]), 4), "alpha0": round(float(qp["alpha0"]), 4),
                 "alpha1": round(float(qp["alpha1"]), 4), "alpha3": round(float(qp["alpha3"]), 4),
-                "alpha5": round(float(qp["alpha5"]), 4), "epsilon": round(float(qp["epsilon"]), 4),
+                "alpha5": round(float(qp["alpha5"]), 4), "epsilon": float(qp["epsilon"]),
+                # OU half-lives in calendar days, from the unrounded speeds
+                "hl_x_days": math.log(2.0) / float(qp["lam_x"]) * 365.0,
+                "hl_y_days": math.log(2.0) / float(qp["lam_y"]) * 365.0,
                 "spx_rmse": _num(ql.get("spx_iv_rmse")),
                 "spx_rmse_fresh": _num(ql.get("spx_iv_rmse_fresh_paths")),
                 # model E[VIX_T] vs the VIX-option parity forward (no VX futures)
@@ -1307,35 +1312,39 @@ def load_page3() -> dict[str, Any]:
                 # colour = the flag metric relative to its threshold (full at the threshold)
                 shade = 2.0 * min(m / flag_thr, 1.0) if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr else z
                 bg = _vomma_color(shade)
-                cells.append({
-                    "vomma": round(float(r.vomma), 1), "z": round(z, 2), "metric": round(m, 3),
-                    "iv": round(float(r.iv) * 100, 1), "K": round(float(r.K), 0),
+                cells.append({        # unrounded: each value is formatted once, in the template
+                    "vomma": float(r.vomma), "z": z, "metric": m,
+                    "iv": float(r.iv) * 100, "K": round(float(r.K), 0),
                     "lm": lm, "unstable": bool(r.is_unstable), "bg": bg,
                     # text colour chosen per cell for contrast (white on bright green was 2.7:1)
                     "fg": _text_colour_on(bg),
                 })
             d["heatmap_rows"].append({"T": T, "label": f"{T}d", "cells": cells})
-        d["heatmap_cols"] = [_fmt(c, "+.3f") for c in cols]
+        # Column labels from the stored ln(K/F), not from the 4-dp grouping key.
+        raw_lm: dict = {}
+        for x in list(gdf["log_moneyness"]) + list(grid_lm):
+            raw_lm.setdefault(round(float(x), 4), float(x))
+        d["heatmap_cols"] = [_fmt(raw_lm.get(c, c), "+.3f") for c in cols]
 
         unstable = gdf[gdf["is_unstable"]]
         d["unstable_nodes"] = sorted((
-            {"T_days": int(u.T_days), "lm": round(float(u.log_moneyness), 4),
-             "K": round(float(u.K), 0), "vomma": round(float(u.vomma), 1),
-             "z": round(float(u.vomma_zscore), 2), "iv": round(float(u.iv) * 100, 1),
-             "metric": round(float(u.flag_metric), 3)}
+            {"T_days": int(u.T_days), "lm": float(u.log_moneyness),
+             "K": round(float(u.K), 0), "vomma": float(u.vomma),
+             "z": float(u.vomma_zscore), "iv": float(u.iv) * 100,
+             "metric": float(u.flag_metric)}
             for u in unstable.itertuples()), key=lambda x: x["metric"], reverse=True)
         d["n_unstable"] = len(d["unstable_nodes"])
         d["unstable_maturities"] = sorted({n["T_days"] for n in d["unstable_nodes"]})
         d["unstable_by_maturity"] = {int(t): int(n) for t, n in gdf.groupby("T_days")["is_unstable"].sum().items()}
 
         imax, imin = gdf["vomma"].idxmax(), gdf["vomma"].idxmin()
-        d["vomma_max"] = round(float(gdf.loc[imax, "vomma"]), 1)
+        d["vomma_max"] = float(gdf.loc[imax, "vomma"])
         d["vomma_max_at"] = {"T_days": int(gdf.loc[imax, "T_days"]),
                              "lm": round(float(gdf.loc[imax, "log_moneyness"]), 3)}
-        d["vomma_min"] = round(float(gdf.loc[imin, "vomma"]), 1)
+        d["vomma_min"] = float(gdf.loc[imin, "vomma"])
         d["vomma_min_at"] = {"T_days": int(gdf.loc[imin, "T_days"]),
                              "lm": round(float(gdf.loc[imin, "log_moneyness"]), 3)}
-        d["vomma_mean"] = round(float(gdf["vomma"].mean()), 1)
+        d["vomma_mean"] = float(gdf["vomma"].mean())
 
         # QV convexity = Var[∫v dt] per maturity: one number per maturity (it
         # does not depend on strike), so a single series is plotted.
@@ -1343,14 +1352,14 @@ def load_page3() -> dict[str, Any]:
         if ((qv["max"] - qv["min"]).abs() > 1e-12 * qv["max"].abs().clip(lower=1)).any():
             _logger.info("qv_convexity varies within a maturity; plotting the mean")
         d["qv_labels"] = [f"{int(t)}d" for t in qv.index]
-        d["qv_values"] = (qv["mean"] * 1e4).round(4).tolist()
+        d["qv_values"] = (qv["mean"] * 1e4).tolist()
 
         vanna = gdf.groupby("T_days")["vanna"].mean()
         d["vanna_labels"] = [f"{int(t)}d" for t in vanna.index]
         d["vanna_values"] = vanna.round(4).tolist()
 
         d["scatter_lm"] = gdf["log_moneyness"].round(4).tolist()
-        d["scatter_z"] = gdf["flag_metric"].round(4).tolist()      # the flag metric (ratio, or |z| fallback)
+        d["scatter_z"] = gdf["flag_metric"].tolist()      # the flag metric (ratio, or |z| fallback)
         d["scatter_T"] = gdf["T_days"].astype(int).tolist()
 
         # Provenance + staleness. The shipped surface records no source fit;
@@ -1635,7 +1644,7 @@ def load_page4() -> dict[str, Any]:
                          "signal_pnl": [], "signal_labels": [],
                          "research_s1": {}, "research_s1c": {}, "research_s4": {},
                          "eq_dates": [], "eq_nav": [], "eq_nav_s1c": [], "eq_nav_s3": [],
-                         "eq_nav_s4": [], "eq_nav_s1": [], "ann": [], "ann_years": [],
+                         "eq_nav_s4": [], "eq_nav_s1": [], "eq_summary": [], "ann": [], "ann_years": [],
                          "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
                          "crisis": [], "sleeves": {}, "open_trades": []}
     for k in ("final_nav", "total_pnl", "start_date", "end_date",
@@ -1675,6 +1684,16 @@ def load_page4() -> dict[str, Any]:
             return ((s / float(s.iloc[0]) * 100) - 100).round(2).tolist()
 
         d["eq_dates"] = [t.strftime("%Y-%m-%d") for t in eq.index]
+        # Final / lowest / highest of each curve for the table alternative, from
+        # the unrounded curves: printing the 2-dp chart series at 1 dp showed S3's
+        # final +5.647% as "+5.7%".
+        d["eq_summary"] = []
+        for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
+                          ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+            if col in eq.columns and eq[col].notna().any():
+                rel = eq[col].dropna() / float(eq[col].dropna().iloc[0]) - 1.0
+                d["eq_summary"].append({"name": name, "final": float(rel.iloc[-1]),
+                                        "low": float(rel.min()), "high": float(rel.max())})
         d["eq_nav"] = _norm("nav")
         d["eq_nav_s1c"] = _norm("nav_s1c")
         d["eq_nav_s3"] = _norm("nav_s3")

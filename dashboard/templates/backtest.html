@@ -88,13 +88,12 @@
   <div class="chart-wrap xtall">
     <canvas id="equityChart" role="img" aria-label="Line chart: cumulative return of the portfolio and its sleeves, {{ d.start_date|fmt }} to {{ d.end_date|fmt }}" aria-describedby="equityChart-data"></canvas>
   </div>
-  {% macro series_row(name, xs) %}{% set v = (xs or [])|reject('none')|list %}{% if v %}<tr><td>{{ name }}</td><td>{{ (v[-1] / 100)|pct }}</td><td>{{ ((v|min) / 100)|pct }}</td><td>{{ ((v|max) / 100)|pct }}</td></tr>{% endif %}{% endmacro %}
   <div class="chart-data sr-only" id="equityChart-data">
     <table>
       <caption>Cumulative return (%) from {{ d.start_date|fmt }} to {{ d.end_date|fmt }}</caption>
       <thead><tr><th scope="col">Series</th><th scope="col">Final</th><th scope="col">Lowest</th><th scope="col">Highest</th></tr></thead>
       <tbody>
-        {{ series_row('Portfolio', d.eq_nav) }}{{ series_row('S1C Contrarian', d.eq_nav_s1c) }}{{ series_row('S3 Dispersion', d.eq_nav_s3) }}{{ series_row('S4 VRP', d.eq_nav_s4) }}{{ series_row('S1 PDV (reference)', d.eq_nav_s1) }}
+        {% for r in d.eq_summary %}<tr><td>{{ r.name }}</td><td>{{ r.final|pct }}</td><td>{{ r.low|pct }}</td><td>{{ r.high|pct }}</td></tr>{% endfor %}
       </tbody>
     </table>
   </div>
