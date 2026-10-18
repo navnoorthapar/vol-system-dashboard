@@ -4,10 +4,15 @@ test_lookahead.py — Zero look-ahead bias enforcement tests.
 These are the most important tests in the system.
 A single look-ahead bug invalidates the entire backtest.
 
-Tests are grouped into three categories:
+Tests are grouped into these categories:
   1. Database layer — verify SQL queries respect as_of_date
   2. Pipeline layer — verify the DataPipeline enforces the guarantee
   3. Realised vol    — verify RV computation has no forward-looking windows
+  4. Log returns     — r_t uses only S_t and S_{t-1}
+  5. Signals, regime labels, the R2 gate and the HMM — the trading path.
+     Each test is mutation-checked: removing the 1-day feature or regime lag,
+     a full-sample z-score, a forward-looking R2 gate, a t+1 return in the
+     label's realised vol, or HMM smoothing makes at least one of them fail.
 
 Run with:
   pytest tests/test_lookahead.py -v
@@ -364,6 +369,207 @@ class TestLogReturnComputation:
             assert abs(actual - expected) < 1e-10, (
                 f"Log return mismatch: expected {expected:.6f}, got {actual:.6f}"
             )
+
+
+# ── Category 5: Signals, regime labels, R2 gate, HMM ─────────────────────────
+
+from joint_vol_calibration.signals.regime_classifier import (  # noqa: E402
+    HMMRegimeClassifier,
+    build_features,
+    build_regime_labels,
+    r2_gate_threshold,
+)
+from joint_vol_calibration.signals.signal_engine import SignalEngine  # noqa: E402
+
+
+def _signal_market(n: int = 800, seed: int = 11):
+    """GARCH-like returns; VIX tracks realised vol, VVIX tracks VIX, so the
+    labels move through R0/R1/R2 and every signal has something to do."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2016-01-04", periods=n)
+    s2 = np.empty(n)
+    r = np.empty(n)
+    s2[0], r[0] = 1e-4, 0.0
+    for t in range(1, n):
+        s2[t] = 3e-6 + 0.08 * r[t - 1] ** 2 + 0.90 * s2[t - 1]
+        r[t] = rng.normal(0.0, np.sqrt(s2[t]))
+    rv = np.sqrt(s2 * 252)
+    vix = np.clip(15 + 35 * (rv - rv.mean()) / rv.std() + rng.normal(0, 1.5, n), 9, 60)
+    vvix = np.clip(90 + 12 * (vix - vix.mean()) / vix.std() + rng.normal(0, 4, n), 75, 160)
+    spx = pd.DataFrame({"date": dates, "close": 3000 * np.exp(np.cumsum(r)), "log_return": r})
+    vixw = pd.DataFrame({"date": dates, "^VIX": vix,
+                         "^VIX3M": vix + rng.normal(1.5, 1.0, n), "^VVIX": vvix})
+    return spx, vixw
+
+
+def _poison(spx, vix, from_date, ret, v, v3m, vv, inclusive=True):
+    sp, vp = spx.copy(), vix.copy()
+    ds, dv = pd.to_datetime(sp["date"]), pd.to_datetime(vp["date"])
+    ms = ds >= from_date if inclusive else ds > from_date
+    mv = dv >= from_date if inclusive else dv > from_date
+    sp.loc[ms, "log_return"] = ret
+    sp.loc[ms, "close"] = sp.loc[ms, "close"] * 5.0
+    vp.loc[mv, "^VIX"] = v
+    vp.loc[mv, "^VIX3M"] = v3m
+    vp.loc[mv, "^VVIX"] = vv
+    return sp, vp
+
+
+# Two opposite poisons so a dependency cannot hide behind a saturated label.
+POISONS = [
+    dict(ret=0.25, v=5.0, v3m=90.0, vv=999.0),   # realised >> implied, VVIX huge
+    dict(ret=0.0, v=90.0, v3m=10.0, vv=50.0),    # implied >> realised, VVIX tiny
+]
+_SIG_WINDOW = ("2016-01-01", "2020-01-01")
+
+
+@pytest.fixture(scope="module")
+def clean_signals():
+    spx, vix = _signal_market()
+    return spx, vix, SignalEngine().generate(spx, vix, *_SIG_WINDOW)
+
+
+class TestSignalEngineSameDayPoison:
+    """Signals at session t trade at the close of t on information dated
+    ≤ t−1. So poisoning everything dated ≥ t (the cutoff session INCLUDED)
+    must leave every numeric column of every row dated ≤ t bit-identical —
+    positions, strengths, z-scores, features and the regime. The older
+    end-to-end test poisoned strictly AFTER the cutoff and compared positions
+    only, so a missing 1-day lag or a full-sample z-score went unnoticed."""
+
+    @pytest.mark.parametrize("frac", [0.3, 0.45, 0.6, 0.75])
+    @pytest.mark.parametrize("pz", POISONS, ids=["hot", "cold"])
+    def test_rows_up_to_cutoff_unchanged(self, clean_signals, frac, pz):
+        spx, vix, clean = clean_signals
+        # a cutoff whose lagged regime is R1, so a forward-looking label flips
+        start = clean.index[int(len(clean) * frac)]
+        cutoff = clean.index[(clean["regime"] == 1) & (clean.index >= start)][0]
+        sp, vp = _poison(spx, vix, cutoff, **pz)
+        pois = SignalEngine().generate(sp, vp, *_SIG_WINDOW)
+        cols = [c for c in clean.columns if clean[c].dtype.kind in "fiub"]
+        for z in ("s2_z", "s3_z", "s4_z", "regime", "vvix", "pdv_iv_spread"):
+            assert z in cols
+        pd.testing.assert_frame_equal(clean.loc[:cutoff, cols], pois.loc[:cutoff, cols],
+                                      check_exact=True)
+        after = clean.index[clean.index > cutoff][:20]
+        assert not clean.loc[after, cols].equals(pois.loc[after, cols]), "poison is vacuous"
+
+
+class TestSignalEngineLags:
+    def test_features_are_previous_session_values(self, clean_signals):
+        spx, vix, clean = clean_signals
+        raw = build_features(spx, vix)
+        prev = raw.shift(1).reindex(clean.index)
+        for c in ("vix", "ts_slope", "fear_premium", "vvix", "pdv_iv_spread"):
+            pd.testing.assert_series_equal(clean[c], prev[c], check_names=False)
+
+    def test_regime_is_previous_session_label(self, clean_signals):
+        spx, vix, clean = clean_signals
+        labels = build_regime_labels(spx, vix)
+        prev = labels.reindex(pd.to_datetime(spx["date"])).shift(1).ffill().reindex(clean.index)
+        assert (clean["regime"] == prev).all()
+
+    def test_precomputed_label_change_moves_only_later_rows(self, clean_signals):
+        """Changing the label dated t may only move rows dated > t."""
+        spx, vix, _ = clean_signals
+        labels = build_regime_labels(spx, vix)
+        t = labels.index[500]
+        alt = labels.copy()
+        alt.loc[t] = 2 if labels.loc[t] != 2 else 1
+        a = SignalEngine().generate(spx, vix, *_SIG_WINDOW, precomputed_regimes=labels)
+        b = SignalEngine().generate(spx, vix, *_SIG_WINDOW, precomputed_regimes=alt)
+        cols = [c for c in a.columns if a[c].dtype.kind in "fiub"]
+        pd.testing.assert_frame_equal(a.loc[:t, cols], b.loc[:t, cols], check_exact=True)
+        assert a.loc[a.index > t, "regime"].iloc[0] != b.loc[b.index > t, "regime"].iloc[0]
+
+
+class TestRegimeLabelCausality:
+    """A label is a function of observables dated ≤ t: poisoning everything
+    strictly AFTER t must not change any label (or gate) dated ≤ t."""
+
+    @pytest.mark.parametrize("thr", [None, 100.0], ids=["adaptive", "fixed100"])
+    @pytest.mark.parametrize("pz", POISONS, ids=["hot", "cold"])
+    def test_labels_up_to_t_unchanged(self, pz, thr):
+        spx, vix = _signal_market()
+        clean = build_regime_labels(spx, vix, vvix_threshold=thr)
+        for t in clean.index[[300, 450, 600]]:
+            sp, vp = _poison(spx, vix, t, inclusive=False, **pz)
+            pois = build_regime_labels(sp, vp, vvix_threshold=thr)
+            pd.testing.assert_series_equal(clean.loc[:t], pois.loc[:t])
+
+    def test_label_at_t_uses_return_at_t(self):
+        """Non-vacuity: the label's realised vol includes r_t (same-day), so
+        poisoning t itself must be able to move the label at t."""
+        spx, vix = _signal_market()
+        clean = build_regime_labels(spx, vix, vvix_threshold=1e9)   # no R2
+        moved = 0
+        for t in clean.index[[300, 450, 600]]:
+            sp, vp = _poison(spx, vix, t, ret=0.25, v=15.0, v3m=16.0, vv=90.0)
+            moved += int(build_regime_labels(sp, vp, vvix_threshold=1e9).loc[t] != clean.loc[t])
+        assert moved > 0
+
+    def test_adaptive_gate_uses_only_past_vvix(self):
+        spx, vix = _signal_market()
+        vvix = vix.set_index(pd.to_datetime(vix["date"]))["^VVIX"]
+        clean = r2_gate_threshold(vvix)
+        for k in (100, 400, 700):
+            pois = vvix.copy()
+            pois.iloc[k + 1:] = 999.0
+            pd.testing.assert_series_equal(clean.iloc[:k + 1], r2_gate_threshold(pois).iloc[:k + 1])
+
+
+class TestHMMIsFiltered:
+    """HMM inference must be forward filtering: P(state_t | x_1..x_t)."""
+
+    def test_truncation_invariance(self):
+        rng = np.random.default_rng(42)
+        n = 400
+        block = n // 3
+        vix = np.concatenate([rng.uniform(0.10, 0.18, block), rng.uniform(0.18, 0.28, block),
+                              rng.uniform(0.28, 0.45, n - 2 * block)])
+        X = pd.DataFrame({"vix": vix, "vvix": vix * rng.uniform(3.5, 5.0, n),
+                          "ts_slope": rng.uniform(-0.005, 0.005, n),
+                          "fear_premium": rng.uniform(0.95, 1.15, n)},
+                         index=pd.bdate_range("2010-01-04", periods=n))
+        hmm = HMMRegimeClassifier(n_components=3, n_iter=50, random_state=42).fit(X)
+        full_p = hmm.hmm_predict_proba(X)
+        full_l = hmm.predict(X)
+        for k in (60, 130, 134, 140, 270, 300):
+            part = X.iloc[:k]
+            np.testing.assert_allclose(hmm.hmm_predict_proba(part).iloc[-1].values,
+                                       full_p.iloc[k - 1].values, rtol=0, atol=1e-12)
+            assert hmm.predict(part)[-1] == full_l[k - 1]
+
+    def test_labels_do_not_use_later_observations(self):
+        """Hand-set model: after a long state-1 spell, four rows sit marginally
+        closer to state 0. The filter needs several such rows before it
+        switches; a full-sequence decoder (Viterbi) relabels the FIRST of them
+        using the rows that follow."""
+        from hmmlearn.hmm import GaussianHMM
+
+        means = np.array([[0.20, 0.95, 0.002, 0.85],    # → R0 (fear < 1)
+                          [0.13, 0.85, 0.015, 1.45],    # → R1
+                          [0.30, 1.35, -0.010, 1.20]])  # → R2 (highest vvix)
+        sd = np.array([0.01, 0.03, 0.002, 0.04])
+        model = GaussianHMM(n_components=3, covariance_type="full", init_params="", params="")
+        model.n_features = 4
+        model.startprob_ = np.full(3, 1 / 3)
+        model.transmat_ = np.full((3, 3), 0.01) + np.eye(3) * 0.97
+        model.means_ = means
+        model.covars_ = np.array([np.diag(sd ** 2)] * 3)
+        hmm = HMMRegimeClassifier()
+        hmm._model, hmm.is_fitted = model, True
+        hmm._state_to_regime = hmm.map_states_to_regimes(means)
+
+        ambiguous = 0.505 * means[0] + 0.495 * means[1]
+        rows = [means[1]] * 30 + [ambiguous] * 4 + [means[0]] * 30
+        X = pd.DataFrame(rows, columns=hmm.HMM_FEATURES,
+                         index=pd.bdate_range("2015-01-01", periods=len(rows)))
+        full = hmm.predict(X)
+        assert list(full[29:32]) == [1, 1, 1], "first ambiguous rows relabelled from the future"
+        np.testing.assert_array_equal(full, hmm.hmm_predict_proba(X).values.argmax(axis=1))
+        for k in range(28, 40):
+            assert hmm.predict(X.iloc[:k])[-1] == full[k - 1]
 
 
 if __name__ == "__main__":

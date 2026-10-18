@@ -10,10 +10,15 @@ Test coverage:
   6.  evaluate_classifier() — keys, confusion matrix shape, recall
   7.  validate_regime2_dates() — stress-date checks
   8.  regime_distribution_by_year() — shape/columns
-  9.  Persistence        — save/load roundtrip
-  10. RegimePipeline     — repr, require-run guard
-
-Total: 28 tests across 10 test classes.
+  9.  Persistence        — save/load roundtrip, version-robust pickle,
+                           predictions never written over the rule labels
+  10. RegimePipeline     — repr, require-run guard, no full-sample PDV
+  11. The ONE R2 gate     — adaptive default, VVIX gaps, noise audit on the
+                           same labels (C22)
+  12. HMM                — rule-semantic state mapping (causality is in
+                           test_lookahead.py)
+  13. Probability calibration, evaluation provenance, accuracy report,
+      rule-label frame / DB rows, forward-premium table, σ̂ injection hook
 """
 
 
@@ -21,8 +26,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import pickle
+
+import xgboost as xgb
+
+import joint_vol_calibration.signals.regime_classifier as rc
 from joint_vol_calibration.signals.regime_classifier import (
+    CLASSIFIER_FEATURE_COLS,
     FEATURE_COLS,
+    PDV_SOURCE_INJECTED,
+    PDV_SOURCE_RV_PROXY,
+    R2_GATE,
     REGIME2_VALIDATION_DATES,
     REGIME_NAMES,
     TRAIN_END_DATE,
@@ -30,10 +44,19 @@ from joint_vol_calibration.signals.regime_classifier import (
     RegimeClassifier,
     RegimePipeline,
     HMMRegimeClassifier,
+    _expected_calibration_error,
     build_dataset,
     build_features,
     build_regime_labels,
+    build_rule_label_frame,
+    classifier_accuracy_report,
+    gate_name,
+    r2_gate_state,
+    r2_gate_threshold,
+    regime_forward_premium_table,
+    regime_label_db_rows,
     regime_label_noise_audit,
+    regime_label_summary,
     evaluate_classifier,
     load_regime_labels,
     regime_distribution_by_year,
@@ -161,11 +184,66 @@ class TestBuildFeatures:
 
     def test_no_future_data_used(self, spx_df, vix_wide_df):
         """
-        Features at time t should not use data from t+1.
-        Check: feature row count <= number of trading days.
+        Features at time t must not use data from t+1: poisoning every row
+        AFTER t leaves every feature dated ≤ t bit-identical.
         """
-        feats = build_features(spx_df, vix_wide_df)
-        assert len(feats) <= len(spx_df)
+        clean = build_features(spx_df, vix_wide_df)
+        cutoff = clean.index[200]
+        spx_p, vix_p = spx_df.copy(), vix_wide_df.copy()
+        spx_p.loc[spx_p["date"] > cutoff, "log_return"] = 0.3
+        for c in ("^VIX", "^VIX3M", "^VVIX"):
+            vix_p.loc[pd.to_datetime(vix_p["date"]) > cutoff, c] = 777.0
+        pois = build_features(spx_p, vix_p)
+        pd.testing.assert_frame_equal(clean.loc[:cutoff], pois.loc[:cutoff], check_exact=True)
+        assert not clean.loc[clean.index > cutoff].equals(pois.loc[pois.index > cutoff])
+
+    def test_vvix_missing_print_carried_one_session(self, spx_df, vix_wide_df):
+        """One missing VVIX print uses the previous print; two leave a gap."""
+        vix = vix_wide_df.copy()
+        vix.loc[100, "^VVIX"] = np.nan
+        vix.loc[[150, 151], "^VVIX"] = np.nan
+        feats = build_features(spx_df, vix)
+        d = pd.to_datetime(vix["date"])
+        assert feats.loc[d[100], "vvix"] == pytest.approx(vix.loc[99, "^VVIX"] / 100.0)
+        assert feats.loc[d[150], "vvix"] == pytest.approx(vix.loc[149, "^VVIX"] / 100.0)
+        assert np.isnan(feats.loc[d[151], "vvix"])
+
+
+# ── 1b. the σ̂ injection hook for pdv_iv_spread ──────────────────────────────
+
+class TestVolForecastInjection:
+    def test_injected_forecast_defines_spread(self, spx_df, vix_wide_df):
+        idx = pd.to_datetime(spx_df["date"])
+        sigma = pd.Series(np.linspace(0.12, 0.30, len(idx)), index=idx)
+        sigma.iloc[:30] = np.nan                     # warm-up: no forecast yet
+        feats = build_features(spx_df, vix_wide_df, pdv_vol_series=sigma)
+        vix = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"]))["^VIX"] / 100.0
+        have = sigma.dropna().index
+        np.testing.assert_allclose(feats.loc[have, "pdv_iv_spread"],
+                                   (sigma - vix).loc[have], rtol=0, atol=1e-15)
+        assert feats.attrs["pdv_iv_spread_source"] == PDV_SOURCE_INJECTED
+        # forecast-less days fall back to the rv proxy, and are counted
+        proxy = build_features(spx_df, vix_wide_df)["pdv_iv_spread"].iloc[:30]
+        pd.testing.assert_series_equal(feats["pdv_iv_spread"].iloc[:30], proxy)
+        assert feats.attrs["pdv_iv_spread_n_proxy"] == int(proxy.notna().sum()) > 0
+
+    def test_default_source_is_rv_proxy(self, features_df):
+        assert features_df.attrs["pdv_iv_spread_source"] == PDV_SOURCE_RV_PROXY
+
+    def test_rejects_vol_points(self, spx_df, vix_wide_df):
+        """σ̂ in vol POINTS (18.0) would make the spread meaningless."""
+        idx = pd.to_datetime(spx_df["date"])
+        with pytest.raises(ValueError, match="POINTS"):
+            build_features(spx_df, vix_wide_df,
+                           pdv_vol_series=pd.Series(18.0, index=idx))
+
+    def test_duplicate_forecast_dates_keep_last(self, spx_df, vix_wide_df):
+        idx = pd.to_datetime(spx_df["date"])
+        sigma = pd.Series(0.2, index=idx)
+        dup = pd.Series([0.5], index=[idx[50]])
+        feats = build_features(spx_df, vix_wide_df, pdv_vol_series=pd.concat([sigma, dup]))
+        vix50 = vix_wide_df.loc[50, "^VIX"] / 100.0
+        assert feats.loc[idx[50], "pdv_iv_spread"] == pytest.approx(0.5 - vix50)
 
 
 # ── 2. build_regime_labels ────────────────────────────────────────────────────
@@ -219,6 +297,61 @@ class TestBuildRegimeLabels:
         """First 19 days (insufficient for rv_20d) are dropped."""
         # Labels series should have fewer rows than SPX (first 19 rows dropped)
         assert len(labels_series) < 300  # 300 = total SPX rows in fixture
+
+
+# ── 2b. The ONE R2 gate (C22) ────────────────────────────────────────────────
+
+class TestR2Gate:
+    def test_default_gate_is_adaptive(self, spx_df, vix_wide_df):
+        """Every label builder defaults to the adaptive gate — the gate the
+        published labels, the dashboard and the backtest all describe."""
+        assert R2_GATE is None
+        assert gate_name() == "adaptive_p80_252d"
+        default = build_regime_labels(spx_df, vix_wide_df)
+        adaptive = build_regime_labels(spx_df, vix_wide_df, vvix_threshold=None)
+        fixed = build_regime_labels(spx_df, vix_wide_df, vvix_threshold=100.0)
+        pd.testing.assert_series_equal(default, adaptive)
+        common = default.index.intersection(fixed.index)
+        assert (default[common] != fixed[common]).any(), "fixture cannot tell the gates apart"
+
+    def test_r2_exactly_where_gate_state_is_on(self, spx_df, vix_wide_df):
+        labels = build_regime_labels(spx_df, vix_wide_df)
+        vvix = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"]))["^VVIX"]
+        state = r2_gate_state(vvix).reindex(labels.index)
+        assert ((labels == 2) == (state == 1.0)).all()
+        gate = r2_gate_threshold(vvix)
+        # adaptive gate = trailing 252-session 80th percentile, ≥ 63 prints
+        assert gate.iloc[:62].isna().all() and gate.iloc[62:].notna().all()
+        assert gate.iloc[100] == pytest.approx(vvix.iloc[:101].quantile(0.80))
+
+    def test_missing_vvix_print_does_not_fail_open(self, spx_df, vix_wide_df):
+        """VVIX far above the gate with ONE missing print: that day is R2,
+        not silently R0/R1 (NaN > gate used to evaluate False)."""
+        vix = vix_wide_df.copy()
+        vix["^VVIX"] = 150.0
+        vix.loc[120, "^VVIX"] = np.nan
+        labels = build_regime_labels(spx_df, vix, vvix_threshold=100.0)
+        day = pd.Timestamp(vix.loc[120, "date"])
+        assert labels.loc[day] == 2
+
+    def test_vvix_outage_leaves_label_unknown(self, spx_df, vix_wide_df):
+        """Two consecutive missing prints: the first is carried forward, the
+        second has no gate state and is dropped rather than guessed."""
+        vix = vix_wide_df.copy()
+        vix["^VVIX"] = 150.0
+        vix.loc[[120, 121], "^VVIX"] = np.nan
+        labels = build_regime_labels(spx_df, vix, vvix_threshold=100.0)
+        d120, d121 = (pd.Timestamp(vix.loc[i, "date"]) for i in (120, 121))
+        assert labels.loc[d120] == 2
+        assert d121 not in labels.index
+
+    def test_label_summary_persistence(self):
+        idx = pd.bdate_range("2021-01-04", periods=6)
+        lab = pd.Series([1, 1, 2, 2, 0, 0], index=idx)
+        out = regime_label_summary(lab)
+        assert out["persistence_acc"] == pytest.approx(3 / 5)
+        assert out["counts"] == {0: 2, 1: 2, 2: 2}
+        assert regime_label_summary(lab, start="2021-01-06")["n"] == 4
 
 
 # ── 3. build_dataset ─────────────────────────────────────────────────────────
@@ -311,6 +444,104 @@ class TestRegimeClassifier:
         with pytest.raises(RuntimeError):
             clf.predict(X)
 
+    def test_default_fit_returns_raw_booster_probabilities(self, fitted_clf):
+        """No calibrator is fit on the booster's own training rows any more."""
+        clf, X, _ = fitted_clf
+        assert isinstance(clf.model_, xgb.XGBClassifier)
+        assert clf.calibration_ is None
+        np.testing.assert_array_equal(clf.predict_proba(X),
+                                      clf.model_.predict_proba(X[clf.feature_names_].values))
+
+
+_FAST = {"objective": "multi:softprob", "num_class": 3, "n_estimators": 60,
+         "max_depth": 3, "learning_rate": 0.1, "random_state": 0, "n_jobs": 1,
+         "verbosity": 0}
+
+
+def _imbalanced_classes(n: int, seed: int = 0):
+    """Stationary 3-class data with a rare class 2 (~13%)."""
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, 3))
+    logits = np.column_stack([0.8 * X[:, 0], 0.6 + 0.4 * X[:, 1], -1.4 + 1.2 * X[:, 2]])
+    p = np.exp(logits)
+    p /= p.sum(axis=1, keepdims=True)
+    y = np.array([rng.choice(3, p=pi) for pi in p])
+    idx = pd.bdate_range("2000-01-03", periods=n)
+    return pd.DataFrame(X, index=idx, columns=["a", "b", "c"]), pd.Series(y, index=idx)
+
+
+class TestProbabilityCalibration:
+    def test_holdout_calibrator_sees_only_later_unseen_rows(self):
+        X, y = _imbalanced_classes(1000)
+        clf = RegimeClassifier(_FAST).fit(X, y, calibration="holdout", calibration_frac=0.25)
+        meta = clf.metadata_
+        assert meta["fit_rows"] == 750 and meta["calibration_rows"] == 250
+        assert pd.Timestamp(meta["fit_window"][1]) < pd.Timestamp(meta["calibration_window"][0])
+
+    def test_holdout_calibration_improves_out_of_sample_ece(self):
+        """Balanced class weights tilt raw P(class 2) far above its frequency;
+        an UNWEIGHTED calibrator fit on later rows the booster never saw
+        repairs it out of sample."""
+        X, y = _imbalanced_classes(3000)
+        Xtr, ytr, Xte, yte = X.iloc[:2000], y.iloc[:2000], X.iloc[2000:], y.iloc[2000:]
+        raw = RegimeClassifier(_FAST).fit(Xtr, ytr)
+        cal = RegimeClassifier(_FAST).fit(Xtr, ytr, calibration="holdout")
+        hit = (yte.values == 2).astype(float)
+        e_raw = _expected_calibration_error(raw.predict_proba(Xte)[:, 2], hit)
+        e_cal = _expected_calibration_error(cal.predict_proba(Xte)[:, 2], hit)
+        assert e_raw > 0.10
+        assert e_cal < 0.5 * e_raw
+        np.testing.assert_allclose(cal.predict_proba(Xte).sum(axis=1), 1.0, atol=1e-12)
+
+    def test_rejects_unknown_calibration(self, dataset):
+        X, y = dataset
+        with pytest.raises(ValueError):
+            RegimeClassifier(_FAST).fit(X, y, calibration="isotonic_in_sample")
+
+
+class TestVersionRobustPickle:
+    def test_pickle_holds_no_sklearn_objects(self):
+        X, y = _imbalanced_classes(600)
+        clf = RegimeClassifier(_FAST).fit(X, y, calibration="holdout")
+        blob = pickle.dumps(clf)
+        assert b"sklearn" not in blob, "pickle must not depend on sklearn class layouts"
+        back = pickle.loads(blob)
+        np.testing.assert_array_equal(back.predict_proba(X), clf.predict_proba(X))
+        np.testing.assert_array_equal(back.predict(X), clf.predict(X))
+        assert back.metadata_["calibration"] == "holdout"
+
+    def test_legacy_wrapped_model_state_still_loads(self, dataset):
+        """A pre-C22 pickle (plain __dict__ with a sklearn wrapper) loads."""
+        from sklearn.linear_model import LogisticRegression
+
+        X, y = dataset
+        cols = CLASSIFIER_FEATURE_COLS
+        legacy = LogisticRegression(max_iter=500).fit(X[cols].values, y.values)
+        obj = RegimeClassifier.__new__(RegimeClassifier)
+        obj.__setstate__({"params": {}, "model_": legacy, "feature_names_": cols,
+                          "train_end_date_": None})
+        np.testing.assert_array_equal(obj.predict(X), legacy.predict(X[cols].values))
+        assert obj.metadata_ == {"legacy_pickle": True}
+
+    def test_shipped_classifier_is_built_on_the_canonical_gate(self):
+        """The shipped research classifier records how it was built and was
+        trained on labels from the gate every trading path uses."""
+        from pathlib import Path
+
+        path = Path("data_store/signals/regime_classifier.pkl")
+        if not path.exists():
+            pytest.skip("no shipped classifier")
+        blob = path.read_bytes()
+        assert b"sklearn" not in blob
+        clf = RegimeClassifier.load(path)
+        meta = clf.metadata_
+        assert meta["r2_gate"] == gate_name(R2_GATE)
+        assert meta["feature_cols"] == CLASSIFIER_FEATURE_COLS
+        assert meta["pdv_iv_spread_source"] == PDV_SOURCE_RV_PROXY
+        assert meta["calibration"] == "holdout"
+        ev = meta["evaluation"]
+        assert 0.0 < ev["oos_acc"] < ev["persistence_acc"] < 1.0
+
 
 # ── 5. train_test_split_temporal ─────────────────────────────────────────────
 
@@ -379,6 +610,49 @@ class TestEvaluateClassifier:
         assert "persistence_baseline_accuracy" in result
         assert 0.0 <= result["persistence_baseline_accuracy"] <= 1.0
         assert isinstance(result["beats_persistence"], bool)
+
+    def test_reports_provenance(self, fitted_clf):
+        """An accuracy number must say which rows, features and gate it is on."""
+        clf, X, y = fitted_clf
+        result = evaluate_classifier(clf, X, y)
+        assert result["n_test"] == len(y)
+        assert result["test_window"] == (str(X.index.min().date()), str(X.index.max().date()))
+        assert result["feature_cols"] == list(X.columns)
+        assert result["r2_gate"] == gate_name(R2_GATE)
+        assert result["persistence_n"] == len(y) - 1
+
+    def test_persistence_uses_previous_session_label(self):
+        """With the full label series, ŷ(t) is the previous SESSION's label even
+        when that session's feature row was dropped from the test set."""
+        idx = pd.bdate_range("2021-01-04", periods=6)
+        labels = pd.Series([1, 1, 2, 1, 1, 1], index=idx)
+        y_test = labels.drop(idx[2])
+        acc, n = rc._persistence(y_test, labels)
+        assert (acc, n) == (pytest.approx(0.75), 4)
+        assert rc._persistence(y_test)[0] == pytest.approx(1.0)   # row-shift view
+
+
+class TestAccuracyReport:
+    def test_report_is_computed_with_matching_baseline(self):
+        spx = _make_spx(1100, seed=3)
+        vix = _make_vix(spx, seed=3)
+        rep = classifier_accuracy_report(
+            spx, vix, train_end="2019-12-31", test_start="2020-01-01",
+            test_end="2022-03-31", wf_years=[2021], params=_FAST,
+        )
+        assert rep["r2_gate"] == gate_name(R2_GATE)
+        assert rep["pdv_iv_spread_source"] == PDV_SOURCE_RV_PROXY
+        X, y = build_dataset(spx, vix)
+        in_test = (X.index >= "2020-01-01") & (X.index <= "2022-03-31")
+        single = rep["single_split"]
+        assert single["n_test"] == int(in_test.sum())
+        labels = build_regime_labels(spx, vix)
+        assert single["persistence_acc"] == pytest.approx(rc._persistence(y[in_test], labels)[0])
+        assert set(rep["walk_forward"]["by_year"]) == {2021}
+        for k in ("in_sample_acc", "oos_acc"):
+            assert 0.0 <= single[k] <= 1.0
+            assert 0.0 <= rep["benchmarks"]["with_vvix"][k] <= 1.0
+            assert 0.0 <= rep["benchmarks"]["with_vvix_and_lagged_label"][k] <= 1.0
 
 
 # ── 7. validate_regime2_dates ────────────────────────────────────────────────
@@ -452,8 +726,24 @@ class TestPersistence:
         save_regime_labels(clf, X, y_true=y, path=path)
         df = load_regime_labels(path)
         assert len(df) == len(X)
-        assert "regime" in df.columns
+        assert "pred_regime" in df.columns
         assert "confidence" in df.columns
+        assert (df["true_regime"] == y).all()
+
+    def test_predictions_never_overwrite_rule_labels(self, fitted_clf, tmp_path, monkeypatch):
+        """RegimePipeline used to write classifier PREDICTIONS over the RULE
+        label file the dashboard headlines; that path is now refused, and the
+        default goes to a separate predictions file."""
+        clf, X, y = fitted_clf
+        rule_file = tmp_path / "regime_labels.parquet"
+        preds_file = tmp_path / "regime_classifier_predictions.parquet"
+        monkeypatch.setattr(rc, "LABELS_PARQUET", rule_file)
+        monkeypatch.setattr(rc, "CLASSIFIER_PREDICTIONS_PARQUET", preds_file)
+        with pytest.raises(ValueError):
+            save_regime_labels(clf, X, y_true=y, path=rule_file)
+        assert not rule_file.exists()
+        assert save_regime_labels(clf, X, y_true=y) == preds_file
+        assert preds_file.exists() and not rule_file.exists()
 
 
 # ── 10. RegimePipeline interface ─────────────────────────────────────────────
@@ -468,6 +758,14 @@ class TestRegimePipeline:
         pipe = RegimePipeline()
         with pytest.raises(RuntimeError):
             pipe.plot()
+
+    def test_defaults_avoid_look_ahead(self):
+        """No full-sample PDV pickle (its coefficients saw the test period),
+        and labels from the canonical gate."""
+        pipe = RegimePipeline()
+        assert pipe.pdv_model_path is None
+        assert pipe.vvix_threshold is R2_GATE
+        assert gate_name(R2_GATE) in repr(pipe)
 
 
 # ── Module constants ──────────────────────────────────────────────────────────
@@ -601,6 +899,45 @@ class TestHMMRegimeClassifier:
         hmm, _ = fitted_hmm
         assert set(hmm.HMM_FEATURES) == {"vix", "vvix", "ts_slope", "fear_premium"}
 
+    def test_state_mapping_follows_rule_semantics(self):
+        """Under the rule, R1 (implied ≥ trailing realised) has the LOWEST mean
+        VIX; R0 is the state where trailing realised exceeds implied
+        (fear_premium < 1); R2 the highest-VVIX state. Ranking states by mean
+        VIX (the pre-C22 mapping) swapped R0 and R1."""
+        #                 vix   vvix  ts_slope fear_premium
+        means = np.array([[0.30, 1.35, -0.010, 1.20],    # state 0: vol-of-vol spike
+                          [0.13, 0.85,  0.015, 1.45],    # state 1: calm, IV ≥ RV
+                          [0.20, 0.95,  0.002, 0.85]])   # state 2: RV > IV
+        assert HMMRegimeClassifier.map_states_to_regimes(means) == {0: 2, 1: 1, 2: 0}
+
+    def test_fit_uses_rule_semantic_mapping(self, fitted_hmm):
+        hmm, _ = fitted_hmm
+        assert hmm._state_to_regime == HMMRegimeClassifier.map_states_to_regimes(
+            hmm._model.means_)
+
+    def test_requires_three_components(self):
+        with pytest.raises(ValueError):
+            HMMRegimeClassifier(n_components=2)
+
+    def test_multi_start_fit_separates_distinct_clusters(self):
+        """Three well-separated clusters: single-start EM (seed 42) merges two
+        of them and splits the third; the best of n_init starts separates all
+        three, and the mapping names them by rule semantics."""
+        rng = np.random.default_rng(0)
+        state = np.repeat([1, 0, 2, 1, 0, 2, 1, 0, 2], 100)
+        mu = {0: (0.20, 0.95, 0.002, 0.85),      # trailing RV > IV  → R0
+              1: (0.13, 0.85, 0.015, 1.45),      # calm, IV ≥ RV     → R1
+              2: (0.30, 1.35, -0.010, 1.20)}     # vol-of-vol spike  → R2
+        sd = (0.01, 0.03, 0.002, 0.04)
+        X = pd.DataFrame([[rng.normal(m, s_) for m, s_ in zip(mu[k], sd)] for k in state],
+                         columns=HMMRegimeClassifier.HMM_FEATURES,
+                         index=pd.bdate_range("2012-01-02", periods=len(state)))
+        single = HMMRegimeClassifier(n_iter=100, n_init=1).fit(X)
+        multi = HMMRegimeClassifier(n_iter=100).fit(X)
+        assert multi.log_likelihood_ > single.log_likelihood_
+        pred = multi.predict(X)
+        np.testing.assert_array_equal(pred, state)
+
 
 # ── Label ontology noise floor (why the classifier was demoted) ───────────────
 
@@ -647,6 +984,19 @@ class TestLabelNoiseAudit:
             assert k in a
         assert a["n_days"] > 100
 
+    def test_audits_the_labels_actually_used(self):
+        """Same gate, same labels, same persistence as build_regime_labels —
+        the noise floor must describe the labels that are displayed/traded."""
+        spx, vix = self._persistent_market()
+        for thr in (R2_GATE, 100.0):
+            a = regime_label_noise_audit(spx, vix, vvix_threshold=thr)
+            labels = build_regime_labels(spx, vix, vvix_threshold=thr)
+            assert a["r2_gate"] == gate_name(thr)
+            assert a["n_days"] == len(labels)
+            assert a["persistence_acc"] == pytest.approx(
+                round(regime_label_summary(labels)["persistence_acc"], 4))
+        assert regime_label_noise_audit(spx, vix)["r2_gate"] == gate_name(R2_GATE)
+
     def test_bounded_noise_floor_and_persistence(self):
         spx, vix = self._persistent_market()
         a = regime_label_noise_audit(spx, vix, vvix_threshold=100.0)
@@ -658,3 +1008,53 @@ class TestLabelNoiseAudit:
         # Fractions are valid probabilities.
         for k in ("boundary_within_1vp", "boundary_within_0p5vp", "r2_gate_fragile"):
             assert 0.0 <= a[k] <= 1.0
+
+
+# ── Rule-label frame, DB rows, forward-premium table ──────────────────────────
+
+class TestRuleLabelFrame:
+    def test_frame_pairs_label_with_same_day_observables(self, spx_df, vix_wide_df):
+        frame = build_rule_label_frame(spx_df, vix_wide_df)
+        labels = build_regime_labels(spx_df, vix_wide_df)
+        feats = build_features(spx_df, vix_wide_df)
+        pd.testing.assert_series_equal(frame["regime"], labels.rename("regime"))
+        pd.testing.assert_frame_equal(frame[FEATURE_COLS], feats.loc[labels.index])
+        d = labels.index[50]
+        r = spx_df.set_index(pd.to_datetime(spx_df["date"]))["log_return"].loc[:d].iloc[-20:]
+        assert frame.loc[d, "rv_20d"] == pytest.approx(np.sqrt((r ** 2).mean() * 252))
+        assert frame.attrs["r2_gate"] == gate_name(R2_GATE)
+
+    def test_db_rows_hold_rule_label_and_same_day_values(self, spx_df, vix_wide_df):
+        """The regime_labels table used to store classifier predictions,
+        t−1 features under date t, and rv_20d = 2·VIX − RV."""
+        frame = build_rule_label_frame(spx_df, vix_wide_df)
+        rows = regime_label_db_rows(frame).set_index("date")
+        d = frame.index[60]
+        key = d.strftime("%Y-%m-%d")
+        vix_d = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"])).loc[d]
+        assert rows.loc[key, "vix_level"] == pytest.approx(vix_d["^VIX"])
+        assert rows.loc[key, "vix_slope"] == pytest.approx(vix_d["^VIX3M"] - vix_d["^VIX"])
+        assert rows.loc[key, "rv_20d"] == pytest.approx(frame.loc[d, "rv_20d"])
+        assert rows.loc[key, "regime"] == build_regime_labels(spx_df, vix_wide_df).loc[d]
+        assert (rows["confidence"] == 1.0).all()
+
+
+class TestForwardPremiumTable:
+    def test_forward_rv_is_t_plus_1_to_t_plus_h(self, spx_df, vix_wide_df):
+        labels = build_regime_labels(spx_df, vix_wide_df)
+        tab = regime_forward_premium_table(spx_df, vix_wide_df, labels, horizon=21)
+        assert set(tab.index) <= {0, 1, 2}
+        assert tab["p_fwd_rv_gt_vix"].between(0, 1).all()
+        # recompute one regime's numbers by hand
+        r = spx_df.set_index(pd.to_datetime(spx_df["date"]))["log_return"]
+        v = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"]))["^VIX"] / 100
+        hits, n = 0, 0
+        for d in labels.index[labels == 1]:
+            i = r.index.get_loc(d)
+            fwd = r.iloc[i + 1:i + 22]
+            if len(fwd) < 21:
+                continue
+            n += 1
+            hits += np.sqrt((fwd ** 2).mean() * 252) > v.loc[d]
+        assert tab.loc[1, "n"] == n
+        assert tab.loc[1, "p_fwd_rv_gt_vix"] == pytest.approx(hits / n)
