@@ -354,6 +354,16 @@ class TestTbillUnits:
                     if isinstance(t, ast.Name)}
         assert {"BT_START", "BT_END"} <= imported and not {"BT_START", "BT_END"} & assigned
 
+    def test_backfill_default_end_is_the_last_closed_session(self, tmp_db, monkeypatch):
+        """Not the machine's date: mid-session that asked Yahoo for a forming ^IRX bar."""
+        mod = _load_script("backfill_tbill_history")
+        seen = {}
+        monkeypatch.setattr(mod.dl, "download_tbill_rate",
+                            lambda start, end: seen.update(end=end) or pd.DataFrame())
+        freeze(monkeypatch, "2026-10-09T15:00:00Z")             # Friday 11:00 ET
+        assert mod.main("2026-10-01", apply=False) == 1          # empty download: aborts
+        assert seen["end"] == "2026-10-08"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Download windows (data-daily-refresh-drops-current-session)

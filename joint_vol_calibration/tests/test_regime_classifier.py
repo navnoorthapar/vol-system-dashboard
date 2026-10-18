@@ -18,7 +18,8 @@ Test coverage:
   12. HMM                — rule-semantic state mapping (causality is in
                            test_lookahead.py)
   13. Probability calibration, evaluation provenance, accuracy report,
-      rule-label frame / DB rows, forward-premium table, σ̂ injection hook
+      rule-label frame, predictions-table rows, forward-premium table, σ̂
+      injection hook, train/serve feature parity, the shipped evaluation record
 """
 
 
@@ -50,11 +51,13 @@ from joint_vol_calibration.signals.regime_classifier import (
     build_regime_labels,
     build_rule_label_frame,
     classifier_accuracy_report,
+    classifier_evaluation,
+    classifier_features,
+    classifier_prediction_db_rows,
     gate_name,
     r2_gate_state,
     r2_gate_threshold,
     regime_forward_premium_table,
-    regime_label_db_rows,
     regime_label_noise_audit,
     regime_label_summary,
     evaluate_classifier,
@@ -542,6 +545,27 @@ class TestVersionRobustPickle:
         ev = meta["evaluation"]
         assert 0.0 < ev["oos_acc"] < ev["persistence_acc"] < 1.0
 
+    def test_shipped_evaluation_record_matches_the_shipped_data(self):
+        """The dashboard prints metadata_["evaluation"]. It was first written on
+        the pre-migration DB, whose spurious 2025-05-08 NULL log_return dropped 20
+        test rows (1,488: OOS 75.1% vs persistence 86.8%); on the shipped data the
+        same model scores 75.0% vs 86.7% on 1,508 rows."""
+        from pathlib import Path
+        from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+
+        path = Path(__file__).resolve().parents[2] / "data_store" / "signals" / "regime_classifier.pkl"
+        spx = get_spx_ohlcv("2025-12-31", "2010-01-01")
+        if not path.exists() or len(spx) < 3000:
+            pytest.skip("shipped classifier or market history unavailable")
+        clf = RegimeClassifier.load(path)
+        ev = classifier_evaluation(clf, spx, get_vix_term_structure_wide("2025-12-31", "2010-01-01"))
+        stored = clf.metadata_["evaluation"]
+        assert stored["n_test"] == ev["n_test"]
+        assert tuple(stored["test_window"]) == tuple(ev["test_window"])
+        for k, v in ev.items():
+            if k not in ("n_test", "test_window"):
+                assert stored[k] == pytest.approx(v, abs=1e-12), k
+
 
 # ── 5. train_test_split_temporal ─────────────────────────────────────────────
 
@@ -1024,19 +1048,92 @@ class TestRuleLabelFrame:
         assert frame.loc[d, "rv_20d"] == pytest.approx(np.sqrt((r ** 2).mean() * 252))
         assert frame.attrs["r2_gate"] == gate_name(R2_GATE)
 
-    def test_db_rows_hold_rule_label_and_same_day_values(self, spx_df, vix_wide_df):
-        """The regime_labels table used to store classifier predictions,
-        t−1 features under date t, and rv_20d = 2·VIX − RV."""
+    def test_frame_records_the_spread_definition_on_every_row(self, spx_df, vix_wide_df):
+        """Label files are built by appending; the proxy and the PDV-21 spread
+        share the column name, so each row says which one it holds."""
         frame = build_rule_label_frame(spx_df, vix_wide_df)
-        rows = regime_label_db_rows(frame).set_index("date")
-        d = frame.index[60]
+        assert set(frame["pdv_iv_spread_source"]) == {PDV_SOURCE_RV_PROXY}
+        idx = pd.to_datetime(spx_df["date"])
+        sigma = pd.Series(0.15, index=idx)
+        injected = build_rule_label_frame(spx_df, vix_wide_df, pdv_vol_series=sigma)
+        assert set(injected["pdv_iv_spread_source"]) == {PDV_SOURCE_INJECTED}
+
+
+class TestPredictionsTable:
+    """classifier_predictions holds the research classifier's forecasts. Pre-C22
+    (as regime_labels) it stored t−1 features under date t and rv_20d = 2·VIX − RV;
+    mid-C22 the writer was pointed at RULE labels while the table was renamed
+    for predictions."""
+
+    def test_rows_are_the_forecast_for_t_with_session_t_observables(
+            self, spx_df, vix_wide_df, fitted_clf):
+        clf, X, _ = fitted_clf
+        frame = build_rule_label_frame(spx_df, vix_wide_df)
+        rows = classifier_prediction_db_rows(clf, X, frame).set_index("date")
+        assert len(rows) == len(X)
+        d = X.index[60]
         key = d.strftime("%Y-%m-%d")
-        vix_d = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"])).loc[d]
-        assert rows.loc[key, "vix_level"] == pytest.approx(vix_d["^VIX"])
-        assert rows.loc[key, "vix_slope"] == pytest.approx(vix_d["^VIX3M"] - vix_d["^VIX"])
+        assert rows.loc[key, "regime"] == clf.predict(X.loc[[d]])[0]
+        assert rows.loc[key, "confidence"] == pytest.approx(clf.predict_proba(X.loc[[d]]).max())
+        vix = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"]))
+        assert rows.loc[key, "vix_level"] == pytest.approx(vix.loc[d, "^VIX"])
+        assert rows.loc[key, "vix_level"] != pytest.approx(X.loc[d, "vix"] * 100)  # X holds t−1
+        assert rows.loc[key, "vix_slope"] == pytest.approx(vix.loc[d, "^VIX3M"] - vix.loc[d, "^VIX"])
         assert rows.loc[key, "rv_20d"] == pytest.approx(frame.loc[d, "rv_20d"])
-        assert rows.loc[key, "regime"] == build_regime_labels(spx_df, vix_wide_df).loc[d]
-        assert (rows["confidence"] == 1.0).all()
+        assert (rows["confidence"] < 1.0).any()
+
+    def test_pipeline_writes_predictions_not_rule_labels(self, tmp_path, monkeypatch):
+        spx = _make_spx(600, seed=7)                 # 2018-01-02 .. 2020-04: has test rows
+        vix = _make_vix(spx, seed=7)
+        monkeypatch.setattr(rc, "get_spx_ohlcv", lambda **k: spx)
+        monkeypatch.setattr(rc, "get_vix_term_structure_wide", lambda **k: vix)
+        monkeypatch.setattr(rc, "MODEL_PATH", tmp_path / "clf.pkl")
+        monkeypatch.setattr(rc, "CLASSIFIER_PREDICTIONS_PARQUET", tmp_path / "preds.parquet")
+        written = []
+        monkeypatch.setattr(rc, "insert_classifier_predictions", lambda df: written.append(df) or len(df))
+
+        pipe = RegimePipeline(xgb_params=_FAST)
+        pipe.run()
+        rows = written[0].set_index("date")
+        assert list(rows.index) == list(pipe.X_.index.strftime("%Y-%m-%d"))
+        np.testing.assert_array_equal(rows["regime"].to_numpy(), pipe.clf_.predict(pipe.X_))
+        rule = build_regime_labels(spx, vix).reindex(pipe.X_.index).to_numpy()
+        assert (rows["regime"].to_numpy() != rule).any()     # forecasts, not the rule
+        ev = pipe.clf_.metadata_["evaluation"]
+        assert ev == classifier_evaluation(pipe.clf_, spx, vix)
+        assert ev["n_test"] == int((pipe.X_.index >= "2020-01-01").sum())
+
+
+class TestClassifierFeatures:
+    """Train/serve parity: the inputs are rebuilt from the classifier's own record."""
+
+    def _clf(self, fitted_clf, src):
+        clf = fitted_clf[0]
+        clf.metadata_["pdv_iv_spread_source"] = src
+        return clf
+
+    def test_rv_proxy_classifier_gets_the_proxy(self, spx_df, vix_wide_df, fitted_clf):
+        clf = self._clf(fitted_clf, PDV_SOURCE_RV_PROXY)
+        feats = classifier_features(clf, spx_df, vix_wide_df)
+        pd.testing.assert_frame_equal(feats, build_features(spx_df, vix_wide_df))
+        assert feats.attrs["pdv_iv_spread_source"] == PDV_SOURCE_RV_PROXY
+
+    def test_walk_forward_classifier_gets_the_walk_forward_spread(
+            self, spx_df, vix_wide_df, fitted_clf, monkeypatch):
+        idx = pd.to_datetime(spx_df["date"])
+        sigma = pd.Series(np.linspace(0.10, 0.30, len(idx)), index=idx)
+        monkeypatch.setattr(rc, "walk_forward_pdv_vol", lambda spx, **k: sigma)
+        clf = self._clf(fitted_clf, rc.PDV_SOURCE_WALK_FORWARD)
+        feats = classifier_features(clf, spx_df, vix_wide_df)
+        vix = vix_wide_df.set_index(pd.to_datetime(vix_wide_df["date"]))["^VIX"] / 100
+        np.testing.assert_allclose(feats["pdv_iv_spread"], (sigma - vix).reindex(feats.index))
+        assert feats.attrs["pdv_iv_spread_source"] == rc.PDV_SOURCE_WALK_FORWARD
+
+    @pytest.mark.parametrize("src", [PDV_SOURCE_INJECTED, "pdv_model_full_sample", None])
+    def test_sources_that_cannot_be_rebuilt_raise(self, spx_df, vix_wide_df, fitted_clf, src):
+        clf = self._clf(fitted_clf, src)
+        with pytest.raises(ValueError, match="pdv_iv_spread source"):
+            classifier_features(clf, spx_df, vix_wide_df)
 
 
 class TestForwardPremiumTable:

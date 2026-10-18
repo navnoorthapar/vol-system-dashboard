@@ -21,10 +21,10 @@ Three regimes (descriptive states, not profitability regimes)
 
   The names are historical. R0/R1 describe the TRAILING 20-day window; they
   are not forecasts. Measured ex post (2010-2025, canonical gate, forward RV
-  over t+1..t+21): after an R0 day forward realised vol still ends up BELOW
-  VIX 81% of the time (P(fwd RV > VIX) = 0.19 vs 0.15 after R1; mean gap
-  −3.3 vs −3.5 vol points). With the old fixed-100 gate R0 was even lower
-  than R1 (0.14 vs 0.16). So "R0 → long gamma is profitable" is not
+  over t+1..t+21, shipped DB): after an R0 day forward realised vol still
+  ends up BELOW VIX 82% of the time (P(fwd RV > VIX) = 0.18 vs 0.15 after
+  R1; mean gap −3.5 vol points after both). With the old fixed-100 gate R0
+  was even lower than R1 (0.14 vs 0.16). So "R0 → long gamma is profitable" is not
   supported; regime_forward_premium_table() recomputes the check on any data.
 
   The R2 gate (ONE gate, used everywhere)
@@ -56,8 +56,15 @@ Features (computed at close of t; every consumer lags them one session)
   pdv_vol_series=PDV_WALK_FORWARD: walk_forward_pdv_vol(), the purged
   walk-forward PDVLinear forecast of the next-21-session RMS vol (the default
   in SignalEngine.generate and the backtest). Without one, the trailing rv_20d
-  is used as a proxy (build_features' default, kept for the live label job). "IVR" in older docs referred to this spread; no
-  implied-vol RANK is computed anywhere.
+  is used as a proxy: build_features' default, and the definition behind the
+  feature columns of the rule-label file and the shipped research classifier.
+  The two are different quantities under one column name (2018-01..2025-03:
+  mean −3.5 vp for the proxy vs −4.6 vp for the PDV-21 spread, correlation
+  0.46), so every producer records which one it used
+  (.attrs["pdv_iv_spread_source"]; a per-row column in build_rule_label_frame;
+  metadata_ of a trained classifier), and classifier_features() rebuilds the
+  inputs a pickled classifier was trained on. "IVR" in older docs referred to
+  this spread; no implied-vol RANK is computed anywhere.
 
 Classifier (research only)
 --------------------------
@@ -69,7 +76,8 @@ Classifier (research only)
   Accuracy is never hard-coded: classifier_accuracy_report() computes it
   (single split, per-year walk-forward, benchmarks, persistence on the same
   rows), and the shipped pickle records its own OOS accuracy and baseline in
-  metadata_["evaluation"].
+  metadata_["evaluation"] (classifier_evaluation(); a test re-derives it from
+  the shipped data, so the record cannot go stale silently).
 
 Zero look-ahead
 ---------------
@@ -82,6 +90,7 @@ Outputs
 -------
   data_store/signals/regime_classifier.pkl            (research classifier)
   data_store/signals/regime_classifier_predictions.parquet
+  the classifier_predictions table of the SQLite DB    (the same predictions)
   data_store/signals/regime_confusion_matrix.png
   data_store/signals/regime_distribution.png
   The RULE labels in data_store/signals/regime_labels.parquet are written by
@@ -112,7 +121,7 @@ from joint_vol_calibration.config import DATA_DIR, RANDOM_SEED
 from joint_vol_calibration.data.database import (
     get_spx_ohlcv,
     get_vix_term_structure_wide,
-    insert_regime_labels,
+    insert_classifier_predictions,
 )
 from joint_vol_calibration.models.pdv import (
     VIX_HORIZON_DAYS,
@@ -414,6 +423,10 @@ def build_features(
                   Sessions without a forecast (e.g. warm-up) fall back to the
                   trailing rv_20d proxy; how many did is recorded in
                   .attrs["pdv_iv_spread_n_proxy"].
+                  None (the default, with no pdv_model): pdv_iv_spread is the
+                  proxy rv_20d − VIX/100 on every row. That is NOT the S1
+                  trading spread (PDV_WALK_FORWARD, SignalEngine's default);
+                  .attrs["pdv_iv_spread_source"] says which one was built.
 
     Returns
     -------
@@ -566,9 +579,16 @@ def build_rule_label_frame(
     """Same-day (UNSHIFTED) features, gate and RULE label, one row per session.
 
     The one place that pairs a session's rule label with the observables that
-    produced it — for label files, the regime_labels DB table and dashboards.
+    produced it — for label files and dashboards.
     Columns: FEATURE_COLS + rv_20d (the label's own realised vol) +
-    vvix_gate (index points) + regime (int). Only labelled sessions are kept.
+    vvix_gate (index points) + regime (int) + pdv_iv_spread_source (the σ̂
+    tag of build_features, repeated on every row). Only labelled sessions are
+    kept.
+
+    The per-row source tag is there because label files are built by
+    appending: pdv_iv_spread is the rv_20d proxy by default but the PDV-21
+    walk-forward spread elsewhere, and rows appended under a different
+    definition would otherwise be indistinguishable from the history.
     """
     feats = build_features(spx_df, vix_wide_df, pdv_vol_series=pdv_vol_series)
     labels = build_regime_labels(spx_df, vix_wide_df, vvix_threshold)
@@ -580,6 +600,7 @@ def build_rule_label_frame(
     else:
         out["vvix_gate"] = np.nan
     out["regime"] = labels.astype(int)
+    out["pdv_iv_spread_source"] = feats.attrs.get("pdv_iv_spread_source")
     out.attrs["r2_gate"] = gate_name(vvix_threshold)
     out.attrs["pdv_iv_spread_source"] = feats.attrs.get("pdv_iv_spread_source")
     return out
@@ -1163,6 +1184,39 @@ def train_classifier(
     return clf, X_test, y_test
 
 
+# σ̂ setting of build_features that reproduces each recorded pdv_iv_spread source.
+_PDV_SOURCE_BUILD = {
+    PDV_SOURCE_RV_PROXY:     None,
+    PDV_SOURCE_WALK_FORWARD: PDV_WALK_FORWARD,
+}
+
+
+def classifier_features(
+    clf: "RegimeClassifier",
+    spx_df: pd.DataFrame,
+    vix_wide_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """UNSHIFTED features built the way ``clf`` was trained (train/serve parity).
+
+    pdv_iv_spread is not one quantity: the rv_20d proxy and the PDV-21
+    walk-forward spread share the column name. A classifier trained on one and
+    fed the other scores silently out of distribution, so the σ̂ is taken from
+    clf.metadata_["pdv_iv_spread_source"], never chosen by the caller. Sources
+    that cannot be rebuilt from market data alone — an injected series, a
+    full-sample pdv_model, or a legacy pickle that recorded nothing — raise
+    ValueError. Row t holds the features at the close of t (they predict the
+    label of t+1); select clf.feature_names_ before calling predict_proba.
+    """
+    src = (getattr(clf, "metadata_", None) or {}).get("pdv_iv_spread_source")
+    if src not in _PDV_SOURCE_BUILD:
+        raise ValueError(
+            f"classifier was trained on pdv_iv_spread source {src!r}; only "
+            f"{sorted(_PDV_SOURCE_BUILD)} can be rebuilt for inference")
+    feats = build_features(spx_df, vix_wide_df, pdv_vol_series=_PDV_SOURCE_BUILD[src])
+    assert feats.attrs.get("pdv_iv_spread_source") == src
+    return feats
+
+
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
 def _persistence(y: pd.Series, labels: Optional[pd.Series] = None) -> Tuple[float, int]:
@@ -1263,6 +1317,63 @@ def evaluate_classifier(
         "r2_gate":           meta.get("r2_gate", X_test.attrs.get("r2_gate")),
         "pdv_iv_spread_source": meta.get("pdv_iv_spread_source",
                                          X_test.attrs.get("pdv_iv_spread_source")),
+    }
+
+
+def classifier_evaluation(
+    clf: RegimeClassifier,
+    spx_df: pd.DataFrame,
+    vix_wide_df: pd.DataFrame,
+    vvix_threshold: "Optional[float]" = R2_GATE,
+    test_start: str = TEST_START_DATE,
+    test_end: str = TEST_END_DATE,
+) -> dict:
+    """The metadata_["evaluation"] record of a trained classifier, from data.
+
+    Rebuilds the lagged dataset exactly as training did (build_dataset with
+    the classifier's own pdv_iv_spread source, labels from `vvix_threshold`,
+    which must match the recorded r2_gate), keeps the rows dated in
+    [test_start, test_end] and returns:
+      oos_acc, persistence_acc (previous labelled session, same rows), n_test,
+      test_window, and for P(R2): p_r2_ece_raw / p_r2_ece_calibrated and
+      p_r2_brier_raw / p_r2_brier_calibrated (raw booster vs predict_proba).
+
+    The record depends on the data as well as the model: the shipped pickle's
+    first record was taken before the 2025-05-08 log_return repair, whose
+    NULL dropped 20 test rows (1,488 instead of 1,508).
+    """
+    meta = getattr(clf, "metadata_", None) or {}
+    if meta.get("r2_gate") not in (None, gate_name(vvix_threshold)):
+        raise ValueError(f"classifier labels used gate {meta.get('r2_gate')!r}, "
+                         f"not {gate_name(vvix_threshold)!r}")
+    src = meta.get("pdv_iv_spread_source")
+    if src not in _PDV_SOURCE_BUILD:
+        raise ValueError(f"pdv_iv_spread source {src!r} cannot be rebuilt from market data")
+    X, y = build_dataset(spx_df, vix_wide_df, None, vvix_threshold,
+                         pdv_vol_series=_PDV_SOURCE_BUILD[src])
+    labels = build_regime_labels(spx_df, vix_wide_df, vvix_threshold)
+    in_test = (X.index >= pd.Timestamp(test_start)) & (X.index <= pd.Timestamp(test_end))
+    X_test, y_test = X[in_test], y[in_test]
+    if X_test.empty:
+        raise ValueError(f"no test rows in [{test_start}, {test_end}]")
+    pred = clf.predict(X_test)
+    pers, _ = _persistence(y_test, labels)
+
+    cal = clf.predict_proba(X_test)
+    classes = list(np.asarray(clf.model_.classes_))
+    raw = (cal if clf._is_legacy()
+           else clf.model_.predict_proba(X_test[clf.feature_names_].values))
+    j = classes.index(2)
+    y2 = (y_test.to_numpy() == 2).astype(float)
+    return {
+        "oos_acc":               float((pred == y_test.to_numpy()).mean()),
+        "persistence_acc":       float(pers),
+        "n_test":                int(len(y_test)),
+        "test_window":           _window(y_test.index),
+        "p_r2_ece_raw":          _expected_calibration_error(raw[:, j], y2),
+        "p_r2_ece_calibrated":   _expected_calibration_error(cal[:, j], y2),
+        "p_r2_brier_raw":        float(np.mean((raw[:, j] - y2) ** 2)),
+        "p_r2_brier_calibrated": float(np.mean((cal[:, j] - y2) ** 2)),
     }
 
 
@@ -1592,9 +1703,9 @@ class RegimePipeline:
       pipe.plot()         # confusion matrix + distribution chart
       results = pipe.results_
 
-    Writes the classifier (MODEL_PATH), its predictions
-    (CLASSIFIER_PREDICTIONS_PARQUET) and the RULE labels to the regime_labels
-    DB table. It never touches the rule-label parquet.
+    Writes the classifier (MODEL_PATH) and its predictions, to
+    CLASSIFIER_PREDICTIONS_PARQUET and to the classifier_predictions DB table.
+    It never touches the rule labels (parquet or DB).
 
     pdv_vol_series injects a walk-forward σ̂ for pdv_iv_spread. pdv_model_path
     (a full-sample PDV pickle) is accepted for legacy use only — its
@@ -1671,17 +1782,22 @@ class RegimePipeline:
         logger.info("Validation dates: %s", val)
 
         # Save model and its predictions (never over the rule labels)
-        self.clf_.metadata_["evaluation"] = {
-            "oos_acc":         float(self.results_["accuracy"]),
-            "persistence_acc": float(self.results_["persistence_baseline_accuracy"]),
-            "n_test":          int(self.results_["n_test"]),
-            "test_window":     self.results_["test_window"],
-        }
+        try:
+            self.clf_.metadata_["evaluation"] = classifier_evaluation(
+                self.clf_, spx, vix, self.vvix_threshold)
+        except ValueError:      # injected / full-sample σ̂: not rebuildable from data
+            self.clf_.metadata_["evaluation"] = {
+                "oos_acc":         float(self.results_["accuracy"]),
+                "persistence_acc": float(self.results_["persistence_baseline_accuracy"]),
+                "n_test":          int(self.results_["n_test"]),
+                "test_window":     self.results_["test_window"],
+            }
         self.clf_.save(MODEL_PATH)
         save_regime_labels(self.clf_, self.X_, self.y_)
 
-        # Write the RULE labels (same-day observables) to SQLite
-        _write_labels_to_db(build_rule_label_frame(spx, vix, self.vvix_threshold))
+        # The same predictions to SQLite (classifier_predictions table)
+        _write_predictions_to_db(classifier_prediction_db_rows(
+            self.clf_, self.X_, build_rule_label_frame(spx, vix, self.vvix_threshold)))
 
         return self.results_
 
@@ -1710,33 +1826,45 @@ class RegimePipeline:
 
 # ── DB write helper ────────────────────────────────────────────────────────────
 
-def regime_label_db_rows(label_frame: pd.DataFrame) -> pd.DataFrame:
-    """Rows for the regime_labels DB table from build_rule_label_frame output.
+def classifier_prediction_db_rows(
+    clf: RegimeClassifier,
+    X: pd.DataFrame,
+    label_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Rows for the classifier_predictions DB table.
 
-    Each row holds the RULE label and the SAME-DAY observables that define it:
-    vix_level = VIX(t) points, vix_slope = VIX3M(t) − VIX(t) points, rv_20d =
-    the label's own trailing realised vol (decimal). confidence is 1.0: the
-    rule is deterministic, it is not a model probability.
+    ``X`` is the LAGGED feature matrix of build_dataset: its row t holds the
+    features of t−1, so the row stored under date t is the classifier's
+    forecast of session t's rule label made at the close of t−1. confidence
+    is the probability of the predicted class (predict_proba). vix_level =
+    VIX(t) points, vix_slope = VIX3M(t) − VIX(t) points and rv_20d = the rule
+    label's own trailing realised vol (decimal) are session t's observables
+    from ``label_frame`` (build_rule_label_frame) — what the forecast is
+    judged against, never the t−1 inputs. Rows before the classifier's
+    train_end are in-sample predictions.
 
-    (Pre-C22 the table held classifier predictions labelled 'regime', t−1
-    features under date t, and rv_20d = vix − spread = 2·VIX − RV.)
+    (Pre-C22 the table, then called regime_labels, held t−1 features under
+    date t and rv_20d = vix − spread = 2·VIX − RV. During C22 the writer was
+    briefly pointed at RULE labels while the table was renamed for the
+    classifier's predictions, which would have mixed both in one table.)
     """
+    proba = clf.predict_proba(X)
+    obs = label_frame.reindex(X.index)
     return pd.DataFrame({
-        "date":       label_frame.index.strftime("%Y-%m-%d"),
-        "regime":     label_frame["regime"].astype(int).values,
-        "confidence": 1.0,
-        "vix_level":  label_frame["vix"].values * 100.0,
-        "vix_slope":  label_frame["ts_slope"].values * 100.0,
-        "rv_20d":     label_frame["rv_20d"].values,
+        "date":       X.index.strftime("%Y-%m-%d"),
+        "regime":     np.asarray(clf.predict(X)).astype(int),
+        "confidence": proba.max(axis=1),
+        "vix_level":  obs["vix"].to_numpy() * 100.0,
+        "vix_slope":  obs["ts_slope"].to_numpy() * 100.0,
+        "rv_20d":     obs["rv_20d"].to_numpy(),
     })
 
 
-def _write_labels_to_db(label_frame: pd.DataFrame) -> int:
-    """Write rule labels (see regime_label_db_rows) to the regime_labels table."""
-    rows = regime_label_db_rows(label_frame)
+def _write_predictions_to_db(rows: pd.DataFrame) -> int:
+    """Upsert classifier_prediction_db_rows output into the classifier_predictions table."""
     try:
-        n = insert_regime_labels(rows)
-        logger.info("Wrote %d regime label rows to SQLite", n)
+        n = insert_classifier_predictions(rows)
+        logger.info("Wrote %d classifier prediction rows to SQLite", n)
         return n
     except Exception as exc:
         logger.warning("DB write failed: %s", exc)
