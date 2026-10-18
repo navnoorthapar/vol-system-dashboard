@@ -16,7 +16,8 @@ Design philosophy:
     * time series (spx_ohlcv, vix_daily, vix_term_structure, tbill_rates,
       vix_futures_*) are keyed upserts (INSERT OR REPLACE on the natural key).
       An upsert never deletes: a row the remote source later drops stays
-      stored, and the writer logs a warning naming it.
+      stored, and the writer logs a warning naming it. A vix_daily row from
+      Cboe (the official print) is only replaced by another Cboe row.
     * an options snapshot REPLACES that session's chain for that underlying in
       one transaction (delete-then-insert), so a re-run never duplicates or
       mixes quote sets. A UNIQUE index on the natural key
@@ -1039,7 +1040,16 @@ def _get_dated(table: str, as_of_date: str, start_date: Optional[str],
 # ══════════════════════════════════════════════════════════════════════════════
 
 def insert_vix_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
-    """Upsert VIX index daily OHLC. An optional `source` column ('cboe'/'yfinance') is stored."""
+    """Upsert VIX index daily OHLC. An optional `source` column ('cboe'/'yfinance') is stored.
+
+    A stored row whose source is 'cboe' (VIX_History.csv, the official
+    print) is only ever replaced by another Cboe row: incoming rows from any
+    other source (Yahoo's ^VIX, or unrecorded) for those dates are skipped.
+    The bot writes Yahoo's window first and Cboe's on top; when the Cboe
+    download failed, the Yahoo rows used to replace the official closes for
+    the whole 400-day window (2026-02-06: Yahoo 20.37, Cboe 17.76) and the
+    run committed them. Returns the rows written.
+    """
     _ensure_schema()
     df = _normalise_date_column(df)
     if df.empty:
@@ -1049,7 +1059,6 @@ def insert_vix_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
         df["source"] = None
     find_bad_prints(df, "vix_daily")
     validate_sessions(df["date"], label="vix_daily")
-    rows = _records(df, ["date", "open", "high", "low", "close", "source"])
     sql = """
         INSERT OR REPLACE INTO vix_daily (date, open, high, low, close, source)
         VALUES (:date, :open, :high, :low, :close, :source)
@@ -1057,6 +1066,17 @@ def insert_vix_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     with _connection() as conn:
         if warn_dropped:
             _warn_dropped(conn, "vix_daily", df, ["date"], "vix_daily")
+        not_cboe = df["source"].astype(object).ne("cboe").to_numpy()
+        if not_cboe.any():
+            official = {r[0] for r in conn.execute(
+                "SELECT date FROM vix_daily WHERE source = 'cboe' AND date BETWEEN ? AND ?",
+                (df["date"].iloc[0], df["date"].iloc[-1]))}
+            keep = ~(not_cboe & df["date"].isin(official).to_numpy())
+            if not keep.all():
+                logger.info("vix_daily: kept %d stored Cboe close(s); the incoming non-Cboe "
+                            "rows for those dates were skipped", int((~keep).sum()))
+                df = df[keep]
+        rows = _records(df, ["date", "open", "high", "low", "close", "source"])
         conn.executemany(sql, rows)
     logger.info("Upserted %d VIX daily rows", len(rows))
     return len(rows)

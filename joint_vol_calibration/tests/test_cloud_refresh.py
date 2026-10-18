@@ -619,9 +619,15 @@ def test_cboe_vix_print_overrides_yahoo(env, monkeypatch):
         raise OSError("cdn.cboe.com unreachable")
     monkeypatch.setattr(cboe, "download_vix_history", boom)
     monkeypatch.setattr(dl, "download_vix_index", lambda start, end: pd.DataFrame(
-        [{**row, "date": "2026-09-22", "close": 15.0, "source": "yfinance"}]))
+        [{**row, "date": "2026-09-22", "close": 15.0, "source": "yfinance"},
+         {**row, "close": 20.37, "source": "yfinance"}]))
     assert _run(env, "market")[0] == 0
-    assert _vix_close("2026-09-22") == (15.0, "yfinance")
+    assert _vix_close("2026-09-22") == (15.0, "yfinance")       # no Cboe row: Yahoo fills it
+    # Review finding: the outage run replaced the official closes with Yahoo's
+    # for the whole window (275 rows) and committed them.
+    assert _vix_close(SESSION) == (17.76, "cboe")
+    part = pd.read_parquet(dbm.MARKET_DIR / "vix_daily" / "vix_daily_2026.parquet")
+    assert part.loc[part["date"] == SESSION, ["close", "source"]].values.tolist() == [[17.76, "cboe"]]
 
 
 def test_download_window_reaches_back_to_the_last_stored_session():

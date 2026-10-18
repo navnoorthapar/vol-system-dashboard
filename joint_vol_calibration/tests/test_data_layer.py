@@ -513,6 +513,33 @@ class TestValidationHooks:
         df = pd.DataFrame({"date": ["2026-01-16", "2026-01-19", "2026-01-20"], "close": [1.0, 2.0, 3.0]})
         assert pl._sessions_only(df, "t")["date"].tolist() == ["2026-01-16", "2026-01-20"]
 
+    def test_yahoo_never_overwrites_a_stored_cboe_close(self, tmp_db, caplog):
+        """Cboe's VIX_History.csv is the official print (2026-02-06: Yahoo
+        20.37, Cboe 17.76). With the Cboe download down, the bot's Yahoo upsert
+        used to replace every stored Cboe close in its 400-day window."""
+        def rows(dates, closes, source):
+            df = pd.DataFrame({"date": dates, "close": closes, "source": source})
+            return df.assign(open=df["close"], high=df["close"], low=df["close"])
+
+        def stored():
+            con = raw_conn(tmp_db)
+            out = {d: (c, s) for d, c, s in con.execute("SELECT date, close, source FROM vix_daily")}
+            con.close()
+            return out
+        db.insert_vix_daily(rows(["2026-02-05", "2026-02-06"], [21.77, 17.76], "cboe"))
+        db.insert_vix_daily(rows(["2026-02-04"], [18.0], None))               # unrecorded (pre-C22)
+        with caplog.at_level(logging.INFO):
+            n = db.insert_vix_daily(rows(["2026-02-04", "2026-02-05", "2026-02-06", "2026-02-09"],
+                                         [18.1, 21.70, 20.37, 17.36], "yfinance"))
+        assert n == 2 and "kept 2 stored Cboe close(s)" in caplog.text
+        assert stored() == {"2026-02-04": (18.1, "yfinance"), "2026-02-05": (21.77, "cboe"),
+                            "2026-02-06": (17.76, "cboe"), "2026-02-09": (17.36, "yfinance")}
+        db.insert_vix_daily(rows(["2026-02-06"], [17.70], None))               # nor an unrecorded row
+        assert stored()["2026-02-06"] == (17.76, "cboe")
+        db.insert_vix_daily(rows(["2026-02-06", "2026-02-09"], [17.75, 17.40], "cboe"))
+        assert stored()["2026-02-06"] == (17.75, "cboe")                       # Cboe replaces Cboe
+        assert stored()["2026-02-09"] == (17.40, "cboe")                       # ... and Yahoo
+
     def test_upsert_keeps_a_session_the_source_dropped(self, tmp_db, caplog):
         dates = ["2026-09-21", "2026-09-22", "2026-09-23"]
         db.insert_spx_ohlcv(spx_frame(dates))
