@@ -528,7 +528,7 @@ class TestVersionRobustPickle:
         trained on labels from the gate every trading path uses."""
         from pathlib import Path
 
-        path = Path("data_store/signals/regime_classifier.pkl")
+        path = Path(__file__).resolve().parents[2] / "data_store" / "signals" / "regime_classifier.pkl"
         if not path.exists():
             pytest.skip("no shipped classifier")
         blob = path.read_bytes()

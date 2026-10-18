@@ -1538,7 +1538,7 @@ class TestGenerateSignal4:
         from pathlib import Path
 
         # Load regime classifier from disk
-        clf_path = Path("data_store/signals/regime_classifier.pkl")
+        clf_path = Path(__file__).resolve().parents[2] / "data_store" / "signals" / "regime_classifier.pkl"
         if not clf_path.exists():
             pytest.skip("Regime classifier not found; skipping integration test")
 
@@ -1631,7 +1631,7 @@ class TestGenerateSignal1Contrarian:
     def test_signal_engine_includes_s1c(self):
         """SignalEngine.generate() must return s1c_position column."""
         from pathlib import Path
-        clf_path = Path("data_store/signals/regime_classifier.pkl")
+        clf_path = Path(__file__).resolve().parents[2] / "data_store" / "signals" / "regime_classifier.pkl"
         if not clf_path.exists():
             pytest.skip("Regime classifier not found")
         from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
