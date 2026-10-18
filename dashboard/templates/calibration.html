@@ -1,10 +1,12 @@
 {% extends "base.html" %}
 {% set page = "calibration" %}
 {% block title %}Calibration — Vol System{% endblock %}
+{% block og_title %}Joint Heston Calibration — SPX/VIX Vol System{% endblock %}
+{% block og_description %}The newest joint SPX/VIX Heston fit that passes the quality gate: parameters, Feller state, identification, RMSE by leg and its model smile.{% endblock %}
 
 {% block content %}
 <div class="page-header">
-  <div class="page-title">Joint Calibration Results</div>
+  <h1 class="page-title">Joint Calibration Results</h1>
   <div class="page-subtitle">Heston 5-parameter · DE + L-BFGS-B</div>
   <div class="page-badge">
     {{ d.session|fmt }}{% if d.calib_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.calib_age }} session{{ 's' if d.calib_age != 1 else '' }} old)</span>{% endif %}
@@ -15,27 +17,29 @@
 </div>
 
 {% if d.kappa is not none %}
-<div style="font-size:11.5px;color:var(--text3);margin:-14px 0 18px;">
+<p class="page-note">
   Headline = the newest fit that passes the quality gate (<span class="mono">{{ d.calib_file }}</span>), not the lowest-RMSE fit in the archive:
   ranking by RMSE rewards the days the data broke.
-</div>
+</p>
 
 <!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
 {% if d.rho_at_boundary %}
 <div class="banner banner-warn" style="margin-bottom:20px;">
   <div class="banner-icon">⚠</div>
   <div>
-    <div class="banner-title" style="color:#ff8833;">
+    <div class="banner-title" style="color:var(--orange);">
       ρ = {{ d.rho }}  —  AT THE LOWER BOUNDARY (−0.95)
     </div>
     <div class="banner-body">
       The Heston correlation parameter has hit its lower bound during calibration.
-      This indicates the model <strong style="color:var(--text);">cannot fully reproduce the steep SPX left skew</strong>
-      with a pure diffusion structure — jump risk or a non-affine model (e.g. rough Heston) is required.
+      This indicates the model <strong style="color:var(--text);">cannot fully reproduce the SPX skew of this snapshot</strong>
+      with a one-factor diffusion — it needs jumps or rough volatility (e.g. rough Heston, an affine Volterra
+      model whose characteristic function solves a fractional Riccati equation).
       The extreme negative ρ is the model's best approximation of the leverage effect,
       revealing model misspecification.
-      <strong style="color:#ff8833;">VIX options leg is disabled (w₃ = 0.0)</strong> — RMSE was 37.14 vol pts, a structural failure of the CIR density, not a calibration failure.
-      Bates SVJ calibration was attempted — jump params degenerate on daily data (see Barndorff-Nielsen &amp; Shephard 2004). Heston remains the active model.
+      <strong style="color:var(--orange);">VIX options leg is disabled (w₃ = 0.0)</strong> — RMSE was 37.14 vol pts, a structural failure of the CIR density, not a calibration failure.
+      A Bates SVJ fit (2026-03-24 snapshot) did not converge — the optimiser reported failure, λ ended at its upper
+      bound and the SPX fit was worse than the nested Heston one — so it is not a result yet. Heston remains the active model.
     </div>
   </div>
 </div>
@@ -101,7 +105,7 @@
       <strong style="color:var(--text);">{{ d.n_vix_tenors|fmt }}</strong> VIX tenors{% if d.spot_date %},
       all taken on the closed SPX session of <strong style="color:var(--text);">{{ d.spot_date }}</strong>{% endif %}.
       {% if d.spx_underidentified %}
-      <strong style="color:#ffaa33;">With fewer than 3 expiries the SPX smile carries no term structure, so κ, θ and v₀
+      <strong style="color:var(--amber);">With fewer than 3 expiries the SPX smile carries no term structure, so κ, θ and v₀
       are not separately identified by the SPX leg, and its RMSE is low because there is little to fit — it is not
       comparable with multi-expiry fits.</strong>
       {% endif %}
@@ -168,7 +172,7 @@
 <div class="grid grid-4" style="margin-bottom:16px;">
 
   <div class="card">
-    <div class="card-label">SPX IV RMSE</div>
+    <h2 class="card-label">SPX IV RMSE</h2>
     {% if d.spx_rmse is not none %}
     <div class="card-value sm {% if d.spx_underidentified %}yellow{% elif d.spx_rmse > 5 %}red{% elif d.spx_rmse > 2 %}yellow{% else %}green{% endif %}">
       {{ d.spx_rmse }} vol pts
@@ -186,7 +190,7 @@
   </div>
 
   <div class="card">
-    <div class="card-label">VIX Futures RMSE</div>
+    <h2 class="card-label">VIX Futures RMSE</h2>
     {% if d.vix_fut_rmse is not none %}
     <div class="card-value sm {% if d.vix_fut_rmse > 2 %}red{% elif d.vix_fut_rmse > 0.5 %}yellow{% else %}green{% endif %}">
       {{ d.vix_fut_rmse }} pts
@@ -203,10 +207,10 @@
   </div>
 
   <div class="card" style="border-color:rgba(100,100,100,0.3);background:rgba(50,50,50,0.04);">
-    <div class="card-label" style="color:var(--text2);">VIX Options RMSE</div>
+    <h2 class="card-label" style="color:var(--text2);">VIX Options RMSE</h2>
     {% if d.vix_opt_disabled %}
-    <div class="card-value sm" style="color:#555;">DISABLED</div>
-    <div class="card-sub mt8" style="color:#555;">
+    <div class="card-value sm" style="color:var(--text2);">DISABLED</div>
+    <div class="card-sub mt8" style="color:var(--text2);">
       Heston CIR density underestimates vol-of-vol path uncertainty.
       RMSE was 37.14 pts — structural failure. w₃ = 0.0 (was 0.2).
     </div>
@@ -216,7 +220,7 @@
   </div>
 
   <div class="card">
-    <div class="card-label">Calibration Performance</div>
+    <h2 class="card-label">Calibration Performance</h2>
     <div class="card-value sm green">{{ d.fit_time|fmt }}s</div>
     <div class="card-sub mt8">{{ d.n_evals|fmt(",") }} evaluations</div>
     <div class="card-sub">{{ d.optimizer or "Optimiser settings not recorded in this result" }}</div>
@@ -229,11 +233,28 @@
 
   <!-- Model smile of the headline parameters -->
   <div class="card">
-    <div class="chart-title">Heston Smile of This Fit ({{ d.session }}) — All Maturities</div>
+    <h2 class="chart-title">Heston Smile of This Fit ({{ d.session }}) — All Maturities</h2>
     <div class="chart-wrap tall">
-      <canvas id="smileChart" role="img" aria-label="Heston model implied volatility smile of the headline calibration"></canvas>
+      <canvas id="smileChart" role="img" aria-label="Line chart: Heston model implied-volatility smile of the {{ d.session }} fit, one curve per maturity, against ln(K/F)" aria-describedby="smileChart-data"></canvas>
     </div>
-    <div style="margin-top:10px;font-size:11px;color:var(--text3);line-height:1.5;">
+    <div class="chart-data sr-only" id="smileChart-data">
+      {% if d.mat_smiles %}
+      <table>
+        <caption>Model implied vol (%) by maturity: at the lowest, nearest-the-money and highest ln(K/F) plotted</caption>
+        <thead><tr><th scope="col">Maturity</th><th scope="col">Lowest ln(K/F)</th><th scope="col">Near the money</th><th scope="col">Highest ln(K/F)</th></tr></thead>
+        <tbody>
+        {% for sm in d.mat_smiles %}{% if sm.lm %}
+        {% set _atm = namespace(i=0) %}{% for x in sm.lm %}{% if x|abs < sm.lm[_atm.i]|abs %}{% set _atm.i = loop.index0 %}{% endif %}{% endfor %}
+        <tr><td>{{ sm.T }}d</td>
+          <td>{{ sm.lm[0]|fmt("+.3f") }}: {{ sm.iv[0]|fmt(".2f") }}</td>
+          <td>{{ sm.lm[_atm.i]|fmt("+.3f") }}: {{ sm.iv[_atm.i]|fmt(".2f") }}</td>
+          <td>{{ sm.lm[-1]|fmt("+.3f") }}: {{ sm.iv[-1]|fmt(".2f") }}</td></tr>
+        {% endif %}{% endfor %}
+        </tbody>
+      </table>
+      {% else %}No smile was computed for this fit.{% endif %}
+    </div>
+    <div class="chart-note">
       Model curves: Black–Scholes implied vols of Heston prices at the parameters above, against ln(K/F)
       (forward-normalised, so independent of r and q). Nodes whose out-of-the-money price is too small to invert
       reliably are omitted.
@@ -245,15 +266,16 @@
 
   <!-- Calibration summary table -->
   <div class="card">
-    <div class="chart-title">Calibrated Parameter Summary</div>
+    <h2 class="chart-title">Calibrated Parameter Summary</h2>
 
-    <table class="data-table mt8">
+    <div class="table-scroll mt8" tabindex="0" role="region" aria-label="Calibrated parameter summary (scrollable)">
+    <table class="data-table">
       <thead>
         <tr>
-          <th>Parameter</th>
-          <th>Symbol</th>
-          <th>Value</th>
-          <th>Interpretation</th>
+          <th scope="col">Parameter</th>
+          <th scope="col">Symbol</th>
+          <th scope="col">Value</th>
+          <th scope="col">Interpretation</th>
         </tr>
       </thead>
       <tbody>
@@ -336,10 +358,11 @@
         </tr>
       </tbody>
     </table>
+    </div>
 
     <div class="divider"></div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
+    <div class="kv-2" style="font-size:11.5px;color:var(--text2);">
       <div>SPX level: <span class="mono green">{{ d.S|fmt(",.1f") }}</span></div>
       <div>Session: <span class="mono">{{ d.session }}</span></div>
       <div>Fit time: <span class="mono green">{{ d.fit_time|fmt }}s</span></div>
@@ -351,12 +374,15 @@
 
 <!-- ── RMSE by leg ────────────────────────────────────────────────────────── -->
 <div class="card" style="margin-bottom:16px;">
-  <div class="chart-title">RMSE by Active Leg</div>
+  <h2 class="chart-title">RMSE by Active Leg</h2>
   <div class="chart-wrap short">
-    <canvas id="rmseChart" role="img" aria-label="Calibration RMSE of each active leg"></canvas>
+    <canvas id="rmseChart" role="img" aria-label="Bar chart: calibration RMSE of each active leg" aria-describedby="rmseChart-data"></canvas>
   </div>
+  <p class="chart-data sr-only" id="rmseChart-data">
+    {% for b in d.rmse_bars %}{{ b.label }}: {{ b.value|fmt(".3f") }}{{ '; ' if not loop.last else '.' }}{% endfor %}
+  </p>
   {% if d.vix_opt_disabled %}
-  <div style="margin-top:8px;font-size:11px;color:var(--text3);">VIX-options leg disabled (weight 0) — not plotted. Units differ by leg (vol points vs index points).</div>
+  <div class="chart-note">VIX-options leg disabled (weight 0) — not plotted. Units differ by leg (vol points vs index points).</div>
   {% endif %}
 </div>
 {% endif %}
@@ -364,7 +390,7 @@
 <!-- HMM classifier note -->
 <div class="card" style="margin-bottom:16px;">
   <div style="padding:10px 14px;border-radius:6px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);">
-    <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">HMM Regime Classifier — Limitations</div>
+    <div style="font-size:11px;font-weight:600;color:var(--orange);margin-bottom:4px;">HMM Regime Classifier — Limitations</div>
     <div style="font-size:11.5px;color:var(--text2);line-height:1.6;">
       HMM trained 2010–2019. Out-of-distribution on 2025 tariff regime — misclassifies 2025-04-09 as R1.
       Neither classifier is used for trading: the XGBoost classifier is research-only (C17) and the backtest
@@ -379,7 +405,7 @@
 {% if d.quintic %}
 {% set q = d.quintic %}
 <div class="card" style="margin-bottom:16px;border-color:rgba(0,255,136,0.2);background:rgba(0,255,136,0.02);">
-  <div class="chart-title" style="color:var(--green);">C13 — Two-Factor Quintic OU Model (Research) · snapshot {{ q.as_of|fmt }}</div>
+  <h2 class="chart-title" style="color:var(--accent);">C13 — Two-Factor Quintic OU Model (Research) · snapshot {{ q.as_of|fmt }}</h2>
   <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">
     σ(t) = g₀(t) · p(Z_t) &nbsp;·&nbsp; Z_t = θX_t + (1−θ)Y_t &nbsp;·&nbsp;
     p(z) = α₀ + α₁z + α₃z³ + α₅z⁵ &nbsp;·&nbsp;
@@ -390,13 +416,14 @@
 
     <!-- Parameters table -->
     <div>
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Quintic OU parameters (scrollable)">
       <table class="data-table">
         <thead>
           <tr>
-            <th>Parameter</th>
-            <th>Symbol</th>
-            <th>Value</th>
-            <th>Description</th>
+            <th scope="col">Parameter</th>
+            <th scope="col">Symbol</th>
+            <th scope="col">Value</th>
+            <th scope="col">Description</th>
           </tr>
         </thead>
         <tbody>
@@ -445,7 +472,7 @@
           <tr>
             <td>Leverage (corr)</td>
             <td class="mono">ε</td>
-            <td class="mono {% if q.eps_saturated %}red{% else %}green{% endif %}">
+            <td class="mono {% if q.eps_saturated %}red{% endif %}">
               {{ q.epsilon }}
               {% if q.eps_saturated %}<span class="tag tag-red" style="font-size:9px;margin-left:4px;">⚠ BOUNDARY</span>{% endif %}
             </td>
@@ -453,14 +480,16 @@
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
 
     <!-- RMSE comparison: same snapshot only -->
     <div>
       {% if q.heston %}
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Heston versus Quintic OU on the same snapshot (scrollable)">
       <table class="data-table" id="quintic-vs-heston">
         <thead>
-          <tr><th>Metric · {{ q.as_of }}</th><th>Heston (same snapshot)</th><th>Quintic OU</th><th>Δ</th></tr>
+          <tr><th scope="col">Metric · {{ q.as_of }}</th><th scope="col">Heston (same snapshot)</th><th scope="col">Quintic OU</th><th scope="col">Δ (Quintic − Heston)</th></tr>
         </thead>
         <tbody>
           <tr>
@@ -481,14 +510,15 @@
           </tr>
           <tr>
             <td>VIX Opt RMSE (vp)</td>
-            <td class="mono" style="color:#555;">DISABLED</td>
+            <td class="mono" style="color:var(--text2);">DISABLED</td>
             <td class="mono {% if q.vix_opt_rmse is not none and q.vix_opt_rmse < 15 %}green{% elif q.vix_opt_rmse is not none and q.vix_opt_rmse < 30 %}yellow{% else %}red{% endif %}">
               {{ q.vix_opt_rmse|fmt(".2f") }}
             </td>
-            <td class="mono" style="color:#555;">—</td>
+            <td class="mono" style="color:var(--text3);">—</td>
           </tr>
         </tbody>
       </table>
+      </div>
       <div style="margin-top:6px;font-size:10.5px;color:var(--text3);">
         Both fits use the {{ q.as_of }} snapshot ({{ q.heston.file }}){% if not q.heston.gate_ok %}; that Heston fit fails today's quality gate ({{ q.heston.gate_reason }}), so it is not the page headline{% endif %}.
         {% if q.converged == false %}The Quintic optimiser stopped before converging.{% endif %}
@@ -499,7 +529,7 @@
 
       <div class="divider"></div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
+      <div class="kv-2" style="font-size:11.5px;color:var(--text2);">
         <div>Fit time: <span class="mono green">{{ q.fit_time|fmt(".1f") }}s</span></div>
         <div>Evaluations: <span class="mono">{{ q.n_evals|fmt(",") }}</span></div>
         <div>Converged: <span class="mono {% if q.converged == false %}red{% endif %}">{{ 'no' if q.converged == false else ('yes' if q.converged else '—') }}</span></div>
@@ -507,16 +537,16 @@
       </div>
 
       <div style="margin-top:12px;padding:8px 10px;border-radius:4px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.15);font-size:11px;color:var(--text2);line-height:1.6;">
-        <strong style="color:var(--green);">Key advance over Heston:</strong>
+        <strong style="color:var(--accent);">Key advance over Heston:</strong>
         VIX options are analytically tractable via 2D Gauss-Hermite quadrature — no structural failure of the pricing kernel.
-        The non-affine polynomial structure captures steep SPX left skew without rho saturating.
-        VIX futures fit to <span class="mono">{{ q.vix_rmse|fmt(".3f") }} pts</span> — <strong style="color:#ff8833;">by construction, not model skill</strong>: ξ₀ is bootstrapped from the same VIX term structure being fit (and no tradable futures prices exist in the DB; the "futures" leg is an index proxy). Quote the SPX-leg RMSE ({{ q.spx_rmse|fmt(".2f") }} vp) as the real fit quality.
+        The polynomial volatility map adds skew and smile shape that Heston can only get from ρ{% if q.eps_saturated %} — though on this fit the leverage parameter ε also sits at its bound (see the table), so the skew is still not fully captured{% endif %}.
+        VIX futures fit to <span class="mono">{{ q.vix_rmse|fmt(".3f") }} pts</span> — <strong style="color:var(--orange);">by construction, not model skill</strong>: ξ₀ is bootstrapped from the same VIX term structure being fit (and no tradable futures prices exist in the DB; the "futures" leg is an index proxy). Quote the SPX-leg RMSE ({{ q.spx_rmse|fmt(".2f") }} vp) as the real fit quality.
         Model: <span class="mono">models/quintic_ou.py</span> ·
         Calibrator: <span class="mono">calibration/quintic_calibrator.py</span>
       </div>
 
       <div style="margin-top:8px;padding:8px 10px;border-radius:4px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);font-size:11px;color:var(--text2);line-height:1.6;">
-        <strong style="color:#ff8833;">Honest limitation:</strong>
+        <strong style="color:var(--orange);">Honest limitation:</strong>
         VIX-option RMSE of <span class="mono">{{ q.vix_opt_rmse|fmt(".1f") }} vp</span> beats Heston's <span class="mono">37.1 vp</span>
         but does not yet reach the <span class="mono">&lt;10 vp</span> research target. The residual is in the VIX-smile wings —
         the degree-5 polynomial under-fits far-OTM VIX calls. A higher-degree map or a second
@@ -527,8 +557,8 @@
 </div>
 {% else %}
 <div class="card" style="margin-bottom:16px;border-color:rgba(100,100,100,0.2);background:rgba(30,30,30,0.3);">
-  <div class="chart-title" style="color:var(--text2);">C13 — Two-Factor Quintic OU Model (Research)</div>
-  <div style="font-size:11.5px;color:#555;padding:8px 0;">
+  <h2 class="chart-title" style="color:var(--text2);">C13 — Two-Factor Quintic OU Model (Research)</h2>
+  <div style="font-size:11.5px;color:var(--text2);padding:8px 0;">
     No Quintic OU calibration is stored. Execute:
     <span class="mono" style="color:var(--text2);">QuinticCalibrator(as_of_date='2026-03-24').calibrate(); cal.save()</span>
   </div>
@@ -539,6 +569,7 @@
 
 {% block scripts %}
 <script>
+vsCharts(function () {
   // Model smile of the headline parameters (+ market anchors when stored)
   const smileEl = document.getElementById('smileChart');
   if (smileEl) {
@@ -579,7 +610,7 @@
           legend: {
             display: true,
             position: 'top',
-            labels: { color: '#888', font: { family: 'Menlo', size: 10 }, boxWidth: 20 }
+            labels: { boxWidth: 20 }
           },
           tooltip: {
             callbacks: {
@@ -590,14 +621,12 @@
         scales: {
           x: {
             type: 'linear',
-            grid: { color: '#141414' },
-            ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-            title: { display: true, text: 'Log-Moneyness  ln(K/F)', color: '#444', font: { size: 10 } },
+            ticks: { font: { size: 10 } },
+            title: { display: true, text: 'Log-Moneyness  ln(K/F)', font: { size: 10 } },
           },
           y: {
-            grid: { color: '#141414' },
-            ticks: { color: '#555', font: { family: 'Menlo', size: 10 }, callback: v => v.toFixed(1) + '%' },
-            title: { display: true, text: 'Implied Vol (%)', color: '#444', font: { size: 10 } },
+            ticks: { font: { size: 10 }, callback: v => v.toFixed(1) + '%' },
+            title: { display: true, text: 'Implied Vol (%)', font: { size: 10 } },
           },
         },
       }
@@ -632,17 +661,16 @@
         },
         scales: {
           x: {
-            grid: { color: '#141414' },
-            ticks: { color: '#888', font: { size: 11 } },
+            ticks: { font: { size: 11 }, color: VS.title },
           },
           y: {
-            grid: { color: '#141414' },
-            ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-            title: { display: true, text: 'RMSE (units per bar label)', color: '#444', font: { size: 10 } },
+            ticks: { font: { size: 10 } },
+            title: { display: true, text: 'RMSE (units per bar label)', font: { size: 10 } },
           },
         }
       }
     });
   }
+});
 </script>
 {% endblock %}

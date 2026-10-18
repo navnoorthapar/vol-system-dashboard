@@ -573,12 +573,28 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
     assert f"greeks.html</loc><lastmod>{g['surface_date']}</lastmod>" in sitemap
 
 
-def test_external_scripts_carry_subresource_integrity(dash):
+def test_no_third_party_script_and_the_vendored_chartjs_matches_its_sri(dash, freezer):
+    """Chart.js is served from the site itself; the CDN copy is only a fallback
+    loaded from JS with the same SRI hash, which must equal the vendored file's."""
     html = dash.app.test_client().get("/").get_data(as_text=True)
-    tags = re.findall(r"<script[^>]+src=\"https?://[^>]+>", html)
-    assert tags
-    for tag in tags:
-        assert 'integrity="sha384-' in tag and 'crossorigin="anonymous"' in tag
+    assert not re.findall(r"<script[^>]+src=\"(?:https?:)?//", html)
+    assert f'<script src="{dash.CHARTJS["src"]}">' in html
+    vendored = ROOT / "dashboard" / dash.CHARTJS["src"]
+    assert vendored.exists()
+    assert freezer.sri_sha384(str(vendored)) == dash.CHARTJS["sri"]
+    assert f'"{dash.CHARTJS["cdn"]}"' in html and f'"{dash.CHARTJS["sri"]}"' in html
+    assert "s.crossOrigin = 'anonymous'" in html
+    assert "@4.4.3/" in dash.CHARTJS["cdn"] and dash.CHARTJS["version"] in dash.CHARTJS["src"]
+
+
+def test_freeze_copies_static_and_refuses_a_chartjs_that_fails_its_sri(dash, freezer, tmp_path, monkeypatch):
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 0
+    assert (out / dash.CHARTJS["src"]).read_bytes() == (ROOT / "dashboard" / dash.CHARTJS["src"]).read_bytes()
+    monkeypatch.setitem(dash.CHARTJS, "sri", "sha384-" + "A" * 64)
+    out2 = tmp_path / "site2"
+    assert freezer.freeze(str(out2), dash) == 1
+    assert not out2.exists() or not any(out2.iterdir())
 
 
 # ── Greeks page ───────────────────────────────────────────────────────────────
@@ -703,3 +719,196 @@ def test_backtest_prose_is_rendered_from_the_results(dash, engine_state):
     m = engine_state["metrics"]
     for key in ("s1_total_pnl", "s1c_total_pnl", "s4_total_pnl"):
         assert dash._usd_k(m[key]) in html
+
+
+# ── C22 step 2: structure, accessibility and copy ─────────────────────────────
+
+@pytest.fixture(scope="module")
+def pages(dash):
+    """Rendered HTML of every route from the shipped data."""
+    client = dash.app.test_client()
+    return {route: client.get(route).get_data(as_text=True) for route in dash.ROUTES}
+
+
+def _attrs(tag: str) -> dict:
+    return dict(re.findall(r'([\w:-]+)="([^"]*)"', tag))
+
+
+def test_every_page_has_one_h1_landmarks_and_a_skip_link(pages):
+    """The pages had zero h1–h6, no landmarks around the banner and no skip link."""
+    for route, html in pages.items():
+        assert len(re.findall(r"<h1[\s>]", html)) == 1, route
+        assert len(re.findall(r"<h2[\s>]", html)) >= 3, route
+        assert html.count("<main") == 1 and 'id="main"' in html
+        assert re.search(r'<nav class="nav" aria-label="Primary">', html)
+        assert html.count("<header") == 1
+        assert '<a class="skip-link" href="#main">' in html
+        # the nav is a direct child of <body> (sticky works for the whole page),
+        # and nothing overrides its position inline
+        assert '<nav class="nav" style=' not in html and "position:relative;\">" not in html
+
+
+def test_nav_marks_exactly_the_current_page(dash, pages):
+    for route, html in pages.items():
+        current = re.findall(r'<a href="([^"]+)" class="nav-link active" aria-current="page">', html)
+        assert current == [route], (route, current)
+        assert len(re.findall(r'<a [^>]*aria-current="page"', html)) == 1
+
+
+def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
+    """Canvases had role=img and a generic label (the PDV sparkline was called an
+    'SPX price sparkline'); none had a text alternative carrying the numbers."""
+    n = 0
+    for route, html in pages.items():
+        for tag in re.findall(r"<canvas[^>]*>", html):
+            a = _attrs(tag)
+            assert a.get("role") == "img", (route, tag)
+            assert len(a.get("aria-label", "")) > 20, (route, tag)
+            ref = a.get("aria-describedby")
+            assert ref, (route, tag)
+            m = re.search(rf'<(\w+) class="chart-data sr-only" id="{re.escape(ref)}">(.*?)</\1>', html, re.S)
+            assert m, (route, ref)
+            assert re.search(r"\d", m.group(2)), (route, ref)        # it carries numbers
+            n += 1
+        assert "SPX price sparkline" not in html
+    assert n == 12
+
+
+def test_scroll_regions_are_keyboard_focusable(pages):
+    """Tables and the heatmap scroll horizontally on phones; axe flagged the
+    scroll regions as unreachable by keyboard."""
+    for route, html in pages.items():
+        for m in re.finditer(r'<table class="(data-table|heatmap)"', html):
+            before = html[:m.start()]
+            opener = before[before.rfind("<div"):]
+            assert re.match(r'<div class="(table-scroll|heatmap-wrap)[^"]*" tabindex="0" role="region" aria-(label|labelledby)="[^"]+">\s*$', opener), (route, opener[:120])
+
+
+def test_colour_tokens_meet_wcag_aa(dash, pages):
+    """--text3 was #555 (2.5:1 on the cards) and chart ticks/axis titles #555/#444."""
+    html = pages["/"]
+    root = re.search(r":root \{(.*?)\}", html, re.S).group(1)
+    tok = dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", root))
+    backgrounds = [tok["bg"], tok["surface"], tok["surface2"], "#1a1a1a",
+                   "#251414", "#271f13"]          # tooltip, red- and amber-tinted banners
+    for name in ("text", "text2", "text3", "accent", "accent2", "red", "blue", "yellow",
+                 "amber", "orange", "purple", "cyan", "pink"):
+        for bg in backgrounds:
+            assert dash.contrast_ratio(tok[name], bg) >= 4.5, (name, tok[name], bg)
+    vs_block = html[html.index("var VS = {"):html.index("};", html.index("var VS = {"))]
+    vs = dict(re.findall(r"(tick|title):\s*'(#[0-9a-fA-F]{6})'", vs_block))
+    assert set(vs) == {"tick", "title"}
+    for c in vs.values():
+        assert dash.contrast_ratio(c, tok["surface"]) >= 4.5
+    for literal in ("#555", "#444"):
+        for route, h in pages.items():
+            assert f"color:{literal}" not in h and f"color: '{literal}'" not in h, (route, literal)
+
+
+def test_heatmap_text_contrasts_with_every_cell(dash):
+    """White text on the bright-green cells was 2.7:1; the z labels sat at 0.7 opacity."""
+    d = dash.load_page3()
+    cells = [c for row in d["heatmap_rows"] for c in row["cells"] if c]
+    assert cells
+    for c in cells:
+        assert dash.contrast_ratio(c["fg"], c["bg"]) >= 4.5, c
+    for z in np.linspace(-3, 3, 241):
+        bg = dash._vomma_color(float(z))
+        assert dash.contrast_ratio(dash._text_colour_on(bg), bg) >= 4.5
+    html = dash.app.test_client().get("/greeks").get_data(as_text=True)
+    assert "opacity:0.7" not in html
+    # unstable is flagged by outline + text marker, not by a red fill alone
+    assert len(re.findall(r'class="node unstable"', html)) == len(re.findall(r'<div class="z">⚠ ', html)) == d["n_unstable"]
+    assert '<span class="sym">(∂²V/∂S∂σ)</span>' in html       # σ is not upper-cased to Σ
+
+
+def test_motion_print_and_font_fallbacks(pages):
+    html = pages["/"]
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert "Chart.defaults.animation = false" in html
+    assert "@media print" in html and "beforeprint" in html and "afterprint" in html
+    assert '<meta name="color-scheme" content="dark">' in html
+    for route, h in pages.items():
+        assert "family: 'Menlo'" not in h and "font-family:'Menlo',monospace" not in h, route
+        assert "monospace" in re.search(r"--mono:([^;]+);", h).group(1)
+
+
+def test_page_charts_wait_for_chartjs(pages):
+    """A failed Chart.js load threw 'Chart is not defined' and blanked every chart."""
+    for route, html in pages.items():
+        page_js = html[html.rindex("function makeBarOpts"):]
+        first_new = page_js.find("new Chart(")
+        assert first_new > page_js.find("vsCharts(function () {") > 0, route
+    assert "if (!window.Chart) return fail();" in pages["/"]
+
+
+def test_social_meta_and_card_carry_no_test_count(pages):
+    """The card said '631 tests', the meta '666', CI '642 passed, 24 skipped'."""
+    for route, html in pages.items():
+        assert not re.search(r"\d+\s+tests", html), route
+        title = re.search(r'<meta property="og:title"\s+content="([^"]+)"', html).group(1)
+        desc = re.search(r'<meta property="og:description"\s+content="([^"]+)"', html).group(1)
+        assert title and desc
+    titles = {re.search(r'og:title"\s+content="([^"]+)"', h).group(1) for h in pages.values()}
+    assert len(titles) == len(pages)                      # per-page, not one for all
+
+
+def test_regime_and_calibration_copy_state_the_actual_rules(pages):
+    idx, cal, bt = pages["/"], pages["/calibration"], pages["/backtest"]
+    assert "rolling 252-day 80th percentile" in idx
+    assert "rv₂₀ &gt; VIX" in idx
+    for stale in ("Low VIX / backwardation", "Normal contango", "VVIX &gt; 100"):
+        assert stale not in idx and stale not in bt
+    for stale in ("non-affine model (e.g. rough Heston)", "degenerate on daily data",
+                  "Barndorff-Nielsen &amp; Shephard 2004", "production classification"):
+        assert stale not in cal
+    assert "affine Volterra" in cal and "did not converge" in cal
+
+
+def test_vix_colour_and_words_come_from_one_threshold_table(dash, monkeypatch):
+    """VIX 19 was painted yellow beside 'NORMAL range'; VIX 27 red beside 'caution'."""
+    base = dash.load_page1()
+    client = dash.app.test_client()
+    for vix, cls, words in ((19.0, "green", "NORMAL"), (27.0, "yellow", "ELEVATED"),
+                            (31.0, "red", "STRESS"), (12.0, "green", "LOW")):
+        monkeypatch.setattr(dash, "load_page1", lambda v=vix: {**base, "vix": v})
+        html = client.get("/").get_data(as_text=True)
+        block = html[html.index("VIX  <span"):html.index("<!-- VVIX -->")]
+        assert f'class="card-value {cls}"' in block and words in block, (vix, block)
+
+
+def test_term_structure_is_drawn_on_a_linear_tenor_axis(pages):
+    js = pages["/"][pages["/"].index("// VIX Term Structure chart"):]
+    js = js[:js.index("// Sparkline")]
+    assert "type: 'linear'" in js and "tension: 0," in js and "tension: 0.35" not in js
+
+
+def test_backtest_audit_heading_counts_its_rows(pages):
+    """'Ten Flaws Found, Eight Fixed, Two Quantified' sat above an 11-row table."""
+    bt = pages["/backtest"]
+    statuses = re.findall(r'<tr data-status="(fixed|quantified)" data-round="(C\d+)"', bt)
+    rounds = sorted({r for _, r in statuses}, key=lambda r: int(r[1:]))
+    n_fixed = sum(1 for s, _ in statuses if s == "fixed")
+    n_quant = sum(1 for s, _ in statuses if s == "quantified")
+    heading = re.search(r'id="audit-title">([^<]+)<', bt).group(1)
+    assert heading == (f"{rounds[0]}–{rounds[-1]} Methodology Audit — {len(statuses)} Flaws Found, "
+                       f"{n_fixed} Fixed, {n_quant} Quantified")
+    assert {"C19", "C20", "C21"} <= set(rounds)
+    assert "Ten Flaws Found" not in bt and "C17 pipeline" not in bt
+
+
+def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
+    bt = pages["/backtest"]
+    d = dash.load_page4()
+    assert re.search(rf"<h1 class=\"page-title\">C10 Backtest Results — {d['start_date']} → {d['end_date']}", bt)
+    assert "2018 → 2025<" not in bt
+    tariffs = next(c for c in d["crisis"] if c["name"] == "Tariffs_2025")
+    assert tariffs["end"] <= d["end_date"]
+    assert f"Tariffs 2025 ({tariffs['start']} → {tariffs['end']})" in bt
+    assert "April 2025 tariff shock is <em>not</em> in it" in bt
+    assert "single options snapshot" not in bt and "22 times in 7 years" not in bt
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        n_dates = con.execute("SELECT COUNT(DISTINCT snapshot_date) FROM options_snapshots "
+                              "WHERE underlying='SPX'").fetchone()[0]
+    assert f"its {n_dates} SPX chain" in bt
+    assert "$-" not in bt and "'$' + v + 'k'" not in bt

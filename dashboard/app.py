@@ -275,23 +275,43 @@ app.jinja_env.filters["usd_k"] = _usd_k
 app.jinja_env.filters["pct"] = _pct_prose
 
 
+def _relative_luminance(hex_colour: str) -> float:
+    """WCAG 2.x relative luminance of '#rrggbb'."""
+    h = hex_colour.lstrip("#")
+    def lin(c: int) -> float:
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def contrast_ratio(fg: str, bg: str) -> float:
+    """WCAG 2.x contrast ratio between two opaque '#rrggbb' colours (1..21)."""
+    hi, lo = sorted((_relative_luminance(fg), _relative_luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _text_colour_on(bg: str) -> str:
+    """Black or white, whichever contrasts more with `bg` (always >= 4.58:1)."""
+    return "#000000" if contrast_ratio("#000000", bg) >= contrast_ratio("#ffffff", bg) else "#ffffff"
+
+
+# Diverging heatmap ramp: blue for z < 0, orange for z > 0 (distinguishable
+# under red-green colour blindness). Red is NOT used as a fill: an unstable
+# node (|z| > 2) gets the end colour of its side plus a red outline and a text
+# marker in the cell, so the flag does not depend on colour alone.
+_HEAT_NEUTRAL = (0x1a, 0x1a, 0x1a)
+_HEAT_NEG = (0x2f, 0x6f, 0xd6)
+_HEAT_POS = (0xf0, 0x8a, 0x24)
+
+
 def _vomma_color(z: Optional[float]) -> str:
-    """Map a vomma z-score to a CSS colour for the heatmap."""
+    """Map a vomma z-score to a CSS background colour for the heatmap."""
     if z is None or (isinstance(z, float) and np.isnan(z)):
         return "#1a1a1a"
-    if abs(z) > 2.0:
-        return "#cc1111"   # danger red
-    if z > 0:
-        t = min(z / 2.0, 1.0)
-        r = int(17 + (0 - 17) * t)
-        g = int(17 + (190 - 17) * t)
-        b = int(17 + (90 - 17) * t)
-        return f"#{r:02x}{g:02x}{b:02x}"
+    end = _HEAT_POS if z > 0 else _HEAT_NEG
     t = min(abs(z) / 2.0, 1.0)
-    r = int(17 + (40 - 17) * t)
-    g = int(17 + (90 - 17) * t)
-    b = int(17 + (200 - 17) * t)
-    return f"#{r:02x}{g:02x}{b:02x}"
+    return "#" + "".join(f"{round(a + (b - a) * t):02x}" for a, b in zip(_HEAT_NEUTRAL, end))
 
 
 # ── Market data readers (DB) ───────────────────────────────────────────────────
@@ -1040,7 +1060,8 @@ def load_page3() -> dict[str, Any]:
                     "vomma": round(float(r.vomma), 1), "z": round(z, 2),
                     "iv": round(float(r.iv) * 100, 1), "K": round(float(r.K), 0),
                     "lm": lm, "unstable": bool(r.is_unstable), "bg": _vomma_color(z),
-                    "fg": "#fff" if bool(r.is_unstable) or abs(z) > 1 else "#aaa",
+                    # text colour chosen per cell for contrast (white on bright green was 2.7:1)
+                    "fg": _text_colour_on(_vomma_color(z)),
                 })
             d["heatmap_rows"].append({"T": T, "label": f"{T}d", "cells": cells})
         d["heatmap_cols"] = [f"{c:+.3f}" for c in cols]
@@ -1200,6 +1221,19 @@ def load_page4() -> dict[str, Any]:
               "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date"):
         d[k] = None
 
+    # Option chains the DB holds (the roadmap states what the backtest could and
+    # could not use; it hard-coded "a single options snapshot (2026-03-24)").
+    d["option_snapshots"] = None
+    try:
+        with _db() as con:
+            rows = con.execute(
+                "SELECT snapshot_date, COUNT(*) FROM options_snapshots "
+                "WHERE underlying = 'SPX' GROUP BY snapshot_date ORDER BY snapshot_date").fetchall()
+        d["option_snapshots"] = {"dates": [r[0] for r in rows],
+                                 "n_rows": int(sum(r[1] for r in rows))}
+    except Exception as e:      # the roadmap then omits the count; not a page error
+        _logger.info("option snapshot count unavailable: %s", e)
+
     eq: Optional[pd.DataFrame] = None
     try:
         eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
@@ -1237,9 +1271,15 @@ def load_page4() -> dict[str, Any]:
         d["wf_total"] = len(defined)
         d["wf_flat"] = sum(1 for w in d["wf"] if w["flat"])
 
-        from joint_vol_calibration.backtest.backtest_engine import compute_crisis_performance
+        from joint_vol_calibration.backtest.backtest_engine import (
+            CRISIS_PERIODS, compute_crisis_performance)
+        # The window dates are shown with each return: "Tariffs_2025" ends at the
+        # backtest's last session (2025-03-24), before the April 2025 shock.
         d["crisis"] = [{"name": k, "total_return": v.get("total_return"),
-                        "n_days": v.get("n_days")}
+                        "n_days": v.get("n_days"),
+                        "start": CRISIS_PERIODS.get(k, (None, None))[0],
+                        "end": min(CRISIS_PERIODS.get(k, (None, d["end_date"]))[1] or d["end_date"],
+                                   d["end_date"])}
                        for k, v in compute_crisis_performance(eq).items()]
     except Exception as e:
         _record_error(d, "backtest equity curve (full_results.parquet)", e)
@@ -1411,10 +1451,25 @@ _DATA_DATE_KEYS = {"/": "latest_session", "/calibration": "session",
                    "/greeks": "surface_date", "/backtest": "run_date"}
 
 
+# Chart.js is vendored (dashboard/static, copied into the site by freeze_site.py)
+# so no third-party script sits on the critical path. The relative src works at
+# every route because all routes are top-level. `sri` is the sha384 of the
+# vendored file, which is byte-identical to the npm build on jsDelivr and unpkg;
+# base.html falls back to `cdn` (with the same SRI) only if the local copy fails,
+# and to the charts' data summaries if both fail.
+CHARTJS = {
+    "version": "4.4.3",
+    "src": "static/chart.umd-4.4.3.js",
+    "sri": "sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54",
+    "cdn": "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js",
+}
+
+
 @app.context_processor
 def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
-    return {"canonical": canonical_url(route), "page_file": ROUTES[route]}
+    return {"canonical": canonical_url(route), "page_file": ROUTES[route],
+            "chartjs": CHARTJS}
 
 
 def _render(template: str, d: dict):
