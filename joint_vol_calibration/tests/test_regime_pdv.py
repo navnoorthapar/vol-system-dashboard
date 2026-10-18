@@ -383,7 +383,10 @@ class TestCalibrateJumpTail:
     def test_tail_result_is_threshold_estimate(self):
         model = self._model()
         as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
-        p = model.calibrate_jump_tail(as_of)
+        # alpha pinned: at the default 1% size this GARCH fixture (vol feedback
+        # after each jump inflates the local bipower variance) flags only 9 of
+        # 420 post-R2 days, below the 10-jump minimum, so the MLE fallback runs.
+        p = model.calibrate_jump_tail(as_of, alpha=0.05)
         assert isinstance(p, MertonJumpParams)
         assert p.method == "threshold"
 
@@ -391,9 +394,10 @@ class TestCalibrateJumpTail:
         """λ refers to every post-R2 day, not only to the flagged ones."""
         model = self._model()
         as_of = model._regime_labels.index[-1].strftime("%Y-%m-%d")
-        p = model.calibrate_jump_tail(as_of)
+        p = model.calibrate_jump_tail(as_of, alpha=0.05)
+        assert p.method == "threshold"
         _, _, _, dates = model._get_r2_data(as_of)
-        flags = model.compute_jump_flags(as_of)["jump"].reindex(dates).fillna(False)
+        flags = model.compute_jump_flags(as_of, alpha=0.05)["jump"].reindex(dates).fillna(False)
         assert p.lam == pytest.approx(ANNUALISE * flags.sum() / len(dates))
         assert p.n_r2_days == len(dates)
 
