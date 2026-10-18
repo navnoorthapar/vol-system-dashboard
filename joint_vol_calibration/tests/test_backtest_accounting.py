@@ -381,6 +381,27 @@ class TestS3:
         res = bte.s3_timing_null_test(eng, n_paths=1, seed=1)
         assert res["z_proxy"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
 
+    def test_null_says_its_statistic_is_base_size_not_the_reported_s3(self, engine):
+        """The null's 'real' is S3 at BASE (pass-1) size; the S3 the engine
+        reports is after the pass-2 sizing overlay (2018-2025: +$41,952 vs
+        +$56,471). The report labelled the base-size number "engine P&L" and
+        said the null kept the real "sizing", while the p-value was quoted
+        next to the overlay-sized S3."""
+        from joint_vol_calibration.backtest.report_generator import ReportGenerator
+        res = bte.s3_timing_null_test(engine, n_paths=2, seed=1)
+        overlay = engine.equity_df["pnl_s3"].sum()
+        assert res["engine_overlay_pnl"] == pytest.approx(overlay, rel=1e-12)
+        assert res["engine_overlay_pnl"] == pytest.approx(engine.metrics_["s3_total_pnl"], rel=1e-9)
+        assert res["index_leg"]["real"] == pytest.approx(res["engine_pass1_pnl"], rel=1e-12)
+        # the fixture exercises the overlay: the two sizes differ
+        assert res["engine_overlay_pnl"] != pytest.approx(res["engine_pass1_pnl"], rel=1e-6)
+        rg = ReportGenerator(engine, engine.equity_df, engine.metrics_, {}, s3_null=res)
+        html = rg._null_html()
+        assert "engine P&L" not in html and "market and sizing" not in html
+        assert "at base size, before the sizing overlay" in html
+        assert f"${overlay:,.0f} for the real S3" in html
+        assert "before the sizing overlay" in rg._failures_html()
+
     def test_null_paths_change_only_vvix(self, engine, monkeypatch):
         """Each null path re-runs SignalEngine on the full history with ^VVIX
         replaced; ^VIX, the regimes and the PDV series are the engine's."""

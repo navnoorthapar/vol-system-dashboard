@@ -362,10 +362,12 @@ def _print_summary(metrics: dict, crisis: dict) -> None:
 
 def _print_null(null: Dict) -> None:
     print(f"\n  S3 timing null test ({null['method']}, {null['n_paths']} paths, seed {null['seed']}):")
-    print(f"  real S3 entries {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}"
-          f"  (engine S3 pass-1 P&L ${null['engine_pass1_pnl']:,.0f})")
-    for key, lbl in (("index_leg", "S3 index leg (short SPX straddle)"),
-                     ("z_proxy", "pre-C22 z-unit proxy")):
+    print(f"  real S3 entries {null['real_trades']}  vs null mean {null['null_mean_trades']:.1f}")
+    print(f"  tested statistic: S3 P&L at base (pass-1) size; engine pass-1 S3 "
+          f"${null['engine_pass1_pnl']:,.0f}. The reported S3 after the sizing overlay, "
+          f"${null.get('engine_overlay_pnl', float('nan')):,.0f}, is not what p refers to.")
+    for key, lbl in (("index_leg", "S3 index leg at base size"),
+                     ("z_proxy", "pre-C22 z-unit proxy at base size")):
         s = null[key]
         print(f"  {lbl:<36} real ${s['real']:>10,.0f} | null mean ${s['null_mean']:>10,.0f} "
               f"sd ${s['null_std']:>9,.0f} | P(null>0) {s['null_frac_positive']:.2f} "

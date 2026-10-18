@@ -1841,12 +1841,23 @@ def s3_timing_null_test(
     same spx/VIX history, precomputed regimes and PDV series, trailing
     z-scores warmed up on pre-window data, entries only inside the window.
     ^VVIX feeds nothing but S3, so every other input — the regime gate, the
-    SPX/VIX market the straddles are priced on, β, the corrections and base
-    (pass-1) sizing — is the real one. Only S3's timing changes.
+    SPX/VIX market the straddles are priced on, β and the corrections — is
+    the real one. Only S3's timing changes.
+
+    SIZE: every path, the real one included, is sized at S3's BASE kelly
+    (the engine's pass 1), NOT through the pass-2 ex-ante sizing overlay
+    (correlation netting × trailing net-Sharpe scale) that produces the
+    S3 P&L the engine reports (equity_df['pnl_s3'], the trade log, the
+    metrics' s3_total_pnl). The overlay rescales the same entries and
+    exits, so the timing tested is the timing traded, but the dollar
+    statistic is not the published one: on 2018-2025 the tested "real"
+    is +$41,952 at base size while the published S3 is +$56,471 after
+    the overlay. Both are returned (engine_pass1_pnl, engine_overlay_pnl);
+    the p-value belongs to the first. The overlay is not re-run per path.
 
     Two statistics are compared with their null distributions:
-      index_leg : total P&L of S3 priced as a short SPX straddle (the
-                  engine's S3 model) — the test of S3's timing
+      index_leg : total base-size P&L of S3 priced as a short SPX straddle
+                  (the engine's S3 model) — the test of S3's timing
       z_proxy   : the pre-C22 z-unit proxy P&L. Its null distribution is
                   shifted far above zero: positive "P&L" on series with no
                   predictability, which is why it is not evidence of edge.
@@ -1854,9 +1865,9 @@ def s3_timing_null_test(
     p_value = (1 + #{null ≥ real}) / (n_paths + 1), one-sided.
 
     The real statistic goes through the same function on the real ^VVIX, so
-    it IS the engine's pass-1 S3 P&L: ``engine_pass1_pnl`` (the engine's
-    own number) must equal index_leg['real'] (z_proxy['real'] when the
-    engine runs the legacy proxy). Before this was re-based on
+    it IS the engine's pass-1 (base-size) S3 P&L: ``engine_pass1_pnl``
+    (the engine's own number) must equal index_leg['real'] (z_proxy['real']
+    when the engine runs the legacy proxy). Before this was re-based on
     SignalEngine, the null re-built S3 from the backtest-window features
     alone, so its "real" S3 warmed its 252-day z-score up inside the window
     and was not the S3 the engine trades (2018-2025: 26 entries, first on
@@ -1932,7 +1943,13 @@ def s3_timing_null_test(
 
     return {
         "method": method, "n_paths": n_paths, "seed": seed,
+        # the tested statistic's engine twin: S3 at base (pass-1) size
         "engine_pass1_pnl": float(engine._pass1_pnl["s3"].sum()) if "s3" in engine._pass1_pnl else np.nan,
+        # the S3 P&L the engine reports, after the pass-2 sizing overlay —
+        # NOT the statistic the p-values refer to
+        "engine_overlay_pnl": (float(engine.equity_df["pnl_s3"].sum())
+                               if engine.equity_df is not None and "pnl_s3" in engine.equity_df
+                               else np.nan),
         # entries (flat → on), not trade records: an S3 position held past
         # the straddle's 21-session expiry is rolled into a new record
         "real_trades": real_n, "null_mean_trades": float(np.mean(null_n)) if null_n else np.nan,
