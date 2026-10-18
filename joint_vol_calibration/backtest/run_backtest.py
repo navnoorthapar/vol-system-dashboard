@@ -224,7 +224,7 @@ def _print_beta(table: pd.DataFrame) -> None:
 def run_beta_sensitivity(
     spx_df: pd.DataFrame,
     vix_wide: pd.DataFrame,
-    betas: Sequence[float] = (1.00, 0.90, ATM_TO_VIX_RATIO),
+    betas: Sequence[float] = (1.00, 0.90, 0.85, ATM_TO_VIX_RATIO, 0.78),
     pdv_vol: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Re-run the backtest for each β; one row per β with headline and per-signal stats."""
@@ -435,7 +435,7 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true",
                         help="With --estimate-beta: also fetch a live Yahoo ^SPX chain")
     parser.add_argument("--beta-sensitivity", action="store_true",
-                        help="Re-run the backtest for β ∈ {1.00, 0.90, default}")
+                        help="Re-run the backtest for β ∈ {1.00, 0.90, 0.85, default, 0.78}")
     parser.add_argument("--pseudo-oos", action="store_true",
                         help="S1C on 2013-2017 (confounded pseudo out-of-sample)")
     parser.add_argument("--csv", help="With --beta-sensitivity: also write the table to this CSV "
