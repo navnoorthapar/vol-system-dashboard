@@ -30,9 +30,9 @@ What this module does instead:
   3. A quote-state gate: if too few near-ATM lines are two-sided (empty
      after-hours book) the chain is marked unusable with an explicit reason —
      the caller must fail closed rather than fit garbage.
-  4. A small NYSE session calendar (no new dependency): which session a
-     wall-clock time belongs to, so snapshots are labelled by the session
-     whose quotes they hold.
+  4. Session helpers on database.py's NYSE calendar (date-object API): which
+     session a wall-clock time belongs to, so snapshots are labelled by the
+     session whose quotes they hold, and T from that session's close.
 """
 
 from __future__ import annotations
@@ -40,20 +40,19 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 from scipy.special import ndtr
+from zoneinfo import ZoneInfo
+
+from joint_vol_calibration.data import database as _db
 
 logger = logging.getLogger(__name__)
 
-try:                                    # stdlib; tz database ships with Python/OS
-    from zoneinfo import ZoneInfo
-    NY_TZ = ZoneInfo("America/New_York")
-except Exception:                       # pragma: no cover - exotic platforms only
-    NY_TZ = None
+NY_TZ = ZoneInfo("America/New_York")
 
 # ── Single source of truth for the calibration expiry grid ────────────────────
 # Target tenors (calendar days) of the SPX smile slices the joint fit uses.
@@ -76,70 +75,12 @@ SESSION_CLOSED_AFTER_ET = time(16, 15) # daily bar treated as final after this
 _MINUTES_PER_YEAR = 365.0 * 24.0 * 60.0
 
 
-# ── NYSE calendar (rule-based; regular full-day closures) ─────────────────────
-
-def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
-    """n-th (1-based) given weekday of a month; n = -1 means the last one."""
-    if n > 0:
-        d = date(year, month, 1)
-        d += timedelta(days=(weekday - d.weekday()) % 7)
-        return d + timedelta(weeks=n - 1)
-    nxt = date(year + (month == 12), month % 12 + 1, 1)
-    d = nxt - timedelta(days=1)
-    return d - timedelta(days=(d.weekday() - weekday) % 7)
-
-
-def _easter(year: int) -> date:
-    """Gregorian Easter Sunday (anonymous Gregorian algorithm)."""
-    a = year % 19
-    b, c = divmod(year, 100)
-    d, e = divmod(b, 4)
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i, k = divmod(c, 4)
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month, day = divmod(h + l - 7 * m + 114, 31)
-    return date(year, month, day + 1)
-
-
-def _observed(d: date) -> Optional[date]:
-    """NYSE observance: Saturday -> Friday, Sunday -> Monday."""
-    if d.weekday() == 5:
-        return d - timedelta(days=1)
-    if d.weekday() == 6:
-        return d + timedelta(days=1)
-    return d
-
-
-# One-off full-day closures (national days of mourning, Hurricane Sandy).
-_SPECIAL_CLOSURES = {
-    date(2012, 10, 29), date(2012, 10, 30), date(2018, 12, 5), date(2025, 1, 9),
-}
-
-
-def nyse_holidays(year: int) -> set:
-    """Full-day NYSE holidays of one calendar year (regular rules + specials)."""
-    hol = set()
-    ny = date(year, 1, 1)
-    if ny.weekday() == 6:
-        hol.add(ny + timedelta(days=1))
-    elif ny.weekday() != 5:           # Saturday New Year is NOT observed on Fri
-        hol.add(ny)
-    hol.add(_nth_weekday(year, 1, 0, 3))          # Martin Luther King Jr. Day
-    hol.add(_nth_weekday(year, 2, 0, 3))          # Washington's Birthday
-    hol.add(_easter(year) - timedelta(days=2))    # Good Friday
-    hol.add(_nth_weekday(year, 5, 0, -1))         # Memorial Day
-    if year >= 2022:
-        hol.add(_observed(date(year, 6, 19)))     # Juneteenth
-    hol.add(_observed(date(year, 7, 4)))          # Independence Day
-    hol.add(_nth_weekday(year, 9, 0, 1))          # Labor Day
-    hol.add(_nth_weekday(year, 11, 3, 4))         # Thanksgiving
-    hol.add(_observed(date(year, 12, 25)))        # Christmas
-    hol |= {d for d in _SPECIAL_CLOSURES if d.year == year}
-    return hol
-
+# ── NYSE calendar ─────────────────────────────────────────────────────────────
+# One calendar for the whole project: database.py's (holiday rules plus the
+# special closures 2001-09-11..14, 2004-06-11, 2007-01-02, 2012-10-29/30,
+# 2018-12-05, 2025-01-09, checked against the shipped SPX history). These
+# wrappers keep this module's date-object API. A second, rule-based copy lived
+# here until C22 verification and disagreed on 9 days in 1995-2045.
 
 def _as_date(d) -> date:
     if isinstance(d, datetime):
@@ -149,43 +90,36 @@ def _as_date(d) -> date:
     return pd.Timestamp(d).date()
 
 
+def nyse_holidays(year: int) -> set:
+    """Weekday NYSE closures of one calendar year (holidays + special closures)."""
+    return {date.fromisoformat(h) for h in _db.nyse_holidays(f"{year}-01-01", f"{year}-12-31")}
+
+
 def is_nyse_session(d) -> bool:
-    """True if ``d`` is a regular NYSE trading day."""
-    d = _as_date(d)
-    return d.weekday() < 5 and d not in nyse_holidays(d.year)
+    """True if ``d`` is an NYSE trading day."""
+    return bool(_db.is_nyse_session(_as_date(d)))
 
 
 def previous_session(d) -> date:
     """Most recent NYSE session strictly before ``d``."""
-    d = _as_date(d) - timedelta(days=1)
-    while not is_nyse_session(d):
-        d -= timedelta(days=1)
-    return d
+    return date.fromisoformat(_db.previous_session(_as_date(d)))
 
 
 def session_on_or_before(d) -> date:
     """Most recent NYSE session on or before ``d`` (the session whose closing
     quotes a weekend/holiday snapshot holds)."""
-    d = _as_date(d)
-    return d if is_nyse_session(d) else previous_session(d)
+    return date.fromisoformat(_db.session_on_or_before(_as_date(d)))
 
 
 def sessions_between(start, end) -> int:
     """Number of NYSE sessions s with start < s <= end (0 when end <= start)."""
-    s, e = _as_date(start), _as_date(end)
-    n, d = 0, s + timedelta(days=1)
-    while d <= e:
-        n += is_nyse_session(d)
-        d += timedelta(days=1)
-    return n
+    return int(_db.sessions_between(_as_date(start), _as_date(end)))
 
 
 def _now_et(now_utc: Optional[datetime] = None) -> datetime:
     now = now_utc or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    if NY_TZ is None:                 # pragma: no cover - fixed EDT fallback
-        return now.astimezone(timezone(timedelta(hours=-4)))
     return now.astimezone(NY_TZ)
 
 
@@ -195,13 +129,11 @@ def last_closed_session(now_utc: Optional[datetime] = None) -> date:
     A session counts as closed from 16:15 ET (after the 16:00 cash close and
     the 16:15 settlement of the index options). A run at 14:00 ET on a trading
     day therefore returns the PREVIOUS session; a Saturday run returns Friday;
-    a 23:30 UTC Friday run returns that Friday.
+    a 23:30 UTC Friday run returns that Friday. (database.last_closed_session
+    with the cutoff SESSION_CLOSED_AFTER_ET.)
     """
-    et = _now_et(now_utc)
-    today = et.date()
-    if is_nyse_session(today) and et.time() >= SESSION_CLOSED_AFTER_ET:
-        return today
-    return previous_session(today)
+    return date.fromisoformat(_db.last_closed_session(_now_et(now_utc),
+                                                      cutoff=SESSION_CLOSED_AFTER_ET))
 
 
 def ny_date(now_utc: Optional[datetime] = None) -> date:
@@ -230,9 +162,9 @@ def tbill_discount_to_cc(d: float, days: int = 91) -> float:
     """Convert a 13-week T-bill bank-discount yield (^IRX/100) to a
     continuously-compounded rate: r = -ln(1 - d*days/360) * 365/days.
 
-    4.03% discount ~ 4.11% cc. Used only as the reference rate (fallback
-    discount factor, VIX-options discounting); the SPX leg prices off the
-    per-expiry parity discount factors.
+    4.03% discount ~ 4.11% cc. Same formula as database.tbill_discount_to_cc,
+    which the downloader applies before storing: tbill_rates.rate and
+    db.get_tbill_rate() are ALREADY cc, so do not apply this to them.
     """
     d = float(d)
     return -math.log(1.0 - d * days / 360.0) * 365.0 / days
@@ -382,14 +314,17 @@ def _normalise(raw: pd.DataFrame) -> pd.DataFrame:
         out["root"] = df["root"].astype(str).str.upper()
     else:
         out["root"] = ""                 # unknown (stored snapshots predate C22)
+    # Yahoo's own IV, as a diagnostic only. A stored snapshot's implied_vol
+    # column is not read here: in a chain stored by observed_quotes() it holds
+    # this module's Black-76 IV, not Yahoo's.
     if "impliedVolatility" in df.columns:
         out["yahoo_iv"] = pd.to_numeric(df["impliedVolatility"], errors="coerce")
     elif "yahoo_iv" in df.columns:
         out["yahoo_iv"] = pd.to_numeric(df["yahoo_iv"], errors="coerce")
-    elif "implied_vol" in df.columns:
-        out["yahoo_iv"] = pd.to_numeric(df["implied_vol"], errors="coerce")
     else:
         out["yahoo_iv"] = np.nan
+    if "contractSymbol" in df.columns or "contract_symbol" in df.columns:
+        out["contract_symbol"] = df.get("contractSymbol", df.get("contract_symbol"))
     out["volume"] = pd.to_numeric(df.get("volume"), errors="coerce") if "volume" in df.columns else np.nan
     oi = "openInterest" if "openInterest" in df.columns else "open_interest"
     out["open_interest"] = pd.to_numeric(df[oi], errors="coerce") if oi in df.columns else np.nan
@@ -548,7 +483,8 @@ def clean_option_chain(
     r_ref        : reference continuously-compounded rate (T-bill), used only
                    when an expiry's parity discount is implausible
     """
-    diag = {"session": str(_as_date(session_date)), "n_raw": int(len(raw))}
+    diag = {"session": str(_as_date(session_date)), "n_raw": int(len(raw)),
+            "r_ref": None if r_ref is None else float(r_ref)}
     empty = CleanChain(pd.DataFrame(columns=_QUOTE_COLS),
                        pd.DataFrame(columns=["expiry", "T", "forward", "discount",
                                              "r", "q", "method", "n_pairs",
@@ -639,29 +575,89 @@ def clean_option_chain(
     return CleanChain(q[_QUOTE_COLS], carry, diag, True, "ok")
 
 
+def observed_quotes(raw: pd.DataFrame, clean: Optional[CleanChain] = None,
+                    spot: Optional[float] = None, source: str = "yahoo") -> pd.DataFrame:
+    """The session's observed two-sided quotes, in the options_snapshots schema.
+
+    This is what the live pipeline stores for an ACCEPTED session: every line
+    of the downloaded chain with bid > 0 and ask >= bid, after the one-
+    settlement-per-expiry choice (the AM lines a PM expiry never uses are left
+    out), with mid = (bid + ask)/2. It is taken BEFORE the spread cap and the
+    parity-consistency filter on purpose: clean_option_chain() of these rows
+    reproduces ``clean`` exactly, so a refit from the stored snapshot
+    reproduces the live fit. The cleaned subset itself is not a fixed point of
+    the cleaner (the parity regression on fewer pairs lands on a slightly
+    different discount; on the 2026-10-16 book the 14-day r_T moved from
+    3.49% to 2.96% and 6 quotes changed), so storing it would break that.
+
+    No lastPrice and no Yahoo IV are stored. ``implied_vol`` is this module's
+    Black-76 IV for the quotes that survived cleaning (``clean``) and NaN for
+    the rest; ``underlying_price`` is the session close.
+    """
+    df = _resolve_settlement(_normalise(raw))
+    bid, ask = df["bid"].to_numpy(float), df["ask"].to_numpy(float)
+    two_sided = (bid > 0) & (ask > 0) & (ask >= bid)
+    df = df[two_sided].copy()
+    df["mid_price"] = 0.5 * (df["bid"] + df["ask"])
+    key = ["expiry", "strike", "right", "root"]
+    if clean is not None and clean.ok and len(clean.quotes):
+        iv = clean.quotes[key + ["implied_vol"]]
+        df = df.merge(iv, on=key, how="left")
+    else:
+        df["implied_vol"] = np.nan
+    if spot is not None:
+        df["underlying_price"] = float(spot)
+    df["source"] = source
+    cols = [c for c in ("expiry", "strike", "right", "root", "settlement", "bid", "ask",
+                        "mid_price", "implied_vol", "volume", "open_interest",
+                        "contract_symbol", "underlying_price", "source") if c in df.columns]
+    return df[cols].sort_values(["expiry", "right", "strike"]).reset_index(drop=True)
+
+
 # ── Live download ─────────────────────────────────────────────────────────────
+
+def _with_retries(fn, what: str, attempts: int, pause: float, sleep: Callable):
+    """fn() with up to ``attempts`` tries (Yahoo fails transiently: empty JSON,
+    429s); the last exception propagates."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:                     # network / parse failure
+            if i == attempts - 1:
+                raise
+            logger.info("  %s failed (%s); retrying in %.0fs", what, exc, pause * (i + 1))
+            sleep(pause * (i + 1))
+
 
 def fetch_spx_chain(
     session_date,
     ticker_factory: Optional[Callable] = None,
     symbols: Sequence[str] = ("^SPX", "^GSPC"),
     neighbours: int = 1,
+    attempts: int = 3,
+    pause: float = 2.0,
+    sleep: Optional[Callable] = None,
 ) -> tuple:
     """Download only the calibration expiries (plus neighbours) of the SPX chain.
 
     Returns (raw DataFrame, meta dict with 'listed', 'requested', 'failed',
     'symbol'). The DataFrame keeps contractSymbol (for the AM/PM root) and
     adds 'expiration' and 'option_type'. lastPrice is downloaded by Yahoo but
-    never used.
+    never used. The listing and each expiry get up to ``attempts`` tries (a
+    run makes ~18 requests; one transient failure must not cost a slice).
     """
     if ticker_factory is None:
         import yfinance as yf
         ticker_factory = yf.Ticker
+    if sleep is None:
+        import time as _time
+        sleep = _time.sleep
     meta = {"listed": [], "requested": [], "failed": [], "symbol": None}
     tk, listed = None, []
     for sym in symbols:
         tk = ticker_factory(sym)
-        listed = list(getattr(tk, "options", None) or [])
+        listed = list(_with_retries(lambda: getattr(tk, "options", None) or [],
+                                    f"{sym} expiry listing", attempts, pause, sleep))
         if listed:
             meta["symbol"] = sym
             break
@@ -673,8 +669,9 @@ def fetch_spx_chain(
     frames = []
     for exp in req:
         try:
-            chain = tk.option_chain(exp)
-        except Exception as exc:                     # network / parse failure
+            chain = _with_retries(lambda: tk.option_chain(exp), f"expiry {exp}",
+                                  attempts, pause, sleep)
+        except Exception as exc:                     # still failing after the retries
             meta["failed"].append(exp)
             logger.warning("  Expiry %s failed: %s", exp, exc)
             continue
