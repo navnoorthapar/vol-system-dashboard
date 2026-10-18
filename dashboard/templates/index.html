@@ -196,7 +196,7 @@
 
         <div class="card-sub mt8" style="color:var(--text3);font-size:10px;line-height:1.5;">
           Next-session forecast from the features of {{ d.clf_feature_date }}.
-          {% if d.clf_agrees == false %}Classifier disagrees with the rule label here — {% endif %}63.4% out-of-sample, it loses to the 90% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+          {% if d.clf_agrees == false %}Classifier disagrees with the rule label here — {% endif %}{% if d.clf_oos_acc is not none %}{{ d.clf_oos_acc|fmt }}% out-of-sample, it loses to the {{ d.clf_persistence_acc|fmt }}% “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong> (shown for research only).
         </div>
         {% else %}
         <div class="card-sub mt8" style="color:var(--text3);font-size:10.5px;">
@@ -367,19 +367,21 @@
       <div class="divider"></div>
 
       <div class="kv-2" style="font-size:12px;color:var(--text2);">
-        <div>Overall Accuracy: <span class="mono" style="color:var(--amber);">63.4%</span></div>
-        <div>Persistence baseline: <span class="mono red">90.0%</span></div>
+        <div>Out-of-sample accuracy: <span class="mono" style="color:var(--amber);">{{ d.clf_oos_acc|fmt }}%</span></div>
+        <div>Persistence baseline: <span class="mono red">{{ d.clf_persistence_acc|fmt }}%</span></div>
         <div>Features: <span class="mono">5 (vvix excluded — C16)</span></div>
         <div>Top Feature: <span class="mono" style="color:var(--yellow);">{% if d.clf_top_feature %}{{ d.clf_top_feature }} ({{ d.clf_top_importance|fmt(".0f") }}%){% else %}—{% endif %}</span></div>
         <div>Model: <span class="mono">XGBoost 3-class</span></div>
         <div>Status: <span class="mono red">RESEARCH ONLY (C17)</span></div>
       </div>
       <div style="margin-top:8px;font-size:10.5px;color:var(--text3);line-height:1.5;">
-        C16: vvix removed from training — the R2 label is defined as VVIX&gt;threshold, so including
-        it inflated accuracy to 86.2% by letting the model recover its own labelling rule; 63.4% is
-        the honest out-of-sample number. <strong style="color:var(--red);">C17: 63.4% loses to the
-        no-skill persistence baseline</strong> ("predict yesterday's regime" scores 90.0% on 2020+,
-        and yesterday's label is fully observable). The classifier is demoted from the trading loop —
+        Accuracy is the shipped model's own evaluation{% if d.clf_test_window %} on {{ d.clf_test_window }}
+        ({{ d.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}.
+        <strong style="color:var(--red);">C17: the classifier loses to the no-skill persistence
+        baseline</strong> ("predict yesterday's regime"; yesterday's label is fully observable).
+        History: C16 reported 86.2% (fixed 100-point VVIX gate, vvix as a feature) and C17 63.4% vs
+        90.0% (fixed labels, a full-sample PDV feature with look-ahead); C22 retrained it on the one
+        adaptive gate with holdout calibration, and the conclusion did not change. The classifier is demoted from the trading loop —
         the backtest uses the lagged deterministic rule labels directly. Kept here as a documented
         negative result: regimes are too sticky for daily ML classification to add value.
       </div>

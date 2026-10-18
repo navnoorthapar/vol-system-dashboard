@@ -993,3 +993,25 @@ def test_greeks_provenance_written_by_risk_monitor_is_read(dash, synth):
     assert d["surface_date"] == last
     html = dash.app.test_client().get("/greeks").get_data(as_text=True)
     assert f"joint_cal_{last}.pkl" in html and "records no source calibration" not in html
+
+
+def test_classifier_accuracy_is_read_from_the_shipped_model(pages):
+    """The front page hard-coded '63.4%' vs '90.0%' (pre-C22 fixed-gate labels with a
+    look-ahead PDV feature) beside a classifier retrained in C22 whose own evaluation
+    records 75.1% vs 86.8%. The figures must come from the pickle's metadata."""
+    import pickle
+
+    with open(ROOT / "data_store" / "signals" / "regime_classifier.pkl", "rb") as f:
+        ev = pickle.load(f).metadata_["evaluation"]
+    idx = pages["/"]
+    oos = f"{round(ev['oos_acc'] * 100, 1)}%"
+    pers = f"{round(ev['persistence_acc'] * 100, 1)}%"
+    assert f"{oos} out-of-sample, it loses to the {pers}" in idx
+    assert re.search(r"Out-of-sample accuracy: <span[^>]*>" + re.escape(oos), idx)
+    assert re.search(r"Persistence baseline: <span[^>]*>" + re.escape(pers), idx)
+
+
+def test_backtest_audit_table_has_the_c22_round(pages):
+    bt = pages["/backtest"]
+    assert 'data-round="C22"' in bt
+    assert "from the C21 run" not in bt

@@ -487,9 +487,10 @@ def heston_model_smile(params: dict,
     With deterministic rates the forward-normalised Heston smile does not
     depend on r or q, so it is priced with S = F = 1 and r = q = 0 and needs
     nothing beyond the five parameters. OTM prices (puts below the forward,
-    calls above) come from the vectorised Carr-Madan pricer on a converged
-    integration grid and are inverted with Black-Scholes; nodes whose OTM price
-    is below SMILE_PRICE_FLOOR are omitted rather than shown.
+    calls above) come from heston_call_batch (Lewis contour integral with a
+    Black-Scholes control variate, adaptive step; no FFT) and are inverted with
+    Black-Scholes; nodes whose OTM price is below SMILE_PRICE_FLOOR are omitted
+    rather than shown.
     """
     from joint_vol_calibration.models.heston import heston_call_batch, implied_vol_from_price
 
@@ -501,7 +502,6 @@ def heston_model_smile(params: dict,
         calls = heston_call_batch(
             1.0, K, T, 0.0, 0.0,
             params["kappa"], params["theta"], params["sigma"], params["rho"], params["v0"],
-            n_points=4096, v_upper=1000.0,
         )
         otm = np.where(k < 0, calls - (1.0 - K), calls)
         lm, iv = [], []
@@ -614,6 +614,7 @@ def load_page1() -> dict[str, Any]:
               "pdv_halflives", "pdv_garch_beta", "pdv_garch_persistence",
               "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
               "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
+              "clf_oos_acc", "clf_persistence_acc", "clf_n_test", "clf_test_window",
               "latest_session"):
         d[k] = None
     d.update(regime_name="UNAVAILABLE", regime_color="#666", regime_label="—",
@@ -777,6 +778,14 @@ def load_page1() -> dict[str, Any]:
         d["clf_conf"] = round(float(proba[c_reg]) * 100, 1)
         d["prob_r0"], d["prob_r1"], d["prob_r2"] = (round(float(p) * 100, 1) for p in proba[:3])
         d["clf_agrees"] = (d["regime"] == c_reg) if d.get("regime_date") == d["clf_feature_date"] else None
+        # Accuracy as recorded by the classifier's own evaluation (never hand-typed).
+        ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
+        if ev.get("oos_acc") is not None and ev.get("persistence_acc") is not None:
+            d["clf_oos_acc"] = round(float(ev["oos_acc"]) * 100, 1)
+            d["clf_persistence_acc"] = round(float(ev["persistence_acc"]) * 100, 1)
+            d["clf_n_test"] = int(ev.get("n_test") or 0)
+            tw = ev.get("test_window") or (None, None)
+            d["clf_test_window"] = f"{tw[0]} → {tw[1]}" if tw[0] else None
         try:
             imp = clf.feature_importance()
             d["clf_top_feature"] = str(imp.index[0])
@@ -1428,6 +1437,8 @@ def load_page4() -> dict[str, Any]:
             "n_round_trips": n_rt,
             "win_rate": (wins / n_rt) if n_rt else None,
             "avg_pnl": (port_pnl / n_rt) if (n_rt and port_pnl is not None) else None,
+            "s3_null_p": _num(em.get("s3_null_p_value")),
+            "cash_ret": _num(em.get("cash_cum_return")),
         }
         d["kpi"] = kpi
 
@@ -1482,7 +1493,7 @@ def load_page4() -> dict[str, Any]:
                            for s in PORTFOLIO_SLEEVES]
 
         for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", "S3 Dispersion", False),
-                                 ("s4", "S4 VRP", False), ("s1", "S1 IVR (ref)", True),
+                                 ("s4", "S4 VRP", False), ("s1", "S1 PDV (ref)", True),
                                  ("s2", "S2 VIX TS (ref)", True)):
             s = sleeves[sig]
             if s["total_pnl"] is None:

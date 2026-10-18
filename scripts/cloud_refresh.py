@@ -183,8 +183,8 @@ def extend_regime_labels(today: "date | None" = None) -> int:
     any stored label that disagrees with the rule. Returns rows added.
 
     This used to append ``clf.predict(...)`` — the XGBoost classifier's output.
-    That is the model C16/C17 demoted: it scores 63.4% out-of-sample and loses
-    to a 90.0% "predict-yesterday" baseline, so it is research-only and is not
+    That is the model C16/C17 demoted: it loses to the "predict-yesterday"
+    baseline (C22, adaptive labels: 75.0% vs 86.7% out of sample), so it is research-only and is not
     supposed to drive anything. But dashboard/app.py headlines the LAST ROW of
     this parquet as "the deterministic rule label, the label the backtest
     trades on", so every day the bot appended a prediction, the front page

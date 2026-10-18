@@ -2,7 +2,7 @@
 {% set page = "backtest" %}
 {% block title %}Backtest — Vol System{% endblock %}
 {% block og_title %}Delta-Hedged Straddle Backtest — SPX/VIX Vol System{% endblock %}
-{% block og_description %}C10 backtest 2018-01-02 → 2025-03-24 after every correction (C16–C21): equity curve, per-signal P&L, half-year Sharpe and the methodology audit.{% endblock %}
+{% block og_description %}C10 backtest 2018-01-02 → 2025-03-24 after every correction (C16–C22): equity curve, per-signal P&L, half-year Sharpe and the methodology audit.{% endblock %}
 
 {% block content %}
 {% set sl = d.sleeves or {} %}
@@ -40,7 +40,7 @@
       <caption>Cumulative return (%) from {{ d.start_date|fmt }} to {{ d.end_date|fmt }}</caption>
       <thead><tr><th scope="col">Series</th><th scope="col">Final</th><th scope="col">Lowest</th><th scope="col">Highest</th></tr></thead>
       <tbody>
-        {{ series_row('Portfolio', d.eq_nav) }}{{ series_row('S1C Contrarian', d.eq_nav_s1c) }}{{ series_row('S3 Dispersion', d.eq_nav_s3) }}{{ series_row('S4 VRP', d.eq_nav_s4) }}{{ series_row('S1 IVR (reference)', d.eq_nav_s1) }}
+        {{ series_row('Portfolio', d.eq_nav) }}{{ series_row('S1C Contrarian', d.eq_nav_s1c) }}{{ series_row('S3 Dispersion', d.eq_nav_s3) }}{{ series_row('S4 VRP', d.eq_nav_s4) }}{{ series_row('S1 PDV (reference)', d.eq_nav_s1) }}
       </tbody>
     </table>
   </div>
@@ -59,11 +59,13 @@
         straddle</strong> — a directional |S−K| bet, not a vol trade. This contaminated all P&amp;L from C10–C17.
         <strong style="color:var(--amber);">Fixed: positions now roll correctly</strong>, and the correction inverts the
         contrarian thesis. The "catastrophic" S1 (−$1.53M) that motivated flipping its direction into S1C was the
-        artifact — corrected, <strong style="color:var(--accent);">S1 is a regime-gated short-VRP harvester ({{ s1.get('total_pnl')|usd_k }}, {{ s1.get('win_rate')|pct(0, false) }} win)</strong>
-        with a fat crisis tail, and the contrarian inversion <strong style="color:var(--red);">S1C collapses to {{ s1c.get('total_pnl')|usd_k }}</strong>.
+        artifact. After C18 S1 looked like a profitable short-VRP harvester; <strong style="color:var(--red);">C22 showed that
+        profit was the skew premium inside the VIX</strong> (straddles had been priced at the VIX, not at ATM vol). Today S1 is
+        {{ s1.get('total_pnl')|usd_k }} ({{ s1.get('win_rate')|pct(0, false) }} win) and the contrarian inversion S1C is
+        <strong style="color:var(--red);">{{ s1c.get('total_pnl')|usd_k }}</strong>.
         The (S1C + S3 + S4) portfolio is <strong style="color:var(--red);">{{ k.get('cum_ret')|pct }} cumulative</strong>, Sharpe {{ k.get('sharpe')|fmt(".2f") }}, max DD {{ k.get('mdd')|pct }}.
-        <strong style="color:var(--accent);">S3 dispersion timing ({{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the lone signal positive across every correction.</strong>
-        Still a documented research result, not a deployable strategy: mark-to-model, concentrated, tail-heavy.
+        S3 (index-leg proxy, {{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the only positive sleeve, and only for β ≳ 0.8.
+        A documented research result, not a deployable strategy: mark-to-model throughout.
       </div>
     </div>
     <div class="legend mt8" aria-hidden="true">
@@ -96,7 +98,7 @@
   <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
     <!-- S1 Card (headline corrected result) -->
     <div style="flex:1;min-width:260px;padding:14px 16px;border-radius:8px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.22);">
-      <div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S1 — IVR SHORT-VRP (CORRECTED)</div>
+      <div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:10px;letter-spacing:0.05em;">S1 — PDV SHORT-VRP (REFERENCE)</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11.5px;">
         <span style="color:var(--text3);">Total P&amp;L</span>
         <span class="mono {% if d.research_s1.green %}green{% else %}red{% endif %}">{{ d.research_s1.total_pnl }}</span>
@@ -108,12 +110,14 @@
         <span class="mono">{{ d.research_s1.n_trades }}</span>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
-        {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles selling rich implied vol in R1 — a regime-gated VRP harvester.
-        Its prior <strong style="color:var(--red);">−$1.53M "catastrophe" was the stale-strike bug.</strong>
-        Corrected: <strong style="color:var(--accent);">{{ s1.get('total_pnl')|usd_k }}, {{ s1.get('win_rate')|pct(0, false) }} win</strong>{% if s1t.get('positive_years') %}, positive (by exit year) in {{ s1t.positive_years|join(', ') }}{% endif %}.
-        But this is <em>not</em> a green light — the payoff is fat-tailed (worst single trade {{ s1t.get('worst_pnl')|usd_k }}, {{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}{% if s1t.get('negative_years') %}; losing exit years: {% for y in s1t.negative_years %}{{ y.year }} {{ y.pnl|usd_k }}{{ ', ' if not loop.last else '' }}{% endfor %}{% endif %})
-        and concentrated (top-5 trades = {{ s1t.get('top5_share')|pct(0, false) }} of net profit), and it is mark-to-model. Honest read: short-VRP
-        earns the premium in calm regimes and pays it back in spikes.
+        {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles sold in R1.
+        Its pre-C18 <strong style="color:var(--red);">−$1.53M "catastrophe" was the stale-strike bug</strong>; after C18/C21 it looked like a
+        profitable VRP harvester (+$694K). <strong style="color:var(--red);">C22: that profit came from selling straddles at the VIX</strong>,
+        a variance-swap rate that contains the skew premium. Priced at ATM vol = β·VIX (β estimated from real chains) it is
+        <strong class="{% if (s1.get('total_pnl') or 0) >= 0 %}green{% else %}red{% endif %}">{{ s1.get('total_pnl')|usd_k }}, {{ s1.get('win_rate')|pct(0, false) }} win</strong>;
+        the sign flips between β = 0.90 and 0.85 (see the β sensitivity table in the README). Worst single trade
+        {{ s1t.get('worst_pnl')|usd_k }} ({{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}){% if s1t.get('negative_years') %}; losing exit years: {% for y in s1t.negative_years %}{{ y.year }} {{ y.pnl|usd_k }}{{ ', ' if not loop.last else '' }}{% endfor %}{% endif %}.
+        Reference only, and mark-to-model.
       </div>
     </div>
     <!-- S1C Card (thesis collapse) -->
@@ -131,9 +135,10 @@
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--text2);line-height:1.6;">
         S1C flipped S1's direction on the premise that S1 lost both ways, so the PDV spread had to be contrarian.
-        <strong style="color:var(--red);">C18 verdict: that premise was the bug.</strong> Once S1 rolls its straddles
-        properly it is profitable, so inverting it is the <em>wrong</em> trade — S1C is
-        <strong style="color:var(--red);">{{ s1c.get('total_pnl')|usd_k }}</strong> on {{ (d.start_date or '')[:4] }}–{{ (d.end_date or '')[:4] }}. Demoted, like the ML classifier in C17:
+        <strong style="color:var(--red);">C18 verdict: that premise was the bug.</strong> C22 removed S1's apparent profit as well,
+        so neither direction makes money: S1C is
+        <strong style="color:var(--red);">{{ s1c.get('total_pnl')|usd_k }}</strong> on {{ (d.start_date or '')[:4] }}–{{ (d.end_date or '')[:4] }} and also loses on its 2013–2017
+        pseudo-out-of-sample check. It remains a portfolio sleeve because the portfolio's composition is held fixed across correction rounds so they stay comparable;
         a thesis that only held under a bug is not a signal.
       </div>
     </div>
@@ -294,7 +299,7 @@
   </table>
   </div>
   <div style="margin-top:8px;font-size:11px;color:var(--text3);">
-    MAIN signals (S1C, S3, S4) form the audited portfolio — every number is from the C21 run (the latest correction that re-ran the backtest). REF signals (S1, S2) are retained for historical comparison only.
+    MAIN signals (S1C, S3, S4) form the audited portfolio — every number is from the C22 run (the latest correction that re-ran the backtest). REF signals (S1, S2) are retained for historical comparison only.
   </div>
 </div>
 
@@ -318,16 +323,16 @@
     <h2 class="chart-title" style="color:var(--cyan);">C18 — The Contrarian Thesis Was a Strike-Rolling Artifact</h2>
     <div style="font-size:12.5px;color:var(--text2);line-height:1.8;">
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1 {{ s1.get('total_pnl')|usd_k }}</span>
+        <span class="tag {% if (s1.get('total_pnl') or 0) >= 0 %}tag-green{% else %}tag-red{% endif %}" style="margin-right:8px;">S1 {{ s1.get('total_pnl')|usd_k }}</span>
         The "S1 loses both ways" diagnosis that launched the contrarian idea was the bug:
         positions never rolled, so S1 held one stale-strike straddle past expiry. Rolling
-        properly, <strong style="color:var(--accent);">S1 is a regime-gated short-VRP harvester</strong>
-        — profitable in calm regimes, with a fat crisis tail.
+        properly it looked like a profitable short-VRP harvester, until C22 priced its straddles at ATM vol
+        (β·VIX) instead of the VIX: the "profit" was the skew premium, and S1 now loses.
       </div>
       <div style="margin-bottom:8px;">
         <span class="tag tag-red" style="margin-right:8px;">S1C {{ s1c.get('total_pnl')|usd_k }}</span>
-        Inverting a signal that is actually <em>profitable</em> is the wrong trade. The contrarian
-        flip only looked good while S1 looked catastrophic — and that was the artifact.
+        The contrarian flip only looked good while S1 looked catastrophic — and that was the artifact.
+        With S1 itself now unprofitable, neither direction of the PDV spread trade makes money.
         <strong style="color:var(--red);">S1C is demoted</strong>, exactly like the ML classifier in C17:
         a thesis that holds only under a bug is not a signal.
       </div>
@@ -348,15 +353,15 @@
       <div style="margin-bottom:8px;">
         <span class="tag tag-green" style="margin-right:8px;">S3 {{ s3.get('total_pnl')|usd_k }}</span>
         Dispersion proxy fires only at VIX/VVIX extremes — {{ s3.get('n_trades')|fmt }} trades in {{ (d.start_date or '')[:4] }}–{{ (d.end_date or '')[:4] }},
-        <strong style="color:var(--accent);">{{ s3.get('win_rate')|pct(0, false) }} win rate</strong>, positive at every tested P&amp;L
-        scale (0.5%–4%/z-unit) and in pseudo-OOS. Unchanged by the strike-rolling fix — the one
-        robust finding; dollar magnitude is proxy-scaled, not market-derived.
+        <strong style="color:var(--accent);">{{ s3.get('win_rate')|pct(0, false) }} win rate</strong>. Since C22 it is priced as the index leg
+        of the dispersion trade (a short SPX straddle; no single-stock options data), and its timing beats a
+        random-walk null (p = {{ k.get('s3_null_p')|fmt(".3f") }}). The pre-C22 "+$23K at every z-scale" was not option P&amp;L.
+        Positive only for β ≳ 0.8, and below the T-bill return.
       </div>
       <div style="margin-bottom:8px;">
-        <span class="tag tag-green" style="margin-right:8px;">S1 {{ s1.get('total_pnl')|usd_k }}</span>
-        {{ s1.get('win_rate')|pct(0, false) }} win, but <strong style="color:var(--amber);">not deployable</strong>: fat-tailed (worst trade
-        {{ s1t.get('worst_pnl')|usd_k }}, exited {{ s1t.get('worst_exit')|fmt }}), concentrated (top-5 = {{ s1t.get('top5_share')|pct(0, false) }} of net profit), and mark-to-model. Short-VRP earns the
-        premium in calm regimes and pays it back in spikes.
+        <span class="tag {% if (s1.get('total_pnl') or 0) >= 0 %}tag-green{% else %}tag-red{% endif %}" style="margin-right:8px;">S1 {{ s1.get('total_pnl')|usd_k }}</span>
+        {{ s1.get('win_rate')|pct(0, false) }} win, reference only: its sign depends on β (positive at β = 0.90, negative from 0.85 down);
+        worst trade {{ s1t.get('worst_pnl')|usd_k }}, exited {{ s1t.get('worst_exit')|fmt }}. Selling straddles at the VIX books the skew premium as profit.
       </div>
       <div>
         <span class="tag tag-red" style="margin-right:8px;">S4 {{ s4.get('total_pnl')|usd_k }}</span>
@@ -367,7 +372,7 @@
   </div>
 </div>
 
-<!-- ── C16–C21 Methodology Audit ─────────────────────────────────────────── -->
+<!-- ── C16–C22 Methodology Audit ─────────────────────────────────────────── -->
 {# Rows as data: the heading's counts are computed from them (the hand-typed
    "Ten Flaws Found, Eight Fixed" sat above an 11-row table). #}
 {% set audit = [
@@ -385,7 +390,7 @@
    "evidence": "Pseudo-OOS under C17: S1C −$333K — the apparent edge was an artifact"},
   {"round": "C16", "status": "QUANTIFIED", "flaw": "S3 arbitrary P&amp;L scale", "tone": "amber",
    "body": "the 2%/z-unit proxy scale is assumed (no single-stock options data). Sensitivity run at 0.5%/1%/2%/4% per z-unit.",
-   "evidence": "C16 sensitivity run: P&amp;L +$5K…+$52K, win 15–17 of 17 at every scale (before C18/C21 re-priced every trade; S3 now has " ~ (s3.get('n_trades')|fmt) ~ " trades)"},
+   "evidence": "C16 sensitivity run: P&amp;L +$5K…+$52K, win 15–17 of 17 at every scale (before C18, C21 and C22 re-priced every trade and C22 replaced the z-unit proxy with the index leg; S3 now has " ~ (s3.get('n_trades')|fmt) ~ " trades)"},
   {"round": "C17", "status": "FIXED", "flaw": "Classifier never benchmarked vs persistence", "tone": "red",
    "body": "the no-skill baseline \"predict yesterday's regime\" scores 90.0% on 2020+ (labels are same-day observables, so y(t−1) is known at t−1). The honest 63.4% classifier LOSES by 27 points. ML demoted from the trading loop; backtest uses lagged rule labels directly.",
    "evidence": "63.4% vs 90.0% — the ML added negative value"},
@@ -409,7 +414,25 @@
    "evidence": "The published \"best calibration\" had been the day the VIX feed failed"},
   {"round": "C21", "status": "FIXED", "flaw": "Cash hurdle was a unit-test fixture; straddles marked a day too rich", "tone": "red",
    "body": "two independent defects found by an adversarial audit. (a) The only T-bill rows inside the backtest window were seven synthetic days written by <span class=\"mono\">test_rates.py</span> into the tracked database and forward-filled for five years, so \"Sharpe vs ^IRX\" was measured against <span class=\"mono\">np.linspace(0.015, 0.020)</span>; the real ^IRX history is now loaded (1,809 rows) and the tests can no longer write to it. (b) <span class=\"mono\">T_rem</span> was computed from the pre-increment day count, so the first holding day carried no time decay and every later mark valued the straddle one day too rich — which systematically flattered the short-vol side.",
-   "evidence": "Portfolio −19.0%→−26.1%, Sharpe −1.57→−1.80, max DD −25.9%→−31.5%; S1 +$463K→+$694K, S1C −$404K→−$600K; S3 unchanged again"}
+   "evidence": "Portfolio −19.0%→−26.1%, Sharpe −1.57→−1.80, max DD −25.9%→−31.5%; S1 +$463K→+$694K, S1C −$404K→−$600K; S3 unchanged again"},
+  {"round": "C22", "status": "FIXED", "flaw": "ATM straddles priced at the VIX", "tone": "red",
+   "body": "the VIX is a 30-day variance-swap rate that contains the skew premium; straddles were priced and marked at it. ATM vol is now β·VIX with β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84), with a sensitivity grid.",
+   "evidence": "C22 bridge row 11: S1 +$722K → −$508K from β alone; at β = 1 S1 would show +$2.6M"},
+  {"round": "C22", "status": "FIXED", "flaw": "Two R2 gates and a hard-coded VVIX override", "tone": "red",
+   "body": "the published labels used the adaptive gate (rolling 252-day 80th percentile of VVIX) while the backtest traded a fixed 100-point VVIX gate (≈ 48% vs ≈ 23% of the window in R2), and the signal engine OR-ed a VVIX-above-100 override onto any labels. One adaptive gate everywhere; no override.",
+   "evidence": "C22 bridge row 13: portfolio −$134K"},
+  {"round": "C22", "status": "FIXED", "flaw": "Free hedging, no carry, sizing off $1M, no-op netting", "tone": "amber",
+   "body": "the opening hedge and closing unwind were free, the self-financing book earned no carry, size and margin used $1M instead of the sleeve's running NAV, and the correlation netting factor was clipped into a no-op.",
+   "evidence": "C22 bridge rows 5, 6, 9, 10: −$15K, +$20K, +$51K, +$18K"},
+  {"round": "C22", "status": "FIXED", "flaw": "S3 P&amp;L was a z-score times an assumed 2%", "tone": "red",
+   "body": "the \"survivor\" was positive on 98% of random-walk null paths: it measured mean reversion of a ratio, not option P&amp;L. S3 is now the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.",
+   "evidence": "S3 +$23K (z-units) → " ~ (s3.get('total_pnl')|usd_k) ~ " (index leg), null p = 0.035; positive only for β ≳ 0.8"},
+  {"round": "C22", "status": "FIXED", "flaw": "PDV spread compared the 30-day VIX with a 1-day E|r| forecast", "tone": "amber",
+   "body": "σ̂ averaged 0.71× the forward 21-day RMS vol, so \"VIX &gt; σ̂ + 2 vp\" held on 95% of sessions. The spread now uses a 21-day RMS-vol forecast, refit daily on labels fully observed at the forecast origin.",
+   "evidence": "C22 bridge row 14: portfolio +$40K"},
+  {"round": "C22", "status": "FIXED", "flaw": "Sharpe charged cash twice", "tone": "green",
+   "body": "option P&amp;L on unfunded collateral is already an excess return; subtracting ^IRX again double-counted it. Sharpe uses rf = 0 (collateral assumed to earn T-bills), with the T-bill benchmark shown.",
+   "evidence": "C22 bridge row 2: Sharpe −1.85 → −1.17 with P&amp;L unchanged"}
 ] %}
 {% set n_fixed = audit|selectattr('status', 'equalto', 'FIXED')|list|length %}
 {% set n_quant = audit|selectattr('status', 'equalto', 'QUANTIFIED')|list|length %}
@@ -417,7 +440,7 @@
 <div class="card" style="margin-bottom:16px;border-color:rgba(255,170,51,0.25);background:rgba(255,170,51,0.02);">
   <h2 class="chart-title" style="color:var(--amber);" id="audit-title">{{ rounds[0] }}–{{ rounds[-1] }} Methodology Audit — {{ audit|length }} Flaws Found, {{ n_fixed }} Fixed, {{ n_quant }} Quantified</h2>
   <div style="font-size:11.5px;color:var(--text2);margin-bottom:12px;">
-    Self-audit of the methodology (C16: 2026-06-11, C17 redteam the same week, C18–C21 after). Every number on this page is from the C21 run.
+    Self-audit of the methodology (C16: 2026-06-11, C17 redteam the same week, C18–C22 after). Every number on this page is from the C22 run (β = 0.82, one adaptive R2 gate, rf = 0 Sharpe).
     Each successive fix made the backtest <em>worse</em> — the original "edge" was a stack of artifacts. Figures in the Evidence column are the effect each correction had when it was made.
   </div>
   <div class="table-scroll mt8" tabindex="0" role="region" aria-labelledby="audit-title">
@@ -432,7 +455,7 @@
     </thead>
     <tbody>
       {% for row in audit %}
-      <tr data-status="{{ row.status|lower }}" data-round="{{ row.round }}"{% if row.round in ('C18', 'C21') %} style="background:rgba(255,170,51,0.05);"{% endif %}>
+      <tr data-status="{{ row.status|lower }}" data-round="{{ row.round }}"{% if row.round in ('C18', 'C21', 'C22') %} style="background:rgba(255,170,51,0.05);"{% endif %}>
         <td class="mono" style="color:{% if row.round == 'C16' %}var(--accent){% elif row.round == 'C17' %}#ff8855{% else %}var(--amber){% endif %};font-weight:700;">{{ loop.index }}</td>
         <td class="wrap" style="font-weight:600;">{{ row.flaw|safe }}</td>
         <td class="wrap" style="font-size:11px;color:var(--text2);">{{ row.status }}{% if row.round != 'C16' %} ({{ row.round }}){% endif %} — {{ row.body|safe }}</td>
@@ -445,8 +468,8 @@
   <div style="margin-top:10px;font-size:11px;color:var(--text3);">
     Honest read: after removing every identified artifact — including the strike-rolling bug that had been
     distorting the P&amp;L the whole time — the portfolio is <strong style="color:var(--red);">{{ k.get('cum_ret')|pct }}</strong> and the
-    only signal with cross-correction robustness is S3's timing. S1 is a real short-VRP harvester ({{ s1.get('total_pnl')|usd_k }} in-sample)
-    but fat-tailed, concentrated and mark-to-model — not deployable. This dashboard documents a negative result with
+    only positive sleeve is S3's index-leg proxy, which depends on β. S1, the former short-VRP "harvester", is
+    {{ s1.get('total_pnl')|usd_k }} once straddles are priced at ATM vol rather than the VIX — not deployable. This dashboard documents a negative result with
     full methodology: the infrastructure (calibration, Greeks, hedging, walk-forward harness) is the deliverable;
     the trading signals are the case study in why most backtests flatter themselves.
   </div>
@@ -619,7 +642,7 @@ vsCharts(function () {
           order: 4,
         },
         {
-          label: 'S1 IVR (ref)',
+          label: 'S1 PDV (ref)',
           data: {{ d.eq_nav_s1 | tojson }},
           borderColor: 'rgba(77,148,255,0.85)',   // >= 3:1 against the card (was 0.35 alpha, ~1.7:1)
           backgroundColor: 'transparent',
