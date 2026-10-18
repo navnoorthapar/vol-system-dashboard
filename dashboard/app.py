@@ -1523,6 +1523,26 @@ def _trade_summary(trades: list, sig: str) -> dict:
     }
 
 
+def _entries_and_rolls(trades: list, sig: str, eq: Optional[pd.DataFrame]) -> dict:
+    """How a sleeve's trade records split into entries and expiry rolls.
+
+    A position held past its straddle's expiry is closed with exit_reason
+    "expiry" and continued as a new record entered that day, so a sleeve's
+    trade count is its entries (flat -> on in the stored position series)
+    plus those rolls: S3's 39 trades are 26 entries and 13 rolls. Returns
+    {"entries", "rolls"} only when the two add up to the trade count.
+    """
+    col = f"{sig}_position"
+    tr = [t for t in trades if getattr(t, "signal", None) == sig]
+    if eq is None or col not in eq.columns or not tr:
+        return {}
+    pos = pd.to_numeric(eq[col], errors="coerce").fillna(0.0)
+    entries = int(((pos != 0) & (pos.shift(1, fill_value=0.0) == 0)).sum())
+    expiry_exits = {pd.Timestamp(t.exit_date) for t in tr if getattr(t, "exit_reason", None) == "expiry"}
+    rolls = sum(1 for t in tr if pd.Timestamp(t.entry_date) in expiry_exits)
+    return {"entries": entries, "rolls": rolls} if entries + rolls == len(tr) else {}
+
+
 def _read_csv_rows(path: Path) -> list[dict]:
     df = pd.read_csv(path)
     return [_clean(r) for r in df.to_dict("records")]
@@ -1864,7 +1884,13 @@ def load_page4() -> dict[str, Any]:
             "n_trades": n_rt, "n_closed": n_closed, "n_open": n_rt - n_closed,
             "win_rate": float((closed > 0).mean()) if n_closed else None,
             "avg_pnl": float(closed.sum()) / len(PORTFOLIO_SLEEVES) / n_closed if n_closed else None,
+            # The null test sizes every path, the real one included, at S3's
+            # BASE kelly (the engine's pass 1); the S3 P&L the page reports is
+            # after the pass-2 sizing overlay (+$41,952 vs +$56,471 on
+            # 2018-2025). The base-size figure is shown only when the results
+            # record it (metrics["s3_null_real_pnl"]); it is never typed in.
             "s3_null_p": _num(em.get("s3_null_p_value")),
+            "s3_null_real": _num(em.get("s3_null_real_pnl")),
             "cash_ret": _num(em.get("cash_cum_return")),
         }
         d["kpi"] = kpi
@@ -1906,6 +1932,7 @@ def load_page4() -> dict[str, Any]:
                 "n_open": sum(1 for t in trades if getattr(t, "signal", None) == sig
                               and getattr(t, "is_open", False)),
                 "summary": _trade_summary(trades, sig),
+                **_entries_and_rolls(trades, sig, eq),
             }
         d["sleeves"] = sleeves
 

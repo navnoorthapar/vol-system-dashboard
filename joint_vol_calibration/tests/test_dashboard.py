@@ -1503,3 +1503,45 @@ def test_pre_c22_spread_statistics_are_computed_from_the_data(dash, pages, monke
     monkeypatch.setattr(dash, "pre_c22_spread_facts", lambda *a, **k: {**pc, "share": 0.5, "ratio": 0.9})
     text = _visible_text(dash.app.test_client().get("/backtest").get_data(as_text=True))
     assert "averaged 0.90×" in text and "held on 50% of its" in text
+
+
+def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, pages, synth):
+    """The p = 0.075 sat next to S3's +$56,471, but s3_timing_null_test sizes every
+    path, the real one included, at S3's base (pass-1) kelly: its real statistic is
+    +$41,952, before the sizing overlay. The page says so, and shows the base-size
+    figure only when the stored results record it."""
+    m = engine_state["metrics"]
+    text = _visible_text(pages["/backtest"])
+    p = f"{m['s3_null_p_value']:.3f}"
+    assert ("its timing, tested on S3 at base (pass-1) size, before the sizing overlay, does not beat "
+            f"random entry dates at the 5% level (p = {p})") in text
+    assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
+    assert f"timing null test on S3 at base (pass-1) size, before the sizing overlay: p = {p}" in text
+    assert "null p =" not in text and "S3 entries vs random entry dates" not in text
+    if "s3_null_real_pnl" not in m:
+        assert "+$41,952" not in text                    # never typed in
+    # when the results record the base-size statistic, it is quoted
+    path = synth["data"] / "backtest" / "full_results.pkl"
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    state["metrics"]["s3_null_real_pnl"] = 41951.87
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+    text = _visible_text(dash.app.test_client().get("/backtest").get_data(as_text=True))
+    assert "tested on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text
+
+
+def test_s3_trade_count_is_explained_as_entries_plus_rolls(dash, engine_state, pages):
+    """S3's 39 trade records are 26 entries and 13 expiry rolls; 'S3 fires 39 times'
+    overstated its breadth."""
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    pos = eq["s3_position"]
+    entries = int(((pos != 0) & (pos.shift(1, fill_value=0) == 0)).sum())
+    s3 = [t for t in engine_state["all_trades"] if t.signal == "s3"]
+    exp = {t.exit_date for t in s3 if t.exit_reason == "expiry"}
+    rolls = sum(1 for t in s3 if t.entry_date in exp)
+    assert (len(s3), entries, rolls) == (39, 26, 13)
+    text = _visible_text(pages["/backtest"])
+    assert (f"{len(s3)} trades in 2018–2025 ({entries} entries plus {rolls} rolls of a position held "
+            f"past its straddle's expiry)") in text
+    assert f"S3 enters {entries} times in 2018–2025" in text and "S3 fires 39 times" not in text

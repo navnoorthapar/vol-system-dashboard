@@ -17,7 +17,9 @@
 {% set s3_beta_txt = ('positive for β ≥ ' ~ (s3f.hi|fmt('.2f')) ~ ' in the sensitivity grid, negative at ' ~ (s3f.lo|fmt('.2f'))) if (s3f and s3f.positive_above) else 'its sign depends on β (see the sensitivity grid)' %}
 {% set yrs = (d.start_date or '')[:4] ~ '–' ~ (d.end_date or '')[:4] %}
 {% set _p = k.get('s3_null_p') %}
-{% set s3_timing_txt = ('its timing beats random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if (_p is not none and _p < 0.05) else (('its timing does not beat random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if _p is not none else 'its timing null test is not recorded') %}
+{# The null test sizes S3 at its base (pass-1) kelly, not through the sizing overlay behind the reported S3 P&L. #}
+{% set s3_base_txt = 'S3 at base (pass-1) size' ~ ((' (' ~ (k.s3_null_real|usd(true)) ~ ')') if k.get('s3_null_real') is not none else '') ~ ', before the sizing overlay' %}
+{% set s3_timing_txt = ('its timing, tested on ' ~ s3_base_txt ~ ', ' ~ ('beats' if _p < 0.05 else 'does not beat') ~ ' random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if _p is not none else 'its timing null test is not recorded' %}
 {% set be = d.beta_est %}
 {% if be %}{% set _later = be.later[0] if be.later else none %}
 {% set beta_src_txt = beta_txt ~ ' = mean of ' ~ be.n_db ~ ' DB chain' ~ ('s' if be.n_db != 1 else '') ~ ' and ' ~ be.n_live ~ ' live capture' ~ ('s' if be.n_live != 1 else '') ~ ' (' ~ (be.lo|fmt('.2f')) ~ '–' ~ (be.hi|fmt('.2f')) ~ ')' %}
@@ -69,7 +71,7 @@
   <div class="card card-sm">
     <h2 class="card-label">S3 timing null test</h2>
     <div class="card-value">p = {{ k.get('s3_null_p')|fmt(".3f") }}</div>
-    <div class="card-sub">S3 entries vs random entry dates: {% if _p is not none and _p < 0.05 %}significant at 5%{% elif _p is not none %}<strong>not</strong> significant at 5%{% else %}not recorded{% endif %}</div>
+    <div class="card-sub">{{ s3_base_txt }}, vs random entry dates: {% if _p is not none and _p < 0.05 %}significant at 5%{% elif _p is not none %}<strong>not</strong> significant at 5%{% else %}not recorded{% endif %}</div>
   </div>
 </div>
 
@@ -241,7 +243,8 @@
         {{ s3.get('win_rate')|pct(0, false) }} win) is the only positive sleeve, {{ s3_beta_txt }}, and below the T-bill return.
       </p>
       <p>
-        <strong>S3 · dispersion (index leg)</strong> fires only at VIX/VVIX extremes: {{ s3.get('n_trades')|fmt }} trades in {{ yrs }},
+        <strong>S3 · dispersion (index leg)</strong> fires only at VIX/VVIX extremes: {{ s3.get('n_trades')|fmt }} trades in {{ yrs }}{% if s3.get('rolls') %}
+        ({{ s3.entries }} entries plus {{ s3.rolls }} rolls of a position held past its straddle's expiry){% endif %},
         {{ s3.get('win_rate')|pct(0, false) }} win rate. Since C22 it is priced as the index leg of the dispersion trade (a short SPX
         straddle; there is no single-stock options data), and {{ s3_timing_txt }}.
         The pre-C22 “+$23K at every z-scale” was not option P&amp;L.
@@ -427,7 +430,7 @@
    "evidence": ev.get('costs', 'C22 bridge unavailable')},
   {"round": "C22", "status": "FIXED", "flaw": "S3 P&amp;L was a z-score times an assumed 2%", "tone": "red",
    "body": "the “survivor” was positive on 99.5% of random-walk null paths: it measured mean reversion of a ratio, not option P&amp;L. S3 is now the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.",
-   "evidence": "S3 +$23K (z-units, as published in C21) → " ~ (s3.get('total_pnl')|usd_k) ~ " (index leg), null p = " ~ (k.get('s3_null_p')|fmt('.3f')) ~ "; " ~ s3_beta_txt},
+   "evidence": "S3 +$23K (z-units, as published in C21) → " ~ (s3.get('total_pnl')|usd_k) ~ " (index leg); timing null test on " ~ s3_base_txt ~ ": p = " ~ (k.get('s3_null_p')|fmt('.3f')) ~ "; " ~ s3_beta_txt},
   {"round": "C22", "status": "FIXED", "flaw": "PDV spread compared the 30-day VIX with a 1-day E|r| forecast", "tone": "amber",
    "body": ("the pre-C22 σ̂ (a 1-day E|r| forecast) averaged " ~ (_pc.ratio|fmt('.2f')) ~ "× the realised RMS vol of the next " ~ _pc.horizon ~ " sessions in the backtest window, so “VIX &gt; σ̂ + " ~ (_pc.threshold_vp|fmt('.0f')) ~ " vol pts” held on " ~ ((_pc.share * 100)|fmt('.0f')) ~ "% of its " ~ ("{:,}".format(_pc.n)) ~ " sessions." if _pc else "the pre-C22 σ̂ was a 1-day E|r| forecast, not a 21-day vol forecast (its statistics are not available).") ~ " The spread now uses a 21-day RMS-vol forecast, refit daily on labels fully observed at the forecast origin.",
    "evidence": ev.get('pdv_h21', 'C22 bridge unavailable')},
@@ -532,7 +535,7 @@
     <div class="prose">
       <p><strong>Option prices.</strong> All P&amp;L is Black–Scholes on β·VIX — the database holds no option prices inside the backtest window{% if d.option_snapshots and d.option_snapshots.dates %} (its {{ d.option_snapshots.dates|length }} SPX chain{{ 's' if d.option_snapshots.dates|length != 1 else '' }}, {{ "{:,}".format(d.option_snapshots.n_rows) }} rows, are snapshots from {{ d.option_snapshots.dates[0] }}{% if d.option_snapshots.dates|length > 1 %} to {{ d.option_snapshots.dates[-1] }}{% endif %}{% if be %}; β comes from {{ be.n_db }} of them plus a live capture, and {{ be.later|length }} {{ 'is a later check' if be.later|length == 1 else 'are later checks' }}{% endif %}){% endif %}. Historical end-of-day chains would turn the backtest from an estimate into evidence.</p>
       <p><strong>Jumps.</strong> The one Bates SVJ fit did not converge (λ ended at its bound and the fit was worse than nested Heston), and daily returns cannot separate frequent small jumps from rare large ones; intraday data (bipower variation) would.</p>
-      <p><strong>Breadth.</strong> S3 fires {{ s3.get('n_trades')|fmt }} times in {{ yrs }}; by the fundamental law of active management that breadth cannot support an information ratio. Single-name option data across index constituents would.</p>
+      <p><strong>Breadth.</strong> S3 {% if s3.get('rolls') %}enters {{ s3.entries }} times{% else %}trades {{ s3.get('n_trades')|fmt }} times{% endif %} in {{ yrs }}; by the fundamental law of active management that breadth cannot support an information ratio. Single-name option data across index constituents would.</p>
       <p><strong>Execution.</strong> Costs are a flat assumption; quote-level bid–ask data would test whether a thin vol-carry edge survives the round trip. The Monte-Carlo-priced Quintic OU calibration is slow (see the calibration page).</p>
     </div>
   </div>
