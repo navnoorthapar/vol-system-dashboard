@@ -8,10 +8,16 @@ its accuracy and speed claims are reproducible, not because anything relies
 on it.
 
   NN-1 (SPX): (x = ln(K/F), √T, κ, θ, σ, ρ, v0) → Black-Scholes implied vol
-  NN-2 (VIX): (κ, θ, σ, v0, tenor) → heston_vix_futures_curve value.
+  NN-2 (VIX): (κ, θ, σ, v0, tenor) → heston_vix_term_index value, the
+              Heston level of a spot-starting VIX-style index (^VIX9D/^VIX/
+              ^VIX3M/^VIX6M at their tenors) — the mapping the joint
+              calibrator's VIX leg uses. Before C22 the target was
+              heston_vix_futures_curve (a FUTURES mapping, the wrong
+              instrument for the spot indices). σ is kept as an input for
+              checkpoint compatibility; the index does not depend on it.
               DEPRECATED: the closed form it approximates is itself cheaper
-              than the network (NNPricer.benchmark_vix: 12 µs for
-              heston_vix_futures_curve vs 87 µs for the NN-2 forward pass,
+              than the network (NNPricer.benchmark_vix: ~14 µs for
+              heston_vix_term_index vs ~87 µs for the NN-2 forward pass,
               8 tenors), and exact, so NN-2 accelerates nothing; it is kept
               only so old checkpoints and results can be reproduced.
 
@@ -104,7 +110,7 @@ from joint_vol_calibration.config import (
 from joint_vol_calibration.models.heston import (
     characteristic_function,
     heston_call_batch,
-    heston_vix_futures_curve,
+    heston_vix_term_index,
 )
 from joint_vol_calibration.models.implied_vol import (  # noqa: F401  (_bs_iv_vectorized re-exported)
     _bs_iv_vectorized,
@@ -156,7 +162,10 @@ NN_LABEL_MIN_OTM_PRICE_REL = 1e-6   # label / benchmark floor on OTM value / F
 NN_VIX_TARGET_MAE = 0.05            # VIX points (NN-2's own units)
 
 _SPX_CKPT_FORMAT = "spx_iv_net_v2"
-_VIX_CKPT_FORMAT = "vix_futures_net_v2"
+_VIX_CKPT_FORMAT = "vix_index_net_v3"
+# What NN-2 is trained to reproduce; recorded in the training-data cache so a
+# cache built on the pre-C22 futures target is regenerated, not reused.
+_VIX_TARGET = "heston_vix_term_index"
 
 
 # ── Domain helpers ────────────────────────────────────────────────────────────
@@ -452,7 +461,8 @@ def generate_vix_training_data(
     Generate (or load) training data for the deprecated NN-2.
 
     Features: kappa, theta, sigma, v0, tenor_years (rho drops out of the VIX
-    formula). Target: heston_vix_futures_curve value in VIX points. Each
+    formula, and sigma out of the spot index). Target: heston_vix_term_index,
+    the spot-starting index level in VIX points at horizon tenor_years. Each
     parameter set gets n_tenors tenors; rows carry set_id for group splits.
 
     Returns
@@ -462,8 +472,8 @@ def generate_vix_training_data(
     domain = domain or VIX_TRAINING_DOMAIN
     path = Path(path) if path else _VIX_DATA_PATH
     n_sets = max(n_samples // n_tenors, 1)
-    meta = {"version": 2, "domain": domain, "n_param_sets": n_sets,
-            "n_tenors": n_tenors, "seed": seed}
+    meta = {"version": 3, "target": _VIX_TARGET, "domain": domain,
+            "n_param_sets": n_sets, "n_tenors": n_tenors, "seed": seed}
     if not force_regen:
         cached = _read_cached(path, meta)
         if cached is not None:
@@ -476,8 +486,8 @@ def generate_vix_training_data(
     tenors = rng.uniform(lo, hi, (n_sets, n_tenors))
     target = np.empty((n_sets, n_tenors))
     for i in range(n_sets):
-        target[i] = heston_vix_futures_curve(params["kappa"][i], params["theta"][i],
-                                             params["sigma"][i], params["v0"][i], tenors[i])
+        target[i] = heston_vix_term_index(params["kappa"][i], params["theta"][i],
+                                          params["sigma"][i], params["v0"][i], tenors[i])
     df = pd.DataFrame({
         "set_id": np.repeat(np.arange(n_sets), n_tenors),
         **{k: np.repeat(params[k], n_tenors) for k in ("kappa", "theta", "sigma", "v0")},
@@ -1138,12 +1148,12 @@ class NNPricer:
         tenors: np.ndarray,
     ) -> np.ndarray:
         """
-        DEPRECATED NN-2 prediction of heston_vix_futures_curve (VIX points).
+        DEPRECATED NN-2 prediction of heston_vix_term_index (VIX points).
 
-        Call heston_vix_futures_curve directly: it is exact and faster than
+        Call heston_vix_term_index directly: it is exact and faster than
         this network. Inputs outside NN-2's training domain raise ValueError.
         """
-        warnings.warn("NNPricer.vix_prices (NN-2) is deprecated: heston_vix_futures_curve "
+        warnings.warn("NNPricer.vix_prices (NN-2) is deprecated: heston_vix_term_index "
                       "is exact and faster", DeprecationWarning, stacklevel=2)
         if self._vix_model is None:
             raise RuntimeError("NN-2 not loaded")
@@ -1308,7 +1318,7 @@ class NNPricer:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             nn_s = _best(lambda: self.vix_prices(tenors=tenors, **p))
-        cf_s = _best(lambda: heston_vix_futures_curve(p["kappa"], p["theta"], p["sigma"], p["v0"], tenors))
+        cf_s = _best(lambda: heston_vix_term_index(p["kappa"], p["theta"], p["sigma"], p["v0"], tenors))
         return {"nn_us": nn_s * 1e6, "closed_form_us": cf_s * 1e6, "nn_over_closed_form": nn_s / cf_s}
 
     def __repr__(self) -> str:

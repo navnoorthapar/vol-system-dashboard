@@ -360,6 +360,21 @@ class TestDataGeneration:
         assert {"set_id", *VIX_FEATURES, "vix_target"} <= set(dv.columns)
         assert (dv.groupby("set_id").size() == 10).all()
 
+    def test_vix_target_is_the_spot_index_mapping(self, tmp_path):
+        """NN-2 learns the spot-index level the calibrator's VIX leg fits
+        (heston_vix_term_index), not the VX-futures curve it used before C22."""
+        from joint_vol_calibration.models.heston import (
+            heston_vix_futures_curve, heston_vix_term_index)
+        dv = generate_vix_training_data(200, path=tmp_path / "vix.parquet")
+        idx = heston_vix_term_index(dv["kappa"].to_numpy(), dv["theta"].to_numpy(),
+                                    dv["sigma"].to_numpy(), dv["v0"].to_numpy(),
+                                    dv["tenor_years"].to_numpy())
+        np.testing.assert_allclose(dv["vix_target"], idx, rtol=1e-12)
+        r = dv.iloc[0]
+        fut = heston_vix_futures_curve(r.kappa, r.theta, r.sigma, r.v0,
+                                       np.array([r.tenor_years]))[0]
+        assert abs(fut - r.vix_target) > 1e-6
+
 
 # ── 6. Training ───────────────────────────────────────────────────────────────
 
