@@ -97,7 +97,7 @@ jobs:
         working-directory: joint_vol_calibration/tests
         run: >
           python -m pytest -q -p no:cacheprovider
-          test_suite_isolation.py test_cloud_refresh.py test_data_layer.py
+          test_suite_isolation.py test_infra_config.py test_cloud_refresh.py test_data_layer.py
           test_option_chain.py test_data_pipeline.py test_rates.py test_lookahead.py
           test_c21_audit_fixes.py test_dashboard.py
 
