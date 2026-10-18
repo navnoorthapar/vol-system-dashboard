@@ -234,7 +234,9 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert res["model_version"] == 2 and res["spot_date"] == SESSION
     assert res["n_spx_expiries"] == 6
     # rates are the ones the fit used (parity), not a post-hoc overwrite
-    assert res["r"] == pytest.approx(0.042, abs=2e-3) and "r_reference" in res
+    assert res["r"] == pytest.approx(0.042, abs=2e-3)
+    assert res["r_reference"] == pytest.approx(0.04075, abs=1e-4)          # ^IRX 4.00% -> cc
+    assert res["r_reference_source"].startswith("^IRX")
     n, n_two_sided = _spx_snapshot_rows(SESSION)
     assert n > 0 and n_two_sided == n                           # only clean quotes stored
     assert st["session"] == SESSION and st["headline_calibration"]["date"] == SESSION

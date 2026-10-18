@@ -382,7 +382,8 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         return st
 
     try:
-        cal = JointCalibrator(as_of_date=spot_date, r=r_ref, spx_chain=clean)
+        # r=None: the calibrator reads the same ^IRX row and records its source
+        cal = JointCalibrator(as_of_date=spot_date, spx_chain=clean)
         result = cal.calibrate(**(calibrate_kwargs or {}))
     except Exception as e:
         st.update(status="failed", reason=f"calibration failed: {e}")
