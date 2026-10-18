@@ -1592,6 +1592,52 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     return out
 
 
+_PRE_C22_CACHE: dict = {}
+
+
+def pre_c22_spread_facts(spx: pd.DataFrame, vix: pd.Series, start: str, end: str,
+                         history_start: str) -> Optional[dict]:
+    """How the pre-C22 PDV spread behaved in the backtest window, from the data.
+
+    σ̂ is the pre-C22 forecast as the engine replays it for the C22 bridge
+    (BacktestEngine with pdv_horizon = 1: one PDVLinear per year on the
+    1-day |r|·√252 target, fitted on returns before January 1), on the
+    engine's own data window (SPX from `history_start`, the stored
+    log_return column). Returns the share of sessions in [start, end] on
+    which VIX − σ̂ exceeded the S1 entry threshold (signal_engine
+    S1_ENTRY_THRESHOLD, 2 vol pts), and mean σ̂ over the mean realised RMS
+    vol of the next PDV_SPREAD_HORIZON (21) sessions. The audit row quoted
+    both numbers as typed text ("0.71×", "95%"), while the code comments
+    say ~96% and ≈0.66×.
+    """
+    from joint_vol_calibration.backtest.backtest_engine import PDV_SPREAD_HORIZON, BacktestEngine
+    from joint_vol_calibration.models.pdv import forward_target
+    from joint_vol_calibration.signals.signal_engine import S1_ENTRY_THRESHOLD
+
+    frame = spx.loc[history_start:end, ["close", "log_return"]]
+    v = pd.to_numeric(vix, errors="coerce").loc[history_start:end]
+    key = (start, end, history_start, len(frame), float(frame["close"].sum()),
+           float(frame["log_return"].fillna(0).abs().sum()), len(v), float(v.fillna(0).sum()))
+    if key in _PRE_C22_CACHE:
+        return _PRE_C22_CACHE[key]
+    eng = BacktestEngine(start_date=start, end_date=end, pdv_horizon=1)
+    sig = eng._build_walkforward_pdv_vol(frame.rename_axis("date").reset_index())
+    out = None
+    if sig is not None and not sig.empty:
+        sig.index = pd.to_datetime(sig.index)
+        w = pd.concat([sig.rename("f"), (v / 100.0).rename("v")], axis=1, join="inner").loc[start:end].dropna()
+        r = np.log(frame["close"].astype(float)).diff().dropna()
+        y = forward_target(r, horizon=PDV_SPREAD_HORIZON, target="rv")
+        both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner").loc[start:end].dropna()
+        if len(w) and len(both):
+            out = {"share": float(((w["v"] - w["f"]) > S1_ENTRY_THRESHOLD).mean()),
+                   "n": int(len(w)), "threshold_vp": float(S1_ENTRY_THRESHOLD) * 100.0,
+                   "ratio": float(both["f"].mean() / both["y"].mean()),
+                   "horizon": int(PDV_SPREAD_HORIZON), "history_start": history_start}
+    _PRE_C22_CACHE[key] = out
+    return out
+
+
 # The fifth chain behind β is a live Yahoo ^SPX capture (Cboe global trading
 # hours, 2026-10-12 04:39 ET, run_backtest.fetch_live_spx_chain). The DB holds
 # end-of-day chains only, so the capture is kept with the test fixtures.
@@ -1931,6 +1977,18 @@ def load_page4() -> dict[str, Any]:
         d["beta_est"] = be
     except Exception as e:
         _record_error(d, "β estimation chains (run_backtest.estimate_beta)", e)
+
+    # ── The pre-C22 PDV spread (audit row): how often it signalled short vol ─
+    d["pre_c22_spread"] = None
+    try:
+        if d["start_date"] and d["end_date"]:
+            rb = _import_run_backtest()
+            d["pre_c22_spread"] = pre_c22_spread_facts(
+                _read_spx(), _read_vix_wide()["^VIX"], d["start_date"], d["end_date"], rb.DATA_START)
+            if d["pre_c22_spread"] is None:
+                raise ValueError("no pre-C22 PDV forecast could be built for the backtest window")
+    except Exception as e:
+        _record_error(d, "pre-C22 PDV spread facts (BacktestEngine, pdv_horizon = 1)", e)
 
     # ── Facts the change log quotes, recomputed from the DB ──────────────────
     # (the log hard-coded "2018: ~1.5%" for a year whose ^IRX averaged 1.95%,

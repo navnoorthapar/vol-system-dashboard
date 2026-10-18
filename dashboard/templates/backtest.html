@@ -23,7 +23,7 @@
 {% set beta_src_txt = beta_txt ~ ' = mean of ' ~ be.n_db ~ ' DB chain' ~ ('s' if be.n_db != 1 else '') ~ ' and ' ~ be.n_live ~ ' live capture' ~ ('s' if be.n_live != 1 else '') ~ ' (' ~ (be.lo|fmt('.2f')) ~ '–' ~ (be.hi|fmt('.2f')) ~ ')' %}
 {% set beta_check_txt = ('the first later chain, ' ~ _later.session ~ ', gives ' ~ (_later.ratio|fmt('.2f')) ~ ' — the mean over all ' ~ be.n_all ~ ' chains, ' ~ (be.mean_all|fmt('.2f')) ~ (', is a row of the β grid' if be.mean_all_in_grid else ', is not in the β grid')) if _later else 'no later chain is stored yet' %}
 {% else %}{% set beta_src_txt = beta_txt %}{% set beta_check_txt = 'the estimation chains are not available' %}{% endif %}
-{% set _sh = d.r2_share or {} %}
+{% set _sh = d.r2_share or {} %}{% set _pc = d.pre_c22_spread %}
 {% set r2_txt = (((_sh.fixed * 100)|fmt('.0f')) ~ '% vs ' ~ ((_sh.adaptive * 100)|fmt('.0f')) ~ '% of the backtest sessions in R2') if (_sh.get('fixed') is not none and _sh.get('adaptive') is not none) else 'R2 shares not available' %}
 <div class="page-header">
   <h1 class="page-title">C10 Backtest Results — <span class="nowrap">{{ d.start_date|fmt }} → {{ d.end_date|fmt }}</span>{% if d.eq_dates %} ({{ "{:,}".format(d.eq_dates|length) }} sessions){% endif %}</h1>
@@ -429,7 +429,7 @@
    "body": "the “survivor” was positive on 99.5% of random-walk null paths: it measured mean reversion of a ratio, not option P&amp;L. S3 is now the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.",
    "evidence": "S3 +$23K (z-units, as published in C21) → " ~ (s3.get('total_pnl')|usd_k) ~ " (index leg), null p = " ~ (k.get('s3_null_p')|fmt('.3f')) ~ "; " ~ s3_beta_txt},
   {"round": "C22", "status": "FIXED", "flaw": "PDV spread compared the 30-day VIX with a 1-day E|r| forecast", "tone": "amber",
-   "body": "σ̂ averaged 0.71× the forward 21-day RMS vol in the backtest window, so “VIX &gt; σ̂ + 2 vol pts” held on 95% of sessions. The spread now uses a 21-day RMS-vol forecast, refit daily on labels fully observed at the forecast origin.",
+   "body": ("the pre-C22 σ̂ (a 1-day E|r| forecast) averaged " ~ (_pc.ratio|fmt('.2f')) ~ "× the realised RMS vol of the next " ~ _pc.horizon ~ " sessions in the backtest window, so “VIX &gt; σ̂ + " ~ (_pc.threshold_vp|fmt('.0f')) ~ " vol pts” held on " ~ ((_pc.share * 100)|fmt('.0f')) ~ "% of its " ~ ("{:,}".format(_pc.n)) ~ " sessions." if _pc else "the pre-C22 σ̂ was a 1-day E|r| forecast, not a 21-day vol forecast (its statistics are not available).") ~ " The spread now uses a 21-day RMS-vol forecast, refit daily on labels fully observed at the forecast origin.",
    "evidence": ev.get('pdv_h21', 'C22 bridge unavailable')},
   {"round": "C22", "status": "FIXED", "flaw": "Sharpe charged cash twice", "tone": "green",
    "body": "option P&amp;L on unfunded collateral is already an excess return; subtracting ^IRX again double-counted it. Sharpe uses rf = 0 (collateral assumed to earn T-bills), with the T-bill benchmark shown.",

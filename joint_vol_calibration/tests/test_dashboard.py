@@ -1473,3 +1473,33 @@ def test_percentile_wording_is_capped_short_of_a_record(dash):
     assert dash.percentile_rank(0.3) == {"record": None, "big": "1st", "tail": "bottom 1%"}
     assert dash.percentile_rank(85.2) == {"record": None, "big": "85th", "tail": "top 15%"}
     assert dash.percentile_rank(50.0)["tail"] is None and dash.percentile_rank(None) is None
+
+
+def test_pre_c22_spread_statistics_are_computed_from_the_data(dash, pages, monkeypatch):
+    """'σ̂ averaged 0.71× ... held on 95% of sessions' was typed text (the code
+    comments say ~96% and ≈0.66×). Both figures are now the engine's own pre-C22
+    replay (pdv_horizon = 1) on the engine's data window."""
+    from joint_vol_calibration.backtest.backtest_engine import BacktestEngine
+    from joint_vol_calibration.backtest.run_backtest import _load_data
+    from joint_vol_calibration.models.pdv import forward_target
+
+    d = dash.load_page4()
+    pc = d["pre_c22_spread"]
+    spx, vix_wide = _load_data()                       # the engine's loader, independent of app.py
+    sig = BacktestEngine(start_date=d["start_date"], end_date=d["end_date"],
+                         pdv_horizon=1)._build_walkforward_pdv_vol(spx)
+    vix = vix_wide.set_index(pd.to_datetime(vix_wide["date"]))["^VIX"] / 100
+    w = pd.concat([sig.rename("f"), vix.rename("v")], axis=1, join="inner").loc[d["start_date"]:d["end_date"]].dropna()
+    assert pc["share"] == pytest.approx(((w["v"] - w["f"]) > 0.02).mean(), abs=1e-12)
+    assert pc["n"] == len(w) == len(pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet"))
+    close = spx.set_index(pd.to_datetime(spx["date"]))["close"]
+    y = forward_target(np.log(close).diff().dropna(), horizon=21, target="rv")
+    both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner").loc[d["start_date"]:d["end_date"]].dropna()
+    assert pc["ratio"] == pytest.approx(both["f"].mean() / both["y"].mean(), abs=1e-12)
+    text = _visible_text(pages["/backtest"])
+    assert (f"averaged {pc['ratio']:.2f}× the realised RMS vol of the next 21 sessions in the backtest window, "
+            f"so “VIX > σ̂ + 2 vol pts” held on {pc['share'] * 100:.0f}% of its {pc['n']:,} sessions") in text
+    # the page follows the computation, not a typed figure
+    monkeypatch.setattr(dash, "pre_c22_spread_facts", lambda *a, **k: {**pc, "share": 0.5, "ratio": 0.9})
+    text = _visible_text(dash.app.test_client().get("/backtest").get_data(as_text=True))
+    assert "averaged 0.90×" in text and "held on 50% of its" in text
