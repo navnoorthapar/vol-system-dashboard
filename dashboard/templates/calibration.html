@@ -11,7 +11,7 @@
   <div class="page-badge">
     {{ d.session|fmt }}{% if d.calib_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.calib_age }} session{{ 's' if d.calib_age != 1 else '' }} old)</span>{% endif %}
     &nbsp;·&nbsp; SPX = {{ d.S|fmt(",.1f") }}
-    &nbsp;·&nbsp; r = {% if d.carry_recorded %}{{ d.r_pct }}%{% else %}n/a{% endif %}
+    &nbsp;·&nbsp; r = {% if d.carry_recorded %}{{ d.r_pct }}%{% if d.carry_mode == 'parity' %} (parity-implied median){% endif %}{% else %}n/a{% endif %}{% if d.r_ref_pct is not none %} · ^IRX {{ d.r_ref_pct|fmt(".2f") }}%{% endif %}
     {% if d.legacy %}&nbsp;·&nbsp; <span class="tag tag-dim" title="Fitted before the C22 schema (calibration_is_legacy)">PRE-C22 FIT</span>{% endif %}
   </div>
 </div>
@@ -20,6 +20,8 @@
 <p class="page-note">
   Headline = the newest fit that passes the quality gate (<span class="mono">{{ d.calib_file }}</span>), not the lowest-RMSE fit in the archive:
   ranking by RMSE rewards the days the data broke.
+  {% if d.archive %}Of {{ d.archive.n_total }} stored fits, {{ d.archive.n_current_ok }} of {{ d.archive.n_current }} current-schema (model_version 2) fits pass the gate;
+  {{ d.archive.n_legacy }} pre-C22 fits are labelled legacy and never ranked (they fitted the VIX spot indices as futures, with ATM-call anchors and an assumed r/q).{% endif %}
 </p>
 
 <!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
@@ -37,7 +39,6 @@
       model whose characteristic function solves a fractional Riccati equation).
       The extreme negative ρ is the model's best approximation of the leverage effect,
       revealing model misspecification.
-      <strong style="color:var(--orange);">VIX options leg is disabled (w₃ = 0.0)</strong> — RMSE was 37.14 vol pts, a structural failure of the CIR density, not a calibration failure.
       A Bates SVJ fit (2026-03-24 snapshot) did not converge — the optimiser reported failure, λ ended at its upper
       bound and the SPX fit was worse than the nested Heston one — so it is not a result yet. Heston remains the active model.
     </div>
@@ -63,20 +64,15 @@
         &nbsp;&nbsp;|&nbsp;&nbsp;
       Margin = <strong style="color:{{ f_col }};">{{ "{:+.2e}".format(d.feller_margin) }}</strong>
       <br>
-      {% if f_bind %}
-      The constraint is <strong>active</strong>, not broken. The calibrator applies a soft
-      exterior penalty <span class="mono">50·max(0, σ²−2κθ)²</span> whose gradient vanishes at the
-      boundary, so when the SPX smile wants more vol-of-vol than Feller permits the optimiser
-      settles a whisker outside the feasible set — here σ agrees with √(2κθ) to six significant
-      figures. Reporting that as a failure would be a rounding artefact. What it does mean is
-      economically real: <strong>the market smile is asking for more vol-of-vol than a
-      Feller-satisfying Heston can supply</strong>, so σ is pinned by the constraint rather than
-      by the data.
-      {% elif f_ok %}
-      The variance process stays strictly positive — the Heston SDE is well-posed.
+      {% if d.feller_imposed %}
+      Imposed in this fit as a soft penalty <span class="mono">50·max(0, σ²−2κθ)²</span>;
+      {% if f_bind %}it binds (σ ≈ √(2κθ)), so σ is set by the constraint, not by the data.
+      {% elif f_ok %}it does not bind.
+      {% else %}the optimum still violates it.{% endif %}
       {% else %}
-      The variance process can touch zero — the Heston SDE is not well-posed at current parameters.
-      Practically this causes numerical instability in Monte Carlo paths and occasional negative variance.
+      <strong>Diagnostic only — not imposed.</strong> 2κθ ≥ σ² is not a no-arbitrage condition: when it fails the
+      variance process can reach zero and reflects, and the Fourier pricer remains valid.
+      {% if not f_ok %}Here the SPX smile and VIX indices together ask for more vol-of-vol than the Feller boundary allows.{% endif %}
       {% endif %}
     </div>
   </div>
@@ -88,14 +84,12 @@
   <div>
     <div class="banner-title">Fit identification — {{ d.effective_dof }} of 5 effective degrees of freedom{% if d.spx_underidentified %} · SPX leg spans {{ d.n_spx_expiries }} expiry{{ '' if d.n_spx_expiries == 1 else ' buckets' }}{% endif %}</div>
     <div class="banner-body">
-      {% if d.pinned_params %}
-      Pinned at a boundary: <strong style="color:var(--text);">{{ d.pinned_params|join(', ') }}</strong>.
-      A pinned parameter is set by its constraint, not by the market data, so this
-      5-parameter model is effectively fitting with {{ d.effective_dof }}. ρ pins at its −0.95
-      floor on nearly every joint fit: the SPX skew wants more spot–vol correlation than Heston
-      is allowed to express. That is the misspecification this project documents, stated as a number.
+      {% if d.active_constraints %}
+      Active constraints: <strong style="color:var(--text);">{{ d.active_constraints|join('; ') }}</strong>.
+      A parameter on a bound is set by the constraint, not by the market data, so this
+      5-parameter model is effectively fitting with {{ d.effective_dof }}.
       {% else %}
-      No parameter sits on a boundary — all five are identified by the data.
+      No constraint is active — no parameter sits on its box bound{% if d.feller_imposed %} and the imposed Feller penalty does not bind{% endif %}.
       {% endif %}
       <br>
       Fit from
@@ -109,7 +103,7 @@
       are not separately identified by the SPX leg, and its RMSE is low because there is little to fit — it is not
       comparable with multi-expiry fits.</strong>
       {% endif %}
-      The VIX-futures leg needs at least 3 tenors to identify a curve; fits below that
+      The VIX index leg needs at least 3 tenors to identify a curve; fits below that
       threshold are rejected, because a single tenor is one data point that Heston matches
       exactly and the joint fit silently collapses into an SPX-only calibration.
     </div>
@@ -178,6 +172,7 @@
       {{ d.spx_rmse }} vol pts
     </div>
     <div class="card-sub mt8">
+      {% if d.spx_oos_rmse is not none %}In-sample anchors · out of sample {{ d.spx_oos_rmse|fmt(".3f") }} vp (put wing {{ d.spx_oos_wing_rmse|fmt(".3f") }}) · {% endif %}
       {% if d.spx_underidentified %}Not comparable — {{ d.n_spx_expiries }} expiry, {{ d.n_spx_options|fmt }} options
       {% elif d.spx_rmse > 5 %}Poor fit — skew too steep for Heston
       {% elif d.spx_rmse > 2 %}Moderate — acceptably close
@@ -190,16 +185,13 @@
   </div>
 
   <div class="card">
-    <h2 class="card-label">VIX Futures RMSE</h2>
-    {% if d.vix_fut_rmse is not none %}
-    <div class="card-value sm {% if d.vix_fut_rmse > 2 %}red{% elif d.vix_fut_rmse > 0.5 %}yellow{% else %}green{% endif %}">
-      {{ d.vix_fut_rmse }} pts
+    <h2 class="card-label">VIX index RMSE</h2>
+    {% if d.vix_index_rmse is not none %}
+    <div class="card-value sm {% if d.vix_index_rmse > 2 %}red{% elif d.vix_index_rmse > 0.5 %}yellow{% else %}green{% endif %}">
+      {{ d.vix_index_rmse }} pts
     </div>
     <div class="card-sub mt8">
-      {% if d.vix_fut_rmse > 2 %}Poor futures curve fit
-      {% elif d.vix_fut_rmse > 0.5 %}Acceptable futures fit
-      {% else %}Good futures fit
-      {% endif %}
+      Spot indices ^VIX9D/^VIX/^VIX3M/^VIX6M ({{ d.n_vix_tenors|fmt }} on the session) vs the model's expected average vol to each horizon
     </div>
     {% else %}
     <div class="card-value sm dim">—</div>
@@ -211,8 +203,8 @@
     {% if d.vix_opt_disabled %}
     <div class="card-value sm" style="color:var(--text2);">DISABLED</div>
     <div class="card-sub mt8" style="color:var(--text2);">
-      Heston CIR density underestimates vol-of-vol path uncertainty.
-      RMSE was 37.14 pts — structural failure. w₃ = 0.0 (was 0.2).
+      Weight w₃ = 0: not part of this fit's objective{% if d.n_vix_options is not none %} ({{ d.n_vix_options }} liquid VIX option{{ '' if d.n_vix_options == 1 else 's' }} on the session){% endif %}.
+      No VIX-options error is reported for a leg the fit did not use.
     </div>
     {% else %}
     <div class="card-value sm">{{ d.vix_opt_rmse|fmt }} vol pts</div>
@@ -295,7 +287,7 @@
           <td>Vol-of-vol</td>
           <td class="mono">σ</td>
           <td class="mono" style="color:var(--orange);">{{ d.sigma }}</td>
-          <td>High: drives strong skew / smile</td>
+          <td>Vol of variance: smile curvature and the spot–vol skew with ρ</td>
         </tr>
         <tr>
           <td>Correlation</td>
@@ -304,7 +296,7 @@
             {{ d.rho }}
             {% if d.rho_at_boundary %}<span class="tag tag-red" style="font-size:9px;margin-left:6px;">⚠ BOUNDARY</span>{% endif %}
           </td>
-          <td>Extreme leverage effect — needs jumps</td>
+          <td>{% if d.rho_at_boundary %}At its −0.95 bound: the skew wants more leverage than the box allows{% else %}Spot–vol correlation (leverage){% endif %}</td>
         </tr>
         <tr>
           <td>Spot vol</td>
@@ -316,13 +308,13 @@
           <td>Risk-free rate</td>
           <td class="mono">r</td>
           <td class="mono">{% if d.carry_recorded %}{{ d.r_pct }}%{% else %}n/a{% endif %}</td>
-          <td>{% if d.carry_recorded %}Rate the fit priced with (as recorded in the result){% else %}Not recorded by this fit — the rate it priced with is unknown from the stored result{% endif %}</td>
+          <td>{% if d.carry_recorded and d.carry_mode == 'parity' %}Median of the per-expiry put-call-parity rates r_T the fit priced with{% if d.r_ref_pct is not none %}; ^IRX 13-week bill (cc) reference {{ d.r_ref_pct|fmt(".2f") }}%{% endif %}{% elif d.carry_recorded %}Rate the fit priced with (as recorded in the result){% else %}Not recorded by this fit — the rate it priced with is unknown from the stored result{% endif %}</td>
         </tr>
         <tr>
           <td>Dividend yield</td>
           <td class="mono">q</td>
           <td class="mono">{% if d.carry_recorded %}{{ d.q_pct }}%{% else %}n/a{% endif %}</td>
-          <td>{% if d.carry_recorded %}Yield the fit priced with (as recorded in the result){% else %}Not recorded by this fit{% endif %}</td>
+          <td>{% if d.carry_recorded and d.carry_mode == 'parity' %}Median of the per-expiry parity-implied carry q_T = r_T − ln(F_T/S)/T{% elif d.carry_recorded %}Yield the fit priced with (as recorded in the result){% else %}Not recorded by this fit{% endif %}</td>
         </tr>
         <tr>
           <td>Feller margin</td>
@@ -332,18 +324,18 @@
           </td>
           <td>
             {%- if d.feller_state == 'PASS' %}PASS — variance stays strictly positive
-            {%- elif d.feller_state == 'BINDING' %}BINDING — constraint active; σ set by Feller, not by the data
-            {%- else %}VIOLATED — variance can touch zero{% endif %}
+            {%- elif d.feller_state == 'BINDING' %}BINDING{% if d.feller_imposed %} — imposed constraint active; σ set by Feller, not by the data{% else %} — on the boundary (not imposed){% endif %}
+            {%- else %}VIOLATED — variance can reach zero{% if not d.feller_imposed %} (diagnostic; not imposed){% endif %}{% endif %}
           </td>
         </tr>
         <tr>
           <td>Effective d.o.f.</td>
-          <td class="mono">5 − |pinned|</td>
+          <td class="mono">5 − |active|</td>
           <td class="mono {% if d.effective_dof >= 5 %}green{% elif d.effective_dof >= 4 %}amber{% else %}red{% endif %}">
             {{ d.effective_dof }} / 5
           </td>
           <td>
-            {%- if d.pinned_params %}Pinned: {{ d.pinned_params|join(', ') }} — set by constraints, not data
+            {%- if d.active_constraints %}{{ d.active_constraints|join('; ') }} — set by constraints, not data
             {%- else %}All parameters identified by the data{% endif %}
           </td>
         </tr>
@@ -405,11 +397,11 @@
 {% if d.quintic %}
 {% set q = d.quintic %}
 <div class="card" style="margin-bottom:16px;border-color:rgba(0,255,136,0.2);background:rgba(0,255,136,0.02);">
-  <h2 class="chart-title" style="color:var(--accent);">C13 — Two-Factor Quintic OU Model (Research) · snapshot {{ q.as_of|fmt }}</h2>
+  <h2 class="chart-title" style="color:var(--accent);">C13 — Two-Factor Quintic OU Model (Research) · session {{ q.as_of|fmt }}</h2>
   <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">
     σ(t) = g₀(t) · p(Z_t) &nbsp;·&nbsp; Z_t = θX_t + (1−θ)Y_t &nbsp;·&nbsp;
     p(z) = α₀ + α₁z + α₃z³ + α₅z⁵ &nbsp;·&nbsp;
-    VIX priced via 2D Gauss-Hermite quadrature
+    VIX by cubature on the standard-normal plane{% if q.quad_points %} ({{ q.quad_points }} points per dimension){% endif %} · SPX by Monte Carlo{% if q.mc_paths %} ({{ q.mc_paths|fmt(",") }} paths){% endif %}
   </div>
 
   <div class="grid grid-2" style="gap:16px;">
@@ -483,48 +475,57 @@
       </div>
     </div>
 
-    <!-- RMSE comparison: same snapshot only -->
+    <!-- RMSE comparison: same session only -->
     <div>
       {% if q.heston %}
-      <div class="table-scroll" tabindex="0" role="region" aria-label="Heston versus Quintic OU on the same snapshot (scrollable)">
+      {% set h = q.heston %}
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Heston versus Quintic OU on the same session (scrollable)">
       <table class="data-table" id="quintic-vs-heston">
         <thead>
-          <tr><th scope="col">Metric · {{ q.as_of }}</th><th scope="col">Heston (same snapshot)</th><th scope="col">Quintic OU</th><th scope="col">Δ (Quintic − Heston)</th></tr>
+          <tr><th scope="col">Metric · {{ q.as_of }}</th><th scope="col">Heston, own targets</th><th scope="col">Heston on Quintic's targets</th><th scope="col">Quintic OU</th><th scope="col">Δ (Quintic − Heston, same targets)</th></tr>
         </thead>
         <tbody>
           <tr>
             <td>SPX IV RMSE (vp)</td>
-            <td class="mono">{{ q.heston.spx_rmse|fmt(".3f") }}</td>
-            <td class="mono">{{ q.spx_rmse|fmt(".3f") }}</td>
-            <td class="mono {% if q.heston.spx_delta is not none and q.heston.spx_delta < 0 %}green{% else %}red{% endif %}">
-              {{ q.heston.spx_delta|fmt("+.3f") }}
-            </td>
+            <td class="mono">{{ h.spx_rmse|fmt(".3f") }}{% if h.n_spx %} <span class="dim">({{ h.n_spx }} anchors)</span>{% endif %}</td>
+            <td class="mono">{{ h.spx_rmse_on_q|fmt(".3f") }}{% if h.n_spx_on_q %} <span class="dim">({{ h.n_spx_on_q }})</span>{% endif %}</td>
+            <td class="mono">{{ q.spx_rmse|fmt(".3f") }}{% if q.n_spx %} <span class="dim">({{ q.n_spx }})</span>{% endif %}</td>
+            <td class="mono {% if h.spx_delta is not none and h.spx_delta < 0 %}green{% elif h.spx_delta is not none %}red{% endif %}">{{ h.spx_delta|fmt("+.3f") }}</td>
           </tr>
           <tr>
-            <td>VIX leg RMSE (pts)</td>
-            <td class="mono">{{ q.heston.vix_rmse|fmt(".3f") }}</td>
-            <td class="mono">{{ q.vix_rmse|fmt(".3f") }}</td>
-            <td class="mono {% if q.heston.vix_delta is not none and q.heston.vix_delta < 0 %}green{% else %}red{% endif %}">
-              {{ q.heston.vix_delta|fmt("+.3f") }}
-            </td>
+            <td>VIX forward RMSE (pts) — model E[VIX_T] vs VIX-option parity forward</td>
+            <td class="mono" style="color:var(--text2);">not a Heston target</td>
+            <td class="mono">{{ h.vix_fwd_rmse_on_q|fmt(".3f") }}</td>
+            <td class="mono">{{ q.vix_fwd_rmse|fmt(".3f") }}</td>
+            <td class="mono {% if h.vix_fwd_delta is not none and h.vix_fwd_delta < 0 %}green{% elif h.vix_fwd_delta is not none %}red{% endif %}">{{ h.vix_fwd_delta|fmt("+.3f") }}</td>
           </tr>
           <tr>
-            <td>VIX Opt RMSE (vp)</td>
-            <td class="mono" style="color:var(--text2);">DISABLED</td>
-            <td class="mono {% if q.vix_opt_rmse is not none and q.vix_opt_rmse < 15 %}green{% elif q.vix_opt_rmse is not none and q.vix_opt_rmse < 30 %}yellow{% else %}red{% endif %}">
-              {{ q.vix_opt_rmse|fmt(".2f") }}
-            </td>
+            <td>VIX options RMSE (vp)</td>
+            <td class="mono" style="color:var(--text2);">weight 0 — not fitted</td>
+            <td class="mono">{{ h.vix_opt_rmse_on_q|fmt(".2f") }}</td>
+            <td class="mono">{{ q.vix_opt_rmse|fmt(".2f") }}{% if q.n_vix_opts %} <span class="dim">({{ q.n_vix_opts }})</span>{% endif %}</td>
+            <td class="mono {% if h.vix_opt_delta is not none and h.vix_opt_delta < 0 %}green{% elif h.vix_opt_delta is not none %}red{% endif %}">{{ h.vix_opt_delta|fmt("+.2f") }}</td>
+          </tr>
+          <tr>
+            <td>VIX index RMSE (pts)</td>
+            <td class="mono">{{ h.vix_index_rmse|fmt(".3f") }}</td>
+            <td class="mono" style="color:var(--text3);">—</td>
+            <td class="mono" style="color:var(--text2);">input (ξ₀), {{ q.xi0_check|fmt(".1e") }}</td>
             <td class="mono" style="color:var(--text3);">—</td>
           </tr>
         </tbody>
       </table>
       </div>
       <div style="margin-top:6px;font-size:10.5px;color:var(--text3);">
-        Both fits use the {{ q.as_of }} snapshot ({{ q.heston.file }}){% if not q.heston.gate_ok %}; that Heston fit fails today's quality gate ({{ q.heston.gate_reason }}), so it is not the page headline{% endif %}.
-        {% if q.converged == false %}The Quintic optimiser stopped before converging.{% endif %}
+        Both fits use the {{ q.as_of }} SPX chain and VIX data ({{ h.file }}{% if h.baseline_file %}; re-pricing on the Quintic's targets: {{ h.baseline_file }}{% endif %}).
+        {% if not h.gate_ok %}That Heston fit fails today's quality gate ({{ h.gate_reason }}), so it is not the page headline.{% endif %}
+        {% if h.active_constraints %}Heston active constraints: {{ h.active_constraints|join('; ') }}.{% endif %}
+        The Quintic was fitted to every target in its column; Heston was fitted to its own anchors and the VIX indices only
+        (VIX-options weight 0), so the "Quintic's targets" column is out of sample for Heston.
+        {% if h.spx_rmse_on_q is none %}No like-for-like re-pricing of this Heston fit is stored.{% endif %}
       </div>
       {% else %}
-      <div style="font-size:11.5px;color:var(--text3);">No Heston fit exists for the Quintic snapshot ({{ q.as_of|fmt }}), so no like-for-like comparison is shown.</div>
+      <div style="font-size:11.5px;color:var(--text3);">No Heston fit exists for the Quintic session ({{ q.as_of|fmt }}), so no like-for-like comparison is shown.</div>
       {% endif %}
 
       <div class="divider"></div>
@@ -533,24 +534,17 @@
         <div>Fit time: <span class="mono green">{{ q.fit_time|fmt(".1f") }}s</span></div>
         <div>Evaluations: <span class="mono">{{ q.n_evals|fmt(",") }}</span></div>
         <div>Converged: <span class="mono {% if q.converged == false %}red{% endif %}">{{ 'no' if q.converged == false else ('yes' if q.converged else '—') }}</span></div>
-        <div>MC paths / VIX quadrature: <span class="mono">not recorded with the fit</span></div>
-      </div>
-
-      <div style="margin-top:12px;padding:8px 10px;border-radius:4px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.15);font-size:11px;color:var(--text2);line-height:1.6;">
-        <strong style="color:var(--accent);">Key advance over Heston:</strong>
-        VIX options are analytically tractable via 2D Gauss-Hermite quadrature — no structural failure of the pricing kernel.
-        The polynomial volatility map adds skew and smile shape that Heston can only get from ρ{% if q.eps_saturated %} — though on this fit the leverage parameter ε also sits at its bound (see the table), so the skew is still not fully captured{% endif %}.
-        VIX futures fit to <span class="mono">{{ q.vix_rmse|fmt(".3f") }} pts</span> — <strong style="color:var(--orange);">by construction, not model skill</strong>: ξ₀ is bootstrapped from the same VIX term structure being fit (and no tradable futures prices exist in the DB; the "futures" leg is an index proxy). Quote the SPX-leg RMSE ({{ q.spx_rmse|fmt(".2f") }} vp) as the real fit quality.
-        Model: <span class="mono">models/quintic_ou.py</span> ·
-        Calibrator: <span class="mono">calibration/quintic_calibrator.py</span>
+        <div>SPX RMSE on fresh MC paths: <span class="mono">{{ q.spx_rmse_fresh|fmt(".3f") }} vp</span></div>
       </div>
 
       <div style="margin-top:8px;padding:8px 10px;border-radius:4px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);font-size:11px;color:var(--text2);line-height:1.6;">
-        <strong style="color:var(--orange);">Honest limitation:</strong>
-        VIX-option RMSE of <span class="mono">{{ q.vix_opt_rmse|fmt(".1f") }} vp</span> beats Heston's <span class="mono">37.1 vp</span>
-        but does not yet reach the <span class="mono">&lt;10 vp</span> research target. The residual is in the VIX-smile wings —
-        the degree-5 polynomial under-fits far-OTM VIX calls. A higher-degree map or a second
-        stochastic driver is the next step. Reported as measured, not as a hit target.
+        <strong style="color:var(--orange);">Reading this honestly:</strong>
+        {% if q.converged == false %}The Quintic optimiser stopped at its iteration limits without meeting its tolerance. {% endif %}
+        {% if q.at_bound %}Parameters on a search bound: <span class="mono">{{ q.at_bound|join(', ') }}</span>{% if q.eps_saturated %} (ε at −0.99: the skew wants more leverage than the bound allows){% endif %}. {% endif %}
+        ξ₀ is bootstrapped from the VIX indices, so the Quintic reproduces them by construction; that is an input check, not a fit metric.
+        The VIX-forward and VIX-options legs are where the models genuinely differ: they are in the Quintic's objective and not in Heston's.
+        Model: <span class="mono">models/quintic_ou.py</span> ·
+        Calibrator: <span class="mono">calibration/quintic_calibrator.py</span>
       </div>
     </div>
   </div>

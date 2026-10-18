@@ -67,8 +67,8 @@ def build(out: str = DEFAULT_OUT) -> str:
             color=WHITE, fontsize=23, family="DejaVu Sans")
 
     # Tech chips
-    chips = ["Heston", "SVI / SSVI", "Quintic OU", "Bates SVJ",
-             "PDV", "Regime classifier"]
+    chips = ["Heston", "Quintic OU", "Bates SVJ", "VIX index leg",
+             "PDV", "Regime rule"]
     x = 72
     for c in chips:
         w = 24 + len(c) * 12.5

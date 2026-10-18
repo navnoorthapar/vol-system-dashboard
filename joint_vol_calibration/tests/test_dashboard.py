@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import pickle
 import re
 import shutil
@@ -138,7 +139,7 @@ def _write_labels(path: Path, dates: pd.DatetimeIndex, seed: int = 3) -> pd.Data
 
 
 def _cal(session: str, rmse: float, n_vix: int = 4, n_spx: int = 54, **extra) -> dict:
-    """A complete, well-identified result (Feller PASS, fresh snapshot, 6 expiries)."""
+    """A complete, well-identified model_version 2 result (Feller PASS, fresh snapshot, 6 expiries)."""
     cal = {
         "params": {"kappa": 2.2, "theta": 0.05, "sigma": 0.45, "rho": -0.8, "v0": 0.02},
         "leg_losses": {"spx_iv_rmse": rmse, "vix_futures_rmse": 0.3, "vix_options_rmse": 0.0},
@@ -146,6 +147,7 @@ def _cal(session: str, rmse: float, n_vix: int = 4, n_spx: int = 54, **extra) ->
         "spot_date": session, "spx_snapshot_date": session, "as_of_date": session,
         "S": 6000.0, "fit_time": 5.0, "n_evals": 1000, "success": True,
         "weights": {"w1": 0.5, "w2": 0.5, "w3": 0.0},
+        "model_version": 2, "feller": "off",
     }
     cal.update(extra)
     return cal
@@ -257,14 +259,18 @@ def test_selector_never_falls_back_to_a_rejected_fit(dash, tmp_path, monkeypatch
     assert dash.latest_good_calibration_path() is None
 
 
-def test_selector_passes_new_gate_arguments_by_name(dash, tmp_path, monkeypatch):
-    """A gate that grows an SPX-sufficiency argument is honoured without
-    touching the dashboard (the old call was positional and fixed)."""
+def test_selector_calls_the_gate_with_the_full_result(dash, tmp_path, monkeypatch):
+    """The gate receives the whole stored result (its single-source-of-truth
+    form), so every check it knows about is applied, including ones whose
+    keys the dashboard never names."""
     from joint_vol_calibration.calibration import joint_calibrator as jc
 
-    def gate(params, spx_iv_rmse=None, n_vix_tenors=None, n_spx_expiries=None):
-        if n_spx_expiries is not None and n_spx_expiries < 3:
-            return False, "one expiry"
+    seen = []
+
+    def gate(result, *a, **k):
+        seen.append(result)
+        if result.get("n_spx_expiries", 9) < 4:
+            return False, "too few expiries"
         return True, "ok"
 
     monkeypatch.setattr(jc, "is_acceptable_calibration", gate)
@@ -275,6 +281,24 @@ def test_selector_passes_new_gate_arguments_by_name(dash, tmp_path, monkeypatch)
     })
     monkeypatch.setattr(dash, "DATA", data)
     assert Path(dash.latest_good_calibration_path()).name == "joint_cal_2026-09-04.pkl"
+    assert seen and all("params" in r and "spot_date" in r for r in seen)
+
+
+def test_selector_never_ranks_legacy_fits(dash, tmp_path, monkeypatch):
+    """A pre-C22 (model_version 1) fit is newer and passes every numeric check,
+    but its RMSEs are not comparable: it is labelled legacy and not ranked."""
+    legacy = _cal("2026-10-09", 0.3)
+    del legacy["model_version"]
+    data = tmp_path / "data_store"
+    _write_cals(data / "calibrations", {
+        "joint_cal_2026-06-18.pkl": _cal("2026-06-18", 0.9),
+        "joint_cal_2026-10-09.pkl": legacy,
+    })
+    monkeypatch.setattr(dash, "DATA", data)
+    assert Path(dash.latest_good_calibration_path()).name == "joint_cal_2026-06-18.pkl"
+    rows = {Path(r["path"]).name: r for r in dash.scan_calibrations()}
+    assert rows["joint_cal_2026-10-09.pkl"]["legacy"] is True
+    assert rows["joint_cal_2026-06-18.pkl"]["legacy"] is False
 
 
 def test_calibration_page_shows_age_and_staleness_banner(dash, synth):
@@ -292,14 +316,23 @@ def test_calibration_page_shows_age_and_staleness_banner(dash, synth):
     assert "Heston calibration is 10 NYSE sessions old" in html
 
 
-def test_legacy_fits_are_labelled_when_the_library_can_tell(dash, synth, monkeypatch):
-    from joint_vol_calibration.calibration import joint_calibrator as jc
-
-    monkeypatch.setattr(jc, "calibration_is_legacy", lambda cal: True, raising=False)
-    assert dash.load_page2()["legacy"] is True
-    assert "PRE-C22 FIT" in dash.app.test_client().get("/calibration").get_data(as_text=True)
-    monkeypatch.delattr(jc, "calibration_is_legacy", raising=False)
-    assert dash.load_page2()["legacy"] is None
+def test_legacy_fits_are_counted_and_never_headlined(dash, synth):
+    """The page reports how many archived fits are legacy; none is the headline."""
+    cal_dir = synth["data"] / "calibrations"
+    old = str(synth["dates"][-2].date())
+    last = str(synth["dates"][-1].date())
+    legacy = _cal(last, 0.3)
+    del legacy["model_version"]
+    for p in cal_dir.glob("*.pkl"):
+        p.unlink()
+    _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0),
+                          f"joint_cal_{last}.pkl": legacy})
+    d = dash.load_page2()
+    assert d["session"] == old and d["legacy"] is False
+    assert d["archive"] == {"n_total": 2, "n_legacy": 1, "n_current": 1, "n_current_ok": 1}
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    assert "PRE-C22 FIT" not in html
+    assert "1 pre-C22 fits are labelled legacy and never ranked" in html
 
 
 def test_carry_is_shown_only_when_the_fit_recorded_it(dash, synth):
@@ -369,8 +402,14 @@ def test_quintic_is_compared_with_the_same_snapshot_heston(dash):
     assert q["heston"]["file"] == f"joint_cal_{q['as_of']}.pkl"
     with open(SHIPPED / "calibrations" / q["heston"]["file"], "rb") as f:
         h = pickle.load(f)
+    assert q["heston"]["spx_rmse"] == pytest.approx(dash._cal_losses(h)["spx_iv_rmse"])
+    # The Δ is taken on the SAME targets: the Heston parameters re-priced on
+    # the Quintic's strikes (baseline_<session>.json), not two strike sets.
+    base = json.loads((SHIPPED / "calibrations" / f"baseline_{q['as_of']}.json").read_text())
+    assert base["heston"]["file"] == q["heston"]["file"]
+    assert base["params"] == h["params"]
     assert q["heston"]["spx_delta"] == pytest.approx(
-        q["spx_rmse"] - dash._cal_losses(h)["spx_iv_rmse"], abs=1e-12)
+        q["spx_rmse"] - base["on_quintic_targets"]["spx_iv_rmse"], abs=1e-12)
 
 
 # ── PDV card ──────────────────────────────────────────────────────────────────
@@ -871,7 +910,13 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
     for stale in ("non-affine model (e.g. rough Heston)", "degenerate on daily data",
                   "Barndorff-Nielsen &amp; Shephard 2004", "production classification"):
         assert stale not in cal
-    assert "affine Volterra" in cal and "did not converge" in cal
+    # The ρ-boundary banner (rough-Heston / Bates copy) renders only when the
+    # headline fit has ρ on its bound; the shipped headline does not.
+    if "AT THE LOWER BOUNDARY" in cal:
+        assert "affine Volterra" in cal and "did not converge" in cal
+    for stale in ("37.14", "structural failure", "Feller-satisfying Heston", "SOFR",
+                  "VIX Futures RMSE", "SVI"):
+        assert stale not in cal, stale
 
 
 def test_vix_colour_and_words_come_from_one_threshold_table(dash, monkeypatch):
@@ -921,3 +966,30 @@ def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
                               "WHERE underlying='SPX'").fetchone()[0]
     assert f"its {n_dates} SPX chain" in bt
     assert "$-" not in bt and "'$' + v + 'k'" not in bt
+
+
+def test_greeks_provenance_written_by_risk_monitor_is_read(dash, synth):
+    """The dashboard read b"provenance" while risk_monitor.save_greeks_surface
+    writes b"greeks_provenance" (nested source): a regenerated surface with
+    full provenance was shown as 'records no source calibration'."""
+    from joint_vol_calibration.greeks.risk_monitor import save_greeks_surface
+
+    last = str(synth["dates"][-1].date())
+    with open(synth["data"] / "calibrations" / f"joint_cal_{last}.pkl", "rb") as f:
+        params = dict(pickle.load(f)["params"])
+    path = synth["data"] / "greeks" / "greeks_surface.parquet"
+    df = pd.read_parquet(path)
+    df.attrs["provenance"] = {
+        "schema_version": 2, "as_of_date": last, "S": 6000.0, "r": 0.04, "q": 0.007,
+        "params": params,
+        "source": {"calibration_file": f"data_store/calibrations/joint_cal_{last}.pkl",
+                   "spot_date": last},
+    }
+    save_greeks_surface(df, path)
+
+    d = dash.load_page3()
+    assert d["provenance"]["source_calibration"] == f"joint_cal_{last}.pkl"
+    assert d["source_matches_headline"] is True
+    assert d["surface_date"] == last
+    html = dash.app.test_client().get("/greeks").get_data(as_text=True)
+    assert f"joint_cal_{last}.pkl" in html and "records no source calibration" not in html

@@ -164,7 +164,7 @@
       </table>
     </div>
     <div class="chart-note">
-      Variance of the integrated variance ∫₀ᵀ v_t dt under the surface's Heston parameters (Monte Carlo), one
+      Variance of the integrated variance ∫₀ᵀ v_t dt under the surface's Heston parameters ({% if d.provenance and d.provenance.qv_method == 'exact' %}exact closed form for the CIR variance{% else %}Monte Carlo{% endif %}), one
       value per maturity — it does not depend on strike. A model quantity: it grows with the horizon because
       more variance paths accumulate, not because of any option's vomma.
     </div>

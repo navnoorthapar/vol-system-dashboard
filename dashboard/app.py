@@ -23,7 +23,6 @@ Run a local preview (read-only, bound to 127.0.0.1):
 from __future__ import annotations
 
 import glob
-import inspect
 import json
 import logging
 import math
@@ -378,46 +377,18 @@ def _cal_losses(cal: dict) -> dict:
 
 
 def calibration_gate(cal: dict) -> tuple[bool, str]:
-    """Apply joint_calibrator.is_acceptable_calibration to a stored result.
+    """joint_calibrator.is_acceptable_calibration applied to a stored result.
 
-    The gate is the single source of truth for what may be published, and its
-    signature grows as checks are added (SPX data sufficiency, snapshot
-    freshness, ...). Its arguments are therefore bound BY NAME from the stored
-    result: `params` <- result["params"], `spx_iv_rmse` <- the SPX leg RMSE, a
-    parameter called `result`/`cal`/`calibration` <- the whole dict, and any
-    other parameter <- the result key of the same name. A new gate argument is
-    picked up here without editing the dashboard.
+    The gate is called with the FULL result dict, its single-source-of-truth
+    form: it applies every check from the result's own fields (degenerate
+    corner, SPX RMSE, VIX tenors, SPX expiries / options / put wing, snapshot
+    session == spot session, model_version) and rejects legacy (pre-C22)
+    results. Binding a few keys into the old positional form skipped the
+    checks whose arguments were not passed, including the legacy check.
     """
     from joint_vol_calibration.calibration import joint_calibrator as jc
 
-    gate = jc.is_acceptable_calibration
-    losses = _cal_losses(cal)
-    args, kwargs = [], {}
-    for name, p in inspect.signature(gate).parameters.items():
-        if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-            continue
-        if name == "params":
-            val, have = cal.get("params", {}), True
-        elif name in ("result", "cal", "calibration"):
-            val, have = cal, True
-        elif name in ("spx_iv_rmse", "spx_rmse"):
-            val = losses.get("spx_iv_rmse")
-            have = val is not None
-        elif name in cal:
-            val, have = cal[name], True
-        elif name in losses:
-            val, have = losses[name], True
-        else:
-            val, have = None, False
-        if not have:
-            if p.default is p.empty:
-                return False, f"result lacks '{name}', required by the quality gate"
-            continue
-        if p.kind is p.POSITIONAL_ONLY:
-            args.append(val)
-        else:
-            kwargs[name] = val
-    ok, reason = gate(*args, **kwargs)
+    ok, reason = jc.is_acceptable_calibration(cal)
     return bool(ok), str(reason)
 
 
@@ -435,8 +406,32 @@ def calibration_is_legacy(cal: dict) -> Optional[bool]:
         return None
 
 
+def scan_calibrations(cal_dir: str | Path | None = None) -> list[dict]:
+    """Every joint_cal_*.pkl with its session, legacy flag and gate verdict.
+
+    Legacy (pre-C22, model_version < 2) results are classified, never ranked:
+    they fitted the VIX spot indices as futures, with ATM-call anchors and an
+    assumed r/q, so their RMSEs are not comparable with model_version 2 fits.
+    """
+    cal_dir = Path(cal_dir) if cal_dir is not None else DATA / "calibrations"
+    rows = []
+    for path in sorted(glob.glob(str(cal_dir / "joint_cal_*.pkl"))):
+        try:
+            with open(path, "rb") as f:
+                cal = pickle.load(f)
+            legacy = calibration_is_legacy(cal)
+            ok, reason = calibration_gate(cal)
+        except Exception as exc:
+            _logger.warning("calibration %s unreadable: %s", Path(path).name, exc)
+            continue
+        rows.append({"path": path, "session": _calibration_session(cal, path),
+                     "run_date": str(cal.get("run_date") or ""),
+                     "legacy": legacy, "ok": ok, "reason": reason})
+    return rows
+
+
 def latest_good_calibration_path(cal_dir: str | Path | None = None) -> Optional[str]:
-    """Return the NEWEST joint_cal_*.pkl that passes the quality gate, or None.
+    """Return the NEWEST model_version 2 joint_cal_*.pkl that passes the gate, or None.
 
     Selection is by market session (spot_date, else as_of_date, else the date
     in the file name), never by RMSE. Ranking archived fits by RMSE is a
@@ -444,25 +439,21 @@ def latest_good_calibration_path(cal_dir: str | Path | None = None) -> Optional[
     0.049 vp) and later a one-expiry SPX leg (2026-09-11, 0.215 vp; 2026-09-25,
     0.041 vp) each scored the best RMSE on record precisely because the data
     had broken, and an RMSE-ranked selector headlined them over newer, better
-    identified fits. What may be published is decided by the gate
-    (``calibration_gate``); the dashboard shows the latest such fit together
-    with its age, and never falls back to a fit the gate rejected.
+    identified fits. Only current-schema fits are ranked (calibration_is_legacy
+    excludes the pre-C22 archive); what may be published is decided by the
+    gate (``calibration_gate``, the full-result form of
+    is_acceptable_calibration), and the dashboard shows the latest such fit
+    together with its age, never falling back to a rejected or legacy fit.
     """
-    cal_dir = Path(cal_dir) if cal_dir is not None else DATA / "calibrations"
     candidates = []
-    for path in glob.glob(str(cal_dir / "joint_cal_*.pkl")):
-        try:
-            with open(path, "rb") as f:
-                cal = pickle.load(f)
-            ok, reason = calibration_gate(cal)
-        except Exception as exc:
-            _logger.warning("calibration %s unreadable: %s", Path(path).name, exc)
-            continue
-        session = _calibration_session(cal, path)
-        if ok and session:
-            candidates.append((session, str(cal.get("run_date") or ""), path))
-        elif not ok:
-            _logger.info("calibration %s rejected by gate: %s", Path(path).name, reason)
+    for row in scan_calibrations(cal_dir):
+        name = Path(row["path"]).name
+        if row["legacy"]:
+            _logger.info("calibration %s is legacy (pre-C22): not ranked", name)
+        elif not row["ok"]:
+            _logger.info("calibration %s rejected by gate: %s", name, row["reason"])
+        elif row["session"]:
+            candidates.append((row["session"], row["run_date"], row["path"]))
     if not candidates:
         return None
     return max(candidates)[2]
@@ -828,13 +819,24 @@ def load_page1() -> dict[str, Any]:
 
 # ── PAGE 2 DATA: Calibration Results ─────────────────────────────────────────
 def _optimizer_settings(cal: dict) -> Optional[str]:
-    """Human-readable optimiser settings when the result records them."""
-    opt = cal.get("optimizer") or cal.get("de_config") or {}
+    """The optimiser settings the result records (methods.optimizer on
+    model_version 2 results), or None when it records none."""
+    opt = ((cal.get("methods") or {}).get("optimizer") or cal.get("optimizer")
+           or cal.get("de_config") or {})
     maxiter = opt.get("maxiter", cal.get("de_maxiter"))
     popsize = opt.get("popsize", cal.get("de_popsize"))
     if maxiter is None or popsize is None:
         return None
-    return f"DE (maxiter {int(maxiter)}, popsize {int(popsize)} × 5) + L-BFGS-B"
+    members = opt.get("members")
+    text = f"DE maxiter {int(maxiter)}, popsize {int(popsize)}"
+    if members is not None:
+        text += f" ({int(members)} members)"
+    if opt.get("seed") is not None:
+        text += f", seed {opt['seed']}"
+    polish = opt.get("lbfgsb_polish")
+    if polish is None or polish:
+        text += " + L-BFGS-B polish"
+    return text
 
 
 def load_page2() -> dict[str, Any]:
@@ -845,9 +847,12 @@ def load_page2() -> dict[str, Any]:
               "spx_rmse", "vix_fut_rmse", "vix_opt_rmse", "feller_lhs", "feller_rhs",
               "feller_margin", "feller_state", "effective_dof", "n_spx_options",
               "n_vix_tenors", "spot_date", "n_spx_expiries", "half_life_days",
-              "optimizer", "legacy", "calib_file", "calib_age"):
+              "optimizer", "legacy", "calib_file", "calib_age", "vix_index_rmse",
+              "r_ref_pct", "r_ref_source", "carry_mode", "feller_mode", "spx_oos_rmse",
+              "spx_oos_wing_rmse", "n_vix_options", "archive"):
         d[k] = None
-    d.update(pinned_params=[], rho_at_boundary=False, spx_underidentified=None,
+    d.update(pinned_params=[], active_constraints=[], feller_imposed=None,
+             rho_at_boundary=False, spx_underidentified=None,
              n_spx_expiries_inferred=False, carry_recorded=False)
 
     try:
@@ -872,38 +877,70 @@ def load_page2() -> dict[str, Any]:
         # Carry inputs: shown only when the RESULT records both r and q. Daily
         # fits before C22 ran with the calibrator's default carry while the
         # pickle stored a T-bill close written after the fit (and no q), so a
-        # lone stored r is not the rate the fit used.
+        # lone stored r is not the rate the fit used. model_version 2 results
+        # price every expiry off its own put-call-parity forward and discount;
+        # r and q are the medians of the parity-implied r_T, q_T over the
+        # anchor expiries, and r_reference is the ^IRX bill (cc) for reference.
         if _num(cal.get("r")) is not None and _num(cal.get("q")) is not None:
             d["carry_recorded"] = True
             d["r_pct"] = round(float(cal["r"]) * 100, 2)
             d["q_pct"] = round(float(cal["q"]) * 100, 2)
+        d["carry_mode"] = (cal.get("methods") or {}).get("carry")
+        if _num(cal.get("r_reference")) is not None:
+            d["r_ref_pct"] = round(float(cal["r_reference"]) * 100, 2)
+            d["r_ref_source"] = cal.get("r_reference_source")
 
         losses = _cal_losses(cal)
         d["spx_rmse"] = round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None else None
-        d["vix_fut_rmse"] = round(float(losses["vix_futures_rmse"]), 3) if _num(losses.get("vix_futures_rmse")) is not None else None
+        # VIX leg: the Cboe SPOT indices (^VIX9D/^VIX/^VIX3M/^VIX6M) against
+        # heston_vix_term_index. Pre-C22 results only have the old key name.
+        vix_rmse = losses.get("vix_index_rmse", losses.get("vix_futures_rmse"))
+        d["vix_index_rmse"] = round(float(vix_rmse), 3) if _num(vix_rmse) is not None else None
+        for key, src in (("spx_oos_rmse", "spx_oos_iv_rmse"),
+                         ("spx_oos_wing_rmse", "spx_oos_put_wing_rmse")):
+            if _num(losses.get(src)) is not None:
+                d[key] = round(float(losses[src]), 3)
+        d["n_vix_options"] = cal.get("n_vix_options")
+        # The VIX-options leg is in the objective only when its weight is > 0
+        # (liquid contracts on the spot session alone do not activate it).
         w3 = (cal.get("weights") or {}).get("w3")
-        vix_opt_active = bool(w3) or bool(cal.get("n_vix_options"))
+        vix_opt_active = bool(w3)
         if vix_opt_active and _num(losses.get("vix_options_rmse")) is not None:
             d["vix_opt_rmse"] = round(float(losses["vix_options_rmse"]), 2)
         d["vix_opt_disabled"] = not vix_opt_active
         d["rmse_bars"] = [b for b in (
             {"label": "SPX IV RMSE (vol pts)", "value": d["spx_rmse"], "color": "#3388ff"},
-            {"label": "VIX leg RMSE (index pts)", "value": d["vix_fut_rmse"], "color": "#00ff88"},
+            {"label": "VIX index RMSE (index pts)", "value": d["vix_index_rmse"], "color": "#00ff88"},
             {"label": "VIX options RMSE (vol pts)", "value": d["vix_opt_rmse"], "color": "#ff3333"},
         ) if b["value"] is not None]
 
-        # Feller: PASS / BINDING / VIOLATED (soft exterior penalty -> an active
-        # constraint lands a whisker outside the feasible set).
+        # Feller: a DIAGNOSTIC (PASS / BINDING / VIOLATED and the margin), and a
+        # constraint only when the fit imposed it (feller="soft"; the C22
+        # default is "off"). Active constraints come from the result itself:
+        # box bounds a parameter sits on, plus "feller" when it was imposed
+        # and binds.
         from joint_vol_calibration.calibration.joint_calibrator import (
-            _CAL_STRIKES_PER_EXPIRY, classify_feller, count_pinned_params,
+            _CAL_STRIKES_PER_EXPIRY, active_constraints, classify_feller,
+            count_pinned_params,
         )
         state, margin = classify_feller(p["kappa"], p["theta"], p["sigma"])
         d["feller_lhs"] = round(2 * p["kappa"] * p["theta"], 5)
         d["feller_rhs"] = round(p["sigma"] ** 2, 5)
         d["feller_margin"] = margin
         d["feller_state"] = state
-        pinned = cal.get("pinned_params") or count_pinned_params(p, state)
+        # Pre-C22 fits always carried the soft penalty; model_version 2 records it.
+        d["feller_mode"] = cal.get("feller") if isinstance(cal.get("feller"), str) else (
+            "soft" if d["legacy"] else None)
+        imposed = d["feller_mode"] != "off"
+        d["feller_imposed"] = imposed
+        pinned = cal.get("pinned_params")
+        if pinned is None:
+            pinned = count_pinned_params(p, state, feller_imposed=imposed)
         d["pinned_params"] = list(pinned)
+        ac = cal.get("active_constraints")
+        if ac is None:
+            ac = active_constraints(p, state, feller_imposed=imposed)
+        d["active_constraints"] = list(ac)
         d["effective_dof"] = 5 - len(pinned)
         d["rho_at_boundary"] = abs(p["rho"]) >= 0.94
 
@@ -953,7 +990,20 @@ def load_page2() -> dict[str, Any]:
     except Exception as e:
         _record_error(d, "headline calibration", e)
 
-    # ── Quintic OU research fit vs the Heston fit of the SAME snapshot ───────
+    # Archive census: how many stored fits are current-schema and gate-passing,
+    # and how many are pre-C22 (labelled, never ranked).
+    try:
+        rows = scan_calibrations()
+        d["archive"] = {
+            "n_total": len(rows),
+            "n_legacy": sum(1 for r in rows if r["legacy"]),
+            "n_current": sum(1 for r in rows if r["legacy"] is False),
+            "n_current_ok": sum(1 for r in rows if r["legacy"] is False and r["ok"]),
+        }
+    except Exception as e:
+        _record_error(d, "calibration archive", e)
+
+    # ── Quintic OU research fit vs the Heston fit of the SAME session ────────
     try:
         qpaths = sorted(glob.glob(str(DATA / "calibrations" / "quintic_cal_*.pkl")))
         if qpaths:
@@ -963,34 +1013,65 @@ def load_page2() -> dict[str, Any]:
             qp = qcal["params"]
             qp = qp if isinstance(qp, dict) else vars(qp)
             ql = qcal.get("leg_losses", {})
-            q_date = _calibration_session(qcal, qpath)
+            qprov = qcal.get("provenance") or {}
+            q_date = _date_str(qprov.get("spot_date")) or _calibration_session(qcal, qpath)
+            mc = qprov.get("mc") or {}
+            quad = qprov.get("vix_quadrature") or {}
             q = {
                 "as_of": q_date,
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
                 "theta": round(float(qp["theta"]), 4), "alpha0": round(float(qp["alpha0"]), 4),
                 "alpha1": round(float(qp["alpha1"]), 4), "alpha3": round(float(qp["alpha3"]), 4),
                 "alpha5": round(float(qp["alpha5"]), 4), "epsilon": round(float(qp["epsilon"]), 4),
-                "spx_rmse": _num(ql.get("spx_iv_rmse")), "vix_rmse": _num(ql.get("vix_futures_rmse")),
+                "spx_rmse": _num(ql.get("spx_iv_rmse")),
+                "spx_rmse_fresh": _num(ql.get("spx_iv_rmse_fresh_paths")),
+                # model E[VIX_T] vs the VIX-option parity forward (no VX futures)
+                "vix_fwd_rmse": _num(ql.get("vix_futures_rmse")),
                 "vix_opt_rmse": _num(ql.get("vix_options_rmse")),
+                "xi0_check": _num(ql.get("xi0_index_reproduction_rmse")),
+                "at_bound": [k for k, v in (qcal.get("at_bound") or {}).items() if v],
                 "eps_saturated": abs(float(qp["epsilon"]) + 0.99) < 0.02,
+                "n_spx": qprov.get("n_spx_options"), "n_vix_opts": qprov.get("n_vix_options"),
+                "mc_paths": mc.get("n_paths"), "quad_points": quad.get("points_per_dim"),
                 "fit_time": _num(qcal.get("fit_time")), "n_evals": qcal.get("n_evals"),
                 "converged": qcal.get("success"),
                 "heston": None,
             }
-            # A cross-date Δ (Quintic on 2026-03-24 vs today's Heston headline)
-            # compares different chains and flipped the sign of the SPX Δ.
+            # Like-for-like only: the Heston fit of the SAME session, and the
+            # same Heston parameters re-priced on the Quintic's own targets
+            # (baseline_<session>.json, scripts/heston_quintic_baseline.py).
             hpath = DATA / "calibrations" / f"joint_cal_{q_date}.pkl"
+            bpath = DATA / "calibrations" / f"baseline_{q_date}.json"
             if q_date and hpath.exists():
                 with open(hpath, "rb") as f:
                     hcal = pickle.load(f)
                 hl = _cal_losses(hcal)
                 ok, reason = calibration_gate(hcal)
-                h_spx, h_vix = _num(hl.get("spx_iv_rmse")), _num(hl.get("vix_futures_rmse"))
+                base = json.loads(bpath.read_text()) if bpath.exists() else {}
+                on_q = base.get("on_quintic_targets") or {}
+                if base and (base.get("heston") or {}).get("file") != hpath.name:
+                    on_q = {}        # baseline built from another Heston fit
+                h_spx_q, h_fwd_q, h_opt_q = (_num(on_q.get(k)) for k in
+                                             ("spx_iv_rmse", "vix_forward_rmse", "vix_options_rmse"))
+
+                def _delta(a, b):
+                    return (a - b) if None not in (a, b) else None
+
                 q["heston"] = {
-                    "file": hpath.name, "spx_rmse": h_spx, "vix_rmse": h_vix,
-                    "gate_ok": ok, "gate_reason": reason,
-                    "spx_delta": (q["spx_rmse"] - h_spx) if None not in (q["spx_rmse"], h_spx) else None,
-                    "vix_delta": (q["vix_rmse"] - h_vix) if None not in (q["vix_rmse"], h_vix) else None,
+                    "file": hpath.name, "gate_ok": ok, "gate_reason": reason,
+                    "legacy": calibration_is_legacy(hcal),
+                    "spx_rmse": _num(hl.get("spx_iv_rmse")),
+                    "spx_oos_rmse": _num(hl.get("spx_oos_iv_rmse")),
+                    "n_spx": hcal.get("n_spx_options"),
+                    "vix_index_rmse": _num(hl.get("vix_index_rmse", hl.get("vix_futures_rmse"))),
+                    "sigma": _num((hcal.get("params") or {}).get("sigma")),
+                    "active_constraints": hcal.get("active_constraints") or [],
+                    "baseline_file": bpath.name if on_q else None,
+                    "spx_rmse_on_q": h_spx_q, "n_spx_on_q": on_q.get("n_spx"),
+                    "vix_fwd_rmse_on_q": h_fwd_q, "vix_opt_rmse_on_q": h_opt_q,
+                    "spx_delta": _delta(q["spx_rmse"], h_spx_q),
+                    "vix_fwd_delta": _delta(q["vix_fwd_rmse"], h_fwd_q),
+                    "vix_opt_delta": _delta(q["vix_opt_rmse"], h_opt_q),
                 }
             d["quintic"] = q
     except Exception as e:
@@ -1001,16 +1082,31 @@ def load_page2() -> dict[str, Any]:
 
 # ── PAGE 3 DATA: Greeks Risk Monitor ─────────────────────────────────────────
 def _greeks_provenance(path: Path) -> dict:
-    """Provenance stored with the surface (parquet metadata 'provenance' JSON)."""
+    """Provenance stored with the surface, normalised to one flat dict.
+
+    greeks.risk_monitor.save_greeks_surface writes it under the parquet
+    metadata key b"greeks_provenance" (params, S, r, q and as_of_date at the
+    top level; the source calibration under source.calibration_file /
+    source.spot_date). The older contract, a flat dict under b"provenance",
+    is still read. Returned keys: source_calibration (file name), spot_date,
+    S, r, q, params, plus everything else the builder recorded.
+    """
     prov: dict = {}
     try:
         import pyarrow.parquet as pq
         meta = pq.read_schema(path).metadata or {}
-        raw = meta.get(b"provenance")
+        raw = meta.get(b"greeks_provenance") or meta.get(b"provenance")
         if raw:
             prov = json.loads(raw.decode())
     except Exception as exc:
         _logger.info("greeks provenance unreadable: %s", exc)
+    if not isinstance(prov, dict):
+        return {}
+    src = prov.get("source") if isinstance(prov.get("source"), dict) else {}
+    if not prov.get("source_calibration") and src.get("calibration_file"):
+        prov["source_calibration"] = Path(str(src["calibration_file"])).name
+    if not prov.get("spot_date"):
+        prov["spot_date"] = src.get("spot_date") or prov.get("as_of_date")
     return prov
 
 
@@ -1404,17 +1500,22 @@ def load_page4() -> dict[str, Any]:
     # ── Improvement Summary (Steps 1–8) — a historical change log ─────────────
     d["improvements"] = [
         {"step": "1", "name": "Disable VIX options leg",
-         "what": "JOINT_W3 = 0.0 (was 0.2). Heston CIR density is structurally mis-specified for VIX options.",
-         "before": "VIX opt RMSE 37.14 vp (corrupts calibration)",
-         "after":  "SPX-only objective. RMSE expected ↓ from 5.3 → ~2.5 vp."},
+         "what": "JOINT_W3 = 0.0 (was 0.2). Attributed at the time to the Heston CIR density; "
+                 "C22 traced the 37.14 vp to a broken VIX put pricer, spot-VIX vegas and a "
+                 "stale chain, so it was not evidence about the model.",
+         "before": "VIX-options leg in the objective with a broken pricer",
+         "after":  "SPX + VIX index objective; VIX-options leg off (too few sessions of quotes)."},
         {"step": "2", "name": "Vega-weighted anchor selection",
          "what": "Select 9 highest-BS-vega options per expiry (was log-uniform grid). Moneyness lo 0.70 (was 0.75).",
          "before": "Log-uniform includes low-information deep OTM options",
-         "after":  "Near-ATM anchors only; more stable Heston gradient."},
-        {"step": "3", "name": "SVI smoothing (SSVI surface)",
-         "what": "Fit Gatheral (2004) SVI per expiry; calibrate Heston to smooth surface not noisy quotes.",
-         "before": "SPX RMSE ~5.3 vol pts (market microstructure noise)",
-         "after":  "Target SPX RMSE ~2.0 vol pts. Butterfly-free surface."},
+         "after":  "Near-ATM anchors only. C22 reverted it: the top-vega strikes were adjacent "
+                   "ATM calls and the fit never saw the put wing; anchors are now a "
+                   "forward-moneyness z-grid with >= 3 wing puts per expiry."},
+        {"step": "3", "name": "SVI smoothing — never wired in; removed (C22)",
+         "what": "SVI/SSVI helpers were written, but only tests called them: the calibrator "
+                 "always fitted the quotes directly. C22 removed them.",
+         "before": "Claimed: Heston calibrated to an SSVI-smoothed surface",
+         "after":  "Calibrates to two-sided parity-forward Black-76 IVs; no smoothing step."},
         {"step": "4", "name": "Per-date T-bill rate",
          "what": "^IRX 3M T-bill from DB replaces fixed r=0.045 in backtest. 18 new tests.",
          "before": "Fixed r=0.045 throughout 2018–2025",
