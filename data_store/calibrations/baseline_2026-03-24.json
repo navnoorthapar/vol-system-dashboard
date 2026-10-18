@@ -37,7 +37,7 @@
     "n_spx_oos": 6622,
     "vix_index_rmse": 0.8883033191050096,
     "vix_index_definition": "VIX points, ^VIX9D/^VIX/^VIX3M/^VIX6M vs heston_vix_term_index",
-    "vx_futures_rmse_oos": 2.316237247480611
+    "vx_futures_rmse_oos": 2.6638613302849485
   },
   "on_quintic_targets": {
     "spx_iv_rmse": 1.2145040027985554,
@@ -71,7 +71,7 @@
     "r_source": "^IRX",
     "code_sha": "2ab2dbbd267820b5976637501bc22f92de047cec"
   },
-  "built_at_utc": "2026-10-18T15:33:43Z",
-  "code_sha": "4dcb35e272a63437ce38d4efe51b30a6d7c5953a",
+  "built_at_utc": "2026-10-18T20:01:46Z",
+  "code_sha": "8bf9aa6771c75555176f0da72ea2228d792fee7d",
   "generator": "scripts/heston_quintic_baseline.py"
 }
