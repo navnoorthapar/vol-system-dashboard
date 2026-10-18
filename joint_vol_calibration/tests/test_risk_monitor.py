@@ -45,7 +45,6 @@ from joint_vol_calibration.greeks.risk_monitor import (
     simulate_qv_convexity,
 )
 from joint_vol_calibration.config import ROOT_DIR
-from joint_vol_calibration.models.heston import characteristic_function
 from joint_vol_calibration.models.implied_vol import IV_NOT_CONVERGED, IV_OK
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
@@ -70,17 +69,32 @@ def _make_surface() -> pd.DataFrame:
     )
 
 
+def _cf_reference(u, T, kappa, theta, sigma, rho, v0):
+    """
+    Heston CF of ln(S_T/F) written out here (Albrecher et al. 2007 "little
+    trap" form), so the reference does not share models.heston's code.
+    """
+    iu = 1j * u
+    b = kappa - rho * sigma * iu
+    d = np.sqrt(b * b + sigma**2 * (iu + u * u))
+    g = (b - d) / (b + d)
+    e = np.exp(-d * T)
+    C = kappa * theta / sigma**2 * ((b - d) * T - 2.0 * np.log((1.0 - g * e) / (1.0 - g)))
+    D = (b - d) / sigma**2 * (1.0 - e) / (1.0 - g * e)
+    return np.exp(C + D * v0)
+
+
 def _ref_otm_and_iv(S, K, T, r, q, p):
     """
-    Independent reference for one node: Lewis formula by scipy.quad, then the
-    OTM option inverted with scipy brentq on the textbook BS formula.
-    Returns (undiscounted OTM price / F, implied vol or NaN).
+    Independent reference for one node: the Heston CF above, the Lewis formula
+    by scipy.quad, then the OTM option inverted with scipy brentq on the
+    textbook BS formula. Returns (undiscounted OTM price / F, implied vol or NaN).
     """
     F = S * np.exp((r - q) * T)
     x = np.log(K / F)
 
     def integrand(u):
-        cf = characteristic_function(np.array([u - 0.5j]), 1.0, T, 0.0, 0.0, **p)[0]
+        cf = _cf_reference(u - 0.5j, T, **p)
         return np.real(np.exp(-1j * u * x) * cf) / (u * u + 0.25)
 
     val, _ = integrate.quad(integrand, 0, np.inf, limit=2000, epsabs=1e-15, epsrel=1e-13)
@@ -494,8 +508,6 @@ class TestCalibrationEntryPoint:
         assert m.as_of_date == "2026-09-11"
         assert m.S == pytest.approx(7656.97998046875)
         # q not recorded in live pickles → the calibrator's own default
-        from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
-        import inspect
         from joint_vol_calibration.calibration.joint_calibrator import FLAT_CARRY_Q
         assert m.q == FLAT_CARRY_Q
         assert "JointCalibrator default" in m.source["q_source"]
@@ -578,8 +590,14 @@ class TestRiskMonitor:
 
 def test_import_does_not_load_torch():
     """The Greeks monitor (and the backtest engine through delta_hedger) used to
-    import torch and sklearn only to reach a numpy IV helper in nn_pricer."""
+    import torch and sklearn only to reach a numpy IV helper in nn_pricer.
+    Unpickling the backtest results (TradeRecord) imports backtest_engine, so
+    the dashboard build pulled torch in through that chain."""
     code = ("import sys, joint_vol_calibration.greeks.risk_monitor, "
             "joint_vol_calibration.models.implied_vol; "
             "sys.exit(int('torch' in sys.modules or 'sklearn' in sys.modules))")
+    assert subprocess.run([sys.executable, "-c", code], cwd=str(ROOT_DIR)).returncode == 0
+    code = ("import sys, joint_vol_calibration.backtest.delta_hedger, "
+            "joint_vol_calibration.backtest.backtest_engine; "
+            "sys.exit(int('torch' in sys.modules))")
     assert subprocess.run([sys.executable, "-c", code], cwd=str(ROOT_DIR)).returncode == 0

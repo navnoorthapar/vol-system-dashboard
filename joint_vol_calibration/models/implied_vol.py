@@ -38,9 +38,22 @@ Implied-vol solver
 
   An entry that is ill-posed (non-finite input, T <= 0, price at or below
   intrinsic, price above the sigma_max value, price below a caller-supplied
-  floor) or that has not converged after max_iter iterations is returned as
-  NaN — a non-converged iterate is never returned as an implied vol. With
-  full_output=True a per-entry status code (IV_STATUS) says why.
+  floor), that float64 cannot resolve (see below) or that has not converged
+  after max_iter iterations is returned as NaN — a non-converged iterate is
+  never returned as an implied vol. With full_output=True a per-entry status
+  code (IV_STATUS) says why.
+
+  Resolution limit: the OTM target is rounded, by about one ulp of the input
+  price, and also of F − K when an in-the-money input goes through parity.
+  Its complement to the upper bound is rounded by one ulp of that bound. When
+  either is within _MIN_SIGNIFICANCE (1,000) ulps of zero, the price does not
+  determine σ. Examples are an ITM option whose time value is lost in the
+  parity subtraction, or a total vol σ√T above ~14, where the price equals its
+  upper bound to 13 digits. Such an entry is IV_UNRESOLVED instead of whatever
+  σ happens to reproduce the rounded price. (Before this guard, a 900%-vol
+  5-year put came back as 740% with status ok.) Above the limit the target has
+  at least 3 significant digits, which bounds the relative σ error at about
+  1e-5 in the wings and at most 1e-3 at the money.
 
   Why the old solver was replaced: the previous Newton loop in nn_pricer
   started from the Brenner-Subrahmanyam guess clipped to 0.05, which for OTM
@@ -64,6 +77,9 @@ _LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
 # Relative price residual |ln p(σ) − ln p_target| required (with a sub-tolerance
 # Newton step) before an implied vol is accepted as converged.
 _LN_RESIDUAL_TOL = 1e-7
+# The OTM target and its complement to the upper bound must each exceed this
+# many units of their float64 rounding (see "Resolution limit" above).
+_MIN_SIGNIFICANCE = 1e3
 
 # ── Status codes returned by implied_vol_black(..., full_output=True) ─────────
 
@@ -74,6 +90,7 @@ IV_ABOVE_MAX = 3        # price >= Black price at sigma_max (or >= its upper bou
 IV_BELOW_MIN = 4        # price <= Black price at sigma_min
 IV_BELOW_FLOOR = 5      # OTM price below the caller's min_otm_price floor
 IV_NOT_CONVERGED = 6    # max_iter reached without meeting the tolerance
+IV_UNRESOLVED = 7       # float64 rounding of the price does not determine σ
 
 IV_STATUS = {
     IV_OK: "ok",
@@ -83,6 +100,7 @@ IV_STATUS = {
     IV_BELOW_MIN: "below_sigma_min",
     IV_BELOW_FLOOR: "below_price_floor",
     IV_NOT_CONVERGED: "not_converged",
+    IV_UNRESOLVED: "unresolved_at_float64",
 }
 
 
@@ -162,7 +180,10 @@ def black_price(
     is_call = is_call.astype(bool)
     s = sigma * np.sqrt(np.maximum(T, 0.0))
     x = np.log(K / F)
-    otm = F * np.exp(_otm_log_price_over_F(x, s))
+    # exp(ln(p/F) + ln F), not F·exp(ln(p/F)): for F > 1 the latter goes through
+    # a subnormal intermediate and loses the price's digits (7.5% at p ≈ 1e-319)
+    with np.errstate(divide="ignore"):
+        otm = np.exp(_otm_log_price_over_F(x, s) + np.log(F))
     otm = np.where(s > 0, otm, 0.0)
     # Recover the requested side from the OTM price via parity: C − P = F − K
     call = np.where(x >= 0, otm, otm + (F - K))
@@ -419,7 +440,7 @@ def implied_vol_black(
     s_hi = sigma_max * sqrtT
 
     pending = status == IV_OK
-    no_tv = pending & ~(target > 0)
+    no_tv = pending & ~(otm > 0)
     status[no_tv] = IV_NO_TIME_VALUE
     pending &= ~no_tv
 
@@ -428,7 +449,17 @@ def implied_vol_black(
     pending &= ~below_floor
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        ln_target = np.where(pending, np.log(np.where(pending, target, 1.0)), 0.0)
+        # ln(otm/F), except where the quotient is subnormal and has lost its
+        # significant digits: there ln(otm) − ln(F). (Not everywhere: near the
+        # upper bound σ is so sensitive to ln p that the extra rounding of the
+        # difference of two larger logs costs ~10x accuracy.)
+        normal = target >= np.finfo(float).tiny
+        ln_target = np.where(
+            pending,
+            np.where(normal, np.log(np.where(normal & pending, target, 1.0)),
+                     np.log(np.where(pending, otm, 1.0)) - np.log(Fs)),
+            0.0,
+        )
     ln_hi = _otm_log_price_over_F(x, s_hi)
     ln_lo = _otm_log_price_over_F(x, s_lo)
     above = pending & (ln_target >= ln_hi)
@@ -437,6 +468,21 @@ def implied_vol_black(
     below = pending & (ln_target <= ln_lo)
     status[below] = IV_BELOW_MIN
     pending &= ~below
+
+    # Float64 resolution of the target: one ulp of the input price,
+    # plus one ulp of F − K when an ITM input went through parity; its
+    # complement to the upper bound p_max (F for calls, K for puts) also
+    # carries one ulp of p_max.
+    # Compared in absolute terms (index points), so tiny prices do not underflow.
+    eps, ulp_min = np.finfo(float).eps, np.finfo(float).smallest_subnormal
+    with np.errstate(invalid="ignore"):
+        via_parity = np.where(x >= 0, ~is_call, is_call)
+        noise = eps * (np.abs(p) + np.where(via_parity, np.abs(Fs - Ks), 0.0)) + ulp_min
+        p_max = np.where(x >= 0, Fs, Ks)
+        unresolved = pending & ((otm <= _MIN_SIGNIFICANCE * noise)
+                                | (p_max - otm <= _MIN_SIGNIFICANCE * (noise + eps * p_max)))
+    status[unresolved] = IV_UNRESOLVED
+    pending &= ~unresolved
 
     s_out = np.full(shape, np.nan)
     if pending.any():
