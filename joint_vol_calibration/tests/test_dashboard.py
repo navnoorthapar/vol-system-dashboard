@@ -1281,3 +1281,34 @@ def test_page_header_dates_never_break_across_lines(dash, route):
     # Strip the no-wrap spans; no ISO date may remain outside one.
     outside = re.sub(r'<span class="nowrap"[^>]*>.*?</span>', "", body, flags=re.S)
     assert not re.search(r"\d{4}-\d{2}-\d{2}", outside), (route, outside)
+
+
+# ── Independent review of 8bf9aa6: every displayed number equals its artifact ─
+
+def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
+    """compute_crisis_performance divided by the window's FIRST NAV, dropping the
+    first session's return: 'FedHikes 2022 (2022-01-01 → 2022-12-31) +5.1%' sat
+    beside a 2022 annual return of +4.71% for the same sessions."""
+    d = dash.load_page4()
+    crisis = {c["name"]: c for c in d["crisis"]}
+    ann = {a["year"]: a["ret_pct"] / 100 for a in d["ann"]}
+    assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(ann[2022], abs=1e-12)
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    nav = eq["nav"]
+    nav.index = pd.to_datetime(nav.index)
+    for name, c in crisis.items():
+        base = nav[nav.index < pd.Timestamp(c["start"])].iloc[-1]
+        assert c["total_return"] == pytest.approx(nav.loc[c["start"]:c["end"]].iloc[-1] / base - 1, abs=1e-12)
+    assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(0.0470983, abs=1e-6)
+    assert crisis["COVID_2020"]["total_return"] == pytest.approx(0.0168672, abs=1e-6)
+    assert crisis["Tariffs_2025"]["total_return"] == pytest.approx(-0.0113131, abs=1e-6)
+    text = _visible_text(pages["/backtest"])
+    assert "FedHikes 2022 (2022-01-01 → 2022-12-31) +4.7%" in text
+    assert "COVID 2020 (2020-02-19 → 2020-04-30) +1.7%" in text
+    assert "+5.1%" not in text and "+1.8%" not in text
+    # a jump on the window's first session counts; a window at the curve's start uses its first NAV
+    idx = pd.bdate_range("2021-12-27", "2022-01-07")
+    toy = pd.Series([100.0] * 5 + [110.0] * 5, index=idx)
+    got = dash.window_returns(toy, {"jump": ("2022-01-01", "2022-01-07"), "head": ("2021-12-01", "2021-12-31")})
+    assert got[0]["total_return"] == pytest.approx(0.10) and got[0]["n_days"] == 5
+    assert got[1]["total_return"] == pytest.approx(0.0) and got[1]["n_days"] == 4

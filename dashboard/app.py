@@ -1434,6 +1434,32 @@ def annual_returns(nav: pd.Series) -> list[dict]:
     return out
 
 
+def window_returns(nav: pd.Series, periods: dict, end: Optional[str] = None) -> list[dict]:
+    """Return over each named (start, end) window, based on the last NAV before it opens.
+
+    backtest_engine.compute_crisis_performance divides the window's last NAV
+    by its FIRST NAV, which drops the first session's return: the page read
+    "FedHikes 2022 (2022-01-01 → 2022-12-31) +5.1%" beside a 2022 annual
+    return of +4.71% for the same sessions. As in annual_returns and
+    half_year_sharpes, the base is the close of the session before the window
+    (a window opening on the first session of the curve is based on that
+    session's NAV). Windows are clipped at `end`.
+    """
+    nav = nav.dropna()
+    out = []
+    for name, (start, stop) in periods.items():
+        stop = min(stop, end) if (stop and end) else (stop or end)
+        sub = nav.loc[start:stop]
+        prior = nav[nav.index < pd.Timestamp(start)]
+        row = {"name": name, "start": start, "end": stop, "total_return": None, "n_days": 0}
+        if len(sub) and (len(prior) or len(sub) > 1):
+            base = float(prior.iloc[-1]) if len(prior) else float(sub.iloc[0])
+            row["total_return"] = float(sub.iloc[-1]) / base - 1.0
+            row["n_days"] = int(len(sub) if len(prior) else len(sub) - 1)   # returns in the window
+        out.append(row)
+    return out
+
+
 def _trade_summary(trades: list, sig: str) -> dict:
     """Per-signal trade-log facts quoted in the page prose."""
     tr = [t for t in trades if getattr(t, "signal", None) == sig]
@@ -1585,16 +1611,10 @@ def load_page4() -> dict[str, Any]:
         d["wf_total"] = len(defined)
         d["wf_flat"] = sum(1 for w in d["wf"] if w["flat"])
 
-        from joint_vol_calibration.backtest.backtest_engine import (
-            CRISIS_PERIODS, compute_crisis_performance)
+        from joint_vol_calibration.backtest.backtest_engine import CRISIS_PERIODS
         # The window dates are shown with each return: "Tariffs_2025" ends at the
         # backtest's last session (2025-03-24), before the April 2025 shock.
-        d["crisis"] = [{"name": k, "total_return": v.get("total_return"),
-                        "n_days": v.get("n_days"),
-                        "start": CRISIS_PERIODS.get(k, (None, None))[0],
-                        "end": min(CRISIS_PERIODS.get(k, (None, d["end_date"]))[1] or d["end_date"],
-                                   d["end_date"])}
-                       for k, v in compute_crisis_performance(eq).items()]
+        d["crisis"] = window_returns(nav, CRISIS_PERIODS, end=d["end_date"])
     except Exception as e:
         _record_error(d, "backtest equity curve (full_results.parquet)", e)
         eq = None

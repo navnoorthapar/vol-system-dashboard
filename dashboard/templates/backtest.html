@@ -239,7 +239,7 @@
         The pre-C22 “+$23K at every z-scale” was not option P&amp;L.
       </p>
       <p>
-        Stress windows: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} ({{ c.start|fmt }} → {{ c.end|fmt }}) {{ c.total_return|pct }}{{ '; ' if not loop.last else '' }}{% endfor %}
+        Stress windows, each measured from the close before it opens: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} ({{ c.start|fmt }} → {{ c.end|fmt }}) {{ c.total_return|pct }}{{ '; ' if not loop.last else '' }}{% endfor %}
         — {% if d.crisis and (d.crisis|selectattr('total_return', 'gt', 0)|list|length) == (d.crisis|length) %}all positive, but they{% else %}they{% endif %} cannot pay for the bleed between them.
         {% if d.end_date and d.end_date < '2025-04-02' %}The backtest ends {{ d.end_date }}, so the 2025 window covers only the run-up: the April 2025 tariff shock is <em>not</em> in it, and this is no evidence of resilience to it.{% endif %}
       </p>
