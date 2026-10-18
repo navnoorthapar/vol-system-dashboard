@@ -574,6 +574,29 @@ def spread_percentile(history: pd.Series, current: float) -> tuple[Optional[floa
 PDV_MIN_HISTORY = 252   # fewer valid history points -> no percentile is shown
 
 
+def percentile_rank(pct: Any) -> Optional[dict]:
+    """Wording for a percentile = percent of prior sessions strictly below today.
+
+    100 (above every prior session) and 0 (none below) printed as numbers read
+    "100th percentile" / "top 0%" and "0th" / "bottom 0%"; they are records.
+    Anything else is shown as an integer percentile capped at 1st..99th so
+    rounding cannot produce those strings, and the tail share is the
+    complement of that integer ("85th" with "top 15%").
+    Returns {"record": "high" | "low" | None, "big": the headline figure,
+    "tail": "top 15%" / "bottom 3%" / "highest on record" / ... or None}.
+    """
+    x = _num(pct)
+    if x is None:
+        return None
+    if x >= 100.0:
+        return {"record": "high", "big": "Record high", "tail": "highest on record"}
+    if x <= 0.0:
+        return {"record": "low", "big": "Record low", "tail": "lowest on record"}
+    k = min(99, max(1, math.floor(x + 0.5)))
+    tail = f"top {100 - k}%" if x >= 80 else (f"bottom {k}%" if x <= 20 else None)
+    return {"record": None, "big": ordinal(k), "tail": tail}
+
+
 def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
                         stress_date: str = "2020-03-16") -> Optional[dict]:
     """Ex-ante PDV-linear forecast of |r| on `stress_date`, made at the prior close.
@@ -686,7 +709,7 @@ def load_page1() -> dict[str, Any]:
               "reg2_pct", "reg_span", "calib_date", "pdv_forecast", "pdv_spread",
               "pdv_date", "pdv_spread_mean", "pdv_spread_pct", "pdv_hist_n",
               "pdv_hist_start", "pdv_hist_end", "pdv_sigma1", "pdv_sigma2",
-              "pdv_age", "stress", "pdv_vix", "pdv_horizon", "pdv_coef", "pdv_intercept",
+              "pdv_age", "pdv_rank", "stress", "pdv_vix", "pdv_horizon", "pdv_coef", "pdv_intercept",
               "pdv_halflives", "pdv_garch_beta", "pdv_garch_persistence",
               "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
               "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
@@ -838,6 +861,7 @@ def load_page1() -> dict[str, Any]:
         d["pdv_hist_n"] = n_hist
         if n_hist >= PDV_MIN_HISTORY:
             d["pdv_spread_pct"] = pct          # unrounded: formatted once on the page
+            d["pdv_rank"] = percentile_rank(pct)
             d["pdv_spread_mean"] = round(float(hist.mean()), 2)
             d["pdv_hist_start"] = str(hist.index[0].date())
             d["pdv_hist_end"] = str(hist.index[-1].date())

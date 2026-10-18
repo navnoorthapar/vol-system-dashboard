@@ -203,13 +203,13 @@
       </div>
     </div>
     <div class="divider"></div>
-    {% set _pct = d.pdv_spread_pct %}
+    {% set _pct = d.pdv_spread_pct %}{% set _rk = d.pdv_rank %}
     <div class="small faint">VIX − PDV forecast</div>
     <div class="card-value lg">{{ d.pdv_spread|fmt("+.2f") }}<span class="unit">vol pts</span></div>
-    {% if not d.pdv_stale and _pct is not none %}
+    {% if not d.pdv_stale and _pct is not none and _rk %}
     <div class="card-sub">
-      {% if _pct >= 80 %}Implied vol is rich versus this spread's own history (top {{ (100 - _pct)|round|int }}%)
-      {% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history (bottom {{ _pct|round|int }}%)
+      {% if _pct >= 80 %}Implied vol is rich versus this spread's own history ({{ _rk.tail }})
+      {% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history ({{ _rk.tail }})
       {% else %}Within this spread's usual range
       {% endif %}
     </div>
@@ -217,10 +217,10 @@
 
     <!-- Historical context: the SAME quantity (VIX − this model's forecast) on prior sessions -->
     <div class="subcard mt12">
-      {% if _pct is not none %}
+      {% if _pct is not none and _rk %}
       <div style="display:flex;align-items:baseline;gap:10px;">
-        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">{{ _pct|ordinal }}</div>
-        <div class="small dim">percentile of {{ "{:,}".format(d.pdv_hist_n) }} prior sessions ({{ d.pdv_hist_start }} → {{ d.pdv_hist_end }}); mean {{ d.pdv_spread_mean|fmt("+.2f") }} vol pts</div>
+        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">{{ _rk.big }}</div>
+        <div class="small dim">{% if _rk.record == 'high' %}above all{% elif _rk.record == 'low' %}at or below all{% else %}percentile of{% endif %} {{ "{:,}".format(d.pdv_hist_n) }} prior sessions ({{ d.pdv_hist_start }} → {{ d.pdv_hist_end }}); mean {{ d.pdv_spread_mean|fmt("+.2f") }} vol pts</div>
       </div>
       {% else %}
       <div class="small faint">Percentile hidden: only {{ d.pdv_hist_n|fmt }} valid history points (at least 252 needed).</div>

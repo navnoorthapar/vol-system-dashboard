@@ -1434,3 +1434,31 @@ def test_vix_index_tenors_come_from_config(dash, pages):
     text = _visible_text(pages["/"])
     assert f"9d {d['ts_values'][0]:.2f} → 184d {d['ts_values'][-1]:.2f}" in text
     assert "182d" not in pages["/"]
+
+
+@pytest.mark.parametrize("last_vix, big, tail, lead", [
+    (95.0, "Record high", "Implied vol is rich versus this spread's own history (highest on record)", "above all"),
+    (0.5, "Record low", "Implied vol is cheap versus this spread's own history (lowest on record)", "at or below all"),
+])
+def test_record_pdv_spreads_read_as_records(dash, synth, last_vix, big, tail, lead):
+    """A spread above (below) its whole history rendered 'top 0%' and '100th
+    percentile' ('bottom 0%', '0th'). Synthetic history: today's VIX is pushed
+    far above (below) anything before it."""
+    con = sqlite3.connect(synth["data"] / "vol_system.db")
+    con.execute("UPDATE vix_daily SET close = ? WHERE date = ?", (last_vix, str(synth["dates"][-1].date())))
+    con.commit()
+    con.close()
+    d = dash.load_page1()
+    assert d["pdv_spread_pct"] == (100.0 if last_vix > 50 else 0.0)
+    text = _visible_text(dash.app.test_client().get("/").get_data(as_text=True))
+    assert tail in text
+    assert f"{big} {lead} {d['pdv_hist_n']:,} prior sessions" in text
+    for bad in (r"\btop 0%", r"\bbottom 0%", r"\b100th\b", r"\b0th\b"):
+        assert not re.search(bad, text), bad
+
+
+def test_percentile_wording_is_capped_short_of_a_record(dash):
+    assert dash.percentile_rank(99.6) == {"record": None, "big": "99th", "tail": "top 1%"}
+    assert dash.percentile_rank(0.3) == {"record": None, "big": "1st", "tail": "bottom 1%"}
+    assert dash.percentile_rank(85.2) == {"record": None, "big": "85th", "tail": "top 15%"}
+    assert dash.percentile_rank(50.0)["tail"] is None and dash.percentile_rank(None) is None
