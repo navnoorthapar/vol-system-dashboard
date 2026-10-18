@@ -317,3 +317,25 @@ def test_download_window_reaches_back_to_the_last_stored_session():
     assert cr.download_start(today, "2026-06-18") == date(2026, 6, 8)
     assert cr.download_start(today, "2027-08-31") == today - timedelta(days=400)
     assert cr.download_start(today, None) == today - timedelta(days=400)
+
+
+def test_freeze_only_run_renders_from_the_restored_captures(env, monkeypatch):
+    """A re-render (steps=freeze) must load the committed captures into the DB
+    first; otherwise it publishes whatever stale history the DB file holds."""
+    assert _run(env, "market")[0] == 0
+    dbm.DB_PATH.unlink()
+    dbm._SCHEMA_READY.clear()
+    dbm.init_database()
+    seen = {}
+
+    class _R:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_freeze(*a, **k):
+        seen["dates"] = _spx_dates()
+        return _R()
+    monkeypatch.setattr(env.subprocess, "run", fake_freeze)
+    code, st = _run(env, "freeze")
+    assert code == 0
+    assert SESSION in seen["dates"]
+    assert "persisted" not in st                 # a re-render exports nothing

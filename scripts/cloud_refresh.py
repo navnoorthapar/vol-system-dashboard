@@ -11,15 +11,15 @@ Steps (run all, or a subset with --steps):
              only then store the chain as that session's options snapshot
   freeze     Freeze the Flask app to static HTML -> .site-build/
 
-Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and is
-not what the bot commits. Before any download the run upserts the committed
-captures into it (yearly market partitions under data_store/market/ and the
-per-session SPX chains under data_store/options/, via the data layer's
-import_* helpers), and after the steps it exports what it captured back to
-those files (export_* helpers merge and never drop a stored row). The
-workflow commits those two directories, so a session Yahoo later drops, or a
-chain that is only quoted once, survives every later run and every clean
-clone.
+Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
+is not what the bot commits. At the start of every run (freeze-only
+re-renders included, before any download) the committed captures are
+upserted into it: yearly market partitions under data_store/market/ and the
+per-session SPX chains under data_store/options/ (the data layer's import_*
+helpers). After the market/calibrate steps, what they captured is exported
+back to those files (the export_* helpers merge and never drop a stored
+row). The workflow commits both directories, so a session Yahoo later drops,
+or a chain that is only quoted once, survives later runs and clean clones.
 
 The option step needs a book with live two-sided quotes. After the 16:15 ET
 close Cboe's book empties until Global Trading Hours open (20:15 ET; Friday
@@ -622,7 +622,9 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     log.info("Daily auto-refresh -- %s UTC -- steps: %s", status["run_utc"], ",".join(steps))
     log.info("=" * 60)
 
-    persist = not args.no_persist and any(s in steps for s in ("market", "labels", "calibrate"))
+    # Restore for every step (a freeze-only re-render must see the captured
+    # history, not the stale committed DB); export only what a step captured.
+    persist = not args.no_persist
     if persist:
         with _Group("restore committed captures"):
             try:
@@ -695,7 +697,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                     status["errors"].append(msg)
                     _annotate("error", "Calibration stale", msg)
 
-    if persist:
+    if persist and any(s in steps for s in ("market", "calibrate")):
         with _Group("persist captures"):
             since = status.get("market", {}).get("start") if "market" in steps else None
             chains = ([status["calibration"]["session"]]
