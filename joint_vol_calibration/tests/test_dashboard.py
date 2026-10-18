@@ -1012,7 +1012,8 @@ def test_backtest_audit_heading_counts_its_rows(pages):
 def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
     bt = pages["/backtest"]
     d = dash.load_page4()
-    assert re.search(rf"<h1 class=\"page-title\">C10 Backtest Results — {d['start_date']} → {d['end_date']}", bt)
+    assert re.search(rf"<h1 class=\"page-title\">C10 Backtest Results — (?:<span class=\"nowrap\">)?"
+                     rf"{d['start_date']} → {d['end_date']}", bt)
     assert "2018 → 2025<" not in bt
     tariffs = next(c for c in d["crisis"] if c["name"] == "Tariffs_2025")
     assert tariffs["end"] <= d["end_date"]
