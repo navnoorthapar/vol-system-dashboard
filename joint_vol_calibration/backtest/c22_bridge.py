@@ -203,6 +203,11 @@ def _run(spx, vix, *, beta: float, corr: bte.C22Corrections, gate, pdv_h: int,
                                  pdv_vol_series=pdv_vol)
         eq = eng.run(spx, vix)
         m = eng.compute_metrics()
+    return result_row(eng, eq, m)
+
+
+def result_row(eng: bte.BacktestEngine, eq: pd.DataFrame, m: Dict) -> Dict:
+    """The headline and per-sleeve columns of one bridge row from a finished run."""
     out = {"nav": float(eq["nav"].iloc[-1]), "pnl": float(eq["nav"].iloc[-1] - eng.initial_capital),
            "sharpe": float(m["sharpe"]), "max_dd": float(m["max_drawdown"])}
     for s in SLEEVES:
@@ -343,7 +348,7 @@ def main(argv: Optional[List[str]] = None) -> pd.DataFrame:
         print(f"  {s:<9} P&L {last[f'{s}_pnl']:>11,.0f}  Sharpe {last[f'{s}_sharpe']:>7.3f}"
               f"  win {'—' if w is None or pd.isna(w) else f'{w:.1%}'}  trades {last[f'{s}_trades']}")
     if args.csv:
-        df.to_csv(args.csv, index_label="row", float_format="%.6g")
+        df.to_csv(args.csv, index_label="row", float_format=bte.ARTIFACT_CSV_FLOAT_FORMAT)
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(json.loads(df.to_json(orient="records")), fh, indent=1)

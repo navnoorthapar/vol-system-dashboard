@@ -176,6 +176,9 @@ BACKTEST_DIR = DATA_DIR / "backtest"
 RESULTS_PATH = BACKTEST_DIR / "full_results.parquet"
 REPORTS_DIR  = BACKTEST_DIR / "reports"
 REPORT_PATH  = REPORTS_DIR / "full_report.html"
+# float_format of the committed CSV artifacts (beta_sensitivity.csv,
+# c22_bridge.csv); test_backtest_reproducibility re-serialises rows with it
+ARTIFACT_CSV_FLOAT_FORMAT = "%.6g"
 
 # Crisis periods (start, end) for reporting
 CRISIS_PERIODS: Dict[str, Tuple[str, str]] = {
