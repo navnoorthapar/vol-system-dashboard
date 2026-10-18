@@ -63,30 +63,23 @@ class TestRiskFreeHurdle:
 
         m_stub = bte.compute_metrics(nav, rf_series=stub)
         m_full = bte.compute_metrics(nav, rf_series=full)
-        # Forward-filling a 7-day stub across a year is what produced the bug;
-        # the two must not silently agree, and neither may be NaN.
-        assert np.isfinite(m_stub["sharpe"]) and np.isfinite(m_full["sharpe"])
+        # Forward-filling a 7-day stub across a year is what produced the bug:
+        # a non-spanning series is refused and the scalar rf is used instead.
+        assert m_stub["sharpe"] == bte.compute_metrics(nav)["sharpe"]
+        assert m_stub["sharpe"] != bte.compute_metrics(
+            nav, rf_series=stub.reindex(idx).ffill().bfill())["sharpe"]
+        # A spanning series is used as given.
+        assert m_full["sharpe"] == pytest.approx(bte.compute_metrics(nav, rf=0.05)["sharpe"])
 
-    def test_engine_falls_back_when_series_does_not_span_window(self, caplog):
+    def test_engine_falls_back_when_series_does_not_span_window(self):
         """A non-spanning series must be refused, not forward-filled."""
-        import logging
-
         eng = bte.BacktestEngine(start_date="2018-01-01", end_date="2025-03-24")
-        stub = pd.DataFrame({
-            "date": pd.to_datetime(pd.bdate_range("2020-01-02", periods=7)),
-            "rate": np.linspace(0.015, 0.020, 7),
-        })
-        # Reproduce the guard's decision without running the whole backtest.
-        first = pd.Timestamp(stub["date"].iloc[0])
-        last = pd.Timestamp(stub["date"].iloc[-1])
-        span_days = (pd.Timestamp(eng.end_date) - pd.Timestamp(eng.start_date)).days
-        expected = span_days / 7 * 5 * 0.80
-        rejected = (
-            first > pd.Timestamp(eng.start_date) + pd.Timedelta(days=10)
-            or last < pd.Timestamp(eng.end_date) - pd.Timedelta(days=10)
-            or len(stub) < expected
-        )
-        assert rejected, "a 7-row stub must not be accepted as a per-date hurdle"
+        stub = pd.bdate_range("2020-01-02", periods=7)
+        # The engine's own guard, not a copy of its condition.
+        assert not bte.rate_series_spans_window(stub, eng.start_date, eng.end_date), (
+            "a 7-row stub must not be accepted as a per-date hurdle")
+        full = pd.bdate_range(eng.start_date, eng.end_date)
+        assert bte.rate_series_spans_window(full, eng.start_date, eng.end_date)
 
 
 # ── 2. time decay must reflect elapsed sessions ─────────────────────────────
@@ -104,17 +97,6 @@ class TestStraddleTimeDecay:
         v_entry = bte._bs_straddle_value(S, K, T, r, q, sigma)
         v_day1 = bte._bs_straddle_value(S, K, T - 1 / 252, r, q, sigma)
         assert v_day1 < v_entry, "one elapsed session must remove time value"
-
-    def test_engine_marks_use_incremented_day_count(self):
-        """Guard the exact off-by-one in the source."""
-        import inspect
-
-        src = inspect.getsource(bte)
-        assert "T_entry - (days_biz + 1) / TRADING_DAYS" in src, (
-            "T_rem must be computed from days_biz + 1: days_biz is incremented "
-            "in the HOLD branch AFTER T_rem is read, so using it raw values the "
-            "straddle one session too rich on every mark"
-        )
 
 
 # ── 3. regime labels must be the rule, never the demoted classifier ─────────

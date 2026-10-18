@@ -776,6 +776,13 @@ def compute_metrics(
             "n_trades": len(tl), "n_days": n, "cumulative_return": 0.0,
         }
 
+    if (rf_series is not None and len(rf_series) > 0
+            and not rate_series_spans_window(rf_series.index, rets.index[0], rets.index[-1])):
+        # Forward-filling a few prints across the window is how seven fixture
+        # rows became a five-year hurdle (C21): refuse it, use the scalar.
+        logger.warning("compute_metrics: rf_series does not span %s..%s; using rf=%.4f",
+                       rets.index[0].date(), rets.index[-1].date(), rf)
+        rf_series = None
     if rf_series is not None and len(rf_series) > 0:
         rf_daily = (
             rf_series.reindex(rets.index).ffill().fillna(rf) / TRADING_DAYS
