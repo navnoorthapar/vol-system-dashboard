@@ -18,12 +18,16 @@ because every one of these bugs was invisible in a green test suite:
   4. yfinance's `end` is exclusive; every downloader here documents it as
      inclusive.
 """
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from joint_vol_calibration.backtest import backtest_engine as bte
 from joint_vol_calibration.signals.regime_classifier import build_regime_labels
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ── 1. the cash hurdle must be real, not a forward-filled stub ───────────────
@@ -132,7 +136,7 @@ class TestRegimeLabelProvenance:
 
         Rebuilding with the default would silently rewrite ~20% of the labels.
         """
-        rl = pd.read_parquet("data_store/signals/regime_labels.parquet")
+        rl = pd.read_parquet(_ROOT / "data_store" / "signals" / "regime_labels.parquet")
         from joint_vol_calibration.data.database import (
             get_spx_ohlcv, get_vix_term_structure_wide,
         )

@@ -88,6 +88,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(cr, "DATA", data)
     monkeypatch.setattr(dbm, "DB_PATH", data / "vol_system.db")
     monkeypatch.setattr(dbm, "PARQUET_DIR", data / "parquet")
+    monkeypatch.setattr(dbm, "MARKET_DIR", data / "market")
+    monkeypatch.setattr(dbm, "OPTIONS_DIR", data / "options")
     monkeypatch.chdir(tmp_path)              # main() chdirs; restored afterwards
     dbm.init_database()
 
@@ -243,6 +245,10 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert "calibration=accepted" in output.read_text()
     assert f"session={SESSION}" in output.read_text()
     assert "accepted" in summary.read_text()
+    # the accepted chain is persisted for the workflow to commit
+    chain_file = dbm.options_snapshot_path(SESSION, "SPX")
+    assert chain_file.exists() and str(chain_file) in st["persisted"]
+    assert len(pd.read_parquet(chain_file)) == n
     # idempotent re-run
     code2, st2 = _run(env, "calibrate")
     assert code2 == 0 and st2["calibration"]["status"] == "exists"
@@ -264,3 +270,72 @@ def test_freeze_stderr_logged_on_success(env, monkeypatch, caplog):
         code, _ = _run(env, "freeze")
     assert code == 0
     assert any("InconsistentVersionWarning" in r.getMessage() for r in caplog.records)
+
+
+# ── Persistence of captures (data_store/market, data_store/options) ───────────
+
+def _spx_dates():
+    return set(dbm.get_spx_ohlcv(as_of_date="2100-01-01")["date"].astype(str).str[:10])
+
+
+def test_market_captures_survive_a_dropped_session_and_a_fresh_db(env, monkeypatch):
+    """A session Yahoo later drops must survive: the run restores the committed
+    partitions before downloading and merges its download back into them."""
+    code, st = _run(env, "market")
+    assert code == 0
+    part = dbm.MARKET_DIR / "spx_ohlcv" / "spx_ohlcv_2026.parquet"
+    assert part.exists() and str(part) in st["persisted"]
+    assert "2026-09-22" in set(pd.read_parquet(part)["date"])
+
+    # Next run: clean clone (fresh, empty DB) and Yahoo no longer serves 09-22.
+    full = dl.download_spx_ohlcv(None, None)
+    monkeypatch.setattr(dl, "download_spx_ohlcv",
+                        lambda start, end: full[full["date"] != "2026-09-22"].copy())
+    dbm.DB_PATH.unlink()
+    dbm._SCHEMA_READY.clear()
+    dbm.init_database()
+    code, st = _run(env, "market")
+    assert code == 0
+    assert st["restored"]["market"]["spx_ohlcv"] > 0
+    assert "2026-09-22" in _spx_dates()
+    assert "2026-09-22" in set(pd.read_parquet(part)["date"])
+
+
+def test_no_persist_flag_leaves_capture_dirs_alone(env):
+    status = env.DATA.parent / "status.json"
+    code = env.main(["--steps", "market", "--status-file", str(status), "--no-persist"],
+                    now_utc=NOW)
+    assert code == 0
+    assert not dbm.MARKET_DIR.exists()
+
+
+def test_download_window_reaches_back_to_the_last_stored_session():
+    """Pre-C22 the window was always today-400d, so once the stored history
+    ended more than 400 days ago a permanent gap opened (the 2027-07-28 bomb)."""
+    cr = _load()
+    today = date(2027, 9, 1)
+    assert cr.download_start(today, "2026-06-18") == date(2026, 6, 8)
+    assert cr.download_start(today, "2027-08-31") == today - timedelta(days=400)
+    assert cr.download_start(today, None) == today - timedelta(days=400)
+
+
+def test_freeze_only_run_renders_from_the_restored_captures(env, monkeypatch):
+    """A re-render (steps=freeze) must load the committed captures into the DB
+    first; otherwise it publishes whatever stale history the DB file holds."""
+    assert _run(env, "market")[0] == 0
+    dbm.DB_PATH.unlink()
+    dbm._SCHEMA_READY.clear()
+    dbm.init_database()
+    seen = {}
+
+    class _R:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_freeze(*a, **k):
+        seen["dates"] = _spx_dates()
+        return _R()
+    monkeypatch.setattr(env.subprocess, "run", fake_freeze)
+    code, st = _run(env, "freeze")
+    assert code == 0
+    assert SESSION in seen["dates"]
+    assert "persisted" not in st                 # a re-render exports nothing

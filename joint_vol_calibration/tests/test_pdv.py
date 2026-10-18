@@ -419,6 +419,20 @@ class TestForwardTarget:
         # first OOS forecast sits at row train_min_days + (h-1) of X
         assert lin.notna().idxmax() == out["y_oos"].index[0]
 
+    def test_verbose_reports_go_to_logging_not_stdout(self, returns, capsys, caplog):
+        """print() output is block-buffered in CI and landed after later log
+        lines; the verbose reports are one logging record each."""
+        import logging
+        m = PDVModel(horizon=1, train_min_days=300).fit(returns)
+        with caplog.at_level(logging.INFO, logger="joint_vol_calibration.models.pdv"):
+            m.validate(returns, verbose=True)
+            m.stress_test(returns, stress_date=str(returns.index[-5].date()), verbose=True)
+        assert capsys.readouterr().out == ""
+        text = caplog.text
+        assert "PDV WALK-FORWARD VALIDATION RESULTS" in text
+        assert "PDVLinear coefficients" in text
+        assert "PDV STRESS TEST" in text
+
 
 # ── 10. EWM start-up (C22: the first return seeded sigma2) ────────────────────
 

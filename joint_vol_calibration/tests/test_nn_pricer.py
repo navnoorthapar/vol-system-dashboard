@@ -19,6 +19,7 @@ Coverage:
 """
 
 import math
+import sys
 import warnings
 
 import numpy as np
@@ -582,6 +583,10 @@ class TestShippedModel:
     def test_benchmark_speedup_positive(self):
         """Wall-clock: best of 3 samples, so transient CPU contention does not
         flip a genuine order-of-magnitude advantage."""
+        if sys.gettrace() is not None:
+            # coverage/debugger tracing taxes the Python-heavy reference pricer
+            # and the NN path unequally; the ratio would measure the tracer.
+            pytest.skip("wall-clock benchmark is not meaningful under a tracer (pytest --cov)")
         pricer = _make_pricer()
         speedups = []
         for _ in range(3):
