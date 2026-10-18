@@ -87,7 +87,7 @@ STALE_ERROR_SESSIONS = 5    # red banner from this age on
 
 # Regime presentation (index = rule label 0/1/2)
 _REGIME_NAMES = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
-_REGIME_COLORS = ["#3388ff", "#00ff88", "#ff3333"]
+_REGIME_COLORS = ["#7fadf7", "#5cc8a0", "#f0787c"]   # --blue / --accent / --red
 _REGIME_LABELS = ["R0", "R1", "R2"]
 
 # The backtest portfolio is the equal-weight mean of these sleeves
@@ -239,6 +239,9 @@ def ordinal(n: Any) -> str:
     return f"{k}{suffix}"
 
 
+MINUS = "\u2212"   # '−': numbers are printed with a true minus sign, not a hyphen
+
+
 def _fmt(value: Any, spec: str = "", default: str = "—") -> str:
     """Jinja filter: format a number, or render `default` when it is missing."""
     if value is None:
@@ -246,7 +249,7 @@ def _fmt(value: Any, spec: str = "", default: str = "—") -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if not math.isfinite(float(value)):
             return default
-        return format(value, spec)
+        return format(value, spec).replace("-", MINUS)   # typographic minus sign
     return str(value)
 
 
@@ -256,7 +259,18 @@ def _usd_k(value: Any, signed: bool = True) -> str:
     if x is None:
         return "—"
     sign = "−" if x < 0 else ("+" if signed else "")
+    if abs(x) >= 999_500:
+        return f"{sign}${abs(x) / 1e6:,.1f}M"
     return f"{sign}${abs(x) / 1000:,.0f}K"
+
+
+def _usd(value: Any, signed: bool = False) -> str:
+    """Whole dollars with a true minus sign: -1039.2 -> '−$1,039'."""
+    x = _num(value)
+    if x is None:
+        return "—"
+    sign = "−" if x < 0 else ("+" if signed and x > 0 else "")
+    return f"{sign}${abs(x):,.0f}"
 
 
 def _pct_prose(value: Any, digits: int = 1, signed: bool = True) -> str:
@@ -271,6 +285,7 @@ def _pct_prose(value: Any, digits: int = 1, signed: bool = True) -> str:
 app.jinja_env.filters["fmt"] = _fmt
 app.jinja_env.filters["ordinal"] = ordinal
 app.jinja_env.filters["usd_k"] = _usd_k
+app.jinja_env.filters["usd"] = _usd
 app.jinja_env.filters["pct"] = _pct_prose
 
 
@@ -299,15 +314,15 @@ def _text_colour_on(bg: str) -> str:
 # under red-green colour blindness). Red is NOT used as a fill: an unstable
 # node (|z| > 2) gets the end colour of its side plus a red outline and a text
 # marker in the cell, so the flag does not depend on colour alone.
-_HEAT_NEUTRAL = (0x1a, 0x1a, 0x1a)
-_HEAT_NEG = (0x2f, 0x6f, 0xd6)
-_HEAT_POS = (0xf0, 0x8a, 0x24)
+_HEAT_NEUTRAL = (0x1c, 0x20, 0x26)
+_HEAT_NEG = (0x33, 0x62, 0xb5)
+_HEAT_POS = (0xbd, 0x6e, 0x2a)
 
 
 def _vomma_color(z: Optional[float]) -> str:
     """Map a vomma z-score to a CSS background colour for the heatmap."""
     if z is None or (isinstance(z, float) and np.isnan(z)):
-        return "#1a1a1a"
+        return "#1c2026"
     end = _HEAT_POS if z > 0 else _HEAT_NEG
     t = min(abs(z) / 2.0, 1.0)
     return "#" + "".join(f"{round(a + (b - a) * t):02x}" for a, b in zip(_HEAT_NEUTRAL, end))
@@ -315,11 +330,20 @@ def _vomma_color(z: Optional[float]) -> str:
 
 # ── Market data readers (DB) ───────────────────────────────────────────────────
 def _read_spx() -> pd.DataFrame:
-    """SPX closes and log returns, date-indexed, ascending."""
+    """SPX closes and log returns, date-indexed, ascending.
+
+    ``log_return`` is the stored column (the classifier was trained on it via
+    build_features); ``close_return`` is ln(close_t / close_{t-1}) rebuilt from
+    the closes, which is what the PDV model is fitted on: the stored column has
+    isolated holes (e.g. 2025-05-08) that would silently drop a session from
+    the PDV state variables.
+    """
     with _db() as con:
         df = pd.read_sql("SELECT date, close, log_return FROM spx_ohlcv ORDER BY date", con)
     df["date"] = pd.to_datetime(df["date"])
-    return df.set_index("date")
+    df = df.drop_duplicates("date", keep="last").set_index("date")
+    df["close_return"] = np.log(df["close"].astype(float)).diff()
+    return df
 
 
 def _read_vix_daily() -> pd.Series:
@@ -595,8 +619,62 @@ def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
         "stress_date": str(target.date()), "origin": str(origin.date()),
         "forecast_pct": forecast * 100.0, "actual_pct": actual * 100.0,
         "error_pp": (forecast - actual) * 100.0, "n_train": int(np.sum(train)),
-        "horizon": horizon,
+        "horizon": horizon, "window_end": str(window.index[-1].date()),
+        "n_window": int(len(window)),
     }
+
+
+def pdv_walk_forward_skill(pdv: Any, log_returns: pd.Series,
+                           exclude_year: int = 2020) -> Optional[dict]:
+    """Walk-forward R² of PDVLinear on the shipped model's own target.
+
+    models.pdv.walk_forward_vol_forecast refits the OLS daily on labels fully
+    observed at each forecast origin (purged; embargo = horizon), so every
+    forecast is out of sample. R² is taken against the realised target over
+    the rows whose label is complete, pooled and without `exclude_year`.
+    """
+    from joint_vol_calibration.models.pdv import forward_target, walk_forward_vol_forecast
+
+    horizon = int(getattr(pdv, "horizon", 1))
+    target = str(getattr(pdv, "target", "rv"))
+    if horizon < 2:
+        return None          # the 1-day |r| target has its own (yearly) harness
+    r = log_returns.dropna()
+    if r.empty:
+        return None
+    # ~1 s of daily refits: memoised on the exact inputs (a preview server and
+    # the test-suite render the same data many times).
+    key = (horizon, target, len(r), str(r.index[0]), str(r.index[-1]), float(r.sum()),
+           float((r * r).sum()), exclude_year,
+           tuple(getattr(pdv, k, None) for k in ("train_min_days", "halflife_fast",
+                                                 "halflife_slow", "halflife_lev")))
+    if key in _SKILL_CACHE:
+        return dict(_SKILL_CACHE[key])
+    pred = walk_forward_vol_forecast(
+        r, horizon=horizon, target=target,
+        train_min_days=int(getattr(pdv, "train_min_days", 504)),
+        halflife_fast=getattr(pdv, "halflife_fast", 5.0),
+        halflife_slow=getattr(pdv, "halflife_slow", 60.0),
+        halflife_lev=getattr(pdv, "halflife_lev", 10.0),
+    )
+    y = forward_target(r, horizon=horizon, target=target)
+    both = pd.concat([y.rename("y"), pred.rename("p")], axis=1, join="inner").dropna()
+    if len(both) < 30:
+        return None
+
+    def r2(df: pd.DataFrame) -> float:
+        return float(1.0 - ((df["y"] - df["p"]) ** 2).sum() / ((df["y"] - df["y"].mean()) ** 2).sum())
+
+    ex = both[both.index.year != exclude_year]
+    out = {"horizon": horizon, "target": target, "r2": r2(both),
+           "r2_ex": r2(ex) if len(ex) >= 30 else None, "exclude_year": exclude_year,
+           "n": int(len(both)), "start": str(both.index[0].date()),
+           "end": str(both.index[-1].date())}
+    _SKILL_CACHE[key] = dict(out)
+    return out
+
+
+_SKILL_CACHE: dict = {}
 
 
 # ── PAGE 1 DATA: Live Market Overview ─────────────────────────────────────────
@@ -615,7 +693,7 @@ def load_page1() -> dict[str, Any]:
               "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
               "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
               "clf_oos_acc", "clf_persistence_acc", "clf_n_test", "clf_test_window",
-              "latest_session"):
+              "clf_feature_source", "clf_n_features", "pdv_skill", "rule", "latest_session"):
         d[k] = None
     d.update(regime_name="UNAVAILABLE", regime_color="#666", regime_label="—",
              clf_color="#666")
@@ -694,6 +772,32 @@ def load_page1() -> dict[str, Any]:
     except Exception as e:
         _record_error(d, "rule regime labels (regime_labels.parquet)", e)
 
+    # ── The rule's own inputs on the newest session the DB covers ────────────
+    # build_rule_label_frame pairs each session's rule label with the
+    # observables that produced it (rv₂₀, VIX, VVIX and the adaptive gate),
+    # so the headline label can be checked against its inputs on the page.
+    try:
+        if spx_df is not None and vix_wide is not None:
+            from joint_vol_calibration.signals.regime_classifier import build_rule_label_frame
+
+            frame = build_rule_label_frame(
+                spx_df.reset_index()[["date", "close", "log_return"]],
+                vix_wide.reset_index().rename(columns={"index": "date"}),
+            )
+            if len(frame):
+                last = frame.iloc[-1]
+                t = frame.index[-1]
+                vv = vix_wide["^VVIX"].get(t) if "^VVIX" in vix_wide.columns else None
+                rule = {"date": str(pd.Timestamp(t).date()), "label": int(last["regime"]),
+                        "rv20": _num(last.get("rv_20d")), "vix": _num(last.get("vix")),
+                        "vvix": _num(vv), "gate": _num(last.get("vvix_gate")),
+                        "stored": None}
+                if d["regime_date"] == rule["date"]:
+                    rule["stored"] = d["regime"]
+                d["rule"] = rule
+    except Exception as e:
+        _record_error(d, "rule inputs (build_rule_label_frame)", e)
+
     # ── PDV forecast vs VIX, with a like-for-like history ────────────────────
     pdv = None
     pdv_vol: Optional[pd.Series] = None
@@ -702,7 +806,7 @@ def load_page1() -> dict[str, Any]:
             pdv = pickle.load(f)
         if spx_df is None or vix_daily is None:
             raise RuntimeError("needs the market data that failed to load")
-        feats = pdv_features(pdv, spx_df["log_return"])
+        feats = pdv_features(pdv, spx_df["close_return"])
         pdv_vol = pdv.linear_.predict(feats).rename("pdv_vol")
         spread = (vix_daily - 100.0 * pdv_vol).dropna()   # VIX pts − forecast vol pts
         if spread.empty:
@@ -746,28 +850,43 @@ def load_page1() -> dict[str, Any]:
     # COVID stress test, computed ex ante from the DB returns
     try:
         if pdv is not None and spx_df is not None:
-            d["stress"] = pdv_stress_forecast(pdv, spx_df["log_return"])
+            d["stress"] = pdv_stress_forecast(pdv, spx_df["close_return"])
     except Exception as e:
         _record_error(d, "PDV COVID stress test", e)
 
+    # Out-of-sample skill of the model family on the model's own target,
+    # recomputed from the DB (the card hard-coded 0.31 / 0.23, the R² of the
+    # superseded next-day |r| model and of the kernel, beside a 21-day model).
+    try:
+        if pdv is not None and spx_df is not None:
+            d["pdv_skill"] = pdv_walk_forward_skill(pdv, spx_df["close_return"])
+    except Exception as e:
+        _record_error(d, "PDV walk-forward skill", e)
+
     # ── Research-only classifier card ────────────────────────────────────────
     # Features come from build_features — the code path the classifier was
-    # trained on — with the PDV forecast series computed above. (Building them
-    # by hand fed it pdv_iv_spread = −VIX, because the PDV forecast was read
-    # before it had been computed, and used different RV definitions.)
+    # trained on — with pdv_iv_spread built from the SAME source the training
+    # set used (regime_classifier.classifier_features reads it from the model's
+    # metadata). Building features by hand fed it pdv_iv_spread = −VIX; feeding
+    # the PDV forecast to a classifier trained on the rv₂₀ proxy was a
+    # training/serving mismatch.
     try:
         with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
             clf = pickle.load(f)
-        if spx_df is None or vix_wide is None or pdv_vol is None:
-            raise RuntimeError("needs the market data and PDV forecast that failed to load")
-        from joint_vol_calibration.signals.regime_classifier import build_features
+        if spx_df is None or vix_wide is None:
+            raise RuntimeError("needs the market data that failed to load")
+        from joint_vol_calibration.signals.regime_classifier import classifier_features
 
-        feats = build_features(
+        # classifier_features rebuilds pdv_iv_spread from the source recorded
+        # in clf.metadata_ (and refuses a source it cannot rebuild).
+        feats = classifier_features(
+            clf,
             spx_df.reset_index()[["date", "close", "log_return"]],
             vix_wide.reset_index().rename(columns={"index": "date"}),
-            pdv_vol_series=pdv_vol,
         )
+        d["clf_feature_source"] = feats.attrs.get("pdv_iv_spread_source")
         cols = list(getattr(clf, "feature_names_", None) or feats.columns)
+        d["clf_n_features"] = len(cols)
         row = feats.dropna(subset=cols).iloc[[-1]]
         proba = np.asarray(clf.predict_proba(row[cols])[0], dtype=float)
         c_reg = int(np.argmax(proba))
@@ -850,7 +969,7 @@ def _optimizer_settings(cal: dict) -> Optional[str]:
 
 def load_page2() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "mat_smiles": [], "anchors": [],
-                         "quintic": None, "rmse_bars": []}
+                         "quintic": None}
     for k in ("kappa", "theta", "theta_vol", "sigma", "rho", "v0", "v0_vol", "S",
               "r_pct", "q_pct", "session", "fit_time", "n_evals",
               "spx_rmse", "vix_fut_rmse", "vix_opt_rmse", "feller_lhs", "feller_rhs",
@@ -861,7 +980,8 @@ def load_page2() -> dict[str, Any]:
               "spx_oos_wing_rmse", "n_vix_options", "archive"):
         d[k] = None
     d.update(pinned_params=[], active_constraints=[], feller_imposed=None,
-             rho_at_boundary=False, spx_underidentified=None,
+             rho_at_boundary=False, spx_underidentified=None, rho_bound=None,
+             feller_penalty_weight=None, strikes_per_expiry=None,
              n_spx_expiries_inferred=False, carry_recorded=False)
 
     try:
@@ -917,11 +1037,6 @@ def load_page2() -> dict[str, Any]:
         if vix_opt_active and _num(losses.get("vix_options_rmse")) is not None:
             d["vix_opt_rmse"] = round(float(losses["vix_options_rmse"]), 2)
         d["vix_opt_disabled"] = not vix_opt_active
-        d["rmse_bars"] = [b for b in (
-            {"label": "SPX IV RMSE (vol pts)", "value": d["spx_rmse"], "color": "#3388ff"},
-            {"label": "VIX index RMSE (index pts)", "value": d["vix_index_rmse"], "color": "#00ff88"},
-            {"label": "VIX options RMSE (vol pts)", "value": d["vix_opt_rmse"], "color": "#ff3333"},
-        ) if b["value"] is not None]
 
         # Feller: a DIAGNOSTIC (PASS / BINDING / VIOLATED and the margin), and a
         # constraint only when the fit imposed it (feller="soft"; the C22
@@ -951,7 +1066,12 @@ def load_page2() -> dict[str, Any]:
             ac = active_constraints(p, state, feller_imposed=imposed)
         d["active_constraints"] = list(ac)
         d["effective_dof"] = 5 - len(pinned)
-        d["rho_at_boundary"] = abs(p["rho"]) >= 0.94
+        from joint_vol_calibration.calibration.joint_calibrator import _FELLER_PENALTY
+        from joint_vol_calibration.config import HESTON_BOUNDS
+        d["rho_bound"] = float(HESTON_BOUNDS["rho"][0])
+        d["rho_at_boundary"] = p["rho"] <= d["rho_bound"] + 0.01
+        d["feller_penalty_weight"] = float(_FELLER_PENALTY)
+        d["strikes_per_expiry"] = int(_CAL_STRIKES_PER_EXPIRY)
 
         # Data provenance. The SPX leg keeps _CAL_STRIKES_PER_EXPIRY strikes per
         # expiry bucket, so an unrecorded expiry count is bounded by
@@ -983,14 +1103,9 @@ def load_page2() -> dict[str, Any]:
 
         # Model smile implied by THESE parameters (not the Greeks parquet,
         # which was built from a different, gate-rejected 2026-03-24 fit).
-        colors = {14: "#ff3333", 30: "#ff8844", 60: "#ffcc00",
-                  91: "#00ff88", 180: "#44aaff", 365: "#aa44ff"}
         for s in heston_model_smile(p):
-            d["mat_smiles"].append({
-                "T": s["T"], "lm": s["lm"],
-                "iv": [round(v * 100, 3) for v in s["iv"]],
-                "color": colors.get(s["T"], "#888"),
-            })
+            d["mat_smiles"].append({"T": s["T"], "lm": s["lm"],
+                                    "iv": [round(v * 100, 3) for v in s["iv"]]})
 
         ref = _latest_market_session()
         item = _staleness("calibration", "Heston calibration", d["session"], ref)
@@ -1169,7 +1284,7 @@ def load_page3() -> dict[str, Any]:
                     "fg": _text_colour_on(_vomma_color(z)),
                 })
             d["heatmap_rows"].append({"T": T, "label": f"{T}d", "cells": cells})
-        d["heatmap_cols"] = [f"{c:+.3f}" for c in cols]
+        d["heatmap_cols"] = [_fmt(c, "+.3f") for c in cols]
 
         unstable = gdf[gdf["is_unstable"]]
         d["unstable_nodes"] = sorted((
@@ -1314,6 +1429,67 @@ def _trade_summary(trades: list, sig: str) -> dict:
     }
 
 
+def _read_csv_rows(path: Path) -> list[dict]:
+    df = pd.read_csv(path)
+    return [_clean(r) for r in df.to_dict("records")]
+
+
+def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
+    """Numbers the audit table quotes from the C22 bridge and the β grid.
+
+    The bridge (backtest/c22_bridge.py) applies the C22 corrections one at a
+    time from the published C21 engine; each row's d_pnl is that step's effect
+    on portfolio P&L. The β grid (run_backtest --beta-sensitivity) re-runs the
+    canonical backtest at several ATM-vol / VIX ratios.
+    """
+    rows = {r["step"]: dict(r, row=int(r["row"])) for r in bridge}
+    out: dict[str, Any] = {"rows": rows}
+    order = sorted(bridge, key=lambda r: int(r["row"]))
+    for prev, cur in zip(order, order[1:]):
+        rows[cur["step"]]["prev"] = prev
+    g = sorted(grid, key=lambda r: float(r["beta"]))
+    out["grid"] = g
+
+    def flip(col: str) -> Optional[dict]:
+        """Adjacent grid betas where the sleeve's P&L changes sign."""
+        for lo, hi in zip(g, g[1:]):
+            if (lo[col] > 0) != (hi[col] > 0):
+                return {"lo": float(lo["beta"]), "hi": float(hi["beta"]),
+                        "positive_above": hi[col] > 0}
+        return None
+
+    out["s1_flip"] = flip("s1_pnl")
+    out["s3_flip"] = flip("s3_pnl")
+    at_one = [r for r in g if abs(float(r["beta"]) - 1.0) < 1e-9]
+    out["s1_at_beta1"] = at_one[0]["s1_pnl"] if at_one else None
+
+    # Evidence sentences for the audit table, each from one bridge row.
+    ev: dict[str, str] = {}
+    r = rows.get("beta")
+    if r and r.get("prev"):
+        txt = (f"C22 bridge row {r['row']}: S1 {_usd_k(r['prev']['s1_pnl'])} → "
+               f"{_usd_k(r['s1_pnl'])} from β alone")
+        if out["s1_at_beta1"] is not None:
+            txt += f"; at β = 1 S1 would show {_usd_k(out['s1_at_beta1'])}"
+        ev["beta"] = txt
+    for step in ("r2_gate", "pdv_h21"):
+        r = rows.get(step)
+        if r:
+            ev[step] = f"C22 bridge row {r['row']}: portfolio {_usd_k(r['d_pnl'])}"
+    cost_steps = [rows[k] for k in ("hedge_costs", "financing", "sleeve_nav", "corr_netting") if k in rows]
+    if cost_steps:
+        ev["costs"] = ("C22 bridge rows " + ", ".join(str(r["row"]) for r in cost_steps) + ": "
+                       + ", ".join(_usd_k(r["d_pnl"]) for r in cost_steps))
+    r = rows.get("sharpe")
+    if r and r.get("prev"):
+        moved = abs(float(r["d_pnl"])) > 0.5
+        ev["sharpe"] = (f"C22 bridge row {r['row']}: Sharpe {_fmt(r['prev']['sharpe'], '.2f')} → "
+                        f"{_fmt(r['sharpe'], '.2f')}"
+                        + (f", P&L {_usd_k(r['d_pnl'])}" if moved else " with P&L unchanged"))
+    out["evidence"] = ev
+    return out
+
+
 def load_page4() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "metrics_rows": [], "signal_metrics": [],
                          "signal_pnl": [], "signal_labels": [],
@@ -1323,7 +1499,8 @@ def load_page4() -> dict[str, Any]:
                          "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
                          "crisis": [], "sleeves": {}}
     for k in ("final_nav", "total_pnl", "start_date", "end_date",
-              "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date"):
+              "wf_neg", "wf_total", "kpi", "sharpe_convention", "run_date",
+              "beta", "bridge"):
         d[k] = None
 
     # Option chains the DB holds (the roadmap states what the backtest could and
@@ -1400,6 +1577,7 @@ def load_page4() -> dict[str, Any]:
             raise ValueError("full_results.pkl carries no engine metrics")
         d["run_date"] = _date_str(state.get("run_date"))
         d["sharpe_convention"] = em.get("sharpe_convention") or state.get("sharpe_convention")
+        d["beta"] = _num(state.get("atm_to_vix_ratio", em.get("atm_to_vix_ratio")))
 
         if eq is not None:
             # Both artifacts must come from the same engine run.
@@ -1443,10 +1621,10 @@ def load_page4() -> dict[str, Any]:
         d["kpi"] = kpi
 
         def _pct(x):
-            return "—" if x is None else f"{x * 100:.2f}%"
+            return _fmt(None if x is None else x * 100, ".2f") + ("%" if x is not None else "")
 
         def _f(x, n=3):
-            return "—" if x is None else f"{x:.{n}f}"
+            return _fmt(x, f".{n}f")
 
         def _dol(x):
             return "—" if x is None else (f"−${abs(x):,.0f}" if x < 0 else f"${x:,.0f}")
@@ -1457,14 +1635,14 @@ def load_page4() -> dict[str, Any]:
             {"label": "Sharpe", "value": _f(kpi["sharpe"]), "positive": (kpi["sharpe"] or 0) > 0},
             {"label": "Sortino", "value": _f(kpi["sortino"]), "positive": (kpi["sortino"] or 0) > 0},
             {"label": "Max Drawdown", "value": _pct(kpi["mdd"]), "positive": False},
-            {"label": "DD Duration", "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur'])} sessions", "positive": False},
+            {"label": "DD Duration", "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur']):,} sessions", "positive": False},
             {"label": "Calmar", "value": _f(kpi["calmar"]), "positive": (kpi["calmar"] or 0) > 0},
             {"label": "Win Rate (per round trip)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
             {"label": "Avg P&L / Round Trip", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
             {"label": "Best Day", "value": _pct(kpi["best_day"]), "positive": True},
             {"label": "Worst Day", "value": _pct(kpi["worst_day"]), "positive": False},
-            {"label": "Round-Trip Trades", "value": str(n_rt), "positive": True},
-            {"label": "Return Days", "value": "—" if kpi["n_days"] is None else str(int(kpi["n_days"])), "positive": True},
+            {"label": "Round-Trip Trades", "value": f"{n_rt:,}", "positive": True},
+            {"label": "Return Days", "value": "—" if kpi["n_days"] is None else f"{int(kpi['n_days']):,}", "positive": True},
         ]
 
         sleeves = {}
@@ -1488,7 +1666,7 @@ def load_page4() -> dict[str, Any]:
 
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
 
-        d["signal_labels"] = ["S1C  Contrarian PDV", "S3  Dispersion", "S4  VRP"]
+        d["signal_labels"] = ["S1C contrarian", "S3 dispersion", "S4 VRP"]
         d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None else round(sleeves[s]["total_pnl"] / 1000, 1)
                            for s in PORTFOLIO_SLEEVES]
 
@@ -1507,6 +1685,70 @@ def load_page4() -> dict[str, Any]:
             })
     except Exception as e:
         _record_error(d, "backtest engine results (full_results.pkl)", e)
+
+    # ── C22 bridge + β grid (the audit table's evidence column) ──────────────
+    try:
+        bridge = _read_csv_rows(DATA / "backtest" / "c22_bridge.csv")
+        grid = _read_csv_rows(DATA / "backtest" / "beta_sensitivity.csv")
+        if not bridge or not grid:
+            raise ValueError("empty C22 bridge or β grid")
+        last = max(bridge, key=lambda r: int(r["row"]))
+        if d["total_pnl"] is not None and abs(float(last["pnl"]) - d["total_pnl"]) > 1.0:
+            raise ValueError(f"c22_bridge.csv ends at P&L {last['pnl']:,.0f}, the stored run at "
+                             f"{d['total_pnl']:,.0f}: the bridge is from another run")
+        beta = d["beta"]
+        if beta is not None:
+            at = [r for r in grid if abs(float(r["beta"]) - beta) < 1e-9]
+            if not at or (d["total_pnl"] is not None and abs(float(at[0]["pnl"]) - d["total_pnl"]) > 1.0):
+                raise ValueError(f"beta_sensitivity.csv has no row matching the stored run at β = {beta}")
+        d["bridge"] = bridge_evidence(bridge, grid)
+    except Exception as e:
+        _record_error(d, "C22 bridge / β grid (c22_bridge.csv, beta_sensitivity.csv)", e)
+
+    # ── Facts the change log quotes, recomputed from the DB ──────────────────
+    # (the log hard-coded "2018: ~1.5%" for a year whose ^IRX averaged 1.95%,
+    # and "~53%" / "~25%" R2 shares for gates that give 48% / 23% here).
+    d["tbill_by_year"], d["r2_share"] = {}, None
+    try:
+        if d["start_date"] and d["end_date"]:
+            with _db() as con:
+                tb = pd.read_sql("SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?",
+                                 con, params=(d["start_date"], d["end_date"]), parse_dates=["date"])
+            if len(tb):
+                yearly = tb.groupby(tb["date"].dt.year)["rate"].mean()
+                d["tbill_by_year"] = {int(y): float(v) for y, v in yearly.items()}
+            spx_df, vix_wide = _read_spx(), _read_vix_wide()
+            from joint_vol_calibration.signals.regime_classifier import (
+                VVIX_REGIME2_THRESHOLD, build_regime_labels)
+            spx_in = spx_df.reset_index()[["date", "close", "log_return"]]
+            vw_in = vix_wide.reset_index().rename(columns={"index": "date"})
+            share = {}
+            for key, gate in (("adaptive", None), ("fixed", VVIX_REGIME2_THRESHOLD)):
+                lab = build_regime_labels(spx_in, vw_in, gate).loc[d["start_date"]:d["end_date"]]
+                share[key] = float((lab == 2).mean()) if len(lab) else None
+            share["fixed_level"] = float(VVIX_REGIME2_THRESHOLD)
+            d["r2_share"] = share
+    except Exception as e:
+        _record_error(d, "change-log facts (T-bill rates, R2 shares)", e)
+
+    def _pct0(x: Optional[float]) -> str:
+        return "—" if x is None else f"{x * 100:.1f}%"
+
+    # The shipped classifier's own evaluation record (quoted beside the C17 figures)
+    d["clf_eval"] = None
+    try:
+        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
+            ev = (getattr(pickle.load(f), "metadata_", None) or {}).get("evaluation") or {}
+        if ev.get("oos_acc") is not None and ev.get("persistence_acc") is not None:
+            d["clf_eval"] = {"oos_acc": float(ev["oos_acc"]), "persistence_acc": float(ev["persistence_acc"]),
+                             "n_test": int(ev.get("n_test") or 0)}
+    except Exception as exc:     # page 1 reports a broken classifier; here the clause is omitted
+        _logger.info("classifier evaluation unavailable: %s", exc)
+
+    tby = d["tbill_by_year"]
+    rate_txt = ", ".join(f"{y}: {v * 100:.2f}%" for y, v in sorted(tby.items())
+                         if y in (min(tby), 2023, max(tby))) if tby else "not available"
+    sh = d["r2_share"] or {}
 
     # ── Improvement Summary (Steps 1–8) — a historical change log ─────────────
     d["improvements"] = [
@@ -1528,13 +1770,13 @@ def load_page4() -> dict[str, Any]:
          "before": "Claimed: Heston calibrated to an SSVI-smoothed surface",
          "after":  "Calibrates to two-sided parity-forward Black-76 IVs; no smoothing step."},
         {"step": "4", "name": "Per-date T-bill rate",
-         "what": "^IRX 3M T-bill from DB replaces fixed r=0.045 in backtest. 18 new tests.",
-         "before": "Fixed r=0.045 throughout 2018–2025",
-         "after":  "Per-date rate (2018: ~1.5%, 2023: ~5.3%, 2025: ~4.3%)."},
+         "what": "^IRX 3M T-bill from the DB replaces the fixed r = 0.045 in the backtest.",
+         "before": "Fixed r = 0.045 throughout 2018–2025",
+         "after":  f"Per-date rate (annual mean, cc: {rate_txt})."},
         {"step": "5", "name": "Adaptive VVIX threshold",
          "what": "Rolling 252-day 80th percentile of VVIX as R2 gate (was fixed 100).",
-         "before": "R2 frequency ~53% (over-triggered in low-vol periods)",
-         "after":  "Expected R2 frequency ~25% (calibrated to market regime)."},
+         "before": f"R2 on {_pct0(sh.get('fixed'))} of backtest sessions with the fixed 100-point gate",
+         "after":  f"R2 on {_pct0(sh.get('adaptive'))} of backtest sessions."},
         {"step": "6", "name": "Isotonic calibration + step sizing",
          "what": "CalibratedClassifierCV(FrozenEstimator(XGB), isotonic). S1S step: full/half/flat at P(R2) 0.4/0.6.",
          "before": "Raw XGB probabilities (overconfident). Linear 1−p scaling.",

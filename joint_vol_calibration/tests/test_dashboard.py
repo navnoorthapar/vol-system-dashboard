@@ -496,7 +496,10 @@ def test_shipped_front_page_drops_the_hardcoded_stress_and_window_claims(dash):
 # ── front page: rule label, classifier, term structure ───────────────────────
 
 def test_classifier_card_uses_the_training_feature_path(dash):
-    """The card fed pdv_iv_spread = −VIX (PDV read before it was computed)."""
+    """The card fed pdv_iv_spread = −VIX (PDV read before it was computed), and
+    later the PDV forecast to a classifier whose training set used the rv₂₀
+    proxy. The card must rebuild the feature exactly as the training set did,
+    from the source the model records."""
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
     from joint_vol_calibration.signals.regime_classifier import build_features
 
@@ -504,12 +507,47 @@ def test_classifier_card_uses_the_training_feature_path(dash):
     as_of = d["clf_feature_date"]
     with open(SHIPPED / "signals" / "regime_classifier.pkl", "rb") as f:
         clf = pickle.load(f)
-    with open(SHIPPED / "pdv_model.pkl", "rb") as f:
-        pdv = pickle.load(f)
-    feats = build_features(get_spx_ohlcv(as_of_date=as_of),
-                           get_vix_term_structure_wide(as_of_date=as_of), pdv_model=pdv)
+    source = clf.metadata_["pdv_iv_spread_source"]
+    assert source == "rv20_proxy"                     # what the shipped model records
+    assert d["clf_feature_source"] == source
+    feats = build_features(get_spx_ohlcv(as_of_date=as_of), get_vix_term_structure_wide(as_of_date=as_of))
+    assert feats.attrs["pdv_iv_spread_source"] == source
     proba = clf.predict_proba(feats.dropna(subset=clf.feature_names_).iloc[[-1]])[0] * 100
     assert [d["prob_r0"], d["prob_r1"], d["prob_r2"]] == pytest.approx(list(proba), abs=0.051)
+
+
+def test_classifier_card_refuses_a_source_it_cannot_rebuild(dash, synth):
+    """A classifier whose training spread cannot be rebuilt is reported, not fed a substitute."""
+    path = synth["data"] / "signals" / "regime_classifier.pkl"
+    with open(path, "rb") as f:
+        clf = pickle.load(f)
+    clf.metadata_ = {**clf.metadata_, "pdv_iv_spread_source": "pdv_model_full_sample"}
+    with open(path, "wb") as f:
+        pickle.dump(clf, f)
+    d = dash.load_page1()
+    assert d["clf_available"] is False and d["prob_r1"] is None
+    assert any("research classifier" in e["component"] for e in d["errors"])
+    assert d["regime"] is not None                 # the rule label is unaffected
+
+
+def test_rule_inputs_reproduce_the_stored_label(dash):
+    """The regime card shows the rule's own inputs (rv₂₀, VIX, VVIX, adaptive gate)."""
+    from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+    from joint_vol_calibration.signals.regime_classifier import build_rule_label_frame
+
+    d = dash.load_page1()
+    r = d["rule"]
+    frame = build_rule_label_frame(get_spx_ohlcv(as_of_date=r["date"]),
+                                   get_vix_term_structure_wide(as_of_date=r["date"]))
+    last = frame.iloc[-1]
+    assert str(frame.index[-1].date()) == r["date"]
+    assert r["rv20"] == pytest.approx(last["rv_20d"], abs=1e-12)
+    assert r["gate"] == pytest.approx(last["vvix_gate"], abs=1e-12)
+    assert r["label"] == int(last["regime"])
+    rl = pd.read_parquet(SHIPPED / "signals" / "regime_labels.parquet")
+    assert r["label"] == int(rl["regime"].loc[r["date"]])     # stored label on that session
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert f"Rule inputs on {r['date']}" in html
 
 
 def test_corrupt_classifier_keeps_the_rule_label_and_reports_an_error(dash, synth):
@@ -713,7 +751,7 @@ def test_kpis_are_round_trips_of_the_portfolio_sleeves(dash, engine_state):
     trades = [t for t in engine_state["all_trades"] if t.signal in dash.PORTFOLIO_SLEEVES]
     assert d["kpi"]["win_rate"] == pytest.approx(np.mean([t.net_pnl > 0 for t in trades]), abs=1e-12)
     assert d["kpi"]["avg_pnl"] == pytest.approx(d["total_pnl"] / n, abs=1e-9)
-    assert rows["Sharpe"] == f"{m['sharpe']:.3f}"
+    assert rows["Sharpe"] == f"{m['sharpe']:.3f}".replace("-", "\u2212")
 
 
 def test_s3_sharpe_is_the_engine_value_not_hidden(dash, engine_state):
@@ -817,7 +855,7 @@ def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
             assert re.search(r"\d", m.group(2)), (route, ref)        # it carries numbers
             n += 1
         assert "SPX price sparkline" not in html
-    assert n == 12
+    assert n == 10
 
 
 def test_scroll_regions_are_keyboard_focusable(pages):
@@ -835,8 +873,8 @@ def test_colour_tokens_meet_wcag_aa(dash, pages):
     html = pages["/"]
     root = re.search(r":root \{(.*?)\}", html, re.S).group(1)
     tok = dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", root))
-    backgrounds = [tok["bg"], tok["surface"], tok["surface2"], "#1a1a1a",
-                   "#251414", "#271f13"]          # tooltip, red- and amber-tinted banners
+    backgrounds = [tok["bg"], tok["surface"], tok["surface2"], tok["tooltip"],
+                   tok["tint-red"], tok["tint-amber"], tok["tint-green"], tok["tint-blue"]]
     for name in ("text", "text2", "text3", "accent", "accent2", "red", "blue", "yellow",
                  "amber", "orange", "purple", "cyan", "pink"):
         for bg in backgrounds:
@@ -924,11 +962,11 @@ def test_vix_colour_and_words_come_from_one_threshold_table(dash, monkeypatch):
     base = dash.load_page1()
     client = dash.app.test_client()
     for vix, cls, words in ((19.0, "green", "NORMAL"), (27.0, "yellow", "ELEVATED"),
-                            (31.0, "red", "STRESS"), (12.0, "green", "LOW")):
+                            (31.0, "red", "STRESS"), (12.0, "dim", "LOW")):
         monkeypatch.setattr(dash, "load_page1", lambda v=vix: {**base, "vix": v})
         html = client.get("/").get_data(as_text=True)
         block = html[html.index("VIX  <span"):html.index("<!-- VVIX -->")]
-        assert f'class="card-value {cls}"' in block and words in block, (vix, block)
+        assert f'<span class="chip chip-{cls}">{words}' in block, (vix, block)
 
 
 def test_term_structure_is_drawn_on_a_linear_tenor_axis(pages):
@@ -997,8 +1035,8 @@ def test_greeks_provenance_written_by_risk_monitor_is_read(dash, synth):
 
 def test_classifier_accuracy_is_read_from_the_shipped_model(pages):
     """The front page hard-coded '63.4%' vs '90.0%' (pre-C22 fixed-gate labels with a
-    look-ahead PDV feature) beside a classifier retrained in C22 whose own evaluation
-    records 75.1% vs 86.8%. The figures must come from the pickle's metadata."""
+    look-ahead PDV feature) beside a classifier retrained in C22 that records its own
+    evaluation. The figures must come from the pickle's metadata."""
     import pickle
 
     with open(ROOT / "data_store" / "signals" / "regime_classifier.pkl", "rb") as f:
@@ -1015,3 +1053,134 @@ def test_backtest_audit_table_has_the_c22_round(pages):
     bt = pages["/backtest"]
     assert 'data-round="C22"' in bt
     assert "from the C21 run" not in bt
+
+
+# ── C22 verification round: presentation guarantees ──────────────────────────
+
+def _visible_text(html: str) -> str:
+    import html as _html
+
+    body = re.sub(r"<(script|style|noscript)\b.*?</\1>", " ", html, flags=re.S)
+    body = body[body.index("<body"):]
+    return _html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)))
+
+
+def test_numbers_use_true_minus_signs_and_no_placeholders(pages):
+    """'-0.571', '$-923' and 'z=-1.0' printed hyphens; a missing value must read '—',
+    never 'nan', 'None' or 'undefined'."""
+    for route, html in pages.items():
+        text = _visible_text(html)
+        hyphen_numbers = re.findall(r"(?<![\w/.\-–])-\$?\d[\d,.]*", text)
+        assert not hyphen_numbers, (route, hyphen_numbers[:5])
+        for bad in (r"\bNaN\b", r"\bnan%", r"\bundefined\b", r"\bInfinity\b",
+                    r"[:=]\s*(None|null)\b", r"(^|\s)None(\s|$)"):
+            assert not re.search(bad, text), (route, bad)
+
+
+def test_pdv_skill_is_the_library_walk_forward_r2(dash, pages):
+    """The card hard-coded 'Walk-fwd R² 0.31 / kernel 0.23' (the superseded next-day
+    model) beside the 21-day model; the figure is now recomputed from the DB."""
+    from joint_vol_calibration.models.pdv import spx_log_returns_from_db, walk_forward_skill_report
+
+    d = dash.load_page1()
+    s = d["pdv_skill"]
+    assert s["horizon"] == 21
+    r = spx_log_returns_from_db(as_of_date=d["spx_date"])
+    rep = walk_forward_skill_report(r, horizons=(21,))["summary"].iloc[0]
+    assert s["r2"] == pytest.approx(rep["r2"], abs=5e-5)          # the report rounds to 4 dp
+    assert s["r2_ex"] == pytest.approx(rep["r2_ex"], abs=5e-5)
+    html = pages["/"]
+    assert f"Walk-forward R²: <span class=\"v\">{s['r2']:.2f}" in html
+    assert "Walk-fwd R² (kernel)" not in html and ">0.31<" not in html
+
+
+def test_stress_card_describes_the_models_own_target(dash, pages):
+    """The 21-day model's outcome is the RMS vol over its horizon, not 'that day's |r|'."""
+    st = dash.load_page1()["stress"]
+    text = _visible_text(pages["/"])
+    assert st["horizon"] == 21 and st["n_window"] == 21
+    assert f"Realised over its 21-session horizon ({st['stress_date']} → {st['window_end']}" in text
+    assert "that day's |r|" not in text
+
+
+def test_audit_evidence_is_read_from_the_c22_bridge(dash, pages):
+    """'S1 +$722K → −$508K from β alone' quoted the published C21 figure as the
+    pre-β value; the β step alone moved S1 from the previous bridge row."""
+    bridge = pd.read_csv(SHIPPED / "backtest" / "c22_bridge.csv").set_index("step")
+    grid = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv").set_index("beta")
+    rows = list(bridge.index)
+    prev = bridge.loc[rows[rows.index("beta") - 1]]
+    text = _visible_text(pages["/backtest"])
+    want = (f"C22 bridge row {int(bridge.loc['beta', 'row'])}: S1 {dash._usd_k(prev['s1_pnl'])} → "
+            f"{dash._usd_k(bridge.loc['beta', 's1_pnl'])} from β alone; at β = 1 S1 would show "
+            f"{dash._usd_k(grid.loc[1.0, 's1_pnl'])}")
+    assert want in text
+    assert f"C22 bridge row {int(bridge.loc['r2_gate', 'row'])}: portfolio {dash._usd_k(bridge.loc['r2_gate', 'd_pnl'])}" in text
+    assert "+$722K → −$508K" not in text
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        beta = pickle.load(f)["atm_to_vix_ratio"]
+    assert f"β = {beta:.2f}" in text
+
+
+def test_a_bridge_from_another_run_is_a_loader_error(dash, synth):
+    path = synth["data"] / "backtest" / "c22_bridge.csv"
+    df = pd.read_csv(path)
+    df.loc[df.index[-1], "pnl"] += 1000.0
+    df.to_csv(path, index=False)
+    d = dash.load_page4()
+    assert any("C22 bridge" in e["component"] for e in d["errors"])
+    assert d["bridge"] is None
+
+
+def test_change_log_quotes_facts_from_the_db(dash, pages):
+    """The log said '2018: ~1.5%' (^IRX averaged 1.95%) and R2 '~53% → ~25%'."""
+    d = dash.load_page4()
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        t = pd.read_sql("SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?", con,
+                        params=(d["start_date"], d["end_date"]), parse_dates=["date"])
+    m2018 = t[t["date"].dt.year == 2018]["rate"].mean()
+    assert d["tbill_by_year"][2018] == pytest.approx(m2018, abs=1e-12)
+    text = _visible_text(pages["/backtest"])
+    assert f"2018: {m2018 * 100:.2f}%" in text
+    sh = d["r2_share"]
+    assert f"R2 on {sh['fixed'] * 100:.1f}% of backtest sessions" in text
+    assert f"R2 on {sh['adaptive'] * 100:.1f}% of backtest sessions" in text
+    assert 0.40 < sh["fixed"] < 0.55 and 0.18 < sh["adaptive"] < 0.28
+    for stale in ("~1.5%", "~53%", "~25%", "18 new tests"):
+        assert stale not in text
+
+
+def test_no_js_fallback_and_scroll_affordance(pages):
+    html = pages["/backtest"]
+    nos = re.search(r"<noscript><style>(.*?)</style></noscript>", html, re.S).group(1)
+    assert ".chart-wrap" in nos and ".chart-data.sr-only" in nos and "position: static" in nos
+    css = html[html.index(".table-scroll, .heatmap-wrap {"):]
+    css = css[:css.index("}")]
+    assert "local" in css and "scroll" in css and "position: relative" in css
+    assert "Scroll sideways for more columns" in html
+
+
+def test_unverified_or_contradicted_copy_is_gone(pages):
+    cal, bt = _visible_text(pages["/calibration"]), _visible_text(pages["/backtest"])
+    assert "misclassifies 2025-04-09" not in cal          # no stored HMM backs it
+    assert "10 vp target" not in bt                      # the Quintic VIX-options RMSE is below it
+    assert "Good fit" not in cal
+
+
+def test_pdv_features_use_returns_rebuilt_from_closes(dash, synth):
+    """The stored log_return column has holes (2025-05-08 in the shipped DB);
+    dropping that row removed a session from the PDV state variables."""
+    from joint_vol_calibration.models.pdv import extract_pdv_features
+
+    hole = str(synth["dates"][-30].date())
+    con = sqlite3.connect(synth["data"] / "vol_system.db")
+    con.execute("UPDATE spx_ohlcv SET log_return = NULL WHERE date = ?", (hole,))
+    con.commit()
+    close = pd.Series(dict(con.execute("SELECT date, close FROM spx_ohlcv ORDER BY date").fetchall()))
+    con.close()
+    close.index = pd.to_datetime(close.index)
+    with open(synth["data"] / "pdv_model.pkl", "rb") as f:
+        pdv = pickle.load(f)
+    fc = pdv.linear_.predict(extract_pdv_features(np.log(close).diff().dropna())).iloc[-1]
+    d = dash.load_page1()
+    assert d["pdv_forecast"] == pytest.approx(fc * 100, abs=0.006)
