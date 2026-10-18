@@ -145,7 +145,8 @@ STRADDLE_TENOR_DAYS: int = 30       # 30-calendar-day ATM straddle at entry
 # re-define the canonical backtest daily. Later chains are reported by
 # --estimate-beta as out-of-sample checks: the first, 2026-10-16 (VVIX 110,
 # an R2 day), gives 0.702, which would pull the all-chain mean to 0.80. β is
-# therefore not constant across regimes; the β grid includes 0.80.
+# therefore not constant (though not simply a stress effect: the R2 sessions
+# 2026-03-24 / 03-27 in the set gave 0.824 / 0.841); the β grid includes 0.80.
 ATM_TO_VIX_RATIO:  float = 0.82
 BETA_ESTIMATION_SESSIONS: Tuple[str, ...] = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18")
 
@@ -178,7 +179,7 @@ REPORTS_DIR  = BACKTEST_DIR / "reports"
 REPORT_PATH  = REPORTS_DIR / "full_report.html"
 # float_format of the committed CSV artifacts (beta_sensitivity.csv,
 # c22_bridge.csv); test_backtest_reproducibility re-serialises rows with it
-ARTIFACT_CSV_FLOAT_FORMAT = "%.6g"
+ARTIFACT_CSV_FLOAT_FORMAT = "%.10g"
 
 # Crisis periods (start, end) for reporting
 CRISIS_PERIODS: Dict[str, Tuple[str, str]] = {
