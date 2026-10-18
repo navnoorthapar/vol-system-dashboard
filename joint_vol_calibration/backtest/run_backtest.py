@@ -10,7 +10,7 @@ Usage (from the repository root):
   python -m joint_vol_calibration.backtest.run_backtest --no-wf     # skip sub-period windows
   python -m joint_vol_calibration.backtest.run_backtest --no-save   # print only, write nothing
   python -m joint_vol_calibration.backtest.run_backtest --estimate-beta [--live]
-  python -m joint_vol_calibration.backtest.run_backtest --beta-sensitivity
+  python -m joint_vol_calibration.backtest.run_backtest --beta-sensitivity [--csv PATH]
   python -m joint_vol_calibration.backtest.run_backtest --pseudo-oos
   python -m joint_vol_calibration.backtest.run_backtest --c7        # re-run the C7 delta-hedge study
 """
@@ -54,6 +54,13 @@ from joint_vol_calibration.backtest.report_generator import ReportGenerator
 DATA_START = "2015-01-01"
 BT_END     = "2025-03-24"
 
+# SPX history behind the walk-forward PDV-21 forecast (pdv_iv_spread). The
+# forecast at t only uses returns dated ≤ t, so a longer history changes no
+# causality — it gives the 2018 forecasts 2010-2017 to learn from instead
+# of the calm 2015-2017 alone (mean σ̂ / mean forward RV21 over the window:
+# 0.92 from 2010 vs 0.88 from 2015).
+PDV_HISTORY_START = "2010-01-01"
+
 # A chain's parity-implied spot must match its session close this closely
 # before its quotes are compared with that session's VIX close.
 SNAPSHOT_SPOT_TOL = 0.005
@@ -71,6 +78,17 @@ def _load_data(start: str = DATA_START, end: str = BT_END) -> tuple[pd.DataFrame
     logger.info("  VIX rows: %d  cols: %s", len(vix_wide), list(vix_wide.columns))
 
     return spx_df, vix_wide
+
+
+def load_pdv_vol(end: str = BT_END, start: str = PDV_HISTORY_START) -> pd.Series:
+    """Walk-forward PDV-21 σ̂ (regime_classifier.walk_forward_pdv_vol) on SPX
+    closes from ``start`` to ``end``; row t uses returns dated ≤ t only."""
+    from joint_vol_calibration.signals.regime_classifier import walk_forward_pdv_vol
+    spx = get_spx_ohlcv(as_of_date=end, start_date=start)
+    pdv = walk_forward_pdv_vol(spx)
+    logger.info("PDV-21 forecast: %d sessions %s → %s (history from %s)",
+                len(pdv), pdv.index[0].date(), pdv.index[-1].date(), start)
+    return pdv
 
 
 # ── β = ATM vol / VIX estimation ──────────────────────────────────────────────
@@ -207,11 +225,14 @@ def run_beta_sensitivity(
     spx_df: pd.DataFrame,
     vix_wide: pd.DataFrame,
     betas: Sequence[float] = (1.00, 0.90, ATM_TO_VIX_RATIO),
+    pdv_vol: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Re-run the backtest for each β; one row per β with headline and per-signal stats."""
+    if pdv_vol is None:
+        pdv_vol = load_pdv_vol()
     rows = []
     for b in betas:
-        eng = BacktestEngine(atm_to_vix_ratio=b)
+        eng = BacktestEngine(atm_to_vix_ratio=b, pdv_vol_series=pdv_vol)
         eq = eng.run(spx_df, vix_wide)
         m = eng.compute_metrics()
         row = {"beta": b, "nav": float(eq["nav"].iloc[-1]),
@@ -220,6 +241,8 @@ def run_beta_sensitivity(
         for s in ("s1c", "s3", "s4", "s1", "s2"):
             row[f"{s}_pnl"] = m.get(f"{s}_total_pnl", 0.0)
             row[f"{s}_sharpe"] = m.get(f"{s}_sharpe")
+            row[f"{s}_win"] = m.get(f"{s}_win_rate")
+            row[f"{s}_trades"] = m.get(f"{s}_n_trades")
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -327,7 +350,7 @@ def main(run_wf: bool = True, save: bool = True, null_paths: int = 200) -> None:
 
     # ── 2. Run full backtest ──────────────────────────────────────────────────
     logger.info("Running BacktestEngine (2018-01-01 → 2025-03-24) …")
-    engine    = BacktestEngine()
+    engine    = BacktestEngine(pdv_vol_series=load_pdv_vol())
     equity_df = engine.run(spx_df, vix_wide)
     logger.info("Backtest done: %d days | NAV $%.0f → $%.0f | trades: %d",
                 len(equity_df),
@@ -415,6 +438,8 @@ if __name__ == "__main__":
                         help="Re-run the backtest for β ∈ {1.00, 0.90, default}")
     parser.add_argument("--pseudo-oos", action="store_true",
                         help="S1C on 2013-2017 (confounded pseudo out-of-sample)")
+    parser.add_argument("--csv", help="With --beta-sensitivity: also write the table to this CSV "
+                                      "(canonical: data_store/backtest/beta_sensitivity.csv)")
     parser.add_argument("--c7", action="store_true",
                         help="Re-run the C7 delta-hedge study and save its parquet/chart")
     args = parser.parse_args()
@@ -423,8 +448,11 @@ if __name__ == "__main__":
         _print_beta(estimate_beta(include_live=args.live))
     elif args.beta_sensitivity:
         spx, vix = _load_data()
-        with pd.option_context("display.width", 250, "display.max_columns", 30):
-            print(run_beta_sensitivity(spx, vix).round(3).to_string(index=False))
+        sens = run_beta_sensitivity(spx, vix)
+        with pd.option_context("display.width", 250, "display.max_columns", 40):
+            print(sens.round(3).to_string(index=False))
+        if args.csv:
+            sens.to_csv(args.csv, index=False, float_format="%.6g")
     elif args.pseudo_oos:
         print(run_pseudo_oos())
     elif args.c7:

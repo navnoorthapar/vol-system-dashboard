@@ -458,7 +458,9 @@ class TestSignalEngineSameDayPoison:
 class TestSignalEngineLags:
     def test_features_are_previous_session_values(self, clean_signals):
         spx, vix, clean = clean_signals
-        raw = build_features(spx, vix)
+        # SignalEngine's default σ̂ is the walk-forward PDV-21 forecast
+        from joint_vol_calibration.signals.regime_classifier import PDV_WALK_FORWARD
+        raw = build_features(spx, vix, pdv_vol_series=PDV_WALK_FORWARD)
         prev = raw.shift(1).reindex(clean.index)
         for c in ("vix", "ts_slope", "fear_premium", "vvix", "pdv_iv_spread"):
             pd.testing.assert_series_equal(clean[c], prev[c], check_names=False)

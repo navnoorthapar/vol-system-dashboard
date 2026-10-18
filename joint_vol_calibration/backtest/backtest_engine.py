@@ -63,7 +63,9 @@ Assumptions (documented for transparency):
   7. Ex-ante sizing overlay, shifted 1 day, applied in a second pass:
      correlation netting m_i = 1/√(1 + Σ_j max(ρ_ij, 0)) on trailing 60d
      P&L correlation, times a trailing-252d net-Sharpe scale in [0.5, 1]
-  8. PDVLinear retrained per year on strictly pre-year data (walk-forward)
+  8. pdv_iv_spread = σ̂_PDV(t) − VIX(t): σ̂ is the walk-forward PDVLinear
+     forecast of the next-21-session RMS vol made at the close of t (refit
+     daily on labels observed by t, purged); lagged one session
 
 The C22Corrections switches below exist only so c22_bridge.py can replay
 the C22 correction round one fix at a time from the published C21 numbers.
@@ -140,11 +142,14 @@ STRADDLE_TENOR_DAYS: int = 30       # 30-calendar-day ATM straddle at entry
 ATM_TO_VIX_RATIO:  float = 0.82
 
 # Horizon (sessions) of the walk-forward PDV forecast behind pdv_iv_spread.
-# 1 is the |r_{t+1}| target (an E|r| forecast, ≈0.8σ). The C22 PDV chain
-# fixes build_xy's multi-day window; once that lands this should become 21
-# (forward RMS vol, the horizon VIX measures). c22_bridge.py applies it as
-# a separate step when it detects the fix.
-PDV_SPREAD_HORIZON: int = 1
+# 21 (canonical, C22): the forecast of the RMS vol over the next 21 sessions
+# — variance-consistent and horizon-matched with the 30-day VIX — from
+# regime_classifier.walk_forward_pdv_vol (PDVLinear refit DAILY on labels
+# fully observed at the forecast origin; purged, embargo = 21).
+# 1 (pre-C22, kept for c22_bridge): PDVLinear on |r_{t+1}|·√252, refit once
+# a year on pre-year returns — an E|r| forecast (≈0.66× RMS vol on SPX), so
+# "VIX > σ̂ + 2 vp" held on ~96% of 2018-2025 sessions.
+PDV_SPREAD_HORIZON: int = 21
 
 # S3 legacy z-score proxy parameters (pre-C22 P&L model, kept for the bridge)
 S3_Z_SCALE:        float = 0.02    # 2% of kelly-weighted nav per unit z improvement
@@ -1015,7 +1020,10 @@ class BacktestEngine:
         "Ex-ante sizing overlay, shifted 1 day, second simulation pass: "
         "correlation netting 1/√(1+Σmax(ρ,0)) on trailing 60d P&L corr × "
         "trailing-252d net-Sharpe scale in [0.5, 1]",
-        "Walk-forward PDVLinear retrained per year on pre-year returns",
+        ("Walk-forward PDVLinear forecast of the next-21-session RMS vol "
+         "(refit daily on labels observed at the forecast origin, purged) "
+         "behind the S1/S1C pdv_iv_spread" if PDV_SPREAD_HORIZON > 1 else
+         "Walk-forward PDVLinear retrained per year on pre-year returns"),
     ]
 
     # Each entry is "Title: explanation" (the report renders the title).
@@ -1071,6 +1079,7 @@ class BacktestEngine:
         vvix_threshold   = _DEFAULT_GATE,
         pdv_horizon:     Optional[int] = None,
         s3_leg_direction: int = S3_LEG_DIRECTION,
+        pdv_vol_series:  Optional[pd.Series] = None,
     ):
         """
         atm_to_vix_ratio : β in σ_ATM = β·VIX-TS (1.0 = pre-C22 "VIX is ATM vol")
@@ -1084,6 +1093,13 @@ class BacktestEngine:
                            pdv_iv_spread (default PDV_SPREAD_HORIZON)
         s3_leg_direction : straddle direction of the S3 index leg when the
                            signal is on (see S3_LEG_DIRECTION)
+        pdv_vol_series   : optional precomputed walk-forward σ̂ for
+                           pdv_horizon > 1 (regime_classifier.walk_forward_pdv_vol,
+                           value at t dated ≤ t). run_backtest builds it from
+                           SPX history since PDV_HISTORY_START so the first
+                           forecasts are not trained on 2015-2017 alone;
+                           without it σ̂ is built from the spx_df given to run().
+                           Ignored for pdv_horizon == 1.
         """
         self.start_date      = start_date
         self.end_date        = end_date
@@ -1098,6 +1114,8 @@ class BacktestEngine:
         if s3_leg_direction not in (-1, 1):
             raise ValueError("s3_leg_direction must be -1 (short straddle) or +1 (long)")
         self.s3_leg_direction = int(s3_leg_direction)
+        self.pdv_vol_series  = pdv_vol_series
+        self.pdv_vol_:   Optional[pd.Series] = None
         np.random.seed(seed)
 
         self.equity_df:   Optional[pd.DataFrame] = None
@@ -1182,28 +1200,43 @@ class BacktestEngine:
 
     def _build_walkforward_pdv_vol(self, spx_df: pd.DataFrame) -> Optional[pd.Series]:
         """
-        Build walk-forward PDV vol forecasts with zero look-ahead bias.
+        Walk-forward PDV vol forecasts σ̂(t) with zero look-ahead.
 
-        For each backtest year Y, fit a fresh PDVLinear (Guyon-Lekeufack
-        features: sigma1, sigma2, lev) on log-returns strictly before
-        January 1 of Y (delta_hedger.fit_pdv_before), then predict sigma_PDV
-        for the days of year Y. The target horizon is ``self.pdv_horizon``.
+        horizon > 1 (canonical 21): regime_classifier.walk_forward_pdv_vol —
+          on each session t a PDVLinear (sigma1, sigma2, lev) is refit on the
+          forward-RMS-vol labels whose window ends by t (purged, embargo =
+          horizon) and predicts from t's features, so σ̂(t) uses returns
+          dated ≤ t only and targets sqrt(252/h·Σ r²_{t+1..t+h}).
+        horizon 1 (pre-C22 replay): one PDVLinear per backtest year, fit on
+          returns strictly before January 1 (delta_hedger.fit_pdv_before) on
+          the |r_{t+1}| target.
 
-        This replaces two flawed alternatives:
-          • the pickled full-sample PDVModel (coefficients contaminated by
-            future data — look-ahead bias), and
-          • the trailing rv_20d − VIX proxy (look-ahead-free but not a PDV
-            model at all, so S1/S1C never actually traded the PDV signal).
-
-        Feature rows at date t use returns through t; SignalEngine shifts
-        features by one day before signal generation, so the spread used on
-        day t is built from t−1 information — fully causal.
+        SignalEngine lags features by one session, so the spread traded on
+        session t is built from information dated t−1.
 
         Returns
         -------
-        pd.Series of annualised vol forecasts (decimal), or None if no year
-        had the minimum 504 training observations.
+        pd.Series of annualised vol forecasts (decimal), or None if none
+        could be made (too little history) — the rv_20d proxy is then used.
         """
+        if self.pdv_horizon > 1:
+            from joint_vol_calibration.signals.regime_classifier import walk_forward_pdv_vol
+            if self.pdv_vol_series is not None:
+                out = pd.Series(self.pdv_vol_series, dtype=float).dropna()
+                out.index = pd.to_datetime(out.index)
+            else:
+                out = walk_forward_pdv_vol(spx_df, horizon=self.pdv_horizon)
+            out = out[out.index <= pd.Timestamp(self.end_date)]
+            if out.empty:
+                logger.warning("WF PDV (h=%d): no forecasts — rv proxy fallback", self.pdv_horizon)
+                return None
+            logger.info("WF PDV (h=%d, daily purged refit): %d forecasts %s → %s",
+                        self.pdv_horizon, len(out), out.index[0].date(), out.index[-1].date())
+            return out
+        return self._build_yearly_pdv_vol(spx_df)
+
+    def _build_yearly_pdv_vol(self, spx_df: pd.DataFrame) -> Optional[pd.Series]:
+        """Pre-C22 per-year PDVLinear on the 1-day |r| target (bridge replay)."""
         from joint_vol_calibration.models.pdv import PDVLinear, extract_pdv_features
 
         df = spx_df.copy()
@@ -1320,6 +1353,7 @@ class BacktestEngine:
         # ── Walk-forward PDV vol forecasts (zero look-ahead) ───────────────────
         logger.info("Building walk-forward PDV forecasts ...")
         wf_pdv_vol = self._build_walkforward_pdv_vol(spx_col)
+        self.pdv_vol_ = wf_pdv_vol
 
         # ── Generate C9 signals ────────────────────────────────────────────────
         engine  = SignalEngine(clf=clf)
@@ -1566,6 +1600,10 @@ class BacktestEngine:
                     vvix_threshold=self.vvix_threshold,
                     pdv_horizon=self.pdv_horizon,
                     s3_leg_direction=self.s3_leg_direction,
+                    # σ̂(t) is causal, so the full-run series is valid for
+                    # every window (and saves a refit per window)
+                    pdv_vol_series=(self.pdv_vol_series if self.pdv_vol_series is not None
+                                    else self.pdv_vol_),
                 )
                 eq_sub = sub.run(spx_col, vix_col)
                 m_sub  = sub.compute_metrics(eq_sub)
@@ -1614,6 +1652,8 @@ class BacktestEngine:
             "atm_to_vix_ratio": self.atm_to_vix_ratio,
             "pdv_horizon":     self.pdv_horizon,
             "s3_leg_direction": self.s3_leg_direction,
+            "pdv_iv_spread_source": (self.signals_df.attrs.get("pdv_iv_spread_source")
+                                     if self.signals_df is not None else None),
             "corrections":     {f.name: getattr(self.corrections, f.name)
                                 for f in fields(self.corrections)},
             "metrics":         self.metrics_,

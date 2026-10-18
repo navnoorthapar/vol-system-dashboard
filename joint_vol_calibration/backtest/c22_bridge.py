@@ -25,17 +25,18 @@ Order (cumulative; each row includes every row above it):
   14  pdv_h21        PDV spread on a 21-day forward-RMS target       [PDV chain]
   --  s2_stop        S2 stop-loss direction (reference sleeve only)  [signals chain]
 
-Rows 13-14 depend on other C22 chains. They are applied only when the
-upstream change is detected by a behavioural probe, and are reported as
-"no-op (upstream absent)" otherwise, so the bridge runs before and after
-those chains merge:
-  • r2_gate : applied when SignalEngine.generate no longer overwrites
+Rows 13-14 depend on other C22 chains, which are merged; both rows are
+always applied, and a behavioural probe of each upstream change guards it
+(the bridge raises if the probe fails, i.e. if the upstream fix regressed):
+  • r2_gate : SignalEngine.generate no longer overwrites
               precomputed regimes with its own VVIX>100 rule (otherwise an
               adaptive label set would be unioned with the fixed gate). The
               row then uses build_regime_labels' DEFAULT gate — whatever single
               gate regime_classifier defines.
-  • pdv_h21 : applied when models.pdv.build_xy(horizon=h) targets returns
-              over [t+1, t+h] (C22 PDV fix; before it, h>1 leaked).
+  • pdv_h21 : models.pdv.build_xy(horizon=h) targets returns over
+              [t+1, t+h] (C22 PDV fix; before it, h>1 leaked). The row
+              switches the spread from the yearly 1-day |r| PDVLinear to
+              walk_forward_pdv_vol (21-session RMS vol, daily purged refit).
   • s2_stop : lives inside generate_signal2 and cannot be toggled from here.
               The probe reports whether stops fire on adverse moves; S2 is a
               research reference and never enters the portfolio, so the
@@ -48,14 +49,15 @@ direction, z-score warm-up from history, EWM start-up, …) row 0 runs the
 legacy ENGINE on the new signals; its ΔP&L against the published P&L is
 then the size of those changes, and the reconciliation says so.
 
-The canonical run (run_backtest) uses BacktestEngine's defaults. After the
-PDV chain merges, PDV_SPREAD_HORIZON must be set to 21 for the canonical run
-to match the last row here; the R2 gate needs no change (the engine uses
-build_regime_labels' default).
+The canonical run (run_backtest) uses BacktestEngine's defaults
+(PDV_SPREAD_HORIZON = 21, build_regime_labels' default gate) with the
+PDV-21 series from run_backtest.load_pdv_vol(); the bridge passes the same
+series, so its last row is the canonical headline.
 
 Usage (repository root):
   python -m joint_vol_calibration.backtest.c22_bridge
   python -m joint_vol_calibration.backtest.c22_bridge --json out.json
+  python -m joint_vol_calibration.backtest.c22_bridge --csv data_store/backtest/c22_bridge.csv
 """
 
 from __future__ import annotations
@@ -193,11 +195,12 @@ def probe_s2_stop_direction() -> str:
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def _run(spx, vix, *, beta: float, corr: bte.C22Corrections, gate, pdv_h: int,
-         legacy_interp: bool) -> Dict:
+         legacy_interp: bool, pdv_vol: Optional[pd.Series] = None) -> Dict:
     ctx = legacy_vix_interpolation() if legacy_interp else contextlib.nullcontext()
     with ctx:
         eng = bte.BacktestEngine(atm_to_vix_ratio=beta, corrections=corr,
-                                 vvix_threshold=gate, pdv_horizon=pdv_h)
+                                 vvix_threshold=gate, pdv_horizon=pdv_h,
+                                 pdv_vol_series=pdv_vol)
         eq = eng.run(spx, vix)
         m = eng.compute_metrics()
     out = {"nav": float(eq["nav"].iloc[-1]), "pnl": float(eq["nav"].iloc[-1] - eng.initial_capital),
@@ -228,31 +231,43 @@ def build_steps() -> List[Dict]:
         {"key": "beta", "label": f"ATM vol = {beta:.2f} × VIX", "set": {"beta": beta}},
         {"key": "s3_index_leg", "label": "S3 = short SPX straddle (index leg)", "corr": {"s3_index_leg": True}},
     ]
-    override_gone = probe_r2_override_removed()
+    # Both upstream chains are merged: the rows are always applied. The probes
+    # stay as guards — if either fails, an upstream fix has regressed and the
+    # waterfall would silently mislabel a no-op as a correction.
+    if not probe_r2_override_removed():
+        raise RuntimeError("r2_gate row: SignalEngine overrides precomputed regimes "
+                           "again (signals-chain fix regressed)")
+    if not probe_pdv_forward_window():
+        raise RuntimeError("pdv_h21 row: build_xy(horizon>1) no longer targets "
+                           "[t+1, t+h] (PDV-chain fix regressed)")
     gate_desc = default_gate_description()
     steps.append({
         "key": "r2_gate", "upstream": "signals",
         "label": f"R2 gate = upstream default ({gate_desc})",
-        "set": {"gate": bte._DEFAULT_GATE} if override_gone else {},
-        "note": ("applied" if override_gone else
-                 "no-op (upstream absent): SignalEngine still overrides precomputed regimes with VVIX>100"),
+        "set": {"gate": bte._DEFAULT_GATE},
     })
-    pdv_ok = probe_pdv_forward_window()
     steps.append({
         "key": "pdv_h21", "upstream": "pdv",
-        "label": "PDV spread: 21-day forward-RMS target",
-        "set": {"pdv_h": 21} if pdv_ok else {},
-        "note": ("applied" if pdv_ok else
-                 "no-op (upstream absent): build_xy(horizon>1) still uses a leaking window"),
+        "label": "PDV spread: 21-day RMS-vol forecast (daily purged refit)",
+        "set": {"pdv_h": bte.PDV_SPREAD_HORIZON},
     })
     return steps
 
 
-def run_bridge(spx: Optional[pd.DataFrame] = None, vix: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Run every step cumulatively; one row per step."""
+def run_bridge(spx: Optional[pd.DataFrame] = None, vix: Optional[pd.DataFrame] = None,
+               pdv_vol: Optional[pd.Series] = None) -> pd.DataFrame:
+    """Run every step cumulatively; one row per step.
+
+    ``pdv_vol`` is the walk-forward PDV-21 σ̂ used once the pdv_h21 row
+    switches the spread to the 21-day target (rows with pdv_h = 1 ignore
+    it). Left None with the DB data, it is run_backtest.load_pdv_vol() —
+    the same series the canonical run uses, so the last row reproduces it.
+    """
     if spx is None or vix is None:
-        from joint_vol_calibration.backtest.run_backtest import _load_data
+        from joint_vol_calibration.backtest.run_backtest import _load_data, load_pdv_vol
         spx, vix = _load_data()
+        if pdv_vol is None:
+            pdv_vol = load_pdv_vol()
     state = {"beta": 1.0, "gate": LEGACY_VVIX_GATE, "pdv_h": 1, "legacy_interp": True}
     corr = bte.C22Corrections.legacy()
     rows = []
@@ -262,7 +277,8 @@ def run_bridge(spx: Optional[pd.DataFrame] = None, vix: Optional[pd.DataFrame] =
             corr = corr.with_(**step["corr"])
         t0 = time.time()
         res = _run(spx, vix, beta=state["beta"], corr=corr, gate=state["gate"],
-                   pdv_h=state["pdv_h"], legacy_interp=state["legacy_interp"])
+                   pdv_h=state["pdv_h"], legacy_interp=state["legacy_interp"],
+                   pdv_vol=pdv_vol)
         logger.info("step %-13s done in %.1fs", step["key"], time.time() - t0)
         rows.append({"step": step["key"], "label": step["label"],
                      "note": step.get("note", ""), **res})
@@ -302,6 +318,8 @@ def main(argv: Optional[List[str]] = None) -> pd.DataFrame:
     logger.setLevel(logging.INFO)
     ap = argparse.ArgumentParser(description="C22 correction waterfall")
     ap.add_argument("--json", help="write the rows as JSON to this path")
+    ap.add_argument("--csv", help="write the rows as CSV to this path "
+                                  "(canonical: data_store/backtest/c22_bridge.csv)")
     args = ap.parse_args(argv)
 
     df = run_bridge()
@@ -324,6 +342,8 @@ def main(argv: Optional[List[str]] = None) -> pd.DataFrame:
         w = last[f"{s}_win"]
         print(f"  {s:<9} P&L {last[f'{s}_pnl']:>11,.0f}  Sharpe {last[f'{s}_sharpe']:>7.3f}"
               f"  win {'—' if w is None or pd.isna(w) else f'{w:.1%}'}  trades {last[f'{s}_trades']}")
+    if args.csv:
+        df.to_csv(args.csv, index_label="row", float_format="%.6g")
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(json.loads(df.to_json(orient="records")), fh, indent=1)

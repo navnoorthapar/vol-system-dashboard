@@ -52,8 +52,11 @@ Features (computed at close of t; every consumer lags them one session)
   vvix            : ^VVIX / 100                  (vol-of-vol level, decimal)
 
   σ̂ is whatever forecast is injected through build_features(pdv_vol_series=...)
-  (annualised decimal σ at the VIX horizon); without one, the trailing rv_20d
-  is used as a proxy. "IVR" in older docs referred to this spread; no
+  (annualised decimal σ at the VIX horizon). The canonical one is
+  pdv_vol_series=PDV_WALK_FORWARD: walk_forward_pdv_vol(), the purged
+  walk-forward PDVLinear forecast of the next-21-session RMS vol (the default
+  in SignalEngine.generate and the backtest). Without one, the trailing rv_20d
+  is used as a proxy (build_features' default, kept for the live label job). "IVR" in older docs referred to this spread; no
   implied-vol RANK is computed anywhere.
 
 Classifier (research only)
@@ -111,7 +114,11 @@ from joint_vol_calibration.data.database import (
     get_vix_term_structure_wide,
     insert_regime_labels,
 )
-from joint_vol_calibration.models.pdv import extract_pdv_features
+from joint_vol_calibration.models.pdv import (
+    VIX_HORIZON_DAYS,
+    extract_pdv_features,
+    walk_forward_vol_forecast,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +307,60 @@ def gate_name(vvix_threshold: Optional[float] = R2_GATE) -> str:
 PDV_SOURCE_INJECTED = "injected_forecast"
 PDV_SOURCE_MODEL    = "pdv_model_full_sample"
 PDV_SOURCE_RV_PROXY = "rv20_proxy"
+PDV_SOURCE_WALK_FORWARD = "pdv21_walk_forward"
+
+# Pass as build_features(pdv_vol_series=PDV_WALK_FORWARD) (or as
+# SignalEngine.generate(precomputed_pdv_vol=PDV_WALK_FORWARD), its default) to
+# have the σ̂ built here by walk_forward_pdv_vol(): the purged walk-forward
+# PDVLinear forecast of the next-21-session RMS vol (variance-consistent and
+# horizon-matched with the 30-day VIX), dated at its forecast origin.
+PDV_WALK_FORWARD = "walk_forward"
+
+
+def _spx_log_returns(spx_df: pd.DataFrame) -> pd.Series:
+    """Daily SPX log returns rebuilt from closes, one per session.
+
+    The DB's log_return column has isolated NaNs where both closes exist
+    (e.g. 2025-05-08), which walk_forward_vol_forecast would DROP, silently
+    joining two returns into one session. Closes are the source of truth;
+    the stored column is used only when no close column exists.
+    """
+    spx = spx_df.copy()
+    if "date" in spx.columns:
+        spx = spx.set_index(pd.to_datetime(spx["date"]))
+    spx.index = pd.to_datetime(spx.index)
+    spx = spx[~spx.index.duplicated(keep="last")].sort_index()
+    if "close" in spx.columns:
+        r = np.log(spx["close"].astype(float)).diff()
+    else:
+        r = spx["log_return"].astype(float)
+    return r.dropna().rename("log_return")
+
+
+def walk_forward_pdv_vol(
+    spx_df: pd.DataFrame,
+    horizon: int = VIX_HORIZON_DAYS,
+    **kwargs,
+) -> pd.Series:
+    """
+    The σ̂ behind pdv_iv_spread: models.pdv.walk_forward_vol_forecast on the
+    SPX returns in ``spx_df``.
+
+    Row t is the forecast, made at the close of t from returns dated ≤ t and
+    a PDVLinear refit daily on labels fully observed by t (purged, embargo ≥
+    horizon), of sqrt(252/h · Σ_{i=1..h} r²_{t+i}) — the annualised RMS vol of
+    the next ``horizon`` sessions (21 = the 30-calendar-day VIX horizon), so
+    σ̂(t) − VIX(t)/100 compares like with like. Sessions before the first
+    forecast (burn-in + train_min_days + embargo ≈ 585 sessions of history)
+    are absent; build_features fills them with the rv_20d proxy and counts
+    them in .attrs["pdv_iv_spread_n_proxy"].
+
+    kwargs are passed to walk_forward_vol_forecast (train_min_days, …).
+    """
+    r = _spx_log_returns(spx_df)
+    if len(r) == 0:
+        return pd.Series(dtype=float, name=f"pdv_vol_{int(horizon)}d")
+    return walk_forward_vol_forecast(r, horizon=horizon, **kwargs)
 
 
 def _validate_vol_forecast(pdv_vol_series: pd.Series) -> pd.Series:
@@ -341,7 +402,11 @@ def build_features(
                   features (kept for live/legacy callers only). Ignored when
                   pdv_vol_series is given.
     pdv_vol_series : THE injection hook for the pdv_iv_spread feature.
-                  A date-indexed Series of vol forecasts σ̂(t) that:
+                  PDV_WALK_FORWARD ("walk_forward") builds the canonical σ̂
+                  here with walk_forward_pdv_vol(spx_df) (21-session RMS-vol
+                  forecast, purged walk-forward; source tag
+                  PDV_SOURCE_WALK_FORWARD). Otherwise
+                  a date-indexed Series of vol forecasts σ̂(t) that:
                     • are annualised DECIMAL vol (σ, not variance, not points),
                     • target the VIX horizon (30 calendar days ≈ 21 sessions),
                       so σ̂ − VIX/100 compares like with like,
@@ -386,14 +451,21 @@ def build_features(
     # ── Feature 5: vol forecast vs ATM IV spread ─────────────────────────────
     rv_proxy_spread = rv_20d - df["^VIX"] / 100.0
     n_proxy = 0
+    source_injected = PDV_SOURCE_INJECTED
+    if isinstance(pdv_vol_series, str):
+        if pdv_vol_series != PDV_WALK_FORWARD:
+            raise ValueError(f"pdv_vol_series={pdv_vol_series!r}: pass a Series, None "
+                             f"or PDV_WALK_FORWARD ({PDV_WALK_FORWARD!r})")
+        pdv_vol_series = walk_forward_pdv_vol(spx_df)
+        source_injected = PDV_SOURCE_WALK_FORWARD
     if pdv_vol_series is not None:
-        # Walk-forward forecasts supplied externally (zero look-ahead).
+        # Walk-forward forecasts (zero look-ahead: σ̂(t) uses data dated ≤ t).
         pdv_vol = _validate_vol_forecast(pdv_vol_series).reindex(df.index)
         spread  = pdv_vol - df["^VIX"] / 100.0
         use_proxy = spread.isna() & rv_proxy_spread.notna()
         n_proxy = int(use_proxy.sum())
         df["pdv_iv_spread"] = spread.fillna(rv_proxy_spread)
-        source = PDV_SOURCE_INJECTED
+        source = source_injected
         if n_proxy:
             logger.info("pdv_iv_spread: %d session(s) without an injected forecast "
                         "use the rv_20d proxy", n_proxy)

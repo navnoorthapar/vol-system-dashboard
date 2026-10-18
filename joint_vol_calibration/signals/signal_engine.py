@@ -7,8 +7,13 @@ regime labels dated t−1 (see "Zero look-ahead" below).
 
 Signal 1 — PDV–IV Spread Trade (formerly "IVR"; no implied-vol rank exists)
 ---------------------------------------------------------------------------
-  Spread = σ̂(t) − VIX(t)/100, where σ̂ is the injected vol forecast
-  (build_features(pdv_vol_series=...)) or the rv_20d proxy.
+  Spread = σ̂(t) − VIX(t)/100, where σ̂ is the walk-forward PDV forecast of
+  the RMS vol over the next 21 sessions (the VIX horizon) made at the close
+  of t (regime_classifier.walk_forward_pdv_vol; SignalEngine.generate's
+  default), or another injected forecast, or — before the first forecast /
+  when explicitly disabled — the trailing rv_20d proxy. Pre-C22 σ̂ was a
+  1-day |r| (E|r| ≈ 0.66·RMS vol) forecast or rv_20d, so "VIX > σ̂ + 2 vp"
+  held on ~96% of days.
     σ̂ > VIX  → market underprices vol → long straddle (long gamma)
     VIX > σ̂  → market overprices vol → short straddle (short gamma)
 
@@ -125,6 +130,7 @@ import pandas as pd
 
 from joint_vol_calibration.config import DATA_DIR
 from joint_vol_calibration.signals.regime_classifier import (
+    PDV_WALK_FORWARD,
     R2_GATE,
     RegimeClassifier,
     build_features,
@@ -1206,7 +1212,7 @@ class SignalEngine:
         start_date:          str = "2015-01-01",
         end_date:            str = "2025-12-31",
         precomputed_regimes: "Optional[pd.Series]" = None,
-        precomputed_pdv_vol: "Optional[pd.Series]" = None,
+        precomputed_pdv_vol: "Optional[pd.Series] | str" = PDV_WALK_FORWARD,
     ) -> pd.DataFrame:
         """
         Generate all signals for [start_date, end_date].
@@ -1225,8 +1231,14 @@ class SignalEngine:
             Without them: the classifier's predictions if a fitted clf was
             given (with R2 forced wherever the canonical rule label is R2),
             else build_regime_labels(spx_df, vix_wide_df).
-        precomputed_pdv_vol : optional walk-forward σ̂ forecast Series — the
-            pdv_iv_spread injection hook; see build_features(pdv_vol_series).
+        precomputed_pdv_vol : the σ̂ behind pdv_iv_spread — the injection
+            hook of build_features(pdv_vol_series). Default PDV_WALK_FORWARD:
+            the purged walk-forward 21-session RMS-vol forecast built from
+            spx_df (regime_classifier.walk_forward_pdv_vol), dated at its
+            forecast origin and lagged one session like every feature. Pass
+            a precomputed walk-forward Series to reuse one, or None for the
+            trailing rv_20d proxy. A pdv_model given to the constructor
+            (legacy, full-sample) replaces the default.
 
         Every session in the window with a known lagged regime is kept, even
         if some feature is NaN: each signal treats a NaN input as "no entry /
@@ -1250,10 +1262,13 @@ class SignalEngine:
         .attrs: regime_source, pdv_iv_spread_source, n_sessions_dropped.
         """
         # ── Build feature matrix (values at the close of each session) ───────
+        pdv_series = precomputed_pdv_vol
+        if isinstance(pdv_series, str) and self.pdv_model is not None:
+            pdv_series = None            # explicit legacy model wins over the default
         feats_raw = build_features(
             spx_df, vix_wide_df,
             pdv_model=self.pdv_model,
-            pdv_vol_series=precomputed_pdv_vol,
+            pdv_vol_series=pdv_series,
         )
         sessions = feats_raw.index
 
