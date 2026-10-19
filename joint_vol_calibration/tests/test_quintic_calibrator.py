@@ -27,6 +27,7 @@ import pytest
 from joint_vol_calibration.calibration import quintic_calibrator as qc
 from joint_vol_calibration.config import DATA_DIR, DB_PATH, VIX_INDEX_TENOR_DAYS
 from joint_vol_calibration.models import quintic_ou as q
+from joint_vol_calibration.tests.artifact_tolerance import assert_close_to_artifact
 
 SPOT_DATE = "2026-03-24"
 S0, R, QDIV = 6500.0, 0.04, 0.013
@@ -398,12 +399,13 @@ class TestCommittedFit:
         assert prov["spot_date"] == prov["spx_snapshot_date"] == prov["vix_snapshot_date"] \
             == cal.spot_date
         assert prov["S"] == cal.S and prov["r"] == cal.r
-        np.testing.assert_array_equal([r["market_iv"] for r in res["spx_rows"]],
-                                      cal.spx_surface["market_iv"].values)
-        np.testing.assert_array_equal([r["market_iv"] for r in res["vix_rows"]],
-                                      cal.vix_opts_surface["market_iv"].values)
-        np.testing.assert_array_equal([r["forward_mkt"] for r in res["vix_forward_rows"]],
-                                      cal.vix_forwards["forward"].values)
+        # to the last bits only: CI's CPU (no AVX-512) moved one SPX IV by 1 ulp
+        assert_close_to_artifact(cal.spx_surface["market_iv"].values,
+                                 [r["market_iv"] for r in res["spx_rows"]], "spx market_iv")
+        assert_close_to_artifact(cal.vix_opts_surface["market_iv"].values,
+                                 [r["market_iv"] for r in res["vix_rows"]], "vix market_iv")
+        assert_close_to_artifact(cal.vix_forwards["forward"].values,
+                                 [r["forward_mkt"] for r in res["vix_forward_rows"]], "vix forward")
         np.testing.assert_allclose(cal.fwd_var_func.xi_nodes, prov["xi0_nodes"], rtol=1e-15)
 
     def test_stored_leg_rmses_are_the_loss_at_the_stored_parameters(self, committed):

@@ -26,7 +26,10 @@ are read from. What is checked, exactly:
                          13's unrounded P&L and is checked to the CSV's 6
                          significant digits. Rows 0-13 are NOT re-run here
   delta_hedge_2020.parquet  the C7 study re-run (DeltaHedger, ~2 s): same
-                         columns, index, values (exact) and attrs
+                         columns, index and dtypes; values to 1e-10 of each
+                         column's scale (artifact_tolerance.py: a CPU without
+                         AVX-512 moves the last bits), and attrs; also re-run
+                         with numpy's AVX-512 kernels disabled
   s3_null_p_value        NOT re-run (200 paths, ~4 min); only checked to be
                          a valid 200-path p-value, (1 + k)/201. Its pipeline
                          is pinned in test_backtest_accounting.py
@@ -57,6 +60,10 @@ from joint_vol_calibration.backtest.backtest_engine import (
     BACKTEST_DIR,
     RESULTS_PATH,
     BacktestEngine,
+)
+from joint_vol_calibration.tests.artifact_tolerance import (
+    ARTIFACT_RTOL,
+    assert_frame_matches_artifact,
 )
 
 SLEEVES = ("s1c", "s3", "s4", "s1", "s2", "combined")
@@ -183,15 +190,73 @@ def test_bridge_last_row_is_byte_identical(canonical):
     assert float(last[i]) == pytest.approx(pnl, abs=1.0)    # row 13's P&L is rounded to 6 digits
 
 
+def _assert_c7_matches(df: pd.DataFrame, committed: pd.DataFrame) -> None:
+    assert_frame_matches_artifact(df, committed)
+    assert df.attrs.keys() == committed.attrs.keys()
+    for k, v in committed.attrs.items():
+        assert df.attrs[k] == (pytest.approx(v, rel=ARTIFACT_RTOL) if isinstance(v, float) else v), k
+
+
 def test_c7_delta_hedge_study_reproduces():
     """delta_hedge_2020.parquet is DeltaHedger().run() (run_backtest --c7)."""
     from joint_vol_calibration.backtest.delta_hedger import OUTPUT_PARQUET, DeltaHedger
+    _assert_c7_matches(DeltaHedger().run(), pd.read_parquet(OUTPUT_PARQUET))
+
+
+_C7_IN_CHILD = """
+import sys
+from joint_vol_calibration.backtest.delta_hedger import DeltaHedger
+DeltaHedger().run().to_pickle(sys.argv[1])
+"""
+
+
+def test_c7_reproduces_without_avx512(tmp_path):
+    """CI run 39166521027: GitHub's runner (no AVX-512) recomputed the study
+    1.1e-15 off the committed file, and the old exact comparison failed it.
+    The same run with numpy's AVX-512 kernels disabled must still match (on a
+    CPU without them the variable changes nothing). The child only reads
+    data_store; the suite's guard fails the run if it wrote there."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    from joint_vol_calibration.backtest.delta_hedger import OUTPUT_PARQUET
+    out = tmp_path / "c7.pkl"
+    root = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "NPY_DISABLE_CPU_FEATURES": "X86_V4",
+           "PYTHONPATH": os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")]))}
+    subprocess.run([sys.executable, "-c", _C7_IN_CHILD, str(out)], cwd=tmp_path, env=env,
+                   check=True, timeout=300)
+    df = pd.read_pickle(out)
+    _assert_c7_matches(df, pd.read_parquet(OUTPUT_PARQUET))
+
+
+def test_artifact_comparison_accepts_rounding_and_rejects_a_real_change():
+    """The tolerance passes last-bit noise (3x the worst measured, on every
+    float column at once) and fails a change a code edit would make."""
+    from joint_vol_calibration.backtest.delta_hedger import OUTPUT_PARQUET
     committed = pd.read_parquet(OUTPUT_PARQUET)
-    df = DeltaHedger().run()
-    pd.testing.assert_frame_equal(df, committed, check_exact=True)
-    assert df.attrs.keys() == committed.attrs.keys()
-    for k, v in committed.attrs.items():
-        assert df.attrs[k] == (pytest.approx(v, rel=1e-12) if isinstance(v, float) else v), k
+    num = committed.select_dtypes("float").columns
+    noisy = committed.copy()
+    noisy[num] = noisy[num] * (1 + 1e-14)
+    noisy["pnl_residual_a"] += 3 * 2.8e-13 * committed["pnl_residual_a"].abs().max()
+    noisy.attrs = {k: (v * (1 + 1e-14) if isinstance(v, float) else v)
+                   for k, v in committed.attrs.items()}
+    _assert_c7_matches(noisy, committed)
+
+    for col, bump in (("sigma_pdv", 1e-8), ("pnl_total", 1e-6), ("pnl_residual_a", 1e-6)):
+        moved = committed.copy()
+        moved.iloc[100, moved.columns.get_loc(col)] += bump
+        with pytest.raises(AssertionError, match=col):
+            _assert_c7_matches(moved, committed)
+    flipped = committed.copy()
+    flipped["is_unstable"] = ~flipped["is_unstable"]
+    with pytest.raises(AssertionError, match="is_unstable"):
+        _assert_c7_matches(flipped, committed)
+    moved = committed.copy()
+    moved.attrs = {**committed.attrs, "cum_residual_a": committed.attrs["cum_residual_a"] + 1e-6}
+    with pytest.raises(AssertionError, match="cum_residual_a"):
+        _assert_c7_matches(moved, committed)
 
 
 def test_stored_null_p_value_is_a_200_path_p_value(committed):
