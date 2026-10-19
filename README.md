@@ -288,9 +288,10 @@ each used 9 options on a single expiry. All runs were green. Root causes, all fi
 **Resolved.** Run as the workflow runs it, the corrected pipeline accepted the 2026-10-16 session on the live Friday book
 (the current headline, above) and rejected the degenerate cases it should: one expiry ("1 expiry < 4", out-of-sample error
 7.7 vp), one VIX tenor, the 2026-06-18 chain presented as current (stale), and an empty book (fails closed). The stored
-chain is the observed two-sided quotes, and a refit from the committed parquet reproduces the live fit bit for bit. A stale
-calibration now fails the job but still publishes the site with its staleness banner (`publishable` output), so a rejected
-fit can no longer freeze the market pages. The book slot runs at 02:30 UTC (retry 04:30): 75 minutes after the overnight
+chain is the observed two-sided quotes, and a refit from the committed parquet reproduces the live fit bit for bit on the
+same machine (on a CPU without AVX-512, to within 1e-8 relative: every published digit). A stale calibration now fails
+the job but still publishes the site with its staleness banner (`publishable` output), so a rejected fit can no longer
+freeze the market pages. The book slot runs at 02:30 UTC (retry 04:30): 75 minutes after the overnight
 session opens even under EST, when quotes reach Yahoo about 15 minutes late.
 
 The tests that pin this are `tests/test_option_chain.py`, `tests/test_cloud_refresh.py`, `tests/test_joint_calibrator.py`,
