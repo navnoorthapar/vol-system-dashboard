@@ -532,7 +532,7 @@ Implemented or directly followed in the code (see module docstrings for where an
 
 ## Author
 
-**Navnoor Bawa**, 3rd year CS, Thapar Institute of Engineering & Technology
+**Navnoor Bawa**, final-year B.E. Computer Science and Engineering (May 2027), Thapar Institute of Engineering & Technology
 
 - Website: [navnoorbawa.me](https://navnoorbawa.me)
 - Substack: [navnoorbawa.substack.com](https://navnoorbawa.substack.com)
