@@ -3,516 +3,207 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Calibration — Vol System</title>
-  <!-- Inline SVG favicon (volatility smile, brand colours) — no file needed -->
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%2300ff88' stroke-width='3' stroke-linecap='round'/></svg>">
-  <meta name="theme-color" content="#0a0a0a">
-  <!-- Open Graph — LinkedIn / Twitter / Substack link preview -->
+  <title>Calibration — SPX/VIX Vol System</title>
+  <!-- Inline SVG favicon (volatility smile) — no file needed -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d0f12'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%235cc8a0' stroke-width='3' stroke-linecap='round'/></svg>">
+  <meta name="theme-color" content="#0d0f12">
+  <meta name="color-scheme" content="dark">
+  <!-- Open Graph — LinkedIn / Twitter / Substack link preview. No test count here:
+       a hand-typed count went stale in four places (C22); README/CI carry it. -->
   <meta property="og:type"         content="website">
-  <meta property="og:url"          content="https://navnoorbawa.me/">
-  <meta property="og:title"        content="Vol System — Joint SPX/VIX Smile Calibration">
-  <meta property="og:description"  content="14-component vol research system: Heston · SVI/SSVI · Quintic OU · Bates SVJ · XGBoost regime classifier · 2018–2025 backtest · 666 tests. Live dashboard.">
+  <meta property="og:url"          content="https://navnoorbawa.me/calibration.html">
+  <meta property="og:title"        content="Joint Heston Calibration — SPX/VIX Vol System">
+  <meta property="og:description"  content="The newest joint SPX/VIX Heston fit that passes the quality gate: parameters, Feller state, identification, RMSE by leg and its model smile.">
   <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
   <meta property="og:image:width"  content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, 666 tests, documented negative result.">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, a 2018–25 backtest and a documented negative result.">
   <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
   <meta name="author"              content="Navnoor Bawa">
-  <link rel="canonical"            href="https://navnoorbawa.me/">
+  <link rel="canonical"            href="https://navnoorbawa.me/calibration.html">
   <meta name="twitter:card"        content="summary_large_image">
   <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
-  <meta name="description"         content="Joint SPX/VIX smile calibration system. Heston, SVI/SSVI, Quintic OU, regime classifier, full backtest 2018–2025.">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <meta name="description"         content="The newest joint SPX/VIX Heston fit that passes the quality gate: parameters, Feller state, identification, RMSE by leg and its model smile.">
   <style>
-    /* ── Reset & Base ────────────────────────────────────────────────────── */
+    /* ── Reset & base ────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* Colour tokens. Every text token reaches WCAG 2.2 AA (>= 4.5:1) on --bg,
+       --surface, --surface2, the tooltip and the tinted banner backgrounds;
+       checked by test_dashboard.py::test_colour_tokens_meet_wcag_aa.
+       Colour carries meaning only: --accent = positive / brand, --red =
+       negative or failed, --amber = caution or stale, --blue = information.
+       Numbers are neutral (--text) unless their sign or state is the point. */
     :root {
-      --bg:       #0a0a0a;
-      --surface:  #111111;
-      --surface2: #161616;
-      --border:   #1f1f1f;
-      --border2:  #2a2a2a;
-      --accent:   #00ff88;
-      --accent2:  #00cc6a;
-      --text:     #e4e4e4;
-      --text2:    #888888;
-      --text3:    #555555;
-      --red:      #ff3333;
-      --red2:     #cc1111;
-      --blue:     #3388ff;
-      --yellow:   #ffcc00;
-      --orange:   #ff8833;
-      --purple:   #aa44ff;
+      color-scheme: dark;
+      --bg:       #0d0f12;
+      --surface:  #14171b;
+      --surface2: #1a1e23;
+      --tooltip:  #1f242a;
+      --border:   #252a31;
+      --border2:  #30363e;
+      --accent:   #5cc8a0;
+      --accent2:  #52b892;
+      --text:     #e7e9ec;
+      --text2:    #adb3bb;
+      --text3:    #8f969f;
+      --red:      #f0787c;
+      --blue:     #7fadf7;
+      --yellow:   #e2c46a;
+      --amber:    #e3a54a;
+      --orange:   #e8925a;
+      --purple:   #b99cf0;
+      --cyan:     #6cc5d9;
+      --pink:     #e58fbd;
+      --focus:    #7fadf7;
+      --tint-red:   #2a2125;
+      --tint-amber: #25221f;
+      --tint-green: #1a2526;
+      --tint-blue:  #1c232d;
+      --mono:     ui-monospace, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+      --sans:     Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       --radius:   6px;
-      --radius2:  10px;
+      --radius2:  8px;
+      --gap:      16px;
     }
 
     html, body {
-      height: 100%;
       background: var(--bg);
       color: var(--text);
-      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-family: var(--sans);
       font-size: 14px;
-      line-height: 1.5;
+      line-height: 1.55;
+      /* tabular, lining figures everywhere: columns of numbers line up */
+      font-variant-numeric: tabular-nums lining-nums;
+      -webkit-font-smoothing: antialiased;
     }
+    body { min-height: 100%; display: flex; flex-direction: column; }
+    h1, h2, h3 { font: inherit; }
+    a { color: var(--blue); text-underline-offset: 2px; }
+    code, .code { font-family: var(--mono); font-size: 0.92em; color: var(--text2); }
+    strong { font-weight: 600; color: var(--text); }
+    em { font-style: italic; }
+    sub { font-size: 0.75em; }
 
-    /* ── Navigation ─────────────────────────────────────────────────────── */
+    /* ── Accessibility helpers ──────────────────────────────────────────── */
+    .sr-only {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .skip-link {
+      position: absolute;
+      left: 12px; top: -48px;
+      z-index: 200;
+      padding: 8px 14px;
+      background: var(--text);
+      color: #000;
+      font-weight: 600;
+      border-radius: var(--radius);
+      text-decoration: none;
+    }
+    .skip-link:focus { top: 8px; }
+    :focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .nav-link:focus-visible { outline-offset: -2px; }
+
+    /* Horizontal scroll regions: keyboard-focusable (tabindex=0) and visibly
+       scrollable — edge shadows appear on the side that has more content
+       (pure CSS: the covers scroll with the content, the shadows do not). */
+    .table-scroll, .heatmap-wrap {
+      position: relative;   /* contains the visually hidden captions */
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      max-width: 100%;
+      background:
+        linear-gradient(to right, var(--surface) 30%, rgba(20,23,27,0)) left center / 36px 100% no-repeat local,
+        linear-gradient(to left,  var(--surface) 30%, rgba(20,23,27,0)) right center / 36px 100% no-repeat local,
+        linear-gradient(to right, rgba(127,173,247,0.30), rgba(127,173,247,0)) left center / 12px 100% no-repeat scroll,
+        linear-gradient(to left,  rgba(127,173,247,0.30), rgba(127,173,247,0)) right center / 12px 100% no-repeat scroll;
+    }
+    .table-scroll:focus-visible, .heatmap-wrap:focus-visible { outline-offset: 0; }
+    .scroll-hint { display: none; font-size: 11.5px; color: var(--text3); margin: 0 0 6px; }
+    .scroll-hint::before { content: "\2194\00a0"; color: var(--blue); }
+    [data-overflow="true"] + .scroll-hint, .scroll-hint.show { display: block; }
+
+    /* ── Site header + navigation ───────────────────────────────────────── */
+    .top-banner {
+      min-height: 34px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--text3);
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; list-style: none; }
+    .top-banner-links a { color: var(--text2); text-decoration: none; font-size: 12px; }
+    .top-banner-links a:hover { color: var(--text); text-decoration: underline; }
+    .top-banner-sep { color: var(--text3); }
+
     .nav {
-      position: sticky;
+      position: sticky;     /* a direct child of <body>, so it sticks for the whole page */
       top: 0;
       z-index: 100;
-      background: #0d0d0d;
+      background: rgba(13,15,18,0.96);
       border-bottom: 1px solid var(--border2);
       display: flex;
       align-items: center;
       padding: 0 24px;
-      height: 52px;
-      gap: 0;
+      height: 50px;
     }
-
     .nav-brand {
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      color: var(--accent);
-      text-transform: uppercase;
-      margin-right: 36px;
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text);
+      margin-right: 32px;
       white-space: nowrap;
+      letter-spacing: 0.01em;
     }
-    .nav-brand span { color: var(--text2); font-weight: 400; }
-
-    .nav-links { display: flex; gap: 0; }
-
+    .nav-brand span { color: var(--text3); font-weight: 400; }
+    .nav-brand::before {
+      content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+      background: var(--accent); margin-right: 9px; vertical-align: 1px;
+    }
+    .nav-links { display: flex; }
     .nav-link {
       display: flex;
       align-items: center;
-      gap: 7px;
-      padding: 0 18px;
-      height: 52px;
+      padding: 0 16px;
+      height: 50px;
       color: var(--text2);
       text-decoration: none;
-      font-size: 12.5px;
+      font-size: 13px;
       font-weight: 500;
-      letter-spacing: 0.04em;
       border-bottom: 2px solid transparent;
-      transition: color 0.15s, border-color 0.15s;
       white-space: nowrap;
     }
-    .nav-link:hover { color: var(--text); border-bottom-color: var(--border2); }
-    .nav-link.active {
-      color: var(--accent);
-      border-bottom-color: var(--accent);
-    }
-    .nav-dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: currentColor;
-      opacity: 0.6;
-    }
-
+    .nav-link:hover { color: var(--text); }
+    .nav-link.active,
+    .nav-link[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+    .nav-dot { display: none; }
     .nav-status {
       margin-left: auto;
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 11px;
-      color: var(--text3);
-    }
-    .status-dot {
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      background: var(--accent);
-      box-shadow: 0 0 6px var(--accent);
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.4; }
-    }
-
-    /* ── Page Layout ─────────────────────────────────────────────────────── */
-    .page {
-      max-width: 1440px;
-      margin: 0 auto;
-      padding: 28px 28px 60px;
-    }
-
-    .page-header {
-      display: flex;
-      align-items: baseline;
-      gap: 14px;
-      margin-bottom: 28px;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 16px;
-    }
-    .page-title {
-      font-size: 20px;
-      font-weight: 700;
-      color: var(--text);
-      letter-spacing: -0.01em;
-    }
-    .page-subtitle {
-      font-size: 12px;
-      color: var(--text3);
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-    .page-badge {
-      margin-left: auto;
-      font-size: 11px;
-      color: var(--text3);
-      font-family: 'Menlo', 'Courier New', monospace;
-    }
-
-    /* ── Grid Helpers ────────────────────────────────────────────────────── */
-    .grid       { display: grid; gap: 16px; }
-    .grid-2     { grid-template-columns: repeat(2, 1fr); }
-    .grid-3     { grid-template-columns: repeat(3, 1fr); }
-    .grid-4     { grid-template-columns: repeat(4, 1fr); }
-    .grid-5     { grid-template-columns: repeat(5, 1fr); }
-    .col-2      { grid-column: span 2; }
-    .col-3      { grid-column: span 3; }
-    .col-4      { grid-column: span 4; }
-    .col-full   { grid-column: 1 / -1; }
-
-    /* ── Cards ───────────────────────────────────────────────────────────── */
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius2);
-      padding: 20px;
-      position: relative;
-      overflow: hidden;
-    }
-    .card::before {
-      content: '';
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent);
-    }
-
-    .card-sm { padding: 16px; }
-    .card-lg { padding: 28px; }
-
-    .card-label {
-      font-size: 10.5px;
-      font-weight: 600;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--text3);
-      margin-bottom: 8px;
-    }
-
-    .card-value {
-      font-size: 32px;
-      font-weight: 700;
-      font-family: 'Menlo', 'Courier New', monospace;
-      color: var(--text);
-      letter-spacing: -0.02em;
-      line-height: 1.1;
-    }
-    .card-value.lg { font-size: 40px; }
-    .card-value.sm { font-size: 22px; }
-    .card-value.green { color: var(--accent); }
-    .card-value.red   { color: var(--red); }
-    .card-value.blue  { color: var(--blue); }
-    .card-value.yellow{ color: var(--yellow); }
-    .card-value.dim   { color: var(--text2); }
-
-    .card-sub {
-      font-size: 12px;
-      color: var(--text2);
-      margin-top: 5px;
-      font-family: 'Menlo', 'Courier New', monospace;
-    }
-
-    /* ── Stat Row ─────────────────────────────────────────────────────────── */
-    .stat-row {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      margin-top: 8px;
       font-size: 12px;
       color: var(--text2);
     }
-    .stat-change { font-family: 'Menlo', monospace; }
-    .stat-change.up   { color: var(--accent); }
-    .stat-change.down { color: var(--red); }
-
-    /* ── Regime Badge ─────────────────────────────────────────────────────── */
-    .regime-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 14px;
-      border-radius: var(--radius);
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      border: 1px solid;
-    }
-
-    /* ── Banner ───────────────────────────────────────────────────────────── */
-    .banner {
-      border-radius: var(--radius2);
-      padding: 20px 24px;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      border: 1px solid;
-    }
-    .banner-warn {
-      background: rgba(255,51,51,0.06);
-      border-color: rgba(255,51,51,0.25);
-    }
-    .banner-info {
-      background: rgba(0,255,136,0.04);
-      border-color: rgba(0,255,136,0.2);
-    }
-    .banner-icon {
-      font-size: 22px;
-      flex-shrink: 0;
-    }
-    .banner-title {
-      font-size: 15px;
-      font-weight: 700;
-      margin-bottom: 3px;
-    }
-    .banner-body {
-      font-size: 12.5px;
-      color: var(--text2);
-      line-height: 1.6;
-    }
-
-    /* ── Table ────────────────────────────────────────────────────────────── */
-    .data-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-    .data-table th {
-      text-align: left;
-      padding: 9px 12px;
-      font-size: 10.5px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--text3);
-      border-bottom: 1px solid var(--border);
-    }
-    .data-table td {
-      padding: 9px 12px;
-      border-bottom: 1px solid var(--border);
-      font-family: 'Menlo', 'Courier New', monospace;
-      font-size: 12.5px;
-      color: var(--text2);
-    }
-    .data-table td:first-child { color: var(--text); font-family: inherit; }
-    .data-table tr:last-child td { border-bottom: none; }
-    .data-table tr:hover td { background: var(--surface2); }
-    .data-table .green { color: var(--accent); }
-    .data-table .red   { color: var(--red); }
-    /* amber = constraint binding / partially identified — neither pass nor fail */
-    .data-table .amber { color: #ffcc33; }
-
-    /* ── Chart Container ──────────────────────────────────────────────────── */
-    .chart-wrap {
-      position: relative;
-      height: 260px;
-    }
-    .chart-wrap.tall   { height: 340px; }
-    .chart-wrap.xtall  { height: 420px; }
-    .chart-wrap.short  { height: 180px; }
-    .chart-title {
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--text3);
-      margin-bottom: 14px;
-    }
-
-    /* ── Heatmap Table ────────────────────────────────────────────────────── */
-    .heatmap-wrap { overflow-x: auto; }
-    .heatmap {
-      border-collapse: collapse;
-      font-size: 11px;
-      width: 100%;
-    }
-    .heatmap th {
-      padding: 5px 6px;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      color: var(--text3);
-      white-space: nowrap;
-      text-align: center;
-      border-bottom: 1px solid var(--border);
-    }
-    .heatmap th.row-head { text-align: left; padding-right: 12px; }
-    .heatmap td {
-      width: 72px;
-      height: 44px;
-      text-align: center;
-      vertical-align: middle;
-      font-family: 'Menlo', monospace;
-      font-size: 10px;
-      border: 1px solid #0a0a0a;
-      transition: transform 0.1s;
-      cursor: default;
-    }
-    .heatmap td:hover { transform: scale(1.05); z-index: 10; position: relative; }
-    .heatmap td.empty { background: #0d0d0d; }
-    .heatmap td.unstable {
-      border: 2px solid #ff3333 !important;
-      box-shadow: 0 0 8px rgba(255,51,51,0.4);
-    }
-    .heatmap .mat-label {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text2);
-      font-family: inherit;
-      padding-right: 14px;
-      white-space: nowrap;
-    }
-
-    /* ── Progress Bars ────────────────────────────────────────────────────── */
-    .progress-bar-wrap { margin-top: 10px; }
-    .progress-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 7px;
-    }
-    .progress-label {
-      width: 90px;
-      font-size: 11px;
-      color: var(--text2);
-      flex-shrink: 0;
-    }
-    .progress-track {
-      flex: 1;
-      height: 6px;
-      background: var(--border2);
-      border-radius: 3px;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      border-radius: 3px;
-      transition: width 0.3s;
-    }
-    .progress-val {
-      width: 44px;
-      font-size: 11px;
-      color: var(--text2);
-      text-align: right;
-      font-family: 'Menlo', monospace;
-    }
-
-    /* ── Divider ──────────────────────────────────────────────────────────── */
-    .divider {
-      height: 1px;
-      background: var(--border);
-      margin: 16px 0;
-    }
-
-    /* ── Tag/Pill ─────────────────────────────────────────────────────────── */
-    .tag {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 20px;
-      font-size: 10.5px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-    }
-    .tag-green { background: rgba(0,255,136,0.12); color: var(--accent); border: 1px solid rgba(0,255,136,0.25); }
-    .tag-red   { background: rgba(255,51,51,0.1);  color: var(--red);    border: 1px solid rgba(255,51,51,0.25); }
-    .tag-blue  { background: rgba(51,136,255,0.1); color: var(--blue);   border: 1px solid rgba(51,136,255,0.25); }
-    .tag-dim   { background: rgba(255,255,255,0.04); color: var(--text2); border: 1px solid var(--border2); }
-
-    /* ── Feller / Param Box ───────────────────────────────────────────────── */
-    .param-box {
-      text-align: center;
-      padding: 18px 12px;
-    }
-    .param-sym {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text3);
-      letter-spacing: 0.05em;
-      margin-bottom: 4px;
-    }
-    .param-val {
-      font-size: 26px;
-      font-weight: 700;
-      font-family: 'Menlo', monospace;
-      letter-spacing: -0.02em;
-    }
-    .param-desc {
-      font-size: 10.5px;
-      color: var(--text3);
-      margin-top: 5px;
-    }
-
-    /* ── Utilities ────────────────────────────────────────────────────────── */
-    .mono { font-family: 'Menlo', 'Courier New', monospace; }
-    .bold { font-weight: 700; }
-    .mt8  { margin-top: 8px; }
-    .mt12 { margin-top: 12px; }
-    .mt16 { margin-top: 16px; }
-    .mt20 { margin-top: 20px; }
-    .mb12 { margin-bottom: 12px; }
-    .flex { display: flex; align-items: center; }
-    .gap8 { gap: 8px; }
-    .gap12{ gap: 12px; }
-    .space-between { justify-content: space-between; }
-    .text-right { text-align: right; }
-    .opacity-50 { opacity: 0.5; }
-    .green { color: var(--accent); }
-    .red   { color: var(--red); }
-    .blue  { color: var(--blue); }
-    .dim   { color: var(--text2); }
-
-    /* ── Scrollbar ────────────────────────────────────────────────────────── */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: var(--bg); }
-    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-
-    /* ── Chart.js global overrides ────────────────────────────────────────── */
-    canvas { display: block; }
-
-    /* ── Visitor context banner (Bug 5) ────────────────────────────────────── */
-    .top-banner {
-      height: 36px;
-      background: #111;
-      border-bottom: 1px solid #222;
-      display: flex;
-      align-items: center;
-      padding: 0 20px;
-      gap: 12px;
-      font-size: 11px;
-      color: #666;
-      white-space: nowrap;
-      overflow: hidden;
-    }
-    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
-    .top-banner-links a {
-      color: #555;
-      text-decoration: none;
-      font-size: 11px;
-      font-weight: 500;
-      letter-spacing: 0.04em;
-      transition: color 0.15s;
-    }
-    .top-banner-links a:hover { color: #00ff88; }
-    .top-banner-sep { color: #333; }
-
-    /* ── Hamburger button (hidden on desktop) ──────────────────────────────── */
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+    .status-dot.warn  { background: var(--amber); }
+    .status-dot.error { background: var(--red); }
     .nav-toggle {
       display: none;
       flex-direction: column;
@@ -525,602 +216,844 @@
       margin-left: auto;
       margin-right: 4px;
     }
-    .nav-toggle span {
-      display: block;
-      width: 22px;
-      height: 2px;
-      background: var(--text2);
-      border-radius: 2px;
-      transition: all 0.2s;
-    }
+    .nav-toggle span { display: block; width: 20px; height: 2px; background: var(--text2); border-radius: 2px; }
     .nav-toggle.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
     .nav-toggle.open span:nth-child(2) { opacity: 0; }
     .nav-toggle.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
-    /* ── Tablet (≤ 900px) ─────────────────────────────────────────────────── */
+    /* ── Page layout ─────────────────────────────────────────────────────── */
+    .page {
+      width: 100%;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 28px 28px 48px;
+      flex: 1;
+    }
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 4px 16px;
+      margin-bottom: 20px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .page-title { font-size: 22px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; line-height: 1.3; }
+    .page-subtitle { font-size: 13px; color: var(--text2); flex-basis: 100%; }
+    .page-badge { font-size: 12.5px; color: var(--text2); flex-basis: 100%; }
+    /* inline-block: a line can break at every separator, even between no-wrap items */
+    .page-badge .sep { color: var(--text3); padding: 0 6px; display: inline-block; }
+    .page-note { font-size: 13px; color: var(--text2); margin: 0 0 20px; max-width: 110ch; line-height: 1.6; }
+    .section-title {
+      font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--text2); margin: 28px 0 12px;
+    }
+
+    /* ── Grid helpers ────────────────────────────────────────────────────── */
+    .grid       { display: grid; gap: var(--gap); }
+    /* min-width:0 lets wide children (tables) scroll inside their own wrapper
+       instead of forcing the grid track wider than the card (C22: mobile clipping) */
+    .grid > *   { min-width: 0; }
+    .grid-2     { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3     { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4     { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid-5     { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .grid-6     { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .col-2      { grid-column: span 2; }
+    .col-3      { grid-column: span 3; }
+    .col-full   { grid-column: 1 / -1; }
+    .row        { margin-bottom: var(--gap); }
+    .tiles      { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
+    .tiles > *  { min-width: 0; }
+    .kv-2       { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 16px; font-size: 12.5px; color: var(--text2); }
+    .kv-2 .v    { color: var(--text); }
+    .card-head  { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin-bottom: 12px; }
+    .card-head > .chart-title, .card-head > .card-label { margin-bottom: 0; }
+    .legend     { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text2); align-items: center; }
+    .legend .swatch { display: inline-block; width: 16px; height: 0; border-top: 2px solid currentColor; vertical-align: middle; margin-right: 6px; }
+    .legend .swatch.dashed { border-top-style: dashed; }
+    .legend .key { color: var(--text2); }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius2);
+      padding: 18px 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card-sm { padding: 14px 16px; }
+    .card.flush { padding: 0; }
+    .subcard { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+    .card-label, .chart-title {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text2);
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+    .card-label .qual, .chart-title .qual { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text3); }
+    .card-value {
+      font-size: 26px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+    .card-value.lg { font-size: 32px; }
+    .card-value.sm { font-size: 20px; }
+    .card-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 3px; }
+    .card-value.green { color: var(--accent); }
+    .card-value.red   { color: var(--red); }
+    .card-value.blue  { color: var(--blue); }
+    .card-value.yellow{ color: var(--amber); }
+    .card-value.dim   { color: var(--text2); }
+    .card-sub { font-size: 12.5px; color: var(--text2); margin-top: 6px; line-height: 1.5; }
+    .card-sub + .card-sub { margin-top: 2px; }
+
+    /* Status chips (word + colour, never colour alone) */
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border2); color: var(--text2);
+      white-space: nowrap;
+    }
+    .chip-green { color: var(--accent); border-color: rgba(92,200,160,0.35); background: var(--tint-green); }
+    .chip-red   { color: var(--red);    border-color: rgba(240,120,124,0.35); background: var(--tint-red); }
+    .chip-amber, .chip-yellow { color: var(--amber); border-color: rgba(227,165,74,0.35); background: var(--tint-amber); }
+    .chip-blue  { color: var(--blue);   border-color: rgba(127,173,247,0.35); background: var(--tint-blue); }
+
+    /* ── Stat row ────────────────────────────────────────────────────────── */
+    .stat-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-top: 6px; font-size: 12.5px; color: var(--text2); }
+    .stat-change.up   { color: var(--accent); }
+    .stat-change.down { color: var(--red); }
+
+    /* ── Banners: a coloured rule on the left, neutral body ─────────────── */
+    .banner {
+      border-radius: var(--radius2);
+      padding: 12px 16px;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--text3);
+    }
+    .banner-icon { font-size: 15px; line-height: 1.45; flex-shrink: 0; width: 16px; text-align: center; color: var(--text3); }
+    .banner-title { font-size: 13.5px; font-weight: 600; margin-bottom: 2px; color: var(--text); }
+    .banner-body { font-size: 13px; color: var(--text2); line-height: 1.6; }
+    .banner-body ul { margin: 4px 0 0 18px; }
+    .banner-warn        { border-left-color: var(--amber); }
+    .banner-warn .banner-icon, .banner-warn .banner-title { color: var(--amber); }
+    .banner-info        { border-left-color: var(--blue); }
+    .banner-info .banner-icon { color: var(--blue); }
+    .banner-ok          { border-left-color: var(--accent); }
+    .banner-ok .banner-icon { color: var(--accent); }
+    /* Loader failure: the numbers for this component are NOT shown */
+    .banner-error       { border-left-color: var(--red); background: var(--tint-red); }
+    .banner-error .banner-title, .banner-error .banner-icon { color: var(--red); }
+    /* Staleness: amber from STALE_WARN_SESSIONS, red from STALE_ERROR_SESSIONS */
+    .banner-stale-warn  { border-left-color: var(--amber); }
+    .banner-stale-warn .banner-title, .banner-stale-warn .banner-icon { color: var(--amber); }
+    .banner-stale-error { border-left-color: var(--red); }
+    .banner-stale-error .banner-title, .banner-stale-error .banner-icon { color: var(--red); }
+    .banner-stack { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+    .age-ok    { color: var(--text3); }
+    .age-warn  { color: var(--amber); font-weight: 600; }
+    .age-error { color: var(--red); font-weight: 600; }
+
+    /* ── Tables ──────────────────────────────────────────────────────────── */
+    .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .data-table th {
+      text-align: left;
+      padding: 8px 12px;
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text3);
+      border-bottom: 1px solid var(--border2);
+      white-space: nowrap;
+    }
+    .data-table td {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text2);
+      vertical-align: top;
+    }
+    .data-table td:first-child { color: var(--text); }
+    .data-table .num, .data-table th.num { text-align: right; white-space: nowrap; color: var(--text); }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tbody tr:hover td { background: var(--surface2); }
+    .data-table .green { color: var(--accent); }
+    .data-table .red   { color: var(--red); }
+    .data-table .amber { color: var(--amber); }
+    .data-table tr.muted td { color: var(--text3); }
+    .data-table tr.muted td.num { color: var(--text2); }
+    .data-table.compact td, .data-table.compact th { padding: 6px 10px; }
+    .data-table td.small { font-size: 12.5px; }
+
+    /* ── Charts ──────────────────────────────────────────────────────────── */
+    .chart-wrap { position: relative; height: 260px; }
+    .chart-wrap.tall   { height: 320px; }
+    .chart-wrap.xtall  { height: 400px; }
+    .chart-wrap.short  { height: 180px; }
+    .chart-wrap.spark  { height: 36px !important; }   /* sparkline: fixed at every width */
+    /* Greek symbols must not be upper-cased (σ -> Σ changes the symbol) */
+    .sym { text-transform: none; letter-spacing: 0; }
+    .chart-note { margin-top: 10px; font-size: 12px; color: var(--text3); line-height: 1.55; max-width: 120ch; }
+    /* Data alternative of a chart: visually hidden unless the chart library fails */
+    .chart-data table { border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+    .chart-data th, .chart-data td { padding: 2px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+    .chart-data caption { text-align: left; color: var(--text3); font-size: 12px; padding-bottom: 4px; }
+    .chart-fallback { display: none; }
+    .charts-failed .chart-wrap { height: auto !important; }
+    .charts-failed .chart-wrap canvas { display: none; }
+    .charts-failed .chart-fallback {
+      display: block;
+      padding: 10px 12px;
+      border: 1px dashed var(--border2);
+      border-radius: var(--radius);
+      font-size: 12px;
+      color: var(--amber);
+    }
+    .charts-failed .chart-data.sr-only {
+      position: static !important;
+      width: auto; height: auto; margin: 8px 0 0;
+      overflow: visible; clip: auto; white-space: normal;
+      font-size: 12px; color: var(--text2);
+    }
+
+    /* ── Heatmap table ───────────────────────────────────────────────────── */
+    .heatmap { border-collapse: separate; border-spacing: 2px; font-size: 11.5px; width: 100%; }
+    .heatmap th {
+      padding: 4px 4px 6px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text3);
+      white-space: nowrap;
+      text-align: center;
+    }
+    .heatmap th.row-head { text-align: left; padding-right: 10px; }
+    .heatmap td {
+      min-width: 52px;
+      height: 42px;
+      text-align: center;
+      vertical-align: middle;
+      font-size: 11.5px;
+      border-radius: 3px;
+      cursor: default;
+    }
+    .heatmap td.empty { background: var(--bg); }
+    /* Unstable = an outline AND a text marker, not colour alone (colour-blind safe) */
+    .heatmap td.unstable { outline: 2px solid var(--red); outline-offset: -2px; }
+    .heatmap .mat-label { font-size: 12px; font-weight: 600; color: var(--text2); padding-right: 12px; white-space: nowrap; text-align: left; }
+    .heatmap .z { font-size: 10.5px; }
+    .heatmap .vv { font-weight: 500; }
+    .heatmap td.unstable .vv { font-weight: 700; }
+    .heat-key { display: inline-block; width: 22px; height: 10px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+
+    /* ── Probability bars ────────────────────────────────────────────────── */
+    .progress-bar-wrap { margin-top: 8px; }
+    .progress-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .progress-label { width: 92px; font-size: 12px; color: var(--text2); flex-shrink: 0; }
+    .progress-track { flex: 1; height: 6px; background: var(--border2); border-radius: 3px; overflow: hidden; }
+    .progress-fill  { height: 100%; border-radius: 3px; background: var(--text3); }
+    .progress-val   { width: 50px; font-size: 12px; color: var(--text); text-align: right; }
+
+    .divider { height: 1px; background: var(--border); margin: 14px 0; }
+
+    /* ── Tags ────────────────────────────────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      vertical-align: 1px;
+      border: 1px solid var(--border2);
+      color: var(--text2);
+    }
+    .tag-green { color: var(--accent); border-color: rgba(92,200,160,0.35); }
+    .tag-red   { color: var(--red);    border-color: rgba(240,120,124,0.35); }
+    .tag-blue  { color: var(--blue);   border-color: rgba(127,173,247,0.35); }
+    .tag-amber { color: var(--amber);  border-color: rgba(227,165,74,0.35); }
+    .tag-dim   { color: var(--text2); }
+
+    /* ── Parameter boxes ─────────────────────────────────────────────────── */
+    .param-sym  { font-size: 13px; font-weight: 600; color: var(--text2); margin-bottom: 6px; }
+    .param-sym .qual { font-weight: 400; color: var(--text3); }
+    .param-val  { font-size: 24px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); overflow-wrap: anywhere; line-height: 1.2; }
+    .param-desc { font-size: 12px; color: var(--text3); margin-top: 6px; }
+
+    /* ── Utilities ───────────────────────────────────────────────────────── */
+    .mono { font-variant-numeric: tabular-nums; }   /* numbers: tabular sans; code uses <code> */
+    .bold { font-weight: 600; }
+    .mt8  { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+    .mt16 { margin-top: 16px; }
+    .mb12 { margin-bottom: 12px; }
+    .mb16 { margin-bottom: 16px; }
+    .flex { display: flex; align-items: center; }
+    .flex-wrap { flex-wrap: wrap; }
+    .gap8 { gap: 8px; }
+    .gap12{ gap: 12px; }
+    .space-between { justify-content: space-between; }
+    .text-right { text-align: right; }
+    .green { color: var(--accent); }
+    .red   { color: var(--red); }
+    .blue  { color: var(--blue); }
+    .yellow{ color: var(--yellow); }
+    .amber { color: var(--amber); }
+    .dim   { color: var(--text2); }
+    .faint { color: var(--text3); }
+    .prose { font-size: 13px; color: var(--text2); line-height: 1.65; max-width: 120ch; }
+    .prose p + p { margin-top: 8px; }
+    .small { font-size: 12px; }
+    .nowrap { white-space: nowrap; }
+    .defs { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px; align-items: baseline; }
+    .defs dt { font-weight: 600; color: var(--text); padding-left: 8px; border-left: 2px solid var(--border2); }
+    .defs dd { color: var(--text2); }
+
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+    canvas { display: block; }
+
+    /* ── Footer ──────────────────────────────────────────────────────────── */
+    .site-footer {
+      border-top: 1px solid var(--border);
+      padding: 16px 28px 24px;
+      font-size: 12px;
+      color: var(--text3);
+    }
+    .site-footer p { max-width: 1400px; margin: 0 auto; }
+
+    /* ── Tablet (≤ 1100px / ≤ 900px) ─────────────────────────────────────── */
+    @media (max-width: 1100px) {
+      .grid-5, .grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+    }
     @media (max-width: 900px) {
-      .grid-4, .grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
-      .col-4, .col-3   { grid-column: 1 / -1 !important; }
-      .page  { padding: 16px !important; }
+      .grid-4, .grid-5, .grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+      .grid-3          { grid-template-columns: minmax(0, 1fr) !important; }
+      .col-3, .col-2   { grid-column: 1 / -1 !important; }
+      .page  { padding: 20px 16px 40px !important; }
       .nav   { padding: 0 12px; }
+      .top-banner { padding: 0 12px; }
       .nav-brand { margin-right: 12px; }
     }
 
-    /* ── Mobile nav: hamburger (≤ 768px) ──────────────────────────────────── */
+    /* ── Mobile nav: menu button (≤ 768px) ────────────────────────────────── */
     @media (max-width: 768px) {
       .nav-toggle { display: flex; }
-      .nav-status { display: none; }          /* hide LIVE DATA text — too crowded */
-
+      .nav-status { display: none; }          /* the status is repeated in the page banners */
       .nav-links {
         display: none;
         position: absolute;
-        top: 52px; left: 0; right: 0;
-        background: #0d0d0d;
+        top: 50px; left: 0; right: 0;
+        background: var(--bg);
         border-bottom: 1px solid var(--border2);
         flex-direction: column;
         padding: 6px 0;
         z-index: 99;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
       }
       .nav-links.open { display: flex; }
-
-      .nav-link {
-        height: 44px;
-        padding: 0 20px;
-        border-bottom: none;
-        border-left: 2px solid transparent;
-      }
-      .nav-link.active {
-        border-left-color: var(--accent);
-        border-bottom-color: transparent;
-        background: rgba(0,255,136,0.05);
-      }
-
-      /* Tables: horizontal scroll instead of overflow */
-      .data-table {
-        display: block;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        white-space: nowrap;
-      }
-      .data-table td:first-child { white-space: normal; min-width: 120px; }
-
-      /* Page header: badge drops below title */
-      .page-header { flex-wrap: wrap; gap: 4px; }
-      .page-badge  { margin-left: 0 !important; width: 100%; padding-top: 2px; }
-
-      /* Top banner: wrap instead of nowrap */
-      .top-banner {
-        height: auto;
-        padding: 6px 14px;
-        flex-wrap: wrap;
-        white-space: normal;
-        gap: 4px;
-      }
-
-      /* Col spans collapse on mobile */
-      .col-2 { grid-column: 1 / -1 !important; }
+      .nav-link { height: 44px; padding: 0 20px; border-bottom: none; border-left: 2px solid transparent; }
+      .nav-link.active,
+      .nav-link[aria-current="page"] { border-left-color: var(--accent); border-bottom-color: transparent; background: var(--surface); }
+      /* Tables scroll inside their focusable .table-scroll wrapper */
+      .table-scroll .data-table { white-space: nowrap; }
+      .table-scroll .data-table td.wrap,
+      .table-scroll .data-table td:first-child { white-space: normal; min-width: 130px; }
+      .table-scroll .data-table td.wrap { min-width: 240px; }
+      .top-banner { padding: 6px 12px; }
+      .top-banner-text { font-size: 11.5px; }
+      .grid-2 { grid-template-columns: minmax(0, 1fr) !important; }
     }
 
     /* ── Small phone (≤ 480px) ───────────────────────────────────────────── */
     @media (max-width: 480px) {
-      .grid-4, .grid-5,
-      .grid-3, .grid-2  { grid-template-columns: 1fr !important; }
-      .col-2, .col-3,
-      .col-4, .col-full { grid-column: 1 / -1 !important; }
-
-      .page       { padding: 10px !important; }
+      .grid-4, .grid-5, .grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px; }
+      .grid-3, .grid-2  { grid-template-columns: minmax(0, 1fr) !important; }
+      .col-2, .col-3, .col-full { grid-column: 1 / -1 !important; }
+      .page       { padding: 14px 12px 32px !important; }
       .card       { padding: 14px !important; }
-      .card-value { font-size: 26px !important; }
-      .card-value.lg { font-size: 30px !important; }
-
-      .chart-wrap       { height: 200px !important; }
-      .chart-wrap.tall  { height: 240px !important; }
+      .card-value { font-size: 21px !important; }
+      .card-value.lg { font-size: 24px !important; }
+      .card-value.sm { font-size: 18px !important; }
+      .chart-wrap       { height: 220px !important; }
+      .chart-wrap.tall  { height: 250px !important; }
       .chart-wrap.xtall { height: 280px !important; }
-      .chart-wrap.short { height: 150px !important; }
+      .chart-wrap.short { height: 160px !important; }
+      .chart-wrap.spark { height: 36px !important; }
+      .param-val  { font-size: 19px !important; }
+      .nav-brand span { display: none; }
+      .page-title    { font-size: 19px; }
+      .top-banner-text { display: none; }
+      .top-banner-links { margin-left: auto; }
+      .banner { padding: 10px 12px; }
+    }
 
-      .param-val  { font-size: 20px !important; }
-      .param-desc { font-size: 10px !important; }
+    /* ── Reduced motion ───────────────────────────────────────────────────── */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
 
-      .nav-brand span      { display: none; }
-      .top-banner-links    { display: none; }  /* hide GitHub/Substack/LinkedIn on tiny screens */
-      .top-banner-text     { font-size: 10px; }
-
-      .page-title    { font-size: 17px; }
-      .page-subtitle { display: none; }        /* "End-of-day regime + term structure" — skip on phone */
-
-      .banner { flex-direction: column; align-items: flex-start; gap: 8px; }
-      .banner-icon { font-size: 18px; }
+    /* ── Print ────────────────────────────────────────────────────────────── */
+    @media print {
+      :root {
+        color-scheme: light;
+        --bg: #ffffff; --surface: #ffffff; --surface2: #f4f4f4; --tooltip: #ffffff;
+        --border: #cccccc; --border2: #bbbbbb;
+        --text: #111111; --text2: #333333; --text3: #555555;
+        --accent: #00703c; --accent2: #00703c; --red: #b00020; --blue: #0b4fb3; --yellow: #7a5c00;
+        --amber: #8a4b00; --orange: #a04400; --purple: #5b2a9e; --cyan: #005f80; --pink: #a3125f;
+        --tint-red: #ffffff; --tint-amber: #ffffff; --tint-green: #ffffff; --tint-blue: #ffffff;
+      }
+      html, body { background: #fff !important; color: #111 !important; }
+      .nav, .top-banner, .skip-link, .nav-toggle, .scroll-hint { display: none !important; }
+      .page { max-width: none; padding: 0 !important; }
+      .card, .banner, .subcard { break-inside: avoid; box-shadow: none !important; background: #fff !important; border-color: #ccc !important; }
+      .table-scroll, .heatmap-wrap { overflow: visible !important; background: none !important; }
+      .table-scroll .data-table { white-space: normal !important; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9px; color: #555; }
+      .chart-wrap { break-inside: avoid; }
     }
   </style>
+  <!-- Without JavaScript there are no charts: show every chart's data table instead -->
+  <noscript><style>
+    .chart-wrap { display: none !important; }
+    .chart-data.sr-only {
+      position: static !important; width: auto; height: auto; margin: 8px 0 0;
+      overflow: visible; clip: auto; white-space: normal; font-size: 12px; color: var(--text2);
+    }
+  </style></noscript>
+  
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<div class="top-banner">
-  <div class="top-banner-text">
-    Joint SPX/VIX Volatility Research System &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; 666 tests &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; by Navnoor Bawa
-  </div>
-  <div class="top-banner-links">
-    <a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub</a>
-    <span class="top-banner-sep">·</span>
-    <a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack</a>
-    <span class="top-banner-sep">·</span>
-    <a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn</a>
-  </div>
-</div>
+<header class="top-banner">
+  <p class="top-banner-text">
+    Joint SPX/VIX volatility research system &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; Navnoor Bawa
+  </p>
+  <ul class="top-banner-links" aria-label="Author links">
+    <li><a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></li>
+    <li class="top-banner-sep" aria-hidden="true">·</li>
+    <li><a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack<span class="sr-only"> (opens in a new tab)</span></a></li>
+    <li class="top-banner-sep" aria-hidden="true">·</li>
+    <li><a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn<span class="sr-only"> (opens in a new tab)</span></a></li>
+  </ul>
+</header>
 
-<nav class="nav" style="position:relative;">
-  <div class="nav-brand">VOL&#8202;SYS <span>/ SPX+VIX</span></div>
-  <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false">
+<nav class="nav" aria-label="Primary">
+  <div class="nav-brand">SPX/VIX <span>Vol Research</span></div>
+  <button class="nav-toggle" id="navToggle" type="button" aria-label="Menu" aria-controls="navLinks" aria-expanded="false">
     <span></span><span></span><span></span>
   </button>
   <div class="nav-links" id="navLinks">
-    <a href="index.html"            class="nav-link ">
-      <span class="nav-dot"></span>Live Market
+    
+    <a href="index.html" class="nav-link">
+      <span class="nav-dot" aria-hidden="true"></span>Market
     </a>
-    <a href="calibration.html" class="nav-link active">
-      <span class="nav-dot"></span>Calibration
+    
+    <a href="calibration.html" class="nav-link active" aria-current="page">
+      <span class="nav-dot" aria-hidden="true"></span>Calibration
     </a>
-    <a href="greeks.html"      class="nav-link ">
-      <span class="nav-dot"></span>Greeks Monitor
+    
+    <a href="greeks.html" class="nav-link">
+      <span class="nav-dot" aria-hidden="true"></span>Greeks
     </a>
-    <a href="backtest.html"    class="nav-link ">
-      <span class="nav-dot"></span>Backtest
+    
+    <a href="backtest.html" class="nav-link">
+      <span class="nav-dot" aria-hidden="true"></span>Backtest
     </a>
+    
   </div>
-  <div class="nav-status" title="End-of-day snapshot, auto-refreshed daily after the US market close">
-    <div class="status-dot"></div>
-    EOD DATA
+  
+  <div class="nav-status" title="End-of-day snapshot, rebuilt after each US market close">
+    <div class="status-dot " aria-hidden="true"></div>
+    End-of-day data
   </div>
 </nav>
 
-<main class="page">
+<main class="page" id="main" tabindex="-1">
+  
   
 <div class="page-header">
-  <div class="page-title">Joint Calibration Results</div>
-  <div class="page-subtitle">Heston 5-parameter · DE + L-BFGS-B</div>
-  <div class="page-badge">2026-09-25  ·  SPX = 7743.4  ·  r = 4.07%</div>
-</div>
-
-<!-- ── Rho Boundary Banner ────────────────────────────────────────────────── -->
-
-<div class="banner banner-warn" style="margin-bottom:20px;">
-  <div class="banner-icon">⚠</div>
-  <div>
-    <div class="banner-title" style="color:#ff8833;">
-      ρ = -0.95  —  AT THE LOWER BOUNDARY (−0.95)
-    </div>
-    <div class="banner-body">
-      The Heston correlation parameter has hit its lower bound during calibration.
-      This indicates the model <strong style="color:var(--text);">cannot fully reproduce the steep 2026 SPX left skew</strong>
-      with a pure diffusion structure — jump risk or a non-affine model (e.g. rough Heston) is required.
-      The extreme negative ρ is the model's best approximation of the leverage effect,
-      revealing model misspecification.
-      <strong style="color:#ff8833;">VIX options leg is disabled (w₃ = 0.0)</strong> — RMSE was 37.14 vol pts, a structural failure of the CIR density, not a calibration failure.
-      Bates SVJ calibration was attempted — jump params degenerate on daily data (see Barndorff-Nielsen &amp; Shephard 2004). Heston remains the active model.
-    </div>
+  <h1 class="page-title">Joint SPX/VIX Heston Calibration</h1>
+  <div class="page-subtitle">Five-parameter Heston fitted jointly to the SPX smile and the VIX index term structure (differential evolution, then L-BFGS-B).</div>
+  <div class="page-badge">
+    <span class="nowrap">Session 2026-10-16</span>
+    <span class="sep">·</span>SPX = 7,659.4
+    <span class="sep">·</span>r = 4.43% (parity-implied median)<span class="sep">·</span>^IRX 4.15%
+    
   </div>
 </div>
 
 
-<!-- ── Feller Condition Banner ────────────────────────────────────────────── -->
+<p class="page-note">
+  The headline is the newest fit that passes the quality gate (<code>joint_cal_2026-10-16.pkl</code>), not the lowest-RMSE fit in the archive:
+  ranking by RMSE rewards the days the data broke.
+  Of 42 stored fits, 5 of 5 current-schema (model_version 2) fits pass the gate;
+  37 pre-C22 fits are labelled legacy and never ranked (they fitted the VIX spot indices as futures, with ATM-call anchors and an assumed r/q).
+</p>
 
-
-
-<div class="banner banner-info" style="margin-bottom:20px;">
-  <div class="banner-icon">✓</div>
-  <div>
-    <div class="banner-title" style="color:#00ff88;">
-      Feller Condition:  2κθ &gt; σ²
-       —  PASS
-    </div>
-    <div class="banner-body">
-      2κθ = 2 × 3.3207 × 0.04617 = <strong style="color:var(--text);">0.30665</strong>
-        &nbsp;&nbsp;|&nbsp;&nbsp;
-      σ² = 0.295² = <strong style="color:var(--text);">0.08705</strong>
-        &nbsp;&nbsp;|&nbsp;&nbsp;
-      Margin = <strong style="color:#00ff88;">+2.20e-01</strong>
-      <br>
-      
-      The variance process stays strictly positive — the Heston SDE is well-posed.
-      
-    </div>
+<!-- ── Parameters ─────────────────────────────────────────────────────────── -->
+<h2 class="section-title">Parameters</h2>
+<div class="grid grid-5 row">
+  <div class="card card-sm">
+    <div class="param-sym">κ <span class="qual">mean reversion</span></div>
+    <div class="param-val">4.9919</div>
+    <div class="param-desc">Half-life 35.0 trading days</div>
+  </div>
+  <div class="card card-sm">
+    <div class="param-sym">θ <span class="qual">long-run variance</span></div>
+    <div class="param-val">0.04994</div>
+    <div class="param-desc">√θ = 22.35% annualised</div>
+  </div>
+  <div class="card card-sm">
+    <div class="param-sym">σ <span class="qual">vol of variance</span></div>
+    <div class="param-val">2.0000</div>
+    <div class="param-desc">Smile curvature; skew with ρ</div>
+  </div>
+  <div class="card card-sm" >
+    <div class="param-sym">ρ <span class="qual">spot–vol correlation</span></div>
+    <div class="param-val">−0.7528</div>
+    <div class="param-desc">Leverage effect</div>
+  </div>
+  <div class="card card-sm">
+    <div class="param-sym">v₀ <span class="qual">initial variance</span></div>
+    <div class="param-val">0.03439</div>
+    <div class="param-desc">√v₀ = 18.54% spot vol</div>
   </div>
 </div>
 
-<!-- ── Identification / provenance banner ─────────────────────────────────── -->
-<div class="banner banner-info" style="margin-bottom:20px;">
-  <div class="banner-icon">◧</div>
-  <div>
-    <div class="banner-title">Fit identification — 4 of 5 effective degrees of freedom</div>
-    <div class="banner-body">
-      
-      Pinned at a boundary: <strong style="color:var(--text);">rho</strong>.
-      A pinned parameter is set by its constraint, not by the market data, so this
-      5-parameter model is effectively fitting with 4. ρ pins at its −0.95
-      floor on nearly every joint fit: the SPX skew wants more spot–vol correlation than Heston
-      is allowed to express. That is the misspecification this project documents, stated as a number.
-      
-      <br>
-      Fit from
-      <strong style="color:var(--text);">9</strong> SPX options and
-      <strong style="color:var(--text);">4</strong> VIX tenors,
-      all taken on the closed SPX session of <strong style="color:var(--text);">2026-09-25</strong>.
-      The VIX-futures leg needs at least 3 tenors to identify a curve; fits below that
-      threshold are rejected, because a single tenor is one data point that Heston matches
-      exactly and the joint fit silently collapses into an SPX-only calibration.
-    </div>
-  </div>
-</div>
+<!-- ── Fit quality ────────────────────────────────────────────────────────── -->
+<h2 class="section-title">Fit quality</h2>
+<div class="grid grid-4 row">
 
-<!-- ── Parameter Cards ───────────────────────────────────────────────────── -->
-<div class="grid grid-5" style="margin-bottom:16px;">
-
-  <div class="card">
-    <div class="param-box">
-      <div class="param-sym">κ  (kappa)</div>
-      <div class="param-val" style="color:var(--blue);">3.3207</div>
-      <div class="param-desc">Mean reversion speed</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Half-life = 52.6d</div>
+  <div class="card card-sm">
+    <h3 class="card-label">SPX IV RMSE</h3>
+    
+    <div class="card-value sm">1.336<span class="unit">vol pts</span></div>
+    <div class="card-sub">
+      In-sample, 53 anchors.
+      Out of sample 2.955 (put wing 3.896).
     </div>
+    
   </div>
 
-  <div class="card">
-    <div class="param-box">
-      <div class="param-sym">θ  (theta)</div>
-      <div class="param-val" style="color:var(--yellow);">0.04617</div>
-      <div class="param-desc">Long-run variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√θ = 21.49% ann vol</div>
-    </div>
+  <div class="card card-sm">
+    <h3 class="card-label">VIX index RMSE</h3>
+    
+    <div class="card-value sm">0.823<span class="unit">index pts</span></div>
+    <div class="card-sub">^VIX9D, ^VIX, ^VIX3M, ^VIX6M (4 on the session) against the model's expected average vol to each horizon.</div>
+    
   </div>
 
-  <div class="card">
-    <div class="param-box">
-      <div class="param-sym">σ  (vol-of-vol)</div>
-      <div class="param-val" style="color:var(--orange);">0.295</div>
-      <div class="param-desc">Vol of variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">Controls smile curvature</div>
+  <div class="card card-sm">
+    <h3 class="card-label">VIX options RMSE</h3>
+    
+    <div class="card-value sm dim">Not in objective</div>
+    <div class="card-sub">
+      Weight w₃ = 0 (0 liquid VIX options on the session);
+      no error is reported for a leg the fit did not use.
     </div>
+    
   </div>
 
-  <div class="card" style="border-color:rgba(255,136,51,0.4);background:rgba(255,136,51,0.04);">
-    <div class="param-box">
-      <div class="param-sym">ρ  (rho)</div>
-      <div class="param-val" style="color:#ff8833;">-0.95</div>
-      <div class="param-desc">Spot-vol correlation</div>
-      
-      <div style="margin-top:6px;"><span class="tag tag-red">AT BOUNDARY</span></div>
-      
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="param-box">
-      <div class="param-sym">v₀  (v-naught)</div>
-      <div class="param-val" style="color:var(--accent);">0.00958</div>
-      <div class="param-desc">Initial variance</div>
-      <div class="param-desc" style="margin-top:4px;color:var(--text2);">√v₀ = 9.79% spot vol</div>
-    </div>
+  <div class="card card-sm">
+    <h3 class="card-label">Optimiser</h3>
+    <div class="card-value sm">50.7<span class="unit">s</span></div>
+    <div class="card-sub">5,018 objective evaluations</div>
+    <div class="card-sub">DE maxiter 200, popsize 10 (50 members), seed 42 + L-BFGS-B polish</div>
   </div>
 
 </div>
 
-<!-- ── RMSE Cards ────────────────────────────────────────────────────────── -->
-<div class="grid grid-4" style="margin-bottom:16px;">
+<!-- ── Diagnostics: Feller, identification, boundary ─────────────────────── -->
 
-  <div class="card">
-    <div class="card-label">SPX IV RMSE</div>
-    <div class="card-value sm green">
-      0.041 vol pts
-    </div>
-    <div class="card-sub mt8">
-      Good fit
-      
-    </div>
-  </div>
 
-  <div class="card">
-    <div class="card-label">VIX Futures RMSE</div>
-    <div class="card-value sm green">
-      0.092 pts
-    </div>
-    <div class="card-sub mt8">
-      Good futures fit
-      
+<h2 class="section-title">Diagnostics</h2>
+<div class="grid grid-2 row">
+  <div class="banner banner-warn">
+    <div class="banner-icon" aria-hidden="true">!</div>
+    <div>
+      <div class="banner-title">Feller condition: 2κθ &lt; σ² — VIOLATED</div>
+      <div class="banner-body">
+        2κθ = 0.49862; σ² = 4.00000; margin 2κθ − σ² = <strong>−3.5014</strong>.
+        
+        <strong>Diagnostic only — not imposed.</strong> 2κθ ≥ σ² is not a no-arbitrage condition: when it fails the
+        variance process can reach zero and reflects, and the Fourier pricer remains valid.
+        Here the SPX smile and VIX indices together ask for more vol-of-vol than the Feller boundary allows.
+        
+      </div>
     </div>
   </div>
 
-  <div class="card" style="border-color:rgba(100,100,100,0.3);background:rgba(50,50,50,0.04);">
-    <div class="card-label" style="color:var(--text2);">VIX Options RMSE</div>
-    <div class="card-value sm" style="color:#555;">DISABLED</div>
-    <div class="card-sub mt8" style="color:#555;">
-      Heston CIR density underestimates vol-of-vol path uncertainty.
-      RMSE was 37.14 pts — structural failure. w₃ = 0.0 (was 0.2).
+  <div id="identification-banner" class="banner banner-info">
+    <div class="banner-icon" aria-hidden="true">i</div>
+    <div>
+      <div class="banner-title">Identification — 4 of 5 effective degrees of freedom</div>
+      <div class="banner-body">
+        
+        Active constraints: <strong>sigma = 2 (box ceiling)</strong>.
+        A parameter on a bound is set by the constraint, not by the market data, so this
+        5-parameter model is effectively fitting with 4.
+        
+        Fit from <strong>53</strong> SPX options
+        (<strong>6</strong> expiries)
+        and <strong>4</strong> VIX tenors, all taken on the closed SPX session of 2026-10-16.
+        
+        The VIX leg needs at least 3 tenors to identify a curve; a single tenor is one data point that Heston matches
+        exactly, and the joint fit would silently collapse into an SPX-only calibration.
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-label">Calibration Performance</div>
-    <div class="card-value sm green">4.3s</div>
-    <div class="card-sub mt8">7,124 evaluations</div>
-    <div class="card-sub">DE (120 iter × 40) + L-BFGS-B</div>
-  </div>
-
+  
 </div>
 
-<!-- ── SPX Smile + Info ───────────────────────────────────────────────────── -->
-<div class="grid grid-2" style="margin-bottom:16px;">
+<!-- ── Smile + parameter table ────────────────────────────────────────────── -->
+<div class="grid grid-2 row">
 
-  <!-- Multi-maturity smile -->
   <div class="card">
-    <div class="chart-title">SPX Implied Volatility Smile — All Maturities</div>
+    <h2 class="chart-title">Model smile of this fit <span class="qual">· 2026-10-16, all maturities</span></h2>
     <div class="chart-wrap tall">
-      <canvas id="smileChart" role="img" aria-label="SPX implied volatility smile vs strike"></canvas>
+      <canvas id="smileChart" role="img" aria-label="Line chart: Heston model implied-volatility smile of the 2026-10-16 fit, one curve per maturity, against ln(K/F)" aria-describedby="smileChart-data"></canvas>
     </div>
+    <div class="chart-data sr-only" id="smileChart-data">
+      
+      <table>
+        <caption>Model implied vol (%) by maturity: at the lowest, nearest-the-money and highest ln(K/F) plotted</caption>
+        <thead><tr><th scope="col">Maturity</th><th scope="col">Lowest ln(K/F)</th><th scope="col">Near the money</th><th scope="col">Highest ln(K/F)</th></tr></thead>
+        <tbody>
+        
+        
+        <tr><td>14d</td>
+          <td>−0.300: 44.75</td>
+          <td>+0.000: 16.11</td>
+          <td>+0.100: 15.09</td></tr>
+        
+        
+        <tr><td>30d</td>
+          <td>−0.300: 42.47</td>
+          <td>+0.000: 15.00</td>
+          <td>+0.175: 17.21</td></tr>
+        
+        
+        <tr><td>60d</td>
+          <td>−0.300: 38.65</td>
+          <td>+0.000: 14.53</td>
+          <td>+0.250: 18.01</td></tr>
+        
+        
+        <tr><td>91d</td>
+          <td>−0.300: 35.72</td>
+          <td>+0.000: 14.61</td>
+          <td>+0.250: 16.51</td></tr>
+        
+        
+        <tr><td>180d</td>
+          <td>−0.300: 30.89</td>
+          <td>+0.000: 15.29</td>
+          <td>+0.250: 13.97</td></tr>
+        
+        
+        <tr><td>365d</td>
+          <td>−0.300: 26.91</td>
+          <td>+0.000: 16.46</td>
+          <td>+0.250: 12.42</td></tr>
+        
+        </tbody>
+      </table>
+      
+    </div>
+    <p class="chart-note">
+      Black–Scholes implied vols of Heston prices at the parameters above, against ln(K/F) (forward-normalised, so
+      independent of r and q). Nodes whose out-of-the-money price is too small to invert reliably are omitted.
+      This result does not store its
+      market quotes, so no market overlay is drawn — these are model curves, not market data.
+      
+    </p>
   </div>
 
-  <!-- Calibration summary table -->
   <div class="card">
-    <div class="chart-title">Calibrated Parameter Summary</div>
-
-    <table class="data-table mt8">
+    <h2 class="chart-title">Parameter summary</h2>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Calibrated parameter summary (scrollable)">
+    <table class="data-table">
       <thead>
         <tr>
-          <th>Parameter</th>
-          <th>Symbol</th>
-          <th>Value</th>
-          <th>Interpretation</th>
+          <th scope="col">Parameter</th>
+          <th scope="col">Symbol</th>
+          <th scope="col" class="num">Value</th>
+          <th scope="col">Interpretation</th>
         </tr>
       </thead>
       <tbody>
+        <tr><td>Mean reversion</td><td>κ</td><td class="num">4.9919</td><td class="small wrap">Half-life ≈ 35 trading days</td></tr>
+        <tr><td>Long-run vol</td><td>√θ</td><td class="num">22.35%</td><td class="small wrap">Steady-state level of instantaneous vol</td></tr>
+        <tr><td>Vol of variance</td><td>σ</td><td class="num">2.0000</td><td class="small wrap">Smile curvature and, with ρ, the spot–vol skew</td></tr>
         <tr>
-          <td>Mean reversion</td>
-          <td class="mono">κ</td>
-          <td class="mono blue">3.3207</td>
-          <td>Half-life ≈ 53 trading days</td>
+          <td>Correlation</td><td>ρ</td>
+          <td class="num ">−0.7528</td>
+          <td class="small wrap">Spot–vol correlation (leverage)</td>
+        </tr>
+        <tr><td>Spot vol</td><td>√v₀</td><td class="num">18.54%</td><td class="small wrap">Instantaneous vol on the session</td></tr>
+        <tr>
+          <td>Risk-free rate</td><td>r</td>
+          <td class="num">4.43%</td>
+          <td class="small wrap">Median of the per-expiry put–call-parity rates r_T the fit priced with; ^IRX 13-week bill (cc) reference 4.15%</td>
         </tr>
         <tr>
-          <td>Long-run vol</td>
-          <td class="mono">√θ</td>
-          <td class="mono yellow">21.49%</td>
-          <td>Steady-state implied vol target</td>
+          <td>Dividend yield</td><td>q</td>
+          <td class="num">0.93%</td>
+          <td class="small wrap">Median of the per-expiry parity-implied carry q_T = r_T − ln(F_T/S)/T</td>
         </tr>
         <tr>
-          <td>Vol-of-vol</td>
-          <td class="mono">σ</td>
-          <td class="mono" style="color:var(--orange);">0.295</td>
-          <td>High: drives strong skew / smile</td>
-        </tr>
-        <tr>
-          <td>Correlation</td>
-          <td class="mono">ρ</td>
-          <td class="mono" style="color:#ff8833;">
-            -0.95
-            <span class="tag tag-red" style="font-size:9px;margin-left:6px;">⚠ BOUNDARY</span>
-          </td>
-          <td>Extreme leverage effect — needs jumps</td>
-        </tr>
-        <tr>
-          <td>Spot vol</td>
-          <td class="mono">√v₀</td>
-          <td class="mono green">9.79%</td>
-          <td>Current instantaneous vol</td>
-        </tr>
-        <tr>
-          <td>Risk-free rate</td>
-          <td class="mono">r</td>
-          <td class="mono">4.07%</td>
-          <td>USD 6M SOFR (2026-03)</td>
-        </tr>
-        <tr>
-          <td>Dividend yield</td>
-          <td class="mono">q</td>
-          <td class="mono">0.0%</td>
-          <td>SPX continuous div yield</td>
-        </tr>
-        <tr>
-          <td>Feller margin</td>
-          <td class="mono">2κθ − σ²</td>
-          <td class="mono green">
-            +2.20e-01
-          </td>
-          <td>PASS — variance stays strictly positive
+          <td>Feller margin</td><td>2κθ − σ²</td>
+          <td class="num red">−3.5014</td>
+          <td class="small wrap">VIOLATED — variance can reach zero (diagnostic; not imposed)
           </td>
         </tr>
         <tr>
-          <td>Effective d.o.f.</td>
-          <td class="mono">5 − |pinned|</td>
-          <td class="mono amber">
-            4 / 5
-          </td>
-          <td>Pinned: rho — set by constraints, not data
+          <td>Effective d.o.f.</td><td>5 − |active|</td>
+          <td class="num amber">4 / 5</td>
+          <td class="small wrap">sigma = 2 (box ceiling) — set by constraints, not data
           </td>
         </tr>
         <tr>
-          <td>Calibration inputs</td>
-          <td class="mono">n<sub>SPX</sub> / n<sub>VIX</sub></td>
-          <td class="mono green">
-            9 / 4
+          <td>Calibration inputs</td><td>n<sub>SPX</sub> (expiries) / n<sub>VIX</sub></td>
+          
+          <td class="num ">
+            53 (6) / 4
           </td>
-          <td>SPX options / VIX tenors — ≥3 tenors required to identify the VIX leg</td>
+          <td class="small wrap">SPX options (expiries) / VIX tenors — at least 3 of each are needed to identify the term structure</td>
         </tr>
       </tbody>
     </table>
-
-    <div class="divider"></div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
-      <div>SPX level: <span class="mono green">7743.4</span></div>
-      <div>As-of date: <span class="mono">2026-09-25</span></div>
-      <div>Fit time: <span class="mono green">4.3s</span></div>
-      <div>DE evaluations: <span class="mono">7,124</span></div>
     </div>
   </div>
 
 </div>
 
-<!-- ── RMSE bar comparison ────────────────────────────────────────────────── -->
-<div class="card" style="margin-bottom:16px;">
-  <div class="chart-title">RMSE Decomposition — Loss Components</div>
-  <div class="chart-wrap short">
-    <canvas id="rmseChart" role="img" aria-label="Calibration RMSE comparison across legs"></canvas>
+
+<!-- ── C13: Quintic OU research panel ─────────────────────────────────────── -->
+
+
+<h2 class="section-title">Research model · two-factor Quintic OU (C13)</h2>
+<div class="card row">
+  <div class="card-head">
+    <h3 class="chart-title">Quintic OU vs Heston <span class="qual">· same session, 2026-03-24</span></h3>
+    <span class="chip chip-amber">Optimiser did not converge</span>
   </div>
-</div>
+  <p class="small dim" style="margin-bottom:12px;">
+    σ(t) = g₀(t) · p(Z_t), Z_t = θX_t + (1−θ)Y_t, p(z) = α₀ + α₁z + α₃z³ + α₅z⁵.
+    VIX by cubature on the standard-normal plane (101 points per dimension); SPX by Monte Carlo (10,000 paths).
+  </p>
 
-<!-- HMM classifier note -->
-<div class="card" style="margin-bottom:16px;">
-  <div style="padding:10px 14px;border-radius:6px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);">
-    <div style="font-size:11px;font-weight:600;color:#ff8833;margin-bottom:4px;">HMM Regime Classifier — Limitations</div>
-    <div style="font-size:11.5px;color:var(--text2);line-height:1.6;">
-      HMM trained 2010–2019. Out-of-distribution on 2025 tariff regime — misclassifies 2025-04-09 as R1.
-      Use XGBoost for production classification.
-      HMM is available as a research alternative via <span class="mono">HMMRegimeClassifier</span> in
-      <span class="mono">regime_classifier.py</span>.
-    </div>
-  </div>
-</div>
+  <div class="grid grid-3">
 
-<!-- ── C13: Quintic OU Research Panel ────────────────────────────────────── -->
-
-<div class="card" style="margin-bottom:16px;border-color:rgba(0,255,136,0.2);background:rgba(0,255,136,0.02);">
-  <div class="chart-title" style="color:var(--green);">C13 — Two-Factor Quintic OU Model (Research)</div>
-  <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">
-    σ(t) = g₀(t) · p(Z_t) &nbsp;·&nbsp; Z_t = θX_t + (1−θ)Y_t &nbsp;·&nbsp;
-    p(z) = α₀ + α₁z + α₃z³ + α₅z⁵ &nbsp;·&nbsp;
-    VIX priced via 2D Gauss-Hermite ≈ 500 pts
-  </div>
-
-  <div class="grid grid-2" style="gap:16px;">
-
-    <!-- Parameters table -->
     <div>
-      <table class="data-table">
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Quintic OU parameters (scrollable)">
+      <table class="data-table compact">
         <thead>
-          <tr>
-            <th>Parameter</th>
-            <th>Symbol</th>
-            <th>Value</th>
-            <th>Description</th>
-          </tr>
+          <tr><th scope="col">Parameter</th><th scope="col">Symbol</th><th scope="col" class="num">Value</th><th scope="col">Role</th></tr>
         </thead>
         <tbody>
+          <tr><td>Fast OU speed</td><td>λx</td><td class="num">46.126</td><td class="small wrap">Fast-factor half-life ln 2/λx ≈ 5.48 calendar days</td></tr>
+          <tr><td>Slow OU speed</td><td>λy</td><td class="num">6.812</td><td class="small wrap">Slow-factor half-life ln 2/λy ≈ 37.1 calendar days</td></tr>
+          <tr><td>Factor weight</td><td>θ</td><td class="num">0.4503</td><td class="small wrap">Fast-factor loading in Z_t</td></tr>
+          <tr><td>Poly constant</td><td>α₀</td><td class="num">0.0043</td><td class="small wrap">Constant term (σ is signed; no floor)</td></tr>
+          <tr><td>Poly linear</td><td>α₁</td><td class="num">0.0123</td><td class="small wrap">Linear skew driver</td></tr>
+          <tr><td>Poly cubic</td><td>α₃</td><td class="num">0.0364</td><td class="small wrap">Smile curvature</td></tr>
+          <tr><td>Poly quintic</td><td>α₅</td><td class="num">1.0000</td><td class="small wrap">Wing correction</td></tr>
           <tr>
-            <td>Fast OU speed</td>
-            <td class="mono">λx</td>
-            <td class="mono blue">168.48</td>
-            <td>Fast factor half-life ≈ 1.04d</td>
-          </tr>
-          <tr>
-            <td>Slow OU speed</td>
-            <td class="mono">λy</td>
-            <td class="mono blue">10.543</td>
-            <td>Slow factor half-life ≈ 16.6d</td>
-          </tr>
-          <tr>
-            <td>Factor weight</td>
-            <td class="mono">θ</td>
-            <td class="mono yellow">2.8539</td>
-            <td>Fast-factor loading in Z_t</td>
-          </tr>
-          <tr>
-            <td>Poly constant</td>
-            <td class="mono">α₀</td>
-            <td class="mono">0.4061</td>
-            <td>Sets vol floor</td>
-          </tr>
-          <tr>
-            <td>Poly linear</td>
-            <td class="mono">α₁</td>
-            <td class="mono">-0.9404</td>
-            <td>Linear skew driver</td>
-          </tr>
-          <tr>
-            <td>Poly cubic</td>
-            <td class="mono">α₃</td>
-            <td class="mono">0.8877</td>
-            <td>Smile curvature</td>
-          </tr>
-          <tr>
-            <td>Poly quintic</td>
-            <td class="mono">α₅</td>
-            <td class="mono">-0.4895</td>
-            <td>Wing correction</td>
-          </tr>
-          <tr>
-            <td>Leverage (corr)</td>
-            <td class="mono">ε</td>
-            <td class="mono green">
-              -0.1823
-              
-            </td>
-            <td>Spot-vol correlation (leverage)</td>
+            <td>Leverage</td><td>ε</td>
+            <td class="num amber">−0.99</td>
+            <td class="small wrap">Spot–vol correlation — <span class="amber">on its bound</span></td>
           </tr>
         </tbody>
       </table>
+      </div>
+      <div class="kv-2 mt12">
+        <div>Fit time <span class="v">499.4 s</span></div>
+        <div>Evaluations <span class="v">3,704</span></div>
+        <div>Converged <span class="v amber">no</span></div>
+        <div>SPX RMSE on fresh MC paths <span class="v">1.310 vol pts</span></div>
+      </div>
     </div>
 
-    <!-- RMSE comparison -->
-    <div>
-      <table class="data-table">
+    <div class="col-2">
+      
+      
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Heston versus Quintic OU on the same session (scrollable)">
+      <table class="data-table compact" id="quintic-vs-heston">
         <thead>
-          <tr><th>Metric</th><th>Heston</th><th>Quintic OU</th><th>Δ</th></tr>
+          <tr><th scope="col">RMSE</th><th scope="col" class="num">Heston (own targets)</th><th scope="col" class="num">Heston on Quintic targets</th><th scope="col" class="num">Quintic OU</th><th scope="col" class="num">Δ, same targets</th></tr>
         </thead>
         <tbody>
           <tr>
-            <td>SPX IV RMSE (vp)</td>
-            <td class="mono">0.041</td>
-            <td class="mono yellow">
-              2.343
-            </td>
-            <td class="mono red">
-              +2.302
-            </td>
+            <td style="min-width:150px;">SPX implied vol (vol pts)</td>
+            <td class="num">1.207 <span class="faint">(52)</span></td>
+            <td class="num">1.215 <span class="faint">(66)</span></td>
+            <td class="num">1.309 <span class="faint">(66)</span></td>
+            <td class="num">+0.094</td>
           </tr>
           <tr>
-            <td>VIX Fut RMSE (pts)</td>
-            <td class="mono">0.092</td>
-            <td class="mono green">
-              0.001
-            </td>
-            <td class="mono green">
-              -0.091
-            </td>
+            <td>VIX forward (pts)¹</td>
+            <td class="num faint">not a target</td>
+            <td class="num">2.304</td>
+            <td class="num">0.376</td>
+            <td class="num">−1.928</td>
           </tr>
           <tr>
-            <td>VIX Opt RMSE (vp)</td>
-            <td class="mono" style="color:#555;">DISABLED</td>
-            <td class="mono yellow">
-              17.53
-            </td>
-            <td class="mono" style="color:#555;">—</td>
+            <td>VIX options (vol pts)</td>
+            <td class="num faint">not fitted (w₃ = 0)</td>
+            <td class="num">35.16</td>
+            <td class="num">2.77 <span class="faint">(61)</span></td>
+            <td class="num">−32.39</td>
+          </tr>
+          <tr>
+            <td>VIX indices (pts)</td>
+            <td class="num">0.888</td>
+            <td class="num faint">—</td>
+            <td class="num faint">input (ξ₀), 2.5e−15</td>
+            <td class="num faint">—</td>
           </tr>
         </tbody>
       </table>
-
-      <div class="divider"></div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11.5px;color:var(--text2);">
-        <div>Fit time: <span class="mono green">2751.8s</span></div>
-        <div>Evaluations: <span class="mono">2,813</span></div>
-        <div>MC paths: <span class="mono">6,000/expiry</span></div>
-        <div>VIX quad: <span class="mono">18² = 324 pts</span></div>
       </div>
+      <p class="chart-note">
+        Counts in brackets are quotes. ¹ Model E[VIX_T] against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets. Both fits use the 2026-03-24 SPX chain and VIX data (<code>joint_cal_2026-03-24.pkl</code>; re-pricing on the Quintic's targets: <code>baseline_2026-03-24.json</code>).
+        
+        Heston active constraints: sigma = 2 (box ceiling).
+        The Quintic was fitted to every target in its column; Heston was fitted to its own anchors and the VIX indices only
+        (VIX-options weight 0), so the “Quintic's targets” column is out of sample for Heston.
+        
+      </p>
+      
 
-      <div style="margin-top:12px;padding:8px 10px;border-radius:4px;background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.15);font-size:11px;color:var(--text2);line-height:1.6;">
-        <strong style="color:var(--green);">Key advance over Heston:</strong>
-        VIX options are analytically tractable via 2D Gauss-Hermite quadrature — no structural failure of the pricing kernel.
-        The non-affine polynomial structure captures steep SPX left skew without rho saturating.
-        VIX futures fit to <span class="mono">0.001 pts</span> — <strong style="color:#ff8833;">by construction, not model skill</strong>: ξ₀ is bootstrapped from the same VIX term structure being fit (and no tradable futures prices exist in the DB; the "futures" leg is an index proxy). Quote the SPX-leg RMSE (2.34 vp) as the real fit quality.
-        Model: <span class="mono">models/quintic_ou.py</span> ·
-        Calibrator: <span class="mono">calibration/quintic_calibrator.py</span>
-      </div>
-
-      <div style="margin-top:8px;padding:8px 10px;border-radius:4px;background:rgba(255,136,51,0.06);border:1px solid rgba(255,136,51,0.2);font-size:11px;color:var(--text2);line-height:1.6;">
-        <strong style="color:#ff8833;">Honest limitation:</strong>
-        VIX-option RMSE of <span class="mono">~17.5 vp</span> beats Heston's <span class="mono">37.1 vp</span> (a ~53% reduction)
-        but does not yet reach the <span class="mono">&lt;10 vp</span> research target. The residual is in the VIX-smile wings —
-        the degree-5 polynomial under-fits far-OTM VIX calls. A higher-degree map or a second
-        stochastic driver is the next step. Reported as measured, not as a hit target.
+      <div class="banner banner-warn mt12">
+        <div class="banner-icon" aria-hidden="true">!</div>
+        <div class="banner-body">
+          <strong class="amber">Reading this honestly.</strong>
+          The Quintic optimiser stopped at its iteration limits without meeting its tolerance. 
+          Parameters on a search bound: <code>epsilon</code> (ε at −0.99: the skew wants more leverage than the bound allows). 
+          ξ₀ is bootstrapped from the VIX indices, so the Quintic reproduces them by construction; that is an input check, not a fit metric.
+          The VIX-forward and VIX-options legs are where the models genuinely differ: they are in the Quintic's objective and not in Heston's.
+          Code: <code>models/quintic_ou.py</code>, <code>calibration/quintic_calibrator.py</code>.
+        </div>
       </div>
     </div>
   </div>
@@ -1130,67 +1063,188 @@
 
 </main>
 
+<footer class="site-footer">
+  <p>Static end-of-day snapshot. Every figure is computed from the repository's stored artifacts at build time; inputs that fail to load are reported, never replaced. Research and methodology only — mark-to-model, not investment advice.</p>
+</footer>
+
 <script>
-  // Hamburger nav toggle
+  // Menu button (≤ 768px)
   (function() {
     var btn   = document.getElementById('navToggle');
     var links = document.getElementById('navLinks');
     if (!btn || !links) return;
-    btn.addEventListener('click', function() {
-      var open = links.classList.toggle('open');
+    function setOpen(open) {
+      links.classList.toggle('open', open);
       btn.classList.toggle('open', open);
-      btn.setAttribute('aria-expanded', open);
-    });
-    // Close menu when any nav link is tapped (SPA-style)
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    btn.addEventListener('click', function() { setOpen(!links.classList.contains('open')); });
     links.querySelectorAll('.nav-link').forEach(function(a) {
-      a.addEventListener('click', function() {
-        links.classList.remove('open');
-        btn.classList.remove('open');
-        btn.setAttribute('aria-expanded', 'false');
-      });
+      a.addEventListener('click', function() { setOpen(false); });
     });
-    // Close menu when tapping outside
     document.addEventListener('click', function(e) {
-      if (!btn.contains(e.target) && !links.contains(e.target)) {
-        links.classList.remove('open');
-        btn.classList.remove('open');
-        btn.setAttribute('aria-expanded', 'false');
-      }
+      if (!btn.contains(e.target) && !links.contains(e.target)) setOpen(false);
+    });
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && links.classList.contains('open')) { setOpen(false); btn.focus(); }
     });
   })();
 
-  // Chart.js global dark-theme defaults
-  Chart.defaults.color            = '#666';
-  Chart.defaults.borderColor      = '#1f1f1f';
-  Chart.defaults.plugins.legend.labels.color = '#888';
-  Chart.defaults.plugins.legend.labels.usePointStyle = true;
-  Chart.defaults.plugins.legend.labels.pointStyleWidth = 8;
-  Chart.defaults.plugins.tooltip.backgroundColor = '#1a1a1a';
-  Chart.defaults.plugins.tooltip.borderColor      = '#2a2a2a';
-  Chart.defaults.plugins.tooltip.borderWidth       = 1;
-  Chart.defaults.plugins.tooltip.titleColor        = '#e4e4e4';
-  Chart.defaults.plugins.tooltip.bodyColor         = '#888';
-  Chart.defaults.plugins.tooltip.padding           = 10;
+  // Scroll regions: say so (text, not only the edge shadow) when content is cut off
+  (function () {
+    function mark() {
+      document.querySelectorAll('.table-scroll, .heatmap-wrap').forEach(function (el) {
+        var over = el.scrollWidth > el.clientWidth + 1;
+        el.setAttribute('data-overflow', over ? 'true' : 'false');
+        var hint = el.previousElementSibling;
+        if (!hint || !hint.classList.contains('scroll-hint')) {
+          hint = document.createElement('p');
+          hint.className = 'scroll-hint';
+          hint.textContent = 'Scroll sideways for more columns';
+          el.parentNode.insertBefore(hint, el);
+        }
+        hint.classList.toggle('show', over);
+      });
+    }
+    mark();
+    window.addEventListener('resize', mark);
+  })();
+</script>
 
+<!-- Chart.js 4.4.3, vendored (dashboard/static) so the site has no
+     third-party script on its critical path; freeze_site.py refuses to publish if
+     the file's sha384 differs from sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54. (No integrity attribute on the
+     same-origin copy: browsers enforce SRI only on CORS-enabled loads, which a
+     file:// preview is not.) If the local copy fails, the pinned CDN build is tried
+     WITH that SRI; if that fails too, every chart is replaced by its data summary
+     instead of the page throwing 'Chart is not defined'. -->
+<script src="static/chart.umd-4.4.3.js"></script>
+<script>
+  // Shared chart styling (text colours meet WCAG AA on the card surface)
+  var VS = {
+    sans:  "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    tick:  '#8f969f',   // --text3
+    title: '#adb3bb',   // --text2
+    grid:  'rgba(255,255,255,0.06)',
+    zero:  'rgba(255,255,255,0.22)',
+    // series: neutral headline, then distinct muted hues (>= 3:1 on the card)
+    series: { portfolio: '#e7e9ec', s1c: '#7fadf7', s3: '#e3a54a', s4: '#b99cf0', s1: '#8f969f',
+              pos: '#5cc8a0', neg: '#f0787c', info: '#7fadf7' },
+    // maturity is ordinal: one sequential ramp, short (light) to long (violet)
+    maturity: { 14: '#e8d77a', 30: '#e3b04a', 60: '#e8925a', 91: '#d6727a', 180: '#b06aa8', 365: '#8a6fe0' },
+  };
+  // Number formatting shared by ticks and tooltips: true minus sign, fixed decimals.
+  function vsNum(v, digits, signed) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    var s = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    return (v < 0 ? '−' : (signed && v > 0 ? '+' : '')) + s;
+  }
+
+  // vsCharts(fn): run a page's chart code once Chart.js is available.
+  (function () {
+    var queue = [];
+    var state = 'pending';
+    function setup() {
+      Chart.defaults.font.family = VS.sans;
+      Chart.defaults.font.size = 11;
+      Chart.defaults.color            = VS.tick;
+      Chart.defaults.borderColor      = VS.grid;
+      Chart.defaults.scale.grid.color = VS.grid;
+      Chart.defaults.scale.border = { display: false };
+      Chart.defaults.scale.title.color = VS.title;
+      Chart.defaults.scale.title.font = { size: 11, weight: '500' };
+      Chart.defaults.plugins.legend.labels.color = VS.title;
+      Chart.defaults.plugins.legend.labels.usePointStyle = true;
+      Chart.defaults.plugins.legend.labels.pointStyleWidth = 10;
+      Chart.defaults.plugins.legend.labels.boxHeight = 6;
+      Chart.defaults.plugins.tooltip.backgroundColor = '#1f242a';
+      Chart.defaults.plugins.tooltip.borderColor      = '#30363e';
+      Chart.defaults.plugins.tooltip.borderWidth       = 1;
+      Chart.defaults.plugins.tooltip.titleColor        = '#e7e9ec';
+      Chart.defaults.plugins.tooltip.bodyColor         = '#adb3bb';
+      Chart.defaults.plugins.tooltip.padding           = 10;
+      Chart.defaults.plugins.tooltip.boxPadding        = 4;
+      Chart.defaults.elements.line.borderWidth = 1.6;
+      Chart.defaults.elements.point.radius = 0;
+      Chart.defaults.elements.bar.borderRadius = 2;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        Chart.defaults.animation = false;
+      }
+      // Re-lay out the charts for paper (Chart.js responsive docs: resize on beforeprint)
+      var printColours = { tick: '#333333', title: '#111111', grid: '#cccccc', ink: '#111111' };
+      VS.ink = VS.series.portfolio;   // the near-white headline series turns black on paper
+      function restyle(c) {
+        Chart.defaults.color = c.tick;
+        Chart.defaults.borderColor = c.grid;
+        Chart.defaults.scale.grid.color = c.grid;
+        Chart.defaults.plugins.legend.labels.color = c.title;
+        // per-chart options are resolved at creation, so set them on each chart too
+        Object.values(Chart.instances).forEach(function (ch) {
+          Object.values(ch.options.scales || {}).forEach(function (sc) {
+            if (sc.grid) sc.grid.color = c.grid;
+            if (sc.ticks) sc.ticks.color = c.tick;
+            if (sc.title) sc.title.color = c.title;
+          });
+          var lg = ch.options.plugins && ch.options.plugins.legend;
+          if (lg && lg.labels) lg.labels.color = c.title;
+          ch.data.datasets.forEach(function (ds) {
+            if (ds.borderColor === VS.ink || ds.borderColor === printColours.ink) {
+              ds.borderColor = c.ink; ds.backgroundColor = c.ink;
+            }
+          });
+          ch.resize();
+          ch.update('none');
+        });
+      }
+      window.addEventListener('beforeprint', function () { restyle(printColours); });
+      window.addEventListener('afterprint',  function () { restyle(VS); });
+      state = 'ready';
+    }
+    function run(fn) {
+      try { fn(); } catch (e) { console.error('chart rendering failed:', e); }
+    }
+    function fail() {
+      state = 'failed';
+      queue = [];
+      document.documentElement.classList.add('charts-failed');
+      document.querySelectorAll('.chart-wrap').forEach(function (w) {
+        var p = document.createElement('p');
+        p.className = 'chart-fallback';
+        p.textContent = 'Chart unavailable: the charting library could not be loaded. The values are listed below.';
+        w.appendChild(p);
+      });
+    }
+    window.vsCharts = function (fn) {
+      if (state === 'ready') run(fn);
+      else if (state === 'pending') queue.push(fn);
+    };
+    if (window.Chart) { setup(); return; }
+    var s = document.createElement('script');
+    s.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js";
+    s.integrity = "sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54";
+    s.crossOrigin = 'anonymous';
+    s.onload = function () {
+      if (!window.Chart) return fail();
+      setup();
+      queue.splice(0).forEach(run);
+    };
+    s.onerror = fail;
+    document.head.appendChild(s);
+  })();
+
+  // Axis option helpers (colours and fonts come from Chart.defaults above)
   function makeLineOpts(yLabel) {
     return {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { display: true, position: 'top' },
+        legend: { display: true, position: 'top', align: 'start' },
         tooltip: { mode: 'index' },
       },
       scales: {
-        x: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', maxTicksLimit: 8, font: { family: 'Menlo', size: 10 } },
-        },
-        y: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
-        },
+        x: { ticks: { maxTicksLimit: 8 }, grid: { display: false } },
+        y: { title: { display: !!yLabel, text: yLabel } },
       },
     };
   }
@@ -1205,15 +1259,9 @@
         tooltip: { mode: 'index' },
       },
       scales: {
-        x: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-        },
-        y: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } },
-        },
+        x: { grid: { display: false } },
+        y: { title: { display: !!yLabel, text: yLabel },
+             grid: { color: function (c) { return c.tick && c.tick.value === 0 ? VS.zero : VS.grid; } } },
       },
     };
   }
@@ -1221,93 +1269,67 @@
 
 
 <script>
-  // Multi-maturity smile chart
-  const smileCtx = document.getElementById('smileChart').getContext('2d');
-  const matSmiles = [{"T": 14, "color": "#ff3333", "iv": [38.916, 37.399, 35.808, 34.122, 32.304, 30.312, 28.087, 25.519, 22.379, 12.105, 16.357, 20.773, 24.906, 28.746], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0929, 0.1321, 0.1714, 0.2107, 0.25]}, {"T": 30, "color": "#ff8844", "iv": [38.159, 36.718, 35.19, 33.56, 31.804, 29.888, 27.758, 25.323, 22.401, 4.999, 10.251, 20.155], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.1321, 0.2107, 0.25]}, {"T": 60, "color": "#ffcc00", "iv": [36.955, 35.59, 34.148, 32.616, 30.973, 29.194, 27.237, 25.04, 22.49, 19.365], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536]}, {"T": 91, "color": "#00ff88", "iv": [35.869, 34.582, 33.227, 31.793, 30.265, 28.623, 26.839, 24.87, 22.652, 20.081], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536]}, {"T": 180, "color": "#44aaff", "iv": [33.538, 32.458, 31.332, 30.157, 28.925, 27.629, 26.258, 24.8, 23.24, 21.557, 19.72], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, 0.0929]}, {"T": 365, "color": "#aa44ff", "iv": [30.971, 30.205, 29.419, 28.611, 27.781, 26.925, 26.043, 25.13, 24.184, 23.2, 22.174, 21.101], "lm": [-0.3, -0.2607, -0.2214, -0.1821, -0.1429, -0.1036, -0.0643, -0.025, 0.0143, 0.0536, 0.0929, 0.1321]}];
+vsCharts(function () {
+  // Model smile of the headline parameters (+ market anchors when stored)
+  const smileEl = document.getElementById('smileChart');
+  if (smileEl) {
+    const matSmiles = [{"T": 14, "iv": [44.750695826364584, 43.23295779491896, 41.64789970179856, 39.985700146519434, 38.23389460182459, 36.376263156637, 34.39103890676805, 32.24785678105446, 29.902184303626406, 27.284252549249178, 24.275021476650448, 20.654718079531182, 16.107529153244066, 12.458447559290708, 12.804438903059424, 13.931212157719228, 15.0907577262159], "lm": [-0.3, -0.275, -0.25, -0.225, -0.2, -0.175, -0.15, -0.125, -0.1, -0.075, -0.05, -0.025, 0.0, 0.025, 0.05, 0.075, 0.1]}, {"T": 30, "iv": [42.47005390984365, 40.9544139477862, 39.37014139641058, 37.70735647148117, 35.95365217987339, 34.093127248035024, 32.104923201189976, 29.960970696063, 27.6225104583735, 25.03492865366433, 22.121378813443226, 18.783465316175793, 14.997460617952118, 11.946327899191186, 11.944477413871029, 12.98425683745155, 14.124011058426278, 15.21781563648243, 16.24675668025112, 17.214843264620495], "lm": [-0.3, -0.275, -0.25, -0.225, -0.2, -0.175, -0.15, -0.125, -0.1, -0.075, -0.05, -0.025, 0.0, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175]}, {"T": 60, "iv": [38.65434391057664, 37.19210952225891, 35.66928859142362, 34.078539735077726, 32.41108759894882, 30.656361128399055, 28.8015282554273, 26.8309010013364, 24.725210921515657, 22.46093789280669, 20.01089060674401, 17.353078854495184, 14.533943792014572, 12.072718593035477, 11.337702514377867, 11.884622309409368, 12.77268025104972, 13.721202301403832, 14.654870218621497, 15.552557917074012, 16.40985728675685, 17.227963401047962, 18.0098651824876], "lm": [-0.3, -0.275, -0.25, -0.225, -0.2, -0.175, -0.15, -0.125, -0.1, -0.075, -0.05, -0.025, 0.0, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25]}, {"T": 91, "iv": [35.71719883722032, 34.35377062056126, 32.94127697349095, 31.47482829331588, 29.948753784481667, 28.356423379833295, 26.690022671876584, 24.94028867820444, 23.096278155113417, 21.14548285401608, 19.0755501535696, 16.882900985789643, 14.612774578389311, 12.535864982427242, 11.416702382913018, 11.454130896510435, 12.013539849422193, 12.742094595212208, 13.517001267329096, 14.293600371138968, 15.054556750304087, 15.793241365981755, 16.507605420818347], "lm": [-0.3, -0.275, -0.25, -0.225, -0.2, -0.175, -0.15, -0.125, -0.1, -0.075, -0.05, -0.025, 0.0, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25]}, {"T": 180, "iv": [30.891397907873575, 29.7978035425649, 28.675069201522113, 27.5208886250075, 26.332656573448254, 25.10744001073845, 23.841973928249597, 22.53272439345055, 21.17612127333352, 19.769214413112223, 18.311408852866617, 16.809046269487578, 15.287642598626974, 13.82295278840332, 12.59443935495379, 11.847413807945651, 11.630608247659366, 11.769023302818194, 12.096106178251045, 12.517772918208541, 12.985968308988694, 13.47575524034475, 13.973687895181094], "lm": [-0.3, -0.275, -0.25, -0.225, -0.2, -0.175, -0.15, -0.125, -0.1, -0.075, -0.05, -0.025, 0.0, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25]}, {"T": 365, "iv": [26.90893910567177, 26.131782911058643, 25.33923301597626, 24.530467056993878, 23.704648220282134, 22.860960162097367, 21.998669703735175, 21.117237410343705, 20.216511866914882, 19.297071678207455, 18.360830025366454, 17.412103742723538, 16.459476656141206, 15.518879927458794, 14.617956492252823, 13.799713347860306, 13.118500386840761, 12.620141867091741, 12.316695842415438, 12.183867518708446, 12.18138740314193, 12.271369483941475, 12.424860517568549], "lm": [-0.3, -0.275, -0.25, -0.225, -0.2, -0.175, -0.15, -0.125, -0.1, -0.075, -0.05, -0.025, 0.0, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25]}];
+    const anchors = [];
+    const colorOf = T => VS.maturity[T] || VS.title;
+    const datasets = matSmiles.map(s => ({
+      label: s.T + 'd',
+      data: s.lm.map((x, i) => ({ x, y: s.iv[i] })),
+      borderColor: colorOf(s.T),
+      backgroundColor: colorOf(s.T),
+      tension: 0,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      borderWidth: 1.8,
+    }));
+    const anchorTs = [...new Set(anchors.map(a => a.T_days))];
+    anchorTs.forEach(T => datasets.push({
+      type: 'scatter',
+      label: T + 'd market',
+      data: anchors.filter(a => a.T_days === T).map(a => ({ x: a.lm, y: a.market_iv })),
+      borderColor: colorOf(T),
+      backgroundColor: colorOf(T),
+      pointStyle: 'crossRot',
+      pointRadius: 5,
+    }));
 
-  new Chart(smileCtx, {
-    type: 'line',
-    data: {
-      datasets: matSmiles.map(s => ({
-        label: s.T + 'd',
-        data: s.lm.map((x, i) => ({ x, y: s.iv[i] })),
-        borderColor: s.color,
-        backgroundColor: 'transparent',
-        tension: 0.25,
-        pointRadius: 3,
-        pointBackgroundColor: s.color,
-        borderWidth: 2,
-      }))
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: {
-          display: true,
-          position: 'top',
-          labels: { color: '#888', font: { family: 'Menlo', size: 10 }, boxWidth: 20 }
-        },
-        tooltip: {
-          callbacks: {
-            label: ctx => `  ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} vol pts`
+    new Chart(smileEl.getContext('2d'), {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        // 'nearest' (not 'index'): curves have different strike grids, so an
+        // index-paired tooltip mixed values from different strikes.
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { display: true, position: 'top', align: 'start', title: { display: true, text: 'Maturity', color: VS.tick } },
+          tooltip: {
+            callbacks: {
+              label: ctx => `  ${ctx.dataset.label}: ln(K/F) ${vsNum(ctx.parsed.x, 3, true)}, ${vsNum(ctx.parsed.y, 2)}% vol`
+            }
           }
-        }
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: true, text: 'Log-Moneyness  ln(K/F)', color: '#444', font: { size: 10 } },
         },
-        y: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 }, callback: v => v.toFixed(1) + '%' },
-          title: { display: true, text: 'Implied Vol (%)', color: '#444', font: { size: 10 } },
-        },
-      },
-    }
-  });
-
-  // RMSE comparison bar
-  const rmseCtx = document.getElementById('rmseChart').getContext('2d');
-  new Chart(rmseCtx, {
-    type: 'bar',
-    data: {
-      labels: ['SPX IV RMSE', 'VIX Futures RMSE', 'VIX Options RMSE'],
-      datasets: [{
-        data: [0.041, 0.092, 0.0],
-        backgroundColor: ['#3388ff', '#00ff88', '#ff3333'],
-        borderRadius: 4,
-        borderSkipped: false,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => `  RMSE: ${ctx.parsed.y.toFixed(3)} pts`
-          }
-        }
-      },
-      scales: {
-        x: {
-          grid: { color: '#141414' },
-          ticks: { color: '#888', font: { size: 11 } },
-        },
-        y: {
-          grid: { color: '#141414' },
-          ticks: { color: '#555', font: { family: 'Menlo', size: 10 } },
-          title: { display: true, text: 'RMSE (vol pts / VIX pts)', color: '#444', font: { size: 10 } },
+        scales: {
+          x: {
+            type: 'linear',
+            grid: { display: false },
+            ticks: { callback: v => vsNum(v, 2, true) },
+            title: { display: true, text: 'Log-moneyness ln(K/F)' },
+          },
+          y: {
+            ticks: { callback: v => vsNum(v, 0) + '%' },
+            title: { display: true, text: 'Implied vol (% annualised)' },
+          },
         },
       }
-    }
-  });
+    });
+  }
+});
 </script>
 
 
