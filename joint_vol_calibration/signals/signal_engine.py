@@ -1,23 +1,32 @@
 """
 signal_engine.py — C9: Trading Signal Engine
 
-Three regime-gated volatility trading signals that together drive position
-sizing for the complete backtest in C10.
+Regime-gated volatility trading signals that drive position sizing for the
+backtest in C10. Every signal at session t is computed from features and
+regime labels dated t−1 (see "Zero look-ahead" below).
 
-Signal 1 — IV vs Realised Spread Trade
----------------------------------------
-  Edge: PDV-forecast vol deviates from ATM implied vol (VIX).
-    PDV > VIX  → market underprices vol → long straddle (long gamma)
-    VIX > PDV  → market overprices vol → short straddle (short gamma)
+Signal 1 — PDV–IV Spread Trade (formerly "IVR"; no implied-vol rank exists)
+---------------------------------------------------------------------------
+  Spread = σ̂(t) − VIX(t)/100, where σ̂ is the walk-forward PDV forecast of
+  the RMS vol over the next 21 sessions (the VIX horizon) made at the close
+  of t (regime_classifier.walk_forward_pdv_vol; SignalEngine.generate's
+  default), or another injected forecast, or — before the first forecast /
+  when explicitly disabled — the trailing rv_20d proxy. Pre-C22 σ̂ was a
+  1-day |r| (E|r| ≈ 0.66·RMS vol) forecast or rv_20d, so "VIX > σ̂ + 2 vp"
+  held on ~96% of days.
+    σ̂ > VIX  → market underprices vol → long straddle (long gamma)
+    VIX > σ̂  → market overprices vol → short straddle (short gamma)
 
   Regime gate:
-    Long  straddle only in Regime 0 (LONG_GAMMA,  rv > iv)
-    Short straddle only in Regime 1 (SHORT_GAMMA, iv > rv)
-    No new entries in Regime 2 (VOMMA_ACTIVE — too dangerous)
+    Long  straddle only in Regime 0 (LONG_GAMMA,  trailing rv > iv)
+    Short straddle only in Regime 1 (SHORT_GAMMA, iv ≥ trailing rv)
+    No new entries in Regime 2 (VOMMA_ACTIVE)
 
-  Entry threshold : |pdv_iv_spread| > 0.02  (2 vol points)
-  Exit            : spread reverts to zero OR max-hold 21 days
-  Sizing          : Kelly fraction = tanh(|spread|/0.04) × 0.20, capped at 20 %
+  Entry threshold : |spread| > 0.02  (2 vol points)
+  Exit            : the spread reverts INTO the ±0.5 vp band OR crosses
+                    through zero to the other side (the entry side is
+                    remembered), OR max-hold 21 days
+  Sizing          : size fraction = tanh(|spread|/0.04) × 0.20, capped at 20 %
 
 Signal 1 — Regime-Filtered Variant (S1_regime_filtered)
 ---------------------------------------------------------
@@ -39,69 +48,76 @@ Signal 2 — VIX Term-Structure Curve Trade
 ------------------------------------------
   Edge: VIX 3M–1M slope deviates from its 252-day rolling mean.
     Slope > mean + 1σ  → contango steeper than normal, front month overpriced
-                        → short front vol (short calendar spread)
+                        → short front vol (SHORT SPX straddle, −1)
     Slope < 0 (inversion / backwardation)
                         → front month cheap
-                        → long front vol
+                        → long front vol (LONG SPX straddle, +1)
 
   Regime gate: only Regime 0 or 1 (never Regime 2)
 
   Exit: slope z-score reverts inside ±0.50  OR  max-hold 10 days
-        OR stop-loss: slope moves 15 % of entry level against position
+        OR stop-loss: front-month implied vol (VIX) moves 15 % of its entry
+        level AGAINST the straddle actually traded — up for a short
+        straddle, down for a long one. (Pre-C22 the stop was written on the
+        slope with the sign inverted: it fired when the trade was winning.)
   Sizing: min(|z_slope| / 3, 1.0) × 0.20, capped at 20 %
 
-Signal 3 — Dispersion Proxy Trade
-------------------------------------
-  Edge: VIX / VVIX ratio is below its 252-day rolling mean by ≥ 1 σ.
-    A depressed VIX relative to VVIX implies the index is calm while
-    individual-stock options are nervous → low implied correlation →
-    long dispersion (long single-stock vol, short index vol) is cheap.
+Signal 3 — VIX/VVIX Ratio ("Dispersion Proxy") Trade
+------------------------------------------------------
+  Entry when the VIX / VVIX ratio is below its 252-day rolling mean by ≥ 1σ:
+  VIX is calm relative to the vol-of-vol market.
 
-  Substitution note: we use VIX/VVIX as a proxy for the index-vol /
-  single-stock-vol ratio because historical single-stock options data
-  is not in the database (only SPX and VIX index options available).
-  No implied-correlation index data is in the DB, so the proxy's link
-  to true dispersion pricing is a hypothesis, not a verified relation.
+  What +1 means operationally: the signal is ON — long dispersion. The
+  backtest trades it as the INDEX LEG of a dispersion trade, i.e. a SHORT
+  delta-hedged SPX straddle (backtest_engine.S3_LEG_DIRECTION = −1); the
+  pre-C22 P&L proxy (P&L ∝ Δz of the ratio) is gone. The research-only
+  combiner below still counts S3 = +1 as LONG index vol (the old reading),
+  the opposite of what the backtest trades, so its "combined" sleeve is not
+  a coherent strategy and is not reported.
 
-  Entry: z_ratio < −1.0  AND  regime in {0, 1}  → long dispersion (+1)
+  Substitution note: no single-stock options or implied-correlation data are
+  in the database, so the link to true dispersion pricing is unverified.
+
+  Entry: z_ratio < −1.0  AND  regime in {0, 1}  → +1
   Exit : z_ratio > −0.30  OR  max-hold 30 days
   Sizing: min(|z_ratio| / 3, 1.0) × 0.20, capped at 20 %
 
-Signal combination
-------------------
-  For each day, three scalar positions s1, s2, s3 ∈ {−1, 0, +1}.
+Signal combination (research only; the published portfolio does not use it)
+---------------------------------------------------------------------------
+  Positions s1c, s3, s4 ∈ {−1, 0, +1}, each read as an index-vol direction.
 
-  All three agree (same non-zero sign):
-    combined = mean(agreeing) × equal_weight_factor   (full conviction)
+    All three non-zero and agree      → direction × 1.0, mean strength
+    Two agree, third flat             → direction × 0.5, mean strength × 0.5
+    One non-zero, two flat            → direction × 0.5, strength × 0.5
+    Any two non-zero signals conflict → 0
+    All flat                          → 0
 
-  Exactly two agree (same sign, third is 0 or opposite):
-    If third is flat (0)  → combined = mean(two) × 0.5  (half weight)
-    If third conflicts    → combined = 0               (too uncertain)
-
-  All flat or conflicted: combined = 0
-
-  The combined_pos is further scaled by combined_strength ∈ [0, 1].
+  (One active signal earns the same half weight as two agreeing ones.)
 
 Zero look-ahead guarantee
 -------------------------
-  All feature inputs are derived from close of t-1 before any day-t
-  signal is generated.  The public `generate()` method shifts the
-  feature DataFrame by 1 row before signal computation.
+  SignalEngine.generate() lags the feature matrix AND the regime labels by
+  one SESSION before any signal is computed, so the signal for session t uses
+  only data dated ≤ t−1 and can trade at the close of t. Rolling statistics
+  are trailing and use all history supplied (entries start at start_date);
+  regime labels passed in are only lagged, never modified.
 
 Outputs
 -------
   signals_df columns per signal:
-    s{i}_pos           : +1 / −1 / 0
-    s{i}_str           : 0–1 signal strength (used for position sizing)
+    s{i}_position      : +1 / −1 / 0
+    s{i}_strength      : 0–1 signal strength (used for position sizing)
     s{i}_regime_entry  : Regime at time of entry (NaN while flat)
     s{i}_days_held     : trading days since entry (0 while flat)
-    s{i}_kelly         : Kelly fraction (capped at 20 %)
+    s{i}_kelly         : size fraction (capped at 20 %; a heuristic, not a
+                         Kelly-criterion estimate — the name is historical)
     s{i}_exp_pnl       : expected P&L proxy  = str × kelly × 100
+    s2_z, s3_z, s4_z   : the continuous z-scores the signals threshold on
 
   Combined:
     combined_pos       : final position (−1 to +1)
     combined_str       : final strength
-    combined_kelly     : combined Kelly fraction
+    combined_kelly     : combined size fraction
 """
 
 import logging
@@ -114,9 +130,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from joint_vol_calibration.config import DATA_DIR
+from joint_vol_calibration.config import BT_END, BT_START, DATA_DIR
 from joint_vol_calibration.signals.regime_classifier import (
-    VVIX_REGIME2_THRESHOLD,
+    PDV_WALK_FORWARD,
+    R2_GATE,
     RegimeClassifier,
     build_features,
     build_regime_labels,
@@ -126,8 +143,9 @@ logger = logging.getLogger(__name__)
 
 # ── Signal constants ──────────────────────────────────────────────────────────
 
-# Signal 1 — IVR spread trade
+# Signal 1 — PDV–IV spread trade
 S1_ENTRY_THRESHOLD: float = 0.02     # 2 vol points (decimal)
+S1_EXIT_BAND: float       = 0.005    # exit inside ±0.5 vp, or on crossing zero
 S1_MAX_HOLD: int          = 21       # trading days
 S1_MAX_KELLY: float       = 0.20     # cap at 20 % of notional
 S1_STRENGTH_SCALE: float  = 0.04     # tanh(spread / scale) saturates at this spread
@@ -138,11 +156,12 @@ S2_ZSCORE_ENTRY: float    = 1.0      # enter short when z > 1 std
 S2_ZSCORE_EXIT: float     = 0.50     # exit when |z| < 0.5 (mean-reversion)
 S2_LOOKBACK: int          = 252      # rolling window for slope stats
 S2_MAX_HOLD: int          = 10       # trading days
-S2_STOP_LOSS_PCT: float   = 0.15     # 15 % adverse move triggers stop
+S2_STOP_LOSS_PCT: float   = 0.15     # stop when VIX moves 15 % of its entry
+                                     # level against the straddle held
 S2_MAX_KELLY: float       = 0.20
 S2_STRENGTH_SCALE: float  = 3.0      # z / scale → strength
 
-# Signal 3 — Dispersion proxy trade
+# Signal 3 — VIX/VVIX ratio ("dispersion proxy") trade
 S3_ZSCORE_ENTRY: float    = -1.0     # enter when z_ratio < −1.0
 S3_ZSCORE_EXIT: float     = -0.30    # exit when z_ratio > −0.30
 S3_LOOKBACK: int          = 252      # rolling window for VIX/VVIX ratio stats
@@ -165,13 +184,38 @@ S4_MAX_HOLD: int          = 15      # shorter hold to reduce regime-change expos
 S4_MAX_KELLY: float       = 0.20
 S4_STRENGTH_SCALE: float  = 2.0    # |z| / scale → strength (saturates at 2σ)
 
-# Output paths
+# Output paths. SignalEngine.save() names its default file after the date
+# span actually saved (default_signals_path); a fixed "signals_2015_2025"
+# name once labelled a 2018-01..2025-03 file that nothing read.
 SIGNALS_DIR   = DATA_DIR / "signals"
-SIGNALS_PATH  = SIGNALS_DIR / "signals_2015_2025.parquet"
 SIGNALS_CHART = SIGNALS_DIR / "signal_overview.png"
 
 
+def default_signals_path(df: pd.DataFrame) -> Path:
+    """data_store/signals/signals_<first>_<last>.parquet for a signals frame."""
+    idx = pd.to_datetime(df.index)
+    return SIGNALS_DIR / f"signals_{idx.min():%Y%m%d}_{idx.max():%Y%m%d}.parquet"
+
+
 # ── Generic state-machine helper ──────────────────────────────────────────────
+
+def _side_exit(
+    exit_cond:  pd.Series,
+    exit_long:  Optional[pd.Series],
+    exit_short: Optional[pd.Series],
+) -> "tuple[np.ndarray, np.ndarray]":
+    """Per-side exit flags: exit_cond OR the side-specific condition."""
+    base = exit_cond.fillna(False).astype(bool).to_numpy()
+    el = base | (exit_long.fillna(False).astype(bool).to_numpy() if exit_long is not None else False)
+    es = base | (exit_short.fillna(False).astype(bool).to_numpy() if exit_short is not None else False)
+    return el, es
+
+
+def _entry_allowed(entry_allowed: Optional[pd.Series], n: int) -> np.ndarray:
+    if entry_allowed is None:
+        return np.ones(n, dtype=bool)
+    return entry_allowed.fillna(False).astype(bool).to_numpy()
+
 
 def _run_statemachine(
     entry_long:  pd.Series,
@@ -180,6 +224,9 @@ def _run_statemachine(
     strength:    pd.Series,
     regime:      pd.Series,
     max_hold:    int,
+    exit_long:   Optional[pd.Series] = None,
+    exit_short:  Optional[pd.Series] = None,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Simulate a trading state machine over a time series.
@@ -188,10 +235,15 @@ def _run_statemachine(
     -----
     • Enter long  when entry_long[t]=True  AND currently flat.
     • Enter short when entry_short[t]=True AND currently flat.
-    • Exit when exit_cond[t]=True OR days_held >= max_hold.
+    • Exit when exit_cond[t]=True OR days_held >= max_hold, or — for a long
+      position — exit_long[t]=True, for a short — exit_short[t]=True
+      (optional side-specific exits; NaN counts as False).
     • On exit day, position immediately becomes 0.
     • No re-entry on the same day as exit.
     • If both entry_long and entry_short fire on same day: no entry.
+    • No entry on a day where entry_allowed is False (optional; lets
+      trailing statistics use history before a backtest window while the
+      book still starts flat at the window's first session).
 
     Returns
     -------
@@ -203,6 +255,8 @@ def _run_statemachine(
     """
     n = len(entry_long)
     idx = entry_long.index
+    exit_l, exit_s = _side_exit(exit_cond, exit_long, exit_short)
+    allow = _entry_allowed(entry_allowed, n)
 
     position    = np.zeros(n, dtype=float)
     str_out     = np.zeros(n, dtype=float)
@@ -213,12 +267,11 @@ def _run_statemachine(
     cur_str         = 0.0
     cur_regime      = np.nan
     cur_days        = 0
-    entry_price_ref = 0.0   # reference value for stop-loss (set externally if needed)
 
     for i in range(n):
-        el = bool(entry_long.iloc[i])
-        es = bool(entry_short.iloc[i])
-        ec = bool(exit_cond.iloc[i])
+        el = bool(entry_long.iloc[i]) and allow[i]
+        es = bool(entry_short.iloc[i]) and allow[i]
+        ec = bool(exit_l[i]) if cur_pos > 0 else bool(exit_s[i])
 
         if cur_pos != 0:
             # In trade
@@ -275,6 +328,9 @@ def _run_statemachine_r2exit(
     strength:    pd.Series,
     regime:      pd.Series,
     max_hold:    int,
+    exit_long:   Optional[pd.Series] = None,
+    exit_short:  Optional[pd.Series] = None,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     State machine variant that EXITS positions when regime transitions INTO R2.
@@ -286,6 +342,7 @@ def _run_statemachine_r2exit(
     Differs from the S1RF (regime-filtered) variant, which zeroes the output
     on R2 days but leaves the state machine running.  This variant TERMINATES
     the trade at the R2 boundary — the position is gone, not paused.
+    exit_long / exit_short / entry_allowed behave as in _run_statemachine.
 
     Returns
     -------
@@ -294,6 +351,8 @@ def _run_statemachine_r2exit(
     """
     n   = len(entry_long)
     idx = entry_long.index
+    exit_l, exit_s = _side_exit(exit_cond, exit_long, exit_short)
+    allow = _entry_allowed(entry_allowed, n)
 
     position   = np.zeros(n, dtype=float)
     str_out    = np.zeros(n, dtype=float)
@@ -308,9 +367,9 @@ def _run_statemachine_r2exit(
     prev_reg   = -1.0   # -1 sentinel = "no prior regime"
 
     for i in range(n):
-        el      = bool(entry_long.iloc[i])
-        es      = bool(entry_short.iloc[i])
-        ec      = bool(exit_cond.iloc[i])
+        el      = bool(entry_long.iloc[i]) and allow[i]
+        es      = bool(entry_short.iloc[i]) and allow[i]
+        ec      = bool(exit_l[i]) if cur_pos > 0 else bool(exit_s[i])
         cur_reg = float(regime.iloc[i]) if pd.notna(regime.iloc[i]) else -1.0
 
         if cur_pos != 0:
@@ -363,7 +422,21 @@ def _run_statemachine_r2exit(
     )
 
 
-# ── Signal 1: IVR Spread ──────────────────────────────────────────────────────
+# ── Signal 1: PDV–IV Spread ───────────────────────────────────────────────────
+
+def _s1_spread_exits(spread: pd.Series) -> "tuple[pd.Series, pd.Series]":
+    """Exit flags keyed to the side of zero the spread was on at entry.
+
+    A trade entered on a POSITIVE spread (> +threshold) exits once the spread
+    is back below +S1_EXIT_BAND — inside the band or already through zero;
+    a trade entered on a NEGATIVE spread exits once it is above −S1_EXIT_BAND.
+    The old rule (|spread| < band only) missed sign flips that jumped over the
+    ±0.5 vp band (10 of 23 in 2018-2025) and rode them to max-hold.
+
+    Returns (exit_from_positive, exit_from_negative).
+    """
+    return spread < S1_EXIT_BAND, spread > -S1_EXIT_BAND
+
 
 def generate_signal1(
     features: pd.DataFrame,
@@ -371,6 +444,7 @@ def generate_signal1(
     threshold: float = S1_ENTRY_THRESHOLD,
     max_hold:  int   = S1_MAX_HOLD,
     max_kelly: float = S1_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 1: PDV vs ATM IV spread trade.
@@ -382,7 +456,8 @@ def generate_signal1(
       PDV > VIX + threshold  AND  regime == 0  → long straddle (+1)
       VIX > PDV + threshold  AND  regime == 1  → short straddle (−1)
 
-    Exit: spread crosses zero  OR  days_held >= max_hold.
+    Exit: spread back inside ±S1_EXIT_BAND or through zero (see
+    _s1_spread_exits)  OR  days_held >= max_hold.
     """
     spread = features["pdv_iv_spread"]      # σ_PDV − σ_ATM  (decimal)
 
@@ -392,10 +467,13 @@ def generate_signal1(
     entry_long  = (spread >  threshold) & (regimes == 0)
     entry_short = (spread < -threshold) & (regimes == 1)
 
-    exit_cond   = spread.abs() < 0.005   # exit when spread reverts to ~zero
+    # long entered on a positive spread, short on a negative one
+    from_pos, from_neg = _s1_spread_exits(spread)
+    no_exit = pd.Series(False, index=spread.index)
 
     result = _run_statemachine(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+        entry_long, entry_short, no_exit, strength, regimes, max_hold,
+        exit_long=from_pos, exit_short=from_neg, entry_allowed=entry_allowed,
     )
 
     kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
@@ -412,6 +490,7 @@ def generate_signal1_contrarian(
     threshold: float = S1_ENTRY_THRESHOLD,
     max_hold:  int   = S1_MAX_HOLD,
     max_kelly: float = S1_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 1 Contrarian (S1C): PDV model mean-reversion trade.
@@ -426,7 +505,8 @@ def generate_signal1_contrarian(
       PDV > VIX + threshold  AND  regime == 0  → SHORT straddle (−1)
       VIX > PDV + threshold  AND  regime == 1  → LONG  straddle (+1)
 
-    Exit: spread reverts to ~0  OR  max_hold  OR  regime transitions INTO
+    Exit: spread back inside ±S1_EXIT_BAND or through zero (see
+    _s1_spread_exits)  OR  max_hold  OR  regime transitions INTO
     R2 (forced close via _run_statemachine_r2exit — C17). An open short
     straddle riding through a VVIX spike for up to 21 days with no stop
     was the single largest production tail risk; the R2 boundary now
@@ -450,10 +530,13 @@ def generate_signal1_contrarian(
     entry_short = (spread >  threshold) & (regimes == 0)
     entry_long  = (spread < -threshold) & (regimes == 1)
 
-    exit_cond   = spread.abs() < 0.005
+    # short entered on a positive spread, long on a negative one
+    from_pos, from_neg = _s1_spread_exits(spread)
+    no_exit = pd.Series(False, index=spread.index)
 
     result = _run_statemachine_r2exit(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+        entry_long, entry_short, no_exit, strength, regimes, max_hold,
+        exit_long=from_neg, exit_short=from_pos, entry_allowed=entry_allowed,
     )
 
     kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
@@ -470,6 +553,7 @@ def generate_signal1_regime_filtered(
     threshold: float = S1_ENTRY_THRESHOLD,
     max_hold:  int   = S1_MAX_HOLD,
     max_kelly: float = S1_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 1 — Regime-Filtered Variant (S1RF).
@@ -489,7 +573,8 @@ def generate_signal1_regime_filtered(
         s1rf_kelly, s1rf_exp_pnl
     """
     base = generate_signal1(features, regimes, threshold=threshold,
-                            max_hold=max_hold, max_kelly=max_kelly)
+                            max_hold=max_hold, max_kelly=max_kelly,
+                            entry_allowed=entry_allowed)
 
     result = base.rename(columns={c: c.replace("s1_", "s1rf_", 1) for c in base.columns})
 
@@ -504,8 +589,8 @@ def generate_signal1_regime_filtered(
 
 def compare_s1_regime_filter(
     signals_df: pd.DataFrame,
-    start_date: str   = "2018-01-01",
-    end_date:   str   = "2025-03-24",
+    start_date: str   = BT_START,
+    end_date:   str   = BT_END,
     notional:   float = 1_000_000.0,
 ) -> dict:
     """
@@ -605,6 +690,7 @@ def generate_signal1_r2exit(
     threshold: float = S1_ENTRY_THRESHOLD,
     max_hold:  int   = S1_MAX_HOLD,
     max_kelly: float = S1_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 1 — R2-Exit Variant (S1X).
@@ -628,10 +714,12 @@ def generate_signal1_r2exit(
 
     entry_long  = (spread >  threshold) & (regimes == 0)
     entry_short = (spread < -threshold) & (regimes == 1)
-    exit_cond   = spread.abs() < 0.005
+    from_pos, from_neg = _s1_spread_exits(spread)
+    no_exit = pd.Series(False, index=spread.index)
 
     result = _run_statemachine_r2exit(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+        entry_long, entry_short, no_exit, strength, regimes, max_hold,
+        exit_long=from_pos, exit_short=from_neg, entry_allowed=entry_allowed,
     )
 
     kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
@@ -649,6 +737,7 @@ def generate_signal1_soft(
     threshold: float = S1_ENTRY_THRESHOLD,
     max_hold:  int   = S1_MAX_HOLD,
     max_kelly: float = S1_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 1 — Soft Regime-Scaling Variant (S1S).
@@ -658,8 +747,10 @@ def generate_signal1_soft(
       - P(R2) ∈ [0.4, 0.6)  →  scale = 0.5  (half position)
       - P(R2) ≥ 0.6  →  scale = 0.0  (flat / no trade)
 
-    The step function respects the CalibratedClassifierCV output (isotonic
-    regression) and avoids over-sensitivity to small probability changes.
+    The 0.4 / 0.6 cut-offs only mean something if prob_r2 is a calibrated
+    probability: use a RegimeClassifier fit with calibration="holdout"
+    (isotonic map fit on a later window the booster never saw). The raw
+    booster output, trained with balanced class weights, overstates P(R2).
     Unlike continuous (1 − prob_r2), the three-level step gives cleaner
     risk-sizing behaviour.
 
@@ -675,7 +766,8 @@ def generate_signal1_soft(
         s1s_kelly, s1s_exp_pnl, s1s_scale
     """
     base = generate_signal1(
-        features, regimes, threshold=threshold, max_hold=max_hold, max_kelly=max_kelly
+        features, regimes, threshold=threshold, max_hold=max_hold, max_kelly=max_kelly,
+        entry_allowed=entry_allowed,
     )
     result = base.rename(columns={c: c.replace("s1_", "s1s_", 1) for c in base.columns})
 
@@ -697,70 +789,51 @@ def generate_signal1_soft(
 
 # ── Signal 2: VIX Term-Structure Curve ────────────────────────────────────────
 
-def generate_signal2(
-    features:      pd.DataFrame,
-    regimes:       pd.Series,
-    zscore_entry:  float = S2_ZSCORE_ENTRY,
-    zscore_exit:   float = S2_ZSCORE_EXIT,
-    lookback:      int   = S2_LOOKBACK,
-    max_hold:      int   = S2_MAX_HOLD,
-    stop_loss_pct: float = S2_STOP_LOSS_PCT,
-    max_kelly:     float = S2_MAX_KELLY,
-) -> pd.DataFrame:
-    """
-    Signal 2: VIX term-structure slope trade.
-
-    Slope = (VIX3M − VIX) / 100  (already in 'ts_slope' feature column).
-
-    Entry:
-      z_slope > zscore_entry  AND  regime ∈ {0, 1}  → short front vol (−1)
-      slope < 0 (backwardation)  AND  regime ∈ {0, 1}  → long front vol (+1)
-
-    Exit: |z_slope| < zscore_exit  OR  days_held >= max_hold  OR  stop-loss.
-    """
-    slope   = features["ts_slope"]      # (VIX3M − VIX) / 100
-
+def _s2_slope_zscore(slope: pd.Series, lookback: int) -> pd.Series:
+    """Trailing z-score of the VIX3M − VIX slope (window ends at t)."""
     mu_slope  = slope.rolling(lookback, min_periods=lookback // 2).mean()
     std_slope = slope.rolling(lookback, min_periods=lookback // 2).std().clip(lower=1e-6)
-    z_slope   = (slope - mu_slope) / std_slope
+    return (slope - mu_slope) / std_slope
 
-    # Strength: saturates at 1 when |z| = S2_STRENGTH_SCALE
-    strength = (z_slope.abs() / S2_STRENGTH_SCALE).clip(upper=1.0)
 
-    regime_ok  = regimes.isin([0, 1])
-    entry_long  = (slope < 0)          & regime_ok   # backwardation → long front vol
-    entry_short = (z_slope > zscore_entry) & regime_ok   # steep contango → short front vol
+def _apply_s2_stop(
+    result:        pd.DataFrame,
+    front_vol:     pd.Series,
+    stop_loss_pct: float,
+) -> pd.DataFrame:
+    """Stop an S2 trade when front-month implied vol moves against the straddle.
 
-    # Exit: z-score reverts inside exit band
-    exit_cond = z_slope.abs() < zscore_exit
+    S2 trades an SPX straddle: +1 = LONG straddle (loses when front vol
+    falls), −1 = SHORT straddle (loses when front vol rises). With
+    v_entry = VIX on the entry session, the adverse move on a later session is
 
-    result = _run_statemachine(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
-    )
+        adverse_t = −position × (VIX_t / v_entry − 1)
 
-    # Stop-loss: slope moved 15% of entry level against the position
-    # Compute inline using days_held > 0 and slope change
-    pos    = result["position"].values
-    dh     = result["days_held"].values
-    slope_v = slope.values
-    stop   = np.zeros(len(slope_v), dtype=bool)
+    and the stop fires when adverse_t > stop_loss_pct. The position is then
+    zeroed from the stop session until the state machine starts a NEW trade
+    (a single-day zero would let the trade resume on the next bar).
 
-    entry_slope_ref = 0.0
+    Pre-C22 the stop was written on the SLOPE (VIX3M − VIX) with the sign
+    inverted: it stopped shorts when contango steepened and longs when
+    backwardation deepened — both favourable for the straddle actually held —
+    so all 8 stops in 2018-2025 fired on winning trades.
+    """
+    pos  = result["position"].to_numpy()
+    dh   = result["days_held"].to_numpy()
+    vol  = front_vol.to_numpy(dtype=float)
+    stop = np.zeros(len(pos), dtype=bool)
+
+    entry_vol = np.nan
     for i in range(len(pos)):
         if dh[i] == 1:                         # just entered
-            entry_slope_ref = slope_v[i]
-        if dh[i] > 1 and entry_slope_ref != 0:
-            pct_move = (slope_v[i] - entry_slope_ref) / abs(entry_slope_ref)
-            # Short position (pos = -1) loses when slope widens (pct_move > +stop_loss_pct)
-            # Long position  (pos = +1) loses when slope narrows (pct_move < -stop_loss_pct)
-            if (pos[i] == -1 and pct_move >  stop_loss_pct) or \
-               (pos[i] == +1 and pct_move < -stop_loss_pct):
+            entry_vol = vol[i]
+        if dh[i] > 1 and pos[i] != 0 and np.isfinite(entry_vol) and entry_vol > 0 \
+                and np.isfinite(vol[i]):
+            adverse = -pos[i] * (vol[i] / entry_vol - 1.0)
+            if adverse > stop_loss_pct:
                 stop[i] = True
-                entry_slope_ref = 0.0
+                entry_vol = np.nan
 
-    # Apply stop-loss: zero out from stop day onward until the state machine
-    # starts a NEW trade (dh == 1). A single-day zero is not a real exit —
-    # the trade would resume on the next bar without this propagation.
     pos_with_stop = pos.copy()
     stopped = False
     for i in range(len(pos_with_stop)):
@@ -772,14 +845,81 @@ def generate_signal2(
                 stopped = False
             else:
                 pos_with_stop[i] = 0.0
+    result = result.copy()
     result["position"] = pos_with_stop
     result.loc[result["position"] == 0, "strength"] = 0.0
     result.loc[result["position"] == 0, "regime_entry"] = np.nan
     result.loc[result["position"] == 0, "days_held"] = 0
+    result["stop"] = stop
+    return result
+
+
+def _generate_signal2_core(
+    features:      pd.DataFrame,
+    regimes:       pd.Series,
+    zscore_entry:  float,
+    zscore_exit:   float,
+    lookback:      int,
+    max_hold:      int,
+    stop_loss_pct: float,
+    max_kelly:     float,
+    statemachine,
+    entry_allowed: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    slope   = features["ts_slope"]      # (VIX3M − VIX) / 100
+    z_slope = _s2_slope_zscore(slope, lookback)
+
+    # Strength: saturates at 1 when |z| = S2_STRENGTH_SCALE
+    strength = (z_slope.abs() / S2_STRENGTH_SCALE).clip(upper=1.0)
+
+    regime_ok   = regimes.isin([0, 1])
+    entry_long  = (slope < 0)              & regime_ok   # backwardation → long front vol
+    entry_short = (z_slope > zscore_entry) & regime_ok   # steep contango → short front vol
+
+    # Exit: z-score reverts inside exit band
+    exit_cond = z_slope.abs() < zscore_exit
+
+    result = statemachine(
+        entry_long, entry_short, exit_cond, strength, regimes, max_hold,
+        entry_allowed=entry_allowed,
+    )
+    result = _apply_s2_stop(result, features["vix"], stop_loss_pct)
 
     kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
     result["kelly"]    = kelly
     result["exp_pnl"]  = result["strength"].fillna(0.0) * kelly * 100.0
+    result["z"]        = z_slope
+    return result
+
+
+def generate_signal2(
+    features:      pd.DataFrame,
+    regimes:       pd.Series,
+    zscore_entry:  float = S2_ZSCORE_ENTRY,
+    zscore_exit:   float = S2_ZSCORE_EXIT,
+    lookback:      int   = S2_LOOKBACK,
+    max_hold:      int   = S2_MAX_HOLD,
+    stop_loss_pct: float = S2_STOP_LOSS_PCT,
+    max_kelly:     float = S2_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    """
+    Signal 2: VIX term-structure slope trade, traded as an SPX straddle.
+
+    Slope = (VIX3M − VIX) / 100  (already in 'ts_slope' feature column).
+
+    Entry:
+      z_slope > zscore_entry  AND  regime ∈ {0, 1}  → short straddle (−1)
+      slope < 0 (backwardation)  AND  regime ∈ {0, 1}  → long straddle (+1)
+
+    Exit: |z_slope| < zscore_exit  OR  days_held >= max_hold  OR  stop-loss
+    (VIX moves stop_loss_pct of its entry level against the straddle; see
+    _apply_s2_stop). Output adds s2_stop (stop sessions) and s2_z (z_slope).
+    """
+    result = _generate_signal2_core(
+        features, regimes, zscore_entry, zscore_exit, lookback, max_hold,
+        stop_loss_pct, max_kelly, _run_statemachine, entry_allowed=entry_allowed,
+    )
     return result.rename(columns={c: f"s2_{c}" for c in result.columns})
 
 
@@ -794,73 +934,27 @@ def generate_signal2_r2exit(
     max_hold:      int   = S2_MAX_HOLD,
     stop_loss_pct: float = S2_STOP_LOSS_PCT,
     max_kelly:     float = S2_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 2 — R2-Exit Variant (S2X).
 
-    Identical to generate_signal2() except that positions are forcibly closed
-    when regime transitions INTO R2 (prev day not R2, today R2).
+    Identical to generate_signal2() (including the VIX-based stop) except
+    that positions are forcibly closed when regime transitions INTO R2
+    (prev day not R2, today R2).
 
     Returns
     -------
     pd.DataFrame with columns prefixed ``s2x_``.
     """
-    slope     = features["ts_slope"]
-    mu_slope  = slope.rolling(lookback, min_periods=lookback // 2).mean()
-    std_slope = slope.rolling(lookback, min_periods=lookback // 2).std().clip(lower=1e-6)
-    z_slope   = (slope - mu_slope) / std_slope
-
-    strength = (z_slope.abs() / S2_STRENGTH_SCALE).clip(upper=1.0)
-
-    regime_ok   = regimes.isin([0, 1])
-    entry_long  = (slope < 0)               & regime_ok
-    entry_short = (z_slope > zscore_entry)  & regime_ok
-    exit_cond   = z_slope.abs() < zscore_exit
-
-    result = _run_statemachine_r2exit(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+    result = _generate_signal2_core(
+        features, regimes, zscore_entry, zscore_exit, lookback, max_hold,
+        stop_loss_pct, max_kelly, _run_statemachine_r2exit, entry_allowed=entry_allowed,
     )
-
-    # Stop-loss: slope moved 15 % of entry level against position
-    pos     = result["position"].values
-    dh      = result["days_held"].values
-    slope_v = slope.values
-    stop    = np.zeros(len(slope_v), dtype=bool)
-
-    entry_slope_ref = 0.0
-    for i in range(len(pos)):
-        if dh[i] == 1:
-            entry_slope_ref = slope_v[i]
-        if dh[i] > 1 and entry_slope_ref != 0:
-            pct_move = (slope_v[i] - entry_slope_ref) / abs(entry_slope_ref)
-            if (pos[i] == -1 and pct_move >  stop_loss_pct) or \
-               (pos[i] == +1 and pct_move < -stop_loss_pct):
-                stop[i] = True
-                entry_slope_ref = 0.0
-
-    pos_with_stop = pos.copy()
-    stopped = False
-    for i in range(len(pos_with_stop)):
-        if stop[i]:
-            pos_with_stop[i] = 0.0
-            stopped = True
-        elif stopped:
-            if dh[i] == 1:
-                stopped = False
-            else:
-                pos_with_stop[i] = 0.0
-    result["position"] = pos_with_stop
-    result.loc[result["position"] == 0, "strength"]     = 0.0
-    result.loc[result["position"] == 0, "regime_entry"] = np.nan
-    result.loc[result["position"] == 0, "days_held"]    = 0
-
-    kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
-    result["kelly"]   = kelly
-    result["exp_pnl"] = result["strength"].fillna(0.0) * kelly * 100.0
     return result.rename(columns={c: f"s2x_{c}" for c in result.columns})
 
 
-# ── Signal 3: Dispersion Proxy ────────────────────────────────────────────────
+# ── Signal 3: VIX/VVIX Ratio ("Dispersion Proxy") ────────────────────────────
 
 def generate_signal3(
     features:     pd.DataFrame,
@@ -870,17 +964,20 @@ def generate_signal3(
     lookback:     int   = S3_LOOKBACK,
     max_hold:     int   = S3_MAX_HOLD,
     max_kelly:    float = S3_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
-    Signal 3: VIX/VVIX dispersion proxy trade.
+    Signal 3: VIX/VVIX ratio mean-reversion ("dispersion proxy").
 
     ratio = vix_feature / vvix_feature  = (^VIX / ^VVIX)
-    A depressed ratio (VVIX elevated relative to VIX) implies that
-    individual stock options are expensive vs index → low implied
-    correlation → long dispersion is cheap.
+    A depressed ratio means VIX is calm relative to the vol-of-vol market.
+    +1 = long dispersion. The backtest trades it as a SHORT SPX straddle
+    (the index leg; backtest_engine.S3_LEG_DIRECTION = −1); see the module
+    docstring for how the research-only combiner reads it.
 
     Entry: z_ratio < zscore_entry (= −1.0)  AND  regime ∈ {0, 1}
     Exit : z_ratio > zscore_exit  (= −0.30) OR   days_held >= max_hold
+    Output adds s3_z (z_ratio, trailing window ending at t).
     """
     # Both features already divided by 100; ratio is dimensionless
     ratio   = features["vix"] / features["vvix"].clip(lower=1e-6)
@@ -893,19 +990,21 @@ def generate_signal3(
     strength = (z_ratio.abs() / S3_STRENGTH_SCALE).clip(upper=1.0)
 
     regime_ok   = regimes.isin([0, 1])
-    entry_long  = (z_ratio < zscore_entry) & regime_ok   # only long dispersion
-    entry_short = pd.Series(False, index=features.index)  # no short dispersion
+    entry_long  = (z_ratio < zscore_entry) & regime_ok   # only the +1 side
+    entry_short = pd.Series(False, index=features.index)  # never −1
 
     # Exit when z_ratio reverts above exit threshold
     exit_cond = z_ratio > zscore_exit
 
     result = _run_statemachine(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+        entry_long, entry_short, exit_cond, strength, regimes, max_hold,
+        entry_allowed=entry_allowed,
     )
 
     kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
     result["kelly"]    = kelly
     result["exp_pnl"]  = result["strength"].fillna(0.0) * kelly * 100.0
+    result["z"]        = z_ratio
     return result.rename(columns={c: f"s3_{c}" for c in result.columns})
 
 
@@ -920,6 +1019,7 @@ def generate_signal4(
     lookback:      int   = S4_LOOKBACK,
     max_hold:      int   = S4_MAX_HOLD,
     max_kelly:     float = S4_MAX_KELLY,
+    entry_allowed: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Signal 4: Volatility Risk Premium (VRP) mean-reversion.
@@ -932,6 +1032,7 @@ def generate_signal4(
       z_vrp <  z_entry_long   AND  regime == 0  → long straddle  (IV unusually cheap)
 
     Exit: |z_vrp| < z_exit  OR  days_held >= max_hold  OR  regime → R2 (jump risk).
+    Output adds s4_z (z_vrp, trailing window ending at t).
     """
     fear = features["fear_premium"].clip(lower=0.01)
     vrp  = features["vix"] * (1.0 - 1.0 / fear)   # positive when IV > RV (normal)
@@ -955,12 +1056,14 @@ def generate_signal4(
 
     # R2-exit state machine: immediately close on regime → R2 (jump protection)
     result = _run_statemachine_r2exit(
-        entry_long, entry_short, exit_cond, strength, regimes, max_hold
+        entry_long, entry_short, exit_cond, strength, regimes, max_hold,
+        entry_allowed=entry_allowed,
     )
 
     kelly = (result["strength"] * max_kelly).clip(upper=max_kelly).fillna(0.0)
     result["kelly"]   = kelly
     result["exp_pnl"] = result["strength"].fillna(0.0) * kelly * 100.0
+    result["z"]       = z_vrp
 
     return result.rename(columns={c: f"s4_{c}" for c in result.columns})
 
@@ -974,9 +1077,14 @@ def combine_signals(
     s1_str: pd.Series,
     s2_str: pd.Series,
     s3_str: pd.Series,
+    max_kelly: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Combine three signals into a single position using the agreement rule.
+
+    Every input position must be expressed in the same units — the direction
+    of the index straddle (+1 long vol, −1 short vol) — because combined_pos
+    is traded as one SPX straddle.
 
     Rules
     -----
@@ -984,17 +1092,24 @@ def combine_signals(
     Non-zero signals with opposite signs = "conflict".
 
     • All three agree (all same non-zero sign):
-        combined_pos = mean_direction × mean_strength  (equal weight)
+        combined_pos = direction,        combined_str = mean_strength
     • Exactly two agree (same sign), third is flat:
-        combined_pos = mean_direction × mean_strength × 0.5  (half weight)
-    • Two agree but third opposes  →  flat (conflict = 0)
-    • Only one non-zero            →  that signal × 0.5  (half weight)
+        combined_pos = direction × 0.5,  combined_str = mean_strength × 0.5
+    • Only one non-zero:
+        combined_pos = direction × 0.5,  combined_str = strength × 0.5
+      (one active signal earns the same half weight as two agreeing ones)
+    • Any conflict among the non-zero signals  →  0
     • All flat                     →  0
+
+    combined_kelly = combined_str × max_kelly, capped at max_kelly
+    (default: the largest per-signal cap, S1–S4).
 
     Returns
     -------
     pd.DataFrame with columns: combined_pos, combined_str, combined_kelly
     """
+    if max_kelly is None:
+        max_kelly = max(S1_MAX_KELLY, S2_MAX_KELLY, S3_MAX_KELLY, S4_MAX_KELLY)
     idx = s1_pos.index
     n   = len(idx)
 
@@ -1049,7 +1164,7 @@ def combine_signals(
             combined_pos[i] = direction * 0.5
             combined_str[i] = mean_strength * 0.5
 
-    combined_kelly = np.clip(np.nan_to_num(combined_str, nan=0.0) * max(S1_MAX_KELLY, S2_MAX_KELLY, S3_MAX_KELLY), 0, 0.20)
+    combined_kelly = np.clip(np.nan_to_num(combined_str, nan=0.0) * max_kelly, 0, max_kelly)
 
     return pd.DataFrame(
         {
@@ -1065,20 +1180,22 @@ def combine_signals(
 
 class SignalEngine:
     """
-    Orchestrates the generation of all three regime-gated trading signals.
+    Orchestrates the generation of all regime-gated trading signals.
 
     Usage
     -----
-      engine = SignalEngine(clf)
-      df = engine.generate(spx_df, vix_wide_df, start_date="2015-01-01")
+      engine = SignalEngine()
+      df = engine.generate(spx_df, vix_wide_df, start_date="2018-01-01")
       engine.plot(df)
       engine.save(df)
 
     Parameters
     ----------
-    clf         : fitted RegimeClassifier from C8
-    pdv_model   : optional PDVModel; if None, Signal 1 uses the pdv_iv_spread
-                  feature already in the C8 feature set (rv_20d − VIX proxy)
+    clf         : optional fitted RegimeClassifier (RESEARCH ONLY). Used for
+                  regimes only when no precomputed_regimes are given; R2 is
+                  then still set by the canonical rule gate.
+    pdv_model   : optional full-sample PDVModel (look-ahead; legacy). Prefer
+                  generate(precomputed_pdv_vol=...) with walk-forward σ̂.
     """
 
     def __init__(
@@ -1097,111 +1214,160 @@ class SignalEngine:
         start_date:          str = "2015-01-01",
         end_date:            str = "2025-12-31",
         precomputed_regimes: "Optional[pd.Series]" = None,
-        precomputed_pdv_vol: "Optional[pd.Series]" = None,
+        precomputed_pdv_vol: "Optional[pd.Series] | str" = PDV_WALK_FORWARD,
     ) -> pd.DataFrame:
         """
         Generate all signals for [start_date, end_date].
 
-        Zero look-ahead: features are shifted 1 day inside this method
-        before passing to signal generators.
+        Zero look-ahead: features AND regime labels are lagged one SESSION
+        here, before any signal generator sees them; the row for session t
+        holds only information dated ≤ t−1.
 
         Parameters
         ----------
-        precomputed_regimes : optional pre-built walk-forward regime labels.
-            If supplied, bypasses the internal classifier/rule-based labels.
-            Use this to inject walk-forward-trained regime labels from the
-            backtest engine to eliminate look-ahead bias in the classifier.
-        precomputed_pdv_vol : optional walk-forward PDV vol forecast Series
-            (annualised decimal, date-indexed). If supplied, the
-            pdv_iv_spread feature is built from these forecasts instead of
-            a full-sample-fitted PDV model, eliminating look-ahead bias in
-            the S1/S1C entry signal.
+        precomputed_regimes : optional regime labels dated at the session they
+            describe (e.g. build_regime_labels(...) with the canonical gate).
+            They are used exactly as given — lagged one session, never
+            modified. (Pre-C22 a hard-coded VVIX > 100 override was OR-ed on
+            top, so labels built with any other gate never took effect.)
+            Without them: the classifier's predictions if a fitted clf was
+            given (with R2 forced wherever the canonical rule label is R2),
+            else build_regime_labels(spx_df, vix_wide_df).
+        precomputed_pdv_vol : the σ̂ behind pdv_iv_spread — the injection
+            hook of build_features(pdv_vol_series). Default PDV_WALK_FORWARD:
+            the purged walk-forward 21-session RMS-vol forecast built from
+            spx_df (regime_classifier.walk_forward_pdv_vol), dated at its
+            forecast origin and lagged one session like every feature. Pass
+            a precomputed walk-forward Series to reuse one, or None for the
+            trailing rv_20d proxy. A pdv_model given to the constructor
+            (legacy, full-sample) replaces the default.
+
+        Every session in the window with a known lagged regime is kept, even
+        if some feature is NaN: each signal treats a NaN input as "no entry /
+        no exit" for that session. (Pre-C22 any NaN feature — e.g. one missing
+        VVIX print, which only S3 uses — removed the whole session from the
+        output and hence from the backtest P&L path.)
+
+        Trailing statistics (the S2/S3/S4 z-scores) are computed over ALL the
+        history supplied, but entries are allowed only inside [start_date,
+        end_date], so the book starts flat on the window's first session.
+        (Pre-C22 the features were cut to the window first, so the 252-day
+        z-scores warmed up INSIDE it: in the 2018-2025 backtest S3/S4 never
+        traded, and S2 traded once, in 2018-01..2018-07, although data were
+        loaded from 2015 precisely to warm them.)
 
         Returns
         -------
-        pd.DataFrame indexed by date with all signal and combined columns.
+        pd.DataFrame indexed by date with all signal columns (s1, s1c, s1rf,
+        s1x, s2, s2x, s3, s4 prefixes), the combined columns, the lagged
+        features and the lagged regime.
+        .attrs: regime_source, pdv_iv_spread_source, n_sessions_dropped.
         """
-        # ── Build feature matrix ─────────────────────────────────────────────
+        # ── Build feature matrix (values at the close of each session) ───────
+        pdv_series = precomputed_pdv_vol
+        if isinstance(pdv_series, str) and self.pdv_model is not None:
+            pdv_series = None            # explicit legacy model wins over the default
         feats_raw = build_features(
             spx_df, vix_wide_df,
             pdv_model=self.pdv_model,
-            pdv_vol_series=precomputed_pdv_vol,
+            pdv_vol_series=pdv_series,
         )
+        sessions = feats_raw.index
 
-        # ── Compute regime labels ────────────────────────────────────────────
+        # ── Regime labels (dated at the session they describe) ────────────────
         if precomputed_regimes is not None:
-            # Walk-forward regimes supplied externally (no look-ahead bias)
-            regimes_raw = precomputed_regimes
+            regimes_raw = pd.Series(precomputed_regimes, copy=True)
+            regimes_raw.index = pd.to_datetime(regimes_raw.index)
+            regimes_raw = regimes_raw[~regimes_raw.index.duplicated(keep="last")]
+            regime_source = "precomputed"
         elif self.clf is not None and self.clf.model_ is not None:
             try:
-                preds = self.clf.predict_series(feats_raw.dropna())
-                regimes_raw = preds
+                cols = list(self.clf.feature_names_ or feats_raw.columns)
+                preds = self.clf.predict_series(feats_raw.dropna(subset=cols))
+                # R2 is a deterministic risk rule, not a prediction problem:
+                # wherever the canonical rule label is R2, the regime is R2.
+                rule = build_regime_labels(spx_df, vix_wide_df, R2_GATE)
+                regimes_raw = preds.copy()
+                regimes_raw[rule.reindex(preds.index) == 2] = 2
+                regime_source = "classifier+rule_r2"
             except Exception as exc:
                 logger.warning("Classifier prediction failed (%s); using rule-based regimes", exc)
                 regimes_raw = build_regime_labels(spx_df, vix_wide_df)
+                regime_source = "rule"
         else:
             regimes_raw = build_regime_labels(spx_df, vix_wide_df)
+            regime_source = "rule"
 
-        # ── Deterministic R2 risk-gate override (C16) ────────────────────────
-        # R2 is DEFINED as elevated vol-of-vol (VVIX > threshold) — it is a
-        # hard risk rule, not a prediction problem. Since vvix was removed
-        # from the classifier features (circularity fix), the rule is applied
-        # directly here on the observable VVIX level. Zero look-ahead: the
-        # regime series is shifted 1 day below before any signal uses it.
-        if "vvix" in feats_raw.columns:
-            r2_rule = feats_raw["vvix"] > (VVIX_REGIME2_THRESHOLD / 100.0)
-            regimes_raw = regimes_raw.copy()
-            r2_mask = r2_rule.reindex(regimes_raw.index, fill_value=False)
-            regimes_raw.loc[r2_mask] = 2
-
-        # ── Shift by 1: X(t-1) predicts y(t) ───────────────────────────────
+        # ── Lag by one SESSION: information dated t−1 drives session t ────────
+        # Reindex labels to the session calendar first so the shift moves one
+        # session, not one position of whatever index they arrived with; the
+        # ffill only carries an already-known label over a session that has
+        # none (never anything dated after t−1).
         feats   = feats_raw.shift(1)
-        regimes = regimes_raw.shift(1).ffill().dropna()
+        regimes = regimes_raw.reindex(sessions).shift(1).ffill()
 
-        # Align all on common index
-        common_idx = feats.dropna().index.intersection(regimes.index)
-        feats   = feats.loc[common_idx]
-        regimes = regimes.loc[common_idx].astype(int)
-
-        # Filter to [start_date, end_date]
         start_ts = pd.Timestamp(start_date)
         end_ts   = pd.Timestamp(end_date)
-        mask = (feats.index >= start_ts) & (feats.index <= end_ts)
-        feats   = feats[mask]
-        regimes = regimes[mask]
+        has_regime = regimes.notna().to_numpy()
+        in_window = (sessions >= start_ts) & (sessions <= end_ts)
 
-        if len(feats) == 0:
+        n_dropped = int((in_window & ~has_regime).sum())
+        if n_dropped:
+            dropped = sessions[in_window & ~has_regime]
+            logger.warning(
+                "%d session(s) in [%s, %s] have no lagged regime label and are "
+                "dropped (first: %s)", n_dropped, start_date, end_date,
+                ", ".join(str(d.date()) for d in dropped[:5]),
+            )
+
+        # Full history (sessions with a regime) for the trailing statistics;
+        # entries only inside the window.
+        feats   = feats[has_regime]
+        regimes = regimes[has_regime].astype(int)
+        window  = pd.Series(in_window[has_regime], index=feats.index)
+
+        if not window.any():
             raise ValueError(f"No data in [{start_date}, {end_date}] after feature build.")
 
         logger.info(
-            "Generating signals for %d trading days (%s → %s)",
-            len(feats), feats.index.min().date(), feats.index.max().date(),
+            "Generating signals for %d trading days (%s → %s), regimes: %s",
+            int(window.sum()), feats.index[window.values].min().date(),
+            feats.index[window.values].max().date(), regime_source,
         )
 
         # ── Generate individual signals ───────────────────────────────────────
-        s1   = generate_signal1(feats, regimes)
-        s1c  = generate_signal1_contrarian(feats, regimes)
-        s1rf = generate_signal1_regime_filtered(feats, regimes)
-        s2   = generate_signal2(feats, regimes)
-        s3   = generate_signal3(feats, regimes)
-        s4   = generate_signal4(feats, regimes)
+        kw = {"entry_allowed": window}
+        s1   = generate_signal1(feats, regimes, **kw)
+        s1c  = generate_signal1_contrarian(feats, regimes, **kw)
+        s1rf = generate_signal1_regime_filtered(feats, regimes, **kw)
+        s1x  = generate_signal1_r2exit(feats, regimes, **kw)
+        s2   = generate_signal2(feats, regimes, **kw)
+        s2x  = generate_signal2_r2exit(feats, regimes, **kw)
+        s3   = generate_signal3(feats, regimes, **kw)
+        s4   = generate_signal4(feats, regimes, **kw)
 
-        # ── Combine (S1C + S3 + S4 — the three logically sound signals) ─────────
+        # ── Combine S1C + S3 + S4 as index-vol directions (research only) ─────
         # S1 removed: PDV spread is a lagging indicator — backwards as directional signal.
         # S2 removed: no mechanistic basis for TS slope predicting vol direction.
-        # S1C: correct (contrarian) use of PDV lag.
-        # S3: clear mechanism — VVIX/VIX extreme → second-order fear precedes vol spike.
-        # S4: VRP mean-reversion after z peaks (fixed entry — post-spike, not pre-spike).
+        # S1C: contrarian use of the spread (±1 = long/short straddle).
+        # S3: +1 counted as long index vol — the pre-C22 reading. The backtest
+        #     trades S3 as a SHORT SPX straddle (S3_LEG_DIRECTION = −1), so this
+        #     research-only combination is not the traded book (not reported).
+        # S4: VRP mean-reversion after z peaks (±1 = long/short straddle).
         combined = combine_signals(
             s1c["s1c_position"], s3["s3_position"], s4["s4_position"],
             s1c["s1c_strength"], s3["s3_strength"], s4["s4_strength"],
+            max_kelly=max(S1_MAX_KELLY, S3_MAX_KELLY, S4_MAX_KELLY),
         )
 
-        # ── Assemble output DataFrame ─────────────────────────────────────────
+        # ── Assemble output DataFrame (window only) ───────────────────────────
         df = pd.concat(
-            [s1, s1c, s1rf, s2, s3, s4, combined, feats, regimes.rename("regime")],
+            [s1, s1c, s1rf, s1x, s2, s2x, s3, s4, combined, feats, regimes.rename("regime")],
             axis=1,
-        )
+        ).loc[window.values]
+        df.attrs["regime_source"] = regime_source
+        df.attrs["pdv_iv_spread_source"] = feats_raw.attrs.get("pdv_iv_spread_source")
+        df.attrs["n_sessions_dropped"] = n_dropped
         self._result = df
 
         n_s1   = (df["s1_position"]   != 0).sum()
@@ -1218,11 +1384,12 @@ class SignalEngine:
         return df
 
     def save(self, df: Optional[pd.DataFrame] = None, path: Optional[Path] = None) -> Path:
-        """Save signals DataFrame to parquet."""
+        """Save signals DataFrame to parquet (default: default_signals_path(df),
+        named after the date span actually saved)."""
         df = df if df is not None else self._result
         if df is None:
             raise RuntimeError("No results to save. Call generate() first.")
-        path = Path(path or SIGNALS_PATH)
+        path = Path(path or default_signals_path(df))
         path.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(path)
         logger.info("Signals saved to %s (%d rows)", path, len(df))
@@ -1238,7 +1405,7 @@ class SignalEngine:
         Plot combined position timeline with per-signal breakdown.
 
         Panel 1: VIX level with regime colour bands
-        Panel 2: Signal 1 (IVR spread) position
+        Panel 2: Signal 1 (PDV–IV spread) position
         Panel 3: Signal 2 (TS curve) position
         Panel 4: Signal 3 (Dispersion) position
         Panel 5: Combined position
@@ -1268,7 +1435,7 @@ class SignalEngine:
 
         # ── Panels 1-3: Per-signal positions ──────────────────────────────────
         signal_info = [
-            ("s1_position", "s1_strength", "#2196F3", "Signal 1 — IV vs RV Spread"),
+            ("s1_position", "s1_strength", "#2196F3", "Signal 1 — PDV–IV Spread"),
             ("s2_position", "s2_strength", "#4CAF50", "Signal 2 — VIX TS Curve"),
             ("s3_position", "s3_strength", "#FF9800", "Signal 3 — Dispersion Proxy"),
         ]
@@ -1337,7 +1504,7 @@ def signal_summary(df: pd.DataFrame) -> dict:
     stats = {}
 
     for prefix, label in [
-        ("s1",   "Signal1_IVR"),
+        ("s1",   "Signal1_PDV_IV"),
         ("s1c",  "Signal1C_Contrarian"),
         ("s1rf", "Signal1_RF"),
         ("s2",   "Signal2_TS"),

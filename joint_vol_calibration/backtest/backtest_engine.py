@@ -3,51 +3,80 @@ backtest_engine.py — C10: Full Backtest & Reporting Engine
 
 Period:   2018-01-01 → 2025-03-24
 Capital:  $1,000,000 (initial)
-Signals:  S1 (IVR Spread), S2 (VIX TS Curve), S3 (Dispersion Proxy),
-          S4 (VRP — Volatility Risk Premium), Combined
+Signals:  portfolio  S1C (contrarian PDV), S3 (dispersion, index leg), S4 (VRP)
+          references S1 (PDV–IV spread), S2 (VIX TS), Combined
 
 Cost model (non-negotiable):
   Bid-ask:    0.15 vol pts per leg  → 0.15 × 0.01 × vega × n_contracts × 100
   Commission: $0.65 per contract per leg (2 legs per straddle)
   Margin:     20% of K × multiplier × n_contracts for short options
-  Slippage:   0.05% of |Δdelta| × S × multiplier × n_contracts on delta-hedge rebalancing
+  Slippage:   0.05% of |hedge shares traded| × S on every delta-hedge trade,
+              INCLUDING the opening hedge and the closing unwind
 
-P&L methodology:
-  S1/S2 — 30-day ATM straddle, delta-hedged daily (C7 framework):
-    daily_pnl_t = direction × (V_t − V_{t−1} − Δ_{t−1} × ΔS) × n_contracts × 100
-  S3  — VIX/VVIX ratio z-score proxy (no actual options traded):
-    daily_pnl_t = position × kelly × nav × Δz_ratio × S3_Z_SCALE
+P&L methodology (every signal, S3 included, uses the same straddle engine):
+  30-day ATM straddle, delta-hedged daily, self-financing:
+    daily_pnl_t = direction × [ V_t − V_{t−1} − Δ_{t−1}·ΔS
+                                + (r_{t−1}·(Δ_{t−1}·S_{t−1} − V_{t−1})
+                                   − q·Δ_{t−1}·S_{t−1}) / 252 ] × n × 100
+  The second line is the carry of the book: the cash account (−V + Δ·S)
+  accrues r and the stock hedge pays the dividend yield. Without it the
+  hedged P&L is not ½Γ(ΔS² − σ²S²Δt) even under Black-Scholes.
+  A straddle that reaches expiry (21 sessions for a 30-day tenor) settles
+  at intrinsic |S − K|; if the signal is still on it is rolled into a
+  fresh ATM straddle the same close.
+
+  S3 (long dispersion) is priced as the INDEX LEG of the dispersion trade:
+  long dispersion ⇒ SHORT SPX straddle. There is no single-stock option
+  data, so the single-stock leg is not modelled; S3's P&L is a proxy for
+  half the trade, not a dispersion P&L.
+
+Implied vol: ATM vol is not VIX. VIX is a 30-day variance-swap rate and
+contains the skew/convexity premium, so it sits above ATM implied vol.
+Straddles are priced and marked at
+    σ_ATM(T) = ATM_TO_VIX_RATIO × VIX-TS(T)
+(VIX term structure interpolated in total variance). ATM_TO_VIX_RATIO is
+estimated from every real SPX chain available (see
+estimate_atm_to_vix_ratio and run_backtest --estimate-beta).
+
+Performance convention: the strategy runs on $1M of unfunded collateral
+assumed to earn T-bills, so its P&L is already an EXCESS return over cash.
+Sharpe/Sortino use rf = 0 on that P&L everywhere (headline, per signal,
+crisis windows, sub-periods). Subtracting ^IRX again would charge the cash
+hurdle twice. The T-bill path is reported separately as the cash
+benchmark (nav_tbill, metrics['cash_cum_return']).
 
 Assumptions (documented for transparency):
-  1. 30-day ATM straddles for S1/S2; new entry re-strikes ATM at current spot
-  2. Vol surface: VIX TS interpolated in total-variance space (ATM only, no
-     smile). NO historical option prices exist in the DB — all option P&L is
-     MARK-TO-MODEL (BS), which flatters short-straddle P&L (no skew dynamics,
-     no pin risk). The Heston/joint-calibration stack is NOT in this P&L
-     path; it serves C6 (Greeks) and C7 (hedge simulation).
-  3. Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013;
-     Sharpe/Sortino use the same per-date T-bill series as the cash hurdle
-  4. Regime labels: lagged deterministic rule (rv_20d vs VIX; VVIX>100 → R2).
-     Persistence predictor = 90.0% next-day accuracy on 2020+ vs 63.4% for
-     walk-forward XGBoost — the ML classifier is demoted from the trading loop
+  1. 30-day ATM straddles; new entries and expiry rolls re-strike ATM
+  2. Vol surface: β × VIX TS (ATM only, no smile). NO historical option
+     prices exist in the DB — all option P&L is MARK-TO-MODEL (BS), which
+     ignores skew dynamics and pin risk. The Heston/joint-calibration
+     stack is NOT in this P&L path; it serves C6 (Greeks) and C7.
+  3. Per-date r from ^IRX 3M T-bill (previous available print on gaps;
+     fallback 0.045 only if the DB has no usable series), q = 0.013
+  4. Regime labels: lagged deterministic rule (rv_20d vs VIX; VVIX gate →
+     R2) built by regime_classifier.build_regime_labels with its default
+     gate; the ML classifier is not in the trading loop
   5. Regime gate: no NEW entries in Regime 2; S1C/S4 also force-close open
      positions when the regime transitions INTO R2
-  6. Margin ENFORCED: short straddles capped at nav/(0.20 × K × 100) contracts
-  7. Correlation netting EX-ANTE: trailing 60d corr / 252d Sharpe multipliers,
-     shifted 1 day, applied to Kelly sizing in a second simulation pass
-  8. PDVLinear retrained per year on strictly pre-year data (walk-forward)
+  6. Sizing off each sleeve's own running NAV (through the prior close);
+     short straddles capped at NAV/(0.20 × K × 100) contracts
+  7. Ex-ante sizing overlay, shifted 1 day, applied in a second pass:
+     correlation netting m_i = 1/√(1 + Σ_j max(ρ_ij, 0)) on trailing 60d
+     P&L correlation, times a trailing-252d net-Sharpe scale in [0.5, 1]
+  8. pdv_iv_spread = σ̂_PDV(t) − VIX(t): σ̂ is the walk-forward PDVLinear
+     forecast of the next-21-session RMS vol made at the close of t (refit
+     daily on labels observed by t, purged); lagged one session
 
-Honest failures (from C4, C7 — see report):
-  • PDV over-forecast in 2020: σ_PDV=91.6% vs σ_ATM=55.4% on COVID crash
-  • Heston rho=−0.99 boundary convergence: steep 2026 skew under-modelled
-  • C6: 3 unstable vomma nodes; delta-only hedge insufficient on those days
+The C22Corrections switches below exist only so c22_bridge.py can replay
+the C22 correction round one fix at a time from the published C21 numbers.
+Every default is the corrected behaviour.
 """
 
 from __future__ import annotations
 
 import logging
 import pickle
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -55,6 +84,7 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
 from scipy.stats import norm
 
 from joint_vol_calibration.config import DATA_DIR, RANDOM_SEED
@@ -62,11 +92,11 @@ from joint_vol_calibration.backtest.delta_hedger import (
     _bs_straddle_value,
     _bs_straddle_greeks,
     _interp_atm_iv,
+    fit_pdv_before,
 )
 from joint_vol_calibration.signals.signal_engine import SignalEngine
 from joint_vol_calibration.signals.regime_classifier import (
     RegimeClassifier,
-    build_features,
     build_regime_labels,
 )
 
@@ -77,8 +107,12 @@ logger = logging.getLogger(__name__)
 BT_START:          str   = "2018-01-01"
 BT_END:            str   = "2025-03-24"
 INITIAL_CAPITAL:   float = 1_000_000.0
-RISK_FREE_RATE:    float = 0.05      # annualised rf for Sharpe (5%)
-R_BACKTEST:        float = 0.045     # discount rate in option pricing
+# Sharpe/Sortino hurdle on the strategy P&L. The P&L is an excess return
+# (collateral assumed to earn T-bills), so the hurdle is zero. Before C22 a
+# per-date ^IRX hurdle was subtracted from this unfunded P&L — charging
+# cash twice (headline Sharpe −1.80 vs −1.14 on the same NAV).
+SHARPE_RF:         float = 0.0
+R_BACKTEST:        float = 0.045     # pricing rate used only if no ^IRX series is usable
 Q_BACKTEST:        float = 0.013     # SPX dividend yield
 TRADING_DAYS:      int   = 252
 
@@ -86,17 +120,55 @@ TRADING_DAYS:      int   = 252
 BID_ASK_VOL_PTS:   float = 0.15     # vol points per leg (0.15 × 0.01 = 0.0015 decimal)
 COMMISSION_PER_LEG: float = 0.65    # $ per contract per leg
 MARGIN_RATIO:      float = 0.20     # short-option initial margin as fraction of notional
-SLIPPAGE_PCT:      float = 0.0005   # 0.05% of |Δdelta| × S on delta-hedge rebalancing
+SLIPPAGE_PCT:      float = 0.0005   # 0.05% of |hedge shares traded| × S
 CONTRACT_MULT:     int   = 100      # SPX options: 100 shares per contract
 
-# S1/S2 straddle tenor
-STRADDLE_TENOR_DAYS: int = 30       # 30-day ATM straddle at entry
+# Straddle tenor
+STRADDLE_TENOR_DAYS: int = 30       # 30-calendar-day ATM straddle at entry
 
-# S3 proxy parameters
+# ATM implied vol per unit of VIX-term-structure vol: σ_ATM = β · VIX-TS.
+# Estimated (C22) as the mean ratio of the 30-day ATM-forward implied vol
+# (Black-76 on parity-implied forwards, total-variance interpolated to 30
+# calendar days) to the same-time ^VIX, over every real SPX chain with a
+# time-matched VIX print (run_backtest --estimate-beta --live):
+#   DB 2026-03-24 0.824 · 2026-03-27 0.841 · 2026-05-29 0.813 ·
+#   2026-06-18 0.814 · live Yahoo GTH chain 2026-10-12 04:38 ET 0.796
+#   → mean 0.818, median 0.814, sd 0.017, n = 5. (A sixth, 2026-06-05
+#   chain in the old spx_options table was excluded — its parity-implied
+#   spot was 2.2% above that session's close, so its quotes were not from
+#   the close whose VIX they would be compared with — and the table was
+#   dropped from the DB in C22.) All five chains are from 2026; no
+#   history of ATM IV exists in the DB, so β is assumed constant over
+#   2018-2025. Pre-C22 the engine used β = 1 (VIX as ATM vol).
+# The estimation set is frozen (BETA_ESTIMATION_SESSIONS): the daily bot now
+# stores a chain every session, and a default that moved with each one would
+# re-define the canonical backtest daily. Later chains are reported by
+# --estimate-beta as out-of-sample checks: the first, 2026-10-16 (VVIX 110,
+# an R2 day), gives 0.702, which would pull the all-chain mean to 0.80. β is
+# therefore not constant (though not simply a stress effect: the R2 sessions
+# 2026-03-24 / 03-27 in the set gave 0.824 / 0.841); the β grid includes 0.80.
+ATM_TO_VIX_RATIO:  float = 0.82
+BETA_ESTIMATION_SESSIONS: Tuple[str, ...] = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18")
+
+# Horizon (sessions) of the walk-forward PDV forecast behind pdv_iv_spread.
+# 21 (canonical, C22): the forecast of the RMS vol over the next 21 sessions
+# — variance-consistent and horizon-matched with the 30-day VIX — from
+# regime_classifier.walk_forward_pdv_vol (PDVLinear refit DAILY on labels
+# fully observed at the forecast origin; purged, embargo = 21).
+# 1 (pre-C22, kept for c22_bridge): PDVLinear on |r_{t+1}|·√252, refit once
+# a year on pre-year returns — an E|r| forecast (≈0.66× RMS vol on SPX), so
+# "VIX > σ̂ + 2 vp" held on ~96% of 2018-2025 sessions.
+PDV_SPREAD_HORIZON: int = 21
+
+# S3 legacy z-score proxy parameters (pre-C22 P&L model, kept for the bridge)
 S3_Z_SCALE:        float = 0.02    # 2% of kelly-weighted nav per unit z improvement
 S3_PROXY_COST:     float = 0.001   # 0.1% of notional at entry/exit (execution proxy)
 
-# Walk-forward
+# Ex-ante sizing overlay
+CORR_WINDOW:       int   = 60      # trailing days for pairwise P&L correlation
+NET_SHARPE_WINDOW: int   = 252     # trailing days for the net-Sharpe scale
+
+# Sub-period stability windows
 WF_N_WINDOWS:      int   = 12
 WF_WINDOW_MONTHS:  int   = 6
 
@@ -105,6 +177,9 @@ BACKTEST_DIR = DATA_DIR / "backtest"
 RESULTS_PATH = BACKTEST_DIR / "full_results.parquet"
 REPORTS_DIR  = BACKTEST_DIR / "reports"
 REPORT_PATH  = REPORTS_DIR / "full_report.html"
+# float_format of the committed CSV artifacts (beta_sensitivity.csv,
+# c22_bridge.csv); test_backtest_reproducibility re-serialises rows with it
+ARTIFACT_CSV_FLOAT_FORMAT = "%.10g"
 
 # Crisis periods (start, end) for reporting
 CRISIS_PERIODS: Dict[str, Tuple[str, str]] = {
@@ -113,12 +188,76 @@ CRISIS_PERIODS: Dict[str, Tuple[str, str]] = {
     "Tariffs_2025":  ("2025-01-01", "2025-03-24"),
 }
 
+PORTFOLIO_SIGNALS: Tuple[str, ...] = ("s1c", "s3", "s4")
+REFERENCE_SIGNALS: Tuple[str, ...] = ("s1", "s2", "combined")
+
+# Sentinel: "use regime_classifier.build_regime_labels' own default gate"
+_DEFAULT_GATE = object()
+
+# Straddle direction of the S3 index leg per unit of s3_position (+1 = the
+# signal is on). −1: long dispersion ⇒ SHORT SPX straddle (the C22 reading:
+# a dispersion trade is short index vol). The signal's own documentation may
+# read +1 as "the VIX/VVIX ratio reverts up", i.e. long index vol; pass
+# s3_leg_direction=+1 to price that reading instead.
+S3_LEG_DIRECTION: int = -1
+
+
+# ── C22 correction switches ────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class C22Corrections:
+    """
+    Switches for the C22 correction round (audit finding id in brackets).
+
+    Every default is the corrected behaviour. ``C22Corrections.legacy()``
+    turns them all off; together with ``atm_to_vix_ratio=1.0``, the fixed
+    VVIX>100 gate, the 1-day PDV spread and the legacy VIX interpolation it
+    is the C21 ENGINE. On the C21 signal/PDV code and database it reproduced
+    the published C21 headline (NAV $738,794 / P&L −$261,206 / Sharpe −1.80
+    / MaxDD −31.5%); on today's signal code it does not: c22_bridge row 0
+    gives NAV $734,577 / P&L −$265,423, the gap being upstream changes these
+    switches cannot turn off (S2 stop direction, z-score warm-up, …).
+    They exist so c22_bridge.py can apply the corrections one at a time;
+    nothing else should switch them off.
+    """
+    sharpe_rf_zero:    bool = True   # Sharpe on excess P&L, rf=0 [backtest-sharpe-double-counts-rf]
+    rate_ffill:        bool = True   # previous ^IRX print on gaps, not 4.5% [backtest-rate-missing-dates-fallback]
+    s3_exit_day:       bool = True   # S3 proxy holds entry size through exit day [backtest-s3-exit-day-dropped]
+    hedge_costs:       bool = True   # opening hedge + closing unwind, no phantom exit rebalance [backtest-hedge-entry-unwind-cost-missing]
+    financing:         bool = True   # r on cash (−V+ΔS), q on stock leg [backtest-no-premium-hedge-financing]
+    expiry_roll:       bool = True   # settle at expiry, roll if signal on [backtest-no-expiry-roll]
+    open_trade_log:    bool = True   # trade still open at the end is logged [backtest-open-trade-and-sizing-bookkeeping]
+    sleeve_nav_sizing: bool = True   # size/margin off the sleeve's running NAV [backtest-open-trade-and-sizing-bookkeeping]
+    corr_netting:      bool = True   # correlation netting that can reduce size [backtest-corr-netting-noop]
+    s3_index_leg:      bool = True   # S3 priced as short SPX straddle, not z-units [signals-s3-mechanical-zscore-pnl]
+
+    @classmethod
+    def legacy(cls) -> "C22Corrections":
+        """All corrections off — the published C21 engine."""
+        return cls(**{f.name: False for f in fields(cls)})
+
+    def with_(self, **changes) -> "C22Corrections":
+        """Copy with some switches changed."""
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
+        d.update(changes)
+        return C22Corrections(**d)
+
 
 # ── Trade record ───────────────────────────────────────────────────────────────
 
 @dataclass
 class TradeRecord:
-    """One completed straddle trade."""
+    """
+    One straddle trade (or one S3 proxy trade).
+
+    ``direction`` is the STRADDLE direction (+1 long, −1 short). For S3 the
+    signal is long dispersion, which the index leg trades by default as a
+    SHORT SPX straddle (direction −1, see S3_LEG_DIRECTION); the legacy
+    z-proxy records +1.
+    ``is_open`` marks the trade still open on the last backtest date; its
+    exit_date is that date, its P&L is mark-to-model and no closing cost
+    has been charged.
+    """
     signal:        str
     direction:     int            # +1 = long, −1 = short
     entry_date:    pd.Timestamp
@@ -131,11 +270,15 @@ class TradeRecord:
     entry_cost:    float
     exit_cost:     float = 0.0
     gross_pnl:     float = 0.0
-    slippage_cost: float = 0.0
+    slippage_cost: float = 0.0    # all delta-hedge trading costs (open, rebalances, unwind)
+    financing:     float = 0.0    # carry of the cash account and the stock hedge
+    exit_reason:   str   = ""     # "signal" | "expiry" | "open"
+    is_open:       bool  = False
 
     @property
     def net_pnl(self) -> float:
-        return self.gross_pnl - self.entry_cost - self.exit_cost - self.slippage_cost
+        return (self.gross_pnl + self.financing
+                - self.entry_cost - self.exit_cost - self.slippage_cost)
 
     @property
     def duration_days(self) -> int:
@@ -167,10 +310,25 @@ def _one_way_cost(vega: float, n_contracts: int) -> float:
     return ba + comm
 
 
+def _hedge_cost(delta_shares: float, S: float, n_contracts: int) -> float:
+    """Slippage on a delta-hedge trade of |delta_shares| per straddle."""
+    return SLIPPAGE_PCT * abs(delta_shares) * S * n_contracts * CONTRACT_MULT
+
+
+def _atm_sigma(vix_row: pd.Series, T: float, atm_to_vix_ratio: float) -> float:
+    """σ_ATM(T) = β · VIX-TS(T); 20% if the VIX row is unusable."""
+    sigma = atm_to_vix_ratio * float(_interp_atm_iv(vix_row, T))
+    if not (sigma > 0) or np.isnan(sigma):
+        sigma = 0.20
+    return sigma
+
+
 def _build_s3_zscore(vix_wide: pd.DataFrame, lookback: int = 252) -> pd.Series:
     """
-    Compute the VIX/VVIX ratio z-score used by Signal 3.
-    Matches signal_engine.py generate_signal3() logic exactly (zero look-ahead).
+    VIX/VVIX ratio z-score on the full unshifted history (legacy S3 proxy P&L).
+
+    The S3 TRADING signal is computed in signal_engine.generate_signal3 on
+    1-day-shifted features; this series only drives the legacy proxy's Δz.
     """
     idx = vix_wide.set_index("date") if "date" in vix_wide.columns else vix_wide
     idx.index = pd.to_datetime(idx.index)
@@ -180,155 +338,251 @@ def _build_s3_zscore(vix_wide: pd.DataFrame, lookback: int = 252) -> pd.Series:
     return ((ratio - mu) / std).rename("z_ratio")
 
 
+def _resolve_rates(
+    r: "float | pd.Series",
+    dates: pd.Index,
+    ffill: bool,
+) -> np.ndarray:
+    """
+    Per-date pricing rate.
+
+    ffill=True  : the previous available print on dates the series misses
+                  (e.g. sessions the ^IRX download skipped); negative or zero
+                  yields are kept as published. Dates before the first print
+                  use R_BACKTEST.
+    ffill=False : legacy — any missing date priced at R_BACKTEST (4.5%).
+    """
+    if not isinstance(r, pd.Series):
+        return np.full(len(dates), float(r))
+    s = r.copy()
+    s.index = pd.to_datetime(s.index)
+    s = s[~s.index.duplicated(keep="last")].sort_index().astype(float)
+    if ffill:
+        full = s.reindex(s.index.union(pd.DatetimeIndex(dates))).ffill()
+        return full.reindex(dates).fillna(R_BACKTEST).values
+    return np.array([float(s.get(d, R_BACKTEST)) for d in dates])
+
+
+def rate_series_spans_window(dates: "pd.Series | pd.Index", start: str, end: str) -> bool:
+    """
+    True if a rate series with these print dates covers [start, end]: its
+    first print inside the window is within 10 days of ``start``, its last
+    print within 10 days of ``end``, and it has at least 80% of the
+    window's business days.
+
+    An emptiness check is not enough: the shipped DB once held exactly 7
+    T-bill rows inside the window (a unit-test fixture that leaked into the
+    tracked database); forward-filled, those 7 synthetic days became the
+    rate for five years (C21).
+    """
+    d = pd.DatetimeIndex(pd.to_datetime(pd.Series(dates))).sort_values()
+    start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    inside = d[d >= start_ts]
+    if len(inside) == 0:
+        return False
+    span_days = max((end_ts - start_ts).days, 1)
+    expected = span_days / 7 * 5 * 0.80
+    return bool(
+        inside[0] <= start_ts + pd.Timedelta(days=10)
+        and d[-1] >= end_ts - pd.Timedelta(days=10)
+        and len(inside) >= expected
+    )
+
+
 # ── Core P&L simulators ────────────────────────────────────────────────────────
+
+@dataclass
+class _OpenStraddle:
+    direction:   int
+    K:           float
+    S_entry:     float
+    sigma_entry: float
+    n:           int
+    kelly:       float
+    entry_date:  pd.Timestamp
+    entry_cost:  float
+    V:           float
+    delta:       float
+    S:           float
+    r:           float
+    days_biz:    int = 0
+    gross:       float = 0.0
+    slip:        float = 0.0
+    fin:         float = 0.0
+
 
 def _simulate_straddle_pnl(
     position:     pd.Series,      # index=date, values ∈ {−1, 0, +1} (or fractional; sign = direction)
     kelly:        pd.Series,      # index=date, values ∈ [0, 0.20]
-    nav_series:   pd.Series,      # index=date, capital available for sizing
+    nav_series:   pd.Series,      # index=date, sizing capital (see corrections.sleeve_nav_sizing)
     spx_close:    pd.Series,      # index=date, SPX close price
     vix_wide_idx: pd.DataFrame,   # date-indexed wide VIX DataFrame
     r:            "float | pd.Series" = R_BACKTEST,   # scalar or date-indexed Series
     q:            float = Q_BACKTEST,
     tenor_days:   int   = STRADDLE_TENOR_DAYS,
     signal_label: str   = "s",
+    atm_to_vix_ratio: float = ATM_TO_VIX_RATIO,
+    corrections:  Optional[C22Corrections] = None,
 ) -> Tuple[pd.Series, List[TradeRecord]]:
     """
     Simulate delta-hedged 30-day ATM straddle P&L for a position series.
 
-    P&L formula (C7 framework, zero look-ahead):
-      daily_pnl_t = direction × (V_t − V_{t−1} − Δ_{t−1} × ΔS_t) × n_contracts × 100
+    Timing: the position on day t is decided from t−1 information and
+    traded at the close of t. On an entry day the straddle is bought/sold
+    and hedged at the close; each later day books the move from the prior
+    close; on an exit day (position 0) the straddle and hedge are closed at
+    the close.
 
-    Where Δ_{t−1} = BS straddle delta computed at close of day t−1.
-    Entry/exit costs applied on transition days.
-    Hedge rebalancing slippage on every active day.
+    Daily P&L (C7 framework, Greeks from the prior close):
+      direction × (V_t − V_{t−1} − Δ_{t−1}·ΔS_t) × n × 100        mark-to-model
+      + direction × (r_{t−1}(Δ_{t−1}S_{t−1} − V_{t−1})
+                     − qΔ_{t−1}S_{t−1}) / 252 × n × 100            financing
+      − 5 bp × |shares traded| × S                                 hedge costs
+    with σ = ATM_TO_VIX_RATIO × VIX-TS(T_rem). Entry/exit pay the option
+    bid-ask and commission; the hedge pays slippage when opened, on every
+    rebalance and when unwound. A straddle reaching expiry settles at
+    |S − K| (no option exit cost) and, if the signal is still on, is
+    rolled into a fresh ATM straddle the same close.
+
+    ``nav_series`` is the sizing capital. With corrections.sleeve_nav_sizing
+    the sizing/margin NAV on day t is nav_series[t] plus this sleeve's own
+    cumulative P&L through the close of t−1, i.e. the sleeve's running NAV.
+
+    The sum of ``net_pnl`` over the returned trades equals ``pnl.sum()``
+    (the trade still open at the end is included as ``is_open``).
     """
-    T_entry = tenor_days / 365.0
-    dates   = position.index
-    pnl     = pd.Series(0.0, index=dates, dtype=float)
+    c = corrections or C22Corrections()
+    T_entry   = tenor_days / 365.0
+    n_expiry  = max(1, int(np.ceil(T_entry * TRADING_DAYS - 1e-9)))   # sessions to expiry
+    dates     = position.index
+    pnl       = pd.Series(0.0, index=dates, dtype=float)
     trades: List[TradeRecord] = []
+    rates     = _resolve_rates(r, dates, ffill=c.rate_ffill)
 
-    # Trade state
-    in_trade  = False
-    direction = 0
-    K = prev_V = prev_delta = prev_S = 0.0
-    n_contracts = 0
-    days_biz    = 0
-    entry_date  = None
-    kelly_entry = 0.0
-    S_entry     = 0.0
-    sigma_entry = 0.0
-    entry_cost_ = 0.0
-    trade_gross = 0.0
-    trade_slip  = 0.0
+    st: Optional[_OpenStraddle] = None
+    cum_pnl   = 0.0
+    last_date = None
 
-    # Resolve per-date rates once; supports both scalar and date-indexed Series
-    _r_is_series = isinstance(r, pd.Series)
+    def _record(s: _OpenStraddle, exit_date, exit_cost: float, reason: str, is_open=False):
+        trades.append(TradeRecord(
+            signal=signal_label, direction=s.direction,
+            entry_date=s.entry_date, exit_date=exit_date,
+            K=s.K, S_entry=s.S_entry, sigma_entry=s.sigma_entry,
+            n_contracts=s.n, kelly_frac=s.kelly,
+            entry_cost=s.entry_cost, exit_cost=exit_cost,
+            gross_pnl=s.gross, slippage_cost=s.slip, financing=s.fin,
+            exit_reason=reason, is_open=is_open,
+        ))
+
+    def _open(direction, date, S, vix_row, r_t, k, nav) -> Tuple[Optional[_OpenStraddle], float]:
+        """Open a straddle at today's close; returns (state, cash cost)."""
+        if c.sleeve_nav_sizing and nav <= 0:
+            return None, 0.0          # sleeve wiped out: nothing to size off
+        sigma = _atm_sigma(vix_row, T_entry, atm_to_vix_ratio)
+        K  = S
+        V0 = max(float(_bs_straddle_value(S, K, T_entry, r_t, q, sigma)), 1e-4)
+        n  = max(1, int(k * nav / (V0 * CONTRACT_MULT)))
+        # Margin cap on short straddles: initial margin = 20% of strike
+        # notional per contract must fit within NAV. Long straddles are
+        # premium-capped by construction (k·nav sizing above).
+        if direction < 0:
+            n_margin_cap = int(nav / (MARGIN_RATIO * K * CONTRACT_MULT))
+            if n_margin_cap < 1:
+                return None, 0.0      # NAV cannot support even one short contract
+            n = min(n, n_margin_cap)
+        entry_cost = _one_way_cost(_straddle_vega(S, K, T_entry, r_t, q, sigma), n)
+        delta0 = float(_bs_straddle_greeks(S, K, T_entry, r_t, q, sigma)[0])
+        hedge0 = _hedge_cost(delta0, S, n) if c.hedge_costs else 0.0
+        s = _OpenStraddle(
+            direction=direction, K=K, S_entry=S, sigma_entry=sigma, n=n, kelly=k,
+            entry_date=date, entry_cost=entry_cost, V=V0, delta=delta0, S=S, r=r_t,
+            slip=hedge0,
+        )
+        return s, entry_cost + hedge0
 
     for i, date in enumerate(dates):
         raw_pos = float(position.iloc[i])
         pos     = int(np.sign(raw_pos))   # collapse fractional → {−1, 0, +1}
         k       = float(kelly.iloc[i])
-        nav     = float(nav_series.iloc[i])
+        nav     = float(nav_series.iloc[i]) + (cum_pnl if c.sleeve_nav_sizing else 0.0)
 
         # Defensive: a direct sign flip while holding (+1→−1 with no flat day)
-        # must not be silently ignored — the old `if not in_trade`/`if pos==0`
-        # branches would otherwise keep the original direction. The state
-        # machines now force a flat day between opposite positions, so this
-        # never triggers; if upstream ever changes, treat the flip as a close
-        # today (the opposite leg is opened on the next flat→entry day).
-        if in_trade and pos != 0 and pos != direction:
+        # is treated as a close today; the opposite leg opens on the next
+        # flat→entry day. The state machines force a flat day between
+        # opposite positions, so this never triggers today.
+        if st is not None and pos != 0 and pos != st.direction:
             pos = 0
 
         if date not in spx_close.index or date not in vix_wide_idx.index:
             continue
 
-        # Per-date risk-free rate (zero look-ahead: uses date, not date+1)
-        r_t = float(r.get(date, R_BACKTEST)) if _r_is_series else float(r)
-
+        r_t     = float(rates[i])
         S       = float(spx_close.loc[date])
         vix_row = vix_wide_idx.loc[date]
-        # days_biz is incremented in the HOLD branch BELOW, so at this point it
-        # still holds the count as of the previous bar. Being in_trade here
-        # means one more session has elapsed, hence days_biz + 1: without it
-        # the first holding day carried no time decay at all and every later
-        # mark valued the straddle one day too rich, which systematically
-        # understated short-straddle P&L (S1 is 53 of 54 short).
-        T_rem   = (max(T_entry - (days_biz + 1) / TRADING_DAYS, 1.0 / 365.0)
-                   if in_trade else T_entry)
-        sigma   = float(_interp_atm_iv(vix_row, T_rem))
-        if not (sigma > 0) or np.isnan(sigma):
-            sigma = 0.20
+        day     = 0.0
+        last_date = date
 
-        if not in_trade and pos != 0:
+        if st is not None:
+            # ── HOLD / EXIT / EXPIRY ──────────────────────────────────────────
+            # days_biz still holds the count as of the previous bar; one more
+            # session has elapsed, hence days_biz + 1 (C21: without it the
+            # first holding day carried no time decay at all).
+            days_biz = st.days_biz
+            T_raw    = T_entry - (days_biz + 1) / TRADING_DAYS
+            expired  = c.expiry_roll and (days_biz + 1) >= n_expiry
+            T_rem    = max(T_raw, 0.0) if c.expiry_roll else max(T_raw, 1.0 / 365.0)
+            st.days_biz = days_biz + 1
+            mult = st.n * CONTRACT_MULT
+
+            if expired:
+                sigma   = st.sigma_entry
+                V_t     = abs(S - st.K)
+                delta_t = 0.0
+            else:
+                sigma   = _atm_sigma(vix_row, T_rem, atm_to_vix_ratio)
+                V_t     = float(_bs_straddle_value(S, st.K, T_rem, r_t, q, sigma))
+                delta_t = float(_bs_straddle_greeks(S, st.K, T_rem, r_t, q, sigma)[0])
+
+            raw = st.direction * (V_t - st.V - st.delta * (S - st.S)) * mult
+            fin = 0.0
+            if c.financing:
+                fin = (st.direction
+                       * (st.r * (st.delta * st.S - st.V) - q * st.delta * st.S)
+                       / TRADING_DAYS * mult)
+
+            closing = expired or pos == 0
+            if closing and c.hedge_costs:
+                slip = _hedge_cost(st.delta, S, st.n)          # unwind the hedge
+            else:
+                slip = _hedge_cost(delta_t - st.delta, S, st.n)  # rebalance (legacy: also on exit)
+
+            day      += raw + fin - slip
+            st.gross += raw
+            st.fin   += fin
+            st.slip  += slip
+            st.V, st.delta, st.S, st.r = V_t, delta_t, S, r_t
+
+            if closing:
+                exit_cost = 0.0 if expired else _one_way_cost(
+                    _straddle_vega(S, st.K, T_rem, r_t, q, sigma), st.n)
+                day -= exit_cost
+                _record(st, date, exit_cost, "expiry" if expired else "signal")
+                st = None
+                if expired and pos != 0:
+                    # ── ROLL: signal still on → fresh ATM straddle today ─────
+                    st, cost = _open(pos, date, S, vix_row, r_t, k, nav)
+                    day -= cost
+
+        elif pos != 0:
             # ── ENTRY ─────────────────────────────────────────────────────────
-            direction   = pos
-            K           = S
-            S_entry     = S
-            sigma_entry = sigma
-            kelly_entry = k
-            V0          = max(float(_bs_straddle_value(S, K, T_entry, r_t, q, sigma)), 1e-4)
-            vega0       = _straddle_vega(S, K, T_entry, r_t, q, sigma)
-            n_contracts = max(1, int(k * nav / (V0 * CONTRACT_MULT)))
+            st, cost = _open(pos, date, S, vix_row, r_t, k, nav)
+            day -= cost
 
-            # Margin cap on short straddles: initial margin = 20% of strike
-            # notional per contract must fit within NAV. Long straddles are
-            # premium-capped by construction (k·nav sizing above).
-            if direction < 0:
-                margin_per_contract = MARGIN_RATIO * K * CONTRACT_MULT
-                n_margin_cap = int(nav / margin_per_contract)
-                if n_margin_cap < 1:
-                    continue   # NAV cannot support even one short contract
-                n_contracts = min(n_contracts, n_margin_cap)
+        pnl.iloc[i] += day
+        cum_pnl += day
 
-            entry_cost_  = _one_way_cost(vega0, n_contracts)
-            pnl.iloc[i] -= entry_cost_
-
-            prev_V, _, _, _ = (V0, None, None, None)
-            prev_delta      = float(_bs_straddle_greeks(S, K, T_entry, r_t, q, sigma)[0])
-            prev_S          = S
-            prev_V          = V0
-            in_trade        = True
-            entry_date      = date
-            days_biz        = 0
-            trade_gross     = 0.0
-            trade_slip      = 0.0
-
-        elif in_trade:
-            # ── HOLD ──────────────────────────────────────────────────────────
-            days_biz += 1
-            V_t         = float(_bs_straddle_value(S, K, T_rem, r_t, q, sigma))
-            delta_t     = float(_bs_straddle_greeks(S, K, T_rem, r_t, q, sigma)[0])
-
-            # Delta-hedged P&L
-            raw_pnl_t  = direction * (V_t - prev_V - prev_delta * (S - prev_S)) * n_contracts * CONTRACT_MULT
-            slip_t     = SLIPPAGE_PCT * abs(delta_t - prev_delta) * S * n_contracts * CONTRACT_MULT
-
-            pnl.iloc[i] += raw_pnl_t - slip_t
-            trade_gross += raw_pnl_t
-            trade_slip  += slip_t
-
-            prev_V     = V_t
-            prev_delta = delta_t
-            prev_S     = S
-
-            if pos == 0:
-                # ── EXIT ──────────────────────────────────────────────────────
-                exit_cost_   = _one_way_cost(_straddle_vega(S, K, T_rem, r_t, q, sigma), n_contracts)
-                pnl.iloc[i] -= exit_cost_
-
-                trades.append(TradeRecord(
-                    signal=signal_label, direction=direction,
-                    entry_date=entry_date, exit_date=date,
-                    K=K, S_entry=S_entry, sigma_entry=sigma_entry,
-                    n_contracts=n_contracts, kelly_frac=kelly_entry,
-                    entry_cost=entry_cost_, exit_cost=exit_cost_,
-                    gross_pnl=trade_gross, slippage_cost=trade_slip,
-                ))
-                in_trade    = False
-                direction   = 0
-                K           = 0.0
-                n_contracts = 0
+    if st is not None and c.open_trade_log:
+        _record(st, last_date, 0.0, "open", is_open=True)
 
     return pnl, trades
 
@@ -338,22 +592,28 @@ def _simulate_s3_pnl(
     kelly:      pd.Series,
     nav_series: pd.Series,
     z_ratio:    pd.Series,    # precomputed z-score (date-indexed)
+    corrections: Optional[C22Corrections] = None,
 ) -> Tuple[pd.Series, List[TradeRecord]]:
     """
-    Proxy P&L for Signal 3 (dispersion trade).
+    LEGACY z-score proxy P&L for Signal 3 (pre-C22; kept for c22_bridge).
 
-    Assumption (documented): no actual options traded.
-    P&L ≈ position × kelly × nav × Δz_ratio × S3_Z_SCALE (= 2% per z-unit).
-    Entry/exit cost: 0.1% of kelly-weighted notional (proxy for execution spread).
+    P&L = position × kelly × nav × Δz_ratio × S3_Z_SCALE (2% per z-unit);
+    entry/exit cost 0.1% of notional. No option is priced.
 
-    A full mean-reversion (z: −1.0 → −0.3, ~15 days) yields ≈ 1.4% × kelly × nav gross.
+    DO NOT read this as evidence of edge: z is a standardised statistic
+    that drifts back toward 0 through its own rolling normalisation, so
+    "enter at z<−1, exit at z>−0.3" books positive P&L on pure random walks
+    (199 of the 200 seeded random-walk paths of the canonical 2018-2025
+    s3_timing_null_test, 99.5%; its null p-value 0.010). The engine
+    now prices S3 as the short-SPX-straddle index leg instead.
 
-    WARNING — the S3_Z_SCALE factor is ASSUMED, not derived from any option
-    prices or dispersion-trade mechanics. The z-score timing signal is real,
-    but the dollar P&L magnitude is arbitrary up to that constant: doubling
-    S3_Z_SCALE doubles reported S3 P&L. Treat S3's contribution as
-    illustrative of timing quality, never as a dollar-accurate backtest.
+    With corrections.s3_exit_day the notional is fixed at entry (kelly at
+    entry × NAV at entry) and held through the exit day, which books that
+    day's Δz and pays the exit cost on the entry notional. Before C22 the
+    exit day read that day's kelly, which is 0 once the signal is flat, so
+    the last day's P&L and the exit cost were silently dropped.
     """
+    c = corrections or C22Corrections()
     dates  = position.index
     pnl    = pd.Series(0.0, index=dates, dtype=float)
     trades: List[TradeRecord] = []
@@ -362,18 +622,22 @@ def _simulate_s3_pnl(
     entry_date  = None
     entry_cost_ = 0.0
     notional_0  = 0.0
+    k_in        = 0.0
     trade_gross = 0.0
+    cum_pnl     = 0.0
 
     for i, date in enumerate(dates):
         pos = int(np.sign(float(position.iloc[i])))
         k   = float(kelly.iloc[i])
-        nav = float(nav_series.iloc[i])
+        nav = float(nav_series.iloc[i]) + (cum_pnl if c.sleeve_nav_sizing else 0.0)
         z   = float(z_ratio.loc[date]) if date in z_ratio.index else 0.0
+        day = 0.0
 
         if not in_trade and pos != 0:
-            notional_0   = k * nav
+            k_in         = k
+            notional_0   = k * max(nav, 0.0)
             entry_cost_  = S3_PROXY_COST * notional_0
-            pnl.iloc[i] -= entry_cost_
+            day         -= entry_cost_
             in_trade     = True
             entry_date   = date
             trade_gross  = 0.0
@@ -387,36 +651,108 @@ def _simulate_s3_pnl(
             if not np.isfinite(dz):
                 dz = 0.0   # missing z-ratio (NaN gap) → no P&L that day, not NaN NAV
 
-            notional    = k * nav
+            notional    = notional_0 if c.s3_exit_day else k * nav
             raw_pnl_t   = notional * dz * S3_Z_SCALE   # long-only
-            pnl.iloc[i] += raw_pnl_t
+            day        += raw_pnl_t
             trade_gross += raw_pnl_t
 
             if pos == 0:
-                notional_exit = k * nav
+                notional_exit = notional_0 if c.s3_exit_day else k * nav
                 exit_cost_    = S3_PROXY_COST * notional_exit
-                pnl.iloc[i] -= exit_cost_
+                day          -= exit_cost_
 
                 trades.append(TradeRecord(
                     signal="s3", direction=1,
                     entry_date=entry_date, exit_date=date,
                     K=0.0, S_entry=notional_0, sigma_entry=0.0,
-                    n_contracts=0, kelly_frac=k,
+                    n_contracts=0, kelly_frac=k_in if c.s3_exit_day else k,
                     entry_cost=entry_cost_, exit_cost=exit_cost_,
                     gross_pnl=trade_gross, slippage_cost=0.0,
+                    exit_reason="signal",
                 ))
                 in_trade = False
 
+        pnl.iloc[i] += day
+        cum_pnl += day
+
+    if in_trade and c.open_trade_log:
+        trades.append(TradeRecord(
+            signal="s3", direction=1,
+            entry_date=entry_date, exit_date=dates[-1],
+            K=0.0, S_entry=notional_0, sigma_entry=0.0,
+            n_contracts=0, kelly_frac=k_in,
+            entry_cost=entry_cost_, exit_cost=0.0,
+            gross_pnl=trade_gross, slippage_cost=0.0,
+            exit_reason="open", is_open=True,
+        ))
+
     return pnl, trades
+
+
+# ── Ex-ante sizing overlay (pass 2) ────────────────────────────────────────────
+
+def _corr_netting_multipliers(
+    pnl_mat: pd.DataFrame,
+    window: int = CORR_WINDOW,
+    min_periods: int = 20,
+) -> pd.DataFrame:
+    """
+    Correlation-netting size multiplier per sleeve (NOT shifted; caller shifts).
+
+        m_i,t = 1 / sqrt(1 + Σ_{j≠i} max(ρ_ij,t, 0))
+
+    with ρ the trailing ``window``-day correlation of daily P&L. For N
+    sleeves with equal vol and common correlation ρ ≥ 0 this keeps the
+    equal-weight portfolio variance at the uncorrelated level
+    (m² · (N + N(N−1)ρ) = N). Uncorrelated or anti-correlated sleeves keep
+    full size (no upsizing); perfectly correlated ones get 1/√N.
+    Undefined correlations (a sleeve flat over the window) count as 0.
+    """
+    cols = list(pnl_mat.columns)
+    out = pd.DataFrame(1.0, index=pnl_mat.index, columns=cols)
+    excess = {c: pd.Series(0.0, index=pnl_mat.index) for c in cols}
+    for a_i, a in enumerate(cols):
+        for b in cols[a_i + 1:]:
+            rho = (pnl_mat[a].rolling(window, min_periods=min_periods)
+                   .corr(pnl_mat[b]).clip(-1.0, 1.0))
+            # rolling().corr can return ±inf/NaN when a window is flat
+            rho = rho.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=0.0)
+            excess[a] = excess[a] + rho
+            excess[b] = excess[b] + rho
+    for c in cols:
+        out[c] = 1.0 / np.sqrt(1.0 + excess[c])
+    return out
+
+
+def _legacy_corr_kelly_mult(a: pd.Series, b: pd.Series, window: int = CORR_WINDOW) -> pd.Series:
+    """
+    Pre-C22 pairwise multiplier sqrt(2/(1+ρ)). It is ≥ 1 for every ρ in
+    [−1, 1], so after the caller's clip(0.5, 1.0) it is identically 1.0 —
+    the advertised netting never changed a position. Kept for the bridge.
+    """
+    rho = a.rolling(window, min_periods=20).corr(b).clip(-1.0, 1.0)
+    return np.sqrt(2.0 / (1.0 + rho.fillna(0.0)))
+
+
+def _net_kelly_scale(pnl: pd.Series, window: int = NET_SHARPE_WINDOW) -> pd.Series:
+    """
+    Trailing net-Sharpe size scale (NOT shifted; caller shifts).
+    Sharpe ≥ 0 → 1.0 | Sharpe = −1 → 0.75 | Sharpe ≤ −2 → 0.5. Never upsizes.
+    """
+    mu  = pnl.rolling(window, min_periods=90).mean()
+    sig = pnl.rolling(window, min_periods=90).std().clip(lower=1e-8)
+    sh  = (mu / sig * np.sqrt(TRADING_DAYS)).fillna(0.0)
+    return (1.0 + sh.clip(-2.0, 0.0) / 4.0).clip(0.5, 1.0)
 
 
 # ── Performance metrics ────────────────────────────────────────────────────────
 
 def compute_metrics(
     equity_df: pd.DataFrame,
-    rf:        float = RISK_FREE_RATE,
+    rf:        float = SHARPE_RF,
     trade_log: Optional[List[TradeRecord]] = None,
     rf_series: Optional[pd.Series] = None,
+    base_nav:  Optional[float] = None,
 ) -> Dict:
     """
     Compute full set of performance metrics from an equity curve.
@@ -424,13 +760,29 @@ def compute_metrics(
     Parameters
     ----------
     equity_df : DataFrame with column 'nav' (portfolio value, date-indexed)
-    rf        : annualised risk-free rate (scalar fallback, default 5%)
+    rf        : annualised hurdle subtracted from daily returns for
+                Sharpe/Sortino. Default 0: the backtest NAV is unfunded
+                collateral + strategy P&L, i.e. already an excess return
+                over cash (collateral assumed to earn T-bills), so any
+                positive hurdle would charge cash twice.
     trade_log : optional list of TradeRecord objects for trade-level stats
-    rf_series : optional date-indexed annualised T-bill rates (^IRX). When
-                supplied, daily excess returns use the per-date rate instead
-                of the scalar — Sharpe/Sortino are then measured against the
-                actual cash hurdle of the period (~0% in 2020-21, ~5% in
-                2023-24), consistent with the per-date r used in pricing.
+    rf_series : optional date-indexed annualised rates. Supply it only for a
+                FUNDED NAV (one that already accrues interest on its cash);
+                daily excess returns then use the per-date rate.
+    base_nav  : the NAV at the close BEFORE the curve's first row: the
+                initial capital for a full run, the last NAV before the
+                window for a slice of a longer curve. Every row is then a
+                session with a return measured from the row before it (the
+                first from base_nav), so the first session's P&L (e.g. the
+                entry costs of a position opened on it) counts in the
+                returns, Sharpe, drawdown and cumulative return, and
+                n_days = len(nav). BacktestEngine.compute_metrics always
+                passes it.
+                Default None (backward compatible): the first row IS the
+                base — a starting value, not a session — so its own P&L is
+                not measured and n_days = len(nav) − 1. Right only for a
+                curve whose first row is the capital (or the NAV before the
+                window), e.g. a slice with the prior session's NAV prepended.
 
     Returns
     -------
@@ -439,7 +791,17 @@ def compute_metrics(
                n_trades, n_days, cumulative_return
     """
     nav  = equity_df["nav"].dropna()
-    rets = nav.pct_change().dropna()
+    if base_nav is None:
+        rets  = nav.pct_change().dropna()
+        start = float(nav.iloc[0]) if len(nav) else np.nan
+    else:
+        start = float(base_nav)
+        if not (np.isfinite(start) and start > 0):
+            raise ValueError(f"base_nav must be a positive NAV, got {base_nav!r}")
+        prev = nav.shift(1)
+        if len(prev):
+            prev.iloc[0] = start
+        rets = nav / prev - 1.0
     n    = len(rets)
     if n == 0:
         return {}
@@ -455,24 +817,45 @@ def compute_metrics(
             "n_trades": len(tl), "n_days": n, "cumulative_return": 0.0,
         }
 
+    if (rf_series is not None and len(rf_series) > 0
+            and not rate_series_spans_window(rf_series.index, rets.index[0], rets.index[-1])):
+        # Forward-filling a few prints across the window is how seven fixture
+        # rows became a five-year hurdle (C21): refuse it, use the scalar.
+        logger.warning("compute_metrics: rf_series does not span %s..%s; using rf=%.4f",
+                       rets.index[0].date(), rets.index[-1].date(), rf)
+        rf_series = None
     if rf_series is not None and len(rf_series) > 0:
         rf_daily = (
             rf_series.reindex(rets.index).ffill().fillna(rf) / TRADING_DAYS
         )
     else:
         rf_daily = rf / TRADING_DAYS
-    ann_ret  = float((nav.iloc[-1] / nav.iloc[0]) ** (TRADING_DAYS / n) - 1.0)
+    growth   = float(nav.iloc[-1] / start)
+    # A NAV at or below zero has lost everything; a fractional power of a
+    # non-positive ratio is NaN, so report the total loss instead.
+    ann_ret  = growth ** (TRADING_DAYS / n) - 1.0 if growth > 0 else -1.0
     excess   = rets - rf_daily
-    sharpe   = float(excess.mean() / excess.std() * np.sqrt(TRADING_DAYS)) if excess.std() > 0 else 0.0
+    ex_mu, ex_sd = float(excess.mean()), float(excess.std())
+    if ex_sd > 1e-12 * max(abs(ex_mu), 1e-12):
+        sharpe = ex_mu / ex_sd * np.sqrt(TRADING_DAYS)
+    else:
+        # Zero-variance excess return: the ratio is ±∞ (or 0 for a zero mean),
+        # not 0 — a riskless positive return must not read as "no edge".
+        sharpe = float(np.sign(ex_mu) * np.inf) if ex_mu != 0 else 0.0
 
     # Sortino denominator = downside deviation about the target (rf), i.e.
     # sqrt(mean(min(0, excess)^2)) over ALL days — not the sample std of the
     # negative subset about its own mean (which understates downside risk).
     downside_dev = float(np.sqrt((excess.clip(upper=0.0) ** 2).mean()))
-    sortino  = (float(excess.mean() / downside_dev * np.sqrt(TRADING_DAYS))
-                if downside_dev > 0 else 0.0)
+    if downside_dev > 0:
+        sortino = float(excess.mean() / downside_dev * np.sqrt(TRADING_DAYS))
+    else:
+        # No day below the target: same convention as the Sharpe above.
+        sortino = float(np.sign(ex_mu) * np.inf) if ex_mu != 0 else 0.0
 
     roll_max = nav.cummax()
+    if base_nav is not None:
+        roll_max = roll_max.clip(lower=start)     # the peak includes the base
     dd       = (nav - roll_max) / roll_max
     max_dd   = float(dd.min())
 
@@ -486,7 +869,7 @@ def compute_metrics(
             cur = 0
 
     calmar   = float(ann_ret / abs(max_dd)) if abs(max_dd) > 1e-6 else 0.0
-    cum_ret  = float(nav.iloc[-1] / nav.iloc[0] - 1.0)
+    cum_ret  = float(nav.iloc[-1] / start - 1.0)
 
     # Trade-level stats
     tl = trade_log or []
@@ -514,16 +897,36 @@ def compute_metrics(
 def compute_crisis_performance(
     equity_df: pd.DataFrame,
     periods:   Dict[str, Tuple[str, str]] = CRISIS_PERIODS,
+    base_nav:  Optional[float] = None,
 ) -> Dict[str, Dict]:
-    """Compute performance metrics for each named crisis period."""
+    """
+    Performance metrics for each named crisis period.
+
+    Each window is measured from the NAV at the close before its first
+    session: the curve's last NAV before the window or, for a window that
+    starts on the curve's first row, ``base_nav`` (the NAV before that row,
+    e.g. the initial capital). The window's first session therefore counts
+    in its return, drawdown and Sharpe. Only a window that starts on the
+    first row with no base_nav falls back to its first NAV as the base.
+    (Before this was fixed the base was always the window's first NAV, which
+    dropped the first session: on the canonical run COVID_2020 read +1.76%
+    for +1.69% and FedHikes_2022 +5.12% for +4.71%.)
+
+    Sharpe uses rf = 0 on the strategy's excess P&L, the same convention as
+    compute_metrics' default.
+    """
     results = {}
+    nav_all = equity_df["nav"]
     for name, (start, end) in periods.items():
-        mask = (equity_df.index >= pd.Timestamp(start)) & (equity_df.index <= pd.Timestamp(end))
-        sub  = equity_df.loc[mask]
-        if len(sub) < 2:
+        s, e  = pd.Timestamp(start), pd.Timestamp(end)
+        sub   = nav_all.loc[(nav_all.index >= s) & (nav_all.index <= e)].dropna()
+        prior = nav_all.loc[nav_all.index < s].dropna()
+        base  = float(prior.iloc[-1]) if len(prior) else base_nav
+        nav   = (sub.reset_index(drop=True) if base is None
+                 else pd.Series(np.r_[float(base), sub.to_numpy(dtype=float)]))
+        if len(sub) == 0 or len(nav) < 2:
             results[name] = {"n_days": 0, "note": "No data in period"}
             continue
-        nav  = sub["nav"]
         rets = nav.pct_change().dropna()
         dd   = (nav - nav.cummax()) / nav.cummax()
         results[name] = {
@@ -535,6 +938,133 @@ def compute_crisis_performance(
             "worst_day":    float(rets.min()) if len(rets) else 0.0,
         }
     return results
+
+
+# ── ATM-vol / VIX ratio estimation ─────────────────────────────────────────────
+
+def _black76_price(F: float, K: float, T: float, DF: float, sigma: float, is_call: bool) -> float:
+    """Black-76 price of a European option on forward F, discounted by DF."""
+    sd = sigma * np.sqrt(T)
+    d1 = (np.log(F / K) + 0.5 * sd * sd) / sd
+    d2 = d1 - sd
+    if is_call:
+        return DF * (F * norm.cdf(d1) - K * norm.cdf(d2))
+    return DF * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
+
+
+def _black76_implied_vol(price: float, F: float, K: float, T: float, DF: float,
+                         is_call: bool) -> float:
+    """Black-76 implied vol by Brent; NaN outside the no-arbitrage bounds."""
+    intrinsic = DF * max((F - K) if is_call else (K - F), 0.0)
+    upper = DF * (F if is_call else K)
+    if not np.isfinite(price) or price <= intrinsic + 1e-10 or price >= upper:
+        return np.nan
+    try:
+        return float(brentq(lambda s: _black76_price(F, K, T, DF, s, is_call) - price,
+                            1e-4, 5.0, xtol=1e-10))
+    except ValueError:
+        return np.nan
+
+
+def atm_forward_term_structure(
+    chain:     pd.DataFrame,
+    as_of:     pd.Timestamp,
+    r:         float,
+    min_days:  float = 7.0,
+    max_days:  float = 75.0,
+    n_forward: int   = 3,
+) -> pd.DataFrame:
+    """
+    ATM-forward implied vol per expiry from raw SPX quotes.
+
+    chain : columns expiry, strike, right ('C'/'P'), bid, ask
+    as_of : quote time (naive, US/Eastern); expiries are taken at 16:00 ET
+    r     : continuously-compounded rate for discounting (^IRX)
+
+    Per expiry (Cboe VIX-white-paper construction):
+      • DF = exp(−rT); forward from put-call parity, F = K + (C − P)/DF,
+        averaged over the ``n_forward`` strikes with the smallest |C − P|
+        (mid quotes, both legs bid > 0)
+      • Black-76 implied vol of call and put at the strikes bracketing F,
+        averaged per strike, then interpolated linearly in log-moneyness
+        to K = F.
+    Returns columns expiry, T (years, 365-day), F, atm_iv.
+    """
+    as_of = pd.Timestamp(as_of)
+    out = []
+    for expiry, g in chain.groupby("expiry"):
+        T = ((pd.Timestamp(expiry) + pd.Timedelta(hours=16) - as_of).total_seconds()
+             / (365.0 * 86400.0))
+        if not (min_days / 365.0 <= T <= max_days / 365.0):
+            continue
+        g = g[(g["bid"] > 0) & (g["ask"] >= g["bid"])]
+        mid = (g["bid"] + g["ask"]) / 2.0
+        calls = mid[g["right"] == "C"].groupby(g.loc[g["right"] == "C", "strike"]).mean()
+        puts  = mid[g["right"] == "P"].groupby(g.loc[g["right"] == "P", "strike"]).mean()
+        ks = calls.index.intersection(puts.index).sort_values()
+        if len(ks) < max(n_forward, 2):
+            continue
+        DF = float(np.exp(-r * T))
+        diff = (calls[ks] - puts[ks])
+        nearest = diff.abs().sort_values().index[:n_forward]
+        F = float(np.mean([k + diff[k] / DF for k in nearest]))
+        below, above = ks[ks <= F], ks[ks > F]
+        if len(below) == 0 or len(above) == 0:
+            continue
+        k1, k2 = float(below.max()), float(above.min())
+        ivs = []
+        for k in (k1, k2):
+            ic = _black76_implied_vol(float(calls[k]), F, k, T, DF, True)
+            ip = _black76_implied_vol(float(puts[k]),  F, k, T, DF, False)
+            ivs.append(np.nanmean([ic, ip]) if np.isfinite([ic, ip]).any() else np.nan)
+        if not np.all(np.isfinite(ivs)):
+            continue
+        x1, x2 = np.log(k1 / F), np.log(k2 / F)
+        atm = ivs[0] + (ivs[1] - ivs[0]) * (0.0 - x1) / (x2 - x1)
+        out.append({"expiry": str(pd.Timestamp(expiry).date()), "T": T, "F": F, "atm_iv": float(atm)})
+    return pd.DataFrame(out, columns=["expiry", "T", "F", "atm_iv"])
+
+
+def atm_iv_at_tenor(term: pd.DataFrame, target_days: float = 30.0) -> Tuple[float, str, str]:
+    """
+    ATM vol at ``target_days`` calendar days: linear interpolation in total
+    variance σ²T between the nearest expiries below and above (the VIX
+    construction). Returns (σ, expiry_below, expiry_above).
+    """
+    T30 = target_days / 365.0
+    lo, hi = term[term["T"] <= T30], term[term["T"] > T30]
+    if lo.empty or hi.empty:
+        raise ValueError(f"no expiries bracket {target_days:g} days")
+    a = lo.loc[lo["T"].idxmax()]
+    b = hi.loc[hi["T"].idxmin()]
+    w1, w2 = a["atm_iv"] ** 2 * a["T"], b["atm_iv"] ** 2 * b["T"]
+    w = w1 + (w2 - w1) * (T30 - a["T"]) / (b["T"] - a["T"])
+    return float(np.sqrt(w / T30)), str(a["expiry"]), str(b["expiry"])
+
+
+def estimate_atm_to_vix_ratio(
+    chain: pd.DataFrame,
+    as_of: pd.Timestamp,
+    vix:   float,
+    r:     float,
+    q:     float = Q_BACKTEST,
+) -> Dict:
+    """
+    β = σ_ATM,30d / VIX for one SPX chain and a time-matched ^VIX print.
+
+    ``vix`` is in index points (e.g. 15.39). Also returns the spot implied
+    by the 30-day forward, S = F·exp(−(r−q)T), so callers can check that the
+    quotes really belong to the session whose VIX they are compared with.
+    """
+    term = atm_forward_term_structure(chain, as_of, r)
+    atm30, e_lo, e_hi = atm_iv_at_tenor(term, 30.0)
+    near = term.iloc[(term["T"] - 30.0 / 365.0).abs().argsort()[:1]].iloc[0]
+    s_impl = float(near["F"] * np.exp(-(r - q) * near["T"]))
+    return {
+        "atm30": atm30, "vix": vix / 100.0, "ratio": atm30 / (vix / 100.0),
+        "expiry_below": e_lo, "expiry_above": e_hi, "implied_spot": s_impl,
+        "n_expiries": int(len(term)),
+    }
 
 
 # ── BacktestEngine ─────────────────────────────────────────────────────────────
@@ -549,55 +1079,84 @@ class BacktestEngine:
       equity_df = engine.run(spx_df, vix_wide)
       metrics   = engine.compute_metrics()
       crisis    = engine.crisis_performance()
-      wf_df     = engine.walk_forward_validation(spx_df, vix_wide)
+      sub_df    = engine.sub_period_stability(spx_df, vix_wide)
+      null      = s3_timing_null_test(engine)
       engine.save()
     """
 
     ASSUMPTIONS: List[str] = [
-        "30-day ATM straddles for S1/S2; re-struck at each new entry",
-        "Delta-hedged daily (C7 framework): pnl = direction×(ΔV−Δ_{t−1}×ΔS)×n×100",
-        "S3 P&L: VIX/VVIX z-score proxy; 2% of kelly-weighted NAV per z-unit (no real options)",
+        "30-day ATM straddles for every signal; re-struck ATM at each new entry "
+        "and at expiry (21 sessions), when an open position is rolled",
+        "Delta-hedged daily and self-financing: pnl = direction×[ΔV − Δ_{t−1}ΔS "
+        "+ (r(ΔS−V) − qΔS)/252]×n×100; the hedge pays 5 bp on the opening "
+        "trade, every rebalance and the closing unwind",
+        "ATM vol = β × VIX term structure (β = ATM_TO_VIX_RATIO, estimated from "
+        "real 2026 SPX chains); VIX itself is a variance-swap rate that "
+        "includes the skew premium, so it is never used as ATM vol directly",
         "MARK-TO-MODEL P&L: no historical option prices in DB — straddles priced "
-        "via Black-Scholes on VIX-TS-interpolated ATM vol (no smile, no pin risk); "
-        "the Heston/joint-calibration stack is NOT in the backtest P&L path",
-        "Per-date r from ^IRX 3M T-bill (fallback 0.045 if DB empty), q=0.013; "
-        "Sharpe/Sortino measured against the same per-date T-bill series",
-        "Margin ENFORCED: short straddles capped at nav/(0.20×K×100) contracts",
-        "Regime labels: lagged deterministic rule (rv_20d vs VIX; VVIX>100→R2). "
-        "Persistence predictor = 90.0% next-day acc on 2020+ vs 63.4% for "
-        "walk-forward XGBoost — ML classifier demoted from the trading loop (C17)",
+        "via Black-Scholes at β×VIX-TS (no smile, no pin risk); the "
+        "Heston/joint-calibration stack is NOT in the backtest P&L path",
+        "S3 = index leg of the dispersion trade: long dispersion ⇒ short SPX "
+        "straddle on the same engine; the single-stock leg is not modelled "
+        "(no single-stock option data)",
+        "Per-date r from ^IRX 3M T-bill (previous print on gaps), q=0.013. "
+        "The P&L is an excess return on $1M unfunded collateral assumed to "
+        "earn T-bills: Sharpe/Sortino use rf=0 on it",
+        "Sizing off each sleeve's running NAV; short straddles capped at "
+        "NAV/(0.20×K×100) contracts",
+        "Regime labels: lagged deterministic rule (rv_20d vs VIX; VVIX gate→R2); "
+        "the ML classifier is not in the trading loop (it did not beat the "
+        "persistence baseline)",
         "Regime gate: new entries blocked in R2; S1C/S4 force-close open "
         "positions on transition INTO R2",
-        "Kelly netting EX-ANTE: trailing 60d corr + trailing 252d Sharpe multipliers, "
-        "shifted 1 day, applied to position size in a second simulation pass",
-        "Walk-forward PDVLinear retrained per year on pre-year returns",
+        "Ex-ante sizing overlay, shifted 1 day, second simulation pass: "
+        "correlation netting 1/√(1+Σmax(ρ,0)) on trailing 60d P&L corr × "
+        "trailing-252d net-Sharpe scale in [0.5, 1]",
+        ("Walk-forward PDVLinear forecast of the next-21-session RMS vol "
+         "(refit daily on labels observed at the forecast origin, purged) "
+         "behind the S1/S1C pdv_iv_spread" if PDV_SPREAD_HORIZON > 1 else
+         "Walk-forward PDVLinear retrained per year on pre-year returns"),
     ]
 
+    # Each entry is "Title: explanation" (the report renders the title).
     HONEST_FAILURES: List[str] = [
-        "PDV over-forecast vol in 2020 (σ_PDV=91.6% vs σ_ATM=55.4% on COVID crash); "
-        "hedge efficiency Run B = 0.303 vs Run A = 0.016",
-        "Heston rho=−0.99 boundary convergence (2026 calibration); steep skew under-modelled",
-        "C6: 3 unstable vomma nodes; delta-only hedge insufficient on those days",
-        "S3 is a proxy: no real single-stock options data in DB; the 2%-per-z-unit "
-        "P&L scale (S3_Z_SCALE) is assumed, not derived from market prices — "
-        "S3 P&L magnitude is therefore illustrative, not a real backtest",
-        "S1C DATA SNOOPING: contrarian direction was chosen AFTER observing S1 lose "
-        "on 2018-2025 — its backtest P&L is in-sample by construction and needs "
-        "confirmation on post-2026-06 data before being trusted",
-        "S1C pseudo-OOS (2013-2017) is CONFOUNDED: that window was the best "
-        "systematic short-vol era in modern history (pre-Volmageddon), so its "
-        "profit may be short-vol beta, not contrarian alpha; entry thresholds "
-        "are also shared with the discovery window",
-        "Regime classifier accuracy (86.2%) was inflated by the circular vvix feature; "
-        "after removing it, honest accuracy 63.4% LOSES to the trivial persistence "
-        "baseline (90.0%) — the ML classifier adds negative value for next-day "
-        "regime prediction and was removed from the trading loop (C17)",
-        "P&L CONCENTRATION: portfolio profit is dominated by the COVID-2020 window; "
-        "ex-crisis the portfolio is roughly flat — with ~2 dozen trades, no result "
-        "here is statistically significant",
-        "Returns below cash: cumulative return is positive but annualised return "
-        "is below the T-bill path for most configurations — this is a research "
-        "artifact and audit trail, not a deployable edge",
+        "β is one constant from 2026 chains: ATM vol is mapped from VIX with a "
+        "single ratio estimated on five 2026 SPX chains; there is no 2018-2025 "
+        "ATM-IV history and the ratio moves with skew. At β = 0.82 the model's "
+        "30-day ATM vol averages 0.3 vol pt BELOW the realised vol of the next "
+        "21 sessions over 2018-2025 (median 1.2 pt above); at β = 1 it averages "
+        "3.3 pt above (median 4.4). If "
+        "ATM implied exceeded realised on average in this window, as most SPX "
+        "studies find, the steep-skew 2026 chains understate β for it. Short-vol "
+        "P&L is very sensitive to β (run_backtest --beta-sensitivity)",
+        "Mark-to-model only: no smile dynamics, no pin risk, and the 0.15 vol-pt "
+        "bid-ask does not widen in crises",
+        "S3 is an index-leg proxy: the single-stock leg of the dispersion trade "
+        "is not modelled, so S3's P&L is a short-SPX-straddle P&L timed by the "
+        "VIX/VVIX rule. Its pre-C22 z-unit P&L was positive by construction "
+        "(positive on most random walks); judge its timing only against the "
+        "null test (s3_timing_null_test)",
+        "S1C data snooping: the contrarian direction was chosen AFTER observing "
+        "S1 lose on 2018-2025 — its backtest P&L is in-sample by construction and "
+        "needs confirmation on post-2026-06 data before being trusted",
+        "S1C pseudo-OOS is confounded: 2013-2017 (run_backtest --pseudo-oos) was "
+        "the best systematic short-vol era in modern history (pre-Volmageddon), "
+        "so a result there may be short-vol beta, not contrarian alpha; entry "
+        "thresholds are shared with the discovery window",
+        *([
+            "PDV spread units: the S1/S1C pdv_iv_spread compares a 1-day E|r| PDV "
+            "forecast with 30-day VIX (units and horizon mismatch); the spread is "
+            "biased negative and the S1/S1C entry filter is close to always-on in R1",
+        ] if PDV_SPREAD_HORIZON == 1 else []),
+        "Regime classifier: it did not beat the trivial persistence baseline for "
+        "next-day regime prediction and was removed from the trading loop",
+        "Sub-periods are not out-of-sample: the 6-month windows re-run the same "
+        "rules; nothing is re-fitted per window, so they test stability, not skill",
+        "C7 Run B is not a hedge: the PDV-scaled vega line is an attribution "
+        "variant of the SAME hedge; it explains less P&L variance than Run A and "
+        "says nothing about hedging with PDV",
+        "No statistical significance: few trades per sleeve on one 7-year path; "
+        "this is a research artifact and audit trail, not a deployable edge",
     ]
 
     def __init__(
@@ -608,13 +1167,48 @@ class BacktestEngine:
         r:               float = R_BACKTEST,
         q:               float = Q_BACKTEST,
         seed:            int   = RANDOM_SEED,
+        atm_to_vix_ratio: float = ATM_TO_VIX_RATIO,
+        corrections:     Optional[C22Corrections] = None,
+        vvix_threshold   = _DEFAULT_GATE,
+        pdv_horizon:     Optional[int] = None,
+        s3_leg_direction: int = S3_LEG_DIRECTION,
+        pdv_vol_series:  Optional[pd.Series] = None,
     ):
+        """
+        atm_to_vix_ratio : β in σ_ATM = β·VIX-TS (1.0 = pre-C22 "VIX is ATM vol")
+        corrections      : C22Corrections switches (default: all corrected)
+        vvix_threshold   : R2 gate passed to build_regime_labels. Left at the
+                           default, the engine uses build_regime_labels' own
+                           default gate, so the backtest follows the single
+                           gate regime_classifier defines; a float is a fixed
+                           VVIX level, None the adaptive 80th percentile.
+        pdv_horizon      : build_xy horizon of the walk-forward PDV behind
+                           pdv_iv_spread (default PDV_SPREAD_HORIZON)
+        s3_leg_direction : straddle direction of the S3 index leg when the
+                           signal is on (see S3_LEG_DIRECTION)
+        pdv_vol_series   : optional precomputed walk-forward σ̂ for
+                           pdv_horizon > 1 (regime_classifier.walk_forward_pdv_vol,
+                           value at t dated ≤ t). run_backtest builds it from
+                           SPX history since PDV_HISTORY_START so the first
+                           forecasts are not trained on 2015-2017 alone;
+                           without it σ̂ is built from the spx_df given to run().
+                           Ignored for pdv_horizon == 1.
+        """
         self.start_date      = start_date
         self.end_date        = end_date
         self.initial_capital = initial_capital
         self.r               = r
         self.q               = q
         self.seed            = seed
+        self.atm_to_vix_ratio = float(atm_to_vix_ratio)
+        self.corrections     = corrections or C22Corrections()
+        self.vvix_threshold  = vvix_threshold
+        self.pdv_horizon     = int(pdv_horizon if pdv_horizon is not None else PDV_SPREAD_HORIZON)
+        if s3_leg_direction not in (-1, 1):
+            raise ValueError("s3_leg_direction must be -1 (short straddle) or +1 (long)")
+        self.s3_leg_direction = int(s3_leg_direction)
+        self.pdv_vol_series  = pdv_vol_series
+        self.pdv_vol_:   Optional[pd.Series] = None
         np.random.seed(seed)
 
         self.equity_df:   Optional[pd.DataFrame] = None
@@ -622,6 +1216,9 @@ class BacktestEngine:
         self.all_trades:  List[TradeRecord]       = []
         self.metrics_:    Optional[Dict]          = None
         self._wf_results: Optional[pd.DataFrame] = None
+        self._rate_series: Optional[pd.Series]   = None
+        self._market: Dict = {}
+        self._pass1_pnl: Dict[str, pd.Series] = {}
 
     # ── Data prep helpers ──────────────────────────────────────────────────────
 
@@ -645,14 +1242,6 @@ class BacktestEngine:
         return df
 
     @staticmethod
-    def _load_clf() -> Optional[RegimeClassifier]:
-        try:
-            return RegimeClassifier.load()
-        except Exception as exc:
-            logger.warning("C8 classifier not loaded (%s); using rule-based regimes", exc)
-            return None
-
-    @staticmethod
     def _ensure_log_return(spx_df: pd.DataFrame) -> pd.DataFrame:
         df = spx_df.copy()
         if "log_return" not in df.columns:
@@ -660,34 +1249,75 @@ class BacktestEngine:
             df["log_return"] = np.log(df["close"] / df["close"].shift(1))
         return df
 
+    def _load_rate_series(self) -> Optional[pd.Series]:
+        """
+        Per-date ^IRX series from the DB, or None if it does not span the
+        window (rate_series_spans_window: a stub must not be forward-filled
+        into a five-year hurdle). Read from 40 days before the start so the
+        first backtest dates have a previous print to carry forward.
+        """
+        from joint_vol_calibration.data.database import get_tbill_rates_series
+
+        fetch_start = (pd.Timestamp(self.start_date) - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
+        df = get_tbill_rates_series(as_of_date=self.end_date, start_date=fetch_start)
+        if df.empty:
+            logger.warning("No T-bill rates in DB — using fixed r=%.4f", self.r)
+            return None
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        if not rate_series_spans_window(df["date"], self.start_date, self.end_date):
+            logger.warning(
+                "T-bill series does not span the backtest window "
+                "(%d rows, %s → %s, window %s → %s) — "
+                "falling back to fixed r=%.4f rather than forward-filling a stub",
+                len(df), df["date"].iloc[0].date(), df["date"].iloc[-1].date(),
+                self.start_date, self.end_date, self.r,
+            )
+            return None
+        return df.set_index("date")["rate"].astype(float)
+
     # ── Walk-forward PDV model ────────────────────────────────────────────────
 
     def _build_walkforward_pdv_vol(self, spx_df: pd.DataFrame) -> Optional[pd.Series]:
         """
-        Build walk-forward PDV vol forecasts with zero look-ahead bias.
+        Walk-forward PDV vol forecasts σ̂(t) with zero look-ahead.
 
-        For each backtest year Y, fit a fresh PDVLinear (Guyon-Lekeufack
-        features: sigma1, sigma2, lev) on log-returns strictly before
-        January 1 of Y, then predict sigma_PDV for the days of year Y.
+        horizon > 1 (canonical 21): regime_classifier.walk_forward_pdv_vol —
+          on each session t a PDVLinear (sigma1, sigma2, lev) is refit on the
+          forward-RMS-vol labels whose window ends by t (purged, embargo =
+          horizon) and predicts from t's features, so σ̂(t) uses returns
+          dated ≤ t only and targets sqrt(252/h·Σ r²_{t+1..t+h}).
+        horizon 1 (pre-C22 replay): one PDVLinear per backtest year, fit on
+          returns strictly before January 1 (delta_hedger.fit_pdv_before) on
+          the |r_{t+1}| target.
 
-        This replaces two flawed alternatives:
-          • the pickled full-sample PDVModel (coefficients contaminated by
-            future data — look-ahead bias), and
-          • the trailing rv_20d − VIX proxy (look-ahead-free but not a PDV
-            model at all, so S1/S1C never actually traded the PDV signal).
-
-        Feature rows at date t use returns through t; SignalEngine shifts
-        features by one day before signal generation, so the spread used on
-        day t is built from t−1 information — fully causal.
+        SignalEngine lags features by one session, so the spread traded on
+        session t is built from information dated t−1.
 
         Returns
         -------
-        pd.Series of annualised vol forecasts (decimal), or None if no year
-        had the minimum 504 training observations.
+        pd.Series of annualised vol forecasts (decimal), or None if none
+        could be made (too little history) — the rv_20d proxy is then used.
         """
-        from joint_vol_calibration.models.pdv import (
-            PDVLinear, build_xy, extract_pdv_features,
-        )
+        if self.pdv_horizon > 1:
+            from joint_vol_calibration.signals.regime_classifier import walk_forward_pdv_vol
+            if self.pdv_vol_series is not None:
+                out = pd.Series(self.pdv_vol_series, dtype=float).dropna()
+                out.index = pd.to_datetime(out.index)
+            else:
+                out = walk_forward_pdv_vol(spx_df, horizon=self.pdv_horizon)
+            out = out[out.index <= pd.Timestamp(self.end_date)]
+            if out.empty:
+                logger.warning("WF PDV (h=%d): no forecasts — rv proxy fallback", self.pdv_horizon)
+                return None
+            logger.info("WF PDV (h=%d, daily purged refit): %d forecasts %s → %s",
+                        self.pdv_horizon, len(out), out.index[0].date(), out.index[-1].date())
+            return out
+        return self._build_yearly_pdv_vol(spx_df)
+
+    def _build_yearly_pdv_vol(self, spx_df: pd.DataFrame) -> Optional[pd.Series]:
+        """Pre-C22 per-year PDVLinear on the 1-day |r| target (bridge replay)."""
+        from joint_vol_calibration.models.pdv import PDVLinear, extract_pdv_features
 
         df = spx_df.copy()
         if "date" in df.columns:
@@ -708,17 +1338,13 @@ class BacktestEngine:
             cutoff   = pd.Timestamp(f"{year}-01-01")
             year_end = pd.Timestamp(f"{year}-12-31")
 
-            r_train = log_ret[log_ret.index < cutoff]
-            if len(r_train) < 504:
+            model, train_end = fit_pdv_before(log_ret, cutoff, horizon=self.pdv_horizon)
+            if model is None:
                 logger.warning(
-                    "WF PDV: insufficient training data for %d (%d obs) — "
-                    "rv proxy fallback for that year", year, len(r_train),
+                    "WF PDV: insufficient training data for %d — rv proxy fallback for that year",
+                    year,
                 )
                 continue
-
-            feats_train  = extract_pdv_features(r_train)
-            X_tr, y_tr   = build_xy(r_train, feats_train, horizon=1)
-            model        = PDVLinear().fit(X_tr, y_tr)
 
             mask   = (feats_full.index >= cutoff) & (feats_full.index <= year_end)
             X_year = feats_full.loc[mask].dropna(subset=PDVLinear._XCOLS)
@@ -726,8 +1352,8 @@ class BacktestEngine:
                 continue
             preds.append(model.predict(X_year))
             logger.info(
-                "WF PDV year %d: trained on %d obs → predicted %d days  (%s)",
-                year, len(X_tr), len(X_year), model,
+                "WF PDV year %d (h=%d): trained through %s → predicted %d days  (%s)",
+                year, self.pdv_horizon, train_end.date(), len(X_year), model,
             )
 
         if not preds:
@@ -736,104 +1362,6 @@ class BacktestEngine:
 
         out = pd.concat(preds).sort_index()
         return out[~out.index.duplicated(keep="first")]
-
-    # ── Walk-forward regime classifier ───────────────────────────────────────
-
-    def _build_walkforward_regimes(
-        self,
-        spx_df:      pd.DataFrame,
-        vix_wide_df: pd.DataFrame,
-    ) -> pd.Series:
-        """
-        Build walk-forward regime labels with zero look-ahead bias.
-
-        For each backtest year Y, train a fresh RegimeClassifier on ALL data
-        strictly before January 1 of Y, then predict regimes for year Y.
-        This eliminates the look-ahead bias that occurs when a single
-        classifier trained on 2010-2025 is used to label 2018 data.
-
-        Minimum training requirement: 500 samples (~2 years of daily data).
-        Falls back to rule-based labels if insufficient training data.
-        """
-        from joint_vol_calibration.signals.regime_classifier import (
-            CLASSIFIER_FEATURE_COLS, build_dataset, build_features, RegimeClassifier,
-        )
-
-        backtest_start = pd.Timestamp(self.start_date)
-        backtest_end   = pd.Timestamp(self.end_date)
-
-        all_preds: list[pd.Series] = []
-
-        for year in range(backtest_start.year, backtest_end.year + 1):
-            cutoff    = pd.Timestamp(f"{year}-01-01")
-            year_end  = pd.Timestamp(f"{year}-12-31")
-
-            # ── Train on strictly pre-cutoff data ────────────────────────────
-            # Filter by date — support both 'date' column and DatetimeIndex
-            if "date" in spx_df.columns:
-                spx_train = spx_df[pd.to_datetime(spx_df["date"]) < cutoff]
-                vix_train = vix_wide_df[pd.to_datetime(vix_wide_df["date"]) < cutoff]
-            else:
-                spx_train = spx_df[spx_df.index < cutoff]
-                vix_train = vix_wide_df[vix_wide_df.index < cutoff]
-
-            try:
-                X_train, y_train = build_dataset(spx_train, vix_train)
-                # Drop vvix from the training features: the R2 label is
-                # defined as VVIX > threshold, so keeping it lets XGBoost
-                # trivially recover the labelling rule (circular feature).
-                X_train = X_train[CLASSIFIER_FEATURE_COLS]
-            except Exception as e:
-                logger.warning("WF regime: dataset build failed for year %d: %s", year, e)
-                continue
-
-            if len(X_train) < 500:
-                logger.warning(
-                    "WF regime: insufficient training data for year %d (%d samples) — skipping",
-                    year, len(X_train),
-                )
-                continue
-
-            clf_wf = RegimeClassifier()
-            try:
-                clf_wf.fit(X_train, y_train)
-            except Exception as e:
-                logger.warning("WF regime: classifier fit failed for year %d: %s", year, e)
-                continue
-
-            # ── Predict for this calendar year ───────────────────────────────
-            # Use FULL spx/vix for feature rolling windows but only predict
-            # for dates in [cutoff, year_end] to avoid look-ahead in signals.
-            try:
-                feats_full = build_features(spx_df, vix_wide_df).shift(1)
-                feats_year = feats_full.loc[
-                    (feats_full.index >= cutoff) & (feats_full.index <= year_end)
-                ].dropna()
-                # Only keep columns the classifier was trained on
-                feat_cols  = X_train.columns.tolist()
-                feats_year = feats_year[[c for c in feat_cols if c in feats_year.columns]]
-                if len(feats_year) == 0:
-                    continue
-                preds_year = clf_wf.predict_series(feats_year)
-                all_preds.append(preds_year)
-                logger.info(
-                    "WF regime year %d: trained on %d samples → predicted %d days",
-                    year, len(X_train), len(preds_year),
-                )
-            except Exception as e:
-                logger.warning("WF regime: prediction failed for year %d: %s", year, e)
-
-        if not all_preds:
-            logger.warning("WF regime: no predictions generated — falling back to None")
-            return None
-
-        combined = pd.concat(all_preds).sort_index()
-        combined = combined[~combined.index.duplicated(keep="first")]
-        logger.info(
-            "WF regime labels built: %d days (%s → %s)",
-            len(combined), combined.index.min().date(), combined.index.max().date(),
-        )
-        return combined
 
     # ── Main run ──────────────────────────────────────────────────────────────
 
@@ -850,15 +1378,22 @@ class BacktestEngine:
         ----------
         spx_df   : SPX OHLCV DataFrame with 'date', 'close', 'log_return' columns
         vix_wide : Wide VIX TS with columns '^VIX', '^VIX3M', '^VVIX', etc.
-        clf      : Optional fitted C8 RegimeClassifier; loads from disk if None
+        clf      : ignored by the trading path (regimes are the lagged rule
+                   labels, passed to SignalEngine as precomputed_regimes,
+                   which take precedence). Kept for API compatibility; it is
+                   no longer loaded from disk.
 
         Returns
         -------
         equity_df : date-indexed DataFrame with columns:
-          nav, daily_pnl, nav_s1, nav_s2, nav_s3, nav_combined,
-          pnl_s1, pnl_s2, pnl_s3, pnl_combined, regime,
-          s1_position, s2_position, s3_position, combined_pos
+          nav, daily_pnl, nav_s1c, nav_s3, nav_s4, nav_s1, nav_s2,
+          nav_combined, nav_tbill, pnl_s1c, pnl_s3, pnl_s4, pnl_s1, pnl_s2,
+          pnl_combined, regime, s1_position, s1c_position, s2_position,
+          s3_position, s4_position, combined_pos
         """
+        c = self.corrections
+        beta = self.atm_to_vix_ratio
+
         # ── Load data if not provided ──────────────────────────────────────────
         if spx_df is None or vix_wide is None:
             from joint_vol_calibration.data.database import (
@@ -868,50 +1403,13 @@ class BacktestEngine:
             spx_df   = get_spx_ohlcv(as_of_date=self.end_date)
             vix_wide = get_vix_term_structure_wide(as_of_date=self.end_date)
 
-        # ── Build per-date T-bill rate lookup (zero look-ahead) ───────────────
-        from joint_vol_calibration.data.database import get_tbill_rates_series
-        _tbill_df = get_tbill_rates_series(
-            as_of_date=self.end_date,
-            start_date=self.start_date,
-        )
-        # An emptiness check is not enough. The shipped DB once held exactly 7
-        # T-bill rows inside this window (a unit-test fixture that leaked into
-        # the tracked database), and because compute_metrics forward-fills the
-        # series, those 7 synthetic days silently became the cash hurdle for
-        # five years. Require the series to actually SPAN the backtest window
-        # before trusting it as a per-date hurdle.
-        _rate_series = None
-        if _tbill_df.empty:
-            logger.warning("No T-bill rates in DB — using fixed r=%.4f", self.r)
-        else:
-            _first = pd.Timestamp(_tbill_df["date"].iloc[0])
-            _last = pd.Timestamp(_tbill_df["date"].iloc[-1])
-            _span_days = max((pd.Timestamp(self.end_date) - pd.Timestamp(self.start_date)).days, 1)
-            _expected = _span_days / 7 * 5 * 0.80   # 80% of business days in the window
-            if (
-                _first > pd.Timestamp(self.start_date) + pd.Timedelta(days=10)
-                or _last < pd.Timestamp(self.end_date) - pd.Timedelta(days=10)
-                or len(_tbill_df) < _expected
-            ):
-                logger.warning(
-                    "T-bill series does not span the backtest window "
-                    "(%d rows, %s → %s, need ~%d covering %s → %s) — "
-                    "falling back to fixed r=%.4f rather than forward-filling a stub",
-                    len(_tbill_df), _first.date(), _last.date(), _expected,
-                    self.start_date, self.end_date, self.r,
-                )
-            else:
-                _rate_series = _tbill_df.set_index("date")["rate"]
-        # Keep for compute_metrics: Sharpe/Sortino use the same cash hurdle
+        # ── Per-date T-bill rate (pricing, financing, cash benchmark) ─────────
+        _rate_series = self._load_rate_series()
         self._rate_series = _rate_series
 
-        # NOTE (C17): the former "monthly Heston recalibration" loop was
-        # removed. There is no historical options data before the 2026
-        # snapshots, so every monthly calibration failed and fell back to
-        # static defaults — and the resulting parameters were never consumed
-        # by any P&L path. Backtest pricing is Black-Scholes on the
-        # VIX-term-structure-interpolated ATM vol; the Heston/joint
-        # calibration stack serves C6 (Greeks) and C7 (hedge sim), not C10.
+        # NOTE (C17): there is no monthly Heston recalibration. Backtest
+        # pricing is Black-Scholes on β × the VIX-term-structure vol; the
+        # Heston/joint calibration stack serves C6 (Greeks) and C7.
 
         # Normalise to have 'date' column
         spx_col  = self._to_df_with_date_col(self._to_date_indexed(spx_df))
@@ -923,28 +1421,21 @@ class BacktestEngine:
         vix_idx  = self._to_date_indexed(vix_col)
 
         # ── Regime labels: lagged deterministic rule (C17) ─────────────────────
-        # The regime label is DEFINED by same-day observables (rv_20d vs VIX;
-        # VVIX > threshold → R2), so yesterday's label is fully known at the
-        # close of t−1. Benchmarking showed this persistence predictor hits
-        # 90.0% next-day accuracy on 2020+ vs 63.4% for the walk-forward
-        # XGBoost — the ML classifier is therefore DEMOTED from the trading
-        # loop and kept only as a research component (C8). SignalEngine
-        # shifts these labels by 1 day before any signal uses them, which is
-        # exactly the persistence predictor.
+        # The label is DEFINED by same-day observables (rv_20d vs VIX; VVIX
+        # gate → R2), so yesterday's label is known at the close of t−1;
+        # SignalEngine shifts it by 1 day (the persistence predictor). The
+        # gate is build_regime_labels' default unless one was passed in.
         logger.info("Building rule-based regime labels (persistence predictor) ...")
-        rule_regimes = build_regime_labels(spx_col, vix_col)
+        gate_kw = ({} if self.vvix_threshold is _DEFAULT_GATE
+                   else {"vvix_threshold": self.vvix_threshold})
+        rule_regimes = build_regime_labels(spx_col, vix_col, **gate_kw)
 
         # ── Walk-forward PDV vol forecasts (zero look-ahead) ───────────────────
-        # Retrain PDVLinear per backtest year on strictly pre-year returns so
-        # the pdv_iv_spread feature used by S1/S1C is a genuine PDV forecast
-        # with no future data in the coefficients.
         logger.info("Building walk-forward PDV forecasts ...")
         wf_pdv_vol = self._build_walkforward_pdv_vol(spx_col)
+        self.pdv_vol_ = wf_pdv_vol
 
         # ── Generate C9 signals ────────────────────────────────────────────────
-        if clf is None:
-            clf = self._load_clf()
-
         engine  = SignalEngine(clf=clf)
         sig_df  = engine.generate(
             spx_col, vix_col,
@@ -955,122 +1446,70 @@ class BacktestEngine:
         )
         self.signals_df = sig_df
 
-        # ── Build S3 z-score (matches C9 exactly) ─────────────────────────────
+        # Legacy S3 proxy z-score (only used when s3_index_leg is off)
         z_ratio = _build_s3_zscore(vix_col).reindex(sig_df.index)
 
-        # ── Fixed-nav sizing (each signal sizes off initial capital) ───────────
-        # No compounding — conservative; avoids look-ahead in sizing
+        # Sizing capital. With sleeve_nav_sizing the simulators add each
+        # sleeve's own running P&L (through t−1) to this base.
         nav_const = pd.Series(self.initial_capital, index=sig_df.index, dtype=float)
-
         spx_close = spx_idx["close"]
-
-        # ── Simulate per-signal P&L ────────────────────────────────────────────
         _r = _rate_series if _rate_series is not None else self.r
-        pnl_s1, t1 = _simulate_straddle_pnl(
-            sig_df["s1_position"], sig_df["s1_kelly"],
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="s1",
-        )
-        pnl_s2, t2 = _simulate_straddle_pnl(
-            sig_df["s2_position"], sig_df["s2_kelly"],
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="s2",
-        )
-        pnl_s3, t3 = _simulate_s3_pnl(
-            sig_df["s3_position"], sig_df["s3_kelly"],
-            nav_const, z_ratio,
-        )
-        pnl_cb, t4 = _simulate_straddle_pnl(
-            sig_df["combined_pos"], sig_df["combined_kelly"],
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="combined",
-        )
-        pnl_s4, t5 = _simulate_straddle_pnl(
-            sig_df["s4_position"], sig_df["s4_kelly"],
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="s4",
-        )
-        pnl_s1c, t6 = _simulate_straddle_pnl(
-            sig_df["s1c_position"], sig_df["s1c_kelly"],
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="s1c",
-        )
+        # Everything the S3 null test needs to re-run SignalEngine exactly as
+        # here (full history, same regimes and PDV series) on synthetic ratios.
+        self._market = {"spx_close": spx_close, "vix_idx": vix_idx, "r": _r,
+                        "nav_base": nav_const, "spx_col": spx_col, "vix_col": vix_col,
+                        "regimes": rule_regimes, "pdv_vol": wf_pdv_vol}
 
-        # ── Portfolio Kelly netting — EX-ANTE two-pass (zero look-ahead) ───────
-        # NEW PORTFOLIO (logically corrected):
-        #   S1C (contrarian PDV) + S3 (VVIX/VIX dispersion) + S4 (VRP post-spike)
-        #
-        # S1 REMOVED: PDV spread is backwards as a directional signal (lagging
-        #   indicator overestimates fear; market prices normalization correctly).
-        # S2 REMOVED: no mechanistic basis — TS slope z-score has no theoretical
-        #   reason to predict vol direction; empirically -$101K.
-        # Combined REMOVED: was redundant (= (S1+S2+S3)/3) and included broken signals.
-        #
-        # S1 and S2 kept as RESEARCH reference curves (no portfolio weight).
-        #
-        # Methodology (replaces the old retrospective P&L rescaling):
-        #   Pass 1 (above) simulated each portfolio signal at its base Kelly.
-        #   From pass-1 P&L we compute per-day sizing multipliers using ONLY
-        #   trailing windows, then SHIFT BY 1 DAY so the multiplier applied on
-        #   day t is computable at the close of t−1. Pass 2 re-simulates the
-        #   trades with kelly × multiplier, so contract counts, entry/exit
-        #   costs and slippage all reflect the reduced size. The multipliers
-        #   are derived from pass-1 (base-size) P&L — a causal approximation,
-        #   since trailing correlation/Sharpe of the base strategy is a valid
-        #   t−1-observable statistic.
-        CORR_WINDOW = 60
+        def _straddle(pos, kel, label):
+            return _simulate_straddle_pnl(
+                pos, kel, nav_const, spx_close, vix_idx,
+                r=_r, q=self.q, signal_label=label,
+                atm_to_vix_ratio=beta, corrections=c,
+            )
 
-        def _corr_kelly_mult(a: pd.Series, b: pd.Series) -> pd.Series:
-            """Rolling pairwise correlation → diversification multiplier."""
-            r = a.rolling(CORR_WINDOW, min_periods=20).corr(b).clip(-1.0, 1.0)
-            return np.sqrt(2.0 / (1.0 + r.fillna(0.0)))
+        def _s3(kel):
+            if c.s3_index_leg:
+                # Index leg: long dispersion = SHORT the SPX straddle (default)
+                return _straddle(self.s3_leg_direction * sig_df["s3_position"], kel, "s3")
+            return _simulate_s3_pnl(sig_df["s3_position"], kel, nav_const, z_ratio,
+                                    corrections=c)
 
-        pnl_mat = pd.DataFrame({
-            "s1c": pnl_s1c, "s3": pnl_s3, "s4": pnl_s4,
-        }).fillna(0.0)
+        # ── Pass 1: every signal at its base size ──────────────────────────────
+        pnl_s1,  t1 = _straddle(sig_df["s1_position"],  sig_df["s1_kelly"],  "s1")
+        pnl_s2,  t2 = _straddle(sig_df["s2_position"],  sig_df["s2_kelly"],  "s2")
+        pnl_s3,  t3 = _s3(sig_df["s3_kelly"])
+        pnl_cb,  t4 = _straddle(sig_df["combined_pos"], sig_df["combined_kelly"], "combined")
+        pnl_s4,  t5 = _straddle(sig_df["s4_position"],  sig_df["s4_kelly"],  "s4")
+        pnl_s1c, t6 = _straddle(sig_df["s1c_position"], sig_df["s1c_kelly"], "s1c")
+        self._pass1_pnl = {"s1": pnl_s1, "s2": pnl_s2, "s3": pnl_s3, "combined": pnl_cb,
+                           "s4": pnl_s4, "s1c": pnl_s1c}
 
-        m_s1c_s3 = _corr_kelly_mult(pnl_mat["s1c"], pnl_mat["s3"])
-        m_s1c_s4 = _corr_kelly_mult(pnl_mat["s1c"], pnl_mat["s4"])
-        m_s3_s4  = _corr_kelly_mult(pnl_mat["s3"],  pnl_mat["s4"])
+        # ── Pass 2: ex-ante sizing overlay for the portfolio sleeves ──────────
+        # PORTFOLIO: S1C (contrarian PDV) + S3 (dispersion, index leg) + S4 (VRP).
+        # S1, S2 and Combined are research reference curves (no weight).
+        # From pass-1 P&L we compute per-day multipliers using ONLY trailing
+        # windows, then SHIFT BY 1 DAY so the multiplier applied on day t is
+        # computable at the close of t−1. Pass 2 re-simulates the trades with
+        # kelly × multiplier, so contract counts, entry/exit costs and
+        # slippage reflect the reduced size.
+        pnl_mat = pd.DataFrame({"s1c": pnl_s1c, "s3": pnl_s3, "s4": pnl_s4}).fillna(0.0)
+        if c.corr_netting:
+            m_corr = _corr_netting_multipliers(pnl_mat)
+        else:
+            m12 = _legacy_corr_kelly_mult(pnl_mat["s1c"], pnl_mat["s3"])
+            m13 = _legacy_corr_kelly_mult(pnl_mat["s1c"], pnl_mat["s4"])
+            m23 = _legacy_corr_kelly_mult(pnl_mat["s3"],  pnl_mat["s4"])
+            m_corr = pd.DataFrame({"s1c": (m12 * m13) ** 0.5, "s3": (m12 * m23) ** 0.5,
+                                   "s4": (m13 * m23) ** 0.5})
+        k_mult = {
+            s: (m_corr[s].clip(0.5, 1.0) * _net_kelly_scale(pnl_mat[s])).shift(1).fillna(1.0)
+            for s in PORTFOLIO_SIGNALS
+        }
+        self._k_mult = k_mult
 
-        # Geometric mean of each signal's pairwise multipliers
-        mult_s1c = (m_s1c_s3 * m_s1c_s4) ** 0.5
-        mult_s3  = (m_s1c_s3 * m_s3_s4)  ** 0.5
-        mult_s4  = (m_s1c_s4 * m_s3_s4)  ** 0.5
-
-        # Net-of-cost Kelly scaling:
-        # Reduce position sizing when a signal has been deeply loss-making over
-        # the trailing year. Scale is 0.5× when rolling Sharpe < -2, 1× when >= 0.
-        # Conservative: we do NOT upsize when Sharpe is positive (avoid overfitting).
-        def _net_kelly_scale(pnl: pd.Series, window: int = 252) -> pd.Series:
-            mu  = pnl.rolling(window, min_periods=90).mean()
-            sig = pnl.rolling(window, min_periods=90).std().clip(lower=1e-8)
-            sh  = (mu / sig * np.sqrt(252)).fillna(0.0)
-            # Sharpe >= 0 → scale = 1.0 | Sharpe = -1 → 0.75 | Sharpe <= -2 → 0.5
-            return (1.0 + sh.clip(-2.0, 0.0) / 4.0).clip(0.5, 1.0)
-
-        # Combined multiplier per signal, shifted 1 day → strictly ex-ante.
-        # Day-t sizing uses only P&L history through t−1. fillna(1.0) covers
-        # the warm-up window (insufficient history → no reduction).
-        k_mult_s1c = (mult_s1c.clip(0.5, 1.0) * _net_kelly_scale(pnl_s1c)).shift(1).fillna(1.0)
-        k_mult_s3  = (mult_s3.clip(0.5, 1.0)  * _net_kelly_scale(pnl_s3)).shift(1).fillna(1.0)
-        k_mult_s4  = (mult_s4.clip(0.5, 1.0)  * _net_kelly_scale(pnl_s4)).shift(1).fillna(1.0)
-
-        # ── Pass 2: re-simulate portfolio signals at adjusted Kelly ───────────
-        pnl_s1c_adj, t6b = _simulate_straddle_pnl(
-            sig_df["s1c_position"], sig_df["s1c_kelly"] * k_mult_s1c,
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="s1c",
-        )
-        pnl_s3_adj, t3b = _simulate_s3_pnl(
-            sig_df["s3_position"], sig_df["s3_kelly"] * k_mult_s3,
-            nav_const, z_ratio,
-        )
-        pnl_s4_adj, t5b = _simulate_straddle_pnl(
-            sig_df["s4_position"], sig_df["s4_kelly"] * k_mult_s4,
-            nav_const, spx_close, vix_idx,
-            r=_r, q=self.q, signal_label="s4",
-        )
+        pnl_s1c_adj, t6b = _straddle(sig_df["s1c_position"], sig_df["s1c_kelly"] * k_mult["s1c"], "s1c")
+        pnl_s3_adj,  t3b = _s3(sig_df["s3_kelly"] * k_mult["s3"])
+        pnl_s4_adj,  t5b = _straddle(sig_df["s4_position"], sig_df["s4_kelly"] * k_mult["s4"], "s4")
 
         # Trade log: pass-2 records for portfolio signals (actual sizing);
         # pass-1 records for the S1/S2/Combined research references.
@@ -1079,6 +1518,11 @@ class BacktestEngine:
         # ── Build equity curves ────────────────────────────────────────────────
         cap = self.initial_capital
         pnl_total = (pnl_s1c_adj + pnl_s3_adj + pnl_s4_adj) / 3.0
+
+        # Cash benchmark: $cap compounding at the prior day's ^IRX
+        rates = _resolve_rates(_r, sig_df.index, ffill=True)
+        growth = np.concatenate([[1.0], 1.0 + rates[:-1] / TRADING_DAYS])
+        nav_tbill = cap * np.cumprod(growth)
 
         eq = pd.DataFrame({
             "nav":          cap + pnl_total.cumsum(),
@@ -1091,6 +1535,8 @@ class BacktestEngine:
             "nav_s1":       cap + pnl_s1.cumsum(),
             "nav_s2":       cap + pnl_s2.cumsum(),
             "nav_combined": cap + pnl_cb.cumsum(),
+            # Cash benchmark (what the collateral alone would have earned)
+            "nav_tbill":    nav_tbill,
             # Raw P&L columns
             "pnl_s1c":      pnl_s1c_adj,
             "pnl_s3":       pnl_s3_adj,
@@ -1106,62 +1552,113 @@ class BacktestEngine:
             if col in sig_df.columns:
                 eq[col] = sig_df[col]
 
-        # Backwards-compat alias: pnl_s3 (used by load_page4 metrics)
-        if "pnl_s3" not in eq.columns:
-            eq["pnl_s3"] = pnl_s3_adj
-
         self.equity_df = eq
         logger.info(
-            "Backtest complete: %d days | NAV $%.0f → $%.0f | trades: %d",
-            len(eq), cap, float(eq["nav"].iloc[-1]), len(self.all_trades),
+            "Backtest complete: %d days | NAV $%.0f → $%.0f | trades: %d | β=%.2f",
+            len(eq), cap, float(eq["nav"].iloc[-1]), len(self.all_trades), beta,
         )
         return eq
 
     # ── Metrics interface ──────────────────────────────────────────────────────
 
+    def portfolio_trades(self) -> List[TradeRecord]:
+        """Trades of the three portfolio sleeves (S1C, S3, S4) only."""
+        return [t for t in self.all_trades if t.signal in PORTFOLIO_SIGNALS]
+
     def compute_metrics(self, equity_df: Optional[pd.DataFrame] = None) -> Dict:
-        """Compute full performance metrics; also adds per-signal breakdown."""
+        """
+        Full performance metrics plus per-signal breakdown.
+
+        Sharpe/Sortino: rf = 0 on the excess P&L (see SHARPE_RF). Portfolio
+        trade stats (win_rate, n_trades, avg_pnl_per_trade) cover the three
+        portfolio sleeves only; the research references have their own
+        per-signal keys. ``cash_cum_return`` is what the $1M collateral
+        would have earned in T-bills over the same dates.
+
+        Every curve is measured from the NAV before its first session
+        (``_nav_before``): the initial capital for this run's own curve
+        (each sleeve and each sub-period window starts flat on it), the
+        last NAV before the slice for a later slice of it. The first
+        session's P&L — the entry costs of a position opened on it — is
+        thus in every return, Sharpe and drawdown, and n_days counts every
+        session of the frame. (Until this was fixed the base was the first
+        row's NAV, after that session's P&L: on the 2019-07-01 sub-period
+        window the −$678.52 of first-day costs were dropped and the
+        cumulative return read −3.746% for −3.811%.)
+        """
         df = equity_df if equity_df is not None else self.equity_df
         if df is None:
             raise RuntimeError("No equity DataFrame. Call run() first.")
 
-        _rf_series = getattr(self, "_rate_series", None)
-        m = compute_metrics(df, trade_log=self.all_trades, rf_series=_rf_series)
+        c = self.corrections
+        _rf_series = None if c.sharpe_rf_zero else getattr(self, "_rate_series", None)
+        _rf = SHARPE_RF if c.sharpe_rf_zero else 0.05
+        m = compute_metrics(df, rf=_rf, trade_log=self.portfolio_trades(), rf_series=_rf_series,
+                            base_nav=self._nav_before(df, "nav"))
+        m["sharpe_convention"] = ("excess P&L, rf=0 (collateral earns T-bills)"
+                                  if c.sharpe_rf_zero else "NAV minus per-date ^IRX (pre-C22)")
 
         # Per-signal Sharpe and annualised return
         for sig, nav_col in [("s1","nav_s1"),("s2","nav_s2"),("s3","nav_s3"),
                               ("s4","nav_s4"),("s1c","nav_s1c"),("combined","nav_combined")]:
             if nav_col in df.columns:
                 sub = pd.DataFrame({"nav": df[nav_col]})
-                sm  = compute_metrics(sub, rf_series=_rf_series)
+                sm  = compute_metrics(sub, rf=_rf, rf_series=_rf_series,
+                                      base_nav=self._nav_before(df, nav_col))
                 m[f"{sig}_sharpe"]     = sm.get("sharpe", np.nan)
                 m[f"{sig}_ann_return"] = sm.get("ann_return", np.nan)
+                m[f"{sig}_max_drawdown"] = sm.get("max_drawdown", np.nan)
+
+        if "nav_tbill" in df.columns and len(df) > 0:
+            m["cash_cum_return"] = float(df["nav_tbill"].iloc[-1]
+                                         / self._nav_before(df, "nav_tbill") - 1.0)
 
         # Per-signal trade stats
         from collections import defaultdict
         sig_trades: Dict[str, List] = defaultdict(list)
         for t in self.all_trades:
-            sig_trades[t.signal].append(t.net_pnl)
-        for sig, pnls in sig_trades.items():
+            sig_trades[t.signal].append(t)
+        for sig, tl in sig_trades.items():
+            pnls = [t.net_pnl for t in tl]
             if pnls:
                 m[f"{sig}_win_rate"]  = float(sum(1 for p in pnls if p > 0) / len(pnls))
                 m[f"{sig}_avg_pnl"]  = float(np.mean(pnls))
                 m[f"{sig}_n_trades"] = len(pnls)
                 m[f"{sig}_total_pnl"] = float(sum(pnls))
+                m[f"{sig}_n_open"]   = int(sum(1 for t in tl if t.is_open))
 
+        m["atm_to_vix_ratio"] = self.atm_to_vix_ratio
         self.metrics_ = m
         return m
 
+    def _nav_before(self, df: pd.DataFrame, col: str) -> float:
+        """
+        NAV of ``col`` at the close before df's first session — the base its
+        returns are measured from. When df is a later slice of this run's
+        equity curve, that is the column's last value in the curve before
+        the slice; otherwise df starts on the run's first session and the
+        base is the initial capital, where every NAV column of run()
+        (portfolio, sleeves, T-bill cash) starts.
+        """
+        first = df[col].first_valid_index() if len(df) else None
+        full = self.equity_df
+        if first is not None and full is not None and col in full.columns:
+            prior = full.loc[full.index < first, col].dropna()
+            if len(prior):
+                return float(prior.iloc[-1])
+        return float(self.initial_capital)
+
     def crisis_performance(self, equity_df: Optional[pd.DataFrame] = None) -> Dict[str, Dict]:
-        """Compute performance metrics for each crisis period."""
+        """Compute performance metrics for each crisis period (rf = 0), each
+        measured from the NAV before its first session."""
         df = equity_df if equity_df is not None else self.equity_df
         if df is None:
             raise RuntimeError("No equity DataFrame. Call run() first.")
-        return compute_crisis_performance(df)
+        return compute_crisis_performance(df, base_nav=self._nav_before(df, "nav"))
 
-    # ── Walk-forward validation ────────────────────────────────────────────────
+    # ── Sub-period stability ───────────────────────────────────────────────────
 
-    def walk_forward_validation(
+    def sub_period_stability(
         self,
         spx_df:        pd.DataFrame,
         vix_wide:      pd.DataFrame,
@@ -1169,17 +1666,32 @@ class BacktestEngine:
         window_months: int = WF_WINDOW_MONTHS,
     ) -> pd.DataFrame:
         """
-        Expanding-window walk-forward validation.
+        Re-run the full pipeline on consecutive 6-month windows (2019 →).
 
-        For each of 12 six-month OOS windows (2019 → 2024):
-          1. Re-train C8 classifier on all data up to test_start − 1 day
-          2. Run backtest on 6-month test window using retrained classifier
-          3. Compute Sharpe and flag windows with Sharpe < 0
+        Each window starts flat with fresh capital and the same rules and
+        parameters (β, corrections, gate, PDV horizon), and reads the same
+        causal PDV forecast as the main run (the PDV-21 σ̂ series, each value
+        dated ≤ its session; with pdv_horizon = 1 the per-year refit on
+        pre-year data). Nothing is fitted per window — so this measures how
+        stable the strategy is across sub-periods. It is NOT an
+        out-of-sample test: the signal rules, thresholds and S1C's direction
+        were chosen on the whole 2018-2025 sample.
+
+        (Before C22 this method also re-trained the C8 classifier per
+        window, ~6 min each, and passed it to run(), which ignores it —
+        regimes are the precomputed rule labels.)
+
+        Each window's metrics are measured from its fresh capital (the
+        window's engine computes them from its own initial_capital), so a
+        position opened on the window's first session pays its entry costs
+        inside the window's return, Sharpe and drawdown.
 
         Returns
         -------
         DataFrame with columns: window, train_end, test_start, test_end,
-          sharpe, ann_return, max_drawdown, n_trades, below_zero_sharpe
+          sharpe (rf=0), ann_return, max_drawdown, n_trades (portfolio
+          sleeves), below_zero_sharpe. ``train_end`` is the day before the
+          window: the last date any PDV fit for the window can see.
         """
         spx_col = self._to_df_with_date_col(self._to_date_indexed(spx_df))
         vix_col = self._to_df_with_date_col(self._to_date_indexed(vix_wide))
@@ -1196,30 +1708,28 @@ class BacktestEngine:
             if test_start > pd.Timestamp(self.end_date):
                 break
 
-            logger.info(
-                "WF window %d/%d: train→%s  test %s→%s",
-                i + 1, n_windows, train_end.date(), test_start.date(), test_end.date(),
-            )
-
-            # Re-train C8 on expanding window
-            try:
-                clf = self._retrain_classifier(spx_col, vix_col, train_end)
-            except Exception as exc:
-                logger.warning("Classifier retrain failed (window %d): %s", i + 1, exc)
-                clf = None
-
-            # Run sub-backtest
+            logger.info("Sub-period %d/%d: %s → %s", i + 1, n_windows,
+                        test_start.date(), test_end.date())
             try:
                 sub = BacktestEngine(
                     start_date      = test_start.strftime("%Y-%m-%d"),
                     end_date        = test_end.strftime("%Y-%m-%d"),
                     initial_capital = self.initial_capital,
                     r=self.r, q=self.q, seed=self.seed,
+                    atm_to_vix_ratio=self.atm_to_vix_ratio,
+                    corrections=self.corrections,
+                    vvix_threshold=self.vvix_threshold,
+                    pdv_horizon=self.pdv_horizon,
+                    s3_leg_direction=self.s3_leg_direction,
+                    # σ̂(t) is causal, so the full-run series is valid for
+                    # every window (and saves a refit per window)
+                    pdv_vol_series=(self.pdv_vol_series if self.pdv_vol_series is not None
+                                    else self.pdv_vol_),
                 )
-                eq_sub = sub.run(spx_col, vix_col, clf=clf)
+                eq_sub = sub.run(spx_col, vix_col)
                 m_sub  = sub.compute_metrics(eq_sub)
             except Exception as exc:
-                logger.warning("WF window %d backtest failed: %s", i + 1, exc)
+                logger.warning("Sub-period %d backtest failed: %s", i + 1, exc)
                 m_sub = {"sharpe": np.nan, "ann_return": np.nan, "max_drawdown": np.nan, "n_trades": 0}
 
             sh = m_sub.get("sharpe", np.nan)
@@ -1239,31 +1749,9 @@ class BacktestEngine:
         self._wf_results = wf_df
         return wf_df
 
-    @staticmethod
-    def _retrain_classifier(
-        spx_df:    pd.DataFrame,
-        vix_wide:  pd.DataFrame,
-        train_end: pd.Timestamp,
-    ) -> RegimeClassifier:
-        """Re-train C8 XGBoost on data up to train_end (expanding window)."""
-        from joint_vol_calibration.signals.regime_classifier import (
-            CLASSIFIER_FEATURE_COLS,
-        )
-        feats  = build_features(spx_df, vix_wide)
-        labels = build_regime_labels(spx_df, vix_wide)
-
-        mask    = feats.index <= train_end
-        X_train = feats[mask].dropna()
-        y_train = labels.reindex(X_train.index).dropna()
-        X_train = X_train.reindex(y_train.index)
-
-        if len(X_train) < 50:
-            raise ValueError(f"Insufficient training data: {len(X_train)} rows")
-
-        clf = RegimeClassifier()
-        # vvix excluded: it defines the R2 label (circular feature).
-        clf.fit(X_train[CLASSIFIER_FEATURE_COLS], y_train)
-        return clf
+    def walk_forward_validation(self, *args, **kwargs) -> pd.DataFrame:
+        """Backward-compatible name for sub_period_stability (not an OOS test)."""
+        return self.sub_period_stability(*args, **kwargs)
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -1282,6 +1770,13 @@ class BacktestEngine:
             "r":               self.r,
             "q":               self.q,
             "seed":            self.seed,
+            "atm_to_vix_ratio": self.atm_to_vix_ratio,
+            "pdv_horizon":     self.pdv_horizon,
+            "s3_leg_direction": self.s3_leg_direction,
+            "pdv_iv_spread_source": (self.signals_df.attrs.get("pdv_iv_spread_source")
+                                     if self.signals_df is not None else None),
+            "corrections":     {f.name: getattr(self.corrections, f.name)
+                                for f in fields(self.corrections)},
             "metrics":         self.metrics_,
             "all_trades":      self.all_trades,
         }
@@ -1302,6 +1797,7 @@ class BacktestEngine:
         with open(pkl_path, "rb") as f:
             state = pickle.load(f)
 
+        corr = state.get("corrections")
         engine            = cls(
             start_date      = state["start_date"],
             end_date        = state["end_date"],
@@ -1309,6 +1805,11 @@ class BacktestEngine:
             r               = state.get("r", R_BACKTEST),
             q               = state.get("q", Q_BACKTEST),
             seed            = state.get("seed", RANDOM_SEED),
+            # Results saved before C22 carry no β: they were priced at VIX (β=1)
+            atm_to_vix_ratio = state.get("atm_to_vix_ratio", 1.0),
+            corrections     = C22Corrections(**corr) if corr else C22Corrections.legacy(),
+            pdv_horizon     = state.get("pdv_horizon"),
+            s3_leg_direction = state.get("s3_leg_direction", S3_LEG_DIRECTION),
         )
         engine.equity_df  = eq_df
         engine.metrics_   = state.get("metrics")
@@ -1323,3 +1824,144 @@ class BacktestEngine:
             f"BacktestEngine(start={self.start_date}, end={self.end_date}, "
             f"capital=${self.initial_capital:,.0f}, days={n}, final_nav={nav})"
         )
+
+
+# ── S3 timing null test ────────────────────────────────────────────────────────
+
+def s3_timing_null_test(
+    engine:  BacktestEngine,
+    n_paths: int = 200,
+    seed:    int = RANDOM_SEED,
+    method:  str = "random_walk",
+) -> Dict:
+    """
+    Is the S3 timing rule better than random timing with the same mechanics?
+
+    The real S3 rule (z of VIX/VVIX < −1 entry, > −0.3 exit, 30-day max hold,
+    R2 gate) is re-run on ``n_paths`` synthetic VIX/VVIX ratio paths that
+    carry no information about the market:
+      method='random_walk' : Gaussian random walk in log(ratio) with the
+                             real daily log-change std, started at the real
+                             first value
+      method='permutation' : the real daily log-changes in shuffled order
+    Each path replaces ^VVIX by ^VIX / synthetic ratio over the WHOLE
+    history the engine was given (sessions with no real VVIX print stay
+    missing) and re-runs SignalEngine.generate exactly as engine.run() did:
+    same spx/VIX history, precomputed regimes and PDV series, trailing
+    z-scores warmed up on pre-window data, entries only inside the window.
+    ^VVIX feeds nothing but S3, so every other input — the regime gate, the
+    SPX/VIX market the straddles are priced on, β and the corrections — is
+    the real one. Only S3's timing changes.
+
+    SIZE: every path, the real one included, is sized at S3's BASE kelly
+    (the engine's pass 1), NOT through the pass-2 ex-ante sizing overlay
+    (correlation netting × trailing net-Sharpe scale) that produces the
+    S3 P&L the engine reports (equity_df['pnl_s3'], the trade log, the
+    metrics' s3_total_pnl). The overlay rescales the same entries and
+    exits, so the timing tested is the timing traded, but the dollar
+    statistic is not the published one: on 2018-2025 the tested "real"
+    is +$41,952 at base size while the published S3 is +$56,471 after
+    the overlay. Both are returned (engine_pass1_pnl, engine_overlay_pnl);
+    the p-value belongs to the first. The overlay is not re-run per path.
+
+    Two statistics are compared with their null distributions:
+      index_leg : total base-size P&L of S3 priced as a short SPX straddle
+                  (the engine's S3 model) — the test of S3's timing
+      z_proxy   : the pre-C22 z-unit proxy P&L. Its null distribution is
+                  shifted far above zero: positive "P&L" on series with no
+                  predictability, which is why it is not evidence of edge.
+
+    p_value = (1 + #{null ≥ real}) / (n_paths + 1), one-sided.
+
+    The real statistic goes through the same function on the real ^VVIX, so
+    it IS the engine's pass-1 (base-size) S3 P&L: ``engine_pass1_pnl``
+    (the engine's own number) must equal index_leg['real'] (z_proxy['real']
+    when the engine runs the legacy proxy). Before this was re-based on
+    SignalEngine, the null re-built S3 from the backtest-window features
+    alone, so its "real" S3 warmed its 252-day z-score up inside the window
+    and was not the S3 the engine trades (2018-2025: 26 entries, first on
+    2018-07-16, +$110,675, against the engine's first entry on 2018-01-04
+    and +$41,952 at pass-1 size). Requires engine.run() to have been called.
+    """
+    if method not in ("random_walk", "permutation"):
+        raise ValueError(f"unknown method {method!r}")
+    if engine.signals_df is None or not engine._market:
+        raise RuntimeError("Run the engine before the S3 null test.")
+    mk = engine._market
+    c = engine.corrections
+    nav = mk["nav_base"]
+    vix_col = mk["vix_col"]
+    sig_engine = SignalEngine(clf=None)
+
+    def _stats(vix_df: pd.DataFrame) -> Tuple[float, float, int]:
+        sig = sig_engine.generate(
+            mk["spx_col"], vix_df,
+            start_date=engine.start_date, end_date=engine.end_date,
+            precomputed_regimes=mk["regimes"], precomputed_pdv_vol=mk["pdv_vol"],
+        )
+        pos, kel = sig["s3_position"], sig["s3_kelly"]
+        leg, _ = _simulate_straddle_pnl(
+            engine.s3_leg_direction * pos, kel, nav, mk["spx_close"], mk["vix_idx"],
+            r=mk["r"], q=engine.q,
+            signal_label="s3", atm_to_vix_ratio=engine.atm_to_vix_ratio, corrections=c,
+        )
+        z = _build_s3_zscore(vix_df).reindex(sig.index)
+        proxy, _ = _simulate_s3_pnl(pos, kel, nav, z, corrections=c)
+        n_entries = int(((pos != 0) & (pos.shift(1, fill_value=0) == 0)).sum())
+        return float(leg.sum()), float(proxy.sum()), n_entries
+
+    se_logger = logging.getLogger(SignalEngine.__module__)
+    level = se_logger.level
+    se_logger.setLevel(max(level, logging.WARNING))     # one INFO line per path otherwise
+    try:
+        real_leg, real_proxy, real_n = _stats(vix_col)
+
+        vix = pd.to_numeric(vix_col["^VIX"], errors="coerce").to_numpy(dtype=float)
+        vvix = pd.to_numeric(vix_col["^VVIX"], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(vix) & np.isfinite(vvix) & (vix > 0) & (vvix > 0)
+        log_ratio = np.log(vix[ok] / vvix[ok])
+        steps = np.diff(log_ratio)
+        rng = np.random.default_rng(seed)
+        null_leg, null_proxy, null_n = [], [], []
+        for _ in range(n_paths):
+            if method == "random_walk":
+                inc = rng.normal(0.0, steps.std(ddof=1), len(steps))
+            else:
+                inc = rng.permutation(steps)
+            path = log_ratio[0] + np.concatenate([[0.0], np.cumsum(inc)])
+            syn = np.full(len(vix_col), np.nan)
+            syn[ok] = vix[ok] / np.exp(path)
+            f = vix_col.copy()
+            f["^VVIX"] = syn
+            a, b, n = _stats(f)
+            null_leg.append(a)
+            null_proxy.append(b)
+            null_n.append(n)
+    finally:
+        se_logger.setLevel(level)
+
+    def _summ(real: float, null: List[float]) -> Dict:
+        arr = np.asarray(null)
+        return {
+            "real": real,
+            "null_mean": float(arr.mean()),
+            "null_std": float(arr.std(ddof=1)) if len(arr) > 1 else np.nan,
+            "null_frac_positive": float((arr > 0).mean()),
+            "p_value": float((1 + (arr >= real).sum()) / (len(arr) + 1)),
+        }
+
+    return {
+        "method": method, "n_paths": n_paths, "seed": seed,
+        # the tested statistic's engine twin: S3 at base (pass-1) size
+        "engine_pass1_pnl": float(engine._pass1_pnl["s3"].sum()) if "s3" in engine._pass1_pnl else np.nan,
+        # the S3 P&L the engine reports, after the pass-2 sizing overlay —
+        # NOT the statistic the p-values refer to
+        "engine_overlay_pnl": (float(engine.equity_df["pnl_s3"].sum())
+                               if engine.equity_df is not None and "pnl_s3" in engine.equity_df
+                               else np.nan),
+        # entries (flat → on), not trade records: an S3 position held past
+        # the straddle's 21-session expiry is rolled into a new record
+        "real_trades": real_n, "null_mean_trades": float(np.mean(null_n)) if null_n else np.nan,
+        "index_leg": _summ(real_leg, null_leg),
+        "z_proxy": _summ(real_proxy, null_proxy),
+    }

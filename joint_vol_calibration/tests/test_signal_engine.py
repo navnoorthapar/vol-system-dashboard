@@ -12,11 +12,13 @@ Coverage:
   8.  signal_summary        — return structure and keys
   9.  Edge cases            — all-flat, single-day, NaN handling
   10. Constants sanity      — S1/S2/S3 thresholds in valid ranges
-
-Total: 70 tests across 13 test classes.
   11. generate_signal1_regime_filtered — R2 zeroing, resume after R2, columns
   12. compare_s1_regime_filter         — dict keys, P&L math, trade decomposition
   13. SignalEngine S1RF integration    — engine output columns, summary key
+  14+ R2-exit machines, S1X/S2X/S1S/S4/S1C, and the C22 regressions:
+      S2 stop direction (both sides), S1 exit on a zero crossing, precomputed
+      regimes only lagged, sessions kept across a missing VVIX print.
+  Signal-level look-ahead tests live in test_lookahead.py.
 """
 
 
@@ -24,8 +26,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import joint_vol_calibration.signals.signal_engine as se
+from joint_vol_calibration.signals.regime_classifier import build_regime_labels
 from joint_vol_calibration.signals.signal_engine import (
     S1_ENTRY_THRESHOLD,
+    S1_EXIT_BAND,
     S1_MAX_HOLD,
     S1_MAX_KELLY,
     S1_RF_REGIME2_SCALE,
@@ -38,7 +43,9 @@ from joint_vol_calibration.signals.signal_engine import (
     S4_Z_EXIT,
     S4_MAX_HOLD,
     S4_MAX_KELLY,
+    S2_STOP_LOSS_PCT,
     SignalEngine,
+    default_signals_path,
     _run_statemachine,
     _run_statemachine_r2exit,
     combine_signals,
@@ -59,7 +66,6 @@ from joint_vol_calibration.signals.signal_engine import (
 
 def _make_flat_features(n: int = 60, seed: int = 42) -> pd.DataFrame:
     """Synthetic feature DataFrame that triggers no signals (neutral)."""
-    rng  = np.random.default_rng(seed)
     idx  = pd.bdate_range("2022-01-03", periods=n)
     return pd.DataFrame({
         "vix":           np.full(n, 0.18),
@@ -133,11 +139,6 @@ class TestRunStatemachine:
         assert r["position"].iloc[3] == 0
 
     def test_exits_on_max_hold(self):
-        r = self._run(
-            entry_l=[True] + [False]*9,
-            entry_s=[False]*10,
-            exit_c=[False]*10,
-        )
         result = _run_statemachine(
             pd.Series([True] + [False]*9),
             pd.Series([False]*10),
@@ -146,7 +147,8 @@ class TestRunStatemachine:
             pd.Series(np.zeros(10)),
             max_hold=4,
         )
-        assert result["position"].iloc[4] == 0  # after 4-day hold
+        # days_held reaches max_hold=4 on the 4th session, which is the exit day
+        assert list(result["position"].iloc[:5]) == [1, 1, 1, 0, 0]
 
     def test_no_double_entry(self):
         """Both long and short on same day → no entry."""
@@ -254,15 +256,55 @@ class TestGenerateSignal1:
         assert s1["s1_kelly"].max() <= S1_MAX_KELLY + 1e-8
 
     def test_max_hold_respected(self):
+        """Entry day 0 (days_held 1) … day 4 reaches max_hold=5 → flat that
+        day, re-entry the next day while the spread still qualifies."""
         feats = _inject_spread(_make_flat_features(), 0, 60, 0.05)
         regs  = _make_regimes(value=0)
         s1    = generate_signal1(feats, regs, max_hold=5)
-        # After entry + 5 days, should be flat again
         pos = s1["s1_position"].values
-        # Find first flat after first active streak
-        first_active = np.where(pos != 0)[0]
-        if len(first_active) > 5:
-            assert pos[first_active[0] + 5] == 0 or pos[first_active[0] + 5] != 0  # max_hold exit possible
+        assert list(pos[:6]) == [1, 1, 1, 1, 0, 1]
+        assert s1["s1_days_held"].max() == 4
+
+
+class TestSignal1ExitOnCrossing:
+    """The documented exit is "spread reverts to zero". The code used to exit
+    only INSIDE |spread| < 0.5 vp, so a spread that jumped through zero (10 of
+    23 sign flips in 2018-2025) kept the trade open until max-hold."""
+
+    @staticmethod
+    def _spread_path(first: float, then: float, n: int = 20):
+        feats = _make_flat_features(n)
+        feats.iloc[:3, feats.columns.get_loc("pdv_iv_spread")] = first
+        feats.iloc[3:, feats.columns.get_loc("pdv_iv_spread")] = then
+        return feats
+
+    def test_long_exits_when_spread_jumps_through_zero(self):
+        feats = self._spread_path(0.03, -0.01)
+        s1 = generate_signal1(feats, _make_regimes(20, value=0))
+        assert list(s1["s1_position"].iloc[:4]) == [1, 1, 1, 0]
+        assert (s1["s1_position"].iloc[3:] == 0).all()
+
+    def test_short_exits_when_spread_jumps_through_zero(self):
+        feats = self._spread_path(-0.03, 0.01)
+        s1 = generate_signal1(feats, _make_regimes(20, value=1))
+        assert list(s1["s1_position"].iloc[:4]) == [-1, -1, -1, 0]
+
+    def test_trade_holds_while_spread_stays_on_entry_side(self):
+        feats = self._spread_path(0.03, 0.01)      # smaller, same sign, outside band
+        s1 = generate_signal1(feats, _make_regimes(20, value=0))
+        assert (s1["s1_position"].iloc[:S1_MAX_HOLD - 1] == 1).all()
+
+    def test_exit_inside_band_still_works(self):
+        feats = self._spread_path(0.03, S1_EXIT_BAND / 2)
+        s1 = generate_signal1(feats, _make_regimes(20, value=0))
+        assert s1["s1_position"].iloc[3] == 0
+
+    def test_contrarian_and_r2exit_variants_exit_on_crossing(self):
+        feats = self._spread_path(0.03, -0.01)
+        s1c = generate_signal1_contrarian(feats, _make_regimes(20, value=0))
+        assert list(s1c["s1c_position"].iloc[:4]) == [-1, -1, -1, 0]
+        s1x = generate_signal1_r2exit(feats, _make_regimes(20, value=0))
+        assert list(s1x["s1x_position"].iloc[:4]) == [1, 1, 1, 0]
 
 
 # ── 3. generate_signal2 ───────────────────────────────────────────────────────
@@ -287,9 +329,9 @@ class TestGenerateSignal2:
         feats = self._features_with_slope(np.full(n, 0.003))
         regs  = pd.Series(1, index=feats.index)
         s2    = generate_signal2(feats, regs)
-        # With constant slope, std ≈ 0 → no z-score-based entry
-        # Backwardation entry is possible only when slope < 0; here slope > 0
-        assert (s2["s2_position"] == 0).all() or True  # lenient: no contango entry expected
+        # Constant slope → z = 0 (no contango entry); slope > 0 → no long entry
+        assert (s2["s2_position"] == 0).all()
+        assert s2["s2_z"].dropna().abs().max() < 1e-6
 
     def test_short_entry_steep_contango(self):
         """Inject steep contango → short front vol."""
@@ -301,9 +343,9 @@ class TestGenerateSignal2:
         regs  = pd.Series(1, index=feats.index)
         s2    = generate_signal2(feats, regs)
         active = s2[s2["s2_position"] != 0]
-        # Should have at least some short positions
-        if len(active) > 0:
-            assert (active["s2_position"] <= 0).all() or True  # only short from contango
+        assert len(active) > 0, "steep contango must open a short"
+        assert (active["s2_position"] == -1).all()
+        assert s2["s2_position"].iloc[300] == -1
 
     def test_long_entry_backwardation(self):
         n = 400
@@ -314,8 +356,8 @@ class TestGenerateSignal2:
         s2    = generate_signal2(feats, regs)
         # Check that long positions appear during backwardation window
         window = s2["s2_position"].iloc[300:320]
-        if (window != 0).any():
-            assert (window[window != 0] == 1).any()
+        assert window.iloc[0] == 1, "backwardation must open a long on day 1"
+        assert (window[window != 0] == 1).all()
 
     def test_no_entry_regime2(self):
         """Regime 2 gates all Signal 2 entries."""
@@ -328,50 +370,65 @@ class TestGenerateSignal2:
         assert (s2["s2_position"] == 0).all()
 
     def test_kelly_capped(self):
-        n = 400
         slope = np.concatenate([np.full(300, 0.003), np.full(100, -0.05)])
         feats = self._features_with_slope(slope)
         regs  = pd.Series(0, index=feats.index)
         s2    = generate_signal2(feats, regs)
         assert s2["s2_kelly"].max() <= 0.20 + 1e-8
 
-    def test_stop_loss_propagates_beyond_trigger_day(self):
-        """Stop-loss must zero the position for ALL remaining days of the trade,
-        not just the trigger day. Pre-fix: only day i was zeroed; the trade
-        resumed on day i+1. Post-fix: zeroed until the next state-machine entry."""
-        n = 400
-        slope = np.full(n, 0.003, dtype=float)
-        # Drive a backwardation entry at day 300 (slope < 0, regime OK)
-        slope[300:315] = -0.05
-        # On day 305 inject a +50% adverse move to trigger stop-loss:
-        # long position (pos=+1) loses when slope narrows to near-zero → pct_move < -0.15
-        slope[305] = -0.001   # from -0.05 reference → pct_move ≈ +0.98 for short, or near 0 for long
-        # Use long entry (backwardation); stop fires if slope moves +15% against long
-        # i.e. slope[305] rises from entry_slope_ref = slope[300] = -0.05
-        # pct_move = (-0.001 - (-0.05)) / 0.05 = 0.98 > 0.15 → stop for long? No, wrong sign.
-        # For a LONG position: stop fires when pct_move < -stop_loss_pct = -0.15
-        # pct_move = (slope[i] - entry_ref) / |entry_ref|
-        # We need slope to go more negative: slope[305] = -0.08 → pct_move = (-0.08 - (-0.05)) / 0.05 = -0.6 < -0.15
-        slope[305] = -0.08
-        slope[306:315] = -0.05  # slope returns to normal after stop day
+    # ── stop-loss: expressed in the STRADDLE that is traded ──────────────────
+    # S2 trades an SPX straddle: +1 long (loses when front vol FALLS), −1 short
+    # (loses when front vol RISES). Pre-C22 the stop lived on the slope with the
+    # sign inverted, so every stop fired on a winning trade.
+
+    def _stop_case(self, slope_value: float, vix_after: float, prefix: str = "s2"):
+        n = 330
+        slope = np.full(n, 0.003)
+        slope[300:] = slope_value               # entry on day 300, persists
         feats = self._features_with_slope(slope)
-        regs  = pd.Series(0, index=feats.index)  # regime 0 (backwardation allowed)
-        s2    = generate_signal2(feats, regs)
-        pos   = s2["s2_position"].values
-        # Find the stop day (first day with in-trade days_held > 0 that gets zeroed)
-        stop_day = None
-        for i in range(300, min(320, n)):
-            if pos[i] == 0 and i > 300 and pos[i - 1] != 0:
-                stop_day = i
-                break
-        if stop_day is not None:
-            # All days after stop_day (and before next entry) must also be 0
-            for j in range(stop_day + 1, min(stop_day + 5, n)):
-                if s2["s2_days_held"].values[j] == 0:
-                    assert pos[j] == 0, (
-                        f"Stop-loss must propagate: day {j} still shows position "
-                        f"{pos[j]} after stop fired on day {stop_day}"
-                    )
+        vix = np.full(n, 0.20)
+        vix[303:] = vix_after                   # front vol moves on day 303
+        feats["vix"] = vix
+        regs = pd.Series(1, index=feats.index)
+        fn = generate_signal2 if prefix == "s2" else generate_signal2_r2exit
+        return fn(feats, regs, max_hold=10)
+
+    def test_long_straddle_stopped_when_front_vol_falls(self):
+        s2 = self._stop_case(-0.05, 0.20 * (1 - S2_STOP_LOSS_PCT - 0.05))
+        pos = s2["s2_position"].values
+        assert list(pos[300:303]) == [1, 1, 1]
+        assert bool(s2["s2_stop"].iloc[303]) and pos[303] == 0
+        # the stop propagates until the state machine starts a NEW trade:
+        # it would have run to max_hold (day 309), then re-enters on day 310
+        assert (pos[303:310] == 0).all()
+        assert pos[310] == 1 and s2["s2_days_held"].iloc[310] == 1
+
+    def test_long_straddle_not_stopped_when_front_vol_rises(self):
+        s2 = self._stop_case(-0.05, 0.20 * (1 + S2_STOP_LOSS_PCT + 0.05))
+        pos = s2["s2_position"].values
+        assert not s2["s2_stop"].any()
+        assert (pos[300:309] == 1).all() and pos[309] == 0     # max_hold exit only
+
+    def test_short_straddle_stopped_when_front_vol_rises(self):
+        s2 = self._stop_case(0.08, 0.20 * (1 + S2_STOP_LOSS_PCT + 0.05))
+        pos = s2["s2_position"].values
+        assert list(pos[300:303]) == [-1, -1, -1]
+        assert bool(s2["s2_stop"].iloc[303]) and pos[303] == 0
+
+    def test_short_straddle_not_stopped_when_front_vol_falls(self):
+        s2 = self._stop_case(0.08, 0.20 * (1 - S2_STOP_LOSS_PCT - 0.05))
+        assert not s2["s2_stop"].any()
+        assert s2["s2_position"].iloc[303] == -1
+
+    def test_small_adverse_move_does_not_stop(self):
+        s2 = self._stop_case(-0.05, 0.20 * (1 - S2_STOP_LOSS_PCT + 0.05))
+        assert not s2["s2_stop"].any()
+
+    def test_r2exit_variant_uses_same_stop(self):
+        s2x = self._stop_case(-0.05, 0.20 * (1 - S2_STOP_LOSS_PCT - 0.05), prefix="s2x")
+        assert bool(s2x["s2x_stop"].iloc[303]) and s2x["s2x_position"].iloc[303] == 0
+        s2x = self._stop_case(0.08, 0.20 * (1 - S2_STOP_LOSS_PCT - 0.05), prefix="s2x")
+        assert not s2x["s2x_stop"].any()
 
 
 # ── 4. generate_signal3 ───────────────────────────────────────────────────────
@@ -400,7 +457,7 @@ class TestGenerateSignal3:
         regs  = pd.Series(1, index=feats.index)
         s3    = generate_signal3(feats, regs)
         # Constant ratio → std=0 → z=0 → no entry
-        assert (s3["s3_position"] == 0).all() or True  # lenient
+        assert (s3["s3_position"] == 0).all()
 
     def test_entry_when_ratio_low(self):
         """Very low VIX/VVIX ratio (VVIX elevated vs VIX) → long dispersion."""
@@ -410,13 +467,12 @@ class TestGenerateSignal3:
         feats = self._features_with_vvix_ratio(ratio)
         regs  = pd.Series(1, index=feats.index)
         s3    = generate_signal3(feats, regs)
-        # Should see long positions during low-ratio window
-        if (s3["s3_position"] != 0).any():
-            assert (s3["s3_position"][s3["s3_position"] != 0] == 1).all()
+        assert s3["s3_position"].iloc[300] == 1, "z < −1 must open the +1 side"
+        assert (s3["s3_position"][s3["s3_position"] != 0] == 1).all()
+        assert s3["s3_z"].iloc[300] < -1.0
 
     def test_no_short_in_signal3(self):
-        """Signal 3 only goes long (no short dispersion)."""
-        n = 400
+        """Signal 3 never takes the −1 side."""
         ratio = np.concatenate([np.full(300, 0.19), np.full(100, 0.40)])
         feats = self._features_with_vvix_ratio(ratio)
         regs  = pd.Series(1, index=feats.index)
@@ -433,14 +489,18 @@ class TestGenerateSignal3:
         assert (s3["s3_position"] == 0).all()
 
     def test_max_hold_respected(self):
-        n = 200
+        """Warm the 252-day z-score (needs 126 obs) BEFORE the low ratio, so a
+        trade actually opens; the old version never opened one (vacuous)."""
+        n = 260
         ratio = np.full(n, 0.19)
-        ratio[:50] = 0.05   # long entry at start
+        ratio[200:] = 0.05                      # deep, persistent low ratio
         feats = self._features_with_vvix_ratio(ratio)
         regs  = pd.Series(1, index=feats.index)
         s3    = generate_signal3(feats, regs, max_hold=10)
-        # Check days_held never exceeds max_hold
-        assert s3["s3_days_held"].max() <= 10
+        dh = s3["s3_days_held"].values
+        assert s3["s3_position"].iloc[200] == 1
+        assert dh.max() == 9                    # day 10 is the max_hold exit
+        assert s3["s3_position"].iloc[209] == 0 and s3["s3_position"].iloc[210] == 1
 
 
 # ── 5. combine_signals ────────────────────────────────────────────────────────
@@ -489,6 +549,12 @@ class TestCombineSignals:
     def test_combined_kelly_capped(self):
         r = self._combine([1]*5, [1]*5, [1]*5, st=pd.Series(np.ones(5)))
         assert (r["combined_kelly"] <= 0.20 + 1e-8).all()
+
+    def test_combined_kelly_uses_given_cap(self):
+        idx = pd.RangeIndex(3)
+        one = pd.Series(np.ones(3), index=idx)
+        r = combine_signals(one, one, one, one, one, one, max_kelly=0.1)
+        np.testing.assert_allclose(r["combined_kelly"], 0.1)
 
 
 # ── 6. SignalEngine.generate ──────────────────────────────────────────────────
@@ -557,6 +623,107 @@ class TestSignalEngineGenerate:
         df = engine.generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
         assert pd.api.types.is_datetime64_any_dtype(df.index)
 
+    def test_exposes_continuous_statistics(self, spx_df, vix_df):
+        """The z-scores the signals threshold on are output columns, so tests
+        (and the backtest) can check them directly, not only positions."""
+        df = SignalEngine().generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
+        for col in ("s2_z", "s3_z", "s4_z"):
+            assert col in df.columns and df[col].notna().all()
+        # s3_z is the trailing 252-session z of the LAGGED VIX/VVIX ratio
+        from joint_vol_calibration.signals.regime_classifier import build_features
+        lagged = build_features(spx_df, vix_df).shift(1)
+        ratio = (lagged["vix"] / lagged["vvix"]).loc[:df.index[-1]].iloc[-252:]
+        assert df["s3_z"].iloc[-1] == pytest.approx((ratio.iloc[-1] - ratio.mean()) / ratio.std())
+
+    def test_statistics_warm_from_history_book_starts_flat(self, spx_df, vix_df):
+        """z-scores use the history BEFORE start_date (they used to warm up
+        inside the window, silencing S2/S3/S4 for ~126 sessions), but no
+        position is carried in from before the window."""
+        early = SignalEngine().generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
+        assert early[["s2_z", "s3_z", "s4_z"]].iloc[0].notna().all()
+        full = SignalEngine().generate(spx_df, vix_df, start_date="2020-01-01", end_date="2021-12-31")
+        common = early.index
+        pd.testing.assert_series_equal(early["s3_z"], full.loc[common, "s3_z"])
+        for c in ("s1_position", "s2_position", "s3_position", "s4_position", "s1c_position"):
+            first = early[c].iloc[0]
+            assert first == 0 or early[c.replace("position", "days_held")].iloc[0] == 1, (
+                f"{c} carried a pre-window trade into the window")
+
+    def test_default_regimes_are_lagged_canonical_rule_labels(self, spx_df, vix_df):
+        df = SignalEngine().generate(spx_df, vix_df, start_date="2021-01-01", end_date="2021-12-31")
+        labels = build_regime_labels(spx_df, vix_df)
+        sessions = pd.to_datetime(spx_df["date"])
+        lagged = labels.reindex(sessions).shift(1).ffill().reindex(df.index)
+        assert (df["regime"] == lagged).all()
+        assert df.attrs["regime_source"] == "rule"
+
+
+class TestPrecomputedRegimesAreOnlyLagged:
+    """C22: SignalEngine used to OR a hard-coded VVIX > 100 override onto any
+    regimes it was given, so the adaptive gate could never lower R2."""
+
+    @pytest.fixture
+    def market(self):
+        rng = np.random.default_rng(4)
+        n = 400
+        dates = pd.bdate_range("2020-01-02", periods=n)
+        r = rng.normal(0, 0.01, n)
+        spx = pd.DataFrame({"date": dates, "close": 3000 * np.exp(np.cumsum(r)), "log_return": r})
+        vix = pd.DataFrame({"date": dates, "^VIX": rng.uniform(14, 30, n),
+                            "^VIX3M": rng.uniform(15, 31, n),
+                            "^VVIX": rng.uniform(105, 140, n)})   # always > 100
+        return spx, vix
+
+    def test_given_labels_are_used_verbatim_one_session_later(self, market):
+        spx, vix = market
+        dates = pd.to_datetime(spx["date"])
+        given = pd.Series(np.tile([0, 1, 1, 1, 0, 1], len(dates) // 6 + 1)[:len(dates)],
+                          index=dates)                         # never R2
+        df = SignalEngine().generate(spx, vix, start_date="2020-06-01", end_date="2021-06-30",
+                                     precomputed_regimes=given)
+        assert (df["regime"] == given.shift(1).reindex(df.index)).all()
+        assert (df["regime"] != 2).all(), "an R2 override leaked into given labels"
+        assert df.attrs["regime_source"] == "precomputed"
+
+    def test_given_labels_on_other_calendar_shift_by_session(self, market):
+        """Labels missing a session must not shift by POSITION: session t uses
+        the latest label dated ≤ t−1."""
+        spx, vix = market
+        dates = pd.to_datetime(spx["date"])
+        given = pd.Series(np.arange(len(dates)) % 2, index=dates)
+        hole = dates[200]
+        df = SignalEngine().generate(spx, vix, start_date="2020-06-01", end_date="2021-06-30",
+                                     precomputed_regimes=given.drop(hole))
+        nxt = dates[201]
+        assert df.loc[nxt, "regime"] == given[dates[199]]      # carried, not shifted
+        assert df.loc[dates[202], "regime"] == given[dates[201]]
+
+
+class TestSessionsSurviveMissingVVIX:
+    """C22: one missing VVIX print dropped the NEXT session from the signal
+    frame (and the backtest equity curve), although only S3 reads vvix."""
+
+    def test_every_session_is_kept(self):
+        rng = np.random.default_rng(8)
+        n = 420
+        dates = pd.bdate_range("2019-01-02", periods=n)
+        r = rng.normal(0, 0.01, n)
+        spx = pd.DataFrame({"date": dates, "close": 3000 * np.exp(np.cumsum(r)), "log_return": r})
+        vix = pd.DataFrame({"date": dates, "^VIX": rng.uniform(14, 30, n),
+                            "^VIX3M": rng.uniform(15, 31, n), "^VVIX": rng.uniform(80, 120, n)})
+        vix.loc[350, "^VVIX"] = np.nan              # one missing print
+        vix.loc[[370, 371], "^VVIX"] = np.nan       # two-session outage
+        vix.loc[390, "^VIX3M"] = np.nan             # no term structure one day
+        df = SignalEngine().generate(spx, vix, start_date="2020-01-01", end_date="2020-12-31")
+        window = dates[(dates >= "2020-01-01") & (dates <= "2020-12-31")]
+        assert df.index.equals(window)
+        for i in (351, 372, 391):
+            assert dates[i] in df.index
+        # a NaN input only silences the signals that read it, for that session
+        assert np.isnan(df.loc[dates[372], "vvix"]) and np.isnan(df.loc[dates[391], "ts_slope"])
+        assert df.loc[dates[372], "regime"] == df.loc[dates[371], "regime"]
+        assert df.attrs["n_sessions_dropped"] == 0
+
 
 # ── 7. SignalEngine.save ──────────────────────────────────────────────────────
 
@@ -583,6 +750,18 @@ class TestSignalEngineSave:
         engine = SignalEngine()
         with pytest.raises(RuntimeError):
             engine.save(path=tmp_path / "test.parquet")
+
+    def test_default_path_names_the_saved_span(self, tmp_path, monkeypatch):
+        """The old fixed name 'signals_2015_2025.parquet' labelled a
+        2018-01..2025-03 file; the default now says what is in it."""
+        monkeypatch.setattr(se, "SIGNALS_DIR", tmp_path)
+        idx = pd.bdate_range("2018-01-02", "2025-03-24")
+        df = pd.DataFrame({"s1_position": np.zeros(len(idx))}, index=idx)
+        engine = SignalEngine()
+        engine._result = df
+        path = engine.save()
+        assert path == tmp_path / "signals_20180102_20250324.parquet" == default_signals_path(df)
+        assert path.exists()
 
 
 # ── 8. signal_summary ────────────────────────────────────────────────────────
@@ -619,7 +798,8 @@ class TestSignalSummary:
             "combined_kelly": np.zeros(n),
         }, index=idx)
         summary = signal_summary(df)
-        assert "Signal1_IVR" in summary
+        assert "Signal1_PDV_IV" in summary      # not "IVR": no IV rank exists
+        assert "Signal1_IVR" not in summary
         assert "Signal2_TS" in summary
         assert "Signal3_Disp" in summary
         assert "Combined" in summary
@@ -639,7 +819,7 @@ class TestSignalSummary:
             "combined_kelly": pos * 0.1,
         }, index=idx)
         summary = signal_summary(df)
-        assert 0.0 <= summary["Signal1_IVR"]["pct_active"] <= 1.0
+        assert summary["Signal1_PDV_IV"]["pct_active"] == pytest.approx(0.5)
 
 
 # ── 9. Edge cases ─────────────────────────────────────────────────────────────
@@ -1169,7 +1349,6 @@ class TestGenerateSignal1Soft:
 
 def _make_vrp_features(n: int = 400, seed: int = 7) -> pd.DataFrame:
     """Features with VRP pattern: vix and fear_premium controls VRP signal."""
-    rng = np.random.default_rng(seed)
     idx = pd.bdate_range("2020-01-02", periods=n)
     vix = np.full(n, 0.18)
     # Normal fear_premium ~1.2 (IV slightly above RV)
@@ -1359,7 +1538,7 @@ class TestGenerateSignal4:
         from pathlib import Path
 
         # Load regime classifier from disk
-        clf_path = Path("data_store/signals/regime_classifier.pkl")
+        clf_path = Path(__file__).resolve().parents[2] / "data_store" / "signals" / "regime_classifier.pkl"
         if not clf_path.exists():
             pytest.skip("Regime classifier not found; skipping integration test")
 
@@ -1452,7 +1631,7 @@ class TestGenerateSignal1Contrarian:
     def test_signal_engine_includes_s1c(self):
         """SignalEngine.generate() must return s1c_position column."""
         from pathlib import Path
-        clf_path = Path("data_store/signals/regime_classifier.pkl")
+        clf_path = Path(__file__).resolve().parents[2] / "data_store" / "signals" / "regime_classifier.pkl"
         if not clf_path.exists():
             pytest.skip("Regime classifier not found")
         from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide

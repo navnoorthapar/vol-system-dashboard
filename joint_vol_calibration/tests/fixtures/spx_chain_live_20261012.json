@@ -1,0 +1,9 @@
+{
+ "as_of_et": "2026-10-12 04:39:23.119304",
+ "vix": 15.380000114440918,
+ "irx_rate": 0.040570001602172855,
+ "note": "VIX print 2026-10-12 04:24 ET, chain 2026-10-12 04:39 ET",
+ "source": "Yahoo ^SPX option chain (SPXW, Cboe global trading hours), near-ATM strikes (\u00b11.5% of forward) of the two expiries bracketing 30 days; captured with run_backtest.fetch_live_spx_chain",
+ "atm30_full_chain": 0.12254641805256541,
+ "ratio_full_chain": 0.7967907486392118
+}

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joint-vol-calibration"
+version = "0.22.0"
+description = "Joint SPX/VIX volatility calibration, regime signals, backtest and the static dashboard behind navnoorbawa.me"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Navnoor Bawa" }]
+requires-python = ">=3.11"
+# Ranges live in requirements.txt (one list for pip and for this file); the
+# exact tested set is requirements-lock.txt.
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+# Mirrors requirements-dev.txt.
+dev = ["pytest>=9,<10", "pytest-cov>=7,<8", "ruff>=0.6"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["joint_vol_calibration*"]
+exclude = ["joint_vol_calibration.tests*"]
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["joint_vol_calibration/tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = [
+    # The class-scoped-fixture form removed in pytest 10 must not come back.
+    "error::pytest.PytestRemovedIn10Warning",
+]
+
+# ── coverage (pytest --cov) ───────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["joint_vol_calibration", "scripts", "dashboard"]
+omit = ["joint_vol_calibration/tests/*"]
+
+[tool.coverage.report]
+skip_empty = true
+
+# ── ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+extend-exclude = ["docs", ".site-build"]
+
+[tool.ruff.lint]
+# Target rule set: real-bug rules only (unused/shadowed names, loop-variable
+# capture, blind excepts, silently swallowed errors); style is not checked.
+# `ruff check .` reports the backlog against it. CI gates only the subset that
+# is already clean and always a bug: `ruff check --select E9,F63,F7,F82 .`
+# (syntax errors, invalid comparisons, misplaced statements, undefined names).
+select = ["F", "E9", "B", "BLE", "S110", "PLW"]
+ignore = [
+    "B905",   # zip() without strict=: too noisy for the numerical code
+]
+
+[tool.ruff.lint.per-file-ignores]
+"joint_vol_calibration/tests/*" = ["B011", "BLE", "S110"]

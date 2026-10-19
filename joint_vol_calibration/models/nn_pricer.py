@@ -1,49 +1,102 @@
 """
-nn_pricer.py — Neural Network Acceleration Layer (C5).
+nn_pricer.py — Neural-network surrogate for Heston implied vols (C5).
 
-Two networks trained to replace expensive Heston pricing in the hot calibration loop:
+Status: research prototype. No production code path imports this module —
+the calibrator prices with heston_call_batch and the Greeks monitor with the
+Fourier pricer in models.implied_vol. The surrogate is evaluated here so that
+its accuracy and speed claims are reproducible, not because anything relies
+on it.
 
-  NN-1 (HestonSPXNet): (log-moneyness, sqrt_T, kappa, theta, sigma, rho, v0)
-                        → BS implied vol σ_BS
-  NN-2 (HestonVIXNet): (kappa, theta, sigma, v0, tenor_years)
-                        → VIX futures price
+  NN-1 (SPX): (x = ln(K/F), √T, κ, θ, σ, ρ, v0) → Black-Scholes implied vol
+  NN-2 (VIX): (κ, θ, σ, v0, tenor) → heston_vix_term_index value, the
+              Heston level of a spot-starting VIX-style index (^VIX9D/^VIX/
+              ^VIX3M/^VIX6M at their tenors) — the mapping the joint
+              calibrator's VIX leg uses. Before C22 the target was
+              heston_vix_futures_curve (a FUTURES mapping, the wrong
+              instrument for the spot indices). σ is kept as an input for
+              checkpoint compatibility; the index does not depend on it.
+              DEPRECATED: the closed form it approximates is itself cheaper
+              than the network (NNPricer.benchmark_vix, 8 tenors: 7-14 µs
+              for heston_vix_term_index vs 70-90 µs for the NN-2 forward
+              pass), and exact, so NN-2 accelerates nothing; it is kept
+              only so old checkpoints and results can be reproduced.
 
-Both use 4-layer MLP, 256 hidden units (architecture from config.py).
+Training domain (stored in every checkpoint; inference refuses inputs outside it)
+---------------------------------------------------------------------------------
+  The old surrogate was trained on a ±30% box around one day's fit, which
+  none of the archived calibrations fall inside (v0 alone ranges 1e-4..0.093
+  across them). SPX_TRAINING_DOMAIN contains every archived joint_cal_*.pkl
+  fit: the legacy daily fits (κ 1.7–12.9, θ 0.022–0.066, σ 0.24–0.85,
+  ρ = −0.95..−0.73, v0 1e-4..0.022) and the C22 model_version 2 refits
+  (κ 4.3–6.1, θ 0.060–0.073, σ 1.59–2.00, ρ −0.82..−0.66, v0 0.013–0.093).
+  The σ range is the calibrator's full bound (HESTON_BOUNDS σ ≤ 2, which the
+  2026-03-24 refit reaches); the other ranges cover the fits with margin:
 
-Training set design
--------------------
-  Centre:     calibrated params for 2026-03-24 (saved in baseline_2026-03-24.json)
-  Perturbation: each parameter sampled uniformly in [centre × 0.70, centre × 1.30]
-                clipped to HESTON_BOUNDS — the NN learns the full neighbourhood
-                around the real solution, not a generic region of parameter space.
-  Samples:    500 000 for each network (stored on disk, never regenerated)
+      κ ∈ [0.5, 15]  (log-uniform)     θ ∈ [0.01, 0.20] (log-uniform)
+      σ ∈ [0.1, 2.0]                   ρ ∈ [−0.99, −0.30]
+      v0 ∈ [1e-4, 0.25] (log-uniform)  T ∈ [0.02, 2] (√T uniform)
+      x ∈ [−0.30, 0.25] and z = x/(σ_ref√T) ∈ [−6, 4],
+      σ_ref² = θ + (v0 − θ)(1 − e^{−κT})/(κT)  (expected average variance)
 
-Performance targets (per config.py)
-------------------------------------
-  MAE  < 0.1 vol point  (NN_VOL_ERROR_TARGET = 0.001 in decimal)
-  Speed: ~100x faster than heston_call_batch() + IV inversion at inference time
+  (The first C22 box stopped at σ = 1.2 and excluded all four refits, the
+  headline 2026-06-18 fit among them.)
 
-Why this matters
-----------------
-  The calibration loop calls the SPX pricer ~5 000 times per calibration run.
-  At inference the NN evaluates 500 options in a single forward pass and achieves
-  an 8.1× speedup over the batch Heston pricer + IV inversion (measured benchmark).
-  For backtesting over 10 years (2500 trading days), that difference compounds to
-  hours vs minutes.
+  The z constraint keeps strikes within a sensible number of standard
+  deviations when total variance is small (otherwise most of [−0.30, 0.25]
+  is options worth nothing at 7-day, 1%-vol corners).
+
+Labels
+------
+  Exact Heston prices (Lewis/Fourier, ~1e-14·F; implied_vol.fourier_otm_price)
+  inverted on the OTM side by the robust solver. Options whose OTM value is
+  below NN_LABEL_MIN_OTM_PRICE_REL·F (1e-6) are not labelled: their implied
+  vol is not meaningful. Any other unlabelled option (Fourier pricer not
+  converged, inversion failure) is counted and logged separately, never
+  reported as "below the floor". The old generator used heston_call_batch
+  plus a Newton loop that failed on 28% of OTM calls and silently dropped
+  them, biasing the labels away from the OTM-call wing.
+
+Splits and reporting
+--------------------
+  Rows are grouped by parameter set (set_id) and split 80/10/10 into
+  train/validation/test by group, so no parameter set is on both sides. The
+  validation set drives early stopping and the LR schedule; the TEST set is
+  what accuracy is reported on. Metrics are reported in each network's own
+  units (vol points for NN-1, VIX points for NN-2).
+
+Benchmark
+---------
+  NNPricer.benchmark() draws fresh parameter sets from the domain (seeded,
+  disjoint from training draws), prices a full calibration-like workload per
+  set (several maturities, strikes across the whole x/z domain including the
+  OTM-call wing), scores the NN against the exact reference on every
+  well-posed option (never filtering on the NN's own output), and times the
+  NN forward pass against heston_call_batch + IV inversion on the same
+  options. Both legs are timed single-threaded by default (torch pinned to
+  one thread; the numpy reference pricer is single-threaded): a multi-thread
+  torch forward pass on a shared machine is dominated by thread contention
+  (median 0.3-0.5 s instead of 2 ms for 500 options under a load of ~10 on 4
+  cores). Numbers depend on the machine; the result records it.
 
 Usage
 -----
-  from joint_vol_calibration.models.nn_pricer import NNPricer
+  from joint_vol_calibration.models.nn_pricer import NNPricer, train_spx
 
-  pricer = NNPricer.load()          # load from disk (auto-trains if missing)
-  iv = pricer.spx_iv(log_m, T, kappa, theta, sigma, rho, v0)   # scalar
-  ivs = pricer.spx_iv_batch(features_array)                      # vectorised
-  vix = pricer.vix_price(kappa, theta, sigma, v0, tenors)        # array
+  result = train_spx()                       # generate data (cached) + train
+  pricer = NNPricer.load()                   # load from disk (no auto-train)
+  ivs    = pricer.spx_iv_batch(features)     # (N, 7) → (N,), raises out of domain
+  report = pricer.benchmark()
 """
 
+import hashlib
 import json
 import logging
+import os
+import platform
+import subprocess
 import time
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -51,8 +104,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from scipy.stats import norm as _scipy_norm
-from sklearn.preprocessing import StandardScaler
 
 from joint_vol_calibration.config import (
     DATA_DIR,
@@ -64,17 +115,28 @@ from joint_vol_calibration.config import (
     NN_MAX_EPOCHS,
     NN_N_LAYERS,
     NN_TRAIN_SAMPLES,
+    NN_VOL_ERROR_TARGET,
     RANDOM_SEED,
+    ROOT_DIR,
 )
-from joint_vol_calibration.models.heston import heston_call_batch, heston_vix_futures_curve
+from joint_vol_calibration.models.heston import (
+    characteristic_function,
+    heston_call_batch,
+    heston_vix_term_index,
+)
+from joint_vol_calibration.models.implied_vol import (  # noqa: F401  (_bs_iv_vectorized re-exported)
+    _bs_iv_vectorized,
+    fourier_otm_price,
+    implied_vol_black,
+)
 
 logger = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _BASELINE_PATH   = DATA_DIR / "calibrations" / "baseline_2026-03-24.json"
-_SPX_DATA_PATH   = MC_CACHE_DIR / "nn_spx_train_500k.parquet"
-_VIX_DATA_PATH   = MC_CACHE_DIR / "nn_vix_train_500k.parquet"
+_SPX_DATA_PATH   = MC_CACHE_DIR / "nn_spx_train_v2.parquet"
+_VIX_DATA_PATH   = MC_CACHE_DIR / "nn_vix_train_v2.parquet"
 _SPX_MODEL_PATH  = DATA_DIR / "nn_spx_model.pt"
 _VIX_MODEL_PATH  = DATA_DIR / "nn_vix_model.pt"
 
@@ -85,75 +147,130 @@ _DEFAULT_CAL_PARAMS = {          # fallback if baseline file not found
     "kappa": 4.62, "theta": 0.0764, "sigma": 0.8407, "rho": -0.95, "v0": 0.0561,
 }
 
-# ── Vectorised Black-Scholes IV (Newton-Raphson) ──────────────────────────────
+SPX_FEATURES = ["x", "sqrt_T", "kappa", "theta", "sigma", "rho", "v0"]
+VIX_FEATURES = ["kappa", "theta", "sigma", "v0", "tenor_years"]
+_PARAM_NAMES = ("kappa", "theta", "sigma", "rho", "v0")
 
-def _bs_iv_vectorized(
-    call_prices: np.ndarray,
-    F: np.ndarray,
-    K: np.ndarray,
-    T: np.ndarray,
-    r: np.ndarray,
-    tol: float = 1e-7,
-    max_iter: int = 50,
-) -> np.ndarray:
+SPX_TRAINING_DOMAIN = {
+    "kappa": [0.5, 15.0],
+    "theta": [0.01, 0.20],
+    "sigma": [0.10, 2.00],
+    "rho":   [-0.99, -0.30],
+    "v0":    [1e-4, 0.25],
+    "T":     [0.02, 2.0],
+    "x":     [-0.30, 0.25],
+    "z":     [-6.0, 4.0],
+}
+VIX_TRAINING_DOMAIN = {
+    "kappa": [0.5, 15.0],
+    "theta": [0.01, 0.20],
+    "sigma": [0.10, 2.00],
+    "v0":    [1e-4, 0.25],
+    "tenor_years": [0.02, 1.5],
+}
+_LOG_UNIFORM = ("kappa", "theta", "v0")
+
+NN_LABEL_MIN_OTM_PRICE_REL = 1e-6   # label / benchmark floor on OTM value / F
+NN_VIX_TARGET_MAE = 0.05            # VIX points (NN-2's own units)
+
+_SPX_CKPT_FORMAT = "spx_iv_net_v2"
+_VIX_CKPT_FORMAT = "vix_index_net_v3"
+# What NN-2 is trained to reproduce; recorded in the training-data cache so a
+# cache built on the pre-C22 futures target is regenerated, not reused.
+_VIX_TARGET = "heston_vix_term_index"
+
+
+# ── Domain helpers ────────────────────────────────────────────────────────────
+
+def _sigma_ref(T, kappa, theta, v0):
+    """√ of the expected average variance to T (leading-order ATM implied vol)."""
+    T = np.asarray(T, dtype=float)
+    kT = np.asarray(kappa, dtype=float) * T
+    B = np.where(kT > 1e-10, -np.expm1(-kT) / np.where(kT > 1e-10, kT, 1.0), 1.0)
+    return np.sqrt(np.maximum(theta + (v0 - theta) * B, 1e-12))
+
+
+def _sample_domain_params(n: int, domain: dict, rng: np.random.Generator) -> dict:
+    """Draw n Heston parameter sets from a domain box (log-uniform for κ, θ, v0)."""
+    out = {}
+    for name in _PARAM_NAMES:
+        if name not in domain:
+            continue
+        lo, hi = domain[name]
+        if name in _LOG_UNIFORM:
+            out[name] = np.exp(rng.uniform(np.log(lo), np.log(hi), n))
+        else:
+            out[name] = rng.uniform(lo, hi, n)
+    return out
+
+
+def _x_interval(T: float, p: dict, domain: dict) -> Tuple[float, float]:
+    """Admissible ln(K/F) interval at T: domain x-range ∩ z-range·σ_ref√T."""
+    w = float(_sigma_ref(T, p["kappa"], p["theta"], p["v0"])) * np.sqrt(T)
+    lo = max(domain["x"][0], domain["z"][0] * w)
+    hi = min(domain["x"][1], domain["z"][1] * w)
+    return lo, hi
+
+
+def spx_out_of_domain(features: np.ndarray, domain: dict = SPX_TRAINING_DOMAIN) -> np.ndarray:
     """
-    Invert Black-Scholes call prices to implied vols via vectorised Newton-Raphson.
-
-    All inputs must be numpy arrays of the same shape.
-    Operates on the undiscounted-forward representation internally for stability.
-
-    Parameters
-    ----------
-    call_prices : discounted call prices (as returned by heston_call_batch)
-    F           : forward price  F = S * exp((r-q)*T)
-    K           : strike
-    T           : time to expiry
-    r           : risk-free rate (for discounting)
-
-    Returns
-    -------
-    np.ndarray — implied vols; NaN where inversion fails or price out of bounds.
-
-    Financial note:
-      Newton-Raphson on BS is guaranteed to converge for in-bounds prices because
-      BS is convex and monotone in sigma. The vectorised form processes 500K rows
-      in ~0.3s vs ~250s for a Python loop with scipy.brentq.
+    Boolean mask of rows of `features` (N, 7: SPX_FEATURES order) that lie
+    outside the training domain (parameter box, T range, x range, z range).
     """
-    # Undiscounted forward price
-    C_fwd = call_prices * np.exp(r * T)
+    f = np.asarray(features, dtype=np.float64)
+    x, sqT, kappa, theta, sigma, rho, v0 = (f[:, i] for i in range(7))
+    T = sqT**2
+    eps = 1e-9
+    bad = ~np.all(np.isfinite(f), axis=1)
+    for name, col in zip(_PARAM_NAMES, (kappa, theta, sigma, rho, v0)):
+        lo, hi = domain[name]
+        bad |= (col < lo - eps * abs(lo)) | (col > hi + eps * abs(hi))
+    bad |= (T < domain["T"][0] * (1 - eps)) | (T > domain["T"][1] * (1 + eps))
+    bad |= (x < domain["x"][0] - eps) | (x > domain["x"][1] + eps)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z = x / (_sigma_ref(T, kappa, theta, v0) * np.sqrt(np.maximum(T, 1e-12)))
+    bad |= (z < domain["z"][0] - 1e-6) | (z > domain["z"][1] + 1e-6)
+    return bad
 
-    # Intrinsic value in forward measure
-    intrinsic = np.maximum(F - K, 0.0)
-    upper     = F
 
-    # Mark out-of-bounds inputs as NaN from the start
-    valid = (C_fwd >= intrinsic - 1e-4) & (C_fwd <= upper + 1e-4) & (T > 1e-6)
-    sigma = np.where(valid, 0.30, np.nan)
+# ── Exact labels ──────────────────────────────────────────────────────────────
 
-    # Initial guess: Brenner-Subrahmanyam approximation  σ ≈ sqrt(2π/T) * C/F
-    sigma = np.where(valid, np.sqrt(2 * np.pi / np.maximum(T, 1e-6)) * C_fwd / F, np.nan)
-    sigma = np.clip(sigma, 0.05, 3.0)
+def _heston_otm_rel(x: np.ndarray, T: float, p: dict) -> Tuple[np.ndarray, bool]:
+    """Exact Heston OTM forward value / F for one (T, params) slice (Fourier)."""
+    w = float(_sigma_ref(T, p["kappa"], p["theta"], p["v0"])) ** 2 * T
 
-    for _ in range(max_iter):
-        safe_sigma = np.maximum(sigma, 1e-8)
-        sqrtT = np.sqrt(np.maximum(T, 1e-12))
-        d1 = (np.log(F / K) + 0.5 * safe_sigma**2 * T) / (safe_sigma * sqrtT)
-        d2 = d1 - safe_sigma * sqrtT
-        # Forward BS price (undiscounted)
-        price_model = F * _scipy_norm.cdf(d1) - K * _scipy_norm.cdf(d2)
-        # Vega in forward measure
-        vega = F * _scipy_norm.pdf(d1) * sqrtT
-        # Newton step
-        delta = (price_model - C_fwd) / np.maximum(vega, 1e-12)
-        sigma  = sigma - delta
-        sigma  = np.clip(sigma, 1e-4, 5.0)
-        # Early exit: check convergence (guard against empty valid mask)
-        if valid.any() and np.nanmax(np.abs(delta[valid])) < tol:
-            break
+    def cf(u):
+        return characteristic_function(u, 1.0, T, 0.0, 0.0, **p)
 
-    # NaN out invalid entries
-    sigma = np.where(valid, sigma, np.nan)
-    return sigma
+    return fourier_otm_price(cf, x, variance_hint=w)
+
+
+def _iv_from_otm_rel(otm, x, T, min_otm_price_rel):
+    """Implied vols of OTM forward values / F (vectorised over slices)."""
+    return np.asarray(implied_vol_black(otm, 1.0, np.exp(x), T, is_call=(x >= 0),
+                                        discount=1.0, sigma_min=1e-4, sigma_max=10.0,
+                                        min_otm_price=min_otm_price_rel), dtype=float)
+
+
+def heston_iv_exact(
+    x: np.ndarray,
+    T: float,
+    params: dict,
+    min_otm_price_rel: float = NN_LABEL_MIN_OTM_PRICE_REL,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Exact Heston implied vols for one (T, params) slice.
+
+    Returns (iv, otm_rel): implied vols (NaN where the OTM value is below
+    min_otm_price_rel·F or the Fourier pricer did not converge) and the OTM
+    forward value / F. Independent of S, r and q (Heston is homogeneous).
+    """
+    p = {k: float(params[k]) for k in _PARAM_NAMES}
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    otm, ok = _heston_otm_rel(x, T, p)
+    if not ok:
+        return np.full(x.shape, np.nan), otm
+    return _iv_from_otm_rel(otm, x, np.full(x.shape, T), min_otm_price_rel), otm
 
 
 # ── Training Data Generation ──────────────────────────────────────────────────
@@ -172,24 +289,12 @@ def _load_baseline_params() -> dict:
 
 def _sample_heston_params(n: int, center: dict, perturb: float = 0.30, rng: np.random.Generator = None) -> dict:
     """
-    Sample n Heston parameter sets uniformly around the calibrated centre ±perturb.
-
-    For each parameter p_0:
-      p ~ Uniform[max(p_0*(1-perturb), bound_lo), min(p_0*(1+perturb), bound_hi)]
+    Sample n Heston parameter sets uniformly around a centre ±perturb, clipped
+    to HESTON_BOUNDS. (The original training design; no longer used by
+    generate_*_training_data, which sample SPX_TRAINING_DOMAIN instead.)
 
     For rho (negative by convention), multiplicative ±30% means:
       rho ~ Uniform[rho_0 * (1+perturb), rho_0 * (1-perturb)]
-      (so rho_0=-0.99 → range [-0.99, -0.693], staying in the negative half-plane)
-
-    Parameters
-    ----------
-    center   : dict of calibrated param values
-    perturb  : fractional perturbation (0.30 = ±30%)
-    rng      : numpy random generator (for reproducibility)
-
-    Returns
-    -------
-    dict of arrays shape (n,) — one array per parameter name
     """
     if rng is None:
         rng = np.random.default_rng(RANDOM_SEED)
@@ -198,13 +303,11 @@ def _sample_heston_params(n: int, center: dict, perturb: float = 0.30, rng: np.r
     for name, p0 in center.items():
         lo_bound, hi_bound = HESTON_BOUNDS[name]
         if name == "rho":
-            # rho is negative: multiply by (1+perturb) to get less negative, by (1-perturb) more negative
-            lo = max(p0 * (1 + perturb), lo_bound)   # more negative (e.g. -0.99 → stays -0.99)
-            hi = min(p0 * (1 - perturb), hi_bound)   # less negative (e.g. -0.99 → -0.693)
+            lo = max(p0 * (1 + perturb), lo_bound)
+            hi = min(p0 * (1 - perturb), hi_bound)
         else:
             lo = max(p0 * (1 - perturb), lo_bound)
             hi = min(p0 * (1 + perturb), hi_bound)
-        # Ensure lo <= hi (can happen if p0 is at a bound)
         if lo > hi:
             lo, hi = hi, lo
         samples[name] = rng.uniform(lo, hi, n)
@@ -212,233 +315,238 @@ def _sample_heston_params(n: int, center: dict, perturb: float = 0.30, rng: np.r
     return samples
 
 
+def _spx_rows_for_sets(args) -> pd.DataFrame:
+    """
+    Worker: exact labels for a block of parameter sets (deterministic per
+    set_id). Prices every slice, then inverts the whole block in one solver
+    call. Every sampled option is returned: iv_target is NaN where there is
+    no label (OTM value below the floor; otm_rel is also NaN where the
+    Fourier pricer did not converge), so the caller can count why. With a
+    part_path the block is written there (atomically) and reused if it
+    already exists, so an interrupted generation resumes.
+    """
+    set_ids, params, domain, n_T, n_K, seed, floor, part_path = args
+    if part_path is not None and Path(part_path).exists():
+        return pd.read_parquet(part_path)
+    cols = {k: [] for k in ("set_id", "x", "sqrt_T", *_PARAM_NAMES, "otm_rel")}
+    for j, sid in enumerate(set_ids):
+        p = {k: float(params[k][j]) for k in _PARAM_NAMES}
+        rng = np.random.default_rng([seed, int(sid)])
+        sqT = rng.uniform(np.sqrt(domain["T"][0]), np.sqrt(domain["T"][1]), n_T)
+        for s in sqT:
+            T = float(s * s)
+            lo, hi = _x_interval(T, p, domain)
+            x = rng.uniform(lo, hi, n_K)
+            otm, ok = _heston_otm_rel(x, T, p)
+            cols["set_id"].append(np.full(n_K, int(sid)))
+            cols["x"].append(x)
+            cols["sqrt_T"].append(np.full(n_K, float(s)))
+            for k in _PARAM_NAMES:
+                cols[k].append(np.full(n_K, p[k]))
+            cols["otm_rel"].append(otm if ok else np.full(n_K, np.nan))
+    block = pd.DataFrame({k: np.concatenate(v) for k, v in cols.items()})
+    iv = _iv_from_otm_rel(block["otm_rel"].to_numpy(), block["x"].to_numpy(),
+                          block["sqrt_T"].to_numpy() ** 2, floor)
+    block.insert(len(block.columns) - 1, "iv_target", iv)
+    if part_path is not None:
+        tmp = Path(str(part_path) + ".tmp")
+        block.to_parquet(tmp, index=False)
+        os.replace(tmp, part_path)
+    return block
+
+
+def _read_cached(path: Path, meta_expected: dict) -> Optional[pd.DataFrame]:
+    """Load a cached training parquet if its recorded metadata matches."""
+    if not path.exists():
+        return None
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(path).metadata or {}
+    found = json.loads(meta.get(b"nn_training_meta", b"{}").decode())
+    if found != json.loads(json.dumps(meta_expected)):
+        logger.info("Cached training data %s was generated with different settings; regenerating", path)
+        return None
+    logger.info("Loading cached training data from %s", path)
+    df = pd.read_parquet(path)
+    counts = json.loads(meta.get(b"nn_training_counts", b"{}").decode())
+    df.attrs["nn_training_meta"] = {**found, **counts}
+    return df
+
+
+def _write_cached(df: pd.DataFrame, path: Path, meta: dict, counts: Optional[dict] = None) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    md = dict(table.schema.metadata or {})
+    md[b"nn_training_meta"] = json.dumps(meta).encode()       # compared on reuse
+    if counts:
+        md[b"nn_training_counts"] = json.dumps(counts).encode()
+    pq.write_table(table.replace_schema_metadata(md), path)
+    logger.info("Saved %d rows to %s", len(df), path)
+
+
+def spx_data_meta(
+    n_samples: int = NN_TRAIN_SAMPLES,
+    *,
+    domain: Optional[dict] = None,
+    n_T: int = 6,
+    n_K: int = 10,
+    seed: int = RANDOM_SEED,
+    min_otm_price_rel: float = NN_LABEL_MIN_OTM_PRICE_REL,
+) -> dict:
+    """Settings that determine the NN-1 training data (cache key; stored in checkpoints)."""
+    domain = domain or SPX_TRAINING_DOMAIN
+    return {"version": 2, "domain": domain, "n_param_sets": max(n_samples // (n_T * n_K), 1),
+            "n_T": n_T, "n_K": n_K, "seed": seed, "min_otm_price_rel": min_otm_price_rel,
+            "labels": "Lewis/Fourier Heston price + implied_vol_black (OTM)"}
+
+
 def generate_spx_training_data(
     n_samples: int = NN_TRAIN_SAMPLES,
-    S: float = 6581.0,
-    r: float = 0.045,
-    q: float = 0.013,
-    perturb: float = 0.30,
     force_regen: bool = False,
+    *,
+    domain: Optional[dict] = None,
+    n_T: int = 6,
+    n_K: int = 10,
+    seed: int = RANDOM_SEED,
+    min_otm_price_rel: float = NN_LABEL_MIN_OTM_PRICE_REL,
+    path: Optional[Path] = None,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """
-    Generate training data for NN-1 (SPX implied vol surface).
+    Generate (or load from cache) exact training data for NN-1.
 
-    Sampling strategy:
-      - n_param_sets = n_samples // (n_T × n_K) parameter sets
-      - For each set, n_T expiry values × n_K strikes per expiry
-      - Expiry T: uniform[0.02, 2.0] years
-      - Log-moneyness x = ln(K/F): uniform[-0.30, 0.25] (≈ 75-130% moneyness)
-      - Heston params: centered on calibrated values ±30%
+    Layout: n_param_sets = n_samples // (n_T·n_K) parameter sets drawn from
+    `domain`; per set n_T maturities (√T uniform) and per maturity n_K strikes
+    uniform on the admissible x interval. Labels below the price floor are
+    not produced, so the row count is somewhat below n_samples.
 
-    Input features for NN-1 (7D):
-      x       = ln(K / F)    log-moneyness relative to forward
-      sqrt_T  = sqrt(T)      square-root-time (better numerical range than T)
-      kappa, theta, sigma, rho, v0  Heston parameters
-
-    Target (1D):
-      sigma_BS = Black-Scholes implied vol (dimensionless, ≈ 0.10 to 1.50)
-
-    Parameters
-    ----------
-    force_regen : bool — if True, regenerate even if cached file exists
+    The cache is reused only if it was generated with identical settings
+    (recorded in the parquet metadata). Results do not depend on n_jobs.
 
     Returns
     -------
-    DataFrame with columns [x, sqrt_T, kappa, theta, sigma, rho, v0, iv_target]
+    DataFrame [set_id, x, sqrt_T, kappa, theta, sigma, rho, v0, iv_target, otm_rel];
+    attrs["nn_training_meta"] holds the settings and the counts of options
+    sampled, below the floor and unpriceable (train_spx stores it in the
+    checkpoint).
     """
-    if _SPX_DATA_PATH.exists() and not force_regen:
-        logger.info("Loading cached SPX training data from %s", _SPX_DATA_PATH)
-        return pd.read_parquet(_SPX_DATA_PATH)
+    domain = domain or SPX_TRAINING_DOMAIN
+    path = Path(path) if path else _SPX_DATA_PATH
+    meta = spx_data_meta(n_samples, domain=domain, n_T=n_T, n_K=n_K, seed=seed,
+                         min_otm_price_rel=min_otm_price_rel)
+    n_sets = meta["n_param_sets"]
+    if not force_regen:
+        cached = _read_cached(path, meta)
+        if cached is not None:
+            return cached
 
-    logger.info("Generating %d SPX training samples ...", n_samples)
+    logger.info("Generating SPX training data: %d parameter sets × %d T × %d K ...",
+                n_sets, n_T, n_K)
     t0 = time.time()
+    rng = np.random.default_rng(seed)
+    params = _sample_domain_params(n_sets, domain, rng)
+    ids = np.arange(n_sets)
+    blocks = [b for b in np.array_split(ids, max(1, min(n_sets, n_sets // 25 + 1))) if len(b)]
+    # Finished blocks are kept next to the target (keyed by the settings) so an
+    # interrupted run resumes instead of starting over; removed at the end.
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()[:12]
+    parts_dir = path.parent / f"{path.stem}.parts-{key}"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    tasks = [(b, {k: params[k][b] for k in _PARAM_NAMES}, domain, n_T, n_K, seed,
+              min_otm_price_rel, parts_dir / f"block_{i:05d}.parquet")
+             for i, b in enumerate(blocks)]
 
-    center = _load_baseline_params()
-    rng = np.random.default_rng(RANDOM_SEED)
+    def _progress(done):
+        if done % max(len(tasks) // 20, 1) == 0 or done == len(tasks):
+            logger.info("  %d/%d blocks (%.0fs)", done, len(tasks), time.time() - t0)
 
-    # Layout: n_param_sets × n_T × n_K
-    n_T = 10    # expiry values per param set
-    n_K = 10    # strikes per expiry
-    n_per_set = n_T * n_K
-    n_param_sets = n_samples // n_per_set
-    actual_n = n_param_sets * n_per_set
+    parts = []
+    if n_jobs > 1:
+        import multiprocessing as mp
+        with mp.get_context("spawn").Pool(n_jobs) as pool:
+            for part in pool.imap_unordered(_spx_rows_for_sets, tasks):
+                parts.append(part)
+                _progress(len(parts))
+    else:
+        for t in tasks:
+            parts.append(_spx_rows_for_sets(t))
+            _progress(len(parts))
+    df = pd.concat([p for p in parts if len(p)], ignore_index=True)
+    otm = df["otm_rel"].to_numpy(dtype=float)
+    labelled = np.isfinite(df["iv_target"].to_numpy(dtype=float))
+    with np.errstate(invalid="ignore"):
+        below = np.isfinite(otm) & ((otm < min_otm_price_rel) | (otm <= 0))
+    unpriceable = ~labelled & ~below
+    counts = {"n_sampled": int(len(df)), "n_labelled": int(labelled.sum()),
+              "n_below_floor": int(below.sum()), "n_unpriceable": int(unpriceable.sum())}
+    if counts["n_unpriceable"]:
+        bad = df.loc[unpriceable, "set_id"].unique()
+        logger.warning("%d options above the floor could not be priced or inverted (Fourier "
+                       "pricer not converged) and are not labelled; parameter sets %s",
+                       counts["n_unpriceable"], bad[:20].tolist())
+    df = df[labelled].sort_values(["set_id", "sqrt_T", "x"], kind="mergesort").reset_index(drop=True)
 
-    logger.info("  %d param sets × %d T × %d K = %d samples", n_param_sets, n_T, n_K, actual_n)
-
-    # Sample parameter sets
-    params_dict = _sample_heston_params(n_param_sets, center, perturb, rng)
-
-    # Pre-allocate output arrays
-    feats_x      = np.empty(actual_n)
-    feats_sqrtT  = np.empty(actual_n)
-    feats_kappa  = np.empty(actual_n)
-    feats_theta  = np.empty(actual_n)
-    feats_sigma  = np.empty(actual_n)
-    feats_rho    = np.empty(actual_n)
-    feats_v0     = np.empty(actual_n)
-    targets_iv   = np.full(actual_n, np.nan)
-
-    idx = 0
-    skipped = 0
-
-    for i in range(n_param_sets):
-        kappa = params_dict["kappa"][i]
-        theta = params_dict["theta"][i]
-        sigma = params_dict["sigma"][i]
-        rho   = params_dict["rho"][i]
-        v0    = params_dict["v0"][i]
-
-        # Sample n_T expiry values
-        T_vals = rng.uniform(0.02, 2.0, n_T)
-
-        for T in T_vals:
-            F = S * np.exp((r - q) * T)
-
-            # Sample n_K log-moneyness values, convert to strikes
-            log_m = rng.uniform(-0.30, 0.25, n_K)
-            strikes = F * np.exp(log_m)
-            strikes = np.clip(strikes, S * 0.50, S * 2.0)
-
-            # Batch price all strikes for this (T, params)
-            model_calls = heston_call_batch(
-                S, strikes, T, r, q, kappa, theta, sigma, rho, v0
-            )
-
-            # Vectorised IV inversion
-            F_arr = np.full(n_K, F)
-            T_arr = np.full(n_K, T)
-            r_arr = np.full(n_K, r)
-            ivs = _bs_iv_vectorized(model_calls, F_arr, strikes, T_arr, r_arr)
-
-            # Store valid rows
-            end = idx + n_K
-            feats_x[idx:end]     = np.log(strikes / F)
-            feats_sqrtT[idx:end] = np.sqrt(T)
-            feats_kappa[idx:end] = kappa
-            feats_theta[idx:end] = theta
-            feats_sigma[idx:end] = sigma
-            feats_rho[idx:end]   = rho
-            feats_v0[idx:end]    = v0
-            targets_iv[idx:end]  = ivs
-            idx = end
-
-        if (i + 1) % 500 == 0:
-            logger.info("  Progress: %d/%d param sets (%.0f%%) ...",
-                        i + 1, n_param_sets, 100 * (i + 1) / n_param_sets)
-
-    # Assemble DataFrame, drop NaN rows
-    df = pd.DataFrame({
-        "x":      feats_x,
-        "sqrt_T": feats_sqrtT,
-        "kappa":  feats_kappa,
-        "theta":  feats_theta,
-        "sigma":  feats_sigma,
-        "rho":    feats_rho,
-        "v0":     feats_v0,
-        "iv_target": targets_iv,
-    })
-    n_before = len(df)
-    df = df.dropna().reset_index(drop=True)
-    skipped = n_before - len(df)
-
-    elapsed = time.time() - t0
-    logger.info("SPX training data: %d samples (dropped %d NaN) in %.1fs",
-                len(df), skipped, elapsed)
-
-    # Filter unrealistic IVs (sanity bounds)
-    df = df[(df["iv_target"] >= 0.02) & (df["iv_target"] <= 3.0)].reset_index(drop=True)
-    logger.info("  After IV filter: %d samples", len(df))
-
-    _SPX_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(_SPX_DATA_PATH, index=False)
-    logger.info("Saved to %s", _SPX_DATA_PATH)
+    logger.info("SPX training data: %d labelled of %d sampled options (%d below the %.0e·F "
+                "floor, %d unpriceable) in %.0fs", counts["n_labelled"], counts["n_sampled"],
+                counts["n_below_floor"], min_otm_price_rel, counts["n_unpriceable"],
+                time.time() - t0)
+    _write_cached(df, path, meta, counts)
+    df.attrs["nn_training_meta"] = {**meta, **counts}
+    import shutil
+    shutil.rmtree(parts_dir, ignore_errors=True)
     return df
 
 
 def generate_vix_training_data(
     n_samples: int = NN_TRAIN_SAMPLES,
-    perturb: float = 0.30,
     force_regen: bool = False,
+    *,
+    domain: Optional[dict] = None,
+    n_tenors: int = 10,
+    seed: int = RANDOM_SEED + 1,
+    path: Optional[Path] = None,
 ) -> pd.DataFrame:
     """
-    Generate training data for NN-2 (VIX futures term structure).
+    Generate (or load) training data for the deprecated NN-2.
 
-    Input features for NN-2 (5D):
-      kappa, theta, sigma, v0   Heston parameters (rho drops out of VIX formula)
-      tenor_years               VIX futures expiry in years
-
-    Target (1D):
-      vix_price = Heston VIX futures price  (VIX points, e.g. 22.5)
-
-    Sampling:
-      - Heston params ±30% around calibrated centre
-      - Tenor: uniform[0.02, 1.5] years
+    Features: kappa, theta, sigma, v0, tenor_years (rho drops out of the VIX
+    formula, and sigma out of the spot index). Target: heston_vix_term_index,
+    the spot-starting index level in VIX points at horizon tenor_years. Each
+    parameter set gets n_tenors tenors; rows carry set_id for group splits.
 
     Returns
     -------
-    DataFrame with columns [kappa, theta, sigma, v0, tenor_years, vix_target]
+    DataFrame [set_id, kappa, theta, sigma, v0, tenor_years, vix_target]
     """
-    if _VIX_DATA_PATH.exists() and not force_regen:
-        logger.info("Loading cached VIX training data from %s", _VIX_DATA_PATH)
-        return pd.read_parquet(_VIX_DATA_PATH)
+    domain = domain or VIX_TRAINING_DOMAIN
+    path = Path(path) if path else _VIX_DATA_PATH
+    n_sets = max(n_samples // n_tenors, 1)
+    meta = {"version": 3, "target": _VIX_TARGET, "domain": domain,
+            "n_param_sets": n_sets, "n_tenors": n_tenors, "seed": seed}
+    if not force_regen:
+        cached = _read_cached(path, meta)
+        if cached is not None:
+            return cached
 
-    logger.info("Generating %d VIX training samples ...", n_samples)
     t0 = time.time()
-
-    center = _load_baseline_params()
-    rng = np.random.default_rng(RANDOM_SEED + 1)   # different seed from SPX
-
-    n_tenors  = 10
-    n_per_set = n_tenors
-    n_param_sets = n_samples // n_per_set
-    actual_n = n_param_sets * n_per_set
-
-    params_dict = _sample_heston_params(n_param_sets, center, perturb, rng)
-
-    rows_kappa  = np.empty(actual_n)
-    rows_theta  = np.empty(actual_n)
-    rows_sigma  = np.empty(actual_n)
-    rows_v0     = np.empty(actual_n)
-    rows_tenor  = np.empty(actual_n)
-    rows_target = np.empty(actual_n)
-
-    idx = 0
-    for i in range(n_param_sets):
-        kappa = params_dict["kappa"][i]
-        theta = params_dict["theta"][i]
-        sigma = params_dict["sigma"][i]
-        v0    = params_dict["v0"][i]
-
-        tenors = rng.uniform(0.02, 1.5, n_tenors)
-        prices = heston_vix_futures_curve(kappa, theta, sigma, v0, tenors)
-
-        end = idx + n_tenors
-        rows_kappa[idx:end]  = kappa
-        rows_theta[idx:end]  = theta
-        rows_sigma[idx:end]  = sigma
-        rows_v0[idx:end]     = v0
-        rows_tenor[idx:end]  = tenors
-        rows_target[idx:end] = prices
-        idx = end
-
+    rng = np.random.default_rng(seed)
+    params = _sample_domain_params(n_sets, domain, rng)
+    lo, hi = domain["tenor_years"]
+    tenors = rng.uniform(lo, hi, (n_sets, n_tenors))
+    target = np.empty((n_sets, n_tenors))
+    for i in range(n_sets):
+        target[i] = heston_vix_term_index(params["kappa"][i], params["theta"][i],
+                                          params["sigma"][i], params["v0"][i], tenors[i])
     df = pd.DataFrame({
-        "kappa":       rows_kappa,
-        "theta":       rows_theta,
-        "sigma":       rows_sigma,
-        "v0":          rows_v0,
-        "tenor_years": rows_tenor,
-        "vix_target":  rows_target,
+        "set_id": np.repeat(np.arange(n_sets), n_tenors),
+        **{k: np.repeat(params[k], n_tenors) for k in ("kappa", "theta", "sigma", "v0")},
+        "tenor_years": tenors.ravel(),
+        "vix_target": target.ravel(),
     })
-
-    # Sanity filter: VIX futures should be in (2, 100) range
-    df = df[(df["vix_target"] > 2.0) & (df["vix_target"] < 100.0)].reset_index(drop=True)
-
-    elapsed = time.time() - t0
-    logger.info("VIX training data: %d samples in %.1fs", len(df), elapsed)
-
-    _VIX_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(_VIX_DATA_PATH, index=False)
-    logger.info("Saved to %s", _VIX_DATA_PATH)
+    df = df[np.isfinite(df["vix_target"])].reset_index(drop=True)
+    logger.info("VIX training data: %d rows in %.1fs", len(df), time.time() - t0)
+    _write_cached(df, path, meta)
     return df
 
 
@@ -446,20 +554,11 @@ def generate_vix_training_data(
 
 class HestonNet(nn.Module):
     """
-    4-layer MLP for approximating Heston option prices / VIX futures.
+    MLP used by both surrogates.
 
     Architecture (per config.py):
-      Linear(input_dim, 256) → SiLU
-      Linear(256, 256)       → SiLU
-      Linear(256, 256)       → SiLU
-      Linear(256, 256)       → SiLU
-      Linear(256, 1)         → Softplus  (guarantees positive output)
-
-    SiLU (Swish) activation: x * sigmoid(x) — smoother than ReLU, better for
-    functions with continuous derivatives like the BS implied vol smile.
-
-    Softplus on output: log(1 + exp(x)) — enforces positivity (IV and VIX prices
-    must be strictly positive) without the saturation issue of Sigmoid.
+      Linear(input_dim, hidden) → SiLU, then (n_layers − 1) × [Linear(hidden, hidden) → SiLU],
+      Linear(hidden, 1) → Softplus  (strictly positive output)
 
     Parameters
     ----------
@@ -489,6 +588,42 @@ class HestonNet(nn.Module):
         return self.net(x).squeeze(-1)
 
 
+class SPXImpliedVolNet(nn.Module):
+    """
+    NN-1: implied vol = σ_ref(T, κ, θ, v0) × HestonNet(standardised features).
+
+    Input: raw SPX_FEATURES (x, √T, κ, θ, σ, ρ, v0). Engineered features:
+    x, √T, ln κ, ln θ, σ, ρ, ln v0, ln σ_ref, z = x/(σ_ref√T). The network
+    learns the smile relative to the level σ_ref (the expected average vol),
+    which spans 1%–50% across the domain; the product is trained with MSE in
+    implied-vol units. Standardisation constants are buffers in state_dict.
+    """
+
+    N_ENGINEERED = 9
+
+    def __init__(self, hidden_dim: int = NN_HIDDEN_DIM, n_layers: int = NN_N_LAYERS):
+        super().__init__()
+        self.mlp = HestonNet(self.N_ENGINEERED, hidden_dim, n_layers)
+        self.register_buffer("feat_mean", torch.zeros(self.N_ENGINEERED))
+        self.register_buffer("feat_scale", torch.ones(self.N_ENGINEERED))
+
+    @staticmethod
+    def engineer(raw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x, sqT, kappa, theta, sigma, rho, v0 = raw.unbind(-1)
+        T = sqT * sqT
+        kT = kappa * T
+        B = -torch.expm1(-kT) / kT
+        sig_ref = torch.sqrt(torch.clamp(theta + (v0 - theta) * B, min=1e-12))
+        z = x / (sig_ref * sqT)
+        eng = torch.stack([x, sqT, torch.log(kappa), torch.log(theta), sigma, rho,
+                           torch.log(v0), torch.log(sig_ref), z], dim=-1)
+        return eng, sig_ref
+
+    def forward(self, raw: torch.Tensor) -> torch.Tensor:
+        eng, sig_ref = self.engineer(raw)
+        return sig_ref * self.mlp((eng - self.feat_mean) / self.feat_scale)
+
+
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def _make_tensors(
@@ -498,6 +633,127 @@ def _make_tensors(
         torch.tensor(X, dtype=torch.float32, device=device),
         torch.tensor(y, dtype=torch.float32, device=device),
     )
+
+
+def _split_by_group(groups: np.ndarray, val_frac: float, test_frac: float, seed: int):
+    """Shuffle the unique groups (seeded) and assign whole groups to train/val/test."""
+    uniq = np.unique(groups)
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(uniq)
+    n_test = int(round(len(uniq) * test_frac))
+    n_val = max(int(round(len(uniq) * val_frac)), 1)
+    test_g, val_g = perm[:n_test], perm[n_test:n_test + n_val]
+    is_test = np.isin(groups, test_g)
+    is_val = np.isin(groups, val_g)
+    is_train = ~(is_test | is_val)
+    return np.flatnonzero(is_train), np.flatnonzero(is_val), np.flatnonzero(is_test)
+
+
+def _error_stats(pred: np.ndarray, y: np.ndarray) -> dict:
+    err = np.abs(np.asarray(pred, float) - np.asarray(y, float))
+    if err.size == 0:
+        return {"n": 0, "mae": float("nan"), "rmse": float("nan"),
+                "p99": float("nan"), "max": float("nan")}
+    return {"n": int(err.size), "mae": float(err.mean()), "rmse": float(np.sqrt((err**2).mean())),
+            "p99": float(np.quantile(err, 0.99)), "max": float(err.max())}
+
+
+def _fit(
+    model: nn.Module,
+    X_train: torch.Tensor,
+    y_train: torch.Tensor,
+    X_val: torch.Tensor,
+    y_val: torch.Tensor,
+    *,
+    lr: float,
+    batch_size: int,
+    max_epochs: int,
+    patience: int,
+    seed: int,
+    verbose: bool,
+    model_name: str,
+) -> dict:
+    """Adam + ReduceLROnPlateau + early stopping on validation MSE; keeps the best state."""
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=5, min_lr=1e-6)
+    loss_fn = nn.MSELoss()
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    n_train = X_train.shape[0]
+    n_steps = max(n_train // batch_size, 1)
+
+    best_val, best_state, best_epoch, patience_count = float("inf"), None, 0, 0
+    train_mse = float("nan")
+    t0 = time.time()
+    epoch = 0
+    for epoch in range(1, max_epochs + 1):
+        model.train()
+        perm = torch.randperm(n_train, generator=gen).to(X_train.device)
+        loss_sum = 0.0
+        for step in range(n_steps):
+            idx = perm[step * batch_size:(step + 1) * batch_size]
+            opt.zero_grad()
+            loss = loss_fn(model(X_train[idx]), y_train[idx])
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            opt.step()
+            loss_sum += loss.item() * len(idx)
+        train_mse = loss_sum / (n_steps * batch_size)
+
+        model.eval()
+        with torch.no_grad():
+            val_mse = loss_fn(model(X_val), y_val).item()
+        sched.step(val_mse)
+
+        if val_mse < best_val:
+            best_val, best_epoch, patience_count = val_mse, epoch, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_count += 1
+
+        if verbose and (epoch % 10 == 0 or epoch == 1):
+            print(f"  [{model_name}] epoch {epoch:3d}/{max_epochs}  train_rmse={np.sqrt(train_mse):.3e}  "
+                  f"val_rmse={np.sqrt(val_mse):.3e}  lr={opt.param_groups[0]['lr']:.1e}  "
+                  f"patience={patience_count}/{patience}  ({time.time() - t0:.0f}s)", flush=True)
+        if patience_count >= patience:
+            if verbose:
+                print(f"  [{model_name}] early stop at epoch {epoch} (best epoch {best_epoch})", flush=True)
+            break
+
+    if best_state is None:
+        raise RuntimeError(f"[{model_name}] validation loss was never finite "
+                           f"(last {val_mse!r}); nothing to keep")
+    model.load_state_dict(best_state)
+    model.eval()
+    return {"best_val_mse": best_val, "best_epoch": best_epoch, "epochs_run": epoch,
+            "train_mse": train_mse, "train_time": time.time() - t0}
+
+
+def _git_revision() -> Optional[str]:
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT_DIR),
+                             capture_output=True, text=True, timeout=5)
+        return (out.stdout.strip() or None) if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _data_sha256(*arrays: np.ndarray) -> str:
+    h = hashlib.sha256()
+    for a in arrays:
+        h.update(np.ascontiguousarray(a, dtype=np.float64).tobytes())
+    return h.hexdigest()
+
+
+def _training_meta(seed: int, X: np.ndarray, y: np.ndarray, n_tr: int, n_val: int, n_te: int) -> dict:
+    return {
+        "seed": int(seed),
+        "torch_version": str(torch.__version__),
+        "numpy_version": str(np.__version__),
+        "data_sha256": _data_sha256(X, y),
+        "n_train": int(n_tr), "n_val": int(n_val), "n_test": int(n_te),
+        "code_revision": _git_revision(),
+        "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def train_network(
@@ -514,167 +770,257 @@ def train_network(
     val_frac: float = 0.10,
     patience: int = 12,
     verbose: bool = True,
+    *,
+    test_frac: float = 0.10,
+    group_col: Optional[str] = "set_id",
+    target_mae: Optional[float] = None,
+    target_units: str = "target units",
+    seed: int = RANDOM_SEED,
+    domain: Optional[dict] = None,
 ) -> dict:
     """
-    Train a HestonNet on the given feature/target DataFrame.
+    Train a generic HestonNet (standardised inputs) on a feature/target frame.
 
-    Training protocol:
-      - 90/10 train/val split (chronological: last 10% as val to avoid leakage)
-      - Adam optimiser, initial LR from config
-      - ReduceLROnPlateau: factor=0.5, patience=5 — halves LR if val loss stagnates
-      - Early stopping: stop if val loss hasn't improved in 'patience' epochs
-      - Best model (lowest val MSE) saved to disk — not the last epoch
-
-    All inputs are StandardScaled (mean/std computed on training set only).
-    Scaler parameters are saved alongside the model weights for inference.
+    Protocol
+    --------
+      - Rows are split by `group_col` (parameter-set id) into train/val/test
+        with fractions (1 − val − test, val, test); without that column the
+        split falls back to contiguous blocks (last val_frac, then test_frac).
+      - Inputs standardised with training-set mean/std only.
+      - torch and the shuffling generator are seeded before the model is
+        built, so identical inputs give identical weights.
+      - Adam, ReduceLROnPlateau (factor 0.5, patience 5), early stopping on
+        validation MSE; the best-validation weights are kept and saved.
+      - Accuracy is reported on the held-out TEST groups, in target units.
 
     Returns
     -------
-    dict: {train_mse, val_mse, best_epoch, epochs_run, train_time, mae_vol_pts}
+    dict with val_* and test_* metrics in target units (mae, rmse, p99, max),
+    passed_target (test MAE < target_mae, or None when no target is given),
+    plus the legacy keys train_mse, val_mse, val_rmse_vp, mae_vol_pts
+    (= 100 × validation MAE: vol points only for an implied-vol target),
+    best_epoch, epochs_run, train_time.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("[%s] Training on device: %s", model_name, device)
+    device = torch.device("cpu")
+    X_all = df[feature_cols].to_numpy(dtype=np.float64)
+    y_all = df[target_col].to_numpy(dtype=np.float64)
 
-    # ── Data prep ──
-    X_all = df[feature_cols].values.astype(np.float32)
-    y_all = df[target_col].values.astype(np.float32)
+    split = {"group_col": None}
+    if group_col and group_col in df.columns:
+        groups = df[group_col].to_numpy()
+        i_tr, i_val, i_te = _split_by_group(groups, val_frac, test_frac, seed)
+        split = {"group_col": group_col,
+                 "val_groups": sorted(int(g) for g in np.unique(groups[i_val])),
+                 "test_groups": sorted(int(g) for g in np.unique(groups[i_te]))}
+    else:
+        logger.warning("[%s] no '%s' column: falling back to a contiguous split", model_name, group_col)
+        n = len(df)
+        n_val = max(int(n * val_frac), 1)
+        n_te = int(n * test_frac)
+        i_tr = np.arange(0, n - n_val - n_te)
+        i_val = np.arange(n - n_val - n_te, n - n_te)
+        i_te = np.arange(n - n_te, n)
 
-    n_val  = max(int(len(X_all) * val_frac), 1000)
-    n_train = len(X_all) - n_val
+    mean = X_all[i_tr].mean(axis=0)
+    scale = X_all[i_tr].std(axis=0)
+    scale = np.where(scale > 0, scale, 1.0)
+    Xs = ((X_all - mean) / scale).astype(np.float32)
 
-    X_train, y_train = X_all[:n_train], y_all[:n_train]
-    X_val,   y_val   = X_all[n_train:], y_all[n_train:]
+    X_tr, y_tr = _make_tensors(Xs[i_tr], y_all[i_tr], device)
+    X_val, y_val = _make_tensors(Xs[i_val], y_all[i_val], device)
+    X_te = torch.tensor(Xs[i_te], dtype=torch.float32, device=device)
 
-    # Standardise on training data only
-    scaler = StandardScaler()
-    X_train_sc = scaler.fit_transform(X_train)
-    X_val_sc   = scaler.transform(X_val)
-
-    X_train_t, y_train_t = _make_tensors(X_train_sc, y_train, device)
-    X_val_t,   y_val_t   = _make_tensors(X_val_sc,   y_val,   device)
-
-    n_features = X_train.shape[1]
-    model = HestonNet(n_features, hidden_dim, n_layers).to(device)
-    opt   = torch.optim.Adam(model.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt, factor=0.5, patience=5, min_lr=1e-6, verbose=False
-    )
-    loss_fn = nn.MSELoss()
-
-    best_val_mse    = float("inf")
-    best_state      = None
-    best_epoch      = 0
-    patience_count  = 0
-
-    # Manual batching is 2.4x faster than DataLoader on CPU (avoids Python-level
-    # worker overhead and unnecessary memory copies for in-memory TensorDatasets)
-    torch.manual_seed(RANDOM_SEED)
-
-    t0 = time.time()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model = HestonNet(len(feature_cols), hidden_dim, n_layers).to(device)
     if verbose:
-        print(f"\n[{model_name}] Training: {n_train:,} train, {n_val:,} val, "
-              f"{n_features}D input, device={device}", flush=True)
+        print(f"\n[{model_name}] {len(i_tr):,} train / {len(i_val):,} val / {len(i_te):,} test rows, "
+              f"{len(feature_cols)} features", flush=True)
+    fit = _fit(model, X_tr, y_tr, X_val, y_val, lr=lr, batch_size=batch_size,
+               max_epochs=max_epochs, patience=patience, seed=seed, verbose=verbose,
+               model_name=model_name)
 
-    for epoch in range(1, max_epochs + 1):
-        # ── Train pass (manual shuffle + batching) ──
-        model.train()
-        perm = torch.randperm(n_train, device=device)
-        train_loss_sum = 0.0
-        n_steps = n_train // batch_size
-        for step in range(n_steps):
-            idx_b = perm[step * batch_size: (step + 1) * batch_size]
-            Xb, yb = X_train_t[idx_b], y_train_t[idx_b]
-            opt.zero_grad()
-            pred  = model(Xb)
-            loss  = loss_fn(pred, yb)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            opt.step()
-            train_loss_sum += loss.item() * len(yb)
-        train_mse = train_loss_sum / max(n_steps * batch_size, 1)
-
-        # ── Validation pass ──
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(X_val_t)
-            val_mse  = loss_fn(val_pred, y_val_t).item()
-
-        sched.step(val_mse)
-
-        if val_mse < best_val_mse:
-            best_val_mse   = val_mse
-            best_epoch     = epoch
-            best_state     = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            patience_count = 0
-        else:
-            patience_count += 1
-
-        if verbose and epoch % 20 == 0:
-            lr_now = opt.param_groups[0]["lr"]
-            print(f"  Epoch {epoch:3d}/{max_epochs}  "
-                  f"train_rmse={np.sqrt(train_mse)*100:.2f} vp  "
-                  f"val_rmse={np.sqrt(val_mse)*100:.2f} vp  "
-                  f"lr={lr_now:.2e}  patience={patience_count}/{patience}")
-
-        if patience_count >= patience:
-            if verbose:
-                print(f"  Early stop at epoch {epoch} (best val epoch={best_epoch})")
-            break
-
-    # Restore best weights
-    model.load_state_dict(best_state)
-    train_time = time.time() - t0
-
-    # ── Final evaluation on validation set ──
-    model.eval()
     with torch.no_grad():
-        val_pred_np = model(X_val_t).cpu().numpy()
-    # mae_vol_pts units differ by model:
-    #   SPX (NN-1): target is IV decimal (e.g. 0.25), so mae_vol_pts = MAE × 100 in vol pts
-    #               e.g. mae_vol_pts=0.065 means 0.065 vol pts absolute error.
-    #   VIX (NN-2): target is VIX index pts (e.g. 25.0), so mae_vol_pts = MAE × 100 in VIX pts
-    #               e.g. mae_vol_pts=5.96 means 5.96 VIX index pts absolute error, NOT 5.96 vol pts.
-    # VIX MAE in VIX index points (e.g. 5.96 = 5.96 VIX pts), not decimal fraction.
-    # SPX MAE is in vol pts decimal.
-    mae_vol_pts = float(np.mean(np.abs(val_pred_np - y_val))) * 100  # see unit note above
+        val_pred = model(X_val).cpu().numpy()
+        te_pred = model(X_te).cpu().numpy() if len(i_te) else np.empty(0)
+    val_stats = _error_stats(val_pred, y_all[i_val])
+    test_stats = _error_stats(te_pred, y_all[i_te])
+    report = test_stats if test_stats["n"] else val_stats
+    passed = None if target_mae is None else bool(report["mae"] < target_mae)
 
-    if verbose:
-        print(f"\n[{model_name}] Training complete:")
-        print(f"  Best epoch     : {best_epoch}")
-        print(f"  Val RMSE       : {np.sqrt(best_val_mse)*100:.4f} vol pts")
-        print(f"  Val MAE        : {mae_vol_pts:.4f} vol pts")
-        # mae_vol_pts = MAE × 100. For SPX (IV decimal target): 0.1 vp → threshold 0.1
-        # For VIX (VIX-pts target): 0.1 VIX pt × 100 → threshold 10.0
-        # The benchmark uses the strict 0.1 vol pt threshold
-        print(f"  Train MAE (raw): {mae_vol_pts:.4f}")
-        print(f"  Train time     : {train_time:.1f}s")
-
-    # Save model + scaler
+    meta = _training_meta(seed, X_all, y_all, len(i_tr), len(i_val), len(i_te))
+    model_path = Path(model_path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "state_dict":   best_state,
-        "scaler_mean":  scaler.mean_.tolist(),
-        "scaler_scale": scaler.scale_.tolist(),
-        "feature_cols": feature_cols,
+        "format":       "heston_net_v2",
+        "state_dict":   model.state_dict(),
+        "scaler_mean":  mean.tolist(),
+        "scaler_scale": scale.tolist(),
+        "feature_cols": list(feature_cols),
         "target_col":   target_col,
-        "input_dim":    n_features,
-        "hidden_dim":   hidden_dim,
-        "n_layers":     n_layers,
-        "best_val_mse": best_val_mse,
-        "mae_vol_pts":  mae_vol_pts,
-        "best_epoch":   best_epoch,
+        "target_units": target_units,
+        "input_dim":    len(feature_cols),
+        "hidden_dim":   int(hidden_dim),
+        "n_layers":     int(n_layers),
+        "best_val_mse": float(fit["best_val_mse"]),
+        "best_epoch":   int(fit["best_epoch"]),
+        "val_metrics":  val_stats,
+        "test_metrics": test_stats,
+        "domain":       domain,
+        "training":     {**meta, "split": split},
     }, model_path)
-    logger.info("[%s] Model saved to %s", model_name, model_path)
+    logger.info("[%s] model saved to %s", model_name, model_path)
+
+    if verbose:
+        print(f"[{model_name}] best epoch {fit['best_epoch']}, test MAE {report['mae']:.4g} "
+              f"{target_units} (p99 {report['p99']:.4g}), val MAE {val_stats['mae']:.4g} "
+              f"{target_units}; target {target_mae} → {passed}", flush=True)
 
     return {
-        "train_mse":    train_mse,
-        "val_mse":      best_val_mse,
-        "val_rmse_vp":  np.sqrt(best_val_mse) * 100,
-        "mae_vol_pts":  mae_vol_pts,
-        "best_epoch":   best_epoch,
-        "epochs_run":   epoch,
-        "train_time":   train_time,
-        "passed_target": mae_vol_pts < 10.0,   # <0.1 vol pt in decimal = 10 in percent
+        "train_mse":     fit["train_mse"],
+        "val_mse":       fit["best_val_mse"],
+        "val_rmse_vp":   float(np.sqrt(fit["best_val_mse"]) * 100),
+        "mae_vol_pts":   val_stats["mae"] * 100,
+        "val_mae":       val_stats["mae"],
+        "test_mae":      test_stats["mae"],
+        "test_rmse":     test_stats["rmse"],
+        "test_p99":      test_stats["p99"],
+        "test_max":      test_stats["max"],
+        "target_units":  target_units,
+        "n_train":       len(i_tr), "n_val": len(i_val), "n_test": len(i_te),
+        "best_epoch":    fit["best_epoch"],
+        "epochs_run":    fit["epochs_run"],
+        "train_time":    fit["train_time"],
+        "passed_target": passed,
+    }
+
+
+def _moneyness_buckets(x: np.ndarray, err: np.ndarray) -> dict:
+    edges = [(-0.30, -0.10), (-0.10, 0.0), (0.0, 0.10), (0.10, 0.25)]
+    out = {}
+    for lo, hi in edges:
+        m = (x >= lo) & ((x < hi) if hi < 0.25 else (x <= hi))
+        out[f"[{lo:+.2f},{hi:+.2f}]"] = (float(np.mean(err[m])) if m.any() else None, int(m.sum()))
+    return out
+
+
+def train_spx(
+    force_regen: bool = False,
+    *,
+    data: Optional[pd.DataFrame] = None,
+    n_samples: int = NN_TRAIN_SAMPLES,
+    model_path: Optional[Path] = None,
+    hidden_dim: int = NN_HIDDEN_DIM,
+    n_layers: int = NN_N_LAYERS,
+    lr: float = NN_LEARNING_RATE,
+    batch_size: int = NN_BATCH_SIZE,
+    max_epochs: int = NN_MAX_EPOCHS,
+    patience: int = 15,
+    val_frac: float = 0.10,
+    test_frac: float = 0.10,
+    seed: int = RANDOM_SEED,
+    n_jobs: int = 1,
+    verbose: bool = True,
+    command: Optional[str] = None,
+) -> dict:
+    """
+    Generate (or load) exact SPX training data and train NN-1 (SPXImpliedVolNet).
+
+    `data` lets callers (tests) pass a prepared frame with SPX_FEATURES,
+    set_id and iv_target. Accuracy is reported on held-out parameter sets in
+    vol points; passed_target compares the test MAE with
+    config.NN_VOL_ERROR_TARGET (0.1 vol point). The checkpoint records the
+    training settings, the data-generation settings and counts (df.attrs),
+    and `command` (the CLI line that produced it, when given).
+    """
+    df = data if data is not None else generate_spx_training_data(
+        n_samples, force_regen, n_jobs=n_jobs)
+    model_path = Path(model_path) if model_path else _SPX_MODEL_PATH
+    X_all = df[SPX_FEATURES].to_numpy(dtype=np.float64)
+    y_all = df["iv_target"].to_numpy(dtype=np.float64)
+    groups = df["set_id"].to_numpy()
+    i_tr, i_val, i_te = _split_by_group(groups, val_frac, test_frac, seed)
+    split = {"group_col": "set_id",
+             "val_groups": sorted(int(g) for g in np.unique(groups[i_val])),
+             "test_groups": sorted(int(g) for g in np.unique(groups[i_te]))}
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model = SPXImpliedVolNet(hidden_dim, n_layers)
+    with torch.no_grad():
+        eng, _ = SPXImpliedVolNet.engineer(torch.tensor(X_all[i_tr], dtype=torch.float64))
+        mean = eng.mean(dim=0)
+        scale = eng.std(dim=0, unbiased=False)
+        model.feat_mean.copy_(mean.float())
+        model.feat_scale.copy_(torch.where(scale > 0, scale, torch.ones_like(scale)).float())
+
+    X_tr, y_tr = _make_tensors(X_all[i_tr], y_all[i_tr], torch.device("cpu"))
+    X_val, y_val = _make_tensors(X_all[i_val], y_all[i_val], torch.device("cpu"))
+    X_te = torch.tensor(X_all[i_te], dtype=torch.float32)
+    if verbose:
+        print(f"\n[NN-1 (SPX)] {len(i_tr):,} train / {len(i_val):,} val / {len(i_te):,} test rows "
+              f"({len(np.unique(df['set_id']))} parameter sets)", flush=True)
+    fit = _fit(model, X_tr, y_tr, X_val, y_val, lr=lr, batch_size=batch_size,
+               max_epochs=max_epochs, patience=patience, seed=seed, verbose=verbose,
+               model_name="NN-1 (SPX)")
+
+    with torch.no_grad():
+        val_pred = model(X_val).numpy()
+        te_pred = model(X_te).numpy() if len(i_te) else np.empty(0)
+    val_vp = {k: (v * 100 if k != "n" else v) for k, v in _error_stats(val_pred, y_all[i_val]).items()}
+    test_vp = {k: (v * 100 if k != "n" else v) for k, v in _error_stats(te_pred, y_all[i_te]).items()}
+    report = test_vp if test_vp["n"] else val_vp
+    target_vp = NN_VOL_ERROR_TARGET * 100
+    by_bucket = (_moneyness_buckets(X_all[i_te, 0], np.abs(te_pred - y_all[i_te]) * 100)
+                 if len(i_te) else {})
+
+    ckpt = {
+        "format":       _SPX_CKPT_FORMAT,
+        "state_dict":   model.state_dict(),
+        "feature_cols": list(SPX_FEATURES),
+        "hidden_dim":   int(hidden_dim),
+        "n_layers":     int(n_layers),
+        "domain":       SPX_TRAINING_DOMAIN,
+        "label_floor_otm_rel": NN_LABEL_MIN_OTM_PRICE_REL,
+        "data":         df.attrs.get("nn_training_meta"),
+        "units":        "implied vol, decimal; metrics in vol points",
+        "best_val_mse": float(fit["best_val_mse"]),
+        "best_epoch":   int(fit["best_epoch"]),
+        "val_metrics_vp":  val_vp,
+        "test_metrics_vp": test_vp,
+        "test_mae_by_moneyness_vp": {k: [v[0], v[1]] for k, v in by_bucket.items()},
+        "training":     {**_training_meta(seed, X_all, y_all, len(i_tr), len(i_val), len(i_te)),
+                         "lr": lr, "batch_size": batch_size, "max_epochs": max_epochs,
+                         "patience": patience, "epochs_run": int(fit["epochs_run"]),
+                         "train_time_s": float(fit["train_time"]),
+                         "torch_threads": int(torch.get_num_threads()),
+                         "command": command,
+                         "split": split},
+    }
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(ckpt, model_path)
+    logger.info("[NN-1 (SPX)] model saved to %s", model_path)
+    if verbose:
+        print(f"[NN-1 (SPX)] test MAE {report['mae']:.3f} vp, RMSE {report['rmse']:.3f} vp, "
+              f"p99 {report['p99']:.3f} vp, max {report['max']:.3f} vp "
+              f"(target {target_vp:.2f} vp); by moneyness {by_bucket}", flush=True)
+
+    return {
+        "train_mse":     fit["train_mse"],
+        "val_mse":       fit["best_val_mse"],
+        "val_rmse_vp":   float(np.sqrt(fit["best_val_mse"]) * 100),
+        "mae_vol_pts":   report["mae"],
+        "val_mae_vp":    val_vp["mae"],
+        "test_mae_vp":   test_vp["mae"],
+        "test_rmse_vp":  test_vp["rmse"],
+        "test_p99_vp":   test_vp["p99"],
+        "test_max_vp":   test_vp["max"],
+        "test_mae_by_moneyness_vp": by_bucket,
+        "n_train":       len(i_tr), "n_val": len(i_val), "n_test": len(i_te),
+        "best_epoch":    fit["best_epoch"],
+        "epochs_run":    fit["epochs_run"],
+        "train_time":    fit["train_time"],
+        "passed_target": bool(report["mae"] < target_vp),
     }
 
 
@@ -682,99 +1028,110 @@ def train_network(
 
 class NNPricer:
     """
-    Unified inference wrapper for NN-1 (SPX) and NN-2 (VIX) networks.
+    Inference wrapper for NN-1 (SPX implied vols) and the deprecated NN-2.
 
-    Handles:
-      - Loading models and scalers from disk
-      - Input normalisation (StandardScaler)
-      - Batch inference via PyTorch (GPU if available)
-      - Speed benchmark vs Heston pricer
+    Inputs are checked against the training domain stored in the checkpoint;
+    out-of-domain rows raise by default (see spx_iv_batch).
 
     Usage
     -----
         pricer = NNPricer.load()
-
-        # Single SPX option:
-        iv = pricer.spx_iv(log_moneyness=-0.05, T=0.25,
-                            kappa=4.62, theta=0.076, sigma=0.84, rho=-0.99, v0=0.056)
-
-        # Batch of options (array inputs, same shape):
-        ivs = pricer.spx_iv_batch(features_2d_array)   # shape (N, 7)
-
-        # VIX term structure:
-        vix_prices = pricer.vix_prices(kappa, theta, sigma, v0, tenors)
+        iv  = pricer.spx_iv(log_moneyness=-0.05, T=0.25,
+                            kappa=4.62, theta=0.076, sigma=0.84, rho=-0.95, v0=0.056)
+        ivs = pricer.spx_iv_batch(features)        # (N, 7) in SPX_FEATURES order
     """
 
     def __init__(self):
-        self._spx_model:    Optional[HestonNet] = None
-        self._vix_model:    Optional[HestonNet] = None
-        self._spx_scaler_mean:  Optional[np.ndarray] = None
+        self._spx_model: Optional[nn.Module] = None
+        self._vix_model: Optional[HestonNet] = None
+        self._spx_scaler_mean:  Optional[np.ndarray] = None   # legacy checkpoints only
         self._spx_scaler_scale: Optional[np.ndarray] = None
         self._vix_scaler_mean:  Optional[np.ndarray] = None
         self._vix_scaler_scale: Optional[np.ndarray] = None
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._spx_domain: Optional[dict] = None
+        self._vix_domain: Optional[dict] = None
+        self._spx_meta: dict = {}
+        self._vix_meta: dict = {}
+        self._device = torch.device("cpu")
 
     @classmethod
     def load(
         cls,
         spx_path: Optional[str] = None,
         vix_path: Optional[str] = None,
-        retrain_if_missing: bool = True,
+        retrain_if_missing: bool = False,
     ) -> "NNPricer":
         """
-        Load NN-1 and NN-2 from disk.
+        Load NN-1 (required) and NN-2 (optional, deprecated) from disk.
 
-        If model files are missing and retrain_if_missing=True, auto-trains them.
+        retrain_if_missing now defaults to False: generating exact labels and
+        training takes tens of minutes, which is not something a `load` call
+        should do implicitly. A missing NN-1 raises FileNotFoundError; a
+        missing NN-2 raises only if vix_path was given explicitly.
         """
         pricer = cls()
         spx_p = Path(spx_path) if spx_path else _SPX_MODEL_PATH
         vix_p = Path(vix_path) if vix_path else _VIX_MODEL_PATH
 
-        if spx_p.exists():
-            pricer._load_spx(spx_p)
-            logger.info("NN-1 (SPX) loaded from %s", spx_p)
-        elif retrain_if_missing:
+        if not spx_p.exists():
+            if not retrain_if_missing:
+                raise FileNotFoundError(f"SPX model not found: {spx_p}")
             logger.info("NN-1 not found — training now...")
-            train_spx()
-            pricer._load_spx(spx_p)
-        else:
-            raise FileNotFoundError(f"SPX model not found: {spx_p}")
+            train_spx(model_path=spx_p)
+        pricer._load_spx(spx_p)
+        logger.info("NN-1 (SPX) loaded from %s", spx_p)
 
         if vix_p.exists():
             pricer._load_vix(vix_p)
-            logger.info("NN-2 (VIX) loaded from %s", vix_p)
-        elif retrain_if_missing:
-            logger.info("NN-2 not found — training now...")
-            train_vix()
-            pricer._load_vix(vix_p)
-        else:
+            logger.info("NN-2 (VIX, deprecated) loaded from %s", vix_p)
+        elif vix_path is not None:
             raise FileNotFoundError(f"VIX model not found: {vix_p}")
-
+        elif retrain_if_missing:
+            train_vix(model_path=vix_p)
+            pricer._load_vix(vix_p)
         return pricer
 
     def _load_spx(self, path: Path):
-        ckpt = torch.load(path, map_location=self._device, weights_only=False)
-        model = HestonNet(ckpt["input_dim"], ckpt["hidden_dim"], ckpt["n_layers"])
-        model.load_state_dict(ckpt["state_dict"])
+        ckpt = torch.load(path, map_location=self._device, weights_only=True)
+        if ckpt.get("format") == _SPX_CKPT_FORMAT:
+            model = SPXImpliedVolNet(ckpt["hidden_dim"], ckpt["n_layers"])
+            model.load_state_dict(ckpt["state_dict"])
+            self._spx_domain = ckpt["domain"]
+        else:
+            warnings.warn(
+                f"{path} is a legacy NN-1 checkpoint with no recorded training domain; "
+                "out-of-domain inputs cannot be detected", RuntimeWarning, stacklevel=3,
+            )
+            model = HestonNet(ckpt["input_dim"], ckpt["hidden_dim"], ckpt["n_layers"])
+            model.load_state_dict(ckpt["state_dict"])
+            self._spx_scaler_mean  = np.array(ckpt["scaler_mean"],  dtype=np.float32)
+            self._spx_scaler_scale = np.array(ckpt["scaler_scale"], dtype=np.float32)
+            self._spx_domain = None
         model.to(self._device).eval()
-        self._spx_model       = model
-        self._spx_scaler_mean  = np.array(ckpt["scaler_mean"],  dtype=np.float32)
-        self._spx_scaler_scale = np.array(ckpt["scaler_scale"], dtype=np.float32)
+        self._spx_model = model
         self._spx_meta = ckpt
 
     def _load_vix(self, path: Path):
-        ckpt = torch.load(path, map_location=self._device, weights_only=False)
+        ckpt = torch.load(path, map_location=self._device, weights_only=True)
         model = HestonNet(ckpt["input_dim"], ckpt["hidden_dim"], ckpt["n_layers"])
         model.load_state_dict(ckpt["state_dict"])
         model.to(self._device).eval()
         self._vix_model        = model
         self._vix_scaler_mean  = np.array(ckpt["scaler_mean"],  dtype=np.float32)
         self._vix_scaler_scale = np.array(ckpt["scaler_scale"], dtype=np.float32)
+        self._vix_domain = ckpt.get("domain")
         self._vix_meta = ckpt
 
     def _normalise(self, X: np.ndarray, mean: np.ndarray, scale: np.ndarray) -> torch.Tensor:
         X_sc = (X.astype(np.float32) - mean) / scale
         return torch.tensor(X_sc, dtype=torch.float32, device=self._device)
+
+    def spx_out_of_domain(self, features: np.ndarray) -> np.ndarray:
+        """Mask of rows outside NN-1's training domain (all False for legacy checkpoints)."""
+        f = np.asarray(features, dtype=np.float64)
+        if self._spx_domain is None:
+            return np.zeros(len(f), dtype=bool)
+        return spx_out_of_domain(f, self._spx_domain)
 
     def spx_iv(
         self,
@@ -785,37 +1142,60 @@ class NNPricer:
         sigma: float,
         rho: float,
         v0: float,
+        out_of_domain: str = "raise",
     ) -> float:
         """
-        Predict Black-Scholes implied vol for a single SPX option.
+        Predict the Black-Scholes implied vol for a single SPX option.
 
-        Parameters
-        ----------
-        log_moneyness : ln(K / F) where F = S*exp((r-q)*T)
-        T             : time to expiry in years
-        Returns       : implied vol (decimal, e.g. 0.22 = 22%)
+        log_moneyness : ln(K / F) where F = S·exp((r−q)T);  T in years.
+        Returns the implied vol in decimal (0.22 = 22%).
         """
-        features = np.array([[log_moneyness, np.sqrt(T), kappa, theta, sigma, rho, v0]],
-                             dtype=np.float32)
-        X_t = self._normalise(features, self._spx_scaler_mean, self._spx_scaler_scale)
-        with torch.no_grad():
-            return float(self._spx_model(X_t).item())
+        features = np.array([[log_moneyness, np.sqrt(T), kappa, theta, sigma, rho, v0]])
+        return float(self.spx_iv_batch(features, out_of_domain=out_of_domain)[0])
 
-    def spx_iv_batch(self, features: np.ndarray) -> np.ndarray:
+    def spx_iv_batch(self, features: np.ndarray, out_of_domain: str = "raise") -> np.ndarray:
         """
         Batch prediction of SPX implied vols.
 
         Parameters
         ----------
-        features : shape (N, 7) — columns: [x, sqrt_T, kappa, theta, sigma, rho, v0]
+        features      : (N, 7) — columns [x, sqrt_T, kappa, theta, sigma, rho, v0]
+        out_of_domain : what to do with rows outside the training domain:
+                        "raise" (default) ValueError; "nan" return NaN there;
+                        "exact" price them exactly instead (slow, per slice).
 
         Returns
         -------
-        np.ndarray shape (N,) — implied vols in decimal
+        np.ndarray (N,) — implied vols in decimal
         """
-        X_t = self._normalise(features, self._spx_scaler_mean, self._spx_scaler_scale)
+        if self._spx_model is None:
+            raise RuntimeError("NN-1 not loaded")
+        if out_of_domain not in ("raise", "nan", "exact"):
+            raise ValueError(f"out_of_domain must be 'raise', 'nan' or 'exact', got {out_of_domain!r}")
+        f = np.asarray(features, dtype=np.float64)
+        if f.ndim != 2 or f.shape[1] != len(SPX_FEATURES):
+            raise ValueError(f"features must have shape (N, {len(SPX_FEATURES)}), got {f.shape}")
+        ood = self.spx_out_of_domain(f)
+        if ood.any() and out_of_domain == "raise":
+            raise ValueError(
+                f"{int(ood.sum())} of {len(f)} inputs are outside NN-1's training domain "
+                f"{self._spx_domain}; first offending row: {f[np.argmax(ood)].tolist()}. "
+                "Pass out_of_domain='nan' or 'exact' to handle them explicitly."
+            )
+
         with torch.no_grad():
-            return self._spx_model(X_t).cpu().numpy()
+            if self._spx_scaler_mean is not None:      # legacy HestonNet checkpoint
+                out = self._spx_model(self._normalise(f, self._spx_scaler_mean,
+                                                      self._spx_scaler_scale)).cpu().numpy()
+            else:
+                out = self._spx_model(torch.tensor(f, dtype=torch.float32)).cpu().numpy()
+        out = out.astype(np.float64)
+        if ood.any():
+            if out_of_domain == "nan":
+                out[ood] = np.nan
+            else:
+                out[ood] = _exact_rows(f[ood])
+        return out
 
     def vix_prices(
         self,
@@ -826,24 +1206,27 @@ class NNPricer:
         tenors: np.ndarray,
     ) -> np.ndarray:
         """
-        Predict VIX futures prices for an array of tenors.
+        DEPRECATED NN-2 prediction of heston_vix_term_index (VIX points).
 
-        Parameters
-        ----------
-        tenors : array of expiry times in years
-
-        Returns
-        -------
-        np.ndarray shape (len(tenors),) — VIX futures prices (VIX points)
+        Call heston_vix_term_index directly: it is exact and faster than
+        this network. Inputs outside NN-2's training domain raise ValueError.
         """
-        tenors = np.asarray(tenors)
+        warnings.warn("NNPricer.vix_prices (NN-2) is deprecated: heston_vix_term_index "
+                      "is exact and faster", DeprecationWarning, stacklevel=2)
+        if self._vix_model is None:
+            raise RuntimeError("NN-2 not loaded")
+        tenors = np.atleast_1d(np.asarray(tenors, dtype=float))
         features = np.column_stack([
-            np.full(len(tenors), kappa),
-            np.full(len(tenors), theta),
-            np.full(len(tenors), sigma),
-            np.full(len(tenors), v0),
-            tenors,
-        ]).astype(np.float32)
+            np.full(len(tenors), kappa), np.full(len(tenors), theta),
+            np.full(len(tenors), sigma), np.full(len(tenors), v0), tenors,
+        ])
+        if self._vix_domain is not None:
+            names = VIX_FEATURES
+            for i, n in enumerate(names):
+                lo, hi = self._vix_domain[n]
+                col = features[:, i]
+                if np.any((col < lo - 1e-9 * abs(lo)) | (col > hi + 1e-9 * abs(hi))):
+                    raise ValueError(f"NN-2 input {n} outside training domain [{lo}, {hi}]")
         X_t = self._normalise(features, self._vix_scaler_mean, self._vix_scaler_scale)
         with torch.no_grad():
             return self._vix_model(X_t).cpu().numpy()
@@ -854,83 +1237,178 @@ class NNPricer:
         r: float = 0.045,
         q: float = 0.013,
         n_options: int = 500,
+        *,
+        n_param_sets: int = 20,
+        maturities_days: tuple = (14, 30, 61, 91, 182, 365),
+        param_sets: Optional[list] = None,
+        seed: int = RANDOM_SEED + 1000,
+        repeats: int = 5,
+        verbose: bool = True,
+        torch_threads: Optional[int] = 1,
     ) -> dict:
         """
-        Compare NN inference speed against Heston batch pricer + IV inversion.
+        Accuracy and speed of NN-1 on a calibration-like workload.
 
-        Returns dict with timing and accuracy metrics.
+        For each parameter set (fresh draws from the training domain, or
+        `param_sets`), n_options options are spread over `maturities_days`
+        with strikes uniform on each maturity's admissible x interval (the
+        full domain, OTM-call wing included). Accuracy: NN vs the exact
+        reference (Fourier price + robust solver) on EVERY option whose exact
+        OTM value is at least NN_LABEL_MIN_OTM_PRICE_REL·F — never filtered
+        on the NN's output. Speed: per parameter set, one NN forward pass vs
+        heston_call_batch + _bs_iv_vectorized for the same options (one call
+        per maturity), best of `repeats`; the speedup is reported as the
+        median and inter-quartile range over parameter sets. torch is pinned
+        to `torch_threads` threads for the run (default 1, like the numpy
+        reference; None leaves torch's setting alone) and restored after.
+
+        Options without a reference IV because the exact pricer failed (not
+        because they are below the floor) are counted in n_reference_failed
+        rather than silently left out of the MAE.
+
+        Returns a dict with the legacy keys (n_options, heston_ms, nn_ms,
+        speedup, mae_vol_pts, rmse_vol_pts, target_passed) plus p99/max error,
+        MAE by moneyness and maturity, the production pricer's own error,
+        and the machine the timing was taken on.
         """
-        rng   = np.random.default_rng(42)
-        p     = _load_baseline_params()
-        kappa = p["kappa"]; theta = p["theta"]
-        sigma = p["sigma"]; rho   = p["rho"]; v0 = p["v0"]
-        T     = 0.25
-        F     = S * np.exp((r - q) * T)
+        if self._spx_model is None:
+            raise RuntimeError("NN-1 not loaded")
+        threads_before = torch.get_num_threads()
+        if torch_threads is not None:
+            torch.set_num_threads(int(torch_threads))
+        try:
+            return self._benchmark(S, r, q, n_options, n_param_sets, maturities_days,
+                                   param_sets, seed, repeats, verbose)
+        finally:
+            torch.set_num_threads(threads_before)
 
-        strikes    = rng.uniform(S * 0.75, S * 1.30, n_options)
-        log_m_vals = np.log(strikes / F)
-        sqrt_T     = np.sqrt(T)
+    def _benchmark(self, S, r, q, n_options, n_param_sets, maturities_days,
+                   param_sets, seed, repeats, verbose) -> dict:
+        domain = self._spx_domain or SPX_TRAINING_DOMAIN
+        rng = np.random.default_rng(seed)
+        if param_sets is None:
+            drawn = _sample_domain_params(n_param_sets, domain, rng)
+            param_sets = [{k: float(drawn[k][i]) for k in _PARAM_NAMES} for i in range(n_param_sets)]
+        mats = np.asarray(maturities_days, dtype=float) / 365.0
+        n_per = max(n_options // len(mats), 1)
 
-        # Timing: best-of-N with perf_counter on BOTH sides. A single wall-clock
-        # sample of a few-millisecond kernel is dominated by scheduler jitter
-        # (observed: identical code reporting 0.8x and 3x on the same laptop),
-        # which is noise about the machine, not information about the pricer.
-        # The minimum over repeats is the standard steady-state estimator.
-        def _best_of(fn, repeats: int = 5):
-            best = float("inf")
+        def _best_of(fn):
+            best, out = float("inf"), None
             for _ in range(repeats):
                 t0 = time.perf_counter()
                 out = fn()
                 best = min(best, time.perf_counter() - t0)
             return out, best
 
-        # ── Heston batch + IV inversion ──
-        F_arr = np.full(n_options, F); T_arr = np.full(n_options, T); r_arr = np.full(n_options, r)
+        all_x, all_T, all_nn, all_ref, all_prod = [], [], [], [], []
+        heston_t, nn_t = [], []
+        n_ref_failed = 0
+        for p in param_sets:
+            xs = []
+            for T in mats:
+                lo, hi = _x_interval(T, p, domain)
+                xs.append(rng.uniform(lo, hi, n_per))
+            feats = np.vstack([
+                np.column_stack([x, np.full(n_per, np.sqrt(T))]
+                                + [np.full(n_per, p[k]) for k in _PARAM_NAMES])
+                for x, T in zip(xs, mats)
+            ])
+            refs = []
+            for x, T in zip(xs, mats):
+                otm, ok = _heston_otm_rel(x, T, p)
+                if ok:
+                    iv = _iv_from_otm_rel(otm, x, np.full(x.shape, T), NN_LABEL_MIN_OTM_PRICE_REL)
+                    n_ref_failed += int((np.isnan(iv) & (otm >= NN_LABEL_MIN_OTM_PRICE_REL)).sum())
+                else:                      # prices unreliable: no option of the slice is scored
+                    iv = np.full(x.shape, np.nan)
+                    n_ref_failed += len(x)
+                refs.append(iv)
+            ref = np.concatenate(refs)
 
-        def _heston_leg():
-            calls = heston_call_batch(S, strikes, T, r, q, kappa, theta, sigma, rho, v0)
-            return _bs_iv_vectorized(calls, F_arr, strikes, T_arr, r_arr)
+            Fs = [S * np.exp((r - q) * T) for T in mats]
+            Ks = [F * np.exp(x) for F, x in zip(Fs, xs)]
 
-        heston_ivs, heston_time = _best_of(_heston_leg)
+            def _heston_leg():
+                out = []
+                for T, F, K in zip(mats, Fs, Ks):
+                    calls = heston_call_batch(S, K, T, r, q, **p)
+                    n = len(K)
+                    out.append(_bs_iv_vectorized(calls, np.full(n, F), K,
+                                                 np.full(n, T), np.full(n, r)))
+                return np.concatenate(out)
 
-        # ── NN inference ──
-        feats = np.column_stack([
-            log_m_vals, np.full(n_options, sqrt_T),
-            np.full(n_options, kappa), np.full(n_options, theta),
-            np.full(n_options, sigma), np.full(n_options, rho),
-            np.full(n_options, v0),
-        ]).astype(np.float32)
-        # Warm up once: the first forward pass carries PyTorch graph-build and
-        # allocation overhead (cold-start speedup can dip to ~1×). The benchmark
-        # is meant to report steady-state inference speed, so discard the first.
-        _ = self.spx_iv_batch(feats)
-        nn_ivs, nn_time = _best_of(lambda: self.spx_iv_batch(feats))
+            prod, h_time = _best_of(_heston_leg)
+            self.spx_iv_batch(feats, out_of_domain="nan")          # warm-up
+            nn_out, n_time = _best_of(lambda: self.spx_iv_batch(feats, out_of_domain="nan"))
+            heston_t.append(h_time)
+            nn_t.append(n_time)
+            all_x.append(feats[:, 0]); all_T.append(feats[:, 1] ** 2)
+            all_nn.append(nn_out); all_ref.append(ref); all_prod.append(prod)
 
-        # Accuracy on valid rows: filter out near-zero IVs (deep OTM options with
-        # < 2% IV are excluded from calibration and outside the training distribution)
-        valid = (~np.isnan(heston_ivs)) & (heston_ivs >= 0.02) & (nn_ivs >= 0.02)
-        mae  = float(np.mean(np.abs(nn_ivs[valid] - heston_ivs[valid]))) * 100
-        rmse = float(np.sqrt(np.mean((nn_ivs[valid] - heston_ivs[valid])**2))) * 100
-
-        # mae is in vol points (MAE_decimal × 100). Target: 0.1 vol pt → threshold 0.1
+        x = np.concatenate(all_x); Tm = np.concatenate(all_T)
+        nn_iv = np.concatenate(all_nn); ref = np.concatenate(all_ref); prod = np.concatenate(all_prod)
+        ok = np.isfinite(ref)
+        err = np.abs(nn_iv - ref) * 100
+        e_ok = err[ok]
+        prod_ok = ok & np.isfinite(prod)
+        speedups = np.array(heston_t) / np.maximum(np.array(nn_t), 1e-12)
+        mae = float(np.mean(e_ok))
         result = {
-            "n_options":     n_options,
-            "heston_ms":     heston_time * 1000,
-            "nn_ms":         nn_time * 1000,
-            "speedup":       heston_time / max(nn_time, 1e-9),
-            "mae_vol_pts":   mae,
-            "rmse_vol_pts":  rmse,
-            "target_passed": mae < 0.1,    # 0.1 vol pt target (in vol-pt units)
+            "n_options":      int(len(ref)),
+            "n_well_posed":   int(ok.sum()),
+            "n_reference_failed": int(n_ref_failed),
+            "n_param_sets":   len(param_sets),
+            "heston_ms":      float(np.median(heston_t) * 1000),
+            "nn_ms":          float(np.median(nn_t) * 1000),
+            "speedup":        float(np.median(speedups)),
+            "speedup_iqr":    [float(np.quantile(speedups, 0.25)), float(np.quantile(speedups, 0.75))],
+            "mae_vol_pts":    mae,
+            "rmse_vol_pts":   float(np.sqrt(np.mean(e_ok**2))),
+            "p99_vol_pts":    float(np.quantile(e_ok, 0.99)),
+            "max_vol_pts":    float(np.max(e_ok)),
+            "mae_by_moneyness_vp": _moneyness_buckets(x[ok], e_ok),
+            "mae_by_maturity_vp": {int(d): float(np.mean(err[ok & np.isclose(Tm, d / 365.0)]))
+                                   for d in maturities_days
+                                   if (ok & np.isclose(Tm, d / 365.0)).any()},
+            "pricer_mae_vol_pts": float(np.mean(np.abs(prod - ref)[prod_ok]) * 100),
+            "pricer_max_vol_pts": float(np.max(np.abs(prod - ref)[prod_ok]) * 100),
+            "pricer_n_nan":   int((ok & ~np.isfinite(prod)).sum()),
+            "target_passed":  bool(mae < NN_VOL_ERROR_TARGET * 100),
+            "machine": {"platform": platform.platform(), "machine": platform.machine(),
+                        "cpu_count": os.cpu_count(), "torch": str(torch.__version__),
+                        "torch_threads": torch.get_num_threads(), "numpy": np.__version__},
         }
-
-        print(f"\n── NN-1 Benchmark ({n_options} SPX options, T={T}) ──")
-        print(f"  Heston + IV inv  : {heston_time*1000:.2f}ms")
-        print(f"  NN inference     : {nn_time*1000:.2f}ms")
-        print(f"  Speedup          : {result['speedup']:.1f}×")
-        print(f"  MAE              : {mae:.3f} vol pts")
-        print(f"  RMSE             : {rmse:.3f} vol pts")
-        print(f"  Target (<0.1 vp) : {'PASS ✓' if result['target_passed'] else 'FAIL ✗'}")
+        if verbose:
+            print(f"\n── NN-1 benchmark: {len(param_sets)} parameter sets × {len(ref) // len(param_sets)} "
+                  f"options ({ok.sum()} well-posed, {n_ref_failed} reference failures) ──")
+            print(f"  heston_call_batch + IV : {result['heston_ms']:.2f} ms per set (median; "
+                  f"torch threads {torch.get_num_threads()})")
+            print(f"  NN forward pass        : {result['nn_ms']:.2f} ms per set (median)")
+            print(f"  Speedup                : {result['speedup']:.1f}× "
+                  f"(IQR {result['speedup_iqr'][0]:.1f}–{result['speedup_iqr'][1]:.1f}×)")
+            print(f"  NN error vs exact      : MAE {mae:.3f} vp, RMSE {result['rmse_vol_pts']:.3f}, "
+                  f"p99 {result['p99_vol_pts']:.3f}, max {result['max_vol_pts']:.3f} vp")
+            print(f"  by moneyness           : {result['mae_by_moneyness_vp']}")
+            print(f"  heston_call_batch error: MAE {result['pricer_mae_vol_pts']:.4f} vp, "
+                  f"max {result['pricer_max_vol_pts']:.3f} vp, {result['pricer_n_nan']} NaN")
+            print(f"  Target (<{NN_VOL_ERROR_TARGET * 100:.1f} vp)       : "
+                  f"{'PASS' if result['target_passed'] else 'FAIL'}")
         return result
+
+    def benchmark_vix(self, n_tenors: int = 8, repeats: int = 200) -> dict:
+        """Time NN-2 against the closed form it approximates (single parameter set)."""
+        p = dict(kappa=4.62, theta=0.0764, sigma=0.84, v0=0.0561)
+        tenors = np.linspace(0.05, 1.0, n_tenors)
+        def _best(fn):
+            best = float("inf")
+            for _ in range(repeats):
+                t0 = time.perf_counter(); fn(); best = min(best, time.perf_counter() - t0)
+            return best
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            nn_s = _best(lambda: self.vix_prices(tenors=tenors, **p))
+        cf_s = _best(lambda: heston_vix_term_index(p["kappa"], p["theta"], p["sigma"], p["v0"], tenors))
+        return {"nn_us": nn_s * 1e6, "closed_form_us": cf_s * 1e6, "nn_over_closed_form": nn_s / cf_s}
 
     def __repr__(self) -> str:
         spx_ok = self._spx_model is not None
@@ -938,41 +1416,33 @@ class NNPricer:
         return f"NNPricer(NN-1={'loaded' if spx_ok else 'not loaded'}, NN-2={'loaded' if vix_ok else 'not loaded'})"
 
 
+def _exact_rows(f: np.ndarray) -> np.ndarray:
+    """Exact implied vols for arbitrary feature rows (grouped by (T, params) slice)."""
+    out = np.full(len(f), np.nan)
+    keys = [tuple(row[1:]) for row in f]
+    for key in dict.fromkeys(keys):
+        idx = [i for i, k in enumerate(keys) if k == key]
+        sqT, *pv = key
+        p = dict(zip(_PARAM_NAMES, pv))
+        out[idx] = heston_iv_exact(f[idx, 0], float(sqT) ** 2, p)[0]
+    return out
+
+
 # ── Convenience Training Entry Points ─────────────────────────────────────────
 
-def train_spx(force_regen: bool = False, **train_kwargs) -> dict:
+def train_vix(force_regen: bool = False, *, model_path: Optional[Path] = None, **train_kwargs) -> dict:
     """
-    Generate 500K SPX training samples and train NN-1.
-    Saves training data and model to disk. Safe to call repeatedly.
-    """
-    df = generate_spx_training_data(force_regen=force_regen)
-    feature_cols = ["x", "sqrt_T", "kappa", "theta", "sigma", "rho", "v0"]
-    result = train_network(
-        df, feature_cols, "iv_target", _SPX_MODEL_PATH,
-        model_name="NN-1 (SPX)", **train_kwargs
-    )
-    return result
+    Generate VIX training data and train the deprecated NN-2.
 
-
-def train_vix(force_regen: bool = False, **train_kwargs) -> dict:
-    """
-    Generate 500K VIX training samples and train NN-2.
-
-    Architecture choices:
-      - hidden_dim=64 (vs 256 for SPX): Heston VIX formula is nearly affine in
-        exp(-kappa*T) — 64 hidden units achieves <0.05 VIX pt MAE
-      - batch_size=8192: larger batches amortise per-op Python overhead on CPU
-        (30ms/batch is fixed cost regardless of batch size at these matrix dims)
-      - 100K subsample: the VIX function is smooth/deterministic, 100K covers
-        the full parameter space; 500K adds no information
-
-    Full 500K is still generated and cached on disk for reproducibility.
-    Training uses a 100K subset: fast (~45s) with the same accuracy.
+    hidden_dim=64, batch 8192 on a 100K subsample of parameter-set groups
+    (the target is a smooth closed form). Split by parameter set, so the
+    reported test MAE (VIX points) is out-of-sample.
     """
     df = generate_vix_training_data(force_regen=force_regen)
-    # Subsample 100K — sufficient for smooth, low-dimensional VIX function
-    df_train = df.sample(n=min(100_000, len(df)), random_state=RANDOM_SEED).reset_index(drop=True)
-    feature_cols = ["kappa", "theta", "sigma", "v0", "tenor_years"]
+    rng = np.random.default_rng(RANDOM_SEED)
+    sets = np.unique(df["set_id"])
+    keep = rng.permutation(sets)[: max(1, min(len(sets), 100_000 // 10))]
+    df_train = df[df["set_id"].isin(keep)].reset_index(drop=True)
     kwargs = {
         "hidden_dim":  64,
         "n_layers":    4,
@@ -981,8 +1451,55 @@ def train_vix(force_regen: bool = False, **train_kwargs) -> dict:
         "patience":    15,
     }
     kwargs.update(train_kwargs)
-    result = train_network(
-        df_train, feature_cols, "vix_target", _VIX_MODEL_PATH,
-        model_name="NN-2 (VIX)", **kwargs
+    return train_network(
+        df_train, VIX_FEATURES, "vix_target", Path(model_path) if model_path else _VIX_MODEL_PATH,
+        model_name="NN-2 (VIX)", target_mae=NN_VIX_TARGET_MAE, target_units="VIX points",
+        domain=VIX_TRAINING_DOMAIN, **kwargs,
     )
-    return result
+
+
+# ── Command line ──────────────────────────────────────────────────────────────
+
+def main(argv=None) -> int:
+    """
+    Reproduce the shipped NN-1 checkpoint and its numbers:
+
+      python -m joint_vol_calibration.models.nn_pricer train [--jobs 4] [--epochs N] [--patience P] [--vix]
+      python -m joint_vol_calibration.models.nn_pricer benchmark [--sets 20]
+
+    `train` generates (or reuses the cached) exact training data and writes
+    data_store/nn_spx_model.pt; the command line is recorded in the
+    checkpoint (training.command), so `train` with the recorded options
+    rebuilds it. `benchmark` prints the benchmark dict as JSON. Training is
+    pinned to one torch thread so runs are reproducible and do not
+    oversubscribe a shared machine.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(description=main.__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    tr = sub.add_parser("train")
+    tr.add_argument("--jobs", type=int, default=1, help="processes for label generation")
+    tr.add_argument("--epochs", type=int, default=NN_MAX_EPOCHS)
+    tr.add_argument("--patience", type=int, default=15, help="early-stopping patience (epochs)")
+    tr.add_argument("--vix", action="store_true", help="also train the deprecated NN-2")
+    bm = sub.add_parser("benchmark")
+    bm.add_argument("--sets", type=int, default=20)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    torch.set_num_threads(1)
+    if args.cmd == "train":
+        command = (f"python -m joint_vol_calibration.models.nn_pricer train --epochs {args.epochs} "
+                   f"--patience {args.patience}")
+        generate_spx_training_data(n_jobs=args.jobs)
+        print(json.dumps(train_spx(max_epochs=args.epochs, patience=args.patience,
+                                   command=command), default=str, indent=1))
+        if args.vix:
+            print(json.dumps(train_vix(), default=str, indent=1))
+    else:
+        print(json.dumps(NNPricer.load().benchmark(n_param_sets=args.sets), default=str, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

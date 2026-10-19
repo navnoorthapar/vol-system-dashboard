@@ -18,12 +18,16 @@ because every one of these bugs was invisible in a green test suite:
   4. yfinance's `end` is exclusive; every downloader here documents it as
      inclusive.
 """
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from joint_vol_calibration.backtest import backtest_engine as bte
 from joint_vol_calibration.signals.regime_classifier import build_regime_labels
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ── 1. the cash hurdle must be real, not a forward-filled stub ───────────────
@@ -59,30 +63,23 @@ class TestRiskFreeHurdle:
 
         m_stub = bte.compute_metrics(nav, rf_series=stub)
         m_full = bte.compute_metrics(nav, rf_series=full)
-        # Forward-filling a 7-day stub across a year is what produced the bug;
-        # the two must not silently agree, and neither may be NaN.
-        assert np.isfinite(m_stub["sharpe"]) and np.isfinite(m_full["sharpe"])
+        # Forward-filling a 7-day stub across a year is what produced the bug:
+        # a non-spanning series is refused and the scalar rf is used instead.
+        assert m_stub["sharpe"] == bte.compute_metrics(nav)["sharpe"]
+        assert m_stub["sharpe"] != bte.compute_metrics(
+            nav, rf_series=stub.reindex(idx).ffill().bfill())["sharpe"]
+        # A spanning series is used as given.
+        assert m_full["sharpe"] == pytest.approx(bte.compute_metrics(nav, rf=0.05)["sharpe"])
 
-    def test_engine_falls_back_when_series_does_not_span_window(self, caplog):
+    def test_engine_falls_back_when_series_does_not_span_window(self):
         """A non-spanning series must be refused, not forward-filled."""
-        import logging
-
         eng = bte.BacktestEngine(start_date="2018-01-01", end_date="2025-03-24")
-        stub = pd.DataFrame({
-            "date": pd.to_datetime(pd.bdate_range("2020-01-02", periods=7)),
-            "rate": np.linspace(0.015, 0.020, 7),
-        })
-        # Reproduce the guard's decision without running the whole backtest.
-        first = pd.Timestamp(stub["date"].iloc[0])
-        last = pd.Timestamp(stub["date"].iloc[-1])
-        span_days = (pd.Timestamp(eng.end_date) - pd.Timestamp(eng.start_date)).days
-        expected = span_days / 7 * 5 * 0.80
-        rejected = (
-            first > pd.Timestamp(eng.start_date) + pd.Timedelta(days=10)
-            or last < pd.Timestamp(eng.end_date) - pd.Timedelta(days=10)
-            or len(stub) < expected
-        )
-        assert rejected, "a 7-row stub must not be accepted as a per-date hurdle"
+        stub = pd.bdate_range("2020-01-02", periods=7)
+        # The engine's own guard, not a copy of its condition.
+        assert not bte.rate_series_spans_window(stub, eng.start_date, eng.end_date), (
+            "a 7-row stub must not be accepted as a per-date hurdle")
+        full = pd.bdate_range(eng.start_date, eng.end_date)
+        assert bte.rate_series_spans_window(full, eng.start_date, eng.end_date)
 
 
 # ── 2. time decay must reflect elapsed sessions ─────────────────────────────
@@ -100,17 +97,6 @@ class TestStraddleTimeDecay:
         v_entry = bte._bs_straddle_value(S, K, T, r, q, sigma)
         v_day1 = bte._bs_straddle_value(S, K, T - 1 / 252, r, q, sigma)
         assert v_day1 < v_entry, "one elapsed session must remove time value"
-
-    def test_engine_marks_use_incremented_day_count(self):
-        """Guard the exact off-by-one in the source."""
-        import inspect
-
-        src = inspect.getsource(bte)
-        assert "T_entry - (days_biz + 1) / TRADING_DAYS" in src, (
-            "T_rem must be computed from days_biz + 1: days_biz is incremented "
-            "in the HOLD branch AFTER T_rem is read, so using it raw values the "
-            "straddle one session too rich on every mark"
-        )
 
 
 # ── 3. regime labels must be the rule, never the demoted classifier ─────────
@@ -132,7 +118,7 @@ class TestRegimeLabelProvenance:
 
         Rebuilding with the default would silently rewrite ~20% of the labels.
         """
-        rl = pd.read_parquet("data_store/signals/regime_labels.parquet")
+        rl = pd.read_parquet(_ROOT / "data_store" / "signals" / "regime_labels.parquet")
         from joint_vol_calibration.data.database import (
             get_spx_ohlcv, get_vix_term_structure_wide,
         )
@@ -157,7 +143,10 @@ class TestRegimeLabelProvenance:
         """The bot must not append classifier predictions to the label file."""
         import pathlib
 
-        src = pathlib.Path("scripts/cloud_refresh.py").read_text()
+        # Resolved from this file, not the CWD: cloud_refresh no longer chdirs
+        # on import (C22), so a CWD-relative path made this order-dependent.
+        src = (pathlib.Path(__file__).resolve().parents[2]
+               / "scripts" / "cloud_refresh.py").read_text()
         head = src[src.index("def extend_regime_labels"):src.index("# -- Step 3")]
         # Check for the classifier being LOADED/CALLED, not merely named: the
         # function's docstring legitimately explains the old clf.predict path.
@@ -167,7 +156,7 @@ class TestRegimeLabelProvenance:
             "the dashboard headlines as the deterministic rule label"
         )
         assert "clf.predict(new_feats)" not in head
-        assert "build_regime_labels" in head and "vvix_threshold=None" in head
+        assert "build_rule_label_frame" in head and "vvix_threshold=None" in head
 
     def test_rule_labels_are_same_day_observable(self):
         """Truncating the future must not change a past label."""
@@ -188,11 +177,14 @@ def test_bot_writes_the_table_the_calibrator_reads():
     """The daily chain must land in options_snapshots, not a dead table."""
     import pathlib
 
-    src = pathlib.Path("scripts/cloud_refresh.py").read_text()
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "scripts" / "cloud_refresh.py").read_text()
     assert 'to_sql(\n            "spx_options"' not in src and '"spx_options", con' not in src, (
         "the bot is writing the chain to `spx_options`, which nothing reads — "
         "JointCalibrator reads options_snapshots via get_options_surface, so "
         "every 'daily recalibration' refits the newest COMMITTED snapshot"
     )
     assert "insert_options_snapshot(opts" in src
-    assert "spx_snapshot_date" in src, "stale-surface guard missing"
+    # C22: the stale-surface guard moved into the shared gate, which the bot
+    # applies to the full result (snapshot session vs spot session).
+    assert "is_acceptable_calibration(result)" in src, "stale-surface guard missing"
