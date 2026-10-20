@@ -1347,12 +1347,18 @@ def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
         beta = pickle.load(f)["atm_to_vix_ratio"]
     assert round(float(np.mean(est)), 2) == beta
     first = oos.iloc[0]
-    want = (f"β = {beta:.2f} = mean of {len(inc)} DB chains and 1 live capture "
+    # The estimation set and the first later chain are frozen (BETA_ESTIMATION_SESSIONS), so
+    # their wording is pinned. The all-chain mean grows with every chain the daily bot stores,
+    # so it is derived, and the page must only call it a grid row when it really is one.
+    stem = (f"β = {beta:.2f} = mean of {len(inc)} DB chains and 1 live capture "
             f"({min(est):.2f}–{max(est):.2f}); the first later chain, {first['session']}, gives "
-            f"{first['ratio']:.2f} — the mean over all {len(every)} chains, {np.mean(every):.2f}, "
-            f"is a row of the β grid")
-    assert want == ("β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later "
-                    "chain, 2026-10-16, gives 0.70 — the mean over all 6 chains, 0.80, is a row of the β grid")
+            f"{first['ratio']:.2f}")
+    assert stem == ("β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later "
+                    "chain, 2026-10-16, gives 0.70")
+    grid_betas = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")["beta"]
+    in_grid = any(abs(g - round(float(np.mean(every)), 2)) < 1e-9 for g in grid_betas)
+    want = (f"{stem} — the mean over all {len(every)} chains, {np.mean(every):.2f}, "
+            + ("is a row of the β grid" if in_grid else "is not in the β grid"))
     text = _visible_text(pages["/backtest"])
     assert want in text
     assert "five real 2026 SPX chains" not in text
@@ -1422,7 +1428,16 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     cal_html = pages["/calibration"]
     s365 = smile[365]
     assert f"{s365['lm'][-1]:+.3f}: {s365['iv'][-1] * 100:.2f}" in cal_html
-    assert "+0.250: 12.42" in cal_html and "+0.250: 12.43" not in cal_html
+    # Rounded once: the loader hands the template the unrounded model smile for every
+    # maturity, so each printed cell is a single rounding of the model value. (Checked on
+    # the live headline fit rather than one day's number: the bot replaces that fit.)
+    d2 = dash.load_page2()
+    for row in d2["mat_smiles"]:
+        model = smile[row["T"]]
+        assert list(row["lm"]) == list(model["lm"])
+        assert [x / 100.0 for x in row["iv"]] == pytest.approx(list(model["iv"]), rel=0, abs=1e-15)
+        for i in (0, -1):
+            assert f"{row['lm'][i]:+.3f}: {row['iv'][i]:.2f}".replace("-", m) in cal_html
     # Greeks heatmap: every cell's vomma and flag metric from the stored surface
     gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
     gdf = gdf.assign(lm_key=gdf["log_moneyness"].round(4)).sort_values(["T_days", "lm_key"])
