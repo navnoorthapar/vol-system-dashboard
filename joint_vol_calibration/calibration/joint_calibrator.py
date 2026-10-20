@@ -83,6 +83,7 @@ Usage
 import functools
 import logging
 import math
+import os
 import pickle
 import time
 import warnings
@@ -1660,7 +1661,7 @@ class JointCalibrator:
         warm_start="auto",
         jacobian: str = "analytic",
         de_check: bool = False,
-        de_workers: int = 1,
+        de_workers: Optional[int] = None,
     ) -> dict:
         """
         Calibrate Heston by minimising joint_loss.
@@ -1677,10 +1678,15 @@ class JointCalibrator:
           correlations, parameters on bounds).
         optimizer="de": the pre-C23 method, differential evolution (Latin
           hypercube, seed 42, scipy polish off) then one L-BFGS-B polish;
-          de_workers=1 reproduces the committed fits exactly.
-        de_check=True (with "trf"): also run that DE (de_workers processes)
-          as a global check, polish its optimum with TRF, keep whichever loss
-          is lower and record both.
+          serial by default (de_workers=None -> 1), which reproduces the
+          committed fits exactly.
+        de_check=True (with "trf"): also run that DE as a global check,
+          polish its optimum with TRF, keep whichever loss is lower and
+          record both. It runs in de_workers PROCESSES (default None -> all
+          CPUs; scipy's integer workers is a multiprocessing pool, with
+          updating="deferred"): measured 1.8-2.9x faster than serial on 4
+          idle CPUs (data_store/calibrations/diagnostics), slower when the
+          machine is already loaded.
 
         warm_start: "auto", None/False (none), or a params dict / 5-vector.
 
@@ -1695,6 +1701,8 @@ class JointCalibrator:
             raise ValueError(f"optimizer must be 'trf' or 'de', got {optimizer!r}")
         if jacobian not in ("analytic", "2-point"):
             raise ValueError(f"jacobian must be 'analytic' or '2-point', got {jacobian!r}")
+        if de_workers is None:
+            de_workers = 1 if optimizer == "de" else (os.cpu_count() or 1)
         lvl = logging.INFO if verbose else logging.DEBUG
         logger.log(lvl, "[C4] Joint calibration: as of %s (session %s) | S=%.0f | "
                    "%d SPX anchors / %d expiries | %d VIX indices | feller=%s | %s",

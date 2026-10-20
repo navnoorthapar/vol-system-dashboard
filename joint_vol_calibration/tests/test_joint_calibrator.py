@@ -898,11 +898,18 @@ class TestMultiStartTRF:
         assert chk["de_polished_loss"] >= res["loss"] * (1 - 1e-6)
         assert chk["trf_loss"] == res["loss"]
         assert res["methods"]["optimizer"]["de"]["maxiter"] == 6
+        # the global check runs in processes by default (deferred updating)
+        import os
+        assert chk["workers"] == (os.cpu_count() or 1)
+        if chk["workers"] > 1:
+            assert res["methods"]["optimizer"]["de"]["updating"] == "deferred"
 
     def test_legacy_de_path_still_available(self, synth):
         res = synth.calibrate(de_maxiter=3, de_popsize=5, optimizer="de", verbose=False)
         assert res["optimizer"] == "de"
         assert res["methods"]["optimizer"]["scipy_polish"] is False
+        # serial 'immediate' by default: the committed fits' exact trajectory
+        assert res["methods"]["optimizer"]["workers"] == 1
         assert res["methods"]["optimizer"]["updating"] == "immediate"
         assert "multistart" not in res and "identifiability" in res
 
