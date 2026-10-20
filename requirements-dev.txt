@@ -3,3 +3,6 @@
 pytest>=9,<10
 pytest-cov>=7,<8
 ruff>=0.6
+# Test oracle only: test_stats_forecast.py checks the Diebold-Mariano test against
+# statsmodels' implementation (BSD-3; installed with arch, pinned here for the tests).
+statsmodels>=0.14

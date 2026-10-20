@@ -28,3 +28,9 @@ yfinance>=0.2.54,<2
 # On Linux without a GPU install the CPU wheel:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch>=2.4,<3
+# stats/ (C23 inference layer): Politis-White block length, Hansen SPA, Romano-Wolf
+# StepM, the Model Confidence Set and the GARCH/GJR forecast baselines (NCSA licence;
+# pulls in statsmodels, BSD-3).
+arch>=7.0,<9
+# stats/trials.py reads the committed trials ledger docs/trials_ledger.yaml (MIT licence).
+PyYAML>=6.0,<7

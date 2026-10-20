@@ -12,11 +12,15 @@ authors = [{ name = "Navnoor Bawa" }]
 requires-python = ">=3.11"
 # Ranges live in requirements.txt (one list for pip and for this file); the
 # exact tested set is requirements-lock.txt.
+# C23 added (via requirements.txt):
+#   arch    stats/: block length, SPA, StepM, MCS, GARCH/GJR baselines (NCSA licence)
+#   PyYAML  stats/trials.py reads docs/trials_ledger.yaml (MIT licence)
 dynamic = ["dependencies"]
 
 [project.optional-dependencies]
 # Mirrors requirements-dev.txt.
-dev = ["pytest>=9,<10", "pytest-cov>=7,<8", "ruff>=0.6"]
+# statsmodels: Diebold-Mariano test oracle for test_stats_forecast.py (BSD-3).
+dev = ["pytest>=9,<10", "pytest-cov>=7,<8", "ruff>=0.6", "statsmodels>=0.14"]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
