@@ -22,7 +22,8 @@ make install-any        # pip install -r requirements-dev.txt (runtime ranges + 
 make test-fast
 ```
 
-`requirements.txt` holds compatible ranges and `requirements-dev.txt` adds the test, lint and benchmark tools. On
+`requirements.txt` holds compatible ranges and `requirements-dev.txt` adds the test, lint and benchmark tools
+(`pip install -r requirements.txt` alone is enough for `make demo` and the pipeline, not for the suite). On
 2026-10-20 the ranges were resolved for each platform with `uv pip compile requirements-dev.txt --python-version 3.11
 --python-platform <platform>` (uv 0.8.17; `MACOSX_DEPLOYMENT_TARGET` set where shown):
 
