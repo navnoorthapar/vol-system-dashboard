@@ -425,6 +425,9 @@ results), so the dashboard runs with no network access and no recalibration. Ren
 | `data_store/backtest/full_results.{pkl,parquet}` + HTML report | `python -m joint_vol_calibration.backtest.run_backtest` |
 | `data_store/backtest/beta_sensitivity.csv` | `python -m joint_vol_calibration.backtest.run_backtest --beta-sensitivity --csv data_store/backtest/beta_sensitivity.csv` |
 | `data_store/backtest/c22_bridge.csv` | `python -m joint_vol_calibration.backtest.c22_bridge --csv data_store/backtest/c22_bridge.csv` |
+| `data_store/backtest/c23_bridge.csv` (C23 data-correction waterfall) | `python -m joint_vol_calibration.backtest.c23_bridge --csv data_store/backtest/c23_bridge.csv` |
+| `data_store/signals/regime_labels.parquet`, every row (after a restatement of the record) | `python scripts/cloud_refresh.py --steps labels --rebuild-labels --no-persist` |
+| `data_store/vol_system.db` (the cache, from the committed record) | `python -m joint_vol_calibration.data.pipeline resync-db` |
 | `data_store/backtest/delta_hedge_2020.parquet` (C7) | `python -m joint_vol_calibration.backtest.run_backtest --c7` |
 | β estimate from the frozen chain set, plus later chains as out-of-sample checks (add `--live` for a Yahoo chain) | `python -m joint_vol_calibration.backtest.run_backtest --estimate-beta` |
 | S1C pseudo-OOS 2013–2017 | `python -m joint_vol_calibration.backtest.run_backtest --pseudo-oos` |

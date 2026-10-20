@@ -145,7 +145,7 @@
     "open": 27.54,
     "source": "cboe",
     "table": "vix_daily",
-    "term_structure_close": 31.04999924
+    "term_structure_close": 31.05
    },
    "official_inside_day_range": true,
    "parity_forward": {
@@ -283,7 +283,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": 0.09870824289,
+    "gap_pts": 0.09870870065,
     "levels": {
      "L0_replicated": 29.3687087,
      "L1_model_outside_fit_range": 27.67684511,
@@ -291,16 +291,16 @@
      "L2c_model_continuous_on_strip": 27.5598639,
      "L3_model_continuous_k_-3_to_2": 27.64205938
     },
-    "official": 29.27000046,
-    "residual_pts": -0.1809037293,
+    "official": 29.27,
+    "residual_pts": -0.1809041871,
     "surface": "svi_cal",
     "truncation_pts": 0.08219548645
    },
-   "gap_vs_official": 0.09870824289,
+   "gap_vs_official": 0.09870870065,
    "headline_method": "cboe_rules",
    "official": {
-    "close": 29.27000046,
-    "source": "yfinance",
+    "close": 29.27,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {
@@ -438,7 +438,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": -1.218829084,
+    "gap_pts": -1.218828397,
     "levels": {
      "L0_replicated": 28.5611716,
      "L1_model_outside_fit_range": 26.5535825,
@@ -446,16 +446,16 @@
      "L2c_model_continuous_on_strip": 26.58216428,
      "L3_model_continuous_k_-3_to_2": 26.67991009
     },
-    "official": 29.78000069,
-    "residual_pts": 1.121083278,
+    "official": 29.78,
+    "residual_pts": 1.121082591,
     "surface": "svi_cal",
     "truncation_pts": 0.09774580583
    },
-   "gap_vs_official": -1.218829084,
+   "gap_vs_official": -1.218828397,
    "headline_method": "cboe_rules",
    "official": {
-    "close": 29.78000069,
-    "source": "yfinance",
+    "close": 29.78,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {
@@ -588,11 +588,11 @@
     "available": false,
     "reason": "term(s) 2026-04-02 not fitted by the surface (outside the scoring universe)"
    },
-   "gap_vs_official": -0.3728591132,
+   "gap_vs_official": -0.3728597236,
    "headline_method": "cboe_rules",
    "official": {
-    "close": 30.63999939,
-    "source": "yfinance",
+    "close": 30.64,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {

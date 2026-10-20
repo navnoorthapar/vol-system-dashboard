@@ -23,9 +23,9 @@ import pandas as pd
 import pytest
 
 from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+from joint_vol_calibration.data import cboe_downloader as cboe
 from joint_vol_calibration.data import database as dbm
 from joint_vol_calibration.data import yf_downloader as dl
-from joint_vol_calibration.data import cboe_downloader as cboe
 from joint_vol_calibration.models.heston import heston_vix_term_index
 from joint_vol_calibration.tests.test_joint_calibrator import _TRUE, _heston_chain
 
@@ -456,8 +456,7 @@ def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch
     used to apply stored the previous session's ts_slope under later dates
     when ^VIX3M was missing; the rows must carry NaN, the rule label and the
     pdv_iv_spread source tag."""
-    from joint_vol_calibration.signals.regime_classifier import (
-        FEATURE_COLS, build_rule_label_frame)
+    from joint_vol_calibration.signals.regime_classifier import FEATURE_COLS, build_rule_label_frame
     idx = pd.bdate_range("2024-01-01", periods=420)
     rng = np.random.default_rng(7)
     ret = rng.normal(0, 0.01, len(idx))
@@ -484,6 +483,57 @@ def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch
     assert tail["ts_slope"].iloc[-2:].isna().all()               # not the 3rd-last value
     assert (tail["regime"] == frame["regime"].iloc[-5:]).all()
     assert tail["pdv_iv_spread_source"].notna().all()
+
+
+def test_rebuild_labels_restates_history_extend_cannot_reach(env, monkeypatch):
+    """After a restatement of the record far back (C23: Cboe's VIX family
+    replaced Yahoo's to 2010), every stored label row is rebuilt from the
+    database. extend_regime_labels only heals the trailing window a 900-day
+    fetch can label with a full 252-day gate, so an old wrong label survives
+    it; rebuild_regime_labels repairs it and the features, and refuses (writing
+    nothing) when the database cannot rebuild a stored date."""
+    from joint_vol_calibration.signals.regime_classifier import FEATURE_COLS, build_rule_label_frame
+    idx = pd.bdate_range("2023-01-02", periods=700)
+    rng = np.random.default_rng(11)
+    ret = rng.normal(0, 0.01, len(idx))
+    spx = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "log_return": ret,
+                        "close": 4000 * np.exp(np.cumsum(ret))})
+    vix = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"),
+                        "^VIX": 16 + rng.normal(0, 1.5, len(idx)).cumsum() * 0.05,
+                        "^VIX9D": 15.0, "^VIX3M": 18.0, "^VIX6M": 19.0,
+                        "^VVIX": 95 + rng.normal(0, 4, len(idx))})
+    served = {"vix": vix}
+    monkeypatch.setattr(dbm, "get_spx_ohlcv", lambda as_of_date, start_date=None:
+                        spx[spx["date"] <= as_of_date].reset_index(drop=True))
+    monkeypatch.setattr(dbm, "get_vix_term_structure_wide", lambda as_of_date, start_date=None:
+                        served["vix"][served["vix"]["date"] <= as_of_date].reset_index(drop=True))
+    truth = build_rule_label_frame(spx, vix, vvix_threshold=None)
+    stored = truth[[*FEATURE_COLS, "regime", "pdv_iv_spread_source"]].copy()
+    old = stored.index[40]                                   # long before any heal window
+    stored.loc[old, "regime"] = (int(stored.loc[old, "regime"]) + 1) % 3
+    stored.loc[stored.index[41], "vvix"] += 0.5
+    (env.DATA / "signals").mkdir()
+    path = env.DATA / "signals" / "regime_labels.parquet"
+    stored.to_parquet(path)
+    as_of = date.fromisoformat(spx["date"].iloc[-1])
+
+    assert env.extend_regime_labels(as_of) == 0
+    assert int(pd.read_parquet(path).loc[old, "regime"]) != int(truth.loc[old, "regime"])
+
+    out = env.rebuild_regime_labels(as_of)
+    rl = pd.read_parquet(path)
+    assert out["labels_changed"] == 1
+    assert out["changed"][0][0] == str(old.date())
+    assert out["features_changed"] >= 1
+    assert out["rows_added"] == 0
+    assert (rl["regime"] == truth["regime"]).all()
+    np.testing.assert_allclose(rl["vvix"].to_numpy(float), truth["vvix"].to_numpy(float))
+
+    served["vix"] = vix.iloc[300:]                           # a store that lost its history
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="cannot rebuild"):
+        env.rebuild_regime_labels(as_of)
+    assert path.read_bytes() == before
 
 
 # ── Publishable vs exit status (the workflow deploys on publishable) ──────────

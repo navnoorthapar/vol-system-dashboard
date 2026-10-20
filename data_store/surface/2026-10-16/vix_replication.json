@@ -146,7 +146,7 @@
     "open": 16.02,
     "source": "cboe",
     "table": "vix_daily",
-    "term_structure_close": 19.98999977
+    "term_structure_close": 19.99
    },
    "official_inside_day_range": true,
    "parity_forward": {
@@ -301,7 +301,7 @@
    "headline_method": "cboe_rules",
    "official": {
     "close": 20.5,
-    "source": "yfinance",
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {
@@ -439,7 +439,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": -0.1044964806,
+    "gap_pts": -0.1044964043,
     "levels": {
      "L0_replicated": 21.5655036,
      "L1_model_outside_fit_range": 20.07285339,
@@ -447,16 +447,16 @@
      "L2c_model_continuous_on_strip": 20.10093287,
      "L3_model_continuous_k_-3_to_2": 20.10903277
     },
-    "official": 21.67000008,
-    "residual_pts": 0.09639657307,
+    "official": 21.67,
+    "residual_pts": 0.09639649677,
     "surface": "svi_cal",
     "truncation_pts": 0.008099907557
    },
-   "gap_vs_official": -0.1044964806,
+   "gap_vs_official": -0.1044964043,
    "headline_method": "cboe_rules",
    "official": {
-    "close": 21.67000008,
-    "source": "yfinance",
+    "close": 21.67,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {
@@ -594,7 +594,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": -0.2470657163,
+    "gap_pts": -0.2470648771,
     "levels": {
      "L0_replicated": 19.87293512,
      "L1_model_outside_fit_range": 20.12576363,
@@ -602,16 +602,16 @@
      "L2c_model_continuous_on_strip": 20.17612777,
      "L3_model_continuous_k_-3_to_2": 20.43784196
     },
-    "official": 20.12000084,
-    "residual_pts": -0.01464847181,
+    "official": 20.12,
+    "residual_pts": -0.01464931104,
     "surface": "svi_cal",
     "truncation_pts": 0.2617141881
    },
-   "gap_vs_official": -0.2470657163,
+   "gap_vs_official": -0.2470648771,
    "headline_method": "cboe_rules",
    "official": {
-    "close": 20.12000084,
-    "source": "yfinance",
+    "close": 20.12,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {

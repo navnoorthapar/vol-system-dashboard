@@ -86,8 +86,15 @@ _BACKTEST = ("from joint_vol_calibration.backtest.run_backtest import _load_data
              "eng.run(spx, vix)\n"
              "eng.compute_metrics()\n"
              "eng.save()\n")
-_REFIT = ("from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator\n"
-          "c = JointCalibrator(as_of_date={session!r})\n"
+# A committed fit is refitted on the VIX targets it recorded (C23 restated the
+# database's VIX family as Cboe's closes; joint_calibrator.recorded_vix_targets).
+_REFIT = ("import pickle\n"
+          "from joint_vol_calibration.calibration.joint_calibrator import (\n"
+          "    JointCalibrator, recorded_vix_targets)\n"
+          "from joint_vol_calibration.config import DATA_DIR\n"
+          "with open(DATA_DIR / 'calibrations' / 'joint_cal_{session}.pkl', 'rb') as f:\n"
+          "    ref = pickle.load(f)\n"
+          "c = JointCalibrator(as_of_date={session!r}, vix_targets=recorded_vix_targets(ref))\n"
           "c.calibrate(verbose=False)\n"
           "c.save()\n")
 
@@ -328,6 +335,10 @@ def build_steps(root: Path) -> list[Step]:
         Step("bridge", [py, "-m", "joint_vol_calibration.backtest.c22_bridge",
                         "--csv", f"{bt}/c22_bridge.csv"],
              [(f"{bt}/c22_bridge.csv", "bridge", {})], full_only=True),
+        # C23 data-correction waterfall: 4 backtests, about 20 s
+        Step("c23_bridge", [py, "-m", "joint_vol_calibration.backtest.c23_bridge",
+                            "--csv", f"{bt}/c23_bridge.csv"],
+             [(f"{bt}/c23_bridge.csv", "bridge", {})]),
         Step("s3_null", [py, "-m", "joint_vol_calibration.backtest.run_backtest", "--no-wf"],
              [(f"{bt}/full_results.pkl", "s3_null", {"only": ["metrics.s3_null_p_value"]})],
              full_only=True),

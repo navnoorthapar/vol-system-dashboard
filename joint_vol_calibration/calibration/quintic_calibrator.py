@@ -293,6 +293,17 @@ def _git_revision() -> dict:
     return out
 
 
+def recorded_vix_index_levels(result: dict) -> dict:
+    """{ticker: level} of the spot VIX indices a stored Quintic fit recorded
+    (result["provenance"]["vix_index_levels"]), for
+    QuinticCalibrator(..., vix_index_levels=...)."""
+    rows = (result.get("provenance") or {}).get("vix_index_levels") or []
+    out = {str(r["ticker"]): float(r["vix_level"]) for r in rows}
+    if not out:
+        raise QuinticDataError("the result records no VIX index levels")
+    return out
+
+
 class QuinticCalibrator:
     """
     Joint SPX/VIX calibrator for the two-factor Quintic OU model.
@@ -315,6 +326,7 @@ class QuinticCalibrator:
         n_paths:     int = _MC_PATHS_CAL,
         seed:        int = RANDOM_SEED,
         allow_stale: bool = False,
+        vix_index_levels: dict | None = None,
     ):
         """
         Parameters
@@ -327,6 +339,12 @@ class QuinticCalibrator:
         n_paths    : SPX Monte Carlo paths per evaluation (antithetic pairs × 2)
         seed       : common-random-numbers seed used in every evaluation
         allow_stale: skip the same-session checks (research use only; recorded)
+        vix_index_levels: {ticker: level} replacing the database's spot VIX
+                     indices (the same tickers, else QuinticDataError), e.g.
+                     recorded_vix_index_levels(result) to rebuild a committed
+                     fit's xi0 from the levels it recorded: C23 restated the
+                     database's Yahoo float32 prints as Cboe's closes
+                     (<= 1e-5 pts apart). None (default): the database
         """
         self.as_of_date = as_of_date
         self.r_override = r
@@ -337,6 +355,8 @@ class QuinticCalibrator:
         self.n_paths = int(n_paths)
         self.seed = int(seed)
         self.allow_stale = bool(allow_stale)
+        self._vix_index_levels = (None if vix_index_levels is None
+                                  else {str(k): float(v) for k, v in vix_index_levels.items()})
         self.steps_per_year = MC_STEPS_PER_YEAR
         self.min_steps = MC_MIN_STEPS
         self.n_outer = _VIX_QUAD_OUTER
@@ -501,6 +521,15 @@ class QuinticCalibrator:
             if not row.empty and pd.notna(row.iloc[-1]["close"]) and row.iloc[-1]["close"] > 0:
                 rows.append({"ticker": ticker, "tenor": days / 365.0,
                              "vix_level": float(row.iloc[-1]["close"])})
+        levels = getattr(self, "_vix_index_levels", None)
+        if levels is not None:
+            have = {str(r["ticker"]) for r in rows}
+            if have != set(levels):
+                raise QuinticDataError(f"vix_index_levels {sorted(levels)} do not "
+                                       f"match the database's VIX indices on {self.spot_date}: "
+                                       f"{sorted(have)}")
+            for r in rows:
+                r["vix_level"] = levels[str(r["ticker"])]
         return pd.DataFrame(rows, columns=["ticker", "tenor", "vix_level"])
 
     def _prepare_vix_options(self) -> pd.DataFrame:

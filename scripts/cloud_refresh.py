@@ -163,8 +163,11 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
     """
     from joint_vol_calibration.data import yf_downloader as dl
     from joint_vol_calibration.data.database import (
-        get_latest_date, insert_spx_ohlcv, insert_vix_daily,
-        insert_vix_term_structure, insert_tbill_rates,
+        get_latest_date,
+        insert_spx_ohlcv,
+        insert_tbill_rates,
+        insert_vix_daily,
+        insert_vix_term_structure,
     )
 
     today = today or date.today()
@@ -248,7 +251,7 @@ def extend_regime_labels(today: "date | None" = None) -> int:
 
     This used to append ``clf.predict(...)`` — the XGBoost classifier's output.
     That is the model C16/C17 demoted: it loses to the "predict-yesterday"
-    baseline (C22, adaptive labels: 75.0% vs 86.7% out of sample), so it is research-only and is not
+    baseline (adaptive labels, C23 record: 74.9% vs 87.0% out of sample), so it is research-only and is not
     supposed to drive anything. But dashboard/app.py headlines the LAST ROW of
     this parquet as "the deterministic rule label, the label the backtest
     trades on", so every day the bot appended a prediction, the front page
@@ -264,9 +267,11 @@ def extend_regime_labels(today: "date | None" = None) -> int:
         rather than the 60 days the feature builder alone would need.
     """
     import pandas as pd
+
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
     from joint_vol_calibration.signals.regime_classifier import (
-        build_rule_label_frame, FEATURE_COLS,
+        FEATURE_COLS,
+        build_rule_label_frame,
     )
 
     today_s = (today or date.today()).isoformat()
@@ -326,6 +331,57 @@ def extend_regime_labels(today: "date | None" = None) -> int:
     rl.to_parquet(rl_path)
     log.info("  Added %d new rows -> regime_labels now at %s", n, rl.index.max().date())
     return n
+
+
+def rebuild_regime_labels(today: date) -> dict:
+    """Recompute EVERY stored rule label and its features from the database.
+
+    extend_regime_labels only appends and heals the trailing window its
+    900-day fetch can label with a full adaptive gate. After the record
+    itself is restated further back (C23: Cboe's official VIX family in place
+    of Yahoo's copies, back to 2010) every row must be rebuilt from the
+    restated data with the same rule (build_rule_label_frame, adaptive gate).
+    The rebuilt frame must cover every stored date (nothing is dropped);
+    rows after the last stored date are appended as extend would. Returns
+    {"rows", "labels_changed", "changed": [(date, old, new)], "features_changed"}.
+    """
+    import pandas as pd
+
+    from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+    from joint_vol_calibration.signals.regime_classifier import (
+        FEATURE_COLS,
+        build_rule_label_frame,
+    )
+
+    today_s = today.isoformat()
+    rl_path = DATA / "signals" / "regime_labels.parquet"
+    rl = pd.read_parquet(rl_path)
+    spx = get_spx_ohlcv(as_of_date=today_s, start_date="2009-01-01")
+    vix = get_vix_term_structure_wide(as_of_date=today_s, start_date="2009-01-01")
+    frame = build_rule_label_frame(spx, vix, vvix_threshold=None)
+    missing = rl.index.difference(frame.index)
+    if len(missing):
+        raise ValueError(f"the database cannot rebuild {len(missing)} stored label date(s) "
+                         f"({missing[0].date()} ... {missing[-1].date()}); nothing written")
+    cols = [*FEATURE_COLS, "regime", "pdv_iv_spread_source"]
+    new = frame.loc[frame.index >= rl.index.min(), cols].copy()
+    new["regime"] = new["regime"].astype(int)
+    common = rl.index
+    old_lab = rl["regime"].astype(int)
+    new_lab = new.loc[common, "regime"]
+    differ = old_lab != new_lab
+    feats = new.loc[common, list(FEATURE_COLS)].astype(float)
+    olds = rl[list(FEATURE_COLS)].astype(float)
+    fchg = int((((feats - olds).abs() > 1e-12) | (feats.isna() ^ olds.isna())).any(axis=1).sum())
+    new.attrs = dict(rl.attrs) | dict(frame.attrs)
+    new.to_parquet(rl_path)
+    out = {"rows": len(new), "labels_changed": int(differ.sum()),
+           "changed": [(str(d.date()), int(old_lab[d]), int(new_lab[d])) for d in common[differ]],
+           "features_changed": fchg, "rows_added": int((new.index > rl.index.max()).sum())}
+    log.info("[labels] Rebuilt %d rows from the database: %d label(s) changed %s, features "
+             "changed on %d row(s), %d row(s) added", out["rows"], out["labels_changed"],
+             out["changed"], fchg, out["rows_added"])
+    return out
 
 
 # -- Step 3: Heston recalibration ----------------------------------------------
@@ -420,8 +476,10 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     is "skipped" before anything is downloaded.
     """
     import pandas as pd
+
     from joint_vol_calibration.calibration.joint_calibrator import (
-        JointCalibrator, is_acceptable_calibration,
+        JointCalibrator,
+        is_acceptable_calibration,
     )
     from joint_vol_calibration.data import option_chain as oc
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate, utc_iso
@@ -717,6 +775,9 @@ def _parse_args(argv):
                     help="do not restore/export the committed parquet captures")
     ap.add_argument("--now", default=None,
                     help="override the clock (ISO UTC, e.g. 2026-10-17T01:30:00Z)")
+    ap.add_argument("--rebuild-labels", action="store_true",
+                    help="labels step: rebuild every stored rule label from the database "
+                         "(after a restatement of the record) instead of extending")
     args = ap.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     bad = [s for s in steps if s not in ALL_STEPS]
@@ -804,7 +865,11 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
         with _Group("regime labels"):
             if market_ok:
                 try:
-                    status["labels_added"] = extend_regime_labels(closed)
+                    if args.rebuild_labels:
+                        status["labels_rebuilt"] = rebuild_regime_labels(closed)
+                        status["labels_added"] = status["labels_rebuilt"]["rows_added"]
+                    else:
+                        status["labels_added"] = extend_regime_labels(closed)
                 except Exception as e:
                     hard_fail = True
                     msg = f"labels step failed: {e}"

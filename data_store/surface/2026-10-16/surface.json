@@ -1012,11 +1012,11 @@
  "inputs": {
   "chain": "data_store/options/spx_2026-10-16.parquet",
   "chain_rows": 6191,
-  "chain_sha256": "7b06c7a52e66d56d5f2aa60034015351bfe35526996ec2b849ef27cb25465e7a",
+  "chain_sha256": "4917eefa6a24bbb9cb144a147b9507f5e606b05f5e289a3556c4c49c269229ff",
   "quote_time": null,
   "r_ref_cc": 0.04147901649,
   "r_ref_source": "^IRX 13-week bill (tbill_rates, cc)",
-  "source": "yahoo",
+  "source": "yfinance",
   "spot": 7659.439941,
   "t_origin": "2026-10-16T16:00:00-04:00",
   "t_origin_basis": "session close 16:00 ET"
@@ -2235,7 +2235,7 @@
   "n_expiries": 17,
   "n_universe": 2913,
   "quote_time": null,
-  "source": "yahoo",
+  "source": "yfinance",
   "t_origin": "2026-10-16T16:00:00-04:00",
   "t_origin_basis": "session close 16:00 ET",
   "universe_filters": {

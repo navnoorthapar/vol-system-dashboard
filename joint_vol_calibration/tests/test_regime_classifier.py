@@ -548,8 +548,9 @@ class TestVersionRobustPickle:
     def test_shipped_evaluation_record_matches_the_shipped_data(self):
         """The dashboard prints metadata_["evaluation"]. It was first written on
         the pre-migration DB, whose spurious 2025-05-08 NULL log_return dropped 20
-        test rows (1,488: OOS 75.1% vs persistence 86.8%); on the shipped data the
-        same model scores 75.0% vs 86.7% on 1,508 rows."""
+        test rows (1,488: OOS 75.1% vs persistence 86.8%); on the C22 data the
+        same model scored 75.0% vs 86.7% on 1,508 rows, and on the C23 record
+        (Cboe's VIX family; 6 rule labels moved) 74.93% vs 87.00%."""
         from pathlib import Path
         from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
 

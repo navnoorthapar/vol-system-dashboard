@@ -63,7 +63,11 @@ def test_internal_consistency(summary):
         for kind in ("circular", "shuffle"):
             n = summary["nulls"]["sleeves"][s][kind]["total_pnl"]
             assert 0 < n["p_value"] <= 1
-            assert n["timing_component"] == pytest.approx(n["real"] - n["null_mean"], rel=1e-8, abs=1e-6)
+            # each stored value has 10 significant digits, so their difference
+            # is good to ~1e-9 of the operands, not of itself (portfolio, C23:
+            # $3,139 = -$222,177 - (-$225,316), 6.7e-5 off)
+            tol = 1e-9 * (abs(n["real"]) + abs(n["null_mean"])) + 1e-6
+            assert n["timing_component"] == pytest.approx(n["real"] - n["null_mean"], abs=tol)
         rng = summary["trials"]["dsr_range"][s]
         grid = summary["trials"]["dsr_sensitivity"]["values"][s]
         for v in summary["trials"]["dsr"][s].values():

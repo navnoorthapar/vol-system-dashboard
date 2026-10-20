@@ -145,7 +145,7 @@
     "open": 15.81,
     "source": "cboe",
     "table": "vix_daily",
-    "term_structure_close": 15.31999969
+    "term_structure_close": 15.32
    },
    "official_inside_day_range": false,
    "parity_forward": {
@@ -246,7 +246,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": -0.03834107647,
+    "gap_pts": -0.03834122906,
     "levels": {
      "L0_replicated": 18.62165877,
      "L1_model_outside_fit_range": 18.16249166,
@@ -254,16 +254,16 @@
      "L2c_model_continuous_on_strip": 18.15463154,
      "L3_model_continuous_k_-3_to_2": 18.22148788
     },
-    "official": 18.65999985,
-    "residual_pts": -0.02851526774,
+    "official": 18.66,
+    "residual_pts": -0.02851511515,
     "surface": "svi_cal",
     "truncation_pts": 0.0668563442
    },
-   "gap_vs_official": -0.03834107647,
+   "gap_vs_official": -0.03834122906,
    "headline_method": "parity_forward",
    "official": {
-    "close": 18.65999985,
-    "source": "yfinance",
+    "close": 18.66,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {
@@ -364,7 +364,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": -0.4624492564,
+    "gap_pts": -0.4624488749,
     "levels": {
      "L0_replicated": 21.13755113,
      "L1_model_outside_fit_range": 20.06381211,
@@ -372,16 +372,16 @@
      "L2c_model_continuous_on_strip": 20.04710566,
      "L3_model_continuous_k_-3_to_2": 20.09186083
     },
-    "official": 21.60000038,
-    "residual_pts": 0.4176940858,
+    "official": 21.6,
+    "residual_pts": 0.4176937043,
     "surface": "svi_cal",
     "truncation_pts": 0.0447551706
    },
-   "gap_vs_official": -0.4624492564,
+   "gap_vs_official": -0.4624488749,
    "headline_method": "parity_forward",
    "official": {
-    "close": 21.60000038,
-    "source": "yfinance",
+    "close": 21.6,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {
@@ -519,7 +519,7 @@
      0.7,
      1.3
     ],
-    "gap_pts": -0.2311642689,
+    "gap_pts": -0.2311641163,
     "levels": {
      "L0_replicated": 12.35883588,
      "L1_model_outside_fit_range": 12.35883588,
@@ -527,16 +527,16 @@
      "L2c_model_continuous_on_strip": 12.34351302,
      "L3_model_continuous_k_-3_to_2": 12.72081411
     },
-    "official": 12.59000015,
-    "residual_pts": -0.1461368197,
+    "official": 12.59,
+    "residual_pts": -0.1461369723,
     "surface": "svi_cal",
     "truncation_pts": 0.3773010886
    },
-   "gap_vs_official": -0.2311642689,
+   "gap_vs_official": -0.2311641163,
    "headline_method": "cboe_rules",
    "official": {
-    "close": 12.59000015,
-    "source": "yfinance",
+    "close": 12.59,
+    "source": "cboe",
     "table": "vix_term_structure"
    },
    "parity_forward": {

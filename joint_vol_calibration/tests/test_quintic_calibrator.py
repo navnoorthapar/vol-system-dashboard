@@ -384,7 +384,10 @@ _HAVE_COMMITTED = _COMMITTED.exists() and Path(DB_PATH).exists()
 def committed():
     with open(_COMMITTED, "rb") as f:
         res = pickle.load(f)
-    return res, qc.QuinticCalibrator(res["provenance"]["as_of_date"])
+    # on the VIX index levels the fit recorded: C23 restated the database's
+    # (Yahoo float32 -> Cboe's closes, <= 1e-5 pts; test_vix_levels_are_the_restated_closes)
+    return res, qc.QuinticCalibrator(res["provenance"]["as_of_date"],
+                                     vix_index_levels=qc.recorded_vix_index_levels(res))
 
 
 @pytest.mark.skipif(not _HAVE_COMMITTED, reason="committed Quintic fit or project DB not present")
@@ -407,6 +410,23 @@ class TestCommittedFit:
         assert_close_to_artifact(cal.vix_forwards["forward"].values,
                                  [r["forward_mkt"] for r in res["vix_forward_rows"]], "vix forward")
         np.testing.assert_allclose(cal.fwd_var_func.xi_nodes, prov["xi0_nodes"], rtol=1e-15)
+
+    def test_vix_levels_are_the_restated_closes(self, committed):
+        """The recorded levels and the database's restated Cboe closes are the
+        same 2-decimal prints; on the database's the xi0 nodes move by < 1e-6
+        relative, so the bit-for-bit checks here pass the recorded levels."""
+        res, cal = committed
+        db_cal = qc.QuinticCalibrator(res["provenance"]["as_of_date"])
+        rec = qc.recorded_vix_index_levels(res)
+        got = dict(zip(db_cal.vix_ts["ticker"], db_cal.vix_ts["vix_level"]))
+        assert set(got) == set(rec)
+        assert max(abs(got[k] - rec[k]) for k in rec) <= 1e-5
+        assert dict(zip(cal.vix_ts["ticker"], cal.vix_ts["vix_level"])) == rec
+        np.testing.assert_allclose(db_cal.fwd_var_func.xi_nodes, res["provenance"]["xi0_nodes"],
+                                   rtol=1e-6)
+        with pytest.raises(qc.QuinticDataError, match="do not match"):
+            qc.QuinticCalibrator(res["provenance"]["as_of_date"],
+                                 vix_index_levels={**rec, "^VIX1D": 20.0})
 
     def test_stored_leg_rmses_are_the_loss_at_the_stored_parameters(self, committed):
         res, cal = committed

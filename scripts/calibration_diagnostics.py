@@ -299,7 +299,9 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
         raise ValueError(f"unknown part(s) {sorted(unknown)}; choose from {PARTS}")
     with open(config.DATA_DIR / "calibrations" / f"joint_cal_{session}.pkl", "rb") as f:
         stored = pickle.load(f)  # noqa: S301 (trusted: the calibrator's own joint_cal_*.pkl)
-    cal = jc.JointCalibrator(as_of_date=session)
+    # The committed fit's own objective: its recorded VIX targets, not the
+    # database's (C23 restated those as Cboe's closes, <= 1e-5 pts away).
+    cal = jc.JointCalibrator(as_of_date=session, vix_targets=jc.recorded_vix_targets(stored))
     names = jc.HESTON_PARAM_NAMES
     x_stored = np.array([stored["params"][k] for k in names])
     r = cal.residuals(x_stored)

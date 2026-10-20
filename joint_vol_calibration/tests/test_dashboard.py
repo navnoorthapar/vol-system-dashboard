@@ -1551,12 +1551,13 @@ def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
     for c in crisis.values():
         base = nav[nav.index < pd.Timestamp(c["start"])].iloc[-1]
         assert c["total_return"] == pytest.approx(nav.loc[c["start"]:c["end"]].iloc[-1] / base - 1, abs=1e-12)
-    assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(0.0470983, abs=1e-6)
-    assert crisis["COVID_2020"]["total_return"] == pytest.approx(0.0168672, abs=1e-6)
-    assert crisis["Tariffs_2025"]["total_return"] == pytest.approx(-0.0113131, abs=1e-6)
+    # C23 record (Cboe VIX family); C22: +4.71%, +1.69%, -1.13%
+    assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(0.0413374, abs=1e-6)
+    assert crisis["COVID_2020"]["total_return"] == pytest.approx(-0.0018125, abs=1e-6)
+    assert crisis["Tariffs_2025"]["total_return"] == pytest.approx(-0.0114006, abs=1e-6)
     text = _visible_text(pages["/research"])
-    assert "FedHikes 2022 (2022-01-01 → 2022-12-31) +4.7%" in text
-    assert "COVID 2020 (2020-02-19 → 2020-04-30) +1.7%" in text
+    assert "FedHikes 2022 (2022-01-01 → 2022-12-31) +4.1%" in text
+    assert "COVID 2020 (2020-02-19 → 2020-04-30) −0.2%" in text
     assert "+5.1%" not in text
     assert "+1.8%" not in text
     # a jump on the window's first session counts; a window at the curve's start uses its first NAV
@@ -1643,17 +1644,18 @@ def test_trade_kpis_keep_the_open_trade_out_of_the_win_rate(dash, engine_state, 
     open_ = [t for t in trades if t.is_open]
     closed = [t for t in trades if not t.is_open]
     assert [(t.signal, str(t.entry_date.date())) for t in open_] == [("s4", "2025-03-24")]
-    assert (len(trades), len(closed)) == (208, 207)
+    assert (len(trades), len(closed)) == (206, 205)       # C23 record; C22: 208 / 207
     win = np.mean([t.net_pnl > 0 for t in closed])
     avg = sum(t.net_pnl for t in closed) / 3 / len(closed)
-    assert (round(win * 100, 1), round(avg)) == (38.2, -1043)
+    assert (round(win * 100, 1), round(avg)) == (37.6, -1083)     # C22: 38.2%, -$1,043
     text = _visible_text(pages["/research"])
-    assert (f"Trades 208 1 open at the end; over the 207 closed: win rate {win * 100:.1f}%, "
+    assert (f"Trades {len(trades)} 1 open at the end; over the {len(closed)} closed: "
+            f"win rate {win * 100:.1f}%, "
             f"average {dash._usd(avg)} of portfolio P&L per trade") in text
     assert "Round trips" not in text
     assert "38.0%" not in text
     assert "−$1,039" not in text
-    assert "S4 VRP −$273,544" in text
+    assert "S4 VRP −$273,733" in text                     # C22: −$273,544
     assert "46 (1 open)" in text
     assert "S4's count includes a straddle opened on the last session (2025-03-24)" in text
 
@@ -1672,7 +1674,8 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
         want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
                        for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
-    assert '<tr><td>S3 Dispersion</td><td class="num">+5.6%</td>' in table
+    # the C22 case (+5.647% printed as +5.7%) is now +6.105% on the C23 record
+    assert '<tr><td>S3 Dispersion</td><td class="num">+6.1%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
     _, cal = dash.load_headline_calibration()
     smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}

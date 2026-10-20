@@ -87,7 +87,7 @@ import os
 import pickle
 import time
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -844,6 +844,24 @@ def gauss_newton_profile_check(fun: Callable, x: np.ndarray, report: dict,
     return out
 
 
+def recorded_vix_targets(result: dict) -> dict:
+    """{ticker: level} of the spot VIX indices a stored fit was calibrated to
+    (``result["vix_index"][i]["market"]``), for
+    JointCalibrator(..., vix_targets=...).
+
+    C23 restated the database's VIX index family as Cboe's official closes.
+    The committed fits were made on Yahoo's float32 copies of the same prints
+    (26.950001 for Cboe's 26.95; |change| <= 1e-5 pts on every committed
+    session), so they reproduce exactly on the targets they recorded, and to
+    about 1e-7 relative loss on the restated database.
+    """
+    rows = result.get("vix_index") or []
+    out = {str(r["ticker"]): float(r["market"]) for r in rows if r.get("market") is not None}
+    if not out:
+        raise ValueError("the result records no VIX index targets (result['vix_index'])")
+    return out
+
+
 def previous_accepted_fit(spot_date: str, cal_dir=None) -> tuple:
     """(path, result) of the newest ACCEPTED model_version >= 2 joint Heston
     fit of a session strictly before spot_date, or (None, None).
@@ -909,6 +927,7 @@ class JointCalibrator:
         spx_chain=None,
         carry: str = "parity",
         feller: str = "off",
+        vix_targets: Mapping[str, float] | None = None,
     ):
         """
         Parameters
@@ -931,6 +950,11 @@ class JointCalibrator:
         carry      : "parity" (default; per-expiry F_T, D_T from put-call
                      parity) or "flat" (S e^{(r-q)T}, e^{-rT}; research only)
         feller     : "off" (default) or "soft" (penalty 50*viol^2)
+        vix_targets: {ticker: level} replacing the database's spot VIX
+                     indices on the spot session (the same tickers, else
+                     ValueError), e.g. recorded_vix_targets(result) to
+                     reproduce a committed fit on the targets it recorded.
+                     None (default): the database's closes
         """
         if feller not in _FELLER_MODES:
             raise ValueError(f"feller must be one of {_FELLER_MODES}, got {feller!r}")
@@ -942,6 +966,8 @@ class JointCalibrator:
         self.feller = feller
         self.w1, self.w2, self.w3 = w1, w2, w3
         self._spx_chain_in = spx_chain
+        self._vix_targets = None if vix_targets is None else {str(k): float(v)
+                                                              for k, v in vix_targets.items()}
 
         self.params: dict | None = None
         self.result: dict | None = None
@@ -1213,6 +1239,14 @@ class JointCalibrator:
                              "market_price": float(latest[col])})
         if not rows:
             return empty
+        targets = getattr(self, "_vix_targets", None)
+        if targets is not None:
+            have = {str(r["ticker"]) for r in rows}
+            if have != set(targets):
+                raise ValueError(f"vix_targets {sorted(targets)} do not match the "
+                                 f"database's VIX indices on {spot}: {sorted(have)}")
+            for r in rows:
+                r["market_price"] = targets[str(r["ticker"])]
         return pd.DataFrame(rows).sort_values("tenor_years").reset_index(drop=True)
 
     def _prepare_vx_futures(self) -> pd.DataFrame:
@@ -1554,6 +1588,9 @@ class JointCalibrator:
     def _methods(self, de_cfg: dict) -> dict:
         return {
             "vix_leg": "spot_index_term_structure (heston_vix_term_index, Cboe 9/30/93/184d)",
+            "vix_targets": ("database (vix_term_structure)"
+                            if getattr(self, "_vix_targets", None) is None
+                            else "vix_targets argument"),
             "spx_quotes": "two-sided mid, no lastPrice",
             "spx_iv": "own Black-76 on parity F_T, D_T (Yahoo IV diagnostic only)",
             "carry": self.carry,

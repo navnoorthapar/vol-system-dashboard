@@ -18,6 +18,7 @@ against independent evidence, plus the committed diagnostics artifacts (C23).
 import itertools
 import json
 import math
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -221,7 +222,12 @@ def test_artifact_numbers_are_reproduced_by_the_code():
     the parameters stored in the artifact."""
     from joint_vol_calibration.models import rough_heston as rh
     d = _load("2026-10-16")
-    cal = jc.JointCalibrator(as_of_date="2026-10-16")
+    # the diagnostics run on the committed fit's recorded VIX targets
+    # (calibration_diagnostics.py; joint_calibrator.recorded_vix_targets)
+    with open(config.DATA_DIR / "calibrations" / "joint_cal_2026-10-16.pkl", "rb") as f:
+        stored = pickle.load(f)
+    cal = jc.JointCalibrator(as_of_date="2026-10-16",
+                             vix_targets=jc.recorded_vix_targets(stored))
     free = d["sigma_profile"]["rows"][-1]
     live = cal.fit_summary([free["params"][k] for k in _NAMES])
     assert live["spx_oos_iv_rmse"] == pytest.approx(free["spx_oos_iv_rmse"], rel=1e-9)

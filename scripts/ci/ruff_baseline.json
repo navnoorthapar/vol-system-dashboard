@@ -267,7 +267,6 @@
   },
   "joint_vol_calibration/tests/test_cloud_refresh.py": {
    "F401": 2,
-   "I001": 2,
    "PT006": 2,
    "PT018": 23,
    "RUF005": 1,
@@ -447,7 +446,6 @@
    "EXE001": 1,
    "F401": 1,
    "FURB162": 1,
-   "I001": 3,
    "ISC004": 6,
    "PLW1510": 1,
    "RUF005": 1,
@@ -468,6 +466,6 @@
   }
  },
  "tool": "ruff",
- "total": 1309,
+ "total": 1304,
  "version": "ruff 0.17.1"
 }

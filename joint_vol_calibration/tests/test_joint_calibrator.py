@@ -32,6 +32,7 @@ from joint_vol_calibration.calibration.joint_calibrator import (
     heston_vix_call_price,
     heston_vix_put_price,
     is_acceptable_calibration,
+    recorded_vix_targets,
 )
 from joint_vol_calibration.config import HESTON_BOUNDS, JOINT_W1, JOINT_W2, VIX_INDEX_TENOR_DAYS
 from joint_vol_calibration.data import option_chain as oc
@@ -829,11 +830,44 @@ class TestResidualForm:
 
     @pytest.mark.parametrize("session", _V2_SESSIONS)
     def test_committed_losses_recompute_from_residuals(self, session):
+        """On the VIX targets the fit recorded (recorded_vix_targets), the
+        residual vector reproduces the committed loss exactly."""
         ref = _committed(session)
-        cal = JointCalibrator(as_of_date=session)
+        cal = JointCalibrator(as_of_date=session, vix_targets=recorded_vix_targets(ref))
         x = [ref["params"][k] for k in _NAMES]
         r = cal.residuals(x)
         assert float(r @ r) == pytest.approx(ref["loss"], rel=1e-12)
+        assert cal._methods({})["vix_targets"] == "vix_targets argument"
+
+    @pytest.mark.parametrize("session", _V2_SESSIONS)
+    def test_restated_vix_closes_move_the_committed_loss_by_under_1e6(self, session):
+        """C23 restated the database's VIX family as Cboe's closes. The
+        committed fits were made on Yahoo's float32 copies of the same prints
+        (measured: <= 9.2e-7 pts apart, loss <= 4.9e-7 relative). On the
+        database targets the same parameters give that much different a loss,
+        which is why the reproductions above pass the recorded targets."""
+        ref = _committed(session)
+        cal = JointCalibrator(as_of_date=session)
+        rec = recorded_vix_targets(ref)
+        db_t = dict(zip(cal.vix_ts["ticker"], cal.vix_ts["market_price"]))
+        assert set(db_t) == set(rec)
+        assert max(abs(db_t[k] - rec[k]) for k in rec) <= 1e-5
+        x = [ref["params"][k] for k in _NAMES]
+        r = cal.residuals(x)
+        assert float(r @ r) == pytest.approx(ref["loss"], rel=1e-6)
+        assert cal._methods({})["vix_targets"] == "database (vix_term_structure)"
+
+    def test_vix_targets_must_name_the_databases_indices(self):
+        ref = _committed("2026-10-16")
+        rec = recorded_vix_targets(ref)
+        with pytest.raises(ValueError, match="do not match"):
+            JointCalibrator(as_of_date="2026-10-16", vix_targets={**rec, "^VIX1D": 20.0})
+        bumped = {k: v + (1.0 if k == "^VIX" else 0.0) for k, v in rec.items()}
+        cal = JointCalibrator(as_of_date="2026-10-16", vix_targets=bumped)
+        got = dict(zip(cal.vix_ts["ticker"], cal.vix_ts["market_price"]))
+        assert got == bumped
+        with pytest.raises(ValueError, match="records no VIX index targets"):
+            recorded_vix_targets({"vix_index": []})
 
     def test_analytic_jacobian_matches_finite_differences(self, synth):
         model = synth.residual_model()
@@ -909,7 +943,7 @@ class TestMultiStartTRF:
         lands on the stored DE + L-BFGS-B optimum (equal or lower loss), and
         every start ends in the same basin."""
         ref = _committed(session)
-        cal = JointCalibrator(as_of_date=session)
+        cal = JointCalibrator(as_of_date=session, vix_targets=recorded_vix_targets(ref))
         res = cal.calibrate(verbose=False)
         assert res["loss"] <= ref["loss"] * (1 + 1e-7)
         assert res["loss"] >= ref["loss"] * (1 - 1e-5)

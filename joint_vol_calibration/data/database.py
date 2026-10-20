@@ -1623,7 +1623,14 @@ def get_vix_term_structure_wide(as_of_date: str, start_date: str | None = None) 
     Columns: [^VIX9D, ^VIX, ^VIX3M, ^VIX6M, ^VVIX] (plus derived slope).
     Useful for regime classifier feature construction.
     """
-    df_long = get_vix_term_structure(as_of_date, start_date)
+    return vix_term_structure_wide(get_vix_term_structure(as_of_date, start_date))
+
+
+def vix_term_structure_wide(df_long: pd.DataFrame) -> pd.DataFrame:
+    """get_vix_term_structure_wide's pivot of long (date, ticker, close) rows:
+    one column per ticker plus the two slope columns, ``date`` a column.
+    Public so a caller that edits long rows (backtest.c23_bridge) builds the
+    exact frame the database reader would."""
     if df_long.empty:
         return pd.DataFrame()
     wide = df_long.pivot(index="date", columns="ticker", values="close")
