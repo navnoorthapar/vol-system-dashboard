@@ -41,9 +41,11 @@ Tests:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
+from typing import Any, Literal
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from scipy.stats import t as student_t
 
@@ -202,9 +204,9 @@ def _autocov(d: np.ndarray, k: int) -> float:
     return float(c[k:] @ c[:len(c) - k]) / len(c)
 
 
-def dm_test(loss_a: Sequence[float], loss_b: Sequence[float], horizon: int = 1,
+def dm_test(loss_a: npt.ArrayLike, loss_b: npt.ArrayLike, horizon: int = 1,
             kernel: str = "rectangular", lags: int | None = None,
-            harvey: bool = True) -> dict[str, float]:
+            harvey: bool = True) -> dict[str, Any]:
     """Diebold-Mariano test of E[loss_a − loss_b] = 0.
 
     kernel 'rectangular' uses lags = horizon − 1 unweighted autocovariances
@@ -233,7 +235,7 @@ def dm_test(loss_a: Sequence[float], loss_b: Sequence[float], horizon: int = 1,
     h = int(horizon)
     if harvey:
         stat *= float(np.sqrt((T + 1 - 2 * h + h * (h - 1) / T) / T))
-        dist = student_t(df=T - 1)
+        dist: Any = student_t(df=T - 1)
     else:
         from scipy.stats import norm as dist
     return {"stat": stat, "p_two_sided": float(2.0 * dist.sf(abs(stat))),
@@ -242,7 +244,7 @@ def dm_test(loss_a: Sequence[float], loss_b: Sequence[float], horizon: int = 1,
 
 
 def mcs(losses: pd.DataFrame, size: float = 0.10, block_size: int = HORIZON,
-        reps: int = 5000, seed: int = 42, method: str = "R") -> dict:
+        reps: int = 5000, seed: int = 42, method: Literal["R", "max"] = "R") -> dict:
     """Model Confidence Set via arch: p-value per model and the set at ``size``."""
     from arch.bootstrap import MCS
 

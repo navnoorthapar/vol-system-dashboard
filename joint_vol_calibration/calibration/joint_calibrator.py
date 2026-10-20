@@ -89,6 +89,7 @@ import time
 import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -231,7 +232,7 @@ def count_pinned_params(params: dict, feller_state: str | None = None,
 
     effective d.o.f. = 5 - len(result).
     """
-    pinned = []
+    pinned: list[str] = []
     for name in ("kappa", "theta", "sigma", "rho", "v0"):
         if name not in params or name not in HESTON_BOUNDS:
             continue
@@ -544,7 +545,7 @@ class HestonJointResiduals:
             self.c_vo = math.sqrt(w_vix_opt / len(vo))
         self.n_calls = 0
         self.n_jac = 0
-        self._grid_cache = None
+        self._grid_cache: tuple[bytes, list] | None = None
 
     # -- residuals -----------------------------------------------------------
     def _spx(self, p, keep_grids: bool):
@@ -594,7 +595,7 @@ class HestonJointResiduals:
     def jac(self, p) -> np.ndarray:
         self.n_jac += 1
         p = np.asarray(p, dtype=float)
-        kappa, theta, sigma, _rho, v0 = p
+        kappa, theta, sigma, rho, v0 = p
         key = p.tobytes()
         grids = (self._grid_cache[1] if self._grid_cache is not None
                  and self._grid_cache[0] == key else [None] * len(self.groups))
@@ -602,7 +603,7 @@ class HestonJointResiduals:
         if self.c_spx:
             for (T, F, D, K, _, _, vega), grid in zip(self.groups, grids):
                 r_T = -math.log(D) / T
-                _, J = heston_call_batch_jac(F, K, T, r_T, r_T, *p, grid=grid)
+                _, J = heston_call_batch_jac(F, K, T, r_T, r_T, kappa, theta, sigma, rho, v0, grid=grid)
                 rows.append(self.c_spx * J / vega[:, None])
         if self.c_vix:
             _, Jv = heston_vix_term_index_jac(kappa, theta, sigma, v0, self.vix_tenors)
@@ -657,7 +658,7 @@ def _group_basins(losses: Sequence[float], rtol: float = _BASIN_LOSS_RTOL) -> li
     (relative to the group's lowest loss). Starts that end on the same flat
     valley at different parameters (kappa is a flat direction) count once."""
     order = np.argsort(np.asarray(losses, dtype=float), kind="stable")
-    groups = []
+    groups: list[list[int]] = []
     for i in order:
         if groups and losses[i] <= losses[groups[-1][0]] * (1.0 + rtol) + 1e-300:
             groups[-1].append(int(i))
@@ -682,7 +683,8 @@ def multistart_trf(fun: Callable, jac, starts: np.ndarray, lo: np.ndarray, hi: n
     cost the daily fit; RuntimeError only if every start fails.
     """
     labels = list(labels) if labels is not None else [f"start{i}" for i in range(len(starts))]
-    runs, best, best_loss = [], None, np.inf
+    runs: list[dict[str, Any]] = []
+    best, best_loss = None, np.inf
     for start, label in zip(starts, labels):
         x0 = np.clip(np.asarray(start, dtype=float), lo, hi)
         t0 = time.perf_counter()
@@ -765,7 +767,7 @@ def identifiability_report(J: np.ndarray, r: np.ndarray, x: np.ndarray,
             on_bound.append(n)
     free = [j for j, n in enumerate(names) if n not in on_bound]
     n_obs, k = len(r), len(free)
-    out = {
+    out: dict[str, Any] = {
         "param_names": names,
         "n_residuals": int(n_obs),
         "rel_jacobian_singular_values": [float(v) for v in sv],
@@ -819,7 +821,7 @@ def gauss_newton_profile_check(fun: Callable, x: np.ndarray, report: dict,
     base = float(r0 @ r0)
     s2 = report.get("residual_variance")
     free = [names.index(k) for k in report["free_params"]]
-    out = {}
+    out: dict[str, dict[str, float]] = {}
     if not s2:
         return out
     for i in free:
@@ -942,7 +944,7 @@ class JointCalibrator:
         self._spx_chain_in = spx_chain
 
         self.params: dict | None = None
-        self.result = None
+        self.result: dict | None = None
         self.fit_time: float | None = None
         self.fit_cpu_time: float | None = None
         self.losses: dict | None = None
@@ -1048,8 +1050,8 @@ class JointCalibrator:
         src = self._spx_chain_in
         if isinstance(src, oc.CleanChain):
             sess = str(src.diagnostics.get("session", self.spot_date))
-            self.spx_snapshot_date = sess
-            self.spx_snapshot_session = sess
+            self.spx_snapshot_date: str | None = sess
+            self.spx_snapshot_session: str | None = sess
             return src
         if src is not None:
             raw = src
@@ -1155,7 +1157,7 @@ class JointCalibrator:
         sigma_atm = float(np.interp(0.0, k, iv))
         z = k / (sigma_atm * math.sqrt(T))
         g = g.assign(z=z)
-        used = []
+        used: list[int] = []
         for zt in _ANCHOR_Z_GRID:
             dist = np.abs(z - zt)
             dist[used] = np.inf
@@ -1265,7 +1267,7 @@ class JointCalibrator:
         df = df[(df["time_to_expiry"] >= 7.0 / 365.0) & (df["time_to_expiry"] <= 91.0 / 365.0)]
         df = df[(df["bid"] > 0) & (df["ask"] >= df["bid"])].copy()
         df["mid_price"] = 0.5 * (df["bid"] + df["ask"])
-        selected = []
+        selected: list[pd.Series] = []
         for target_T in (30.0 / 365.0, 60.0 / 365.0):
             exps = df.groupby("expiry")["time_to_expiry"].first()
             if exps.empty:
@@ -1988,7 +1990,7 @@ class JointCalibrator:
         groups = self._spx_groups()
         t0 = time.perf_counter()
         if model == "heston":
-            names = HESTON_PARAM_NAMES
+            names: tuple[str, ...] = HESTON_PARAM_NAMES
             lo, hi = _box_arrays(hbox, names)
             res_model = self.residual_model(w_spx=w_spx, w_vix=w_vix, w_vix_opt=0.0)
             warm_list = [("warm", warm)] if warm is not None else []
@@ -2008,9 +2010,9 @@ class JointCalibrator:
             numerics = None
         else:
             names = rh.ROUGH_HESTON_PARAM_NAMES
-            box = dict(HESTON_BOUNDS)
-            box["H"] = ROUGH_HESTON_H_BOUNDS
-            lo, hi = _box_arrays(box, names)
+            rbox = dict(HESTON_BOUNDS)
+            rbox["H"] = ROUGH_HESTON_H_BOUNDS
+            lo, hi = _box_arrays(rbox, names)
             resid = rh.RoughHestonSPXResiduals(
                 groups, w_spx, n_factors, n_steps,
                 vix_tenors=self.vix_ts["tenor_years"].to_numpy(float),

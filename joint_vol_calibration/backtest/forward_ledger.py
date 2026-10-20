@@ -59,7 +59,7 @@ import math
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -166,7 +166,7 @@ def _leg(book: pd.DataFrame, expiry: str, strike: float, right: str, root: str) 
 
 def _discount(T: float, r_ref: float | None, carry: pd.DataFrame | None, expiry: str) -> float:
     if carry is not None and len(carry) and expiry in set(carry["expiry"]):
-        return float(carry.set_index("expiry").loc[expiry, "discount"])
+        return float(cast(float, carry.set_index("expiry").loc[expiry, "discount"]))
     return math.exp(-(r_ref if r_ref is not None and math.isfinite(r_ref) else 0.0) * T)
 
 
@@ -664,7 +664,7 @@ def signals_for_session(session: str, start_date: str | None = None) -> dict[str
     ts = pd.Timestamp(session)
     if ts not in sig.index:
         raise ValueError(f"no signal row for {session}")
-    row = sig.loc[ts]
+    row = cast(pd.Series, sig.loc[ts])                    # one session: one row
     return {s: {"position": float(row[f"{s}_position"]), "kelly": float(row[f"{s}_kelly"])}
             for s in SLEEVES}
 

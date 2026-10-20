@@ -39,6 +39,7 @@ import pathlib
 import subprocess
 import sys
 import time
+from typing import Any, cast
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -138,15 +139,15 @@ def section_bootstrap(eq: pd.DataFrame, reps: int, seed: int):
     out = {}
     for s in SLEEVES:
         rows = table[table["series"] == s].set_index("statistic")
-        frows = fixed[fixed["series"] == s].set_index("statistic")
+        rv = rows.to_dict(orient="index")
+        fv = fixed[fixed["series"] == s].set_index("statistic").to_dict(orient="index")
         out[s] = {
             "block": float(rows["block"].iloc[0]),
-            **{k: {"point": float(rows.loc[k, "point"]), "ci95": [float(rows.loc[k, "ci_lo"]),
-                                                                  float(rows.loc[k, "ci_hi"])],
-                   "se": float(rows.loc[k, "se"]), "frac_gt_0": float(rows.loc[k, "frac_gt_0"]),
-                   "excludes_zero": bool(rows.loc[k, "excludes_zero"]),
-                   "ci95_block21": [float(frows.loc[k, "ci_lo"]), float(frows.loc[k, "ci_hi"])],
-                   "excludes_zero_block21": bool(frows.loc[k, "excludes_zero"])}
+            **{k: {"point": float(rv[k]["point"]), "ci95": [float(rv[k]["ci_lo"]), float(rv[k]["ci_hi"])],
+                   "se": float(rv[k]["se"]), "frac_gt_0": float(rv[k]["frac_gt_0"]),
+                   "excludes_zero": bool(rv[k]["excludes_zero"]),
+                   "ci95_block21": [float(fv[k]["ci_lo"]), float(fv[k]["ci_hi"])],
+                   "excludes_zero_block21": bool(fv[k]["excludes_zero"])}
                for k in bs.STATISTICS},
         }
     settings = {"reps": reps, "seed": seed, "level": 0.95, "method": "stationary bootstrap, percentile",
@@ -174,7 +175,10 @@ def trial_family(spx, vix, pdv) -> tuple[pd.DataFrame, list[dict]]:
     β grid, each × six sleeves; checked against the committed CSVs."""
     from joint_vol_calibration.backtest import c22_bridge as cb
 
-    cols, meta, checks, index = {}, [], [], []
+    cols: dict[str, np.ndarray] = {}
+    meta: list[dict] = []
+    checks: list[tuple] = []
+    index: list[pd.Index] = []
     bridge_csv = pd.read_csv(bte.BACKTEST_DIR / "c22_bridge.csv")
     beta_csv = pd.read_csv(bte.BACKTEST_DIR / "beta_sensitivity.csv")
 
@@ -188,7 +192,7 @@ def trial_family(spx, vix, pdv) -> tuple[pd.DataFrame, list[dict]]:
             cols[f"{tag}:{s}"] = R[s].to_numpy()
             meta.append({"trial": f"{tag}:{s}", "sleeve": s, **extra})
 
-    state = {"beta": 1.0, "gate": cb.LEGACY_VVIX_GATE, "pdv_h": 1, "legacy_interp": True}
+    state: dict[str, Any] = {"beta": 1.0, "gate": cb.LEGACY_VVIX_GATE, "pdv_h": 1, "legacy_interp": True}
     corr = bte.C22Corrections.legacy()
     for i, step in enumerate(cb.build_steps()):
         state.update(step.get("set", {}))
@@ -275,7 +279,7 @@ def section_trials(eq, fam: pd.DataFrame, meta: list[dict]) -> dict:
     for s in SLEEVES:
         vals = {f"{vname}|{k}": sh.deflated_sharpe_ratio(R[s].to_numpy(), n, v)["dsr"]
                 for vname, v in variances.items() for k, n in choices.items()}
-        lo, hi = min(vals, key=vals.get), max(vals, key=vals.get)
+        lo, hi = min(vals, key=lambda c: vals[c]), max(vals, key=lambda c: vals[c])
         dsr_range[s] = {"min": vals[lo], "argmin": lo, "max": vals[hi], "argmax": hi}
     return {
         "ledger": {"path": "docs/trials_ledger.yaml", "n_trials_all_rounds": n_all["n_trials"],
@@ -339,20 +343,21 @@ def section_multiple_testing(eq, fam: pd.DataFrame, block: int, reps: int, seed:
 
 def section_nulls(eng: bte.BacktestEngine, eq: pd.DataFrame, n_shuffle: int, seed: int):
     mk = eng._market
-    replay = StraddleReplay(eng.signals_df.index, mk["spx_close"], mk["vix_idx"], mk["r"],
+    signals = cast(pd.DataFrame, eng.signals_df)          # set by eng.run()
+    replay = StraddleReplay(signals.index, mk["spx_close"], mk["vix_idx"], mk["r"],
                             q=eng.q, atm_to_vix_ratio=eng.atm_to_vix_ratio)
     pn = nl.PortfolioNull(eng, replay)
     real = pn.run_path(nl.NullPath("real", -1))
     for s, (_, pcol) in SLEEVES.items():
         if not np.array_equal(real[s], eq[pcol].to_numpy(float)):
             raise SystemExit(f"null machinery does not reproduce the engine's {s} P&L")
-    paths = nl.circular_shift_paths(len(eng.signals_df), nl.DEFAULT_MIN_SHIFT, include_reversed=True)
+    paths = nl.circular_shift_paths(len(signals), nl.DEFAULT_MIN_SHIFT, include_reversed=True)
     paths += nl.shuffle_paths(n_shuffle, seed=seed)
     t0 = time.time()
     df = pn.run(paths)
     log.info("null paths: %d in %.0fs", len(paths), time.time() - t0)
     real_stats = pn.statistics(real)
-    summary = {}
+    summary: dict[str, dict[str, Any]] = {}
     for s in real_stats:
         summary[s] = {"real_entries": int(sum(real["_entries"][x] for x in nl.PORTFOLIO))
                       if s == "portfolio" else int(real["_entries"][s])}
@@ -397,7 +402,7 @@ def section_forecast(reps: int, seed: int) -> dict:
         spx = get_spx_ohlcv(as_of_date="2100-01-01", start_date="2010-01-01")
         vw = get_vix_term_structure_wide(as_of_date="2100-01-01", start_date="2010-01-01")
     close = pd.Series(spx["close"].to_numpy(float), index=pd.to_datetime(spx["date"]))
-    r = np.log(close).diff().dropna()
+    r = cast(pd.Series, np.log(close)).diff().dropna()
     vix = pd.Series(vw["^VIX"].to_numpy(float), index=pd.to_datetime(vw["date"]))
     with quiet():
         F = fc.build_forecasts(r, vix)
@@ -442,7 +447,7 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> dict:
     if levels.empty:
         raise SystemExit(f"no benchmark files in {BENCH_DIR}: run scripts/fetch_cboe_benchmarks.py")
     setv = bm.load_levels(BENCH_DIR, ("SET",))["SET"]
-    dates = eq.index
+    dates = cast(pd.DatetimeIndex, eq.index)
     tb = eq["nav_tbill"].to_numpy(float)
     cash = pd.Series(tb / np.r_[CAP, tb[:-1]] - 1.0, index=dates)
     ex = bm.benchmark_excess_returns(levels, dates, cash)
@@ -481,7 +486,7 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> dict:
                                     "every session at 0.10 size: the mark-to-model premium factor"}
 
     # implied β from PUT (monthly, AM-settled at SET) and WPUT (weekly, PM)
-    sessions = spx.index[(spx.index >= "2017-12-01") & (spx.index <= bte.BT_END)]
+    sessions = cast(pd.DatetimeIndex, spx.index[(spx.index >= "2017-12-01") & (spx.index <= bte.BT_END)])
     def _implied(index_name, rolls, settle, fallback, hour):
         per = bm.put_write_periods(rolls, spx["close"], settle, vw, rates, bte.Q_BACKTEST,
                                    expiry_hour_et=hour, settle_fallback=fallback)
@@ -534,9 +539,9 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> dict:
         }
 
     mrolls = bm.monthly_roll_dates(sessions)
-    mrolls = mrolls[(mrolls >= "2017-12-15") & (mrolls <= bte.BT_END)]
+    mrolls = mrolls[(mrolls >= pd.Timestamp("2017-12-15")) & (mrolls <= pd.Timestamp(bte.BT_END))]
     wrolls = bm.weekly_roll_dates(sessions)
-    wrolls = wrolls[(wrolls >= "2017-12-29") & (wrolls <= bte.BT_END)]
+    wrolls = wrolls[(wrolls >= pd.Timestamp("2017-12-29")) & (wrolls <= pd.Timestamp(bte.BT_END))]
     out["implied_beta"] = {
         "PUT": _implied("PUT", mrolls, setv, spx["open"], 9.5),
         "WPUT": _implied("WPUT", wrolls, spx["close"], None, 16.0),

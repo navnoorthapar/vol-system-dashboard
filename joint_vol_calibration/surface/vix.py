@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -208,8 +209,9 @@ def term_tables(raw: pd.DataFrame, session: str, calc_time_ny: datetime) -> list
     """
     df = oc._normalise(raw)
     df["settlement"] = np.where(df["root"] == "SPX", "AM", "PM")
-    out = []
-    for exp, g in df.groupby("expiry"):
+    out: list[dict[str, Any]] = []
+    for key, g in df.groupby("expiry"):
+        exp = cast(str, key)
         has_am = (g["settlement"] == "AM").any()
         sett = "AM" if has_am else "PM"
         lines = g[g["settlement"] == sett]

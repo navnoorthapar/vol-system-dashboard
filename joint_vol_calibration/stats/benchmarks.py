@@ -38,6 +38,7 @@ import io
 import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -165,7 +166,7 @@ def strategy_benchmark_stats(
 ) -> pd.DataFrame:
     """pair_stats for every (sleeve, benchmark) over the whole window and each
     calendar year."""
-    idx = sleeve_returns.index
+    idx = cast(pd.DatetimeIndex, sleeve_returns.index)
     if years is None:
         years = sorted(set(idx.year))
     rows = []
@@ -198,7 +199,7 @@ def monthly_roll_dates(sessions: pd.DatetimeIndex) -> pd.DatetimeIndex:
     sessions = pd.DatetimeIndex(sessions).sort_values()
     out = []
     for (y, m), _ in pd.Series(0, index=sessions).groupby([sessions.year, sessions.month]):
-        first = pd.Timestamp(year=int(y), month=int(m), day=1)
+        first = pd.Timestamp(year=int(y), month=int(m), day=1)  # type: ignore[call-overload]  # int keys
         fri = first + pd.Timedelta(days=(4 - first.weekday()) % 7) + pd.Timedelta(days=14)
         on_before = sessions[sessions <= fri]
         if len(on_before) and on_before[-1].month == m:
@@ -209,7 +210,8 @@ def monthly_roll_dates(sessions: pd.DatetimeIndex) -> pd.DatetimeIndex:
 def weekly_roll_dates(sessions: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """The last session of each W-FRI week (Friday, or Thursday on a holiday)."""
     s = pd.Series(sessions, index=sessions)
-    return pd.DatetimeIndex(s.groupby(s.index.to_period("W-FRI")).max().to_numpy())
+    weeks = cast(pd.DatetimeIndex, s.index).to_period("W-FRI")
+    return pd.DatetimeIndex(s.groupby(weeks).max().to_numpy())
 
 
 def put_write_periods(
@@ -300,7 +302,7 @@ def implied_beta(
 
     n = len(periods)
     per = np.array([_solve(np.arange(n) == i) for i in range(n)])
-    out = {"per_period": per, "overall": _solve(np.ones(n, dtype=bool)), "groups": {}}
+    out: dict[str, Any] = {"per_period": per, "overall": _solve(np.ones(n, dtype=bool)), "groups": {}}
     for g, m in (groups or {}).items():
         mask = np.asarray(m, dtype=bool)
         out["groups"][g] = _solve(mask) if mask.any() else float("nan")
@@ -326,7 +328,7 @@ def replication_daily(
     """
     sessions = pd.DatetimeIndex(sessions)
     rate = rates.sort_index()
-    level = {}
+    level: dict[Any, float] = {}
     M = 1.0
     for _, p in periods.iterrows():
         a, b, K = p["roll"], p["expiry"], float(p["K"])

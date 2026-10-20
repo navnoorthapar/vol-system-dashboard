@@ -20,15 +20,16 @@ reproducible bit for bit.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 from joint_vol_calibration.stats.sharpe import TRADING_DAYS
 
 
-def block_length(x: Sequence[float], include_squares: bool = True) -> float:
+def block_length(x: npt.ArrayLike, include_squares: bool = True) -> float:
     """Politis-White(-Patton) mean block length for the stationary bootstrap.
 
     The larger of the values for x and (if ``include_squares``) x², floored
@@ -92,8 +93,8 @@ STATISTICS: dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]] = {
 
 
 def bootstrap_series(
-    returns: Sequence[float],
-    pnl: Sequence[float] | None = None,
+    returns: npt.ArrayLike,
+    pnl: npt.ArrayLike | None = None,
     reps: int = 5000,
     seed: int = 42,
     mean_block: float | None = None,
@@ -147,7 +148,7 @@ def bootstrap_series(
 
 
 def bootstrap_table(
-    series: Mapping[str, dict[str, Sequence[float]]],
+    series: Mapping[str, Mapping[str, npt.ArrayLike]],
     reps: int = 5000,
     seed: int = 42,
     level: float = 0.95,

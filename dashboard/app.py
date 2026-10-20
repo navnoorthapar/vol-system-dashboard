@@ -46,7 +46,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -531,7 +531,7 @@ SMILE_PRICE_FLOOR = 1e-6
 
 
 def heston_model_smile(params: dict,
-                       maturities_days: Iterable[int] = SMILE_MATURITIES_DAYS,
+                       maturities_days: Iterable[float] = SMILE_MATURITIES_DAYS,
                        log_moneyness: Iterable[float] = SMILE_LOG_MONEYNESS) -> list[dict]:
     """Heston implied-vol smiles of `params` against ln(K/F).
 
@@ -1074,8 +1074,8 @@ def load_page2() -> dict[str, Any]:
                          else None)
         # VIX leg: the Cboe SPOT indices (^VIX9D/^VIX/^VIX3M/^VIX6M) against
         # heston_vix_term_index. Pre-C22 results only have the old key name.
-        vix_rmse = losses.get("vix_index_rmse", losses.get("vix_futures_rmse"))
-        d["vix_index_rmse"] = round(float(vix_rmse), 3) if _num(vix_rmse) is not None else None
+        vix_rmse = _num(losses.get("vix_index_rmse", losses.get("vix_futures_rmse")))
+        d["vix_index_rmse"] = round(vix_rmse, 3) if vix_rmse is not None else None
         for key, src in (("spx_oos_rmse", "spx_oos_iv_rmse"),
                          ("spx_oos_wing_rmse", "spx_oos_put_wing_rmse")):
             if _num(losses.get(src)) is not None:
@@ -1743,7 +1743,7 @@ def beta_estimation(regimes: pd.Series | None = None) -> dict:
         if regimes is None or not session:
             return None
         lab = regimes.get(pd.Timestamp(session))
-        return _REGIME_LABELS[int(lab)] if _num(lab) is not None else None
+        return _REGIME_LABELS[int(lab)] if lab is not None and _num(lab) is not None else None
 
     chains = []
     for r in table.to_dict("records"):
@@ -2281,11 +2281,12 @@ def calibration_extras(d: dict, cal: dict) -> None:
 
     # VIX leg: Cboe spot indices against the model's index values.
     vix = [v for v in cal.get("vix_index") or [] if _num(v.get("market")) is not None]
-    d["vix_rows"] = [{"ticker": v["ticker"], "tenor": int(v["tenor_days"]), "market": float(v["market"]),
-                      "model": _num(v.get("model")),
-                      "diff": ((_num(v.get("model")) - float(v["market"])) if _num(v.get("model")) is not None
-                               else None)}
-                     for v in vix]
+    d["vix_rows"] = []
+    for vrow in vix:
+        model = _num(vrow.get("model"))
+        d["vix_rows"].append({"ticker": vrow["ticker"], "tenor": int(vrow["tenor_days"]),
+                              "market": float(vrow["market"]), "model": model,
+                              "diff": (model - float(vrow["market"])) if model is not None else None})
     if vix:
         d["charts"]["vix"] = charts.xy(
             "chart-vixleg", "VIX index term structure: market and the Heston fit",
@@ -2434,7 +2435,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
                     v = float(getattr(r, col)) * (100.0 if key == "iv" else 1.0)
                     bg = seq_colour(v, lo, hi) if scale == "seq" else div_colour(v, lim)
                     det = (f"T {T}d · ln(K/F) {_fmt(c, '+.3f')} · K {_fmt(r.K, ',.0f')} · "
-                           f"IV {_fmt(r.iv * 100, '.1f')}% · {label} {_fmt(v, fmt)}")
+                           f"IV {_fmt(cast(float, r.iv) * 100, '.1f')}% · {label} {_fmt(v, fmt)}")
                     cells.append(cell(_fmt(v, fmt), bg, detail=det))
                 rows.append({"label": f"{T}d", "cells": cells})
             grids.append({"key": key, "label": label, "unit": unit, "scale": scale, "rows": rows,
@@ -2550,7 +2551,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
         "unstable_days": int(h["is_unstable"].astype(bool).sum()) if "is_unstable" in h.columns else None,
         # where the expansion misses: the largest daily residuals and the share of
         # the residual's sum of squares inside the Feb–Apr 2020 stress window
-        "top_resid": [{"date": str(t.date()), "value": float(v)} for t, v in
+        "top_resid": [{"date": str(cast(pd.Timestamp, t).date()), "value": float(v)} for t, v in
                       days["pnl_residual_a"].reindex(days["pnl_residual_a"].abs().sort_values(ascending=False).index[:3]).items()],
         "covid_resid_share": float((days["pnl_residual_a"].loc["2020-02-20":"2020-04-30"] ** 2).sum()
                                    / max((days["pnl_residual_a"] ** 2).sum(), 1e-300)),
@@ -2580,7 +2581,9 @@ MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 
 def _runs(mask: pd.Series) -> list[tuple]:
     """(first, last) index labels of each run of True values."""
-    out, start, prev = [], None, None
+    out: list[tuple] = []
+    start: Any = None
+    prev: Any = None
     for t, v in mask.items():
         if v and start is None:
             start = t
@@ -2642,10 +2645,11 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             series=[{"name": "Drawdown", "type": "line", "color": "neg", "width": 1.2, "area": True,
                      "data": dd.round(3).tolist()}],
             xs=xs, zoom=False, csv="drawdown.csv", grid={"top": 10, "bottom": 30},
-            describe=f"Deepest drawdown {_fmt(float(dd.min()), '.1f')}% on {dd.idxmin().date()}.",
+            describe=(f"Deepest drawdown {_fmt(float(dd.min()), '.1f')}% on "
+                      f"{cast(pd.Timestamp, dd.idxmin()).date()}."),
             table=charts.table("Drawdown", ["Statistic", "Value"],
                                [["Deepest (%)", _fmt(float(dd.min()), ".2f")],
-                                ["Date of the trough", str(dd.idxmin().date())]]))
+                                ["Date of the trough", str(cast(pd.Timestamp, dd.idxmin()).date())]]))
         # rolling 126-session Sharpe (rf = 0, the engine's convention)
         ret = nav.pct_change()
         roll = (ret.rolling(126).mean() / ret.rolling(126).std(ddof=1)) * np.sqrt(252)
@@ -2665,11 +2669,13 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                                 ["Lowest", _fmt(_num(roll.min()), "+.2f")],
                                 ["Highest", _fmt(_num(roll.max()), "+.2f")]]))
         # monthly returns grid (against the prior month-end NAV)
-        month_end = nav.groupby([nav.index.year, nav.index.month]).last()
+        nav_idx = cast(pd.DatetimeIndex, nav.index)
+        month_end = nav.groupby([nav_idx.year, nav_idx.month]).last()
         base = float(nav.iloc[0])
         grid: dict = {}
         prev = base
-        for (yr, mo), v in month_end.items():
+        for ym, v in month_end.items():
+            yr, mo = cast(tuple[int, int], ym)
             grid.setdefault(int(yr), {})[int(mo)] = float(v) / prev - 1.0
             prev = float(v)
         lim = max((abs(v) for m in grid.values() for v in m.values()), default=0.01) or 0.01
@@ -3350,7 +3356,11 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     levels = [start] + [float(r["pnl"]) for r in bridge]
     cats = ["C21 published"] + [str(r["label"]) for r in bridge] + ["C22 canonical"]
     k = 1e3
-    base, raise_, lower, total, tip = [None], [None], [None], [start / k], [start / k]
+    base: list[float | None] = [None]
+    raise_: list[float | None] = [None]
+    lower: list[float | None] = [None]
+    total: list[float | None] = [start / k]
+    tip: list[float | None] = [start / k]
     all_neg = all(v <= 0 for v in levels)
     for r, before in zip(bridge, levels[:-1]):
         dp = float(r["d_pnl"])
@@ -3407,8 +3417,8 @@ def load_corrections() -> dict[str, Any]:
     # replay, the S3 null) is the backtest page's own computation, so the two
     # pages can never quote different numbers.
     p4 = load_page4()
-    for e in p4.get("errors") or []:
-        d["errors"].append(e)
+    for err in p4.get("errors") or []:
+        d["errors"].append(err)
     d["p4"] = {k: p4.get(k) for k in ("bridge", "beta", "beta_est", "r2_share", "pre_c22_spread", "kpi",
                                       "sleeves", "clf_eval", "total_pnl", "final_nav", "start_date",
                                       "end_date")}
@@ -3418,7 +3428,7 @@ def load_corrections() -> dict[str, Any]:
         if not bridge:
             raise ValueError("empty C22 bridge")
         bridge = sorted(bridge, key=lambda r: int(r["row"]))
-    final = None
+    final: dict[str, float | None] | None = None
     with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
         em = (_load_pickle(DATA / "backtest" / "full_results.pkl").get("metrics") or {})
         final = {"cum_ret": _num(em.get("cumulative_return")), "sharpe": _num(em.get("sharpe"))}
@@ -3456,8 +3466,9 @@ def load_corrections() -> dict[str, Any]:
     hs = []
     for ptn in pts:
         v = ptn.get("cum_ret_pct")
-        if v is None and ptn.get("from_artifact") and final and final.get("cum_ret") is not None:
-            v = final["cum_ret"] * 100.0
+        cum = final.get("cum_ret") if final else None
+        if v is None and ptn.get("from_artifact") and cum is not None:
+            v = cum * 100.0
         hs.append((ptn["round"], v))
     d["charts"]["headline"] = charts.xy(
         "chart-headline", "Published portfolio cumulative return after each round",
@@ -3633,7 +3644,7 @@ _CHROME_CACHE: dict = {}
 
 
 def _stat_key(*paths: Path) -> tuple:
-    out = []
+    out: list[tuple[str, int | None, int | None]] = []
     for p in paths:
         try:
             st = Path(p).stat()

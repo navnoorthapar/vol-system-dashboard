@@ -34,10 +34,11 @@ and these numbers are reported beside them, not instead of them.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from scipy.stats import norm
 
 TRADING_DAYS: int = 252
@@ -46,7 +47,7 @@ EULER_GAMMA: float = 0.5772156649015329
 
 # ── Basic statistics ──────────────────────────────────────────────────────────
 
-def returns_from_nav(nav: Sequence[float], base_nav: float) -> np.ndarray:
+def returns_from_nav(nav: npt.ArrayLike, base_nav: float) -> np.ndarray:
     """Daily simple returns of a NAV path, the first measured from ``base_nav``
     (the NAV at the close before the first session), as compute_metrics does."""
     nav = np.asarray(nav, dtype=float)
@@ -56,13 +57,13 @@ def returns_from_nav(nav: Sequence[float], base_nav: float) -> np.ndarray:
     return nav / prev - 1.0
 
 
-def returns_from_pnl(pnl: Sequence[float], capital: float) -> np.ndarray:
+def returns_from_pnl(pnl: npt.ArrayLike, capital: float) -> np.ndarray:
     """Daily returns of NAV = capital + cumulative P&L (the backtest's sleeves)."""
     pnl = np.asarray(pnl, dtype=float)
     return returns_from_nav(capital + np.cumsum(pnl), capital)
 
 
-def sharpe(r: Sequence[float]) -> float:
+def sharpe(r: npt.ArrayLike) -> float:
     """Per-period Sharpe ratio mean / std (ddof = 1); NaN if undefined."""
     r = np.asarray(r, dtype=float)
     if r.size < 2:
@@ -73,7 +74,7 @@ def sharpe(r: Sequence[float]) -> float:
     return float(r.mean() / sd)
 
 
-def sortino(r: Sequence[float]) -> float:
+def sortino(r: npt.ArrayLike) -> float:
     """Per-period Sortino ratio: mean / sqrt(mean(min(r, 0)²)) over ALL periods
     (the downside deviation about a zero target, as compute_metrics)."""
     r = np.asarray(r, dtype=float)
@@ -88,7 +89,7 @@ def annualise(sr_per_period: float, periods: int = TRADING_DAYS) -> float:
     return float(sr_per_period) * float(np.sqrt(periods))
 
 
-def sample_moments(r: Sequence[float]) -> dict[str, float]:
+def sample_moments(r: npt.ArrayLike) -> dict[str, Any]:
     """Mean, sd (ddof=1), sample skewness and Pearson kurtosis (normal = 3)."""
     r = np.asarray(r, dtype=float)
     mu = float(r.mean())
@@ -184,7 +185,7 @@ class SharpeInference:
         return asdict(self)
 
 
-def sharpe_inference(r: Sequence[float], alpha: float = 0.05,
+def sharpe_inference(r: npt.ArrayLike, alpha: float = 0.05,
                      periods: int = TRADING_DAYS) -> SharpeInference:
     """SR̂, its IID non-normal standard error, PSR(SR > 0) and MinTRL."""
     r = np.asarray(r, dtype=float)
@@ -203,7 +204,7 @@ def sharpe_inference(r: Sequence[float], alpha: float = 0.05,
 
 
 def deflated_sharpe_ratio(
-    r: Sequence[float], n_trials: float, var_trial_sr: float,
+    r: npt.ArrayLike, n_trials: float, var_trial_sr: float,
 ) -> dict[str, float]:
     """DSR = PSR(SR̂ ≥ SR*) with SR* = expected_max_sharpe(N, V).
 
@@ -226,21 +227,21 @@ def deflated_sharpe_ratio(
 
 # ── HAC t-statistic of the mean ───────────────────────────────────────────────
 
-def newey_west_variance(x: Sequence[float], lags: int) -> float:
+def newey_west_variance(x: npt.ArrayLike, lags: int) -> float:
     """Bartlett-kernel (Newey-West) long-run variance of x (demeaned)."""
-    x = np.asarray(x, dtype=float)
-    x = x - x.mean()
-    n = x.size
-    lrv = float(x @ x) / n
+    d = np.asarray(x, dtype=float)
+    d = d - d.mean()
+    n = d.size
+    lrv = float(d @ d) / n
     for k in range(1, int(lags) + 1):
         if k >= n:
             break
         w = 1.0 - k / (lags + 1.0)
-        lrv += 2.0 * w * float(x[k:] @ x[:-k]) / n
+        lrv += 2.0 * w * float(d[k:] @ d[:-k]) / n
     return lrv
 
 
-def newey_west_tstat(x: Sequence[float], lags: int | None = None) -> dict[str, float]:
+def newey_west_tstat(x: npt.ArrayLike, lags: int | None = None) -> dict[str, float]:
     """t-statistic of the mean of x with a Newey-West standard error.
 
     lags default: floor(4·(n/100)^(2/9)) (Newey & West 1994 rule of thumb).

@@ -78,6 +78,7 @@ from __future__ import annotations
 import math
 import time
 from functools import lru_cache
+from typing import cast
 
 import numpy as np
 from scipy.linalg import expm
@@ -364,7 +365,7 @@ class RoughHestonSurfacePricer:
         self.slices = [(float(T), float(F), float(D), np.atleast_1d(np.asarray(K, float)))
                        for T, F, D, K in slices]
         self.n_factors, self.n_steps, self.rtol = int(n_factors), int(n_steps), float(rtol)
-        self.grids = None
+        self.grids: list | None = None
 
     def _price_slice(self, j, p, grid=None):
         T, F, D, K = self.slices[j]
@@ -396,15 +397,17 @@ class RoughHestonSurfacePricer:
         int_f, int_psi, _ = _riccati_sweep(z, T_col, kappa, sigma, rho, H, self.n_factors,
                                            self.n_steps)
         log_cf = _mask_unresolved(v0 * int_f + kappa * theta * int_psi)
-        self._last = (np.asarray(p, dtype=float).tobytes(), log_cf, int_f, int_psi)
+        self._last: tuple[bytes, np.ndarray, np.ndarray, np.ndarray] = (
+            np.asarray(p, dtype=float).tobytes(), log_cf, int_f, int_psi)
         out, start = [], 0
         for (T, F, D, K), grid in zip(self.slices, self.grids):
             vals = log_cf[start:start + grid.n]
             start += grid.n
             w = float(_expected_integrated_variance(T, kappa, theta, v0))
             r_T = -math.log(D) / T
-            calls, _ = _lewis_call_prices(F, K, T, r_T, r_T, lambda _z, v=vals: v,
-                                          max(w, 1e-12), grid=grid)
+            def log_cf_slice(_z, v=vals):
+                return v
+            calls, _ = _lewis_call_prices(F, K, T, r_T, r_T, log_cf_slice, max(w, 1e-12), grid=grid)
             out.append(_clip_calls(calls, F, K, T, r_T, r_T))
         return out
 
@@ -419,7 +422,7 @@ class RoughHestonSurfacePricer:
         _, log_cf, int_f, int_psi = self._last
         kappa = float(p[0])
         out, start = [], 0
-        for (T, F, D, K), grid in zip(self.slices, self.grids):
+        for (T, F, D, K), grid in zip(self.slices, cast(list, self.grids)):   # set by prices()
             sl = slice(start, start + grid.n)
             start += grid.n
             grad = np.vstack([kappa * int_psi[sl], int_f[sl]])
@@ -535,6 +538,9 @@ def fit_trf_with_grid_refresh(resid: RoughHestonSPXResiduals, starts, labels, lo
     ADAPTIVE one at its final point. Returns (best_x, best_loss, report)."""
     from scipy import optimize
 
+    def jac(q):
+        return resid.jac(q, lo, hi)
+
     runs = []
     best_x, best_loss = None, np.inf
     for x0, label in zip(starts, labels):
@@ -545,7 +551,7 @@ def fit_trf_with_grid_refresh(resid: RoughHestonSPXResiduals, starts, labels, lo
         nfev, refreshes, status, frozen_loss = 0, 0, 0, np.nan
         for attempt in range(max_refresh + 1):
             refreshes = attempt
-            sol = optimize.least_squares(resid, x, jac=lambda q: resid.jac(q, lo, hi),
+            sol = optimize.least_squares(resid, x, jac=jac,
                                          bounds=(lo, hi), method="trf", x_scale="jac",
                                          ftol=tol, xtol=tol, gtol=tol, max_nfev=max_nfev)
             nfev += int(sol.nfev)

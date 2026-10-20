@@ -55,6 +55,7 @@ import json
 import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -357,9 +358,9 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         carry_map = {e: (float(f), float(d)) for e, f, d in
                      zip(sq.carry["expiry"], sq.carry["forward"], sq.carry["discount"])}
         official = vx.official_closes(session)
-        indices = {}
+        indices: dict[str, dict[str, Any]] = {}
         for name, days in vx.CONSTANT_MATURITY_DAYS.items():
-            rep = {"cboe_rules": vx.replicate_index(terms, sq.r_ref, days, spot=sq.spot),
+            rep: dict[str, Any] = {"cboe_rules": vx.replicate_index(terms, sq.r_ref, days, spot=sq.spot),
                    "parity_forward": vx.replicate_index(terms, sq.r_ref, days, carry=carry_map,
                                                         spot=sq.spot),
                    "any_expiry_parity_forward": vx.replicate_index(
@@ -392,7 +393,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         rep30 = indices["VIX"]["cboe_rules"] if indices["VIX"]["cboe_rules"]["ok"] \
             else indices["VIX"]["parity_forward"]
         atm30 = vx.constant_maturity_atm(rep30, strip)
-        beta = {"atm_vol_30d_quotes": atm30,
+        beta: dict[str, Any] = {"atm_vol_30d_quotes": atm30,
                 "atm_vol_30d_method": ("near / next ATM mid IVs of the replicated VIX's own terms, "
                                        "combined with the VIX constant-maturity weights"),
                 "atm_vol_30d_essvi": 100.0 * essvi_surface.atm_vol(T30)}

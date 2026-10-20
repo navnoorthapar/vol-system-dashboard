@@ -409,7 +409,7 @@ def fit_svi_calendar_surface(groups, essvi_surface, *, h_floor: float = 5e-4,
     objs = [_objective(np.asarray(params[i]), data[i][2], data[i][1], data[i][3], inv[i])[0]
             for i in range(n)]
     start_total = float(sum(objs))
-    infos = [{} for _ in range(n)]
+    infos: list[dict] = [{} for _ in range(n)]
     n_rejected = n_cut_rounds = 0
     sweeps = 0
     totals = [start_total]

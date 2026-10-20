@@ -307,7 +307,7 @@ def is_session_array(dates) -> np.ndarray:
     if idx.tz is not None:
         idx = idx.tz_convert(NY_TZ).tz_localize(None)
     idx = idx.normalize()
-    return np.asarray((~idx.isna()) & (idx.weekday < 5) & ~idx.isin(_holiday_index()), dtype=bool)
+    return np.asarray(idx.notna() & (idx.weekday < 5) & ~idx.isin(_holiday_index()), dtype=bool)
 
 
 def drop_non_sessions(df: pd.DataFrame, label: str = "series", *, col: str = "date") -> pd.DataFrame:
@@ -1892,7 +1892,7 @@ def insert_cboe_index(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
                 stored = conn.execute("SELECT COUNT(*) FROM cboe_index_daily WHERE symbol = ?",
                                       (sym,)).fetchone()[0]
                 if stored:
-                    _warn_dropped_keyed(conn, "cboe_index_daily", sub, "symbol", sym)
+                    _warn_dropped_keyed(conn, "cboe_index_daily", sub, "symbol", str(sym))
         df = _skip_over_official(conn, "cboe_index_daily", df, ["date", "symbol"])
         rows = _records(df, cols)
         conn.executemany(  # the column names are the schema's own, the values are bound

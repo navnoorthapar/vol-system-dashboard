@@ -24,6 +24,7 @@ from the engine is not possible.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -40,7 +41,7 @@ class StraddleReplay:
 
     def __init__(
         self,
-        dates: Sequence,
+        dates: pd.Index | list,
         spx_close: pd.Series,
         vix_wide_idx: pd.DataFrame,
         r: float | pd.Series,
@@ -69,7 +70,7 @@ class StraddleReplay:
         n = len(self.dates)
         self.S = np.array([float(spx_close.loc[d]) for d in self.dates])
         self.rates = bte._resolve_rates(r, self.dates, ffill=c.rate_ffill)
-        rows = [vix_wide_idx.loc[d] for d in self.dates]
+        rows = [cast(pd.Series, vix_wide_idx.loc[d]) for d in self.dates]     # unique index: one row each
 
         # Entry quantities on every session (an entry or an expiry roll).
         self.sig0 = np.empty(n)
@@ -114,8 +115,8 @@ class StraddleReplay:
 
     def simulate(
         self,
-        position: Sequence[float] | pd.Series,
-        kelly: Sequence[float] | pd.Series,
+        position: np.ndarray | Sequence[float] | pd.Series,
+        kelly: np.ndarray | Sequence[float] | pd.Series,
         nav_base: float | Sequence[float] = bte.INITIAL_CAPITAL,
     ) -> np.ndarray:
         """Daily P&L of the straddle sleeve for this position/size series.

@@ -89,6 +89,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -296,7 +297,7 @@ def refresh_rates(start_year: int | None = None, end_year: int | None = None, *,
     and errors."""
     start_year = start_year or int(HIST_START[:4])
     end_year = end_year or date.fromisoformat(db.last_closed_session()).year
-    out = {"treasury": 0, "nyfed": 0, "fred": 0, "errors": []}
+    out: dict[str, Any] = {"treasury": 0, "nyfed": 0, "fred": 0, "errors": []}
     for year in range(int(start_year), int(end_year) + 1):
         for kind in TREASURY_KINDS:
             try:

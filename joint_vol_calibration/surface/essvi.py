@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from scipy.optimize import minimize, minimize_scalar
@@ -185,7 +186,7 @@ class ESSVISurface:
         30) refined by a bounded 1-D search around each pair's worst point."""
         bm = butterfly_margins(self.theta, self.psi, self.rho)
         cm = calendar_margins(self.theta, self.psi, self.rho)
-        out = {f"butterfly_{k}_min": float(v.min()) for k, v in bm.items()}
+        out: dict[str, Any] = {f"butterfly_{k}_min": float(v.min()) for k, v in bm.items()}
         out.update({f"monotone_{k}_min": (float(v.min()) if len(v) else None) for k, v in cm.items()})
         dmin = None
         A, B = self.psi * (1 + self.rho), self.psi * (1 - self.rho)
@@ -216,8 +217,10 @@ class ESSVISurface:
     @classmethod
     def from_dict(cls, d: dict) -> ESSVISurface:
         sl = d["slices"]
-        return cls(T=[s["T"] for s in sl], theta=[s["theta"] for s in sl],
-                   psi=[s["psi"] for s in sl], rho=[s["rho"] for s in sl],
+        return cls(T=np.asarray([s["T"] for s in sl], dtype=float),
+                   theta=np.asarray([s["theta"] for s in sl], dtype=float),
+                   psi=np.asarray([s["psi"] for s in sl], dtype=float),
+                   rho=np.asarray([s["rho"] for s in sl], dtype=float),
                    expiries=[s.get("expiry") for s in sl])
 
 

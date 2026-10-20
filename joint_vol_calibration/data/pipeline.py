@@ -43,6 +43,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -124,8 +125,8 @@ def refresh_vix_index_family(start: str, end: str, *, yahoo: bool = True, vix_da
       mismatches   DataFrame [date, ticker, cboe, yfinance, diff] (|diff| > tol)
       errors       list of download error strings
     """
-    out = {"ok": True, "rows": {}, "provisional": [], "errors": [],
-           "mismatches": pd.DataFrame(columns=["date", "ticker", "cboe", "yfinance", "diff"])}
+    out: dict[str, Any] = {"ok": True, "rows": {}, "provisional": [], "errors": [],
+                           "mismatches": pd.DataFrame(columns=["date", "ticker", "cboe", "yfinance", "diff"])}
     yts = yvd = pd.DataFrame()
     if yahoo:
         try:
@@ -249,7 +250,7 @@ def _correction_frame(stored: pd.DataFrame, ref: pd.DataFrame, keys: list, value
         "table": table, "date": m["date"], "ticker": m["ticker"],
         "old_close": m["close_old"], "old_source": old_src,
         "new_close": np.where(sess, out["close"], np.nan),
-        "new_source": np.where(sess, out["source"], None),
+        "new_source": np.where(sess, out["source"], None),  # type: ignore[call-overload]  # object column
         "diff": diff, "action": act,
         "in_backtest_window": m["date"].between(BT_START, BT_END),
     })
@@ -318,7 +319,7 @@ def correct_vix_index_family(cboe_term: pd.DataFrame | None = None,
     vd_new = vd_new.drop(columns=["ticker"])
 
     log = pd.concat([ts_log, vd_log], ignore_index=True)
-    summary = {
+    summary: dict[str, Any] = {
         "generated_by": "joint_vol_calibration.data.pipeline.correct_vix_index_family",
         "same_print_tol": SAME_PRINT_TOL,
         "backtest_window": [BT_START, BT_END],
@@ -406,7 +407,7 @@ def resync_database_from_record(*, options: bool = True) -> dict:
             bad = [d for d, ok in zip(dates, db.is_session_array(dates)) if not ok]
             removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount  # noqa: S608
                                  for d in bad)
-    out = {"removed_non_session": removed, "imported": db.import_market_partitions()}
+    out: dict[str, Any] = {"removed_non_session": removed, "imported": db.import_market_partitions()}
     if options:
         out["options_rows_reimported"] = db.import_options_snapshots(overwrite=True)
     with db._connection() as conn:

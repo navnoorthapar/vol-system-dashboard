@@ -43,10 +43,9 @@
   },
   "joint_vol_calibration/calibration/joint_calibrator.py": {
    "arg-type": 3,
-   "assignment": 4,
+   "assignment": 1,
    "call-overload": 1,
-   "index": 2,
-   "var-annotated": 2
+   "index": 2
   },
   "joint_vol_calibration/calibration/quintic_calibrator.py": {
    "arg-type": 18,
@@ -73,7 +72,7 @@
    "return-value": 1
   },
   "joint_vol_calibration/models/heston.py": {
-   "arg-type": 6,
+   "arg-type": 3,
    "assignment": 3,
    "operator": 1,
    "return-value": 1
@@ -134,9 +133,8 @@
    "var-annotated": 1
   },
   "joint_vol_calibration/tests/test_dashboard.py": {
-   "arg-type": 1,
    "attr-defined": 1,
-   "union-attr": 2
+   "union-attr": 1
   },
   "joint_vol_calibration/tests/test_heston_reference.py": {
    "attr-defined": 1
@@ -163,6 +161,6 @@
   }
  },
  "tool": "mypy",
- "total": 390,
+ "total": 380,
  "version": "mypy 2.4.0 (compiled: yes)"
 }

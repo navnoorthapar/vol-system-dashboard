@@ -79,6 +79,7 @@ executable static arbitrage among these rows.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -335,9 +336,10 @@ def repair_lp(P: ArbitrageProblem, delta0: float | None = None) -> dict:
     cost = np.concatenate([np.zeros(n), np.ones(n)])
     bounds = [(None, None)] * n + [(0.0, None)] * n
     res = linprog(cost, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+    ok = res.status == 0                       # fun and x are set when the LP solved
     return {"status": int(res.status), "message": str(res.message), "delta0": delta0,
-            "objective": float(res.fun) if res.status == 0 else None,
-            "eps": res.x[:n].copy() if res.status == 0 else None}
+            "objective": float(cast(float, res.fun)) if ok else None,
+            "eps": cast(np.ndarray, res.x)[:n].copy() if ok else None}
 
 
 def outside_spread_lp(P: ArbitrageProblem) -> dict:
@@ -361,8 +363,8 @@ def outside_spread_lp(P: ArbitrageProblem) -> dict:
     if res.status != 0:
         return {"status": int(res.status), "message": str(res.message), "distance": None,
                 "n_outside": None}
-    o = res.x[n:]
-    return {"status": 0, "message": str(res.message), "distance": float(res.fun),
+    o = cast(np.ndarray, res.x)[n:]
+    return {"status": 0, "message": str(res.message), "distance": float(cast(float, res.fun)),
             "n_outside": int((o > 1e-9).sum())}
 
 
@@ -379,7 +381,7 @@ def calendar_total_variance_mid(quotes: pd.DataFrame, tol: float = 1e-8) -> dict
     q = quotes
     exp_T = q.groupby("expiry", sort=False)["T"].first().sort_values()
     n_pts = n_cross = 0
-    pairs = []
+    pairs: list[dict[str, Any]] = []
     for e1, e2 in zip(exp_T.index[:-1], exp_T.index[1:]):
         a = q[q["expiry"] == e1]
         b = q[q["expiry"] == e2].sort_values("k")
@@ -452,7 +454,8 @@ def screen(quotes: pd.DataFrame, *, repair: bool = True, tol: float = 1e-9,
             "type": names[rr],
             "shortfall_index_points": float(-slack[rr]),
             "executable": bool(exe[rr]),
-            "legs": [{"expiry": str(q.loc[int(j), "expiry"]), "strike": float(q.loc[int(j), "strike"]),
+            "legs": [{"expiry": str(q.loc[int(j), "expiry"]),
+                      "strike": float(cast(float, q.loc[int(j), "strike"])),
                       "right": str(q.loc[int(j), "right"]), "weight": float(wj)}
                      for j, wj in zip(legs, w)],
         })

@@ -97,7 +97,7 @@ def _clog1p(z: np.ndarray) -> np.ndarray:
     return 0.5 * np.log1p(2.0 * re + re * re + im * im) + 1j * np.arctan2(im, 1.0 + re)
 
 
-def _one_minus_exp_over(x: np.ndarray) -> np.ndarray:
+def _one_minus_exp_over(x: float | np.ndarray) -> np.ndarray:
     """(1 - e^{-x}) / x for x >= 0, with the x -> 0 limit (= 1) handled exactly."""
     x = np.asarray(x, dtype=float)
     small = np.abs(x) < 1e-8

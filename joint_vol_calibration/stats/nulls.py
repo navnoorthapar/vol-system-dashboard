@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -233,7 +234,7 @@ class PortfolioNull:
             out[s] = self._straddle(s, pos[s], kel[s] * k_mult.to_numpy())
         return out
 
-    def run_path(self, path: NullPath) -> dict[str, np.ndarray]:
+    def run_path(self, path: NullPath) -> dict[str, Any]:
         """Daily P&L of every sleeve and the portfolio on one null path.
 
         Every sleeve is transformed by the same path. Trade shuffles permute
@@ -243,13 +244,13 @@ class PortfolioNull:
         pos, kel = {}, {}
         for k, s in enumerate(SLEEVE_SPECS):
             if path.kind == "shuffle":
-                p = NullPath("shuffle", path.path_id, 0, False, int(path.seed) * 16 + k)
+                p = NullPath("shuffle", path.path_id, 0, False, int(cast(int, path.seed)) * 16 + k)
             else:
                 p = path
             pos[s], kel[s] = apply_path(p, [self.pos[s], self.kel[s]], self.pos[s])
         p1 = {s: self._straddle(s, pos[s], kel[s]) for s in SLEEVE_SPECS}
         p2 = self.overlay(p1, pos, kel)
-        out = {"s1": p1["s1"], "s2": p1["s2"], **p2}
+        out: dict[str, Any] = {"s1": p1["s1"], "s2": p1["s2"], **p2}
         out["portfolio"] = (p2["s1c"] + p2["s3"] + p2["s4"]) / 3.0
         out["_entries"] = {s: n_entries(pos[s]) for s in SLEEVE_SPECS}
         return out

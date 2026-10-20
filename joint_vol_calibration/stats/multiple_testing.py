@@ -115,7 +115,9 @@ def pbo_cscv(returns: pd.DataFrame | np.ndarray, n_splits: int = 16,
         rng = np.random.default_rng(seed)
         pick = rng.choice(len(combos), size=int(max_combinations), replace=False)
         combos = [combos[i] for i in sorted(pick)]
-    lam, is_best, oos_best = [], [], []
+    lam_l: list[float] = []
+    is_l: list[float] = []
+    oos_l: list[float] = []
     for c in combos:
         m = np.zeros(n_splits, dtype=bool)
         m[list(c)] = True
@@ -126,11 +128,11 @@ def pbo_cscv(returns: pd.DataFrame | np.ndarray, n_splits: int = 16,
         oos = np.where(np.isfinite(sr_oos), sr_oos, -np.inf)
         rank = float((oos < oos[j]).sum() + 1 + 0.5 * ((oos == oos[j]).sum() - 1))
         w = rank / (N + 1.0)
-        lam.append(np.log(w / (1.0 - w)))
-        is_best.append(float(sr_is[j]))
-        oos_best.append(float(sr_oos[j]))
-    lam = np.asarray(lam)
-    is_best, oos_best = np.asarray(is_best), np.asarray(oos_best)
+        lam_l.append(np.log(w / (1.0 - w)))
+        is_l.append(float(sr_is[j]))
+        oos_l.append(float(sr_oos[j]))
+    lam = np.asarray(lam_l)
+    is_best, oos_best = np.asarray(is_l), np.asarray(oos_l)
     ok = np.isfinite(is_best) & np.isfinite(oos_best)
     slope = (float(np.polyfit(is_best[ok], oos_best[ok], 1)[0])
              if ok.sum() > 2 and np.ptp(is_best[ok]) > 0 else float("nan"))
