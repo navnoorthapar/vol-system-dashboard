@@ -68,6 +68,20 @@ def test_heston_iv_function_has_the_black_scholes_limit():
     np.testing.assert_allclose(iv(np.linspace(-0.3, 0.2, 11), 0.5), 0.2, atol=2e-6)
 
 
+def test_iv_from_normalised_calls_inverts_a_black_scholes_pricer():
+    """The integration hook for further models: a forward-normalised call
+    pricer at 25% vol comes back as a flat 25% smile, puts by parity."""
+    from scipy.special import ndtr
+
+    def bs(K, T, vol=0.25):
+        sd = vol * np.sqrt(T)
+        d1 = -np.log(K) / sd + sd / 2
+        return ndtr(d1) - K * ndtr(d1 - sd)
+    iv = sc.iv_from_normalised_calls(bs)
+    np.testing.assert_allclose(iv(np.linspace(-0.4, 0.3, 15), 0.5), 0.25, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(iv(np.array([-0.05, 0.0, 0.05]), 7 / 365), 0.25, rtol=0, atol=1e-9)
+
+
 def test_registered_model_is_scored_on_the_same_quotes(sq):
     def flat(ctx):
         return sc.ModelSpec("flat20", lambda k, T: np.full(len(k), 0.20),

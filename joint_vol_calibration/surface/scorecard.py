@@ -11,6 +11,9 @@ dividends C / (D_T F_T) depends on (k, T) only.
 Built-in models (MODEL_REGISTRY, in scorecard order):
   essvi      eSSVI global surface (essvi.py), fitted to the surface fit set
   svi        raw SVI per expiry, butterfly constraints (svi.py)
+  svi_cal    raw SVI slices with butterfly constraints AND calendar ordering
+             against both neighbour slices, started from the eSSVI fit
+             (svi.fit_svi_calendar_surface): the arbitrage-free surface
   heston_v2  Heston at the session's stored model_version-2 joint fit
              (data_store/calibrations/joint_cal_<session>.pkl), priced with
              the repo engine (models.heston.heston_call_batch); in_sample =
@@ -25,6 +28,18 @@ out-of-sample RMSE reproduces the pickle's oos.spx_oos_iv_rmse.
 Adding a model (rough Heston, Quintic OU, ...): write a factory
 ``f(ctx) -> ModelSpec | None`` (None = not available for this session) and
 ``register_model("name", f)``; ctx is a ScoreContext. Nothing else changes.
+A model that prices calls needs only a forward-normalised pricer
+``call(K_over_F: ndarray, T: float) -> C / (D F)``; iv_from_normalised_calls
+turns it into iv(k, T) (OTM side by parity, Black-76 inversion), e.g.
+
+    def rough_heston_factory(ctx):
+        cal = load_my_fit(ctx.sq.session)            # None when absent
+        if cal is None:
+            return None
+        iv = iv_from_normalised_calls(lambda K, T: my_pricer(K, T, **cal["params"]))
+        return ModelSpec("rough_heston", iv, heston_anchor_mask(ctx.quotes, ctx.sq.session),
+                         len(cal["params"]), "rough Heston (lifted, n = 20)")
+    register_model("rough_heston", rough_heston_factory)
 """
 
 from __future__ import annotations
@@ -48,6 +63,8 @@ from joint_vol_calibration.surface.quotes import SessionQuotes
 
 CALIBRATIONS_DIR = DATA_DIR / "calibrations"
 H_FLOOR_FIT = 5e-4          # 0.05 vol points: floor of the half-spread in fit weights
+SVI_CAL_SWEEPS = 8          # block coordinate descent: at most 8 sweeps ...
+SVI_CAL_REL_TOL = 1e-3      # ... stopping when a sweep gains < 0.1% of the objective
 
 
 @dataclass
@@ -119,8 +136,9 @@ def essvi_factory(ctx: ScoreContext) -> ModelSpec:
     _check_fit_covers_expiries(ctx, surf.T)
     return ModelSpec(
         "essvi", surf.iv, ctx.fit_mask.copy(), 3 * len(surf.T),
-        "eSSVI global surface (theta, psi, rho per expiry); Hendriks-Martini calendar and "
-        "Gatheral-Jacquier butterfly conditions imposed; inverse half-spread weights",
+        "eSSVI global surface (theta, psi, rho per expiry); Gatheral-Jacquier butterfly "
+        "conditions, monotone theta and wing slopes, and slice ordering certified on a "
+        "4,001-point k-grid; inverse half-spread weights",
         params=surf.to_dict(), fit={k: v for k, v in info.items() if k != "x"})
 
 
@@ -144,20 +162,45 @@ def svi_factory(ctx: ScoreContext) -> ModelSpec:
              "mean_objective": float(np.mean([x.info["objective"] for x in s.slices]))})
 
 
-def heston_iv_function(params: dict) -> Callable:
-    """iv(k, T) of Heston at ``params`` (kappa, theta, sigma, rho, v0): the
-    repo's Lewis engine on F = 1, D = 1 (forward-normalised), Black-76
-    inversion as in JointCalibrator._surface_errors."""
-    kap, th, sg, rh, v0 = (float(params[n]) for n in ("kappa", "theta", "sigma", "rho", "v0"))
+def svi_cal_factory(ctx: ScoreContext) -> ModelSpec:
+    surf, _ = _essvi(ctx)
+    if "svi_cal" not in ctx.cache:
+        ctx.cache["svi_cal"] = sv.fit_svi_calendar_surface(_groups(ctx), surf, h_floor=H_FLOOR_FIT,
+                                                           max_sweeps=SVI_CAL_SWEEPS,
+                                                           rel_tol=SVI_CAL_REL_TOL)
+    s, info = ctx.cache["svi_cal"]
+    _check_fit_covers_expiries(ctx, s.T)
+    return ModelSpec(
+        "svi_cal", s.iv, ctx.fit_mask.copy(), 5 * len(s.slices),
+        "raw SVI per expiry with Durrleman g(k) >= 0 on 241 points of k in [-1.5, 1] and Lee "
+        "wing bounds, and calendar ordering w_(i-1) <= w_i <= w_(i+1) certified on a "
+        "4,001-point k-grid and in the wing slopes; block coordinate descent from the eSSVI "
+        "fit; inverse half-spread weights",
+        params=s.to_dict(), fit={k: v for k, v in info.items()})
 
+
+def iv_from_normalised_calls(call_price: Callable) -> Callable:
+    """iv(k, T) from a forward-normalised call pricer call_price(K, T) ->
+    C / (D F) at strikes K = K/F (array): the OTM side is priced (puts by
+    parity, P = C - (1 - K)) and inverted with the repo's Black-76 solver on
+    F = 1, D = 1, as in JointCalibrator._surface_errors. NaN where the price
+    has no implied vol."""
     def iv(k, T):
         K = np.exp(np.atleast_1d(np.asarray(k, dtype=float)))
         T = float(T)
-        calls = heston_call_batch(1.0, K, T, 0.0, 0.0, kap, th, sg, rh, v0)
+        calls = np.asarray(call_price(K, T), dtype=float)
         is_call = K >= 1.0
         prices = np.where(is_call, calls, calls - (1.0 - K))       # OTM put by parity
         return oc.black76_implied_vol(prices, 1.0, K, T, 1.0, is_call)
     return iv
+
+
+def heston_iv_function(params: dict) -> Callable:
+    """iv(k, T) of Heston at ``params`` (kappa, theta, sigma, rho, v0): the
+    repo's Lewis engine (models.heston.heston_call_batch) on F = 1, D = 1."""
+    kap, th, sg, rh, v0 = (float(params[n]) for n in ("kappa", "theta", "sigma", "rho", "v0"))
+    return iv_from_normalised_calls(
+        lambda K, T: heston_call_batch(1.0, K, T, 0.0, 0.0, kap, th, sg, rh, v0))
 
 
 def load_v2_calibration(session: str, calibrations_dir: Path = CALIBRATIONS_DIR) -> Optional[dict]:
@@ -215,6 +258,7 @@ def heston_v2_factory(ctx: ScoreContext) -> Optional[ModelSpec]:
 MODEL_REGISTRY: dict = {
     "essvi": essvi_factory,
     "svi": svi_factory,
+    "svi_cal": svi_cal_factory,
     "heston_v2": heston_v2_factory,
 }
 

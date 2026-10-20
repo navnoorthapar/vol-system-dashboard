@@ -81,3 +81,82 @@ def test_surface_interpolates_total_variance_linearly_in_T():
     np.testing.assert_allclose(s.w(k, 0.05), 0.5 * s.slices[0].w(k))
     d = sv.SVISurface.from_dict(s.to_dict())
     np.testing.assert_allclose(d.w(k, 0.2), s.w(k, 0.2), rtol=1e-15)
+
+
+def test_analytic_g_and_constraint_jacobians_match_finite_differences():
+    rng = np.random.default_rng(11)
+    k = sv.SVI_GRID
+    for _ in range(10):
+        p = np.array([rng.uniform(-0.01, 0.02), rng.uniform(0.02, 0.5), rng.uniform(-0.9, 0.9),
+                      rng.uniform(-0.3, 0.3), rng.uniform(0.02, 0.5)])
+        g, J = sv.svi_g_jacobian(k, p)
+        np.testing.assert_allclose(g, sv.svi_g(k, p), rtol=0, atol=1e-13)
+        fun, jac = sv._constraints(k, tuple(p * [1, 0.9, 1, 1, 1]), tuple(p * [1, 1.1, 1, 1, 1]))
+        Jc = jac(p)
+        for j in range(5):
+            h = 1e-6 * max(abs(p[j]), 1e-2)
+            pp, pm = p.copy(), p.copy()
+            pp[j] += h
+            pm[j] -= h
+            fd = (sv.svi_g(k, pp) - sv.svi_g(k, pm)) / (2 * h)
+            np.testing.assert_allclose(J[:, j], fd, rtol=1e-5, atol=1e-6)
+            np.testing.assert_allclose(Jc[:, j], (fun(pp) - fun(pm)) / (2 * h), rtol=1e-5, atol=1e-6)
+
+
+def _crossing_groups():
+    """Three expiries; the middle one's quotes sit BELOW the first's in total
+    variance on the call wing (a calendar arbitrage in the data)."""
+    k = np.linspace(-0.35, 0.15, 41)
+    out = []
+    for lab, T, a, slope in (("a", 20 / 365, 0.165, -0.55), ("b", 21 / 365, 0.165, -0.75),
+                             ("c", 60 / 365, 0.17, -0.45)):
+        iv = a + slope * k + 1.0 * k * k
+        out.append((lab, T, k, iv, np.full(len(k), 0.001)))
+    w = {lab: iv ** 2 * T for lab, T, _, iv, _ in out}
+    assert (w["b"] < w["a"]).any()
+    return out
+
+
+def test_calendar_surface_is_ordered_and_beats_its_essvi_start():
+    groups = _crossing_groups()
+    kk = np.concatenate([g[2] for g in groups])
+    TT = np.concatenate([np.full(len(g[2]), g[1]) for g in groups])
+    iv = np.concatenate([g[3] for g in groups])
+    lab = np.concatenate([[g[0]] * len(g[2]) for g in groups])
+    ess, _ = es.fit_essvi(kk, TT, iv, np.full(len(kk), 0.001), lab)
+    free = sv.fit_svi_surface(groups, ess)
+    cal, info = sv.fit_svi_calendar_surface(groups, ess)
+    assert not free.ordering()["ordered"]                    # per-slice SVI crosses
+    o = cal.ordering()
+    assert o["ordered"] and o["min_dw_on_check_grid"] >= -sv._ORDER_TOL
+    assert o["min_wing_slope_increment"] >= -sv._ORDER_TOL
+    assert info["objective"] < info["objective_start_essvi"]
+    assert info["max_constraint_violation"] <= 1e-9
+    assert info["summed_objective_by_sweep"] == sorted(info["summed_objective_by_sweep"], reverse=True)
+    for s in cal.slices:
+        assert sv.svi_g(sv.SVI_GRID, s.params).min() >= -1e-9
+    # the non-crossing slice c fits about as well as unconstrained SVI
+    rm = lambda srf, g: np.sqrt(np.mean((srf.slices[2].iv(g[2]) - g[3]) ** 2))   # noqa: E731
+    assert rm(cal, groups[2]) < rm(free, groups[2]) + 5e-4
+    d = sv.SVISurface.from_dict(cal.to_dict())
+    assert d.name == "SVI-cal"
+    np.testing.assert_allclose(d.w(sv.SVI_GRID, 0.1), cal.w(sv.SVI_GRID, 0.1), rtol=1e-15)
+
+
+def test_calendar_surface_of_ordered_data_matches_free_fit():
+    """No crossing in the data: the calendar constraints do not bind and the
+    calendar-ordered slices fit as well as free per-slice SVI."""
+    k = np.linspace(-0.4, 0.2, 31)
+    groups = []
+    for lab, T in (("a", 30 / 365), ("b", 90 / 365), ("c", 180 / 365)):
+        true = sv.ssvi_slice_to_raw(0.04 * T, 0.5 * np.sqrt(0.04 * T), -0.6)
+        groups.append((lab, T, k, np.sqrt(sv.svi_w(k, *true) / T), np.full(len(k), 0.001)))
+    kk = np.concatenate([g[2] for g in groups])
+    TT = np.concatenate([np.full(len(k), g[1]) for g in groups])
+    iv = np.concatenate([g[3] for g in groups])
+    lab = np.concatenate([[g[0]] * len(k) for g in groups])
+    ess, _ = es.fit_essvi(kk, TT, iv, np.full(len(kk), 0.001), lab)
+    cal, info = sv.fit_svi_calendar_surface(groups, ess)
+    for s, g in zip(cal.slices, groups):
+        assert np.max(np.abs(s.iv(g[2]) - g[3])) < 2e-4         # 0.02 vol points
+    assert cal.ordering()["ordered"]

@@ -15,18 +15,21 @@ Butterfly, per slice (Gatheral & Jacquier, arXiv:1204.0646, Theorem 4.2):
 With A = psi (1 + rho) and B = psi (1 - rho) (twice the right / left wing
 slopes of w) they read max(A, B) < 4 and psi max(A, B) <= 4 theta.
 
-Calendar, consecutive slices: theta, A and B non-decreasing (the condition
-Corbetta, Cohort, Laachir & Martini, arXiv:1804.04924 sec. 2.2, quote from
-Hendriks & Martini: theta, psi non-decreasing and |rho_{i+1} psi_{i+1} -
-rho_i psi_i| <= psi_{i+1} - psi_i) PLUS the slice ordering itself,
-w_{i+1}(k) >= w_i(k), imposed by cutting planes: rows on CALENDAR_GRID (25
-points, dense near the money, out to |k| = 30), then, wherever a pair still
-crosses on CHECK_GRID (4,001 points on [-3, 2] plus |k| = 10, 30), the ends
-of each crossing run and the precise (bounded 1-D) minimiser of w_{i+1} - w_i
-in it are added as rows and the fit is re-solved from where it stopped,
-until no pair crosses by more than 1e-10 in total variance (at most 8 rounds;
-rounds and rows are in the fit info). The extra rows are needed: the monotone (theta, A, B) condition alone is
-NOT sufficient. Measured on the 2026-06-18 fit without them: the 2026-07-16
+Calendar, consecutive slices: theta, A and B non-decreasing PLUS the slice
+ordering itself. Corbetta, Cohort, Laachir & Martini (arXiv:1804.04924 sec.
+2.2), citing Hendriks & Martini, state "theta, psi non-decreasing and
+|rho_{i+1} psi_{i+1} - rho_i psi_i| <= psi_{i+1} - psi_i" (equivalently
+theta, A, B non-decreasing) as necessary and sufficient. They are necessary
+(w(0) = theta and the two wing slopes A/2, B/2), but not sufficient: the
+measured pair below satisfies them and crosses. So the ordering
+w_{i+1}(k) >= w_i(k) is imposed by cutting planes: rows on CALENDAR_GRID
+(25 points, dense near the money, out to |k| = 30), then, wherever a pair
+still crosses on CHECK_GRID (4,001 points on [-3, 2] plus |k| = 10, 30), the
+ends of each crossing run and the precise (bounded 1-D) minimiser of
+w_{i+1} - w_i in it are added as rows and the fit is re-solved from where it
+stopped, until no pair crosses by more than 1e-10 in total variance (at most
+8 rounds; rounds and rows are in the fit info). Measured on the 2026-06-18
+fit without the ordering rows: the 2026-07-16
 and 07-17 slices (theta 0.0013237 -> 0.0013323, A equal, B 0.0647 -> 0.0686)
 cross for every k > 0.0046 (min w_2 - w_1 = -2.4e-5 at k = 0.033); there
 d psi / d theta = 226 exceeds Gatheral-Jacquier's continuous-time bound
@@ -58,6 +61,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import minimize, minimize_scalar
+
+from joint_vol_calibration.surface._blas import blas_single_threaded
 
 _BUTTERFLY_SLACK = 1e-6          # psi (1+|rho|) <= 4 (1 - slack): strict "< 4"
 _MIN_FIRST = 1e-6
@@ -401,6 +406,7 @@ def _initial_point(k, mid_iv, T_slice, s, n, rho0=-0.7, eta0=1.0):
     return np.concatenate([inc(theta), inc(A), inc(B)])
 
 
+@blas_single_threaded
 def fit_essvi(k, T, mid_iv, half_spread, expiries, *, h_floor: float = 5e-4,
               weights=None, maxiter: int = 1000, x0=None) -> tuple:
     """Fit one eSSVI surface to quotes.

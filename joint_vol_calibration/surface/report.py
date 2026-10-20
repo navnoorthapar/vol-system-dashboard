@@ -19,11 +19,15 @@ residuals.parquet — one row per (model, quote) of the scoring universe:
     points). Sorted by model order, then T, strike.
 
 surface.json — inputs (chain path and SHA-256, spot, rate, T origin,
-    source), universe counts, the static-arbitrage screen and repair
-    summary with the largest violations, and for each fitted surface (essvi,
-    svi) its parameters, analytic no-arbitrage margins, fit
-    diagnostics, dense-grid checks and quote metrics; plus an ATM term
-    structure (eSSVI ATM vol and skew per quoted expiry, parity carry).
+    source), universe counts, the static-arbitrage screen (row counts and
+    violations per CRW row type, mid and executable; the bid / ask box
+    certificate; the total-variance calendar diagnostic), the l1-BA repair
+    summary with the largest violating rows and the quotes it moves outside
+    their spread, and for each fitted surface (essvi, svi, svi_cal) its
+    parameters, analytic no-arbitrage margins (and, for SVI surfaces, the
+    calendar ordering on the check grid), fit diagnostics, dense-grid checks
+    and quote metrics; plus an ATM term structure (eSSVI ATM vol and skew,
+    SVI-cal ATM vol, mid-quote ATM vol per quoted expiry, parity carry).
 
 scorecard.json — every model of scorecard.MODEL_REGISTRY on the same quotes:
     description, parameter count, in-sample size, metrics (all / in /
@@ -33,10 +37,13 @@ scorecard.json — every model of scorecard.MODEL_REGISTRY on the same quotes:
 
 vix_replication.json — official closes, the replicated VIX (Cboe rules;
     parity-forward variant; any-weekday bracket) and VIX9D/3M/6M analogues,
-    the variance-swap strip by expiry (Cboe single-term formula on the stored
-    quotes) with the model-free ATM vol and the ATM / VS ratio, model
-    variance swaps from the SVI and eSSVI fits, the 30-day ATM / VIX ratio
-    (model-free), the methodology deviations and measured gap diagnostics.
+    each with a gap attribution (wing truncation measured on the SVI-cal
+    surface, residual = official - replicated - truncation); the
+    variance-swap strip by expiry (Cboe single-term formula on the stored
+    quotes) with the model-free ATM vol and the ATM / VS ratio (the
+    empirical beta), model variance swaps from the eSSVI, SVI and SVI-cal
+    fits, the 30-day ATM / VIX ratio (model-free), the methodology
+    deviations and the gap notes.
 
 index.json (in data_store/surface/) — one summary row per session written.
 """
@@ -62,6 +69,7 @@ from joint_vol_calibration.surface import quotes as sqm
 from joint_vol_calibration.surface import scorecard as sc
 from joint_vol_calibration.surface import svi as sv
 from joint_vol_calibration.surface import vix as vx
+from joint_vol_calibration.surface._blas import single_thread_blas
 
 SCHEMA_VERSION = 1
 SURFACE_DIR = DATA_DIR / "surface"
@@ -127,19 +135,6 @@ def _sha256(path: Path) -> Optional[str]:
     return h.hexdigest()
 
 
-def _threadpool_limit():
-    """Single-threaded BLAS for the small dense problems here, if threadpoolctl
-    is importable (it ships with scikit-learn). On the shared 4-CPU machine,
-    OpenBLAS thread oversubscription slowed the eSSVI fit 70-150x (0.06 s
-    single-threaded vs 8.8 s)."""
-    try:
-        from threadpoolctl import threadpool_limits
-        return threadpool_limits(limits=1, user_api="blas")
-    except ImportError:                            # optional speed-up only
-        import contextlib
-        return contextlib.nullcontext()
-
-
 # ── per-session computation ───────────────────────────────────────────────────
 
 def _calc_time_ny(sq: sqm.SessionQuotes) -> datetime:
@@ -166,11 +161,29 @@ def _surface_section(model_row: dict, surface) -> dict:
         sec["analytic_g_min_k_-3_to_2"] = float(min(gmins))
         sec["slices_with_g_negative_on_k_-3_to_2"] = int(sum(g < -1e-9 for g in gmins))
         sec["max_wing_slope_b_1_plus_abs_rho"] = float(max(lee))
+        sec["calendar_ordering"] = surface.ordering()
     return sec
 
 
+def _repaired_quotes(q: pd.DataFrame, flags: pd.DataFrame, n: int = 25) -> dict:
+    """The quotes the l1-BA repair moves outside their spread: counts per
+    expiry and the ``n`` largest moves (option-price units)."""
+    out = flags["repair_outside_spread"].to_numpy(bool) if "repair_outside_spread" in flags else \
+        np.zeros(len(q), dtype=bool)
+    d = q.loc[out, ["expiry", "T_days", "strike", "right", "bid", "ask", "mid", "mid_iv",
+                    "half_spread_vp"]].copy()
+    d["repair_dprice"] = flags.loc[out, "repair_dprice"].to_numpy(float)
+    half = 0.5 * (d["ask"] - d["bid"])
+    d["repair_dprice_half_spreads"] = np.where(half > 0, d["repair_dprice"].abs() / half, np.nan)
+    d = d.reindex(d["repair_dprice"].abs().sort_values(ascending=False, kind="mergesort").index)
+    per_exp = {str(e): int(c) for e, c in q.loc[out, "expiry"].value_counts(sort=False).items()}
+    return {"n": int(out.sum()), "by_expiry": dict(sorted(per_exp.items())),
+            "largest": d.head(n).to_dict(orient="records")}
+
+
 def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
-               svi_surface, essvi_surface: es.ESSVISurface, calc: datetime) -> list:
+               svi_surface, essvi_surface: es.ESSVISurface, calc: datetime,
+               svi_cal_surface=None, attribution: Optional[dict] = None) -> list:
     notes = []
     raw = sq.raw
     n_zero = int(((pd.to_numeric(raw["bid"], errors="coerce") <= 0)).sum()) if "bid" in raw else 0
@@ -210,7 +223,7 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                             if t["k0_fallback"] else ""))
     T30 = 30.0 / 365.0
     parts = []
-    for name, surf in (("SVI", svi_surface), ("eSSVI", essvi_surface)):
+    for name, surf in (("SVI-cal", svi_cal_surface), ("SVI", svi_surface), ("eSSVI", essvi_surface)):
         if surf is not None:
             vs = 100.0 * math.sqrt(max(vx.surface_variance_swap(surf, T30), 0.0))
             parts.append(f"{name} {vs:.2f}")
@@ -218,6 +231,25 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
         notes.append("Model variance swaps at 30 days (k in [-3, 2], wings beyond the fitted "
                      "K/F 0.70-1.30 extrapolated, so each inherits its model's wing bias): "
                      + ", ".join(parts) + ".")
+    a = attribution or {}
+    if a.get("available") and "residual_pts" in a:
+        fw = a["far_wing_market_minus_model_pts"]
+        if abs(fw) < 0.05:
+            wing = "about as rich as that wing"
+        elif fw > 0:
+            wing = (f"{fw:.2f} index points richer than that wing, so the truncation figure "
+                    "likely understates")
+        else:
+            wing = (f"{-fw:.2f} index points cheaper than that wing, so the truncation figure "
+                    "likely overstates")
+        notes.append(f"Gap attribution (VIX, SVI-cal surface): replicated - official = "
+                     f"{a['gap_pts']:+.2f}. Strikes beyond the stored strip would add "
+                     f"{a['truncation_pts']:+.2f} under the surface's wing; the stored quotes "
+                     f"beyond the fitted K/F 0.70-1.30 are {wing}. Inside the fitted range "
+                     f"market and surface differ by {a['fit_inside_range_pts']:+.2f}. Left "
+                     f"unexplained by the chain: {a['residual_pts']:+.2f} (official - "
+                     f"replicated - truncation): snapshot timing vs the 16:15 ET print, stale "
+                     f"quotes, rate.")
     return notes
 
 
@@ -226,7 +258,7 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
     """Compute every artifact of ``session``. Returns {'residuals': frame,
     'surface': dict, 'scorecard': dict, 'vix_replication': dict}."""
     session = str(pd.Timestamp(session).date())
-    with _threadpool_limit():
+    with single_thread_blas():
         sq = sqm.load_session_quotes(session, chain=chain)
         q = sq.quotes
         screen = arb.screen(q)
@@ -247,11 +279,13 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
 
         # surface.json
         rows = {m["model"]: m for m in card["models"] if m.get("available")}
+        svi_surface = ctx.cache.get("svi")
+        svi_cal_surface = ctx.cache["svi_cal"][0] if "svi_cal" in ctx.cache else None
+        objs = {"essvi": essvi_surface, "svi": svi_surface, "svi_cal": svi_cal_surface}
         surfaces = {}
-        for name in ("essvi", "svi"):
+        for name in ("essvi", "svi", "svi_cal"):
             if name in rows:
-                obj = essvi_surface if name == "essvi" else ctx.cache.get(name)
-                surfaces[name] = _surface_section(rows[name], obj)
+                surfaces[name] = _surface_section(rows[name], objs[name])
         term = []
         carry = sq.carry.set_index("expiry")
         for exp, T, F, D, g in sqm.expiry_groups(q):
@@ -262,6 +296,8 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                          "median_half_spread_vp": float(np.median(g["half_spread_vp"])),
                          "atm_vol_essvi": 100.0 * essvi_surface.atm_vol(T),
                          "atm_skew_essvi": essvi_surface.atm_skew(T),
+                         "atm_vol_svi_cal": (100.0 * float(svi_cal_surface.iv(np.array([0.0]), T)[0])
+                                             if svi_cal_surface is not None else None),
                          "atm_vol_mid_quotes": 100.0 * float(np.interp(
                              0.0, np.sort(g["k"].to_numpy(float)),
                              g["mid_iv"].to_numpy(float)[np.argsort(g["k"].to_numpy(float))]))})
@@ -279,6 +315,7 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
             },
             "universe": sq.diagnostics,
             "arbitrage": {**screen.summary(), "largest_mid_violations": screen.violations,
+                          "quotes_repaired_outside_spread": _repaired_quotes(q, flags),
                           "constraint_set": ("CRW 2020 Table 1: C1-C3 per expiry; C4, C5 and C6 "
                                              "(C6.1 a/b/c and the nearest-neighbour chord) between "
                                              "consecutive expiries only; see arbitrage.py")},
@@ -305,8 +342,13 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                          "notes": [
                              "Every model is scored on the same quotes (the calibrator's OOS "
                              "universe) with the same metrics and dense-grid checks.",
-                             "Surfaces are fitted to alternate strikes; Heston's in-sample set is "
-                             "its 53 calibration anchors, fitted jointly with the VIX index leg.",
+                             "Surfaces are fitted to alternate strikes, so their out-of-sample "
+                             "quotes are the strikes in between (an interpolation test); Heston's "
+                             "in-sample set is its calibration anchors, fitted jointly with the "
+                             "VIX index leg.",
+                             "svi_cal is the arbitrage-free surface (butterfly and calendar "
+                             "certified on grids); svi has no calendar constraint and its "
+                             "calendar violations are counted in dense_grid.",
                              "Yahoo snapshots carry no quote time: part of every model's spread "
                              "misses can be stale quotes rather than model error."]}
 
@@ -334,10 +376,19 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                     if "low" in off:
                         rep["official_inside_day_range"] = bool(off["low"] <= head["level"] <= off["high"])
             indices[name] = rep
+        model_surfaces = {n: o for n, o in objs.items() if o is not None}
         strip = vx.variance_swap_strip(terms, sq.r_ref, q, carry=carry_map,
-                                       surfaces={"svi": ctx.cache.get("svi"),
-                                                 "essvi": essvi_surface}
-                                       if "svi" in ctx.cache else {"essvi": essvi_surface})
+                                       surfaces=model_surfaces)
+        fitted_expiries = set(q["expiry"].astype(str))
+        for name in vx.CONSTANT_MATURITY_DAYS:
+            rep = indices[name]
+            head = rep[rep["headline_method"]]
+            off = (rep.get("official") or {}).get("close")
+            rep["gap_attribution"] = (
+                vx.gap_attribution(head, terms, sq.r_ref, svi_cal_surface, fitted_expiries, off,
+                                   carry=carry_map)
+                if svi_cal_surface is not None
+                else {"available": False, "reason": "no SVI-cal surface"})
         T30 = 30.0 / 365.0
         rep30 = indices["VIX"]["cboe_rules"] if indices["VIX"]["cboe_rules"]["ok"] \
             else indices["VIX"]["parity_forward"]
@@ -346,11 +397,13 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                 "atm_vol_30d_method": ("near / next ATM mid IVs of the replicated VIX's own terms, "
                                        "combined with the VIX constant-maturity weights"),
                 "atm_vol_30d_essvi": 100.0 * essvi_surface.atm_vol(T30)}
-        for name in ("svi", "essvi"):
-            surf = ctx.cache.get(name) if name == "svi" else essvi_surface
-            if surf is not None:
-                beta[f"var_swap_vol_30d_{name}_k_-3_to_2"] = 100.0 * math.sqrt(
-                    max(vx.surface_variance_swap(surf, T30), 0.0))
+        for name, surf in model_surfaces.items():
+            beta[f"var_swap_vol_30d_{name}_k_-3_to_2"] = 100.0 * math.sqrt(
+                max(vx.surface_variance_swap(surf, T30), 0.0))
+        if svi_cal_surface is not None:
+            beta["atm_vol_30d_svi_cal"] = 100.0 * float(svi_cal_surface.iv(np.array([0.0]), T30)[0])
+            beta["atm_over_var_swap_30d_svi_cal"] = (
+                beta["atm_vol_30d_svi_cal"] / beta["var_swap_vol_30d_svi_cal_k_-3_to_2"])
         if "VIX" in official:
             beta["vix_official"] = official["VIX"]["close"]
             if atm30:
@@ -376,7 +429,8 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                 "Root-less (pre-C22) chains are treated as PM-settled.",
             ],
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
-                                    ctx.cache.get("svi"), essvi_surface, calc),
+                                    svi_surface, essvi_surface, calc, svi_cal_surface,
+                                    indices["VIX"].get("gap_attribution")),
         }
     resid_cols = [c for c in resid.columns]
     return {"residuals": resid[resid_cols].reset_index(drop=True), "surface": surface_doc,
@@ -410,9 +464,12 @@ def index_row(out: dict) -> dict:
                               "butterfly_violations": m["dense_grid"]["butterfly_violations"],
                               "calendar_violations": m["dense_grid"]["calendar_violations"]}
     v = vx_doc["indices"]["VIX"]
+    arbd = out["surface"]["arbitrage"]
     return {"session": sc_doc["session"], "n_quotes": sc_doc["n_quotes"],
-            "arbitrage_quotes_outside_spread": out["surface"]["arbitrage"]["repair"].get(
-                "n_perturbed_outside_spread"),
+            "arbitrage_quotes_outside_spread": arbd["repair"].get("n_perturbed_outside_spread"),
+            "executable_arbitrage": arbd["executable_arbitrage_certificate"].get("executable_arbitrage"),
+            "vix_gap_attribution": {k: v.get("gap_attribution", {}).get(k) for k in
+                                    ("truncation_pts", "residual_pts")},
             "models": models, "vix_replicated": v.get("replicated"),
             "vix_official": (v.get("official") or {}).get("close"),
             "vix_method": v.get("headline_method"),
@@ -421,6 +478,7 @@ def index_row(out: dict) -> dict:
 
 def write_index(rows: list, out_root: Path = SURFACE_DIR) -> Path:
     path = Path(out_root) / "index.json"
-    dump_json({"schema_version": SCHEMA_VERSION, "sessions": sorted(rows, key=lambda r: r["session"])},
-              path)
+    dump_json({"schema_version": SCHEMA_VERSION,
+               "schema_doc": "joint_vol_calibration/surface/report.py (module docstring)",
+               "sessions": sorted(rows, key=lambda r: r["session"])}, path)
     return path

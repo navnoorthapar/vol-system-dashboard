@@ -3,9 +3,10 @@
 surface_report.py — the quote-grade surface layer on every committed SPX chain.
 
 For each data_store/options/spx_<session>.parquet: clean the chain (the
-calibrator's universe), screen and repair static arbitrage, fit eSSVI / SVI /
-SVI+calendar surfaces, score them and the stored model_version-2 Heston fit
-in spread units, and replicate the VIX from the same chain. Writes
+calibrator's universe), screen and repair static arbitrage, fit the eSSVI,
+per-expiry SVI and calendar-ordered SVI (SVI-cal) surfaces, score them and the
+stored model_version-2 Heston fit in spread units, and replicate the VIX from
+the same chain. Writes
 data_store/surface/<session>/{residuals.parquet, surface.json,
 scorecard.json, vix_replication.json} and data_store/surface/index.json
 (schema: joint_vol_calibration/surface/report.py).
