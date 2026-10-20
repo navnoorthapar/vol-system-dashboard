@@ -632,8 +632,9 @@ _TABLE_DDL = {
     -- Daily interest-rate quotes as published (C23), the inputs of
     -- data/rates.py's zero curve: US Treasury bill rates (bank discount and
     -- coupon equivalent) and the par yield curve (home.treasury.gov), SOFR
-    -- and the H.15 3-month bill (FRED). value is the published quote / 100;
-    -- its basis is fixed by the series (rates.SERIES). Dated by the
+    -- (NY Fed), and on request FRED copies (DGS*, SOFR, the H.15 3-month
+    -- bill DTB3). value is the published quote / 100; its basis is fixed by
+    -- the series name (rates.bill_series, rates.PAR_MONTHS). Dated by the
     -- publisher's business day, which is NOT always an NYSE session (the
     -- bond market closes on Columbus and Veterans Day). Read via
     -- get_rates_daily(as_of_date).
@@ -641,7 +642,7 @@ _TABLE_DDL = {
         date        TEXT NOT NULL,
         series      TEXT NOT NULL,       -- e.g. 'UST_BILL_13W_BD', 'UST_PAR_2Y', 'SOFR'
         value       REAL NOT NULL,       -- decimal (4.10% -> 0.041), basis per series
-        source      TEXT NOT NULL,       -- 'treasury' | 'fred'
+        source      TEXT NOT NULL,       -- 'treasury' | 'nyfed' | 'fred'
         PRIMARY KEY (date, series)
     )""",
 }

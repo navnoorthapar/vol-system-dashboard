@@ -1,0 +1,5 @@
+bucket,n,sessions,spread_bills_bp_median,spread_bills_bp_iqr,spread_par_bp_median,spread_par_bp_iqr,spread_sofr_bp_median,spread_sofr_bp_iqr
+0-30d,65,5,-45.94,299.11,-48.80,301.04,-44.71,295.04
+30-91d,42,5,12.82,80.69,11.12,80.77,12.96,74.69
+91-365d,64,5,41.37,22.32,39.60,18.08,48.57,40.05
+>=365d,24,5,33.39,21.83,33.33,21.16,62.14,56.28
