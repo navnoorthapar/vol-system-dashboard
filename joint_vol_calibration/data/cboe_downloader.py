@@ -35,9 +35,12 @@ Financial context:
   indices. These are the prices a VIX-futures model leg should be fitted to.
 """
 
+import hashlib
 import io
+import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -177,6 +180,65 @@ def download_vix_term_structure_history(
     out["is_vvix"] = out["ticker"].eq("^VVIX")
     out = out.sort_values(["date", "tenor_days"]).reset_index(drop=True)
     return out[["date", "ticker", "tenor_days", "close", "is_vvix", "source"]]
+
+
+# ── Other Cboe indices (C23) ──────────────────────────────────────────────────
+
+# Same URL template as the VIX family. Name -> (what it is, first date in the
+# file as fetched 2026-10-20). Files with OHLC columns keep them; the others
+# (SKEW, DSPX, VIXEQ and the strategy benchmarks) carry one value per day.
+CBOE_INDEX_CATALOG = {
+    "VIX1D": ("1-day VIX: expected 1-day SPX volatility (variance-swap method on 0-1 DTE options)",
+              "2022-05-13"),
+    "VIX1Y": ("1-year VIX: the VIX method at a 1-year horizon", "2007-01-03"),
+    "SKEW": ("Cboe SKEW Index: 100 - 10 x (S&P 500 30-day risk-neutral skewness)", "1990-01-02"),
+    "COR1M": ("Cboe 1-month implied correlation index (S&P 500, 50 largest names)", "2006-01-03"),
+    "COR3M": ("Cboe 3-month implied correlation index", "2006-01-03"),
+    "DSPX": ("Cboe S&P 500 Dispersion Index: 30-day expected dispersion of constituent returns",
+             "2014-06-19"),
+    "VIXEQ": ("Cboe S&P 500 constituent volatility index (the single-name leg of DSPX)", "2014-06-19"),
+    # Strategy benchmarks (total-return indices of systematic SPX option strategies)
+    "PUT": ("Cboe S&P 500 PutWrite Index (monthly cash-secured ATM put write)", "1991-03-04"),
+    "WPUT": ("Cboe S&P 500 One-Week PutWrite Index", "2006-01-31"),
+    "BXM": ("Cboe S&P 500 BuyWrite Index (monthly ATM covered call)", "2002-03-22"),
+    "BFLY": ("Cboe S&P 500 Iron Butterfly Index", "1986-06-20"),
+    "CNDR": ("Cboe S&P 500 Iron Condor Index", "1986-06-20"),
+}
+# What pipeline.refresh_cboe_indices downloads unless told otherwise.
+DEFAULT_EXTRA_INDICES = ("VIX1D", "VIX1Y", "SKEW", "COR1M", "COR3M", "DSPX")
+
+
+def download_cboe_indices(symbols: Iterable[str] = DEFAULT_EXTRA_INDICES,
+                          start: Optional[str] = None,
+                          end: Optional[str] = None) -> pd.DataFrame:
+    """
+    Daily history of Cboe indices outside the VIX family, one file each.
+
+    ``symbols`` are Cboe file names (CBOE_INDEX_CATALOG lists the known
+    ones; any other name is tried with the same URL template). Rows are
+    returned as published — including the days the NYSE was closed;
+    database.insert_cboe_index drops those. [start, end] trims inclusively.
+
+    Returns
+    -------
+    DataFrame with columns [date, symbol, open, high, low, close, source='cboe'],
+    sorted by (date, symbol). A symbol whose download fails raises.
+    """
+    frames = []
+    for sym in symbols:
+        sym = str(sym).upper().lstrip("^_")
+        df = download_index_history(sym)
+        df["symbol"] = sym
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=["date", "symbol", "open", "high", "low", "close", "source"])
+    out = pd.concat(frames, ignore_index=True)
+    if start:
+        out = out[out["date"] >= start]
+    if end:
+        out = out[out["date"] <= end]
+    out = out.sort_values(["date", "symbol"]).reset_index(drop=True)
+    return out[["date", "symbol", "open", "high", "low", "close", "source"]]
 
 
 # ── VX Futures Settlements ────────────────────────────────────────────────────
@@ -518,6 +580,175 @@ def download_cboe_options_snapshot(underlying: str, now: Optional[datetime] = No
         logger.info("Fetched %d %s option rows (%d expiries) for session %s", len(df),
                     underlying.upper(), df["expiry"].nunique(), df["snapshot_date"].iloc[0])
     return df
+
+
+# ── Timestamped chain capture (C23; not wired into the daily bot) ─────────────
+
+# Per-option fields the delayed-quotes payload carries beyond the
+# options_snapshots schema; kept only with include_extras=True.
+_CAPTURE_EXTRAS = {"bid_size": "bid_size", "ask_size": "ask_size", "theo": "theo", "rho": "rho",
+                   "last_trade_price": "last_trade_price", "last_trade_time": "option_last_trade_time"}
+
+# Cboe labels these quotes "delayed": the payload's `timestamp` is when Cboe
+# generated the file (on 2026-10-20 a fetch at 12:29:03Z returned timestamp
+# 12:28:16Z, Last-Modified 12:28:19Z), not when the quotes were live.
+STATED_DELAY_MINUTES = 15
+
+
+@dataclass
+class ChainCapture:
+    """One delayed-quotes download of a full option chain, with its timestamps.
+
+    frame       options_snapshots rows (parse_cboe_options_payload): snapshot_date
+                is the NY session of the underlying's last trade, quote_time the
+                payload timestamp (ISO UTC), source 'cboe'; plus the
+                _CAPTURE_EXTRAS columns when include_extras=True
+    session     that NY session
+    book_state  where the fetch fell relative to that session (book_state_at):
+                'intraday' | 'closing' | 'gth' | 'pre_open'
+    fetched_at  client clock at the request (ISO UTC)
+    payload_timestamp, underlying_last_trade_time (NY local), underlying_price
+    url, sha256 (of the raw response bytes), n_bytes
+    """
+    underlying: str
+    frame: pd.DataFrame
+    session: Optional[str]
+    book_state: str
+    fetched_at: str
+    payload_timestamp: Optional[str]
+    underlying_last_trade_time: Optional[str]
+    underlying_price: float
+    url: str
+    sha256: str
+    n_bytes: int
+
+    def summary(self) -> dict:
+        """JSON-ready metadata (no quotes): counts, timestamps, hash."""
+        f = self.frame
+        two = int(((f["bid"] > 0) & (f["ask"] >= f["bid"])).sum()) if len(f) else 0
+        return {
+            "underlying": self.underlying, "session": self.session, "book_state": self.book_state,
+            "fetched_at": self.fetched_at, "payload_timestamp": self.payload_timestamp,
+            "stated_delay_minutes": STATED_DELAY_MINUTES,
+            "underlying_last_trade_time": self.underlying_last_trade_time,
+            "underlying_price": self.underlying_price, "url": self.url,
+            "sha256": self.sha256, "n_bytes": self.n_bytes, "rows": int(len(f)),
+            "two_sided_rows": two, "expiries": int(f["expiry"].nunique()) if len(f) else 0,
+            "roots": sorted(f["root"].dropna().unique().tolist()) if len(f) else [],
+        }
+
+
+def book_state_at(fetched_at: datetime, session: Optional[str]) -> str:
+    """Which book a quote feed shows at ``fetched_at`` for quotes of ``session``.
+
+    'intraday'  09:30 ET to the 16:15 data cutoff of ``session`` itself
+    'gth'       inside the Global Trading Hours window (20:15 ET the evening
+                before, to 09:15 ET) of the session AFTER ``session``: these
+                quotes trade for the next session (option_chain.t_origin
+                measures T from the quote time for them)
+    'pre_open'  09:15-09:30 ET of the next session (GTH closed, RTH not open)
+    'closing'   anything else: the evening after the close, weekends and
+                holidays — the session's closing book
+    """
+    from joint_vol_calibration.data import option_chain as oc
+    if session is None:
+        return "closing"
+    ny = db._now_ny(fetched_at)
+    if db.is_intraday(fetched_at) and ny.date().isoformat() == session:
+        return "intraday"
+    nxt = oc.next_session(session)
+    lo, hi = oc.gth_window(nxt)
+    if lo <= ny < hi:
+        return "gth"
+    if ny.date() == nxt and hi <= ny < datetime.combine(nxt, db.SESSION_OPEN, db.NY_TZ):
+        return "pre_open"
+    return "closing"
+
+
+def capture_option_chain(underlying: str, now: Optional[datetime] = None, *,
+                         include_extras: bool = False, timeout: float = 60.0) -> ChainCapture:
+    """
+    Download one full delayed-quotes chain (``_SPX.json`` / ``_VIX.json``) and
+    return it normalised and timestamped (ChainCapture). Stores nothing.
+
+    The frame is what download_cboe_options_snapshot returns (the
+    options_snapshots schema, quote_time and source='cboe' on every row),
+    computed from the same bytes the sha256 is taken of, so a later
+    re-parse of a privately archived payload can be checked against the
+    hash. ``now`` is the fetch time used for dating (default: the clock).
+
+    Licensing: Cboe's website terms allow viewing and downloading for
+    personal, non-commercial use and bar storing or redistributing the
+    Materials (DATA_SOURCES.md). Nothing here writes the quotes to the
+    repository; capture_option_chains writes only where its caller says.
+    """
+    symbol = _quote_symbol(underlying)
+    url = _CBOE_QUOTE_API.format(symbol=symbol)
+    fetched = now or db._utcnow()
+    resp = _get(url, timeout=timeout)
+    raw_bytes = resp.content
+    payload = json.loads(raw_bytes.decode("utf-8"))
+    return _capture_from_payload(underlying, payload, raw_bytes, url, fetched, include_extras)
+
+
+def _capture_from_payload(underlying: str, payload: dict, raw_bytes: bytes, url: str,
+                          fetched: datetime, include_extras: bool = False) -> ChainCapture:
+    und = underlying.upper().lstrip("_^")
+    frame = parse_cboe_options_payload(payload, und, now=fetched)
+    data = payload.get("data") or {}
+    if include_extras and not frame.empty:
+        raw = pd.DataFrame(data.get("options") or [])
+        raw = raw[raw.get("option", pd.Series(dtype=object)).astype(str).isin(frame["contract_symbol"])]
+        keep = {k: v for k, v in _CAPTURE_EXTRAS.items() if k in raw.columns}
+        extra = raw[["option", *keep]].rename(columns={"option": "contract_symbol", **keep})
+        for col in extra.columns:
+            if col not in ("contract_symbol", "option_last_trade_time"):
+                extra[col] = pd.to_numeric(extra[col], errors="coerce")
+        frame = frame.merge(extra.drop_duplicates("contract_symbol"), on="contract_symbol", how="left")
+    session = str(frame["snapshot_date"].iloc[0]) if len(frame) else None
+    stamp = pd.to_datetime(payload.get("timestamp"), errors="coerce")
+    spot = data.get("close") or data.get("current_price")
+    return ChainCapture(
+        underlying=und, frame=frame, session=session,
+        book_state=book_state_at(fetched, session),
+        fetched_at=db.utc_iso(fetched),
+        payload_timestamp=None if pd.isna(stamp) else stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        underlying_last_trade_time=data.get("last_trade_time"),
+        underlying_price=float(spot) if spot else float("nan"),
+        url=url, sha256=hashlib.sha256(raw_bytes).hexdigest(), n_bytes=len(raw_bytes),
+    )
+
+
+def capture_option_chains(underlyings: Iterable[str] = ("SPX", "VIX"), now: Optional[datetime] = None, *,
+                          out_dir=None, include_extras: bool = False) -> dict:
+    """
+    capture_option_chain for each underlying, back to back (the SPX and VIX
+    books a joint fit needs, fetched about a second apart). Returns
+    {underlying: ChainCapture}; a failed download is logged and left out.
+
+    With ``out_dir`` (required to write anything; there is no default under
+    data_store/) each frame goes to <out_dir>/<und>_<session>_<HHMMSSZ>.parquet
+    and every summary to <out_dir>/<und>_<session>_<HHMMSSZ>.json. Each
+    capture's own fetch time is recorded; ``now`` overrides the clock for all.
+    """
+    out = {}
+    for und in underlyings:
+        try:
+            cap = capture_option_chain(und, now=now, include_extras=include_extras)
+        except Exception as e:
+            logger.warning("Cboe %s chain capture failed: %s", und, e)
+            continue
+        out[cap.underlying] = cap
+        if out_dir is not None and cap.session is not None:
+            from pathlib import Path
+            d = Path(out_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            stem = f"{cap.underlying.lower()}_{cap.session}_{cap.fetched_at[11:19].replace(':', '')}Z"
+            cap.frame.to_parquet(d / f"{stem}.parquet", index=False, compression="zstd")
+            (d / f"{stem}.json").write_text(json.dumps(cap.summary(), indent=2) + "\n")
+        logger.info("Captured %s chain: %d rows, session %s, book %s, payload %s", cap.underlying,
+                    len(cap.frame), cap.session, cap.book_state, cap.payload_timestamp)
+    return out
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────

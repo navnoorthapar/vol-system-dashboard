@@ -9,6 +9,7 @@ which opens the shipped file READ-ONLY. Clocks are frozen by monkeypatching
 captured fixtures (tests/fixtures/cboe_*). No test touches the network.
 """
 import ast
+import json
 import importlib.util
 import logging
 import pickle
@@ -1180,3 +1181,184 @@ class TestC23SchemaV2:
             assert db._schema_is_current(con)
         finally:
             con.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C23: the VIX index family from Cboe (pipeline.refresh_vix_index_family) and
+# the scripted correction of the persisted record
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _family(rows, source):
+    """rows: (date, ticker, close) -> the downloaders' long frame."""
+    df = pd.DataFrame(rows, columns=["date", "ticker", "close"])
+    df["tenor_days"] = df["ticker"].map({**config.VIX_INDEX_TENOR_DAYS, "^VVIX": config.VVIX_TENOR_DAYS})
+    df["is_vvix"] = df["ticker"].eq("^VVIX")
+    return df.assign(source=source)
+
+
+def _ohlc(rows, source):
+    df = pd.DataFrame(rows, columns=["date", "close"])
+    return df.assign(open=df["close"], high=df["close"], low=df["close"], source=source)
+
+
+@pytest.fixture
+def family_sources(monkeypatch):
+    """Yahoo and Cboe downloads of the same window, with the real 2026-02-06
+    Yahoo bad print (^VIX = the ^VIX3M value), a Memorial Day Yahoo row and
+    a session (10-19) Cboe has not posted yet."""
+    yahoo = _family([("2026-02-06", "^VIX", 20.370001), ("2026-02-06", "^VIX3M", 20.370001),
+                     ("2026-05-25", "^VIX", 15.5), ("2026-10-16", "^VVIX", 109.910004),
+                     ("2026-10-19", "^VVIX", 107.0)], "yfinance")
+    cboe = _family([("2026-02-06", "^VIX", 17.76), ("2026-02-06", "^VIX3M", 20.37),
+                    ("2026-10-16", "^VVIX", 109.91)], "cboe")
+    state = {"yahoo": yahoo, "cboe": cboe, "cboe_up": True,
+             "y_vix": _ohlc([("2026-02-06", 20.370001), ("2026-10-19", 18.44)], "yfinance"),
+             "c_vix": _ohlc([("2026-01-19", 15.0), ("2026-02-06", 17.76)], "cboe")}
+
+    def cboe_ts(start=None, end=None, tickers=None):
+        if not state["cboe_up"]:
+            raise cb.requests.HTTPError("503")
+        df = state["cboe"]
+        return df[(df["date"] >= start) & (df["date"] <= end)]
+
+    def cboe_vix():
+        if not state["cboe_up"]:
+            raise cb.requests.HTTPError("503")
+        return state["c_vix"]
+    monkeypatch.setattr(yfd, "download_vix_term_structure", lambda start, end: state["yahoo"].copy())
+    monkeypatch.setattr(yfd, "download_vix_index", lambda start, end: state["y_vix"].copy())
+    monkeypatch.setattr(cb, "download_vix_term_structure_history", cboe_ts)
+    monkeypatch.setattr(cb, "download_vix_history", cboe_vix)
+    return state
+
+
+class TestC23VixIndexFamilyRefresh:
+    def test_cboe_wins_yahoo_is_provisional_and_mismatches_are_reported(self, tmp_db, family_sources, caplog):
+        with caplog.at_level(logging.WARNING):
+            res = pl.refresh_vix_index_family("2026-01-01", "2026-10-19")
+        assert res["ok"] and res["errors"] == []
+        st = _stored_vts(tmp_db)
+        assert st[("2026-02-06", "^VIX")] == (17.76, "cboe")
+        assert st[("2026-10-16", "^VVIX")] == (109.91, "cboe")
+        assert st[("2026-10-19", "^VVIX")] == (107.0, "yfinance")
+        assert ("2026-05-25", "^VIX") not in st                             # Memorial Day
+        assert res["provisional"] == [("2026-10-19", "^VVIX")]
+        assert res["mismatches"][["date", "ticker"]].values.tolist() == [["2026-02-06", "^VIX"]]
+        assert "cboe vs yfinance ^VIX: 1 row(s) differ by more than 0.25" in caplog.text
+        vd = db.get_vix_daily("2026-12-31").set_index(db.get_vix_daily("2026-12-31")["date"].dt.strftime("%Y-%m-%d"))
+        assert vd.loc["2026-02-06", "close"] == 17.76 and vd.loc["2026-02-06", "source"] == "cboe"
+        assert vd.loc["2026-10-19", "source"] == "yfinance" and "2026-01-19" not in vd.index
+
+        family_sources["cboe"] = pd.concat([family_sources["cboe"],
+                                            _family([("2026-10-19", "^VVIX", 106.93)], "cboe")])
+        res = pl.refresh_vix_index_family("2026-10-01", "2026-10-19")
+        assert res["provisional"] == [] and _stored_vts(tmp_db)[("2026-10-19", "^VVIX")] == (106.93, "cboe")
+
+    def test_cboe_outage_keeps_yahoo_as_provisional_and_says_so(self, tmp_db, family_sources):
+        db.insert_vix_term_structure(_family([("2026-02-06", "^VIX", 17.76)], "cboe"))
+        family_sources["cboe_up"] = False
+        res = pl.refresh_vix_index_family("2026-01-01", "2026-10-19")
+        assert not res["ok"] and any(e.startswith("cboe term structure") for e in res["errors"])
+        st = _stored_vts(tmp_db)
+        assert st[("2026-02-06", "^VIX")] == (17.76, "cboe")                # the official print survives
+        assert st[("2026-10-19", "^VVIX")][1] == "yfinance"
+        assert len(res["provisional"]) == 4 and res["mismatches"].empty
+
+    def test_daily_refresh_stores_the_family_through_it(self, offline_pipeline, family_sources, monkeypatch):
+        freeze(monkeypatch, "2026-10-19T22:30:00Z")
+        res = pl.DataPipeline().daily_refresh()
+        assert res["vix_cross_source_mismatches"] == 0                     # window 10-09..10-19 only
+        st = _stored_vts(db.DB_PATH)
+        assert st[("2026-10-16", "^VVIX")] == (109.91, "cboe")
+        assert st[("2026-10-19", "^VVIX")] == (107.0, "yfinance")
+
+
+class TestC23RecordCorrection:
+    """correct_vix_index_family on a miniature record shaped like the real one
+    (pre-C23 partitions: unrecorded or 'yfinance' sources, float32 prints)."""
+
+    def _record(self, tmp_path):
+        root = tmp_path / "market"
+        old_ts = _family([("2011-01-03", "^VIX9D", 16.040001),          # Cboe's VIX9D file starts 01-04
+                          ("2019-08-12", "^VVIX", 105.309998),          # Cboe 110.31
+                          ("2020-06-10", "^VVIX", 116.529999),          # same print as Cboe
+                          ("2026-02-06", "^VIX", 20.370001),            # Yahoo's bad print
+                          ("2026-09-07", "^VIX", 15.0)], None)          # Labor Day
+        old_ts.loc[old_ts["date"] == "2026-09-07", "source"] = "yfinance"
+        db.replace_market_partitions("vix_term_structure", old_ts, root)
+        db.replace_market_partitions("vix_daily", _ohlc([("2019-08-12", 17.97), ("2024-07-04", 12.0)], None), root)
+        cboe_ts = _family([("2011-01-04", "^VIX9D", 16.06), ("2019-08-12", "^VVIX", 110.31),
+                           ("2020-06-10", "^VVIX", 116.53), ("2020-06-11", "^VVIX", 146.84),
+                           ("2026-02-06", "^VIX", 17.76), ("2026-10-19", "^VIX", 18.44)], "cboe")
+        cboe_vix = _ohlc([("2019-08-12", 17.97), ("2024-07-04", 12.0)], "cboe")
+        return root, cboe_ts, cboe_vix
+
+    def test_every_row_is_classified_and_the_backtest_window_counted(self, tmp_db, tmp_path):
+        root, cboe_ts, cboe_vix = self._record(tmp_path)
+        res = pl.correct_vix_index_family(cboe_ts, cboe_vix, root=root)          # dry run
+        log = res["log"].set_index(["table", "date", "ticker"])["action"].to_dict()
+        assert log == {
+            ("vix_term_structure", "2011-01-03", "^VIX9D"): "kept_not_in_cboe",
+            ("vix_term_structure", "2011-01-04", "^VIX9D"): "added_from_cboe",
+            ("vix_term_structure", "2019-08-12", "^VVIX"): "replaced_by_cboe",
+            ("vix_term_structure", "2020-06-10", "^VVIX"): "restated_as_cboe",
+            ("vix_term_structure", "2020-06-11", "^VVIX"): "added_from_cboe",
+            ("vix_term_structure", "2026-02-06", "^VIX"): "replaced_by_cboe",
+            ("vix_term_structure", "2026-09-07", "^VIX"): "removed_non_session",
+            ("vix_daily", "2019-08-12", "^VIX"): "restated_as_cboe",
+            ("vix_daily", "2024-07-04", "^VIX"): "removed_non_session",
+        }
+        t = res["tables"]["vix_term_structure"]
+        assert t["rows_before"] == 5 and t["rows_after"] == 6                   # 10-19 is past the record
+        assert t["replaced_over_cross_source_tol"] == 2
+        assert t["replaced_over_cross_source_tol_in_backtest_window"] == 1      # 2019-08-12 only
+        assert t["actions_in_backtest_window"] == {"added_from_cboe": 1, "replaced_by_cboe": 1,
+                                                   "restated_as_cboe": 1}
+        before = db.read_market_partitions("vix_term_structure", root)
+        assert before["close"].tolist()[:1] == [16.040001]                        # dry run wrote nothing
+
+    def test_apply_rewrites_the_record_and_logs_the_material_rows(self, tmp_db, tmp_path):
+        root, cboe_ts, cboe_vix = self._record(tmp_path)
+        logs = tmp_path / "corrections"
+        res = pl.correct_vix_index_family(cboe_ts, cboe_vix, root=root, apply=True, log_dir=logs)
+        ts = db.read_market_partitions("vix_term_structure", root).set_index(["date", "ticker"])
+        assert ts.loc[("2026-02-06", "^VIX"), "close"] == 17.76
+        assert ts.loc[("2011-01-03", "^VIX9D"), "source"] == "yfinance"
+        assert set(ts.drop(index=("2011-01-03", "^VIX9D"))["source"]) == {"cboe"}
+        assert ("2026-09-07", "^VIX") not in ts.index
+        assert ts.loc[("2020-06-11", "^VVIX"), ["tenor_days", "is_vvix"]].tolist() == [30, 1]
+        vd = db.read_market_partitions("vix_daily", root)
+        assert vd[["date", "source"]].values.tolist() == [["2019-08-12", "cboe"]]
+        csv = pd.read_csv(logs / "c23_vix_index_family.csv")
+        assert sorted(csv["action"].unique()) == ["added_from_cboe", "kept_not_in_cboe", "removed_non_session",
+                                                  "replaced_by_cboe"]
+        assert len(csv) == res["material_rows"] == 7                          # restatements are counted only
+        summary = json.loads((logs / "c23_vix_index_family.json").read_text())
+        assert summary["tables"]["vix_daily"]["actions"] == {"removed_non_session": 1, "restated_as_cboe": 1}
+        again = pl.correct_vix_index_family(cboe_ts, cboe_vix, root=root, apply=True)
+        assert again["partitions_rewritten"] == 0 and again["material_rows"] == 1   # only the kept row
+        assert set(again["log"]["action"]) == {"unchanged", "kept_not_in_cboe"}
+
+    def test_apply_db_removes_holiday_rows_and_installs_the_cboe_values(self, tmp_db, tmp_path):
+        root, cboe_ts, cboe_vix = self._record(tmp_path)
+        con = raw_conn(tmp_db)
+        con.execute("INSERT INTO vix_term_structure VALUES ('2026-09-07', '^VIX', 30, 15.0, 0, NULL)")
+        con.execute("INSERT INTO vix_term_structure VALUES ('2026-02-06', '^VIX', 30, 20.370001, 0, NULL)")
+        con.execute("INSERT INTO vix_daily VALUES ('2024-07-04', 12, 12, 12, 12, NULL)")
+        con.commit()
+        con.close()
+        res = pl.correct_vix_index_family(cboe_ts, cboe_vix, root=root, apply=True, apply_db=True)
+        assert res["db"]["removed_non_session"] == {"vix_term_structure": 1, "vix_daily": 1}
+        st = _stored_vts(tmp_db)
+        assert st[("2026-02-06", "^VIX")] == (17.76, "cboe") and ("2026-09-07", "^VIX") not in st
+        assert st[("2020-06-11", "^VVIX")] == (146.84, "cboe")
+
+    def test_cli_dry_run_prints_the_summary(self, tmp_db, tmp_path, monkeypatch, capsys):
+        root, cboe_ts, cboe_vix = self._record(tmp_path)
+        monkeypatch.setattr(db, "MARKET_DIR", root)
+        monkeypatch.setattr(cb, "download_vix_term_structure_history", lambda **k: cboe_ts)
+        monkeypatch.setattr(cb, "download_vix_history", lambda: cboe_vix)
+        assert pl.main(["correct-vix-index-family"]) == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["material_rows"] == 7 and "partitions_rewritten" not in out
+        assert not (root / "corrections").exists()

@@ -2185,18 +2185,29 @@ def replace_market_partitions(table: str, df: pd.DataFrame, root: Optional[Path]
     """Make the persisted partitions of ``table`` hold exactly ``df``'s rows.
 
     FOR DELIBERATE, SCRIPTED CORRECTIONS ONLY (pipeline.correct_vix_index_family):
-    unlike export_market_partitions this does not merge — rows a file holds
-    that ``df`` lacks are removed, and a year with no row in ``df`` keeps
-    its file untouched. Returns the paths rewritten.
+    unlike export_market_partitions this does not merge. Rows a file holds
+    that ``df`` lacks are removed, and the file of a year with no row left in
+    ``df`` is deleted. ``df`` must therefore be the WHOLE corrected table; an
+    empty ``df`` is refused. Returns the paths rewritten or deleted.
     """
     root = Path(root) if root is not None else MARKET_DIR
     keys, cols, dtypes = _MARKET_TABLES[table]
+    if df is None or df.empty:
+        raise ValueError(f"replace_market_partitions({table}): refusing to empty the record")
     df = _canonical(df.drop_duplicates(list(keys), keep="last"), cols, dtypes, keys)
     written = []
+    years = set()
     for year, part in df.groupby(df["date"].str[:4]):
+        years.add(year)
         path = root / table / f"{table}_{year}.parquet"
         if _write_parquet_if_changed(part.reset_index(drop=True), path):
             written.append(path)
+    for path in sorted((root / table).glob(f"{table}_*.parquet")):
+        if path.stem.rsplit("_", 1)[-1] not in years:
+            path.unlink()
+            written.append(path)
+            logger.warning("replace_market_partitions(%s): deleted %s (no row left for that year)",
+                           table, path.name)
     logger.info("replace_market_partitions(%s): %d file(s) rewritten under %s", table, len(written), root)
     return written
 
