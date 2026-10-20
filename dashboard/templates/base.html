@@ -151,7 +151,8 @@
   <p class="mt12"><button class="btn" type="button" data-close-dialog>Close</button></p>
 </dialog>
 
-<script src="{{ vendored.echarts.src }}" integrity="{{ vendored.echarts.sri }}" crossorigin="anonymous"></script>
-<script src="{{ js.src }}"></script>
+{# the chart library (225 KB gzipped) only on pages that draw a chart #}
+{% if d and (d.charts or d.surface3d) %}<script src="{{ vendored.echarts.src }}" integrity="{{ vendored.echarts.sri }}" crossorigin="anonymous"></script>
+{% endif %}<script src="{{ js.src }}"></script>
 </body>
 </html>

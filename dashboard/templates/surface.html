@@ -55,7 +55,7 @@
     </table>
     </div>
     {% for n_ in d.score_notes %}<p class="note">{{ n_|prose }}</p>{% endfor %}
-    {% if H %}<p class="note">Heston's fitted set is its calibration anchors; the surfaces are fitted to alternate strikes and scored on the rest, so they interpolate where Heston must extrapolate. Read the surfaces as the quote-noise floor, not as rival models.</p>{% endif %}
+    {% if H %}<p class="note">The surfaces interpolate between fitted strikes where Heston must extrapolate from its anchors: read them as the quote-noise floor, not as rival models.</p>{% endif %}
     {% call m.method('Model descriptions') %}<dl class="dl">{% for r in d.score_rows %}<dt>{{ r.label }}</dt><dd>{{ r.description|prose }}</dd>{% endfor %}</dl>{% endcall %}
   {% endcall %}
   {% call m.panel('by-expiry', 'Median |z| by expiry · every model', 's5') %}

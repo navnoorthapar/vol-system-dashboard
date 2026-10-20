@@ -283,6 +283,7 @@
   Desk.render = render;
 
   function initCharts() {
+    if (!$$('.chart').length) return;           // a page without charts loads no chart library
     if (!window.echarts) {
       root.classList.add('charts-failed');
       $$('.chart').forEach(function (w) {

@@ -728,7 +728,11 @@ def test_no_third_party_script_and_vendored_scripts_match_their_sri(dash, freeze
     ec = dash.VENDORED["echarts"]
     for route, html in pages.items():
         assert not re.findall(r"<script[^>]+src=\"(?:https?:)?//", html), route
-        assert f'<script src="{ec["src"]}" integrity="{ec["sri"]}" crossorigin="anonymous"></script>' in html
+        # the chart library is loaded, with its hash, exactly on the pages that draw a chart
+        draws = 'data-spec="' in html or 'data-load-3d="' in html
+        tag = f'<script src="{ec["src"]}" integrity="{ec["sri"]}" crossorigin="anonymous"></script>'
+        assert (tag in html) is draws, route
+        assert html.count(ec["src"]) == (1 if draws else 0), route
         assert "cdn.jsdelivr" not in html and "unpkg.com" not in html and "chart.umd" not in html
         assert not freezer.page_policy_problems(html), route
     # echarts-gl is never a page script: the Surface page loads it on demand, with its hash
@@ -1088,7 +1092,10 @@ def test_charts_fail_soft_without_echarts(pages):
     for route, html in pages.items():
         assert "new Chart(" not in html and "Chart.defaults" not in html
         # ECharts loads before the page script, which only reads JSON specs
-        assert html.index("echarts-6.1.0-desk.min.js") < html.index("static/desk.js?v=")
+        if 'data-spec="' in html:
+            assert html.index("echarts-6.1.0-desk.min.js") < html.index("static/desk.js?v=")
+    assert "if (!$$('.chart').length) return;" in js
+    assert "echarts-6.1.0-desk.min.js" not in pages["/model-risk"]        # no chart, no library
 
 
 def test_social_meta_and_card_carry_no_test_count(pages):

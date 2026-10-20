@@ -3540,6 +3540,9 @@ def load_model_risk() -> dict[str, Any]:
                           ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—")
+    # grouped by model (M1 … M9), data checks last; checks keep their order within a group
+    rank = {m: i for i, m in enumerate([f"M{i}" for i in range(1, 10)] + ["Data"])}
+    mon.sort(key=lambda m: rank.get(m["model"], len(rank)))
     d["monitors"] = mon
     d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k) for k in ("ok", "watch", "breach", "info", "na")}
     d["limits"] = MONITOR_LIMITS
