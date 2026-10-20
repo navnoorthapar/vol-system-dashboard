@@ -1,0 +1,85 @@
+{
+  "backtest_window": [
+    "2018-01-01",
+    "2025-03-24"
+  ],
+  "cboe_reference": {
+    "term_structure_max_date": "2026-10-19",
+    "term_structure_rows": 27422,
+    "vix_max_date": "2026-10-19",
+    "vix_rows": 9297
+  },
+  "generated_by": "joint_vol_calibration.data.pipeline.correct_vix_index_family",
+  "material_rows": 177,
+  "material_rows_in_backtest_window": 142,
+  "partitions_rewritten": 34,
+  "same_print_tol": 0.005,
+  "tables": {
+    "vix_daily": {
+      "actions": {
+        "removed_non_session": 29,
+        "restated_as_cboe": 3949,
+        "unchanged": 275
+      },
+      "actions_in_backtest_window": {
+        "removed_non_session": 22,
+        "restated_as_cboe": 1816
+      },
+      "by_ticker": {
+        "^VIX": {
+          "removed_non_session": 29,
+          "restated_as_cboe": 3949,
+          "unchanged": 275
+        }
+      },
+      "replaced_over_cross_source_tol": 0,
+      "replaced_over_cross_source_tol_in_backtest_window": 0,
+      "rows_after": 4224,
+      "rows_before": 4253
+    },
+    "vix_term_structure": {
+      "actions": {
+        "added_from_cboe": 8,
+        "kept_not_in_cboe": 2,
+        "removed_non_session": 2,
+        "replaced_by_cboe": 136,
+        "restated_as_cboe": 20721
+      },
+      "actions_in_backtest_window": {
+        "added_from_cboe": 8,
+        "replaced_by_cboe": 112,
+        "restated_as_cboe": 8960
+      },
+      "by_ticker": {
+        "^VIX": {
+          "removed_non_session": 2,
+          "replaced_by_cboe": 9,
+          "restated_as_cboe": 4215
+        },
+        "^VIX3M": {
+          "replaced_by_cboe": 12,
+          "restated_as_cboe": 4212
+        },
+        "^VIX6M": {
+          "replaced_by_cboe": 51,
+          "restated_as_cboe": 4173
+        },
+        "^VIX9D": {
+          "kept_not_in_cboe": 1,
+          "replaced_by_cboe": 52,
+          "restated_as_cboe": 3919
+        },
+        "^VVIX": {
+          "added_from_cboe": 8,
+          "kept_not_in_cboe": 1,
+          "replaced_by_cboe": 12,
+          "restated_as_cboe": 4202
+        }
+      },
+      "replaced_over_cross_source_tol": 38,
+      "replaced_over_cross_source_tol_in_backtest_window": 33,
+      "rows_after": 20867,
+      "rows_before": 20861
+    }
+  }
+}
