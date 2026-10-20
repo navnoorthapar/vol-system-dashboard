@@ -146,7 +146,7 @@ def test_surface_variance_swap_of_flat_surface_is_its_variance():
     T = 0.25
     s = es.ESSVISurface(T=[T], theta=[0.04 * T], psi=[1e-8], rho=[0.0])
     vs = vix.surface_variance_swap(s, T)
-    assert vs == pytest.approx(0.04, rel=2e-5)
+    assert vs == pytest.approx(0.04, rel=1e-9)
 
 
 def test_stored_session_replication_brackets_and_flags():
@@ -164,3 +164,101 @@ def test_stored_session_replication_brackets_and_flags():
     off = vix.official_closes("2026-10-16")
     assert off["VIX"]["close"] == pytest.approx(19.99) and off["VIX"]["source"] == "cboe"
     assert abs(rep["level"] - off["VIX"]["close"]) < 1.0
+
+
+class _FlatSurface:
+    def __init__(self, vol):
+        self.vol = vol
+
+    def w(self, k, T):
+        return np.full(np.shape(k), self.vol ** 2 * float(T))
+
+    def iv(self, k, T):
+        return np.full(np.shape(k), self.vol)
+
+
+def _flat_terms(vol, F, kf_lo, kf_hi, minutes=(28 * 1440, 35 * 1440), step=5.0):
+    """Two candidate terms of a Black-Scholes chain (R = 0) quoted only on
+    K/F in [kf_lo, kf_hi], bid = ask = model price."""
+    terms = []
+    for i, M in enumerate(minutes):
+        T = M / vix.MINUTES_PER_YEAR
+        K, c, p = _bs_chain(F, T, vol, np.arange(np.ceil(kf_lo * F / step) * step, kf_hi * F + 1e-9, step))
+        tab = pd.DataFrame({"bid_c": c, "ask_c": c, "bid_p": p, "ask_p": p}, index=K)
+        terms.append({"expiry": f"2026-11-{13 + 7 * i:02d}", "settlement": "PM", "minutes": int(M),
+                      "T": T, "has_root": True, "candidate": True, "table": tab})
+    return terms
+
+
+def _bs_vs_outside(vol, T, kf_lo, kf_hi):
+    """Variance-swap variance carried by OTM options outside K/F [lo, hi]
+    (Black-Scholes, F = 1), by adaptive quadrature: independent of vix.py."""
+    from scipy.integrate import quad
+    from scipy.stats import norm
+    sd = vol * np.sqrt(T)
+
+    def otm(k):
+        d1 = -k / sd + sd / 2
+        if k >= 0:
+            return norm.cdf(d1) - np.exp(k) * norm.cdf(d1 - sd)
+        return np.exp(k) * norm.cdf(-(d1 - sd)) - norm.cdf(-d1)
+    f = lambda k: otm(k) * np.exp(-k)                                   # noqa: E731
+    lo = quad(f, -3.0, np.log(kf_lo), limit=200, epsabs=1e-14)[0]
+    hi = quad(f, np.log(kf_hi), 2.0, limit=200, epsabs=1e-14)[0]
+    return 2.0 * (lo + hi) / T
+
+
+def test_gap_attribution_on_a_truncated_flat_vol_chain():
+    """Market = surface at every stored strike, so the far-wing and in-range
+    parts vanish; the full-range model index is the flat vol; the truncation
+    matches an independent quadrature of the variance beyond K/F 0.85-1.15,
+    and residual + gap + truncation close."""
+    vol, F = 0.20, 5000.0
+    terms = _flat_terms(vol, F, 0.85, 1.15)
+    rep = vix.replicate_index(terms, 0.0, 30)
+    assert rep["ok"]
+    a = vix.gap_attribution(rep, terms, 0.0, _FlatSurface(vol), [t["expiry"] for t in terms],
+                            official=20.0)
+    assert a["available"]
+    assert a["far_wing_market_minus_model_pts"] == pytest.approx(0.0, abs=1e-9)
+    assert a["fit_inside_range_pts"] == pytest.approx(0.0, abs=1e-9)
+    assert a["levels"]["L3_model_continuous_k_-3_to_2"] == pytest.approx(20.0, abs=1e-3)
+    s_strip = [vol ** 2 - _bs_vs_outside(vol, t["T"], 0.85, 1.15) for t in terms]
+    expect = 20.0 - vix.constant_maturity_index(s_strip[0], terms[0]["minutes"], s_strip[1],
+                                                terms[1]["minutes"], 30 * 1440)
+    assert expect > 0.01
+    assert a["truncation_pts"] == pytest.approx(expect, rel=2e-3, abs=2e-4)
+    assert a["gap_pts"] == pytest.approx(rep["level"] - 20.0)
+    assert a["residual_pts"] + a["gap_pts"] + a["truncation_pts"] == pytest.approx(0.0, abs=1e-12)
+    assert abs(a["discretisation_pts"]) < 0.02                 # 5-point strikes
+
+
+def test_gap_attribution_sees_a_rich_far_wing():
+    """Puts beyond the fitted K/F 0.70 priced at 60% vol against a 20%
+    surface: L1 (surface prices beyond the fitted range) is exactly the
+    replication of the unmodified 20% chain, and the excess is far-wing
+    richness, not fit error."""
+    vol, F = 0.20, 5000.0
+    flat = _flat_terms(vol, F, 0.55, 1.20)
+    terms = _flat_terms(vol, F, 0.55, 1.20)
+    for t in terms:
+        tab = t["table"]
+        far = tab.index.to_numpy() < 0.70 * F
+        _, _, p_rich = _bs_chain(F, t["T"], 0.60, tab.index.to_numpy()[far])
+        tab.loc[far, ["bid_p", "ask_p"]] = np.column_stack([p_rich, p_rich])
+    rep = vix.replicate_index(terms, 0.0, 30)
+    a = vix.gap_attribution(rep, terms, 0.0, _FlatSurface(vol), [t["expiry"] for t in terms],
+                            official=None)
+    base = vix.replicate_index(flat, 0.0, 30)["level"]
+    assert a["levels"]["L1_model_outside_fit_range"] == pytest.approx(base, abs=1e-9)
+    assert a["far_wing_market_minus_model_pts"] == pytest.approx(rep["level"] - base, abs=1e-9)
+    assert a["far_wing_market_minus_model_pts"] > 0.1
+    assert a["fit_inside_range_pts"] == pytest.approx(0.0, abs=1e-9)
+    assert "residual_pts" not in a
+
+
+def test_gap_attribution_needs_fitted_terms():
+    terms = _flat_terms(0.2, 5000.0, 0.8, 1.2)
+    rep = vix.replicate_index(terms, 0.0, 30)
+    a = vix.gap_attribution(rep, terms, 0.0, _FlatSurface(0.2), {}, official=20.0)
+    assert not a["available"] and "not fitted" in a["reason"]

@@ -157,6 +157,7 @@ def single_term_variance(strikes, call_bid, call_ask, put_bid, put_ask,
     sigma2 = 2.0 / T * float(contrib.sum()) - (F / K0 - 1.0) ** 2 / T
     return {
         "ok": True, "sigma2": sigma2, "F": F, "K0": K0, "atm_strike": atm_strike,
+        "T": float(T), "growth": growth,
         "forward_method": f_method, "k0_fallback": fallback, "literal_K0": literal_K0,
         "n_puts": len(puts), "n_calls": len(calls),
         "lowest_strike": float(Ks[0]), "highest_strike": float(Ks[-1]),
@@ -188,8 +189,11 @@ def minutes_to_settlement(calc_time_ny: datetime, expiry: str, settlement: str) 
 
 
 def is_end_of_week_expiry(expiry: str) -> bool:
-    """Friday, or a Thursday whose Friday is an NYSE holiday."""
+    """An NYSE session that is a Friday, or a Thursday whose Friday is an NYSE
+    holiday (a Friday holiday itself lists no expiry)."""
     d = date.fromisoformat(str(expiry)[:10])
+    if not oc.is_nyse_session(d):
+        return False
     if d.weekday() == 4:
         return True
     return d.weekday() == 3 and not oc.is_nyse_session(d + timedelta(days=1))
@@ -309,11 +313,21 @@ def _bs_otm_normalised(k, w):
 def surface_variance_swap(surface, T: float, k_lo: float = -3.0, k_hi: float = 2.0,
                           n: int = 6001) -> float:
     """Variance-swap variance of an iv-surface at T: sigma^2 T = 2 int otm(k) e^{-k} dk
-    (forward-normalised OTM prices; trapezoid on [k_lo, k_hi])."""
-    k = np.linspace(k_lo, k_hi, n)
-    w = surface.w(k, T)
-    f = _bs_otm_normalised(k, w) * np.exp(-k)
-    return float(2.0 * np.trapezoid(f, k) / T)
+    over [k_lo, k_hi] (forward-normalised OTM prices). Simpson's rule on each
+    side of k = 0, where the OTM integrand has its put / call kink, with about
+    n points in all (flat 20% vol, 30 days: relative error 2e-12 in sigma^2,
+    against 4e-5 for one trapezoid on 6,001 points)."""
+    from scipy.integrate import simpson
+    total = 0.0
+    span = k_hi - k_lo
+    for a, b in ((k_lo, min(0.0, k_hi)), (max(0.0, k_lo), k_hi)):
+        if b <= a:
+            continue
+        m = max(int(n * (b - a) / span) | 1, 101)          # odd point count
+        k = np.linspace(a, b, m)
+        f = _bs_otm_normalised(k, surface.w(k, T)) * np.exp(-k)
+        total += float(simpson(f, x=k))
+    return 2.0 * total / T
 
 
 def variance_swap_strip(terms: list, R: float, quotes: Optional[pd.DataFrame] = None,
@@ -359,6 +373,110 @@ def variance_swap_strip(terms: list, R: float, quotes: Optional[pd.DataFrame] = 
                 row[f"var_swap_vol_{name}_quoted_range"] = 100.0 * math.sqrt(max(inq, 0.0))
         rows.append(row)
     return rows
+
+
+FIT_RANGE_K_OVER_F = (0.70, 1.30)     # the scoring universe the surfaces are fitted on
+
+
+def _model_strip(v: dict, surface, T_surface: float, lo_kf: float, hi_kf: float) -> tuple:
+    """sigma^2 of one term with the Cboe discrete sum, market mids replaced by
+    the surface's forward OTM prices at the strikes OUTSIDE [lo_kf, hi_kf]
+    (lo_kf = hi_kf = F: every strike modelled). Same strikes, dK, F and K0
+    as the market strip ``v``. Returns (sigma2_mixed, sigma2_all_model)."""
+    K, dK, F, K0 = v["strikes"], v["dK"], v["F"], v["K0"]
+    k = np.log(K / F)
+    w = surface.w(k, T_surface)
+    otm = _bs_otm_normalised(k, w)                       # OTM vs F, forward-normalised
+    put_n = np.where(k < 0, otm, otm - (1.0 - np.exp(k)))
+    call_n = put_n + (1.0 - np.exp(k))
+    q_model = F * np.where(K < K0, put_n, np.where(K > K0, call_n, 0.5 * (put_n + call_n)))
+    T = v["T"]
+    growth = v["growth"]
+    q_mkt_fwd = growth * v["Q"]                          # forward (undiscounted) market prices
+    kf = K / F
+    outside = (kf < lo_kf) | (kf > hi_kf)
+    mixed = np.where(outside, q_model, q_mkt_fwd)
+    corr = (F / K0 - 1.0) ** 2 / T
+    s_mixed = 2.0 / T * float(np.sum(dK / K ** 2 * mixed)) - corr
+    s_model = 2.0 / T * float(np.sum(dK / K ** 2 * q_model)) - corr
+    return s_mixed, s_model
+
+
+def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
+                    official: Optional[float], *, carry: Optional[dict] = None,
+                    name: str = "svi_cal") -> dict:
+    """Decompose one replicated index against a fitted arbitrage-free surface
+    on the replication's own near / next terms. Levels (index points), each
+    with the Cboe constant-maturity weights of ``rep``:
+
+      L0  replicated: Cboe discrete sum on the stored market mids
+      L1  same strikes, market mids inside the fitted K/F range 0.70-1.30,
+          the surface's prices outside it
+      L2  same strikes, the surface's prices everywhere
+      L2c the surface's continuous variance swap on the stored strip's K/F range
+      L3  the surface's continuous variance swap on k in [-3, 2]
+
+    Reported: far_wing_market_minus_model_pts = L0 - L1 (how much richer the
+    stored quotes beyond the fitted range are than the surface's extrapolated
+    wing), fit_inside_range_pts = L1 - L2, discretisation_pts = L2 - L2c,
+    truncation_pts = L3 - L2c (what strikes beyond the stored strip add under
+    the surface's wing; with a positive far-wing difference the surface's
+    wing is thinner than the market's, so this likely understates the
+    truncation), and residual_pts = official - L0 - truncation_pts (snapshot
+    timing vs the 16:15 ET print, stale quotes, rate, missing Cboe series).
+
+    The surface is evaluated at each term's own T (minutes to its Cboe
+    settlement / 525,600): on a third Friday the VIX uses the AM SPX lines
+    while the cleaned chain (and so the fitted slice) keeps the PM SPXW lines,
+    6.5 hours later. ``fitted_expiries``: the expiries the surface was fitted
+    on; a term outside them (e.g. a 0-6 DTE term) makes the attribution
+    unavailable. ``carry``: expiry -> (F, D) when ``rep`` used the parity
+    forwards.
+    """
+    if not rep.get("ok"):
+        return {"available": False, "reason": "replication not available"}
+    sel = (rep["near"], rep["next"])
+    missing = [t["expiry"] for t in sel if t["expiry"] not in set(fitted_expiries)]
+    if missing:
+        return {"available": False,
+                "reason": f"term(s) {', '.join(missing)} not fitted by the surface "
+                          "(outside the scoring universe)"}
+    by_exp = {t["expiry"]: t for t in terms}
+    use_carry = carry if rep.get("forward_source") == "parity_regression" else None
+    lo_kf, hi_kf = FIT_RANGE_K_OVER_F
+    s0, s1, s2, s2c, s3 = [], [], [], [], []
+    for t in sel:
+        term = by_exp[t["expiry"]]
+        v = _variance_of(term, R, use_carry)
+        if not v["ok"]:
+            return {"available": False, "reason": f"{t['expiry']}: {v['reason']}"}
+        Ts = term["T"]
+        mixed, model = _model_strip(v, surface, Ts, lo_kf, hi_kf)
+        s0.append(v["sigma2"])
+        s1.append(mixed)
+        s2.append(model)
+        s2c.append(surface_variance_swap(surface, Ts, math.log(t["lowest_K_over_F"]),
+                                         math.log(t["highest_K_over_F"]), 2001))
+        s3.append(surface_variance_swap(surface, Ts))
+    M1, M2 = rep["near"]["minutes"], rep["next"]["minutes"]
+    Mcm = rep["constant_maturity_days"] * 1440.0
+
+    def lvl(x):
+        return constant_maturity_index(x[0], M1, x[1], M2, Mcm)
+    L0, L1, L2, L2c, L3 = lvl(s0), lvl(s1), lvl(s2), lvl(s2c), lvl(s3)
+    out = {"available": True, "surface": name, "fit_range_K_over_F": list(FIT_RANGE_K_OVER_F),
+           "levels": {"L0_replicated": L0, "L1_model_outside_fit_range": L1,
+                      "L2_model_all_strikes": L2, "L2c_model_continuous_on_strip": L2c,
+                      "L3_model_continuous_k_-3_to_2": L3},
+           "far_wing_market_minus_model_pts": L0 - L1,
+           "fit_inside_range_pts": L1 - L2,
+           "discretisation_pts": L2 - L2c,
+           "truncation_pts": L3 - L2c}
+    if official is not None:
+        out["official"] = official
+        out["gap_pts"] = L0 - official
+        out["residual_pts"] = official - L0 - (L3 - L2c)
+    return out
 
 
 def constant_maturity_atm(rep: dict, strip: list) -> Optional[float]:
