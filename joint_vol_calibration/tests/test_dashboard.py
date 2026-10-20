@@ -1370,10 +1370,13 @@ def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
     grid = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")
     html = pages["/backtest"]
     assert len(re.findall(r'<tr data-beta="', html)) == len(grid)
-    row = grid[np.isclose(grid["beta"], round(float(np.mean(every)), 2))].iloc[0]
-    cells = re.search(rf'<tr data-beta="{row["beta"]:.2f}"[^>]*>(.*?)</tr>', html, re.S).group(1)
-    for col in ("pnl", "s1c_pnl", "s3_pnl", "s4_pnl", "s1_pnl"):
-        assert dash._usd_k(row[col]) in cells, col
+    # Every row of the grid is the CSV row, and the ◆ (mean over every chain) marks a row only
+    # when that mean is one: each chain the bot stores moves it, often off the grid.
+    for _, row in grid.iterrows():
+        cells = re.search(rf'<tr data-beta="{row["beta"]:.2f}"[^>]*>(.*?)</tr>', html, re.S).group(1)
+        for col in ("pnl", "s1c_pnl", "s3_pnl", "s4_pnl", "s1_pnl"):
+            assert dash._usd_k(row[col]) in cells, (row["beta"], col)
+        assert ("◆" in cells) == (in_grid and abs(row["beta"] - round(float(np.mean(every)), 2)) < 1e-9)
 
 
 def test_a_beta_that_disagrees_with_its_chains_is_a_loader_error(dash, synth):
