@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -78,7 +77,7 @@ def _valid(bid, ask):
 
 
 def single_term_variance(strikes, call_bid, call_ask, put_bid, put_ask,
-                         T: float, R: float, *, forward: Optional[float] = None,
+                         T: float, R: float, *, forward: float | None = None,
                          k0_fallback: bool = True) -> dict:
     """Cboe single-term variance (Mathematics Methodology sec. 3(a)).
 
@@ -145,7 +144,7 @@ def single_term_variance(strikes, call_bid, call_ask, put_bid, put_ask,
         return {"ok": False, "reason": "every OTM put excluded"}
     if not calls:
         return {"ok": False, "reason": "every OTM call excluded"}
-    sel = sorted(puts) + [i0] + sorted(calls)
+    sel = [*sorted(puts), i0, *sorted(calls)]
     Ks = K[sel]
     Q = np.array([pmid[j] if j < i0 else (cmid[j] if j > i0 else 0.5 * (pmid[j] + cmid[j]))
                   for j in sel])
@@ -185,7 +184,7 @@ def _settle_dt(expiry: str, settlement: str) -> datetime:
 
 def minutes_to_settlement(calc_time_ny: datetime, expiry: str, settlement: str) -> int:
     """Whole minutes (rounded down) from a naive New York wall-clock time."""
-    return int(math.floor((_settle_dt(expiry, settlement) - calc_time_ny).total_seconds() / 60.0))
+    return math.floor((_settle_dt(expiry, settlement) - calc_time_ny).total_seconds() / 60.0)
 
 
 def is_end_of_week_expiry(expiry: str) -> bool:
@@ -228,7 +227,7 @@ def term_tables(raw: pd.DataFrame, session: str, calc_time_ny: datetime) -> list
     return out
 
 
-def _variance_of(term: dict, R: float, carry: Optional[dict] = None) -> dict:
+def _variance_of(term: dict, R: float, carry: dict | None = None) -> dict:
     """Single-term variance of one term. With ``carry`` (expiry -> (F, D) of
     the cleaned chain's parity regression) and the expiry in it, F and the
     discount come from there ("parity_regression"); otherwise the Cboe
@@ -267,7 +266,7 @@ def _term_summary(t: dict, v: dict) -> dict:
 
 
 def replicate_index(terms: list, R: float, days: int, *, candidates_only: bool = True,
-                    carry: Optional[dict] = None, spot: Optional[float] = None) -> dict:
+                    carry: dict | None = None, spot: float | None = None) -> dict:
     """One constant-maturity index from ``terms`` (term_tables output).
 
     carry : expiry -> (F, D) to use the parity forwards (see _variance_of)
@@ -330,8 +329,8 @@ def surface_variance_swap(surface, T: float, k_lo: float = -3.0, k_hi: float = 2
     return 2.0 * total / T
 
 
-def variance_swap_strip(terms: list, R: float, quotes: Optional[pd.DataFrame] = None,
-                        carry: Optional[dict] = None, surfaces: Optional[dict] = None) -> list:
+def variance_swap_strip(terms: list, R: float, quotes: pd.DataFrame | None = None,
+                        carry: dict | None = None, surfaces: dict | None = None) -> list:
     """Per expiry: the Cboe single-term variance-swap vol from the stored
     quotes (on the parity forward when ``carry`` has the expiry), the
     model-free ATM vol (mid IVs interpolated to k = 0 in the scoring
@@ -403,7 +402,7 @@ def _model_strip(v: dict, surface, T_surface: float, lo_kf: float, hi_kf: float)
 
 
 def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
-                    official: Optional[float], *, carry: Optional[dict] = None,
+                    official: float | None, *, carry: dict | None = None,
                     name: str = "svi_cal") -> dict:
     """Decompose one replicated index against a fitted arbitrage-free surface
     on the replication's own near / next terms. Levels (index points), each
@@ -479,7 +478,7 @@ def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
     return out
 
 
-def constant_maturity_atm(rep: dict, strip: list) -> Optional[float]:
+def constant_maturity_atm(rep: dict, strip: list) -> float | None:
     """The model-free ATM vol at the index's constant maturity: the near / next
     terms' quote ATM vols combined with the index's own weights (total
     variance, as in the VIX formula); None when a term has no ATM quote."""

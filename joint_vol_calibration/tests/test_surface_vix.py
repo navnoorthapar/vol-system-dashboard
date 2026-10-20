@@ -16,7 +16,8 @@ from joint_vol_calibration.surface import essvi as es
 from joint_vol_calibration.surface import vix
 
 FIXTURE = Path(__file__).parent / "fixtures" / "surface_cboe_vix_sample.csv"
-CALC = datetime(2022, 9, 27, 10, 45, 15)            # the sample's calculation time (ET)
+# the sample's calculation time, naive New York wall-clock time as vix.py takes it
+CALC = datetime(2022, 9, 27, 10, 45, 15)  # noqa: DTZ001
 R1, R2 = 0.031664e-2, 0.028797e-2                  # published R1, R2
 
 
@@ -40,7 +41,8 @@ def test_sample_minutes_match_the_methodology():
 def test_sample_forwards_k0_and_variances(sample):
     near = _term(sample, "near", 34484, R1)
     nxt = _term(sample, "next", 44954, R2)
-    assert near["atm_strike"] == 1965 and nxt["atm_strike"] == 1960
+    assert near["atm_strike"] == 1965
+    assert nxt["atm_strike"] == 1960
     assert near["F"] == pytest.approx(1962.89996, abs=5e-6)
     assert nxt["F"] == pytest.approx(1962.40006, abs=5e-6)
     assert near["K0"] == nxt["K0"] == 1960
@@ -64,9 +66,11 @@ def test_sample_individual_contributions_and_delta_k(sample):
     expected_next = {1275: (50, 0.0000023069), 1325: (37.5, 0.0000032041),
                      1960: (5, 0.0000339711), 2200: (50, 0.0000007748)}
     for K, (dk, c) in expected_near.items():
-        assert cn[K][0] == dk and cn[K][1] == pytest.approx(c, abs=5e-11), K
+        assert cn[K][0] == dk, K
+        assert cn[K][1] == pytest.approx(c, abs=5e-11), K
     for K, (dk, c) in expected_next.items():
-        assert cx[K][0] == dk and cx[K][1] == pytest.approx(c, abs=5e-11), K
+        assert cx[K][0] == dk, K
+        assert cx[K][1] == pytest.approx(c, abs=5e-11), K
 
 
 def test_two_consecutive_zero_bids_stop_the_walk(sample):
@@ -75,11 +79,13 @@ def test_two_consecutive_zero_bids_stop_the_walk(sample):
     zero bids (1405 put, 2120 call) are skipped without stopping."""
     near = _term(sample, "near", 34484, R1)
     ks = set(near["strikes"])
-    assert near["lowest_strike"] == 1370 and near["highest_strike"] == 2125
+    assert near["lowest_strike"] == 1370
+    assert near["highest_strike"] == 2125
     assert not ks & {1350, 1355, 1360, 1365, 2225, 2120, 1405}
     assert {1370, 1400, 1410, 2100, 2125} <= ks
     nxt = _term(sample, "next", 44954, R2)
-    assert nxt["lowest_strike"] == 1275 and 1300 not in set(nxt["strikes"])   # isolated zero bid
+    assert nxt["lowest_strike"] == 1275
+    assert 1300 not in set(nxt["strikes"])
 
 
 def test_k0_without_both_sides_fails_closed_or_falls_back_flagged(sample):
@@ -88,15 +94,20 @@ def test_k0_without_both_sides_fails_closed_or_falls_back_flagged(sample):
     args = (g["strike"], g["call_bid"], g["call_ask"], g["put_bid"], g["put_ask"],
             34484 / vix.MINUTES_PER_YEAR, R1)
     strict = vix.single_term_variance(*args, k0_fallback=False)
-    assert not strict["ok"] and "K0 = 1960" in strict["reason"]
+    assert not strict["ok"]
+    assert "K0 = 1960" in strict["reason"]
     fb = vix.single_term_variance(*args)
-    assert fb["ok"] and fb["k0_fallback"] and fb["K0"] == 1955 and fb["literal_K0"] == 1960
+    assert fb["ok"]
+    assert fb["k0_fallback"]
+    assert fb["K0"] == 1955
+    assert fb["literal_K0"] == 1960
 
 
 def test_given_forward_replaces_the_single_strike_rule(sample):
     a = _term(sample, "near", 34484, R1)
     b = _term(sample, "near", 34484, R1, forward=a["F"])
-    assert b["forward_method"] == "given" and b["sigma2"] == pytest.approx(a["sigma2"], rel=1e-14)
+    assert b["forward_method"] == "given"
+    assert b["sigma2"] == pytest.approx(a["sigma2"], rel=1e-14)
 
 
 def _bs_chain(F, T, vol, strikes, D=1.0):
@@ -132,9 +143,11 @@ def test_end_of_week_candidates():
 def test_bracket_picks_last_term_within_and_first_after():
     terms = [{"minutes": m, "candidate": True, "expiry": str(m)} for m in (20000, 40000, 45000, 60000)]
     near, nxt = vix.bracket(terms, 43200)
-    assert near["minutes"] == 40000 and nxt["minutes"] == 45000
+    assert near["minutes"] == 40000
+    assert nxt["minutes"] == 45000
     near, nxt = vix.bracket(terms, 10000)                       # nothing <= target: nearest + next
-    assert near["minutes"] == 20000 and nxt["minutes"] == 40000
+    assert near["minutes"] == 20000
+    assert nxt["minutes"] == 40000
 
 
 def test_constant_maturity_interpolates_total_variance():
@@ -159,10 +172,13 @@ def test_stored_session_replication_brackets_and_flags():
     assert {t["expiry"] for t in terms if t["candidate"]} >= {"2026-10-30", "2026-11-13", "2026-12-04"}
     assert "2026-11-20" not in {t["expiry"] for t in terms}
     rep = vix.replicate_index(terms, sq.r_ref, 30, spot=sq.spot)
-    assert rep["ok"] and rep["near"]["expiry"] == "2026-11-13" and rep["next"]["expiry"] == "2026-12-04"
+    assert rep["ok"]
+    assert rep["near"]["expiry"] == "2026-11-13"
+    assert rep["next"]["expiry"] == "2026-12-04"
     assert 0.0 < rep["near_weight"] < 1.0
     off = vix.official_closes("2026-10-16")
-    assert off["VIX"]["close"] == pytest.approx(19.99) and off["VIX"]["source"] == "cboe"
+    assert off["VIX"]["close"] == pytest.approx(19.99)
+    assert off["VIX"]["source"] == "cboe"
     assert abs(rep["level"] - off["VIX"]["close"]) < 1.0
 
 
@@ -261,4 +277,5 @@ def test_gap_attribution_needs_fitted_terms():
     terms = _flat_terms(0.2, 5000.0, 0.8, 1.2)
     rep = vix.replicate_index(terms, 0.0, 30)
     a = vix.gap_attribution(rep, terms, 0.0, _FlatSurface(0.2), {}, official=20.0)
-    assert not a["available"] and "not fitted" in a["reason"]
+    assert not a["available"]
+    assert "not fitted" in a["reason"]

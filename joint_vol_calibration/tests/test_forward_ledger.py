@@ -44,7 +44,8 @@ def closes():
 
 @pytest.fixture(scope="module")
 def ledgers(closes):
-    l1 = fl.step(None, SESSIONS[0], _chain(SESSIONS[0]), SIG_A, spot=SPOT[SESSIONS[0]], r_ref=RATE[SESSIONS[0]])
+    l1 = fl.step(None, SESSIONS[0], _chain(SESSIONS[0]), SIG_A, spot=SPOT[SESSIONS[0]],
+                 r_ref=RATE[SESSIONS[0]])
     l2 = fl.step(l1, SESSIONS[1], _chain(SESSIONS[1]), SIG_B, spot=SPOT[SESSIONS[1]], r_ref=RATE[SESSIONS[1]],
                  settlement_closes=closes, vix_row=VIX_0327)
     l3 = fl.step(l2, SESSIONS[2], _chain(SESSIONS[2]), SIG_B, spot=SPOT[SESSIONS[2]], r_ref=RATE[SESSIONS[2]],
@@ -67,10 +68,12 @@ def test_contract_is_the_30_day_atm_forward_straddle():
     assert abs(q["strike"] - q["parity_forward"]) <= min(abs(k - q["parity_forward"]) for k in strikes) + 1e-9
     cb, ca = _quote(SESSIONS[0], q["expiry"], q["strike"], "C")
     pb, pa = _quote(SESSIONS[0], q["expiry"], q["strike"], "P")
-    assert q["bid"] == pytest.approx(cb + pb) and q["ask"] == pytest.approx(ca + pa)
+    assert q["bid"] == pytest.approx(cb + pb)
+    assert q["ask"] == pytest.approx(ca + pa)
     # the forward implied by the straddle's own legs makes call and put IVs equal
     assert q["iv_call"] == pytest.approx(q["iv_put"], abs=1e-8)
-    assert 0.1 < q["iv_mid"] < 0.5 and abs(q["delta_F"]) < 0.2
+    assert 0.1 < q["iv_mid"] < 0.5
+    assert abs(q["delta_F"]) < 0.2
 
 
 def test_entries_at_executable_prices_and_engine_sizing(ledgers):
@@ -91,7 +94,7 @@ def test_entries_at_executable_prices_and_engine_sizing(ledgers):
 def test_close_books_exit_bid_minus_entry_ask(ledgers):
     """S1C (long) goes flat on 03-27: sold at the 03-27 bids, bought at the
     03-24 asks; the gap to the mid P&L is exactly the two half-spreads."""
-    l1, l2, _ = ledgers
+    _l1, l2, _ = ledgers
     c = {x["sleeve"]: x for x in l2["closed"]}["s1c"]
     exp, K = c["contract"]["expiry"], c["contract"]["strike"]
     cb1, ca1 = _quote(SESSIONS[0], exp, K, "C")
@@ -113,8 +116,10 @@ def test_marks_and_model_mark_on_a_held_short(ledgers):
     _, l2, _ = ledgers
     p = {x["sleeve"]: x for x in l2["positions"]}["s1"]
     m = p["mark"]
-    assert m["status"] == "marked" and m["close_value_exec"] == m["ask"]     # a short buys back at the ask
-    assert m["pnl_exec"] == pytest.approx(-(m["ask"] - p["entry"]["price_exec"]) * 100 * p["contracts_per_1m"])
+    assert m["status"] == "marked"
+    assert m["close_value_exec"] == m["ask"]
+    assert m["pnl_exec"] == pytest.approx(
+        -(m["ask"] - p["entry"]["price_exec"]) * 100 * p["contracts_per_1m"])
     assert m["pnl_exec"] <= m["pnl_mid"]
     # the backtest's β·VIX value of the same contract sits beside the market mid
     assert m["model_sigma"] == pytest.approx(0.82 * 0.31, abs=0.01)
@@ -122,7 +127,7 @@ def test_marks_and_model_mark_on_a_held_short(ledgers):
 
 
 def test_expired_straddles_settle_on_the_official_close_and_roll(ledgers, closes):
-    _, l2, l3 = ledgers
+    _, _l2, l3 = ledgers
     st = {x["sleeve"]: x for x in l3["closed"]}
     s1 = st["s1"]
     K = s1["contract"]["strike"]
@@ -132,7 +137,9 @@ def test_expired_straddles_settle_on_the_official_close_and_roll(ledgers, closes
         -1 * (abs(S_T - K) - s1["entry"]["price_exec"]) * 100 * s1["contracts_per_1m"])
     assert s1["closed"]["commission"] == pytest.approx(2 * 0.65 * s1["contracts_per_1m"])   # entry only
     acts = {(a["sleeve"], a["action"]) for a in l3["actions"]}
-    assert ("s1", "settle") in acts and ("s1", "roll") in acts and ("s4", "open") in acts
+    assert ("s1", "settle") in acts
+    assert ("s1", "roll") in acts
+    assert ("s4", "open") in acts
     new = {p["sleeve"]: p for p in l3["positions"]}
     assert new["s1"]["entry"]["session"] == SESSIONS[2]
     # summary accumulates every realised trade
@@ -145,7 +152,8 @@ def test_settlement_waits_for_the_official_close(ledgers):
     _, l2, _ = ledgers
     l3 = fl.step(l2, SESSIONS[2], _chain(SESSIONS[2]), SIG_B, settlement_closes={})
     acts = {a["sleeve"]: a["action"] for a in l3["actions"]}
-    assert acts["s1"] == "await_settlement" and not l3["closed"]
+    assert acts["s1"] == "await_settlement"
+    assert not l3["closed"]
 
 
 def test_unmarkable_position_is_kept_not_priced(ledgers):
@@ -166,13 +174,15 @@ def test_hash_chain_and_tamper_detection(ledgers):
     l1 = json.loads(json.dumps(ledgers[0]))
     l1["positions"][0]["entry"]["price_exec"] += 0.05
     probs = fl.verify_chain([l1, ledgers[1], ledgers[2]])
-    assert probs and "2026-03-27" in probs[0]
+    assert probs
+    assert "2026-03-27" in probs[0]
     assert ledgers[1]["previous"]["sha256"] == fl.ledger_sha256(ledgers[0])
     assert len(ledgers[0]["inputs"]["chain_sha256"]) == 64
 
 
 def test_deterministic_and_append_only_files(ledgers, tmp_path, closes):
-    again = fl.step(None, SESSIONS[0], _chain(SESSIONS[0]), SIG_A, spot=SPOT[SESSIONS[0]], r_ref=RATE[SESSIONS[0]])
+    again = fl.step(None, SESSIONS[0], _chain(SESSIONS[0]), SIG_A, spot=SPOT[SESSIONS[0]],
+                    r_ref=RATE[SESSIONS[0]])
     assert fl.canonical_json(again) == fl.canonical_json(ledgers[0])
     # the chain hash does not depend on row order
     shuffled = _chain(SESSIONS[0]).sample(frac=1.0, random_state=3)
@@ -187,7 +197,7 @@ def test_deterministic_and_append_only_files(ledgers, tmp_path, closes):
     other = fl.step(None, SESSIONS[0], _chain(SESSIONS[0]), SIG_B)
     with pytest.raises(FileExistsError):
         fl.write_ledger(other, tmp_path)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must follow"):
         fl.step(ledgers[1], SESSIONS[0], _chain(SESSIONS[0]), SIG_A)     # out of order
 
 
@@ -196,11 +206,11 @@ def test_schema_validation(ledgers):
     bad = json.loads(json.dumps(ledgers[2]))
     del bad["positions"][0]["entry"]["bid"]
     bad["actions"][0]["action"] = "teleport"
-    with pytest.raises(ValueError, match="entry.*bid.*|teleport"):
+    with pytest.raises(ValueError, match=r"entry.*bid.*|teleport"):
         fl.validate_ledger(bad)
     bad2 = json.loads(json.dumps(ledgers[0]))
     bad2["inputs"]["chain_sha256"] = "xyz"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"chain_sha256.*does not match"):
         fl.validate_ledger(bad2)
 
 
@@ -247,14 +257,16 @@ def test_record_session_settles_after_a_long_gap_in_captures(tmp_path):
                            directory=tmp_path, signals=SIG_A)
     first = fl.load_ledger(p1)
     late = "2026-10-16"
-    assert all((pd.Timestamp(late) - pd.Timestamp(p["contract"]["expiry"])).days > 120 for p in first["positions"])
+    assert all((pd.Timestamp(late) - pd.Timestamp(p["contract"]["expiry"])).days > 120
+               for p in first["positions"])
     # the chain is only the hash input here: every sleeve is flat, nothing opens
     p2 = fl.record_session(late, _chain(SESSIONS[2]), directory=tmp_path, signals=flat)
     second = fl.load_ledger(p2)
     spx = get_spx_ohlcv(as_of_date=late, start_date="2026-04-01")
     close = dict(zip(spx["date"].astype(str), spx["close"].astype(float)))
     settled = {c["sleeve"]: c for c in second["closed"]}
-    assert set(settled) == {p["sleeve"] for p in first["positions"]} and not second["positions"]
+    assert set(settled) == {p["sleeve"] for p in first["positions"]}
+    assert not second["positions"]
     for c in settled.values():
         assert c["closed"]["how"] == "settle"
         assert c["mark"]["settle_close"] == pytest.approx(close[c["contract"]["expiry"]])
@@ -273,5 +285,5 @@ def test_a_book_quoted_before_the_signal_close_is_refused():
     assert fl.step(None, SESSIONS[0], ch, SIG_A)["inputs"]["quote_after_close"] is None
     # exactly at the close is allowed (EDT: 16:00 ET = 20:00 UTC on 2026-03-24)
     assert fl.quote_after_close(SESSIONS[0], "2026-03-24T20:00:00Z") is True
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="is before the 2026-03-24 close"):
         fl.quote_after_close(SESSIONS[0], "2026-03-24T19:59:59Z")

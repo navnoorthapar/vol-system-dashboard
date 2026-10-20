@@ -55,7 +55,7 @@ def test_replay_equals_engine_bit_for_bit(seed):
 
 
 def test_replay_equals_engine_when_the_sleeve_is_margin_capped_or_wiped_out():
-    dates, S, vix, rates = _market(seed=5)
+    dates, S, vix, _rates = _market(seed=5)
     rng = np.random.default_rng(7)
     pos, _ = _positions(dates, rng, flips=False)
     kel = pd.Series(5.0, index=dates)                       # absurd size: NAV goes negative
@@ -73,5 +73,5 @@ def test_replay_refuses_what_it_does_not_model():
     with pytest.raises(NotImplementedError):
         StraddleReplay(dates, S, vix, rates, corrections=bte.C22Corrections.legacy())
     rep = StraddleReplay(dates, S, vix, rates)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="one value per session"):
         rep.simulate(np.zeros(len(dates) - 1), np.zeros(len(dates) - 1))

@@ -1,25 +1,15 @@
 {
  "counts": {
   "dashboard/app.py": {
-   "BLE001": 31,
-   "E501": 15,
-   "I001": 2,
-   "PLW2901": 1,
-   "RUF005": 1,
-   "RUF007": 2,
+   "BLE001": 28,
+   "E501": 1,
    "RUF012": 1,
-   "RUF046": 10,
-   "S112": 1,
-   "S301": 8,
-   "UP035": 1,
-   "UP045": 32
+   "S112": 1
   },
   "dashboard/freeze_site.py": {
-   "E501": 1,
-   "PERF401": 1
+   "E501": 1
   },
   "dashboard/make_og_image.py": {
-   "I001": 1,
    "ICN001": 1
   },
   "joint_vol_calibration/backtest/backtest_engine.py": {
@@ -85,12 +75,9 @@
   },
   "joint_vol_calibration/calibration/joint_calibrator.py": {
    "BLE001": 3,
-   "I001": 1,
    "RUF005": 4,
    "RUF012": 1,
-   "RUF046": 6,
-   "S301": 1,
-   "UP045": 19
+   "S301": 1
   },
   "joint_vol_calibration/calibration/quintic_calibrator.py": {
    "BLE001": 1,
@@ -107,28 +94,20 @@
   "joint_vol_calibration/data/cboe_downloader.py": {
    "BLE001": 1,
    "DTZ007": 1,
-   "E501": 1,
-   "RET504": 1,
-   "UP035": 1,
-   "UP045": 11
+   "E501": 1
   },
   "joint_vol_calibration/data/database.py": {
    "B904": 1,
    "BLE001": 1,
    "DTZ007": 1,
    "E501": 4,
-   "I001": 1,
    "ISC004": 1,
    "PD010": 1,
    "PERF401": 3,
    "PLW2901": 3,
    "RUF012": 1,
    "S110": 1,
-   "S608": 7,
-   "SIM114": 1,
-   "UP017": 4,
-   "UP035": 1,
-   "UP045": 34
+   "S608": 7
   },
   "joint_vol_calibration/data/option_chain.py": {
    "B023": 2,
@@ -146,9 +125,7 @@
   "joint_vol_calibration/data/pipeline.py": {
    "BLE001": 18,
    "E501": 4,
-   "I001": 1,
-   "S101": 4,
-   "UP045": 4
+   "S101": 4
   },
   "joint_vol_calibration/data/yf_downloader.py": {
    "BLE001": 3,
@@ -175,16 +152,9 @@
    "UP045": 24
   },
   "joint_vol_calibration/models/heston.py": {
-   "I001": 1,
-   "RET505": 1,
-   "RUF059": 2,
    "S301": 2,
-   "SIM108": 1,
    "SIM300": 2,
-   "UP006": 3,
-   "UP031": 5,
-   "UP035": 2,
-   "UP045": 18
+   "UP031": 5
   },
   "joint_vol_calibration/models/implied_vol.py": {
    "UP006": 8,
@@ -293,10 +263,7 @@
    "PT018": 2
   },
   "joint_vol_calibration/tests/test_cboe_downloader.py": {
-   "E501": 4,
-   "PT006": 1,
-   "PT018": 4,
-   "UP017": 2
+   "E501": 4
   },
   "joint_vol_calibration/tests/test_cloud_refresh.py": {
    "F401": 2,
@@ -307,26 +274,16 @@
    "UP017": 11
   },
   "joint_vol_calibration/tests/test_dashboard.py": {
-   "B007": 1,
    "B023": 6,
-   "E501": 13,
-   "F841": 1,
-   "FURB167": 8,
-   "PERF102": 1,
-   "PT006": 3,
-   "PT018": 55,
-   "RUF005": 1,
-   "SIM117": 1
+   "E501": 12,
+   "PT018": 11,
+   "RUF005": 1
   },
   "joint_vol_calibration/tests/test_data_layer.py": {
    "E501": 10,
    "ERA001": 1,
-   "FURB162": 2,
-   "PT006": 1,
-   "PT018": 15,
    "RUF005": 3,
-   "RUF012": 3,
-   "UP017": 1
+   "RUF012": 3
   },
   "joint_vol_calibration/tests/test_data_pipeline.py": {
    "I001": 1,
@@ -372,15 +329,9 @@
    "PT018": 10
   },
   "joint_vol_calibration/tests/test_joint_calibrator.py": {
-   "C408": 5,
-   "F401": 1,
    "PERF401": 1,
-   "PT018": 26,
-   "RET504": 1,
    "RUF005": 1,
-   "RUF007": 3,
-   "RUF012": 1,
-   "SIM300": 2
+   "RUF012": 1
   },
   "joint_vol_calibration/tests/test_lookahead.py": {
    "C401": 1,
@@ -517,6 +468,6 @@
   }
  },
  "tool": "ruff",
- "total": 1622,
+ "total": 1309,
  "version": "ruff 0.17.1"
 }

@@ -8,14 +8,14 @@ kernel; the default lag is the Newey & West (1994) rule floor(4·(n/100)^(2/9)).
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 from scipy.stats import norm
 
 
-def ols_hac(y: Sequence[float], X: np.ndarray, lags: Optional[int] = None,
-            add_constant: bool = True) -> Dict:
+def ols_hac(y: Sequence[float], X: np.ndarray, lags: int | None = None,
+            add_constant: bool = True) -> dict:
     """OLS of y on X with HAC covariance.
 
     Returns coef, se, t, p (two-sided, normal), r2, n, lags. With

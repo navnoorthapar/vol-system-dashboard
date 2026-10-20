@@ -21,14 +21,13 @@ loss = −daily return, and the benchmark loss is 0.
 
 from __future__ import annotations
 
-from itertools import combinations
-from typing import Dict, Optional
+from itertools import combinations, pairwise
 
 import numpy as np
 import pandas as pd
 
 
-def _as_frame(returns: "pd.DataFrame | np.ndarray") -> pd.DataFrame:
+def _as_frame(returns: pd.DataFrame | np.ndarray) -> pd.DataFrame:
     if isinstance(returns, pd.DataFrame):
         return returns.astype(float)
     a = np.asarray(returns, dtype=float)
@@ -37,8 +36,8 @@ def _as_frame(returns: "pd.DataFrame | np.ndarray") -> pd.DataFrame:
     return pd.DataFrame(a, columns=[f"m{i}" for i in range(a.shape[1])])
 
 
-def spa_vs_cash(returns: "pd.DataFrame | np.ndarray", block_size: int, reps: int = 5000,
-                seed: int = 42) -> Dict:
+def spa_vs_cash(returns: pd.DataFrame | np.ndarray, block_size: int, reps: int = 5000,
+                seed: int = 42) -> dict:
     """Hansen SPA of every column against a zero excess return.
 
     Returns the lower / consistent / upper p-values (Hansen's three
@@ -60,8 +59,8 @@ def spa_vs_cash(returns: "pd.DataFrame | np.ndarray", block_size: int, reps: int
             "block_size": int(block_size), "reps": int(reps), "seed": int(seed)}
 
 
-def stepm_vs_cash(returns: "pd.DataFrame | np.ndarray", block_size: int, size: float = 0.05,
-                  reps: int = 5000, seed: int = 42) -> Dict:
+def stepm_vs_cash(returns: pd.DataFrame | np.ndarray, block_size: int, size: float = 0.05,
+                  reps: int = 5000, seed: int = 42) -> dict:
     """Romano-Wolf StepM: the strategies that beat cash at FWER ≤ ``size``."""
     from arch.bootstrap import StepM
 
@@ -75,8 +74,8 @@ def stepm_vs_cash(returns: "pd.DataFrame | np.ndarray", block_size: int, size: f
             "size": float(size), "block_size": int(block_size), "reps": int(reps), "seed": int(seed)}
 
 
-def pbo_cscv(returns: "pd.DataFrame | np.ndarray", n_splits: int = 16,
-             max_combinations: Optional[int] = None, seed: int = 42) -> Dict:
+def pbo_cscv(returns: pd.DataFrame | np.ndarray, n_splits: int = 16,
+             max_combinations: int | None = None, seed: int = 42) -> dict:
     """Probability of Backtest Overfitting by CSCV.
 
     The T × N matrix of per-period returns of N candidate configurations is
@@ -100,8 +99,8 @@ def pbo_cscv(returns: "pd.DataFrame | np.ndarray", n_splits: int = 16,
     if n_splits % 2 or n_splits < 2:
         raise ValueError("n_splits must be an even number >= 2")
     edges = np.linspace(0, T, n_splits + 1).astype(int)
-    s1 = np.stack([X[a:b].sum(axis=0) for a, b in zip(edges[:-1], edges[1:])])        # (S, N)
-    s2 = np.stack([(X[a:b] ** 2).sum(axis=0) for a, b in zip(edges[:-1], edges[1:])])
+    s1 = np.stack([X[a:b].sum(axis=0) for a, b in pairwise(edges)])        # (S, N)
+    s2 = np.stack([(X[a:b] ** 2).sum(axis=0) for a, b in pairwise(edges)])
     cnt = np.diff(edges).astype(float)
 
     def _sr(mask: np.ndarray) -> np.ndarray:

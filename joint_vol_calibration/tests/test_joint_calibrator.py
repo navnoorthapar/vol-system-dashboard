@@ -15,6 +15,7 @@ Run with:
   pytest tests/test_joint_calibrator.py -v
 """
 
+import itertools
 import math
 
 import numpy as np
@@ -46,13 +47,13 @@ from joint_vol_calibration.models.heston import (
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
-_P = dict(kappa=3.0, theta=0.04, sigma=0.5, v0=0.04)  # stable Heston params
+_P = {"kappa": 3.0, "theta": 0.04, "sigma": 0.5, "v0": 0.04}  # stable Heston params
 _R = 0.045
 _Q = 0.013
 _S = 5000.0
 
 # Synthetic market (session Wed 2026-09-23)
-_TRUE = dict(kappa=3.0, theta=0.05, sigma=0.7, rho=-0.75, v0=0.025)
+_TRUE = {"kappa": 3.0, "theta": 0.05, "sigma": 0.7, "rho": -0.75, "v0": 0.025}
 _SESSION = "2026-09-23"
 _SPOT = 7600.0
 _R_TRUE, _Q_TRUE = 0.042, 0.011
@@ -119,8 +120,7 @@ def synth():
     """Calibrator on the synthetic Heston market (built once)."""
     with pytest.MonkeyPatch.context() as mp:
         _patch_db(mp)
-        cal = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain())
-    return cal
+        return JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain())
 
 
 def _tvec(p=_TRUE):
@@ -137,16 +137,16 @@ class TestHestonVixOptionPricing:
 
     def test_call_monotone_decreasing_in_strike(self):
         prices = [heston_vix_call_price(K, 0.25, **_P) for K in (15, 18, 20, 22, 25, 30)]
-        assert all(a >= b for a, b in zip(prices, prices[1:]))
+        assert all(a >= b for a, b in itertools.pairwise(prices))
 
     def test_put_monotone_increasing_in_strike(self):
         prices = [heston_vix_put_price(K, 0.25, **_P) for K in (15, 18, 20, 22, 25)]
-        assert all(a <= b for a, b in zip(prices, prices[1:]))
+        assert all(a <= b for a, b in itertools.pairwise(prices))
 
     @pytest.mark.parametrize("T", [30 / 365, 60 / 365, 0.25])
     @pytest.mark.parametrize("params", [
-        _P, dict(kappa=3.28, theta=0.0462, sigma=0.516, v0=0.0116),
-        dict(kappa=5.2, theta=0.06, sigma=1.7, v0=0.013)])          # d < 2: singular density
+        _P, {"kappa": 3.28, "theta": 0.0462, "sigma": 0.516, "v0": 0.0116},
+        {"kappa": 5.2, "theta": 0.06, "sigma": 1.7, "v0": 0.013}])          # d < 2: singular density
     def test_put_call_parity_with_exact_vix_forward(self, T, params):
         """C - P = DF (E[VIX_T] - K) with E[VIX_T] the exact futures price.
 
@@ -162,7 +162,7 @@ class TestHestonVixOptionPricing:
             assert c - p == pytest.approx(math.exp(-_R * T) * (F - K), abs=2e-3)
 
     def test_put_nonnegative_across_strikes(self):
-        params = dict(kappa=3.28, theta=0.0462, sigma=0.516, v0=0.0116)
+        params = {"kappa": 3.28, "theta": 0.0462, "sigma": 0.516, "v0": 0.0116}
         for T in (30 / 365, 60 / 365):
             for K in np.arange(5.0, 61.0, 5.0):
                 assert heston_vix_put_price(K, T, **params) >= 0.0
@@ -205,7 +205,7 @@ class TestHestonCallBatch:
     def test_batch_monotone_in_strike(self):
         strikes = np.array([4000., 4500., 5000., 5500., 6000.])
         result = heston_call_batch(_S, strikes, 0.25, _R, _Q, 2.0, 0.04, 0.5, -0.7, 0.04)
-        assert all(a >= b for a, b in zip(result, result[1:]))
+        assert all(a >= b for a, b in itertools.pairwise(result))
 
 
 # ── Synthetic market: legs, carry, anchors ────────────────────────────────────
@@ -368,7 +368,9 @@ class TestBatesNestsHeston:
 
     def test_bounds_contain_heston(self):
         lam, mu_j, sigma_j = JointCalibrator._BATES_JUMP_BOUNDS
-        assert lam[0] == 0.0 and mu_j[0] < 0.0 < mu_j[1] and sigma_j[0] == 0.0
+        assert lam[0] == 0.0
+        assert mu_j[0] < 0.0 < mu_j[1]
+        assert sigma_j[0] == 0.0
 
 
 # ── Time to expiry, staleness, empty surfaces ────────────────────────────────
@@ -397,7 +399,8 @@ class TestSessionTiming:
                       spx_surface=_db_rows(chain, sun),
                       spx_dates=["2026-09-16", "2026-09-17", fri])
             cal = JointCalibrator(as_of_date=sun)
-        assert cal.spot_date == fri and cal.spx_snapshot_session == fri
+        assert cal.spot_date == fri
+        assert cal.spx_snapshot_session == fri
         g = cal.spx_surface[cal.spx_surface["expiry"] == "2026-10-02"]
         assert g["time_to_expiry"].iloc[0] == pytest.approx(14 / 365)
         assert cal._spx_leg(**_TRUE) < 1e-10
@@ -412,7 +415,8 @@ class TestSessionTiming:
         assert cal.spx_snapshot_session == old != cal.spot_date
         res = _fake_result(spx_snapshot_session=old, spx_snapshot_date=old)
         ok, reason = is_acceptable_calibration(res)
-        assert not ok and "stale" in reason
+        assert not ok
+        assert "stale" in reason
 
     def test_empty_surface_raises_value_error(self):
         """Pre-C22: KeyError('time_to_expiry') from a log line."""
@@ -497,12 +501,14 @@ def test_gth_book_measures_T_from_its_quote_time_and_says_so():
         cal = JointCalibrator(as_of_date=_SESSION, spx_chain=chain)
     origin = oc.t_origin("2026-09-24T01:30:00Z", _SESSION)
     for exp, T in cal.spx_surface.groupby("expiry")["time_to_expiry"].first().items():
-        assert T == oc.year_fraction(_SESSION, exp, "PM", origin=origin)
-        assert T < oc.year_fraction(_SESSION, exp, "PM")
+        assert oc.year_fraction(_SESSION, exp, "PM", origin=origin) == T
+        assert oc.year_fraction(_SESSION, exp, "PM") > T
     m = cal._methods({})
     assert m["T_origin"] == "2026-09-23T21:30:00-04:00"
-    assert "quote time 2026-09-23T21:30:00-04:00" in m["T"] and "Global Trading Hours" in m["T"]
-    assert "16:15 ET" in m["vix_leg_timing"] and "residual timing mismatch" in m["vix_leg_timing"]
+    assert "quote time 2026-09-23T21:30:00-04:00" in m["T"]
+    assert "Global Trading Hours" in m["T"]
+    assert "16:15 ET" in m["vix_leg_timing"]
+    assert "residual timing mismatch" in m["vix_leg_timing"]
 
 
 class TestSyntheticCalibration:
@@ -524,8 +530,10 @@ class TestSyntheticCalibration:
 
     def test_result_provenance(self, synth_fit):
         cal, res = synth_fit
-        assert res["model_version"] == 2 and not calibration_is_legacy(res)
-        assert res["n_spx_expiries"] == 6 and res["n_spx_options"] >= 48
+        assert res["model_version"] == 2
+        assert not calibration_is_legacy(res)
+        assert res["n_spx_expiries"] == 6
+        assert res["n_spx_options"] >= 48
         assert res["leg_losses"]["vix_futures_rmse"] == \
             res["leg_losses"]["vix_index_rmse"]           # back-compat alias
         assert res["r"] == pytest.approx(_R_TRUE, abs=2e-3)
@@ -534,10 +542,12 @@ class TestSyntheticCalibration:
         used = cal.spx_surface.groupby("expiry")["discount"].first()
         T = cal.spx_surface.groupby("expiry")["time_to_expiry"].first()
         assert res["r"] == pytest.approx(float(np.median(-np.log(used) / T)))
-        assert res["feller"] == "off" and "feller" not in res["pinned_params"]
+        assert res["feller"] == "off"
+        assert "feller" not in res["pinned_params"]
         assert res["optimizer"] == "trf_multistart"
         opt = res["methods"]["optimizer"]
-        assert opt["method"] == "trf_multistart" and opt["jacobian"] == "analytic"
+        assert opt["method"] == "trf_multistart"
+        assert opt["jacobian"] == "analytic"
         assert res["multistart"]["n_starts"] == opt["n_sobol_starts"] + (
             1 if (opt["warm_start"] or {}).get("source") else 0)
         # no quote time: a closing book, T from the session's 16:00 ET close
@@ -589,20 +599,24 @@ class TestCalibrationQualityGate:
     def test_single_expiry_rejected(self):
         """Every production fit 2026-09-08..09-23 used ONE expiry (9 options)."""
         ok, reason = is_acceptable_calibration(_fake_result(n_spx_expiries=1, n_spx_options=9))
-        assert not ok and "term structure under-identified" in reason
+        assert not ok
+        assert "term structure under-identified" in reason
 
     def test_too_few_options_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(n_spx_options=20))
-        assert not ok and "options" in reason
+        assert not ok
+        assert "options" in reason
 
     def test_missing_put_wing_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(n_put_wing_expiries=0))
-        assert not ok and "put wing" in reason
+        assert not ok
+        assert "put wing" in reason
 
     def test_stale_surface_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(spx_snapshot_session="2026-06-18",
                                                             spx_snapshot_date="2026-06-20"))
-        assert not ok and "stale" in reason
+        assert not ok
+        assert "stale" in reason
 
     def test_staleness_is_the_reason_reported_first(self):
         """A months-old chain seen from a later session has few unexpired
@@ -611,7 +625,8 @@ class TestCalibrationQualityGate:
         ok, reason = is_acceptable_calibration(_fake_result(
             spx_snapshot_session="2026-06-18", spx_snapshot_date="2026-06-18",
             spot_date="2026-10-16", n_spx_expiries=3, n_spx_options=26))
-        assert not ok and "stale" in reason
+        assert not ok
+        assert "stale" in reason
 
     def test_legacy_result_rejected_unless_allowed(self):
         legacy = {"params": {"kappa": 5.0, "theta": 0.0431, "sigma": 0.657, "rho": -0.95,
@@ -621,9 +636,11 @@ class TestCalibrationQualityGate:
                   "spx_snapshot_date": "2026-09-11"}
         assert calibration_is_legacy(legacy)
         ok, reason = is_acceptable_calibration(legacy)
-        assert not ok and "legacy" in reason
+        assert not ok
+        assert "legacy" in reason
         ok, reason = is_acceptable_calibration(legacy, allow_legacy=True)
-        assert not ok and "options" in reason      # the 9-option 09-11 headline
+        assert not ok
+        assert "options" in reason
         # 05-31 showcase: Sunday snapshot holding Friday's session — fresh
         showcase = dict(legacy, n_spx_options=54, spot_date="2026-05-29",
                         spx_snapshot_date="2026-05-31",
@@ -641,30 +658,36 @@ class TestCalibrationQualityGate:
     def test_vol_of_vol_collapse_rejected(self):
         ok, reason = is_acceptable_calibration(
             {"kappa": 20.0, "sigma": 0.0015, "rho": -0.0003}, spx_iv_rmse=5.74)
-        assert not ok and "sigma" in reason
+        assert not ok
+        assert "sigma" in reason
 
     def test_no_skew_rejected(self):
         ok, reason = is_acceptable_calibration({"kappa": 2.0, "sigma": 0.4, "rho": -0.02}, 1.0)
-        assert not ok and "skew" in reason
+        assert not ok
+        assert "skew" in reason
 
     def test_kappa_pinned_rejected(self):
         ok, reason = is_acceptable_calibration({"kappa": 0.10, "sigma": 0.3, "rho": -0.5}, 1.0)
-        assert not ok and "kappa" in reason
+        assert not ok
+        assert "kappa" in reason
 
     def test_v0_at_floor_rejected(self):
         ok, reason = is_acceptable_calibration(
             {"kappa": 2.0, "sigma": 0.4, "rho": -0.6, "theta": 0.05, "v0": 1.5e-4}, 1.0)
-        assert not ok and "v0" in reason
+        assert not ok
+        assert "v0" in reason
 
     def test_high_rmse_rejected(self):
         ok, reason = is_acceptable_calibration({"kappa": 2.0, "sigma": 0.4, "rho": -0.6}, 4.5)
-        assert not ok and "RMSE" in reason
+        assert not ok
+        assert "RMSE" in reason
 
     def test_single_vix_tenor_rejected(self):
         """C20: a 1-tenor VIX leg cannot identify the joint fit (07-23: 0.049vp)."""
         healthy = {"kappa": 2.26, "sigma": 0.474, "rho": -0.95}
         ok, reason = is_acceptable_calibration(healthy, spx_iv_rmse=0.049, n_vix_tenors=1)
-        assert not ok and "tenor" in reason.lower()
+        assert not ok
+        assert "tenor" in reason.lower()
         assert is_acceptable_calibration(healthy, spx_iv_rmse=0.049, n_vix_tenors=4)[0]
 
     def test_tenor_check_skipped_when_unknown(self):
@@ -677,17 +700,20 @@ class TestFellerClassification:
 
     def test_clear_pass(self):
         state, margin = classify_feller(1.77, 0.0666, 0.460)
-        assert state == "PASS" and margin > 0
+        assert state == "PASS"
+        assert margin > 0
 
     def test_binding_not_reported_as_failure(self):
         kappa, theta, sigma = 4.022199139627185, 0.04630341824281701, 0.6103173509096278
         assert 2 * kappa * theta < sigma**2
         state, margin = classify_feller(kappa, theta, sigma)
-        assert state == "BINDING" and -1e-4 < margin < 0
+        assert state == "BINDING"
+        assert -1e-4 < margin < 0
 
     def test_genuine_violation_still_flagged(self):
         state, margin = classify_feller(4.6217, 0.07637, 0.84115)
-        assert state == "VIOLATED" and margin < -1e-4
+        assert state == "VIOLATED"
+        assert margin < -1e-4
 
     def test_states_are_exhaustive_and_ordered(self):
         kappa, theta = 2.0, 0.05
@@ -743,7 +769,8 @@ class TestRealSnapshot:
         kf = s["strike"] / s["forward"]
         assert kf.between(0.70, 1.30).all()
         assert s["implied_vol"].between(0.01, 2.0).all()
-        assert (s["bs_vega"] > 0).all() and (s["market_price_f"] > 0).all()
+        assert (s["bs_vega"] > 0).all()
+        assert (s["market_price_f"] > 0).all()
         assert s["expiry"].nunique() == 6
         assert cal.spx_snapshot_session == cal.spot_date == "2026-03-24"
 
@@ -759,7 +786,8 @@ class TestRealSnapshot:
     def test_loss_ranks_params(self, cal):
         p_bad = np.array([0.2, 0.002, 0.1, -0.1, 0.002])
         p_good = np.array([5.0, 0.065, 1.5, -0.8, 0.07])
-        assert np.isfinite(cal.joint_loss(p_good)) and cal.joint_loss(p_good) < cal.joint_loss(p_bad)
+        assert np.isfinite(cal.joint_loss(p_good))
+        assert cal.joint_loss(p_good) < cal.joint_loss(p_bad)
         assert cal.joint_loss([25.0, 0.04, 0.5, -0.7, 0.04]) == 1e6
         assert cal.joint_loss([2.0, 0.04, 0.5, 0.1, 0.04]) == 1e6
 
@@ -772,6 +800,7 @@ _V2_SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10
 
 def _committed(session):
     import pickle
+
     from joint_vol_calibration.config import DATA_DIR
     with open(DATA_DIR / "calibrations" / f"joint_cal_{session}.pkl", "rb") as f:
         return pickle.load(f)
@@ -829,14 +858,18 @@ class TestMultiStartTRF:
         _, res = synth_fit
         ms = res["multistart"]
         assert ms["n_starts"] == len(ms["runs"]) >= 8
-        assert ms["n_starts_at_best"] >= 1 and ms["n_distinct_basins"] >= 1
+        assert ms["n_starts_at_best"] >= 1
+        assert ms["n_distinct_basins"] >= 1
         assert min(r["loss"] for r in ms["runs"]) == pytest.approx(res["loss"], rel=1e-12)
-        assert res["success"] is True and res["n_evals"] == (
+        assert res["success"] is True
+        assert res["n_evals"] == (
             ms["n_residual_evals"] + ms["n_jacobian_evals"])
         idf = res["identifiability"]
-        assert idf["on_bound"] == [] and set(idf["free_params"]) == set(_NAMES)
+        assert idf["on_bound"] == []
+        assert set(idf["free_params"]) == set(_NAMES)
         sv = idf["rel_jacobian_singular_values"]
-        assert sv == sorted(sv, reverse=True) and sv[-1] > 0
+        assert sv == sorted(sv, reverse=True)
+        assert sv[-1] > 0
         assert idf["rel_jtj_condition_number"] == pytest.approx((sv[0] / sv[-1]) ** 2)
         C = np.array(idf["correlation"]["matrix"])
         np.testing.assert_allclose(np.diag(C), 1.0)
@@ -911,7 +944,8 @@ class TestMultiStartTRF:
         # serial 'immediate' by default: the committed fits' exact trajectory
         assert res["methods"]["optimizer"]["workers"] == 1
         assert res["methods"]["optimizer"]["updating"] == "immediate"
-        assert "multistart" not in res and "identifiability" in res
+        assert "multistart" not in res
+        assert "identifiability" in res
 
 
 def test_process_parallel_de_is_bit_identical_to_serial_deferred(synth):
@@ -923,7 +957,8 @@ def test_process_parallel_de_is_bit_identical_to_serial_deferred(synth):
     serial = synth._optimise(model.loss, bounds, 2, 5, False, "latinhypercube", "t", workers=map)
     pooled = synth._optimise(model.loss, bounds, 2, 5, False, "latinhypercube", "t", workers=2)
     np.testing.assert_array_equal(serial[1], pooled[1])
-    assert serial[2] == pooled[2] and serial[0].nfev == pooled[0].nfev
+    assert serial[2] == pooled[2]
+    assert serial[0].nfev == pooled[0].nfev
 
 
 class TestPreviousAcceptedFit:
@@ -943,7 +978,8 @@ class TestPreviousAcceptedFit:
         self._write(tmp_path, "2026-09-24")                            # later: look-ahead
         (tmp_path / "joint_cal_2026-09-22.pkl").write_bytes(b"not a pickle")
         path, res = jc.previous_accepted_fit("2026-09-23", tmp_path)
-        assert path.name == "joint_cal_2026-09-10.pkl" and res == good
+        assert path.name == "joint_cal_2026-09-10.pkl"
+        assert res == good
         assert jc.previous_accepted_fit("2026-09-10", tmp_path) == (None, None)
         assert jc.previous_accepted_fit("2026-09-23", tmp_path / "missing") == (None, None)
 
@@ -983,10 +1019,12 @@ class TestIdentifiabilityReport:
         r = 0.01 * rng.normal(size=40)
         rep = jc.identifiability_report(A, r, x, ("a", "b", "c"),
                                         np.array([0.0, 0.0, 0.0]), np.array([5.0, 5.0, 2.0]))
-        assert rep["on_bound"] == ["c"] and rep["standard_errors"]["c"] is None
+        assert rep["on_bound"] == ["c"]
+        assert rep["standard_errors"]["c"] is None
         assert rep["correlation"]["params"] == ["a", "b"]
         w = rep["weakest_direction"]
-        assert abs(abs(w["a"]) - 2 ** -0.5) < 1e-3 and abs(w["a"] + w["b"]) < 1e-3
+        assert abs(abs(w["a"]) - 2 ** -0.5) < 1e-3
+        assert abs(w["a"] + w["b"]) < 1e-3
         assert rep["rel_jacobian_condition_number"] > 1e3
 
 
@@ -1005,19 +1043,23 @@ class TestSigmaProfile:
 
     def test_loss_never_rises_with_the_cap(self, profile):
         losses = [r["loss"] for r in profile["rows"]]
-        assert all(b <= a * (1 + 1e-9) + 1e-15 for a, b in zip(losses, losses[1:]))
-        assert profile["caps"] == [0.4, 0.55, 0.7, 1.0, 3.0] and profile["kappa_max"] == 40.0
+        assert all(b <= a * (1 + 1e-9) + 1e-15 for a, b in itertools.pairwise(losses))
+        assert profile["caps"] == [0.4, 0.55, 0.7, 1.0, 3.0]
+        assert profile["kappa_max"] == 40.0
         assert profile["production_box"]["sigma"] == list(HESTON_BOUNDS["sigma"])
 
     def test_binding_caps_flagged_and_free_caps_recover_truth(self, profile):
         rows = {r["sigma_cap"]: r for r in profile["rows"]}
         for cap in (0.4, 0.55):
-            assert rows[cap]["sigma_at_cap"] and rows[cap]["params"]["sigma"] == pytest.approx(cap)
+            assert rows[cap]["sigma_at_cap"]
+            assert rows[cap]["params"]["sigma"] == pytest.approx(cap)
             assert rows[cap]["loss"] > 100 * rows[3.0]["loss"]
         for cap in (1.0, 3.0):
             r = rows[cap]
-            assert not r["sigma_at_cap"] and not r["kappa_at_max"]
-            assert r["spx_iv_rmse"] < 0.05 and r["spx_oos_iv_rmse"] < 0.2
+            assert not r["sigma_at_cap"]
+            assert not r["kappa_at_max"]
+            assert r["spx_iv_rmse"] < 0.05
+            assert r["spx_oos_iv_rmse"] < 0.2
             for k in _NAMES:
                 assert r["params"][k] == pytest.approx(_TRUE[k], rel=0.05), (cap, k)
 
@@ -1031,7 +1073,8 @@ class TestSigmaProfile:
     def test_rows_carry_the_vvix_check(self, profile, synth):
         r = profile["rows"][-1]
         # the synthetic DB row has no ^VVIX: the model side is still reported
-        assert r["vvix_market"] is None and r["vvix_error"] is None
+        assert r["vvix_market"] is None
+        assert r["vvix_error"] is None
         p = r["params"]
         assert r["vvix_model"] == pytest.approx(jc.heston_vvix(p["kappa"], p["theta"],
                                                                p["sigma"], p["v0"]))
@@ -1043,8 +1086,10 @@ class TestSpxOnlyComparison:
 
     def test_heston_spx_only_recovers_the_synthetic_market(self, synth):
         out = synth.calibrate_spx_only("heston", n_starts=2, warm=dict(_TRUE))
-        assert out["model"] == "heston" and out["spx_iv_rmse_exact"] < 0.05
-        assert out["spx_oos_iv_rmse"] < 0.2 and out["on_bound"] == []
+        assert out["model"] == "heston"
+        assert out["spx_iv_rmse_exact"] < 0.05
+        assert out["spx_oos_iv_rmse"] < 0.2
+        assert out["on_bound"] == []
         for k in _NAMES:
             assert out["params"][k] == pytest.approx(_TRUE[k], rel=0.05)
         # the VIX leg is off, so the index error is out of sample (and small:
@@ -1060,9 +1105,11 @@ class TestSpxOnlyComparison:
         assert out["params"]["H"] > 0.45
         assert out["spx_iv_rmse_exact"] < 0.1
         ms = out["multistart"]
-        assert ms["n_starts"] == 2 and {r["label"] for r in ms["runs"]} == {"warm_H0.30",
+        assert ms["n_starts"] == 2
+        assert {r["label"] for r in ms["runs"]} == {"warm_H0.30",
                                                                             "warm_H0.10"}
-        assert out["settings"]["n_steps"] == 100 and out["settings"]["n_factors"] == 20
+        assert out["settings"]["n_steps"] == 100
+        assert out["settings"]["n_factors"] == 20
 
     def test_unknown_model_rejected(self, synth):
         with pytest.raises(ValueError, match="model"):
@@ -1121,15 +1168,19 @@ def test_basin_grouping_and_sobol_starts():
     s1 = jc.sobol_starts(8, jc.HESTON_START_BOX, lo, hi, _NAMES)
     s2 = jc.sobol_starts(8, jc.HESTON_START_BOX, lo, hi, _NAMES)
     np.testing.assert_array_equal(s1, s2)                       # seeded
-    assert s1.shape == (8, 5) and np.all(s1 > lo) and np.all(s1 < hi)
+    assert s1.shape == (8, 5)
+    assert np.all(s1 > lo)
+    assert np.all(s1 < hi)
     for j, k in enumerate(_NAMES):
         a, b, _ = jc.HESTON_START_BOX[k]
-        assert np.all(s1[:, j] >= a - 1e-12) and np.all(s1[:, j] <= b + 1e-12)
+        assert np.all(s1[:, j] >= a - 1e-12)
+        assert np.all(s1[:, j] <= b + 1e-12)
     # a start box edge outside a tighter active box is clipped to it
     hi2 = hi.copy()
     hi2[2] = 1.0
     s3 = jc.sobol_starts(5, jc.HESTON_START_BOX, lo, hi2, _NAMES)
-    assert s3.shape == (5, 5) and np.all(s3[:, 2] < 1.0)
+    assert s3.shape == (5, 5)
+    assert np.all(s3[:, 2] < 1.0)
 
 
 def test_multistart_trf_survives_a_start_with_non_finite_residuals():
@@ -1147,10 +1198,14 @@ def test_multistart_trf_survives_a_start_with_non_finite_residuals():
     best, rep = jc.multistart_trf(fun, None, starts, lo, hi, ["bad", "a", "b"])
     np.testing.assert_allclose(best.x, np.linalg.lstsq(A, b, rcond=None)[0], atol=1e-8)
     bad = rep["runs"][0]
-    assert bad["status"] == "failed" and bad["loss"] is None and bad["x"] is None
+    assert bad["status"] == "failed"
+    assert bad["loss"] is None
+    assert bad["x"] is None
     assert "ValueError" in bad["message"]
-    assert rep["n_failed_starts"] == 1 and rep["n_starts"] == 3
-    assert rep["n_distinct_basins"] == 1 and rep["n_starts_at_best"] == 2
+    assert rep["n_failed_starts"] == 1
+    assert rep["n_starts"] == 3
+    assert rep["n_distinct_basins"] == 1
+    assert rep["n_starts_at_best"] == 2
     assert rep["best_label"] in ("a", "b")
     with pytest.raises(RuntimeError, match="all 1 TRF start"):
         jc.multistart_trf(fun, None, starts[:1], lo, hi, ["bad"])

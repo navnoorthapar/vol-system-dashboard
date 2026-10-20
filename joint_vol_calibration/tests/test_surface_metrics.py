@@ -31,10 +31,12 @@ def test_spread_unit_metrics_by_hand():
     assert res["inside_spread"].tolist() == [True, False, False, True]
     np.testing.assert_allclose(res["outside_spread_vp"], [0.0, 0.1, 0.05, 0.0], atol=1e-12)
     s = mt.summarise(res)
-    assert s["all"]["n"] == 4 and s["all"]["inside_spread_pct"] == pytest.approx(50.0)
+    assert s["all"]["n"] == 4
+    assert s["all"]["inside_spread_pct"] == pytest.approx(50.0)
     assert s["all"]["rmse_vp"] == pytest.approx(np.sqrt((0.05 ** 2 + 0.3 ** 2 + 0.15 ** 2) / 4))
     assert s["all"]["median_abs_hs"] == pytest.approx(1.0)
-    assert s["in_sample"]["n"] == 2 and s["out_of_sample"]["inside_spread_pct"] == pytest.approx(50.0)
+    assert s["in_sample"]["n"] == 2
+    assert s["out_of_sample"]["inside_spread_pct"] == pytest.approx(50.0)
     assert s["by_expiry"]["E1"]["rmse_hs"] == pytest.approx(np.sqrt((0.25 + 2.25) / 2))
     assert s["by_tenor_delta"]["180-365d|25P"]["n"] == 1
     assert s["all"]["within_2hs_pct"] == pytest.approx(100.0)
@@ -61,7 +63,8 @@ RANGES = [("a", 0.1, -0.4, 0.2), ("b", 0.25, -0.5, 0.3), ("c", 0.5, -0.6, 0.35)]
 
 def test_flat_vol_has_no_dense_grid_violation():
     out = mt.dense_grid_checks(lambda k, T: np.full(len(k), 0.2), RANGES)
-    assert out["butterfly_violations"] == 0 and out["calendar_violations"] == 0
+    assert out["butterfly_violations"] == 0
+    assert out["calendar_violations"] == 0
     assert out["call_spread_slope_violations"] == 0
     assert out["butterfly_points"] == 3 * (mt.GRID_POINTS - 2)
 
@@ -70,11 +73,13 @@ def test_butterfly_arbitrage_is_detected_on_prices():
     vogt = (-0.0410, 0.1331, 0.3060, 0.3586, 0.4153)
     iv = lambda k, T: np.sqrt(np.maximum(sv.svi_w(k, *vogt), 1e-12) / 1.0)   # noqa: E731
     out = mt.dense_grid_checks(iv, [("v", 1.0, -0.2, 0.9)])
-    assert out["butterfly_violations"] > 0 and out["butterfly_violating_expiries"] == ["v"]
+    assert out["butterfly_violations"] > 0
+    assert out["butterfly_violating_expiries"] == ["v"]
 
 
 def test_calendar_arbitrage_is_detected():
     # total variance falls from T = 0.25 to T = 0.5
     iv = lambda k, T: np.full(len(k), 0.3 if T < 0.3 else 0.2)              # noqa: E731
     out = mt.dense_grid_checks(iv, RANGES)
-    assert out["calendar_violations"] > 0 and out["calendar_violating_pairs"] == ["b->c"]
+    assert out["calendar_violations"] > 0
+    assert out["calendar_violating_pairs"] == ["b->c"]

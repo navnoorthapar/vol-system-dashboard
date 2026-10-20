@@ -55,7 +55,6 @@ import json
 import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -125,7 +124,7 @@ def _frame_rounded(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _sha256(path: Path) -> Optional[str]:
+def _sha256(path: Path) -> str | None:
     if not path.exists():
         return None
     h = hashlib.sha256()
@@ -183,7 +182,7 @@ def _repaired_quotes(q: pd.DataFrame, flags: pd.DataFrame, n: int = 25) -> dict:
 
 def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                svi_surface, essvi_surface: es.ESSVISurface, calc: datetime,
-               svi_cal_surface=None, attribution: Optional[dict] = None) -> list:
+               svi_cal_surface=None, attribution: dict | None = None) -> list:
     notes = []
     raw = sq.raw
     n_zero = int(((pd.to_numeric(raw["bid"], errors="coerce") <= 0)).sum()) if "bid" in raw else 0
@@ -253,8 +252,8 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
     return notes
 
 
-def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
-                chain: Optional[pd.DataFrame] = None, models: Optional[list] = None) -> dict:
+def run_session(session: str, *, calibrations_dir: Path | None = None,
+                chain: pd.DataFrame | None = None, models: list | None = None) -> dict:
     """Compute every artifact of ``session``. Returns {'residuals': frame,
     'surface': dict, 'scorecard': dict, 'vix_replication': dict}."""
     session = str(pd.Timestamp(session).date())
@@ -292,7 +291,7 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
             c = carry.loc[exp]
             term.append({"expiry": exp, "T_days": T * 365.0, "forward": F, "discount": D,
                          "r": float(c["r"]), "q": float(c["q"]), "carry_method": str(c["method"]),
-                         "n_quotes": int(len(g)),
+                         "n_quotes": len(g),
                          "median_half_spread_vp": float(np.median(g["half_spread_vp"])),
                          "atm_vol_essvi": 100.0 * essvi_surface.atm_vol(T),
                          "atm_skew_essvi": essvi_surface.atm_skew(T),
@@ -307,7 +306,7 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
             "inputs": {
                 "chain": f"data_store/options/spx_{session}.parquet" if chain is None else "argument",
                 "chain_sha256": _sha256(chain_path) if chain is None else None,
-                "chain_rows": int(len(sq.raw)), "source": sq.diagnostics.get("source"),
+                "chain_rows": len(sq.raw), "source": sq.diagnostics.get("source"),
                 "quote_time": sq.diagnostics.get("quote_time"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),
@@ -321,7 +320,7 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                                              "consecutive expiries only; see arbitrage.py")},
             "fit_set": {"rule": "alternate strikes per expiry (even positions by strike), minus "
                                 "quotes the l1-BA repair moves outside their spread",
-                        "n": int(ctx.fit_mask.sum()), "n_universe": int(len(q)),
+                        "n": int(ctx.fit_mask.sum()), "n_universe": len(q),
                         "half_spread_floor_vp_in_weights": sc.H_FLOOR_FIT * 100.0},
             "surfaces": surfaces,
             "term_structure": term,
@@ -337,20 +336,20 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
                           for m in avail if m["metrics"]["out_of_sample"].get("n")),
                          key=lambda r: (r["oos_median_abs_hs"] is None, r["oos_median_abs_hs"]))
         scorecard_doc = {"schema_version": SCHEMA_VERSION, "session": session,
-                         "n_quotes": int(len(q)), "models": card["models"],
+                         "n_quotes": len(q), "models": card["models"],
                          "ranking_by_oos_median_abs_hs": ranking,
                          "notes": [
-                             "Every model is scored on the same quotes (the calibrator's OOS "
-                             "universe) with the same metrics and dense-grid checks.",
-                             "Surfaces are fitted to alternate strikes, so their out-of-sample "
-                             "quotes are the strikes in between (an interpolation test); Heston's "
-                             "in-sample set is its calibration anchors, fitted jointly with the "
-                             "VIX index leg.",
-                             "svi_cal is the arbitrage-free surface (butterfly and calendar "
-                             "certified on grids); svi has no calendar constraint and its "
-                             "calendar violations are counted in dense_grid.",
-                             "Yahoo snapshots carry no quote time: part of every model's spread "
-                             "misses can be stale quotes rather than model error."]}
+                             ("Every model is scored on the same quotes (the calibrator's OOS "
+                              "universe) with the same metrics and dense-grid checks."),
+                             ("Surfaces are fitted to alternate strikes, so their out-of-sample "
+                              "quotes are the strikes in between (an interpolation test); Heston's "
+                              "in-sample set is its calibration anchors, fitted jointly with the "
+                              "VIX index leg."),
+                             ("svi_cal is the arbitrage-free surface (butterfly and calendar "
+                              "certified on grids); svi has no calendar constraint and its "
+                              "calendar violations are counted in dense_grid."),
+                             ("Yahoo snapshots carry no quote time: part of every model's spread "
+                              "misses can be stale quotes rather than model error.")]}
 
         # vix_replication.json
         calc = _calc_time_ny(sq)
@@ -420,19 +419,19 @@ def run_session(session: str, *, calibrations_dir: Optional[Path] = None,
             "deviations": [
                 "R is the ^IRX bill rate (cc), not Cboe's CMT spline; dVIX/dR ~ VIX T / 2.",
                 "Calculation time is the chain's T origin; Yahoo snapshots carry no quote time.",
-                "parity_forward replaces the single-strike forward with the cleaned chain's "
-                "parity-regression F and D (robust to one stale strike).",
-                "K0 falls back to the nearest lower strike with both sides quoted when the listed "
-                "K0 lacks one (two-sided-only storage); flagged per term.",
-                "VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days "
-                "(analogues, not Cboe's index-specific series sets).",
+                ("parity_forward replaces the single-strike forward with the cleaned chain's "
+                 "parity-regression F and D (robust to one stale strike)."),
+                ("K0 falls back to the nearest lower strike with both sides quoted when the listed "
+                 "K0 lacks one (two-sided-only storage); flagged per term."),
+                ("VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days "
+                 "(analogues, not Cboe's index-specific series sets)."),
                 "Root-less (pre-C22) chains are treated as PM-settled.",
             ],
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,
                                     indices["VIX"].get("gap_attribution")),
         }
-    resid_cols = [c for c in resid.columns]
+    resid_cols = list(resid.columns)
     return {"residuals": resid[resid_cols].reset_index(drop=True), "surface": surface_doc,
             "scorecard": scorecard_doc, "vix_replication": vix_doc}
 

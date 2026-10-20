@@ -43,7 +43,6 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -57,8 +56,8 @@ from joint_vol_calibration.config import (
     VVIX_TENOR_DAYS,
 )
 from joint_vol_calibration.data import cboe_downloader as cboe
-from joint_vol_calibration.data import yf_downloader as yf_dl
 from joint_vol_calibration.data import database as db
+from joint_vol_calibration.data import yf_downloader as yf_dl
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +178,7 @@ def refresh_vix_index_family(start: str, end: str, *, yahoo: bool = True, vix_da
     return out
 
 
-def refresh_cboe_indices(symbols=None, start: Optional[str] = None, end: Optional[str] = None) -> dict:
+def refresh_cboe_indices(symbols=None, start: str | None = None, end: str | None = None) -> dict:
     """Download and store the non-VIX-family Cboe indices (cboe_downloader.CBOE_INDEX_CATALOG).
 
     ``symbols`` defaults to cboe_downloader.DEFAULT_EXTRA_INDICES (VIX1D,
@@ -257,8 +256,8 @@ def _correction_frame(stored: pd.DataFrame, ref: pd.DataFrame, keys: list, value
     return out[sess].reset_index(drop=True), log
 
 
-def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
-                             cboe_vix: Optional[pd.DataFrame] = None, *,
+def correct_vix_index_family(cboe_term: pd.DataFrame | None = None,
+                             cboe_vix: pd.DataFrame | None = None, *,
                              root=None, apply: bool = False, apply_db: bool = False,
                              log_dir=None, log_name: str = "c23_vix_index_family") -> dict:
     """
@@ -324,8 +323,8 @@ def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
         "same_print_tol": SAME_PRINT_TOL,
         "backtest_window": [BT_START, BT_END],
         "cboe_reference": {
-            "term_structure_rows": int(len(cboe_term)), "term_structure_max_date": str(cboe_term["date"].max()),
-            "vix_rows": int(len(cboe_vix)), "vix_max_date": str(cboe_vix["date"].max()),
+            "term_structure_rows": len(cboe_term), "term_structure_max_date": str(cboe_term["date"].max()),
+            "vix_rows": len(cboe_vix), "vix_max_date": str(cboe_vix["date"].max()),
         },
         "tables": {},
     }
@@ -335,17 +334,17 @@ def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
         in_bt = tl[tl["in_backtest_window"]]["action"].value_counts().to_dict()
         big = tl[(tl["action"] == "replaced_by_cboe") & (tl["diff"].abs() > CROSS_SOURCE_TOL)]
         summary["tables"][table] = {
-            "rows_before": int(len(old)), "rows_after": int(len(new)),
+            "rows_before": len(old), "rows_after": len(new),
             "actions": {k: int(v) for k, v in sorted(counts.items())},
             "actions_in_backtest_window": {k: int(v) for k, v in sorted(in_bt.items())},
-            "replaced_over_cross_source_tol": int(len(big)),
+            "replaced_over_cross_source_tol": len(big),
             "replaced_over_cross_source_tol_in_backtest_window": int(big["in_backtest_window"].sum()),
             "by_ticker": {t: {k: int(v) for k, v in g["action"].value_counts().sort_index().items()}
                           for t, g in tl.groupby("ticker")},
         }
     material = log[log["action"].isin(["replaced_by_cboe", "added_from_cboe", "removed_non_session",
                                        "kept_not_in_cboe"])]
-    summary["material_rows"] = int(len(material))
+    summary["material_rows"] = len(material)
     summary["material_rows_in_backtest_window"] = int(material["in_backtest_window"].sum())
 
     if apply:
@@ -369,10 +368,11 @@ def _apply_vix_correction_to_db(ts_new: pd.DataFrame, vd_new: pd.DataFrame) -> d
     db.init_database()
     removed = {}
     with db._connection() as conn:
-        for table in ("vix_term_structure", "vix_daily"):
-            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]
+        for table in ("vix_term_structure", "vix_daily"):      # literal table names; dates are bound
+            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]  # noqa: S608
             bad = [d for d, ok in zip(dates, db.is_session_array(dates)) if not ok]
-            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount for d in bad)
+            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount  # noqa: S608
+                                 for d in bad)
     n_ts = db.insert_vix_term_structure(ts_new, warn_dropped=False)
     n_vd = db.insert_vix_daily(vd_new, warn_dropped=False)
     return {"removed_non_session": removed, "upserted": {"vix_term_structure": n_ts, "vix_daily": n_vd}}
@@ -401,17 +401,17 @@ def resync_database_from_record(*, options: bool = True) -> dict:
     db.init_database()
     removed = {}
     with db._connection() as conn:
-        for table in db.SESSION_KEYED_TABLES:
-            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]
+        for table in db.SESSION_KEYED_TABLES:              # the schema's own table names; dates are bound
+            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]  # noqa: S608
             bad = [d for d, ok in zip(dates, db.is_session_array(dates)) if not ok]
-            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount
+            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount  # noqa: S608
                                  for d in bad)
     out = {"removed_non_session": removed, "imported": db.import_market_partitions()}
     if options:
         out["options_rows_reimported"] = db.import_options_snapshots(overwrite=True)
     with db._connection() as conn:
         out["null_source_rows"] = {
-            t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE source IS NULL").fetchone()[0]
+            t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE source IS NULL").fetchone()[0]  # noqa: S608
             for t in ("vix_daily", "vix_term_structure", "options_snapshots")}
         out["option_sources"] = {r[0]: r[1] for r in conn.execute(
             "SELECT source, COUNT(*) FROM options_snapshots GROUP BY source")}
@@ -434,7 +434,7 @@ class DataPipeline:
     def __init__(
         self,
         hist_start: str = HIST_START,
-        hist_end: Optional[str] = HIST_END,
+        hist_end: str | None = HIST_END,
     ):
         self.hist_start = hist_start
         self.hist_end   = hist_end if hist_end is not None else db.last_closed_session()
@@ -586,7 +586,7 @@ class DataPipeline:
         logger.info("Restored persisted data: %s", counts)
         return counts
 
-    def persist(self, since: Optional[str] = None, market_root=None, options_root=None) -> list:
+    def persist(self, since: str | None = None, market_root=None, options_root=None) -> list:
         """Write the parquet record: market partitions for years >= since, chains for sessions >= since."""
         paths = db.export_market_partitions(market_root, since=since)
         paths += db.export_options_snapshots(options_root, since=since)
@@ -594,7 +594,7 @@ class DataPipeline:
 
     # ── Look-ahead Validation ─────────────────────────────────────────────────
 
-    def validate_no_lookahead(self, test_date: Optional[str] = None) -> bool:
+    def validate_no_lookahead(self, test_date: str | None = None) -> bool:
         """
         Verify that the database enforces zero look-ahead bias.
 
@@ -795,7 +795,7 @@ class DataPipeline:
 
 # ── Convenience top-level functions ──────────────────────────────────────────
 
-def run_backfill(hist_start: str = HIST_START, hist_end: Optional[str] = HIST_END) -> dict:
+def run_backfill(hist_start: str = HIST_START, hist_end: str | None = HIST_END) -> dict:
     """
     Convenience wrapper: initialise pipeline and run historical backfill.
 

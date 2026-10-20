@@ -56,7 +56,8 @@ import logging
 import math
 import pickle
 import warnings
-from typing import Callable, NamedTuple, Optional, Tuple
+from collections.abc import Callable
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -64,8 +65,13 @@ from scipy import optimize
 from scipy.special import ndtr
 
 from joint_vol_calibration.config import (
-    HESTON_DEFAULTS, HESTON_BOUNDS, MC_PATHS, MC_STEPS_PER_YEAR,
-    MC_ANTITHETIC, RANDOM_SEED, MC_CACHE_DIR,
+    HESTON_BOUNDS,
+    HESTON_DEFAULTS,
+    MC_ANTITHETIC,
+    MC_CACHE_DIR,
+    MC_PATHS,
+    MC_STEPS_PER_YEAR,
+    RANDOM_SEED,
 )
 
 logger = logging.getLogger(__name__)
@@ -254,9 +260,9 @@ def _lewis_call_prices(
     log_cf: Callable[[np.ndarray], np.ndarray],
     total_var: float,
     jump_extent: float = 0.0,
-    grid: Optional[_LewisGrid] = None,
+    grid: _LewisGrid | None = None,
     rtol: float = _PRICE_RTOL,
-) -> Tuple[np.ndarray, _LewisGrid]:
+) -> tuple[np.ndarray, _LewisGrid]:
     """
     Core engine: discounted call prices for one expiry, plus the grid used.
 
@@ -380,8 +386,8 @@ def heston_call_price(
     sigma: float,
     rho: float,
     v0: float,
-    damping_alpha: Optional[float] = None,
-    n_integration_points: Optional[int] = None,
+    damping_alpha: float | None = None,
+    n_integration_points: int | None = None,
 ) -> float:
     """
     Price one European call under Heston (present value, i.e. discounted).
@@ -430,8 +436,8 @@ def heston_call_batch(
     sigma: float,
     rho: float,
     v0: float,
-    n_points: Optional[int] = None,
-    v_upper: Optional[float] = None,
+    n_points: int | None = None,
+    v_upper: float | None = None,
 ) -> np.ndarray:
     """
     Price European calls for one expiry, vectorised over strikes.
@@ -650,8 +656,8 @@ def bates_call_price(
     lam: float,
     mu_j: float,
     sigma_j: float,
-    damping_alpha: Optional[float] = None,
-    n_integration_points: Optional[int] = None,
+    damping_alpha: float | None = None,
+    n_integration_points: int | None = None,
 ) -> float:
     """
     Price one European call under the Bates (1996) SVJ model.
@@ -683,8 +689,8 @@ def bates_call_batch(
     lam: float,
     mu_j: float,
     sigma_j: float,
-    n_points: Optional[int] = None,
-    v_upper: Optional[float] = None,
+    n_points: int | None = None,
+    v_upper: float | None = None,
 ) -> np.ndarray:
     """
     Batch-price European calls under Bates (1996) SVJ, vectorised over strikes.
@@ -763,7 +769,7 @@ def _heston_log_cf_grad(z, T: float, kappa: float, theta: float, sigma: float,
     C = kappa * theta * A
     log_cf = C + D * v0
 
-    grad = np.empty((5,) + z.shape, dtype=complex)
+    grad = np.empty((5, *z.shape), dtype=complex)
     grad[1] = kappa * A                       # theta: C is linear in theta
     grad[4] = D                               # v0
     zero = np.zeros_like(z)
@@ -824,7 +830,7 @@ def _lewis_call_derivs(S: float, strikes: np.ndarray, T: float, r: float, q: flo
 def heston_call_batch_grid(
     S: float, strikes: np.ndarray, T: float, r: float, q: float,
     kappa: float, theta: float, sigma: float, rho: float, v0: float,
-) -> Tuple[np.ndarray, Optional[_LewisGrid]]:
+) -> tuple[np.ndarray, _LewisGrid | None]:
     """heston_call_batch's prices plus the Lewis grid the adaptive engine
     converged on (None for T <= 0), so a Jacobian at the same parameters can
     reuse it (heston_call_batch_jac(..., grid=grid))."""
@@ -851,8 +857,8 @@ def heston_call_batch_jac(
     sigma: float,
     rho: float,
     v0: float,
-    grid: Optional[_LewisGrid] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    grid: _LewisGrid | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Calls for one expiry and their analytic Jacobian
     d(call)/d(kappa, theta, sigma, rho, v0), shape (M, 5).
 
@@ -1457,7 +1463,7 @@ def _implied_vol_surface_loss(
     S: float,
     r: float,
     q: float,
-    weights: Optional[np.ndarray] = None,
+    weights: np.ndarray | None = None,
     feller_penalty: float = 0.0,
 ) -> float:
     """
@@ -1490,7 +1496,7 @@ def _implied_vol_surface_loss(
     -------
     float — weighted MSE loss (vol decimal squared)
     """
-    kappa, theta, sigma, rho, v0 = params
+    kappa, theta, sigma, _rho, _v0 = params
     surface = market_surface.reset_index(drop=True)
     n = len(surface)
     if n == 0:
@@ -1700,10 +1706,10 @@ def heston_monte_carlo(
     n_paths: int = MC_PATHS,
     n_steps_per_year: int = MC_STEPS_PER_YEAR,
     seed: int = RANDOM_SEED,
-    cache_key: Optional[str] = None,
+    cache_key: str | None = None,
     scheme: str = "qe",
     antithetic: bool = MC_ANTITHETIC,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Simulate Heston paths.
 
@@ -1830,8 +1836,8 @@ def mc_option_price(
     T: float,
     r: float,
     right: str = "C",
-    antithetic: Optional[bool] = None,
-) -> Tuple[float, float]:
+    antithetic: bool | None = None,
+) -> tuple[float, float]:
     """
     Price a European option from pre-simulated paths.
 
@@ -1846,10 +1852,7 @@ def mc_option_price(
     Tuple[float, float] : (price, standard_error)
     """
     S_T = paths_S[:, -1]
-    if right.upper() == "C":
-        payoffs = np.maximum(S_T - K, 0.0)
-    else:
-        payoffs = np.maximum(K - S_T, 0.0)
+    payoffs = np.maximum(S_T - K, 0.0) if right.upper() == "C" else np.maximum(K - S_T, 0.0)
 
     discounted = np.exp(-r * T) * payoffs
     n = len(discounted)
@@ -1885,9 +1888,9 @@ class HestonModel:
 
     def __init__(self):
         self.params: dict = dict(HESTON_DEFAULTS)
-        self.calib_result: Optional[dict] = None
+        self.calib_result: dict | None = None
         self.is_calibrated: bool = False
-        self._S: Optional[float] = None
+        self._S: float | None = None
         self._r: float = _DEFAULT_RATE
         self._q: float = _DEFAULT_DIV
 
@@ -1917,7 +1920,7 @@ class HestonModel:
 
         return result
 
-    def _spot(self, S: Optional[float]) -> float:
+    def _spot(self, S: float | None) -> float:
         return self._S if S is None else S
 
     def price(
@@ -1925,7 +1928,7 @@ class HestonModel:
         K: float,
         T: float,
         right: str = "C",
-        S: Optional[float] = None,
+        S: float | None = None,
     ) -> float:
         """Price a European option under calibrated Heston (present value)."""
         self._check_calibrated()
@@ -1934,12 +1937,11 @@ class HestonModel:
         if right.upper() == "C":
             return heston_call_price(s, K, T, self._r, self._q,
                                      p["kappa"], p["theta"], p["sigma"], p["rho"], p["v0"])
-        else:
-            return heston_put_price(s, K, T, self._r, self._q,
-                                    p["kappa"], p["theta"], p["sigma"], p["rho"], p["v0"])
+        return heston_put_price(s, K, T, self._r, self._q,
+                                p["kappa"], p["theta"], p["sigma"], p["rho"], p["v0"])
 
     def implied_vol(
-        self, K: float, T: float, right: str = "C", S: Optional[float] = None
+        self, K: float, T: float, right: str = "C", S: float | None = None
     ) -> float:
         """Model-implied vol for a given strike/maturity (NaN if ill-posed)."""
         price = self.price(K, T, right, S)
@@ -1947,7 +1949,7 @@ class HestonModel:
         return implied_vol_from_price(price, s, K, T, self._r, self._q, right=right)
 
     def greeks(
-        self, K: float, T: float, right: str = "C", S: Optional[float] = None
+        self, K: float, T: float, right: str = "C", S: float | None = None
     ) -> dict:
         """Compute all Greeks for a given option (units: see heston_greeks)."""
         self._check_calibrated()

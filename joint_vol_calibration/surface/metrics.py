@@ -31,8 +31,9 @@ construction of its own test):
 
 from __future__ import annotations
 
+import itertools
 import math
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ from joint_vol_calibration.surface.quotes import DELTA_BUCKETS, TENOR_LABELS
 
 H_FLOOR_VP = 0.01
 KF_EDGES = (0.70, 0.80, 0.90, 0.97, 1.03, 1.10, 1.30)      # K/F buckets (right-open, last closed)
-KF_LABELS = tuple(f"{a:.2f}-{b:.2f}" for a, b in zip(KF_EDGES[:-1], KF_EDGES[1:]))
+KF_LABELS = tuple(f"{a:.2f}-{b:.2f}" for a, b in itertools.pairwise(KF_EDGES))
 BUTTERFLY_TOL = 1e-9
 CALENDAR_TOL = 1e-10
 GRID_POINTS = 201
@@ -51,7 +52,7 @@ GRID_PAD = 0.10
 
 def _stats(err_vp: np.ndarray, err_hs: np.ndarray, inside: np.ndarray,
            outside_vp: np.ndarray) -> dict:
-    n = int(len(err_vp))
+    n = len(err_vp)
     if n == 0:
         return {"n": 0}
     return {
@@ -77,7 +78,7 @@ def kf_bucket(kf) -> np.ndarray:
 
 
 def residual_frame(quotes: pd.DataFrame, model_iv, *, model: str,
-                   in_sample=None, extra: Optional[dict] = None) -> pd.DataFrame:
+                   in_sample=None, extra: dict | None = None) -> pd.DataFrame:
     """Per-quote residuals of one model (the residuals.parquet rows)."""
     q = quotes
     miv = np.asarray(model_iv, dtype=float)
@@ -211,7 +212,7 @@ def dense_grid_checks(iv_fn: Callable, ranges: list, n: int = GRID_POINTS) -> di
         min_bf = min(min_bf, float(bf.min()))
         if n_bad:
             bad_bf.append(exp)
-    for (e1, T1, lo1, hi1), (e2, T2, lo2, hi2) in zip(ranges[:-1], ranges[1:]):
+    for (e1, T1, lo1, hi1), (e2, T2, lo2, hi2) in itertools.pairwise(ranges):
         lo, hi = max(lo1, lo2), min(hi1, hi2)
         if hi <= lo:
             continue

@@ -16,10 +16,11 @@ def test_circular_shift_paths_enumerate_every_admissible_shift():
     paths = nulls.circular_shift_paths(100, min_shift=10)
     fwd = [p.shift for p in paths if not p.reverse]
     rev = [p.shift for p in paths if p.reverse]
-    assert fwd == list(range(10, 91)) and rev == fwd
+    assert fwd == list(range(10, 91))
+    assert rev == fwd
     assert len({p.path_id for p in paths}) == len(paths) == 162
     assert len(nulls.circular_shift_paths(1816)) >= 2000         # the canonical window
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="min_shift must be in"):
         nulls.circular_shift_paths(100, min_shift=60)
 
 
@@ -89,7 +90,8 @@ def test_pvalue_and_summary():
     assert nulls.pvalue_greater(10.0, null) == pytest.approx(1 / 5)
     s = nulls.summarise_null(5.0, null)
     assert s["timing_component"] == pytest.approx(5.0 - 2.5)
-    assert s["n_paths"] == 4 and s["null_frac_positive"] == 1.0
+    assert s["n_paths"] == 4
+    assert s["null_frac_positive"] == 1.0
 
 
 def _toy_pnl(pos, f):

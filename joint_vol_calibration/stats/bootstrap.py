@@ -20,7 +20,7 @@ reproducible bit for bit.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Mapping, Optional, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -41,7 +41,7 @@ def block_length(x: Sequence[float], include_squares: bool = True) -> float:
     if include_squares:
         vals.append(float(optimal_block_length(x ** 2)["stationary"].iloc[0]))
     vals = [v for v in vals if np.isfinite(v)]
-    return max([1.0] + vals)
+    return max([1.0, *vals])
 
 
 def stationary_bootstrap_indices(n: int, mean_block: float, reps: int,
@@ -83,7 +83,7 @@ def _sortino_rows(r: np.ndarray) -> np.ndarray:
         return np.where(dd > 0, r.mean(axis=1) / dd, np.nan) * np.sqrt(TRADING_DAYS)
 
 
-STATISTICS: Dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]] = {
+STATISTICS: dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]] = {
     # name: f(resampled returns, resampled daily P&L) → one value per row
     "sharpe": lambda r, p: _sharpe_rows(r),
     "sortino": lambda r, p: _sortino_rows(r),
@@ -93,13 +93,13 @@ STATISTICS: Dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]] = {
 
 def bootstrap_series(
     returns: Sequence[float],
-    pnl: Optional[Sequence[float]] = None,
+    pnl: Sequence[float] | None = None,
     reps: int = 5000,
     seed: int = 42,
-    mean_block: Optional[float] = None,
+    mean_block: float | None = None,
     level: float = 0.95,
     chunk: int = 500,
-) -> Dict:
+) -> dict:
     """Stationary-bootstrap distribution of Sharpe, Sortino and mean daily P&L.
 
     Parameters
@@ -138,7 +138,8 @@ def bootstrap_series(
     ci, se, gt0 = {}, {}, {}
     for k, v in reps_out.items():
         fin = v[np.isfinite(v)]
-        ci[k] = [float(np.quantile(fin, a)), float(np.quantile(fin, 1.0 - a))] if fin.size else [np.nan, np.nan]
+        ci[k] = ([float(np.quantile(fin, a)), float(np.quantile(fin, 1.0 - a))] if fin.size
+                 else [np.nan, np.nan])
         se[k] = float(fin.std(ddof=1)) if fin.size > 1 else float("nan")
         gt0[k] = float((fin > 0).mean()) if fin.size else float("nan")
     return {"block": b, "reps": int(reps), "seed": int(seed), "level": float(level),
@@ -146,11 +147,11 @@ def bootstrap_series(
 
 
 def bootstrap_table(
-    series: Mapping[str, Dict[str, Sequence[float]]],
+    series: Mapping[str, dict[str, Sequence[float]]],
     reps: int = 5000,
     seed: int = 42,
     level: float = 0.95,
-    fixed_block: Optional[float] = None,
+    fixed_block: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """bootstrap_series for several named series.
 

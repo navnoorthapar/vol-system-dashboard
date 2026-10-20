@@ -9,8 +9,8 @@ on the 2018-2025 window, round by round, with the commit it came from.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, Optional
 
 from joint_vol_calibration.config import ROOT_DIR
 
@@ -18,11 +18,11 @@ LEDGER_PATH = ROOT_DIR / "docs" / "trials_ledger.yaml"
 _REQUIRED_FAMILY_KEYS = ("name", "varied", "sleeves", "configurations")
 
 
-def load(path: Path = LEDGER_PATH) -> Dict:
+def load(path: Path = LEDGER_PATH) -> dict:
     """Parse and validate the ledger."""
     import yaml
 
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         led = yaml.safe_load(fh)
     if led.get("schema") != "trials_ledger/1":
         raise ValueError(f"{path}: unknown schema {led.get('schema')!r}")
@@ -48,8 +48,8 @@ def _round_order(rid: str) -> int:
     return int(digits) if digits else 10 ** 6
 
 
-def count_trials(led: Dict, rounds: Optional[Iterable[str]] = None,
-                 from_round: Optional[str] = None, include_evaluations: bool = False) -> Dict:
+def count_trials(led: dict, rounds: Iterable[str] | None = None,
+                 from_round: str | None = None, include_evaluations: bool = False) -> dict:
     """N = Σ over families of len(sleeves) × configurations.
 
     ``rounds`` restricts to those ids; ``from_round`` keeps rounds whose

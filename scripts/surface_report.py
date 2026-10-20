@@ -28,16 +28,16 @@ import os
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
-import argparse                                                        # noqa: E402
-import logging                                                         # noqa: E402
-import sys                                                             # noqa: E402
-import time                                                            # noqa: E402
-from pathlib import Path                                               # noqa: E402
+import argparse  # noqa: E402
+import logging  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from joint_vol_calibration.surface import quotes as sqm               # noqa: E402
-from joint_vol_calibration.surface import report                       # noqa: E402
+from joint_vol_calibration.surface import quotes as sqm  # noqa: E402
+from joint_vol_calibration.surface import report  # noqa: E402
 
 
 def main(argv=None) -> int:

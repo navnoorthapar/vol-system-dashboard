@@ -42,21 +42,25 @@ def test_artifacts_and_schema(written):
     assert set(res["model"]) == {"essvi", "svi", "svi_cal", "heston_v2"}
     assert len(res) == 4 * row["n_quotes"]
     surf = json.loads((d / "surface.json").read_text())
-    assert surf["schema_version"] == report.SCHEMA_VERSION and surf["session"] == SESSION
+    assert surf["schema_version"] == report.SCHEMA_VERSION
+    assert surf["session"] == SESSION
     assert surf["inputs"]["chain"] == f"data_store/options/spx_{SESSION}.parquet"
     assert len(surf["inputs"]["chain_sha256"]) == 64
     assert set(surf["surfaces"]) == {"essvi", "svi", "svi_cal"}
     ess = surf["surfaces"]["essvi"]
     assert ess["analytic_conditions"]["butterfly_ok"]
     assert ess["analytic_conditions"]["calendar_ok_on_check_grid"]
-    assert ess["dense_grid"]["butterfly_violations"] == 0 and ess["dense_grid"]["calendar_violations"] == 0
+    assert ess["dense_grid"]["butterfly_violations"] == 0
+    assert ess["dense_grid"]["calendar_violations"] == 0
     assert surf["surfaces"]["svi"]["dense_grid"]["butterfly_violations"] == 0
     cal = surf["surfaces"]["svi_cal"]
-    assert cal["dense_grid"]["butterfly_violations"] == 0 and cal["dense_grid"]["calendar_violations"] == 0
+    assert cal["dense_grid"]["butterfly_violations"] == 0
+    assert cal["dense_grid"]["calendar_violations"] == 0
     assert cal["calendar_ordering"]["ordered"]
     arbd = surf["arbitrage"]
     cert = arbd["executable_arbitrage_certificate"]
-    assert cert["executable_arbitrage"] and cert["bid_ask_box_feasible"] is False
+    assert cert["executable_arbitrage"]
+    assert cert["bid_ask_box_feasible"] is False
     rq = arbd["quotes_repaired_outside_spread"]
     assert rq["n"] == arbd["repair"]["n_perturbed_outside_spread"] == sum(rq["by_expiry"].values())
     moves = [abs(r["repair_dprice"]) for r in rq["largest"]]
@@ -69,7 +73,8 @@ def test_artifacts_and_schema(written):
     assert vixd["indices"]["VIX"]["headline_method"] == "cboe_rules"
     assert any("2026-11-20" in n for n in vixd["gap_notes"])
     ga = vixd["indices"]["VIX"]["gap_attribution"]
-    assert ga["available"] and ga["surface"] == "svi_cal"
+    assert ga["available"]
+    assert ga["surface"] == "svi_cal"
     assert ga["residual_pts"] + ga["gap_pts"] + ga["truncation_pts"] == pytest.approx(0.0, abs=1e-8)
     idx = json.loads((out / "index.json").read_text())
     assert [r["session"] for r in idx["sessions"]] == [SESSION]
@@ -90,7 +95,8 @@ def test_spread_unit_claims_hold(written):
     assert rows["svi_cal"]["dense_grid"]["calendar_violations"] == 0
     assert rows["svi"]["dense_grid"]["calendar_violations"] > 0
     assert m["heston_v2"]["median_abs_hs"] > 3.0
-    assert m["svi"]["median_abs_hs"] < 1.0 and m["svi_cal"]["median_abs_hs"] < 1.0
+    assert m["svi"]["median_abs_hs"] < 1.0
+    assert m["svi_cal"]["median_abs_hs"] < 1.0
 
 
 def test_rerun_is_byte_identical(written, tmp_path):
@@ -135,7 +141,8 @@ def test_committed_artifacts_match_a_recomputation(written):
         assert (a is None and b is None) or a == pytest.approx(b, rel=1e-9)
     rn = pd.read_parquet(out / SESSION / "residuals.parquet")
     ro = pd.read_parquet(COMMITTED / SESSION / "residuals.parquet")
-    assert list(rn.columns) == list(ro.columns) and len(rn) == len(ro)
+    assert list(rn.columns) == list(ro.columns)
+    assert len(rn) == len(ro)
     h = rn["model"] == "heston_v2"
     np.testing.assert_allclose(rn.loc[h, "model_iv"], ro.loc[h, "model_iv"], rtol=1e-9)
 
@@ -153,6 +160,8 @@ def test_script_writes_the_index(tmp_path):
 def test_round_sig_is_deterministic_and_bounded():
     x = np.array([0.0, 1.23456789012345, -9.87654321098e-7, np.nan, np.inf, 123456789.123])
     r = report.round_sig(x)
-    assert r[0] == 0.0 and np.isnan(r[3]) and np.isinf(r[4])
+    assert r[0] == 0.0
+    assert np.isnan(r[3])
+    assert np.isinf(r[4])
     np.testing.assert_allclose(r[[1, 2, 5]], x[[1, 2, 5]], rtol=1e-9)
     np.testing.assert_array_equal(report.round_sig(r), r)

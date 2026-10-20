@@ -162,7 +162,7 @@ def _call_equivalent(quotes: pd.DataFrame, scale: float) -> dict:
     return {"x": K / F * scale, "y": mid, "y_bid": bid, "y_ask": ask, "norm": norm}
 
 
-def build_problem(quotes: pd.DataFrame, scale: float = None) -> ArbitrageProblem:
+def build_problem(quotes: pd.DataFrame, scale: float | None = None) -> ArbitrageProblem:
     """Constraint rows for ``quotes`` (a quotes.SessionQuotes.quotes frame or any
     frame with expiry, T, strike, right, forward, discount, bid, ask, mid).
 
@@ -309,7 +309,7 @@ def _executable_value(P: ArbitrageProblem) -> np.ndarray:
     return out
 
 
-def repair_lp(P: ArbitrageProblem, delta0: float = None) -> dict:
+def repair_lp(P: ArbitrageProblem, delta0: float | None = None) -> dict:
     """Solve the l1-BA repair LP (CRW eq. (10)) with HiGHS.
 
     Returns {'status', 'message', 'eps' (N, index points), 'objective',
@@ -320,14 +320,14 @@ def repair_lp(P: ArbitrageProblem, delta0: float = None) -> dict:
     dbid = np.maximum(P.delta_bid, _MIN_DELTA)
     if delta0 is None:
         delta0 = float(min(da.min(), dbid.min()) / max(n, 1))
-    I = sparse.identity(n, format="csr")
+    eye = sparse.identity(n, format="csr")
     Z = sparse.csr_matrix((P.A.shape[0], n))
     # rows of A_ub [eps, t] <= b_ub
     blocks = [
-        (sparse.hstack([-I, -I]), dbid - delta0),                 # -e - t <= db - d0
-        (sparse.hstack([I, -I]), da - delta0),                    #  e - t <= da - d0
-        (sparse.hstack([sparse.diags(-delta0 / dbid), -I]), np.zeros(n)),
-        (sparse.hstack([sparse.diags(delta0 / da), -I]), np.zeros(n)),
+        (sparse.hstack([-eye, -eye]), dbid - delta0),                 # -e - t <= db - d0
+        (sparse.hstack([eye, -eye]), da - delta0),                    #  e - t <= da - d0
+        (sparse.hstack([sparse.diags(-delta0 / dbid), -eye]), np.zeros(n)),
+        (sparse.hstack([sparse.diags(delta0 / da), -eye]), np.zeros(n)),
         (sparse.hstack([-P.A, Z]), P.A @ P.y - P.b),              # -A e <= A y - b
     ]
     A_ub = sparse.vstack([blk for blk, _ in blocks], format="csr")
@@ -335,10 +335,9 @@ def repair_lp(P: ArbitrageProblem, delta0: float = None) -> dict:
     cost = np.concatenate([np.zeros(n), np.ones(n)])
     bounds = [(None, None)] * n + [(0.0, None)] * n
     res = linprog(cost, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
-    out = {"status": int(res.status), "message": str(res.message), "delta0": delta0,
-           "objective": float(res.fun) if res.status == 0 else None,
-           "eps": res.x[:n].copy() if res.status == 0 else None}
-    return out
+    return {"status": int(res.status), "message": str(res.message), "delta0": delta0,
+            "objective": float(res.fun) if res.status == 0 else None,
+            "eps": res.x[:n].copy() if res.status == 0 else None}
 
 
 def outside_spread_lp(P: ArbitrageProblem) -> dict:
@@ -350,10 +349,10 @@ def outside_spread_lp(P: ArbitrageProblem) -> dict:
     """
     n = len(P.y)
     da, dbid = P.delta_ask, P.delta_bid
-    I = sparse.identity(n, format="csr")
+    eye = sparse.identity(n, format="csr")
     Z = sparse.csr_matrix((P.A.shape[0], n))
-    A_ub = sparse.vstack([sparse.hstack([I, -I]),                # e - o <= da
-                          sparse.hstack([-I, -I]),               # -e - o <= db
+    A_ub = sparse.vstack([sparse.hstack([eye, -eye]),                # e - o <= da
+                          sparse.hstack([-eye, -eye]),               # -e - o <= db
                           sparse.hstack([-P.A, Z])], format="csr")
     b_ub = np.concatenate([da, dbid, P.A @ P.y - P.b])
     cost = np.concatenate([np.zeros(n), np.ones(n)])
@@ -453,8 +452,8 @@ def screen(quotes: pd.DataFrame, *, repair: bool = True, tol: float = 1e-9,
             "type": names[rr],
             "shortfall_index_points": float(-slack[rr]),
             "executable": bool(exe[rr]),
-            "legs": [{"expiry": str(q.at[int(j), "expiry"]), "strike": float(q.at[int(j), "strike"]),
-                      "right": str(q.at[int(j), "right"]), "weight": float(wj)}
+            "legs": [{"expiry": str(q.loc[int(j), "expiry"]), "strike": float(q.loc[int(j), "strike"]),
+                      "right": str(q.loc[int(j), "right"]), "weight": float(wj)}
                      for j, wj in zip(legs, w)],
         })
 

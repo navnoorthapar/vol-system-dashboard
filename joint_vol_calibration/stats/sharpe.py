@@ -34,8 +34,8 @@ and these numbers are reported beside them, not instead of them.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Dict, Optional, Sequence
 
 import numpy as np
 from scipy.stats import norm
@@ -88,7 +88,7 @@ def annualise(sr_per_period: float, periods: int = TRADING_DAYS) -> float:
     return float(sr_per_period) * float(np.sqrt(periods))
 
 
-def sample_moments(r: Sequence[float]) -> Dict[str, float]:
+def sample_moments(r: Sequence[float]) -> dict[str, float]:
     """Mean, sd (ddof=1), sample skewness and Pearson kurtosis (normal = 3)."""
     r = np.asarray(r, dtype=float)
     mu = float(r.mean())
@@ -180,7 +180,7 @@ class SharpeInference:
     min_trl_periods: float
     min_trl_years: float
 
-    def to_dict(self) -> Dict[str, float]:
+    def to_dict(self) -> dict[str, float]:
         return asdict(self)
 
 
@@ -204,7 +204,7 @@ def sharpe_inference(r: Sequence[float], alpha: float = 0.05,
 
 def deflated_sharpe_ratio(
     r: Sequence[float], n_trials: float, var_trial_sr: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """DSR = PSR(SR̂ ≥ SR*) with SR* = expected_max_sharpe(N, V).
 
     ``var_trial_sr`` is the cross-sectional variance of the per-period Sharpe
@@ -240,7 +240,7 @@ def newey_west_variance(x: Sequence[float], lags: int) -> float:
     return lrv
 
 
-def newey_west_tstat(x: Sequence[float], lags: Optional[int] = None) -> Dict[str, float]:
+def newey_west_tstat(x: Sequence[float], lags: int | None = None) -> dict[str, float]:
     """t-statistic of the mean of x with a Newey-West standard error.
 
     lags default: floor(4·(n/100)^(2/9)) (Newey & West 1994 rule of thumb).

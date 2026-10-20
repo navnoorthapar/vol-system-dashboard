@@ -34,7 +34,8 @@ def committed():
 
 
 def test_every_artifact_is_present_and_well_formed(summary):
-    for name in ("summary.json", "nulls.parquet", "bootstrap.parquet", "forecast_eval.json", "benchmarks.json"):
+    for name in ("summary.json", "nulls.parquet", "bootstrap.parquet", "forecast_eval.json",
+                 "benchmarks.json"):
         assert (OUT / name).exists(), name
     assert summary["schema"] == "inference_summary/1"
     assert set(summary["bootstrap"]) == set(SLEEVES)
@@ -159,8 +160,11 @@ def test_committed_null_paths_rebuild(canonical_null):
 
 def test_put_implied_beta_rebuilds_from_the_committed_levels():
     from joint_vol_calibration.backtest.delta_hedger import _interp_atm_iv
-    from joint_vol_calibration.data.database import (get_spx_ohlcv, get_tbill_rates_series,
-                                                     get_vix_term_structure_wide)
+    from joint_vol_calibration.data.database import (
+        get_spx_ohlcv,
+        get_tbill_rates_series,
+        get_vix_term_structure_wide,
+    )
 
     bj = json.loads((OUT / "benchmarks.json").read_text())
     lv = bm.load_levels(bte.DATA_DIR / "benchmarks", ("PUT", "SET"))
@@ -186,7 +190,8 @@ def test_put_implied_beta_rebuilds_from_the_committed_levels():
     assert set(ref["by_year"]) >= {str(y) for y in range(2018, 2025)}
     pp = ib["per_period"]
     per_year = ref["by_year_per_period"]
-    assert sum(v["n_periods"] for v in per_year.values()) == ref["n_periods"] - ref["per_period"]["n_unsolved"]
+    assert (sum(v["n_periods"] for v in per_year.values())
+            == ref["n_periods"] - ref["per_period"]["n_unsolved"])
     for y, v in per_year.items():
         sel = pp[(yrs == int(y)) & np.isfinite(pp)]
         assert v["per_period_median"] == pytest.approx(float(np.median(sel)), rel=1e-8)
@@ -197,10 +202,12 @@ def test_forecast_eval_is_complete():
     fe = json.loads((OUT / "forecast_eval.json").read_text())
     for sample in ("full_sample", "backtest_window", "non_overlapping"):
         ev = fe[sample]
-        assert "pdv" in ev["models"] and len(ev["models"]) >= 6
+        assert "pdv" in ev["models"]
+        assert len(ev["models"]) >= 6
         for loss in ("qlike", "mse"):
             assert all(v >= 0 for v in ev["losses"][loss].values())
             assert set(ev["dm"][loss]) == set(ev["models"]) - {"pdv"}
             pv = ev["mcs"][loss]["90"]["pvalues"]
-            assert all(0 <= v <= 1 for v in pv.values()) and max(pv.values()) == 1.0
+            assert all(0 <= v <= 1 for v in pv.values())
+            assert max(pv.values()) == 1.0
     assert fe["full_sample"]["n"] > 3000

@@ -15,7 +15,8 @@ def test_indices_have_stationary_bootstrap_structure():
     n, b = 2000, 12.0
     idx = bs.stationary_bootstrap_indices(n, b, 300, rng)
     assert idx.shape == (300, n)
-    assert idx.min() >= 0 and idx.max() < n
+    assert idx.min() >= 0
+    assert idx.max() < n
     cont = (np.diff(idx, axis=1) % n) == 1
     # a block continues with probability 1 - 1/b (plus the chance a fresh draw lands next)
     assert cont.mean() == pytest.approx(1 - 1 / b + 1 / (b * n), abs=0.003)
@@ -39,8 +40,9 @@ def test_indices_reproducible_and_validated():
     a = bs.stationary_bootstrap_indices(100, 5, 10, np.random.default_rng(7))
     b = bs.stationary_bootstrap_indices(100, 5, 10, np.random.default_rng(7))
     c = bs.stationary_bootstrap_indices(100, 5, 10, np.random.default_rng(8))
-    assert np.array_equal(a, b) and not np.array_equal(a, c)
-    with pytest.raises(ValueError):
+    assert np.array_equal(a, b)
+    assert not np.array_equal(a, c)
+    with pytest.raises(ValueError, match="mean_block must be >= 1"):
         bs.stationary_bootstrap_indices(100, 0.5, 10, np.random.default_rng(0))
 
 
@@ -96,14 +98,14 @@ def test_bootstrap_series_point_values_and_reproducibility():
         assert np.array_equal(a["replicates"][k], b["replicates"][k])
         lo, hi = a["ci"][k]
         assert lo < a["point"][k] < hi
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="same length"):
         bs.bootstrap_series(r, pnl[:-1])
 
 
 def test_bootstrap_table_seeds_each_series_independently():
     rng = np.random.default_rng(4)
     x, y = rng.normal(0.001, 0.01, 800), rng.normal(-0.001, 0.01, 800)
-    s1, reps1 = bs.bootstrap_table({"x": {"returns": x, "pnl": x}}, reps=200, seed=5)
+    _s1, reps1 = bs.bootstrap_table({"x": {"returns": x, "pnl": x}}, reps=200, seed=5)
     s2, reps2 = bs.bootstrap_table({"x": {"returns": x, "pnl": x}, "y": {"returns": y, "pnl": y}},
                                    reps=200, seed=5)
     assert np.array_equal(reps1["sharpe"].to_numpy(), reps2[reps2["series"] == "x"]["sharpe"].to_numpy())

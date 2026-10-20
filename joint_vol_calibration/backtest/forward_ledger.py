@@ -53,11 +53,13 @@ separately; *_exec P&L is before commission, *_net after.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -72,9 +74,9 @@ CONTRACT_MULT = 100
 COMMISSION_PER_LEG = 0.65
 MARGIN_RATIO = 0.20
 NAV_PER_SLEEVE = 1_000_000.0
-SLEEVES: Tuple[str, ...] = ("s1", "s1c", "s2", "s3", "s4")
+SLEEVES: tuple[str, ...] = ("s1", "s1c", "s2", "s3", "s4")
 # straddle direction per unit of signal position (S3 on = long dispersion = short index straddle)
-STRADDLE_SIGN: Dict[str, int] = {"s1": 1, "s1c": 1, "s2": 1, "s3": -1, "s4": 1}
+STRADDLE_SIGN: dict[str, int] = {"s1": 1, "s1c": 1, "s2": 1, "s3": -1, "s4": 1}
 _SIG = 10   # significant digits kept for floats
 
 
@@ -141,7 +143,7 @@ def observed_book(raw: pd.DataFrame) -> pd.DataFrame:
     return book.reset_index(drop=True)
 
 
-def _b76(F: float, K: float, T: float, D: float, sig: float) -> Dict[str, float]:
+def _b76(F: float, K: float, T: float, D: float, sig: float) -> dict[str, float]:
     from scipy.stats import norm
     sq = sig * math.sqrt(T)
     d1 = (math.log(F / K) + 0.5 * sq * sq) / sq
@@ -150,7 +152,7 @@ def _b76(F: float, K: float, T: float, D: float, sig: float) -> Dict[str, float]
             "vega": 2.0 * D * F * nd1 * math.sqrt(T)}
 
 
-def _leg(book: pd.DataFrame, expiry: str, strike: float, right: str, root: str) -> Optional[Dict]:
+def _leg(book: pd.DataFrame, expiry: str, strike: float, right: str, root: str) -> dict | None:
     m = book[(book["expiry"] == expiry) & (np.isclose(book["strike"], strike)) &
              (book["right"] == right) & (book["root"] == root)]
     if m.empty:
@@ -162,14 +164,14 @@ def _leg(book: pd.DataFrame, expiry: str, strike: float, right: str, root: str) 
     return {"bid": bid, "ask": ask, "mid": 0.5 * (bid + ask)}
 
 
-def _discount(T: float, r_ref: Optional[float], carry: Optional[pd.DataFrame], expiry: str) -> float:
+def _discount(T: float, r_ref: float | None, carry: pd.DataFrame | None, expiry: str) -> float:
     if carry is not None and len(carry) and expiry in set(carry["expiry"]):
         return float(carry.set_index("expiry").loc[expiry, "discount"])
     return math.exp(-(r_ref if r_ref is not None and math.isfinite(r_ref) else 0.0) * T)
 
 
 def _straddle_quote(book: pd.DataFrame, expiry: str, strike: float, root: str, T: float,
-                    D: float) -> Optional[Dict]:
+                    D: float) -> dict | None:
     """Both legs of a straddle with the implied forward, mid IVs and delta."""
     from joint_vol_calibration.models.implied_vol import implied_vol_black
 
@@ -198,9 +200,9 @@ def _year_fraction(session: str, expiry: str, settlement: str, t_origin) -> floa
     return float(year_fraction(session, expiry, settlement, origin=t_origin))
 
 
-def select_straddle(book: pd.DataFrame, session: str, r_ref: Optional[float] = None,
-                    carry: Optional[pd.DataFrame] = None, t_origin=None,
-                    target_days: int = TARGET_DAYS, min_days: int = MIN_DAYS) -> Optional[Dict]:
+def select_straddle(book: pd.DataFrame, session: str, r_ref: float | None = None,
+                    carry: pd.DataFrame | None = None, t_origin=None,
+                    target_days: int = TARGET_DAYS, min_days: int = MIN_DAYS) -> dict | None:
     """The ATM-forward straddle on the PM expiry closest to ``target_days``."""
     sess = pd.Timestamp(session)
     pm = book[book["settlement"] == "PM"]
@@ -245,7 +247,7 @@ def _contracts(kelly: float, price: float, K: float, direction: int) -> int:
     return n
 
 
-def open_position(sleeve: str, direction: int, kelly: float, quote: Dict, session: str) -> Dict:
+def open_position(sleeve: str, direction: int, kelly: float, quote: dict, session: str) -> dict:
     entry = quote["ask"] if direction > 0 else quote["bid"]
     n = _contracts(kelly, entry, quote["strike"], direction)
     pid = f"{sleeve}:{session}:{quote['root']}:{quote['expiry']}:{quote['strike']:g}"
@@ -266,8 +268,8 @@ def open_position(sleeve: str, direction: int, kelly: float, quote: Dict, sessio
     }
 
 
-def _pnl(direction: int, entry_exec: float, entry_mid: float, exit_exec: Optional[float],
-         exit_mid: Optional[float], n: int) -> Dict[str, Optional[float]]:
+def _pnl(direction: int, entry_exec: float, entry_mid: float, exit_exec: float | None,
+         exit_mid: float | None, n: int) -> dict[str, float | None]:
     per_exec = None if exit_exec is None else direction * (exit_exec - entry_exec) * CONTRACT_MULT
     per_mid = None if exit_mid is None else direction * (exit_mid - entry_mid) * CONTRACT_MULT
     comm = 2 * COMMISSION_PER_LEG                       # one straddle, one side
@@ -277,9 +279,9 @@ def _pnl(direction: int, entry_exec: float, entry_mid: float, exit_exec: Optiona
             "commission": comm * n}
 
 
-def mark_position(pos: Dict, book: pd.DataFrame, session: str, r_ref: Optional[float] = None,
-                  carry: Optional[pd.DataFrame] = None, t_origin=None,
-                  vix_row: Optional[pd.Series] = None, beta: Optional[float] = None) -> Dict:
+def mark_position(pos: dict, book: pd.DataFrame, session: str, r_ref: float | None = None,
+                  carry: pd.DataFrame | None = None, t_origin=None,
+                  vix_row: pd.Series | None = None, beta: float | None = None) -> dict:
     """The position marked on this session's book (a new dict; ``pos`` unchanged)."""
     pos = json.loads(canonical_json(pos))
     c = pos["contract"]
@@ -300,7 +302,8 @@ def mark_position(pos: Dict, book: pd.DataFrame, session: str, r_ref: Optional[f
             **_pnl(d, e["price_exec"], e["price_mid"], exit_exec, q["mid"], n)}
     h = pos["hedge"]
     if h["units"] is not None and h["forward"] is not None:
-        h["pnl"] = float(h["pnl"]) + float(h["units"]) * (q["forward"] - float(h["forward"])) * CONTRACT_MULT * n
+        h["pnl"] = (float(h["pnl"])
+                    + float(h["units"]) * (q["forward"] - float(h["forward"])) * CONTRACT_MULT * n)
         h["forward"] = q["forward"]
         if q.get("delta_F") is not None and math.isfinite(q["delta_F"]):
             h["units"] = -d * q["delta_F"]
@@ -319,7 +322,7 @@ def mark_position(pos: Dict, book: pd.DataFrame, session: str, r_ref: Optional[f
     return pos
 
 
-def settle_position(pos: Dict, session: str, settle_close: float) -> Dict:
+def settle_position(pos: dict, session: str, settle_close: float) -> dict:
     """Settle at intrinsic on the official close of the (PM) expiry date."""
     pos = json.loads(canonical_json(pos))
     K = float(pos["contract"]["strike"])
@@ -339,7 +342,7 @@ def settle_position(pos: Dict, session: str, settle_close: float) -> Dict:
     return pos
 
 
-def _realised(pos: Dict, how: str, session: str) -> Dict:
+def _realised(pos: dict, how: str, session: str) -> dict:
     m = pos["mark"]
     entry_comm = 2 * COMMISSION_PER_LEG * pos["contracts_per_1m"]
     exit_comm = 0.0 if how == "settle" else 2 * COMMISSION_PER_LEG * pos["contracts_per_1m"]
@@ -352,12 +355,12 @@ def _realised(pos: Dict, how: str, session: str) -> Dict:
 
 # ── one session ───────────────────────────────────────────────────────────────
 
-def _summary_template() -> Dict:
+def _summary_template() -> dict:
     return {"realised_pnl_exec": 0.0, "realised_pnl_mid": 0.0, "realised_pnl_net": 0.0,
             "realised_hedge_pnl": 0.0, "n_closed": 0, "n_opened": 0}
 
 
-def quote_after_close(session: str, quote_time) -> Optional[bool]:
+def quote_after_close(session: str, quote_time) -> bool | None:
     """True if ``quote_time`` (ISO string or datetime; naive = UTC) is at or
     after the session's 16:00 ET close; None when no quote time is given.
     Raises ValueError when it is earlier: the session's signals use that
@@ -377,12 +380,12 @@ def quote_after_close(session: str, quote_time) -> Optional[bool]:
     return True
 
 
-def step(prev: Optional[Mapping], session: str, raw_chain: pd.DataFrame,
-         signals: Mapping[str, Mapping[str, float]], spot: Optional[float] = None,
-         r_ref: Optional[float] = None, carry: Optional[pd.DataFrame] = None,
-         t_origin=None, quote_time: Optional[str] = None,
-         settlement_closes: Optional[Mapping[str, float]] = None,
-         vix_row: Optional[pd.Series] = None, beta: Optional[float] = None) -> Dict:
+def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
+         signals: Mapping[str, Mapping[str, float]], spot: float | None = None,
+         r_ref: float | None = None, carry: pd.DataFrame | None = None,
+         t_origin=None, quote_time: str | None = None,
+         settlement_closes: Mapping[str, float] | None = None,
+         vix_row: pd.Series | None = None, beta: float | None = None) -> dict:
     """The ledger record of ``session``.
 
     prev              : the previous session's ledger (None for the first)
@@ -470,7 +473,7 @@ def step(prev: Optional[Mapping], session: str, raw_chain: pd.DataFrame,
         "session": session,
         "previous": None if prev is None else {"session": str(prev["session"]),
                                                "sha256": ledger_sha256(prev)},
-        "inputs": {"chain_sha256": chain_sha256(book), "chain_rows_two_sided": int(len(book)),
+        "inputs": {"chain_sha256": chain_sha256(book), "chain_rows_two_sided": len(book),
                    "quote_time": None if quote_time is None else str(quote_time),
                    "quote_after_close": after_close,
                    "t_origin": None if t_origin is None else str(t_origin),
@@ -515,13 +518,13 @@ def write_ledger(ledger: Mapping, directory: Path = FORWARD_DIR) -> Path:
     return path
 
 
-def load_ledger(path: Path) -> Dict:
+def load_ledger(path: Path) -> dict:
     led = json.loads(Path(path).read_text())
     validate_ledger(led)
     return led
 
 
-def latest_ledger(directory: Path = FORWARD_DIR, before: Optional[str] = None) -> Optional[Dict]:
+def latest_ledger(directory: Path = FORWARD_DIR, before: str | None = None) -> dict | None:
     """The newest ledger strictly before ``before`` (or the newest of all)."""
     files = sorted(Path(directory).glob("ledger_*.json"))
     if before is not None:
@@ -529,11 +532,11 @@ def latest_ledger(directory: Path = FORWARD_DIR, before: Optional[str] = None) -
     return load_ledger(files[-1]) if files else None
 
 
-def verify_chain(ledgers: Sequence[Mapping]) -> List[str]:
+def verify_chain(ledgers: Sequence[Mapping]) -> list[str]:
     """Problems with a sequence of ledgers (ordered by session): every
     'previous' must name the prior file's session and hash."""
     problems = []
-    for a, b in zip(ledgers[:-1], ledgers[1:]):
+    for a, b in itertools.pairwise(ledgers):
         prev = b.get("previous") or {}
         if prev.get("session") != a["session"]:
             problems.append(f"{b['session']}: previous session {prev.get('session')} != {a['session']}")
@@ -547,7 +550,7 @@ def verify_chain(ledgers: Sequence[Mapping]) -> List[str]:
 _NUM = {"type": ["number", "null"]}
 _LEG = {"type": "object", "required": ["bid", "ask", "mid"],
         "properties": {"bid": {"type": "number"}, "ask": {"type": "number"}, "mid": {"type": "number"}}}
-LEDGER_SCHEMA: Dict = {
+LEDGER_SCHEMA: dict = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": SCHEMA,
     "type": "object",
@@ -606,7 +609,7 @@ def _type_ok(value: Any, t: Any) -> bool:
     return False
 
 
-def _validate(value: Any, schema: Mapping, path: str, errors: List[str]) -> None:
+def _validate(value: Any, schema: Mapping, path: str, errors: list[str]) -> None:
     import re
     if "const" in schema and value != schema["const"]:
         errors.append(f"{path}: expected {schema['const']!r}")
@@ -618,9 +621,7 @@ def _validate(value: Any, schema: Mapping, path: str, errors: List[str]) -> None
     if "pattern" in schema and isinstance(value, str) and not re.match(schema["pattern"], value):
         errors.append(f"{path}: {value!r} does not match {schema['pattern']}")
     if isinstance(value, dict):
-        for k in schema.get("required", []):
-            if k not in value:
-                errors.append(f"{path}: missing {k!r}")
+        errors.extend(f"{path}: missing {k!r}" for k in schema.get("required", []) if k not in value)
         for k, sub in schema.get("properties", {}).items():
             if k in value:
                 _validate(value[k], sub, f"{path}.{k}", errors)
@@ -633,7 +634,7 @@ def validate_ledger(ledger: Mapping) -> None:
     """Raise ValueError listing every way ``ledger`` departs from LEDGER_SCHEMA
     (the subset of JSON Schema it uses: type, const, enum, pattern, required,
     properties, items)."""
-    errors: List[str] = []
+    errors: list[str] = []
     _validate(ledger, LEDGER_SCHEMA, "$", errors)
     if errors:
         raise ValueError("invalid forward ledger: " + "; ".join(errors[:20]))
@@ -641,7 +642,7 @@ def validate_ledger(ledger: Mapping) -> None:
 
 # ── inputs from the database (for the daily bot) ─────────────────────────────
 
-def signals_for_session(session: str, start_date: Optional[str] = None) -> Dict[str, Dict[str, float]]:
+def signals_for_session(session: str, start_date: str | None = None) -> dict[str, dict[str, float]]:
     """The backtest's signal positions and sizes for ``session``, built exactly
     as BacktestEngine.run builds them (rule regimes, walk-forward PDV-21 from
     2010, SignalEngine from the backtest start), on data dated ≤ session."""
@@ -668,7 +669,7 @@ def signals_for_session(session: str, start_date: Optional[str] = None) -> Dict[
             for s in SLEEVES}
 
 
-def _session_inputs(session: str, earliest: Optional[str] = None) -> Dict[str, Any]:
+def _session_inputs(session: str, earliest: str | None = None) -> dict[str, Any]:
     """SPX closes up to ``session`` (for settlement) and its VIX row, from the DB.
 
     The closes start 120 days before ``session`` or at ``earliest`` (the
@@ -692,9 +693,9 @@ def _session_inputs(session: str, earliest: Optional[str] = None) -> Dict[str, A
     return {"closes": closes, "vix_row": vix_row}
 
 
-def record_session(session: str, raw_chain: pd.DataFrame, clean=None, spot: Optional[float] = None,
-                   r_ref: Optional[float] = None, quote_time: Optional[str] = None,
-                   directory: Path = FORWARD_DIR, signals: Optional[Mapping] = None) -> Path:
+def record_session(session: str, raw_chain: pd.DataFrame, clean=None, spot: float | None = None,
+                   r_ref: float | None = None, quote_time: str | None = None,
+                   directory: Path = FORWARD_DIR, signals: Mapping | None = None) -> Path:
     """One call for the daily bot, after a session's chain is accepted.
 
     Builds the session's signals (signals_for_session) unless given, reads the

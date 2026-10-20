@@ -43,8 +43,8 @@ with p = (1 + #{null ≥ real}) / (B + 1) for the timing alpha.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -63,11 +63,11 @@ class NullPath:
     path_id: int
     shift: int = 0
     reverse: bool = False
-    seed: Optional[int] = None
+    seed: int | None = None
 
 
 def circular_shift_paths(n: int, min_shift: int = DEFAULT_MIN_SHIFT,
-                         include_reversed: bool = True) -> List[NullPath]:
+                         include_reversed: bool = True) -> list[NullPath]:
     """Every shift τ in [min_shift, n − min_shift], forward then reversed."""
     if not 1 <= min_shift <= n // 2:
         raise ValueError(f"min_shift must be in [1, n/2], got {min_shift}")
@@ -79,7 +79,7 @@ def circular_shift_paths(n: int, min_shift: int = DEFAULT_MIN_SHIFT,
     return out
 
 
-def shuffle_paths(n_paths: int, seed: int = 42) -> List[NullPath]:
+def shuffle_paths(n_paths: int, seed: int = 42) -> list[NullPath]:
     """``n_paths`` trade-shuffle paths with seeds seed, seed+1, ..."""
     return [NullPath("shuffle", i, 0, False, int(seed + i)) for i in range(int(n_paths))]
 
@@ -92,7 +92,7 @@ def shift_series(x: np.ndarray, shift: int, reverse: bool = False) -> np.ndarray
     return np.roll(x, -int(shift))
 
 
-def _runs(sign: np.ndarray) -> List[Tuple[int, int]]:
+def _runs(sign: np.ndarray) -> list[tuple[int, int]]:
     """Maximal runs of equal sign as (start, stop) half-open intervals."""
     if sign.size == 0:
         return []
@@ -103,7 +103,7 @@ def _runs(sign: np.ndarray) -> List[Tuple[int, int]]:
 
 
 def trade_shuffle(arrays: Sequence[np.ndarray], key: np.ndarray,
-                  rng: np.random.Generator) -> List[np.ndarray]:
+                  rng: np.random.Generator) -> list[np.ndarray]:
     """Put the trades and the flat gaps of sign(key) in a random order.
 
     The series is cut into maximal runs of equal sign; the sequence of run
@@ -131,7 +131,7 @@ def trade_shuffle(arrays: Sequence[np.ndarray], key: np.ndarray,
     return out
 
 
-def holm(pvalues: Dict[str, float]) -> Dict[str, float]:
+def holm(pvalues: dict[str, float]) -> dict[str, float]:
     """Holm (1979) step-down adjusted p-values (family-wise error control)."""
     items = sorted(pvalues.items(), key=lambda kv: kv[1])
     m = len(items)
@@ -142,7 +142,7 @@ def holm(pvalues: Dict[str, float]) -> Dict[str, float]:
     return out
 
 
-def apply_path(path: NullPath, arrays: Sequence[np.ndarray], key: np.ndarray) -> List[np.ndarray]:
+def apply_path(path: NullPath, arrays: Sequence[np.ndarray], key: np.ndarray) -> list[np.ndarray]:
     """The null transformation ``path`` applied to aligned arrays."""
     if path.kind == "real":
         return [np.asarray(a) for a in arrays]
@@ -167,7 +167,7 @@ def pvalue_greater(real: float, null: np.ndarray) -> float:
     return float((1 + (null >= real).sum()) / (null.size + 1))
 
 
-def summarise_null(real: float, null: np.ndarray) -> Dict[str, float]:
+def summarise_null(real: float, null: np.ndarray) -> dict[str, float]:
     """Real value, null moments/quantiles, p-value and the timing component."""
     null = np.asarray(null, dtype=float)
     fin = null[np.isfinite(null)]
@@ -187,7 +187,7 @@ def summarise_null(real: float, null: np.ndarray) -> Dict[str, float]:
 
 # ── Sleeves and the portfolio on the canonical engine ────────────────────────
 
-SLEEVE_SPECS: Dict[str, Dict[str, str]] = {
+SLEEVE_SPECS: dict[str, dict[str, str]] = {
     # name: signals_df columns; S3's straddle direction is engine.s3_leg_direction × position
     "s1": {"position": "s1_position", "kelly": "s1_kelly"},
     "s2": {"position": "s2_position", "kelly": "s2_kelly"},
@@ -221,8 +221,8 @@ class PortfolioNull:
     def _straddle(self, s: str, pos: np.ndarray, kel: np.ndarray) -> np.ndarray:
         return self.replay.simulate(self.dirn[s] * pos, kel, self.nav_base)
 
-    def overlay(self, p1: Dict[str, np.ndarray], pos: Dict[str, np.ndarray],
-                kel: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def overlay(self, p1: dict[str, np.ndarray], pos: dict[str, np.ndarray],
+                kel: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         """The engine's pass 2: size multipliers from pass-1 P&L, shifted one
         session, then the three portfolio sleeves re-simulated."""
         pnl_mat = pd.DataFrame({s: p1[s] for s in PORTFOLIO}, index=self.index).fillna(0.0)
@@ -233,7 +233,7 @@ class PortfolioNull:
             out[s] = self._straddle(s, pos[s], kel[s] * k_mult.to_numpy())
         return out
 
-    def run_path(self, path: NullPath) -> Dict[str, np.ndarray]:
+    def run_path(self, path: NullPath) -> dict[str, np.ndarray]:
         """Daily P&L of every sleeve and the portfolio on one null path.
 
         Every sleeve is transformed by the same path. Trade shuffles permute
@@ -254,7 +254,7 @@ class PortfolioNull:
         out["_entries"] = {s: n_entries(pos[s]) for s in SLEEVE_SPECS}
         return out
 
-    def statistics(self, pnl: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
+    def statistics(self, pnl: dict[str, np.ndarray]) -> dict[str, dict[str, float]]:
         out = {}
         for s in ("s1", "s2", "s1c", "s3", "s4", "portfolio"):
             p = pnl[s]

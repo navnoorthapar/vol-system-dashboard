@@ -40,9 +40,9 @@ import io
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -152,9 +152,9 @@ def download_vix_history() -> pd.DataFrame:
 
 
 def download_vix_term_structure_history(
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    tickers: Optional[Iterable[str]] = None,
+    start: str | None = None,
+    end: str | None = None,
+    tickers: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """
     The VIX term-structure indices (and VVIX) from Cboe's official files.
@@ -209,8 +209,8 @@ DEFAULT_EXTRA_INDICES = ("VIX1D", "VIX1Y", "SKEW", "COR1M", "COR3M", "DSPX")
 
 
 def download_cboe_indices(symbols: Iterable[str] = DEFAULT_EXTRA_INDICES,
-                          start: Optional[str] = None,
-                          end: Optional[str] = None) -> pd.DataFrame:
+                          start: str | None = None,
+                          end: str | None = None) -> pd.DataFrame:
     """
     Daily history of Cboe indices outside the VIX family, one file each.
 
@@ -244,9 +244,9 @@ def download_cboe_indices(symbols: Iterable[str] = DEFAULT_EXTRA_INDICES,
 # ── VX Futures Settlements ────────────────────────────────────────────────────
 
 def download_vix_futures_settlements(
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    daily_history: Optional[pd.DataFrame] = None,
+    start: str | None = None,
+    end: str | None = None,
+    daily_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Final settlement values of the standard monthly VX contracts expiring in [start, end].
@@ -405,9 +405,9 @@ def download_vx_settlements(trade_date: str) -> pd.DataFrame:
 
 
 def download_vix_futures_daily_history(
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    expiries: Optional[Iterable[str]] = None,
+    start: str | None = None,
+    end: str | None = None,
+    expiries: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """
     Download daily history for the standard monthly VX contracts.
@@ -463,7 +463,7 @@ STATED_DELAY_MINUTES = 15
 QUOTE_DELAY = timedelta(minutes=STATED_DELAY_MINUTES)
 
 
-def delayed_quote_time(payload_timestamp, now: Optional[datetime] = None) -> str:
+def delayed_quote_time(payload_timestamp, now: datetime | None = None) -> str:
     """ISO UTC instant a delayed-quotes payload shows: its ``timestamp`` (UTC,
     'YYYY-MM-DD HH:MM:SS') minus QUOTE_DELAY, else the fetch time minus it."""
     stamp = pd.to_datetime(payload_timestamp, errors="coerce", utc=True)
@@ -473,7 +473,7 @@ def delayed_quote_time(payload_timestamp, now: Optional[datetime] = None) -> str
 
 
 def parse_cboe_options_payload(payload: dict, underlying: str,
-                               now: Optional[datetime] = None) -> pd.DataFrame:
+                               now: datetime | None = None) -> pd.DataFrame:
     """
     Turn a delayed-quotes JSON payload into options_snapshots rows.
 
@@ -565,11 +565,10 @@ def parse_cboe_options_payload(payload: dict, underlying: str,
         "source": "cboe",
     })
     df = df[(df["strike"] > 0) & (df["time_to_expiry"] > 0)]
-    df = df.sort_values(["expiry", "root", "right", "strike"]).reset_index(drop=True)
-    return df
+    return df.sort_values(["expiry", "root", "right", "strike"]).reset_index(drop=True)
 
 
-def download_cboe_options_snapshot(underlying: str, now: Optional[datetime] = None) -> pd.DataFrame:
+def download_cboe_options_snapshot(underlying: str, now: datetime | None = None) -> pd.DataFrame:
     """
     Download the current (15-min delayed) options chain from Cboe's public API.
 
@@ -637,12 +636,12 @@ class ChainCapture:
     """
     underlying: str
     frame: pd.DataFrame
-    session: Optional[str]
+    session: str | None
     quote_time: str
     book_state: str
     fetched_at: str
-    payload_timestamp: Optional[str]
-    underlying_last_trade_time: Optional[str]
+    payload_timestamp: str | None
+    underlying_last_trade_time: str | None
     underlying_price: float
     url: str
     sha256: str
@@ -658,13 +657,13 @@ class ChainCapture:
             "payload_timestamp": self.payload_timestamp, "stated_delay_minutes": STATED_DELAY_MINUTES,
             "underlying_last_trade_time": self.underlying_last_trade_time,
             "underlying_price": self.underlying_price, "url": self.url,
-            "sha256": self.sha256, "n_bytes": self.n_bytes, "rows": int(len(f)),
+            "sha256": self.sha256, "n_bytes": self.n_bytes, "rows": len(f),
             "two_sided_rows": two, "expiries": int(f["expiry"].nunique()) if len(f) else 0,
             "roots": sorted(f["root"].dropna().unique().tolist()) if len(f) else [],
         }
 
 
-def book_state_at(at: datetime, session: Optional[str]) -> str:
+def book_state_at(at: datetime, session: str | None) -> str:
     """Which book a quote feed shows at instant ``at`` for quotes of ``session``.
 
     Pass the instant the quotes show (a delayed feed's quote_time, see
@@ -694,7 +693,7 @@ def book_state_at(at: datetime, session: Optional[str]) -> str:
     return "closing"
 
 
-def capture_option_chain(underlying: str, now: Optional[datetime] = None, *,
+def capture_option_chain(underlying: str, now: datetime | None = None, *,
                          include_extras: bool = False, timeout: float = 60.0) -> ChainCapture:
     """
     Download one full delayed-quotes chain (``_SPX.json`` / ``_VIX.json``) and
@@ -740,7 +739,7 @@ def _capture_from_payload(underlying: str, payload: dict, raw_bytes: bytes, url:
     spot = data.get("close") or data.get("current_price")
     quote_time = str(frame["quote_time"].iloc[0]) if len(frame) else delayed_quote_time(
         payload.get("timestamp"), fetched)
-    quoted_at = datetime.fromisoformat(quote_time.replace("Z", "+00:00"))
+    quoted_at = datetime.fromisoformat(quote_time)
     return ChainCapture(
         underlying=und, frame=frame, session=session, quote_time=quote_time,
         book_state=book_state_at(quoted_at, session),
@@ -752,7 +751,7 @@ def _capture_from_payload(underlying: str, payload: dict, raw_bytes: bytes, url:
     )
 
 
-def capture_option_chains(underlyings: Iterable[str] = ("SPX", "VIX"), now: Optional[datetime] = None, *,
+def capture_option_chains(underlyings: Iterable[str] = ("SPX", "VIX"), now: datetime | None = None, *,
                           out_dir=None, include_extras: bool = False) -> dict:
     """
     capture_option_chain for each underlying, back to back (the SPX and VIX
@@ -768,7 +767,7 @@ def capture_option_chains(underlyings: Iterable[str] = ("SPX", "VIX"), now: Opti
     for und in underlyings:
         try:
             cap = capture_option_chain(und, now=now, include_extras=include_extras)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 (one underlying's failure must not lose the other's capture)
             logger.warning("Cboe %s chain capture failed: %s", und, e)
             continue
         out[cap.underlying] = cap

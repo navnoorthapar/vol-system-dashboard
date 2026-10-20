@@ -144,10 +144,10 @@ class ESSVISurface:
         """(theta, psi, rho) at maturity T (Corbetta et al. sec. 5)."""
         T = float(T)
         Ts = self.T
-        if T <= Ts[0]:
+        if T <= Ts[0]:  # noqa: SIM300 (T is a maturity, not a constant)
             lam = T / Ts[0]
             return self.theta[0] * lam, self.psi[0] * lam, self.rho[0]
-        if T >= Ts[-1]:
+        if T >= Ts[-1]:  # noqa: SIM300 (T is a maturity, not a constant)
             return self.theta[-1] * T / Ts[-1], self.psi[-1], self.rho[-1]
         i = int(np.searchsorted(Ts, T, side="right") - 1)
         lam = (T - Ts[i]) / (Ts[i + 1] - Ts[i])
@@ -214,7 +214,7 @@ class ESSVISurface:
             for i in range(len(self.T))]}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ESSVISurface":
+    def from_dict(cls, d: dict) -> ESSVISurface:
         sl = d["slices"]
         return cls(T=[s["T"] for s in sl], theta=[s["theta"] for s in sl],
                    psi=[s["psi"] for s in sl], rho=[s["rho"] for s in sl],
@@ -277,7 +277,7 @@ def _butterfly_constraints(n):
         return np.concatenate([lim - A, lim - B, 4.0 * theta - psi * A, 4.0 * theta - psi * B])
 
     def jac(v):
-        theta, A, B = _Objective.unpack(v, n)
+        _theta, A, B = _Objective.unpack(v, n)
         Z = np.zeros((n, n))
         rows = []
         rows.append(np.hstack([Z, -L, Z]))
@@ -380,7 +380,8 @@ def _ordering_shortfalls(v, n):
         for a_, b_ in runs:
             lo, hi = CHECK_GRID[max(a_ - 1, 0)], CHECK_GRID[min(b_ + 1, G - 1)]
             lo, hi = min(lo, hi), max(lo, hi)
-            kx, fx = _pair_min(theta, A, B, i, lo, hi) if hi > lo else (float(CHECK_GRID[a_]), float(d[i][a_]))
+            kx, fx = (_pair_min(theta, A, B, i, lo, hi) if hi > lo
+                      else (float(CHECK_GRID[a_]), float(d[i][a_])))
             if fx < -_ORDER_TOL:
                 ks.append(kx)
             if neg.any():
@@ -473,8 +474,8 @@ def fit_essvi(k, T, mid_iv, half_spread, expiries, *, h_floor: float = 5e-4,
             if len(ks):
                 add_p.append(np.full(len(ks), i))
                 add_k.append(ks)
-        pair = np.concatenate([pair] + add_p)
-        kk = np.concatenate([kk] + add_k)
+        pair = np.concatenate([pair, *add_p])
+        kk = np.concatenate([kk, *add_k])
     v = np.maximum(res.x * sc, lb)
     theta, A, B = _Objective.unpack(v, n)
     psi = 0.5 * (A + B)
@@ -490,8 +491,8 @@ def fit_essvi(k, T, mid_iv, half_spread, expiries, *, h_floor: float = 5e-4,
     info = {"success": bool(res.success), "message": str(res.message), "nit": nit,
             "nfev": nfev, "objective_start": f0, "objective": f1,
             "max_constraint_violation": viol, "ordering_rounds": rounds,
-            "ordering_rows": int(len(kk)),
+            "ordering_rows": len(kk),
             "ordering_check_violations": int(sum(len(b_) for b_ in bad)),
-            "h_floor_vp": h_floor * 100.0, "n_quotes": int(len(k)), "n_slices": n,
+            "h_floor_vp": h_floor * 100.0, "n_quotes": len(k), "n_slices": n,
             "x": v}
     return surf, info

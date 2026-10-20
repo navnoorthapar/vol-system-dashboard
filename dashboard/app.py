@@ -31,8 +31,10 @@ Run a local preview (read-only, bound to 127.0.0.1):
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -42,7 +44,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -127,11 +129,16 @@ ROUTES: dict[str, str] = {
 # The navigation: (route, label, g-shortcut key, one-line description).
 NAV: list[tuple[str, str, str, str]] = [
     ("/", "Overview", "o", "What the system is, its live state, three key results and data freshness."),
-    ("/surface", "Surface", "s", "The SPX implied-vol surface: market quotes, model overlays and residuals in half-spreads."),
-    ("/calibration", "Calibration", "c", "The headline joint SPX/VIX Heston fit: parameters, bounds, out-of-sample error, identifiability."),
-    ("/risk", "Risk", "r", "Greeks of the headline surface, scenario grid and the daily P&L explain of a hedged straddle."),
-    ("/research", "Research", "e", "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
-    ("/corrections", "Corrections", "x", "Correction rounds C16–C22 as postmortems, each tied to commits and regression tests."),
+    ("/surface", "Surface", "s",
+     "The SPX implied-vol surface: market quotes, model overlays and residuals in half-spreads."),
+    ("/calibration", "Calibration", "c",
+     "The headline joint SPX/VIX Heston fit: parameters, bounds, out-of-sample error, identifiability."),
+    ("/risk", "Risk", "r",
+     "Greeks of the headline surface, scenario grid and the daily P&L explain of a hedged straddle."),
+    ("/research", "Research", "e",
+     "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
+    ("/corrections", "Corrections", "x",
+     "Correction rounds C16–C22 as postmortems, each tied to commits and regression tests."),
     ("/model-risk", "Model Risk", "m", "Model inventory and monitoring checks with explicit thresholds."),
 ]
 
@@ -254,6 +261,24 @@ def _record_error(d: dict, component: str, exc: Any) -> None:
     _logger.warning("[%s] loader error: %s", component, msg)
 
 
+@contextlib.contextmanager
+def _loader_boundary(d: dict, component: str) -> Iterator[None]:
+    """Run one loader section of a page: any exception it raises is recorded on
+    the page by _record_error (a red banner and X-Dashboard-Loader-Errors, which
+    freeze_site.py refuses to publish) and the page goes on to its next section."""
+    try:
+        yield
+    except Exception as e:  # noqa: BLE001 (the loader boundary: recorded, rendered, blocks the publish)
+        _record_error(d, component, e)
+
+
+def _load_pickle(path: str | Path) -> Any:
+    """Unpickle one of the repository's own artifacts (calibration results, the
+    PDV and classifier models, the backtest state), read-only."""
+    with open(path, "rb") as f:
+        return pickle.load(f)  # noqa: S301 (trusted input: pickles this codebase wrote and committed)
+
+
 def _date_str(x: Any) -> str | None:
     if x is None:
         return None
@@ -324,7 +349,9 @@ def sym(text: Any) -> Any:
 
     if text is None:
         return ""
-    return Markup(_GREEK.sub(lambda m: f'<span class="sym">{m.group(1)}</span>', str(escape(text))))
+    escaped = str(escape(text))
+    # the only markup is the fixed <span> wrapper: the text itself is escaped above
+    return Markup(_GREEK.sub(lambda m: f'<span class="sym">{m.group(1)}</span>', escaped))  # noqa: S704
 
 
 app.jinja_env.filters["sym"] = sym
@@ -443,8 +470,7 @@ def scan_calibrations(cal_dir: str | Path | None = None) -> list[dict]:
     rows = []
     for path in sorted(glob.glob(str(cal_dir / "joint_cal_*.pkl"))):
         try:
-            with open(path, "rb") as f:
-                cal = pickle.load(f)
+            cal = _load_pickle(path)
             legacy = calibration_is_legacy(cal)
             ok, reason = calibration_gate(cal)
         except Exception as exc:
@@ -492,8 +518,7 @@ def load_headline_calibration() -> tuple[str, dict]:
         raise FileNotFoundError(
             "no joint_cal_*.pkl in data_store/calibrations passes the quality gate"
         )
-    with open(path, "rb") as f:
-        return path, pickle.load(f)
+    return path, _load_pickle(path)
 
 
 # ── Heston model smile (calibration page) ──────────────────────────────────────
@@ -568,8 +593,8 @@ def spread_percentile(history: pd.Series, current: float) -> tuple[float | None,
     """
     hist = pd.to_numeric(history, errors="coerce").dropna()
     if len(hist) == 0 or _num(current) is None:
-        return None, int(len(hist))
-    return float((hist < current).mean() * 100.0), int(len(hist))
+        return None, len(hist)
+    return float((hist < current).mean() * 100.0), len(hist)
 
 
 PDV_MIN_HISTORY = 252   # fewer valid history points -> no percentile is shown
@@ -634,7 +659,7 @@ def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
         "forecast_pct": forecast * 100.0, "actual_pct": actual * 100.0,
         "error_pp": (forecast - actual) * 100.0, "n_train": int(np.sum(train)),
         "horizon": horizon, "window_end": str(window.index[-1].date()),
-        "n_window": int(len(window)),
+        "n_window": len(window),
     }
 
 
@@ -692,7 +717,7 @@ def pdv_walk_forward_skill(pdv: Any, log_returns: pd.Series, pred: pd.Series,
     ex = both[both.index.year != exclude_year]
     return {"horizon": horizon, "target": target, "r2": r2(both),
             "r2_ex": r2(ex) if len(ex) >= 30 else None, "exclude_year": exclude_year,
-            "n": int(len(both)), "start": str(both.index[0].date()),
+            "n": len(both), "start": str(both.index[0].date()),
             "end": str(both.index[-1].date())}
 
 
@@ -774,7 +799,7 @@ def load_page1() -> dict[str, Any]:
     # The headline is the deterministic RULE label. It is never replaced by the
     # research classifier's output, whatever fails.
     reg_series: pd.Series | None = None
-    try:
+    with _loader_boundary(d, "rule regime labels (regime_labels.parquet)"):
         rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
         reg_series = rl["regime"].dropna().astype(int)
         if reg_series.empty:
@@ -787,21 +812,19 @@ def load_page1() -> dict[str, Any]:
         d["regime_color"] = _REGIME_COLORS[reg]
         d["regime_label"] = _REGIME_LABELS[reg]
         d["regime_date"] = str(pd.Timestamp(reg_series.index[-1]).date())
-        tot = int(len(reg_series))
+        tot = len(reg_series)
         d["reg_total"] = tot
         for k in (0, 1, 2):
             n = int((reg_series == k).sum())
             d[f"reg{k}_n"] = n
             d[f"reg{k}_pct"] = round(100.0 * n / tot, 1)
         d["reg_span"] = f"{reg_series.index[0].year} – {reg_series.index[-1].year}"
-    except Exception as e:
-        _record_error(d, "rule regime labels (regime_labels.parquet)", e)
 
     # ── The rule's own inputs on the newest session the DB covers ────────────
     # build_rule_label_frame pairs each session's rule label with the
     # observables that produced it (rv₂₀, VIX, VVIX and the adaptive gate),
     # so the headline label can be checked against its inputs on the page.
-    try:
+    with _loader_boundary(d, "rule inputs (build_rule_label_frame)"):
         if spx_df is not None and vix_wide is not None:
             from joint_vol_calibration.signals.regime_classifier import build_rule_label_frame
 
@@ -825,15 +848,12 @@ def load_page1() -> dict[str, Any]:
                     rule["stored"] = int(reg_series.loc[pd.Timestamp(t)])
                 rule["headline_differs"] = d["regime_date"] is not None and d["regime_date"] != rule["date"]
                 d["rule"] = rule
-    except Exception as e:
-        _record_error(d, "rule inputs (build_rule_label_frame)", e)
 
     # ── PDV forecast vs VIX, with a like-for-like history ────────────────────
     pdv = None
     pdv_vol: pd.Series | None = None
     try:
-        with open(DATA / "pdv_model.pkl", "rb") as f:
-            pdv = pickle.load(f)
+        pdv = _load_pickle(DATA / "pdv_model.pkl")
         if spx_df is None or vix_daily is None:
             raise RuntimeError("needs the market data that failed to load")
         feats = pdv_features(pdv, spx_df["close_return"])          # state variables shown on the card
@@ -879,20 +899,16 @@ def load_page1() -> dict[str, Any]:
         pdv_vol = None
 
     # COVID stress test, computed ex ante from the DB returns
-    try:
+    with _loader_boundary(d, "PDV COVID stress test"):
         if pdv is not None and spx_df is not None:
             d["stress"] = pdv_stress_forecast(pdv, spx_df["close_return"])
-    except Exception as e:
-        _record_error(d, "PDV COVID stress test", e)
 
     # Out-of-sample skill of the model family on the model's own target,
     # recomputed from the DB (the card hard-coded 0.31 / 0.23, the R² of the
     # superseded next-day |r| model and of the kernel, beside a 21-day model).
-    try:
+    with _loader_boundary(d, "PDV walk-forward skill"):
         if pdv is not None and spx_df is not None and pdv_vol is not None:
             d["pdv_skill"] = pdv_walk_forward_skill(pdv, spx_df["close_return"], pdv_vol)
-    except Exception as e:
-        _record_error(d, "PDV walk-forward skill", e)
 
     # ── Research-only classifier card ────────────────────────────────────────
     # Features come from build_features — the code path the classifier was
@@ -901,9 +917,8 @@ def load_page1() -> dict[str, Any]:
     # metadata). Building features by hand fed it pdv_iv_spread = −VIX; feeding
     # the PDV forecast to a classifier trained on the rv₂₀ proxy was a
     # training/serving mismatch.
-    try:
-        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
-            clf = pickle.load(f)
+    with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
+        clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
         if spx_df is None or vix_wide is None:
             raise RuntimeError("needs the market data that failed to load")
         from joint_vol_calibration.signals.regime_classifier import classifier_features
@@ -942,15 +957,11 @@ def load_page1() -> dict[str, Any]:
             d["clf_top_importance"] = round(float(imp.iloc[0]) * 100, 0)
         except Exception as exc:
             _logger.info("feature importance unavailable: %s", exc)
-    except Exception as e:
-        _record_error(d, "research classifier (regime_classifier.pkl)", e)
 
     # ── Headline calibration (date only) ─────────────────────────────────────
-    try:
+    with _loader_boundary(d, "headline calibration"):
         path, cal = load_headline_calibration()
         d["calib_date"] = _calibration_session(cal, path)
-    except Exception as e:
-        _record_error(d, "headline calibration", e)
 
     # ── Staleness of every dated input vs the newest session ─────────────────
     known = [x for x in (d["spx_date"], d["vix_date"], d["regime_date"]) if x]
@@ -1059,7 +1070,8 @@ def load_page2() -> dict[str, Any]:
             d["r_ref_source"] = cal.get("r_reference_source")
 
         losses = _cal_losses(cal)
-        d["spx_rmse"] = round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None else None
+        d["spx_rmse"] = (round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None
+                         else None)
         # VIX leg: the Cboe SPOT indices (^VIX9D/^VIX/^VIX3M/^VIX6M) against
         # heston_vix_term_index. Pre-C22 results only have the old key name.
         vix_rmse = losses.get("vix_index_rmse", losses.get("vix_futures_rmse"))
@@ -1157,7 +1169,7 @@ def load_page2() -> dict[str, Any]:
 
     # Archive census: how many stored fits are current-schema and gate-passing,
     # and how many are pre-C22 (labelled, never ranked).
-    try:
+    with _loader_boundary(d, "calibration archive"):
         rows = scan_calibrations()
         d["archive"] = {
             "n_total": len(rows),
@@ -1165,16 +1177,13 @@ def load_page2() -> dict[str, Any]:
             "n_current": sum(1 for r in rows if r["legacy"] is False),
             "n_current_ok": sum(1 for r in rows if r["legacy"] is False and r["ok"]),
         }
-    except Exception as e:
-        _record_error(d, "calibration archive", e)
 
     # ── Quintic OU research fit vs the Heston fit of the SAME session ────────
-    try:
+    with _loader_boundary(d, "Quintic OU research calibration"):
         qpaths = sorted(glob.glob(str(DATA / "calibrations" / "quintic_cal_*.pkl")))
         if qpaths:
             qpath = qpaths[-1]
-            with open(qpath, "rb") as f:
-                qcal = pickle.load(f)
+            qcal = _load_pickle(qpath)
             qp = qcal["params"]
             qp = qp if isinstance(qp, dict) else vars(qp)
             ql = qcal.get("leg_losses", {})
@@ -1211,8 +1220,7 @@ def load_page2() -> dict[str, Any]:
             hpath = DATA / "calibrations" / f"joint_cal_{q_date}.pkl"
             bpath = DATA / "calibrations" / f"baseline_{q_date}.json"
             if q_date and hpath.exists():
-                with open(hpath, "rb") as f:
-                    hcal = pickle.load(f)
+                hcal = _load_pickle(hpath)
                 hl = _cal_losses(hcal)
                 ok, reason = calibration_gate(hcal)
                 base = json.loads(bpath.read_text()) if bpath.exists() else {}
@@ -1242,8 +1250,6 @@ def load_page2() -> dict[str, Any]:
                     "vix_opt_delta": _delta(q["vix_opt_rmse"], h_opt_q),
                 }
             d["quintic"] = q
-    except Exception as e:
-        _record_error(d, "Quintic OU research calibration", e)
 
     return _clean(d)
 
@@ -1319,7 +1325,8 @@ def load_page3() -> dict[str, Any]:
         dropped = {}
         for item in (prov.get("grid") or {}).get("dropped_nodes") or prov.get("dropped_nodes") or []:
             try:
-                dropped[(int(item["T_days"]), round(float(item["log_moneyness"]), 4))] = str(item.get("reason") or "")
+                node = (int(item["T_days"]), round(float(item["log_moneyness"]), 4))
+                dropped[node] = str(item.get("reason") or "")
             except Exception:
                 continue
         # Columns are the surface's own strike grid in ln(K/F): every maturity
@@ -1336,7 +1343,7 @@ def load_page3() -> dict[str, Any]:
         if grid_lm:   # the builder's full grid, so a column with no surviving node still shows
             cols = sorted(set(cols) | {round(float(x), 4) for x in grid_lm})
         d["n_maturities"] = len(maturities)
-        d["n_cells"] = int(len(gdf))
+        d["n_cells"] = len(gdf)
         d["n_grid"] = len(maturities) * len(cols)
         d["n_missing"] = d["n_grid"] - d["n_cells"]
         if "as_of_date" in gdf.columns and gdf["as_of_date"].notna().any():
@@ -1353,7 +1360,8 @@ def load_page3() -> dict[str, Any]:
                 z = float(r.vomma_zscore)
                 m = float(r.flag_metric)
                 # colour = the flag metric relative to its threshold (full at the threshold)
-                shade = 2.0 * min(m / flag_thr, 1.0) if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr else z
+                shade = (2.0 * min(m / flag_thr, 1.0)
+                         if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr else z)
                 bg = _vomma_color(shade)
                 cells.append({        # unrounded: each value is formatted once, in the template
                     "vomma": float(r.vomma), "z": z, "metric": m,
@@ -1378,7 +1386,8 @@ def load_page3() -> dict[str, Any]:
             for u in unstable.itertuples()), key=lambda x: x["metric"], reverse=True)
         d["n_unstable"] = len(d["unstable_nodes"])
         d["unstable_maturities"] = sorted({n["T_days"] for n in d["unstable_nodes"]})
-        d["unstable_by_maturity"] = {int(t): int(n) for t, n in gdf.groupby("T_days")["is_unstable"].sum().items()}
+        d["unstable_by_maturity"] = {int(t): int(n)
+                                     for t, n in gdf.groupby("T_days")["is_unstable"].sum().items()}
 
         imax, imin = gdf["vomma"].idxmax(), gdf["vomma"].idxmin()
         d["vomma_max"] = float(gdf.loc[imax, "vomma"])
@@ -1506,8 +1515,8 @@ def window_returns(nav: pd.Series, periods: dict, end: str | None = None) -> lis
     """
     nav = nav.dropna()
     out = []
-    for name, (start, stop) in periods.items():
-        stop = min(stop, end) if (stop and end) else (stop or end)
+    for name, (start, period_end) in periods.items():
+        stop = min(period_end, end) if (period_end and end) else (period_end or end)
         sub = nav.loc[start:stop]
         prior = nav[nav.index < pd.Timestamp(start)]
         row = {"name": name, "start": start, "end": stop, "total_return": None, "n_days": 0}
@@ -1582,14 +1591,14 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     rows = {r["step"]: dict(r, row=int(r["row"])) for r in bridge}
     out: dict[str, Any] = {"rows": rows}
     order = sorted(bridge, key=lambda r: int(r["row"]))
-    for prev, cur in zip(order, order[1:]):
+    for prev, cur in itertools.pairwise(order):
         rows[cur["step"]]["prev"] = prev
     g = sorted(grid, key=lambda r: float(r["beta"]))
     out["grid"] = g
 
     def flip(col: str) -> dict | None:
         """Adjacent grid betas where the sleeve's P&L changes sign."""
-        for lo, hi in zip(g, g[1:]):
+        for lo, hi in itertools.pairwise(g):
             if (lo[col] > 0) != (hi[col] > 0):
                 return {"lo": float(lo["beta"]), "hi": float(hi["beta"]),
                         "positive_above": hi[col] > 0}
@@ -1668,13 +1677,14 @@ def pre_c22_spread_facts(spx: pd.DataFrame, vix: pd.Series, start: str, end: str
     out = None
     if sig is not None and not sig.empty:
         sig.index = pd.to_datetime(sig.index)
-        w = pd.concat([sig.rename("f"), (v / 100.0).rename("v")], axis=1, join="inner").loc[start:end].dropna()
+        w = (pd.concat([sig.rename("f"), (v / 100.0).rename("v")], axis=1, join="inner")
+             .loc[start:end].dropna())
         r = np.log(frame["close"].astype(float)).diff().dropna()
         y = forward_target(r, horizon=PDV_SPREAD_HORIZON, target="rv")
         both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner").loc[start:end].dropna()
         if len(w) and len(both):
             out = {"share": float(((w["v"] - w["f"]) > S1_ENTRY_THRESHOLD).mean()),
-                   "n": int(len(w)), "threshold_vp": float(S1_ENTRY_THRESHOLD) * 100.0,
+                   "n": len(w), "threshold_vp": float(S1_ENTRY_THRESHOLD) * 100.0,
                    "ratio": float(both["f"].mean() / both["y"].mean()),
                    "horizon": int(PDV_SPREAD_HORIZON), "history_start": history_start}
     _PRE_C22_CACHE[key] = out
@@ -1845,9 +1855,8 @@ def load_page4() -> dict[str, Any]:
         eq = None
 
     # ── Engine metrics + trade log: the single source for every KPI ──────────
-    try:
-        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
-            state = pickle.load(fh)
+    with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
+        state = _load_pickle(DATA / "backtest" / "full_results.pkl")
         em = state.get("metrics") or {}
         trades = state.get("all_trades") or []
         if not em:
@@ -1888,11 +1897,11 @@ def load_page4() -> dict[str, Any]:
                                         - port_pnl) > 1.0:
             raise ValueError("the portfolio trades do not add up to the portfolio P&L")
         closed = np.array([float(t.net_pnl) for t in ptr if not getattr(t, "is_open", False)])
-        n_closed = int(len(closed))
+        n_closed = len(closed)
         d["open_trades"] = [{"signal": t.signal, "entry": str(pd.Timestamp(t.entry_date).date()),
                              "net_pnl": float(t.net_pnl)}
                             for t in trades if getattr(t, "is_open", False)
-                            and t.signal in PORTFOLIO_SLEEVES + ("s1", "s2")]
+                            and t.signal in (*PORTFOLIO_SLEEVES, "s1", "s2")]
         kpi = {
             "cum_ret": _num(em.get("cumulative_return")),
             "ann_ret": _num(em.get("ann_return")),
@@ -1928,20 +1937,27 @@ def load_page4() -> dict[str, Any]:
             return "—" if x is None else (f"−${abs(x):,.0f}" if x < 0 else f"${x:,.0f}")
 
         d["metrics_rows"] = [
-            {"label": "Cumulative Return", "value": _pct(kpi["cum_ret"]), "positive": (kpi["cum_ret"] or 0) > 0},
+            {"label": "Cumulative Return", "value": _pct(kpi["cum_ret"]),
+             "positive": (kpi["cum_ret"] or 0) > 0},
             {"label": "Ann. Return", "value": _pct(kpi["ann_ret"]), "positive": (kpi["ann_ret"] or 0) > 0},
             {"label": "Sharpe", "value": _f(kpi["sharpe"]), "positive": (kpi["sharpe"] or 0) > 0},
             {"label": "Sortino", "value": _f(kpi["sortino"]), "positive": (kpi["sortino"] or 0) > 0},
             {"label": "Max Drawdown", "value": _pct(kpi["mdd"]), "positive": False},
-            {"label": "DD Duration", "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur']):,} sessions", "positive": False},
+            {"label": "DD Duration",
+             "value": "—" if kpi["dd_dur"] is None else f"{int(kpi['dd_dur']):,} sessions",
+             "positive": False},
             {"label": "Calmar", "value": _f(kpi["calmar"]), "positive": (kpi["calmar"] or 0) > 0},
-            {"label": "Win Rate (closed trades)", "value": _pct(kpi["win_rate"]), "positive": (kpi["win_rate"] or 0) > 0.5},
-            {"label": "Avg Portfolio P&L / Closed Trade", "value": _dol(kpi["avg_pnl"]), "positive": (kpi["avg_pnl"] or 0) > 0},
+            {"label": "Win Rate (closed trades)", "value": _pct(kpi["win_rate"]),
+             "positive": (kpi["win_rate"] or 0) > 0.5},
+            {"label": "Avg Portfolio P&L / Closed Trade", "value": _dol(kpi["avg_pnl"]),
+             "positive": (kpi["avg_pnl"] or 0) > 0},
             {"label": "Best Day", "value": _pct(kpi["best_day"]), "positive": True},
             {"label": "Worst Day", "value": _pct(kpi["worst_day"]), "positive": False},
-            {"label": "Trades", "value": f"{n_rt:,}" + (f" ({n_rt - n_closed} open)" if n_rt > n_closed else ""),
+            {"label": "Trades",
+             "value": f"{n_rt:,}" + (f" ({n_rt - n_closed} open)" if n_rt > n_closed else ""),
              "positive": True},
-            {"label": "Return Days", "value": "—" if kpi["n_days"] is None else f"{int(kpi['n_days']):,}", "positive": True},
+            {"label": "Return Days", "value": "—" if kpi["n_days"] is None else f"{int(kpi['n_days']):,}",
+             "positive": True},
         ]
 
         sleeves = {}
@@ -1973,7 +1989,8 @@ def load_page4() -> dict[str, Any]:
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
 
         d["signal_labels"] = ["S1C contrarian", "S3 dispersion", "S4 VRP"]
-        d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None else round(sleeves[s]["total_pnl"] / 1000, 1)
+        d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None
+                           else round(sleeves[s]["total_pnl"] / 1000, 1)
                            for s in PORTFOLIO_SLEEVES]
 
         for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", "S3 Dispersion", False),
@@ -1988,11 +2005,9 @@ def load_page4() -> dict[str, Any]:
                 "total_pnl": _dol(s["total_pnl"]), "green": s["total_pnl"] > 0,
                 "is_research": is_ref,
             })
-    except Exception as e:
-        _record_error(d, "backtest engine results (full_results.pkl)", e)
 
     # ── C22 bridge + β grid (the audit table's evidence column) ──────────────
-    try:
+    with _loader_boundary(d, "C22 bridge / β grid (c22_bridge.csv, beta_sensitivity.csv)"):
         bridge = _read_csv_rows(DATA / "backtest" / "c22_bridge.csv")
         grid = _read_csv_rows(DATA / "backtest" / "beta_sensitivity.csv")
         if not bridge or not grid:
@@ -2007,14 +2022,13 @@ def load_page4() -> dict[str, Any]:
             if not at or (d["total_pnl"] is not None and abs(float(at[0]["pnl"]) - d["total_pnl"]) > 1.0):
                 raise ValueError(f"beta_sensitivity.csv has no row matching the stored run at β = {beta}")
         d["bridge"] = bridge_evidence(bridge, grid)
-    except Exception as e:
-        _record_error(d, "C22 bridge / β grid (c22_bridge.csv, beta_sensitivity.csv)", e)
 
     # ── β: the chains it was estimated from, and the later checks ────────────
     d["beta_est"] = None
-    try:
+    with _loader_boundary(d, "β estimation chains (run_backtest.estimate_beta)"):
         try:
-            regimes = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])["regime"]
+            regimes = pd.read_parquet(DATA / "signals" / "regime_labels.parquet",
+                                      columns=["regime"])["regime"]
         except Exception as exc:          # the chain table then shows no regime
             _logger.info("regime labels unavailable for the β chains: %s", exc)
             regimes = None
@@ -2025,26 +2039,22 @@ def load_page4() -> dict[str, Any]:
         grid_betas = [float(r["beta"]) for r in ((d["bridge"] or {}).get("grid") or [])]
         be["mean_all_in_grid"] = any(abs(g - round(be["mean_all"], 2)) < 1e-9 for g in grid_betas)
         d["beta_est"] = be
-    except Exception as e:
-        _record_error(d, "β estimation chains (run_backtest.estimate_beta)", e)
 
     # ── The pre-C22 PDV spread (audit row): how often it signalled short vol ─
     d["pre_c22_spread"] = None
-    try:
+    with _loader_boundary(d, "pre-C22 PDV spread facts (BacktestEngine, pdv_horizon = 1)"):
         if d["start_date"] and d["end_date"]:
             rb = _import_run_backtest()
             d["pre_c22_spread"] = pre_c22_spread_facts(
                 _read_spx(), _read_vix_wide()["^VIX"], d["start_date"], d["end_date"], rb.DATA_START)
             if d["pre_c22_spread"] is None:
                 raise ValueError("no pre-C22 PDV forecast could be built for the backtest window")
-    except Exception as e:
-        _record_error(d, "pre-C22 PDV spread facts (BacktestEngine, pdv_horizon = 1)", e)
 
     # ── Facts the change log quotes, recomputed from the DB ──────────────────
     # (the log hard-coded "2018: ~1.5%" for a year whose ^IRX averaged 1.95%,
     # and "~53%" / "~25%" R2 shares for gates that give 48% / 23% here).
     d["tbill_by_year"], d["r2_share"] = {}, None
-    try:
+    with _loader_boundary(d, "change-log facts (T-bill rates, R2 shares)"):
         if d["start_date"] and d["end_date"]:
             with _db() as con:
                 tb = pd.read_sql("SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?",
@@ -2065,8 +2075,6 @@ def load_page4() -> dict[str, Any]:
                 share[key] = float((lab == 2).mean()) if len(lab) else None
             share["fixed_level"] = float(VVIX_REGIME2_THRESHOLD)
             d["r2_share"] = share
-    except Exception as e:
-        _record_error(d, "change-log facts (T-bill rates, R2 shares)", e)
 
     def _pct0(x: float | None) -> str:
         return "—" if x is None else f"{x * 100:.1f}%"
@@ -2074,8 +2082,8 @@ def load_page4() -> dict[str, Any]:
     # The shipped classifier's own evaluation record (quoted beside the C17 figures)
     d["clf_eval"] = None
     try:
-        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
-            ev = (getattr(pickle.load(f), "metadata_", None) or {}).get("evaluation") or {}
+        clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
+        ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
         if ev.get("oos_acc") is not None and ev.get("persistence_acc") is not None:
             d["clf_eval"] = {"oos_acc": float(ev["oos_acc"]), "persistence_acc": float(ev["persistence_acc"]),
                              "n_test": int(ev.get("n_test") or 0)}
@@ -2096,7 +2104,8 @@ def load_page4() -> dict[str, Any]:
          "before": "VIX-options leg in the objective with a broken pricer",
          "after":  "SPX + VIX index objective; VIX-options leg off (too few sessions of quotes)."},
         {"step": "2", "name": "Vega-weighted anchor selection",
-         "what": "Select 9 highest-BS-vega options per expiry (was log-uniform grid). Moneyness lo 0.70 (was 0.75).",
+         "what": ("Select 9 highest-BS-vega options per expiry (was log-uniform grid). "
+                  "Moneyness lo 0.70 (was 0.75)."),
          "before": "Log-uniform includes low-information deep OTM options",
          "after":  "Near-ATM anchors only. C22 reverted it: the top-vega strikes were adjacent "
                    "ATM calls and the fit never saw the put wing; anchors are now a "
@@ -2115,7 +2124,8 @@ def load_page4() -> dict[str, Any]:
          "before": f"R2 on {_pct0(sh.get('fixed'))} of backtest sessions with the fixed 100-point gate",
          "after":  f"R2 on {_pct0(sh.get('adaptive'))} of backtest sessions."},
         {"step": "6", "name": "Isotonic calibration + step sizing",
-         "what": "CalibratedClassifierCV(FrozenEstimator(XGB), isotonic). S1S step: full/half/flat at P(R2) 0.4/0.6.",
+         "what": ("CalibratedClassifierCV(FrozenEstimator(XGB), isotonic). "
+                  "S1S step: full/half/flat at P(R2) 0.4/0.6."),
          "before": "Raw XGB probabilities (overconfident). Linear 1−p scaling.",
          "after":  "Calibrated probabilities. Cleaner 3-level position sizing."},
         {"step": "7", "name": "Portfolio Kelly netting",
@@ -2174,8 +2184,7 @@ def _gated_history() -> list[dict]:
     for row in scan_calibrations():
         if row["legacy"] is not False or not row["ok"] or not row["session"]:
             continue
-        with open(row["path"], "rb") as f:
-            c = pickle.load(f)
+        c = _load_pickle(row["path"])
         losses = _cal_losses(c)
         out.append({"session": row["session"], "params": dict(c["params"]),
                     "rmse": _num(losses.get("spx_iv_rmse")), "oos": _num(losses.get("spx_oos_iv_rmse")),
@@ -2195,13 +2204,13 @@ def _bound_side(value: float, lo: float, hi: float) -> str | None:
 
 def _heat_cols(edges: Sequence[float]) -> list[str]:
     """Bucket ranges for cell details: '−0.30…−0.20'."""
-    return [f"{_fmt(a, '+.2f')}…{_fmt(b, '+.2f')}" for a, b in zip(edges[:-1], edges[1:])]
+    return [f"{_fmt(a, '+.2f')}…{_fmt(b, '+.2f')}" for a, b in itertools.pairwise(edges)]
 
 
 def _heat_heads(edges: Sequence[float]) -> list[str]:
     """Compact column heads: each bucket's midpoint, '−0.25'."""
     return [_fmt((a + b) / 2.0, "+.3f").rstrip("0").rstrip(".") if abs((a + b) / 2.0) > 1e-12 else "0"
-            for a, b in zip(edges[:-1], edges[1:])]
+            for a, b in itertools.pairwise(edges)]
 
 
 K_EDGES = (-0.30, -0.20, -0.14, -0.09, -0.05, -0.02, 0.0, 0.02, 0.05, 0.09, 0.14, 0.20, 0.30)
@@ -2274,7 +2283,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     vix = [v for v in cal.get("vix_index") or [] if _num(v.get("market")) is not None]
     d["vix_rows"] = [{"ticker": v["ticker"], "tenor": int(v["tenor_days"]), "market": float(v["market"]),
                       "model": _num(v.get("model")),
-                      "diff": (_num(v.get("model")) - float(v["market"])) if _num(v.get("model")) is not None else None}
+                      "diff": ((_num(v.get("model")) - float(v["market"])) if _num(v.get("model")) is not None
+                               else None)}
                      for v in vix]
     if vix:
         d["charts"]["vix"] = charts.xy(
@@ -2282,7 +2292,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
             y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
             series=[{"name": "Cboe index (market)", "type": "line", "color": "headline", "symbol": "circle",
-                     "size": 7, "width": 1.5, "legend": True, "data": [[r["tenor"], r["market"]] for r in d["vix_rows"]]},
+                     "size": 7, "width": 1.5, "legend": True,
+                     "data": [[r["tenor"], r["market"]] for r in d["vix_rows"]]},
                     {"name": "Heston model", "type": "line", "color": "cat1", "symbol": "diamond", "size": 7,
                      "dash": True, "legend": True,
                      "data": [[r["tenor"], r["model"]] for r in d["vix_rows"] if r["model"] is not None]}],
@@ -2303,11 +2314,13 @@ def calibration_extras(d: dict, cal: dict) -> None:
                      "legend": True, "data": [[k, v] for k, v in zip(s_["lm"], s_["iv"])]}
                     for i, s_ in enumerate(sms)],
             tooltip="item", csv=f"model_smile_{session}.csv",
-            describe="Model implied vols at the fitted parameters for 14 to 365 days; model curves, not market data.",
+            describe=("Model implied vols at the fitted parameters for 14 to 365 days; model curves, "
+                      "not market data."),
             table=charts.table("Model implied vol (%) at the lowest and highest log-moneyness plotted",
                                ["Maturity", "Lowest ln(K/F)#", "IV#", "Highest ln(K/F)#", "IV#"],
                                [[f"{s_['T']}d", _fmt(s_["lm"][0], "+.3f"), _fmt(s_["iv"][0], ".2f"),
-                                 _fmt(s_["lm"][-1], "+.3f"), _fmt(s_["iv"][-1], ".2f")] for s_ in sms if s_["lm"]]))
+                                 _fmt(s_["lm"][-1], "+.3f"), _fmt(s_["iv"][-1], ".2f")]
+                                for s_ in sms if s_["lm"]]))
 
     # Smile small multiples: one panel per anchor expiry. Market quotes and the
     # model's IVs at those quotes come from the surface residual table when it
@@ -2335,27 +2348,31 @@ def calibration_extras(d: dict, cal: dict) -> None:
                 series.append({"name": "Bid–ask", "type": "errorbar", "color": "muted", "legend": True,
                                "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
                                         for r in q.itertuples()]})
-            series.append({"name": "Mid (out of sample)", "type": "scatter", "color": "headline", "hollow": True,
-                           "size": 5, "legend": True,
-                           "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r, i in zip(q.itertuples(), ins) if not i]})
+            series.append({"name": "Mid (out of sample)", "type": "scatter", "color": "headline",
+                           "hollow": True, "size": 5, "legend": True,
+                           "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
+                                    for r, i in zip(q.itertuples(), ins) if not i]})
             if ins.any():
                 series.append({"name": "Mid (fit anchor)", "type": "scatter", "color": "headline", "size": 6,
                                "legend": True,
-                               "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r, i in zip(q.itertuples(), ins) if i]})
+                               "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
+                                        for r, i in zip(q.itertuples(), ins) if i]})
             series.append({"name": "Heston", "type": "line", "color": "cat1", "width": 1.6, "legend": True,
-                           "data": [[round(float(k), 3), round(float(v) * 100, 2)] for k, v in zip(q["k"], q["model_iv"])
-                                    if _num(v) is not None]})
+                           "data": [[round(float(k), 3), round(float(v) * 100, 2)]
+                                    for k, v in zip(q["k"], q["model_iv"]) if _num(v) is not None]})
             # the table behind the chart: one row per ln(K/F) bucket (the CSV has every quote)
             qb = q.assign(kb=pd.cut(q["k"], K_EDGES, labels=False), ins=ins.values)
             for b, g in qb.groupby("kb"):
                 tbl_rows.append([_heat_cols(K_EDGES)[int(b)], len(g), int(g["ins"].sum()),
-                                 _fmt(g["mid_iv"].median() * 100, ".2f"), _fmt(g["model_iv"].median() * 100, ".2f"),
+                                 _fmt(g["mid_iv"].median() * 100, ".2f"),
+                                 _fmt(g["model_iv"].median() * 100, ".2f"),
                                  signed(float(g["error_hs"].median()), ".1f"),
                                  _fmt(g["inside_spread"].astype(bool).mean() * 100, ".0f")])
             source = "quotes"
             inside = float(q["inside_spread"].astype(bool).mean() * 100.0)
             note = (f"{len(q)} quotes, {int(ins.sum())} of them fit anchors; Heston inside the bid–ask on "
-                    f"{_fmt(inside, '.0f')}%, median |model − mid| {_fmt(float(q['error_hs'].abs().median()), '.1f')} half-spreads")
+                    f"{_fmt(inside, '.0f')}%, median |model − mid| "
+                    f"{_fmt(float(q['error_hs'].abs().median()), '.1f')} half-spreads")
         else:
             sm = heston_model_smile(p, maturities_days=(T_days,))[0]
             series.append({"name": "Heston", "type": "line", "color": "cat1", "width": 1.6,
@@ -2369,8 +2386,12 @@ def calibration_extras(d: dict, cal: dict) -> None:
                 f"chart-smile-{exp}", f"Smile {exp} ({_fmt(T_days, '.0f')} days)",
                 x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True, "label": "k"},
                 y={"name": "IV (%)", "digits": 0, "tipDigits": 2},
-                series=series, tooltip="item", csv=f"smile_{exp}.csv", grid={"left": 40, "top": 10, "bottom": 34},
-                describe=(f"{'Market bid–ask quotes, mids and the Heston IVs at the quoted strikes' if source == 'quotes' else 'Heston model smile only (market quotes need the surface residual table)'} for the {exp} expiry."),
+                series=series, tooltip="item", csv=f"smile_{exp}.csv",
+                grid={"left": 40, "top": 10, "bottom": 34},
+                describe=(("Market bid–ask quotes, mids and the Heston IVs at the quoted strikes"
+                           if source == "quotes"
+                           else "Heston model smile only (market quotes need the surface residual table)")
+                          + f" for the {exp} expiry."),
                 table=(charts.table(f"{exp}: quotes by ln(K/F) bucket (medians; IV in %)",
                                     ["ln(K/F)", "Quotes#", "Anchors#", "Mid IV#", "Heston IV#",
                                      "(Heston − mid) / half-spread#", "Inside the bid–ask (%)#"], tbl_rows)
@@ -2407,12 +2428,13 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
                 for c in cols:
                     r = cellmap.get((T, round(c, 4)))
                     if r is None:
-                        cells.append(cell("", None, detail=f"T {T}d · ln(K/F) {_fmt(c, '+.3f')}: no stored Greeks"))
+                        cells.append(cell("", None,
+                                          detail=f"T {T}d · ln(K/F) {_fmt(c, '+.3f')}: no stored Greeks"))
                         continue
                     v = float(getattr(r, col)) * (100.0 if key == "iv" else 1.0)
                     bg = seq_colour(v, lo, hi) if scale == "seq" else div_colour(v, lim)
-                    det = (f"T {T}d · ln(K/F) {_fmt(c, '+.3f')} · K {_fmt(r.K, ',.0f')} · IV {_fmt(r.iv * 100, '.1f')}% · "
-                           f"{label} {_fmt(v, fmt)}")
+                    det = (f"T {T}d · ln(K/F) {_fmt(c, '+.3f')} · K {_fmt(r.K, ',.0f')} · "
+                           f"IV {_fmt(r.iv * 100, '.1f')}% · {label} {_fmt(v, fmt)}")
                     cells.append(cell(_fmt(v, fmt), bg, detail=det))
                 rows.append({"label": f"{T}d", "cells": cells})
             grids.append({"key": key, "label": label, "unit": unit, "scale": scale, "rows": rows,
@@ -2425,9 +2447,11 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
             "chart-qv", "Quadratic-variation convexity by maturity (×10⁴)",
             x={"type": "category", "categories": d["qv_labels"], "name": "Maturity", "interval": 0},
             y={"name": "Var[∫v dt] × 10⁴", "digits": 1, "tipDigits": 3, "zero": True},
-            series=[{"name": "QV convexity × 10⁴", "type": "bar", "color": "cat0", "fill": 0.55, "data": d["qv_values"]}],
+            series=[{"name": "QV convexity × 10⁴", "type": "bar", "color": "cat0", "fill": 0.55,
+                     "data": d["qv_values"]}],
             xs=d["qv_labels"], csv="qv_convexity.csv",
-            describe="One value per maturity under the surface's Heston parameters; it grows with the horizon.",
+            describe=("One value per maturity under the surface's Heston parameters; it grows with "
+                      "the horizon."),
             table=charts.table("QV convexity × 10⁴ by maturity", ["Maturity", "QV convexity × 10⁴#"],
                                [[lab, _fmt(v, ".3f")] for lab, v in zip(d["qv_labels"], d["qv_values"])]))
     if d.get("vanna_labels"):
@@ -2438,8 +2462,10 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
             series=[{"name": "Mean vanna", "type": "bar", "signed": True, "data": d["vanna_values"]}],
             xs=d["vanna_labels"], csv="vanna_by_maturity.csv",
             describe="Black–Scholes vanna averaged over the strikes stored at each maturity.",
-            table=charts.table("Mean vanna by maturity (per unit index, per 1.00 vol)", ["Maturity", "Mean vanna#"],
-                               [[lab, signed(v, ".4f")] for lab, v in zip(d["vanna_labels"], d["vanna_values"])]))
+            table=charts.table("Mean vanna by maturity (per unit index, per 1.00 vol)",
+                               ["Maturity", "Mean vanna#"],
+                               [[lab, signed(v, ".4f")]
+                                for lab, v in zip(d["vanna_labels"], d["vanna_values"])]))
     if d.get("scatter_lm"):
         ur = d.get("unstable_rule") or {}
         thr = ur.get("threshold") if ur.get("threshold") is not None else 2.0
@@ -2449,15 +2475,19 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
             "chart-flag", f"{name} against ln(K/F), all maturities",
             x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
             y={"name": name, "digits": 1, "tipDigits": 3, "min": 0},
-            series=[{"name": f"{T}d", "type": "scatter", "color": charts.color_cycle(i), "size": 6, "legend": True,
-                     "data": [[x, z] for x, z, t in zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"]) if t == T]}
+            series=[{"name": f"{T}d", "type": "scatter", "color": charts.color_cycle(i), "size": 6,
+                     "legend": True,
+                     "data": [[x, z] for x, z, t in zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"])
+                              if t == T]}
                     for i, T in enumerate(mats)],
             tooltip="item", csv="vomma_flag_metric.csv",
             marks={"y": [{"value": thr, "label": f"flag {_fmt(thr, '.2f')}", "color": "breach"}]},
-            describe=f"{len(d['scatter_lm'])} nodes; {d.get('n_unstable')} above the flag threshold {_fmt(thr, '.2f')}.",
+            describe=(f"{len(d['scatter_lm'])} nodes; {d.get('n_unstable')} above the flag threshold "
+                      f"{_fmt(thr, '.2f')}."),
             table=charts.table(f"{name} by node (largest ten)", ["Maturity", "ln(K/F)#", name + "#"],
                                [[f"{t}d", _fmt(x, "+.3f"), _fmt(z, ".3f")] for x, z, t in
-                                sorted(zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"]), key=lambda r: -r[1])[:10]]))
+                                sorted(zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"]),
+                                       key=lambda r: -r[1])[:10]]))
 
     d["scenario"] = artifacts.load_scenario_grid(DATA)
     if d["scenario"].get("state") == "ok":
@@ -2474,8 +2504,10 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
         d["scenario_heat"] = {
             "cols": [signed(s, ".0f", "%") for s in spots],
             "rows": [{"label": signed(v, ".0f", " vp"), "cells": [
-                cell(signed(lut.get((float(s), float(v))), ",.0f"), pnl_colour(lut.get((float(s), float(v))), lim),
-                     detail=f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vp')}: P&L {signed(lut.get((float(s), float(v))), ',.0f')}")
+                cell(signed(lut.get((float(s), float(v))), ",.0f"),
+                     pnl_colour(lut.get((float(s), float(v))), lim),
+                     detail=(f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vp')}: "
+                             f"P&L {signed(lut.get((float(s), float(v))), ',.0f')}"))
                 for s in spots]} for v in vols]}
 
     # C7: daily-hedged 1-year ATM straddle through 2020, Greek P&L explain.
@@ -2485,8 +2517,8 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
         _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)", e)
         return
     comps = [("pnl_gamma", "Gamma", "cat0"), ("pnl_vega_a", "Vega", "cat1"), ("pnl_theta", "Theta", "cat2"),
-             ("pnl_vanna", "Vanna", "cat4"), ("pnl_volga", "Volga", "cat3"), ("pnl_financing", "Financing", "muted"),
-             ("pnl_residual_a", "Residual", "cat5")]
+             ("pnl_vanna", "Vanna", "cat4"), ("pnl_volga", "Volga", "cat3"),
+             ("pnl_financing", "Financing", "muted"), ("pnl_residual_a", "Residual", "cat5")]
     need = {"pnl_total"} | {c for c, *_ in comps}
     missing = need - set(h.columns)
     if missing:
@@ -2509,7 +2541,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     series.insert(0, {"name": "Total", "type": "line", "color": "headline", "width": 2.2, "legend": True,
                       "data": [round(float(v), 4) for v in h["pnl_total"].fillna(0.0).cumsum()]})
     d["hedge"] = {
-        "n": int(len(days)), "start": str(h.index[0].date()), "end": str(h.index[-1].date()),
+        "n": len(days), "start": str(h.index[0].date()), "end": str(h.index[-1].date()),
         "explained_share": float(1.0 - resid.var(ddof=1) / tot.var(ddof=1)),
         "rms_total": float(np.sqrt((tot ** 2).mean())), "rms_resid": float(np.sqrt((resid ** 2).mean())),
         "cum": {name: float(h[c].fillna(0.0).sum()) for c, name, _ in comps},
@@ -2525,7 +2557,8 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     }
     if "is_unstable" in h.columns and h["is_unstable"].astype(bool).any():
         flagged = h.index[h["is_unstable"].astype(bool)]
-        d["hedge"]["flag_first"], d["hedge"]["flag_last"] = str(flagged.min().date()), str(flagged.max().date())
+        d["hedge"]["flag_first"] = str(flagged.min().date())
+        d["hedge"]["flag_last"] = str(flagged.max().date())
     d["charts"]["hedge"] = charts.xy(
         "chart-hedge", "Cumulative P&L explain of a delta-hedged 1-year ATM straddle, 2020",
         x={"type": "time", "name": "", "csv": "date"},
@@ -2566,12 +2599,16 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
     if eq is not None:
         xs = d["eq_dates"]
         series = [
-            {"name": "Portfolio", "type": "line", "color": "headline", "width": 2.2, "legend": True, "data": d["eq_nav"]},
-            {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True, "data": d["eq_nav_s1c"]},
-            {"name": "S3 dispersion", "type": "line", "color": "cat1", "width": 1.3, "legend": True, "data": d["eq_nav_s3"]},
-            {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True, "data": d["eq_nav_s4"]},
-            {"name": "S1 (reference)", "type": "line", "color": "muted", "width": 1.2, "dash": True, "legend": True,
-             "hidden": True, "data": d["eq_nav_s1"]},
+            {"name": "Portfolio", "type": "line", "color": "headline", "width": 2.2, "legend": True,
+             "data": d["eq_nav"]},
+            {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True,
+             "data": d["eq_nav_s1c"]},
+            {"name": "S3 dispersion", "type": "line", "color": "cat1", "width": 1.3, "legend": True,
+             "data": d["eq_nav_s3"]},
+            {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True,
+             "data": d["eq_nav_s4"]},
+            {"name": "S1 (reference)", "type": "line", "color": "muted", "width": 1.2, "dash": True,
+             "legend": True, "hidden": True, "data": d["eq_nav_s1"]},
         ]
         if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
             tb = eq["nav_tbill"]
@@ -2579,13 +2616,14 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                            "dash": True, "legend": True,
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
         r2 = (eq["regime"] == 2) if "regime" in eq.columns else pd.Series(False, index=eq.index)
-        areas = [{"from": a.strftime("%Y-%m-%d"), "to": b.strftime("%Y-%m-%d"), "color": "watch", "alpha": 0.07}
-                 for a, b in _runs(r2)]
+        areas = [{"from": a.strftime("%Y-%m-%d"), "to": b.strftime("%Y-%m-%d"), "color": "watch",
+                  "alpha": 0.07} for a, b in _runs(r2)]
         d["r2_share_bt"] = float(r2.mean())
         d["charts"]["equity"] = charts.xy(
             "chart-equity", "Cumulative return from $1M: portfolio, sleeves and T-bills",
             x={"type": "time", "csv": "date"},
-            y={"name": "Cumulative return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%", "unit": "%"},
+            y={"name": "Cumulative return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%",
+               "unit": "%"},
             series=series, xs=xs, zoom=True, zoom_presets=(("1Y", 1), ("3Y", 3), ("All", 0)),
             marks={"areas": areas, "y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
             csv="equity_curves.csv",
@@ -2593,8 +2631,8 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                       f"{_fmt(d['r2_share_bt'] * 100, '.0f')}% of the window."),
             table=charts.table(f"Cumulative return from {d['start_date']} to {d['end_date']}",
                                ["Series", "Final#", "Lowest#", "Highest#"],
-                               [[r["name"], _pct_prose(r["final"]), _pct_prose(r["low"]), _pct_prose(r["high"])]
-                                for r in d.get("eq_summary") or []]))
+                               [[r["name"], _pct_prose(r["final"]), _pct_prose(r["low"]),
+                                 _pct_prose(r["high"])] for r in d.get("eq_summary") or []]))
         nav = eq["nav"]
         dd = (nav / nav.cummax() - 1.0) * 100.0
         d["charts"]["drawdown"] = charts.xy(
@@ -2622,8 +2660,10 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
             describe="Annualised Sharpe of the trailing 126 daily returns; blank where the NAV was flat.",
             table=charts.table("Rolling Sharpe", ["Statistic", "Value#"],
-                               [["Latest", _fmt(_num(roll.dropna().iloc[-1]) if roll.notna().any() else None, "+.2f")],
-                                ["Lowest", _fmt(_num(roll.min()), "+.2f")], ["Highest", _fmt(_num(roll.max()), "+.2f")]]))
+                               [["Latest",
+                                 _fmt(_num(roll.dropna().iloc[-1]) if roll.notna().any() else None, "+.2f")],
+                                ["Lowest", _fmt(_num(roll.min()), "+.2f")],
+                                ["Highest", _fmt(_num(roll.max()), "+.2f")]]))
         # monthly returns grid (against the prior month-end NAV)
         month_end = nav.groupby([nav.index.year, nav.index.month]).last()
         base = float(nav.iloc[0])
@@ -2633,16 +2673,18 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             grid.setdefault(int(yr), {})[int(mo)] = float(v) / prev - 1.0
             prev = float(v)
         lim = max((abs(v) for m in grid.values() for v in m.values()), default=0.01) or 0.01
-        d["monthly"] = {"cols": list(MONTHS) + ["Year"], "rows": []}
+        d["monthly"] = {"cols": [*MONTHS, "Year"], "rows": []}
         ann = {a["year"]: a["ret_pct"] / 100.0 for a in d.get("ann") or []}
         for yr in sorted(grid):
             cells = []
             for mo in range(1, 13):
                 v = grid[yr].get(mo)
                 cells.append(cell(signed(v * 100 if v is not None else None, ".1f"), pnl_colour(v, lim),
-                                  detail=f"{MONTHS[mo - 1]} {yr}: {signed(v * 100 if v is not None else None, '.2f', '%')}"))
+                                  detail=(f"{MONTHS[mo - 1]} {yr}: "
+                                          f"{signed(v * 100 if v is not None else None, '.2f', '%')}")))
             y = ann.get(yr)
-            cells.append(cell(signed(y * 100 if y is not None else None, ".1f"), pnl_colour(y, max(lim * 3, 0.01)),
+            cells.append(cell(signed(y * 100 if y is not None else None, ".1f"),
+                              pnl_colour(y, max(lim * 3, 0.01)),
                               detail=f"{yr}: {signed(y * 100 if y is not None else None, '.2f', '%')}"))
             d["monthly"]["rows"].append({"label": str(yr), "cells": cells})
         d["monthly"]["lim"] = lim
@@ -2657,13 +2699,15 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             grid={"left": 110, "bottom": 30},
             describe="Mark-to-model P&L of the three portfolio sleeves over the backtest window.",
             table=charts.table("Total P&L by sleeve ($000s)", ["Sleeve", "P&L ($000s)#"],
-                               [[lab, signed(v, ",.1f")] for lab, v in zip(d["signal_labels"], d["signal_pnl"])]))
+                               [[lab, signed(v, ",.1f")]
+                                for lab, v in zip(d["signal_labels"], d["signal_pnl"])]))
     if d.get("ann"):
         labels = [f"{a['year']}{' YTD' if a['partial'] else ''}" for a in d["ann"]]
         d["charts"]["annual"] = charts.xy(
             "chart-annual", "Annual return against the prior year-end NAV",
             x={"type": "category", "categories": labels, "interval": 0},
-            y={"name": "Return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%", "unit": "%"},
+            y={"name": "Return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%",
+               "unit": "%"},
             series=[{"name": "Return", "type": "bar", "signed": True, "data": d["ann_rets"]}],
             xs=labels, csv="annual_returns.csv",
             describe="Calendar-year returns; they compound to the cumulative return.",
@@ -2678,7 +2722,8 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             xs=d["wf_periods"], csv="half_year_sharpe.csv", grid={"bottom": 70},
             describe=f"{d.get('wf_neg')} of {d.get('wf_total')} half-years have a negative Sharpe.",
             table=charts.table("Half-year Sharpe (in-sample, rf = 0)", ["Half-year", "Sharpe#"],
-                               [[w, _fmt(v, "+.2f", "flat NAV — none")] for w, v in zip(d["wf_periods"], d["wf_sharpes"])]))
+                               [[w, _fmt(v, "+.2f", "flat NAV — none")]
+                                for w, v in zip(d["wf_periods"], d["wf_sharpes"])]))
     inference_extras(d, artifacts.load_inference(DATA))
     d["forward"] = artifacts.load_forward_ledger(DATA)
     if d["forward"].get("state") == "ok":
@@ -2687,12 +2732,14 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         d["forward"]["rows"] = [{"sleeve": SLEEVE_NAMES.get(sl, sl.upper()), "key": sl,
                                  "target": (led.get("signals") or {}).get(sl, {}).get("straddle_direction"),
                                  **(led.get("summary") or {}).get(sl, {}),
-                                 "position": next((ps for ps in led.get("positions") or [] if ps.get("sleeve") == sl), None)}
+                                 "position": next((ps for ps in led.get("positions") or []
+                                                   if ps.get("sleeve") == sl), None)}
                                 for sl in ("s1c", "s3", "s4", "s1", "s2")]
 
 
-SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian", "s2": "S2 VIX TS (ref)",
-                "s3": "S3 dispersion", "s4": "S4 VRP", "always_short_straddle": "Always-short straddle"}
+SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian",
+                "s2": "S2 VIX TS (ref)", "s3": "S3 dispersion", "s4": "S4 VRP",
+                "always_short_straddle": "Always-short straddle"}
 
 
 def inference_extras(d: dict, inf: dict) -> None:
@@ -2715,9 +2762,10 @@ def inference_extras(d: dict, inf: dict) -> None:
         sh = artifacts.bootstrap_ci(inf, sname, "sharpe") or {}
         c = cf.get(sname) or {}
         d["boot_rows"].append({
-            "series": SLEEVE_NAMES.get(sname, sname), "key": sname, "point": sh.get("point"), "lo": sh.get("lo"),
-            "hi": sh.get("hi"), "excludes_zero": sh.get("excludes_zero"), "psr": _num(c.get("psr_gt_0")),
-            "skew": _num(c.get("skew")), "kurt": _num(c.get("kurtosis")), "min_trl": _num(c.get("min_trl_years")),
+            "series": SLEEVE_NAMES.get(sname, sname), "key": sname, "point": sh.get("point"),
+            "lo": sh.get("lo"), "hi": sh.get("hi"), "excludes_zero": sh.get("excludes_zero"),
+            "psr": _num(c.get("psr_gt_0")), "skew": _num(c.get("skew")), "kurt": _num(c.get("kurtosis")),
+            "min_trl": _num(c.get("min_trl_years")),
             "dsr": _num((dsr.get(sname) or {}).get("n_eff_c16_c22"))})
     tri = summ.get("trials") or {}
     nch = tri.get("n_choices") or {}
@@ -2733,15 +2781,18 @@ def inference_extras(d: dict, inf: dict) -> None:
     for sname, t in (nulls.get("sleeves") or {}).items():
         circ = ((t or {}).get("circular") or {}).get("total_pnl") or {}
         shuf = ((t or {}).get("shuffle") or {}).get("total_pnl") or {}
-        d["null_rows"].append({"series": SLEEVE_NAMES.get(sname, sname), "key": sname, "real": _num(circ.get("real")),
+        d["null_rows"].append({"series": SLEEVE_NAMES.get(sname, sname), "key": sname,
+                               "real": _num(circ.get("real")),
                                "null_mean": _num(circ.get("null_mean")), "q05": _num(circ.get("null_q05")),
-                               "q95": _num(circ.get("null_q95")), "timing": _num(circ.get("timing_component")),
+                               "q95": _num(circ.get("null_q95")),
+                               "timing": _num(circ.get("timing_component")),
                                "p": _num(circ.get("p_value")), "p_holm": _num(circ.get("p_holm_6_sleeves")),
                                "n": circ.get("n_paths"), "p_shuffle": _num(shuf.get("p_value")),
                                "n_shuffle": shuf.get("n_paths")})
     d["null_rows"].sort(key=lambda r: list(SLEEVE_NAMES).index(r["key"]) if r["key"] in SLEEVE_NAMES else 99)
     mt = summ.get("multiple_testing") or {}
-    fam = [("published", "Published sleeves vs cash"), ("trial_family", "Every configuration tried (trials ledger)"),
+    fam = [("published", "Published sleeves vs cash"),
+           ("trial_family", "Every configuration tried (trials ledger)"),
            ("beta_estimated", "Configurations at an estimated β")]
     d["mt_rows"] = []
     for key, label in fam:
@@ -2792,9 +2843,11 @@ def inference_extras(d: dict, inf: dict) -> None:
     q = ((bw.get("losses") or {}).get("qlike") or {})
     if q:
         mcs = ((bw.get("mcs") or {}).get("qlike") or {}).get("90")
-        mcs_set = set(mcs if isinstance(mcs, list) else (mcs or {}).get("included", []) if isinstance(mcs, dict) else [])
+        mcs_set = set(mcs if isinstance(mcs, list)
+                      else (mcs or {}).get("included", []) if isinstance(mcs, dict) else [])
         d["forecast_rows"] = sorted(
-            [{"model": m, "desc": (fe.get("models") or {}).get(m), "qlike": _num(v if not isinstance(v, dict) else v.get("mean")),
+            [{"model": m, "desc": (fe.get("models") or {}).get(m),
+              "qlike": _num(v if not isinstance(v, dict) else v.get("mean")),
               "in_mcs": (m in mcs_set) if mcs_set else None, "r2": _num((bw.get("r2_vol") or {}).get(m)),
               "rank": ((bw.get("rank") or {}).get("qlike") or {}).get(m),
               "mean_vol": _num((bw.get("mean_forecast_vol") or {}).get(m))} for m, v in q.items()],
@@ -2818,34 +2871,39 @@ def key_results(p2: dict, p4: dict | None, hedge: dict | None, surf: dict, inf: 
         best = rows[0] if rows and rows[0]["model"] != hkey else None
     if heston and _num(heston.get("median_abs_hs")) is not None:
         scope = heston.get("scope")
-        ref = (f"; an interpolating {model_label(best['model'])} surface scores {_fmt(best['oos']['median_abs_hs'], '.2f')}"
-               if best else "")
+        ref = (f"; an interpolating {model_label(best['model'])} surface scores "
+               f"{_fmt(best['oos']['median_abs_hs'], '.2f')}" if best else "")
         out.append({"key": ("Model vs market (out of sample)" if scope == "out-of-sample"
                             else f"Model vs market ({scope or 'scope not stated'})"),
                     "value": _fmt(heston["median_abs_hs"], ".1f"), "unit": "half-spreads",
                     "detail": (f"Heston median |model − mid|, {_fmt(heston.get('n'), ',')} quotes of "
-                               f"{surf['session']}; {_fmt(heston.get('inside_spread_pct'), '.1f')}% inside the bid–ask{ref}"),
+                               f"{surf['session']}; {_fmt(heston.get('inside_spread_pct'), '.1f')}% "
+                               f"inside the bid–ask{ref}"),
                     "ci": None,
                     "ci_note": "no interval in the scorecard; one session, Yahoo quotes without a quote time",
                     "href": "surface.html#scorecard", "source": f"data_store/surface/{surf['session']}/"})
     elif p2.get("spx_oos_rmse") is not None:
         rows = p2.get("oos_rows") or []
-        rng = (f"; per expiry {_fmt(min(r['rmse'] for r in rows), '.2f')}–{_fmt(max(r['rmse'] for r in rows), '.2f')}"
-               if rows else "")
+        rng = (f"; per expiry {_fmt(min(r['rmse'] for r in rows), '.2f')}–"
+               f"{_fmt(max(r['rmse'] for r in rows), '.2f')}" if rows else "")
         out.append({"key": "Model vs market (out of sample)",
                     "value": _fmt(p2["spx_oos_rmse"], ".2f"), "unit": "vol pts RMSE",
                     "detail": (f"Heston, {_fmt(p2.get('n_oos'), ',')} quotes not used in the fit"
                                f" ({p2.get('session')}){rng}"),
                     "ci": None, "ci_note": "half-spread units need the surface scorecard, not yet generated",
-                    "href": "calibration.html#oos", "source": f"data_store/calibrations/{p2.get('calib_file')}"})
+                    "href": "calibration.html#oos",
+                    "source": f"data_store/calibrations/{p2.get('calib_file')}"})
     # 2. hedging: Greek P&L explain of the C7 hedged straddle
     if hedge:
         out.append({"key": "Hedged-straddle P&L explain",
                     "value": _fmt(hedge["explained_share"] * 100, ".2f"), "unit": "% of variance",
-                    "detail": (f"Greek terms of a daily delta-hedged 1-year ATM straddle, {hedge['start'][:4]} "
+                    "detail": (f"Greek terms of a daily delta-hedged 1-year ATM straddle, "
+                               f"{hedge['start'][:4]} "
                                f"({hedge['n']} sessions); residual RMS {_fmt(hedge['rms_resid'], '.2f')} vs "
                                f"{_fmt(hedge['rms_total'], '.1f')} index pts"),
-                    "ci": None, "ci_note": "one path, with the realised Δσ inside the Taylor terms: an accounting check, not a forecast",
+                    "ci": None,
+                    "ci_note": ("one path, with the realised Δσ inside the Taylor terms: "
+                                "an accounting check, not a forecast"),
                     "href": "risk.html#hedge", "source": "data_store/backtest/delta_hedge_2020.parquet"})
     # 3. backtest: the portfolio Sharpe with its bootstrap interval and the S3 timing null
     if p4 and p4.get("kpi"):
@@ -2855,12 +2913,15 @@ def key_results(p2: dict, p4: dict | None, hedge: dict | None, surf: dict, inf: 
         circ = ((s3 or {}).get("circular") or {}).get("total_pnl") or {}
         if ci:
             p_txt = (f"S3 timing vs {_fmt(circ.get('n_paths'), ',')} exposure-matched circular shifts: p "
-                     f"{_fmt(_num(circ.get('p_value')), '.3f')} (Holm over 6 sleeves {_fmt(_num(circ.get('p_holm_6_sleeves')), '.2f')})"
+                     f"{_fmt(_num(circ.get('p_value')), '.3f')} (Holm over 6 sleeves "
+                     f"{_fmt(_num(circ.get('p_holm_6_sleeves')), '.2f')})"
                      if circ.get("p_value") is not None else "")
             out.append({"key": "Backtest Sharpe (mark-to-model)",
                         "value": _fmt(ci["point"], "+.2f"), "unit": "portfolio",
-                        "detail": (f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]}, β·VIX marks; {p_txt}"),
-                        "ci": (f"{_fmt(ci['level'] * 100, '.0f')}% CI {_fmt(ci['lo'], '+.2f')} to {_fmt(ci['hi'], '+.2f')} "
+                        "detail": (f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]}, "
+                                   f"β·VIX marks; {p_txt}"),
+                        "ci": (f"{_fmt(ci['level'] * 100, '.0f')}% CI {_fmt(ci['lo'], '+.2f')} to "
+                               f"{_fmt(ci['hi'], '+.2f')} "
                                f"({ci.get('method') or 'bootstrap'}, {_fmt(ci.get('reps'), ',')} draws)"),
                         "ci_note": None, "href": "research.html#inference",
                         "source": "data_store/backtest/inference/summary.json"})
@@ -2868,10 +2929,12 @@ def key_results(p2: dict, p4: dict | None, hedge: dict | None, surf: dict, inf: 
             p = k.get("s3_null_p")
             out.append({"key": "Signal timing vs random entry",
                         "value": _fmt(p, ".3f"), "unit": "p (S3)",
-                        "detail": (f"{'Not significant' if p is not None and p >= 0.05 else 'Significant'} at 5%; "
+                        "detail": (f"{'Not significant' if p is not None and p >= 0.05 else 'Significant'}"
+                                   f" at 5%; "
                                    f"portfolio Sharpe {_fmt(k.get('sharpe'), '.2f')} (mark-to-model, "
                                    f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]})"),
-                        "ci": None, "ci_note": "the bootstrap interval needs the inference artifact, not yet generated",
+                        "ci": None,
+                        "ci_note": "the bootstrap interval needs the inference artifact, not yet generated",
                         "href": "research.html#inference", "source": "data_store/backtest/full_results.pkl"})
     return out
 
@@ -2883,29 +2946,26 @@ def load_overview() -> dict[str, Any]:
     for e in p2.get("errors") or []:
         if e not in d["errors"]:
             d["errors"].append(e)
-    d["fit"] = {k: p2.get(k) for k in ("session", "calib_file", "spx_rmse", "spx_oos_rmse", "spx_oos_wing_rmse",
-                                       "vix_index_rmse", "active_constraints", "pinned_params", "effective_dof",
+    d["fit"] = {k: p2.get(k) for k in ("session", "calib_file", "spx_rmse", "spx_oos_rmse",
+                                       "spx_oos_wing_rmse", "vix_index_rmse", "active_constraints",
+                                       "pinned_params", "effective_dof",
                                        "feller_state", "feller_margin", "n_spx_options", "n_spx_expiries",
                                        "calib_age", "model_version", "oos_rows", "n_oos")}
     d["fit"]["tiles"] = p2.get("param_tiles") or []
     hedge_d: dict = {"errors": [], "charts": {}}
-    try:
+    with _loader_boundary(d, "C7 hedge simulation"):
         risk_extras(hedge_d, None)
-    except Exception as e:
-        _record_error(d, "C7 hedge simulation", e)
     for e in hedge_d.get("errors") or []:
         d["errors"].append(e)
     p4 = None
-    try:
-        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
-            st = pickle.load(fh)
+    with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
+        st = _load_pickle(DATA / "backtest" / "full_results.pkl")
         em = st.get("metrics") or {}
         eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
         p4 = {"kpi": {"sharpe": _num(em.get("sharpe")), "s3_null_p": _num(em.get("s3_null_p_value")),
                       "cum_ret": _num(em.get("cumulative_return"))},
-              "start_date": str(pd.Timestamp(eq.index[0]).date()), "end_date": str(pd.Timestamp(eq.index[-1]).date())}
-    except Exception as e:
-        _record_error(d, "backtest engine results (full_results.pkl)", e)
+              "start_date": str(pd.Timestamp(eq.index[0]).date()),
+              "end_date": str(pd.Timestamp(eq.index[-1]).date())}
     try:
         surf = artifacts.load_surface(DATA)
     except artifacts.ArtifactError as e:
@@ -2923,10 +2983,11 @@ def load_overview() -> dict[str, Any]:
             "chart-ts", f"VIX index term structure on {d.get('ts_date')}",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
             y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
-            series=[{"name": "VIX family", "type": "line", "color": "cat0", "symbol": "circle", "size": 7, "width": 2,
-                     "data": [[t, v] for t, v in zip(days, d["ts_values"])]}],
+            series=[{"name": "VIX family", "type": "line", "color": "cat0", "symbol": "circle", "size": 7,
+                     "width": 2, "data": [[t, v] for t, v in zip(days, d["ts_values"])]}],
             csv=f"vix_term_structure_{d.get('ts_date')}.csv", grid={"top": 12},
-            describe="^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session; tenor on a linear axis, straight segments.",
+            describe=("^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session; tenor on a linear axis, "
+                      "straight segments."),
             table=charts.table(f"VIX-family index levels, {d.get('ts_date')}", ["Tenor", "Level (vol pts)#"],
                                [[t, _fmt(v, ".2f")] for t, v in zip(d["ts_tenors"], d["ts_values"])]))
     d["pdv_spark"] = sparkline(d.get("pdv_sparkline") or [], height=36, zero=True)
@@ -2975,11 +3036,13 @@ def _model_surface_heat(params: dict) -> dict:
         for k in lm:
             v = by.get(round(float(k), 4))
             if v is None:
-                cells.append(cell("", None, detail=f"{r['T']}d · ln(K/F) {_fmt(k, '+.2f')}: price too small to invert"))
+                cells.append(cell("", None,
+                                  detail=f"{r['T']}d · ln(K/F) {_fmt(k, '+.2f')}: price too small to invert"))
                 pts.append([float(k), float(r["T"]), None])      # the 3D surface needs the full grid
                 continue
             cells.append(cell(_fmt(v * 100, ".1f"), seq_colour(v * 100, lo, hi),
-                              detail=f"{r['T']}d · ln(K/F) {_fmt(k, '+.2f')} · model IV {_fmt(v * 100, '.2f')}%"))
+                              detail=(f"{r['T']}d · ln(K/F) {_fmt(k, '+.2f')} · "
+                                      f"model IV {_fmt(v * 100, '.2f')}%")))
             pts.append([float(k), float(r["T"]), round(v * 100, 3)])
         out_rows.append({"label": f"{r['T']}d", "cells": cells})
     return {"cols": [_fmt(k, "+.2f") for k in lm], "rows": out_rows, "lo": lo, "hi": hi, "points": pts}
@@ -3007,14 +3070,12 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail) -> lis
 def load_surface() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "surf": None, "model_heat": None,
                          "session": None, "models": [], "expiries": []}
-    try:
+    with _loader_boundary(d, "headline calibration"):
         path, cal = load_headline_calibration()
         d["calib_session"] = _calibration_session(cal, path)
         d["calib_file"] = Path(path).name
         d["model_heat"] = _model_surface_heat(cal["params"])
         d["model_params"] = dict(cal["params"])
-    except Exception as e:
-        _record_error(d, "headline calibration", e)
     try:
         surf = artifacts.load_surface(DATA)
         surface_extras(d, surf)
@@ -3027,7 +3088,7 @@ def load_surface() -> dict[str, Any]:
 
 def surface_extras(d: dict, surf: dict) -> None:
     """Every Surface-page view of one session's surface artifacts."""
-    d["surf"] = {k: v for k, v in surf.items() if k not in ("residuals",)}
+    d["surf"] = {k: v for k, v in surf.items() if k != "residuals"}
     if surf.get("state") != "ok":
         mh = d.get("model_heat")
         if mh and mh["points"]:
@@ -3042,20 +3103,22 @@ def surface_extras(d: dict, surf: dict) -> None:
     models = surf["models"]
     # scores: the producer's scorecard when present, else computed on the residual table
     if surf.get("scorecard_rows"):
-        d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]), "short": model_short(r["model"]), "oos": r["oos"],
+        d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]),
+                            "short": model_short(r["model"]), "oos": r["oos"],
                             "in_sample": r.get("in_sample"), "n_params": r.get("n_params"),
                             "n_in_sample": r.get("n_in_sample"), "description": r.get("description"),
                             "dense": r.get("dense") or {}, "ex_arb": r.get("ex_arb")}
                            for r in surf["scorecard_rows"]]
         d["score_source"] = "scorecard.json"
     else:
-        d["score_rows"] = [{"key": m, "label": model_label(m), "short": model_short(m), "oos": artifacts.residual_stats(res, m)}
-                           for m in models]
+        d["score_rows"] = [{"key": m, "label": model_label(m), "short": model_short(m),
+                            "oos": artifacts.residual_stats(res, m)} for m in models]
         d["score_source"] = "residuals.parquet"
     d["score_notes"] = list((surf.get("scorecard") or {}).get("notes") or [])
     exps = mkt.groupby("expiry")["T_days"].median().sort_values()
-    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum())} for e, t in exps.items()]
-    d["n_quotes"] = int(len(mkt))
+    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum())}
+                     for e, t in exps.items()]
+    d["n_quotes"] = len(mkt)
     d["median_half_spread"] = float(mkt["half_spread_vp"].median())
 
     # market IV heatmap: median mid IV of the quotes in each (expiry, ln(K/F)) bucket
@@ -3064,7 +3127,8 @@ def surface_extras(d: dict, surf: dict) -> None:
         "cols": _heat_heads(K_EDGES), "lo": lo, "hi": hi,
         "rows": _bucket_grid(
             mkt, exps,
-            value=lambda g: {"value": float(g["mid_iv"].median() * 100), "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
+            value=lambda g: {"value": float(g["mid_iv"].median() * 100),
+                             "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
             colour=lambda v: seq_colour(v, lo, hi),
             detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
                                  f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vp")), "compact": True}
@@ -3087,13 +3151,15 @@ def surface_extras(d: dict, surf: dict) -> None:
             q = q[~q["in_sample"]]
         q = q[pd.to_numeric(q["model_iv"], errors="coerce").notna()]
         d["resid_heat"].append({
-            "key": m, "label": model_label(m), "cols": _heat_heads(K_EDGES), "n": int(len(q)), "compact": True,
+            "key": m, "label": model_label(m), "cols": _heat_heads(K_EDGES), "n": len(q), "compact": True,
             "rows": _bucket_grid(
                 q, exps,
-                value=lambda g: {"value": float(g["error_hs"].median()), "text": signed(float(g["error_hs"].median()), ".1f")},
+                value=lambda g: {"value": float(g["error_hs"].median()),
+                                 "text": signed(float(g["error_hs"].median()), ".1f")},
                 colour=lambda v: div_colour(v, 5.0),
                 detail=lambda g, v: (f"{signed(v['value'], '.2f')} half-spreads (median of {len(g)}) · "
-                                     f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% inside"))})
+                                     f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% "
+                                     "inside"))})
 
     # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); the
     # production Heston fit and the best-ranked other model (every model is in
@@ -3107,15 +3173,16 @@ def surface_extras(d: dict, surf: dict) -> None:
         q = mkt[mkt["expiry"] == e].sort_values("k")
         if {"bid_iv", "ask_iv"} <= set(q.columns):
             series.append({"name": f"{e} bid–ask", "type": "errorbar", "color": "muted", "group": e,
-                           "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)] for r in q.itertuples()]})
+                           "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
+                                    for r in q.itertuples()]})
         series.append({"name": f"{e} mid", "type": "scatter", "color": "headline", "size": 4, "group": e,
                        "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r in q.itertuples()]})
         for j, m in enumerate(overlay):
             qm = res[(res["model"] == m) & (res["expiry"] == e)].sort_values("k")
-            series.append({"name": f"{e} {model_label(m)}", "type": "line", "color": charts.color_cycle(j + 1),
-                           "width": 1.5, "group": e,
-                           "data": [[round(float(k), 3), round(float(v) * 100, 2)] for k, v in zip(qm["k"], qm["model_iv"])
-                                    if _num(v) is not None]})
+            series.append({"name": f"{e} {model_label(m)}", "type": "line",
+                           "color": charts.color_cycle(j + 1), "width": 1.5, "group": e,
+                           "data": [[round(float(k), 3), round(float(v) * 100, 2)]
+                                    for k, v in zip(qm["k"], qm["model_iv"]) if _num(v) is not None]})
     d["charts"]["slices"] = charts.xy(
         "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
         x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
@@ -3127,7 +3194,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                            [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
                              _fmt(float(mkt[mkt["expiry"] == x["expiry"]]["half_spread_vp"].median()), ".2f")]
                             for x in d["expiries"]]))
-    d["default_exp"] = min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"] if d["expiries"] else None
+    d["default_exp"] = (min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"]
+                        if d["expiries"] else None)
 
     # out-of-sample median |model − mid| by expiry, one line per model (scorecard by_expiry)
     if surf.get("scorecard_rows"):
@@ -3148,7 +3216,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             marks={"y": [{"value": 1.0, "label": "inside the spread", "color": "ok"}]},
             describe=("All quotes of each expiry (in and out of sample, the scorecard's by-expiry rows); "
                       "1 half-spread is the edge of the quoted bid–ask."),
-            table=charts.table("Median |model − mid| (half-spreads) by expiry", ["Model"] + [c + "#" for c in labels], tbl))
+            table=charts.table("Median |model − mid| (half-spreads) by expiry",
+                               ["Model"] + [c + "#" for c in labels], tbl))
 
     # ATM term structure (surface.json): market ATM vol and the eSSVI ATM vol and skew
     ts = (surf.get("surface") or {}).get("term_structure") or []
@@ -3158,19 +3227,24 @@ def surface_extras(d: dict, surf: dict) -> None:
             "chart-atm-ts", "ATM implied vol by expiry: quotes and the eSSVI fit",
             x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
             y={"name": "ATM vol (%)", "digits": 1, "tipDigits": 2},
-            series=[{"name": "ATM mid (quotes)", "type": "scatter", "color": "headline", "size": 6, "legend": True,
+            series=[{"name": "ATM mid (quotes)", "type": "scatter", "color": "headline", "size": 6,
+                     "legend": True,
                      "data": [[float(t["T_days"]), _num(t.get("atm_vol_mid_quotes"))] for t in ts
                               if _num(t.get("atm_vol_mid_quotes")) is not None]},
                     {"name": "eSSVI ATM", "type": "line", "color": "cat1", "width": 1.5, "legend": True,
                      "data": [[float(t["T_days"]), _num(t.get("atm_vol_essvi"))] for t in ts
                               if _num(t.get("atm_vol_essvi")) is not None]}],
             tooltip="axis", csv=f"atm_term_structure_{session}.csv",
-            describe="ATM implied vol per quoted expiry, from the mids at the parity forward and from the eSSVI surface.",
+            describe=("ATM implied vol per quoted expiry, from the mids at the parity forward and from the "
+                      "eSSVI surface."),
             table=charts.table("ATM term structure", ["Expiry", "Days#", "ATM mid (%)#", "eSSVI ATM (%)#",
                                                       "eSSVI ATM skew#", "Parity r#", "Parity q#", "Quotes#"],
-                               [[t.get("expiry"), _fmt(_num(t.get("T_days")), ".0f"), _fmt(_num(t.get("atm_vol_mid_quotes")), ".2f"),
-                                 _fmt(_num(t.get("atm_vol_essvi")), ".2f"), signed(_num(t.get("atm_skew_essvi")), ".3f"),
-                                 _pct_prose(_num(t.get("r")), 2, signed=False), _pct_prose(_num(t.get("q")), 2, signed=False),
+                               [[t.get("expiry"), _fmt(_num(t.get("T_days")), ".0f"),
+                                 _fmt(_num(t.get("atm_vol_mid_quotes")), ".2f"),
+                                 _fmt(_num(t.get("atm_vol_essvi")), ".2f"),
+                                 signed(_num(t.get("atm_skew_essvi")), ".3f"),
+                                 _pct_prose(_num(t.get("r")), 2, signed=False),
+                                 _pct_prose(_num(t.get("q")), 2, signed=False),
                                  _fmt(t.get("n_quotes"), ",")] for t in ts]))
 
     # static-arbitrage screen and repair (surface.json)
@@ -3183,8 +3257,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                           "mid_tick": (arb.get("mid_violations_gt_tick") or {}).get(k),
                           "exec": (arb.get("executable_violations") or {}).get(k),
                           "max_mid": (arb.get("max_mid_violation_index_points") or {}).get(k)} for k in keys]
-        d["arb"] = {k: arb.get(k) for k in ("n_quotes", "n_quotes_in_executable_violation", "n_quotes_in_mid_violation",
-                                            "constraint_set")}
+        d["arb"] = {k: arb.get(k) for k in ("n_quotes", "n_quotes_in_executable_violation",
+                                            "n_quotes_in_mid_violation", "constraint_set")}
         d["arb_repair"] = arb.get("repair") or {}
         d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
                              for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
@@ -3202,16 +3276,18 @@ def surface_extras(d: dict, surf: dict) -> None:
                 continue
             off = row.get("official")
             off_close = _num(off.get("close")) if isinstance(off, dict) else _num(off)
-            d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")), "official": off_close,
-                                  "gap": _num(row.get("gap_vs_official")), "method": row.get("headline_method"),
+            d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")),
+                                  "official": off_close, "gap": _num(row.get("gap_vs_official")),
+                                  "method": row.get("headline_method"),
                                   "in_range": row.get("official_inside_day_range"),
                                   "day_range": ([_num(off.get("low")), _num(off.get("high"))]
-                                                if isinstance(off, dict) and off.get("low") is not None else None)})
+                                                if isinstance(off, dict) and off.get("low") is not None
+                                                else None)})
         d["vix_beta"] = vx.get("beta") or {}
         d["vix_notes"] = list(vx.get("gap_notes") or [])
         d["vix_deviations"] = list(vx.get("deviations") or [])
-        d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")), "vs": _num(r.get("var_swap_vol")),
-                       "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
+        d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
+                       "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
                        "n": (r.get("n_puts") or 0) + (r.get("n_calls") or 0)}
                       for r in sorted(vx.get("strip") or [], key=lambda r: _num(r.get("days")) or 0)]
@@ -3220,27 +3296,33 @@ def surface_extras(d: dict, surf: dict) -> None:
                 "chart-strip", "Variance-swap vol and ATM vol by expiry, same chain",
                 x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
                 y={"name": "Vol (%)", "digits": 0, "tipDigits": 2},
-                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "color": "cat0", "symbol": "circle",
-                         "size": 5, "width": 1.5, "legend": True,
-                         "data": [[r["days"], r["vs"]] for r in d["strip"] if r["vs"] is not None and r["days"] is not None]},
-                        {"name": "ATM vol (quotes)", "type": "line", "color": "cat1", "symbol": "diamond", "size": 5,
-                         "width": 1.5, "dash": True, "legend": True,
-                         "data": [[r["days"], r["atm"]] for r in d["strip"] if r["atm"] is not None and r["days"] is not None]}],
+                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "color": "cat0",
+                         "symbol": "circle", "size": 5, "width": 1.5, "legend": True,
+                         "data": [[r["days"], r["vs"]] for r in d["strip"]
+                                  if r["vs"] is not None and r["days"] is not None]},
+                        {"name": "ATM vol (quotes)", "type": "line", "color": "cat1", "symbol": "diamond",
+                         "size": 5, "width": 1.5, "dash": True, "legend": True,
+                         "data": [[r["days"], r["atm"]] for r in d["strip"]
+                                  if r["atm"] is not None and r["days"] is not None]}],
                 tooltip="axis", csv=f"varswap_strip_{session}.csv",
-                describe="The single-term variance-swap vol of every stored expiry against its ATM vol; the gap is the skew premium.",
-                table=charts.table("Variance-swap strip", ["Expiry", "Days#", "Var-swap vol#", "ATM vol#",
-                                                           "Var-swap − ATM (vp)#", "ATM / var-swap#", "Strikes#"],
-                                   [[r["expiry"], _fmt(r["days"], ".0f"), _fmt(r["vs"], ".2f"), _fmt(r["atm"], ".2f"),
-                                     signed(r["diff"], ".2f"), _fmt(r["ratio"], ".3f"), _fmt(r["n"], ",")] for r in d["strip"]]))
+                describe=("The single-term variance-swap vol of every stored expiry against its ATM vol; "
+                          "the gap is the skew premium."),
+                table=charts.table("Variance-swap strip",
+                                   ["Expiry", "Days#", "Var-swap vol#", "ATM vol#", "Var-swap − ATM (vp)#",
+                                    "ATM / var-swap#", "Strikes#"],
+                                   [[r["expiry"], _fmt(r["days"], ".0f"), _fmt(r["vs"], ".2f"),
+                                     _fmt(r["atm"], ".2f"), signed(r["diff"], ".2f"), _fmt(r["ratio"], ".3f"),
+                                     _fmt(r["n"], ",")] for r in d["strip"]]))
 
     # every session the surface report has covered (index.json)
     idx = surf.get("index") or []
     if idx:
-        mk = [m for m in models]
+        mk = list(models)
         d["history_models"] = [{"key": m, "label": model_label(m)} for m in mk]
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
-                                 "vix_rep": _num(r.get("vix_replicated")), "vix_off": _num(r.get("vix_official")),
+                                 "vix_rep": _num(r.get("vix_replicated")),
+                                 "vix_off": _num(r.get("vix_official")),
                                  "beta": _num(r.get("atm_over_vix_official")),
                                  "m": {m: (r.get("models") or {}).get(m) or {} for m in mk}} for r in idx]
 
@@ -3289,7 +3371,8 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     total.append(levels[-1] / k)
     tip.append(levels[-1] / k)
     return charts.xy(
-        "chart-waterfall", "C22 waterfall: portfolio P&L from the published C21 run to the canonical run ($000s)",
+        "chart-waterfall",
+        "C22 waterfall: portfolio P&L from the published C21 run to the canonical run ($000s)",
         x={"type": "category", "categories": cats, "interval": 0, "rotate": 38, "labelWidth": 150},
         y={"name": "Portfolio P&L ($000s)", "digits": 0, "tipDigits": 1, "signed": True, "zero": True,
            "max": 0 if all_neg else None},
@@ -3299,8 +3382,8 @@ def waterfall_spec(bridge: list[dict]) -> dict:
              "data": raise_, "tip": tip},
             {"name": "Step lowers P&L", "type": "bar", "stack": "w", "color": "neg", "legend": True,
              "data": lower, "tip": tip},
-            {"name": "Run total", "type": "bar", "stack": "w", "color": "headline", "fill": 0.35, "legend": True,
-             "data": total},
+            {"name": "Run total", "type": "bar", "stack": "w", "color": "headline", "fill": 0.35,
+             "legend": True, "data": total},
         ],
         xs=cats, tooltip="axis", grid={"bottom": 112, "left": 60}, csv="c22_waterfall.csv",
         describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} in {len(bridge)} "
@@ -3327,31 +3410,27 @@ def load_corrections() -> dict[str, Any]:
     for e in p4.get("errors") or []:
         d["errors"].append(e)
     d["p4"] = {k: p4.get(k) for k in ("bridge", "beta", "beta_est", "r2_share", "pre_c22_spread", "kpi",
-                                      "sleeves", "clf_eval", "total_pnl", "final_nav", "start_date", "end_date")}
+                                      "sleeves", "clf_eval", "total_pnl", "final_nav", "start_date",
+                                      "end_date")}
     bridge = None
-    try:
+    with _loader_boundary(d, "C22 bridge (c22_bridge.csv)"):
         bridge = _read_csv_rows(DATA / "backtest" / "c22_bridge.csv")
         if not bridge:
             raise ValueError("empty C22 bridge")
         bridge = sorted(bridge, key=lambda r: int(r["row"]))
-    except Exception as e:
-        _record_error(d, "C22 bridge (c22_bridge.csv)", e)
     final = None
-    try:
-        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
-            em = (pickle.load(fh).get("metrics") or {})
+    with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
+        em = (_load_pickle(DATA / "backtest" / "full_results.pkl").get("metrics") or {})
         final = {"cum_ret": _num(em.get("cumulative_return")), "sharpe": _num(em.get("sharpe"))}
         if bridge and abs(float(bridge[-1]["sharpe"]) - (final["sharpe"] or 0.0)) > 1e-6:
             raise ValueError("c22_bridge.csv does not end at the stored run's Sharpe")
-    except Exception as e:
-        _record_error(d, "backtest engine results (full_results.pkl)", e)
     steps = {r["step"]: r for r in bridge or []}
     d["c21_pnl"] = (float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])) if bridge else None
     for rnd in reg["rounds"]:
         r = dict(rnd)
         r["findings"] = []
-        for f in rnd["findings"]:
-            f = dict(f)
+        for finding in rnd["findings"]:
+            f = dict(finding)
             if f.get("bridge_steps") and steps:
                 rows = [steps[s] for s in f["bridge_steps"] if s in steps]
                 if len(rows) != len(f["bridge_steps"]):
@@ -3365,7 +3444,8 @@ def load_corrections() -> dict[str, Any]:
                 f["sharpe_from"] = _num(prev[0]["sharpe"]) if prev else None
                 f["sharpe_to"] = _num(last["sharpe"])
             r["findings"].append(f)
-        r["commit_links"] = [{"sha": c, "short": c[:7], "url": f"{reg['repo']}/commit/{c}"} for c in rnd["commits"]]
+        r["commit_links"] = [{"sha": c, "short": c[:7], "url": f"{reg['repo']}/commit/{c}"}
+                             for c in rnd["commits"]]
         r["n_tests"] = sum(len(f.get("tests") or []) for f in rnd["findings"])
         d["rounds"].append(r)
     # the page's data date (sitemap lastmod, X-Dashboard-Data-Date): its newest round
@@ -3382,9 +3462,10 @@ def load_corrections() -> dict[str, Any]:
     d["charts"]["headline"] = charts.xy(
         "chart-headline", "Published portfolio cumulative return after each round",
         x={"type": "category", "categories": [r for r, _ in hs], "interval": 0},
-        y={"name": "Cumulative return (%)", "digits": 0, "tipDigits": 1, "signed": True, "tickUnit": "%", "unit": "%"},
-        series=[{"name": "Published cumulative return", "type": "line", "color": "headline", "symbol": "circle",
-                 "size": 7, "data": [v for _, v in hs]}],
+        y={"name": "Cumulative return (%)", "digits": 0, "tipDigits": 1, "signed": True, "tickUnit": "%",
+           "unit": "%"},
+        series=[{"name": "Published cumulative return", "type": "line", "color": "headline",
+                 "symbol": "circle", "size": 7, "data": [v for _, v in hs]}],
         xs=[r for r, _ in hs], csv="headline_by_round.csv", grid={"top": 12},
         describe="C17 to C21 as published in the README at the time; C22 from the stored canonical run.",
         table=charts.table("Published cumulative return by round (%)", ["Round", "Cumulative return#"],
@@ -3423,12 +3504,10 @@ def _rag(value: float | None, limits: tuple) -> str:
 
 def load_model_risk() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
-    try:
+    with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
         d["inventory"] = inv["models"]
         d["inventory_about"] = inv.get("about")
-    except Exception as e:
-        _record_error(d, "model inventory (dashboard/model_inventory.json)", e)
     p2 = load_page2()
     for e in p2.get("errors") or []:
         d["errors"].append(e)
@@ -3436,12 +3515,10 @@ def load_model_risk() -> dict[str, Any]:
 
     def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None):
         lim = MONITOR_LIMITS.get(limits_key)
-        if status is not None:
-            st = status
-        else:
-            st = _rag(value, lim) if lim else "na"
+        st = status if status is not None else _rag(value, lim) if lim else "na"
         mon.append({"model": mid, "check": check, "value": text, "status": st,
-                    "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim else "informational"),
+                    "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim
+                                              else "informational"),
                     "artifact": artifact, "note": note})
     fit_art = f"data_store/calibrations/{p2.get('calib_file') or 'joint_cal_<session>.pkl'}"
     add("M1", "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")), _fmt(p2.get("calib_age")),
@@ -3449,34 +3526,35 @@ def load_model_risk() -> dict[str, Any]:
     add("M1", "Parameters on a box bound", float(len(p2.get("pinned_params") or [])),
         ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
         "A parameter on its bound is set by the box, not the market.")
-    add("M1", "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")), _fmt(p2.get("spx_oos_rmse"), ".2f"),
+    add("M1", "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")),
+        _fmt(p2.get("spx_oos_rmse"), ".2f"),
         "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.")
     short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
     worst = max(short, key=lambda r: r["rmse"]) if short else None
     add("M1", "Worst short-dated expiry OOS RMSE (≤ 30 days)", worst["rmse"] if worst else None,
         f"{_fmt(worst['rmse'], '.2f')} ({worst['expiry']})" if worst else "—", "short_oos_rmse", fit_art,
         "One-factor Heston misses the short end; see the calibration page.")
-    add("M1", "VIX index RMSE (index pts)", _num(p2.get("vix_index_rmse")), _fmt(p2.get("vix_index_rmse"), ".2f"),
+    add("M1", "VIX index RMSE (index pts)", _num(p2.get("vix_index_rmse")),
+        _fmt(p2.get("vix_index_rmse"), ".2f"),
         "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.")
     add("M1", "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
         "Not a no-arbitrage condition; reported, not limited.", status="info")
     # M3: β drift — the newest stored chain against the frozen backtest β
-    try:
-        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
-            st = pickle.load(fh)
+    with _loader_boundary(d, "β estimation chains"):
+        st = _load_pickle(DATA / "backtest" / "full_results.pkl")
         beta = _num(st.get("atm_to_vix_ratio", (st.get("metrics") or {}).get("atm_to_vix_ratio")))
         be = beta_estimation(None)
         later = be.get("later") or []
         newest = later[-1] if later else None
         drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
         add("M3", "β drift: newest chain's ATM vol / VIX against the frozen β", drift,
-            (f"{_fmt(newest['ratio'], '.3f')} on {newest['session']} vs β = {_fmt(beta, '.2f')}" if newest else "no later chain"),
-            "beta_drift", "data_store/backtest/full_results.pkl", "The backtest marks every straddle at β·VIX.")
-    except Exception as e:
-        _record_error(d, "β estimation chains", e)
+            (f"{_fmt(newest['ratio'], '.3f')} on {newest['session']} vs β = {_fmt(beta, '.2f')}" if newest
+             else "no later chain"),
+            "beta_drift", "data_store/backtest/full_results.pkl",
+            "The backtest marks every straddle at β·VIX.")
     # M4: market DB lag behind the labels (the regime card's inputs)
-    try:
+    with _loader_boundary(d, "rule labels / market DB"):
         labels = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
         lab_date = str(pd.Timestamp(labels.index[-1]).date())
         with _db() as con:
@@ -3484,30 +3562,27 @@ def load_model_risk() -> dict[str, Any]:
         lag = session_age(db_date, lab_date)
         add("M4", "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag), "label_lag",
             "data_store/vol_system.db", f"Labels {lab_date}; market DB {db_date}.")
-    except Exception as e:
-        _record_error(d, "rule labels / market DB", e)
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
         d["errors"].append(e)
     add("M2", "Greeks surface built from the headline fit", None,
-        "yes" if g.get("source_matches_headline") else ("no" if g.get("source_matches_headline") is False else "unknown"),
+        "yes" if g.get("source_matches_headline")
+        else ("no" if g.get("source_matches_headline") is False else "unknown"),
         "", "data_store/greeks/greeks_surface.parquet", f"Surface {g.get('surface_date')}.",
         status=("ok" if g.get("source_matches_headline")
                 else ("breach" if g.get("source_matches_headline") is False else "watch")),
         limits_text="OK if yes · watch if unknown · breach if no")
     # M8: classifier vs persistence (research only)
-    try:
-        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
-            ev = (getattr(pickle.load(f), "metadata_", None) or {}).get("evaluation") or {}
+    with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
+        clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
+        ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
             add("M8", "Classifier accuracy minus the persistence baseline (pts)", gap, signed(gap, ".1f"),
                 "", "data_store/signals/regime_classifier.pkl",
                 "Research only since C17: below the no-skill baseline, so it never trades.",
                 status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below")
-    except Exception as e:
-        _record_error(d, "research classifier (regime_classifier.pkl)", e)
     # surface artifacts: spread-unit fit quality and data checks on the stored chain
     try:
         surf = artifacts.load_surface(DATA)
@@ -3526,14 +3601,17 @@ def load_model_risk() -> dict[str, Any]:
         rep = ((surf.get("vix") or {}).get("indices") or {}).get("VIX") or {}
         gap = _num(rep.get("gap_vs_official"))
         add("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
-            abs(gap) if gap is not None else None, signed(gap, ".2f") if gap is not None else "—", "vix_rep_gap",
-            sart + "vix_replication.json", "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.")
+            abs(gap) if gap is not None else None, signed(gap, ".2f") if gap is not None else "—",
+            "vix_rep_gap", sart + "vix_replication.json",
+            "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.")
         arb = (surf.get("surface") or {}).get("arbitrage") or {}
         n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
         share = n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None
         add("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
-            f"{_fmt(share, '.1f')}% ({_fmt(n_ex, ',.0f')} of {_fmt(n_q, ',.0f')})" if share is not None else "—",
-            "arb_exec_share", sart + "surface.json", "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.")
+            f"{_fmt(share, '.1f')}% ({_fmt(n_ex, ',.0f')} of {_fmt(n_q, ',.0f')})" if share is not None
+            else "—",
+            "arb_exec_share", sart + "surface.json",
+            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.")
     else:
         for mid_, chk in (("M1", "Heston median |model − mid|, out of sample (half-spreads)"),
                           ("Data", "VIX replicated from the stored chain − Cboe close (index pts)"),
@@ -3544,7 +3622,8 @@ def load_model_risk() -> dict[str, Any]:
     rank = {m: i for i, m in enumerate([f"M{i}" for i in range(1, 10)] + ["Data"])}
     mon.sort(key=lambda m: rank.get(m["model"], len(rank)))
     d["monitors"] = mon
-    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k) for k in ("ok", "watch", "breach", "info", "na")}
+    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k)
+                       for k in ("ok", "watch", "breach", "info", "na")}
     d["limits"] = MONITOR_LIMITS
     return _clean_keep(d)
 
@@ -3569,8 +3648,9 @@ def build_info() -> dict:
     sha = os.environ.get("BUILD_SHA") or os.environ.get("GITHUB_SHA")
     if not sha:
         try:
-            sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True,
-                                 text=True, timeout=5, check=False).stdout.strip() or None
+            sha = subprocess.run(  # noqa: S603 (a fixed argv, no external input)
+                ["git", "-C", str(ROOT), "rev-parse", "HEAD"],  # noqa: S607 (git from PATH, as in CI)
+                capture_output=True, text=True, timeout=5, check=False).stdout.strip() or None
         except Exception as exc:          # git missing: the status bar says "unknown"
             _logger.info("git rev-parse unavailable: %s", exc)
             sha = None
@@ -3584,9 +3664,9 @@ def load_chrome() -> dict:
     page's own loader owns its errors, and any page error blocks the publish.
     """
     cal_dir = DATA / "calibrations"
-    key = _stat_key(DATA / "vol_system.db", DATA / "signals" / "regime_labels.parquet", cal_dir,
-                    DATA / "greeks" / "greeks_surface.parquet", DATA / "backtest" / "full_results.parquet",
-                    DATA / "surface", DATA / "backtest" / "inference") + (str(DATA),)
+    key = (*_stat_key(DATA / "vol_system.db", DATA / "signals" / "regime_labels.parquet", cal_dir,
+                      DATA / "greeks" / "greeks_surface.parquet", DATA / "backtest" / "full_results.parquet",
+                      DATA / "surface", DATA / "backtest" / "inference"), str(DATA))
     if key in _CHROME_CACHE:
         return _CHROME_CACHE[key]
     c: dict[str, Any] = {"ticker": [], "sources": [], "worst": "ok", "build": build_info(),
@@ -3596,8 +3676,8 @@ def load_chrome() -> dict:
         spx = _read_spx()
         last, prev = float(spx["close"].iloc[-1]), float(spx["close"].iloc[-2])
         spx_date = str(spx.index[-1].date())
-        c["ticker"].append({"label": "SPX", "value": _fmt(last, ",.2f"), "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True),
-                            "note": None})
+        c["ticker"].append({"label": "SPX", "value": _fmt(last, ",.2f"),
+                            "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True), "note": None})
         vd = _read_vix_daily()
         vix_date = str(vd.index[-1].date())
         c["ticker"].append({"label": "VIX", "value": _fmt(float(vd.iloc[-1]), ".2f"),
@@ -3608,7 +3688,8 @@ def load_chrome() -> dict:
             vv = vw["^VVIX"].dropna()
             c["ticker"].append({"label": "VVIX", "value": _fmt(float(vv.iloc[-1]), ".2f"),
                                 "chg": pnl(float(vv.iloc[-1]) - float(vv.iloc[-2]), ".2f", glyph=True),
-                                "note": None if str(vv.index[-1].date()) == spx_date else str(vv.index[-1].date())})
+                                "note": (None if str(vv.index[-1].date()) == spx_date
+                                         else str(vv.index[-1].date()))})
         cols = [t for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M") if t in vw.columns]
         full = vw[cols].dropna() if len(cols) == 4 else pd.DataFrame()
         if len(full):
@@ -3618,12 +3699,14 @@ def load_chrome() -> dict:
             c["ticker"].append({"label": "9D→6M", "value": signed(slope, ".2f"),
                                 "chg": "contango" if slope > 0 else "backwardation",
                                 "note": None if ts_date == spx_date else ts_date})
-            c["ticker"].append({"label": "VIX/VIX3M", "value": _fmt(float(row["^VIX"] / row["^VIX3M"]), ".3f"),
+            c["ticker"].append({"label": "VIX/VIX3M",
+                                "value": _fmt(float(row["^VIX"] / row["^VIX3M"]), ".3f"),
                                 "chg": None, "note": None if ts_date == spx_date else ts_date})
     except Exception as exc:
         _logger.info("chrome: market data unavailable (%s)", exc)
     try:
-        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])["regime"].dropna()
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet",
+                             columns=["regime"])["regime"].dropna()
         labels_date = str(pd.Timestamp(rl.index[-1]).date())
         lab = int(rl.iloc[-1])
         c["ticker"].append({"label": "RULE", "value": _REGIME_LABELS[lab], "chg": _REGIME_NAMES[lab].lower(),
@@ -3634,8 +3717,7 @@ def load_chrome() -> dict:
     try:
         path = latest_good_calibration_path()
         if path:
-            with open(path, "rb") as f:
-                cal = pickle.load(f)
+            cal = _load_pickle(path)
             calib_date = _calibration_session(cal, path)
             c["model_version"] = cal.get("model_version")
     except Exception as exc:
@@ -3660,8 +3742,10 @@ def load_chrome() -> dict:
         ("LABELS", "Rule regime labels", labels_date, "data_store/signals/regime_labels.parquet", True),
         ("FIT", "Headline Heston fit", calib_date, "data_store/calibrations/", True),
         ("GREEKS", "Greeks surface", greeks_date, "data_store/greeks/greeks_surface.parquet", True),
-        ("SURFACE", "Quote-grade surface", surf_sessions[-1] if surf_sessions else None, "data_store/surface/<session>/", False),
-        ("BACKTEST", "Backtest window end (fixed)", bt_end, "data_store/backtest/full_results.parquet", False),
+        ("SURFACE", "Quote-grade surface", surf_sessions[-1] if surf_sessions else None,
+         "data_store/surface/<session>/", False),
+        ("BACKTEST", "Backtest window end (fixed)", bt_end, "data_store/backtest/full_results.parquet",
+         False),
     ]
     for short, label, date, art, aged in rows:
         age = session_age(date, ref) if (aged and date) else None
@@ -3742,8 +3826,8 @@ def _page_context() -> dict:
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
             "cividis": CIVIDIS_11, "berlin": BERLIN_11,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
-            "font_preload": FONT_PRELOAD, "chrome": load_chrome(), "page_title": dict(
-                (r, label) for r, label, *_ in NAV).get(route, "Overview")}
+            "font_preload": FONT_PRELOAD, "chrome": load_chrome(), "page_title": {
+                r: label for r, label, *_ in NAV}.get(route, "Overview")}
 
 
 def _render(template: str, d: dict):

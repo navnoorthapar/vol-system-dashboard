@@ -45,9 +45,9 @@ turns it into iv(k, T) (OTM side by parity, Black-76 inversion), e.g.
 from __future__ import annotations
 
 import pickle
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -176,7 +176,7 @@ def svi_cal_factory(ctx: ScoreContext) -> ModelSpec:
         "wing bounds, and calendar ordering w_(i-1) <= w_i <= w_(i+1) certified on a "
         "4,001-point k-grid and in the wing slopes; block coordinate descent from the eSSVI "
         "fit; inverse half-spread weights",
-        params=s.to_dict(), fit={k: v for k, v in info.items()})
+        params=s.to_dict(), fit=dict(info.items()))
 
 
 def iv_from_normalised_calls(call_price: Callable) -> Callable:
@@ -203,14 +203,14 @@ def heston_iv_function(params: dict) -> Callable:
         lambda K, T: heston_call_batch(1.0, K, T, 0.0, 0.0, kap, th, sg, rh, v0))
 
 
-def load_v2_calibration(session: str, calibrations_dir: Path = CALIBRATIONS_DIR) -> Optional[dict]:
+def load_v2_calibration(session: str, calibrations_dir: Path = CALIBRATIONS_DIR) -> dict | None:
     """The stored model_version-2 joint fit for ``session`` (None if absent,
     legacy, or built on another session's quotes)."""
     path = Path(calibrations_dir) / f"joint_cal_{session}.pkl"
     if not path.exists():
         return None
     with open(path, "rb") as f:
-        cal = pickle.load(f)
+        cal = pickle.load(f)  # noqa: S301 (trusted: the calibrator's own committed result)
     if jc.calibration_is_legacy(cal):
         return None
     if str(cal.get("spx_snapshot_session")) != session:
@@ -237,7 +237,7 @@ def heston_anchor_mask(quotes: pd.DataFrame, session: str) -> np.ndarray:
     return mask
 
 
-def heston_v2_factory(ctx: ScoreContext) -> Optional[ModelSpec]:
+def heston_v2_factory(ctx: ScoreContext) -> ModelSpec | None:
     cal = load_v2_calibration(ctx.sq.session, ctx.calibrations_dir)
     if cal is None:
         return None
@@ -277,10 +277,11 @@ def model_ivs(spec: ModelSpec, quotes: pd.DataFrame) -> np.ndarray:
     return out
 
 
-def score_models(ctx: ScoreContext, models: Optional[list] = None) -> tuple:
+def score_models(ctx: ScoreContext, models: list | None = None) -> tuple:
     """Score every available model. Returns (scorecard dict, residuals frame)."""
     q = ctx.quotes
-    assert (q.index == np.arange(len(q))).all(), "quotes must have a RangeIndex"
+    if not (q.index == np.arange(len(q))).all():
+        raise AssertionError("quotes must have a RangeIndex")
     ranges = mt.expiry_ranges(q)
     rows, frames = [], []
     for name in (models or list(MODEL_REGISTRY)):

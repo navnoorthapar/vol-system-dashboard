@@ -56,7 +56,8 @@ def test_fit_recovers_an_arbitrage_free_slice():
     x0 = sv.ssvi_slice_to_raw(float(sv.svi_w(0.0, *true)), 0.15, -0.6)
     p, info = sv.fit_svi_slice(k, T, iv, np.full(len(k), 1e-3), x0)
     assert np.max(np.abs(np.sqrt(sv.svi_w(k, *p) / T) - iv)) < 1e-4
-    assert info["g_min"] >= -1e-9 and info["max_constraint_violation"] < 1e-9
+    assert info["g_min"] >= -1e-9
+    assert info["max_constraint_violation"] < 1e-9
 
 
 def test_fit_to_the_vogt_smile_is_forced_arbitrage_free():
@@ -65,7 +66,7 @@ def test_fit_to_the_vogt_smile_is_forced_arbitrage_free():
     T = 1.0
     k, iv = _quotes(VOGT, T, np.linspace(-0.8, 0.8, 81))
     x0 = sv.ssvi_slice_to_raw(float(sv.svi_w(0.0, *VOGT)), 0.2, 0.3)
-    p, info = sv.fit_svi_slice(k, T, iv, np.full(len(k), 1e-3), x0)
+    p, _info = sv.fit_svi_slice(k, T, iv, np.full(len(k), 1e-3), x0)
     assert sv.svi_g(sv.SVI_GRID, p).min() >= -1e-8
     err = np.sqrt(sv.svi_w(k, *p) / T) - iv
     assert np.max(np.abs(err)) > 1e-4                       # cannot match an arbitrageable smile
@@ -128,7 +129,8 @@ def test_calendar_surface_is_ordered_and_beats_its_essvi_start():
     cal, info = sv.fit_svi_calendar_surface(groups, ess)
     assert not free.ordering()["ordered"]                    # per-slice SVI crosses
     o = cal.ordering()
-    assert o["ordered"] and o["min_dw_on_check_grid"] >= -sv._ORDER_TOL
+    assert o["ordered"]
+    assert o["min_dw_on_check_grid"] >= -sv._ORDER_TOL
     assert o["min_wing_slope_increment"] >= -sv._ORDER_TOL
     assert info["objective"] < info["objective_start_essvi"]
     assert info["max_constraint_violation"] <= 1e-9
@@ -156,7 +158,7 @@ def test_calendar_surface_of_ordered_data_matches_free_fit():
     iv = np.concatenate([g[3] for g in groups])
     lab = np.concatenate([[g[0]] * len(k) for g in groups])
     ess, _ = es.fit_essvi(kk, TT, iv, np.full(len(kk), 0.001), lab)
-    cal, info = sv.fit_svi_calendar_surface(groups, ess)
+    cal, _info = sv.fit_svi_calendar_surface(groups, ess)
     for s, g in zip(cal.slices, groups):
         assert np.max(np.abs(s.iv(g[2]) - g[3])) < 2e-4         # 0.02 vol points
     assert cal.ordering()["ordered"]

@@ -46,5 +46,5 @@ def test_validation_rejects_a_malformed_ledger(tmp_path):
     with pytest.raises(ValueError, match="lacks"):
         trials.load(p)
     p.write_text("schema: other\nrounds: []\n")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown schema 'other'"):
         trials.load(p)

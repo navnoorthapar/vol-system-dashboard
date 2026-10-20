@@ -23,7 +23,8 @@ def test_returns_from_nav_reproduce_the_engines_sharpe():
         assert sh.annualise(sh.sortino(r)) == pytest.approx(m["sortino"], rel=1e-12)
     pnl = eq["pnl_s3"].to_numpy()
     np.testing.assert_allclose(sh.returns_from_pnl(pnl, INITIAL_CAPITAL),
-                               sh.returns_from_nav(eq["nav_s3"].to_numpy(), INITIAL_CAPITAL), rtol=1e-10, atol=1e-15)
+                               sh.returns_from_nav(eq["nav_s3"].to_numpy(), INITIAL_CAPITAL),
+                               rtol=1e-10, atol=1e-15)
 
 
 def test_sample_moments_of_a_normal_sample():
@@ -55,8 +56,8 @@ def test_psr_is_calibrated_under_the_null():
     rng = np.random.default_rng(2)
     n, sims = 500, 3000
     x = rng.standard_t(df=6, size=(sims, n)) * 0.01     # true SR = 0
-    psr = np.array([sh.probabilistic_sharpe_ratio(sh.sharpe(r), n, *(lambda m: (m["skew"], m["kurtosis"]))(sh.sample_moments(r)))
-                    for r in x])
+    psr = np.array([sh.probabilistic_sharpe_ratio(
+        sh.sharpe(r), n, *(lambda m: (m["skew"], m["kurtosis"]))(sh.sample_moments(r))) for r in x])
     assert (psr > 0.95).mean() == pytest.approx(0.05, abs=0.015)
     assert (psr > 0.50).mean() == pytest.approx(0.50, abs=0.04)
 
@@ -67,7 +68,8 @@ def test_psr_basic_properties():
     hi = sh.probabilistic_sharpe_ratio(0.02, 2000, 0.0, 3.0)
     assert 0.5 < lo < hi < 1.0
     # negative skew and fat tails widen the SR distribution → lower PSR at SR > 0
-    assert sh.probabilistic_sharpe_ratio(0.05, 1000, -3.0, 50.0) < sh.probabilistic_sharpe_ratio(0.05, 1000, 0.0, 3.0)
+    assert (sh.probabilistic_sharpe_ratio(0.05, 1000, -3.0, 50.0)
+            < sh.probabilistic_sharpe_ratio(0.05, 1000, 0.0, 3.0))
 
 
 def test_min_track_record_length_is_where_psr_reaches_the_confidence_level():
@@ -91,7 +93,8 @@ def test_deflated_sharpe_ratio_deflates_with_more_trials_and_more_dispersion():
     rng = np.random.default_rng(4)
     r = rng.normal(0.0006, 0.01, 1800)
     base = sh.deflated_sharpe_ratio(r, 1, 0.001)
-    psr = sh.probabilistic_sharpe_ratio(sh.sharpe(r), r.size, *[sh.sample_moments(r)[k] for k in ("skew", "kurtosis")])
+    psr = sh.probabilistic_sharpe_ratio(sh.sharpe(r), r.size,
+                                        *[sh.sample_moments(r)[k] for k in ("skew", "kurtosis")])
     assert base["dsr"] == pytest.approx(psr)          # one trial: no deflation
     d10 = sh.deflated_sharpe_ratio(r, 10, 1e-4)["dsr"]
     d100 = sh.deflated_sharpe_ratio(r, 100, 1e-4)["dsr"]

@@ -58,7 +58,7 @@ def _fd4(p, T, K=_K, F=_F, r=_R, rel=1e-4):
 @pytest.mark.parametrize("p", _PARAM_SETS)
 @pytest.mark.parametrize("T", _T_GRID)
 def test_matches_fourth_order_finite_differences(p, T):
-    calls, J = heston_call_batch_jac(_F, _K, T, _R, _R, *p)
+    _calls, J = heston_call_batch_jac(_F, _K, T, _R, _R, *p)
     Jfd = _fd4(p, T)
     scale = np.abs(Jfd).max(axis=0)
     rel = np.abs(J - Jfd).max(axis=0) / scale
@@ -91,7 +91,7 @@ def test_prices_are_exactly_the_pricers():
 def test_supplied_grid_reproduces_adaptive_result():
     p = _PARAM_SETS[0]
     for T in _T_GRID:
-        calls, grid = heston_call_batch_grid(_F, _K, T, _R, _R, *p)
+        _calls, grid = heston_call_batch_grid(_F, _K, T, _R, _R, *p)
         c_a, J_a = heston_call_batch_jac(_F, _K, T, _R, _R, *p)
         c_g, J_g = heston_call_batch_jac(_F, _K, T, _R, _R, *p, grid=grid)
         # same trapezoid, summed in a different order (halving vs one pass)
@@ -112,7 +112,8 @@ def test_expired_and_clipped_quotes_have_zero_rows():
                                    float(hm._expected_integrated_variance(T, 2.0, 0.04, 0.04)))
     calls, J = heston_call_batch_jac(100.0, K, T, 0.03, 0.03, *p)
     clipped = calls != raw
-    assert clipped.any() and not clipped.all()
+    assert clipped.any()
+    assert not clipped.all()
     np.testing.assert_array_equal(J[clipped], 0.0)
     assert np.abs(J[~clipped]).max() > 0
 
@@ -133,11 +134,11 @@ def _torch_log_cf(torch, z, T, p):
     return C + D * v0
 
 
-@pytest.mark.parametrize("T", (14 / 365, 0.25, 1.0))
+@pytest.mark.parametrize("T", [14 / 365, 0.25, 1.0])
 def test_matches_torch_jacfwd_on_the_same_grid(T):
     torch = pytest.importorskip("torch")
     p = _PARAM_SETS[-1] if T < 0.1 else _PARAM_SETS[0]
-    calls, grid = heston_call_batch_grid(_F, _K, T, _R, _R, *p)
+    _calls, grid = heston_call_batch_grid(_F, _K, T, _R, _R, *p)
     _, J = heston_call_batch_jac(_F, _K, T, _R, _R, *p, grid=grid)
 
     u = torch.arange(grid.n, dtype=torch.float64) * grid.h
@@ -166,7 +167,7 @@ def test_matches_torch_jacfwd_on_the_same_grid(T):
 
 # ── VIX spot-index Jacobian ──────────────────────────────────────────────────
 
-@pytest.mark.parametrize("kappa", (5e-3, 0.1, 4.99, 20.0))
+@pytest.mark.parametrize("kappa", [5e-3, 0.1, 4.99, 20.0])
 def test_vix_index_jacobian_matches_central_differences(kappa):
     T = np.array([9, 30, 93, 184]) / 365.0
     theta, sigma, v0 = 0.05, 1.5, 0.034
@@ -181,7 +182,8 @@ def test_vix_index_jacobian_matches_central_differences(kappa):
         fd = (heston_vix_term_index(up[0], up[1], up[2], up[4], T)
               - heston_vix_term_index(dn[0], dn[1], dn[2], dn[4], T)) / (2 * h)
         np.testing.assert_allclose(J[:, j], fd, rtol=1e-6, atol=1e-6)
-    assert np.all(J[:, 2] == 0) and np.all(J[:, 3] == 0)   # no sigma/rho dependence
+    assert np.all(J[:, 2] == 0)
+    assert np.all(J[:, 3] == 0)
 
 
 def test_d_one_minus_exp_over_branches_join():

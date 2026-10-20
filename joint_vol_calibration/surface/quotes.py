@@ -34,7 +34,6 @@ chain from data_store/options/spx_<session>.parquet
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -154,7 +153,7 @@ def universe_from_clean(clean: oc.CleanChain, session: str) -> tuple:
              & (q["mid_price"] > MIN_PRICE)
              & q["implied_vol"].between(MIN_IV, MAX_IV)].copy()
     full = full.sort_values(["time_to_expiry", "strike"], kind="mergesort").reset_index(drop=True)
-    counts = {"n_clean": int(len(q)), "n_universe": int(len(full))}
+    counts = {"n_clean": len(q), "n_universe": len(full)}
 
     F = full["forward"].to_numpy(float)
     D = full["discount"].to_numpy(float)
@@ -199,9 +198,9 @@ def universe_from_clean(clean: oc.CleanChain, session: str) -> tuple:
     return out[QUOTE_COLUMNS], counts
 
 
-def load_session_quotes(session: str, *, chain: Optional[pd.DataFrame] = None,
-                        spot: Optional[float] = None,
-                        r_ref: Optional[float] = None) -> SessionQuotes:
+def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
+                        spot: float | None = None,
+                        r_ref: float | None = None) -> SessionQuotes:
     """Build the scoring universe of ``session`` from its stored chain.
 
     chain : a stored/raw chain frame to use instead of the committed parquet

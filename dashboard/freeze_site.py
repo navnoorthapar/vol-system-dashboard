@@ -48,7 +48,8 @@ STATIC = os.path.join(ROOT, "dashboard", "static")
 _404_HTML = (
     "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<meta http-equiv='Content-Security-Policy' content=\"default-src 'self'; style-src 'unsafe-inline'; img-src data:\">"
+    "<meta http-equiv='Content-Security-Policy' "
+    "content=\"default-src 'self'; style-src 'unsafe-inline'; img-src data:\">"
     "<meta name='robots' content='noindex'>"
     "<title>Not found · SPX/VIX Vol Research</title>"
     "<link rel='icon' href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%23111418'/><path d='M5 9 Q16 29 27 9' fill='none' stroke='%238abbff' stroke-width='3' stroke-linecap='round'/></svg>\">"
@@ -61,8 +62,9 @@ _404_HTML = (
     "a{color:#8abbff}</style></head>"
     "<body><main><h1>404 · not found</h1>"
     "<p>That page is not part of this site.</p>"
-    "<p><a href='/'>Overview</a> · <a href='/surface.html'>Surface</a> · <a href='/calibration.html'>Calibration</a> · "
-    "<a href='/risk.html'>Risk</a> · <a href='/research.html'>Research</a> · <a href='/corrections.html'>Corrections</a> · "
+    "<p><a href='/'>Overview</a> · <a href='/surface.html'>Surface</a> · "
+    "<a href='/calibration.html'>Calibration</a> · <a href='/risk.html'>Risk</a> · "
+    "<a href='/research.html'>Research</a> · <a href='/corrections.html'>Corrections</a> · "
     "<a href='/model-risk.html'>Model Risk</a></p></main></body></html>"
 )
 
@@ -139,8 +141,9 @@ def render_pages(mod: Any) -> tuple[dict, list[str], list[str]]:
     return pages, problems, warnings
 
 
-_EXTERNAL = re.compile(r"<(?:script|link|img|iframe|source)\b[^>]*\b(?:src|href)=\"(?:https?:)?//[^\"]+\"[^>]*>", re.I)
-_SCRIPT = re.compile(r"<script\b([^>]*)>", re.I)
+_EXTERNAL = re.compile(r"<(?:script|link|img|iframe|source)\b[^>]*\b(?:src|href)="
+                       r"\"(?:https?:)?//[^\"]+\"[^>]*>", re.IGNORECASE)
+_SCRIPT = re.compile(r"<script\b([^>]*)>", re.IGNORECASE)
 
 
 def page_policy_problems(html: str) -> list[str]:
@@ -178,13 +181,13 @@ def check_static(mod: Any, pages: dict) -> list[str]:
         elif sri_sha384(local) != v["sri"]:
             problems.append(f"vendored {name} does not match its SRI hash ({v['sri']})")
     for route, page in pages.items():
-        for ref in sorted(set(re.findall(r'(?:src|href|data-src)="(static/[^"]+)"', page["html"]))):
-            if not os.path.exists(_static_path(ref)):
-                problems.append(f"{route}: references missing static file {ref}")
+        refs = sorted(set(re.findall(r'(?:src|href|data-src)="(static/[^"]+)"', page["html"])))
+        problems.extend(f"{route}: references missing static file {ref}"
+                        for ref in refs if not os.path.exists(_static_path(ref)))
         for name, v in getattr(mod, "VENDORED", {}).items():
-            for m in re.finditer(rf'<script[^>]+src="{re.escape(v["src"])}"[^>]*>', page["html"]):
-                if f'integrity="{v["sri"]}"' not in m.group(0):
-                    problems.append(f"{route}: {name} is loaded without its integrity hash")
+            tags = re.finditer(rf'<script[^>]+src="{re.escape(v["src"])}"[^>]*>', page["html"])
+            problems.extend(f"{route}: {name} is loaded without its integrity hash"
+                            for m in tags if f'integrity="{v["sri"]}"' not in m.group(0))
     return problems
 
 

@@ -73,9 +73,9 @@ def test_pbo_high_when_in_sample_winners_reverse():
 
 def test_pbo_input_validation_and_subsampling():
     X = np.random.default_rng(0).normal(size=(400, 5))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="n_splits must be an even number"):
         mt.pbo_cscv(X, n_splits=7)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least two configurations"):
         mt.pbo_cscv(X[:, :1])
     res = mt.pbo_cscv(X, n_splits=12, max_combinations=100)
     assert res["n_combinations"] == 100

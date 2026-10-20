@@ -37,14 +37,16 @@ def test_universe_is_the_calibrators_oos_universe(sq, cal):
     np.testing.assert_array_equal(q["expiry"].to_numpy(), full["expiry"].astype(str).to_numpy())
     np.testing.assert_allclose(q["mid_iv"].to_numpy(), full["implied_vol"].to_numpy(), rtol=0, atol=0)
     np.testing.assert_allclose(q["forward"].to_numpy(), full["forward"].to_numpy(), rtol=0, atol=0)
-    assert (q["bid_iv"] <= q["mid_iv"]).all() and (q["mid_iv"] <= q["ask_iv"]).all()
+    assert (q["bid_iv"] <= q["mid_iv"]).all()
+    assert (q["mid_iv"] <= q["ask_iv"]).all()
 
 
 def test_anchor_mask_is_the_calibrators_anchor_set(sq, cal):
     mask = sc.heston_anchor_mask(sq.quotes, SESSION)
     got = set(map(tuple, sq.quotes.loc[mask, ["expiry", "strike", "right"]].astype(str).to_numpy()))
     want = set(map(tuple, cal.spx_surface[["expiry", "strike", "right"]].astype(str).to_numpy()))
-    assert got == want and len(got) == 53
+    assert got == want
+    assert len(got) == 53
 
 
 def test_heston_v2_reproduces_the_stored_rmses(sq):
@@ -54,13 +56,15 @@ def test_heston_v2_reproduces_the_stored_rmses(sq):
     row = card["models"][0]
     stored = sc.load_v2_calibration(SESSION)["leg_losses"]
     m = row["metrics"]
-    assert row["n_in_sample"] == 53 and m["out_of_sample"]["n"] == 2860
+    assert row["n_in_sample"] == 53
+    assert m["out_of_sample"]["n"] == 2860
     assert m["out_of_sample"]["rmse_vp"] == pytest.approx(stored["spx_oos_iv_rmse"], rel=1e-9)
     assert m["in_sample"]["rmse_vp"] == pytest.approx(stored["spx_iv_rmse_exact"], rel=1e-9)
     assert row["dense_grid"]["butterfly_violations"] == 0
     assert row["dense_grid"]["calendar_violations"] == 0
     assert row["params"]["pinned_params"] == ["sigma"]
-    assert set(res["model"]) == {"heston_v2"} and len(res) == len(sq.quotes)
+    assert set(res["model"]) == {"heston_v2"}
+    assert len(res) == len(sq.quotes)
 
 
 def test_heston_iv_function_has_the_black_scholes_limit():
@@ -88,7 +92,7 @@ def test_registered_model_is_scored_on_the_same_quotes(sq):
                             np.zeros(len(ctx.quotes), dtype=bool), 1, "flat 20% (test)")
     sc.register_model("flat20", flat)
     try:
-        card, res = sc.score_models(_ctx(sq), ["flat20"])
+        card, _res = sc.score_models(_ctx(sq), ["flat20"])
     finally:
         sc.MODEL_REGISTRY.pop("flat20")
     q = sq.quotes

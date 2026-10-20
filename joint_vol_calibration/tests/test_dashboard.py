@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import itertools
 import json
 import pickle
 import re
@@ -88,7 +89,9 @@ def test_nyse_calendar_matches_published_closures(dash):
     assert got == NYSE_CLOSURES_2022_2024
     assert dash.session_age("2026-09-04", "2026-09-08") == 1      # Labor Day 09-07
     assert dash.session_age("2026-09-08", "2026-09-04") == 0
-    assert dash.stale_level(1) == "ok" and dash.stale_level(2) == "warn" and dash.stale_level(5) == "error"
+    assert dash.stale_level(1) == "ok"
+    assert dash.stale_level(2) == "warn"
+    assert dash.stale_level(5) == "error"
 
 
 def _write_market_db(path: Path, dates: pd.DatetimeIndex, seed: int = 11,
@@ -219,9 +222,8 @@ def test_db_connection_is_read_only(dash, tmp_path, monkeypatch):
     data.mkdir()
     _write_market_db(data / "vol_system.db", _sessions(dash, "2024-01-02", "2024-02-28"))
     monkeypatch.setattr(dash, "DATA", data)
-    with pytest.raises(sqlite3.OperationalError):
-        with dash._db() as con:
-            con.execute("CREATE TABLE should_fail (a INTEGER)")
+    with pytest.raises(sqlite3.OperationalError), dash._db() as con:
+        con.execute("CREATE TABLE should_fail (a INTEGER)")
 
 
 def test_local_preview_binds_loopback(monkeypatch):
@@ -286,7 +288,8 @@ def test_selector_calls_the_gate_with_the_full_result(dash, tmp_path, monkeypatc
     })
     monkeypatch.setattr(dash, "DATA", data)
     assert Path(dash.latest_good_calibration_path()).name == "joint_cal_2026-09-04.pkl"
-    assert seen and all("params" in r and "spot_date" in r for r in seen)
+    assert seen
+    assert all("params" in r and "spot_date" in r for r in seen)
 
 
 def test_selector_never_ranks_legacy_fits(dash, tmp_path, monkeypatch):
@@ -315,7 +318,8 @@ def test_calibration_page_shows_age_and_staleness_banner(dash, synth):
         p.unlink()
     _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0)})
     d = dash.load_page2()
-    assert d["session"] == old and d["calib_age"] == 10
+    assert d["session"] == old
+    assert d["calib_age"] == 10
     html = dash.app.test_client().get("/calibration").get_data(as_text=True)
     assert 'class="banner banner-stale-error"' in html
     assert "Heston calibration is 10 NYSE sessions old" in html
@@ -333,7 +337,8 @@ def test_legacy_fits_are_counted_and_never_headlined(dash, synth):
     _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0),
                           f"joint_cal_{last}.pkl": legacy})
     d = dash.load_page2()
-    assert d["session"] == old and d["legacy"] is False
+    assert d["session"] == old
+    assert d["legacy"] is False
     assert d["archive"] == {"n_total": 2, "n_legacy": 1, "n_current": 1, "n_current_ok": 1}
     html = dash.app.test_client().get("/calibration").get_data(as_text=True)
     assert "PRE-C22 FIT" not in html
@@ -347,9 +352,12 @@ def test_carry_is_shown_only_when_the_fit_recorded_it(dash, synth):
     last = str(synth["dates"][-1].date())
     _write_cals(cal_dir, {f"joint_cal_{last}.pkl": _cal(last, 1.0, r=0.03913)})
     d = dash.load_page2()
-    assert d["r_pct"] is None and d["q_pct"] is None and d["carry_recorded"] is False
+    assert d["r_pct"] is None
+    assert d["q_pct"] is None
+    assert d["carry_recorded"] is False
     html = dash.app.test_client().get("/calibration").get_data(as_text=True)
-    assert "SOFR" not in html and "r = n/a" in html
+    assert "SOFR" not in html
+    assert "r = n/a" in html
 
     _write_cals(cal_dir, {f"joint_cal_{last}.pkl": _cal(last, 1.0, r=0.045, q=0.013)})
     d = dash.load_page2()
@@ -367,10 +375,12 @@ def test_single_expiry_fit_is_flagged_not_called_good(dash, synth, monkeypatch, 
     _write_cals(synth["data"] / "calibrations",
                 {f"joint_cal_{last}.pkl": _cal(last, 0.2, n_spx=9, **extra)})
     d = dash.load_page2()
-    assert d["n_spx_expiries"] == 1 and d["spx_underidentified"]
+    assert d["n_spx_expiries"] == 1
+    assert d["spx_underidentified"]
     assert d["n_spx_expiries_inferred"] is (not recorded)
     html = dash.app.test_client().get("/calibration").get_data(as_text=True)
-    assert "Good fit" not in html and "Not comparable" in html
+    assert "Good fit" not in html
+    assert "Not comparable" in html
 
 
 def test_model_smile_is_the_headline_fits_heston_smile(dash, synth):
@@ -405,7 +415,8 @@ def test_model_smile_is_the_headline_fits_heston_smile(dash, synth):
 
 def test_quintic_is_compared_with_the_same_snapshot_heston(dash):
     q = dash.load_page2()["quintic"]
-    assert q is not None and q["heston"] is not None
+    assert q is not None
+    assert q["heston"] is not None
     assert q["heston"]["file"] == f"joint_cal_{q['as_of']}.pkl"
     with open(SHIPPED / "calibrations" / q["heston"]["file"], "rb") as f:
         h = pickle.load(f)
@@ -484,10 +495,13 @@ def test_stale_pdv_forecast_is_flagged_on_the_page(dash, synth):
     dates = _sessions(dash, "2019-01-02", "2024-07-15")
     _write_labels(synth["data"] / "signals" / "regime_labels.parquet", dates)
     d = dash.load_page1()
-    assert d["pdv_stale"] is True and d["pdv_age"] == len(dates) - len(synth["dates"])
+    assert d["pdv_stale"] is True
+    assert d["pdv_age"] == len(dates) - len(synth["dates"])
     html = dash.app.test_client().get("/").get_data(as_text=True)
-    assert 'id="pdv-stale-flag"' in html and "STALE FORECAST" in html
-    assert "Within this spread's usual range" not in html and "rich versus" not in html
+    assert 'id="pdv-stale-flag"' in html
+    assert "STALE FORECAST" in html
+    assert "Within this spread's usual range" not in html
+    assert "rich versus" not in html
 
 
 def test_covid_stress_forecast_is_ex_ante(dash):
@@ -550,7 +564,8 @@ def test_classifier_card_refuses_a_source_it_cannot_rebuild(dash, synth):
     with open(path, "wb") as f:
         pickle.dump(clf, f)
     d = dash.load_page1()
-    assert d["clf_available"] is False and d["prob_r1"] is None
+    assert d["clf_available"] is False
+    assert d["prob_r1"] is None
     assert any("research classifier" in e["component"] for e in d["errors"])
     assert d["regime"] is not None                 # the rule label is unaffected
 
@@ -583,7 +598,8 @@ def test_corrupt_classifier_keeps_the_rule_label_and_reports_an_error(dash, synt
     assert resp.headers["X-Dashboard-Loader-Errors"] == "1"
     lab = int(synth["labels"]["regime"].iloc[-1])
     assert f"{['R0', 'R1', 'R2'][lab]} · {['LONG GAMMA', 'SHORT GAMMA', 'VOMMA ACTIVE'][lab]}" in html
-    assert "research classifier" in html and "Data unavailable" in html
+    assert "research classifier" in html
+    assert "Data unavailable" in html
 
 
 def test_missing_labels_never_headline_the_classifier(dash, synth):
@@ -613,7 +629,7 @@ def test_term_structure_is_taken_from_one_date(dash, tmp_path, monkeypatch, synt
 
 # ── loader failures: visible, and never deployed ──────────────────────────────
 
-@pytest.mark.parametrize("victim, route, component", [
+@pytest.mark.parametrize(("victim", "route", "component"), [
     ("greeks/greeks_surface.parquet", "/risk", "Greeks surface"),
     ("backtest/full_results.pkl", "/research", "backtest engine results"),
     ("pdv_model.pkl", "/", "PDV forecast"),
@@ -634,7 +650,7 @@ def test_missing_input_renders_an_error_not_zeros(dash, synth, route, victim, co
     assert "NAV: $0" not in html
     # no headline tile shows a substituted zero (or a unit hanging off a missing value)
     tiles = [re.sub(r"<[^>]+>", "", v).strip()
-             for v in re.findall(r'<div class="kpi-value[^"]*">(.*?)</div>', html, re.S)]
+             for v in re.findall(r'<div class="kpi-value[^"]*">(.*?)</div>', html, re.DOTALL)]
     assert not [v for v in tiles if re.fullmatch(r"[+−]?\$?0(\.0+)?\s*%?", v)], tiles
     assert "—%" not in _visible_text(html)
 
@@ -713,14 +729,18 @@ def test_retired_urls_redirect_to_their_successors(dash, freezer, tmp_path):
     assert freezer.freeze(str(out), dash) == 0
     for old, new in dash.LEGACY_REDIRECTS.items():
         html = (out / old).read_text()
-        assert f"content='0; url={new}'" in html and f"href='{dash.SITE_URL}{new}'" in html
-        assert "noindex" in html and (out / new).exists()
+        assert f"content='0; url={new}'" in html
+        assert f"href='{dash.SITE_URL}{new}'" in html
+        assert "noindex" in html
+        assert (out / new).exists()
     client = dash.app.test_client()
-    assert client.get("/greeks").status_code == 301 and client.get("/greeks").location.endswith("/risk")
+    assert client.get("/greeks").status_code == 301
+    assert client.get("/greeks").location.endswith("/risk")
     assert client.get("/backtest").location.endswith("/research")
     # the 404 page is in the desk palette, not the retired neon one
     page404 = (out / "404.html").read_text()
-    assert "#111418" in page404 and "#8abbff" in page404
+    assert "#111418" in page404
+    assert "#8abbff" in page404
     for old in ("#0a0a0a", "#00ff88", "#00d4ff"):
         assert old not in page404.lower()
 
@@ -742,7 +762,9 @@ def test_no_third_party_script_and_vendored_scripts_match_their_sri(dash, freeze
         tag = f'<script src="{ec["src"]}" integrity="{ec["sri"]}" crossorigin="anonymous"></script>'
         assert (tag in html) is draws, route
         assert html.count(ec["src"]) == (1 if draws else 0), route
-        assert "cdn.jsdelivr" not in html and "unpkg.com" not in html and "chart.umd" not in html
+        assert "cdn.jsdelivr" not in html
+        assert "unpkg.com" not in html
+        assert "chart.umd" not in html
         assert not freezer.page_policy_problems(html), route
     # echarts-gl is never a page script: the Surface page loads it on demand, with its hash
     gl = dash.VENDORED["echarts-gl"]
@@ -752,7 +774,8 @@ def test_no_third_party_script_and_vendored_scripts_match_their_sri(dash, freeze
     if 'data-load-3d="surface3d"' in surf:
         assert f'data-src="{gl["src"]}" data-sri="{gl["sri"]}"' in surf
     js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
-    assert "s.integrity = " in js and "s.crossOrigin = 'anonymous'" in js
+    assert "s.integrity = " in js
+    assert "s.crossOrigin = 'anonymous'" in js
 
 
 def test_freeze_copies_static_and_refuses_a_script_that_fails_its_sri(dash, freezer, tmp_path, monkeypatch):
@@ -780,7 +803,9 @@ def test_heatmap_draws_every_node(dash):
     assert sum(c["unstable"] for c in cells) == d["n_unstable"] == int(gdf["is_unstable"].sum())
     html = dash.app.test_client().get("/risk").get_data(as_text=True)
     assert len(re.findall(r'class="node unstable flag"', html)) == d["n_unstable"]
-    assert "ln(K/S)" not in html and "2026-03-24" not in html and "All three unstable" not in html
+    assert "ln(K/S)" not in html
+    assert "2026-03-24" not in html
+    assert "All three unstable" not in html
 
 
 def test_greeks_badge_and_staleness_come_from_the_surface(dash):
@@ -788,7 +813,8 @@ def test_greeks_badge_and_staleness_come_from_the_surface(dash):
     gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
     assert d["surface_date"] == str(gdf["as_of_date"].iloc[0])[:10]
     assert d["greeks_age"] == dash.session_age(d["surface_date"], dash._latest_market_session())
-    assert d["qv_values"] and len(d["qv_values"]) == d["n_maturities"]
+    assert d["qv_values"]
+    assert len(d["qv_values"]) == d["n_maturities"]
 
 
 @pytest.mark.parametrize("same_fit", [True, False])
@@ -815,7 +841,8 @@ def test_greeks_provenance_metadata_is_read_and_checked(dash, synth, same_fit):
     d = dash.load_page3()
     assert d["provenance"]["source_calibration"] == f"joint_cal_{last}.pkl"
     assert d["source_matches_headline"] is same_fit
-    assert d["surface_date"] == last and d["greeks_age"] == 0
+    assert d["surface_date"] == last
+    assert d["greeks_age"] == 0
     html = dash.app.test_client().get("/risk").get_data(as_text=True)
     assert ("not the parameters of the calibration-page headline fit" in html) is (not same_fit)
 
@@ -848,7 +875,8 @@ def test_s3_sharpe_is_the_engine_value_not_hidden(dash, engine_state):
     s3 = next(s for s in dash.load_page4()["signal_metrics"] if s["label"].startswith("S3"))
     assert s3["sharpe"] == f"{engine_state['metrics']['s3_sharpe']:.3f}"
     html = dash.app.test_client().get("/backtest").get_data(as_text=True)
-    assert "N/A*" not in html and "ratio diverges" not in html
+    assert "N/A*" not in html
+    assert "ratio diverges" not in html
 
 
 def test_half_year_sharpes_use_engine_metrics_unclipped(dash):
@@ -868,13 +896,16 @@ def test_half_year_sharpes_use_engine_metrics_unclipped(dash):
             ref = compute_metrics(pd.DataFrame({"nav": win}), rf=0.0)["sharpe"]
             assert w["sharpe"] == pytest.approx(ref, abs=1e-12)
     html = dash.app.test_client().get("/backtest").get_data(as_text=True)
-    assert "OOS Windows" not in html and "Walk-Forward Sharpe" not in html
+    assert "OOS Windows" not in html
+    assert "Walk-Forward Sharpe" not in html
 
     # no clipping: a steady riser has a Sharpe far above the old ±4 cap
     idx = pd.bdate_range("2021-01-04", "2021-12-31")
-    steady = pd.Series(1e6 * np.exp(np.cumsum(np.random.default_rng(2).normal(4e-4, 1e-4, len(idx)))), index=idx)
+    steady = pd.Series(1e6 * np.exp(np.cumsum(np.random.default_rng(2).normal(4e-4, 1e-4, len(idx)))),
+                       index=idx)
     hy = dash.half_year_sharpes(steady)
-    assert len(hy) == 2 and min(w["sharpe"] for w in hy) > 20
+    assert len(hy) == 2
+    assert min(w["sharpe"] for w in hy) > 20
 
 
 def test_annual_returns_compound_to_the_total(dash):
@@ -913,13 +944,15 @@ def test_every_page_has_one_h1_landmarks_and_a_skip_link(pages):
     for route, html in pages.items():
         assert len(re.findall(r"<h1[\s>]", html)) == 1, route
         assert len(re.findall(r"<h2[\s>]", html)) >= 3, route
-        assert html.count("<main") == 1 and 'id="main"' in html
+        assert html.count("<main") == 1
+        assert 'id="main"' in html
         assert re.search(r'<nav class="nav" aria-label="Primary">', html)
         assert html.count("<header") == 1
         assert '<a class="skip-link" href="#main">' in html
         # the nav is a direct child of <body> (sticky works for the whole page),
         # and nothing overrides its position inline
-        assert '<nav class="nav" style=' not in html and "position:relative;\">" not in html
+        assert '<nav class="nav" style=' not in html
+        assert "position:relative;\">" not in html
 
 
 def test_nav_marks_exactly_the_current_page(dash, pages):
@@ -929,7 +962,8 @@ def test_nav_marks_exactly_the_current_page(dash, pages):
         assert len(re.findall(r'<a [^>]*aria-current="page"', html)) == 1
     # every page is in the nav, with a unique g-shortcut key
     keys = [k for _, _, k, _ in dash.NAV]
-    assert [r for r, *_ in dash.NAV] == list(dash.ROUTES) and len(set(keys)) == len(keys)
+    assert [r for r, *_ in dash.NAV] == list(dash.ROUTES)
+    assert len(set(keys)) == len(keys)
 
 
 def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
@@ -947,14 +981,17 @@ def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
             assert a.get("aria-describedby") == f"{cid}-desc {cid}-data", (route, tag)
             desc = re.search(rf'<p class="sr-only" id="{re.escape(cid)}-desc">([^<]+)</p>', html)
             assert desc and len(desc.group(1).strip()) > 20, (route, cid)
-            m = re.search(rf'<div class="chart-data sr-only" id="{re.escape(cid)}-data">(.*?)</div>', html, re.S)
+            m = re.search(rf'<div class="chart-data sr-only" id="{re.escape(cid)}-data">(.*?)</div>', html,
+                          re.DOTALL)
             assert m and "<table>" in m.group(1) and "<caption>" in m.group(1), (route, cid)
             assert re.search(r"<td[^>]*>[^<]*\d", m.group(1)), (route, cid)        # it carries numbers
             spec = json.loads(_html_unescape(re.search(
-                rf'<script type="application/json" id="{re.escape(a["data-spec"])}">(.*?)</script>', html, re.S).group(1)))
+                rf'<script type="application/json" id="{re.escape(a["data-spec"])}">(.*?)</script>', html,
+                re.DOTALL).group(1)))
             assert spec["id"] == cid and spec["series"], (route, cid)
             # the table toggle and the CSV button name this chart
-            assert f'data-table-for="{cid}-data"' in html and f'data-csv-for="{cid}"' in html
+            assert f'data-table-for="{cid}-data"' in html
+            assert f'data-csv-for="{cid}"' in html
             n += 1
         assert "SPX price sparkline" not in html
         for svg in re.findall(r'<svg class="spark[^"]*"[^>]*>', html):
@@ -989,7 +1026,7 @@ DESK_JS = ROOT / "dashboard" / "static" / "desk.js"
 
 
 def _tokens() -> dict:
-    root = re.search(r":root\s*\{(.*?)\n\}", DESK_CSS.read_text(), re.S).group(1)
+    root = re.search(r":root\s*\{(.*?)\n\}", DESK_CSS.read_text(), re.DOTALL).group(1)
     return dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})\b", root))
 
 
@@ -1003,7 +1040,8 @@ def test_colour_tokens_meet_wcag_aa(dash, pages):
     for name in ("text", "text2", "text3", "pos", "neg", "ok", "watch", "breach", "info"):
         for bg in backgrounds:
             assert dash.contrast_ratio(tok[name], bg) >= 4.5, (name, tok[name], bg)
-    for name in [f"cat-{i}" for i in range(6)] + ["series-headline", "series-muted", "pos-fill", "neg-fill", "focus"]:
+    for name in [f"cat-{i}" for i in range(6)] + ["series-headline", "series-muted", "pos-fill", "neg-fill",
+                                                  "focus"]:
         for bg in (tok["bg"], tok["surface"], tok["surface2"]):
             assert dash.contrast_ratio(tok[name], bg) >= 3.0, (name, tok[name], bg)
     # a pressed toggle / selected tab is marked by a 3:1 border, not by colour of text alone
@@ -1025,12 +1063,14 @@ def test_colour_tokens_meet_wcag_aa(dash, pages):
 
 def test_categorical_series_are_the_okabe_ito_set_and_never_neon(dash):
     tok = _tokens()
-    assert [tok[f"cat-{i}"] for i in range(6)] == ["#56b4e9", "#e69f00", "#009e73", "#f0e442", "#cc79a7", "#d55e00"]
+    assert [tok[f"cat-{i}"] for i in range(6)] == ["#56b4e9", "#e69f00", "#009e73", "#f0e442", "#cc79a7",
+                                                   "#d55e00"]
     css = DESK_CSS.read_text().lower()
     for neon in ("#00ff88", "#00d4ff", "#ff3366", "#0a0a0a"):
         assert neon not in css
     # gains and losses are blue / orange (colour-vision safe), each with a sign glyph
-    assert tok["pos"] == "#8abbff" and tok["neg"] == "#fbb360"
+    assert tok["pos"] == "#8abbff"
+    assert tok["neg"] == "#fbb360"
 
 
 def test_heatmap_text_contrasts_with_every_cell(dash):
@@ -1045,25 +1085,31 @@ def test_heatmap_text_contrasts_with_every_cell(dash):
         assert dash.contrast_ratio(dash._text_colour_on(bg), bg) >= 4.5
     # every ramp a heatmap cell can take: cividis (IV), berlin (residuals), P&L
     for i in range(101):
-        for bg in (dash.seq_colour(i, 0, 100), dash.div_colour(i / 50 - 1, 1.0), dash.pnl_colour(i / 50 - 1, 1.0)):
+        for bg in (dash.seq_colour(i, 0, 100), dash.div_colour(i / 50 - 1, 1.0),
+                   dash.pnl_colour(i / 50 - 1, 1.0)):
             assert dash.contrast_ratio(dash._text_colour_on(bg), bg) >= 4.5, bg
     html = dash.app.test_client().get("/risk").get_data(as_text=True)
     assert "opacity:0.7" not in html
     # unstable is flagged by outline + text marker, not by a fill alone
-    assert len(re.findall(r'class="node unstable flag"', html)) == len(re.findall(r'<div class="z">⚠ ', html)) == d["n_unstable"]
+    n_flagged = len(re.findall(r'class="node unstable flag"', html))
+    assert n_flagged == len(re.findall(r'<div class="z">⚠ ', html)) == d["n_unstable"]
     assert '<span class="sym">(∂²V/∂S∂σ)</span>' in html       # σ is not upper-cased to Σ
     # cell details are reachable by keyboard and screen reader, not only a title tooltip
     assert ' title="' not in "".join(re.findall(r'<td class="node[^>]*>', html))
     assert all("data-detail=" in td for td in re.findall(r'<td class="node[^>]*>', html))
-    assert 'aria-live="polite"' in html and "Hover or focus a cell (arrow keys move)" in html
+    assert 'aria-live="polite"' in html
+    assert "Hover or focus a cell (arrow keys move)" in html
 
 
 def test_motion_print_and_font_fallbacks(pages):
     css, js = DESK_CSS.read_text(), DESK_JS.read_text()
     assert "@media (prefers-reduced-motion: reduce)" in css
     assert "animation: false" in js
-    assert "@media print" in css and "beforeprint" in js and "afterprint" in js
-    assert re.search(r"--mono:[^;]*monospace;", css) and re.search(r"--sans:[^;]*sans-serif;", css)
+    assert "@media print" in css
+    assert "beforeprint" in js
+    assert "afterprint" in js
+    assert re.search(r"--mono:[^;]*monospace;", css)
+    assert re.search(r"--sans:[^;]*sans-serif;", css)
     for route, h in pages.items():
         assert '<meta name="color-scheme" content="dark">' in h
         assert "family: 'Menlo'" not in h and "font-family:'Menlo',monospace" not in h, route
@@ -1082,24 +1128,28 @@ def test_fonts_are_self_hosted_subsets_that_match_their_manifest(pages):
         data = (fdir / name).read_bytes()
         assert hashlib.sha256(data).hexdigest() == meta["sha256"], name
         assert data[:4] == b"wOF2" and len(data) < 60_000, name
-        assert f"url(fonts/{name})" in css or f"url('fonts/{name}')" in css or f'url("fonts/{name}")' in css, name
+        assert any(f"url({q}fonts/{name}{q})" in css for q in ("", "'", '"')), name
     for lic in ("OFL-Inter.txt", "OFL-IBM-Plex-Mono.txt"):
         assert "SIL OPEN FONT LICENSE" in (fdir / lic).read_text().upper()
     # the IBM Plex derivative is renamed (Reserved Font Name), so it is "Desk Mono"
-    assert '"Desk Mono"' in css and "font-family: \"IBM Plex Mono\"" not in css
-    for route, h in pages.items():
+    assert '"Desk Mono"' in css
+    assert "font-family: \"IBM Plex Mono\"" not in css
+    for h in pages.values():
         assert '<link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>' in h
-        assert "fonts.googleapis" not in h and "fonts.gstatic" not in h
+        assert "fonts.googleapis" not in h
+        assert "fonts.gstatic" not in h
 
 
 def test_charts_fail_soft_without_echarts(pages):
     """A failed Chart.js load threw 'Chart is not defined' and blanked every chart.
     Without ECharts (blocked, or JavaScript off) every chart's table is shown."""
     js = DESK_JS.read_text()
-    assert "if (!window.echarts) {" in js and "root.classList.add('charts-failed')" in js
+    assert "if (!window.echarts) {" in js
+    assert "root.classList.add('charts-failed')" in js
     assert re.search(r"\.charts-failed \.chart-data\.sr-only[^{]*\{", DESK_CSS.read_text())
-    for route, html in pages.items():
-        assert "new Chart(" not in html and "Chart.defaults" not in html
+    for html in pages.values():
+        assert "new Chart(" not in html
+        assert "Chart.defaults" not in html
         # ECharts loads before the page script, which only reads JSON specs
         if 'data-spec="' in html:
             assert html.index("echarts-6.1.0-desk.min.js") < html.index("static/desk.js?v=")
@@ -1115,7 +1165,8 @@ def test_social_meta_and_card_carry_no_test_count(pages):
         assert not re.search(r"\d+\s+tests", html), route
         title = re.search(r'<meta property="og:title"\s+content="([^"]+)"', html).group(1)
         desc = re.search(r'<meta property="og:description"\s+content="([^"]+)"', html).group(1)
-        assert title and desc
+        assert title
+        assert desc
     titles = {re.search(r'og:title"\s+content="([^"]+)"', h).group(1) for h in pages.values()}
     assert len(titles) == len(pages)                      # per-page, not one for all
 
@@ -1125,14 +1176,16 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
     assert "rolling 252-day 80th percentile" in idx
     assert "rv₂₀ &gt; VIX" in idx
     for stale in ("Low VIX / backwardation", "Normal contango", "VVIX &gt; 100"):
-        assert stale not in idx and stale not in bt
+        assert stale not in idx
+        assert stale not in bt
     for stale in ("non-affine model (e.g. rough Heston)", "degenerate on daily data",
                   "Barndorff-Nielsen &amp; Shephard 2004", "production classification"):
         assert stale not in cal
     # The ρ-boundary banner (rough-Heston / Bates copy) renders only when the
     # headline fit has ρ on its bound; the shipped headline does not.
     if "AT THE LOWER BOUNDARY" in cal:
-        assert "affine Volterra" in cal and "did not converge" in cal
+        assert "affine Volterra" in cal
+        assert "did not converge" in cal
     for stale in ("structural failure", "Feller-satisfying Heston", "SOFR",
                   "VIX Futures RMSE", "SVI"):
         assert stale not in cal, stale
@@ -1142,7 +1195,8 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
 
 
 def _spec(html: str, chart_id: str) -> dict:
-    raw = re.search(rf'<script type="application/json" id="{re.escape(chart_id)}-spec">(.*?)</script>', html, re.S)
+    raw = re.search(rf'<script type="application/json" id="{re.escape(chart_id)}-spec">(.*?)</script>', html,
+                    re.DOTALL)
     assert raw, chart_id
     return json.loads(_html_unescape(raw.group(1)))
 
@@ -1152,13 +1206,16 @@ def test_term_structure_is_drawn_on_a_linear_tenor_axis(dash, pages):
     from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
 
     d = dash.load_page1()
-    cid = re.search(r'<div class="chart[^"]*" id="([^"]+)" data-spec="[^"]+" role="img" aria-label="VIX index term structure',
-                    pages["/"]).group(1)
+    cid = re.search(r'<div class="chart[^"]*" id="([^"]+)" data-spec="[^"]+" role="img" '
+                    r'aria-label="VIX index term structure', pages["/"]).group(1)
     spec = _spec(pages["/"], cid)
-    assert spec["x"]["type"] == "value" and spec["x"].get("min") == 0
+    assert spec["x"]["type"] == "value"
+    assert spec["x"].get("min") == 0
     line = spec["series"][0]
-    assert line["type"] == "line" and not line.get("smooth")
-    assert [p[0] for p in line["data"]] == [VIX_INDEX_TENOR_DAYS[t] for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M")]
+    assert line["type"] == "line"
+    assert not line.get("smooth")
+    assert [p[0] for p in line["data"]] == [VIX_INDEX_TENOR_DAYS[t]
+                                            for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M")]
     assert [p[1] for p in line["data"]] == pytest.approx(d["ts_values"])
 
 
@@ -1166,15 +1223,16 @@ def test_backtest_audit_heading_counts_its_rows(pages):
     """'Ten Flaws Found, Eight Fixed, Two Quantified' sat above an 11-row table.
     The Corrections page heading is counted from the postmortems it shows."""
     cp = pages["/corrections"]
-    arts = re.findall(r'<article class="pm[^"]*" id="c\d+" data-round="(C\d+)".*?</article>', cp, re.S)
-    bodies = re.findall(r'<article class="pm[^"]*" id="c\d+" data-round="C\d+".*?</article>', cp, re.S)
+    arts = re.findall(r'<article class="pm[^"]*" id="c\d+" data-round="(C\d+)".*?</article>', cp, re.DOTALL)
+    bodies = re.findall(r'<article class="pm[^"]*" id="c\d+" data-round="C\d+".*?</article>', cp, re.DOTALL)
     statuses = [s for b in bodies for s in re.findall(r'data-status="(fixed|quantified)"', b)]
     n_fixed, n_quant = statuses.count("fixed"), statuses.count("quantified")
     heading = re.search(r'id="audit-title">([^<]+)<', cp).group(1)
     assert heading == (f"{arts[0]}–{arts[-1]} corrections — {len(statuses)} findings, "
                        f"{n_fixed} fixed, {n_quant} quantified")
     assert arts == [f"C{i}" for i in range(16, 23)]
-    assert "Ten Flaws Found" not in cp and "C17 pipeline" not in cp
+    assert "Ten Flaws Found" not in cp
+    assert "C17 pipeline" not in cp
 
 
 def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
@@ -1187,12 +1245,14 @@ def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
     assert tariffs["end"] <= d["end_date"]
     assert f"Tariffs 2025 ({tariffs['start']} → {tariffs['end']})" in bt
     assert "April 2025 tariff shock is <em>not</em> in it" in bt
-    assert "single options snapshot" not in bt and "22 times in 7 years" not in bt
+    assert "single options snapshot" not in bt
+    assert "22 times in 7 years" not in bt
     with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
         n_dates = con.execute("SELECT COUNT(DISTINCT snapshot_date) FROM options_snapshots "
                               "WHERE underlying='SPX'").fetchone()[0]
     assert f"the database's {n_dates} SPX chain" in bt
-    assert "$-" not in bt and "'$' + v + 'k'" not in bt
+    assert "$-" not in bt
+    assert "'$' + v + 'k'" not in bt
 
 
 def test_greeks_provenance_written_by_risk_monitor_is_read(dash, synth):
@@ -1219,7 +1279,8 @@ def test_greeks_provenance_written_by_risk_monitor_is_read(dash, synth):
     assert d["source_matches_headline"] is True
     assert d["surface_date"] == last
     html = dash.app.test_client().get("/risk").get_data(as_text=True)
-    assert f"joint_cal_{last}.pkl" in html and "records no source calibration" not in html
+    assert f"joint_cal_{last}.pkl" in html
+    assert "records no source calibration" not in html
 
 
 def test_classifier_accuracy_is_read_from_the_shipped_model(pages):
@@ -1249,7 +1310,7 @@ def test_backtest_audit_table_has_the_c22_round(pages):
 def _visible_text(html: str) -> str:
     import html as _html
 
-    body = re.sub(r"<(script|style|noscript)\b.*?</\1>", " ", html, flags=re.S)
+    body = re.sub(r"<(script|style|noscript)\b.*?</\1>", " ", html, flags=re.DOTALL)
     body = body[body.index("<body"):]
     return _html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)))
 
@@ -1284,14 +1345,16 @@ def test_pdv_skill_is_the_library_walk_forward_r2(dash, pages):
     assert s["r2_ex"] == pytest.approx(rep["r2_ex"], abs=5e-5)
     html = pages["/"]
     assert f"Walk-forward R²: <span class=\"v\">{s['r2']:.2f}" in html
-    assert "Walk-fwd R² (kernel)" not in html and ">0.31<" not in html
+    assert "Walk-fwd R² (kernel)" not in html
+    assert ">0.31<" not in html
 
 
 def test_stress_card_describes_the_models_own_target(dash, pages):
     """The 21-day model's outcome is the RMS vol over its horizon, not 'that day's |r|'."""
     st = dash.load_page1()["stress"]
     text = _visible_text(pages["/"])
-    assert st["horizon"] == 21 and st["n_window"] == 21
+    assert st["horizon"] == 21
+    assert st["n_window"] == 21
     assert f"Realised over its 21-session horizon ({st['stress_date']} → {st['window_end']}" in text
     assert "that day's |r|" not in text
 
@@ -1342,20 +1405,24 @@ def test_change_log_quotes_facts_from_the_db(dash, pages):
     sh = d["r2_share"]
     assert f"R2 on {sh['fixed'] * 100:.1f}% of backtest sessions" in text
     assert f"R2 on {sh['adaptive'] * 100:.1f}% of backtest sessions" in text
-    assert 0.40 < sh["fixed"] < 0.55 and 0.18 < sh["adaptive"] < 0.28
+    assert 0.40 < sh["fixed"] < 0.55
+    assert 0.18 < sh["adaptive"] < 0.28
     for stale in ("~1.5%", "~53%", "~25%", "18 new tests"):
         assert stale not in text
 
 
 def test_no_js_fallback_and_scroll_affordance(pages):
     for route, html in pages.items():
-        nos = re.search(r"<noscript><style>(.*?)</style></noscript>", html, re.S).group(1)
+        nos = re.search(r"<noscript><style>(.*?)</style></noscript>", html, re.DOTALL).group(1)
         assert ".chart {" in nos and ".chart-data.sr-only" in nos and "position: static" in nos, route
         assert ".js-only" in nos
     css = DESK_CSS.read_text()
     rule = css[css.index(".tbl-wrap, .heat-wrap {"):]
     rule = rule[:rule.index("}")]
-    assert "local" in rule and "scroll" in rule and "position: relative" in rule and "overflow-x: auto" in rule
+    assert "local" in rule
+    assert "scroll" in rule
+    assert "position: relative" in rule
+    assert "overflow-x: auto" in rule
     assert "Scroll sideways for more columns" in DESK_JS.read_text()
 
 
@@ -1396,14 +1463,17 @@ def test_unstable_nodes_follow_the_surfaces_recorded_rule(dash, pages):
     d = dash.load_page3()
     assert d["unstable_rule"]["kind"] == "pnl_ratio"
     assert d["unstable_rule"]["threshold"] == rule["threshold"]
-    assert d["n_unstable"] == int(gdf["is_unstable"].sum()) == int((gdf["vomma_pnl_ratio"].abs() > rule["threshold"]).sum())
+    assert (d["n_unstable"] == int(gdf["is_unstable"].sum())
+            == int((gdf["vomma_pnl_ratio"].abs() > rule["threshold"]).sum()))
     text = _visible_text(pages["/risk"])
     assert f"{d['n_unstable']} of {d['n_cells']}" in text
     assert f"vomma P&L ratio ½·vomma·|Δσ|/vega > {rule['threshold']:.2f}" in text
-    assert "|vomma z-score| > 2" not in text and "pooled score" not in text
+    assert "|vomma z-score| > 2" not in text
+    assert "pooled score" not in text
     # every dropped grid node says why
     empties = [c for row in d["heatmap_rows"] for c in row["cells"] if c.get("empty")]
-    assert len(empties) == d["n_missing"] and all(c["reason"] for c in empties)
+    assert len(empties) == d["n_missing"]
+    assert all(c["reason"] for c in empties)
 
 
 def test_unstable_falls_back_to_z_only_without_the_ratio_and_says_so(dash, synth):
@@ -1424,7 +1494,8 @@ def test_model_smile_never_carries_a_nan(dash, monkeypatch):
     params = {"kappa": 2.0, "theta": 0.04, "sigma": 0.5, "rho": -0.7, "v0": 0.04}
     # a deep out-of-the-money node with a near-zero price is omitted, never NaN
     deep = dash.heston_model_smile(params, maturities_days=(14,), log_moneyness=(-1.5, -0.8, 0.0, 0.1))
-    assert all(np.isfinite(v) for s in deep for v in s["iv"]) and 0.0 in deep[0]["lm"]
+    assert all(np.isfinite(v) for s in deep for v in s["iv"])
+    assert 0.0 in deep[0]["lm"]
     assert -1.5 not in deep[0]["lm"]
     real = heston.implied_vol_from_price
     monkeypatch.setattr(heston, "implied_vol_from_price",
@@ -1434,8 +1505,9 @@ def test_model_smile_never_carries_a_nan(dash, monkeypatch):
     assert all(np.isfinite(v) for v in out[0]["iv"])
 
 
-@pytest.mark.parametrize("p, says", [(0.0746, "does not beat random entry dates at the 5% level (p = 0.075)"),
-                                     (0.0348, "beats random entry dates at the 5% level (p = 0.035)")])
+@pytest.mark.parametrize(("p", "says"), [
+    (0.0746, "does not beat random entry dates at the 5% level (p = 0.075)"),
+    (0.0348, "beats random entry dates at the 5% level (p = 0.035)")])
 def test_s3_timing_claim_follows_the_stored_null_test(dash, monkeypatch, p, says):
     """'Only S3's timing survives' / 'its timing beats a random-walk null' were
     hard-coded; the regenerated null test gives p = 0.075, not significant."""
@@ -1447,16 +1519,17 @@ def test_s3_timing_claim_follows_the_stored_null_test(dash, monkeypatch, p, says
     assert "Timing Survives" not in text
 
 
-@pytest.mark.parametrize("route", ["/", "/surface", "/calibration", "/risk", "/research", "/corrections", "/model-risk"])
+@pytest.mark.parametrize("route", ["/", "/surface", "/calibration", "/risk", "/research", "/corrections",
+                                   "/model-risk"])
 def test_page_header_dates_never_break_across_lines(dash, route):
     """A date in the page header must sit inside a no-wrap element: at phone
     width the browser otherwise breaks '2026-10-16' at a hyphen."""
     html = dash.app.test_client().get(route).get_data(as_text=True)
-    badge = re.search(r'<div class="page-badge"[^>]*>(.*?)</div>', html, re.S)
+    badge = re.search(r'<div class="page-badge"[^>]*>(.*?)</div>', html, re.DOTALL)
     assert badge, route
     body = badge.group(1)
     # Strip the no-wrap spans; no ISO date may remain outside one.
-    outside = re.sub(r'<span class="nowrap"[^>]*>.*?</span>', "", body, flags=re.S)
+    outside = re.sub(r'<span class="nowrap"[^>]*>.*?</span>', "", body, flags=re.DOTALL)
     assert not re.search(r"\d{4}-\d{2}-\d{2}", outside), (route, outside)
 
 
@@ -1473,7 +1546,7 @@ def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
     eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
     nav = eq["nav"]
     nav.index = pd.to_datetime(nav.index)
-    for name, c in crisis.items():
+    for c in crisis.values():
         base = nav[nav.index < pd.Timestamp(c["start"])].iloc[-1]
         assert c["total_return"] == pytest.approx(nav.loc[c["start"]:c["end"]].iloc[-1] / base - 1, abs=1e-12)
     assert crisis["FedHikes_2022"]["total_return"] == pytest.approx(0.0470983, abs=1e-6)
@@ -1482,13 +1555,17 @@ def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
     text = _visible_text(pages["/research"])
     assert "FedHikes 2022 (2022-01-01 → 2022-12-31) +4.7%" in text
     assert "COVID 2020 (2020-02-19 → 2020-04-30) +1.7%" in text
-    assert "+5.1%" not in text and "+1.8%" not in text
+    assert "+5.1%" not in text
+    assert "+1.8%" not in text
     # a jump on the window's first session counts; a window at the curve's start uses its first NAV
     idx = pd.bdate_range("2021-12-27", "2022-01-07")
     toy = pd.Series([100.0] * 5 + [110.0] * 5, index=idx)
-    got = dash.window_returns(toy, {"jump": ("2022-01-01", "2022-01-07"), "head": ("2021-12-01", "2021-12-31")})
-    assert got[0]["total_return"] == pytest.approx(0.10) and got[0]["n_days"] == 5
-    assert got[1]["total_return"] == pytest.approx(0.0) and got[1]["n_days"] == 4
+    got = dash.window_returns(toy, {"jump": ("2022-01-01", "2022-01-07"),
+                                    "head": ("2021-12-01", "2021-12-31")})
+    assert got[0]["total_return"] == pytest.approx(0.10)
+    assert got[0]["n_days"] == 5
+    assert got[1]["total_return"] == pytest.approx(0.0)
+    assert got[1]["n_days"] == 4
 
 
 LIVE_BETA_CAPTURE = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "spx_chain_live_20261012.json"
@@ -1529,8 +1606,8 @@ def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
         assert "five real 2026 SPX chains" not in _visible_text(pages[route])
     # every chain is listed with its ratio and use
     d = dash.load_page4()
-    assert [(c["session"], round(c["ratio"], 3)) for c in d["beta_est"]["chains"] if c["kind"] == "DB chain"] == \
-        [(s, round(r, 3)) for s, r in zip(t["session"], t["ratio"])]
+    db_chains = [(c["session"], round(c["ratio"], 3)) for c in d["beta_est"]["chains"] if c["kind"] == "DB chain"]
+    assert db_chains == [(s, round(r, 3)) for s, r in zip(t["session"], t["ratio"])]
     # the grid on the page is the CSV, including the row at the mean over every chain
     grid = pd.read_csv(SHIPPED / "backtest" / "beta_sensitivity.csv")
     html = pages["/research"]
@@ -1538,7 +1615,7 @@ def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
     # Every row of the grid is the CSV row, and the ◆ (mean over every chain) marks a row only
     # when that mean is one: each chain the bot stores moves it, often off the grid.
     for _, row in grid.iterrows():
-        cells = re.search(rf'<tr data-beta="{row["beta"]:.2f}"[^>]*>(.*?)</tr>', html, re.S).group(1)
+        cells = re.search(rf'<tr data-beta="{row["beta"]:.2f}"[^>]*>(.*?)</tr>', html, re.DOTALL).group(1)
         for col in ("pnl", "s1c_pnl", "s3_pnl", "s4_pnl", "s1_pnl"):
             assert dash._usd_k(row[col]) in cells, (row["beta"], col)
         assert ("◆" in cells) == (in_grid and abs(row["beta"] - round(float(np.mean(every)), 2)) < 1e-9)
@@ -1571,8 +1648,11 @@ def test_trade_kpis_keep_the_open_trade_out_of_the_win_rate(dash, engine_state, 
     text = _visible_text(pages["/research"])
     assert (f"Trades 208 1 open at the end; over the 207 closed: win rate {win * 100:.1f}%, "
             f"average {dash._usd(avg)} of portfolio P&L per trade") in text
-    assert "Round trips" not in text and "38.0%" not in text and "−$1,039" not in text
-    assert "S4 VRP −$273,544" in text and "46 (1 open)" in text
+    assert "Round trips" not in text
+    assert "38.0%" not in text
+    assert "−$1,039" not in text
+    assert "S4 VRP −$273,544" in text
+    assert "46 (1 open)" in text
     assert "S4's count includes a straddle opened on the last session (2025-03-24)" in text
 
 
@@ -1583,11 +1663,12 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     m = dash.MINUS
     # equity-curve table: final / lowest / highest from the unrounded curves
     eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
-    table = re.search(r'id="chart-equity-data">(.*?)</div>', pages["/research"], re.S).group(1)
+    table = re.search(r'id="chart-equity-data">(.*?)</div>', pages["/research"], re.DOTALL).group(1)
     for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
                       ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
         rel = eq[col] / eq[col].iloc[0] - 1
-        want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>' for x in (rel.iloc[-1], rel.min(), rel.max()))
+        want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
+                       for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
     assert '<tr><td>S3 Dispersion</td><td class="num">+5.6%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
@@ -1614,7 +1695,8 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     assert vv == [f"{x:,.0f}".replace("-", m) for x in gdf["vomma"]]
     zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="z">([^<]+)</div>', g_html)]
     assert zz == [f"{abs(x):.2f}" for x in gdf["vomma_pnl_ratio"]]
-    assert "3,267" in vv and "3,268" not in vv
+    assert "3,267" in vv
+    assert "3,268" not in vv
 
 
 def test_vix_index_tenors_come_from_config(dash, pages):
@@ -1630,9 +1712,11 @@ def test_vix_index_tenors_come_from_config(dash, pages):
     assert "182d" not in pages["/"]
 
 
-@pytest.mark.parametrize("last_vix, big, tail, lead", [
-    (95.0, "Record high", "Implied vol is rich versus this spread's own history (highest on record)", "above all"),
-    (0.5, "Record low", "Implied vol is cheap versus this spread's own history (lowest on record)", "at or below all"),
+@pytest.mark.parametrize(("last_vix", "big", "tail", "lead"), [
+    (95.0, "Record high", "Implied vol is rich versus this spread's own history (highest on record)",
+     "above all"),
+    (0.5, "Record low", "Implied vol is cheap versus this spread's own history (lowest on record)",
+     "at or below all"),
 ])
 def test_record_pdv_spreads_read_as_records(dash, synth, last_vix, big, tail, lead):
     """A spread above (below) its whole history rendered 'top 0%' and '100th
@@ -1655,7 +1739,8 @@ def test_percentile_wording_is_capped_short_of_a_record(dash):
     assert dash.percentile_rank(99.6) == {"record": None, "big": "99th", "tail": "top 1%"}
     assert dash.percentile_rank(0.3) == {"record": None, "big": "1st", "tail": "bottom 1%"}
     assert dash.percentile_rank(85.2) == {"record": None, "big": "85th", "tail": "top 15%"}
-    assert dash.percentile_rank(50.0)["tail"] is None and dash.percentile_rank(None) is None
+    assert dash.percentile_rank(50.0)["tail"] is None
+    assert dash.percentile_rank(None) is None
 
 
 def test_pre_c22_spread_statistics_are_computed_from_the_data(dash, pages, monkeypatch):
@@ -1672,12 +1757,14 @@ def test_pre_c22_spread_statistics_are_computed_from_the_data(dash, pages, monke
     sig = BacktestEngine(start_date=d["start_date"], end_date=d["end_date"],
                          pdv_horizon=1)._build_walkforward_pdv_vol(spx)
     vix = vix_wide.set_index(pd.to_datetime(vix_wide["date"]))["^VIX"] / 100
-    w = pd.concat([sig.rename("f"), vix.rename("v")], axis=1, join="inner").loc[d["start_date"]:d["end_date"]].dropna()
+    w = pd.concat([sig.rename("f"), vix.rename("v")], axis=1, join="inner")
+    w = w.loc[d["start_date"]:d["end_date"]].dropna()
     assert pc["share"] == pytest.approx(((w["v"] - w["f"]) > 0.02).mean(), abs=1e-12)
     assert pc["n"] == len(w) == len(pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet"))
     close = spx.set_index(pd.to_datetime(spx["date"]))["close"]
     y = forward_target(np.log(close).diff().dropna(), horizon=21, target="rv")
-    both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner").loc[d["start_date"]:d["end_date"]].dropna()
+    both = pd.concat([sig.rename("f"), y.rename("y")], axis=1, join="inner")
+    both = both.loc[d["start_date"]:d["end_date"]].dropna()
     assert pc["ratio"] == pytest.approx(both["f"].mean() / both["y"].mean(), abs=1e-12)
     text = _visible_text(pages["/corrections"])
     assert (f"averaged {pc['ratio']:.2f}× the realised RMS vol of the next 21 sessions in the backtest window, "
@@ -1685,7 +1772,8 @@ def test_pre_c22_spread_statistics_are_computed_from_the_data(dash, pages, monke
     # the page follows the computation, not a typed figure
     monkeypatch.setattr(dash, "pre_c22_spread_facts", lambda *a, **k: {**pc, "share": 0.5, "ratio": 0.9})
     text = _visible_text(dash.app.test_client().get("/corrections").get_data(as_text=True))
-    assert "averaged 0.90×" in text and "held on 50% of its" in text
+    assert "averaged 0.90×" in text
+    assert "held on 50% of its" in text
 
 
 def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, pages, synth):
@@ -1700,7 +1788,8 @@ def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, page
             f"random entry dates at the 5% level (p = {p})") in text
     assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
     assert f"timing null test on S3 at base (pass-1) size, before the sizing overlay: p = {p}" in text
-    assert "null p =" not in text and "S3 entries vs random entry dates" not in text
+    assert "null p =" not in text
+    assert "S3 entries vs random entry dates" not in text
     if "s3_null_real_pnl" not in m:
         assert "+$41,952" not in text                    # never typed in
     # when the results record the base-size statistic, it is quoted
@@ -1729,7 +1818,8 @@ def test_s3_trade_count_is_explained_as_entries_plus_rolls(dash, engine_state, p
     text = _visible_text(pages["/research"])
     assert (f"{len(s3)} trades in 2018–2025 ({entries} entries plus {rolls} rolls of a position held "
             f"past its straddle's expiry)") in text
-    assert f"S3 enters {entries} times in 2018–2025" in text and "S3 fires 39 times" not in text
+    assert f"S3 enters {entries} times in 2018–2025" in text
+    assert "S3 fires 39 times" not in text
 
 
 def test_no_double_negative_losses(pages):
@@ -1744,7 +1834,8 @@ def test_page_header_can_wrap_at_every_separator():
     unbreakable run (497 px wide at a 390 px viewport). The separator must be
     an inline-block, which browsers may break around."""
     rule = re.search(r"\.page-badge \.sep\s*\{([^}]*)\}", DESK_CSS.read_text())
-    assert rule and "display: inline-block" in rule.group(1)
+    assert rule
+    assert "display: inline-block" in rule.group(1)
 
 
 # ── C23 artifacts: the producers' outputs, absent / ok / malformed ────────────
@@ -1818,10 +1909,12 @@ def test_artifacts_absent_render_named_placeholders_and_still_publish(dash, no_a
     client = dash.app.test_client()
     pages = {route: client.get(route).get_data(as_text=True) for route in ("/", "/surface", "/research")}
     surf = pages["/surface"]
-    assert 'data-artifact-state="absent"' in surf and "data_store/surface/&lt;session&gt;/residuals.parquet" in surf
+    assert 'data-artifact-state="absent"' in surf
+    assert "data_store/surface/&lt;session&gt;/residuals.parquet" in surf
     assert "scripts/surface_report.py" in surf
     res = pages["/research"]
-    for path in ("data_store/backtest/inference/summary.json", "data_store/forward/ledger_&lt;session&gt;.json",
+    for path in ("data_store/backtest/inference/summary.json",
+                 "data_store/forward/ledger_&lt;session&gt;.json",
                  "data_store/backtest/inference/forecast_eval.json"):
         assert path in res, path
     assert "the bootstrap interval needs the inference artifact" in pages["/"]
@@ -1834,13 +1927,15 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert _errors(resp) == 0
     sc = json.loads((FIX / "surface" / SESSION / "scorecard.json").read_text())
     text = _visible_text(html)
-    table = re.search(r'<table class="tbl dense" id="scorecard-table">(.*?)</table>', html, re.S).group(1)
+    table = re.search(r'<table class="tbl dense" id="scorecard-table">(.*?)</table>', html,
+                      re.DOTALL).group(1)
     rank = [r["model"] for r in sc["ranking_by_oos_median_abs_hs"]]
     rows = re.findall(r"<tr[^>]*><td>([^<]+)</td>", table.split("<tbody>")[1])
     assert [dash.model_label(m) for m in rank] == rows            # the producer's ranking order
     for m in sc["models"]:
         o = m["metrics"]["out_of_sample"]
-        row = re.search(rf"<td>{re.escape(dash.model_label(m['model']))}</td>(.*?)</tr>", table, re.S).group(1)
+        row = re.search(rf"<td>{re.escape(dash.model_label(m['model']))}</td>(.*?)</tr>", table,
+                        re.DOTALL).group(1)
         cells = re.findall(r'<td class="num">([^<]*)</td>', row)
         assert cells[2] == f"{o['n']:,}" and cells[3] == f"{o['median_abs_hs']:.2f}", m["model"]
         assert cells[4] == f"{o['inside_spread_pct']:.1f}%" and cells[6] == f"{o['rmse_vp']:.2f}", m["model"]
@@ -1849,26 +1944,29 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     # the market heatmap is the median mid IV of the quotes in each bucket, computed here independently
     res = pd.read_parquet(FIX / "surface" / SESSION / "residuals.parquet")
     mkt = res[res["model"] == res["model"].iloc[0]]
-    e0 = sorted(mkt["expiry"].unique())[0]
+    e0 = min(mkt["expiry"].unique())
     q = mkt[(mkt["expiry"] == e0) & (mkt["k"] > -0.02) & (mkt["k"] <= 0.0)]
-    heat = re.search(r'<table class="heat" id="iv-heatmap"[^>]*>(.*?)</table>', html, re.S).group(1)
-    first = re.search(r"<tr><th scope=\"row\">[^<]*</th>(.*?)</tr>", heat.split("<tbody>")[1], re.S).group(1)
-    tds = re.findall(r"<td[^>]*>(.*?)</td>", first, re.S)
+    heat = re.search(r'<table class="heat" id="iv-heatmap"[^>]*>(.*?)</table>', html, re.DOTALL).group(1)
+    first = re.search(r"<tr><th scope=\"row\">[^<]*</th>(.*?)</tr>", heat.split("<tbody>")[1],
+                      re.DOTALL).group(1)
+    tds = re.findall(r"<td[^>]*>(.*?)</td>", first, re.DOTALL)
     assert len(tds) == len(dash.K_EDGES) - 1
     atm = tds[dash.K_EDGES.index(0.0) - 1]                       # the (−0.02, 0] bucket
     assert re.match(rf"{q['mid_iv'].median() * 100:.1f}\b", atm), (atm, q["mid_iv"].median())
     # VIX replication and the arbitrage screen are the files' numbers
     vx = json.loads((FIX / "surface" / SESSION / "vix_replication.json").read_text())["indices"]["VIX"]
-    assert f"{vx['replicated']:.2f}" in text and f"Cboe close {vx['official']['close']:.2f}" in text
+    assert f"{vx['replicated']:.2f}" in text
+    assert f"Cboe close {vx['official']['close']:.2f}" in text
     arb = json.loads((FIX / "surface" / SESSION / "surface.json").read_text())["arbitrage"]
-    atab = re.search(r'<table class="tbl dense" id="arb-table">(.*?)</table>', html, re.S).group(1)
+    atab = re.search(r'<table class="tbl dense" id="arb-table">(.*?)</table>', html, re.DOTALL).group(1)
     assert f"{arb['executable_violations']['C3_vertical_butterfly']:,}" in re.search(
-        r"<td>Butterfly</td>(.*?)</tr>", atab, re.S).group(1)
+        r"<td>Butterfly</td>(.*?)</tr>", atab, re.DOTALL).group(1)
     # one residual grid per model, of that model's out-of-sample quotes only
     for m in res["model"].unique():
         n_oos = int((~res.loc[res["model"] == m, "in_sample"]).sum())
         assert f"of its {n_oos:,} out-of-sample quotes" in html, m
-    assert "Every session the surface report covers" in html and "2026-06-18" in html
+    assert "Every session the surface report covers" in html
+    assert "2026-06-18" in html
 
 
 def test_surface_key_result_is_heston_out_of_sample_in_half_spreads(dash, art):
@@ -1877,10 +1975,11 @@ def test_surface_key_result_is_heston_out_of_sample_in_half_spreads(dash, art):
     _, html = _get(dash, "/")
     sc = json.loads((FIX / "surface" / SESSION / "scorecard.json").read_text())
     h = next(m for m in sc["models"] if m["model"].startswith("heston"))["metrics"]["out_of_sample"]
-    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', html, re.S).group(1)
+    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', html, re.DOTALL).group(1)
     t = _visible_text("<body>" + card)
     assert "Model vs market (out of sample)" in t
-    assert f"{h['median_abs_hs']:.1f} half-spreads" in t and f"{h['n']:,} quotes" in t
+    assert f"{h['median_abs_hs']:.1f} half-spreads" in t
+    assert f"{h['n']:,} quotes" in t
     assert f"{h['inside_spread_pct']:.1f}% inside the bid–ask" in t
     assert "no interval in the scorecard" in t
 
@@ -1899,13 +1998,16 @@ def test_residual_stats_score_each_model_on_its_own_out_of_sample_quotes(dash):
     res = dash.artifacts.read_residuals(p, SESSION)
     h = dash.artifacts.residual_stats(res, "heston_v2")
     s = dash.artifacts.residual_stats(res, "svi")
-    assert h["scope"] == s["scope"] == "out-of-sample" and h["n"] == s["n"] == 2
+    assert h["scope"] == s["scope"] == "out-of-sample"
+    assert h["n"] == s["n"] == 2
     # heston OOS: k=0 (0.20 vs 0.20, inside) and k=0.1 (0.30 vs mid 0.25: 5 vp, half-spread
     # (0.26 − 0.24) × 50 = 1 vp, so 5 half-spreads); its anchor at k=−0.1 is not scored
-    assert h["inside_spread_pct"] == 50.0 and h["rmse_vp"] == pytest.approx(np.sqrt((0 + 5.0 ** 2) / 2))
+    assert h["inside_spread_pct"] == 50.0
+    assert h["rmse_vp"] == pytest.approx(np.sqrt((0 + 5.0 ** 2) / 2))
     assert h["median_abs_hs"] == pytest.approx((0.0 + 5.0) / 2)
     # svi OOS: k=−0.1 (inside) and k=0.1 (0.25 vs 0.25, inside)
-    assert s["inside_spread_pct"] == 100.0 and s["median_abs_hs"] == pytest.approx(0.0)
+    assert s["inside_spread_pct"] == 100.0
+    assert s["median_abs_hs"] == pytest.approx(0.0)
 
 
 def _rewrite_json(path: Path, fn) -> None:
@@ -1932,7 +2034,8 @@ def _bad_residuals(kind):
 
 MALFORMED = {
     "residuals in vol points": ("/surface", _bad_residuals("vol_points"), "looks like vol points"),
-    "residuals from another session": ("/surface", _bad_residuals("other_session"), "rows from another session"),
+    "residuals from another session": ("/surface", _bad_residuals("other_session"),
+                                       "rows from another session"),
     "models on different quotes": ("/surface", _bad_residuals("unequal_models"), "different quote sets"),
     "negative half-spread": ("/surface", _bad_residuals("negative_spread"), "half_spread_vp must be finite"),
     "inside share above 100%": ("/", lambda d: _rewrite_json(
@@ -2007,7 +2110,8 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     import gzip
     static = ROOT / "dashboard" / "static"
     assert len(gzip.compress((static / "vendor" / "echarts-6.1.0-desk.min.js").read_bytes())) < 240_000
-    assert (static / "desk.js").stat().st_size < 60_000 and (static / "desk.css").stat().st_size < 60_000
+    assert (static / "desk.js").stat().st_size < 60_000
+    assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
 
@@ -2016,14 +2120,16 @@ def test_research_inference_panels_show_the_summary(dash, art):
     assert _errors(resp) == 0
     s = json.loads((FIX / "inference" / "summary.json").read_text())
     b = s["bootstrap"]["portfolio"]["sharpe"]
-    boot = re.search(r'<table class="tbl dense" id="bootstrap-table">(.*?)</table>', html, re.S).group(1)
-    port = _visible_text("<body>" + re.search(r"<td>Portfolio</td>(.*?)</tr>", boot, re.S).group(1))
-    fmt = lambda x: f"{x:+.2f}".replace("-", "−")
+    boot = re.search(r'<table class="tbl dense" id="bootstrap-table">(.*?)</table>', html, re.DOTALL).group(1)
+    port = _visible_text("<body>" + re.search(r"<td>Portfolio</td>(.*?)</tr>", boot, re.DOTALL).group(1))
+    def fmt(x):
+        return f"{x:+.2f}".replace("-", "−")
     assert f"{fmt(b['ci95'][0])} to {fmt(b['ci95'][1])}" in port
-    nul = re.search(r'<table class="tbl dense" id="null-table">(.*?)</table>', html, re.S).group(1)
+    nul = re.search(r'<table class="tbl dense" id="null-table">(.*?)</table>', html, re.DOTALL).group(1)
     s3 = s["nulls"]["sleeves"]["s3"]
-    row = _visible_text("<body>" + re.search(r"<td>S3 dispersion</td>(.*?)</tr>", nul, re.S).group(1))
-    assert f"{s3['circular']['total_pnl']['p_value']:.3f}" in row and f"{s3['shuffle']['total_pnl']['p_value']:.3f}" in row
+    row = _visible_text("<body>" + re.search(r"<td>S3 dispersion</td>(.*?)</tr>", nul, re.DOTALL).group(1))
+    assert f"{s3['circular']['total_pnl']['p_value']:.3f}" in row
+    assert f"{s3['shuffle']['total_pnl']['p_value']:.3f}" in row
     # the KPI interval and the overview key result use the same bootstrap row
     assert f"95% CI {fmt(b['ci95'][0])} to {fmt(b['ci95'][1])} (bootstrap)" in _visible_text(html)
     _, idx = _get(dash, "/")
@@ -2032,18 +2138,20 @@ def test_research_inference_panels_show_the_summary(dash, art):
     assert "3 sessions registered, 2026-03-24 → 2026-05-29" in _visible_text(html)
     # forecast table: PDV's QLIKE rank as the file states
     fe = json.loads((FIX / "inference" / "forecast_eval.json").read_text())["backtest_window"]
-    ftab = re.search(r'<table class="tbl dense" id="forecast-table">(.*?)</table>', html, re.S).group(1)
-    pdv = _visible_text("<body>" + re.search(r"<td>PDV</td>(.*?)</tr>", ftab, re.S).group(1))
-    assert f"{fe['losses']['qlike']['pdv']:.3f}" in pdv and str(fe["rank"]["qlike"]["pdv"]) in pdv
+    ftab = re.search(r'<table class="tbl dense" id="forecast-table">(.*?)</table>', html, re.DOTALL).group(1)
+    pdv = _visible_text("<body>" + re.search(r"<td>PDV</td>(.*?)</tr>", ftab, re.DOTALL).group(1))
+    assert f"{fe['losses']['qlike']['pdv']:.3f}" in pdv
+    assert str(fe["rank"]["qlike"]["pdv"]) in pdv
 
 
 def test_forward_ledger_hash_chain_matches_the_producer(dash, tmp_path):
     """The reader's canonical SHA-256 is the producer's: the committed files chain."""
     data = _artifact_store(tmp_path, surface=False, inference=False, diagnostics=False)
     led = dash.artifacts.load_forward_ledger(data)
-    assert led["state"] == "ok" and led["sessions"] == ["2026-03-24", "2026-03-27", "2026-05-29"]
+    assert led["state"] == "ok"
+    assert led["sessions"] == ["2026-03-24", "2026-03-27", "2026-05-29"]
     files = sorted((FIX / "forward").glob("ledger_*.json"))
-    for a, b in zip(files[:-1], files[1:]):
+    for a, b in itertools.pairwise(files):
         prev = json.loads(b.read_text())["previous"]
         assert prev["sha256"] == dash.artifacts._canonical_sha256(json.loads(a.read_text()))
 
@@ -2053,20 +2161,22 @@ def test_calibration_page_reads_the_diagnostics_and_the_quote_smiles(dash, art):
     assert _errors(resp) == 0
     diag = json.loads((FIX / "diagnostics" / f"{SESSION}.json").read_text())
     text = _visible_text(html)
-    I = diag["identifiability"]
-    assert f"{I['rel_jtj_condition_number']:,.0f}" in text
+    ident = diag["identifiability"]
+    assert f"{ident['rel_jtj_condition_number']:,.0f}" in text
     ms = diag["trf"]["multistart"]
     assert f"{ms['n_starts_at_best']} / {ms['n_starts']}" in text
-    prof = re.search(r'<table class="tbl dense" id="sigma-profile">(.*?)</table>', html, re.S).group(1)
+    prof = re.search(r'<table class="tbl dense" id="sigma-profile">(.*?)</table>', html, re.DOTALL).group(1)
     assert len(re.findall(r"<tr>", prof.split("<tbody>")[1])) == len(diag["sigma_profile"]["rows"])
     assert "at cap" in prof
-    assert "Rough Heston (lifted)" in html and f"{diag['spx_only']['rough_heston']['params']['H']:.3f}" in html
+    assert "Rough Heston (lifted)" in html
+    assert f"{diag['spx_only']['rough_heston']['params']['H']:.3f}" in html
     # the κ tile carries the diagnostics' standard error
-    assert f"SE {I['standard_errors']['kappa']:.3g}" in text
+    assert f"SE {ident['standard_errors']['kappa']:.3g}" in text
     # the anchor expiry present in the residual table is drawn from quotes, with Heston's anchors counted
     res = pd.read_parquet(FIX / "surface" / SESSION / "residuals.parquet")
     h = res[res["model"].str.startswith("heston")]
-    cal = pickle.load(open(SHIPPED / "calibrations" / f"joint_cal_{SESSION}.pkl", "rb"))
+    with open(SHIPPED / "calibrations" / f"joint_cal_{SESSION}.pkl", "rb") as f:
+        cal = pickle.load(f)
     shared = sorted({a["expiry"] for a in cal["anchors_by_expiry"]} & set(h["expiry"]))
     assert shared
     for e in shared:
@@ -2076,7 +2186,7 @@ def test_calibration_page_reads_the_diagnostics_and_the_quote_smiles(dash, art):
 
 
 def test_model_risk_checks_use_the_surface_artifacts(dash, art):
-    resp, html = _get(dash, "/model-risk")
+    resp, _html = _get(dash, "/model-risk")
     assert _errors(resp) == 0
     d = dash.load_model_risk()
     mon = {m["check"]: m for m in d["monitors"]}
@@ -2084,16 +2194,19 @@ def test_model_risk_checks_use_the_surface_artifacts(dash, art):
     h = next(m for m in sc["models"] if m["model"].startswith("heston"))["metrics"]["out_of_sample"]
     hs = mon["Heston median |model − mid|, out of sample (half-spreads)"]
     lim = dash.MONITOR_LIMITS["median_abs_hs"]
-    assert hs["status"] == ("ok" if h["median_abs_hs"] <= lim[0] else "watch" if h["median_abs_hs"] <= lim[1] else "breach")
+    want = "ok" if h["median_abs_hs"] <= lim[0] else "watch" if h["median_abs_hs"] <= lim[1] else "breach"
+    assert hs["status"] == want
     arb = json.loads((FIX / "surface" / SESSION / "surface.json").read_text())["arbitrage"]
     share = arb["n_quotes_in_executable_violation"] / arb["n_quotes"] * 100
-    assert mon["Quotes in an executable static-arbitrage row (% of scored quotes)"]["value"].startswith(f"{share:.1f}%")
+    arb_row = mon["Quotes in an executable static-arbitrage row (% of scored quotes)"]
+    assert arb_row["value"].startswith(f"{share:.1f}%")
 
 
 def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
     d = dash.load_model_risk()
     na = [m for m in d["monitors"] if m["value"] == "artifact not yet generated"]
-    assert len(na) == 3 and all(m["status"] == "na" for m in na)
+    assert len(na) == 3
+    assert all(m["status"] == "na" for m in na)
 
 
 # ── Corrections registry and model inventory ─────────────────────────────────
@@ -2108,15 +2221,17 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
     rounds = [r["id"] for r in reg["rounds"]]
     assert rounds == [f"C{i}" for i in range(16, 23)]
     shallow = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
-                             capture_output=True, text=True).stdout.strip() != "false"
+                             capture_output=True, text=True, check=False).stdout.strip() != "false"
     for r in reg["rounds"]:
         assert r["commits"] and re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["date"]), r["id"]
         for c in r["commits"]:
             assert re.fullmatch(r"[0-9a-f]{40}", c), (r["id"], c)
             if not shallow:
-                assert subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{c}^{{commit}}"]).returncode == 0
+                exists = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{c}^{{commit}}"],
+                                        check=False)
+                assert exists.returncode == 0
                 day = subprocess.run(["git", "-C", str(ROOT), "log", "-1", "--format=%ad", "--date=short", c],
-                                     capture_output=True, text=True).stdout.strip()
+                                     capture_output=True, text=True, check=False).stdout.strip()
                 assert day == r["date"], (r["id"], c, day)
         for f in r["findings"]:
             assert f["status"] in ("fixed", "quantified"), f["flaw"]
@@ -2125,7 +2240,8 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
                 tree = ast.parse((ROOT / path).read_text())
                 scope = tree.body
                 for name in names:
-                    hit = next((n for n in scope if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name), None)
+                    hit = next((n for n in scope
+                                if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name), None)
                     assert hit is not None, node
                     scope = hit.body
 

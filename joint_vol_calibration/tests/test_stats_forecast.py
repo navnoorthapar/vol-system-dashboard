@@ -27,7 +27,8 @@ def _garch_returns(n=900, seed=0):
 def test_losses():
     y = np.array([0.04, 0.09, 0.01])
     assert np.allclose(fc.qlike(y, y), 0.0)
-    assert np.all(fc.qlike(y, y * 1.3) > 0) and np.all(fc.qlike(y, y * 0.7) > 0)
+    assert np.all(fc.qlike(y, y * 1.3) > 0)
+    assert np.all(fc.qlike(y, y * 0.7) > 0)
     assert np.allclose(fc.qlike(3 * y, 3 * y * 1.2), fc.qlike(y, y * 1.2))     # scale-free
     # QLIKE punishes under-prediction more than the same relative over-prediction
     assert fc.qlike(y, 0.5 * y)[0] > fc.qlike(y, 1.5 * y)[0]
@@ -38,7 +39,8 @@ def test_target_is_the_next_h_sessions():
     r = pd.Series(np.arange(1.0, 11.0), index=pd.bdate_range("2020-01-01", periods=10))
     y = fc.target_variance(r, horizon=3, annualise=1)
     assert y.iloc[0] == pytest.approx((2 ** 2 + 3 ** 2 + 4 ** 2) / 3)
-    assert y.iloc[-3:].isna().all() and y.iloc[:-3].notna().all()
+    assert y.iloc[-3:].isna().all()
+    assert y.iloc[:-3].notna().all()
 
 
 @pytest.mark.parametrize("builder", ["har", "vix_mz", "garch"])
@@ -121,7 +123,8 @@ def test_dm_detects_a_better_forecast():
     good = np.full_like(y, 1.0)
     bad = np.full_like(y, 2.0)
     res = fc.dm_test(fc.qlike(y, good), fc.qlike(y, bad), horizon=1)
-    assert res["stat"] < -5 and res["p_a_better"] < 1e-6
+    assert res["stat"] < -5
+    assert res["p_a_better"] < 1e-6
 
 
 def test_mcs_excludes_a_clearly_worse_model():
@@ -131,7 +134,8 @@ def test_mcs_excludes_a_clearly_worse_model():
     L = pd.DataFrame({"a": base + rng.normal(0, 0.1, n), "b": base + rng.normal(0, 0.1, n),
                       "bad": base + 0.8 + rng.normal(0, 0.1, n)})
     res = fc.mcs(L, size=0.10, block_size=5, reps=500, seed=1)
-    assert "bad" in res["excluded"] and {"a", "b"} <= set(res["included"])
+    assert "bad" in res["excluded"]
+    assert {"a", "b"} <= set(res["included"])
 
 
 def test_evaluate_ranks_the_true_conditional_variance_first():

@@ -106,7 +106,7 @@ def committed_v2_sessions(cal_dir: Path | None = None) -> list:
     out = []
     for p in sorted(cal_dir.glob("joint_cal_*.pkl")):
         with open(p, "rb") as f:
-            res = pickle.load(f)
+            res = pickle.load(f)  # noqa: S301 (trusted: the calibrator's own joint_cal_*.pkl)
         if jc.calibration_is_legacy(res) or not jc.is_acceptable_calibration(res)[0]:
             continue
         session = p.stem[len("joint_cal_"):]
@@ -117,8 +117,9 @@ def committed_v2_sessions(cal_dir: Path | None = None) -> list:
 
 def _git_head() -> str | None:
     try:
-        return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True,
-                              capture_output=True, text=True).stdout.strip()
+        return subprocess.run(  # noqa: S603 (a fixed argv, no external input)
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],  # noqa: S607 (git from PATH)
+            check=True, capture_output=True, text=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None
 
@@ -173,9 +174,10 @@ PARTS = ("heston", "rough")
 def _code_dirty_files() -> list | None:
     """Uncommitted changes to the code this script runs (provenance)."""
     try:
-        res = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--",
-                              "joint_vol_calibration", "scripts/calibration_diagnostics.py"],
-                             check=True, capture_output=True, text=True)
+        res = subprocess.run(  # noqa: S603 (a fixed argv, no external input)
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--",  # noqa: S607 (git from PATH)
+             "joint_vol_calibration", "scripts/calibration_diagnostics.py"],
+            check=True, capture_output=True, text=True)
     except (OSError, subprocess.CalledProcessError):
         return None
     return [ln[3:] for ln in res.stdout.splitlines()
@@ -183,7 +185,7 @@ def _code_dirty_files() -> list | None:
 
 
 def _provenance_start() -> dict:
-    return {"generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    return {"generated_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
             "code_commit": _git_head(), "code_dirty_files": _code_dirty_files(),
             # timings are on a machine that may be shared: compare methods
             # within one part (they ran back to back), and prefer the CPU
@@ -296,7 +298,7 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
     if unknown:
         raise ValueError(f"unknown part(s) {sorted(unknown)}; choose from {PARTS}")
     with open(config.DATA_DIR / "calibrations" / f"joint_cal_{session}.pkl", "rb") as f:
-        stored = pickle.load(f)
+        stored = pickle.load(f)  # noqa: S301 (trusted: the calibrator's own joint_cal_*.pkl)
     cal = jc.JointCalibrator(as_of_date=session)
     names = jc.HESTON_PARAM_NAMES
     x_stored = np.array([stored["params"][k] for k in names])
@@ -310,10 +312,10 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
         "environment": {"python": platform.python_version(), "numpy": np.__version__,
                         "scipy": __import__("scipy").__version__,
                         "cpus": os.cpu_count(), "machine": platform.machine()},
-        "data": {"n_spx_anchors": int(len(cal.spx_surface)),
+        "data": {"n_spx_anchors": len(cal.spx_surface),
                  "n_spx_expiries": int(cal.spx_surface["expiry"].nunique()),
                  "n_spx_oos": int(len(cal.spx_surface_full) - len(cal.spx_surface)),
-                 "n_vix_tenors": int(len(cal.vix_ts)), "n_vx_futures": int(len(cal.vx_futures)),
+                 "n_vix_tenors": len(cal.vix_ts), "n_vx_futures": len(cal.vx_futures),
                  "vvix_market": cal.vvix_market},
         "stored_fit": {
             "file": f"joint_cal_{session}.pkl",
@@ -417,7 +419,7 @@ def summarise(paths) -> dict:
                 "lifting_error_estimate_max_vp"),
         })
     return {"schema_version": SCHEMA_VERSION,
-            "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "generated_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
             "n_sessions": len(rows), "rows": rows}
 
 
@@ -428,7 +430,7 @@ def main(argv=None) -> int:
     ap.add_argument("--time-serial-de", action="store_true",
                     help="also re-run the serial DE on this machine (about 45 s per session)")
     ap.add_argument("--de-workers", type=int, default=4)
-    ap.add_argument("--part", choices=("all",) + PARTS, default="all",
+    ap.add_argument("--part", choices=("all", *PARTS), default="all",
                     help="run one part and merge it into the session's existing file")
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     args = ap.parse_args(argv)

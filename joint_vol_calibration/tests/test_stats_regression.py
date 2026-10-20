@@ -47,5 +47,5 @@ def test_nan_rows_dropped_and_too_few_rows_rejected():
     x = np.array([0.0, 1.0, 2.0, np.nan, 4.0, 5.0])
     res = ols_hac(y, x, lags=1)
     assert res["n"] == 4
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not enough observations"):
         ols_hac(np.array([1.0, 2.0]), np.array([1.0, 2.0]))

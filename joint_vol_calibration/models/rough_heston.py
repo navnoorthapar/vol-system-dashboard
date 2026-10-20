@@ -78,7 +78,6 @@ from __future__ import annotations
 import math
 import time
 from functools import lru_cache
-from typing import Optional, Tuple
 
 import numpy as np
 from scipy.linalg import expm
@@ -88,11 +87,11 @@ from joint_vol_calibration.config import (
     ROUGH_HESTON_TIME_STEPS,
 )
 from joint_vol_calibration.models.heston import (
-    _LewisGrid,
     _clip_calls,
     _expected_integrated_variance,
     _lewis_call_derivs,
     _lewis_call_prices,
+    _LewisGrid,
 )
 
 ROUGH_HESTON_PARAM_NAMES = ("kappa", "theta", "sigma", "rho", "v0", "H")
@@ -109,7 +108,7 @@ def _sinc_pi(b: float) -> float:
 
 
 @lru_cache(maxsize=4096)
-def _kernel_cached(H: float, n: int, T: float) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+def _kernel_cached(H: float, n: int, T: float) -> tuple[tuple[float, ...], tuple[float, ...]]:
     beta = 0.5 - H                         # 1 - alpha
     norm = _sinc_pi(beta)
     eta_lo = 1.0 / (math.sqrt(n) * T)
@@ -137,7 +136,7 @@ def _kernel_cached(H: float, n: int, T: float) -> Tuple[Tuple[float, ...], Tuple
 
 
 def lifted_kernel(H: float, n_factors: int = ROUGH_HESTON_N_FACTORS,
-                  T: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+                  T: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
     """(c, x): K_n(t) = sum_i c_i exp(-x_i t) approximating
     t^(H-1/2) / Gamma(H+1/2) for t in (0, T] (see the module docstring)."""
     if not 0.0 < H <= 0.5:
@@ -150,7 +149,7 @@ def lifted_kernel(H: float, n_factors: int = ROUGH_HESTON_N_FACTORS,
     return np.array(c), np.array(x)
 
 
-def _phi12(theta: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _phi12(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """phi1 = (1 - e^-t)/t, phi2 = (t - 1 + e^-t)/t^2 (series for small t)."""
     t = np.asarray(theta, dtype=float)
     small = t < 1e-4
@@ -198,7 +197,7 @@ def _riccati_sweep(z: np.ndarray, T_col, kappa: float, sigma: float,
     a0 = -0.5 * z * (z + 1j)
     a1 = 1j * rho * sigma * z - kappa
     a2 = 0.5 * sigma * sigma
-    phi = np.zeros((E.shape[1],) + z.shape, dtype=complex)
+    phi = np.zeros((E.shape[1], *z.shape), dtype=complex)
     psin = np.zeros(z.shape, dtype=complex)
     f = a0.copy()                              # F(z, 0)
     int_f = np.zeros(z.shape, dtype=complex)
@@ -310,8 +309,8 @@ def rough_heston_call_batch_grid(
     S: float, strikes, T: float, r: float, q: float,
     kappa: float, theta: float, sigma: float, rho: float, v0: float, H: float,
     n_factors: int = ROUGH_HESTON_N_FACTORS, n_steps: int = ROUGH_HESTON_TIME_STEPS,
-    grid: Optional[_LewisGrid] = None, rtol: float = ROUGH_LEWIS_RTOL,
-) -> Tuple[np.ndarray, Optional[_LewisGrid]]:
+    grid: _LewisGrid | None = None, rtol: float = ROUGH_LEWIS_RTOL,
+) -> tuple[np.ndarray, _LewisGrid | None]:
     """Calls and the Lewis grid used (grid given: priced on it, no adaptation)."""
     strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
     if T <= 0:

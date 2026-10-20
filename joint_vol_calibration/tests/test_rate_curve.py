@@ -23,19 +23,26 @@ from joint_vol_calibration.data import rates
 
 FIX = Path(__file__).parent / "fixtures"
 
-BILLS_2026 = '''Date,"4 WEEKS BANK DISCOUNT","4 WEEKS COUPON EQUIVALENT","6 WEEKS BANK DISCOUNT","6 WEEKS COUPON EQUIVALENT","8 WEEKS BANK DISCOUNT","8 WEEKS COUPON EQUIVALENT","13 WEEKS BANK DISCOUNT","13 WEEKS COUPON EQUIVALENT","17 WEEKS BANK DISCOUNT","17 WEEKS COUPON EQUIVALENT","26 WEEKS BANK DISCOUNT","26 WEEKS COUPON EQUIVALENT","52 WEEKS BANK DISCOUNT","52 WEEKS COUPON EQUIVALENT"
-10/19/2026,3.94,4.01,3.95,4.02,4.01,4.09,4.10,4.20,4.15,4.27,4.23,4.38,4.27,4.47
-10/16/2026,3.95,4.02,3.96,4.03,4.02,4.10,4.08,4.18,4.14,4.26,4.20,4.35,4.24,4.44
-10/09/2026,3.96,4.03,3.96,4.03,3.97,4.05,4.06,4.16,4.11,4.22,4.18,4.33,4.26,4.46
-'''
-PAR_2026 = '''Date,"1 Mo","1.5 Month","2 Mo","3 Mo","4 Mo","6 Mo","1 Yr","2 Yr","3 Yr","5 Yr","7 Yr","10 Yr","20 Yr","30 Yr"
-10/19/2026,4.11,4.14,4.17,4.27,4.34,4.37,4.50,4.77,4.85,4.94,5.04,5.15,5.53,5.48
-10/16/2026,4.12,4.14,4.17,4.26,4.32,4.34,4.46,4.74,4.82,4.89,4.98,5.09,5.47,5.43
-10/09/2026,4.13,4.13,4.13,4.25,4.29,4.32,4.47,4.80,4.89,5.02,5.13,5.24,5.65,5.60
-'''
-BILLS_2010 = '''Date,"4 WEEKS BANK DISCOUNT","4 WEEKS COUPON EQUIVALENT","13 WEEKS BANK DISCOUNT","13 WEEKS COUPON EQUIVALENT","26 WEEKS BANK DISCOUNT","26 WEEKS COUPON EQUIVALENT","52 WEEKS BANK DISCOUNT","52 WEEKS COUPON EQUIVALENT"
-12/31/2010,0.06,0.06,0.12,0.12,0.19,0.19,0.27,0.27
-'''
+BILLS_2026 = (
+    'Date,"4 WEEKS BANK DISCOUNT","4 WEEKS COUPON EQUIVALENT","6 WEEKS BANK DISCOUNT",'
+    '"6 WEEKS COUPON EQUIVALENT","8 WEEKS BANK DISCOUNT","8 WEEKS COUPON EQUIVALENT",'
+    '"13 WEEKS BANK DISCOUNT","13 WEEKS COUPON EQUIVALENT","17 WEEKS BANK DISCOUNT",'
+    '"17 WEEKS COUPON EQUIVALENT","26 WEEKS BANK DISCOUNT","26 WEEKS COUPON EQUIVALENT",'
+    '"52 WEEKS BANK DISCOUNT","52 WEEKS COUPON EQUIVALENT"\n'
+    '10/19/2026,3.94,4.01,3.95,4.02,4.01,4.09,4.10,4.20,4.15,4.27,4.23,4.38,4.27,4.47\n'
+    '10/16/2026,3.95,4.02,3.96,4.03,4.02,4.10,4.08,4.18,4.14,4.26,4.20,4.35,4.24,4.44\n'
+    '10/09/2026,3.96,4.03,3.96,4.03,3.97,4.05,4.06,4.16,4.11,4.22,4.18,4.33,4.26,4.46\n')
+PAR_2026 = (
+    'Date,"1 Mo","1.5 Month","2 Mo","3 Mo","4 Mo","6 Mo","1 Yr","2 Yr","3 Yr","5 Yr","7 Yr","10 Yr",'
+    '"20 Yr","30 Yr"\n'
+    '10/19/2026,4.11,4.14,4.17,4.27,4.34,4.37,4.50,4.77,4.85,4.94,5.04,5.15,5.53,5.48\n'
+    '10/16/2026,4.12,4.14,4.17,4.26,4.32,4.34,4.46,4.74,4.82,4.89,4.98,5.09,5.47,5.43\n'
+    '10/09/2026,4.13,4.13,4.13,4.25,4.29,4.32,4.47,4.80,4.89,5.02,5.13,5.24,5.65,5.60\n')
+BILLS_2010 = (
+    'Date,"4 WEEKS BANK DISCOUNT","4 WEEKS COUPON EQUIVALENT","13 WEEKS BANK DISCOUNT",'
+    '"13 WEEKS COUPON EQUIVALENT","26 WEEKS BANK DISCOUNT","26 WEEKS COUPON EQUIVALENT",'
+    '"52 WEEKS BANK DISCOUNT","52 WEEKS COUPON EQUIVALENT"\n'
+    '12/31/2010,0.06,0.06,0.12,0.12,0.19,0.19,0.27,0.27\n')
 SOFR_JSON = {"refRates": [
     {"effectiveDate": "2026-10-19", "type": "SOFR", "percentRate": 3.87, "volumeInBillions": 2888},
     {"effectiveDate": "2026-10-16", "type": "SOFR", "percentRate": 3.88, "volumeInBillions": 2925},
@@ -72,18 +79,22 @@ def tmp_store(tmp_path, monkeypatch):
 class TestParsing:
     def test_treasury_bill_file_maps_every_column_and_converts_percent(self):
         q = rates.parse_treasury_csv(BILLS_2026, "daily_treasury_bill_rates")
-        assert len(q) == 3 * 14 and set(q["source"]) == {"treasury"}
+        assert len(q) == 3 * 14
+        assert set(q["source"]) == {"treasury"}
         day = _day(q, "2026-10-19")
-        assert day["UST_BILL_13W_BD"] == pytest.approx(0.0410) and day["UST_BILL_13W_CE"] == pytest.approx(0.0420)
+        assert day["UST_BILL_13W_BD"] == pytest.approx(0.0410)
+        assert day["UST_BILL_13W_CE"] == pytest.approx(0.0420)
         assert set(day.index) == {rates.bill_series(w, b) for w in rates.BILL_WEEKS for b in ("BD", "CE")}
 
     def test_older_files_carry_fewer_columns(self):
         q = rates.parse_treasury_csv(BILLS_2010, "daily_treasury_bill_rates")
-        assert sorted(q["series"]) == sorted(rates.bill_series(w, b) for w in (4, 13, 26, 52) for b in ("BD", "CE"))
+        assert sorted(q["series"]) == sorted(rates.bill_series(w, b) for w in (4, 13, 26, 52)
+                                             for b in ("BD", "CE"))
 
     def test_par_file_and_unknown_columns(self, caplog):
         q = rates.parse_treasury_csv(PAR_2026.replace('"30 Yr"', '"Mystery"'), "daily_treasury_yield_curve")
-        assert "UST_PAR_1.5M" in set(q["series"]) and "UST_PAR_30Y" not in set(q["series"])
+        assert "UST_PAR_1.5M" in set(q["series"])
+        assert "UST_PAR_30Y" not in set(q["series"])
         assert "ignoring unknown column 'Mystery'" in caplog.text
         assert _day(q, "2026-10-16")["UST_PAR_2Y"] == pytest.approx(0.0474)
 
@@ -94,13 +105,15 @@ class TestParsing:
         assert set(q.loc[q["date"] == "2026-10-19", "series"]) == {"SOFR"}
         tsy = rates.parse_treasury_csv(PAR_2026, "daily_treasury_yield_curve")
         both = q.merge(tsy, on=["date", "series"], suffixes=("_fred", "_tsy"))
-        assert len(both) == 10 and np.allclose(both["value_fred"], both["value_tsy"], rtol=0, atol=1e-15)
+        assert len(both) == 10
+        assert np.allclose(both["value_fred"], both["value_tsy"], rtol=0, atol=1e-15)
 
     def test_nyfed_sofr(self):
         q = rates.parse_nyfed_sofr(SOFR_JSON)
         assert q["date"].tolist() == ["2026-10-15", "2026-10-16", "2026-10-19"]
         assert np.allclose(q["value"], [0.0389, 0.0388, 0.0387], rtol=0, atol=1e-15)
-        assert set(q["source"]) == {"nyfed"} and set(q["series"]) == {"SOFR"}
+        assert set(q["source"]) == {"nyfed"}
+        assert set(q["series"]) == {"SOFR"}
 
 
 # ── instrument conversions ────────────────────────────────────────────────────
@@ -130,7 +143,8 @@ class TestConversions:
         for w in rates.BILL_WEEKS:
             n = 7 * w
             rb = rates.cc_rate(rates.price_from_discount(day[rates.bill_series(w, "BD")], n), n / 365)
-            rc = rates.cc_rate(rates.price_from_coupon_equivalent(day[rates.bill_series(w, "CE")], n), n / 365)
+            ce = day[rates.bill_series(w, "CE")]
+            rc = rates.cc_rate(rates.price_from_coupon_equivalent(ce, n), n / 365)
             assert abs(rb - rc) < 2e-4, w
 
     def test_sofr_compounding(self):
@@ -143,7 +157,8 @@ class TestConversions:
 class TestCurve:
     def test_bill_nodes_are_exact_and_r91_is_the_13_week_bill(self):
         c = rates.build_zero_curve(_quotes(), "2026-10-19")
-        assert c.curve_date == "2026-10-19" and c.short_end == "bills"
+        assert c.curve_date == "2026-10-19"
+        assert c.short_end == "bills"
         r13 = -math.log(1 - 0.0410 * 91 / 360) * 365 / 91
         assert c.zero_rate(91 / 365) == pytest.approx(r13, abs=1e-12)
         for w in rates.BILL_WEEKS:
@@ -161,12 +176,14 @@ class TestCurve:
         T = np.array([1 / 365, 7 / 365, 0.25, 0.75, 1.5, 2.0, 10.0, 30.0, 40.0])
         assert np.allclose(c.zero_rate(T) * T, -np.log(c.discount_factor(T)), atol=1e-14)
         assert np.all(np.diff(c.discount_factor(np.linspace(0, 40, 400))) < 0)
-        assert c.discount_factor(0.0) == 1.0 and c.discount_factor(-1.0) == 1.0
+        assert c.discount_factor(0.0) == 1.0
+        assert c.discount_factor(-1.0) == 1.0
 
     def test_front_is_flat_at_the_first_bill_and_back_is_flat_forward(self):
         c = rates.build_zero_curve(_quotes(), "2026-10-19")
         r4 = c.zero_rate(28 / 365)
-        assert c.zero_rate(1 / 365) == pytest.approx(r4, abs=1e-13) and c.zero_rate(0.0) == pytest.approx(r4)
+        assert c.zero_rate(1 / 365) == pytest.approx(r4, abs=1e-13)
+        assert c.zero_rate(0.0) == pytest.approx(r4)
         f_last = c.forward_rate(c.t[-2], c.t[-1])
         assert c.forward_rate(30.0, 35.0) == pytest.approx(f_last, abs=1e-12)
 
@@ -175,8 +192,10 @@ class TestCurve:
         2Y-30Y as semiannual par bonds) is the zero curve P(t) = (1 + y/2)^-2t
         on the 6-month grid: the bootstrap must reproduce it to rounding."""
         y = 0.045
-        rows = [("2026-10-16", s, y, "treasury") for s, m in rates.PAR_MONTHS.items() if m in (6, 12) or m >= 24]
-        c = rates.build_zero_curve(pd.DataFrame(rows, columns=["date", "series", "value", "source"]), "2026-10-16")
+        rows = [("2026-10-16", s, y, "treasury") for s, m in rates.PAR_MONTHS.items()
+                if m in (6, 12) or m >= 24]
+        c = rates.build_zero_curve(pd.DataFrame(rows, columns=["date", "series", "value", "source"]),
+                                   "2026-10-16")
         assert c.short_end == "par"
         grid = np.arange(0.5, 30.01, 0.5)
         assert np.allclose(c.discount_factor(grid), (1 + y / 2) ** (-2 * grid), rtol=0, atol=1e-13)
@@ -186,7 +205,8 @@ class TestCurve:
         q = _quotes()
         q = q[~q["series"].str.startswith("UST_BILL_") | (q["series"] == "UST_BILL_13W_BD")]
         c = rates.build_zero_curve(q, "2026-10-19")
-        assert c.short_end == "par" and c.nodes["instrument"].iloc[0] == "UST_PAR_1M"
+        assert c.short_end == "par"
+        assert c.nodes["instrument"].iloc[0] == "UST_PAR_1M"
         y = 0.0411
         assert c.discount_factor(1 / 12) == pytest.approx(1 / (1 + y * (365 / 12) / 365), abs=1e-14)
 
@@ -267,7 +287,8 @@ class TestFredDownload:
         ids = ["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DTB3", "SOFR"] * 2 + ["DGS1MO"]
         q = rates.download_fred(ids, start="2026-10-13")
         assert seen == [["DGS1MO", "DGS3MO", "DGS6MO", "DGS1", "DGS2", "DTB3", "SOFR"]]   # de-duplicated
-        assert q["date"].min() == "2026-10-13" and "H15_BILL_3M_BD" in set(q["series"])
+        assert q["date"].min() == "2026-10-13"
+        assert "H15_BILL_3M_BD" in set(q["series"])
         many = [f"X{i}" for i in range(13)]
         seen.clear()
         with pytest.raises(ValueError, match="lacks requested series"):
@@ -309,7 +330,8 @@ class TestStore:
         monkeypatch.setattr(rates, "_get_text", fake_get)
         res = rates.refresh_rates(2026, 2026)
         assert res == {"treasury": 3 * 14 + 3 * 14, "nyfed": 3, "fred": 0, "errors": []}
-        assert not any("stlouisfed" in u for u in seen) and len(seen) == 3
+        assert not any("stlouisfed" in u for u in seen)
+        assert len(seen) == 3
 
 
 # ── against independent real data (committed record) ──────────────────────────
@@ -331,13 +353,15 @@ class TestCommittedRecord:
         FRED's DTB3)."""
         idx = rates.index_quotes(_committed_quotes())
         con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        irx = pd.read_sql("SELECT date, rate FROM tbill_rates WHERE date >= '2018-01-02' AND date <= '2026-10-16'",
+        irx = pd.read_sql("SELECT date, rate FROM tbill_rates "
+                          "WHERE date >= '2018-01-02' AND date <= '2026-10-16'",
                           con).set_index("date")["rate"]
         con.close()
         diff_bp = np.array([(rates.build_zero_curve(idx, d).zero_rate(91 / 365) - r) * 1e4
                             for d, r in irx.items()])
         assert len(diff_bp) > 2000
-        assert abs(np.median(diff_bp)) < 2.0 and np.percentile(np.abs(diff_bp), 95) < 8.0
+        assert abs(np.median(diff_bp)) < 2.0
+        assert np.percentile(np.abs(diff_bp), 95) < 8.0
 
     def test_a_curve_exists_for_every_session_of_the_backtest_window(self):
         idx = rates.index_quotes(_committed_quotes())
@@ -349,7 +373,8 @@ class TestCommittedRecord:
                 aged[d] = (d - pd.Timestamp(c.curve_date)).days
         # the bond market closes on Columbus Day and Veterans Day (observed) while
         # the NYSE trades: those sessions, and only those, use an older curve
-        assert len(aged) == 13 and max(aged.values()) <= 3
+        assert len(aged) == 13
+        assert max(aged.values()) <= 3
         for d in aged:
             columbus = d.month == 10 and d.weekday() == 0 and 8 <= d.day <= 14
             veterans = d.month == 11 and 10 <= d.day <= 12
@@ -367,7 +392,8 @@ class TestCommittedRecord:
             day = idx.by_date[d].drop(["UST_BILL_13W_BD", "UST_BILL_13W_CE"])
             loo = rates.build_zero_curve(rates.QuoteIndex(np.array([d], dtype=object), {d: day}), d)
             errs.append(abs(loo.zero_rate(91 / 365) - full.zero_rate(91 / 365)) * 1e4)
-        assert np.median(errs) < 3.0 and np.percentile(errs, 95) < 25.0
+        assert np.median(errs) < 3.0
+        assert np.percentile(errs, 95) < 25.0
 
 
 # ── parity-implied rates ──────────────────────────────────────────────────────
@@ -384,7 +410,8 @@ class TestParityComparison:
         assert out["spread_bills_bp"].iloc[1] == pytest.approx((0.0410 - c.zero_rate(91 / 365)) * 1e4)
         assert out["spread_sofr_bp"].iloc[0] == pytest.approx((0.0450 - rates.sofr_to_cc(0.0388)) * 1e4)
         assert set(out["curve_date"]) == {"2026-10-16"}
-        assert out["n_pairs"].tolist() == [40, 31] and out["days"].tolist() == [63.0, 91.0]
+        assert out["n_pairs"].tolist() == [40, 31]
+        assert out["days"].tolist() == [63.0, 91.0]
 
     def test_summary_buckets_are_half_open_medians_and_iqrs(self):
         cmp_ = pd.DataFrame({"as_of": ["a"] * 6 + ["b"] * 2,
@@ -392,7 +419,8 @@ class TestParityComparison:
                              "spread_bills_bp": [-100, 50, 10, 30, 40, 44, 20, 60.0]})
         out = rates.summarize_parity_comparison(cmp_).set_index("bucket")
         assert out.index.tolist() == ["0-30d", "30-91d", "91-365d", ">=365d"]
-        assert out["n"].tolist() == [2, 2, 2, 2] and out.loc[">=365d", "sessions"] == 1
+        assert out["n"].tolist() == [2, 2, 2, 2]
+        assert out.loc[">=365d", "sessions"] == 1
         assert out.loc["0-30d", "spread_bills_bp_median"] == pytest.approx(-25.0)
         assert out.loc["30-91d", "spread_bills_bp_iqr"] == pytest.approx(10.0)      # 25th/75th of {10, 30}
         assert out.loc[">=365d", "spread_bills_bp_median"] == pytest.approx(40.0)

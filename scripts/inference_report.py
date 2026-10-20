@@ -39,30 +39,30 @@ import pathlib
 import subprocess
 import sys
 import time
-from typing import Dict, List, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import numpy as np                                                    # noqa: E402
-import pandas as pd                                                   # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
-from joint_vol_calibration.backtest import backtest_engine as bte      # noqa: E402
-from joint_vol_calibration.stats import artifacts, benchmarks as bm   # noqa: E402
-from joint_vol_calibration.stats import bootstrap as bs               # noqa: E402
-from joint_vol_calibration.stats import forecast as fc                # noqa: E402
-from joint_vol_calibration.stats import multiple_testing as mt        # noqa: E402
-from joint_vol_calibration.stats import nulls as nl                   # noqa: E402
-from joint_vol_calibration.stats import sharpe as sh                  # noqa: E402
-from joint_vol_calibration.stats import trials as tr                  # noqa: E402
-from joint_vol_calibration.stats.regression import ols_hac            # noqa: E402
+from joint_vol_calibration.backtest import backtest_engine as bte  # noqa: E402
+from joint_vol_calibration.stats import artifacts  # noqa: E402
+from joint_vol_calibration.stats import benchmarks as bm  # noqa: E402
+from joint_vol_calibration.stats import bootstrap as bs  # noqa: E402
+from joint_vol_calibration.stats import forecast as fc  # noqa: E402
+from joint_vol_calibration.stats import multiple_testing as mt  # noqa: E402
+from joint_vol_calibration.stats import nulls as nl  # noqa: E402
+from joint_vol_calibration.stats import sharpe as sh  # noqa: E402
+from joint_vol_calibration.stats import trials as tr  # noqa: E402
+from joint_vol_calibration.stats.regression import ols_hac  # noqa: E402
 from joint_vol_calibration.stats.straddle_replay import StraddleReplay  # noqa: E402
 
 log = logging.getLogger("inference_report")
 
 OUT_DIR = bte.BACKTEST_DIR / "inference"
 BENCH_DIR = bte.DATA_DIR / "benchmarks"
-SLEEVES: Dict[str, Tuple[str, str]] = {
+SLEEVES: dict[str, tuple[str, str]] = {
     "s1": ("nav_s1", "pnl_s1"), "s1c": ("nav_s1c", "pnl_s1c"), "s2": ("nav_s2", "pnl_s2"),
     "s3": ("nav_s3", "pnl_s3"), "s4": ("nav_s4", "pnl_s4"), "portfolio": ("nav", "daily_pnl"),
 }
@@ -73,13 +73,13 @@ HAC_LAGS = 21
 
 def git_head() -> str:
     try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
-                              text=True, check=True).stdout.strip()
+        return subprocess.run(["git", "rev-parse", "HEAD"],  # noqa: S607 (git from PATH)
+                              cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
     except Exception:                                   # noqa: BLE001 — provenance is best effort
         return "unknown"
 
 
-def code_sha256() -> Dict[str, str]:
+def code_sha256() -> dict[str, str]:
     """SHA-256 of every source file whose code determines the numbers."""
     files = [ROOT / "scripts" / "inference_report.py",
              *sorted((ROOT / "joint_vol_calibration" / "stats").glob("*.py")),
@@ -155,7 +155,7 @@ def section_bootstrap(eq: pd.DataFrame, reps: int, seed: int):
     return out, settings, replicates
 
 
-def section_closed_form(eq: pd.DataFrame) -> Dict:
+def section_closed_form(eq: pd.DataFrame) -> dict:
     R = sleeve_returns(eq)
     out = {}
     for s in SLEEVES:
@@ -169,7 +169,7 @@ def section_closed_form(eq: pd.DataFrame) -> Dict:
 
 # ── 2. the trial family, DSR, SPA/StepM, PBO ─────────────────────────────────
 
-def trial_family(spx, vix, pdv) -> Tuple[pd.DataFrame, List[Dict]]:
+def trial_family(spx, vix, pdv) -> tuple[pd.DataFrame, list[dict]]:
     """Daily returns of every reproducible trial: the C22 bridge rows and the
     β grid, each × six sleeves; checked against the committed CSVs."""
     from joint_vol_calibration.backtest import c22_bridge as cb
@@ -222,7 +222,7 @@ def trial_family(spx, vix, pdv) -> Tuple[pd.DataFrame, List[Dict]]:
     return pd.DataFrame(cols, index=index[0]), meta
 
 
-def beta_estimated_columns(fam: pd.DataFrame) -> List[str]:
+def beta_estimated_columns(fam: pd.DataFrame) -> list[str]:
     """Trial series priced at an estimated β: C22 bridge rows 11-14 (β = 0.82)
     and the β grid below 1.00. Bridge rows 0-10 and the β = 1.00 grid row price
     ATM options at the VIX itself (the mis-specified pre-C22 mark)."""
@@ -231,7 +231,7 @@ def beta_estimated_columns(fam: pd.DataFrame) -> List[str]:
             or (c.startswith("beta") and not c.startswith("beta1.00"))]
 
 
-def section_trials(eq, fam: pd.DataFrame, meta: List[Dict]) -> Dict:
+def section_trials(eq, fam: pd.DataFrame, meta: list[dict]) -> dict:
     led = tr.load()
     n_all = tr.count_trials(led, include_evaluations=True)
     n_c16 = tr.count_trials(led, from_round="C16")
@@ -305,7 +305,7 @@ def section_trials(eq, fam: pd.DataFrame, meta: List[Dict]) -> Dict:
     }
 
 
-def section_multiple_testing(eq, fam: pd.DataFrame, block: int, reps: int, seed: int) -> Dict:
+def section_multiple_testing(eq, fam: pd.DataFrame, block: int, reps: int, seed: int) -> dict:
     R = sleeve_returns(eq)
     port_cols = [c for c in fam.columns if c.endswith(":portfolio")]
     est = beta_estimated_columns(fam)
@@ -391,7 +391,7 @@ def section_nulls(eng: bte.BacktestEngine, eq: pd.DataFrame, n_shuffle: int, see
 
 # ── 4. forecasts ──────────────────────────────────────────────────────────────
 
-def section_forecast(reps: int, seed: int) -> Dict:
+def section_forecast(reps: int, seed: int) -> dict:
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
     with quiet():
         spx = get_spx_ohlcv(as_of_date="2100-01-01", start_date="2010-01-01")
@@ -403,8 +403,9 @@ def section_forecast(reps: int, seed: int) -> Dict:
         F = fc.build_forecasts(r, vix)
     y2 = fc.target_variance(r)
     out = {"data": {"spx_first": str(close.index[0].date()), "spx_last": str(close.index[-1].date()),
-                    "n_returns": int(len(r))},
-           "target": "y²(t) = 252/21 Σ_{i=1..21} r²_{t+i}, annualised realised variance of the next 21 sessions",
+                    "n_returns": len(r)},
+           "target": ("y²(t) = 252/21 Σ_{i=1..21} r²_{t+i}, annualised realised variance of the next "
+                      "21 sessions"),
            "models": {
                "pdv": "PDVLinear walk-forward (models.pdv.walk_forward_vol_forecast), σ̂², the S1/S1C input",
                "har": "HAR-RV on daily r², expanding OLS, purged (labels i ≤ t − 21)",
@@ -429,10 +430,13 @@ def section_forecast(reps: int, seed: int) -> Dict:
 
 # ── 5. Cboe benchmarks ────────────────────────────────────────────────────────
 
-def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> Dict:
+def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> dict:
     from joint_vol_calibration.backtest.delta_hedger import _interp_atm_iv
-    from joint_vol_calibration.data.database import (get_spx_ohlcv, get_tbill_rates_series,
-                                                     get_vix_term_structure_wide)
+    from joint_vol_calibration.data.database import (
+        get_spx_ohlcv,
+        get_tbill_rates_series,
+        get_vix_term_structure_wide,
+    )
 
     levels = bm.load_levels(BENCH_DIR, bm.BENCHMARK_INDICES)
     if levels.empty:
@@ -454,7 +458,7 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> Dict:
     S["always_short_straddle"] = sh.returns_from_pnl(vrp_short, CAP)
     years = list(range(pd.Timestamp(bte.BT_START).year, pd.Timestamp(bte.BT_END).year + 1))
     tab = bm.strategy_benchmark_stats(S, ex, spx_ret, years)
-    nested: Dict = {}
+    nested: dict = {}
     for _, row in tab.iterrows():
         nested.setdefault(row["sleeve"], {}).setdefault(row["benchmark"], {})[row["period"]] = {
             k: row[k] for k in tab.columns if k not in ("sleeve", "benchmark", "period")}
@@ -513,12 +517,12 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> Dict:
             daily[label] = {k: st[k] for k in ("n_days", "corr_daily", "corr_weekly", "partial_corr_ex_spx",
                                                "beta", "sharpe_sleeve", "sharpe_bench")}
         return {
-            "n_periods": int(len(per)), "first_roll": str(per["roll"].iloc[0].date()),
+            "n_periods": len(per), "first_roll": str(per["roll"].iloc[0].date()),
             "last_expiry": str(per["expiry"].iloc[-1].date()),
             "settle_sources": per["settle_source"].value_counts().to_dict(),
             "overall": ib["overall"], "by_year": ib["groups"], "by_year_per_period": per_year,
             "full_year_dispersion": {"min": float(np.nanmin(vals)), "max": float(np.nanmax(vals)),
-                                     "sd": float(np.nanstd(vals, ddof=1)), "n_years": int(len(vals)),
+                                     "sd": float(np.nanstd(vals, ddof=1)), "n_years": len(vals),
                                      "median_se_approx": float(np.nanmedian(se_full))},
             "per_period": {"median": float(np.nanmedian(pp)), "q25": float(np.nanpercentile(pp, 25)),
                            "q75": float(np.nanpercentile(pp, 75)), "sd": float(np.nanstd(pp, ddof=1)),
@@ -557,7 +561,7 @@ def _years(x) -> str:
     return "n/a (SR <= 0)" if x is None or not np.isfinite(x) else f"{x:.0f} years"
 
 
-def headline(summary: Dict, fe: Dict, bmk: Dict) -> List[str]:
+def headline(summary: dict, fe: dict, bmk: dict) -> list[str]:
     """Plain statements generated from the numbers (no hand-typed values)."""
     lines = []
     b = summary["bootstrap"]
@@ -574,8 +578,9 @@ def headline(summary: Dict, fe: Dict, bmk: Dict) -> List[str]:
     lines.append("PSR(SR>0) and the largest DSR over every N and trial-variance choice: "
                  + "; ".join(f"{s} {cf[s]['psr_gt_0']:.2f} / {t['dsr_range'][s]['max']:.3f}" for s in SLEEVES)
                  + f" (N from {nc['n_eigen_participation']:.1f}, the eigenvalue participation of the "
-                   f"{t['family']['n_series']}-series re-run family, to {nc['n_upper_with_evaluations']:.0f}; "
-                   f"ledger C16-C22 {t['ledger']['n_trials_c16_c22']}, all rounds {t['ledger']['n_trials_all_rounds']})")
+                   f"{t['family']['n_series']}-series re-run family, to "
+                   f"{nc['n_upper_with_evaluations']:.0f}; ledger C16-C22 {t['ledger']['n_trials_c16_c22']}, "
+                   f"all rounds {t['ledger']['n_trials_all_rounds']})")
     s3 = t["dsr_sensitivity"]["values"]["s3"]
     lines.append(f"s3: DSR {t['dsr']['s3']['n_raw_c16_c22']:.3f} at the ledger's N "
                  f"{t['ledger']['n_trials_c16_c22']} with the family's trial-Sharpe sd "
@@ -583,19 +588,20 @@ def headline(summary: Dict, fe: Dict, bmk: Dict) -> List[str]:
                  f"{s3['null_var|N=' + format(nc['n_raw_c16_c22'], '.6g')]:.3f} with the H0 sd "
                  f"{t['family']['sd_sharpe_annual_under_h0']:.2f}/yr; "
                  f"{s3['null_var|N=' + format(nc['n_eigen_participation'], '.6g')]:.2f} at N "
-                 f"{nc['n_eigen_participation']:.1f} with the H0 sd; MinTRL {_years(cf['s3']['min_trl_years'])} "
-                 f"at the observed SR and moments")
+                 f"{nc['n_eigen_participation']:.1f} with the H0 sd; "
+                 f"MinTRL {_years(cf['s3']['min_trl_years'])} at the observed SR and moments")
     m = summary["multiple_testing"]
-    lines.append(f"Hansen SPA (the 6 published series vs cash): consistent p {m['spa_published']['p_consistent']:.2f}; "
+    lines.append(f"Hansen SPA (the 6 published series vs cash): consistent p "
+                 f"{m['spa_published']['p_consistent']:.2f}; "
                  f"Romano-Wolf StepM superior: {m['stepm_published']['superior'] or 'none'}")
-    lines.append(f"Over the {m['spa_beta_estimated']['n_strategies']} trial series priced at an estimated beta: "
-                 f"SPA p {m['spa_beta_estimated']['p_consistent']:.2f}, StepM superior "
+    lines.append(f"Over the {m['spa_beta_estimated']['n_strategies']} trial series priced at an "
+                 f"estimated beta: SPA p {m['spa_beta_estimated']['p_consistent']:.2f}, StepM superior "
                  f"{m['stepm_beta_estimated']['superior'] or 'none'}; over all "
                  f"{m['spa_trial_family']['n_strategies']} (incl. beta = 1, the mis-specified mark): "
                  f"SPA p {m['spa_trial_family']['p_consistent']:.3f}, StepM superior "
                  f"{m['stepm_trial_family']['superior'] or 'none'}")
-    for key, label in (("pbo_beta_estimated", "beta-estimated trials"), ("pbo_portfolio_configs", "portfolio configs"),
-                       ("pbo_all_trials", "all trials")):
+    for key, label in (("pbo_beta_estimated", "beta-estimated trials"),
+                       ("pbo_portfolio_configs", "portfolio configs"), ("pbo_all_trials", "all trials")):
         p = m[key]
         lines.append(f"CSCV PBO ({label}, {p['n_configurations']} series, {p['n_combinations']} splits): "
                      f"{p['pbo']:.2f}; OOS-on-IS Sharpe slope {p['oos_on_is_slope']:.2f}; selected config's "
@@ -621,21 +627,24 @@ def headline(summary: Dict, fe: Dict, bmk: Dict) -> List[str]:
         dm = q["dm"]["qlike"]
         sig = sorted(k for k, v in dm.items() if v["rectangular_hln"]["p_two_sided"] < 0.05)
         lines.append(f"21-day variance forecasts, {sample} {q['start']}..{q['end']} (n {q['n']}): QLIKE PDV "
-                     f"{ql['pdv']:.3f}, rank {q['rank']['qlike']['pdv']}/{len(ql)} (best {best} {ql[best]:.3f}); "
+                     f"{ql['pdv']:.3f}, rank {q['rank']['qlike']['pdv']}/{len(ql)} "
+                     f"(best {best} {ql[best]:.3f}); "
                      f"MSE rank {q['rank']['mse']['pdv']}/{len(ql)}; DM (HLN) vs PDV significant at 5%: "
                      f"{sig or 'none'}; 90% MCS (QLIKE) {q['mcs']['qlike']['90']['included']}")
     for name in ("PUT", "WPUT"):
         ib = bmk["implied_beta"][name]
         fy = ib["full_year_dispersion"]
-        lines.append(f"{name}-implied beta overall {ib['overall']:.3f}; full years {fy['min']:.2f}-{fy['max']:.2f} "
-                     f"(sd {fy['sd']:.2f}; typical within-year se {fy['median_se_approx']:.2f}); "
+        lines.append(f"{name}-implied beta overall {ib['overall']:.3f}; "
+                     f"full years {fy['min']:.2f}-{fy['max']:.2f} (sd {fy['sd']:.2f}; "
+                     f"typical within-year se {fy['median_se_approx']:.2f}); "
                      f"replication at beta {bmk['implied_beta']['canonical_beta']}: daily corr "
                      f"{ib['daily']['beta_0.82']['corr_daily']:.3f} with the index")
     cm = bmk["co_movement"]["always_short_straddle"]
     lines.append("Always-short straddle (the mark's premium factor) daily corr / corr ex-SPX with "
-                 + "; ".join(f"{bn}: " + ", ".join(f"{p} {cm[bn][p]['corr_daily']:.2f}/{cm[bn][p]['partial_corr_ex_spx']:.2f}"
-                                                  for p in ("all", "2018", "2020", "2022"))
-                             for bn in ("WPUT", "PUT", "BFLY")))
+                 + "; ".join(f"{bn}: " + ", ".join(
+                     f"{p} {cm[bn][p]['corr_daily']:.2f}/{cm[bn][p]['partial_corr_ex_spx']:.2f}"
+                     for p in ("all", "2018", "2020", "2022"))
+                     for bn in ("WPUT", "PUT", "BFLY")))
     return lines
 
 
@@ -662,7 +671,7 @@ def main(argv=None) -> int:
     fam = fam.loc[:, ~fam.T.duplicated()]
     log.info("trial family: %d series", fam.shape[1])
     trials_sec = section_trials(committed, fam, meta)
-    block = int(round(np.median([boot[s]["block"] for s in SLEEVES])))
+    block = int(np.round(np.median([boot[s]["block"] for s in SLEEVES])))
     mtest = section_multiple_testing(committed, fam, block, min(args.reps, 5000), args.seed)
     log.info("SPA / StepM / PBO done")
     nulls_sec, null_df, vrp_short = section_nulls(eng, committed, args.shuffles, args.seed)
@@ -683,16 +692,16 @@ def main(argv=None) -> int:
         "code_sha256": code_sha256(),
         "inputs_sha256": inputs,
         "window": [str(committed.index[0].date()), str(committed.index[-1].date())],
-        "n_sessions": int(len(committed)),
+        "n_sessions": len(committed),
         "caveats": [
-            "Every P&L here is the backtest's mark-to-model P&L (Black-Scholes at beta x VIX-TS, constant "
-            "beta 0.82); the inference is about that proxy, not about executable option P&L",
-            "One window, 2018-01-02..2025-03-24; nothing here is out of sample for the rules, which were "
-            "revised on this window over the rounds in docs/trials_ledger.yaml",
-            "The closed forms (PSR, DSR, MinTRL) assume IID returns; the stationary bootstrap is the "
-            "primary interval and the closed forms sit beside it",
-            "Timing nulls condition on each sleeve's own exposure (position and size series): they test "
-            "when it trades, not whether the short- or long-vol exposure itself earns a premium",
+            ("Every P&L here is the backtest's mark-to-model P&L (Black-Scholes at beta x VIX-TS, constant "
+             "beta 0.82); the inference is about that proxy, not about executable option P&L"),
+            ("One window, 2018-01-02..2025-03-24; nothing here is out of sample for the rules, which were "
+             "revised on this window over the rounds in docs/trials_ledger.yaml"),
+            ("The closed forms (PSR, DSR, MinTRL) assume IID returns; the stationary bootstrap is the "
+             "primary interval and the closed forms sit beside it"),
+            ("Timing nulls condition on each sleeve's own exposure (position and size series): they test "
+             "when it trades, not whether the short- or long-vol exposure itself earns a premium"),
         ],
         "conventions": {"returns": "daily NAV returns from the $1M base (backtest_engine.compute_metrics); "
                                    "excess over T-bills, rf = 0",

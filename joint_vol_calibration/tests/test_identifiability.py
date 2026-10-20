@@ -15,6 +15,7 @@ against independent evidence, plus the committed diagnostics artifacts (C23).
    code at spot checks.
 """
 
+import itertools
 import json
 import math
 
@@ -91,8 +92,7 @@ def _noisy_fit(seed, iv_noise):
     with pytest.MonkeyPatch.context() as mp:
         tjc._patch_db(mp)
         cal = jc.JointCalibrator(as_of_date=tjc._SESSION, spx_chain=chain)
-        res = cal.calibrate(n_starts=0, warm_start=dict(tjc._TRUE), verbose=False)
-    return res
+        return cal.calibrate(n_starts=0, warm_start=dict(tjc._TRUE), verbose=False)
 
 
 def test_standard_errors_match_the_monte_carlo_spread_of_refits():
@@ -119,11 +119,13 @@ def _load(session):
 @pytest.mark.parametrize("session", _V2)
 def test_diagnostics_artifact_is_consistent(session):
     d = _load(session)
-    assert d["schema_version"] == 1 and d["session"] == session
+    assert d["schema_version"] == 1
+    assert d["session"] == session
     # both parts ran, from committed code (no uncommitted non-test changes)
     assert set(d["provenance"]) == {"heston", "rough"}
     for prov in d["provenance"].values():
-        assert prov["code_commit"] and prov["code_dirty_files"] == [], prov
+        assert prov["code_commit"], prov
+        assert prov["code_dirty_files"] == [], prov
     st = d["stored_fit"]
     assert st["loss_recomputed_from_residuals"] == pytest.approx(st["loss"], rel=1e-12)
     trf = d["trf"]
@@ -135,7 +137,8 @@ def test_diagnostics_artifact_is_consistent(session):
     assert max(jac["analytic_vs_central_fd_max_rel_diff_by_param"].values()) < 1e-5
     assert jac["speedup_vs_2point"] > 1.0
     de = d["de"]
-    assert de["used"] == "trf" and de["de_polished_loss"] >= trf["loss"] * (1 - 1e-6)
+    assert de["used"] == "trf"
+    assert de["de_polished_loss"] >= trf["loss"] * (1 - 1e-6)
 
     idf = d["identifiability"]
     sv = idf["rel_jacobian_singular_values"]
@@ -153,7 +156,7 @@ def test_diagnostics_artifact_is_consistent(session):
     assert prof["kappa_max"] == config.PROFILE_KAPPA_MAX
     rows = prof["rows"]
     losses = [r["loss"] for r in rows]
-    assert all(b <= a * (1 + 1e-9) for a, b in zip(losses, losses[1:]))
+    assert all(b <= a * (1 + 1e-9) for a, b in itertools.pairwise(losses))
     cap2 = next(r for r in rows if r["sigma_cap"] == 2.0)
     # the cap-2 refit is the production box whenever kappa stays below 20
     if cap2["params"]["kappa"] < config.HESTON_BOUNDS["kappa"][1]:
@@ -168,9 +171,11 @@ def test_diagnostics_artifact_is_consistent(session):
     h, hw, rgh = (d["spx_only"][k] for k in ("heston", "heston_wide_box", "rough_heston"))
     jr = d["joint_rough_heston"]
     for m in (h, hw, rgh, jr):
-        assert np.isfinite(m["spx_iv_rmse_exact"]) and np.isfinite(m["spx_oos_iv_rmse"])
+        assert np.isfinite(m["spx_iv_rmse_exact"])
+        assert np.isfinite(m["spx_oos_iv_rmse"])
         assert m["n_spx_oos"] == d["data"]["n_spx_oos"]
-    assert h["legs"] == hw["legs"] == rgh["legs"] == "spx" and jr["legs"] == "joint"
+    assert h["legs"] == hw["legs"] == rgh["legs"] == "spx"
+    assert jr["legs"] == "joint"
     # the wide box nests the production box: never a worse SPX-only optimum
     assert hw["loss"] <= h["loss"] * (1 + 1e-6)
     lo, hi = config.ROUGH_HESTON_H_BOUNDS
@@ -257,7 +262,7 @@ def test_sigma_box_rationale_in_config_matches_the_artifacts():
     # and H = 1/2 (Heston itself) on two sessions
     jr = {s: d[s]["joint_rough_heston"] for s in _V2}
     sig = [jr[s]["params"]["sigma"] for s in _V2]
-    assert "sigma" not in sum((jr[s]["on_bound"] for s in _V2), [])
+    assert "sigma" not in [b for s in _V2 for b in jr[s]["on_bound"]]
     assert (round(min(sig), 2), round(max(sig), 2)) == (0.88, 1.71)
     assert (round(jr["2026-10-16"]["loss"], 6), round(free["loss"], 6),
             round(d["2026-10-16"]["trf"]["loss"], 6)) == (7.3e-5, 8.5e-5, 1.18e-4)

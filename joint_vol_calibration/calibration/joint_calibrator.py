@@ -87,8 +87,8 @@ import os
 import pickle
 import time
 import warnings
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -96,29 +96,38 @@ from scipy import optimize, stats
 from scipy.stats import qmc
 
 from joint_vol_calibration.config import (
-    HESTON_BOUNDS, JOINT_W1, JOINT_W2, JOINT_W3,
-    RANDOM_SEED, DATA_DIR, VIX_INDEX_TENOR_DAYS,
-    HESTON_START_BOX, SIGMA_PROFILE_CAPS, PROFILE_KAPPA_MAX,
-    ROUGH_HESTON_H_BOUNDS, ROUGH_HESTON_N_FACTORS, ROUGH_HESTON_TIME_STEPS,
+    DATA_DIR,
+    HESTON_BOUNDS,
+    HESTON_START_BOX,
+    JOINT_W1,
+    JOINT_W2,
+    JOINT_W3,
+    PROFILE_KAPPA_MAX,
+    RANDOM_SEED,
+    ROUGH_HESTON_H_BOUNDS,
+    ROUGH_HESTON_N_FACTORS,
     ROUGH_HESTON_START_BOX,
+    ROUGH_HESTON_TIME_STEPS,
+    SIGMA_PROFILE_CAPS,
+    VIX_INDEX_TENOR_DAYS,
 )
 from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
 from joint_vol_calibration.data.option_chain import CAL_EXPIRY_TARGETS_DAYS
 from joint_vol_calibration.models.heston import (
     HESTON_PARAM_NAMES,
+    _one_minus_exp_over,
+    bates_call_batch,
+    bates_vix_term_index,
     heston_call_batch,
     heston_call_batch_grid,
     heston_call_batch_jac,
+    heston_vix_future_exact,
+    heston_vix_futures_curve,  # noqa: F401  (re-exported for back-compat)
+    heston_vix_index,
     heston_vix_term_index,
     heston_vix_term_index_jac,
-    heston_vix_index,
-    heston_vix_future_exact,
-    heston_vix_futures_curve,      # noqa: F401  (re-exported for back-compat)
     heston_vvix,
-    bates_call_batch,
-    bates_vix_term_index,
-    _one_minus_exp_over,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,7 +217,7 @@ def _at_bound(val: float, bound: float, span: float, rel_tol: float) -> bool:
     return abs(val - bound) <= rel_tol * scale
 
 
-def count_pinned_params(params: dict, feller_state: Optional[str] = None,
+def count_pinned_params(params: dict, feller_state: str | None = None,
                         rel_tol: float = 1e-3, feller_imposed: bool = True) -> list:
     """Names of the constraints that are active at a fit.
 
@@ -236,7 +245,7 @@ def count_pinned_params(params: dict, feller_state: Optional[str] = None,
     return pinned
 
 
-def active_constraints(params: dict, feller_state: Optional[str] = None,
+def active_constraints(params: dict, feller_state: str | None = None,
                        feller_imposed: bool = True, rel_tol: float = 1e-3) -> list:
     """Human-readable list of the active constraints (replaces the old
     'Pinned: rho, sigma at boundary' message)."""
@@ -266,20 +275,20 @@ def calibration_is_legacy(cal: dict) -> bool:
         return True
 
 
-def _session_of(snapshot_date) -> Optional[str]:
+def _session_of(snapshot_date) -> str | None:
     if snapshot_date is None:
         return None
     return oc.session_on_or_before(snapshot_date).isoformat()
 
 
-def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None,
-                              n_vix_tenors: Optional[int] = None, *,
-                              n_spx_expiries: Optional[int] = None,
-                              n_spx_options: Optional[int] = None,
-                              n_put_wing_expiries: Optional[int] = None,
-                              spx_snapshot_session: Optional[str] = None,
-                              spot_date: Optional[str] = None,
-                              model_version: Optional[int] = None,
+def is_acceptable_calibration(params: dict, spx_iv_rmse: float | None = None,
+                              n_vix_tenors: int | None = None, *,
+                              n_spx_expiries: int | None = None,
+                              n_spx_options: int | None = None,
+                              n_put_wing_expiries: int | None = None,
+                              spx_snapshot_session: str | None = None,
+                              spot_date: str | None = None,
+                              model_version: int | None = None,
                               allow_legacy: bool = False) -> tuple:
     """Reject degenerate, under-identified or stale Heston fits.
 
@@ -562,7 +571,7 @@ class HestonJointResiduals:
     def __call__(self, p) -> np.ndarray:
         self.n_calls += 1
         p = np.asarray(p, dtype=float)
-        kappa, theta, sigma, rho, v0 = p
+        kappa, theta, sigma, _rho, v0 = p
         parts = self._spx(p, keep_grids=True) if self.c_spx else []
         if self.c_vix:
             model = heston_vix_term_index(kappa, theta, sigma, v0, self.vix_tenors)
@@ -585,7 +594,7 @@ class HestonJointResiduals:
     def jac(self, p) -> np.ndarray:
         self.n_jac += 1
         p = np.asarray(p, dtype=float)
-        kappa, theta, sigma, rho, v0 = p
+        kappa, theta, sigma, _rho, v0 = p
         key = p.tobytes()
         grids = (self._grid_cache[1] if self._grid_cache is not None
                  and self._grid_cache[0] == key else [None] * len(self.groups))
@@ -627,7 +636,7 @@ def sobol_starts(n: int, start_box: dict, lo: np.ndarray, hi: np.ndarray,
     parameter), each coordinate clipped to the interior of [lo, hi]."""
     if n <= 0:
         return np.zeros((0, len(names)))
-    m = int(math.ceil(math.log2(max(n, 1))))
+    m = math.ceil(math.log2(max(n, 1)))
     u = qmc.Sobol(len(names), scramble=True, seed=seed).random_base2(m)[:n]
     out = np.empty_like(u)
     for j, name in enumerate(names):
@@ -658,7 +667,7 @@ def _group_basins(losses: Sequence[float], rtol: float = _BASIN_LOSS_RTOL) -> li
 
 
 def multistart_trf(fun: Callable, jac, starts: np.ndarray, lo: np.ndarray, hi: np.ndarray,
-                   labels: Optional[Sequence[str]] = None, *, max_nfev: int = _TRF_MAX_NFEV,
+                   labels: Sequence[str] | None = None, *, max_nfev: int = _TRF_MAX_NFEV,
                    tol: float = _TRF_TOL, x_scale="jac") -> tuple:
     """least_squares(method='trf') from every start; returns (best, report).
 
@@ -765,8 +774,8 @@ def identifiability_report(J: np.ndarray, r: np.ndarray, x: np.ndarray,
         "weakest_direction": {n: float(v) for n, v in zip(names, weakest)},
         "on_bound": on_bound,
         "free_params": [names[j] for j in free],
-        "standard_errors": {n: None for n in names},
-        "relative_standard_errors": {n: None for n in names},
+        "standard_errors": dict.fromkeys(names),
+        "relative_standard_errors": dict.fromkeys(names),
         "correlation": None,
         "se_note": ("Gauss-Newton s^2 (J^T J)^-1 over the free parameters: a local "
                     "curvature scale, not a sampling distribution (the residuals are "
@@ -821,7 +830,7 @@ def gauss_newton_profile_check(fun: Callable, x: np.ndarray, report: dict,
             xi = x.copy()
             xi[i] = float(np.clip(x[i] + m * se, lo[i], hi[i]))
 
-            def sub(y, xi=xi):
+            def sub(y, xi=xi, others=others):
                 z = xi.copy()
                 z[others] = y
                 return fun(z)
@@ -851,7 +860,7 @@ def previous_accepted_fit(spot_date: str, cal_dir=None) -> tuple:
             continue
         try:
             with open(path, "rb") as f:
-                res = pickle.load(f)
+                res = pickle.load(f)  # noqa: S301 (trusted: this module's own joint_cal_*.pkl results)
         except (OSError, EOFError, pickle.UnpicklingError, AttributeError,
                 ImportError, ValueError, TypeError):   # unreadable: not a warm start
             continue
@@ -889,8 +898,8 @@ class JointCalibrator:
     def __init__(
         self,
         as_of_date: str,
-        r: Optional[float] = None,
-        q: Optional[float] = None,
+        r: float | None = None,
+        q: float | None = None,
         w1: float = JOINT_W1,
         w2: float = JOINT_W2,
         w3: float = JOINT_W3,
@@ -932,11 +941,11 @@ class JointCalibrator:
         self.w1, self.w2, self.w3 = w1, w2, w3
         self._spx_chain_in = spx_chain
 
-        self.params: Optional[dict] = None
+        self.params: dict | None = None
         self.result = None
-        self.fit_time: Optional[float] = None
-        self.fit_cpu_time: Optional[float] = None
-        self.losses: Optional[dict] = None
+        self.fit_time: float | None = None
+        self.fit_cpu_time: float | None = None
+        self.losses: dict | None = None
         self._n_evals = 0
 
         logger.info("JointCalibrator: loading market data for %s", as_of_date)
@@ -1024,7 +1033,7 @@ class JointCalibrator:
                      + f"{r:.4%} cc")
         return r, label
 
-    def _session_for(self, snapshot_date) -> Optional[str]:
+    def _session_for(self, snapshot_date) -> str | None:
         """Session whose closing book a snapshot taken on ``snapshot_date``
         holds: the last SPX session in the DB on or before that date (a
         Sunday 05-31 snapshot holds Friday 05-29's quotes)."""
@@ -1454,7 +1463,7 @@ class JointCalibrator:
             "spx_oos_iv_rmse": float(np.sqrt(np.mean(e ** 2)) * 100) if len(e) else float("nan"),
             "spx_oos_put_wing_rmse": (float(np.sqrt(np.mean(wing ** 2)) * 100)
                                       if len(wing) else float("nan")),
-            "n_spx_oos": int(len(e)),
+            "n_spx_oos": len(e),
             "n_spx_oos_expiries": int(err["expiry"].nunique()),
             "spx_oos_rmse_by_expiry": by_exp,
         }
@@ -1468,7 +1477,7 @@ class JointCalibrator:
                 for t, T, m, x in zip(self.vix_ts["ticker"], self.vix_ts["tenor_years"],
                                       self.vix_ts["market_price"], np.atleast_1d(model))]
 
-    def _vx_futures_oos(self, kappa, theta, sigma, v0) -> Optional[float]:
+    def _vx_futures_oos(self, kappa, theta, sigma, v0) -> float | None:
         if self.vx_futures.empty:
             return None
         T = self.vx_futures["days_to_expiry"].to_numpy(float) / 365.0
@@ -1485,7 +1494,7 @@ class JointCalibrator:
             gk = g["strike"] / g["forward"]
             by_exp.append({
                 "expiry": exp, "T_days": round(float(g["time_to_expiry"].iloc[0]) * 365, 2),
-                "n": int(len(g)), "n_puts": int((g["right"] == "P").sum()),
+                "n": len(g), "n_puts": int((g["right"] == "P").sum()),
                 "n_wing_puts": int(((g["right"] == "P") & (gk < _PUT_WING_KF)).sum()),
                 "kf_min": float(gk.min()), "kf_max": float(gk.max()),
                 "forward": float(g["forward"].iloc[0]),
@@ -1497,7 +1506,7 @@ class JointCalibrator:
         anchor_r = s.groupby("expiry")["r_T"].first()
         anchor_q = s.groupby("expiry")["q_T"].first()
         return {
-            "n_spx_options": int(len(s)),
+            "n_spx_options": len(s),
             "n_spx_expiries": int(s["expiry"].nunique()),
             "n_spx_puts": int((s["right"] == "P").sum()),
             "n_spx_calls": int((s["right"] == "C").sum()),
@@ -1505,9 +1514,9 @@ class JointCalibrator:
             "n_put_wing_expiries": int(sum(1 for e in by_exp
                                            if e["n_wing_puts"] >= _MIN_WING_PUTS_PER_EXPIRY)),
             "anchors_by_expiry": by_exp,
-            "n_vix_tenors":  int(len(self.vix_ts)),
-            "n_vix_options": int(len(self.vix_options)),
-            "n_vx_futures":  int(len(self.vx_futures)),
+            "n_vix_tenors":  len(self.vix_ts),
+            "n_vix_options": len(self.vix_options),
+            "n_vx_futures":  len(self.vx_futures),
             "spot_date":     self.spot_date,
             "spx_snapshot_date": getattr(self, "spx_snapshot_date", None),
             "spx_snapshot_session": getattr(self, "spx_snapshot_session", None),
@@ -1595,8 +1604,8 @@ class JointCalibrator:
 
     # ── Least-squares form of the joint loss (C23) ────────────────────────────
 
-    def residual_model(self, w_spx: Optional[float] = None, w_vix: Optional[float] = None,
-                       w_vix_opt: Optional[float] = None) -> HestonJointResiduals:
+    def residual_model(self, w_spx: float | None = None, w_vix: float | None = None,
+                       w_vix_opt: float | None = None) -> HestonJointResiduals:
         """The joint loss as a residual vector (default: this calibrator's
         normalised weights; w_vix=0 gives the SPX-only problem)."""
         return HestonJointResiduals(
@@ -1618,7 +1627,7 @@ class JointCalibrator:
         return previous_accepted_fit(self.spot_date, Path(DATA_DIR) / "calibrations")
 
     def _trf_fit(self, model: HestonJointResiduals, lo, hi, n_starts: int, warm,
-                 jacobian: str, label: str = "Heston", start_box: Optional[dict] = None) -> tuple:
+                 jacobian: str, label: str = "Heston", start_box: dict | None = None) -> tuple:
         """Multi-start TRF on ``model``: warm start(s) first, then Sobol."""
         starts, labels = [], []
         for name, x in warm:
@@ -1661,7 +1670,7 @@ class JointCalibrator:
         warm_start="auto",
         jacobian: str = "analytic",
         de_check: bool = False,
-        de_workers: Optional[int] = None,
+        de_workers: int | None = None,
     ) -> dict:
         """
         Calibrate Heston by minimising joint_loss.
@@ -2063,7 +2072,7 @@ class JointCalibrator:
             "params": {n: float(v) for n, v in zip(names, x)},
             "loss": float(loss),
             "spx_iv_rmse_exact": float(np.sqrt(np.mean(ins ** 2)) * 100) if len(ins) else None,
-            "n_spx_anchors": int(len(ins)),
+            "n_spx_anchors": len(ins),
             "spx_oos_iv_rmse": oos["spx_oos_iv_rmse"],
             "spx_oos_put_wing_rmse": oos["spx_oos_put_wing_rmse"],
             "spx_oos_rmse_by_expiry": oos["spx_oos_rmse_by_expiry"],
@@ -2371,7 +2380,7 @@ class JointCalibrator:
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
-    def save(self, path: Optional[str] = None) -> str:
+    def save(self, path: str | None = None) -> str:
         """
         Persist the full calibration result dict (the same schema the daily
         pipeline writes). Default path: data_store/calibrations/joint_cal_{spot_date}.pkl

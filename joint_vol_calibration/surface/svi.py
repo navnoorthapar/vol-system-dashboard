@@ -176,9 +176,9 @@ class SVISurface:
     def w(self, k, T: float):
         Ts = self.T
         T = float(T)
-        if T <= Ts[0]:
+        if T <= Ts[0]:  # noqa: SIM300 (T is a maturity, not a constant)
             return self.slices[0].w(k) * T / Ts[0]
-        if T >= Ts[-1]:
+        if T >= Ts[-1]:  # noqa: SIM300 (T is a maturity, not a constant)
             return self.slices[-1].w(k) * T / Ts[-1]
         i = int(np.searchsorted(Ts, T, side="right") - 1)
         lam = (T - Ts[i]) / (Ts[i + 1] - Ts[i])
@@ -197,7 +197,7 @@ class SVISurface:
              "butterfly_grid_k": s.info.get("grid_k")} for s in self.slices]}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "SVISurface":
+    def from_dict(cls, d: dict) -> SVISurface:
         names = ("a", "b", "rho", "m", "sigma")
         return cls([SVISlice(s["expiry"], s["T"], tuple(s[n] for n in names))
                     for s in d["slices"]], name=d.get("model", "SVI"))
@@ -253,7 +253,7 @@ def _constraints(grid, lower=None, upper=None, cal_grid=CALENDAR_ROWS_GRID):
     s_hi = None if upper is None else wing_slopes(upper)
 
     def fun(x):
-        a, b, rho, m, sig = x
+        a, b, rho, _m, sig = x
         parts = [svi_g(grid, x),
                  [lee - b * (1 + rho), lee - b * (1 - rho),
                   a + b * sig * math.sqrt(max(1 - rho * rho, 0.0))]]
@@ -267,7 +267,7 @@ def _constraints(grid, lower=None, upper=None, cal_grid=CALENDAR_ROWS_GRID):
         return np.concatenate(parts)
 
     def jac(x):
-        a, b, rho, m, sig = x
+        _a, b, rho, _m, sig = x
         _, jg = svi_g_jacobian(grid, x)
         sq = math.sqrt(max(1 - rho * rho, 0.0))
         rows = [jg,
@@ -336,8 +336,8 @@ def fit_svi_slice(k, T, mid_iv, half_spread, x0, *, h_floor: float = 5e-4,
     if not (runs[0]["f"] < f0) or runs[0]["x"][1] < 1e-5:
         runs.append(run(0.1 * sc0))
     start = {"x": x0, "f": f0, "viol": float(max(0.0, -cfun(x0).min())), "res": None}
-    feasible = [r for r in runs + [start] if np.isfinite(r["f"]) and r["viol"] <= _FEAS_TOL]
-    best = min(feasible, key=lambda r: r["f"]) if feasible else min(runs + [start], key=lambda r: r["viol"])
+    feasible = [r for r in [*runs, start] if np.isfinite(r["f"]) and r["viol"] <= _FEAS_TOL]
+    best = min(feasible, key=lambda r: r["f"]) if feasible else min([*runs, start], key=lambda r: r["viol"])
     res = runs[0]["res"] if best["res"] is None else best["res"]
     x = best["x"]
     info = {"success": best["res"] is not None and bool(best["res"].success),

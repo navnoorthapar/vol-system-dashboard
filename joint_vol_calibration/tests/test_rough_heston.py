@@ -18,6 +18,7 @@ Independent checks, none of which reuse the code under test as its own oracle:
      the Adams route (exact fractional Riccati) measures the lifting error.
 """
 
+import itertools
 import math
 
 import numpy as np
@@ -36,21 +37,25 @@ _K = np.array([70.0, 80, 90, 95, 100, 105, 110, 120])
 
 def test_kernel_collapses_to_one_node_at_half():
     c, x = rh.lifted_kernel(0.5, 20, 1.0)
-    assert c[0] == pytest.approx(1.0, abs=1e-15) and x[0] == 0.0
+    assert c[0] == pytest.approx(1.0, abs=1e-15)
+    assert x[0] == 0.0
     np.testing.assert_array_equal(c[1:], 0.0)
 
 
-@pytest.mark.parametrize("H", (0.05, 0.1, 0.3, 0.45))
+@pytest.mark.parametrize("H", [0.05, 0.1, 0.3, 0.45])
 def test_kernel_nonnegative_and_converges_in_n(H):
     t = np.geomspace(1e-3, 1.0, 40)
     exact = t ** (H - 0.5) / math.gamma(H + 0.5)
     errs = []
     for n in (5, 20, 80):
         c, x = rh.lifted_kernel(H, n, 1.0)
-        assert np.all(c > 0) and np.all(x >= 0) and np.all(np.diff(x) > 0)
+        assert np.all(c > 0)
+        assert np.all(x >= 0)
+        assert np.all(np.diff(x) > 0)
         Kn = (c[None, :] * np.exp(-x[None, :] * t[:, None])).sum(axis=1)
         errs.append(float(np.max(np.abs(Kn / exact - 1))))
-    assert errs[0] > errs[1] > errs[2] and errs[2] < 5e-3, errs
+    assert errs[0] > errs[1] > errs[2], errs
+    assert errs[2] < 5e-3, errs
 
 
 def test_kernel_scales_with_maturity():
@@ -65,15 +70,15 @@ def test_kernel_scales_with_maturity():
 
 def test_invalid_hurst_rejected():
     for H in (0.0, -0.1, 0.51):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="H must be in"):
             rh.lifted_kernel(H, 20, 1.0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="H must be in"):
         rh.rough_heston_log_cf(np.array([1.0 - 0.5j]), 0.5, *_P, 0.6)
 
 
 # ── 2. H = 1/2 is Heston ─────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("T", (14 / 365, 91 / 365, 1.0))
+@pytest.mark.parametrize("T", [14 / 365, 91 / 365, 1.0])
 def test_half_is_heston_cf_with_second_order_convergence(T):
     z = np.linspace(0.0, 150.0, 301) - 0.5j
     ref = np.exp(_heston_log_cf(z, T, *_P))
@@ -81,11 +86,11 @@ def test_half_is_heston_cf_with_second_order_convergence(T):
             for N in (100, 200, 400)]
     assert errs[1] < 1e-5
     # implicit trapezoid: x4 per doubling of the steps
-    for a, b in zip(errs, errs[1:]):
+    for a, b in itertools.pairwise(errs):
         assert 3.0 < a / b < 5.0, errs
 
 
-@pytest.mark.parametrize("T", (7 / 365, 30 / 365, 1.0))
+@pytest.mark.parametrize("T", [7 / 365, 30 / 365, 1.0])
 def test_half_prices_match_heston_engine(T):
     rough = rh.rough_heston_call_batch(_F, _K, T, _R, _Q, *_P, 0.5)
     np.testing.assert_allclose(rough, heston_call_batch(_F, _K, T, _R, _Q, *_P), rtol=0, atol=1e-5 * _F)
@@ -111,9 +116,9 @@ def _mittag_leffler(alpha, beta, z, terms=400):
     return total
 
 
-@pytest.mark.parametrize("H, tol", ((0.02, 5e-3),   # the box floor, where joint fits land
-                                    (0.1, 3e-3), (0.3, 3e-3)))
-@pytest.mark.parametrize("T", (30 / 365, 1.0))
+@pytest.mark.parametrize(("H", "tol"), [(0.02, 5e-3),   # the box floor, where joint fits land
+                                        (0.1, 3e-3), (0.3, 3e-3)])
+@pytest.mark.parametrize("T", [30 / 365, 1.0])
 def test_expected_variance_matches_mittag_leffler(H, tol, T):
     """Exact rough Heston: E[V_t] = V0 + (theta - V0)(1 - E_a(-kappa t^a)),
     so int_0^T E[V] = theta T - (theta - V0) T E_{a,2}(-kappa T^a), a = H + 1/2."""
@@ -126,7 +131,7 @@ def test_expected_variance_matches_mittag_leffler(H, tol, T):
     # 0.34%-0.44% at H = 0.02
     assert errs[0] < tol
     # and it shrinks like n^-1.5 (ratio 2^1.5 = 2.8 per doubling)
-    for a, b in zip(errs, errs[1:]):
+    for a, b in itertools.pairwise(errs):
         assert 2.2 < a / b < 3.5, errs
 
 
@@ -182,7 +187,7 @@ def test_theta_v0_derivatives_are_exact():
 
 # ── 5. shape ─────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("H", (0.05, 0.15, 0.35))
+@pytest.mark.parametrize("H", [0.05, 0.15, 0.35])
 def test_rough_prices_decreasing_and_convex_in_strike(H):
     """No-arbitrage shape, to the quadrature target the engine promises
     (ROUGH_LEWIS_RTOL * F; 1-week far-wing prices are ~1e-9 * F)."""
@@ -217,7 +222,8 @@ def test_grid_refreshing_trf_recovers_a_synthetic_rough_market():
     x, loss, runs = rh.fit_trf_with_grid_refresh(resid, [x0], ["near"], lo, hi)
     assert loss < 1e-14
     assert x[5] == pytest.approx(0.2, abs=0.01)
-    assert runs[0]["loss"] == loss and runs[0]["status"] > 0
+    assert runs[0]["loss"] == loss
+    assert runs[0]["status"] > 0
 
 
 # ── 7. QuantLib oracle (dev-only) ────────────────────────────────────────────
@@ -242,9 +248,9 @@ def _ql_rough_calls(ql, p, H, days, K, approx, steps):
     return np.array(out)
 
 
-@pytest.mark.parametrize("p", (_P, _PR))
-@pytest.mark.parametrize("H", (0.1, 0.3, 0.49))
-@pytest.mark.parametrize("days", (30, 365))
+@pytest.mark.parametrize("p", [_P, _PR])
+@pytest.mark.parametrize("H", [0.1, 0.3, 0.49])
+@pytest.mark.parametrize("days", [30, 365])
 def test_matches_quantlib_lifted_engine(p, H, days):
     """Same kernel partition, independent ODE scheme (QuantLib: uniform steps,
     explicit predictor; here: graded steps, implicit quadratic step): they
@@ -257,7 +263,7 @@ def test_matches_quantlib_lifted_engine(p, H, days):
     assert np.max(np.abs(ours - theirs)) < 2e-6 * _F
 
 
-@pytest.mark.parametrize("H", (0.1, 0.3))
+@pytest.mark.parametrize("H", [0.1, 0.3])
 def test_lifting_error_against_quantlib_adams(H):
     """QuantLib's Adams scheme solves the exact fractional Riccati equation;
     the gap to it is the 20-factor lifting error, measured (not hidden):

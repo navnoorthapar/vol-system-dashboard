@@ -77,15 +77,17 @@ import math
 import os
 import re
 import sqlite3
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
-from datetime import datetime, time as dtime, timezone
+from datetime import UTC, datetime
+from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+from dateutil.relativedelta import MO
 from pandas.tseries.holiday import (
     AbstractHolidayCalendar,
     GoodFriday,
@@ -98,7 +100,6 @@ from pandas.tseries.holiday import (
     sunday_to_monday,
 )
 from pandas.tseries.offsets import CustomBusinessDay, DateOffset
-from dateutil.relativedelta import MO
 
 from joint_vol_calibration.config import (
     DATA_DIR,
@@ -244,19 +245,19 @@ def sessions_between(earlier, later) -> int:
 
 def _utcnow() -> datetime:
     """Clock used by the session helpers (tests monkeypatch this)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _now_ny(now: Optional[datetime] = None) -> datetime:
+def _now_ny(now: datetime | None = None) -> datetime:
     """``now`` (default: the clock) in New York time. Naive datetimes are taken as UTC."""
     if now is None:
         now = _utcnow()
     if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     return now.astimezone(NY_TZ)
 
 
-def last_closed_session(now: Optional[datetime] = None,
+def last_closed_session(now: datetime | None = None,
                         cutoff: dtime = CLOSE_DATA_CUTOFF) -> str:
     """The most recent NYSE session whose close has printed, as of ``now``.
 
@@ -272,7 +273,7 @@ def last_closed_session(now: Optional[datetime] = None,
     return previous_session(today)
 
 
-def quote_session(now: Optional[datetime] = None) -> str:
+def quote_session(now: datetime | None = None) -> str:
     """The NYSE session whose quotes a live feed is showing at ``now``.
 
     From the 09:30 ET open of a session day it is that day (intraday quotes
@@ -289,11 +290,11 @@ def quote_session(now: Optional[datetime] = None) -> str:
 def utc_iso(when: datetime) -> str:
     """ISO-8601 UTC timestamp ('2026-10-09T20:15:00Z'); naive datetimes are taken as UTC."""
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def is_intraday(now: Optional[datetime] = None) -> bool:
+def is_intraday(now: datetime | None = None) -> bool:
     """True between the 09:30 open and the data cutoff (16:15 ET) of a session day."""
     ny = _now_ny(now)
     return (is_nyse_session(pd.Timestamp(ny.date()))
@@ -404,7 +405,7 @@ ROOT_SETTLEMENT = {"SPX": "AM", "SPXW": "PM", "VIX": "AM", "VIXW": "AM"}
 _MINUTES_PER_YEAR = 525_600.0   # Cboe VIX methodology: T in minutes / 525,600
 
 
-def parse_occ_symbol(symbol) -> Optional[dict]:
+def parse_occ_symbol(symbol) -> dict | None:
     """Split an OCC option symbol into root, expiry (YYYY-MM-DD), right ('C'/'P') and strike.
 
     Returns None when ``symbol`` is not an OCC symbol.
@@ -423,12 +424,12 @@ def parse_occ_symbol(symbol) -> Optional[dict]:
     }
 
 
-def settlement_for_root(root) -> Optional[str]:
+def settlement_for_root(root) -> str | None:
     """'AM' or 'PM' for a known option root, else None."""
     return ROOT_SETTLEMENT.get(str(root).upper()) if root else None
 
 
-def time_to_settlement(snapshot_date, expiry, settlement: Optional[str] = None) -> float:
+def time_to_settlement(snapshot_date, expiry, settlement: str | None = None) -> float:
     """Years from the 16:00 ET close of ``snapshot_date`` to the contract's settlement.
 
     AM-settled contracts settle at 09:30 ET on ``expiry``, PM-settled at 16:00
@@ -952,9 +953,7 @@ def _records(df: pd.DataFrame, cols: Sequence[str]) -> list:
                 clean[k] = None
             elif isinstance(v, (float, np.floating)):
                 clean[k] = None if math.isnan(v) else float(v)
-            elif isinstance(v, (np.integer,)):
-                clean[k] = int(v)
-            elif isinstance(v, (np.bool_, bool)):
+            elif isinstance(v, (np.integer, np.bool_, bool)):
                 clean[k] = int(v)
             else:
                 clean[k] = v
@@ -1053,7 +1052,7 @@ def insert_spx_ohlcv(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     return len(rows)
 
 
-def _recompute_log_returns(conn, from_date: Optional[str]) -> int:
+def _recompute_log_returns(conn, from_date: str | None) -> int:
     """Recompute log_return for every row from ``from_date`` on, against the previous stored close."""
     anchor = None
     if from_date is not None:
@@ -1077,7 +1076,7 @@ def _recompute_log_returns(conn, from_date: Optional[str]) -> int:
     return len(updates)
 
 
-def get_spx_ohlcv(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_spx_ohlcv(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return SPX OHLCV for [start_date, as_of_date].
 
@@ -1096,7 +1095,7 @@ def get_spx_ohlcv(as_of_date: str, start_date: Optional[str] = None) -> pd.DataF
     return _get_dated("spx_ohlcv", as_of_date, start_date)
 
 
-def _get_dated(table: str, as_of_date: str, start_date: Optional[str],
+def _get_dated(table: str, as_of_date: str, start_date: str | None,
                order: str = "date ASC") -> pd.DataFrame:
     _validate_date(as_of_date)
     sql = f"SELECT * FROM {table} WHERE date <= ?"
@@ -1152,8 +1151,9 @@ def _skip_over_official(conn, table: str, df: pd.DataFrame, keys: Sequence[str])
     if not not_official.any():
         return df
     key_sql = ", ".join(keys)
+    # table and key names come from this module's constants; the values are bound
     official = {tuple(map(str, r)) for r in conn.execute(
-        f"SELECT {key_sql} FROM {table} WHERE source = ? AND date BETWEEN ? AND ?",
+        f"SELECT {key_sql} FROM {table} WHERE source = ? AND date BETWEEN ? AND ?",  # noqa: S608
         (OFFICIAL_INDEX_SOURCE, df["date"].min(), df["date"].max()))}
     if not official:
         return df
@@ -1199,7 +1199,7 @@ def insert_vix_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     return len(rows)
 
 
-def get_vix_daily(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_vix_daily(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return VIX daily levels up to as_of_date.
 
@@ -1423,7 +1423,8 @@ def insert_options_snapshot(df: pd.DataFrame, underlying: str) -> int:
         df["time_to_expiry"] = given.where(~known & given.notna(), tte)
 
     if "source" in df.columns:
-        aliased = df["source"].notna() & df["source"].astype(str).str.strip().str.lower().isin(_SOURCE_ALIASES)
+        spelled = df["source"].astype(str).str.strip().str.lower()
+        aliased = df["source"].notna() & spelled.isin(_SOURCE_ALIASES)
         if aliased.any():
             logger.info("%s snapshot: source %s stored as %s", und,
                         sorted(df.loc[aliased, "source"].astype(str).unique()),
@@ -1460,7 +1461,7 @@ def insert_options_snapshot(df: pd.DataFrame, underlying: str) -> int:
 
 
 def get_options_surface(as_of_date: str, underlying: str,
-                        max_age_sessions: Optional[int] = None) -> pd.DataFrame:
+                        max_age_sessions: int | None = None) -> pd.DataFrame:
     """
     Return the most recent options chain for an underlying as of a date.
 
@@ -1523,7 +1524,7 @@ _DATED_TABLES = {"spx_ohlcv": "date", "vix_daily": "date", "vix_term_structure":
                  "cboe_index_daily": "date", "rates_daily": "date"}
 
 
-def get_latest_date(table: str) -> Optional[str]:
+def get_latest_date(table: str) -> str | None:
     """Latest stored date in one of the dated tables (None if it is empty)."""
     if table not in _DATED_TABLES:
         raise ValueError(f"not a dated table: {table}")
@@ -1532,7 +1533,7 @@ def get_latest_date(table: str) -> Optional[str]:
         return conn.execute(f"SELECT MAX({_DATED_TABLES[table]}) FROM {table}").fetchone()[0]
 
 
-def get_options_snapshot_dates(underlying: Optional[str] = None) -> list:
+def get_options_snapshot_dates(underlying: str | None = None) -> list:
     """Sorted snapshot dates stored (optionally for one underlying)."""
     _ensure_schema()
     sql = "SELECT DISTINCT snapshot_date FROM options_snapshots"
@@ -1606,7 +1607,7 @@ def insert_vix_term_structure(df: pd.DataFrame, *, warn_dropped: bool = True) ->
     return len(rows)
 
 
-def get_vix_term_structure(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_vix_term_structure(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return VIX term structure up to as_of_date (long format, one row per date and ticker).
 
@@ -1615,7 +1616,7 @@ def get_vix_term_structure(as_of_date: str, start_date: Optional[str] = None) ->
     return _get_dated("vix_term_structure", as_of_date, start_date, order="date ASC, tenor_days ASC")
 
 
-def get_vix_term_structure_wide(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_vix_term_structure_wide(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return VIX term structure in wide format: one column per ticker.
 
@@ -1657,8 +1658,8 @@ def compare_sources(primary: pd.DataFrame, secondary: pd.DataFrame, tol: float =
     cols = [*keys, a, b, "diff"]
     if primary is None or secondary is None or primary.empty or secondary.empty:
         return pd.DataFrame(columns=cols)
-    p = primary[keys + [value]].copy()
-    s = secondary[keys + [value]].copy()
+    p = primary[[*keys, value]].copy()
+    s = secondary[[*keys, value]].copy()
     for f in (p, s):
         f["date"] = _to_date_str(f["date"])
     p = drop_non_sessions(p.drop_duplicates(keys, keep="last"), f"compare_sources {a}")
@@ -1678,7 +1679,7 @@ def compare_sources(primary: pd.DataFrame, secondary: pd.DataFrame, tol: float =
 
 
 def cross_check_vix(reference: pd.DataFrame, tol: float = 0.25,
-                    start: Optional[str] = None, end: Optional[str] = None,
+                    start: str | None = None, end: str | None = None,
                     *, log: bool = True) -> pd.DataFrame:
     """Compare stored VIX-family closes with an independent reference.
 
@@ -1748,7 +1749,7 @@ def insert_classifier_predictions(df: pd.DataFrame) -> int:
     return len(rows)
 
 
-def get_classifier_predictions(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_classifier_predictions(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """Return classifier predictions strictly up to as_of_date (look-ahead safe)."""
     _ensure_schema()
     return _get_dated("classifier_predictions", as_of_date, start_date)
@@ -1764,7 +1765,7 @@ def insert_regime_labels(df: pd.DataFrame) -> int:
     return insert_classifier_predictions(df)
 
 
-def get_regime_labels(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_regime_labels(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """Deprecated alias of get_classifier_predictions (classifier output, not rule labels)."""
     return get_classifier_predictions(as_of_date, start_date)
 
@@ -1842,7 +1843,7 @@ def get_tbill_rate(as_of_date: str, fallback: float = 0.045) -> float:
     return float(row["rate"])
 
 
-def get_tbill_rates_series(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_tbill_rates_series(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return full T-bill rate series up to as_of_date.
 
@@ -1894,8 +1895,8 @@ def insert_cboe_index(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
                     _warn_dropped_keyed(conn, "cboe_index_daily", sub, "symbol", sym)
         df = _skip_over_official(conn, "cboe_index_daily", df, ["date", "symbol"])
         rows = _records(df, cols)
-        conn.executemany(
-            f"INSERT OR REPLACE INTO cboe_index_daily ({', '.join(cols)}) "
+        conn.executemany(  # the column names are the schema's own, the values are bound
+            f"INSERT OR REPLACE INTO cboe_index_daily ({', '.join(cols)}) "  # noqa: S608
             f"VALUES ({', '.join(':' + c for c in cols)})", rows)
     logger.info("Upserted %d Cboe index rows (%s)", len(rows), ", ".join(sorted(df["symbol"].unique())))
     return len(rows)
@@ -1904,17 +1905,18 @@ def insert_cboe_index(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
 def _warn_dropped_keyed(conn, table: str, incoming: pd.DataFrame, col: str, value: str) -> list:
     """_warn_dropped for one series of a (date, <col>)-keyed table."""
     lo, hi = incoming["date"].min(), incoming["date"].max()
-    stored = {r[0] for r in conn.execute(
-        f"SELECT date FROM {table} WHERE {col} = ? AND date BETWEEN ? AND ?", (value, lo, hi))}
+    stored = {r[0] for r in conn.execute(  # table and column from the callers' constants
+        f"SELECT date FROM {table} WHERE {col} = ? AND date BETWEEN ? AND ?", (value, lo, hi))}  # noqa: S608
     gone = sorted(stored - set(incoming["date"]))
     if gone:
         logger.warning("%s %s: source no longer returns %d stored row(s) in %s..%s (kept): %s%s",
-                       table, value, len(gone), lo, hi, ", ".join(gone[:10]), " ..." if len(gone) > 10 else "")
+                       table, value, len(gone), lo, hi, ", ".join(gone[:10]),
+                       " ..." if len(gone) > 10 else "")
     return gone
 
 
-def get_cboe_index(as_of_date: str, symbols: Optional[Iterable[str]] = None,
-                   start_date: Optional[str] = None) -> pd.DataFrame:
+def get_cboe_index(as_of_date: str, symbols: Iterable[str] | None = None,
+                   start_date: str | None = None) -> pd.DataFrame:
     """Cboe index rows with date <= as_of_date (optionally from start_date), long format.
 
     LOOK-AHEAD GUARD: date <= as_of_date strictly. Columns [date (datetime),
@@ -1939,13 +1941,14 @@ def get_cboe_index(as_of_date: str, symbols: Optional[Iterable[str]] = None,
     return df
 
 
-def get_cboe_index_wide(as_of_date: str, symbols: Optional[Iterable[str]] = None,
-                        start_date: Optional[str] = None) -> pd.DataFrame:
+def get_cboe_index_wide(as_of_date: str, symbols: Iterable[str] | None = None,
+                        start_date: str | None = None) -> pd.DataFrame:
     """get_cboe_index pivoted to one close column per symbol (index: date)."""
     long = get_cboe_index(as_of_date, symbols, start_date)
     if long.empty:
         return pd.DataFrame()
-    wide = long.pivot(index="date", columns="symbol", values="close")
+    # pivot, not pivot_table: (date, symbol) is the key, and a duplicate must raise, not be averaged
+    wide = long.pivot(index="date", columns="symbol", values="close")  # noqa: PD010
     wide.columns.name = None
     return wide
 
@@ -1989,7 +1992,8 @@ def insert_rates_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
             params=[df["date"].min(), df["date"].max()])
         if warn_dropped and not stored.empty:
             got = set(zip(df["date"], df["series"]))
-            mine = stored[stored["series"].isin(df["series"].unique()) & stored["source"].isin(df["source"].unique())]
+            mine = stored[stored["series"].isin(df["series"].unique())
+                          & stored["source"].isin(df["source"].unique())]
             gone = [f"{d}/{s}" for d, s in zip(mine["date"], mine["series"]) if (d, s) not in got]
             if gone:
                 logger.warning("rates_daily: source no longer returns %d stored row(s) (kept): %s%s",
@@ -2009,8 +2013,8 @@ def insert_rates_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     return len(rows)
 
 
-def get_rates_daily(as_of_date: str, series: Optional[Iterable[str]] = None,
-                    start_date: Optional[str] = None) -> pd.DataFrame:
+def get_rates_daily(as_of_date: str, series: Iterable[str] | None = None,
+                    start_date: str | None = None) -> pd.DataFrame:
     """Rate quotes dated on or before as_of_date, long format [date (str), series, value, source].
 
     LOOK-AHEAD GUARD: date <= as_of_date. This is the quote's own date; a
@@ -2121,9 +2125,9 @@ def _write_parquet_if_changed(df: pd.DataFrame, path: Path) -> bool:
     return True
 
 
-def export_market_partitions(root: Optional[Path] = None,
-                             tables: Optional[Iterable[str]] = None,
-                             since: Optional[str] = None) -> list:
+def export_market_partitions(root: Path | None = None,
+                             tables: Iterable[str] | None = None,
+                             since: str | None = None) -> list:
     """Persist market tables as yearly parquet partitions.
 
     Layout: ``<root>/<table>/<table>_<YYYY>.parquet`` (root defaults to
@@ -2171,7 +2175,7 @@ def export_market_partitions(root: Optional[Path] = None,
     return written
 
 
-def read_market_partitions(table: str, root: Optional[Path] = None) -> pd.DataFrame:
+def read_market_partitions(table: str, root: Path | None = None) -> pd.DataFrame:
     """Every persisted row of ``table`` (all years), canonical columns and dtypes; empty if none."""
     root = Path(root) if root is not None else MARKET_DIR
     keys, cols, dtypes = _MARKET_TABLES[table]
@@ -2182,7 +2186,7 @@ def read_market_partitions(table: str, root: Optional[Path] = None) -> pd.DataFr
     return _canonical(df, cols, dtypes, keys)
 
 
-def replace_market_partitions(table: str, df: pd.DataFrame, root: Optional[Path] = None) -> list:
+def replace_market_partitions(table: str, df: pd.DataFrame, root: Path | None = None) -> list:
     """Make the persisted partitions of ``table`` hold exactly ``df``'s rows.
 
     FOR DELIBERATE, SCRIPTED CORRECTIONS ONLY (pipeline.correct_vix_index_family):
@@ -2213,8 +2217,8 @@ def replace_market_partitions(table: str, df: pd.DataFrame, root: Optional[Path]
     return written
 
 
-def import_market_partitions(root: Optional[Path] = None,
-                             tables: Optional[Iterable[str]] = None) -> dict:
+def import_market_partitions(root: Path | None = None,
+                             tables: Iterable[str] | None = None) -> dict:
     """Upsert every persisted market partition under ``root`` into the database.
 
     Use at the start of a run, before downloading: the files are the record of
@@ -2240,16 +2244,16 @@ def import_market_partitions(root: Optional[Path] = None,
     return counts
 
 
-def options_snapshot_path(snapshot_date: str, underlying: str, root: Optional[Path] = None) -> Path:
+def options_snapshot_path(snapshot_date: str, underlying: str, root: Path | None = None) -> Path:
     root = Path(root) if root is not None else OPTIONS_DIR
     return root / f"{underlying.lower()}_{snapshot_date}.parquet"
 
 
 def export_options_snapshot(snapshot_date: str, underlying: str,
-                            root: Optional[Path] = None, *,
-                            moneyness: Optional[tuple] = None,
-                            max_years: Optional[float] = None,
-                            two_sided_only: bool = False) -> Optional[Path]:
+                            root: Path | None = None, *,
+                            moneyness: tuple | None = None,
+                            max_years: float | None = None,
+                            two_sided_only: bool = False) -> Path | None:
     """Persist one stored chain to ``<root>/<underlying>_<snapshot_date>.parquet``.
 
     All columns except the surrogate id, sorted by (root, expiry, right,
@@ -2281,7 +2285,7 @@ def export_options_snapshot(snapshot_date: str, underlying: str,
     return path if _write_parquet_if_changed(df, path) else None
 
 
-def export_options_snapshots(root: Optional[Path] = None, since: Optional[str] = None,
+def export_options_snapshots(root: Path | None = None, since: str | None = None,
                              **filters) -> list:
     """``export_options_snapshot`` for every stored chain (optionally only sessions >= since).
 
@@ -2300,7 +2304,7 @@ def export_options_snapshots(root: Optional[Path] = None, since: Optional[str] =
     return out
 
 
-def import_options_snapshots(root: Optional[Path] = None, overwrite: bool = False) -> int:
+def import_options_snapshots(root: Path | None = None, overwrite: bool = False) -> int:
     """Load persisted chains into the database.
 
     A chain the database already holds for that (session, underlying) is left

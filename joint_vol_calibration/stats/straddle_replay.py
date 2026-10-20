@@ -23,7 +23,7 @@ from the engine is not possible.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Union
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
@@ -43,11 +43,11 @@ class StraddleReplay:
         dates: Sequence,
         spx_close: pd.Series,
         vix_wide_idx: pd.DataFrame,
-        r: "float | pd.Series",
+        r: float | pd.Series,
         q: float = bte.Q_BACKTEST,
         atm_to_vix_ratio: float = bte.ATM_TO_VIX_RATIO,
         tenor_days: int = bte.STRADDLE_TENOR_DAYS,
-        corrections: Optional[bte.C22Corrections] = None,
+        corrections: bte.C22Corrections | None = None,
     ):
         c = corrections or bte.C22Corrections()
         if c != bte.C22Corrections():
@@ -114,9 +114,9 @@ class StraddleReplay:
 
     def simulate(
         self,
-        position: Union[Sequence[float], pd.Series],
-        kelly: Union[Sequence[float], pd.Series],
-        nav_base: Union[float, Sequence[float]] = bte.INITIAL_CAPITAL,
+        position: Sequence[float] | pd.Series,
+        kelly: Sequence[float] | pd.Series,
+        nav_base: float | Sequence[float] = bte.INITIAL_CAPITAL,
     ) -> np.ndarray:
         """Daily P&L of the straddle sleeve for this position/size series.
 
@@ -165,10 +165,7 @@ class StraddleReplay:
                 raw = dirn * (V_t - V - dl * (S - Sp)) * mult
                 fin = (dirn * (rp * (dl * Sp - V) - q * dl * Sp) / TD * mult)
                 closing = expired or pos == 0
-                if closing:
-                    slip = hedge_cost(dl, S, nc)
-                else:
-                    slip = hedge_cost(delta_t - dl, S, nc)
+                slip = hedge_cost(dl, S, nc) if closing else hedge_cost(delta_t - dl, S, nc)
                 day += raw + fin - slip
                 V, dl, Sp, rp = V_t, delta_t, S, r_t
                 if closing:

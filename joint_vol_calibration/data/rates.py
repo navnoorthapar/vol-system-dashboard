@@ -81,13 +81,14 @@ from __future__ import annotations
 
 import argparse
 import io
+import itertools
 import json
 import logging
 import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -110,7 +111,7 @@ _PAR_COLUMNS = {
     "5 Yr": ("UST_PAR_5Y", 60.0), "7 Yr": ("UST_PAR_7Y", 84.0), "10 Yr": ("UST_PAR_10Y", 120.0),
     "20 Yr": ("UST_PAR_20Y", 240.0), "30 Yr": ("UST_PAR_30Y", 360.0),
 }
-PAR_MONTHS = {s: m for s, m in _PAR_COLUMNS.values()}
+PAR_MONTHS = dict(_PAR_COLUMNS.values())
 
 # FRED id -> series. DGS* are the same constant-maturity par yields as the
 # Treasury file (identical on every overlapping date checked, see tests).
@@ -244,7 +245,7 @@ def parse_fred_csv(text: str) -> pd.DataFrame:
 FRED_MAX_IDS_PER_REQUEST = 12
 
 
-def download_fred(ids: Iterable[str] = tuple(FRED_SERIES), start: Optional[str] = None) -> pd.DataFrame:
+def download_fred(ids: Iterable[str] = tuple(FRED_SERIES), start: str | None = None) -> pd.DataFrame:
     """Keyless FRED download of ``ids`` (parse_fred_csv), rows from ``start`` on.
 
     One request per FRED_MAX_IDS_PER_REQUEST ids. The multi-series graph CSV
@@ -279,13 +280,14 @@ def parse_nyfed_sofr(payload: dict) -> pd.DataFrame:
     return df[["date", "series", "value", "source"]].sort_values("date").reset_index(drop=True)
 
 
-def download_nyfed_sofr(start: str = "2018-04-02", end: Optional[str] = None) -> pd.DataFrame:
+def download_nyfed_sofr(start: str = "2018-04-02", end: str | None = None) -> pd.DataFrame:
     """SOFR history from the NY Fed's markets API (one request; parse_nyfed_sofr)."""
-    end = end or date.today().isoformat()
+    # only an upper bound for the request: the API returns what it has published
+    end = end or date.today().isoformat()  # noqa: DTZ011
     return parse_nyfed_sofr(json.loads(_get_text(_NYFED_SOFR.format(start=start, end=end))))
 
 
-def refresh_rates(start_year: Optional[int] = None, end_year: Optional[int] = None, *,
+def refresh_rates(start_year: int | None = None, end_year: int | None = None, *,
                   sofr: bool = True, fred_ids: Sequence[str] = ()) -> dict:
     """Download the Treasury bill and par files for [start_year, end_year] (2 requests a
     year) and, with ``sofr``, the NY Fed SOFR history into database.rates_daily.
@@ -300,7 +302,7 @@ def refresh_rates(start_year: Optional[int] = None, end_year: Optional[int] = No
             try:
                 df = download_treasury_year(year, kind)
                 out["treasury"] += db.insert_rates_daily(df) if not df.empty else 0
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 (each source fails alone: reported in out['errors'])
                 out["errors"].append(f"treasury {kind} {year}: {e}")
                 logger.warning("Treasury %s %d failed: %s", kind, year, e)
     if sofr:
@@ -308,14 +310,14 @@ def refresh_rates(start_year: Optional[int] = None, end_year: Optional[int] = No
             df = download_nyfed_sofr(start=max(f"{start_year}-01-01", "2018-04-02"),
                                      end=f"{end_year}-12-31")
             out["nyfed"] = db.insert_rates_daily(df) if not df.empty else 0
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 (each source fails alone: reported in out['errors'])
             out["errors"].append(f"nyfed sofr: {e}")
             logger.warning("NY Fed SOFR download failed: %s", e)
     if fred_ids:
         try:
             df = download_fred(fred_ids, start=f"{start_year}-01-01")
             out["fred"] = db.insert_rates_daily(df) if not df.empty else 0
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 (each source fails alone: reported in out['errors'])
             out["errors"].append(f"fred: {e}")
             logger.warning("FRED download failed: %s", e)
     return out
@@ -345,7 +347,7 @@ def load_rate_quotes(root=None) -> pd.DataFrame:
     part = db.read_market_partitions("rates_daily", root)
     try:
         rows = db.get_rates_daily("9999-12-31")
-    except Exception as e:          # a read-only or absent database: the partitions alone
+    except Exception as e:  # noqa: BLE001 (a read-only or absent database: the partitions alone)
         logger.info("rates: database not readable (%s); using the partitions only", e)
         rows = pd.DataFrame(columns=["date", "series", "value", "source"])
     df = pd.concat([part, rows], ignore_index=True).drop_duplicates(["date", "series"], keep="last")
@@ -407,7 +409,7 @@ class ZeroCurve:
         ll = np.concatenate([[0.0], self.log_df])
         out = np.interp(T, tt, ll)
         f_last = (ll[-2] - ll[-1]) / (tt[-1] - tt[-2])           # flat forward beyond the last node
-        out = np.where(T > tt[-1], ll[-1] - f_last * (T - tt[-1]), out)
+        out = np.where(T > tt[-1], ll[-1] - f_last * (T - tt[-1]), out)  # noqa: SIM300 (T: maturities)
         return np.where(T <= 0.0, 0.0, out)
 
     def discount_factor(self, T):
@@ -582,9 +584,9 @@ def sofr(as_of: str, *, max_age_days: int = 7, root=None) -> dict:
 
 # ── Parity-implied (box) rates against the curve ──────────────────────────────
 
-def parity_rate_comparison(carry: pd.DataFrame, as_of: str, *, curve: Optional[ZeroCurve] = None,
-                           par_curve: Optional[ZeroCurve] = None,
-                           sofr_cc: Optional[float] = None) -> pd.DataFrame:
+def parity_rate_comparison(carry: pd.DataFrame, as_of: str, *, curve: ZeroCurve | None = None,
+                           par_curve: ZeroCurve | None = None,
+                           sofr_cc: float | None = None) -> pd.DataFrame:
     """Per expiry: the SPX put-call-parity rate r_T against the Treasury curve.
 
     ``carry`` is option_chain.CleanChain.carry (expiry, T, r, method, ...);
@@ -628,7 +630,7 @@ def par_only_curve(as_of: str, root=None, **kw) -> ZeroCurve:
     return build_zero_curve(q, as_of, **kw)
 
 
-def committed_chain_comparison(snapshot_dates: Optional[Sequence[str]] = None, *, root=None) -> pd.DataFrame:
+def committed_chain_comparison(snapshot_dates: Sequence[str] | None = None, *, root=None) -> pd.DataFrame:
     """parity_rate_comparison for every committed SPX chain (data_store/options/spx_*.parquet).
 
     Each chain is cleaned with the calibrator's cleaner
@@ -677,11 +679,12 @@ def summarize_parity_comparison(cmp_: pd.DataFrame,
     """Median and interquartile range of the parity-minus-curve spreads (bp) by
     days-to-expiry bucket [lo, hi), over every row of committed_chain_comparison."""
     df = cmp_.copy()
-    labels = [f"{int(lo)}-{int(hi)}d" if hi < 10_000 else f">={int(lo)}d" for lo, hi in zip(buckets[:-1], buckets[1:])]
+    labels = [f"{int(lo)}-{int(hi)}d" if hi < 10_000 else f">={int(lo)}d"
+              for lo, hi in itertools.pairwise(buckets)]
     df["bucket"] = pd.cut(df["days"], list(buckets), right=False, labels=labels)
     rows = []
     for b, g in df.groupby("bucket", observed=True):
-        row = {"bucket": str(b), "n": int(len(g)), "sessions": int(g["as_of"].nunique())}
+        row = {"bucket": str(b), "n": len(g), "sessions": int(g["as_of"].nunique())}
         for col in ("spread_bills_bp", "spread_par_bp", "spread_sofr_bp"):
             if col in g.columns:
                 q1, med, q3 = np.nanpercentile(g[col].to_numpy(float), [25, 50, 75])

@@ -41,7 +41,7 @@ Tests:
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional, Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -149,7 +149,7 @@ def vix2_forecast(vix: pd.Series) -> pd.Series:
 
 def garch_forecast(log_returns: pd.Series, horizon: int = HORIZON, o: int = 0,
                    refit_every: int = 21, train_min: int = 504,
-                   annualise: int = ANNUALISE, name: Optional[str] = None) -> pd.Series:
+                   annualise: int = ANNUALISE, name: str | None = None) -> pd.Series:
     """Walk-forward GARCH(1,1) (o=0) or GJR-GARCH(1,1,1) (o=1) forecasts.
 
     Every ``refit_every`` sessions the model is estimated (arch, zero mean,
@@ -179,7 +179,7 @@ def garch_forecast(log_returns: pd.Series, horizon: int = HORIZON, o: int = 0,
 
 
 def build_forecasts(log_returns: pd.Series, vix: pd.Series, horizon: int = HORIZON,
-                    models: Optional[Iterable[str]] = None) -> pd.DataFrame:
+                    models: Iterable[str] | None = None) -> pd.DataFrame:
     """Every forecaster on the same date index (NaN where one has no forecast)."""
     r = log_returns.astype(float).dropna()
     builders = {
@@ -203,8 +203,8 @@ def _autocov(d: np.ndarray, k: int) -> float:
 
 
 def dm_test(loss_a: Sequence[float], loss_b: Sequence[float], horizon: int = 1,
-            kernel: str = "rectangular", lags: Optional[int] = None,
-            harvey: bool = True) -> Dict[str, float]:
+            kernel: str = "rectangular", lags: int | None = None,
+            harvey: bool = True) -> dict[str, float]:
     """Diebold-Mariano test of E[loss_a − loss_b] = 0.
 
     kernel 'rectangular' uses lags = horizon − 1 unweighted autocovariances
@@ -242,7 +242,7 @@ def dm_test(loss_a: Sequence[float], loss_b: Sequence[float], horizon: int = 1,
 
 
 def mcs(losses: pd.DataFrame, size: float = 0.10, block_size: int = HORIZON,
-        reps: int = 5000, seed: int = 42, method: str = "R") -> Dict:
+        reps: int = 5000, seed: int = 42, method: str = "R") -> dict:
     """Model Confidence Set via arch: p-value per model and the set at ``size``."""
     from arch.bootstrap import MCS
 
@@ -259,14 +259,14 @@ def mcs(losses: pd.DataFrame, size: float = 0.10, block_size: int = HORIZON,
 
 def evaluate(forecasts: pd.DataFrame, y2: pd.Series, horizon: int = HORIZON,
              reference: str = "pdv", mcs_reps: int = 5000, seed: int = 42,
-             mcs_block: Optional[int] = None) -> Dict:
+             mcs_block: int | None = None) -> dict:
     """Losses, DM tests of ``reference`` against every other model, and the
     MCS at 90% and 75% on the rows where every model and the target exist."""
     df = pd.concat([forecasts, y2.rename("_y2")], axis=1).dropna()
     if df.empty:
         raise ValueError("no common rows")
     y = df.pop("_y2").to_numpy()
-    out: Dict = {"n": int(len(df)), "start": str(df.index[0].date()), "end": str(df.index[-1].date()),
+    out: dict = {"n": len(df), "start": str(df.index[0].date()), "end": str(df.index[-1].date()),
                  "horizon": int(horizon), "models": list(df.columns), "losses": {}, "dm": {}, "mcs": {},
                  "r2_vol": {}, "mean_forecast_vol": {}, "mean_realised_vol": float(np.sqrt(y).mean())}
     loss_frames = {}

@@ -6,6 +6,7 @@ at T = 30 days, from the closed-form CIR Laplace transform. Checked against
 exact CIR sampling (scaled non-central chi-square, seeded) and its limits.
 """
 
+import itertools
 import math
 
 import numpy as np
@@ -55,7 +56,7 @@ def test_vvix_limits_and_monotonicity():
     # sigma -> 0: VIX_T is deterministic, its log-contract vol vanishes
     assert hm.heston_vvix(3.0, 0.04, 1e-4, 0.04) < 0.05
     vals = [hm.heston_vvix(3.0, 0.04, s, 0.04) for s in (0.2, 0.5, 1.0, 1.5, 2.0)]
-    assert all(x < y for x, y in zip(vals, vals[1:]))
+    assert all(x < y for x, y in itertools.pairwise(vals))
     # faster mean reversion averages variance over the 30-day window: lower VVIX
     assert hm.heston_vvix(27.0, 0.04, 2.0, 0.04) < hm.heston_vvix(5.0, 0.04, 2.0, 0.04)
 

@@ -21,9 +21,10 @@ import os
 import sys
 
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
 
 # desk.css tokens (dark desk palette)
 BG = "#111418"        # --bg

@@ -10,7 +10,6 @@ import pytest
 from joint_vol_calibration.data import option_chain as oc
 from joint_vol_calibration.surface import arbitrage as arb
 
-
 STRIKES = np.arange(4000.0, 6001.0, 50.0)
 
 
@@ -162,7 +161,8 @@ def test_certificate_finds_arbitrage_no_single_row_shows():
     assert sum(rep.executable_violations.values()) == 0
     cert = rep.certificate
     assert not cert["any_single_row_executable"]
-    assert cert["bid_ask_box_feasible"] is False and cert["executable_arbitrage"]
+    assert cert["bid_ask_box_feasible"] is False
+    assert cert["executable_arbitrage"]
     assert cert["distance"] == pytest.approx(0.5, abs=1e-9)
 
 
@@ -176,13 +176,15 @@ def test_certificate_is_clean_when_spreads_admit_arbitrage_free_prices():
 
 def test_certificate_on_synthetic_chains():
     clean = arb.screen(_chain(_skew))
-    assert clean.certificate["bid_ask_box_feasible"] and not clean.certificate["executable_arbitrage"]
+    assert clean.certificate["bid_ask_box_feasible"]
+    assert not clean.certificate["executable_arbitrage"]
     q = _chain(_skew, half=2.0)
     i = int(q.index[(q["expiry"] == "E060") & (q["strike"] == 5500.0)][0])
     q.loc[i, ["mid", "bid", "ask"]] += 3.0               # broken at mids, fixable inside the spread
     rep = arb.screen(q)
     assert sum(rep.mid_violations.values()) > 0
-    assert rep.certificate["bid_ask_box_feasible"] and not rep.certificate["executable_arbitrage"]
+    assert rep.certificate["bid_ask_box_feasible"]
+    assert not rep.certificate["executable_arbitrage"]
 
 
 def test_calendar_total_variance_diagnostic():
@@ -198,6 +200,7 @@ def test_calendar_total_variance_diagnostic():
     # 60-day w = 2 x iv60^2 x T30 < iv30^2 x T30 wherever the call-wing cut applies
     expected = int((first["k"] > 0.05).sum())
     assert out["n_pairs_crossing"] == 1
-    assert out["n_crossing"] == expected and expected == 15
+    assert out["n_crossing"] == expected
+    assert expected == 15
     flat = q.assign(mid_iv=0.2)
     assert arb.calendar_total_variance_mid(flat)["n_crossing"] == 0

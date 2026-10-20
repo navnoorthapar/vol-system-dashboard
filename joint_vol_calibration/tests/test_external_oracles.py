@@ -136,7 +136,8 @@ def lbr_set():
     # subnormal prices (< 1e-300: deep wings at 1-day maturities) carry no
     # information; LBR still returns a number there, wrong in some cases
     solved = np.isfinite(ref) & (ref > 0) & (px > 1e-300)
-    return dict(x=x, T=T, sig=sig, F=F, K=K, is_call=is_call, px=px, ref=ref, solved=solved)
+    return {"x": x, "T": T, "sig": sig, "F": F, "K": K, "is_call": is_call, "px": px, "ref": ref,
+            "solved": solved}
 
 
 def test_implied_vol_black_matches_lets_be_rational(lbr_set):

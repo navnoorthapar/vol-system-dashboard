@@ -30,14 +30,14 @@ import hashlib
 import json
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import requests                                                     # noqa: E402
+import requests  # noqa: E402
 
-from joint_vol_calibration.stats.benchmarks import (               # noqa: E402
+from joint_vol_calibration.stats.benchmarks import (  # noqa: E402
     BENCHMARK_INDICES,
     CBOE_INDEX_URL,
     parse_cboe_index_csv,
@@ -54,7 +54,7 @@ def fetch(index: str, session: requests.Session, timeout: float = 60.0) -> dict:
     resp.raise_for_status()
     return {"index": index, "url": url, "final_url": resp.url, "status": resp.status_code,
             "redirects": [r.status_code for r in resp.history], "content": resp.content,
-            "retrieved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            "retrieved_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
 
 def store(got: dict, out_dir: pathlib.Path, start: str) -> dict:

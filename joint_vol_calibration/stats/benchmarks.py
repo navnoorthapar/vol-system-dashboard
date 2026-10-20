@@ -35,8 +35,9 @@ at the SPX level itself (no strike grid), and earns ^IRX on the collateral.
 from __future__ import annotations
 
 import io
+import itertools
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -52,7 +53,7 @@ CBOE_INDEX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{index
 
 # ── levels ────────────────────────────────────────────────────────────────────
 
-def parse_cboe_index_csv(text: str, name: Optional[str] = None) -> pd.DataFrame:
+def parse_cboe_index_csv(text: str, name: str | None = None) -> pd.DataFrame:
     """A Cboe ``<INDEX>_History.csv`` (DATE + one value column, or OHLC) →
     DataFrame [date (YYYY-MM-DD), close], sorted, de-duplicated, positive."""
     df = pd.read_csv(io.StringIO(text))
@@ -111,13 +112,13 @@ def _sharpe_ann(r: np.ndarray) -> float:
     return float(r.mean() / sd * np.sqrt(TRADING_DAYS)) if sd > 0 else float("nan")
 
 
-def pair_stats(s: pd.Series, b: pd.Series, spx: Optional[pd.Series] = None) -> Dict[str, float]:
+def pair_stats(s: pd.Series, b: pd.Series, spx: pd.Series | None = None) -> dict[str, float]:
     """Co-movement of sleeve excess returns s with benchmark excess returns b
     (same index). Weekly figures compound the daily returns into W-FRI weeks."""
     df = pd.concat([s.rename("s"), b.rename("b")] + ([spx.rename("m")] if spx is not None else []),
                    axis=1).dropna()
     n = len(df)
-    out: Dict[str, float] = {"n_days": int(n)}
+    out: dict[str, float] = {"n_days": int(n)}
     if n < 20 or df["s"].std() == 0 or df["b"].std() == 0:
         out.update({k: float("nan") for k in ("corr_daily", "corr_weekly", "beta", "alpha_ann",
                                                "alpha_t", "sharpe_sleeve", "sharpe_bench",
@@ -128,7 +129,8 @@ def pair_stats(s: pd.Series, b: pd.Series, spx: Optional[pd.Series] = None) -> D
     wk = pd.concat([_weekly(df["s"]), _weekly(df["b"])], axis=1).dropna()
     out.update({
         "corr_daily": float(np.corrcoef(sv, bv)[0, 1]),
-        "corr_weekly": float(np.corrcoef(wk.iloc[:, 0], wk.iloc[:, 1])[0, 1]) if len(wk) > 3 else float("nan"),
+        "corr_weekly": (float(np.corrcoef(wk.iloc[:, 0], wk.iloc[:, 1])[0, 1]) if len(wk) > 3
+                        else float("nan")),
         "beta": float(reg["coef"][1]),
         "alpha_ann": float(reg["coef"][0] * TRADING_DAYS),
         "alpha_t": float(reg["t"][0]),
@@ -158,8 +160,8 @@ def benchmark_excess_returns(levels: pd.DataFrame, dates: pd.DatetimeIndex,
 def strategy_benchmark_stats(
     sleeve_returns: pd.DataFrame,
     bench_excess: pd.DataFrame,
-    spx_returns: Optional[pd.Series] = None,
-    years: Optional[Sequence[int]] = None,
+    spx_returns: pd.Series | None = None,
+    years: Sequence[int] | None = None,
 ) -> pd.DataFrame:
     """pair_stats for every (sleeve, benchmark) over the whole window and each
     calendar year."""
@@ -218,7 +220,7 @@ def put_write_periods(
     rates: pd.Series,
     q: float,
     expiry_hour_et: float = 9.5,
-    settle_fallback: Optional[pd.Series] = None,
+    settle_fallback: pd.Series | None = None,
 ) -> pd.DataFrame:
     """One row per roll period [d_i, d_{i+1}] with what the replication needs.
 
@@ -234,7 +236,7 @@ def put_write_periods(
     rd = pd.DatetimeIndex(roll_dates)
     rows = []
     rate = rates.sort_index()
-    for a, b in zip(rd[:-1], rd[1:]):
+    for a, b in itertools.pairwise(rd):
         if a not in spx_close.index or a not in vix_rows.index:
             continue
         S0 = float(spx_close.loc[a])
@@ -247,7 +249,7 @@ def put_write_periods(
         T = (days - (16.0 - float(expiry_hour_et)) / 24.0) / 365.0
         seg = rate[(rate.index >= a) & (rate.index < b)]
         r0 = float(rate[rate.index <= a].iloc[-1]) if (rate.index <= a).any() else float("nan")
-        pts = list(seg.index) + [b]
+        pts = [*seg.index, b]
         g = 0.0
         for k in range(len(seg)):
             g += float(seg.iloc[k]) * (pts[k + 1] - pts[k]).days / 365.0
@@ -271,9 +273,9 @@ def implied_beta(
     periods: pd.DataFrame,
     vix_tenor_vol: np.ndarray,
     index_return: np.ndarray,
-    groups: Optional[Mapping[str, np.ndarray]] = None,
+    groups: Mapping[str, np.ndarray] | None = None,
     bracket: tuple = (0.05, 3.0),
-) -> Dict:
+) -> dict:
     """β with σ = β·vix_tenor_vol that reproduces the index's return.
 
     Per period: R_rep(β) = R_index (R_rep is increasing in β through the
