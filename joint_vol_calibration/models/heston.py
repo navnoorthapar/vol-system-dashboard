@@ -53,6 +53,7 @@ VIX under Heston — index versus futures (two different instruments):
 """
 
 import logging
+import math
 import pickle
 import warnings
 from typing import Callable, NamedTuple, Optional, Tuple
@@ -1212,6 +1213,56 @@ def heston_vix_future_exact(kappa: float, theta: float, sigma: float, v0: float,
     a = theta * (1.0 - b)
     out = 100.0 * _expected_sqrt_affine_cir(a, b, kappa, theta, sigma, v0, T)
     return float(out[0]) if np.ndim(T) == 0 else out
+
+
+_VVIX_W = np.arange(-30.0, 8.0 + 1e-9, 0.05)
+
+
+def _expected_log_affine_cir(a, b, kappa, theta, sigma, v0, T):
+    """E[ln(a + b v_T)] for CIR v_T (started at v0), vectorised over T; a > 0.
+
+    Frullani: ln(Y/m) = int_0^inf (e^{-t} - e^{-tY/m}) / t dt, so with
+    t = e^w, E[ln Y] = ln m + int (e^{-e^w} - E[e^{-e^w Y/m}]) dw, m = E[Y],
+    and the CIR Laplace transform of _expected_sqrt_affine_cir. The integrand
+    is O(e^{2w}) as w -> -inf (the O(e^w) terms cancel because m = E[Y]) and
+    vanishes faster than exponentially as w -> +inf (a > 0), so a trapezoid
+    on [-30, 8] with step 0.05 converges far below the 1e-10 level.
+    """
+    T = np.atleast_1d(np.asarray(T, dtype=float))
+    ekT = np.exp(-kappa * T)
+    one_m_ekT = -np.expm1(-kappa * T)
+    c = sigma**2 * T * _one_minus_exp_over(kappa * T) / 4.0
+    m = np.maximum(a + b * (theta * one_m_ekT + v0 * ekT), 1e-300)
+    w = _VVIX_W[None, :]
+    s = np.exp(w) / m[:, None]
+    bs = b * s
+    y = 2.0 * c[:, None] * bs
+    l1p = np.where(y < 1e-8, 1.0 - 0.5 * y, np.log1p(y) / np.where(y < 1e-8, 1.0, y))
+    log_L = -(a * s + theta * one_m_ekT[:, None] * bs * l1p
+              + v0 * ekT[:, None] * bs / (1.0 + y))
+    integrand = np.exp(-np.exp(w)) - np.exp(log_L)
+    hw = _VVIX_W[1] - _VVIX_W[0]
+    body = hw * (integrand.sum(axis=1) - 0.5 * (integrand[:, 0] + integrand[:, -1]))
+    return np.log(m) + body
+
+
+def heston_vvix(kappa: float, theta: float, sigma: float, v0: float,
+                T: float = _VIX_TAU, tau: float = _VIX_TAU) -> float:
+    """Model counterpart of Cboe's ^VVIX: the 30-day log-contract (variance
+    swap) volatility of VIX on its forward, in vol points,
+        VVIX^2 = -(2/T) E[ln(VIX_T / E[VIX_T])],   VIX_T = 100 sqrt(a + b v_T),
+    which is what the VVIX formula estimates from a strip of 30-day VIX
+    options. Exact up to quadrature (CIR Laplace transform, no sampling).
+    It grows with sigma; the joint loss is blind to it while the VIX-options
+    weight is 0 (the spot indices do not depend on sigma), so the comparison
+    with the market ^VVIX is reported as an out-of-sample check.
+    """
+    b = float(_one_minus_exp_over(kappa * tau))
+    a = theta * (1.0 - b)
+    e_sqrt = float(_expected_sqrt_affine_cir(a, b, kappa, theta, sigma, v0, T)[0])
+    e_log = float(_expected_log_affine_cir(a, b, kappa, theta, sigma, v0, T)[0])
+    var = (2.0 / T) * (math.log(e_sqrt) - 0.5 * e_log)
+    return 100.0 * math.sqrt(max(var, 0.0))
 
 
 def heston_vix_futures_upper_bound(

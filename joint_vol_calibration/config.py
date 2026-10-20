@@ -48,10 +48,49 @@ HESTON_DEFAULTS = {
 HESTON_BOUNDS = {
     "kappa": (0.1,  20.0),
     "theta": (1e-4,  1.0),
+    # sigma <= 2 is a PRIOR, not something the data support (C23, measured by
+    # JointCalibrator.sigma_profile, data_store/calibrations/diagnostics/):
+    #  * it binds on 2 of the 5 model_version 2 fits; the other three optima
+    #    are interior (sigma 1.83 / 1.71 / 1.59);
+    #  * where it binds, refitting with sigma <= 10, kappa <= 60 lowers the
+    #    loss (2026-03-24: -2%, sigma 2.21; 2026-10-16: -28%, sigma 6.9,
+    #    kappa 27) and the out-of-sample SPX error (1.98 -> 1.82 vp; 2.96 ->
+    #    1.19 vp), and on 10-16 brings the model's 30-day VIX log-contract vol
+    #    (heston_vvix) from 205 to 113 against a ^VVIX close of 110. The loss
+    #    has no sigma-sensitive VIX term while w3 = 0, so it cannot see that.
+    # Kept at 2 for C23 anyway, because widening it is not a calibrator-only
+    # change: the NN surrogate's training domain is pinned to this bound
+    # (test_nn_pricer), the risk monitor sizes its vomma shock from the fitted
+    # sigma, and the dashboard's "pinned" chips read it. The widening is
+    # filed as a cross-chain request with these numbers; until then the
+    # binding is reported (pinned_params) rather than hidden.
     "sigma": (1e-3,  2.0),
     "rho":   (-0.95, 0.0),
     "v0":    (1e-4,  1.0),
 }
+
+# Box the multi-start TRF draws its Sobol starts from (C23): (low, high,
+# scale), "log" = uniform in log. Narrower than HESTON_BOUNDS on purpose: a
+# start at theta = 0.5 (71% long-run vol) or sigma = 1e-3 only spends
+# iterations walking back. It bounds the STARTS, not the fit; a start box
+# edge outside the active bounds is clipped to them.
+HESTON_START_BOX = {
+    "kappa": (0.5, 15.0, "log"),
+    "theta": (0.01, 0.25, "log"),
+    "sigma": (0.2, 1.9, "lin"),
+    "rho":   (-0.9, -0.2, "lin"),
+    "v0":    (0.005, 0.25, "log"),
+}
+
+# sigma-profile (C23 diagnostic, never the production fit): the joint fit is
+# repeated with sigma <= cap for each cap below. kappa's ceiling is widened
+# to PROFILE_KAPPA_MAX for these refits only, because the large-sigma optima
+# come with kappa above the production ceiling of 20 (2026-10-16: kappa 27
+# at sigma 6.9), and a kappa cap binding in the profile would hide the
+# sigma effect it is meant to measure.
+SIGMA_PROFILE_CAPS = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
+PROFILE_KAPPA_MAX = 60.0
+
 
 # ── Monte Carlo ───────────────────────────────────────────────────────────────
 MC_PATHS = 30_000
