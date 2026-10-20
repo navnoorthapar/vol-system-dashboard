@@ -22,9 +22,12 @@ ZERO LOOK-AHEAD GUARANTEE:
   - validate_no_lookahead() runs automated checks before any backtest.
 
 DATA VALIDATION (warnings, never silent drops):
-  - every download is checked against the NYSE session calendar;
-  - Yahoo's VIX-family series are cross-checked against Cboe's official index
-    files (database.cross_check_vix);
+  - every download is checked against the NYSE session calendar, and rows
+    dated on days the NYSE was closed are not stored in the session-keyed
+    tables (logged);
+  - the VIX index family comes from Cboe's official files, with Yahoo only
+    for sessions Cboe has not posted; the two are cross-checked on every
+    refresh (refresh_vix_index_family, database.compare_sources);
   - an upsert that no longer sees a stored session keeps it and says so.
 
 Usage:
@@ -36,12 +39,23 @@ Usage:
   coverage = pipe.get_coverage()       # inspect what we have
 """
 
+import argparse
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
-from joint_vol_calibration.config import HIST_START, HIST_END
+from joint_vol_calibration.config import (
+    BT_END,
+    BT_START,
+    HIST_END,
+    HIST_START,
+    VIX_INDEX_TENOR_DAYS,
+    VVIX_TENOR_DAYS,
+)
 from joint_vol_calibration.data import cboe_downloader as cboe
 from joint_vol_calibration.data import yf_downloader as yf_dl
 from joint_vol_calibration.data import database as db
@@ -67,6 +81,342 @@ def _sessions_only(df: pd.DataFrame, label: str) -> pd.DataFrame:
         logger.info("%s: not storing %d row(s) dated on NYSE holidays: %s", label,
                     int((~keep).sum()), ", ".join(df.loc[~keep, "date"].astype(str).head(10)))
     return df[keep]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The VIX index family: Cboe primary, Yahoo provisional (C23)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Pts above which a Yahoo and a Cboe print of the same index on the same
+# session are reported (the C22 cross-check threshold).
+CROSS_SOURCE_TOL = 0.25
+
+
+def refresh_vix_index_family(start: str, end: str, *, yahoo: bool = True, vix_daily: bool = True,
+                             tol: float = CROSS_SOURCE_TOL) -> dict:
+    """
+    Store ^VIX9D/^VIX/^VIX3M/^VIX6M/^VVIX (vix_term_structure) and VIX OHLC
+    (vix_daily) for sessions [start, end] with Cboe's official files as the
+    primary source.
+
+    Order: Yahoo's rows first, then Cboe's on top. A Yahoo row therefore only
+    survives for a session Cboe's file does not have yet (Cboe usually posts
+    the evening's close within hours; Yahoo the same evening); it is stored
+    with source='yfinance' and replaced by the Cboe print on the first run
+    after Cboe publishes it — database.insert_vix_term_structure and
+    insert_vix_daily never let a non-Cboe row replace a stored Cboe one.
+    Rows on days the NYSE was closed are dropped by the writers.
+    ``vix_daily=False`` leaves the VIX OHLC table alone.
+
+    Cross-source check: every session both sources print in the window is
+    compared (database.compare_sources); rows differing by more than ``tol``
+    are returned and logged. Whether a mismatch fails a run is the caller's
+    decision.
+
+    Returns
+    -------
+    dict with keys
+      ok           False if Cboe's term-structure download failed (the Yahoo
+                   rows, if any, were still stored as provisional)
+      rows         {'vix_term_structure_yfinance', 'vix_term_structure_cboe',
+                    'vix_daily_yfinance', 'vix_daily_cboe'} -> rows written
+      provisional  [(date, ticker), ...] stored from Yahoo because Cboe's
+                   file lacks them
+      mismatches   DataFrame [date, ticker, cboe, yfinance, diff] (|diff| > tol)
+      errors       list of download error strings
+    """
+    out = {"ok": True, "rows": {}, "provisional": [], "errors": [],
+           "mismatches": pd.DataFrame(columns=["date", "ticker", "cboe", "yfinance", "diff"])}
+    yts = yvd = pd.DataFrame()
+    if yahoo:
+        try:
+            yts = yf_dl.download_vix_term_structure(start=start, end=end)
+        except Exception as e:
+            out["errors"].append(f"yahoo term structure: {e}")
+            logger.warning("Yahoo VIX term structure failed: %s", e)
+        try:
+            if vix_daily:
+                yvd = yf_dl.download_vix_index(start=start, end=end)
+        except Exception as e:
+            out["errors"].append(f"yahoo ^VIX: {e}")
+            logger.warning("Yahoo ^VIX failed: %s", e)
+    cts = cvd = pd.DataFrame()
+    try:
+        cts = cboe.download_vix_term_structure_history(start=start, end=end)
+    except Exception as e:
+        out["ok"] = False
+        out["errors"].append(f"cboe term structure: {e}")
+        logger.warning("Cboe VIX-family download failed (Yahoo rows stored as provisional): %s", e)
+    try:
+        if vix_daily:
+            cvd = cboe.download_vix_history()
+            cvd = cvd[(cvd["date"] >= start) & (cvd["date"] <= end)]
+    except Exception as e:
+        out["errors"].append(f"cboe VIX OHLC: {e}")
+        logger.warning("Cboe VIX OHLC download failed: %s", e)
+
+    def window(df):
+        return df if df.empty else df[(df["date"] >= start) & (df["date"] <= end)]
+    yts, yvd, cts, cvd = window(yts), window(yvd), window(cts), window(cvd)
+
+    if not yts.empty and not cts.empty:
+        out["mismatches"] = db.compare_sources(cts, yts, tol, keys=("date", "ticker"),
+                                               labels=("cboe", "yfinance"))
+    if not yts.empty:
+        yk = db.drop_non_sessions(yts, "Yahoo term structure")
+        ck = set() if cts.empty else set(zip(cts["date"], cts["ticker"]))
+        out["provisional"] = sorted((d, t) for d, t in zip(yk["date"], yk["ticker"]) if (d, t) not in ck)
+
+    for key, frame, ins in (("vix_term_structure_yfinance", yts, db.insert_vix_term_structure),
+                            ("vix_daily_yfinance", yvd, db.insert_vix_daily),
+                            ("vix_term_structure_cboe", cts, db.insert_vix_term_structure),
+                            ("vix_daily_cboe", cvd, db.insert_vix_daily)):
+        out["rows"][key] = ins(frame, warn_dropped=key.endswith("_cboe")) if not frame.empty else 0
+    if out["provisional"]:
+        logger.info("VIX family: %d Yahoo row(s) stored as provisional (not in Cboe's files yet): %s",
+                    len(out["provisional"]),
+                    ", ".join(f"{d} {t}" for d, t in out["provisional"][:10]))
+    return out
+
+
+def refresh_cboe_indices(symbols=None, start: Optional[str] = None, end: Optional[str] = None) -> dict:
+    """Download and store the non-VIX-family Cboe indices (cboe_downloader.CBOE_INDEX_CATALOG).
+
+    ``symbols`` defaults to cboe_downloader.DEFAULT_EXTRA_INDICES (VIX1D,
+    VIX1Y, SKEW, COR1M, COR3M, DSPX); start defaults to config.HIST_START.
+    One request per symbol. A failed symbol is logged and skipped. Returns
+    {symbol: {rows, min_date, max_date}} plus 'errors'.
+    """
+    symbols = tuple(symbols or cboe.DEFAULT_EXTRA_INDICES)
+    start = start or HIST_START
+    out: dict = {"errors": []}
+    for sym in symbols:
+        try:
+            df = cboe.download_cboe_indices([sym], start=start, end=end)
+        except Exception as e:
+            out["errors"].append(f"{sym}: {e}")
+            logger.warning("Cboe %s history failed: %s", sym, e)
+            continue
+        n = db.insert_cboe_index(df) if not df.empty else 0
+        stored = db.drop_non_sessions(df, sym)
+        out[sym] = {"rows": n, "min_date": stored["date"].min() if n else None,
+                    "max_date": stored["date"].max() if n else None}
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C23 scripted correction of the persisted VIX index family
+# ══════════════════════════════════════════════════════════════════════════════
+
+# |new - old| at or below this is a re-statement of the same 2-decimal print
+# (Yahoo serves float32: 22.129999 for Cboe's 22.13), not a revision.
+SAME_PRINT_TOL = 0.005
+
+_CORRECTION_LOG_COLS = ["table", "date", "ticker", "old_close", "old_source", "new_close", "new_source",
+                        "diff", "action", "in_backtest_window"]
+
+
+def _correction_frame(stored: pd.DataFrame, ref: pd.DataFrame, keys: list, value_cols: list,
+                      table: str, lo: str, hi: str) -> tuple:
+    """(corrected rows, per-row log) for one table: Cboe's value wherever Cboe has the
+    session, the stored row (tagged 'yfinance' if unrecorded) where it does not, Cboe
+    rows the store lacks added, rows on non-session days removed."""
+    ref = ref[(ref["date"] >= lo) & (ref["date"] <= hi)]
+    ref = db.drop_non_sessions(ref, f"Cboe {table}")
+    ref = ref.drop_duplicates(keys, keep="last")
+    m = stored.merge(ref[keys + value_cols], on=keys, how="outer", suffixes=("_old", "_ref"),
+                     indicator=True)
+    sess = db.is_session_array(m["date"])
+    act = pd.Series("unchanged", index=m.index, dtype=object)
+    both = (m["_merge"] == "both").to_numpy()
+    diff = (m["close_ref"] - m["close_old"]).to_numpy(float)
+    # the largest change over every value column (open/high/low too for vix_daily)
+    worst = np.nanmax(np.abs(np.column_stack([(m[f"{c}_ref"] - m[f"{c}_old"]).to_numpy(float)
+                                              for c in value_cols])), axis=1, initial=0.0)
+    old_src = db.canonical_source(m["source"]) if "source" in m.columns else pd.Series(None, index=m.index)
+    act[both & (worst > SAME_PRINT_TOL)] = "replaced_by_cboe"
+    act[both & (worst <= SAME_PRINT_TOL) & ((worst > 1e-12)
+                                            | old_src.ne("cboe").to_numpy())] = "restated_as_cboe"
+    act[(m["_merge"] == "right_only").to_numpy()] = "added_from_cboe"
+    left = (m["_merge"] == "left_only").to_numpy()
+    act[left] = "kept_not_in_cboe"
+    act[~sess] = "removed_non_session"
+    use_ref = both | (m["_merge"] == "right_only").to_numpy()
+    out = m.copy()
+    for c in value_cols:
+        out[c] = np.where(use_ref, m[f"{c}_ref"], m[f"{c}_old"])
+    out["source"] = np.where(use_ref, "cboe", old_src.fillna("yfinance").to_numpy())
+    log = pd.DataFrame({
+        "table": table, "date": m["date"], "ticker": m["ticker"],
+        "old_close": m["close_old"], "old_source": old_src,
+        "new_close": np.where(sess, out["close"], np.nan),
+        "new_source": np.where(sess, out["source"], None),
+        "diff": diff, "action": act,
+        "in_backtest_window": m["date"].between(BT_START, BT_END),
+    })
+    return out[sess].reset_index(drop=True), log
+
+
+def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
+                             cboe_vix: Optional[pd.DataFrame] = None, *,
+                             root=None, apply: bool = False, apply_db: bool = False,
+                             log_dir=None, log_name: str = "c23_vix_index_family") -> dict:
+    """
+    The C23 correction of the persisted VIX index family: make Cboe's official
+    files the source of every vix_term_structure and vix_daily row in the
+    yearly partitions (data_store/market/), as refresh_vix_index_family does
+    for new sessions.
+
+    For each table, over the stored date span:
+      replaced_by_cboe   the stored (Yahoo) value differs from Cboe's by more
+                         than SAME_PRINT_TOL -> Cboe's value
+      restated_as_cboe   the same 2-decimal print (Yahoo's float32 22.129999 vs
+                         Cboe's 22.13), or unrecorded provenance -> Cboe's value
+                         and source='cboe'
+      added_from_cboe    a session Cboe prints and the store lacks (VVIX gaps)
+      kept_not_in_cboe   the store has it, Cboe's file does not -> kept, an
+                         unrecorded source becomes 'yfinance' (the only
+                         pre-C22 writer of these tables was yf_downloader)
+      removed_non_session  dated on a day the NYSE was closed
+    ``cboe_term``/``cboe_vix`` default to a live download of the full files.
+
+    apply      rewrite the partitions under ``root`` (default MARKET_DIR) with
+               database.replace_market_partitions
+    apply_db   also bring the database (DB_PATH) in line: non-session rows
+               deleted, every corrected row upserted
+    log_dir    write <log_dir>/<log_name>.csv (every row whose value changed
+               by more than SAME_PRINT_TOL, added, removed or kept without
+               Cboe) and <log_name>.json (counts per action, table and ticker;
+               the backtest-window counts). The CLI never overwrites the
+               committed C23 log: a re-run writes a dated <log_name>.
+
+    Returns the summary dict (also what the JSON holds) with 'log' (the full
+    per-row DataFrame) added.
+    """
+    root = Path(root) if root is not None else db.MARKET_DIR
+    if cboe_term is None:
+        cboe_term = cboe.download_vix_term_structure_history()
+    if cboe_vix is None:
+        cboe_vix = cboe.download_vix_history()
+    ts_old = db.read_market_partitions("vix_term_structure", root)
+    vd_old = db.read_market_partitions("vix_daily", root)
+    if ts_old.empty or vd_old.empty:
+        raise FileNotFoundError(f"no vix_term_structure/vix_daily partitions under {root}")
+
+    lo, hi = ts_old["date"].min(), ts_old["date"].max()
+    ts_ref = cboe_term[["date", "ticker", "close"]].copy()
+    ts_new, ts_log = _correction_frame(ts_old, ts_ref, ["date", "ticker"], ["close"],
+                                       "vix_term_structure", lo, hi)
+    tenors = {**VIX_INDEX_TENOR_DAYS, "^VVIX": VVIX_TENOR_DAYS}
+    ts_new["tenor_days"] = ts_new["ticker"].map(tenors).astype(int)
+    ts_new["is_vvix"] = ts_new["ticker"].eq("^VVIX").astype(int)
+
+    lo_d, hi_d = vd_old["date"].min(), vd_old["date"].max()
+    vd_ref = cboe_vix[["date", "open", "high", "low", "close"]].copy()
+    vd_new, vd_log = _correction_frame(vd_old.assign(ticker="^VIX"), vd_ref.assign(ticker="^VIX"),
+                                       ["date", "ticker"], ["open", "high", "low", "close"],
+                                       "vix_daily", lo_d, hi_d)
+    vd_new = vd_new.drop(columns=["ticker"])
+
+    log = pd.concat([ts_log, vd_log], ignore_index=True)
+    summary = {
+        "generated_by": "joint_vol_calibration.data.pipeline.correct_vix_index_family",
+        "same_print_tol": SAME_PRINT_TOL,
+        "backtest_window": [BT_START, BT_END],
+        "cboe_reference": {
+            "term_structure_rows": int(len(cboe_term)), "term_structure_max_date": str(cboe_term["date"].max()),
+            "vix_rows": int(len(cboe_vix)), "vix_max_date": str(cboe_vix["date"].max()),
+        },
+        "tables": {},
+    }
+    for table, tl, new, old in (("vix_term_structure", ts_log, ts_new, ts_old),
+                                ("vix_daily", vd_log, vd_new, vd_old)):
+        counts = tl["action"].value_counts().to_dict()
+        in_bt = tl[tl["in_backtest_window"]]["action"].value_counts().to_dict()
+        big = tl[(tl["action"] == "replaced_by_cboe") & (tl["diff"].abs() > CROSS_SOURCE_TOL)]
+        summary["tables"][table] = {
+            "rows_before": int(len(old)), "rows_after": int(len(new)),
+            "actions": {k: int(v) for k, v in sorted(counts.items())},
+            "actions_in_backtest_window": {k: int(v) for k, v in sorted(in_bt.items())},
+            "replaced_over_cross_source_tol": int(len(big)),
+            "replaced_over_cross_source_tol_in_backtest_window": int(big["in_backtest_window"].sum()),
+            "by_ticker": {t: {k: int(v) for k, v in g["action"].value_counts().sort_index().items()}
+                          for t, g in tl.groupby("ticker")},
+        }
+    material = log[log["action"].isin(["replaced_by_cboe", "added_from_cboe", "removed_non_session",
+                                       "kept_not_in_cboe"])]
+    summary["material_rows"] = int(len(material))
+    summary["material_rows_in_backtest_window"] = int(material["in_backtest_window"].sum())
+
+    if apply:
+        written = db.replace_market_partitions("vix_term_structure", ts_new, root)
+        written += db.replace_market_partitions("vix_daily", vd_new, root)
+        summary["partitions_rewritten"] = len(written)
+    if apply_db:
+        summary["db"] = _apply_vix_correction_to_db(ts_new, vd_new)
+    if log_dir is not None:
+        d = Path(log_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        material.sort_values(["table", "date", "ticker"])[_CORRECTION_LOG_COLS].to_csv(
+            d / f"{log_name}.csv", index=False, float_format="%.6f")
+        (d / f"{log_name}.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    summary["log"] = log
+    return summary
+
+
+def _apply_vix_correction_to_db(ts_new: pd.DataFrame, vd_new: pd.DataFrame) -> dict:
+    """Delete non-session rows from the two tables in DB_PATH and upsert the corrected rows."""
+    db.init_database()
+    removed = {}
+    with db._connection() as conn:
+        for table in ("vix_term_structure", "vix_daily"):
+            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]
+            bad = [d for d, ok in zip(dates, db.is_session_array(dates)) if not ok]
+            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount for d in bad)
+    n_ts = db.insert_vix_term_structure(ts_new, warn_dropped=False)
+    n_vd = db.insert_vix_daily(vd_new, warn_dropped=False)
+    return {"removed_non_session": removed, "upserted": {"vix_term_structure": n_ts, "vix_daily": n_vd}}
+
+
+def resync_database_from_record(*, options: bool = True) -> dict:
+    """
+    Bring the database cache (DB_PATH) in line with the persisted record,
+    offline: no download.
+
+    1. delete every row dated on a day the NYSE was closed from the
+       session-keyed tables (database.SESSION_KEYED_TABLES);
+    2. upsert every market partition (database.MARKET_TABLES): the corrected
+       Cboe rows replace the stored Yahoo ones (the writers' Cboe precedence
+       lets a Cboe row replace any other), and provenance comes with them;
+    3. with ``options``, re-import every committed chain
+       (import_options_snapshots(overwrite=True)), which stores one source
+       spelling ('yahoo' -> 'yfinance').
+
+    This is what the C23 correction needs after the partitions were rewritten
+    (correct_vix_index_family --apply). It CHANGES what every consumer of the
+    database reads (labels, backtest, hedger, calibrator VIX leg), so it is a
+    deliberate step, run once, followed by regenerating those artifacts.
+    Returns counts, including rows still without a source per table.
+    """
+    db.init_database()
+    removed = {}
+    with db._connection() as conn:
+        for table in db.SESSION_KEYED_TABLES:
+            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]
+            bad = [d for d, ok in zip(dates, db.is_session_array(dates)) if not ok]
+            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount
+                                 for d in bad)
+    out = {"removed_non_session": removed, "imported": db.import_market_partitions()}
+    if options:
+        out["options_rows_reimported"] = db.import_options_snapshots(overwrite=True)
+    with db._connection() as conn:
+        out["null_source_rows"] = {
+            t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE source IS NULL").fetchone()[0]
+            for t in ("vix_daily", "vix_term_structure", "options_snapshots")}
+        out["option_sources"] = {r[0]: r[1] for r in conn.execute(
+            "SELECT source, COUNT(*) FROM options_snapshots GROUP BY source")}
+    logger.info("resync_database_from_record: %s", out)
+    return out
 
 
 class DataPipeline:
@@ -103,7 +453,8 @@ class DataPipeline:
           3. VX futures daily history (Cboe per-contract CSVs, monthly contracts)
           4. VX final settlements (each contract's expiry-day settle; Cboe VRO
              where no contract file exists)
-          5. VIX term-structure indices (Yahoo), cross-checked against Cboe
+          5. VIX term-structure indices (Cboe's files; Yahoo where Cboe has
+             no row), cross-checked
           6. T-bill rates (^IRX)
           7. The current option chains, unless a session is still trading
 
@@ -176,9 +527,15 @@ class DataPipeline:
             logger.error("SPX OHLCV refresh failed: %s", e)
             results["spx_ohlcv"] = 0
 
-        # VIX daily — Yahoo for the same-evening row, then Cboe's official file
-        # on top wherever it already has the session.
-        results["vix_daily"] = self._refresh_vix_daily(since_last("vix_daily"), end)
+        # The VIX index family (vix_daily + vix_term_structure): Cboe's
+        # official files primary, Yahoo for the sessions Cboe has not posted
+        # yet, cross-checked (refresh_vix_index_family).
+        vix_start = min(since_last("vix_daily"), since_last("vix_term_structure"))
+        fam = refresh_vix_index_family(vix_start, end)
+        results["vix_daily"] = max(fam["rows"]["vix_daily_yfinance"], fam["rows"]["vix_daily_cboe"])
+        results["vix_term_structure"] = max(fam["rows"]["vix_term_structure_yfinance"],
+                                            fam["rows"]["vix_term_structure_cboe"])
+        results["vix_cross_source_mismatches"] = len(fam["mismatches"])
 
         # VX futures — the monthly contracts' per-contract files (one request per
         # listed contract, whatever the span), from the window start or from the
@@ -201,15 +558,6 @@ class DataPipeline:
         except Exception as e:
             logger.warning("VX final settlements unavailable: %s", e)
             results["vix_futures_settlements"] = 0
-
-        # VIX term structure (Yahoo), cross-checked against Cboe's index files
-        try:
-            df_ts = yf_dl.download_vix_term_structure(start=since_last("vix_term_structure"), end=end)
-            results["vix_term_structure"] = db.insert_vix_term_structure(df_ts) if not df_ts.empty else 0
-        except Exception as e:
-            logger.error("VIX term structure refresh failed: %s", e)
-            results["vix_term_structure"] = 0
-        self._cross_check_vix(start, end)
 
         # T-bill rates
         try:
@@ -370,32 +718,6 @@ class DataPipeline:
             logger.error("Failed to load VIX daily: %s", e)
             return 0
 
-    def _refresh_vix_daily(self, start: str, end: str) -> int:
-        """Yahoo rows for the window, then Cboe's rows on top (Cboe is the official print)."""
-        n = 0
-        try:
-            yv = yf_dl.download_vix_index(start=start, end=end)
-            if not yv.empty:
-                n = db.insert_vix_daily(yv)
-        except Exception as e:
-            logger.warning("Yahoo VIX refresh failed: %s", e)
-        try:
-            cv = cboe.download_vix_history()
-            cv = _sessions_only(cv[(cv["date"] >= start) & (cv["date"] <= end)], "Cboe VIX")
-            if not cv.empty:
-                n = max(n, db.insert_vix_daily(cv, warn_dropped=False))
-        except Exception as e:
-            logger.warning("Cboe VIX refresh failed (Yahoo rows kept): %s", e)
-        return n
-
-    def _cross_check_vix(self, start: str, end: str) -> None:
-        """Log any Yahoo-vs-Cboe disagreement in the VIX family over [start, end]."""
-        try:
-            ref = cboe.download_vix_term_structure_history(start=start, end=end)
-            db.cross_check_vix(ref, start=start, end=end)
-        except Exception as e:
-            logger.warning("VIX cross-check against Cboe skipped: %s", e)
-
     def _load_vix_futures(self) -> tuple:
         """VX daily history (monthly contracts) and their final settlements. Returns (daily rows, settlements)."""
         n_daily = n_final = 0
@@ -420,20 +742,10 @@ class DataPipeline:
         return n_daily, n_final
 
     def _load_vix_term_structure(self) -> int:
-        """Download and store full VIX term structure history, then cross-check it."""
-        try:
-            df = yf_dl.download_vix_term_structure(
-                start=self.hist_start, end=self.hist_end
-            )
-            if df.empty:
-                logger.warning("VIX term structure returned empty")
-                return 0
-            n = db.insert_vix_term_structure(df)
-        except Exception as e:
-            logger.error("Failed to load VIX term structure: %s", e)
-            return 0
-        self._cross_check_vix(self.hist_start, self.hist_end)
-        return n
+        """Store the full VIX term-structure history: Cboe's files primary, Yahoo
+        for the rows Cboe lacks (refresh_vix_index_family, term structure only)."""
+        fam = refresh_vix_index_family(self.hist_start, self.hist_end, vix_daily=False)
+        return max(fam["rows"]["vix_term_structure_yfinance"], fam["rows"]["vix_term_structure_cboe"])
 
     def _load_tbill_rates(self) -> int:
         """Download and store 13-week T-bill rate history (^IRX)."""
@@ -505,3 +817,59 @@ def run_daily() -> dict:
     """
     pipe = DataPipeline()
     return pipe.daily_refresh()
+
+
+# ── Command line ──────────────────────────────────────────────────────────────
+
+def main(argv=None) -> int:
+    """``python -m joint_vol_calibration.data.pipeline <command>``
+
+    correct-vix-index-family  the C23 correction (dry run unless --apply);
+                              --apply-db also rewrites DB_PATH's two tables;
+                              the log goes to --log-dir (default with --apply:
+                              data_store/market/corrections)
+    resync-db                 bring DB_PATH in line with the persisted record,
+                              offline (resync_database_from_record)
+    cboe-indices              download VIX1D/VIX1Y/SKEW/COR1M/COR3M/DSPX (or
+                              --symbols) into the database; --persist also
+                              writes data_store/market/cboe_index_daily/
+    """
+    ap = argparse.ArgumentParser(prog="python -m joint_vol_calibration.data.pipeline")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("correct-vix-index-family")
+    c.add_argument("--apply", action="store_true")
+    c.add_argument("--apply-db", action="store_true")
+    c.add_argument("--log-dir", default=None)
+    r = sub.add_parser("resync-db")
+    r.add_argument("--no-options", action="store_true", help="leave options_snapshots alone")
+    i = sub.add_parser("cboe-indices")
+    i.add_argument("--symbols", nargs="*", default=None)
+    i.add_argument("--start", default=None)
+    i.add_argument("--persist", action="store_true")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    if args.cmd == "correct-vix-index-family":
+        log_dir = args.log_dir or (db.MARKET_DIR / "corrections" if args.apply else None)
+        log_name = "c23_vix_index_family"
+        if args.log_dir is None and log_dir is not None and (Path(log_dir) / f"{log_name}.csv").exists():
+            # The committed C23 log records the correction that was made; a later
+            # re-run (a no-op, or a Cboe revision) gets its own dated log beside it.
+            log_name = f"{log_name}_{db._utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+        res = correct_vix_index_family(apply=args.apply, apply_db=args.apply_db, log_dir=log_dir,
+                                       log_name=log_name)
+        res.pop("log")
+        print(json.dumps(res, indent=2, sort_keys=True))
+        return 0
+    if args.cmd == "resync-db":
+        print(json.dumps(resync_database_from_record(options=not args.no_options), indent=2, sort_keys=True))
+        return 0
+    res = refresh_cboe_indices(args.symbols, start=args.start)
+    if args.persist:
+        res["persisted"] = [str(p) for p in db.export_market_partitions(tables=["cboe_index_daily"])]
+    print(json.dumps(res, indent=2, sort_keys=True, default=str))
+    return 1 if res["errors"] else 0
+
+
+if __name__ == "__main__":       # pragma: no cover
+    raise SystemExit(main())
