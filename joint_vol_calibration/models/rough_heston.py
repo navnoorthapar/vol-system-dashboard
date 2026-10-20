@@ -55,9 +55,16 @@ Accuracy (measured, tests/test_rough_heston.py):
     fractional Riccati equation (2048 steps): 1.5e-7 to 8.5e-5 * F on the
     same sets, largest at H = 0.1; the mean variance converges to the
     Mittag-Leffler closed form like n^-1.5 (0.07%-0.26% at 20 factors).
-At a calibrated rough fit the anchor IVs move by <= 0.02 vp when factors
-are doubled and steps quadrupled (JointCalibrator.calibrate_spx_only,
-numerics_check).
+  * at the H = 0.02 box floor, where the joint SPX + VIX-index fits land:
+    mean-variance error 0.34%-0.44% at 20 factors (still n^-1.5); prices
+    within 1.3e-4 * F of Adams at 8192 steps on the test sets (Adams at
+    2048 steps is itself off by 6e-5 * F at sigma = 2 there) and within
+    7.7e-5 * F / 0.085 vp of it at the 2026-10-16 joint fit, 14 days-1 year.
+At a calibrated rough fit the anchor IVs move by <= 0.04 vp when factors
+are doubled and steps quadrupled (JointCalibrator.calibrate_comparison,
+numerics_check); with the n^-1.5 rate that self-convergence gap understates
+the 20-factor error by a factor 1/(1 - 2^-1.5) = 1.55, which the check
+reports as its estimate.
 
 Counter-evidence to keep in view when reading any fit: Abi Jaber & Li (2024),
 "Volatility models in practice: Rough, Path-dependent or Markovian?",

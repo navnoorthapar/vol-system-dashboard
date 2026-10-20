@@ -120,6 +120,10 @@ def _load(session):
 def test_diagnostics_artifact_is_consistent(session):
     d = _load(session)
     assert d["schema_version"] == 1 and d["session"] == session
+    # both parts ran, from committed code (no uncommitted non-test changes)
+    assert set(d["provenance"]) == {"heston", "rough"}
+    for prov in d["provenance"].values():
+        assert prov["code_commit"] and prov["code_dirty_files"] == [], prov
     st = d["stored_fit"]
     assert st["loss_recomputed_from_residuals"] == pytest.approx(st["loss"], rel=1e-12)
     trf = d["trf"]
@@ -175,6 +179,8 @@ def test_diagnostics_artifact_is_consistent(session):
         num = m["numerics"]
         # the lifting / time-step error is far below the misfit it is compared with
         assert num["anchor_iv_max_abs_diff_vp"] < 0.05
+        assert num["lifting_error_estimate_max_vp"] == pytest.approx(
+            num["anchor_iv_max_abs_diff_vp"] / (1 - 2 ** -1.5))
         assert num["frozen_vs_adaptive_rel_loss_diff"] < 1e-5
         assert ("H" in m["on_bound"]) == (m["params"]["H"] <= lo * (1 + 1e-3)
                                           or m["params"]["H"] >= hi * (1 - 1e-3))

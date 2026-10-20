@@ -16,6 +16,8 @@ chain, writes data_store/calibrations/diagnostics/<session>.json:
   de                DE (same settings as the committed fits) in 4 processes,
                     TRF-polished: the optional global check, timed; with
                     --time-serial-de also the serial run on this machine
+                    (wall and CPU seconds, so TRF and DE compare on one
+                    machine back to back)
   identifiability   singular values, cond(J^T J), weakest direction, Gauss-
                     Newton standard errors / correlations, parameters on bounds
   sigma_profile     the joint fit under every config.SIGMA_PROFILE_CAPS cap
@@ -34,14 +36,19 @@ and data_store/calibrations/diagnostics/summary.json (one row per session).
 Everything is derived from committed data (the DB copy and the stored
 chains); nothing is downloaded and no calibration pickle is written.
 
+  provenance        per part: UTC time, code commit, uncommitted code files,
+                    load average at start and end, seconds
+
 Usage:
   python scripts/calibration_diagnostics.py                 # every v2 session
-  python scripts/calibration_diagnostics.py --session 2026-10-16
+  python scripts/calibration_diagnostics.py --session 2026-10-16 --time-serial-de
+  python scripts/calibration_diagnostics.py --session 2026-10-16 --part rough
   python scripts/calibration_diagnostics.py --summary-only  # rebuild summary.json
-Each session takes about 3-6 minutes on 4 CPUs (most of it the rough
-Heston fit); run sessions as separate invocations to stay under a job time
-limit. Timings are wall clock and the file records the load average: compare
-methods within one file (they ran back to back), not seconds across files.
+A session takes about 10 minutes on a 4-CPU machine at load ~10, most of it
+the two rough Heston fits ("rough" part); --part runs one part and merges it
+into the session's file, so each job stays short. Timings: compare methods
+within one part (they ran back to back) and prefer the CPU seconds; wall
+clock on a shared machine moves with the load, which provenance records.
 """
 
 from __future__ import annotations
@@ -53,7 +60,6 @@ import logging
 import os
 import pickle
 import platform
-import resource
 import subprocess
 import sys
 import time
@@ -109,22 +115,6 @@ def committed_v2_sessions(cal_dir: Path | None = None) -> list:
     return out
 
 
-def _cpu_seconds() -> float:
-    """CPU seconds of this process (all threads) plus its reaped children
-    (the DE worker processes, which scipy's pool joins on exit)."""
-    s = resource.getrusage(resource.RUSAGE_SELF)
-    c = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return s.ru_utime + s.ru_stime + c.ru_utime + c.ru_stime
-
-
-def _timed(fn, *args, **kwargs):
-    """(result, wall seconds, CPU seconds). CPU time is the robust number on
-    a shared machine: wall clock grows with the load, CPU time much less."""
-    w0, c0 = time.perf_counter(), _cpu_seconds()
-    out = fn(*args, **kwargs)
-    return out, time.perf_counter() - w0, _cpu_seconds() - c0
-
-
 def _git_head() -> str | None:
     try:
         return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True,
@@ -173,26 +163,149 @@ def _jacobian_timing(model, x, reps: int = 5) -> dict:
     }
 
 
-def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int = 4) -> dict:
-    t_all = time.perf_counter()
+PARTS = ("heston", "rough")
+
+
+def _code_dirty_files() -> list | None:
+    """Uncommitted changes to the code this script runs (provenance)."""
+    try:
+        res = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--",
+                              "joint_vol_calibration", "scripts/calibration_diagnostics.py"],
+                             check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [ln[3:] for ln in res.stdout.splitlines()
+            if "/tests/" not in ln and "__pycache__" not in ln]
+
+
+def _provenance_start() -> dict:
+    return {"generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "code_commit": _git_head(), "code_dirty_files": _code_dirty_files(),
+            # timings are on a machine that may be shared: compare methods
+            # within one part (they ran back to back), and prefer the CPU
+            # seconds, which depend far less on the load than wall clock
+            "loadavg_start": list(os.getloadavg()), "_t0": time.perf_counter()}
+
+
+def _provenance_end(prov: dict) -> dict:
+    prov = dict(prov)
+    prov["seconds"] = time.perf_counter() - prov.pop("_t0")
+    prov["loadavg_end"] = list(os.getloadavg())
+    return prov
+
+
+def _heston_part(session: str, cal, stored: dict, out: dict, time_serial_de: bool,
+                 de_workers: int) -> None:
+    names = jc.HESTON_PARAM_NAMES
+
+    # 1. default TRF (warm start = previous accepted session + Sobol starts)
+    res = cal.calibrate(verbose=False)
+    trf_x = np.array([res["params"][k] for k in names])
+    out["trf"] = {
+        "params": res["params"], "loss": res["loss"],
+        "loss_rel_diff_vs_stored": res["loss"] / stored["loss"] - 1.0,
+        "param_rel_diff_vs_stored": {k: res["params"][k] / stored["params"][k] - 1.0
+                                     for k in names},
+        "fit_time_seconds": res["fit_time"], "fit_cpu_seconds": res["fit_cpu_time"],
+        "n_evals": res["n_evals"],
+        "success": res["success"], "message": res["optimizer_message"],
+        "warm_start": res["methods"]["optimizer"]["warm_start"],
+        "multistart": res["multistart"],
+        "spx_iv_rmse": res["leg_losses"]["spx_iv_rmse"],
+        "spx_oos_iv_rmse": res["leg_losses"]["spx_oos_iv_rmse"],
+        "pinned_params": res["pinned_params"],
+        "gate": list(jc.is_acceptable_calibration(res)),
+    }
+    out["identifiability"] = res["identifiability"]
+    lo, hi = jc._box_arrays(config.HESTON_BOUNDS, names)
+    out["identifiability"]["profile_check"] = jc.gauss_newton_profile_check(
+        cal.residual_model(), trf_x, res["identifiability"], lo, hi)
+    log.info("%s TRF: loss %.8g (stored %.8g), %.1fs (%.1f CPU s), %d evals", session,
+             res["loss"], stored["loss"], res["fit_time"], res["fit_cpu_time"], res["n_evals"])
+
+    # 2. TRF with a finite-difference Jacobian (same starts)
+    fd = cal.calibrate(verbose=False, jacobian="2-point")
+    out["trf_finite_diff"] = {"loss": fd["loss"], "fit_time_seconds": fd["fit_time"],
+                              "fit_cpu_seconds": fd["fit_cpu_time"], "n_evals": fd["n_evals"],
+                              "loss_rel_diff_vs_analytic": fd["loss"] / res["loss"] - 1.0,
+                              "n_distinct_basins": fd["multistart"]["n_distinct_basins"]}
+    out["jacobian"] = _jacobian_timing(cal.residual_model(), trf_x)
+
+    # 3. DE (the committed fits' settings) as the optional global check, in
+    #    de_workers processes, then optionally the serial run itself
+    chk = cal.calibrate(verbose=False, de_check=True, de_workers=de_workers)["de_check"]
+    out["de"] = {"settings": {"maxiter": 200, "popsize": 10, "seed": config.RANDOM_SEED,
+                              "workers": de_workers, "updating": "deferred"},
+                 **chk}
+    log.info("%s DE check (%d workers): %.1fs, loss %.8g, agrees=%s", session, de_workers,
+             chk["de_seconds"], chk["de_polished_loss"], chk["agrees"])
+    if time_serial_de:
+        ser = cal.calibrate(verbose=False, optimizer="de", de_workers=1)
+        out["de"]["serial_rerun"] = {"fit_time_seconds": ser["fit_time"],
+                                     "fit_cpu_seconds": ser["fit_cpu_time"],
+                                     "loss": ser["loss"], "n_evals": ser["n_evals"],
+                                     "loss_rel_diff_vs_stored": ser["loss"] / stored["loss"] - 1}
+        log.info("%s serial DE: %.1fs (%.1f CPU s), %d evals", session, ser["fit_time"],
+                 ser["fit_cpu_time"], ser["n_evals"])
+
+    # 4. sigma profile (diagnostic; the production fit is untouched)
+    cal.calibrate(verbose=False)
+    out["sigma_profile"] = cal.sigma_profile(base=stored["params"])
+    log.info("%s sigma profile done", session)
+
+    # 5a. SPX-only Heston in the production and the wide (profile) box
+    spx = out.setdefault("spx_only", {})
+    for key, box in (("heston", "production"), ("heston_wide_box", "wide")):
+        spx[key] = cal.calibrate_spx_only("heston", warm=stored["params"], box=box, n_starts=4)
+        log.info("%s SPX-only %s: in %.3f vp, OOS %.3f vp, %.0fs", session, key,
+                 spx[key]["spx_iv_rmse_exact"], spx[key]["spx_oos_iv_rmse"],
+                 spx[key]["fit_seconds"])
+
+
+def _rough_part(session: str, cal, stored: dict, out: dict) -> None:
+    # 5b. SPX-only lifted rough Heston, same anchors, residuals and box
+    spx = out.setdefault("spx_only", {})
+    spx["rough_heston"] = rgh = cal.calibrate_spx_only(
+        "rough_heston", warm=stored["params"], n_starts=ROUGH_SOBOL_STARTS)
+    log.info("%s SPX-only rough Heston: in %.3f vp, OOS %.3f vp, H %.3f, %.0fs", session,
+             rgh["spx_iv_rmse_exact"], rgh["spx_oos_iv_rmse"], rgh["params"]["H"],
+             rgh["fit_seconds"])
+    # 6. the joint loss (SPX anchors + VIX spot indices) with rough Heston;
+    #    its Heston counterparts are "trf" (production box) and the last
+    #    sigma_profile row (sigma <= 10, kappa <= 60)
+    jr = cal.calibrate_comparison("rough_heston", legs="joint", warm=stored["params"],
+                                  n_starts=ROUGH_SOBOL_STARTS)
+    out["joint_rough_heston"] = jr
+    log.info("%s joint rough Heston: loss %.4g, in %.3f vp, OOS %.3f vp, VIX %.3f, H %.3f, %.0fs",
+             session, jr["loss"], jr["spx_iv_rmse_exact"], jr["spx_oos_iv_rmse"],
+             jr["vix_index_rmse"], jr["params"]["H"], jr["fit_seconds"])
+
+
+def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int = 4,
+                     parts=PARTS, existing: dict | None = None) -> dict:
+    """The diagnostics of one session; ``parts`` selects "heston" (TRF, DE,
+    Jacobian, identifiability, sigma profile, SPX-only Heston) and/or
+    "rough" (SPX-only and joint lifted rough Heston). A part not run is
+    carried over from ``existing`` (the session's file so far), so the two
+    can run as separate jobs."""
+    unknown = set(parts) - set(PARTS)
+    if unknown:
+        raise ValueError(f"unknown part(s) {sorted(unknown)}; choose from {PARTS}")
     with open(config.DATA_DIR / "calibrations" / f"joint_cal_{session}.pkl", "rb") as f:
         stored = pickle.load(f)
     cal = jc.JointCalibrator(as_of_date=session)
     names = jc.HESTON_PARAM_NAMES
     x_stored = np.array([stored["params"][k] for k in names])
     r = cal.residuals(x_stored)
-    out = {
+    out = dict(existing or {})
+    if out.get("session") not in (None, session):
+        raise ValueError(f"existing diagnostics are for {out.get('session')}, not {session}")
+    out.update({
         "schema_version": SCHEMA_VERSION,
         "session": session,
-        "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        "code_commit": _git_head(),
         "environment": {"python": platform.python_version(), "numpy": np.__version__,
                         "scipy": __import__("scipy").__version__,
-                        "cpus": os.cpu_count(), "machine": platform.machine(),
-                        # timings below are wall-clock on a shared machine:
-                        # compare methods within one file (run back to back),
-                        # not seconds across files or machines
-                        "loadavg_start": list(os.getloadavg())},
+                        "cpus": os.cpu_count(), "machine": platform.machine()},
         "data": {"n_spx_anchors": int(len(cal.spx_surface)),
                  "n_spx_expiries": int(cal.spx_surface["expiry"].nunique()),
                  "n_spx_oos": int(len(cal.spx_surface_full) - len(cal.spx_surface)),
@@ -209,92 +322,18 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
             "spx_oos_iv_rmse": stored["leg_losses"].get("spx_oos_iv_rmse"),
             **cal._vvix_check(*(stored["params"][k] for k in ("kappa", "theta", "sigma", "v0"))),
         },
-    }
-
-    # 1. default TRF
-    res, trf_wall, trf_cpu = _timed(cal.calibrate, verbose=False)
-    trf_x = np.array([res["params"][k] for k in names])
-    out["trf"] = {
-        "params": res["params"], "loss": res["loss"],
-        "loss_rel_diff_vs_stored": res["loss"] / stored["loss"] - 1.0,
-        "param_rel_diff_vs_stored": {k: res["params"][k] / stored["params"][k] - 1.0
-                                     for k in names},
-        "fit_time_seconds": res["fit_time"], "n_evals": res["n_evals"],
-        "fit_cpu_seconds": res["fit_cpu_time"],
-        "wall_seconds_incl_diagnostics": trf_wall, "cpu_seconds_incl_diagnostics": trf_cpu,
-        "success": res["success"], "message": res["optimizer_message"],
-        "warm_start": res["methods"]["optimizer"]["warm_start"],
-        "multistart": res["multistart"],
-        "spx_iv_rmse": res["leg_losses"]["spx_iv_rmse"],
-        "spx_oos_iv_rmse": res["leg_losses"]["spx_oos_iv_rmse"],
-        "pinned_params": res["pinned_params"],
-        "gate": list(jc.is_acceptable_calibration(res)),
-    }
-    out["identifiability"] = res["identifiability"]
-    lo, hi = jc._box_arrays(config.HESTON_BOUNDS, names)
-    out["identifiability"]["profile_check"] = jc.gauss_newton_profile_check(
-        cal.residual_model(), trf_x, res["identifiability"], lo, hi)
-    log.info("%s TRF: loss %.8g (stored %.8g), %.1fs, %d evals", session, res["loss"],
-             stored["loss"], res["fit_time"], res["n_evals"])
-
-    # 2. TRF with a finite-difference Jacobian (same starts)
-    fd, _, fd_cpu = _timed(cal.calibrate, verbose=False, jacobian="2-point")
-    out["trf_finite_diff"] = {"loss": fd["loss"], "fit_time_seconds": fd["fit_time"],
-                              "fit_cpu_seconds": fd["fit_cpu_time"],
-                              "cpu_seconds_incl_diagnostics": fd_cpu,
-                              "n_evals": fd["n_evals"],
-                              "loss_rel_diff_vs_analytic": fd["loss"] / res["loss"] - 1.0,
-                              "n_distinct_basins": fd["multistart"]["n_distinct_basins"]}
-    out["jacobian"] = _jacobian_timing(cal.residual_model(), trf_x)
-
-    # 3. DE as the optional global check (processes), and optionally serial
-    chk_res, _, chk_cpu = _timed(cal.calibrate, verbose=False, de_check=True,
-                                 de_workers=de_workers)
-    chk = chk_res["de_check"]
-    out["de"] = {"settings": {"maxiter": 200, "popsize": 10, "seed": config.RANDOM_SEED,
-                              "workers": de_workers, "updating": "deferred"},
-                 # TRF fit + DE in worker processes + TRF polish, all CPU
-                 "cpu_seconds_trf_plus_de_check": chk_cpu,
-                 **chk}
-    if time_serial_de:
-        ser, ser_wall, ser_cpu = _timed(cal.calibrate, verbose=False, optimizer="de",
-                                        de_workers=1)
-        out["de"]["serial_rerun"] = {"seconds": ser_wall, "cpu_seconds": ser_cpu,
-                                     "fit_time_seconds": ser["fit_time"],
-                                     "fit_cpu_seconds": ser["fit_cpu_time"],
-                                     "loss": ser["loss"], "n_evals": ser["n_evals"],
-                                     "loss_rel_diff_vs_stored": ser["loss"] / stored["loss"] - 1}
-    log.info("%s DE check (%d workers): %.1fs, loss %.8g, agrees=%s", session, de_workers,
-             chk["de_seconds"], chk["de_polished_loss"], chk["agrees"])
-
-    # 4. sigma profile (diagnostic; the production fit is untouched)
-    cal.calibrate(verbose=False)
-    out["sigma_profile"] = cal.sigma_profile(base=stored["params"])
-    log.info("%s sigma profile done", session)
-
-    # 5. SPX-only Heston vs lifted rough Heston, same residuals and optimiser
-    spx = {}
-    for key, model, box in (("heston", "heston", "production"),
-                            ("heston_wide_box", "heston", "wide"),
-                            ("rough_heston", "rough_heston", "production")):
-        spx[key] = cal.calibrate_spx_only(model, warm=stored["params"], box=box,
-                                          n_starts=ROUGH_SOBOL_STARTS if model != "heston" else 4)
-        log.info("%s SPX-only %s: in %.3f vp, OOS %.3f vp, %.0fs", session, key,
-                 spx[key]["spx_iv_rmse_exact"], spx[key]["spx_oos_iv_rmse"],
-                 spx[key]["fit_seconds"])
-    out["spx_only"] = spx
-
-    # 6. the joint loss (SPX anchors + VIX spot indices) with rough Heston;
-    #    its Heston counterparts are "trf" (production box) and the last
-    #    sigma_profile row (sigma <= 10, kappa <= 60)
-    jr = cal.calibrate_comparison("rough_heston", legs="joint", warm=stored["params"],
-                                  n_starts=ROUGH_SOBOL_STARTS)
-    out["joint_rough_heston"] = jr
-    log.info("%s joint rough Heston: loss %.4g, in %.3f vp, OOS %.3f vp, VIX %.3f, H %.3f, %.0fs",
-             session, jr["loss"], jr["spx_iv_rmse_exact"], jr["spx_oos_iv_rmse"],
-             jr["vix_index_rmse"], jr["params"]["H"], jr["fit_seconds"])
-    out["seconds_total"] = time.perf_counter() - t_all
-    out["environment"]["loadavg_end"] = list(os.getloadavg())
+    })
+    prov = dict(out.get("provenance") or {})
+    for part in PARTS:
+        if part not in parts:
+            continue
+        p0 = _provenance_start()
+        if part == "heston":
+            _heston_part(session, cal, stored, out, time_serial_de, de_workers)
+        else:
+            _rough_part(session, cal, stored, out)
+        prov[part] = _provenance_end(p0)
+    out["provenance"] = prov
     return _jsonable(out)
 
 
@@ -315,12 +354,13 @@ def summarise(paths) -> dict:
             "trf_fd_seconds": d["trf_finite_diff"]["fit_time_seconds"],
             "trf_fd_cpu_seconds": d["trf_finite_diff"].get("fit_cpu_seconds"),
             "trf_fd_evals": d["trf_finite_diff"]["n_evals"],
+            "de4_trf_polished_loss": d["de"]["de_polished_loss"],
             "de_serial_seconds": (d["de"].get("serial_rerun") or {}).get("fit_time_seconds"),
             "de_serial_cpu_seconds": (d["de"].get("serial_rerun") or {}).get("fit_cpu_seconds"),
             "de_serial_evals": (d["de"].get("serial_rerun") or {}).get("n_evals"),
             "de_serial_loss_rel_diff_vs_stored": (d["de"].get("serial_rerun") or {}).get(
                 "loss_rel_diff_vs_stored"),
-            "loadavg_start": d["environment"]["loadavg_start"],
+            "heston_part_loadavg_start": d["provenance"]["heston"]["loadavg_start"],
             "trf_basins": d["trf"]["multistart"]["n_distinct_basins"],
             "stored_de_seconds": d["stored_fit"]["fit_time_seconds"],
             "stored_de_evals": d["stored_fit"]["n_evals"],
@@ -354,6 +394,8 @@ def summarise(paths) -> dict:
             "rough_basins": rgh["multistart"]["n_distinct_basins"],
             "rough_numerics_max_iv_vp": (rgh.get("numerics") or {}).get(
                 "anchor_iv_max_abs_diff_vp"),
+            "rough_lifting_error_estimate_max_vp": (rgh.get("numerics") or {}).get(
+                "lifting_error_estimate_max_vp"),
             "joint_heston_loss": d["trf"]["loss"],
             "joint_heston_free_sigma_loss": free["loss"],
             "joint_heston_vix_index": prof[2.0]["vix_index_rmse"],
@@ -366,6 +408,9 @@ def summarise(paths) -> dict:
             "joint_rough_H": d["joint_rough_heston"]["params"]["H"],
             "joint_rough_sigma": d["joint_rough_heston"]["params"]["sigma"],
             "joint_rough_on_bound": d["joint_rough_heston"]["on_bound"],
+            "joint_rough_lifting_error_estimate_max_vp": (
+                d["joint_rough_heston"].get("numerics") or {}).get(
+                "lifting_error_estimate_max_vp"),
         })
     return {"schema_version": SCHEMA_VERSION,
             "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -379,21 +424,31 @@ def main(argv=None) -> int:
     ap.add_argument("--time-serial-de", action="store_true",
                     help="also re-run the serial DE on this machine (about 45 s per session)")
     ap.add_argument("--de-workers", type=int, default=4)
+    ap.add_argument("--part", choices=("all",) + PARTS, default="all",
+                    help="run one part and merge it into the session's existing file")
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     for name in ("joint_vol_calibration",):
         logging.getLogger(name).setLevel(logging.WARNING)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    parts = PARTS if args.part == "all" else (args.part,)
     if not args.summary_only:
         sessions = args.session or committed_v2_sessions()
         for s in sessions:
-            d = diagnose_session(s, time_serial_de=args.time_serial_de,
-                                 de_workers=args.de_workers)
             path = args.out_dir / f"{s}.json"
+            existing = json.loads(path.read_text()) if path.exists() else None
+            d = diagnose_session(s, time_serial_de=args.time_serial_de,
+                                 de_workers=args.de_workers, parts=parts, existing=existing)
             path.write_text(json.dumps(d, indent=1, allow_nan=False) + "\n")
-            log.info("wrote %s (%.0fs)", path, d["seconds_total"])
-    paths = sorted(p for p in args.out_dir.glob("20*.json"))
+            log.info("wrote %s (%s: %s)", path, ", ".join(parts),
+                     ", ".join(f"{k} {v['seconds']:.0f}s" for k, v in d["provenance"].items()))
+    paths = []
+    for p in sorted(args.out_dir.glob("20*.json")):
+        if set(json.loads(p.read_text()).get("provenance", {})) >= set(PARTS):
+            paths.append(p)
+        else:
+            log.info("%s: not every part has run; left out of summary.json", p.name)
     if paths:
         (args.out_dir / "summary.json").write_text(
             json.dumps(_jsonable(summarise(paths)), indent=1, allow_nan=False) + "\n")

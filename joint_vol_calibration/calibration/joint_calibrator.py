@@ -1942,7 +1942,10 @@ class JointCalibrator:
         is off), fit time, evaluations, every start, and an identifiability
         report. numerics_check (rough): anchor IVs re-priced with twice the
         factors and four times the Riccati steps, so the approximation error
-        is measured next to the misfit. box="wide" (Heston only) fits in the
+        is measured next to the misfit (a self-convergence gap; scaled by
+        1/(1 - 2^-1.5) for the n^-1.5 lifting rate it estimates the
+        20-factor error, cf. the QuantLib Adams comparison in
+        tests/test_rough_heston.py). box="wide" (Heston only) fits in the
         sigma-profile box instead (sigma <= max(SIGMA_PROFILE_CAPS), kappa <=
         PROFILE_KAPPA_MAX), so rough Heston can also be compared with a Heston
         that is not held by the production sigma <= 2 prior.
@@ -2025,10 +2028,15 @@ class JointCalibrator:
                 fine_iv = self._surface_errors(self.spx_surface, fine, tuple(x))["model_iv"]
                 d_iv = (base_iv - fine_iv).to_numpy(float) * 100
                 d_iv = d_iv[np.isfinite(d_iv)]
+                max_d = float(np.max(np.abs(d_iv))) if len(d_iv) else None
                 numerics = {
                     "reference": {"n_factors": 2 * n_factors, "n_steps": 4 * n_steps},
-                    "anchor_iv_max_abs_diff_vp": float(np.max(np.abs(d_iv))) if len(d_iv) else None,
+                    "anchor_iv_max_abs_diff_vp": max_d,
                     "anchor_iv_rms_diff_vp": float(np.sqrt(np.mean(d_iv ** 2))) if len(d_iv) else None,
+                    # the lifting error falls like n^-1.5 (tests), so the gap
+                    # to 2n factors is (1 - 2^-1.5) of the n-factor error
+                    "lifting_error_estimate_max_vp": (max_d / (1.0 - 2.0 ** -1.5)
+                                                      if max_d is not None else None),
                     "frozen_vs_adaptive_rel_loss_diff": float(max(
                         abs(run["loss"] - run["frozen_loss"]) / max(run["loss"], 1e-300)
                         for run in runs)),

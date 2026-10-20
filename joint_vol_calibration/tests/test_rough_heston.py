@@ -111,9 +111,10 @@ def _mittag_leffler(alpha, beta, z, terms=400):
     return total
 
 
-@pytest.mark.parametrize("H", (0.1, 0.3))
+@pytest.mark.parametrize("H, tol", ((0.02, 5e-3),   # the box floor, where joint fits land
+                                    (0.1, 3e-3), (0.3, 3e-3)))
 @pytest.mark.parametrize("T", (30 / 365, 1.0))
-def test_expected_variance_matches_mittag_leffler(H, T):
+def test_expected_variance_matches_mittag_leffler(H, tol, T):
     """Exact rough Heston: E[V_t] = V0 + (theta - V0)(1 - E_a(-kappa t^a)),
     so int_0^T E[V] = theta T - (theta - V0) T E_{a,2}(-kappa T^a), a = H + 1/2."""
     kappa, theta, _, _, v0 = (2.0, 0.06, 0.5, -0.7, 0.02)
@@ -121,7 +122,9 @@ def test_expected_variance_matches_mittag_leffler(H, T):
     exact = theta * T - (theta - v0) * T * _mittag_leffler(a, 2.0, -kappa * T ** a)
     errs = [abs(rh.rough_heston_expected_variance_integral(T, kappa, theta, v0, H, n_factors=n)
                 / exact - 1) for n in (20, 40, 80)]
-    assert errs[0] < 3e-3            # the 20-factor lifting error (measured 0.07%-0.26%)
+    # the 20-factor lifting error: measured 0.07%-0.26% at H = 0.1-0.3 and
+    # 0.34%-0.44% at H = 0.02
+    assert errs[0] < tol
     # and it shrinks like n^-1.5 (ratio 2^1.5 = 2.8 per doubling)
     for a, b in zip(errs, errs[1:]):
         assert 2.2 < a / b < 3.5, errs
@@ -266,3 +269,36 @@ def test_lifting_error_against_quantlib_adams(H):
             ours = rh.rough_heston_call_batch(_F, K, days / 365, _R, _Q, *p, H)
             adams = _ql_rough_calls(ql, p, H, days, K, "AdamsPredictorCorrector", 2048)
             assert np.max(np.abs(ours - adams)) < 1e-4 * _F
+
+
+def test_lifting_error_at_the_floor_where_the_joint_fit_lands():
+    """The joint (SPX + VIX index) rough fit of 2026-10-16 sits on the
+    H = 0.02 floor (data_store/calibrations/diagnostics/2026-10-16.json), so
+    the 20-factor lifting error is measured THERE against QuantLib's Adams
+    scheme for the exact fractional Riccati equation, 14 days to 1 year:
+    measured <= 7.7e-5 * F in price and <= 0.085 vp in implied vol (largest
+    at 14 days), against a 1.08 vp in-sample misfit at that fit. The VIX
+    index leg's error is the mean's: <= 0.02 VIX points (Mittag-Leffler).
+    Adams at 2048 steps is converged here (to 6e-7 * F of 8192 steps); it
+    is NOT at sigma = 2, H = 0.02 (6e-5 * F), which is why the generic
+    Adams test above stops at H = 0.1."""
+    ql = pytest.importorskip("QuantLib")
+    from joint_vol_calibration.models.implied_vol import implied_vol_black
+    p = (1.5791, 0.0538, 0.8772, -0.7123, 0.0352)       # 2026-10-16 joint rough fit (rounded)
+    K = np.array([85.0, 90, 95, 100, 105])
+    for days in (14, 30, 91, 365):
+        T = days / 365
+        ours = rh.rough_heston_call_batch(_F, K, T, _R, _Q, *p, 0.02)
+        adams = _ql_rough_calls(ql, p, 0.02, days, K, "AdamsPredictorCorrector", 2048)
+        assert np.max(np.abs(ours - adams)) < 1e-4 * _F
+        Fw, D = _F * math.exp((_R - _Q) * T), math.exp(-_R * T)
+        d_iv = [implied_vol_black(a, Fw, k, T, D, True) - implied_vol_black(b, Fw, k, T, D, True)
+                for a, b, k in zip(ours, adams, K)]
+        assert np.max(np.abs(d_iv)) * 100 < 0.1
+    kappa, theta, _, _, v0 = p
+    a = 0.52
+    for days in (9, 30, 93, 184):
+        T = days / 365
+        exact = theta * T - (theta - v0) * T * _mittag_leffler(a, 2.0, -kappa * T ** a)
+        lifted = rh.rough_heston_expected_variance_integral(T, kappa, theta, v0, 0.02)
+        assert abs(100 * math.sqrt(lifted / T) - 100 * math.sqrt(exact / T)) < 0.02
