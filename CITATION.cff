@@ -1,0 +1,128 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or its results, please cite it as below. The
+  version is the package version in pyproject.toml; cite the commit you used
+  when you depend on a specific result (the daily job keeps committing data).
+type: software
+title: "Joint SPX/VIX Smile Calibration System"
+abstract: >-
+  Heston and Bates option pricing by the Lewis (2001) contour integral with a
+  Black-Scholes control variate, exact VIX index and VIX futures formulas, a
+  session-dated and look-ahead-gated SPX option-chain pipeline, a joint
+  calibration of Heston to SPX smiles and the Cboe VIX term-structure indices,
+  a delta-hedged straddle backtest priced mark-to-model (it reports a negative
+  result), and the static dashboard published at https://navnoorbawa.me.
+authors:
+  - family-names: Bawa
+    given-names: Navnoor
+    affiliation: Thapar Institute of Engineering & Technology
+    website: "https://navnoorbawa.me"
+version: 0.22.0
+date-released: 2026-10-19
+license: MIT
+repository-code: "https://github.com/navnoorthapar/vol-system-dashboard"
+url: "https://navnoorbawa.me"
+keywords:
+  - stochastic volatility
+  - Heston model
+  - Bates model
+  - VIX
+  - option pricing
+  - implied volatility
+  - model calibration
+  - backtesting
+references:
+  - type: article
+    title: "A closed-form solution for options with stochastic volatility with applications to bond and currency options"
+    authors:
+      - family-names: Heston
+        given-names: Steven L.
+    journal: "The Review of Financial Studies"
+    volume: 6
+    issue: 2
+    start: 327
+    end: 343
+    year: 1993
+  - type: article
+    title: "Jumps and stochastic volatility: exchange rate processes implicit in Deutsche Mark options"
+    authors:
+      - family-names: Bates
+        given-names: David S.
+    journal: "The Review of Financial Studies"
+    volume: 9
+    issue: 1
+    start: 69
+    end: 107
+    year: 1996
+  - type: report
+    title: "A simple option formula for general jump-diffusion and other exponential Lévy processes"
+    authors:
+      - family-names: Lewis
+        given-names: Alan L.
+    institution:
+      name: "Envision Financial Systems and OptionCity.net"
+    year: 2001
+  - type: article
+    title: "The little Heston trap"
+    authors:
+      - family-names: Albrecher
+        given-names: Hansjörg
+      - family-names: Mayer
+        given-names: Philipp
+      - family-names: Schoutens
+        given-names: Wim
+      - family-names: Tistaert
+        given-names: Jurgen
+    journal: "Wilmott Magazine"
+    month: 1
+    year: 2007
+    start: 83
+    end: 92
+  - type: article
+    title: "Simple and efficient simulation of the Heston stochastic volatility model"
+    authors:
+      - family-names: Andersen
+        given-names: Leif
+    journal: "Journal of Computational Finance"
+    volume: 11
+    issue: 3
+    start: 1
+    end: 42
+    year: 2008
+  - type: article
+    title: "The quintic Ornstein-Uhlenbeck volatility model that jointly calibrates SPX & VIX smiles"
+    authors:
+      - family-names: Abi Jaber
+        given-names: Eduardo
+      - family-names: Illand
+        given-names: Camille
+      - family-names: Li
+        given-names: Shaun
+    identifiers:
+      - type: other
+        value: "arXiv:2212.10917"
+    year: 2022
+  - type: article
+    title: "Capturing smile dynamics with the quintic volatility model: SPX, skew-stickiness ratio and VIX"
+    authors:
+      - family-names: Abi Jaber
+        given-names: Eduardo
+      - family-names: Li
+        given-names: Shaun
+    identifiers:
+      - type: other
+        value: "arXiv:2503.14158"
+    year: 2025
+  - type: article
+    title: "Volatility is (mostly) path-dependent"
+    authors:
+      - family-names: Guyon
+        given-names: Julien
+      - family-names: Lekeufack
+        given-names: Jordan
+    journal: "Quantitative Finance"
+    volume: 23
+    issue: 9
+    start: 1221
+    end: 1258
+    year: 2023

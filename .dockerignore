@@ -1,0 +1,21 @@
+# Build context for the Dockerfile: the tracked tree without history, caches or
+# local build output. The image runs `make test` on its own copy; work that needs
+# the git history (make reproduce copies the tracked files) mounts the checkout:
+#   docker run --rm -v "$PWD":/work vol-system-dashboard make reproduce
+.git
+**/__pycache__
+**/*.py[cod]
+.hypothesis
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+.coverage.*
+.benchmarks
+.bench
+.reproduce
+.site-build
+.venv
+venv
+scripts/ci/a11y/node_modules
+data_store/mc_cache
