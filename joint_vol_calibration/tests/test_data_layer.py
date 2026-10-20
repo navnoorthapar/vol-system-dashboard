@@ -918,3 +918,265 @@ class TestProvenanceBackfill:
 
         assert mod.backfill(apply=True, cal_dir=d, snapshots=self.SNAPS) == 0
         assert self._bytes(d) == after_first
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C23: session-keyed writers, Cboe primary, one source vocabulary, no float
+# churn, the reference tables (cboe_index_daily, rates_daily)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _vts(rows, source):
+    """rows: (date, ticker, close)."""
+    return pd.DataFrame(rows, columns=["date", "ticker", "close"]).assign(source=source)
+
+
+def _stored_vts(path) -> dict:
+    con = raw_conn(path)
+    out = {(d, t): (c, s) for d, t, c, s in con.execute("SELECT date, ticker, close, source FROM vix_term_structure")}
+    con.close()
+    return out
+
+
+class TestC23SessionKeyedWriters:
+    """Yahoo served ^VIX on Memorial Day 2026-05-25 and Labor Day 2026-09-07,
+    and Cboe's VIX_History.csv prints on 33 NYSE holidays since 2022-05-30;
+    the bot stored the Yahoo ones (29 holiday rows in vix_daily, 2 in the
+    term structure) and every run logged them."""
+
+    HOLIDAYS = ["2026-05-25", "2026-09-07"]
+
+    def test_vectorised_calendar_agrees_with_the_scalar_one(self):
+        days = pd.date_range("2009-12-25", "2027-01-05", freq="D")
+        assert db.is_session_array(days).tolist() == [db.is_nyse_session(d) for d in days]
+        assert db.is_session_array(["not a date", None]).tolist() == [False, False]
+
+    def test_vix_daily_writer_drops_holiday_rows(self, tmp_db, caplog):
+        dates = ["2026-05-22", "2026-05-25", "2026-05-26", "2026-09-04", "2026-09-07", "2026-09-08"]
+        df = pd.DataFrame({"date": dates, "open": 1.0, "high": 1.0, "low": 1.0, "close": 15.0,
+                           "source": "yfinance"})
+        with caplog.at_level(logging.INFO):
+            assert db.insert_vix_daily(df) == 4
+        stored = db.get_vix_daily("2026-12-31")["date"].dt.strftime("%Y-%m-%d").tolist()
+        assert stored == ["2026-05-22", "2026-05-26", "2026-09-04", "2026-09-08"]
+        assert "not storing 2 row(s)" in caplog.text and "2026-05-25" in caplog.text
+
+    def test_term_structure_writer_drops_holiday_rows(self, tmp_db):
+        rows = [(d, "^VIX", 15.0) for d in ["2026-09-04", "2026-09-07", "2026-09-08"]]
+        assert db.insert_vix_term_structure(_vts(rows, "yfinance")) == 2
+        assert {d for d, _ in _stored_vts(tmp_db)} == {"2026-09-04", "2026-09-08"}
+        assert db.insert_vix_term_structure(_vts([("2026-09-07", "^VIX", 15.0)], "cboe")) == 0
+
+    def test_export_never_writes_a_holiday_row_from_either_side(self, tmp_db, tmp_path):
+        """A stale DB (the committed file holds 29 such rows) or an old partition
+        must not carry a holiday row back into the record: export merges both."""
+        part = tmp_path / "market" / "vix_daily" / "vix_daily_2026.parquet"
+        part.parent.mkdir(parents=True)
+        pd.DataFrame({"date": ["2026-05-25", "2026-05-26"], "open": 1.0, "high": 1.0, "low": 1.0,
+                      "close": [16.0, 17.0], "source": ["yfinance", "cboe"]}).to_parquet(part, index=False)
+        con = raw_conn(tmp_db)                       # what the pre-C23 bot left in the DB
+        con.execute("INSERT INTO vix_daily VALUES ('2026-09-07', 1, 1, 1, 15.5, NULL)")
+        con.execute("INSERT INTO vix_daily VALUES ('2026-09-08', 1, 1, 1, 15.6, 'cboe')")
+        con.commit()
+        con.close()
+        assert db.export_market_partitions(tables=["vix_daily"]) == [part]
+        assert pd.read_parquet(part)["date"].tolist() == ["2026-05-26", "2026-09-08"]
+
+    def test_tbill_and_spx_writers_are_not_session_filtered(self, tmp_db):
+        """The bond market's business days are not NYSE sessions; SPX is the
+        calendar's own reference (a holiday row there is a calendar bug and
+        stays visible through validate_sessions)."""
+        db.insert_tbill_rates(pd.DataFrame({"date": ["2026-04-03"], "rate": [0.04]}))   # Good Friday
+        assert db.get_tbill_rate("2026-04-03") == pytest.approx(0.04)
+        assert "spx_ohlcv" not in db.SESSION_KEYED_TABLES and "tbill_rates" not in db.SESSION_KEYED_TABLES
+
+
+class TestC23CboePrimaryTermStructure:
+    """Consumers (labels, backtest, hedger, calibrator) read vix_term_structure,
+    which held Yahoo prints only: 2026-02-06 ^VIX 20.37 (Yahoo served the
+    ^VIX3M value) against Cboe's 17.76, and 9 ^VVIX sessions missing."""
+
+    def test_yahoo_never_replaces_a_stored_cboe_index_value(self, tmp_db, caplog):
+        db.insert_vix_term_structure(_vts([("2026-02-06", "^VIX", 17.76), ("2026-02-06", "^VIX3M", 20.37)],
+                                          "cboe"))
+        with caplog.at_level(logging.INFO):
+            n = db.insert_vix_term_structure(_vts([("2026-02-06", "^VIX", 20.37), ("2026-02-06", "^VIX3M", 20.37),
+                                                   ("2026-02-09", "^VIX", 17.36)], "yfinance"))
+        assert n == 1 and "kept 2 stored Cboe close(s)" in caplog.text
+        st = _stored_vts(tmp_db)
+        assert st[("2026-02-06", "^VIX")] == (17.76, "cboe")
+        assert st[("2026-02-09", "^VIX")] == (17.36, "yfinance")            # provisional
+
+    def test_cboe_replaces_the_provisional_yahoo_row(self, tmp_db):
+        db.insert_vix_term_structure(_vts([("2026-10-19", "^VVIX", 107.10)], "yfinance"))
+        db.insert_vix_term_structure(_vts([("2026-10-19", "^VVIX", 106.93)], "cboe"))
+        assert _stored_vts(tmp_db)[("2026-10-19", "^VVIX")] == (106.93, "cboe")
+
+    def test_restoring_an_unrecorded_partition_keeps_the_cboe_rows(self, tmp_db, tmp_path):
+        """The bot restores the committed partitions into the committed DB on
+        every run: whichever of the two is older must not win over Cboe."""
+        db.insert_vix_term_structure(_vts([("2020-06-11", "^VVIX", 146.84)], "cboe"))
+        old = tmp_path / "old_market" / "vix_term_structure" / "vix_term_structure_2020.parquet"
+        old.parent.mkdir(parents=True)
+        pd.DataFrame({"date": ["2020-06-11", "2020-06-12"], "ticker": "^VVIX", "tenor_days": 30,
+                      "close": [116.53, 117.0], "is_vvix": 1, "source": None}).to_parquet(old, index=False)
+        db.import_market_partitions(tmp_path / "old_market", tables=["vix_term_structure"])
+        st = _stored_vts(tmp_db)
+        assert st[("2020-06-11", "^VVIX")] == (146.84, "cboe")
+        assert st[("2020-06-12", "^VVIX")] == (117.0, None)
+
+    def test_compare_sources_reports_only_material_session_differences(self, caplog):
+        cboe = _vts([("2026-02-06", "^VIX", 17.76), ("2026-02-06", "^VIX3M", 20.37),
+                     ("2019-08-12", "^VVIX", 110.31), ("2026-09-07", "^VIX", 15.0),
+                     ("2026-02-09", "^VIX", 17.36)], "cboe")
+        yahoo = _vts([("2026-02-06", "^VIX", 20.370001), ("2026-02-06", "^VIX3M", 20.370001),
+                      ("2019-08-12", "^VVIX", 105.309998), ("2026-09-07", "^VIX", 25.0),
+                      ("2026-02-09", "^VIX", 17.61)], "yfinance")
+        with caplog.at_level(logging.WARNING):
+            res = db.compare_sources(cboe, yahoo, 0.25)
+        assert res[["date", "ticker"]].values.tolist() == [["2019-08-12", "^VVIX"], ["2026-02-06", "^VIX"]]
+        assert res["diff"].round(4).tolist() == [5.0, -2.61]
+        assert "2026-02-06 (17.76 vs 20.37)" in caplog.text
+        # 0.25 itself is not a mismatch; holidays (2026-09-07) are never compared
+        assert db.compare_sources(cboe, yahoo.assign(close=yahoo["close"].where(
+            yahoo["date"] != "2026-02-09", 17.11)), 0.25, log=False)["date"].tolist() == ["2019-08-12", "2026-02-06"]
+        assert db.compare_sources(cboe, yahoo.iloc[0:0], 0.25).empty
+
+
+class TestC23SourceVocabulary:
+    def test_option_rows_tagged_yahoo_are_stored_as_yfinance(self, tmp_db):
+        """option_chain.observed_quotes tags its rows 'yahoo' (the 2026-10-16
+        chain), yf_downloader 'yfinance': one spelling in the table."""
+        db.insert_options_snapshot(chain("2026-10-16", TestOptionSnapshots.ROWS, source="yahoo"), "SPX")
+        db.insert_options_snapshot(chain("2026-10-09", TestOptionSnapshots.ROWS, source="cboe"), "SPX")
+        con = raw_conn(tmp_db)
+        got = dict(con.execute("SELECT snapshot_date, GROUP_CONCAT(DISTINCT source) FROM options_snapshots "
+                               "GROUP BY snapshot_date").fetchall())
+        con.close()
+        assert got == {"2026-10-09": "cboe", "2026-10-16": "yfinance"}
+
+    def test_canonical_source(self):
+        s = db.canonical_source(pd.Series(["yahoo", "Yahoo ", "cboe", None, np.nan, "yfinance"]))
+        assert s.tolist() == ["yfinance", "yfinance", "cboe", None, None, "yfinance"]
+
+
+class TestC23NoFloatChurn:
+    """61f7252 rewrote tbill_rates_2025.parquet for three rows whose derived
+    rate differed by -6.94e-18 between runner CPUs."""
+
+    def _export_rate(self, rate):
+        db.insert_tbill_rates(pd.DataFrame({"date": ["2025-12-11"], "rate": [rate],
+                                            "discount_yield": [0.0360]}))
+        return db.export_market_partitions(tables=["tbill_rates"])
+
+    def test_last_bit_differences_rewrite_nothing(self, tmp_db, tmp_path):
+        r = float(db.tbill_discount_to_cc(0.0360))
+        assert len(self._export_rate(r)) == 1
+        path = tmp_path / "market" / "tbill_rates" / "tbill_rates_2025.parquet"
+        blob = path.read_bytes()
+        assert self._export_rate(r - 6.94e-18) == []
+        assert path.read_bytes() == blob
+        assert self._export_rate(r + 1e-6) == [path]                       # a real revision is written
+
+    def test_same_content(self):
+        a = pd.DataFrame({"date": ["d1", "d2"], "x": [1.0, np.nan], "s": ["cboe", None]})
+        assert db._same_content(a, a.assign(x=[1.0 + 1e-15, np.nan]))
+        assert not db._same_content(a, a.assign(x=[1.0, 2.0]))             # NaN -> value
+        assert not db._same_content(a, a.assign(x=[1.0 + 1e-9, np.nan]))
+        assert not db._same_content(a, a.assign(s=["cboe", "yfinance"]))
+        assert not db._same_content(a, a.iloc[:1])
+
+
+class TestC23ReferenceTables:
+    def _skew(self):
+        return pd.DataFrame({"date": ["2026-10-15", "2026-10-16", "2026-10-19", "2026-10-17"],
+                             "symbol": "SKEW", "close": [160.10, 168.59, 161.86, 150.0],
+                             "source": "cboe"})
+
+    def test_cboe_index_round_trip_is_gated_and_session_keyed(self, tmp_db):
+        assert db.insert_cboe_index(self._skew()) == 3                       # the Saturday row dropped
+        db.insert_cboe_index(pd.DataFrame({"date": ["2026-10-16"], "symbol": "^cor3m", "open": 11.82,
+                                           "high": 16.41, "low": 11.82, "close": 13.98, "source": "cboe"}))
+        got = db.get_cboe_index("2026-10-16")
+        assert got[["symbol", "close"]].values.tolist() == [["SKEW", 160.10], ["COR3M", 13.98], ["SKEW", 168.59]]
+        assert got.loc[got["symbol"] == "SKEW", "open"].isna().all()
+        wide = db.get_cboe_index_wide("2026-10-19", ["SKEW", "COR3M"], start_date="2026-10-16")
+        assert wide.index.strftime("%Y-%m-%d").tolist() == ["2026-10-16", "2026-10-19"]
+        assert wide.loc["2026-10-19", "SKEW"] == 161.86 and np.isnan(wide.loc["2026-10-19", "COR3M"])
+        db.insert_cboe_index(self._skew().assign(close=1.0, source="yfinance"))
+        assert db.get_cboe_index("2026-10-19", ["SKEW"])["close"].tolist() == [160.10, 168.59, 161.86]
+
+    def test_rates_precedence_and_gate(self, tmp_db, caplog):
+        tsy = pd.DataFrame({"date": ["2026-10-15", "2026-10-16"], "series": "UST_PAR_3M",
+                            "value": [0.0428, 0.0426], "source": "treasury"})
+        assert db.insert_rates_daily(tsy) == 2
+        fred = tsy.assign(value=[0.0400, 0.0400], source="fred")
+        fred = pd.concat([fred, pd.DataFrame({"date": ["2026-10-19"], "series": ["UST_PAR_3M"],
+                                              "value": [0.0427], "source": ["fred"]})])
+        assert db.insert_rates_daily(fred) == 1                              # fills the gap only
+        got = db.get_rates_daily("2026-10-16")
+        assert got["value"].tolist() == [0.0428, 0.0426] and set(got["source"]) == {"treasury"}
+        assert db.get_rates_daily("2026-10-19")["source"].tolist() == ["treasury", "treasury", "fred"]
+        assert db.insert_rates_daily(fred.iloc[[2]].assign(value=0.0429, source="treasury")) == 1
+        assert db.get_rates_daily("2026-10-19")["value"].iloc[-1] == 0.0429
+        with caplog.at_level(logging.WARNING):
+            db.insert_rates_daily(pd.DataFrame({"date": ["2026-10-20"], "series": ["SOFR"], "value": [3.87],
+                                                "source": ["fred"]}))
+        assert "percent stored as decimal" in caplog.text
+        with pytest.raises(ValueError, match="series"):
+            db.insert_rates_daily(pd.DataFrame({"date": ["2026-10-20"], "value": [0.04]}))
+
+    def test_reference_tables_are_opt_in_for_the_partitions(self, tmp_db, tmp_path, monkeypatch):
+        """The bot's restore/persist steps call the default (MARKET_TABLES):
+        adding the C23 tables must not change what they read or write."""
+        db.insert_cboe_index(self._skew())
+        db.insert_rates_daily(pd.DataFrame({"date": ["2026-10-16"], "series": ["SOFR"], "value": [0.0388],
+                                            "source": ["fred"]}))
+        assert db.export_market_partitions() == []
+        assert db.MARKET_TABLES == ("spx_ohlcv", "vix_daily", "vix_term_structure", "tbill_rates")
+        written = db.export_market_partitions(tables=db.REFERENCE_TABLES)
+        assert sorted(p.name for p in written) == ["cboe_index_daily_2026.parquet", "rates_daily_2026.parquet"]
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "fresh.db")
+        db.init_database()
+        assert db.import_market_partitions() == {}
+        assert db.import_market_partitions(tables=db.REFERENCE_TABLES) == {"cboe_index_daily": 3,
+                                                                           "rates_daily": 1}
+
+    def test_replace_market_partitions_removes_what_df_lacks(self, tmp_db, tmp_path):
+        db.insert_vix_term_structure(_vts([("2026-02-05", "^VIX", 21.77), ("2026-02-06", "^VIX", 20.37)], None))
+        db.export_market_partitions(tables=["vix_term_structure"])
+        fixed = db.read_market_partitions("vix_term_structure").iloc[[1]].assign(close=17.76, source="cboe")
+        assert len(db.replace_market_partitions("vix_term_structure", fixed)) == 1
+        back = db.read_market_partitions("vix_term_structure")
+        assert back[["date", "close", "source"]].values.tolist() == [["2026-02-06", 17.76, "cboe"]]
+
+
+class TestC23SchemaV2:
+    def test_v1_file_gains_the_reference_tables_and_keeps_its_rows(self, tmp_path, monkeypatch):
+        path = tmp_path / "v1.db"
+        monkeypatch.setattr(db, "DB_PATH", path)
+        db.init_database()
+        db.insert_spx_ohlcv(spx_frame(["2026-09-21"]))
+        con = raw_conn(path)
+        con.execute("DROP TABLE cboe_index_daily")
+        con.execute("DROP TABLE rates_daily")
+        con.execute("PRAGMA user_version = 1")
+        con.commit()
+        con.close()
+        db._SCHEMA_READY.clear()
+        db.init_database()
+        con = raw_conn(path)
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        n = con.execute("SELECT COUNT(*) FROM spx_ohlcv").fetchone()[0]
+        con.close()
+        assert {"cboe_index_daily", "rates_daily"} <= tables and version == db.SCHEMA_VERSION == 2 and n == 1
+
+    def test_shipped_database_is_at_the_current_schema(self):
+        """CI renders the site from the shipped file and then requires a clean
+        tree: a file behind SCHEMA_VERSION would be migrated (written) by the
+        first _ensure_schema() call."""
+        con = sqlite3.connect(f"file:{REPO / 'data_store' / 'vol_system.db'}?mode=ro", uri=True)
+        try:
+            assert db._schema_is_current(con)
+        finally:
+            con.close()
