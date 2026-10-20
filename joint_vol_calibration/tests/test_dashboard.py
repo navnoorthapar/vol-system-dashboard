@@ -108,6 +108,10 @@ def _write_market_db(path: Path, dates: pd.DatetimeIndex, seed: int = 11,
     con.execute("CREATE TABLE vix_daily (date TEXT PRIMARY KEY, open REAL, high REAL, low REAL, close REAL)")
     con.execute("CREATE TABLE vix_term_structure (date TEXT, ticker TEXT, tenor_days INTEGER, "
                 "close REAL, is_vvix INTEGER, PRIMARY KEY (date, ticker))")
+    # the research page's change-log facts average this per backtest year
+    con.execute("CREATE TABLE tbill_rates (date TEXT PRIMARY KEY, rate REAL NOT NULL, discount_yield REAL)")
+    con.executemany("INSERT INTO tbill_rates VALUES (?,?,?)",
+                    [(d, 0.02 + 0.0001 * (i % 50), None) for i, d in enumerate(ds)])
     con.executemany("INSERT INTO spx_ohlcv VALUES (?,?,?,?,?,?,?)",
                     [(d, c, c, c, c, 1, (None if i == 0 else float(x)))
                      for i, (d, c, x) in enumerate(zip(ds, close, r))])
@@ -619,10 +623,15 @@ def test_missing_input_renders_an_error_not_zeros(dash, synth, route, victim, co
     resp = dash.app.test_client().get(route)
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert int(resp.headers["X-Dashboard-Loader-Errors"]) >= 1
+    # the victim is the only failing loader: the synthetic store has every other
+    # input the page reads (it lacked tbill_rates, a second error hidden by ">= 1")
+    assert int(resp.headers["X-Dashboard-Loader-Errors"]) == 1
     assert component in resp.headers["X-Dashboard-Error-Components"]
     assert "Data unavailable" in html
-    assert "0 / 0" not in html and "NAV: $0" not in html
+    # a zero substituted over a zero ("0 / 0", "0.00 / 0.0"), not a number pair such
+    # as the inference headline's PSR / DSR "s2 0.10 / 0.004"
+    assert not re.search(r"(?<![\d.])0(\.0+)? / 0(\.0+)?(?![\d.])", _visible_text(html))
+    assert "NAV: $0" not in html
     # no headline tile shows a substituted zero (or a unit hanging off a missing value)
     tiles = [re.sub(r"<[^>]+>", "", v).strip()
              for v in re.findall(r'<div class="kpi-value[^"]*">(.*?)</div>', html, re.S)]
@@ -1124,9 +1133,12 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
     # headline fit has ρ on its bound; the shipped headline does not.
     if "AT THE LOWER BOUNDARY" in cal:
         assert "affine Volterra" in cal and "did not converge" in cal
-    for stale in ("37.14", "structural failure", "Feller-satisfying Heston", "SOFR",
+    for stale in ("structural failure", "Feller-satisfying Heston", "SOFR",
                   "VIX Futures RMSE", "SVI"):
         assert stale not in cal, stale
+    # the pre-C22 copy's "VIX options RMSE was 37.14 (vol) pts"; the quote smiles'
+    # chart data may hold an IV of 37.14 %
+    assert not re.search(r"37\.14 (vol )?pts", cal)
 
 
 def _spec(html: str, chart_id: str) -> dict:
@@ -1791,9 +1803,20 @@ def _errors(resp) -> int:
     return int(resp.headers.get("X-Dashboard-Loader-Errors", "0"))
 
 
-def test_artifacts_absent_render_named_placeholders_and_still_publish(dash, pages):
+@pytest.fixture
+def no_art(dash, tmp_path, monkeypatch):
+    """The shipped data_store without any C23 producer's artifact (data_store/
+    now ships the surface, inference and diagnostics outputs)."""
+    data = _artifact_store(tmp_path, surface=False, inference=False, forward=False, diagnostics=False)
+    monkeypatch.setattr(dash, "DATA", data)
+    return data
+
+
+def test_artifacts_absent_render_named_placeholders_and_still_publish(dash, no_art):
     """Before a producer runs, its panels say 'not yet generated', name the file
     and the producer, and show no number in its place; the pages still publish."""
+    client = dash.app.test_client()
+    pages = {route: client.get(route).get_data(as_text=True) for route in ("/", "/surface", "/research")}
     surf = pages["/surface"]
     assert 'data-artifact-state="absent"' in surf and "data_store/surface/&lt;session&gt;/residuals.parquet" in surf
     assert "scripts/surface_report.py" in surf
@@ -1802,7 +1825,6 @@ def test_artifacts_absent_render_named_placeholders_and_still_publish(dash, page
                  "data_store/backtest/inference/forecast_eval.json"):
         assert path in res, path
     assert "the bootstrap interval needs the inference artifact" in pages["/"]
-    client = dash.app.test_client()
     for route in dash.ROUTES:
         assert _errors(client.get(route)) == 0, route
 
@@ -2068,7 +2090,7 @@ def test_model_risk_checks_use_the_surface_artifacts(dash, art):
     assert mon["Quotes in an executable static-arbitrage row (% of scored quotes)"]["value"].startswith(f"{share:.1f}%")
 
 
-def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, pages):
+def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
     d = dash.load_model_risk()
     na = [m for m in d["monitors"] if m["value"] == "artifact not yet generated"]
     assert len(na) == 3 and all(m["status"] == "na" for m in na)
