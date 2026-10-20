@@ -41,7 +41,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 import numpy as np
@@ -225,8 +225,8 @@ def download_cboe_indices(symbols: Iterable[str] = DEFAULT_EXTRA_INDICES,
     sorted by (date, symbol). A symbol whose download fails raises.
     """
     frames = []
-    for sym in symbols:
-        sym = str(sym).upper().lstrip("^_")
+    for name in symbols:
+        sym = str(name).upper().lstrip("^_")
         df = download_index_history(sym)
         df["symbol"] = sym
         frames.append(df)
@@ -457,6 +457,21 @@ def _quote_symbol(underlying: str) -> str:
     return f"_{und}" if und in _INDEX_UNDERLYINGS else und
 
 
+# The delayed-quotes feed lags the market by this much (Cboe states 15
+# minutes; measured 15m01s-15m02s on 2026-10-20, see parse_cboe_options_payload).
+STATED_DELAY_MINUTES = 15
+QUOTE_DELAY = timedelta(minutes=STATED_DELAY_MINUTES)
+
+
+def delayed_quote_time(payload_timestamp, now: Optional[datetime] = None) -> str:
+    """ISO UTC instant a delayed-quotes payload shows: its ``timestamp`` (UTC,
+    'YYYY-MM-DD HH:MM:SS') minus QUOTE_DELAY, else the fetch time minus it."""
+    stamp = pd.to_datetime(payload_timestamp, errors="coerce", utc=True)
+    if pd.isna(stamp):
+        return db.utc_iso((now or db._utcnow()) - QUOTE_DELAY)
+    return (stamp - QUOTE_DELAY).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def parse_cboe_options_payload(payload: dict, underlying: str,
                                now: Optional[datetime] = None) -> pd.DataFrame:
     """
@@ -471,8 +486,16 @@ def parse_cboe_options_payload(payload: dict, underlying: str,
     (data.last_trade_time, New York local time). It is cross-checked against
     database.quote_session(now); a disagreement is logged and the payload wins.
     time_to_expiry runs from that session's 16:00 close to each contract's
-    settlement (database.time_to_settlement). underlying_price is data.close
-    (the session close), falling back to data.current_price.
+    settlement (database.time_to_settlement). underlying_price is data.close,
+    falling back to data.current_price (during the session both hold the
+    delayed last index value; measured 2026-10-20 12:04 ET).
+
+    quote_time is the instant the quotes show: the payload ``timestamp``
+    (when Cboe generated the file) minus QUOTE_DELAY. The feed is delayed:
+    on 2026-10-20 a payload stamped 16:04:29Z carried a latest SPX option
+    trade and an underlying last trade at 11:49:27 ET (15:49:27Z), 15m02s
+    earlier; the VIX payload likewise (15m01s). Without a timestamp the
+    fetch time minus QUOTE_DELAY is used.
 
     mid_price is set only for two-sided markets (bid > 0 and ask >= bid);
     Cboe's iv of 0 (not computed) becomes NaN. Greeks are stored as Cboe
@@ -496,9 +519,7 @@ def parse_cboe_options_payload(payload: dict, underlying: str,
             logger.warning("Cboe %s quotes are from session %s but the clock says %s; using %s",
                            underlying, session, clock_session, session)
 
-    stamp = pd.to_datetime(payload.get("timestamp"), errors="coerce")   # UTC, 'YYYY-MM-DD HH:MM:SS'
-    quote_time = (stamp.strftime("%Y-%m-%dT%H:%M:%SZ") if not pd.isna(stamp)
-                  else db.utc_iso(now or db._utcnow()))
+    quote_time = delayed_quote_time(payload.get("timestamp"), now)
     spot = data.get("close") or data.get("current_price")
     spot = float(spot) if spot else np.nan
 
@@ -589,10 +610,9 @@ def download_cboe_options_snapshot(underlying: str, now: Optional[datetime] = No
 _CAPTURE_EXTRAS = {"bid_size": "bid_size", "ask_size": "ask_size", "theo": "theo", "rho": "rho",
                    "last_trade_price": "last_trade_price", "last_trade_time": "option_last_trade_time"}
 
-# Cboe labels these quotes "delayed": the payload's `timestamp` is when Cboe
-# generated the file (on 2026-10-20 a fetch at 12:29:03Z returned timestamp
-# 12:28:16Z, Last-Modified 12:28:19Z), not when the quotes were live.
-STATED_DELAY_MINUTES = 15
+# The payload's `timestamp` is when Cboe generated the file (on 2026-10-20 a
+# fetch at 12:29:03Z returned timestamp 12:28:16Z, Last-Modified 12:28:19Z);
+# the quotes in it are QUOTE_DELAY older (delayed_quote_time).
 
 
 @dataclass
@@ -601,18 +621,24 @@ class ChainCapture:
 
     frame       options_snapshots rows (parse_cboe_options_payload): snapshot_date
                 is the NY session of the underlying's last trade, quote_time the
-                payload timestamp (ISO UTC), source 'cboe'; plus the
-                _CAPTURE_EXTRAS columns when include_extras=True
+                instant the delayed quotes show (payload timestamp minus
+                QUOTE_DELAY, ISO UTC), source 'cboe'; plus the _CAPTURE_EXTRAS
+                columns when include_extras=True
     session     that NY session
-    book_state  where the fetch fell relative to that session (book_state_at):
-                'intraday' | 'closing' | 'gth' | 'pre_open'
+    quote_time  the frame's quote_time
+    book_state  where quote_time falls relative to that session (book_state_at):
+                'intraday' | 'closing' | 'gth' | 'pre_open'. Classified at the
+                quote instant, not the fetch time, so it agrees with
+                option_chain.t_origin(quote_time, session)
     fetched_at  client clock at the request (ISO UTC)
-    payload_timestamp, underlying_last_trade_time (NY local), underlying_price
-    url, sha256 (of the raw response bytes), n_bytes
+    payload_timestamp (file generation, ISO UTC), underlying_last_trade_time
+    (NY local, as published), underlying_price, url, sha256 (of the raw
+    response bytes), n_bytes
     """
     underlying: str
     frame: pd.DataFrame
     session: Optional[str]
+    quote_time: str
     book_state: str
     fetched_at: str
     payload_timestamp: Optional[str]
@@ -627,9 +653,9 @@ class ChainCapture:
         f = self.frame
         two = int(((f["bid"] > 0) & (f["ask"] >= f["bid"])).sum()) if len(f) else 0
         return {
-            "underlying": self.underlying, "session": self.session, "book_state": self.book_state,
-            "fetched_at": self.fetched_at, "payload_timestamp": self.payload_timestamp,
-            "stated_delay_minutes": STATED_DELAY_MINUTES,
+            "underlying": self.underlying, "session": self.session, "quote_time": self.quote_time,
+            "book_state": self.book_state, "fetched_at": self.fetched_at,
+            "payload_timestamp": self.payload_timestamp, "stated_delay_minutes": STATED_DELAY_MINUTES,
             "underlying_last_trade_time": self.underlying_last_trade_time,
             "underlying_price": self.underlying_price, "url": self.url,
             "sha256": self.sha256, "n_bytes": self.n_bytes, "rows": int(len(f)),
@@ -638,8 +664,11 @@ class ChainCapture:
         }
 
 
-def book_state_at(fetched_at: datetime, session: Optional[str]) -> str:
-    """Which book a quote feed shows at ``fetched_at`` for quotes of ``session``.
+def book_state_at(at: datetime, session: Optional[str]) -> str:
+    """Which book a quote feed shows at instant ``at`` for quotes of ``session``.
+
+    Pass the instant the quotes show (a delayed feed's quote_time, see
+    delayed_quote_time), not the fetch time.
 
     'intraday'  09:30 ET to the 16:15 data cutoff of ``session`` itself
     'gth'       inside the Global Trading Hours window (20:15 ET the evening
@@ -653,8 +682,8 @@ def book_state_at(fetched_at: datetime, session: Optional[str]) -> str:
     from joint_vol_calibration.data import option_chain as oc
     if session is None:
         return "closing"
-    ny = db._now_ny(fetched_at)
-    if db.is_intraday(fetched_at) and ny.date().isoformat() == session:
+    ny = db._now_ny(at)
+    if db.is_intraday(at) and ny.date().isoformat() == session:
         return "intraday"
     nxt = oc.next_session(session)
     lo, hi = oc.gth_window(nxt)
@@ -672,7 +701,8 @@ def capture_option_chain(underlying: str, now: Optional[datetime] = None, *,
     return it normalised and timestamped (ChainCapture). Stores nothing.
 
     The frame is what download_cboe_options_snapshot returns (the
-    options_snapshots schema, quote_time and source='cboe' on every row),
+    options_snapshots schema, quote_time = the delayed instant the quotes
+    show and source='cboe' on every row),
     computed from the same bytes the sha256 is taken of, so a later
     re-parse of a privately archived payload can be checked against the
     hash. ``now`` is the fetch time used for dating (default: the clock).
@@ -708,9 +738,12 @@ def _capture_from_payload(underlying: str, payload: dict, raw_bytes: bytes, url:
     session = str(frame["snapshot_date"].iloc[0]) if len(frame) else None
     stamp = pd.to_datetime(payload.get("timestamp"), errors="coerce")
     spot = data.get("close") or data.get("current_price")
+    quote_time = str(frame["quote_time"].iloc[0]) if len(frame) else delayed_quote_time(
+        payload.get("timestamp"), fetched)
+    quoted_at = datetime.fromisoformat(quote_time.replace("Z", "+00:00"))
     return ChainCapture(
-        underlying=und, frame=frame, session=session,
-        book_state=book_state_at(fetched, session),
+        underlying=und, frame=frame, session=session, quote_time=quote_time,
+        book_state=book_state_at(quoted_at, session),
         fetched_at=db.utc_iso(fetched),
         payload_timestamp=None if pd.isna(stamp) else stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
         underlying_last_trade_time=data.get("last_trade_time"),

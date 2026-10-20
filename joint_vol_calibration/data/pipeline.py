@@ -260,7 +260,7 @@ def _correction_frame(stored: pd.DataFrame, ref: pd.DataFrame, keys: list, value
 def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
                              cboe_vix: Optional[pd.DataFrame] = None, *,
                              root=None, apply: bool = False, apply_db: bool = False,
-                             log_dir=None) -> dict:
+                             log_dir=None, log_name: str = "c23_vix_index_family") -> dict:
     """
     The C23 correction of the persisted VIX index family: make Cboe's official
     files the source of every vix_term_structure and vix_daily row in the
@@ -284,10 +284,11 @@ def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
                database.replace_market_partitions
     apply_db   also bring the database (DB_PATH) in line: non-session rows
                deleted, every corrected row upserted
-    log_dir    write <log_dir>/c23_vix_index_family.csv (every row whose value
-               changed by more than SAME_PRINT_TOL, added, removed or kept
-               without Cboe) and c23_vix_index_family.json (counts per action,
-               table and ticker; the backtest-window counts)
+    log_dir    write <log_dir>/<log_name>.csv (every row whose value changed
+               by more than SAME_PRINT_TOL, added, removed or kept without
+               Cboe) and <log_name>.json (counts per action, table and ticker;
+               the backtest-window counts). The CLI never overwrites the
+               committed C23 log: a re-run writes a dated <log_name>.
 
     Returns the summary dict (also what the JSON holds) with 'log' (the full
     per-row DataFrame) added.
@@ -357,8 +358,8 @@ def correct_vix_index_family(cboe_term: Optional[pd.DataFrame] = None,
         d = Path(log_dir)
         d.mkdir(parents=True, exist_ok=True)
         material.sort_values(["table", "date", "ticker"])[_CORRECTION_LOG_COLS].to_csv(
-            d / "c23_vix_index_family.csv", index=False, float_format="%.6f")
-        (d / "c23_vix_index_family.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+            d / f"{log_name}.csv", index=False, float_format="%.6f")
+        (d / f"{log_name}.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     summary["log"] = log
     return summary
 
@@ -375,6 +376,47 @@ def _apply_vix_correction_to_db(ts_new: pd.DataFrame, vd_new: pd.DataFrame) -> d
     n_ts = db.insert_vix_term_structure(ts_new, warn_dropped=False)
     n_vd = db.insert_vix_daily(vd_new, warn_dropped=False)
     return {"removed_non_session": removed, "upserted": {"vix_term_structure": n_ts, "vix_daily": n_vd}}
+
+
+def resync_database_from_record(*, options: bool = True) -> dict:
+    """
+    Bring the database cache (DB_PATH) in line with the persisted record,
+    offline: no download.
+
+    1. delete every row dated on a day the NYSE was closed from the
+       session-keyed tables (database.SESSION_KEYED_TABLES);
+    2. upsert every market partition (database.MARKET_TABLES): the corrected
+       Cboe rows replace the stored Yahoo ones (the writers' Cboe precedence
+       lets a Cboe row replace any other), and provenance comes with them;
+    3. with ``options``, re-import every committed chain
+       (import_options_snapshots(overwrite=True)), which stores one source
+       spelling ('yahoo' -> 'yfinance').
+
+    This is what the C23 correction needs after the partitions were rewritten
+    (correct_vix_index_family --apply). It CHANGES what every consumer of the
+    database reads (labels, backtest, hedger, calibrator VIX leg), so it is a
+    deliberate step, run once, followed by regenerating those artifacts.
+    Returns counts, including rows still without a source per table.
+    """
+    db.init_database()
+    removed = {}
+    with db._connection() as conn:
+        for table in db.SESSION_KEYED_TABLES:
+            dates = [r[0] for r in conn.execute(f"SELECT DISTINCT date FROM {table}")]
+            bad = [d for d, ok in zip(dates, db.is_session_array(dates)) if not ok]
+            removed[table] = sum(conn.execute(f"DELETE FROM {table} WHERE date = ?", (d,)).rowcount
+                                 for d in bad)
+    out = {"removed_non_session": removed, "imported": db.import_market_partitions()}
+    if options:
+        out["options_rows_reimported"] = db.import_options_snapshots(overwrite=True)
+    with db._connection() as conn:
+        out["null_source_rows"] = {
+            t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE source IS NULL").fetchone()[0]
+            for t in ("vix_daily", "vix_term_structure", "options_snapshots")}
+        out["option_sources"] = {r[0]: r[1] for r in conn.execute(
+            "SELECT source, COUNT(*) FROM options_snapshots GROUP BY source")}
+    logger.info("resync_database_from_record: %s", out)
+    return out
 
 
 class DataPipeline:
@@ -786,6 +828,8 @@ def main(argv=None) -> int:
                               --apply-db also rewrites DB_PATH's two tables;
                               the log goes to --log-dir (default with --apply:
                               data_store/market/corrections)
+    resync-db                 bring DB_PATH in line with the persisted record,
+                              offline (resync_database_from_record)
     cboe-indices              download VIX1D/VIX1Y/SKEW/COR1M/COR3M/DSPX (or
                               --symbols) into the database; --persist also
                               writes data_store/market/cboe_index_daily/
@@ -796,6 +840,8 @@ def main(argv=None) -> int:
     c.add_argument("--apply", action="store_true")
     c.add_argument("--apply-db", action="store_true")
     c.add_argument("--log-dir", default=None)
+    r = sub.add_parser("resync-db")
+    r.add_argument("--no-options", action="store_true", help="leave options_snapshots alone")
     i = sub.add_parser("cboe-indices")
     i.add_argument("--symbols", nargs="*", default=None)
     i.add_argument("--start", default=None)
@@ -805,9 +851,18 @@ def main(argv=None) -> int:
 
     if args.cmd == "correct-vix-index-family":
         log_dir = args.log_dir or (db.MARKET_DIR / "corrections" if args.apply else None)
-        res = correct_vix_index_family(apply=args.apply, apply_db=args.apply_db, log_dir=log_dir)
+        log_name = "c23_vix_index_family"
+        if args.log_dir is None and log_dir is not None and (Path(log_dir) / f"{log_name}.csv").exists():
+            # The committed C23 log records the correction that was made; a later
+            # re-run (a no-op, or a Cboe revision) gets its own dated log beside it.
+            log_name = f"{log_name}_{db._utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+        res = correct_vix_index_family(apply=args.apply, apply_db=args.apply_db, log_dir=log_dir,
+                                       log_name=log_name)
         res.pop("log")
         print(json.dumps(res, indent=2, sort_keys=True))
+        return 0
+    if args.cmd == "resync-db":
+        print(json.dumps(resync_database_from_record(options=not args.no_options), indent=2, sort_keys=True))
         return 0
     res = refresh_cboe_indices(args.symbols, start=args.start)
     if args.persist:

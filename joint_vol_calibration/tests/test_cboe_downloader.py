@@ -23,7 +23,7 @@ import hashlib
 import json
 import logging
 import pathlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -116,8 +116,26 @@ def test_snapshot_is_dated_by_the_quote_session_not_the_clock():
     df = cb.parse_cboe_options_payload(_payload("SPX"), "SPX", now=CAPTURED_AT)
     assert set(df["snapshot_date"]) == {"2026-10-09"}
     assert set(df["underlying_price"]) == {7811.54}
-    assert set(df["quote_time"]) == {"2026-10-12T08:15:07Z"}
+    # the payload is stamped 08:15:07Z; its quotes are QUOTE_DELAY (15 min) older
+    assert set(df["quote_time"]) == {"2026-10-12T08:00:07Z"}
     assert set(df["source"]) == {"cboe"}
+
+
+def test_quote_time_is_the_payload_stamp_minus_the_feed_delay():
+    """Measured 2026-10-20 on the live feed: a payload stamped 16:04:29Z held
+    a latest option trade and an underlying last trade at 11:49:27 ET
+    (15:49:27Z), 15m02s earlier. quote_time must be that instant, not the
+    file's generation time."""
+    assert cb.QUOTE_DELAY == timedelta(minutes=15) and cb.STATED_DELAY_MINUTES == 15
+    assert cb.delayed_quote_time("2026-10-20 16:04:29") == "2026-10-20T15:49:29Z"
+    lag = pd.Timestamp("2026-10-20T16:04:29Z") - pd.Timestamp("2026-10-20 11:49:27", tz="America/New_York")
+    assert abs(lag - cb.QUOTE_DELAY) <= timedelta(seconds=5)
+    # no stamp: the fetch time minus the delay
+    assert cb.delayed_quote_time(None, CAPTURED_AT) == "2026-10-12T08:00:28Z"
+    p = _payload("SPX")
+    p.pop("timestamp")
+    df = cb.parse_cboe_options_payload(p, "SPX", now=CAPTURED_AT)
+    assert set(df["quote_time"]) == {"2026-10-12T08:00:28Z"}
 
 
 def test_one_sided_quotes_get_no_mid_and_zero_iv_is_missing():
@@ -389,12 +407,13 @@ def test_capture_is_the_snapshot_schema_plus_timestamps_and_a_hash(serve_chains)
     same = cb.parse_cboe_options_payload(_payload("SPX"), "SPX", now=CAPTURED_AT)
     pd.testing.assert_frame_equal(cap.frame, same)
     assert set(cap.frame.columns) == set(db._OPTION_COLUMNS) - {"underlying"}
-    assert set(cap.frame["quote_time"]) == {"2026-10-12T08:15:07Z"} and set(cap.frame["source"]) == {"cboe"}
+    assert set(cap.frame["quote_time"]) == {"2026-10-12T08:00:07Z"} and set(cap.frame["source"]) == {"cboe"}
+    assert cap.quote_time == "2026-10-12T08:00:07Z"
     raw = (FIX / "cboe_options_SPX_2026-10-09.json").read_bytes()
     assert cap.sha256 == hashlib.sha256(raw).hexdigest() and cap.n_bytes == len(raw)
     s = cap.summary()
-    assert (s["session"], s["book_state"], s["fetched_at"], s["payload_timestamp"]) == \
-        ("2026-10-09", "gth", "2026-10-12T08:15:28Z", "2026-10-12T08:15:07Z")
+    assert (s["session"], s["book_state"], s["fetched_at"], s["payload_timestamp"], s["quote_time"]) == \
+        ("2026-10-09", "gth", "2026-10-12T08:15:28Z", "2026-10-12T08:15:07Z", "2026-10-12T08:00:07Z")
     assert (s["rows"], s["two_sided_rows"], s["expiries"], s["roots"]) == (17, 16, 3, ["SPX", "SPXW"])
     assert s["underlying_last_trade_time"] == "2026-10-09T16:14:59" and s["underlying_price"] == 7811.54
     assert s["stated_delay_minutes"] == 15 and s["url"].endswith("/options/_SPX.json")
@@ -439,6 +458,27 @@ def test_book_state_gth_agrees_with_the_calibrators_t_origin():
             gth = cb.book_state_at(when, session) == "gth"
             from_quote_time = oc.t_origin(db.utc_iso(when), session) != oc.session_close(session)
             assert gth == from_quote_time, (session, when)
+
+
+@pytest.mark.parametrize("stamp_utc, fetched_state, quoted_state", [
+    ("2026-10-12T00:25:00", "gth", "closing"),          # Sun 20:25 ET file shows 20:10 ET: GTH not open yet
+    ("2026-10-09T20:25:00", "closing", "intraday"),     # Fri 16:25 ET file shows 16:10 ET: before the cutoff
+    ("2026-10-12T13:40:00", "closing", "pre_open"),     # Mon 09:40 ET file shows 09:25 ET: RTH not open yet
+    ("2026-10-12T08:15:07", "gth", "gth"),              # Mon 04:15 ET file shows 04:00 ET
+])
+def test_capture_book_state_is_classified_at_the_quote_instant(stamp_utc, fetched_state, quoted_state):
+    """A delayed book is the market QUOTE_DELAY before the file was stamped:
+    the label must follow the quotes (and so option_chain.t_origin of the
+    frame's quote_time), not the fetch clock."""
+    from joint_vol_calibration.data import option_chain as oc
+    payload = _payload("SPX")
+    payload["timestamp"] = stamp_utc.replace("T", " ")
+    stamped = datetime.fromisoformat(stamp_utc).replace(tzinfo=timezone.utc)
+    cap = cb._capture_from_payload("SPX", payload, b"{}", "u", stamped)
+    assert cb.book_state_at(stamped, cap.session) == fetched_state
+    assert cap.book_state == quoted_state
+    gth = oc.t_origin(cap.quote_time, cap.session) != oc.session_close(cap.session)
+    assert gth == (quoted_state == "gth")
 
 
 def test_capture_chains_writes_only_where_told(serve_chains, tmp_path, caplog):

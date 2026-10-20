@@ -1362,3 +1362,56 @@ class TestC23RecordCorrection:
         out = json.loads(capsys.readouterr().out)
         assert out["material_rows"] == 7 and "partitions_rewritten" not in out
         assert not (root / "corrections").exists()
+
+    def test_cli_apply_never_overwrites_the_committed_log(self, tmp_db, tmp_path, monkeypatch, capsys):
+        """--apply logs to <MARKET_DIR>/corrections by default; once the C23 log
+        is there, a re-run (a no-op or a later Cboe revision) gets a dated log."""
+        root, cboe_ts, cboe_vix = self._record(tmp_path)
+        monkeypatch.setattr(db, "MARKET_DIR", root)
+        monkeypatch.setattr(cb, "download_vix_term_structure_history", lambda **k: cboe_ts)
+        monkeypatch.setattr(cb, "download_vix_history", lambda: cboe_vix)
+        assert pl.main(["correct-vix-index-family", "--apply"]) == 0
+        first = (root / "corrections" / "c23_vix_index_family.csv").read_bytes()
+        assert len(pd.read_csv(root / "corrections" / "c23_vix_index_family.csv")) == 7
+        assert pl.main(["correct-vix-index-family", "--apply"]) == 0
+        assert (root / "corrections" / "c23_vix_index_family.csv").read_bytes() == first
+        dated = sorted(p.name for p in (root / "corrections").glob("c23_vix_index_family_*Z.csv"))
+        assert len(dated) == 1 and len(pd.read_csv(root / "corrections" / dated[0])) == 1   # the kept row
+        capsys.readouterr()
+
+
+class TestC23Resync:
+    """resync_database_from_record: the stale cache brought in line with the
+    corrected record, offline."""
+
+    def test_resync_installs_the_record_and_one_source_spelling(self, tmp_db, tmp_path, capsys):
+        root = tmp_path / "market"
+        db.replace_market_partitions("vix_term_structure", _family([("2026-02-06", "^VIX", 17.76),
+                                                                    ("2026-02-09", "^VIX", 17.36)], "cboe"), root)
+        db.replace_market_partitions("vix_daily", _ohlc([("2026-02-06", 17.76)], "cboe"), root)
+        con = raw_conn(tmp_db)                       # the cache as the pre-C23 writers left it
+        con.execute("INSERT INTO vix_term_structure VALUES ('2026-02-06', '^VIX', 30, 20.370001, 0, NULL)")
+        con.execute("INSERT INTO vix_term_structure VALUES ('2026-09-07', '^VIX', 30, 15.0, 0, 'yfinance')")
+        con.execute("INSERT INTO vix_daily VALUES ('2026-02-06', 20.37, 20.37, 20.37, 20.37, NULL)")
+        con.execute("INSERT INTO vix_daily VALUES ('2024-07-04', 12, 12, 12, 12, NULL)")
+        con.commit()
+        con.close()
+        (tmp_path / "options").mkdir()
+        chain("2026-10-09", TestOptionSnapshots.ROWS, source="yahoo").to_parquet(
+            tmp_path / "options" / "spx_2026-10-09.parquet")
+        db.import_options_snapshots()
+        con = raw_conn(tmp_db)
+        con.execute("UPDATE options_snapshots SET source = 'yahoo'")       # the 2026-10-16 rows' spelling
+        con.commit()
+        con.close()
+
+        assert pl.main(["resync-db"]) == 0
+        res = json.loads(capsys.readouterr().out)
+        assert res["removed_non_session"] == {"vix_daily": 1, "vix_term_structure": 1, "cboe_index_daily": 0}
+        st = _stored_vts(tmp_db)
+        assert st == {("2026-02-06", "^VIX"): (17.76, "cboe"), ("2026-02-09", "^VIX"): (17.36, "cboe")}
+        con = raw_conn(tmp_db)
+        assert con.execute("SELECT date, close, source FROM vix_daily").fetchall() == [("2026-02-06", 17.76, "cboe")]
+        con.close()
+        assert res["null_source_rows"] == {"vix_daily": 0, "vix_term_structure": 0, "options_snapshots": 0}
+        assert res["option_sources"] == {"yfinance": 2} and res["options_rows_reimported"] == 2
