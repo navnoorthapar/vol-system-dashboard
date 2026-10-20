@@ -715,6 +715,173 @@ def bates_call_batch(
     return _clip_calls(calls, S, strikes, T, r, q)
 
 
+# ── Analytic parameter Jacobian (C23) ────────────────────────────────────────
+#
+# d(call)/d(kappa, theta, sigma, rho, v0) on the SAME trapezoid grid the
+# adaptive engine converged on, from the closed-form gradient of the
+# little-trap log-CF (chain rule through beta, d, g; cf. Cui, del Bano
+# Rollin & Germano 2017, arXiv:1511.08718, who differentiate the same CF).
+# On a fixed grid the price is a finite sum of smooth terms, so this is the
+# exact derivative of the quadrature (no step-size choice, no grid-switch
+# noise); it differs from the derivative of the true price only by the
+# derivative of the 1e-10*DF*F quadrature error. The control-variate variance
+# w is held fixed: C_BS(w) + DF sqrt(FK)/pi * sum(phi_BS(w)) does not depend
+# on w beyond that same quadrature error.
+
+HESTON_PARAM_NAMES = ("kappa", "theta", "sigma", "rho", "v0")
+
+
+def _heston_log_cf_grad(z, T: float, kappa: float, theta: float, sigma: float,
+                        rho: float, v0: float):
+    """log-CF (as _heston_log_cf) and its gradient w.r.t. (kappa, theta,
+    sigma, rho, v0), shape (5, len(z)). Same little-trap algebra; the
+    derivative of each intermediate is carried alongside it.
+
+    The sigma-derivative contains 2 L dS2/sigma^4 - 2 dL/sigma^2 with
+    L = O(sigma^2), a cancellation as sigma -> 0; at sigma = 1e-3 (the box
+    floor) the price Jacobian still agrees with a 4th-order central
+    difference to < 1e-5 of each column's scale
+    (tests/test_heston_jacobian.py).
+    """
+    z = np.asarray(z, dtype=complex)
+    sig = max(float(sigma), 1e-12)
+    s2 = sig * sig
+    s = z * (z + 1j)
+    beta = kappa - 1j * rho * sig * z
+    d = np.sqrt(beta * beta + s2 * s)
+    bpd = beta + d
+    one_m_e = -np.expm1(-d * T)
+    E = 1.0 - one_m_e
+    g = -s2 * s / (bpd * bpd)
+    Q = 1.0 - g * E
+    M = bpd * Q
+    D = -s * one_m_e / M
+    R = g * one_m_e / (1.0 - g)
+    L = _clog1p(R)
+    A = -s * T / bpd - 2.0 * L / s2
+    C = kappa * theta * A
+    log_cf = C + D * v0
+
+    grad = np.empty((5,) + z.shape, dtype=complex)
+    grad[1] = kappa * A                       # theta: C is linear in theta
+    grad[4] = D                               # v0
+    zero = np.zeros_like(z)
+    # (index, d beta, d sigma^2, d kappa)
+    for idx, dbeta, dS2, dkap in ((0, 1.0 + zero, 0.0, 1.0),
+                                  (2, -1j * rho * z, 2.0 * sig, 0.0),
+                                  (3, -1j * sig * z, 0.0, 0.0)):
+        dd = (beta * dbeta + 0.5 * dS2 * s) / d
+        dbpd = dbeta + dd
+        dE = -T * E * dd
+        d_ome = -dE
+        dg = -dS2 * s / (bpd * bpd) - 2.0 * g * dbpd / bpd
+        dQ = -(dg * E + g * dE)
+        dM = dbpd * Q + bpd * dQ
+        dD = (-s * d_ome - D * dM) / M
+        dR = (dg * one_m_e + g * d_ome + R * dg) / (1.0 - g)
+        dL = dR / (1.0 + R)
+        dA = s * T * dbpd / (bpd * bpd) - 2.0 * dL / s2 + 2.0 * L * dS2 / (s2 * s2)
+        grad[idx] = kappa * theta * dA + dkap * theta * A + v0 * dD
+    return log_cf, grad
+
+
+def _lewis_call_derivs(S: float, strikes: np.ndarray, T: float, r: float, q: float,
+                       log_cf_grad: Callable, grid: _LewisGrid) -> np.ndarray:
+    """d(call)/d(params) on a fixed Lewis grid, shape (len(strikes), P).
+
+    log_cf_grad(z) -> (log_cf (n,), grad (P, n)). Strikes <= 0 (call =
+    DF (F - K), no parameter dependence) get zero rows.
+    """
+    strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
+    df = np.exp(-r * T)
+    F = S * np.exp((r - q) * T)
+    pos = np.isfinite(strikes) & (strikes > 0)
+    u = grid.h * np.arange(grid.n)
+    log_cf, grad = log_cf_grad(u - 0.5j)
+    P = grad.shape[0]
+    out = np.zeros((len(strikes), P))
+    if not pos.any():
+        return out
+    K = strikes[pos]
+    x = np.log(F / K)
+    w = np.full(grid.n, grid.h)
+    w[0] *= 0.5
+    # d/dp of (phi_BS - phi)/uu = -phi * dlogphi/dp / uu
+    gw = -(np.exp(log_cf) / (u * u + 0.25) * w)[None, :] * grad
+    pref = df * np.sqrt(F * K) / np.pi
+    acc = np.zeros((len(K), P))
+    # one phase matrix per block, shared by every parameter column (same
+    # explicit multiply-sum as _lewis_sum: no BLAS thread pool)
+    for start in range(0, grid.n, _LEWIS_BLOCK):
+        sl = slice(start, start + _LEWIS_BLOCK)
+        phase = np.exp(1j * np.outer(x, u[sl]))
+        acc += (phase[:, None, :] * gw[None, :, sl]).sum(axis=2).real
+    out[pos] = pref[:, None] * acc
+    return out
+
+
+def heston_call_batch_grid(
+    S: float, strikes: np.ndarray, T: float, r: float, q: float,
+    kappa: float, theta: float, sigma: float, rho: float, v0: float,
+) -> Tuple[np.ndarray, Optional[_LewisGrid]]:
+    """heston_call_batch's prices plus the Lewis grid the adaptive engine
+    converged on (None for T <= 0), so a Jacobian at the same parameters can
+    reuse it (heston_call_batch_jac(..., grid=grid))."""
+    strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
+    if T <= 0:
+        F = S * np.exp((r - q) * T)
+        return np.maximum(F - strikes, 0.0) * np.exp(-r * T), None
+    raw, grid = _lewis_call_prices(
+        S, strikes, T, r, q,
+        lambda z: _heston_log_cf(z, T, kappa, theta, sigma, rho, v0),
+        float(_expected_integrated_variance(T, kappa, theta, v0)),
+    )
+    return _clip_calls(raw, S, strikes, T, r, q), grid
+
+
+def heston_call_batch_jac(
+    S: float,
+    strikes: np.ndarray,
+    T: float,
+    r: float,
+    q: float,
+    kappa: float,
+    theta: float,
+    sigma: float,
+    rho: float,
+    v0: float,
+    grid: Optional[_LewisGrid] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Calls for one expiry and their analytic Jacobian
+    d(call)/d(kappa, theta, sigma, rho, v0), shape (M, 5).
+
+    grid=None: the prices are exactly heston_call_batch's and the derivative
+    is taken on the grid the adaptive engine converged on for these
+    parameters (see the comment block above). With a grid (from
+    heston_call_batch_grid at the same parameters) both are evaluated on it
+    without re-adapting. Where a price is clipped to the no-arbitrage band
+    its row is zero (the clipped price does not move). Puts priced by parity
+    off the same F and DF share the call's derivative.
+    """
+    strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
+    if T <= 0:
+        F = S * np.exp((r - q) * T)
+        return np.maximum(F - strikes, 0.0) * np.exp(-r * T), np.zeros((len(strikes), 5))
+    raw, grid = _lewis_call_prices(
+        S, strikes, T, r, q,
+        lambda z: _heston_log_cf(z, T, kappa, theta, sigma, rho, v0),
+        float(_expected_integrated_variance(T, kappa, theta, v0)),
+        grid=grid,
+    )
+    calls = _clip_calls(raw, S, strikes, T, r, q)
+    jac = _lewis_call_derivs(
+        S, strikes, T, r, q,
+        lambda z: _heston_log_cf_grad(z, T, kappa, theta, sigma, rho, v0), grid)
+    clipped = (calls != raw) | ~np.isfinite(raw)
+    jac[clipped] = 0.0
+    return calls, jac
+
+
 # ── Greeks ────────────────────────────────────────────────────────────────────
 
 def heston_greeks(
@@ -904,6 +1071,33 @@ def heston_vix_term_index(kappa: float, theta: float, sigma: float, v0: float, T
     avg = theta + (v0 - theta) * _one_minus_exp_over(kappa * np.asarray(T, dtype=float))
     out = 100.0 * np.sqrt(np.maximum(avg, 0.0))
     return float(out) if np.ndim(out) == 0 else out
+
+
+def _d_one_minus_exp_over(x: np.ndarray) -> np.ndarray:
+    """d/dx (1 - e^{-x})/x = -(1 - e^{-x} - x e^{-x}) / x^2 (series near 0)."""
+    x = np.asarray(x, dtype=float)
+    small = np.abs(x) < 1e-3
+    safe = np.where(small, 1.0, x)
+    exact = -(-np.expm1(-safe) - safe * np.exp(-safe)) / (safe * safe)
+    return np.where(small, -0.5 + x / 3.0 - x * x / 8.0 + x ** 3 / 30.0 - x ** 4 / 144.0, exact)
+
+
+def heston_vix_term_index_jac(kappa: float, theta: float, sigma: float, v0: float, T):
+    """heston_vix_term_index and its Jacobian w.r.t. (kappa, theta, sigma,
+    rho, v0), shape (len(T), 5). The sigma and rho columns are zero: the
+    spot-starting index is E[average variance], which does not depend on
+    them under Heston. A non-positive average variance (outside any box this
+    project uses) gets a zero row."""
+    T = np.atleast_1d(np.asarray(T, dtype=float))
+    f = _one_minus_exp_over(kappa * T)
+    avg = theta + (v0 - theta) * f
+    idx = 100.0 * np.sqrt(np.maximum(avg, 0.0))
+    half = np.where(avg > 0, 50.0 / np.sqrt(np.where(avg > 0, avg, 1.0)), 0.0)
+    jac = np.zeros((len(T), 5))
+    jac[:, 0] = half * (v0 - theta) * T * _d_one_minus_exp_over(kappa * T)
+    jac[:, 1] = half * (1.0 - f)
+    jac[:, 4] = half * f
+    return idx, jac
 
 
 def heston_vix_index(
