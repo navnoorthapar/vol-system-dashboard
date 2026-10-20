@@ -38,6 +38,15 @@ def test_spread_unit_metrics_by_hand():
     assert s["by_expiry"]["E1"]["rmse_hs"] == pytest.approx(np.sqrt((0.25 + 2.25) / 2))
     assert s["by_tenor_delta"]["180-365d|25P"]["n"] == 1
     assert s["all"]["within_2hs_pct"] == pytest.approx(100.0)
+    # K/F = e^-0.1 = 0.905 (two puts) and e^0.1 = 1.105 (two calls)
+    assert {b: v["n"] for b, v in s["by_moneyness"].items()} == {"0.90-0.97": 2, "1.10-1.30": 2}
+    assert s["by_moneyness"]["1.10-1.30"]["rmse_vp"] == pytest.approx(np.sqrt((0.3 ** 2 + 0.0) / 2))
+
+
+def test_kf_buckets_edges():
+    lab = mt.kf_bucket([0.69, 0.70, 0.7999, 0.80, 0.97, 1.0, 1.03, 1.2999, 1.30, 1.31])
+    assert lab.tolist() == ["", "0.70-0.80", "0.70-0.80", "0.80-0.90", "0.97-1.03", "0.97-1.03",
+                            "1.03-1.10", "1.10-1.30", "1.10-1.30", ""]
 
 
 def test_zero_width_spread_is_floored_not_infinite():

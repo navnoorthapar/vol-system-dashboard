@@ -13,7 +13,8 @@ Per quote, with h = (ask_iv - bid_iv) / 2 (vol points):
 H_FLOOR_VP = 0.01 vol points only guards against zero-width (locked)
 quotes; it is not a fitting weight. RMSE / median |error| are reported in
 both vol points and half-spreads, overall, in- and out-of-sample, by expiry,
-by tenor bucket, by delta bucket and on the tenor x delta grid.
+by tenor bucket, by delta bucket, by K/F bucket (KF_EDGES) and on the
+tenor x delta grid.
 
 Dense-grid checks (the same for every model, so a model cannot pass by
 construction of its own test):
@@ -40,6 +41,8 @@ from scipy.special import ndtr
 from joint_vol_calibration.surface.quotes import DELTA_BUCKETS, TENOR_LABELS
 
 H_FLOOR_VP = 0.01
+KF_EDGES = (0.70, 0.80, 0.90, 0.97, 1.03, 1.10, 1.30)      # K/F buckets (right-open, last closed)
+KF_LABELS = tuple(f"{a:.2f}-{b:.2f}" for a, b in zip(KF_EDGES[:-1], KF_EDGES[1:]))
 BUTTERFLY_TOL = 1e-9
 CALENDAR_TOL = 1e-10
 GRID_POINTS = 201
@@ -62,6 +65,15 @@ def _stats(err_vp: np.ndarray, err_hs: np.ndarray, inside: np.ndarray,
         "within_2hs_pct": float(100.0 * np.mean(np.abs(err_hs) <= 2.0)),
         "rmse_outside_spread_vp": float(math.sqrt(np.mean(outside_vp ** 2))),
     }
+
+
+def kf_bucket(kf) -> np.ndarray:
+    """K/F bucket labels (KF_LABELS); '' outside [0.70, 1.30]."""
+    kf = np.asarray(kf, dtype=float)
+    idx = np.searchsorted(np.asarray(KF_EDGES), kf, side="right") - 1
+    idx = np.where(kf == KF_EDGES[-1], len(KF_LABELS) - 1, idx)
+    ok = (idx >= 0) & (idx < len(KF_LABELS))
+    return np.where(ok, np.asarray(KF_LABELS)[np.clip(idx, 0, len(KF_LABELS) - 1)], "")
 
 
 def residual_frame(quotes: pd.DataFrame, model_iv, *, model: str,
@@ -135,6 +147,8 @@ def summarise(res: pd.DataFrame) -> dict:
                        if (r["tenor_bucket"] == t).any()}
     out["by_delta"] = {b: st((r["delta_bucket"] == b).to_numpy()) for b in DELTA_BUCKETS
                        if (r["delta_bucket"] == b).any()}
+    kf_lab = kf_bucket(np.exp(r["k"].to_numpy(float)))
+    out["by_moneyness"] = {b: st(kf_lab == b) for b in KF_LABELS if (kf_lab == b).any()}
     grid = {}
     for t in TENOR_LABELS:
         for b in DELTA_BUCKETS:
