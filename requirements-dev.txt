@@ -11,3 +11,6 @@ QuantLib==1.44
 #   py_lets_be_rational (MIT; deps cody-special, piecewise-rational, both MIT):
 #   Jaeckel's "Let's Be Rational" implied-vol oracle in tests/test_external_oracles.py.
 py_lets_be_rational==1.1.2
+# Test oracle only: test_stats_forecast.py checks the Diebold-Mariano test against
+# statsmodels' implementation (BSD-3; installed with arch, pinned here for the tests).
+statsmodels>=0.14

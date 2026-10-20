@@ -1,0 +1,197 @@
+# Trials ledger: every backtest configuration whose result was computed and
+# looked at on the 2018-01-02..2025-03-24 window, from the first engine (C10)
+# to the C22 audit. It exists so the Deflated Sharpe Ratio's N is read from a
+# committed record, not chosen after the fact (stats/trials.py reads it;
+# scripts/inference_report.py uses it).
+#
+# Counting rule. One trial = one (sleeve, configuration, engine version) whose
+# P&L or Sharpe was produced and inspected. A round that re-ran every sleeve
+# on a corrected engine counts each sleeve again: the result was seen, and a
+# researcher could have stopped at a flattering one (C15 reported "portfolio
+# positive for first time"). Robustness checks that were never candidates for
+# the reported strategy (cost sweeps, always-on straddles, null tests) are
+# listed under `evaluations` and are not trials; `count_trials` can include
+# them for an upper bound.
+#
+# Sources: commit messages and diffs (hashes below), README "The corrections",
+# data_store/backtest/c22_bridge.csv and beta_sensitivity.csv. Where a commit
+# reports results for a set of sleeves, those sleeves are listed.
+#
+# `reproducible` families are the ones today's code can re-run exactly; the
+# inference report re-runs them to get the trial return matrix (cross-trial
+# Sharpe variance for the DSR, average correlation for N_eff, CSCV PBO).
+
+schema: trials_ledger/1
+window: ["2018-01-02", "2025-03-24"]
+sleeves_today: [s1, s1c, s2, s3, s4, portfolio]
+
+rounds:
+  - id: C10
+    date: "2026-03-25"
+    commit: 4889dcc
+    families:
+      - name: first engine (C1-C10)
+        varied: initial signal set S1 (PDV-IV spread), S2 (VIX term structure), S3 (VIX/VVIX dispersion proxy), combined
+        sleeves: [s1, s2, s3, combined]
+        configurations: 1
+
+  - id: C9-C11
+    date: "2026-03-28"
+    commit: 80eb134
+    families:
+      - name: S1 regime-filtered variant
+        varied: S1RF zeroes S1 on R2 days (compare_s1_regime_filter)
+        sleeves: [s1rf]
+        configurations: 1
+
+  - id: C12
+    date: "2026-03-28"
+    commit: b6855bd
+    families:
+      - name: R2-exit and soft-regime variants
+        varied: S1X and S2X close at the R2 boundary; S1S scales S1 by regime probability
+        sleeves: [s1x, s2x, s1s]
+        configurations: 1
+
+  - id: C13
+    date: "2026-04-03"
+    commit: d3f916a
+    families:
+      - name: adaptive VVIX gate, portfolio Kelly netting
+        varied: R2 gate from fixed VVIX > 100 to the rolling 252-day 80th percentile; pairwise correlation netting; S1S 3-level sizing
+        sleeves: [s1, s2, s3, combined, s1rf, s1x, s1s, s2x]
+        configurations: 1
+
+  - id: C14
+    date: "2026-06-05"
+    commit: d376ed1
+    families:
+      - name: S1C contrarian and S4 VRP added
+        varied: two new signals; the four existing sleeves re-reported beside them
+        sleeves: [s1, s2, s3, combined, s1c, s4]
+        configurations: 1
+
+  - id: C15
+    date: "2026-06-05"
+    commit: 73cc117
+    families:
+      - name: S4 entry fix, new portfolio, walk-forward regime classifier
+        varied: S4 waits for z_vrp to decline; portfolio = S1C + S3 + S4; per-year classifier; net-of-cost Kelly
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 1
+
+  - id: C16
+    date: "2026-06-11"
+    commit: 47e1ffe
+    families:
+      - name: walk-forward PDV, classifier without vvix, ex-ante Kelly
+        varied: engine and signal corrections; every sleeve re-run
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 1
+      - name: S1C pseudo-out-of-sample 2013-2017
+        varied: same rules on 2013-2017 (a different window, inspected for S1C and S1)
+        sleeves: [s1c, s1]
+        configurations: 1
+      - name: S3 proxy P&L scale
+        varied: S3_Z_SCALE 0.5, 1, 4 %/z (2 % is the base row above)
+        sleeves: [s3]
+        configurations: 3
+
+  - id: C17
+    date: "2026-06-11"
+    commit: 8c3ba9b
+    families:
+      - name: rule labels replace the classifier, margin cap, S1C R2-exit
+        varied: engine and signal corrections; every sleeve re-run
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 1
+      - name: S1C pseudo-out-of-sample 2013-2017 (re-run)
+        varied: corrected engine on 2013-2017
+        sleeves: [s1c]
+        configurations: 1
+      - name: S3 proxy P&L scale (re-run)
+        varied: S3_Z_SCALE 0.5, 1, 4 %/z ("robust at all scales")
+        sleeves: [s3]
+        configurations: 3
+
+  - id: C18
+    date: "2026-06-14"
+    commit: 3d52f42
+    families:
+      - name: strike-rolling fix
+        varied: positions roll instead of holding one stale strike; every sleeve re-run
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 1
+
+  - id: C19
+    date: "2026-06-20"
+    commit: e1cfbd0
+    families:
+      - name: S2 stop propagation, data gap repair
+        varied: signal fixes; canonical numbers unchanged but re-run and inspected
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 1
+
+  - id: C20
+    date: "2026-08-04"
+    commit: 35690a2
+    families: []          # calibration selector only; no backtest result changed
+
+  - id: C21
+    date: "2026-09-05"
+    commit: 15b4db5
+    families:
+      - name: real ^IRX hurdle, one-session time-decay fix
+        varied: accounting corrections; every sleeve re-run
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 1
+
+  - id: C22
+    date: "2026-10-12"
+    commit: a51eccc       # the C22 merge (work from 2026-10-12)
+    families:
+      - name: c22_bridge
+        varied: the 15 cumulative correction rows of data_store/backtest/c22_bridge.csv (row 14 = canonical)
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 15
+        reproducible: c22_bridge
+      - name: beta_grid
+        varied: ATM_TO_VIX_RATIO 1.00, 0.90, 0.85, 0.80, 0.78 (0.82 is bridge row 14)
+        sleeves: [s1, s2, s1c, s3, s4, portfolio]
+        configurations: 5
+        reproducible: beta_grid
+      - name: S3 index-leg direction
+        varied: s3_leg_direction = +1 (long index straddle) against the canonical −1
+        sleeves: [s3, portfolio]
+        configurations: 1
+      - name: S1C pseudo-out-of-sample 2013-2017 (C22 engine)
+        varied: run_backtest --pseudo-oos
+        sleeves: [s1c]
+        configurations: 1
+
+# Reproducible families: exactly how to rebuild them from today's code.
+reproducible:
+  beta_grid:
+    runner: run_backtest.run_beta_sensitivity
+    betas: [1.00, 0.90, 0.85, 0.82, 0.80, 0.78]
+  c22_bridge:
+    runner: c22_bridge.build_steps (cumulative rows 0..14)
+    rows: 15
+
+# Evaluations that were never candidates for the reported strategy.
+evaluations:
+  - id: C22
+    name: S3 timing null (random-walk and permutation VVIX paths, 200 each)
+    count: 2
+  - id: C23-research
+    name: hedge-slippage and bid-ask cost sweep at β = 0.82 (0, 0.5, 1, 2 bp; all costs zero; 0.50 vp bid-ask)
+    count: 6
+  - id: C23-research
+    name: S1 at 1 bp slippage across β (1.00, 0.90, 0.85, 0.82, 0.80)
+    count: 5
+  - id: C23-research
+    name: always-on delta-hedged ATM straddle, long and short, 0.10 size
+    count: 2
+  - id: C23-research
+    name: exposure-matched circular-shift nulls, 200 shifts per sleeve (S1, S1C, S2, S3, S4)
+    count: 5
