@@ -15,6 +15,11 @@ baseline_gate.py (ruff / mypy against a committed per-(file, code) baseline):
   * the mypy and ruff parsers recover every finding from the tools' output
     formats (notes and summary lines are not findings);
   * a finding in a strict file always fails, whatever the baseline says.
+
+reproduce.py (`make reproduce`: rebuilt artifacts against the committed ones):
+the comparator measures deviations relative to each column's scale, never
+passes a NaN mismatch, and skips / tolerates / notes exactly the keys it is
+told to (properties listed above its tests below).
 """
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("hypothesis")
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from joint_vol_calibration.tests.test_properties_pricing import budget
@@ -139,3 +144,94 @@ def test_a_strict_file_finding_always_fails(base, cur):
     res = gate.compare(base, cur, strict_files=(strict,))
     touched = any(k[0] == strict and (base.get(k, 0) or cur.get(k, 0)) for k in set(base) | set(cur))
     assert (not res.ok) if touched else (res.ok == (not res.grown))
+
+
+# ── reproduce.py: the artifact comparator ────────────────────────────────────
+#
+#   * an artifact compared with itself passes with deviation 0;
+#   * moving one numeric cell by a fraction d of its column's scale is reported
+#     as deviation d (to rounding) at that column, and fails exactly when d
+#     exceeds the tolerance;
+#   * a NaN where a number is expected (or the reverse) always fails;
+#   * skipped keys are not compared, optional keys may be missing, any other
+#     missing key fails; provenance keys are compared but only noted.
+
+repro = _load("reproduce")
+
+finite = st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)
+
+
+@st.composite
+def frames(draw):
+    import numpy as np
+    import pandas as pd
+    n = draw(st.integers(1, 12))
+    cols = draw(st.lists(st.sampled_from(["nav", "pnl", "vega", "iv"]), min_size=1, max_size=4, unique=True))
+    data = {c: np.array(draw(st.lists(finite, min_size=n, max_size=n))) for c in cols}
+    return pd.DataFrame(data)
+
+
+@settings(max_examples=budget(2.0))
+@given(df=frames())
+def test_an_artifact_matches_itself(df):
+    check = repro.Check("x", 0.0)
+    repro.compare_frames(df.copy(), df, check)
+    assert check.ok
+    assert check.deviation == 0.0
+
+
+@settings(max_examples=budget(4.0))
+@given(df=frames(), data=st.data(), d=st.floats(1e-14, 1e-3), tol=st.sampled_from([1e-10, 1e-6]))
+def test_a_moved_cell_is_measured_relative_to_its_column_scale(df, data, d, tol):
+    import numpy as np
+    col = data.draw(st.sampled_from(list(df.columns)))
+    scale = float(np.max(np.abs(df[col].to_numpy())))
+    # d * scale must be a normal float: a perturbation of a subnormal column
+    # (Hypothesis found 4.9e-324) underflows to no change at all
+    assume(scale > 1e-280)
+    row = data.draw(st.integers(0, len(df) - 1))
+    got = df.copy()
+    got.loc[row, col] = df.loc[row, col] + d * scale
+    check = repro.Check("x", tol)
+    repro.compare_frames(got, df, check)
+    assert check.deviation == pytest.approx(d, rel=1e-6, abs=1e-15)
+    assert check.where.startswith(col)
+    assert check.ok == (check.deviation <= tol)
+
+
+@settings(max_examples=budget())
+@given(df=frames(), data=st.data())
+def test_a_nan_mismatch_always_fails(df, data):
+    col = data.draw(st.sampled_from(list(df.columns)))
+    row = data.draw(st.integers(0, len(df) - 1))
+    got = df.copy()
+    got.loc[row, col] = float("nan")
+    check = repro.Check("x", 1.0)
+    repro.compare_frames(got, df, check)
+    assert not check.ok
+
+
+@settings(max_examples=budget(2.0))
+@given(base=st.dictionaries(st.sampled_from(["kappa", "theta", "loss", "fit_time", "losses", "n"]),
+                            finite, min_size=1, max_size=6),
+       drop=st.sampled_from(["kappa", "theta", "loss", "fit_time", "losses", "n"]),
+       text=st.sampled_from(["a", "b"]))
+def test_skip_optional_and_provenance_keys(base, drop, text):
+    """What compare_file does with a calibration pickle: 'fit_time' skipped,
+    'losses' optional, 'methods' provenance (noted, never failed)."""
+    import pickle
+    import tempfile
+    exp = dict(base, methods={"T": "a"})
+    got = {k: v for k, v in exp.items() if k != drop}
+    got["methods"] = {"T": text}
+    if "fit_time" in got:
+        got["fit_time"] = got["fit_time"] + 1.0
+    with tempfile.TemporaryDirectory() as tmp:
+        g, e = Path(tmp) / "got.pkl", Path(tmp) / "exp.pkl"
+        g.write_bytes(pickle.dumps(got))
+        e.write_bytes(pickle.dumps(exp))
+        check = repro.compare_file(g, e, "x", 0.0, skip={"fit_time"}, optional={"losses"},
+                                   provenance={"methods"})
+    missing_required = drop in exp and drop not in ("fit_time", "losses")
+    assert check.ok == (not missing_required)
+    assert bool(check.notes) == (text != "a")

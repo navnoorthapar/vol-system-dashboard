@@ -1,0 +1,33 @@
+{
+  // Dev container / GitHub Codespaces: the repository's Dockerfile (digest-pinned
+  // python:3.11.15-slim-bookworm, exact locked packages on x86_64), then `make test`.
+  // https://containers.dev/implementors/json_reference/
+  "name": "vol-system-dashboard",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "containerEnv": {
+    "PYTHONHASHSEED": "0",
+    "OMP_NUM_THREADS": "1",
+    "HYPOTHESIS_PROFILE": "ci"
+  },
+  // The image already holds the locked packages; the mounted checkout is the
+  // tree under test. `make help` lists every entry point.
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && make help",
+  "postAttachCommand": "echo 'Run: make test-fast (1 min), make test (6-9 min), make reproduce, make bench'",
+  "forwardPorts": [5000],
+  "portsAttributes": { "5000": { "label": "dashboard (make demo)" } },
+  "hostRequirements": { "cpus": 4, "memory": "8gb" },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff", "ms-python.mypy-type-checker"],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["joint_vol_calibration/tests", "-p", "no:cacheprovider"]
+      }
+    }
+  }
+}
