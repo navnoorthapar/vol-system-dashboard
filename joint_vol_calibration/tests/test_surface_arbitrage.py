@@ -140,3 +140,64 @@ def test_committed_session_screen_counts():
     assert rep.n_rows["C3_vertical_butterfly"] == n - 17            # one per interior strike + forward
     # part of the mid violations are below one tick (rounding of quoted prices)
     assert (sum(rep.mid_violations_gt_tick.values()) < sum(rep.mid_violations.values()))
+
+
+# ── the bid / ask box certificate ─────────────────────────────────────────────
+
+def _three_calls(ask1, bid2, ask2, bid3):
+    """Calls at K = 100, 105, 110 on F = 100, D = 1 with hand-set quotes."""
+    rows = [(100.0, 9.8, ask1), (105.0, bid2, ask2), (110.0, bid3, 10.6)]
+    return pd.DataFrame([{"expiry": "E1", "T": 0.25, "strike": K, "right": "C", "forward": 100.0,
+                          "discount": 1.0, "bid": b, "ask": a, "mid": 0.5 * (a + b)}
+                         for K, b, a in rows])
+
+
+def test_certificate_finds_arbitrage_no_single_row_shows():
+    """y1 >= y2 >= y3 with ask1 = 10.0 < bid3 = 10.5: each adjacent vertical
+    spread costs 0.1 >= 0 at the quotes (no single executable row), but no
+    prices inside the three spreads are monotone. The box LP needs exactly
+    0.5 index points outside the spreads."""
+    q = _three_calls(ask1=10.0, bid2=9.9, ask2=10.6, bid3=10.5)
+    rep = arb.screen(q)
+    assert sum(rep.executable_violations.values()) == 0
+    cert = rep.certificate
+    assert not cert["any_single_row_executable"]
+    assert cert["bid_ask_box_feasible"] is False and cert["executable_arbitrage"]
+    assert cert["distance"] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_certificate_is_clean_when_spreads_admit_arbitrage_free_prices():
+    q = _three_calls(ask1=10.6, bid2=9.9, ask2=10.6, bid3=9.6)     # 10.3 >= 10.25 >= 10.2 fits
+    rep = arb.screen(q)
+    assert rep.certificate["bid_ask_box_feasible"] is True
+    assert not rep.certificate["executable_arbitrage"]
+    assert rep.certificate["distance"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_certificate_on_synthetic_chains():
+    clean = arb.screen(_chain(_skew))
+    assert clean.certificate["bid_ask_box_feasible"] and not clean.certificate["executable_arbitrage"]
+    q = _chain(_skew, half=2.0)
+    i = int(q.index[(q["expiry"] == "E060") & (q["strike"] == 5500.0)][0])
+    q.loc[i, ["mid", "bid", "ask"]] += 3.0               # broken at mids, fixable inside the spread
+    rep = arb.screen(q)
+    assert sum(rep.mid_violations.values()) > 0
+    assert rep.certificate["bid_ask_box_feasible"] and not rep.certificate["executable_arbitrage"]
+
+
+def test_calendar_total_variance_diagnostic():
+    """Mid total variance falls from the 30-day to the 60-day expiry on the
+    call wing only: crossings are counted there and nowhere else."""
+    def vol(k, T):
+        return 0.18 - 0.25 * k - np.where((np.asarray(T) > 45 / 365) & (np.asarray(k) > 0.05), 0.08, 0.0)
+    q = _chain(vol, expiries=((30, 5000.0, 0.997), (60, 5000.0, 0.994)), half=0.05)
+    q["k"] = np.log(q["strike"] / q["forward"])
+    q["mid_iv"] = vol(q["k"].to_numpy(), q["T"].to_numpy())     # vectorised: T per quote
+    out = arb.calendar_total_variance_mid(q)
+    first = q[q["expiry"] == "E030"]
+    # 60-day w = 2 x iv60^2 x T30 < iv30^2 x T30 wherever the call-wing cut applies
+    expected = int((first["k"] > 0.05).sum())
+    assert out["n_pairs_crossing"] == 1
+    assert out["n_crossing"] == expected and expected == 15
+    flat = q.assign(mid_iv=0.2)
+    assert arb.calendar_total_variance_mid(flat)["n_crossing"] == 0

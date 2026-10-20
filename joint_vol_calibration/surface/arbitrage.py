@@ -58,8 +58,22 @@ is d0/da_j (or d0/db_j), outside it is 1. CRW take d0 = (1/N) ^ min_j
 min(da_j, db_j) in normalised units; this code uses the scale-free
 d0 = min_j min(da_j, db_j) / N, which keeps their stated property (moving
 every price to its spread edge costs no more than moving one price outside
-it by the smallest half-spread). A repaired price outside [bid, ask]
-("effectively perturbed") certifies an executable arbitrage among the rows.
+it by the smallest half-spread). The quotes the l1-BA solution moves outside
+[bid, ask] ("effectively perturbed") are the attribution of the arbitrage;
+they are not by themselves a proof that one exists, because the l1-BA
+objective can trade a small move outside one spread against several moves
+inside others.
+
+Executable-arbitrage certificate (bid / ask box LP)
+---------------------------------------------------
+    min sum_j o_j   s.t.  o_j >= e_j - da_j,  o_j >= -db_j - e_j,  o_j >= 0,
+                          A (y + e) >= b
+is the least total distance (index points) the prices must move OUTSIDE
+their spreads to satisfy every row. It is 0 exactly when some price vector
+inside every [bid, ask] satisfies all rows; when it is > 0, by Farkas'
+lemma a non-negative combination of rows is a test portfolio that can be
+bought at the asks / sold at the bids for less than its bound, i.e. an
+executable static arbitrage among these rows.
 """
 
 from __future__ import annotations
@@ -78,6 +92,7 @@ ROW_TYPES = ("C1_outright", "C2_vertical_spread", "C2_vertical_bound",
 _EPS_X = 1e-12        # relative tolerance for "identical normalised strike"
 TICK = 0.05           # SPX option tick (index points): mid violations below it are rounding
 _MIN_DELTA = 1e-4     # floor of a half-spread in forward index points
+_CERT_TOL = 1e-7      # box-LP distance (index points) below which the box is feasible
 
 
 @dataclass
@@ -114,6 +129,8 @@ class ArbitrageReport:
     repair: dict = field(default_factory=dict)
     mid_violations_gt_tick: dict = field(default_factory=dict)   # shortfall > TICK
     violations: list = field(default_factory=list)   # top violating rows (mid), detail
+    certificate: dict = field(default_factory=dict)  # bid / ask box LP (outside_spread_lp)
+    calendar_tv: dict = field(default_factory=dict)  # calendar_total_variance_mid
 
     def summary(self) -> dict:
         return {
@@ -125,6 +142,8 @@ class ArbitrageReport:
             "max_mid_violation_index_points": self.max_mid_violation,
             "n_quotes_in_mid_violation": int(self.quote_flags["arb_mid"].sum()),
             "n_quotes_in_executable_violation": int(self.quote_flags["arb_exec"].sum()),
+            "executable_arbitrage_certificate": self.certificate,
+            "calendar_total_variance_mid": self.calendar_tv,
             "repair": self.repair,
         }
 
@@ -322,9 +341,79 @@ def repair_lp(P: ArbitrageProblem, delta0: float = None) -> dict:
     return out
 
 
+def outside_spread_lp(P: ArbitrageProblem) -> dict:
+    """The executable-arbitrage certificate (module docstring): the least
+    total distance outside the bid / ask spreads that satisfies every row.
+
+    Returns {'status', 'message', 'distance' (index points, None on solver
+    failure), 'n_outside' (quotes this solution moves outside their spread)}.
+    """
+    n = len(P.y)
+    da, dbid = P.delta_ask, P.delta_bid
+    I = sparse.identity(n, format="csr")
+    Z = sparse.csr_matrix((P.A.shape[0], n))
+    A_ub = sparse.vstack([sparse.hstack([I, -I]),                # e - o <= da
+                          sparse.hstack([-I, -I]),               # -e - o <= db
+                          sparse.hstack([-P.A, Z])], format="csr")
+    b_ub = np.concatenate([da, dbid, P.A @ P.y - P.b])
+    cost = np.concatenate([np.zeros(n), np.ones(n)])
+    bounds = [(None, None)] * n + [(0.0, None)] * n
+    res = linprog(cost, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+    if res.status != 0:
+        return {"status": int(res.status), "message": str(res.message), "distance": None,
+                "n_outside": None}
+    o = res.x[n:]
+    return {"status": 0, "message": str(res.message), "distance": float(res.fun),
+            "n_outside": int((o > 1e-9).sum())}
+
+
+def calendar_total_variance_mid(quotes: pd.DataFrame, tol: float = 1e-8) -> dict:
+    """Diagnostic calendar check in total implied variance at mids.
+
+    For each pair of consecutive expiries, every earlier-expiry quote whose k
+    lies inside the later expiry's quoted k-range is compared with the later
+    expiry's mid total variance w = iv^2 T linearly interpolated in k: a
+    crossing is w_earlier(k) > w_later(k) + tol. Linear interpolation is not
+    a bound on the later smile, so this is a diagnostic of the quoted surface,
+    not a certificate; the certified calendar rows are C4-C6.
+    """
+    q = quotes
+    exp_T = q.groupby("expiry", sort=False)["T"].first().sort_values()
+    n_pts = n_cross = 0
+    pairs = []
+    for e1, e2 in zip(exp_T.index[:-1], exp_T.index[1:]):
+        a = q[q["expiry"] == e1]
+        b = q[q["expiry"] == e2].sort_values("k")
+        kb = b["k"].to_numpy(float)
+        wb = (b["mid_iv"].to_numpy(float) ** 2) * float(exp_T[e2])
+        ka = a["k"].to_numpy(float)
+        inside = (ka >= kb.min()) & (ka <= kb.max())
+        if not inside.any():
+            continue
+        wa = (a["mid_iv"].to_numpy(float)[inside] ** 2) * float(exp_T[e1])
+        d = np.interp(ka[inside], kb, wb) - wa
+        cross = d < -tol
+        n_pts += int(inside.sum())
+        n_cross += int(cross.sum())
+        if cross.any():
+            pairs.append({"earlier": str(e1), "later": str(e2), "n_points": int(inside.sum()),
+                          "n_crossing": int(cross.sum()), "min_dw": float(d.min())})
+    pairs.sort(key=lambda r: r["min_dw"])
+    return {"n_points": n_pts, "n_crossing": n_cross,
+            "n_pairs_crossing": len(pairs), "worst_pairs": pairs[:10],
+            "tolerance_total_variance": tol,
+            "method": ("earlier mid total variance vs the later expiry's mid total variance "
+                       "interpolated linearly in k (diagnostic, not a certificate)")}
+
+
 def screen(quotes: pd.DataFrame, *, repair: bool = True, tol: float = 1e-9,
            n_detail: int = 25) -> ArbitrageReport:
     """Screen ``quotes`` for static arbitrage and (optionally) repair them.
+
+    Always computed: row violations at mids and executable per row, the
+    bid / ask box certificate (outside_spread_lp) and, when the frame has k
+    and mid_iv, the total-variance calendar diagnostic. ``repair``: also the
+    CRW l1-BA repair and its per-quote attribution.
 
     tol : a row counts as violated when its shortfall exceeds tol x scale
           (index points; 1e-9 x 7,000 = 7e-6, far below a 0.05 tick)
@@ -393,12 +482,24 @@ def screen(quotes: pd.DataFrame, *, repair: bool = True, tol: float = 1e-9,
                 "max_abs_dprice_half_spreads": (float(np.nanmax(dhs[moved])) if moved.any() else 0.0),
                 "sum_abs_dprice": float(np.abs(dq).sum()),
                 "max_row_shortfall_after": float(max(0.0, -post.min())) if len(post) else 0.0,
-                "certifies_executable_arbitrage": bool(outside.any()),
             })
         else:
             flags["repair_dprice"] = np.nan
             flags["repair_outside_spread"] = False
+    box = outside_spread_lp(P)
+    single_row = bool(exe.any())
+    dist = box["distance"]
+    certificate = {
+        **box,
+        "bid_ask_box_feasible": (None if dist is None else bool(dist <= _CERT_TOL)),
+        "any_single_row_executable": single_row,
+        "executable_arbitrage": bool(single_row or (dist is not None and dist > _CERT_TOL)),
+        "tolerance_index_points": _CERT_TOL,
+    }
     return ArbitrageReport(n_quotes=len(q), n_rows=n_rows, mid_violations=mid_v,
                            mid_violations_gt_tick=mid_big,
                            executable_violations=exe_v, max_mid_violation=max_v,
-                           quote_flags=flags, repair=rep, violations=detail)
+                           quote_flags=flags, repair=rep, violations=detail,
+                           certificate=certificate,
+                           calendar_tv=(calendar_total_variance_mid(q)
+                                        if {"k", "mid_iv"} <= set(q.columns) else {}))
