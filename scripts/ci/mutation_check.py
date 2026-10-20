@@ -33,13 +33,15 @@ IV = "joint_vol_calibration/models/implied_vol.py"
 TESTS = ["joint_vol_calibration/tests/test_properties_pricing.py",
          "joint_vol_calibration/tests/test_properties_iv.py"]
 
-# Mutants that cannot change any result on the inputs the properties draw.
-# Each is listed with the measurement that shows it, and is reported, not failed.
+# Mutants whose effect on the inputs the properties draw is far below every
+# property's tolerance. Each is listed with the measurement that shows it, and
+# is reported, not failed.
 EQUIVALENT = {
     "IV solver accepts a loose price residual":
         "the residual guard rejects spuriously small Newton steps on inconsistent input; on "
-        "400,000 exact Black-76 prices (sigma 0.1%-1000%, T 1d-5y, +-12 sd) the mutant's "
-        "output is identical to the original's, so no property over exact prices can kill it",
+        "400,000 exact Black-76 prices (sigma 0.1%-1000%, T 1d-5y, +-12 sd, seed 5) the "
+        "mutant changes 19 vols by at most 2.1e-11 relative and no status code, against a "
+        "worst solver error of 8.0e-5 on the same inputs and the round-trip property's 1e-9",
 }
 
 # (name, file, original text, mutated text)

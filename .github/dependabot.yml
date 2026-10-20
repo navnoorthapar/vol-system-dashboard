@@ -1,0 +1,71 @@
+# Dependabot: weekly, grouped update PRs; each one runs tests.yml (suite, lint and
+# type gates, benchmark smoke, a11y) before anyone merges it.
+#
+# A release must be 14 days old before it is proposed (cooldown), so a
+# compromised or broken release has time to be noticed and yanked. The
+# cooldown applies to version updates; security updates are grouped separately.
+#
+# requirements-lock.txt is compiled from requirements-dev.txt with uv (command
+# in its header). Dependabot bumps the pins in place; the CPU builds (torch
+# +cpu from the PyTorch index, xgboost-cpu) are left to that compile, because
+# Dependabot would replace them with the PyPI (CUDA) builds.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "torch"
+      - dependency-name: "xgboost-cpu"
+      - dependency-name: "xgboost"
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+      dev-tools:
+        patterns:
+          - "pytest*"
+          - "coverage"
+          - "ruff"
+          - "mypy*"
+          - "hypothesis"
+          - "pandas-stubs"
+          - "scipy-stubs"
+      runtime:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: npm
+    directory: "/scripts/ci/a11y"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+    cooldown:
+      default-days: 14
+    groups:
+      a11y-tools:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
