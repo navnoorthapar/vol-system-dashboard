@@ -58,6 +58,12 @@ HESTON_BOUNDS = {
     #    1.19 vp), and on 10-16 brings the model's 30-day VIX log-contract vol
     #    (heston_vvix) from 205 to 113 against a ^VVIX close of 110. The loss
     #    has no sigma-sensitive VIX term while w3 = 0, so it cannot see that.
+    #  * the unboxed 10-16 optimum is extreme (sigma 6.9, kappa 27, Feller
+    #    margin -45), and lifted rough Heston fits the same joint loss with
+    #    sigma interior on every session (0.88-1.71) and, on 10-16, lower
+    #    (7.3e-5 vs 8.5e-5 unboxed, 1.18e-4 boxed): consistent with sigma
+    #    standing in for short-end roughness rather than being a vol-of-vol
+    #    to trust. On 2 of 5 sessions rough Heston returns H = 1/2 (Heston).
     # Kept at 2 for C23 anyway, because widening it is not a calibrator-only
     # change: the NN surrogate's training domain is pinned to this bound
     # (test_nn_pricer), the risk monitor sizes its vomma shock from the fitted

@@ -1942,7 +1942,8 @@ class JointCalibrator:
         is off), fit time, evaluations, every start, and an identifiability
         report. numerics_check (rough): anchor IVs re-priced with twice the
         factors and four times the Riccati steps, so the approximation error
-        is measured next to the misfit (a self-convergence gap; scaled by
+        is measured next to the misfit (timed apart from fit_seconds; a
+        self-convergence gap; scaled by
         1/(1 - 2^-1.5) for the n^-1.5 lifting rate it estimates the
         20-factor error, cf. the QuantLib Adams comparison in
         tests/test_rough_heston.py). box="wide" (Heston only) fits in the
@@ -2021,6 +2022,7 @@ class JointCalibrator:
                 n_factors) if not self.vix_ts.empty else None
             n_evals = resid.n_calls
             numerics = None
+            fit_seconds = time.perf_counter() - t0      # the numerics check is not fit time
             if numerics_check:
                 base_iv = self._surface_errors(self.spx_surface, pricer, tuple(x))["model_iv"]
                 fine = functools.partial(rh.rough_heston_call_batch, n_factors=2 * n_factors,
@@ -2040,8 +2042,9 @@ class JointCalibrator:
                     "frozen_vs_adaptive_rel_loss_diff": float(max(
                         abs(run["loss"] - run["frozen_loss"]) / max(run["loss"], 1e-300)
                         for run in runs)),
+                    "seconds": time.perf_counter() - t0 - fit_seconds,
                 }
-        seconds = time.perf_counter() - t0
+        seconds = fit_seconds if model == "rough_heston" else time.perf_counter() - t0
         ins = self._surface_errors(self.spx_surface, pricer, tuple(x))["error"].dropna()
         oos = self._out_of_sample(pricer, tuple(x))
         out = {

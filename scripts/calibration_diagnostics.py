@@ -131,14 +131,18 @@ def _jacobian_timing(model, x, reps: int = 5) -> dict:
     lo, hi = jc._box_arrays(config.HESTON_BOUNDS, jc.HESTON_PARAM_NAMES)
     model(x)
     J = model.jac(x)
-    # central differences with a step well above the 1e-10 quadrature noise
+    # central differences with a step well above the 1e-10 quadrature noise,
+    # NOT clipped to the box: the residuals are defined beyond the
+    # optimiser's bounds, and clipping at a binding bound (sigma = 2) turns
+    # the reference into an O(h) one-sided difference (1.5e-5 off on
+    # 2026-03-24, an error of the reference, not of the Jacobian)
     Jc = np.zeros_like(J)
     for j in range(5):
-        h = 1e-5 * abs(x[j])
+        h = 1e-5 * max(abs(x[j]), 1e-3)
         up, dn = x.copy(), x.copy()
-        up[j] = min(up[j] + h, hi[j])
-        dn[j] = max(dn[j] - h, lo[j])
-        Jc[:, j] = (model(up) - model(dn)) / (up[j] - dn[j])
+        up[j] += h
+        dn[j] -= h
+        Jc[:, j] = (model(up) - model(dn)) / (2.0 * h)
     rel = np.abs(J - Jc).max(axis=0) / np.abs(Jc).max(axis=0)
     t_a, t_f = [], []
     for _ in range(reps):

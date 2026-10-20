@@ -226,3 +226,40 @@ def test_artifact_numbers_are_reproduced_by_the_code():
     err = cal._surface_errors(cal.spx_surface, rh.rough_heston_call_batch, x)["error"].dropna()
     assert math.sqrt(float(np.mean(err ** 2))) * 100 == pytest.approx(
         rgh["spx_iv_rmse_exact"], rel=1e-9)
+
+
+def test_sigma_box_rationale_in_config_matches_the_artifacts():
+    """config.HESTON_BOUNDS documents why sigma <= 2 is kept with numbers
+    measured here; this pins those numbers to the committed diagnostics so
+    the comment cannot drift from the data."""
+    d = {s: _load(s) for s in _V2}
+    binds = [s for s in _V2 if "sigma" in d[s]["trf"]["pinned_params"]]
+    assert binds == ["2026-03-24", "2026-10-16"]
+    interior = [round(d[s]["trf"]["params"]["sigma"], 2) for s in _V2 if s not in binds]
+    assert interior == [1.83, 1.71, 1.59]
+
+    def prof(s):
+        rows = d[s]["sigma_profile"]["rows"]
+        return next(r for r in rows if r["sigma_cap"] == 2.0), rows[-1]
+
+    cap2, free = prof("2026-03-24")
+    assert free["loss"] / cap2["loss"] - 1 == pytest.approx(-0.02, abs=0.005)
+    assert round(free["params"]["sigma"], 2) == 2.21
+    assert (round(cap2["spx_oos_iv_rmse"], 2), round(free["spx_oos_iv_rmse"], 2)) == (1.98, 1.82)
+    cap2, free = prof("2026-10-16")
+    assert free["loss"] / cap2["loss"] - 1 == pytest.approx(-0.28, abs=0.005)
+    assert (round(free["params"]["sigma"], 1), round(free["params"]["kappa"])) == (6.9, 27)
+    assert (round(cap2["spx_oos_iv_rmse"], 2), round(free["spx_oos_iv_rmse"], 2)) == (2.96, 1.19)
+    assert (round(cap2["vvix_model"]), round(free["vvix_model"]),
+            round(free["vvix_market"])) == (205, 113, 110)
+    assert round(free["feller_margin"]) == -45
+    # rough Heston: sigma interior everywhere, lower joint loss on 10-16,
+    # and H = 1/2 (Heston itself) on two sessions
+    jr = {s: d[s]["joint_rough_heston"] for s in _V2}
+    sig = [jr[s]["params"]["sigma"] for s in _V2]
+    assert "sigma" not in sum((jr[s]["on_bound"] for s in _V2), [])
+    assert (round(min(sig), 2), round(max(sig), 2)) == (0.88, 1.71)
+    assert (round(jr["2026-10-16"]["loss"], 6), round(free["loss"], 6),
+            round(d["2026-10-16"]["trf"]["loss"], 6)) == (7.3e-5, 8.5e-5, 1.18e-4)
+    at_half = [s for s in _V2 if "H" in jr[s]["on_bound"] and jr[s]["params"]["H"] > 0.4]
+    assert at_half == ["2026-05-29", "2026-06-18"]
