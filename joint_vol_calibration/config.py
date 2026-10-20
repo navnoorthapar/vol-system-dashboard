@@ -91,6 +91,22 @@ HESTON_START_BOX = {
 SIGMA_PROFILE_CAPS = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
 PROFILE_KAPPA_MAX = 60.0
 
+# ── Rough Heston (lifted multi-factor approximation, C23 research model) ──────
+# Hurst exponent box: H = 1/2 is classical Heston; the lower edge keeps the
+# kernel t^{H-1/2} integrable with a margin for the factor quadrature.
+ROUGH_HESTON_H_BOUNDS = (0.02, 0.5)
+ROUGH_HESTON_N_FACTORS = 20      # factors of the lifted kernel approximation
+ROUGH_HESTON_TIME_STEPS = 200    # Riccati steps per expiry (graded grid)
+# Sobol start box of the rough fits (same conventions as HESTON_START_BOX);
+# the five Heston parameters keep the production HESTON_BOUNDS in the fit.
+ROUGH_HESTON_START_BOX = {
+    "kappa": (0.2, 10.0, "log"),
+    "theta": (0.01, 0.25, "log"),
+    "sigma": (0.1, 1.5, "lin"),
+    "rho":   (-0.9, -0.3, "lin"),
+    "v0":    (0.005, 0.25, "log"),
+    "H":     (0.05, 0.45, "lin"),
+}
 
 # ── Monte Carlo ───────────────────────────────────────────────────────────────
 MC_PATHS = 30_000

@@ -1030,6 +1030,38 @@ class TestSigmaProfile:
                                                                p["sigma"], p["v0"]))
 
 
+class TestSpxOnlyComparison:
+    """calibrate_spx_only: Heston and lifted rough Heston on the same
+    residuals, box and optimiser."""
+
+    def test_heston_spx_only_recovers_the_synthetic_market(self, synth):
+        out = synth.calibrate_spx_only("heston", n_starts=2, warm=dict(_TRUE))
+        assert out["model"] == "heston" and out["spx_iv_rmse_exact"] < 0.05
+        assert out["spx_oos_iv_rmse"] < 0.2 and out["on_bound"] == []
+        for k in _NAMES:
+            assert out["params"][k] == pytest.approx(_TRUE[k], rel=0.05)
+        # the VIX leg is off, so the index error is out of sample (and small:
+        # the synthetic indices are Heston's own)
+        assert out["vix_index_rmse_oos"] < 0.1
+        assert out["identifiability"]["free_params"] == list(_NAMES)
+
+    def test_rough_heston_nests_heston(self, synth):
+        """On a market priced by Heston (H = 1/2) the rough fit goes to the
+        H = 1/2 edge of its box and reprices it."""
+        out = synth.calibrate_spx_only("rough_heston", n_starts=0, warm=dict(_TRUE),
+                                       n_steps=100, numerics_check=False)
+        assert out["params"]["H"] > 0.45
+        assert out["spx_iv_rmse_exact"] < 0.1
+        ms = out["multistart"]
+        assert ms["n_starts"] == 2 and {r["label"] for r in ms["runs"]} == {"warm_H0.30",
+                                                                            "warm_H0.10"}
+        assert out["settings"]["n_steps"] == 100 and out["settings"]["n_factors"] == 20
+
+    def test_unknown_model_rejected(self, synth):
+        with pytest.raises(ValueError, match="model"):
+            synth.calibrate_spx_only("sabr")
+
+
 def test_real_session_vvix_check_reads_the_spot_session_close():
     cal = JointCalibrator(as_of_date="2026-10-16")
     assert cal.vvix_market == pytest.approx(109.91, abs=0.01)

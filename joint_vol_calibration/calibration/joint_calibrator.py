@@ -72,6 +72,7 @@ Usage
     result = cal.calibrate()
 """
 
+import functools
 import logging
 import math
 import pickle
@@ -89,6 +90,8 @@ from joint_vol_calibration.config import (
     HESTON_BOUNDS, JOINT_W1, JOINT_W2, JOINT_W3,
     RANDOM_SEED, DATA_DIR, VIX_INDEX_TENOR_DAYS,
     HESTON_START_BOX, SIGMA_PROFILE_CAPS, PROFILE_KAPPA_MAX,
+    ROUGH_HESTON_H_BOUNDS, ROUGH_HESTON_N_FACTORS, ROUGH_HESTON_TIME_STEPS,
+    ROUGH_HESTON_START_BOX,
 )
 from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
@@ -1821,6 +1824,137 @@ class JointCalibrator:
         return {"caps": [float(c) for c in caps], "kappa_max": float(kappa_max),
                 "production_box": {k: list(v) for k, v in HESTON_BOUNDS.items()},
                 "rows": rows}
+
+    # ── SPX-only model comparison (C23) ───────────────────────────────────────
+
+    def calibrate_spx_only(self, model: str = "heston", n_starts: int = 4, warm=None,
+                           n_factors: int = ROUGH_HESTON_N_FACTORS,
+                           n_steps: int = ROUGH_HESTON_TIME_STEPS,
+                           numerics_check: bool = True) -> dict:
+        """SPX-only fit of Heston or lifted rough Heston, like for like.
+
+        Both models see the same anchors and residuals sqrt(1/n) (model -
+        market)/vega (the joint loss with the VIX leg off), the production
+        box for the five Heston parameters (rough Heston adds H in
+        config.ROUGH_HESTON_H_BOUNDS), the same TRF tolerances, and Sobol
+        starts plus warm starts. Heston uses the analytic Jacobian; rough
+        Heston prices on frozen Lewis grids refreshed at each optimum
+        (models/rough_heston.fit_trf_with_grid_refresh) with exact theta / v0
+        Jacobian columns and one-sided differences for the rest.
+
+        warm: Heston -> [5-vector or params dict] (default: this calibrator's
+        joint fit); rough Heston -> a Heston 5-vector, used at H = 0.30 and
+        0.10 (default: the joint fit). Reported: in-sample anchor RMSE (exact
+        inversion), out-of-sample RMSE over the full cleaned surface (all,
+        put wing, by expiry), the VIX index RMSE (out of sample: the VIX leg
+        is off), fit time, evaluations, every start, and an identifiability
+        report. numerics_check (rough): anchor IVs re-priced with twice the
+        factors and four times the Riccati steps, so the approximation error
+        is measured next to the misfit.
+        """
+        from joint_vol_calibration.models import rough_heston as rh
+
+        if model not in ("heston", "rough_heston"):
+            raise ValueError(f"model must be 'heston' or 'rough_heston', got {model!r}")
+        if warm is None and self.params is not None:
+            warm = [self.params[k] for k in HESTON_PARAM_NAMES]
+        elif isinstance(warm, dict):
+            warm = [float(warm[k]) for k in HESTON_PARAM_NAMES]
+        groups = self._spx_groups()
+        t0 = time.perf_counter()
+        if model == "heston":
+            names = HESTON_PARAM_NAMES
+            lo, hi = _box_arrays(HESTON_BOUNDS, names)
+            res_model = self.residual_model(w_spx=1.0, w_vix=0.0, w_vix_opt=0.0)
+            warm_list = [("warm", warm)] if warm is not None else []
+            sol, rep = self._trf_fit(res_model, lo, hi, n_starts, warm_list, "analytic",
+                                     label="Heston SPX-only")
+            x, loss = sol.x, float(2.0 * sol.cost)
+            J, r = res_model.jac(x), res_model(x)
+            pricer = heston_call_batch
+            vix_model = heston_vix_term_index(x[0], x[1], x[2], x[4],
+                                              self.vix_ts["tenor_years"].to_numpy(float)) \
+                if not self.vix_ts.empty else None
+            n_evals = rep["n_residual_evals"] + rep["n_jacobian_evals"]
+            numerics = None
+        else:
+            names = rh.ROUGH_HESTON_PARAM_NAMES
+            box = dict(HESTON_BOUNDS)
+            box["H"] = ROUGH_HESTON_H_BOUNDS
+            lo, hi = _box_arrays(box, names)
+            resid = rh.RoughHestonSPXResiduals(groups, 1.0, n_factors, n_steps)
+            starts, labels = [], []
+            if warm is not None:
+                for H0 in (0.30, 0.10):
+                    starts.append(np.r_[np.asarray(warm, dtype=float), H0])
+                    labels.append(f"warm_H{H0:.2f}")
+            sob = sobol_starts(n_starts, ROUGH_HESTON_START_BOX, lo, hi, names)
+            starts.extend(sob)
+            labels.extend(f"sobol{i}" for i in range(len(sob)))
+            x, loss, runs = rh.fit_trf_with_grid_refresh(resid, starts, labels, lo, hi)
+            groups_b = _group_basins([run["loss"] for run in runs])
+            rep = {"runs": runs, "n_starts": len(runs), "n_distinct_basins": len(groups_b),
+                   "n_starts_at_best": len(groups_b[0]),
+                   "basin_losses": [runs[g[0]]["loss"] for g in groups_b],
+                   "best_label": runs[groups_b[0][0]]["label"],
+                   "n_residual_evals": resid.n_calls, "n_grid_adaptations": resid.n_adapt}
+            r = resid.adapt(x)
+            J = resid.jac(x, lo, hi)
+            pricer = functools.partial(rh.rough_heston_call_batch, n_factors=n_factors,
+                                       n_steps=n_steps)
+            vix_model = rh.rough_heston_vix_term_index(
+                x[0], x[1], x[2], x[4], x[5], self.vix_ts["tenor_years"].to_numpy(float),
+                n_factors) if not self.vix_ts.empty else None
+            n_evals = resid.n_calls
+            numerics = None
+            if numerics_check:
+                base_iv = self._surface_errors(self.spx_surface, pricer, tuple(x))["model_iv"]
+                fine = functools.partial(rh.rough_heston_call_batch, n_factors=2 * n_factors,
+                                         n_steps=4 * n_steps)
+                fine_iv = self._surface_errors(self.spx_surface, fine, tuple(x))["model_iv"]
+                d_iv = (base_iv - fine_iv).to_numpy(float) * 100
+                d_iv = d_iv[np.isfinite(d_iv)]
+                numerics = {
+                    "reference": {"n_factors": 2 * n_factors, "n_steps": 4 * n_steps},
+                    "anchor_iv_max_abs_diff_vp": float(np.max(np.abs(d_iv))) if len(d_iv) else None,
+                    "anchor_iv_rms_diff_vp": float(np.sqrt(np.mean(d_iv ** 2))) if len(d_iv) else None,
+                    "frozen_vs_adaptive_rel_loss_diff": float(max(
+                        abs(run["loss"] - run["frozen_loss"]) / max(run["loss"], 1e-300)
+                        for run in runs)),
+                }
+        seconds = time.perf_counter() - t0
+        ins = self._surface_errors(self.spx_surface, pricer, tuple(x))["error"].dropna()
+        oos = self._out_of_sample(pricer, tuple(x))
+        out = {
+            "model": model,
+            "params": {n: float(v) for n, v in zip(names, x)},
+            "loss": float(loss),
+            "spx_iv_rmse_exact": float(np.sqrt(np.mean(ins ** 2)) * 100) if len(ins) else None,
+            "n_spx_anchors": int(len(ins)),
+            "spx_oos_iv_rmse": oos["spx_oos_iv_rmse"],
+            "spx_oos_put_wing_rmse": oos["spx_oos_put_wing_rmse"],
+            "spx_oos_rmse_by_expiry": oos["spx_oos_rmse_by_expiry"],
+            "n_spx_oos": oos["n_spx_oos"],
+            "vix_index_rmse_oos": (float(np.sqrt(np.mean(
+                (np.atleast_1d(vix_model) - self.vix_ts["market_price"].to_numpy(float)) ** 2)))
+                if vix_model is not None else None),
+            "fit_seconds": float(seconds),
+            "n_evals": int(n_evals),
+            "multistart": rep,
+            "on_bound": [n for j, n in enumerate(names)
+                         if _at_bound(x[j], lo[j], (hi[j] - lo[j]) or 1.0, _PIN_REL_TOL)
+                         or _at_bound(x[j], hi[j], (hi[j] - lo[j]) or 1.0, _PIN_REL_TOL)],
+        }
+        try:
+            out["identifiability"] = identifiability_report(J, r, x, names, lo, hi)
+        except (np.linalg.LinAlgError, ValueError, ArithmeticError) as exc:
+            out["identifiability"] = {"error": str(exc)}
+        if model == "rough_heston":
+            out["numerics"] = numerics
+            out["settings"] = {"n_factors": int(n_factors), "n_steps": int(n_steps),
+                               "lewis_rtol": rh.ROUGH_LEWIS_RTOL,
+                               "H_bounds": list(ROUGH_HESTON_H_BOUNDS)}
+        return out
 
     def _warm_starts(self, warm_start) -> tuple:
         """[(label, x)] for the TRF and a JSON-able description."""
