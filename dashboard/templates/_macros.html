@@ -1,0 +1,107 @@
+{# Shared page components. Every chart: role="img" container with an accessible
+   name, a JSON spec (never executed) and a server-rendered table behind it. #}
+
+{% macro panel(id, title, span='s6', meta=None, cls='') -%}
+<section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="{{ id }}-t">{{ title|sym }}</h2>
+    {% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span>
+  </div>
+  <div class="panel-body">{{ caller() }}</div>
+</section>
+{%- endmacro %}
+
+{% macro kpi(label, value, sub=None, unit=None, ci=None, tone=None) -%}
+<div class="kpi">
+  <div class="kpi-label">{{ label|sym }}</div>
+  <div class="kpi-value{% if tone %} {{ tone }}{% endif %}">{{ value }}{% if unit and value|string != '—' %}<span class="unit">{{ unit }}</span>{% endif %}</div>
+  {% if ci %}<div class="kpi-ci">{{ ci }}</div>{% endif %}
+  {% if sub %}<div class="kpi-sub">{{ sub }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro chip(text, tone='muted') -%}<span class="chip chip-{{ tone }}">{{ text }}</span>{%- endmacro %}
+
+{% macro rag(status) -%}
+{%- set m = {'ok': ('●', 'OK'), 'watch': ('▲', 'WATCH'), 'breach': ('■', 'BREACH'), 'info': ('◆', 'INFO'), 'na': ('○', 'N/A')} -%}
+<span class="rag rag-{{ 'na' if status == 'info' else status }}"><span aria-hidden="true">{{ m[status][0] }}</span>{{ m[status][1] }}</span>
+{%- endmacro %}
+
+{% macro data_table(t, id, sr=True) -%}
+<div class="chart-data{% if sr %} sr-only{% endif %}" id="{{ id }}">
+  {% if t and t.rows %}
+  <table>
+    <caption>{{ t.caption }}</caption>
+    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for r in t.rows %}<tr>{% for v in r %}<td{% if t.columns[loop.index0] and t.columns[loop.index0].num %} class="num"{% endif %}>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table>
+  {% else %}No data.{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro chart(spec, height='', tools=True) -%}
+{%- set cid = spec.id -%}
+{% if tools %}
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% endif %}{% if it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="{{ cid }}-data" aria-expanded="false" aria-controls="{{ cid }}-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="{{ cid }}" data-filename="{{ spec.csv }}">CSV</button>
+  </div>
+</div>
+{% endif %}
+<div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec" role="img" aria-label="{{ spec.title }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
+<p class="sr-only" id="{{ cid }}-desc">{{ spec.describe }}</p>
+<script type="application/json" id="{{ cid }}-spec">{{ spec|tojson }}</script>
+{{ data_table(spec.table, cid ~ '-data') }}
+{%- endmacro %}
+
+{% macro heatmap(h, id, caption, row_head='T', ramp=None) -%}
+<div class="heat-wrap" tabindex="0" role="region" aria-labelledby="{{ id }}-cap">
+  <table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}>
+    <caption id="{{ id }}-cap">{{ caption }}</caption>
+    <thead><tr><th scope="col">{{ row_head }}</th>{% for c in h.cols %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for row in h.rows %}
+      <tr><th scope="row">{{ row.label }}</th>
+        {% for cell in row.cells %}{% if cell.empty %}<td class="empty" data-detail="{{ cell.detail }}"><span aria-hidden="true">·</span><span class="sr-only">{{ cell.detail or 'no data' }}</span></td>{% else %}<td{% if cell.flag %} class="flag"{% endif %} style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="{{ cell.detail }}">{{ cell.text }}{% if not h.compact %}<span class="sr-only">; {{ cell.detail }}</span>{% endif %}</td>{% endif %}{% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="heat-readout" id="{{ id }}-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+{% if ramp %}<div class="ramp" aria-hidden="true">{{ ramp }}</div>{% endif %}
+{%- endmacro %}
+
+{% macro ramp_bar(stops, lo_label, hi_label, mid_label=None) -%}
+<span>{{ lo_label }}</span><span class="ramp-bar" style="background:linear-gradient(90deg,{{ stops|join(',') }})"></span><span>{{ hi_label }}</span>{% if mid_label %}<span>· {{ mid_label }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro missing(state, what) -%}
+<div class="missing" data-artifact-state="absent">
+  <div class="missing-title">Artifact not yet generated</div>
+  <div class="missing-body">{{ what }} This panel reads
+    {% for p in state.paths %}<code>{{ p }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}{% if state.producer %}, written by {{ state.producer }}{% endif %}.
+    Nothing is estimated in its place.</div>
+</div>
+{%- endmacro %}
+
+{% macro method(title='Methodology and caveats') -%}
+<details class="method"><summary>{{ title }}</summary>{{ caller() }}</details>
+{%- endmacro %}
+
+{% macro spark(sp, label, cls='') -%}
+{% if sp %}
+<svg class="spark {{ cls }}" viewBox="0 0 {{ sp.width }} {{ sp.height }}" preserveAspectRatio="none" role="img" aria-label="{{ label }}">
+  {% if sp.zero_y is defined %}<line class="spark-zero" x1="0" x2="{{ sp.width }}" y1="{{ sp.zero_y }}" y2="{{ sp.zero_y }}"/>{% endif %}
+  {% if sp.bound_y is defined %}<line class="spark-bound" x1="0" x2="{{ sp.width }}" y1="{{ sp.bound_y }}" y2="{{ sp.bound_y }}"/>{% endif %}
+  <polyline class="spark-line" points="{{ sp.points }}"/>
+  <rect class="spark-last" x="{{ sp.last.x - 1.2 }}" y="{{ sp.last.y - 1.2 }}" width="2.4" height="2.4"/>
+</svg>
+{% endif %}
+{%- endmacro %}

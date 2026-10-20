@@ -1,0 +1,323 @@
+{
+ "co_movement": {
+  "always_short_straddle": {
+   "BFLY": {
+    "all": {
+     "alpha_ann": -0.07156139411,
+     "alpha_t": -1.645776266,
+     "beta": 0.1415878221,
+     "corr_daily": 0.1303354657,
+     "corr_weekly": 0.1473868581,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.1334043652,
+     "r2": 0.01698733362,
+     "sharpe_bench": -0.5056858254,
+     "sharpe_diff": -0.0948909152,
+     "sharpe_sleeve": -0.6005767406
+    }
+   },
+   "BXM": {
+    "all": {
+     "alpha_ann": -0.1016083602,
+     "alpha_t": -2.709663929,
+     "beta": 0.4675123794,
+     "corr_daily": 0.4993635781,
+     "corr_weekly": 0.5897883776,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.1755697388,
+     "r2": 0.2493639831,
+     "sharpe_bench": 0.3175759142,
+     "sharpe_diff": -0.9181526549,
+     "sharpe_sleeve": -0.6005767406
+    }
+   },
+   "CNDR": {
+    "all": {
+     "alpha_ann": -0.06800858751,
+     "alpha_t": -1.65731057,
+     "beta": 0.5089625568,
+     "corr_daily": 0.2980914242,
+     "corr_weekly": 0.4012812982,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.2008596122,
+     "r2": 0.08885849717,
+     "sharpe_bench": -0.3101512991,
+     "sharpe_diff": -0.2904254415,
+     "sharpe_sleeve": -0.6005767406
+    }
+   },
+   "PUT": {
+    "all": {
+     "alpha_ann": -0.1126078823,
+     "alpha_t": -2.960717149,
+     "beta": 0.4815121611,
+     "corr_daily": 0.4971404776,
+     "corr_weekly": 0.6147646783,
+     "n_days": 1815,
+     "partial_corr_ex_spx": 0.1676793545,
+     "r2": 0.2471486545,
+     "sharpe_bench": 0.3740889019,
+     "sharpe_diff": -1.022176205,
+     "sharpe_sleeve": -0.6480873026
+    }
+   },
+   "VXTH": {
+    "all": {
+     "alpha_ann": -0.1020546474,
+     "alpha_t": -2.293044315,
+     "beta": 0.1822619412,
+     "corr_daily": 0.2274316388,
+     "corr_weekly": 0.2601752282,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.1060043561,
+     "r2": 0.05172515034,
+     "sharpe_bench": 0.7119513434,
+     "sharpe_diff": -1.312528084,
+     "sharpe_sleeve": -0.6005767406
+    }
+   },
+   "WPUT": {
+    "all": {
+     "alpha_ann": -0.07660768863,
+     "alpha_t": -2.236340455,
+     "beta": 0.5524923953,
+     "corr_daily": 0.5526344138,
+     "corr_weekly": 0.6755210758,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.3144570931,
+     "r2": 0.3054047953,
+     "sharpe_bench": -0.05103847996,
+     "sharpe_diff": -0.5495382607,
+     "sharpe_sleeve": -0.6005767406
+    }
+   }
+  },
+  "portfolio": {
+   "BFLY": {
+    "all": {
+     "alpha_ann": -0.03563417415,
+     "alpha_t": -2.853138507,
+     "beta": -0.01347433128,
+     "corr_daily": -0.04429632433,
+     "corr_weekly": -0.1011310675,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.03925019923,
+     "r2": 0.001962164349,
+     "sharpe_bench": -0.5056858254,
+     "sharpe_diff": -0.4227286916,
+     "sharpe_sleeve": -0.928414517
+    }
+   },
+   "BXM": {
+    "all": {
+     "alpha_ann": -0.0326383103,
+     "alpha_t": -2.655619971,
+     "beta": -0.0474959541,
+     "corr_daily": -0.1811774435,
+     "corr_weekly": -0.3057817998,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.03135643209,
+     "r2": 0.03282526602,
+     "sharpe_bench": 0.3175759142,
+     "sharpe_diff": -1.245990431,
+     "sharpe_sleeve": -0.928414517
+    }
+   },
+   "CNDR": {
+    "all": {
+     "alpha_ann": -0.03593607909,
+     "alpha_t": -2.896322001,
+     "beta": -0.04694689306,
+     "corr_daily": -0.09819610632,
+     "corr_weekly": -0.1728620257,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.04319001244,
+     "r2": 0.009642475297,
+     "sharpe_bench": -0.3101512991,
+     "sharpe_diff": -0.6182632179,
+     "sharpe_sleeve": -0.928414517
+    }
+   },
+   "PUT": {
+    "all": {
+     "alpha_ann": -0.03047345368,
+     "alpha_t": -2.458006129,
+     "beta": -0.05033865968,
+     "corr_daily": -0.1864786027,
+     "corr_weekly": -0.3136138871,
+     "n_days": 1815,
+     "partial_corr_ex_spx": 0.02342402241,
+     "r2": 0.03477426927,
+     "sharpe_bench": 0.3740889019,
+     "sharpe_diff": -1.253702483,
+     "sharpe_sleeve": -0.8796135814
+    }
+   },
+   "VXTH": {
+    "all": {
+     "alpha_ann": -0.03007543783,
+     "alpha_t": -2.33791417,
+     "beta": -0.03968917903,
+     "corr_daily": -0.1768686121,
+     "corr_weekly": -0.2328648407,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.05545198078,
+     "r2": 0.03128250596,
+     "sharpe_bench": 0.7119513434,
+     "sharpe_diff": -1.64036586,
+     "sharpe_sleeve": -0.928414517
+    }
+   },
+   "WPUT": {
+    "all": {
+     "alpha_ann": -0.03523675364,
+     "alpha_t": -2.994529464,
+     "beta": -0.06469844049,
+     "corr_daily": -0.2311155659,
+     "corr_weekly": -0.3567513646,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.08858015655,
+     "r2": 0.05341440481,
+     "sharpe_bench": -0.05103847996,
+     "sharpe_diff": -0.877376037,
+     "sharpe_sleeve": -0.928414517
+    }
+   }
+  },
+  "s3": {
+   "BFLY": {
+    "all": {
+     "alpha_ann": 0.008179969702,
+     "alpha_t": 0.5258057963,
+     "beta": -0.01091545641,
+     "corr_daily": -0.02751871244,
+     "corr_weekly": -0.1133382877,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.03267705838,
+     "r2": 0.0007572795345,
+     "sharpe_bench": -0.5056858254,
+     "sharpe_diff": 0.6869828002,
+     "sharpe_sleeve": 0.1812969747
+    }
+   },
+   "BXM": {
+    "all": {
+     "alpha_ann": 0.006747962292,
+     "alpha_t": 0.4470496018,
+     "beta": 0.04652046144,
+     "corr_daily": 0.136087196,
+     "corr_weekly": 0.07739363283,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.03765010106,
+     "r2": 0.01851972492,
+     "sharpe_bench": 0.3175759142,
+     "sharpe_diff": -0.1362789395,
+     "sharpe_sleeve": 0.1812969747
+    }
+   },
+   "CNDR": {
+    "all": {
+     "alpha_ann": 0.009305645333,
+     "alpha_t": 0.6127016856,
+     "beta": 0.01832812912,
+     "corr_daily": 0.02939891402,
+     "corr_weekly": 0.02817068864,
+     "n_days": 1809,
+     "partial_corr_ex_spx": -0.01645385294,
+     "r2": 0.0008642961456,
+     "sharpe_bench": -0.3101512991,
+     "sharpe_diff": 0.4914482738,
+     "sharpe_sleeve": 0.1812969747
+    }
+   },
+   "PUT": {
+    "all": {
+     "alpha_ann": 0.006467947263,
+     "alpha_t": 0.4297922258,
+     "beta": 0.04531171677,
+     "corr_daily": 0.1294574387,
+     "corr_weekly": 0.1002406911,
+     "n_days": 1815,
+     "partial_corr_ex_spx": -0.04516934189,
+     "r2": 0.01675922842,
+     "sharpe_bench": 0.3740889019,
+     "sharpe_diff": -0.1930917133,
+     "sharpe_sleeve": 0.1809971887
+    }
+   },
+   "VXTH": {
+    "all": {
+     "alpha_ann": 0.00442451477,
+     "alpha_t": 0.2880656538,
+     "beta": 0.03730312699,
+     "corr_daily": 0.1274822242,
+     "corr_weekly": 0.1087445276,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.0288213887,
+     "r2": 0.01625171748,
+     "sharpe_bench": 0.7119513434,
+     "sharpe_diff": -0.5306543687,
+     "sharpe_sleeve": 0.1812969747
+    }
+   },
+   "WPUT": {
+    "all": {
+     "alpha_ann": 0.009310806009,
+     "alpha_t": 0.6349467917,
+     "beta": 0.06597005094,
+     "corr_daily": 0.1807207185,
+     "corr_weekly": 0.1643897491,
+     "n_days": 1809,
+     "partial_corr_ex_spx": 0.06845055894,
+     "r2": 0.0326599781,
+     "sharpe_bench": -0.05103847996,
+     "sharpe_diff": 0.2323354547,
+     "sharpe_sleeve": 0.1812969747
+    }
+   }
+  }
+ },
+ "implied_beta": {
+  "PUT": {
+   "by_year": {
+    "2018": 0.6343288763,
+    "2019": 0.8476017574,
+    "2020": 0.9030328966,
+    "2021": 0.7144941204,
+    "2022": 0.8219064267,
+    "2023": 0.8620072323,
+    "2024": 0.7884506909,
+    "2025": 0.5695687449
+   },
+   "n_periods": 87,
+   "overall": 0.7998006364
+  },
+  "WPUT": {
+   "by_year": {
+    "2018": 0.7700948405,
+    "2019": 0.8341032471,
+    "2020": 0.7792706332,
+    "2021": 0.7455062391,
+    "2022": 0.894594046,
+    "2023": 0.7506039928,
+    "2024": 0.7892363186,
+    "2025": 0.8181026621
+   },
+   "n_periods": 374,
+   "overall": 0.7997174575
+  },
+  "canonical_beta": 0.82
+ },
+ "indices": [
+  "PUT",
+  "WPUT",
+  "BXM",
+  "BFLY",
+  "CNDR",
+  "VXTH"
+ ],
+ "window": [
+  "2018-01-01",
+  "2025-03-24"
+ ]
+}

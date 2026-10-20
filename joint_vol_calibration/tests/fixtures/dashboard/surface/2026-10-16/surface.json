@@ -1,0 +1,590 @@
+{
+ "arbitrage": {
+  "calendar_total_variance_mid": {
+   "method": "earlier mid total variance vs the later expiry's mid total variance interpolated linearly in k (diagnostic, not a certificate)",
+   "n_crossing": 6,
+   "n_pairs_crossing": 2,
+   "n_points": 2819,
+   "tolerance_total_variance": 1e-08,
+   "worst_pairs": [
+    {
+     "earlier": "2027-03-31",
+     "later": "2027-04-16",
+     "min_dw": -0.02168784747,
+     "n_crossing": 5,
+     "n_points": 386
+    },
+    {
+     "earlier": "2026-12-31",
+     "later": "2027-01-15",
+     "min_dw": -0.008759164785,
+     "n_crossing": 1,
+     "n_points": 405
+    }
+   ]
+  },
+  "constraint_set": "CRW 2020 Table 1: C1-C3 per expiry; C4, C5 and C6 (C6.1 a/b/c and the nearest-neighbour chord) between consecutive expiries only; see arbitrage.py",
+  "executable_arbitrage_certificate": {
+   "any_single_row_executable": true,
+   "bid_ask_box_feasible": false,
+   "distance": 647.8926167,
+   "executable_arbitrage": true,
+   "message": "Optimization terminated successfully. (HiGHS Status 7: Optimal)",
+   "n_outside": 85,
+   "status": 0,
+   "tolerance_index_points": 1e-07
+  },
+  "executable_violations": {
+   "C1_outright": 0,
+   "C2_vertical_bound": 0,
+   "C2_vertical_spread": 26,
+   "C3_vertical_butterfly": 80,
+   "C4_calendar_spread": 0,
+   "C5_calendar_vertical_spread": 2,
+   "C6_calendar_butterfly": 9
+  },
+  "max_mid_violation_index_points": {
+   "C1_outright": 0.0,
+   "C2_vertical_bound": 0.0,
+   "C2_vertical_spread": 94.97226433,
+   "C3_vertical_butterfly": 94.89624359,
+   "C4_calendar_spread": 0.0,
+   "C5_calendar_vertical_spread": 78.9731067,
+   "C6_calendar_butterfly": 85.68982034
+  },
+  "mid_violations": {
+   "C1_outright": 0,
+   "C2_vertical_bound": 0,
+   "C2_vertical_spread": 33,
+   "C3_vertical_butterfly": 700,
+   "C4_calendar_spread": 0,
+   "C5_calendar_vertical_spread": 2,
+   "C6_calendar_butterfly": 25
+  },
+  "mid_violations_gt_tick": {
+   "C1_outright": 0,
+   "C2_vertical_bound": 0,
+   "C2_vertical_spread": 33,
+   "C3_vertical_butterfly": 405,
+   "C4_calendar_spread": 0,
+   "C5_calendar_vertical_spread": 2,
+   "C6_calendar_butterfly": 25
+  },
+  "n_quotes": 2913,
+  "n_quotes_in_executable_violation": 198,
+  "n_quotes_in_mid_violation": 1670,
+  "n_rows": {
+   "C1_outright": 17,
+   "C2_vertical_bound": 17,
+   "C2_vertical_spread": 2913,
+   "C3_vertical_butterfly": 2896,
+   "C4_calendar_spread": 0,
+   "C5_calendar_vertical_spread": 2827,
+   "C6_calendar_butterfly": 8310
+  },
+  "quotes_repaired_outside_spread": {
+   "by_expiry": {
+    "2026-12-31": 11,
+    "2027-03-31": 72,
+    "2027-05-21": 2
+   },
+   "largest": [
+    {
+     "T_days": 166.0,
+     "ask": 154.1,
+     "bid": 151.4,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.1134589125,
+     "mid": 152.75,
+     "mid_iv": 0.3479293266,
+     "repair_dprice": -90.5,
+     "repair_dprice_half_spreads": 67.03703704,
+     "right": "P",
+     "strike": 6265.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 143.3,
+     "bid": 141.6,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.06892344168,
+     "mid": 142.45,
+     "mid_iv": 0.3071477243,
+     "repair_dprice": -67.95832131,
+     "repair_dprice_half_spreads": 79.95096625,
+     "right": "P",
+     "strike": 6455.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 135.0,
+     "bid": 133.2,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.07601179678,
+     "mid": 134.1,
+     "mid_iv": 0.3119251121,
+     "repair_dprice": -64.21101491,
+     "repair_dprice_half_spreads": 71.34557212,
+     "right": "P",
+     "strike": 6385.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 94.0,
+     "bid": 92.8,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.06667551752,
+     "mid": 93.4,
+     "mid_iv": 0.3484376074,
+     "repair_dprice": -47.19032468,
+     "repair_dprice_half_spreads": 78.65054113,
+     "right": "P",
+     "strike": 5920.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 79.8,
+     "bid": 78.6,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.076107172,
+     "mid": 79.2,
+     "mid_iv": 0.3650599615,
+     "repair_dprice": -40.39090909,
+     "repair_dprice_half_spreads": 67.31818182,
+     "right": "P",
+     "strike": 5710.0
+    },
+    {
+     "T_days": 76.0,
+     "ask": 67.8,
+     "bid": 66.9,
+     "expiry": "2026-12-31",
+     "half_spread_vp": 0.07320256673,
+     "mid": 67.35,
+     "mid_iv": 0.3765025643,
+     "repair_dprice": -39.98469388,
+     "repair_dprice_half_spreads": 88.85487528,
+     "right": "P",
+     "strike": 6285.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 154.0,
+     "bid": 152.9,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03234978321,
+     "mid": 153.45,
+     "mid_iv": 0.1703983766,
+     "repair_dprice": 21.83253968,
+     "repair_dprice_half_spreads": 39.6955267,
+     "right": "P",
+     "strike": 7305.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 105.0,
+     "bid": 104.0,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03730735722,
+     "mid": 104.5,
+     "mid_iv": 0.1981997925,
+     "repair_dprice": 14.96666667,
+     "repair_dprice_half_spreads": 29.93333333,
+     "right": "P",
+     "strike": 6945.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 85.8,
+     "bid": 85.0,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03453599081,
+     "mid": 85.4,
+     "mid_iv": 0.2135666154,
+     "repair_dprice": 12.36666667,
+     "repair_dprice_half_spreads": 30.91666667,
+     "right": "P",
+     "strike": 6745.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 83.7,
+     "bid": 82.9,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.0351886762,
+     "mid": 83.3,
+     "mid_iv": 0.215475609,
+     "repair_dprice": 12.13333333,
+     "repair_dprice_half_spreads": 30.33333333,
+     "right": "P",
+     "strike": 6720.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 69.1,
+     "bid": 68.2,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.04605874814,
+     "mid": 68.65,
+     "mid_iv": 0.2309300072,
+     "repair_dprice": 10.11560847,
+     "repair_dprice_half_spreads": 22.47912992,
+     "right": "P",
+     "strike": 6520.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 116.3,
+     "bid": 115.4,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03209776435,
+     "mid": 115.85,
+     "mid_iv": 0.2001193025,
+     "repair_dprice": 9.35,
+     "repair_dprice_half_spreads": 20.77777778,
+     "right": "P",
+     "strike": 6985.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 55.6,
+     "bid": 54.8,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.04905908076,
+     "mid": 55.2,
+     "mid_iv": 0.2493265951,
+     "repair_dprice": 8.15,
+     "repair_dprice_half_spreads": 20.375,
+     "right": "P",
+     "strike": 6285.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 54.3,
+     "bid": 53.5,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.05004361801,
+     "mid": 53.9,
+     "mid_iv": 0.2512226066,
+     "repair_dprice": 8.075,
+     "repair_dprice_half_spreads": 20.1875,
+     "right": "P",
+     "strike": 6260.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 53.7,
+     "bid": 52.8,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.05692111232,
+     "mid": 53.25,
+     "mid_iv": 0.2525049926,
+     "repair_dprice": 7.9,
+     "repair_dprice_half_spreads": 17.55555556,
+     "right": "P",
+     "strike": 6245.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 53.2,
+     "bid": 52.3,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.05737454695,
+     "mid": 52.75,
+     "mid_iv": 0.2532686849,
+     "repair_dprice": 7.875,
+     "repair_dprice_half_spreads": 17.5,
+     "right": "P",
+     "strike": 6235.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 52.5,
+     "bid": 51.6,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.05804186144,
+     "mid": 52.05,
+     "mid_iv": 0.254466758,
+     "repair_dprice": 7.7875,
+     "repair_dprice_half_spreads": 17.30555556,
+     "right": "P",
+     "strike": 6220.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 51.8,
+     "bid": 51.0,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.05217496077,
+     "mid": 51.4,
+     "mid_iv": 0.2557170187,
+     "repair_dprice": 7.65,
+     "repair_dprice_half_spreads": 19.125,
+     "right": "P",
+     "strike": 6205.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 83.9,
+     "bid": 83.1,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03593950629,
+     "mid": 83.5,
+     "mid_iv": 0.2238627817,
+     "repair_dprice": 6.866666667,
+     "repair_dprice_half_spreads": 17.16666667,
+     "right": "P",
+     "strike": 6665.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 45.7,
+     "bid": 44.8,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.06565721188,
+     "mid": 45.25,
+     "mid_iv": 0.2673632729,
+     "repair_dprice": 6.692857143,
+     "repair_dprice_half_spreads": 14.87301587,
+     "right": "P",
+     "strike": 6060.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 44.1,
+     "bid": 43.3,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.06020166044,
+     "mid": 43.7,
+     "mid_iv": 0.2705866807,
+     "repair_dprice": 6.528571429,
+     "repair_dprice_half_spreads": 16.32142857,
+     "right": "P",
+     "strike": 6020.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 77.2,
+     "bid": 76.4,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03830657842,
+     "mid": 76.8,
+     "mid_iv": 0.2302499954,
+     "repair_dprice": 6.514814815,
+     "repair_dprice_half_spreads": 16.28703704,
+     "right": "P",
+     "strike": 6580.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 76.1,
+     "bid": 75.4,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.03388915853,
+     "mid": 75.75,
+     "mid_iv": 0.2314440326,
+     "repair_dprice": 6.32037037,
+     "repair_dprice_half_spreads": 18.05820106,
+     "right": "P",
+     "strike": 6565.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 62.9,
+     "bid": 62.1,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.04513625163,
+     "mid": 62.5,
+     "mid_iv": 0.246576144,
+     "repair_dprice": 6.073929774,
+     "repair_dprice_half_spreads": 15.18482443,
+     "right": "P",
+     "strike": 6365.0
+    },
+    {
+     "T_days": 166.0,
+     "ask": 40.3,
+     "bid": 39.5,
+     "expiry": "2027-03-31",
+     "half_spread_vp": 0.06544310348,
+     "mid": 39.9,
+     "mid_iv": 0.2797589661,
+     "repair_dprice": 5.929616293,
+     "repair_dprice_half_spreads": 14.82404073,
+     "right": "P",
+     "strike": 5910.0
+    }
+   ],
+   "n": 85
+  },
+  "repair": {
+   "delta0_index_points": 3.457064536e-05,
+   "max_abs_dprice": 90.5,
+   "max_abs_dprice_half_spreads": 88.85487528,
+   "max_row_shortfall_after": 1.250555215e-12,
+   "message": "Optimization terminated successfully. (HiGHS Status 7: Optimal)",
+   "n_perturbed": 1159,
+   "n_perturbed_outside_spread": 85,
+   "objective": 647.9050206,
+   "status": 0,
+   "sum_abs_dprice": 1051.216875
+  }
+ },
+ "fit_set": {
+  "half_spread_floor_vp_in_weights": 0.05,
+  "n": 1417,
+  "n_universe": 2913,
+  "rule": "alternate strikes per expiry (even positions by strike), minus quotes the l1-BA repair moves outside their spread"
+ },
+ "inputs": {
+  "chain": "data_store/options/spx_2026-10-16.parquet",
+  "chain_rows": 6191,
+  "quote_time": null,
+  "r_ref_cc": 0.04147901649,
+  "r_ref_source": "^IRX 13-week bill (tbill_rates, cc)",
+  "source": "yahoo",
+  "spot": 7659.439941,
+  "t_origin": "2026-10-16T16:00:00-04:00",
+  "t_origin_basis": "session close 16:00 ET"
+ },
+ "schema_version": 1,
+ "session": "2026-10-16",
+ "surfaces": {
+  "essvi": {
+   "dense_grid": {
+    "butterfly_min_per_DF": 6.565561946e-09,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": 1.696496567e-06,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [],
+    "calendar_violations": 0,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   }
+  },
+  "svi": {
+   "dense_grid": {
+    "butterfly_min_per_DF": 1.999235502e-08,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": -0.0002582037421,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [
+     "2026-11-13->2026-11-16",
+     "2027-03-31->2027-04-16"
+    ],
+    "calendar_violations": 14,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   }
+  },
+  "svi_cal": {
+   "dense_grid": {
+    "butterfly_min_per_DF": 2.016560624e-08,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": 1.442724847e-05,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [],
+    "calendar_violations": 0,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   }
+  }
+ },
+ "term_structure": [
+  {
+   "T_days": 13.0,
+   "atm_skew_essvi": -2.037097512,
+   "atm_vol_essvi": 14.01800049,
+   "atm_vol_mid_quotes": 14.19524268,
+   "atm_vol_svi_cal": 14.04735711,
+   "carry_method": "parity_fixed_D",
+   "discount": 0.9985237559,
+   "expiry": "2026-10-29",
+   "forward": 7668.702128,
+   "median_half_spread_vp": 0.2519772628,
+   "n_quotes": 130,
+   "q": 0.007547476011,
+   "r": 0.04147901649
+  },
+  {
+   "T_days": 28.0,
+   "atm_skew_essvi": -1.388105399,
+   "atm_vol_essvi": 14.15132184,
+   "atm_vol_mid_quotes": 14.25499356,
+   "atm_vol_svi_cal": 14.16301603,
+   "carry_method": "parity_fixed_D",
+   "discount": 0.9968231051,
+   "expiry": "2026-11-13",
+   "forward": 7680.472077,
+   "median_half_spread_vp": 0.1879401508,
+   "n_quotes": 170,
+   "q": 0.005733167799,
+   "r": 0.04147901649
+  },
+  {
+   "T_days": 91.0,
+   "atm_skew_essvi": -0.7710211785,
+   "atm_vol_essvi": 14.23400227,
+   "atm_vol_mid_quotes": 14.38939327,
+   "atm_vol_svi_cal": 14.40800835,
+   "carry_method": "parity_regression",
+   "discount": 0.9883138087,
+   "expiry": "2027-01-15",
+   "forward": 7731.678337,
+   "median_half_spread_vp": 0.1138652787,
+   "n_quotes": 115,
+   "q": 0.009497696783,
+   "r": 0.04714922196
+  }
+ ],
+ "universe": {
+  "T_days_max": 426.7291667,
+  "T_days_min": 13.0,
+  "median_half_spread_vp": 0.1309447469,
+  "n_bid_iv_floor": 0,
+  "n_clean": 5120,
+  "n_dropped_no_ask_iv": 0,
+  "n_expiries": 17,
+  "n_universe": 2913,
+  "quote_time": null,
+  "source": "yahoo",
+  "t_origin": "2026-10-16T16:00:00-04:00",
+  "t_origin_basis": "session close 16:00 ET",
+  "universe_filters": {
+   "K_over_F": [
+    0.7,
+    1.3
+   ],
+   "max_T_years": 2.0,
+   "mid_iv_range": [
+    0.01,
+    2.0
+   ],
+   "min_T_days": 7,
+   "min_mid_price": 0.5,
+   "note": "identical to JointCalibrator.spx_surface_full; 0-6 DTE expiries are excluded, as in the calibrator",
+   "otm_vs_parity_forward": true
+  }
+ }
+}

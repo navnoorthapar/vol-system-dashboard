@@ -1,0 +1,489 @@
+{
+ "actions": [
+  {
+   "action": "settle",
+   "id": "s1:2026-03-24::2026-04-23:6575",
+   "sleeve": "s1"
+  },
+  {
+   "action": "roll",
+   "id": "s1:2026-05-29::2026-06-29:7600",
+   "sleeve": "s1"
+  },
+  {
+   "action": "settle",
+   "id": "s2:2026-03-27::2026-04-27:6350",
+   "sleeve": "s2"
+  },
+  {
+   "action": "roll",
+   "id": "s2:2026-05-29::2026-06-29:7600",
+   "sleeve": "s2"
+  },
+  {
+   "action": "settle",
+   "id": "s3:2026-03-24::2026-04-23:6575",
+   "sleeve": "s3"
+  },
+  {
+   "action": "roll",
+   "id": "s3:2026-05-29::2026-06-29:7600",
+   "sleeve": "s3"
+  },
+  {
+   "action": "open",
+   "id": "s4:2026-05-29::2026-06-29:7600",
+   "sleeve": "s4"
+  }
+ ],
+ "closed": [
+  {
+   "closed": {
+    "commission": 2.6,
+    "hedge_pnl": -54666.7226,
+    "how": "settle",
+    "pnl_exec": -39960.0,
+    "pnl_mid": -39570.0,
+    "pnl_net": -39962.6,
+    "session": "2026-05-29"
+   },
+   "contract": {
+    "expiry": "2026-04-23",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6575.0
+   },
+   "contracts_per_1m": 2,
+   "direction": -1,
+   "entry": {
+    "ask": 337.5,
+    "bid": 333.6,
+    "call": {
+     "ask": 173.7,
+     "bid": 171.9,
+     "mid": 172.8
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.04448320886,
+    "forward": 6585.080503,
+    "iv_mid": 0.2235841293,
+    "price_exec": 333.6,
+    "price_mid": 335.55,
+    "put": {
+     "ask": 163.8,
+     "bid": 161.7,
+     "mid": 162.75
+    },
+    "session": "2026-03-24"
+   },
+   "hedge": {
+    "forward": 7108.4,
+    "pnl": -54666.7226,
+    "units": 0.0
+   },
+   "id": "s1:2026-03-24::2026-04-23:6575",
+   "kelly": 0.1,
+   "mark": {
+    "close_value_exec": 533.4,
+    "commission": 0.0,
+    "mid": 533.4,
+    "pnl_exec": -39960.0,
+    "pnl_exec_per_straddle": -19980.0,
+    "pnl_mid": -39570.0,
+    "pnl_mid_per_straddle": -19785.0,
+    "session": "2026-05-29",
+    "settle_close": 7108.4,
+    "status": "settled"
+   },
+   "sessions_marked": 1,
+   "sleeve": "s1"
+  },
+  {
+   "closed": {
+    "commission": 2.6,
+    "hedge_pnl": -10578.79923,
+    "how": "settle",
+    "pnl_exec": 86922.0,
+    "pnl_mid": 87482.0,
+    "pnl_net": 86919.4,
+    "session": "2026-05-29"
+   },
+   "contract": {
+    "expiry": "2026-04-27",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6350.0
+   },
+   "contracts_per_1m": 2,
+   "direction": 1,
+   "entry": {
+    "ask": 389.3,
+    "bid": 383.7,
+    "call": {
+     "ask": 205.5,
+     "bid": 202.7,
+     "mid": 204.1
+    },
+    "days_to_expiry": 31,
+    "delta_F": 0.06594092318,
+    "forward": 6371.767816,
+    "iv_mid": 0.2619281547,
+    "price_exec": 389.3,
+    "price_mid": 386.5,
+    "put": {
+     "ask": 183.8,
+     "bid": 181.0,
+     "mid": 182.4
+    },
+    "session": "2026-03-27"
+   },
+   "hedge": {
+    "forward": 7173.91,
+    "pnl": -10578.79923,
+    "units": 0.0
+   },
+   "id": "s2:2026-03-27::2026-04-27:6350",
+   "kelly": 0.1,
+   "mark": {
+    "close_value_exec": 823.91,
+    "commission": 0.0,
+    "mid": 823.91,
+    "pnl_exec": 86922.0,
+    "pnl_exec_per_straddle": 43461.0,
+    "pnl_mid": 87482.0,
+    "pnl_mid_per_straddle": 43741.0,
+    "session": "2026-05-29",
+    "settle_close": 7173.91,
+    "status": "settled"
+   },
+   "sessions_marked": 0,
+   "sleeve": "s2"
+  },
+  {
+   "closed": {
+    "commission": 2.6,
+    "hedge_pnl": -54666.7226,
+    "how": "settle",
+    "pnl_exec": -39960.0,
+    "pnl_mid": -39570.0,
+    "pnl_net": -39962.6,
+    "session": "2026-05-29"
+   },
+   "contract": {
+    "expiry": "2026-04-23",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6575.0
+   },
+   "contracts_per_1m": 2,
+   "direction": -1,
+   "entry": {
+    "ask": 337.5,
+    "bid": 333.6,
+    "call": {
+     "ask": 173.7,
+     "bid": 171.9,
+     "mid": 172.8
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.04448320886,
+    "forward": 6585.080503,
+    "iv_mid": 0.2235841293,
+    "price_exec": 333.6,
+    "price_mid": 335.55,
+    "put": {
+     "ask": 163.8,
+     "bid": 161.7,
+     "mid": 162.75
+    },
+    "session": "2026-03-24"
+   },
+   "hedge": {
+    "forward": 7108.4,
+    "pnl": -54666.7226,
+    "units": 0.0
+   },
+   "id": "s3:2026-03-24::2026-04-23:6575",
+   "kelly": 0.08,
+   "mark": {
+    "close_value_exec": 533.4,
+    "commission": 0.0,
+    "mid": 533.4,
+    "pnl_exec": -39960.0,
+    "pnl_exec_per_straddle": -19980.0,
+    "pnl_mid": -39570.0,
+    "pnl_mid_per_straddle": -19785.0,
+    "session": "2026-05-29",
+    "settle_close": 7108.4,
+    "status": "settled"
+   },
+   "sessions_marked": 1,
+   "sleeve": "s3"
+  }
+ ],
+ "inputs": {
+  "beta": null,
+  "chain_rows_two_sided": 412,
+  "chain_sha256": "25b0b9a3d706bad68716dbbad72e191de85fc2a1a76857b46b3024a4a76ab019",
+  "quote_time": null,
+  "r_ref": 0.036544,
+  "spot": 7580.06,
+  "t_origin": null
+ },
+ "positions": [
+  {
+   "contract": {
+    "expiry": "2026-06-29",
+    "root": "",
+    "settlement": "PM",
+    "strike": 7600.0
+   },
+   "contracts_per_1m": 4,
+   "direction": -1,
+   "entry": {
+    "ask": 218.9,
+    "bid": 216.6,
+    "call": {
+     "ask": 107.4,
+     "bid": 106.2,
+     "mid": 106.8
+    },
+    "days_to_expiry": 31,
+    "delta_F": 0.002232500803,
+    "forward": 7595.837099,
+    "iv_mid": 0.1236261284,
+    "price_exec": 216.6,
+    "price_mid": 217.75,
+    "put": {
+     "ask": 111.5,
+     "bid": 110.4,
+     "mid": 110.95
+    },
+    "session": "2026-05-29"
+   },
+   "hedge": {
+    "forward": 7595.837099,
+    "pnl": 0.0,
+    "units": 0.002232500803
+   },
+   "id": "s1:2026-05-29::2026-06-29:7600",
+   "kelly": 0.1,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s1"
+  },
+  {
+   "contract": {
+    "expiry": "2026-06-29",
+    "root": "",
+    "settlement": "PM",
+    "strike": 7600.0
+   },
+   "contracts_per_1m": 4,
+   "direction": 1,
+   "entry": {
+    "ask": 218.9,
+    "bid": 216.6,
+    "call": {
+     "ask": 107.4,
+     "bid": 106.2,
+     "mid": 106.8
+    },
+    "days_to_expiry": 31,
+    "delta_F": 0.002232500803,
+    "forward": 7595.837099,
+    "iv_mid": 0.1236261284,
+    "price_exec": 218.9,
+    "price_mid": 217.75,
+    "put": {
+     "ask": 111.5,
+     "bid": 110.4,
+     "mid": 110.95
+    },
+    "session": "2026-05-29"
+   },
+   "hedge": {
+    "forward": 7595.837099,
+    "pnl": 0.0,
+    "units": -0.002232500803
+   },
+   "id": "s2:2026-05-29::2026-06-29:7600",
+   "kelly": 0.1,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s2"
+  },
+  {
+   "contract": {
+    "expiry": "2026-06-29",
+    "root": "",
+    "settlement": "PM",
+    "strike": 7600.0
+   },
+   "contracts_per_1m": 3,
+   "direction": -1,
+   "entry": {
+    "ask": 218.9,
+    "bid": 216.6,
+    "call": {
+     "ask": 107.4,
+     "bid": 106.2,
+     "mid": 106.8
+    },
+    "days_to_expiry": 31,
+    "delta_F": 0.002232500803,
+    "forward": 7595.837099,
+    "iv_mid": 0.1236261284,
+    "price_exec": 216.6,
+    "price_mid": 217.75,
+    "put": {
+     "ask": 111.5,
+     "bid": 110.4,
+     "mid": 110.95
+    },
+    "session": "2026-05-29"
+   },
+   "hedge": {
+    "forward": 7595.837099,
+    "pnl": 0.0,
+    "units": 0.002232500803
+   },
+   "id": "s3:2026-05-29::2026-06-29:7600",
+   "kelly": 0.08,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s3"
+  },
+  {
+   "contract": {
+    "expiry": "2026-06-29",
+    "root": "",
+    "settlement": "PM",
+    "strike": 7600.0
+   },
+   "contracts_per_1m": 4,
+   "direction": -1,
+   "entry": {
+    "ask": 218.9,
+    "bid": 216.6,
+    "call": {
+     "ask": 107.4,
+     "bid": 106.2,
+     "mid": 106.8
+    },
+    "days_to_expiry": 31,
+    "delta_F": 0.002232500803,
+    "forward": 7595.837099,
+    "iv_mid": 0.1236261284,
+    "price_exec": 216.6,
+    "price_mid": 217.75,
+    "put": {
+     "ask": 111.5,
+     "bid": 110.4,
+     "mid": 110.95
+    },
+    "session": "2026-05-29"
+   },
+   "hedge": {
+    "forward": 7595.837099,
+    "pnl": 0.0,
+    "units": 0.002232500803
+   },
+   "id": "s4:2026-05-29::2026-06-29:7600",
+   "kelly": 0.1,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s4"
+  }
+ ],
+ "previous": {
+  "session": "2026-03-27",
+  "sha256": "cef246562a3b7c5bdd225071351c91526eb90de8abc2f43e82faba39b8266eba"
+ },
+ "schema": "forward_ledger/1",
+ "session": "2026-05-29",
+ "signals": {
+  "s1": {
+   "kelly": 0.1,
+   "position": -1,
+   "straddle_direction": -1
+  },
+  "s1c": {
+   "kelly": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s2": {
+   "kelly": 0.1,
+   "position": 1,
+   "straddle_direction": 1
+  },
+  "s3": {
+   "kelly": 0.08,
+   "position": 1,
+   "straddle_direction": -1
+  },
+  "s4": {
+   "kelly": 0.1,
+   "position": -1,
+   "straddle_direction": -1
+  }
+ },
+ "summary": {
+  "s1": {
+   "n_closed": 1,
+   "n_opened": 2,
+   "open_id": "s1:2026-05-29::2026-06-29:7600",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": -54666.7226,
+   "realised_pnl_exec": -39960.0,
+   "realised_pnl_mid": -39570.0,
+   "realised_pnl_net": -39962.6
+  },
+  "s1c": {
+   "n_closed": 1,
+   "n_opened": 1,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 2877.017132,
+   "realised_pnl_exec": 8700.0,
+   "realised_pnl_mid": 10020.0,
+   "realised_pnl_net": 8692.2
+  },
+  "s2": {
+   "n_closed": 1,
+   "n_opened": 2,
+   "open_id": "s2:2026-05-29::2026-06-29:7600",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": -10578.79923,
+   "realised_pnl_exec": 86922.0,
+   "realised_pnl_mid": 87482.0,
+   "realised_pnl_net": 86919.4
+  },
+  "s3": {
+   "n_closed": 1,
+   "n_opened": 2,
+   "open_id": "s3:2026-05-29::2026-06-29:7600",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": -54666.7226,
+   "realised_pnl_exec": -39960.0,
+   "realised_pnl_mid": -39570.0,
+   "realised_pnl_net": -39962.6
+  },
+  "s4": {
+   "n_closed": 1,
+   "n_opened": 2,
+   "open_id": "s4:2026-05-29::2026-06-29:7600",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 1918.011421,
+   "realised_pnl_exec": 5800.0,
+   "realised_pnl_mid": 6680.0,
+   "realised_pnl_net": 5794.8
+  }
+ }
+}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block og_title %}Model Risk — Inventory and Monitoring — SPX/VIX Vol Research{% endblock %}
+{% block og_description %}Every model the system runs, with its use, inputs, outputs and limitations, and monitoring checks against explicit thresholds.{% endblock %}
+
+{% block content %}
+{% set rc = d.rag_counts or {} %}
+<div class="page-head">
+  <h1 class="page-title">Model risk · inventory and monitoring</h1>
+  <p class="page-sub">The structure of a model-risk review (an inventory, then outcome checks against stated limits) applied to a personal research system. The limits are this page's working thresholds, stated so a reader can disagree with them.</p>
+  <div class="page-badge"><span class="nowrap">{{ d.inventory|length }} models</span><span class="sep">·</span><span class="nowrap">{{ d.monitors|length }} checks</span><span class="sep">·</span><span class="nowrap">{{ rc.ok|fmt }} OK · {{ rc.watch|fmt }} watch · {{ rc.breach|fmt }} breach · {{ rc.info|fmt }} informational</span></div>
+</div>
+
+<div class="g">
+  {% call m.panel('monitors', 'Monitoring checks', 's12') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Monitoring checks (scrollable)">
+    <table class="tbl" id="monitor-table">
+      <thead><tr><th scope="col">Model</th><th scope="col">Check</th><th scope="col" class="num">Value</th><th scope="col">Status</th><th scope="col">Limits</th><th scope="col">Artifact</th><th scope="col">Note</th></tr></thead>
+      <tbody>{% for x in d.monitors %}<tr data-status="{{ x.status }}"><td>{{ x.model }}</td><td class="wrap">{{ x.check|sym }}</td><td class="num">{{ x.value }}</td><td>{{ m.rag(x.status) }}</td><td class="nowrap">{{ x.limits }}</td><td><code>{{ x.artifact }}</code></td><td class="wrap">{{ x.note }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% call m.method('How to read the status') %}
+    <p class="prose">OK, WATCH and BREACH compare the value with the limits in the same row (green ≤ the first limit, watch ≤ the second, breach above); every status also carries a word and a glyph, so colour is never the only cue. INFO rows are reported, not limited: the Feller condition is a diagnostic here, not a no-arbitrage requirement. A BREACH is not an outage: it marks where the model is weakest, which the linked page explains.</p>
+    {% endcall %}
+  {% endcall %}
+</div>
+
+<div class="g">
+  {% call m.panel('inventory', 'Model inventory', 's12') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model inventory (scrollable)">
+    <table class="tbl" id="inventory-table">
+      <thead><tr><th scope="col">ID</th><th scope="col">Model</th><th scope="col">Tier</th><th scope="col">Use</th><th scope="col">Inputs → outputs</th><th scope="col">Known limitations</th></tr></thead>
+      <tbody>{% for x in d.inventory %}<tr><td>{{ x.id }}</td><td class="wrap"><strong>{{ x.name }}</strong><br><code>{{ x.module }}</code>{% if x.page %} · <a href="{{ x.page }}">page</a>{% endif %}</td><td>{{ m.chip(x.tier, 'info' if x.tier == 'production' else ('watch' if x.tier == 'backtest' else 'muted')) }}</td><td class="wrap">{{ x.use }}</td><td class="wrap">{{ x.inputs }} → <code>{{ x.outputs }}</code></td><td class="wrap">{{ x.limitations }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">{{ d.inventory_about }}</p>
+  {% endcall %}
+</div>
+{% endblock %}

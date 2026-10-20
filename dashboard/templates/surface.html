@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block og_title %}Surface — SPX Implied-Vol Surface vs Models — SPX/VIX Vol Research{% endblock %}
+{% block og_description %}The SPX implied-vol surface: market bid–ask quotes, model overlays, residuals in half-spread units, arbitrage status and the VIX replicated from the same chain.{% endblock %}
+
+{% block content %}
+{% set s = d.surf or {} %}
+<div class="page-head">
+  <h1 class="page-title">SPX implied-volatility surface</h1>
+  <p class="page-sub">Market quotes against the models, measured in the unit a market maker uses: half the bid–ask spread. A model inside the spread is as good as the quote.</p>
+  <div class="page-badge">
+    {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='label')|join(', ') }}</span>
+    {% else %}<span class="nowrap">Quote-grade surface not yet generated</span><span class="sep">·</span><span class="nowrap">headline fit {{ d.calib_session|fmt }}</span>{% endif %}
+  </div>
+</div>
+
+{% if s.state == 'ok' %}
+{% set H = d.score_rows|selectattr('key', 'in', ['heston_v2', 'heston'])|first %}
+<div class="kpis" style="margin-bottom:8px;" id="surface-scores">
+  {% for r in d.score_rows %}{% set o = r.oos %}
+  {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vp · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes') }}
+  {% endfor %}
+  {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
+  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else '')) }}
+  {% endif %}{% endif %}
+  {% if d.arb %}{{ m.kpi('Executable static arbitrage', d.arb.n_quotes_in_executable_violation|fmt(','), sub='of ' ~ (d.arb.n_quotes|fmt(',')) ~ ' quotes sit in a bid/ask-level violation; ' ~ (d.arb.n_quotes_in_mid_violation|fmt(',')) ~ ' at mids') }}{% endif %}
+</div>
+
+<div class="g">
+  {% call m.panel('iv-heat', 'Implied vol by expiry and ln(K/F) · market mids', 's7', d.n_quotes|fmt(',') ~ ' quotes') %}
+    {{ m.heatmap(d.iv_heat, 'iv-heatmap', 'Median mid implied vol (%) of the quotes in each expiry (rows) and log-moneyness bucket (columns; heads are bucket midpoints)', 'Expiry',
+                 m.ramp_bar(cividis, d.iv_heat.lo|fmt('.1f') ~ '%', d.iv_heat.hi|fmt('.1f') ~ '%', 'cividis')) }}
+    {% if d.surface3d %}
+    <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
+    <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the implied-vol grid above (same numbers as the table)" hidden></div>
+    <script type="application/json" id="surface3d-spec">{{ d.surface3d|tojson }}</script>
+    {% endif %}
+    <p class="note">Two-sided out-of-the-money quotes on each expiry's parity forward ({{ ((d.universe.universe_filters or {}).note or 'the calibrator’s universe')|prose }}). Median half-spread {{ d.median_half_spread|fmt('.2f') }} vol pts.</p>
+  {% endcall %}
+  {% call m.panel('slices', 'Smile slice · bid–ask, mid and models', 's5') %}
+    <div class="tabs js-only" role="tablist" aria-label="Expiry shown in the smile chart" data-state-key="exp" data-chart-filter="chart-slices" hidden>
+      {% for e in d.expiries %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if e.expiry == d.default_exp else 'false' }}" aria-controls="slices-panel" data-value="{{ e.expiry }}">{{ e.T_days|fmt('.0f') }}d</button>{% endfor %}
+    </div>
+    <div id="slices-panel" role="tabpanel">{{ m.chart(d.charts.slices, 'h400') }}</div>
+  {% endcall %}
+</div>
+
+<div class="g">
+  {% call m.panel('scorecard', 'Model scorecard · same quotes, same metric', 's7', 'source: ' ~ d.score_source) %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model scorecard (scrollable)">
+    <table class="tbl dense" id="scorecard-table">
+      <caption>Out-of-sample quotes of each model (the quotes it was not fitted to); |z| = |model − mid| in half-spreads</caption>
+      <thead><tr><th scope="col">Model</th><th scope="col" class="num">Params</th><th scope="col" class="num">Fitted to</th><th scope="col" class="num">Scored</th><th scope="col" class="num">Median |z|</th><th scope="col" class="num">Inside</th><th scope="col" class="num">Within 2</th><th scope="col" class="num">RMSE vp</th><th scope="col" class="num">Bias vp</th><th scope="col" class="num">Dense-grid arb. (fly / cal)</th></tr></thead>
+      <tbody>{% for r in d.score_rows %}{% set o = r.oos %}<tr{% if r.key in ('heston_v2', 'heston') %} class="em"{% endif %}><td>{{ r.label }}</td><td class="num">{{ r.n_params|fmt }}</td><td class="num">{{ r.n_in_sample|fmt(',') }}</td><td class="num">{{ o.n|fmt(',') }}</td><td class="num">{{ o.median_abs_hs|fmt('.2f') }}</td><td class="num">{{ o.inside_spread_pct|fmt('.1f')|u('%') }}</td><td class="num">{{ o.within_2hs_pct|fmt('.1f')|u('%') }}</td><td class="num">{{ o.rmse_vp|fmt('.2f') }}</td><td class="num">{{ o.mean_error_vp|signed('.2f') }}</td><td class="num">{% if r.dense %}{{ r.dense.butterfly_violations|fmt(',') }} / {{ r.dense.calendar_violations|fmt(',') }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% for n_ in d.score_notes %}<p class="note">{{ n_|prose }}</p>{% endfor %}
+    {% if H %}<p class="note">Heston's fitted set is its calibration anchors; the surfaces are fitted to alternate strikes and scored on the rest, so they interpolate where Heston must extrapolate. Read the surfaces as the quote-noise floor, not as rival models.</p>{% endif %}
+    {% call m.method('Model descriptions') %}<dl class="dl">{% for r in d.score_rows %}<dt>{{ r.label }}</dt><dd>{{ r.description|prose }}</dd>{% endfor %}</dl>{% endcall %}
+  {% endcall %}
+  {% call m.panel('by-expiry', 'Median |z| by expiry · every model', 's5') %}
+    {% if d.charts.by_expiry %}{{ m.chart(d.charts.by_expiry, 'h300') }}{% else %}<p class="note">The by-expiry rows need scorecard.json.</p>{% endif %}
+  {% endcall %}
+</div>
+
+<div class="g">
+  {% call m.panel('residuals', 'Residuals in half-spreads · (model − mid) / half-spread', 's8', 'out-of-sample quotes') %}
+    <div class="tabs js-only" role="tablist" aria-label="Model shown in the residual grid" data-state-key="model" hidden>
+      {% for r in d.resid_heat %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if loop.first else 'false' }}" aria-controls="resid-{{ r.key }}" data-value="{{ r.key }}">{{ r.label }}</button>{% endfor %}
+    </div>
+    {% for r in d.resid_heat %}
+    <div id="resid-{{ r.key }}" role="tabpanel">
+      {{ m.heatmap(r, 'resid-heat-' ~ r.key, r.label ~ ': median (model − mid) / half-spread of its ' ~ (r.n|fmt(',')) ~ ' out-of-sample quotes by expiry and log-moneyness bucket (column heads are bucket midpoints); |value| ≤ 1 is inside the spread', 'Expiry',
+                   m.ramp_bar(berlin, '−5', '+5', 'model below mid ← 0 → model above mid')) }}
+    </div>
+    {% endfor %}
+  {% endcall %}
+  {% call m.panel('arbitrage', 'Static arbitrage · screen and repair', 's4') %}
+    {% if d.arb_rows %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Static-arbitrage screen (scrollable)">
+    <table class="tbl dense" id="arb-table"><caption>Constraint rows of the stored quotes ({{ d.arb.constraint_set.split(':')[0] if d.arb.constraint_set else 'CRW 2020' }})</caption>
+      <thead><tr><th scope="col">Constraint</th><th scope="col" class="num">Rows</th><th scope="col" class="num">At mids</th><th scope="col" class="num">At bid/ask</th></tr></thead>
+      <tbody>{% for r in d.arb_rows %}<tr><td>{{ r.label }}</td><td class="num">{{ r.rows|fmt(',') }}</td><td class="num">{{ r.mid|fmt(',') }}</td><td class="num{% if r.exec %} neg{% endif %}">{{ r.exec|fmt(',') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% set rp = d.arb_repair %}
+    {% if rp %}<p class="note">An l1 repair (linear programme, HiGHS) moves {{ rp.n_perturbed|fmt(',') }} quotes, {{ rp.n_perturbed_outside_spread|fmt(',') }} of them outside their bid–ask (largest move {{ rp.max_abs_dprice_half_spreads|fmt('.0f') }} half-spreads); those are flagged and left out of the surfaces' fitted set.</p>{% endif %}
+    {% if d.arb_surfaces %}<p class="note">Dense-grid checks of the fitted surfaces: {% for a in d.arb_surfaces %}{{ a.label }} {{ a.dense.butterfly_violations|fmt(',') }} butterfly / {{ a.dense.calendar_violations|fmt(',') }} calendar violations{{ '; ' if not loop.last else '.' }}{% endfor %}</p>{% endif %}
+    {% else %}<p class="note">No arbitrage screen in surface.json for this session.</p>{% endif %}
+  {% endcall %}
+</div>
+
+{% if d.vix_rows or d.strip %}
+<div class="g">
+  {% call m.panel('vix-replication', 'VIX family replicated from the same chain', 's5', 'Cboe VIX methodology') %}
+    {% if d.vix_rows %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Replicated VIX indices (scrollable)">
+    <table class="tbl dense" id="vix-rep-table"><caption>Replicated index against the Cboe close (index points)</caption>
+      <thead><tr><th scope="col">Index</th><th scope="col" class="num">Replicated</th><th scope="col" class="num">Cboe close</th><th scope="col" class="num">Gap</th></tr></thead>
+      <tbody>{% for r in d.vix_rows %}<tr><td>{{ r.ticker }}</td><td class="num">{{ r.replicated|fmt('.2f') }}</td><td class="num">{{ r.official|fmt('.2f') }}</td><td class="num">{{ r.gap|signed('.2f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% endif %}
+    {% set vb = d.vix_beta or {} %}
+    {% if vb.atm_over_vix_official is defined %}<p class="note">30-day ATM vol / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the backtest marks every straddle at one fixed β; see <a href="research.html#beta">Research</a>).</p>{% endif %}
+    {% call m.method('Where the replication departs from Cboe') %}
+      <ul class="prose" style="padding-left:16px;">{% for n_ in d.vix_deviations %}<li>{{ n_|prose }}</li>{% endfor %}{% for n_ in d.vix_notes %}<li>{{ n_|prose }}</li>{% endfor %}</ul>
+    {% endcall %}
+  {% endcall %}
+  {% call m.panel('varswap', 'Variance-swap strip · same chain', 's7') %}
+    {% if d.charts.strip %}{{ m.chart(d.charts.strip, 'h260') }}{% endif %}
+    <p class="note">Var-swap minus ATM vol is the skew premium in the 30-day VIX: the reason a straddle is not worth the VIX.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
+{% if d.charts.atm_ts or d.surface_history %}
+<div class="g">
+  {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes and eSSVI', 's5') %}{{ m.chart(d.charts.atm_ts, 'h260') }}{% endcall %}{% endif %}
+  {% if d.surface_history %}{% call m.panel('surface-history', 'Every session the surface report covers', 's7', (d.surface_history|length) ~ ' sessions') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Surface sessions (scrollable)">
+    <table class="tbl dense" id="surface-history-table"><caption>Median |z| in half-spreads (all scored quotes) by session and model</caption>
+      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Quotes</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }}</th>{% endfor %}<th scope="col" class="num">Arb. outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">ATM / VIX</th></tr></thead>
+      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td>{% for hm in d.history_models %}<td class="num">{{ r.m[hm.key].median_abs_hs|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a statistic.</p>
+  {% endcall %}{% endif %}
+</div>
+{% endif %}
+
+{% else %}
+{{ m.missing(s, 'The market surface: two-sided OTM quotes with bid / mid / ask implied vols on each expiry’s parity forward, every model priced on the same quotes, residuals in half-spread units, the static-arbitrage screen and the VIX replicated from the same chain.') }}
+<div class="g" style="margin-top:8px;">
+  {% call m.panel('model-surface', 'Model surface · Heston headline fit (not market data)', 's8', d.calib_session) %}
+    {% if d.model_heat %}
+    {{ m.heatmap(d.model_heat, 'model-heatmap', 'Heston implied vol (%) by maturity (rows) and ln(K/F) (columns), headline fit ' ~ (d.calib_session or ''), 'T',
+                 m.ramp_bar(cividis, d.model_heat.lo|fmt('.1f') ~ '%', d.model_heat.hi|fmt('.1f') ~ '%', 'cividis')) }}
+    {% if d.surface3d %}
+    <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
+    <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the model implied-vol grid above (same numbers as the table)" hidden></div>
+    <script type="application/json" id="surface3d-spec">{{ d.surface3d|tojson }}</script>
+    {% endif %}
+    {% endif %}
+    <p class="note">Model implied vols at the headline parameters (<code>{{ d.calib_file }}</code>), forward-normalised. The market surface replaces this panel when the surface artifacts exist; until then no market quotes are shown here rather than unscored ones.</p>
+  {% endcall %}
+  {% call m.panel('surface-plan', 'What this page will show', 's4') %}
+    <ul class="prose" style="padding-left:16px;">
+      <li>Inside-spread share and median |model − mid| in half-spreads, per model, on one quote set.</li>
+      <li>Smile slices with bid–ask bars, the fit's anchors filled and out-of-sample quotes hollow.</li>
+      <li>A residual grid by expiry and moneyness, dark where the model is inside the spread.</li>
+      <li>Butterfly, vertical and calendar arbitrage counts before and after repair.</li>
+      <li>The VIX replicated from this chain against the Cboe close.</li>
+    </ul>
+    <p class="note">Contract: <code>dashboard/ARTIFACTS.md</code>.</p>
+  {% endcall %}
+</div>
+{% endif %}
+{% endblock %}

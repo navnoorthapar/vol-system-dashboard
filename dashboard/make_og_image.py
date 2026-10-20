@@ -1,98 +1,114 @@
 """
 make_og_image.py — Generate the 1200×630 social-preview card (og-image.png).
 
-The base template references https://navnoorbawa.me/og-image.png for LinkedIn /
-Twitter / Substack link previews. This script renders that card in the
-dashboard's dark/green brand so the preview is rich rather than blank.
+The base template points og:image at https://navnoorbawa.me/og-image.png for
+LinkedIn, Twitter and Substack link previews. The card is drawn in the site's
+desk palette: every colour below is a token in static/desk.css, which
+test_dashboard.py checks.
 
-The card carries only facts that do not drift with each commit. It used to
-show a hand-typed test count ('631 tests') that was already stale against the
-page meta ('666') and CI (642 passed + 24 skipped); a count belongs to CI and
-the README, not to a PNG nobody regenerates. test_dashboard.py checks that the
-card's stats and the page meta carry no test count.
+The card carries only facts that do not drift from commit to commit. An
+earlier version showed a hand-typed test count ("631 tests") that was already
+stale against the page meta (666) and CI (642 passed + 24 skipped). A count
+belongs to CI and the README, not to a PNG nobody regenerates, so
+test_dashboard.py also checks that the card's stats carry no test count.
 
 Usage:
     python dashboard/make_og_image.py [OUTPUT_PATH]
-    (defaults to <repo>/dashboard/og-image.png; freeze_site.py copies it to the
-     site root so the absolute og:image URL resolves.)
+    The default output is <repo>/dashboard/og-image.png. freeze_site.py copies
+    it to the site root, so the absolute og:image URL resolves.
 """
 import os
 import sys
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 
-BG     = "#0a0a0a"
-GREEN  = "#00ff88"
-WHITE  = "#e8e8e8"
-MUTED  = "#8a8a8a"
-PANEL  = "#141414"
+# desk.css tokens (dark desk palette)
+BG = "#111418"        # --bg
+BG_DEEP = "#0d1014"   # --bg-deep
+SURFACE = "#1c2127"   # --surface
+LINE = "#2f343c"      # --line
+LINE2 = "#404854"     # --line2
+TEXT = "#e5e8eb"      # --text
+TEXT2 = "#abb3bf"     # --text2
+TEXT3 = "#9aa3b0"     # --text3
+ACCENT = "#8abbff"    # --pos / --info
+OK = "#72ca9b"        # --ok
+PALETTE = (BG, BG_DEEP, SURFACE, LINE, LINE2, TEXT, TEXT2, TEXT3, ACCENT, OK)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_OUT = os.path.join(ROOT, "dashboard", "og-image.png")
 
-# (value, label) pairs of the stat band — stable facts only (no test count, no correction-round number)
-STATS = [("14", "components"), ("0", "look-ahead"), ("2018–25", "backtest")]
+# (value, label) pairs of the stat band: stable facts only (no test count, no metric that moves daily)
+STATS = [("SPX + VIX", "one joint Heston fit"), ("2018–2025", "hedged-straddle backtest"),
+         ("C16–C22", "correction rounds logged")]
+CHIPS = ["Heston (joint)", "Quintic OU", "PDV forecast", "Greeks & P&L explain", "Regime rule"]
+SANS, MONO = "DejaVu Sans", "DejaVu Sans Mono"
 
 
 def build(out: str = DEFAULT_OUT) -> str:
-    # 1200×630 at dpi=100
-    fig = plt.figure(figsize=(12.0, 6.3), dpi=100)
+    fig = plt.figure(figsize=(12.0, 6.3), dpi=100)        # 1200 × 630 px
     fig.patch.set_facecolor(BG)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, 1200)
     ax.set_ylim(0, 630)
     ax.axis("off")
 
-    # Top accent rule
-    ax.add_patch(plt.Rectangle((0, 612), 1200, 18, color=GREEN, lw=0))
+    # status bar, as on the site
+    ax.add_patch(plt.Rectangle((0, 598), 1200, 32, color=BG_DEEP, lw=0))
+    ax.plot([0, 1200], [598, 598], color=LINE, lw=1)
+    ax.add_patch(plt.Circle((40, 614), 5, color=OK, lw=0))
+    ax.text(54, 614, "END OF DAY   ·   SPX / VIX   ·   STATIC BUILD FROM STORED ARTIFACTS",
+            color=TEXT3, fontsize=12, family=MONO, va="center")
 
-    # Volatility-smile motif (top-right corner), echoing the favicon
-    k = np.linspace(-1, 1, 200)
-    smile = k**2
-    ax.plot(1010 + 150 * (k + 1) / 2, 520 + 64 * smile,
-            color=GREEN, lw=4, alpha=0.8, solid_capstyle="round")
+    # smile motif: a schematic (drawn from a formula, not a session's data) of
+    # quotes with bid-ask bars around a model curve, and labelled as such
+    k = np.linspace(-1.0, 1.0, 200)
+    x0, w, y0, h = 924, 216, 330, 190
+    curve = 0.15 + 0.55 * (k - 0.25) ** 2 + 0.12 * np.maximum(-k, 0)
+    ax.add_patch(plt.Rectangle((x0 - 24, y0 - 34), w + 48, h + 92, color=SURFACE, ec=LINE, lw=1))
+    ax.plot(x0 + w * (k + 1) / 2, y0 + h * curve, color=ACCENT, lw=3, solid_capstyle="round")
+    for kq in np.linspace(-0.9, 0.9, 13):
+        cq = 0.15 + 0.55 * (kq - 0.25) ** 2 + 0.12 * max(-kq, 0)
+        off = 0.035 * np.sin(7.3 * kq)
+        xq, yq = x0 + w * (kq + 1) / 2, y0 + h * (cq + off)
+        ax.plot([xq, xq], [yq - 9, yq + 9], color=TEXT3, lw=1.4)
+        ax.add_patch(plt.Circle((xq, yq), 3.2, color=TEXT, lw=0))
+    ax.text(x0 + w / 2, y0 - 20, "ln(K/F)", color=TEXT3, fontsize=12, family=MONO, ha="center")
+    ax.text(x0 - 16, y0 + h + 40, "schematic: model vs bid–ask", color=TEXT2, fontsize=13, family=SANS)
 
-    # Title
-    ax.text(70, 500, "Joint SPX / VIX", color=WHITE, fontsize=52,
-            fontweight="bold", family="DejaVu Sans")
-    ax.text(70, 436, "Smile Calibration System", color=GREEN, fontsize=52,
-            fontweight="bold", family="DejaVu Sans")
+    # title block
+    ax.text(64, 500, "Joint SPX/VIX", color=TEXT, fontsize=50, fontweight="bold", family=SANS)
+    ax.text(64, 436, "Smile Calibration", color=TEXT, fontsize=50, fontweight="bold", family=SANS)
+    ax.text(66, 388, "Calibration, Greeks and a backtest with its full correction log",
+            color=TEXT2, fontsize=19, family=SANS)
 
-    # One-line honest positioning
-    ax.text(72, 372,
-            "Calibration & risk infrastructure  +  a documented negative result",
-            color=WHITE, fontsize=23, family="DejaVu Sans")
+    # chips
+    x = 66
+    for c in CHIPS:
+        cw = 22 + len(c) * 9.6
+        ax.add_patch(plt.Rectangle((x, 312), cw, 34, color=SURFACE, ec=LINE2, lw=1))
+        ax.text(x + cw / 2, 329, c, color=TEXT, fontsize=13.5, ha="center", va="center", family=SANS)
+        x += cw + 10
 
-    # Tech chips
-    chips = ["Heston", "Quintic OU", "Bates SVJ", "VIX index leg",
-             "PDV", "Regime rule"]
-    x = 72
-    for c in chips:
-        w = 24 + len(c) * 12.5
-        ax.add_patch(plt.Rectangle((x, 286), w, 40, color=PANEL, lw=1,
-                                   ec="#2a2a2a", joinstyle="round"))
-        ax.text(x + w / 2, 306, c, color=WHITE, fontsize=16,
-                ha="center", va="center", family="DejaVu Sans")
-        x += w + 16
-
-    # Stat band
-    x = 72
+    # stat band
+    ax.plot([64, 1136], [262, 262], color=LINE, lw=1)
+    x = 66
     for val, lab in STATS:
-        ax.text(x, 196, val, color=GREEN, fontsize=40, fontweight="bold",
-                family="DejaVu Sans Mono")
-        ax.text(x + 4, 158, lab, color=MUTED, fontsize=17, family="DejaVu Sans")
-        x += 80 + max(33 * len(val), 11 * len(lab))
+        ax.text(x, 202, val, color=ACCENT, fontsize=30, fontweight="bold", family=MONO)
+        ax.text(x + 2, 168, lab, color=TEXT3, fontsize=15, family=SANS)
+        x += 360
+    ax.plot([64, 1136], [128, 128], color=LINE, lw=1)
 
-    # Footer
-    ax.text(72, 60, "navnoorbawa.me", color=GREEN, fontsize=24,
-            fontweight="bold", family="DejaVu Sans Mono")
-    ax.text(72, 28, "Navnoor Bawa  ·  honest negative result, validated end-to-end",
-            color=MUTED, fontsize=16, family="DejaVu Sans")
+    # footer
+    ax.text(66, 70, "navnoorbawa.me", color=ACCENT, fontsize=22, fontweight="bold", family=MONO)
+    ax.text(66, 36, "Navnoor Bawa  ·  personal research project  ·  end-of-day data",
+            color=TEXT3, fontsize=15, family=SANS)
 
-    fig.savefig(out, facecolor=BG, dpi=100)
+    # no Software/creation metadata, so the PNG is byte-stable for the same inputs
+    fig.savefig(out, facecolor=BG, dpi=100, metadata={"Software": None})
     plt.close(fig)
     return out
 

@@ -108,7 +108,7 @@ def fetch(key: str, src_dir: Path | None) -> bytes:
         data = (src_dir / f"{key}-{name}").read_bytes() if (src_dir / f"{key}-{name}").exists() \
             else (src_dir / name).read_bytes()
     else:
-        with urllib.request.urlopen(spec["url"], timeout=60) as resp:   # noqa: S310 (pinned https URL)
+        with urllib.request.urlopen(spec["url"], timeout=60) as resp:  # noqa: S310 (pinned https URL)
             data = resp.read()
     got = sha256(data)
     if got != spec["sha256"]:
@@ -180,7 +180,8 @@ def build(src_dir: Path | None = None, out: Path = OUT) -> dict:
             "source": SOURCES[key]["url"], "source_sha256": SOURCES[key]["sha256"],
             "sha256": sha256(blob), "bytes": len(blob), "features": features,
             "instance": {k: list(v) if isinstance(v, tuple) else v for k, v in (limits or {}).items()},
-            "renamed_to": " ".join(rename) if rename else None, "license": LICENSES["inter_license" if key == "inter" else "plex_license"],
+            "renamed_to": " ".join(rename) if rename else None,
+            "license": LICENSES["inter_license" if key == "inter" else "plex_license"],
         }
         print(f"WROTE {OUTPUTS[key]}  {len(blob):,} bytes  sha256 {sha256(blob)[:16]}…")
     for key, name in LICENSES.items():

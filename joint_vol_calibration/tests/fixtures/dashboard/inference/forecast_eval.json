@@ -1,0 +1,72 @@
+{
+ "backtest_window": {
+  "end": "2025-03-24",
+  "horizon": 21,
+  "losses": {
+   "qlike": {
+    "ewma": 0.7332425869,
+    "garch": 0.4824723391,
+    "gjr": 0.4749841583,
+    "har": 0.5055189367,
+    "pdv": 0.6620261865,
+    "vix2": 0.450289785,
+    "vix_mz": 0.5058063061
+   }
+  },
+  "mcs": {
+   "qlike": {
+    "90": {
+     "included": [
+      "garch",
+      "gjr",
+      "har",
+      "pdv",
+      "vix2",
+      "vix_mz"
+     ]
+    }
+   }
+  },
+  "mean_forecast_vol": {
+   "ewma": 0.1683066708,
+   "garch": 0.1669251397,
+   "gjr": 0.1713949094,
+   "har": 0.1698093661,
+   "pdv": 0.1525372142,
+   "vix2": 0.1982931168,
+   "vix_mz": 0.1744439419
+  },
+  "mean_realised_vol": 0.1671609635,
+  "n": 1816,
+  "r2_vol": {
+   "ewma": 0.0517301701,
+   "garch": 0.293586803,
+   "gjr": 0.2783089448,
+   "har": 0.2589567133,
+   "pdv": 0.2693334114,
+   "vix2": 0.2159024867,
+   "vix_mz": 0.2524187033
+  },
+  "rank": {
+   "qlike": {
+    "ewma": 7,
+    "garch": 3,
+    "gjr": 2,
+    "har": 4,
+    "pdv": 6,
+    "vix2": 1,
+    "vix_mz": 5
+   }
+  },
+  "start": "2018-01-02"
+ },
+ "models": {
+  "ewma": "RiskMetrics \u03bb = 0.94",
+  "garch": "GARCH(1,1) zero mean, Gaussian QML (arch), re-estimated every 21 sessions",
+  "gjr": "GJR-GARCH(1,1,1), as garch",
+  "har": "HAR-RV on daily r\u00b2, expanding OLS, purged (labels i \u2264 t \u2212 21)",
+  "pdv": "PDVLinear walk-forward (models.pdv.walk_forward_vol_forecast), \u03c3\u0302\u00b2, the S1/S1C input",
+  "vix2": "(VIX/100)\u00b2, risk-neutral (contains the variance premium)",
+  "vix_mz": "walk-forward OLS of y\u00b2 on [1, (VIX/100)\u00b2], purged"
+ }
+}
