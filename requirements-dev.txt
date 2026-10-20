@@ -3,3 +3,11 @@
 pytest>=9,<10
 pytest-cov>=7,<8
 ruff>=0.6
+# Independent test oracles (C23), never imported by runtime code: the tests
+# that use them call pytest.importorskip and skip cleanly without them.
+#   QuantLib (BSD-3): AnalyticHestonEngine / BatesEngine / AnalyticRoughHestonEngine
+#   oracles in tests/test_external_oracles.py and tests/test_rough_heston.py.
+QuantLib==1.44
+#   py_lets_be_rational (MIT; deps cody-special, piecewise-rational, both MIT):
+#   Jaeckel's "Let's Be Rational" implied-vol oracle in tests/test_external_oracles.py.
+py_lets_be_rational==1.1.2
