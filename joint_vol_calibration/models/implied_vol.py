@@ -66,12 +66,18 @@ Implied-vol solver
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Tuple, Union
+from typing import Any, Callable, Literal, Optional, Tuple, Union, overload
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.special import log_ndtr, ndtr
 
 ArrayLike = Union[float, np.ndarray]
+BoolLike = Union[bool, np.ndarray]
+# Return annotations follow numpy's own convention: a function declared to
+# return np.ndarray returns a numpy scalar of the same dtype (np.float64,
+# np.int8) when every input is a scalar. numpy scalars support .shape, .ndim,
+# [()] and float().
 
 _LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
 # Relative price residual |ln p(σ) − ln p_target| required (with a sub-tolerance
@@ -106,7 +112,7 @@ IV_STATUS = {
 
 # ── Black-76 / Black-Scholes prices ───────────────────────────────────────────
 
-def _as_float_arrays(*args) -> Tuple[np.ndarray, ...]:
+def _as_float_arrays(*args: Union[ArrayLike, BoolLike]) -> Tuple[NDArray[np.float64], ...]:
     arrs = np.broadcast_arrays(*[np.asarray(a, dtype=float) for a in args])
     return tuple(np.array(a, dtype=float) for a in arrs)
 
@@ -188,7 +194,8 @@ def black_price(
     # Recover the requested side from the OTM price via parity: C − P = F − K
     call = np.where(x >= 0, otm, otm + (F - K))
     put = np.where(x >= 0, otm + (K - F), otm)
-    return D * np.where(is_call, call, put)
+    out: np.ndarray = D * np.where(is_call, call, put)
+    return out
 
 
 def bs_price(
@@ -269,8 +276,9 @@ def fourier_otm_price(
         variance_hint = w if (np.isfinite(w) and w > 0) else 0.01
     w = float(variance_hint)
 
-    def _diff(z):
-        return cf_logfwd(z) - np.exp(-0.5 * w * (1j * z + z * z))
+    def _diff(z: np.ndarray) -> np.ndarray:
+        out: np.ndarray = cf_logfwd(z) - np.exp(-0.5 * w * (1j * z + z * z))
+        return out
 
     # Truncation point: first U on a geometric grid with tail below tail_tol at U and 1.25·U
     n_cand = int(np.ceil(np.log(u_max / 32.0) / np.log(1.25))) + 1
@@ -283,7 +291,7 @@ def fourier_otm_price(
         return np.full(x.shape, np.nan), False
     U = float(cand[int(np.argmax(both))])
 
-    def _sum(u, weight):
+    def _sum(u: np.ndarray, weight: ArrayLike) -> np.ndarray:
         weight = np.broadcast_to(np.asarray(weight, dtype=float), u.shape)
         acc = np.zeros(x.shape)
         for i in range(0, u.size, chunk):
@@ -318,41 +326,50 @@ def fourier_otm_price(
 
 # ── Greeks (spot, with continuous dividend yield) ─────────────────────────────
 
-def bs_d1d2(F: ArrayLike, K: ArrayLike, T: ArrayLike, sigma: ArrayLike) -> tuple:
+def bs_d1d2(F: ArrayLike, K: ArrayLike, T: ArrayLike,
+            sigma: ArrayLike) -> Tuple[np.ndarray, np.ndarray]:
     """d1, d2 of the forward-measure Black formula."""
     sqrtT = np.sqrt(np.maximum(T, 1e-12))
-    d1 = (np.log(F / K) + 0.5 * sigma**2 * T) / (sigma * sqrtT)
-    d2 = d1 - sigma * sqrtT
+    d1: np.ndarray = (np.log(F / K) + 0.5 * sigma**2 * T) / (sigma * sqrtT)
+    d2: np.ndarray = d1 - sigma * sqrtT
     return d1, d2
 
 
-def _phi(d):
-    return np.exp(-0.5 * d * d - _LOG_SQRT_2PI)
+def _phi(d: ArrayLike) -> np.ndarray:
+    out: np.ndarray = np.exp(-0.5 * d * d - _LOG_SQRT_2PI)
+    return out
 
 
-def bs_delta(S, K, T, r, q, sigma, is_call: Union[bool, np.ndarray] = True) -> np.ndarray:
+def bs_delta(S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike, q: ArrayLike,
+             sigma: ArrayLike, is_call: BoolLike = True) -> np.ndarray:
     """∂V/∂S: call e^{−qT}N(d1), put −e^{−qT}N(−d1)."""
     F = S * np.exp((r - q) * T)
     d1, _ = bs_d1d2(F, K, T, sigma)
     dq = np.exp(-q * T)
-    return np.where(is_call, dq * ndtr(d1), -dq * ndtr(-d1))
+    out: np.ndarray = np.where(is_call, dq * ndtr(d1), -dq * ndtr(-d1))
+    return out
 
 
-def bs_gamma(S, K, T, r, q, sigma) -> np.ndarray:
+def bs_gamma(S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike, q: ArrayLike,
+             sigma: ArrayLike) -> np.ndarray:
     """∂²V/∂S² = e^{−qT}φ(d1)/(S σ √T) (call = put)."""
     F = S * np.exp((r - q) * T)
     d1, _ = bs_d1d2(F, K, T, sigma)
-    return np.exp(-q * T) * _phi(d1) / (S * sigma * np.sqrt(np.maximum(T, 1e-12)))
+    out: np.ndarray = np.exp(-q * T) * _phi(d1) / (S * sigma * np.sqrt(np.maximum(T, 1e-12)))
+    return out
 
 
-def bs_vega(S, K, T, r, q, sigma) -> np.ndarray:
+def bs_vega(S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike, q: ArrayLike,
+            sigma: ArrayLike) -> np.ndarray:
     """∂V/∂σ = S e^{−qT} φ(d1) √T, per 1.00 (100 vol points) of σ (call = put)."""
     F = S * np.exp((r - q) * T)
     d1, _ = bs_d1d2(F, K, T, sigma)
-    return S * np.exp(-q * T) * _phi(d1) * np.sqrt(np.maximum(T, 1e-12))
+    out: np.ndarray = S * np.exp(-q * T) * _phi(d1) * np.sqrt(np.maximum(T, 1e-12))
+    return out
 
 
-def bs_vomma(S, K, T, r, q, sigma) -> np.ndarray:
+def bs_vomma(S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike, q: ArrayLike,
+             sigma: ArrayLike) -> np.ndarray:
     """
     Vomma (a.k.a. volga) = ∂²V/∂σ² = Vega · d1 · d2 / σ, per (1.00 of σ)² (call = put).
 
@@ -361,18 +378,44 @@ def bs_vomma(S, K, T, r, q, sigma) -> np.ndarray:
     """
     F = S * np.exp((r - q) * T)
     d1, d2 = bs_d1d2(F, K, T, sigma)
-    return bs_vega(S, K, T, r, q, sigma) * d1 * d2 / np.maximum(sigma, 1e-8)
+    out: np.ndarray = bs_vega(S, K, T, r, q, sigma) * d1 * d2 / np.maximum(sigma, 1e-8)
+    return out
 
 
-def bs_vanna(S, K, T, r, q, sigma) -> np.ndarray:
+def bs_vanna(S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike, q: ArrayLike,
+             sigma: ArrayLike) -> np.ndarray:
     """∂²V/∂S∂σ = −e^{−qT} φ(d1) d2 / σ, per 1.00 of σ (call = put)."""
     F = S * np.exp((r - q) * T)
     d1, d2 = bs_d1d2(F, K, T, sigma)
-    return -np.exp(-q * T) * _phi(d1) * d2 / np.maximum(sigma, 1e-8)
+    out: np.ndarray = -np.exp(-q * T) * _phi(d1) * d2 / np.maximum(sigma, 1e-8)
+    return out
 
 
 # ── Implied volatility ────────────────────────────────────────────────────────
 
+# The return type depends on full_output; the overloads let a type checker see
+# which (they change nothing at run time).
+@overload
+def implied_vol_black(
+    price: ArrayLike, F: ArrayLike, K: ArrayLike, T: ArrayLike,
+    is_call: BoolLike = ..., discount: ArrayLike = ..., *,
+    sigma_min: float = ..., sigma_max: float = ..., min_otm_price: ArrayLike = ...,
+    tol: float = ..., max_iter: int = ..., full_output: Literal[False] = ...,
+) -> np.ndarray: ...
+@overload
+def implied_vol_black(
+    price: ArrayLike, F: ArrayLike, K: ArrayLike, T: ArrayLike,
+    is_call: BoolLike = ..., discount: ArrayLike = ..., *,
+    sigma_min: float = ..., sigma_max: float = ..., min_otm_price: ArrayLike = ...,
+    tol: float = ..., max_iter: int = ..., full_output: Literal[True],
+) -> Tuple[np.ndarray, np.ndarray]: ...
+@overload
+def implied_vol_black(
+    price: ArrayLike, F: ArrayLike, K: ArrayLike, T: ArrayLike,
+    is_call: BoolLike = ..., discount: ArrayLike = ..., *,
+    sigma_min: float = ..., sigma_max: float = ..., min_otm_price: ArrayLike = ...,
+    tol: float = ..., max_iter: int = ..., full_output: bool,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]: ...
 def implied_vol_black(
     price: ArrayLike,
     F: ArrayLike,
@@ -387,7 +430,7 @@ def implied_vol_black(
     tol: float = 1e-12,
     max_iter: int = 100,
     full_output: bool = False,
-):
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
     Black-76 implied volatility, vectorised.
 
@@ -550,7 +593,7 @@ def implied_vol_black(
         s_flat[idx] = s_res
         s_out = s_flat.reshape(shape)
 
-    sigma = s_out / sqrtT
+    sigma: np.ndarray = s_out / sqrtT
     sigma = np.where(status == IV_OK, sigma, np.nan)
     if sigma.ndim == 0:
         sigma = sigma[()]
@@ -558,6 +601,18 @@ def implied_vol_black(
     return (sigma, status) if full_output else sigma
 
 
+@overload
+def implied_vol_bs(
+    price: ArrayLike, S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike,
+    q: ArrayLike, is_call: BoolLike = ..., *, full_output: Literal[False] = ...,
+    **kwargs: Any,
+) -> np.ndarray: ...
+@overload
+def implied_vol_bs(
+    price: ArrayLike, S: ArrayLike, K: ArrayLike, T: ArrayLike, r: ArrayLike,
+    q: ArrayLike, is_call: BoolLike = ..., *, full_output: Literal[True],
+    **kwargs: Any,
+) -> Tuple[np.ndarray, np.ndarray]: ...
 def implied_vol_bs(
     price: ArrayLike,
     S: ArrayLike,
@@ -566,12 +621,16 @@ def implied_vol_bs(
     r: ArrayLike,
     q: ArrayLike,
     is_call: Union[bool, np.ndarray] = True,
-    **kwargs,
-):
-    """Black-Scholes implied vol with dividend yield q (wraps implied_vol_black)."""
+    *,
+    full_output: bool = False,
+    **kwargs: Any,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    """Black-Scholes implied vol with dividend yield q (wraps implied_vol_black;
+    keyword arguments are passed through)."""
     price, S, K, T, r, q = _as_float_arrays(price, S, K, T, r, q)
     F = S * np.exp((r - q) * T)
-    return implied_vol_black(price, F, K, T, is_call, np.exp(-r * T), **kwargs)
+    return implied_vol_black(price, F, K, T, is_call, np.exp(-r * T),
+                             full_output=full_output, **kwargs)
 
 
 def _bs_iv_vectorized(
@@ -592,7 +651,8 @@ def _bs_iv_vectorized(
     has not converged to `tol` within `max_iter` iterations — unlike the old
     implementation, which returned the last (often clipped) iterate.
     """
-    return implied_vol_black(
+    out: np.ndarray = implied_vol_black(
         call_prices, F, K, T, True, np.exp(-np.asarray(r, float) * np.asarray(T, float)),
         sigma_min=1e-4, sigma_max=5.0, tol=tol, max_iter=max_iter,
     )
+    return out
