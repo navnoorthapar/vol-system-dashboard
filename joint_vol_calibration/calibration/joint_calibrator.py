@@ -65,6 +65,14 @@ the routine fit. Its old 37 vp "structural failure" figure was measured with
 the broken put pricer, spot-VIX vegas and a stale chain, so it says nothing
 about the model.
 
+Optimiser and diagnostics (C23). The loss is a sum of squares and is
+minimised as one (HestonJointResiduals + multistart_trf); every result
+records its starts, basins and an identifiability report. sigma_profile()
+measures the cost of the sigma <= 2 box, calibrate_comparison() fits Heston
+and lifted rough Heston like for like, and
+scripts/calibration_diagnostics.py writes both for every committed
+session (data_store/calibrations/diagnostics/).
+
 Usage
 -----
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
@@ -763,6 +771,47 @@ def identifiability_report(J: np.ndarray, r: np.ndarray, x: np.ndarray,
     return out
 
 
+def gauss_newton_profile_check(fun: Callable, x: np.ndarray, report: dict,
+                               lo: np.ndarray, hi: np.ndarray,
+                               steps: Sequence[float] = (-1.0, 1.0)) -> dict:
+    """How well the Gauss-Newton standard errors describe the loss.
+
+    For each free parameter, hold it at x_j + m SE_j and re-fit the other
+    free parameters; return dSSR / (m^2 s^2) per step m. A quadratic loss
+    with the Gauss-Newton Hessian gives exactly 1. Below 1 the loss rises
+    more slowly than J^T J predicts (the dropped sum r_i Hess(r_i) term
+    matters because the residuals are model misfit), so that SE is
+    optimistic; above 1, conservative. Measured, not assumed.
+    """
+    names = report["param_names"]
+    x = np.asarray(x, dtype=float)
+    r0 = fun(x)
+    base = float(r0 @ r0)
+    s2 = report.get("residual_variance")
+    free = [names.index(k) for k in report["free_params"]]
+    out = {}
+    if not s2:
+        return out
+    for i in free:
+        se = report["standard_errors"][names[i]]
+        others = [j for j in free if j != i]
+        ratios = {}
+        for m in steps:
+            xi = x.copy()
+            xi[i] = float(np.clip(x[i] + m * se, lo[i], hi[i]))
+
+            def sub(y, xi=xi):
+                z = xi.copy()
+                z[others] = y
+                return fun(z)
+            sol = optimize.least_squares(sub, x[others], bounds=(lo[others], hi[others]),
+                                         method="trf", x_scale="jac", ftol=1e-12, xtol=1e-12)
+            eff = (xi[i] - x[i]) / se
+            ratios[f"{m:+g}"] = float((2.0 * sol.cost - base) / (s2 * eff * eff))
+        out[names[i]] = ratios
+    return out
+
+
 def previous_accepted_fit(spot_date: str, cal_dir=None) -> tuple:
     """(path, result) of the newest ACCEPTED model_version >= 2 joint Heston
     fit of a session strictly before spot_date, or (None, None).
@@ -801,8 +850,11 @@ class JointCalibrator:
     Joint SPX/VIX smile calibration engine for the Heston model.
 
     Loads market data once at construction, then minimises the weighted loss
-    with differential evolution (global search, scipy's internal polish off)
-    followed by one L-BFGS-B polish.
+    as a least-squares problem: multi-start trust-region reflective
+    (scipy least_squares) from the previous session's accepted fit and
+    scrambled-Sobol starts, analytic Jacobian (C23). The pre-C23 differential
+    evolution + L-BFGS-B path remains as calibrate(optimizer="de") and as an
+    optional global check (de_check=True).
 
     Attributes (set after calibrate())
     ------------------------------------
@@ -1543,13 +1595,13 @@ class JointCalibrator:
         return previous_accepted_fit(self.spot_date, Path(DATA_DIR) / "calibrations")
 
     def _trf_fit(self, model: HestonJointResiduals, lo, hi, n_starts: int, warm,
-                 jacobian: str, label: str = "Heston") -> tuple:
+                 jacobian: str, label: str = "Heston", start_box: Optional[dict] = None) -> tuple:
         """Multi-start TRF on ``model``: warm start(s) first, then Sobol."""
         starts, labels = [], []
         for name, x in warm:
             starts.append(np.clip(np.asarray(x, dtype=float), lo, hi))
             labels.append(name)
-        sob = sobol_starts(n_starts, HESTON_START_BOX, lo, hi, HESTON_PARAM_NAMES)
+        sob = sobol_starts(n_starts, start_box or HESTON_START_BOX, lo, hi, HESTON_PARAM_NAMES)
         starts.extend(sob)
         labels.extend(f"sobol{i}" for i in range(len(sob)))
         if not starts:
@@ -1636,7 +1688,8 @@ class JointCalibrator:
                   "members": de_popsize * len(bounds), "seed": RANDOM_SEED, "tol": 1e-6,
                   "scipy_polish": False, "lbfgsb_polish": bool(polish),
                   "workers": int(de_workers),
-                  "updating": "immediate" if int(de_workers) == 1 else "deferred"}
+                  "updating": "immediate" if int(de_workers) == 1 else "deferred",
+                  "bounds": {k: list(v) for k, v in HESTON_BOUNDS.items()}}
         multistart = de_report = None
         t_start = time.time()
         if optimizer == "de":
@@ -1662,7 +1715,8 @@ class JointCalibrator:
                        "warm_start": warm_info, "jacobian": jacobian,
                        "x_scale": "jac", "ftol": _TRF_TOL, "xtol": _TRF_TOL,
                        "gtol": _TRF_TOL, "max_nfev_per_start": _TRF_MAX_NFEV,
-                       "basin_loss_rtol": _BASIN_LOSS_RTOL, "de_check": bool(de_check)}
+                       "basin_loss_rtol": _BASIN_LOSS_RTOL, "de_check": bool(de_check),
+                       "bounds": {k: list(v) for k, v in HESTON_BOUNDS.items()}}
             if de_check:
                 de_report, best, best_loss = self._de_global_check(
                     model, bounds, lo, hi, de_maxiter, de_popsize, de_workers, jacobian,
@@ -1827,11 +1881,21 @@ class JointCalibrator:
 
     # ── SPX-only model comparison (C23) ───────────────────────────────────────
 
-    def calibrate_spx_only(self, model: str = "heston", n_starts: int = 4, warm=None,
-                           n_factors: int = ROUGH_HESTON_N_FACTORS,
-                           n_steps: int = ROUGH_HESTON_TIME_STEPS,
-                           numerics_check: bool = True) -> dict:
-        """SPX-only fit of Heston or lifted rough Heston, like for like.
+    def calibrate_spx_only(self, model: str = "heston", **kwargs) -> dict:
+        """calibrate_comparison(model, legs="spx", ...): the VIX leg off."""
+        return self.calibrate_comparison(model, legs="spx", **kwargs)
+
+    def calibrate_comparison(self, model: str = "heston", legs: str = "spx",
+                             n_starts: int = 4, warm=None,
+                             n_factors: int = ROUGH_HESTON_N_FACTORS,
+                             n_steps: int = ROUGH_HESTON_TIME_STEPS,
+                             numerics_check: bool = True, box: str = "production") -> dict:
+        """Heston or lifted rough Heston fitted like for like.
+
+        legs="spx": the SPX anchors only (the VIX index is then out of
+        sample); legs="joint": the production joint loss (this calibrator's
+        normalised w1, w2 on the same anchors and spot VIX indices; for rough
+        Heston the index is rough_heston_vix_term_index).
 
         Both models see the same anchors and residuals sqrt(1/n) (model -
         market)/vega (the joint loss with the VIX leg off), the production
@@ -1850,12 +1914,24 @@ class JointCalibrator:
         is off), fit time, evaluations, every start, and an identifiability
         report. numerics_check (rough): anchor IVs re-priced with twice the
         factors and four times the Riccati steps, so the approximation error
-        is measured next to the misfit.
+        is measured next to the misfit. box="wide" (Heston only) fits in the
+        sigma-profile box instead (sigma <= max(SIGMA_PROFILE_CAPS), kappa <=
+        PROFILE_KAPPA_MAX), so rough Heston can also be compared with a Heston
+        that is not held by the production sigma <= 2 prior.
         """
         from joint_vol_calibration.models import rough_heston as rh
 
         if model not in ("heston", "rough_heston"):
             raise ValueError(f"model must be 'heston' or 'rough_heston', got {model!r}")
+        if legs not in ("spx", "joint"):
+            raise ValueError(f"legs must be 'spx' or 'joint', got {legs!r}")
+        w_spx, w_vix = (1.0, 0.0) if legs == "spx" else (self.w1, self.w2)
+        if box not in ("production", "wide") or (box == "wide" and model != "heston"):
+            raise ValueError(f"box must be 'production' (or 'wide' for Heston), got {box!r}")
+        hbox = dict(HESTON_BOUNDS)
+        if box == "wide":
+            hbox["sigma"] = (HESTON_BOUNDS["sigma"][0], float(max(SIGMA_PROFILE_CAPS)))
+            hbox["kappa"] = (HESTON_BOUNDS["kappa"][0], float(PROFILE_KAPPA_MAX))
         if warm is None and self.params is not None:
             warm = [self.params[k] for k in HESTON_PARAM_NAMES]
         elif isinstance(warm, dict):
@@ -1864,11 +1940,15 @@ class JointCalibrator:
         t0 = time.perf_counter()
         if model == "heston":
             names = HESTON_PARAM_NAMES
-            lo, hi = _box_arrays(HESTON_BOUNDS, names)
-            res_model = self.residual_model(w_spx=1.0, w_vix=0.0, w_vix_opt=0.0)
+            lo, hi = _box_arrays(hbox, names)
+            res_model = self.residual_model(w_spx=w_spx, w_vix=w_vix, w_vix_opt=0.0)
             warm_list = [("warm", warm)] if warm is not None else []
+            sbox = dict(HESTON_START_BOX)
+            if box == "wide":       # starts that can reach the large-sigma basin too
+                sbox["kappa"] = (0.5, 40.0, "log")
+                sbox["sigma"] = (0.2, 8.0, "log")
             sol, rep = self._trf_fit(res_model, lo, hi, n_starts, warm_list, "analytic",
-                                     label="Heston SPX-only")
+                                     label=f"Heston {legs} ({box} box)", start_box=sbox)
             x, loss = sol.x, float(2.0 * sol.cost)
             J, r = res_model.jac(x), res_model(x)
             pricer = heston_call_batch
@@ -1882,7 +1962,10 @@ class JointCalibrator:
             box = dict(HESTON_BOUNDS)
             box["H"] = ROUGH_HESTON_H_BOUNDS
             lo, hi = _box_arrays(box, names)
-            resid = rh.RoughHestonSPXResiduals(groups, 1.0, n_factors, n_steps)
+            resid = rh.RoughHestonSPXResiduals(
+                groups, w_spx, n_factors, n_steps,
+                vix_tenors=self.vix_ts["tenor_years"].to_numpy(float),
+                vix_market=self.vix_ts["market_price"].to_numpy(float), w_vix=w_vix)
             starts, labels = [], []
             if warm is not None:
                 for H0 in (0.30, 0.10):
@@ -1927,6 +2010,9 @@ class JointCalibrator:
         oos = self._out_of_sample(pricer, tuple(x))
         out = {
             "model": model,
+            "legs": legs,
+            "weights": {"w_spx": float(w_spx), "w_vix": float(w_vix)},
+            "box": {n: [float(a), float(b)] for n, a, b in zip(names, lo, hi)},
             "params": {n: float(v) for n, v in zip(names, x)},
             "loss": float(loss),
             "spx_iv_rmse_exact": float(np.sqrt(np.mean(ins ** 2)) * 100) if len(ins) else None,
@@ -1935,8 +2021,10 @@ class JointCalibrator:
             "spx_oos_put_wing_rmse": oos["spx_oos_put_wing_rmse"],
             "spx_oos_rmse_by_expiry": oos["spx_oos_rmse_by_expiry"],
             "n_spx_oos": oos["n_spx_oos"],
-            "vix_index_rmse_oos": (float(np.sqrt(np.mean(
-                (np.atleast_1d(vix_model) - self.vix_ts["market_price"].to_numpy(float)) ** 2)))
+            # out of sample for legs="spx", in sample for legs="joint"
+            "vix_index_rmse_oos" if legs == "spx" else "vix_index_rmse": (
+                float(np.sqrt(np.mean((np.atleast_1d(vix_model)
+                                       - self.vix_ts["market_price"].to_numpy(float)) ** 2)))
                 if vix_model is not None else None),
             "fit_seconds": float(seconds),
             "n_evals": int(n_evals),

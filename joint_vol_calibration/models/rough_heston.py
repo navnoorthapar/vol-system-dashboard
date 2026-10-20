@@ -427,59 +427,87 @@ class RoughHestonSurfacePricer:
 # ── SPX-only least squares (C23 model comparison) ────────────────────────────
 
 class RoughHestonSPXResiduals:
-    """sqrt(w/n) (model - market) / vega on the calibration anchors under
-    lifted rough Heston, priced on frozen grids (RoughHestonSurfacePricer).
-
-    groups: JointCalibrator._spx_groups() tuples (T, F, D, K, is_put, market,
-    vega). adapt(p) refreshes the grids at p and returns the residuals there
-    (adaptive prices); __call__(p) prices on the current grids.
+    """Residuals of the SPX anchors, optionally with the VIX spot-index leg,
+    under lifted rough Heston, priced on frozen grids
+    (RoughHestonSurfacePricer):
+      SPX  sqrt(w_spx/n) (model - market) / vega          per anchor
+      VIX  sqrt(w_vix/n_vix) (index - market) / 100       per spot index
+    (the joint loss of JointCalibrator with the rough model; w_vix = 0 is the
+    SPX-only problem). groups: JointCalibrator._spx_groups() tuples
+    (T, F, D, K, is_put, market, vega). adapt(p) refreshes the grids at p and
+    returns the residuals there; __call__(p) prices on the current grids.
     """
 
     names = ROUGH_HESTON_PARAM_NAMES
 
     def __init__(self, groups, w_spx: float = 1.0, n_factors: int = ROUGH_HESTON_N_FACTORS,
-                 n_steps: int = ROUGH_HESTON_TIME_STEPS):
+                 n_steps: int = ROUGH_HESTON_TIME_STEPS, vix_tenors=None, vix_market=None,
+                 w_vix: float = 0.0):
         self.groups = [tuple(g) for g in groups]
         self.pricer = RoughHestonSurfacePricer([(g[0], g[1], g[2], g[3]) for g in self.groups],
                                                n_factors=n_factors, n_steps=n_steps)
         n = sum(len(g[3]) for g in self.groups)
         self.c = math.sqrt(w_spx / n)
+        self.n_factors = int(n_factors)
+        self.vix_tenors = np.asarray([] if vix_tenors is None else vix_tenors, dtype=float)
+        self.vix_market = np.asarray([] if vix_market is None else vix_market, dtype=float)
+        self.c_vix = (math.sqrt(w_vix / len(self.vix_tenors))
+                      if (w_vix > 0 and len(self.vix_tenors)) else 0.0)
         self.n_calls = 0
         self.n_adapt = 0
 
-    def _resid(self, calls_list) -> np.ndarray:
+    def _vix(self, p) -> np.ndarray:
+        kappa, theta, sigma, _, v0, H = p
+        idx = rough_heston_vix_term_index(kappa, theta, sigma, v0, H, self.vix_tenors,
+                                          self.n_factors)
+        return self.c_vix * (np.atleast_1d(idx) - self.vix_market) / 100.0
+
+    def _resid(self, calls_list, p) -> np.ndarray:
         parts = []
         for (_, F, D, K, is_put, mkt, vega), calls in zip(self.groups, calls_list):
             model = calls.copy()
             model[is_put] = calls[is_put] - D * (F - K[is_put])
             parts.append(self.c * (model - mkt) / vega)
+        if self.c_vix:
+            parts.append(self._vix(p))
         return np.concatenate(parts)
 
     def adapt(self, p) -> np.ndarray:
         self.n_adapt += 1
-        return self._resid(self.pricer.adapt(np.asarray(p, dtype=float)))
+        p = np.asarray(p, dtype=float)
+        return self._resid(self.pricer.adapt(p), p)
 
     def __call__(self, p) -> np.ndarray:
         self.n_calls += 1
         p = np.asarray(p, dtype=float)
-        r = self._resid(self.pricer.prices(p))
+        r = self._resid(self.pricer.prices(p), p)
         self._last_r = (p.tobytes(), id(self.pricer.grids), r)
         return r
 
     def jac(self, p, lo=None, hi=None) -> np.ndarray:
-        """d r / d p on the frozen grids: theta and v0 columns exact
-        (theta_v0_derivatives), kappa / sigma / rho / H by one-sided
-        differences that stay inside [lo, hi] (the price is smooth in p on a
-        frozen grid, so a 1e-7 relative step is safe)."""
+        """d r / d p on the frozen grids: the SPX theta and v0 columns exact
+        (theta_v0_derivatives), the VIX-index part of those two columns by
+        central differences of the closed-form index (cheap), kappa / sigma /
+        rho / H by one-sided differences of the whole vector that stay inside
+        [lo, hi] (the price is smooth in p on a frozen grid, so a 1e-7
+        relative step is safe)."""
         p = np.asarray(p, dtype=float)
         last = getattr(self, "_last_r", None)
         # least_squares evaluates r(p) right before jac(p): reuse it
         base = (last[2] if last is not None and last[0] == p.tobytes()
                 and last[1] == id(self.pricer.grids) else self(p))
         J = np.empty((len(base), 6))
+        n_spx = sum(len(g[3]) for g in self.groups)
         dtv = self.pricer.theta_v0_derivatives(p)
-        J[:, 1] = np.concatenate([self.c * d[:, 0] / g[6] for d, g in zip(dtv, self.groups)])
-        J[:, 4] = np.concatenate([self.c * d[:, 1] / g[6] for d, g in zip(dtv, self.groups)])
+        J[:n_spx, 1] = np.concatenate([self.c * d[:, 0] / g[6] for d, g in zip(dtv, self.groups)])
+        J[:n_spx, 4] = np.concatenate([self.c * d[:, 1] / g[6] for d, g in zip(dtv, self.groups)])
+        if self.c_vix:
+            for j in (1, 4):
+                h = 1e-6 * abs(p[j])
+                up, dn = p.copy(), p.copy()
+                up[j] += h
+                dn[j] -= h
+                J[n_spx:, j] = (self._vix(up) - self._vix(dn)) / (2 * h)
         for j in (0, 2, 3, 5):
             h = 1e-7 * max(abs(p[j]), 0.1)
             if hi is not None and p[j] + h > hi[j]:

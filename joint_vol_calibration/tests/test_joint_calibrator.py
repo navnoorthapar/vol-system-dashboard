@@ -1060,6 +1060,40 @@ class TestSpxOnlyComparison:
     def test_unknown_model_rejected(self, synth):
         with pytest.raises(ValueError, match="model"):
             synth.calibrate_spx_only("sabr")
+        with pytest.raises(ValueError, match="legs"):
+            synth.calibrate_comparison("heston", legs="vix")
+        with pytest.raises(ValueError, match="box"):
+            synth.calibrate_comparison("rough_heston", box="wide")
+
+    def test_joint_heston_comparison_is_the_production_fit(self, synth):
+        prod = synth.calibrate(n_starts=2, warm_start=dict(_TRUE), verbose=False)
+        cmp_ = synth.calibrate_comparison("heston", legs="joint", n_starts=2, warm=dict(_TRUE))
+        assert cmp_["loss"] == pytest.approx(prod["loss"], rel=1e-9, abs=1e-15)
+        assert cmp_["weights"] == {"w_spx": synth.w1, "w_vix": synth.w2}
+        assert cmp_["vix_index_rmse"] == pytest.approx(prod["leg_losses"]["vix_index_rmse"],
+                                                       rel=1e-6, abs=1e-9)
+        assert cmp_["box"]["sigma"] == list(HESTON_BOUNDS["sigma"])
+        wide = synth.calibrate_comparison("heston", legs="spx", box="wide", n_starts=1,
+                                          warm=dict(_TRUE))
+        assert wide["box"]["sigma"][1] == max(jc.SIGMA_PROFILE_CAPS)
+        assert wide["box"]["kappa"][1] == jc.PROFILE_KAPPA_MAX
+
+    def test_rough_joint_residuals_at_half_are_the_heston_residuals(self, synth):
+        """Cross-model check: with H = 1/2 the rough joint residual vector
+        (anchors + VIX indices, same weights) equals HestonJointResiduals'
+        to the rough engine's time-stepping error."""
+        from joint_vol_calibration.models import rough_heston as rh
+        p = _tvec()
+        heston = synth.residual_model()(p)
+        rough = rh.RoughHestonSPXResiduals(
+            synth._spx_groups(), synth.w1, vix_tenors=synth.vix_ts["tenor_years"].to_numpy(),
+            vix_market=synth.vix_ts["market_price"].to_numpy(), w_vix=synth.w2,
+            n_steps=400).adapt(np.r_[p, 0.5])
+        assert rough.shape == heston.shape
+        n_vix = len(synth.vix_ts)
+        np.testing.assert_allclose(rough[-n_vix:], heston[-n_vix:], rtol=0, atol=1e-12)
+        # SPX residuals are IV-scale (~1e-2 x vol error): agree to ~1e-6 vol
+        np.testing.assert_allclose(rough[:-n_vix], heston[:-n_vix], rtol=0, atol=2e-7)
 
 
 def test_real_session_vvix_check_reads_the_spot_session_close():
