@@ -41,6 +41,10 @@ Rules (the backtest's rules, on listed contracts):
     model mark  with the session's VIX term structure, the backtest's own
                 β·VIX straddle value of the same contract is recorded beside
                 the market mid, so the mark-to-model error accumulates too
+    timing      the signals use the session's 16:00 ET close, so the book they
+                trade on must be quoted after it (the bot's Global Trading
+                Hours capture is); a ``quote_time`` before the close is refused
+                rather than booked at a price that predates the signal
 
 Commissions ($0.65 per contract per leg, the backtest's rate) are recorded
 separately; *_exec P&L is before commission, *_net after.
@@ -353,6 +357,26 @@ def _summary_template() -> Dict:
             "realised_hedge_pnl": 0.0, "n_closed": 0, "n_opened": 0}
 
 
+def quote_after_close(session: str, quote_time) -> Optional[bool]:
+    """True if ``quote_time`` (ISO string or datetime; naive = UTC) is at or
+    after the session's 16:00 ET close; None when no quote time is given.
+    Raises ValueError when it is earlier: the session's signals use that
+    close, so trading them on an earlier book would use a price from before
+    the information."""
+    from datetime import datetime as _dt
+
+    from joint_vol_calibration.data.option_chain import NY_TZ, SESSION_CLOSE_ET, _as_instant
+
+    q = _as_instant(quote_time)
+    if q is None:
+        return None
+    close = _dt.combine(pd.Timestamp(session).date(), SESSION_CLOSE_ET, tzinfo=NY_TZ)
+    if q < close:
+        raise ValueError(f"book quoted at {q.isoformat()} is before the {session} close "
+                         f"({close.isoformat()}) that the session's signals use")
+    return True
+
+
 def step(prev: Optional[Mapping], session: str, raw_chain: pd.DataFrame,
          signals: Mapping[str, Mapping[str, float]], spot: Optional[float] = None,
          r_ref: Optional[float] = None, carry: Optional[pd.DataFrame] = None,
@@ -370,6 +394,7 @@ def step(prev: Optional[Mapping], session: str, raw_chain: pd.DataFrame,
     session = str(pd.Timestamp(session).date())
     if prev is not None and str(prev["session"]) >= session:
         raise ValueError(f"ledger for {session} must follow {prev['session']}")
+    after_close = quote_after_close(session, quote_time)
     book = observed_book(raw_chain)
     settle = {str(k): float(v) for k, v in (settlement_closes or {}).items()}
     open_prev = {p["sleeve"]: p for p in (prev or {}).get("positions", [])}
@@ -446,7 +471,9 @@ def step(prev: Optional[Mapping], session: str, raw_chain: pd.DataFrame,
         "previous": None if prev is None else {"session": str(prev["session"]),
                                                "sha256": ledger_sha256(prev)},
         "inputs": {"chain_sha256": chain_sha256(book), "chain_rows_two_sided": int(len(book)),
-                   "quote_time": quote_time, "t_origin": None if t_origin is None else str(t_origin),
+                   "quote_time": None if quote_time is None else str(quote_time),
+                   "quote_after_close": after_close,
+                   "t_origin": None if t_origin is None else str(t_origin),
                    "spot": spot, "r_ref": r_ref,
                    "beta": None if vix_row is None else (beta if beta is not None else _default_beta())},
         "signals": {s: {"position": int(np.sign(float(signals.get(s, {}).get("position", 0)))),
@@ -641,12 +668,20 @@ def signals_for_session(session: str, start_date: Optional[str] = None) -> Dict[
             for s in SLEEVES}
 
 
-def _session_inputs(session: str) -> Dict[str, Any]:
-    """SPX closes up to ``session`` (for settlement) and its VIX row, from the DB."""
+def _session_inputs(session: str, earliest: Optional[str] = None) -> Dict[str, Any]:
+    """SPX closes up to ``session`` (for settlement) and its VIX row, from the DB.
+
+    The closes start 120 days before ``session`` or at ``earliest`` (the
+    oldest expiry still open in the previous ledger) if that is older, so a
+    straddle whose expiry fell in a run of sessions without a captured book
+    still settles on its own expiry close.
+    """
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
 
-    spx = get_spx_ohlcv(as_of_date=session, start_date=str((pd.Timestamp(session)
-                                                            - pd.Timedelta(days=120)).date()))
+    start = pd.Timestamp(session) - pd.Timedelta(days=120)
+    if earliest is not None:
+        start = min(start, pd.Timestamp(earliest))
+    spx = get_spx_ohlcv(as_of_date=session, start_date=str(start.date()))
     closes = {str(pd.Timestamp(d).date()): float(c) for d, c in zip(spx["date"], spx["close"])}
     vw = get_vix_term_structure_wide(as_of_date=session, start_date=session)
     vix_row = None
@@ -671,7 +706,8 @@ def record_session(session: str, raw_chain: pd.DataFrame, clean=None, spot: Opti
     session = str(pd.Timestamp(session).date())
     prev = latest_ledger(directory, before=session)
     sig = signals if signals is not None else signals_for_session(session)
-    inp = _session_inputs(session)
+    open_expiries = [p["contract"]["expiry"] for p in (prev or {}).get("positions", [])]
+    inp = _session_inputs(session, min(open_expiries) if open_expiries else None)
     carry, t0 = None, None
     if clean is not None and getattr(clean, "ok", False):
         carry = clean.carry

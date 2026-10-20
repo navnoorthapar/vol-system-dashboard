@@ -233,3 +233,45 @@ def test_record_session_writes_a_chained_file(tmp_path):
     held = {x["sleeve"]: x for x in b["positions"]}["s1"]
     assert held["mark"]["model_sigma"] > 0                  # the DB's 03-27 VIX row was used
     assert b["inputs"]["beta"] == pytest.approx(0.82)
+
+
+def test_record_session_settles_after_a_long_gap_in_captures(tmp_path):
+    """Positions opened on 03-24 expire in April; the next ledger is on
+    2026-10-16, more than 120 days after those expiries. Each still settles on
+    its own expiry's official close from the DB (not left awaiting a close
+    outside the default look-back window)."""
+    from joint_vol_calibration.data.database import get_spx_ohlcv
+
+    flat = {s: {"position": 0, "kelly": 0.0} for s in fl.SLEEVES}
+    p1 = fl.record_session(SESSIONS[0], _chain(SESSIONS[0]), spot=SPOT[SESSIONS[0]], r_ref=RATE[SESSIONS[0]],
+                           directory=tmp_path, signals=SIG_A)
+    first = fl.load_ledger(p1)
+    late = "2026-10-16"
+    assert all((pd.Timestamp(late) - pd.Timestamp(p["contract"]["expiry"])).days > 120 for p in first["positions"])
+    # the chain is only the hash input here: every sleeve is flat, nothing opens
+    p2 = fl.record_session(late, _chain(SESSIONS[2]), directory=tmp_path, signals=flat)
+    second = fl.load_ledger(p2)
+    spx = get_spx_ohlcv(as_of_date=late, start_date="2026-04-01")
+    close = dict(zip(spx["date"].astype(str), spx["close"].astype(float)))
+    settled = {c["sleeve"]: c for c in second["closed"]}
+    assert set(settled) == {p["sleeve"] for p in first["positions"]} and not second["positions"]
+    for c in settled.values():
+        assert c["closed"]["how"] == "settle"
+        assert c["mark"]["settle_close"] == pytest.approx(close[c["contract"]["expiry"]])
+    assert fl.verify_chain([first, second]) == []
+
+
+def test_a_book_quoted_before_the_signal_close_is_refused():
+    """The session's signals use its 16:00 ET close: a book quoted earlier
+    that day cannot be the one they trade on; a GTH book after it can."""
+    ch = _chain(SESSIONS[0])
+    with pytest.raises(ValueError, match="before the 2026-03-24 close"):
+        fl.step(None, SESSIONS[0], ch, SIG_A, quote_time="2026-03-24T19:30:00Z")      # 15:30 ET
+    ok = fl.step(None, SESSIONS[0], ch, SIG_A, quote_time="2026-03-25T02:30:00Z")     # 22:30 ET
+    assert ok["inputs"]["quote_after_close"] is True
+    assert ok["inputs"]["quote_time"] == "2026-03-25T02:30:00Z"
+    assert fl.step(None, SESSIONS[0], ch, SIG_A)["inputs"]["quote_after_close"] is None
+    # exactly at the close is allowed (EDT: 16:00 ET = 20:00 UTC on 2026-03-24)
+    assert fl.quote_after_close(SESSIONS[0], "2026-03-24T20:00:00Z") is True
+    with pytest.raises(ValueError):
+        fl.quote_after_close(SESSIONS[0], "2026-03-24T19:59:59Z")
