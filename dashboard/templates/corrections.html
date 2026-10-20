@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block og_title %}Corrections C16–C22 — SPX/VIX Vol Research{% endblock %}
+{% block og_description %}Every correction round as a postmortem: symptom, root cause, detection, fix, the regression tests that pin it, the commit and its effect on the published result, with the C22 waterfall.{% endblock %}
+
+{% block content %}
+{% set p4 = d.p4 or {} %}{% set k = p4.kpi or {} %}{% set b = p4.bridge or {} %}{% set ev = b.get('evidence') or {} %}
+{% set s3 = (p4.sleeves or {}).get('s3') or {} %}{% set s3f = b.get('s3_flip') %}
+{% set beta_txt = ('β = ' ~ (p4.beta|fmt('.2f'))) if p4.beta is not none else 'β (not recorded)' %}
+{% set be = p4.beta_est %}
+{% if be %}{% set _later = be.later[0] if be.later else none %}
+{% set beta_src_txt = beta_txt ~ ' = mean of ' ~ be.n_db ~ ' DB chain' ~ ('s' if be.n_db != 1 else '') ~ ' and ' ~ be.n_live ~ ' live capture' ~ ('s' if be.n_live != 1 else '') ~ ' (' ~ (be.lo|fmt('.2f')) ~ '–' ~ (be.hi|fmt('.2f')) ~ ')' %}
+{% set beta_check_txt = ('the first later chain, ' ~ _later.session ~ ', gives ' ~ (_later.ratio|fmt('.2f')) ~ ' — the mean over all ' ~ be.n_all ~ ' chains, ' ~ (be.mean_all|fmt('.2f')) ~ (', is a row of the β grid' if be.mean_all_in_grid else ', is not in the β grid')) if _later else 'no later chain is stored yet' %}
+{% else %}{% set beta_src_txt = beta_txt %}{% set beta_check_txt = 'the estimation chains are not available' %}{% endif %}
+{% set _p = k.get('s3_null_p') %}
+{% set s3_base_txt = 'S3 at base (pass-1) size' ~ ((' (' ~ (k.s3_null_real|usd(true)) ~ ')') if k.get('s3_null_real') is not none else '') ~ ', before the sizing overlay' %}
+{% set s3_beta_txt = ('positive for β ≥ ' ~ (s3f.hi|fmt('.2f')) ~ ' in the sensitivity grid, negative at ' ~ (s3f.lo|fmt('.2f'))) if (s3f and s3f.positive_above) else 'its sign depends on β (see the sensitivity grid)' %}
+{% set _sh = p4.r2_share or {} %}{% set _pc = p4.pre_c22_spread %}
+{% set r2_txt = (((_sh.fixed * 100)|fmt('.0f')) ~ '% vs ' ~ ((_sh.adaptive * 100)|fmt('.0f')) ~ '% of the backtest sessions in R2') if (_sh.get('fixed') is not none and _sh.get('adaptive') is not none) else 'R2 shares not available' %}
+{% set evidence = {
+  'beta': beta_src_txt ~ '; ' ~ beta_check_txt ~ '. ' ~ ev.get('beta', 'C22 bridge unavailable'),
+  'r2_gate': 'The backtest traded the fixed gate while the labels used the adaptive one (' ~ r2_txt ~ '). ' ~ ev.get('r2_gate', 'C22 bridge unavailable'),
+  'costs': ev.get('costs', 'C22 bridge unavailable'),
+  's3': 'S3 +$23K (z-units, as published in C21) → ' ~ (s3.get('total_pnl')|usd_k) ~ ' (index leg); timing null test on ' ~ s3_base_txt ~ ': p = ' ~ (_p|fmt('.3f')) ~ '; ' ~ s3_beta_txt,
+  'pdv_h21': (('the pre-C22 σ̂ (a 1-day E|r| forecast) averaged ' ~ (_pc.ratio|fmt('.2f')) ~ '× the realised RMS vol of the next ' ~ _pc.horizon ~ ' sessions in the backtest window, so “VIX > σ̂ + ' ~ (_pc.threshold_vp|fmt('.0f')) ~ ' vol pts” held on ' ~ ((_pc.share * 100)|fmt('.0f')) ~ '% of its ' ~ ("{:,}".format(_pc.n)) ~ ' sessions. ') if _pc else '') ~ ev.get('pdv_h21', 'C22 bridge unavailable'),
+  'sharpe': ev.get('sharpe', 'C22 bridge unavailable'),
+  'clf': '63.4% vs 90.0% — the ML added negative value' ~ ((' (the C22 retrain on the adaptive gate: ' ~ ((p4.clf_eval.oos_acc * 100)|fmt('.1f')) ~ '% vs ' ~ ((p4.clf_eval.persistence_acc * 100)|fmt('.1f')) ~ '%; still below the baseline)') if p4.clf_eval else ''),
+} %}
+{% set all_f = [] %}{% for r in d.rounds %}{% for f in r.findings %}{% set _ = all_f.append(f) %}{% endfor %}{% endfor %}
+{% set n_fixed = all_f|selectattr('status', 'equalto', 'fixed')|list|length %}
+{% set n_quant = all_f|selectattr('status', 'equalto', 'quantified')|list|length %}
+<div class="page-head">
+  <h1 class="page-title" id="audit-title">{{ d.rounds[0].id if d.rounds else 'C16' }}–{{ d.rounds[-1].id if d.rounds else 'C22' }} corrections — {{ all_f|length }} findings, {{ n_fixed }} fixed, {{ n_quant }} quantified</h1>
+  <p class="page-sub">Each round as a blameless postmortem: what was wrong, why, how it was found, the fix, the tests that now pin it and what it did to the published result. Every successive fix made the backtest worse; the original edge was a stack of artifacts.</p>
+  <div class="page-badge"><span class="nowrap">{{ d.n_tests }} regression tests cited</span><span class="sep">·</span><span class="nowrap">{{ d.rounds|map(attribute='commit_links')|map('length')|sum }} commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span></div>
+</div>
+
+<div class="g">
+  {% call m.panel('waterfall', 'C22 waterfall · portfolio P&L, one correction at a time', 's8', '$000s') %}
+    {% if d.charts.waterfall %}{{ m.chart(d.charts.waterfall, 'h400') }}{% endif %}
+    {% set _rb = (b.rows or {}).get('beta') %}{% set _rg = (b.rows or {}).get('r2_gate') %}
+    <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative).{% if _rb and _rb.prev %} The β step moves it by {{ _rb.d_pnl|usd_k }} (S1C {{ _rb.prev.s1c_pnl|usd_k }} → {{ _rb.s1c_pnl|usd_k }}, S1 {{ _rb.prev.s1_pnl|usd_k }} → {{ _rb.s1_pnl|usd_k }}){% endif %}{% if _rg %}; the single R2 gate by {{ _rg.d_pnl|usd_k }}{% endif %}.</p>
+  {% endcall %}
+  {% call m.panel('headline', 'Published result after each round', 's4') %}
+    {% if d.charts.headline %}{{ m.chart(d.charts.headline, 'h300') }}{% endif %}
+    <p class="note">C16 published no portfolio figure; C19 and C20 left it unchanged.</p>
+  {% endcall %}
+</div>
+
+<h2 class="section-title">Postmortems</h2>
+<div class="timeline" id="audit-table">
+  {% for r in d.rounds %}
+  <article class="pm sev-{{ r.severity }}" id="{{ r.id|lower }}" data-round="{{ r.id }}" aria-labelledby="{{ r.id|lower }}-t">
+    <div class="pm-head">
+      <span class="pm-id">{{ r.id }}</span>
+      <h3 class="pm-title" id="{{ r.id|lower }}-t">{{ r.title|sym }}</h3>
+      {{ m.chip(r.severity ~ ' severity', 'breach' if r.severity == 'high' else ('watch' if r.severity == 'medium' else 'ok')) }}
+      <span class="pm-date">{{ r.date }}</span>
+    </div>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">{{ r.detection }}</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">{{ r.components|join(', ') }} · {% for c in r.commit_links %}<a href="{{ c.url }}"><code>{{ c.short }}</code></a>{{ ', ' if not loop.last else '' }}{% endfor %}</div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">{% if r.effect %}{{ r.effect }}{% elif r.effect_from_bridge and d.c21_pnl is not none %}Portfolio P&amp;L {{ d.c21_pnl|usd(true) }} (C21 as published) → {{ p4.total_pnl|usd(true) }} (final NAV {{ p4.final_nav|usd }}), Sharpe {{ k.get('sharpe')|fmt('.2f') }} after the bridge's {{ (b.rows or {})|length }} steps; the waterfall above shows each step{% else %}—{% endif %}</div></div>
+    </div>
+    {% for f in r.findings %}
+    <div class="pm-cell" data-status="{{ f.status }}" style="border-right:none;">
+      <div class="pm-k">Finding {{ loop.index }} · {{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}</div>
+      <div class="pm-v"><strong>{{ f.flaw|sym }}</strong></div>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>{{ f.root_cause }}</dd>
+        <dt>Fix</dt><dd>{{ f.fix }}</dd>
+        <dt>Evidence</dt><dd>{{ evidence[f.evidence_key] if f.evidence_key else f.evidence }}</dd>
+        {% if f.d_pnl is not none and f.bridge_rows %}<dt>C22 bridge</dt><dd class="src">row{{ 's' if f.bridge_rows|length > 1 else '' }} {{ f.bridge_rows|join(', ') }} · portfolio P&amp;L {% if f.d_pnl|abs < 500 %}unchanged{% else %}{{ f.d_pnl|usd_k }}{% endif %} · Sharpe {{ f.sharpe_from|fmt('.2f') }} → {{ f.sharpe_to|fmt('.2f') }}</dd>{% endif %}
+        <dt>Pinned by</dt><dd>{% if f.tests %}{% for t in f.tests %}<code>{{ t.split('::')[-2:]|join('::') }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}{% else %}no dedicated regression test (a gap){% endif %}</dd>
+      </dl>
+    </div>
+    {% endfor %}
+  </article>
+  {% endfor %}
+</div>
+{% endblock %}

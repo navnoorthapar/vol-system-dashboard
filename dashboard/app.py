@@ -1,11 +1,17 @@
 """
 dashboard/app.py — Joint SPX/VIX Volatility System — display layer.
 
-Renders the four dashboard pages from the artifacts under data_store/. It is a
+Renders the dashboard pages from the artifacts under data_store/. It is a
 pure READ path: rendering a page never downloads data, never writes a file and
 never retrains or re-labels anything. The daily data refresh, the regime-label
 extension and the Heston recalibration belong to scripts/cloud_refresh.py; the
 static site is produced by dashboard/freeze_site.py.
+
+Pages (ROUTES): Overview, Surface, Calibration, Risk, Research, Corrections and
+Model Risk. Every chart is a JSON spec rendered by static/desk.js (Apache
+ECharts, vendored with SRI) with a server-rendered data table behind it; all
+page JavaScript lives in static files, so the pages carry a strict
+Content-Security-Policy (script-src 'self').
 
 (An earlier version started "startup" and "every 4 hours" refresh threads from
 ``__main__``. They downloaded market data into the tracked SQLite DB and then
@@ -15,7 +21,10 @@ local DB was more than three days old, i.e. on every fresh clone.)
 
 Every loader reports failures in ``d["errors"]``; the templates render them as a
 visible error banner instead of zeros, and freeze_site.py refuses to publish a
-page that carries one.
+page that carries one. Artifacts that a later chain of work produces (the
+quote-grade surface, inference, scenario grids; dashboard/ARTIFACTS.md) render
+an explicit "not yet generated" panel while absent, and a loader error if they
+exist but break their contract.
 
 Run a local preview (read-only, bound to 127.0.0.1):
     python dashboard/app.py
@@ -23,15 +32,19 @@ Run a local preview (read-only, bound to 127.0.0.1):
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import logging
 import math
+import os
 import pickle
 import re
 import sqlite3
+import subprocess
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -53,8 +66,42 @@ _logger = logging.getLogger("vol_dashboard")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
+DASH = Path(__file__).resolve().parent
 DATA = ROOT / "data_store"
 sys.path.insert(0, str(ROOT))
+if str(DASH) not in sys.path:
+    sys.path.insert(0, str(DASH))
+
+import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
+import desk_charts as charts  # noqa: E402
+from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
+    _HEAT_NEG,
+    _HEAT_NEUTRAL,
+    _HEAT_POS,
+    BERLIN_11,
+    CIVIDIS_11,
+    MINUS,
+    _fmt,
+    _num,
+    _pct_prose,
+    _relative_luminance,
+    _text_colour_on,
+    _usd,
+    _usd_k,
+    _vomma_color,
+    cell,
+    contrast_ratio,
+    div_colour,
+    ordinal,
+    plural,
+    pnl,
+    prose,
+    round_sig,
+    seq_colour,
+    signed,
+    sparkline,
+    tone,
+)
 
 app = Flask(
     __name__,
@@ -65,14 +112,32 @@ app = Flask(
 # ── Site map ───────────────────────────────────────────────────────────────────
 SITE_URL = "https://navnoorbawa.me/"
 
-# route -> (frozen file name, nav id). freeze_site.py imports this map so the
-# frozen file names, the canonical URLs and the sitemap can never drift apart.
+# route -> frozen file name. freeze_site.py imports this map so the frozen file
+# names, the canonical URLs and the sitemap can never drift apart.
 ROUTES: dict[str, str] = {
     "/":            "index.html",
+    "/surface":     "surface.html",
     "/calibration": "calibration.html",
-    "/greeks":      "greeks.html",
-    "/backtest":    "backtest.html",
+    "/risk":        "risk.html",
+    "/research":    "research.html",
+    "/corrections": "corrections.html",
+    "/model-risk":  "model-risk.html",
 }
+
+# The navigation: (route, label, g-shortcut key, one-line description).
+NAV: list[tuple[str, str, str, str]] = [
+    ("/", "Overview", "o", "What the system is, its live state, three key results and data freshness."),
+    ("/surface", "Surface", "s", "The SPX implied-vol surface: market quotes, model overlays and residuals in half-spreads."),
+    ("/calibration", "Calibration", "c", "The headline joint SPX/VIX Heston fit: parameters, bounds, out-of-sample error, identifiability."),
+    ("/risk", "Risk", "r", "Greeks of the headline surface, scenario grid and the daily P&L explain of a hedged straddle."),
+    ("/research", "Research", "e", "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
+    ("/corrections", "Corrections", "x", "Correction rounds C16–C22 as postmortems, each tied to commits and regression tests."),
+    ("/model-risk", "Model Risk", "m", "Model inventory and monitoring checks with explicit thresholds."),
+]
+
+# Old page URLs (shared on social links) keep working: freeze_site.py writes a
+# small redirect page at each old file name.
+LEGACY_REDIRECTS: dict[str, str] = {"greeks.html": "risk.html", "backtest.html": "research.html"}
 
 
 def canonical_url(route: str) -> str:
@@ -87,7 +152,7 @@ STALE_ERROR_SESSIONS = 5    # red banner from this age on
 
 # Regime presentation (index = rule label 0/1/2)
 _REGIME_NAMES = ["LONG GAMMA", "SHORT GAMMA", "VOMMA ACTIVE"]
-_REGIME_COLORS = ["#7fadf7", "#5cc8a0", "#f0787c"]   # --blue / --accent / --red
+_REGIME_COLORS = ["#56b4e9", "#009e73", "#e69f00"]   # --cat-0 / --cat-2 / --cat-1 (categorical, not status)
 _REGIME_LABELS = ["R0", "R1", "R2"]
 
 # The backtest portfolio is the equal-weight mean of these sleeves
@@ -135,7 +200,7 @@ def nyse_holidays(start: str = "2010-01-01", end: str = "2030-12-31") -> pd.Date
     return out[out.dayofweek < 5]   # a Saturday New Year's Day closes nothing
 
 
-def session_age(date: Optional[str], ref: Optional[str]) -> Optional[int]:
+def session_age(date: str | None, ref: str | None) -> int | None:
     """Number of NYSE sessions in (date, ref]: 0 when date is the ref session.
 
     Returns None when either date is unknown. A date after ref (possible when
@@ -154,7 +219,7 @@ def session_age(date: Optional[str], ref: Optional[str]) -> Optional[int]:
     ))
 
 
-def stale_level(age: Optional[int]) -> str:
+def stale_level(age: int | None) -> str:
     """'ok' / 'warn' / 'error' for an age in sessions ('unknown' if None)."""
     if age is None:
         return "unknown"
@@ -165,7 +230,7 @@ def stale_level(age: Optional[int]) -> str:
     return "ok"
 
 
-def _staleness(component: str, label: str, date: Optional[str], ref: Optional[str]) -> dict:
+def _staleness(component: str, label: str, date: str | None, ref: str | None) -> dict:
     age = session_age(date, ref)
     return {"component": component, "label": label, "date": date,
             "ref": ref, "age": age, "level": stale_level(age)}
@@ -189,7 +254,7 @@ def _record_error(d: dict, component: str, exc: Any) -> None:
     _logger.warning("[%s] loader error: %s", component, msg)
 
 
-def _date_str(x: Any) -> Optional[str]:
+def _date_str(x: Any) -> str | None:
     if x is None:
         return None
     if isinstance(x, (pd.Timestamp, np.datetime64)):
@@ -222,111 +287,47 @@ def _clean(obj: Any) -> Any:
     return obj
 
 
-def _num(x: Any) -> Optional[float]:
-    """float(x) if x is a finite number, else None."""
-    try:
-        f = float(x)
-    except Exception:          # TypeError/ValueError, or a Jinja Undefined
-        return None
-    return f if math.isfinite(f) else None
-
-
-def ordinal(n: Any) -> str:
-    """1 -> '1st', 2 -> '2nd', 11 -> '11th', 75 -> '75th' (rounded to an integer)."""
-    if _num(n) is None:
-        return "—"
-    k = int(round(float(n)))
-    suffix = "th" if 10 <= k % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(k % 10, "th")
-    return f"{k}{suffix}"
-
-
-MINUS = "\u2212"   # '−': numbers are printed with a true minus sign, not a hyphen
-
-
-def _fmt(value: Any, spec: str = "", default: str = "—") -> str:
-    """Jinja filter: format a number, or render `default` when it is missing."""
-    if value is None:
-        return default
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if not math.isfinite(float(value)):
-            return default
-        return format(value, spec).replace("-", MINUS)   # typographic minus sign
-    return str(value)
-
-
-def _usd_k(value: Any, signed: bool = True) -> str:
-    """Prose dollars in thousands: 693938 -> '+$694K', -599995 -> '−$600K'."""
-    x = _num(value)
-    if x is None:
-        return "—"
-    sign = "−" if x < 0 else ("+" if signed else "")
-    if abs(x) >= 999_500:
-        return f"{sign}${abs(x) / 1e6:,.1f}M"
-    return f"{sign}${abs(x) / 1000:,.0f}K"
-
-
-def _usd(value: Any, signed: bool = False) -> str:
-    """Whole dollars with a true minus sign: -1039.2 -> '−$1,039'."""
-    x = _num(value)
-    if x is None:
-        return "—"
-    sign = "−" if x < 0 else ("+" if signed and x > 0 else "")
-    return f"{sign}${abs(x):,.0f}"
-
-
-def _pct_prose(value: Any, digits: int = 1, signed: bool = True) -> str:
-    """Prose percent of a decimal: -0.2612 -> '−26.1%'."""
-    x = _num(value)
-    if x is None:
-        return "—"
-    sign = "−" if x < 0 else ("+" if signed and x > 0 else "")
-    return f"{sign}{abs(x) * 100:.{digits}f}%"
-
-
+# Number formatting, contrast and colour scales live in desk_format.py (imported
+# above); these filters are what the templates use.
 app.jinja_env.filters["fmt"] = _fmt
 app.jinja_env.filters["ordinal"] = ordinal
 app.jinja_env.filters["usd_k"] = _usd_k
 app.jinja_env.filters["usd"] = _usd
 app.jinja_env.filters["pct"] = _pct_prose
+app.jinja_env.filters["signed"] = signed
+app.jinja_env.filters["pnl"] = pnl
+app.jinja_env.filters["tone"] = tone
+app.jinja_env.filters["plural"] = plural
+app.jinja_env.filters["prose"] = prose
 
 
-def _relative_luminance(hex_colour: str) -> float:
-    """WCAG 2.x relative luminance of '#rrggbb'."""
-    h = hex_colour.lstrip("#")
-    def lin(c: int) -> float:
-        c = c / 255.0
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+def with_unit(text: Any, unit: str) -> str:
+    """Append a unit to a formatted number, but never to the missing-value dash
+    ("—", not "—%")."""
+    text = "" if text is None else str(text)
+    return text if text in ("", "—") else f"{text}{unit}"
 
 
-def contrast_ratio(fg: str, bg: str) -> float:
-    """WCAG 2.x contrast ratio between two opaque '#rrggbb' colours (1..21)."""
-    hi, lo = sorted((_relative_luminance(fg), _relative_luminance(bg)), reverse=True)
-    return (hi + 0.05) / (lo + 0.05)
+app.jinja_env.filters["u"] = with_unit
 
 
-def _text_colour_on(bg: str) -> str:
-    """Black or white, whichever contrasts more with `bg` (always >= 4.58:1)."""
-    return "#000000" if contrast_ratio("#000000", bg) >= contrast_ratio("#ffffff", bg) else "#ffffff"
+_GREEK = re.compile(r"([\u0370-\u03ff\u1f00-\u1fff]+)")
 
 
-# Diverging heatmap ramp: blue for z < 0, orange for z > 0 (distinguishable
-# under red-green colour blindness). Red is NOT used as a fill: an unstable
-# node (|z| > 2) gets the end colour of its side plus a red outline and a text
-# marker in the cell, so the flag does not depend on colour alone.
-_HEAT_NEUTRAL = (0x1c, 0x20, 0x26)
-_HEAT_NEG = (0x33, 0x62, 0xb5)
-_HEAT_POS = (0xbd, 0x6e, 0x2a)
+def sym(text: Any) -> Any:
+    """Wrap Greek letters in <span class="sym"> so an upper-cased heading keeps them.
+
+    CSS text-transform: uppercase turns β into Β (read as a B) and σ into Σ;
+    the .sym class switches the transform off for those characters only.
+    """
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    return Markup(_GREEK.sub(lambda m: f'<span class="sym">{m.group(1)}</span>', str(escape(text))))
 
 
-def _vomma_color(z: Optional[float]) -> str:
-    """Map a vomma z-score to a CSS background colour for the heatmap."""
-    if z is None or (isinstance(z, float) and np.isnan(z)):
-        return "#1c2026"
-    end = _HEAT_POS if z > 0 else _HEAT_NEG
-    t = min(abs(z) / 2.0, 1.0)
-    return "#" + "".join(f"{round(a + (b - a) * t):02x}" for a, b in zip(_HEAT_NEUTRAL, end))
+app.jinja_env.filters["sym"] = sym
 
 
 # ── Market data readers (DB) ───────────────────────────────────────────────────
@@ -363,7 +364,7 @@ def _read_vix_wide() -> pd.DataFrame:
     return wide.sort_index()
 
 
-def _latest_market_session() -> Optional[str]:
+def _latest_market_session() -> str | None:
     """Newest session any dashboard input knows about (DB close or rule label).
 
     The reference date for every staleness age: an input is 'n sessions old'
@@ -387,7 +388,7 @@ def _latest_market_session() -> Optional[str]:
 
 
 # ── Calibration selection ──────────────────────────────────────────────────────
-def _calibration_session(cal: dict, path: str | Path) -> Optional[str]:
+def _calibration_session(cal: dict, path: str | Path) -> str | None:
     """The market session a calibration describes (spot_date > as_of_date > file name)."""
     for key in ("spot_date", "as_of_date"):
         s = _date_str(cal.get(key))
@@ -417,7 +418,7 @@ def calibration_gate(cal: dict) -> tuple[bool, str]:
     return bool(ok), str(reason)
 
 
-def calibration_is_legacy(cal: dict) -> Optional[bool]:
+def calibration_is_legacy(cal: dict) -> bool | None:
     """joint_calibrator.calibration_is_legacy(cal) when the library provides it.
 
     Returns None (unknown) on library versions without the helper.
@@ -455,7 +456,7 @@ def scan_calibrations(cal_dir: str | Path | None = None) -> list[dict]:
     return rows
 
 
-def latest_good_calibration_path(cal_dir: str | Path | None = None) -> Optional[str]:
+def latest_good_calibration_path(cal_dir: str | Path | None = None) -> str | None:
     """Return the NEWEST model_version 2 joint_cal_*.pkl that passes the gate, or None.
 
     Selection is by market session (spot_date, else as_of_date, else the date
@@ -557,7 +558,7 @@ def pdv_features(pdv: Any, log_returns: pd.Series) -> pd.DataFrame:
     )
 
 
-def spread_percentile(history: pd.Series, current: float) -> tuple[Optional[float], int]:
+def spread_percentile(history: pd.Series, current: float) -> tuple[float | None, int]:
     """(percent of the history strictly below `current`, number of valid points).
 
     NaN history rows are dropped before ranking. Counting them in the
@@ -574,7 +575,7 @@ def spread_percentile(history: pd.Series, current: float) -> tuple[Optional[floa
 PDV_MIN_HISTORY = 252   # fewer valid history points -> no percentile is shown
 
 
-def percentile_rank(pct: Any) -> Optional[dict]:
+def percentile_rank(pct: Any) -> dict | None:
     """Wording for a percentile = percent of prior sessions strictly below today.
 
     100 (above every prior session) and 0 (none below) printed as numbers read
@@ -598,7 +599,7 @@ def percentile_rank(pct: Any) -> Optional[dict]:
 
 
 def pdv_stress_forecast(pdv: Any, log_returns: pd.Series,
-                        stress_date: str = "2020-03-16") -> Optional[dict]:
+                        stress_date: str = "2020-03-16") -> dict | None:
     """Ex-ante PDV-linear forecast of |r| on `stress_date`, made at the prior close.
 
     Out of sample: the OLS is refitted on the rows whose labels were already
@@ -667,7 +668,7 @@ def pdv_walk_forward_series(pdv: Any, spx: pd.DataFrame) -> pd.Series:
 
 
 def pdv_walk_forward_skill(pdv: Any, log_returns: pd.Series, pred: pd.Series,
-                           exclude_year: int = 2020) -> Optional[dict]:
+                           exclude_year: int = 2020) -> dict | None:
     """Walk-forward R² of `pred` (pdv_walk_forward_series) on the model's own target.
 
     R² is taken against the realised target over the rows whose label is
@@ -716,16 +717,16 @@ def load_page1() -> dict[str, Any]:
               "clf_oos_acc", "clf_persistence_acc", "clf_n_test", "clf_test_window",
               "clf_feature_source", "clf_n_features", "pdv_skill", "rule", "latest_session"):
         d[k] = None
-    d.update(regime_name="UNAVAILABLE", regime_color="#666", regime_label="—",
-             clf_color="#666")
-    d.update(ts_tenors=[], ts_values=[], ts_regime="N/A", ts_regime_color="#666",
+    d.update(regime_name="UNAVAILABLE", regime_color="#9aa3b0", regime_label="—",
+             clf_color="#9aa3b0")
+    d.update(ts_tenors=[], ts_values=[], ts_regime="N/A",
              pdv_sparkline=[], pdv_sparkline_dates=[], pdv_stale=False,
              clf_available=False, stale=[])
 
     # ── Market snapshot (DB) ─────────────────────────────────────────────────
-    spx_df: Optional[pd.DataFrame] = None
-    vix_daily: Optional[pd.Series] = None
-    vix_wide: Optional[pd.DataFrame] = None
+    spx_df: pd.DataFrame | None = None
+    vix_daily: pd.Series | None = None
+    vix_wide: pd.DataFrame | None = None
     try:
         spx_df = _read_spx()
         if len(spx_df) < 2:
@@ -765,7 +766,6 @@ def load_page1() -> dict[str, Any]:
             d["ts_tenors"] = [f"{t}d" for t, _ in pts]
             d["ts_values"] = [round(v, 2) for _, v in pts]
             d["ts_regime"] = "CONTANGO" if pts[-1][1] > pts[0][1] else "BACKWARDATION"
-            d["ts_regime_color"] = "#00ff88" if d["ts_regime"] == "CONTANGO" else "#ff3333"
     except Exception as e:
         _record_error(d, "market data (vol_system.db)", e)
         spx_df = vix_daily = vix_wide = None
@@ -773,6 +773,7 @@ def load_page1() -> dict[str, Any]:
     # ── Rule regime + frequencies (regime_labels.parquet only) ───────────────
     # The headline is the deterministic RULE label. It is never replaced by the
     # research classifier's output, whatever fails.
+    reg_series: pd.Series | None = None
     try:
         rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
         reg_series = rl["regime"].dropna().astype(int)
@@ -816,15 +817,20 @@ def load_page1() -> dict[str, Any]:
                         "rv20": _num(last.get("rv_20d")), "vix": _num(last.get("vix")),
                         "vvix": _num(vv), "gate": _num(last.get("vvix_gate")),
                         "stored": None}
-                if d["regime_date"] == rule["date"]:
-                    rule["stored"] = d["regime"]
+                # The stored label OF THE INPUTS' SESSION. The headline label can be
+                # newer than the market DB (the bot labels the session before the DB
+                # copy is refreshed); the card then showed the newest label beside
+                # an older session's inputs as if they had produced it.
+                if reg_series is not None and pd.Timestamp(t) in reg_series.index:
+                    rule["stored"] = int(reg_series.loc[pd.Timestamp(t)])
+                rule["headline_differs"] = d["regime_date"] is not None and d["regime_date"] != rule["date"]
                 d["rule"] = rule
     except Exception as e:
         _record_error(d, "rule inputs (build_rule_label_frame)", e)
 
     # ── PDV forecast vs VIX, with a like-for-like history ────────────────────
     pdv = None
-    pdv_vol: Optional[pd.Series] = None
+    pdv_vol: pd.Series | None = None
     try:
         with open(DATA / "pdv_model.pkl", "rb") as f:
             pdv = pickle.load(f)
@@ -971,11 +977,18 @@ def load_page1() -> dict[str, Any]:
 
 
 # ── PAGE 2 DATA: Calibration Results ─────────────────────────────────────────
-def _optimizer_settings(cal: dict) -> Optional[str]:
+def _optimizer_settings(cal: dict) -> str | None:
     """The optimiser settings the result records (methods.optimizer on
     model_version 2 results), or None when it records none."""
     opt = ((cal.get("methods") or {}).get("optimizer") or cal.get("optimizer")
            or cal.get("de_config") or {})
+    if isinstance(opt, dict) and str(opt.get("method", "")).startswith("trf"):
+        n = opt.get("n_sobol_starts") or opt.get("n_starts")
+        text = "Trust-region least squares" + (f", {int(n)} Sobol starts" if n else "")
+        ms = cal.get("multistart") or {}
+        if ms.get("n_starts_at_best") is not None and ms.get("n_starts"):
+            text += f" ({int(ms['n_starts_at_best'])} of {int(ms['n_starts'])} in the best basin)"
+        return text
     maxiter = opt.get("maxiter", cal.get("de_maxiter"))
     popsize = opt.get("popsize", cal.get("de_popsize"))
     if maxiter is None or popsize is None:
@@ -993,8 +1006,9 @@ def _optimizer_settings(cal: dict) -> Optional[str]:
 
 
 def load_page2() -> dict[str, Any]:
-    d: dict[str, Any] = {"errors": [], "stale": [], "mat_smiles": [], "anchors": [],
-                         "quintic": None}
+    d: dict[str, Any] = {"errors": [], "stale": [], "mat_smiles": [], "quintic": None,
+                         "param_tiles": [], "history": [], "smiles": [], "charts": {},
+                         "ident": None, "oos_rows": [], "vix_rows": []}
     for k in ("kappa", "theta", "theta_vol", "sigma", "rho", "v0", "v0_vol", "S",
               "r_pct", "q_pct", "session", "fit_time", "n_evals",
               "spx_rmse", "vix_fut_rmse", "vix_opt_rmse", "feller_lhs", "feller_rhs",
@@ -1069,7 +1083,9 @@ def load_page2() -> dict[str, Any]:
         # box bounds a parameter sits on, plus "feller" when it was imposed
         # and binds.
         from joint_vol_calibration.calibration.joint_calibrator import (
-            _CAL_STRIKES_PER_EXPIRY, active_constraints, classify_feller,
+            _CAL_STRIKES_PER_EXPIRY,
+            active_constraints,
+            classify_feller,
             count_pinned_params,
         )
         state, margin = classify_feller(p["kappa"], p["theta"], p["sigma"])
@@ -1113,19 +1129,6 @@ def load_page2() -> dict[str, Any]:
         if n_exp is not None:
             d["spx_underidentified"] = n_exp < 3
 
-        # Market anchors (when the result stores them): market vs model IV.
-        for a in cal.get("anchors") or []:
-            try:
-                T_days = a.get("T_days", (a.get("T") or 0) * 365.0)
-                d["anchors"].append({
-                    "T_days": int(round(float(T_days))),
-                    "lm": float(a["k"] if "k" in a else a["log_moneyness"]),
-                    "market_iv": float(a["market_iv"]) * 100,
-                    "model_iv": float(a["model_iv"]) * 100 if a.get("model_iv") is not None else None,
-                })
-            except Exception as exc:
-                _logger.info("skipping malformed anchor %r: %s", a, exc)
-
         # Model smile implied by THESE parameters (not the Greeks parquet,
         # which was built from a different, gate-rejected 2026-03-24 fit).
         # Unrounded: the template formats each value once (rounding to 3 dp
@@ -1138,8 +1141,19 @@ def load_page2() -> dict[str, Any]:
         item = _staleness("calibration", "Heston calibration", d["session"], ref)
         d["calib_age"] = item["age"]
         d["stale"] = [item]
+        d["model_version"] = cal.get("model_version")
+        d["fit_run_utc"] = cal.get("run_utc")
     except Exception as e:
         _record_error(d, "headline calibration", e)
+        cal = None
+
+    if cal is not None:
+        try:
+            calibration_extras(d, cal)
+        except artifacts.ArtifactError as e:
+            _record_error(d, "calibration diagnostics (identifiability / surface residuals)", e)
+        except Exception as e:
+            _record_error(d, "calibration diagnostics", e)
 
     # Archive census: how many stored fits are current-schema and gate-passing,
     # and how many are pre-C22 (labelled, never ranked).
@@ -1272,8 +1286,10 @@ def load_page3() -> dict[str, Any]:
                          "unstable_by_maturity": {}}
     for k in ("n_unstable", "n_cells", "n_grid", "n_missing", "n_maturities", "as_of", "surface_date",
               "vomma_max", "vomma_max_at", "vomma_min", "vomma_min_at", "vomma_mean",
-              "provenance", "source_matches_headline", "greeks_age", "unstable_rule"):
+              "provenance", "source_matches_headline", "greeks_age", "unstable_rule", "hedge"):
         d[k] = None
+    d.update(charts={}, greek_grids=[], scenario=None)
+    gdf: pd.DataFrame | None = None
 
     try:
         path = DATA / "greeks" / "greeks_surface.parquet"
@@ -1328,7 +1344,7 @@ def load_page3() -> dict[str, Any]:
 
         cell = {(int(r.T_days), float(r.lm_key)): r for r in gdf.itertuples()}
         for T in maturities:
-            cells: list[Optional[dict]] = []
+            cells: list[dict | None] = []
             for lm in cols:
                 r = cell.get((T, lm))
                 if r is None:
@@ -1409,8 +1425,15 @@ def load_page3() -> dict[str, Any]:
         d["stale"] = [item]
     except Exception as e:
         _record_error(d, "Greeks surface (greeks_surface.parquet)", e)
+        gdf = None
 
-    return _clean(d)
+    try:
+        risk_extras(d, gdf)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "scenario grid (data_store/greeks/scenario_grid.parquet)", e)
+    except Exception as e:
+        _record_error(d, "risk views", e)
+    return _clean_keep(d)
 
 
 # ── PAGE 4 DATA: Backtest Results ─────────────────────────────────────────────
@@ -1470,7 +1493,7 @@ def annual_returns(nav: pd.Series) -> list[dict]:
     return out
 
 
-def window_returns(nav: pd.Series, periods: dict, end: Optional[str] = None) -> list[dict]:
+def window_returns(nav: pd.Series, periods: dict, end: str | None = None) -> list[dict]:
     """Return over each named (start, end) window, based on the last NAV before it opens.
 
     backtest_engine.compute_crisis_performance divides the window's last NAV
@@ -1523,7 +1546,7 @@ def _trade_summary(trades: list, sig: str) -> dict:
     }
 
 
-def _entries_and_rolls(trades: list, sig: str, eq: Optional[pd.DataFrame]) -> dict:
+def _entries_and_rolls(trades: list, sig: str, eq: pd.DataFrame | None) -> dict:
     """How a sleeve's trade records split into entries and expiry rolls.
 
     A position held past its straddle's expiry is closed with exit_reason
@@ -1564,7 +1587,7 @@ def bridge_evidence(bridge: list[dict], grid: list[dict]) -> dict:
     g = sorted(grid, key=lambda r: float(r["beta"]))
     out["grid"] = g
 
-    def flip(col: str) -> Optional[dict]:
+    def flip(col: str) -> dict | None:
         """Adjacent grid betas where the sleeve's P&L changes sign."""
         for lo, hi in zip(g, g[1:]):
             if (lo[col] > 0) != (hi[col] > 0):
@@ -1616,7 +1639,7 @@ _PRE_C22_CACHE: dict = {}
 
 
 def pre_c22_spread_facts(spx: pd.DataFrame, vix: pd.Series, start: str, end: str,
-                         history_start: str) -> Optional[dict]:
+                         history_start: str) -> dict | None:
     """How the pre-C22 PDV spread behaved in the backtest window, from the data.
 
     σ̂ is the pre-C22 forecast as the engine replays it for the C22 bridge
@@ -1683,7 +1706,7 @@ def _import_run_backtest():
     return run_backtest
 
 
-def beta_estimation(regimes: Optional[pd.Series] = None) -> dict:
+def beta_estimation(regimes: pd.Series | None = None) -> dict:
     """The SPX chains behind β (backtest_engine.ATM_TO_VIX_RATIO) and the later checks.
 
     Per-chain ratios (30-day ATM-forward implied vol over the same-time VIX)
@@ -1706,7 +1729,7 @@ def beta_estimation(regimes: Optional[pd.Series] = None) -> dict:
     table = _BETA_CACHE[key]
     live = json.loads(BETA_LIVE_CAPTURE.read_text())
 
-    def regime_on(session: Optional[str]) -> Optional[str]:
+    def regime_on(session: str | None) -> str | None:
         if regimes is None or not session:
             return None
         lab = regimes.get(pd.Timestamp(session))
@@ -1747,7 +1770,7 @@ def load_page4() -> dict[str, Any]:
                          "eq_dates": [], "eq_nav": [], "eq_nav_s1c": [], "eq_nav_s3": [],
                          "eq_nav_s4": [], "eq_nav_s1": [], "eq_summary": [], "ann": [], "ann_years": [],
                          "ann_rets": [], "wf": [], "wf_periods": [], "wf_sharpes": [],
-                         "crisis": [], "sleeves": {}, "open_trades": []}
+                         "crisis": [], "sleeves": {}, "open_trades": [], "charts": {}}
     for k in ("final_nav", "total_pnl", "start_date", "end_date",
               "wf_neg", "wf_total", "kpi", "sharpe_convention",
               "beta", "bridge"):
@@ -1766,7 +1789,7 @@ def load_page4() -> dict[str, Any]:
     except Exception as e:      # the roadmap then omits the count; not a page error
         _logger.info("option snapshot count unavailable: %s", e)
 
-    eq: Optional[pd.DataFrame] = None
+    eq: pd.DataFrame | None = None
     try:
         eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
         eq.index = pd.to_datetime(eq.index)
@@ -2031,7 +2054,9 @@ def load_page4() -> dict[str, Any]:
                 d["tbill_by_year"] = {int(y): float(v) for y, v in yearly.items()}
             spx_df, vix_wide = _read_spx(), _read_vix_wide()
             from joint_vol_calibration.signals.regime_classifier import (
-                VVIX_REGIME2_THRESHOLD, build_regime_labels)
+                VVIX_REGIME2_THRESHOLD,
+                build_regime_labels,
+            )
             spx_in = spx_df.reset_index()[["date", "close", "log_return"]]
             vw_in = vix_wide.reset_index().rename(columns={"index": "date"})
             share = {}
@@ -2043,7 +2068,7 @@ def load_page4() -> dict[str, Any]:
     except Exception as e:
         _record_error(d, "change-log facts (T-bill rates, R2 shares)", e)
 
-    def _pct0(x: Optional[float]) -> str:
+    def _pct0(x: float | None) -> str:
         return "—" if x is None else f"{x * 100:.1f}%"
 
     # The shipped classifier's own evaluation record (quoted beside the C17 figures)
@@ -2108,37 +2133,1617 @@ def load_page4() -> dict[str, Any]:
          "after":  "Honest: backtest P&L is BS on VIX-TS ATM vol; the calibration "
                    "stack serves C6 Greeks / C7 hedge sim, not C10 P&L."},
     ]
-    return _clean(d)
+    try:
+        research_extras(d, eq)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "backtest inference artifacts (data_store/backtest/inference)", e)
+    except Exception as e:
+        _record_error(d, "research views", e)
+    return _clean_keep(d)
+
+
+# ── C23 desk views: shared helpers ────────────────────────────────────────────
+PARAM_META = (
+    ("kappa", "κ", "mean reversion", ".3f"),
+    ("theta", "θ", "long-run variance", ".4f"),
+    ("sigma", "σ", "vol of variance", ".3f"),
+    ("rho", "ρ", "spot–vol correlation", ".3f"),
+    ("v0", "v₀", "initial variance", ".4f"),
+)
+# A parameter is "at a bound" when it sits within this fraction of its box
+# width from the edge (the calibrator's own pinned_params test is the primary
+# source; this only labels which edge).
+BOUND_REL_TOL = 1e-4
+
+# P&L diverging scale: orange (loss) -> panel colour -> blue (gain), the same
+# blue/orange convention as the signed numbers.
+PNL_DIV = ("#fbb360", "#a8743f", "#5a4630", "#2a2f37", "#1c2127", "#25344a", "#2f5a96", "#4c90f0", "#8abbff")
+
+
+def pnl_colour(value: Any, limit: float) -> str | None:
+    from desk_format import ramp
+    x = _num(value)
+    if x is None or limit <= 0:
+        return None
+    return ramp(PNL_DIV, 0.5 + 0.5 * max(-1.0, min(1.0, x / limit)))
+
+
+def _gated_history() -> list[dict]:
+    """Every current-schema, gate-passing fit, oldest first (parameter history)."""
+    out = []
+    for row in scan_calibrations():
+        if row["legacy"] is not False or not row["ok"] or not row["session"]:
+            continue
+        with open(row["path"], "rb") as f:
+            c = pickle.load(f)
+        losses = _cal_losses(c)
+        out.append({"session": row["session"], "params": dict(c["params"]),
+                    "rmse": _num(losses.get("spx_iv_rmse")), "oos": _num(losses.get("spx_oos_iv_rmse")),
+                    "vix": _num(losses.get("vix_index_rmse")),
+                    "pinned": list(c.get("pinned_params") or [])})
+    return sorted(out, key=lambda r: r["session"])
+
+
+def _bound_side(value: float, lo: float, hi: float) -> str | None:
+    span = (hi - lo) or 1.0
+    if abs(value - hi) <= BOUND_REL_TOL * span:
+        return "upper"
+    if abs(value - lo) <= BOUND_REL_TOL * span:
+        return "lower"
+    return None
+
+
+def _heat_cols(edges: Sequence[float]) -> list[str]:
+    """Bucket ranges for cell details: '−0.30…−0.20'."""
+    return [f"{_fmt(a, '+.2f')}…{_fmt(b, '+.2f')}" for a, b in zip(edges[:-1], edges[1:])]
+
+
+def _heat_heads(edges: Sequence[float]) -> list[str]:
+    """Compact column heads: each bucket's midpoint, '−0.25'."""
+    return [_fmt((a + b) / 2.0, "+.3f").rstrip("0").rstrip(".") if abs((a + b) / 2.0) > 1e-12 else "0"
+            for a, b in zip(edges[:-1], edges[1:])]
+
+
+K_EDGES = (-0.30, -0.20, -0.14, -0.09, -0.05, -0.02, 0.0, 0.02, 0.05, 0.09, 0.14, 0.20, 0.30)
+
+
+# ── Calibration page extras ──────────────────────────────────────────────────
+def calibration_extras(d: dict, cal: dict) -> None:
+    """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    p = cal["params"]
+    session = d.get("session")
+    hist = _gated_history()
+    d["history"] = [{"session": h["session"], **{k: h["params"][k] for k, *_ in PARAM_META},
+                     "oos": h["oos"], "rmse": h["rmse"], "vix": h["vix"]} for h in hist]
+    diag = artifacts.calibration_diagnostics(cal, DATA, session)
+    d["ident"] = diag
+    ident = diag.get("ident") if diag.get("state") == "ok" else {}
+    se = (ident or {}).get("standard_errors") or {}
+    pinned = set(d.get("pinned_params") or [])
+    tiles = []
+    for key, symbol, name, spec in PARAM_META:
+        lo, hi = (float(x) for x in HESTON_BOUNDS[key])
+        val = float(p[key])
+        side = _bound_side(val, lo, hi)
+        if key in pinned and side is None:
+            side = "bound"
+        series = [h["params"][key] for h in hist]
+        tiles.append({
+            "key": key, "sym": symbol, "name": name, "value": val, "spec": spec,
+            "lo": lo, "hi": hi, "side": side, "se": _num(se.get(key)),
+            "spark": sparkline(series, bound=(hi if side == "upper" else lo if side == "lower" else None)),
+            "n_hist": len(series), "hist_first": hist[0]["session"] if hist else None,
+            "hist_last": hist[-1]["session"] if hist else None,
+            "hist_min": min(series) if series else None, "hist_max": max(series) if series else None,
+        })
+    d["param_tiles"] = tiles
+
+    # OOS RMSE by expiry, with the in-sample RMSE as the reference line.
+    oos = (cal.get("oos") or {}).get("spx_oos_rmse_by_expiry") or {}
+    t_by_exp = {str(c.get("expiry")): float(c["T"]) * 365.0 for c in cal.get("carry_by_expiry") or []
+                if _num(c.get("T")) is not None}
+    anchor_exp = {str(a.get("expiry")) for a in cal.get("anchors_by_expiry") or []}
+    rows = sorted(({"expiry": e, "T_days": t_by_exp.get(e), "rmse": float(v), "anchor": e in anchor_exp}
+                   for e, v in oos.items() if _num(v) is not None), key=lambda r: r["expiry"])
+    d["oos_rows"] = rows
+    d["n_oos"] = (cal.get("oos") or {}).get("n_spx_oos")
+    if rows:
+        cats = [f"{r['expiry'][2:]} · {_fmt(r['T_days'], '.0f')}d" if r["T_days"] is not None else r["expiry"]
+                for r in rows]
+        marks = {"y": [{"value": d["spx_rmse"], "label": f"in-sample {_fmt(d['spx_rmse'], '.2f')}",
+                        "color": "info"}]} if d.get("spx_rmse") is not None else None
+        d["charts"]["oos"] = charts.xy(
+            "chart-oos", "Out-of-sample SPX IV RMSE by expiry",
+            x={"type": "category", "categories": cats, "name": "Expiry · days to expiry", "interval": 0},
+            y={"name": "RMSE (vol pts)", "digits": 1, "tipDigits": 2, "zero": True},
+            series=[{"name": "OOS RMSE", "type": "bar", "color": "cat0",
+                     "data": [r["rmse"] for r in rows], "fill": 0.55}],
+            xs=cats, marks=marks, csv=f"oos_rmse_by_expiry_{session}.csv",
+            grid={"bottom": 64},
+            describe=(f"{len(rows)} expiries; RMSE from {_fmt(min(r['rmse'] for r in rows), '.2f')} to "
+                      f"{_fmt(max(r['rmse'] for r in rows), '.2f')} vol pts against "
+                      f"{_fmt(d.get('spx_rmse'), '.2f')} in sample."),
+            table=charts.table("Out-of-sample RMSE by expiry (vol pts)",
+                               ["Expiry", "Days#", "RMSE (vol pts)#", "Anchor expiry"],
+                               [[r["expiry"], _fmt(r["T_days"], ".0f"), _fmt(r["rmse"], ".2f"),
+                                 "yes" if r["anchor"] else "no"] for r in rows]))
+
+    # VIX leg: Cboe spot indices against the model's index values.
+    vix = [v for v in cal.get("vix_index") or [] if _num(v.get("market")) is not None]
+    d["vix_rows"] = [{"ticker": v["ticker"], "tenor": int(v["tenor_days"]), "market": float(v["market"]),
+                      "model": _num(v.get("model")),
+                      "diff": (_num(v.get("model")) - float(v["market"])) if _num(v.get("model")) is not None else None}
+                     for v in vix]
+    if vix:
+        d["charts"]["vix"] = charts.xy(
+            "chart-vixleg", "VIX index term structure: market and the Heston fit",
+            x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
+            y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
+            series=[{"name": "Cboe index (market)", "type": "line", "color": "headline", "symbol": "circle",
+                     "size": 7, "width": 1.5, "legend": True, "data": [[r["tenor"], r["market"]] for r in d["vix_rows"]]},
+                    {"name": "Heston model", "type": "line", "color": "cat1", "symbol": "diamond", "size": 7,
+                     "dash": True, "legend": True,
+                     "data": [[r["tenor"], r["model"]] for r in d["vix_rows"] if r["model"] is not None]}],
+            tooltip="axis", csv=f"vix_leg_{session}.csv",
+            describe="Market VIX-family indices and the fitted model's values at 9, 30, 93 and 184 days.",
+            table=charts.table("VIX indices: market vs model (index points)",
+                               ["Index", "Tenor (days)#", "Market#", "Model#", "Model − market#"],
+                               [[r["ticker"], r["tenor"], _fmt(r["market"], ".2f"), _fmt(r["model"], ".2f"),
+                                 signed(r["diff"], ".2f")] for r in d["vix_rows"]]))
+
+    if d.get("mat_smiles"):
+        sms = d["mat_smiles"]
+        d["charts"]["model_smile"] = charts.xy(
+            "chart-model-smile", f"Heston model smile of the {session} fit, one curve per maturity",
+            x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
+            y={"name": "Implied vol (%)", "digits": 0, "tipDigits": 2},
+            series=[{"name": f"{s_['T']}d", "type": "line", "color": charts.color_cycle(i), "width": 1.5,
+                     "legend": True, "data": [[k, v] for k, v in zip(s_["lm"], s_["iv"])]}
+                    for i, s_ in enumerate(sms)],
+            tooltip="item", csv=f"model_smile_{session}.csv",
+            describe="Model implied vols at the fitted parameters for 14 to 365 days; model curves, not market data.",
+            table=charts.table("Model implied vol (%) at the lowest and highest log-moneyness plotted",
+                               ["Maturity", "Lowest ln(K/F)#", "IV#", "Highest ln(K/F)#", "IV#"],
+                               [[f"{s_['T']}d", _fmt(s_["lm"][0], "+.3f"), _fmt(s_["iv"][0], ".2f"),
+                                 _fmt(s_["lm"][-1], "+.3f"), _fmt(s_["iv"][-1], ".2f")] for s_ in sms if s_["lm"]]))
+
+    # Smile small multiples: one panel per anchor expiry. Market quotes and the
+    # model's IVs at those quotes come from the surface residual table when it
+    # exists for this session (the Heston rows; its in_sample flag marks the
+    # calibration anchors); otherwise the panel shows the model curve only.
+    surf = artifacts.load_surface(DATA, session) if session in artifacts.surface_sessions(DATA) else \
+        artifacts.absent("surface", DATA / "surface" / str(session) / "residuals.parquet", data_dir=DATA)
+    d["smile_source"] = {k: v for k, v in surf.items() if k != "residuals"}
+    res = None
+    if surf.get("state") == "ok":
+        hkey = heston_model_key(surf["models"])
+        if hkey is not None:
+            res = surf["residuals"][surf["residuals"]["model"] == hkey]
+            d["smile_model"] = hkey
+    for a in cal.get("anchors_by_expiry") or []:
+        exp = str(a.get("expiry"))
+        T_days = _num(a.get("T_days"))
+        if T_days is None:
+            continue
+        series, tbl_rows = [], []
+        if res is not None and (res["expiry"] == exp).any():
+            q = res[res["expiry"] == exp].sort_values("k")
+            ins = q["in_sample"] if "in_sample" in q.columns else pd.Series(False, index=q.index)
+            if {"bid_iv", "ask_iv"} <= set(q.columns):
+                series.append({"name": "Bid–ask", "type": "errorbar", "color": "muted", "legend": True,
+                               "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
+                                        for r in q.itertuples()]})
+            series.append({"name": "Mid (out of sample)", "type": "scatter", "color": "headline", "hollow": True,
+                           "size": 5, "legend": True,
+                           "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r, i in zip(q.itertuples(), ins) if not i]})
+            if ins.any():
+                series.append({"name": "Mid (fit anchor)", "type": "scatter", "color": "headline", "size": 6,
+                               "legend": True,
+                               "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r, i in zip(q.itertuples(), ins) if i]})
+            series.append({"name": "Heston", "type": "line", "color": "cat1", "width": 1.6, "legend": True,
+                           "data": [[round(float(k), 3), round(float(v) * 100, 2)] for k, v in zip(q["k"], q["model_iv"])
+                                    if _num(v) is not None]})
+            # the table behind the chart: one row per ln(K/F) bucket (the CSV has every quote)
+            qb = q.assign(kb=pd.cut(q["k"], K_EDGES, labels=False), ins=ins.values)
+            for b, g in qb.groupby("kb"):
+                tbl_rows.append([_heat_cols(K_EDGES)[int(b)], len(g), int(g["ins"].sum()),
+                                 _fmt(g["mid_iv"].median() * 100, ".2f"), _fmt(g["model_iv"].median() * 100, ".2f"),
+                                 signed(float(g["error_hs"].median()), ".1f"),
+                                 _fmt(g["inside_spread"].astype(bool).mean() * 100, ".0f")])
+            source = "quotes"
+            inside = float(q["inside_spread"].astype(bool).mean() * 100.0)
+            note = (f"{len(q)} quotes, {int(ins.sum())} of them fit anchors; Heston inside the bid–ask on "
+                    f"{_fmt(inside, '.0f')}%, median |model − mid| {_fmt(float(q['error_hs'].abs().median()), '.1f')} half-spreads")
+        else:
+            sm = heston_model_smile(p, maturities_days=(T_days,))[0]
+            series.append({"name": "Heston", "type": "line", "color": "cat1", "width": 1.6,
+                           "data": [[k, v * 100] for k, v in zip(sm["lm"], sm["iv"])]})
+            tbl_rows = [[_fmt(k, "+.3f"), _fmt(v * 100, ".2f")] for k, v in zip(sm["lm"], sm["iv"])]
+            source = "model"
+            note = None
+        d["smiles"].append({
+            "expiry": exp, "T_days": T_days, "n": a.get("n"), "source": source, "note": note,
+            "spec": charts.xy(
+                f"chart-smile-{exp}", f"Smile {exp} ({_fmt(T_days, '.0f')} days)",
+                x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True, "label": "k"},
+                y={"name": "IV (%)", "digits": 0, "tipDigits": 2},
+                series=series, tooltip="item", csv=f"smile_{exp}.csv", grid={"left": 40, "top": 10, "bottom": 34},
+                describe=(f"{'Market bid–ask quotes, mids and the Heston IVs at the quoted strikes' if source == 'quotes' else 'Heston model smile only (market quotes need the surface residual table)'} for the {exp} expiry."),
+                table=(charts.table(f"{exp}: quotes by ln(K/F) bucket (medians; IV in %)",
+                                    ["ln(K/F)", "Quotes#", "Anchors#", "Mid IV#", "Heston IV#",
+                                     "(Heston − mid) / half-spread#", "Inside the bid–ask (%)#"], tbl_rows)
+                       if source == "quotes" else
+                       charts.table(f"{exp}: Heston model implied vol (%) by ln(K/F)",
+                                    ["ln(K/F)#", "Heston IV#"], tbl_rows))),
+        })
+
+
+# ── Risk page extras ─────────────────────────────────────────────────────────
+GREEK_TABS = (
+    # key, tab label, column, scale ('seq' | 'div'), cell format, unit note
+    ("iv", "IV", "iv", "seq", ".1f", "implied vol, %"),
+    ("vega", "Vega", "vega", "seq", ",.1f", "per unit index, per 1.00 vol"),
+    ("vanna", "Vanna", "vanna", "div", "+.3f", "per unit index, per 1.00 vol"),
+    ("delta", "Delta", "delta", "div", "+.2f", "OTM option, forward delta"),
+)
+
+
+def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
+    """Greek grids, the scenario grid and the 2020 hedged-straddle P&L explain."""
+    if gdf is not None and len(gdf):
+        maturities = sorted(int(t) for t in gdf["T_days"].unique())
+        cols = sorted(float(x) for x in gdf["log_moneyness"].round(4).unique())
+        cellmap = {(int(r.T_days), round(float(r.log_moneyness), 4)): r for r in gdf.itertuples()}
+        grids = []
+        for key, label, col, scale, fmt, unit in GREEK_TABS:
+            vals = gdf[col].astype(float) * (100.0 if key == "iv" else 1.0)
+            lo, hi = float(vals.min()), float(vals.max())
+            lim = float(vals.abs().max()) or 1.0
+            rows = []
+            for T in maturities:
+                cells = []
+                for c in cols:
+                    r = cellmap.get((T, round(c, 4)))
+                    if r is None:
+                        cells.append(cell("", None, detail=f"T {T}d · ln(K/F) {_fmt(c, '+.3f')}: no stored Greeks"))
+                        continue
+                    v = float(getattr(r, col)) * (100.0 if key == "iv" else 1.0)
+                    bg = seq_colour(v, lo, hi) if scale == "seq" else div_colour(v, lim)
+                    det = (f"T {T}d · ln(K/F) {_fmt(c, '+.3f')} · K {_fmt(r.K, ',.0f')} · IV {_fmt(r.iv * 100, '.1f')}% · "
+                           f"{label} {_fmt(v, fmt)}")
+                    cells.append(cell(_fmt(v, fmt), bg, detail=det))
+                rows.append({"label": f"{T}d", "cells": cells})
+            grids.append({"key": key, "label": label, "unit": unit, "scale": scale, "rows": rows,
+                          "cols": [_fmt(c, "+.2f") for c in cols], "lo": lo, "hi": hi, "lim": lim,
+                          "fmt": fmt})
+        d["greek_grids"] = grids
+
+    if d.get("qv_labels"):
+        d["charts"]["qv"] = charts.xy(
+            "chart-qv", "Quadratic-variation convexity by maturity (×10⁴)",
+            x={"type": "category", "categories": d["qv_labels"], "name": "Maturity", "interval": 0},
+            y={"name": "Var[∫v dt] × 10⁴", "digits": 1, "tipDigits": 3, "zero": True},
+            series=[{"name": "QV convexity × 10⁴", "type": "bar", "color": "cat0", "fill": 0.55, "data": d["qv_values"]}],
+            xs=d["qv_labels"], csv="qv_convexity.csv",
+            describe="One value per maturity under the surface's Heston parameters; it grows with the horizon.",
+            table=charts.table("QV convexity × 10⁴ by maturity", ["Maturity", "QV convexity × 10⁴#"],
+                               [[lab, _fmt(v, ".3f")] for lab, v in zip(d["qv_labels"], d["qv_values"])]))
+    if d.get("vanna_labels"):
+        d["charts"]["vanna"] = charts.xy(
+            "chart-vanna", "Mean vanna by maturity (∂²V/∂S∂σ)",
+            x={"type": "category", "categories": d["vanna_labels"], "name": "Maturity", "interval": 0},
+            y={"name": "Mean vanna", "digits": 2, "tipDigits": 4, "signed": True},
+            series=[{"name": "Mean vanna", "type": "bar", "signed": True, "data": d["vanna_values"]}],
+            xs=d["vanna_labels"], csv="vanna_by_maturity.csv",
+            describe="Black–Scholes vanna averaged over the strikes stored at each maturity.",
+            table=charts.table("Mean vanna by maturity (per unit index, per 1.00 vol)", ["Maturity", "Mean vanna#"],
+                               [[lab, signed(v, ".4f")] for lab, v in zip(d["vanna_labels"], d["vanna_values"])]))
+    if d.get("scatter_lm"):
+        ur = d.get("unstable_rule") or {}
+        thr = ur.get("threshold") if ur.get("threshold") is not None else 2.0
+        mats = sorted(set(d["scatter_T"]))
+        name = "Vomma P&L ratio" if ur.get("kind") == "pnl_ratio" else "|Vomma z-score|"
+        d["charts"]["scatter"] = charts.xy(
+            "chart-flag", f"{name} against ln(K/F), all maturities",
+            x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
+            y={"name": name, "digits": 1, "tipDigits": 3, "min": 0},
+            series=[{"name": f"{T}d", "type": "scatter", "color": charts.color_cycle(i), "size": 6, "legend": True,
+                     "data": [[x, z] for x, z, t in zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"]) if t == T]}
+                    for i, T in enumerate(mats)],
+            tooltip="item", csv="vomma_flag_metric.csv",
+            marks={"y": [{"value": thr, "label": f"flag {_fmt(thr, '.2f')}", "color": "breach"}]},
+            describe=f"{len(d['scatter_lm'])} nodes; {d.get('n_unstable')} above the flag threshold {_fmt(thr, '.2f')}.",
+            table=charts.table(f"{name} by node (largest ten)", ["Maturity", "ln(K/F)#", name + "#"],
+                               [[f"{t}d", _fmt(x, "+.3f"), _fmt(z, ".3f")] for x, z, t in
+                                sorted(zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"]), key=lambda r: -r[1])[:10]]))
+
+    d["scenario"] = artifacts.load_scenario_grid(DATA)
+    if d["scenario"].get("state") == "ok":
+        g = d["scenario"]["grid"]
+        if "dynamics" in g.columns:
+            dyns = sorted(g["dynamics"].astype(str).unique())
+            dyn = "sticky_strike" if "sticky_strike" in dyns else dyns[0]
+            g = g[g["dynamics"].astype(str) == dyn]
+            d["scenario"]["dynamics_shown"], d["scenario"]["dynamics_all"] = dyn, dyns
+        spots = sorted(g["spot_shock_pct"].unique())
+        vols = sorted(g["vol_shock_vp"].unique())
+        lim = float(g["pnl"].abs().max()) or 1.0
+        lut = {(float(r.spot_shock_pct), float(r.vol_shock_vp)): float(r.pnl) for r in g.itertuples()}
+        d["scenario_heat"] = {
+            "cols": [signed(s, ".0f", "%") for s in spots],
+            "rows": [{"label": signed(v, ".0f", " vp"), "cells": [
+                cell(signed(lut.get((float(s), float(v))), ",.0f"), pnl_colour(lut.get((float(s), float(v))), lim),
+                     detail=f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vp')}: P&L {signed(lut.get((float(s), float(v))), ',.0f')}")
+                for s in spots]} for v in vols]}
+
+    # C7: daily-hedged 1-year ATM straddle through 2020, Greek P&L explain.
+    try:
+        h = pd.read_parquet(DATA / "backtest" / "delta_hedge_2020.parquet")
+    except Exception as e:
+        _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)", e)
+        return
+    comps = [("pnl_gamma", "Gamma", "cat0"), ("pnl_vega_a", "Vega", "cat1"), ("pnl_theta", "Theta", "cat2"),
+             ("pnl_vanna", "Vanna", "cat4"), ("pnl_volga", "Volga", "cat3"), ("pnl_financing", "Financing", "muted"),
+             ("pnl_residual_a", "Residual", "cat5")]
+    need = {"pnl_total"} | {c for c, *_ in comps}
+    missing = need - set(h.columns)
+    if missing:
+        _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)",
+                      ValueError("missing columns " + ", ".join(sorted(missing))))
+        return
+    h = h.copy()
+    h.index = pd.to_datetime(h.index)
+    days = h.dropna(subset=["pnl_total"])
+    explained = days[[c for c, *_ in comps if c != "pnl_residual_a"]].sum(axis=1)
+    resid = days["pnl_total"] - explained
+    if (resid - days["pnl_residual_a"]).abs().max() > 1e-6 * max(1.0, days["pnl_total"].abs().max()):
+        _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)",
+                      ValueError("pnl_residual_a is not total minus the Greek terms"))
+        return
+    tot = days["pnl_total"]
+    xs = [t.strftime("%Y-%m-%d") for t in h.index]
+    series = [{"name": name, "type": "line", "color": color, "width": 1.3, "legend": True,
+               "data": [round(float(v), 4) for v in h[c].fillna(0.0).cumsum()]} for c, name, color in comps]
+    series.insert(0, {"name": "Total", "type": "line", "color": "headline", "width": 2.2, "legend": True,
+                      "data": [round(float(v), 4) for v in h["pnl_total"].fillna(0.0).cumsum()]})
+    d["hedge"] = {
+        "n": int(len(days)), "start": str(h.index[0].date()), "end": str(h.index[-1].date()),
+        "explained_share": float(1.0 - resid.var(ddof=1) / tot.var(ddof=1)),
+        "rms_total": float(np.sqrt((tot ** 2).mean())), "rms_resid": float(np.sqrt((resid ** 2).mean())),
+        "cum": {name: float(h[c].fillna(0.0).sum()) for c, name, _ in comps},
+        "cum_total": float(tot.sum()),
+        "K": _num(h["S"].iloc[0]),
+        "unstable_days": int(h["is_unstable"].astype(bool).sum()) if "is_unstable" in h.columns else None,
+        # where the expansion misses: the largest daily residuals and the share of
+        # the residual's sum of squares inside the Feb–Apr 2020 stress window
+        "top_resid": [{"date": str(t.date()), "value": float(v)} for t, v in
+                      days["pnl_residual_a"].reindex(days["pnl_residual_a"].abs().sort_values(ascending=False).index[:3]).items()],
+        "covid_resid_share": float((days["pnl_residual_a"].loc["2020-02-20":"2020-04-30"] ** 2).sum()
+                                   / max((days["pnl_residual_a"] ** 2).sum(), 1e-300)),
+    }
+    if "is_unstable" in h.columns and h["is_unstable"].astype(bool).any():
+        flagged = h.index[h["is_unstable"].astype(bool)]
+        d["hedge"]["flag_first"], d["hedge"]["flag_last"] = str(flagged.min().date()), str(flagged.max().date())
+    d["charts"]["hedge"] = charts.xy(
+        "chart-hedge", "Cumulative P&L explain of a delta-hedged 1-year ATM straddle, 2020",
+        x={"type": "time", "name": "", "csv": "date"},
+        y={"name": "Cumulative P&L (index points)", "digits": 0, "tipDigits": 2, "signed": True},
+        series=series, xs=xs, zoom=True, csv="hedge_attribution_2020.csv",
+        marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+        describe=(f"{len(days)} daily rebalances from {d['hedge']['start']} to {d['hedge']['end']}; total "
+                  f"{signed(d['hedge']['cum_total'], ',.1f')} index points, residual "
+                  f"{signed(d['hedge']['cum']['Residual'], ',.2f')}."),
+        table=charts.table("Cumulative P&L by Greek, 2020 (index points per straddle)",
+                           ["Component", "Cumulative P&L#"],
+                           [["Total", signed(d["hedge"]["cum_total"], ",.2f")]]
+                           + [[n, signed(v, ",.2f")] for n, v in d["hedge"]["cum"].items()]))
+
+
+# ── Research page extras ─────────────────────────────────────────────────────
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _runs(mask: pd.Series) -> list[tuple]:
+    """(first, last) index labels of each run of True values."""
+    out, start, prev = [], None, None
+    for t, v in mask.items():
+        if v and start is None:
+            start = t
+        if not v and start is not None:
+            out.append((start, prev))
+            start = None
+        prev = t
+    if start is not None:
+        out.append((start, prev))
+    return out
+
+
+def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
+    """Tear-sheet series: equity with regime shading, drawdown, rolling Sharpe,
+    monthly returns grid, sleeve bars, annual and half-year bars, inference."""
+    if eq is not None:
+        xs = d["eq_dates"]
+        series = [
+            {"name": "Portfolio", "type": "line", "color": "headline", "width": 2.2, "legend": True, "data": d["eq_nav"]},
+            {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True, "data": d["eq_nav_s1c"]},
+            {"name": "S3 dispersion", "type": "line", "color": "cat1", "width": 1.3, "legend": True, "data": d["eq_nav_s3"]},
+            {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True, "data": d["eq_nav_s4"]},
+            {"name": "S1 (reference)", "type": "line", "color": "muted", "width": 1.2, "dash": True, "legend": True,
+             "hidden": True, "data": d["eq_nav_s1"]},
+        ]
+        if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
+            tb = eq["nav_tbill"]
+            series.append({"name": "T-bill (collateral)", "type": "line", "color": "cat2", "width": 1.2,
+                           "dash": True, "legend": True,
+                           "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
+        r2 = (eq["regime"] == 2) if "regime" in eq.columns else pd.Series(False, index=eq.index)
+        areas = [{"from": a.strftime("%Y-%m-%d"), "to": b.strftime("%Y-%m-%d"), "color": "watch", "alpha": 0.07}
+                 for a, b in _runs(r2)]
+        d["r2_share_bt"] = float(r2.mean())
+        d["charts"]["equity"] = charts.xy(
+            "chart-equity", "Cumulative return from $1M: portfolio, sleeves and T-bills",
+            x={"type": "time", "csv": "date"},
+            y={"name": "Cumulative return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%", "unit": "%"},
+            series=series, xs=xs, zoom=True, zoom_presets=(("1Y", 1), ("3Y", 3), ("All", 0)),
+            marks={"areas": areas, "y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+            csv="equity_curves.csv",
+            describe=(f"Daily from {d['start_date']} to {d['end_date']}; R2 sessions (shaded) are "
+                      f"{_fmt(d['r2_share_bt'] * 100, '.0f')}% of the window."),
+            table=charts.table(f"Cumulative return from {d['start_date']} to {d['end_date']}",
+                               ["Series", "Final#", "Lowest#", "Highest#"],
+                               [[r["name"], _pct_prose(r["final"]), _pct_prose(r["low"]), _pct_prose(r["high"])]
+                                for r in d.get("eq_summary") or []]))
+        nav = eq["nav"]
+        dd = (nav / nav.cummax() - 1.0) * 100.0
+        d["charts"]["drawdown"] = charts.xy(
+            "chart-dd", "Portfolio drawdown from its running peak",
+            x={"type": "time", "csv": "date"},
+            y={"name": "Drawdown (%)", "digits": 0, "tipDigits": 2, "tickUnit": "%", "unit": "%", "max": 0},
+            series=[{"name": "Drawdown", "type": "line", "color": "neg", "width": 1.2, "area": True,
+                     "data": dd.round(3).tolist()}],
+            xs=xs, zoom=False, csv="drawdown.csv", grid={"top": 10, "bottom": 30},
+            describe=f"Deepest drawdown {_fmt(float(dd.min()), '.1f')}% on {dd.idxmin().date()}.",
+            table=charts.table("Drawdown", ["Statistic", "Value"],
+                               [["Deepest (%)", _fmt(float(dd.min()), ".2f")],
+                                ["Date of the trough", str(dd.idxmin().date())]]))
+        # rolling 126-session Sharpe (rf = 0, the engine's convention)
+        ret = nav.pct_change()
+        roll = (ret.rolling(126).mean() / ret.rolling(126).std(ddof=1)) * np.sqrt(252)
+        roll = roll.where(ret.rolling(126).std(ddof=1) > 1e-12)
+        d["charts"]["rolling"] = charts.xy(
+            "chart-rolling", "Rolling 126-session Sharpe (rf = 0)",
+            x={"type": "time", "csv": "date"},
+            y={"name": "Sharpe (annualised)", "digits": 1, "tipDigits": 2, "signed": True},
+            series=[{"name": "Rolling Sharpe", "type": "line", "color": "cat0", "width": 1.3,
+                     "data": [None if not np.isfinite(v) else round(float(v), 3) for v in roll]}],
+            xs=xs, csv="rolling_sharpe_126.csv", grid={"top": 10, "bottom": 30},
+            marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+            describe="Annualised Sharpe of the trailing 126 daily returns; blank where the NAV was flat.",
+            table=charts.table("Rolling Sharpe", ["Statistic", "Value#"],
+                               [["Latest", _fmt(_num(roll.dropna().iloc[-1]) if roll.notna().any() else None, "+.2f")],
+                                ["Lowest", _fmt(_num(roll.min()), "+.2f")], ["Highest", _fmt(_num(roll.max()), "+.2f")]]))
+        # monthly returns grid (against the prior month-end NAV)
+        month_end = nav.groupby([nav.index.year, nav.index.month]).last()
+        base = float(nav.iloc[0])
+        grid: dict = {}
+        prev = base
+        for (yr, mo), v in month_end.items():
+            grid.setdefault(int(yr), {})[int(mo)] = float(v) / prev - 1.0
+            prev = float(v)
+        lim = max((abs(v) for m in grid.values() for v in m.values()), default=0.01) or 0.01
+        d["monthly"] = {"cols": list(MONTHS) + ["Year"], "rows": []}
+        ann = {a["year"]: a["ret_pct"] / 100.0 for a in d.get("ann") or []}
+        for yr in sorted(grid):
+            cells = []
+            for mo in range(1, 13):
+                v = grid[yr].get(mo)
+                cells.append(cell(signed(v * 100 if v is not None else None, ".1f"), pnl_colour(v, lim),
+                                  detail=f"{MONTHS[mo - 1]} {yr}: {signed(v * 100 if v is not None else None, '.2f', '%')}"))
+            y = ann.get(yr)
+            cells.append(cell(signed(y * 100 if y is not None else None, ".1f"), pnl_colour(y, max(lim * 3, 0.01)),
+                              detail=f"{yr}: {signed(y * 100 if y is not None else None, '.2f', '%')}"))
+            d["monthly"]["rows"].append({"label": str(yr), "cells": cells})
+        d["monthly"]["lim"] = lim
+    # sleeves, annual returns, half-year Sharpe as signed bars
+    if d.get("signal_labels"):
+        d["charts"]["sleeves"] = charts.xy(
+            "chart-sleeves", "Total P&L by portfolio sleeve ($000s)",
+            x={"type": "category", "categories": d["signal_labels"], "interval": 0},
+            y={"name": "P&L ($000s)", "digits": 0, "tipDigits": 1, "signed": True},
+            series=[{"name": "P&L ($000s)", "type": "bar", "signed": True, "data": d["signal_pnl"]}],
+            xs=d["signal_labels"], horizontal=True, tooltip="axis", csv="sleeve_pnl.csv",
+            grid={"left": 110, "bottom": 30},
+            describe="Mark-to-model P&L of the three portfolio sleeves over the backtest window.",
+            table=charts.table("Total P&L by sleeve ($000s)", ["Sleeve", "P&L ($000s)#"],
+                               [[lab, signed(v, ",.1f")] for lab, v in zip(d["signal_labels"], d["signal_pnl"])]))
+    if d.get("ann"):
+        labels = [f"{a['year']}{' YTD' if a['partial'] else ''}" for a in d["ann"]]
+        d["charts"]["annual"] = charts.xy(
+            "chart-annual", "Annual return against the prior year-end NAV",
+            x={"type": "category", "categories": labels, "interval": 0},
+            y={"name": "Return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%", "unit": "%"},
+            series=[{"name": "Return", "type": "bar", "signed": True, "data": d["ann_rets"]}],
+            xs=labels, csv="annual_returns.csv",
+            describe="Calendar-year returns; they compound to the cumulative return.",
+            table=charts.table("Annual return (%)", ["Year", "Return#"],
+                               [[lab, signed(v, ".2f", "%")] for lab, v in zip(labels, d["ann_rets"])]))
+    if d.get("wf"):
+        d["charts"]["halfyear"] = charts.xy(
+            "chart-halfyear", "Half-year Sharpe of the single in-sample run (rf = 0)",
+            x={"type": "category", "categories": d["wf_periods"], "interval": 0},
+            y={"name": "Sharpe", "digits": 0, "tipDigits": 2, "signed": True},
+            series=[{"name": "Sharpe", "type": "bar", "signed": True, "data": d["wf_sharpes"]}],
+            xs=d["wf_periods"], csv="half_year_sharpe.csv", grid={"bottom": 70},
+            describe=f"{d.get('wf_neg')} of {d.get('wf_total')} half-years have a negative Sharpe.",
+            table=charts.table("Half-year Sharpe (in-sample, rf = 0)", ["Half-year", "Sharpe#"],
+                               [[w, _fmt(v, "+.2f", "flat NAV — none")] for w, v in zip(d["wf_periods"], d["wf_sharpes"])]))
+    inference_extras(d, artifacts.load_inference(DATA))
+    d["forward"] = artifacts.load_forward_ledger(DATA)
+    if d["forward"].get("state") == "ok":
+        led = d["forward"].pop("latest")
+        d["forward"]["inputs"] = led.get("inputs") or {}
+        d["forward"]["rows"] = [{"sleeve": SLEEVE_NAMES.get(sl, sl.upper()), "key": sl,
+                                 "target": (led.get("signals") or {}).get(sl, {}).get("straddle_direction"),
+                                 **(led.get("summary") or {}).get(sl, {}),
+                                 "position": next((ps for ps in led.get("positions") or [] if ps.get("sleeve") == sl), None)}
+                                for sl in ("s1c", "s3", "s4", "s1", "s2")]
+
+
+SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian", "s2": "S2 VIX TS (ref)",
+                "s3": "S3 dispersion", "s4": "S4 VRP", "always_short_straddle": "Always-short straddle"}
+
+
+def inference_extras(d: dict, inf: dict) -> None:
+    """Research-page inference tables from data_store/backtest/inference (inference_summary/1)."""
+    d["inference"] = {k: v for k, v in inf.items() if k not in ("summary", "benchmarks", "forecast")}
+    d["sharpe_ci"] = artifacts.bootstrap_ci(inf, "portfolio", "sharpe")
+    if inf.get("state") != "ok":
+        return
+    summ = inf["summary"]
+    sett = summ.get("bootstrap_settings") or {}
+    d["boot_settings"] = {"level": _num(sett.get("level")) or 0.95, "reps": sett.get("reps"),
+                          "method": sett.get("method"), "block_rule": sett.get("block_rule")}
+    order = [x for x in (sett.get("series_order") or []) if x in (summ.get("bootstrap") or {})] or \
+        list((summ.get("bootstrap") or {}).keys())
+    order = (["portfolio"] if "portfolio" in order else []) + [x for x in order if x != "portfolio"]
+    cf = summ.get("closed_form") or {}
+    dsr = ((summ.get("trials") or {}).get("dsr") or {})
+    d["boot_rows"] = []
+    for sname in order:
+        sh = artifacts.bootstrap_ci(inf, sname, "sharpe") or {}
+        c = cf.get(sname) or {}
+        d["boot_rows"].append({
+            "series": SLEEVE_NAMES.get(sname, sname), "key": sname, "point": sh.get("point"), "lo": sh.get("lo"),
+            "hi": sh.get("hi"), "excludes_zero": sh.get("excludes_zero"), "psr": _num(c.get("psr_gt_0")),
+            "skew": _num(c.get("skew")), "kurt": _num(c.get("kurtosis")), "min_trl": _num(c.get("min_trl_years")),
+            "dsr": _num((dsr.get(sname) or {}).get("n_eff_c16_c22"))})
+    tri = summ.get("trials") or {}
+    nch = tri.get("n_choices") or {}
+    d["dsr_note"] = {"n_eff": _num(nch.get("n_eff_c16_c22")), "n_raw": _num(nch.get("n_raw_c16_c22")),
+                     "n_all": _num(nch.get("n_raw_all_rounds")),
+                     "ledger": (tri.get("ledger") or {}).get("path")}
+    for r in d["boot_rows"]:
+        rng = (tri.get("dsr_range") or {}).get(r["key"]) or {}
+        r["dsr_lo"], r["dsr_hi"] = _num(rng.get("min")), _num(rng.get("max"))
+    nulls = (summ.get("nulls") or {})
+    d["null_settings"] = nulls.get("settings") or {}
+    d["null_rows"] = []
+    for sname, t in (nulls.get("sleeves") or {}).items():
+        circ = ((t or {}).get("circular") or {}).get("total_pnl") or {}
+        shuf = ((t or {}).get("shuffle") or {}).get("total_pnl") or {}
+        d["null_rows"].append({"series": SLEEVE_NAMES.get(sname, sname), "key": sname, "real": _num(circ.get("real")),
+                               "null_mean": _num(circ.get("null_mean")), "q05": _num(circ.get("null_q05")),
+                               "q95": _num(circ.get("null_q95")), "timing": _num(circ.get("timing_component")),
+                               "p": _num(circ.get("p_value")), "p_holm": _num(circ.get("p_holm_6_sleeves")),
+                               "n": circ.get("n_paths"), "p_shuffle": _num(shuf.get("p_value")),
+                               "n_shuffle": shuf.get("n_paths")})
+    d["null_rows"].sort(key=lambda r: list(SLEEVE_NAMES).index(r["key"]) if r["key"] in SLEEVE_NAMES else 99)
+    mt = summ.get("multiple_testing") or {}
+    fam = [("published", "Published sleeves vs cash"), ("trial_family", "Every configuration tried (trials ledger)"),
+           ("beta_estimated", "Configurations at an estimated β")]
+    d["mt_rows"] = []
+    for key, label in fam:
+        spa = mt.get(f"spa_{key}") or {}
+        stepm = mt.get(f"stepm_{key}") or {}
+        pbo = mt.get(f"pbo_{key}") or (mt.get("pbo_all_trials") if key == "trial_family" else None) or {}
+        if not spa and not stepm and not pbo:
+            continue
+        d["mt_rows"].append({"label": label, "n": spa.get("n_strategies") or pbo.get("n_configurations"),
+                             "spa_p": _num(spa.get("p_consistent")), "best": spa.get("best"),
+                             "superior": stepm.get("superior"), "pbo": _num(pbo.get("pbo")),
+                             "pbo_n": pbo.get("n_configurations")})
+    if mt.get("pbo_portfolio_configs"):
+        d["pbo_portfolio"] = mt["pbo_portfolio_configs"]
+    d["inf_headline"] = list(summ.get("headline") or [])
+    d["inf_conventions"] = summ.get("conventions") or {}
+    # real-settlement benchmarks (benchmarks.json)
+    bm = inf.get("benchmarks") or {}
+    co = bm.get("co_movement") or {}
+    idx = [x for x in (bm.get("indices") or []) if isinstance(x, str)]
+    if co and idx:
+        d["bench_indices"] = idx
+        d["bench_rows"] = []
+        for sname in ("portfolio", "s1c", "s3", "s4", "always_short_straddle"):
+            if sname not in co:
+                continue
+            cells = {}
+            for ix in idx:
+                a = ((co[sname].get(ix) or {}).get("all") or {})
+                cells[ix] = {"corr": _num(a.get("corr_daily")), "beta": _num(a.get("beta")),
+                             "sharpe_diff": _num(a.get("sharpe_diff"))}
+            d["bench_rows"].append({"series": SLEEVE_NAMES.get(sname, sname), "key": sname, "cells": cells})
+        ib = bm.get("implied_beta") or {}
+        d["implied_beta"] = []
+        for ix in ("PUT", "WPUT"):
+            b = ib.get(ix) or {}
+            if not b:
+                continue
+            by = b.get("by_year") or {}
+            d["implied_beta"].append({"index": ix, "overall": _num(b.get("overall")), "n": b.get("n_periods"),
+                                      "years": {str(y): _num(v if not isinstance(v, dict) else v.get("beta"))
+                                                for y, v in by.items()}})
+        d["canonical_beta"] = _num(ib.get("canonical_beta"))
+        d["bench_window"] = bm.get("window")
+    # volatility-forecast evaluation (forecast_eval.json)
+    fe = inf.get("forecast") or {}
+    bw = fe.get("backtest_window") or {}
+    q = ((bw.get("losses") or {}).get("qlike") or {})
+    if q:
+        mcs = ((bw.get("mcs") or {}).get("qlike") or {}).get("90")
+        mcs_set = set(mcs if isinstance(mcs, list) else (mcs or {}).get("included", []) if isinstance(mcs, dict) else [])
+        d["forecast_rows"] = sorted(
+            [{"model": m, "desc": (fe.get("models") or {}).get(m), "qlike": _num(v if not isinstance(v, dict) else v.get("mean")),
+              "in_mcs": (m in mcs_set) if mcs_set else None, "r2": _num((bw.get("r2_vol") or {}).get(m)),
+              "rank": ((bw.get("rank") or {}).get("qlike") or {}).get(m),
+              "mean_vol": _num((bw.get("mean_forecast_vol") or {}).get(m))} for m, v in q.items()],
+            key=lambda r: (r["qlike"] is None, r["qlike"]))
+        d["forecast_meta"] = {"start": bw.get("start"), "end": bw.get("end"), "n": bw.get("n"),
+                              "horizon": bw.get("horizon"), "realised": _num(bw.get("mean_realised_vol"))}
+
+
+# ── Overview ──────────────────────────────────────────────────────────────────
+def key_results(p2: dict, p4: dict | None, hedge: dict | None, surf: dict, inf: dict) -> list[dict]:
+    """The three headline results, each with its interval or the reason it has none."""
+    out = []
+    # 1. surface fit: half-spread units when the surface artifacts exist, else the stored OOS RMSE
+    heston = None
+    if surf.get("state") == "ok":
+        hkey = heston_model_key(surf["models"])
+        rows = surf.get("scorecard_rows") or []
+        hrow = next((r for r in rows if r["model"] == hkey), None) if hkey else None
+        heston = dict(hrow["oos"], scope="out-of-sample") if hrow else (
+            artifacts.residual_stats(surf["residuals"], hkey) if hkey else None)
+        best = rows[0] if rows and rows[0]["model"] != hkey else None
+    if heston and _num(heston.get("median_abs_hs")) is not None:
+        scope = heston.get("scope")
+        ref = (f"; an interpolating {model_label(best['model'])} surface scores {_fmt(best['oos']['median_abs_hs'], '.2f')}"
+               if best else "")
+        out.append({"key": ("Model vs market (out of sample)" if scope == "out-of-sample"
+                            else f"Model vs market ({scope or 'scope not stated'})"),
+                    "value": _fmt(heston["median_abs_hs"], ".1f"), "unit": "half-spreads",
+                    "detail": (f"Heston median |model − mid|, {_fmt(heston.get('n'), ',')} quotes of "
+                               f"{surf['session']}; {_fmt(heston.get('inside_spread_pct'), '.1f')}% inside the bid–ask{ref}"),
+                    "ci": None,
+                    "ci_note": "no interval in the scorecard; one session, Yahoo quotes without a quote time",
+                    "href": "surface.html#scorecard", "source": f"data_store/surface/{surf['session']}/"})
+    elif p2.get("spx_oos_rmse") is not None:
+        rows = p2.get("oos_rows") or []
+        rng = (f"; per expiry {_fmt(min(r['rmse'] for r in rows), '.2f')}–{_fmt(max(r['rmse'] for r in rows), '.2f')}"
+               if rows else "")
+        out.append({"key": "Model vs market (out of sample)",
+                    "value": _fmt(p2["spx_oos_rmse"], ".2f"), "unit": "vol pts RMSE",
+                    "detail": (f"Heston, {_fmt(p2.get('n_oos'), ',')} quotes not used in the fit"
+                               f" ({p2.get('session')}){rng}"),
+                    "ci": None, "ci_note": "half-spread units need the surface scorecard, not yet generated",
+                    "href": "calibration.html#oos", "source": f"data_store/calibrations/{p2.get('calib_file')}"})
+    # 2. hedging: Greek P&L explain of the C7 hedged straddle
+    if hedge:
+        out.append({"key": "Hedged-straddle P&L explain",
+                    "value": _fmt(hedge["explained_share"] * 100, ".2f"), "unit": "% of variance",
+                    "detail": (f"Greek terms of a daily delta-hedged 1-year ATM straddle, {hedge['start'][:4]} "
+                               f"({hedge['n']} sessions); residual RMS {_fmt(hedge['rms_resid'], '.2f')} vs "
+                               f"{_fmt(hedge['rms_total'], '.1f')} index pts"),
+                    "ci": None, "ci_note": "one path, with the realised Δσ inside the Taylor terms: an accounting check, not a forecast",
+                    "href": "risk.html#hedge", "source": "data_store/backtest/delta_hedge_2020.parquet"})
+    # 3. backtest: the portfolio Sharpe with its bootstrap interval and the S3 timing null
+    if p4 and p4.get("kpi"):
+        k = p4["kpi"]
+        ci = artifacts.bootstrap_ci(inf, "portfolio", "sharpe") if inf.get("state") == "ok" else None
+        s3 = (((inf.get("summary") or {}).get("nulls") or {}).get("sleeves") or {}).get("s3") if ci else None
+        circ = ((s3 or {}).get("circular") or {}).get("total_pnl") or {}
+        if ci:
+            p_txt = (f"S3 timing vs {_fmt(circ.get('n_paths'), ',')} exposure-matched circular shifts: p "
+                     f"{_fmt(_num(circ.get('p_value')), '.3f')} (Holm over 6 sleeves {_fmt(_num(circ.get('p_holm_6_sleeves')), '.2f')})"
+                     if circ.get("p_value") is not None else "")
+            out.append({"key": "Backtest Sharpe (mark-to-model)",
+                        "value": _fmt(ci["point"], "+.2f"), "unit": "portfolio",
+                        "detail": (f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]}, β·VIX marks; {p_txt}"),
+                        "ci": (f"{_fmt(ci['level'] * 100, '.0f')}% CI {_fmt(ci['lo'], '+.2f')} to {_fmt(ci['hi'], '+.2f')} "
+                               f"({ci.get('method') or 'bootstrap'}, {_fmt(ci.get('reps'), ',')} draws)"),
+                        "ci_note": None, "href": "research.html#inference",
+                        "source": "data_store/backtest/inference/summary.json"})
+        else:
+            p = k.get("s3_null_p")
+            out.append({"key": "Signal timing vs random entry",
+                        "value": _fmt(p, ".3f"), "unit": "p (S3)",
+                        "detail": (f"{'Not significant' if p is not None and p >= 0.05 else 'Significant'} at 5%; "
+                                   f"portfolio Sharpe {_fmt(k.get('sharpe'), '.2f')} (mark-to-model, "
+                                   f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]})"),
+                        "ci": None, "ci_note": "the bootstrap interval needs the inference artifact, not yet generated",
+                        "href": "research.html#inference", "source": "data_store/backtest/full_results.pkl"})
+    return out
+
+
+def load_overview() -> dict[str, Any]:
+    d = load_page1()
+    d.setdefault("charts", {})
+    p2 = load_page2()
+    for e in p2.get("errors") or []:
+        if e not in d["errors"]:
+            d["errors"].append(e)
+    d["fit"] = {k: p2.get(k) for k in ("session", "calib_file", "spx_rmse", "spx_oos_rmse", "spx_oos_wing_rmse",
+                                       "vix_index_rmse", "active_constraints", "pinned_params", "effective_dof",
+                                       "feller_state", "feller_margin", "n_spx_options", "n_spx_expiries",
+                                       "calib_age", "model_version", "oos_rows", "n_oos")}
+    d["fit"]["tiles"] = p2.get("param_tiles") or []
+    hedge_d: dict = {"errors": [], "charts": {}}
+    try:
+        risk_extras(hedge_d, None)
+    except Exception as e:
+        _record_error(d, "C7 hedge simulation", e)
+    for e in hedge_d.get("errors") or []:
+        d["errors"].append(e)
+    p4 = None
+    try:
+        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
+            st = pickle.load(fh)
+        em = st.get("metrics") or {}
+        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
+        p4 = {"kpi": {"sharpe": _num(em.get("sharpe")), "s3_null_p": _num(em.get("s3_null_p_value")),
+                      "cum_ret": _num(em.get("cumulative_return"))},
+              "start_date": str(pd.Timestamp(eq.index[0]).date()), "end_date": str(pd.Timestamp(eq.index[-1]).date())}
+    except Exception as e:
+        _record_error(d, "backtest engine results (full_results.pkl)", e)
+    try:
+        surf = artifacts.load_surface(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "surface artifacts", e)
+        surf = {"state": "error"}
+    try:
+        inf = artifacts.load_inference(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "backtest inference artifacts", e)
+        inf = {"state": "error"}
+    d["key_results"] = key_results(p2, p4, hedge_d.get("hedge"), surf, inf)
+    if d.get("ts_values"):
+        days = [int(t.rstrip("d")) for t in d["ts_tenors"]]
+        d["charts"]["ts"] = charts.xy(
+            "chart-ts", f"VIX index term structure on {d.get('ts_date')}",
+            x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
+            y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
+            series=[{"name": "VIX family", "type": "line", "color": "cat0", "symbol": "circle", "size": 7, "width": 2,
+                     "data": [[t, v] for t, v in zip(days, d["ts_values"])]}],
+            csv=f"vix_term_structure_{d.get('ts_date')}.csv", grid={"top": 12},
+            describe="^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session; tenor on a linear axis, straight segments.",
+            table=charts.table(f"VIX-family index levels, {d.get('ts_date')}", ["Tenor", "Level (vol pts)#"],
+                               [[t, _fmt(v, ".2f")] for t, v in zip(d["ts_tenors"], d["ts_values"])]))
+    d["pdv_spark"] = sparkline(d.get("pdv_sparkline") or [], height=36, zero=True)
+    d["surface_state"] = surf.get("state")
+    d["inference_state"] = inf.get("state")
+    return d
+
+
+# ── Surface page ──────────────────────────────────────────────────────────────
+MODEL_LABELS = {"heston": "Heston", "heston_v2": "Heston (v2 fit)", "essvi": "eSSVI", "svi": "SVI",
+                "svi_cal": "SVI, calendar-ordered",
+                "ah": "Andreasen–Huge", "bates": "Bates", "rough_heston": "Rough Heston",
+                "quintic": "Quintic OU", "lifted_heston": "Lifted Heston"}
+ARB_LABELS = {"C1_outright": "Outright bounds", "C2_vertical_bound": "Vertical bound",
+              "C2_vertical_spread": "Vertical spread", "C3_vertical_butterfly": "Butterfly",
+              "C4_calendar_spread": "Calendar spread", "C5_calendar_vertical_spread": "Calendar vertical",
+              "C6_calendar_butterfly": "Calendar butterfly"}
+
+
+MODEL_SHORT = {"heston_v2": "Heston", "svi_cal": "SVI-cal", "rough_heston": "Rough Heston"}
+
+
+def model_label(m: str) -> str:
+    return MODEL_LABELS.get(m, m.replace("_", " ").title())
+
+
+def model_short(m: str) -> str:
+    return MODEL_SHORT.get(m, model_label(m))
+
+
+def heston_model_key(models: Iterable[str]) -> str | None:
+    """The production Heston fit among a surface artifact's models ('heston_v2', 'heston')."""
+    return next((m for m in models if str(m).lower().startswith("heston")), None)
+
+
+def _model_surface_heat(params: dict) -> dict:
+    """Heston IV grid of the headline fit (model, not market) as a heatmap."""
+    lm = list(np.round(np.linspace(-0.30, 0.20, 11), 3))
+    rows = heston_model_smile(params, maturities_days=SMILE_MATURITIES_DAYS, log_moneyness=lm)
+    vals = [v * 100 for r in rows for v in r["iv"]]
+    lo, hi = (min(vals), max(vals)) if vals else (0.0, 1.0)
+    out_rows, pts = [], []
+    for r in rows:
+        by = dict(zip(r["lm"], r["iv"]))
+        cells = []
+        for k in lm:
+            v = by.get(round(float(k), 4))
+            if v is None:
+                cells.append(cell("", None, detail=f"{r['T']}d · ln(K/F) {_fmt(k, '+.2f')}: price too small to invert"))
+                pts.append([float(k), float(r["T"]), None])      # the 3D surface needs the full grid
+                continue
+            cells.append(cell(_fmt(v * 100, ".1f"), seq_colour(v * 100, lo, hi),
+                              detail=f"{r['T']}d · ln(K/F) {_fmt(k, '+.2f')} · model IV {_fmt(v * 100, '.2f')}%"))
+            pts.append([float(k), float(r["T"]), round(v * 100, 3)])
+        out_rows.append({"label": f"{r['T']}d", "cells": cells})
+    return {"cols": [_fmt(k, "+.2f") for k in lm], "rows": out_rows, "lo": lo, "hi": hi, "points": pts}
+
+
+def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail) -> list[dict]:
+    """Heatmap rows: one per expiry, one cell per K_EDGES bucket of ln(K/F)."""
+    qb = q.assign(kb=pd.cut(q["k"], K_EDGES, labels=False))
+    heads = _heat_cols(K_EDGES)
+    rows = []
+    for e in exps.index:
+        qe = qb[qb["expiry"] == e]
+        cells = []
+        for b in range(len(K_EDGES) - 1):
+            g = qe[qe["kb"] == b]
+            if g.empty:
+                cells.append(cell("", None, detail=f"{e} · ln(K/F) {heads[b]}: no quotes"))
+                continue
+            v = value(g)
+            cells.append(cell(v["text"], colour(v["value"]), detail=detail(g, v)))
+        rows.append({"label": f"{e[2:]} · {_fmt(exps[e], '.0f')}d", "cells": cells})
+    return rows
+
+
+def load_surface() -> dict[str, Any]:
+    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "surf": None, "model_heat": None,
+                         "session": None, "models": [], "expiries": []}
+    try:
+        path, cal = load_headline_calibration()
+        d["calib_session"] = _calibration_session(cal, path)
+        d["calib_file"] = Path(path).name
+        d["model_heat"] = _model_surface_heat(cal["params"])
+        d["model_params"] = dict(cal["params"])
+    except Exception as e:
+        _record_error(d, "headline calibration", e)
+    try:
+        surf = artifacts.load_surface(DATA)
+        surface_extras(d, surf)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "surface artifacts (data_store/surface)", e)
+    except Exception as e:
+        _record_error(d, "surface views", e)
+    return _clean_keep(d)
+
+
+def surface_extras(d: dict, surf: dict) -> None:
+    """Every Surface-page view of one session's surface artifacts."""
+    d["surf"] = {k: v for k, v in surf.items() if k not in ("residuals",)}
+    if surf.get("state") != "ok":
+        mh = d.get("model_heat")
+        if mh and mh["points"]:
+            d["surface3d"] = {"id": "surface3d", "points": mh["points"], "zmin": mh["lo"], "zmax": mh["hi"],
+                              "stops": list(CIVIDIS_11), "kind": "model"}
+        return
+    res = surf["residuals"]
+    mkt = artifacts.market_quotes(res)
+    session = d["session"] = surf["session"]
+    ref = _latest_market_session()
+    d["stale"] = [_staleness("surface", "Surface artifacts", session, ref)]
+    models = surf["models"]
+    # scores: the producer's scorecard when present, else computed on the residual table
+    if surf.get("scorecard_rows"):
+        d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]), "short": model_short(r["model"]), "oos": r["oos"],
+                            "in_sample": r.get("in_sample"), "n_params": r.get("n_params"),
+                            "n_in_sample": r.get("n_in_sample"), "description": r.get("description"),
+                            "dense": r.get("dense") or {}, "ex_arb": r.get("ex_arb")}
+                           for r in surf["scorecard_rows"]]
+        d["score_source"] = "scorecard.json"
+    else:
+        d["score_rows"] = [{"key": m, "label": model_label(m), "short": model_short(m), "oos": artifacts.residual_stats(res, m)}
+                           for m in models]
+        d["score_source"] = "residuals.parquet"
+    d["score_notes"] = list((surf.get("scorecard") or {}).get("notes") or [])
+    exps = mkt.groupby("expiry")["T_days"].median().sort_values()
+    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum())} for e, t in exps.items()]
+    d["n_quotes"] = int(len(mkt))
+    d["median_half_spread"] = float(mkt["half_spread_vp"].median())
+
+    # market IV heatmap: median mid IV of the quotes in each (expiry, ln(K/F)) bucket
+    lo, hi = float(mkt["mid_iv"].min() * 100), float(mkt["mid_iv"].max() * 100)
+    d["iv_heat"] = {
+        "cols": _heat_heads(K_EDGES), "lo": lo, "hi": hi,
+        "rows": _bucket_grid(
+            mkt, exps,
+            value=lambda g: {"value": float(g["mid_iv"].median() * 100), "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
+            colour=lambda v: seq_colour(v, lo, hi),
+            detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
+                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vp")), "compact": True}
+    pts = []
+    qb = mkt.assign(kb=pd.cut(mkt["k"], K_EDGES, labels=False))
+    for e in exps.index:
+        for b in range(len(K_EDGES) - 1):
+            g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
+            pts.append([round((K_EDGES[b] + K_EDGES[b + 1]) / 2, 4), float(exps[e]),
+                        round(float(g["mid_iv"].median() * 100), 3) if len(g) else None])
+    if sum(1 for q_ in pts if q_[2] is not None) >= 9:
+        d["surface3d"] = {"id": "surface3d", "points": pts, "zmin": lo, "zmax": hi,
+                          "stops": list(CIVIDIS_11), "kind": "quotes"}
+
+    # residual heatmaps, one per model, out-of-sample quotes only, in half-spreads
+    d["resid_heat"] = []
+    for m in models:
+        q = res[res["model"] == m]
+        if "in_sample" in q.columns:
+            q = q[~q["in_sample"]]
+        q = q[pd.to_numeric(q["model_iv"], errors="coerce").notna()]
+        d["resid_heat"].append({
+            "key": m, "label": model_label(m), "cols": _heat_heads(K_EDGES), "n": int(len(q)), "compact": True,
+            "rows": _bucket_grid(
+                q, exps,
+                value=lambda g: {"value": float(g["error_hs"].median()), "text": signed(float(g["error_hs"].median()), ".1f")},
+                colour=lambda v: div_colour(v, 5.0),
+                detail=lambda g, v: (f"{signed(v['value'], '.2f')} half-spreads (median of {len(g)}) · "
+                                     f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% inside"))})
+
+    # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); the
+    # production Heston fit and the best-ranked other model (every model is in
+    # the scorecard and the residual grid), rounded to what the chart can show
+    hkey = heston_model_key(models)
+    ranked = [r["model"] for r in surf.get("scorecard_rows") or []] or models
+    overlay = [m for m in [hkey, next((m for m in ranked if m != hkey), None)] if m]
+    d["slice_models"] = [model_label(m) for m in overlay]
+    series = []
+    for e in exps.index:
+        q = mkt[mkt["expiry"] == e].sort_values("k")
+        if {"bid_iv", "ask_iv"} <= set(q.columns):
+            series.append({"name": f"{e} bid–ask", "type": "errorbar", "color": "muted", "group": e,
+                           "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)] for r in q.itertuples()]})
+        series.append({"name": f"{e} mid", "type": "scatter", "color": "headline", "size": 4, "group": e,
+                       "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r in q.itertuples()]})
+        for j, m in enumerate(overlay):
+            qm = res[(res["model"] == m) & (res["expiry"] == e)].sort_values("k")
+            series.append({"name": f"{e} {model_label(m)}", "type": "line", "color": charts.color_cycle(j + 1),
+                           "width": 1.5, "group": e,
+                           "data": [[round(float(k), 3), round(float(v) * 100, 2)] for k, v in zip(qm["k"], qm["model_iv"])
+                                    if _num(v) is not None]})
+    d["charts"]["slices"] = charts.xy(
+        "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
+        x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
+        y={"name": "Implied vol (%)", "digits": 0, "tipDigits": 2},
+        series=series, tooltip="item", csv=f"smile_slices_{session}.csv",
+        describe=(f"One expiry at a time (choose it above the chart): bid–ask bars, mids and the "
+                  f"{' and '.join(d['slice_models'])} IVs at the quoted strikes."),
+        table=charts.table("Quotes per expiry", ["Expiry", "Days#", "Quotes#", "Median half-spread (vp)#"],
+                           [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
+                             _fmt(float(mkt[mkt["expiry"] == x["expiry"]]["half_spread_vp"].median()), ".2f")]
+                            for x in d["expiries"]]))
+    d["default_exp"] = min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"] if d["expiries"] else None
+
+    # out-of-sample median |model − mid| by expiry, one line per model (scorecard by_expiry)
+    if surf.get("scorecard_rows"):
+        cats = [x["expiry"] for x in d["expiries"]]
+        labels = [f"{e[2:]} · {_fmt(t, '.0f')}d" for e, t in zip(cats, [x["T_days"] for x in d["expiries"]])]
+        ser, tbl = [], []
+        for j, r in enumerate(surf["scorecard_rows"]):
+            be = r.get("by_expiry") or {}
+            vals = [_num((be.get(e) or {}).get("median_abs_hs")) for e in cats]
+            ser.append({"name": model_label(r["model"]), "type": "line", "color": charts.color_cycle(j + 1),
+                        "symbol": "circle", "size": 5, "width": 1.5, "legend": True, "data": vals})
+            tbl.append([model_label(r["model"])] + [_fmt(v, ".1f") for v in vals])
+        d["charts"]["by_expiry"] = charts.xy(
+            "chart-by-expiry", "Median |model − mid| in half-spreads by expiry, every model",
+            x={"type": "category", "categories": labels, "name": "", "interval": "auto", "rotate": 40},
+            y={"name": "Median |z| (half-spreads)", "digits": 0, "tipDigits": 2, "zero": True, "log": False},
+            series=ser, xs=labels, csv=f"median_abs_hs_by_expiry_{session}.csv", grid={"bottom": 72},
+            marks={"y": [{"value": 1.0, "label": "inside the spread", "color": "ok"}]},
+            describe=("All quotes of each expiry (in and out of sample, the scorecard's by-expiry rows); "
+                      "1 half-spread is the edge of the quoted bid–ask."),
+            table=charts.table("Median |model − mid| (half-spreads) by expiry", ["Model"] + [c + "#" for c in labels], tbl))
+
+    # ATM term structure (surface.json): market ATM vol and the eSSVI ATM vol and skew
+    ts = (surf.get("surface") or {}).get("term_structure") or []
+    if ts:
+        ts = sorted(ts, key=lambda t: float(t["T_days"]))
+        d["charts"]["atm_ts"] = charts.xy(
+            "chart-atm-ts", "ATM implied vol by expiry: quotes and the eSSVI fit",
+            x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
+            y={"name": "ATM vol (%)", "digits": 1, "tipDigits": 2},
+            series=[{"name": "ATM mid (quotes)", "type": "scatter", "color": "headline", "size": 6, "legend": True,
+                     "data": [[float(t["T_days"]), _num(t.get("atm_vol_mid_quotes"))] for t in ts
+                              if _num(t.get("atm_vol_mid_quotes")) is not None]},
+                    {"name": "eSSVI ATM", "type": "line", "color": "cat1", "width": 1.5, "legend": True,
+                     "data": [[float(t["T_days"]), _num(t.get("atm_vol_essvi"))] for t in ts
+                              if _num(t.get("atm_vol_essvi")) is not None]}],
+            tooltip="axis", csv=f"atm_term_structure_{session}.csv",
+            describe="ATM implied vol per quoted expiry, from the mids at the parity forward and from the eSSVI surface.",
+            table=charts.table("ATM term structure", ["Expiry", "Days#", "ATM mid (%)#", "eSSVI ATM (%)#",
+                                                      "eSSVI ATM skew#", "Parity r#", "Parity q#", "Quotes#"],
+                               [[t.get("expiry"), _fmt(_num(t.get("T_days")), ".0f"), _fmt(_num(t.get("atm_vol_mid_quotes")), ".2f"),
+                                 _fmt(_num(t.get("atm_vol_essvi")), ".2f"), signed(_num(t.get("atm_skew_essvi")), ".3f"),
+                                 _pct_prose(_num(t.get("r")), 2, signed=False), _pct_prose(_num(t.get("q")), 2, signed=False),
+                                 _fmt(t.get("n_quotes"), ",")] for t in ts]))
+
+    # static-arbitrage screen and repair (surface.json)
+    arb = (surf.get("surface") or {}).get("arbitrage") or {}
+    if arb:
+        keys = list((arb.get("n_rows") or {}).keys()) or list((arb.get("mid_violations") or {}).keys())
+        d["arb_rows"] = [{"key": k, "label": ARB_LABELS.get(k, k.replace("_", " ")),
+                          "rows": (arb.get("n_rows") or {}).get(k),
+                          "mid": (arb.get("mid_violations") or {}).get(k),
+                          "mid_tick": (arb.get("mid_violations_gt_tick") or {}).get(k),
+                          "exec": (arb.get("executable_violations") or {}).get(k),
+                          "max_mid": (arb.get("max_mid_violation_index_points") or {}).get(k)} for k in keys]
+        d["arb"] = {k: arb.get(k) for k in ("n_quotes", "n_quotes_in_executable_violation", "n_quotes_in_mid_violation",
+                                            "constraint_set")}
+        d["arb_repair"] = arb.get("repair") or {}
+        d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
+                             for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
+        d["fit_set"] = (surf.get("surface") or {}).get("fit_set") or {}
+        d["universe"] = (surf.get("surface") or {}).get("universe") or {}
+        d["inputs"] = (surf.get("surface") or {}).get("inputs") or {}
+
+    # VIX replicated from the same chain (vix_replication.json)
+    vx = surf.get("vix")
+    if vx:
+        d["vix_rows"] = []
+        for tick in ("VIX9D", "VIX", "VIX3M", "VIX6M"):
+            row = (vx.get("indices") or {}).get(tick)
+            if not row:
+                continue
+            off = row.get("official")
+            off_close = _num(off.get("close")) if isinstance(off, dict) else _num(off)
+            d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")), "official": off_close,
+                                  "gap": _num(row.get("gap_vs_official")), "method": row.get("headline_method"),
+                                  "in_range": row.get("official_inside_day_range"),
+                                  "day_range": ([_num(off.get("low")), _num(off.get("high"))]
+                                                if isinstance(off, dict) and off.get("low") is not None else None)})
+        d["vix_beta"] = vx.get("beta") or {}
+        d["vix_notes"] = list(vx.get("gap_notes") or [])
+        d["vix_deviations"] = list(vx.get("deviations") or [])
+        d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")), "vs": _num(r.get("var_swap_vol")),
+                       "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
+                       "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
+                       "n": (r.get("n_puts") or 0) + (r.get("n_calls") or 0)}
+                      for r in sorted(vx.get("strip") or [], key=lambda r: _num(r.get("days")) or 0)]
+        if d["strip"]:
+            d["charts"]["strip"] = charts.xy(
+                "chart-strip", "Variance-swap vol and ATM vol by expiry, same chain",
+                x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
+                y={"name": "Vol (%)", "digits": 0, "tipDigits": 2},
+                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "color": "cat0", "symbol": "circle",
+                         "size": 5, "width": 1.5, "legend": True,
+                         "data": [[r["days"], r["vs"]] for r in d["strip"] if r["vs"] is not None and r["days"] is not None]},
+                        {"name": "ATM vol (quotes)", "type": "line", "color": "cat1", "symbol": "diamond", "size": 5,
+                         "width": 1.5, "dash": True, "legend": True,
+                         "data": [[r["days"], r["atm"]] for r in d["strip"] if r["atm"] is not None and r["days"] is not None]}],
+                tooltip="axis", csv=f"varswap_strip_{session}.csv",
+                describe="The single-term variance-swap vol of every stored expiry against its ATM vol; the gap is the skew premium.",
+                table=charts.table("Variance-swap strip", ["Expiry", "Days#", "Var-swap vol#", "ATM vol#",
+                                                           "Var-swap − ATM (vp)#", "ATM / var-swap#", "Strikes#"],
+                                   [[r["expiry"], _fmt(r["days"], ".0f"), _fmt(r["vs"], ".2f"), _fmt(r["atm"], ".2f"),
+                                     signed(r["diff"], ".2f"), _fmt(r["ratio"], ".3f"), _fmt(r["n"], ",")] for r in d["strip"]]))
+
+    # every session the surface report has covered (index.json)
+    idx = surf.get("index") or []
+    if idx:
+        mk = [m for m in models]
+        d["history_models"] = [{"key": m, "label": model_label(m)} for m in mk]
+        d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
+                                 "arb_out": r.get("arbitrage_quotes_outside_spread"),
+                                 "vix_rep": _num(r.get("vix_replicated")), "vix_off": _num(r.get("vix_official")),
+                                 "beta": _num(r.get("atm_over_vix_official")),
+                                 "m": {m: (r.get("models") or {}).get(m) or {} for m in mk}} for r in idx]
+
+
+def _clean_keep(d: dict) -> dict:
+    """_clean for a page dict whose chart specs are already JSON-ready."""
+    specs = d.pop("charts", {})
+    out = _clean(d)
+    out["charts"] = specs
+    return out
+
+
+# ── Corrections page ─────────────────────────────────────────────────────────
+CORRECTIONS_PATH = DASH / "corrections.json"
+
+
+def waterfall_spec(bridge: list[dict]) -> dict:
+    """C22 waterfall as stacked bars: an invisible base plus the step, in $000s.
+
+    Every level of this bridge is a loss, so the bars hang below zero: the base
+    spans from 0 to the end of the step nearer zero and the visible bar covers
+    the step. A bridge that crosses zero is drawn as plain step bars instead.
+    """
+    start = float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])
+    levels = [start] + [float(r["pnl"]) for r in bridge]
+    cats = ["C21 published"] + [str(r["label"]) for r in bridge] + ["C22 canonical"]
+    k = 1e3
+    base, raise_, lower, total, tip = [None], [None], [None], [start / k], [start / k]
+    all_neg = all(v <= 0 for v in levels)
+    for r, before in zip(bridge, levels[:-1]):
+        dp = float(r["d_pnl"])
+        after = before + dp
+        if all_neg:
+            base.append(max(before, after) / k)
+            raise_.append(-abs(dp) / k if dp > 0 else None)
+            lower.append(-abs(dp) / k if dp < 0 else None)
+        else:
+            base.append(None)
+            raise_.append(dp / k if dp > 0 else None)
+            lower.append(dp / k if dp < 0 else None)
+        total.append(None)
+        tip.append(dp / k)
+    base.append(None)
+    raise_.append(None)
+    lower.append(None)
+    total.append(levels[-1] / k)
+    tip.append(levels[-1] / k)
+    return charts.xy(
+        "chart-waterfall", "C22 waterfall: portfolio P&L from the published C21 run to the canonical run ($000s)",
+        x={"type": "category", "categories": cats, "interval": 0, "rotate": 38, "labelWidth": 150},
+        y={"name": "Portfolio P&L ($000s)", "digits": 0, "tipDigits": 1, "signed": True, "zero": True,
+           "max": 0 if all_neg else None},
+        series=[
+            {"name": "base", "type": "bar", "stack": "w", "invisible": True, "data": base},
+            {"name": "Step raises P&L", "type": "bar", "stack": "w", "color": "pos", "legend": True,
+             "data": raise_, "tip": tip},
+            {"name": "Step lowers P&L", "type": "bar", "stack": "w", "color": "neg", "legend": True,
+             "data": lower, "tip": tip},
+            {"name": "Run total", "type": "bar", "stack": "w", "color": "headline", "fill": 0.35, "legend": True,
+             "data": total},
+        ],
+        xs=cats, tooltip="axis", grid={"bottom": 112, "left": 60}, csv="c22_waterfall.csv",
+        describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} in {len(bridge)} "
+                  "cumulative steps; each bar is one correction's effect on portfolio P&L."),
+        table=charts.table("C22 bridge: each correction applied in turn ($)",
+                           ["Row#", "Correction", "Δ P&L#", "P&L after#", "Sharpe after#"],
+                           [["—", "C21 as published", "", _usd(start), ""]]
+                           + [[r["row"], r["label"], _usd(r["d_pnl"], signed=True), _usd(r["pnl"]),
+                               _fmt(r["sharpe"], ".2f")] for r in bridge]))
+
+
+def load_corrections() -> dict[str, Any]:
+    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "rounds": []}
+    try:
+        reg = json.loads(CORRECTIONS_PATH.read_text())
+        d["repo"] = reg["repo"]
+    except Exception as e:
+        _record_error(d, "corrections registry (dashboard/corrections.json)", e)
+        return _clean_keep(d)
+    # The C22 evidence (bridge rows, β chains, R2 shares, the pre-C22 spread
+    # replay, the S3 null) is the backtest page's own computation, so the two
+    # pages can never quote different numbers.
+    p4 = load_page4()
+    for e in p4.get("errors") or []:
+        d["errors"].append(e)
+    d["p4"] = {k: p4.get(k) for k in ("bridge", "beta", "beta_est", "r2_share", "pre_c22_spread", "kpi",
+                                      "sleeves", "clf_eval", "total_pnl", "final_nav", "start_date", "end_date")}
+    bridge = None
+    try:
+        bridge = _read_csv_rows(DATA / "backtest" / "c22_bridge.csv")
+        if not bridge:
+            raise ValueError("empty C22 bridge")
+        bridge = sorted(bridge, key=lambda r: int(r["row"]))
+    except Exception as e:
+        _record_error(d, "C22 bridge (c22_bridge.csv)", e)
+    final = None
+    try:
+        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
+            em = (pickle.load(fh).get("metrics") or {})
+        final = {"cum_ret": _num(em.get("cumulative_return")), "sharpe": _num(em.get("sharpe"))}
+        if bridge and abs(float(bridge[-1]["sharpe"]) - (final["sharpe"] or 0.0)) > 1e-6:
+            raise ValueError("c22_bridge.csv does not end at the stored run's Sharpe")
+    except Exception as e:
+        _record_error(d, "backtest engine results (full_results.pkl)", e)
+    steps = {r["step"]: r for r in bridge or []}
+    d["c21_pnl"] = (float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])) if bridge else None
+    for rnd in reg["rounds"]:
+        r = dict(rnd)
+        r["findings"] = []
+        for f in rnd["findings"]:
+            f = dict(f)
+            if f.get("bridge_steps") and steps:
+                rows = [steps[s] for s in f["bridge_steps"] if s in steps]
+                if len(rows) != len(f["bridge_steps"]):
+                    _record_error(d, "corrections registry", ValueError(
+                        f"{rnd['id']}: bridge step(s) {f['bridge_steps']} not all in c22_bridge.csv"))
+                f["bridge_rows"] = [int(x["row"]) for x in rows]
+                f["d_pnl"] = float(sum(float(x["d_pnl"]) for x in rows))
+                first = min(rows, key=lambda x: int(x["row"]))
+                last = max(rows, key=lambda x: int(x["row"]))
+                prev = [x for x in bridge if int(x["row"]) == int(first["row"]) - 1]
+                f["sharpe_from"] = _num(prev[0]["sharpe"]) if prev else None
+                f["sharpe_to"] = _num(last["sharpe"])
+            r["findings"].append(f)
+        r["commit_links"] = [{"sha": c, "short": c[:7], "url": f"{reg['repo']}/commit/{c}"} for c in rnd["commits"]]
+        r["n_tests"] = sum(len(f.get("tests") or []) for f in rnd["findings"])
+        d["rounds"].append(r)
+    # the page's data date (sitemap lastmod, X-Dashboard-Data-Date): its newest round
+    d["latest_round_date"] = max((str(r["date"]) for r in reg["rounds"]), default=None)
+    if bridge:
+        d["charts"]["waterfall"] = waterfall_spec(bridge)
+    pts = reg["headline_series"]["points"]
+    hs = []
+    for ptn in pts:
+        v = ptn.get("cum_ret_pct")
+        if v is None and ptn.get("from_artifact") and final and final.get("cum_ret") is not None:
+            v = final["cum_ret"] * 100.0
+        hs.append((ptn["round"], v))
+    d["charts"]["headline"] = charts.xy(
+        "chart-headline", "Published portfolio cumulative return after each round",
+        x={"type": "category", "categories": [r for r, _ in hs], "interval": 0},
+        y={"name": "Cumulative return (%)", "digits": 0, "tipDigits": 1, "signed": True, "tickUnit": "%", "unit": "%"},
+        series=[{"name": "Published cumulative return", "type": "line", "color": "headline", "symbol": "circle",
+                 "size": 7, "data": [v for _, v in hs]}],
+        xs=[r for r, _ in hs], csv="headline_by_round.csv", grid={"top": 12},
+        describe="C17 to C21 as published in the README at the time; C22 from the stored canonical run.",
+        table=charts.table("Published cumulative return by round (%)", ["Round", "Cumulative return#"],
+                           [[r, signed(v, ".1f", "%")] for r, v in hs]))
+    d["n_findings"] = sum(len(r["findings"]) for r in d["rounds"])
+    d["n_tests"] = sum(r["n_tests"] for r in d["rounds"])
+    return _clean_keep(d)
+
+
+# ── Model risk page ──────────────────────────────────────────────────────────
+INVENTORY_PATH = DASH / "model_inventory.json"
+
+# Monitoring thresholds: (green if value <= g, amber if <= a, else red) unless
+# stated otherwise. They are this page's working limits for a research system,
+# stated so a reader can disagree with them; they are not regulatory limits.
+MONITOR_LIMITS = {
+    "calib_age": (1, 4),            # NYSE sessions since the headline fit
+    "params_at_bound": (0, 1),      # parameters on a box bound
+    "oos_rmse": (1.5, 3.0),         # vol pts, all out-of-sample quotes
+    "short_oos_rmse": (2.0, 5.0),   # vol pts, worst expiry within 30 days
+    "vix_rmse": (0.5, 1.0),         # index points
+    "beta_drift": (0.05, 0.10),     # |latest chain ATM/VIX − frozen β|
+    "label_lag": (0, 1),            # sessions the market DB lags the labels
+    "median_abs_hs": (2.0, 5.0),    # half-spreads, Heston out-of-sample median |model − mid|
+    "vix_rep_gap": (0.5, 1.5),      # index pts, |VIX replicated from the chain − Cboe close|
+    "arb_exec_share": (2.0, 5.0),   # % of scored quotes in an executable static-arbitrage row
+}
+
+
+def _rag(value: float | None, limits: tuple) -> str:
+    if value is None:
+        return "na"
+    g, a = limits
+    return "ok" if value <= g else ("watch" if value <= a else "breach")
+
+
+def load_model_risk() -> dict[str, Any]:
+    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
+    try:
+        inv = json.loads(INVENTORY_PATH.read_text())
+        d["inventory"] = inv["models"]
+        d["inventory_about"] = inv.get("about")
+    except Exception as e:
+        _record_error(d, "model inventory (dashboard/model_inventory.json)", e)
+    p2 = load_page2()
+    for e in p2.get("errors") or []:
+        d["errors"].append(e)
+    mon = []
+
+    def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None):
+        lim = MONITOR_LIMITS.get(limits_key)
+        if status is not None:
+            st = status
+        else:
+            st = _rag(value, lim) if lim else "na"
+        mon.append({"model": mid, "check": check, "value": text, "status": st,
+                    "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim else "informational"),
+                    "artifact": artifact, "note": note})
+    fit_art = f"data_store/calibrations/{p2.get('calib_file') or 'joint_cal_<session>.pkl'}"
+    add("M1", "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")), _fmt(p2.get("calib_age")),
+        "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.")
+    add("M1", "Parameters on a box bound", float(len(p2.get("pinned_params") or [])),
+        ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
+        "A parameter on its bound is set by the box, not the market.")
+    add("M1", "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")), _fmt(p2.get("spx_oos_rmse"), ".2f"),
+        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.")
+    short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
+    worst = max(short, key=lambda r: r["rmse"]) if short else None
+    add("M1", "Worst short-dated expiry OOS RMSE (≤ 30 days)", worst["rmse"] if worst else None,
+        f"{_fmt(worst['rmse'], '.2f')} ({worst['expiry']})" if worst else "—", "short_oos_rmse", fit_art,
+        "One-factor Heston misses the short end; see the calibration page.")
+    add("M1", "VIX index RMSE (index pts)", _num(p2.get("vix_index_rmse")), _fmt(p2.get("vix_index_rmse"), ".2f"),
+        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.")
+    add("M1", "Feller condition (diagnostic, not imposed)", None,
+        f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
+        "Not a no-arbitrage condition; reported, not limited.", status="info")
+    # M3: β drift — the newest stored chain against the frozen backtest β
+    try:
+        with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
+            st = pickle.load(fh)
+        beta = _num(st.get("atm_to_vix_ratio", (st.get("metrics") or {}).get("atm_to_vix_ratio")))
+        be = beta_estimation(None)
+        later = be.get("later") or []
+        newest = later[-1] if later else None
+        drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
+        add("M3", "β drift: newest chain's ATM vol / VIX against the frozen β", drift,
+            (f"{_fmt(newest['ratio'], '.3f')} on {newest['session']} vs β = {_fmt(beta, '.2f')}" if newest else "no later chain"),
+            "beta_drift", "data_store/backtest/full_results.pkl", "The backtest marks every straddle at β·VIX.")
+    except Exception as e:
+        _record_error(d, "β estimation chains", e)
+    # M4: market DB lag behind the labels (the regime card's inputs)
+    try:
+        labels = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
+        lab_date = str(pd.Timestamp(labels.index[-1]).date())
+        with _db() as con:
+            db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
+        lag = session_age(db_date, lab_date)
+        add("M4", "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag), "label_lag",
+            "data_store/vol_system.db", f"Labels {lab_date}; market DB {db_date}.")
+    except Exception as e:
+        _record_error(d, "rule labels / market DB", e)
+    # M2: Greeks surface built from the headline fit
+    g = load_page3()
+    for e in g.get("errors") or []:
+        d["errors"].append(e)
+    add("M2", "Greeks surface built from the headline fit", None,
+        "yes" if g.get("source_matches_headline") else ("no" if g.get("source_matches_headline") is False else "unknown"),
+        "", "data_store/greeks/greeks_surface.parquet", f"Surface {g.get('surface_date')}.",
+        status=("ok" if g.get("source_matches_headline")
+                else ("breach" if g.get("source_matches_headline") is False else "watch")),
+        limits_text="OK if yes · watch if unknown · breach if no")
+    # M8: classifier vs persistence (research only)
+    try:
+        with open(DATA / "signals" / "regime_classifier.pkl", "rb") as f:
+            ev = (getattr(pickle.load(f), "metadata_", None) or {}).get("evaluation") or {}
+        if ev.get("oos_acc") is not None:
+            gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
+            add("M8", "Classifier accuracy minus the persistence baseline (pts)", gap, signed(gap, ".1f"),
+                "", "data_store/signals/regime_classifier.pkl",
+                "Research only since C17: below the no-skill baseline, so it never trades.",
+                status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below")
+    except Exception as e:
+        _record_error(d, "research classifier (regime_classifier.pkl)", e)
+    # surface artifacts: spread-unit fit quality and data checks on the stored chain
+    try:
+        surf = artifacts.load_surface(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "surface artifacts (data_store/surface)", e)
+        surf = {"state": "error"}
+    if surf.get("state") == "ok":
+        sart = f"data_store/surface/{surf['session']}/"
+        hkey = heston_model_key(surf["models"])
+        row = next((r for r in surf.get("scorecard_rows") or [] if r["model"] == hkey), None)
+        st_ = row["oos"] if row else (artifacts.residual_stats(surf["residuals"], hkey) if hkey else {})
+        add("M1", "Heston median |model − mid|, out of sample (half-spreads)", _num(st_.get("median_abs_hs")),
+            f"{_fmt(st_.get('median_abs_hs'), '.1f')} ({_fmt(st_.get('inside_spread_pct'), '.1f')}% inside)",
+            "median_abs_hs", sart + ("scorecard.json" if row else "residuals.parquet"),
+            f"{_fmt(st_.get('n'), ',')} quotes of {surf['session']}; Yahoo quotes carry no quote time.")
+        rep = ((surf.get("vix") or {}).get("indices") or {}).get("VIX") or {}
+        gap = _num(rep.get("gap_vs_official"))
+        add("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
+            abs(gap) if gap is not None else None, signed(gap, ".2f") if gap is not None else "—", "vix_rep_gap",
+            sart + "vix_replication.json", "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.")
+        arb = (surf.get("surface") or {}).get("arbitrage") or {}
+        n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
+        share = n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None
+        add("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
+            f"{_fmt(share, '.1f')}% ({_fmt(n_ex, ',.0f')} of {_fmt(n_q, ',.0f')})" if share is not None else "—",
+            "arb_exec_share", sart + "surface.json", "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.")
+    else:
+        for mid_, chk in (("M1", "Heston median |model − mid|, out of sample (half-spreads)"),
+                          ("Data", "VIX replicated from the stored chain − Cboe close (index pts)"),
+                          ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)")):
+            add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
+                "Shown once the surface report has run.", status="na", limits_text="—")
+    # grouped by model (M1 … M9), data checks last; checks keep their order within a group
+    rank = {m: i for i, m in enumerate([f"M{i}" for i in range(1, 10)] + ["Data"])}
+    mon.sort(key=lambda m: rank.get(m["model"], len(rank)))
+    d["monitors"] = mon
+    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k) for k in ("ok", "watch", "breach", "info", "na")}
+    d["limits"] = MONITOR_LIMITS
+    return _clean_keep(d)
+
+
+# ── Page chrome: status bar, ticker strip, freshness table ───────────────────
+_CHROME_CACHE: dict = {}
+
+
+def _stat_key(*paths: Path) -> tuple:
+    out = []
+    for p in paths:
+        try:
+            st = Path(p).stat()
+            out.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((str(p), None, None))
+    return tuple(out)
+
+
+def build_info() -> dict:
+    """The build's commit: BUILD_SHA / GITHUB_SHA, else `git rev-parse` (read-only)."""
+    sha = os.environ.get("BUILD_SHA") or os.environ.get("GITHUB_SHA")
+    if not sha:
+        try:
+            sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True,
+                                 text=True, timeout=5, check=False).stdout.strip() or None
+        except Exception as exc:          # git missing: the status bar says "unknown"
+            _logger.info("git rev-parse unavailable: %s", exc)
+            sha = None
+    return {"sha": sha, "short": sha[:7] if sha else None}
+
+
+def load_chrome() -> dict:
+    """Ticker strip, per-source as-of dates and staleness for every page.
+
+    Failures here are shown (a red "n/a" in the status bar), not raised: each
+    page's own loader owns its errors, and any page error blocks the publish.
+    """
+    cal_dir = DATA / "calibrations"
+    key = _stat_key(DATA / "vol_system.db", DATA / "signals" / "regime_labels.parquet", cal_dir,
+                    DATA / "greeks" / "greeks_surface.parquet", DATA / "backtest" / "full_results.parquet",
+                    DATA / "surface", DATA / "backtest" / "inference") + (str(DATA),)
+    if key in _CHROME_CACHE:
+        return _CHROME_CACHE[key]
+    c: dict[str, Any] = {"ticker": [], "sources": [], "worst": "ok", "build": build_info(),
+                         "model_version": None}
+    spx_date = vix_date = labels_date = None
+    try:
+        spx = _read_spx()
+        last, prev = float(spx["close"].iloc[-1]), float(spx["close"].iloc[-2])
+        spx_date = str(spx.index[-1].date())
+        c["ticker"].append({"label": "SPX", "value": _fmt(last, ",.2f"), "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True),
+                            "note": None})
+        vd = _read_vix_daily()
+        vix_date = str(vd.index[-1].date())
+        c["ticker"].append({"label": "VIX", "value": _fmt(float(vd.iloc[-1]), ".2f"),
+                            "chg": pnl(float(vd.iloc[-1]) - float(vd.iloc[-2]), ".2f", glyph=True),
+                            "note": None if vix_date == spx_date else vix_date})
+        vw = _read_vix_wide()
+        if "^VVIX" in vw.columns:
+            vv = vw["^VVIX"].dropna()
+            c["ticker"].append({"label": "VVIX", "value": _fmt(float(vv.iloc[-1]), ".2f"),
+                                "chg": pnl(float(vv.iloc[-1]) - float(vv.iloc[-2]), ".2f", glyph=True),
+                                "note": None if str(vv.index[-1].date()) == spx_date else str(vv.index[-1].date())})
+        cols = [t for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M") if t in vw.columns]
+        full = vw[cols].dropna() if len(cols) == 4 else pd.DataFrame()
+        if len(full):
+            row = full.iloc[-1]
+            ts_date = str(full.index[-1].date())
+            slope = float(row["^VIX6M"] - row["^VIX9D"])
+            c["ticker"].append({"label": "9D→6M", "value": signed(slope, ".2f"),
+                                "chg": "contango" if slope > 0 else "backwardation",
+                                "note": None if ts_date == spx_date else ts_date})
+            c["ticker"].append({"label": "VIX/VIX3M", "value": _fmt(float(row["^VIX"] / row["^VIX3M"]), ".3f"),
+                                "chg": None, "note": None if ts_date == spx_date else ts_date})
+    except Exception as exc:
+        _logger.info("chrome: market data unavailable (%s)", exc)
+    try:
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])["regime"].dropna()
+        labels_date = str(pd.Timestamp(rl.index[-1]).date())
+        lab = int(rl.iloc[-1])
+        c["ticker"].append({"label": "RULE", "value": _REGIME_LABELS[lab], "chg": _REGIME_NAMES[lab].lower(),
+                            "note": labels_date})
+    except Exception as exc:
+        _logger.info("chrome: labels unavailable (%s)", exc)
+    calib_date = greeks_date = None
+    try:
+        path = latest_good_calibration_path()
+        if path:
+            with open(path, "rb") as f:
+                cal = pickle.load(f)
+            calib_date = _calibration_session(cal, path)
+            c["model_version"] = cal.get("model_version")
+    except Exception as exc:
+        _logger.info("chrome: calibration unavailable (%s)", exc)
+    try:
+        prov = _greeks_provenance(DATA / "greeks" / "greeks_surface.parquet")
+        greeks_date = _date_str(prov.get("spot_date") or prov.get("as_of_date"))
+    except Exception as exc:
+        _logger.info("chrome: greeks unavailable (%s)", exc)
+    bt_end = None
+    try:
+        eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet", columns=["nav"])
+        bt_end = str(pd.Timestamp(eq.index[-1]).date())
+    except Exception as exc:
+        _logger.info("chrome: backtest unavailable (%s)", exc)
+    surf_sessions = artifacts.surface_sessions(DATA)
+    ref = max([x for x in (spx_date, labels_date) if x], default=None)
+    c["latest"] = ref
+    rows = [
+        ("SPX", "SPX close (market DB)", spx_date, "data_store/vol_system.db", True),
+        ("VIX", "VIX close (market DB)", vix_date, "data_store/vol_system.db", True),
+        ("LABELS", "Rule regime labels", labels_date, "data_store/signals/regime_labels.parquet", True),
+        ("FIT", "Headline Heston fit", calib_date, "data_store/calibrations/", True),
+        ("GREEKS", "Greeks surface", greeks_date, "data_store/greeks/greeks_surface.parquet", True),
+        ("SURFACE", "Quote-grade surface", surf_sessions[-1] if surf_sessions else None, "data_store/surface/<session>/", False),
+        ("BACKTEST", "Backtest window end (fixed)", bt_end, "data_store/backtest/full_results.parquet", False),
+    ]
+    for short, label, date, art, aged in rows:
+        age = session_age(date, ref) if (aged and date) else None
+        level = (stale_level(age) if aged else "ok") if date else ("missing" if aged else "unknown")
+        c["sources"].append({"short": short, "label": label, "date": date, "age": age, "level": level,
+                             "artifact": art, "aged": aged})
+        if level in ("error", "missing"):
+            c["worst"] = "error"
+        elif level == "warn" and c["worst"] == "ok":
+            c["worst"] = "warn"
+    c["holidays"] = [str(h.date()) for h in nyse_holidays(
+        f"{(ref or '2026')[:4]}-01-01", f"{int((ref or '2026')[:4]) + 2}-12-31")]
+    _CHROME_CACHE.clear()
+    _CHROME_CACHE[key] = c
+    return c
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────────
 # Per-route data date for the sitemap (freeze_site.py reads the header): the
-# date of the data each page shows. The backtest page used "run_date", a key
-# full_results.pkl never had, so it got no lastmod; its data date is the last
-# session of the stored equity curve.
-_DATA_DATE_KEYS = {"/": "latest_session", "/calibration": "session",
-                   "/greeks": "surface_date", "/backtest": "end_date"}
+# date of the data each page shows.
+_DATA_DATE_KEYS = {"/": "latest_session", "/calibration": "session", "/risk": "surface_date",
+                   "/research": "end_date", "/surface": "session", "/corrections": "latest_round_date",
+                   "/model-risk": None}
 
-
-# Chart.js is vendored (dashboard/static, copied into the site by freeze_site.py)
-# so no third-party script sits on the critical path. The relative src works at
-# every route because all routes are top-level. `sri` is the sha384 of the
-# vendored file, which is byte-identical to the npm build on jsDelivr and unpkg;
-# base.html falls back to `cdn` (with the same SRI) only if the local copy fails,
-# and to the charts' data summaries if both fail.
-CHARTJS = {
-    "version": "4.4.3",
-    "src": "static/chart.umd-4.4.3.js",
-    "sri": "sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54",
-    "cdn": "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js",
+# Third-party code served from dashboard/static/vendor (copied into the site by
+# freeze_site.py): no script comes from another origin. `sri` is the sha384 of
+# the vendored file; freeze_site.py refuses to publish if a file no longer
+# matches, and the pages carry it as the integrity attribute.
+#   echarts: a tree-shaken build of Apache ECharts 6.1.0 (Apache-2.0) made by
+#            dashboard/echarts_build (pinned lockfile; `npm ci && node build.mjs`
+#            reproduces the file byte for byte).
+#   echarts-gl: the npm dist file of echarts-gl 2.1.0 (BSD-3-Clause) with one
+#            patch (dashboard/echarts_build/patch_gl.mjs): its compositor's
+#            `new Function` is replaced by a small arithmetic parser, so the
+#            pages need no 'unsafe-eval'. Loaded only when a reader asks for the
+#            3D surface view.
+VENDORED: dict[str, dict] = {
+    "echarts": {
+        "version": "6.1.0", "license": "Apache-2.0",
+        "src": "static/vendor/echarts-6.1.0-desk.min.js",
+        "sri": "sha384-91oWllvVjknURH3iVY4aXknr/M7IadTMvoXGVuobX0GYrzD8gMLUwsVnC+tRn1k4",
+        "upstream": "npm echarts@6.1.0, tree-shaken by dashboard/echarts_build",
+        "license_file": "echarts-LICENSE.txt",
+    },
+    "echarts-gl": {
+        "version": "2.1.0", "license": "BSD-3-Clause",
+        "src": "static/vendor/echarts-gl-2.1.0-csp.min.js",
+        "sri": "sha384-YXckRCK1pIX+JWGuGeaHlMZOpZViZwkgsac4HKofKED09rnmDjqdcStCMfmOOp0T",
+        "upstream": "npm echarts-gl@2.1.0 dist, patched by dashboard/echarts_build/patch_gl.mjs",
+        "license_file": "echarts-gl-LICENSE.txt",
+    },
 }
+
+# The site's own stylesheet and script (same origin; versioned by content hash
+# so a cached old copy is never paired with a new page).
+OWN_ASSETS = ("static/desk.css", "static/desk.js")
+FONT_PRELOAD = "static/fonts/InterDesk-4.1-wght400-700.woff2"
+
+# Every page is static; all JavaScript is in static files, chart data is in
+# <script type="application/json"> blocks (never executed), so scripts are
+# limited to this origin. style-src allows inline style attributes (heatmap
+# cell colours). frame-ancestors / report-uri are not honoured in a <meta> CSP.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; "
+       "base-uri 'self'; form-action 'none'")
+
+
+def own_asset(rel: str) -> dict:
+    """src with a content-hash query (cache busting) for one of OWN_ASSETS."""
+    data = (DASH / rel).read_bytes()
+    return {"src": f"{rel}?v={hashlib.sha256(data).hexdigest()[:12]}", "bytes": len(data)}
 
 
 @app.context_processor
 def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
-    return {"canonical": canonical_url(route), "page_file": ROUTES[route],
-            "chartjs": CHARTJS}
+    return {"canonical": canonical_url(route), "page_file": ROUTES[route], "route": route,
+            "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
+            "cividis": CIVIDIS_11, "berlin": BERLIN_11,
+            "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
+            "font_preload": FONT_PRELOAD, "chrome": load_chrome(), "page_title": dict(
+                (r, label) for r, label, *_ in NAV).get(route, "Overview")}
 
 
 def _render(template: str, d: dict):
@@ -2162,15 +3767,21 @@ def _render(template: str, d: dict):
              if s.get("level") in ("warn", "error")]
     if stale:
         resp.headers["X-Dashboard-Stale"] = ", ".join(stale)
-    data_date = d.get(_DATA_DATE_KEYS.get(request.path, ""))
+    key = _DATA_DATE_KEYS.get(request.path)
+    data_date = d.get(key) if key else None
     if data_date:
         resp.headers["X-Dashboard-Data-Date"] = str(data_date)
     return resp
 
 
 @app.route("/")
-def page_market():
-    return _render("index.html", load_page1())
+def page_overview():
+    return _render("index.html", load_overview())
+
+
+@app.route("/surface")
+def page_surface():
+    return _render("surface.html", load_surface())
 
 
 @app.route("/calibration")
@@ -2178,14 +3789,32 @@ def page_calibration():
     return _render("calibration.html", load_page2())
 
 
+@app.route("/risk")
+def page_risk():
+    return _render("risk.html", load_page3())
+
+
+@app.route("/research")
+def page_research():
+    return _render("research.html", load_page4())
+
+
+@app.route("/corrections")
+def page_corrections():
+    return _render("corrections.html", load_corrections())
+
+
+@app.route("/model-risk")
+def page_model_risk():
+    return _render("model-risk.html", load_model_risk())
+
+
 @app.route("/greeks")
-def page_greeks():
-    return _render("greeks.html", load_page3())
-
-
 @app.route("/backtest")
-def page_backtest():
-    return _render("backtest.html", load_page4())
+def page_legacy():
+    """Old routes of the local preview (the frozen site writes redirect pages)."""
+    from flask import redirect
+    return redirect({"/greeks": "/risk", "/backtest": "/research"}[request.path], code=301)
 
 
 # ── Local preview ──────────────────────────────────────────────────────────────

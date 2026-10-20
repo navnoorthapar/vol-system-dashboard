@@ -1,441 +1,171 @@
 {% extends "base.html" %}
-{% set page = "market" %}
-{% block title %}Market — SPX/VIX Vol System{% endblock %}
-{% block og_title %}Market Overview — SPX/VIX Vol System{% endblock %}
-{% block og_description %}End-of-day SPX/VIX regime (rule label), VIX term structure and the PDV realised-vol forecast against implied vol.{% endblock %}
+{% import "_macros.html" as m %}
+{% block og_title %}Overview — Joint SPX/VIX Smile Calibration{% endblock %}
+{% block og_description %}Joint SPX/VIX Heston calibration measured out of sample, a hedged-straddle P&amp;L explain and a mark-to-model backtest with its correction log; end-of-day regime, VIX term structure and data freshness.{% endblock %}
 
 {% block content %}
-{% set _names = {'regime': 'Regime', 'calibration': 'Calibration', 'pdv': 'PDV forecast'} %}
-<div class="page-header">
-  <h1 class="page-title">Market Overview</h1>
-  <div class="page-subtitle">End-of-day rule regime, implied versus forecast volatility, and the VIX term structure.</div>
-  <div class="page-badge" id="freshness-badge" data-holidays='{{ d.holidays|tojson }}'>
-    <span class="nowrap" data-date="{{ d.spx_date or '' }}">Last close {{ d.spx_date|fmt }}</span>
-    {% for s in d.stale %}{% if s.component != 'market' %}<span class="sep">·</span><span class="nowrap">{{ _names[s.component] }} {{ s.date|fmt }}</span>{% if s.age %} <span class="age-{{ s.level }}">({{ s.age }} session{{ 's' if s.age != 1 else '' }} old)</span>{% endif %}{% endif %}{% endfor %}
+{% set f = d.fit or {} %}
+<div class="page-head">
+  <h1 class="page-title">Joint SPX/VIX smile calibration — overview</h1>
+  <p class="page-sub">One stochastic-volatility model fitted every U.S. session to the SPX option smile and the VIX index term structure, scored against the quotes it did not see, carried into Greeks and a hedged P&amp;L explain, and used in a backtest that is reported with every correction made to it.</p>
+  <div class="page-badge">
+    <span class="nowrap">Last close {{ d.spx_date|fmt }}</span><span class="sep">·</span>
+    <span class="nowrap">Rule label {{ d.regime_date|fmt }}</span><span class="sep">·</span>
+    <span class="nowrap">Headline fit {{ f.session|fmt }}</span>{% if f.calib_age %} <span class="age-{{ 'error' if f.calib_age >= 5 else ('warn' if f.calib_age >= 2 else 'ok') }}">({{ f.calib_age|plural('session') }} old)</span>{% endif %}<span class="sep">·</span>
+    <span class="nowrap">PDV forecast {{ d.pdv_date|fmt }}</span>
   </div>
 </div>
-<script>
-/* View-time freshness check. The site is a static end-of-day snapshot, rebuilt
-   after each US close. This counts the NYSE sessions between the snapshot's last
-   close and the most recent session that SHOULD have data by now (viewer's clock),
-   skipping weekends and the NYSE holidays emitted by the server, and escalates
-   with the same thresholds as the server-side banners (2 = amber, 5 = red). */
-(function () {
-  var badge = document.getElementById('freshness-badge');
-  if (!badge) return;
-  var span = badge.querySelector('[data-date]');
-  var dd = span && span.getAttribute('data-date');
-  if (!dd || !/^\d{4}-\d{2}-\d{2}$/.test(dd)) return;
-  var holidays = {};
-  try { JSON.parse(badge.getAttribute('data-holidays') || '[]').forEach(function (h) { holidays[h] = true; }); } catch (e) {}
-  function iso(t) { return new Date(t).toISOString().slice(0, 10); }
-  function isSession(t) { var w = new Date(t).getUTCDay(); return w !== 0 && w !== 6 && !holidays[iso(t)]; }
-  var DAY = 86400000;
-  var probe = new Date();
-  // EOD data for a session is published after ~22:00 UTC; before that, today has no close yet.
-  var t = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
-  if (probe.getUTCHours() < 22) t -= DAY;
-  while (!isSession(t)) t -= DAY;
-  var dataDay = Date.parse(dd + 'T00:00:00Z');
-  var behind = 0;
-  for (var x = t; x > dataDay && behind < 400; x -= DAY) { if (isSession(x)) behind++; }
-  var note = document.createElement('span');
-  var cls, txt;
-  if (behind === 0) { cls = 'age-ok'; txt = 'current as of the latest U.S. session'; }
-  else if (behind === 1) { cls = 'age-ok'; txt = 'refreshes after the next U.S. close'; }
-  else { cls = behind >= 5 ? 'age-error' : 'age-warn'; txt = behind + ' sessions behind today'; }
-  note.innerHTML = '<span class="sep">·</span><span class="' + cls + '"></span>';
-  note.lastChild.textContent = txt;
-  badge.appendChild(note);
-})();
-</script>
 
-<!-- ── Row 1: market snapshot ─────────────────────────────────────────────── -->
-<div class="grid grid-4 row">
-
-  <div class="card card-sm">
-    <h2 class="card-label">S&amp;P 500</h2>
-    <div class="card-value">{{ d.spx|fmt(",.2f") }}</div>
-    {% if d.spx_chg is not none %}
-    <div class="stat-row">
-      <span class="stat-change {{ 'up' if d.spx_up else 'down' }}">{{ d.spx_chg|fmt("+.2f") }}%</span>
-      <span>vs previous close</span>
-    </div>
-    {% endif %}
-    <div class="card-sub">Close {{ d.spx_date|fmt }}</div>
-  </div>
-
-  <div class="card card-sm">
-    <h2 class="card-label">VIX  <span class="qual">30-day implied</span></h2>
-    {% if d.vix is not none %}
-    {# One threshold table drives both the chip colour and its words (they disagreed:
-       VIX 19 was yellow beside "NORMAL", VIX 27 red beside "caution"). #}
-    {% set _vb = ('red', 'STRESS — above 30') if d.vix > 30 else (('yellow', 'ELEVATED — 20 to 30') if d.vix > 20 else (('green', 'NORMAL — 15 to 20') if d.vix >= 15 else ('dim', 'LOW — below 15'))) %}
-    <div class="card-value">{{ d.vix|fmt(".2f") }}</div>
-    <div class="stat-row"><span class="chip chip-{{ _vb[0] }}">{{ _vb[1] }}</span></div>
-    <div class="card-sub">{% if d.vix_date and d.vix_date != d.spx_date %}As of {{ d.vix_date }}{% else %}Close {{ d.vix_date|fmt }}{% endif %}</div>
-    {% else %}
-    <div class="card-value dim">—</div>
-    {% endif %}
-  </div>
-  <!-- VVIX -->
-  <div class="card card-sm">
-    <h2 class="card-label">VVIX  <span class="qual">vol of VIX</span></h2>
-    {% if d.vvix is not none %}
-    <div class="card-value">{{ d.vvix|fmt(".2f") }}</div>
-    {% if d.rule and d.rule.gate is not none and d.rule.date == d.vvix_date %}
-    <div class="stat-row">
-      {% if d.vvix > d.rule.gate %}<span class="chip chip-red">ABOVE R2 GATE</span>{% else %}<span class="chip">BELOW R2 GATE</span>{% endif %}
-    </div>
-    <div class="card-sub">Gate {{ d.rule.gate|fmt(".2f") }}: rolling 252-day 80th percentile</div>
-    {% endif %}
-    {% if d.vvix_date and d.vvix_date != d.spx_date %}<div class="card-sub">As of {{ d.vvix_date }}</div>{% endif %}
-    {% else %}
-    <div class="card-value dim">—</div>
-    {% endif %}
-  </div>
-
-  <div class="card card-sm">
-    <h2 class="card-label">VIX term structure</h2>
-    {% if d.ts_values|length >= 2 %}
-    <div class="card-value sm">{{ d.ts_regime|title }}</div>
-    <div class="card-sub">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|fmt("+.2f") }} pts)</div>
-    <div class="card-sub" {% if d.ts_date != d.vix_date %}style="color:var(--amber);"{% endif %}>
-      All tenors {{ d.ts_date }}{% if d.ts_date != d.vix_date %} (latest full curve; VIX is from {{ d.vix_date|fmt }}){% endif %}
-    </div>
-    {% else %}
-    <div class="card-value dim">—</div>
-    {% endif %}
-  </div>
-
+<h2 class="section-title">Key results</h2>
+<div class="kpis" id="key-results" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:8px;">
+  {% for r in d.key_results %}
+  <a class="result" href="{{ r.href }}" style="text-decoration:none;color:inherit;">
+    <span class="result-k">{{ r.key }}</span>
+    <span class="result-v">{{ r.value }}<span class="unit">{{ r.unit }}</span></span>
+    <span class="result-d">{{ r.detail }}</span>
+    {% if r.ci %}<span class="kpi-ci">{{ r.ci }}</span>{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
+    <span class="src">{{ r.source }}</span>
+  </a>
+  {% else %}
+  <div class="result"><span class="result-k">Key results</span><span class="result-d">Unavailable: see the error above.</span></div>
+  {% endfor %}
 </div>
 
-<!-- ── Row 2: regime · PDV vs implied · term-structure chart ─────────────── -->
-<div class="grid grid-3 row">
-
-  <!-- Current regime: the deterministic rule label -->
-  <div class="card">
-    <h2 class="card-label">Current regime <span class="qual">· rule label</span></h2>
+<div class="g">
+  {% call m.panel('state-regime', 'Regime · rule label', 's4', d.regime_date) %}
     {% if d.regime is not none %}
-    <div class="card-value sm" style="display:flex;align-items:center;gap:10px;">
+    <div class="kpi-value" style="display:flex;align-items:center;gap:8px;">
       <span aria-hidden="true" style="width:10px;height:10px;border-radius:2px;background:{{ d.regime_color }};flex-shrink:0;"></span>
       <span>{{ d.regime_label }} · {{ d.regime_name }}</span>
     </div>
-    <div class="card-sub">
-      Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
-      trades on. As of {{ d.regime_date }}.
-    </div>
-    {% if d.rule %}
-    {% set r = d.rule %}
-    <div class="subcard mt12" id="rule-inputs">
-      <div class="small faint" style="margin-bottom:4px;">Rule inputs on {{ r.date }}</div>
-      <div class="kv-2" style="grid-template-columns:repeat(2,minmax(0,1fr));">
-        <div>rv₂₀ <span class="v">{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f") }}%</span></div>
-        <div>VIX <span class="v">{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f") }}%</span></div>
-        <div>VVIX <span class="v">{{ r.vvix|fmt(".2f") }}</span></div>
-        <div>R2 gate <span class="v">{{ r.gate|fmt(".2f") }}</span></div>
-      </div>
-      <div class="small dim" style="margin-top:6px;">
-        {% if r.vvix is not none and r.gate is not none and r.vvix > r.gate %}VVIX above the gate → R2.
-        {% elif r.rv20 is not none and r.vix is not none %}VVIX below the gate; rv₂₀ {{ '>' if r.rv20 > r.vix else '≤' }} VIX → R{{ 0 if r.rv20 > r.vix else 1 }}.{% endif %}
-        {% if r.stored is not none and r.stored != r.label %}<span class="amber">Recomputed label R{{ r.label }} differs from the stored label.</span>{% endif %}
-      </div>
+    <p class="note">Deterministic rule (rv₂₀ against VIX, VVIX gate); the label the backtest trades, lagged one session. Label as of {{ d.regime_date }}.</p>
+    {% if d.rule %}{% set r = d.rule %}
+    <div id="rule-inputs">
+      <p class="note">Rule inputs on {{ r.date }}{% if r.headline_differs %} — the latest session in the market database; the {{ d.regime_date }} label above was written from data not yet in it{% endif %}:</p>
+      <dl class="dl">
+        <dt>rv₂₀</dt><dd>{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f")|u('%') }}</dd>
+        <dt>VIX</dt><dd>{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f")|u('%') }}</dd>
+        <dt>VVIX</dt><dd>{{ r.vvix|fmt(".2f") }}</dd>
+        <dt>R2 gate</dt><dd>{{ r.gate|fmt(".2f") }} (rolling 252-day 80th percentile of VVIX)</dd>
+        <dt>Rule gives</dt><dd>R{{ r.label }}{% if r.stored is not none %}; stored label for {{ r.date }}: R{{ r.stored }}{% if r.stored != r.label %} <span class="lvl-warn">(differs)</span>{% endif %}{% endif %}</dd>
+      </dl>
     </div>
     {% endif %}
     {% else %}
-    <div class="card-value sm dim">Rule label unavailable</div>
+    <div class="kpi-value flat">Rule label unavailable</div>
     {% endif %}
-
-    <!-- ML classifier: research-only (demoted, C17) -->
-    <div class="divider"></div>
-    {% if d.clf_available %}
-    <div class="flex space-between" style="margin-bottom:4px;">
-      <span class="small dim">ML classifier <span class="chip chip-amber" style="margin-left:4px;">research only</span></span>
-      <span class="small" style="font-weight:600;">{{ d.clf_label }} · {{ d.clf_conf|fmt(".1f") }}%</span>
-    </div>
-    <div class="progress-bar-wrap" role="group" aria-label="Classifier probabilities">
-      {% for lbl, pr in [('R0 long γ', d.prob_r0), ('R1 short γ', d.prob_r1), ('R2 vomma', d.prob_r2)] %}
-      <div class="progress-row">
-        <div class="progress-label">{{ lbl }}</div>
-        <div class="progress-track"><div class="progress-fill" style="width:{{ pr }}%;"></div></div>
-        <div class="progress-val">{{ pr|fmt(".1f") }}%</div>
-      </div>
-      {% endfor %}
-    </div>
-    <div class="card-sub small">
-      Next-session forecast from the features of {{ d.clf_feature_date }}.
-      {% if d.clf_agrees == false %}Classifier disagrees with the rule label here — {% endif %}{% if d.clf_oos_acc is not none %}{{ d.clf_oos_acc|fmt }}% out-of-sample, it loses to the {{ d.clf_persistence_acc|fmt }}% “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong> (shown for research only).
-    </div>
-    {% else %}
-    <div class="card-sub small">ML classifier (research only): unavailable — see the error above. The rule label is unaffected.</div>
-    {% endif %}
-
-    <!-- Regime legend: the rule, as build_regime_labels applies it -->
-    <div class="divider"></div>
-    <dl class="defs" aria-label="Rule-label definitions">
-      <dt style="border-left-color:var(--blue);">R0</dt><dd>Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</dd>
-      <dt style="border-left-color:var(--accent);">R1</dt><dd>Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</dd>
-      <dt style="border-left-color:var(--red);">R2</dt><dd>VVIX above its rolling 252-day 80th percentile (overrides R0/R1) → vomma trades</dd>
+    {% call m.method('Rule definitions') %}
+    <dl class="dl">
+      <dt>R0</dt><dd>Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</dd>
+      <dt>R1</dt><dd>Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</dd>
+      <dt>R2</dt><dd>VVIX above its rolling 252-day 80th percentile (overrides R0/R1) → vomma trades</dd>
     </dl>
-  </div>
+    {% endcall %}
+  {% endcall %}
 
-  <!-- PDV forecast vs VIX -->
-  <div class="card">
-    <h2 class="card-label">PDV forecast vs implied vol</h2>
+  {% call m.panel('state-ts', 'VIX term structure', 's4', d.ts_date) %}
+    {% if d.charts.ts %}
+    {{ m.chart(d.charts.ts, 'h220') }}
+    <p class="note">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|signed(".2f") }} pts, {{ d.ts_regime|lower }}){% if d.ts_date != d.vix_date %}; latest full curve — VIX itself is from {{ d.vix_date|fmt }}{% endif %}.</p>
+    {% else %}<p class="note">No term-structure data.</p>{% endif %}
+  {% endcall %}
+
+  {% call m.panel('state-pdv', 'Implied vs forecast vol', 's4', d.pdv_date) %}
     {% if d.pdv_forecast is not none %}
     {% if d.pdv_stale %}
-    <div id="pdv-stale-flag" class="banner banner-stale-warn" role="status" style="margin-bottom:12px;">
+    <div id="pdv-stale-flag" class="banner banner-stale-warn" role="status">
       <div class="banner-icon" aria-hidden="true">!</div>
-      <div class="banner-body"><strong class="amber">STALE FORECAST</strong> — built from returns through
-        {{ d.pdv_date }}, {{ d.pdv_age }} session{{ 's' if d.pdv_age != 1 else '' }}
-        before the latest session ({{ d.latest_session }}). The interpretation is suppressed until the
-        market data catches up.</div>
+      <div class="banner-body"><strong>STALE FORECAST</strong> — built from returns through {{ d.pdv_date }}, {{ d.pdv_age|plural('session') }} before the latest session ({{ d.latest_session }}). The interpretation is suppressed until the market data catches up.</div>
     </div>
     {% endif %}
-    <div class="grid grid-2" style="gap:12px;">
-      <div>
-        <div class="small faint">VIX · {{ d.pdv_date }}</div>
-        <div class="card-value">{{ d.pdv_vix|fmt(".2f") }}<span class="unit">%</span></div>
-      </div>
-      <div>
-        <div class="small faint">PDV forecast · {% if d.pdv_horizon == 1 %}next-day |r|, annualised{% else %}next {{ d.pdv_horizon }}-day realised vol{% endif %}</div>
-        <div class="card-value">{{ d.pdv_forecast|fmt(".2f") }}<span class="unit">%</span></div>
-      </div>
+    <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+      {{ m.kpi('VIX', d.pdv_vix|fmt('.2f'), unit='%') }}
+      {{ m.kpi('PDV forecast', d.pdv_forecast|fmt('.2f'), unit='%', sub=('next-day |r|, annualised' if d.pdv_horizon == 1 else 'next ' ~ d.pdv_horizon ~ '-day realised')) }}
+      {{ m.kpi('VIX − PDV', d.pdv_spread|signed('.2f'), unit='vol pts', tone=d.pdv_spread|tone) }}
     </div>
-    <div class="divider"></div>
     {% set _pct = d.pdv_spread_pct %}{% set _rk = d.pdv_rank %}
-    <div class="small faint">VIX − PDV forecast</div>
-    <div class="card-value lg">{{ d.pdv_spread|fmt("+.2f") }}<span class="unit">vol pts</span></div>
     {% if not d.pdv_stale and _pct is not none and _rk %}
-    <div class="card-sub">
-      {% if _pct >= 80 %}Implied vol is rich versus this spread's own history ({{ _rk.tail }})
-      {% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history ({{ _rk.tail }})
-      {% else %}Within this spread's usual range
-      {% endif %}
-    </div>
+    <p class="note">{% if _pct >= 80 %}Implied vol is rich versus this spread's own history ({{ _rk.tail }}).{% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history ({{ _rk.tail }}).{% else %}Within this spread's usual range.{% endif %}</p>
     {% endif %}
-
-    <!-- Historical context: the SAME quantity (VIX − this model's forecast) on prior sessions -->
-    <div class="subcard mt12">
-      {% if _pct is not none and _rk %}
-      <div style="display:flex;align-items:baseline;gap:10px;">
-        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">{{ _rk.big }}</div>
-        <div class="small dim">{% if _rk.record == 'high' %}above all{% elif _rk.record == 'low' %}at or below all{% else %}percentile of{% endif %} {{ "{:,}".format(d.pdv_hist_n) }} prior sessions ({{ d.pdv_hist_start }} → {{ d.pdv_hist_end }}); mean {{ d.pdv_spread_mean|fmt("+.2f") }} vol pts</div>
-      </div>
-      {% else %}
-      <div class="small faint">Percentile hidden: only {{ d.pdv_hist_n|fmt }} valid history points (at least 252 needed).</div>
-      {% endif %}
-      {% if d.pdv_sparkline %}
-      <div class="small faint" style="margin:10px 0 2px;">Last {{ d.pdv_sparkline|length }} sessions to {{ d.pdv_date }} (shaded above zero)</div>
-      <div class="chart-wrap spark">
-        <canvas id="sparklineChart" role="img" aria-label="Sparkline: VIX minus PDV forecast, last {{ d.pdv_sparkline|length }} sessions" aria-describedby="sparklineChart-data"></canvas>
-      </div>
-      {% set _sp = d.pdv_sparkline|reject('none')|list %}
-      <p class="chart-data sr-only" id="sparklineChart-data">
-        VIX minus PDV forecast from {{ d.pdv_sparkline_dates[0] }} to {{ d.pdv_sparkline_dates[-1] }}:
-        first {{ d.pdv_sparkline[0]|fmt("+.2f") }} vol pts, last {{ d.pdv_sparkline[-1]|fmt("+.2f") }} vol pts{% if _sp %},
-        range {{ _sp|min|fmt("+.2f") }} to {{ _sp|max|fmt("+.2f") }} vol pts{% endif %}.
-      </p>
-      {% endif %}
-    </div>
-    <p class="chart-note">
-      {% if d.pdv_horizon == 1 %}The forecast target is next-day |r|·√252, about 0.8σ for Gaussian returns, so the spread's
-      level carries a structural positive offset that is not a risk premium.
-      {% else %}The forecast is the expected realised vol (RMS) of the next {{ d.pdv_horizon }} sessions, the VIX horizon.
-      VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity
-      gap (E[σ] &lt; √E[σ²]); it is not a pure premium.{% endif %}
-      Forecast and history are the purged walk-forward forecast (refitted daily on labels known at each close), so the
-      percentile ranks today against out-of-sample values only, not against zero.
-    </p>
-    <div class="kv-2 mt8">
-      <div>σ₁ ({{ d.pdv_halflives[0]|fmt }}-day EWMA) <span class="v">{{ d.pdv_sigma1|fmt(".2f") }}%</span></div>
-      <div>σ₂ ({{ d.pdv_halflives[1]|fmt }}-day EWMA) <span class="v">{{ d.pdv_sigma2|fmt(".2f") }}%</span></div>
-    </div>
+    {% if _pct is not none and _rk %}
+    <p class="note" id="pdv-percentile-line"><strong id="pdv-percentile">{{ _rk.big }}</strong> {% if _rk.record == 'high' %}above all{% elif _rk.record == 'low' %}at or below all{% else %}percentile of{% endif %} {{ "{:,}".format(d.pdv_hist_n) }} prior sessions ({{ d.pdv_hist_start }} → {{ d.pdv_hist_end }}); mean {{ d.pdv_spread_mean|signed(".2f") }} vol pts.</p>
     {% else %}
-    <div class="card-value sm dim">Forecast unavailable</div>
+    <p class="note">Percentile hidden: only {{ d.pdv_hist_n|fmt }} valid history points (at least 252 needed).</p>
     {% endif %}
-  </div>
-
-  <!-- VIX term-structure chart -->
-  <div class="card">
-    <h2 class="card-label">VIX term structure{% if d.ts_date %} <span class="qual">· {{ d.ts_date }}</span>{% endif %}</h2>
-    <div class="chart-wrap tall">
-      <canvas id="tsChart" role="img" aria-label="Line chart: VIX index term structure by tenor{% if d.ts_date %} on {{ d.ts_date }}{% endif %}" aria-describedby="tsChart-data"></canvas>
+    {{ m.spark(d.pdv_spark, 'VIX minus PDV forecast, last ' ~ (d.pdv_sparkline|length) ~ ' sessions to ' ~ d.pdv_date ~ ': from ' ~ (d.pdv_sparkline[0]|signed('.2f')) ~ ' to ' ~ (d.pdv_sparkline[-1]|signed('.2f')) ~ ' vol pts') }}
+    <p class="note">Last {{ d.pdv_sparkline|length }} sessions of the spread; the line marks zero.</p>
+    {% call m.method() %}
+    <div class="prose">
+      <p>{% if d.pdv_horizon == 1 %}The forecast target is next-day |r|·√252, about 0.8σ for Gaussian returns, so the spread's level carries a structural positive offset that is not a risk premium.{% else %}The forecast is the expected realised vol (RMS) of the next {{ d.pdv_horizon }} sessions, the VIX horizon. VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity gap (E[σ] &lt; √E[σ²]); it is not a pure premium.{% endif %}
+      Forecast and history are the purged walk-forward forecast (refitted daily on labels known at each close), so the percentile ranks today against out-of-sample values only.</p>
+      <p>σ₁ (EWMA, {{ d.pdv_halflives[0]|fmt('g') if d.pdv_halflives else '—' }}-day half-life) {{ d.pdv_sigma1|fmt(".2f")|u('%') }}; σ₂ (EWMA, {{ d.pdv_halflives[1]|fmt('g') if d.pdv_halflives else '—' }}-day half-life) {{ d.pdv_sigma2|fmt(".2f")|u('%') }}.
+      <span id="pdv-skill">Walk-forward R²: <span class="v">{% if d.pdv_skill %}{{ d.pdv_skill.r2|fmt(".2f") }}{% if d.pdv_skill.r2_ex is not none %} (ex-{{ d.pdv_skill.exclude_year }} {{ d.pdv_skill.r2_ex|fmt(".2f") }}){% endif %}{% else %}—{% endif %}</span></span>{% if d.pdv_skill %} on {{ "{:,}".format(d.pdv_skill.n) }} forecasts {{ d.pdv_skill.start }} → {{ d.pdv_skill.end }}{% endif %}.</p>
+      {% if d.stress %}{% set st = d.stress %}
+      <p>COVID stress test, {{ st.stress_date }}: forecast made at the {{ st.origin }} close (refitted on the {{ "{:,}".format(st.n_train) }} labels known then) {{ st.forecast_pct|fmt(".1f")|u('%') }}.
+      {% if st.horizon == 1 %}Outcome on {{ st.stress_date }} (that day's |r|·√252):{% else %}Realised over its {{ st.n_window }}-session horizon ({{ st.stress_date }} → {{ st.window_end }}, RMS, annualised):{% endif %} {{ st.actual_pct|fmt(".1f")|u('%') }}; error {{ st.error_pp|signed(".1f") }} vol pts. A backward-looking model cannot see a jump coming.</p>
+      {% endif %}
     </div>
-    <div class="chart-data sr-only" id="tsChart-data">
-      {% if d.ts_values %}
-      <table>
-        <caption>VIX-family index levels{% if d.ts_date %}, {{ d.ts_date }}{% endif %}</caption>
-        <thead><tr><th scope="col">Tenor</th><th scope="col">Level (vol pts)</th></tr></thead>
-        <tbody>{% for t in d.ts_tenors %}<tr><td>{{ t }}</td><td>{{ d.ts_values[loop.index0]|fmt(".2f") }}</td></tr>{% endfor %}</tbody>
-      </table>
-      {% else %}No term-structure data.{% endif %}
-    </div>
-    <p class="chart-note">^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session. The x axis is the tenor in calendar days on a linear scale; points are joined by straight lines (no smoothing).</p>
-  </div>
-
+    {% endcall %}
+    {% else %}
+    <div class="kpi-value flat">Forecast unavailable</div>
+    {% endif %}
+  {% endcall %}
 </div>
 
-<!-- ── Row 3: label history + classifier · PDV model ─────────────────────── -->
-<div class="grid grid-2 row">
+<div class="g">
+  {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session) %}
+    <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
+      {{ m.kpi('SPX RMSE in sample', f.spx_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_spx_options|fmt) ~ ' anchors, ' ~ (f.n_spx_expiries|fmt) ~ ' expiries') }}
+      {{ m.kpi('Out of sample', f.spx_oos_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_oos|fmt(',')) ~ ' quotes') }}
+      {{ m.kpi('Put wing OOS', f.spx_oos_wing_rmse|fmt('.2f'), unit='vol pts') }}
+      {{ m.kpi('VIX indices', f.vix_index_rmse|fmt('.2f'), unit='pts RMSE') }}
+    </div>
+    <p class="note">
+      {% for t in f.tiles %}<span class="nowrap">{{ t.sym }} {{ t.value|fmt(t.spec) }}{% if t.side %} {{ m.chip('at ' ~ (t.side if t.side != 'bound' else '') ~ ' bound', 'watch') }}{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}
+    </p>
+    <p class="note">{% if f.active_constraints %}Active constraint: {{ f.active_constraints|join('; ') }} — {{ f.effective_dof }} of 5 parameters are set by the data.{% else %}No parameter on a bound.{% endif %} Feller {{ f.feller_state|fmt }} (margin {{ f.feller_margin|signed('.2f') }}; diagnostic, not imposed). <a href="/calibration">Calibration page</a>.</p>
+  {% endcall %}
 
-  <div class="card">
-    <h2 class="card-label">Rule-label distribution <span class="qual">· {{ d.reg_span or "—" }}</span></h2>
-    <div class="tiles" style="grid-template-columns:repeat(3,minmax(0,1fr));">
-      {% for k, name, col in [(0, 'R0 long gamma', 'var(--blue)'), (1, 'R1 short gamma', 'var(--accent)'), (2, 'R2 vomma active', 'var(--red)')] %}
-      <div class="subcard" style="border-top:2px solid {{ col }};">
-        <div class="small dim">{{ name }}</div>
-        <div class="card-value sm">{{ d['reg%d_pct' % k]|fmt(".1f") }}<span class="unit">%</span></div>
-        <div class="small faint">{{ d['reg%d_n' % k]|fmt(",") }} of {{ d.reg_total|fmt(",") }} sessions</div>
-      </div>
+  {% call m.panel('state-pages', 'Pages', 's6') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Pages of this site">
+    <table class="tbl dense">
+      <caption class="sr-only">Pages of this site</caption>
+      <tbody>
+      {% for href, label, key, desc in nav %}{% if href != '/' %}
+        <tr><td class="nowrap"><a href="{{ href }}">{{ label }}</a></td><td>{{ desc }}</td></tr>
+      {% endif %}{% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% endcall %}
+</div>
+
+<div class="g">
+  {% call m.panel('research-classifier', 'Research only · ML regime classifier', 's6') %}
+    {% if d.clf_available %}
+    <p class="note">{{ m.chip('research only', 'watch') }} Next-session forecast from the features of {{ d.clf_feature_date }}: <strong>{{ d.clf_label }}</strong> at {{ d.clf_conf|fmt(".1f")|u('%') }}{% if d.clf_agrees == false %}, disagreeing with the rule label{% endif %}.
+    {% if d.clf_oos_acc is not none %}{{ d.clf_oos_acc|fmt|u('%') }} out-of-sample, it loses to the {{ d.clf_persistence_acc|fmt|u('%') }} “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong>.</p>
+    <dl class="dl">
+      {% for lbl, pr in [('P(R0 long γ)', d.prob_r0), ('P(R1 short γ)', d.prob_r1), ('P(R2 vomma)', d.prob_r2)] %}<dt>{{ lbl }}</dt><dd>{{ pr|fmt(".1f")|u('%') }}</dd>{% endfor %}
+      <dt>Out-of-sample accuracy:</dt><dd><span class="v">{{ d.clf_oos_acc|fmt|u('%') }}</span></dd>
+      <dt>Persistence baseline:</dt><dd><span class="v">{{ d.clf_persistence_acc|fmt|u('%') }}</span></dd>
+      <dt>Features</dt><dd>{{ d.clf_n_features|fmt }} (vvix excluded — C16){% if d.clf_top_feature %}; top <code>{{ d.clf_top_feature }}</code> ({{ d.clf_top_importance|fmt(".0f")|u('%') }}){% endif %}</dd>
+    </dl>
+    {% call m.method('Why it is not used') %}
+    <p class="prose">Accuracy is the shipped model's own evaluation{% if d.clf_test_window %} on {{ d.clf_test_window }} ({{ d.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}{% if d.clf_feature_source == 'rv20_proxy' %}; its spread feature is the rv₂₀ proxy it was trained on{% endif %}. Regimes are persistent and observable on the day, so “predict yesterday's regime” is a strong no-skill baseline; C17 demoted the classifier when it lost to it and C22's retrain did not change that. The backtest trades the lagged rule labels; a Gaussian HMM in <code>regime_classifier.py</code> is research-only as well.</p>
+    {% endcall %}
+    {% else %}
+    <p class="note">ML classifier (research only): unavailable — see the error above. The rule label is unaffected.</p>
+    {% endif %}
+  {% endcall %}
+
+  {% call m.panel('label-history', 'Rule-label distribution', 's6', d.reg_span) %}
+    <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+      {% for k, name in [(0, 'R0 long gamma'), (1, 'R1 short gamma'), (2, 'R2 vomma active')] %}
+      {{ m.kpi(name, d['reg%d_pct' % k]|fmt('.1f'), unit='%', sub=(d['reg%d_n' % k]|fmt(',')) ~ ' of ' ~ (d.reg_total|fmt(',')) ~ ' sessions') }}
       {% endfor %}
     </div>
-
-    <div class="divider"></div>
-
-    <div class="kv-2">
-      <div>Out-of-sample accuracy: <span class="v">{{ d.clf_oos_acc|fmt }}%</span></div>
-      <div>Persistence baseline: <span class="v">{{ d.clf_persistence_acc|fmt }}%</span></div>
-      <div>Features: <span class="v">{{ d.clf_n_features|fmt }}</span> (vvix excluded — C16)</div>
-      <div>Top feature: <span class="v">{% if d.clf_top_feature %}<code>{{ d.clf_top_feature }}</code> ({{ d.clf_top_importance|fmt(".0f") }}%){% else %}—{% endif %}</span></div>
-      <div>Model: <span class="v">XGBoost, 3 classes</span></div>
-      <div>Status: <span class="chip chip-red">Research only (C17)</span></div>
-    </div>
-    <p class="chart-note">
-      Accuracy is the shipped model's own evaluation{% if d.clf_test_window %} on {{ d.clf_test_window }}
-      ({{ d.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}{% if d.clf_feature_source == 'rv20_proxy' %};
-      its spread feature is the rv₂₀ proxy it was trained on{% endif %}.
-      <strong>C17: the classifier loses to the no-skill persistence baseline</strong> (“predict yesterday's regime”;
-      yesterday's label is fully observable). History: C16 reported 86.2% (fixed 100-point VVIX gate, vvix as a
-      feature) and C17 63.4% vs 90.0% (fixed labels, a full-sample PDV feature with look-ahead); C22 retrained it on
-      the one adaptive gate with holdout calibration, and the conclusion did not change. The backtest uses the lagged
-      deterministic rule labels; a Gaussian HMM in <code>regime_classifier.py</code> is research-only as well.
-      Regimes are too persistent for daily ML classification to add value.
-    </p>
-  </div>
-
-  <div class="card">
-    <h2 class="card-label">PDV model <span class="qual">· EWMA approximation of Guyon–Lekeufack (2023)</span></h2>
-    {% if d.pdv_coef %}
-    <div class="subcard" style="font-size:13px;">
-      <code style="color:var(--text);font-size:13px;">σ̂(t) = {{ d.pdv_coef[0]|fmt(".3f") }}·σ₁ {{ '+' if d.pdv_coef[1] >= 0 else '−' }} {{ d.pdv_coef[1]|abs|fmt(".3f") }}·σ₂ {{ '+' if d.pdv_coef[2] >= 0 else '−' }} {{ d.pdv_coef[2]|abs|fmt(".3f") }}·lev {{ '+' if d.pdv_intercept >= 0 else '−' }} {{ d.pdv_intercept|abs|fmt(".4f") }}</code>
-    </div>
-    {% endif %}
-    <div class="kv-2 mt12">
-      <div>σ₁ half-life: <span class="v">{{ d.pdv_halflives[0]|fmt if d.pdv_halflives else '—' }} days</span></div>
-      <div>σ₂ half-life: <span class="v">{{ d.pdv_halflives[1]|fmt if d.pdv_halflives else '—' }} days</span></div>
-      <div id="pdv-skill">Walk-forward R²: <span class="v">{% if d.pdv_skill %}{{ d.pdv_skill.r2|fmt(".2f") }}{% if d.pdv_skill.r2_ex is not none %} (ex-{{ d.pdv_skill.exclude_year }} {{ d.pdv_skill.r2_ex|fmt(".2f") }}){% endif %}{% else %}—{% endif %}</span></div>
-      <div>GARCH(1,1) benchmark persistence: <span class="v">{{ d.pdv_garch_persistence|fmt(".3f") }}</span></div>
-    </div>
-    {% if d.pdv_skill %}
-    <p class="chart-note">R² of the daily-refitted (purged) walk-forward forecast against realised {{ d.pdv_skill.horizon }}-day RMS vol,
-      {{ "{:,}".format(d.pdv_skill.n) }} forecasts {{ d.pdv_skill.start }} → {{ d.pdv_skill.end }}, recomputed from the database at build time.
-      The equation is the shipped model's full-sample fit; the forecast on the card is the walk-forward one.</p>
-    {% endif %}
-
-    {% if d.stress %}
-    {% set st = d.stress %}
-    <div class="banner banner-warn mt12">
-      <div class="banner-icon" aria-hidden="true">!</div>
-      <div>
-        <div class="banner-title">COVID stress test — {{ st.stress_date }}</div>
-        <div class="banner-body">
-          PDV-linear forecast made at the {{ st.origin }} close (refitted on the {{ "{:,}".format(st.n_train) }} labels known then):
-          <strong>{{ st.forecast_pct|fmt(".1f") }}%</strong>.
-          {% if st.horizon == 1 %}Outcome on {{ st.stress_date }} (the model's target: that day's |r|·√252, one day's move annualised, not a realised volatility):
-          {% else %}Realised over its {{ st.n_window }}-session horizon ({{ st.stress_date }} → {{ st.window_end }}, RMS, annualised):
-          {% endif %}<strong class="red">{{ st.actual_pct|fmt(".1f") }}%</strong>.
-          Error <strong class="red">{{ st.error_pp|fmt("+.1f") }} vol pts</strong> — a backward-looking model cannot see a jump coming.
-        </div>
-      </div>
-    </div>
-    {% endif %}
-  </div>
-
+    <p class="note">Share of sessions under each rule label since {{ (d.reg_span or '—')[:4] }}; the adaptive R2 gate is the only gate in every path (C22).</p>
+  {% endcall %}
 </div>
-
-{% endblock %}
-
-{% block scripts %}
-<script>
-vsCharts(function () {
-  // VIX Term Structure chart — x = tenor in calendar days on a LINEAR axis
-  // (a category axis spaced the 9/30/93/184-day tenors evenly and the spline bent the curve)
-  const tsCtx = document.getElementById('tsChart').getContext('2d');
-  const tsLabels = {{ d.ts_tenors | tojson }};
-  const tsValues = {{ d.ts_values | tojson }};
-  const tsDays = tsLabels.map(t => parseInt(t, 10));
-
-  new Chart(tsCtx, {
-    type: 'line',
-    data: {
-      datasets: [{
-        label: 'VIX term structure',
-        data: tsDays.map((x, i) => ({ x, y: tsValues[i], tenor: tsLabels[i] })),
-        borderColor: VS.series.info,
-        backgroundColor: VS.series.info,
-        tension: 0,
-        pointRadius: 4,
-        pointHoverRadius: 5,
-        borderWidth: 2,
-      }]
-    },
-    options: {
-      ...makeLineOpts(),
-      plugins: {
-        ...makeLineOpts().plugins,
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title: items => items.length ? `${items[0].raw.tenor} index{% if d.ts_date %} · {{ d.ts_date }}{% endif %}` : '',
-            label: ctx => `  ${vsNum(ctx.parsed.y, 2)} vol pts`
-          }
-        }
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          min: 0,
-          grid: { display: false },
-          ticks: { stepSize: 30, callback: v => v + 'd' },
-          title: { display: true, text: 'Tenor (calendar days)' },
-        },
-        y: {
-          ticks: { callback: v => vsNum(v, 1) },
-          title: { display: true, text: 'Index level (vol pts)' },
-        },
-      },
-    }
-  });
-
-  // Sparkline — VIX − PDV forecast, recent sessions
-  {% if d.pdv_sparkline %}
-  const spkCtx = document.getElementById('sparklineChart');
-  if (spkCtx) {
-    const spkData = {{ d.pdv_sparkline | tojson }};
-    const spkDates = {{ d.pdv_sparkline_dates | tojson }};
-    new Chart(spkCtx, {
-      type: 'line',
-      data: {
-        labels: spkDates,
-        datasets: [{
-          data: spkData,
-          borderColor: VS.title,
-          borderWidth: 1.4,
-          pointRadius: 0,
-          fill: { target: 'origin', above: 'rgba(127,173,247,0.16)', below: 'rgba(240,120,124,0.16)' },
-          tension: 0,
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        animation: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: false } },
-        scales: { x: { display: false }, y: { display: false } }
-      }
-    });
-  }
-  {% endif %}
-});
-</script>
 {% endblock %}
