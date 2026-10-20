@@ -1125,5 +1125,29 @@ def test_basin_grouping_and_sobol_starts():
     assert s3.shape == (5, 5) and np.all(s3[:, 2] < 1.0)
 
 
+def test_multistart_trf_survives_a_start_with_non_finite_residuals():
+    """The daily fit runs the multi-start TRF: a start at which the residual
+    vector is not finite (least_squares refuses it) is recorded as failed and
+    the fit comes from the remaining starts; only all-failed raises."""
+    A = np.array([[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]])
+    b = np.array([1.0, -1.0, 2.0])                 # inconsistent: optimum loss > 0
+
+    def fun(x):
+        return np.full(3, np.nan) if x[0] > 5.0 else A @ x - b    # a failing corner
+
+    lo, hi = np.full(2, -10.0), np.full(2, 10.0)
+    starts = np.array([[8.0, 0.0], [0.0, 0.0], [2.0, 2.0]])
+    best, rep = jc.multistart_trf(fun, None, starts, lo, hi, ["bad", "a", "b"])
+    np.testing.assert_allclose(best.x, np.linalg.lstsq(A, b, rcond=None)[0], atol=1e-8)
+    bad = rep["runs"][0]
+    assert bad["status"] == "failed" and bad["loss"] is None and bad["x"] is None
+    assert "ValueError" in bad["message"]
+    assert rep["n_failed_starts"] == 1 and rep["n_starts"] == 3
+    assert rep["n_distinct_basins"] == 1 and rep["n_starts_at_best"] == 2
+    assert rep["best_label"] in ("a", "b")
+    with pytest.raises(RuntimeError, match="all 1 TRF start"):
+        jc.multistart_trf(fun, None, starts[:1], lo, hi, ["bad"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

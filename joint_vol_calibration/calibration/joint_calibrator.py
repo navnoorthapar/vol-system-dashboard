@@ -665,19 +665,34 @@ def multistart_trf(fun: Callable, jac, starts: np.ndarray, lo: np.ndarray, hi: n
     earlier start, so a warm start listed first wins a tie). report: one row
     per start (label, x0, x, loss = sum r^2, nfev, njev, status, seconds)
     plus the basin grouping. jac=None differences numerically ('2-point').
+
+    A start whose residuals are not finite at x0 (least_squares raises) or
+    whose optimum is not finite is recorded as failed (status "failed",
+    loss None) and the others still run, so one bad Sobol corner cannot
+    cost the daily fit; RuntimeError only if every start fails.
     """
     labels = list(labels) if labels is not None else [f"start{i}" for i in range(len(starts))]
     runs, best, best_loss = [], None, np.inf
     for start, label in zip(starts, labels):
         x0 = np.clip(np.asarray(start, dtype=float), lo, hi)
         t0 = time.perf_counter()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)   # Lewis cap at extreme trial points
-            sol = optimize.least_squares(
-                fun, x0, jac=jac if jac is not None else "2-point", bounds=(lo, hi),
-                method="trf", x_scale=x_scale, ftol=tol, xtol=tol, gtol=tol,
-                max_nfev=max_nfev)
-        loss = float(2.0 * sol.cost)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)   # Lewis cap at extreme trial points
+                sol = optimize.least_squares(
+                    fun, x0, jac=jac if jac is not None else "2-point", bounds=(lo, hi),
+                    method="trf", x_scale=x_scale, ftol=tol, xtol=tol, gtol=tol,
+                    max_nfev=max_nfev)
+            loss = float(2.0 * sol.cost)
+            if not (np.isfinite(loss) and np.all(np.isfinite(sol.x))):
+                raise FloatingPointError(f"non-finite optimum (loss {loss})")
+        except (ValueError, FloatingPointError, ArithmeticError, np.linalg.LinAlgError) as exc:
+            logger.warning("     TRF start %s failed: %s", label, exc)
+            runs.append({"label": label, "x0": [float(v) for v in x0], "x": None,
+                         "loss": None, "nfev": None, "njev": None, "status": "failed",
+                         "message": f"{type(exc).__name__}: {exc}",
+                         "seconds": time.perf_counter() - t0})
+            continue
         runs.append({"label": label, "x0": [float(v) for v in x0],
                      "x": [float(v) for v in sol.x], "loss": loss,
                      "nfev": int(sol.nfev), "njev": int(sol.njev or 0),
@@ -685,11 +700,16 @@ def multistart_trf(fun: Callable, jac, starts: np.ndarray, lo: np.ndarray, hi: n
                      "seconds": time.perf_counter() - t0})
         if loss < best_loss:
             best, best_loss = sol, loss
-    groups = _group_basins([r["loss"] for r in runs])
+    if best is None:
+        raise RuntimeError(f"all {len(runs)} TRF start(s) failed: "
+                           + "; ".join(f"{r['label']}: {r['message']}" for r in runs))
+    ok = [i for i, r in enumerate(runs) if r["loss"] is not None]
+    groups = [[ok[i] for i in g] for g in _group_basins([runs[i]["loss"] for i in ok])]
     best_group = groups[0] if groups else []
     report = {
         "runs": runs,
         "n_starts": len(runs),
+        "n_failed_starts": len(runs) - len(ok),
         "n_distinct_basins": len(groups),
         "n_starts_at_best": len(best_group),
         "basin_losses": [runs[g[0]]["loss"] for g in groups],
@@ -861,6 +881,7 @@ class JointCalibrator:
     params     : dict — calibrated Heston parameters
     result     : dict — the full calibration result (what save() persists)
     fit_time   : float — wall-clock seconds for calibration
+    fit_cpu_time : float — CPU seconds of the optimisation (this process)
     losses     : dict — per-leg losses at the optimum
     """
 
@@ -913,6 +934,7 @@ class JointCalibrator:
         self.params: Optional[dict] = None
         self.result = None
         self.fit_time: Optional[float] = None
+        self.fit_cpu_time: Optional[float] = None
         self.losses: Optional[dict] = None
         self._n_evals = 0
 
@@ -1692,6 +1714,7 @@ class JointCalibrator:
                   "bounds": {k: list(v) for k, v in HESTON_BOUNDS.items()}}
         multistart = de_report = None
         t_start = time.time()
+        c_start = time.process_time()       # this process only (not DE worker processes)
         if optimizer == "de":
             serial = int(de_workers) == 1
             n0 = model.n_calls
@@ -1723,6 +1746,7 @@ class JointCalibrator:
                     best, best_loss)
                 opt_cfg["de"] = de_cfg
         self.fit_time = time.time() - t_start
+        self.fit_cpu_time = time.process_time() - c_start
 
         kappa, theta, sigma, rho, v0 = (float(x) for x in best)
         self.params = {"kappa": kappa, "theta": theta, "sigma": sigma, "rho": rho, "v0": v0}
@@ -1755,6 +1779,10 @@ class JointCalibrator:
             "loss":       best_loss,
             "leg_losses": self.losses,
             "fit_time":   self.fit_time,
+            # CPU seconds of the optimisation in this process: stable on a
+            # loaded machine where fit_time (wall clock) is not; excludes
+            # DE worker processes when de_workers > 1
+            "fit_cpu_time": self.fit_cpu_time,
             "n_evals":    n_evals,
             "success":    success,
             "optimizer":  "trf_multistart" if optimizer == "trf" else "de",

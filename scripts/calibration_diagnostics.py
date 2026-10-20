@@ -53,6 +53,7 @@ import logging
 import os
 import pickle
 import platform
+import resource
 import subprocess
 import sys
 import time
@@ -80,16 +81,16 @@ def _jsonable(obj):
         return {str(k): _jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_jsonable(v) for v in obj]
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
     if isinstance(obj, np.bool_):
         return bool(obj)
+    if isinstance(obj, (float, np.floating)):
+        # strict JSON: NaN / inf (np.float64 is a float subclass) become null
+        v = float(obj)
+        return v if np.isfinite(v) else None
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
     if isinstance(obj, np.ndarray):
         return _jsonable(obj.tolist())
-    if isinstance(obj, float) and not np.isfinite(obj):
-        return None
     return obj
 
 
@@ -106,6 +107,22 @@ def committed_v2_sessions(cal_dir: Path | None = None) -> list:
         if (config.DATA_DIR / "options" / f"spx_{session}.parquet").exists():
             out.append(session)
     return out
+
+
+def _cpu_seconds() -> float:
+    """CPU seconds of this process (all threads) plus its reaped children
+    (the DE worker processes, which scipy's pool joins on exit)."""
+    s = resource.getrusage(resource.RUSAGE_SELF)
+    c = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return s.ru_utime + s.ru_stime + c.ru_utime + c.ru_stime
+
+
+def _timed(fn, *args, **kwargs):
+    """(result, wall seconds, CPU seconds). CPU time is the robust number on
+    a shared machine: wall clock grows with the load, CPU time much less."""
+    w0, c0 = time.perf_counter(), _cpu_seconds()
+    out = fn(*args, **kwargs)
+    return out, time.perf_counter() - w0, _cpu_seconds() - c0
 
 
 def _git_head() -> str | None:
@@ -195,7 +212,7 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
     }
 
     # 1. default TRF
-    res = cal.calibrate(verbose=False)
+    res, trf_wall, trf_cpu = _timed(cal.calibrate, verbose=False)
     trf_x = np.array([res["params"][k] for k in names])
     out["trf"] = {
         "params": res["params"], "loss": res["loss"],
@@ -203,6 +220,8 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
         "param_rel_diff_vs_stored": {k: res["params"][k] / stored["params"][k] - 1.0
                                      for k in names},
         "fit_time_seconds": res["fit_time"], "n_evals": res["n_evals"],
+        "fit_cpu_seconds": res["fit_cpu_time"],
+        "wall_seconds_incl_diagnostics": trf_wall, "cpu_seconds_incl_diagnostics": trf_cpu,
         "success": res["success"], "message": res["optimizer_message"],
         "warm_start": res["methods"]["optimizer"]["warm_start"],
         "multistart": res["multistart"],
@@ -219,22 +238,30 @@ def diagnose_session(session: str, time_serial_de: bool = False, de_workers: int
              stored["loss"], res["fit_time"], res["n_evals"])
 
     # 2. TRF with a finite-difference Jacobian (same starts)
-    fd = cal.calibrate(verbose=False, jacobian="2-point")
+    fd, _, fd_cpu = _timed(cal.calibrate, verbose=False, jacobian="2-point")
     out["trf_finite_diff"] = {"loss": fd["loss"], "fit_time_seconds": fd["fit_time"],
+                              "fit_cpu_seconds": fd["fit_cpu_time"],
+                              "cpu_seconds_incl_diagnostics": fd_cpu,
                               "n_evals": fd["n_evals"],
                               "loss_rel_diff_vs_analytic": fd["loss"] / res["loss"] - 1.0,
                               "n_distinct_basins": fd["multistart"]["n_distinct_basins"]}
     out["jacobian"] = _jacobian_timing(cal.residual_model(), trf_x)
 
     # 3. DE as the optional global check (processes), and optionally serial
-    chk = cal.calibrate(verbose=False, de_check=True, de_workers=de_workers)["de_check"]
+    chk_res, _, chk_cpu = _timed(cal.calibrate, verbose=False, de_check=True,
+                                 de_workers=de_workers)
+    chk = chk_res["de_check"]
     out["de"] = {"settings": {"maxiter": 200, "popsize": 10, "seed": config.RANDOM_SEED,
                               "workers": de_workers, "updating": "deferred"},
+                 # TRF fit + DE in worker processes + TRF polish, all CPU
+                 "cpu_seconds_trf_plus_de_check": chk_cpu,
                  **chk}
     if time_serial_de:
-        t0 = time.perf_counter()
-        ser = cal.calibrate(verbose=False, optimizer="de", de_workers=1)
-        out["de"]["serial_rerun"] = {"seconds": time.perf_counter() - t0,
+        ser, ser_wall, ser_cpu = _timed(cal.calibrate, verbose=False, optimizer="de",
+                                        de_workers=1)
+        out["de"]["serial_rerun"] = {"seconds": ser_wall, "cpu_seconds": ser_cpu,
+                                     "fit_time_seconds": ser["fit_time"],
+                                     "fit_cpu_seconds": ser["fit_cpu_time"],
                                      "loss": ser["loss"], "n_evals": ser["n_evals"],
                                      "loss_rel_diff_vs_stored": ser["loss"] / stored["loss"] - 1}
     log.info("%s DE check (%d workers): %.1fs, loss %.8g, agrees=%s", session, de_workers,
@@ -284,6 +311,16 @@ def summarise(paths) -> dict:
             "stored_loss": d["stored_fit"]["loss"], "trf_loss": d["trf"]["loss"],
             "trf_loss_rel_diff": d["trf"]["loss_rel_diff_vs_stored"],
             "trf_seconds": d["trf"]["fit_time_seconds"], "trf_evals": d["trf"]["n_evals"],
+            "trf_cpu_seconds": d["trf"].get("fit_cpu_seconds"),
+            "trf_fd_seconds": d["trf_finite_diff"]["fit_time_seconds"],
+            "trf_fd_cpu_seconds": d["trf_finite_diff"].get("fit_cpu_seconds"),
+            "trf_fd_evals": d["trf_finite_diff"]["n_evals"],
+            "de_serial_seconds": (d["de"].get("serial_rerun") or {}).get("fit_time_seconds"),
+            "de_serial_cpu_seconds": (d["de"].get("serial_rerun") or {}).get("fit_cpu_seconds"),
+            "de_serial_evals": (d["de"].get("serial_rerun") or {}).get("n_evals"),
+            "de_serial_loss_rel_diff_vs_stored": (d["de"].get("serial_rerun") or {}).get(
+                "loss_rel_diff_vs_stored"),
+            "loadavg_start": d["environment"]["loadavg_start"],
             "trf_basins": d["trf"]["multistart"]["n_distinct_basins"],
             "stored_de_seconds": d["stored_fit"]["fit_time_seconds"],
             "stored_de_evals": d["stored_fit"]["n_evals"],
@@ -354,12 +391,12 @@ def main(argv=None) -> int:
             d = diagnose_session(s, time_serial_de=args.time_serial_de,
                                  de_workers=args.de_workers)
             path = args.out_dir / f"{s}.json"
-            path.write_text(json.dumps(d, indent=1) + "\n")
+            path.write_text(json.dumps(d, indent=1, allow_nan=False) + "\n")
             log.info("wrote %s (%.0fs)", path, d["seconds_total"])
     paths = sorted(p for p in args.out_dir.glob("20*.json"))
     if paths:
-        (args.out_dir / "summary.json").write_text(json.dumps(_jsonable(summarise(paths)),
-                                                              indent=1) + "\n")
+        (args.out_dir / "summary.json").write_text(
+            json.dumps(_jsonable(summarise(paths)), indent=1, allow_nan=False) + "\n")
         log.info("wrote summary of %d session(s)", len(paths))
     return 0
 
