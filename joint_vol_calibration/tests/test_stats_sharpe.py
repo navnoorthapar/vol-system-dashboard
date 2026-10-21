@@ -126,6 +126,27 @@ def test_newey_west_tstat():
         2 * norm.sf(abs(sh.newey_west_tstat(x, lags=5)["t"])))
 
 
+@pytest.mark.parametrize("lags", [5, 21])
+def test_newey_west_matches_statsmodels_hac(lags):
+    """The Bartlett weights at lags > 0, against statsmodels' HAC standard
+    error of a regression on a constant (no small-sample correction): the
+    published newey_west_mean_return_t_lag21 is this statistic."""
+    import statsmodels.api as smapi
+
+    rng = np.random.default_rng(11)
+    e = rng.normal(size=3000)
+    ar = np.empty_like(e)
+    ar[0] = e[0]
+    for i in range(1, e.size):
+        ar[i] = 0.4 * ar[i - 1] + e[i]
+    x = ar * 0.01 + 0.002
+    fit = smapi.OLS(x, np.ones_like(x)).fit(cov_type="HAC", cov_kwds={"maxlags": lags,
+                                                                     "use_correction": False})
+    nw = sh.newey_west_tstat(x, lags)
+    assert nw["se"] == pytest.approx(float(fit.bse[0]), rel=1e-10)
+    assert nw["t"] == pytest.approx(float(fit.tvalues[0]), rel=1e-10)
+
+
 def test_sharpe_inference_bundle():
     rng = np.random.default_rng(6)
     r = rng.normal(0.0005, 0.01, 2000)

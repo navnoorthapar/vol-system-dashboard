@@ -113,7 +113,9 @@ def test_headline_is_generated_from_the_stored_numbers(summary):
 def test_bootstrap_rebuilds_exactly_from_the_committed_curve(summary, committed):
     st = summary["bootstrap_settings"]
     reps = pd.read_parquet(OUT / "bootstrap.parquet")
-    for s in ("s3", "portfolio"):
+    # s4's published block is set by the r² term (6.49 vs 2.66 on levels), so
+    # it pins the block rule on the real data
+    for s in ("s3", "s4", "portfolio"):
         i = st["series_order"].index(s)
         nav, pnl = SLEEVES[s]
         r = sh.returns_from_nav(committed[nav].to_numpy(float), bte.INITIAL_CAPITAL)
@@ -122,6 +124,25 @@ def test_bootstrap_rebuilds_exactly_from_the_committed_curve(summary, committed)
         assert res["ci"]["sharpe"] == pytest.approx(summary["bootstrap"][s]["sharpe"]["ci95"], rel=1e-8)
         np.testing.assert_array_equal(res["replicates"]["sharpe"],
                                       reps[reps["series"] == s]["sharpe"].to_numpy())
+
+
+def test_closed_form_section_rebuilds_from_the_committed_curve(summary, committed):
+    """PSR, MinTRL and the Newey-West t-statistics in summary.json are what
+    the script's own section_closed_form computes from the committed curve
+    (the file keeps 10 significant digits: rel 1e-9)."""
+    got = _script().section_closed_form(committed)
+    ref = summary["closed_form"]
+    assert set(got) == set(ref) == set(SLEEVES)
+    n = 0
+    for s in SLEEVES:
+        assert set(got[s]) == set(ref[s])
+        for k, v in ref[s].items():
+            if v is None:
+                assert got[s][k] is None or not np.isfinite(got[s][k]), (s, k)
+                continue
+            assert got[s][k] == pytest.approx(v, rel=1e-9, abs=1e-12), (s, k)
+            n += 1
+    assert n >= 6 * 10
 
 
 @pytest.fixture(scope="module")
