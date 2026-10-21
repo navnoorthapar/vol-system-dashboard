@@ -452,6 +452,63 @@ def test_a_capture_of_another_session_or_a_failed_download_is_not_stored(env, mo
     assert "::warning title=Cboe capture::" in capsys.readouterr().out
 
 
+def test_a_capture_write_error_fails_that_capture_not_the_run(env, monkeypatch, capsys):
+    """PROD-7: only the download was guarded, so an OSError from save_capture (a
+    full disk) propagated out of main(): no market or calibrate step, no status
+    file, no GITHUB_OUTPUT. Now that underlying is "failed", what it left of its
+    capture is removed (the retry slot captures it whole), and the run goes on."""
+    monkeypatch.setattr(cboe, "capture_option_chain", lambda und, **kw: _capture(und))
+    real = cboe.save_capture
+
+    def full_disk(cap, out_dir):
+        if cap.underlying != "SPX":
+            return real(cap, out_dir)
+        d = pathlib.Path(out_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        stem = cboe.capture_stem(cap)
+        cap.frame.to_parquet(d / f"{stem}.parquet", index=False)      # renamed into place ...
+        (d / f".{stem}.json.tmp").write_text("{")                     # ... then the JSON fails
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(cboe, "save_capture", full_disk)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    capt = st["capture"]
+    assert capt["status"] == "partial"
+    assert capt["captures"]["SPX"]["status"] == "failed"
+    assert "No space left on device" in capt["captures"]["SPX"]["reason"]
+    assert capt["captures"]["VIX"]["status"] == "captured"
+    d = env.DATA / "options" / "cboe"
+    assert sorted(p.name for p in d.iterdir()) == [f"vix_{SESSION}_013005Z.json",
+                                                   f"vix_{SESSION}_013005Z.parquet"]
+    stem = d / f"vix_{SESSION}_013005Z"
+    assert capt["files"] == [str(stem.with_suffix(".parquet")), str(stem.with_suffix(".json"))]
+    assert st["market"]["ok"]
+    assert st["calibration"]["status"] == "skipped"  # the later steps ran
+    assert code == 0
+    assert not st["publish_blockers"]
+    assert "::warning title=Cboe capture::Cboe chain capture partial" in capsys.readouterr().out
+    # the retry slot captures SPX again (nothing of the failed capture is left to say "exists")
+    monkeypatch.setattr(cboe, "save_capture", real)
+    code, st = _run(env, "capture")
+    assert st["capture"]["captures"]["SPX"]["status"] == "captured"
+    assert st["capture"]["captures"]["VIX"]["status"] == "exists"
+
+
+def test_a_crash_in_the_capture_step_does_not_skip_the_run(env, monkeypatch, capsys):
+    def crash(now_utc, expected, out_dir=None):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(env, "capture_cboe_chains", crash)
+    _accepted_pickle(env, "2026-09-22")
+    _, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    assert st["capture"]["status"] == "failed"
+    assert "RuntimeError: unexpected" in st["capture"]["reason"]
+    assert st["market"]["ok"]
+    assert st["calibration"]["status"] == "skipped"
+    assert st["session"] == SESSION
+    assert "exit_code" in st
+    assert "::warning title=Cboe capture::" in capsys.readouterr().out
+
+
 def test_no_capture_while_the_book_is_another_sessions(env, monkeypatch):
     """Same refusal as the calibration: from the 09:30 ET open the live book
     is the new session's."""

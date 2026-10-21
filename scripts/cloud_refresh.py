@@ -557,7 +557,12 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
     session: the retry slot skips an underlying already captured.
 
     Returns {"status": captured|exists|partial|skipped|failed, "reason",
-    "session", "files", "captures": {und: {...}}}. Never raises.
+    "session", "files", "captures": {und: {...}}}. Never raises: a failure
+    while summarising or writing one underlying's capture (a full disk, a
+    permission or pyarrow error) is that underlying's "failed", and whatever
+    it left of that capture (a temporary file, a parquet without its JSON) is
+    removed, so a capture is stored whole or not at all and the retry slot,
+    still inside the live book, captures it again.
     """
     d = pathlib.Path(out_dir) if out_dir is not None else capture_dir()
     st: dict = {"status": "skipped", "reason": "", "session": expected, "files": [],
@@ -581,19 +586,25 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
             st["captures"][und] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
             log.warning("  Cboe %s capture failed: %s", und, e)
             continue
-        summ = cap.summary()
-        if cap.frame.empty or cap.session != expected:
-            why = ("empty chain" if cap.frame.empty else
-                   f"the live {und} book is session {cap.session}'s, not {expected}'s")
-            st["captures"][und] = {"status": "rejected", "reason": why, "summary": summ}
-            log.warning("  Cboe %s capture not stored: %s", und, why)
+        try:
+            summ = cap.summary()
+            if cap.frame.empty or cap.session != expected:
+                why = ("empty chain" if cap.frame.empty else
+                       f"the live {und} book is session {cap.session}'s, not {expected}'s")
+                st["captures"][und] = {"status": "rejected", "reason": why, "summary": summ}
+                log.warning("  Cboe %s capture not stored: %s", und, why)
+                continue
+            pq_path, js_path = cboe.save_capture(cap, d)
+            st["captures"][und] = {"status": "captured", "file": str(pq_path),
+                                   **{k: summ[k] for k in ("quote_time", "book_state", "rows",
+                                                           "two_sided_rows", "expiries", "n_bytes",
+                                                           "sha256", "underlying_price")}}
+        except Exception as e:  # noqa: BLE001 (one underlying's write must not lose the run)
+            st["captures"][und] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
+            log.warning("  Cboe %s capture could not be stored: %s", und, e)
+            _discard_partial_capture(d, cap, cboe)
             continue
-        pq_path, js_path = cboe.save_capture(cap, d)
         st["files"] += [str(pq_path), str(js_path)]
-        st["captures"][und] = {"status": "captured", "file": str(pq_path),
-                               **{k: summ[k] for k in ("quote_time", "book_state", "rows",
-                                                       "two_sided_rows", "expiries", "n_bytes",
-                                                       "sha256", "underlying_price")}}
         log.info("  Cboe %s chain: %d rows (%d two-sided, %d expiries), quote time %s, book %s -> %s",
                  und, summ["rows"], summ["two_sided_rows"], summ["expiries"], summ["quote_time"],
                  summ["book_state"], pq_path.name)
@@ -609,6 +620,21 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
     st["reason"] = "; ".join(f"{u} {c['status']}" + (f" ({c['reason']})" if c.get("reason") else "")
                              for u, c in st["captures"].items())
     return st
+
+
+def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:
+    """Remove what a failed save_capture left of ``cap``: its temporary files,
+    and a parquet whose JSON was never written (the pair is the capture)."""
+    try:
+        stem = cboe.capture_stem(cap)
+    except Exception:  # noqa: BLE001 (no stem: nothing of this capture was written)
+        return
+    for p in (d / f".{stem}.parquet.tmp", d / f".{stem}.json.tmp"):
+        p.unlink(missing_ok=True)
+    pq_path, js_path = d / f"{stem}.parquet", d / f"{stem}.json"
+    if pq_path.exists() != js_path.exists():
+        pq_path.unlink(missing_ok=True)
+        js_path.unlink(missing_ok=True)
 
 
 def record_forward_ledger(session: str, raw, clean, spot: float, r_ref: float,
@@ -1174,7 +1200,12 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # live, and it is captured whatever the Yahoo chain or the fit do later.
     if "capture" in steps:
         with _Group("Cboe option-chain capture"):
-            capt = capture_cboe_chains(now_utc, closed.isoformat())
+            try:
+                capt = capture_cboe_chains(now_utc, closed.isoformat())
+            except Exception as e:  # it should not raise; the market and fit steps must run
+                log.exception("capture step crashed")
+                capt = {"status": "failed", "reason": f"capture step crashed: {type(e).__name__}: {e}",
+                        "session": closed.isoformat(), "files": [], "captures": {}}
             status["capture"] = capt
             if capt["status"] in ("failed", "partial"):
                 msg = f"Cboe chain capture {capt['status']}: {capt['reason']}"
