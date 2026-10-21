@@ -8,6 +8,8 @@ published site.
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 DAILY = (ROOT / ".github" / "workflows" / "daily_refresh.yml").read_text()
 TESTS = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
@@ -127,6 +129,14 @@ def test_a_presentation_test_cannot_lose_the_captures():
     commit_if = re.search(r"if:\s*(.*)", commit).group(1)
     assert "steps.datatests.outcome == 'success'" in commit_if
     assert "steps.tests.outcome" not in commit_if and "artifacttests" not in commit_if
+    # PROD-1: the captures are committed before any test gate runs, behind
+    # integrity checks only, and leave the runner as an artifact before that
+    caps = _step(DAILY, "Commit captures")
+    caps_if = re.search(r"if:\s*(.*)", caps).group(1)
+    assert "outcome == 'success'" not in caps_if
+    assert "datatests" not in caps_if
+    assert "check_captures.py" in _step(DAILY, "Check the captures (integrity only)")
+    assert DAILY.index("- name: Commit captures") < DAILY.index("- name: Data tests")
     arts = _step(DAILY, "Commit derived artifacts")
     arts_if = re.search(r"if:\s*>?\s*(.*?)\n\s*env:", arts, re.S).group(1)
     assert "steps.artifacttests.outcome == 'success'" in arts_if
@@ -162,11 +172,14 @@ def test_push_retry_rebase_survives_the_unstaged_database():
     # changes"), "rebase --abort" finds no rebase, and the step exited 1 -- losing
     # the run's captures -- whenever main moved during the run.
     push = (ROOT / "scripts" / "ci" / "commit_and_push.sh").read_text()
-    for name in ("Commit data files", "Commit derived artifacts"):
+    code = "\n".join(ln for ln in push.splitlines() if not ln.lstrip().startswith("#"))
+    for name in ("Commit captures", "Commit data files", "Commit derived artifacts"):
         assert "scripts/ci/commit_and_push.sh" in _step(DAILY, name), name
     assert (ROOT / "data_store" / "vol_system.db").exists()
-    pulls = re.findall(r"pull --rebase[^\n]*", push)
-    assert pulls and all("--autostash" in p for p in pulls), pulls
+    rebases = re.findall(r"git rebase [^\n]*origin/main[^\n]*", code)
+    assert rebases, rebases
+    assert all("--autostash" in r for r in rebases), rebases
+    assert "pull --rebase" not in code          # a failed pull's fetch ended the loop (PROD-2)
     # and the comment no longer claims the database is not committed/tracked
     assert "rebuildable cache and is not committed" not in DAILY
     assert "git-tracked" in DAILY
@@ -220,7 +233,7 @@ def test_commit_and_push_against_a_moved_remote(tmp_path):
                         "data_store/calibrations", ":(exclude)data_store/calibrations/diagnostics"],
                        cwd=work, env=env, capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "rebasing onto origin/main" in r.stdout
+    assert "fetching origin/main to rebase onto it" in r.stdout
     log = git("log", "--format=%s", "origin/main", cwd=work).split("\n")
     assert log[:3] == ["title", "main moved", "init"]
     files = git("show", "--name-only", "--format=", "origin/main", cwd=work).split()
@@ -324,3 +337,265 @@ def test_reproduce_steps_do_not_read_derived_artifacts_for_the_refits(tmp_path, 
     assert "FileNotFoundError" in {s.name: s for s in mod.build_steps(root)}["greeks"].error
     # the committed artifacts name their source: no step is flagged
     assert not [s.name for s in mod.build_steps(ROOT) if s.error]
+
+
+def test_the_captures_leave_the_runner_before_any_gate():
+    """PROD-1: the Cboe books, the accepted chain and pickle and the ledger lived
+    only in the runner until the one data push succeeded; the only upload was the
+    status JSON. Everything the run created or changed under the record's
+    directories is uploaded (90 days) right after the refresh, before any gate can
+    fail or time out, and a run whose captures reached neither commit says so."""
+    bundle = _step(DAILY, "Bundle this run's captures")
+    upload = _step(DAILY, "Upload the captures (before the gates)")
+    assert "if: always() && steps.refresh.outcome != 'skipped'" in bundle
+    for d in ("data_store/options", "data_store/calibrations", "data_store/forward", "data_store/market",
+              "data_store/signals"):
+        assert d in bundle, d
+    assert "--others --modified" in bundle                     # new and changed files, not history
+    assert "always()" in upload
+    assert "retention-days: 90" in upload
+    assert "runner.temp }}/captures" in upload
+    first_gate = DAILY.index("- name: Data tests")
+    assert DAILY.index("- name: Run cloud_refresh.py") < DAILY.index("- name: Bundle this run's captures") \
+        < DAILY.index("- name: Upload the captures") < first_gate
+    report = _step(DAILY, "Report captures that were not committed")
+    assert "::error" in report
+    assert "steps.commit.outcome != 'success'" in report
+    assert "steps.commitcaptures.outcome != 'success'" in report
+    commit = _step(DAILY, "Commit data files")
+    assert "REDERIVE=" in commit
+    assert "--rederive" in commit
+    assert "steps.refresh.outputs.run_utc" in commit
+
+
+def _repo(tmp_path):
+    """A scratch repository with a local bare remote, as commit_and_push.sh sees CI."""
+    import os
+    import shutil
+    import subprocess
+    if not (shutil.which("git") and shutil.which("base64") and shutil.which("bash")):
+        import pytest
+        pytest.skip("git/base64/bash not available")
+    env = {**os.environ, "GH_TOKEN": "x", "REPO": "o/r", "PUSH_RETRY_SLEEP": "0",
+           "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    env.pop("GITHUB_OUTPUT", None)
+    (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@example.com\n"
+                                        "[init]\n\tdefaultBranch = main\n")
+
+    def git(*a, cwd):
+        return subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+    remote, work, other = tmp_path / "remote.git", tmp_path / "work", tmp_path / "other"
+    git("init", "--bare", str(remote), cwd=tmp_path)
+    git("clone", str(remote), str(work), cwd=tmp_path)
+    ds = work / "data_store"
+    for rel, text in (("vol_system.db", "db0"), ("market/vix_daily/vix_daily_2026.parquet", "v0\n"),
+                      ("signals/regime_labels.parquet", "l0\n"), ("options/spx_old.parquet", "o0")):
+        (ds / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ds / rel).write_text(text)
+    git("add", "-A", cwd=work)
+    git("commit", "-qm", "init", cwd=work)
+    git("push", "-q", "origin", "HEAD:main", cwd=work)
+    git("clone", str(remote), str(other), cwd=tmp_path)
+    return env, git, work, other
+
+
+def _main_moves(git, other, rel, text, msg="main moved"):
+    (other / rel).parent.mkdir(parents=True, exist_ok=True)
+    (other / rel).write_text(text)
+    git("add", "-A", cwd=other)
+    git("commit", "-qm", msg, cwd=other)
+    git("push", "-q", "origin", "HEAD:main", cwd=other)
+
+
+def _push_script(env, work, *args, extra_env=None):
+    import subprocess
+    return subprocess.run(["bash", str(ROOT / "scripts" / "ci" / "commit_and_push.sh"), *args],
+                          cwd=work, env={**env, **(extra_env or {})}, capture_output=True, text=True,
+                          check=False)
+
+
+def test_a_transient_remote_outage_is_retried(tmp_path):
+    """PROD-2: after a failed push the script ran `git pull --rebase`; when that
+    pull's fetch failed too (a GitHub 5xx, a network blip spanning both) it exited
+    1 at once ("rebase onto main failed") and the run's captures were lost. The
+    fetch is now retried with a growing pause, and only a real rebase conflict is
+    a conflict. A git wrapper fails the first push and the first two fetches."""
+    import os
+    env, git, work, other = _repo(tmp_path)
+    _main_moves(git, other, "README", "moved")
+    real_git = __import__("shutil").which("git")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    counts = tmp_path / "counts"
+    counts.mkdir()
+    (bin_dir / "git").write_text(f"""#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    push|fetch|pull)
+      n=$(cat "{counts}/$a" 2>/dev/null || echo 0); echo $((n + 1)) > "{counts}/$a"
+      limit=0; [ "$a" = push ] && limit=1; [ "$a" = fetch ] && limit=2; [ "$a" = pull ] && limit=1
+      if [ "$n" -lt "$limit" ]; then echo "fatal: Could not read from remote repository." >&2; exit 128; fi
+      break ;;
+  esac
+done
+exec {real_git} "$@"
+""")
+    os.chmod(bin_dir / "git", 0o700)
+    cap = work / "data_store" / "options" / "cboe" / "spx_2026-10-20_023000Z.parquet"
+    cap.parent.mkdir(parents=True)
+    cap.write_text("book")
+    r = _push_script(env, work, "captures", "b", "data_store/options",
+                     extra_env={"PATH": f"{bin_dir}:{env['PATH']}"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fetching origin/main failed (try 1 of 4)" in r.stdout
+    assert (counts / "fetch").read_text().strip() == "3"
+    assert (counts / "push").read_text().strip() == "2"
+    files = git("show", "--name-only", "--format=", "origin/main", cwd=work).split()
+    assert files == ["data_store/options/cboe/spx_2026-10-20_023000Z.parquet"]
+    assert git("log", "--format=%s", "origin/main", cwd=work).split("\n")[:2] == ["captures", "main moved"]
+
+
+_PART = "data_store/market/vix_daily/vix_daily_2026.parquet"
+# a stand-in for cloud_refresh.py --rederive: merge the run's row into whatever the
+# partition file now holds, from the run's database (here a text file)
+_REDERIVE = ("python3 -c \"import pathlib; p = pathlib.Path('" + _PART + "'); "
+             "p.write_text(p.read_text() + 'run-row\\n'); "
+             "pathlib.Path('rederived.log').write_text(pathlib.Path('data_store/vol_system.db').read_text())\"")
+
+
+@pytest.mark.parametrize("rederive", [False, True])
+def test_new_captures_land_although_main_rewrote_a_partition(tmp_path, rederive):
+    """PROD-1's reproduction: main moved by a commit touching vix_daily_2026.parquet,
+    which the run also rewrote (uncommitted, for the data commit). The capture
+    commit holds only new files and lands; the run's partition is not left as
+    --autostash's failed pop left it (main's copy): re-derived over main's with
+    REDERIVE (the workflow), the run's own copy without."""
+    env, git, work, other = _repo(tmp_path)
+    _main_moves(git, other, _PART, "v0\nmain-row\n")
+    (work / _PART).write_text("v0\nrun-row\n")
+    (work / "data_store" / "vol_system.db").write_text("db-run")
+    cap = work / "data_store" / "options" / "cboe" / "spx_2026-10-20_023000Z.parquet"
+    cap.parent.mkdir(parents=True)
+    cap.write_text("book")
+    r = _push_script(env, work, "captures", "b", str(cap.relative_to(work)),
+                     extra_env={"REDERIVE": _REDERIVE} if rederive else {})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert git("show", "--name-only", "--format=", "origin/main", cwd=work) == str(cap.relative_to(work))
+    assert git("log", "--format=%s", "origin/main", cwd=work).split("\n")[:2] == ["captures", "main moved"]
+    status = git("status", "--porcelain", cwd=work)
+    assert "UU" not in status
+    assert not git("stash", "list", cwd=work)
+    part = (work / _PART).read_text()
+    assert part == ("v0\nmain-row\nrun-row\n" if rederive else "v0\nrun-row\n")
+    assert (work / "data_store" / "vol_system.db").read_text() == "db-run"
+
+
+def test_a_conflict_in_a_re_derivable_file_is_re_derived_over_main(tmp_path):
+    """PROD-2: the data commit (partitions, labels) conflicted with main on a
+    binary partition and the whole commit was dropped. It is now rebuilt over
+    main's version by REDERIVE (cloud_refresh.py --rederive in the workflow),
+    keeping the run's other files and its database, and pushed on top of main."""
+    env, git, work, other = _repo(tmp_path)
+    part = _PART
+    _main_moves(git, other, part, "v0\nmain-row\n")
+    ds = work / "data_store"
+    (ds / "vol_system.db").write_text("db-run")                       # unstaged, never committed
+    (ds / part.removeprefix("data_store/")).write_text("v0\nrun-row\n")
+    (ds / "signals" / "regime_labels.parquet").write_text("l0\nl1\n")
+    (ds / "options" / "spx_2026-10-20.parquet").write_text("chain")   # a second-chance capture
+    r = _push_script(env, work, "data", "b", "data_store/market", "data_store/signals/regime_labels.parquet",
+                     "data_store/options", extra_env={"REDERIVE": _REDERIVE})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Main also changed re-derivable file(s): " + part in r.stdout
+    log = git("log", "--format=%s", "origin/main", cwd=work).split("\n")
+    assert log[:3] == ["data", "main moved", "init"]
+    assert git("show", f"origin/main:{part}", cwd=work) == "v0\nmain-row\nrun-row"
+    assert git("show", "origin/main:data_store/options/spx_2026-10-20.parquet", cwd=work) == "chain"
+    assert git("show", "origin/main:data_store/signals/regime_labels.parquet", cwd=work) == "l0\nl1"
+    assert (work / "rederived.log").read_text() == "db-run"           # REDERIVE saw the run's database
+    assert (ds / "vol_system.db").read_text() == "db-run"
+    assert git("diff", "--name-only", cwd=work) == "data_store/vol_system.db"     # still unstaged
+    assert git("diff", "--staged", "--name-only", cwd=work) == ""
+
+
+def test_a_conflict_elsewhere_fails_loudly_and_names_the_file(tmp_path):
+    env, git, work, other = _repo(tmp_path)
+    _main_moves(git, other, "data_store/options/spx_old.parquet", "o-main")
+    (work / "data_store" / "options" / "spx_old.parquet").write_text("o-run")
+    r = _push_script(env, work, "data", "b", "data_store/options", extra_env={"REDERIVE": "true"})
+    assert r.returncode == 1
+    assert "main changed what this commit changes: data_store/options/spx_old.parquet" in r.stdout
+    head = git("rev-parse", "origin/main", cwd=work)
+    assert git("log", "-1", "--format=%s", head, cwd=work) == "main moved"
+    assert (work / "data_store" / "options" / "spx_old.parquet").read_text() == "o-run"   # untouched
+    # without REDERIVE even a partition conflict is an error (the derived-artifact commit)
+    (tmp_path / "b").mkdir()
+    env2, git2, work2, other2 = _repo(tmp_path / "b")
+    part = "data_store/market/vix_daily/vix_daily_2026.parquet"
+    _main_moves(git2, other2, part, "v-main\n")
+    (work2 / part).write_text("v-run\n")
+    r = _push_script(env2, work2, "data", "b", "data_store/market")
+    assert r.returncode == 1
+    assert "REDERIVE unset" in r.stdout
+
+
+def _capture_files(root, session="2026-10-20", rows=3, json_rows=None):
+    import json as _json
+
+    import pandas as pd
+    d = root / "data_store" / "options" / "cboe"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"snapshot_date": [session] * rows, "strike": range(rows)}).to_parquet(
+        d / f"spx_{session}_023000Z.parquet")
+    (d / f"spx_{session}_023000Z.json").write_text(_json.dumps(
+        {"session": session, "rows": rows if json_rows is None else json_rows, "sha256": "ab" * 32}))
+
+
+def test_check_captures_reads_every_new_capture_back(tmp_path):
+    """The capture commit's gate (scripts/ci/check_captures.py): each new file is
+    recognised by its name and read back whole; a broken one is reported and left
+    out, another new file is left to the data commit."""
+    import json as _json
+    import pickle
+    import subprocess
+
+    import pandas as pd
+    *_, work, _ = _repo(tmp_path)
+    _capture_files(work)
+    _capture_files(work, session="2026-10-21", json_rows=99)          # rows disagree
+    (work / "data_store" / "options" / "cboe" / "vix_2026-10-20_023001Z.parquet").write_bytes(b"PAR1")
+    pd.DataFrame({"snapshot_date": ["2026-10-20"], "strike": [1.0]}).to_parquet(
+        work / "data_store" / "options" / "spx_2026-10-20.parquet")
+    pd.DataFrame({"snapshot_date": ["2026-10-17"]}).to_parquet(
+        work / "data_store" / "options" / "spx_2026-10-19.parquet")   # another session's rows
+    cal = work / "data_store" / "calibrations"
+    cal.mkdir()
+    fit = {"model_version": 2, "spot_date": "2026-10-20", "as_of_date": "2026-10-20",
+           "params": {"kappa": 5.0, "theta": 0.05, "sigma": 0.7, "rho": -0.9, "v0": 0.015},
+           "leg_losses": {"spx_iv_rmse": 1.4, "vix_index_rmse": 0.6},
+           "n_spx_expiries": 6, "n_spx_options": 54, "n_put_wing_expiries": 6,
+           "n_vix_tenors": 4, "spx_snapshot_date": "2026-10-20", "spx_snapshot_session": "2026-10-20"}
+    with open(cal / "joint_cal_2026-10-20.pkl", "wb") as f:
+        pickle.dump(fit, f)
+    (cal / "diagnostics").mkdir()
+    (cal / "diagnostics" / "2026-10-20.json").write_text("{}")         # derived: not a capture
+    (work / "data_store" / "forward").mkdir()
+    (work / "data_store" / "forward" / "ledger_2026-10-20.json").write_text(_json.dumps({"session": "x"}))
+    (work / "data_store" / "options" / "notes.txt").write_text("?")
+    out = tmp_path / "ok.txt"
+    r = subprocess.run([__import__("sys").executable, str(ROOT / "scripts" / "ci" / "check_captures.py"),
+                        "--out", str(out), "--root", str(work)], capture_output=True, text=True, check=False)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert out.read_text().split() == [
+        "data_store/calibrations/joint_cal_2026-10-20.pkl",
+        "data_store/options/cboe/spx_2026-10-20_023000Z.json",
+        "data_store/options/cboe/spx_2026-10-20_023000Z.parquet",
+        "data_store/options/spx_2026-10-20.parquet"]
+    errors = [ln for ln in r.stdout.splitlines() if ln.startswith("::error")]
+    assert len(errors) == 5, errors
+    for bad in ("spx_2026-10-21_023000Z.json", "spx_2026-10-21_023000Z.parquet", "vix_2026-10-20_023001Z",
+                "spx_2026-10-19.parquet", "ledger_2026-10-20.json"):
+        assert any(bad in e for e in errors), bad
+    assert "other  data_store/options/notes.txt" in r.stdout
+    assert "diagnostics" not in out.read_text()

@@ -1083,6 +1083,29 @@ def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
     return written
 
 
+def rederive_records(steps, closed: date, today: date) -> dict:
+    """Rebuild the re-derivable committed files from this run's database over
+    the versions now in the working tree (main's, when the commit step hit a
+    rebase conflict on them: scripts/ci/commit_and_push.sh REDERIVE).
+
+      market  export_market_partitions over the download window: it MERGES
+              the database into each file (the database wins a key clash,
+              the file's other rows are kept), so main's rows and this run's
+              both survive
+      labels  extend_regime_labels: appends the sessions the file lacks and
+              heals the trailing window, from this run's database
+
+    Nothing is downloaded and the committed captures are NOT restored first
+    (that would let main's copy of a row replace what this run downloaded)."""
+    out: dict = {}
+    if "market" in steps:
+        out["persisted"] = persist_captures(download_start(today, None).isoformat())
+    if "labels" in steps:
+        out["labels_added"] = extend_regime_labels(closed)
+    log.info("[rederive] %s", out)
+    return out
+
+
 def headline_calibration(session: "str | None") -> dict:
     """Newest calibration that passes the CURRENT gate, and its age in NYSE
     sessions relative to ``session``. Legacy (pre-C22) pickles do not count."""
@@ -1137,6 +1160,7 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
     if out_path:
         with open(out_path, "a") as f:
             f.write(f"session={status.get('session') or ''}\n")
+            f.write(f"run_utc={status.get('run_utc') or ''}\n")
             f.write(f"calibration={cal.get('status', 'not-run')}\n")
             f.write(f"reason={str(cal.get('reason', '')).splitlines()[0] if cal.get('reason') else ''}\n")
             f.write(f"labels_added={status.get('labels_added', 0)}\n")
@@ -1253,6 +1277,11 @@ def _parse_args(argv):
     ap.add_argument("--rebuild-labels", action="store_true",
                     help="labels step: rebuild every stored rule label from the database "
                          "(after a restatement of the record) instead of extending")
+    ap.add_argument("--rederive", action="store_true",
+                    help="no download, no restore: re-export the market partitions ('market' in "
+                         "--steps) and re-extend the labels ('labels') from this run's database over "
+                         "the files now in the tree (scripts/ci/commit_and_push.sh REDERIVE, after it "
+                         "took main's version of a conflicting file); pass the run's --now")
     args = ap.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     bad = [s for s in steps if s not in ALL_STEPS]
@@ -1286,6 +1315,17 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     status = {"run_utc": now_utc.isoformat(timespec="seconds"), "steps": steps,
               "expected_session": closed.isoformat(),
               "session": None, "errors": [], "warnings": []}
+    if args.rederive:
+        try:
+            status["rederived"] = rederive_records(steps, closed, today)
+            status["exit_code"] = 0
+        except Exception as e:
+            log.exception("rederive failed")
+            status["errors"].append(f"rederive failed: {e}")
+            status["exit_code"] = 1
+        # the run's own status file (.refresh-status.json) is left as the run wrote it
+        log.info("Rederive %s", "complete" if status["exit_code"] == 0 else f"FAILED: {status['errors']}")
+        return status["exit_code"]
     hard_fail = False
     # Failures after which the rendered site must not be published (the data
     # it would show is wrong or incomplete). A rejected, skipped or stale

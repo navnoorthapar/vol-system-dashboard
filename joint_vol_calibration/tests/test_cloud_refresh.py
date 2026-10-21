@@ -1014,6 +1014,44 @@ def test_market_captures_survive_a_dropped_session_and_a_fresh_db(env, monkeypat
     assert "2026-09-22" in set(pd.read_parquet(part)["date"])
 
 
+def test_rederive_rebuilds_the_partitions_and_labels_over_mains_files(env, monkeypatch):
+    """PROD-2: the push loop's answer to a binary conflict (commit_and_push.sh
+    REDERIVE). After a market run, main is given a different copy of the 2026
+    SPX partition (a row the run never downloaded; the run's last session
+    missing). --rederive, with no download and no restore, merges the run's
+    database into main's file, so main's extra row and the run's session are
+    both there, and re-extends the labels as of the run's session."""
+    code, _ = _run(env, "market")
+    assert code == 0
+    part = dbm.MARKET_DIR / "spx_ohlcv" / "spx_ohlcv_2026.parquet"
+    run_part = pd.read_parquet(part)
+    mains = run_part[run_part["date"] != SESSION].copy()
+    extra = mains.iloc[[0]].assign(date="2026-01-02", close=1234.5)
+    pd.concat([extra, mains]).sort_values("date").to_parquet(part, index=False)
+    status = env.DATA.parent / "status.json"
+    before = status.read_text()
+
+    def no_network(*a, **k):
+        raise AssertionError("rederive must not download or restore")
+    monkeypatch.setattr(dl, "download_spx_ohlcv", no_network)
+    monkeypatch.setattr(env, "restore_captures", no_network)
+    labelled = []
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: labelled.append(as_of) or 1)
+    code = env.main(["--rederive", "--steps", "market,labels", "--status-file", str(status)], now_utc=NOW)
+    assert code == 0
+    got = pd.read_parquet(part)
+    assert SESSION in set(got["date"])
+    assert "2026-01-02" in set(got["date"])
+    assert got.loc[got["date"] == "2026-01-02", "close"].item() == 1234.5
+    assert len(got) == len(run_part) + 1
+    assert labelled == [date.fromisoformat(SESSION)]
+    assert status.read_text() == before                        # the run's status file is the run's
+    # the market step alone: the labels are not touched
+    labelled.clear()
+    assert env.main(["--rederive", "--steps", "market,capture,calibrate,freeze"], now_utc=NOW) == 0
+    assert labelled == []
+
+
 def test_no_persist_flag_leaves_capture_dirs_alone(env):
     status = env.DATA.parent / "status.json"
     code = env.main(["--steps", "market", "--status-file", str(status), "--no-persist"],
