@@ -17,7 +17,7 @@ the result with the committed file:
 | `greeks/greeks_surface.parquet` | `risk_monitor --calibration <the fit its provenance names>` (the headline fit: 2026-10-16 until the daily bot accepts a newer one and rebuilds it) | every column | 1e-10 |
 | `greeks/scenario_grid.parquet` | `python -m joint_vol_calibration.greeks.scenario_grid --calibration <the fit its provenance names>` | every column | 1e-10 |
 | `backtest/delta_hedge_2020.parquet` | `run_backtest --c7` | every column | 1e-10 |
-| `calibrations/joint_cal_<session>.pkl` × 5 | `JointCalibrator(as_of_date=<session>, **recorded_inputs(<committed fit>)).calibrate(); save()` (the VIX targets and the reference rate the fit recorded: C23 restated the database's VIX family, and new fits discount on the Treasury curve) | every field except `fit_time` and `run_utc`; `methods` and `chain_diagnostics` reported, not failed (below) | 1e-6 |
+| `calibrations/joint_cal_<session>.pkl` × 5 | `JointCalibrator(as_of_date=<session>, **recorded_inputs(<committed fit>)).calibrate(optimizer=<the optimiser that made it>); save()`: the VIX targets and the reference rate the fit recorded (C23 restated the database's VIX family, and new fits discount on the Treasury curve), and differential evolution for every committed fit (they record no `optimizer`; the daily bot's fits record `trf_multistart`) | every field except `fit_time` and `run_utc`; `methods` and `chain_diagnostics` reported, not failed (below) | 1e-6 |
 | `backtest/beta_sensitivity.csv` (`--full`) | `run_backtest --beta-sensitivity` | every cell | 1e-9 (10 significant digits) |
 | `backtest/c22_bridge.csv` (`--full`) | `c22_bridge --csv` | every cell | 1e-9 |
 | `backtest/c23_bridge.csv` | `c23_bridge --csv` (4 backtests) | every cell | 1e-9 |

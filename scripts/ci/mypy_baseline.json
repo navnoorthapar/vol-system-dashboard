@@ -153,12 +153,11 @@
    "index": 4
   },
   "scripts/cloud_refresh.py": {
-   "assignment": 1,
    "union-attr": 2,
    "var-annotated": 1
   }
  },
  "tool": "mypy",
- "total": 371,
+ "total": 370,
  "version": "mypy 2.4.0 (compiled: yes)"
 }

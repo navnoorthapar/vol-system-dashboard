@@ -36,7 +36,7 @@ install:  ## exact tested environment (Linux x86_64, CPython 3.11): requirements
 install-any:  ## any other platform (macOS arm64, Windows, Linux aarch64): resolve the ranges
 	$(PYTHON) -m pip install -r requirements-dev.txt
 
-test:  ## the full suite (6-9 min on 4 vCPU, measured)
+test:  ## the full suite (about 10.5 min on 4 vCPU at load 1-1.5, measured 2026-10-21)
 	$(PYTEST) joint_vol_calibration/tests -q
 
 test-fast:  ## pricing, IV, chain hygiene, CI config and the property tests (about 1 min)

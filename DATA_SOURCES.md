@@ -8,7 +8,7 @@ This repository is public, and it commits market data its vendors' terms do not 
 
 - **Raw option quotes from Yahoo.** These are 5 SPX chains and 4 VIX chains under `data_store/options/`, plus 69,902 quote rows in `data_store/vol_system.db`.
 - **Cboe's VX futures history.** 30,963 rows in the database.
-- **Cboe index levels.** The VIX family partitions under `data_store/market/`.
+- **Cboe index levels.** The VIX family partitions under `data_store/market/`, and seven Cboe strategy-index histories (PUT, WPUT, BXM, BFLY, CNDR, VXTH, SET; 2,458–2,462 rows each, 2017-01-03 to 2026-10-19) under `data_store/benchmarks/`.
 
 Cboe's website terms allow viewing and downloading one copy for personal, non-commercial use. They bar storing the Materials "in an electronic retrieval system", publishing or distributing them, and using them "to verify or correct other data or information" without Cboe's prior written consent. Yahoo's terms bar automated collection without permission, and they bar building a database or archive that substitutes for Yahoo's services.
 
@@ -23,8 +23,10 @@ The owner has four options. They can be combined.
 
 **Owner decision (2026-10-21):** the raw option quotes stay committed in the public repository, disclosed in this register, and the git history is not rewritten (option 4 is declined). The risk above is accepted by the owner, not resolved. From C23 the daily bot therefore also commits the Cboe delayed-quotes books it captures (below). The rates C23 adds are US Government works and NY Fed data whose terms permit redistribution with a notice (see below). In detail:
 
-- The daily bot's `capture` step (`scripts/cloud_refresh.py capture_cboe_chains`) stores Cboe's full delayed SPX and VIX chains once per book session under `data_store/options/cboe/` (`<und>_<session>_<HHMMSS>Z.parquet` plus a `.json` record with the timestamps and the SHA-256 of the raw response), about 0.9 MB a session (2026-10-20: SPX 28,980 lines, 821 KB; VIX 1,520 lines, 63 KB), so about 220 MB a year. `cboe_downloader.capture_option_chains` itself still writes only where its caller says.
-- The new Cboe index histories (VIX1D, VIX1Y, SKEW, COR1M, COR3M, DSPX) and the strategy benchmarks are downloadable into the database. They are not committed: their partitions are opt-in through `database.REFERENCE_TABLES`.
+- The daily bot's `capture` step (`scripts/cloud_refresh.py capture_cboe_chains`) is built to store Cboe's full delayed SPX and VIX chains once per book session under `data_store/options/cboe/` (`<und>_<session>_<HHMMSS>Z.parquet` plus a `.json` record with the timestamps and the SHA-256 of the raw response), about 0.9 MB a session (2026-10-20: SPX 28,980 lines, 821 KB; VIX 1,520 lines, 63 KB). The one capture committed so far (2026-10-20) was made by that code from a development run. `cboe_downloader.capture_option_chains` itself still writes only where its caller says.
+- **What the repository grows by** (measured with `scripts/ci/repo_growth.py --session` on the five accepted sessions, after the C23f re-encoding of the surface residuals): an accepted book session adds 1.7–2.7 MB of new files (1.5–2.3 MB after git's zlib): the Cboe books 0.88 MB, the surface residuals 0.43–1.06 MB, the SPX chain 0.17–0.35 MB, the surface JSON 0.2–0.3 MB and the diagnostics 0.05–0.06 MB. Every slot also rewrites 0.34 MB (0.25 MB after zlib; the labels file is 0.22 MB of it). The repository was 54 MB on 2026-10-21 (GitHub API). If every session were accepted that is roughly 0.4–0.6 GB a year, toward GitHub's 1 GB recommendation within about two years; the daily job reports each run's growth and warns above 4 MB. Moving the raw captures and the residuals to Git LFS, a data branch or release assets is the remedy if the job runs that long; it is not done.
+- The new Cboe index histories (VIX1D, VIX1Y, SKEW, COR1M, COR3M, DSPX) are downloadable into the database and are not committed: their partitions are opt-in through `database.REFERENCE_TABLES`.
+- **The Cboe strategy-index histories are committed** (commit `8d9c02d`, 2026-10-20): `data_store/benchmarks/{PUT,WPUT,BXM,BFLY,CNDR,VXTH,SET}.csv` with a `manifest.json` of source URLs and hashes. They are the input of the published β replication (`data_store/backtest/inference/benchmarks.json`). The owner's decision above was recorded while this register said they were not committed, so it does not cover them yet: they are the same class of Cboe Materials as the VIX-family partitions (medium-high risk) and need the owner's call, to keep them or move them with the private store (option 1).
 - C23 does make Cboe's official files the stored source of the VIX index family, correcting the Yahoo prints (see the correction log). The risk is the same class as before. Before C23, every session row of `vix_daily` already equalled Cboe's VIX file to 0.005 (275 rows were tagged 'cboe'), and the term structure held Yahoo's republication of the same Cboe indices. Under option 1 or 2 these partitions move private with everything else.
 - The cross-source check (`database.compare_sources`, `pipeline.refresh_vix_index_family`) uses Cboe's files to check and correct Yahoo's prints. That is the use Cboe's clause on verifying or correcting other data names.
 
@@ -35,9 +37,10 @@ The owner has four options. They can be combined.
 | `data_store/options/spx_*.parquet` | 5 SPX chains (2026-03-24, 03-27, 05-29, 06-18, 10-16): 68,006 quotes | Yahoo (yfinance) | Raw quotes. **High risk** |
 | `data_store/options/vix_*.parquet` | 4 VIX chains (2026-03-24 to 06-18): 1,896 quotes | Yahoo (yfinance) | Raw quotes. **High risk** |
 | `data_store/options/cboe/` (C23) | Cboe delayed-quotes SPX and VIX chains, every line, one capture per book session (from 2026-10-20), with a JSON record per capture (fetch and quote time, book state, SHA-256 of the raw response) | Cboe (delayed quotes) | Raw quotes. **High risk** |
-| `data_store/forward/` (C23) | The forward ledger: one hash-chained JSON per accepted session (signals, listed straddles at the captured bid/ask, marks) | Derived from the Yahoo chains | Derived (holds individual bid/ask prints of the straddles it trades) |
+| `data_store/forward/` (C23) | The forward ledger: one hash-chained JSON per captured session (signals, listed straddles at the captured bid/ask, marks); no entry yet | Derived from the session's Cboe SPX capture (the Yahoo chain as fallback) | Derived (holds individual bid/ask prints of the straddles it trades) |
 | `data_store/vol_system.db` | The rebuildable cache. Holds the chains above, VX futures (30,963 rows, 2013-01-02 to 2026-10-09), VX final settlements (201), and every market table | Cboe, Yahoo | Raw. **High risk** |
 | `data_store/market/vix_term_structure/`, `vix_daily/` | Daily closes of VIX9D/VIX/VIX3M/VIX6M/VVIX and VIX OHLC, 2010 to present | Cboe official files (C23); 2 rows Yahoo-only | Index levels. Medium-high risk |
+| `data_store/benchmarks/` (C23) | Cboe strategy-index daily levels: PUT, WPUT, BXM, BFLY, CNDR, VXTH, SET (2017-01-03 to 2026-10-19, one CSV each) and `manifest.json` | Cboe index files | Index levels. Medium-high risk; not yet covered by the owner's decision (above) |
 | `data_store/market/spx_ohlcv/` | S&P 500 daily OHLCV | Yahoo (^GSPC) | Medium risk |
 | `data_store/market/tbill_rates/` | 13-week bill discount yield | Yahoo (^IRX) | Medium risk |
 | `data_store/market/rates_daily/` (C23) | Treasury bill rates, par yield curve and SOFR, 2010 (SOFR 2018) to present: 92,208 quotes | US Treasury, NY Fed | Low risk (see each source) |
@@ -52,14 +55,15 @@ The owner has four options. They can be combined.
 - **Used for:**
   - The VIX index family (VIX, VIX9D, VIX3M, VIX6M, VVIX). This is the primary source from C23.
   - VRO (VX final settlements).
-  - On request (C23, not committed): VIX1D, VIX1Y, SKEW, COR1M, COR3M, DSPX, VIXEQ, and the PUT/WPUT/BXM/BFLY/CNDR strategy benchmarks.
+  - On request (C23, not committed): VIX1D, VIX1Y, SKEW, COR1M, COR3M, DSPX, VIXEQ.
+  - The PUT/WPUT/BXM/BFLY/CNDR/VXTH/SET strategy benchmarks (C23, committed under `data_store/benchmarks/`).
 - **Endpoint:** `https://cdn.cboe.com/api/global/us_indices/daily_prices/<INDEX>_History.csv` (307 to `cdn-api.cboe.com`). No key.
 - **Terms:** <https://www.cboe.com/terms>, "Terms and Conditions for Use of Cboe Websites", *Last Updated: November 16, 2022*. Section 2, "Copyrights, Trademarks, Service Marks, And Proprietary Rights":
 
   > You may view, print and download one copy of the Materials for your personal non-commercial use in connection with products and services offered by Cboe, provided that you maintain all copyright, trademark and other notices contained on the Materials. You may not otherwise copy, reproduce, alter, store either in hard copy or in an electronic retrieval system, license, transmit, display, broadcast, create a derivative work (for example, a financial product, service or index) from, use to verify or correct other data or information, publish, rent, sublicense, distribute, or otherwise use in whole or in part in any other manner the Materials without Cboe's prior written consent except to the extent that such use constitutes "fair use" under the "Copyright Act of 1976", as amended from time to time.
 
   Section 2 defines "Materials" to include "databases".
-- **Committed:** the VIX-family partitions only. The other indices are not committed.
+- **Committed:** the VIX-family partitions and the seven strategy-index files under `data_store/benchmarks/`. The other indices are not committed.
 - **Risk:** medium-high.
 - **Notes:**
   - Section 2 also requires keeping "all copyright, trademark and other notices contained on the Materials". The index names are Cboe's.
@@ -165,7 +169,7 @@ The owner has four options. They can be combined.
 
 ## How the code keeps to this register
 
-- `database.MARKET_TABLES`, which the daily bot restores and commits, is unchanged. The C23 reference tables (`cboe_index_daily`, `rates_daily`) are written to partitions only when a caller passes `tables=database.REFERENCE_TABLES` or names them.
+- `database.MARKET_TABLES`, which the daily bot restores and commits, is unchanged. The C23 reference tables (`cboe_index_daily`, `rates_daily`) are written to partitions only when a caller passes `tables=database.REFERENCE_TABLES` or names them; the daily bot names `rates_daily` (US Government and NY Fed data, above) and never `cboe_index_daily`.
 - `cboe_downloader.capture_option_chains(out_dir=None)` writes nothing. Every write goes to a directory the caller passes; the daily bot passes `data_store/options/cboe/` (owner decision above).
 - `rates.refresh_rates()` uses Treasury and the NY Fed. FRED is used only when `fred_ids` are passed.
 - `rates.sofr()` returns the NY Fed notice with every value.

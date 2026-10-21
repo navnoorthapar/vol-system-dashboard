@@ -6,16 +6,17 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Cite](https://img.shields.io/badge/cite-CITATION.cff-blue?style=flat-square)](CITATION.cff)
 
-An end-of-day research system that fits the SPX option smile and the VIX index term structure every U.S. session,
-scores each fit against bid–ask quotes it was not fitted to, and reports a mark-to-model straddle backtest with its
-statistical inference; the backtest result is negative and is published as such.
+An end-of-day research system that fits one Heston model jointly to the SPX option smile and the four Cboe VIX indices
+(VIX options are a research leg, not in the fit), scores every model against bid–ask quotes it was not fitted to, and
+reports a mark-to-model straddle backtest with its statistical inference. The backtest result is negative and is
+published as such.
 
-**Three results** (headline session 2026-10-16; ranges over the five sessions with a stored chain, 2026-03-24 to
-2026-10-16):
+**Three results** (headline session 2026-10-16; ranges over the five sessions with a stored chain and an accepted fit,
+2026-03-24 to 2026-10-16):
 
-1. **Quote-grade surface.** An arbitrage-free, calendar-ordered SVI surface prices held-out strikes to a median
-   **0.55 half-spreads** of the quoted bid–ask (80.0% inside it). Range over the five sessions: **0.45–1.98** half-spreads
-   (a range, not a confidence interval; held-out strikes lie between fitted ones).
+1. **Interpolation floor.** A certified arbitrage-free, calendar-ordered SVI surface prices held-out strikes to a
+   median **0.55 half-spreads** of the quoted bid–ask (80.0% inside it). Range over the five sessions: **0.45–1.98**
+   half-spreads (a range, not a confidence interval; held-out strikes lie between fitted ones).
 2. **Joint SPX/VIX calibration, out of sample.** Heston, fitted to 53 SPX anchors and the four Cboe VIX indices, misses
    the other 2,860 quotes by **2.96 vol pts** RMSE with σ on its 2.0 cap. Rough Heston on the same quotes: **1.09**.
    Range: Heston 1.28–2.96, rough Heston 1.09–1.83; rough is lower on 3 of 5 sessions and returns H = ½ (Heston) on 2.
@@ -25,11 +26,10 @@ statistical inference; the backtest result is negative and is published as such.
 
 ![SPX smiles on 2026-10-16: bid–ask quotes, the arbitrage-free SVI surface and the joint Heston fit](docs/figures/smile_2026-10-16.png)
 
-**Limitations.** Yahoo end-of-day chains carry no quote time, so part of every spread miss can be staleness; five
-sessions have a stored chain (Cboe's timestamped books are captured daily from 2026-10-20). Every backtest P&L is
-Black–Scholes at β·VIX: no option prices exist inside the window. Heston's vol-of-vol sits on its cap in 2 of 5 fits.
-The VIX-options leg is off.
-One developer, so no independent validation.
+**Limitations.** Yahoo end-of-day chains carry no quote time, so part of every spread miss can be staleness. Cboe's
+timestamped books are stored from 2026-10-20, and the forward ledger at executable prices has no entry yet. Every
+backtest P&L is Black–Scholes at β·VIX: no option prices exist inside the window. Heston's vol-of-vol sits on its cap
+in 2 of 5 fits. One developer, so no independent validation.
 
 **Links.** [Live dashboard](https://navnoorbawa.me) · [Docs](docs/README.md) ·
 [Validation pack](docs/model_validation/README.md) · [Reproduce](docs/reproduce.md) ·
@@ -74,10 +74,16 @@ flowchart LR
   D --> S["navnoorbawa.me"]
 ```
 
-`scripts/cloud_refresh.py` is the only writer in the daily job: market data, rule labels, the Cboe book capture, the
-calibration and, after an accepted fit, its surface report, diagnostics, Greeks, scenario grid and forward-ledger
-entry. Data tests gate the commit of what was captured; presentation tests gate only the deploy. The dashboard is a
-read-only renderer, and `dashboard/freeze_site.py` refuses to publish a page that reports a loader error.
+`scripts/cloud_refresh.py` is the only writer in the daily job, which is built to run every U.S. session: market data
+and rule labels after the close; in the book slot the Cboe book capture, the calibration, a forward-ledger entry for
+every session with a live captured book (whatever the fit does) and, after an accepted fit, its surface report,
+diagnostics, Greeks and scenario grid. Each book run also rebuilds derived artifacts an earlier run failed to build.
+The captures leave the runner first, as a workflow artifact, and are committed in their own commit behind integrity
+checks only; data tests gate the data commit, artifact tests the derived artifacts, presentation tests only the
+deploy. The dashboard is a read-only renderer, and `dashboard/freeze_site.py` refuses to publish a page that reports a
+loader error. What is stored so far was not all written by the scheduled job: the 2026-10-16 fit and the first Cboe
+capture (2026-10-20) were made by the job's code from development runs, and the git history says which commit wrote
+each file.
 
 ## Quickstart
 
@@ -133,9 +139,12 @@ What C23 measured about these fits (`data_store/calibrations/diagnostics/`, the 
 | 2026-06-18 | 1.83 | 1.83 | 0.50 |
 | 2026-10-16 | 2.96 | 1.09 | 0.02 |
 
-On the same quotes, in half-spreads (`data_store/surface/<session>/scorecard.json`), Heston's out-of-sample median
-|model − mid| is 4.4–15.6 half-spreads against 0.45–1.98 for the arbitrage-free SVI surface. The VIX computed from each
-session's own SPX chain with Cboe's rules is within 0.09–0.78 index points of the official close.
+On the 1,473–3,695 quotes per session that no model was fitted to (`data_store/surface/<session>/scorecard.json`,
+`metrics.common_out_of_sample`), Heston's median |model − mid| is 4.4–15.6 half-spreads against 0.45–1.98 for the
+certified arbitrage-free SVI surface (Durrleman g ≥ 0 and calendar order checked on a 1e-4 grid over ln K/F ∈ [−3, 2],
+a 1/k grid to |k| = 2,000–3,000 and the |k| → ∞ limits). The VIX computed from each session's own SPX chain with
+Cboe's rules is within 0.09–0.78 index points of the official close; most of that gap is not explained by the stored
+chain ([validation pack](docs/model_validation/README.md#m14-quote-grade-surface), M14).
 
 ## Backtest (a proxy study, mark-to-model)
 
@@ -158,9 +167,12 @@ The portfolio ends at NAV $777,823 (−22.2%) while T-bills earned 19.1% over th
 full backtest re-run at each β (`data_store/backtest/beta_sensitivity.csv`) moves S1 from +$2,509,627 at β = 1.00 to
 −$554,935 at β = 0.78, and the portfolio is negative at every β from 0.78 to 1.00. Replicating Cboe's PUT and WPUT
 indices over the window implies β = 0.80 for both (`data_store/backtest/inference/benchmarks.json`). Deflated for the
-configurations tried since C10 (`docs/trials_ledger.yaml`), S3's largest deflated Sharpe ratio over every trial count
-is 0.27. The forward ledger (`data_store/forward/`) records each accepted session's signals at executable prices from
-the next accepted fit on; it is the only evidence here that will not be mark-to-model.
+configurations tried since C10 (`docs/trials_ledger.yaml`), S3's deflated Sharpe ratio is 0.000–0.019 at the ledger's
+trial counts (N 147–210); it reaches 0.27 only if the search is counted as 4.6 independent trials (the eigenvalue
+participation ratio of the 83 re-run trial series, not a trial count) with the skill-less trial variance. The forward
+ledger (`data_store/forward/`) records every captured session's signals at executable prices on that session's full
+Cboe SPX book (the Yahoo chain plus the open positions' expiries as fallback), whatever the calibration does, and marks
+them on later captured books. It has no entry yet; it is the only evidence here that will not be mark-to-model.
 
 ## Data
 
@@ -174,9 +186,9 @@ committed publicly; the owner's decision is recorded there).
 | SPX OHLCV | Yahoo (`^GSPC`) | 2010-01-04 → 2026-10-19 | 4,224 |
 | VIX daily | Cboe's official `VIX_History.csv` (a Yahoo row only until Cboe posts the session, labelled `yfinance`) | 2010-01-04 → 2026-10-19 | 4,224 |
 | VIX term structure | Cboe's official index files (`^VIX9D` from 2011-01-03, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`), Yahoo as the provisional same-evening row; restated from Yahoo's copies in C23 (`data_store/market/corrections/`) | 2010-01-04 → 2026-10-19 | 20,867 (2 Yahoo rows) |
-| SPX options | Yahoo: 4 full end-of-day chains (2026-03-24, 03-27, 05-29, 06-18) and the daily job's two-sided capture of 2026-10-16 | none inside the backtest window | 68,006 |
+| SPX options | Yahoo: 4 full end-of-day chains (2026-03-24, 03-27, 05-29, 06-18) and a two-sided capture of 2026-10-16 (the daily job's code, run from a development session) | none inside the backtest window | 68,006 |
 | VIX options | Yahoo, the first 4 sessions | none inside the backtest window | 1,896 |
-| SPX and VIX option books (C23) | Cboe delayed quotes: every line of both chains, captured once per book session by the daily job (`data_store/options/cboe/`, with the fetch and quote times and the SHA-256 of the raw response); not used by the calibrator yet | from 2026-10-20 | 28,980 SPX + 1,520 VIX lines (first capture) |
+| SPX and VIX option books (C23) | Cboe delayed quotes: every line of both chains, which the daily job's capture step stores once per book session (`data_store/options/cboe/`, with the fetch and quote times and the SHA-256 of the raw response); the first capture was made by that code from a development run; the forward ledger trades on them, the calibrator does not use them yet | from 2026-10-20 | 28,980 SPX + 1,520 VIX lines (first capture) |
 | VX futures | Cboe per-contract files (174 monthly contracts expiring 2013-01 → 2027-06) | 2013-01-02 → 2026-10-09 | 30,963 |
 | VX final settlements | Cboe (expiry-day settles; VRO before mid-2013) | 2010-01-20 → 2026-09-16 | 201 |
 | T-bill rate | Yahoo (`^IRX`, stored as cc rate + raw discount yield; negative 2020 bills kept) | 2010-01-04 → 2026-10-19 | 4,222 |
@@ -194,7 +206,7 @@ committed publicly; the owner's decision is recorded there).
 | `data_store/backtest/inference/` | `python scripts/inference_report.py` (9–14 min) |
 | `data_store/signals/regime_labels.parquet`, every row | `python scripts/cloud_refresh.py --steps labels --rebuild-labels --no-persist` |
 | `data_store/vol_system.db` (the cache, from the committed record) | `python -m joint_vol_calibration.data.pipeline resync-db` |
-| `data_store/calibrations/joint_cal_<session>.pkl` | `python -c "from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator as J; c = J(as_of_date='2026-10-16'); c.calibrate(); c.save()"` |
+| `data_store/calibrations/joint_cal_<session>.pkl` | `python -c "import pickle; from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator as J, recorded_inputs; s = '2026-10-16'; ref = pickle.load(open(f'data_store/calibrations/joint_cal_{s}.pkl', 'rb')); c = J(as_of_date=s, **recorded_inputs(ref)); c.calibrate(optimizer='de'); c.save()"`: the committed fit, from the VIX targets and rate it recorded and with the optimiser that made it (`make reproduce` refits all five and diffs them). `J(as_of_date=s).calibrate()` is a new fit instead: multi-start TRF on the Treasury curve, about 1e-3 relative from the committed DE fit on ^IRX |
 | `data_store/calibrations/diagnostics/` | `python scripts/calibration_diagnostics.py --session <session>` (about 3 min a session) |
 | `data_store/surface/` | `python scripts/surface_report.py` |
 | `data_store/greeks/greeks_surface.parquet`, `scenario_grid.parquet` | `python -m joint_vol_calibration.greeks.risk_monitor --calibration data_store/calibrations/joint_cal_2026-10-16.pkl`; `python -m joint_vol_calibration.greeks.scenario_grid` |
@@ -214,13 +226,14 @@ python -m pytest joint_vol_calibration/tests -q -p no:cacheprovider     # the fu
 ```
 
 Every push and pull request runs the full suite, the lint and type gates (ruff and mypy against committed baselines
-that may only shrink), a render and accessibility check of the site (axe-core, 0 violations required), a simulation of
-the daily job's next session, and a benchmark smoke test in GitHub Actions; the **tests** badge above is that run.
-The suite works on a private copy of `data_store/` and fails if anything under it changes. It includes look-ahead
-tests that poison the data two opposite ways, Heston prices against independent quadratures, Hypothesis property tests
-of the no-arbitrage invariants over the whole parameter box, a curated mutation check (`make mutation`), and tests that
-every number this README quotes is the committed artifact's (`test_readme.py`). **QuantLib is used only as a dev-only
-test oracle** (with Let's Be Rational for implied vols; `test_external_oracles.py`): no runtime code imports it.
+that may only shrink, compared with the base branch's), a render and accessibility check of the site (axe-core, 0
+violations required), a simulation of the daily job's next session, and a benchmark smoke test in GitHub Actions; the
+**tests** badge above is that run. The suite works on a private copy of `data_store/` and fails if anything under it
+changes. It includes look-ahead tests that poison the data two opposite ways, Heston prices against independent
+quadratures, Hypothesis property tests of the no-arbitrage invariants over the whole parameter box, a curated mutation
+check (`make mutation`, weekly), and `test_readme.py`, which recomputes from its artifact every result, table cell,
+data count and limitation figure this README quotes. **QuantLib is used only as a dev-only test oracle** (with Let's Be
+Rational for implied vols; `test_external_oracles.py`): no runtime code imports it.
 
 ## Requirements
 
@@ -238,7 +251,7 @@ warnings treated as errors.
   real VX futures by 1.9–3.2 pts out of sample, and is not fitted to VIX options (too few sessions of VIX option quotes).
   The Quintic OU fit that prices VIX options did not converge.
 - **Quote quality.** The five full chains are Yahoo end-of-day snapshots without a quote time; static arbitrage that is
-  executable at the quoted bid and ask is present on all five. Cboe's timestamped books are captured from 2026-10-20.
+  executable at the quoted bid and ask is present on all five. Cboe's timestamped books are stored from 2026-10-20.
 - **Research prototypes** feed nothing: the XGBoost regime classifier loses to "predict yesterday's regime", the NN
   pricer surrogate is on no production path, and the Quintic OU is one unconverged fit.
 - **No independent validation**: one developer built and validated everything

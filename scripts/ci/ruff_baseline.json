@@ -266,7 +266,7 @@
    "E501": 4
   },
   "joint_vol_calibration/tests/test_cloud_refresh.py": {
-   "F401": 2,
+   "F401": 1,
    "PT006": 2,
    "PT018": 23,
    "RUF005": 1,
@@ -325,7 +325,7 @@
   },
   "joint_vol_calibration/tests/test_infra_config.py": {
    "FURB167": 4,
-   "PT018": 8
+   "PT018": 7
   },
   "joint_vol_calibration/tests/test_joint_calibrator.py": {
    "PERF401": 1,
@@ -440,7 +440,7 @@
    "I001": 2
   },
   "scripts/cloud_refresh.py": {
-   "BLE001": 9,
+   "BLE001": 8,
    "DTZ011": 2,
    "E501": 1,
    "EXE001": 1,
@@ -449,8 +449,6 @@
    "ISC004": 6,
    "PLW1510": 1,
    "RUF005": 1,
-   "S112": 1,
-   "S301": 1,
    "UP017": 3
   },
   "scripts/heston_quintic_baseline.py": {
@@ -466,6 +464,6 @@
   }
  },
  "tool": "ruff",
- "total": 1300,
+ "total": 1295,
  "version": "ruff 0.17.1"
 }

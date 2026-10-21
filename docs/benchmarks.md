@@ -1,38 +1,46 @@
 # Benchmarks
 
-Measured 2026-10-20 with pytest-benchmark 5.3.0 (`make bench`; the compact results are in
-[`benchmarks/2026-10-20.json`](benchmarks/2026-10-20.json), written by `scripts/bench/summarize.py`).
+Measured with pytest-benchmark 5.3.0 (`make bench`; the compact results are in `docs/benchmarks/`, written by
+`scripts/bench/summarize.py`). The production paths below are the run of 2026-10-21
+([`benchmarks/2026-10-21.json`](benchmarks/2026-10-21.json), code of commit `98e4366`); the kernel comparison further
+down is the run of 2026-10-20 ([`benchmarks/2026-10-20.json`](benchmarks/2026-10-20.json), commit `defa301`), the last
+one with Numba installed.
 
 **Machine.** Intel Xeon @ 2.10 GHz (AVX-512), 4 vCPU, Linux 6.18 VM; CPython 3.11.15, NumPy 2.4.6, SciPy 1.17.1,
 pandas 3.0.6; Numba 0.68.0 and g++ 13.3.0 for the kernel comparison only. One thread (OMP/OpenBLAS/MKL = 1),
-`PYTHONHASHSEED=0`. Code: commit `defa301` plus the benchmark files themselves (the engine is unchanged).
+`PYTHONHASHSEED=0`.
 
-**Noise.** The VM was shared with other jobs (load average 4.5–8.9 on 4 vCPU during the runs), so medians are
-inflated and unstable. The table reports the **minimum over rounds**, the usual estimator of the uncontended cost.
-Across two back-to-back runs the minima of the fixed-grid and compiled kernels agreed within 0.0–3.5%, the
-production slice and the loss evaluation within 10%, and the two chain-level IV benchmarks moved by 22% and 40%
-(both runs are shown for those two rows). Re-measure on a quiet machine before quoting a median. Every benchmark first checks that it computes the right
-thing (the loss recomputes the committed fit's loss to 1e-9; every compiled kernel reproduces the NumPy engine) and
-none asserts on time.
+**Noise.** The VM was shared with other jobs (load average 4.5–8.9 on 4 vCPU during the 2026-10-20 runs, 1.5–3.1
+during the 2026-10-21 run, which overlapped a test-suite run), so medians are inflated and unstable. The table reports
+the **minimum over rounds**, the usual estimator of the uncontended cost; the two full calibrations are one round each,
+so their times carry the load with them. Across the two 2026-10-20 runs the minima of the fixed-grid and compiled
+kernels agreed within 0.0–3.5%, the production slice and the loss evaluation within 10%, and the two chain-level IV
+benchmarks moved by 22% and 40%. Re-measure on a quiet machine before quoting a median. Every benchmark first checks
+that it computes the right thing (the loss recomputes the committed fit's loss to 1e-9; the DE calibration reproduces
+the committed parameters to 1e-6 relative; every compiled kernel reproduces the NumPy engine) and none asserts on time.
 
 ## Production paths
 
 | What | Input | Min | Median | Per unit |
 |---|---|---|---|---|
-| `heston_call_batch`, one 25-strike slice, K/F 0.70–1.30 | headline fit, T = 7 d | 0.89 ms | 1.58 ms | |
-| same | T = 30 d | 0.89 ms | 1.01 ms | |
-| same | T = 365 d | 1.04 ms | 1.38 ms | |
-| 7 expiries × 15 strikes | headline fit | 6.2 ms | 7.1 ms | 0.89 ms per expiry |
-| `implied_vol_black` (Newton), every clean OTM quote | 3,209 quotes, 2026-10-16 chain | 6.6–10.9 ms (two runs) | 7.8–15.2 ms | 2.1–3.4 µs per quote |
-| `black76_implied_vol` (80-step bisection; the cleaner and the calibrator use it) | same quotes | 15.4–18.7 ms (two runs) | 18.2–28.9 ms | 4.8–5.8 µs per quote |
-| `JointCalibrator.joint_loss`, one evaluation | 53 anchors, 6 expiries, 4 VIX indices | 5.1 ms | 7.0 ms | |
-| `JointCalibrator.calibrate()` (DE 50 × 200 + L-BFGS-B, seed 42) | 2026-10-16 | 42.3 s | (1 round) | 5,018 evaluations, 8.4 ms each incl. optimiser |
+| `heston_call_batch`, one 25-strike slice, K/F 0.70–1.30 | headline fit, T = 7 d | 0.82 ms | 0.99 ms | |
+| same | T = 30 d | 0.67 ms | 0.95 ms | |
+| same | T = 365 d | 0.74 ms | 1.24 ms | |
+| 7 expiries × 15 strikes | headline fit | 6.4 ms | 9.5 ms | 0.91 ms per expiry |
+| `implied_vol_black` (Newton), every clean OTM quote | 3,209 quotes, 2026-10-16 chain | 4.6 ms | 6.3 ms | 1.4 µs per quote |
+| `black76_implied_vol` (80-step bisection; the cleaner and the calibrator use it) | same quotes | 12.2 ms | 16.9 ms | 3.8 µs per quote |
+| `JointCalibrator.joint_loss`, one evaluation | 53 anchors, 6 expiries, 4 VIX indices | 3.9 ms | 5.8 ms | |
+| `JointCalibrator.calibrate()`, the default since C23: multi-start trust-region least squares with the analytic Jacobian | 2026-10-16 | 2.1 s | (1 round) | 276 evaluations with their Jacobian, 7.7 ms each incl. optimiser |
+| `JointCalibrator.calibrate(optimizer="de")`: DE 50 × 200 + L-BFGS-B, seed 42, the optimiser of every committed fit | 2026-10-16 | 28.3 s | (1 round) | 5,018 evaluations, 5.6 ms each incl. optimiser |
 
-The full calibration reproduces the committed parameters (asserted to 1e-6 relative; `make reproduce` compares
-every field, docs/reproduce.md). The committed pickle records 50.7 s on the machine that wrote it. The bisection
-inverter cost 2.8× the Newton solver on the same quotes in the first run and 1.4× in the second, so the ratio is
-not established on this machine; on OTM inputs the two agree to 2.1e-12 relative (worst of 1e5 random inputs;
-`test_properties_iv.py` pins 1e-9).
+The DE path reproduces the committed parameters (asserted to 1e-6 relative; `make reproduce` compares every field,
+docs/reproduce.md). The default TRF path is a new fit: its loss is asserted at or below the committed one (×(1 + 1e-6))
+and its parameters within 2e-3 relative (κ moves 8.5e-4 along a flat direction), not 1e-6. The TRF benchmark runs in
+the CI bench smoke test; the DE one is marked slow and runs in `make bench` only. The committed pickle records 50.7 s for its DE fit on the machine that wrote it; the diagnostics measured
+1.7–2.1 s for TRF against 19.8–28.3 s for serial DE on the five sessions (quiet machine;
+`data_store/calibrations/diagnostics/summary.json`). The bisection inverter cost 2.8×, 1.4× and 2.7× the Newton solver
+on the same quotes in the three runs, so the ratio is not established on this machine; on OTM inputs the two agree to
+2.1e-12 relative (worst of 1e5 random inputs; `test_properties_iv.py` pins 1e-9).
 
 ## Would compiled code make the slice faster?
 
@@ -70,8 +78,9 @@ What this shows:
 So the answer to "would C++ beat Numba?" is: on the transcendental-bound direct kernel it did (1.5×); once the
 algorithm removes the transcendentals from the inner loop, it did not. The speed-ups worth having, grid reuse and the
 phase recurrence, are algorithmic, and Numba is enough for the second. Neither is wired into the engine yet (the
-calibrator is owned elsewhere); these timings are the evidence for doing so. Not measured: GPU, process-parallel
-differential evolution, analytic gradients.
+calibrator is owned elsewhere); these timings are the evidence for doing so. The analytic Jacobian (3.4–4.0× faster per
+call than two-point differences) and differential evolution in four processes (7.9–15.4 s, agreeing with TRF to
+2.1e-13) are measured in `data_store/calibrations/diagnostics/summary.json`, not here. Not measured: GPU.
 
 ### Where a production slice spends its time
 
@@ -88,7 +97,7 @@ cProfile over 2,000 slices at T = 30 d (25 strikes; profiling inflates the total
 ## Reproducing these numbers
 
 ```bash
-make bench                                     # writes .bench/benchmarks.json (about 2 minutes)
+make bench                                     # writes .bench/benchmarks.json (about 1 minute; 53 s on 2026-10-21)
 python scripts/bench/summarize.py .bench/benchmarks.json --json docs/benchmarks/$(date +%F).json
 pip install numba==0.68.0                      # optional: include the Numba kernels (not a project dependency)
 ```

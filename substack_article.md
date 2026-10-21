@@ -1,4 +1,4 @@
-# I built the 'holy grail of volatility modelling' — then found the bug that faked my P&L
+# ~~I built the 'holy grail of volatility modelling'~~ I tried joint SPX/VIX calibration — then found the bug that faked my P&L
 
 > **C23 note (21 October 2026).** A second review round (C23) changed the data under the backtest and added what the
 > first version lacked: evidence in the units a market maker uses, and statistics. What changed, and why:
@@ -12,14 +12,17 @@
 >   published series beats cash (Hansen SPA p 0.65). Against 3,550 exposure-matched circular shifts, S3's entry timing
 >   has p 0.078 (0.47 after a Holm correction over the six series), replacing the 200-path p = 0.075 quoted below.
 > - **Model against market.** Scored on quotes it was not fitted to, the joint Heston fit misses by a median 4.4–15.6
->   half-spreads of the bid–ask across the five stored sessions; an arbitrage-free SVI surface on the same sessions
->   misses by 0.45–1.98. Freeing Heston's vol-of-vol cap (σ ≤ 2) on 2026-10-16 cuts its out-of-sample error from 2.96
+>   half-spreads of the bid–ask across the five stored sessions; a certified arbitrage-free SVI surface on the same
+>   sessions misses by 0.45–1.98. Freeing Heston's vol-of-vol cap (σ ≤ 2) on 2026-10-16 cuts its out-of-sample error from 2.96
 >   to 1.19 vol pts, at σ = 6.9. Rough Heston on the same quotes is lower on 3 of 5 sessions and identical to Heston on
 >   the other 2; it does not pin down a roughness exponent.
 > - **Withdrawn:** the "14–23× faster" figure for the NN surrogate below, which no committed benchmark backs.
 >
-> Every number in this note is read from a committed file and checked by the repository's tests; the
-> [README](https://github.com/navnoorthapar/vol-system-dashboard#readme) names each one.
+> - **The title.** The VIX-options leg is still off, so the project is "joint SPX/VIX calibration" (the SPX smile and
+>   the VIX index term structure), not a joint SPX/VIX *smile* fit; the original headline is struck through.
+>
+> Every number in this note is read from a committed file and checked against it by the repository's tests
+> (`test_readme.py`); the [README](https://github.com/navnoorthapar/vol-system-dashboard#readme) names each file.
 
 > **Correction (October 2026, C22).** After this article was published, a full audit of the system (about 270 findings,
 > each reproduced before it was fixed) changed several of its central claims. In short:
@@ -49,9 +52,9 @@
 
 Every options desk runs two separate calibration routines: one for the SPX smile and one for the VIX term structure. They're run independently, stored in different systems, and never asked to agree. This works until it doesn't — and when it doesn't, you get a book that's simultaneously long skew and short correlation, or a delta hedge that blows up on a VIX spike your SPX model called "small".
 
-The hard problem is joint calibration: find one set of parameters that fits both the SPX smile *and* VIX options *simultaneously*, with the constraint that they're driven by the same instantaneous variance process V(t). That's what this project attempted. *(C22: it is not an open problem in the literature — Guyon (2020) and Abi Jaber, Illand & Li (2022) solve it with richer models; it is hard for classical one-factor diffusions like Heston, which is what this project measures.)*
+The hard problem is joint calibration: find one set of parameters that fits both the SPX smile *and* VIX options *simultaneously*, with the constraint that they're driven by the same instantaneous variance process V(t). That's what this project attempted. *(C22: it is not an open problem in the literature — Guyon (2020) and Abi Jaber, Illand & Li (2022) solve it with richer models; it is hard for classical one-factor diffusions like Heston, which is what this project measures. C23: the fitted VIX leg is the four VIX indices; VIX options are not in the objective.)*
 
-What I want to write about here isn't the calibration. It's the five times I had to correct my own work — the fourth inverted a thesis I'd spent weeks building on top of, and the fifth I found only after the system had been running unattended for a month.
+What I want to write about here isn't the calibration. It's the ~~five~~ *(C23: eight rounds, C16–C23, in [docs/corrections.md](https://github.com/navnoorthapar/vol-system-dashboard/blob/main/docs/corrections.md))* times I had to correct my own work — the fourth inverted a thesis I'd spent weeks building on top of, and the fifth I found only after the system had been running unattended for a month.
 
 ---
 
@@ -101,7 +104,7 @@ In Heston, ρ governs the leverage effect: when the underlying falls, volatility
 
 ## The fifth correction: my selector was rewarding broken data
 
-I said there were four corrections. There are five. This one I found a month after the system went on autopilot, and it is the one I'd least like to have explained in an interview without having caught it first.
+I said there were four corrections. There are five *(C23: eight rounds by now)*. This one I found a month after the system went on autopilot, and it is the one I'd least like to have explained in an interview without having caught it first.
 
 The dashboard headlines the best archived calibration, ranked by SPX smile RMSE. Reasonable — except Yahoo intermittently returns `^VIX` without `^VIX9D/3M/6M`, and my term-structure builder took the last row of a pivot without checking it was complete. On those days the VIX leg had **one tenor**.
 
@@ -163,7 +166,7 @@ There's a deeper reason it was never going to work, and it is about the labels, 
 
 Every hedge fund backtest showing Sharpe > 2 has look-ahead bias somewhere — in the feature construction, the regime labels, the vol surface used for pricing, or the cost model. Usually more than one.
 
-The ~~666~~ tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. *(C22 showed what tests of the code cannot catch: an assumption — straddles priced at the VIX — that no test questioned.)* The correction history reads: look-ahead → circular feature → label noise → stale-strike bug *→ broken-data selector → test-fixture cash hurdle → VIX-as-ATM-vol*. **Every single fix made the result worse or flipped a thesis.** That sequence — not any one number — is the deliverable.
+The ~~666~~ tests in this system exist to verify none of those shortcuts were taken: features shift by one day before signal generation, regime labels are computed on the as-of date only, PDV is re-fit walk-forward on strictly pre-year data, and the option engine is held to its own roll schedule. *(C22 showed what tests of the code cannot catch: an assumption — straddles priced at the VIX — that no test questioned.)* The correction history reads: look-ahead → circular feature → label noise → stale-strike bug *→ broken-data selector → test-fixture cash hurdle → VIX-as-ATM-vol*. ~~**Every single fix made the result worse or flipped a thesis.**~~ *(C23: not every one. C19 and C20 left the backtest unchanged, and C22 raised the portfolio from −26.1% to −21.6% while taking S1's profit away; no round restored a positive return.)* That sequence — not any one number — is the deliverable.
 
 The takeaway is not "volatility trading is impossible." It's that the edge is thin, execution-dependent, mark-to-model-sensitive, and dominated by regime risk no model fully captures. ~~ρ at the boundary tells you more about the structural inadequacy of continuous diffusions than any positive backtest would~~ *(C22: ρ at the boundary turned out to be my anchors, not the model)* — and a strike-rolling bug that faked a −$1.53M loss tells you more about backtest hygiene than a clean equity curve ever could.
 
@@ -171,4 +174,4 @@ The code is at [github.com/navnoorthapar/vol-system-dashboard](https://github.co
 
 ---
 
-*Built in Python. Heston via ~~Carr-Madan FFT~~ the Lewis (2001) contour integral. PDV after Guyon & Lekeufack (2023). Joint calibration via differential evolution + L-BFGS-B polish. All backtest P&L is mark-to-model (Black-Scholes at 0.82 × VIX). Data: Yahoo Finance, Cboe free historical (including VX futures).*
+*Built in Python. Heston via ~~Carr-Madan FFT~~ the Lewis (2001) contour integral. PDV after Guyon & Lekeufack (2023). Joint calibration via ~~differential evolution + L-BFGS-B polish~~ multi-start trust-region least squares with an analytic Jacobian (C23; every committed fit was made by differential evolution, whose loss it matches to within 3.6e-7 relative). All backtest P&L is mark-to-model (Black-Scholes at 0.82 × VIX). Data: Yahoo Finance, Cboe free historical (including VX futures).*

@@ -7,7 +7,7 @@ Python 3.11. Three routes, from most to least exact.
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 make install            # pip install -r requirements-lock.txt
-make test-fast          # about 1 minute; `make test` runs the full suite (6–9 minutes on 4 vCPU, measured 2026-10-20)
+make test-fast          # about 1 minute; `make test` runs the full suite (about 10.5 minutes on 4 vCPU, measured 2026-10-21)
 ```
 
 `requirements-lock.txt` pins every package, including the CPU builds of torch (`+cpu`, from the PyTorch index) and
