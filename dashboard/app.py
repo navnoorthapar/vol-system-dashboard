@@ -3969,6 +3969,16 @@ def headline_trend_sentence(series: Sequence[tuple[str, Any]], tol: float = 0.05
 
 # ── Model risk page ──────────────────────────────────────────────────────────
 INVENTORY_PATH = DASH / "model_inventory.json"
+# The monitors' models, by their IDs in the canonical inventory (model_inventory.json,
+# the IDs docs/model_validation uses): the dashboard had its own numbering, so
+# "M4" was the rule labeller here and the joint calibrator in the pack.
+INV_CALIBRATOR, INV_GREEKS, INV_BETA, INV_LABELS, INV_CLASSIFIER = "M4", "M6", "M7", "M10", "M11"
+CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
+
+
+def chain_vendor(source: Any) -> str:
+    """The vendor-input ID of a stored chain's source ('Data' when it is not recorded)."""
+    return CHAIN_VENDORS.get(str(source or "").lower(), "Data")
 
 # Monitoring thresholds: (green if value <= g, amber if <= a, else red) unless
 # stated otherwise. They are this page's working limits for a research system,
@@ -3999,6 +4009,7 @@ def load_model_risk() -> dict[str, Any]:
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
         d["inventory"] = inv["models"]
+        d["vendor_inputs"] = inv.get("vendor_inputs") or []
         d["inventory_about"] = inv.get("about")
     p2 = load_page2()
     for e in p2.get("errors") or []:
@@ -4013,23 +4024,24 @@ def load_model_risk() -> dict[str, Any]:
                                               else "informational"),
                     "artifact": artifact, "note": note})
     fit_art = f"data_store/calibrations/{p2.get('calib_file') or 'joint_cal_<session>.pkl'}"
-    add("M1", "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")), _fmt(p2.get("calib_age")),
+    add(INV_CALIBRATOR, "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")),
+        _fmt(p2.get("calib_age")),
         "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.")
-    add("M1", "Parameters on a box bound", float(len(p2.get("pinned_params") or [])),
+    add(INV_CALIBRATOR, "Parameters on a box bound", float(len(p2.get("pinned_params") or [])),
         ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
         "A parameter on its bound is set by the box, not the market.")
-    add("M1", "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")),
+    add(INV_CALIBRATOR, "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")),
         _fmt(p2.get("spx_oos_rmse"), ".2f"),
         "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.")
     short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
     worst = max(short, key=lambda r: r["rmse"]) if short else None
-    add("M1", "Worst short-dated expiry OOS RMSE (≤ 30 days)", worst["rmse"] if worst else None,
+    add(INV_CALIBRATOR, "Worst short-dated expiry OOS RMSE (≤ 30 days)", worst["rmse"] if worst else None,
         f"{_fmt(worst['rmse'], '.2f')} ({worst['expiry']})" if worst else "—", "short_oos_rmse", fit_art,
         "One-factor Heston misses the short end; see the calibration page.")
-    add("M1", "VIX index RMSE (index pts)", _num(p2.get("vix_index_rmse")),
+    add(INV_CALIBRATOR, "VIX index RMSE (index pts)", _num(p2.get("vix_index_rmse")),
         _fmt(p2.get("vix_index_rmse"), ".2f"),
         "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.")
-    add("M1", "Feller condition (diagnostic, not imposed)", None,
+    add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
         "Not a no-arbitrage condition; reported, not limited.", status="info")
     # M3: β drift — the newest stored chain against the frozen backtest β
@@ -4040,7 +4052,7 @@ def load_model_risk() -> dict[str, Any]:
         later = be.get("later") or []
         newest = later[-1] if later else None
         drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
-        add("M3", "β drift: newest chain's ATM vol / VIX against the frozen β", drift,
+        add(INV_BETA, "β drift: newest chain's ATM vol / VIX against the frozen β", drift,
             (f"{_fmt(newest['ratio'], '.3f')} on {newest['session']} vs β = {_fmt(beta, '.2f')}" if newest
              else "no later chain"),
             "beta_drift", "data_store/backtest/full_results.pkl",
@@ -4052,13 +4064,14 @@ def load_model_risk() -> dict[str, Any]:
         with _db() as con:
             db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
         lag = session_age(db_date, lab_date)
-        add("M4", "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag), "label_lag",
+        add(INV_LABELS, "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag),
+            "label_lag",
             "data_store/vol_system.db", f"Labels {lab_date}; market DB {db_date}.")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
         d["errors"].append(e)
-    add("M2", "Greeks surface built from the headline fit", None,
+    add(INV_GREEKS, "Greeks surface built from the headline fit", None,
         "yes" if g.get("source_matches_headline")
         else ("no" if g.get("source_matches_headline") is False else "unknown"),
         "", "data_store/greeks/greeks_surface.parquet", f"Surface {g.get('surface_date')}.",
@@ -4071,7 +4084,8 @@ def load_model_risk() -> dict[str, Any]:
         ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
-            add("M8", "Classifier accuracy minus the persistence baseline (pts)", gap, signed(gap, ".1f"),
+            add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (pts)", gap,
+                signed(gap, ".1f"),
                 "", "data_store/signals/regime_classifier.pkl",
                 "Research only since C17: below the no-skill baseline, so it never trades.",
                 status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below")
@@ -4086,33 +4100,41 @@ def load_model_risk() -> dict[str, Any]:
         hkey = heston_model_key(surf["models"])
         row = next((r for r in surf.get("scorecard_rows") or [] if r["model"] == hkey), None)
         st_ = row["oos"] if row else (artifacts.residual_stats(surf["residuals"], hkey) if hkey else {})
-        add("M1", "Heston median |model − mid|, out of sample (half-spreads)", _num(st_.get("median_abs_hs")),
+        add(INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
+            _num(st_.get("median_abs_hs")),
             f"{_fmt(st_.get('median_abs_hs'), '.1f')} ({_fmt(st_.get('inside_spread_pct'), '.1f')}% inside)",
             "median_abs_hs", sart + ("scorecard.json" if row else "residuals.parquet"),
             f"{_fmt(st_.get('n'), ',')} quotes of {surf['session']}; Yahoo quotes carry no quote time.")
         rep = ((surf.get("vix") or {}).get("indices") or {}).get("VIX") or {}
         gap = _num(rep.get("gap_vs_official"))
-        add("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
+        vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
+        add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
             abs(gap) if gap is not None else None, signed(gap, ".2f") if gap is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
             "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.")
         arb = (surf.get("surface") or {}).get("arbitrage") or {}
         n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
         share = n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None
-        add("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
+        add(vendor, "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
             f"{_fmt(share, '.1f')}% ({_fmt(n_ex, ',.0f')} of {_fmt(n_q, ',.0f')})" if share is not None
             else "—",
             "arb_exec_share", sart + "surface.json",
             "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.")
     else:
-        for mid_, chk in (("M1", "Heston median |model − mid|, out of sample (half-spreads)"),
+        for mid_, chk in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)"),
                           ("Data", "VIX replicated from the stored chain − Cboe close (index pts)"),
                           ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—")
-    # grouped by model (M1 … M9), data checks last; checks keep their order within a group
-    rank = {m: i for i, m in enumerate([f"M{i}" for i in range(1, 10)] + ["Data"])}
+    # grouped by model (inventory order), the vendor-data checks last; checks
+    # keep their order within a group
+    order = [m["id"] for m in d["inventory"]] + [v.get("id") for v in d.get("vendor_inputs") or []] + ["Data"]
+    rank = {m: i for i, m in enumerate(order)}
     mon.sort(key=lambda m: rank.get(m["model"], len(rank)))
+    names = {m["id"]: m["name"] for m in d["inventory"]}
+    names.update({v.get("id"): v.get("source") for v in d.get("vendor_inputs") or []})
+    for m in mon:
+        m["model_name"] = names.get(m["model"])
     d["monitors"] = mon
     d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k)
                        for k in ("ok", "watch", "breach", "info", "na")}

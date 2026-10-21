@@ -2204,10 +2204,10 @@ def test_inventory_does_not_claim_flat_carry_for_the_per_maturity_greeks():
     meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
     prov = json.loads(meta[b"greeks_provenance"])
     models = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
-    inv = {m["id"]: m for m in models}
+    greeks = next(m for m in models if m["module"].endswith("greeks/risk_monitor.py"))
     if (prov.get("carry") or {}).get("by_maturity"):
-        assert "flat carry" not in inv["M2"]["limitations"].lower()
-        assert "per maturity" in inv["M2"]["limitations"]
+        assert "flat carry" not in greeks["limitations"].lower()
+        assert "per maturity" in greeks["limitations"]
 
 
 def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
@@ -2536,9 +2536,13 @@ def test_model_inventory_paths_exist(dash):
     assert ids == [f"M{i}" for i in range(1, len(ids) + 1)]
     for m in inv["models"]:
         assert (ROOT / m["module"]).is_file(), m["id"]
-        assert (ROOT / m["outputs"]).exists(), (m["id"], m["outputs"])
+        # an output not yet written says so and why (the forward ledger's first entry)
+        assert (ROOT / m["outputs"]).exists() or m.get("outputs_pending"), (m["id"], m["outputs"])
         assert m["tier"] in ("production", "backtest", "research"), m["id"]
+        assert m["materiality"] in ("high", "medium", "low"), m["id"]
         assert m.get("page") is None or m["page"] in dash.ROUTES, m["id"]
+    vendors = [v["id"] for v in inv["vendor_inputs"]]
+    assert vendors == [f"V{i}" for i in range(1, len(vendors) + 1)]
 
 
 def test_artifact_pages_keep_the_number_style(dash, art):
@@ -2938,6 +2942,38 @@ def test_overview_states_what_is_stored_not_who_stored_it(pages):
     assert "Pipeline · what is stored" in idx
     assert "Each U.S. session it stores the option books" not in idx
     assert "whoever wrote it" in idx
+
+
+def test_model_inventory_is_the_validation_packs(dash, pages):
+    """CLM-09: the pack (19 models, M14 = surface) and this inventory (13 models,
+    M10 = surface) used one ID for different models while the pack called them the
+    same inventory. The inventory is canonical: every pack ID is here under the
+    pack's name, and the Model Risk checks cite these IDs."""
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    ours = {m["id"]: m["name"] for m in inv["models"]}
+    ours.update({v["id"]: v["source"] for v in inv["vendor_inputs"]})
+    pack = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+    sec = pack[pack.index("## 1. Model inventory"):pack.index("## 2.")]
+    rows = re.findall(r"^\| (M\d+|V\d+) \| ([^|]+) \|", sec, re.MULTILINE)
+    assert len(rows) >= 19
+
+    def stem(name: str) -> str:                   # the name up to its first parenthesis or colon
+        return re.split(r" \(|: ", name.strip())[0].strip().strip("`")
+
+    for mid, cell in rows:
+        assert mid in ours, mid
+        assert stem(ours[mid]) == stem(cell), (mid, ours[mid], cell)
+    d = dash.load_model_risk()
+    ids = set(ours) | {"Data"}
+    for m in d["monitors"]:
+        assert m["model"] in ids, m
+    by = {m["check"]: m["model"] for m in d["monitors"]}
+    assert by["Headline fit age (NYSE sessions)"] == "M4"                       # the joint calibrator
+    assert by["Greeks surface built from the headline fit"] == "M6"
+    assert by["β drift: newest chain's ATM vol / VIX against the frozen β"] == "M7"
+    assert by["Market database lag behind the rule labels (sessions)"] == "M10"
+    assert re.search(r'<tr id="inv-m14"><td>M14</td><td class="wrap"><strong>Quote-grade surface</strong>',
+                     pages["/model-risk"])
 
 
 # ── browser checks (Chromium via Playwright; skipped where it is not installed) ──
