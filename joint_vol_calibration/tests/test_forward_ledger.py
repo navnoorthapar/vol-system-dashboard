@@ -9,6 +9,7 @@ themselves, settlement, the hash chain, determinism and the schema.
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -306,3 +307,128 @@ def test_committed_ledgers_form_one_valid_chain():
                                            ensure_ascii=False, allow_nan=False) + "\n"
     assert ledgers[0]["previous"] is None
     assert fl.verify_chain(ledgers) == []
+
+
+# ── delta hedge and margin cap, on synthetic Black-76 books (ENG-5) ──────────
+# A book priced by Black-76 at one forward and one vol: the parity forward of
+# any strike is that forward exactly and the mid IV is that vol, so the
+# ledger's forward, delta and hedge P&L can be computed independently here.
+
+def _b76_quote(F, K, T, D, sig):
+    from scipy.stats import norm
+    sq = sig * np.sqrt(T)
+    d1 = (np.log(F / K) + 0.5 * sq * sq) / sq
+    d2 = d1 - sq
+    call = D * (F * norm.cdf(d1) - K * norm.cdf(d2))
+    put = D * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
+    return call, put, D * (2.0 * norm.cdf(d1) - 1.0)          # ∂(C+P)/∂F
+
+
+def _b76_book(session, F, sig=0.18, r=0.04, expiries=("2026-04-23",), half=0.25,
+              strikes=None):
+    rows = []
+    for exp in expiries:
+        T = (pd.Timestamp(exp) - pd.Timestamp(session)).days / 365.0
+        D = float(np.exp(-r * T))
+        for K in (strikes if strikes is not None else np.arange(6400.0, 6825.0, 25.0)):
+            c, p, _ = _b76_quote(F, K, T, D, sig)
+            for right, px in (("C", c), ("P", p)):
+                rows.append({"snapshot_date": session, "expiry": exp, "strike": float(K), "right": right,
+                             "root": "SPXW", "bid": float(px) - half, "ask": float(px) + half})
+    return pd.DataFrame(rows)
+
+
+_FLAT = {s: {"position": 0, "kelly": 0.0} for s in fl.SLEEVES}
+_LONG_S1C = {**_FLAT, "s1c": {"position": 1, "kelly": 0.12}}
+
+
+@pytest.mark.parametrize("dF", [+150.0, -150.0])
+def test_hedge_pnl_on_a_mark_is_minus_direction_delta_times_the_forward_move(dF):
+    """A long straddle hedged with −∂(C+P)/∂F forwards: when the parity
+    forward moves by ΔF the hedge books −δ·ΔF·100·n, and the units are
+    re-struck to the new delta. Pins the sign (a long straddle with δ > 0
+    loses on its hedge when F rises)."""
+    s0, s1, exp, F0, r, sig = "2026-03-24", "2026-03-25", "2026-04-23", 6610.0, 0.04, 0.18
+    l1 = fl.step(None, s0, _b76_book(s0, F0), _LONG_S1C, r_ref=r)
+    p = {x["sleeve"]: x for x in l1["positions"]}["s1c"]
+    K, n = p["contract"]["strike"], p["contracts_per_1m"]
+    assert (K, p["direction"]) == (6600.0, 1)
+    T0 = (pd.Timestamp(exp) - pd.Timestamp(s0)).days / 365.0
+    _, _, delta0 = _b76_quote(F0, K, T0, np.exp(-r * T0), sig)
+    assert p["entry"]["forward"] == pytest.approx(F0, abs=1e-6)
+    assert p["hedge"] == {"units": pytest.approx(-delta0, rel=1e-6), "forward": pytest.approx(F0, abs=1e-6),
+                          "pnl": 0.0}
+    l2 = fl.step(l1, s1, _b76_book(s1, F0 + dF), _LONG_S1C, r_ref=r)
+    q = {x["sleeve"]: x for x in l2["positions"]}["s1c"]
+    assert q["mark"]["status"] == "marked"
+    assert q["mark"]["forward"] == pytest.approx(F0 + dF, abs=1e-6)
+    want = -delta0 * dF * 100 * n
+    assert q["hedge"]["pnl"] == pytest.approx(want, rel=1e-6)
+    assert np.sign(q["hedge"]["pnl"]) == -np.sign(delta0 * dF)
+    T1 = (pd.Timestamp(exp) - pd.Timestamp(s1)).days / 365.0
+    _, _, delta1 = _b76_quote(F0 + dF, K, T1, np.exp(-r * T1), sig)
+    assert q["hedge"]["units"] == pytest.approx(-delta1, rel=1e-6)
+    assert q["hedge"]["forward"] == pytest.approx(F0 + dF, abs=1e-6)
+
+
+def test_the_hedge_removes_the_first_order_forward_exposure():
+    """Economic check of the sign: the straddle's mid P&L for a forward move
+    of +ΔF and −ΔF differs by about 2·δ·ΔF (its delta); with the hedge P&L
+    added the difference is only the higher-order terms. A hedge of the wrong
+    sign would double it instead."""
+    s0, s1 = "2026-03-24", "2026-03-25"
+    l1 = fl.step(None, s0, _b76_book(s0, 6610.0), _LONG_S1C, r_ref=0.04)
+    out = {}
+    for dF in (+150.0, -150.0):
+        q = {x["sleeve"]: x for x in fl.step(l1, s1, _b76_book(s1, 6610.0 + dF), _LONG_S1C,
+                                             r_ref=0.04)["positions"]}["s1c"]
+        out[dF] = (q["mark"]["pnl_mid"], q["mark"]["pnl_mid"] + q["hedge"]["pnl"])
+    unhedged = out[150.0][0] - out[-150.0][0]
+    hedged = out[150.0][1] - out[-150.0][1]
+    p = {x["sleeve"]: x for x in l1["positions"]}["s1c"]
+    assert unhedged == pytest.approx(2 * p["entry"]["delta_F"] * 150 * 100 * p["contracts_per_1m"], rel=0.1)
+    assert abs(hedged) < 0.1 * abs(unhedged)
+
+
+def test_hedge_pnl_at_settlement_runs_to_the_official_close_and_unwinds():
+    """Settlement books the hedge from the last mark's forward to the
+    official close (units·(S_T − F_last)·100·n) and leaves no units."""
+    s0, s1, exp = "2026-03-24", "2026-03-25", "2026-04-23"
+    l1 = fl.step(None, s0, _b76_book(s0, 6610.0), _LONG_S1C, r_ref=0.04)
+    l2 = fl.step(l1, s1, _b76_book(s1, 6680.0), _LONG_S1C, r_ref=0.04)
+    held = {x["sleeve"]: x for x in l2["positions"]}["s1c"]
+    h, n = held["hedge"], held["contracts_per_1m"]
+    S_T = 6450.0
+    l3 = fl.step(l2, exp, _b76_book(exp, 6450.0, expiries=("2026-05-22",)), _FLAT, r_ref=0.04,
+                 settlement_closes={exp: S_T})
+    c = {x["sleeve"]: x for x in l3["closed"]}["s1c"]
+    assert c["closed"]["how"] == "settle"
+    want = h["pnl"] + h["units"] * (S_T - h["forward"]) * 100 * n
+    assert c["closed"]["hedge_pnl"] == pytest.approx(want, rel=1e-9)
+    assert c["hedge"]["units"] == 0.0
+    assert c["hedge"]["forward"] == S_T
+    assert l3["summary"]["s1c"]["realised_hedge_pnl"] == pytest.approx(want, rel=1e-9)
+
+
+def test_short_straddles_are_capped_at_the_margin_rule():
+    """n = int(kelly·1e6/(price·100)), short straddles capped at
+    1e6/(0.20·K·100): at K = 7,600 the cap is 6 contracts, which binds for
+    kelly above ~0.15 at a 216 straddle; a long straddle is not capped."""
+    assert fl._contracts(0.20, 216.0, 7600.0, -1) == 6
+    assert fl._contracts(0.20, 216.0, 7600.0, +1) == 9
+    assert fl._contracts(0.10, 216.0, 7600.0, -1) == 4                 # below the cap
+    assert fl._contracts(0.20, 216.0, 1e9, -1) == 0                     # margin-blocked
+    # through a session: S3 on (short index straddle) at kelly 0.2
+    book = _b76_book("2026-03-24", 7600.0, sig=0.124, strikes=np.arange(7400.0, 7825.0, 25.0))
+    sig = {**_FLAT, "s3": {"position": 1, "kelly": 0.20}, "s4": {"position": 1, "kelly": 0.20}}
+    led = fl.step(None, "2026-03-24", book, sig, r_ref=0.04)
+    by = {x["sleeve"]: x for x in led["positions"]}
+    s3, s4 = by["s3"], by["s4"]
+    assert s3["direction"] == -1
+    assert s4["direction"] == 1
+    assert s3["contract"]["strike"] == 7600.0
+    uncapped = int(0.20 * 1e6 / (s3["entry"]["price_exec"] * 100))
+    cap = int(1e6 / (0.2 * 7600.0 * 100))
+    assert uncapped > cap == 6
+    assert s3["contracts_per_1m"] == cap
+    assert s4["contracts_per_1m"] == int(0.20 * 1e6 / (s4["entry"]["price_exec"] * 100)) > cap
