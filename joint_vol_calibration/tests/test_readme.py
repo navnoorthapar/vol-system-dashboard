@@ -286,3 +286,23 @@ def test_article_c23_note_carries_the_canonical_numbers(inference):
     for key in ("s1", "s1c", "s3"):
         k = f"{abs(m[key + '_total_pnl']) / 1000:,.0f}K"
         assert k in note, key
+
+
+def test_citation_is_this_version():
+    """CLM-12: CITATION.cff cited 0.22.0 'released' 2026-10-19 while its
+    abstract described C23 work committed after that date. The cited version is
+    the package's, released no earlier than the last correction round it
+    describes, and the title is the README's."""
+    cff = (ROOT / "CITATION.cff").read_text()
+    version = re.search(r"^version: (\S+)$", cff, re.MULTILINE).group(1)
+    released = re.search(r"^date-released: (\d{4}-\d{2}-\d{2})$", cff, re.MULTILINE).group(1)
+    toml = (ROOT / "pyproject.toml").read_text()
+    pyproject = re.search(r'^version = "([^"]+)"$', toml, re.MULTILINE).group(1)
+    assert version == pyproject
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    last = max(r.get("date_end") or r["date"] for r in reg["rounds"])
+    assert released >= last, (released, last)
+    title = re.search(r'^title: "([^"]+)"$', cff, re.MULTILINE).group(1)
+    assert README_RAW.splitlines()[0] == f"# {title}"
+    assert "no release tag" in " ".join(cff.split())       # nothing claims a tag or DOI that does not exist
+    assert "doi" not in cff.lower()

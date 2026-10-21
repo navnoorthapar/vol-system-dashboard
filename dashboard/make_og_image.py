@@ -17,6 +17,7 @@ Usage:
     The default output is <repo>/dashboard/og-image.png. freeze_site.py copies
     it to the site root, so the absolute og:image URL resolves.
 """
+import json
 import os
 import sys
 
@@ -42,10 +43,22 @@ PALETTE = (BG, BG_DEEP, SURFACE, LINE, LINE2, TEXT, TEXT2, TEXT3, ACCENT, OK)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_OUT = os.path.join(ROOT, "dashboard", "og-image.png")
 
+
+def _correction_rounds() -> str:
+    """'C16–C23': the first and last round of the corrections registry."""
+    with open(os.path.join(ROOT, "dashboard", "corrections.json"), encoding="utf-8") as fh:
+        rounds = json.load(fh)["rounds"]
+    return f"{rounds[0]['id']}–{rounds[-1]['id']}"
+
+
+# The project's title (README, CITATION.cff): joint SPX/VIX calibration, not a
+# joint SPX/VIX *smile* fit; the VIX-options leg is off (CLM-05).
+TITLE_LINES = ("Joint SPX/VIX", "Calibration")
+SUBTITLE = "The SPX smile and the VIX index term structure, one Heston fit"
 # (value, label) pairs of the stat band: stable facts only (no test count, no metric that moves daily)
 STATS = [("SPX + VIX", "one joint Heston fit"), ("2018–2025", "hedged-straddle backtest"),
-         ("C16–C22", "correction rounds logged")]
-CHIPS = ["Heston (joint)", "Quintic OU", "PDV forecast", "Greeks & P&L explain", "Regime rule"]
+         (_correction_rounds(), "correction rounds logged")]
+CHIPS = ["Heston (joint)", "SVI surface", "Rough Heston", "Greeks", "Bootstrap & nulls"]
 SANS, MONO = "DejaVu Sans", "DejaVu Sans Mono"
 
 
@@ -81,10 +94,9 @@ def build(out: str = DEFAULT_OUT) -> str:
     ax.text(x0 - 16, y0 + h + 40, "schematic: model vs bid–ask", color=TEXT2, fontsize=13, family=SANS)
 
     # title block
-    ax.text(64, 500, "Joint SPX/VIX", color=TEXT, fontsize=50, fontweight="bold", family=SANS)
-    ax.text(64, 436, "Smile Calibration", color=TEXT, fontsize=50, fontweight="bold", family=SANS)
-    ax.text(66, 388, "Calibration, Greeks and a backtest with its full correction log",
-            color=TEXT2, fontsize=19, family=SANS)
+    ax.text(64, 500, TITLE_LINES[0], color=TEXT, fontsize=50, fontweight="bold", family=SANS)
+    ax.text(64, 436, TITLE_LINES[1], color=TEXT, fontsize=50, fontweight="bold", family=SANS)
+    ax.text(66, 388, SUBTITLE, color=TEXT2, fontsize=19, family=SANS)
 
     # chips
     x = 66

@@ -1,28 +1,34 @@
 cff-version: 1.2.0
 message: >-
   If you use this software or its results, please cite it as below. The
-  version is the package version in pyproject.toml; cite the commit you used
-  when you depend on a specific result (the daily job keeps committing data).
+  version is the package version in pyproject.toml; no release tag has been
+  cut for it, so cite the commit you used, especially when you depend on a
+  specific result (the daily job keeps committing data).
 type: software
-title: "Joint SPX/VIX Smile Calibration System"
+title: "Joint SPX/VIX Calibration System"
 abstract: >-
-  Heston and Bates option pricing by the Lewis (2001) contour integral with a
-  Black-Scholes control variate, exact VIX index and VIX futures formulas, a
-  session-dated and look-ahead-gated SPX option-chain pipeline, a joint
-  calibration of Heston to SPX smiles and the Cboe VIX term-structure indices
-  (multi-start least squares with identifiability diagnostics and a rough
-  Heston comparison), an arbitrage-free SVI surface scored against the quoted
-  bid-ask, a delta-hedged straddle backtest priced mark-to-model with
-  bootstrap intervals, deflated Sharpe ratios and exposure-matched nulls (it
-  reports a negative result), and the static dashboard published at
+  An end-of-day research system that fits one Heston model jointly to the
+  SPX option smile and the four Cboe VIX indices (VIX9D, VIX, VIX3M, VIX6M);
+  VIX options are a research leg, not in the objective. Heston and Bates
+  pricing by the Lewis (2001) contour integral with a Black-Scholes control
+  variate, exact VIX index and VIX futures formulas, a session-dated and
+  look-ahead-gated SPX option-chain pipeline, the joint calibration
+  (multi-start least squares with an analytic Jacobian, identifiability
+  diagnostics, a sigma-box profile and a rough Heston comparison), an SVI
+  surface certified free of butterfly and calendar arbitrage on a numerical
+  grid, every model scored against the quoted bid-ask on quotes it was not
+  fitted to, a Treasury zero curve, a delta-hedged straddle backtest priced
+  mark-to-model with bootstrap intervals, deflated Sharpe ratios and
+  exposure-matched nulls (it reports a negative result), a forward ledger at
+  executable prices, and the static dashboard published at
   https://navnoorbawa.me.
 authors:
   - family-names: Bawa
     given-names: Navnoor
     affiliation: Thapar Institute of Engineering & Technology
     website: "https://navnoorbawa.me"
-version: 0.22.0
-date-released: 2026-10-19
+version: 0.23.0
+date-released: 2026-10-21
 license: MIT
 repository-code: "https://github.com/navnoorthapar/vol-system-dashboard"
 url: "https://navnoorbawa.me"

@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from desk_format import _fmt, round_sig
+from desk_format import round_sig
 
 CATEGORICAL = ("cat0", "cat1", "cat2", "cat3", "cat4", "cat5")
 
@@ -77,22 +77,6 @@ def table(caption: str, columns: Iterable, rows: Iterable[Iterable[Any]]) -> dic
         num = isinstance(c, str) and c.endswith("#")
         cols.append({"label": c[:-1] if num else c, "num": num})
     return {"caption": caption, "columns": cols, "rows": [[str(v) for v in r] for r in rows]}
-
-
-def summary_table(caption: str, series: list[dict], fmt: str = ".2f", unit: str = "",
-                  xs: Sequence | None = None) -> dict:
-    """First / last / lowest / highest of each aligned series (long series)."""
-    rows = []
-    for s in series:
-        if s.get("invisible"):
-            continue
-        ys = [v for v in s["data"] if v is not None]
-        if not ys:
-            continue
-        rows.append([s["name"], f"{_fmt(ys[0], fmt)}{unit}", f"{_fmt(ys[-1], fmt)}{unit}",
-                     f"{_fmt(min(ys), fmt)}{unit}", f"{_fmt(max(ys), fmt)}{unit}"])
-    head = (f"First ({xs[0]})#" if xs else "First#", f"Last ({xs[-1]})#" if xs else "Last#")
-    return table(caption, ["Series", head[0], head[1], "Lowest#", "Highest#"], rows)
 
 
 def color_cycle(i: int) -> str:

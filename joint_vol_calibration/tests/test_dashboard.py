@@ -1205,6 +1205,30 @@ def test_social_meta_and_card_carry_no_test_count(pages):
     assert len(titles) == len(pages)                      # per-page, not one for all
 
 
+def test_titles_do_not_promise_a_vix_smile_fit(pages):
+    """CLM-05: 'Joint SPX/VIX smile calibration' means fitting both option
+    smiles (Guyon 2020); every committed fit has the VIX-options leg off
+    (w3 = 0) and fits the four VIX indices. One honest title everywhere: the
+    README, CITATION.cff, every page's og:title and the Overview heading, and
+    the social card; the card's correction range is the registry's."""
+    readme_h1 = (ROOT / "README.md").read_text().splitlines()[0]
+    cff_title = re.search(r'^title: "([^"]+)"', (ROOT / "CITATION.cff").read_text(), re.MULTILINE).group(1)
+    og = _load("og_card_title_under_test", "dashboard/make_og_image.py")
+    texts = {"README": readme_h1, "CITATION": cff_title, "card": " ".join(og.TITLE_LINES)}
+    for route, html in pages.items():
+        texts[route] = re.search(r'<meta property="og:title"\s+content="([^"]+)"', html).group(1)
+        texts[route + " alt"] = re.search(r'<meta property="og:image:alt"\s+content="([^"]+)"', html).group(1)
+    texts["overview h1"] = re.search(r'<h1 class="page-title">([^<]+)</h1>', pages["/"]).group(1)
+    for where, text in texts.items():
+        assert "smile calibration" not in text.lower(), (where, text)
+    assert readme_h1 == f"# {cff_title}"
+    assert cff_title == "Joint SPX/VIX Calibration System"
+    assert "VIX index term structure" in og.SUBTITLE
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    span = f"{reg['rounds'][0]['id']}–{reg['rounds'][-1]['id']}"
+    assert (span, "correction rounds logged") in og.STATS
+
+
 def test_regime_and_calibration_copy_state_the_actual_rules(pages):
     idx, cal, bt = pages["/"], pages["/calibration"], pages["/research"]
     assert "rolling 252-day 80th percentile" in idx

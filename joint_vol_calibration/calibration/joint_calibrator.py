@@ -1,5 +1,6 @@
 """
-joint_calibrator.py — Joint SPX/VIX Smile Calibration Engine (C4, revised C22).
+joint_calibrator.py — Joint SPX/VIX calibration engine: the SPX smile and the VIX
+index term structure (C4, revised C22).
 
 Minimises a single weighted loss over the market observables:
 
@@ -1036,7 +1037,8 @@ def previous_accepted_fit(spot_date: str, cal_dir=None) -> tuple:
 
 class JointCalibrator:
     """
-    Joint SPX/VIX smile calibration engine for the Heston model.
+    Joint SPX/VIX calibration engine for the Heston model: the SPX smile and
+    the VIX index term structure (the VIX-options leg is off by default, w3 = 0).
 
     Loads market data once at construction, then minimises the weighted loss
     as a least-squares problem: multi-start trust-region reflective

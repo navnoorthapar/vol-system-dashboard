@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "joint-vol-calibration"
-version = "0.22.0"
+version = "0.23.0"
 description = "Joint SPX/VIX volatility calibration, regime signals, backtest and the static dashboard behind navnoorbawa.me"
 readme = "README.md"
 license = { file = "LICENSE" }

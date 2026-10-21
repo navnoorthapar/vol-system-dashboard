@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
-{% block og_title %}Overview — Joint SPX/VIX Smile Calibration{% endblock %}
+{% block og_title %}Overview — Joint SPX/VIX Calibration{% endblock %}
 {% block og_description %}End-of-day SPX/VIX volatility research system: an arbitrage-free surface and a joint SPX/VIX Heston fit scored against the bid–ask, rough Heston beside it, and a mark-to-model backtest with bootstrap intervals and timing nulls.{% endblock %}
 
 {% block content %}
 {% set f = d.fit or {} %}
 <div class="page-head">
-  <h1 class="page-title">Joint SPX/VIX smile calibration</h1>
-  <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Its daily job is built to store each U.S. session's option books, fit an arbitrage-free market surface and a joint SPX/VIX stochastic-volatility model, and score both on quotes they were not fitted to, in units of the quoted half-spread; the pipeline panel lists what is stored so far. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
+  <h1 class="page-title">Joint SPX/VIX calibration</h1>
+  <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Its daily job is built to store each U.S. session's option books, fit an arbitrage-free market surface and one stochastic-volatility model jointly to the SPX smile and the VIX index term structure (VIX options are a research leg, not in the fit), and score both on quotes they were not fitted to, in units of the quoted half-spread; the pipeline panel lists what is stored so far. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
   <div class="page-badge">
     <span class="nowrap">Last close {{ d.spx_date|fmt }}</span><span class="sep">·</span>
     <span class="nowrap">Rule label {{ d.regime_date|fmt }}</span><span class="sep">·</span>

@@ -43,7 +43,7 @@ with p = (1 + #{null ≥ real}) / (B + 1) for the timing alpha.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -277,8 +277,3 @@ class PortfolioNull:
                              "sleeve": s, "total_pnl": st["total_pnl"], "sharpe": st["sharpe"],
                              "n_entries": ent})
         return pd.DataFrame(rows)
-
-
-def iter_chunks(seq: Sequence, size: int) -> Iterator[Sequence]:
-    for i in range(0, len(seq), size):
-        yield seq[i:i + size]

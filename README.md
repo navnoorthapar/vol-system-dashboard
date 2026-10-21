@@ -1,4 +1,4 @@
-# Joint SPX/VIX Smile Calibration System
+# Joint SPX/VIX Calibration System
 
 [![tests](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/tests.yml)
 [![daily refresh](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/daily_refresh.yml/badge.svg?branch=main)](https://github.com/navnoorthapar/vol-system-dashboard/actions/workflows/daily_refresh.yml)
