@@ -75,7 +75,9 @@ The market columns repeat for every model; every model must be scored on the sam
 - `models` is a non-empty list; each row needs `model` and `metrics.out_of_sample` with `n` (a non-negative integer), `median_abs_hs`, `inside_spread_pct` (in [0, 100]) and `rmse_vp` (≥ 0).
 - Rows are shown in the order of `ranking_by_oos_median_abs_hs`.
 - `notes` are printed under the scorecard as written (they carry the stale-quote caveat).
-- The Overview's key result is the Heston row's out-of-sample `median_abs_hs`. No interval is stored, and the card says so.
+- The panel title says "same quotes" only when every row's `out_of_sample.n` is equal; otherwise "each model's out-of-sample quotes".
+- `metrics.by_expiry` covers all quotes (in and out of sample), so the pages do not read it: the "Median |z| by expiry" chart is computed from `residuals.parquet` on each model's out-of-sample quotes, the scorecard's own sets.
+- The Overview's first key result is the `svi_cal` row's out-of-sample `median_abs_hs` on the newest session, with its range over every stored session beside it; a range across sessions is not a sampling interval, and the card says so.
 
 ### `surface.json`
 

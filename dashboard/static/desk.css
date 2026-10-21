@@ -119,6 +119,9 @@ sub, sup { font-size: 0.72em; }
 .statusbar .sb-k { color: var(--text3); margin-right: 4px; }
 .statusbar .sb-v { color: var(--text2); }
 .statusbar .sb-right { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+/* the view-time freshness text replaces "as of <date>" after first paint: its
+   width is reserved so the status bar never re-wraps (no layout shift) */
+.statusbar #freshness { display: inline-block; min-width: 18ch; }
 .sb-state { font-weight: 500; letter-spacing: 0.04em; }
 .lvl-ok    { color: var(--ok); }
 .lvl-warn  { color: var(--watch); }
@@ -222,6 +225,8 @@ sub, sup { font-size: 0.72em; }
 .btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
 .btn .key-swatch.dashed { border-top-style: dashed; }
 .btn .key-swatch.dot { width: 7px; height: 7px; border: none; border-radius: 50%; background: currentColor; }
+.btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }
+.btn .key-swatch.diamond { width: 7px; height: 7px; border: none; border-radius: 0; background: currentColor; transform: rotate(45deg); }
 .legend-bar { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip {
   display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em;
@@ -243,6 +248,9 @@ sub, sup { font-size: 0.72em; }
 .kpi-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 2px; }
 .kpi-sub { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 1px; }
 .kpi-ci { font-family: var(--mono); font-size: 10.5px; color: var(--text2); margin-top: 2px; }
+.kpi-ci.faint { font-family: var(--sans); color: var(--text3); }
+/* a range across sessions is not a confidence interval: marked apart from one */
+.kpi-range { border-left: 2px dashed var(--line2); padding-left: 6px; }
 
 /* parameter tiles */
 .param { background: var(--surface); padding: 8px 10px; min-width: 0; }
@@ -286,6 +294,11 @@ sub, sup { font-size: 0.72em; }
 .scroll-hint.show { display: block; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
 .tbl caption { text-align: left; font-size: 11px; color: var(--text3); padding: 0 0 4px; }
+/* A caption inside a horizontal scroll region is as wide as its table, so on a
+   phone the middle of each line was off-screen: it wraps to the region's
+   visible width (a size container) and stays put while the table scrolls. */
+.tbl-wrap, .heat-wrap { container-type: inline-size; }
+.tbl-wrap > table > caption, .heat-wrap > table > caption { position: sticky; left: 0; max-width: 100cqw; }
 .tbl th {
   text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
   color: var(--text3); padding: 5px 8px; border-bottom: 1px solid var(--line2); background: var(--surface); white-space: nowrap;
@@ -301,6 +314,7 @@ sub, sup { font-size: 0.72em; }
 .tbl tr.em td { color: var(--text); font-weight: 600; }
 .tbl td.wrap { white-space: normal; min-width: 180px; }
 .tbl.dense td, .tbl.dense th { padding: 3px 6px; }
+.tbl.wrap-head th { white-space: normal; vertical-align: bottom; min-width: 7ch; }   /* long heads wrap, the numbers do not */
 .dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; font-size: 12px; align-items: baseline; }
 .dl dd, .pm-v, .tbl td.wrap { overflow-wrap: anywhere; }
 code { overflow-wrap: anywhere; }
@@ -314,7 +328,10 @@ code { overflow-wrap: anywhere; }
 .heat th { font-weight: 500; color: var(--text3); padding: 2px 4px; white-space: nowrap; text-align: center; }
 .heat th[scope="row"] { text-align: left; padding-right: 8px; color: var(--text2); }
 .heat td { min-width: 40px; height: 26px; text-align: center; vertical-align: middle; border-radius: 1px; padding: 0 3px; white-space: nowrap; }
-.heat td:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* two-tone focus ring: black and white, so one of the two reaches 3:1 on any
+   cell colour (the single --focus ring vanished on the light ends of the ramps) */
+.heat td:focus-visible { outline: 2px solid #000; outline-offset: -2px; box-shadow: inset 0 0 0 4px #fff; }
+.heat td.flag:focus-visible { box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 6px var(--breach); }
 .heat td.empty { background: var(--bg); color: var(--text3); }
 .heat td.flag { box-shadow: inset 0 0 0 2px var(--breach); font-weight: 600; }
 .heat .vv { display: block; }
@@ -335,6 +352,9 @@ code { overflow-wrap: anywhere; }
 .chart-data caption { text-align: left; color: var(--text3); font-size: 11px; padding-bottom: 3px; }
 .chart-fallback { display: none; }
 .charts-failed .chart, .no-js .chart { display: none; }
+/* controls that only drive a chart do nothing without one (the smile's expiry
+   tabs stay: they also switch the per-expiry tables shown in its place) */
+.charts-failed [data-load-3d], .charts-failed [data-legend-for], .charts-failed [data-zoom-for] { display: none !important; }
 .charts-failed .chart-fallback { display: block; padding: 6px 10px; border: 1px dashed var(--line2); border-radius: var(--radius); font-size: 11.5px; color: var(--watch); }
 .charts-failed .chart-data.sr-only, .no-js .chart-data.sr-only {
   position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal;
@@ -455,6 +475,7 @@ dialog.keys .dl { font-size: 12px; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
   .chart.h300, .chart.h340, .chart.h400, .chart.h440 { height: 260px; }
+  .chart.tall-narrow { height: 480px; }      /* one row per category (the C22 waterfall) */
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
@@ -477,7 +498,13 @@ dialog.keys .dl { font-size: 12px; }
   .page { max-width: none; padding: 0; }
   .panel, .banner, .pm, .kpis { break-inside: avoid; }
   .tbl-wrap, .heat-wrap { overflow: visible !important; }
+  .tbl-wrap.capped { max-height: none !important; overflow-y: visible !important; }   /* a capped table overlapped the chart below it */
   .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 4px 0 0; overflow: visible; clip: auto; white-space: normal; }
+  /* heat cells, ramps and swatches print in their colours (browsers drop
+     backgrounds by default, which left faint grey numbers on white) */
+  .heat td, .ramp-bar, .key-swatch, .rag, .chip { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* every tab panel prints (desk.js also opens each methodology drawer before printing) */
+  [role="tabpanel"][hidden] { display: block !important; }
   details.method { display: block; }
   a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9px; color: #555; }
 }

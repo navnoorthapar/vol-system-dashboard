@@ -1572,16 +1572,25 @@ def test_model_smile_never_carries_a_nan(dash, monkeypatch):
     assert all(np.isfinite(v) for v in out[0]["iv"])
 
 
+def _without_inference(base: dict) -> dict:
+    """A Research page dict as it is before the C23 inference report has run."""
+    return {**base, "null_rows": [], "inference": {"state": "absent", "paths": [], "producer": None},
+            "sharpe_ci": None}
+
+
 @pytest.mark.parametrize(("p", "says"), [
-    (0.0746, "does not beat random entry dates at the 5% level (p = 0.075)"),
-    (0.0348, "beats random entry dates at the 5% level (p = 0.035)")])
+    (0.0746, "does not beat random entry dates at the 5% level (p = 0.075;"),
+    (0.0348, "beats random entry dates at the 5% level (p = 0.035;")])
 def test_s3_timing_claim_follows_the_stored_null_test(dash, monkeypatch, p, says):
     """'Only S3's timing survives' / 'its timing beats a random-walk null' were
-    hard-coded; the regenerated null test gives p = 0.075, not significant."""
-    base = dash.load_page4()
+    hard-coded; the regenerated null test gives p = 0.075, not significant.
+    Without the C23 inference report the legacy 200-path null is quoted, and
+    labelled as superseded."""
+    base = _without_inference(dash.load_page4())
     monkeypatch.setattr(dash, "load_page4", lambda: {**base, "kpi": {**base["kpi"], "s3_null_p": p}})
     text = _visible_text(dash.app.test_client().get("/research").get_data(as_text=True))
     assert says in text
+    assert "the legacy 200-path null, superseded in C23" in text
     assert ("not significant at 5%" in text) is (p >= 0.05)
     assert "Timing Survives" not in text
 
@@ -1865,12 +1874,20 @@ def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, page
     +$41,952, before the sizing overlay. The page says so, and shows the base-size
     figure only when the stored results record it."""
     m = engine_state["metrics"]
-    text = _visible_text(pages["/research"]) + " | " + _visible_text(pages["/corrections"])
+    text = _visible_text(pages["/corrections"])
     p = f"{m['s3_null_p_value']:.3f}"
-    assert ("its timing, tested on S3 at base (pass-1) size, before the sizing overlay, does not beat "
-            f"random entry dates at the 5% level (p = {p})") in text
-    assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
+    # the C22 finding quotes its own (legacy) test, named as superseded
     assert f"timing null test on S3 at base (pass-1) size, before the sizing overlay: p = {p}" in text
+    assert "(the C22 200-path null; C23 replaced it with exposure-matched nulls" in text
+    # the Research page quotes it only when the C23 nulls are missing
+    base = _without_inference(dash.load_page4())
+    import unittest.mock as _mock
+    with _mock.patch.object(dash, "load_page4", lambda: base):
+        legacy = _visible_text(dash.app.test_client().get("/research").get_data(as_text=True))
+    text += " | " + legacy
+    assert ("its timing, tested on S3 at base (pass-1) size, before the sizing overlay, does not beat "
+            f"random entry dates at the 5% level (p = {p};") in text
+    assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
     assert "null p =" not in text
     assert "S3 entries vs random entry dates" not in text
     if "s3_null_real_pnl" not in m:
@@ -1883,9 +1900,13 @@ def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, page
     with open(path, "wb") as f:
         pickle.dump(state, f)
     client = dash.app.test_client()
-    for route in ("/research", "/corrections"):
-        text = _visible_text(client.get(route).get_data(as_text=True))
-        assert "on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text, route
+    text = _visible_text(client.get("/corrections").get_data(as_text=True))
+    assert "on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text
+    base = _without_inference(dash.load_page4())
+    import unittest.mock as _mock
+    with _mock.patch.object(dash, "load_page4", lambda: base):
+        text = _visible_text(client.get("/research").get_data(as_text=True))
+    assert "on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text
 
 
 def test_s3_trade_count_is_explained_as_entries_plus_rolls(dash, engine_state, pages):
@@ -2039,8 +2060,9 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     first = re.search(r"<tr><th scope=\"row\">[^<]*</th>(.*?)</tr>", heat.split("<tbody>")[1],
                       re.DOTALL).group(1)
     tds = re.findall(r"<td[^>]*>(.*?)</td>", first, re.DOTALL)
-    assert len(tds) == len(dash.K_EDGES) - 1
-    atm = tds[dash.K_EDGES.index(0.0) - 1]                       # the (−0.02, 0] bucket
+    used = dash.k_buckets_used(mkt["k"])            # K_EDGES' buckets, plus a wing that has quotes
+    assert len(tds) == len(used)
+    atm = tds[used.index(dash.K_EDGES.index(0.0))]                # the (−0.02, 0] bucket
     assert re.match(rf"{q['mid_iv'].median() * 100:.1f}\b", atm), (atm, q["mid_iv"].median())
     # VIX replication and the arbitrage screen are the files' numbers
     vx = json.loads((FIX / "surface" / SESSION / "vix_replication.json").read_text())["indices"]["VIX"]
@@ -2182,10 +2204,10 @@ def test_inventory_does_not_claim_flat_carry_for_the_per_maturity_greeks():
     meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
     prov = json.loads(meta[b"greeks_provenance"])
     models = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
-    inv = {m["id"]: m for m in models}
+    greeks = next(m for m in models if m["module"].endswith("greeks/risk_monitor.py"))
     if (prov.get("carry") or {}).get("by_maturity"):
-        assert "flat carry" not in inv["M2"]["limitations"].lower()
-        assert "per maturity" in inv["M2"]["limitations"]
+        assert "flat carry" not in greeks["limitations"].lower()
+        assert "per maturity" in greeks["limitations"]
 
 
 def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
@@ -2514,9 +2536,13 @@ def test_model_inventory_paths_exist(dash):
     assert ids == [f"M{i}" for i in range(1, len(ids) + 1)]
     for m in inv["models"]:
         assert (ROOT / m["module"]).is_file(), m["id"]
-        assert (ROOT / m["outputs"]).exists(), (m["id"], m["outputs"])
+        # an output not yet written says so and why (the forward ledger's first entry)
+        assert (ROOT / m["outputs"]).exists() or m.get("outputs_pending"), (m["id"], m["outputs"])
         assert m["tier"] in ("production", "backtest", "research"), m["id"]
+        assert m["materiality"] in ("high", "medium", "low"), m["id"]
         assert m.get("page") is None or m["page"] in dash.ROUTES, m["id"]
+    vendors = [v["id"] for v in inv["vendor_inputs"]]
+    assert vendors == [f"V{i}" for i in range(1, len(vendors) + 1)]
 
 
 def test_artifact_pages_keep_the_number_style(dash, art):
@@ -2527,3 +2553,603 @@ def test_artifact_pages_keep_the_number_style(dash, art):
         _assert_number_style(route, client.get(route).get_data(as_text=True))
     assert dash.prose("CI [-0.68, 0.50]; P&L $-158; C16-C22; 2018-01-02") == \
         "CI [−0.68, 0.50]; P&L −$158; C16-C22; 2018-01-02"
+
+
+# ── C23 adversarial review, UI findings (UI-1 … UI-18, CLM-01/08/09) ──────────
+
+def _cells(html: str, table_id: str) -> list[list[str]]:
+    """Visible cell texts of a heat table, one list per body row (row head first)."""
+    tbl = re.search(rf'<table class="heat" id="{re.escape(table_id)}"[^>]*>(.*?)</table>', html, re.DOTALL)
+    assert tbl, table_id
+    rows = []
+    for tr in re.findall(r"<tr>(.*?)</tr>", tbl.group(1).split("<tbody>")[1], re.DOTALL):
+        cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, re.DOTALL)
+        rows.append([re.sub(r"<span class=\"sr-only\">.*?</span>", "", c).strip() for c in cells])
+    return rows
+
+
+def test_risk_delta_grid_is_the_otm_options_forward_delta(dash, pages):
+    """UI-3: the grid said 'OTM option, forward delta' over the stored call spot
+    delta e^{−qT}N(d₁), so a 30%-OTM put read +0.99. Each cell is now the OTM
+    option's forward delta: N(d₁) − 1 for the put below the forward, N(d₁) for
+    the call above it, recomputed here from the stored surface."""
+    g = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
+    html = pages["/risk"]
+    cap = re.search(r'<caption id="heat-delta-cap">(.*?)</caption>', html, re.DOTALL).group(1)
+    assert "N(d₁) − 1 for the put at K &lt; F" in cap
+    assert "N(d₁) for the call at K ≥ F" in cap
+    rows = {r[0]: r[1:] for r in _cells(html, "heat-delta")}
+    cols = sorted(float(x) for x in g["log_moneyness"].round(4).unique())
+    n_put = n_call = 0
+    for r in g.itertuples():
+        nd1 = r.delta * np.exp(r.q * r.T)
+        want = nd1 - 1.0 if r.log_moneyness < 0 else nd1
+        got = rows[f"{int(r.T_days)}d"][cols.index(round(float(r.log_moneyness), 4))]
+        assert got == dash.signed(want, ".2f"), (r.T_days, r.log_moneyness, got, want)
+        n_put += r.log_moneyness < 0
+        n_call += r.log_moneyness >= 0
+    assert n_put
+    assert n_call
+    # the 30-day, 30%-OTM put: a small negative delta, never the +0.99 the grid showed
+    deep_put = g[(g["T_days"] == 30) & (g["log_moneyness"].round(2) == -0.30)].iloc[0]
+    assert dash.otm_forward_delta(deep_put.delta, deep_put.q, deep_put.T, deep_put.log_moneyness) < 0
+    assert rows["30d"][0].startswith("−")
+
+
+def test_one_colour_per_model_on_every_surface_chart(dash, pages):
+    """UI-2: the slice drew Heston in the orange the by-expiry chart beside it used
+    for SVI, and had no legend. Each model now has one colour on every chart, and
+    the slice has one toggle per model (all four), the market quotes and the
+    Heston anchors, with the forward marked."""
+    html = pages["/surface"]
+    sl, be = _spec(html, "chart-slices"), _spec(html, "chart-by-expiry")
+    by_name = {s["name"]: s["color"] for s in be["series"]}
+    models = json.loads((SHIPPED / "surface" / "2026-10-16" / "scorecard.json").read_text())["models"]
+    keys = [m["model"] for m in models]
+    assert len({dash.model_colour(k) for k in keys}) == len(keys)            # distinct
+    for k in keys:
+        label = dash.model_label(k)
+        assert by_name[label] == dash.model_colour(k), k
+        slice_cols = {s["color"] for s in sl["series"] if s.get("legendKey") == label}
+        assert slice_cols == {dash.model_colour(k)}, (k, slice_cols)
+    legend = [it["name"] for it in sl["legend_items"]]
+    assert {dash.model_label(k) for k in keys} <= set(legend)
+    assert {"Bid–ask", "Mid", "Heston fit anchors"} <= set(legend)
+    assert len(legend) == len(set(legend))                                   # one button per key
+    shown = {it["name"] for it in sl["legend_items"] if not it["hidden"]}
+    assert {dash.model_label("heston_v2"), dash.model_label("svi_cal")} <= shown
+    assert sl["marks"]["x"][0]["value"] == 0                                  # the forward
+    # the same model keeps its colour on the calibration page
+    cal = pages["/calibration"]
+    smile = next(_spec(cal, cid) for cid in re.findall(r'id="(chart-smile-[^"]+)" data-spec', cal))
+    heston = next(s for s in smile["series"] if s["name"] == "Heston")
+    assert heston["color"] == dash.model_colour("heston_v2")
+
+
+def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
+    """UI-2/UI-17: all four models on the slice within the page budget: a model's
+    points list only IVs, aligned with that expiry's mids (desk.js takes x from
+    them), and the IVs are the residual table's model IVs at those strikes."""
+    sl = _spec(pages["/surface"], "chart-slices")
+    by = {s["name"]: s for s in sl["series"]}
+    res = pd.read_parquet(SHIPPED / "surface" / "2026-10-16" / "residuals.parquet")
+    with_x = [s for s in sl["series"] if s.get("xFrom")]
+    assert len(with_x) == res["model"].nunique() * res["expiry"].nunique()      # every model, every expiry
+    for s in with_x:
+        mids = by[s["xFrom"]]["data"]
+        assert len(mids) == len(s["data"]), s["name"]
+        e, label = s["group"], s["legendKey"]
+        key = next(k for k in res["model"].unique() if dash.model_label(k) == label)
+        q = res[(res["model"] == key) & (res["expiry"] == e)].sort_values("k")
+        assert [round(float(k), 3) for k in q["k"]] == [m[0] for m in mids], s["name"]
+        assert s["data"] == [round(float(v) * 100, 2) for v in q["model_iv"]], s["name"]
+
+
+def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
+    """UI-17: without the chart the slice offered 'the values listed below', a
+    table of quote counts. Its data block now has one table per expiry (bid,
+    mid, ask and every model's IV by ln(K/F) bucket); the default expiry's is
+    shown, the others are hidden until their tab is chosen (all show without JS)."""
+    html = pages["/surface"]
+    block = re.search(r'<div class="chart-data sr-only" id="chart-slices-data">(.*?)\n</div>', html,
+                      re.DOTALL).group(1)
+    groups = re.findall(r'<div class="chart-data-group" data-group="([^"]+)"( hidden)?>', block)
+    exps = re.findall(r'data-value="(\d{4}-\d{2}-\d{2})">\d+d</button>', html)
+    assert [g for g, _ in groups] == exps
+    assert sum(1 for _, h in groups if not h) == 1
+    head = re.search(r'data-group="[^"]+"[^>]*><table>\s*<caption>[^<]+</caption>\s*<thead><tr>(.*?)</tr>',
+                     block, re.DOTALL).group(1)
+    for col in ("Bid", "Mid", "Ask", "Heston", "SVI-cal", "SVI", "eSSVI"):
+        assert f">{col}</th>" in head, col
+    assert ('[role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }'
+            in html)
+
+
+def test_iv_and_residual_grids_hold_every_quote(dash, pages):
+    """UI-14: pd.cut over ±0.30 dropped the 108 quotes at ln(K/F) ≤ −0.30 (the deep
+    put wing) from every grid, and the colour ramp spanned quotes no cell showed.
+    The grids now carry an open wing column; their cells add up to the quotes."""
+    d = dash.load_surface()
+    res = pd.read_parquet(SHIPPED / "surface" / "2026-10-16" / "residuals.parquet")
+    mkt = res[res["model"] == res["model"].iloc[0]]
+    assert (mkt["k"] <= -0.30).sum() > 0
+    assert d["iv_heat"]["n"] == len(mkt) == d["n_quotes"]
+    assert d["iv_heat"]["cols"][0] == "≤ −0.30"
+    shown = [float(c["text"]) for r in d["iv_heat"]["rows"] for c in r["cells"] if not c.get("empty")]
+    assert d["iv_heat"]["hi"] == pytest.approx(max(shown), abs=0.051)       # the ramp spans the cells
+    assert d["iv_heat"]["lo"] == pytest.approx(min(shown), abs=0.051)
+    for r in d["resid_heat"]:
+        assert sum(c["n"] for row in r["rows"] for c in row["cells"]) == r["n"], r["key"]
+    assert dash.k_bucket_label(0) == "≤ −0.30"
+    assert dash.k_bucket_label(len(dash.K_EDGES)) == "> +0.30"
+    assert list(dash.k_bucket(pd.Series([-0.355, -0.30, -0.25, 0.31]))) == [0, 0, 1, len(dash.K_EDGES)]
+
+
+def test_scorecard_and_by_expiry_chart_say_which_quotes_they_score(dash, pages):
+    """UI-16: 'same quotes, same metric' sat above 1,496 vs 2,860 scored quotes, and
+    the by-expiry chart beside it mixed in the fitted quotes. The title follows the
+    quote counts, the chart is each model's out-of-sample quotes (recomputed here),
+    and the history column names the repair's moves."""
+    html = pages["/surface"]
+    sc = json.loads((SHIPPED / "surface" / "2026-10-16" / "scorecard.json").read_text())
+    ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"]}
+    title = re.search(r'<h2 class="panel-title" id="scorecard-t">(.*?)</h2>', html).group(1)
+    assert ("same quotes" in title) is (len(ns) == 1)
+    be = _spec(html, "chart-by-expiry")
+    res = pd.read_parquet(SHIPPED / "surface" / "2026-10-16" / "residuals.parquet")
+    for s in be["series"]:
+        key = next(k for k in res["model"].unique() if dash.model_label(k) == s["name"])
+        q = res[(res["model"] == key) & ~res["in_sample"].astype(bool)]
+        med = q["error_hs"].abs().groupby(q["expiry"]).median()
+        exps = sorted(med.index)
+        got = [v for v in s["data"] if v is not None]
+        assert got == pytest.approx([float(med[e]) for e in exps if e in med.index], rel=1e-5), s["name"]
+    assert "Out-of-sample quotes only" in html
+    assert "Repair moves outside spread" in html
+    assert "Arb. outside spread" not in html
+
+
+def test_surface_atm_over_vix_is_named_by_its_method(dash, pages):
+    """UI-5: Surface showed '30-day ATM vol / VIX' = 0.712 and linked to Research,
+    whose table gives 0.702 for the same chain. Each number now carries its own
+    method's name, and the β estimator's value equals the Research page's."""
+    surf, res = _visible_text(pages["/surface"]), pages["/research"]
+    vb = json.loads((SHIPPED / "surface" / "2026-10-16" / "vix_replication.json").read_text())["beta"]
+    assert f"VIX-term ATM / VIX on this chain: {vb['atm_over_vix_official']:.3f}" in surf
+    assert "30-day ATM vol / VIX on this chain" not in surf
+    row = re.search(r'<td class="nowrap">2026-10-16</td><td>[^<]*</td><td class="num">([0-9.]+)</td>', res)
+    assert row, "research β chain row"
+    assert f"gives {row.group(1)} on the same chain" in surf
+    assert "β estimator ATM 30d / VIX" in surf
+    assert "VIX-term ATM / VIX" in surf
+
+
+def test_research_s3_timing_headline_is_the_c23_exposure_matched_null(dash, pages):
+    """UI-6: the hero and KPI quoted the 200-path null C23 calls inadequate
+    (p = 0.065) while the Inference panel below said 0.078. Both now read the
+    inference summary's circular-shift test."""
+    summ = json.loads((SHIPPED / "backtest" / "inference" / "summary.json").read_text())
+    circ = summ["nulls"]["sleeves"]["s3"]["circular"]["total_pnl"]
+    text = _visible_text(pages["/research"])
+    p = f"{circ['p_value']:.3f}"
+    assert f"exposure-matched circular shifts at the 5% level (p = {p};" in text
+    kpi = re.search(r'id="s3-timing-kpi">(.*?)</div></div>', pages["/research"], re.DOTALL).group(1)
+    assert f"p = {p}" in kpi
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as fh:
+        legacy = pickle.load(fh)["metrics"]["s3_null_p_value"]
+    if f"{legacy:.3f}" != p:
+        assert f"p = {legacy:.3f}" not in text
+
+
+def test_corrections_trend_sentence_agrees_with_the_published_series(dash, pages):
+    """UI-4: 'Every successive fix made the backtest worse' sat beside a chart on
+    which C22 raised the result from −26.1% to −21.6%. The sentence is now read
+    off the series: it names every round that raised the result."""
+    html = pages["/corrections"]
+    sub = _visible_text("<body>" + re.search(r'id="audit-sub">(.*?)</p>', html, re.DOTALL).group(1))
+    series = _spec(html, "chart-headline")
+    vals = list(series["series"][0]["data"])
+    rounds = series["xs"]
+    ups = [rounds[i + 1] for i in range(len(vals) - 1)
+           if vals[i] is not None and vals[i + 1] is not None and vals[i + 1] - vals[i] > 0.05]
+    assert "Every successive fix made the backtest worse" not in html
+    if ups:
+        for r in ups:
+            assert f"{r} raised it from" in sub, r
+        assert not sub.startswith("No correction")
+    f = dash.headline_trend_sentence
+    assert f([("C17", -9.1), ("C18", -19.0), ("C21", -26.1)]).startswith("No correction raised")
+    assert "C22 raised it from −26.1% to −21.6%" in f([("C17", -9.1), ("C21", -26.1), ("C22", -21.6),
+                                                       ("C23", -22.2)])
+
+
+def test_waterfall_exports_steps_not_bar_encodings(dash, pages):
+    """UI-9: the CSV exported the stacked-bar geometry (a step that raised P&L by
+    $107.9K as −107.87) and the tooltip listed every step as both 'raises' and
+    'lowers'. The spec now carries its own CSV rows (Δ P&L, P&L after) and each
+    step bar's tip only where that bar is drawn."""
+    w = _spec(pages["/corrections"], "chart-waterfall")
+    bridge = sorted(dash._read_csv_rows(SHIPPED / "backtest" / "c22_bridge.csv"), key=lambda r: int(r["row"]))
+    rows = {r[1]: r for r in w["csv_rows"]["rows"]}
+    assert w["csv_rows"]["columns"][:4] == ["row", "step", "d_pnl_usd", "pnl_after_usd"]
+    for b in bridge:
+        assert rows[b["label"]][2] == pytest.approx(float(b["d_pnl"]), abs=0.01), b["label"]
+        assert rows[b["label"]][3] == pytest.approx(float(b["pnl"]), abs=0.01), b["label"]
+    atm = next(b for b in bridge if "0.82" in b["label"])
+    assert float(atm["d_pnl"]) > 0
+    assert rows[atm["label"]][2] > 0
+    up = next(s for s in w["series"] if s["name"] == "Step raises P&L")
+    down = next(s for s in w["series"] if s["name"] == "Step lowers P&L")
+    for i, (tu, td) in enumerate(zip(up["tip"], down["tip"])):
+        assert (tu is None) or (td is None), i                    # never both at one step
+        assert (tu is None) == (up["data"][i] is None), i
+        assert (td is None) == (down["data"][i] is None), i
+    assert w["horizontal"] is True                              # step names never collide
+    assert w.get("labelShare")
+    js = DESK_JS.read_text()
+    assert "if (spec.csv_rows)" in js
+    assert "(spec.tipRows || [])" in js
+
+
+def test_surface_badge_lists_the_models(pages):
+    """UI-10: the badge read 'models:' and nothing else."""
+    badge = _visible_text("<body>" + re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"],
+                                                re.DOTALL).group(1))
+    for m in ("eSSVI", "SVI", "SVI-cal", "Heston"):
+        assert re.search(rf"models:.*\b{re.escape(m)}\b", badge), (m, badge)
+
+
+def test_surface_key_result_shows_its_range_caveat(dash, pages):
+    """UI-11: key result 1 showed 'Range over 5 stored sessions' in the interval
+    slot and dropped the note that it is not a sampling interval and that
+    held-out strikes are an interpolation test (rendered only without a range)."""
+    card = _card(pages["/"], "surface.html#scorecard")
+    assert "Range over" in card
+    assert "not a sampling interval" in card
+    assert "interpolation test" in card
+    assert 'class="kpi-ci kpi-range"' in pages["/"]
+
+
+def test_calibration_smile_anchors_stand_apart_from_the_out_of_sample_mids(dash, pages):
+    """UI-12: the 9 fit anchors were filled dots the colour of 338 hollow mids,
+    and both legend swatches were the same white dot."""
+    cal = pages["/calibration"]
+    n = 0
+    for cid in re.findall(r'id="(chart-smile-[^"]+)" data-spec', cal):
+        spec = _spec(cal, cid)
+        ser = {s["name"]: s for s in spec["series"]}
+        if "Mid (fit anchor)" not in ser:
+            continue
+        a, o = ser["Mid (fit anchor)"], ser["Mid (out of sample)"]
+        assert a["color"] != o["color"]
+        assert a["symbol"] == "diamond"
+        assert a["size"] > o["size"]
+        assert a.get("z", 2) > 2
+        items = {it["name"]: it for it in spec["legend_items"]}
+        assert items["Mid (fit anchor)"]["diamond"]
+        assert items["Mid (out of sample)"]["hollow"]
+        n += 1
+    assert n
+    assert ".btn .key-swatch.hollow" in DESK_CSS.read_text()
+    assert ".btn .key-swatch.diamond" in DESK_CSS.read_text()
+
+
+def test_heat_focus_ring_is_two_tone(dash):
+    """UI-13: the 2 px #8abbff ring drawn inside a cell was ~1.05:1 against the
+    light ends of the cividis and berlin ramps. The ring is black with a white
+    inner band: one of the two reaches 3:1 on any cell colour."""
+    css = DESK_CSS.read_text()
+    rule = re.search(r"\.heat td:focus-visible \{([^}]*)\}", css).group(1)
+    assert "outline: 2px solid #000" in rule
+    assert "inset 0 0 0 4px #fff" in rule
+    for i in range(101):
+        for bg in (dash.seq_colour(i, 0, 100), dash.div_colour(i / 50 - 1, 1.0),
+                   dash.pnl_colour(i / 50 - 1, 1.0)):
+            assert max(dash.contrast_ratio("#000000", bg), dash.contrast_ratio("#ffffff", bg)) >= 3.0, bg
+
+
+def test_print_keeps_cell_colours_opens_drawers_and_every_tab(dash):
+    """UI-7: heat-cell colours did not print (white text on white), methodology
+    drawers printed closed and a capped table overlapped the chart below it."""
+    css, js = DESK_CSS.read_text(), DESK_JS.read_text()
+    pr = css[css.index("@media print"):]
+    assert "print-color-adjust: exact" in pr
+    assert ".heat td" in pr
+    assert '[role="tabpanel"][hidden] { display: block !important; }' in pr
+    assert ".tbl-wrap.capped { max-height: none !important;" in pr
+    assert "$$('details.method:not([open])').forEach(function (d) { d.open = true; opened.push(d); });" in js
+    assert "opened.forEach(function (d) { d.open = false; })" in js
+
+
+def test_status_bar_freshness_never_reflows_the_page(dash, pages):
+    """UI-8: '1 session behind (refreshes after the next close)' replaced 'as of
+    <date>' after first paint and wrapped the status bar (CLS 0.15–0.63). The
+    text fits the reserved width; the explanation moved to its title. The risk
+    page's other Greek grids are hidden server-side (hiding them after paint
+    shifted the page), and the smile slice is drawn once, not twice."""
+    js, css = DESK_JS.read_text(), DESK_CSS.read_text()
+    assert "(refreshes after the next close)'" not in js
+    assert "'1 session behind'" in js
+    assert "el.title =" in js
+    assert ".statusbar #freshness { display: inline-block; min-width: 18ch; }" in css
+    risk = pages["/risk"]
+    for key in ("iv", "vega", "vanna", "delta"):
+        want = rf'<div id="grid-{key}" role="tabpanel" aria-labelledby="tab-{key}" hidden>'
+        assert re.search(want, risk), key
+    assert '<div id="grid-vomma" role="tabpanel" aria-labelledby="tab-vomma">' in risk
+    assert "else if (!Desk.isPending(el)) render(el);" in js
+    assert "if (Desk.charts[e.target.id]) return;" in js
+
+
+def test_captions_wrap_to_their_scroll_region(dash):
+    """UI-15: a caption inside a horizontal scroll region was as wide as its table,
+    so on a phone the middle of each line was off-screen."""
+    css = DESK_CSS.read_text()
+    assert ".tbl-wrap, .heat-wrap { container-type: inline-size; }" in css
+    assert (".tbl-wrap > table > caption, .heat-wrap > table > caption { position: sticky; left: 0; "
+            "max-width: 100cqw; }") in css
+
+
+def test_chart_fallback_hides_chart_only_controls(dash):
+    """UI-17: with ECharts blocked, the 3D button and legend toggles stayed and did
+    nothing, and a fallback notice sat under the hidden 3D container."""
+    js, css = DESK_JS.read_text(), DESK_CSS.read_text()
+    assert "if (w.hidden || w.closest('[hidden]')) return;" in js
+    assert (".charts-failed [data-load-3d], .charts-failed [data-legend-for], "
+            ".charts-failed [data-zoom-for]") in css
+
+
+def test_both_first_screen_fonts_are_preloaded(pages):
+    """UI-18: only Inter was preloaded; canvas charts drawn before Desk Mono arrived
+    kept the fallback font. Both are preloaded and early charts are redrawn once
+    the fonts are ready."""
+    for route, h in pages.items():
+        assert ('<link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" '
+                'crossorigin>') in h, route
+    js = DESK_JS.read_text()
+    assert "doc.fonts.ready.then(" in js
+    assert "if (c.early) render(c.el);" in js
+
+
+def test_no_identification_count_where_the_sigma_profile_contradicts_it(dash, pages):
+    """CLM-01: '4 of 5 parameters are set by the data' / '4 of 5 effective degrees
+    of freedom' beside a σ profile on which κ rides the σ cap (1.2 → 27.4). The
+    pages count interior parameters and say that κ moves with the cap."""
+    idx, cal = _visible_text(pages["/"]), _visible_text(pages["/calibration"])
+    for t in (idx, cal):
+        assert "parameters are set by the data" not in t
+        assert "effective degrees of freedom" not in t
+    d = dash.load_page2()
+    rg = d["ridge"]
+    prof = d["ident"]["sigma_profile"]
+    kap = [r["params"]["kappa"] for r in sorted(prof, key=lambda r: r["sigma_cap"])]
+    assert rg["kappa_lo"] == pytest.approx(kap[0])
+    assert rg["kappa_top"] == pytest.approx(kap[-1])
+    if rg["moves"]:
+        assert "moves with the σ cap along a κ–σ ridge" in idx
+        assert "moves with the σ cap along a κ–σ ridge" in cal
+        assert f"κ ≤ {d['ident']['kappa_max']:g}" in cal
+    assert "of 5 parameters interior (not on a bound)" in cal
+    # the free-σ refit names its wider box (κ ≤ 60, not production's 20)
+    assert re.search(r"Refitted in a wider box \(σ ≤ \d+, κ ≤ \d+; production has κ ≤ \d+\)", idx)
+
+
+def test_overview_states_what_is_stored_not_who_stored_it(pages):
+    """CLM-08: 'What the daily job has stored' listed records committed from
+    development runs; the copy now describes design intent and the stored record."""
+    idx = _visible_text(pages["/"])
+    assert "What the daily job has stored" not in pages["/"]
+    assert "Pipeline · what is stored" in idx
+    assert "Each U.S. session it stores the option books" not in idx
+    assert "whoever wrote it" in idx
+
+
+def test_model_inventory_is_the_validation_packs(dash, pages):
+    """CLM-09: the pack (19 models, M14 = surface) and this inventory (13 models,
+    M10 = surface) used one ID for different models while the pack called them the
+    same inventory. The inventory is canonical: every pack ID is here under the
+    pack's name, and the Model Risk checks cite these IDs."""
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    ours = {m["id"]: m["name"] for m in inv["models"]}
+    ours.update({v["id"]: v["source"] for v in inv["vendor_inputs"]})
+    pack = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+    sec = pack[pack.index("## 1. Model inventory"):pack.index("## 2.")]
+    rows = re.findall(r"^\| (M\d+|V\d+) \| ([^|]+) \|", sec, re.MULTILINE)
+    assert len(rows) >= 19
+
+    def stem(name: str) -> str:                   # the name up to its first parenthesis or colon
+        return re.split(r" \(|: ", name.strip())[0].strip().strip("`")
+
+    for mid, cell in rows:
+        assert mid in ours, mid
+        assert stem(ours[mid]) == stem(cell), (mid, ours[mid], cell)
+    d = dash.load_model_risk()
+    ids = set(ours) | {"Data"}
+    for m in d["monitors"]:
+        assert m["model"] in ids, m
+    by = {m["check"]: m["model"] for m in d["monitors"]}
+    assert by["Headline fit age (NYSE sessions)"] == "M4"                       # the joint calibrator
+    assert by["Greeks surface built from the headline fit"] == "M6"
+    assert by["β drift: newest chain's ATM vol / VIX against the frozen β"] == "M7"
+    assert by["Market database lag behind the rule labels (sessions)"] == "M10"
+    assert re.search(r'<tr id="inv-m14"><td>M14</td><td class="wrap"><strong>Quote-grade surface</strong>',
+                     pages["/model-risk"])
+
+
+# ── browser checks (Chromium via Playwright; skipped where it is not installed) ──
+
+@pytest.fixture(scope="module")
+def site_browser(dash, freezer, tmp_path_factory):
+    """The frozen site served on loopback and a headless Chromium."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    out = tmp_path_factory.mktemp("site")
+    assert freezer.freeze(str(out), dash) == 0
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(out)))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    pw = sync_api.sync_playwright().start()
+    try:
+        browser = pw.chromium.launch()
+    except Exception as exc:              # no browser binary on this machine
+        pw.stop()
+        httpd.shutdown()
+        pytest.skip(f"Chromium unavailable: {exc}")
+    yield {"base": f"http://127.0.0.1:{httpd.server_address[1]}/", "browser": browser, "site": out}
+    browser.close()
+    pw.stop()
+    httpd.shutdown()
+
+
+BROWSER_TIMEOUT_MS = 120_000          # generous: the suite shares its CPUs with other jobs
+
+
+def _context(sb, width=1440, height=900):
+    ctx = sb["browser"].new_context(viewport={"width": width, "height": height})
+    ctx.set_default_timeout(BROWSER_TIMEOUT_MS)
+    ctx.set_default_navigation_timeout(BROWSER_TIMEOUT_MS)
+    return ctx
+
+
+def _page(sb, width=1440, height=900):
+    ctx = _context(sb, width, height)
+    return ctx, ctx.new_page()
+
+
+def test_browser_panel_deep_links_land_on_their_panel(site_browser):
+    """UI-1: desk.js rewrote '#scorecard' to '#exp=…&model=…' before the browser
+    scrolled, so every panel link on Surface and Risk (the Overview's first key
+    result included) landed at the top. Every '<page>#<panel>' loads at its panel,
+    a plain load keeps its URL, and a copied link keeps the tab state."""
+    sb = site_browser
+    links = set()
+    for f in sorted(sb["site"].glob("*.html")):
+        h = f.read_text()
+        links |= set(re.findall(r'href="([a-z\-]+\.html#[a-z][^"&]*)"', h))
+        links |= {f"{f.name}#{pid}" for pid in re.findall(r'data-copy-link="([^"]+)"', h)}
+    links |= {"surface.html#scorecard&exp=2026-12-18", "risk.html#scenario&greek=vega"}
+    ctx, page = _page(sb)
+    bad = []
+    for href in sorted(links):
+        page.goto(sb["base"] + href, wait_until="load")
+        page.wait_for_timeout(150)
+        anchor = href.split("#", 1)[1].split("&")[0]
+        top = page.evaluate(f"(() => {{ const e = document.getElementById({anchor!r}); "
+                            "return e ? e.getBoundingClientRect().top : null; })()")
+        at_bottom = page.evaluate(
+            "Math.abs(scrollY - (document.documentElement.scrollHeight - innerHeight)) < 2")
+        if top is None or not (-5 <= top <= 120 or at_bottom):
+            bad.append((href, top, page.url))
+    assert not bad, bad
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    assert page.url.endswith("/surface.html")                   # a plain load keeps its URL
+    page.goto(sb["base"] + "surface.html#exp=2026-12-18", wait_until="load")
+    page.click("[data-copy-link='scorecard']")
+    assert page.url.endswith("#scorecard&exp=2026-12-18")
+    ctx.close()
+
+
+def test_browser_slice_is_drawn_once_and_tables_follow_the_tab(site_browser):
+    """UI-8 / UI-17: the slice was drawn twice at boot (tab init and the
+    IntersectionObserver); with ECharts blocked, the tabs still switch the
+    per-expiry tables, and no notice sits under the hidden 3D view."""
+    sb = site_browser
+    ctx, page = _page(sb)
+    page.add_init_script("""window.__so = {}; document.addEventListener('DOMContentLoaded', () => {
+        const tmp = window.echarts.init(document.createElement('div'));
+        const proto = Object.getPrototypeOf(tmp); const so = proto.setOption; tmp.dispose();
+        proto.setOption = function () {
+          const id = this.getDom().id; window.__so[id] = (window.__so[id] || 0) + 1;
+          return so.apply(this, arguments); }; });""")
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    page.wait_for_timeout(300)
+    page.evaluate("document.fonts.ready.then(() => true)")
+    page.wait_for_timeout(200)
+    n = page.evaluate("window.__so['chart-slices']")
+    early = page.evaluate("Desk.charts['chart-slices'].early")
+    assert n == (2 if early else 1), (n, early)
+    ctx.close()
+    ctx = _context(sb)
+    ctx.route("**/echarts-6.1.0-desk.min.js*",
+              lambda r: r.fulfill(status=200, body="/* blocked */",
+                                  headers={"content-type": "text/javascript"}))
+    page = ctx.new_page()
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    st = page.evaluate("""({failed: document.documentElement.classList.contains('charts-failed'),
+        btn3d: document.querySelector('[data-load-3d]').offsetParent !== null,
+        notes: [...document.querySelectorAll('.chart-fallback')].map(p => p.previousElementSibling.id)})""")
+    assert st["failed"], st
+    assert not st["btn3d"], st
+    assert "surface3d" not in st["notes"], st
+    page.click("[data-chart-filter] [data-value='2026-12-18']")
+    shown = page.evaluate("[...document.querySelectorAll('#chart-slices-data [data-group]')]"
+                          ".filter(g => !g.hidden).map(g => g.dataset.group)")
+    assert shown == ["2026-12-18"]
+    ctx.close()
+
+
+def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
+    """UI-8 / UI-15: no layout shift after first paint; at 390 px no caption runs
+    past its scroll region; at 1440 px the surface history table fits."""
+    sb = site_browser
+    for width, height in ((1440, 900), (390, 844)):
+        ctx, page = _page(sb, width, height)
+        page.add_init_script("window.__cls = 0; new PerformanceObserver(l => {"
+                             " for (const e of l.getEntries())"
+                             " if (!e.hadRecentInput) window.__cls += e.value; })"
+                             ".observe({type: 'layout-shift', buffered: true});")
+        for name in ("index.html", "surface.html", "risk.html"):
+            page.goto(sb["base"] + name, wait_until="load")
+            page.wait_for_timeout(400)
+            assert page.evaluate("window.__cls") < 0.05, (width, name, page.evaluate("window.__cls"))
+            over = page.evaluate("""
+                [...document.querySelectorAll('.tbl-wrap > table > caption, .heat-wrap > table > caption')]
+                .filter(c => c.offsetParent !== null && c.getBoundingClientRect().width > 0)
+                .filter(c => c.getBoundingClientRect().right >
+                             c.closest('.tbl-wrap, .heat-wrap').getBoundingClientRect().right + 1)
+                .map(c => c.textContent.slice(0, 40))""")
+            assert not over, (width, name, over)
+        if width == 1440:
+            page.goto(sb["base"] + "surface.html", wait_until="load")
+            fits = page.evaluate("(() => { const w = document.getElementById('surface-history-table')"
+                                 ".closest('.tbl-wrap'); return w.scrollWidth <= w.clientWidth + 1; })()")
+            assert fits
+        ctx.close()
+
+
+def test_browser_waterfall_csv_and_print(site_browser):
+    """UI-9 / UI-7: the downloaded waterfall CSV has the steps' signed Δ P&L; a
+    print opens every methodology drawer and restores them afterwards."""
+    sb = site_browser
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "corrections.html", wait_until="load")
+    csv = page.evaluate(
+        "Desk.specCsv(JSON.parse(document.getElementById('chart-waterfall-spec').textContent))")
+    atm = next(line for line in csv.splitlines() if "0.82" in line)
+    assert float(next(c for c in atm.split(",")[2:] if c)) > 0, atm
+    page.goto(sb["base"] + "risk.html", wait_until="load")
+    page.evaluate("window.dispatchEvent(new Event('beforeprint'))")
+    assert page.evaluate("[...document.querySelectorAll('details.method')].every(d => d.open)")
+    assert page.evaluate("[...document.querySelectorAll('[role=tabpanel]')].every(p => !p.hidden)")
+    page.evaluate("window.dispatchEvent(new Event('afterprint'))")
+    assert page.evaluate("[...document.querySelectorAll('details.method')].every(d => !d.open)")
+    ctx.close()
+
+
+def test_long_daily_series_are_downsampled_for_drawing(pages):
+    """UI-8: the Research page's daily lines (~1,800 points each, six on the equity
+    chart) were drawn point by point; they are drawn with LTTB downsampling (the
+    CSV and the table keep every point)."""
+    for cid in ("chart-equity", "chart-dd", "chart-rolling"):
+        spec = _spec(pages["/research"], cid)
+        assert all(s.get("sampling") == "lttb" for s in spec["series"]), cid
+        assert len(spec["series"][0]["data"]) == len(spec["xs"]) > 1000, cid
+    assert "sampling: s.sampling || undefined" in DESK_JS.read_text()

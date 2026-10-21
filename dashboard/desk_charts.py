@@ -15,7 +15,10 @@ Series fields: name, type ('line' | 'bar' | 'scatter' | 'errorbar'), data
 (aligned with ``xs`` or [x, y] / [x, lo, hi] pairs), color (a token name such
 as 'headline', 'cat0'..'cat5', 'pos', 'neg', 'muted', or '#rrggbb'), width,
 dash, symbol, size, hollow, signed (bars coloured by sign), stack, invisible,
-y2, group (for tab-filtered charts), legend (show a toggle button), hidden.
+y2, group (for tab-filtered charts), legend (show a toggle button), legendKey
+(the button's name when one button stands for several series, e.g. a model's
+curve on every expiry), hidden (toggled off at first), xFrom (the name of a
+series whose x values this one's y-only data shares).
 """
 from __future__ import annotations
 
@@ -51,11 +54,19 @@ def xy(chart_id: str, title: str, *, x: dict, y: dict, series: list[dict],
         spec["grid"] = grid
     spec["csv"] = csv or f"{chart_id}.csv"
     spec["table"] = table or {"caption": title, "columns": [], "rows": []}
-    spec["legend_items"] = [
-        {"name": s["name"], "color": s.get("color", "cat0"), "dash": bool(s.get("dash")),
-         "dot": s.get("type") in ("scatter", "errorbar"), "hidden": bool(s.get("hidden"))}
-        for s in series if s.get("legend") and not s.get("invisible")
-    ]
+    items: dict[str, dict] = {}
+    for s in series:
+        if not s.get("legend") or s.get("invisible"):
+            continue
+        key = s.get("legendKey") or s["name"]
+        if key in items:                  # one button per key, from its first series
+            continue
+        items[key] = {"name": key, "color": s.get("color", "cat0"), "dash": bool(s.get("dash")),
+                      "dot": s.get("type") in ("scatter", "errorbar"),
+                      "hollow": s.get("type") == "scatter" and bool(s.get("hollow")),
+                      "diamond": s.get("type") == "scatter" and s.get("symbol") == "diamond",
+                      "hidden": bool(s.get("hidden"))}
+    spec["legend_items"] = list(items.values())
     return round_sig(spec)
 
 

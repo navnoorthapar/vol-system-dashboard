@@ -28,14 +28,22 @@
 <span class="rag rag-{{ 'na' if status == 'info' else status }}"><span aria-hidden="true">{{ m[status][0] }}</span>{{ m[status][1] }}</span>
 {%- endmacro %}
 
-{% macro data_table(t, id, sr=True) -%}
-<div class="chart-data{% if sr %} sr-only{% endif %}" id="{{ id }}">
-  {% if t and t.rows %}
-  <table>
+{% macro _table(t) -%}
+<table>
     <caption>{{ t.caption }}</caption>
     <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label }}</th>{% endfor %}</tr></thead>
     <tbody>{% for r in t.rows %}<tr>{% for v in r %}<td{% if t.columns[loop.index0] and t.columns[loop.index0].num %} class="num"{% endif %}>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
   </table>
+{%- endmacro %}
+
+{# t.groups: one more table per tab group (the smile slices' expiries); desk.js
+   shows the selected group's, and every group shows without JavaScript #}
+{% macro data_table(t, id, sr=True) -%}
+<div class="chart-data{% if sr %} sr-only{% endif %}" id="{{ id }}">
+  {% if t and t.rows %}
+  {{ _table(t) }}
+  {% for g in t.groups or [] %}<div class="chart-data-group" data-group="{{ g.group }}"{% if not g.shown %} hidden{% endif %}>{{ _table(g) }}</div>
+  {% endfor %}
   {% else %}No data.{% endif %}
 </div>
 {%- endmacro %}
@@ -45,7 +53,7 @@
 {% if tools %}
 <div class="chart-tools">
   <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
-    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% endif %}{% if it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
     {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
   </div>
   <div class="legend-bar">

@@ -7,7 +7,7 @@
 {% set f = d.fit or {} %}
 <div class="page-head">
   <h1 class="page-title">Joint SPX/VIX smile calibration</h1>
-  <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Each U.S. session it stores the option books, fits an arbitrage-free market surface and a joint SPX/VIX stochastic-volatility model, and scores both on quotes they were not fitted to, in units of the quoted half-spread. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
+  <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Its daily job is built to store each U.S. session's option books, fit an arbitrage-free market surface and a joint SPX/VIX stochastic-volatility model, and score both on quotes they were not fitted to, in units of the quoted half-spread; the pipeline panel lists what is stored so far. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
   <div class="page-badge">
     <span class="nowrap">Last close {{ d.spx_date|fmt }}</span><span class="sep">·</span>
     <span class="nowrap">Rule label {{ d.regime_date|fmt }}</span><span class="sep">·</span>
@@ -23,7 +23,7 @@
     <span class="result-k">{{ r.key }}</span>
     <span class="result-v">{{ r.value }}<span class="unit">{{ r.unit }}</span></span>
     <span class="result-d">{{ r.detail }}</span>
-    {% if r.ci %}<span class="kpi-ci">{{ r.ci }}</span>{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
+    {% if r.ci %}<span class="kpi-ci{% if r.ci_kind == 'range' %} kpi-range{% endif %}">{{ r.ci }}</span>{% if r.ci_note %}<span class="kpi-ci faint">{{ r.ci_note }}</span>{% endif %}{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
     <span class="src">{{ r.source }}</span>
   </a>
   {% else %}
@@ -124,15 +124,16 @@
     <p class="note">
       {% for t in f.tiles %}<span class="nowrap">{{ t.sym }} {{ t.value|fmt(t.spec) }}{% if t.side %} {{ m.chip('at ' ~ (t.side if t.side != 'bound' else '') ~ ' bound', 'watch') }}{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}
     </p>
-    <p class="note">{% if f.active_constraints %}Active constraint: {{ f.active_constraints|join('; ') }} — {{ f.effective_dof }} of 5 parameters are set by the data.{% else %}No parameter on a bound.{% endif %} Feller {{ f.feller_state|fmt }} (margin {{ f.feller_margin|signed('.2f') }}; diagnostic, not imposed).{% if f.free_sigma %}{% set fs = f.free_sigma %} <span id="free-sigma">Without the σ cap the same fit goes to σ {{ fs.sigma|fmt('.2f') }}, κ {{ fs.kappa|fmt('.1f') }}{% if fs.loss_rel is not none %}, loss {{ (fs.loss_rel * 100)|signed('.1f') }}%{% endif %}, out-of-sample RMSE {{ fs.oos_cap|fmt('.2f') }} → {{ fs.oos|fmt('.2f') }} vol pts (σ profile).</span>{% endif %} <a href="/calibration">Calibration page</a>.</p>
+    {% set rg = f.ridge or {} %}
+    <p class="note" id="fit-constraints">{% if f.active_constraints %}On a bound: {{ f.active_constraints|join('; ') }}. The other {{ f.effective_dof }} parameters are interior, fitted given that bound{% if rg.moves %}, and κ is not pinned by the data either: it moves with the σ cap along a κ–σ ridge (σ profile: κ {{ rg.kappa_lo|fmt('.1f') }} at σ ≤ {{ rg.cap_lo|fmt('g') }}, {{ rg.kappa_fit|fmt('.1f') }} at the fit's cap, {{ rg.kappa_top|fmt('.1f') }} at σ ≤ {{ rg.cap_top|fmt('g') }}){% if rg.kappa_rse is not none %}; κ's curvature SE is {{ (rg.kappa_rse * 100)|fmt('.0f') }}%{% endif %}{% endif %}.{% else %}No parameter on a bound.{% endif %} Feller {{ f.feller_state|fmt }} (margin {{ f.feller_margin|signed('.2f') }}; diagnostic, not imposed).{% if f.free_sigma %}{% set fs = f.free_sigma %} <span id="free-sigma">{% if fs.sigma_max is not none and fs.kappa_max is not none %}Refitted in a wider box (σ ≤ {{ fs.sigma_max|fmt('g') }}, κ ≤ {{ fs.kappa_max|fmt('g') }}; production has κ ≤ {{ fs.kappa_box|fmt('g') }}){% else %}Refitted without the σ cap{% endif %}, it goes to σ {{ fs.sigma|fmt('.2f') }}, κ {{ fs.kappa|fmt('.1f') }}{% if fs.loss_rel is not none %}, loss {{ (fs.loss_rel * 100)|signed('.1f') }}%{% endif %}, out-of-sample RMSE {{ fs.oos_cap|fmt('.2f') }} → {{ fs.oos|fmt('.2f') }} vol pts.</span>{% endif %} <a href="/calibration">Calibration page</a>.</p>
   {% endcall %}
 
-  {% call m.panel('state-pipeline', 'Pipeline · what the daily job has stored', 's6', 'build ' ~ (chrome.build.short or 'unknown')) %}
+  {% call m.panel('state-pipeline', 'Pipeline · what is stored', 's6', 'build ' ~ (chrome.build.short or 'unknown')) %}
     {% set pl = d.pipeline %}
     {% if pl %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Pipeline state (scrollable)">
     <table class="tbl dense" id="pipeline">
-      <caption class="sr-only">What the daily job has stored</caption>
+      <caption class="sr-only">What the repository has stored, and which records the scheduled job wrote</caption>
       <tbody>
         <tr><th scope="row">Cboe option books</th><td>{% for c in pl.captures %}<span class="nowrap">{{ c.underlying }} {{ c.session }}:</span> {{ c.rows|fmt(',') }} lines ({{ c.two_sided_rows|fmt(',') }} two-sided, {{ c.expiries|fmt }} expiries), quotes {{ (c.quote_time or '')|replace('T', ' ')|replace('Z', ' UTC') }}{% if c.book_state == 'gth' %} (overnight book){% endif %}{{ '; ' if not loop.last else '' }}{% else %}none stored yet{% endfor %}</td></tr>
         <tr><th scope="row">Accepted joint fits</th><td>{{ pl.fits|fmt }} (model_version 2), newest {{ pl.fits_newest|fmt }}</td></tr>
@@ -143,7 +144,7 @@
       </tbody>
     </table>
     </div>
-    <p class="note">Each input's as-of date and age in NYSE sessions is in the status bar and in the table at the foot of every page. Research prototypes (the ML regime classifier, the NN pricer, the Quintic OU) are on the <a href="research.html#research-classifier">Research</a> and <a href="calibration.html#quintic">Calibration</a> pages; none feeds a number on this page.</p>
+    <p class="note">What the repository holds, whoever wrote it: a record does not say whether the scheduled job or a manual run of the job's code produced it (the git history does). Each input's as-of date and age in NYSE sessions is in the status bar and in the table at the foot of every page. Research prototypes (the ML regime classifier, the NN pricer, the Quintic OU) are on the <a href="research.html#research-classifier">Research</a> and <a href="calibration.html#quintic">Calibration</a> pages; none feeds a number on this page.</p>
     {% else %}
     <p class="note">Pipeline state unavailable: see the error above.</p>
     {% endif %}

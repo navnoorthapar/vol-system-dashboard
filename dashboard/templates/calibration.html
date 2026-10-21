@@ -67,10 +67,11 @@
   <div id="identification-banner" class="banner s6 {% if d.spx_underidentified %}banner-stale-warn{% else %}banner-info{% endif %}">
     <div class="banner-icon" aria-hidden="true">{% if d.spx_underidentified %}!{% else %}i{% endif %}</div>
     <div>
-      <div class="banner-title">Identification — {{ d.effective_dof }} of 5 effective degrees of freedom{% if d.spx_underidentified %} · SPX leg spans {{ d.n_spx_expiries }} expiry{{ '' if d.n_spx_expiries == 1 else ' buckets' }}{% endif %}</div>
+      <div class="banner-title">Identification — {{ d.effective_dof }} of 5 parameters interior (not on a bound){% if d.spx_underidentified %} · SPX leg spans {{ d.n_spx_expiries }} expiry{{ '' if d.n_spx_expiries == 1 else ' buckets' }}{% endif %}</div>
       <div class="banner-body">
         {% if d.active_constraints %}Active constraints: <strong>{{ d.active_constraints|join('; ') }}</strong>. A parameter on a bound is set by the box, not by the market data.
         {% else %}No constraint is active{% if d.feller_imposed %} and the imposed Feller penalty does not bind{% endif %}.{% endif %}
+        {% set rg = d.ridge or {} %}{% if rg.moves %}<span id="kappa-ridge">Interior is not the same as set by the data: κ moves with the σ cap along a κ–σ ridge (σ profile below: κ {{ rg.kappa_lo|fmt('.1f') }} at σ ≤ {{ rg.cap_lo|fmt('g') }}, {{ rg.kappa_fit|fmt('.1f') }} here, {{ rg.kappa_top|fmt('.1f') }} at σ ≤ {{ rg.cap_top|fmt('g') }} with κ ≤ {{ rg.kappa_max|fmt('g') }}){% if rg.kappa_rse is not none %}, and its curvature SE is {{ (rg.kappa_rse * 100)|fmt('.0f') }}%{% endif %}, so where the fit sits on the ridge is set by the box.</span>{% endif %}
         Fit from <strong>{{ d.n_spx_options|fmt }}</strong> SPX options{% if d.n_spx_expiries is not none %} (<strong>{{ '≤ ' if d.n_spx_expiries_inferred else '' }}{{ d.n_spx_expiries }}</strong> expir{{ 'y' if d.n_spx_expiries == 1 else 'ies' }}{% if d.n_spx_expiries_inferred %}, inferred from the option count at {{ d.strikes_per_expiry|fmt }} strikes per expiry{% endif %}){% endif %}
         and <strong>{{ d.n_vix_tenors|fmt }}</strong> VIX tenors{% if d.spot_date %}, all on the SPX session of {{ d.spot_date }}{% endif %}.
         {% if d.spx_underidentified %}<strong>With fewer than 3 expiries the SPX smile carries no term structure, so κ, θ and v₀ are not separately identified by the SPX leg.</strong>{% endif %}
