@@ -1083,6 +1083,43 @@ def test_rederive_rebuilds_the_partitions_and_labels_over_mains_files(env, monke
     assert labelled == []
 
 
+def test_merge_main_data_rederives_mains_sessions_over_the_branchs_record(env, tmp_path, monkeypatch):
+    """ENG-1 (scripts/ci/merge_main_data.py rederive): main's partition (the bot's
+    provisional Yahoo rows) is upserted into
+    the branch's database and the partition re-exported: main's new session
+    is in, the branch's Cboe row for the same session stays, a row main
+    stored on an NYSE holiday does not come in."""
+    spec = importlib.util.spec_from_file_location(
+        "merge_main_data_test_mod", SCRIPT.parent / "ci" / "merge_main_data.py")
+    merge = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, merge)
+    spec.loader.exec_module(merge)
+    code, _ = _run(env, "market")
+    assert code == 0
+    rel = "data_store/market/vix_term_structure/vix_term_structure_2026.parquet"
+    part = dbm.MARKET_DIR / "vix_term_structure" / "vix_term_structure_2026.parquet"
+    cboe = pd.DataFrame([{"date": SESSION, "ticker": "^VIX", "tenor_days": 30, "close": 17.76,
+                          "is_vvix": 0, "source": "cboe"}])
+    dbm.insert_vix_term_structure(cboe)                        # the branch's restated print
+    dbm.export_market_partitions(tables=("vix_term_structure",), since=SESSION)
+    mains = pd.read_parquet(part)
+    mains.loc[(mains["date"] == SESSION) & (mains["ticker"] == "^VIX"), ["close", "source"]] = \
+        [20.37, "yfinance"]
+    extra = mains[mains["date"] == SESSION].assign(date="2026-09-24", source="yfinance")
+    holiday = mains[mains["date"] == SESSION].assign(date="2026-09-07", source="yfinance")
+    theirs = tmp_path / "theirs"
+    (theirs / rel).parent.mkdir(parents=True)
+    pd.concat([mains, extra, holiday], ignore_index=True).to_parquet(theirs / rel, index=False)
+    out = merge.rederive(theirs, [rel], env)
+    assert out["tables"] == ["vix_term_structure"]
+    assert "labels_added" not in out
+    got = pd.read_parquet(part)
+    vix = got[(got["date"] == SESSION) & (got["ticker"] == "^VIX")].iloc[0]
+    assert (vix["close"], vix["source"]) == (17.76, "cboe")
+    assert set(got.loc[got["date"] == "2026-09-24", "ticker"]) == set(extra["ticker"])
+    assert "2026-09-07" not in set(got["date"])
+
+
 def test_no_persist_flag_leaves_capture_dirs_alone(env):
     status = env.DATA.parent / "status.json"
     code = env.main(["--steps", "market", "--status-file", str(status), "--no-persist"],

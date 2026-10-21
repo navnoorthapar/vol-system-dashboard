@@ -11,6 +11,11 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * simulate_next_session.py (CI's simulate job): the simulated session's
     book is priced by parameters moved off the headline fit, with noise, so
     a test pinning a headline-derived value fails there, not in the bot.
+  * merge_main_data.py (merging live main's bot data into a branch that
+    restated the record): only the re-derivable data files may conflict,
+    they resolve to the branch's version, and main's rows are re-derived
+    into them from the database (main's new sessions in, the branch's
+    restated rows kept, holiday artefacts out).
 """
 from __future__ import annotations
 
@@ -215,4 +220,118 @@ class TestSimulatedSession:
         main = inspect.getsource(sim.main)
         assert "MIN_PARAM_MOVE" in main
         assert "param_moves(" in main
+
+
+# ── merge_main_data.py ────────────────────────────────────────────────────────
+
+@pytest.fixture
+def merge(monkeypatch):
+    return _load("scripts/ci/merge_main_data.py", "merge_main_data_under_test", monkeypatch)
+
+
+def _git_repo(tmp_path):
+    import os
+    import shutil
+    if not shutil.which("git"):
+        pytest.skip("git not available")
+    env_ = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@example.com\n"
+                                        "[init]\n\tdefaultBranch = main\n")
+    repo = tmp_path / "repo"
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=repo, env=env_, check=True, capture_output=True,
+                              text=True).stdout.strip()
+    repo.mkdir()
+    git("init", "-q")
+    files = {"data_store/market/vix_daily/vix_daily_2026.parquet": "v0\n",
+             "data_store/signals/regime_labels.parquet": "l0\n", "README": "r0\n",
+             "data_store/market/spx_ohlcv/spx_ohlcv_2026.parquet": "s0\n"}
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    git("checkout", "-qb", "branch")
+    return repo, git, env_
+
+
+def _write_commit(repo, git, msg, **files):
+    for rel, text in files.items():
+        (repo / rel).write_text(text)
+    git("add", "-A")
+    git("commit", "-qm", msg)
+
+
+class TestMergeMainData:
+    VIX = "data_store/market/vix_daily/vix_daily_2026.parquet"
+    LABELS = "data_store/signals/regime_labels.parquet"
+    SPX = "data_store/market/spx_ohlcv/spx_ohlcv_2026.parquet"
+
+    def test_data_conflicts_resolve_to_the_branch_with_mains_copy_set_aside(self, merge, tmp_path,
+                                                                             monkeypatch):
+        """ENG-1 / PROD-4: the C23 branch and main's bot both rewrote the 2026 VIX
+        partition and the labels; git cannot merge them, and main's side undoes the
+        restatement. The merge takes the branch's copy and sets main's aside for
+        the re-derivation; a file only main changed merges as usual."""
+        repo, git, env_ = _git_repo(tmp_path)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", env_["GIT_CONFIG_GLOBAL"])
+        _write_commit(repo, git, "C23 restates", **{self.VIX: "v-cboe\n", self.LABELS: "l-restated\n"})
+        git("checkout", "-q", "main")
+        _write_commit(repo, git, "bot close slot", **{self.VIX: "v0\nv-1020\n", self.LABELS: "l0\nl-1020\n",
+                                                       self.SPX: "s0\ns-1020\n"})
+        git("checkout", "-q", "branch")
+        state = merge.start_merge("main", cwd=repo)
+        assert sorted(state["conflicts"]) == sorted([self.VIX, self.LABELS])
+        assert sorted(state["main_changed"]) == sorted([self.VIX, self.LABELS, self.SPX])
+        theirs = tmp_path / "theirs"
+        merge.take_ours_and_set_theirs_aside(state, "main", theirs, cwd=repo)
+        assert (repo / self.VIX).read_text() == "v-cboe\n"
+        assert (repo / self.LABELS).read_text() == "l-restated\n"
+        assert (repo / self.SPX).read_text() == "s0\ns-1020\n"            # clean: main's
+        assert (theirs / self.VIX).read_text() == "v0\nv-1020\n"
+        assert (theirs / self.LABELS).read_text() == "l0\nl-1020\n"
+        assert (theirs / self.SPX).read_text() == "s0\ns-1020\n"
+        git("add", "-A")
+        assert git("diff", "--name-only", "--diff-filter=U") == ""
+
+    def test_any_other_conflict_aborts_the_merge(self, merge, tmp_path, monkeypatch):
+        repo, git, env_ = _git_repo(tmp_path)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", env_["GIT_CONFIG_GLOBAL"])
+        _write_commit(repo, git, "branch", **{"README": "r-branch\n", self.VIX: "v-cboe\n"})
+        git("checkout", "-q", "main")
+        _write_commit(repo, git, "main", **{"README": "r-main\n", self.VIX: "v-main\n"})
+        git("checkout", "-q", "branch")
+        head = git("rev-parse", "HEAD")
+        with pytest.raises(ValueError, match="README"):
+            merge.start_merge("main", cwd=repo)
+        assert git("rev-parse", "HEAD") == head
+        assert git("status", "--porcelain") == ""                       # aborted, nothing left
+        assert subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=repo,
+                              capture_output=True, check=False).returncode != 0
+
+    def test_a_dirty_tree_or_nothing_to_merge_is_refused(self, merge, tmp_path, monkeypatch):
+        repo, _, env_ = _git_repo(tmp_path)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", env_["GIT_CONFIG_GLOBAL"])
+        with pytest.raises(ValueError, match="nothing to merge"):
+            merge.start_merge("main", cwd=repo)
+        (repo / "README").write_text("dirty\n")
+        with pytest.raises(ValueError, match="uncommitted"):
+            merge.start_merge("main", cwd=repo)
+
+    def test_compare_labels_names_the_restatements_and_mains_sessions(self, merge, tmp_path):
+        import pandas as pd
+        idx = pd.to_datetime(["2019-08-09", "2020-02-20", "2026-10-19"])
+        ours = pd.DataFrame({"regime": [1, 2, 0]}, index=idx)
+        theirs = pd.DataFrame({"regime": [0, 2, 0, 1]}, index=idx.append(pd.to_datetime(["2026-10-20"])))
+        merged = pd.DataFrame({"regime": [1, 2, 0, 1]}, index=theirs.index)
+        paths = []
+        for name, df in (("o", ours), ("t", theirs), ("m", merged)):
+            paths.append(tmp_path / f"{name}.parquet")
+            df.to_parquet(paths[-1])
+        rep = merge.compare_labels(*paths)
+        assert rep["main_only_dates"] == ["2026-10-20"]
+        assert rep["main_only_in_merge"] is True
+        assert rep["labels_differing_from_main"] == ["2019-08-09"]
+        assert rep["branch_labels_changed_by_merge"] == []
 
