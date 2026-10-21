@@ -215,21 +215,59 @@ def test_schema_validation(ledgers):
         fl.validate_ledger(bad2)
 
 
-def test_signals_for_session_reproduce_the_backtest_positions():
+@pytest.fixture(scope="module")
+def canonical_engine():
+    from joint_vol_calibration.backtest import backtest_engine as bte
+    from joint_vol_calibration.backtest.run_backtest import _load_data, load_pdv_vol
+
+    spx, vix = _load_data()
+    eng = bte.BacktestEngine(pdv_vol_series=load_pdv_vol())
+    eng.run(spx, vix)
+    return eng
+
+
+def test_signals_for_session_reproduce_the_backtest_positions_and_sizes(canonical_engine):
     """On sessions inside the backtest window the helper the bot calls gives
-    the positions and sizes the canonical backtest traded."""
+    the positions the canonical backtest traded and the size it traded them
+    at: the base Kelly for S1/S2, the base Kelly times the pass-2 overlay
+    multiplier for the portfolio sleeves S1C/S3/S4 (STATS-4: before C23f the
+    ledger sized those at the base Kelly, 1.3-2x the engine's size)."""
     from joint_vol_calibration.backtest.backtest_engine import RESULTS_PATH
 
     eq = pd.read_parquet(RESULTS_PATH)
-    on = 0
-    for session in ("2018-01-09", "2018-07-03", "2022-04-06", "2025-03-24"):
+    eng = canonical_engine
+    on, scaled = 0, 0
+    for session in ("2018-07-03", "2022-04-06", "2023-06-01"):
         sig = fl.signals_for_session(session)
-        row = eq.loc[pd.Timestamp(session)]
+        ts = pd.Timestamp(session)
+        row = eq.loc[ts]
         for s in fl.SLEEVES:
             assert sig[s]["position"] == pytest.approx(float(row[f"{s}_position"]))
-            assert 0.0 <= sig[s]["kelly"] <= 0.2 + 1e-12
+            base = float(eng.signals_df.loc[ts, f"{s}_kelly"])
+            assert sig[s]["kelly_base"] == pytest.approx(base, rel=1e-12, abs=1e-15)
+            assert 0.0 <= sig[s]["kelly_base"] <= 0.2 + 1e-12
+            if s in fl.PORTFOLIO_SLEEVES:
+                k = float(eng._k_mult[s].loc[ts])
+                assert sig[s]["k_mult"] == pytest.approx(k, rel=1e-12)
+                assert sig[s]["kelly"] == pytest.approx(base * k, rel=1e-12, abs=1e-15)
+                scaled += sig[s]["position"] != 0 and k < 0.9
+            else:
+                assert sig[s]["k_mult"] is None
+                assert sig[s]["kelly"] == sig[s]["kelly_base"]
             on += sig[s]["position"] != 0
     assert on >= 6                       # the dates exercise every non-trivial state
+    assert scaled >= 3                   # and the overlay binds on open portfolio sleeves
+
+
+def test_the_ledger_records_the_size_and_its_two_factors():
+    sig = {**SIG_A, "s1c": {"position": 1, "kelly": 0.06, "kelly_base": 0.12, "k_mult": 0.5}}
+    led = fl.step(None, SESSIONS[0], _chain(SESSIONS[0]), sig, r_ref=RATE[SESSIONS[0]])
+    assert led["signals"]["s1c"] == {"position": 1, "kelly": 0.06, "kelly_base": 0.12, "k_mult": 0.5,
+                                     "straddle_direction": 1}
+    assert led["signals"]["s1"]["k_mult"] is None
+    p = {x["sleeve"]: x for x in led["positions"]}["s1c"]
+    assert (p["kelly"], p["kelly_base"], p["k_mult"]) == (0.06, 0.12, 0.5)
+    assert p["contracts_per_1m"] == max(1, int(0.06 * 1e6 / (p["entry"]["price_exec"] * 100)))
 
 
 def test_record_session_writes_a_chained_file(tmp_path):
@@ -291,8 +329,8 @@ def test_a_book_quoted_before_the_signal_close_is_refused():
 
 
 def test_committed_ledgers_form_one_valid_chain():
-    """data_store/forward/ (written by the daily bot after each accepted
-    session): every file is schema-valid, named after its session and linked
+    """data_store/forward/ (written by the daily bot for every session it
+    captured a live book of): every file is schema-valid, named after its session and linked
     to the one before it by SHA-256. An edited or missing link is an error
     here, before the bot commits, as it is on the Research page."""
     files = sorted((Path(__file__).resolve().parents[2] / "data_store" / "forward").glob("ledger_*.json"))
@@ -432,3 +470,75 @@ def test_short_straddles_are_capped_at_the_margin_rule():
     assert uncapped > cap == 6
     assert s3["contracts_per_1m"] == cap
     assert s4["contracts_per_1m"] == int(0.20 * 1e6 / (s4["entry"]["price_exec"] * 100)) > cap
+
+
+# ── books that cannot price an open straddle (STATS-1) ───────────────────────
+
+def test_a_book_without_the_expiry_defers_the_close_to_the_next_book_that_has_it(ledgers):
+    """S1C goes flat on 03-27, but that session's book lacks its expiry (the
+    calibration-only Yahoo download did, for most of a straddle's life): the
+    ledger says so, keeps the position at no price, and closes it at the first
+    later book that lists the expiry, at that book's bids."""
+    l1 = ledgers[0]
+    p = {x["sleeve"]: x for x in l1["positions"]}["s1c"]
+    exp, K, n = p["contract"]["expiry"], p["contract"]["strike"], p["contracts_per_1m"]
+    ch = _chain(SESSIONS[1])
+    l2 = fl.step(l1, SESSIONS[1], ch[ch["expiry"] != exp], SIG_B)
+    kept = {x["sleeve"]: x for x in l2["positions"]}["s1c"]
+    assert kept["mark"]["status"] == "unmarked"
+    assert kept["mark"]["reason_code"] == "expiry_not_in_book"
+    assert exp in kept["mark"]["reason"]
+    assert kept["mark"]["last_marked"] is None              # never marked since the entry
+    assert kept["sessions_unmarked"] == 1
+    act = {a["sleeve"]: a for a in l2["actions"]}["s1c"]
+    assert act["action"] == "close_pending"
+    assert act["reason_code"] == "expiry_not_in_book"
+    assert l2["summary"]["s1c"]["open_status"] == "unmarked"
+    assert l2["summary"]["s1c"]["open_reason_code"] == "expiry_not_in_book"
+    assert l2["summary"]["s1c"]["open_pnl_exec"] is None
+    assert exp in l2["inputs"]["open_expiries_not_in_book"]
+    # the next book lists the expiry: the pending close executes at its bids
+    l3 = fl.step(l2, "2026-03-30", _chain(SESSIONS[1]), SIG_B)
+    c = {x["sleeve"]: x for x in l3["closed"]}["s1c"]
+    assert {a["sleeve"]: a["action"] for a in l3["actions"]}["s1c"] == "close"
+    cb, _ = _quote(SESSIONS[1], exp, K, "C")
+    pb, _ = _quote(SESSIONS[1], exp, K, "P")
+    assert c["closed"]["pnl_exec"] == pytest.approx(((cb + pb) - p["entry"]["price_exec"]) * 100 * n)
+    assert l3["inputs"]["open_expiries_not_in_book"] == []
+    assert fl.verify_chain([l1, l2, l3]) == []
+
+
+def test_unmarked_reasons_separate_an_unlisted_strike_from_a_one_sided_leg(ledgers):
+    l1 = ledgers[0]
+    p = {x["sleeve"]: x for x in l1["positions"]}["s1"]           # held through 03-27 (SIG_B)
+    exp, K = p["contract"]["expiry"], p["contract"]["strike"]
+    ch = _chain(SESSIONS[1])
+    at = (ch["expiry"] == exp) & (ch["strike"] == K)
+    no_strike = fl.step(l1, SESSIONS[1], ch[~at], SIG_B)
+    m = {x["sleeve"]: x for x in no_strike["positions"]}["s1"]["mark"]
+    assert m["reason_code"] == "strike_not_in_book"
+    one_sided = ch.copy()
+    one_sided.loc[at & (one_sided["right"] == "P"), "bid"] = 0.0
+    led = fl.step(l1, SESSIONS[1], one_sided, SIG_B)
+    m = {x["sleeve"]: x for x in led["positions"]}["s1"]["mark"]
+    assert m["reason_code"] == "leg_one_sided"
+    assert m["legs_one_sided"] == ["put"]
+    assert {a["sleeve"]: a["action"] for a in led["actions"]}["s1"] == "hold"
+    # without the listed lines a missing strike reads as one-sided, never as priced
+    book = fl.observed_book(ch[~at])
+    assert fl.unmarked_reason(book, p["contract"])["reason_code"] == "leg_one_sided"
+    assert fl.unmarked_reason(book, p["contract"], fl.listed_book(ch[~at]))["reason_code"] == \
+        "strike_not_in_book"
+
+
+def test_an_unmarked_session_keeps_the_last_executable_mark(ledgers):
+    _, l2, _ = ledgers
+    held = {x["sleeve"]: x for x in l2["positions"]}["s1"]
+    assert held["mark"]["status"] == "marked"
+    ch = _chain(SESSIONS[2])
+    led = fl.step(l2, "2026-03-30", ch[ch["expiry"] != held["contract"]["expiry"]], SIG_B)
+    m = {x["sleeve"]: x for x in led["positions"]}["s1"]["mark"]
+    assert m["status"] == "unmarked"
+    assert m["last_marked"] == {k: held["mark"][k] for k in ("session", "bid", "ask", "mid", "pnl_exec",
+                                                             "pnl_mid")}
+    assert {x["sleeve"]: x for x in led["positions"]}["s1"]["sessions_marked"] == held["sessions_marked"]

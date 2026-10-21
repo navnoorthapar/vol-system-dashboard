@@ -20,9 +20,10 @@ name: Daily Market Refresh
 #          quotes (01:30 left 15 min); GTH runs to 09:15 ET, so a late start is still
 #          inside the live book. A mistimed run fails closed at the quote-state gate.
 #          `capture` stores Cboe's full delayed SPX and VIX books (data_store/options/
-#          cboe/), whatever the fit does. After an accepted fit the run records the
-#          forward ledger and rebuilds the session's surface report and diagnostics and
-#          the headline fit's Greeks surface and scenario grid (about 5 min).
+#          cboe/), whatever the fit does, and the session goes into the forward ledger
+#          on that full SPX book (Yahoo's chain as fallback), also whatever the fit does.
+#          After an accepted fit the run rebuilds the session's surface report and
+#          diagnostics and the headline fit's Greeks surface and scenario grid (about 5 min).
 #          The retry skips what already exists (a calibration, a capture), but it is a
 #          full job: install, market step, freeze.
 #

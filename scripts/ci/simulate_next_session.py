@@ -302,8 +302,8 @@ def main(argv=None) -> int:
         problems.append(f"cloud_refresh exited {r.returncode}: {st.get('errors')}")
     if cal.get("status") != "accepted":
         problems.append(f"the simulated fit was not accepted: {cal.get('status')} {cal.get('reason')}")
-    if not (cal.get("forward_ledger") or {}).get("ok"):
-        problems.append(f"forward ledger: {cal.get('forward_ledger')}")
+    if (st.get("forward_ledger") or {}).get("status") != "recorded":
+        problems.append(f"forward ledger: {st.get('forward_ledger')}")
     if (st.get("capture") or {}).get("status") != "captured":
         problems.append(f"capture: {st.get('capture')}")
     for name, res in (st.get("artifacts") or {}).items():
