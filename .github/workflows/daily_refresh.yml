@@ -91,17 +91,28 @@ jobs:
           STEPS: ${{ steps.plan.outputs.steps }}
         run: python scripts/cloud_refresh.py --steps "$STEPS"
 
-      # Publish-path tests against the data this run produced (the suite works on a
-      # private copy of data_store and fails if anything under data_store/ changes).
-      - name: Fast tests before publishing
-        id: tests
+      # Tests against the data this run produced (the suite works on a private copy of
+      # data_store and fails if anything under data_store/ changes), in two gates.
+      # The data gate decides whether the captures are committed; the presentation gate
+      # only decides whether the site is deployed. They used to be one gate, so on
+      # 2026-10-20 two dashboard copy tests failed on a legitimately new fit and the
+      # accepted overnight (GTH) book of 2026-10-19, which cannot be fetched again, was
+      # never committed. A rendering bug may block a deploy; it must never lose data.
+      - name: Data tests (gate the commit)
+        id: datatests
         if: always() && steps.refresh.outcome != 'skipped'
         working-directory: joint_vol_calibration/tests
         run: >
           python -m pytest -q -p no:cacheprovider
           test_suite_isolation.py test_infra_config.py test_cloud_refresh.py test_data_layer.py
           test_option_chain.py test_data_pipeline.py test_rates.py test_lookahead.py
-          test_c21_audit_fixes.py test_dashboard.py
+          test_c21_audit_fixes.py
+
+      - name: Presentation tests (gate the deploy)
+        id: tests
+        if: always() && steps.refresh.outcome != 'skipped'
+        working-directory: joint_vol_calibration/tests
+        run: python -m pytest -q -p no:cacheprovider test_dashboard.py
 
       - name: Upload run status and diagnostics
         if: always()
@@ -125,7 +136,7 @@ jobs:
       # unstaged changes") and the run lost its captures whenever main had moved.
       - name: Commit data files
         id: commit
-        if: always() && steps.refresh.outcome != 'skipped' && steps.tests.outcome == 'success'
+        if: always() && steps.refresh.outcome != 'skipped' && steps.datatests.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -172,7 +183,8 @@ jobs:
       - name: Deploy to GitHub Pages
         if: >
           always() && steps.refresh.outputs.publishable == 'true' &&
-          steps.tests.outcome == 'success' && steps.commit.outcome == 'success' &&
+          steps.datatests.outcome == 'success' && steps.tests.outcome == 'success' &&
+          steps.commit.outcome == 'success' &&
           contains(steps.plan.outputs.steps, 'freeze')
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:

@@ -102,6 +102,26 @@ def test_a_stale_calibration_does_not_block_the_deploy():
     assert "steps.tests.outcome == 'success'" in cond
 
 
+def test_a_presentation_test_cannot_lose_the_captures():
+    # On 2026-10-20 one combined test gate decided both the data commit and the
+    # deploy. Two dashboard copy tests failed on a legitimately new fit, so the
+    # accepted overnight book of 2026-10-19 (not re-fetchable) was never committed.
+    # The commit now keys only on the data gate; the dashboard tests gate the deploy.
+    data = _step(DAILY, "Data tests (gate the commit)")
+    pres = _step(DAILY, "Presentation tests (gate the deploy)")
+    assert "id: datatests" in data and "id: tests" in pres
+    assert "test_dashboard.py" not in data and "test_dashboard.py" in pres
+    for f in ("test_data_layer.py", "test_option_chain.py", "test_cloud_refresh.py", "test_lookahead.py"):
+        assert f in data, f
+    commit = _step(DAILY, "Commit data files")
+    commit_if = re.search(r"if:\s*(.*)", commit).group(1)
+    assert "steps.datatests.outcome == 'success'" in commit_if
+    assert "steps.tests.outcome" not in commit_if
+    deploy = _step(DAILY, "Deploy to GitHub Pages")
+    cond = re.search(r"if:\s*>?\s*(.*?)\n\s*uses:", deploy, re.S).group(1)
+    assert "steps.datatests.outcome == 'success'" in cond and "steps.tests.outcome == 'success'" in cond
+
+
 def test_push_retry_rebase_survives_the_unstaged_database():
     # data_store/vol_system.db is tracked, every run modifies it and the bot never
     # stages it. A plain "git pull --rebase" then refuses ("You have unstaged
