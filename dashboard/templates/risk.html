@@ -21,7 +21,7 @@
     <div class="banner-body">
       {% if d.provenance %}
       Built from <code>{{ d.provenance.source_calibration|fmt }}</code> at S = {{ d.provenance.S|fmt(",.1f") }}
-      (r = {{ (d.provenance.get('r') * 100)|fmt(".2f") if d.provenance.get('r') is not none else '—' }}%, q = {{ (d.provenance.get('q') * 100)|fmt(".2f") if d.provenance.get('q') is not none else '—' }}%), session {{ d.provenance.spot_date|fmt }}{% if d.source_matches_headline %}, the parameters of the calibration-page headline fit{% endif %}.
+      ({% if d.provenance.get('r') is not none %}r = {{ (d.provenance.get('r') * 100)|fmt(".2f") }}%, q = {{ (d.provenance.get('q') * 100)|fmt(".2f") if d.provenance.get('q') is not none else '—' }}%{% elif d.carry_by_maturity %}{% set cb = d.carry_by_maturity %}carry per maturity, {{ cb.t_lo }}–{{ cb.t_hi }} days: r(T) {{ (cb.r_lo * 100)|fmt(".2f") }}–{{ (cb.r_hi * 100)|fmt(".2f") }}%{% if cb.discount %} ({{ cb.discount }}){% endif %}, q(T) {{ (cb.q_lo * 100)|fmt(".2f") }}–{{ (cb.q_hi * 100)|fmt(".2f") }}% from the fit's parity forwards{% else %}carry not recorded{% endif %}), session {{ d.provenance.spot_date|fmt }}{% if d.source_matches_headline %}, the parameters of the calibration-page headline fit{% endif %}.
       {% if d.source_matches_headline == false %}<strong>These are not the parameters of the calibration-page headline fit.</strong>{% endif %}
       {% else %}
       The stored surface records no source calibration, spot, rates or parameters — only its build date ({{ d.as_of|fmt }}); its inputs cannot be verified from the artifact.
@@ -102,6 +102,12 @@
     {% if sc.state == 'ok' %}
     {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows)', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain')) }}
     <p class="note">{{ (sc.provenance or {}).get('book', 'Reference book') }}; as of {{ (sc.provenance or {}).get('as_of_date', '—') }}{% if sc.dynamics_shown %}; {{ sc.dynamics_shown|replace('_', '-') }} dynamics shown{% if sc.dynamics_all|length > 1 %} (the file also holds {{ sc.dynamics_all|reject('equalto', sc.dynamics_shown)|join(', ')|replace('_', '-') }}){% endif %}{% endif %}. P&amp;L in {{ (sc.provenance or {}).get('units', 'index points per unit book') }}.</p>
+    {% for x in d.scenario_more %}
+    {% call m.method(x.dynamics|replace('_', '-')|capitalize ~ ' dynamics: the same book and shocks') %}
+    {{ m.heatmap(x.heat, 'scenario-grid-' ~ x.dynamics|replace('_', '-'), 'P&L of the reference book under ' ~ (x.dynamics|replace('_', '-')) ~ ' dynamics, by spot shock (columns) and parallel vol shock (rows)', 'Vol') }}
+    <p class="note">Same colour scale as the grid above. Under sticky-moneyness the smile moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
+    {% endcall %}
+    {% endfor %}
     {% else %}
     {{ m.missing(sc, 'A spot (−10% … +10%) × parallel vol (−5 … +10 vol pts) P&L grid of a reference book, fully revalued, under sticky-strike and sticky-moneyness dynamics.') }}
     {% endif %}

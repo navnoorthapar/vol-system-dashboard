@@ -1,8 +1,8 @@
 {
-  "about": "Correction rounds C16-C22 in postmortem form (root cause, detection, fix, regression tests, evidence). Evidence before C22 is the effect published when each fix landed (README 'The corrections'); C22 evidence is computed at build time from data_store/backtest/c22_bridge.csv, the β grid and the stored run. test_dashboard.py checks that every listed test exists in the suite and every commit is a full SHA.",
+  "about": "Correction rounds C16-C23 in postmortem form (root cause, detection, fix, regression tests, evidence). Evidence before C22 is the effect published when each fix landed; C22 evidence is computed at build time from data_store/backtest/c22_bridge.csv (replayed on the C23-restated VIX record), the β grid and the stored run; C23 evidence is quoted from the committed C23 artifacts named in each finding. A round may span days (date to date_end). docs/corrections.md is rendered from this file (scripts/render_corrections.py). test_dashboard.py checks that every listed test exists in the suite and every commit is a full SHA dated inside its round.",
   "repo": "https://github.com/navnoorthapar/vol-system-dashboard",
   "headline_series": {
-    "about": "Portfolio cumulative return as published after each round (README); C16 published no portfolio figure.",
+    "about": "Portfolio cumulative return as published after each round; C16 published no portfolio figure; C23 from the stored canonical run.",
     "points": [
       {
         "round": "C17",
@@ -26,6 +26,10 @@
       },
       {
         "round": "C22",
+        "cum_ret_pct": -21.6
+      },
+      {
+        "round": "C23",
         "cum_ret_pct": null,
         "from_artifact": "full_results.pkl"
       }
@@ -307,7 +311,6 @@
       "commits": [
         "a51eccc15d25b750c6a1523b3a53331b8596280d"
       ],
-      "effect_from_bridge": true,
       "findings": [
         {
           "flaw": "ATM straddles priced at the VIX",
@@ -409,6 +412,105 @@
             "joint_vol_calibration/tests/test_joint_calibrator.py::TestCalibrationQualityGate::test_missing_put_wing_rejected"
           ],
           "evidence": "Headline Heston fit replaced; one-expiry fits are rejected by the gate"
+        }
+      ],
+      "effect": "Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. The waterfall above replays the 15 steps on the C23-restated VIX record, so its last bar is the C23 canonical run."
+    },
+    {
+      "id": "C23",
+      "date": "2026-10-20",
+      "date_end": "2026-10-21",
+      "severity": "high",
+      "title": "Vendor data, the calibration's identification, spread-unit evidence and statistical inference",
+      "components": [
+        "data layer",
+        "calibration",
+        "surface",
+        "statistics",
+        "rates",
+        "daily bot"
+      ],
+      "detection": "A reviewer-standard pass over every subsystem in six parallel chains (surface, calibration, statistics, data, UI, engineering), each result measured on the five committed model_version 2 sessions and merged only with the full suite green.",
+      "commits": [
+        "c63e515f1c64b311d924d091ac8145bdd3fb6527",
+        "256655374fe2302942cc71e7594e6f2aa91fa7ac",
+        "958be6996b9ea0f837dc256638be5ffb787bccbf",
+        "49f5fd03619dd1559f8e0a5185b8e9eb93ddc310",
+        "1c886e33525cfdb0322ad3c88fec25f8f63c2965",
+        "ca36d24448b9d3923f4b517499366eb8318366f5",
+        "9c486c388f9d274021d1d96473eedf628898a0cb",
+        "a678e57c10a32d835ee261021a37ea7c971494ad"
+      ],
+      "effect": "Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it.",
+      "findings": [
+        {
+          "flaw": "The labels, backtest and calibrator read Yahoo's copies of the VIX index family",
+          "status": "fixed",
+          "root_cause": "Production overlaid Cboe's official closes on vix_daily only; every consumer read vix_term_structure, Yahoo's float32 copies with NULL provenance, NYSE-holiday rows and 8 VVIX sessions missing (forward-filled).",
+          "fix": "Cboe's index files are the record (Yahoo only as a provisional same-evening row, replaced when Cboe posts); the database cache re-synced from it; the daily job writes Cboe first and reports cross-source differences above 0.25 pts.",
+          "tests": [
+            "joint_vol_calibration/tests/test_data_layer.py::TestC23RecordCorrection::test_apply_db_removes_holiday_rows_and_installs_the_cboe_values",
+            "joint_vol_calibration/tests/test_cloud_refresh.py::test_vix_term_structure_is_cboe_primary",
+            "joint_vol_calibration/tests/test_backtest_reproducibility.py::test_c23_bridge_reproduces_every_row"
+          ],
+          "evidence": "136 term-structure rows replaced (38 by more than 0.25 pts, 33 of them in the backtest window), 8 VVIX sessions added, 31 holiday rows removed; portfolio −$216,092 → −$222,177 (c23_bridge.csv); labels 2019-08-09, 2020-02-20, 2020-06-11, 2021-05-11 R1 → R2 and 2021-06-09, 2021-07-08 R2 → R1"
+        },
+        {
+          "flaw": "The σ ≤ 2 box, not the market, sets the headline fit",
+          "status": "quantified",
+          "root_cause": "σ sits on its 2.0 ceiling in 2 of the 5 model_version 2 fits (2026-03-24, 2026-10-16); the page said 4 of 5 parameters are set by the market without saying what the box costs.",
+          "fix": "A σ profile (the joint loss refitted under caps 1 to 10, κ ≤ 60) and Gauss–Newton identifiability are stored per session and shown; the production box is kept (the NN domain, the vomma shock sizing and the gate depend on it) and its cost is published.",
+          "tests": [
+            "joint_vol_calibration/tests/test_identifiability.py::test_sigma_box_rationale_in_config_matches_the_artifacts",
+            "joint_vol_calibration/tests/test_identifiability.py::test_diagnostics_artifact_is_consistent"
+          ],
+          "evidence": "2026-10-16: freeing σ gives σ 6.90, κ 27.4, loss −27.7%, out-of-sample RMSE 2.96 → 1.19 vol pts and model VVIX 205 → 113 against the market's 110; on 2026-03-24 the box costs 2.1% of the loss (data_store/calibrations/diagnostics/)"
+        },
+        {
+          "flaw": "Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage",
+          "status": "fixed",
+          "root_cause": "No per-quote residuals were stored, the calibration chart drew the model only, and nothing screened the stored quotes for static arbitrage.",
+          "fix": "A surface package: Cohen–Reisinger–Wang screen and l1 repair on HiGHS, an executable-arbitrage certificate, eSSVI and calendar-ordered SVI surfaces, and one scorecard that scores every model on the calibrator's out-of-sample quotes in half-spreads.",
+          "tests": [
+            "joint_vol_calibration/tests/test_surface_arbitrage.py::test_committed_session_screen_counts",
+            "joint_vol_calibration/tests/test_surface_report.py::test_spread_unit_claims_hold",
+            "joint_vol_calibration/tests/test_surface_report.py::test_committed_artifacts_match_a_recomputation"
+          ],
+          "evidence": "Out-of-sample median |model − mid| over the 5 sessions: Heston 4.4–15.6 half-spreads (3.0–12.3% inside the bid–ask); the arbitrage-free SVI surface 0.45–1.98 (32–80% inside); executable static arbitrage on all 5 sessions, 160–629 quotes per session in an executable row (data_store/surface/)"
+        },
+        {
+          "flaw": "The backtest had no statistical inference",
+          "status": "fixed",
+          "root_cause": "Sharpe ratios and a 200-path S3 null were published without intervals, deflation for the configurations tried since C10, or exposure-matched nulls for every sleeve.",
+          "fix": "Stationary-bootstrap intervals, PSR/DSR against a committed trials ledger, Hansen SPA and StepM, CSCV PBO, exposure-matched circular-shift and trade-shuffle nulls for every sleeve, and forecast comparisons (QLIKE, Diebold–Mariano, MCS).",
+          "tests": [
+            "joint_vol_calibration/tests/test_stats_inference_report.py::test_headline_is_generated_from_the_stored_numbers",
+            "joint_vol_calibration/tests/test_stats_inference_report.py::test_bootstrap_rebuilds_exactly_from_the_committed_curve",
+            "joint_vol_calibration/tests/test_stats_nulls.py::test_circular_null_detects_real_timing_and_not_luck"
+          ],
+          "evidence": "Portfolio Sharpe −0.99, 95% CI −1.81 to −0.30; S3 timing p 0.078 against 3,550 circular shifts (Holm over 6 sleeves 0.47); Hansen SPA p 0.65 for the published series against cash; S3's largest DSR over every trial count 0.27 (data_store/backtest/inference/summary.json)"
+        },
+        {
+          "flaw": "Flat rates in the hedger and the Greeks surface",
+          "status": "fixed",
+          "root_cause": "The C7 hedger hard-coded R = 1.5% ('2020 US Treasury'), and the Greeks surface used one median r and q for every maturity, so its 1-year forward was 0.50% below that expiry's parity forward.",
+          "fix": "A daily Treasury zero curve (bills and par yields, look-ahead gated, refused when more than 7 days old) feeds the calibrator's reference, the chain cleaner, the C7 study and per-maturity Greeks carry.",
+          "tests": [
+            "joint_vol_calibration/tests/test_rate_reference.py::test_c7_uses_the_one_year_zero_rate_at_entry",
+            "joint_vol_calibration/tests/test_rate_reference.py::test_greeks_carry_reprices_the_parity_forwards_on_the_treasury_curve"
+          ],
+          "evidence": "C7 cumulative P&L 167.95 → 168.34 index points; Greeks surface 1-year forward 7,931.8 → 7,971.7 (the parity forward); the committed fits recorded ^IRX and are unchanged"
+        },
+        {
+          "flaw": "A presentation test could lose a captured session",
+          "status": "fixed",
+          "root_cause": "The daily job committed the chain and the fit only if the dashboard tests passed; a test that pinned a value of the committed data failed on the first new fit, and the 2026-10-19 overnight book (accepted three times) was lost.",
+          "fix": "Separate gates: data tests gate the capture commit, artifact tests the derived artifacts, presentation tests only the deploy; CI simulates the bot's next session before merge.",
+          "tests": [
+            "joint_vol_calibration/tests/test_infra_config.py::test_a_presentation_test_cannot_lose_the_captures",
+            "joint_vol_calibration/tests/test_infra_config.py::test_each_commit_adds_its_own_paths"
+          ],
+          "evidence": "No published number moved; the simulated next session (scripts/ci/simulate_next_session.py) found 5 more tests that would have blocked the deploy on the first accepted fit"
         }
       ]
     }

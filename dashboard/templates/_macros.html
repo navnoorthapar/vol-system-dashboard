@@ -21,7 +21,7 @@
 </div>
 {%- endmacro %}
 
-{% macro chip(text, tone='muted') -%}<span class="chip chip-{{ tone }}">{{ text }}</span>{%- endmacro %}
+{% macro chip(text, tone='muted') -%}<span class="chip chip-{{ tone }}">{{ text|sym }}</span>{%- endmacro %}
 
 {% macro rag(status) -%}
 {%- set m = {'ok': ('●', 'OK'), 'watch': ('▲', 'WATCH'), 'breach': ('■', 'BREACH'), 'info': ('◆', 'INFO'), 'na': ('○', 'N/A')} -%}

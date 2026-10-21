@@ -566,7 +566,7 @@ def test_classifier_card_uses_the_training_feature_path(dash):
     from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
     from joint_vol_calibration.signals.regime_classifier import build_features
 
-    d = dash.load_page1()
+    d = dash.load_classifier_card()
     as_of = d["clf_feature_date"]
     with open(SHIPPED / "signals" / "regime_classifier.pkl", "rb") as f:
         clf = pickle.load(f)
@@ -587,7 +587,7 @@ def test_classifier_card_refuses_a_source_it_cannot_rebuild(dash, synth):
     clf.metadata_ = {**clf.metadata_, "pdv_iv_spread_source": "pdv_model_full_sample"}
     with open(path, "wb") as f:
         pickle.dump(clf, f)
-    d = dash.load_page1()
+    d = dash.load_classifier_card()
     assert d["clf_available"] is False
     assert d["prob_r1"] is None
     assert any("research classifier" in e["component"] for e in d["errors"])
@@ -620,15 +620,19 @@ def test_rule_inputs_reproduce_the_stored_label(dash):
 
 
 def test_corrupt_classifier_keeps_the_rule_label_and_reports_an_error(dash, synth):
+    """The classifier is a Research-page card: a broken pickle is that card's
+    loader error (it blocks the publish) and never touches the rule label."""
     (synth["data"] / "signals" / "regime_classifier.pkl").write_bytes(b"not a pickle")
     resp = dash.app.test_client().get("/")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert resp.headers["X-Dashboard-Loader-Errors"] == "1"
     lab = int(synth["labels"]["regime"].iloc[-1])
     assert f"{['R0', 'R1', 'R2'][lab]} · {['LONG GAMMA', 'SHORT GAMMA', 'VOMMA ACTIVE'][lab]}" in html
-    assert "research classifier" in html
-    assert "Data unavailable" in html
+    assert "research classifier" not in html            # not on the Overview at all
+    card = dash.load_classifier_card()
+    assert card["clf_available"] is False
+    assert [e["component"] for e in card["errors"]] == ["research classifier (regime_classifier.pkl)"]
+    assert card["regime"] == lab                          # the rule label is unaffected
 
 
 def test_missing_labels_never_headline_the_classifier(dash, synth):
@@ -742,7 +746,8 @@ def test_freeze_of_shipped_data_canonicals_and_sitemap(dash, freezer, tmp_path):
     assert f"research.html</loc><lastmod>{last}</lastmod>" in sitemap
     assert dash.app.test_client().get("/research").headers["X-Dashboard-Data-Date"] == last
     reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
-    assert f"corrections.html</loc><lastmod>{max(r['date'] for r in reg['rounds'])}</lastmod>" in sitemap
+    last_round = max(r.get("date_end") or r["date"] for r in reg["rounds"])
+    assert f"corrections.html</loc><lastmod>{last_round}</lastmod>" in sitemap
     # a page without a data date of its own gets no lastmod rather than a wrong one
     assert "model-risk.html</loc></url>" in sitemap
     has_surface = bool(dash.artifacts.surface_sessions(dash.DATA))
@@ -1259,7 +1264,7 @@ def test_backtest_audit_heading_counts_its_rows(pages):
     heading = re.search(r'id="audit-title">([^<]+)<', cp).group(1)
     assert heading == (f"{arts[0]}–{arts[-1]} corrections — {len(statuses)} findings, "
                        f"{n_fixed} fixed, {n_quant} quantified")
-    assert arts == [f"C{i}" for i in range(16, 23)]
+    assert arts == [f"C{i}" for i in range(16, 24)]
     assert "Ten Flaws Found" not in cp
     assert "C17 pipeline" not in cp
 
@@ -1320,7 +1325,7 @@ def test_classifier_accuracy_is_read_from_the_shipped_model(pages):
 
     with open(ROOT / "data_store" / "signals" / "regime_classifier.pkl", "rb") as f:
         ev = pickle.load(f).metadata_["evaluation"]
-    idx = pages["/"]
+    idx = pages["/research"]
     oos = f"{round(ev['oos_acc'] * 100, 1)}%"
     pers = f"{round(ev['persistence_acc'] * 100, 1)}%"
     assert f"{oos} out-of-sample, it loses to the {pers}" in idx
@@ -1504,6 +1509,13 @@ def test_scenario_panel_renders_the_shipped_grid(dash, pages):
     assert "sticky-strike dynamics shown (the file also holds sticky-moneyness)" in text
     assert prov["units"] in text
     assert "Artifact not yet generated" not in text.split("Scenario grid")[1].split("QV convexity")[0]
+    # the sticky-moneyness grid, every cell, behind its own disclosure on the same colour scale
+    sm = g[g["dynamics"] == "sticky_moneyness"]
+    t2 = re.search(r'<table class="heat" id="scenario-grid-sticky-moneyness".*?</table>', html,
+                   re.DOTALL).group(0)
+    assert t2.count("<td ") == len(sm) > 0
+    for row in sm.itertuples():
+        assert f"P&L {dash.signed(row.pnl, ',.0f')}" in t2.replace("&amp;", "&")
 
 
 def test_unstable_nodes_follow_the_surfaces_recorded_rule(dash, pages):
@@ -1914,10 +1926,10 @@ def test_page_header_can_wrap_at_every_separator():
 # tests/fixtures/dashboard/ holds trimmed samples of what each producer wrote
 # (dashboard/capture_artifact_fixtures.py): the surface report for 2026-10-16
 # (3 of 17 expiries, every 4th quote, all models; option prices dropped), the
-# inference summary / benchmarks / forecast evaluation, and three forward-ledger
-# files written by backtest/forward_ledger.py from its own test chains. The
-# calibration-diagnostics file is a shape sample (the producer's key names,
-# made-up numbers). Each test builds a data_store that links the shipped
+# inference summary / benchmarks / forecast evaluation, three forward-ledger
+# files written by backtest/forward_ledger.py from its own test chains, and the
+# calibration diagnostics of 2026-10-16 plus the summary of every diagnosed
+# session (trimmed real files). Each test builds a data_store that links the shipped
 # directories and adds the artifacts, so nothing under data_store/ changes.
 # The store's calibrations stop at the fixtures' session: the daily bot adds
 # newer fits (and the headline moves to them), while these samples describe
@@ -2046,19 +2058,170 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert "2026-06-18" in html
 
 
-def test_surface_key_result_is_heston_out_of_sample_in_half_spreads(dash, art):
-    """The overview's model-vs-market number is the Heston fit's out-of-sample
-    median |model − mid| in half-spreads from the scorecard, never an in-sample one."""
+def _card(html: str, href: str) -> str:
+    card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
+    assert card, href
+    return _visible_text("<body>" + card.group(1))
+
+
+def test_surface_key_result_is_the_arbitrage_free_surface_in_half_spreads(dash, art):
+    """The Overview's first result is the arbitrage-free SVI surface's
+    out-of-sample median |model − mid| in half-spreads from the scorecard, with
+    Heston on its own held-out quotes beside it; never an in-sample figure, and
+    the card says why it carries no sampling interval."""
     _, html = _get(dash, "/")
     sc = json.loads((FIX / "surface" / SESSION / "scorecard.json").read_text())
-    h = next(m for m in sc["models"] if m["model"].startswith("heston"))["metrics"]["out_of_sample"]
-    card = re.search(r'<a class="result" href="surface.html#scorecard"(.*?)</a>', html, re.DOTALL).group(1)
-    t = _visible_text("<body>" + card)
-    assert "Model vs market (out of sample)" in t
-    assert f"{h['median_abs_hs']:.1f} half-spreads" in t
-    assert f"{h['n']:,} quotes" in t
-    assert f"{h['inside_spread_pct']:.1f}% inside the bid–ask" in t
-    assert "no interval in the scorecard" in t
+    by = {m["model"]: m for m in sc["models"]}
+    s = by["svi_cal"]["metrics"]["out_of_sample"]
+    h = next(m for k, m in by.items() if k.startswith("heston"))["metrics"]["out_of_sample"]
+    t = _card(html, "surface.html#scorecard")
+    assert "Quote-grade surface · held-out strikes" in t
+    assert f"{s['median_abs_hs']:.2f} half-spreads" in t
+    assert f"{s['n']:,} held-out quotes of {SESSION}" in t
+    assert f"{s['inside_spread_pct']:.1f}% inside the bid–ask" in t
+    dg = by["svi_cal"]["dense_grid"]
+    assert f"{dg['butterfly_violations']} butterfly and {dg['calendar_violations']} calendar violations" in t
+    assert f"Heston on its own held-out quotes of that session: {h['median_abs_hs']:.1f} half-spreads" in t
+    # one stored session in this store: no range, and the card says what the figure is not
+    assert "not a sampling interval" in t
+    assert "interpolation test" in t
+
+
+def test_overview_key_results_are_read_from_the_shipped_artifacts(dash, pages):
+    """The three results on the shipped data: the numbers are recomputed here
+    from whatever data_store holds (the bot adds sessions), never typed."""
+    t1 = _card(pages["/"], "surface.html#scorecard")
+    rows = dash.artifacts.surface_oos_by_session(dash.DATA)
+    svi = [r for r in rows if r["model"] == "svi_cal"]
+    head = dash.load_page2()["session"]
+    cur = next((r for r in svi if r["session"] == head), svi[-1])
+    assert f"{cur['median_abs_hs']:.2f} half-spreads" in t1
+    lo, hi = min(r["median_abs_hs"] for r in svi), max(r["median_abs_hs"] for r in svi)
+    assert f"Range over {len(svi)} stored sessions: {lo:.2f}–{hi:.2f} half-spreads" in t1
+    t2 = _card(pages["/"], "calibration.html#rough-vs-heston")
+    summ = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    row = next(r for r in summ if r["session"] == head)
+    assert "Joint SPX/VIX fit · out of sample" in t2
+    assert f"{row['sigma_cap2_oos']:.2f} vol pts, Heston" in t2
+    assert f"Rough Heston on the same quotes: {row['joint_rough_oos']:.2f}" in t2
+    lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in summ)
+    assert f"lower on {lower} of {len(summ)} sessions" in t2
+    hes = [r["sigma_cap2_oos"] for r in summ]
+    assert f"Heston {min(hes):.2f}–{max(hes):.2f}" in t2
+    t3 = _card(pages["/"], "research.html#inference")
+    inf = json.loads((SHIPPED / "backtest" / "inference" / "summary.json").read_text())
+    b = inf["bootstrap"]["portfolio"]["sharpe"]
+    fmt = lambda x: f"{x:+.2f}".replace("-", "−")  # noqa: E731
+    assert f"95% CI {fmt(b['ci95'][0])} to {fmt(b['ci95'][1])}" in t3
+    assert f"p {inf['multiple_testing']['spa_published']['p_consistent']:.2f}" in t3
+    assert "mark-to-model" in t3.lower()
+
+
+def test_overview_keeps_research_prototypes_off_the_first_screen(dash, pages):
+    """The demoted ML classifier (it loses to 'predict yesterday') sat on the
+    Overview next to the rule label; it is now a Research-page card, and the
+    Overview's loader no longer even computes it."""
+    idx = _visible_text(pages["/"])
+    for word in ("classifier", "XGBoost", "P(R0", "fear_premium"):
+        assert word not in idx.replace("ML regime classifier, the NN pricer", ""), word
+    assert 'id="research-classifier"' not in pages["/"]
+    assert 'id="research-classifier"' in pages["/research"]
+    assert 'id="label-history"' in pages["/research"]
+    assert not any(k.startswith("clf_") for k in dash.load_page1())
+    # the Overview names where the prototypes are, and says none feeds its numbers
+    assert "none feeds a number on this page" in idx
+
+
+def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
+    """Cboe book captures, accepted fits, artifacts and the forward ledger as
+    the stored records state them."""
+    pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
+    text = _visible_text(pages["/"])
+    cboe = SHIPPED / "options" / "cboe"
+    caps = sorted(cboe.glob("*.json")) if cboe.is_dir() else []
+    for rec in (json.loads(f.read_text()) for f in caps):
+        latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
+        if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
+            assert f"{rec['underlying']} {rec['session']}: {rec['rows']:,} lines" in text
+    assert f"{pl['fits']} (model_version 2), newest {pl['fits_newest']}" in text
+    assert f"{len(pl['surface_sessions'])} sessions" in text
+    if pl["forward"]["state"] != "ok":
+        assert "no entry yet: the first is written with the next accepted fit" in text
+
+
+def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
+    resp, html = _get(dash, "/calibration")
+    assert _errors(resp) == 0
+    rows = json.loads((FIX / "diagnostics" / "summary.json").read_text())["rows"]
+    tab = re.search(r'<table class="tbl dense" id="rough-heston-table">(.*?)</table>', html,
+                    re.DOTALL).group(1)
+    body = tab.split("<tbody>")[1]
+    assert len(re.findall(r"<tr[ >]", body)) == len(rows)
+    for r in rows:
+        line = _visible_text("<body>" + re.search(rf"<td>{r['session']}(.*?)</tr>", body, re.DOTALL).group(1))
+        assert f"{r['sigma_cap2_oos']:.2f}" in line
+        assert f"{r['joint_rough_oos']:.2f}" in line
+        assert f"{r['joint_rough_H']:.2f}" in line
+    verdict = _visible_text("<body>" + re.search(r'id="rough-verdict">(.*?)</p>', html, re.DOTALL).group(1))
+    lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in rows)
+    same = sum(r["joint_rough_H"] >= 0.5 - 1e-9 for r in rows)
+    assert f"lower on {lower} of {len(rows)} sessions" in verdict
+    assert f"on {same} it returns H = ½" in verdict
+    # Greek letters in upper-cased headings and chips keep their case (σ, not Σ)
+    assert re.search(r'<span class="chip chip-watch"><span class="sym">σ</span> at cap</span>', html)
+    assert '<th scope="col" class="num">σ' not in html
+
+
+def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
+    """The C23 Greeks surface has one r(T), q(T) per maturity and no scalar r, q;
+    the banner printed 'r = —%, q = —%'."""
+    import pyarrow.parquet as pq
+
+    meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
+    prov = json.loads(meta[b"greeks_provenance"])
+    text = _visible_text(pages["/risk"])
+    assert "r = —%" not in text
+    rows = (prov.get("carry") or {}).get("by_maturity") or []
+    if prov.get("r") is None and rows:
+        r_lo, r_hi = min(c["r"] for c in rows) * 100, max(c["r"] for c in rows) * 100
+        q_lo, q_hi = min(c["q"] for c in rows) * 100, max(c["q"] for c in rows) * 100
+        assert f"r(T) {r_lo:.2f}–{r_hi:.2f}%" in text
+        assert f"q(T) {q_lo:.2f}–{q_hi:.2f}% from the fit's parity forwards" in text
+
+
+def test_corrections_page_shows_the_c23_waterfall_from_its_file(pages):
+    bridge = pd.read_csv(SHIPPED / "backtest" / "c23_bridge.csv")
+    tab = re.search(r'<table class="tbl dense" id="c23-bridge">(.*?)</table>', pages["/corrections"],
+                    re.DOTALL).group(1)
+    body = _visible_text("<body>" + tab)
+    assert len(re.findall(r"<tr>", tab.split("<tbody>")[1])) == len(bridge)
+    for _, r in bridge.iterrows():
+        assert r["label"] in body
+        pnl = f"${abs(r['pnl']):,.0f}"
+        assert ("−" if r["pnl"] < 0 else "+") + pnl in body
+    assert 'data-round="C23"' in pages["/corrections"]
+
+
+def test_diagnostics_summary_contract(dash, tmp_path):
+    """summary.json rows: finite numbers or null, H in [0, 1/2], one row per session."""
+    da = dash.artifacts
+    good = json.loads((FIX / "diagnostics" / "summary.json").read_text())
+    tmp = tmp_path / "data_store"
+    (tmp / "calibrations" / "diagnostics").mkdir(parents=True)
+    path = tmp / "calibrations" / "diagnostics" / "summary.json"
+    path.write_text(json.dumps(good))
+    assert da.load_diagnostics_summary(tmp)["state"] == "ok"
+    for breaker, msg in ((lambda o: o["rows"][0].update(joint_rough_H=0.7), "outside [0, 1/2]"),
+                         (lambda o: o["rows"].append(dict(o["rows"][0])), "duplicate sessions"),
+                         (lambda o: o["rows"][0].update(sigma_cap2_oos="n/a"), "not a finite number"),
+                         (lambda o: o.update(rows=[]), "non-empty 'rows'")):
+        bad = json.loads(json.dumps(good))
+        breaker(bad)
+        path.write_text(json.dumps(bad))
+        with pytest.raises(da.ArtifactError, match=re.escape(msg)):
+            da.load_diagnostics_summary(tmp)
+    path.unlink()
+    assert da.load_diagnostics_summary(tmp)["state"] == "absent"
 
 
 def test_residual_stats_score_each_model_on_its_own_out_of_sample_quotes(dash):
@@ -2146,6 +2309,9 @@ MALFORMED = {
         d / "calibrations" / "diagnostics" / f"{SESSION}.json",
         lambda o: o["identifiability"].update(rel_jacobian_singular_values=[0.1, 2.0, 0.5, 0.2, 0.01])),
         "largest first"),
+    "rough H above one half": ("/calibration", lambda d: _rewrite_json(
+        d / "calibrations" / "diagnostics" / "summary.json",
+        lambda o: o["rows"][-1].update(joint_rough_H=0.9)), "outside [0, 1/2]"),
     "diagnostics of another session": ("/calibration", lambda d: _rewrite_json(
         d / "calibrations" / "diagnostics" / f"{SESSION}.json", lambda o: o.update(session="2026-06-18")),
         "session 2026-06-18"),
@@ -2296,7 +2462,7 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
 
     reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
     rounds = [r["id"] for r in reg["rounds"]]
-    assert rounds == [f"C{i}" for i in range(16, 23)]
+    assert rounds == [f"C{i}" for i in range(16, 24)]
     shallow = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                              capture_output=True, text=True, check=False).stdout.strip() != "false"
     for r in reg["rounds"]:
@@ -2309,7 +2475,8 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
                 assert exists.returncode == 0
                 day = subprocess.run(["git", "-C", str(ROOT), "log", "-1", "--format=%ad", "--date=short", c],
                                      capture_output=True, text=True, check=False).stdout.strip()
-                assert day == r["date"], (r["id"], c, day)
+                # a round may span days (C23: 2026-10-20 to 2026-10-21)
+                assert r["date"] <= day <= r.get("date_end", r["date"]), (r["id"], c, day)
         for f in r["findings"]:
             assert f["status"] in ("fixed", "quantified"), f["flaw"]
             for node in f.get("tests", []):

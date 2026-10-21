@@ -439,6 +439,80 @@ def calibration_diagnostics(cal: dict, data_dir: Path, session: str | None) -> d
             "file": str(path.relative_to(Path(data_dir).parent)) if obj else None}
 
 
+# The per-session numbers of diagnostics/summary.json the pages read: the
+# production (σ ≤ 2) joint Heston fit, the joint and SPX-only rough Heston
+# fits, the free-σ refit and the model VVIX. Vol points unless named.
+DIAG_SUMMARY_FIELDS = (
+    "sigma_cap2_oos", "joint_heston_vix_index", "joint_rough_oos", "joint_rough_in", "joint_rough_H",
+    "joint_rough_vix_index", "joint_rough_lifting_error_estimate_max_vp", "heston_spx_oos", "rough_oos",
+    "rough_H", "sigma_free", "kappa_free", "sigma_free_oos", "sigma_free_loss_rel", "vvix_market",
+    "vvix_model_cap2",
+    "rel_jtj_condition_number", "trf_seconds", "trf_evals", "de_serial_seconds", "de_serial_evals",
+    "trf_loss_rel_diff")
+
+
+def load_diagnostics_summary(data_dir: Path) -> dict:
+    """data_store/calibrations/diagnostics/summary.json: one row per diagnosed session.
+
+    Written by scripts/calibration_diagnostics.py (the bot adds a row per
+    accepted fit). Every field in DIAG_SUMMARY_FIELDS a row carries must be a
+    finite number or null; H must lie in [0, 1/2]; sessions are unique.
+    """
+    path = Path(data_dir) / "calibrations" / "diagnostics" / "summary.json"
+    if not path.exists():
+        return absent("identifiability", path, data_dir=data_dir)
+    name = "calibrations/diagnostics/summary.json"
+    obj = _read_json(path, name)
+    rows = obj.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise ArtifactError(f"{name}: needs a non-empty 'rows' list")
+    out = []
+    for r in rows:
+        if not isinstance(r, dict) or not _DATE.match(str(r.get("session", ""))):
+            raise ArtifactError(f"{name}: every row needs a YYYY-MM-DD session")
+        row: dict[str, Any] = {"session": r["session"],
+                               "on_bound": list(r.get("on_bound") or []),
+                               "joint_rough_on_bound": list(r.get("joint_rough_on_bound") or []),
+                               "relative_standard_errors": r.get("relative_standard_errors") or {}}
+        for k in DIAG_SUMMARY_FIELDS:
+            v = _finite(r.get(k))
+            if r.get(k) is not None and v is None:
+                raise ArtifactError(f"{name}: {r['session']}.{k} is not a finite number ({r.get(k)!r})")
+            row[k] = v
+        for k in ("joint_rough_H", "rough_H"):
+            if row[k] is not None and not 0.0 <= row[k] <= 0.5:
+                raise ArtifactError(f"{name}: {r['session']}.{k} = {row[k]} is outside [0, 1/2]")
+        out.append(row)
+    sessions = [r["session"] for r in out]
+    if len(set(sessions)) != len(sessions):
+        raise ArtifactError(f"{name}: duplicate sessions")
+    return {"state": "ok", "rows": sorted(out, key=lambda r: r["session"]),
+            "generated_utc": obj.get("generated_utc"),
+            "file": str(path.relative_to(Path(data_dir).parent))}
+
+
+def surface_oos_by_session(data_dir: Path) -> list[dict]:
+    """Every stored session's out-of-sample scorecard block per model.
+
+    One row per (session, model) with that session's scorecard.json
+    out_of_sample metrics (n, median_abs_hs, inside_spread_pct, rmse_vp) and
+    the dense-grid arbitrage counts; sessions without a scorecard are skipped.
+    """
+    out: list[dict[str, Any]] = []
+    for s in surface_sessions(data_dir):
+        p = Path(data_dir) / "surface" / s / "scorecard.json"
+        if not p.exists():
+            continue
+        obj = _read_json(p, f"surface/{s}/scorecard.json")
+        _check_session(obj, s, f"surface/{s}/scorecard.json")
+        out.extend({"session": s, "model": r["model"],
+                    **{k: r["oos"].get(k) for k in ("n", "median_abs_hs", "inside_spread_pct", "rmse_vp")},
+                    "butterfly": (r["dense"] or {}).get("butterfly_violations"),
+                    "calendar": (r["dense"] or {}).get("calendar_violations")}
+                   for r in scorecard_rows(obj, s))
+    return out
+
+
 # ── backtest inference: data_store/backtest/inference/ ───────────────────────
 INFERENCE_SCHEMA = "inference_summary/"
 

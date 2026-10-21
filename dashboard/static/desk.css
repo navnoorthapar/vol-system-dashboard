@@ -445,6 +445,9 @@ dialog.keys .dl { font-size: 12px; }
 @media (max-width: 480px) {
   .page { padding: 10px 10px 24px; }
   .statusbar, .ticker { padding-left: 10px; padding-right: 10px; }
+  /* the view-time freshness note ("1 session behind (refreshes after the next close)")
+     is longer than a 320 px screen: let status items wrap instead of scrolling the page */
+  .statusbar .sb-item { white-space: normal; min-width: 0; overflow-wrap: anywhere; }
   .tk { padding: 0 8px; }
   .brand .brand-sub { display: none; }
   .kpi-value { font-size: 18px; }

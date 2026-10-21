@@ -27,7 +27,10 @@ const site = resolve(args[0] || '.site-build');
 const outIdx = args.indexOf('--out');
 const outPath = outIdx >= 0 ? args[outIdx + 1] : null;
 
-const PAGES = ['index.html', 'calibration.html', 'greeks.html', 'backtest.html', '404.html'];
+// The site's seven pages and its 404 (greeks.html and backtest.html are meta-refresh
+// redirects to risk.html and research.html since C23, so they are not audited themselves).
+const PAGES = ['index.html', 'surface.html', 'calibration.html', 'risk.html', 'research.html',
+  'corrections.html', 'model-risk.html', '404.html'];
 const AXE_VIEWPORTS = [{ width: 1440, height: 900 }, { width: 390, height: 844 }];
 const OVERFLOW_WIDTHS = [320, 390, 768, 1024, 1440, 1920];
 const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
@@ -72,7 +75,10 @@ for (const name of PAGES) {
   const entry = { page: name, axe: [], overflow: [], errors: [], blocked: [] };
   for (const scheme of ['dark', 'light']) {
     for (const vp of AXE_VIEWPORTS) {
-      const ctx = await browser.newContext({ viewport: vp, colorScheme: scheme, reducedMotion: 'reduce' });
+      // bypassCSP: the pages' CSP (script-src 'self') would block the injected axe-core;
+      // only the audit script is exempted, the page's own scripts run as published.
+      const ctx = await browser.newContext({ viewport: vp, colorScheme: scheme, reducedMotion: 'reduce',
+                                             bypassCSP: true });
       const { page, errors, blocked } = await openPage(ctx, name);
       await page.addScriptTag({ content: AXE });
       const violations = await page.evaluate(async tags => {

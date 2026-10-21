@@ -19,10 +19,15 @@ Usage (build-time only; never run by the site or the bot):
     python dashboard/capture_artifact_fixtures.py SRC_DATA_STORE \
         joint_vol_calibration/tests/fixtures/dashboard FORWARD_LEDGER_DIR
 
-The calibration-diagnostics sample (fixtures/dashboard/diagnostics) is
-hand-written in the producer's key names, since no diagnostics file existed
-when the tests were written; replace it with a trimmed real file once
-scripts/calibration_diagnostics.py has run.
+  * calibrations/diagnostics/<session>.json: the identifiability, multi-start,
+    sigma-profile, SPX-only and joint rough-Heston blocks the Calibration page
+    reads (per-run lists and timings dropped); diagnostics/summary.json: every
+    session's row, restricted to the fields the pages read
+    (desk_artifacts.DIAG_SUMMARY_FIELDS).
+
+With --diagnostics-only, only the two diagnostics samples are refreshed
+(python dashboard/capture_artifact_fixtures.py SRC_DATA_STORE FIXTURE_DIR
+--diagnostics-only).
 """
 
 import json
@@ -32,8 +37,47 @@ from pathlib import Path
 
 import pandas as pd
 
-src, fx, fwd = (Path(a) for a in sys.argv[1:4])
 sess = "2026-10-16"
+
+
+def capture_diagnostics(src: Path, fx: Path) -> None:
+    """Trimmed real calibration-diagnostics samples (one session + the summary)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from desk_artifacts import DIAG_SUMMARY_FIELDS
+
+    out = fx / "diagnostics"
+    out.mkdir(parents=True, exist_ok=True)
+    d = json.loads((src / "calibrations" / "diagnostics" / f"{sess}.json").read_text())
+    ident = {k: v for k, v in d["identifiability"].items() if k != "profile_check"}
+    ms = d["trf"]["multistart"]
+    keep = {
+        "schema_version": d["schema_version"], "session": d["session"], "identifiability": ident,
+        "trf": {"multistart": {k: ms[k] for k in ("n_starts", "n_starts_at_best", "n_distinct_basins",
+                                                    "n_failed_starts", "best_label") if k in ms}},
+        "sigma_profile": {k: d["sigma_profile"][k] for k in ("caps", "kappa_max", "production_box")},
+        "spx_only": {}, "joint_rough_heston": None,
+    }
+    keep["sigma_profile"]["rows"] = [{k: v for k, v in r.items() if k != "spx_oos_rmse_by_expiry"}
+                                     for r in d["sigma_profile"]["rows"]]
+    drop = ("multistart", "identifiability", "spx_oos_rmse_by_expiry", "numerics", "settings")
+    for m, r in d["spx_only"].items():
+        keep["spx_only"][m] = {k: v for k, v in r.items() if k not in drop}
+    keep["joint_rough_heston"] = {k: v for k, v in d["joint_rough_heston"].items() if k not in drop}
+    (out / f"{sess}.json").write_text(json.dumps(keep, indent=1, sort_keys=True) + "\n")
+    summ = json.loads((src / "calibrations" / "diagnostics" / "summary.json").read_text())
+    rows = [{k: r.get(k) for k in ("session", "on_bound", "joint_rough_on_bound", "relative_standard_errors",
+                                   *DIAG_SUMMARY_FIELDS)} for r in summ["rows"]]
+    (out / "summary.json").write_text(json.dumps(
+        {"schema_version": summ["schema_version"], "generated_utc": summ["generated_utc"],
+         "n_sessions": len(rows), "rows": rows}, indent=1, sort_keys=True) + "\n")
+    print("diagnostics", sess, len(rows), "summary rows")
+
+
+if "--diagnostics-only" in sys.argv:
+    capture_diagnostics(Path(sys.argv[1]), Path(sys.argv[2]))
+    sys.exit(0)
+
+src, fx, fwd = (Path(a) for a in sys.argv[1:4])
 res = pd.read_parquet(src / "surface" / sess / "residuals.parquet")
 exps = sorted(res["expiry"].unique())
 tdays = res.groupby("expiry")["T_days"].first()
@@ -155,3 +199,4 @@ fw = fx / "forward"
 fw.mkdir(exist_ok=True)
 for p in sorted(fwd.glob("ledger_*.json")):
     shutil.copy(p, fw / p.name)
+capture_diagnostics(src, fx)

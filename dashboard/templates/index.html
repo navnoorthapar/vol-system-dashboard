@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
 {% block og_title %}Overview — Joint SPX/VIX Smile Calibration{% endblock %}
-{% block og_description %}Joint SPX/VIX Heston calibration measured out of sample, a hedged-straddle P&amp;L explain and a mark-to-model backtest with its correction log; end-of-day regime, VIX term structure and data freshness.{% endblock %}
+{% block og_description %}End-of-day SPX/VIX volatility research system: an arbitrage-free surface and a joint SPX/VIX Heston fit scored against the bid–ask, rough Heston beside it, and a mark-to-model backtest with bootstrap intervals and timing nulls.{% endblock %}
 
 {% block content %}
 {% set f = d.fit or {} %}
 <div class="page-head">
-  <h1 class="page-title">Joint SPX/VIX smile calibration — overview</h1>
-  <p class="page-sub">One stochastic-volatility model fitted every U.S. session to the SPX option smile and the VIX index term structure, scored against the quotes it did not see, carried into Greeks and a hedged P&amp;L explain, and used in a backtest that is reported with every correction made to it.</p>
+  <h1 class="page-title">Joint SPX/VIX smile calibration</h1>
+  <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Each U.S. session it stores the option books, fits an arbitrage-free market surface and a joint SPX/VIX stochastic-volatility model, and scores both on quotes they were not fitted to, in units of the quoted half-spread. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
   <div class="page-badge">
     <span class="nowrap">Last close {{ d.spx_date|fmt }}</span><span class="sep">·</span>
     <span class="nowrap">Rule label {{ d.regime_date|fmt }}</span><span class="sep">·</span>
@@ -30,6 +30,7 @@
   <div class="result"><span class="result-k">Key results</span><span class="result-d">Unavailable: see the error above.</span></div>
   {% endfor %}
 </div>
+<p class="note" style="margin:0 0 12px;">Every figure is read from the committed artifact named under it. A half-spread is half the quoted bid–ask in implied-vol terms, so a model within one half-spread of the mid sits inside the quote. Backtest dollars are mark-to-model, never traded fills.</p>
 
 <div class="g">
   {% call m.panel('state-regime', 'Regime · rule label', 's4', d.regime_date) %}
@@ -123,49 +124,29 @@
     <p class="note">
       {% for t in f.tiles %}<span class="nowrap">{{ t.sym }} {{ t.value|fmt(t.spec) }}{% if t.side %} {{ m.chip('at ' ~ (t.side if t.side != 'bound' else '') ~ ' bound', 'watch') }}{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}
     </p>
-    <p class="note">{% if f.active_constraints %}Active constraint: {{ f.active_constraints|join('; ') }} — {{ f.effective_dof }} of 5 parameters are set by the data.{% else %}No parameter on a bound.{% endif %} Feller {{ f.feller_state|fmt }} (margin {{ f.feller_margin|signed('.2f') }}; diagnostic, not imposed). <a href="/calibration">Calibration page</a>.</p>
+    <p class="note">{% if f.active_constraints %}Active constraint: {{ f.active_constraints|join('; ') }} — {{ f.effective_dof }} of 5 parameters are set by the data.{% else %}No parameter on a bound.{% endif %} Feller {{ f.feller_state|fmt }} (margin {{ f.feller_margin|signed('.2f') }}; diagnostic, not imposed).{% if f.free_sigma %}{% set fs = f.free_sigma %} <span id="free-sigma">Without the σ cap the same fit goes to σ {{ fs.sigma|fmt('.2f') }}, κ {{ fs.kappa|fmt('.1f') }}{% if fs.loss_rel is not none %}, loss {{ (fs.loss_rel * 100)|signed('.1f') }}%{% endif %}, out-of-sample RMSE {{ fs.oos_cap|fmt('.2f') }} → {{ fs.oos|fmt('.2f') }} vol pts (σ profile).</span>{% endif %} <a href="/calibration">Calibration page</a>.</p>
   {% endcall %}
 
-  {% call m.panel('state-pages', 'Pages', 's6') %}
-    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Pages of this site">
-    <table class="tbl dense">
-      <caption class="sr-only">Pages of this site</caption>
+  {% call m.panel('state-pipeline', 'Pipeline · what the daily job has stored', 's6', 'build ' ~ (chrome.build.short or 'unknown')) %}
+    {% set pl = d.pipeline %}
+    {% if pl %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Pipeline state (scrollable)">
+    <table class="tbl dense" id="pipeline">
+      <caption class="sr-only">What the daily job has stored</caption>
       <tbody>
-      {% for href, label, key, desc in nav %}{% if href != '/' %}
-        <tr><td class="nowrap"><a href="{{ href }}">{{ label }}</a></td><td>{{ desc }}</td></tr>
-      {% endif %}{% endfor %}
+        <tr><th scope="row">Cboe option books</th><td>{% for c in pl.captures %}<span class="nowrap">{{ c.underlying }} {{ c.session }}:</span> {{ c.rows|fmt(',') }} lines ({{ c.two_sided_rows|fmt(',') }} two-sided, {{ c.expiries|fmt }} expiries), quotes {{ (c.quote_time or '')|replace('T', ' ')|replace('Z', ' UTC') }}{% if c.book_state == 'gth' %} (overnight book){% endif %}{{ '; ' if not loop.last else '' }}{% else %}none stored yet{% endfor %}</td></tr>
+        <tr><th scope="row">Accepted joint fits</th><td>{{ pl.fits|fmt }} (model_version 2), newest {{ pl.fits_newest|fmt }}</td></tr>
+        <tr><th scope="row">Surface reports</th><td>{{ pl.surface_sessions|length }} sessions{% if pl.surface_sessions %}, {{ pl.surface_sessions[0] }} → {{ pl.surface_sessions[-1] }}{% endif %}</td></tr>
+        <tr><th scope="row">Calibration diagnostics</th><td>{{ pl.diag_sessions|length }} sessions (σ profile, identifiability, rough Heston)</td></tr>
+        <tr><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}no entry yet: the first is written with the next accepted fit, at executable prices{% endif %}</td></tr>
+        <tr><th scope="row">Backtest window</th><td>ends {{ chrome.sources|selectattr('short', 'equalto', 'BACKTEST')|map(attribute='date')|first|fmt }}, fixed (mark-to-model)</td></tr>
       </tbody>
     </table>
     </div>
-  {% endcall %}
-</div>
-
-<div class="g">
-  {% call m.panel('research-classifier', 'Research only · ML regime classifier', 's6') %}
-    {% if d.clf_available %}
-    <p class="note">{{ m.chip('research only', 'watch') }} Next-session forecast from the features of {{ d.clf_feature_date }}: <strong>{{ d.clf_label }}</strong> at {{ d.clf_conf|fmt(".1f")|u('%') }}{% if d.clf_agrees == false %}, disagreeing with the rule label{% endif %}.
-    {% if d.clf_oos_acc is not none %}{{ d.clf_oos_acc|fmt|u('%') }} out-of-sample, it loses to the {{ d.clf_persistence_acc|fmt|u('%') }} “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong>.</p>
-    <dl class="dl">
-      {% for lbl, pr in [('P(R0 long γ)', d.prob_r0), ('P(R1 short γ)', d.prob_r1), ('P(R2 vomma)', d.prob_r2)] %}<dt>{{ lbl }}</dt><dd>{{ pr|fmt(".1f")|u('%') }}</dd>{% endfor %}
-      <dt>Out-of-sample accuracy:</dt><dd><span class="v">{{ d.clf_oos_acc|fmt|u('%') }}</span></dd>
-      <dt>Persistence baseline:</dt><dd><span class="v">{{ d.clf_persistence_acc|fmt|u('%') }}</span></dd>
-      <dt>Features</dt><dd>{{ d.clf_n_features|fmt }} (vvix excluded — C16){% if d.clf_top_feature %}; top <code>{{ d.clf_top_feature }}</code> ({{ d.clf_top_importance|fmt(".0f")|u('%') }}){% endif %}</dd>
-    </dl>
-    {% call m.method('Why it is not used') %}
-    <p class="prose">Accuracy is the shipped model's own evaluation{% if d.clf_test_window %} on {{ d.clf_test_window }} ({{ d.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}{% if d.clf_feature_source == 'rv20_proxy' %}; its spread feature is the rv₂₀ proxy it was trained on{% endif %}. Regimes are persistent and observable on the day, so “predict yesterday's regime” is a strong no-skill baseline; C17 demoted the classifier when it lost to it and C22's retrain did not change that. The backtest trades the lagged rule labels; a Gaussian HMM in <code>regime_classifier.py</code> is research-only as well.</p>
-    {% endcall %}
+    <p class="note">Each input's as-of date and age in NYSE sessions is in the status bar and in the table at the foot of every page. Research prototypes (the ML regime classifier, the NN pricer, the Quintic OU) are on the <a href="research.html#research-classifier">Research</a> and <a href="calibration.html#quintic">Calibration</a> pages; none feeds a number on this page.</p>
     {% else %}
-    <p class="note">ML classifier (research only): unavailable — see the error above. The rule label is unaffected.</p>
+    <p class="note">Pipeline state unavailable: see the error above.</p>
     {% endif %}
-  {% endcall %}
-
-  {% call m.panel('label-history', 'Rule-label distribution', 's6', d.reg_span) %}
-    <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
-      {% for k, name in [(0, 'R0 long gamma'), (1, 'R1 short gamma'), (2, 'R2 vomma active')] %}
-      {{ m.kpi(name, d['reg%d_pct' % k]|fmt('.1f'), unit='%', sub=(d['reg%d_n' % k]|fmt(',')) ~ ' of ' ~ (d.reg_total|fmt(',')) ~ ' sessions') }}
-      {% endfor %}
-    </div>
-    <p class="note">Share of sessions under each rule label since {{ (d.reg_span or '—')[:4] }}; the adaptive R2 gate is the only gate in every path (C22).</p>
   {% endcall %}
 </div>
 {% endblock %}

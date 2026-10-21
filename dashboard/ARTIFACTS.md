@@ -105,6 +105,14 @@ The headline result pickle's own `identifiability` and `multistart` keys win whe
 - `sigma_profile.rows`: each row needs `sigma_cap` and `loss`; `params`, `spx_iv_rmse_exact`, `spx_oos_iv_rmse`, `spx_oos_put_wing_rmse`, `vix_index_rmse`, `sigma_at_cap`, `kappa_at_max` are shown.
 - `spx_only.<heston|heston_wide_box|rough_heston>`: `params` (with `H` for rough Heston), `spx_iv_rmse_exact`, `spx_oos_iv_rmse`, `spx_oos_put_wing_rmse`, `vix_index_rmse_oos`.
 - A `session` that differs from the file name is an `ArtifactError`.
+- `summary.json` (optional; the Calibration page's "Heston vs rough Heston" panel and the Overview's joint-fit result):
+  `rows[]`, one per diagnosed session (`YYYY-MM-DD`, unique). Read per row, each a finite number or null:
+  `sigma_cap2_oos` (the production joint Heston fit's out-of-sample SPX RMSE, vol pts), `joint_heston_vix_index`,
+  `joint_rough_oos`, `joint_rough_in`, `joint_rough_H` (in [0, 1/2]), `joint_rough_vix_index`,
+  `joint_rough_lifting_error_estimate_max_vp`, `heston_spx_oos`, `rough_oos`, `rough_H`, `sigma_free`, `kappa_free`,
+  `sigma_free_oos`, `sigma_free_loss_rel`, `vvix_market`, `vvix_model_cap2`, `rel_jtj_condition_number`, `trf_seconds`, `trf_evals`,
+  `de_serial_seconds`, `de_serial_evals`, `trf_loss_rel_diff`; lists `on_bound`, `joint_rough_on_bound`; the object
+  `relative_standard_errors`.
 
 ## 3. Backtest inference: `data_store/backtest/inference/`
 

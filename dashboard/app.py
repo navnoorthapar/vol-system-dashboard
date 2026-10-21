@@ -138,7 +138,7 @@ NAV: list[tuple[str, str, str, str]] = [
     ("/research", "Research", "e",
      "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
     ("/corrections", "Corrections", "x",
-     "Correction rounds C16–C22 as postmortems, each tied to commits and regression tests."),
+     "Correction rounds C16–C23 as postmortems, each tied to commits and regression tests."),
     ("/model-risk", "Model Risk", "m", "Model inventory and monitoring checks with explicit thresholds."),
 ]
 
@@ -725,28 +725,122 @@ _WF_CACHE: dict = {}
 
 
 # ── PAGE 1 DATA: Live Market Overview ─────────────────────────────────────────
+def _rule_labels(d: dict) -> pd.Series | None:
+    """The stored rule labels; sets the headline label keys of ``d``."""
+    reg_series: pd.Series | None = None
+    with _loader_boundary(d, "rule regime labels (regime_labels.parquet)"):
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
+        reg_series = rl["regime"].dropna().astype(int)
+        if reg_series.empty:
+            raise ValueError("regime_labels.parquet has no labels")
+        reg = int(reg_series.iloc[-1])
+        if reg not in (0, 1, 2):
+            raise ValueError(f"unknown regime label {reg}")
+        d["regime"] = reg
+        d["regime_name"] = _REGIME_NAMES[reg]
+        d["regime_color"] = _REGIME_COLORS[reg]
+        d["regime_label"] = _REGIME_LABELS[reg]
+        d["regime_date"] = str(pd.Timestamp(reg_series.index[-1]).date())
+    return reg_series
+
+
+def load_classifier_card() -> dict[str, Any]:
+    """The research-only ML regime classifier and the rule-label distribution.
+
+    Rendered on the Research page only: the classifier is demoted (it loses to
+    "predict yesterday's regime") and feeds nothing, so it is not on the
+    Overview. A failure here is the Research page's loader error.
+    """
+    d: dict[str, Any] = {"errors": []}
+    for k in ("regime", "regime_date", "reg_total", "reg0_n", "reg1_n", "reg2_n", "reg0_pct", "reg1_pct",
+              "reg2_pct", "reg_span", "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
+              "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
+              "clf_oos_acc", "clf_persistence_acc", "clf_n_test", "clf_test_window",
+              "clf_feature_source", "clf_n_features"):
+        d[k] = None
+    d.update(regime_name="UNAVAILABLE", regime_color="#9aa3b0", regime_label="—", clf_color="#9aa3b0",
+             clf_available=False)
+    spx_df: pd.DataFrame | None = None
+    vix_wide: pd.DataFrame | None = None
+    with _loader_boundary(d, "market data (vol_system.db)"):
+        spx_df = _read_spx()
+        vix_wide = _read_vix_wide()
+    reg_series = _rule_labels(d)
+    if reg_series is not None:
+        tot = len(reg_series)
+        d["reg_total"] = tot
+        for k in (0, 1, 2):
+            n = int((reg_series == k).sum())
+            d[f"reg{k}_n"] = n
+            d[f"reg{k}_pct"] = round(100.0 * n / tot, 1)
+        d["reg_span"] = f"{reg_series.index[0].year} – {reg_series.index[-1].year}"
+    # ── Research-only classifier card ────────────────────────────────────────
+    # Features come from build_features — the code path the classifier was
+    # trained on — with pdv_iv_spread built from the SAME source the training
+    # set used (regime_classifier.classifier_features reads it from the model's
+    # metadata). Building features by hand fed it pdv_iv_spread = −VIX; feeding
+    # the PDV forecast to a classifier trained on the rv₂₀ proxy was a
+    # training/serving mismatch.
+    with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
+        clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
+        if spx_df is None or vix_wide is None:
+            raise RuntimeError("needs the market data that failed to load")
+        from joint_vol_calibration.signals.regime_classifier import classifier_features
+
+        # classifier_features rebuilds pdv_iv_spread from the source recorded
+        # in clf.metadata_ (and refuses a source it cannot rebuild).
+        feats = classifier_features(
+            clf,
+            spx_df.reset_index()[["date", "close", "log_return"]],
+            vix_wide.reset_index().rename(columns={"index": "date"}),
+        )
+        d["clf_feature_source"] = feats.attrs.get("pdv_iv_spread_source")
+        cols = list(getattr(clf, "feature_names_", None) or feats.columns)
+        d["clf_n_features"] = len(cols)
+        row = feats.dropna(subset=cols).iloc[[-1]]
+        proba = np.asarray(clf.predict_proba(row[cols])[0], dtype=float)
+        c_reg = int(np.argmax(proba))
+        d["clf_available"] = True
+        d["clf_feature_date"] = str(row.index[0].date())
+        d["clf_label"] = _REGIME_LABELS[c_reg]
+        d["clf_color"] = _REGIME_COLORS[c_reg]
+        d["clf_conf"] = round(float(proba[c_reg]) * 100, 1)
+        d["prob_r0"], d["prob_r1"], d["prob_r2"] = (round(float(p) * 100, 1) for p in proba[:3])
+        d["clf_agrees"] = (d["regime"] == c_reg) if d.get("regime_date") == d["clf_feature_date"] else None
+        # Accuracy as recorded by the classifier's own evaluation (never hand-typed).
+        ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
+        if ev.get("oos_acc") is not None and ev.get("persistence_acc") is not None:
+            d["clf_oos_acc"] = round(float(ev["oos_acc"]) * 100, 1)
+            d["clf_persistence_acc"] = round(float(ev["persistence_acc"]) * 100, 1)
+            d["clf_n_test"] = int(ev.get("n_test") or 0)
+            tw = ev.get("test_window") or (None, None)
+            d["clf_test_window"] = f"{tw[0]} → {tw[1]}" if tw[0] else None
+        try:
+            imp = clf.feature_importance()
+            d["clf_top_feature"] = str(imp.index[0])
+            d["clf_top_importance"] = round(float(imp.iloc[0]) * 100, 0)
+        except Exception as exc:
+            _logger.info("feature importance unavailable: %s", exc)
+
+    return _clean(d)
+
+
 def load_page1() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": []}
 
     # Defaults: None renders as '—'. Nothing here may default to a plausible number.
     for k in ("spx", "spx_chg", "spx_up", "spx_date", "vix", "vix_date",
               "vvix", "vvix_date", "ts_date", "regime", "regime_date",
-              "reg_total", "reg0_n", "reg1_n", "reg2_n", "reg0_pct", "reg1_pct",
-              "reg2_pct", "reg_span", "calib_date", "pdv_forecast", "pdv_spread",
+              "calib_date", "pdv_forecast", "pdv_spread",
               "pdv_date", "pdv_spread_mean", "pdv_spread_pct", "pdv_hist_n",
               "pdv_hist_start", "pdv_hist_end", "pdv_sigma1", "pdv_sigma2",
               "pdv_age", "pdv_rank", "stress", "pdv_vix", "pdv_horizon", "pdv_coef", "pdv_intercept",
               "pdv_halflives", "pdv_garch_beta", "pdv_garch_persistence",
-              "clf_feature_date", "clf_label", "clf_conf", "clf_agrees",
-              "prob_r0", "prob_r1", "prob_r2", "clf_top_feature", "clf_top_importance",
-              "clf_oos_acc", "clf_persistence_acc", "clf_n_test", "clf_test_window",
-              "clf_feature_source", "clf_n_features", "pdv_skill", "rule", "latest_session"):
+              "pdv_skill", "rule", "latest_session"):
         d[k] = None
-    d.update(regime_name="UNAVAILABLE", regime_color="#9aa3b0", regime_label="—",
-             clf_color="#9aa3b0")
+    d.update(regime_name="UNAVAILABLE", regime_color="#9aa3b0", regime_label="—")
     d.update(ts_tenors=[], ts_values=[], ts_regime="N/A",
-             pdv_sparkline=[], pdv_sparkline_dates=[], pdv_stale=False,
-             clf_available=False, stale=[])
+             pdv_sparkline=[], pdv_sparkline_dates=[], pdv_stale=False, stale=[])
 
     # ── Market snapshot (DB) ─────────────────────────────────────────────────
     spx_df: pd.DataFrame | None = None
@@ -795,30 +889,10 @@ def load_page1() -> dict[str, Any]:
         _record_error(d, "market data (vol_system.db)", e)
         spx_df = vix_daily = vix_wide = None
 
-    # ── Rule regime + frequencies (regime_labels.parquet only) ───────────────
-    # The headline is the deterministic RULE label. It is never replaced by the
-    # research classifier's output, whatever fails.
-    reg_series: pd.Series | None = None
-    with _loader_boundary(d, "rule regime labels (regime_labels.parquet)"):
-        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet")
-        reg_series = rl["regime"].dropna().astype(int)
-        if reg_series.empty:
-            raise ValueError("regime_labels.parquet has no labels")
-        reg = int(reg_series.iloc[-1])
-        if reg not in (0, 1, 2):
-            raise ValueError(f"unknown regime label {reg}")
-        d["regime"] = reg
-        d["regime_name"] = _REGIME_NAMES[reg]
-        d["regime_color"] = _REGIME_COLORS[reg]
-        d["regime_label"] = _REGIME_LABELS[reg]
-        d["regime_date"] = str(pd.Timestamp(reg_series.index[-1]).date())
-        tot = len(reg_series)
-        d["reg_total"] = tot
-        for k in (0, 1, 2):
-            n = int((reg_series == k).sum())
-            d[f"reg{k}_n"] = n
-            d[f"reg{k}_pct"] = round(100.0 * n / tot, 1)
-        d["reg_span"] = f"{reg_series.index[0].year} – {reg_series.index[-1].year}"
+    # ── Rule regime (regime_labels.parquet only) ─────────────────────────────
+    # The headline is the deterministic RULE label. The research classifier is
+    # not on this page at all (Research page, load_classifier_card).
+    reg_series = _rule_labels(d)
 
     # ── The rule's own inputs on the newest session the DB covers ────────────
     # build_rule_label_frame pairs each session's rule label with the
@@ -909,54 +983,6 @@ def load_page1() -> dict[str, Any]:
     with _loader_boundary(d, "PDV walk-forward skill"):
         if pdv is not None and spx_df is not None and pdv_vol is not None:
             d["pdv_skill"] = pdv_walk_forward_skill(pdv, spx_df["close_return"], pdv_vol)
-
-    # ── Research-only classifier card ────────────────────────────────────────
-    # Features come from build_features — the code path the classifier was
-    # trained on — with pdv_iv_spread built from the SAME source the training
-    # set used (regime_classifier.classifier_features reads it from the model's
-    # metadata). Building features by hand fed it pdv_iv_spread = −VIX; feeding
-    # the PDV forecast to a classifier trained on the rv₂₀ proxy was a
-    # training/serving mismatch.
-    with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
-        clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
-        if spx_df is None or vix_wide is None:
-            raise RuntimeError("needs the market data that failed to load")
-        from joint_vol_calibration.signals.regime_classifier import classifier_features
-
-        # classifier_features rebuilds pdv_iv_spread from the source recorded
-        # in clf.metadata_ (and refuses a source it cannot rebuild).
-        feats = classifier_features(
-            clf,
-            spx_df.reset_index()[["date", "close", "log_return"]],
-            vix_wide.reset_index().rename(columns={"index": "date"}),
-        )
-        d["clf_feature_source"] = feats.attrs.get("pdv_iv_spread_source")
-        cols = list(getattr(clf, "feature_names_", None) or feats.columns)
-        d["clf_n_features"] = len(cols)
-        row = feats.dropna(subset=cols).iloc[[-1]]
-        proba = np.asarray(clf.predict_proba(row[cols])[0], dtype=float)
-        c_reg = int(np.argmax(proba))
-        d["clf_available"] = True
-        d["clf_feature_date"] = str(row.index[0].date())
-        d["clf_label"] = _REGIME_LABELS[c_reg]
-        d["clf_color"] = _REGIME_COLORS[c_reg]
-        d["clf_conf"] = round(float(proba[c_reg]) * 100, 1)
-        d["prob_r0"], d["prob_r1"], d["prob_r2"] = (round(float(p) * 100, 1) for p in proba[:3])
-        d["clf_agrees"] = (d["regime"] == c_reg) if d.get("regime_date") == d["clf_feature_date"] else None
-        # Accuracy as recorded by the classifier's own evaluation (never hand-typed).
-        ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
-        if ev.get("oos_acc") is not None and ev.get("persistence_acc") is not None:
-            d["clf_oos_acc"] = round(float(ev["oos_acc"]) * 100, 1)
-            d["clf_persistence_acc"] = round(float(ev["persistence_acc"]) * 100, 1)
-            d["clf_n_test"] = int(ev.get("n_test") or 0)
-            tw = ev.get("test_window") or (None, None)
-            d["clf_test_window"] = f"{tw[0]} → {tw[1]}" if tw[0] else None
-        try:
-            imp = clf.feature_importance()
-            d["clf_top_feature"] = str(imp.index[0])
-            d["clf_top_importance"] = round(float(imp.iloc[0]) * 100, 0)
-        except Exception as exc:
-            _logger.info("feature importance unavailable: %s", exc)
 
     # ── Headline calibration (date only) ─────────────────────────────────────
     with _loader_boundary(d, "headline calibration"):
@@ -1303,7 +1329,8 @@ def load_page3() -> dict[str, Any]:
                          "unstable_by_maturity": {}}
     for k in ("n_unstable", "n_cells", "n_grid", "n_missing", "n_maturities", "as_of", "surface_date",
               "vomma_max", "vomma_max_at", "vomma_min", "vomma_min_at", "vomma_mean",
-              "provenance", "source_matches_headline", "greeks_age", "unstable_rule", "hedge"):
+              "provenance", "source_matches_headline", "greeks_age", "unstable_rule", "hedge",
+              "carry_by_maturity"):
         d[k] = None
     d.update(charts={}, greek_grids=[], scenario=None)
     gdf: pd.DataFrame | None = None
@@ -1428,6 +1455,19 @@ def load_page3() -> dict[str, Any]:
         # Provenance + staleness. The shipped surface records no source fit;
         # when it does (parquet metadata), compare with the headline calibration.
         d["provenance"] = prov or None
+        # Per-maturity carry (C23: Treasury r(T), q(T) from the fit's parity
+        # forwards); the surface then records no single r or q.
+        carry_raw = prov.get("carry")
+        carry: dict = carry_raw if isinstance(carry_raw, dict) else {}
+        crows = [c for c in carry.get("by_maturity") or []
+                 if isinstance(c, dict) and _num(c.get("r")) is not None and _num(c.get("q")) is not None]
+        d["carry_by_maturity"] = None
+        if crows:
+            d["carry_by_maturity"] = {
+                "r_lo": min(c["r"] for c in crows), "r_hi": max(c["r"] for c in crows),
+                "q_lo": min(c["q"] for c in crows), "q_hi": max(c["q"] for c in crows),
+                "t_lo": min(c["T_days"] for c in crows), "t_hi": max(c["T_days"] for c in crows),
+                "discount": carry.get("discount"), "n": len(crows)}
         if prov.get("params"):
             try:
                 _, hcal = load_headline_calibration()
@@ -2160,6 +2200,13 @@ def load_page4() -> dict[str, Any]:
         _record_error(d, "backtest inference artifacts (data_store/backtest/inference)", e)
     except Exception as e:
         _record_error(d, "research views", e)
+    # The demoted ML classifier and the rule-label distribution live here, not
+    # on the Overview: research prototypes stay off the first screen.
+    card = load_classifier_card()
+    for err in card.pop("errors"):
+        if err not in d["errors"]:
+            d["errors"].append(err)
+    d["clf"] = card
     return _clean_keep(d)
 
 
@@ -2239,6 +2286,22 @@ def calibration_extras(d: dict, cal: dict) -> None:
                      "oos": h["oos"], "rmse": h["rmse"], "vix": h["vix"]} for h in hist]
     diag = artifacts.calibration_diagnostics(cal, DATA, session)
     d["ident"] = diag
+    # Heston against rough Heston on every diagnosed session (summary.json):
+    # the same anchors, residuals, VIX leg and out-of-sample quotes per session.
+    try:
+        ds = artifacts.load_diagnostics_summary(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "calibration diagnostics summary (diagnostics/summary.json)", e)
+        ds = {"state": "error"}
+    d["rough_vs_heston"] = ds
+    if ds.get("state") == "ok":
+        jr = joint_fit_result(ds, session)
+        d["rough_vs_heston"] = {**ds, "result": jr, "rows": [
+            {**r, "rough_minus_heston": (
+                r["joint_rough_oos"] - r["sigma_cap2_oos"]
+                if r["joint_rough_oos"] is not None and r["sigma_cap2_oos"] is not None else None),
+             "rough_is_heston": r["joint_rough_H"] is not None and r["joint_rough_H"] >= 0.5 - 1e-9}
+            for r in ds["rows"]]}
     ident = diag.get("ident") if diag.get("state") == "ok" else {}
     se = (ident or {}).get("standard_errors") or {}
     pinned = set(d.get("pinned_params") or [])
@@ -2502,25 +2565,36 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
                                        key=lambda r: -r[1])[:10]]))
 
     d["scenario"] = artifacts.load_scenario_grid(DATA)
+    d["scenario_more"] = []
     if d["scenario"].get("state") == "ok":
-        g = d["scenario"]["grid"]
-        if "dynamics" in g.columns:
-            dyns = sorted(g["dynamics"].astype(str).unique())
+        g_all = d["scenario"]["grid"]
+        lim = float(g_all["pnl"].abs().max()) or 1.0      # one colour scale for every dynamics
+
+        def heat(g: pd.DataFrame) -> dict:
+            spots = sorted(g["spot_shock_pct"].unique())
+            vols = sorted(g["vol_shock_vp"].unique())
+            lut = {(float(a), float(b)): float(c) for a, b, c in
+                   zip(g["spot_shock_pct"].to_numpy(float), g["vol_shock_vp"].to_numpy(float),
+                       g["pnl"].to_numpy(float))}
+            return {
+                "cols": [signed(s, ".0f", "%") for s in spots],
+                "rows": [{"label": signed(v, ".0f", " vp"), "cells": [
+                    cell(signed(lut.get((float(s), float(v))), ",.0f"),
+                         pnl_colour(lut.get((float(s), float(v))), lim),
+                         detail=(f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vp')}: "
+                                 f"P&L {signed(lut.get((float(s), float(v))), ',.0f')}"))
+                    for s in spots]} for v in vols]}
+
+        g = g_all
+        if "dynamics" in g_all.columns:
+            dyns = sorted(g_all["dynamics"].astype(str).unique())
             dyn = "sticky_strike" if "sticky_strike" in dyns else dyns[0]
-            g = g[g["dynamics"].astype(str) == dyn]
+            g = g_all[g_all["dynamics"].astype(str) == dyn]
             d["scenario"]["dynamics_shown"], d["scenario"]["dynamics_all"] = dyn, dyns
-        spots = sorted(g["spot_shock_pct"].unique())
-        vols = sorted(g["vol_shock_vp"].unique())
-        lim = float(g["pnl"].abs().max()) or 1.0
-        lut = {(float(r.spot_shock_pct), float(r.vol_shock_vp)): float(r.pnl) for r in g.itertuples()}
-        d["scenario_heat"] = {
-            "cols": [signed(s, ".0f", "%") for s in spots],
-            "rows": [{"label": signed(v, ".0f", " vp"), "cells": [
-                cell(signed(lut.get((float(s), float(v))), ",.0f"),
-                     pnl_colour(lut.get((float(s), float(v))), lim),
-                     detail=(f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vp')}: "
-                             f"P&L {signed(lut.get((float(s), float(v))), ',.0f')}"))
-                for s in spots]} for v in vols]}
+            # the other dynamics (sticky-moneyness: the smile moves with the forward)
+            d["scenario_more"] = [{"dynamics": x, "heat": heat(g_all[g_all["dynamics"].astype(str) == x])}
+                                  for x in dyns if x != dyn]
+        d["scenario_heat"] = heat(g)
 
     # C7: daily-hedged 1-year ATM straddle through 2020, Greek P&L explain.
     try:
@@ -2874,69 +2948,156 @@ def inference_extras(d: dict, inf: dict) -> None:
 
 
 # ── Overview ──────────────────────────────────────────────────────────────────
-def key_results(p2: dict, p4: dict | None, hedge: dict | None, surf: dict, inf: dict) -> list[dict]:
-    """The three headline results, each with its interval or the reason it has none."""
+SURFACE_HEADLINE_MODEL = "svi_cal"   # the arbitrage-free (butterfly- and calendar-certified) surface
+
+
+def _range_txt(values: Iterable[Any], spec: str) -> str | None:
+    vals = [v for v in (_num(x) for x in values) if v is not None]
+    if not vals:
+        return None
+    return f"{_fmt(min(vals), spec)}–{_fmt(max(vals), spec)}"
+
+
+def surface_result(surf_oos: list[dict], session: str | None) -> dict | None:
+    """Key result 1: the quote-grade surface's held-out error in half-spreads.
+
+    The headline is the arbitrage-free SVI-cal surface's out-of-sample median
+    |model − mid| / half-spread on ``session`` (the newest surface session when
+    None), with Heston on the same session beside it and the range of the
+    surface's figure over every stored session. A range across sessions is not
+    a sampling interval and the card says so.
+    """
+    rows = [r for r in surf_oos if r["model"] == SURFACE_HEADLINE_MODEL]
+    if not rows:
+        return None
+    sessions = sorted({r["session"] for r in rows})
+    sess = session if session in sessions else sessions[-1]
+    cur = next(r for r in rows if r["session"] == sess)
+    hkey = heston_model_key(r["model"] for r in surf_oos if r["session"] == sess)
+    hes = next((r for r in surf_oos if r["session"] == sess and r["model"] == hkey), None)
+    return {
+        "session": sess, "n_sessions": len(sessions), "model": SURFACE_HEADLINE_MODEL,
+        "median_abs_hs": cur["median_abs_hs"], "inside_spread_pct": cur["inside_spread_pct"], "n": cur["n"],
+        "butterfly": cur["butterfly"], "calendar": cur["calendar"],
+        "range": _range_txt((r["median_abs_hs"] for r in rows), ".2f"),
+        "inside_range": _range_txt((r["inside_spread_pct"] for r in rows), ".0f"),
+        "heston": ({"median_abs_hs": hes["median_abs_hs"], "inside_spread_pct": hes["inside_spread_pct"],
+                    "n": hes["n"]} if hes else None),
+        "heston_range": _range_txt((r["median_abs_hs"] for r in surf_oos if r["model"] == hkey), ".1f"),
+    }
+
+
+def joint_fit_result(diag: dict, session: str | None) -> dict | None:
+    """Key result 2: the joint SPX/VIX fit out of sample, Heston and rough Heston.
+
+    From calibrations/diagnostics/summary.json: the production joint Heston
+    fit's out-of-sample SPX RMSE (``sigma_cap2_oos``) and the joint rough
+    Heston fit's on the same quotes, for ``session`` (the headline fit's) and
+    over every diagnosed session. "Lower" needs a margin of 0.01 vol pts; a
+    rough fit that returns H = 1/2 is Heston and is counted as the same fit.
+    """
+    if diag.get("state") != "ok":
+        return None
+    rows = [r for r in diag["rows"] if r["sigma_cap2_oos"] is not None and r["joint_rough_oos"] is not None]
+    if not rows:
+        return None
+    cur = next((r for r in rows if r["session"] == session), rows[-1])
+    lower = sum(1 for r in rows if r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01)
+    same = sum(1 for r in rows if r["joint_rough_H"] is not None and r["joint_rough_H"] >= 0.5 - 1e-9)
+    return {"session": cur["session"], "n_sessions": len(rows), "heston_oos": cur["sigma_cap2_oos"],
+            "rough_oos": cur["joint_rough_oos"], "rough_H": cur["joint_rough_H"],
+            "rough_H_on_bound": "H" in cur["joint_rough_on_bound"], "heston_on_bound": cur["on_bound"],
+            "heston_vix": cur["joint_heston_vix_index"], "rough_vix": cur["joint_rough_vix_index"],
+            "kappa_rse": _num((cur["relative_standard_errors"] or {}).get("kappa")),
+            "n_lower": lower, "n_same": same,
+            "heston_range": _range_txt((r["sigma_cap2_oos"] for r in rows), ".2f"),
+            "rough_range": _range_txt((r["joint_rough_oos"] for r in rows), ".2f")}
+
+
+def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf: dict) -> list[dict]:
+    """The Overview's three results, each with its interval or the reason it has none:
+    the quote-grade surface in half-spreads, the joint SPX/VIX fit (Heston and
+    rough Heston) out of sample, and the backtest Sharpe with its bootstrap
+    interval and the timing null."""
     out = []
-    # 1. surface fit: half-spread units when the surface artifacts exist, else the stored OOS RMSE
-    heston = None
-    if surf.get("state") == "ok":
-        hkey = heston_model_key(surf["models"])
-        rows = surf.get("scorecard_rows") or []
-        hrow = next((r for r in rows if r["model"] == hkey), None) if hkey else None
-        heston = dict(hrow["oos"], scope="out-of-sample") if hrow else (
-            artifacts.residual_stats(surf["residuals"], hkey) if hkey else None)
-        best = rows[0] if rows and rows[0]["model"] != hkey else None
-    if heston and _num(heston.get("median_abs_hs")) is not None:
-        scope = heston.get("scope")
-        ref = (f"; an interpolating {model_label(best['model'])} surface scores "
-               f"{_fmt(best['oos']['median_abs_hs'], '.2f')}" if best else "")
-        out.append({"key": ("Model vs market (out of sample)" if scope == "out-of-sample"
-                            else f"Model vs market ({scope or 'scope not stated'})"),
-                    "value": _fmt(heston["median_abs_hs"], ".1f"), "unit": "half-spreads",
-                    "detail": (f"Heston median |model − mid|, {_fmt(heston.get('n'), ',')} quotes of "
-                               f"{surf['session']}; {_fmt(heston.get('inside_spread_pct'), '.1f')}% "
-                               f"inside the bid–ask{ref}"),
-                    "ci": None,
-                    "ci_note": "no interval in the scorecard; one session, Yahoo quotes without a quote time",
-                    "href": "surface.html#scorecard", "source": f"data_store/surface/{surf['session']}/"})
+    # 1. the quote-grade surface, in units of the quoted half-spread
+    sr = surface_result(surf_oos, p2.get("session"))
+    if sr and _num(sr["median_abs_hs"]) is not None:
+        h = sr["heston"]
+        cert = (f"; {sr['butterfly']} butterfly and {sr['calendar']} calendar violations on its dense grid"
+                if sr["butterfly"] is not None and sr["calendar"] is not None else "")
+        out.append({
+            "key": "Quote-grade surface · held-out strikes",
+            "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
+            "detail": (f"Median |model − mid| of the arbitrage-free, calendar-ordered SVI surface on "
+                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}; "
+                       f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask{cert}."
+                       + (f" Heston on its own held-out quotes of that session: "
+                          f"{_fmt(h['median_abs_hs'], '.1f')} half-spreads, "
+                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside." if h else "")),
+            "ci": (f"Range over {sr['n_sessions']} stored sessions: {sr['range']} half-spreads "
+                   f"({sr['inside_range']}% inside)" if sr["n_sessions"] > 1 else None),
+            "ci_note": ("a range across sessions, not a sampling interval; held-out strikes sit between "
+                        "fitted ones (an interpolation test) and Yahoo quotes carry no quote time"),
+            "href": "surface.html#scorecard", "source": f"data_store/surface/{sr['session']}/scorecard.json"})
+    else:
+        out.append({"key": "Quote-grade surface · held-out strikes", "value": "—", "unit": "",
+                    "detail": "The surface report has not run for any stored session, so no model is scored "
+                              "in half-spreads yet.",
+                    "ci": None, "ci_note": "needs data_store/surface/<session>/scorecard.json "
+                                           "(scripts/surface_report.py), not yet generated",
+                    "href": "surface.html", "source": "data_store/surface/<session>/scorecard.json"})
+    # 2. the joint SPX/VIX fit out of sample: Heston against rough Heston
+    jr = joint_fit_result(diag, p2.get("session"))
+    if jr:
+        bound = " (σ on its box cap)" if "sigma" in (jr["heston_on_bound"] or []) else ""
+        h_txt = (f"H {_fmt(jr['rough_H'], '.2f')}{' on its floor' if jr['rough_H_on_bound'] else ''}"
+                 if jr["rough_H"] is not None else "H —")
+        n_txt = f"the {_fmt(p2.get('n_oos'), ',')}" if p2.get("session") == jr["session"] else "the"
+        out.append({
+            "key": "Joint SPX/VIX fit · out of sample",
+            "value": _fmt(jr["heston_oos"], ".2f"), "unit": "vol pts, Heston",
+            "detail": (f"SPX IV RMSE on {n_txt} quotes outside the fit, {jr['session']}, with the four VIX "
+                       f"indices in the objective{bound}. Rough Heston on the same quotes: "
+                       f"{_fmt(jr['rough_oos'], '.2f')} "
+                       f"({h_txt}); lower on {jr['n_lower']} of {jr['n_sessions']} sessions, and on "
+                       f"{jr['n_same']} it returns H = ½, i.e. Heston."),
+            "ci": (f"Range over {jr['n_sessions']} sessions: Heston {jr['heston_range']}, rough Heston "
+                   f"{jr['rough_range']} vol pts"
+                   + (f"; κ ±{_fmt(jr['kappa_rse'] * 100, '.0f')}% (Gauss–Newton curvature scale)"
+                      if jr["kappa_rse"] is not None else "")),
+            "ci_note": None, "href": "calibration.html#rough-vs-heston",
+            "source": "data_store/calibrations/diagnostics/summary.json"})
     elif p2.get("spx_oos_rmse") is not None:
-        rows = p2.get("oos_rows") or []
-        rng = (f"; per expiry {_fmt(min(r['rmse'] for r in rows), '.2f')}–"
-               f"{_fmt(max(r['rmse'] for r in rows), '.2f')}" if rows else "")
-        out.append({"key": "Model vs market (out of sample)",
-                    "value": _fmt(p2["spx_oos_rmse"], ".2f"), "unit": "vol pts RMSE",
-                    "detail": (f"Heston, {_fmt(p2.get('n_oos'), ',')} quotes not used in the fit"
-                               f" ({p2.get('session')}){rng}"),
-                    "ci": None, "ci_note": "half-spread units need the surface scorecard, not yet generated",
+        out.append({"key": "Joint SPX/VIX fit · out of sample",
+                    "value": _fmt(p2["spx_oos_rmse"], ".2f"), "unit": "vol pts, Heston",
+                    "detail": (f"SPX IV RMSE on the {_fmt(p2.get('n_oos'), ',')} quotes outside the fit "
+                               f"({p2.get('session')}), with the four VIX indices in the objective."),
+                    "ci": None, "ci_note": ("rough Heston and the range over sessions need the calibration "
+                                            "diagnostics (diagnostics/summary.json), not yet generated"),
                     "href": "calibration.html#oos",
                     "source": f"data_store/calibrations/{p2.get('calib_file')}"})
-    # 2. hedging: Greek P&L explain of the C7 hedged straddle
-    if hedge:
-        out.append({"key": "Hedged-straddle P&L explain",
-                    "value": _fmt(hedge["explained_share"] * 100, ".2f"), "unit": "% of variance",
-                    "detail": (f"Greek terms of a daily delta-hedged 1-year ATM straddle, "
-                               f"{hedge['start'][:4]} "
-                               f"({hedge['n']} sessions); residual RMS {_fmt(hedge['rms_resid'], '.2f')} vs "
-                               f"{_fmt(hedge['rms_total'], '.1f')} index pts"),
-                    "ci": None,
-                    "ci_note": ("one path, with the realised Δσ inside the Taylor terms: "
-                                "an accounting check, not a forecast"),
-                    "href": "risk.html#hedge", "source": "data_store/backtest/delta_hedge_2020.parquet"})
-    # 3. backtest: the portfolio Sharpe with its bootstrap interval and the S3 timing null
+    # 3. backtest: the portfolio Sharpe with its bootstrap interval, data snooping and timing nulls
     if p4 and p4.get("kpi"):
         k = p4["kpi"]
         ci = artifacts.bootstrap_ci(inf, "portfolio", "sharpe") if inf.get("state") == "ok" else None
-        s3 = (((inf.get("summary") or {}).get("nulls") or {}).get("sleeves") or {}).get("s3") if ci else None
+        summ = (inf.get("summary") or {}) if ci else {}
+        s3 = ((summ.get("nulls") or {}).get("sleeves") or {}).get("s3")
         circ = ((s3 or {}).get("circular") or {}).get("total_pnl") or {}
+        spa_pub = (summ.get("multiple_testing") or {}).get("spa_published")
+        spa = _num(spa_pub.get("p_consistent")) if isinstance(spa_pub, dict) else None
         if ci:
-            p_txt = (f"S3 timing vs {_fmt(circ.get('n_paths'), ',')} exposure-matched circular shifts: p "
+            p_txt = (f"S3 entry timing vs {_fmt(circ.get('n_paths'), ',')} exposure-matched circular "
+                     f"shifts: p "
                      f"{_fmt(_num(circ.get('p_value')), '.3f')} (Holm over 6 sleeves "
                      f"{_fmt(_num(circ.get('p_holm_6_sleeves')), '.2f')})"
                      if circ.get("p_value") is not None else "")
-            out.append({"key": "Backtest Sharpe (mark-to-model)",
+            spa_txt = (f"; Hansen SPA, published series vs cash: p {_fmt(spa, '.2f')}"
+                       if spa is not None else "")
+            out.append({"key": "Backtest Sharpe · mark-to-model",
                         "value": _fmt(ci["point"], "+.2f"), "unit": "portfolio",
-                        "detail": (f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]}, "
-                                   f"β·VIX marks; {p_txt}"),
+                        "detail": (f"{p4.get('start_date', '')[:4]}–{p4.get('end_date', '')[:4]}, straddles "
+                                   f"marked at β·VIX (no option prices in the window){spa_txt}. {p_txt}."),
                         "ci": (f"{_fmt(ci['level'] * 100, '.0f')}% CI {_fmt(ci['lo'], '+.2f')} to "
                                f"{_fmt(ci['hi'], '+.2f')} "
                                f"({ci.get('method') or 'bootstrap'}, {_fmt(ci.get('reps'), ',')} draws)"),
@@ -2956,6 +3117,39 @@ def key_results(p2: dict, p4: dict | None, hedge: dict | None, surf: dict, inf: 
     return out
 
 
+def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
+    """The newest stored Cboe book per underlying (data_store/options/cboe/*.json records)."""
+    root = Path(data_dir or DATA) / "options" / "cboe"
+    newest: dict[str, dict] = {}
+    for f in sorted(root.glob("*.json")) if root.is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"options/cboe/{f.name}: unreadable record ({exc})") from exc
+        und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
+        key = (str(rec.get("session")), str(rec.get("quote_time")))
+        if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
+            newest[und] = {**rec, "file": f.name}
+    return [newest[u] for u in sorted(newest)]
+
+
+def pipeline_state(diag: dict) -> dict:
+    """What the daily job has stored: books, fits, derived artifacts, the forward ledger."""
+    out: dict[str, Any] = {"captures": [], "fits": None, "fits_newest": None, "surface_sessions": [],
+                           "diag_sessions": [], "forward": None}
+    out["captures"] = latest_cboe_captures()
+    fits = [r for r in scan_calibrations() if r["legacy"] is False and r["ok"] and r["session"]]
+    out["fits"] = len(fits)
+    out["fits_newest"] = max((r["session"] for r in fits), default=None)
+    out["surface_sessions"] = artifacts.surface_sessions(DATA)
+    out["diag_sessions"] = [r["session"] for r in diag.get("rows") or []] if diag.get("state") == "ok" else []
+    try:
+        out["forward"] = artifacts.load_forward_ledger(DATA)
+    except artifacts.ArtifactError as e:
+        out["forward"] = {"state": "error", "message": str(e)}
+    return out
+
+
 def load_overview() -> dict[str, Any]:
     d = load_page1()
     d.setdefault("charts", {})
@@ -2969,11 +3163,6 @@ def load_overview() -> dict[str, Any]:
                                        "feller_state", "feller_margin", "n_spx_options", "n_spx_expiries",
                                        "calib_age", "model_version", "oos_rows", "n_oos")}
     d["fit"]["tiles"] = p2.get("param_tiles") or []
-    hedge_d: dict = {"errors": [], "charts": {}}
-    with _loader_boundary(d, "C7 hedge simulation"):
-        risk_extras(hedge_d, None)
-    for e in hedge_d.get("errors") or []:
-        d["errors"].append(e)
     p4 = None
     with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -2993,7 +3182,26 @@ def load_overview() -> dict[str, Any]:
     except artifacts.ArtifactError as e:
         _record_error(d, "backtest inference artifacts", e)
         inf = {"state": "error"}
-    d["key_results"] = key_results(p2, p4, hedge_d.get("hedge"), surf, inf)
+    surf_oos: list[dict] = []
+    try:
+        surf_oos = artifacts.surface_oos_by_session(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "surface scorecards", e)
+    try:
+        diag = artifacts.load_diagnostics_summary(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "calibration diagnostics summary", e)
+        diag = {"state": "error"}
+    d["key_results"] = key_results(p2, p4, surf_oos, diag, inf)
+    # What the σ ≤ 2 box costs the headline fit (its σ profile, when diagnosed)
+    row = next((r for r in diag.get("rows") or [] if r["session"] == p2.get("session")), None)
+    d["fit"]["free_sigma"] = ({"sigma": row["sigma_free"], "kappa": row["kappa_free"],
+                               "oos": row["sigma_free_oos"], "oos_cap": row["sigma_cap2_oos"],
+                               "loss_rel": row["sigma_free_loss_rel"]}
+                              if row and row["sigma_free"] is not None else None)
+    d["pipeline"] = None
+    with _loader_boundary(d, "pipeline state (options/cboe, calibrations, forward)"):
+        d["pipeline"] = pipeline_state(diag)
     if d.get("ts_values"):
         days = [int(t.rstrip("d")) for t in d["ts_tenors"]]
         d["charts"]["ts"] = charts.xy(
@@ -3445,6 +3653,18 @@ def load_corrections() -> dict[str, Any]:
         final = {"cum_ret": _num(em.get("cumulative_return")), "sharpe": _num(em.get("sharpe"))}
         if bridge and abs(float(bridge[-1]["sharpe"]) - (final["sharpe"] or 0.0)) > 1e-6:
             raise ValueError("c22_bridge.csv does not end at the stored run's Sharpe")
+    # The C23 data-correction waterfall: the C22 published run restated row by row
+    # on the Cboe record (c23_bridge.py), shown in the C23 postmortem.
+    d["c23_bridge"] = None
+    with _loader_boundary(d, "C23 bridge (c23_bridge.csv)"):
+        c23 = sorted(_read_csv_rows(DATA / "backtest" / "c23_bridge.csv"), key=lambda r: int(r["row"]))
+        if not c23:
+            raise ValueError("empty C23 bridge")
+        final_sharpe = (final or {}).get("sharpe")
+        if final_sharpe is not None and abs(float(c23[-1]["sharpe"]) - final_sharpe) > 1e-6:
+            raise ValueError("c23_bridge.csv does not end at the stored run's Sharpe")
+        d["c23_bridge"] = [{"row": int(r["row"]), "label": r["label"], "pnl": float(r["pnl"]),
+                            "d_pnl": float(r["d_pnl"]), "sharpe": float(r["sharpe"])} for r in c23]
     steps = {r["step"]: r for r in bridge or []}
     d["c21_pnl"] = (float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])) if bridge else None
     for rnd in reg["rounds"]:
@@ -3470,7 +3690,7 @@ def load_corrections() -> dict[str, Any]:
         r["n_tests"] = sum(len(f.get("tests") or []) for f in rnd["findings"])
         d["rounds"].append(r)
     # the page's data date (sitemap lastmod, X-Dashboard-Data-Date): its newest round
-    d["latest_round_date"] = max((str(r["date"]) for r in reg["rounds"]), default=None)
+    d["latest_round_date"] = max((str(r.get("date_end") or r["date"]) for r in reg["rounds"]), default=None)
     if bridge:
         d["charts"]["waterfall"] = waterfall_spec(bridge)
     pts = reg["headline_series"]["points"]
@@ -3489,7 +3709,7 @@ def load_corrections() -> dict[str, Any]:
         series=[{"name": "Published cumulative return", "type": "line", "color": "headline",
                  "symbol": "circle", "size": 7, "data": [v for _, v in hs]}],
         xs=[r for r, _ in hs], csv="headline_by_round.csv", grid={"top": 12},
-        describe="C17 to C21 as published in the README at the time; C22 from the stored canonical run.",
+        describe="C17 to C22 as published at the time; C23 from the stored canonical run.",
         table=charts.table("Published cumulative return by round (%)", ["Round", "Cumulative return#"],
                            [[r, signed(v, ".1f", "%")] for r, v in hs]))
     d["n_findings"] = sum(len(r["findings"]) for r in d["rounds"])

@@ -131,7 +131,7 @@
     {% if idn.sigma_profile %}
     <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="Sigma profile (scrollable)">
     <table class="tbl dense" id="sigma-profile"><caption>σ profile: the joint loss refitted under each cap on σ (κ ≤ {{ idn.kappa_max|fmt('.0f') }}); vol pts unless stated</caption>
-      <thead><tr><th scope="col" class="num">σ cap</th><th scope="col" class="num">σ</th><th scope="col" class="num">κ</th><th scope="col" class="num">Loss</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX (pts)</th></tr></thead>
+      <thead><tr><th scope="col" class="num">{{ 'σ cap'|sym }}</th><th scope="col" class="num">{{ 'σ'|sym }}</th><th scope="col" class="num">{{ 'κ'|sym }}</th><th scope="col" class="num">Loss</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX (pts)</th></tr></thead>
       <tbody>{% for r in idn.sigma_profile %}<tr><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
@@ -140,7 +140,7 @@
     {% if idn.spx_only %}
     <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="SPX-only model comparison (scrollable)">
     <table class="tbl dense" id="spx-only"><caption>SPX-only fits, same anchors, residuals and optimiser (the VIX index is then out of sample)</caption>
-      <thead><tr><th scope="col">Model</th><th scope="col" class="num">H</th><th scope="col" class="num">σ</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX OOS (pts)</th></tr></thead>
+      <thead><tr><th scope="col">Model</th><th scope="col" class="num">H</th><th scope="col" class="num">{{ 'σ'|sym }}</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX OOS (pts)</th></tr></thead>
       <tbody>{% for key, r in idn.spx_only.items() %}<tr><td>{{ {'heston': 'Heston, production box', 'heston_wide_box': 'Heston, wide box', 'rough_heston': 'Rough Heston (lifted)'}.get(key, key) }}</td><td class="num">{{ (r.params or {}).get('H')|fmt('.3f') }}</td><td class="num">{{ ((r.params or {}).get('sigma') or (r.params or {}).get('nu'))|fmt('.2f') }}</td><td class="num">{{ r.spx_iv_rmse_exact|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ (r.vix_index_rmse_oos if r.vix_index_rmse_oos is defined else r.vix_index_rmse)|fmt('.2f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
@@ -158,6 +158,26 @@
     </table>
     </div>
     <p class="note">In-sample and out-of-sample SPX IV RMSE in vol pts. Compare day-to-day moves with the standard errors in the identifiability panel.</p>
+  {% endcall %}
+</div>
+
+<div class="g">
+  {% call m.panel('rough-vs-heston', 'Heston vs rough Heston · joint fit, every diagnosed session', 's12', 'diagnostics/summary.json') %}
+    {% set rv = d.rough_vs_heston or {} %}
+    {% if rv.state == 'ok' %}{% set jr = rv.result %}
+    {% if jr %}<p class="note" id="rough-verdict">Rough Heston (lifted, 20 factors) is fitted with the same anchors, VIX leg, weights and parameter box as the production Heston fit, plus H ∈ [0.02, ½], by multi-start trust-region least squares. Its out-of-sample SPX error is lower on <strong>{{ jr.n_lower }} of {{ jr.n_sessions }}</strong> sessions; on {{ jr.n_same }} it returns H = ½, which is Heston. H is weakly identified{% if jr.rough_H_on_bound %} and sits on its 0.02 floor on {{ jr.session }}{% endif %}, so no Hurst exponent is read from these fits (compare arXiv:2401.03345).</p>{% endif %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Heston versus rough Heston by session (scrollable)">
+    <table class="tbl dense" id="rough-heston-table"><caption>Joint SPX/VIX fits by session: out-of-sample SPX IV RMSE (vol pts) on the same quotes, VIX-index RMSE (index pts), model VVIX against the market</caption>
+      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Heston OOS</th><th scope="col" class="num">Rough OOS</th><th scope="col" class="num">Rough − Heston</th><th scope="col" class="num">H</th><th scope="col" class="num">Heston VIX</th><th scope="col" class="num">Rough VIX</th><th scope="col" class="num">Lifting error (vp)</th><th scope="col" class="num">{{ 'Free-σ OOS'|sym }}</th><th scope="col" class="num">VVIX model / market</th></tr></thead>
+      <tbody>{% for r in rv.rows %}<tr{% if r.session == d.session %} class="em"{% endif %}><td>{{ r.session }}{% if 'sigma' in r.on_bound %} {{ m.chip('σ at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.sigma_cap2_oos|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_oos|fmt('.2f') }}</td><td class="num">{{ r.rough_minus_heston|signed('.2f') }}</td><td class="num">{{ r.joint_rough_H|fmt('.2f') }}{% if 'H' in r.joint_rough_on_bound %} {{ m.chip('on bound', 'watch') }}{% endif %}</td><td class="num">{{ r.joint_heston_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_lifting_error_estimate_max_vp|fmt('.3f') }}</td><td class="num">{{ r.sigma_free_oos|fmt('.2f') }}</td><td class="num">{{ r.vvix_model_cap2|fmt('.0f') }} / {{ r.vvix_market|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">Heston OOS is the production fit (σ ≤ 2); free-σ OOS refits it with σ ≤ 10 and κ ≤ 60 (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close: Heston needs a vol-of-vol that prices VVIX far above the market to fit the SPX skew. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.</p>
+    {% elif rv.state == 'absent' %}
+    {{ m.missing(rv, 'The joint Heston and rough Heston fits of every diagnosed session.') }}
+    {% else %}
+    <p class="note">The diagnostics summary failed its contract: see the error above.</p>
+    {% endif %}
   {% endcall %}
 </div>
 
@@ -198,7 +218,7 @@
     {% if q.heston %}{% set h = q.heston %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Heston versus Quintic OU on the same session (scrollable)">
     <table class="tbl" id="quintic-vs-heston">
-      <thead><tr><th scope="col">RMSE</th><th scope="col" class="num">Heston (own targets)</th><th scope="col" class="num">Heston on Quintic targets</th><th scope="col" class="num">Quintic OU</th><th scope="col" class="num">Δ, same targets</th></tr></thead>
+      <thead><tr><th scope="col">RMSE</th><th scope="col" class="num">Heston (own targets)</th><th scope="col" class="num">Heston on Quintic targets</th><th scope="col" class="num">Quintic OU</th><th scope="col" class="num">{{ 'Δ, same targets'|sym }}</th></tr></thead>
       <tbody>
         <tr><td>SPX implied vol (vol pts)</td><td class="num">{{ h.spx_rmse|fmt(".3f") }}{% if h.n_spx %} ({{ h.n_spx }}){% endif %}</td><td class="num">{{ h.spx_rmse_on_q|fmt(".3f") }}{% if h.n_spx_on_q %} ({{ h.n_spx_on_q }}){% endif %}</td><td class="num">{{ q.spx_rmse|fmt(".3f") }}{% if q.n_spx %} ({{ q.n_spx }}){% endif %}</td><td class="num">{{ h.spx_delta|signed(".3f") }}</td></tr>
         <tr><td>VIX forward (pts)¹</td><td class="num">not a target</td><td class="num">{{ h.vix_fwd_rmse_on_q|fmt(".3f") }}</td><td class="num">{{ q.vix_fwd_rmse|fmt(".3f") }}</td><td class="num">{{ h.vix_fwd_delta|signed(".3f") }}</td></tr>

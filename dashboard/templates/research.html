@@ -25,7 +25,7 @@
 
 <div class="page-head">
   <h1 class="page-title">Research · delta-hedged straddle backtest, <span class="nowrap">{{ d.start_date|fmt }} → {{ d.end_date|fmt }}</span>{% if d.eq_dates %} ({{ "{:,}".format(d.eq_dates|length) }} sessions){% endif %}</h1>
-  <p class="page-sub">Equal-weight S1C + S3 + S4 sleeves on $1M of collateral, after every correction from C16 to C22. A documented negative result.</p>
+  <p class="page-sub">Equal-weight S1C + S3 + S4 sleeves on $1M of collateral, after every correction from C16 to C23. A documented negative result.</p>
   <div class="page-badge">
     {% if d.final_nav is not none %}<span class="nowrap">Final NAV ${{ "{:,.0f}".format(d.final_nav) }}</span><span class="sep">·</span><span class="nowrap">P&amp;L {{ d.total_pnl|usd(true) }}</span><span class="sep">·</span><span class="nowrap">straddles marked at ATM vol = {{ beta_txt }} × VIX</span>{% else %}NAV —{% endif %}
   </div>
@@ -194,7 +194,7 @@
     {% if grid %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β sensitivity grid (scrollable)">
     <table class="tbl dense" id="beta-grid">
-      <thead><tr><th scope="col" class="num">β</th><th scope="col" class="num">Portfolio</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">S1C</th><th scope="col" class="num">S3</th><th scope="col" class="num">S4</th><th scope="col" class="num">S1 (ref)</th></tr></thead>
+      <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col" class="num">Portfolio</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">S1C</th><th scope="col" class="num">S3</th><th scope="col" class="num">S4</th><th scope="col" class="num">S1 (ref)</th></tr></thead>
       <tbody>{% for g in grid|sort(attribute='beta', reverse=true) %}{% set _canon = d.beta is not none and (g.beta - d.beta)|abs < 1e-9 %}{% set _all = be and (g.beta - (be.mean_all|round(2)))|abs < 1e-9 %}
         <tr data-beta="{{ g.beta|fmt('.2f') }}"{% if _canon %} class="em"{% endif %}><td class="num nowrap">{{ g.beta|fmt('.2f') }}{% if _canon %} ●{% endif %}{% if _all %} ◆{% endif %}</td><td class="num">{{ g.pnl|usd_k }}</td><td class="num">{{ g.sharpe|fmt('.2f') }}</td><td class="num">{{ g.s1c_pnl|usd_k }}</td><td class="num">{{ g.s3_pnl|usd_k }}</td><td class="num">{{ g.s4_pnl|usd_k }}</td><td class="num">{{ g.s1_pnl|usd_k }}</td></tr>{% endfor %}</tbody>
     </table>
@@ -216,7 +216,7 @@
       <p><strong>S1 · PDV short-VRP (reference):</strong> {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles sold in R1; worst trade {{ s1t.get('worst_pnl')|usd_k }} ({{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}). Selling straddles at the VIX books the skew premium as profit.</p>
       <p><strong>S1C · contrarian PDV</strong> flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. It stays a sleeve because the portfolio's composition is held fixed across correction rounds so they remain comparable. <strong>S4 · VRP</strong> enters on z_vrp declining from a peak; its P&amp;L on {{ yrs }} is {{ s4.get('total_pnl')|usd_k }}.</p>
       <p>Stress windows, each measured from the close before it opens: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} ({{ c.start|fmt }} → {{ c.end|fmt }}) {{ c.total_return|pct }}{{ '; ' if not loop.last else '' }}{% endfor %}. {% if d.end_date and d.end_date < '2025-04-02' %}The backtest ends {{ d.end_date }}, so the April 2025 tariff shock is <em>not</em> in it, and this is no evidence of resilience to it.{% endif %}</p>
-      <p>The C16–C22 corrections, each with its root cause, fix, tests and effect, are on the <a href="/corrections">Corrections</a> page.</p>
+      <p>The C16–C23 corrections, each with its root cause, fix, tests and effect, are on the <a href="/corrections">Corrections</a> page.</p>
     </div>
     {% endcall %}
   {% endcall %}
@@ -234,6 +234,41 @@
     </table>
     </div>
     {% endcall %}
+  {% endcall %}
+</div>
+
+<h2 class="section-title" id="research-prototypes">Research prototypes · not used for trading</h2>
+<div class="g">
+  {% set c = d.clf or {} %}
+  {% call m.panel('research-classifier', 'ML regime classifier · research only', 's6') %}
+    {% if c.clf_available %}
+    <p class="note">{{ m.chip('research only', 'watch') }} Next-session forecast from the features of {{ c.clf_feature_date }}: <strong>{{ c.clf_label }}</strong> at {{ c.clf_conf|fmt(".1f")|u('%') }}{% if c.clf_agrees == false %}, disagreeing with the rule label{% endif %}.
+    {% if c.clf_oos_acc is not none %}{{ c.clf_oos_acc|fmt|u('%') }} out-of-sample, it loses to the {{ c.clf_persistence_acc|fmt|u('%') }} “predict-yesterday” baseline{% else %}It loses to the “predict-yesterday” baseline{% endif %}, so it is <strong>not used for trading</strong>.</p>
+    <dl class="dl">
+      {% for lbl, pr in [('P(R0 long γ)', c.prob_r0), ('P(R1 short γ)', c.prob_r1), ('P(R2 vomma)', c.prob_r2)] %}<dt>{{ lbl }}</dt><dd>{{ pr|fmt(".1f")|u('%') }}</dd>{% endfor %}
+      <dt>Out-of-sample accuracy:</dt><dd><span class="v">{{ c.clf_oos_acc|fmt|u('%') }}</span></dd>
+      <dt>Persistence baseline:</dt><dd><span class="v">{{ c.clf_persistence_acc|fmt|u('%') }}</span></dd>
+      <dt>Features</dt><dd>{{ c.clf_n_features|fmt }} (vvix excluded — C16){% if c.clf_top_feature %}; top <code>{{ c.clf_top_feature }}</code> ({{ c.clf_top_importance|fmt(".0f")|u('%') }}){% endif %}</dd>
+    </dl>
+    {% call m.method('Why it is not used') %}
+    <p class="prose">Accuracy is the shipped model's own evaluation{% if c.clf_test_window %} on {{ c.clf_test_window }} ({{ c.clf_n_test|fmt(",") }} sessions, adaptive-gate rule labels){% endif %}{% if c.clf_feature_source == 'rv20_proxy' %}; its spread feature is the rv₂₀ proxy it was trained on{% endif %}. Regimes are persistent and observable on the day, so “predict yesterday's regime” is a strong no-skill baseline; C17 demoted the classifier when it lost to it and C22's retrain did not change that. The backtest trades the lagged rule labels; a Gaussian HMM in <code>regime_classifier.py</code> is research-only as well.</p>
+    {% endcall %}
+    {% else %}
+    <p class="note">ML classifier (research only): unavailable — see the error above. The rule label is unaffected.</p>
+    {% endif %}
+  {% endcall %}
+
+  {% call m.panel('label-history', 'Rule-label distribution', 's6', c.reg_span) %}
+    {% if c.reg_total %}
+    <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+      {% for k_, name in [(0, 'R0 long gamma'), (1, 'R1 short gamma'), (2, 'R2 vomma active')] %}
+      {{ m.kpi(name, c['reg%d_pct' % k_]|fmt('.1f'), unit='%', sub=(c['reg%d_n' % k_]|fmt(',')) ~ ' of ' ~ (c.reg_total|fmt(',')) ~ ' sessions') }}
+      {% endfor %}
+    </div>
+    <p class="note">Share of sessions under each rule label since {{ (c.reg_span or '—')[:4] }}; the adaptive R2 gate is the only gate in every path (C22). The rule label, not the classifier, is what the backtest trades.</p>
+    {% else %}
+    <p class="note">Rule labels unavailable — see the error above.</p>
+    {% endif %}
   {% endcall %}
 </div>
 {% endblock %}

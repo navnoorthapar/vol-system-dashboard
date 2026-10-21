@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
-{% block og_title %}Corrections C16–C22 — SPX/VIX Vol Research{% endblock %}
+{% block og_title %}Corrections C16–C23 — SPX/VIX Vol Research{% endblock %}
 {% block og_description %}Every correction round as a postmortem: symptom, root cause, detection, fix, the regression tests that pin it, the commit and its effect on the published result, with the C22 waterfall.{% endblock %}
 
 {% block content %}
@@ -32,18 +32,18 @@
 <div class="page-head">
   <h1 class="page-title" id="audit-title">{{ d.rounds[0].id if d.rounds else 'C16' }}–{{ d.rounds[-1].id if d.rounds else 'C22' }} corrections — {{ all_f|length }} findings, {{ n_fixed }} fixed, {{ n_quant }} quantified</h1>
   <p class="page-sub">Each round as a blameless postmortem: what was wrong, why, how it was found, the fix, the tests that now pin it and what it did to the published result. Every successive fix made the backtest worse; the original edge was a stack of artifacts.</p>
-  <div class="page-badge"><span class="nowrap">{{ d.n_tests }} regression tests cited</span><span class="sep">·</span><span class="nowrap">{{ d.rounds|map(attribute='commit_links')|map('length')|sum }} commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span></div>
+  <div class="page-badge"><span class="nowrap">{{ d.n_tests }} regression tests cited</span><span class="sep">·</span><span class="nowrap">{{ d.rounds|map(attribute='commit_links')|map('length')|sum }} commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span><span class="sep">·</span><span class="nowrap">C23 from <code>c23_bridge.csv</code></span></div>
 </div>
 
 <div class="g">
   {% call m.panel('waterfall', 'C22 waterfall · portfolio P&L, one correction at a time', 's8', '$000s') %}
     {% if d.charts.waterfall %}{{ m.chart(d.charts.waterfall, 'h400') }}{% endif %}
     {% set _rb = (b.rows or {}).get('beta') %}{% set _rg = (b.rows or {}).get('r2_gate') %}
-    <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative).{% if _rb and _rb.prev %} The β step moves it by {{ _rb.d_pnl|usd_k }} (S1C {{ _rb.prev.s1c_pnl|usd_k }} → {{ _rb.s1c_pnl|usd_k }}, S1 {{ _rb.prev.s1_pnl|usd_k }} → {{ _rb.s1_pnl|usd_k }}){% endif %}{% if _rg %}; the single R2 gate by {{ _rg.d_pnl|usd_k }}{% endif %}.</p>
+    <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative), replayed on the C23-restated VIX record, so the last bar is today's canonical run; the published C22 run ended at −$216,092 and the C23 table below accounts for the difference.{% if _rb and _rb.prev %} The β step moves it by {{ _rb.d_pnl|usd_k }} (S1C {{ _rb.prev.s1c_pnl|usd_k }} → {{ _rb.s1c_pnl|usd_k }}, S1 {{ _rb.prev.s1_pnl|usd_k }} → {{ _rb.s1_pnl|usd_k }}){% endif %}{% if _rg %}; the single R2 gate by {{ _rg.d_pnl|usd_k }}{% endif %}.</p>
   {% endcall %}
   {% call m.panel('headline', 'Published result after each round', 's4') %}
     {% if d.charts.headline %}{{ m.chart(d.charts.headline, 'h300') }}{% endif %}
-    <p class="note">C16 published no portfolio figure; C19 and C20 left it unchanged.</p>
+    <p class="note">C16 published no portfolio figure; C19 and C20 left it unchanged; C23 is the stored canonical run.</p>
   {% endcall %}
 </div>
 
@@ -55,13 +55,24 @@
       <span class="pm-id">{{ r.id }}</span>
       <h3 class="pm-title" id="{{ r.id|lower }}-t">{{ r.title|sym }}</h3>
       {{ m.chip(r.severity ~ ' severity', 'breach' if r.severity == 'high' else ('watch' if r.severity == 'medium' else 'ok')) }}
-      <span class="pm-date">{{ r.date }}</span>
+      <span class="pm-date">{{ r.date }}{% if r.date_end and r.date_end != r.date %} → {{ r.date_end }}{% endif %}</span>
     </div>
     <div class="pm-grid">
       <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">{{ r.detection }}</div></div>
       <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">{{ r.components|join(', ') }} · {% for c in r.commit_links %}<a href="{{ c.url }}"><code>{{ c.short }}</code></a>{{ ', ' if not loop.last else '' }}{% endfor %}</div></div>
       <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">{% if r.effect %}{{ r.effect }}{% elif r.effect_from_bridge and d.c21_pnl is not none %}Portfolio P&amp;L {{ d.c21_pnl|usd(true) }} (C21 as published) → {{ p4.total_pnl|usd(true) }} (final NAV {{ p4.final_nav|usd }}), Sharpe {{ k.get('sharpe')|fmt('.2f') }} after the bridge's {{ (b.rows or {})|length }} steps; the waterfall above shows each step{% else %}—{% endif %}</div></div>
     </div>
+    {% if r.id == 'C23' and d.c23_bridge %}
+    <div class="pm-cell" style="border-right:none;">
+      <div class="pm-k">C23 waterfall · the C22 run restated on the Cboe record (<code>c23_bridge.csv</code>)</div>
+      <div class="tbl-wrap" tabindex="0" role="region" aria-label="C23 waterfall (scrollable)">
+      <table class="tbl dense" id="c23-bridge">
+        <thead><tr><th scope="col" class="num">Row</th><th scope="col">Step (cumulative)</th><th scope="col" class="num">Portfolio P&amp;L</th><th scope="col" class="num">{{ 'Δ P&L'|sym }}</th><th scope="col" class="num">Sharpe</th></tr></thead>
+        <tbody>{% for x in d.c23_bridge %}<tr><td class="num">{{ x.row }}</td><td class="wrap">{{ x.label }}</td><td class="num">{{ x.pnl|usd(true) }}</td><td class="num">{{ x.d_pnl|usd(true) if x.row else '' }}</td><td class="num">{{ x.sharpe|fmt('.3f') }}</td></tr>{% endfor %}</tbody>
+      </table>
+      </div>
+    </div>
+    {% endif %}
     {% for f in r.findings %}
     <div class="pm-cell" data-status="{{ f.status }}" style="border-right:none;">
       <div class="pm-k">Finding {{ loop.index }} · {{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}</div>
