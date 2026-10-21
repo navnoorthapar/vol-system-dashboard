@@ -88,6 +88,7 @@ import pathlib
 import pickle
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -112,6 +113,12 @@ ARTIFACT_PARTS = ("surface", "diagnostics", "greeks", "scenario")
 # Sessions whose missing artifacts one run rebuilds (backfill_session_artifacts):
 # the diagnostics take ~4 min a session, the job has 45 (an accepted fit ~5).
 MAX_BACKFILL_SESSIONS = 2
+# The backfill's share of the 45-minute job, and how long the whole refresh may
+# have run before the backfill gives way: the gates, the commits and the deploy
+# come after it, and a job that hits its timeout is cancelled before the step
+# that uploads the captures. A diagnostics part gets at most what is left.
+BACKFILL_BUDGET_S = 12 * 60
+REFRESH_BUDGET_S = 25 * 60
 
 
 def _bootstrap_path() -> None:
@@ -837,11 +844,14 @@ def artifact_gaps(headline_path: "str | None") -> dict:
 
 
 def backfill_session_artifacts(headline_path: "str | None", skip=(),
-                               max_sessions: int = MAX_BACKFILL_SESSIONS) -> dict:
+                               max_sessions: int = MAX_BACKFILL_SESSIONS,
+                               budget_s: float = BACKFILL_BUDGET_S, clock=time.monotonic) -> dict:
     """Rebuild what artifact_gaps finds missing or stale, newest session first,
-    at most ``max_sessions`` sessions a run (the rest are 'deferred' to the
-    next run). ``skip``: sessions this run already rebuilt (an accepted fit's
-    failed part is not retried in the same run).
+    at most ``max_sessions`` sessions a run and within ``budget_s`` seconds (a
+    session is started only with a minute left, and its diagnostics get at most
+    what is left); the rest are 'deferred' to the next run. ``skip``: sessions
+    this run already rebuilt (an accepted fit's failed part is not retried in
+    the same run).
 
     The artifacts used to be built only by the run that accepted the fit: when
     a part failed there (the diagnostics' 20-minute timeout), or the artifact
@@ -853,11 +863,17 @@ def backfill_session_artifacts(headline_path: "str | None", skip=(),
     Returns {"gaps": {session: [parts]}, "rebuilt": {session: {part: result}},
     "deferred": [sessions]}."""
     gaps = {s: p for s, p in artifact_gaps(headline_path).items() if s not in set(skip)}
-    todo = list(gaps)[:max_sessions]
-    out: dict = {"gaps": gaps, "rebuilt": {}, "deferred": list(gaps)[max_sessions:]}
-    for sess in todo:
-        log.info("  backfill: %s for %s", ", ".join(gaps[sess]), sess)
-        out["rebuilt"][sess] = refresh_session_artifacts(sess, headline_path, parts=tuple(gaps[sess]))
+    out: dict = {"gaps": gaps, "rebuilt": {}, "deferred": []}
+    t0 = clock()
+    for i, sess in enumerate(gaps):
+        left = budget_s - (clock() - t0)
+        if i >= max_sessions or left < 60:
+            out["deferred"].append(sess)
+            continue
+        log.info("  backfill: %s for %s (%.0f s left)", ", ".join(gaps[sess]), sess, left)
+        out["rebuilt"][sess] = refresh_session_artifacts(
+            sess, headline_path, parts=tuple(gaps[sess]),
+            diagnostics_timeout=min(DIAGNOSTICS_TIMEOUT_S, left))
     return out
 
 
@@ -1293,6 +1309,7 @@ def _parse_args(argv):
 def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
          calibrate_kwargs: "dict | None" = None) -> int:
     """Run the selected steps; return the process exit status."""
+    run_t0 = time.monotonic()
     args, steps = _parse_args(argv if argv is not None else sys.argv[1:])
     _bootstrap_path()
     os.chdir(ROOT)
@@ -1489,7 +1506,8 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
             try:
                 head = status.get("headline_calibration") or {}
                 done = [status["calibration"]["session"]] if accepted else []
-                bf = backfill_session_artifacts(head.get("path"), skip=done)
+                budget = min(BACKFILL_BUDGET_S, REFRESH_BUDGET_S - (time.monotonic() - run_t0))
+                bf = backfill_session_artifacts(head.get("path"), skip=done, budget_s=budget)
             except Exception as e:  # reported; the captures and the fit stand
                 log.exception("artifact backfill crashed")
                 bf = {"gaps": {}, "rebuilt": {}, "deferred": [], "error": f"{type(e).__name__}: {e}"}

@@ -676,6 +676,37 @@ def test_backfill_rebuilds_newest_first_and_defers_the_rest(env, monkeypatch):
         env._real_refresh_session_artifacts(SESSION, None, parts=("bogus",))
 
 
+def test_the_backfill_keeps_to_its_time_budget(env, monkeypatch):
+    """A job that reaches its 45-minute timeout is cancelled before the step that
+    uploads the captures, so the backfill has a budget: a session is started only
+    with a minute left, its diagnostics get at most what is left, the rest waits
+    for the next run; main() shrinks the budget by what the run already used."""
+    gaps = {"2026-09-23": ["diagnostics"], "2026-09-22": ["diagnostics"]}
+    monkeypatch.setattr(env, "artifact_gaps", lambda head: dict(gaps))
+    now = [0.0]
+    seen = []
+
+    def rebuild(s, h, parts=None, diagnostics_timeout=None, **kw):
+        seen.append((s, diagnostics_timeout))
+        now[0] += 500.0                                   # this session took 500 s
+        return {p: {"ok": True} for p in parts}
+    monkeypatch.setattr(env, "refresh_session_artifacts", rebuild)
+    out = env.backfill_session_artifacts("h.pkl", budget_s=530.0, clock=lambda: now[0])
+    assert seen == [("2026-09-23", 530.0)]
+    assert out["deferred"] == ["2026-09-22"]                 # 30 s left: not started
+    seen.clear()
+    out = env.backfill_session_artifacts("h.pkl", budget_s=5000.0, clock=lambda: now[0])
+    assert [s for s, _ in seen] == ["2026-09-23", "2026-09-22"]
+    assert seen[0][1] == env.DIAGNOSTICS_TIMEOUT_S           # capped by the part's own timeout
+    budgets = []
+    monkeypatch.setattr(env, "backfill_session_artifacts",
+                        lambda head, skip=(), budget_s=None, **kw: budgets.append(budget_s) or
+                        {"gaps": {}, "rebuilt": {}, "deferred": []})
+    _run(env, "calibrate")
+    assert len(budgets) == 1
+    assert 0 < budgets[0] <= env.BACKFILL_BUDGET_S
+
+
 def test_a_greeks_write_that_dies_keeps_the_previous_surface(env, monkeypatch):
     """PROD-3: save_greeks_surface writes in place; a crash mid-write left a
     surface without its provenance, which the data gate then tripped on. The
