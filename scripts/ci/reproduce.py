@@ -69,6 +69,7 @@ PROVENANCE_KEYS = {"methods", "chain_diagnostics"}
 TOLERANCES = {
     "backtest": 1e-10,
     "greeks": 1e-10,
+    "scenario": 1e-10,
     "c7": 1e-10,
     "calibration": 1e-6,
     "beta_grid": 1e-9,      # CSV written at 10 significant digits
@@ -310,21 +311,38 @@ def v2_sessions(root: Path) -> list[str]:
     return out
 
 
+def source_calibration(root: Path, artifact: str, key: bytes) -> str:
+    """The calibration a committed parquet artifact names in its provenance
+    (metadata ``key``, source.calibration_file): the headline fit it was built
+    from. The daily bot rebuilds the Greeks surface and the scenario grid from
+    each new headline fit, so the input is read, not typed."""
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(root / DS / artifact).metadata or {}
+    return str(root / json.loads(meta[key])["source"]["calibration_file"])
+
+
 def build_steps(root: Path) -> list[Step]:
     py = sys.executable
     bt = f"{DS}/backtest"
+    greeks_cal = source_calibration(root, "greeks/greeks_surface.parquet", b"greeks_provenance")
     steps = [
         Step("backtest", [py, "-c", _BACKTEST],
              [(f"{bt}/full_results.parquet", "backtest", {}),
               # the 200-path S3 null test is the --full step "s3_null"
               (f"{bt}/full_results.pkl", "backtest", {"skip": {"metrics.s3_null_p_value"}})]),
-        # input: the COMMITTED headline fit (the refit step may be rewriting the copy)
+        # input: the COMMITTED fit the surface names (the refit step may be rewriting the copy)
         Step("greeks", [py, "-m", "joint_vol_calibration.greeks.risk_monitor", "--calibration",
-                        str(root / DS / "calibrations" / "joint_cal_2026-10-16.pkl")],
+                        greeks_cal],
              [(f"{DS}/greeks/greeks_surface.parquet", "greeks", {})]),
         Step("c7", [py, "-m", "joint_vol_calibration.backtest.run_backtest", "--c7"],
              [(f"{bt}/delta_hedge_2020.parquet", "c7", {})]),
     ]
+    if (root / DS / "greeks" / "scenario_grid.parquet").exists():
+        steps.append(Step("scenario", [py, "-m", "joint_vol_calibration.greeks.scenario_grid",
+                                       "--calibration",
+                                       source_calibration(root, "greeks/scenario_grid.parquet",
+                                                          b"scenario_provenance")],
+                          [(f"{DS}/greeks/scenario_grid.parquet", "scenario", {})]))
     steps.extend(Step(f"calibration-{s}", [py, "-c", _REFIT.format(session=s)],
                       [(f"{DS}/calibrations/joint_cal_{s}.pkl", "calibration",
                         {"skip": VOLATILE_KEYS, "optional": OPTIONAL_KEYS, "provenance": PROVENANCE_KEYS})])

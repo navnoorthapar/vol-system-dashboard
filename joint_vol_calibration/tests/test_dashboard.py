@@ -1475,6 +1475,32 @@ def test_pdv_features_use_returns_rebuilt_from_closes(dash, synth):
     assert d["pdv_forecast"] == pytest.approx(_synth_walk_forward(synth).iloc[-1] * 100, abs=0.006)
 
 
+def test_scenario_panel_renders_the_shipped_grid(dash, pages):
+    """The Risk page's scenario panel shows the producer's grid
+    (greeks/scenario_grid.py): the sticky-strike cells, every one, with the
+    book, date and units from the file's provenance. Read from the file, not
+    typed: the daily bot regenerates it from each new headline fit."""
+    from joint_vol_calibration.greeks.scenario_grid import load_scenario_grid
+    path = SHIPPED / "greeks" / "scenario_grid.parquet"
+    if not path.exists():
+        pytest.skip("scenario_grid.parquet not generated")
+    g = load_scenario_grid(path)
+    prov = g.attrs["provenance"]
+    html = pages["/risk"]
+    table = re.search(r'<table class="heat" id="scenario-grid".*?</table>', html, re.DOTALL).group(0)
+    ss = g[g["dynamics"] == "sticky_strike"]
+    assert table.count("<td ") == len(ss)
+    for row in ss.itertuples():
+        assert f"P&amp;L {dash.signed(row.pnl, ',.0f')}" in table or \
+            f"P&L {dash.signed(row.pnl, ',.0f')}" in table
+    text = _visible_text(html)
+    assert prov["book"] in text
+    assert f"as of {prov['as_of_date']}" in text
+    assert "sticky-strike dynamics shown (the file also holds sticky-moneyness)" in text
+    assert prov["units"] in text
+    assert "Artifact not yet generated" not in text.split("Scenario grid")[1].split("QV convexity")[0]
+
+
 def test_unstable_nodes_follow_the_surfaces_recorded_rule(dash, pages):
     """load_page3 re-derived the flag as |z| > 2 (5 of 79 nodes when this was
     found) instead of the surface's own vomma-P&L-ratio rule; the expected count

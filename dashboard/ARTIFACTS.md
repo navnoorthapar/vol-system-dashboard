@@ -9,7 +9,7 @@ for the artifacts added in C23, written against what their producers write:
 | `data_store/calibrations/diagnostics/<session>.json` | `scripts/calibration_diagnostics.py` | `schema_version` 1 |
 | `data_store/backtest/inference/` | `scripts/inference_report.py` (`joint_vol_calibration/stats`) | `inference_summary/1` |
 | `data_store/forward/ledger_<session>.json` | `joint_vol_calibration/backtest/forward_ledger.py` | `forward_ledger/1` |
-| `data_store/greeks/scenario_grid.parquet` | the risk monitor (no producer yet) | section 5 |
+| `data_store/greeks/scenario_grid.parquet` | `joint_vol_calibration/greeks/scenario_grid.py` (the daily bot rebuilds it from each new headline fit) | section 5 |
 
 `dashboard/desk_artifacts.py` is the executable form of this file. If the two
 disagree, the code is what runs, and this file should be fixed to match it.
@@ -128,7 +128,7 @@ The headline result pickle's own `identifiability` and `multistart` keys win whe
 
 ## 5. Scenario grid: `data_store/greeks/scenario_grid.parquet`
 
-**Producer:** none yet. **Consumer:** the Risk page "Scenario grid" panel, which shows "not yet generated" until it exists.
+**Producer:** `python -m joint_vol_calibration.greeks.scenario_grid --calibration <joint_cal_*.pkl>` (the reference book: a 30-day straddle struck at the forward, delta-hedged at inception, revalued in full on the fit's smile; 9 spot × 6 vol shocks × 2 dynamics). **Consumer:** the Risk page "Scenario grid" panel, which shows "not yet generated" until it exists.
 
 | Column | Meaning |
 |---|---|
@@ -138,7 +138,7 @@ The headline result pickle's own `identifiability` and `multistart` keys win whe
 | `dynamics` | Optional: `sticky_strike`, `sticky_moneyness` and so on. The page shows `sticky_strike` when present, otherwise the first value in sorted order, and names the others. |
 
 - `(spot_shock_pct, vol_shock_vp[, dynamics])` must be unique.
-- Parquet key-value metadata `b"scenario_provenance"` holds a JSON object with `book` (description), `as_of_date` and `units`. These are shown under the grid.
+- Parquet key-value metadata `b"scenario_provenance"` holds a JSON object with `book` (description), `as_of_date` and `units`. These are shown under the grid. The producer also records `source.calibration_file`, the parameters, carry, strike, forward, hedge delta, the shock lists and `n_vol_floored`, and writes the extra columns `spot`, `iv_strike`, `straddle_value`, `hedge_pnl` and `vol_floored`.
 
 ## Producing an artifact
 

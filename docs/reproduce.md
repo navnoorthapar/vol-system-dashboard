@@ -1,7 +1,7 @@
 # Reproducing the committed artifacts
 
 ```bash
-make reproduce           # backtest, Greeks surface, C7 study, the five model_version 2 calibrations
+make reproduce           # backtest, Greeks surface, scenario grid, C7 study, the model_version 2 calibrations
 make reproduce-full      # + the β grid (6 backtests), the C22 waterfall (15 rows) and the 200-path S3 null test
 python scripts/ci/reproduce.py --only greeks,c7      # a subset; --jobs N, --keep, --out DIR
 ```
@@ -14,7 +14,8 @@ the result with the committed file:
 | Artifact | Command | Compared | Tolerance (relative to each column's or value's scale) |
 |---|---|---|---|
 | `backtest/full_results.parquet`, `.pkl` | the canonical `BacktestEngine` run (`run_backtest` without the S3 null test and sub-period windows) | every column; every metric except `s3_null_p_value`, the trade log, the settings | 1e-10 |
-| `greeks/greeks_surface.parquet` | `risk_monitor --calibration joint_cal_2026-10-16.pkl` (the committed fit) | every column | 1e-10 |
+| `greeks/greeks_surface.parquet` | `risk_monitor --calibration <the fit its provenance names>` (the headline fit: 2026-10-16 until the daily bot accepts a newer one and rebuilds it) | every column | 1e-10 |
+| `greeks/scenario_grid.parquet` | `python -m joint_vol_calibration.greeks.scenario_grid --calibration <the fit its provenance names>` | every column | 1e-10 |
 | `backtest/delta_hedge_2020.parquet` | `run_backtest --c7` | every column | 1e-10 |
 | `calibrations/joint_cal_<session>.pkl` × 5 | `JointCalibrator(as_of_date=<session>, **recorded_inputs(<committed fit>)).calibrate(); save()` (the VIX targets and the reference rate the fit recorded: C23 restated the database's VIX family, and new fits discount on the Treasury curve) | every field except `fit_time` and `run_utc`; `methods` and `chain_diagnostics` reported, not failed (below) | 1e-6 |
 | `backtest/beta_sensitivity.csv` (`--full`) | `run_backtest --beta-sensitivity` | every cell | 1e-9 (10 significant digits) |
