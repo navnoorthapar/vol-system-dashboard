@@ -2100,7 +2100,9 @@ def test_overview_key_results_are_read_from_the_shipped_artifacts(dash, pages):
     assert f"Range over {len(svi)} stored sessions: {lo:.2f}–{hi:.2f} half-spreads" in t1
     t2 = _card(pages["/"], "calibration.html#rough-vs-heston")
     summ = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
-    row = next(r for r in summ if r["session"] == head)
+    # the headline fit's own row; the newest diagnosed session when the bot's (fail-soft)
+    # diagnostics for a new fit are missing, as the card itself falls back
+    row = next((r for r in summ if r["session"] == head), max(summ, key=lambda r: r["session"]))
     assert "Joint SPX/VIX fit · out of sample" in t2
     assert f"{row['sigma_cap2_oos']:.2f} vol pts, Heston" in t2
     assert f"Rough Heston on the same quotes: {row['joint_rough_oos']:.2f}" in t2
@@ -2170,6 +2172,20 @@ def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
     # Greek letters in upper-cased headings and chips keep their case (σ, not Σ)
     assert re.search(r'<span class="chip chip-watch"><span class="sym">σ</span> at cap</span>', html)
     assert '<th scope="col" class="num">σ' not in html
+
+
+def test_inventory_does_not_claim_flat_carry_for_the_per_maturity_greeks():
+    """M2's limitation said 'Flat carry across maturities' after the Greeks surface
+    moved to per-maturity carry (C23); the inventory must describe the shipped surface."""
+    import pyarrow.parquet as pq
+
+    meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
+    prov = json.loads(meta[b"greeks_provenance"])
+    models = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
+    inv = {m["id"]: m for m in models}
+    if (prov.get("carry") or {}).get("by_maturity"):
+        assert "flat carry" not in inv["M2"]["limitations"].lower()
+        assert "per maturity" in inv["M2"]["limitations"]
 
 
 def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
