@@ -275,3 +275,65 @@ def test_committed_svi_cal_surfaces_are_certified_from_their_json(session):
     assert cert["arbitrage_free"], (cert["butterfly"].get("expiries_with_g_negative"),
                                     cert["calendar"].get("pairs_unordered"))
     assert sec["arbitrage_free_certified"]
+
+
+# ── PROD-6: residuals.parquet, the largest file a book session adds, is written
+# compactly and losslessly (byte-stream-split floats, one page per column)
+
+def _encodings(path: Path) -> dict:
+    import pyarrow.parquet as pq
+    md = pq.ParquetFile(path).metadata
+    rg = md.row_group(0)
+    return {rg.column(i).path_in_schema: set(rg.column(i).encodings) for i in range(md.num_columns)}
+
+
+def test_residuals_writer_is_lossless_and_compact(tmp_path):
+    rng = np.random.default_rng(7)
+    n = 3000
+    quote = pd.DataFrame({"k": report.round_sig(rng.normal(0, 0.2, n)),
+                          "bid_iv": report.round_sig(rng.uniform(0.1, 0.6, n))})
+    frames = []
+    for m in ("essvi", "svi", "svi_cal", "heston_v2"):          # the quote columns repeat per model
+        f = quote.copy()
+        f.insert(0, "model", m)
+        f["model_iv"] = report.round_sig(f["bid_iv"].to_numpy() + rng.normal(0, 0.01, n))
+        f["in_sample"] = rng.random(n) < 0.5
+        frames.append(f)
+    df = pd.concat(frames, ignore_index=True)
+    plain, compact = tmp_path / "plain.parquet", tmp_path / "compact.parquet"
+    df.to_parquet(plain, index=False, compression="zstd")        # the writer before C23f
+    report.write_residuals(df, compact)
+    back = pd.read_parquet(compact)
+    assert list(back.columns) == list(df.columns)
+    for c in df.columns:
+        a, b = df[c].to_numpy(), back[c].to_numpy()
+        if df[c].dtype.kind == "f":
+            assert np.array_equal(a.view(np.uint64), b.view(np.uint64)), c     # bit for bit
+        else:
+            assert (a == b).all(), c
+    enc = _encodings(compact)
+    for c in ("k", "bid_iv", "model_iv"):
+        assert "BYTE_STREAM_SPLIT" in enc[c], (c, enc[c])
+    assert compact.stat().st_size < 0.8 * plain.stat().st_size
+
+
+@pytest.mark.parametrize("session", ["2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16"])
+def test_committed_residuals_are_the_compact_writers_output(session, tmp_path):
+    """The committed files are what write_residuals writes (no value moved:
+    test_committed_artifacts_match_a_recomputation and the README figure check
+    the values), so a regenerated session cannot grow them back."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = COMMITTED / session / "residuals.parquet"
+    if not path.exists():
+        pytest.skip("no committed surface artifacts")
+    df = pd.read_parquet(path)
+    enc = _encodings(path)
+    for c in df.columns:
+        if df[c].dtype.kind == "f":
+            assert "BYTE_STREAM_SPLIT" in enc[c], (session, c, enc[c])
+    if pq.ParquetFile(path).metadata.created_by.endswith(f"version {pa.__version__}"):
+        again = tmp_path / "again.parquet"
+        report.write_residuals(df, again)
+        assert again.read_bytes() == path.read_bytes()

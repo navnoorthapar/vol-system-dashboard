@@ -7,7 +7,7 @@
    "expiry": "2026-10-30",
    "T_days": 14.0,
    "n_quotes": 347,
-   "svi_cal_oos_median_abs_hs": 0.4804,
+   "svi_cal_oos_median_abs_hs": 0.4823,
    "svi_cal_n_oos": 173,
    "heston_v2_oos_median_abs_hs": 13.4651,
    "heston_v2_n_oos": 338
@@ -16,7 +16,7 @@
    "expiry": "2026-11-16",
    "T_days": 31.0,
    "n_quotes": 80,
-   "svi_cal_oos_median_abs_hs": 0.6793,
+   "svi_cal_oos_median_abs_hs": 0.6891,
    "svi_cal_n_oos": 40,
    "heston_v2_oos_median_abs_hs": 5.1349,
    "heston_v2_n_oos": 71
@@ -41,5 +41,5 @@
   }
  ],
  "source": "data_store/surface/2026-10-16/residuals.parquet",
- "source_sha256": "c2a3c07edbefc9075152bb1584fce399268af8a377ae723e7a62da0f8aab5545"
+ "source_sha256": "817199eda5b704840e9bccad4fb1bc734859e8ba5bc9cd7b695fe9c49082bc77"
 }

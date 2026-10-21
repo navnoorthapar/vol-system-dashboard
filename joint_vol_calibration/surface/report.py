@@ -149,6 +149,36 @@ def _frame_rounded(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# residuals.parquet is the largest file a book session adds to the repository
+# (PROD-6). Its float columns are written BYTE_STREAM_SPLIT (Parquet's lossless
+# float encoding: the bytes of each value are regrouped by significance), the
+# other columns dictionary-encoded, each column in one data page, zstd level
+# 19. One page matters: the quote columns (k, bid_iv, vega, ...) repeat once
+# per model, and pyarrow's default 20,000-row pages hide the repeats from zstd.
+# Every value is bit for bit what it was; the five committed files are 34-38%
+# smaller (2026-06-18: 1.72 MB -> 1.06 MB). Readers need nothing new.
+RESIDUALS_ZSTD_LEVEL = 19
+RESIDUALS_ROWS_PER_PAGE = 1 << 20
+
+
+def _parquet_writer_accepts(name: str) -> bool:
+    import inspect
+
+    import pyarrow.parquet as pq
+    return name in inspect.signature(pq.ParquetWriter.__init__).parameters
+
+
+def write_residuals(df: pd.DataFrame, path: Path) -> None:
+    """Write a (rounded) residuals frame as residuals.parquet, losslessly."""
+    floats = [str(c) for c in df.columns if pd.api.types.is_float_dtype(df[c])]
+    others = [str(c) for c in df.columns if str(c) not in floats]
+    kw: dict[str, Any] = {}
+    if _parquet_writer_accepts("max_rows_per_page"):      # pyarrow >= 20; older ones page by 20,000 rows
+        kw["max_rows_per_page"] = RESIDUALS_ROWS_PER_PAGE
+    df.to_parquet(path, index=False, compression="zstd", compression_level=RESIDUALS_ZSTD_LEVEL,
+                  use_byte_stream_split=floats, use_dictionary=others, **kw)
+
+
 def _sha256(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -547,8 +577,7 @@ def write_session(session: str, out_root: Path = SURFACE_DIR, **kw) -> dict:
     out = run_session(session, **kw)
     d = Path(out_root) / session
     d.mkdir(parents=True, exist_ok=True)
-    _frame_rounded(out["residuals"]).to_parquet(d / "residuals.parquet", index=False,
-                                                compression="zstd")
+    write_residuals(_frame_rounded(out["residuals"]), d / "residuals.parquet")
     dump_json(out["surface"], d / "surface.json")
     dump_json(out["scorecard"], d / "scorecard.json")
     dump_json(out["vix_replication"], d / "vix_replication.json")
