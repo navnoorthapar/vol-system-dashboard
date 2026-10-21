@@ -258,6 +258,21 @@ def section_trials(eq, fam: pd.DataFrame, meta: list[dict]) -> dict:
                "n_raw_c16_c22": float(n_c16["n_trials"]),
                "n_raw_all_rounds": float(n_all["n_trials"]),
                "n_upper_with_evaluations": float(n_all["n_trials_upper"])}
+    n_series = int(fam.shape[1])
+    basis = {
+        "n_eigen_participation": ("eigenvalue participation ratio of the correlation matrix of the "
+                                  f"{n_series} re-runnable trial series (C22 bridge rows and the beta "
+                                  "grid, each x 6 sleeves): a clustering measure of that family, close to "
+                                  "the number of distinct sleeves; NOT a count of ledger trials. The most "
+                                  "lenient N"),
+        "n_eff_c16_c22": (f"average-correlation effective N of the {n_c16['n_trials']} C16-C22 ledger trials "
+                          f"(mean pairwise correlation of the {n_series}-series family)"),
+        "n_raw_c16_c22": f"ledger count, rounds C16-C22 ({n_c16['n_trials']} trials)",
+        "n_raw_all_rounds": f"ledger count, every round C10-C22 ({n_all['n_trials']} trials)",
+        "n_upper_with_evaluations": (f"ledger count with the {n_all['n_evaluations']} robustness evaluations "
+                                     "that were never candidates (upper bound)"),
+    }
+    ledger_based = ("n_eff_c16_c22", "n_raw_c16_c22", "n_raw_all_rounds", "n_upper_with_evaluations")
     R = sleeve_returns(eq)
     T = len(R)
     v_null = 1.0 / (T - 1)
@@ -280,7 +295,12 @@ def section_trials(eq, fam: pd.DataFrame, meta: list[dict]) -> dict:
         vals = {f"{vname}|{k}": sh.deflated_sharpe_ratio(R[s].to_numpy(), n, v)["dsr"]
                 for vname, v in variances.items() for k, n in choices.items()}
         lo, hi = min(vals, key=lambda c: vals[c]), max(vals, key=lambda c: vals[c])
-        dsr_range[s] = {"min": vals[lo], "argmin": lo, "max": vals[hi], "argmax": hi}
+        led_vals = {c: v for c, v in vals.items() if c.split("|")[1] in ledger_based}
+        llo, lhi = min(led_vals, key=lambda c: led_vals[c]), max(led_vals, key=lambda c: led_vals[c])
+        dsr_range[s] = {"min": vals[lo], "argmin": lo, "max": vals[hi], "argmax": hi,
+                        "at_ledger_counts": {"min": led_vals[llo], "argmin": llo,
+                                             "max": led_vals[lhi], "argmax": lhi,
+                                             "n_choices": list(ledger_based)}}
     return {
         "ledger": {"path": "docs/trials_ledger.yaml", "n_trials_all_rounds": n_all["n_trials"],
                    "n_trials_c16_c22": n_c16["n_trials"], "by_round": n_all["by_round"],
@@ -295,6 +315,8 @@ def section_trials(eq, fam: pd.DataFrame, meta: list[dict]) -> dict:
                    "mean_pairwise_correlation": rho, "n_eff_c16_c22": n_eff,
                    "eigen_participation_ratio": participation},
         "n_choices": choices,
+        "n_choices_basis": basis,
+        "n_choices_ledger_based": list(ledger_based),
         "variance_choices_per_period": variances,
         "sr0_annual": sr0,
         "sr0_annual_all_choices": sr0_all,
@@ -303,9 +325,12 @@ def section_trials(eq, fam: pd.DataFrame, meta: list[dict]) -> dict:
         "dsr_sensitivity": {"n_grid": grid_n, "var_null_per_period": v_null,
                             "participation_ratio_family": participation, "values": dsr_grid},
         "note": ("DSR = PSR(SR > SR0), SR0 = expected maximum Sharpe of N skill-less trials with trial "
-                 "Sharpe variance V. 'dsr' uses the whole family's V; 'dsr_range' spans every N choice "
-                 "(eigenvalue participation of the re-run family, average-correlation N_eff, raw ledger "
-                 "counts) and every V choice. N from the committed trials ledger"),
+                 "Sharpe variance V. 'dsr' uses the whole family's V; 'dsr_range' spans every N choice and "
+                 "every V choice, and 'dsr_range.<sleeve>.at_ledger_counts' only the N choices read from "
+                 "the committed trials ledger (n_choices_ledger_based: the average-correlation N_eff and "
+                 "the raw counts). The overall maximum is reached at n_eigen_participation, the eigenvalue "
+                 "participation ratio of the re-run trial family, which is not a trial count "
+                 "(n_choices_basis); quote it as the most lenient bound, beside the ledger-count range"),
     }
 
 
@@ -325,6 +350,15 @@ def section_multiple_testing(eq, fam: pd.DataFrame, block: int, reps: int, seed:
         "stepm_trial_family": mt.stepm_vs_cash(fam, block, 0.05, reps, seed),
         "pbo_portfolio_configs": mt.pbo_cscv(fam[port_cols], n_splits=16),
         "pbo_all_trials": mt.pbo_cscv(fam, n_splits=16),
+        "pbo_basis": {
+            "pbo_portfolio_configs": (f"the {len(port_cols)} re-run configurations of the published "
+                                      "portfolio (C22 bridge rows and the beta grid): the PBO that bears on "
+                                      "the published portfolio; report it with every PBO"),
+            "pbo_beta_estimated": (f"the {len(est)} trial series priced at an estimated beta, every sleeve "
+                                   "and the portfolio"),
+            "pbo_all_trials": (f"all {fam.shape[1]} re-run trial series, including the beta = 1 rows "
+                               "(the mis-specified mark)"),
+        },
         "note": ("H0 of SPA: no strategy beats cash (zero excess return); StepM lists strategies that do "
                  "at FWER 5%; PBO = share of CSCV splits whose in-sample best is at or below the "
                  "out-of-sample median. The full trial family contains configurations that price ATM "
@@ -521,9 +555,17 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> dict:
             st = bm.pair_stats(dr, ir, spx["close"].pct_change().reindex(dr.index))
             daily[label] = {k: st[k] for k in ("n_days", "corr_daily", "corr_weekly", "partial_corr_ex_spx",
                                                "beta", "sharpe_sleeve", "sharpe_bench")}
+        partial = {}
+        for y, window in out["partial_years"].items():
+            sel = per[yrs == int(y)]
+            if len(sel):
+                partial[y] = {"window": window, "n_periods": len(sel),
+                              "first_expiry": str(sel["expiry"].iloc[0].date()),
+                              "last_expiry": str(sel["expiry"].iloc[-1].date())}
         return {
             "n_periods": len(per), "first_roll": str(per["roll"].iloc[0].date()),
             "last_expiry": str(per["expiry"].iloc[-1].date()),
+            "partial_years": partial,
             "settle_sources": per["settle_source"].value_counts().to_dict(),
             "overall": ib["overall"], "by_year": ib["groups"], "by_year_per_period": per_year,
             "full_year_dispersion": {"min": float(np.nanmin(vals)), "max": float(np.nanmax(vals)),
@@ -551,7 +593,9 @@ def section_benchmarks(eq: pd.DataFrame, vrp_short: np.ndarray) -> dict:
                    "(Yahoo open where SET has no row), weekly puts at the close; collateral earns ^IRX. "
                    "β solves replication return = index return per period, per expiry year and overall. "
                    "The indices sell at a VWAP and PUT's collateral earns 1- and 3-month bills, so this "
-                   "is an approximation; 2025 covers January-March only."),
+                   "is an approximation. A year in partial_years is not a full year (2025: January to "
+                   "the window's end); a final roll period the window cuts short is dropped "
+                   "(monthly_roll_dates / weekly_roll_dates)."),
     }
     return out
 
@@ -580,20 +624,28 @@ def headline(summary: dict, fe: dict, bmk: dict) -> list[str]:
     t = summary["trials"]
     cf = summary["closed_form"]
     nc = t["n_choices"]
-    lines.append("PSR(SR>0) and the largest DSR over every N and trial-variance choice: "
-                 + "; ".join(f"{s} {cf[s]['psr_gt_0']:.2f} / {t['dsr_range'][s]['max']:.3f}" for s in SLEEVES)
-                 + f" (N from {nc['n_eigen_participation']:.1f}, the eigenvalue participation of the "
-                   f"{t['family']['n_series']}-series re-run family, to "
-                   f"{nc['n_upper_with_evaluations']:.0f}; ledger C16-C22 {t['ledger']['n_trials_c16_c22']}, "
-                   f"all rounds {t['ledger']['n_trials_all_rounds']})")
+    led_n = [nc[k] for k in t["n_choices_ledger_based"]]
+    argmax = sorted({t["dsr_range"][s]["argmax"] for s in SLEEVES})
+    rng = {s: t["dsr_range"][s] for s in SLEEVES}
+    lines.append("PSR(SR>0); DSR at the ledger's trial counts (N "
+                 f"{min(led_n):.0f}-{max(led_n):.0f}: the C16-C22 effective N and the raw counts, every "
+                 "trial-variance choice); the largest DSR over every N and variance choice: "
+                 + "; ".join(f"{s} {cf[s]['psr_gt_0']:.2f}; {rng[s]['at_ledger_counts']['min']:.3f}-"
+                             f"{rng[s]['at_ledger_counts']['max']:.3f}; {rng[s]['max']:.3f}" for s in SLEEVES)
+                 + f". The largest is at {', '.join(argmax)}: N {nc['n_eigen_participation']:.1f} is the "
+                   f"eigenvalue participation ratio of the {t['family']['n_series']} re-run trial series, "
+                   f"not a count of trials (ledger C16-C22 {t['ledger']['n_trials_c16_c22']}, all rounds "
+                   f"{t['ledger']['n_trials_all_rounds']}); null_var is the skill-less trial variance "
+                   "1/(T-1)")
     s3 = t["dsr_sensitivity"]["values"]["s3"]
     lines.append(f"s3: DSR {t['dsr']['s3']['n_raw_c16_c22']:.3f} at the ledger's N "
                  f"{t['ledger']['n_trials_c16_c22']} with the family's trial-Sharpe sd "
                  f"{t['family']['sd_sharpe_annual']:.2f}/yr (SR0 {t['sr0_annual']['n_raw_c16_c22']:.2f}); "
                  f"{s3['null_var|N=' + format(nc['n_raw_c16_c22'], '.6g')]:.3f} with the H0 sd "
                  f"{t['family']['sd_sharpe_annual_under_h0']:.2f}/yr; "
-                 f"{s3['null_var|N=' + format(nc['n_eigen_participation'], '.6g')]:.2f} at N "
-                 f"{nc['n_eigen_participation']:.1f} with the H0 sd; "
+                 f"{s3['null_var|N=' + format(nc['n_eigen_participation'], '.6g')]:.2f} only at N "
+                 f"{nc['n_eigen_participation']:.1f} (the re-run family's eigenvalue participation, not a "
+                 f"trial count) with the H0 sd; "
                  f"MinTRL {_years(cf['s3']['min_trl_years'])} at the observed SR and moments")
     m = summary["multiple_testing"]
     lines.append(f"Hansen SPA (the 6 published series vs cash): consistent p "
@@ -605,8 +657,8 @@ def headline(summary: dict, fe: dict, bmk: dict) -> list[str]:
                  f"{m['spa_trial_family']['n_strategies']} (incl. beta = 1, the mis-specified mark): "
                  f"SPA p {m['spa_trial_family']['p_consistent']:.3f}, StepM superior "
                  f"{m['stepm_trial_family']['superior'] or 'none'}")
-    for key, label in (("pbo_beta_estimated", "beta-estimated trials"),
-                       ("pbo_portfolio_configs", "portfolio configs"), ("pbo_all_trials", "all trials")):
+    for key, label in (("pbo_portfolio_configs", "the published portfolio's configurations"),
+                       ("pbo_beta_estimated", "beta-estimated trials"), ("pbo_all_trials", "all trials")):
         p = m[key]
         lines.append(f"CSCV PBO ({label}, {p['n_configurations']} series, {p['n_combinations']} splits): "
                      f"{p['pbo']:.2f}; OOS-on-IS Sharpe slope {p['oos_on_is_slope']:.2f}; selected config's "

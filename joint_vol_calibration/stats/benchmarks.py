@@ -193,25 +193,52 @@ def bs_put(S, K, T, r, q, sigma):
     return np.where(T > 0, val, np.maximum(K - S, 0.0))
 
 
+def _cut_short(last: pd.Timestamp, period_end: pd.Timestamp) -> bool:
+    """True when the NYSE calendar has a session after ``last`` and on or
+    before ``period_end``: a window that ends on ``last`` stops before the
+    period's real roll date, so ``last`` is not one."""
+    from joint_vol_calibration.data.database import nyse_sessions
+
+    return len(nyse_sessions(last + pd.Timedelta(days=1), period_end)) > 0
+
+
 def monthly_roll_dates(sessions: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """The session on or before each month's third Friday (the SPX monthly
-    expiry, moved to Thursday when Friday is an exchange holiday)."""
+    expiry, moved to Thursday when Friday is an exchange holiday).
+
+    A final month the window ends inside before its roll date (by the NYSE
+    calendar) has no roll: its last session is not an expiry the index used."""
     sessions = pd.DatetimeIndex(sessions).sort_values()
     out = []
+    last_fri: pd.Timestamp | None = None
     for (y, m), _ in pd.Series(0, index=sessions).groupby([sessions.year, sessions.month]):
         first = pd.Timestamp(year=int(y), month=int(m), day=1)  # type: ignore[call-overload]  # int keys
         fri = first + pd.Timedelta(days=(4 - first.weekday()) % 7) + pd.Timedelta(days=14)
+        last_fri = fri
         on_before = sessions[sessions <= fri]
         if len(on_before) and on_before[-1].month == m:
             out.append(on_before[-1])
+    if out and last_fri is not None and out[-1] == sessions[-1] and _cut_short(out[-1], last_fri):
+        out.pop()
     return pd.DatetimeIndex(out)
 
 
 def weekly_roll_dates(sessions: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """The last session of each W-FRI week (Friday, or Thursday on a holiday)."""
+    """The last session of each W-FRI week (Friday, or Thursday on a holiday).
+
+    A final week the window ends inside (by the NYSE calendar a later session
+    of that week exists) has no roll: e.g. a window ending on Monday
+    2025-03-24 would otherwise add a 'weekly' put sold on Friday and settled
+    on Monday that WPUT never wrote."""
+    sessions = pd.DatetimeIndex(sessions).sort_values()
     s = pd.Series(sessions, index=sessions)
     weeks = cast(pd.DatetimeIndex, s.index).to_period("W-FRI")
-    return pd.DatetimeIndex(s.groupby(weeks).max().to_numpy())
+    out = pd.DatetimeIndex(s.groupby(weeks).max().to_numpy())
+    if len(out) and out[-1] == sessions[-1]:
+        week_end = out[-1].to_period("W-FRI").end_time.normalize()
+        if _cut_short(out[-1], week_end):
+            out = out[:-1]
+    return out
 
 
 def put_write_periods(

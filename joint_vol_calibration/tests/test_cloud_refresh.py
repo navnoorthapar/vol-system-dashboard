@@ -248,6 +248,12 @@ def test_empty_book_skips_and_persists_nothing(env):
     assert pathlib.Path(cal["diagnostic_chain"]).exists()       # kept for post-mortem, outside the DB
     assert st["headline_calibration"]["date"] == "2026-09-22"
     assert st["headline_calibration"]["age_sessions"] == 1
+    # a dead book is not a ledger session either: nothing registered, so a
+    # later slot with a live book can still record it
+    assert st["forward_ledger"]["status"] == "no_live_book"
+    assert "not a live book" in st["forward_ledger"]["reason"]
+    assert not (env.DATA / "forward").exists()
+    assert any("forward ledger" in w for w in st["warnings"])
     assert code == 0
 
 
@@ -347,13 +353,15 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
 # ── Book slot: forward ledger, Cboe captures, derived artifacts (C23) ─────────
 
 def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
-    """The forward test at executable prices starts when the bot records each
-    accepted session (forward_ledger.record_session): one canonical,
-    hash-chained file per session, from the chain the fit was accepted on."""
+    """The forward test at executable prices: one canonical, hash-chained file
+    per session (forward_ledger.record_session). With no Cboe capture stored
+    the book is the Yahoo chain the calibrate step downloaded."""
     code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
     assert code == 0, st["errors"]
-    led = st["calibration"]["forward_ledger"]
+    led = st["forward_ledger"]
     assert led["ok"], led
+    assert led["status"] == "recorded"
+    assert led["book"] == "yahoo"
     path = env.DATA / "forward" / f"ledger_{SESSION}.json"
     assert led["path"] == str(path)
     ledger = fl.load_ledger(path)
@@ -366,9 +374,13 @@ def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
     # the ledger's chain hash is the committed snapshot's
     stored = pd.read_parquet(dbm.options_snapshot_path(SESSION, "SPX"))
     assert ledger["inputs"]["chain_sha256"] == fl.chain_sha256(fl.observed_book(stored))
+    assert ledger["inputs"]["book"]["source"] == "yahoo"
+    assert ledger["inputs"]["book"]["extra_expiries"] == []          # no open position yet
     # the retry slot: the session exists, nothing is rewritten
     before = path.read_bytes()
-    assert _run(env, "calibrate")[1]["calibration"]["status"] == "exists"
+    _, st2 = _run(env, "calibrate")
+    assert st2["calibration"]["status"] == "exists"
+    assert st2["forward_ledger"]["status"] == "exists"
     assert path.read_bytes() == before
 
 
@@ -384,6 +396,135 @@ def test_a_ledger_failure_is_loud_but_keeps_the_fit_and_chain(env, monkeypatch, 
     assert any("forward ledger" in e for e in st["errors"])
     assert "::error title=Forward ledger::" in capsys.readouterr().out
     assert not st["publish_blockers"]
+
+
+def _full_spx_capture(session=SESSION, quote_time="2026-09-24T01:15:00Z"):
+    """A Cboe SPX capture as the bot stores it: every listed expiry (weekday
+    dailies for two months, then monthlies) two-sided, in the
+    options_snapshots schema."""
+    start = date.fromisoformat(session)
+    exps = [(start + timedelta(days=i)).isoformat() for i in range(1, 62)
+            if (start + timedelta(days=i)).weekday() < 5]
+    exps += ["2026-12-18", "2027-03-19"]
+    raw = _heston_chain(expiries=exps, S=7600.0)
+    frame = pd.DataFrame({
+        "snapshot_date": session, "expiry": raw["expiration"], "strike": raw["strike"],
+        "right": np.where(raw["option_type"] == "call", "C", "P"), "bid": raw["bid"], "ask": raw["ask"],
+        "mid_price": 0.5 * (raw["bid"] + raw["ask"]), "root": "SPXW",
+        "contract_symbol": raw["contractSymbol"],
+        "settlement": "PM", "underlying_price": 7600.0, "quote_time": quote_time, "source": "cboe"})
+    return cboe.ChainCapture(
+        underlying="SPX", frame=frame, session=session, quote_time=quote_time, book_state="gth",
+        fetched_at="2026-09-24T01:30:05Z", payload_timestamp="2026-09-24T01:30:00Z",
+        underlying_last_trade_time="2026-09-23T16:14:59", underlying_price=7600.0,
+        url="https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json", sha256="cd" * 32,
+        n_bytes=4321)
+
+
+def _fit_fails(monkeypatch):
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+
+    def boom(self, *a, **k):
+        raise RuntimeError("optimiser diverged")
+    monkeypatch.setattr(jc.JointCalibrator, "calibrate", boom)
+
+
+def test_the_ledger_trades_on_the_full_cboe_capture_whatever_the_fit_does(env, monkeypatch):
+    """STATS-1/STATS-2: the ledger's book is the session's full Cboe capture
+    (every listed expiry), not the calibration-expiry Yahoo download, and the
+    session is recorded although the fit failed."""
+    monkeypatch.setattr(cboe, "capture_option_chain",
+                        lambda und, now=None, **kw: _full_spx_capture() if und == "SPX" else _capture(und))
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert st["calibration"]["status"] == "failed"
+    assert code == 0                                         # headline 1 session old: warning only
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded", led
+    assert led["book"] == "cboe"
+    ledger = fl.load_ledger(led["path"])
+    pq_path = env.DATA / "options" / "cboe" / f"spx_{SESSION}_013005Z.parquet"
+    capture = pd.read_parquet(pq_path)
+    assert ledger["inputs"]["book"]["source"] == "cboe"
+    assert ledger["inputs"]["book"]["file"] == f"options/cboe/{pq_path.name}"
+    assert ledger["inputs"]["book"]["raw_sha256"] == "cd" * 32
+    assert ledger["inputs"]["chain_sha256"] == fl.chain_sha256(fl.observed_book(capture))
+    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:15:00Z"
+    assert ledger["inputs"]["chain_expiries"] == capture["expiry"].nunique()
+    (pos,) = ledger["positions"]
+    assert pos["sleeve"] == "s4"
+    assert pos["contract"]["expiry"] in set(capture["expiry"])
+
+
+def test_every_later_book_slot_can_mark_what_the_ledger_opened():
+    """The defect behind STATS-1, on the real expiry rule: a 30-day straddle
+    opened on a session's book is outside the next sessions' calibration
+    download (option_chain.select_calibration_expiries with fetch_spx_chain's
+    one neighbour) on most sessions of its life, while a full listing (the
+    Cboe capture) holds it on every session until it expires."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    start = date.fromisoformat("2026-10-16")
+    listing = [(start + timedelta(days=i)).isoformat() for i in range(120)
+               if (start + timedelta(days=i)).weekday() < 5]
+    opened = "2026-11-16"                                 # 31 days: the ledger's pick on 10-16
+    sessions = [d for d in listing if "2026-10-19" <= d < opened]
+    in_calibration_download = [d for d in sessions if opened in oc.select_calibration_expiries(
+        [e for e in listing if e > d], d, neighbours=1)]
+    assert len(in_calibration_download) <= len(sessions) // 3
+    assert all(opened in [e for e in listing if e > d] for d in sessions)
+
+
+def test_the_yahoo_fallback_adds_the_open_positions_expiries(env, monkeypatch):
+    """Without a Cboe capture the ledger uses the Yahoo chain plus the
+    expiries of its open straddles, so a target change closes the straddle at
+    this session's bids instead of waiting for the expiry to re-enter the
+    calibration download."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    code, _ = _run(env, "market")                        # the DB: closes, VIX rows, ^IRX
+    assert code == 0
+    prev_session, exp = "2026-09-16", "2026-10-16"
+    book = _heston_chain(expiries=[exp], S=7600.0)
+    flat = {s: {"position": 0.0, "kelly": 0.0} for s in fl.SLEEVES}
+    short_s4 = flat | {"s4": {"position": -1.0, "kelly": 0.1}}
+    first = fl.step(None, prev_session, book, short_s4, r_ref=0.04)
+    fl.write_ledger(first, env.DATA / "forward")
+    assert [p["contract"]["expiry"] for p in first["positions"]] == [exp]
+    raw, meta = oc.fetch_spx_chain(SESSION, ticker_factory=_DailyBookTicker)
+    assert exp not in meta["requested"]                  # not a calibration expiry on 09-23
+    monkeypatch.setattr(fl, "signals_for_session", lambda session, start_date=None: flat)
+    # the defect: the calibration download alone cannot price the straddle
+    alone = fl.step(first, SESSION, raw, flat, r_ref=0.04)
+    assert {a["sleeve"]: a for a in alone["actions"]}["s4"]["reason_code"] == "expiry_not_in_book"
+    led = env.record_forward_ledger(SESSION, {"source": "yahoo", "raw": raw, "symbol": meta["symbol"],
+                                              "quote_time": "2026-09-24T01:30:00Z"},
+                                    ticker_factory=_DailyBookTicker)
+    assert led["status"] == "recorded", led
+    ledger = fl.load_ledger(led["path"])
+    assert ledger["inputs"]["book"]["extra_expiries"] == [exp]
+    assert ledger["inputs"]["open_expiries_not_in_book"] == []
+    assert {a["sleeve"]: a["action"] for a in ledger["actions"]}["s4"] == "close"
+    (c,) = ledger["closed"]
+    assert c["closed"]["how"] == "close"
+    assert c["closed"]["pnl_exec"] is not None
+    assert fl.verify_chain([first, ledger]) == []
+
+
+def test_a_book_quoted_before_the_close_is_not_the_ledgers(env, monkeypatch):
+    """A capture whose quotes predate the session's 16:00 ET close is skipped
+    for the next candidate book, not booked at prices older than the signal."""
+    early = _full_spx_capture(quote_time="2026-09-23T19:45:00Z")          # 15:45 ET
+    monkeypatch.setattr(cboe, "capture_option_chain",
+                        lambda und, now=None, **kw: early if und == "SPX" else _capture(und))
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    _, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded"
+    assert led["book"] == "yahoo"                          # the next candidate
+    assert any("before the 2026-09-23 close" in r for r in led["refused_books"])
 
 
 def _capture(und, session=SESSION, rows=4):
@@ -571,7 +712,7 @@ def test_a_failed_artifact_is_reported_and_loses_nothing(env, monkeypatch, capsy
     assert st["artifacts"]["greeks"]["ok"]
     assert st["artifacts"]["scenario"]["ok"]
     assert st["calibration"]["status"] == "accepted"
-    assert st["calibration"]["forward_ledger"]["ok"]
+    assert st["forward_ledger"]["ok"]
     assert str(dbm.options_snapshot_path(SESSION, "SPX")) in st["persisted"]
     assert not st["publish_blockers"]
     assert "::error title=Session artifacts::surface artifact" in capsys.readouterr().out
@@ -746,6 +887,11 @@ def test_gate_rejection_after_a_fit_persists_nothing(env, monkeypatch):
     assert not dbm.options_snapshot_path(SESSION, "SPX").exists()
     assert pathlib.Path(cal["diagnostic_chain"]).exists()
     assert code == 0                           # headline 1 session old: warning only
+    # the strategy's trades do not depend on the fit (STATS-2): the session is
+    # recorded in the forward ledger on the book it downloaded
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded", led
+    assert fl.load_ledger(led["path"])["session"] == SESSION
 
 
 def test_accepted_fit_without_its_stored_chain_fails_the_run(env, monkeypatch):

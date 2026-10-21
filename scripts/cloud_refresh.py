@@ -22,10 +22,15 @@ Steps (run all, or a subset with --steps):
              independent of the calibration and its gate (capture_cboe_chains)
   freeze     Freeze the Flask app to static HTML -> .site-build/
 
-After an ACCEPTED calibration the run also records the session in the
-forward ledger (data_store/forward/ledger_<session>.json, forward_ledger.
-record_session) and rebuilds what is derived from the new fit: the session's
-surface report (data_store/surface/<session>/), its calibration diagnostics
+Whenever capture or calibrate runs and the DB holds the last closed session,
+the run records that session in the forward ledger (data_store/forward/
+ledger_<session>.json, record_forward_ledger), whatever the calibration does:
+on the session's full Cboe SPX capture when one is stored (every listed
+expiry, so every open straddle can be marked), else on the Yahoo chain the
+calibrate step downloaded plus the expiries of the open positions; never on a
+book that fails the quote-state gate or predates the 16:00 ET close. After an
+ACCEPTED calibration it also rebuilds what is derived from the new fit: the
+session's surface report (data_store/surface/<session>/), its calibration diagnostics
 (data_store/calibrations/diagnostics/<session>.json), and the Greeks surface
 and scenario grid of the new headline fit (data_store/greeks/). Each is
 fail-soft: a failure is reported (exit 1) but never undoes what was captured,
@@ -653,28 +658,141 @@ def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:
         js_path.unlink(missing_ok=True)
 
 
-def record_forward_ledger(session: str, raw, clean, spot: float, r_ref: float,
-                          quote_time: str, directory=None) -> dict:
-    """forward_ledger.record_session for an accepted session: the session's
-    signals turned into listed straddles at the captured book's bid/ask, the
-    open ones marked, hash-chained to the previous ledger
-    (data_store/forward/ledger_<session>.json). Called after the pickle and
-    the chain are stored, so a failure never costs them. Never raises: a
-    ValueError (a book quoted before the signal close, an out-of-order
-    session) or FileExistsError (another ledger already registered for the
-    session) is returned as {"ok": False, "error"} for main() to report."""
+def _ledger_books(session: str, yahoo: "dict | None"):
+    """Candidate books for the session's forward ledger, best first: every
+    stored Cboe SPX capture of the session (the full listing: each expiry an
+    open straddle can have), oldest first, then the Yahoo chain the calibrate
+    step downloaded (``yahoo``: recalibrate_heston's ``book_out``)."""
+    import pandas as pd
+
+    for pq_path in sorted(capture_dir().glob(f"spx_{session}_*.parquet")):
+        js = pq_path.with_suffix(".json")
+        side = json.loads(js.read_text()) if js.exists() else {}
+        raw = pd.read_parquet(pq_path)
+        qt = side.get("quote_time")
+        if not qt and "quote_time" in raw.columns and raw["quote_time"].notna().any():
+            qt = str(raw["quote_time"].dropna().iloc[0])
+        yield {"raw": raw, "quote_time": qt, "symbol": None,
+               "meta": {"source": "cboe", "file": f"options/cboe/{pq_path.name}",
+                        "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
+                        "rows": len(raw)}}
+    if yahoo and yahoo.get("raw") is not None and len(yahoo["raw"]):
+        yield {"raw": yahoo["raw"], "quote_time": yahoo.get("quote_time"), "symbol": yahoo.get("symbol"),
+               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"])}}
+
+
+def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3, pause: float = 2.0):
+    """``raw`` (a Yahoo chain) plus the listed expiries in ``expiries`` it
+    lacks, downloaded the way option_chain.fetch_spx_chain downloads one, so
+    an open straddle whose expiry is not a calibration expiry can still be
+    marked. Returns (raw, {"extra_expiries", "extra_expiries_failed"})."""
+    import functools
+    import time
+
+    import pandas as pd
+
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    from joint_vol_calibration.data import option_chain as oc
+
+    have = set(fl.listed_book(raw)["expiry"])
+    missing = [e for e in expiries if e not in have]
+    info: dict = {"extra_expiries": [], "extra_expiries_failed": []}
+    if not missing:
+        return raw, info
+    if ticker_factory is None:
+        import yfinance as yf
+        ticker_factory = yf.Ticker
+    tk = ticker_factory(symbol or "^SPX")
+    frames = [raw]
+    for exp in missing:
+        try:
+            chain = oc._with_retries(functools.partial(tk.option_chain, exp), f"expiry {exp}",
+                                     attempts, pause, time.sleep)
+        except Exception as e:  # noqa: BLE001 (recorded; the straddle stays unmarked, with that reason)
+            log.warning("  forward ledger: open expiry %s not downloaded: %s", exp, e)
+            info["extra_expiries_failed"].append(exp)
+            continue
+        for side, legs in (("call", chain.calls), ("put", chain.puts)):
+            part = legs.copy()
+            part["expiration"] = exp
+            part["option_type"] = side
+            frames.append(part)
+        info["extra_expiries"].append(exp)
+    return pd.concat(frames, ignore_index=True), info
+
+
+def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=None,
+                          ticker_factory=None) -> dict:
+    """forward_ledger.record_session for ``session``, whatever its calibration
+    did: the session's signals turned into listed straddles at the captured
+    book's bid/ask, the open ones marked, hash-chained to the previous ledger
+    (data_store/forward/ledger_<session>.json).
+
+    The book is the first of _ledger_books (the session's full Cboe capture,
+    else the Yahoo chain plus the open positions' expiries) that is quoted at
+    or after the 16:00 ET close and passes the calibration's own quote-state
+    gate (near-ATM two-sided share >= option_chain.MIN_TWO_SIDED_SHARE). The
+    caller has checked that ``session`` is the last closed session and that
+    the DB holds it; the capture and the calibrate step only store or hand on
+    a book that session_guard accepted as that session's.
+
+    Returns {"ok", "status": recorded|exists|no_live_book|failed, ...}; ok is
+    True when the session's ledger is on disk. "no_live_book" records nothing,
+    so a later slot can still record the session. Never raises."""
     try:
         from joint_vol_calibration.backtest import forward_ledger as fl
-        path = fl.record_session(session, raw, clean=clean, spot=spot, r_ref=r_ref,
-                                 quote_time=quote_time,
-                                 directory=pathlib.Path(directory) if directory else DATA / "forward")
-        led = fl.load_ledger(path)
-        return {"ok": True, "path": str(path),
-                "actions": [f"{a['sleeve']} {a['action']}" for a in led.get("actions", [])],
-                "n_open": len(led.get("positions", []))}
-    except Exception as e:  # noqa: BLE001 (reported loudly by main(); the fit and chain stand)
+        from joint_vol_calibration.calibration.joint_calibrator import reference_rate
+        from joint_vol_calibration.data import option_chain as oc
+        from joint_vol_calibration.data.database import get_spx_ohlcv
+
+        d = pathlib.Path(directory) if directory else DATA / "forward"
+        path = fl.ledger_path(d, session)
+        if path.exists():
+            return {"ok": True, "status": "exists", "path": str(path),
+                    "reason": f"a ledger for {session} is already registered"}
+        spx = get_spx_ohlcv(as_of_date=session)
+        if spx.empty or str(spx["date"].iloc[-1])[:10] != session:
+            raise ValueError(f"no SPX close for {session} in the DB")
+        spot = float(spx["close"].iloc[-1])
+        ref = reference_rate(session)
+        prev = fl.latest_ledger(d, before=session)
+        open_exps = sorted({p["contract"]["expiry"] for p in (prev or {}).get("positions", [])
+                            if p["contract"]["expiry"] > session})
+        refused = []
+        for cand in _ledger_books(session, yahoo):
+            meta, raw = dict(cand["meta"]), cand["raw"]
+            label = meta.get("file") or meta["source"]
+            try:
+                fl.quote_after_close(session, cand["quote_time"])
+            except ValueError as e:
+                refused.append(f"{label}: {e}")
+                continue
+            if meta["source"] == "yahoo":
+                raw, extra = _with_open_expiries(raw, open_exps, cand["symbol"], ticker_factory)
+                meta.update(extra)
+            clean = oc.clean_option_chain(raw, session, spot, r_ref=ref.for_clean(),
+                                          quote_time=cand["quote_time"])
+            share = float(clean.diagnostics.get("near_atm_two_sided_share") or 0.0)
+            if share < oc.MIN_TWO_SIDED_SHARE:
+                refused.append(f"{label}: not a live book ({share:.0%} of near-ATM lines two-sided)")
+                continue
+            meta["near_atm_two_sided_share"] = share
+            out = fl.record_session(session, raw, clean=clean, spot=spot, r_ref=ref.r_91d,
+                                    quote_time=cand["quote_time"], directory=d, book_meta=meta)
+            led = fl.load_ledger(out)
+            unmarked = [f"{p['sleeve']} {p['mark'].get('reason_code')}" for p in led.get("positions", [])
+                        if (p.get("mark") or {}).get("status") == "unmarked"]
+            return {"ok": True, "status": "recorded", "path": str(out), "book": meta["source"],
+                    "book_file": meta.get("file"),
+                    "actions": [f"{a['sleeve']} {a['action']}" for a in led.get("actions", [])],
+                    "n_open": len(led.get("positions", [])), "unmarked": unmarked,
+                    "refused_books": refused}
+        return {"ok": False, "status": "no_live_book",
+                "reason": ("no captured book of the session is usable: " + "; ".join(refused)) if refused
+                else f"no Cboe capture or Yahoo chain of {session} in this run"}
+    except Exception as e:  # noqa: BLE001 (reported loudly by main(); the fit and the captures stand)
         log.error("  forward ledger for %s failed: %s", session, e)
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "status": "failed", "error": f"{type(e).__name__}: {e}"}
 
 
 def _run_diagnostics(session: str, out_dir: pathlib.Path, timeout: float) -> None:
@@ -922,7 +1040,7 @@ def _save_rejected_chain(raw, session: str, reason: str) -> "str | None":
 
 
 def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
-                       calibrate_kwargs: "dict | None" = None) -> dict:
+                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None) -> dict:
     """Download the SPX chain for the last closed session and fit the joint model.
 
     Returns a status dict: {"status": accepted|rejected|skipped|exists|failed,
@@ -930,6 +1048,11 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     diagnostics)}. Nothing is written to options_snapshots unless accepted.
     A run whose live book cannot be the last closed session's (session_guard)
     is "skipped" before anything is downloaded.
+
+    ``book_out`` (a dict), when given, receives the downloaded chain as soon
+    as it is in hand, whatever the fit then does: {"source": "yahoo", "raw",
+    "quote_time", "symbol"} — the forward ledger's fallback book
+    (record_forward_ledger), which does not depend on the calibration.
     """
     import pandas as pd
 
@@ -987,6 +1110,8 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     if raw.empty:
         st["reason"] = "no SPX option chain returned"
         return st
+    if book_out is not None:
+        book_out.update(source="yahoo", raw=raw, quote_time=quote_time, symbol=meta.get("symbol"))
 
     clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), quote_time=quote_time)
     d = clean.diagnostics
@@ -1052,9 +1177,6 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         st["snapshot_error"] = f"could not store the accepted {spot_date} chain: {e}"
         log.error("  %s", st["snapshot_error"])
     st.update(status="accepted", reason="ok")
-    # The forward test at executable prices: after the pickle and the chain, so
-    # a ledger failure (reported by main) cannot cost either of them.
-    st["forward_ledger"] = record_forward_ledger(spot_date, raw, clean, S, ref.r_91d, quote_time)
     log.info("  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE %.3f vp "
              "(OOS %.3f) | VIX index RMSE %.3f | %d opts / %d expiries, %d VIX tenors | "
              "Feller %s | session %s", p["kappa"], p["sigma"], p["rho"],
@@ -1249,13 +1371,16 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
                     f"| carry | parity medians r {_fmt(s.get('r'), '.2%')}, q {_fmt(s.get('q'), '.2%')}; "
                     f"reference {s.get('r_reference_source') or _fmt(s.get('r_reference'), '.2%')} |",
                 ]
-            led = cal.get("forward_ledger")
-            if led and led.get("ok"):
-                acts = "; ".join(led.get("actions") or []) or "no action"
-                lines.append(f"| forward ledger | {pathlib.Path(led['path']).name}: {acts} "
-                             f"({led.get('n_open', 0)} open) |")
-            elif led:
-                lines.append(f"| forward ledger | **failed**: {led.get('error')} |")
+        led = status.get("forward_ledger")
+        if led and led.get("status") == "recorded":
+            acts = "; ".join(led.get("actions") or []) or "no action"
+            lines.append(f"| forward ledger | {pathlib.Path(led['path']).name} on the {led.get('book')} "
+                         f"book: {acts} ({led.get('n_open', 0)} open"
+                         + (f"; unmarked: {', '.join(led['unmarked'])}" if led.get("unmarked") else "")
+                         + ") |")
+        elif led:
+            lines.append(f"| forward ledger | **{led.get('status')}**: "
+                         f"{led.get('error') or led.get('reason') or led.get('path')} |")
         for name, res in (status.get("artifacts") or {}).items():
             lines.append(f"| {name} artifact | "
                          + ("ok" if res.get("ok") else f"**failed**: {res.get('error')}")
@@ -1431,11 +1556,13 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 status["labels_added"] = 0
                 log.warning("  skipped: market data is not current")
 
+    yahoo_book: dict = {}
     if "calibrate" in steps:
         with _Group("option chain + joint calibration"):
             if market_ok:
                 try:
-                    cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs)
+                    cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs,
+                                             book_out=yahoo_book)
                 except Exception as e:
                     cal = {"status": "failed", "reason": f"calibrate step crashed: {e}"}
                     log.exception("calibrate step crashed")
@@ -1446,12 +1573,6 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 hard_fail = True
                 status["errors"].append(cal["snapshot_error"])
                 _annotate("error", "Persistence", cal["snapshot_error"])
-            led = cal.get("forward_ledger") or {}
-            if led and not led.get("ok"):          # loud, but the fit and chain stand
-                hard_fail = True
-                msg = f"forward ledger for {cal.get('session')} not recorded: {led.get('error')}"
-                status["errors"].append(msg)
-                _annotate("error", "Forward ledger", msg)
             head = headline_calibration(sess or status["expected_session"])
             status["headline_calibration"] = head
             if cal["status"] in ("rejected", "skipped", "failed"):
@@ -1465,6 +1586,31 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                            if head.get("date") else "no calibration passes the current gate")
                     status["errors"].append(msg)
                     _annotate("error", "Calibration stale", msg)
+
+    # The forward test at executable prices, on every session with a live
+    # captured book: after the calibrate step (its Yahoo chain is the fallback
+    # book) but independent of its outcome, so the strategy's trades do not
+    # depend on whether a Heston fit was accepted. A failure is loud but costs
+    # neither the fit nor the captures.
+    if any(s in steps for s in ("capture", "calibrate")):
+        with _Group("forward ledger"):
+            expected = closed.isoformat()
+            if market_ok and sess == expected:
+                led = record_forward_ledger(expected, yahoo_book or None, ticker_factory=ticker_factory)
+            else:
+                led = {"ok": False, "status": "skipped",
+                       "reason": f"the DB does not hold session {expected} (latest {sess})"}
+            yahoo_book.clear()
+            status["forward_ledger"] = led
+            if led["status"] == "failed":
+                hard_fail = True
+                msg = f"forward ledger for {expected} not recorded: {led.get('error')}"
+                status["errors"].append(msg)
+                _annotate("error", "Forward ledger", msg)
+            elif not led["ok"]:
+                msg = f"forward ledger for {expected} not recorded: {led.get('reason')}"
+                status["warnings"].append(msg)
+                _annotate("warning", "Forward ledger", msg)
 
     accepted = (status.get("calibration") or {}).get("status") == "accepted"
     if persist and any(s in steps for s in ("market", "calibrate")):

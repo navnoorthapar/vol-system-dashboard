@@ -2,14 +2,23 @@
 forward_ledger.py — a pre-registered forward test at executable prices.
 
 The backtest marks every straddle to a model (Black-Scholes at β·VIX). This
-module does the opposite, going forward: on each session the daily bot
-captures, it turns that session's signals into REAL listed SPX straddles,
-records their entry bid/ask from the captured chain, and on every later
-captured session marks each open straddle at that chain's bid, ask and mid.
-P&L is booked at executable prices: a long straddle is bought at the asks and
-sold at the bids, a short one sold at the bids and bought back at the asks; a
-straddle held to expiry settles at its intrinsic value on the official SPX
-close of a PM-settled expiry (no exit spread).
+module does the opposite, going forward: on every session the daily bot
+captures a live book for — whatever the Heston calibration of that session
+does — it turns the session's signals into REAL listed SPX straddles, records
+their entry bid/ask from the captured chain, and on every later captured
+session marks each open straddle at that chain's bid, ask and mid. P&L is
+booked at executable prices: a long straddle is bought at the asks and sold at
+the bids, a short one sold at the bids and bought back at the asks; a straddle
+held to expiry settles at its intrinsic value on the official SPX close of a
+PM-settled expiry (no exit spread).
+
+The book is the session's full Cboe delayed-quotes capture
+(data_store/options/cboe/spx_<session>_<HHMMSS>Z.parquet: every listed expiry
+and strike), so every straddle the ledger opens is in every later captured
+book until it expires. When no capture is stored for the session the bot
+falls back to the Yahoo chain it downloaded for the fit plus the expiries of
+the open positions (scripts/cloud_refresh.record_forward_ledger); which book
+was used is recorded in ``inputs.book``.
 
 Each session writes one file, ledger_<session>.json, in a deterministic
 schema (LEDGER_SCHEMA; keys sorted, floats to 10 significant digits). Every
@@ -26,12 +35,21 @@ Rules (the backtest's rules, on listed contracts):
                 away, and the listed strike nearest that expiry's parity
                 forward with both legs two-sided (ties: lower strike)
     size        contracts per $1M = max(1, int(kelly·1e6 / (entry price·100))),
-                short straddles capped at 1e6 / (0.20·K·100) (the engine's
-                sizing and margin rule, at the executable entry price)
+                short straddles capped at 1e6 / (0.20·K·100): the engine's
+                contract and margin rule at a sleeve NAV of $1M (the engine
+                sizes off each sleeve's running NAV; the ledger reports per
+                $1M). ``kelly`` is the size the engine trades: for the
+                portfolio sleeves S1C/S3/S4 the base Kelly times the engine's
+                pass-2 multiplier k_mult (correlation netting × trailing
+                net-Kelly scale, one session lagged); S1/S2 trade the base
+                size. Both factors are recorded (signals_for_session)
     hold        while the target keeps the same direction
     close       at the next captured book after the target changes or goes
-                flat; a straddle with a one-sided or missing leg is not
-                closed at a made-up price: it stays open and is retried
+                flat. A straddle that cannot be priced on a book (its expiry
+                or strike is not in it, or a leg is one-sided) is not closed
+                at a made-up price: it is marked 'unmarked' with the reason,
+                its last mark is kept, and the close is retried on the next
+                book ('close_pending')
     settle      on or after its expiry date, at |S_close(expiry) − K|; if the
                 target is still on, a new straddle is opened the same session
     hedge       optional bookkeeping of a delta hedge in the forward, set at
@@ -143,6 +161,49 @@ def observed_book(raw: pd.DataFrame) -> pd.DataFrame:
     return book.reset_index(drop=True)
 
 
+def listed_book(raw: pd.DataFrame) -> pd.DataFrame:
+    """Every line of a raw or stored chain, two-sided or not, after the same
+    one-settlement-per-expiry choice as observed_book: what was listed in the
+    captured book, to say why a contract could not be priced on it."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    book = oc._resolve_settlement(oc._normalise(raw))
+    book["root"] = book["root"].fillna("").astype(str)
+    return book.reset_index(drop=True)
+
+
+UNMARKED_REASONS: dict[str, str] = {
+    "expired": "the expiry has passed",
+    "expiry_not_in_book": "the contract's expiry is not in the captured book",
+    "strike_not_in_book": "the expiry is in the captured book but not this strike and root",
+    "leg_one_sided": "the strike is listed but a leg has no two-sided quote",
+}
+
+
+def unmarked_reason(book: pd.DataFrame, contract: Mapping, listed: pd.DataFrame | None = None,
+                    expired: bool = False) -> dict[str, Any]:
+    """Why ``contract`` has no executable mark on this book: a reason code
+    (UNMARKED_REASONS) and a sentence. ``listed`` (listed_book of the same
+    chain) separates a one-sided leg from a strike that is not listed; without
+    it a strike absent from the two-sided ``book`` counts as one-sided."""
+    if expired:
+        return {"reason_code": "expired", "reason": UNMARKED_REASONS["expired"]}
+    src = listed if listed is not None else book
+    exp, K, root = str(contract["expiry"]), float(contract["strike"]), str(contract["root"])
+    e = src[src["expiry"] == exp]
+    if e.empty:
+        return {"reason_code": "expiry_not_in_book",
+                "reason": f"expiry {exp} is not in the captured book"}
+    lines = e[np.isclose(e["strike"], K) & (e["root"] == root)]
+    if listed is not None and lines.empty:
+        return {"reason_code": "strike_not_in_book",
+                "reason": f"strike {K:g} ({root or 'no root'}) is not in the captured book's {exp} expiry"}
+    one_sided = [name for right, name in (("C", "call"), ("P", "put"))
+                 if _leg(book, exp, K, right, root) is None]
+    return {"reason_code": "leg_one_sided", "legs_one_sided": one_sided,
+            "reason": f"the {' and '.join(one_sided) or 'straddle'} of {exp} {K:g} has no two-sided quote"}
+
+
 def _b76(F: float, K: float, T: float, D: float, sig: float) -> dict[str, float]:
     from scipy.stats import norm
     sq = sig * math.sqrt(T)
@@ -247,13 +308,19 @@ def _contracts(kelly: float, price: float, K: float, direction: int) -> int:
     return n
 
 
-def open_position(sleeve: str, direction: int, kelly: float, quote: dict, session: str) -> dict:
+def open_position(sleeve: str, direction: int, kelly: float, quote: dict, session: str,
+                  kelly_base: float | None = None, k_mult: float | None = None) -> dict:
+    """A new straddle at this book's executable price. ``kelly`` is the size
+    traded; ``kelly_base`` and ``k_mult`` (the engine's pass-2 multiplier),
+    when known, are recorded beside it."""
     entry = quote["ask"] if direction > 0 else quote["bid"]
     n = _contracts(kelly, entry, quote["strike"], direction)
     pid = f"{sleeve}:{session}:{quote['root']}:{quote['expiry']}:{quote['strike']:g}"
     hedge_units = -direction * quote.get("delta_F", float("nan"))
     return {
         "id": pid, "sleeve": sleeve, "direction": int(direction), "kelly": float(kelly),
+        "kelly_base": None if kelly_base is None else float(kelly_base),
+        "k_mult": None if k_mult is None else float(k_mult),
         "contracts_per_1m": int(n),
         "contract": {"expiry": quote["expiry"], "strike": quote["strike"], "root": quote["root"],
                      "settlement": quote["settlement"]},
@@ -265,6 +332,7 @@ def open_position(sleeve: str, direction: int, kelly: float, quote: dict, sessio
         "mark": None,
         "hedge": {"units": hedge_units, "forward": quote["forward"], "pnl": 0.0},
         "sessions_marked": 0,
+        "sessions_unmarked": 0,
     }
 
 
@@ -279,10 +347,25 @@ def _pnl(direction: int, entry_exec: float, entry_mid: float, exit_exec: float |
             "commission": comm * n}
 
 
+def _last_marked(mark: Mapping | None) -> dict | None:
+    """The most recent executable mark behind ``mark`` (itself if marked)."""
+    if not mark:
+        return None
+    if mark.get("status") == "marked":
+        return {k: mark.get(k) for k in ("session", "bid", "ask", "mid", "pnl_exec", "pnl_mid")}
+    prev = mark.get("last_marked")
+    return dict(prev) if prev else None
+
+
 def mark_position(pos: dict, book: pd.DataFrame, session: str, r_ref: float | None = None,
                   carry: pd.DataFrame | None = None, t_origin=None,
-                  vix_row: pd.Series | None = None, beta: float | None = None) -> dict:
-    """The position marked on this session's book (a new dict; ``pos`` unchanged)."""
+                  vix_row: pd.Series | None = None, beta: float | None = None,
+                  listed: pd.DataFrame | None = None) -> dict:
+    """The position marked on this session's book (a new dict; ``pos`` unchanged).
+
+    A position the book cannot price is 'unmarked' with a reason code
+    (unmarked_reason; ``listed`` = listed_book of the same chain) and keeps
+    its last executable mark under ``last_marked``; nothing is priced."""
     pos = json.loads(canonical_json(pos))
     c = pos["contract"]
     T = _year_fraction(session, c["expiry"], c["settlement"], t_origin)
@@ -292,7 +375,9 @@ def mark_position(pos: dict, book: pd.DataFrame, session: str, r_ref: float | No
     e = pos["entry"]
     if q is None:
         pos["mark"] = {"session": session, "status": "unmarked",
-                       "reason": "expired" if T <= 0 else "a leg is missing or one-sided"}
+                       **unmarked_reason(book, c, listed, expired=T <= 0),
+                       "last_marked": _last_marked(pos.get("mark"))}
+        pos["sessions_unmarked"] = int(pos.get("sessions_unmarked", 0)) + 1
         return pos
     exit_exec = q["bid"] if d > 0 else q["ask"]
     mark = {"session": session, "status": "marked", "bid": q["bid"], "ask": q["ask"], "mid": q["mid"],
@@ -380,25 +465,36 @@ def quote_after_close(session: str, quote_time) -> bool | None:
     return True
 
 
+def _opt_float(x: Any) -> float | None:
+    return None if x is None else float(x)
+
+
 def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
          signals: Mapping[str, Mapping[str, float]], spot: float | None = None,
          r_ref: float | None = None, carry: pd.DataFrame | None = None,
          t_origin=None, quote_time: str | None = None,
          settlement_closes: Mapping[str, float] | None = None,
-         vix_row: pd.Series | None = None, beta: float | None = None) -> dict:
+         vix_row: pd.Series | None = None, beta: float | None = None,
+         book_meta: Mapping[str, Any] | None = None) -> dict:
     """The ledger record of ``session``.
 
     prev              : the previous session's ledger (None for the first)
     raw_chain         : this session's captured chain (raw or stored frame)
-    signals           : {sleeve: {"position": −1/0/+1, "kelly": f}}
+    signals           : {sleeve: {"position": −1/0/+1, "kelly": f}}, optionally
+                        with "kelly_base" and "k_mult" (recorded; "kelly" is
+                        the size traded)
     settlement_closes : {"YYYY-MM-DD": official SPX close} for expiry dates
                         up to this session (to settle expired straddles)
+    book_meta         : where ``raw_chain`` came from (source, file, raw
+                        sha256, ...), recorded as ``inputs.book``
     """
     session = str(pd.Timestamp(session).date())
     if prev is not None and str(prev["session"]) >= session:
         raise ValueError(f"ledger for {session} must follow {prev['session']}")
     after_close = quote_after_close(session, quote_time)
     book = observed_book(raw_chain)
+    listed = listed_book(raw_chain)
+    listed_expiries = set(listed["expiry"])
     settle = {str(k): float(v) for k, v in (settlement_closes or {}).items()}
     open_prev = {p["sleeve"]: p for p in (prev or {}).get("positions", [])}
     summary = {}
@@ -406,7 +502,8 @@ def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
         sm = dict(_summary_template())
         sm.update({k: v for k, v in (prev or {}).get("summary", {}).get(s, {}).items()
                    if k in sm})
-        sm.update({"open_id": None, "open_pnl_exec": None, "open_pnl_mid": None})
+        sm.update({"open_id": None, "open_pnl_exec": None, "open_pnl_mid": None,
+                   "open_status": None, "open_reason_code": None})
         summary[s] = sm
     positions, closed, actions = [], [], []
     for s in SLEEVES:
@@ -429,14 +526,16 @@ def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
                                           "reason": f"no official close for {exp} supplied"})
                     actions.append({"sleeve": s, "action": "await_settlement", "id": pos["id"]})
             else:
-                pos = mark_position(pos, book, session, r_ref, carry, t_origin, vix_row, beta)
+                pos = mark_position(pos, book, session, r_ref, carry, t_origin, vix_row, beta,
+                                    listed=listed)
                 if target != pos["direction"]:
                     if pos["mark"]["status"] == "marked":
                         closed.append(_realised(pos, "close", session))
                         actions.append({"sleeve": s, "action": "close", "id": pos["id"]})
                         pos, just_closed = None, True
                     else:
-                        actions.append({"sleeve": s, "action": "close_pending", "id": pos["id"]})
+                        actions.append({"sleeve": s, "action": "close_pending", "id": pos["id"],
+                                        "reason_code": pos["mark"].get("reason_code")})
                 else:
                     actions.append({"sleeve": s, "action": "hold", "id": pos["id"]})
         if pos is None and target != 0 and not just_closed:
@@ -444,7 +543,9 @@ def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
             if q is None:
                 actions.append({"sleeve": s, "action": "no_contract"})
             else:
-                newp = open_position(s, target, kelly, q, session)
+                newp = open_position(s, target, kelly, q, session,
+                                     kelly_base=_opt_float(sig.get("kelly_base")),
+                                     k_mult=_opt_float(sig.get("k_mult")))
                 if newp["contracts_per_1m"] < 1:
                     actions.append({"sleeve": s, "action": "margin_blocked"})
                 else:
@@ -468,12 +569,19 @@ def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
         sm["open_pnl_exec"] = m.get("pnl_exec")
         sm["open_pnl_mid"] = m.get("pnl_mid")
         sm["open_id"] = p["id"]
+        sm["open_status"] = m.get("status")
+        sm["open_reason_code"] = m.get("reason_code")
+    open_exps = {p["contract"]["expiry"] for p in open_prev.values()}
+    missing = sorted(e for e in open_exps if e > session and e not in listed_expiries)
     ledger = {
         "schema": SCHEMA,
         "session": session,
         "previous": None if prev is None else {"session": str(prev["session"]),
                                                "sha256": ledger_sha256(prev)},
         "inputs": {"chain_sha256": chain_sha256(book), "chain_rows_two_sided": len(book),
+                   "chain_expiries": len(listed_expiries),
+                   "open_expiries_not_in_book": missing,
+                   "book": None if book_meta is None else dict(book_meta),
                    "quote_time": None if quote_time is None else str(quote_time),
                    "quote_after_close": after_close,
                    "t_origin": None if t_origin is None else str(t_origin),
@@ -481,6 +589,8 @@ def step(prev: Mapping | None, session: str, raw_chain: pd.DataFrame,
                    "beta": None if vix_row is None else (beta if beta is not None else _default_beta())},
         "signals": {s: {"position": int(np.sign(float(signals.get(s, {}).get("position", 0)))),
                         "kelly": float(signals.get(s, {}).get("kelly", 0.0) or 0.0),
+                        "kelly_base": _opt_float(signals.get(s, {}).get("kelly_base")),
+                        "k_mult": _opt_float(signals.get(s, {}).get("k_mult")),
                         "straddle_direction": int(np.sign(float(signals.get(s, {}).get("position", 0))))
                         * STRADDLE_SIGN[s]} for s in SLEEVES},
         "actions": actions,
@@ -642,31 +752,42 @@ def validate_ledger(ledger: Mapping) -> None:
 
 # ── inputs from the database (for the daily bot) ─────────────────────────────
 
-def signals_for_session(session: str, start_date: str | None = None) -> dict[str, dict[str, float]]:
-    """The backtest's signal positions and sizes for ``session``, built exactly
-    as BacktestEngine.run builds them (rule regimes, walk-forward PDV-21 from
-    2010, SignalEngine from the backtest start), on data dated ≤ session."""
-    from joint_vol_calibration.backtest.backtest_engine import BT_START, BacktestEngine
-    from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
-    from joint_vol_calibration.signals.regime_classifier import build_regime_labels, walk_forward_pdv_vol
-    from joint_vol_calibration.signals.signal_engine import SignalEngine
+PORTFOLIO_SLEEVES: tuple[str, ...] = ("s1c", "s3", "s4")     # sized by the engine's pass-2 overlay
 
-    start = start_date or BT_START
-    spx = get_spx_ohlcv(as_of_date=session, start_date="2010-01-01")
-    vix = get_vix_term_structure_wide(as_of_date=session, start_date="2010-01-01")
-    pdv = walk_forward_pdv_vol(spx)
-    spx_col = BacktestEngine._ensure_log_return(
-        BacktestEngine._to_df_with_date_col(BacktestEngine._to_date_indexed(spx)))
-    vix_col = BacktestEngine._to_df_with_date_col(BacktestEngine._to_date_indexed(vix))
-    regimes = build_regime_labels(spx_col, vix_col)
-    sig = SignalEngine(clf=None).generate(spx_col, vix_col, start_date=start, end_date=session,
-                                          precomputed_regimes=regimes, precomputed_pdv_vol=pdv)
+
+def signals_for_session(session: str, start_date: str | None = None) -> dict[str, dict[str, Any]]:
+    """The backtest's positions and sizes for ``session``, from the engine itself.
+
+    Runs BacktestEngine from the backtest start through ``session`` on data
+    dated ≤ session, with the canonical run's inputs (run_backtest: market
+    data from DATA_START, the walk-forward PDV-21 series from
+    PDV_HISTORY_START). Returns {sleeve: {"position", "kelly", "kelly_base",
+    "k_mult"}}: ``kelly_base`` is SignalEngine's pass-1 size and ``kelly`` the
+    size the engine trades on the session — kelly_base × k_mult for the
+    portfolio sleeves S1C/S3/S4 (k_mult: correlation netting × trailing
+    net-Kelly scale, computed on pass-1 P&L through the previous session),
+    kelly_base for the reference sleeves S1/S2 (k_mult None). About 8 s.
+    """
+    from joint_vol_calibration.backtest.backtest_engine import BT_START, BacktestEngine
+    from joint_vol_calibration.backtest.run_backtest import _load_data, load_pdv_vol
+
+    session = str(pd.Timestamp(session).date())
+    spx, vix = _load_data(end=session)
+    eng = BacktestEngine(start_date=start_date or BT_START, end_date=session,
+                         pdv_vol_series=load_pdv_vol(end=session))
+    eng.run(spx, vix)
+    sig = eng.signals_df
     ts = pd.Timestamp(session)
-    if ts not in sig.index:
+    if sig is None or ts not in sig.index:
         raise ValueError(f"no signal row for {session}")
     row = cast(pd.Series, sig.loc[ts])                    # one session: one row
-    return {s: {"position": float(row[f"{s}_position"]), "kelly": float(row[f"{s}_kelly"])}
-            for s in SLEEVES}
+    out: dict[str, dict[str, Any]] = {}
+    for s in SLEEVES:
+        base = float(row[f"{s}_kelly"])
+        k = float(eng._k_mult[s].loc[ts]) if s in PORTFOLIO_SLEEVES else None
+        out[s] = {"position": float(row[f"{s}_position"]), "kelly": base if k is None else base * k,
+                  "kelly_base": base, "k_mult": k}
+    return out
 
 
 def _session_inputs(session: str, earliest: str | None = None) -> dict[str, Any]:
@@ -695,14 +816,16 @@ def _session_inputs(session: str, earliest: str | None = None) -> dict[str, Any]
 
 def record_session(session: str, raw_chain: pd.DataFrame, clean=None, spot: float | None = None,
                    r_ref: float | None = None, quote_time: str | None = None,
-                   directory: Path = FORWARD_DIR, signals: Mapping | None = None) -> Path:
-    """One call for the daily bot, after a session's chain is accepted.
+                   directory: Path = FORWARD_DIR, signals: Mapping | None = None,
+                   book_meta: Mapping[str, Any] | None = None) -> Path:
+    """One call for the daily bot, for every session it captured a live book of.
 
     Builds the session's signals (signals_for_session) unless given, reads the
     previous ledger from ``directory``, the SPX closes (settlement) and the VIX
     row (model mark) from the database, takes the parity carry and T origin
-    from ``clean`` (option_chain.CleanChain) when given, and writes
-    ledger_<session>.json. Returns its path.
+    from ``clean`` (option_chain.CleanChain of ``raw_chain``) when given, and
+    writes ledger_<session>.json, recording ``book_meta`` (which book) in it.
+    Returns its path.
     """
     session = str(pd.Timestamp(session).date())
     prev = latest_ledger(directory, before=session)
@@ -716,5 +839,6 @@ def record_session(session: str, raw_chain: pd.DataFrame, clean=None, spot: floa
         if str(diag.get("t_origin_basis", "")).startswith("quote_time"):
             t0 = diag.get("t_origin")
     led = step(prev, session, raw_chain, sig, spot=spot, r_ref=r_ref, carry=carry, t_origin=t0,
-               quote_time=quote_time, settlement_closes=inp["closes"], vix_row=inp["vix_row"])
+               quote_time=quote_time, settlement_closes=inp["closes"], vix_row=inp["vix_row"],
+               book_meta=book_meta)
     return write_ledger(led, directory)

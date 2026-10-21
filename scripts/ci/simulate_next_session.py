@@ -389,8 +389,8 @@ def main(argv=None) -> int:
         problems.append(f"the new fit did not move off the headline in {still} (relative moves "
                         f"{ {k: round(m, 4) for k, m in moves.items()} } < {MIN_PARAM_MOVE}): "
                         "a test pinning the headline would not be caught")
-    if not (cal.get("forward_ledger") or {}).get("ok"):
-        problems.append(f"forward ledger: {cal.get('forward_ledger')}")
+    if (st.get("forward_ledger") or {}).get("status") != "recorded":
+        problems.append(f"forward ledger: {st.get('forward_ledger')}")
     if (st.get("capture") or {}).get("status") != "captured":
         problems.append(f"capture: {st.get('capture')}")
     for name, res in (st.get("artifacts") or {}).items():

@@ -65,7 +65,12 @@ def test_block_length_grows_with_persistence():
     for i in range(1, 3000):
         v[i] = 0.05 + 0.1 * (iid[i - 1] * np.sqrt(v[i - 1])) ** 2 + 0.85 * v[i - 1]
     g = iid * np.sqrt(v)
-    assert bs.block_length(g) >= bs.block_length(g, include_squares=False)
+    # strict, and by a wide margin (measured 54.9 vs 1.37): the r² term sets it.
+    # (block_length is a max over the two terms, so ">=" held with no r² term.)
+    assert bs.block_length(g) > 10 * bs.block_length(g, include_squares=False)
+    from arch.bootstrap import optimal_block_length
+    assert bs.block_length(g) == pytest.approx(float(optimal_block_length(g ** 2)["stationary"].iloc[0]),
+                                               rel=1e-12)
 
 
 def test_mean_interval_covers_on_ar1_data():
