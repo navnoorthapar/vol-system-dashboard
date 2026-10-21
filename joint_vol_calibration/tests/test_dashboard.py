@@ -45,6 +45,17 @@ ROOT = Path(__file__).resolve().parents[2]
 SHIPPED = ROOT / "data_store"
 
 
+def _surface_file(name: str) -> Path:
+    """``name`` in the session the Surface page renders (desk_artifacts.load_surface:
+    the newest data_store/surface/<session>/ with a residual table), so a test
+    holds on the bot's next session as well as on the committed one."""
+    root = SHIPPED / "surface"
+    sessions = sorted(p.name for p in root.iterdir()
+                      if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name)
+                      and (p / "residuals.parquet").exists())
+    return root / sessions[-1] / name
+
+
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec is not None
@@ -2617,7 +2628,7 @@ def test_risk_delta_grid_is_the_otm_options_forward_delta(dash, pages):
     # the 30-day, 30%-OTM put: a small negative delta, never the +0.99 the grid showed
     deep_put = g[(g["T_days"] == 30) & (g["log_moneyness"].round(2) == -0.30)].iloc[0]
     assert dash.otm_forward_delta(deep_put.delta, deep_put.q, deep_put.T, deep_put.log_moneyness) < 0
-    assert rows["30d"][0].startswith("−")
+    assert float(rows["30d"][0].replace("−", "-")) <= 0          # '−0.01' or '0.00', never '+0.99'
 
 
 def test_one_colour_per_model_on_every_surface_chart(dash, pages):
@@ -2628,7 +2639,7 @@ def test_one_colour_per_model_on_every_surface_chart(dash, pages):
     html = pages["/surface"]
     sl, be = _spec(html, "chart-slices"), _spec(html, "chart-by-expiry")
     by_name = {s["name"]: s["color"] for s in be["series"]}
-    models = json.loads((SHIPPED / "surface" / "2026-10-16" / "scorecard.json").read_text())["models"]
+    models = json.loads(_surface_file("scorecard.json").read_text())["models"]
     keys = [m["model"] for m in models]
     assert len({dash.model_colour(k) for k in keys}) == len(keys)            # distinct
     for k in keys:
@@ -2656,7 +2667,7 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
     them), and the IVs are the residual table's model IVs at those strikes."""
     sl = _spec(pages["/surface"], "chart-slices")
     by = {s["name"]: s for s in sl["series"]}
-    res = pd.read_parquet(SHIPPED / "surface" / "2026-10-16" / "residuals.parquet")
+    res = pd.read_parquet(_surface_file("residuals.parquet"))
     with_x = [s for s in sl["series"] if s.get("xFrom")]
     assert len(with_x) == res["model"].nunique() * res["expiry"].nunique()      # every model, every expiry
     for s in with_x:
@@ -2694,7 +2705,7 @@ def test_iv_and_residual_grids_hold_every_quote(dash, pages):
     put wing) from every grid, and the colour ramp spanned quotes no cell showed.
     The grids now carry an open wing column; their cells add up to the quotes."""
     d = dash.load_surface()
-    res = pd.read_parquet(SHIPPED / "surface" / "2026-10-16" / "residuals.parquet")
+    res = pd.read_parquet(_surface_file("residuals.parquet"))
     mkt = res[res["model"] == res["model"].iloc[0]]
     assert (mkt["k"] <= -0.30).sum() > 0
     assert d["iv_heat"]["n"] == len(mkt) == d["n_quotes"]
@@ -2715,12 +2726,12 @@ def test_scorecard_and_by_expiry_chart_say_which_quotes_they_score(dash, pages):
     quote counts, the chart is each model's out-of-sample quotes (recomputed here),
     and the history column names the repair's moves."""
     html = pages["/surface"]
-    sc = json.loads((SHIPPED / "surface" / "2026-10-16" / "scorecard.json").read_text())
+    sc = json.loads(_surface_file("scorecard.json").read_text())
     ns = {m["metrics"]["out_of_sample"]["n"] for m in sc["models"]}
     title = re.search(r'<h2 class="panel-title" id="scorecard-t">(.*?)</h2>', html).group(1)
     assert ("same quotes" in title) is (len(ns) == 1)
     be = _spec(html, "chart-by-expiry")
-    res = pd.read_parquet(SHIPPED / "surface" / "2026-10-16" / "residuals.parquet")
+    res = pd.read_parquet(_surface_file("residuals.parquet"))
     for s in be["series"]:
         key = next(k for k in res["model"].unique() if dash.model_label(k) == s["name"])
         q = res[(res["model"] == key) & ~res["in_sample"].astype(bool)]
@@ -2738,12 +2749,19 @@ def test_surface_atm_over_vix_is_named_by_its_method(dash, pages):
     whose table gives 0.702 for the same chain. Each number now carries its own
     method's name, and the β estimator's value equals the Research page's."""
     surf, res = _visible_text(pages["/surface"]), pages["/research"]
-    vb = json.loads((SHIPPED / "surface" / "2026-10-16" / "vix_replication.json").read_text())["beta"]
-    assert f"VIX-term ATM / VIX on this chain: {vb['atm_over_vix_official']:.3f}" in surf
+    vb = json.loads(_surface_file("vix_replication.json").read_text())["beta"]
     assert "30-day ATM vol / VIX on this chain" not in surf
-    row = re.search(r'<td class="nowrap">2026-10-16</td><td>[^<]*</td><td class="num">([0-9.]+)</td>', res)
-    assert row, "research β chain row"
-    assert f"gives {row.group(1)} on the same chain" in surf
+    if "atm_over_vix_official" not in vb:       # the chain does not bracket 30 days: no VIX-term ATM
+        assert "VIX-term ATM / VIX on this chain" not in surf
+    else:
+        assert f"VIX-term ATM / VIX on this chain: {vb['atm_over_vix_official']:.3f}" in surf
+        session = _surface_file("residuals.parquet").parent.name
+        row = re.search(rf'<td class="nowrap">{session}</td><td>[^<]*</td><td class="num">([0-9.]+)</td>',
+                        res)
+        if row:     # the session's chain is one the β estimator read
+            assert f"gives {row.group(1)} on the same chain" in surf
+        else:
+            assert "on the same chain" not in surf
     assert "β estimator ATM 30d / VIX" in surf
     assert "VIX-term ATM / VIX" in surf
 

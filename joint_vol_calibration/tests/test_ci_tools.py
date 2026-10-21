@@ -212,6 +212,23 @@ class TestSimulatedSession:
             rms.append(float(np.sqrt(np.mean(dv ** 2))))
         assert 0.8 < float(np.mean(rms)) < 1.2
 
+    def test_no_gate_test_reads_a_shipped_session_by_its_date(self, sim):
+        """C23 verify: five Surface tests opened data_store/surface/2026-10-16/ by
+        name while the page renders the newest session. On the simulated next
+        session (2026-10-20) the page showed that session, the tests compared it
+        with 2026-10-16's files and the deploy gate failed on a legitimate new fit
+        (the 2026-10-20 incident class). A gate test reads the session the page
+        renders; a fixed session is a fixture's, under a temporary directory."""
+        dated = re.compile(r'SHIPPED\s*/\s*"[\w.-]+"\s*/\s*"\d{4}-\d{2}-\d{2}"'
+                           r'|["\']data_store/[\w./-]*?/\d{4}-\d{2}-\d{2}/')
+        gates = sim.gate_tests(ROOT / ".github" / "workflows" / "daily_refresh.yml")
+        files = sorted({f for fs in gates.values() for f in fs})
+        assert "test_dashboard.py" in files
+        hits = [f"{f}:{n}: {line.strip()}" for f in files
+                for n, line in enumerate((ROOT / "joint_vol_calibration" / "tests" / f).read_text()
+                                         .splitlines(), 1) if dated.search(line)]
+        assert hits == []
+
     def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
         import inspect
         src = inspect.getsource(sim.drive)
