@@ -54,7 +54,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # Keys of a calibration pickle that legitimately differ run to run.
-VOLATILE_KEYS = {"fit_time", "run_utc"}
+VOLATILE_KEYS = {"fit_time", "fit_cpu_time", "run_utc"}
 # save() adds the pre-C22 'losses' alias; the daily pipeline's pickles omit it.
 OPTIONAL_KEYS = {"losses"}
 # Provenance in a calibration pickle: how T, carry and anchors were chosen
@@ -64,7 +64,12 @@ OPTIONAL_KEYS = {"losses"}
 # fields, and a fit made from the live download records the raw download's
 # line counts where a refit from the stored chain (two-sided lines only)
 # records its own.
-PROVENANCE_KEYS = {"methods", "chain_diagnostics"}
+PROVENANCE_KEYS = {"methods", "chain_diagnostics",
+                   # C23 records of how a fit was made, absent from every earlier
+                   # pickle: the optimiser and its multi-start runs (with timings),
+                   # the identifiability report, the VVIX check and the rate reference
+                   "optimizer", "optimizer_message", "multistart", "identifiability",
+                   "vvix_check", "de_check", "rate_reference"}
 
 TOLERANCES = {
     "backtest": 1e-10,
@@ -89,15 +94,19 @@ _BACKTEST = ("from joint_vol_calibration.backtest.run_backtest import _load_data
              "eng.save()\n")
 # A committed fit is refitted on the inputs it recorded: its VIX targets (C23
 # restated the database's VIX family as Cboe's closes) and its rate reference
-# (joint_calibrator.recorded_inputs).
+# (joint_calibrator.recorded_inputs), with the optimiser that made it: every fit
+# before C23 is differential evolution (no 'optimizer' key; one worker, so the
+# refit is bit for bit), the daily bot's since then multi-start TRF warmed from
+# the previous accepted fit. They are read from the COMMITTED pickle in the
+# checkout ({ref}): run_step deletes the copy's pickle before the refit.
 _REFIT = ("import pickle\n"
           "from joint_vol_calibration.calibration.joint_calibrator import (\n"
           "    JointCalibrator, recorded_inputs)\n"
-          "from joint_vol_calibration.config import DATA_DIR\n"
-          "with open(DATA_DIR / 'calibrations' / 'joint_cal_{session}.pkl', 'rb') as f:\n"
+          "with open({ref!r}, 'rb') as f:\n"
           "    ref = pickle.load(f)\n"
           "c = JointCalibrator(as_of_date={session!r}, **recorded_inputs(ref))\n"
-          "c.calibrate(verbose=False)\n"
+          "opt = 'de' if ref.get('optimizer', 'de') == 'de' else 'trf'\n"
+          "c.calibrate(verbose=False, optimizer=opt)\n"
           "c.save()\n")
 
 
@@ -343,7 +352,8 @@ def build_steps(root: Path) -> list[Step]:
                                        source_calibration(root, "greeks/scenario_grid.parquet",
                                                           b"scenario_provenance")],
                           [(f"{DS}/greeks/scenario_grid.parquet", "scenario", {})]))
-    steps.extend(Step(f"calibration-{s}", [py, "-c", _REFIT.format(session=s)],
+    steps.extend(Step(f"calibration-{s}", [py, "-c", _REFIT.format(
+                          session=s, ref=str(root / DS / "calibrations" / f"joint_cal_{s}.pkl"))],
                       [(f"{DS}/calibrations/joint_cal_{s}.pkl", "calibration",
                         {"skip": VOLATILE_KEYS, "optional": OPTIONAL_KEYS, "provenance": PROVENANCE_KEYS})])
                  for s in v2_sessions(root))

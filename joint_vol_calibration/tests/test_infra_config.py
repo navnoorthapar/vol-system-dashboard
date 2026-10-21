@@ -236,3 +236,50 @@ def test_commit_and_push_against_a_moved_remote(tmp_path):
     assert "No changes to commit." in r.stdout
     assert git("rev-parse", "origin/main", cwd=work) == head
     assert git("diff", "--staged", "--name-only", cwd=work) == ""
+
+
+def test_reproduce_refits_each_fit_from_its_committed_record(monkeypatch):
+    """make reproduce deletes each artifact in its scratch copy before the step
+    that rebuilds it, so a refit must read the fit's recorded inputs from the
+    committed pickle in the checkout (it read the copy's, already deleted: all
+    five calibration steps failed). And it must use the optimiser the fit was
+    made with: the calibrator's default became multi-start TRF in C23, which
+    lands on the committed DE optima to about 1e-7 in loss but not to 1e-6 in
+    every output."""
+    import importlib.util
+    import pickle
+    spec = importlib.util.spec_from_file_location("reproduce_under_test",
+                                                  ROOT / "scripts" / "ci" / "reproduce.py")
+    mod = importlib.util.module_from_spec(spec)
+    import sys
+    monkeypatch.setitem(sys.modules, spec.name, mod)             # its dataclasses look it up
+    spec.loader.exec_module(mod)
+    steps = {s.name: s for s in mod.build_steps(ROOT)}
+    refits = [n for n in steps if n.startswith("calibration-")]
+    assert refits
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+    seen = []
+
+    class FakeCalibrator:
+        def __init__(self, **kw):
+            seen.append(("init", kw))
+
+        def calibrate(self, **kw):
+            seen.append(("calibrate", kw))
+
+        def save(self):
+            seen.append(("save", {}))
+    monkeypatch.setattr(jc, "JointCalibrator", FakeCalibrator)
+    for name in refits:
+        session = name.removeprefix("calibration-")
+        code = steps[name].argv[-1]
+        committed = ROOT / "data_store" / "calibrations" / f"joint_cal_{session}.pkl"
+        assert repr(str(committed)) in code
+        assert "DATA_DIR" not in code
+        with open(committed, "rb") as f:
+            ref = pickle.load(f)
+        seen.clear()
+        exec(compile(code, name, "exec"), {})                     # noqa: S102 (the step's own code)
+        (_, init), (_, cal), _ = seen
+        assert init == {"as_of_date": session, **jc.recorded_inputs(ref)}
+        assert cal["optimizer"] == ("de" if ref.get("optimizer", "de") == "de" else "trf")

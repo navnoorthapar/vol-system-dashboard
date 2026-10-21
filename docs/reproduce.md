@@ -37,36 +37,46 @@ lines, by design) records its own.
 
 ## Last result
 
-`make reproduce` at commit `defa301` (the artifacts and the code that writes them are unchanged since), 2026-10-20,
-Intel Xeon @ 2.10 GHz with AVX-512, 4 vCPU shared with other jobs, Python 3.11.15, NumPy 2.4.6, pandas 3.0.6,
-three steps in parallel: **9 of 9 artifacts reproduce, every number bit for bit** (largest relative deviation
-0.0 everywhere).
+`make reproduce` plus the three `--full` steps at commit `a678e57` with the refit fix of the next commit, 2026-10-21,
+Intel Xeon @ 2.10 GHz with AVX-512, 4 vCPU (load average about 1), Python 3.11.15, NumPy 2.4.6, pandas 3.0.6, four
+steps in parallel: **14 of 14 artifacts reproduce, every number bit for bit** (largest relative deviation 0.0
+everywhere).
 
 | Artifact | Largest relative deviation | Step time |
 |---|---|---|
-| `backtest/full_results.parquet`, `full_results.pkl` | 0.0 | 38 s |
-| `greeks/greeks_surface.parquet` | 0.0 | 8 s |
-| `backtest/delta_hedge_2020.parquet` (C7) | 0.0 | 23 s |
-| `calibrations/joint_cal_2026-03-24.pkl` | 0.0 | 157 s |
-| `calibrations/joint_cal_2026-03-27.pkl` | 0.0 | 119 s |
-| `calibrations/joint_cal_2026-05-29.pkl` | 0.0 | 151 s |
-| `calibrations/joint_cal_2026-06-18.pkl` | 0.0 | 85 s |
-| `calibrations/joint_cal_2026-10-16.pkl` | 0.0 | 71 s |
+| `backtest/full_results.parquet`, `full_results.pkl` | 0.0 | 8 s |
+| `greeks/greeks_surface.parquet` (from `joint_cal_2026-10-16.pkl`, named in its provenance) | 0.0 | 5 s |
+| `greeks/scenario_grid.parquet` (same fit) | 0.0 | 4 s |
+| `backtest/delta_hedge_2020.parquet` (C7) | 0.0 | 8 s |
+| `calibrations/joint_cal_2026-03-24.pkl` | 0.0 | 29 s |
+| `calibrations/joint_cal_2026-03-27.pkl` | 0.0 | 22 s |
+| `calibrations/joint_cal_2026-05-29.pkl` | 0.0 | 30 s |
+| `calibrations/joint_cal_2026-06-18.pkl` | 0.0 | 27 s |
+| `calibrations/joint_cal_2026-10-16.pkl` | 0.0 | 29 s |
+| `backtest/c23_bridge.csv` | 0.0 | 23 s |
+| `backtest/beta_sensitivity.csv` (`--full`) | 0.0 | 33 s |
+| `backtest/c22_bridge.csv` (`--full`) | 0.0 | 66 s |
+| `metrics.s3_null_p_value` (`--full`) | 0.0 | 179 s |
+
+The five refits run differential evolution with one worker, the optimiser every committed fit was made with (they
+record no `optimizer` key); the calibrator's default since C23 is multi-start TRF, which the daily bot's fits record
+(`optimizer: trf_multistart`) and are refitted with. Each refit reads the inputs its fit recorded from the committed
+pickle in the checkout. From 2566553 (which made the refits read their recorded inputs) until that fix, they read
+the scratch copy's pickle, which `run_step` deletes first, so all five calibration steps failed; with the path
+right, the default TRF refit would still have missed the committed DE fits by up to 2e-3 relative (per-expiry
+out-of-sample RMSE; the loss agrees to about 1e-7).
 
 Provenance differences, reported and not failed:
 
-- all five calibrations: the current code writes two more `methods` entries (`T_origin`, `vix_leg_timing`), words
-  `methods.T` differently ("from the quote session's 16:00 ET close (closing book) to ..." against "quote session
-  16:00 ET -> ..."), and records the T origin in `chain_diagnostics` (`quote_time`, `t_origin`, `t_origin_basis`).
-  These fields were added in C22 after the pickles were written (commit `3e8b2cd`, the GTH quote-time origin); the
-  numbers they describe did not change;
+- all five calibrations: the current code writes three more `methods` entries (`T_origin`, `vix_leg_timing`,
+  `vix_targets`), words `methods.T` differently ("from the quote session's 16:00 ET close (closing book) to ..."
+  against "quote session 16:00 ET -> ..."), records the T origin in `chain_diagnostics` (`quote_time`,
+  `t_origin`, `t_origin_basis`), and adds the C23 records `identifiability` and `rate_reference` (the committed
+  fits predate both; their recorded reference is ^IRX). The numbers these describe did not change;
 - 2026-10-16 only: `chain_diagnostics.n_raw` is 6,191 in the refit against 7,583 in the committed pickle, and
   `n_after_expiry_filter` 6,191 against 6,444. The committed fit was made by the daily job from the live download
   (7,583 lines); the stored chain holds the 6,191 two-sided lines of that download, which reproduce the same clean
   quotes and the same fit.
 
-The step times are on a loaded machine (load average 7–13 during the run); a quiet single calibration takes about
-42 s (docs/benchmarks.md). The `--full` steps were not run for this record. A re-run of the backtest, Greeks and
-C7 steps after the last edit to `reproduce.py` (`--only greeks,c7,backtest`) again gave 4 of 4 at deviation 0.0.
 CI runs `make reproduce` weekly and on demand on GitHub's runners (job `reproduce` in tests.yml), which tests the same
 claim on a different CPU; there the 1e-10 and 1e-6 tolerances, not bit equality, are the claim.
