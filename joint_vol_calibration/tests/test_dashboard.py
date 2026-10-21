@@ -609,7 +609,12 @@ def test_rule_inputs_reproduce_the_stored_label(dash):
     assert r["gate"] == pytest.approx(last["vvix_gate"], abs=1e-12)
     assert r["label"] == int(last["regime"])
     rl = pd.read_parquet(SHIPPED / "signals" / "regime_labels.parquet")
-    assert r["label"] == int(rl["regime"].loc[r["date"]])     # stored label on that session
+    if pd.Timestamp(r["date"]) in rl.index:
+        assert r["label"] == int(rl["regime"].loc[r["date"]])     # stored label on that session
+    else:
+        # the book slot ran before the close slot stored the session's label (a late
+        # or failed close run): the stored labels lag the market data, never lead it
+        assert rl.index.max() < pd.Timestamp(r["date"])
     html = dash.app.test_client().get("/").get_data(as_text=True)
     assert f"Rule inputs on {r['date']}" in html
 
@@ -1914,6 +1919,9 @@ def test_page_header_can_wrap_at_every_separator():
 # calibration-diagnostics file is a shape sample (the producer's key names,
 # made-up numbers). Each test builds a data_store that links the shipped
 # directories and adds the artifacts, so nothing under data_store/ changes.
+# The store's calibrations stop at the fixtures' session: the daily bot adds
+# newer fits (and the headline moves to them), while these samples describe
+# 2026-10-16, so a newer shipped fit must not become the store's headline.
 
 FIX = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "dashboard"
 SESSION = "2026-10-16"
@@ -1931,6 +1939,9 @@ def _artifact_store(tmp_path: Path, surface=True, inference=True, forward=True, 
         for child in (SHIPPED / sub).iterdir():
             if child.name in ("inference", "diagnostics"):
                 continue
+            m = re.fullmatch(r"joint_cal_(\d{4}-\d{2}-\d{2})\.pkl", child.name)
+            if sub == "calibrations" and m and m.group(1) > SESSION:
+                continue                      # a fit the bot added after the fixtures' session
             (data / sub / child.name).symlink_to(child)
     if surface:
         shutil.copytree(FIX / "surface", data / "surface")

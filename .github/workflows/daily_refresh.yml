@@ -108,7 +108,7 @@ jobs:
       # overnight (GTH) book of 2026-10-19, which cannot be fetched again, was never
       # committed. A rendering bug, or a derived artifact that fails its checks, may
       # block a deploy; it must never lose data. None of these gates may pin a value
-      # the bot replaces.
+      # the bot replaces (scripts/ci/simulate_next_session.py checks that in CI).
       - name: Data tests (gate the capture commit)
         id: datatests
         if: always() && steps.refresh.outcome != 'skipped'

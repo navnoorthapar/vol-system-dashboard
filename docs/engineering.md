@@ -13,6 +13,7 @@ Counts are from that day; the gates keep them from growing.
 | `a11y` | axe-core 4.13.0 in Playwright 1.63.0 Chromium over the frozen site | any WCAG 2.0/2.1/2.2 A/AA violation at 1440 or 390 px in either colour scheme; horizontal scroll at 320–1920 px; a JS error; a request to another origin |
 | `audit` | pip-audit 2.10.1 on `requirements-lock.txt` | none (report only, in the job summary) |
 | `reproduce` | `make reproduce` (weekly and on demand) | an artifact outside its tolerance (docs/reproduce.md) |
+| `simulate` | `scripts/ci/simulate_next_session.py --full`: the daily bot's book slot, offline, on a copy of the checkout for the session after the database's last one (a fit accepted on a book priced by the headline parameters, the Cboe capture replayed, the forward ledger and every derived artifact), then the bot's three gates (read from `daily_refresh.yml`) and the full suite in that copy | the simulated session not accepted or not recorded; any gate or suite failure, i.e. a test that pins a value the bot replaces (the 2026-10-20 incident class) |
 
 Every job installs `requirements-lock.txt`, which is compiled from `requirements-dev.txt`, so the test tools added in
 C23 (Hypothesis, pytest-benchmark, mypy and the pandas/SciPy stubs) reach CI through that compile. The property and

@@ -2,7 +2,8 @@ name: tests
 
 # The full pytest suite, with coverage, on every push and PR to main, plus the
 # lint/type gates, a benchmark smoke run, the accessibility gate on the frozen
-# site and a vulnerability report. Pushes made by the daily bot use
+# site, a vulnerability report and the next-session simulation (the daily bot's
+# run and gates on a new fit, so no test pins a value the bot replaces). Pushes made by the daily bot use
 # GITHUB_TOKEN and do not trigger this workflow, so a weekly run also tests
 # main as the bot left it (the daily job runs the publish-path subset itself
 # before it commits or deploys). The weekly run also gives the property tests
@@ -93,6 +94,54 @@ jobs:
             ${{ runner.temp }}/coverage.xml
             ${{ runner.temp }}/junit.xml
             ${{ runner.temp }}/site
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The 2026-10-20 incident class: tests that pinned committed values passed on the
+  # PR and failed inside the bot on the first new fit, which lost that session's
+  # captures. scripts/ci/simulate_next_session.py runs the bot's book slot offline on
+  # a copy of this checkout (a new session, an accepted fit, the forward ledger and
+  # every derived artifact), then the bot's three gates and the whole suite there.
+  simulate:
+    name: next-session simulation (the bot's gates on a new fit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install dependencies (locked)
+        run: python -m pip install -r requirements-lock.txt
+
+      - name: Simulate the next session, then the gates and the full suite
+        run: python scripts/ci/simulate_next_session.py --full --out "$RUNNER_TEMP/sim"
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/sim/report.md" ]; then
+            { echo "## Next-session simulation"; cat "$RUNNER_TEMP/sim/report.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the simulation's status and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: simulate-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sim/report.md
+            ${{ runner.temp }}/sim/status.json
+            ${{ runner.temp }}/sim/logs
           if-no-files-found: ignore
           retention-days: 14
 

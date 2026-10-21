@@ -201,13 +201,18 @@ def test_diagnostics_cover_every_committed_v2_session_and_summary_matches():
         "calibration_diagnostics", config.ROOT_DIR / "scripts" / "calibration_diagnostics.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # The five C23 sessions are reviewed here (each check above); the daily bot
+    # adds a session's diagnostics after each accepted fit, so the committed set
+    # grows and is checked structurally (test_session_artifacts.py).
     sessions = mod.committed_v2_sessions()
-    assert tuple(sessions) == _V2
+    assert set(_V2) <= set(sessions)
     summary_path = _DIAG / "summary.json"
     if not summary_path.exists():
         pytest.skip("summary.json not generated")
     summary = json.loads(summary_path.read_text())
-    assert [r["session"] for r in summary["rows"]] == list(_V2)
+    rows = [r["session"] for r in summary["rows"]]
+    assert set(_V2) <= set(rows) <= set(sessions)
+    assert rows == sorted(rows)
     for row in summary["rows"]:
         d = _load(row["session"])
         assert row["trf_loss"] == d["trf"]["loss"]
