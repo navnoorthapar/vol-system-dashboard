@@ -178,6 +178,40 @@ jobs:
       - name: Type gate (mypy vs scripts/ci/mypy_baseline.json)
         run: python scripts/ci/baseline_gate.py mypy
 
+      # The two gates above compare the code with the baseline committed next to
+      # it, so a change that adds findings and re-baselines (--update
+      # --allow-growth, or a hand edit) passes them. The baselines themselves are
+      # compared with the base branch's (the pull request's base, or the push's
+      # previous tip): a count may fall, never rise, unless the pull request is
+      # labelled 're-baseline' (a reviewed tool upgrade; the growth is printed).
+      - name: Check out the base branch's baselines
+        id: basebaselines
+        if: >
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.base_ref || github.event.before }}
+          path: .baseline-base
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: true
+
+      - name: Baselines may only shrink (vs the base branch)
+        if: steps.basebaselines.outcome == 'success'
+        env:
+          RE_BASELINE: ${{ contains(github.event.pull_request.labels.*.name, 're-baseline') }}
+        run: |
+          allow=""
+          [ "$RE_BASELINE" = "true" ] && allow="--allow-growth"
+          rc=0
+          for tool in ruff mypy; do
+            python scripts/ci/baseline_gate.py "$tool" \
+              --against ".baseline-base/scripts/ci/${tool}_baseline.json" $allow || rc=1
+          done
+          exit $rc
+
   bench:
     name: benchmark smoke (no timings asserted)
     runs-on: ubuntu-latest

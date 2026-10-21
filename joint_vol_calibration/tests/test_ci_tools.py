@@ -5,10 +5,16 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * mutation_check.py (`make mutation`): every curated mutant still names a
     site that occurs exactly once, so a refactor that copies or rewrites a
     mutated line fails here instead of turning the weekly run red as "stale".
+  * baseline_gate.py --against (CI's lint job): a baseline may only shrink
+    against the base branch's, so adding findings and re-baselining in the
+    same change fails.
 """
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -65,3 +71,81 @@ class TestMutationCheck:
         (tmp_path / rel).write_text((ROOT / rel).read_text() + "\n# " + old + "\n")
         assert mutation.stale_sites(tmp_path) == {name: 2}
 
+
+def _baseline(counts: dict, version="ruff 0.15.0") -> str:
+    nested: dict = {}
+    for (path, code), n in counts.items():
+        nested.setdefault(path, {})[code] = n
+    return json.dumps({"tool": "ruff", "version": version, "total": sum(counts.values()), "counts": nested})
+
+
+def _against(tmp_path, head: dict, base, *extra):
+    hp, bp = tmp_path / "head.json", tmp_path / "base.json"
+    hp.write_text(_baseline(head))
+    if base is not None:
+        bp.write_text(_baseline(base))
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "baseline_gate.py"), "ruff",
+                        "--baseline", str(hp), "--against", str(bp), *extra],
+                       capture_output=True, text=True, check=False, cwd=ROOT)
+    return r.returncode, r.stdout + r.stderr
+
+
+_BASE = {("a.py", "F401"): 2, ("b.py", "E501"): 5}
+
+
+class TestBaselineAgainstBase:
+    BASE = _BASE      # read-only
+
+    def test_a_re_baseline_that_grows_a_count_fails(self, tmp_path):
+        """ENG-4: `--update --allow-growth` after adding an unused import moved the
+        baseline 1300 -> 1302 and the gate then passed; the lint job now compares
+        the committed baseline with the base branch's."""
+        grown = {**self.BASE, ("a.py", "F401"): 3, ("c.py", "E402"): 1}
+        rc, out = _against(tmp_path, grown, self.BASE)
+        assert rc == 1, out
+        assert "GREW  a.py F401: base baseline allows 2, this baseline 3" in out
+        assert "GREW  c.py E402: base baseline allows 0, this baseline 1" in out
+        assert "b.py" not in out.split("baseline-vs-base")[0]
+        assert "FAILED" in out
+        assert "2 pair(s) grew" in out
+
+    def test_shrinking_or_equal_passes(self, tmp_path):
+        rc, out = _against(tmp_path, self.BASE, self.BASE)
+        assert rc == 0, out
+        assert "OK" in out, out
+        rc, out = _against(tmp_path, {("a.py", "F401"): 1}, self.BASE)
+        assert rc == 0, out
+        assert "OK" in out, out
+
+    def test_a_labelled_re_baseline_passes_and_says_so(self, tmp_path):
+        rc, out = _against(tmp_path, {**self.BASE, ("c.py", "E402"): 1}, self.BASE, "--allow-growth")
+        assert rc == 0, out
+        assert "GREW  c.py E402" in out
+        assert "reviewed re-baseline" in out
+
+    def test_no_base_baseline_is_a_new_baseline(self, tmp_path):
+        rc, out = _against(tmp_path, self.BASE, None)
+        assert rc == 0, out
+        assert "nothing to compare" in out, out
+
+    def test_growth_helper(self, monkeypatch):
+        from collections import Counter
+        mod = _load("scripts/ci/baseline_gate.py", "baseline_gate_under_test", monkeypatch)
+        assert mod.baseline_growth(Counter({("x", "A"): 2}), Counter({("x", "A"): 2, ("y", "B"): 0})) == {}
+        assert mod.baseline_growth(Counter(), Counter({("y", "B"): 1})) == {("y", "B"): (0, 1)}
+
+    def test_the_lint_job_runs_it_against_the_base_branch(self):
+        wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
+        lint = wf[wf.index("\n  lint:"):wf.index("\n  bench:")]
+        assert "--against" in lint
+        for tool in ("ruff", "mypy"):
+            assert f"scripts/ci/baseline_gate.py {tool}" in lint
+        assert "github.base_ref" in lint
+        assert "github.event.before" in lint
+        assert "sparse-checkout: scripts/ci" in lint
+        assert "'re-baseline'" in lint
+        # after the gates, so ruff's `check .` never scans the base checkout
+        assert lint.index("--against") > lint.index("Type gate")
+        step = re.search(r"- name: Baselines may only shrink.*", lint, re.DOTALL).group(0)
+        assert "|| rc=1" in step
+        assert "exit $rc" in step

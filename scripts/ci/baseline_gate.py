@@ -6,6 +6,7 @@ but fail on anything new.
     python scripts/ci/baseline_gate.py ruff            # gate (CI, `make lint`)
     python scripts/ci/baseline_gate.py mypy            # gate (CI, `make typecheck`)
     python scripts/ci/baseline_gate.py ruff --update   # rewrite the baseline after fixes
+    python scripts/ci/baseline_gate.py ruff --against BASE.json   # CI: the baseline vs the base branch's
 
 The rule sets (pyproject.toml [tool.ruff.lint], [tool.mypy]) are broader than
 what the code passed when they were introduced. Each tool's findings are
@@ -21,6 +22,14 @@ counted per (file, rule/error code) and compared with a committed baseline
     flag exists for a reviewed re-baseline (a tool upgrade that adds rules),
     so in normal use the baseline can only shrink;
   * STRICT_FILES may never appear in a baseline: one error there fails.
+  * --against BASE.json compares the checkout's baseline with the base
+    branch's copy (no tool run) and fails when any (file, code) count is
+    higher. The gate above compares the code with the baseline committed
+    next to it, so a change that adds findings and re-baselines in the same
+    commit (--update --allow-growth, or a hand edit) passed it; CI's lint job
+    runs this against the pull request's base (or the push's previous tip),
+    so the baseline can only shrink unless the pull request carries the
+    're-baseline' label (then the growth is printed and passes, reviewed).
 
 Both tools run through the current interpreter (python -m ruff / python -m
 mypy), i.e. the versions pinned in requirements-lock.txt; the baseline records
@@ -145,6 +154,37 @@ def updated_baseline(baseline: Counter[Key], current: Counter[Key],
     return Counter({k: n for k, n in current.items() if n > 0})
 
 
+def baseline_growth(base: Counter[Key], head: Counter[Key]) -> dict[Key, tuple[int, int]]:
+    """{(file, code): (base count, head count)} for every pair the head
+    baseline allows more of than the base baseline did."""
+    return {k: (base.get(k, 0), n) for k, n in sorted(head.items()) if n > base.get(k, 0)}
+
+
+def check_against(tool: str, head_path: Path, base_path: Path, allow_growth: bool = False) -> int:
+    """--against: exit status of the baseline-vs-base check (prints a report)."""
+    if not base_path.exists() or not base_path.read_text().strip():
+        print(f"{tool}: no base baseline at {base_path}; nothing to compare (a new baseline)")
+        return 0
+    head, head_doc = from_json(head_path.read_text())
+    base, base_doc = from_json(base_path.read_text())
+    grown = baseline_growth(base, head)
+    for (path, code), (b, n) in grown.items():
+        print(f"GREW  {path} {code}: base baseline allows {b}, this baseline {n}")
+    if base_doc.get("version") != head_doc.get("version"):
+        print(f"note: base baseline written with {base_doc.get('version')}, this one with "
+              f"{head_doc.get('version')}")
+    total_b, total_h = sum(base.values()), sum(head.values())
+    if grown and allow_growth:
+        print(f"{tool} baseline grew in {len(grown)} pair(s) ({total_b} -> {total_h}); allowed "
+              "(reviewed re-baseline)")
+        return 0
+    status = "FAILED" if grown else "OK"
+    print(f"{tool} baseline-vs-base {status}: {total_h} findings allowed (base {total_b}), "
+          f"{len(grown)} pair(s) grew" + ("; a baseline may only shrink: fix the findings, or "
+                                           "label the pull request 're-baseline'" if grown else ""))
+    return 1 if grown else 0
+
+
 def to_json(counts: Counter[Key], tool: str, version: str) -> str:
     nested: dict[str, dict[str, int]] = {}
     for (path, code), n in sorted(counts.items()):
@@ -195,10 +235,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baseline", type=Path, help="default: scripts/ci/<tool>_baseline.json")
     ap.add_argument("--update", action="store_true", help="rewrite the baseline to the current counts")
     ap.add_argument("--allow-growth", action="store_true",
-                    help="with --update: allow counts to rise (reviewed re-baseline only)")
+                    help="with --update or --against: allow counts to rise (reviewed re-baseline only)")
+    ap.add_argument("--against", type=Path, metavar="BASE_JSON",
+                    help="compare the baseline with the base branch's copy (no tool run); "
+                         "fail if any (file, code) count is higher")
     args = ap.parse_args(argv)
 
     path = args.baseline or BASELINE_DIR / f"{args.tool}_baseline.json"
+    if args.against is not None:
+        if args.update:
+            ap.error("--against and --update are exclusive")
+        return check_against(args.tool, path, args.against, allow_growth=args.allow_growth)
     version = _tool_version(args.tool)
     findings = run_tool(args.tool)
     current = count(findings)
