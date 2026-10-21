@@ -9,7 +9,7 @@
   <h1 class="page-title">SPX implied-volatility surface</h1>
   <p class="page-sub">Market quotes against the models, measured in the unit a market maker uses: half the bid–ask spread. A model inside the spread is as good as the quote.</p>
   <div class="page-badge">
-    {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='label')|join(', ') }}</span>
+    {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='short')|join(', ') }}</span>
     {% else %}<span class="nowrap">Quote-grade surface not yet generated</span><span class="sep">·</span><span class="nowrap">headline fit {{ d.calib_session|fmt }}</span>{% endif %}
   </div>
 </div>
@@ -35,7 +35,7 @@
     <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the implied-vol grid above (same numbers as the table)" hidden></div>
     <script type="application/json" id="surface3d-spec">{{ d.surface3d|tojson }}</script>
     {% endif %}
-    <p class="note">Two-sided out-of-the-money quotes on each expiry's parity forward ({{ ((d.universe.universe_filters or {}).note or 'the calibrator’s universe')|prose }}). Median half-spread {{ d.median_half_spread|fmt('.2f') }} vol pts.</p>
+    <p class="note">Two-sided out-of-the-money quotes on each expiry's parity forward ({{ ((d.universe.universe_filters or {}).note or 'the calibrator’s universe')|prose }}). Median half-spread {{ d.median_half_spread|fmt('.2f') }} vol pts. The outer columns hold every quote beyond ±0.30, so the {{ d.iv_heat.n|fmt(',') }} quotes in the cells are all of them; the colour scale spans the cells shown.</p>
   {% endcall %}
   {% call m.panel('slices', 'Smile slice · bid–ask, mid and models', 's5') %}
     <div class="tabs js-only" role="tablist" aria-label="Expiry shown in the smile chart" data-state-key="exp" data-chart-filter="chart-slices" hidden>
@@ -46,7 +46,7 @@
 </div>
 
 <div class="g">
-  {% call m.panel('scorecard', 'Model scorecard · same quotes, same metric', 's7', 'source: ' ~ d.score_source) %}
+  {% call m.panel('scorecard', 'Model scorecard · ' ~ ('same quotes, same metric' if d.same_quotes else 'each model’s out-of-sample quotes, same metric'), 's7', 'source: ' ~ d.score_source) %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model scorecard (scrollable)">
     <table class="tbl dense" id="scorecard-table">
       <caption>Out-of-sample quotes of each model (the quotes it was not fitted to); |z| = |model − mid| in half-spreads</caption>
@@ -59,7 +59,8 @@
     {% call m.method('Model descriptions') %}<dl class="dl">{% for r in d.score_rows %}<dt>{{ r.label }}</dt><dd>{{ r.description|prose }}</dd>{% endfor %}</dl>{% endcall %}
   {% endcall %}
   {% call m.panel('by-expiry', 'Median |z| by expiry · every model', 's5') %}
-    {% if d.charts.by_expiry %}{{ m.chart(d.charts.by_expiry, 'h300') }}{% else %}<p class="note">The by-expiry rows need scorecard.json.</p>{% endif %}
+    {% if d.charts.by_expiry %}{{ m.chart(d.charts.by_expiry, 'h300') }}
+    <p class="note">Out-of-sample quotes only: the quote sets of the scorecard beside it, split by expiry.</p>{% else %}<p class="note">No model scores for this session.</p>{% endif %}
   {% endcall %}
 </div>
 
@@ -69,7 +70,7 @@
       {% for r in d.resid_heat %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if loop.first else 'false' }}" aria-controls="resid-{{ r.key }}" data-value="{{ r.key }}">{{ r.label }}</button>{% endfor %}
     </div>
     {% for r in d.resid_heat %}
-    <div id="resid-{{ r.key }}" role="tabpanel">
+    <div id="resid-{{ r.key }}" role="tabpanel"{% if not loop.first %} hidden{% endif %}>
       {{ m.heatmap(r, 'resid-heat-' ~ r.key, r.label ~ ': median (model − mid) / half-spread of its ' ~ (r.n|fmt(',')) ~ ' out-of-sample quotes by expiry and log-moneyness bucket (column heads are bucket midpoints); |value| ≤ 1 is inside the spread', 'Expiry',
                    m.ramp_bar(berlin, '−5', '+5', 'model below mid ← 0 → model above mid')) }}
     </div>
@@ -102,7 +103,8 @@
     </div>
     {% endif %}
     {% set vb = d.vix_beta or {} %}
-    {% if vb.atm_over_vix_official is defined %}<p class="note">30-day ATM vol / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the backtest marks every straddle at one fixed β; see <a href="research.html#beta">Research</a>).</p>{% endif %}
+    {% set be_ = (d.beta_estimator or {}).get(d.session) %}
+    {% if vb.atm_over_vix_official is defined %}<p class="note" id="atm-vix-note">VIX-term ATM / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the ATM mids of the VIX's own two expiries, combined with its constant-maturity weights).{% if be_ is not none %} The backtest's β estimator (30-day ATM-forward Black-76 vol / VIX) gives {{ be_|fmt('.3f') }} on the same chain.{% endif %} The backtest marks every straddle at one fixed β; see <a href="research.html#beta">Research</a>.</p>{% endif %}
     {% call m.method('Where the replication departs from Cboe') %}
       <ul class="prose" style="padding-left:16px;">{% for n_ in d.vix_deviations %}<li>{{ n_|prose }}</li>{% endfor %}{% for n_ in d.vix_notes %}<li>{{ n_|prose }}</li>{% endfor %}</ul>
     {% endcall %}
@@ -119,9 +121,9 @@
   {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes and eSSVI', 's5') %}{{ m.chart(d.charts.atm_ts, 'h260') }}{% endcall %}{% endif %}
   {% if d.surface_history %}{% call m.panel('surface-history', 'Every session the surface report covers', 's7', (d.surface_history|length) ~ ' sessions') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Surface sessions (scrollable)">
-    <table class="tbl dense" id="surface-history-table"><caption>Median |z| in half-spreads (all scored quotes) by session and model</caption>
-      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Quotes</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }}</th>{% endfor %}<th scope="col" class="num">Arb. outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">ATM / VIX</th></tr></thead>
-      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td>{% for hm in d.history_models %}<td class="num">{{ r.m[hm.key].median_abs_hs|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td></tr>{% endfor %}</tbody>
+    <table class="tbl dense wrap-head" id="surface-history-table"><caption>Median |z| in half-spreads (all scored quotes) by session and model; repair moves outside the bid–ask; the VIX replicated from the chain against the close; ATM vol / VIX by the replication's VIX-term interpolation and by the backtest's β estimator</caption>
+      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Quotes</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }}</th>{% endfor %}<th scope="col" class="num">Repair moves outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">VIX-term ATM / VIX</th>{% if d.beta_estimator %}<th scope="col" class="num">{{ 'β estimator ATM 30d / VIX'|sym }}</th>{% endif %}</tr></thead>
+      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td>{% for hm in d.history_models %}<td class="num">{{ r.m[hm.key].median_abs_hs|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a statistic.</p>

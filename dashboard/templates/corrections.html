@@ -37,7 +37,7 @@
 
 <div class="g">
   {% call m.panel('waterfall', 'C22 waterfall · portfolio P&L, one correction at a time', 's8', '$000s') %}
-    {% if d.charts.waterfall %}{{ m.chart(d.charts.waterfall, 'h400') }}{% endif %}
+    {% if d.charts.waterfall %}{{ m.chart(d.charts.waterfall, 'h400 tall-narrow') }}{% endif %}
     {% set _rb = (b.rows or {}).get('beta') %}{% set _rg = (b.rows or {}).get('r2_gate') %}
     <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative), replayed on the C23-restated VIX record, so the last bar is today's canonical run; the published C22 run ended at −$216,092 and the C23 table below accounts for the difference.{% if _rb and _rb.prev %} The β step moves it by {{ _rb.d_pnl|usd_k }} (S1C {{ _rb.prev.s1c_pnl|usd_k }} → {{ _rb.s1c_pnl|usd_k }}, S1 {{ _rb.prev.s1_pnl|usd_k }} → {{ _rb.s1_pnl|usd_k }}){% endif %}{% if _rg %}; the single R2 gate by {{ _rg.d_pnl|usd_k }}{% endif %}.</p>
   {% endcall %}

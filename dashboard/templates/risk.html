@@ -71,7 +71,8 @@
       {% if d.unstable_by_maturity %}Unstable nodes by maturity: {% for t, n in d.unstable_by_maturity|dictsort %}{{ t }}d {{ n }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}</p>
     </div>
     {% for g in d.greek_grids %}
-    <div id="grid-{{ g.key }}" role="tabpanel" aria-labelledby="tab-{{ g.key }}">
+    {# hidden until its tab is chosen: hiding it after first paint shifted the page (no-JS shows every grid) #}
+    <div id="grid-{{ g.key }}" role="tabpanel" aria-labelledby="tab-{{ g.key }}" hidden>
       {{ m.heatmap(g, 'heat-' ~ g.key, g.label ~ ' by maturity (rows) and ln(K/F) (columns), ' ~ g.unit, 'T',
                    m.ramp_bar(cividis if g.scale == 'seq' else berlin, g.lo|fmt(g.fmt) if g.scale == 'seq' else ('−' ~ (g.lim|fmt('.3g'))), g.hi|fmt(g.fmt) if g.scale == 'seq' else ('+' ~ (g.lim|fmt('.3g'))), 'cividis' if g.scale == 'seq' else 'diverging, dark at zero')) }}
     </div>
@@ -84,8 +85,9 @@
   {% call m.panel('unstable', 'Unstable nodes · ' ~ rule_short, 's6', 'sorted by ' ~ metric_lower) %}
     <div class="tbl-wrap capped" tabindex="0" role="region" aria-label="Unstable node details (scrollable)">
     <table class="tbl dense">
-      <thead><tr><th scope="col">Maturity</th><th scope="col" class="num">Strike K</th><th scope="col" class="num">ln(K/F)</th><th scope="col" class="num">IV</th><th scope="col" class="num">Vomma</th><th scope="col" class="num">{{ metric_name }}</th><th scope="col" class="num">z</th></tr></thead>
-      <tbody>{% for n in d.unstable_nodes %}<tr><td>{{ n.T_days }}d</td><td class="num">{{ n.K|fmt(",.0f") }}</td><td class="num">{{ n.lm|fmt("+.3f") }}</td><td class="num">{{ n.iv|fmt(".1f")|u('%') }}</td><td class="num">{{ n.vomma|fmt(",.0f") }}</td><td class="num">{{ n.metric|fmt(".3f") }}</td><td class="num">{{ n.z|fmt("+.2f") }}</td></tr>{% endfor %}</tbody>
+      {# the column the table is sorted by comes right after the node's position, so it is on screen on a phone #}
+      <thead><tr><th scope="col">Maturity</th><th scope="col" class="num">ln(K/F)</th><th scope="col" class="num" aria-sort="descending">{{ metric_name }}</th><th scope="col" class="num">Strike K</th><th scope="col" class="num">IV</th><th scope="col" class="num">Vomma</th><th scope="col" class="num">z</th></tr></thead>
+      <tbody>{% for n in d.unstable_nodes %}<tr><td>{{ n.T_days }}d</td><td class="num">{{ n.lm|fmt("+.3f") }}</td><td class="num">{{ n.metric|fmt(".3f") }}</td><td class="num">{{ n.K|fmt(",.0f") }}</td><td class="num">{{ n.iv|fmt(".1f")|u('%') }}</td><td class="num">{{ n.vomma|fmt(",.0f") }}</td><td class="num">{{ n.z|fmt("+.2f") }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
   {% endcall %}

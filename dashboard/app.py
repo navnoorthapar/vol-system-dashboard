@@ -2272,6 +2272,34 @@ def _heat_heads(edges: Sequence[float]) -> list[str]:
 
 
 K_EDGES = (-0.30, -0.20, -0.14, -0.09, -0.05, -0.02, 0.0, 0.02, 0.05, 0.09, 0.14, 0.20, 0.30)
+# K_EDGES plus an open bucket on each wing: pd.cut over K_EDGES alone returned
+# NaN for ln(K/F) ≤ −0.30, so 108 of the 2,913 quotes of 2026-10-16 (the deep put
+# wing, where the surfaces fit worst) were in no cell of any grid.
+K_BINS = (-np.inf, *K_EDGES, np.inf)
+
+
+def k_bucket(k: Any) -> pd.Series:
+    """Bucket of each ln(K/F) on K_BINS: 0 is ≤ −0.30, len(K_EDGES) is > +0.30."""
+    ks = k if isinstance(k, pd.Series) else pd.Series(k, dtype=float)
+    return pd.cut(ks.astype(float), K_BINS, labels=False)
+
+
+def k_buckets_used(k: Any) -> list[int]:
+    """The interior buckets always, a wing bucket only when a quote falls in it."""
+    present = {int(b) for b in k_bucket(k).dropna()}
+    n = len(K_BINS) - 1
+    return [b for b in range(n) if 0 < b < n - 1 or b in present]
+
+
+def k_bucket_label(b: int, compact: bool = False) -> str:
+    """'≤ −0.30', '−0.30…−0.20' (or the midpoint '−0.25' when compact), '> +0.30'."""
+    n = len(K_BINS) - 1
+    if b == 0:
+        return f"≤ {_fmt(K_EDGES[0], '+.2f')}"
+    if b == n - 1:
+        return f"> {_fmt(K_EDGES[-1], '+.2f')}"
+    lo, hi = K_EDGES[b - 1], K_EDGES[b]
+    return _heat_heads((lo, hi))[0] if compact else _heat_cols((lo, hi))[0]
 
 
 # ── Calibration page extras ──────────────────────────────────────────────────
@@ -2341,7 +2369,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
             "chart-oos", "Out-of-sample SPX IV RMSE by expiry",
             x={"type": "category", "categories": cats, "name": "Expiry · days to expiry", "interval": 0},
             y={"name": "RMSE (vol pts)", "digits": 1, "tipDigits": 2, "zero": True},
-            series=[{"name": "OOS RMSE", "type": "bar", "color": "cat0",
+            series=[{"name": "OOS RMSE", "type": "bar", "color": model_colour("heston_v2"),
                      "data": [r["rmse"] for r in rows], "fill": 0.55}],
             xs=cats, marks=marks, csv=f"oos_rmse_by_expiry_{session}.csv",
             grid={"bottom": 64},
@@ -2369,7 +2397,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
             series=[{"name": "Cboe index (market)", "type": "line", "color": "headline", "symbol": "circle",
                      "size": 7, "width": 1.5, "legend": True,
                      "data": [[r["tenor"], r["market"]] for r in d["vix_rows"]]},
-                    {"name": "Heston model", "type": "line", "color": "cat1", "symbol": "diamond", "size": 7,
+                    {"name": "Heston model", "type": "line", "color": model_colour("heston_v2"),
+                     "symbol": "diamond", "size": 7,
                      "dash": True, "legend": True,
                      "data": [[r["tenor"], r["model"]] for r in d["vix_rows"] if r["model"] is not None]}],
             tooltip="axis", csv=f"vix_leg_{session}.csv",
@@ -2423,22 +2452,25 @@ def calibration_extras(d: dict, cal: dict) -> None:
                 series.append({"name": "Bid–ask", "type": "errorbar", "color": "muted", "legend": True,
                                "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
                                         for r in q.itertuples()]})
-            series.append({"name": "Mid (out of sample)", "type": "scatter", "color": "headline",
-                           "hollow": True, "size": 5, "legend": True,
+            # the out-of-sample mids muted and small, the fit's anchors as large
+            # diamonds drawn above them in their own colour (they looked the same)
+            series.append({"name": "Mid (out of sample)", "type": "scatter", "color": "muted",
+                           "hollow": True, "size": 4, "opacity": 0.6, "legend": True,
                            "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
                                     for r, i in zip(q.itertuples(), ins) if not i]})
             if ins.any():
-                series.append({"name": "Mid (fit anchor)", "type": "scatter", "color": "headline", "size": 6,
-                               "legend": True,
+                series.append({"name": "Mid (fit anchor)", "type": "scatter", "color": ANCHOR_COLOUR,
+                               "symbol": "diamond", "size": 9, "z": 4, "legend": True,
                                "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
                                         for r, i in zip(q.itertuples(), ins) if i]})
-            series.append({"name": "Heston", "type": "line", "color": "cat1", "width": 1.6, "legend": True,
+            series.append({"name": "Heston", "type": "line", "color": model_colour("heston_v2"), "width": 1.6,
+                           "legend": True,
                            "data": [[round(float(k), 3), round(float(v) * 100, 2)]
                                     for k, v in zip(q["k"], q["model_iv"]) if _num(v) is not None]})
             # the table behind the chart: one row per ln(K/F) bucket (the CSV has every quote)
-            qb = q.assign(kb=pd.cut(q["k"], K_EDGES, labels=False), ins=ins.values)
+            qb = q.assign(kb=k_bucket(q["k"]), ins=ins.values)
             for b, g in qb.groupby("kb"):
-                tbl_rows.append([_heat_cols(K_EDGES)[int(b)], len(g), int(g["ins"].sum()),
+                tbl_rows.append([k_bucket_label(int(b)), len(g), int(g["ins"].sum()),
                                  _fmt(g["mid_iv"].median() * 100, ".2f"),
                                  _fmt(g["model_iv"].median() * 100, ".2f"),
                                  signed(float(g["error_hs"].median()), ".1f"),
@@ -2450,7 +2482,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
                     f"{_fmt(float(q['error_hs'].abs().median()), '.1f')} half-spreads")
         else:
             sm = heston_model_smile(p, maturities_days=(T_days,))[0]
-            series.append({"name": "Heston", "type": "line", "color": "cat1", "width": 1.6,
+            series.append({"name": "Heston", "type": "line", "color": model_colour("heston_v2"), "width": 1.6,
                            "data": [[k, v * 100] for k, v in zip(sm["lm"], sm["iv"])]})
             tbl_rows = [[_fmt(k, "+.3f"), _fmt(v * 100, ".2f")] for k, v in zip(sm["lm"], sm["iv"])]
             source = "model"
@@ -2482,8 +2514,25 @@ GREEK_TABS = (
     ("iv", "IV", "iv", "seq", ".1f", "implied vol, %"),
     ("vega", "Vega", "vega", "seq", ",.1f", "per unit index, per 1.00 vol"),
     ("vanna", "Vanna", "vanna", "div", "+.3f", "per unit index, per 1.00 vol"),
-    ("delta", "Delta", "delta", "div", "+.2f", "OTM option, forward delta"),
+    ("delta", "OTM delta", "delta", "div", "+.2f",
+     ("forward delta of the out-of-the-money option: "
+      "N(d₁) for the call at K ≥ F, N(d₁) − 1 for the put at K < F")),
 )
+
+
+def otm_forward_delta(call_spot_delta: Any, q: Any, T: Any, log_moneyness: Any) -> float | None:
+    """Forward delta of the out-of-the-money option at a Greeks-surface node.
+
+    greeks_surface.parquet stores the call's spot delta e^{−qT}·N(d₁) at every
+    node (risk_monitor: "call delta"). The desk quotes the OTM option's forward
+    delta: N(d₁) for the call when K ≥ F, N(d₁) − 1 for the put when K < F
+    (put–call parity), so a 30%-OTM put reads about −0.01, never +0.99.
+    """
+    d, q_, t_, k_ = _num(call_spot_delta), _num(q), _num(T), _num(log_moneyness)
+    if d is None or k_ is None:
+        return None
+    nd1 = d * float(np.exp((q_ or 0.0) * (t_ or 0.0)))       # e^{−qT}N(d₁) → N(d₁)
+    return nd1 - 1.0 if k_ < 0 else nd1
 
 
 def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
@@ -2494,7 +2543,12 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
         cellmap = {(int(r.T_days), round(float(r.log_moneyness), 4)): r for r in gdf.itertuples()}
         grids = []
         for key, label, col, scale, fmt, unit in GREEK_TABS:
-            vals = gdf[col].astype(float) * (100.0 if key == "iv" else 1.0)
+            if key == "delta":
+                vals = pd.Series([otm_forward_delta(r.delta, getattr(r, "q", None), getattr(r, "T", None),
+                                                    r.log_moneyness) for r in gdf.itertuples()],
+                                 index=gdf.index, dtype=float)
+            else:
+                vals = gdf[col].astype(float) * (100.0 if key == "iv" else 1.0)
             lo, hi = float(vals.min()), float(vals.max())
             lim = float(vals.abs().max()) or 1.0
             rows = []
@@ -2506,11 +2560,15 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
                         cells.append(cell("", None,
                                           detail=f"T {T}d · ln(K/F) {_fmt(c, '+.3f')}: no stored Greeks"))
                         continue
-                    v = float(getattr(r, col)) * (100.0 if key == "iv" else 1.0)
+                    v = float(vals.loc[r.Index])
                     bg = seq_colour(v, lo, hi) if scale == "seq" else div_colour(v, lim)
                     det = (f"T {T}d · ln(K/F) {_fmt(c, '+.3f')} · K {_fmt(r.K, ',.0f')} · "
-                           f"IV {_fmt(cast(float, r.iv) * 100, '.1f')}% · {label} {_fmt(v, fmt)}")
-                    cells.append(cell(_fmt(v, fmt), bg, detail=det))
+                           f"IV {_fmt(cast(float, r.iv) * 100, '.1f')}% · {label} "
+                           f"{signed(v, fmt.lstrip('+')) if fmt.startswith('+') else _fmt(v, fmt)}"
+                           + ((" (put)" if c < 0 else " (call)") if key == "delta" else ""))
+                    # a signed value that rounds to zero carries no sign ('0.00', not '−0.00')
+                    txt = signed(v, fmt.lstrip("+")) if fmt.startswith("+") else _fmt(v, fmt)
+                    cells.append(cell(txt, bg, detail=det))
                 rows.append({"label": f"{T}d", "cells": cells})
             grids.append({"key": key, "label": label, "unit": unit, "scale": scale, "rows": rows,
                           "cols": [_fmt(c, "+.2f") for c in cols], "lo": lo, "hi": hi, "lim": lim,
@@ -2703,6 +2761,8 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             series.append({"name": "T-bill (collateral)", "type": "line", "color": "cat2", "width": 1.2,
                            "dash": True, "legend": True,
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
+        for s_ in series:                 # ~1,800 daily points a line: drawn with LTTB downsampling
+            s_["sampling"] = "lttb"
         r2 = (eq["regime"] == 2) if "regime" in eq.columns else pd.Series(False, index=eq.index)
         areas = [{"from": a.strftime("%Y-%m-%d"), "to": b.strftime("%Y-%m-%d"), "color": "watch",
                   "alpha": 0.07} for a, b in _runs(r2)]
@@ -2728,7 +2788,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             x={"type": "time", "csv": "date"},
             y={"name": "Drawdown (%)", "digits": 0, "tipDigits": 2, "tickUnit": "%", "unit": "%", "max": 0},
             series=[{"name": "Drawdown", "type": "line", "color": "neg", "width": 1.2, "area": True,
-                     "data": dd.round(3).tolist()}],
+                     "sampling": "lttb", "data": dd.round(3).tolist()}],
             xs=xs, zoom=False, csv="drawdown.csv", grid={"top": 10, "bottom": 30},
             describe=(f"Deepest drawdown {_fmt(float(dd.min()), '.1f')}% on "
                       f"{cast(pd.Timestamp, dd.idxmin()).date()}."),
@@ -2744,6 +2804,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             x={"type": "time", "csv": "date"},
             y={"name": "Sharpe (annualised)", "digits": 1, "tipDigits": 2, "signed": True},
             series=[{"name": "Rolling Sharpe", "type": "line", "color": "cat0", "width": 1.3,
+                     "sampling": "lttb",
                      "data": [None if not np.isfinite(v) else round(float(v), 3) for v in roll]}],
             xs=xs, csv="rolling_sharpe_126.csv", grid={"top": 10, "bottom": 30},
             marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
@@ -3234,6 +3295,18 @@ ARB_LABELS = {"C1_outright": "Outright bounds", "C2_vertical_bound": "Vertical b
 
 MODEL_SHORT = {"heston_v2": "Heston", "svi_cal": "SVI-cal", "rough_heston": "Rough Heston"}
 
+# One colour per model on every chart of the site (the smile slice drew Heston
+# in the orange the by-expiry chart beside it used for SVI). Okabe–Ito tokens;
+# cat3 (yellow) is kept for fit anchors, market quotes are 'headline' (mids)
+# and 'muted' (bid–ask).
+MODEL_COLOURS = {"heston_v2": "cat1", "heston": "cat1", "svi_cal": "cat0", "svi": "cat2", "essvi": "cat4",
+                 "rough_heston": "cat5"}
+ANCHOR_COLOUR = "cat3"
+
+
+def model_colour(m: str) -> str:
+    return MODEL_COLOURS.get(m, "cat5")
+
 
 def model_label(m: str) -> str:
     return MODEL_LABELS.get(m, m.replace("_", " ").title())
@@ -3273,21 +3346,26 @@ def _model_surface_heat(params: dict) -> dict:
     return {"cols": [_fmt(k, "+.2f") for k in lm], "rows": out_rows, "lo": lo, "hi": hi, "points": pts}
 
 
-def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail) -> list[dict]:
-    """Heatmap rows: one per expiry, one cell per K_EDGES bucket of ln(K/F)."""
-    qb = q.assign(kb=pd.cut(q["k"], K_EDGES, labels=False))
-    heads = _heat_cols(K_EDGES)
+def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
+                 used: Sequence[int] | None = None) -> list[dict]:
+    """Heatmap rows: one per expiry, one cell per ln(K/F) bucket in ``used`` (K_BINS).
+
+    Each cell records how many quotes it holds (``n``), so the cells of a grid
+    add up to the quotes it shows."""
+    qb = q.assign(kb=k_bucket(q["k"]))
+    used = list(used) if used is not None else k_buckets_used(q["k"])
     rows = []
     for e in exps.index:
         qe = qb[qb["expiry"] == e]
         cells = []
-        for b in range(len(K_EDGES) - 1):
+        for b in used:
             g = qe[qe["kb"] == b]
             if g.empty:
-                cells.append(cell("", None, detail=f"{e} · ln(K/F) {heads[b]}: no quotes"))
+                empty = cell("", None, detail=f"{e} · ln(K/F) {k_bucket_label(b)}: no quotes")
+                cells.append({**empty, "n": 0})
                 continue
             v = value(g)
-            cells.append(cell(v["text"], colour(v["value"]), detail=detail(g, v)))
+            cells.append({**cell(v["text"], colour(v["value"]), detail=detail(g, v)), "n": len(g)})
         rows.append({"label": f"{e[2:]} · {_fmt(exps[e], '.0f')}d", "cells": cells})
     return rows
 
@@ -3326,6 +3404,8 @@ def surface_extras(d: dict, surf: dict) -> None:
     ref = _latest_market_session()
     d["stale"] = [_staleness("surface", "Surface artifacts", session, ref)]
     models = surf["models"]
+    # the page badge listed none
+    d["models"] = [{"key": m, "label": model_label(m), "short": model_short(m)} for m in models]
     # scores: the producer's scorecard when present, else computed on the residual table
     if surf.get("scorecard_rows"):
         d["score_rows"] = [{"key": r["model"], "label": model_label(r["model"]),
@@ -3340,29 +3420,43 @@ def surface_extras(d: dict, surf: dict) -> None:
                             "oos": artifacts.residual_stats(res, m)} for m in models]
         d["score_source"] = "residuals.parquet"
     d["score_notes"] = list((surf.get("scorecard") or {}).get("notes") or [])
+    # "same quotes" only when every model is scored on as many out-of-sample
+    # quotes (the surfaces hold out alternate strikes; Heston holds out all but
+    # its anchors, so their sets differ)
+    n_scored = {(r.get("oos") or {}).get("n") for r in d["score_rows"]}
+    d["same_quotes"] = len(n_scored) == 1 and None not in n_scored
     exps = mkt.groupby("expiry")["T_days"].median().sort_values()
     d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum())}
                      for e, t in exps.items()]
     d["n_quotes"] = len(mkt)
     d["median_half_spread"] = float(mkt["half_spread_vp"].median())
 
-    # market IV heatmap: median mid IV of the quotes in each (expiry, ln(K/F)) bucket
-    lo, hi = float(mkt["mid_iv"].min() * 100), float(mkt["mid_iv"].max() * 100)
+    # market IV heatmap: median mid IV of the quotes in each (expiry, ln(K/F)) bucket,
+    # the open wings included; the colour ramp spans the cells shown (it spanned
+    # every quote, so no cell reached the top of its legend)
+    used = k_buckets_used(mkt["k"])
+    qb = mkt.assign(kb=k_bucket(mkt["k"]))
+    cell_iv = qb.groupby(["expiry", "kb"])["mid_iv"].median() * 100
+    lo, hi = float(cell_iv.min()), float(cell_iv.max())
     d["iv_heat"] = {
-        "cols": _heat_heads(K_EDGES), "lo": lo, "hi": hi,
+        "cols": [k_bucket_label(b, compact=True) for b in used], "lo": lo, "hi": hi,
         "rows": _bucket_grid(
             mkt, exps,
             value=lambda g: {"value": float(g["mid_iv"].median() * 100),
                              "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
             colour=lambda v: seq_colour(v, lo, hi),
             detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
-                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vp")), "compact": True}
+                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vp"), used=used),
+        "compact": True}
+    d["iv_heat"]["n"] = sum(c["n"] for r in d["iv_heat"]["rows"] for c in r["cells"])
     pts = []
-    qb = mkt.assign(kb=pd.cut(mkt["k"], K_EDGES, labels=False))
+    # 3D x of a bucket: its midpoint; of an open wing, the median ln(K/F) of its quotes
+    xs3 = {b: (round((K_BINS[b] + K_BINS[b + 1]) / 2, 4) if 0 < b < len(K_BINS) - 2
+               else round(float(qb.loc[qb["kb"] == b, "k"].median()), 4)) for b in used}
     for e in exps.index:
-        for b in range(len(K_EDGES) - 1):
+        for b in used:
             g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
-            pts.append([round((K_EDGES[b] + K_EDGES[b + 1]) / 2, 4), float(exps[e]),
+            pts.append([xs3[b], float(exps[e]),
                         round(float(g["mid_iv"].median() * 100), 3) if len(g) else None])
     if sum(1 for q_ in pts if q_[2] is not None) >= 9:
         d["surface3d"] = {"id": "surface3d", "points": pts, "zmin": lo, "zmax": hi,
@@ -3376,7 +3470,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             q = q[~q["in_sample"]]
         q = q[pd.to_numeric(q["model_iv"], errors="coerce").notna()]
         d["resid_heat"].append({
-            "key": m, "label": model_label(m), "cols": _heat_heads(K_EDGES), "n": len(q), "compact": True,
+            "key": m, "label": model_label(m), "cols": [k_bucket_label(b, compact=True) for b in used],
+            "n": len(q), "compact": True,
             "rows": _bucket_grid(
                 q, exps,
                 value=lambda g: {"value": float(g["error_hs"].median()),
@@ -3384,64 +3479,114 @@ def surface_extras(d: dict, surf: dict) -> None:
                 colour=lambda v: div_colour(v, 5.0),
                 detail=lambda g, v: (f"{signed(v['value'], '.2f')} half-spreads (median of {len(g)}) · "
                                      f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% "
-                                     "inside"))})
+                                     "inside"), used=used)})
 
-    # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); the
-    # production Heston fit and the best-ranked other model (every model is in
-    # the scorecard and the residual grid), rounded to what the chart can show
+    # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); every
+    # model at the quoted strikes, each with one legend toggle across expiries
+    # and its site-wide colour; Heston and the headline surface shown at first.
+    # A model's points list only IVs, in the order of the expiry's mids (every
+    # model is priced on the same quotes), and take their ln(K/F) from them.
     hkey = heston_model_key(models)
-    ranked = [r["model"] for r in surf.get("scorecard_rows") or []] or models
-    overlay = [m for m in [hkey, next((m for m in ranked if m != hkey), None)] if m]
+    ranked = [r["model"] for r in surf.get("scorecard_rows") or []] or list(models)
+    overlay = [m for m in [hkey, *ranked] if m and m in models]
+    overlay = list(dict.fromkeys(overlay))
+    shown = {hkey, SURFACE_HEADLINE_MODEL} & set(overlay) or set(overlay[:2])
     d["slice_models"] = [model_label(m) for m in overlay]
-    series = []
+    d["slice_shown"] = [model_label(m) for m in overlay if m in shown]
+    d["default_exp"] = (min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"]
+                        if d["expiries"] else None)
+    series, groups = [], []
+    hres = res[res["model"] == hkey] if hkey else None
+    n_anchor = int(hres["in_sample"].astype(bool).sum()) if (hres is not None and "in_sample" in hres) else 0
     for e in exps.index:
         q = mkt[mkt["expiry"] == e].sort_values("k")
+        mid_name = f"{e} mid"
         if {"bid_iv", "ask_iv"} <= set(q.columns):
-            series.append({"name": f"{e} bid–ask", "type": "errorbar", "color": "muted", "group": e,
+            series.append({"name": f"{e} bid–ask", "legendKey": "Bid–ask", "legend": True,
+                           "type": "errorbar", "color": "muted", "group": e,
                            "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
                                     for r in q.itertuples()]})
-        series.append({"name": f"{e} mid", "type": "scatter", "color": "headline", "size": 4, "group": e,
+        series.append({"name": mid_name, "legendKey": "Mid", "legend": True, "type": "scatter",
+                       "color": "headline", "size": 4, "group": e,
                        "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r in q.itertuples()]})
-        for j, m in enumerate(overlay):
-            qm = res[(res["model"] == m) & (res["expiry"] == e)].sort_values("k")
-            series.append({"name": f"{e} {model_label(m)}", "type": "line",
-                           "color": charts.color_cycle(j + 1), "width": 1.5, "group": e,
-                           "data": [[round(float(k), 3), round(float(v) * 100, 2)]
-                                    for k, v in zip(qm["k"], qm["model_iv"]) if _num(v) is not None]})
+        by_model = {}
+        for m in overlay:
+            qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
+            qm = qm[~qm.index.duplicated()]
+            ivs = [(round(float(v) * 100, 2) if _num(v) is not None else None)
+                   for v in qm.reindex(q["k"].to_numpy())]
+            by_model[m] = ivs
+            series.append({"name": f"{e} {model_label(m)}", "legendKey": model_label(m), "legend": True,
+                           "hidden": m not in shown, "type": "line", "color": model_colour(m), "width": 1.5,
+                           "group": e, "xFrom": mid_name, "data": ivs})
+        if n_anchor and hres is not None:
+            ha = hres[(hres["expiry"] == e) & hres["in_sample"].astype(bool)].sort_values("k")
+            series.append({"name": f"{e} Heston fit anchor", "legendKey": "Heston fit anchors",
+                           "legend": True, "type": "scatter", "symbol": "diamond", "size": 8, "z": 4,
+                           "color": ANCHOR_COLOUR,
+                           "group": e, "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
+                                                for r in ha.itertuples()]})
+        # the same expiry as a table: medians by ln(K/F) bucket (the chart's data
+        # equivalent; desk.js shows the selected expiry's, every one without JS)
+        qb_e = q.assign(kb=k_bucket(q["k"]).to_numpy())
+        rows_e = []
+        for b in [b_ for b_ in used if (qb_e["kb"] == b_).any()]:
+            sel = (qb_e["kb"] == b).to_numpy()
+            g = qb_e[sel]
+            rows_e.append([k_bucket_label(b), len(g), _fmt(g["bid_iv"].median() * 100, ".2f"),
+                           _fmt(g["mid_iv"].median() * 100, ".2f"), _fmt(g["ask_iv"].median() * 100, ".2f")]
+                          + [_fmt(pd.Series([v for v, s_ in zip(by_model[m], sel) if s_],
+                                            dtype=float).median(), ".2f") for m in overlay])
+        groups.append({"group": e, "shown": e == d["default_exp"], **charts.table(
+            f"{e} ({_fmt(exps[e], '.0f')} days): median implied vol (%) by ln(K/F) bucket",
+            ["ln(K/F)", "Quotes#", "Bid#", "Mid#", "Ask#"] + [model_short(m) + "#" for m in overlay],
+            rows_e)})
+    hs_by_exp = mkt.groupby("expiry")["half_spread_vp"].median()
+    slice_tbl = charts.table("Quotes per expiry", ["Expiry", "Days#", "Quotes#", "Median half-spread (vp)#"],
+                             [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
+                               _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]])
+    slice_tbl["groups"] = groups
     d["charts"]["slices"] = charts.xy(
         "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
         x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
         y={"name": "Implied vol (%)", "digits": 0, "tipDigits": 2},
         series=series, tooltip="item", csv=f"smile_slices_{session}.csv",
-        describe=(f"One expiry at a time (choose it above the chart): bid–ask bars, mids and the "
-                  f"{' and '.join(d['slice_models'])} IVs at the quoted strikes."),
-        table=charts.table("Quotes per expiry", ["Expiry", "Days#", "Quotes#", "Median half-spread (vp)#"],
-                           [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
-                             _fmt(float(mkt[mkt["expiry"] == x["expiry"]]["half_spread_vp"].median()), ".2f")]
-                            for x in d["expiries"]]))
-    d["default_exp"] = (min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"]
-                        if d["expiries"] else None)
+        marks={"x": [{"value": 0, "label": "F", "color": "muted"}]},
+        describe=("One expiry at a time (choose it above the chart): bid–ask bars, mids"
+                  + (" and the Heston fit's anchors (diamonds)" if n_anchor else "")
+                  + f"; model IVs at the quoted strikes for {', '.join(d['slice_models'])} "
+                    f"({' and '.join(d['slice_shown'])} shown, the others behind their toggles). "
+                    "The dashed line is the forward, ln(K/F) = 0."),
+        table=slice_tbl)
 
-    # out-of-sample median |model − mid| by expiry, one line per model (scorecard by_expiry)
-    if surf.get("scorecard_rows"):
+    # out-of-sample median |model − mid| by expiry, one line per model, on the
+    # same quotes as the scorecard beside it (the scorecard's by_expiry rows mix
+    # in the fitted quotes, so they are not used here)
+    if d["score_rows"]:
         cats = [x["expiry"] for x in d["expiries"]]
         labels = [f"{e[2:]} · {_fmt(t, '.0f')}d" for e, t in zip(cats, [x["T_days"] for x in d["expiries"]])]
         ser, tbl = [], []
-        for j, r in enumerate(surf["scorecard_rows"]):
-            be = r.get("by_expiry") or {}
-            vals = [_num((be.get(e) or {}).get("median_abs_hs")) for e in cats]
-            ser.append({"name": model_label(r["model"]), "type": "line", "color": charts.color_cycle(j + 1),
+        for r in d["score_rows"]:
+            qo = res[res["model"] == r["key"]]
+            if "in_sample" in qo.columns:
+                qo = qo[~qo["in_sample"].astype(bool)]
+            z = pd.to_numeric(qo["error_hs"], errors="coerce").abs()
+            med = z.groupby(qo["expiry"]).median()
+            cnt = z.groupby(qo["expiry"]).count()
+            vals = [_num(med.get(e)) if cnt.get(e, 0) else None for e in cats]
+            ser.append({"name": r["label"], "type": "line", "color": model_colour(r["key"]),
                         "symbol": "circle", "size": 5, "width": 1.5, "legend": True, "data": vals})
-            tbl.append([model_label(r["model"])] + [_fmt(v, ".1f") for v in vals])
+            tbl.append([r["label"]] + [_fmt(v, ".1f") for v in vals])
         d["charts"]["by_expiry"] = charts.xy(
-            "chart-by-expiry", "Median |model − mid| in half-spreads by expiry, every model",
+            "chart-by-expiry",
+            "Median |model − mid| in half-spreads by expiry, out-of-sample quotes, every model",
             x={"type": "category", "categories": labels, "name": "", "interval": "auto", "rotate": 40},
             y={"name": "Median |z| (half-spreads)", "digits": 0, "tipDigits": 2, "zero": True, "log": False},
             series=ser, xs=labels, csv=f"median_abs_hs_by_expiry_{session}.csv", grid={"bottom": 72},
             marks={"y": [{"value": 1.0, "label": "inside the spread", "color": "ok"}]},
-            describe=("All quotes of each expiry (in and out of sample, the scorecard's by-expiry rows); "
+            describe=("Each model's out-of-sample quotes of each expiry, the scorecard's quote sets; "
                       "1 half-spread is the edge of the quoted bid–ask."),
-            table=charts.table("Median |model − mid| (half-spreads) by expiry",
+            table=charts.table("Median |model − mid| (half-spreads) by expiry, out-of-sample quotes",
                                ["Model"] + [c + "#" for c in labels], tbl))
 
     # ATM term structure (surface.json): market ATM vol and the eSSVI ATM vol and skew
@@ -3456,7 +3601,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                      "legend": True,
                      "data": [[float(t["T_days"]), _num(t.get("atm_vol_mid_quotes"))] for t in ts
                               if _num(t.get("atm_vol_mid_quotes")) is not None]},
-                    {"name": "eSSVI ATM", "type": "line", "color": "cat1", "width": 1.5, "legend": True,
+                    {"name": "eSSVI ATM", "type": "line", "color": model_colour("essvi"), "width": 1.5,
+                     "legend": True,
                      "data": [[float(t["T_days"]), _num(t.get("atm_vol_essvi"))] for t in ts
                               if _num(t.get("atm_vol_essvi")) is not None]}],
             tooltip="axis", csv=f"atm_term_structure_{session}.csv",
@@ -3509,6 +3655,17 @@ def surface_extras(d: dict, surf: dict) -> None:
                                                 if isinstance(off, dict) and off.get("low") is not None
                                                 else None)})
         d["vix_beta"] = vx.get("beta") or {}
+        # The replication's ATM / VIX interpolates the ATM mids of the VIX's own
+        # two terms with its constant-maturity weights; the backtest's β (Research)
+        # is the 30-day ATM-forward Black-76 vol over the VIX. Both are shown,
+        # each under its own name, so no two pages give one label two values.
+        d["beta_estimator"] = {}
+        try:
+            d["beta_estimator"] = {c["session"]: c["ratio"] for c in beta_estimation(None)["chains"]
+                                   if c["kind"] == "DB chain" and c["ratio"] is not None}
+        except (OSError, ValueError, KeyError, ImportError, sqlite3.Error) as exc:
+            # supplementary: the replication's own figure stands, the comparison is left out
+            _logger.warning("β estimator ratios unavailable for the surface page: %s", exc)
         d["vix_notes"] = list(vx.get("gap_notes") or [])
         d["vix_deviations"] = list(vx.get("deviations") or [])
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
@@ -3521,11 +3678,12 @@ def surface_extras(d: dict, surf: dict) -> None:
                 "chart-strip", "Variance-swap vol and ATM vol by expiry, same chain",
                 x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
                 y={"name": "Vol (%)", "digits": 0, "tipDigits": 2},
-                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "color": "cat0",
+                # market-derived lines, not models: neither takes a model's colour
+                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "color": "info",
                          "symbol": "circle", "size": 5, "width": 1.5, "legend": True,
                          "data": [[r["days"], r["vs"]] for r in d["strip"]
                                   if r["vs"] is not None and r["days"] is not None]},
-                        {"name": "ATM vol (quotes)", "type": "line", "color": "cat1", "symbol": "diamond",
+                        {"name": "ATM vol (quotes)", "type": "line", "color": "headline", "symbol": "diamond",
                          "size": 5, "width": 1.5, "dash": True, "legend": True,
                          "data": [[r["days"], r["atm"]] for r in d["strip"]
                                   if r["atm"] is not None and r["days"] is not None]}],
@@ -3543,7 +3701,7 @@ def surface_extras(d: dict, surf: dict) -> None:
     idx = surf.get("index") or []
     if idx:
         mk = list(models)
-        d["history_models"] = [{"key": m, "label": model_label(m)} for m in mk]
+        d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
                                  "vix_rep": _num(r.get("vix_replicated")),
@@ -3570,6 +3728,12 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     Every level of this bridge is a loss, so the bars hang below zero: the base
     spans from 0 to the end of the step nearer zero and the visible bar covers
     the step. A bridge that crosses zero is drawn as plain step bars instead.
+
+    The stacked encodings are drawing geometry, not data (a step that raised P&L
+    is a negative segment below zero), so the spec carries its own CSV rows
+    (step, Δ P&L, P&L after) and tooltip lines, and each step bar's tip is set
+    only where that bar is drawn. Bars run horizontally: seventeen step names
+    collided when rotated under a vertical chart on a phone.
     """
     start = float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])
     levels = [start] + [float(r["pnl"]) for r in bridge]
@@ -3579,13 +3743,15 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     raise_: list[float | None] = [None]
     lower: list[float | None] = [None]
     total: list[float | None] = [start / k]
-    tip: list[float | None] = [start / k]
+    tip_raise: list[float | None] = [None]
+    tip_lower: list[float | None] = [None]
+    after: list[float | None] = [start / k]
     all_neg = all(v <= 0 for v in levels)
     for r, before in zip(bridge, levels[:-1]):
         dp = float(r["d_pnl"])
-        after = before + dp
+        level = before + dp
         if all_neg:
-            base.append(max(before, after) / k)
+            base.append(max(before, level) / k)
             raise_.append(-abs(dp) / k if dp > 0 else None)
             lower.append(-abs(dp) / k if dp < 0 else None)
         else:
@@ -3593,28 +3759,33 @@ def waterfall_spec(bridge: list[dict]) -> dict:
             raise_.append(dp / k if dp > 0 else None)
             lower.append(dp / k if dp < 0 else None)
         total.append(None)
-        tip.append(dp / k)
+        tip_raise.append(dp / k if dp > 0 else None)
+        tip_lower.append(dp / k if dp < 0 else None)
+        after.append(level / k)
     base.append(None)
     raise_.append(None)
     lower.append(None)
     total.append(levels[-1] / k)
-    tip.append(levels[-1] / k)
-    return charts.xy(
+    tip_raise.append(None)
+    tip_lower.append(None)
+    after.append(levels[-1] / k)
+    spec = charts.xy(
         "chart-waterfall",
         "C22 waterfall: portfolio P&L from the published C21 run to the canonical run ($000s)",
-        x={"type": "category", "categories": cats, "interval": 0, "rotate": 38, "labelWidth": 150},
+        x={"type": "category", "categories": cats, "interval": 0},
         y={"name": "Portfolio P&L ($000s)", "digits": 0, "tipDigits": 1, "signed": True, "zero": True,
            "max": 0 if all_neg else None},
         series=[
             {"name": "base", "type": "bar", "stack": "w", "invisible": True, "data": base},
             {"name": "Step raises P&L", "type": "bar", "stack": "w", "color": "pos", "legend": True,
-             "data": raise_, "tip": tip},
+             "data": raise_, "tip": tip_raise},
             {"name": "Step lowers P&L", "type": "bar", "stack": "w", "color": "neg", "legend": True,
-             "data": lower, "tip": tip},
+             "data": lower, "tip": tip_lower},
             {"name": "Run total", "type": "bar", "stack": "w", "color": "headline", "fill": 0.35,
              "legend": True, "data": total},
         ],
-        xs=cats, tooltip="axis", grid={"bottom": 112, "left": 60}, csv="c22_waterfall.csv",
+        xs=cats, tooltip="axis", horizontal=True, grid={"bottom": 30, "left": 160, "top": 8},
+        csv="c22_waterfall.csv",
         describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} in {len(bridge)} "
                   "cumulative steps; each bar is one correction's effect on portfolio P&L."),
         table=charts.table("C22 bridge: each correction applied in turn ($)",
@@ -3622,6 +3793,14 @@ def waterfall_spec(bridge: list[dict]) -> dict:
                            [["—", "C21 as published", "", _usd(start), ""]]
                            + [[r["row"], r["label"], _usd(r["d_pnl"], signed=True), _usd(r["pnl"]),
                                _fmt(r["sharpe"], ".2f")] for r in bridge]))
+    spec["labelShare"], spec["labelMax"] = 0.36, 300      # desk.js sizes the step names to the width
+    spec["tipRows"] = [{"name": "P&L after", "data": round_sig(after), "digits": 1, "signed": True}]
+    spec["csv_rows"] = {
+        "columns": ["row", "step", "d_pnl_usd", "pnl_after_usd", "sharpe_after"],
+        "rows": ([["", "C21 published", "", round(start, 2), ""]]
+                 + [[int(r["row"]), str(r["label"]), round(float(r["d_pnl"]), 2), round(float(r["pnl"]), 2),
+                     round(float(r["sharpe"]), 4)] for r in bridge])}
+    return spec
 
 
 def load_corrections() -> dict[str, Any]:
@@ -4045,6 +4224,10 @@ VENDORED: dict[str, dict] = {
 # so a cached old copy is never paired with a new page).
 OWN_ASSETS = ("static/desk.css", "static/desk.js")
 FONT_PRELOAD = "static/fonts/InterDesk-4.1-wght400-700.woff2"
+# Both faces the first screen's text and chart axes use: ECharts draws canvas
+# text once, so a chart initialised before Desk Mono arrived kept the fallback
+# font (desk.js also redraws such charts when document.fonts is ready).
+FONT_PRELOADS = (FONT_PRELOAD, "static/fonts/DeskMono-400.woff2")
 
 # Every page is static; all JavaScript is in static files, chart data is in
 # <script type="application/json"> blocks (never executed), so scripts are
@@ -4068,7 +4251,7 @@ def _page_context() -> dict:
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
             "cividis": CIVIDIS_11, "berlin": BERLIN_11,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
-            "font_preload": FONT_PRELOAD, "chrome": load_chrome(), "page_title": {
+            "font_preloads": FONT_PRELOADS, "chrome": load_chrome(), "page_title": {
                 r: label for r, label, *_ in NAV}.get(route, "Overview")}
 
 
