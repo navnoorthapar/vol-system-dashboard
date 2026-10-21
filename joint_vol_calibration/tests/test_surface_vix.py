@@ -279,3 +279,63 @@ def test_gap_attribution_needs_fitted_terms():
     a = vix.gap_attribution(rep, terms, 0.0, _FlatSurface(0.2), {}, official=20.0)
     assert not a["available"]
     assert "not fitted" in a["reason"]
+
+
+# ── C23f: AM-date SPXW proxies (review QSM-4) and extrapolated brackets (QSM-3) ─
+
+def test_spx_am_settlement_dates():
+    assert vix.is_spx_am_settlement_date("2026-10-16")          # third Friday
+    assert vix.is_spx_am_settlement_date("2026-12-18")
+    assert vix.is_spx_am_settlement_date("2027-01-15")
+    assert not vix.is_spx_am_settlement_date("2026-12-17")
+    assert not vix.is_spx_am_settlement_date("2026-12-11")      # second Friday
+    assert vix.is_spx_am_settlement_date("2026-06-18")          # Juneteenth Friday: Thursday
+    assert not vix.is_spx_am_settlement_date("2026-06-19")
+    assert vix.is_spx_am_settlement_date("2027-06-17")          # 2027-06-18 observed holiday
+
+
+def _lines(expiry, root, strikes=(95.0, 100.0, 105.0)):
+    return [{"expiry": expiry, "strike": K, "right": right, "bid": 1.0, "ask": 1.2, "root": root}
+            for K in strikes for right in ("C", "P")]
+
+
+def test_term_tables_flag_spxw_lines_standing_in_for_the_am_monthly():
+    """2026-10-16's chain stores 2026-12-18 and 2027-01-15 (third Fridays) as
+    SPXW only. They stay PM-timed candidates, flagged am_date_pm_proxy; an AM
+    date with SPX lines is AM; a root-less chain is not flagged (its own
+    deviation line covers it)."""
+    calc = datetime(2026, 10, 16, 16, 0)  # noqa: DTZ001
+    raw = pd.DataFrame(_lines("2026-12-18", "SPXW") + _lines("2027-01-15", "SPXW")
+                       + _lines("2027-04-16", "SPX") + _lines("2027-04-16", "SPXW")
+                       + _lines("2026-12-04", "SPXW"))
+    by = {t["expiry"]: t for t in vix.term_tables(raw, "2026-10-16", calc)}
+    assert by["2026-12-18"]["settlement"] == "PM"
+    assert by["2026-12-18"]["am_date_pm_proxy"]
+    assert by["2027-01-15"]["am_date_pm_proxy"]
+    assert by["2027-01-15"]["candidate"]
+    assert by["2027-04-16"]["settlement"] == "AM"
+    assert not by["2027-04-16"]["am_date_pm_proxy"]
+    assert not by["2026-12-04"]["am_date_pm_proxy"]
+    rootless = pd.DataFrame(_lines("2026-12-18", ""))
+    t = vix.term_tables(rootless, "2026-10-16", calc)[0]
+    assert t["settlement"] == "PM"
+    assert not t["am_date_pm_proxy"]
+    assert not t["has_root"]
+
+
+def _rep(ok=True, w=0.5, days=9):
+    near = {"expiry": "2026-10-30", "days": 14.0}
+    nxt = {"expiry": "2026-11-13", "days": 28.0}
+    return {"ok": ok, "level": 20.0, "near_weight": w, "extrapolated": not 0.0 <= w <= 1.0,
+            "constant_maturity_days": days, "near": near, "next": nxt, "reason": "x"}
+
+
+def test_headline_method_refuses_an_extrapolated_bracket():
+    assert vix.headline_method({"cboe_rules": _rep(), "parity_forward": _rep()}) == ("cboe_rules", None)
+    pf = vix.headline_method({"cboe_rules": _rep(ok=False), "parity_forward": _rep()})
+    assert pf[0] == "parity_forward"
+    m, why = vix.headline_method({"cboe_rules": _rep(w=1.357), "parity_forward": _rep(w=1.357)})
+    assert m is None
+    assert "2026-10-30 (14.0d) / 2026-11-13 (28.0d)" in why
+    assert "1.357" in why
+    assert vix.headline_method({"cboe_rules": _rep(ok=False), "parity_forward": _rep(ok=False)})[0] is None

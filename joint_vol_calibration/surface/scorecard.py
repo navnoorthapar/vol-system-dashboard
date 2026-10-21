@@ -10,10 +10,12 @@ dividends C / (D_T F_T) depends on (k, T) only.
 
 Built-in models (MODEL_REGISTRY, in scorecard order):
   essvi      eSSVI global surface (essvi.py), fitted to the surface fit set
-  svi        raw SVI per expiry, butterfly constraints (svi.py)
-  svi_cal    raw SVI slices with butterfly constraints AND calendar ordering
-             against both neighbour slices, started from the eSSVI fit
-             (svi.fit_svi_calendar_surface): the arbitrage-free surface
+  svi        raw SVI per expiry, butterfly certificate per slice (svi.py)
+  svi_cal    raw SVI slices with the butterfly certificate AND calendar
+             ordering against both neighbour slices (ordering certificate),
+             started from the eSSVI fit (svi.fit_svi_calendar_surface): the
+             arbitrage-free surface when surface.json's
+             arbitrage_free_certified holds
   heston_v2  Heston at the session's stored model_version-2 joint fit
              (data_store/calibrations/joint_cal_<session>.pkl), priced with
              the repo engine (models.heston.heston_call_batch); in_sample =
@@ -23,7 +25,9 @@ The surface fit set holds alternate strikes of each expiry (positions 0, 2,
 4, ... by strike) minus the quotes the arbitrage repair must move outside
 their spread; the other quotes are out of sample for the surfaces. Heston's
 in-sample set is its calibration anchors (53 quotes on 2026-10-16), so its
-out-of-sample RMSE reproduces the pickle's oos.spx_oos_iv_rmse.
+out-of-sample RMSE reproduces the pickle's oos.spx_oos_iv_rmse. The two
+held-out sets differ, so every model is also scored on their intersection
+(metrics.common_out_of_sample): a same-quotes comparison.
 
 Adding a model (rough Heston, Quintic OU, ...): write a factory
 ``f(ctx) -> ModelSpec | None`` (None = not available for this session) and
@@ -150,10 +154,12 @@ def svi_factory(ctx: ScoreContext) -> ModelSpec:
     _check_fit_covers_expiries(ctx, s.T)
     return ModelSpec(
         "svi", s.iv, ctx.fit_mask.copy(), 5 * len(s.slices),
-        "raw SVI per expiry; Durrleman g(k) >= 0 on 241 points of k in [-1.5, 1] and Lee "
-        "wing bounds; no calendar constraint between slices; inverse half-spread weights",
+        "raw SVI per expiry; Durrleman g(k) >= 0 rows on 481 points of k in [-3, 2] plus "
+        "cutting planes until svi.butterfly_certificate passes, and Lee wing bounds; no "
+        "calendar constraint between slices; inverse half-spread weights",
         params=s.to_dict(),
         fit={"slices_converged": sum(1 for x in s.slices if x.info.get("success")),
+             "slices_certified": sum(1 for x in s.slices if x.info.get("certified")),
              "n_slices": len(s.slices),
              "max_constraint_violation": float(max(x.info.get("max_constraint_violation", 0.0)
                                                    for x in s.slices)),
@@ -165,17 +171,21 @@ def svi_factory(ctx: ScoreContext) -> ModelSpec:
 def svi_cal_factory(ctx: ScoreContext) -> ModelSpec:
     surf, _ = _essvi(ctx)
     if "svi_cal" not in ctx.cache:
+        if "svi" not in ctx.cache:
+            ctx.cache["svi"] = sv.fit_svi_surface(_groups(ctx), surf, h_floor=H_FLOOR_FIT)
+        free = [x.params for x in ctx.cache["svi"].slices]     # extra starts per slice update
         ctx.cache["svi_cal"] = sv.fit_svi_calendar_surface(_groups(ctx), surf, h_floor=H_FLOOR_FIT,
                                                            max_sweeps=SVI_CAL_SWEEPS,
-                                                           rel_tol=SVI_CAL_REL_TOL)
+                                                           rel_tol=SVI_CAL_REL_TOL, starts=free)
     s, info = ctx.cache["svi_cal"]
     _check_fit_covers_expiries(ctx, s.T)
     return ModelSpec(
         "svi_cal", s.iv, ctx.fit_mask.copy(), 5 * len(s.slices),
-        "raw SVI per expiry with Durrleman g(k) >= 0 on 241 points of k in [-1.5, 1] and Lee "
-        "wing bounds, and calendar ordering w_(i-1) <= w_i <= w_(i+1) certified on a "
-        "4,001-point k-grid and in the wing slopes; block coordinate descent from the eSSVI "
-        "fit; inverse half-spread weights",
+        "raw SVI per expiry with Durrleman g(k) >= 0 rows on 481 points of k in [-3, 2] and "
+        "Lee wing bounds, and calendar ordering w_(i-1) <= w_i <= w_(i+1); a slice is accepted "
+        "only when svi.butterfly_certificate and svi.ordering_certificate pass (cutting planes "
+        "until they do); block coordinate descent from the eSSVI fit; inverse half-spread "
+        "weights",
         params=s.to_dict(), fit=dict(info.items()))
 
 
@@ -278,14 +288,23 @@ def model_ivs(spec: ModelSpec, quotes: pd.DataFrame) -> np.ndarray:
 
 
 def score_models(ctx: ScoreContext, models: list | None = None) -> tuple:
-    """Score every available model. Returns (scorecard dict, residuals frame)."""
+    """Score every available model. Returns (scorecard dict, residuals frame).
+
+    Each model's out_of_sample metrics use its own held-out set (the quotes it
+    was not fitted to), so their sizes differ by model; common_out_of_sample
+    scores every model on the same quotes: those no available model was
+    fitted to (the intersection of the held-out sets)."""
     q = ctx.quotes
     if not (q.index == np.arange(len(q))).all():
         raise AssertionError("quotes must have a RangeIndex")
     ranges = mt.expiry_ranges(q)
+    specs = [(name, MODEL_REGISTRY[name](ctx)) for name in (models or list(MODEL_REGISTRY))]
+    common = np.ones(len(q), dtype=bool)
+    for _, spec in specs:
+        if spec is not None:
+            common &= ~np.asarray(spec.in_sample, dtype=bool)
     rows, frames = [], []
-    for name in (models or list(MODEL_REGISTRY)):
-        spec = MODEL_REGISTRY[name](ctx)
+    for name, spec in specs:
         if spec is None:
             rows.append({"model": name, "available": False})
             continue
@@ -293,12 +312,20 @@ def score_models(ctx: ScoreContext, models: list | None = None) -> tuple:
         res = mt.residual_frame(q, miv, model=spec.name, in_sample=spec.in_sample,
                                 extra={"arb_flag": ctx.arb_flag})
         frames.append(res)
+        metrics = mt.summarise(res)
+        metrics["common_out_of_sample"] = mt.stats_on(res, common)
         rows.append({
             "model": spec.name, "available": True, "description": spec.description,
             "n_params": spec.n_params, "n_in_sample": int(np.sum(spec.in_sample)),
-            "metrics": mt.summarise(res),
+            "metrics": metrics,
             "dense_grid": mt.dense_grid_checks(spec.iv, ranges),
             "params": spec.params, "fit": spec.fit,
         })
     resid = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    return {"session": ctx.sq.session, "models": rows}, resid
+    card = {"session": ctx.sq.session, "models": rows,
+            "common_out_of_sample": {
+                "n": int(common.sum()),
+                "models": [r["model"] for r in rows if r.get("available")],
+                "rule": ("the quotes no available model was fitted to: the intersection of "
+                         "every model's out-of-sample set")}}
+    return card, resid

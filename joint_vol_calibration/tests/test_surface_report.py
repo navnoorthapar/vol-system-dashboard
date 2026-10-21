@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from joint_vol_calibration.surface import report
+from joint_vol_calibration.surface import svi as sv
 
 REPO = Path(__file__).resolve().parents[2]
 SESSION = "2026-10-16"
@@ -165,3 +166,112 @@ def test_round_sig_is_deterministic_and_bounded():
     assert np.isinf(r[4])
     np.testing.assert_allclose(r[[1, 2, 5]], x[[1, 2, 5]], rtol=1e-9)
     np.testing.assert_array_equal(report.round_sig(r), r)
+
+
+# ── C23f: the certificate is the label's gate (QSM-1, CLM-02), same-quotes
+# scoring (CLM-15), VIX9D extrapolation (QSM-3) and SPXW AM-date proxies (QSM-4)
+
+def _recomputed_certificates(sec: dict) -> dict:
+    return sv.SVISurface.from_dict(sec["params"]).certificate()
+
+
+def test_svi_certificates_recompute_from_the_published_parameters(written):
+    """surface.json's certificate fields are those of the parameters it
+    publishes (written at full precision), and the scorecard's svi_cal label
+    is the gate's verdict."""
+    out, _ = written
+    surf = json.loads((out / SESSION / "surface.json").read_text())
+    for name in ("svi", "svi_cal"):
+        sec = surf["surfaces"][name]
+        cert = _recomputed_certificates(sec)
+        assert report._clean(cert["butterfly"]) == sec["butterfly_certificate"]   # as written
+        assert report._clean(cert["calendar"]) == sec["calendar_ordering"]
+        assert sec["butterfly_free_certified"] is cert["butterfly"]["certified"]
+        assert sec["arbitrage_free_certified"] is cert["arbitrage_free"]
+        assert sec["slices_with_g_negative_on_k_-3_to_2"] == 0
+        assert sec["butterfly_free_certified"]
+    cal = surf["surfaces"]["svi_cal"]
+    assert cal["arbitrage_free_certified"]
+    assert cal["fit"]["arbitrage_free_certified"]
+    card = json.loads((out / SESSION / "scorecard.json").read_text())
+    assert card["notes"][2].startswith("svi_cal is the arbitrage-free surface on this session")
+    sl = cal["params"]["slices"][0]
+    assert len(repr(sl["b"]).replace("0.", "").lstrip("0")) > 11     # not rounded to 10 digits
+
+
+def test_svi_cal_label_follows_the_certificate():
+    bad = {"arbitrage_free_certified": False,
+           "butterfly_certificate": {"slices_with_g_negative": 2, "g_min": -2.6e-5},
+           "calendar_ordering": {"pairs_unordered": [["a", "b"]], "min_dw": -1e-6}}
+    note = report._svi_cal_note(bad)
+    assert note.startswith("svi_cal is NOT certified arbitrage-free")
+    assert "2 slice(s)" in note
+    assert "1 consecutive pair(s)" in note
+    assert "is the arbitrage-free surface" not in note
+
+
+def test_every_model_is_also_scored_on_the_same_quotes(written):
+    """CLM-15: each model's out_of_sample set differs (Heston: non-anchors;
+    surfaces: the strikes between fitted ones); common_out_of_sample is the
+    same quotes for every model, those no model was fitted to."""
+    out, _ = written
+    card = json.loads((out / SESSION / "scorecard.json").read_text())
+    res = pd.read_parquet(out / SESSION / "residuals.parquet")
+    models = [m for m in card["models"] if m.get("available")]
+    own = {m["model"]: m["metrics"]["out_of_sample"]["n"] for m in models}
+    assert len(set(own.values())) > 1                               # the held-out sets differ
+    fitted = res.groupby(["expiry", "strike", "right"])["in_sample"].any()
+    n_common = int((~fitted).sum())
+    assert card["common_out_of_sample"]["n"] == n_common
+    for m in models:
+        assert m["metrics"]["common_out_of_sample"]["n"] == n_common
+    assert "the same quotes (the calibrator's OOS universe)" not in card["notes"][0]
+    assert f"the same {n_common:,} quotes" in card["notes"][0]
+    assert [r["model"] for r in card["ranking_by_common_oos_median_abs_hs"]]
+
+
+def test_extrapolated_vix9d_is_not_reported_as_replicated(written):
+    """QSM-3: on 2026-10-16 no stored candidate lies within 9 days, so the
+    bracket 2026-10-30 / 2026-11-13 would extrapolate (weight 1.357)."""
+    out, _ = written
+    vixd = json.loads((out / SESSION / "vix_replication.json").read_text())
+    v9 = vixd["indices"]["VIX9D"]
+    assert v9["cboe_rules"]["extrapolated"]
+    assert v9["headline_method"] is None
+    assert "replicated" not in v9
+    assert "gap_vs_official" not in v9
+    assert "1.357" in v9["not_replicated_reason"]
+    assert any(n.startswith("VIX9D is not replicated from the stored chain") for n in vixd["gap_notes"])
+    for name in ("VIX", "VIX3M", "VIX6M"):
+        assert vixd["indices"][name]["headline_method"] == "cboe_rules"
+        assert not vixd["indices"][name]["cboe_rules"]["extrapolated"]
+
+
+def test_spxw_am_date_proxies_are_flagged_and_listed(written):
+    """QSM-4: 2026-12-18 and 2027-01-15 are stored as SPXW only; VIX3M's near
+    term 2027-01-15 is the PM proxy for the AM monthly, and the deviations
+    say so (the root-less line is not written for a rooted chain)."""
+    out, _ = written
+    vixd = json.loads((out / SESSION / "vix_replication.json").read_text())
+    near = vixd["indices"]["VIX3M"]["cboe_rules"]["near"]
+    assert near["expiry"] == "2027-01-15"
+    assert near["am_date_pm_proxy"]
+    assert near["settlement"] == "PM"
+    assert any("SPXW PM lines stand in for the AM SPX monthly on 2026-12-18, 2027-01-15" in d
+               for d in vixd["deviations"])
+    assert not any(d.startswith("Root-less") for d in vixd["deviations"])
+
+
+@pytest.mark.parametrize("session", ["2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16"])
+def test_committed_svi_cal_surfaces_are_certified_from_their_json(session):
+    """The committed surfaces recompute as arbitrage-free from the parameters
+    they publish (QSM-1: before C23f three of them had g < 0 between nodes
+    and four crossed off the check grid)."""
+    path = COMMITTED / session / "surface.json"
+    if not path.exists():
+        pytest.skip("no committed surface artifacts")
+    sec = json.loads(path.read_text())["surfaces"]["svi_cal"]
+    cert = _recomputed_certificates(sec)
+    assert cert["arbitrage_free"], (cert["butterfly"].get("expiries_with_g_negative"),
+                                    cert["calendar"].get("pairs_unordered"))
+    assert sec["arbitrage_free_certified"]

@@ -120,6 +120,15 @@ def residual_frame(quotes: pd.DataFrame, model_iv, *, model: str,
     return out
 
 
+def stats_on(res: pd.DataFrame, mask) -> dict:
+    """The summary statistics of one model's residual_frame on the quotes in
+    ``mask`` (a boolean array over the frame's rows; finite model IVs only)."""
+    m = np.asarray(mask, dtype=bool) & np.isfinite(res["model_iv"].to_numpy(float))
+    sub = res[m]
+    return _stats(sub["error_vp"].to_numpy(float), sub["error_hs"].to_numpy(float),
+                  sub["inside_spread"].to_numpy(bool), sub["outside_spread_vp"].to_numpy(float))
+
+
 def summarise(res: pd.DataFrame) -> dict:
     """Metrics of one model's residual_frame (finite model IVs only; the
     count of quotes the model could not price is reported)."""
