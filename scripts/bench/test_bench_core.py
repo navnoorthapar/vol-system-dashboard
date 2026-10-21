@@ -18,8 +18,17 @@ headline fit (data_store/calibrations/joint_cal_2026-10-16.pkl) and the
                         the calibrator use) on the same quotes
   joint_loss            one JointCalibrator.joint_loss evaluation (SPX anchors
                         and the VIX index leg) at the headline parameters
-  full_calibration      JointCalibrator.calibrate(): DE + L-BFGS-B, seed 42
-                        (slow, ~30-50 s; excluded from the CI smoke)
+  full_calibration      JointCalibrator.calibrate(optimizer="de"): DE 50 x 200 +
+                        L-BFGS-B, seed 42, serial: the method that made the
+                        committed fit, reproduced to 1e-6 relative (slow,
+                        ~30-50 s; excluded from the CI smoke)
+  full_calibration_trf  JointCalibrator.calibrate(): the default since C23,
+                        multi-start TRF with the analytic Jacobian, warm from
+                        the previous accepted fit (~2-3 s; in the CI smoke).
+                        It lands on the committed DE optimum along the loss's
+                        flat kappa direction: loss no higher than the committed
+                        one, parameters within 2e-3 relative (measured 8.5e-4
+                        on kappa, 2.8e-4 on theta), not 1e-6
 """
 from __future__ import annotations
 
@@ -121,13 +130,23 @@ def test_iv_bisection_chain(benchmark, chain_quotes):
     benchmark(oc.black76_implied_vol, price, F, K, T, D, is_call)
 
 
-@pytest.fixture(scope="module")
-def calibrator(headline):
+def _calibrator(headline):
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator, recorded_inputs
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # the committed fit's objective: its recorded VIX targets and rate reference
         return JointCalibrator(as_of_date=SESSION, **recorded_inputs(headline))
+
+
+@pytest.fixture(scope="module")
+def calibrator(headline):
+    return _calibrator(headline)
+
+
+@pytest.fixture
+def fresh_calibrator(headline):
+    """A calibrator of its own for a full fit (calibrate() stores its result)."""
+    return _calibrator(headline)
 
 
 def test_joint_loss_evaluation(benchmark, calibrator, headline):
@@ -140,9 +159,36 @@ def test_joint_loss_evaluation(benchmark, calibrator, headline):
     benchmark(calibrator.joint_loss, x)
 
 
+def test_headline_is_a_de_fit(headline):
+    """The 1e-6 check below holds for the optimiser that made the committed fit:
+    differential evolution (pickles before C23 carry no 'optimizer' key)."""
+    assert headline.get("optimizer", "de") == "de"
+
+
 @pytest.mark.slow
-def test_full_calibration(benchmark, calibrator, headline):
-    result = benchmark.pedantic(calibrator.calibrate, kwargs={"verbose": False}, rounds=1, iterations=1)
+def test_full_calibration(benchmark, fresh_calibrator, headline):
+    # optimizer="de" explicitly: the default became multi-start TRF in C23, which
+    # this 1e-6 check against the committed DE optimum does not hold for (ENG-3)
+    result = benchmark.pedantic(fresh_calibrator.calibrate, kwargs={"verbose": False, "optimizer": "de"},
+                                rounds=1, iterations=1)
+    assert result.get("optimizer", "de") == "de"
     for k, v in headline["params"].items():
         assert result["params"][k] == pytest.approx(v, rel=1e-6), k
-    benchmark.extra_info.update(n_evals=int(result["n_evals"]), fit_time_s=float(result["fit_time"]))
+    benchmark.extra_info.update(optimizer="de", n_evals=int(result["n_evals"]),
+                                fit_time_s=float(result["fit_time"]))
+
+
+# kappa sits along a flat direction of the joint loss: TRF and DE agree on the
+# loss to ~4e-10 relative and on kappa to 8.5e-4 (2026-10-16, measured)
+TRF_PARAM_RTOL = 2e-3
+
+
+def test_full_calibration_trf(benchmark, fresh_calibrator, headline):
+    result = benchmark.pedantic(fresh_calibrator.calibrate, kwargs={"verbose": False},
+                                rounds=1, iterations=1)
+    assert result["optimizer"] == "trf_multistart"
+    assert result["loss"] <= headline["loss"] * (1 + 1e-6)
+    for k, v in headline["params"].items():
+        assert result["params"][k] == pytest.approx(v, rel=TRF_PARAM_RTOL), k
+    benchmark.extra_info.update(optimizer="trf", n_evals=int(result["n_evals"]),
+                                fit_time_s=float(result["fit_time"]))

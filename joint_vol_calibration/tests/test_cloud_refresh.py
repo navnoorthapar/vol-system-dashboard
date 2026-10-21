@@ -452,6 +452,63 @@ def test_a_capture_of_another_session_or_a_failed_download_is_not_stored(env, mo
     assert "::warning title=Cboe capture::" in capsys.readouterr().out
 
 
+def test_a_capture_write_error_fails_that_capture_not_the_run(env, monkeypatch, capsys):
+    """PROD-7: only the download was guarded, so an OSError from save_capture (a
+    full disk) propagated out of main(): no market or calibrate step, no status
+    file, no GITHUB_OUTPUT. Now that underlying is "failed", what it left of its
+    capture is removed (the retry slot captures it whole), and the run goes on."""
+    monkeypatch.setattr(cboe, "capture_option_chain", lambda und, **kw: _capture(und))
+    real = cboe.save_capture
+
+    def full_disk(cap, out_dir):
+        if cap.underlying != "SPX":
+            return real(cap, out_dir)
+        d = pathlib.Path(out_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        stem = cboe.capture_stem(cap)
+        cap.frame.to_parquet(d / f"{stem}.parquet", index=False)      # renamed into place ...
+        (d / f".{stem}.json.tmp").write_text("{")                     # ... then the JSON fails
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(cboe, "save_capture", full_disk)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    capt = st["capture"]
+    assert capt["status"] == "partial"
+    assert capt["captures"]["SPX"]["status"] == "failed"
+    assert "No space left on device" in capt["captures"]["SPX"]["reason"]
+    assert capt["captures"]["VIX"]["status"] == "captured"
+    d = env.DATA / "options" / "cboe"
+    assert sorted(p.name for p in d.iterdir()) == [f"vix_{SESSION}_013005Z.json",
+                                                   f"vix_{SESSION}_013005Z.parquet"]
+    stem = d / f"vix_{SESSION}_013005Z"
+    assert capt["files"] == [str(stem.with_suffix(".parquet")), str(stem.with_suffix(".json"))]
+    assert st["market"]["ok"]
+    assert st["calibration"]["status"] == "skipped"  # the later steps ran
+    assert code == 0
+    assert not st["publish_blockers"]
+    assert "::warning title=Cboe capture::Cboe chain capture partial" in capsys.readouterr().out
+    # the retry slot captures SPX again (nothing of the failed capture is left to say "exists")
+    monkeypatch.setattr(cboe, "save_capture", real)
+    code, st = _run(env, "capture")
+    assert st["capture"]["captures"]["SPX"]["status"] == "captured"
+    assert st["capture"]["captures"]["VIX"]["status"] == "exists"
+
+
+def test_a_crash_in_the_capture_step_does_not_skip_the_run(env, monkeypatch, capsys):
+    def crash(now_utc, expected, out_dir=None):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(env, "capture_cboe_chains", crash)
+    _accepted_pickle(env, "2026-09-22")
+    _, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    assert st["capture"]["status"] == "failed"
+    assert "RuntimeError: unexpected" in st["capture"]["reason"]
+    assert st["market"]["ok"]
+    assert st["calibration"]["status"] == "skipped"
+    assert st["session"] == SESSION
+    assert "exit_code" in st
+    assert "::warning title=Cboe capture::" in capsys.readouterr().out
+
+
 def test_no_capture_while_the_book_is_another_sessions(env, monkeypatch):
     """Same refusal as the calibration: from the 09:30 ET open the live book
     is the new session's."""
@@ -518,6 +575,157 @@ def test_a_failed_artifact_is_reported_and_loses_nothing(env, monkeypatch, capsy
     assert str(dbm.options_snapshot_path(SESSION, "SPX")) in st["persisted"]
     assert not st["publish_blockers"]
     assert "::error title=Session artifacts::surface artifact" in capsys.readouterr().out
+
+
+def _greeks_source(cr, name="greeks_surface.parquet", key=b"greeks_provenance"):
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(cr.DATA / "greeks" / name).metadata
+    return json.loads(meta[key])["source"]["calibration_file"]
+
+
+def test_a_failed_artifact_is_rebuilt_by_the_next_run(env, monkeypatch):
+    """PROD-5 / ENG-6: the artifacts were built only by the run that accepted the
+    fit. The diagnostics timed out there; the retry slot found the pickle
+    ('exists') and rebuilt nothing, so the session's diagnostics never existed.
+    Every run with the calibrate step now backfills what is missing."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    calls = []
+
+    def timeout(session, out_dir, timeout):
+        calls.append(session)
+        raise TimeoutError("calibration_diagnostics.py: 1200 s")
+    monkeypatch.setattr(env, "_run_diagnostics", timeout)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["calibration"]["status"] == "accepted"
+    assert {k: v["ok"] for k, v in st["artifacts"].items()} == {
+        "surface": True, "diagnostics": False, "greeks": True, "scenario": True}
+    # the failed part is not retried in the same run, and nothing else is missing
+    assert st["artifact_backfill"]["gaps"] == {}
+    assert calls == [SESSION]
+    diag = env.DATA / "calibrations" / "diagnostics" / f"{SESSION}.json"
+    assert not diag.exists()
+
+    def works(session, out_dir, timeout):
+        calls.append(session)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{session}.json").write_text("{}")
+    monkeypatch.setattr(env, "_run_diagnostics", works)
+    code, st = _run(env, "calibrate")                          # the 04:30 retry
+    assert st["calibration"]["status"] == "exists"
+    bf = st["artifact_backfill"]
+    assert bf["gaps"] == {SESSION: ["diagnostics"]}
+    assert list(bf["rebuilt"]) == [SESSION]
+    assert list(bf["rebuilt"][SESSION]) == ["diagnostics"]
+    assert bf["rebuilt"][SESSION]["diagnostics"]["ok"]
+    assert code == 0
+    assert diag.exists()
+    assert calls == [SESSION, SESSION]
+    code, st = _run(env, "calibrate")                          # repaired: nothing to do
+    assert code == 0
+    assert st["artifact_backfill"] == {"gaps": {}, "rebuilt": {}, "deferred": []}
+    assert calls == [SESSION, SESSION]
+    code, st = _run(env, "market,labels")                      # the close slot never backfills
+    assert "artifact_backfill" not in st
+
+
+def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
+    """The artifact commit was dropped (gate failure) or a part failed: the
+    Greeks surface and scenario grid named the previous headline fit. The next
+    run rebuilds both from the headline, and a missing file the same way."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    monkeypatch.setattr(env, "_run_diagnostics", lambda s, d, t: (d.mkdir(parents=True, exist_ok=True),
+                                                                  (d / f"{s}.json").write_text("{}")))
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    head = f"joint_cal_{SESSION}.pkl"
+    assert _greeks_source(env).endswith(head)
+    import pyarrow.parquet as pq
+    g = env.DATA / "greeks" / "greeks_surface.parquet"
+    t = pq.read_table(g)
+    meta = dict(t.schema.metadata)
+    prov = json.loads(meta[b"greeks_provenance"])
+    prov["source"]["calibration_file"] = "data_store/calibrations/joint_cal_2026-09-22.pkl"
+    meta[b"greeks_provenance"] = json.dumps(prov).encode()
+    pq.write_table(t.replace_schema_metadata(meta), g)          # the previous headline's surface
+    (env.DATA / "greeks" / "scenario_grid.parquet").unlink()   # and no scenario grid
+    code, st = _run(env, "calibrate")
+    bf = st["artifact_backfill"]
+    assert bf["gaps"] == {SESSION: ["greeks", "scenario"]}
+    assert {k: v["ok"] for k, v in bf["rebuilt"][SESSION].items()} == {"greeks": True, "scenario": True}
+    assert code == 0
+    assert _greeks_source(env).endswith(head)
+    assert _greeks_source(env, "scenario_grid.parquet", b"scenario_provenance").endswith(head)
+    assert not list((env.DATA / "greeks").glob(".*.tmp"))
+
+
+def test_backfill_rebuilds_newest_first_and_defers_the_rest(env, monkeypatch):
+    gaps = {"2026-09-23": ["diagnostics"], "2026-09-22": ["surface", "diagnostics"],
+            "2026-09-21": ["surface"]}
+    monkeypatch.setattr(env, "artifact_gaps", lambda head: dict(gaps))
+    seen = []
+    def rebuild(s, h, parts=None, **kw):
+        seen.append((s, parts))
+        return {p: {"ok": True} for p in parts}
+    monkeypatch.setattr(env, "refresh_session_artifacts", rebuild)
+    out = env.backfill_session_artifacts("h.pkl", skip=["2026-09-23"], max_sessions=1)
+    assert seen == [("2026-09-22", ("surface", "diagnostics"))]
+    assert out["deferred"] == ["2026-09-21"]
+    assert list(out["gaps"]) == ["2026-09-22", "2026-09-21"]
+    with pytest.raises(ValueError, match="unknown artifact part"):
+        env._real_refresh_session_artifacts(SESSION, None, parts=("bogus",))
+
+
+def test_the_backfill_keeps_to_its_time_budget(env, monkeypatch):
+    """A job that reaches its 45-minute timeout is cancelled before the step that
+    uploads the captures, so the backfill has a budget: a session is started only
+    with a minute left, its diagnostics get at most what is left, the rest waits
+    for the next run; main() shrinks the budget by what the run already used."""
+    gaps = {"2026-09-23": ["diagnostics"], "2026-09-22": ["diagnostics"]}
+    monkeypatch.setattr(env, "artifact_gaps", lambda head: dict(gaps))
+    now = [0.0]
+    seen = []
+
+    def rebuild(s, h, parts=None, diagnostics_timeout=None, **kw):
+        seen.append((s, diagnostics_timeout))
+        now[0] += 500.0                                   # this session took 500 s
+        return {p: {"ok": True} for p in parts}
+    monkeypatch.setattr(env, "refresh_session_artifacts", rebuild)
+    out = env.backfill_session_artifacts("h.pkl", budget_s=530.0, clock=lambda: now[0])
+    assert seen == [("2026-09-23", 530.0)]
+    assert out["deferred"] == ["2026-09-22"]                 # 30 s left: not started
+    seen.clear()
+    out = env.backfill_session_artifacts("h.pkl", budget_s=5000.0, clock=lambda: now[0])
+    assert [s for s, _ in seen] == ["2026-09-23", "2026-09-22"]
+    assert seen[0][1] == env.DIAGNOSTICS_TIMEOUT_S           # capped by the part's own timeout
+    budgets = []
+    monkeypatch.setattr(env, "backfill_session_artifacts",
+                        lambda head, skip=(), budget_s=None, **kw: budgets.append(budget_s) or
+                        {"gaps": {}, "rebuilt": {}, "deferred": []})
+    _run(env, "calibrate")
+    assert len(budgets) == 1
+    assert 0 < budgets[0] <= env.BACKFILL_BUDGET_S
+
+
+def test_a_greeks_write_that_dies_keeps_the_previous_surface(env, monkeypatch):
+    """PROD-3: save_greeks_surface writes in place; a crash mid-write left a
+    surface without its provenance, which the data gate then tripped on. The
+    bot writes it under a temporary name and renames it into place."""
+    from joint_vol_calibration.greeks import risk_monitor
+    g = env.DATA / "greeks" / "greeks_surface.parquet"
+    g.parent.mkdir(parents=True)
+    g.write_bytes(b"previous surface")
+
+    def dies(cal, out_path, *a, **k):
+        assert pathlib.Path(out_path) != g
+        pathlib.Path(out_path).write_bytes(b"half a parq")
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(risk_monitor, "build_surface_from_calibration", dies)
+    res = env._real_refresh_session_artifacts(SESSION, "h.pkl", parts=("greeks",))
+    assert not res["greeks"]["ok"]
+    assert "No space left" in res["greeks"]["error"]
+    assert g.read_bytes() == b"previous surface"
+    assert sorted(p.name for p in g.parent.iterdir()) == ["greeks_surface.parquet"]
 
 
 def test_gate_rejection_after_a_fit_persists_nothing(env, monkeypatch):
@@ -835,6 +1043,81 @@ def test_market_captures_survive_a_dropped_session_and_a_fresh_db(env, monkeypat
     assert st["restored"]["market"]["spx_ohlcv"] > 0
     assert "2026-09-22" in _spx_dates()
     assert "2026-09-22" in set(pd.read_parquet(part)["date"])
+
+
+def test_rederive_rebuilds_the_partitions_and_labels_over_mains_files(env, monkeypatch):
+    """PROD-2: the push loop's answer to a binary conflict (commit_and_push.sh
+    REDERIVE). After a market run, main is given a different copy of the 2026
+    SPX partition (a row the run never downloaded; the run's last session
+    missing). --rederive, with no download and no restore, merges the run's
+    database into main's file, so main's extra row and the run's session are
+    both there, and re-extends the labels as of the run's session."""
+    code, _ = _run(env, "market")
+    assert code == 0
+    part = dbm.MARKET_DIR / "spx_ohlcv" / "spx_ohlcv_2026.parquet"
+    run_part = pd.read_parquet(part)
+    mains = run_part[run_part["date"] != SESSION].copy()
+    extra = mains.iloc[[0]].assign(date="2026-01-02", close=1234.5)
+    pd.concat([extra, mains]).sort_values("date").to_parquet(part, index=False)
+    status = env.DATA.parent / "status.json"
+    before = status.read_text()
+
+    def no_network(*a, **k):
+        raise AssertionError("rederive must not download or restore")
+    monkeypatch.setattr(dl, "download_spx_ohlcv", no_network)
+    monkeypatch.setattr(env, "restore_captures", no_network)
+    labelled = []
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: labelled.append(as_of) or 1)
+    code = env.main(["--rederive", "--steps", "market,labels", "--status-file", str(status)], now_utc=NOW)
+    assert code == 0
+    got = pd.read_parquet(part)
+    assert SESSION in set(got["date"])
+    assert "2026-01-02" in set(got["date"])
+    assert got.loc[got["date"] == "2026-01-02", "close"].item() == 1234.5
+    assert len(got) == len(run_part) + 1
+    assert labelled == [date.fromisoformat(SESSION)]
+    assert status.read_text() == before                        # the run's status file is the run's
+    # the market step alone: the labels are not touched
+    labelled.clear()
+    assert env.main(["--rederive", "--steps", "market,capture,calibrate,freeze"], now_utc=NOW) == 0
+    assert labelled == []
+
+
+def test_merge_main_data_rederives_mains_sessions_over_the_branchs_record(env, tmp_path, monkeypatch):
+    """ENG-1 (scripts/ci/merge_main_data.py rederive): main's partition (the bot's
+    provisional Yahoo rows) is upserted into
+    the branch's database and the partition re-exported: main's new session
+    is in, the branch's Cboe row for the same session stays, a row main
+    stored on an NYSE holiday does not come in."""
+    spec = importlib.util.spec_from_file_location(
+        "merge_main_data_test_mod", SCRIPT.parent / "ci" / "merge_main_data.py")
+    merge = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, merge)
+    spec.loader.exec_module(merge)
+    code, _ = _run(env, "market")
+    assert code == 0
+    rel = "data_store/market/vix_term_structure/vix_term_structure_2026.parquet"
+    part = dbm.MARKET_DIR / "vix_term_structure" / "vix_term_structure_2026.parquet"
+    cboe = pd.DataFrame([{"date": SESSION, "ticker": "^VIX", "tenor_days": 30, "close": 17.76,
+                          "is_vvix": 0, "source": "cboe"}])
+    dbm.insert_vix_term_structure(cboe)                        # the branch's restated print
+    dbm.export_market_partitions(tables=("vix_term_structure",), since=SESSION)
+    mains = pd.read_parquet(part)
+    mains.loc[(mains["date"] == SESSION) & (mains["ticker"] == "^VIX"), ["close", "source"]] = \
+        [20.37, "yfinance"]
+    extra = mains[mains["date"] == SESSION].assign(date="2026-09-24", source="yfinance")
+    holiday = mains[mains["date"] == SESSION].assign(date="2026-09-07", source="yfinance")
+    theirs = tmp_path / "theirs"
+    (theirs / rel).parent.mkdir(parents=True)
+    pd.concat([mains, extra, holiday], ignore_index=True).to_parquet(theirs / rel, index=False)
+    out = merge.rederive(theirs, [rel], env)
+    assert out["tables"] == ["vix_term_structure"]
+    assert "labels_added" not in out
+    got = pd.read_parquet(part)
+    vix = got[(got["date"] == SESSION) & (got["ticker"] == "^VIX")].iloc[0]
+    assert (vix["close"], vix["source"]) == (17.76, "cboe")
+    assert set(got.loc[got["date"] == "2026-09-24", "ticker"]) == set(extra["ticker"])
+    assert "2026-09-07" not in set(got["date"])
 
 
 def test_no_persist_flag_leaves_capture_dirs_alone(env):

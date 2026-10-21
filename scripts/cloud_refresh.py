@@ -30,7 +30,11 @@ surface report (data_store/surface/<session>/), its calibration diagnostics
 and scenario grid of the new headline fit (data_store/greeks/). Each is
 fail-soft: a failure is reported (exit 1) but never undoes what was captured,
 and the workflow commits captures and derived artifacts behind separate test
-gates (refresh_session_artifacts).
+gates (refresh_session_artifacts). Every run with the calibrate step then
+backfills what an earlier run failed to build or commit: a committed accepted
+fit without its surface report or diagnostics, or a Greeks surface / scenario
+grid built from another fit than the headline (backfill_session_artifacts, at
+most MAX_BACKFILL_SESSIONS sessions a run).
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
 is not what the bot commits. At the start of every run (freeze-only
@@ -84,6 +88,7 @@ import pathlib
 import pickle
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -103,6 +108,17 @@ ALL_STEPS = ("market", "labels", "capture", "calibrate", "freeze")
 # multi-start TRF, DE check, identifiability, sigma profile, rough Heston) take
 # about 3 min on 4 idle CPUs; this bounds them so the job keeps its time budget.
 DIAGNOSTICS_TIMEOUT_S = 20 * 60
+# What derives from a fit (refresh_session_artifacts), in build order.
+ARTIFACT_PARTS = ("surface", "diagnostics", "greeks", "scenario")
+# Sessions whose missing artifacts one run rebuilds (backfill_session_artifacts):
+# the diagnostics take ~4 min a session, the job has 45 (an accepted fit ~5).
+MAX_BACKFILL_SESSIONS = 2
+# The backfill's share of the 45-minute job, and how long the whole refresh may
+# have run before the backfill gives way: the gates, the commits and the deploy
+# come after it, and a job that hits its timeout is cancelled before the step
+# that uploads the captures. A diagnostics part gets at most what is left.
+BACKFILL_BUDGET_S = 12 * 60
+REFRESH_BUDGET_S = 25 * 60
 
 
 def _bootstrap_path() -> None:
@@ -557,7 +573,12 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
     session: the retry slot skips an underlying already captured.
 
     Returns {"status": captured|exists|partial|skipped|failed, "reason",
-    "session", "files", "captures": {und: {...}}}. Never raises.
+    "session", "files", "captures": {und: {...}}}. Never raises: a failure
+    while summarising or writing one underlying's capture (a full disk, a
+    permission or pyarrow error) is that underlying's "failed", and whatever
+    it left of that capture (a temporary file, a parquet without its JSON) is
+    removed, so a capture is stored whole or not at all and the retry slot,
+    still inside the live book, captures it again.
     """
     d = pathlib.Path(out_dir) if out_dir is not None else capture_dir()
     st: dict = {"status": "skipped", "reason": "", "session": expected, "files": [],
@@ -581,19 +602,25 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
             st["captures"][und] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
             log.warning("  Cboe %s capture failed: %s", und, e)
             continue
-        summ = cap.summary()
-        if cap.frame.empty or cap.session != expected:
-            why = ("empty chain" if cap.frame.empty else
-                   f"the live {und} book is session {cap.session}'s, not {expected}'s")
-            st["captures"][und] = {"status": "rejected", "reason": why, "summary": summ}
-            log.warning("  Cboe %s capture not stored: %s", und, why)
+        try:
+            summ = cap.summary()
+            if cap.frame.empty or cap.session != expected:
+                why = ("empty chain" if cap.frame.empty else
+                       f"the live {und} book is session {cap.session}'s, not {expected}'s")
+                st["captures"][und] = {"status": "rejected", "reason": why, "summary": summ}
+                log.warning("  Cboe %s capture not stored: %s", und, why)
+                continue
+            pq_path, js_path = cboe.save_capture(cap, d)
+            st["captures"][und] = {"status": "captured", "file": str(pq_path),
+                                   **{k: summ[k] for k in ("quote_time", "book_state", "rows",
+                                                           "two_sided_rows", "expiries", "n_bytes",
+                                                           "sha256", "underlying_price")}}
+        except Exception as e:  # noqa: BLE001 (one underlying's write must not lose the run)
+            st["captures"][und] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
+            log.warning("  Cboe %s capture could not be stored: %s", und, e)
+            _discard_partial_capture(d, cap, cboe)
             continue
-        pq_path, js_path = cboe.save_capture(cap, d)
         st["files"] += [str(pq_path), str(js_path)]
-        st["captures"][und] = {"status": "captured", "file": str(pq_path),
-                               **{k: summ[k] for k in ("quote_time", "book_state", "rows",
-                                                       "two_sided_rows", "expiries", "n_bytes",
-                                                       "sha256", "underlying_price")}}
         log.info("  Cboe %s chain: %d rows (%d two-sided, %d expiries), quote time %s, book %s -> %s",
                  und, summ["rows"], summ["two_sided_rows"], summ["expiries"], summ["quote_time"],
                  summ["book_state"], pq_path.name)
@@ -609,6 +636,21 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
     st["reason"] = "; ".join(f"{u} {c['status']}" + (f" ({c['reason']})" if c.get("reason") else "")
                              for u, c in st["captures"].items())
     return st
+
+
+def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:
+    """Remove what a failed save_capture left of ``cap``: its temporary files,
+    and a parquet whose JSON was never written (the pair is the capture)."""
+    try:
+        stem = cboe.capture_stem(cap)
+    except Exception:  # noqa: BLE001 (no stem: nothing of this capture was written)
+        return
+    for p in (d / f".{stem}.parquet.tmp", d / f".{stem}.json.tmp"):
+        p.unlink(missing_ok=True)
+    pq_path, js_path = d / f"{stem}.parquet", d / f"{stem}.json"
+    if pq_path.exists() != js_path.exists():
+        pq_path.unlink(missing_ok=True)
+        js_path.unlink(missing_ok=True)
 
 
 def record_forward_ledger(session: str, raw, clean, spot: float, r_ref: float,
@@ -650,8 +692,10 @@ def _run_diagnostics(session: str, out_dir: pathlib.Path, timeout: float) -> Non
 
 
 def refresh_session_artifacts(session: str, headline_path: "str | None",
-                              diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S) -> dict:
-    """Rebuild what derives from an accepted session's fit, each part fail-soft:
+                              diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S,
+                              parts=ARTIFACT_PARTS) -> dict:
+    """Rebuild what derives from an accepted session's fit (``parts``, default
+    all four, in this order), each part fail-soft:
 
       surface      data_store/surface/<session>/ (residuals, surface, scorecard,
                    VIX replication) and index.json (surface.report)
@@ -698,7 +742,15 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
         from joint_vol_calibration.greeks.risk_monitor import build_surface_from_calibration
         if not headline_path:
             raise ValueError("no headline calibration")
-        df = build_surface_from_calibration(headline_path, DATA / "greeks" / "greeks_surface.parquet")
+        # written under a temporary name and renamed into place (save_greeks_surface
+        # writes in place): a crash mid-write leaves the previous, valid surface
+        dest = DATA / "greeks" / "greeks_surface.parquet"
+        tmp = dest.with_name(f".{dest.name}.tmp")
+        try:
+            df = build_surface_from_calibration(headline_path, tmp)
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
         return {"from": headline_path, "n_nodes": len(df),
                 "n_unstable": int(df["is_unstable"].sum())}
 
@@ -709,9 +761,119 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
         df = sg.build_from_calibration(headline_path, DATA / "greeks" / "scenario_grid.parquet")
         return {"from": headline_path, "cells": len(df)}
 
-    for name, fn in (("surface", surface), ("diagnostics", diagnostics), ("greeks", greeks),
-                     ("scenario", scenario)):
-        part(name, fn)
+    fns = {"surface": surface, "diagnostics": diagnostics, "greeks": greeks, "scenario": scenario}
+    unknown = set(parts) - set(fns)
+    if unknown:
+        raise ValueError(f"unknown artifact part(s) {sorted(unknown)}")
+    for name in ARTIFACT_PARTS:
+        if name in parts:
+            part(name, fns[name])
+    return out
+
+
+def accepted_sessions() -> dict:
+    """{session: pickle path} of every committed calibration that passes the
+    CURRENT gate (what headline_calibration chooses from)."""
+    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+    out = {}
+    for path in sorted((DATA / "calibrations").glob("joint_cal_*.pkl")):
+        try:
+            with open(path, "rb") as f:
+                cal = pickle.load(f)  # noqa: S301 (the repository's own calibration pickles)
+        except Exception as e:  # noqa: BLE001 (an unreadable pickle is not an accepted fit)
+            log.debug("  %s is not readable (%s): not an accepted fit", path.name, e)
+            continue
+        if isinstance(cal, dict) and is_acceptable_calibration(cal)[0]:
+            out[str(cal.get("spot_date") or cal.get("as_of_date") or path.stem[-10:])[:10]] = str(path)
+    return out
+
+
+def _artifact_source(path: pathlib.Path, key: bytes) -> "str | None":
+    """source.calibration_file in a derived parquet's provenance (None: the
+    file is missing, unreadable or names none)."""
+    import pyarrow.parquet as pq
+    try:
+        meta = pq.read_schema(path).metadata or {}
+        return str(json.loads(meta[key])["source"]["calibration_file"])
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
+def artifact_gaps(headline_path: "str | None") -> dict:
+    """What is missing or stale among the artifacts derived from the committed
+    accepted fits: {session: [parts]}, newest session first.
+
+      surface      data_store/surface/<s>/surface.json missing, or index.json
+                   does not list <s>
+      diagnostics  data_store/calibrations/diagnostics/<s>.json missing
+      greeks,      (the headline session) the parquet is missing, unreadable,
+      scenario     or its provenance names another calibration than the
+                   headline fit (the Greeks surface and scenario grid of the
+                   previous headline next to a new one)
+
+    Only sessions whose SPX chain is stored (data_store/options/spx_<s>.parquet)
+    are checked: the surface report and the diagnostics are built from it."""
+    from joint_vol_calibration.data import database as dbm
+    gaps: dict = {}
+    idx = DATA / "surface" / "index.json"
+    try:
+        listed = {r["session"] for r in json.loads(idx.read_text())["sessions"]} if idx.exists() else set()
+    except (OSError, ValueError, KeyError, TypeError):
+        listed = set()
+    acc = accepted_sessions()
+    for sess in sorted(acc, reverse=True):
+        if not dbm.options_snapshot_path(sess, "SPX").exists():
+            continue
+        need = []
+        if sess not in listed or not (DATA / "surface" / sess / "surface.json").exists():
+            need.append("surface")
+        if not (DATA / "calibrations" / "diagnostics" / f"{sess}.json").exists():
+            need.append("diagnostics")
+        if need:
+            gaps[sess] = need
+    if headline_path:
+        head = pathlib.Path(headline_path)
+        sess = next((s_ for s_, p_ in acc.items() if pathlib.Path(p_).name == head.name), None)
+        stale = [name for name, fname, key in (
+            ("greeks", "greeks_surface.parquet", b"greeks_provenance"),
+            ("scenario", "scenario_grid.parquet", b"scenario_provenance"))
+            if pathlib.Path(_artifact_source(DATA / "greeks" / fname, key) or "").name != head.name]
+        if stale and sess:
+            gaps[sess] = [*gaps.get(sess, []), *stale]
+    return dict(sorted(gaps.items(), reverse=True))
+
+
+def backfill_session_artifacts(headline_path: "str | None", skip=(),
+                               max_sessions: int = MAX_BACKFILL_SESSIONS,
+                               budget_s: float = BACKFILL_BUDGET_S, clock=time.monotonic) -> dict:
+    """Rebuild what artifact_gaps finds missing or stale, newest session first,
+    at most ``max_sessions`` sessions a run and within ``budget_s`` seconds (a
+    session is started only with a minute left, and its diagnostics get at most
+    what is left); the rest are 'deferred' to the next run. ``skip``: sessions
+    this run already rebuilt (an accepted fit's failed part is not retried in
+    the same run).
+
+    The artifacts used to be built only by the run that accepted the fit: when
+    a part failed there (the diagnostics' 20-minute timeout), or the artifact
+    gate failed and the commit dropped them, the retry slot and every later
+    run found the pickle ('exists') and rebuilt nothing, and the next deploy
+    showed the new headline fit next to the previous fit's Greeks surface and
+    scenario grid. Every run with the calibrate step now repairs them.
+
+    Returns {"gaps": {session: [parts]}, "rebuilt": {session: {part: result}},
+    "deferred": [sessions]}."""
+    gaps = {s: p for s, p in artifact_gaps(headline_path).items() if s not in set(skip)}
+    out: dict = {"gaps": gaps, "rebuilt": {}, "deferred": []}
+    t0 = clock()
+    for i, sess in enumerate(gaps):
+        left = budget_s - (clock() - t0)
+        if i >= max_sessions or left < 60:
+            out["deferred"].append(sess)
+            continue
+        log.info("  backfill: %s for %s (%.0f s left)", ", ".join(gaps[sess]), sess, left)
+        out["rebuilt"][sess] = refresh_session_artifacts(
+            sess, headline_path, parts=tuple(gaps[sess]),
+            diagnostics_timeout=min(DIAGNOSTICS_TIMEOUT_S, left))
     return out
 
 
@@ -937,29 +1099,40 @@ def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
     return written
 
 
+def rederive_records(steps, closed: date, today: date) -> dict:
+    """Rebuild the re-derivable committed files from this run's database over
+    the versions now in the working tree (main's, when the commit step hit a
+    rebase conflict on them: scripts/ci/commit_and_push.sh REDERIVE).
+
+      market  export_market_partitions over the download window: it MERGES
+              the database into each file (the database wins a key clash,
+              the file's other rows are kept), so main's rows and this run's
+              both survive
+      labels  extend_regime_labels: appends the sessions the file lacks and
+              heals the trailing window, from this run's database
+
+    Nothing is downloaded and the committed captures are NOT restored first
+    (that would let main's copy of a row replace what this run downloaded)."""
+    out: dict = {}
+    if "market" in steps:
+        out["persisted"] = persist_captures(download_start(today, None).isoformat())
+    if "labels" in steps:
+        out["labels_added"] = extend_regime_labels(closed)
+    log.info("[rederive] %s", out)
+    return out
+
+
 def headline_calibration(session: "str | None") -> dict:
     """Newest calibration that passes the CURRENT gate, and its age in NYSE
     sessions relative to ``session``. Legacy (pre-C22) pickles do not count."""
-    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
     from joint_vol_calibration.data import option_chain as oc
 
-    best = None
-    for path in sorted((DATA / "calibrations").glob("joint_cal_*.pkl")):
-        try:
-            with open(path, "rb") as f:
-                cal = pickle.load(f)
-        except Exception:
-            continue
-        if not isinstance(cal, dict) or not is_acceptable_calibration(cal)[0]:
-            continue
-        d = str(cal.get("spot_date") or cal.get("as_of_date") or path.stem[-10:])[:10]
-        if best is None or d > best["date"]:
-            best = {"date": d, "path": str(path)}
-    if best is None:
+    acc = accepted_sessions()
+    if not acc:
         return {"date": None, "path": None, "age_sessions": None}
-    best["age_sessions"] = (oc.sessions_between(best["date"], session)
-                            if session else None)
-    return best
+    d = max(acc)
+    return {"date": d, "path": acc[d],
+            "age_sessions": oc.sessions_between(d, session) if session else None}
 
 
 # -- Step 4: Freeze static site ------------------------------------------------
@@ -1003,6 +1176,7 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
     if out_path:
         with open(out_path, "a") as f:
             f.write(f"session={status.get('session') or ''}\n")
+            f.write(f"run_utc={status.get('run_utc') or ''}\n")
             f.write(f"calibration={cal.get('status', 'not-run')}\n")
             f.write(f"reason={str(cal.get('reason', '')).splitlines()[0] if cal.get('reason') else ''}\n")
             f.write(f"labels_added={status.get('labels_added', 0)}\n")
@@ -1086,6 +1260,13 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
             lines.append(f"| {name} artifact | "
                          + ("ok" if res.get("ok") else f"**failed**: {res.get('error')}")
                          + f" ({res.get('seconds', '—')} s) |")
+        bf = status.get("artifact_backfill") or {}
+        for sess, arts in (bf.get("rebuilt") or {}).items():
+            lines.append(f"| backfill {sess} | " + "; ".join(
+                f"{n} " + ("ok" if r.get("ok") else f"**failed**: {r.get('error')}")
+                for n, r in arts.items()) + " |")
+        if bf.get("deferred"):
+            lines.append(f"| backfill deferred | {', '.join(bf['deferred'])} (next run) |")
         lines.append(f"| headline calibration | {head.get('date') or 'none'}"
                      + (f" ({head.get('age_sessions')} sessions old)" if head.get("date") else "")
                      + " |")
@@ -1112,6 +1293,11 @@ def _parse_args(argv):
     ap.add_argument("--rebuild-labels", action="store_true",
                     help="labels step: rebuild every stored rule label from the database "
                          "(after a restatement of the record) instead of extending")
+    ap.add_argument("--rederive", action="store_true",
+                    help="no download, no restore: re-export the market partitions ('market' in "
+                         "--steps) and re-extend the labels ('labels') from this run's database over "
+                         "the files now in the tree (scripts/ci/commit_and_push.sh REDERIVE, after it "
+                         "took main's version of a conflicting file); pass the run's --now")
     args = ap.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     bad = [s for s in steps if s not in ALL_STEPS]
@@ -1123,6 +1309,7 @@ def _parse_args(argv):
 def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
          calibrate_kwargs: "dict | None" = None) -> int:
     """Run the selected steps; return the process exit status."""
+    run_t0 = time.monotonic()
     args, steps = _parse_args(argv if argv is not None else sys.argv[1:])
     _bootstrap_path()
     os.chdir(ROOT)
@@ -1145,6 +1332,17 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     status = {"run_utc": now_utc.isoformat(timespec="seconds"), "steps": steps,
               "expected_session": closed.isoformat(),
               "session": None, "errors": [], "warnings": []}
+    if args.rederive:
+        try:
+            status["rederived"] = rederive_records(steps, closed, today)
+            status["exit_code"] = 0
+        except Exception as e:
+            log.exception("rederive failed")
+            status["errors"].append(f"rederive failed: {e}")
+            status["exit_code"] = 1
+        # the run's own status file (.refresh-status.json) is left as the run wrote it
+        log.info("Rederive %s", "complete" if status["exit_code"] == 0 else f"FAILED: {status['errors']}")
+        return status["exit_code"]
     hard_fail = False
     # Failures after which the rendered site must not be published (the data
     # it would show is wrong or incomplete). A rejected, skipped or stale
@@ -1174,7 +1372,12 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # live, and it is captured whatever the Yahoo chain or the fit do later.
     if "capture" in steps:
         with _Group("Cboe option-chain capture"):
-            capt = capture_cboe_chains(now_utc, closed.isoformat())
+            try:
+                capt = capture_cboe_chains(now_utc, closed.isoformat())
+            except Exception as e:  # it should not raise; the market and fit steps must run
+                log.exception("capture step crashed")
+                capt = {"status": "failed", "reason": f"capture step crashed: {type(e).__name__}: {e}",
+                        "session": closed.isoformat(), "files": [], "captures": {}}
             status["capture"] = capt
             if capt["status"] in ("failed", "partial"):
                 msg = f"Cboe chain capture {capt['status']}: {capt['reason']}"
@@ -1294,6 +1497,34 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                     msg = f"{name} artifact for {status['calibration']['session']} failed: {res.get('error')}"
                     status["errors"].append(msg)
                     _annotate("error", "Session artifacts", msg)
+
+    # Every book run: rebuild what derives from the committed accepted fits and is
+    # missing or stale (a part that failed, or an artifact commit the gate dropped,
+    # on an earlier run). Without this the retry slot found the pickle and stopped.
+    if "calibrate" in steps:
+        with _Group("artifact backfill"):
+            try:
+                head = status.get("headline_calibration") or {}
+                done = [status["calibration"]["session"]] if accepted else []
+                budget = min(BACKFILL_BUDGET_S, REFRESH_BUDGET_S - (time.monotonic() - run_t0))
+                bf = backfill_session_artifacts(head.get("path"), skip=done, budget_s=budget)
+            except Exception as e:  # reported; the captures and the fit stand
+                log.exception("artifact backfill crashed")
+                bf = {"gaps": {}, "rebuilt": {}, "deferred": [], "error": f"{type(e).__name__}: {e}"}
+                hard_fail = True
+                status["errors"].append(f"artifact backfill crashed: {bf['error']}")
+                _annotate("error", "Artifact backfill", bf["error"])
+            status["artifact_backfill"] = bf
+            for sess, arts in bf["rebuilt"].items():
+                for name, res in arts.items():
+                    if not res.get("ok"):
+                        hard_fail = True
+                        msg = f"backfill: {name} artifact for {sess} failed: {res.get('error')}"
+                        status["errors"].append(msg)
+                        _annotate("error", "Session artifacts", msg)
+            if bf["gaps"]:
+                log.info("  artifact gaps %s; rebuilt %s; deferred %s", bf["gaps"], list(bf["rebuilt"]),
+                         bf["deferred"])
 
     if "freeze" in steps:
         with _Group("freeze site"):

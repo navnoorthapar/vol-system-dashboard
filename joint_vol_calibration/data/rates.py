@@ -85,7 +85,7 @@ import itertools
 import json
 import logging
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -487,15 +487,63 @@ def _bootstrap_par(q: pd.Series, short_t: np.ndarray, short_ldf: np.ndarray) -> 
 class QuoteIndex:
     """Treasury quotes grouped by date, for building many curves fast."""
     dates: np.ndarray                  # sorted unique quote dates (YYYY-MM-DD strings)
-    by_date: dict                      # date -> Series(series -> value)
+    by_date: Mapping                   # date -> Series(series -> value)
+
+
+class _DaySlices(Mapping):
+    """date -> Series(series -> value), built on first access and kept.
+
+    index_quotes used to build all 4,201 per-date Series up front (one
+    drop_duplicates and set_index each, about 3 s per process) to serve the
+    one curve a calibrator, risk monitor or chain cleaner asks for (2.7 ms).
+    Here the rows are deduplicated and grouped by date once (one stable
+    sort), and a day's Series is a slice of those arrays, made when asked."""
+
+    def __init__(self, keys: list, starts: np.ndarray, stops: np.ndarray,
+                 series: pd.Series, values: pd.Series):
+        self._bounds = {k: (int(a), int(b)) for k, a, b in zip(keys, starts, stops, strict=True)}
+        self._series, self._sdtype = series.to_numpy(dtype=object), series.dtype
+        self._values, self._vdtype = values.to_numpy(), values.dtype
+        self._built: dict = {}
+
+    def __getitem__(self, key):
+        hit = self._built.get(key)
+        if hit is None:
+            a, b = self._bounds[key]          # KeyError for a date without quotes, like a dict
+            hit = self._built[key] = pd.Series(
+                self._values[a:b], index=pd.Index(self._series[a:b], name="series", dtype=self._sdtype),
+                name="value", dtype=self._vdtype)
+        return hit
+
+    def __iter__(self):
+        return iter(self._bounds)
+
+    def __len__(self) -> int:
+        return len(self._bounds)
+
+    def __contains__(self, key) -> bool:
+        return key in self._bounds
 
 
 def index_quotes(quotes: pd.DataFrame) -> QuoteIndex:
-    """QuoteIndex of the UST_* rows of long rate quotes [date, series, value, ...]."""
+    """QuoteIndex of the UST_* rows of long rate quotes [date, series, value, ...].
+
+    A day's Series holds the LAST quote of each series on that date, in the
+    order of the input rows (what a per-date drop_duplicates(keep="last")
+    gives); it is built when first used (_DaySlices)."""
     q = quotes[quotes["series"].astype(str).str.startswith("UST_")]
-    by_date = {str(d): g.drop_duplicates("series", keep="last").set_index("series")["value"]
-               for d, g in q.groupby("date", sort=True)}
-    return QuoteIndex(np.array(sorted(by_date), dtype=object), by_date)
+    q = q.drop_duplicates(["date", "series"], keep="last")
+    q = q.sort_values("date", kind="stable")          # stable: input order within a date
+    d = q["date"].to_numpy()
+    if len(d):
+        cut = np.flatnonzero(d[1:] != d[:-1]) + 1
+        starts = np.concatenate(([0], cut))
+        stops = np.concatenate((cut, [len(d)]))
+    else:
+        starts = stops = np.array([], dtype=int)
+    keys = [str(d[i]) for i in starts]
+    by_date = _DaySlices(keys, starts, stops, q["series"], q["value"])
+    return QuoteIndex(np.array(sorted(keys), dtype=object), by_date)
 
 
 def build_zero_curve(quotes, as_of: str, *, max_age_days: int = 7, same_day: bool = True) -> ZeroCurve:

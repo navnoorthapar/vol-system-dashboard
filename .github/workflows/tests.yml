@@ -178,6 +178,40 @@ jobs:
       - name: Type gate (mypy vs scripts/ci/mypy_baseline.json)
         run: python scripts/ci/baseline_gate.py mypy
 
+      # The two gates above compare the code with the baseline committed next to
+      # it, so a change that adds findings and re-baselines (--update
+      # --allow-growth, or a hand edit) passes them. The baselines themselves are
+      # compared with the base branch's (the pull request's base, or the push's
+      # previous tip): a count may fall, never rise, unless the pull request is
+      # labelled 're-baseline' (a reviewed tool upgrade; the growth is printed).
+      - name: Check out the base branch's baselines
+        id: basebaselines
+        if: >
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.base_ref || github.event.before }}
+          path: .baseline-base
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: true
+
+      - name: Baselines may only shrink (vs the base branch)
+        if: steps.basebaselines.outcome == 'success'
+        env:
+          RE_BASELINE: ${{ contains(github.event.pull_request.labels.*.name, 're-baseline') }}
+        run: |
+          allow=""
+          [ "$RE_BASELINE" = "true" ] && allow="--allow-growth"
+          rc=0
+          for tool in ruff mypy; do
+            python scripts/ci/baseline_gate.py "$tool" \
+              --against ".baseline-base/scripts/ci/${tool}_baseline.json" $allow || rc=1
+          done
+          exit $rc
+
   bench:
     name: benchmark smoke (no timings asserted)
     runs-on: ubuntu-latest
@@ -287,6 +321,45 @@ jobs:
             --progress-spinner off --format markdown > "$RUNNER_TEMP/audit.md" || true
           { echo "## pip-audit (requirements-lock.txt)"; cat "$RUNNER_TEMP/audit.md"; } >> "$GITHUB_STEP_SUMMARY"
           cat "$RUNNER_TEMP/audit.md"
+
+  # The curated mutants (scripts/ci/mutation_check.py) against the property and
+  # Jacobian tests. Weekly, like reproduce: ~10 min. A mutant whose site is no
+  # longer unique is "stale" and fails the job (it went unnoticed for C23 while
+  # the target ran nowhere); tests/test_ci_tools.py also checks the sites on
+  # every push.
+  mutation:
+    name: mutants against the property tests (make mutation)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install dependencies (locked)
+        run: python -m pip install -r requirements-lock.txt
+
+      - name: Mutants (make mutation)
+        run: |
+          set -o pipefail
+          make mutation | tee "$RUNNER_TEMP/mutation.md"
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/mutation.md" ]; then
+            { echo "## Mutation check"; grep -E '^\|| mutants killed' "$RUNNER_TEMP/mutation.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   reproduce:
     name: rebuild committed artifacts (make reproduce)

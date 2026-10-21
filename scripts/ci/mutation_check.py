@@ -7,11 +7,18 @@ Each mutant below is a one-line change of the kind a refactor could
 introduce (a dropped compensator, a sign, a constant, a tolerance, a loop
 bound). For each one the script copies the tracked tree to a scratch
 directory, applies the mutant, runs the property tests
-(tests/test_properties_pricing.py, test_properties_iv.py) with -x and the
-derandomized ci profile, and records whether some property failed (the
-mutant is "killed") or all passed ("survived"). The working tree is never
-modified. A surviving mutant is reported, not fixed: it marks a property
-the tests do not pin.
+(tests/test_properties_pricing.py, test_properties_iv.py; a mutant may name
+its own, e.g. the analytic-Jacobian CF is pinned by test_heston_jacobian.py)
+with -x and the derandomized ci profile, and records whether some test
+failed (the mutant is "killed") or all passed ("survived"). The working tree
+is never modified. A surviving mutant is reported, not fixed: it marks a
+property the tests do not pin.
+
+A mutant's original text must occur exactly once in its file (the old text
+carries enough context to say which copy it mutates); otherwise it is
+"stale" and fails the run like a survivor. tests/test_ci_tools.py checks
+every site in the normal suite, so a refactor that duplicates or rewrites a
+site fails there, not only in the weekly `make mutation`.
 
 This is a curated list, not a mutation-testing framework (mutmut would
 generate hundreds of mutants and take hours here).
@@ -32,6 +39,13 @@ HESTON = "joint_vol_calibration/models/heston.py"
 IV = "joint_vol_calibration/models/implied_vol.py"
 TESTS = ["joint_vol_calibration/tests/test_properties_pricing.py",
          "joint_vol_calibration/tests/test_properties_iv.py"]
+JACOBIAN_TESTS = ["joint_vol_calibration/tests/test_heston_jacobian.py"]
+# Mutants pinned by other tests than the pricing/IV properties (name -> tests).
+MUTANT_TESTS = {
+    # the property tests price through _heston_log_cf only; the Jacobian copy
+    # is checked against finite differences and torch.func.jacfwd
+    "rho sign flipped in the analytic-Jacobian CF": JACOBIAN_TESTS,
+}
 
 # Mutants whose effect on the inputs the properties draw is far below every
 # property's tolerance. Each is listed with the measurement that shows it, and
@@ -49,8 +63,14 @@ MUTANTS = [
     ("Bates jump compensator dropped", HESTON,
      "return lam * T * (np.exp(1j * z * mu_j - 0.5 * z * z * sigma_j**2) - 1.0 - 1j * z * kbar)",
      "return lam * T * (np.exp(1j * z * mu_j - 0.5 * z * z * sigma_j**2) - 1.0)"),
+    # The CF line also appears in _heston_log_cf_grad (C23's analytic Jacobian):
+    # the next line tells the two copies apart.
     ("rho sign flipped in the Heston CF", HESTON,
-     "beta = kappa - 1j * rho * sig * z", "beta = kappa + 1j * rho * sig * z"),
+     "beta = kappa - 1j * rho * sig * z\n    d = np.sqrt(beta * beta + sig * sig * s)",
+     "beta = kappa + 1j * rho * sig * z\n    d = np.sqrt(beta * beta + sig * sig * s)"),
+    ("rho sign flipped in the analytic-Jacobian CF", HESTON,
+     "beta = kappa - 1j * rho * sig * z\n    d = np.sqrt(beta * beta + s2 * s)",
+     "beta = kappa + 1j * rho * sig * z\n    d = np.sqrt(beta * beta + s2 * s)"),
     ("v0 term of the CF off by 1%", HESTON, "return C + D * v0", "return C + D * v0 * 1.01"),
     ("kappa*theta term of the CF off by 0.1%", HESTON,
      "C = kappa * theta * (-s * T / bpd - 2.0 * log_ratio / (sig * sig))",
@@ -84,14 +104,30 @@ def copy_tree(dst: Path) -> None:
             d = dst / rel
             d.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(s, d)
-    for rel in TESTS:                          # the working-tree versions of the tests
+    for rel in all_tests():                    # the working-tree versions of the tests
         shutil.copy2(ROOT / rel, dst / rel)
 
 
-def run(tree: Path, timeout: int) -> tuple[str, str]:
+def all_tests() -> list[str]:
+    return sorted({*TESTS, *(t for ts in MUTANT_TESTS.values() for t in ts)})
+
+
+def stale_sites(root: Path = ROOT) -> dict[str, int]:
+    """{mutant name: occurrences of its original text} for every mutant whose
+    site is not found exactly once in ``root``'s sources."""
+    out = {}
+    for name, rel, old, _new in MUTANTS:
+        n = (root / rel).read_text().count(old)
+        if n != 1:
+            out[name] = n
+    return out
+
+
+def run(tree: Path, timeout: int, tests: list[str] | None = None) -> tuple[str, str]:
     env = {**os.environ, "HYPOTHESIS_PROFILE": "ci", "PYTHONPATH": str(tree)}
     try:
-        r = subprocess.run([sys.executable, "-m", "pytest", *TESTS, "-x", "-q", "-p", "no:cacheprovider"],
+        r = subprocess.run([sys.executable, "-m", "pytest", *(tests or TESTS), "-x", "-q",
+                            "-p", "no:cacheprovider"],
                            cwd=tree, env=env, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return "killed", f"timeout after {timeout} s"
@@ -109,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="mutation-") as tmp:
         tree = Path(tmp) / "tree"
         copy_tree(tree)
-        status, detail = run(tree, args.timeout)
+        status, detail = run(tree, args.timeout, all_tests())
         if status != "survived":
             print(f"the unmutated tree fails the property tests ({detail}); fix that first")
             return 2
@@ -122,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             path.write_text(src.replace(old, new))
             t0 = time.time()
-            status, detail = run(tree, args.timeout)
+            status, detail = run(tree, args.timeout, MUTANT_TESTS.get(name, TESTS))
             path.write_text(src)
             rows.append((name, status, f"{detail} ({time.time() - t0:.0f} s)"))
             print(f"  {status:<9} {name}: {detail}", flush=True)
