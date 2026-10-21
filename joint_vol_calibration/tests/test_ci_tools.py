@@ -8,6 +8,9 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * baseline_gate.py --against (CI's lint job): a baseline may only shrink
     against the base branch's, so adding findings and re-baselining in the
     same change fails.
+  * simulate_next_session.py (CI's simulate job): the simulated session's
+    book is priced by parameters moved off the headline fit, with noise, so
+    a test pinning a headline-derived value fails there, not in the bot.
 """
 from __future__ import annotations
 
@@ -149,3 +152,67 @@ class TestBaselineAgainstBase:
         step = re.search(r"- name: Baselines may only shrink.*", lint, re.DOTALL).group(0)
         assert "|| rc=1" in step
         assert "exit $rc" in step
+
+
+@pytest.fixture
+def sim(monkeypatch):
+    return _load("scripts/ci/simulate_next_session.py", "simulate_under_test", monkeypatch)
+
+
+class TestSimulatedSession:
+    def test_the_book_is_priced_off_the_headline_inside_the_box(self, sim):
+        """PROD-8: the synthetic book was priced by the committed headline's own
+        parameters, so the new fit reproduced it (kappa 5.0093 vs 4.9919, RMSE
+        0.057 vp) and a test pinning the headline passed the simulation."""
+        import pickle
+
+        from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+        from joint_vol_calibration.config import DATA_DIR, HESTON_BOUNDS
+        with open(DATA_DIR / "calibrations" / "joint_cal_2026-10-16.pkl", "rb") as fh:
+            head = pickle.load(fh)["params"]
+        heads = [head, {**head, "sigma": 2.0, "rho": -0.12, "kappa": 19.9},
+                 {"kappa": 0.2, "theta": 1e-4, "sigma": 0.06, "rho": -0.94, "v0": 1e-4}]
+        for h in heads:
+            p = sim.simulated_params(h)
+            assert sim.simulated_params(h) == p                       # deterministic
+            for k, (lo, hi) in HESTON_BOUNDS.items():
+                assert lo < p[k] < hi, (k, p[k])
+            assert is_acceptable_calibration(p)[0], (h, p)
+            assert p["sigma"] <= 0.7 * 1.9 + 1e-12
+        moves = sim.param_moves(sim.simulated_params(head), head)
+        assert set(moves) == set(sim.PARAMS)
+        assert min(moves.values()) > 2 * sim.MIN_PARAM_MOVE, moves
+
+    def test_mid_noise_is_about_one_vol_point_seeded_and_keeps_parity(self, sim):
+        import numpy as np
+
+        from joint_vol_calibration.data import option_chain as oc
+        F, T, D = 6000.0, 0.25, 0.99
+        K = np.arange(4800.0, 7000.0, 25.0)
+        vol = 0.18 + 0.15 * np.maximum(-np.log(K / F), 0.0)
+        calls, puts = (oc.black76_price(F, K, T, D, vol, c) for c in (True, False))
+        a = sim.noisy_mid(calls, F, K, T, D, True, seed=7)
+        np.testing.assert_array_equal(a, sim.noisy_mid(calls, F, K, T, D, True, seed=7))
+        assert not np.array_equal(a, sim.noisy_mid(calls, F, K, T, D, True, seed=8))
+        # the call and the put at a strike move by the same vol: parity holds
+        p = sim.noisy_mid(puts, F, K, T, D, False, seed=7)
+        np.testing.assert_allclose(a - p, D * (F - K), rtol=0, atol=1e-6 * F)
+        rms = []
+        inside = np.abs(np.log(K / F)) / (0.2 * np.sqrt(T)) < 2.5
+        for seed in range(30):
+            iv = oc.black76_implied_vol(sim.noisy_mid(calls, F, K, T, D, True, seed=seed), F, K, T, D, True)
+            dv = (iv - vol)[inside & np.isfinite(iv)] * 100
+            rms.append(float(np.sqrt(np.mean(dv ** 2))))
+        assert 0.8 < float(np.mean(rms)) < 1.2
+
+    def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
+        import inspect
+        src = inspect.getsource(sim.drive)
+        assert 'p = simulated_params(cal["params"])' in src
+        assert "p = cal[" not in src.replace('p = simulated_params(cal["params"])', "")
+        assert "noisy_mid(" in src
+        assert 'heston_vix_term_index(p["kappa"]' in src                # the VIX leg of the same p
+        main = inspect.getsource(sim.main)
+        assert "MIN_PARAM_MOVE" in main
+        assert "param_moves(" in main
+

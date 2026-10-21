@@ -17,13 +17,24 @@ committed. Here a new session happens before merge:
      download faked from the committed data:
        market     Yahoo, Cboe and Treasury return the stored window plus one
                   row per series for the new session (the last value carried
-                  forward; the VIX indices are the headline Heston fit's model
-                  values, so the joint fit is consistent)
+                  forward; the VIX indices are the model values of the
+                  session's parameters below, so the joint fit is consistent)
        capture    the newest committed Cboe books, re-dated to the new session
-       calibrate  a Yahoo-format book priced by the headline fit's Heston
-                  parameters at the new spot; the real calibrator, gate,
-                  forward ledger, surface report, diagnostics, Greeks surface
-                  and scenario grid follow
+       calibrate  a Yahoo-format book priced at the new spot by Heston with
+                  the session's parameters: the headline fit's moved by a
+                  fixed step inside the box and off its bounds
+                  (simulated_params: kappa x0.6, theta x1.2, sigma x0.7 below
+                  1.9, rho +0.1, v0 x1.3), each mid moved by ~1 vol point
+                  of seeded smile error that keeps put-call parity
+                  (noisy_mid), so the fit is a new one with a
+                  production-like RMSE; the real calibrator, gate, forward
+                  ledger, surface report, diagnostics, Greeks surface and
+                  scenario grid follow. A book priced by the headline itself
+                  refitted it to 1e-3 (RMSE 0.06 vp), so a test that pinned
+                  the headline's parameters, or values derived from them
+                  only (Greeks nodes, scenario P&L, the model VIX term),
+                  passed here and failed in the bot. The run fails unless
+                  every parameter of the new fit moved by MIN_PARAM_MOVE.
   3. The three gates of .github/workflows/daily_refresh.yml (their test lists
      are read from the workflow) run in the copy, and with --full the whole
      suite as the weekly tests.yml run would see main after the bot.
@@ -50,6 +61,63 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 GATES = ("Data tests (gate the capture commit)", "Artifact tests (gate the artifact commit)",
          "Presentation tests (gate the deploy)")
+PARAMS = ("kappa", "theta", "sigma", "rho", "v0")
+# the step from the headline fit to the simulated session's parameters
+PARAM_STEP = {"kappa": 0.6, "theta": 1.2, "sigma": 0.7, "rho": 0.1, "v0": 1.3}
+SIGMA_BELOW = 1.9            # the step is taken from below the sigma <= 2 prior
+NOISE_VP = 1.0               # RMS of the mid noise, vol points
+# noisy_mid's smile error per unit of NOISE_VP: level, slope, curvature (in z),
+# per-strike; an RMS of ~1 over the strikes a book quotes
+NOISE_SHAPE = (0.9, 0.35, 0.12, 0.25)
+# every parameter of the new fit must differ from the headline by this much
+# (relative): far beyond any tolerance a test could pin a committed value with
+MIN_PARAM_MOVE = 0.05
+
+
+def simulated_params(head: dict, bounds: dict | None = None) -> dict:
+    """The simulated session's Heston parameters: the headline fit's moved by
+    PARAM_STEP, inside the calibrator's box and at least 5% of its width off
+    each bound, with |rho| >= 0.2 (the gate's no-skew check is 0.10)."""
+    if bounds is None:
+        from joint_vol_calibration.config import HESTON_BOUNDS
+        bounds = HESTON_BOUNDS
+    raw = {"kappa": head["kappa"] * PARAM_STEP["kappa"], "theta": head["theta"] * PARAM_STEP["theta"],
+           "sigma": min(head["sigma"], SIGMA_BELOW) * PARAM_STEP["sigma"],
+           "rho": min(head["rho"] + PARAM_STEP["rho"], -0.2), "v0": head["v0"] * PARAM_STEP["v0"]}
+    out = {}
+    for k in PARAMS:
+        lo, hi = bounds[k]
+        pad = 0.05 * (hi - lo)
+        out[k] = float(min(max(raw[k], lo + pad if k in ("kappa", "sigma", "rho") else 3.0 * lo), hi - pad))
+    return out
+
+
+def noisy_mid(mid, F, K, T, D, is_call, seed: int, noise_vp: float = NOISE_VP):
+    """``mid`` moved in Black-76 implied volatility by about ``noise_vp`` vol
+    points (RMS), seeded by ``seed``: per expiry a smooth smile error (level,
+    slope and curvature in z = ln(K/F) / (0.2 sqrt T), z clipped to +-3) plus a
+    small per-strike part. The move depends on the strike only, so a call and
+    the put at its strike move by the same vol: put-call parity holds, as it
+    does in a real book (independent noise on each made the cleaner drop the
+    pair as parity-inconsistent). A quote whose vol cannot be inverted keeps
+    its price."""
+    import numpy as np
+
+    from joint_vol_calibration.data import option_chain as oc
+    mid, K = np.asarray(mid, float), np.asarray(K, float)
+    iv = oc.black76_implied_vol(mid, F, K, T, D, is_call)
+    rng = np.random.default_rng(seed)
+    uk, inv = np.unique(K, return_inverse=True)
+    z = np.clip(np.log(uk / F) / (0.2 * np.sqrt(T)), -3.0, 3.0)
+    a, b, c = rng.normal(0.0, 1.0, 3) * np.array(NOISE_SHAPE[:3])
+    eps = a + b * z + c * (z * z - 1.0) + rng.normal(0.0, NOISE_SHAPE[3], uk.shape)
+    moved = oc.black76_price(F, K, T, D, np.maximum(iv + eps[inv] * noise_vp / 100.0, 0.01), is_call)
+    return np.where(np.isfinite(iv), moved, mid)
+
+
+def param_moves(new: dict, head: dict) -> dict:
+    """Relative change of each parameter from the headline fit."""
+    return {k: abs(float(new[k]) - float(head[k])) / max(abs(float(head[k])), 1e-12) for k in PARAMS}
 
 
 def gate_tests(workflow: Path) -> dict:
@@ -104,6 +172,7 @@ def drive(status_file: Path) -> int:
     import pickle
     from datetime import UTC, datetime, timedelta
 
+    import numpy as np
     import pandas as pd
 
     from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
@@ -131,11 +200,12 @@ def drive(status_file: Path) -> int:
     head = cr.headline_calibration(last)
     with open(head["path"], "rb") as f:
         cal = pickle.load(f)  # noqa: S301 (the checkout's own calibration pickle)
-    p = cal["params"]
+    p = simulated_params(cal["params"])
     spx = dbm.get_spx_ohlcv(as_of_date=last)
     S = float(spx["close"].iloc[-1])
-    print(f"simulating session {session} (after {last}) at {now:%Y-%m-%dT%H:%MZ}; "
-          f"chain priced by the {head['date']} fit at S = {S:.2f}", flush=True)
+    print(f"simulating session {session} (after {last}) at {now:%Y-%m-%dT%H:%MZ}; chain priced at "
+          f"S = {S:.2f} by {p} (the {head['date']} fit {cal['params']} moved), "
+          f"{NOISE_VP:g} vp mid noise", flush=True)
 
     def window(df, start, end):
         d = df["date"].astype(str).str[:10]
@@ -234,7 +304,15 @@ def drive(status_file: Path) -> int:
                                  if (start + timedelta(days=i)).weekday() < 5)
 
         def option_chain(self, exp):
-            df = _heston_chain(params=p, session=session, S=S, r=r, q=q, expiries=[exp], spread=0.2)
+            import zlib
+            spread = 0.2
+            df = _heston_chain(params=p, session=session, S=S, r=r, q=q, expiries=[exp], spread=spread)
+            T = oc.year_fraction(session, exp, "PM")
+            mid = noisy_mid((df["bid"] + df["ask"]) / 2, S * np.exp((r - q) * T), df["strike"], T,
+                            np.exp(-r * T), (df["option_type"] == "call").to_numpy(),
+                            seed=zlib.crc32(exp.encode()))
+            df["bid"] = np.maximum(mid - spread / 2, 0.05)
+            df["ask"] = np.maximum(mid + spread / 2, df["bid"] + 0.05)
             calls = df[df.option_type == "call"].drop(columns=["expiration", "option_type"])
             puts = df[df.option_type == "put"].drop(columns=["expiration", "option_type"])
             return type("Chain", (), {"calls": calls, "puts": puts})()
@@ -252,7 +330,9 @@ def drive(status_file: Path) -> int:
     code = max(code, code_close)
     st = json.loads(status_file.read_text())
     st["simulated"] = {"session": session, "after": last, "now_utc": now.isoformat(),
-                       "headline_before": head["date"], "seconds": round(time.perf_counter() - t0, 1)}
+                       "headline_before": head["date"], "headline_params": cal["params"],
+                       "book_params": p, "noise_vp": NOISE_VP,
+                       "seconds": round(time.perf_counter() - t0, 1)}
     status_file.write_text(json.dumps(st, indent=2, default=str))
     print(f"cloud_refresh exit {code} in {st['simulated']['seconds']} s", flush=True)
     return code
@@ -302,6 +382,13 @@ def main(argv=None) -> int:
         problems.append(f"cloud_refresh exited {r.returncode}: {st.get('errors')}")
     if cal.get("status") != "accepted":
         problems.append(f"the simulated fit was not accepted: {cal.get('status')} {cal.get('reason')}")
+    fit = (cal.get("summary") or {}).get("params")
+    moves = param_moves(fit, sim["headline_params"]) if fit and sim.get("headline_params") else {}
+    still = sorted(k for k, m in moves.items() if m < MIN_PARAM_MOVE)
+    if fit and still:
+        problems.append(f"the new fit did not move off the headline in {still} (relative moves "
+                        f"{ {k: round(m, 4) for k, m in moves.items()} } < {MIN_PARAM_MOVE}): "
+                        "a test pinning the headline would not be caught")
     if not (cal.get("forward_ledger") or {}).get("ok"):
         problems.append(f"forward ledger: {cal.get('forward_ledger')}")
     if (st.get("capture") or {}).get("status") != "captured":
@@ -312,8 +399,12 @@ def main(argv=None) -> int:
     if not st.get("publishable"):
         problems.append(f"not publishable: {st.get('publish_blockers')}")
     ok_arts = sorted(k for k, v in (st.get("artifacts") or {}).items() if v.get("ok"))
+    rmse = (cal.get("summary") or {}).get("spx_iv_rmse")
     rows = [("bot run", r.returncode, sim.get("seconds"),
-             f"session {sim.get('session')}: calibration {cal.get('status')}, artifacts {ok_arts}")]
+             f"session {sim.get('session')}: calibration {cal.get('status')}"
+             + (f" (SPX RMSE {rmse:.2f} vp; parameters moved "
+                + ", ".join(f"{k} {m:.0%}" for k, m in moves.items()) + ")" if moves and rmse else "")
+             + f", artifacts {ok_arts}")]
     gates = gate_tests(tree / ".github" / "workflows" / "daily_refresh.yml")
     if "--full" in (argv or sys.argv[1:]) or args.full:
         gates["Full suite"] = ["joint_vol_calibration/tests"]
