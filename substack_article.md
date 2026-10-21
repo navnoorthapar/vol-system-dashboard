@@ -1,5 +1,26 @@
 # I built the 'holy grail of volatility modelling' — then found the bug that faked my P&L
 
+> **C23 note (21 October 2026).** A second review round (C23) changed the data under the backtest and added what the
+> first version lacked: evidence in the units a market maker uses, and statistics. What changed, and why:
+>
+> - **The VIX data.** The labels, the backtest and the calibrator had read Yahoo's copies of the VIX index family, with
+>   8 VVIX sessions missing and rows on market holidays. Cboe's official files are now the record. On the corrected
+>   data the portfolio is **−22.2% (NAV $777,823), Sharpe −0.99**, against −21.6% and −0.88 in the C22 note below;
+>   S1 is −$307K, S1C −$454K, S3 +$61K. The step-by-step reconciliation is the C23 waterfall in
+>   [docs/corrections.md](https://github.com/navnoorthapar/vol-system-dashboard/blob/main/docs/corrections.md#c23).
+> - **Intervals and multiple testing.** The portfolio Sharpe's 95% stationary-bootstrap interval is −1.81 to −0.30; no
+>   published series beats cash (Hansen SPA p 0.65). Against 3,550 exposure-matched circular shifts, S3's entry timing
+>   has p 0.078 (0.47 after a Holm correction over the six series), replacing the 200-path p = 0.075 quoted below.
+> - **Model against market.** Scored on quotes it was not fitted to, the joint Heston fit misses by a median 4.4–15.6
+>   half-spreads of the bid–ask across the five stored sessions; an arbitrage-free SVI surface on the same sessions
+>   misses by 0.45–1.98. Freeing Heston's vol-of-vol cap (σ ≤ 2) on 2026-10-16 cuts its out-of-sample error from 2.96
+>   to 1.19 vol pts, at σ = 6.9. Rough Heston on the same quotes is lower on 3 of 5 sessions and identical to Heston on
+>   the other 2; it does not pin down a roughness exponent.
+> - **Withdrawn:** the "14–23× faster" figure for the NN surrogate below, which no committed benchmark backs.
+>
+> Every number in this note is read from a committed file and checked by the repository's tests; the
+> [README](https://github.com/navnoorthapar/vol-system-dashboard#readme) names each one.
+
 > **Correction (October 2026, C22).** After this article was published, a full audit of the system (about 270 findings,
 > each reproduced before it was fixed) changed several of its central claims. In short:
 >
@@ -24,7 +45,7 @@
 >   project started in March 2026), the classifier figures, the PDV skill comparison and the test count.
 >
 > Claims that are now false are struck through below, with the corrected statement next to them. The full before/after
-> waterfall is in the [README](https://github.com/navnoorthapar/vol-system-dashboard#c22-waterfall-from-the-published-c21-headline-to-todays-number).
+> waterfall is in [docs/corrections.md](https://github.com/navnoorthapar/vol-system-dashboard/blob/main/docs/corrections.md#c22).
 
 Every options desk runs two separate calibration routines: one for the SPX smile and one for the VIX term structure. They're run independently, stored in different systems, and never asked to agree. This works until it doesn't — and when it doesn't, you get a book that's simultaneously long skew and short correlation, or a delta hedge that blows up on a VIX spike your SPX model called "small".
 
@@ -41,7 +62,7 @@ What I want to write about here isn't the calibration. It's the five times I had
 - **C1–C2**: Data infrastructure + Heston engine (~~Carr-Madan FFT~~ Lewis (2001) contour integral with a Black-Scholes control variate, vectorised batch pricing; no FFT)
 - **C3**: PDV model (Guyon-Lekeufack 2023) — path-dependent vol from realised path statistics
 - **C4**: Joint calibration engine — one (κ, θ, σ, ρ, v₀) fitting the SPX smile + ~~VIX futures~~ the VIX term-structure indices (spot-starting, not futures)
-- **C5**: Neural network acceleration layer ~~(8.1× speedup, MAE = 0.068 vol pts)~~ (research prototype on no production path; C22 retrained it on a domain that covers every fit and published the weights: 0.02 vol pts mean error on held-out parameters, 14–23× faster than the Fourier pricer single-threaded)
+- **C5**: Neural network acceleration layer ~~(8.1× speedup, MAE = 0.068 vol pts)~~ (research prototype on no production path; C22 retrained it on a domain that covers every fit and published the weights: 0.02 vol pts mean error on held-out parameters, ~~14–23× faster than the Fourier pricer single-threaded~~ (C23: speed-up withdrawn, not backed by a committed benchmark))
 - **C6**: Second-order Greeks monitor — vomma, vanna ~~, volga across a 69-node surface~~ and QV convexity on 83 of 90 grid nodes (volga is vomma)
 - **C7**: Delta-hedged P&L simulation with full attribution (Γ, ν, Θ, residual)
 - **C8**: Volatility regime classifier — XGBoost, 3-way
@@ -114,7 +135,7 @@ Fixing it inverted my own thesis. I had built a *contrarian* signal (S1C) on the
 
 So S1C is demoted. *A thesis that holds only under a bug is not a signal.* ~~And S1's profit isn't a green light either: it's fat-tailed (one −$333K COVID trade, −$99K in 2022), concentrated (top-5 trades = 73% of the profit), and~~ *(C22: there is no S1 profit to qualify.)* The caveat that dominates everything: **mark-to-model**. The database holds no historical option prices, so all P&L is Black-Scholes ~~on the VIX-ATM vol~~ at 0.82 × VIX, a ratio estimated from five 2026 chains (the first later chain, 2026-10-16, gives 0.70: the ratio is not constant), not traded fills.
 
-The final, honest portfolio (S1C + S3 + S4, equally weighted): ~~**−26.1% cumulative, Sharpe −1.80, max drawdown −31.5%.**~~ **−21.6% cumulative (NAV $783,908), Sharpe −0.88 (rf = 0 on excess P&L; T-bills +19.1% over the window), max drawdown −21.6%, 208 trades** (C22).
+The final, honest portfolio (S1C + S3 + S4, equally weighted): ~~**−26.1% cumulative, Sharpe −1.80, max drawdown −31.5%.**~~ **−21.6% cumulative (NAV $783,908), Sharpe −0.88 (rf = 0 on excess P&L; T-bills +19.1% over the window), max drawdown −21.6%, 208 trades** (C22). *C23, on Cboe's VIX data: −22.2% (NAV $777,823), Sharpe −0.99 (95% CI −1.81 to −0.30), max drawdown −22.2%, 206 trades.*
 
 ---
 
@@ -134,7 +155,7 @@ There's a deeper reason it was never going to work, and it is about the labels, 
 
 **PDV: ~30% of next-day |return| variance, walk-forward — but the "4x over naive" I first claimed was a strawman.** *(C22: much of that pooled 0.31 comes from 2020; ex-2020 it is 0.20. The forecast compared with the VIX is now a 21-day RMS-vol forecast, walk-forward R² 0.29, ex-2020 0.27.)* I originally wrote "R² = 0.31 vs 0.08 naive, a 4x win." That comparison was unfair to the baseline, and a reviewer caught it. The 0.08 is a 20-day realised-vol forecast's *uncalibrated* R²: a 20-day RV runs about 25% hot versus E|r| (RV tracks σ, but E|r| ≈ 0.8σ), so it gets penalised for scale, not for lack of information. PDV is OLS-fit, so it gets that rescaling for free. On a fair, scale-invariant basis (squared correlation, every model scored on the same out-of-sample rows), PDV explains ~~~0.30, a 20-day moving average ~0.20, and a parameter-free RiskMetrics EWMA or a GARCH(1,1) ~0.24~~ 0.31, a 20-day moving average 0.21, a RiskMetrics EWMA 0.21, and a walk-forward GARCH(1,1) 0.25 (also 0.25 if GARCH is fitted in-sample) (C22). So the path-dependent structure (an EWMA approximation of Guyon-Lekeufack, not a replication) does add skill over a trivial vol forecaster — but the honest margin over GARCH is ~0.31 vs ~0.25, a modest edge, not 4x. Volatility is the most forecastable object in markets; most of what any of these models captures is plain vol clustering. (Reproducible: `forecast_skill_comparison()`.)
 
-**S3 dispersion: ~~+$23K, 73% win, 22 trades in seven years~~ +$56K, 49% win, 39 trades in seven years (C22).** The VIX/VVIX ratio as a proxy for implied correlation flagged low-correlation regimes where long dispersion was cheap. ~~No short leg, no complex hedging — a directional bet on a z-score with a 30-day max hold. It is the **only** signal positive at every tested P&L scale and in pseudo-OOS, and it was **unchanged by the strike-rolling fix** because it never re-entered same-day.~~ *C22: the old P&L was a z-score change times an assumed 2% per unit — not option P&L, and positive on 99.5% of random-walk null paths. S3 is now priced as the index leg of the dispersion trade (a short SPX straddle) on the same engine; its timing does not beat random entry dates at the 5% level (p = 0.075 against 200 null paths), it is positive only for β ≳ 0.8, and it earns less than T-bills.* The simplest signal in the system is still the only one with a positive number in the canonical run. It's also too small, too model-dependent and too rare to be a business.
+**S3 dispersion: ~~+$23K, 73% win, 22 trades in seven years~~ +$56K, 49% win, 39 trades in seven years (C22).** The VIX/VVIX ratio as a proxy for implied correlation flagged low-correlation regimes where long dispersion was cheap. ~~No short leg, no complex hedging — a directional bet on a z-score with a 30-day max hold. It is the **only** signal positive at every tested P&L scale and in pseudo-OOS, and it was **unchanged by the strike-rolling fix** because it never re-entered same-day.~~ *C22: the old P&L was a z-score change times an assumed 2% per unit — not option P&L, and positive on 99.5% of random-walk null paths. S3 is now priced as the index leg of the dispersion trade (a short SPX straddle) on the same engine; its timing does not beat random entry dates at the 5% level (p = 0.075 against 200 null paths), it is positive only for β ≳ 0.8, and it earns less than T-bills. C23: +$61K on the corrected VIX data; exposure-matched timing p 0.078, Holm 0.47.* The simplest signal in the system is still the only one with a positive number in the canonical run. It's also too small, too model-dependent and too rare to be a business.
 
 ---
 

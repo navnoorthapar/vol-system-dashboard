@@ -9,9 +9,13 @@ abstract: >-
   Heston and Bates option pricing by the Lewis (2001) contour integral with a
   Black-Scholes control variate, exact VIX index and VIX futures formulas, a
   session-dated and look-ahead-gated SPX option-chain pipeline, a joint
-  calibration of Heston to SPX smiles and the Cboe VIX term-structure indices,
-  a delta-hedged straddle backtest priced mark-to-model (it reports a negative
-  result), and the static dashboard published at https://navnoorbawa.me.
+  calibration of Heston to SPX smiles and the Cboe VIX term-structure indices
+  (multi-start least squares with identifiability diagnostics and a rough
+  Heston comparison), an arbitrage-free SVI surface scored against the quoted
+  bid-ask, a delta-hedged straddle backtest priced mark-to-model with
+  bootstrap intervals, deflated Sharpe ratios and exposure-matched nulls (it
+  reports a negative result), and the static dashboard published at
+  https://navnoorbawa.me.
 authors:
   - family-names: Bawa
     given-names: Navnoor

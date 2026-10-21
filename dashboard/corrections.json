@@ -414,7 +414,7 @@
           "evidence": "Headline Heston fit replaced; one-expiry fits are rejected by the gate"
         }
       ],
-      "effect": "Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. The waterfall above replays the 15 steps on the C23-restated VIX record, so its last bar is the C23 canonical run."
+      "effect": "Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run."
     },
     {
       "id": "C23",
