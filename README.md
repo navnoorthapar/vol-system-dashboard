@@ -390,14 +390,15 @@ or drops a row.
 
 | Dataset | Source | Coverage | Rows |
 |---------|--------|----------|------|
-| SPX OHLCV | Yahoo (`^GSPC`) | 2010-01-04 → 2026-10-16 | 4,223 |
-| VIX daily | Yahoo, cross-checked against Cboe's official files | 2010-01-04 → 2026-10-16 | 4,252 |
-| VIX term structure | Yahoo (`^VIX9D` from 2011-01-03, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`) | 2010-01-04 → 2026-10-16 | 20,856 |
+| SPX OHLCV | Yahoo (`^GSPC`) | 2010-01-04 → 2026-10-19 | 4,224 |
+| VIX daily | Cboe's official `VIX_History.csv` (a Yahoo row only until Cboe posts the session, labelled `yfinance`) | 2010-01-04 → 2026-10-19 | 4,224 |
+| VIX term structure | Cboe's official index files (`^VIX9D` from 2011-01-03, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`), Yahoo as the provisional same-evening row; restated from Yahoo's copies in C23 (`data_store/market/corrections/`) | 2010-01-04 → 2026-10-19 | 20,867 (2 Yahoo rows) |
 | SPX options | Yahoo: 4 full end-of-day chains (2026-03-24, 03-27, 05-29, 06-18) and the daily job's two-sided capture of 2026-10-16 | none inside the backtest window | 68,006 |
 | VIX options | Yahoo, the first 4 sessions | none inside the backtest window | 1,896 |
 | VX futures | Cboe per-contract files (174 monthly contracts expiring 2013-01 → 2027-06) | 2013-01-02 → 2026-10-09 | 30,963 |
 | VX final settlements | Cboe (expiry-day settles; VRO before mid-2013) | 2010-01-20 → 2026-09-16 | 201 |
-| T-bill rate | Yahoo (`^IRX`, stored as cc rate + raw discount yield; negative 2020 bills kept) | 2010-01-04 → 2026-10-16 | 4,221 |
+| T-bill rate | Yahoo (`^IRX`, stored as cc rate + raw discount yield; negative 2020 bills kept) | 2010-01-04 → 2026-10-19 | 4,222 |
+| Treasury curve and SOFR | U.S. Treasury daily bill and par-yield files, NY Fed SOFR (`data_store/market/rates_daily/`; the zero curve of `data/rates.py`) | 2010-01-04 → 2026-10-19 | 92,208 (29 series) |
 
 The daily job stores every SPX chain that passes the calibration gate under its quote session, so the options history grows
 from here; it cannot reach back into the backtest window, which is *why* the backtest is mark-to-model. The Cboe downloader was rebuilt in C22 (the old endpoints

@@ -3,8 +3,11 @@
 Daily auto-refresh for GitHub Actions.
 
 Steps (run all, or a subset with --steps):
-  market     Download the last 400 days of SPX/VIX/T-bill from yfinance -> SQLite DB,
-             through the last CLOSED NYSE session (never an in-progress bar)
+  market     Download the last 400 days of market data -> SQLite DB, through the
+             last CLOSED NYSE session (never an in-progress bar): SPX and ^IRX
+             from Yahoo; the VIX index family from Cboe's official files (Yahoo
+             only as the provisional row of a session Cboe has not posted);
+             the Treasury bill/par files and NY Fed SOFR (the discount curve)
   labels     Extend regime_labels.parquet with new trading days (rule labels),
              as of the last closed session
   calibrate  Download the SPX option chain for the last CLOSED NYSE session,
@@ -69,6 +72,7 @@ import pickle
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "data_store"
@@ -157,27 +161,51 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
     through ``end`` (inclusive; main() passes the last CLOSED NYSE session, so
     a run during the session never stores the in-progress daily bar).
 
-    Returns {"ok", "hard_failure", "reason", "rows"}; an empty or failed SPX
-    download is a hard failure (the run must not publish the committed DB's
-    stale close as current).
+    Sources:
+      spx_ohlcv, tbill_rates   Yahoo (^GSPC, ^IRX)
+      VIX index family         Cboe's official files are the primary source
+                               (pipeline.refresh_vix_index_family): ^VIX9D,
+                               ^VIX, ^VIX3M, ^VIX6M, ^VVIX into
+                               vix_term_structure and the VIX OHLC into
+                               vix_daily. Yahoo's rows are stored first and
+                               survive only for a session Cboe's files do not
+                               have yet (source 'yfinance', "provisional"); the
+                               first run after Cboe posts the print replaces
+                               them, and a Yahoo row never replaces a Cboe one.
+                               Sessions both sources print are cross-checked;
+                               a difference above 0.25 pts is reported, not a
+                               failure (Cboe's value is the one stored).
+      rates_daily              the Treasury bill and par-yield files and the NY
+                               Fed SOFR (rates.refresh_rates) for the years of
+                               the last 10 days of the window: the discount
+                               curve the calibrator, the Greeks surface and the
+                               surface layer read (rates.get_zero_curve refuses
+                               a curve more than 7 days old, so a feed outage
+                               shows up as a fallback to ^IRX, recorded).
+
+    Returns {"ok", "hard_failure", "reason", "rows", "start", "vix_family",
+    "rates"}; an empty or failed SPX download is a hard failure (the run must
+    not publish the committed DB's stale close as current). VIX-family and
+    rate failures are warnings (main() annotates them).
     """
     from joint_vol_calibration.data import yf_downloader as dl
     from joint_vol_calibration.data.database import (
         get_latest_date,
         insert_spx_ohlcv,
         insert_tbill_rates,
-        insert_vix_daily,
-        insert_vix_term_structure,
     )
 
     today = today or date.today()
     start = download_start(today, get_latest_date("spx_ohlcv")).isoformat()
-    end = (end or today).isoformat()
-    log.info("[market] Downloading market data from %s -> %s", start, end)
-    out = {"ok": True, "hard_failure": False, "reason": "ok", "rows": {}, "start": start}
+    end_d = end or today
+    end_s = end_d.isoformat()
+    log.info("[market] Downloading market data from %s -> %s", start, end_s)
+    rows: dict[str, Any] = {}
+    out: dict[str, Any] = {"ok": True, "hard_failure": False, "reason": "ok", "rows": rows,
+                           "start": start}
 
     try:
-        spx = dl.download_spx_ohlcv(start=start, end=end)
+        spx = dl.download_spx_ohlcv(start=start, end=end_s)
         if spx is not None and not spx.empty:
             out["rows"]["spx_ohlcv"] = insert_spx_ohlcv(spx)
             log.info("  SPX OHLCV: %d rows", out["rows"]["spx_ohlcv"])
@@ -188,35 +216,102 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
         out.update(ok=False, hard_failure=True, reason=f"SPX OHLCV download failed: {e}")
         log.error("  SPX OHLCV failed: %s", e)
 
-    for key, fn, ins in (("vix_daily", dl.download_vix_index, insert_vix_daily),
-                         ("vix_term_structure", dl.download_vix_term_structure,
-                          insert_vix_term_structure),
-                         ("tbill_rates", dl.download_tbill_rate, insert_tbill_rates)):
-        try:
-            df = fn(start=start, end=end)
-            if df is not None and not df.empty:
-                out["rows"][key] = ins(df)
-                log.info("  %s: %d rows", key, out["rows"][key])
-            else:
-                log.warning("  %s: empty download", key)
-        except Exception as e:
-            log.warning("  %s failed: %s", key, e)
-
-    # Cboe's VIX_History.csv is the official VIX print; Yahoo's ^VIX has had
-    # bad closes (2026-02-06: Yahoo 20.37, Cboe 17.76). Same rule as
-    # DataPipeline._refresh_vix_daily: Yahoo rows first, Cboe's on top, NYSE
-    # sessions only. A Cboe failure keeps the Yahoo rows (warning only).
     try:
-        from joint_vol_calibration.data import cboe_downloader as cboe
-        from joint_vol_calibration.data.database import is_nyse_session
-        cv = cboe.download_vix_history()
-        cv = cv[(cv["date"] >= start) & (cv["date"] <= end)]
-        cv = cv[cv["date"].map(is_nyse_session).astype(bool)]
-        if not cv.empty:
-            out["rows"]["vix_daily_cboe"] = insert_vix_daily(cv, warn_dropped=False)
-            log.info("  vix_daily: %d Cboe rows on top of Yahoo's", out["rows"]["vix_daily_cboe"])
+        df = dl.download_tbill_rate(start=start, end=end_s)
+        if df is not None and not df.empty:
+            out["rows"]["tbill_rates"] = insert_tbill_rates(df)
+            log.info("  tbill_rates: %d rows", out["rows"]["tbill_rates"])
+        else:
+            log.warning("  tbill_rates: empty download")
     except Exception as e:
-        log.warning("  Cboe VIX overlay failed (Yahoo rows kept): %s", e)
+        log.warning("  tbill_rates failed: %s", e)
+
+    fam = refresh_vix_family(start, end_s)
+    rows.update(fam["rows"])
+    out["vix_family"] = fam
+    out["rates"] = refresh_discount_curve(end_d)
+    return out
+
+
+def refresh_vix_family(start: str, end: str) -> dict:
+    """The VIX index family with Cboe primary (pipeline.refresh_vix_index_family),
+    summarised for the status file. Yahoo's ^VIX has had bad closes (2026-02-06:
+    Yahoo 20.37, Cboe 17.76) and float32 copies of every print; before C23 the
+    bot overlaid Cboe on vix_daily only, while every consumer reads the term
+    structure. Never raises: a failure is returned in ``errors``."""
+    from joint_vol_calibration.data import pipeline
+    try:
+        fam = pipeline.refresh_vix_index_family(start, end)
+    except Exception as e:  # noqa: BLE001 (fail-soft: the SPX close and the rest of the run stand)
+        log.warning("  VIX index family refresh failed: %s", e)
+        return {"ok": False, "rows": {}, "n_provisional": 0, "provisional": [],
+                "n_mismatches": 0, "mismatches": [], "errors": [f"VIX index family: {e}"]}
+    mm = fam["mismatches"]
+    mism = [{"date": str(r.date), "ticker": str(r.ticker), "cboe": float(r.cboe),
+             "yfinance": float(r.yfinance), "diff": float(r.diff)}
+            for r in mm.head(20).itertuples()]
+    prov = [f"{d} {t}" for d, t in fam["provisional"]]
+    out: dict[str, Any] = {"ok": bool(fam["ok"]), "rows": dict(fam["rows"]), "n_provisional": len(prov),
+           "provisional": prov[:20], "n_mismatches": len(mm), "mismatches": mism,
+           "errors": list(fam["errors"])}
+    log.info("  VIX family: %s Cboe term-structure rows, %s Yahoo; %d provisional (Yahoo only), "
+             "%d cross-source mismatch(es) > 0.25 pts", out["rows"].get("vix_term_structure_cboe"),
+             out["rows"].get("vix_term_structure_yfinance"), len(prov), len(mm))
+    return out
+
+
+def refresh_discount_curve(end: date) -> dict:
+    """Treasury bills + par curve and SOFR for the years of [end - 10 days, end]
+    into rates_daily (rates.refresh_rates: 2 Treasury requests a year + 1 NY
+    Fed), then the curve the calibrator will use for session ``end``. Never
+    raises: failures are returned in ``errors``; a missing or stale curve is
+    reported in ``curve`` (the calibrator then falls back to ^IRX and records
+    why)."""
+    from joint_vol_calibration.data import rates
+    years = ((end - timedelta(days=10)).year, end.year)
+    try:
+        rr = rates.refresh_rates(start_year=years[0], end_year=years[1])
+    except Exception as e:  # noqa: BLE001 (fail-soft: reported; the calibrator falls back to ^IRX)
+        rr = {"treasury": 0, "nyfed": 0, "fred": 0, "errors": [f"rates refresh: {e}"]}
+    counts = {"treasury": rr.get("treasury", 0), "nyfed": rr.get("nyfed", 0)}
+    out: dict[str, Any] = {"years": list(years), "rows": counts,
+                           "errors": list(rr.get("errors") or [])}
+    try:
+        zc = rates.get_zero_curve(end.isoformat())
+        out["curve"] = {"ok": True, "curve_date": str(zc.curve_date),
+                        "r_91d": float(zc.zero_rate(91 / 365)), "r_1y": float(zc.zero_rate(1.0))}
+    except Exception as e:  # noqa: BLE001 (LookupError / StaleDataError / a bad quote: reported)
+        out["curve"] = {"ok": False, "reason": str(e)}
+    log.info("  rates_daily: %s Treasury, %s NY Fed rows; curve for %s: %s", counts["treasury"],
+             counts["nyfed"], end, out["curve"])
+    return out
+
+
+def market_warnings(m: dict) -> list:
+    """(title, message) annotations for the soft failures of refresh_market_data:
+    VIX-family cross-source mismatches (Cboe's value is stored either way), a
+    failed Cboe download (Yahoo's rows stored as provisional), rate-feed errors
+    and a missing or stale discount curve."""
+    out = []
+    fam = m.get("vix_family") or {}
+    if fam.get("n_mismatches"):
+        ex = "; ".join(f"{x['date']} {x['ticker']} Cboe {x['cboe']:.2f} vs Yahoo {x['yfinance']:.2f}"
+                       for x in fam.get("mismatches", [])[:5])
+        out.append(("VIX family cross-check",
+                    (f"{fam['n_mismatches']} VIX-family print(s) differ between Cboe and Yahoo by "
+                     f"more than 0.25 pts; Cboe's values are stored ({ex})")))
+    if fam.get("errors"):
+        out.append(("VIX family download",
+                    f"{'; '.join(fam['errors'])}"
+                    + ("" if fam.get("ok") else " -- Yahoo's rows stored as provisional (source "
+                       "'yfinance') until Cboe's files carry those sessions")))
+    rt = m.get("rates") or {}
+    if rt.get("errors"):
+        out.append(("Rates download", "; ".join(rt["errors"])))
+    curve = rt.get("curve") or {}
+    if curve and not curve.get("ok"):
+        out.append(("Discount curve", (f"no usable Treasury zero curve ({curve.get('reason')}); "
+                                       "the calibrator falls back to ^IRX and records it")))
     return out
 
 
@@ -619,15 +714,17 @@ def restore_captures() -> dict:
 def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
     """Export what this run captured to the committed parquet files.
 
-    Market partitions are merged for every year >= ``market_since`` (None:
-    skip); each session in ``chain_sessions`` gets its stored SPX chain
-    written to data_store/options/spx_<session>.parquet. Returns the paths
-    that changed.
+    Market partitions (MARKET_TABLES, plus rates_daily: the Treasury/NY Fed
+    quotes the discount curve is built from) are merged for every year >=
+    ``market_since`` (None: skip); each session in ``chain_sessions`` gets its
+    stored SPX chain written to data_store/options/spx_<session>.parquet.
+    Returns the paths that changed.
     """
     from joint_vol_calibration.data import database as dbm
     written = []
     if market_since:
         written += dbm.export_market_partitions(since=market_since)
+        written += dbm.export_market_partitions(since=market_since, tables=("rates_daily",))
     for s in chain_sessions:
         p = dbm.export_options_snapshot(s, "SPX")
         if p is not None:
@@ -727,6 +824,19 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
             + (f" (blocked: {'; '.join(status.get('publish_blockers') or [])})"
                if status.get("publish_blockers") else "") + " |",
             f"| market rows | {status.get('market', {}).get('rows', {})} |",
+        ]
+        fam = (status.get("market") or {}).get("vix_family")
+        if fam:
+            lines.append(f"| VIX family | Cboe primary; {fam.get('n_provisional', 0)} provisional "
+                         f"Yahoo row(s); {fam.get('n_mismatches', 0)} cross-source mismatch(es) "
+                         f"> 0.25 pts{'; download error' if fam.get('errors') else ''} |")
+        curve = ((status.get("market") or {}).get("rates") or {}).get("curve")
+        if curve:
+            lines.append("| discount curve | " + (
+                f"Treasury {curve['curve_date']}: r(91d) {_fmt(curve.get('r_91d'), '.3%')}, "
+                f"r(1y) {_fmt(curve.get('r_1y'), '.3%')} |" if curve.get("ok")
+                else f"unavailable ({curve.get('reason')}); fits fall back to ^IRX |"))
+        lines += [
             f"| labels added | {status.get('labels_added', '—')} |",
             f"| capture files changed | {len(status.get('persisted') or [])} |",
         ]
@@ -850,6 +960,9 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 status["errors"].append(m["reason"])
                 blockers.append(m["reason"])
                 _annotate("error", "Market data", m["reason"])
+            for title, msg in market_warnings(m):
+                status["warnings"].append(msg)
+                _annotate("warning", title, msg)
 
     sess = None
     if market_ok:

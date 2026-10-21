@@ -4,10 +4,13 @@ name: Daily Market Refresh
 #
 #   close  22:07 UTC Mon-Fri   market,labels
 #          After the 16:15 ET VIX settle in both EDT (20:15 UTC) and EST (21:15 UTC).
-#          Yahoo publishes the session's ^GSPC/^VIX/^VIX9D/^VIX3M/^VIX6M/^VVIX/^IRX bars
-#          within minutes of the close and keeps their full history, so nothing here
-#          races a "rollover" (the August 2026 outage was the exclusive yfinance end
-#          date, fixed in 236509e). Commits the labels and the market partitions.
+#          Yahoo publishes the session's ^GSPC/^IRX bars within minutes of the close.
+#          The VIX index family (^VIX9D/^VIX/^VIX3M/^VIX6M/^VVIX) is Cboe's official
+#          files; a session Cboe has not posted yet keeps Yahoo's row as provisional
+#          (source 'yfinance') until a later run (the book slot runs `market` again)
+#          stores Cboe's print over it. The Treasury bill/par files and NY Fed SOFR
+#          feed rates_daily, the discount curve (stale after 7 days by design).
+#          Commits the labels and the market partitions (rates_daily included).
 #
 #   book   02:30 UTC Tue-Sat   market,calibrate,freeze   (+ retry 04:30 UTC)
 #          The SPX option chain needs live two-sided quotes. After 16:15 ET Cboe's book

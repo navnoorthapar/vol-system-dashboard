@@ -440,7 +440,7 @@
    "I001": 2
   },
   "scripts/cloud_refresh.py": {
-   "BLE001": 10,
+   "BLE001": 9,
    "DTZ011": 2,
    "E501": 1,
    "EXE001": 1,
@@ -466,6 +466,6 @@
   }
  },
  "tool": "ruff",
- "total": 1303,
+ "total": 1302,
  "version": "ruff 0.17.1"
 }

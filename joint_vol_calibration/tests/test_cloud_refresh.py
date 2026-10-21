@@ -25,6 +25,7 @@ import pytest
 from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
 from joint_vol_calibration.data import cboe_downloader as cboe
 from joint_vol_calibration.data import database as dbm
+from joint_vol_calibration.data import rates
 from joint_vol_calibration.data import yf_downloader as dl
 from joint_vol_calibration.models.heston import heston_vix_term_index
 from joint_vol_calibration.tests.test_joint_calibrator import _TRUE, _heston_chain
@@ -104,7 +105,7 @@ def env(tmp_path, monkeypatch):
             ts_rows.append({"date": d, "ticker": t, "tenor_days": n, "is_vvix": 0,
                             "close": heston_vix_term_index(_TRUE["kappa"], _TRUE["theta"],
                                                            _TRUE["sigma"], _TRUE["v0"], n / 365)})
-    ts = pd.DataFrame(ts_rows)
+    ts = pd.DataFrame(ts_rows).assign(source="yfinance")      # as yf_downloader labels it
     tb = pd.DataFrame({"date": days, "rate": 0.0400})
 
     monkeypatch.setattr(dl, "download_spx_ohlcv", lambda start, end: spx.copy())
@@ -113,6 +114,16 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "download_tbill_rate", lambda start, end: tb.copy())
     monkeypatch.setattr(cboe, "download_vix_history", lambda: pd.DataFrame(
         columns=["date", "open", "high", "low", "close", "source"]))       # no network
+    # Cboe's VIX-family files have not posted these sessions (so every Yahoo
+    # row is provisional), and the Treasury / NY Fed feeds return nothing (so
+    # there is no discount curve and fits fall back to ^IRX): no network.
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: pd.DataFrame(
+                            columns=["date", "ticker", "tenor_days", "close", "is_vvix", "source"]))
+    monkeypatch.setattr(rates, "download_treasury_year", lambda year, kind: pd.DataFrame(
+        columns=["date", "series", "value", "source"]))
+    monkeypatch.setattr(rates, "download_nyfed_sofr", lambda start=None, end=None: pd.DataFrame(
+        columns=["date", "series", "value", "source"]))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     return cr
@@ -678,6 +689,137 @@ def test_cboe_vix_print_overrides_yahoo(env, monkeypatch):
     assert _vix_close(SESSION) == (17.76, "cboe")
     part = pd.read_parquet(dbm.MARKET_DIR / "vix_daily" / "vix_daily_2026.parquet")
     assert part.loc[part["date"] == SESSION, ["close", "source"]].values.tolist() == [[17.76, "cboe"]]
+
+
+def _ts_row(day, ticker):
+    con = sqlite3.connect(str(dbm.DB_PATH))
+    try:
+        return con.execute("SELECT close, source FROM vix_term_structure WHERE date=? AND ticker=?",
+                           (day, ticker)).fetchone()
+    finally:
+        con.close()
+
+
+def test_vix_term_structure_is_cboe_primary(env, monkeypatch, capsys):
+    """Every consumer (labels, backtest, calibrator VIX leg) reads
+    vix_term_structure, and the bot used to fill it from Yahoo only (float32
+    copies, NULL source, holiday rows); the Cboe overlay corrected vix_daily
+    alone. Now Cboe's files are written on top: a session both print stores
+    Cboe's value and a > 0.25 pt difference is reported (not a failure); a
+    session Cboe has not posted yet keeps Yahoo's row, labelled 'yfinance'
+    (provisional), until the next run after Cboe posts it."""
+    yahoo = dl.download_vix_term_structure(None, None)
+    yahoo.loc[(yahoo["date"] == "2026-09-22") & (yahoo["ticker"] == "^VIX"), "close"] = 20.37
+    monkeypatch.setattr(dl, "download_vix_term_structure", lambda start, end: yahoo.copy())
+    cb = yahoo[yahoo["date"] < SESSION].copy()                # Cboe lags one session
+    cb["close"] = cb["close"].round(2)
+    cb.loc[(cb["date"] == "2026-09-22") & (cb["ticker"] == "^VIX"), "close"] = 17.76
+    cb["source"] = "cboe"
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: cb.copy())
+    code, st = _run(env, "market")
+    assert code == 0
+    fam = st["market"]["vix_family"]
+    assert fam["ok"]
+    assert not fam["errors"]
+    assert _ts_row("2026-09-22", "^VIX") == (17.76, "cboe")
+    assert _ts_row(SESSION, "^VIX")[1] == "yfinance"
+    assert fam["n_provisional"] == 4
+    assert all(p.startswith(SESSION) for p in fam["provisional"])
+    assert fam["n_mismatches"] == 1
+    assert fam["mismatches"][0] == {"date": "2026-09-22", "ticker": "^VIX", "cboe": 17.76,
+                                    "yfinance": 20.37, "diff": pytest.approx(17.76 - 20.37)}
+    out = capsys.readouterr().out
+    assert "::warning title=VIX family cross-check::1 VIX-family print(s) differ" in out
+    assert any("Cboe 17.76 vs Yahoo 20.37" in w for w in st["warnings"])
+    part = pd.read_parquet(dbm.MARKET_DIR / "vix_term_structure" / "vix_term_structure_2026.parquet")
+    assert part["source"].notna().all()                      # every persisted row says where it came from
+    assert set(part.loc[part["date"] == SESSION, "source"]) == {"yfinance"}
+
+    # Next run: Cboe has posted the session; its print replaces the provisional row.
+    cb2 = pd.concat([cb, yahoo[yahoo["date"] == SESSION].assign(source="cboe", close=19.5)])
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: cb2.copy())
+    code, st = _run(env, "market")
+    assert code == 0
+    assert _ts_row(SESSION, "^VIX") == (19.5, "cboe")
+    assert st["market"]["vix_family"]["n_provisional"] == 0
+
+
+def test_a_cboe_outage_stores_yahoo_as_provisional_and_warns(env, monkeypatch, capsys):
+    """The run still stores the session (Yahoo, labelled 'yfinance') and does
+    not fail; a stored Cboe print is never replaced by Yahoo's."""
+    def down(start=None, end=None, tickers=None):
+        raise OSError("cdn.cboe.com unreachable")
+    yahoo = dl.download_vix_term_structure(None, None)
+    good = yahoo[yahoo["date"] == "2026-09-22"].assign(source="cboe", close=18.0)
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: good.copy())
+    assert _run(env, "market")[0] == 0
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history", down)
+    code, st = _run(env, "market")
+    assert code == 0
+    fam = st["market"]["vix_family"]
+    assert fam["ok"] is False
+    assert "cdn.cboe.com unreachable" in fam["errors"][0]
+    assert _ts_row(SESSION, "^VIX")[1] == "yfinance"
+    assert _ts_row("2026-09-22", "^VIX") == (18.0, "cboe")
+    assert "::warning title=VIX family download::" in capsys.readouterr().out
+
+
+def _treasury_rows(days, level=0.0405):
+    """A flat-ish Treasury day: bills (bank discount) and par yields."""
+    rows = []
+    for d in days:
+        for w in (4, 8, 13, 26, 52):
+            n = 7 * w
+            # the bank-discount quote of a bill whose cc yield is `level`
+            disc = (1 - np.exp(-level * n / 365)) * 360 / n
+            rows.append({"date": d, "series": rates.bill_series(w, "BD"), "value": round(disc, 6)})
+        rows.extend({"date": d, "series": f"UST_PAR_{tenor}", "value": level + 0.001}
+                    for tenor in ("2Y", "5Y", "10Y"))
+    return pd.DataFrame(rows).assign(source="treasury")
+
+
+def test_rates_feed_the_curve_the_bot_fits_with(env, monkeypatch, tmp_path):
+    """The bot's market step refreshes rates_daily (Treasury + NY Fed) and
+    persists it; without that the zero curve goes stale 7 days after the last
+    committed quote and every fit falls back to ^IRX. With a curve, the fit
+    records it as its reference and cleans the chain with r(T) per expiry."""
+    calls = []
+
+    def treasury(year, kind):
+        calls.append((year, kind))
+        return _treasury_rows(_business_days(SESSION, 5)) if kind == "daily_treasury_bill_rates" \
+            else pd.DataFrame(columns=["date", "series", "value", "source"])
+    monkeypatch.setattr(rates, "download_treasury_year", treasury)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert sorted(set(calls)) == [(2026, k) for k in rates.TREASURY_KINDS]
+    curve = st["market"]["rates"]["curve"]
+    assert curve["ok"]
+    assert curve["curve_date"] == SESSION
+    assert curve["r_91d"] == pytest.approx(0.0405, abs=1e-6)
+    part = dbm.MARKET_DIR / "rates_daily" / "rates_daily_2026.parquet"
+    assert str(part) in st["persisted"]
+    assert len(pd.read_parquet(part)) == len(_treasury_rows(_business_days(SESSION, 5)))
+    cal = st["calibration"]
+    assert cal["status"] == "accepted", cal["reason"]
+    assert code == 0
+    with open(env.DATA / "calibrations" / f"joint_cal_{SESSION}.pkl", "rb") as f:
+        res = pickle.load(f)
+    assert res["rate_reference"]["kind"] == "treasury_curve"
+    assert res["rate_reference"]["curve_date"] == SESSION
+    assert res["r_reference"] == pytest.approx(curve["r_91d"], abs=1e-12)
+    assert res["r_reference_source"].startswith(f"Treasury zero curve {SESSION}")
+    assert res["chain_diagnostics"]["r_ref"] == "r(T) per expiry"
+    assert cal["summary"]["r_reference_source"] == res["r_reference_source"]
+
+
+def test_no_curve_is_a_warning_and_the_fit_falls_back_to_irx(env, capsys):
+    code, st = _run(env, "market")
+    assert code == 0
+    assert st["market"]["rates"]["curve"]["ok"] is False
+    assert "::warning title=Discount curve::no usable Treasury zero curve" in capsys.readouterr().out
 
 
 def test_download_window_reaches_back_to_the_last_stored_session():
