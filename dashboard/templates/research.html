@@ -165,7 +165,7 @@
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Forward ledger by sleeve (scrollable)">
       <table class="tbl dense" id="forward-table"><caption>Ledger of {{ fw.last }}, per $1M sleeve</caption>
         <thead><tr><th scope="col">Sleeve</th><th scope="col">Target</th><th scope="col">Open straddle</th><th scope="col" class="num">Open P&amp;L (exec)</th><th scope="col" class="num">Realised (net)</th><th scope="col" class="num">Opened / closed</th></tr></thead>
-        <tbody>{% for r in fw.rows %}{% set ps = r.position %}<tr><td>{{ r.sleeve }}</td><td>{{ {1: 'long', -1: 'short', 0: 'flat'}.get(r.target, '—') }}</td><td>{% if ps %}{{ ps.contract.expiry }} {{ ps.contract.strike|fmt(',.0f') }} · {{ 'long' if ps.direction == 1 else 'short' }}{% else %}—{% endif %}</td><td class="num">{{ r.open_pnl_exec|usd(true) }}</td><td class="num">{{ r.realised_pnl_net|usd(true) }}</td><td class="num">{{ r.n_opened|fmt }} / {{ r.n_closed|fmt }}</td></tr>{% endfor %}</tbody>
+        <tbody>{% for r in fw.rows %}{% set ps = r.position %}<tr><td>{{ r.sleeve }}</td><td>{{ {1: 'long', -1: 'short', 0: 'flat'}.get(r.target, '—') }}</td><td>{% if ps %}<span class="nowrap">{{ ps.contract.expiry }}</span> {{ ps.contract.strike|fmt(',.0f') }} · {{ 'long' if ps.direction == 1 else 'short' }}{% else %}—{% endif %}</td><td class="num">{{ r.open_pnl_exec|usd(true) }}</td><td class="num">{{ r.realised_pnl_net|usd(true) }}</td><td class="num">{{ r.n_opened|fmt }} / {{ r.n_closed|fmt }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
     {% else %}

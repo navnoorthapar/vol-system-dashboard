@@ -1652,7 +1652,20 @@ def test_table_dates_never_break_across_lines(pages, route):
     opens with a date keeps it on one line: the cell is no-wrap, or the date sits
     in a no-wrap span when a chip follows it. Chart data tables are screen-reader
     only and never laid out."""
-    html = re.sub(r'<div class="chart-data sr-only".*?\n</div>', "", pages[route], flags=re.DOTALL)
+    assert _breakable_table_dates(pages[route]) == [], route
+
+
+def test_table_dates_never_break_with_every_artifact_present(dash, art):
+    """The same with every C23 artifact in the store: the forward ledger's
+    position cell ('2026-11-19 7,760 · short') appears only once a ledger is
+    written, and the simulated next session caught its date wrapping."""
+    for route in ("/", "/surface", "/calibration", "/risk", "/research", "/corrections", "/model-risk"):
+        _resp, html = _get(dash, route)
+        assert _breakable_table_dates(html) == [], route
+
+
+def _breakable_table_dates(html: str) -> list:
+    html = re.sub(r'<div class="chart-data sr-only".*?\n</div>', "", html, flags=re.DOTALL)
     bad = []
     for table in re.findall(r'<table class="tbl[^"]*"[^>]*>.*?</table>', html, flags=re.DOTALL):
         for attrs, body in re.findall(r"<td([^>]*)>(.*?)</td>", table, flags=re.DOTALL):
@@ -1660,7 +1673,7 @@ def test_table_dates_never_break_across_lines(pages, route):
             if (re.match(r"\d{4}-\d{2}-\d{2}", text) and "nowrap" not in attrs
                     and not re.match(r'\s*<span class="nowrap">\d{4}-\d{2}-\d{2}', body)):
                 bad.append(text[:40])
-    assert bad == [], (route, bad)
+    return bad
 
 
 def test_artifact_paths_break_between_names_never_inside_one(dash, pages):
