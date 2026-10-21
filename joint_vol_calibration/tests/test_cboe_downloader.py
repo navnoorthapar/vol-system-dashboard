@@ -514,3 +514,58 @@ def test_capture_chains_writes_only_where_told(serve_chains, tmp_path, caplog):
     assert set(back["root"]) <= {"VIX", "VIXW"}
     meta = json.loads((out / "spx_2026-10-09_081528Z.json").read_text())
     assert meta["sha256"] == caps["SPX"].sha256
+
+
+def test_save_capture_writes_atomically_and_round_trips(serve_chains, tmp_path, monkeypatch):
+    """The bot commits whatever is in data_store/options/cboe/: a capture is
+    written to a temporary name and renamed, so a crash mid-write leaves no
+    half-file under a capture's name."""
+    cap = cb.capture_option_chain("SPX", now=CAPTURED_AT)
+    pq_path, js_path = cb.save_capture(cap, tmp_path)
+    assert pq_path.name == f"{cb.capture_stem(cap)}.parquet" == "spx_2026-10-09_081528Z.parquet"
+    pd.testing.assert_frame_equal(pd.read_parquet(pq_path), cap.frame.reset_index(drop=True))
+    assert json.loads(js_path.read_text()) == json.loads(json.dumps(cap.summary()))
+    assert not list(tmp_path.glob(".*"))
+
+    def broken(self, *a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", broken)
+    cap2 = cb.capture_option_chain("VIX", now=CAPTURED_AT)
+    with pytest.raises(OSError, match="disk full"):
+        cb.save_capture(cap2, tmp_path)
+    assert not (tmp_path / f"{cb.capture_stem(cap2)}.parquet").exists()
+
+
+_CAPTURES = pathlib.Path(__file__).resolve().parents[2] / "data_store" / "options" / "cboe"
+
+
+@pytest.mark.parametrize("meta_path", sorted(_CAPTURES.glob("*.json")) or [None],
+                         ids=lambda p: p.name if p else "none")
+def test_committed_captures_match_their_records(meta_path):
+    """Every committed Cboe capture (the daily bot's capture step) is one
+    session's book with its record: the parquet holds the rows, session,
+    underlying, quote time and source its JSON summary states."""
+    if meta_path is None:
+        pytest.skip("no committed Cboe capture")
+    meta = json.loads(meta_path.read_text())
+    frame = pd.read_parquet(meta_path.with_suffix(".parquet"))
+    stem = f"{meta['underlying'].lower()}_{meta['session']}_{meta['fetched_at'][11:19].replace(':', '')}Z"
+    assert meta_path.stem == stem
+    assert len(frame) == meta["rows"] > 0
+    two = int(((frame["bid"] > 0) & (frame["ask"] >= frame["bid"])).sum())
+    assert two == meta["two_sided_rows"]
+    assert set(frame["snapshot_date"]) == {meta["session"]}
+    assert set(frame["root"]) == set(meta["roots"])
+    assert all(r.startswith(meta["underlying"]) for r in meta["roots"])
+    assert frame["contract_symbol"].str.startswith(tuple(meta["roots"])).all()
+    assert set(frame["quote_time"]) == {meta["quote_time"]}
+    assert set(frame["source"]) == {"cboe"}
+    assert frame["expiry"].nunique() == meta["expiries"]
+    assert len(meta["sha256"]) == 64
+    assert meta["n_bytes"] > 0
+    # the delayed feed: quotes are the stated delay older than the payload
+    quoted = datetime.fromisoformat(meta["quote_time"])
+    if meta["payload_timestamp"]:
+        stamp = datetime.fromisoformat(meta["payload_timestamp"])
+        assert stamp - quoted == timedelta(minutes=meta["stated_delay_minutes"])
+    assert meta["book_state"] == cb.book_state_at(quoted, meta["session"])

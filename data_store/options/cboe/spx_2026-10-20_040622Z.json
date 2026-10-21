@@ -1,0 +1,21 @@
+{
+  "underlying": "SPX",
+  "session": "2026-10-20",
+  "quote_time": "2026-10-21T03:32:10Z",
+  "book_state": "gth",
+  "fetched_at": "2026-10-21T04:06:22Z",
+  "payload_timestamp": "2026-10-21T03:47:10Z",
+  "stated_delay_minutes": 15,
+  "underlying_last_trade_time": "2026-10-20T16:14:59",
+  "underlying_price": 7712.5698,
+  "url": "https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json",
+  "sha256": "ba7bfdb9dbda78953169d8bb6e23b2fdd5cfa15d28cad56e3d835c3b35c37de3",
+  "n_bytes": 13106717,
+  "rows": 28980,
+  "two_sided_rows": 28113,
+  "expiries": 55,
+  "roots": [
+    "SPX",
+    "SPXW"
+  ]
+}

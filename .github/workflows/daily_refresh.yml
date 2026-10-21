@@ -12,19 +12,24 @@ name: Daily Market Refresh
 #          feed rates_daily, the discount curve (stale after 7 days by design).
 #          Commits the labels and the market partitions (rates_daily included).
 #
-#   book   02:30 UTC Tue-Sat   market,calibrate,freeze   (+ retry 04:30 UTC)
+#   book   02:30 UTC Tue-Sat   market,capture,calibrate,freeze   (+ retry 04:30 UTC)
 #          The SPX option chain needs live two-sided quotes. After 16:15 ET Cboe's book
 #          is empty until Global Trading Hours open at 20:15 ET (00:15 UTC under EDT,
 #          01:15 UTC under EST); Friday evening keeps the closing book, hence Saturday
 #          UTC. 02:30 UTC leaves 75 min after the EST open for Yahoo's ~15-min delayed
 #          quotes (01:30 left 15 min); GTH runs to 09:15 ET, so a late start is still
 #          inside the live book. A mistimed run fails closed at the quote-state gate.
-#          The retry is free: a session whose calibration already exists is skipped.
+#          `capture` stores Cboe's full delayed SPX and VIX books (data_store/options/
+#          cboe/), whatever the fit does. After an accepted fit the run records the
+#          forward ledger and rebuilds the session's surface report and diagnostics and
+#          the headline fit's Greeks surface and scenario grid (about 5 min).
+#          The retry skips what already exists (a calibration, a capture), but it is a
+#          full job: install, market step, freeze.
 #
-# GitHub starts scheduled runs late under load (87-139 min for the old :00 slot in
-# Sep 2026; the top of the hour is the worst time), so the close slot sits off the hour.
-# The concurrency group serialises the slots and manual runs; the push rebases and
-# retries if main moved during the run.
+# GitHub starts scheduled runs late under load (87-319 min, median 127, for the old :00
+# slot in Sep-Oct 2026; the top of the hour is the worst time), so the slots sit off the
+# hour. The concurrency group serialises the slots and manual runs; each push rebases
+# and retries if main moved during the run (scripts/ci/commit_and_push.sh).
 on:
   schedule:
     - cron: "7 22 * * 1-5"     # close
@@ -33,8 +38,8 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: "cloud_refresh.py --steps (any of market,labels,calibrate,freeze)"
-        default: "market,calibrate,freeze"
+        description: "cloud_refresh.py --steps (any of market,labels,capture,calibrate,freeze)"
+        default: "market,capture,calibrate,freeze"
         type: string
 
 permissions:
@@ -48,7 +53,7 @@ jobs:
   refresh:
     name: Refresh data + redeploy site
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45          # an accepted fit adds ~5 min of diagnostics and artifacts
     env:
       PYTHONUNBUFFERED: "1"    # keep print/log lines in step order in the job log
 
@@ -80,8 +85,8 @@ jobs:
         run: |
           case "$SCHEDULE" in
             "7 22 * * 1-5") steps="market,labels"; slot="close" ;;
-            "")             steps="${INPUT_STEPS:-market,calibrate,freeze}"; slot="manual" ;;
-            *)              steps="market,calibrate,freeze"; slot="book" ;;
+            "")             steps="${INPUT_STEPS:-market,capture,calibrate,freeze}"; slot="manual" ;;
+            *)              steps="market,capture,calibrate,freeze"; slot="book" ;;
           esac
           if ! [[ "$steps" =~ ^[a-z,]+$ ]]; then echo "::error::bad steps '$steps'"; exit 1; fi
           echo "steps=$steps" >> "$GITHUB_OUTPUT"
@@ -95,13 +100,16 @@ jobs:
         run: python scripts/cloud_refresh.py --steps "$STEPS"
 
       # Tests against the data this run produced (the suite works on a private copy of
-      # data_store and fails if anything under data_store/ changes), in two gates.
-      # The data gate decides whether the captures are committed; the presentation gate
-      # only decides whether the site is deployed. They used to be one gate, so on
-      # 2026-10-20 two dashboard copy tests failed on a legitimately new fit and the
-      # accepted overnight (GTH) book of 2026-10-19, which cannot be fetched again, was
-      # never committed. A rendering bug may block a deploy; it must never lose data.
-      - name: Data tests (gate the commit)
+      # data_store and fails if anything under data_store/ changes), in three gates.
+      # The data gate decides whether the captures are committed, the artifact gate
+      # whether the artifacts derived from a new fit are, and the presentation gate
+      # only whether the site is deployed. They used to be one gate, so on 2026-10-20
+      # two dashboard copy tests failed on a legitimately new fit and the accepted
+      # overnight (GTH) book of 2026-10-19, which cannot be fetched again, was never
+      # committed. A rendering bug, or a derived artifact that fails its checks, may
+      # block a deploy; it must never lose data. None of these gates may pin a value
+      # the bot replaces.
+      - name: Data tests (gate the capture commit)
         id: datatests
         if: always() && steps.refresh.outcome != 'skipped'
         working-directory: joint_vol_calibration/tests
@@ -109,7 +117,13 @@ jobs:
           python -m pytest -q -p no:cacheprovider
           test_suite_isolation.py test_infra_config.py test_cloud_refresh.py test_data_layer.py
           test_option_chain.py test_data_pipeline.py test_rates.py test_lookahead.py
-          test_c21_audit_fixes.py
+          test_c21_audit_fixes.py test_cboe_downloader.py test_forward_ledger.py
+
+      - name: Artifact tests (gate the artifact commit)
+        id: artifacttests
+        if: always() && steps.refresh.outcome != 'skipped'
+        working-directory: joint_vol_calibration/tests
+        run: python -m pytest -q -p no:cacheprovider test_session_artifacts.py test_scenario_grid.py
 
       - name: Presentation tests (gate the deploy)
         id: tests
@@ -129,14 +143,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      # Committed even when the refresh exits 1 (e.g. a stale calibration): what it
-      # did capture is valid, and a failed download or rejected fit writes nothing.
-      # data_store/vol_system.db is git-tracked, but the bot never commits it: it is
-      # a rebuildable cache (every run first restores the committed parquet captures
-      # under data_store/market and data_store/options into it; those are the record).
-      # Every run modifies it, so it is an unstaged change here and the rebase in the
-      # push loop must --autostash it: a plain `git pull --rebase` refuses ("You have
-      # unstaged changes") and the run lost its captures whenever main had moved.
+      # Committed even when the refresh exits 1 (e.g. a stale calibration or a failed
+      # derived artifact): what it did capture is valid, and a failed download or
+      # rejected fit writes nothing. The captures are the record: labels, market
+      # partitions (rates_daily included), the accepted SPX chain and the Cboe books
+      # (data_store/options, options/cboe), the calibration pickles and the forward
+      # ledger. data_store/vol_system.db is git-tracked, but the bot never commits it:
+      # it is a rebuildable cache (every run first restores the committed parquet
+      # captures under data_store/market and data_store/options into it). Every run
+      # modifies it, so it is an unstaged change here and the rebase in the push loop
+      # must --autostash it: a plain `git pull --rebase` refuses ("You have unstaged
+      # changes") and the run lost its captures whenever main had moved.
       - name: Commit data files
         id: commit
         if: always() && steps.refresh.outcome != 'skipped' && steps.datatests.outcome == 'success'
@@ -151,43 +168,42 @@ jobs:
           PERSISTED: ${{ steps.refresh.outputs.persisted }}
           HEADLINE: ${{ steps.refresh.outputs.headline_calibration }}
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for p in data_store/signals/regime_labels.parquet data_store/market \
-                   data_store/options data_store/calibrations; do
-            if [ -e "$p" ]; then git add -- "$p"; fi
-          done
-          if git diff --staged --quiet; then
-            echo "No data changes to commit."
-          else
-            title="Auto-refresh session ${SESSION:-unknown} (${SLOT}): labels +${LABELS_ADDED:-0}; calibration ${CALIBRATION:-not-run}"
-            body="Capture files changed: ${PERSISTED:-0}. Headline calibration: ${HEADLINE:-none}."
-            [ -n "$REASON" ] && [ "$REASON" != "ok" ] && body="$body Calibration reason: $REASON"
-            git commit -q -m "$title" -m "$body" -m "Run: ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
-            auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-            pushed=0
-            for i in 1 2 3 4; do
-              if git -c http.https://github.com/.extraheader="$auth" push origin HEAD:main; then
-                pushed=1; break
-              fi
-              echo "Push rejected (attempt $i); rebasing onto origin/main"
-              sleep $((i * 10))
-              git -c http.https://github.com/.extraheader="$auth" pull --rebase --autostash origin main || {
-                git rebase --abort || true; echo "::error::rebase onto main failed"; exit 1; }
-            done
-            [ "$pushed" = 1 ] || { echo "::error::push to main failed after 4 attempts"; exit 1; }
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          title="Auto-refresh session ${SESSION:-unknown} (${SLOT}): labels +${LABELS_ADDED:-0}; calibration ${CALIBRATION:-not-run}"
+          body="Capture files changed: ${PERSISTED:-0}. Headline calibration: ${HEADLINE:-none}."
+          [ -n "$REASON" ] && [ "$REASON" != "ok" ] && body="$body Calibration reason: $REASON"
+          scripts/ci/commit_and_push.sh "$title" "$body" \
+            data_store/signals/regime_labels.parquet data_store/market data_store/options \
+            data_store/calibrations ':(exclude)data_store/calibrations/diagnostics' data_store/forward
+
+      # What derives from a new fit (cloud_refresh.refresh_session_artifacts): the
+      # session's surface report and diagnostics, the headline fit's Greeks surface and
+      # scenario grid. A separate commit behind its own gate, after the captures, so an
+      # artifact that fails its checks is reported and left out, never the data.
+      - name: Commit derived artifacts
+        id: commitartifacts
+        if: >
+          always() && steps.refresh.outcome != 'skipped' && steps.commit.outcome == 'success' &&
+          steps.artifacttests.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SESSION: ${{ steps.refresh.outputs.session }}
+        run: |
+          scripts/ci/commit_and_push.sh \
+            "Auto-refresh session ${SESSION:-unknown}: derived artifacts" \
+            "Surface report, calibration diagnostics, Greeks surface and scenario grid of the new fit." \
+            data_store/surface data_store/calibrations/diagnostics data_store/greeks
 
       # A stale calibration fails the job (exit 1) but does not block the deploy: the
       # site states the headline fit's age in its staleness banner. cloud_refresh sets
       # publishable=false for what must block it (freeze failed, market data not
-      # current, captures not restored/persisted).
+      # current, captures not restored/persisted). The site is rendered from this run's
+      # tree, so it deploys only once both commits hold what it shows.
       - name: Deploy to GitHub Pages
         if: >
           always() && steps.refresh.outputs.publishable == 'true' &&
           steps.datatests.outcome == 'success' && steps.tests.outcome == 'success' &&
-          steps.commit.outcome == 'success' &&
+          steps.commit.outcome == 'success' && steps.commitartifacts.outcome == 'success' &&
           contains(steps.plan.outputs.steps, 'freeze')
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:
@@ -199,6 +215,6 @@ jobs:
           user_email: "41898282+github-actions[bot]@users.noreply.github.com"
           full_commit_message: >-
             Deploy session ${{ steps.refresh.outputs.session }} from
-            ${{ steps.commit.outputs.sha }} (calibration ${{ steps.refresh.outputs.calibration }};
+            ${{ steps.commitartifacts.outputs.sha }} (calibration ${{ steps.refresh.outputs.calibration }};
             run ${{ github.run_id }})
           cname: navnoorbawa.me          # preserve custom domain

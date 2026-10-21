@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from joint_vol_calibration.backtest import forward_ledger as fl
 from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
 from joint_vol_calibration.data import cboe_downloader as cboe
 from joint_vol_calibration.data import database as dbm
@@ -126,7 +127,22 @@ def env(tmp_path, monkeypatch):
         columns=["date", "series", "value", "source"]))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    # The post-fit steps have their own tests below; here an accepted fit records
+    # a ledger from fixed signals (the synthetic DB is too short for the real
+    # ones) and the derived artifacts are a no-op.
+    monkeypatch.setattr(fl, "signals_for_session", lambda session, start_date=None: _SIGNALS)
+    monkeypatch.setattr(cr, "_real_refresh_session_artifacts", cr.refresh_session_artifacts,
+                        raising=False)
+    monkeypatch.setattr(cr, "refresh_session_artifacts", lambda session, headline, **kw: {})
+    def no_capture(und, now=None, **kw):
+        raise OSError("no network in tests")
+    monkeypatch.setattr(cboe, "capture_option_chain", no_capture)
     return cr
+
+
+# every sleeve flat except S4 short: the ledger opens one straddle
+_SIGNALS = {s: {"position": 0.0, "kelly": 0.0} for s in ("s1", "s1c", "s2", "s3")}
+_SIGNALS["s4"] = {"position": -1.0, "kelly": 0.10}
 
 
 class _FakeTicker:
@@ -326,6 +342,182 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     # idempotent re-run
     code2, st2 = _run(env, "calibrate")
     assert code2 == 0 and st2["calibration"]["status"] == "exists"
+
+
+# ── Book slot: forward ledger, Cboe captures, derived artifacts (C23) ─────────
+
+def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
+    """The forward test at executable prices starts when the bot records each
+    accepted session (forward_ledger.record_session): one canonical,
+    hash-chained file per session, from the chain the fit was accepted on."""
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    led = st["calibration"]["forward_ledger"]
+    assert led["ok"], led
+    path = env.DATA / "forward" / f"ledger_{SESSION}.json"
+    assert led["path"] == str(path)
+    ledger = fl.load_ledger(path)
+    fl.validate_ledger(ledger)
+    assert ledger["previous"] is None
+    assert ledger["inputs"]["quote_after_close"] is True       # the GTH book, after the 16:00 close
+    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:30:00Z"
+    assert [p["sleeve"] for p in ledger["positions"]] == ["s4"]
+    assert led["actions"] == ["s4 open"]
+    # the ledger's chain hash is the committed snapshot's
+    stored = pd.read_parquet(dbm.options_snapshot_path(SESSION, "SPX"))
+    assert ledger["inputs"]["chain_sha256"] == fl.chain_sha256(fl.observed_book(stored))
+    # the retry slot: the session exists, nothing is rewritten
+    before = path.read_bytes()
+    assert _run(env, "calibrate")[1]["calibration"]["status"] == "exists"
+    assert path.read_bytes() == before
+
+
+def test_a_ledger_failure_is_loud_but_keeps_the_fit_and_chain(env, monkeypatch, capsys):
+    def clash(*a, **k):
+        raise FileExistsError("a different ledger is registered for 2026-09-23")
+    monkeypatch.setattr(fl, "record_session", clash)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["calibration"]["status"] == "accepted"
+    assert (env.DATA / "calibrations" / f"joint_cal_{SESSION}.pkl").exists()
+    assert str(dbm.options_snapshot_path(SESSION, "SPX")) in st["persisted"]
+    assert any("forward ledger" in e for e in st["errors"])
+    assert "::error title=Forward ledger::" in capsys.readouterr().out
+    assert not st["publish_blockers"]
+
+
+def _capture(und, session=SESSION, rows=4):
+    """A ChainCapture as cboe_downloader.capture_option_chain returns it."""
+    frame = pd.DataFrame({"snapshot_date": session, "underlying": und, "root": f"{und}W",
+                          "expiry": "2026-10-16", "strike": 7000.0 + 25 * np.arange(rows),
+                          "right": "C", "bid": 10.0, "ask": 10.5, "quote_time": "2026-09-24T01:15:00Z",
+                          "source": "cboe", "contract_symbol": [f"{und}W261016C{i}" for i in range(rows)]})
+    return cboe.ChainCapture(
+        underlying=und, frame=frame, session=session, quote_time="2026-09-24T01:15:00Z",
+        book_state="gth", fetched_at="2026-09-24T01:30:05Z", payload_timestamp="2026-09-24T01:30:00Z",
+        underlying_last_trade_time="2026-09-23T16:14:59", underlying_price=7600.0,
+        url=f"https://cdn.cboe.com/api/global/delayed_quotes/options/_{und}.json",
+        sha256="ab" * 32, n_bytes=1234)
+
+
+def test_the_cboe_books_are_captured_whatever_the_fit_does(env, monkeypatch, capsys):
+    """The full SPX and VIX books, timestamped, under data_store/options/cboe/,
+    stored even when the Yahoo book is empty and the calibration is skipped;
+    one capture per underlying and session (the retry slot skips them)."""
+    calls = []
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        return _capture(und)
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert st["calibration"]["status"] == "skipped"
+    capt = st["capture"]
+    assert capt["status"] == "captured"
+    d = env.DATA / "options" / "cboe"
+    for und in ("spx", "vix"):
+        pq_path = d / f"{und}_{SESSION}_013005Z.parquet"
+        js = json.loads((d / f"{und}_{SESSION}_013005Z.json").read_text())
+        assert str(pq_path) in st["persisted"]
+        assert len(pd.read_parquet(pq_path)) == js["rows"] == 4
+        assert js["book_state"] == "gth"
+        assert js["sha256"] == "ab" * 32
+        assert capt["captures"][und.upper()]["quote_time"] == "2026-09-24T01:15:00Z"
+    assert not list(d.glob(".*.tmp"))
+    # the captures are not options snapshots: the DB and the calibrator never see them
+    assert _spx_snapshot_rows(SESSION)[0] == 0
+    # retry slot: nothing fetched again, nothing rewritten
+    code, st = _run(env, "capture")
+    assert st["capture"]["status"] == "exists"
+    assert calls == ["SPX", "VIX"]
+    assert "persisted" not in st or not st["persisted"]
+
+
+def test_a_capture_of_another_session_or_a_failed_download_is_not_stored(env, monkeypatch, capsys):
+    def fake(und, now=None, **kw):
+        if und == "VIX":
+            raise OSError("cdn.cboe.com unreachable")
+        return _capture(und, session="2026-09-24")             # the book rolled already
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    code, st = _run(env, "capture")
+    assert code == 0
+    capt = st["capture"]
+    assert capt["status"] == "failed"
+    assert capt["captures"]["SPX"]["status"] == "rejected"
+    assert "session 2026-09-24's, not 2026-09-23's" in capt["captures"]["SPX"]["reason"]
+    assert capt["captures"]["VIX"]["status"] == "failed"
+    assert not (env.DATA / "options" / "cboe").exists()
+    assert "::warning title=Cboe capture::" in capsys.readouterr().out
+
+
+def test_no_capture_while_the_book_is_another_sessions(env, monkeypatch):
+    """Same refusal as the calibration: from the 09:30 ET open the live book
+    is the new session's."""
+    monkeypatch.setattr(cboe, "capture_option_chain", lambda und, **kw: _capture(und))
+    status = env.DATA.parent / "status.json"
+    during = NOW + timedelta(hours=13, minutes=30)                 # Thu 11:00 ET
+    env.main(["--steps", "capture", "--status-file", str(status)], now_utc=during)
+    capt = json.loads(status.read_text())["capture"]
+    assert capt["status"] == "skipped"
+    assert "refusing" in capt["reason"]
+
+
+def test_session_artifacts_are_rebuilt_from_an_accepted_fit(env, monkeypatch):
+    """After an accepted fit: the session's surface report, its diagnostics
+    (the script, stubbed here), and the Greeks surface and scenario grid of the
+    new headline fit, all written under data_store/."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    ran = []
+
+    def diagnostics(session, out_dir, timeout):
+        ran.append((session, out_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{session}.json").write_text("{}")
+    monkeypatch.setattr(env, "_run_diagnostics", diagnostics)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    arts = st["artifacts"]
+    assert {k: v["ok"] for k, v in arts.items()} == {"surface": True, "diagnostics": True,
+                                                    "greeks": True, "scenario": True}
+    sdir = env.DATA / "surface" / SESSION
+    assert sorted(p.name for p in sdir.iterdir()) == ["residuals.parquet", "scorecard.json",
+                                                     "surface.json", "vix_replication.json"]
+    idx = json.loads((env.DATA / "surface" / "index.json").read_text())
+    assert [r["session"] for r in idx["sessions"]] == [SESSION]
+    assert ran == [(SESSION, env.DATA / "calibrations" / "diagnostics")]
+    from joint_vol_calibration.greeks.risk_monitor import load_greeks_surface
+    from joint_vol_calibration.greeks.scenario_grid import load_scenario_grid
+    g = load_greeks_surface(env.DATA / "greeks" / "greeks_surface.parquet").attrs["provenance"]
+    sgp = load_scenario_grid(env.DATA / "greeks" / "scenario_grid.parquet").attrs["provenance"]
+    for prov in (g, sgp):
+        assert prov["as_of_date"] == SESSION
+        assert prov["source"]["calibration_file"].endswith(f"joint_cal_{SESSION}.pkl")
+
+
+def test_a_failed_artifact_is_reported_and_loses_nothing(env, monkeypatch, capsys):
+    """A surface-report crash fails the job (exit 1, annotated) but the fit,
+    the chain, the ledger and the other artifacts stand, and the site may
+    still publish."""
+    from joint_vol_calibration.surface import report
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    monkeypatch.setattr(env, "_run_diagnostics", lambda s, d, t: None)
+
+    def boom(*a, **k):
+        raise ValueError("SVI fit diverged")
+    monkeypatch.setattr(report, "write_session", boom)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["artifacts"]["surface"] == {"ok": False, "error": "ValueError: SVI fit diverged",
+                                          "seconds": st["artifacts"]["surface"]["seconds"]}
+    assert st["artifacts"]["greeks"]["ok"]
+    assert st["artifacts"]["scenario"]["ok"]
+    assert st["calibration"]["status"] == "accepted"
+    assert st["calibration"]["forward_ledger"]["ok"]
+    assert str(dbm.options_snapshot_path(SESSION, "SPX")) in st["persisted"]
+    assert not st["publish_blockers"]
+    assert "::error title=Session artifacts::surface artifact" in capsys.readouterr().out
 
 
 def test_gate_rejection_after_a_fit_persists_nothing(env, monkeypatch):

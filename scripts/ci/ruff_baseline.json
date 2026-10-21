@@ -325,7 +325,7 @@
   },
   "joint_vol_calibration/tests/test_infra_config.py": {
    "FURB167": 4,
-   "PT018": 10
+   "PT018": 8
   },
   "joint_vol_calibration/tests/test_joint_calibrator.py": {
    "PERF401": 1,
@@ -466,6 +466,6 @@
   }
  },
  "tool": "ruff",
- "total": 1302,
+ "total": 1300,
  "version": "ruff 0.17.1"
 }

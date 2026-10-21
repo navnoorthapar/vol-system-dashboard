@@ -395,13 +395,14 @@ or drops a row.
 | VIX term structure | Cboe's official index files (`^VIX9D` from 2011-01-03, `^VIX`, `^VIX3M`, `^VIX6M`, `^VVIX`), Yahoo as the provisional same-evening row; restated from Yahoo's copies in C23 (`data_store/market/corrections/`) | 2010-01-04 → 2026-10-19 | 20,867 (2 Yahoo rows) |
 | SPX options | Yahoo: 4 full end-of-day chains (2026-03-24, 03-27, 05-29, 06-18) and the daily job's two-sided capture of 2026-10-16 | none inside the backtest window | 68,006 |
 | VIX options | Yahoo, the first 4 sessions | none inside the backtest window | 1,896 |
+| SPX and VIX option books (C23) | Cboe delayed quotes: every line of both chains, captured once per book session by the daily job (`data_store/options/cboe/`, with the fetch and quote times and the SHA-256 of the raw response); not used by the calibrator yet | from 2026-10-20 | 28,980 SPX + 1,520 VIX lines (first capture) |
 | VX futures | Cboe per-contract files (174 monthly contracts expiring 2013-01 → 2027-06) | 2013-01-02 → 2026-10-09 | 30,963 |
 | VX final settlements | Cboe (expiry-day settles; VRO before mid-2013) | 2010-01-20 → 2026-09-16 | 201 |
 | T-bill rate | Yahoo (`^IRX`, stored as cc rate + raw discount yield; negative 2020 bills kept) | 2010-01-04 → 2026-10-19 | 4,222 |
 | Treasury curve and SOFR | U.S. Treasury daily bill and par-yield files, NY Fed SOFR (`data_store/market/rates_daily/`; the zero curve of `data/rates.py`) | 2010-01-04 → 2026-10-19 | 92,208 (29 series) |
 
-The daily job stores every SPX chain that passes the calibration gate under its quote session, so the options history grows
-from here; it cannot reach back into the backtest window, which is *why* the backtest is mark-to-model. The Cboe downloader was rebuilt in C22 (the old endpoints
+The daily job stores every SPX chain that passes the calibration gate under its quote session, and Cboe's full SPX and VIX
+books every session whatever the fit does, so the options history grows from here; it cannot reach back into the backtest window, which is *why* the backtest is mark-to-model. The Cboe downloader was rebuilt in C22 (the old endpoints
 returned 403 and the parser read fields the payload does not have).
 
 ---

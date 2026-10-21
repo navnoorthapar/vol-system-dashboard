@@ -287,3 +287,22 @@ def test_a_book_quoted_before_the_signal_close_is_refused():
     assert fl.quote_after_close(SESSIONS[0], "2026-03-24T20:00:00Z") is True
     with pytest.raises(ValueError, match="is before the 2026-03-24 close"):
         fl.quote_after_close(SESSIONS[0], "2026-03-24T19:59:59Z")
+
+
+def test_committed_ledgers_form_one_valid_chain():
+    """data_store/forward/ (written by the daily bot after each accepted
+    session): every file is schema-valid, named after its session and linked
+    to the one before it by SHA-256. An edited or missing link is an error
+    here, before the bot commits, as it is on the Research page."""
+    files = sorted((Path(__file__).resolve().parents[2] / "data_store" / "forward").glob("ledger_*.json"))
+    if not files:
+        pytest.skip("no committed forward ledger yet")
+    ledgers = [fl.load_ledger(p) for p in files]
+    for p, led in zip(files, ledgers):
+        fl.validate_ledger(led)
+        assert p.name == f"ledger_{led['session']}.json"
+        # byte for byte what write_ledger writes (no hand edit, no reformat)
+        assert p.read_text() == json.dumps(fl._clean(led), sort_keys=True, indent=1,
+                                           ensure_ascii=False, allow_nan=False) + "\n"
+    assert ledgers[0]["previous"] is None
+    assert fl.verify_chain(ledgers) == []

@@ -17,7 +17,20 @@ Steps (run all, or a subset with --steps):
              session's options snapshot. Refused ("skipped") when the live
              book cannot be that session's: during the next session (09:30
              ET to the 16:15 cutoff) or after an NYSE holiday (session_guard)
+  capture    Capture Cboe's delayed-quotes SPX and VIX chains of the last CLOSED
+             session (every line, timestamped) under data_store/options/cboe/,
+             independent of the calibration and its gate (capture_cboe_chains)
   freeze     Freeze the Flask app to static HTML -> .site-build/
+
+After an ACCEPTED calibration the run also records the session in the
+forward ledger (data_store/forward/ledger_<session>.json, forward_ledger.
+record_session) and rebuilds what is derived from the new fit: the session's
+surface report (data_store/surface/<session>/), its calibration diagnostics
+(data_store/calibrations/diagnostics/<session>.json), and the Greeks surface
+and scenario grid of the new headline fit (data_store/greeks/). Each is
+fail-soft: a failure is reported (exit 1) but never undoes what was captured,
+and the workflow commits captures and derived artifacts behind separate test
+gates (refresh_session_artifacts).
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
 is not what the bot commits. At the start of every run (freeze-only
@@ -85,7 +98,11 @@ log = logging.getLogger("cloud_refresh")
 LABEL_LOOKBACK_DAYS = 900
 _ADAPTIVE_WINDOW = 252
 DEFAULT_MAX_CAL_AGE_SESSIONS = 3
-ALL_STEPS = ("market", "labels", "calibrate", "freeze")
+ALL_STEPS = ("market", "labels", "capture", "calibrate", "freeze")
+# The calibration diagnostics of a new session (scripts/calibration_diagnostics.py:
+# multi-start TRF, DE check, identifiability, sigma profile, rough Heston) take
+# about 3 min on 4 idle CPUs; this bounds them so the job keeps its time budget.
+DIAGNOSTICS_TIMEOUT_S = 20 * 60
 
 
 def _bootstrap_path() -> None:
@@ -516,6 +533,188 @@ def session_guard(now_utc: datetime, expected: str) -> "str | None":
     return None
 
 
+CAPTURE_UNDERLYINGS = ("SPX", "VIX")
+
+
+def capture_dir() -> pathlib.Path:
+    return DATA / "options" / "cboe"
+
+
+def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
+    """Capture Cboe's delayed-quotes SPX and VIX chains for session ``expected``
+    (cboe_downloader.capture_option_chain) and store them, timestamped, under
+    data_store/options/cboe/: <und>_<session>_<HHMMSS>Z.parquet (every line of
+    the chain: the options_snapshots schema, quote_time = payload timestamp
+    minus the 15-minute delay, source 'cboe') and <stem>.json (timestamps,
+    book state, row counts, the sha256 of the raw response).
+
+    Independent of the Yahoo chain, the calibration and its gate: the book can
+    only be fetched while it is live (the next session's Global Trading Hours
+    book replaces it), so it is stored whether or not a fit is accepted.
+    Refused, like the calibration, when the live book cannot be ``expected``'s
+    (session_guard); a capture whose own session (the underlying's last
+    trade) is not ``expected`` is not stored. One capture per underlying and
+    session: the retry slot skips an underlying already captured.
+
+    Returns {"status": captured|exists|partial|skipped|failed, "reason",
+    "session", "files", "captures": {und: {...}}}. Never raises.
+    """
+    d = pathlib.Path(out_dir) if out_dir is not None else capture_dir()
+    st: dict = {"status": "skipped", "reason": "", "session": expected, "files": [],
+                "captures": {}}
+    try:
+        refused = session_guard(now_utc, expected)
+    except Exception as e:  # noqa: BLE001 (reported; the calibration step decides for itself)
+        refused = f"session check failed: {e}"
+    if refused:
+        st["reason"] = refused
+        return st
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    for und in CAPTURE_UNDERLYINGS:
+        have = sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
+        if have:
+            st["captures"][und] = {"status": "exists", "file": str(have[-1])}
+            continue
+        try:
+            cap = cboe.capture_option_chain(und)
+        except Exception as e:  # noqa: BLE001 (one underlying's failure must not lose the other's)
+            st["captures"][und] = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
+            log.warning("  Cboe %s capture failed: %s", und, e)
+            continue
+        summ = cap.summary()
+        if cap.frame.empty or cap.session != expected:
+            why = ("empty chain" if cap.frame.empty else
+                   f"the live {und} book is session {cap.session}'s, not {expected}'s")
+            st["captures"][und] = {"status": "rejected", "reason": why, "summary": summ}
+            log.warning("  Cboe %s capture not stored: %s", und, why)
+            continue
+        pq_path, js_path = cboe.save_capture(cap, d)
+        st["files"] += [str(pq_path), str(js_path)]
+        st["captures"][und] = {"status": "captured", "file": str(pq_path),
+                               **{k: summ[k] for k in ("quote_time", "book_state", "rows",
+                                                       "two_sided_rows", "expiries", "n_bytes",
+                                                       "sha256", "underlying_price")}}
+        log.info("  Cboe %s chain: %d rows (%d two-sided, %d expiries), quote time %s, book %s -> %s",
+                 und, summ["rows"], summ["two_sided_rows"], summ["expiries"], summ["quote_time"],
+                 summ["book_state"], pq_path.name)
+    kinds = {c["status"] for c in st["captures"].values()}
+    if kinds == {"exists"}:
+        st["status"] = "exists"
+    elif kinds <= {"captured", "exists"}:
+        st["status"] = "captured"
+    elif kinds & {"captured", "exists"}:
+        st["status"] = "partial"
+    else:
+        st["status"] = "failed"
+    st["reason"] = "; ".join(f"{u} {c['status']}" + (f" ({c['reason']})" if c.get("reason") else "")
+                             for u, c in st["captures"].items())
+    return st
+
+
+def record_forward_ledger(session: str, raw, clean, spot: float, r_ref: float,
+                          quote_time: str, directory=None) -> dict:
+    """forward_ledger.record_session for an accepted session: the session's
+    signals turned into listed straddles at the captured book's bid/ask, the
+    open ones marked, hash-chained to the previous ledger
+    (data_store/forward/ledger_<session>.json). Called after the pickle and
+    the chain are stored, so a failure never costs them. Never raises: a
+    ValueError (a book quoted before the signal close, an out-of-order
+    session) or FileExistsError (another ledger already registered for the
+    session) is returned as {"ok": False, "error"} for main() to report."""
+    try:
+        from joint_vol_calibration.backtest import forward_ledger as fl
+        path = fl.record_session(session, raw, clean=clean, spot=spot, r_ref=r_ref,
+                                 quote_time=quote_time,
+                                 directory=pathlib.Path(directory) if directory else DATA / "forward")
+        led = fl.load_ledger(path)
+        return {"ok": True, "path": str(path),
+                "actions": [f"{a['sleeve']} {a['action']}" for a in led.get("actions", [])],
+                "n_open": len(led.get("positions", []))}
+    except Exception as e:  # noqa: BLE001 (reported loudly by main(); the fit and chain stand)
+        log.error("  forward ledger for %s failed: %s", session, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def _run_diagnostics(session: str, out_dir: pathlib.Path, timeout: float) -> None:
+    """scripts/calibration_diagnostics.py --session ``session`` (both parts) in
+    a child process; raises on a non-zero exit or the timeout."""
+    r = subprocess.run(  # noqa: S603 (fixed argv: this interpreter and a repo script)
+        [sys.executable, str(ROOT / "scripts" / "calibration_diagnostics.py"), "--session", session,
+         "--out-dir", str(out_dir)],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=timeout, check=False)
+    for line in (r.stdout + r.stderr).splitlines()[-20:]:
+        log.info("  [diagnostics] %s", line)
+    if r.returncode != 0:
+        raise RuntimeError(f"calibration_diagnostics.py exited {r.returncode}: "
+                           f"{(r.stderr or r.stdout).strip().splitlines()[-1:] or ''}")
+
+
+def refresh_session_artifacts(session: str, headline_path: "str | None",
+                              diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S) -> dict:
+    """Rebuild what derives from an accepted session's fit, each part fail-soft:
+
+      surface      data_store/surface/<session>/ (residuals, surface, scorecard,
+                   VIX replication) and index.json (surface.report)
+      diagnostics  data_store/calibrations/diagnostics/<session>.json and
+                   summary.json (scripts/calibration_diagnostics.py)
+      greeks       data_store/greeks/greeks_surface.parquet of the headline fit
+                   (risk_monitor.build_surface_from_calibration)
+      scenario     data_store/greeks/scenario_grid.parquet of the headline fit
+                   (greeks.scenario_grid)
+
+    Needs the session's stored chain (persist_captures runs first). Returns
+    {part: {"ok": bool, ...}}; a failed part leaves the previous file in place.
+    """
+    import time as _time
+    out: dict = {}
+
+    def part(name, fn):
+        t0 = _time.perf_counter()
+        try:
+            res = fn() or {}
+            out[name] = {"ok": True, **res}
+        except Exception as e:                # fail-soft: logged and reported, the captures stand
+            log.exception("  %s for %s failed", name, session)
+            out[name] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        out[name]["seconds"] = round(_time.perf_counter() - t0, 1)
+
+    def surface():
+        from joint_vol_calibration.surface import report
+        root = DATA / "surface"
+        row = report.write_session(session, root, calibrations_dir=DATA / "calibrations")
+        idx = root / "index.json"
+        rows = [r for r in json.loads(idx.read_text())["sessions"] if r["session"] != session] \
+            if idx.exists() else []
+        report.write_index([*rows, row], root)
+        return {"dir": str(root / session), "n_quotes": row.get("n_quotes"),
+                "vix_replicated": row.get("vix_replicated"), "vix_official": row.get("vix_official")}
+
+    def diagnostics():
+        d = DATA / "calibrations" / "diagnostics"
+        _run_diagnostics(session, d, diagnostics_timeout)
+        return {"file": str(d / f"{session}.json")}
+
+    def greeks():
+        from joint_vol_calibration.greeks.risk_monitor import build_surface_from_calibration
+        if not headline_path:
+            raise ValueError("no headline calibration")
+        df = build_surface_from_calibration(headline_path, DATA / "greeks" / "greeks_surface.parquet")
+        return {"from": headline_path, "n_nodes": len(df),
+                "n_unstable": int(df["is_unstable"].sum())}
+
+    def scenario():
+        from joint_vol_calibration.greeks import scenario_grid as sg
+        if not headline_path:
+            raise ValueError("no headline calibration")
+        df = sg.build_from_calibration(headline_path, DATA / "greeks" / "scenario_grid.parquet")
+        return {"from": headline_path, "cells": len(df)}
+
+    for name, fn in (("surface", surface), ("diagnostics", diagnostics), ("greeks", greeks),
+                     ("scenario", scenario)):
+        part(name, fn)
+    return out
+
+
 def _persist_snapshot(raw, clean, session: str, spot: float,
                       quote_time: "str | None" = None) -> int:
     """Store an ACCEPTED session's observed two-sided quotes as its SPX snapshot.
@@ -691,6 +890,9 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         st["snapshot_error"] = f"could not store the accepted {spot_date} chain: {e}"
         log.error("  %s", st["snapshot_error"])
     st.update(status="accepted", reason="ok")
+    # The forward test at executable prices: after the pickle and the chain, so
+    # a ledger failure (reported by main) cannot cost either of them.
+    st["forward_ledger"] = record_forward_ledger(spot_date, raw, clean, S, ref.r_91d, quote_time)
     log.info("  Done (accepted): kappa=%.4f sigma=%.4f rho=%.4f | SPX RMSE %.3f vp "
              "(OOS %.3f) | VIX index RMSE %.3f | %d opts / %d expiries, %d VIX tenors | "
              "Feller %s | session %s", p["kappa"], p["sigma"], p["rho"],
@@ -840,6 +1042,13 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
             f"| labels added | {status.get('labels_added', '—')} |",
             f"| capture files changed | {len(status.get('persisted') or [])} |",
         ]
+        capt = status.get("capture")
+        if capt:
+            parts = [f"{u} {c['status']}" + (f" ({c['rows']:,} rows, {c['book_state']} book, quotes "
+                                             f"{c['quote_time']})" if c["status"] == "captured" else "")
+                     for u, c in (capt.get("captures") or {}).items()]
+            lines.append(f"| Cboe chains | **{capt['status']}** "
+                         f"{'; '.join(parts) or capt.get('reason', '')} |")
         if "calibrate" in status.get("steps", []):
             lines += [
                 f"| calibration | **{cal.get('status', 'not run')}** {cal.get('reason', '')} |",
@@ -866,6 +1075,17 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
                     f"| carry | parity medians r {_fmt(s.get('r'), '.2%')}, q {_fmt(s.get('q'), '.2%')}; "
                     f"reference {s.get('r_reference_source') or _fmt(s.get('r_reference'), '.2%')} |",
                 ]
+            led = cal.get("forward_ledger")
+            if led and led.get("ok"):
+                acts = "; ".join(led.get("actions") or []) or "no action"
+                lines.append(f"| forward ledger | {pathlib.Path(led['path']).name}: {acts} "
+                             f"({led.get('n_open', 0)} open) |")
+            elif led:
+                lines.append(f"| forward ledger | **failed**: {led.get('error')} |")
+        for name, res in (status.get("artifacts") or {}).items():
+            lines.append(f"| {name} artifact | "
+                         + ("ok" if res.get("ok") else f"**failed**: {res.get('error')}")
+                         + f" ({res.get('seconds', '—')} s) |")
         lines.append(f"| headline calibration | {head.get('date') or 'none'}"
                      + (f" ({head.get('age_sessions')} sessions old)" if head.get("date") else "")
                      + " |")
@@ -950,6 +1170,17 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 _annotate("error", "Persistence", msg)
                 log.exception(msg)
 
+    # First, before anything slower: the Cboe book can only be fetched while it is
+    # live, and it is captured whatever the Yahoo chain or the fit do later.
+    if "capture" in steps:
+        with _Group("Cboe option-chain capture"):
+            capt = capture_cboe_chains(now_utc, closed.isoformat())
+            status["capture"] = capt
+            if capt["status"] in ("failed", "partial"):
+                msg = f"Cboe chain capture {capt['status']}: {capt['reason']}"
+                status["warnings"].append(msg)
+                _annotate("warning", "Cboe capture", msg)
+
     market_ok = True
     if "market" in steps:
         with _Group("market data"):
@@ -1012,6 +1243,12 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 hard_fail = True
                 status["errors"].append(cal["snapshot_error"])
                 _annotate("error", "Persistence", cal["snapshot_error"])
+            led = cal.get("forward_ledger") or {}
+            if led and not led.get("ok"):          # loud, but the fit and chain stand
+                hard_fail = True
+                msg = f"forward ledger for {cal.get('session')} not recorded: {led.get('error')}"
+                status["errors"].append(msg)
+                _annotate("error", "Forward ledger", msg)
             head = headline_calibration(sess or status["expected_session"])
             status["headline_calibration"] = head
             if cal["status"] in ("rejected", "skipped", "failed"):
@@ -1026,11 +1263,11 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                     status["errors"].append(msg)
                     _annotate("error", "Calibration stale", msg)
 
+    accepted = (status.get("calibration") or {}).get("status") == "accepted"
     if persist and any(s in steps for s in ("market", "calibrate")):
         with _Group("persist captures"):
             since = status.get("market", {}).get("start") if "market" in steps else None
-            chains = ([status["calibration"]["session"]]
-                      if (status.get("calibration") or {}).get("status") == "accepted" else [])
+            chains = [status["calibration"]["session"]] if accepted else []
             try:
                 status["persisted"] = persist_captures(since, chains)
             except Exception as e:
@@ -1040,6 +1277,23 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 blockers.append(msg)
                 _annotate("error", "Persistence", msg)
                 log.exception(msg)
+    if (status.get("capture") or {}).get("files"):    # written in place by the capture step
+        status["persisted"] = [*status.get("persisted", []), *status["capture"]["files"]]
+
+    # What derives from the new fit; after the persist step (the surface report
+    # reads the stored chain). Fail-soft: exit 1 and an annotation, but the site
+    # still publishes and the workflow still commits the captures.
+    if accepted:
+        with _Group("session artifacts"):
+            head = status.get("headline_calibration") or {}
+            arts = refresh_session_artifacts(status["calibration"]["session"], head.get("path"))
+            status["artifacts"] = arts
+            for name, res in arts.items():
+                if not res.get("ok"):
+                    hard_fail = True
+                    msg = f"{name} artifact for {status['calibration']['session']} failed: {res.get('error')}"
+                    status["errors"].append(msg)
+                    _annotate("error", "Session artifacts", msg)
 
     if "freeze" in steps:
         with _Group("freeze site"):

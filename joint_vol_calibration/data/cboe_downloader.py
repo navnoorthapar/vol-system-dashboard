@@ -772,15 +772,35 @@ def capture_option_chains(underlyings: Iterable[str] = ("SPX", "VIX"), now: date
             continue
         out[cap.underlying] = cap
         if out_dir is not None and cap.session is not None:
-            from pathlib import Path
-            d = Path(out_dir)
-            d.mkdir(parents=True, exist_ok=True)
-            stem = f"{cap.underlying.lower()}_{cap.session}_{cap.fetched_at[11:19].replace(':', '')}Z"
-            cap.frame.to_parquet(d / f"{stem}.parquet", index=False, compression="zstd")
-            (d / f"{stem}.json").write_text(json.dumps(cap.summary(), indent=2) + "\n")
+            save_capture(cap, out_dir)
         logger.info("Captured %s chain: %d rows, session %s, book %s, payload %s", cap.underlying,
                     len(cap.frame), cap.session, cap.book_state, cap.payload_timestamp)
     return out
+
+
+def capture_stem(cap: ChainCapture) -> str:
+    """File stem of a capture: <und>_<session>_<HHMMSS>Z (the fetch time, UTC)."""
+    return f"{cap.underlying.lower()}_{cap.session}_{cap.fetched_at[11:19].replace(':', '')}Z"
+
+
+def save_capture(cap: ChainCapture, out_dir) -> tuple:
+    """Write one capture: <out_dir>/<stem>.parquet (the frame, zstd) and
+    <stem>.json (summary(): timestamps, book state, sha256 of the raw bytes).
+    Each file goes to a temporary name first and is renamed into place, so a
+    reader never sees half a capture. Returns (parquet_path, json_path)."""
+    import os
+    from pathlib import Path
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    stem = capture_stem(cap)
+    pq_path, js_path = d / f"{stem}.parquet", d / f"{stem}.json"
+    tmp = d / f".{stem}.parquet.tmp"
+    cap.frame.to_parquet(tmp, index=False, compression="zstd")
+    os.replace(tmp, pq_path)
+    tmp = d / f".{stem}.json.tmp"
+    tmp.write_text(json.dumps(cap.summary(), indent=2) + "\n")
+    os.replace(tmp, js_path)
+    return pq_path, js_path
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────

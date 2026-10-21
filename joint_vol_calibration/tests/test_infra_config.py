@@ -26,7 +26,7 @@ def test_daily_cron_is_split_by_data_source():
     assert all(int(c.split()[1]) * 60 + int(c.split()[0]) >= 2 * 60 + 15 for c in book)
     close = [c for c in crons if c.split()[1] == "22"]
     assert close and close[0].split()[0] != "0"                    # off the top of the hour
-    assert '"market,labels"' in DAILY and "market,calibrate,freeze" in DAILY
+    assert '"market,labels"' in DAILY and "market,capture,calibrate,freeze" in DAILY
 
 
 def test_daily_job_persists_captures_and_rebases_before_push():
@@ -107,19 +107,53 @@ def test_a_presentation_test_cannot_lose_the_captures():
     # deploy. Two dashboard copy tests failed on a legitimately new fit, so the
     # accepted overnight book of 2026-10-19 (not re-fetchable) was never committed.
     # The commit now keys only on the data gate; the dashboard tests gate the deploy.
-    data = _step(DAILY, "Data tests (gate the commit)")
+    # C23 adds a third gate: the artifacts derived from a new fit (surface report,
+    # diagnostics, Greeks surface, scenario grid) are a second commit behind their
+    # own tests, so a failed artifact check cannot hold back the captures either.
+    data = _step(DAILY, "Data tests (gate the capture commit)")
+    art = _step(DAILY, "Artifact tests (gate the artifact commit)")
     pres = _step(DAILY, "Presentation tests (gate the deploy)")
-    assert "id: datatests" in data and "id: tests" in pres
-    assert "test_dashboard.py" not in data and "test_dashboard.py" in pres
-    for f in ("test_data_layer.py", "test_option_chain.py", "test_cloud_refresh.py", "test_lookahead.py"):
+    assert "id: datatests" in data
+    assert "id: artifacttests" in art
+    assert "id: tests" in pres
+    assert "test_dashboard.py" not in data + art
+    assert "test_dashboard.py" in pres
+    assert "test_session_artifacts.py" in art
+    assert "test_session_artifacts.py" not in data
+    for f in ("test_data_layer.py", "test_option_chain.py", "test_cloud_refresh.py", "test_lookahead.py",
+              "test_cboe_downloader.py", "test_forward_ledger.py"):
         assert f in data, f
     commit = _step(DAILY, "Commit data files")
     commit_if = re.search(r"if:\s*(.*)", commit).group(1)
     assert "steps.datatests.outcome == 'success'" in commit_if
-    assert "steps.tests.outcome" not in commit_if
+    assert "steps.tests.outcome" not in commit_if and "artifacttests" not in commit_if
+    arts = _step(DAILY, "Commit derived artifacts")
+    arts_if = re.search(r"if:\s*>?\s*(.*?)\n\s*env:", arts, re.S).group(1)
+    assert "steps.artifacttests.outcome == 'success'" in arts_if
+    assert "steps.commit.outcome == 'success'" in arts_if        # after the captures, never instead
+    assert "steps.tests.outcome" not in arts_if
     deploy = _step(DAILY, "Deploy to GitHub Pages")
     cond = re.search(r"if:\s*>?\s*(.*?)\n\s*uses:", deploy, re.S).group(1)
     assert "steps.datatests.outcome == 'success'" in cond and "steps.tests.outcome == 'success'" in cond
+    assert "steps.commitartifacts.outcome == 'success'" in cond
+
+
+def test_each_commit_adds_its_own_paths():
+    """The capture commit holds the record (incl. the Cboe books under
+    data_store/options/cboe and the forward ledger), the artifact commit the
+    derived files; the diagnostics live under data_store/calibrations, so the
+    capture commit excludes them explicitly."""
+    commit = _step(DAILY, "Commit data files")
+    for p in ("data_store/signals/regime_labels.parquet", "data_store/market", "data_store/options",
+              "data_store/calibrations", "data_store/forward"):
+        assert p in commit, p
+    assert "':(exclude)data_store/calibrations/diagnostics'" in commit
+    for p in ("data_store/surface", "data_store/greeks"):
+        assert p not in commit, p
+    arts = _step(DAILY, "Commit derived artifacts")
+    for p in ("data_store/surface", "data_store/calibrations/diagnostics", "data_store/greeks"):
+        assert p in arts, p
+    assert "vol_system.db" not in commit + arts
 
 
 def test_push_retry_rebase_survives_the_unstaged_database():
@@ -127,12 +161,78 @@ def test_push_retry_rebase_survives_the_unstaged_database():
     # stages it. A plain "git pull --rebase" then refuses ("You have unstaged
     # changes"), "rebase --abort" finds no rebase, and the step exited 1 -- losing
     # the run's captures -- whenever main moved during the run.
-    commit = _step(DAILY, "Commit data files")
+    push = (ROOT / "scripts" / "ci" / "commit_and_push.sh").read_text()
+    for name in ("Commit data files", "Commit derived artifacts"):
+        assert "scripts/ci/commit_and_push.sh" in _step(DAILY, name), name
     assert (ROOT / "data_store" / "vol_system.db").exists()
-    pulls = re.findall(r"pull --rebase[^\n]*", commit)
+    pulls = re.findall(r"pull --rebase[^\n]*", push)
     assert pulls and all("--autostash" in p for p in pulls), pulls
-    staged = re.search(r"for p in (.*?); do", commit, re.S).group(1)
-    assert "data_store/market" in staged and "vol_system.db" not in staged
     # and the comment no longer claims the database is not committed/tracked
     assert "rebuildable cache and is not committed" not in DAILY
     assert "git-tracked" in DAILY
+
+
+def test_commit_and_push_against_a_moved_remote(tmp_path):
+    """scripts/ci/commit_and_push.sh on a scratch repository with a local
+    remote: it commits only the paths given (a missing one skipped, the
+    exclusion honoured, the tracked database never), rebases onto a main that
+    moved during the run with the database still modified, and with nothing to
+    add commits nothing."""
+    import os
+    import shutil
+    import subprocess
+    if not (shutil.which("git") and shutil.which("base64") and shutil.which("bash")):
+        import pytest
+        pytest.skip("git/base64/bash not available")
+    script = ROOT / "scripts" / "ci" / "commit_and_push.sh"
+    env = {**os.environ, "GH_TOKEN": "x", "REPO": "o/r", "PUSH_RETRY_SLEEP": "0",
+           "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    env.pop("GITHUB_OUTPUT", None)
+
+    def git(*a, cwd):
+        return subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True,
+                              text=True).stdout
+
+    (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@example.com\n"
+                                        "[init]\n\tdefaultBranch = main\n")
+    remote, work, other = tmp_path / "remote.git", tmp_path / "work", tmp_path / "other"
+    git("init", "--bare", str(remote), cwd=tmp_path)
+    git("clone", str(remote), str(work), cwd=tmp_path)
+    ds = work / "data_store"
+    for rel, text in (("vol_system.db", "db0"), ("market/a.csv", "a0"), ("calibrations/c0.pkl", "c0")):
+        (ds / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ds / rel).write_text(text)
+    git("add", "-A", cwd=work)
+    git("commit", "-qm", "init", cwd=work)
+    git("push", "-q", "origin", "HEAD:main", cwd=work)
+    git("clone", str(remote), str(other), cwd=tmp_path)
+    (other / "README").write_text("moved")
+    git("add", "README", cwd=other)
+    git("commit", "-qm", "main moved", cwd=other)
+    git("push", "-q", "origin", "HEAD:main", cwd=other)
+
+    (ds / "vol_system.db").write_text("db1")                      # tracked, never committed
+    (ds / "market" / "a.csv").write_text("a1")
+    (ds / "calibrations" / "c1.pkl").write_text("c1")
+    (ds / "calibrations" / "diagnostics").mkdir()
+    (ds / "calibrations" / "diagnostics" / "d.json").write_text("{}")
+    r = subprocess.run(["bash", str(script), "title", "body", "data_store/market", "data_store/missing",
+                        "data_store/calibrations", ":(exclude)data_store/calibrations/diagnostics"],
+                       cwd=work, env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "rebasing onto origin/main" in r.stdout
+    log = git("log", "--format=%s", "origin/main", cwd=work).split("\n")
+    assert log[:3] == ["title", "main moved", "init"]
+    files = git("show", "--name-only", "--format=", "origin/main", cwd=work).split()
+    assert sorted(files) == ["data_store/calibrations/c1.pkl", "data_store/market/a.csv"]
+    status = git("status", "--porcelain", cwd=work)
+    assert " M data_store/vol_system.db" in status                 # autostash restored it
+    assert "?? data_store/calibrations/diagnostics/" in status
+
+    head = git("rev-parse", "origin/main", cwd=work)
+    r = subprocess.run(["bash", str(script), "t2", "b2", ":(exclude)data_store/calibrations/diagnostics"],
+                       cwd=work, env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "No changes to commit." in r.stdout
+    assert git("rev-parse", "origin/main", cwd=work) == head
+    assert git("diff", "--staged", "--name-only", cwd=work) == ""
