@@ -396,7 +396,7 @@
    "sr_annual": -0.7877911804
   }
  },
- "code_base_commit": "44c4f0f69df03141aa4d073ee69953879ebfd552",
+ "code_base_commit": "12c6b92444358c9c3afc03feab714517226ee94c",
  "code_sha256": {
   "joint_vol_calibration/backtest/backtest_engine.py": "4b0f0fe773f4404208172efea82792b1259bbd340b119025b4ee2a17393a2f7e",
   "joint_vol_calibration/backtest/c22_bridge.py": "31a2bd1b02354b99865c7cf20b5833d48995db44768735e21f1c14df979ee53c",
@@ -404,7 +404,7 @@
   "joint_vol_calibration/signals/signal_engine.py": "e31937bfb61a48935ff082df4b5127961da9bb5b43ddfe5f3686df9827fb4145",
   "joint_vol_calibration/stats/__init__.py": "4b1d84788c99ced52fa826ddca77ea44fa277ed49633d6ff78c010eb57245b3b",
   "joint_vol_calibration/stats/artifacts.py": "aac48f169a1309d584e04d108fbee8bf4a32d0dd7d0dbf5b9725bde957497ef1",
-  "joint_vol_calibration/stats/benchmarks.py": "af38f67c0d1e1ae9e3da84b7efcd5009479f1cfc695a11dce002d284dad10dbb",
+  "joint_vol_calibration/stats/benchmarks.py": "9e63942887b9df42546d3011e72eab789229601b8ed2e0188b147b2bc7bb1728",
   "joint_vol_calibration/stats/bootstrap.py": "116c910212272092bcb019cc2b995fb6f24f92e21e4b541d4e420d753d89e619",
   "joint_vol_calibration/stats/forecast.py": "33fbbe6021760aeb435431a5337163117c0991d74233c6a32e6145fd8a4244f1",
   "joint_vol_calibration/stats/multiple_testing.py": "d89e83c71df2275118a6495804707c79ec930926ddcbeb3ac4e2762ea2684403",
@@ -413,7 +413,7 @@
   "joint_vol_calibration/stats/sharpe.py": "240f07ec5e56d3065a307db6411098d17cb7c577d7716107332734e97c966995",
   "joint_vol_calibration/stats/straddle_replay.py": "8dab5dc42d156f4a44d32423242ca558e0fda8ca7575ecc149983639a0de399a",
   "joint_vol_calibration/stats/trials.py": "527b4b265c7fdc71c2649d32a4a62361dc045628b1bac38c17d724c3fe5af273",
-  "scripts/inference_report.py": "80563364b36565e207549d240a60863f8a66f0b7816c017eef3c79260e99e450"
+  "scripts/inference_report.py": "b99d12387a2c756857ecedad20170aa0a0b80b49a06aea2b34cdf8612499513f"
  },
  "conventions": {
   "annualisation": "× √252",
@@ -427,12 +427,12 @@
   "s3: Sharpe 0.19, 95% stationary-bootstrap CI [-0.40, 0.87] includes zero; mean daily P&L $34 [-93, 169] includes zero",
   "s4: Sharpe -0.79, 95% stationary-bootstrap CI [-1.42, -0.18] excludes zero (negative); mean daily P&L $-151 [-279, -34] excludes zero (negative)",
   "portfolio: Sharpe -0.99, 95% stationary-bootstrap CI [-1.81, -0.30] excludes zero (negative); mean daily P&L $-122 [-203, -41] excludes zero (negative)",
-  "PSR(SR>0) and the largest DSR over every N and trial-variance choice: s1 0.32 / 0.049; s1c 0.05 / 0.004; s2 0.11 / 0.004; s3 0.69 / 0.271; s4 0.02 / 0.001; portfolio 0.01 / 0.000 (N from 4.6, the eigenvalue participation of the 83-series re-run family, to 210; ledger C16-C22 162, all rounds 190)",
-  "s3: DSR 0.000 at the ledger's N 162 with the family's trial-Sharpe sd 0.64/yr (SR0 1.73); 0.017 with the H0 sd 0.37/yr; 0.27 at N 4.6 with the H0 sd; MinTRL 78 years at the observed SR and moments",
+  "PSR(SR>0); DSR at the ledger's trial counts (N 147-210: the C16-C22 effective N and the raw counts, every trial-variance choice); the largest DSR over every N and variance choice: s1 0.32; 0.000-0.001; 0.049; s1c 0.05; 0.000-0.000; 0.004; s2 0.11; 0.000-0.000; 0.004; s3 0.69; 0.000-0.019; 0.271; s4 0.02; 0.000-0.000; 0.001; portfolio 0.01; 0.000-0.000; 0.000. The largest is at null_var|n_eigen_participation: N 4.6 is the eigenvalue participation ratio of the 83 re-run trial series, not a count of trials (ledger C16-C22 162, all rounds 190); null_var is the skill-less trial variance 1/(T-1)",
+  "s3: DSR 0.000 at the ledger's N 162 with the family's trial-Sharpe sd 0.64/yr (SR0 1.73); 0.017 with the H0 sd 0.37/yr; 0.27 only at N 4.6 (the re-run family's eigenvalue participation, not a trial count) with the H0 sd; MinTRL 78 years at the observed SR and moments",
   "Hansen SPA (the 6 published series vs cash): consistent p 0.65; Romano-Wolf StepM superior: none",
   "Over the 44 trial series priced at an estimated beta: SPA p 0.20, StepM superior none; over all 83 (incl. beta = 1, the mis-specified mark): SPA p 0.013, StepM superior ['beta1.00:s1']",
+  "CSCV PBO (the published portfolio's configurations, 16 series, 12870 splits): 0.34; OOS-on-IS Sharpe slope -0.99; selected config's OOS Sharpe -0.90/yr (IS -0.28)",
   "CSCV PBO (beta-estimated trials, 44 series, 12870 splits): 0.01; OOS-on-IS Sharpe slope -1.11; selected config's OOS Sharpe 0.41/yr (IS 1.04)",
-  "CSCV PBO (portfolio configs, 16 series, 12870 splits): 0.34; OOS-on-IS Sharpe slope -0.99; selected config's OOS Sharpe -0.90/yr (IS -0.28)",
   "CSCV PBO (all trials, 83 series, 12870 splits): 0.00; OOS-on-IS Sharpe slope -1.06; selected config's OOS Sharpe 0.60/yr (IS 1.42)",
   "s1: timing vs 3550 circular shifts p 0.177 (Holm over 6: 0.88); real $-306,779 = exposure at random timing $-419,391 + timing $112,612; trade shuffle (2000 paths) p 0.208 (Holm 1.00)",
   "s1c: timing vs 3550 circular shifts p 0.631 (Holm over 6: 1.00); real $-453,845 = exposure at random timing $-403,511 + timing $-50,334; trade shuffle (2000 paths) p 0.679 (Holm 1.00)",
@@ -518,6 +518,11 @@
    "oos_on_is_slope": -1.056742057,
    "oos_sharpe_of_selected_mean": 0.037823272,
    "pbo": 0.00101010101
+  },
+  "pbo_basis": {
+   "pbo_all_trials": "all 83 re-run trial series, including the beta = 1 rows (the mis-specified mark)",
+   "pbo_beta_estimated": "the 44 trial series priced at an estimated beta, every sleeve and the portfolio",
+   "pbo_portfolio_configs": "the 16 re-run configurations of the published portfolio (C22 bridge rows and the beta grid): the PBO that bears on the published portfolio; report it with every PBO"
   },
   "pbo_beta_estimated": {
    "frac_selected_oos_negative": 0.2366744367,
@@ -1106,36 +1111,108 @@
    "portfolio": {
     "argmax": "null_var|n_eigen_participation",
     "argmin": "family_var|n_upper_with_evaluations",
+    "at_ledger_counts": {
+     "argmax": "null_var|n_eff_c16_c22",
+     "argmin": "family_var|n_upper_with_evaluations",
+     "max": 1.341693964e-06,
+     "min": 2.304967853e-11,
+     "n_choices": [
+      "n_eff_c16_c22",
+      "n_raw_c16_c22",
+      "n_raw_all_rounds",
+      "n_upper_with_evaluations"
+     ]
+    },
     "max": 0.0003997289117,
     "min": 2.304967853e-11
    },
    "s1": {
     "argmax": "null_var|n_eigen_participation",
     "argmin": "family_var|n_upper_with_evaluations",
+    "at_ledger_counts": {
+     "argmax": "null_var|n_eff_c16_c22",
+     "argmin": "family_var|n_upper_with_evaluations",
+     "max": 0.0006466076499,
+     "min": 2.877070432e-08,
+     "n_choices": [
+      "n_eff_c16_c22",
+      "n_raw_c16_c22",
+      "n_raw_all_rounds",
+      "n_upper_with_evaluations"
+     ]
+    },
     "max": 0.04946128807,
     "min": 2.877070432e-08
    },
    "s1c": {
     "argmax": "null_var|n_eigen_participation",
     "argmin": "family_var|n_upper_with_evaluations",
+    "at_ledger_counts": {
+     "argmax": "null_var|n_eff_c16_c22",
+     "argmin": "family_var|n_upper_with_evaluations",
+     "max": 3.195745225e-05,
+     "min": 1.967826949e-09,
+     "n_choices": [
+      "n_eff_c16_c22",
+      "n_raw_c16_c22",
+      "n_raw_all_rounds",
+      "n_upper_with_evaluations"
+     ]
+    },
     "max": 0.00393711116,
     "min": 1.967826949e-09
    },
    "s2": {
     "argmax": "null_var|n_eigen_participation",
     "argmin": "family_var|n_upper_with_evaluations",
+    "at_ledger_counts": {
+     "argmax": "null_var|n_eff_c16_c22",
+     "argmin": "family_var|n_upper_with_evaluations",
+     "max": 3.35861041e-06,
+     "min": 5.234651672e-13,
+     "n_choices": [
+      "n_eff_c16_c22",
+      "n_raw_c16_c22",
+      "n_raw_all_rounds",
+      "n_upper_with_evaluations"
+     ]
+    },
     "max": 0.004120277159,
     "min": 5.234651672e-13
    },
    "s3": {
     "argmax": "null_var|n_eigen_participation",
     "argmin": "family_var|n_upper_with_evaluations",
+    "at_ledger_counts": {
+     "argmax": "null_var|n_eff_c16_c22",
+     "argmin": "family_var|n_upper_with_evaluations",
+     "max": 0.0188537381,
+     "min": 1.678837723e-05,
+     "n_choices": [
+      "n_eff_c16_c22",
+      "n_raw_c16_c22",
+      "n_raw_all_rounds",
+      "n_upper_with_evaluations"
+     ]
+    },
     "max": 0.2711540882,
     "min": 1.678837723e-05
    },
    "s4": {
     "argmax": "null_var|n_eigen_participation",
     "argmin": "family_var|n_upper_with_evaluations",
+    "at_ledger_counts": {
+     "argmax": "null_var|n_eff_c16_c22",
+     "argmin": "family_var|n_upper_with_evaluations",
+     "max": 1.309466358e-06,
+     "min": 5.15339191e-12,
+     "n_choices": [
+      "n_eff_c16_c22",
+      "n_raw_c16_c22",
+      "n_raw_all_rounds",
+      "n_upper_with_evaluations"
+     ]
+    },
     "max": 0.0006730217906,
     "min": 5.15339191e-12
    }
@@ -1375,7 +1452,20 @@
    "n_raw_c16_c22": 162.0,
    "n_upper_with_evaluations": 210.0
   },
-  "note": "DSR = PSR(SR > SR0), SR0 = expected maximum Sharpe of N skill-less trials with trial Sharpe variance V. 'dsr' uses the whole family's V; 'dsr_range' spans every N choice (eigenvalue participation of the re-run family, average-correlation N_eff, raw ledger counts) and every V choice. N from the committed trials ledger",
+  "n_choices_basis": {
+   "n_eff_c16_c22": "average-correlation effective N of the 162 C16-C22 ledger trials (mean pairwise correlation of the 83-series family)",
+   "n_eigen_participation": "eigenvalue participation ratio of the correlation matrix of the 83 re-runnable trial series (C22 bridge rows and the beta grid, each x 6 sleeves): a clustering measure of that family, close to the number of distinct sleeves; NOT a count of ledger trials. The most lenient N",
+   "n_raw_all_rounds": "ledger count, every round C10-C22 (190 trials)",
+   "n_raw_c16_c22": "ledger count, rounds C16-C22 (162 trials)",
+   "n_upper_with_evaluations": "ledger count with the 20 robustness evaluations that were never candidates (upper bound)"
+  },
+  "n_choices_ledger_based": [
+   "n_eff_c16_c22",
+   "n_raw_c16_c22",
+   "n_raw_all_rounds",
+   "n_upper_with_evaluations"
+  ],
+  "note": "DSR = PSR(SR > SR0), SR0 = expected maximum Sharpe of N skill-less trials with trial Sharpe variance V. 'dsr' uses the whole family's V; 'dsr_range' spans every N choice and every V choice, and 'dsr_range.<sleeve>.at_ledger_counts' only the N choices read from the committed trials ledger (n_choices_ledger_based: the average-correlation N_eff and the raw counts). The overall maximum is reached at n_eigen_participation, the eigenvalue participation ratio of the re-run trial family, which is not a trial count (n_choices_basis); quote it as the most lenient bound, beside the ledger-count range",
   "sr0_annual": {
    "n_eff_c16_c22": 1.71248044,
    "n_eigen_participation": 0.7364755458,

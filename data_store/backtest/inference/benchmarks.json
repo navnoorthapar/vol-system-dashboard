@@ -5108,6 +5108,14 @@
    "last_expiry": "2025-03-21",
    "n_periods": 87,
    "overall": 0.7998151485,
+   "partial_years": {
+    "2025": {
+     "first_expiry": "2025-01-17",
+     "last_expiry": "2025-03-21",
+     "n_periods": 3,
+     "window": "2025-01-01..2025-03-24"
+    }
+   },
    "per_period": {
     "median": 0.758194729,
     "n_unsolved": 1,
@@ -5134,7 +5142,7 @@
     "2022": 0.8945940432,
     "2023": 0.7506039971,
     "2024": 0.7892363136,
-    "2025": 0.818102668
+    "2025": 0.823016566
    },
    "by_year_per_period": {
     "2018": {
@@ -5173,29 +5181,29 @@
      "se_approx": 0.03841167458
     },
     "2025": {
-     "n_periods": 12,
-     "per_period_median": 0.8722921936,
-     "se_approx": 0.06742719087
+     "n_periods": 11,
+     "per_period_median": 0.8769365652,
+     "se_approx": 0.07204139647
     }
    },
    "daily": {
     "beta_0.82": {
-     "beta": 0.95753811,
-     "corr_daily": 0.9740257211,
-     "corr_weekly": 0.9686027758,
-     "n_days": 1797,
-     "partial_corr_ex_spx": 0.8786704772,
-     "sharpe_bench": 0.1210596796,
-     "sharpe_sleeve": 0.1817363324
+     "beta": 0.9575088566,
+     "corr_daily": 0.9740211929,
+     "corr_weekly": 0.9685967633,
+     "n_days": 1796,
+     "partial_corr_ex_spx": 0.8785749476,
+     "sharpe_bench": 0.1156829193,
+     "sharpe_sleeve": 0.1757137743
     },
     "beta_implied_overall": {
-     "beta": 0.9582251698,
-     "corr_daily": 0.9739015609,
-     "corr_weekly": 0.9681782443,
-     "n_days": 1797,
-     "partial_corr_ex_spx": 0.8787940981,
-     "sharpe_bench": 0.1210596796,
-     "sharpe_sleeve": 0.1014267451
+     "beta": 0.9581960247,
+     "corr_daily": 0.9738974332,
+     "corr_weekly": 0.9681748879,
+     "n_days": 1796,
+     "partial_corr_ex_spx": 0.878694746,
+     "sharpe_bench": 0.1156829193,
+     "sharpe_sleeve": 0.09595237286
     }
    },
    "first_roll": "2017-12-29",
@@ -5206,27 +5214,35 @@
     "n_years": 7,
     "sd": 0.05288795439
    },
-   "last_expiry": "2025-03-24",
-   "n_periods": 374,
-   "overall": 0.7996932657,
+   "last_expiry": "2025-03-21",
+   "n_periods": 373,
+   "overall": 0.7998025718,
+   "partial_years": {
+    "2025": {
+     "first_expiry": "2025-01-03",
+     "last_expiry": "2025-03-21",
+     "n_periods": 12,
+     "window": "2025-01-01..2025-03-24"
+    }
+   },
    "per_period": {
-    "median": 0.801231687,
+    "median": 0.8027215347,
     "n_unsolved": 10,
-    "q25": 0.6513133574,
-    "q75": 0.9254447667,
-    "sd": 0.2735645898
+    "q25": 0.6506743053,
+    "q75": 0.9267211428,
+    "sd": 0.2739204633
    },
    "replication_at_0.82": {
-    "mean_period_diff_bp": 1.888640915,
-    "period_return_corr": 0.9700086701,
-    "tracking_error_bp_per_period": 40.54081068
+    "mean_period_diff_bp": 1.879060073,
+    "period_return_corr": 0.9700024738,
+    "tracking_error_bp_per_period": 40.59484047
    },
    "settle_sources": {
-    "primary": 374
+    "primary": 373
    }
   },
   "canonical_beta": 0.82,
-  "method": "cash-secured put-write replication with puts at σ = β·VIX-TS(T): strike = SPX close on the roll date, sold at that close; monthly puts settle at Cboe's SET value (Yahoo open where SET has no row), weekly puts at the close; collateral earns ^IRX. β solves replication return = index return per period, per expiry year and overall. The indices sell at a VWAP and PUT's collateral earns 1- and 3-month bills, so this is an approximation; 2025 covers January-March only."
+  "method": "cash-secured put-write replication with puts at σ = β·VIX-TS(T): strike = SPX close on the roll date, sold at that close; monthly puts settle at Cboe's SET value (Yahoo open where SET has no row), weekly puts at the close; collateral earns ^IRX. β solves replication return = index return per period, per expiry year and overall. The indices sell at a VWAP and PUT's collateral earns 1- and 3-month bills, so this is an approximation. A year in partial_years is not a full year (2025: January to the window's end); a final roll period the window cuts short is dropped (monthly_roll_dates / weekly_roll_dates)."
  },
  "indices": [
   "PUT",

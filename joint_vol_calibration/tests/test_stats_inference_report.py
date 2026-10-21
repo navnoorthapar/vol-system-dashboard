@@ -183,7 +183,10 @@ def test_committed_null_paths_rebuild(canonical_null):
             assert got[s]["sharpe"] == pytest.approx(float(ref.loc[s, "sharpe"]), rel=1e-12, abs=1e-12)
 
 
-def test_put_implied_beta_rebuilds_from_the_committed_levels():
+def _rebuild_implied_beta(name):
+    """bm.implied_beta for PUT (monthly rolls, SET settlement, 09:30 ET) or
+    WPUT (weekly rolls, close settlement, 16:00 ET) from the committed levels
+    and the DB, as scripts/inference_report.py builds it."""
     from joint_vol_calibration.backtest.delta_hedger import _interp_atm_iv
     from joint_vol_calibration.data.database import (
         get_spx_ohlcv,
@@ -191,8 +194,7 @@ def test_put_implied_beta_rebuilds_from_the_committed_levels():
         get_vix_term_structure_wide,
     )
 
-    bj = json.loads((OUT / "benchmarks.json").read_text())
-    lv = bm.load_levels(bte.DATA_DIR / "benchmarks", ("PUT", "SET"))
+    lv = bm.load_levels(bte.DATA_DIR / "benchmarks", (name, "SET"))
     spx = get_spx_ohlcv(as_of_date=bte.BT_END, start_date="2017-01-01")
     spx = spx.set_index(pd.to_datetime(spx["date"]))
     vw = get_vix_term_structure_wide(as_of_date=bte.BT_END, start_date="2017-01-01")
@@ -200,15 +202,32 @@ def test_put_implied_beta_rebuilds_from_the_committed_levels():
     tb = get_tbill_rates_series(as_of_date=bte.BT_END, start_date="2017-01-01")
     rates = pd.Series(tb["rate"].to_numpy(float), index=pd.to_datetime(tb["date"]))
     sessions = spx.index[(spx.index >= "2017-12-01") & (spx.index <= bte.BT_END)]
-    rolls = bm.monthly_roll_dates(sessions)
-    rolls = rolls[(rolls >= "2017-12-15") & (rolls <= bte.BT_END)]
-    per = bm.put_write_periods(rolls, spx["close"], lv["SET"], vw, rates, bte.Q_BACKTEST,
-                               expiry_hour_et=9.5, settle_fallback=spx["open"])
-    R = lv["PUT"].reindex(per["expiry"]).to_numpy() / lv["PUT"].reindex(per["roll"]).to_numpy() - 1
+    if name == "PUT":
+        rolls = bm.monthly_roll_dates(sessions)
+        rolls = rolls[(rolls >= "2017-12-15") & (rolls <= bte.BT_END)]
+        per = bm.put_write_periods(rolls, spx["close"], lv["SET"], vw, rates, bte.Q_BACKTEST,
+                                   expiry_hour_et=9.5, settle_fallback=spx["open"])
+    else:
+        rolls = bm.weekly_roll_dates(sessions)
+        rolls = rolls[(rolls >= "2017-12-29") & (rolls <= bte.BT_END)]
+        per = bm.put_write_periods(rolls, spx["close"], spx["close"], vw, rates, bte.Q_BACKTEST,
+                                   expiry_hour_et=16.0, settle_fallback=None)
+    R = lv[name].reindex(per["expiry"]).to_numpy() / lv[name].reindex(per["roll"]).to_numpy() - 1
+    ok = np.isfinite(R)
+    per, R = per[ok].reset_index(drop=True), R[ok]
     vt = np.array([_interp_atm_iv(vw.loc[a], T) for a, T in zip(per["roll"], per["T"])])
     yrs = per["expiry"].dt.year.to_numpy()
     ib = bm.implied_beta(per, vt, R, groups={str(y): yrs == y for y in sorted(set(yrs))})
-    ref = bj["implied_beta"]["PUT"]
+    return per, yrs, ib
+
+
+@pytest.mark.parametrize("name", ["PUT", "WPUT"])
+def test_implied_beta_rebuilds_from_the_committed_levels(name):
+    bj = json.loads((OUT / "benchmarks.json").read_text())
+    per, yrs, ib = _rebuild_implied_beta(name)
+    ref = bj["implied_beta"][name]
+    assert len(per) == ref["n_periods"]
+    assert str(per["expiry"].iloc[-1].date()) == ref["last_expiry"]
     assert ib["overall"] == pytest.approx(ref["overall"], rel=1e-8)
     for y, b in ref["by_year"].items():
         assert ib["groups"][y] == pytest.approx(b, rel=1e-8)
@@ -221,6 +240,66 @@ def test_put_implied_beta_rebuilds_from_the_committed_levels():
         sel = pp[(yrs == int(y)) & np.isfinite(pp)]
         assert v["per_period_median"] == pytest.approx(float(np.median(sel)), rel=1e-8)
         assert v["se_approx"] == pytest.approx(float(np.std(sel, ddof=1) / np.sqrt(sel.size)), rel=1e-8)
+
+
+def test_no_pseudo_period_at_the_window_end_and_partial_years_are_marked():
+    """STATS-5: the window ends on Monday 2025-03-24; WPUT's last period is
+    the week to Friday 03-21 (no Friday-to-Monday put WPUT never wrote), and
+    each index records which of its years are partial, with their periods."""
+    bj = json.loads((OUT / "benchmarks.json").read_text())
+    w = bj["implied_beta"]["WPUT"]
+    assert w["last_expiry"] == "2025-03-21"
+    for name in ("PUT", "WPUT"):
+        ib = bj["implied_beta"][name]
+        assert set(ib["partial_years"]) == set(bj["partial_years"]) & set(ib["by_year"]) == {"2025"}
+        part = ib["partial_years"]["2025"]
+        assert part["window"] == bj["partial_years"]["2025"]
+        assert part["last_expiry"] == ib["last_expiry"] <= bte.BT_END
+        assert part["n_periods"] >= ib["by_year_per_period"]["2025"]["n_periods"]
+        assert ib["full_year_dispersion"]["n_years"] == 7
+
+
+def test_dsr_reports_the_ledger_count_range_beside_the_lenient_bound(summary):
+    """STATS-3 / CLM-13: every N choice says what it is; the DSR range over
+    the N read from the trials ledger is stored beside the overall maximum,
+    which sits at the re-run family's eigenvalue participation ratio (not a
+    trial count), and the headline gives both with that label."""
+    t = summary["trials"]
+    nc, basis, led = t["n_choices"], t["n_choices_basis"], t["n_choices_ledger_based"]
+    assert set(basis) == set(nc)
+    assert "not a count of ledger trials" in basis["n_eigen_participation"].lower()
+    assert set(led) == set(nc) - {"n_eigen_participation"}
+    for s in SLEEVES:
+        rng, grid = t["dsr_range"][s], t["dsr_sensitivity"]["values"][s]
+        at = rng["at_ledger_counts"]
+        vals = [grid[f"{v}|N={format(nc[k], '.6g')}"] for v in t["variance_choices_per_period"] for k in led]
+        assert at["min"] == pytest.approx(min(vals), rel=1e-9, abs=1e-15)
+        assert at["max"] == pytest.approx(max(vals), rel=1e-9, abs=1e-15)
+        assert at["argmax"].split("|")[1] in led
+        assert rng["min"] - 1e-12 <= at["min"] <= at["max"] <= rng["max"] + 1e-12
+    s3 = t["dsr_range"]["s3"]
+    assert s3["argmax"] == "null_var|n_eigen_participation"
+    assert s3["at_ledger_counts"]["max"] < s3["max"]
+    line = next(x for x in summary["headline"] if x.startswith("PSR(SR>0)"))
+    assert "not a count of trials" in line
+    assert (f"s3 {summary['closed_form']['s3']['psr_gt_0']:.2f}; {s3['at_ledger_counts']['min']:.3f}-"
+            f"{s3['at_ledger_counts']['max']:.3f}; {s3['max']:.3f}") in line
+
+
+def test_every_pbo_is_reported_with_its_basis(summary):
+    """CLM-13: the three CSCV PBOs are all in the headline, the published
+    portfolio's configurations first, and each has a stated basis."""
+    m = summary["multiple_testing"]
+    keys = ["pbo_portfolio_configs", "pbo_beta_estimated", "pbo_all_trials"]
+    assert set(m["pbo_basis"]) == set(keys)
+    assert "published portfolio" in m["pbo_basis"]["pbo_portfolio_configs"]
+    lines = [x for x in summary["headline"] if x.startswith("CSCV PBO")]
+    assert len(lines) == 3
+    for x, k in zip(lines, keys):
+        p = m[k]
+        assert f"{p['n_configurations']} series" in x
+        assert f": {p['pbo']:.2f};" in x
+    assert "published portfolio" in lines[0]
 
 
 def test_forecast_eval_is_complete():

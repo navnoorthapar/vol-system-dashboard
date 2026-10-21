@@ -47,7 +47,29 @@ def test_roll_calendars():
     w = bm.weekly_roll_dates(sessions)
     assert pd.Timestamp("2019-04-18") in w
     assert pd.Timestamp("2019-04-12") in w
-    assert all(d.weekday() in (3, 4) for d in w[1:-1])
+    # the window ends on Tuesday 2019-12-31, inside a week whose roll is
+    # Friday 2020-01-03: that Tuesday is not a roll (STATS-5)
+    assert w[-1] == pd.Timestamp("2019-12-27")
+    assert all(d.weekday() in (3, 4) for d in w)
+
+
+def test_a_window_that_stops_inside_a_roll_period_adds_no_pseudo_roll():
+    """STATS-5: the backtest window ends on Monday 2025-03-24. The last weekly
+    roll is Friday 03-21 (no Friday-to-Monday 'weekly' put); a window that
+    stops before a month's third Friday has no roll that month; a window that
+    ends on the roll date itself keeps it, and a holiday-Thursday roll stays."""
+    nyse = pd.DatetimeIndex(pd.bdate_range("2025-01-02", "2025-03-24"))
+    w = bm.weekly_roll_dates(nyse)
+    assert w[-1] == pd.Timestamp("2025-03-21")
+    assert all(d.weekday() == 4 for d in w)
+    assert bm.weekly_roll_dates(nyse[nyse <= "2025-03-21"])[-1] == pd.Timestamp("2025-03-21")
+    m = bm.monthly_roll_dates(nyse[nyse <= "2025-03-18"])
+    assert list(m) == [pd.Timestamp("2025-01-17"), pd.Timestamp("2025-02-21")]
+    assert bm.monthly_roll_dates(nyse)[-1] == pd.Timestamp("2025-03-21")
+    # Good Friday 2025-04-18: the week's roll is Thursday 04-17, also as the window's last day
+    apr = pd.DatetimeIndex(pd.bdate_range("2025-04-07", "2025-04-17"))
+    assert bm.weekly_roll_dates(apr)[-1] == pd.Timestamp("2025-04-17")
+    assert bm.monthly_roll_dates(apr)[-1] == pd.Timestamp("2025-04-17")
 
 
 def test_bs_put_parity_and_limits():
