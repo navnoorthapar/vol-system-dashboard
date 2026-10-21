@@ -25,15 +25,20 @@ surface.json — inputs (chain path and SHA-256, spot, rate, T origin,
     summary with the largest violating rows and the quotes it moves outside
     their spread, and for each fitted surface (essvi, svi, svi_cal) its
     parameters, analytic no-arbitrage margins (and, for SVI surfaces, the
-    calendar ordering on the check grid), fit diagnostics, dense-grid checks
-    and quote metrics; plus an ATM term structure (eSSVI ATM vol and skew,
-    SVI-cal ATM vol, mid-quote ATM vol per quoted expiry, parity carry).
+    butterfly and calendar certificates of the published parameters, which
+    are written at full precision, and the arbitrage_free_certified gate),
+    fit diagnostics, dense-grid checks and quote metrics; plus an ATM term
+    structure (eSSVI ATM vol and skew, SVI-cal ATM vol, mid-quote ATM vol
+    per quoted expiry, parity carry).
 
-scorecard.json — every model of scorecard.MODEL_REGISTRY on the same quotes:
-    description, parameter count, in-sample size, metrics (all / in /
-    out of sample / excluding arbitrage-flagged quotes, by expiry, tenor,
-    delta and tenor x delta), dense-grid checks; a ranking by out-of-sample
-    RMSE in half-spreads.
+scorecard.json — every model of scorecard.MODEL_REGISTRY on the same quote
+    universe: description, parameter count, in-sample size, metrics (all /
+    in / out of sample (its own held-out quotes) / common_out_of_sample
+    (the quotes no model was fitted to) / excluding arbitrage-flagged
+    quotes, by expiry, tenor, delta and tenor x delta), dense-grid checks;
+    rankings by the median out-of-sample error in half-spreads, on each
+    model's own and on the common held-out quotes. The svi_cal note is
+    written from surface.json's certificate fields.
 
 vix_replication.json — official closes, the replicated VIX (Cboe rules;
     parity-forward variant; any-weekday bracket) and VIX9D/3M/6M analogues,
@@ -74,7 +79,7 @@ from joint_vol_calibration.surface._blas import single_thread_blas
 SCHEMA_VERSION = 1
 SURFACE_DIR = DATA_DIR / "surface"
 SIG_DIGITS = 10
-WIDE_K_GRID = np.linspace(-3.0, 2.0, 2001)      # analytic g checks of the fitted slices
+WIDE_K_GRID = np.linspace(-3.0, 2.0, 2001)      # eSSVI g check (its conditions are analytic)
 
 
 # ── deterministic serialisation ───────────────────────────────────────────────
@@ -89,8 +94,27 @@ def round_sig(a, sig: int = SIG_DIGITS):
     return np.where(ok, np.round(x * f) / f, x)
 
 
+class _Exact(float):
+    """A float written at full precision (17 significant digits, repr) rather
+    than SIG_DIGITS: the SVI slice parameters, so the published surface is the
+    fitted one bit for bit and its no-arbitrage certificates recompute from
+    the JSON exactly (10-digit rounding moves g by up to ~1e-10)."""
+
+
+def _exact_svi_params(d: dict) -> dict:
+    """Copy of an SVISurface.to_dict() with the slice parameters as _Exact."""
+    out = dict(d)
+    out["slices"] = [{**sl, **{n: _Exact(sl[n]) for n in ("T", "a", "b", "rho", "m", "sigma")}}
+                     for sl in d.get("slices", [])]
+    return out
+
+
 def _clean(obj):
-    """JSON-safe copy: numpy scalars to Python, floats rounded, NaN/inf to None."""
+    """JSON-safe copy: numpy scalars to Python, floats rounded (_Exact kept
+    whole), NaN/inf to None."""
+    if isinstance(obj, _Exact):
+        v = float(obj)
+        return v if math.isfinite(v) else None
     if isinstance(obj, dict):
         return {str(k): _clean(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -153,16 +177,47 @@ def _surface_section(model_row: dict, surface) -> dict:
         gmin = min(float(surface.g(WIDE_K_GRID, T).min()) for T in surface.T)
         sec["analytic_g_min_k_-3_to_2"] = gmin
     elif isinstance(surface, sv.SVISurface):
-        gmins = [float(sv.svi_g(WIDE_K_GRID, s.params).min()) for s in surface.slices]
+        # the certificates of the PUBLISHED parameters (written whole, _Exact):
+        # the same functions the fit accepts a slice with, so the label and
+        # the artifact cannot disagree
+        pub = sv.SVISurface.from_dict(model_row["params"])
+        cert = pub.certificate()
+        b = cert["butterfly"]
         lee = [max(s.params[1] * (1 + s.params[2]), s.params[1] * (1 - s.params[2]))
-               for s in surface.slices]
-        sec["analytic_g_min_on_fit_grid_k_-1.5_to_1"] = float(min(
-            float(sv.svi_g(sv.SVI_GRID, s.params).min()) for s in surface.slices))
-        sec["analytic_g_min_k_-3_to_2"] = float(min(gmins))
-        sec["slices_with_g_negative_on_k_-3_to_2"] = int(sum(g < -1e-9 for g in gmins))
+               for s in pub.slices]
+        sec["analytic_g_min_on_fit_rows_k_-3_to_2"] = float(min(
+            float(sv.svi_g(sv.SVI_GRID, s.params).min()) for s in pub.slices))
+        sec["analytic_g_min_k_-3_to_2"] = b["g_min_k_-3_to_2"]
+        sec["slices_with_g_negative_on_k_-3_to_2"] = b["slices_with_g_negative_on_k_-3_to_2"]
+        sec["butterfly_certificate"] = b
         sec["max_wing_slope_b_1_plus_abs_rho"] = float(max(lee))
-        sec["calendar_ordering"] = surface.ordering()
+        sec["calendar_ordering"] = cert["calendar"]
+        sec["butterfly_free_certified"] = bool(b["certified"])
+        sec["arbitrage_free_certified"] = bool(cert["arbitrage_free"])
     return sec
+
+
+def _svi_cal_note(sec: dict | None) -> str:
+    """The scorecard's svi_cal label, written from the certificate fields of
+    surface.json (the acceptance gate), never asserted independently."""
+    tail = ("svi has no calendar constraint and its calendar violations are counted in "
+            "dense_grid.")
+    if not sec:
+        return "svi_cal is not available on this session. " + tail
+    b, c = sec["butterfly_certificate"], sec["calendar_ordering"]
+    if sec["arbitrage_free_certified"]:
+        return ("svi_cal is the arbitrage-free surface on this session: every slice passes "
+                "svi.butterfly_certificate (Durrleman g >= 0 on a 1e-4 grid over k in [-3, 2] "
+                "and a 1/k grid out to |k| = 2,000-3,000, each local minimum refined, and the "
+                f"|k| -> inf limit; minimum g {b['g_min']:.2e}) and every consecutive pair passes "
+                "svi.ordering_certificate (total variance ordered to 1e-10 on the same grids, "
+                "wing slopes and tied-wing intercepts included; minimum w_(i+1) - w_i "
+                f"{c['min_dw']:.1e}). Numerical certificates, not closed-form; fields "
+                "surface.json surfaces.svi_cal.butterfly_certificate / calendar_ordering. " + tail)
+    return (f"svi_cal is NOT certified arbitrage-free on this session: "
+            f"{b['slices_with_g_negative']} slice(s) fail svi.butterfly_certificate and "
+            f"{len(c.get('pairs_unordered') or [])} consecutive pair(s) fail "
+            "svi.ordering_certificate (surface.json surfaces.svi_cal). " + tail)
 
 
 def _repaired_quotes(q: pd.DataFrame, flags: pd.DataFrame, n: int = 25) -> dict:
@@ -181,10 +236,32 @@ def _repaired_quotes(q: pd.DataFrame, flags: pd.DataFrame, n: int = 25) -> dict:
             "largest": d.head(n).to_dict(orient="records")}
 
 
+def _settlement_deviations(terms: list) -> list:
+    """Deviation lines for the settlement each stored term was given."""
+    out = []
+    proxy = [t["expiry"] for t in terms if t.get("am_date_pm_proxy")]
+    if proxy:
+        out.append(f"SPXW PM lines stand in for the AM SPX monthly on {', '.join(proxy)} (the "
+                   "chain stores no SPX-root lines there); their T runs to the 16:00 PM "
+                   "settlement, 6.5 h past the 09:30 SOQ the AM series settles on.")
+    rootless = [t for t in terms if not t.get("has_root")]
+    if rootless:
+        am = [t["expiry"] for t in rootless if vx.is_spx_am_settlement_date(t["expiry"])]
+        out.append("Root-less (pre-C22) chain: every line is treated as PM-settled"
+                   + (f"; on the AM monthly dates {', '.join(am)} T is 6.5 h longer than the AM "
+                      "series'." if am else "."))
+    return out
+
+
 def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                svi_surface, essvi_surface: es.ESSVISurface, calc: datetime,
-               svi_cal_surface=None, attribution: dict | None = None) -> list:
+               svi_cal_surface=None, attribution: dict | None = None,
+               indices: dict | None = None) -> list:
     notes = []
+    for name, rep in (indices or {}).items():
+        if rep.get("headline_method") is None:
+            notes.append(f"{name} is not replicated from the stored chain: "
+                         f"{rep.get('not_replicated_reason')}.")
     raw = sq.raw
     n_zero = int(((pd.to_numeric(raw["bid"], errors="coerce") <= 0)).sum()) if "bid" in raw else 0
     if n_zero == 0:
@@ -246,10 +323,14 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                      f"{a['gap_pts']:+.2f}. Strikes beyond the stored strip would add "
                      f"{a['truncation_pts']:+.2f} under the surface's wing; the stored quotes "
                      f"beyond the fitted K/F 0.70-1.30 are {wing}. Inside the fitted range "
-                     f"market and surface differ by {a['fit_inside_range_pts']:+.2f}. Left "
-                     f"unexplained by the chain: {a['residual_pts']:+.2f} (official - "
-                     f"replicated - truncation): snapshot timing vs the 16:15 ET print, stale "
-                     f"quotes, rate.")
+                     f"market and surface differ by {a['fit_inside_range_pts']:+.2f} (these "
+                     f"two terms set the replication against the surface; they are not part "
+                     f"of the gap). Left unexplained by the chain: {a['residual_pts']:+.2f} "
+                     f"(official - replicated - truncation"
+                     + (f"; {100.0 * a['residual_share_of_official_minus_replicated']:.0f}% of "
+                        "official - replicated"
+                        if a.get("residual_share_of_official_minus_replicated") is not None else "")
+                     + "): snapshot timing vs the 16:15 ET print, stale quotes, rate.")
     return notes
 
 
@@ -268,6 +349,9 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                               calibrations_dir=Path(calibrations_dir or sc.CALIBRATIONS_DIR))
         card, resid = sc.score_models(ctx, models)
         essvi_surface, _ = sc._essvi(ctx)
+        for m in card["models"]:              # SVI slice parameters are published whole
+            if m.get("available") and m["model"] in ("svi", "svi_cal"):
+                m["params"] = _exact_svi_params(m["params"])
 
         # residuals: add the arbitrage flags, stable order
         if len(resid):
@@ -329,26 +413,34 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
 
         # scorecard.json
         avail = [m for m in card["models"] if m.get("available")]
-        ranking = sorted(({"model": m["model"],
-                           "oos_rmse_hs": m["metrics"]["out_of_sample"].get("rmse_hs"),
-                           "oos_median_abs_hs": m["metrics"]["out_of_sample"].get("median_abs_hs"),
-                           "oos_inside_spread_pct": m["metrics"]["out_of_sample"].get("inside_spread_pct"),
-                           "oos_rmse_vp": m["metrics"]["out_of_sample"].get("rmse_vp")}
-                          for m in avail if m["metrics"]["out_of_sample"].get("n")),
-                         key=lambda r: (r["oos_median_abs_hs"] is None, r["oos_median_abs_hs"]))
+
+        def _rank(split: str) -> list:
+            return sorted(({"model": m["model"],
+                            "oos_rmse_hs": m["metrics"][split].get("rmse_hs"),
+                            "oos_median_abs_hs": m["metrics"][split].get("median_abs_hs"),
+                            "oos_inside_spread_pct": m["metrics"][split].get("inside_spread_pct"),
+                            "oos_rmse_vp": m["metrics"][split].get("rmse_vp")}
+                           for m in avail if m["metrics"][split].get("n")),
+                          key=lambda r: (r["oos_median_abs_hs"] is None, r["oos_median_abs_hs"]))
+        common = card["common_out_of_sample"]
+        own_n = ", ".join(f"{m['model']} {m['metrics']['out_of_sample'].get('n', 0):,}" for m in avail)
         scorecard_doc = {"schema_version": SCHEMA_VERSION, "session": session,
                          "n_quotes": len(q), "models": card["models"],
-                         "ranking_by_oos_median_abs_hs": ranking,
+                         "common_out_of_sample": common,
+                         "ranking_by_oos_median_abs_hs": _rank("out_of_sample"),
+                         "ranking_by_common_oos_median_abs_hs": _rank("common_out_of_sample"),
                          "notes": [
-                             ("Every model is scored on the same quotes (the calibrator's OOS "
-                              "universe) with the same metrics and dense-grid checks."),
+                             (f"Every model is scored on the same quote universe (the "
+                              f"calibrator's cleaned quotes, {len(q):,}) with the same metrics "
+                              f"and dense-grid checks. Each model's out_of_sample set is the "
+                              f"quotes it was not fitted to, so its size differs by model "
+                              f"({own_n}); metrics.common_out_of_sample scores every model on "
+                              f"the same {common['n']:,} quotes, those no model was fitted to."),
                              ("Surfaces are fitted to alternate strikes, so their out-of-sample "
                               "quotes are the strikes in between (an interpolation test); Heston's "
                               "in-sample set is its calibration anchors, fitted jointly with the "
-                              "VIX index leg."),
-                             ("svi_cal is the arbitrage-free surface (butterfly and calendar "
-                              "certified on grids); svi has no calendar constraint and its "
-                              "calendar violations are counted in dense_grid."),
+                              "VIX index leg, and its out-of-sample set is every other quote."),
+                             _svi_cal_note(surfaces.get("svi_cal")),
                              ("Yahoo snapshots carry no quote time: part of every model's spread "
                               "misses can be stale quotes rather than model error.")]}
 
@@ -367,9 +459,12 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                        terms, sq.r_ref, days, candidates_only=False, carry=carry_map, spot=sq.spot)}
             off = official.get(name)
             rep["official"] = off
-            head = rep["cboe_rules"] if rep["cboe_rules"]["ok"] else rep["parity_forward"]
-            rep["headline_method"] = "cboe_rules" if rep["cboe_rules"]["ok"] else "parity_forward"
-            if head["ok"]:
+            method, why = vx.headline_method(rep)
+            rep["headline_method"] = method
+            if method is None:
+                rep["not_replicated_reason"] = why
+            else:
+                head = rep[method]
                 rep["replicated"] = head["level"]
                 if off:
                     rep["gap_vs_official"] = head["level"] - off["close"]
@@ -382,16 +477,19 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         fitted_expiries = set(q["expiry"].astype(str))
         for name in vx.CONSTANT_MATURITY_DAYS:
             rep = indices[name]
-            head = rep[rep["headline_method"]]
             off = (rep.get("official") or {}).get("close")
+            if rep["headline_method"] is None:
+                rep["gap_attribution"] = {"available": False, "reason": "index not replicated"}
+                continue
+            head = rep[rep["headline_method"]]
             rep["gap_attribution"] = (
                 vx.gap_attribution(head, terms, sq.r_ref, svi_cal_surface, fitted_expiries, off,
                                    carry=carry_map)
                 if svi_cal_surface is not None
                 else {"available": False, "reason": "no SVI-cal surface"})
         T30 = 30.0 / 365.0
-        rep30 = indices["VIX"]["cboe_rules"] if indices["VIX"]["cboe_rules"]["ok"] \
-            else indices["VIX"]["parity_forward"]
+        m30 = indices["VIX"]["headline_method"]
+        rep30 = indices["VIX"][m30] if m30 else {"ok": False}
         atm30 = vx.constant_maturity_atm(rep30, strip)
         beta: dict[str, Any] = {"atm_vol_30d_quotes": atm30,
                 "atm_vol_30d_method": ("near / next ATM mid IVs of the replicated VIX's own terms, "
@@ -433,11 +531,11 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                  "K0 lacks one (two-sided-only storage); flagged per term."),
                 ("VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days "
                  "(analogues, not Cboe's index-specific series sets)."),
-                "Root-less (pre-C22) chains are treated as PM-settled.",
+                *_settlement_deviations(terms),
             ],
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,
-                                    indices["VIX"].get("gap_attribution")),
+                                    indices["VIX"].get("gap_attribution"), indices),
         }
     resid_cols = list(resid.columns)
     return {"residuals": resid[resid_cols].reset_index(drop=True), "surface": surface_doc,
@@ -468,6 +566,8 @@ def index_row(out: dict) -> dict:
                               "median_abs_hs": a["median_abs_hs"],
                               "oos_inside_spread_pct": o.get("inside_spread_pct"),
                               "oos_rmse_vp": o.get("rmse_vp"),
+                              "common_oos_median_abs_hs": m["metrics"].get(
+                                  "common_out_of_sample", {}).get("median_abs_hs"),
                               "butterfly_violations": m["dense_grid"]["butterfly_violations"],
                               "calendar_violations": m["dense_grid"]["calendar_violations"]}
     v = vx_doc["indices"]["VIX"]

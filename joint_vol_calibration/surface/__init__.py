@@ -11,18 +11,21 @@ questions a market maker asks before trusting any model:
                 butterflies, calendar spreads; mid and executable) and the
                 Cohen-Reisinger-Wang (2020) minimal-perturbation repair as a
                 linear programme on scipy's HiGHS
-  svi.py        raw SVI per expiry with Durrleman g(k) >= 0 on a dense grid,
-                free per slice or calendar-ordered against both neighbours
-                (SVI-cal, started from the eSSVI fit: the arbitrage-free
-                surface)
+  svi.py        raw SVI per expiry, accepted only with a numerical butterfly
+                certificate (Durrleman g >= 0, cutting planes), free per
+                slice or calendar-ordered against both neighbours with an
+                ordering certificate (SVI-cal, started from the eSSVI fit:
+                the arbitrage-free surface when both certificates pass)
   essvi.py      the eSSVI global surface (Gatheral-Jacquier butterfly
                 conditions, monotone theta / wing slopes plus grid-certified
                 slice ordering, Corbetta-Cohort-Laachir-Martini interpolation)
   metrics.py    quote-grade metrics in spread units and dense-grid
                 butterfly / calendar violation counts for any iv(k, T)
-  scorecard.py  scores any model given as iv(k, T) on the same quotes
-                (eSSVI, SVI, SVI-cal, Heston at each stored model_version-2
-                fit; a registry and a pricer-to-iv hook for further models)
+  scorecard.py  scores any model given as iv(k, T) on the same quote
+                universe, on its own held-out quotes and on the quotes no
+                model was fitted to (eSSVI, SVI, SVI-cal, Heston at each
+                stored model_version-2 fit; a registry and a pricer-to-iv
+                hook for further models)
   vix.py        Cboe VIX methodology from the stored chain, the
                 variance-swap strip by expiry and the ATM / var-swap ratio
   report.py     per-session artifacts under data_store/surface/<session>/

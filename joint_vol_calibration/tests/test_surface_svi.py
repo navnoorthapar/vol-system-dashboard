@@ -4,6 +4,7 @@ Axel Vogt's butterfly-arbitrage example (Gatheral-Jacquier Example 3.1), and
 constrained fits.
 """
 import numpy as np
+import pytest
 
 from joint_vol_calibration.surface import essvi as es
 from joint_vol_calibration.surface import svi as sv
@@ -162,3 +163,108 @@ def test_calendar_surface_of_ordered_data_matches_free_fit():
     for s, g in zip(cal.slices, groups):
         assert np.max(np.abs(s.iv(g[2]) - g[3])) < 2e-4         # 0.02 vol points
     assert cal.ordering()["ordered"]
+
+
+# ── C23f: certificates between grid nodes and in the tails (review QSM-1) ──────
+# Published pre-fix SVI-cal slices (data_store/surface/<session>/surface.json at
+# commit ea64356): each passed the old node / check-grid tests and is arbitrageable.
+PRE_1016_1029 = (0.03561643836, (-0.005601526423, 0.04784332796, -0.4926502457, -0.02889199835,
+                                 0.1431169621))
+PRE_0618_0630 = (-0.001756403832, 0.01728427752, -0.4497219059, 0.01014970432, 0.1260709118)
+PRE_0618_PAIR = ((-0.003662936701, 0.04726413277, -0.5364152123, 0.003925121283, 0.145352527),
+                 (-0.003753086281, 0.05002803609, -0.5620009891, 0.0006633648301, 0.1491605265))
+PRE_0327_PAIR = ((-0.0003103948087, 0.04193853052, -0.8006239247, 0.1191068613, 0.1026223465),
+                 (-0.0002404000188, 0.04818952576, -0.8264863684, 0.1277443913, 0.1092024735))
+PRE_0324_PAIR = ((5.199897487e-06, 0.03045131457, -0.7514346059, 0.06471351911, 0.06600865159),
+                 (-0.0001139165968, 0.0312336584, -0.7075644951, 0.07068645182, 0.06570109214))
+
+
+def test_butterfly_certificate_finds_the_dip_between_grid_nodes():
+    """2026-10-16, 2026-10-29 slice: g >= 0 at every SVI_GRID node (the old
+    constraint) but g = -2.6e-5 at k = 0.190 (K/F 1.21), between nodes."""
+    _, p = PRE_1016_1029
+    assert sv.svi_g(np.linspace(-1.5, 1.0, 241), p).min() > -1e-12   # the pre-C23f rows
+    c = sv.butterfly_certificate(p)
+    assert not c["ok"]
+    assert c["g_min"] == pytest.approx(-2.58e-5, rel=0.02)
+    assert 0.1875 < c["k_at_g_min"] < 0.1979
+    fine = np.linspace(-3.0, 2.0, 200001)
+    assert c["g_min"] <= sv.svi_g(fine, p).min() + 1e-12          # never above a 5e-6 grid
+
+
+def test_report_count_of_negative_g_slices_uses_the_refined_certificate():
+    """2026-06-18, 2026-06-30 slice: the old 2,001-point check of the report
+    passed it (min g +8.8e-7); the refined certificate does not (-5.8e-8)."""
+    wide = np.linspace(-3.0, 2.0, 2001)
+    assert sv.svi_g(wide, PRE_0618_0630).min() > 0
+    s = sv.SVISurface([sv.SVISlice("2026-06-30", 0.0329, PRE_0618_0630)])
+    b = s.butterfly()
+    assert b["slices_with_g_negative_on_k_-3_to_2"] == 1
+    assert not b["certified"]
+
+
+def test_ordering_certificate_catches_crossings_the_check_grid_missed():
+    """Three published pre-fix pairs that CHECK_GRID (4,001 points on [-3, 2]
+    plus |k| = 10, 30) called ordered: a crossing of -1.5e-6 at k = 6.6
+    (2026-06-18, 08-14 -> 08-21), a tied right wing whose intercept crosses
+    (2026-03-27, 05-29 -> 06-18: w_2 - w_1 -> -2.2e-6 as k -> inf) and a
+    crossing of -6.2e-9 between check-grid nodes at k = 0.121 (2026-03-24,
+    04-27 -> 04-28)."""
+    for (lo, hi), k_at, where in ((PRE_0618_PAIR, 6.613, "dw"), (PRE_0327_PAIR, None, "intercept"),
+                                  (PRE_0324_PAIR, 0.1206, "dw")):
+        s = sv.SVISurface([sv.SVISlice("a", 0.1, lo), sv.SVISlice("b", 0.2, hi)])
+        o = s.ordering()
+        assert o["min_dw_on_check_grid"] > 0                       # the old certificate
+        assert not o["ordered"]
+        c = sv.ordering_certificate(lo, hi)
+        assert not c["ok"]
+        if where == "intercept":
+            assert abs(c["wing_slope_increments"][0]) < 1e-10      # tied right wing ...
+            assert c["tied_wing_intercept_increments"][0] < -2e-6  # ... crossing at infinity
+        else:
+            assert c["k_at_min_dw"] == pytest.approx(k_at, abs=2e-3)
+            assert c["min_dw"] < -1e-10
+
+
+def test_refined_minima_are_exact_for_a_smooth_function():
+    x = np.linspace(-1.0, 1.0, 11)
+    f = lambda k: (np.asarray(k) - 0.123456789) ** 2 - 1.0       # noqa: E731
+    ks, vs = sv._refined_minima(f, x, f(x))
+    j = int(np.argmin(vs))
+    assert ks[j] == pytest.approx(0.123456789, abs=1e-7)
+    assert vs[j] == pytest.approx(-1.0, abs=1e-14)
+
+
+def test_vogt_fit_is_certified_between_nodes_and_in_the_tails():
+    """The fit to Vogt's arbitrageable smile binds the butterfly rows; with
+    rows only at the nodes it dipped below zero between them. It is now
+    accepted only with the certificate."""
+    T = 1.0
+    k, iv = _quotes(VOGT, T, np.linspace(-0.8, 0.8, 81))
+    x0 = sv.ssvi_slice_to_raw(float(sv.svi_w(0.0, *VOGT)), 0.2, 0.3)
+    p, info = sv.fit_svi_slice(k, T, iv, np.full(len(k), 1e-3), x0)
+    assert info["certified"]
+    assert sv.butterfly_certificate(p)["ok"]
+    fine = np.concatenate([np.linspace(-3.0, 2.0, 500001), np.linspace(2.0, 200.0, 20001)])
+    assert sv.svi_g(fine, p).min() >= 0.0
+
+
+def test_calendar_fit_certifies_a_pair_that_ties_its_wing_slopes():
+    """Data that pull two slices onto the same right-wing slope: the fitted
+    surface must pass the ordering certificate including the tied-wing
+    intercept (the limit of w_2 - w_1)."""
+    groups = _crossing_groups()
+    kk = np.concatenate([g[2] for g in groups])
+    TT = np.concatenate([np.full(len(g[2]), g[1]) for g in groups])
+    iv = np.concatenate([g[3] for g in groups])
+    lab = np.concatenate([[g[0]] * len(g[2]) for g in groups])
+    ess, _ = es.fit_essvi(kk, TT, iv, np.full(len(kk), 0.001), lab)
+    cal, info = sv.fit_svi_calendar_surface(groups, ess)
+    assert info["arbitrage_free_certified"]
+    cert = cal.certificate()
+    assert cert["arbitrage_free"]
+    for a, b in zip(cal.slices[:-1], cal.slices[1:]):
+        c = sv.ordering_certificate(a.params, b.params)
+        assert c["ok"]
+        kf = np.linspace(-40.0, 40.0, 400001)
+        assert (b.w(kf) - a.w(kf)).min() >= -1e-10

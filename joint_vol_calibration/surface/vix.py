@@ -26,7 +26,11 @@ and the Cboe Volatility Index Mathematics Methodology, sec. 3):
            on an AM expiry date; near = the latest candidate with M <= Mcm,
            next = the first candidate after it (the methodology text in v6.0
            lists only the near-term rule; this next-term rule reproduces its
-           sample calculation)
+           sample calculation). An index whose stored candidates do not
+           bracket its constant maturity (the near weight would fall outside
+           [0, 1]) is not replicated from the stored chain: headline_method
+           returns no method, and the extrapolated level stays in its
+           method's record, flagged.
 The sample calculation in the methodology's appendices is a test fixture
 (tests/fixtures/surface_cboe_vix_sample.csv): this code reproduces its
 sigma^2 values and VIX = 13.93 (tests/test_surface_vix.py).
@@ -52,6 +56,15 @@ Deviations forced by the stored data (reported per session, never hidden):
   * settlement of root-less chains: pre-C22 snapshots carry no OCC root;
     their lines are treated as PM-settled (the cleaner's convention), which
     misplaces T by 6.5 hours on AM-only dates.
+  * AM dates stored as SPXW only: when a rooted chain holds SPXW (PM) lines
+    but no SPX (AM) lines on an SPX monthly settlement date (the third
+    Friday, or the session before it when that Friday is a holiday; the
+    2026-10-16 Yahoo capture stored 2026-12-18 and 2027-01-15 this way), the
+    stated rule would drop the date from the candidate set and widen the
+    bracket. The SPXW lines are kept as a proxy for the AM monthly instead,
+    on their own PM timing (T to 16:00, 6.5 hours past the 09:30 SOQ the AM
+    series settles on), flagged am_date_pm_proxy per term and listed in the
+    session's deviations.
 """
 
 from __future__ import annotations
@@ -199,13 +212,26 @@ def is_end_of_week_expiry(expiry: str) -> bool:
     return d.weekday() == 3 and not oc.is_nyse_session(d + timedelta(days=1))
 
 
+def is_spx_am_settlement_date(expiry: str) -> bool:
+    """True on the SPX monthly (AM, SOQ) settlement date of the expiry's
+    month: the third Friday, or the NYSE session before it when that Friday
+    is a holiday."""
+    d = date.fromisoformat(str(expiry)[:10])
+    first = d.replace(day=1)
+    third_friday = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+    settle = third_friday if oc.is_nyse_session(third_friday) else oc.previous_session(third_friday)
+    return d == settle
+
+
 def term_tables(raw: pd.DataFrame, session: str, calc_time_ny: datetime) -> list:
     """Per expiry of a stored chain: settlement, minutes and the strike table.
 
     One settlement per expiry: AM-settled SPX lines when the expiry has any
     (the VIX uses the SPX monthly, not the same-day SPXW), else PM. Root-less
-    lines are PM (option_chain convention). Crossed quotes (bid > ask) are
-    treated as null.
+    lines are PM (option_chain convention). On an SPX monthly settlement
+    date with SPXW lines but no SPX lines stored, the PM SPXW lines stand in
+    for the AM monthly (am_date_pm_proxy; module docstring). Crossed quotes
+    (bid > ask) are treated as null.
     """
     df = oc._normalise(raw)
     df["settlement"] = np.where(df["root"] == "SPX", "AM", "PM")
@@ -221,8 +247,11 @@ def term_tables(raw: pd.DataFrame, session: str, calc_time_ny: datetime) -> list
         c = lines[lines["right"] == "C"].groupby("strike")[["bid", "ask"]].last()
         p = lines[lines["right"] == "P"].groupby("strike")[["bid", "ask"]].last()
         tab = c.join(p, how="outer", lsuffix="_c", rsuffix="_p").sort_index()
+        has_root = bool((lines["root"] != "").any())
         out.append({"expiry": str(exp)[:10], "settlement": sett, "minutes": M,
-                    "T": M / MINUTES_PER_YEAR, "has_root": bool((lines["root"] != "").any()),
+                    "T": M / MINUTES_PER_YEAR, "has_root": has_root,
+                    "am_date_pm_proxy": bool(not has_am and has_root
+                                             and is_spx_am_settlement_date(exp)),
                     "candidate": bool(has_am or is_end_of_week_expiry(exp)),
                     "table": tab})
     out.sort(key=lambda r: r["minutes"])
@@ -259,6 +288,7 @@ def bracket(terms: list, M_cm: float) -> tuple:
 
 def _term_summary(t: dict, v: dict) -> dict:
     return {"expiry": t["expiry"], "settlement": t["settlement"], "minutes": t["minutes"],
+            "am_date_pm_proxy": bool(t.get("am_date_pm_proxy", False)),
             "days": t["minutes"] / 1440.0, "F": v["F"], "K0": v["K0"],
             "forward_method": v["forward_method"], "k0_fallback": v["k0_fallback"],
             "sigma2": v["sigma2"], "single_term_vol": 100.0 * math.sqrt(max(v["sigma2"], 0.0)),
@@ -297,6 +327,30 @@ def replicate_index(terms: list, R: float, days: int, *, candidates_only: bool =
             "near_weight": w_near, "extrapolated": bool(w_near < 0 or w_near > 1),
             "candidates_only": candidates_only,
             "forward_source": "parity_regression" if carry is not None else "cboe_single_strike"}
+
+
+HEADLINE_METHODS = ("cboe_rules", "parity_forward")
+
+
+def headline_method(rep: dict) -> tuple:
+    """(method, reason) for one index's replications {method: replicate_index
+    output}: the first of HEADLINE_METHODS that is ok and interpolates
+    (0 <= near weight <= 1); (None, reason) when none does."""
+    for m in HEADLINE_METHODS:
+        r = rep.get(m) or {}
+        if r.get("ok") and not r.get("extrapolated"):
+            return m, None
+    ok = [rep[m] for m in HEADLINE_METHODS if (rep.get(m) or {}).get("ok")]
+    if ok:
+        r = ok[0]
+        n, x = r["near"], r["next"]
+        return None, (f"no stored Cboe candidate expiries on both sides of "
+                      f"{r['constant_maturity_days']} days: the nearest pair {n['expiry']} "
+                      f"({n['days']:.1f}d) / {x['expiry']} ({x['days']:.1f}d) would extrapolate "
+                      f"(near weight {r['near_weight']:.3f}, outside [0, 1]), which is not "
+                      "Cboe's interpolation")
+    reasons = "; ".join(f"{m}: {(rep.get(m) or {}).get('reason', 'not run')}" for m in HEADLINE_METHODS)
+    return None, f"no replication: {reasons}"
 
 
 # ── variance-swap strip and the ATM / variance-swap ratio ─────────────────────
@@ -417,6 +471,11 @@ def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
       L2c the surface's continuous variance swap on the stored strip's K/F range
       L3  the surface's continuous variance swap on k in [-3, 2]
 
+    Only truncation_pts is a term of the gap: official - L0 = truncation_pts +
+    residual_pts. The far-wing, fit and discretisation terms sum to L0 - L2c,
+    the replication against the surface; residual_share_of_official_minus_
+    replicated is the part of the gap the stored chain does not explain.
+
     Reported: far_wing_market_minus_model_pts = L0 - L1 (how much richer the
     stored quotes beyond the fitted range are than the surface's extrapolated
     wing), fit_inside_range_pts = L1 - L2, discretisation_pts = L2 - L2c,
@@ -473,10 +532,15 @@ def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
            "fit_inside_range_pts": L1 - L2,
            "discretisation_pts": L2 - L2c,
            "truncation_pts": L3 - L2c}
+    out["identity"] = ("official - L0 = truncation_pts + residual_pts: only the truncation term "
+                       "explains the gap; far_wing + fit_inside_range + discretisation = L0 - L2c "
+                       "decompose the replication against the surface, not the gap")
     if official is not None:
         out["official"] = official
         out["gap_pts"] = L0 - official
         out["residual_pts"] = official - L0 - (L3 - L2c)
+        if abs(official - L0) > 1e-12:
+            out["residual_share_of_official_minus_replicated"] = out["residual_pts"] / (official - L0)
     return out
 
 
