@@ -5,8 +5,8 @@
 <section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t">
   <div class="panel-head">
     <h2 class="panel-title" id="{{ id }}-t">{{ title|sym }}</h2>
-    {% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
-    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span>
+    <span class="panel-side">{% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">{{ caller() }}</div>
 </section>

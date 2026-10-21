@@ -126,7 +126,7 @@
         <tbody>
           {% for s in c.sources %}
           <tr><td>{{ s.label }}</td><td class="lvl-{{ s.level }} nowrap">{{ s.date or ('missing' if s.aged else 'not yet generated') }}</td>
-            <td class="num">{% if s.aged and s.age is not none %}{{ s.age }}{% else %}—{% endif %}</td><td><code>{{ s.artifact }}</code></td></tr>
+            <td class="num">{% if s.aged and s.age is not none %}{{ s.age }}{% else %}—{% endif %}</td><td><code class="path">{{ s.artifact|path }}</code></td></tr>
           {% endfor %}
         </tbody>
       </table>

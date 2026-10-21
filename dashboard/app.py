@@ -357,6 +357,25 @@ def sym(text: Any) -> Any:
 app.jinja_env.filters["sym"] = sym
 
 
+def path_breaks(text: Any) -> Any:
+    """A repository path or test ID that wraps only between its names: a <wbr>
+    after each '/', '_' and '::', and a name with a hyphen (a date) in a no-wrap span, since the
+    browser also breaks after '-'. With `.tbl code.path { overflow-wrap:
+    break-word }` a narrow column breaks 'data_store/vol_system.db' after 'vol_',
+    never as 'vol_syste' / 'm.db' (word-break: break-all did) or '2026-' / '10-16'."""
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    parts = [p for p in re.split(r"(?<=[/_])|(?<=::)", str(escape(text))) if p]
+    # the only markup is <wbr> and the span: the text itself is escaped first
+    return Markup("<wbr>".join(f'<span class="nowrap">{p}</span>' if "-" in p else p  # noqa: S704
+                               for p in parts))
+
+
+app.jinja_env.filters["path"] = path_breaks
+
+
 # ── Market data readers (DB) ───────────────────────────────────────────────────
 def _read_spx() -> pd.DataFrame:
     """SPX closes and log returns, date-indexed, ascending.

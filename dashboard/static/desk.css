@@ -196,10 +196,10 @@ sub, sup { font-size: 0.72em; }
 }
 .panel-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); line-height: 1.4; }
 .panel-title .qual { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text3); }
-.panel-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--text3); white-space: nowrap; }
+/* the date and the '#' link move as one group: right-aligned, on the title's line or the next */
+.panel-side { margin-left: auto; display: flex; align-items: center; gap: 4px 8px; }
+.panel-meta { font-family: var(--mono); font-size: 10.5px; color: var(--text3); white-space: nowrap; }
 .panel-actions { display: flex; gap: 4px; flex-wrap: wrap; }
-.panel-head .panel-meta + .panel-actions { margin-left: 0; }
-.panel-head .panel-title + .panel-actions { margin-left: auto; }
 .btn-link { background: none; border-color: transparent; color: var(--text3); font-family: var(--mono); padding: 0 4px; }
 .btn-link:hover, .btn-link:focus-visible { color: var(--info); border-color: var(--line2); }
 .tbl-wrap.capped { max-height: 420px; overflow-y: auto; }
@@ -434,7 +434,7 @@ details.method > .prose, details.method > .note, details.method > .tbl-wrap { ma
 .site-footer .foot-inner { max-width: 1680px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
 .site-footer a { color: var(--text2); }
 .site-footer .tbl td, .site-footer .tbl th { padding: 2px 6px; font-size: 11px; background: transparent; }
-.site-footer .tbl code { word-break: break-all; }
+.tbl code.path { overflow-wrap: break-word; }   /* breaks at the <wbr> after / and _ (the path filter) */
 .foot-links { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
 
 /* keyboard shortcut dialog */

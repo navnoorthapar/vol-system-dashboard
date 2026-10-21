@@ -82,7 +82,7 @@
         <dt>Fix</dt><dd>{{ f.fix }}</dd>
         <dt>Evidence</dt><dd>{{ evidence[f.evidence_key] if f.evidence_key else f.evidence }}</dd>
         {% if f.d_pnl is not none and f.bridge_rows %}<dt>C22 bridge</dt><dd class="src">row{{ 's' if f.bridge_rows|length > 1 else '' }} {{ f.bridge_rows|join(', ') }} · portfolio P&amp;L {% if f.d_pnl|abs < 500 %}unchanged{% else %}{{ f.d_pnl|usd_k }}{% endif %} · Sharpe {{ f.sharpe_from|fmt('.2f') }} → {{ f.sharpe_to|fmt('.2f') }}</dd>{% endif %}
-        <dt>Pinned by</dt><dd>{% if f.tests %}{% for t in f.tests %}<code>{{ t.split('::')[-2:]|join('::') }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}{% else %}no dedicated regression test (a gap){% endif %}</dd>
+        <dt>Pinned by</dt><dd>{% if f.tests %}{% for t in f.tests %}<code class="path">{{ t.split('/')[-1]|path }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}{% else %}no dedicated regression test (a gap){% endif %}</dd>
       </dl>
     </div>
     {% endfor %}

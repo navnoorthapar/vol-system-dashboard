@@ -1644,6 +1644,69 @@ def test_page_header_dates_never_break_across_lines(dash, route):
     assert not re.search(r"\d{4}-\d{2}-\d{2}", outside), (route, outside)
 
 
+@pytest.mark.parametrize("route", ["/", "/surface", "/calibration", "/risk", "/research", "/corrections",
+                                   "/model-risk"])
+def test_table_dates_never_break_across_lines(pages, route):
+    """C23 verify: at 390 px the Calibration page's gate-passing fits and rough
+    Heston tables broke '2026-10-16' into '2026-' and '10-16'. A table cell that
+    opens with a date keeps it on one line: the cell is no-wrap, or the date sits
+    in a no-wrap span when a chip follows it. Chart data tables are screen-reader
+    only and never laid out."""
+    html = re.sub(r'<div class="chart-data sr-only".*?\n</div>', "", pages[route], flags=re.DOTALL)
+    bad = []
+    for table in re.findall(r'<table class="tbl[^"]*"[^>]*>.*?</table>', html, flags=re.DOTALL):
+        for attrs, body in re.findall(r"<td([^>]*)>(.*?)</td>", table, flags=re.DOTALL):
+            text = re.sub(r"<[^>]+>", "", body).strip()
+            if (re.match(r"\d{4}-\d{2}-\d{2}", text) and "nowrap" not in attrs
+                    and not re.match(r'\s*<span class="nowrap">\d{4}-\d{2}-\d{2}', body)):
+                bad.append(text[:40])
+    assert bad == [], (route, bad)
+
+
+def test_artifact_paths_break_between_names_never_inside_one(dash, pages):
+    """C23 verify: the footer's freshness table and the Model Risk artifact and
+    module columns broke a path anywhere ('data_store/vol_syste' over 'm.db',
+    'joint_vol_calibration/m' over 'odels/heston.py'): word-break: break-all and
+    overflow-wrap: anywhere. A path now breaks only after '/' or '_', where the
+    path filter puts a <wbr>; its names stay whole."""
+    assert str(dash.path_breaks("data_store/vol_system.db")) == "data_<wbr>store/<wbr>vol_<wbr>system.db"
+    assert str(dash.path_breaks("data_store/surface/<session>/")) == \
+        "data_<wbr>store/<wbr>surface/<wbr>&lt;session&gt;/"
+    assert str(dash.path_breaks("calibrations/joint_cal_2026-10-16.pkl")) == \
+        'calibrations/<wbr>joint_<wbr>cal_<wbr><span class="nowrap">2026-10-16.pkl</span>'
+    assert str(dash.path_breaks("test_pdv.py::TestNoLookAhead::test_x")) == \
+        "test_<wbr>pdv.py::<wbr>TestNoLookAhead::<wbr>test_<wbr>x"
+    assert str(dash.path_breaks(None)) == ""
+
+    def paths(fragment):
+        return re.findall(r"<code([^>]*)>(.*?)</code>", fragment, flags=re.DOTALL)
+
+    def whole(body):
+        import html as _html
+        return _html.unescape(re.sub(r"<[^>]+>", "", body))
+
+    for route, html in pages.items():
+        foot = re.search(r'<footer class="site-footer".*?</footer>', html, flags=re.DOTALL)
+        assert foot, route
+        cells = [p for p in paths(foot.group(0)) if whole(p[1]).startswith("data_store/")]
+        assert cells, route
+        for attrs, body in cells:
+            assert 'class="path"' in attrs, (route, body)
+            assert str(dash.path_breaks(whole(body))) == body, (route, body)
+    mr = pages["/model-risk"]
+    for table_id in ("monitor-table", "inventory-table"):
+        table = re.search(rf'<table[^>]*id="{table_id}".*?</table>', mr, flags=re.DOTALL)
+        assert table, table_id
+        cells = paths(table.group(0))
+        assert cells, table_id
+        for attrs, body in cells:
+            assert 'class="path"' in attrs, (table_id, body)
+            assert str(dash.path_breaks(whole(body))) == body, (table_id, body)
+    css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
+    assert "break-all" not in css
+    assert ".tbl code.path { overflow-wrap: break-word; }" in css
+
+
 # ── Independent review of 8bf9aa6: every displayed number equals its artifact ─
 
 def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
@@ -2217,7 +2280,8 @@ def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
     body = tab.split("<tbody>")[1]
     assert len(re.findall(r"<tr[ >]", body)) == len(rows)
     for r in rows:
-        line = _visible_text("<body>" + re.search(rf"<td>{r['session']}(.*?)</tr>", body, re.DOTALL).group(1))
+        cell = re.search(rf'<td><span class="nowrap">{r["session"]}</span>(.*?)</tr>', body, re.DOTALL)
+        line = _visible_text("<body>" + cell.group(1))
         assert f"{r['sigma_cap2_oos']:.2f}" in line
         assert f"{r['joint_rough_oos']:.2f}" in line
         assert f"{r['joint_rough_H']:.2f}" in line
@@ -2526,6 +2590,22 @@ def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no
 
 
 # ── Corrections registry and model inventory ─────────────────────────────────
+
+def test_corrections_name_each_pinning_test_by_its_file(dash, pages):
+    """C23 verify: 'Pinned by' printed 35 of the 64 tests as Class::test with no
+    file (TestNoLookAhead::test_walk_forward_no_lookahead_poison) and the other
+    29 with the whole joint_vol_calibration/tests/ path, which broke letter by
+    letter at phone width. Each is now its file and test, in one form, wrapping
+    after '/' or '_'."""
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    want = [str(dash.path_breaks(t.split("/")[-1])) for r in reg["rounds"] for f in r["findings"]
+            for t in f.get("tests", [])]
+    got = []
+    for dd in re.findall(r"<dt>Pinned by</dt><dd>(.*?)</dd>", pages["/corrections"], flags=re.DOTALL):
+        got += re.findall(r'<code class="path">(.*?)</code>', dd, flags=re.DOTALL)
+    assert got == want
+    assert all(re.sub(r"<[^>]+>", "", g).startswith("test_") and ".py::" in g for g in got)
+
 
 def test_every_correction_links_a_real_commit_and_existing_tests():
     """The Corrections page ties each round to its commit(s) and pinning tests;
@@ -3166,6 +3246,55 @@ def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser
             fits = page.evaluate("(() => { const w = document.getElementById('surface-history-table')"
                                  ".closest('.tbl-wrap'); return w.scrollWidth <= w.clientWidth + 1; })()")
             assert fits
+        ctx.close()
+
+
+_LINE_BREAKS_JS = """els => els.map(el => {
+  // every place the rendered text starts a new line, with the character before it
+  const out = [];
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let top = null, prev = '', n;
+  while ((n = walk.nextNode())) {
+    for (let i = 0; i < n.length; i++) {
+      const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + 1);
+      const rect = r.getClientRects()[0];
+      if (!rect) continue;
+      if (top !== null && rect.top > top + 2) out.push([el.textContent, prev]);
+      top = rect.top; prev = n.data[i];
+    }
+  }
+  return out;
+}).flat()"""
+
+_PANEL_HEADS_JS = """() => Array.from(document.querySelectorAll('.panel-head')).map(h => {
+  const b = h.querySelector('[data-copy-link]');
+  if (!b || !b.offsetParent) return null;
+  const hr = h.getBoundingClientRect(), cs = getComputedStyle(h);
+  const right = hr.right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
+  const gap = right - b.getBoundingClientRect().right;
+  return gap > 2 ? h.parentElement.id + ' ' + gap.toFixed(0) + 'px' : null;
+}).filter(Boolean)"""
+
+
+def test_browser_paths_and_panel_links_at_phone_width(site_browser):
+    """C23 verify, at 390 px: a path in the freshness table or the Model Risk
+    columns, or a test ID on Corrections, wraps only after '/', '_' or '::' (they
+    broke as 'vol_syste' / 'm.db' and 'test_surf' / 'ace_svi.py'), and
+    every panel's '#' link sits at the right of its header (it dropped to the
+    left of a second line alone when the title and its date filled the first)."""
+    ctx, page = _page(site_browser, 390, 844)
+    try:
+        for name in ("index", "surface", "calibration", "risk", "research", "corrections", "model-risk"):
+            page.goto(site_browser["base"] + f"{name}.html", wait_until="load")
+            codes = page.locator("code.path")
+            assert codes.count(), name
+            breaks = page.evaluate(_LINE_BREAKS_JS, codes.element_handles())
+            assert [b for b in breaks if b[1] not in "/_:"] == [], (name, breaks)
+            assert page.evaluate(_PANEL_HEADS_JS) == [], name
+        page.goto(site_browser["base"] + "model-risk.html", wait_until="load")
+        breaks = page.evaluate(_LINE_BREAKS_JS, page.locator("#monitor-table code.path").element_handles())
+        assert breaks, "the monitor table's paths do wrap at 390 px"        # the check above saw breaks
+    finally:
         ctx.close()
 
 
