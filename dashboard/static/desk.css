@@ -248,6 +248,9 @@ sub, sup { font-size: 0.72em; }
 .kpi-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 2px; }
 .kpi-sub { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 1px; }
 .kpi-ci { font-family: var(--mono); font-size: 10.5px; color: var(--text2); margin-top: 2px; }
+.kpi-ci.faint { font-family: var(--sans); color: var(--text3); }
+/* a range across sessions is not a confidence interval: marked apart from one */
+.kpi-range { border-left: 2px dashed var(--line2); padding-left: 6px; }
 
 /* parameter tiles */
 .param { background: var(--surface); padding: 8px 10px; min-width: 0; }

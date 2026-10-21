@@ -15,7 +15,15 @@
 {% set yrs = (d.start_date or '')[:4] ~ '–' ~ (d.end_date or '')[:4] %}
 {% set _p = k.get('s3_null_p') %}
 {% set s3_base_txt = 'S3 at base (pass-1) size' ~ ((' (' ~ (k.s3_null_real|usd(true)) ~ ')') if k.get('s3_null_real') is not none else '') ~ ', before the sizing overlay' %}
-{% set s3_timing_txt = ('its timing, tested on ' ~ s3_base_txt ~ ', ' ~ ('beats' if _p < 0.05 else 'does not beat') ~ ' random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ ')') if _p is not none else 'its timing null test is not recorded' %}
+{# The C23 exposure-matched nulls (inference summary) replace the 200-path
+   random-walk null of C22 wherever they exist; the legacy test is quoted only
+   without them, and labelled as superseded. #}
+{% set s3n = (d.null_rows or [])|selectattr('key', 'equalto', 's3')|first %}
+{% if s3n and s3n.p is not none %}
+{% set s3_timing_txt = 'its entry timing ' ~ ('beats' if s3n.p < 0.05 else 'does not beat') ~ ' ' ~ (s3n.n|fmt(',')) ~ ' exposure-matched circular shifts at the 5% level (p = ' ~ (s3n.p|fmt('.3f')) ~ '; Holm over 6 sleeves ' ~ (s3n.p_holm|fmt('.2f')) ~ ((('; ' ~ (s3n.n_shuffle|fmt(',')) ~ ' trade shuffles p = ' ~ (s3n.p_shuffle|fmt('.3f')))) if s3n.p_shuffle is not none else '') ~ ')' %}
+{% elif _p is not none %}
+{% set s3_timing_txt = 'its timing, tested on ' ~ s3_base_txt ~ ', ' ~ ('beats' if _p < 0.05 else 'does not beat') ~ ' random entry dates at the 5% level (p = ' ~ (_p|fmt('.3f')) ~ '; the legacy 200-path null, superseded in C23 by exposure-matched nulls)' %}
+{% else %}{% set s3_timing_txt = 'its timing null test is not recorded' %}{% endif %}
 {% set be = d.beta_est %}
 {% if be %}{% set _later = be.later[0] if be.later else none %}
 {% set beta_check_txt = ('the first later chain, ' ~ _later.session ~ ', gives ' ~ (_later.ratio|fmt('.2f')) ~ ' — the mean over all ' ~ be.n_all ~ ' chains, ' ~ (be.mean_all|fmt('.2f')) ~ (', is a row of the β grid' if be.mean_all_in_grid else ', is not in the β grid')) if _later else 'no later chain is stored yet' %}
@@ -44,7 +52,11 @@
   {{ m.kpi('Max drawdown', (k.get('mdd') * 100 if k.get('mdd') is not none else none)|fmt('.1f'), unit='%', tone='neg', sub=(k.get('dd_dur')|fmt(',')) ~ ' sessions under water') }}
   <div class="kpi"><div class="kpi-label">Trades</div><div class="kpi-value">{{ k.get('n_trades')|fmt }}</div><div class="kpi-sub">{% if k.get('n_open') %}{{ k.n_open }} open at the end; over the {{ k.get('n_closed')|fmt }} closed: {% endif %}win rate {{ k.get('win_rate')|pct(1, false) }}, average <span class="nowrap">{{ k.get('avg_pnl')|usd }}</span> of portfolio P&amp;L per trade</div></div>
   {{ m.kpi('T-bill benchmark', (k.get('cash_ret') * 100 if k.get('cash_ret') is not none else none)|signed('.1f'), unit='%', sub='^IRX compounded; the collateral is assumed to earn it') }}
-  <div class="kpi"><div class="kpi-label">S3 timing null test</div><div class="kpi-value">p = {{ k.get('s3_null_p')|fmt(".3f") }}</div><div class="kpi-sub">{{ s3_base_txt }}, vs random entry dates: {% if _p is not none and _p < 0.05 %}significant at 5%{% elif _p is not none %}<strong>not</strong> significant at 5%{% else %}not recorded{% endif %}</div></div>
+  {% if s3n and s3n.p is not none %}
+  <div class="kpi" id="s3-timing-kpi"><div class="kpi-label">S3 timing null test</div><div class="kpi-value">p = {{ s3n.p|fmt(".3f") }}</div><div class="kpi-sub">vs {{ s3n.n|fmt(',') }} exposure-matched circular shifts: {% if s3n.p < 0.05 %}significant at 5%{% else %}<strong>not</strong> significant at 5%{% endif %}; Holm over 6 sleeves {{ s3n.p_holm|fmt('.2f') }}{% if s3n.p_shuffle is not none %}; trade shuffles p = {{ s3n.p_shuffle|fmt('.3f') }}{% endif %}</div></div>
+  {% else %}
+  <div class="kpi" id="s3-timing-kpi"><div class="kpi-label">S3 timing null test (legacy)</div><div class="kpi-value">p = {{ k.get('s3_null_p')|fmt(".3f") }}</div><div class="kpi-sub">{{ s3_base_txt }}, vs random entry dates: {% if _p is not none and _p < 0.05 %}significant at 5%{% elif _p is not none %}<strong>not</strong> significant at 5%{% else %}not recorded{% endif %}; the 200-path null, superseded in C23</div></div>
+  {% endif %}
 </div>
 
 <div class="g">
@@ -119,7 +131,7 @@
       {% endcall %}
     {% else %}
       {{ m.missing(inf, 'Stationary-bootstrap intervals for each sleeve, exposure-matched nulls, deflated / probabilistic Sharpe and a multiple-testing check across every variant tried.') }}
-      <p class="note">Recorded in the stored run now: S3 timing p = {{ k.get('s3_null_p')|fmt('.3f') }} against 200 random-walk null paths ({{ s3_base_txt }}).</p>
+      <p class="note">Recorded in the stored run now: S3 timing p = {{ k.get('s3_null_p')|fmt('.3f') }} against 200 random-walk null paths ({{ s3_base_txt }}): the legacy 200-path null, superseded in C23 by exposure-matched nulls.</p>
     {% endif %}
   {% endcall %}
   {% call m.panel('benchmarks', 'Real-settlement benchmarks · Cboe strategy indices', 's5') %}

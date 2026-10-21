@@ -1155,6 +1155,8 @@ def load_page2() -> dict[str, Any]:
         if ac is None:
             ac = active_constraints(p, state, feller_imposed=imposed)
         d["active_constraints"] = list(ac)
+        # parameters not on a bound: a count of interior parameters, not of what
+        # the data identify (κ is interior but rides the σ cap: see sigma_ridge)
         d["effective_dof"] = 5 - len(pinned)
         from joint_vol_calibration.calibration.joint_calibrator import _FELLER_PENALTY
         from joint_vol_calibration.config import HESTON_BOUNDS
@@ -2303,6 +2305,38 @@ def k_bucket_label(b: int, compact: bool = False) -> str:
 
 
 # ── Calibration page extras ──────────────────────────────────────────────────
+def sigma_ridge(diag: dict, params: dict) -> dict | None:
+    """What the σ profile says about κ: does it move with the σ cap?
+
+    The pages said "4 of 5 parameters are set by the data" with σ on its box
+    ceiling, while the profile refits show κ rising with every cap (1.2 at
+    σ ≤ 1 to 27.4 with σ ≤ 10, κ ≤ 60): where the fit sits on the κ–σ ridge is
+    set by the box. ``moves`` is true when κ rises with the cap across the
+    profile (rank correlation ≥ 0.8) and its top row's κ is at least 1.5× the
+    fit's.
+    """
+    if diag.get("state") != "ok":
+        return None
+    rows = [r for r in diag.get("sigma_profile") or []
+            if _num(r.get("sigma_cap")) is not None
+            and _num((r.get("params") or {}).get("kappa")) is not None]
+    rows = sorted(rows, key=lambda r: float(r["sigma_cap"]))
+    if len(rows) < 3:
+        return None
+    caps = pd.Series([float(r["sigma_cap"]) for r in rows])
+    kap = pd.Series([float(r["params"]["kappa"]) for r in rows])
+    rho = float(caps.corr(kap, method="spearman"))
+    top = rows[-1]
+    k_fit = _num(params.get("kappa"))
+    rse = ((diag.get("ident") or {}).get("relative_standard_errors") or {}).get("kappa")
+    return {"moves": bool(rho >= 0.8 and k_fit and float(top["params"]["kappa"]) >= 1.5 * k_fit),
+            "rank_corr": rho, "kappa_fit": k_fit,
+            "cap_lo": float(rows[0]["sigma_cap"]), "kappa_lo": float(rows[0]["params"]["kappa"]),
+            "cap_top": float(top["sigma_cap"]), "kappa_top": float(top["params"]["kappa"]),
+            "sigma_top": _num(top["params"].get("sigma")), "kappa_max": _num(diag.get("kappa_max")),
+            "kappa_rse": _num(rse)}
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
     from joint_vol_calibration.config import HESTON_BOUNDS
@@ -2314,6 +2348,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
                      "oos": h["oos"], "rmse": h["rmse"], "vix": h["vix"]} for h in hist]
     diag = artifacts.calibration_diagnostics(cal, DATA, session)
     d["ident"] = diag
+    d["ridge"] = sigma_ridge(diag, p)
     # Heston against rough Heston on every diagnosed session (summary.json):
     # the same anchors, residuals, VIX leg and out-of-sample quotes per session.
     try:
@@ -3098,8 +3133,10 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                           f"{_fmt(h['inside_spread_pct'], '.1f')}% inside." if h else "")),
             "ci": (f"Range over {sr['n_sessions']} stored sessions: {sr['range']} half-spreads "
                    f"({sr['inside_range']}% inside)" if sr["n_sessions"] > 1 else None),
-            "ci_note": ("a range across sessions, not a sampling interval; held-out strikes sit between "
-                        "fitted ones (an interpolation test) and Yahoo quotes carry no quote time"),
+            # shown beside the range (it was rendered only when there was no range)
+            "ci_kind": "range",
+            "ci_note": ("A range across sessions, not a sampling interval. Held-out strikes sit between "
+                        "fitted ones (an interpolation test), and Yahoo quotes carry no quote time."),
             "href": "surface.html#scorecard", "source": f"data_store/surface/{sr['session']}/scorecard.json"})
     else:
         out.append({"key": "Quote-grade surface · held-out strikes", "value": "—", "unit": "",
@@ -3127,7 +3164,7 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                    f"{jr['rough_range']} vol pts"
                    + (f"; κ ±{_fmt(jr['kappa_rse'] * 100, '.0f')}% (Gauss–Newton curvature scale)"
                       if jr["kappa_rse"] is not None else "")),
-            "ci_note": None, "href": "calibration.html#rough-vs-heston",
+            "ci_kind": "range", "ci_note": None, "href": "calibration.html#rough-vs-heston",
             "source": "data_store/calibrations/diagnostics/summary.json"})
     elif p2.get("spx_oos_rmse") is not None:
         out.append({"key": "Joint SPX/VIX fit · out of sample",
@@ -3162,7 +3199,7 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
                         "ci": (f"{_fmt(ci['level'] * 100, '.0f')}% CI {_fmt(ci['lo'], '+.2f')} to "
                                f"{_fmt(ci['hi'], '+.2f')} "
                                f"({ci.get('method') or 'bootstrap'}, {_fmt(ci.get('reps'), ',')} draws)"),
-                        "ci_note": None, "href": "research.html#inference",
+                        "ci_kind": "interval", "ci_note": None, "href": "research.html#inference",
                         "source": "data_store/backtest/inference/summary.json"})
         else:
             p = k.get("s3_null_p")
@@ -3224,6 +3261,7 @@ def load_overview() -> dict[str, Any]:
                                        "feller_state", "feller_margin", "n_spx_options", "n_spx_expiries",
                                        "calib_age", "model_version", "oos_rows", "n_oos")}
     d["fit"]["tiles"] = p2.get("param_tiles") or []
+    d["fit"]["ridge"] = p2.get("ridge")
     p4 = None
     with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -3256,9 +3294,15 @@ def load_overview() -> dict[str, Any]:
     d["key_results"] = key_results(p2, p4, surf_oos, diag, inf)
     # What the σ ≤ 2 box costs the headline fit (its σ profile, when diagnosed)
     row = next((r for r in diag.get("rows") or [] if r["session"] == p2.get("session")), None)
+    from joint_vol_calibration.config import HESTON_BOUNDS
+    rg = p2.get("ridge") or {}
     d["fit"]["free_sigma"] = ({"sigma": row["sigma_free"], "kappa": row["kappa_free"],
                                "oos": row["sigma_free_oos"], "oos_cap": row["sigma_cap2_oos"],
-                               "loss_rel": row["sigma_free_loss_rel"]}
+                               "loss_rel": row["sigma_free_loss_rel"],
+                               # the refit's own box (the σ profile's top cap and its κ ceiling),
+                               # wider than production's: "the same fit" it was not
+                               "sigma_max": rg.get("cap_top"), "kappa_max": rg.get("kappa_max"),
+                               "kappa_box": float(HESTON_BOUNDS["kappa"][1])}
                               if row and row["sigma_free"] is not None else None)
     d["pipeline"] = None
     with _loader_boundary(d, "pipeline state (options/cboe, calibrations, forward)"):
@@ -3891,9 +3935,36 @@ def load_corrections() -> dict[str, Any]:
         describe="C17 to C22 as published at the time; C23 from the stored canonical run.",
         table=charts.table("Published cumulative return by round (%)", ["Round", "Cumulative return#"],
                            [[r, signed(v, ".1f", "%")] for r, v in hs]))
+    d["headline_trend"] = headline_trend_sentence(hs)
     d["n_findings"] = sum(len(r["findings"]) for r in d["rounds"])
     d["n_tests"] = sum(r["n_tests"] for r in d["rounds"])
     return _clean_keep(d)
+
+
+def headline_trend_sentence(series: Sequence[tuple[str, Any]], tol: float = 0.05) -> str:
+    """What the corrections did to the published result, read off the series.
+
+    The page said "every successive fix made the backtest worse" beside a chart
+    on which C22 raised it from −26.1% to −21.6%: the sentence now names every
+    round that raised the result, and says "every" only when none did.
+    """
+    pts = [(str(r), float(v)) for r, v in series if _num(v) is not None]
+    if len(pts) < 2:
+        return ""
+    steps = list(itertools.pairwise(pts))
+    ups = [(a, b) for a, b in steps if b[1] - a[1] > tol]
+    downs = [(a, b) for a, b in steps if b[1] - a[1] < -tol]
+    (r0, v0), (rn, vn) = pts[0], pts[-1]
+    span = f"from {signed(v0, '.1f', '%')} after {r0} to {signed(vn, '.1f', '%')} after {rn}"
+    loss = all(v < 0 for _, v in pts)
+    tail = "; no round restored a positive return" if loss else ""
+    if not ups:
+        return (f"No correction raised the published result ({span}){tail}; "
+                "the original edge was a stack of artifacts.")
+    up_txt = ", ".join(f"{b[0]} raised it from {signed(a[1], '.1f', '%')} to {signed(b[1], '.1f', '%')}"
+                       for a, b in ups)
+    lead = "Most corrections lowered" if len(downs) > len(ups) else "The corrections moved"
+    return f"{lead} the published result ({span}); {up_txt}{tail}."
 
 
 # ── Model risk page ──────────────────────────────────────────────────────────

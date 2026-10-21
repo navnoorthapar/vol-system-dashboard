@@ -21,7 +21,7 @@
   'beta': beta_src_txt ~ '; ' ~ beta_check_txt ~ '. ' ~ ev.get('beta', 'C22 bridge unavailable'),
   'r2_gate': 'The backtest traded the fixed gate while the labels used the adaptive one (' ~ r2_txt ~ '). ' ~ ev.get('r2_gate', 'C22 bridge unavailable'),
   'costs': ev.get('costs', 'C22 bridge unavailable'),
-  's3': 'S3 +$23K (z-units, as published in C21) → ' ~ (s3.get('total_pnl')|usd_k) ~ ' (index leg); timing null test on ' ~ s3_base_txt ~ ': p = ' ~ (_p|fmt('.3f')) ~ '; ' ~ s3_beta_txt,
+  's3': 'S3 +$23K (z-units, as published in C21) → ' ~ (s3.get('total_pnl')|usd_k) ~ ' (index leg); timing null test on ' ~ s3_base_txt ~ ': p = ' ~ (_p|fmt('.3f')) ~ ' (the C22 200-path null; C23 replaced it with exposure-matched nulls, Finding 4 of C23); ' ~ s3_beta_txt,
   'pdv_h21': (('the pre-C22 σ̂ (a 1-day E|r| forecast) averaged ' ~ (_pc.ratio|fmt('.2f')) ~ '× the realised RMS vol of the next ' ~ _pc.horizon ~ ' sessions in the backtest window, so “VIX > σ̂ + ' ~ (_pc.threshold_vp|fmt('.0f')) ~ ' vol pts” held on ' ~ ((_pc.share * 100)|fmt('.0f')) ~ '% of its ' ~ ("{:,}".format(_pc.n)) ~ ' sessions. ') if _pc else '') ~ ev.get('pdv_h21', 'C22 bridge unavailable'),
   'sharpe': ev.get('sharpe', 'C22 bridge unavailable'),
   'clf': '63.4% vs 90.0% — the ML added negative value' ~ ((' (the C22 retrain on the adaptive gate: ' ~ ((p4.clf_eval.oos_acc * 100)|fmt('.1f')) ~ '% vs ' ~ ((p4.clf_eval.persistence_acc * 100)|fmt('.1f')) ~ '%; still below the baseline)') if p4.clf_eval else ''),
@@ -31,7 +31,7 @@
 {% set n_quant = all_f|selectattr('status', 'equalto', 'quantified')|list|length %}
 <div class="page-head">
   <h1 class="page-title" id="audit-title">{{ d.rounds[0].id if d.rounds else 'C16' }}–{{ d.rounds[-1].id if d.rounds else 'C22' }} corrections — {{ all_f|length }} findings, {{ n_fixed }} fixed, {{ n_quant }} quantified</h1>
-  <p class="page-sub">Each round as a blameless postmortem: what was wrong, why, how it was found, the fix, the tests that now pin it and what it did to the published result. Every successive fix made the backtest worse; the original edge was a stack of artifacts.</p>
+  <p class="page-sub" id="audit-sub">Each round as a blameless postmortem: what was wrong, why, how it was found, the fix, the tests that now pin it and what it did to the published result. {{ d.headline_trend }}</p>
   <div class="page-badge"><span class="nowrap">{{ d.n_tests }} regression tests cited</span><span class="sep">·</span><span class="nowrap">{{ d.rounds|map(attribute='commit_links')|map('length')|sum }} commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span><span class="sep">·</span><span class="nowrap">C23 from <code>c23_bridge.csv</code></span></div>
 </div>
 

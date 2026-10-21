@@ -1572,16 +1572,25 @@ def test_model_smile_never_carries_a_nan(dash, monkeypatch):
     assert all(np.isfinite(v) for v in out[0]["iv"])
 
 
+def _without_inference(base: dict) -> dict:
+    """A Research page dict as it is before the C23 inference report has run."""
+    return {**base, "null_rows": [], "inference": {"state": "absent", "paths": [], "producer": None},
+            "sharpe_ci": None}
+
+
 @pytest.mark.parametrize(("p", "says"), [
-    (0.0746, "does not beat random entry dates at the 5% level (p = 0.075)"),
-    (0.0348, "beats random entry dates at the 5% level (p = 0.035)")])
+    (0.0746, "does not beat random entry dates at the 5% level (p = 0.075;"),
+    (0.0348, "beats random entry dates at the 5% level (p = 0.035;")])
 def test_s3_timing_claim_follows_the_stored_null_test(dash, monkeypatch, p, says):
     """'Only S3's timing survives' / 'its timing beats a random-walk null' were
-    hard-coded; the regenerated null test gives p = 0.075, not significant."""
-    base = dash.load_page4()
+    hard-coded; the regenerated null test gives p = 0.075, not significant.
+    Without the C23 inference report the legacy 200-path null is quoted, and
+    labelled as superseded."""
+    base = _without_inference(dash.load_page4())
     monkeypatch.setattr(dash, "load_page4", lambda: {**base, "kpi": {**base["kpi"], "s3_null_p": p}})
     text = _visible_text(dash.app.test_client().get("/research").get_data(as_text=True))
     assert says in text
+    assert "the legacy 200-path null, superseded in C23" in text
     assert ("not significant at 5%" in text) is (p >= 0.05)
     assert "Timing Survives" not in text
 
@@ -1865,12 +1874,20 @@ def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, page
     +$41,952, before the sizing overlay. The page says so, and shows the base-size
     figure only when the stored results record it."""
     m = engine_state["metrics"]
-    text = _visible_text(pages["/research"]) + " | " + _visible_text(pages["/corrections"])
+    text = _visible_text(pages["/corrections"])
     p = f"{m['s3_null_p_value']:.3f}"
-    assert ("its timing, tested on S3 at base (pass-1) size, before the sizing overlay, does not beat "
-            f"random entry dates at the 5% level (p = {p})") in text
-    assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
+    # the C22 finding quotes its own (legacy) test, named as superseded
     assert f"timing null test on S3 at base (pass-1) size, before the sizing overlay: p = {p}" in text
+    assert "(the C22 200-path null; C23 replaced it with exposure-matched nulls" in text
+    # the Research page quotes it only when the C23 nulls are missing
+    base = _without_inference(dash.load_page4())
+    import unittest.mock as _mock
+    with _mock.patch.object(dash, "load_page4", lambda: base):
+        legacy = _visible_text(dash.app.test_client().get("/research").get_data(as_text=True))
+    text += " | " + legacy
+    assert ("its timing, tested on S3 at base (pass-1) size, before the sizing overlay, does not beat "
+            f"random entry dates at the 5% level (p = {p};") in text
+    assert "S3 at base (pass-1) size, before the sizing overlay, vs random entry dates: not significant at 5%" in text
     assert "null p =" not in text
     assert "S3 entries vs random entry dates" not in text
     if "s3_null_real_pnl" not in m:
@@ -1883,9 +1900,13 @@ def test_s3_null_test_is_labelled_as_the_base_size_test(dash, engine_state, page
     with open(path, "wb") as f:
         pickle.dump(state, f)
     client = dash.app.test_client()
-    for route in ("/research", "/corrections"):
-        text = _visible_text(client.get(route).get_data(as_text=True))
-        assert "on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text, route
+    text = _visible_text(client.get("/corrections").get_data(as_text=True))
+    assert "on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text
+    base = _without_inference(dash.load_page4())
+    import unittest.mock as _mock
+    with _mock.patch.object(dash, "load_page4", lambda: base):
+        text = _visible_text(client.get("/research").get_data(as_text=True))
+    assert "on S3 at base (pass-1) size (+$41,952), before the sizing overlay" in text
 
 
 def test_s3_trade_count_is_explained_as_entries_plus_rolls(dash, engine_state, pages):
@@ -2699,6 +2720,45 @@ def test_surface_atm_over_vix_is_named_by_its_method(dash, pages):
     assert "VIX-term ATM / VIX" in surf
 
 
+def test_research_s3_timing_headline_is_the_c23_exposure_matched_null(dash, pages):
+    """UI-6: the hero and KPI quoted the 200-path null C23 calls inadequate
+    (p = 0.065) while the Inference panel below said 0.078. Both now read the
+    inference summary's circular-shift test."""
+    summ = json.loads((SHIPPED / "backtest" / "inference" / "summary.json").read_text())
+    circ = summ["nulls"]["sleeves"]["s3"]["circular"]["total_pnl"]
+    text = _visible_text(pages["/research"])
+    p = f"{circ['p_value']:.3f}"
+    assert f"exposure-matched circular shifts at the 5% level (p = {p};" in text
+    kpi = re.search(r'id="s3-timing-kpi">(.*?)</div></div>', pages["/research"], re.DOTALL).group(1)
+    assert f"p = {p}" in kpi
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as fh:
+        legacy = pickle.load(fh)["metrics"]["s3_null_p_value"]
+    if f"{legacy:.3f}" != p:
+        assert f"p = {legacy:.3f}" not in text
+
+
+def test_corrections_trend_sentence_agrees_with_the_published_series(dash, pages):
+    """UI-4: 'Every successive fix made the backtest worse' sat beside a chart on
+    which C22 raised the result from −26.1% to −21.6%. The sentence is now read
+    off the series: it names every round that raised the result."""
+    html = pages["/corrections"]
+    sub = _visible_text("<body>" + re.search(r'id="audit-sub">(.*?)</p>', html, re.DOTALL).group(1))
+    series = _spec(html, "chart-headline")
+    vals = list(series["series"][0]["data"])
+    rounds = series["xs"]
+    ups = [rounds[i + 1] for i in range(len(vals) - 1)
+           if vals[i] is not None and vals[i + 1] is not None and vals[i + 1] - vals[i] > 0.05]
+    assert "Every successive fix made the backtest worse" not in html
+    if ups:
+        for r in ups:
+            assert f"{r} raised it from" in sub, r
+        assert not sub.startswith("No correction")
+    f = dash.headline_trend_sentence
+    assert f([("C17", -9.1), ("C18", -19.0), ("C21", -26.1)]).startswith("No correction raised")
+    assert "C22 raised it from −26.1% to −21.6%" in f([("C17", -9.1), ("C21", -26.1), ("C22", -21.6),
+                                                       ("C23", -22.2)])
+
+
 def test_waterfall_exports_steps_not_bar_encodings(dash, pages):
     """UI-9: the CSV exported the stacked-bar geometry (a step that raised P&L by
     $107.9K as −107.87) and the tooltip listed every step as both 'raises' and
@@ -2733,6 +2793,17 @@ def test_surface_badge_lists_the_models(pages):
                                                 re.DOTALL).group(1))
     for m in ("eSSVI", "SVI", "SVI-cal", "Heston"):
         assert re.search(rf"models:.*\b{re.escape(m)}\b", badge), (m, badge)
+
+
+def test_surface_key_result_shows_its_range_caveat(dash, pages):
+    """UI-11: key result 1 showed 'Range over 5 stored sessions' in the interval
+    slot and dropped the note that it is not a sampling interval and that
+    held-out strikes are an interpolation test (rendered only without a range)."""
+    card = _card(pages["/"], "surface.html#scorecard")
+    assert "Range over" in card
+    assert "not a sampling interval" in card
+    assert "interpolation test" in card
+    assert 'class="kpi-ci kpi-range"' in pages["/"]
 
 
 def test_calibration_smile_anchors_stand_apart_from_the_out_of_sample_mids(dash, pages):
@@ -2836,6 +2907,39 @@ def test_both_first_screen_fonts_are_preloaded(pages):
     assert "if (c.early) render(c.el);" in js
 
 
+def test_no_identification_count_where_the_sigma_profile_contradicts_it(dash, pages):
+    """CLM-01: '4 of 5 parameters are set by the data' / '4 of 5 effective degrees
+    of freedom' beside a σ profile on which κ rides the σ cap (1.2 → 27.4). The
+    pages count interior parameters and say that κ moves with the cap."""
+    idx, cal = _visible_text(pages["/"]), _visible_text(pages["/calibration"])
+    for t in (idx, cal):
+        assert "parameters are set by the data" not in t
+        assert "effective degrees of freedom" not in t
+    d = dash.load_page2()
+    rg = d["ridge"]
+    prof = d["ident"]["sigma_profile"]
+    kap = [r["params"]["kappa"] for r in sorted(prof, key=lambda r: r["sigma_cap"])]
+    assert rg["kappa_lo"] == pytest.approx(kap[0])
+    assert rg["kappa_top"] == pytest.approx(kap[-1])
+    if rg["moves"]:
+        assert "moves with the σ cap along a κ–σ ridge" in idx
+        assert "moves with the σ cap along a κ–σ ridge" in cal
+        assert f"κ ≤ {d['ident']['kappa_max']:g}" in cal
+    assert "of 5 parameters interior (not on a bound)" in cal
+    # the free-σ refit names its wider box (κ ≤ 60, not production's 20)
+    assert re.search(r"Refitted in a wider box \(σ ≤ \d+, κ ≤ \d+; production has κ ≤ \d+\)", idx)
+
+
+def test_overview_states_what_is_stored_not_who_stored_it(pages):
+    """CLM-08: 'What the daily job has stored' listed records committed from
+    development runs; the copy now describes design intent and the stored record."""
+    idx = _visible_text(pages["/"])
+    assert "What the daily job has stored" not in pages["/"]
+    assert "Pipeline · what is stored" in idx
+    assert "Each U.S. session it stores the option books" not in idx
+    assert "whoever wrote it" in idx
+
+
 # ── browser checks (Chromium via Playwright; skipped where it is not installed) ──
 
 @pytest.fixture(scope="module")
@@ -2869,8 +2973,18 @@ def site_browser(dash, freezer, tmp_path_factory):
     httpd.shutdown()
 
 
-def _page(sb, width=1440, height=900):
+BROWSER_TIMEOUT_MS = 120_000          # generous: the suite shares its CPUs with other jobs
+
+
+def _context(sb, width=1440, height=900):
     ctx = sb["browser"].new_context(viewport={"width": width, "height": height})
+    ctx.set_default_timeout(BROWSER_TIMEOUT_MS)
+    ctx.set_default_navigation_timeout(BROWSER_TIMEOUT_MS)
+    return ctx
+
+
+def _page(sb, width=1440, height=900):
+    ctx = _context(sb, width, height)
     return ctx, ctx.new_page()
 
 
@@ -2927,7 +3041,7 @@ def test_browser_slice_is_drawn_once_and_tables_follow_the_tab(site_browser):
     early = page.evaluate("Desk.charts['chart-slices'].early")
     assert n == (2 if early else 1), (n, early)
     ctx.close()
-    ctx = sb["browser"].new_context(viewport={"width": 1440, "height": 900})
+    ctx = _context(sb)
     ctx.route("**/echarts-6.1.0-desk.min.js*",
               lambda r: r.fulfill(status=200, body="/* blocked */",
                                   headers={"content-type": "text/javascript"}))
