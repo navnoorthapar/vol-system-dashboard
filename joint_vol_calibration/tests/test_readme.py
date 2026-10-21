@@ -234,6 +234,33 @@ def test_corrections_doc_is_the_render_of_the_registry():
             assert f"/commit/{c})" in doc
 
 
+def test_validation_pack_findings_log_is_the_render_of_the_registry():
+    """CLM-14: the pack's findings log named docs/corrections.md as its source
+    yet disagreed with it (C17's severity, C20's dates, four C23 findings and
+    six commits missing). It is now rendered from the same registry."""
+    rc = _script("render_corrections")
+    pack = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+    assert rc.LOG_BEGIN in pack, "the pack's findings log is not the generated block"
+    rendered = rc.splice(pack, rc.render_findings_log(), rc.LOG_BEGIN)
+    assert rendered == pack, "run python scripts/render_corrections.py"
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    log = pack[pack.index(rc.LOG_BEGIN):]
+    doc = (ROOT / "docs" / "corrections.md").read_text()
+    for r in reg["rounds"]:
+        ids = [f["id"] for f in r["findings"] if f.get("id")] or [r["id"]]
+        for i in ids:
+            assert f"| {i} |" in log, i
+            if i != r["id"]:
+                assert f"[{i}]" in doc, i                  # the same ID in the postmortem
+        for c in r["commits"]:
+            assert f"`{c[:7]}`" in log, (r["id"], c)       # every commit of the round is in the log
+        for f in r["findings"]:
+            assert set(f.get("commits") or []) <= set(r["commits"]), (r["id"], f.get("id"))
+    for line in log.splitlines():
+        for sha in re.findall(r"`([0-9a-f]{7})`", line):
+            assert f"/commit/{sha}" in doc, sha            # every commit in the log is in corrections.md
+
+
 def test_relative_links_resolve():
     docs = [ROOT / "README.md", ROOT / "docs" / "corrections.md",
             ROOT / "docs" / "free_resources_scorecard.md",

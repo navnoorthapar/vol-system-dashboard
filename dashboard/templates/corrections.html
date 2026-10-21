@@ -75,7 +75,7 @@
     {% endif %}
     {% for f in r.findings %}
     <div class="pm-cell" data-status="{{ f.status }}" style="border-right:none;">
-      <div class="pm-k">Finding {{ loop.index }} · {{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}</div>
+      <div class="pm-k">Finding {{ loop.index }}{% if f.id %} ({{ f.id }}){% endif %} · {{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}</div>
       <div class="pm-v"><strong>{{ f.flaw|sym }}</strong></div>
       <dl class="dl" style="margin-top:4px;">
         <dt>Root cause</dt><dd>{{ f.root_cause }}</dd>

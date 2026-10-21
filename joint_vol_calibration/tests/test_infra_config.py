@@ -72,6 +72,22 @@ def test_lock_pins_every_package_and_uses_cpu_torch():
     assert any(ln.startswith("torch==") and ln.endswith("+cpu") for ln in lines)
 
 
+def test_lock_keeps_the_security_floors():
+    """C23-E2: pip-audit found advisories in idna 3.11, urllib3 2.6.3 and
+    werkzeug 3.1.8; requirements.txt floors them and the lock must honour the
+    floors (a recompile that drops one fails here)."""
+    from packaging.version import Version
+
+    floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
+    req = (ROOT / "requirements.txt").read_text()
+    pins = dict(re.findall(r"^([A-Za-z0-9_.\-]+)==(\S+)$", (ROOT / "requirements-lock.txt").read_text(),
+                           re.MULTILINE))
+    pins = {k.lower(): v for k, v in pins.items()}
+    for name, floor in floors.items():
+        assert re.search(rf"^{name}>={re.escape(floor)}$", req, re.MULTILINE), name
+        assert Version(pins[name]) >= Version(floor), (name, pins[name])
+
+
 def test_redeploy_script_cannot_push_gh_pages():
     sh = (ROOT / "redeploy_site.sh").read_text()
     code = "\n".join(ln for ln in sh.splitlines() if not ln.lstrip().startswith("#"))

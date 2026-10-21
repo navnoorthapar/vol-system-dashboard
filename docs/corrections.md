@@ -3,7 +3,8 @@
 Every round of correction since March 2026, as a blameless postmortem: what was wrong, the root cause, how it was
 found, the fix, the regression tests that now pin it, the commits, and what it did to the published result. The
 numbers in each round are the ones published when it closed; the backtest has been re-run against the same window
-(2018-01-02 → 2025-03-24) after every round, and each round made the result worse or removed a thesis.
+(2018-01-02 → 2025-03-24) after every round. Most rounds lowered the published result or removed a thesis; C22 raised
+the portfolio from −26.1% to −21.6% while turning S1's profit into a loss, and no round restored a positive return.
 
 The rounds below are rendered from `dashboard/corrections.json` by `scripts/render_corrections.py`, the same registry
 the [Corrections page](https://navnoorbawa.me/corrections.html) reads; `test_readme.py` fails if this file falls behind
@@ -12,7 +13,7 @@ the generated block keep the longer explanations that used to sit in the README.
 
 <!-- BEGIN GENERATED: scripts/render_corrections.py -->
 
-C16–C23: 8 rounds, 28 findings (25 fixed, 3 quantified), 51 regression tests cited. Rendered from `dashboard/corrections.json`, the registry the site's Corrections page reads.
+C16–C23: 8 rounds, 33 findings (30 fixed, 3 quantified), 64 regression tests cited. Rendered from `dashboard/corrections.json`, the registry the site's Corrections page reads.
 
 | Round | Date | Severity | Title | Effect on the published result |
 |---|---|---|---|---|
@@ -20,10 +21,10 @@ C16–C23: 8 rounds, 28 findings (25 fixed, 3 quantified), 51 regression tests c
 | [C17](#c17) | 2026-06-11 | high | Red-team: the classifier against a persistence baseline; margin; an unbounded tail | The classifier loses to 'predict yesterday's regime' and was demoted from the trading loop; portfolio −9.1% as published after this round. |
 | [C18](#c18) | 2026-06-14 | high | Straddles never rolled: one stale-strike position marked past expiry | Inverted the contrarian thesis: S1 −$1.53M → +$463K, S1C −$97K → −$404K, portfolio −9.1% → −19.0%; S3 unchanged. |
 | [C19](#c19) | 2026-06-20 | low | Signal-engine logic fixes and data-gap repair | Cleanup; the canonical numbers did not change. |
-| [C20](#c20) | 2026-08-04 | high | The calibration selector rewarded broken data | The published 'best calibration' had been the day the VIX feed failed; fits are now gated on at least 3 VIX tenors with provenance recorded. |
+| [C20](#c20) | 2026-08-04 → 2026-09-05 | high | The calibration selector rewarded broken data | The published 'best calibration' had been the day the VIX feed failed; fits are now gated on at least 3 VIX tenors with provenance recorded. |
 | [C21](#c21) | 2026-09-05 | high | The cash hurdle was a test fixture; straddles marked a day too rich | Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, MaxDD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K. |
-| [C22](#c22) | 2026-10-19 | high | Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L | Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run. |
-| [C23](#c23) | 2026-10-20 → 2026-10-21 | high | Vendor data, the calibration's identification, spread-unit evidence and statistical inference | Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it. |
+| [C22](#c22) | 2026-10-12 → 2026-10-19 | high | Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L | Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run. |
+| [C23](#c23) | 2026-10-20 → 2026-10-21 | high | Vendor data, the calibration's identification, spread-unit evidence and statistical inference | Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it. The review round (finding 11) corrected published claims without moving a headline number. |
 
 ### C16
 
@@ -136,11 +137,11 @@ C16–C23: 8 rounds, 28 findings (25 fixed, 3 quantified), 51 regression tests c
 
 ### C20
 
-**The calibration selector rewarded broken data** · 2026-08-04 · severity high · components: calibration, dashboard
+**The calibration selector rewarded broken data** · 2026-08-04 → 2026-09-05 · severity high · components: calibration, dashboard
 
 - **Detection.** The headline fit was traced to a day the VIX feed returned only ^VIX.
 - **Effect on the published result.** The published 'best calibration' had been the day the VIX feed failed; fits are now gated on at least 3 VIX tenors with provenance recorded.
-- **Commits.** [`35690a2`](https://github.com/navnoorthapar/vol-system-dashboard/commit/35690a261ddf7c944d28be2a9329736794307db6)
+- **Commits.** [`35690a2`](https://github.com/navnoorthapar/vol-system-dashboard/commit/35690a261ddf7c944d28be2a9329736794307db6), [`9058371`](https://github.com/navnoorthapar/vol-system-dashboard/commit/9058371bd30bbfc1d259e74446fa6b349eca3fc9)
 
 **Finding 1 (fixed): Archived fits ranked by SPX RMSE with no data-sufficiency check**
 
@@ -180,7 +181,7 @@ C16–C23: 8 rounds, 28 findings (25 fixed, 3 quantified), 51 regression tests c
 
 ### C22
 
-**Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L** · 2026-10-19 · severity high · components: backtest engine, signals, calibration, daily bot
+**Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L** · 2026-10-12 → 2026-10-19 · severity high · components: backtest engine, signals, calibration, daily bot
 
 - **Detection.** A subsystem-by-subsystem audit (about 270 findings, each reproduced before fixing) after the live calibration failed for a month.
 - **Effect on the published result.** Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run.
@@ -257,11 +258,11 @@ The C22 waterfall, one correction at a time (`data_store/backtest/c22_bridge.csv
 
 ### C23
 
-**Vendor data, the calibration's identification, spread-unit evidence and statistical inference** · 2026-10-20 → 2026-10-21 · severity high · components: data layer, calibration, surface, statistics, rates, daily bot
+**Vendor data, the calibration's identification, spread-unit evidence and statistical inference** · 2026-10-20 → 2026-10-21 · severity high · components: data layer, calibration, surface, statistics, rates, daily bot, dashboard, engineering
 
-- **Detection.** A reviewer-standard pass over every subsystem in six parallel chains (surface, calibration, statistics, data, UI, engineering), each result measured on the five committed model_version 2 sessions and merged only with the full suite green.
-- **Effect on the published result.** Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it.
-- **Commits.** [`c63e515`](https://github.com/navnoorthapar/vol-system-dashboard/commit/c63e515f1c64b311d924d091ac8145bdd3fb6527), [`2566553`](https://github.com/navnoorthapar/vol-system-dashboard/commit/256655374fe2302942cc71e7594e6f2aa91fa7ac), [`958be69`](https://github.com/navnoorthapar/vol-system-dashboard/commit/958be6996b9ea0f837dc256638be5ffb787bccbf), [`49f5fd0`](https://github.com/navnoorthapar/vol-system-dashboard/commit/49f5fd03619dd1559f8e0a5185b8e9eb93ddc310), [`1c886e3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/1c886e33525cfdb0322ad3c88fec25f8f63c2965), [`ca36d24`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ca36d24448b9d3923f4b517499366eb8318366f5), [`9c486c3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/9c486c388f9d274021d1d96473eedf628898a0cb), [`a678e57`](https://github.com/navnoorthapar/vol-system-dashboard/commit/a678e57c10a32d835ee261021a37ea7c971494ad)
+- **Detection.** A reviewer-standard pass over every subsystem in six parallel chains (surface, calibration, statistics, data, UI, engineering), each result measured on the five committed model_version 2 sessions and merged only with the full suite green. An independent adversarial review of the merged branch then confirmed 62 findings; the ones that corrected a published claim are finding 11.
+- **Effect on the published result.** Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it. The review round (finding 11) corrected published claims without moving a headline number.
+- **Commits.** [`c63e515`](https://github.com/navnoorthapar/vol-system-dashboard/commit/c63e515f1c64b311d924d091ac8145bdd3fb6527), [`2566553`](https://github.com/navnoorthapar/vol-system-dashboard/commit/256655374fe2302942cc71e7594e6f2aa91fa7ac), [`958be69`](https://github.com/navnoorthapar/vol-system-dashboard/commit/958be6996b9ea0f837dc256638be5ffb787bccbf), [`49f5fd0`](https://github.com/navnoorthapar/vol-system-dashboard/commit/49f5fd03619dd1559f8e0a5185b8e9eb93ddc310), [`1c886e3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/1c886e33525cfdb0322ad3c88fec25f8f63c2965), [`ca36d24`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ca36d24448b9d3923f4b517499366eb8318366f5), [`9c486c3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/9c486c388f9d274021d1d96473eedf628898a0cb), [`a678e57`](https://github.com/navnoorthapar/vol-system-dashboard/commit/a678e57c10a32d835ee261021a37ea7c971494ad), [`e6a92bc`](https://github.com/navnoorthapar/vol-system-dashboard/commit/e6a92bcf532cbd67462163e791eba829f0bdb853), [`ba360c8`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ba360c82b9d716213c8409c4338002a0faaab84b), [`a92308c`](https://github.com/navnoorthapar/vol-system-dashboard/commit/a92308c85659450830e78bc58d12124f4b994ae6), [`741dfe3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/741dfe3a36f90c0f8feaa263ed896fdd79b02777), [`113efa5`](https://github.com/navnoorthapar/vol-system-dashboard/commit/113efa540b9ab2c1fc03d06edaa24a378a040bbb), [`d63b797`](https://github.com/navnoorthapar/vol-system-dashboard/commit/d63b7976f73d33d978baabf4711956e0d303d51d), [`59e73b1`](https://github.com/navnoorthapar/vol-system-dashboard/commit/59e73b1056b206532d14737285f086e7c909aa28), [`dd4dc01`](https://github.com/navnoorthapar/vol-system-dashboard/commit/dd4dc019ff1b14253a2f97990da877ecfec97aad), [`b69eb45`](https://github.com/navnoorthapar/vol-system-dashboard/commit/b69eb451c39fa1778e2f6f892343a550ea78a05b), [`1a4ca03`](https://github.com/navnoorthapar/vol-system-dashboard/commit/1a4ca03f1edbc58d26553a18a1bee3e1e8b61100)
 
 The C23 waterfall: the published C22 run restated row by row on the Cboe record (`data_store/backtest/c23_bridge.csv`, `python -m joint_vol_calibration.backtest.c23_bridge`).
 
@@ -273,47 +274,104 @@ The C23 waterfall: the published C22 run restated row by row on the Cboe record 
 | 3 | VVIX sessions missing from Yahoo added from Cboe | $777,406 | −$222,594 | −$6,502 | −0.99 |
 | 4 | term-structure values replaced by Cboe's (|change| > 0.005) | $777,823 | −$222,177 | +$417 | −0.99 |
 
-**Finding 1 (fixed): The labels, backtest and calibrator read Yahoo's copies of the VIX index family**
+**Finding 1 [C23-D1] (fixed): The labels, backtest and calibrator read Yahoo's copies of the VIX index family**
 
 - Root cause: Production overlaid Cboe's official closes on vix_daily only; every consumer read vix_term_structure, Yahoo's float32 copies with NULL provenance, NYSE-holiday rows and 8 VVIX sessions missing (forward-filled).
 - Fix: Cboe's index files are the record (Yahoo only as a provisional same-evening row, replaced when Cboe posts); the database cache re-synced from it; the daily job writes Cboe first and reports cross-source differences above 0.25 pts.
 - Evidence: 136 term-structure rows replaced (38 by more than 0.25 pts, 33 of them in the backtest window), 8 VVIX sessions added, 31 holiday rows removed; portfolio −$216,092 → −$222,177 (c23_bridge.csv); labels 2019-08-09, 2020-02-20, 2020-06-11, 2021-05-11 R1 → R2 and 2021-06-09, 2021-07-08 R2 → R1
+- Effect on the published result: portfolio −$216,092 → −$222,177, Sharpe −0.88 → −0.99; 6 of 4,162 labels move
+- Commits: [`c63e515`](https://github.com/navnoorthapar/vol-system-dashboard/commit/c63e515f1c64b311d924d091ac8145bdd3fb6527), [`2566553`](https://github.com/navnoorthapar/vol-system-dashboard/commit/256655374fe2302942cc71e7594e6f2aa91fa7ac)
 - Pinned by: `joint_vol_calibration/tests/test_data_layer.py::TestC23RecordCorrection::test_apply_db_removes_holiday_rows_and_installs_the_cboe_values`, `joint_vol_calibration/tests/test_cloud_refresh.py::test_vix_term_structure_is_cboe_primary`, `joint_vol_calibration/tests/test_backtest_reproducibility.py::test_c23_bridge_reproduces_every_row`
 
-**Finding 2 (quantified): The σ ≤ 2 box, not the market, sets the headline fit**
+**Finding 2 [C23-M1] (quantified): The σ ≤ 2 box, not the market, sets the headline fit**
 
 - Root cause: σ sits on its 2.0 ceiling in 2 of the 5 model_version 2 fits (2026-03-24, 2026-10-16); the page said 4 of 5 parameters are set by the market without saying what the box costs.
-- Fix: A σ profile (the joint loss refitted under caps 1 to 10, κ ≤ 60) and Gauss–Newton identifiability are stored per session and shown; the production box is kept (the NN domain, the vomma shock sizing and the gate depend on it) and its cost is published.
+- Fix: A σ profile (the joint loss refitted under caps 1 to 10, κ ≤ 60) and Gauss–Newton identifiability are stored per session and shown; the production box is kept (the NN domain, the vomma shock sizing and the gate depend on it) and its cost is published. The review round (C23f) removed the count the σ profile contradicts: κ is interior but moves with the σ cap along a κ–σ ridge (κ 1.2 at σ ≤ 1, 5.0 at the cap, 27.4 freed) and its curvature SE is 19%, so the pages say σ is on its bound and κ is set by the box, not that 4 of 5 parameters are set by the data.
 - Evidence: 2026-10-16: freeing σ gives σ 6.90, κ 27.4, loss −27.7%, out-of-sample RMSE 2.96 → 1.19 vol pts and model VVIX 205 → 113 against the market's 110; on 2026-03-24 the box costs 2.1% of the loss (data_store/calibrations/diagnostics/)
-- Pinned by: `joint_vol_calibration/tests/test_identifiability.py::test_sigma_box_rationale_in_config_matches_the_artifacts`, `joint_vol_calibration/tests/test_identifiability.py::test_diagnostics_artifact_is_consistent`
+- Effect on the published result: none (the fit is published with its σ profile and the box's cost)
+- Commits: [`958be69`](https://github.com/navnoorthapar/vol-system-dashboard/commit/958be6996b9ea0f837dc256638be5ffb787bccbf)
+- Pinned by: `joint_vol_calibration/tests/test_identifiability.py::test_sigma_box_rationale_in_config_matches_the_artifacts`, `joint_vol_calibration/tests/test_identifiability.py::test_diagnostics_artifact_is_consistent`, `joint_vol_calibration/tests/test_dashboard.py::test_no_identification_count_where_the_sigma_profile_contradicts_it`
 
-**Finding 3 (fixed): Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage**
+**Finding 3 [C23-M2] (fixed): Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage**
 
 - Root cause: No per-quote residuals were stored, the calibration chart drew the model only, and nothing screened the stored quotes for static arbitrage.
 - Fix: A surface package: Cohen–Reisinger–Wang screen and l1 repair on HiGHS, an executable-arbitrage certificate, eSSVI and calendar-ordered SVI surfaces, and one scorecard that scores every model on the calibrator's out-of-sample quotes in half-spreads.
 - Evidence: Out-of-sample median |model − mid| over the 5 sessions: Heston 4.4–15.6 half-spreads (3.0–12.3% inside the bid–ask); the arbitrage-free SVI surface 0.45–1.98 (32–80% inside); executable static arbitrage on all 5 sessions, 160–629 quotes per session in an executable row (data_store/surface/)
+- Effect on the published result: Heston 4.4–15.6 half-spreads out of sample; executable static arbitrage on all 5 sessions
+- Commits: [`49f5fd0`](https://github.com/navnoorthapar/vol-system-dashboard/commit/49f5fd03619dd1559f8e0a5185b8e9eb93ddc310), [`e6a92bc`](https://github.com/navnoorthapar/vol-system-dashboard/commit/e6a92bcf532cbd67462163e791eba829f0bdb853)
 - Pinned by: `joint_vol_calibration/tests/test_surface_arbitrage.py::test_committed_session_screen_counts`, `joint_vol_calibration/tests/test_surface_report.py::test_spread_unit_claims_hold`, `joint_vol_calibration/tests/test_surface_report.py::test_committed_artifacts_match_a_recomputation`
 
-**Finding 4 (fixed): The backtest had no statistical inference**
+**Finding 4 [C23-S1] (fixed): The backtest had no statistical inference**
 
 - Root cause: Sharpe ratios and a 200-path S3 null were published without intervals, deflation for the configurations tried since C10, or exposure-matched nulls for every sleeve.
 - Fix: Stationary-bootstrap intervals, PSR/DSR against a committed trials ledger, Hansen SPA and StepM, CSCV PBO, exposure-matched circular-shift and trade-shuffle nulls for every sleeve, and forecast comparisons (QLIKE, Diebold–Mariano, MCS).
-- Evidence: Portfolio Sharpe −0.99, 95% CI −1.81 to −0.30; S3 timing p 0.078 against 3,550 circular shifts (Holm over 6 sleeves 0.47); Hansen SPA p 0.65 for the published series against cash; S3's largest DSR over every trial count 0.27 (data_store/backtest/inference/summary.json)
-- Pinned by: `joint_vol_calibration/tests/test_stats_inference_report.py::test_headline_is_generated_from_the_stored_numbers`, `joint_vol_calibration/tests/test_stats_inference_report.py::test_bootstrap_rebuilds_exactly_from_the_committed_curve`, `joint_vol_calibration/tests/test_stats_nulls.py::test_circular_null_detects_real_timing_and_not_luck`
+- Evidence: Portfolio Sharpe −0.99, 95% CI −1.81 to −0.30; S3 timing p 0.078 against 3,550 circular shifts (Holm over 6 sleeves 0.47); Hansen SPA p 0.65 for the published series against cash; S3's deflated Sharpe ratio is 0.000–0.019 at the ledger's trial counts (N 147–210) and reaches 0.27 only at N 4.6, the eigenvalue participation ratio of the 83 re-run trial series (not a trial count), with the skill-less trial variance; CSCV PBO 0.34 for the 16 configurations of the published portfolio (data_store/backtest/inference/summary.json)
+- Effect on the published result: portfolio Sharpe 95% interval −1.81 to −0.30; no published series beats cash
+- Commits: [`1c886e3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/1c886e33525cfdb0322ad3c88fec25f8f63c2965)
+- Pinned by: `joint_vol_calibration/tests/test_stats_inference_report.py::test_headline_is_generated_from_the_stored_numbers`, `joint_vol_calibration/tests/test_stats_inference_report.py::test_bootstrap_rebuilds_exactly_from_the_committed_curve`, `joint_vol_calibration/tests/test_stats_nulls.py::test_circular_null_detects_real_timing_and_not_luck`, `joint_vol_calibration/tests/test_stats_inference_report.py::test_dsr_reports_the_ledger_count_range_beside_the_lenient_bound`
 
-**Finding 5 (fixed): Flat rates in the hedger and the Greeks surface**
+**Finding 5 [C23-R1] (fixed): Flat rates in the hedger and the Greeks surface**
 
 - Root cause: The C7 hedger hard-coded R = 1.5% ('2020 US Treasury'), and the Greeks surface used one median r and q for every maturity, so its 1-year forward was 0.50% below that expiry's parity forward.
 - Fix: A daily Treasury zero curve (bills and par yields, look-ahead gated, refused when more than 7 days old) feeds the calibrator's reference, the chain cleaner, the C7 study and per-maturity Greeks carry.
 - Evidence: C7 cumulative P&L 167.95 → 168.34 index points; Greeks surface 1-year forward 7,931.8 → 7,971.7 (the parity forward); the committed fits recorded ^IRX and are unchanged
+- Effect on the published result: C7 cumulative P&L 167.95 → 168.34 index points
+- Commits: [`ca36d24`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ca36d24448b9d3923f4b517499366eb8318366f5)
 - Pinned by: `joint_vol_calibration/tests/test_rate_reference.py::test_c7_uses_the_one_year_zero_rate_at_entry`, `joint_vol_calibration/tests/test_rate_reference.py::test_greeks_carry_reprices_the_parity_forwards_on_the_treasury_curve`
 
-**Finding 6 (fixed): A presentation test could lose a captured session**
+**Finding 6 [C23-O1] (fixed): A presentation test could lose a captured session**
 
 - Root cause: The daily job committed the chain and the fit only if the dashboard tests passed; a test that pinned a value of the committed data failed on the first new fit, and the 2026-10-19 overnight book (accepted three times) was lost.
 - Fix: Separate gates: data tests gate the capture commit, artifact tests the derived artifacts, presentation tests only the deploy; CI simulates the bot's next session before merge.
 - Evidence: No published number moved; the simulated next session (scripts/ci/simulate_next_session.py) found 5 more tests that would have blocked the deploy on the first accepted fit
+- Effect on the published result: none; the next-session simulation now runs in CI
+- Commits: [`9c486c3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/9c486c388f9d274021d1d96473eedf628898a0cb), [`a678e57`](https://github.com/navnoorthapar/vol-system-dashboard/commit/a678e57c10a32d835ee261021a37ea7c971494ad)
 - Pinned by: `joint_vol_calibration/tests/test_infra_config.py::test_a_presentation_test_cannot_lose_the_captures`, `joint_vol_calibration/tests/test_infra_config.py::test_each_commit_adds_its_own_paths`
+
+**Finding 7 [C23-O2] (fixed): `make reproduce` refitted the calibrations from a deleted scratch pickle and with the wrong optimiser**
+
+- Root cause: The refit step read each fit's recorded inputs from the scratch copy's pickle, which run_step deletes first, so all five calibration steps failed; with the path right, the default TRF refit would still have missed the committed DE fits by up to 2e-3 relative.
+- Fix: Each refit reads its inputs from the committed pickle in the checkout and runs the optimiser that made it (DE for every fit committed before C23).
+- Evidence: make reproduce plus the three --full steps: 14 of 14 artifacts bit for bit (docs/reproduce.md)
+- Effect on the published result: none (the refits failed; now 14 of 14 bit for bit)
+- Commits: [`741dfe3`](https://github.com/navnoorthapar/vol-system-dashboard/commit/741dfe3a36f90c0f8feaa263ed896fdd79b02777)
+- Pinned by: `joint_vol_calibration/tests/test_infra_config.py::test_reproduce_refits_each_fit_from_its_committed_record`
+
+**Finding 8 [C23-U1] (fixed): The accessibility gate audited retired pages; the Risk page printed 'r = —%'; the ML classifier sat on the Overview**
+
+- Root cause: The CI accessibility gate listed two pages that had become redirects and could not inject axe under the pages' CSP; every page scrolled horizontally at 320 px when the view was a session behind; the Risk banner read one flat carry the per-maturity Greeks no longer had; a demoted research model was on the first screen.
+- Fix: The gate audits the seven pages and the 404 (the redirects are not pages), with CSP bypassed for the audit context only; status items wrap below 480 px; the Risk page states its r(T), q(T) ranges and the curve; the classifier moved to the Research page.
+- Evidence: axe-core 4.13.0: 0 violations on the 7 pages and the 404 at 1440 and 390 px in both colour schemes; no horizontal scroll from 320 to 1920 px (docs/engineering.md)
+- Effect on the published result: none
+- Commits: [`113efa5`](https://github.com/navnoorthapar/vol-system-dashboard/commit/113efa540b9ab2c1fc03d06edaa24a378a040bbb)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_risk_provenance_states_the_per_maturity_carry`, `joint_vol_calibration/tests/test_dashboard.py::test_overview_keeps_research_prototypes_off_the_first_screen`
+
+**Finding 9 [C23-E1] (fixed): `option_chain.year_fraction` raised on an origin with no time in it**
+
+- Root cause: A missing quote_time cell reads as an empty string or a missing value, which the time parser did not accept; making the module pass mypy's strict flags found it.
+- Fix: An origin with no time counts as the session close.
+- Evidence: the path raised; it never returned a wrong T
+- Effect on the published result: none
+- Commits: [`ba360c8`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ba360c82b9d716213c8409c4338002a0faaab84b)
+- Pinned by: `joint_vol_calibration/tests/test_properties_iv.py::test_year_fraction_clock`
+
+**Finding 10 [C23-E2] (fixed): Known advisories in three locked packages on the download and preview paths**
+
+- Root cause: pip-audit 2.10.1 on the lock (2026-10-20): idna 3.11 (CVE-2026-45409), urllib3 2.6.3 (five CVEs), werkzeug 3.1.8 (CVE-2026-102598); none in the numerical stack.
+- Fix: Floors idna ≥ 3.15, urllib3 ≥ 2.8.0 and werkzeug ≥ 3.1.9 in requirements.txt and a recompiled lock that keeps every numerical pin.
+- Evidence: requirements-lock.txt pins idna 3.20, urllib3 2.8.0, werkzeug 3.1.9; the committed pickles and bit-exact artifacts are unaffected
+- Effect on the published result: none on a number; urllib3 and idna are on the daily job's download path
+- Commits: [`a92308c`](https://github.com/navnoorthapar/vol-system-dashboard/commit/a92308c85659450830e78bc58d12124f4b994ae6)
+- Pinned by: `joint_vol_calibration/tests/test_infra_config.py::test_lock_keeps_the_security_floors`
+
+**Finding 11 [C23-V1] (fixed): Published claims that the branch's own artifacts contradicted (independent review of C23)**
+
+- Root cause: Claims were checked on the grids that produced them: the 'arbitrage-free' SVI surface was constrained at 241 nodes, the forward ledger was tested on synthetic books that always held the position's expiry, the Risk page's delta grid was labelled from the column name, and the S3 deflated Sharpe ratio was quoted at its most lenient trial count.
+- Fix: SVI slices are accepted only with refined-grid butterfly and calendar certificates (Durrleman g ≥ 0 and calendar order on a 1e-4 grid over k in [−3, 2], a 1/k grid to |k| = 2,000–3,000 and the |k| → ∞ limits), which also gate the label; the ledger trades and marks on the session's full Cboe book whatever the fit does; the Risk grid shows the OTM option's forward delta; every DSR and PBO is reported with its basis; page copy states only what the data supports.
+- Evidence: Before: 21 SVI-cal slices with g < 0 between grid nodes (worst −2.58e-5 at k = 0.19 on 2026-10-16) and 35 crossing calendar pairs; after: 0 and 0 in all five sessions, every session's objective equal or lower, the published 0.45–1.98 half-spread range unchanged. The ledger's position expiry was in its book on 3 of 19 sessions; now the full Cboe book (55 expiries). The Risk grid showed +0.99 for a 30%-OTM put; now −0.01. S3's DSR: 0.000–0.019 at the ledger's counts, 0.27 only at N 4.6. 'Every fix made the backtest worse': C22 raised it from −26.1% to −21.6%
+- Effect on the published result: no headline number moved; the surface, ledger, Risk-page and inference claims now hold
+- Commits: [`d63b797`](https://github.com/navnoorthapar/vol-system-dashboard/commit/d63b7976f73d33d978baabf4711956e0d303d51d), [`59e73b1`](https://github.com/navnoorthapar/vol-system-dashboard/commit/59e73b1056b206532d14737285f086e7c909aa28), [`dd4dc01`](https://github.com/navnoorthapar/vol-system-dashboard/commit/dd4dc019ff1b14253a2f97990da877ecfec97aad), [`b69eb45`](https://github.com/navnoorthapar/vol-system-dashboard/commit/b69eb451c39fa1778e2f6f892343a550ea78a05b), [`1a4ca03`](https://github.com/navnoorthapar/vol-system-dashboard/commit/1a4ca03f1edbc58d26553a18a1bee3e1e8b61100)
+- Pinned by: `joint_vol_calibration/tests/test_surface_svi.py::test_butterfly_certificate_finds_the_dip_between_grid_nodes`, `joint_vol_calibration/tests/test_surface_svi.py::test_ordering_certificate_catches_crossings_the_check_grid_missed`, `joint_vol_calibration/tests/test_forward_ledger.py::test_a_book_without_the_expiry_defers_the_close_to_the_next_book_that_has_it`, `joint_vol_calibration/tests/test_dashboard.py::test_risk_delta_grid_is_the_otm_options_forward_delta`, `joint_vol_calibration/tests/test_stats_inference_report.py::test_every_pbo_is_reported_with_its_basis`, `joint_vol_calibration/tests/test_dashboard.py::test_corrections_trend_sentence_agrees_with_the_published_series`
 
 <!-- END GENERATED -->
 

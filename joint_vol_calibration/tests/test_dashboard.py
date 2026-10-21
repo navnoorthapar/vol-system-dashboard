@@ -2987,6 +2987,8 @@ def test_model_inventory_is_the_validation_packs(dash, pages):
     for mid, cell in rows:
         assert mid in ours, mid
         assert stem(ours[mid]) == stem(cell), (mid, ours[mid], cell)
+    # and the other way: the pack lists every model the page carries (it lacked M20, the C7 simulator)
+    assert sorted(ours) == sorted(mid for mid, _ in rows), sorted(set(ours) ^ {mid for mid, _ in rows})
     d = dash.load_model_risk()
     ids = set(ours) | {"Data"}
     for m in d["monitors"]:

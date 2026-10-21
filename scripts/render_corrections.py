@@ -11,8 +11,14 @@ script renders the same rounds into docs/corrections.md, between the markers
 
 so the prose around them (narrative notes) is kept. The C22 and C23
 waterfalls are rendered from data_store/backtest/c22_bridge.csv and
-c23_bridge.csv. test_readme.py fails when the committed file differs from a
-fresh render.
+c23_bridge.csv. The same registry renders the findings log of the
+validation pack (docs/model_validation/README.md §6) between
+
+    <!-- BEGIN GENERATED: findings log, scripts/render_corrections.py -->
+    <!-- END GENERATED -->
+
+one row per round, or per finding where the finding carries its own id.
+test_readme.py fails when either committed file differs from a fresh render.
 
     python scripts/render_corrections.py [--check]
 """
@@ -27,8 +33,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "dashboard" / "corrections.json"
 DOC = ROOT / "docs" / "corrections.md"
+PACK = ROOT / "docs" / "model_validation" / "README.md"
 BEGIN = "<!-- BEGIN GENERATED: scripts/render_corrections.py -->"
 END = "<!-- END GENERATED -->"
+LOG_BEGIN = "<!-- BEGIN GENERATED: findings log, scripts/render_corrections.py -->"
 MINUS = "−"
 
 
@@ -121,34 +129,78 @@ def render() -> str:
             tests = f.get("tests") or []
             pinned = (", ".join(f"`{t}`" for t in tests) if tests
                       else "no dedicated regression test (a gap)")
-            out += ["", f"**Finding {i} ({f['status']}): {f['flaw']}**", "",
+            fid = f" [{f['id']}]" if f.get("id") else ""
+            out += ["", f"**Finding {i}{fid} ({f['status']}): {f['flaw']}**", "",
                     f"- Root cause: {f['root_cause']}",
                     f"- Fix: {f['fix']}",
-                    f"- Evidence: {finding_evidence(f, steps)}",
-                    f"- Pinned by: {pinned}"]
+                    f"- Evidence: {finding_evidence(f, steps)}"]
+            if f.get("effect"):
+                out.append(f"- Effect on the published result: {f['effect']}")
+            if f.get("commits"):
+                out.append("- Commits: " + ", ".join(f"[`{c[:7]}`]({repo}/commit/{c})" for c in f["commits"]))
+            out.append(f"- Pinned by: {pinned}")
     out += ["", END]
     return "\n".join(out)
 
 
-def splice(doc: str, block: str) -> str:
-    i, j = doc.index(BEGIN), doc.index(END) + len(END)
+def _status(findings: list[dict]) -> str:
+    kinds = sorted({f["status"] for f in findings}, key=("fixed", "quantified").index)
+    return ", ".join(kinds)
+
+
+def render_findings_log() -> str:
+    """The validation pack's findings log (§6): one row per round, or one per
+    finding where the finding carries its own id (the C23 sub-findings)."""
+    reg = json.loads(REGISTRY.read_text())
+    head = "| ID | Date | Component | Severity | Finding | Effect on the published result | Status | Commit |"
+    out = [LOG_BEGIN, "", head, "|---|---|---|---|---|---|---|---|"]
+
+    def span(x: dict) -> str:
+        end = x.get("date_end")
+        return x["date"] + (f" → {end}" if end and end != x["date"] else "")
+
+    def commits(shas: list[str]) -> str:
+        return ", ".join(f"`{c[:7]}`" for c in shas)
+
+    for r in reg["rounds"]:
+        own = [f for f in r["findings"] if f.get("id")]
+        if own:
+            out.extend(f"| {f['id']} | {span(f)} | {', '.join(f['models'])} | {f['severity']} | "
+                       f"{f['flaw']} | {f['effect']} | {f['status']} | "
+                       f"{commits(f['commits'])} |" for f in own)
+        else:
+            models = ", ".join(r.get("models") or r["components"])
+            out.append(f"| {r['id']} | {span(r)} | {models} | {r['severity']} | {r['title']} | "
+                       f"{r.get('effect') or ''} | {_status(r['findings'])} | {commits(r['commits'])} |")
+    out += ["", END]
+    return "\n".join(out)
+
+
+def splice(doc: str, block: str, begin: str = BEGIN) -> str:
+    i = doc.index(begin)
+    j = doc.index(END, i) + len(END)
     return doc[:i] + block + doc[j:]
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--check", action="store_true", help="exit 1 if docs/corrections.md is not up to date")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 if docs/corrections.md or the pack's findings log is not up to date")
     a = ap.parse_args(argv)
-    doc = DOC.read_text()
-    new = splice(doc, render())
-    if a.check:
-        if new != doc:
-            print("docs/corrections.md is stale: run python scripts/render_corrections.py", file=sys.stderr)
-            return 1
-        return 0
-    DOC.write_text(new)
-    print(f"wrote {DOC.relative_to(ROOT)}")
-    return 0
+    targets = ((DOC, render(), BEGIN), (PACK, render_findings_log(), LOG_BEGIN))
+    stale = 0
+    for path, block, begin in targets:
+        doc = path.read_text()
+        new = splice(doc, block, begin)
+        if a.check:
+            if new != doc:
+                print(f"{path.relative_to(ROOT)} is stale: run python scripts/render_corrections.py",
+                      file=sys.stderr)
+                stale = 1
+            continue
+        path.write_text(new)
+        print(f"wrote {path.relative_to(ROOT)}")
+    return stale
 
 
 if __name__ == "__main__":

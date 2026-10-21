@@ -1,9 +1,10 @@
 # Model validation pack
 
 **Status:** the evidence available at C23 (branch `c23/integration`, 2026-10-21): the C22 record plus the C23 model,
-data, statistics and engineering work. Every number here is quoted from a committed artifact (named beside it), a test
-that pins it, or a run recorded in `docs/`. The numbers the README also quotes are checked against their artifacts by
-`tests/test_readme.py`.
+data, statistics and engineering work, and the fixes of an independent review of that branch (C23-V1 in §6). Every
+number here is quoted from a committed artifact (named beside it), a test that pins it, or a run recorded in `docs/`.
+The numbers the README also quotes are checked against their artifacts by `tests/test_readme.py`; the rest of this
+document is not checked number by number.
 
 ## What this document is, and is not
 
@@ -24,8 +25,9 @@ and what does not.
 "Use" is how the output reaches anything published: **production** (computed by the daily job or shown on the
 dashboard), **research** (reported, on no production path), **demoted** (shown only as a negative result).
 "Materiality" is how much a published number depends on the model (high: a headline number or its sign; medium: a
-secondary published number; low: diagnostics only). The dashboard's Model Risk page carries the same inventory in
-short form (`dashboard/model_inventory.json`).
+secondary published number; low: diagnostics only). The dashboard's Model Risk page carries the same inventory
+(`dashboard/model_inventory.json`): the same IDs and names in both directions, checked by `test_dashboard.py`, and its
+monitors cite these IDs.
 
 | ID | Model | Code | Use | Materiality | Key limitations | Validation evidence |
 |---|---|---|---|---|---|---|
@@ -42,12 +44,13 @@ short form (`dashboard/model_inventory.json`).
 | M11 | XGBoost regime classifier | `signals/regime_classifier.py` | demoted (Research page only) | low | loses to "predict yesterday" (74.9% against 87.0% on its own evaluation) | `test_regime_classifier.py` |
 | M12 | NN surrogate pricer | `models/nn_pricer.py` | research | low | trained domain narrower than the calibrator's box (κ ≤ 15 vs 20, θ ≤ 0.2 vs 1, v₀ ≤ 0.25 vs 1); the speed-up once quoted (14–23×) is not backed by a committed benchmark and is withdrawn | `test_nn_pricer.py` |
 | M13 | Two-factor Quintic OU (SPX MC, polynomial VIX²) | `models/quintic_ou.py`, `calibration/quintic_calibrator.py` | research | low | the stored fit did not converge; ε on its −0.99 bound | `test_quintic_ou.py`, `test_quintic_calibrator.py` |
-| M14 | Quote-grade surface: static-arbitrage screen and l1 repair (Cohen–Reisinger–Wang on HiGHS), executable-arbitrage certificate, eSSVI, calendar-ordered SVI, one scorecard for every model, VIX replication from the chain | `surface/` | production: written per accepted fit; Surface page; Overview result 1 | medium | held-out strikes lie between fitted ones (an interpolation test); certificates on dense grids, not closed form | `test_surface_*.py` (arbitrage, eSSVI, SVI, metrics, scorecard, VIX, report) |
+| M14 | Quote-grade surface: static-arbitrage screen and l1 repair (Cohen–Reisinger–Wang on HiGHS), executable-arbitrage certificate, eSSVI, calendar-ordered SVI, one scorecard for every model, VIX replication from the chain | `surface/` | production: written per accepted fit (missing sessions backfilled by later runs); Surface page; Overview result 1 | medium | held-out strikes lie between fitted ones (an interpolation test); the no-arbitrage certificates are numerical (refined grids plus the \|k\| → ∞ limits), not closed form | `test_surface_*.py` (arbitrage, eSSVI, SVI, metrics, scorecard, VIX, report) |
 | M15 | Rough Heston (lifted, 20 factors) | `models/rough_heston.py` | research: per-session comparison | low | H weakly identified (on its 0.02 floor on 2026-10-16; ½ on 2 of 5 sessions) | `test_rough_heston.py` (QuantLib Adams reference) |
 | M16 | Spot × vol scenario grid of a reference straddle (sticky-strike and sticky-moneyness) | `greeks/scenario_grid.py` | production: Risk page | low | instantaneous parallel shocks; one reference book | `test_scenario_grid.py` (Heston-revaluation oracle, second-order Taylor check) |
 | M17 | Statistical inference of the backtest (stationary bootstrap, PSR/DSR, SPA/StepM, CSCV PBO, exposure-matched nulls, forecast comparison) | `stats/`, `scripts/inference_report.py` | production: Research page; Overview result 3 | medium | inference about the β·VIX proxy, not executable P&L; one window the rules were revised on | `test_stats_*.py`, `test_stats_inference_report.py` |
-| M18 | Forward ledger (signals at the captured bid/ask, hash-chained per session) | `backtest/forward_ledger.py` | production: written per accepted fit from C23 | medium (the only executable-price evidence) | no entry committed yet; marks are the captured Yahoo book | `test_forward_ledger.py`, `test_cloud_refresh.py` |
+| M18 | Forward ledger (signals at the captured bid/ask, hash-chained per session) | `backtest/forward_ledger.py` | production: written for every session with a live captured book, whatever the fit does | medium (the only executable-price evidence) | no entry committed yet; trades and marks on the session's full Cboe SPX capture (the Yahoo chain plus the open positions' expiries as fallback); S1C/S3/S4 sized at the engine's pass-2 size (kelly_base × k_mult) | `test_forward_ledger.py`, `test_cloud_refresh.py` |
 | M19 | Treasury zero curve (bills and par yields, look-ahead gated, refused when older than 7 days) | `data/rates.py` | production: calibrator reference, chain cleaner, C7, Greeks carry | medium | daily; falls back to ^IRX and records it when stale | `test_rates.py`, `test_rate_curve.py`, `test_rate_reference.py` |
+| M20 | Delta-hedged straddle simulator (C7: a hedged 1-year ATM straddle through 2020, daily Greek P&L explain) | `backtest/delta_hedger.py` | research: Risk page P&L explain | low | one path; financing at the 1-year Treasury zero rate at entry; Black–Scholes Greeks at the VIX term structure | `test_delta_hedger.py`, `make reproduce` (`delta_hedge_2020.parquet` bit for bit) |
 
 **Vendor and third-party inputs (SR 26-2's treatment of vendor products).** Terms and what is committed:
 [DATA_SOURCES.md](../../DATA_SOURCES.md).
@@ -75,7 +78,8 @@ short form (`dashboard/model_inventory.json`).
   1.44 `AnalyticHestonEngine` at 1e-12 on every committed fit and the stress corners, 1 day to 2 years: worst
   5.6e-12·S, at most 3e-13·S on the fits, asserted below 1e-10·S; Bates against `BatesEngine` 1.6e-12·S. Properties over
   the whole parameter box (no static or calendar arbitrage, parity across engines, the martingale condition, the σ → 0
-  limit, Bates ⊃ Heston, time-change and homogeneity invariants); 11 of 12 curated mutants killed.
+  limit, Bates ⊃ Heston, time-change and homogeneity invariants); 12 of 13 curated mutants killed, the 13th a
+  documented equivalent (`make mutation`, weekly in CI; docs/engineering.md).
 
 ### M2 Implied-vol solvers
 
@@ -122,11 +126,21 @@ short form (`dashboard/model_inventory.json`).
 - **Design.** Every stored quote is screened for static arbitrage at the bid/ask (Cohen, Reisinger & Wang 2020 rows:
   outright, vertical, butterfly, calendar), repaired with the l1-minimal move inside a linear programme on HiGHS, and an
   executable-arbitrage certificate decides whether any arbitrage-free price vector fits inside the quoted spreads. eSSVI
-  (Gatheral & Jacquier 2014) and a calendar-ordered SVI are fitted to alternate strikes; every model, Heston included,
-  is scored on the same calibrator out-of-sample universe in units of the half-spread.
-- **Evidence.** 0 butterfly and 0 calendar violations on the dense grids of the arbitrage-free surface in all five
-  sessions; the VIX replicated from each chain with Cboe's rules lands within 0.09–0.78 pts of the official close, the
-  gap attributed to truncation, the far wing, the fit and discretisation (`vix_replication.json`).
+  (Gatheral & Jacquier 2014) and a calendar-ordered SVI are fitted to alternate strikes. An SVI-cal slice is accepted
+  only with a butterfly certificate (Durrleman g ≥ 0 on a 1e-4 grid over k ∈ [−3, 2] and a 1/k grid out to
+  |k| = 2,000–3,000, each local minimum refined, and the |k| → ∞ limits) and each consecutive pair with a calendar
+  ordering certificate on the same grids; the certificates gate the label "arbitrage-free". Every model, Heston
+  included, is scored in half-spreads on the same quote universe: each on its own held-out quotes, and all on the
+  common held-out set no model was fitted to (`scorecard.json` `metrics.common_out_of_sample`: 3,440 / 2,746 / 3,369 /
+  3,695 / 1,473 quotes).
+- **Evidence.** The published SVI-cal parameters pass both certificates in all five sessions (0 slices with g < 0,
+  0 unordered pairs; before the review round, 21 slices and 35 pairs failed between the old check-grid nodes), and the
+  dense-grid checks find 0 butterfly and 0 calendar violations. The VIX replicated from each chain with Cboe's rules
+  minus the official close is −0.78 to +0.09 pts. Truncation under the SVI-cal wing explains 0.03–0.24 pts of it
+  (0.036 / 0.143 / 0.243 / 0.025 / 0.042); the rest, −0.11 to +0.64 pts and 82–88% of the gap on 2026-03-24, 03-27 and
+  10-16, is not explained by the stored chain (snapshot timing against 16:15, stale quotes, the rate). The far-wing,
+  fit and discretisation terms decompose the replication against the surface, not the gap
+  (`vix_replication.json` `gap_attribution.identity`).
 
 ### M15 Rough Heston
 
@@ -139,7 +153,10 @@ short form (`dashboard/model_inventory.json`).
 
 - **Design.** Stationary-bootstrap intervals (Politis & Romano 1994; 10,000 replicates) as the primary interval;
   PSR/DSR (Bailey & López de Prado) with the trial count from a committed ledger (`docs/trials_ledger.yaml`: 162 raw
-  configurations over C16–C22, 4.6 by eigenvalue participation), reported as a range over N and trial-variance choices;
+  configurations over C16–C22, effective N 147; 190 over C10–C22; 210 with the 20 robustness evaluations), reported as
+  a range over N and trial-variance choices. The eigenvalue participation ratio of the 83 re-runnable trial series
+  (4.6) is a clustering measure of that family, close to the number of distinct sleeves, not a trial count; it is
+  reported only as the most lenient bound;
   Hansen SPA and Romano–Wolf StepM; CSCV PBO; timing nulls that keep each sleeve's own exposure (3,550 circular shifts,
   2,000 trade shuffles), Holm-adjusted over six series. Three runs gave byte-identical artifacts.
 
@@ -149,19 +166,19 @@ short form (`dashboard/model_inventory.json`).
 |---|---|---|
 | M4 | Out-of-sample SPX IV RMSE on the quotes not used as anchors, five v2 sessions | 1.98 / 1.54 / 1.28 / 1.83 / 2.96 vp for 2026-03-24 / 03-27 / 05-29 / 06-18 / 10-16 (`leg_losses.spx_oos_iv_rmse` in the pickles) |
 | M4 | Error in units of the quoted half-spread; share of quotes inside the bid/ask | out-of-sample median \|model − mid\| 4.4–15.6 half-spreads; 3.0–12.3% inside (`data_store/surface/<session>/scorecard.json`) |
-| M14 | The arbitrage-free SVI surface on held-out strikes, same quotes | median 0.45–1.98 half-spreads; 32–80% inside the bid/ask; 0.55 and 80.0% on 2026-10-16 |
+| M14 | The certified arbitrage-free SVI surface on its held-out strikes | median 0.45–1.98 half-spreads; 32–80% inside the bid/ask; 0.55 and 80.0% on 2026-10-16; on the common held-out quotes 0.45–1.98 against Heston's 4.4–15.6 (`metrics.common_out_of_sample`) |
 | M14 | Static arbitrage in the stored quotes | executable at the bid/ask on all 5 sessions; 160–629 quotes per session in an executable row (`surface.json`) |
 | M14 | VIX replicated from the session's own SPX chain (Cboe rules) against the official close | 26.66 / 30.27 / 15.02 / 16.49 / 19.70 against 26.95 / 31.05 / 15.32 / 16.40 / 19.99 (`vix_replication.json`) |
 | M4, M15 | Rough Heston against Heston, joint fit, same out-of-sample quotes | rough lower on 3 of 5 sessions (1.42 vs 1.98, 1.41 vs 1.54, 1.09 vs 2.96 vp); H = ½, identical, on 2 (`diagnostics/summary.json`) |
 | M5 | VX futures at their settlement, out of sample | 1.85–3.18 pts |
 | M7 | β on the first chain after the estimation set (2026-10-16); β implied by PUT / WPUT | 0.70; 0.80 / 0.80 overall, 0.63–0.90 / 0.75–0.89 by full year |
 | M8 | Canonical backtest 2018-01-02 → 2025-03-24 | portfolio −$222,177, Sharpe −0.99 (95% stationary-bootstrap CI −1.81 to −0.30); S1C and S4 intervals also exclude zero, negative (`inference/summary.json`) |
-| M8, M17 | Data snooping and timing | Hansen SPA p 0.65 for the six published series against cash (StepM: none); S3 timing p 0.078 against circular shifts (Holm 0.47), 0.057 against trade shuffles (Holm 0.34); S3's largest DSR over every N and trial variance 0.27, and 0.000 at the ledger's N = 162; PBO is low (0.01) because the configurations differ by persistent level effects, which the summary explains is not evidence of skill |
+| M8, M17 | Data snooping and timing | Hansen SPA p 0.65 for the six published series against cash (StepM: none); S3 timing p 0.078 against circular shifts (Holm 0.47), 0.057 against trade shuffles (Holm 0.34); S3's DSR 0.000–0.019 at the ledger's trial counts (N 147–210, every trial-variance choice), 0.27 only at N 4.6 (the participation ratio, not a trial count) with the skill-less trial variance 1/(T−1); CSCV PBO 0.34 for the 16 configurations of the published portfolio (the selected configuration's out-of-sample Sharpe −0.90/yr), 0.01 for the 44 β-estimated series and 0.00 for all 83: a low PBO says ranks persist, and here they persist because the configurations differ by level effects (the mark's β, net short or long vol), not by skill |
 | M8 | Co-movement with real-settlement benchmarks | the always-short straddle (the mark's premium factor) has a daily correlation of 0.55 with WPUT over the window (0.63 / 0.61 / 0.48 in 2018 / 2020 / 2022) |
 | M9 | 21-day variance forecasts, 2012-04-30 → 2026-09-18 (3,618 origins) | PDV QLIKE 0.461, 6th of 7 (VIX Mincer–Zarnowitz best at 0.378); no Diebold–Mariano difference against PDV significant at 5%; PDV inside the 90% model confidence set (`forecast_eval.json`) |
 | M8 | Reproduction from the captures | `make reproduce` plus `--full`: 14 of 14 artifacts bit for bit (docs/reproduce.md) |
 | M11 | Classifier against persistence | 74.9% against 87.0% out of sample (the shipped model's evaluation) |
-| M18 | Forward test at executable prices | no ledger entry committed yet: the first is written with the next accepted fit |
+| M18 | Forward test at executable prices | no ledger entry committed yet: the first is written by the next book slot that captures a live book |
 
 ## 4. Ongoing monitoring
 
@@ -175,8 +192,9 @@ Controls that run every session in the daily job (`scripts/cloud_refresh.py`, `.
 | Calibration staleness | newest accepted fit older than 3 NYSE sessions | job fails; site published with a staleness banner |
 | VIX-family cross-source check (V1, V2) | Yahoo and Cboe differ by > 0.25 pts on a shared session | warning with the rows; Cboe's value stored |
 | Rate curve (M19) | curve older than 7 days or missing | warning; the fit falls back to ^IRX and records it |
-| Data gate | the data and capture tests | gates the commit of what was captured (chain, pickle, labels, Cboe books, forward ledger) |
-| Artifact gate | surface, diagnostics, Greeks and scenario tests | gates a second commit of the derived artifacts |
+| Captures first | integrity checks only (`scripts/ci/check_captures.py`: each new Cboe book, chain, pickle and ledger entry read back) | the run's captures are uploaded as the workflow artifact `captures-<run>-<slot>` (kept 90 days) before any gate, then committed in their own commit; pushes retry transient failures |
+| Data gate | the data and capture tests | gates the data commit (labels, market partitions, and any capture the first commit missed); a conflict on a re-derivable file is re-derived over main's version |
+| Artifact gate | surface, diagnostics, Greeks and scenario tests | gates a second commit of the derived artifacts; every book run also rebuilds missing or stale ones (at most 2 sessions and 12 minutes a run) |
 | Presentation gate | the dashboard tests | gates only the deploy, never a capture |
 | Site freeze | any page reporting a loader error or an SRI mismatch | publish refused |
 
@@ -208,25 +226,32 @@ with its effect. What does not: a second person who did not build the models.
 ## 6. Findings log (C16–C23)
 
 Severity: **high** changed a published headline number or its sign; **medium** changed a secondary published number
-or a production control; **low** neither. Each round's postmortem, regression tests and commits are in
-[docs/corrections.md](../corrections.md).
+or a production control; **low** neither. The log is rendered from `dashboard/corrections.json`, the registry that
+also renders [docs/corrections.md](../corrections.md) (each round's postmortem, regression tests and commits) and the
+site's Corrections page, by `scripts/render_corrections.py`; `test_readme.py` fails if it falls behind. A round is
+one row; C23 is one row per finding, with the finding's own ID.
+
+<!-- BEGIN GENERATED: findings log, scripts/render_corrections.py -->
 
 | ID | Date | Component | Severity | Finding | Effect on the published result | Status | Commit |
 |---|---|---|---|---|---|---|---|
-| C16 | 2026-06-11 | M9, M8 | high | Look-ahead in the PDV forecaster, a circular `vvix` feature, retrospective Kelly sizing | headline +19% was a label-noise artifact | fixed | `47e1ffe` |
-| C17 | 2026-06-11 | M11 | medium | Classifier never benchmarked against persistence | loses to "predict yesterday"; demoted | fixed | `8c3ba9b` |
-| C18 | 2026-06-14 | M8 | high | Strike-rolling bug: same-day re-entry meant positions never rolled | S1 −$1.53M → +$463K, portfolio −9.1% → −19.0% | fixed | `3d52f42` |
-| C19 | 2026-06-20 | M8, V1 | low | S2 stop-loss propagation, dead code, data-gap repair | canonical numbers unchanged | fixed | `e1cfbd0` |
-| C20 | 2026-08-04, 2026-09-05 | M4 | high | Calibration selector ranked archived fits on SPX RMSE with no data-sufficiency check | gate on ≥ 3 VIX tenors and provenance on every fit | fixed | `35690a2`, `9058371` |
-| C21 | 2026-09-05 | M8, V1 | high | The cash hurdle was a unit-test fixture; straddles marked one session too rich; classifier output published as rule labels | portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80 | fixed | `15b4db5`, `90dc851` |
-| C22 | 2026-10-19 | all | high | Full-system audit (~270 findings): ATM vol was the VIX, free hedging, VIX indices fitted as futures, ATM-call anchors, flat carry, a self-imposed Feller penalty, a month-long calibration outage | NAV $738,794 → $783,908, Sharpe −1.80 → −0.88; S1 +$693,938 → −$287,644 | fixed | `a51eccc` |
-| C23-D1 | 2026-10-20 | V1, V2, M8, M10 | high | Labels, backtest and calibrator read Yahoo's copies of the VIX family (8 VVIX sessions missing, holiday rows) | portfolio −$216,092 → −$222,177, Sharpe −0.88 → −0.99; 6 labels move | fixed | `c63e515`, `2566553` |
-| C23-M1 | 2026-10-20 | M4 | medium | The σ ≤ 2 box sets the headline fit; its cost was not published | none (published with its σ profile) | quantified | `958be69` |
-| C23-M2 | 2026-10-20 | M3, M4, M14 | medium | No error measured against the bid–ask; no static-arbitrage screen | Heston 4.4–15.6 half-spreads out of sample; executable arbitrage on all 5 sessions | fixed | `49f5fd0`, `e6a92bc` |
-| C23-S1 | 2026-10-20 | M8, M17 | high | No statistical inference on the backtest | portfolio Sharpe interval −1.81 to −0.30; no series beats cash | fixed | `1c886e3` |
-| C23-R1 | 2026-10-21 | M6, M19, C7 | medium | Flat R = 1.5% in the hedger; one r, q for every Greeks maturity (1-year forward 0.50% low) | C7 cumulative P&L 167.95 → 168.34 pts | fixed | `ca36d24` |
-| C23-O1 | 2026-10-20, 2026-10-21 | operations | medium | A presentation test could fail the commit of an accepted session (the 2026-10-19 book was lost); three tests pinned the committed session | none; the next-session simulation now runs in CI | fixed | `9c486c3`, `a678e57` |
-| C23-O2 | 2026-10-21 | operations | low | `make reproduce` refitted from a deleted scratch pickle and with the wrong optimiser | none (the refits failed; now 14 of 14 bit for bit) | fixed | `741dfe3` |
-| C23-U1 | 2026-10-21 | dashboard | low | The CI accessibility gate audited two retired pages and could not inject axe under the pages' CSP; every page scrolled horizontally at 320 px when the view was a session behind; the Risk page printed "r = —%" for the per-maturity carry; the ML classifier sat on the Overview | none | fixed | `113efa5` |
-| C23-E1 | 2026-10-20 | M3 | low | `year_fraction` raised on an origin with no time in it | none (the path raised; it never returned a wrong T) | fixed | `ba360c8` |
-| C23-E2 | 2026-10-20 | V4 | low | pip-audit: known advisories in idna 3.11, urllib3 2.6.3, werkzeug 3.1.8 | none on a number; urllib3 and idna are on the download path | fixed (floors idna ≥ 3.15, urllib3 ≥ 2.8.0, werkzeug ≥ 3.1.9) | `a92308c` |
+| C16 | 2026-06-11 | M9, M8 | high | Methodology audit: look-ahead, a circular feature, retrospective sizing | The published +19% headline was a label-noise artifact. | fixed, quantified | `47e1ffe` |
+| C17 | 2026-06-11 | M11 | high | Red-team: the classifier against a persistence baseline; margin; an unbounded tail | The classifier loses to 'predict yesterday's regime' and was demoted from the trading loop; portfolio −9.1% as published after this round. | fixed | `8c3ba9b` |
+| C18 | 2026-06-14 | M8 | high | Straddles never rolled: one stale-strike position marked past expiry | Inverted the contrarian thesis: S1 −$1.53M → +$463K, S1C −$97K → −$404K, portfolio −9.1% → −19.0%; S3 unchanged. | fixed | `3d52f42` |
+| C19 | 2026-06-20 | M8, V1 | low | Signal-engine logic fixes and data-gap repair | Cleanup; the canonical numbers did not change. | fixed | `e1cfbd0` |
+| C20 | 2026-08-04 → 2026-09-05 | M4 | high | The calibration selector rewarded broken data | The published 'best calibration' had been the day the VIX feed failed; fits are now gated on at least 3 VIX tenors with provenance recorded. | fixed | `35690a2`, `9058371` |
+| C21 | 2026-09-05 | M8, V1 | high | The cash hurdle was a test fixture; straddles marked a day too rich | Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, MaxDD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K. | fixed | `15b4db5`, `90dc851` |
+| C22 | 2026-10-12 → 2026-10-19 | M1, M3, M4, M5, M7, M8, M9, M10 | high | Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L | Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run. | fixed | `a51eccc` |
+| C23-D1 | 2026-10-20 | V1, V2, M8, M10 | high | The labels, backtest and calibrator read Yahoo's copies of the VIX index family | portfolio −$216,092 → −$222,177, Sharpe −0.88 → −0.99; 6 of 4,162 labels move | fixed | `c63e515`, `2566553` |
+| C23-M1 | 2026-10-20 | M4 | medium | The σ ≤ 2 box, not the market, sets the headline fit | none (the fit is published with its σ profile and the box's cost) | quantified | `958be69` |
+| C23-M2 | 2026-10-20 | M3, M4, M14 | medium | Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage | Heston 4.4–15.6 half-spreads out of sample; executable static arbitrage on all 5 sessions | fixed | `49f5fd0`, `e6a92bc` |
+| C23-S1 | 2026-10-20 | M8, M17 | high | The backtest had no statistical inference | portfolio Sharpe 95% interval −1.81 to −0.30; no published series beats cash | fixed | `1c886e3` |
+| C23-R1 | 2026-10-21 | M6, M19, M20 | medium | Flat rates in the hedger and the Greeks surface | C7 cumulative P&L 167.95 → 168.34 index points | fixed | `ca36d24` |
+| C23-O1 | 2026-10-20 → 2026-10-21 | operations | medium | A presentation test could lose a captured session | none; the next-session simulation now runs in CI | fixed | `9c486c3`, `a678e57` |
+| C23-O2 | 2026-10-21 | operations | low | `make reproduce` refitted the calibrations from a deleted scratch pickle and with the wrong optimiser | none (the refits failed; now 14 of 14 bit for bit) | fixed | `741dfe3` |
+| C23-U1 | 2026-10-21 | dashboard | low | The accessibility gate audited retired pages; the Risk page printed 'r = —%'; the ML classifier sat on the Overview | none | fixed | `113efa5` |
+| C23-E1 | 2026-10-20 | M3 | low | `option_chain.year_fraction` raised on an origin with no time in it | none | fixed | `ba360c8` |
+| C23-E2 | 2026-10-20 | V4 | low | Known advisories in three locked packages on the download and preview paths | none on a number; urllib3 and idna are on the daily job's download path | fixed | `a92308c` |
+| C23-V1 | 2026-10-21 | M4, M6, M14, M17, M18 | medium | Published claims that the branch's own artifacts contradicted (independent review of C23) | no headline number moved; the surface, ledger, Risk-page and inference claims now hold | fixed | `d63b797`, `59e73b1`, `dd4dc01`, `b69eb45`, `1a4ca03` |
+
+<!-- END GENERATED -->
