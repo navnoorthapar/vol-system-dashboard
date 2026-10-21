@@ -398,6 +398,64 @@ class TestCommittedRecord:
 
 # ── parity-implied rates ──────────────────────────────────────────────────────
 
+def _eager_index(quotes: pd.DataFrame) -> dict:
+    """The pre-C23f index: one deduplicated Series per date, built up front."""
+    q = quotes[quotes["series"].astype(str).str.startswith("UST_")]
+    return {str(d): g.drop_duplicates("series", keep="last").set_index("series")["value"]
+            for d, g in q.groupby("date", sort=True)}
+
+
+def _same_series(a: pd.Series, b: pd.Series) -> bool:
+    return (a.equals(b) and list(a.index) == list(b.index) and a.name == b.name
+            and a.index.name == b.index.name and a.dtype == b.dtype and a.index.dtype == b.index.dtype)
+
+
+class TestQuoteIndex:
+    def test_each_day_is_the_last_quote_per_series_in_input_order(self):
+        """Duplicated (date, series) rows, dates out of order, non-UST rows: every
+        day equals the per-date drop_duplicates(keep='last') of the input."""
+        q = _quotes()
+        dup = q[q["series"].str.startswith("UST_BILL_13W")].assign(value=lambda d: d["value"] + 1e-4)
+        mixed = pd.concat([q.iloc[::-1], dup], ignore_index=True)
+        idx = rates.index_quotes(mixed)
+        ref = _eager_index(mixed)
+        assert list(idx.dates) == sorted(ref)
+        assert set(idx.by_date) == set(ref)
+        assert len(idx.by_date) == len(ref)
+        for d in ref:
+            assert d in idx.by_date
+            assert _same_series(idx.by_date[d], ref[d]), d
+            assert idx.by_date[d] is idx.by_date[d]                # built once, then kept
+        assert "SOFR" not in idx.by_date[idx.dates[-1]].index
+        with pytest.raises(KeyError):
+            idx.by_date["1999-01-04"]
+        empty = rates.index_quotes(q[q["series"] == "SOFR"])
+        assert len(empty.dates) == 0
+        assert len(empty.by_date) == 0
+
+    def test_committed_index_is_cheap_and_unchanged(self):
+        """ENG-10: indexing every committed Treasury date cost ~3 s of CPU per
+        process (4,201 per-date drop_duplicates + set_index) to serve the one
+        curve a calibrator asks for (2.7 ms); JointCalibrator init went from
+        0.5 s to 4.4 s. A day's Series is now built on first use. CPU time, so
+        a loaded machine does not fail it: measured 0.1-0.2 s, bound 1 s."""
+        import time
+        q = _committed_quotes()
+        t0 = time.process_time()
+        idx = rates.index_quotes(q)
+        curve = rates.build_zero_curve(idx, "2026-10-16")
+        cpu = time.process_time() - t0
+        assert cpu < 1.0, f"index_quotes + one curve took {cpu:.2f} s of CPU"
+        ref = _eager_index(q)
+        assert list(idx.dates) == sorted(ref)
+        for d in [*list(ref)[::97], "2026-10-16"]:
+            assert _same_series(idx.by_date[d], ref[d]), d
+        old = rates.build_zero_curve(rates.QuoteIndex(np.array(sorted(ref), dtype=object), ref), "2026-10-16")
+        assert curve.curve_date == old.curve_date
+        np.testing.assert_array_equal(curve.t, old.t)
+        np.testing.assert_array_equal(curve.log_df, old.log_df)
+
+
 class TestParityComparison:
     def test_only_regression_rows_are_compared_in_basis_points(self):
         c = rates.build_zero_curve(_quotes(), "2026-10-16")
