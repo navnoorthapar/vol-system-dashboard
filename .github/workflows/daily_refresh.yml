@@ -22,14 +22,19 @@ name: Daily Market Refresh
 #          `capture` stores Cboe's full delayed SPX and VIX books (data_store/options/
 #          cboe/), whatever the fit does. After an accepted fit the run records the
 #          forward ledger and rebuilds the session's surface report and diagnostics and
-#          the headline fit's Greeks surface and scenario grid (about 5 min).
+#          the headline fit's Greeks surface and scenario grid (about 5 min). Every
+#          book run also rebuilds what an earlier run failed to build or commit (the
+#          backfill: at most 2 sessions a run).
 #          The retry skips what already exists (a calibration, a capture), but it is a
 #          full job: install, market step, freeze.
 #
 # GitHub starts scheduled runs late under load (87-319 min, median 127, for the old :00
 # slot in Sep-Oct 2026; the top of the hour is the worst time), so the slots sit off the
-# hour. The concurrency group serialises the slots and manual runs; each push rebases
-# and retries if main moved during the run (scripts/ci/commit_and_push.sh).
+# hour. The concurrency group serialises the slots and manual runs; each push retries
+# a failed fetch or push and, if main moved during the run, moves onto it, rebuilding
+# the market partitions and labels from the run's database where main changed them
+# too (scripts/ci/commit_and_push.sh). The captures leave the runner as an artifact
+# before any gate, and are committed first, on their own.
 on:
   schedule:
     - cron: "7 22 * * 1-5"     # close
@@ -264,6 +269,17 @@ jobs:
             "Auto-refresh session ${SESSION:-unknown}: derived artifacts" \
             "Surface report, calibration diagnostics, Greeks surface and scenario grid of the new fit (and any an earlier run failed to build: the backfill)." \
             data_store/surface data_store/calibrations/diagnostics data_store/greeks
+
+      # What this run's commits add to the repository (git keeps every version): an
+      # accepted session adds 1.9-3.3 MB of new, already-compressed files (the
+      # surface residuals 0.6-1.7 MB, the Cboe books 0.9 MB, the chain 0.2-0.35 MB)
+      # and every slot rewrites ~0.3 MB (the labels 0.22 MB); measured with
+      # scripts/ci/repo_growth.py. Reported every run, a warning above 4 MB.
+      - name: Repository growth of this run
+        if: always() && steps.refresh.outcome != 'skipped'
+        env:
+          BASE: ${{ github.sha }}
+        run: python scripts/ci/repo_growth.py --range "$BASE..HEAD" --budget-mb 4 --summary "$GITHUB_STEP_SUMMARY" || true
 
       # The captures went into the artifact above; this says so when neither commit
       # took them, instead of a silently skipped step.

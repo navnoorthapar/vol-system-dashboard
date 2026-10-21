@@ -16,6 +16,8 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
     they resolve to the branch's version, and main's rows are re-derived
     into them from the database (main's new sessions in, the branch's
     restated rows kept, holiday artefacts out).
+  * repo_growth.py (the daily workflow's last step): what a run's commits add
+    to the repository, by kind of file, with a warning above a budget.
 """
 from __future__ import annotations
 
@@ -335,3 +337,55 @@ class TestMergeMainData:
         assert rep["labels_differing_from_main"] == ["2019-08-09"]
         assert rep["branch_labels_changed_by_merge"] == []
 
+
+class TestRepoGrowth:
+    def test_a_runs_commits_are_measured_by_kind_with_a_budget_warning(self, tmp_path, monkeypatch):
+        import os
+        import shutil
+        if not shutil.which("git"):
+            pytest.skip("git not available")
+        growth = _load("scripts/ci/repo_growth.py", "repo_growth_under_test", monkeypatch)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@example.com\n")
+        repo = tmp_path / "repo"
+        (repo / "data_store" / "options" / "cboe").mkdir(parents=True)
+        (repo / "data_store" / "signals").mkdir()
+
+        def git(*a):
+            return subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True, text=True).stdout
+        git("init", "-q")
+        (repo / "data_store" / "signals" / "regime_labels.parquet").write_bytes(os.urandom(1000))
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD").strip()
+        (repo / "data_store" / "options" / "cboe" / "spx_2026-10-20_023000Z.parquet").write_bytes(
+            os.urandom(200_000))
+        (repo / "data_store" / "signals" / "regime_labels.parquet").write_bytes(os.urandom(50_000))
+        git("add", "-A")
+        git("commit", "-qm", "bot")
+        g = growth.range_growth(f"{base}..HEAD", cwd=repo)
+        assert g["commits"] == 1
+        assert g["blobs"] == {"cboe books": {"files": 1, "bytes": 200_000},
+                              "labels": {"files": 1, "bytes": 50_000}}
+        assert 250_000 < g["pack_bytes"] < 260_000                  # random bytes: incompressible
+        lines = growth.report_range(g, budget_mb=0.2)
+        assert lines[-1].startswith("::warning title=Repository growth::this run added 0.25 MB")
+        assert not growth.report_range(g, budget_mb=1)[-1].startswith("::warning")
+
+    def test_kinds(self, monkeypatch):
+        growth = _load("scripts/ci/repo_growth.py", "repo_growth_kinds", monkeypatch)
+        assert growth.kind_of("data_store/surface/2026-10-16/residuals.parquet") == "surface residuals"
+        assert growth.kind_of("data_store/surface/2026-10-16/surface.json") == "surface json"
+        assert growth.kind_of("data_store/options/spx_2026-10-16.parquet") == "SPX chain"
+        assert growth.kind_of("data_store/options/cboe/vix_2026-10-20_040625Z.json") == "cboe books"
+        assert growth.kind_of("README.md") == "other"
+
+    def test_the_daily_workflow_reports_it(self):
+        wf = (ROOT / ".github" / "workflows" / "daily_refresh.yml").read_text()
+        step = wf[wf.index("- name: Repository growth of this run"):]
+        step = step[:step.index("\n      - name:", 10)]
+        assert "repo_growth.py --range" in step
+        assert "--budget-mb" in step
+        assert "always()" in step
+        assert "|| true" in step  # reporting never fails the run
