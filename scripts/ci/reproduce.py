@@ -308,6 +308,9 @@ class Step:
     argv: list[str]
     outputs: list[tuple[str, str, dict[str, Any]]]     # (path, tolerance key, compare kwargs)
     full_only: bool = False
+    # why the step cannot run (its input could not be determined): reported as a
+    # failed check by main(), never raised while the steps are being built
+    error: str = ""
 
 
 def v2_sessions(root: Path) -> list[str]:
@@ -320,44 +323,66 @@ def v2_sessions(root: Path) -> list[str]:
     return out
 
 
-def source_calibration(root: Path, artifact: str, key: bytes) -> str:
+def source_calibration(root: Path, artifact: str, key: bytes) -> tuple[str | None, str]:
     """The calibration a committed parquet artifact names in its provenance
     (metadata ``key``, source.calibration_file): the headline fit it was built
     from. The daily bot rebuilds the Greeks surface and the scenario grid from
-    each new headline fit, so the input is read, not typed."""
+    each new headline fit, so the input is read, not typed.
+
+    Returns (path, "") or (None, why) when the artifact is missing, unreadable
+    or names no source: the bot writes these files, and building the list of
+    steps (which the data gate's test of the refit steps does) must not fail
+    on a derived file. The step is then reported as failed by main()."""
     import pyarrow.parquet as pq
-    meta = pq.read_schema(root / DS / artifact).metadata or {}
-    return str(root / json.loads(meta[key])["source"]["calibration_file"])
+    try:
+        meta = pq.read_schema(root / DS / artifact).metadata or {}
+        return str(root / json.loads(meta[key])["source"]["calibration_file"]), ""
+    except (OSError, KeyError, ValueError, TypeError) as exc:   # ArrowInvalid is a ValueError
+        return None, f"{DS}/{artifact} names no source calibration ({type(exc).__name__}: {exc})"
 
 
-def build_steps(root: Path) -> list[Step]:
+def _derived_step(name: str, module: str, artifact: str, key: bytes, tol: str, root: Path) -> Step:
+    py = sys.executable
+    cal, why = source_calibration(root, artifact, key)
+    # input: the COMMITTED fit the artifact names (the refit step may be rewriting the copy)
+    return Step(name, [py, "-m", module, "--calibration", cal] if cal else [],
+                [(f"{DS}/{artifact}", tol, {})], error=why)
+
+
+def build_steps(root: Path, parts: Iterable[str] | None = None) -> list[Step]:
+    """The reproduction steps. ``parts``: step-name prefixes to build (e.g.
+    ("calibration",) for the refits only, which read nothing derived);
+    None builds every step."""
+    want = tuple(parts) if parts is not None else None
+
+    def wanted(name: str) -> bool:
+        return want is None or name.startswith(want)
+
     py = sys.executable
     bt = f"{DS}/backtest"
-    greeks_cal = source_calibration(root, "greeks/greeks_surface.parquet", b"greeks_provenance")
-    steps = [
-        Step("backtest", [py, "-c", _BACKTEST],
-             [(f"{bt}/full_results.parquet", "backtest", {}),
-              # the 200-path S3 null test is the --full step "s3_null"
-              (f"{bt}/full_results.pkl", "backtest", {"skip": {"metrics.s3_null_p_value"}})]),
-        # input: the COMMITTED fit the surface names (the refit step may be rewriting the copy)
-        Step("greeks", [py, "-m", "joint_vol_calibration.greeks.risk_monitor", "--calibration",
-                        greeks_cal],
-             [(f"{DS}/greeks/greeks_surface.parquet", "greeks", {})]),
-        Step("c7", [py, "-m", "joint_vol_calibration.backtest.run_backtest", "--c7"],
-             [(f"{bt}/delta_hedge_2020.parquet", "c7", {})]),
-    ]
-    if (root / DS / "greeks" / "scenario_grid.parquet").exists():
-        steps.append(Step("scenario", [py, "-m", "joint_vol_calibration.greeks.scenario_grid",
-                                       "--calibration",
-                                       source_calibration(root, "greeks/scenario_grid.parquet",
-                                                          b"scenario_provenance")],
-                          [(f"{DS}/greeks/scenario_grid.parquet", "scenario", {})]))
-    steps.extend(Step(f"calibration-{s}", [py, "-c", _REFIT.format(
-                          session=s, ref=str(root / DS / "calibrations" / f"joint_cal_{s}.pkl"))],
-                      [(f"{DS}/calibrations/joint_cal_{s}.pkl", "calibration",
-                        {"skip": VOLATILE_KEYS, "optional": OPTIONAL_KEYS, "provenance": PROVENANCE_KEYS})])
-                 for s in v2_sessions(root))
-    steps += [
+    steps = []
+    if wanted("backtest"):
+        steps.append(Step("backtest", [py, "-c", _BACKTEST],
+                          [(f"{bt}/full_results.parquet", "backtest", {}),
+                           # the 200-path S3 null test is the --full step "s3_null"
+                           (f"{bt}/full_results.pkl", "backtest", {"skip": {"metrics.s3_null_p_value"}})]))
+    if wanted("greeks"):
+        steps.append(_derived_step("greeks", "joint_vol_calibration.greeks.risk_monitor",
+                                   "greeks/greeks_surface.parquet", b"greeks_provenance", "greeks", root))
+    if wanted("c7"):
+        steps.append(Step("c7", [py, "-m", "joint_vol_calibration.backtest.run_backtest", "--c7"],
+                          [(f"{bt}/delta_hedge_2020.parquet", "c7", {})]))
+    if wanted("scenario") and (root / DS / "greeks" / "scenario_grid.parquet").exists():
+        steps.append(_derived_step("scenario", "joint_vol_calibration.greeks.scenario_grid",
+                                   "greeks/scenario_grid.parquet", b"scenario_provenance", "scenario", root))
+    if wanted("calibration-"):
+        steps.extend(Step(f"calibration-{s}", [py, "-c", _REFIT.format(
+                              session=s, ref=str(root / DS / "calibrations" / f"joint_cal_{s}.pkl"))],
+                          [(f"{DS}/calibrations/joint_cal_{s}.pkl", "calibration",
+                            {"skip": VOLATILE_KEYS, "optional": OPTIONAL_KEYS,
+                             "provenance": PROVENANCE_KEYS})])
+                     for s in v2_sessions(root))
+    rest = [
         Step("beta_grid", [py, "-m", "joint_vol_calibration.backtest.run_backtest", "--beta-sensitivity",
                            "--csv", f"{bt}/beta_sensitivity.csv"],
              [(f"{bt}/beta_sensitivity.csv", "beta_grid", {})], full_only=True),
@@ -372,6 +397,7 @@ def build_steps(root: Path) -> list[Step]:
              [(f"{bt}/full_results.pkl", "s3_null", {"only": ["metrics.s3_null_p_value"]})],
              full_only=True),
     ]
+    steps += [s for s in rest if wanted(s.name)]
     return steps
 
 
@@ -408,10 +434,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", action="store_true", help="keep the scratch tree")
     args = ap.parse_args(argv)
 
-    steps = [s for s in build_steps(ROOT) if args.full or not s.full_only]
-    if args.only:
-        want = [w.strip() for w in args.only.split(",") if w.strip()]
-        steps = [s for s in steps if any(s.name.startswith(w) for w in want)]
+    want = [w.strip() for w in args.only.split(",") if w.strip()] if args.only else None
+    steps = [s for s in build_steps(ROOT, parts=want) if args.full or not s.full_only]
     out = args.out.resolve()
     tree, logs = out / "tree", out / "logs"
     if tree.exists():
@@ -430,6 +454,11 @@ def main(argv: list[str] | None = None) -> int:
     timings: dict[str, float] = {}
 
     def do(step: Step) -> list[Check]:
+        if step.error:
+            c = Check(step.name, 0.0)
+            c.problems.append(f"not run: {step.error}")
+            print(f"  {step.name:<26} not run: {step.error}", flush=True)
+            return [c]
         code, secs = run_step(step, tree, logs)
         timings[step.name] = secs
         print(f"  {step.name:<26} exit {code}  {secs:6.1f} s", flush=True)

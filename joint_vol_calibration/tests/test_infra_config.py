@@ -254,9 +254,12 @@ def test_reproduce_refits_each_fit_from_its_committed_record(monkeypatch):
     import sys
     monkeypatch.setitem(sys.modules, spec.name, mod)             # its dataclasses look it up
     spec.loader.exec_module(mod)
-    steps = {s.name: s for s in mod.build_steps(ROOT)}
+    # the refits only: this test is in the data gate, which must not depend on a
+    # derived artifact the bot writes (the Greeks surface, the scenario grid)
+    steps = {s.name: s for s in mod.build_steps(ROOT, parts=("calibration",))}
     refits = [n for n in steps if n.startswith("calibration-")]
     assert refits
+    assert set(steps) == set(refits)
     from joint_vol_calibration.calibration import joint_calibrator as jc
     seen = []
 
@@ -283,3 +286,41 @@ def test_reproduce_refits_each_fit_from_its_committed_record(monkeypatch):
         (_, init), (_, cal), _ = seen
         assert init == {"as_of_date": session, **jc.recorded_inputs(ref)}
         assert cal["optimizer"] == ("de" if ref.get("optimizer", "de") == "de" else "trf")
+
+
+def test_reproduce_steps_do_not_read_derived_artifacts_for_the_refits(tmp_path, monkeypatch):
+    """PROD-3: build_steps read the provenance of the bot-written Greeks surface and
+    scenario grid unconditionally, so a surface written without b'greeks_provenance'
+    (or missing, or unreadable) raised KeyError in the data gate's refit test above
+    and blocked the capture commit. The refit steps now read nothing derived, and a
+    full build reports such an artifact as a step that cannot run instead of raising."""
+    import importlib.util
+    import sys
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    spec = importlib.util.spec_from_file_location("reproduce_derived_under_test",
+                                                  ROOT / "scripts" / "ci" / "reproduce.py")
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, mod)
+    spec.loader.exec_module(mod)
+    root = tmp_path / "repo"
+    (root / "data_store" / "greeks").mkdir(parents=True)
+    (root / "data_store" / "calibrations").symlink_to(ROOT / "data_store" / "calibrations")
+    greeks = root / "data_store" / "greeks" / "greeks_surface.parquet"
+    pq.write_table(pa.table({"x": [1.0]}), greeks)                    # no provenance key
+    (root / "data_store" / "greeks" / "scenario_grid.parquet").write_bytes(b"not a parquet file")
+
+    refits = mod.build_steps(root, parts=("calibration",))
+    assert refits
+    assert all(s.name.startswith("calibration-") and not s.error for s in refits)
+    steps = {s.name: s for s in mod.build_steps(root)}
+    assert "greeks_provenance" in steps["greeks"].error
+    assert steps["greeks"].argv == []
+    assert steps["scenario"].error
+    assert steps["scenario"].argv == []
+    assert not steps["calibration-" + refits[0].name.removeprefix("calibration-")].error
+    greeks.unlink()                                                   # a missing file too
+    assert "FileNotFoundError" in {s.name: s for s in mod.build_steps(root)}["greeks"].error
+    # the committed artifacts name their source: no step is flagged
+    assert not [s.name for s in mod.build_steps(ROOT) if s.error]
