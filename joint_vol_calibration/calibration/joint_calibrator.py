@@ -88,6 +88,7 @@ import pickle
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -862,6 +863,144 @@ def recorded_vix_targets(result: dict) -> dict:
     return out
 
 
+# ── Reference rate: the Treasury zero curve (C23), ^IRX for the committed fits ─
+
+RATE_REFERENCE_KINDS = ("treasury_curve", "irx")
+DEFAULT_RATE_REFERENCE = "treasury_curve"
+_IRX_SOURCE = "^IRX 13-week bill (tbill_rates, cc)"
+
+
+@dataclass(frozen=True)
+class RateReference:
+    """The continuously compounded reference rate of one session.
+
+    kind      "treasury_curve" (rates.get_zero_curve: Treasury bills and par
+              curve, look-ahead gated) or "irx" (Yahoo's ^IRX 13-week bill,
+              the reference of every fit committed before C23)
+    r_91d     the 91-day rate (cc): the scalar summary, comparable with the
+              13-week bill; for "irx" it is the ^IRX rate itself
+    label     human-readable source, recorded in the fit
+    curve     the ZeroCurve (treasury_curve only)
+    fallback  why a requested curve was not used (then kind is "irx")
+
+    ``rate(T)`` is r(T) at maturity T (ACT/365 years): the curve's zero rate,
+    or the flat ^IRX rate. option_chain.clean_option_chain takes it as
+    ``r_ref`` (``for_clean()``): the parity plausibility check and the
+    fixed-D fallback discount each expiry at its own maturity's rate.
+    """
+    kind: str
+    r_91d: float
+    label: str
+    curve: Any = None
+    fallback: str | None = None
+
+    def rate(self, T: float) -> float:
+        if self.curve is None:
+            return float(self.r_91d)
+        return float(self.curve.zero_rate(max(float(T), 1e-6)))
+
+    def for_clean(self):
+        """r_ref for clean_option_chain: a scalar for "irx" (so a committed
+        fit's chain cleans bit for bit as before), r(T) for the curve."""
+        return float(self.r_91d) if self.curve is None else self.rate
+
+    def record(self) -> dict:
+        out = {"kind": self.kind, "r_91d": float(self.r_91d), "label": self.label}
+        if self.curve is not None:
+            out["curve_date"] = str(self.curve.curve_date)
+            out["zero_rates"] = {f"{d}d": float(self.curve.zero_rate(d / 365.0))
+                                 for d in (30, 91, 182, 365, 730)}
+        if self.fallback:
+            out["fallback"] = self.fallback
+        return out
+
+
+def _irx_reference(spot_date: str, fallback: str | None = None) -> RateReference:
+    r = float(db.get_tbill_rate(spot_date))
+    label = f"^IRX 13-week bill, {r:.4%} cc"
+    try:
+        start = (pd.Timestamp(spot_date) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        ser = db.get_tbill_rates_series(spot_date, start_date=start)
+    except Exception:                      # label detail only
+        ser = None
+    if ser is not None and len(ser) and np.isclose(float(ser["rate"].iloc[-1]), r,
+                                                   rtol=0.0, atol=1e-12):
+        row = ser.iloc[-1]
+        d = row.get("discount_yield")
+        label = (f"^IRX 13-week bill {str(row['date'])[:10]}: "
+                 + (f"{float(d):.4%} bank discount = " if d is not None and pd.notna(d) else "")
+                 + f"{r:.4%} cc")
+    return RateReference("irx", r, label, None, fallback)
+
+
+def reference_rate(spot_date: str, kind: str = DEFAULT_RATE_REFERENCE) -> RateReference:
+    """The reference rate of session ``spot_date``.
+
+    "treasury_curve": the zero curve as of the session (rates.get_zero_curve,
+    newest Treasury date <= the session, at most 7 days old). When the curve
+    is missing or stale the ^IRX bill is used instead and the reason is kept
+    in ``fallback`` (and in the fit's record): a curve outage must not lose a
+    session's fit. "irx": the ^IRX bill (tbill_rates, stored cc).
+    """
+    if kind not in RATE_REFERENCE_KINDS:
+        raise ValueError(f"rate reference must be one of {RATE_REFERENCE_KINDS}, got {kind!r}")
+    if kind == "irx":
+        return _irx_reference(spot_date)
+    from joint_vol_calibration.data import rates
+    try:
+        curve = rates.get_zero_curve(spot_date)
+    except (LookupError, db.StaleDataError) as exc:
+        logger.warning("  Treasury zero curve unavailable for %s (%s): using ^IRX", spot_date, exc)
+        return _irx_reference(spot_date, fallback=f"treasury curve unavailable: {exc}")
+    r91 = float(curve.zero_rate(91.0 / 365.0))
+    label = (f"Treasury zero curve {curve.curve_date} (bills + par curve, cc): "
+             f"r(91d) {r91:.4%}, r(1y) {float(curve.zero_rate(1.0)):.4%}")
+    return RateReference("treasury_curve", r91, label, curve)
+
+
+def recorded_rate_reference(result: dict) -> str:
+    """The rate-reference kind a stored fit used: its ``rate_reference``
+    record, else "irx" (every fit committed before C23 used ^IRX). A fit
+    whose curve was unavailable records kind "irx" with the fallback."""
+    rec = result.get("rate_reference")
+    if isinstance(rec, dict) and rec.get("kind") in RATE_REFERENCE_KINDS:
+        return str(rec["kind"])
+    return "irx"
+
+
+def recorded_inputs(result: dict) -> dict:
+    """JointCalibrator keyword arguments that rebuild a stored fit's
+    objective: its recorded VIX targets and its rate reference (or the rate
+    it was given as an argument)."""
+    rec = result.get("rate_reference")
+    out: dict[str, Any] = {"vix_targets": recorded_vix_targets(result)}
+    if isinstance(rec, dict) and rec.get("kind") == "argument":
+        out["r"] = float(rec["r_91d"])
+    else:
+        out["rate_reference"] = recorded_rate_reference(result)
+    return out
+
+
+def session_rate_reference(session: str, cal_dir=None) -> RateReference:
+    """The reference rate of ``session``'s stored joint fit (its record;
+    "irx" for every fit committed before C23), else the calibrator's default.
+    The surface layer cleans a session's chain with it, so its universe is
+    the one that fit was scored on."""
+    cal_dir = Path(cal_dir) if cal_dir is not None else Path(DATA_DIR) / "calibrations"
+    path = cal_dir / f"joint_cal_{session}.pkl"
+    kind = DEFAULT_RATE_REFERENCE
+    if path.exists():
+        try:
+            with open(path, "rb") as f:
+                res = pickle.load(f)  # noqa: S301 (trusted: this module's own joint_cal_*.pkl results)
+        except (OSError, EOFError, pickle.UnpicklingError, AttributeError,
+                ImportError, ValueError, TypeError):
+            res = None
+        if isinstance(res, dict) and not calibration_is_legacy(res):
+            kind = recorded_rate_reference(res)
+    return reference_rate(session, kind)
+
+
 def previous_accepted_fit(spot_date: str, cal_dir=None) -> tuple:
     """(path, result) of the newest ACCEPTED model_version >= 2 joint Heston
     fit of a session strictly before spot_date, or (None, None).
@@ -928,17 +1067,18 @@ class JointCalibrator:
         carry: str = "parity",
         feller: str = "off",
         vix_targets: Mapping[str, float] | None = None,
+        rate_reference: str = DEFAULT_RATE_REFERENCE,
     ):
         """
         Parameters
         ----------
         as_of_date : 'YYYY-MM-DD' — the latest date whose data may be used;
                      the fit describes the last SPX session on or before it
-        r          : reference continuously-compounded rate. None: the ^IRX
-                     13-week bill for the spot session (db.get_tbill_rate,
-                     stored cc). Used to discount VIX options and as the
-                     fallback discount when an expiry's parity slope is
-                     implausible; the SPX leg prices off parity D_T, F_T.
+        r          : reference continuously-compounded rate (one number for
+                     every maturity). None: ``rate_reference``. Used to
+                     discount VIX options and, per expiry, in the chain's
+                     parity plausibility check and fixed-D fallback; the SPX
+                     leg prices off parity D_T, F_T.
         q          : dividend yield, used only with carry="flat"
                      (default 0.013 there)
         w1, w2, w3 : leg weights (SPX IV, VIX index, VIX options); the active
@@ -955,6 +1095,11 @@ class JointCalibrator:
                      ValueError), e.g. recorded_vix_targets(result) to
                      reproduce a committed fit on the targets it recorded.
                      None (default): the database's closes
+        rate_reference: "treasury_curve" (default since C23: the Treasury
+                     zero curve r(T) of the spot session, reference_rate;
+                     ^IRX when the curve is missing or stale, recorded) or
+                     "irx" (the 13-week bill, as every fit committed before
+                     C23; recorded_inputs(result) gives a stored fit's)
         """
         if feller not in _FELLER_MODES:
             raise ValueError(f"feller must be one of {_FELLER_MODES}, got {feller!r}")
@@ -968,6 +1113,10 @@ class JointCalibrator:
         self._spx_chain_in = spx_chain
         self._vix_targets = None if vix_targets is None else {str(k): float(v)
                                                               for k, v in vix_targets.items()}
+        if rate_reference not in RATE_REFERENCE_KINDS:
+            raise ValueError(f"rate_reference must be one of {RATE_REFERENCE_KINDS}, "
+                             f"got {rate_reference!r}")
+        self._rate_kind = rate_reference
 
         self.params: dict | None = None
         self.result: dict | None = None
@@ -993,10 +1142,11 @@ class JointCalibrator:
         logger.info("  SPX spot S = %.2f (session %s)", self.S, self.spot_date)
 
         if self._r_arg is not None:
-            self.r_reference = float(self._r_arg)
-            self.r_reference_source = "argument"
+            self.rate_ref = RateReference("argument", float(self._r_arg), "argument")
         else:
-            self.r_reference, self.r_reference_source = self._reference_rate()
+            self.rate_ref = reference_rate(self.spot_date, self._rate_kind)
+        self.r_reference = float(self.rate_ref.r_91d)
+        self.r_reference_source = self.rate_ref.label
         # Back-compat attributes (scalar summaries; set from parity below)
         self.r = self.r_reference
         self.q = FLAT_CARRY_Q if self._q_arg is None else float(self._q_arg)
@@ -1037,7 +1187,8 @@ class JointCalibrator:
                 "an SPX-only calibration", len(self.vix_ts), _MIN_VIX_TENORS)
 
     def _reference_rate(self) -> tuple:
-        """(rate, label) of the ^IRX 13-week bill for the spot session.
+        """(rate, label) of the ^IRX 13-week bill for the spot session
+        (reference_rate(..., "irx"); kept for callers of the C22 API).
 
         tbill_rates.rate is ALREADY continuously compounded (the data layer
         converts the ^IRX bank-discount yield on download, and migrated the
@@ -1045,21 +1196,8 @@ class JointCalibrator:
         second time, which put the reference rate ~7 bp too high (2026-06-18:
         3.80% instead of 3.73% cc) and labelled the cc rate a discount yield.
         """
-        r = float(db.get_tbill_rate(self.spot_date))
-        label = f"^IRX 13-week bill, {r:.4%} cc"
-        try:
-            start = (pd.Timestamp(self.spot_date) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
-            ser = db.get_tbill_rates_series(self.spot_date, start_date=start)
-        except Exception:                      # label detail only
-            ser = None
-        if ser is not None and len(ser) and np.isclose(float(ser["rate"].iloc[-1]), r,
-                                                       rtol=0.0, atol=1e-12):
-            row = ser.iloc[-1]
-            d = row.get("discount_yield")
-            label = (f"^IRX 13-week bill {str(row['date'])[:10]}: "
-                     + (f"{float(d):.4%} bank discount = " if d is not None and pd.notna(d) else "")
-                     + f"{r:.4%} cc")
-        return r, label
+        ref = _irx_reference(self.spot_date)
+        return ref.r_91d, ref.label
 
     def _session_for(self, snapshot_date) -> str | None:
         """Session whose closing book a snapshot taken on ``snapshot_date``
@@ -1104,7 +1242,7 @@ class JointCalibrator:
             self._spx_hist["date"].astype(str).str[:10] == self.spx_snapshot_session, "close"]
         S_sess = float(sess_close.iloc[-1]) if len(sess_close) else self.S
         return oc.clean_option_chain(raw, self.spx_snapshot_session, S_sess,
-                                     r_ref=self.r_reference)
+                                     r_ref=self.rate_ref.for_clean())
 
     def _prepare_spx_surface(self) -> pd.DataFrame:
         """
@@ -1564,6 +1702,7 @@ class JointCalibrator:
             "q": float(anchor_q.median()),
             "r_reference": float(self.r_reference),
             "r_reference_source": self.r_reference_source,
+            "rate_reference": self.rate_ref.record(),
             "carry_by_expiry": carry,
             "chain_diagnostics": dict(getattr(self, "spx_chain_diagnostics", {})),
             "weights": {"w1": self.w1, "w2": self.w2, "w3": self.w3},

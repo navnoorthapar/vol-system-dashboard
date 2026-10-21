@@ -123,11 +123,11 @@ def test_iv_bisection_chain(benchmark, chain_quotes):
 
 @pytest.fixture(scope="module")
 def calibrator(headline):
-    from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator, recorded_vix_targets
+    from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator, recorded_inputs
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        # the committed fit's objective: its recorded VIX targets (C23 restated the DB's)
-        return JointCalibrator(as_of_date=SESSION, vix_targets=recorded_vix_targets(headline))
+        # the committed fit's objective: its recorded VIX targets and rate reference
+        return JointCalibrator(as_of_date=SESSION, **recorded_inputs(headline))
 
 
 def test_joint_loss_evaluation(benchmark, calibrator, headline):

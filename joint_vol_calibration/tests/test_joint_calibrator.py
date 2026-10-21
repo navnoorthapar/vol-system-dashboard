@@ -32,6 +32,7 @@ from joint_vol_calibration.calibration.joint_calibrator import (
     heston_vix_call_price,
     heston_vix_put_price,
     is_acceptable_calibration,
+    recorded_inputs,
     recorded_vix_targets,
 )
 from joint_vol_calibration.config import HESTON_BOUNDS, JOINT_W1, JOINT_W2, VIX_INDEX_TENOR_DAYS
@@ -108,6 +109,14 @@ def _patch_db(mp, session=_SESSION, S=_SPOT, vix_row=None, spx_surface=None,
                pd.DataFrame({"date": [dates[-1]], "rate": [0.0410], "discount_yield": [0.0403]}))
     mp.setattr(jc.db, "get_vix_futures_curve", lambda as_of_date:
                pd.DataFrame(columns=["expiry_month", "settle", "close", "price", "days_to_expiry"]))
+    # The synthetic market has no Treasury curve: the calibrator's default
+    # reference (the session's zero curve, C23) falls back to the patched ^IRX
+    # bill above instead of reading the shipped partitions for the real session.
+    from joint_vol_calibration.data import rates as _rates
+
+    def _no_curve(as_of, **kw):
+        raise LookupError("synthetic market: no Treasury curve")
+    mp.setattr(_rates, "get_zero_curve", _no_curve)
 
     def _surface(as_of_date, underlying):
         if underlying == "VIX":
@@ -285,10 +294,15 @@ class TestSyntheticMarket:
         assert synth.w1 + synth.w2 == pytest.approx(1.0)
         assert synth.w1 / synth.w2 == pytest.approx(JOINT_W1 / JOINT_W2)
 
-    def test_reference_rate_is_the_stored_cc_rate(self, synth):
+    def test_reference_rate_is_the_stored_cc_rate(self):
         """tbill_rates.rate is already continuously compounded. The first C22
         version converted it a second time (4.10% -> 4.18%, labelled as a
-        discount yield)."""
+        discount yield). (The ^IRX reference; the default since C23 is the
+        Treasury curve, test_rate_reference.py.)"""
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp)
+            synth = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain(),
+                                    rate_reference="irx")
         assert synth.r_reference == 0.0410
         assert synth.r_reference_source == (
             f"^IRX 13-week bill {_SESSION}: 4.0300% bank discount = 4.1000% cc")
@@ -833,7 +847,7 @@ class TestResidualForm:
         """On the VIX targets the fit recorded (recorded_vix_targets), the
         residual vector reproduces the committed loss exactly."""
         ref = _committed(session)
-        cal = JointCalibrator(as_of_date=session, vix_targets=recorded_vix_targets(ref))
+        cal = JointCalibrator(as_of_date=session, **recorded_inputs(ref))
         x = [ref["params"][k] for k in _NAMES]
         r = cal.residuals(x)
         assert float(r @ r) == pytest.approx(ref["loss"], rel=1e-12)
@@ -847,7 +861,7 @@ class TestResidualForm:
         database targets the same parameters give that much different a loss,
         which is why the reproductions above pass the recorded targets."""
         ref = _committed(session)
-        cal = JointCalibrator(as_of_date=session)
+        cal = JointCalibrator(as_of_date=session, rate_reference="irx")
         rec = recorded_vix_targets(ref)
         db_t = dict(zip(cal.vix_ts["ticker"], cal.vix_ts["market_price"]))
         assert set(db_t) == set(rec)
@@ -943,7 +957,7 @@ class TestMultiStartTRF:
         lands on the stored DE + L-BFGS-B optimum (equal or lower loss), and
         every start ends in the same basin."""
         ref = _committed(session)
-        cal = JointCalibrator(as_of_date=session, vix_targets=recorded_vix_targets(ref))
+        cal = JointCalibrator(as_of_date=session, **recorded_inputs(ref))
         res = cal.calibrate(verbose=False)
         assert res["loss"] <= ref["loss"] * (1 + 1e-7)
         assert res["loss"] >= ref["loss"] * (1 - 1e-5)

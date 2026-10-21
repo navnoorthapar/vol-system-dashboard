@@ -480,9 +480,10 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     from joint_vol_calibration.calibration.joint_calibrator import (
         JointCalibrator,
         is_acceptable_calibration,
+        reference_rate,
     )
     from joint_vol_calibration.data import option_chain as oc
-    from joint_vol_calibration.data.database import get_spx_ohlcv, get_tbill_rate, utc_iso
+    from joint_vol_calibration.data.database import get_spx_ohlcv, utc_iso
 
     now_utc = now_utc or _utcnow()
     expected = oc.last_closed_session(now_utc).isoformat()
@@ -513,7 +514,9 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
 
     spx = get_spx_ohlcv(as_of_date=spot_date)
     S = float(spx["close"].iloc[-1])
-    r_ref = get_tbill_rate(spot_date)      # ^IRX, stored continuously compounded
+    # The calibrator's default reference: the Treasury zero curve r(T) of the
+    # session (^IRX when the curve is missing or stale; recorded in the fit).
+    ref = reference_rate(spot_date)
     # One string for the live clean and the stored snapshot, so a refit from
     # the stored chain measures T from exactly the same origin.
     quote_time = utc_iso(now_utc)
@@ -529,7 +532,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         st["reason"] = "no SPX option chain returned"
         return st
 
-    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=r_ref, quote_time=quote_time)
+    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), quote_time=quote_time)
     d = clean.diagnostics
     st["chain"].update({k: d.get(k) for k in ("n_raw", "n_two_sided", "n_near_atm",
                                               "near_atm_two_sided_share", "n_clean",
@@ -545,7 +548,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         return st
 
     try:
-        # r=None: the calibrator reads the same ^IRX row and records its source
+        # r=None: the calibrator builds the same reference and records it
         cal = JointCalibrator(as_of_date=spot_date, spx_chain=clean)
         result = cal.calibrate(**(calibrate_kwargs or {}))
     except Exception as e:
@@ -571,6 +574,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
         "feller_state": result.get("feller_state"), "feller_margin": result.get("feller_margin"),
         "active_constraints": result.get("active_constraints"),
         "r": result.get("r"), "q": result.get("q"), "r_reference": result.get("r_reference"),
+        "r_reference_source": result.get("r_reference_source"),
     }
 
     ok, reason = is_acceptable_calibration(result)
@@ -750,7 +754,7 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
                     f"| Feller | {s.get('feller_state', '—')} (margin {_fmt(s.get('feller_margin'), '+.3g')}); "
                     f"active constraints: {', '.join(s.get('active_constraints') or []) or 'none'} |",
                     f"| carry | parity medians r {_fmt(s.get('r'), '.2%')}, q {_fmt(s.get('q'), '.2%')}; "
-                    f"^IRX {_fmt(s.get('r_reference'), '.2%')} cc |",
+                    f"reference {s.get('r_reference_source') or _fmt(s.get('r_reference'), '.2%')} |",
                 ]
         lines.append(f"| headline calibration | {head.get('date') or 'none'}"
                      + (f" ({head.get('age_sessions')} sessions old)" if head.get("date") else "")

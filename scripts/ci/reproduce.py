@@ -86,15 +86,16 @@ _BACKTEST = ("from joint_vol_calibration.backtest.run_backtest import _load_data
              "eng.run(spx, vix)\n"
              "eng.compute_metrics()\n"
              "eng.save()\n")
-# A committed fit is refitted on the VIX targets it recorded (C23 restated the
-# database's VIX family as Cboe's closes; joint_calibrator.recorded_vix_targets).
+# A committed fit is refitted on the inputs it recorded: its VIX targets (C23
+# restated the database's VIX family as Cboe's closes) and its rate reference
+# (joint_calibrator.recorded_inputs).
 _REFIT = ("import pickle\n"
           "from joint_vol_calibration.calibration.joint_calibrator import (\n"
-          "    JointCalibrator, recorded_vix_targets)\n"
+          "    JointCalibrator, recorded_inputs)\n"
           "from joint_vol_calibration.config import DATA_DIR\n"
           "with open(DATA_DIR / 'calibrations' / 'joint_cal_{session}.pkl', 'rb') as f:\n"
           "    ref = pickle.load(f)\n"
-          "c = JointCalibrator(as_of_date={session!r}, vix_targets=recorded_vix_targets(ref))\n"
+          "c = JointCalibrator(as_of_date={session!r}, **recorded_inputs(ref))\n"
           "c.calibrate(verbose=False)\n"
           "c.save()\n")
 

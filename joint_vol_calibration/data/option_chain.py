@@ -572,7 +572,7 @@ def clean_option_chain(
     raw: Optional[pd.DataFrame],
     session_date: DateLike,
     spot: float,
-    r_ref: Optional[float] = None,
+    r_ref: float | Callable[[float], float] | None = None,
     max_rel_spread: float = MAX_REL_SPREAD,
     min_two_sided_share: float = MIN_TWO_SIDED_SHARE,
     atm_band: float = ATM_GATE_BAND,
@@ -590,8 +590,11 @@ def clean_option_chain(
                    closed session when they were downloaded)
     spot         : SPX close of that session (used for the near-ATM bands
                    and to express carry as q_T; pricing uses F_T, D_T)
-    r_ref        : reference continuously-compounded rate (T-bill), used only
-                   when an expiry's parity discount is implausible
+    r_ref        : reference continuously-compounded rate, used only when an
+                   expiry's parity discount is implausible: a number (one rate
+                   for every expiry, e.g. ^IRX) or a function r(T) of the
+                   expiry's T in years (a term curve, e.g.
+                   rates.ZeroCurve.zero_rate), evaluated at each expiry
     quote_time   : when the quotes were observed (UTC; ISO string or
                    datetime). None: the frame's ``quote_time`` column if it
                    has one (stored snapshots), else unknown. It sets the T
@@ -605,7 +608,8 @@ def clean_option_chain(
     origin = t_origin(qt, sess)
     gth = origin != session_close(sess)
     diag = {"session": str(sess), "n_raw": 0 if raw is None else int(len(raw)),
-            "r_ref": None if r_ref is None else float(r_ref),
+            "r_ref": (None if r_ref is None else "r(T) per expiry" if callable(r_ref)
+                      else float(r_ref)),
             "quote_time": None if qt is None else _db.utc_iso(qt),
             "t_origin": origin.isoformat(timespec="seconds"),
             "t_origin_basis": "quote_time (Cboe GTH book)" if gth else "session close 16:00 ET"}
@@ -661,7 +665,8 @@ def clean_option_chain(
         pairs = pd.concat([c, p], axis=1, join="inner").reset_index()
         if len(pairs) < 2:
             continue
-        fit = _parity_fit(pairs, T, spot, r_ref)
+        r_ref_T = float(r_ref(T)) if callable(r_ref) else r_ref
+        fit = _parity_fit(pairs, T, spot, r_ref_T)
         if not fit["ok"]:
             logger.info("  expiry %s dropped: %s", exp, fit["reason"])
             continue

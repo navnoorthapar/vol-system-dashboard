@@ -226,8 +226,7 @@ def test_artifact_numbers_are_reproduced_by_the_code():
     # (calibration_diagnostics.py; joint_calibrator.recorded_vix_targets)
     with open(config.DATA_DIR / "calibrations" / "joint_cal_2026-10-16.pkl", "rb") as f:
         stored = pickle.load(f)
-    cal = jc.JointCalibrator(as_of_date="2026-10-16",
-                             vix_targets=jc.recorded_vix_targets(stored))
+    cal = jc.JointCalibrator(as_of_date="2026-10-16", **jc.recorded_inputs(stored))
     free = d["sigma_profile"]["rows"][-1]
     live = cal.fit_summary([free["params"][k] for k in _NAMES])
     assert live["spx_oos_iv_rmse"] == pytest.approx(free["spx_oos_iv_rmse"], rel=1e-9)

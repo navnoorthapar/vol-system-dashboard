@@ -16,7 +16,7 @@ the result with the committed file:
 | `backtest/full_results.parquet`, `.pkl` | the canonical `BacktestEngine` run (`run_backtest` without the S3 null test and sub-period windows) | every column; every metric except `s3_null_p_value`, the trade log, the settings | 1e-10 |
 | `greeks/greeks_surface.parquet` | `risk_monitor --calibration joint_cal_2026-10-16.pkl` (the committed fit) | every column | 1e-10 |
 | `backtest/delta_hedge_2020.parquet` | `run_backtest --c7` | every column | 1e-10 |
-| `calibrations/joint_cal_<session>.pkl` × 5 | `JointCalibrator(as_of_date=<session>, vix_targets=recorded_vix_targets(<committed fit>)).calibrate(); save()` (the VIX targets the fit recorded; C23 restated the database's) | every field except `fit_time` and `run_utc`; `methods` and `chain_diagnostics` reported, not failed (below) | 1e-6 |
+| `calibrations/joint_cal_<session>.pkl` × 5 | `JointCalibrator(as_of_date=<session>, **recorded_inputs(<committed fit>)).calibrate(); save()` (the VIX targets and the reference rate the fit recorded: C23 restated the database's VIX family, and new fits discount on the Treasury curve) | every field except `fit_time` and `run_utc`; `methods` and `chain_diagnostics` reported, not failed (below) | 1e-6 |
 | `backtest/beta_sensitivity.csv` (`--full`) | `run_backtest --beta-sensitivity` | every cell | 1e-9 (10 significant digits) |
 | `backtest/c22_bridge.csv` (`--full`) | `c22_bridge --csv` | every cell | 1e-9 |
 | `backtest/c23_bridge.csv` | `c23_bridge --csv` (4 backtests) | every cell | 1e-9 |

@@ -10,7 +10,7 @@
   <div class="page-badge">
     <span class="nowrap">Session {{ d.session|fmt }}</span>{% if d.calib_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.calib_age|plural('session') }} old)</span>{% endif %}
     <span class="sep">·</span><span class="nowrap">SPX = {{ d.S|fmt(",.1f") }}</span>
-    <span class="sep">·</span><span class="nowrap">r = {% if d.carry_recorded %}{{ d.r_pct|fmt(".2f")|u('%') }}{% if d.carry_mode == 'parity' %} (parity-implied median){% endif %}{% else %}n/a{% endif %}</span>{% if d.r_ref_pct is not none %}<span class="sep">·</span><span class="nowrap">^IRX {{ d.r_ref_pct|fmt(".2f")|u('%') }}</span>{% endif %}
+    <span class="sep">·</span><span class="nowrap">r = {% if d.carry_recorded %}{{ d.r_pct|fmt(".2f")|u('%') }}{% if d.carry_mode == 'parity' %} (parity-implied median){% endif %}{% else %}n/a{% endif %}</span>{% if d.r_ref_pct is not none %}<span class="sep">·</span><span class="nowrap">{{ d.r_ref_label }} {{ d.r_ref_pct|fmt(".2f")|u('%') }}</span>{% endif %}
     {% if d.model_version %}<span class="sep">·</span><span class="nowrap">model_version {{ d.model_version }}</span>{% endif %}
     {% if d.legacy %}<span class="sep">·</span><span class="chip chip-muted" title="Fitted before the C22 schema (calibration_is_legacy)">PRE-C22 FIT</span>{% endif %}
   </div>
@@ -179,7 +179,7 @@
     <dl class="dl">
       <dt>r</dt><dd>{% if d.carry_recorded %}{{ d.r_pct|fmt(".2f")|u('%') }}{% if d.carry_mode == 'parity' %}, median of the per-expiry put–call-parity rates the fit priced with{% endif %}{% else %}not recorded by this fit{% endif %}</dd>
       <dt>q</dt><dd>{% if d.carry_recorded %}{{ d.q_pct|fmt(".2f")|u('%') }}{% if d.carry_mode == 'parity' %}, median parity-implied carry q_T = r_T − ln(F_T/S)/T{% endif %}{% else %}not recorded{% endif %}</dd>
-      {% if d.r_ref_pct is not none %}<dt>^IRX</dt><dd>{{ d.r_ref_pct|fmt(".2f")|u('%') }} (13-week bill, continuously compounded; reference)</dd>{% endif %}
+      {% if d.r_ref_pct is not none %}<dt>{{ d.r_ref_label }}</dt><dd>{{ d.r_ref_pct|fmt(".2f")|u('%') }} ({{ d.r_ref_detail }})</dd>{% endif %}
       <dt>Half-life</dt><dd>{{ d.half_life_days|fmt(".1f") }} trading days (ln 2 / κ)</dd>
       <dt>√θ, √v₀</dt><dd>{{ d.theta_vol|fmt(".2f")|u('%') }} long-run, {{ d.v0_vol|fmt(".2f")|u('%') }} spot</dd>
       <dt>Inputs</dt><dd>{{ d.n_spx_options|fmt }} SPX options ({{ '≤' if d.n_spx_expiries_inferred else '' }}{{ d.n_spx_expiries|fmt }} expiries), {{ d.n_vix_tenors|fmt }} VIX tenors</dd>

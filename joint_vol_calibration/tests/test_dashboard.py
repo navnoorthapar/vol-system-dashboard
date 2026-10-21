@@ -366,6 +366,28 @@ def test_carry_is_shown_only_when_the_fit_recorded_it(dash, synth):
     assert (d["r_pct"], d["q_pct"]) == (4.5, 1.3)
 
 
+@pytest.mark.parametrize("kind", ["treasury_curve", None])
+def test_reference_rate_is_labelled_by_the_fits_record(dash, synth, kind):
+    """Every fit before C23 discounted its fallback expiries at the ^IRX bill; a
+    bot fit since then records the Treasury zero curve (rate_reference). The
+    page printed '^IRX' for whatever r_reference held."""
+    last = str(synth["dates"][-1].date())
+    extra = {"r": 0.045, "q": 0.013, "r_reference": 0.0402,
+             "r_reference_source": "^IRX 13-week bill, 4.0200% cc"}
+    if kind:
+        extra.update(r_reference_source="Treasury zero curve ...",
+                     rate_reference={"kind": kind, "r_91d": 0.0402, "label": "x"})
+    _write_cals(synth["data"] / "calibrations", {f"joint_cal_{last}.pkl": _cal(last, 1.0, **extra)})
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    text = _visible_text(html)
+    if kind:
+        assert "Treasury r(91d) 4.02%" in text
+        assert "^IRX" not in text
+    else:
+        assert "^IRX 4.02%" in text
+        assert "Treasury r(91d)" not in text
+
+
 @pytest.mark.parametrize("recorded", [True, False])
 def test_single_expiry_fit_is_flagged_not_called_good(dash, synth, monkeypatch, recorded):
     """Display check, independent of whether the gate admits such a fit."""
@@ -1700,6 +1722,19 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     assert vv == [f"{x:,.0f}".replace("-", m) for x in gdf["vomma"]]
     zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="z">([^<]+)</div>', g_html)]
     assert zz == [f"{abs(x):.2f}" for x in gdf["vomma_pnl_ratio"]]
+
+
+def test_a_vomma_just_below_a_half_is_rounded_once(dash, synth):
+    """The C22 case: vomma 3,267.496 printed '3,268' (rounded to 3,267.5 in the
+    loader, then again in the template). Checked on a written surface, not on the
+    shipped one: the daily bot regenerates that from each new headline fit."""
+    from joint_vol_calibration.greeks.risk_monitor import load_greeks_surface, save_greeks_surface
+    path = synth["data"] / "greeks" / "greeks_surface.parquet"
+    gdf = load_greeks_surface(path)
+    gdf.loc[gdf.index[0], "vomma"] = 3267.496
+    save_greeks_surface(gdf, path)
+    html = dash.app.test_client().get("/risk").get_data(as_text=True)
+    vv = re.findall(r'<div class="vv">([^<]+)</div>', html)
     assert "3,267" in vv
     assert "3,268" not in vv
 

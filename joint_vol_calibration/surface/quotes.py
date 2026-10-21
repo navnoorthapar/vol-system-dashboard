@@ -27,8 +27,10 @@ Added per quote:
 Inputs are read through the repo's look-ahead-gated getters: the stored
 chain from data_store/options/spx_<session>.parquet
 (database.options_snapshot_path), the session's SPX close
-(get_spx_ohlcv(as_of_date=session)) and the ^IRX bill rate
-(get_tbill_rate(session), already continuously compounded).
+(get_spx_ohlcv(as_of_date=session)) and the reference rate the session's
+joint fit used (joint_calibrator.session_rate_reference: ^IRX for every fit
+committed before C23, the Treasury zero curve r(T) after), so the universe is
+the calibrator's own.
 """
 
 from __future__ import annotations
@@ -51,6 +53,8 @@ MONEYNESS_HI: float = _jc._MONEYNESS_HI
 MIN_PRICE: float = _jc._MIN_PRICE
 MIN_IV: float = _jc._MIN_IV
 MAX_IV: float = _jc._MAX_IV
+
+IRX_SOURCE: str = _jc._IRX_SOURCE    # the label of every pre-C23 session's rate
 
 TENOR_EDGES_DAYS = (7.0, 30.0, 90.0, 180.0, 365.0, 730.0)
 TENOR_LABELS = ("7-30d", "30-90d", "90-180d", "180-365d", "365-730d")
@@ -81,6 +85,7 @@ class SessionQuotes:
     raw: pd.DataFrame
     clean_diagnostics: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
+    r_ref_source: str = _jc._IRX_SOURCE
 
     @property
     def expiries(self) -> list:
@@ -205,7 +210,9 @@ def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
 
     chain : a stored/raw chain frame to use instead of the committed parquet
     spot  : SPX close override (default: the stored close of ``session``)
-    r_ref : reference rate override (default: ^IRX for ``session``, cc)
+    r_ref : reference rate override (one cc rate for every expiry). Default:
+            the rate reference of the session's joint fit
+            (joint_calibrator.session_rate_reference)
 
     Raises ValueError when the cleaned chain is unusable (the cleaner's
     fail-closed reason is passed through).
@@ -213,8 +220,14 @@ def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
     session = str(pd.Timestamp(session).date())
     raw = read_stored_chain(session) if chain is None else chain
     S = session_spot(session) if spot is None else float(spot)
-    r = float(db.get_tbill_rate(session)) if r_ref is None else float(r_ref)
-    clean = oc.clean_option_chain(raw, session, S, r_ref=r)
+    if r_ref is None:
+        ref = _jc.session_rate_reference(session)
+        r, r_clean = float(ref.r_91d), ref.for_clean()
+        r_src = _jc._IRX_SOURCE if ref.kind == "irx" else ref.label
+    else:
+        r = r_clean = float(r_ref)
+        r_src = "argument"
+    clean = oc.clean_option_chain(raw, session, S, r_ref=r_clean)
     if not clean.ok:
         raise ValueError(f"SPX chain for {session} unusable: {clean.reason}")
     quotes, counts = universe_from_clean(clean, session)
@@ -241,7 +254,8 @@ def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
     }
     return SessionQuotes(session=session, spot=S, r_ref=r, quotes=quotes,
                          carry=clean.carry.copy(), raw=raw,
-                         clean_diagnostics=dict(clean.diagnostics), diagnostics=diag)
+                         clean_diagnostics=dict(clean.diagnostics), diagnostics=diag,
+                         r_ref_source=r_src)
 
 
 def expiry_groups(quotes: pd.DataFrame):

@@ -311,7 +311,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 "quote_time": sq.diagnostics.get("quote_time"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),
-                "spot": sq.spot, "r_ref_cc": sq.r_ref, "r_ref_source": "^IRX 13-week bill (tbill_rates, cc)",
+                "spot": sq.spot, "r_ref_cc": sq.r_ref, "r_ref_source": sq.r_ref_source,
             },
             "universe": sq.diagnostics,
             "arbitrage": {**screen.summary(), "largest_mid_violations": screen.violations,
@@ -415,10 +415,17 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         vix_doc = {
             "schema_version": SCHEMA_VERSION, "session": session,
             "calculation_time_ny": calc.isoformat(timespec="minutes"),
-            "rate": {"R_cc": sq.r_ref, "source": "^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"},
+            "rate": {"R_cc": sq.r_ref,
+                     "source": ("^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"
+                                if sq.r_ref_source == sqm.IRX_SOURCE else
+                                f"{sq.r_ref_source}; its 91-day rate for both terms "
+                                "(Cboe: CMT cubic spline per expiry)")},
             "indices": indices, "strip": strip, "beta": beta,
             "deviations": [
-                "R is the ^IRX bill rate (cc), not Cboe's CMT spline; dVIX/dR ~ VIX T / 2.",
+                ("R is the ^IRX bill rate (cc), not Cboe's CMT spline; dVIX/dR ~ VIX T / 2."
+                 if sq.r_ref_source == sqm.IRX_SOURCE else
+                 "R is the Treasury zero curve's 91-day rate (cc) for both terms, not Cboe's "
+                 "CMT spline per expiry; dVIX/dR ~ VIX T / 2."),
                 "Calculation time is the chain's T origin; Yahoo snapshots carry no quote time.",
                 ("parity_forward replaces the single-strike forward with the cleaned chain's "
                  "parity-regression F and D (robust to one stale strike)."),

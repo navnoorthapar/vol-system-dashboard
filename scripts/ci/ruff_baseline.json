@@ -120,7 +120,7 @@
    "UP007": 4,
    "UP017": 2,
    "UP035": 2,
-   "UP045": 13
+   "UP045": 12
   },
   "joint_vol_calibration/data/pipeline.py": {
    "BLE001": 18,
@@ -466,6 +466,6 @@
   }
  },
  "tool": "ruff",
- "total": 1304,
+ "total": 1303,
  "version": "ruff 0.17.1"
 }

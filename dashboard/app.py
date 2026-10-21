@@ -1026,7 +1026,8 @@ def load_page2() -> dict[str, Any]:
               "feller_margin", "feller_state", "effective_dof", "n_spx_options",
               "n_vix_tenors", "spot_date", "n_spx_expiries", "half_life_days",
               "optimizer", "legacy", "calib_file", "calib_age", "vix_index_rmse",
-              "r_ref_pct", "r_ref_source", "carry_mode", "feller_mode", "spx_oos_rmse",
+              "r_ref_pct", "r_ref_source", "r_ref_label", "r_ref_detail", "carry_mode",
+              "feller_mode", "spx_oos_rmse",
               "spx_oos_wing_rmse", "n_vix_options", "archive"):
         d[k] = None
     d.update(pinned_params=[], active_constraints=[], feller_imposed=None,
@@ -1059,7 +1060,9 @@ def load_page2() -> dict[str, Any]:
         # lone stored r is not the rate the fit used. model_version 2 results
         # price every expiry off its own put-call-parity forward and discount;
         # r and q are the medians of the parity-implied r_T, q_T over the
-        # anchor expiries, and r_reference is the ^IRX bill (cc) for reference.
+        # anchor expiries, and r_reference is the reference rate (cc): the ^IRX
+        # bill for every fit before C23, the Treasury zero curve's 91-day rate
+        # for a fit whose rate_reference record says so.
         if _num(cal.get("r")) is not None and _num(cal.get("q")) is not None:
             d["carry_recorded"] = True
             d["r_pct"] = round(float(cal["r"]) * 100, 2)
@@ -1068,6 +1071,14 @@ def load_page2() -> dict[str, Any]:
         if _num(cal.get("r_reference")) is not None:
             d["r_ref_pct"] = round(float(cal["r_reference"]) * 100, 2)
             d["r_ref_source"] = cal.get("r_reference_source")
+            kind = (cal.get("rate_reference") or {}).get("kind")
+            if kind == "treasury_curve":
+                d["r_ref_label"] = "Treasury r(91d)"
+                d["r_ref_detail"] = ("Treasury zero curve, 91-day zero rate, continuously "
+                                     "compounded; reference")
+            else:
+                d["r_ref_label"] = "^IRX"
+                d["r_ref_detail"] = "13-week bill, continuously compounded; reference"
 
         losses = _cal_losses(cal)
         d["spx_rmse"] = (round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None

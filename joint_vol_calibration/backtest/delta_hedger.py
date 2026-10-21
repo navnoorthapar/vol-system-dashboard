@@ -103,7 +103,10 @@ ENTRY_DATE: str = "2020-01-02"
 EXIT_DATE: str  = "2020-12-31"
 K_ENTRY: float  = 3257.85    # ATM strike at entry (SPX close 2020-01-02)
 T_ENTRY: float  = 1.0        # initial time to expiry (years)
-R: float        = 0.015      # 1-year risk-free rate (2020 US Treasury ~1.5%)
+# Risk-free rate of the straddle. None (default): the Treasury zero rate at
+# ENTRY_DATE for the straddle's maturity (entry_rate; 1.5532% cc for
+# 2020-01-02, 1 year). Until C23 a hard-coded 1.5% ("2020 US Treasury ~1.5%").
+R: float | None = None
 Q: float        = 0.013      # SPX annualised dividend yield
 
 # Calendar-day year used for time to expiry. Cboe quotes the VIX family on
@@ -519,11 +522,19 @@ def hedge_attribution(
     return df
 
 
+def entry_rate(entry_date: str = ENTRY_DATE, t_entry: float = T_ENTRY) -> float:
+    """The Treasury zero rate (cc, ACT/365) at ``entry_date`` for maturity
+    ``t_entry`` (rates.zero_rate: bills + par curve, look-ahead gated). The
+    study holds it flat over the year, as it always held r."""
+    from joint_vol_calibration.data import rates
+    return float(rates.zero_rate(entry_date, float(t_entry)))
+
+
 def run_simulation(
     entry_date: str = ENTRY_DATE,
     exit_date:  str = EXIT_DATE,
     k_entry:    float = K_ENTRY,
-    r: float    = R,
+    r: float | None = R,
     q: float    = Q,
     t_entry:    float = T_ENTRY,
     pdv_model_path: Optional[Path] = None,
@@ -543,7 +554,7 @@ def run_simulation(
     entry_date      : str 'YYYY-MM-DD' — simulation entry date
     exit_date       : str 'YYYY-MM-DD' — simulation exit date
     k_entry         : float — ATM strike at entry (S at entry close)
-    r               : float — risk-free rate (annualised, decimal)
+    r               : float — risk-free rate (cc, decimal); None: entry_rate()
     q               : float — dividend yield (annualised, decimal)
     t_entry         : float — initial time to expiry (years)
     pdv_model_path  : Path  — OPTIONAL pickled PDVModel for Run B. None (the
@@ -618,11 +629,17 @@ def run_simulation(
         logger.warning("PDV forecast failed: %s — Run B = Run A", exc)
     sigma_pdv = pdv_vol.reindex(dates).values if len(pdv_vol) else None
 
+    r_source = "argument"
+    if r is None:
+        r = entry_rate(entry_date, t_entry)
+        r_source = f"Treasury zero curve {entry_date}, {t_entry:g}y (rates.zero_rate)"
     df = hedge_attribution(
         dates, S, sigma, k_entry, t_entry, r, q,
         sigma_pdv=sigma_pdv, vomma_threshold=vomma_threshold,
     )
     df.attrs["pdv_train_end"] = None if pdv_train_end is None else str(pdv_train_end.date())
+    df.attrs["r"] = float(r)
+    df.attrs["r_source"] = r_source
 
     logger.info(
         "Simulation complete: %d trading days | unexplained-variance ratio "
@@ -813,7 +830,8 @@ def plot_attribution(
     last = df.index[-1].date() if len(df) else EXIT_DATE
     fig.suptitle(
         f"Delta-Hedged ATM SPX Straddle P&L Attribution  ({first} → {last})\n"
-        f"K = {K_ENTRY:.0f}  |  T = 1 year  |  r = {R*100:.1f}%  |  q = {Q*100:.1f}%",
+        f"K = {K_ENTRY:.0f}  |  T = 1 year  |  r = {float(df.attrs.get('r', float('nan')))*100:.2f}%"
+        f"  |  q = {Q*100:.1f}%",
         fontsize=13, fontweight="bold",
     )
 
@@ -919,7 +937,7 @@ class DeltaHedger:
         entry_date: str = ENTRY_DATE,
         exit_date:  str = EXIT_DATE,
         k_entry:    float = K_ENTRY,
-        r:          float = R,
+        r:          float | None = R,
         q:          float = Q,
         t_entry:    float = T_ENTRY,
         pdv_model_path: Optional[Path] = None,

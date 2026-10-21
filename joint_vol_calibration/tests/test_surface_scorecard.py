@@ -7,7 +7,7 @@ interface, and new models plug in through the registry.
 import numpy as np
 import pytest
 
-from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
+from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator, recorded_inputs
 from joint_vol_calibration.surface import quotes as sqm
 from joint_vol_calibration.surface import scorecard as sc
 
@@ -21,7 +21,9 @@ def sq():
 
 @pytest.fixture(scope="module")
 def cal():
-    return JointCalibrator(SESSION)
+    # the committed fit's own inputs (^IRX reference): the surface layer cleans
+    # each session with the reference its fit recorded (session_rate_reference)
+    return JointCalibrator(SESSION, **recorded_inputs(sc.load_v2_calibration(SESSION)))
 
 
 def _ctx(sq):
