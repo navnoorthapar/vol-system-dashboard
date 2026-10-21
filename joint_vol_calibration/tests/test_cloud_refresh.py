@@ -577,6 +577,126 @@ def test_a_failed_artifact_is_reported_and_loses_nothing(env, monkeypatch, capsy
     assert "::error title=Session artifacts::surface artifact" in capsys.readouterr().out
 
 
+def _greeks_source(cr, name="greeks_surface.parquet", key=b"greeks_provenance"):
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(cr.DATA / "greeks" / name).metadata
+    return json.loads(meta[key])["source"]["calibration_file"]
+
+
+def test_a_failed_artifact_is_rebuilt_by_the_next_run(env, monkeypatch):
+    """PROD-5 / ENG-6: the artifacts were built only by the run that accepted the
+    fit. The diagnostics timed out there; the retry slot found the pickle
+    ('exists') and rebuilt nothing, so the session's diagnostics never existed.
+    Every run with the calibrate step now backfills what is missing."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    calls = []
+
+    def timeout(session, out_dir, timeout):
+        calls.append(session)
+        raise TimeoutError("calibration_diagnostics.py: 1200 s")
+    monkeypatch.setattr(env, "_run_diagnostics", timeout)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["calibration"]["status"] == "accepted"
+    assert {k: v["ok"] for k, v in st["artifacts"].items()} == {
+        "surface": True, "diagnostics": False, "greeks": True, "scenario": True}
+    # the failed part is not retried in the same run, and nothing else is missing
+    assert st["artifact_backfill"]["gaps"] == {}
+    assert calls == [SESSION]
+    diag = env.DATA / "calibrations" / "diagnostics" / f"{SESSION}.json"
+    assert not diag.exists()
+
+    def works(session, out_dir, timeout):
+        calls.append(session)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{session}.json").write_text("{}")
+    monkeypatch.setattr(env, "_run_diagnostics", works)
+    code, st = _run(env, "calibrate")                          # the 04:30 retry
+    assert st["calibration"]["status"] == "exists"
+    bf = st["artifact_backfill"]
+    assert bf["gaps"] == {SESSION: ["diagnostics"]}
+    assert list(bf["rebuilt"]) == [SESSION]
+    assert list(bf["rebuilt"][SESSION]) == ["diagnostics"]
+    assert bf["rebuilt"][SESSION]["diagnostics"]["ok"]
+    assert code == 0
+    assert diag.exists()
+    assert calls == [SESSION, SESSION]
+    code, st = _run(env, "calibrate")                          # repaired: nothing to do
+    assert code == 0
+    assert st["artifact_backfill"] == {"gaps": {}, "rebuilt": {}, "deferred": []}
+    assert calls == [SESSION, SESSION]
+    code, st = _run(env, "market,labels")                      # the close slot never backfills
+    assert "artifact_backfill" not in st
+
+
+def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
+    """The artifact commit was dropped (gate failure) or a part failed: the
+    Greeks surface and scenario grid named the previous headline fit. The next
+    run rebuilds both from the headline, and a missing file the same way."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    monkeypatch.setattr(env, "_run_diagnostics", lambda s, d, t: (d.mkdir(parents=True, exist_ok=True),
+                                                                  (d / f"{s}.json").write_text("{}")))
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    head = f"joint_cal_{SESSION}.pkl"
+    assert _greeks_source(env).endswith(head)
+    import pyarrow.parquet as pq
+    g = env.DATA / "greeks" / "greeks_surface.parquet"
+    t = pq.read_table(g)
+    meta = dict(t.schema.metadata)
+    prov = json.loads(meta[b"greeks_provenance"])
+    prov["source"]["calibration_file"] = "data_store/calibrations/joint_cal_2026-09-22.pkl"
+    meta[b"greeks_provenance"] = json.dumps(prov).encode()
+    pq.write_table(t.replace_schema_metadata(meta), g)          # the previous headline's surface
+    (env.DATA / "greeks" / "scenario_grid.parquet").unlink()   # and no scenario grid
+    code, st = _run(env, "calibrate")
+    bf = st["artifact_backfill"]
+    assert bf["gaps"] == {SESSION: ["greeks", "scenario"]}
+    assert {k: v["ok"] for k, v in bf["rebuilt"][SESSION].items()} == {"greeks": True, "scenario": True}
+    assert code == 0
+    assert _greeks_source(env).endswith(head)
+    assert _greeks_source(env, "scenario_grid.parquet", b"scenario_provenance").endswith(head)
+    assert not list((env.DATA / "greeks").glob(".*.tmp"))
+
+
+def test_backfill_rebuilds_newest_first_and_defers_the_rest(env, monkeypatch):
+    gaps = {"2026-09-23": ["diagnostics"], "2026-09-22": ["surface", "diagnostics"],
+            "2026-09-21": ["surface"]}
+    monkeypatch.setattr(env, "artifact_gaps", lambda head: dict(gaps))
+    seen = []
+    def rebuild(s, h, parts=None, **kw):
+        seen.append((s, parts))
+        return {p: {"ok": True} for p in parts}
+    monkeypatch.setattr(env, "refresh_session_artifacts", rebuild)
+    out = env.backfill_session_artifacts("h.pkl", skip=["2026-09-23"], max_sessions=1)
+    assert seen == [("2026-09-22", ("surface", "diagnostics"))]
+    assert out["deferred"] == ["2026-09-21"]
+    assert list(out["gaps"]) == ["2026-09-22", "2026-09-21"]
+    with pytest.raises(ValueError, match="unknown artifact part"):
+        env._real_refresh_session_artifacts(SESSION, None, parts=("bogus",))
+
+
+def test_a_greeks_write_that_dies_keeps_the_previous_surface(env, monkeypatch):
+    """PROD-3: save_greeks_surface writes in place; a crash mid-write left a
+    surface without its provenance, which the data gate then tripped on. The
+    bot writes it under a temporary name and renames it into place."""
+    from joint_vol_calibration.greeks import risk_monitor
+    g = env.DATA / "greeks" / "greeks_surface.parquet"
+    g.parent.mkdir(parents=True)
+    g.write_bytes(b"previous surface")
+
+    def dies(cal, out_path, *a, **k):
+        assert pathlib.Path(out_path) != g
+        pathlib.Path(out_path).write_bytes(b"half a parq")
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(risk_monitor, "build_surface_from_calibration", dies)
+    res = env._real_refresh_session_artifacts(SESSION, "h.pkl", parts=("greeks",))
+    assert not res["greeks"]["ok"]
+    assert "No space left" in res["greeks"]["error"]
+    assert g.read_bytes() == b"previous surface"
+    assert sorted(p.name for p in g.parent.iterdir()) == ["greeks_surface.parquet"]
+
+
 def test_gate_rejection_after_a_fit_persists_nothing(env, monkeypatch):
     """A chain that passes the quote-state gate but whose FIT the shared gate
     rejects (here: a one-tenor VIX leg) must leave no snapshot and no pickle;

@@ -30,7 +30,11 @@ surface report (data_store/surface/<session>/), its calibration diagnostics
 and scenario grid of the new headline fit (data_store/greeks/). Each is
 fail-soft: a failure is reported (exit 1) but never undoes what was captured,
 and the workflow commits captures and derived artifacts behind separate test
-gates (refresh_session_artifacts).
+gates (refresh_session_artifacts). Every run with the calibrate step then
+backfills what an earlier run failed to build or commit: a committed accepted
+fit without its surface report or diagnostics, or a Greeks surface / scenario
+grid built from another fit than the headline (backfill_session_artifacts, at
+most MAX_BACKFILL_SESSIONS sessions a run).
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
 is not what the bot commits. At the start of every run (freeze-only
@@ -103,6 +107,11 @@ ALL_STEPS = ("market", "labels", "capture", "calibrate", "freeze")
 # multi-start TRF, DE check, identifiability, sigma profile, rough Heston) take
 # about 3 min on 4 idle CPUs; this bounds them so the job keeps its time budget.
 DIAGNOSTICS_TIMEOUT_S = 20 * 60
+# What derives from a fit (refresh_session_artifacts), in build order.
+ARTIFACT_PARTS = ("surface", "diagnostics", "greeks", "scenario")
+# Sessions whose missing artifacts one run rebuilds (backfill_session_artifacts):
+# the diagnostics take ~4 min a session, the job has 45 (an accepted fit ~5).
+MAX_BACKFILL_SESSIONS = 2
 
 
 def _bootstrap_path() -> None:
@@ -676,8 +685,10 @@ def _run_diagnostics(session: str, out_dir: pathlib.Path, timeout: float) -> Non
 
 
 def refresh_session_artifacts(session: str, headline_path: "str | None",
-                              diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S) -> dict:
-    """Rebuild what derives from an accepted session's fit, each part fail-soft:
+                              diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S,
+                              parts=ARTIFACT_PARTS) -> dict:
+    """Rebuild what derives from an accepted session's fit (``parts``, default
+    all four, in this order), each part fail-soft:
 
       surface      data_store/surface/<session>/ (residuals, surface, scorecard,
                    VIX replication) and index.json (surface.report)
@@ -724,7 +735,15 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
         from joint_vol_calibration.greeks.risk_monitor import build_surface_from_calibration
         if not headline_path:
             raise ValueError("no headline calibration")
-        df = build_surface_from_calibration(headline_path, DATA / "greeks" / "greeks_surface.parquet")
+        # written under a temporary name and renamed into place (save_greeks_surface
+        # writes in place): a crash mid-write leaves the previous, valid surface
+        dest = DATA / "greeks" / "greeks_surface.parquet"
+        tmp = dest.with_name(f".{dest.name}.tmp")
+        try:
+            df = build_surface_from_calibration(headline_path, tmp)
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
         return {"from": headline_path, "n_nodes": len(df),
                 "n_unstable": int(df["is_unstable"].sum())}
 
@@ -735,9 +754,110 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
         df = sg.build_from_calibration(headline_path, DATA / "greeks" / "scenario_grid.parquet")
         return {"from": headline_path, "cells": len(df)}
 
-    for name, fn in (("surface", surface), ("diagnostics", diagnostics), ("greeks", greeks),
-                     ("scenario", scenario)):
-        part(name, fn)
+    fns = {"surface": surface, "diagnostics": diagnostics, "greeks": greeks, "scenario": scenario}
+    unknown = set(parts) - set(fns)
+    if unknown:
+        raise ValueError(f"unknown artifact part(s) {sorted(unknown)}")
+    for name in ARTIFACT_PARTS:
+        if name in parts:
+            part(name, fns[name])
+    return out
+
+
+def accepted_sessions() -> dict:
+    """{session: pickle path} of every committed calibration that passes the
+    CURRENT gate (what headline_calibration chooses from)."""
+    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
+    out = {}
+    for path in sorted((DATA / "calibrations").glob("joint_cal_*.pkl")):
+        try:
+            with open(path, "rb") as f:
+                cal = pickle.load(f)  # noqa: S301 (the repository's own calibration pickles)
+        except Exception as e:  # noqa: BLE001 (an unreadable pickle is not an accepted fit)
+            log.debug("  %s is not readable (%s): not an accepted fit", path.name, e)
+            continue
+        if isinstance(cal, dict) and is_acceptable_calibration(cal)[0]:
+            out[str(cal.get("spot_date") or cal.get("as_of_date") or path.stem[-10:])[:10]] = str(path)
+    return out
+
+
+def _artifact_source(path: pathlib.Path, key: bytes) -> "str | None":
+    """source.calibration_file in a derived parquet's provenance (None: the
+    file is missing, unreadable or names none)."""
+    import pyarrow.parquet as pq
+    try:
+        meta = pq.read_schema(path).metadata or {}
+        return str(json.loads(meta[key])["source"]["calibration_file"])
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
+def artifact_gaps(headline_path: "str | None") -> dict:
+    """What is missing or stale among the artifacts derived from the committed
+    accepted fits: {session: [parts]}, newest session first.
+
+      surface      data_store/surface/<s>/surface.json missing, or index.json
+                   does not list <s>
+      diagnostics  data_store/calibrations/diagnostics/<s>.json missing
+      greeks,      (the headline session) the parquet is missing, unreadable,
+      scenario     or its provenance names another calibration than the
+                   headline fit (the Greeks surface and scenario grid of the
+                   previous headline next to a new one)
+
+    Only sessions whose SPX chain is stored (data_store/options/spx_<s>.parquet)
+    are checked: the surface report and the diagnostics are built from it."""
+    from joint_vol_calibration.data import database as dbm
+    gaps: dict = {}
+    idx = DATA / "surface" / "index.json"
+    try:
+        listed = {r["session"] for r in json.loads(idx.read_text())["sessions"]} if idx.exists() else set()
+    except (OSError, ValueError, KeyError, TypeError):
+        listed = set()
+    acc = accepted_sessions()
+    for sess in sorted(acc, reverse=True):
+        if not dbm.options_snapshot_path(sess, "SPX").exists():
+            continue
+        need = []
+        if sess not in listed or not (DATA / "surface" / sess / "surface.json").exists():
+            need.append("surface")
+        if not (DATA / "calibrations" / "diagnostics" / f"{sess}.json").exists():
+            need.append("diagnostics")
+        if need:
+            gaps[sess] = need
+    if headline_path:
+        head = pathlib.Path(headline_path)
+        sess = next((s_ for s_, p_ in acc.items() if pathlib.Path(p_).name == head.name), None)
+        stale = [name for name, fname, key in (
+            ("greeks", "greeks_surface.parquet", b"greeks_provenance"),
+            ("scenario", "scenario_grid.parquet", b"scenario_provenance"))
+            if pathlib.Path(_artifact_source(DATA / "greeks" / fname, key) or "").name != head.name]
+        if stale and sess:
+            gaps[sess] = [*gaps.get(sess, []), *stale]
+    return dict(sorted(gaps.items(), reverse=True))
+
+
+def backfill_session_artifacts(headline_path: "str | None", skip=(),
+                               max_sessions: int = MAX_BACKFILL_SESSIONS) -> dict:
+    """Rebuild what artifact_gaps finds missing or stale, newest session first,
+    at most ``max_sessions`` sessions a run (the rest are 'deferred' to the
+    next run). ``skip``: sessions this run already rebuilt (an accepted fit's
+    failed part is not retried in the same run).
+
+    The artifacts used to be built only by the run that accepted the fit: when
+    a part failed there (the diagnostics' 20-minute timeout), or the artifact
+    gate failed and the commit dropped them, the retry slot and every later
+    run found the pickle ('exists') and rebuilt nothing, and the next deploy
+    showed the new headline fit next to the previous fit's Greeks surface and
+    scenario grid. Every run with the calibrate step now repairs them.
+
+    Returns {"gaps": {session: [parts]}, "rebuilt": {session: {part: result}},
+    "deferred": [sessions]}."""
+    gaps = {s: p for s, p in artifact_gaps(headline_path).items() if s not in set(skip)}
+    todo = list(gaps)[:max_sessions]
+    out: dict = {"gaps": gaps, "rebuilt": {}, "deferred": list(gaps)[max_sessions:]}
+    for sess in todo:
+        log.info("  backfill: %s for %s", ", ".join(gaps[sess]), sess)
+        out["rebuilt"][sess] = refresh_session_artifacts(sess, headline_path, parts=tuple(gaps[sess]))
     return out
 
 
@@ -966,26 +1086,14 @@ def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
 def headline_calibration(session: "str | None") -> dict:
     """Newest calibration that passes the CURRENT gate, and its age in NYSE
     sessions relative to ``session``. Legacy (pre-C22) pickles do not count."""
-    from joint_vol_calibration.calibration.joint_calibrator import is_acceptable_calibration
     from joint_vol_calibration.data import option_chain as oc
 
-    best = None
-    for path in sorted((DATA / "calibrations").glob("joint_cal_*.pkl")):
-        try:
-            with open(path, "rb") as f:
-                cal = pickle.load(f)
-        except Exception:
-            continue
-        if not isinstance(cal, dict) or not is_acceptable_calibration(cal)[0]:
-            continue
-        d = str(cal.get("spot_date") or cal.get("as_of_date") or path.stem[-10:])[:10]
-        if best is None or d > best["date"]:
-            best = {"date": d, "path": str(path)}
-    if best is None:
+    acc = accepted_sessions()
+    if not acc:
         return {"date": None, "path": None, "age_sessions": None}
-    best["age_sessions"] = (oc.sessions_between(best["date"], session)
-                            if session else None)
-    return best
+    d = max(acc)
+    return {"date": d, "path": acc[d],
+            "age_sessions": oc.sessions_between(d, session) if session else None}
 
 
 # -- Step 4: Freeze static site ------------------------------------------------
@@ -1112,6 +1220,13 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
             lines.append(f"| {name} artifact | "
                          + ("ok" if res.get("ok") else f"**failed**: {res.get('error')}")
                          + f" ({res.get('seconds', '—')} s) |")
+        bf = status.get("artifact_backfill") or {}
+        for sess, arts in (bf.get("rebuilt") or {}).items():
+            lines.append(f"| backfill {sess} | " + "; ".join(
+                f"{n} " + ("ok" if r.get("ok") else f"**failed**: {r.get('error')}")
+                for n, r in arts.items()) + " |")
+        if bf.get("deferred"):
+            lines.append(f"| backfill deferred | {', '.join(bf['deferred'])} (next run) |")
         lines.append(f"| headline calibration | {head.get('date') or 'none'}"
                      + (f" ({head.get('age_sessions')} sessions old)" if head.get("date") else "")
                      + " |")
@@ -1325,6 +1440,33 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                     msg = f"{name} artifact for {status['calibration']['session']} failed: {res.get('error')}"
                     status["errors"].append(msg)
                     _annotate("error", "Session artifacts", msg)
+
+    # Every book run: rebuild what derives from the committed accepted fits and is
+    # missing or stale (a part that failed, or an artifact commit the gate dropped,
+    # on an earlier run). Without this the retry slot found the pickle and stopped.
+    if "calibrate" in steps:
+        with _Group("artifact backfill"):
+            try:
+                head = status.get("headline_calibration") or {}
+                done = [status["calibration"]["session"]] if accepted else []
+                bf = backfill_session_artifacts(head.get("path"), skip=done)
+            except Exception as e:  # reported; the captures and the fit stand
+                log.exception("artifact backfill crashed")
+                bf = {"gaps": {}, "rebuilt": {}, "deferred": [], "error": f"{type(e).__name__}: {e}"}
+                hard_fail = True
+                status["errors"].append(f"artifact backfill crashed: {bf['error']}")
+                _annotate("error", "Artifact backfill", bf["error"])
+            status["artifact_backfill"] = bf
+            for sess, arts in bf["rebuilt"].items():
+                for name, res in arts.items():
+                    if not res.get("ok"):
+                        hard_fail = True
+                        msg = f"backfill: {name} artifact for {sess} failed: {res.get('error')}"
+                        status["errors"].append(msg)
+                        _annotate("error", "Session artifacts", msg)
+            if bf["gaps"]:
+                log.info("  artifact gaps %s; rebuilt %s; deferred %s", bf["gaps"], list(bf["rebuilt"]),
+                         bf["deferred"])
 
     if "freeze" in steps:
         with _Group("freeze site"):
