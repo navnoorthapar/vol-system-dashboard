@@ -681,18 +681,37 @@
   </div>
   
   <div class="nav-status" title="End-of-day snapshot, rebuilt after each US market close">
-    <div class="status-dot " aria-hidden="true"></div>
-    End-of-day data
+    <div class="status-dot error" aria-hidden="true"></div>
+    Stale input
   </div>
 </nav>
 
 <main class="page" id="main" tabindex="-1">
   
+  <div class="banner-stack">
+    
+    
+    <div class="banner banner-stale-error" data-stale="greeks" data-age="5">
+      <div class="banner-icon" aria-hidden="true">!</div>
+      <div>
+        <div class="banner-title">Greeks surface is 5 NYSE sessions old</div>
+        <div class="banner-body">
+          Greeks surface as of 2026-10-16; the newest session the site has data for is 2026-10-23.
+          
+          
+          
+          The surface is rebuilt only from a fit that passes the gate.
+        </div>
+      </div>
+    </div>
+    
+  </div>
+  
   
 <div class="page-header">
   <h1 class="page-title">Second-Order Greeks Monitor</h1>
   <div class="page-subtitle">Vomma (volga), vanna and quadratic-variation convexity of the stored Heston surface (C6).</div>
-  <div class="page-badge"><span class="nowrap">Surface 2026-10-16</span><span class="sep">·</span>83 of 90 grid nodes<span class="sep">·</span>6 maturities</div>
+  <div class="page-badge"><span class="nowrap">Surface 2026-10-16</span> <span class="age-error">(5 sessions old)</span><span class="sep">·</span>83 of 90 grid nodes<span class="sep">·</span>6 maturities</div>
 </div>
 
 

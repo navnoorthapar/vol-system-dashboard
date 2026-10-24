@@ -681,12 +681,31 @@
   </div>
   
   <div class="nav-status" title="End-of-day snapshot, rebuilt after each US market close">
-    <div class="status-dot " aria-hidden="true"></div>
-    End-of-day data
+    <div class="status-dot error" aria-hidden="true"></div>
+    Stale input
   </div>
 </nav>
 
 <main class="page" id="main" tabindex="-1">
+  
+  <div class="banner-stack">
+    
+    
+    <div class="banner banner-stale-error" data-stale="calibration" data-age="5">
+      <div class="banner-icon" aria-hidden="true">!</div>
+      <div>
+        <div class="banner-title">Heston calibration is 5 NYSE sessions old</div>
+        <div class="banner-body">
+          Heston calibration as of 2026-10-16; the newest session the site has data for is 2026-10-23.
+          No newer fit passed the quality gate, so the latest accepted fit is shown.
+          
+          
+          
+        </div>
+      </div>
+    </div>
+    
+  </div>
   
   
 
@@ -694,8 +713,8 @@
   <h1 class="page-title">Market Overview</h1>
   <div class="page-subtitle">End-of-day rule regime, implied versus forecast volatility, and the VIX term structure.</div>
   <div class="page-badge" id="freshness-badge" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>
-    <span class="nowrap" data-date="2026-10-16">Last close 2026-10-16</span>
-    <span class="sep">·</span><span class="nowrap">Regime 2026-10-16</span><span class="sep">·</span><span class="nowrap">Calibration 2026-10-16</span><span class="sep">·</span><span class="nowrap">PDV forecast 2026-10-16</span>
+    <span class="nowrap" data-date="2026-10-23">Last close 2026-10-23</span>
+    <span class="sep">·</span><span class="nowrap">Regime 2026-10-23</span><span class="sep">·</span><span class="nowrap">Calibration 2026-10-16</span> <span class="age-error">(5 sessions old)</span><span class="sep">·</span><span class="nowrap">PDV forecast 2026-10-23</span>
   </div>
 </div>
 <script>
@@ -739,14 +758,14 @@
 
   <div class="card card-sm">
     <h2 class="card-label">S&amp;P 500</h2>
-    <div class="card-value">7,659.44</div>
+    <div class="card-value">7,623.68</div>
     
     <div class="stat-row">
-      <span class="stat-change down">−1.09%</span>
+      <span class="stat-change down">−0.52%</span>
       <span>vs previous close</span>
     </div>
     
-    <div class="card-sub">Close 2026-10-16</div>
+    <div class="card-sub">Close 2026-10-23</div>
   </div>
 
   <div class="card card-sm">
@@ -754,16 +773,16 @@
     
     
     
-    <div class="card-value">19.99</div>
+    <div class="card-value">19.45</div>
     <div class="stat-row"><span class="chip chip-green">NORMAL — 15 to 20</span></div>
-    <div class="card-sub">Close 2026-10-16</div>
+    <div class="card-sub">Close 2026-10-23</div>
     
   </div>
   <!-- VVIX -->
   <div class="card card-sm">
     <h2 class="card-label">VVIX  <span class="qual">vol of VIX</span></h2>
     
-    <div class="card-value">109.91</div>
+    <div class="card-value">109.70</div>
     
     <div class="stat-row">
       <span class="chip chip-red">ABOVE R2 GATE</span>
@@ -778,9 +797,9 @@
     <h2 class="card-label">VIX term structure</h2>
     
     <div class="card-value sm">Contango</div>
-    <div class="card-sub">9d 20.12 → 184d 21.67 (slope +1.55 pts)</div>
+    <div class="card-sub">9d 18.70 → 184d 21.96 (slope +3.26 pts)</div>
     <div class="card-sub" >
-      All tenors 2026-10-16
+      All tenors 2026-10-23
     </div>
     
   </div>
@@ -800,16 +819,16 @@
     </div>
     <div class="card-sub">
       Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
-      trades on. As of 2026-10-16.
+      trades on. As of 2026-10-23.
     </div>
     
     
     <div class="subcard mt12" id="rule-inputs">
-      <div class="small faint" style="margin-bottom:4px;">Rule inputs on 2026-10-16</div>
+      <div class="small faint" style="margin-bottom:4px;">Rule inputs on 2026-10-23</div>
       <div class="kv-2" style="grid-template-columns:repeat(2,minmax(0,1fr));">
-        <div>rv₂₀ <span class="v">10.19%</span></div>
-        <div>VIX <span class="v">19.99%</span></div>
-        <div>VVIX <span class="v">109.91</span></div>
+        <div>rv₂₀ <span class="v">9.75%</span></div>
+        <div>VIX <span class="v">19.45%</span></div>
+        <div>VVIX <span class="v">109.70</span></div>
         <div>R2 gate <span class="v">107.06</span></div>
       </div>
       <div class="small dim" style="margin-top:6px;">
@@ -826,7 +845,7 @@
     
     <div class="flex space-between" style="margin-bottom:4px;">
       <span class="small dim">ML classifier <span class="chip chip-amber" style="margin-left:4px;">research only</span></span>
-      <span class="small" style="font-weight:600;">R1 · 55.5%</span>
+      <span class="small" style="font-weight:600;">R1 · 63.2%</span>
     </div>
     <div class="progress-bar-wrap" role="group" aria-label="Classifier probabilities">
       
@@ -838,19 +857,19 @@
       
       <div class="progress-row">
         <div class="progress-label">R1 short γ</div>
-        <div class="progress-track"><div class="progress-fill" style="width:55.5%;"></div></div>
-        <div class="progress-val">55.5%</div>
+        <div class="progress-track"><div class="progress-fill" style="width:63.2%;"></div></div>
+        <div class="progress-val">63.2%</div>
       </div>
       
       <div class="progress-row">
         <div class="progress-label">R2 vomma</div>
-        <div class="progress-track"><div class="progress-fill" style="width:44.5%;"></div></div>
-        <div class="progress-val">44.5%</div>
+        <div class="progress-track"><div class="progress-fill" style="width:36.8%;"></div></div>
+        <div class="progress-val">36.8%</div>
       </div>
       
     </div>
     <div class="card-sub small">
-      Next-session forecast from the features of 2026-10-16.
+      Next-session forecast from the features of 2026-10-23.
       Classifier disagrees with the rule label here — 75.0% out-of-sample, it loses to the 86.7% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
     </div>
     
@@ -871,21 +890,21 @@
     
     <div class="grid grid-2" style="gap:12px;">
       <div>
-        <div class="small faint">VIX · 2026-10-16</div>
-        <div class="card-value">19.99<span class="unit">%</span></div>
+        <div class="small faint">VIX · 2026-10-23</div>
+        <div class="card-value">19.45<span class="unit">%</span></div>
       </div>
       <div>
         <div class="small faint">PDV forecast · next 21-day realised vol</div>
-        <div class="card-value">13.83<span class="unit">%</span></div>
+        <div class="card-value">14.25<span class="unit">%</span></div>
       </div>
     </div>
     <div class="divider"></div>
     
     <div class="small faint">VIX − PDV forecast</div>
-    <div class="card-value lg">+6.16<span class="unit">vol pts</span></div>
+    <div class="card-value lg">+5.20<span class="unit">vol pts</span></div>
     
     <div class="card-sub">
-      Implied vol is rich versus this spread's own history (top 15%)
+      Within this spread's usual range
       
     </div>
     
@@ -894,19 +913,19 @@
     <div class="subcard mt12">
       
       <div style="display:flex;align-items:baseline;gap:10px;">
-        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">85th</div>
-        <div class="small dim">percentile of 3,637 prior sessions (2012-04-30 → 2026-10-15); mean +3.37 vol pts</div>
+        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">79th</div>
+        <div class="small dim">percentile of 3,642 prior sessions (2012-04-30 → 2026-10-22); mean +3.37 vol pts</div>
       </div>
       
       
-      <div class="small faint" style="margin:10px 0 2px;">Last 60 sessions to 2026-10-16 (shaded above zero)</div>
+      <div class="small faint" style="margin:10px 0 2px;">Last 60 sessions to 2026-10-23 (shaded above zero)</div>
       <div class="chart-wrap spark">
         <canvas id="sparklineChart" role="img" aria-label="Sparkline: VIX minus PDV forecast, last 60 sessions" aria-describedby="sparklineChart-data"></canvas>
       </div>
       
       <p class="chart-data sr-only" id="sparklineChart-data">
-        VIX minus PDV forecast from 2026-07-24 to 2026-10-16:
-        first +4.44 vol pts, last +6.16 vol pts,
+        VIX minus PDV forecast from 2026-07-31 to 2026-10-23:
+        first +1.41 vol pts, last +5.20 vol pts,
         range +1.41 to +6.16 vol pts.
       </p>
       
@@ -919,24 +938,24 @@
       percentile ranks today against out-of-sample values only, not against zero.
     </p>
     <div class="kv-2 mt8">
-      <div>σ₁ (5.0-day EWMA) <span class="v">10.61%</span></div>
-      <div>σ₂ (60.0-day EWMA) <span class="v">12.34%</span></div>
+      <div>σ₁ (5.0-day EWMA) <span class="v">10.96%</span></div>
+      <div>σ₂ (60.0-day EWMA) <span class="v">12.26%</span></div>
     </div>
     
   </div>
 
   <!-- VIX term-structure chart -->
   <div class="card">
-    <h2 class="card-label">VIX term structure <span class="qual">· 2026-10-16</span></h2>
+    <h2 class="card-label">VIX term structure <span class="qual">· 2026-10-23</span></h2>
     <div class="chart-wrap tall">
-      <canvas id="tsChart" role="img" aria-label="Line chart: VIX index term structure by tenor on 2026-10-16" aria-describedby="tsChart-data"></canvas>
+      <canvas id="tsChart" role="img" aria-label="Line chart: VIX index term structure by tenor on 2026-10-23" aria-describedby="tsChart-data"></canvas>
     </div>
     <div class="chart-data sr-only" id="tsChart-data">
       
       <table>
-        <caption>VIX-family index levels, 2026-10-16</caption>
+        <caption>VIX-family index levels, 2026-10-23</caption>
         <thead><tr><th scope="col">Tenor</th><th scope="col">Level (vol pts)</th></tr></thead>
-        <tbody><tr><td>9d</td><td>20.12</td></tr><tr><td>30d</td><td>19.99</td></tr><tr><td>93d</td><td>20.50</td></tr><tr><td>184d</td><td>21.67</td></tr></tbody>
+        <tbody><tr><td>9d</td><td>18.70</td></tr><tr><td>30d</td><td>19.45</td></tr><tr><td>93d</td><td>20.48</td></tr><tr><td>184d</td><td>21.96</td></tr></tbody>
       </table>
       
     </div>
@@ -955,19 +974,19 @@
       <div class="subcard" style="border-top:2px solid var(--blue);">
         <div class="small dim">R0 long gamma</div>
         <div class="card-value sm">10.3<span class="unit">%</span></div>
-        <div class="small faint">428 of 4,161 sessions</div>
+        <div class="small faint">428 of 4,166 sessions</div>
       </div>
       
       <div class="subcard" style="border-top:2px solid var(--accent);">
         <div class="small dim">R1 short gamma</div>
         <div class="card-value sm">67.7<span class="unit">%</span></div>
-        <div class="small faint">2,819 of 4,161 sessions</div>
+        <div class="small faint">2,822 of 4,166 sessions</div>
       </div>
       
       <div class="subcard" style="border-top:2px solid var(--red);">
         <div class="small dim">R2 vomma active</div>
         <div class="card-value sm">22.0<span class="unit">%</span></div>
-        <div class="small faint">914 of 4,161 sessions</div>
+        <div class="small faint">916 of 4,166 sessions</div>
       </div>
       
     </div>
@@ -1010,7 +1029,7 @@
     </div>
     
     <p class="chart-note">R² of the daily-refitted (purged) walk-forward forecast against realised 21-day RMS vol,
-      3,617 forecasts 2012-04-30 → 2026-09-17, recomputed from the database at build time.
+      3,622 forecasts 2012-04-30 → 2026-09-24, recomputed from the database at build time.
       The equation is the shipped model's full-sample fit; the forecast on the card is the walk-forward one.</p>
     
 
@@ -1248,7 +1267,7 @@ vsCharts(function () {
   // (a category axis spaced the 9/30/93/184-day tenors evenly and the spline bent the curve)
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   const tsLabels = ["9d", "30d", "93d", "184d"];
-  const tsValues = [20.12, 19.99, 20.5, 21.67];
+  const tsValues = [18.7, 19.45, 20.48, 21.96];
   const tsDays = tsLabels.map(t => parseInt(t, 10));
 
   new Chart(tsCtx, {
@@ -1272,7 +1291,7 @@ vsCharts(function () {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            title: items => items.length ? `${items[0].raw.tenor} index · 2026-10-16` : '',
+            title: items => items.length ? `${items[0].raw.tenor} index · 2026-10-23` : '',
             label: ctx => `  ${vsNum(ctx.parsed.y, 2)} vol pts`
           }
         }
@@ -1297,8 +1316,8 @@ vsCharts(function () {
   
   const spkCtx = document.getElementById('sparklineChart');
   if (spkCtx) {
-    const spkData = [4.44, 4.89, 4.88, 5.02, 1.79, 1.41, 1.79, 2.84, 2.32, 1.81, 2.14, 2.9, 2.66, 2.33, 2.88, 2.54, 3.09, 3.13, 2.55, 2.75, 2.36, 3.07, 3.09, 3.06, 2.72, 2.6, 2.94, 3.61, 2.9, 2.23, 2.27, 2.99, 3.44, 4.39, 2.83, 3.82, 3.72, 4.04, 2.08, 1.86, 2.0, 1.6, 1.9, 2.66, 2.36, 2.83, 2.94, 3.28, 3.73, 3.07, 3.7, 3.59, 3.62, 3.6, 3.41, 3.9, 4.11, 4.04, 4.07, 6.16];
-    const spkDates = ["2026-07-24", "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"];
+    const spkData = [1.41, 1.79, 2.84, 2.32, 1.81, 2.14, 2.9, 2.66, 2.33, 2.88, 2.54, 3.09, 3.13, 2.55, 2.75, 2.36, 3.07, 3.09, 3.06, 2.72, 2.6, 2.94, 3.61, 2.9, 2.23, 2.27, 2.99, 3.44, 4.39, 2.83, 3.82, 3.72, 4.04, 2.08, 1.86, 2.0, 1.6, 1.9, 2.66, 2.36, 2.83, 2.94, 3.28, 3.73, 3.07, 3.7, 3.59, 3.62, 3.6, 3.41, 3.9, 4.11, 4.04, 4.07, 6.16, 5.14, 4.47, 4.31, 5.0, 5.2];
+    const spkDates = ["2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"];
     new Chart(spkCtx, {
       type: 'line',
       data: {
