@@ -273,6 +273,11 @@ sub, sup { font-size: 0.72em; }
 .result-v { font-size: 24px; font-weight: 600; line-height: 1.2; letter-spacing: -0.01em; }
 .result-v .unit { font-size: 0.55em; font-weight: 500; color: var(--text2); margin-left: 3px; }
 .result-d { font-size: 12px; color: var(--text2); }
+/* A signed value's tone. The value rules above (.kpi-value: --text) come after
+   .pos / .neg at the same specificity, so the tone class never showed; these
+   win. The sign glyph stays in the text, so colour is never the only cue. */
+.kpi-value.pos, .result-v.pos, .param-val.pos { color: var(--pos); }
+.kpi-value.neg, .result-v.neg, .param-val.neg { color: var(--neg); }
 
 /* ── tables ──────────────────────────────────────────────────────────── */
 /* Horizontal scroll regions: keyboard-focusable (tabindex=0) and visibly
@@ -444,7 +449,10 @@ details.method > .prose, details.method > .note, details.method > .tbl-wrap { ma
 .foot-links { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
 
 /* keyboard shortcut dialog */
-dialog.keys { background: var(--surface); color: var(--text); border: 1px solid var(--line2); border-radius: var(--radius); padding: 14px 16px; max-width: 420px; width: calc(100% - 32px); }
+/* margin: auto restores the browser's centring of a dialog, which the universal
+   reset (margin: 0) removed: the dialog opened in the top-left corner */
+dialog.keys { background: var(--surface); color: var(--text); border: 1px solid var(--line2); border-radius: var(--radius); padding: 14px 16px; max-width: 420px; width: calc(100% - 32px); margin: auto; }
+dialog.keys:modal { inset: 0; }
 dialog.keys::backdrop { background: rgba(0, 0, 0, 0.55); }
 dialog.keys h2 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 dialog.keys .dl { font-size: 12px; }

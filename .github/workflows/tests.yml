@@ -285,12 +285,20 @@ jobs:
       - name: Accessibility and layout gate
         run: node scripts/ci/a11y/a11y.mjs "$RUNNER_TEMP/site" --out "$RUNNER_TEMP/a11y.json"
 
+      # What a reader sees once desk.js has run, under the published CSP: signed
+      # bars in the colour of their sign, KPI tones, the '?' dialog centred.
+      - name: Interaction gate
+        if: always()
+        run: node scripts/ci/a11y/interact.mjs "$RUNNER_TEMP/site" --out "$RUNNER_TEMP/interact.json"
+
       - name: Upload the a11y report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: a11y-${{ github.run_id }}
-          path: ${{ runner.temp }}/a11y.json
+          path: |
+            ${{ runner.temp }}/a11y.json
+            ${{ runner.temp }}/interact.json
           if-no-files-found: ignore
           retention-days: 14
 

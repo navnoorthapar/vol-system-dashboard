@@ -69,6 +69,7 @@ freeze:  ## the static site exactly as published, into $(SITE)
 a11y: freeze  ## axe-core (WCAG 2.2 AA) + overflow check on the frozen site (needs Node 20+)
 	cd scripts/ci/a11y && npm ci --no-audit --no-fund && npx playwright install chromium
 	node scripts/ci/a11y/a11y.mjs $(SITE)
+	node scripts/ci/a11y/interact.mjs $(SITE)
 
 reproduce:  ## rebuild backtest, Greeks, C7 and the v2 calibrations in a scratch copy; diff vs committed
 	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT)

@@ -3817,3 +3817,96 @@ def test_browser_panels_beside_taller_ones_carry_no_large_blank(site_browser):
             assert page.evaluate(_BLANK_JS, "forward") < 0.34
     finally:
         ctx.close()
+
+
+# ── P1 trust pass ─────────────────────────────────────────────────────────────
+
+_SIGNED_FILLS_JS = """cid => {
+  const c = Desk.charts[cid], root = getComputedStyle(document.documentElement);
+  const pos = root.getPropertyValue('--pos-fill').trim(), neg = root.getPropertyValue('--neg-fill').trim();
+  const out = [];
+  (c.spec.series || []).forEach((s, i) => {
+    if (!s.signed) return;
+    const data = c.chart.getModel().getSeriesByIndex(i).getData();
+    for (let j = 0; j < data.count(); j++) {
+      const raw = s.data[j], v = Array.isArray(raw) ? raw[1] : raw;
+      if (v === null || v === undefined) continue;
+      out.push([String((c.spec.xs || [])[j]), v, data.getItemVisual(j, 'style').fill, v < 0 ? neg : pos]);
+    }
+  });
+  return out;
+}"""
+
+
+_SIGNED_CHARTS_JS = """() => Array.from(document.querySelectorAll('.chart[data-spec]')).filter(el =>
+  (JSON.parse(document.getElementById(el.getAttribute('data-spec')).textContent).series || [])
+    .some(s => s.signed) && !el.closest('[hidden]')).map(el => el.id)"""
+_TONED_KPIS_JS = """() => Array.from(document.querySelectorAll('.kpi-value.pos, .kpi-value.neg')).map(el =>
+  [el.classList.contains('neg') ? 'neg' : 'pos', getComputedStyle(el).color, el.textContent.trim()])"""
+_DIALOG_BOX_JS = """() => { const d = document.getElementById('keysDialog'), r = d.getBoundingClientRect();
+  return [d.open, r.left, r.width, document.documentElement.clientWidth]; }"""
+
+
+def test_browser_signed_bars_take_the_colour_of_their_sign(site_browser):
+    """P1.1: desk.js read a signed bar's value as p.value[1], which on a
+    horizontal chart (points swapped to [value, category]) is the category name,
+    so the sleeve chart drew S1C and S4, both losses, in the gain colour. Every
+    bar of every signed series is drawn in the loss fill below zero and the gain
+    fill otherwise (the chart's own spec gives the values)."""
+    sb = site_browser
+    ctx, page = _page(sb)
+    seen = {}
+    try:
+        for name in ("research.html", "risk.html"):
+            page.goto(sb["base"] + name, wait_until="load")
+            ids = page.evaluate(_SIGNED_CHARTS_JS)
+            for cid in ids:
+                page.evaluate(f"document.getElementById('{cid}').scrollIntoView()")
+                _wait_for_chart(page, cid)
+                bars = page.evaluate(_SIGNED_FILLS_JS, cid)
+                assert bars, cid
+                for label, v, fill, want in bars:
+                    assert fill.lower() == want.lower(), (name, cid, label, v, fill, want)
+                seen[cid] = bars
+    finally:
+        ctx.close()
+    assert "chart-sleeves" in seen, sorted(seen)
+    assert "chart-annual" in seen, sorted(seen)
+    sleeves = seen["chart-sleeves"]
+    assert any(v < 0 for _, v, *_ in sleeves)
+    assert any(v >= 0 for _, v, *_ in sleeves)
+
+
+def test_browser_kpi_tones_and_the_shortcut_dialog(site_browser):
+    """P1.1: .kpi-value (colour --text) came after .pos / .neg at the same
+    specificity, so no signed KPI showed its tone; and the universal margin
+    reset opened the '?' dialog in the top-left corner instead of centred."""
+    sb = site_browser
+    tok = _tokens()
+
+    def rgb(h: str) -> str:
+        return f"rgb({int(h[1:3], 16)}, {int(h[3:5], 16)}, {int(h[5:7], 16)})"
+    want = {"pos": rgb(tok["pos"]), "neg": rgb(tok["neg"])}
+    ctx, page = _page(sb)
+    tiles = []
+    try:
+        for name in ("index.html", "risk.html", "research.html"):
+            page.goto(sb["base"] + name, wait_until="load")
+            tiles += [(name, *t) for t in page.evaluate(_TONED_KPIS_JS)]
+    finally:
+        ctx.close()
+    assert {t[1] for t in tiles} == {"pos", "neg"}, tiles
+    for name, cls, colour, text in tiles:
+        assert colour == want[cls], (name, cls, colour, text)
+        assert text[0] in "+−", (name, text)                # the sign glyph stays: colour is not the only cue
+    for width, height in ((1440, 900), (390, 844)):
+        ctx, page = _page(sb, width, height)
+        try:
+            page.goto(sb["base"] + "surface.html", wait_until="load")
+            page.keyboard.press("Shift+Slash")
+            box = page.evaluate(_DIALOG_BOX_JS)
+            opened, left, w, vw = box
+            assert opened, width
+            assert abs(left - (vw - w) / 2) <= 2, (width, box)
+        finally:
+            ctx.close()

@@ -87,6 +87,13 @@ dashboard, commit `70c68f4`, 2026-10-21): 0 failures on all 8 pages at both widt
 scroll from 320 to 1920 px; axe with best-practice rules added, 0 violations. A copy of the site with an image
 without alt text, a 2,400 px element, a JS error and an external stylesheet injected fails with all four reported.
 
+`scripts/ci/a11y/interact.mjs` runs in the same job on the same frozen site, with the published CSP in force, and
+checks what a reader sees once `desk.js` has run: every bar of a series marked `signed` is drawn in the loss fill
+below zero and the gain fill otherwise (read from the drawn chart's ECharts model against the chart's own spec),
+every toned KPI value computes to the `--pos` / `--neg` token, and `?` opens the shortcut dialog centred at 1440
+and 390 px. Before the P1 trust pass it reported 15 failures on the published site (the two losing sleeves drawn
+in the gain colour, eleven KPI tiles without their tone, the dialog at the top-left corner at both widths).
+
 ## Dependencies
 
 pip-audit 2.10.1 on `requirements-lock.txt`, 2026-10-20: 7 distinct advisories (10 rows; OSV lists some twice) in

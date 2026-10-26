@@ -126,7 +126,11 @@
       var bar = Object.assign(base, { type: 'bar', data: data, barMaxWidth: s.barMaxWidth || 28, stack: s.stack || undefined });
       if (s.invisible) { bar.itemStyle = { color: 'transparent' }; bar.tooltip = { show: false }; bar.silent = true; return bar; }
       if (s.signed) {
-        bar.itemStyle = { color: function (p) { var v = Array.isArray(p.value) ? p.value[1] : p.value; return v < 0 ? T.colors.neg : T.colors.pos; } };
+        // buildOption swaps a horizontal chart's points to [value, category], so
+        // the value is p.value[0] there (p.value[1] was the category string, and
+        // every bar took the gain colour, the losing sleeves included)
+        var hz = !!spec.horizontal;
+        bar.itemStyle = { color: function (p) { var v = Array.isArray(p.value) ? p.value[hz ? 0 : 1] : p.value; return v < 0 ? T.colors.neg : T.colors.pos; } };
       } else { bar.itemStyle = { color: s.fill ? alpha(c, s.fill) : c, borderColor: c, borderWidth: s.fill ? 1 : 0 }; }
       return bar;
     }
