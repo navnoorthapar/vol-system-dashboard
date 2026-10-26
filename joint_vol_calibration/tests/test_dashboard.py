@@ -27,6 +27,7 @@ data_store/ (tests that need different inputs point the app at a temp copy).
 """
 from __future__ import annotations
 
+import collections
 import hashlib
 import importlib.util
 import itertools
@@ -5049,10 +5050,10 @@ def test_surface_change_against_every_earlier_session_states_its_gap(dash, pages
     atm = {it["name"] for it in _spec(html, "chart-atm-ts")["legend_items"]}
     rr = {it["name"] for it in _spec(html, "chart-rr-term")["legend_items"]}
     assert f"SVI-cal ATM {head}" in atm
-    assert f"RR25 {head}" in rr
+    assert f"SVI-cal RR25 {head}" in rr
     for old in earlier:
         assert f"SVI-cal ATM {old}" in atm
-        assert f"RR25 {old}" in rr
+        assert f"SVI-cal RR25 {old}" in rr
 
 
 def test_the_surface_page_never_calls_a_session_change_a_day_or_the_prior_session(pages):
@@ -5116,7 +5117,7 @@ def test_browser_session_tabs_switch_the_table_and_both_charts_without_a_request
         assert f"SVI-cal ATM {last}" in st["atm"]
         assert not [s for s in st["atm"] if s.startswith("SVI-cal ATM ") and s != f"SVI-cal ATM {last}"
                     and s.split()[-1] < last], st["atm"]
-        assert f"RR25 {last}" in st["rr"]
+        assert f"SVI-cal RR25 {last}" in st["rr"]
         assert st["atmBtns"] == [last]
         assert st["rrBtns"] == [last]
         assert f"vs={last}" in st["hash"]
@@ -5132,7 +5133,7 @@ def test_atm_term_forward_steps_and_a_calendar_flag_marker(dash, pages):
     ds = _desk_module()
     html = pages["/surface"]
     spec = _spec(html, "chart-atm-ts")
-    step = next(s for s in spec["series"] if s["name"].startswith("Forward ATM vol"))
+    step = next(s for s in spec["series"] if s["name"].startswith("SVI-cal forward ATM vol"))
     fw = ds.forward_vols(ds.constant_maturity(ds.delta_grid(*_desk_inputs())))
     want = [[f["t1_days"], f["fwd_vol"]] for f in fw]
     got = step["data"][0::2]
@@ -6713,7 +6714,7 @@ def test_browser_calibration_smiles_are_small_multiples(site_browser):
     ax = page.evaluate("(ids) => ids.map(id => Desk.charts[id].chart.getOption().xAxis"
                        ".map(a => [a.min, a.max]))", ids)
     assert len({json.dumps(a) for a in ax}) == 1, ax
-    hk = page.get_attribute("#smile-group-tools [data-series^='Heston (']", "data-series")
+    hk = next(s.get("legendKey") or s["name"] for s in raw[ids[0]]["series"] if s.get("quote") == "model")
     page.click(f"#smile-group-tools [data-series='{hk}']")
     page.wait_for_timeout(400)
     left = page.evaluate("""([ids, hk]) => ids.map(id => Desk.charts[id].chart.getOption().series
@@ -6726,3 +6727,82 @@ def test_browser_calibration_smiles_are_small_multiples(site_browser):
     n_quotes = sum(len(g["mid"]) for i in ids for g in raw[i]["quotes"]["groups"].values())
     assert len(rows) - 1 == n_quotes
     ctx.close()
+
+
+def _delta_e76(a: str, b: str) -> float:
+    """CIE76 ΔE between two '#rrggbb' colours (sRGB, D65)."""
+    def lab(h: str) -> tuple[float, float, float]:
+        rgb = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b_ = (((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92 for c in rgb)
+        x = (0.4124 * r + 0.3576 * g + 0.1805 * b_) / 0.95047
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * b_
+        z = (0.0193 * r + 0.1192 * g + 0.9505 * b_) / 1.08883
+
+        def f(t: float) -> float:
+            return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+        return 116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z))
+    la, lb = lab(a), lab(b)
+    return float(sum((p - q) ** 2 for p, q in zip(la, lb)) ** 0.5)
+
+
+def test_every_series_follows_the_encoding_registry(dash, pages):
+    """P4.5 (extends test_one_colour_per_model_on_every_surface_chart): over every
+    page's chart specs, (a) a series that stands for a model (role 'model') has
+    its model's colour and label (desk_charts.MODEL_ENCODING: 'Heston', not
+    'Heston (v2 fit)'); (b) on a page that draws models no other series takes a
+    model colour (the Calibration tenors were cat0 / cat1 / cat4); (c) series
+    indexed by maturity take the tenor ramp, lighter to darker with T; (d) on a
+    P&L or return chart no series is within ΔE76 25 of the gain or loss fill
+    (S3 was cat1, 16.6 from --neg-fill); (e) market observables and Cboe indices
+    are 'headline'; (f) no series uses 'info' (the gain blue). The ramp reaches
+    3:1 on the panels."""
+    ch = dash.charts
+    tok = _tokens()
+    hex_of = {"headline": tok["series-headline"], "muted": tok["series-muted"], "pos": tok["pos-fill"],
+              "neg": tok["neg-fill"], **{f"cat{i}": tok[f"cat-{i}"] for i in range(6)},
+              **{f"ramp{i}": tok[f"ramp-{i}"] for i in range(6)}, "cat-default": tok["cat-0"]}
+    for i in range(6):
+        for bg in (tok["bg"], tok["surface"], tok["surface2"]):
+            assert dash.contrast_ratio(tok[f"ramp-{i}"], bg) >= 3.0, (i, bg)
+    assert dash.model_label("heston_v2") == "Heston"
+    assert dash.model_label("svi_cal") == "SVI-cal"
+    seen = collections.Counter()
+    # a y axis that is P&L or a return (not a ratio that mentions P&L, as the vomma flag's)
+    pnl_axis = re.compile(r"^(Cumulative )?(P&L|[Rr]eturn|Drawdown|Sharpe)\b")
+    for route, html in pages.items():
+        specs = _raw_specs(html)
+        every = [(cid, i, s) for cid, sp in specs.items() for i, s in enumerate(sp.get("series") or [])]
+        model_page = any(s.get("role") == "model" for _, _, s in every)
+        for cid, i, s in every:
+            c = s.get("color") or f"cat{i % 6}"
+            role = s.get("role")
+            where = (route, cid, s.get("name"))
+            assert c != "info", where                                                        # (f)
+            if role == "model":                                                              # (a)
+                seen["model"] += 1
+                assert c == ch.model_colour(s["model"]), where
+                label = re.sub(r"^\d{4}-\d{2}-\d{2} ", "", s.get("legendKey") or s["name"])
+                ml = ch.model_label(s["model"])
+                assert label == ml or label.startswith((ml + " ", ml + ",")), (where, label, ml)
+            elif model_page and not s.get("signed"):                                          # (b)
+                assert c not in ch.MODEL_COLOUR_TOKENS, where
+            if role in ("market", "cboe"):                                                  # (e)
+                seen["market"] += 1
+                assert c == "headline", where
+        for cid, sp in specs.items():
+            tenors = sorted((s["T"], s["color"]) for s in sp.get("series") or [] if s.get("role") == "tenor")
+            if tenors:                                                                      # (c)
+                seen["tenor"] += 1
+                assert all(c in ch.TENOR_RAMP for _, c in tenors), (route, cid)
+                idx = [ch.TENOR_RAMP.index(c) for _, c in tenors]
+                assert idx == sorted(idx), (route, cid, tenors)
+                assert idx[0] < idx[-1], (route, cid, tenors)
+            if pnl_axis.search((sp.get("y") or {}).get("name") or ""):                     # (d)
+                seen["pnl"] += 1
+                for i, s in enumerate(sp.get("series") or []):
+                    c = s.get("color") or f"cat{i % 6}"
+                    if s.get("signed") or s.get("invisible") or c in ("pos", "neg"):
+                        continue                    # the sign colours themselves, by design
+                    for fill in ("pos-fill", "neg-fill"):
+                        assert _delta_e76(hex_of[c], tok[fill]) >= 25, (route, cid, s["name"], c, fill)
+    assert min(seen["model"] / 20, seen["market"] / 8, seen["tenor"] / 2, seen["pnl"] / 3) >= 1, seen

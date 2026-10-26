@@ -65,7 +65,7 @@
 {% if tools %}
 <div class="chart-tools">
   <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
-    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else ('ramp-' ~ it.color[4:] if it.color.startswith('ramp') else it.color))))) }})"></span>{{ it.name }}</button>{% endfor %}
     {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
     {% if spec.zoom_years %}<label class="zoom-year js-only">Year <select class="btn" data-zoom-year-for="{{ cid }}"><option value="">—</option>{% for z in spec.zoom_years %}<option value="{{ z['from'] }}|{{ z.to }}">{{ z.label }}</option>{% endfor %}</select></label>{% endif %}
   </div>
@@ -99,6 +99,12 @@
 </div>
 <p class="heat-readout" id="{{ id }}-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
 {% if ramp %}<div class="ramp" aria-hidden="true">{{ ramp }}</div>{% endif %}
+{%- endmacro %}
+
+{# the gradient key of a chart whose series are maturities (role 'tenor', desk_charts.TENOR_RAMP) #}
+{% macro tenor_key(spec) -%}
+{% set ts = spec.series|selectattr('role', 'defined')|selectattr('role', 'equalto', 'tenor')|list %}
+{% if ts %}<div class="ramp tenor-key" aria-hidden="true"><span>{{ ts[0].T|fmt('.0f') }} d</span><span class="ramp-bar" style="background:linear-gradient(90deg,{% for s in ts %}var(--ramp-{{ s.color[4:] }}){{ ',' if not loop.last }}{% endfor %})"></span><span>{{ ts[-1].T|fmt('.0f') }} d</span><span>· maturity, short to long</span></div>{% endif %}
 {%- endmacro %}
 
 {% macro ramp_bar(stops, lo_label, hi_label, mid_label=None) -%}

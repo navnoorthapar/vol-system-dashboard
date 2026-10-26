@@ -102,7 +102,7 @@
     </div>
   {% endcall %}
   {% call m.panel('flag-scatter', metric_name ~ ' against ln(K/F)', 's6') %}
-    {% if d.charts.scatter %}{{ m.chart(d.charts.scatter, 'h300') }}{% endif %}
+    {% if d.charts.scatter %}{{ m.chart(d.charts.scatter, 'h300') }}{{ m.tenor_key(d.charts.scatter) }}{% endif %}
     <p class="note">Largest at short maturities away from the money, where a vol move's P&amp;L is mostly convexity rather than vega.</p>
   {% endcall %}
 </div>

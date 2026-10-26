@@ -63,6 +63,14 @@
   --cat-4: #cc79a7;
   --cat-5: #d55e00;
   --series-headline: #e5e8eb;
+  /* series indexed by maturity (desk_charts.TENOR_RAMP): a violet lightness ramp,
+     shortest lightest; no model, status or P&L colour, 3:1 on the panels */
+  --ramp-0: #ece6ff;
+  --ramp-1: #d3c8fa;
+  --ramp-2: #bbaaf2;
+  --ramp-3: #a58eea;
+  --ramp-4: #9580e2;
+  --ramp-5: #8670d6;
   --series-muted: #9aa3b0;
   /* type */
   --sans: "Inter Desk", Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;

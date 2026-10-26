@@ -51,6 +51,48 @@ import desk_quotes
 from desk_format import round_sig
 
 CATEGORICAL = ("cat0", "cat1", "cat2", "cat3", "cat4", "cat5")
+
+# ── one meaning per colour, one name per model (P4.5) ─────────────────────────
+# Every spec builder takes a model's colour, dash and label from MODEL_ENCODING and
+# a role's colour from ROLE_COLOURS. A series that stands for a model carries
+# role 'model' and its key (``model``); on a page that draws models no other
+# series takes a model colour. Market observables and Cboe indices are
+# 'headline', bid–ask 'muted', fit anchors 'cat3'; series indexed by maturity
+# take TENOR_RAMP (a lightness ramp, short to long) with a gradient key. No
+# series uses 'info' (it is --pos, the gain colour, and links). The tests read
+# these tables (test_every_series_follows_the_encoding_registry).
+MODEL_ENCODING: dict[str, dict[str, Any]] = {
+    "heston_v2": {"color": "cat1", "dash": None, "label": "Heston"},
+    "heston": {"color": "cat1", "dash": None, "label": "Heston"},
+    "svi_cal": {"color": "cat0", "dash": None, "label": "SVI-cal"},
+    "svi": {"color": "cat2", "dash": None, "label": "SVI"},
+    "essvi": {"color": "cat4", "dash": None, "label": "eSSVI"},
+    "rough_heston": {"color": "cat5", "dash": None, "label": "Rough Heston"},
+}
+OTHER_MODEL_LABELS = {"ah": "Andreasen–Huge", "bates": "Bates", "quintic": "Quintic OU",
+                      "lifted_heston": "Lifted Heston"}
+UNKNOWN_MODEL_COLOUR = "cat5"
+MODEL_COLOUR_TOKENS = frozenset({e["color"] for e in MODEL_ENCODING.values()} | {UNKNOWN_MODEL_COLOUR})
+ROLE_COLOURS = {"market": "headline", "cboe": "headline", "bidask": "muted", "anchor": "cat3",
+                "other": "muted"}
+TENOR_RAMP = ("ramp0", "ramp1", "ramp2", "ramp3", "ramp4", "ramp5")
+
+
+def model_colour(key: str) -> str:
+    return MODEL_ENCODING.get(key, {}).get("color", UNKNOWN_MODEL_COLOUR)
+
+
+def model_label(key: str) -> str:
+    if key in MODEL_ENCODING:
+        return str(MODEL_ENCODING[key]["label"])
+    return OTHER_MODEL_LABELS.get(key, key.replace("_", " ").title())
+
+
+def tenor_colours(n: int) -> list[str]:
+    """``n`` maturities, shortest first, spread over TENOR_RAMP (light → dark)."""
+    if n <= 1:
+        return list(TENOR_RAMP[:n])
+    return [TENOR_RAMP[round(i * (len(TENOR_RAMP) - 1) / (n - 1))] for i in range(n)]
 COMPACT_DATES_MIN = 64
 _ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
 

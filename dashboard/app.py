@@ -2908,17 +2908,21 @@ def skew_term_spec(v: dict) -> dict:
                        "legend": True, "type": "line", "color": "muted", "width": 1, "z": 1,
                        "data": [[t, abs(s)] for t, s in zip(p["T"], p["svi"])]})
     series.append({"name": f"SVI-cal {head}", "legend": True, "type": "line",
-                   "color": model_colour("svi_cal"), "width": 2, "symbol": "circle", "size": 4, "z": 3,
+                   "role": "model", "model": "svi_cal", "color": model_colour("svi_cal"), "width": 2,
+                   "symbol": "circle", "size": 4, "z": 3,
                    "data": [[t, abs(s)] for t, s in zip(hp["T"], hp["svi"])]})
-    series.append({"name": f"eSSVI {head}", "legend": True, "type": "line", "color": model_colour("essvi"),
+    series.append({"name": f"eSSVI {head}", "legend": True, "type": "line", "role": "model", "model": "essvi",
+                   "color": model_colour("essvi"),
                    "width": 1.5, "dash": "dotted", "z": 3,
                    "data": [[t, abs(s)] for t, s in zip(hp["T_essvi"], hp["essvi"])]})
     series.append({"name": "Heston, published fit", "legend": True, "type": "line",
-                   "color": model_colour("heston_v2"), "width": 1.5, "z": 3,
+                   "role": "model", "model": "heston_v2", "color": model_colour("heston_v2"), "width": 1.5,
+                   "z": 3,
                    "data": [[r["T"], abs(r["heston"])] for r in v["rows"] if r["heston"] is not None]})
     if v["refit"]:
         series.append({"name": f"Heston, σ ≤ {_fmt(v['refit']['cap'], 'g')} refit", "legend": True,
-                       "type": "line", "color": model_colour("heston_v2"), "width": 1.5, "dash": True, "z": 3,
+                       "type": "line", "role": "model", "model": "heston_v2",
+                       "color": model_colour("heston_v2"), "width": 1.5, "dash": True, "z": 3,
                        "data": [[r["T"], abs(r["refit"])] for r in v["rows"] if r["refit"] is not None]})
     trows = [[head, r["expiry"], _fmt(r["T_days"], ".0f"), signed(r["svi"], ".3f"), signed(r["essvi"], ".3f"),
               signed(r["heston"], ".3f"), signed(r["refit"], ".3f")] for r in v["rows"]]
@@ -2956,7 +2960,7 @@ def implied_beta_spec(rows: Sequence[dict], cols: Sequence[str], canonical: floa
     """The β that reprices each put-write index from β·VIX, by year (the table
     beside it as a chart), against the backtest's fixed β."""
     years = list(rows[0]["years"])
-    series = [{"name": r["index"], "type": "line", "color": "headline" if i == 0 else "info",
+    series = [{"name": r["index"], "type": "line", "role": "cboe", "color": charts.ROLE_COLOURS["cboe"],
                "dash": i > 0, "symbol": "circle", "size": 5, "width": 1.5, "legend": True,
                "data": [r["years"].get(y) for y in years]} for i, r in enumerate(rows)]
     return charts.xy(
@@ -2982,9 +2986,11 @@ def gated_fits_spec(hist: Sequence[dict], session: str | None) -> dict | None:
         "chart-gated-fits", "SPX IV RMSE of every gated fit, in and out of sample, by session",
         x={"type": "category", "categories": sess, "name": "", "interval": 0},
         y={"name": "RMSE (vol pts)", "digits": 1, "tipDigits": 2, "zero": True},
-        series=[{"name": "Out of sample", "type": "line", "color": col, "symbol": "circle", "size": 6,
+        series=[{"name": "Heston, out of sample", "type": "line", "role": "model", "model": "heston_v2",
+                 "color": col, "symbol": "circle", "size": 6,
                  "width": 1.5, "legend": True, "data": [h["oos"] for h in hist]},
-                {"name": "In sample", "type": "line", "color": col, "dash": True, "symbol": "circle",
+                {"name": "Heston, in sample", "type": "line", "role": "model", "model": "heston_v2",
+                 "color": col, "dash": True, "symbol": "circle",
                  "size": 4, "width": 1.2, "legend": True, "data": [h["rmse"] for h in hist]}],
         xs=sess, csv="gated_fits_rmse.csv",
         marks={"x": [{"value": session, "label": "headline", "color": "muted"}]} if session in sess else None,
@@ -3025,9 +3031,11 @@ def vx_leg_spec(session: str, leg: dict) -> dict:
         f"chart-vx-{session}", f"VX futures on {session}: settlements against the Heston fit's E[VIX_T]",
         x={"type": "value", "name": "Days to expiry (calendar)", "digits": 0, "min": 0, "zero": True},
         y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
-        series=[{"name": "Heston E[VIX_T]", "type": "line", "color": model_colour("heston_v2"), "width": 1.6,
+        series=[{"name": "Heston E[VIX_T]", "type": "line", "role": "model", "model": "heston_v2",
+                 "color": model_colour("heston_v2"), "width": 1.6,
                  "legend": True, "data": leg["curve"]},
-                {"name": "VX settlement", "type": "scatter", "color": "headline", "size": 7, "legend": True,
+                {"name": "VX settlement", "type": "scatter", "role": "market", "color": "headline", "size": 7,
+                 "legend": True,
                  "data": [[r["days"], r["settle"]] for r in rows],
                  "pointLabels": [signed(r["gap"], ".2f") for r in rows], "pointPrefix": "model − settle ",
                  "labelPos": "bottom"}],
@@ -3219,7 +3227,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
             "chart-oos", "Out-of-sample SPX IV RMSE by expiry",
             x={"type": "category", "categories": cats, "name": "Expiry · days to expiry", "interval": 0},
             y={"name": "RMSE (vol pts)", "digits": 1, "tipDigits": 2, "zero": True},
-            series=[{"name": "OOS RMSE", "type": "bar", "color": model_colour("heston_v2"),
+            series=[{"name": "Heston OOS RMSE", "type": "bar", "role": "model", "model": "heston_v2",
+                     "color": model_colour("heston_v2"),
                      "data": [r["rmse"] for r in rows], "fill": 0.55}],
             xs=cats, marks=marks, csv=f"oos_rmse_by_expiry_{session}.csv",
             grid={"bottom": 64},
@@ -3244,10 +3253,12 @@ def calibration_extras(d: dict, cal: dict) -> None:
             "chart-vixleg", "VIX index term structure: market and the Heston fit",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
             y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
-            series=[{"name": "Cboe index (market)", "type": "line", "color": "headline", "symbol": "circle",
+            series=[{"name": "Cboe index (market)", "type": "line", "role": "cboe", "color": "headline",
+                     "symbol": "circle",
                      "size": 7, "width": 1.5, "legend": True,
                      "data": [[r["tenor"], r["market"]] for r in d["vix_rows"]]},
-                    {"name": "Heston model", "type": "line", "color": model_colour("heston_v2"),
+                    {"name": "Heston model", "type": "line", "role": "model", "model": "heston_v2",
+                     "color": model_colour("heston_v2"),
                      "symbol": "diamond", "size": 7,
                      "dash": True, "legend": True,
                      "data": [[r["tenor"], r["model"]] for r in d["vix_rows"] if r["model"] is not None]}],
@@ -3264,7 +3275,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
             "chart-model-smile", f"Heston model smile of the {session} fit, one curve per maturity",
             x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
             y={"name": "Implied vol (%)", "digits": 0, "tipDigits": 2},
-            series=[{"name": f"{s_['T']}d", "type": "line", "color": charts.color_cycle(i), "width": 1.5,
+            series=[{"name": f"{s_['T']}d", "type": "line", "role": "tenor", "T": s_["T"],
+                     "color": charts.tenor_colours(len(sms))[i], "width": 1.5,
                      "legend": True, "data": [[k, v] for k, v in zip(s_["lm"], s_["iv"])]}
                     for i, s_ in enumerate(sms)],
             tooltip="item", csv=f"model_smile_{session}.csv",
@@ -3329,7 +3341,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
                     f"{_fmt(float(q['error_hs'].abs().median()), '.1f')} half-spreads")
         else:
             sm = heston_model_smile(p, maturities_days=(T_days,))[0]
-            series.append({"name": "Heston", "type": "line", "color": model_colour("heston_v2"), "width": 1.6,
+            series.append({"name": "Heston", "type": "line", "role": "model", "model": "heston_v2",
+                           "color": model_colour("heston_v2"), "width": 1.6,
                            "data": [[k, v * 100] for k, v in zip(sm["lm"], sm["iv"])]})
             tbl_rows = [[_fmt(k, "+.3f"), _fmt(v * 100, ".2f")] for k, v in zip(sm["lm"], sm["iv"])]
             source = "model"
@@ -3515,7 +3528,8 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
             "chart-flag", f"{name} against ln(K/F), all maturities",
             x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
             y={"name": name, "digits": 1, "tipDigits": 3, "min": 0},
-            series=[{"name": f"{T}d", "type": "scatter", "color": charts.color_cycle(i), "size": 6,
+            series=[{"name": f"{T}d", "type": "scatter", "role": "tenor", "T": T,
+                     "color": charts.tenor_colours(len(mats))[i], "size": 6,
                      "legend": True,
                      "data": [[x, z] for x, z, t in zip(d["scatter_lm"], d["scatter_z"], d["scatter_T"])
                               if t == T]}
@@ -3576,9 +3590,11 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     except Exception as e:
         _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)", e)
         return
-    comps = [("pnl_gamma", "Gamma", "cat0"), ("pnl_vega_a", "Vega", "cat1"), ("pnl_theta", "Theta", "cat2"),
+    # a P&L chart: no series within ΔE 25 of the gain / loss fills (Vega was cat1,
+    # ΔE 16.6 from --neg-fill); the residual is the dotted grey
+    comps = [("pnl_gamma", "Gamma", "cat0"), ("pnl_vega_a", "Vega", "cat5"), ("pnl_theta", "Theta", "cat2"),
              ("pnl_vanna", "Vanna", "cat4"), ("pnl_volga", "Volga", "cat3"),
-             ("pnl_financing", "Financing", "muted"), ("pnl_residual_a", "Residual", "cat5")]
+             ("pnl_financing", "Financing", "muted"), ("pnl_residual_a", "Residual", "muted")]
     need = {"pnl_total"} | {c for c, *_ in comps}
     missing = need - set(h.columns)
     if missing:
@@ -3597,6 +3613,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     tot = days["pnl_total"]
     xs = [t.strftime("%Y-%m-%d") for t in h.index]
     series = [{"name": name, "type": "line", "color": color, "width": 1.3, "legend": True,
+               **({"dash": "dotted"} if name == "Residual" else {}),
                "data": [round(float(v), 4) for v in h[c].fillna(0.0).cumsum()]} for c, name, color in comps]
     series.insert(0, {"name": "Total", "type": "line", "color": "headline", "width": 2.2, "legend": True,
                       "data": [round(float(v), 4) for v in h["pnl_total"].fillna(0.0).cumsum()]})
@@ -3696,7 +3713,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
              "data": d["eq_nav"]},
             {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True,
              "data": d["eq_nav_s1c"]},
-            {"name": S3_SHORT, "type": "line", "color": "cat1", "width": 1.3, "legend": True,
+            {"name": S3_SHORT, "type": "line", "color": "cat3", "width": 1.3, "legend": True,
              "data": d["eq_nav_s3"]},
             {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True,
              "data": d["eq_nav_s4"]},
@@ -3710,6 +3727,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
         for s_ in series:                 # ~1,800 daily points a line: drawn with LTTB downsampling
             s_["sampling"] = "lttb"
+            s_["endLabel"] = s_["name"].split()[0]          # named at the line's end ('S3', 'T-bill')
         r2 = (eq["regime"] == 2) if "regime" in eq.columns else pd.Series(False, index=eq.index)
         areas = [{"from": a.strftime("%Y-%m-%d"), "to": b.strftime("%Y-%m-%d"), "color": "watch",
                   "alpha": 0.07} for a, b in _runs(r2)]
@@ -3717,7 +3735,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         # equity, drawdown and rolling Sharpe are one chart group (RESEARCH_TS): one
         # x domain, the same plot-area margins, a linked pointer and one zoom (the
         # slider and the presets on equity drive all three), R2 shaded on each
-        ts_grid = {"left": 58, "right": 18}
+        ts_grid = {"left": 58, "right": 70}      # room for the equity curves' end labels
         d["charts"]["equity"] = charts.xy(
             "chart-equity", "Cumulative return from $1M: portfolio, sleeves and T-bills",
             x={"type": "time", "csv": "date"},
@@ -4069,7 +4087,8 @@ def vrp_view(spx: pd.DataFrame, vix: pd.Series, start: str | None, end: str | No
     yt = {k: {y["year"]: y["mean"] for y in desk_market.yearly_means(f[k])} for k in ("rv_trl", "rv_fwd")}
     yt["vrp"] = {y["year"]: y["mean"] for y in yv}
     lev_series = [
-        {"name": "VIX", "type": "line", "color": "headline", "width": 1.3, "legend": True, "sampling": "lttb",
+        {"name": "VIX", "type": "line", "role": "cboe", "color": "headline", "width": 1.3, "legend": True,
+         "sampling": "lttb",
          "data": [_r2(x) for x in f["vix"]]},
         # not blue or orange: the bars below are signed in those two
         {"name": "RV21 trailing", "type": "line", "color": "cat2", "width": 1.1, "legend": True,
@@ -4701,7 +4720,8 @@ def overview_vix_complex(d: dict) -> None:
                 f"VIX / VIX3M, {rv['first']} to {rv['last']}, shaded above 1 (backwardation)",
                 x={"type": "time", "csv": "date"},
                 y={"name": "VIX / VIX3M", "digits": 1, "tipDigits": 3},
-                series=[{"name": "VIX / VIX3M", "type": "line", "color": "cat0", "width": 1.0,
+                series=[{"name": "VIX / VIX3M", "type": "line", "role": "market", "color": "headline",
+                         "width": 1.0,
                          "sampling": "lttb", "data": [round(float(x), 3) for x in ratio]}],
                 xs=xs, csv="vix_over_vix3m.csv", grid={"top": 10, "bottom": 30},
                 marks={"y": [{"value": 1.0, "label": "1.0", "color": "muted", "dash": False}],
@@ -4727,7 +4747,8 @@ def overview_vix_complex(d: dict) -> None:
                              "age": age, "level": stale_level(age), "ref": ref}
             pv = {r["expiry"]: r["settle"] for r in (prev or {}).get("rows") or []}
             cats = [r["expiry"] for r in cur["rows"]]
-            series = [{"name": f"{last} settlements", "type": "line", "color": "headline", "symbol": "circle",
+            series = [{"name": f"{last} settlements", "type": "line", "role": "market", "color": "headline",
+                       "symbol": "circle",
                        "size": 6, "width": 1.6, "legend": True, "z": 4,
                        "data": [r["settle"] for r in cur["rows"]]}]
             if prev:
@@ -4824,12 +4845,16 @@ def load_overview() -> dict[str, Any]:
     if d.get("ts_values"):
         days = [int(t.rstrip("d")) for t in d["ts_tenors"]]
         ov = d.get("ts_overlays") or []
-        series = [{"name": f"{d.get('ts_date')} (latest)", "type": "line", "color": "cat0",
+        # Cboe indices are 'headline' (they were cat0, the SVI-cal colour); the
+        # earlier sessions grey, told apart by dash
+        series = [{"name": f"{d.get('ts_date')} (latest)", "type": "line", "role": "cboe",
+                   "color": "headline",
                    "symbol": "circle", "size": 7, "width": 2, "legend": True, "z": 4,
                    "data": [[t, v] for t, v in zip(days, d["ts_values"])]}]
-        for o, col in zip(ov, ("cat2", "cat4", "cat3")):
-            series.append({"name": o["name"], "type": "line", "color": col, "symbol": "circle", "size": 4,
-                           "width": 1.2, "dash": True, "legend": True,
+        for o, dash in zip(ov, (False, True, "dotted")):
+            series.append({"name": o["name"], "type": "line", "role": "other", "color": "muted",
+                           "symbol": "circle",
+                           "size": 4, "width": 1.2, "dash": dash, "legend": True,
                            "data": [[t, v] for t, v in zip(o["days"], o["values"])]})
         d["charts"]["ts"] = charts.xy(
             "chart-ts", f"VIX index term structure on {d.get('ts_date')}, with earlier sessions",
@@ -4861,37 +4886,30 @@ def load_overview() -> dict[str, Any]:
 
 
 # ── Surface page ──────────────────────────────────────────────────────────────
-MODEL_LABELS = {"heston": "Heston", "heston_v2": "Heston (v2 fit)", "essvi": "eSSVI", "svi": "SVI",
-                "svi_cal": "SVI, calendar-ordered",
-                "ah": "Andreasen–Huge", "bates": "Bates", "rough_heston": "Rough Heston",
-                "quintic": "Quintic OU", "lifted_heston": "Lifted Heston"}
+# one label per model everywhere (desk_charts.MODEL_ENCODING): 'Heston', 'SVI-cal'
+MODEL_LABELS = {**charts.OTHER_MODEL_LABELS, **{k: v["label"] for k, v in charts.MODEL_ENCODING.items()}}
 ARB_LABELS = {"C1_outright": "Outright bounds", "C2_vertical_bound": "Vertical bound",
               "C2_vertical_spread": "Vertical spread", "C3_vertical_butterfly": "Butterfly",
               "C4_calendar_spread": "Calendar spread", "C5_calendar_vertical_spread": "Calendar vertical",
               "C6_calendar_butterfly": "Calendar butterfly"}
 
 
-MODEL_SHORT = {"heston_v2": "Heston", "svi_cal": "SVI-cal", "rough_heston": "Rough Heston"}
-
 # One colour per model on every chart of the site (the smile slice drew Heston
-# in the orange the by-expiry chart beside it used for SVI). Okabe–Ito tokens;
-# cat3 (yellow) is kept for fit anchors, market quotes are 'headline' (mids)
-# and 'muted' (bid–ask).
-MODEL_COLOURS = {"heston_v2": "cat1", "heston": "cat1", "svi_cal": "cat0", "svi": "cat2", "essvi": "cat4",
-                 "rough_heston": "cat5"}
-ANCHOR_COLOUR = "cat3"
+# in the orange the by-expiry chart beside it used for SVI): desk_charts.MODEL_ENCODING.
+MODEL_COLOURS = {k: v["color"] for k, v in charts.MODEL_ENCODING.items()}
+ANCHOR_COLOUR = charts.ROLE_COLOURS["anchor"]
 
 
 def model_colour(m: str) -> str:
-    return MODEL_COLOURS.get(m, "cat5")
+    return charts.model_colour(m)
 
 
 def model_label(m: str) -> str:
-    return MODEL_LABELS.get(m, m.replace("_", " ").title())
+    return charts.model_label(m)
 
 
 def model_short(m: str) -> str:
-    return MODEL_SHORT.get(m, model_label(m))
+    return charts.model_label(m)          # one name per model: the label is already short
 
 
 def heston_model_key(models: Iterable[str]) -> str | None:
@@ -4924,30 +4942,36 @@ def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | 
     shown = set(shown)
     g = str(group)
     out: list[dict] = [{"name": f"{g} bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
-                        "color": "muted", "group": g, "quote": "ba"}]
+                        "role": "bidask", "color": "muted", "group": g, "quote": "ba"}]
     if oos_mids and anchor_model:
+        # market mids are 'headline' everywhere (P4.5): hollow, the anchors filled diamonds
         out.append({"name": f"{g} mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
-                    "type": "scatter", "color": "muted", "hollow": True, "size": 4, "opacity": 0.6,
+                    "type": "scatter", "role": "market", "color": "headline", "hollow": True, "size": 4,
+                    "opacity": 0.6,
                     "group": g, "quote": "oos", "model": anchor_model})
     else:
         out.append({"name": f"{g} mid", "legendKey": "Mid", "legend": True, "type": "scatter",
-                    "color": "headline", "size": 4, "group": g, "quote": "mid"})
+                    "role": "market", "color": "headline", "size": 4, "group": g, "quote": "mid"})
     out.extend({"name": f"{g} {model_label(m)}", "legendKey": model_label(m), "legend": True,
-                "hidden": m not in shown, "type": "line", "color": model_colour(m), "width": 1.5,
+                "hidden": m not in shown, "type": "line", "role": "model", "color": model_colour(m),
+                "width": 1.5,
                 "group": g, "quote": "model", "model": m} for m in models)
     anchor_key = "Mid (fit anchor)" if oos_mids else "Heston fit anchors"
     if anchor_model:
         out.append({"name": f"{g} {'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
                     "legendKey": anchor_key, "legend": True, "type": "scatter", "symbol": "diamond",
-                    "size": 9 if oos_mids else 8, "z": 4, "color": ANCHOR_COLOUR, "group": g,
+                    "size": 9 if oos_mids else 8, "z": 4, "role": "anchor", "color": ANCHOR_COLOUR,
+                    "group": g,
                     "quote": "fit", "model": anchor_model})
     if strip:
         out.extend({"name": f"{g} {model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
-                    "size": 4, "color": model_colour(m), "group": g, "quote": "z", "model": m,
+                    "size": 4, "role": "model", "color": model_colour(m), "group": g, "quote": "z",
+                    "model": m,
                     "strip": True} for m in models)
         if anchor_model:
             out.append({"name": f"{g} {model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
-                        "type": "scatter", "symbol": "diamond", "size": 7, "z": 4, "color": ANCHOR_COLOUR,
+                        "type": "scatter", "symbol": "diamond", "size": 7, "z": 4, "role": "anchor",
+                        "color": ANCHOR_COLOUR,
                         "group": g, "quote": "zfit", "model": anchor_model, "strip": True})
     return out
 
@@ -5224,7 +5248,8 @@ def forward_vol_series(fw: Sequence[dict]) -> list[dict]:
             pts.append([f["t1_days"], None])          # a gap in the steps
             continue
         pts += [[f["t1_days"], f["fwd_vol"]], [f["t2_days"], f["fwd_vol"]]]
-    out = [{"name": "Forward ATM vol, SVI-cal (1M → 1Y)", "type": "line", "color": model_colour("svi_cal"),
+    out = [{"name": "SVI-cal forward ATM vol (1M → 1Y)", "type": "line", "role": "model", "model": "svi_cal",
+            "color": model_colour("svi_cal"),
             "width": 2, "dash": "dotted", "legend": True, "z": 3, "data": pts}]
     flags = [f for f in fw if f["flag"]]
     if flags:
@@ -5267,10 +5292,13 @@ def rr_term_spec(cmp_: dict) -> dict:
         if s == head:
             continue
         series.append({"name": f"RR25 {s} (grey)", "legendKey": "Every stored session", "legend": True,
-                       "type": "line", "color": "muted", "width": 1, "z": 1, "data": pts})
-        series.append({"name": f"RR25 {s}", "legend": True, "type": "line", "color": model_colour("svi_cal"),
+                       "type": "line", "role": "other", "color": "muted", "width": 1, "z": 1, "data": pts})
+        series.append({"name": f"SVI-cal RR25 {s}", "legend": True, "type": "line", "role": "model",
+                       "model": "svi_cal", "color": model_colour("svi_cal"),
                        "width": 1.5, "dash": True, "group": s, "z": 2, "data": pts})
-    series.append({"name": f"RR25 {head}", "legend": True, "type": "line", "color": model_colour("svi_cal"),
+    series.append({"name": f"SVI-cal RR25 {head}", "legend": True, "type": "line", "role": "model",
+                   "model": "svi_cal",
+                   "color": model_colour("svi_cal"),
                    "width": 2, "symbol": "circle", "size": 4, "z": 3,
                    "data": [[r["T_days"], r["rr25"]] for r in cmp_["grids"][head]["listed"]]})
     days = [r["T_days"] for g in cmp_["grids"].values() for r in g["listed"]]
@@ -5506,7 +5534,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             med = z.groupby(qo["expiry"]).median()
             cnt = z.groupby(qo["expiry"]).count()
             vals = [_num(med.get(e)) if cnt.get(e, 0) else None for e in cats]
-            ser.append({"name": r["label"], "type": "line", "color": model_colour(r["key"]),
+            ser.append({"name": r["label"], "type": "line", "role": "model", "model": r["key"],
+                        "color": model_colour(r["key"]),
                         "symbol": "circle", "size": 5, "width": 1.5, "legend": True, "data": vals})
             tbl.append([r["label"]] + [_fmt(v, ".1f") for v in vals])
         d["charts"]["by_expiry"] = charts.xy(
@@ -5529,10 +5558,12 @@ def surface_extras(d: dict, surf: dict) -> None:
     if ts:
         ts = sorted(ts, key=lambda t: float(t["T_days"]))
         atm_series: list[dict[str, Any]] = [
-            {"name": "ATM mid (quotes)", "type": "scatter", "color": "headline", "size": 6, "legend": True,
+            {"name": "ATM mid (quotes)", "type": "scatter", "role": "market", "color": "headline", "size": 6,
+             "legend": True,
              "data": [[float(t["T_days"]), _num(t.get("atm_vol_mid_quotes"))] for t in ts
                       if _num(t.get("atm_vol_mid_quotes")) is not None]},
-            {"name": "eSSVI ATM", "type": "line", "color": model_colour("essvi"), "width": 1.5,
+            {"name": "eSSVI ATM", "type": "line", "role": "model", "model": "essvi",
+             "color": model_colour("essvi"), "width": 1.5,
              "legend": True, "data": [[float(t["T_days"]), _num(t.get("atm_vol_essvi"))] for t in ts
                       if _num(t.get("atm_vol_essvi")) is not None]}]
         atm_groups = []
@@ -5540,12 +5571,14 @@ def surface_extras(d: dict, surf: dict) -> None:
             # the SVI-cal ATM of this session and of the earlier session chosen on the
             # comparison tabs (#surface-change), each named with its date
             atm_series.append({"name": f"SVI-cal ATM {session}", "type": "line",
-                               "color": model_colour("svi_cal"), "width": 1.5, "legend": True,
+                               "role": "model", "model": "svi_cal", "color": model_colour("svi_cal"),
+                               "width": 1.5, "legend": True,
                                "data": [[r["T_days"], r["atmf"]] for r in cmp_grids[session]["listed"]]})
             for old in (v["session"] for v in d["compare"]["views"]):
                 lst = cmp_grids[old]["listed"]
                 atm_series.append({"name": f"SVI-cal ATM {old}", "type": "line",
-                                   "color": model_colour("svi_cal"), "width": 1.2, "dash": True,
+                                   "role": "model", "model": "svi_cal", "color": model_colour("svi_cal"),
+                                   "width": 1.2, "dash": True,
                                    "legend": True, "group": old,
                                    "data": [[r["T_days"], r["atmf"]] for r in lst]})
                 atm_groups.append({"group": old, "shown": old == d["compare"]["default"], **charts.table(
@@ -5650,16 +5683,18 @@ def surface_extras(d: dict, surf: dict) -> None:
                 x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
                 y={"name": "Vol (%)", "digits": 0, "tipDigits": 2},
                 # market-derived lines, not models: neither takes a model's colour
-                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "color": "info",
+                series=[{"name": "Variance-swap vol (Cboe formula)", "type": "line", "role": "market",
+                         "color": charts.ROLE_COLOURS["market"],
                          "symbol": "circle", "size": 5, "width": 1.5, "legend": True,
                          "data": [[r["days"], r["vs"]] for r in d["strip"]
                                   if r["vs"] is not None and r["days"] is not None]},
-                        {"name": "ATM vol (quotes)", "type": "line", "color": "headline", "symbol": "diamond",
+                        {"name": "ATM vol (quotes)", "type": "line", "role": "market", "color": "headline",
+                         "symbol": "diamond",
                          "size": 5, "width": 1.5, "dash": True, "legend": True,
                          "data": [[r["days"], r["atm"]] for r in d["strip"]
                                   if r["atm"] is not None and r["days"] is not None]}]
                 + ([{"name": "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M", "type": "scatter",
-                     "color": "headline", "hollow": True, "size": 10, "legend": True, "z": 4,
+                     "role": "cboe", "color": "headline", "hollow": True, "size": 10, "legend": True, "z": 4,
                      "data": [[m_["days"], m_["close"]] for m_ in d["vix_markers"]]}]
                    if d["vix_markers"] else []),
                 tooltip="axis", csv=f"varswap_strip_{session}.csv",

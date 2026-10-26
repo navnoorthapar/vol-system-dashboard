@@ -44,6 +44,8 @@
         breach: css('--breach'), info: css('--info'),
         cat0: css('--cat-0'), cat1: css('--cat-1'), cat2: css('--cat-2'),
         cat3: css('--cat-3'), cat4: css('--cat-4'), cat5: css('--cat-5'),
+        ramp0: css('--ramp-0'), ramp1: css('--ramp-1'), ramp2: css('--ramp-2'),
+        ramp3: css('--ramp-3'), ramp4: css('--ramp-4'), ramp5: css('--ramp-5'),
       },
     };
     if (print) {
@@ -51,6 +53,8 @@
       t.line = '#bbbbbb'; t.line2 = '#999999'; t.grid = '#dddddd'; t.surface = '#ffffff'; t.tooltip = '#ffffff';
       t.colors.headline = '#111111'; t.colors.muted = '#666666';
       t.colors.cat3 = '#8a7a00';
+      // the maturity ramp on paper: light to dark violet that still reads on white
+      ['#9c8ad8', '#8a76cf', '#7762c4', '#6450b4', '#523fa0', '#412f88'].forEach(function (h, i) { t.colors['ramp' + i] = h; });
     }
     return t;
   }
@@ -320,6 +324,8 @@
       itemStyle: { color: c },
     });
     if (s.area) line.areaStyle = { color: alpha(c, 0.18), origin: s.areaOrigin || 'auto' };
+    // a short name at the line's last shown point (the equity curves: 'S3', 'T-bill')
+    if (s.endLabel) line.endLabel = { show: true, formatter: s.endLabel, color: c, fontFamily: T.mono, fontSize: 10, distance: 4 };
     // per-point marks (the σ frontier): a hollow marker (s.hollowPoints[j]), a
     // larger one (s.bigPoints[j]) and a short label beside each point (s.pointLabels)
     if (s.hollowPoints || s.bigPoints) {

@@ -183,7 +183,7 @@
    ln(K/F) domain, one y step, a linked pointer) #}
 <div class="chart-tools smile-group-tools" id="smile-group-tools">
   <div class="legend-bar" role="group" aria-label="Series shown in every smile panel">
-    {% for it in sg.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ sg.ids|join(' ') }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for it in sg.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ sg.ids|join(' ') }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else ('ramp-' ~ it.color[4:] if it.color.startswith('ramp') else it.color))))) }})"></span>{{ it.name }}</button>{% endfor %}
   </div>
   <div class="legend-bar">
     <button class="btn" type="button" data-table-for="smile-group-data" aria-expanded="false" aria-controls="smile-group-data">Table</button>
@@ -291,7 +291,7 @@
   {% call m.panel('model-smile', 'Model smile of this fit · all maturities', 's7', d.session) %}
     {% set sm = d.mat_smiles %}
     {% set spec = d.charts.model_smile %}
-    {% if spec %}{{ m.chart(spec, 'h300 grow') }}{% endif %}
+    {% if spec %}{{ m.chart(spec, 'h300 grow') }}{{ m.tenor_key(spec) }}{% endif %}
     <div class="chart-data sr-only" id="model-smile-cells">
       <table><caption>Model implied vol (%) by maturity: lowest, nearest-the-money and highest ln(K/F) plotted</caption>
         <thead><tr><th scope="col">Maturity</th><th scope="col">Lowest ln(K/F)</th><th scope="col">Near the money</th><th scope="col">Highest ln(K/F)</th></tr></thead>
