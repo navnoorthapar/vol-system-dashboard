@@ -126,6 +126,24 @@
 </div>
 {%- endmacro %}
 
+{# term days: a whole day prints whole, an AM term's fraction keeps one decimal #}
+{% macro _term_days(x) %}{{ x|fmt('.0f') if (x % 1 < 1e-6 or x % 1 > 1 - 1e-6) else x|fmt('.1f') }}{% endmacro %}
+
+{# each VIX-family index's two terms and its gap split (Surface #vix-replication):
+   vt from desk_surface.vix_terms, each row with a surface_label #}
+{% macro vix_terms(vt) -%}
+    {% if vt %}{% set split = vt|selectattr('truncation', 'ne', none)|list %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Terms and gap split of the replicated indices (scrollable)">
+    <table class="tbl dense wrap-head" id="vix-terms-table"><caption>The two listed expiries each index interpolates and the near term’s weight; the gap above split as gap = truncation + unexplained (index points; each part rounded on its own)</caption>
+      <thead><tr><th scope="col">Index</th><th scope="col" class="num">Near / next (d)</th><th scope="col" class="num">Near weight</th><th scope="col" class="num">Truncation</th><th scope="col" class="num">Unexplained</th></tr></thead>
+      <tbody>{% for r in vt %}<tr><td>{{ r.ticker }}</td><td class="num">{% if r.near and r.next %}{{ _term_days(r.near.days) }} / {{ _term_days(r.next.days) }}{% else %}—{% endif %}</td><td class="num">{{ r.near_weight|fmt('.3f') }}</td><td class="num">{{ r.truncation|signed('.2f') }}</td><td class="num">{{ r.unexplained|signed('.2f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% set fw = split|selectattr('far_wing', 'ne', none)|list %}{% set above = fw|selectattr('far_wing', 'gt', 0)|list %}{% set below = fw|selectattr('far_wing', 'lt', 0)|list %}
+    <p class="note" id="vix-terms-note">Near weight: the near term’s share of the constant-maturity combination; outside [0, 1] it would extrapolate.{% for r in vt if not r.replicated %} {{ r.ticker }} is not replicated{% if r.extrapolated %}: its nearest candidate pair would extrapolate{% endif %}.{% endfor %}{% if split %} Truncation: what strikes beyond the stored strip would add, valued on the {{ split[0].surface_label or 'fitted' }} surface’s wing (negative: the strip lacks them). Unexplained: what the chain leaves of the gap (snapshot timing against the 16:15 ET print, stale quotes or the rate; not measured).{% if above %} The stored quotes beyond the surface’s fitted range price above that wing ({% for r in above %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the truncation there likely understates.{% endif %}{% if below %} {{ 'They price below it' if above else 'The stored quotes beyond the surface’s fitted range price below that wing' }} ({% for r in below %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the truncation there likely overstates.{% endif %}{% endif %}</p>
+    {% endif %}
+{%- endmacro %}
+
 {# one earlier session against the headline at constant maturity (Surface
    #surface-change): v from app.surface_comparison's views #}
 {% macro vs_table(head, v) -%}

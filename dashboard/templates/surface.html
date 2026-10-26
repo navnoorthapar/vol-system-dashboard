@@ -5,7 +5,6 @@
 
 {% block content %}
 {% set s = d.surf or {} %}
-{% macro term_days(x) %}{{ x|fmt('.0f') if (x % 1 < 1e-6 or x % 1 > 1 - 1e-6) else x|fmt('.1f') }}{% endmacro %}
 <div class="page-head">
   <h1 class="page-title">SPX implied-volatility surface</h1>
   <p class="page-sub">Market quotes against the models, measured in the unit a market maker uses: half the bid–ask spread. A model inside the spread is as good as the quote.</p>
@@ -166,17 +165,7 @@
     </table>
     </div>
     {% endif %}
-    {% set vt = d.vix_terms or [] %}
-    {% if vt %}{% set split = vt|selectattr('truncation', 'ne', none)|list %}
-    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Terms and gap split of the replicated indices (scrollable)">
-    <table class="tbl dense wrap-head" id="vix-terms-table"><caption>The two listed expiries each index interpolates and the near term’s weight; the gap above split as gap = truncation + unexplained (index points; each part rounded on its own)</caption>
-      <thead><tr><th scope="col">Index</th><th scope="col" class="num">Near / next (d)</th><th scope="col" class="num">Near weight</th><th scope="col" class="num">Truncation</th><th scope="col" class="num">Unexplained</th></tr></thead>
-      <tbody>{% for r in vt %}<tr><td>{{ r.ticker }}</td><td class="num">{% if r.near and r.next %}{{ term_days(r.near.days) }} / {{ term_days(r.next.days) }}{% else %}—{% endif %}</td><td class="num">{{ r.near_weight|fmt('.3f') }}</td><td class="num">{{ r.truncation|signed('.2f') }}</td><td class="num">{{ r.unexplained|signed('.2f') }}</td></tr>{% endfor %}</tbody>
-    </table>
-    </div>
-    {% set above = split|selectattr('far_wing', 'gt', 0)|list %}{% set below = split|selectattr('far_wing', 'lt', 0)|list %}
-    <p class="note" id="vix-terms-note">Near weight: the near term’s share of the constant-maturity combination; outside [0, 1] it would extrapolate.{% for r in vt if not r.replicated %} {{ r.ticker }} is not replicated{% if r.extrapolated %}: its nearest candidate pair would extrapolate{% endif %}.{% endfor %}{% if split %} Truncation: what strikes beyond the stored strip would add, valued on the {{ split[0].surface_label }} surface’s wing (negative: the strip lacks them). Unexplained: the rest of the gap; the artifact names snapshot timing against the 16:15 ET print, stale quotes and the rate.{% if above %} The stored quotes beyond the surface’s fitted range price above that wing ({% for r in above %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the truncation there likely understates.{% endif %}{% if below %} They price below it ({% for r in below %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the truncation there likely overstates.{% endif %}{% endif %}</p>
-    {% endif %}
+    {{ m.vix_terms(d.vix_terms) }}
     {% set vb = d.vix_beta or {} %}
     {% set be_ = (d.beta_estimator or {}).get(d.session) %}
     {% if vb.atm_over_vix_official is defined %}<p class="note" id="atm-vix-note">VIX-term ATM / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the ATM mids of the VIX's own two expiries, combined with its constant-maturity weights).{% if be_ is not none %} The backtest's β estimator (30-day ATM-forward Black-76 vol / VIX) gives {{ be_|fmt('.3f') }} on the same chain.{% endif %} The backtest marks every straddle at one fixed β; see <a href="research.html#beta">Research</a>.</p>{% endif %}

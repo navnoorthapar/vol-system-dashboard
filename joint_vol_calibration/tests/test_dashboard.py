@@ -5184,6 +5184,38 @@ def test_vix_terms_table_prints_each_index_terms_and_its_gap_split(dash, pages):
         assert ("likely understates" in note) == any(b > 0 for b in bias)
         assert ("likely overstates" in note) == any(b < 0 for b in bias)
 
+
+def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(dash):
+    """The terms table on rows a future replication may write: an index with no
+    terms and no replication, a split without a far-wing figure (it was
+    compared with 0 and broke the page), and an AM term's fractional days.
+    Missing values print '—', and the note speaks only of what the rows hold."""
+    macros = dash.app.jinja_env.get_template("_macros.html").module
+    none = {"replicated": False, "extrapolated": False, "near": None, "next": None, "near_weight": None,
+            "gap": None, "truncation": None, "unexplained": None, "far_wing": None, "surface": None,
+            "surface_label": None}
+    rows = [{**none, "ticker": "VIX9D"},
+            {**none, "ticker": "VIX", "replicated": True, "near": {"expiry": "2030-01-28", "days": 28.0},
+             "next": {"expiry": "2030-02-18", "days": 49.0}, "near_weight": 19 / 21, "gap": -0.30,
+             "truncation": -0.05, "unexplained": -0.25, "surface": "svi_cal", "surface_label": "SVI-cal"},
+            {**none, "ticker": "VIX6M", "replicated": True,
+             "near": {"expiry": "2030-07-19", "days": 181.7291667},
+             "next": {"expiry": "2030-08-16", "days": 216.7291667}, "near_weight": 0.935, "gap": -0.10,
+             "truncation": -0.01, "unexplained": -0.09, "far_wing": -0.40, "surface": "svi_cal",
+             "surface_label": "SVI-cal"}]
+    html = str(macros.vix_terms(rows))
+    got = _table_rows(html, "vix-terms-table")
+    assert got[0] == ["VIX9D", "—", "—", "—", "—"]
+    assert got[1] == ["VIX", "28 / 49", "0.905", "−0.05", "−0.25"]
+    assert got[2] == ["VIX6M", "181.7 / 216.7", "0.935", "−0.01", "−0.09"]
+    note = _visible_text("<body>" + html)
+    assert "VIX9D is not replicated." in note
+    assert "would extrapolate" not in note.split("VIX9D is not replicated")[1][:40]
+    assert "SVI-cal surface’s wing" in note
+    assert "The stored quotes beyond the surface’s fitted range price below that wing (VIX6M −0.40" in note
+    assert "likely understates" not in note
+    assert "None" not in note
+
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
     quote time; a Cboe-sourced chain prints 'Cboe' and its quote time."""
