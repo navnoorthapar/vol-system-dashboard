@@ -46,8 +46,25 @@
       {{ m.desk_grid(g, g.cm, 'delta-grid-cm', 'Constant maturity (1M = 30 days … 1Y = 365): each pillar interpolated linearly in total variance at fixed delta between the two bracketing listed expiries named under the tenor, never extrapolated beyond the listed expiries; F, half-spread and quotes belong to listed expiries; ' ~ conv, 'Delta grid, constant maturity') }}
     </div>
     <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, g.vol_lo|fmt('.1f') ~ '%', g.vol_hi|fmt('.1f') ~ '%', 'vol cells') }}<span class="sep">·</span>{{ m.ramp_bar(berlin, '−', '+', 'RR / BF, each about 0 (RR ±' ~ (g.rr_lim|fmt('.1f')) ~ ', BF ±' ~ (g.bf_lim|fmt('.1f')) ~ ' vol pts)') }}</div>
-    <p class="note">Vols and VS vol in %; RR, BF, VS − ATMF and median half-spread in vol pts; ATM skew = ∂σ/∂ln(K/F) at the forward, in vol pts per 0.1 of ln-moneyness. {% if g.any_extrap %}{{ g.extrap_tag }}: the pillar’s strike lies outside its expiry’s quoted ln(K/F) range (at constant maturity: outside either bracketing expiry’s), so the fitted wing is extrapolated there; the RR / BF that would use it shows “—”. {{ g.n_extrap }} of {{ g.listed|length * 5 }} listed pillars.{% else %}Every pillar of this session lies inside its expiry’s quoted ln(K/F) range: no wing is extrapolated.{% endif %} VS vol is the Cboe-formula variance-swap vol of the same expiry’s quotes (the strip below); VS − ATMF is taken against this grid’s ATMF, not the strip’s quote ATM.</p>
+    <p class="note" id="delta-grid-units">Vols and VS vol in %; RR, BF, VS − ATMF and median half-spread in vol pts; ATM skew = ∂σ/∂ln(K/F) at the forward, in vol pts per 0.1 of ln-moneyness. {% if g.any_extrap %}{{ g.extrap_tag }}: the pillar’s strike lies outside its expiry’s quoted ln(K/F) range (at constant maturity: outside either bracketing expiry’s), so the fitted wing is extrapolated there; the RR / BF that would use it shows “—”. {{ g.n_extrap }} of {{ g.listed|length * 5 }} listed pillars.{% else %}Every pillar of this session lies inside its expiry’s quoted ln(K/F) range: no wing is extrapolated.{% endif %} VS vol is the Cboe-formula variance-swap vol of the same expiry’s quotes (the strip below); VS − ATMF is taken against this grid’s ATMF, not the strip’s quote ATM.</p>
   {% endcall %}
+</div>
+{% endif %}
+
+{% if d.compare or d.charts.atm_ts %}{% set cp = d.compare %}
+<div class="g">
+  {% if cp %}{% call m.panel('surface-change', 'Against an earlier session · constant maturity', 's5', cp.views|length|plural('earlier session')) %}
+    <div class="tabs js-only" role="tablist" aria-label="Earlier session compared" data-state-key="vs" data-chart-filter="chart-atm-ts chart-rr-term" hidden>
+      {% for v in cp.views %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if v.session == cp.default else 'false' }}" aria-controls="vs-{{ v.session }}" data-value="{{ v.session }}">{{ v.session }}</button>{% endfor %}
+    </div>
+    {% for v in cp.views %}
+    <div id="vs-{{ v.session }}" role="tabpanel"{% if v.session != cp.default %} hidden{% endif %}>
+      {{ m.vs_table(cp.head, v) }}
+    </div>
+    {% endfor %}
+    <p class="note">The stored sessions are irregular (the surface report runs on sessions with a stored chain), so a change spans the gap shown, not a day. “—”: a session without that tenor among its listed expiries (never extrapolated), or an RR / BF with a wing beyond the quoted strikes. The tabs also set the dashed lines of the ATM and RR25 charts.</p>
+  {% endcall %}{% endif %}
+  {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes, eSSVI and SVI-cal', 's7' if cp else 's5') %}{{ m.chart(d.charts.atm_ts, 'h300') }}{% endcall %}{% endif %}
 </div>
 {% endif %}
 
@@ -141,9 +158,10 @@
 </div>
 {% endif %}
 
-{% if d.charts.atm_ts or d.surface_history %}
+{% if d.charts.rr_term or d.surface_history %}
 <div class="g">
-  {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes and eSSVI', 's5') %}{{ m.chart(d.charts.atm_ts, 'h260') }}{% endcall %}{% endif %}
+  {% if d.charts.rr_term %}{% call m.panel('rr-term', '25Δ risk reversal by expiry · every stored session', 's5', d.session ~ ' and ' ~ (d.compare.views|length) ~ ' earlier') %}{{ m.chart(d.charts.rr_term, 'h260') }}
+    <p class="note">SVI-cal surface, listed expiries; {{ d.session }} solid, the others grey, the session chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endcall %}{% endif %}
   {% if d.surface_history %}{% call m.panel('surface-history', 'Every session the surface report covers', 's7', (d.surface_history|length) ~ ' sessions') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Surface sessions (scrollable)">
     <table class="tbl dense wrap-head" id="surface-history-table"><caption>Median |z| in half-spreads (all scored quotes) by session and model; repair moves outside the bid–ask; the VIX replicated from the chain against the close; ATM vol / VIX by the replication's VIX-term interpolation and by the backtest's β estimator</caption>

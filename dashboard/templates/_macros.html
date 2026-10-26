@@ -53,7 +53,7 @@
 {% if tools %}
 <div class="chart-tools">
   <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
-    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
     {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
   </div>
   <div class="legend-bar">
@@ -123,4 +123,16 @@
   <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
 </table>
 </div>
+{%- endmacro %}
+
+{# one earlier session against the headline at constant maturity (Surface
+   #surface-change): v from app.surface_comparison's views #}
+{% macro vs_table(head, v) -%}
+      <div class="tbl-wrap" tabindex="0" role="region" aria-label="Change against {{ v.session }} (scrollable)">
+      <table class="tbl dense dgrid" id="vs-table-{{ v.session }}">
+        <caption><strong class="vs-head">vs {{ v.session }}, {{ v.gap|plural('NYSE session') }} earlier</strong>: the SVI-cal surface at constant maturity, each cell {{ v.session }} → {{ head }} (ATMF in %; RR, BF and Δ in vol pts); Δ = {{ head }} − {{ v.session }}</caption>
+        <thead><tr><th scope="col">Tenor</th><th scope="col" class="num">ATMF</th><th scope="col" class="num">Δ ATMF</th><th scope="col" class="num">RR25</th><th scope="col" class="num">Δ RR25</th><th scope="col" class="num">BF25</th><th scope="col" class="num">Δ BF25</th></tr></thead>
+        <tbody>{% for r in v.rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.label }}</th>{% for k in ('atmf', 'rr25', 'bf25') %}{% set c = r[k] %}<td class="num">{{ c.old|fmt('.2f') if k == 'atmf' else c.old|signed('.2f') }} → {{ c.new|fmt('.2f') if k == 'atmf' else c.new|signed('.2f') }}</td><td class="num">{{ c.delta|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      </table>
+      </div>
 {%- endmacro %}

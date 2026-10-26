@@ -4926,3 +4926,115 @@ def test_browser_skew_term_axes_are_logarithmic(site_browser):
         assert "ln(K/F)" in types[3]
     finally:
         ctx.close()
+
+
+def _cm_of(ds, s: dict) -> list[dict]:
+    return ds.constant_maturity(ds.delta_grid(s["surface"], s["quotes"], s["vix"]))
+
+
+def test_surface_change_against_every_earlier_session_states_its_gap(dash, pages):
+    """P2.3: the headline's constant-maturity grid against each earlier stored
+    session (newest first, the newest selected), each table headed with the gap
+    in NYSE sessions (session_age) and its Δ cells the differences of the two
+    grids desk_surface computes from the artifacts."""
+    ds = _desk_module()
+    html = pages["/surface"]
+    inputs = dash.artifacts.load_surface_desk_inputs(SHIPPED)
+    head = _surface_file("surface.json").parent.name
+    earlier = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    sec = re.search(r'id="surface-change".*?</section>', html, re.DOTALL).group(0)
+    tabs = re.findall(r'role="tab" aria-selected="(true|false)" aria-controls="vs-([\d-]+)"', sec)
+    assert [t for _, t in tabs] == earlier
+    assert [t for sel, t in tabs if sel == "true"] == earlier[:1]
+    assert 'data-chart-filter="chart-atm-ts chart-rr-term"' in sec
+    new = _cm_of(ds, next(s for s in inputs if s["session"] == head))
+    for old in earlier:
+        cap = _html_unescape(re.search(rf'id="vs-table-{old}">\s*<caption>(.*?)</caption>', sec,
+                                       re.DOTALL).group(1))
+        gap = dash.session_age(old, head)
+        assert f"vs {old}, {dash.plural(gap, 'NYSE session')} earlier" in re.sub(r"<[^>]+>", "", cap)
+        rows = _table_rows(sec, f"vs-table-{old}")
+        delta = ds.cm_delta(new, _cm_of(ds, next(s for s in inputs if s["session"] == old)))
+        assert [r[0] for r in rows] == [r["label"] for r in delta]
+        for cells, r in zip(rows, delta):
+            assert cells[2] == dash.signed(r["atmf"]["delta"], ".2f")
+            assert cells[4] == dash.signed(r["rr25"]["delta"], ".2f")
+            assert cells[6] == dash.signed(r["bf25"]["delta"], ".2f")
+    # the term charts name both dates
+    atm = {it["name"] for it in _spec(html, "chart-atm-ts")["legend_items"]}
+    rr = {it["name"] for it in _spec(html, "chart-rr-term")["legend_items"]}
+    assert f"SVI-cal ATM {head}" in atm
+    assert f"RR25 {head}" in rr
+    for old in earlier:
+        assert f"SVI-cal ATM {old}" in atm
+        assert f"RR25 {old}" in rr
+
+
+def test_the_surface_page_never_calls_a_session_change_a_day_or_the_prior_session(pages):
+    """The stored surface sessions are irregular (March to October): a change
+    between two of them is labelled with its gap, never as a day's or the prior
+    session's. (The Overview's 'percentile of N prior sessions' is a history.)"""
+    html = pages["/surface"]
+    text = _visible_text(html).lower()
+    for bad in (r"(?<!\d)1-day", r"\bone-day", r"\bprior session", r"\bprevious session", r"day-over-day"):
+        assert not re.search(bad, text), bad
+    assert not re.search(r"(?<!\d)1-day|prior session", html, re.IGNORECASE)
+
+
+def test_a_tenor_the_earlier_session_lacks_prints_a_dash(dash):
+    ds = _desk_module()
+
+    def surface(days):
+        sl = [{"a": 0.0004 * t / 30, "b": 0.05, "rho": -0.6, "m": 0.0, "sigma": 0.12, "T": t / 365,
+               "expiry": f"2030-{i + 1:02d}-01"} for i, t in enumerate(days)]
+        sj = {"surfaces": {"svi_cal": {"params": {"slices": sl}}},
+              "term_structure": [{"expiry": s["expiry"], "T_days": s["T"] * 365} for s in sl]}
+        res = pd.DataFrame([{"model": "svi_cal", "expiry": s["expiry"], "k": k} for s in sl for k in (-1, 1)])
+        return ds.constant_maturity(ds.delta_grid(sj, res, None))
+
+    v = {"session": "2030-01-01", "gap": 7, "rows": ds.cm_delta(surface((20, 45, 100, 200, 400)),
+                                                               surface((20, 45, 100, 200)))}
+    macros = dash.app.jinja_env.get_template("_macros.html").module
+    html = str(macros.vs_table("2030-03-01", v))
+    rows = {r[0]: r for r in _table_rows(html, "vs-table-2030-01-01")}
+    assert rows["1Y"][2] == rows["1Y"][4] == rows["1Y"][6] == "—"
+    assert rows["1Y"][1].startswith("— → ")
+    assert rows["3M"][2] != "—"
+
+
+def test_browser_session_tabs_switch_the_table_and_both_charts_without_a_request(site_browser):
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "surface.html", wait_until="load")
+        tabs = page.locator('#surface-change [role="tab"]')
+        n = tabs.count()
+        assert n >= 1
+        last = tabs.nth(n - 1).get_attribute("data-value")
+        page.locator("#chart-atm-ts").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-atm-ts")
+        page.locator("#chart-rr-term").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-rr-term")
+        requests = []
+        page.on("request", lambda r: requests.append(r.url))
+        tabs.nth(n - 1).click()
+        page.wait_for_timeout(300)
+        st = page.evaluate("""() => {
+          const shown = [...document.querySelectorAll('#surface-change [role=tabpanel]')]
+            .filter(p => !p.hidden).map(p => p.id);
+          const sel = id => { const o = Desk.charts[id].chart.getOption(), s = o.legend[0].selected;
+            return Object.keys(s).filter(k => s[k]); };
+          const btns = id => [...document.querySelectorAll('[data-legend-for="' + id + '"][data-group]')]
+            .filter(b => !b.hidden).map(b => b.dataset.group);
+          return {shown, atm: sel('chart-atm-ts'), rr: sel('chart-rr-term'), atmBtns: btns('chart-atm-ts'),
+                  rrBtns: btns('chart-rr-term'), hash: location.hash}; }""")
+        assert st["shown"] == [f"vs-{last}"], st
+        assert f"SVI-cal ATM {last}" in st["atm"]
+        assert not [s for s in st["atm"] if s.startswith("SVI-cal ATM ") and s != f"SVI-cal ATM {last}"
+                    and s.split()[-1] < last], st["atm"]
+        assert f"RR25 {last}" in st["rr"]
+        assert st["atmBtns"] == [last]
+        assert st["rrBtns"] == [last]
+        assert f"vs={last}" in st["hash"]
+        assert requests == []          # every session's data is in the page
+    finally:
+        ctx.close()

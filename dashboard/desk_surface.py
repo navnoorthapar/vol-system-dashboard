@@ -271,3 +271,24 @@ def skew_slope(t_years: Sequence[float], skews: Sequence[float],
     slope = float(np.polyfit(x, y, 1)[0])
     days = [p[0] * DAYS_PER_YEAR for p in pts]
     return {"slope": slope, "n": len(pts), "t_lo_days": min(days), "t_hi_days": max(days)}
+
+
+# ── one session against an earlier one ───────────────────────────────────────
+CM_DELTA_KEYS = ("atmf", "rr25", "bf25")
+
+
+def cm_delta(new: Sequence[Mapping], old: Sequence[Mapping]) -> list[dict]:
+    """Cell-by-cell change of two constant-maturity grids (``new`` − ``old``) in
+    ATMF, RR25 and BF25, vol points, per tenor of ``new``. A change is None when
+    either session lacks the tenor or the value (an extrapolated RR/BF)."""
+    by_old = {r["days"]: r for r in old}
+    out = []
+    for r in new:
+        o = by_old.get(r["days"]) or {}
+        row: dict[str, Any] = {"days": r["days"], "label": r["label"],
+                               "available": bool(r.get("available") and o.get("available"))}
+        for key in CM_DELTA_KEYS:
+            a, b = r.get(key), o.get(key)
+            row[key] = {"new": a, "old": b, "delta": (a - b) if (a is not None and b is not None) else None}
+        out.append(row)
+    return out

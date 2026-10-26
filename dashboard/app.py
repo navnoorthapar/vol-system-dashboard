@@ -4279,6 +4279,57 @@ def surface_state_line(cm: Sequence[dict], session: str | None, ref: str | None)
                     (f"{plural(age, 'session')} old" if age is not None else "age unknown"))}
 
 
+def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
+    """The headline session's constant-maturity grid against every earlier stored
+    session (Surface #surface-change): per earlier session, newest first, its
+    gap in NYSE sessions (session_age) and desk_surface.cm_delta's rows; and
+    every session's listed grid, for the ATM and RR25 term charts. Stored
+    sessions are irregular (March to October), so a change is never called a
+    day's or the previous session's."""
+    grids: dict[str, dict] = {}
+    for s in inputs:
+        listed = desk_surface.delta_grid(s["surface"], s["quotes"], s["vix"])
+        grids[s["session"]] = {"listed": listed, "cm": desk_surface.constant_maturity(listed)}
+    earlier = sorted((x for x in grids if x < head), reverse=True)
+    if head not in grids or not earlier:
+        return None
+    views = [{"session": old, "gap": session_age(old, head),
+              "rows": desk_surface.cm_delta(grids[head]["cm"], grids[old]["cm"])} for old in earlier]
+    return {"head": head, "default": earlier[0], "views": views, "grids": grids}
+
+
+def rr_term_spec(cmp_: dict) -> dict:
+    """RR25 against days to expiry (log axis) for every stored session: the headline
+    solid, the others grey, the session chosen on the comparison tabs dashed."""
+    head = cmp_["head"]
+    series: list[dict[str, Any]] = []
+    rows = []
+    for s, g in sorted(cmp_["grids"].items()):
+        pts = [[r["T_days"], r["rr25"]] for r in g["listed"]]
+        rows += [[s, r["expiry"], _fmt(r["T_days"], ".0f"), signed(r["rr25"], ".2f")] for r in g["listed"]]
+        if s == head:
+            continue
+        series.append({"name": f"RR25 {s} (grey)", "legendKey": "Every stored session", "legend": True,
+                       "type": "line", "color": "muted", "width": 1, "z": 1, "data": pts})
+        series.append({"name": f"RR25 {s}", "legend": True, "type": "line", "color": "cat2", "width": 1.5,
+                       "dash": True, "group": s, "z": 2, "data": pts})
+    series.append({"name": f"RR25 {head}", "legend": True, "type": "line", "color": model_colour("svi_cal"),
+                   "width": 2, "symbol": "circle", "size": 4, "z": 3,
+                   "data": [[r["T_days"], r["rr25"]] for r in cmp_["grids"][head]["listed"]]})
+    days = [r["T_days"] for g in cmp_["grids"].values() for r in g["listed"]]
+    return charts.xy(
+        "chart-rr-term", f"25-delta risk reversal by days to expiry, {head} and every stored session",
+        x={"type": "value", "log": True, "name": "Days to expiry (log scale)", "digits": 0,
+           "min": round_sig(min(days) / 1.15, 2), "max": round_sig(max(days) * 1.15, 2)},
+        y={"name": "RR25 (vol pts)", "digits": 0, "tipDigits": 2, "signed": True},
+        series=series, tooltip="item", csv=f"rr25_term_{head}.csv",
+        describe=(f"RR25 = 25Δ call vol − 25Δ put vol of the SVI-cal surface per listed expiry: {head} "
+                  "solid, the other stored sessions grey, the session chosen on the comparison tabs dashed. "
+                  "A wing extrapolated beyond the quoted strikes leaves a gap."),
+        table=charts.table("RR25 (vol pts) per listed expiry and stored session, SVI-cal surface",
+                           ["Session", "Expiry", "T (d)#", "RR25#"], rows))
+
+
 def load_surface() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "surf": None, "model_heat": None,
                          "session": None, "models": [], "expiries": []}
@@ -4349,6 +4400,12 @@ def surface_extras(d: dict, surf: dict) -> None:
         cm = desk_surface.constant_maturity(listed)
         d["desk"] = desk_grid_view(listed, cm)
         d["state_tiles"] = surface_state_tiles(cm, listed)
+        # against every earlier stored session, at constant maturity
+        cmp_ = surface_comparison(session, artifacts.load_surface_desk_inputs(DATA))
+        if cmp_:
+            d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
+            d["charts"]["rr_term"] = rr_term_spec(cmp_)
+            d["_cmp_grids"] = cmp_["grids"]
 
     # market IV heatmap: median mid IV of the quotes in each (expiry, ln(K/F)) bucket,
     # the open wings included; the colour ramp spans the cells shown (it spanned
@@ -4511,24 +4568,33 @@ def surface_extras(d: dict, surf: dict) -> None:
 
     # ATM term structure (surface.json): market ATM vol and the eSSVI ATM vol and skew
     ts = (surf.get("surface") or {}).get("term_structure") or []
+    cmp_grids = d.pop("_cmp_grids", None)
     if ts:
         ts = sorted(ts, key=lambda t: float(t["T_days"]))
-        d["charts"]["atm_ts"] = charts.xy(
-            "chart-atm-ts", "ATM implied vol by expiry: quotes and the eSSVI fit",
-            x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
-            y={"name": "ATM vol (%)", "digits": 1, "tipDigits": 2},
-            series=[{"name": "ATM mid (quotes)", "type": "scatter", "color": "headline", "size": 6,
-                     "legend": True,
-                     "data": [[float(t["T_days"]), _num(t.get("atm_vol_mid_quotes"))] for t in ts
-                              if _num(t.get("atm_vol_mid_quotes")) is not None]},
-                    {"name": "eSSVI ATM", "type": "line", "color": model_colour("essvi"), "width": 1.5,
-                     "legend": True,
-                     "data": [[float(t["T_days"]), _num(t.get("atm_vol_essvi"))] for t in ts
-                              if _num(t.get("atm_vol_essvi")) is not None]}],
-            tooltip="axis", csv=f"atm_term_structure_{session}.csv",
-            describe=("ATM implied vol per quoted expiry, from the mids at the parity forward and from the "
-                      "eSSVI surface."),
-            table=charts.table("ATM term structure", ["Expiry", "Days#", "ATM mid (%)#", "eSSVI ATM (%)#",
+        atm_series: list[dict[str, Any]] = [
+            {"name": "ATM mid (quotes)", "type": "scatter", "color": "headline", "size": 6, "legend": True,
+             "data": [[float(t["T_days"]), _num(t.get("atm_vol_mid_quotes"))] for t in ts
+                      if _num(t.get("atm_vol_mid_quotes")) is not None]},
+            {"name": "eSSVI ATM", "type": "line", "color": model_colour("essvi"), "width": 1.5,
+             "legend": True, "data": [[float(t["T_days"]), _num(t.get("atm_vol_essvi"))] for t in ts
+                      if _num(t.get("atm_vol_essvi")) is not None]}]
+        atm_groups = []
+        if cmp_grids and session in cmp_grids:
+            # the SVI-cal ATM of this session and of the earlier session chosen on the
+            # comparison tabs (#surface-change), each named with its date
+            atm_series.append({"name": f"SVI-cal ATM {session}", "type": "line",
+                               "color": model_colour("svi_cal"), "width": 1.5, "legend": True,
+                               "data": [[r["T_days"], r["atmf"]] for r in cmp_grids[session]["listed"]]})
+            for old in (v["session"] for v in d["compare"]["views"]):
+                lst = cmp_grids[old]["listed"]
+                atm_series.append({"name": f"SVI-cal ATM {old}", "type": "line", "color": "cat2",
+                                   "width": 1.2, "dash": True, "legend": True, "group": old,
+                                   "data": [[r["T_days"], r["atmf"]] for r in lst]})
+                atm_groups.append({"group": old, "shown": old == d["compare"]["default"], **charts.table(
+                    f"SVI-cal ATM vol of {old}, the earlier session compared",
+                    ["Expiry", "Days#", "ATM (%)#"],
+                    [[r["expiry"], _fmt(r["T_days"], ".0f"), _fmt(r["atmf"], ".2f")] for r in lst])})
+        atm_tbl = charts.table("ATM term structure", ["Expiry", "Days#", "ATM mid (%)#", "eSSVI ATM (%)#",
                                                       "eSSVI ATM skew#", "Parity r#", "Parity q#", "Quotes#"],
                                [[t.get("expiry"), _fmt(_num(t.get("T_days")), ".0f"),
                                  _fmt(_num(t.get("atm_vol_mid_quotes")), ".2f"),
@@ -4536,7 +4602,20 @@ def surface_extras(d: dict, surf: dict) -> None:
                                  signed(_num(t.get("atm_skew_essvi")), ".3f"),
                                  _pct_prose(_num(t.get("r")), 2, signed=False),
                                  _pct_prose(_num(t.get("q")), 2, signed=False),
-                                 _fmt(t.get("n_quotes"), ",")] for t in ts]))
+                                 _fmt(t.get("n_quotes"), ",")] for t in ts])
+        if atm_groups:
+            atm_tbl["groups"] = atm_groups
+        d["charts"]["atm_ts"] = charts.xy(
+            "chart-atm-ts", "ATM implied vol by expiry: quotes, the eSSVI and SVI-cal fits"
+            + (", and an earlier session" if atm_groups else ""),
+            x={"type": "value", "name": "Days to expiry", "digits": 0, "min": 0},
+            y={"name": "ATM vol (%)", "digits": 1, "tipDigits": 2},
+            series=atm_series, tooltip="axis", csv=f"atm_term_structure_{session}.csv",
+            describe=("ATM implied vol per quoted expiry, from the mids at the parity forward and from the "
+                      "eSSVI and SVI-cal surfaces"
+                      + ("; the dashed line is the SVI-cal ATM of the earlier session chosen on the "
+                         "comparison tabs, named with its date." if atm_groups else ".")),
+            table=atm_tbl)
 
     # static-arbitrage screen and repair (surface.json)
     arb = (surf.get("surface") or {}).get("arbitrage") or {}

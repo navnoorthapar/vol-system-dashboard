@@ -225,6 +225,7 @@ sub, sup { font-size: 0.72em; }
   display: inline-flex; align-items: center; gap: 5px; text-decoration: none;
 }
 .btn:hover { color: var(--text); border-color: var(--text3); }
+.btn[hidden] { display: none; }   /* a legend button of another tab's series (desk.js filterChart) */
 .btn[aria-pressed="true"], .btn[aria-selected="true"] { color: var(--text); background: var(--surface3); border-color: var(--pos-fill); }
 .btn[aria-pressed="false"] .key-swatch { opacity: 0.35; }
 .btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }

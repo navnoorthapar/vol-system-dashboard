@@ -68,6 +68,9 @@ def xy(chart_id: str, title: str, *, x: dict, y: dict, series: list[dict],
                       "hollow": s.get("type") == "scatter" and bool(s.get("hollow")),
                       "diamond": s.get("type") == "scatter" and s.get("symbol") == "diamond",
                       "hidden": bool(s.get("hidden"))}
+        # one series of one tab group (an earlier session's line): its button shows with the group
+        if s.get("group") is not None and not s.get("legendKey"):
+            items[key]["group"] = s["group"]
     spec["legend_items"] = list(items.values())
     return round_sig(spec)
 

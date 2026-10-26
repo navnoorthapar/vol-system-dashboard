@@ -274,3 +274,36 @@ def test_skew_slope_needs_three_expiries_and_ignores_zero_skews():
     s = ds.skew_slope([0.1, 0.2, 0.4, 0.8], [-1.0, 0.0, -0.25, -0.125])
     assert s["n"] == 3
     assert s["slope"] == pytest.approx(-1.0, abs=1e-12)
+
+
+# ── P2.3: one session against an earlier one ─────────────────────────────────
+
+def test_the_change_grid_is_the_cell_by_cell_difference_of_two_constant_maturity_grids(grids):
+    head = SESSIONS[-1]
+    new = ds.constant_maturity(grids[head])
+    for old_s in SESSIONS[:-1]:
+        old = ds.constant_maturity(grids[old_s])
+        rows = ds.cm_delta(new, old)
+        assert [r["label"] for r in rows] == [r["label"] for r in new]
+        for r, a, b in zip(rows, new, old):
+            for key in ("atmf", "rr25", "bf25"):
+                assert r[key]["new"] == a[key]
+                assert r[key]["old"] == b[key]
+                want = None if (a[key] is None or b[key] is None) else a[key] - b[key]
+                assert r[key]["delta"] == want, (old_s, r["label"], key)
+
+
+def test_a_tenor_one_session_lacks_has_no_change():
+    """The earlier session's longest expiry is 200 days: its 1Y is not
+    extrapolated, so the 1Y change is None (printed '—')."""
+    long_ = [_slice(T / 365, a=0.0004 * T / 30) for T in (20, 45, 100, 200, 400)]
+    short = [_slice(T / 365, a=0.0005 * T / 30) for T in (20, 45, 100, 200)]
+    new = ds.constant_maturity(ds.delta_grid(*_surface(long_, {s["expiry"]: (-1.0, 1.0) for s in long_})))
+    old = ds.constant_maturity(ds.delta_grid(*_surface(short, {s["expiry"]: (-1.0, 1.0) for s in short})))
+    rows = {r["label"]: r for r in ds.cm_delta(new, old)}
+    assert rows["1Y"]["available"] is False
+    for key in ("atmf", "rr25", "bf25"):
+        assert rows["1Y"][key]["delta"] is None
+        assert rows["1Y"][key]["old"] is None
+        assert rows["1Y"][key]["new"] is not None
+        assert rows["3M"][key]["delta"] is not None

@@ -614,7 +614,9 @@
   function initTabs() {
     $$('[role="tablist"]').forEach(function (list) {
       var tabs = $$('[role="tab"]', list), key = list.getAttribute('data-state-key');
-      var shared = !!list.getAttribute('data-chart-filter');   // every tab drives one panel
+      // every tab drives one panel (the smile slices), or each its own (the session
+      // comparison, which also filters charts: data-chart-filter lists their ids)
+      var shared = tabs.every(function (t) { return t.getAttribute('aria-controls') === tabs[0].getAttribute('aria-controls'); });
       // init: the page's first selection. It writes no state (a plain load keeps
       // its URL and its #panel anchor) and leaves charts the IntersectionObserver
       // has not reached to it (the smile slices were drawn twice).
@@ -629,7 +631,7 @@
         if (focus) tab.focus();
         if (key && !init) state.set(key, tab.getAttribute('data-value'));
         var target = list.getAttribute('data-chart-filter');
-        if (target) filterChart(target, tab.getAttribute('data-value'));
+        if (target) target.split(/\s+/).forEach(function (id) { filterChart(id, tab.getAttribute('data-value')); });
         $$('.chart[data-spec]', doc.getElementById(tab.getAttribute('aria-controls')) || doc.body).forEach(function (el) {
           if (Desk.charts[el.id]) Desk.charts[el.id].chart.resize();
           else if (!Desk.isPending(el)) render(el);
@@ -653,6 +655,10 @@
   // A tab list can filter one chart's series by a "group" key (the smile slices).
   function filterChart(id, value) {
     Desk.filters[id] = value;
+    // a legend button of one group's series (an earlier session's line) shows with its group only
+    $$('[data-legend-for="' + id + '"][data-group]').forEach(function (b) {
+      b.hidden = String(b.getAttribute('data-group')) !== String(value);
+    });
     // the chart's per-group tables (its data equivalent) follow the same tab
     $$('[data-group]', doc.getElementById(id + '-data') || doc.createElement('div')).forEach(function (g) {
       g.hidden = String(g.getAttribute('data-group')) !== String(value);
