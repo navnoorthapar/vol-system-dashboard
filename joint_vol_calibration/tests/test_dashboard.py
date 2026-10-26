@@ -4353,3 +4353,33 @@ def test_browser_scenario_units_toggle(site_browser):
         assert "per SPX contract" in page.locator("#scenario-grid-readout").inner_text()
     finally:
         ctx.close()
+
+
+def test_overview_pdv_forecast_discloses_its_rank_on_both_losses(dash, pages):
+    """P1.5: the Overview showed the PDV forecast without saying how it ranks
+    among the evaluated forecasters. Under the forecast it now says, from
+    forecast_eval.json, its rank on 21-day MSE and on QLIKE, its membership of
+    the 90% model confidence set and the best model on both; only the bad rank
+    would be selective the other way. The line links to the Research panel."""
+    fe = json.loads((SHIPPED / "backtest" / "inference" / "forecast_eval.json").read_text())
+    bw = fe["backtest_window"]
+    html = pages["/"]
+    line = re.search(r'<p class="note" id="pdv-forecast-rank">(.*?)</p>', html, re.DOTALL)
+    assert line
+    assert '<a href="research.html#forecast">' in line.group(1)
+    text = _visible_text("<body>" + re.sub(r"</?span[^>]*>", "", line.group(1)))
+    for key, label in (("mse", "21-day MSE"), ("qlike", "QLIKE")):
+        r = bw["rank"][key]
+        assert f"{r['pdv']} of {len(r)} on {label}" in text
+    mcs = {k: "pdv" in bw["mcs"][k]["90"]["included"] for k in ("mse", "qlike")}
+    if len(set(mcs.values())) == 1:
+        assert f"in the 90% model confidence set: {'yes' if mcs['mse'] else 'no'} on both" in text
+    else:
+        for k, lab in (("mse", "21-day MSE"), ("qlike", "QLIKE")):
+            assert f"{'yes' if mcs[k] else 'no'} on {lab}" in text
+    best = {k: min(bw["rank"][k], key=bw["rank"][k].get) for k in ("mse", "qlike")}
+    if best["mse"] == best["qlike"] == "vix2":
+        assert "best on both: VIX² (risk-neutral, contains the variance premium)" in text
+    assert f"({bw['start']} → {bw['end']})" in text
+    # the link target exists on the Research page
+    assert 'id="forecast"' in pages["/research"]

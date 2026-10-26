@@ -3610,6 +3610,38 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
     return out
 
 
+FORECAST_LOSSES = (("mse", "21-day MSE"), ("qlike", "QLIKE"))
+
+
+def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") -> dict | None:
+    """Where the PDV forecaster ranks among the evaluated forecasters, on both losses.
+
+    From forecast_eval.json backtest_window: rank.{mse, qlike} (1 = best), the
+    model confidence set at ``level``% per loss, and the best model per loss.
+    The Overview showed the PDV forecast without saying it ranks 6th of 7 on
+    QLIKE; showing only that rank would be selective the other way (2nd on MSE).
+    """
+    bw = (fe or {}).get("backtest_window") or {}
+    ranks = bw.get("rank") or {}
+    out: dict[str, Any] = {"losses": [], "start": bw.get("start"), "end": bw.get("end"),
+                           "horizon": bw.get("horizon"), "level": level}
+    for key, label in FORECAST_LOSSES:
+        r = ranks.get(key) or {}
+        if model not in r:
+            continue
+        mcs = ((bw.get("mcs") or {}).get(key) or {}).get(level)
+        inc = (mcs if isinstance(mcs, list) else (mcs or {}).get("included")) if mcs else None
+        best = sorted(m for m in r if r[m] == min(r.values()))
+        out["losses"].append({"key": key, "label": label, "rank": int(r[model]), "n": len(r),
+                              "in_mcs": (model in inc) if isinstance(inc, list) else None, "best": best})
+    if not out["losses"]:
+        return None
+    bests = {tuple(x["best"]) for x in out["losses"]}
+    out["best_both"] = list(next(iter(bests))) if len(bests) == 1 else None
+    out["descs"] = (fe or {}).get("models") or {}
+    return out
+
+
 def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     """The newest stored Cboe book per underlying (data_store/options/cboe/*.json records)."""
     root = Path(data_dir or DATA) / "options" / "cboe"
@@ -3688,6 +3720,7 @@ def load_overview() -> dict[str, Any]:
         _record_error(d, "calibration diagnostics summary", e)
         diag = {"state": "error"}
     d["key_results"] = key_results(p2, p4, surf_oos, diag, inf)
+    d["pdv_forecast_rank"] = pdv_forecast_rank(inf.get("forecast")) if inf.get("state") == "ok" else None
     # What the σ ≤ 2 box costs the headline fit (its σ profile, when diagnosed)
     row = next((r for r in diag.get("rows") or [] if r["session"] == p2.get("session")), None)
     from joint_vol_calibration.config import HESTON_BOUNDS

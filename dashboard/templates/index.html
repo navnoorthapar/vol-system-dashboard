@@ -84,6 +84,11 @@
       {{ m.kpi('PDV forecast', d.pdv_forecast|fmt('.2f'), unit='%', sub=('next-day |r|, annualised' if d.pdv_horizon == 1 else 'next ' ~ d.pdv_horizon ~ '-day realised')) }}
       {{ m.kpi('VIX − PDV', d.pdv_spread|signed('.2f'), unit='vol pts', tone=d.pdv_spread|tone) }}
     </div>
+    {% set fr = d.pdv_forecast_rank %}
+    {% if fr %}{% set _names = {'vix2': 'VIX²', 'pdv': 'PDV', 'vix_mz': 'VIX (MZ)'} %}
+    {% set _mcs = fr.losses|map(attribute='in_mcs')|list %}
+    <p class="note" id="pdv-forecast-rank"><a href="research.html#forecast">PDV ranks {% for l in fr.losses %}{{ l.rank }} of {{ l.n }} on {{ l.label }}{{ ' and ' if not loop.last }}{% endfor %} (<span class="nowrap">{{ fr.start }}</span> → <span class="nowrap">{{ fr.end }}</span>)</a>; in the {{ fr.level }}% model confidence set: {% if _mcs|unique|list|length == 1 and _mcs[0] is not none %}{{ 'yes' if _mcs[0] else 'no' }}{% if fr.losses|length > 1 %} on both{% endif %}{% else %}{% for l in fr.losses %}{{ 'yes' if l.in_mcs else ('no' if l.in_mcs is not none else 'not recorded') }} on {{ l.label }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}{% if fr.best_both %}; best on {{ 'both' if fr.losses|length > 1 else fr.losses[0].label }}: {% for b in fr.best_both %}{{ _names.get(b, b|upper) }}{% if b == 'vix2' %} (risk-neutral, contains the variance premium){% endif %}{{ ', ' if not loop.last }}{% endfor %}{% endif %}.</p>
+    {% endif %}
     {% set _pct = d.pdv_spread_pct %}{% set _rk = d.pdv_rank %}
     {% if not d.pdv_stale and _pct is not none and _rk %}
     <p class="note">{% if _pct >= 80 %}Implied vol is rich versus this spread's own history ({{ _rk.tail }}).{% elif _pct <= 20 %}Implied vol is cheap versus this spread's own history ({{ _rk.tail }}).{% else %}Within this spread's usual range.{% endif %}</p>
