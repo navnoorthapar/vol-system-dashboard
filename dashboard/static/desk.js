@@ -577,8 +577,22 @@
       ];
     }
     if (spec.quotes) quoteOption(spec, T, opt, filter, width, height);
+    var cur = cursorSeries(spec, T);
+    if (cur) opt.series.push(cur);
     marks(spec, T, opt, filter);
     return opt;
+  }
+
+  // The selected expiry on a chart whose categories are expiries (spec.exps, the
+  // Surface #chart-by-expiry): a vertical line at its category, carried by a
+  // series of its own (merged by id when the selection moves)
+  function cursorSeries(spec, T) {
+    if (!spec.exps || Desk.expCursor === undefined) return null;
+    var i = spec.exps.indexOf(Desk.expCursor), cats = (spec.x && spec.x.categories) || spec.xs || [];
+    return { id: 'cursor', name: '\u00a0selected expiry', type: 'line', data: [], silent: true, tooltip: { show: false }, z: 1,
+      markLine: { silent: true, symbol: 'none', animation: false, label: { show: false },
+        lineStyle: { color: T.text2, type: 'solid', width: 1.5 },
+        data: i < 0 || cats[i] === undefined ? [] : [{ xAxis: cats[i] }] } };
   }
 
   // A quote smile (spec.quotes): the inspector's tooltip, the x range of the
@@ -808,6 +822,7 @@
     inst.setOption(opt, true);
     // linked charts (the same x values) zoom and point together
     if (spec.link && window.echarts.connect) { inst.group = spec.link; window.echarts.connect(spec.link); }
+    if (spec.exps) bindExpiryPick(inst, el.id);
     // drawn before the web fonts arrived: drawn again once they have (canvas text keeps its font)
     Desk.charts[el.id] = { el: el, chart: inst, spec: spec, T: T, early: !fontsReady,
       labels: built.labels, qi: prev ? prev.qi : null };
@@ -831,14 +846,15 @@
   // drawn in the task after that frame: the reader sees the click land at once,
   // and a run of switches (an arrow key held on the expiry tabs) draws the last
   // one only, not every expiry it passed.
-  var redrawQueued = {};
-  function queueRedraw(id) {
-    if (redrawQueued[id]) return;
-    redrawQueued[id] = true;
-    var run = function () { redrawQueued[id] = false; if (Desk.charts[id]) applyFilter(Desk.charts[id]); };
+  var queued = {};
+  function afterPaint(key, fn) {
+    if (queued[key]) return;
+    queued[key] = true;
+    var run = function () { queued[key] = false; fn(); };
     if (window.requestAnimationFrame) window.requestAnimationFrame(function () { setTimeout(run, 0); });
     else setTimeout(run, 0);
   }
+  function queueRedraw(id) { afterPaint(id, function () { if (Desk.charts[id]) applyFilter(Desk.charts[id]); }); }
   function renderAll(print) { $$('.chart[data-spec]').forEach(function (el) { render(el, print); }); }
   Desk.render = render;
 
@@ -1039,6 +1055,7 @@
         });
         if (focus) tab.focus();
         if (key && !init) state.set(key, tab.getAttribute('data-value'));
+        if (key === 'exp' && Desk.onExpiry) Desk.onExpiry(tab.getAttribute('data-value'), !!init);
         var target = list.getAttribute('data-chart-filter');
         if (target) target.split(/\s+/).forEach(function (id) { filterChart(id, tab.getAttribute('data-value')); });
         // a chart drawn while its panel was hidden has the wrong size; a resize
@@ -1174,6 +1191,108 @@
     });
   }
 
+  // -- the expiry as the shared cursor of Surface ----
+  // The smile's expiry tabs, the rows of the IV and residual heatmaps and of the
+  // delta grid (tr[data-exp]) and the categories of #chart-by-expiry (spec.exps)
+  // select one another: a row head (a button, added here: without JavaScript
+  // the tables are as they were), a click on a by-expiry category or '[' / ']'
+  // selects the expiry's smile tab, which writes exp= into the hash; every row of
+  // it is then aria-current, the by-expiry chart draws a line at it and the
+  // heatmap readouts name it. The smile is scrolled to only when it is offscreen.
+  function expiryTabs() {
+    var list = $('[role="tablist"][data-state-key="exp"]');
+    return list ? $$('[role="tab"]', list) : [];
+  }
+  function syncExpiry(exp, init) {
+    Desk.expCursor = exp;
+    var tables = [];
+    // only the rows that change are touched (each attribute write restyles a table)
+    $$('tr[data-exp]').forEach(function (tr) {
+      var on = tr.getAttribute('data-exp') === exp, was = tr.hasAttribute('aria-current');
+      if (on && !was) tr.setAttribute('aria-current', 'true');
+      else if (!on && was) tr.removeAttribute('aria-current');
+      var t = tr.closest('table');
+      if (t && tables.indexOf(t) < 0) tables.push(t);
+    });
+    // one tab stop per table: the selected row's head, else the first
+    tables.forEach(function (t) {
+      var b = t.querySelector('tr[aria-current="true"] .row-pick') || t.querySelector('.row-pick');
+      $$('.row-pick', t).forEach(function (o) { var want = o === b ? 0 : -1; if (o.tabIndex !== want) o.tabIndex = want; });
+    });
+    // the by-expiry chart's line: drawn once the page is idle after the click
+    // (after the smile, which is drawn in the task after the click's frame)
+    var idle = window.requestIdleCallback || function (f) { return setTimeout(f, 50); };
+    if (!init) idle(function () { cursorNow(); }); else cursorNow();
+    function cursorNow() {
+      Object.keys(Desk.charts).forEach(function (k) {
+        var c = Desk.charts[k];
+        if (c.spec && c.spec.exps) c.chart.setOption({ series: [cursorSeries(c.spec, c.T)] });
+      });
+    }
+    if (init) return;
+    var tab = expiryTabs().filter(function (t) { return t.getAttribute('data-value') === exp; })[0];
+    var text = 'Selected expiry ' + exp + (tab ? ' \u00b7 ' + tab.textContent.trim() : '') + ': the smile, these rows and the by-expiry chart show it.';
+    tables.forEach(function (t) {
+      var out = doc.getElementById(t.getAttribute('data-readout'));
+      if (out) out.textContent = text;
+    });
+  }
+  function pickExpiry(exp) {
+    var tab = expiryTabs().filter(function (t) { return t.getAttribute('data-value') === exp; })[0];
+    if (!tab) return false;
+    tab.click();
+    var sm = doc.getElementById(tab.parentNode.getAttribute('data-chart-filter'));
+    if (sm) {
+      var r = sm.getBoundingClientRect();
+      if (r.bottom <= 0 || r.top >= (window.innerHeight || doc.documentElement.clientHeight)) sm.scrollIntoView({ block: 'nearest' });
+    }
+    return true;
+  }
+  function bindExpiryPick(inst, id) {
+    if (inst.__expPick) return;
+    inst.__expPick = true;
+    var zr = inst.getZr();
+    var at = function (e) {
+      var c = Desk.charts[id], p = [e.offsetX, e.offsetY];
+      if (!c || !c.spec.exps || !inst.containPixel({ gridIndex: 0 }, p)) return null;
+      var i = Math.round(inst.convertFromPixel({ xAxisIndex: 0 }, p[0]));
+      return i >= 0 && i < c.spec.exps.length ? c.spec.exps[i] : null;
+    };
+    zr.on('click', function (e) { var exp = at(e); if (exp) pickExpiry(exp); });
+    zr.on('mousemove', function (e) { zr.setCursorStyle(at(e) ? 'pointer' : 'default'); });
+  }
+  function initExpiryCursor() {
+    var tabs = expiryTabs();
+    if (!tabs.length) return;
+    $$('tr[data-exp]').forEach(function (tr) {
+      var th = tr.querySelector('th[scope="row"]');
+      if (!th || th.querySelector('.row-pick')) return;
+      var b = doc.createElement('button');
+      b.type = 'button'; b.className = 'row-pick'; b.tabIndex = -1;
+      b.title = 'Select this expiry: the smile and the other tables follow';
+      while (th.firstChild) b.appendChild(th.firstChild);
+      th.appendChild(b);
+      b.addEventListener('click', function () { pickExpiry(tr.getAttribute('data-exp')); });
+      // up / down: the row heads of the same table
+      b.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        var heads = $$('.row-pick', tr.closest('table')), i = heads.indexOf(b) + (e.key === 'ArrowDown' ? 1 : -1);
+        if (i < 0 || i >= heads.length) return;
+        e.preventDefault(); b.tabIndex = -1; heads[i].tabIndex = 0; heads[i].focus();
+      });
+    });
+    Desk.onExpiry = syncExpiry;
+    Desk.stepExpiry = function (d) {
+      var ts = expiryTabs(), i = -1;
+      ts.forEach(function (t, j) { if (t.getAttribute('aria-selected') === 'true') i = j; });
+      var j = Math.max(0, Math.min(ts.length - 1, i + d));
+      if (!ts.length || j === i) return ts.length > 0;
+      return pickExpiry(ts[j].getAttribute('data-value'));
+    };
+    var sel = tabs.filter(function (t) { return t.getAttribute('aria-selected') === 'true'; })[0] || tabs[0];
+    syncExpiry(sel.getAttribute('data-value'), true);
+  }
+
   // -- row filters: aria-pressed buttons that show a subset of a table's rows ----
   //    (without JavaScript the buttons are not shown and every row is)
   function initFilters() {
@@ -1276,6 +1395,7 @@
       var t = e.target;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
       if (e.key === '?' && dlg && dlg.showModal) { e.preventDefault(); dlg.showModal(); return; }
+      if ((e.key === '[' || e.key === ']') && Desk.stepExpiry && Desk.stepExpiry(e.key === ']' ? 1 : -1)) { e.preventDefault(); return; }
       if (pending && go[e.key]) { pending = false; location.href = go[e.key]; return; }
       if (e.key === 'g') { pending = true; clearTimeout(timer); timer = setTimeout(function () { pending = false; }, 1200); }
     });
@@ -1344,7 +1464,7 @@
 
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
     initPrint(); openTarget(); scrollToAnchor();
     window.addEventListener('hashchange', openTarget);
   }

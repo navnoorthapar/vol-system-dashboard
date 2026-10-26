@@ -2187,7 +2187,7 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     e0 = min(mkt["expiry"].unique())
     q = mkt[(mkt["expiry"] == e0) & (mkt["k"] > -0.02) & (mkt["k"] <= 0.0)]
     heat = re.search(r'<table class="heat" id="iv-heatmap"[^>]*>(.*?)</table>', html, re.DOTALL).group(1)
-    first = re.search(r"<tr><th scope=\"row\">[^<]*</th>(.*?)</tr>", heat.split("<tbody>")[1],
+    first = re.search(r"<tr[^>]*><th scope=\"row\">[^<]*</th>(.*?)</tr>", heat.split("<tbody>")[1],
                       re.DOTALL).group(1)
     tds = re.findall(r"<td[^>]*>(.*?)</td>", first, re.DOTALL)
     used = dash.k_buckets_used(mkt["k"])            # K_EDGES' buckets, plus a wing that has quotes
@@ -6473,4 +6473,81 @@ def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_on
         # one bar per quote: lower cap, the bar, upper cap and a break (7 points)
         assert st["bars"] == 7 * st["rows"]
         assert st["triangles"] <= st["clipped"] * len(spec["quotes"]["models"])
+    ctx.close()
+
+
+def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
+    """P4.3: the expiry selected one place on Surface is selected everywhere. A
+    click on an IV-heatmap row head selects that expiry's smile tab, writes exp=
+    into the hash, marks its rows aria-current in the IV heatmap, every residual
+    heatmap and the delta grid (only those), draws a line at its category on
+    #chart-by-expiry and names it in the readout; ']' and '[' step to the next
+    and previous expiry; a click on a by-expiry category selects it. Without
+    JavaScript the row heads stay plain text. Expiries are read from the page:
+    the daily bot replaces them."""
+    sb = site_browser
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    tabs = page.evaluate("""[...document.querySelectorAll('[data-chart-filter="chart-slices"] [role=tab]')]
+        .map(t => t.dataset.value)""")
+    rows = page.evaluate("[...document.querySelectorAll('#iv-heatmap tr[data-exp]')].map(r => r.dataset.exp)")
+    assert rows == tabs
+    exp = rows[len(rows) // 2]
+    label = page.locator(f"#iv-heatmap tr[data-exp='{exp}'] th").inner_text().strip()
+    btn = page.locator(f"#iv-heatmap tr[data-exp='{exp}'] th[scope=row] button.row-pick")
+    btn.scroll_into_view_if_needed()
+    btn.click()
+    page.wait_for_timeout(300)
+    page.locator("#chart-by-expiry").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-by-expiry")
+    st = page.evaluate("""() => ({
+      sel: [...document.querySelectorAll('[data-chart-filter="chart-slices"] [aria-selected=true]')]
+        .map(t => t.dataset.value),
+      hash: location.hash,
+      current: [...document.querySelectorAll('tr[aria-current]')]
+        .map(r => [r.closest('table').id, r.dataset.exp, r.getAttribute('aria-current')]),
+      tables: [...new Set([...document.querySelectorAll('tr[data-exp]')].map(r => r.closest('table').id))],
+      lines: Desk.charts['chart-by-expiry'].chart.getOption().series
+        .flatMap(s => ((s.markLine || {}).data || []).map(d => d.xAxis)).filter(x => x !== undefined),
+      readout: document.getElementById('iv-heatmap-readout').textContent })""")
+    assert st["sel"] == [exp]
+    assert f"exp={exp}" in st["hash"]
+    assert "iv-heatmap" in st["tables"]
+    assert "delta-grid-listed" in st["tables"]
+    assert any(t.startswith("resid-heat-") for t in st["tables"])
+    assert sorted(c[0] for c in st["current"]) == sorted(st["tables"])     # one row per table
+    assert all(c[1] == exp and c[2] == "true" for c in st["current"]), st["current"]
+    assert st["lines"] == [label], st["lines"]
+    assert exp in st["readout"]
+    # ']' steps to the next expiry, '[' back
+    page.keyboard.press("]")
+    page.wait_for_timeout(200)
+    nxt = tabs[tabs.index(exp) + 1]
+    assert page.evaluate("Desk.filters['chart-slices']") == nxt
+    assert f"exp={nxt}" in page.evaluate("location.hash")
+    assert page.locator(f"#delta-grid-listed tr[data-exp='{nxt}']").get_attribute("aria-current") == "true"
+    page.keyboard.press("[")
+    page.wait_for_timeout(200)
+    assert page.evaluate("Desk.filters['chart-slices']") == exp
+    # a click on a by-expiry category selects it
+    i = 1 if tabs.index(exp) != 1 else 2
+    pos = page.evaluate("""(i) => { const c = Desk.charts['chart-by-expiry'];
+        const x = c.chart.convertToPixel({xAxisIndex: 0}, c.spec.x.categories[i]);
+        const r = c.el.getBoundingClientRect(); return {x: r.left + x, y: r.top + r.height / 2}; }""", i)
+    page.mouse.click(pos["x"], pos["y"])
+    page.wait_for_timeout(300)
+    assert page.evaluate("Desk.filters['chart-slices']") == tabs[i]
+    assert "[" in page.locator("#keysDialog").inner_text()
+    ctx.close()
+    # without JavaScript the row heads are the labels they were
+    ctx = sb["browser"].new_context(viewport={"width": 1440, "height": 900}, java_script_enabled=False)
+    page = ctx.new_page()
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    assert page.locator(".row-pick").count() == 0
+    assert page.locator("tr[aria-current]").count() == 0
+    assert page.locator(f"#iv-heatmap tr[data-exp='{exp}'] th").inner_text().strip() == label
+    ctx.close()
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "index.html", wait_until="load")
+    assert "Previous / next expiry" not in page.locator("#keysDialog").inner_text()
     ctx.close()

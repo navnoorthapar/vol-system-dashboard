@@ -4914,7 +4914,9 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
                 continue
             v = value(g)
             cells.append({**cell(v["text"], colour(v["value"]), detail=detail(g, v)), "n": len(g)})
-        rows.append({"label": f"{e[2:]} · {_fmt(exps[e], '.0f')}d", "cells": cells})
+        # exp: the row's expiry (Surface selects it across the heatmaps, the delta
+        # grid, the by-expiry chart and the smile: desk.js initExpiryCursor)
+        rows.append({"label": f"{e[2:]} · {_fmt(exps[e], '.0f')}d", "exp": str(e), "cells": cells})
     return rows
 
 
@@ -4970,7 +4972,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
                   tint(_fmt(r.get("half_spread_vp"), ".2f"), None), tint(_fmt(r.get("n_quotes"), ","), None)]
         return {"head": head, "sub": sub, "cells": cells, "available": r.get("available", True)}
 
-    rows_l = [row(r, r["expiry"]) for r in listed]
+    rows_l = [{**row(r, r["expiry"]), "exp": str(r["expiry"])} for r in listed]
     rows_c = []
     for r in cm:
         if not r["available"]:
@@ -5424,6 +5426,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                       "1 half-spread is the edge of the quoted bid–ask."),
             table=charts.table("Median |model − mid| (half-spreads) by expiry, out-of-sample quotes",
                                ["Model"] + [c + "#" for c in labels], tbl))
+        # each category's expiry: a click on one selects it on the page (desk.js)
+        d["charts"]["by_expiry"]["exps"] = cats
 
     # ATM term structure (surface.json): market ATM vol and the eSSVI ATM vol and skew
     ts = (surf.get("surface") or {}).get("term_structure") or []
