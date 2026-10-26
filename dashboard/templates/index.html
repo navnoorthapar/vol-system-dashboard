@@ -80,7 +80,7 @@
 
   {% call m.panel('state-ts', 'VIX term structure', 's4', d.ts_date) %}
     {% if d.charts.ts %}
-    {{ m.chart(d.charts.ts, 'h220') }}
+    {{ m.chart(d.charts.ts, 'h220 grow') }}
     <p class="note">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|signed(".2f") }} pts, {{ d.ts_regime|lower }}){% if d.ts_date != d.vix_date %}; latest full curve — VIX itself is from {{ d.vix_date|fmt }}{% endif %}.</p>
     {% else %}<p class="note">No term-structure data.</p>{% endif %}
   {% endcall %}
@@ -142,6 +142,7 @@
       {{ m.kpi('VIX indices', f.vix_index_rmse|fmt('.2f'), unit='pts RMSE') }}
       {% if f.vvix %}{{ m.kpi('VVIX model / market', (f.vvix.model|fmt('.0f')) ~ ' / ' ~ (f.vvix.market|fmt('.0f')), sub='30-day vol of VIX, index pts') }}{% endif %}
     </div>
+    <p class="note" id="fit-evidence">Evidence on the Calibration page: {{ m.cite('out-of-sample error by expiry', 'calibration.html#oos') }} · {{ m.cite('the VIX leg, indices and VX futures', 'calibration.html#vixleg') }}.</p>
     <p class="note">
       {% for t in f.tiles %}<span class="nowrap">{{ t.sym }} {{ t.value|fmt(t.spec) }}{% if t.side %} {{ m.chip('at ' ~ (t.side if t.side != 'bound' else '') ~ ' bound', 'watch') }}{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}
     </p>

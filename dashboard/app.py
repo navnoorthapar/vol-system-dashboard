@@ -416,6 +416,61 @@ def monitored_for(element_id: str) -> list[dict]:
 app.jinja_env.globals["monitored_for"] = monitored_for
 
 
+# ── Evidence graph: m.cite() calls and the 'Cited on' footers ────────────────
+# A page that restates another page's figure cites it with the _macros.html
+# cite(label, href) macro. The registry is read from the templates themselves
+# (every m.cite call whose href is a literal 'page.html#id'), so a footer lists
+# exactly the pages whose cite() calls point at its panel, whatever data a
+# build has.
+_CITE_CALL = re.compile(r"m\.cite\((?:[^()]|\([^()]*\))*?,\s*'([\w.-]+\.html)#([\w-]+)'\s*\)")
+_PANEL_CALL = re.compile(r"\{%\s*call m\.panel\('([\w-]+)'")
+
+
+def cite_registry(template_dir: Path | None = None) -> dict[str, list[dict]]:
+    """{'page.html#id': [{'page', 'panel', 'label'}, ...]}: who cites each element.
+    'panel' is the citing panel's id when the cite() call sits inside one."""
+    tdir = Path(template_dir) if template_dir is not None else DASH / "templates"
+    labels = {ROUTES[r]: label for r, label, *_ in NAV}
+    out: dict[str, list[dict]] = {}
+    for f in sorted(tdir.glob("*.html")):
+        if f.name not in labels:
+            continue
+        src = f.read_text()
+        panels = [(m_.start(), m_.group(1)) for m_ in _PANEL_CALL.finditer(src)]
+        for c in _CITE_CALL.finditer(src):
+            page, anchor = c.group(1), c.group(2)
+            if page == f.name:
+                continue                  # a same-page reference is not cross-page evidence
+            panel = None
+            opened = [(pos, pid) for pos, pid in panels if pos < c.start()]
+            if opened:
+                pos, pid = opened[-1]
+                seg = src[pos:c.start()]
+                if seg.count("{% call ") > seg.count("{% endcall %}"):
+                    panel = pid
+            entry = {"page": f.name, "panel": panel, "label": labels[f.name]}
+            lst = out.setdefault(f"{page}#{anchor}", [])
+            if not any(e["page"] == entry["page"] and e["panel"] == entry["panel"] for e in lst):
+                lst.append(entry)
+    return out
+
+
+_CITES = cite_registry()
+
+
+def cited_on(element_id: str) -> list[dict]:
+    """The other pages that cite this element of the page being rendered (its footer)."""
+    page = ROUTES.get(request.path, "")
+    out: list[dict] = []
+    for e in _CITES.get(f"{page}#{element_id}") or []:
+        if all(o["page"] != e["page"] for o in out):        # one link per citing page
+            out.append(e)
+    return out
+
+
+app.jinja_env.globals["cited_on"] = cited_on
+
+
 # ── Market data readers (DB) ───────────────────────────────────────────────────
 def _read_spx() -> pd.DataFrame:
     """SPX closes and log returns, date-indexed, ascending.

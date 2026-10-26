@@ -109,7 +109,7 @@
     </table>
     </div>
     {% for n_ in d.score_notes %}<p class="note">{{ n_|prose }}</p>{% endfor %}
-    {% if H %}<p class="note">The surfaces interpolate between fitted strikes where Heston must extrapolate from its anchors: read them as the quote-noise floor, not as rival models.</p>{% endif %}
+    {% if H %}<p class="note">The surfaces interpolate between fitted strikes where {{ m.cite('Heston', 'calibration.html#oos') }} must extrapolate from its anchors: read them as the quote-noise floor, not as rival models.</p>{% endif %}
     {% call m.method('Model descriptions') %}<dl class="dl">{% for r in d.score_rows %}<dt>{{ r.label }}</dt><dd>{{ r.description|prose }}</dd>{% endfor %}</dl>{% endcall %}
   {% endcall %}
   {% call m.panel('by-expiry', 'Median |z| by expiry · every model', 's5') %}
@@ -168,7 +168,7 @@
     {{ m.vix_terms(d.vix_terms) }}
     {% set vb = d.vix_beta or {} %}
     {% set be_ = (d.beta_estimator or {}).get(d.session) %}
-    {% if vb.atm_over_vix_official is defined %}<p class="note" id="atm-vix-note">VIX-term ATM / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the ATM mids of the VIX's own two expiries, combined with its constant-maturity weights).{% if be_ is not none %} The backtest's β estimator (30-day ATM-forward Black-76 vol / VIX) gives {{ be_|fmt('.3f') }} on the same chain.{% endif %} The backtest marks every straddle at one fixed β; see <a href="research.html#beta">Research</a>.</p>{% endif %}
+    {% if vb.atm_over_vix_official is defined %}<p class="note" id="atm-vix-note">VIX-term ATM / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the ATM mids of the VIX's own two expiries, combined with its constant-maturity weights).{% if be_ is not none %} The backtest's β estimator (30-day ATM-forward Black-76 vol / VIX) gives {{ be_|fmt('.3f') }} on the same chain.{% endif %} The backtest marks every straddle at one fixed β; see {{ m.cite('the β chains on Research', 'research.html#beta-chains') }}.</p>{% endif %}
     {% call m.method('Where the replication departs from Cboe') %}
       <ul class="prose" style="padding-left:16px;">{% for n_ in d.vix_deviations %}<li>{{ n_|prose }}</li>{% endfor %}{% for n_ in d.vix_notes %}<li>{{ n_|prose }}</li>{% endfor %}</ul>
     {% endcall %}

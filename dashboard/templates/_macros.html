@@ -9,8 +9,14 @@
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">{{ caller() }}</div>
+  {%- set _cb = cited_on(id) %}{% if _cb %}
+  <div class="panel-foot cite-foot" id="{{ id }}-cited">Cited on: {% for c in _cb %}<a href="{{ c.page }}{% if c.panel %}#{{ c.panel }}{% endif %}">{{ c.label }}</a>{{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}
 </section>
 {%- endmacro %}
+
+{# a figure restated from another page: the link to it (app.cite_registry reads
+   these calls, with a literal 'page.html#id', to write that panel's 'Cited on' footer) #}
+{% macro cite(label, href) -%}<a class="cite" href="{{ href }}">{{ label }}</a>{%- endmacro %}
 
 {# a link back to each Model Risk check whose evidence this element shows #}
 {% macro monitored_chips(id) -%}

@@ -21,7 +21,7 @@
     <div class="banner-body">
       {% if d.provenance %}
       Built from <code>{{ d.provenance.source_calibration|fmt }}</code> at S = {{ d.provenance.S|fmt(",.1f") }}
-      ({% if d.provenance.get('r') is not none %}r = {{ (d.provenance.get('r') * 100)|fmt(".2f") }}%, q = {{ (d.provenance.get('q') * 100)|fmt(".2f") if d.provenance.get('q') is not none else '—' }}%{% elif d.carry_by_maturity %}{% set cb = d.carry_by_maturity %}carry per maturity, {{ cb.t_lo }}–{{ cb.t_hi }} days: r(T) {{ (cb.r_lo * 100)|fmt(".2f") }}–{{ (cb.r_hi * 100)|fmt(".2f") }}%{% if cb.discount %} ({{ cb.discount }}){% endif %}, q(T) {{ (cb.q_lo * 100)|fmt(".2f") }}–{{ (cb.q_hi * 100)|fmt(".2f") }}% from the fit's parity forwards{% else %}carry not recorded{% endif %}), session {{ d.provenance.spot_date|fmt }}{% if d.source_matches_headline %}, the parameters of the calibration-page headline fit{% endif %}.
+      ({% if d.provenance.get('r') is not none %}r = {{ (d.provenance.get('r') * 100)|fmt(".2f") }}%, q = {{ (d.provenance.get('q') * 100)|fmt(".2f") if d.provenance.get('q') is not none else '—' }}%{% elif d.carry_by_maturity %}{% set cb = d.carry_by_maturity %}carry per maturity, {{ cb.t_lo }}–{{ cb.t_hi }} days: r(T) {{ (cb.r_lo * 100)|fmt(".2f") }}–{{ (cb.r_hi * 100)|fmt(".2f") }}%{% if cb.discount %} ({{ cb.discount }}){% endif %}, q(T) {{ (cb.q_lo * 100)|fmt(".2f") }}–{{ (cb.q_hi * 100)|fmt(".2f") }}% from the fit's parity forwards{% else %}carry not recorded{% endif %}), session {{ d.provenance.spot_date|fmt }}{% if d.source_matches_headline %}, {{ m.cite('the parameters of the calibration-page headline fit', 'calibration.html#identifiability') }}{% endif %}.
       {% if d.source_matches_headline == false %}<strong>These are not the parameters of the calibration-page headline fit.</strong>{% endif %}
       {% else %}
       The stored surface records no source calibration, spot, rates or parameters — only its build date ({{ d.as_of|fmt }}); its inputs cannot be verified from the artifact.
@@ -122,7 +122,7 @@
     {% for x in d.scenario_more %}
     {% call m.method(x.dynamics|replace('_', '-')|capitalize ~ ' dynamics: the same book and shocks') %}
     {{ m.heatmap(x.heat, 'scenario-grid-' ~ x.dynamics|replace('_', '-'), 'P&L of the reference book under ' ~ (x.dynamics|replace('_', '-')) ~ ' dynamics, by spot shock (columns) and parallel vol shock (rows)', 'Vol') }}
-    <p class="note">Same colour scale and units as the grid above. Under sticky-moneyness the smile moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
+    <p class="note">Same colour scale and units as the grid above. Under sticky-moneyness the smile ({{ m.cite('the headline fit’s model smile', 'calibration.html#model-smile') }}) moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
     {% endcall %}
     {% endfor %}
     </div>
@@ -149,7 +149,7 @@
         <div class="kpi-label">Second-order Taylor check</div>
         <div class="kpi-value">{{ h.resid_sd|fmt('.2f') }}<span class="unit">idx pts residual sd</span></div>
         <div class="kpi-ci">vs daily P&amp;L sd {{ h.total_sd|fmt('.1f') }} idx pts, {{ h.n }} days</div>
-        <div class="kpi-sub">Marks and Greeks share one vol input (the VIX term structure, Run A in <code>delta_hedger.py</code>), so this tests the expansion, not hedge effectiveness against market prices.</div>
+        <div class="kpi-sub">Marks and Greeks share one vol input ({{ m.cite('the VIX term structure', 'index.html#state-ts') }}, Run A in <code>delta_hedger.py</code>), so this tests the expansion, not hedge effectiveness against market prices.</div>
       </div>
     </div>
     {{ m.chart(d.charts.hedge, 'h340') }}

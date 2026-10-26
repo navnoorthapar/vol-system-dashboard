@@ -93,7 +93,7 @@
 <div class="g">
   {% call m.panel('oos', 'Out-of-sample error by expiry', 's12', (d.n_oos|fmt(',')) ~ ' quotes') %}
     {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h260') }}
-    <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors. The short end is where a one-factor model with σ on its box ceiling fails.</p>
+    <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors. The short end is where a one-factor model with σ on its box ceiling fails; in half-spreads on the same chain, see {{ m.cite('the Surface scorecard', 'surface.html#scorecard') }}.</p>
     {% else %}<p class="note">This fit stores no out-of-sample errors by expiry.</p>{% endif %}
   {% endcall %}
 </div>
@@ -153,7 +153,7 @@
         <p class="note" id="skew-term-caption">Inside a rough-volatility model the skew scales as T^(H−1/2); this is a descriptive slope of one fitted surface per session, sensitive to the shortest expiries and to the parametrisation, not an estimate of H{% if sk.rough_H %} ({% if sk.rough_H.on_floor %}the rough-Heston H sits on its 0.02 floor on {{ sk.rough_H.session }}{% else %}the rough-Heston fit gives H = {{ sk.rough_H.H|fmt('.2f') }} on {{ sk.rough_H.session }}{% endif %}: <a href="#rough-vs-heston">rough vs Heston</a>){% endif %}. {{ sk.sessions|length }} stored sessions: a range across sessions, not a sampling interval.</p>
         {% call m.method('How the skews are computed') %}
           <ul class="prose" style="padding-left:16px;">
-            <li>SVI-cal: the analytic slope of each fitted slice at the forward, w′(0) / (2·√(w(0)·T)), with w′(k) = b(ρ + (k − m)/√((k − m)² + σ²)).</li>
+            <li>SVI-cal ({{ m.cite('the Surface page’s fitted slices', 'surface.html#delta-grid') }}): the analytic slope of each fitted slice at the forward, w′(0) / (2·√(w(0)·T)), with w′(k) = b(ρ + (k − m)/√((k − m)² + σ²)).</li>
             <li>eSSVI: the surface report’s stored ATM skew (<code>term_structure.atm_skew_essvi</code>), {{ sk.head }} only. eSSVI’s ψ(θ) shapes the skew across expiries, so its short end differs from SVI-cal’s; both are shown, neither is preferred.</li>
             <li>Heston: central differences of the model smile at h = 0.01 and 0.005 in ln(K/F), Richardson-extrapolated, at {{ sk.head }}’s listed maturities: the published parameters (κ {{ sk.heston_params.kappa|fmt('.2f') }}, σ {{ sk.heston_params.sigma|fmt('.2f') }}){% if sk.refit %} and the σ-profile refit with σ ≤ {{ sk.refit.cap|fmt('g') }} (κ {{ sk.refit.params.kappa|fmt('.2f') }}, σ {{ sk.refit.params.sigma|fmt('.2f') }}; <code>{{ sk.refit.file }}</code>){% endif %}.</li>
             <li>Skews are negative (puts over calls); the chart plots magnitudes on log axes, so a straight line is a power law.</li>
@@ -231,7 +231,7 @@
           <tbody>{% for r in idn.sigma_profile %}<tr{% if r.sigma_cap == d.param_tiles[2].hi %} class="em"{% endif %}><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td><td class="num">{{ r.vvix_model|fmt('.0f') }}</td><td class="num">{{ (r.vvix_model - r.vvix_market if r.vvix_model is not none and r.vvix_market is not none else none)|signed('.0f') }}</td></tr>{% endfor %}</tbody>
         </table>
         </div>
-        <p class="note">Each row is a diagnostic refit and the published fit is unchanged; the highlighted row refits under the production box. The production box is kept at σ ≤ {{ d.param_tiles[2].hi|fmt('g') }}: the NN pricer's training domain, the risk monitor's vomma shock and the bound chips are tied to it, and widening it is filed, not done (<code>config.HESTON_BOUNDS</code>; <a href="corrections.html#c23">Corrections C23-M1</a>).</p>
+        <p class="note">Each row is a diagnostic refit and the published fit is unchanged; the highlighted row refits under the production box. The production box is kept at σ ≤ {{ d.param_tiles[2].hi|fmt('g') }}: the NN pricer's training domain, {{ m.cite('the risk monitor’s vomma shock', 'risk.html#scenario') }} and the bound chips are tied to it, and widening it is filed, not done (<code>config.HESTON_BOUNDS</code>; <a href="corrections.html#c23">Corrections C23-M1</a>).</p>
       </div>
       <div>
         {% if d.charts.frontier %}{{ m.chart(d.charts.frontier, 'h300') }}

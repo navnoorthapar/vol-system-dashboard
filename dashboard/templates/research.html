@@ -188,7 +188,7 @@
         <tbody>{% for r in d.forecast_rows %}<tr{% if r.model == 'pdv' %} class="em"{% endif %}><td class="nowrap">{{ r.model|upper }}</td><td class="num">{{ r.qlike|fmt('.3f') }}</td><td class="num">{{ r.rank|fmt }}</td><td class="num">{{ r.r2|fmt('.3f') }}</td><td>{{ 'in' if r.in_mcs else ('out' if r.in_mcs is not none else '—') }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
-      <p class="note">PDV drives S1/S1C. VIX² is risk-neutral, so it contains the variance premium. Mean realised vol {{ (fm.realised * 100)|fmt('.1f') }}%.</p>
+      <p class="note">PDV drives S1/S1C ({{ m.cite('today’s forecast', 'index.html#state-pdv') }}). VIX² is risk-neutral, so it contains the variance premium. Mean realised vol {{ (fm.realised * 100)|fmt('.1f') }}%.</p>
       {% call m.method('Model definitions') %}<dl class="dl">{% for r in d.forecast_rows %}<dt>{{ r.model|upper }}</dt><dd>{{ r.desc|prose }}</dd>{% endfor %}</dl>{% endcall %}
     {% else %}
       {{ m.missing({'paths': ['data_store/backtest/inference/forecast_eval.json'], 'producer': 'the inference report (scripts/inference_report.py, joint_vol_calibration/stats)'}, 'QLIKE and MSE of the PDV forecast against EWMA, GARCH, GJR, HAR and VIX-based baselines, with Diebold–Mariano tests and the model confidence set.') }}
@@ -216,7 +216,7 @@
       <div>{% if d.charts.vrp_years %}<h3 class="sub-head">{{ vr.beta_bt|fmt('.2f') }}·VIX − RV21 forward by calendar year <span class="sub-meta">backtest window, mean, vol pts</span></h3>
         {{ m.chart(d.charts.vrp_years, 'h200') }}{% endif %}</div>
     </div>
-    <p class="note" id="vrp-caption">RV21 trailing: the root-mean-square SPX log return of the 21 sessions to the date, annualised (√252); RV21 forward: the same over the next 21 sessions, t+1 … t+21, the target of the <a href="#forecast">forecast evaluation</a>, so it ends {{ vr.fwd_last }}. VIX is a 30-calendar-day variance-swap rate that includes the skew premium, so VIX − RV overstates what an at-the-money straddle earns, and the backtest marks its straddles at {{ vr.beta_bt|fmt('.2f') }}·VIX for that reason. The 21-session windows overlap, so the shares and means are not counts of independent events, and no t-statistic is given. This is a description, not P&amp;L: it does not explain the backtest’s result. The backtest window is shaded.</p>
+    <p class="note" id="vrp-caption">RV21 trailing: the root-mean-square SPX log return of the 21 sessions to the date, annualised (√252); RV21 forward: the same over the next 21 sessions, t+1 … t+21, the target of the <a href="#forecast">forecast evaluation</a>, so it ends {{ vr.fwd_last }}. VIX is a 30-calendar-day {{ m.cite('variance-swap rate', 'surface.html#varswap') }} that includes the skew premium, so VIX − RV overstates what an at-the-money straddle earns, and the backtest marks its straddles at {{ vr.beta_bt|fmt('.2f') }}·VIX for that reason. The 21-session windows overlap, so the shares and means are not counts of independent events, and no t-statistic is given. This is a description, not P&amp;L: it does not explain the backtest’s result. The backtest window is shaded.</p>
   {% endcall %}
 </div>
 {% endif %}
@@ -253,7 +253,7 @@
 <div class="g pair">
   {% call m.panel('why', 'Why the edge disappeared', 's8') %}
     <div class="prose">
-      <p>Priced at {{ beta_txt }} × VIX, S1 is {{ s1.get('total_pnl')|usd_k }} ({{ s1.get('win_rate')|pct(0, false) }} win){% if s1f %}, and its sign flips between β = {{ s1f.lo|fmt('.2f') }} and {{ s1f.hi|fmt('.2f') }}{% endif %}. The contrarian inversion S1C is {{ s1c.get('total_pnl')|usd_k }}, so neither direction of the PDV-spread trade makes money. The portfolio is {{ k.get('cum_ret')|pct }} cumulative (Sharpe {{ k.get('sharpe')|fmt(".2f") }}, max drawdown {{ k.get('mdd')|pct }}); S3 ({{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the only positive sleeve, {{ s3_beta_txt }}, and below the T-bill return.</p>
+      <p>Priced at {{ beta_txt }} × VIX, S1 is {{ s1.get('total_pnl')|usd_k }} ({{ s1.get('win_rate')|pct(0, false) }} win){% if s1f %}, and its sign flips between β = {{ s1f.lo|fmt('.2f') }} and {{ s1f.hi|fmt('.2f') }}{% endif %}. The contrarian inversion S1C is {{ s1c.get('total_pnl')|usd_k }}, so neither direction of the PDV-spread trade makes money. The portfolio is {{ k.get('cum_ret')|pct }} cumulative (Sharpe {{ k.get('sharpe')|fmt(".2f") }}, max drawdown {{ k.get('mdd')|pct }}); S3 ({{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the only positive sleeve, {{ s3_beta_txt }}, and below the T-bill return. Each sleeve’s sign at each β is in the {{ m.cite('β grid', '#beta-grid') }}; what the β·VIX mark leaves of the premium, against realised vol, is in {{ m.cite('implied against realised', '#vrp') }}.</p>
     </div>
     {% call m.method('Sleeve notes, stress windows and the C18 inversion') %}
     <div class="prose">
@@ -261,7 +261,7 @@
       <p><strong>S1 · PDV short-VRP (reference):</strong> {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles sold in R1; worst trade {{ s1t.get('worst_pnl')|usd_k }} ({{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}). Selling straddles at the VIX books the skew premium as profit.</p>
       <p><strong>S1C · contrarian PDV</strong> flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. It stays a sleeve because the portfolio's composition is held fixed across correction rounds so they remain comparable. <strong>S4 · VRP</strong> enters on z_vrp declining from a peak; its P&amp;L on {{ yrs }} is {{ s4.get('total_pnl')|usd_k }}.</p>
       <p>Stress windows, each measured from the close before it opens: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} ({{ c.start|fmt }} → {{ c.end|fmt }}) {{ c.total_return|pct }}{{ '; ' if not loop.last else '' }}{% endfor %}. {% if d.end_date and d.end_date < '2025-04-02' %}The backtest ends {{ d.end_date }}, so the April 2025 tariff shock is <em>not</em> in it, and this is no evidence of resilience to it.{% endif %}</p>
-      <p>The C16–C23 corrections, each with its root cause, fix, tests and effect, are on the <a href="/corrections">Corrections</a> page.</p>
+      <p>The C16–C23 corrections, each with its root cause, fix, tests and effect, are on the {{ m.cite('Corrections', 'corrections.html#register') }} page.</p>
     </div>
     {% endcall %}
   {% endcall %}

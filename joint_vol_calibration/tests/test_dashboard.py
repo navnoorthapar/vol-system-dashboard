@@ -5899,3 +5899,91 @@ def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(da
         assert target.index(f'href="model-risk.html#{rid}"') > start
         linked += 1
     assert linked == len(d)
+
+
+# ── P3.4: the evidence graph ──────────────────────────────────────────────────
+
+def _site_links():
+    import sys
+    if str(ROOT / "dashboard") not in sys.path:
+        sys.path.insert(0, str(ROOT / "dashboard"))
+    import site_links
+    return site_links
+
+
+def _pages_by_file(dash, pages) -> dict:
+    return {dash.ROUTES[r]: html for r, html in pages.items()}
+
+
+def test_every_internal_fragment_link_resolves_and_a_broken_one_is_caught(dash, pages):
+    """P3.4: every internal link with a fragment ('page.html#id', '/route#id',
+    '#id') names an id that exists on its target page; a seeded broken fragment
+    is reported."""
+    sl = _site_links()
+    by_file = _pages_by_file(dash, pages)
+    rep = sl.link_report(by_file, dash.ROUTES)
+    assert rep["broken"] == []
+    seeded = dict(by_file)
+    seeded["index.html"] = seeded["index.html"].replace(
+        "</main>", '<a href="calibration.html#no-such-panel">x</a>'
+                   '<a href="/surface#nor-this">y</a></main>', 1)
+    bad = sl.link_report(seeded, dash.ROUTES)["broken"]
+    assert ("index.html", "calibration.html#no-such-panel") in bad
+    assert ("index.html", "/surface#nor-this") in bad
+
+
+def test_every_page_but_model_risk_links_to_evidence_on_three_other_panels(dash, pages):
+    """P3.4: each page except Model Risk links from inside <main> to at least three
+    distinct panels of other pages (the 'Monitored' chips are not counted)."""
+    rep = _site_links().link_report(_pages_by_file(dash, pages), dash.ROUTES)
+    for f in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",
+              "corrections.html"):
+        assert len(rep["cross"][f]) >= 3, (f, sorted(rep["cross"][f]))
+
+
+def test_cited_on_footers_list_exactly_the_citing_pages(dash, pages):
+    """P3.4: a panel restated elsewhere through m.cite() carries a 'Cited on'
+    footer, and the footer lists exactly the pages whose rendered cite links
+    point at it; every cross-page cite of a panel has its footer."""
+    by_file = _pages_by_file(dash, pages)
+    labels = {dash.ROUTES[r]: label for r, label, *_ in dash.NAV}
+    cites: dict[str, set] = {}
+    for f, html in by_file.items():
+        for href in re.findall(r'<a class="cite" href="([\w.-]+\.html#[\w-]+)"', html):
+            if not href.startswith(f + "#"):
+                cites.setdefault(href, set()).add(f)
+    assert len(cites) >= 10
+    footers = {}
+    for f, html in by_file.items():
+        for pid, body in re.findall(r'<div class="panel-foot cite-foot" id="([\w-]+)-cited">(.*?)</div>',
+                                    html, re.DOTALL):
+            footers[f"{f}#{pid}"] = {labels[re.match(r"[\w-]+\.html", h).group(0)]: h
+                                     for h in re.findall(r'<a href="([^"]+)">', body)}
+    reg = dash.cite_registry()
+    # every rendered cite of a panel is in the registry, and the panel's footer names its page
+    for target, sources in cites.items():
+        assert sources <= {e["page"] for e in reg[target]}, target
+        page, pid = target.split("#")
+        if f'id="{pid}" aria-labelledby' in by_file[page]:
+            assert target in footers, target
+            assert {labels[x] for x in sources} <= set(footers[target]), target
+    # a footer lists exactly the pages whose cite() calls point at its panel
+    for target, srcs in footers.items():
+        assert set(srcs) == {e["label"] for e in reg[target]}, target
+        for href in srcs.values():
+            page = href.split("#")[0]
+            assert any(e["page"] == page and (e["panel"] is None or href.endswith("#" + e["panel"]))
+                       for e in reg[target]), (target, href)
+    # a footer's links resolve too
+    assert _site_links().link_report(by_file, dash.ROUTES)["broken"] == []
+
+
+def test_cite_registry_reads_every_cite_call_in_the_templates(dash):
+    """The registry is the templates' own m.cite calls with a literal target."""
+    reg = dash.cite_registry()
+    n_calls = 0
+    for f in (ROOT / "dashboard" / "templates").glob("*.html"):
+        for page, _anchor in re.findall(r"m\.cite\([^\n]*?'([\w.-]+\.html)#([\w-]+)'\)", f.read_text()):
+            n_calls += page != f.name
+    assert sum(len(v) for v in reg.values()) <= n_calls
+    assert {e["page"] for e in reg["calibration.html#oos"]} >= {"index.html"}

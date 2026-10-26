@@ -566,6 +566,7 @@ dialog.keys .dl { font-size: 12px; }
   /* a trio's shorter panel ends with its disclosure, not with blank space */
   .g.trio > .panel > .panel-body { display: flex; flex-direction: column; }
   .g.trio > .panel > .panel-body > .method.foot { margin-top: auto; padding-top: 8px; }
+  .g.trio .panel-body .chart.grow { flex: 1 1 auto; }
 }
 @media (max-width: 1180px) {
   .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }
