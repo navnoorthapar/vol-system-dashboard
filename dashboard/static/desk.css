@@ -340,6 +340,18 @@ sub, sup { font-size: 0.72em; }
 .tbl td.wrap { white-space: normal; min-width: 180px; }
 .tbl.dense td, .tbl.dense th { padding: 3px 6px; }
 .tbl.wrap-head th { white-space: normal; vertical-align: bottom; min-width: 7ch; }   /* long heads wrap, the numbers do not */
+/* the delta-quoted grid (Surface #delta-grid): tinted vol and RR/BF cells, the
+   expiry or tenor as the row header (sticky while the region scrolls sideways),
+   the bracketing expiries of a constant-maturity row under its tenor */
+.dgrid { font-family: var(--mono); font-size: 11.5px; }
+.dgrid caption { font-family: var(--sans); }
+.dgrid thead th { vertical-align: bottom; }
+.dgrid th[scope="row"] { position: sticky; left: 0; z-index: 1; text-transform: none; letter-spacing: 0; font-size: 11.5px; font-weight: 600; color: var(--text); white-space: nowrap; background: var(--surface); }
+.dgrid .dg-sub { display: block; font-weight: 400; font-size: 10px; color: var(--text3); }
+.dgrid td.tint { border-bottom-color: var(--surface); }
+.dgrid tbody tr:hover td.tint { filter: brightness(1.08); }
+.dgrid .xp-tag { display: block; font-family: var(--sans); font-size: 9.5px; font-weight: 600; white-space: nowrap; }
+.dgrid tr.muted th[scope="row"] { color: var(--text3); }
 /* a model's name stays on one line in a desktop-wide region; in a narrower one (a
    1024 px screen, or a card on a phone) it wraps rather than scroll the table */
 .tbl .name { white-space: nowrap; }

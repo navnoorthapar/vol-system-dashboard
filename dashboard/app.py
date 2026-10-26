@@ -76,6 +76,7 @@ if str(DASH) not in sys.path:
 
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
+import desk_surface  # noqa: E402
 from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
     _HEAT_NEG,
     _HEAT_NEUTRAL,
@@ -3853,6 +3854,13 @@ def load_overview() -> dict[str, Any]:
     d["pdv_spark"] = sparkline(d.get("pdv_sparkline") or [], height=36, zero=True)
     d["surface_state"] = surf.get("state")
     d["inference_state"] = inf.get("state")
+    # one line of the surface in desk coordinates (the Surface page's 1M row)
+    d["surface_line"] = None
+    if surf.get("state") == "ok" and surf.get("surface"):
+        with _loader_boundary(d, "surface in desk coordinates"):
+            cm = desk_surface.constant_maturity(
+                desk_surface.delta_grid(surf["surface"], surf["residuals"], surf.get("vix")))
+            d["surface_line"] = surface_state_line(cm, surf["session"], _latest_market_session())
     return d
 
 
@@ -3944,6 +3952,111 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
     return rows
 
 
+# ── the surface in desk coordinates (desk_surface.py) ────────────────────────
+DESK_GRID_HEADS = ("Expiry", "T (d)", "F", *(lab for _, lab, _ in desk_surface.PILLARS),
+                   "RR25", "BF25", "RR10", "BF10", "ATM skew", "VS vol", "VS − ATMF",
+                   "Median half-spread", "Quotes")
+EXTRAP_TAG = "◇ extrapolated"
+
+
+def _short_exp(e: str | None) -> str:
+    return e[2:] if e else "—"
+
+
+def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
+    """Display rows of the delta-quoted grid: listed expiries and constant maturity.
+
+    Vol cells take a cividis tint on one scale for both tables; RR and BF the
+    diverging ramp, each pair (RR25/RR10, BF25/BF10) symmetric about 0 on its
+    own limit. An extrapolated pillar carries the '◇ extrapolated' tag."""
+    keys = [k for k, _, _ in desk_surface.PILLARS]
+    vols = [r["vol"][k] for r in [*listed, *cm] for k in keys if r["vol"][k] is not None]
+    lo, hi = (min(vols), max(vols)) if vols else (0.0, 1.0)
+
+    def lim(names: Sequence[str]) -> float:
+        xs = [abs(r[n]) for r in [*listed, *cm] for n in names if r.get(n) is not None]
+        return max(xs) if xs else 1.0
+
+    rr_lim, bf_lim = lim(("rr25", "rr10")), lim(("bf25", "bf10"))
+
+    def tint(text: str, bg: str | None, title: str = "", xp: bool = False) -> dict:
+        c = {"text": text, "title": title, "xp": xp}
+        if bg is not None:
+            c.update(bg=bg, fg=_text_colour_on(bg))
+        return c
+
+    def row(r: dict, head: str, sub: str = "") -> dict:
+        cells = [tint(_fmt(r["T_days"], ".0f"), None), tint(_fmt(r.get("forward"), ",.2f"), None)]
+        for k, lab, _ in desk_surface.PILLARS:
+            v, xp = r["vol"][k], r["extrap"][k]
+            kk = (r.get("k") or {}).get(k)
+            title = (f"{lab}: ln(K/F) {signed(kk, '.3f')}" if kk is not None else lab) + (
+                f", outside the quoted ln(K/F) range {signed(r.get('k_lo'), '.3f')} to "
+                f"{signed(r.get('k_hi'), '.3f')}" if xp and r.get("k_lo") is not None else
+                (", beyond a bracketing expiry's quoted strikes" if xp else ""))
+            cells.append(tint(_fmt(v, ".2f"), seq_colour(v, lo, hi) if v is not None else None, title, xp))
+        for n, limit in (("rr25", rr_lim), ("bf25", bf_lim), ("rr10", rr_lim), ("bf10", bf_lim)):
+            v = r.get(n)
+            cells.append(tint(signed(v, ".2f"), div_colour(v, limit) if v is not None else None,
+                              "" if v is not None else "a pillar is extrapolated or missing"))
+        cells += [tint(signed(r.get("skew_vp"), ".2f"), None), tint(_fmt(r.get("vs"), ".2f"), None),
+                  tint(signed(r.get("vs_minus_atmf"), ".2f"), None),
+                  tint(_fmt(r.get("half_spread_vp"), ".2f"), None), tint(_fmt(r.get("n_quotes"), ","), None)]
+        return {"head": head, "sub": sub, "cells": cells, "available": r.get("available", True)}
+
+    rows_l = [row(r, r["expiry"]) for r in listed]
+    rows_c = []
+    for r in cm:
+        if not r["available"]:
+            sub = "outside the listed expiries"
+        elif r["lower"] == r["upper"]:
+            sub = f"= {_short_exp(r['lower'])}"
+        else:
+            sub = f"{_short_exp(r['lower'])} → {_short_exp(r['upper'])}"
+        rows_c.append(row(r, r["label"], sub))
+    n_xp = sum(1 for r in listed for k in keys if r["extrap"][k])
+    return {"heads": list(DESK_GRID_HEADS), "listed": rows_l, "cm": rows_c, "vol_lo": lo, "vol_hi": hi,
+            "rr_lim": rr_lim, "bf_lim": bf_lim, "n_extrap": n_xp, "extrap_tag": EXTRAP_TAG,
+            "any_extrap": n_xp > 0 or any(r["extrap"][k] for r in cm for k in keys)}
+
+
+def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict]) -> list[dict]:
+    """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
+    slope 1M → 1Y, all from the constant-maturity rows (never extrapolated)."""
+    by = {r["label"]: r for r in cm}
+    m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
+    span = (f"{_fmt(listed[0]['T_days'], '.0f')}–{_fmt(listed[-1]['T_days'], '.0f')} d"
+            if listed else "no listed expiries")
+    where = (f"between {m1['lower']} and {m1['upper']}" if m1.get("available") and m1["lower"] != m1["upper"]
+             else (f"the {m1['lower']} expiry" if m1.get("available") else f"outside the listed {span}"))
+    slope = (y1["atmf"] - m1["atmf"]) if (m1.get("atmf") is not None and y1.get("atmf") is not None) else None
+    return [
+        {"label": "1M ATMF", "value": _fmt(m1.get("atmf"), ".2f"), "unit": "%",
+         "sub": f"SVI-cal at 30 days, {where}"},
+        {"label": "1M RR25", "value": signed(m1.get("rr25"), ".2f"), "unit": "vol pts",
+         "sub": "25Δ call − 25Δ put; negative: puts over calls"},
+        {"label": "1M BF25", "value": signed(m1.get("bf25"), ".2f"), "unit": "vol pts",
+         "sub": "mean of the 25Δ wings − ATMF"},
+        {"label": "1M VS − ATMF", "value": signed(m1.get("vs_minus_atmf"), ".2f"), "unit": "vol pts",
+         "sub": "variance-swap vol over ATMF: the skew premium"},
+        {"label": "ATMF slope 1M → 1Y", "value": signed(slope, ".2f"), "unit": "vol pts",
+         "sub": (f"1Y {_fmt(y1.get('atmf'), '.2f')}% − 1M {_fmt(m1.get('atmf'), '.2f')}%"
+                 if slope is not None else f"1Y outside the listed {span}")},
+    ]
+
+
+def surface_state_line(cm: Sequence[dict], session: str | None, ref: str | None) -> dict | None:
+    """The Overview's one line of the surface state: the 1M constant-maturity row."""
+    m1 = next((r for r in cm if r["label"] == "1M"), None)
+    if not m1 or not m1["available"]:
+        return None
+    age = session_age(session, ref)
+    return {"atmf": _fmt(m1["atmf"], ".2f"), "rr25": signed(m1["rr25"], ".2f"),
+            "bf25": signed(m1["bf25"], ".2f"), "session": session,
+            "age": ("the newest session" if age == 0 else
+                    (f"{plural(age, 'session')} old" if age is not None else "age unknown"))}
+
+
 def load_surface() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "surf": None, "model_heat": None,
                          "session": None, "models": [], "expiries": []}
@@ -4004,6 +4117,16 @@ def surface_extras(d: dict, surf: dict) -> None:
                      for e, t in exps.items()]
     d["n_quotes"] = len(mkt)
     d["median_half_spread"] = float(mkt["half_spread_vp"].median())
+
+    # the SVI-cal surface in desk coordinates: delta pillars, RR/BF, ATM skew and
+    # var-swap vol per listed expiry and at constant maturity (desk_surface.py).
+    # A slice whose delta cannot be inverted raises: the page fails closed.
+    sj = surf.get("surface") or {}
+    if (((sj.get("surfaces") or {}).get("svi_cal") or {}).get("params") or {}).get("slices"):
+        listed = desk_surface.delta_grid(sj, res, surf.get("vix"))
+        cm = desk_surface.constant_maturity(listed)
+        d["desk"] = desk_grid_view(listed, cm)
+        d["state_tiles"] = surface_state_tiles(cm, listed)
 
     # market IV heatmap: median mid IV of the quotes in each (expiry, ln(K/F)) bucket,
     # the open wings included; the colour ramp spans the cells shown (it spanned

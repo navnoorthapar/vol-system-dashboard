@@ -113,3 +113,14 @@
 </svg>
 {% endif %}
 {%- endmacro %}
+
+{# the delta-quoted surface grid (Surface #delta-grid): g from app.desk_grid_view #}
+{% macro desk_grid(g, rows, id, caption, label) -%}
+<div class="tbl-wrap" tabindex="0" role="region" aria-label="{{ label }} (scrollable)">
+<table class="tbl dense dgrid" id="{{ id }}">
+  <caption>{{ caption }}</caption>
+  <thead><tr>{% for h in g.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{% if g.links and g.links.get(h) %}<a href="{{ g.links[h] }}">{{ h }}</a>{% else %}{{ h }}{% endif %}</th>{% endfor %}</tr></thead>
+  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+</div>
+{%- endmacro %}

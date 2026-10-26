@@ -3373,8 +3373,10 @@ def test_browser_slice_is_drawn_once_and_tables_follow_the_tab(site_browser):
           const id = this.getDom().id; window.__so[id] = (window.__so[id] || 0) + 1;
           return so.apply(this, arguments); }; });""")
     page.goto(sb["base"] + "surface.html", wait_until="load")
-    page.wait_for_timeout(300)
-    page.evaluate("document.fonts.ready.then(() => true)")
+    # the slice sits below the delta grid (P2.1), out of the first viewport: the
+    # IntersectionObserver draws it when it is scrolled to
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
     page.wait_for_timeout(200)
     n = page.evaluate("window.__so['chart-slices']")
     early = page.evaluate("Desk.charts['chart-slices'].early")
@@ -4643,3 +4645,151 @@ def test_browser_corrections_register_filters_links_and_height(site_browser):
         assert st == [True, True, True], st
     finally:
         ctx.close()
+
+
+# ── P2: the surface and skew in desk coordinates ─────────────────────────────
+
+def _desk_inputs() -> tuple[dict, pd.DataFrame, dict]:
+    """surface.json, residuals.parquet and vix_replication.json of the session the
+    Surface page renders (the newest stored one)."""
+    return (json.loads(_surface_file("surface.json").read_text()),
+            pd.read_parquet(_surface_file("residuals.parquet")),
+            json.loads(_surface_file("vix_replication.json").read_text()))
+
+
+def _desk_module():
+    """dashboard/desk_surface.py (dashboard/ is on sys.path once the dash fixture imported app.py)."""
+    return importlib.import_module("desk_surface")
+
+
+def _table_heads(html: str, table_id: str) -> list[str]:
+    tbl = re.search(rf'<table class="tbl[^"]*" id="{re.escape(table_id)}"[^>]*>(.*?)</table>', html,
+                    re.DOTALL)
+    assert tbl, table_id
+    head = tbl.group(1).split("<thead>")[1].split("</thead>")[0]
+    return [_html_unescape(re.sub(r"<[^>]+>", "", c)).strip()
+            for c in re.findall(r"<th[^>]*>(.*?)</th>", head, re.DOTALL)]
+
+
+def _kpi_tiles(html: str, block_id: str) -> dict[str, str]:
+    start = html.index(f'id="{block_id}"')
+    ends = [i for i in (html.find('<div class="kpis"', start), html.find('<div class="g"', start)) if i > 0]
+    blk = html[start:min(ends)]
+    out = {}
+    pat = r'<div class="kpi-label">(.*?)</div>\s*<div class="kpi-value[^"]*">(.*?)</div>'
+    for lab, val in re.findall(pat, blk, re.DOTALL):
+        out[_html_unescape(re.sub(r"<[^>]+>", "", lab)).strip()] = _html_unescape(
+            re.sub(r'<span class="unit">.*?</span>', "", val)).strip()
+    return out
+
+
+DELTA_GRID_HEADS = ["Expiry", "T (d)", "F", "10ΔP", "25ΔP", "ATMF", "25ΔC", "10ΔC", "RR25", "BF25", "RR10",
+                    "BF10", "ATM skew", "VS vol", "VS − ATMF", "Median half-spread", "Quotes"]
+
+
+def test_surface_delta_grid_panel_lists_every_expiry_and_five_tenors(dash, pages):
+    """P2.1: the Surface page opens with the SVI-cal surface in desk coordinates:
+    one row per listed expiry (the slices of the rendered session) and five
+    constant-maturity rows, each with exactly the desk's columns, the conventions
+    in the caption, and the values desk_surface computes from the artifacts."""
+    ds = _desk_module()
+    html = pages["/surface"]
+    sj, res, vix = _desk_inputs()
+    listed = ds.delta_grid(sj, res, vix)
+    cm = ds.constant_maturity(listed)
+    first = re.search(r'<section class="panel [^"]*" id="([\w-]+)"', html).group(1)
+    assert first == "delta-grid"
+    for tid in ("delta-grid-listed", "delta-grid-cm"):
+        assert _table_heads(html, tid) == DELTA_GRID_HEADS, tid
+        cap = re.search(rf'id="{tid}">\s*<caption>(.*?)</caption>', html, re.DOTALL).group(1)
+        assert "RR = call − put" in _html_unescape(cap)
+        assert "not premium-adjusted" in _html_unescape(cap)
+    rows_l = _table_rows(html, "delta-grid-listed")
+    rows_c = _table_rows(html, "delta-grid-cm")
+    assert len(rows_l) == len(sj["surfaces"]["svi_cal"]["params"]["slices"]) == len(listed)
+    assert len(rows_c) == 5
+    assert [r[0][:2] for r in rows_c] == ["1M", "2M", "3M", "6M", "1Y"]
+    col = {h: i for i, h in enumerate(DELTA_GRID_HEADS)}
+    for r, g in zip(rows_l, listed):
+        assert r[0] == g["expiry"]
+        assert r[col["ATMF"]].startswith(dash._fmt(g["atmf"], ".2f"))
+        assert r[col["RR25"]] == dash.signed(g["rr25"], ".2f")
+        assert r[col["BF25"]] == dash.signed(g["bf25"], ".2f")
+    for r, g in zip(rows_c, cm):
+        assert r[col["ATMF"]].startswith(dash._fmt(g["atmf"], ".2f"))
+    # the tab toggle names both row sets with their counts
+    assert f">Listed expiries ({len(listed)})</button>" in html
+    assert ">Constant maturity (5)</button>" in html
+    # the grid sits in a labelled, focusable scroll region (phones scroll it, not the page)
+    assert html.count('role="region" aria-label="Delta grid, listed expiries (scrollable)"') == 1
+
+
+def test_surface_state_tiles_are_the_one_month_constant_maturity_row(dash, pages):
+    ds = _desk_module()
+    listed = ds.delta_grid(*_desk_inputs())
+    cm = {r["label"]: r for r in ds.constant_maturity(listed)}
+    tiles = _kpi_tiles(pages["/surface"], "surface-state")
+    m1, y1 = cm["1M"], cm["1Y"]
+    assert tiles["1M ATMF"] == dash._fmt(m1["atmf"], ".2f")
+    assert tiles["1M RR25"] == dash.signed(m1["rr25"], ".2f")
+    assert tiles["1M BF25"] == dash.signed(m1["bf25"], ".2f")
+    assert tiles["1M VS − ATMF"] == dash.signed(m1["vs_minus_atmf"], ".2f")
+    slope = (y1["atmf"] - m1["atmf"]) if (y1["available"] and m1["available"]) else None
+    assert tiles["ATMF slope 1M → 1Y"] == dash.signed(slope, ".2f")
+    # the state row sits above the model-error tiles
+    html = pages["/surface"]
+    assert html.index('id="surface-state"') < html.index('id="surface-scores"')
+
+
+def test_overview_surface_line_is_the_one_month_row_with_its_age(dash, pages):
+    ds = _desk_module()
+    m1 = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))[0]
+    assert m1["label"] == "1M"
+    line = re.search(r'<p class="note" id="surface-line">(.*?)</p>', pages["/"], re.DOTALL)
+    assert line, "the Overview's headline-fit panel lost its surface line"
+    text = re.sub(r"\s+([,.)])", r"\1", _visible_text("<body>" + line.group(1)))
+    session = _surface_file("surface.json").parent.name
+    age = dash.session_age(session, dash._latest_market_session())
+    assert (f"1M ATMF {dash._fmt(m1['atmf'], '.2f')}% · RR25 {dash.signed(m1['rr25'], '.2f')} · "
+            f"BF25 {dash.signed(m1['bf25'], '.2f')} vol pts") in text
+    assert f"surface {session}, " in text
+    assert ("the newest session" if age == 0 else f"{dash.plural(age, 'session')} old") in text
+    assert 'href="/surface#delta-grid"' in line.group(1)
+
+
+def test_surface_stale_banner_still_renders_above_the_new_panels(dash, pages):
+    session = _surface_file("surface.json").parent.name
+    age = dash.session_age(session, dash._latest_market_session())
+    html = pages["/surface"]
+    banner = re.search(r'<div class="banner banner-stale-(\w+)" data-stale="surface" data-age="(\d+)"', html)
+    if dash.stale_level(age) == "ok":
+        assert banner is None
+    else:
+        assert banner
+        assert banner.group(1) == dash.stale_level(age)
+        assert int(banner.group(2)) == age
+        assert html.index('data-stale="surface"') < html.index('id="delta-grid"')
+
+
+def test_delta_grid_renders_an_extrapolated_pillar_and_dashes_its_rr_bf(dash):
+    """A synthetic slice quoted only up to between its 25Δ and 10Δ call strikes:
+    the 10ΔC cell carries '◇ extrapolated' and RR10 / BF10 print '—'."""
+    ds = _desk_module()
+    sl = {"a": 0.0004, "b": 0.05, "rho": -0.6, "m": 0.0, "sigma": 0.12, "T": 28 / 365, "expiry": "2030-01-28"}
+    k25, k10 = ds.delta_strike(sl, 0.25), ds.delta_strike(sl, 0.10)
+    sj = {"surfaces": {"svi_cal": {"params": {"slices": [sl]}}},
+          "term_structure": [{"expiry": sl["expiry"], "T_days": 28.0, "forward": 5000.0, "n_quotes": 12,
+                              "median_half_spread_vp": 0.2}]}
+    res = pd.DataFrame({"model": "svi_cal", "expiry": sl["expiry"], "k": [-0.5, (k25 + k10) / 2]})
+    listed = ds.delta_grid(sj, res, {"strip": []})
+    view = dash.desk_grid_view(listed, ds.constant_maturity(listed))
+    macros = dash.app.jinja_env.get_template("_macros.html").module
+    html = str(macros.desk_grid(view, view["listed"], "t-grid", "caption", "label"))
+    (row,) = _table_rows(html, "t-grid")
+    col = {h: i for i, h in enumerate(DELTA_GRID_HEADS)}
+    assert row[col["10ΔC"]].endswith("◇ extrapolated")
+    assert "extrapolated" not in "".join(row[col["10ΔP"]:col["25ΔC"] + 1])
+    assert row[col["RR10"]] == row[col["BF10"]] == "—"
+    assert row[col["RR25"]] != "—"
+    assert row[col["BF25"]] != "—"
+    assert row[col["VS vol"]] == "—"                     # no strip row for the expiry: not invented

@@ -16,6 +16,11 @@
 
 {% if s.state == 'ok' %}
 {% set H = d.score_rows|selectattr('key', 'in', ['heston_v2', 'heston'])|first %}
+{% if d.state_tiles %}
+<div class="kpis" style="margin-bottom:8px;" id="surface-state" role="group" aria-label="Surface state: the SVI-cal surface at constant maturity">
+  {% for t in d.state_tiles %}{{ m.kpi(t.label, t.value, unit=t.unit, sub=t.sub) }}{% endfor %}
+</div>
+{% endif %}
 <div class="kpis" style="margin-bottom:8px;" id="surface-scores">
   {% for r in d.score_rows %}{% set o = r.oos %}
   {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes') }}
@@ -25,6 +30,26 @@
   {% endif %}{% endif %}
   {% if d.arb %}{{ m.kpi('Executable static arbitrage', d.arb.n_quotes_in_executable_violation|fmt(','), sub='of ' ~ (d.arb.n_quotes|fmt(',')) ~ ' quotes sit in a bid/ask-level violation; ' ~ (d.arb.n_quotes_in_mid_violation|fmt(',')) ~ ' at mids') }}{% endif %}
 </div>
+
+{% if d.desk %}{% set g = d.desk %}
+<div class="g">
+  {% call m.panel('delta-grid', 'Surface in desk coordinates · delta pillars, RR / BF, skew and var-swap', 's12', 'SVI-cal · ' ~ d.session) %}
+    <div class="tabs js-only" role="tablist" aria-label="Rows of the delta grid" data-state-key="grid" hidden>
+      <button class="btn" type="button" role="tab" aria-selected="true" aria-controls="dg-listed" data-value="listed">Listed expiries ({{ g.listed|length }})</button>
+      <button class="btn" type="button" role="tab" aria-selected="false" aria-controls="dg-cm" data-value="cm">Constant maturity ({{ g.cm|length }})</button>
+    </div>
+    {% set conv = 'undiscounted forward delta on the slice’s own vol (not premium-adjusted); ATMF = ln(K/F) = 0; RR = call − put (negative = puts over calls); BF = (call + put)/2 − ATMF; values of the fitted SVI-cal surface, not raw quotes' %}
+    <div id="dg-listed" role="tabpanel">
+      {{ m.desk_grid(g, g.listed, 'delta-grid-listed', 'Listed expiries, ' ~ d.session ~ ': ' ~ conv, 'Delta grid, listed expiries') }}
+    </div>
+    <div id="dg-cm" role="tabpanel" hidden>
+      {{ m.desk_grid(g, g.cm, 'delta-grid-cm', 'Constant maturity (1M = 30 days … 1Y = 365): each pillar interpolated linearly in total variance at fixed delta between the two bracketing listed expiries named under the tenor, never extrapolated beyond the listed expiries; F, half-spread and quotes belong to listed expiries; ' ~ conv, 'Delta grid, constant maturity') }}
+    </div>
+    <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, g.vol_lo|fmt('.1f') ~ '%', g.vol_hi|fmt('.1f') ~ '%', 'vol cells') }}<span class="sep">·</span>{{ m.ramp_bar(berlin, '−', '+', 'RR / BF, each about 0 (RR ±' ~ (g.rr_lim|fmt('.1f')) ~ ', BF ±' ~ (g.bf_lim|fmt('.1f')) ~ ' vol pts)') }}</div>
+    <p class="note">Vols and VS vol in %; RR, BF, VS − ATMF and median half-spread in vol pts; ATM skew = ∂σ/∂ln(K/F) at the forward, in vol pts per 0.1 of ln-moneyness. {% if g.any_extrap %}{{ g.extrap_tag }}: the pillar’s strike lies outside its expiry’s quoted ln(K/F) range (at constant maturity: outside either bracketing expiry’s), so the fitted wing is extrapolated there; the RR / BF that would use it shows “—”. {{ g.n_extrap }} of {{ g.listed|length * 5 }} listed pillars.{% else %}Every pillar of this session lies inside its expiry’s quoted ln(K/F) range: no wing is extrapolated.{% endif %} VS vol is the Cboe-formula variance-swap vol of the same expiry’s quotes (the strip below); VS − ATMF is taken against this grid’s ATMF, not the strip’s quote ATM.</p>
+  {% endcall %}
+</div>
+{% endif %}
 
 <div class="g">
   {% call m.panel('iv-heat', 'Implied vol by expiry and ln(K/F) · market mids', 's7', d.n_quotes|fmt(',') ~ ' quotes') %}
