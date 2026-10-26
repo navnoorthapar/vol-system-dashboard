@@ -20,7 +20,10 @@
 //     of a closed <details> is not visible content; #carry and #forward are left to
 //     their own fixes;
 //   * heatmap row heads: at 390 px a heatmap's row header stays in view after its
-//     region is scrolled sideways.
+//     region is scrolled sideways;
+//   * Model Risk status filters: each chip of the summary strip shows exactly the
+//     rows of its status, as many as it counts, and is the only one pressed; 'All'
+//     shows every row again.
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -271,7 +274,35 @@ async function checkStickyHeatHeads() {
   return check;
 }
 
-for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads]) {
+// -- Model Risk status filters (P3.3) ----
+async function checkMonitorFilters() {
+  const check = { name: 'Model Risk status chips filter the checks', filters: [], failures: [] };
+  const { ctx, page, errors } = await openPage('model-risk.html');
+  const chips = await page.evaluate(() => Array.from(document.querySelectorAll('[data-filter-for="monitor-table"]'))
+    .map(b => ({ filter: b.getAttribute('data-filter'), count: b.getAttribute('data-count') })));
+  const total = await page.evaluate(() => document.querySelectorAll('#monitor-table tbody tr').length);
+  if (chips.filter(c => c.filter.startsWith('status:')).length < 2) check.failures.push('model-risk.html: fewer than two status chips');
+  for (const c of [...chips.filter(x => x.filter !== 'all'), chips.find(x => x.filter === 'all')]) {
+    if (!c) continue;
+    await page.locator(`[data-filter-for="monitor-table"][data-filter="${c.filter}"]`).click();
+    const r = await page.evaluate(f => ({
+      shown: Array.from(document.querySelectorAll('#monitor-table tbody tr')).filter(tr => !tr.hidden && getComputedStyle(tr).display !== 'none')
+        .map(tr => tr.getAttribute('data-status')),
+      pressed: Array.from(document.querySelectorAll('[data-filter-for="monitor-table"][aria-pressed="true"]')).map(b => b.getAttribute('data-filter')),
+    }), c.filter);
+    check.filters.push({ filter: c.filter, shown: r.shown.length });
+    const want = c.filter === 'all' ? total : Number(c.count);
+    const st = c.filter.slice(7);
+    if (r.shown.length !== want) check.failures.push(`model-risk.html ${c.filter}: ${r.shown.length} rows shown, the chip counts ${want}`);
+    if (c.filter !== 'all' && r.shown.some(x => x !== st)) check.failures.push(`model-risk.html ${c.filter}: shows rows of other statuses (${r.shown.join(', ')})`);
+    if (r.pressed.length !== 1 || r.pressed[0] !== c.filter) check.failures.push(`model-risk.html ${c.filter}: pressed ${r.pressed.join(', ')}`);
+  }
+  for (const e of errors) check.failures.push(`model-risk.html: JavaScript error: ${e}`);
+  await ctx.close();
+  return check;
+}
+
+for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters]) {
   const c = await run();
   report.checks.push(c);
   report.failures.push(...c.failures);

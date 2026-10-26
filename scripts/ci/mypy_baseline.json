@@ -2,7 +2,7 @@
  "counts": {
   "dashboard/app.py": {
    "arg-type": 20,
-   "assignment": 3,
+   "assignment": 2,
    "attr-defined": 4,
    "call-overload": 6,
    "index": 8,
@@ -158,6 +158,6 @@
   }
  },
  "tool": "mypy",
- "total": 369,
+ "total": 368,
  "version": "mypy 2.4.0 (compiled: yes)"
 }

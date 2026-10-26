@@ -5,11 +5,16 @@
 <section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t">
   <div class="panel-head">
     <h2 class="panel-title" id="{{ id }}-t">{{ title|sym }}</h2>
-    <span class="panel-side">{% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
+    <span class="panel-side">{{ monitored_chips(id) }}{% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">{{ caller() }}</div>
 </section>
+{%- endmacro %}
+
+{# a link back to each Model Risk check whose evidence this element shows #}
+{% macro monitored_chips(id) -%}
+{%- for c in monitored_for(id) -%}<a class="chip chip-{{ c.status if c.status in ('ok', 'watch', 'breach') else 'muted' }} mon-link" href="model-risk.html#{{ c.id }}" aria-label="Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}: {{ c.check }}" title="Model Risk check: {{ c.check }}" data-monitored="{{ c.id }}">Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}</a>{%- endfor -%}
 {%- endmacro %}
 
 {# ci_kind 'range': a range across sessions (dashed rule), never read as an interval #}

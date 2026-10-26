@@ -51,6 +51,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 from flask import Flask, make_response, render_template, request
+from flask import g as request_globals
 from pandas.tseries.holiday import (
     AbstractHolidayCalendar,
     GoodFriday,
@@ -77,6 +78,7 @@ if str(DASH) not in sys.path:
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
 import desk_market  # noqa: E402
+import desk_monitor  # noqa: E402
 import desk_surface  # noqa: E402
 from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
     _HEAT_NEG,
@@ -403,6 +405,15 @@ def date_nowrap(text: Any) -> Any:
 
 
 app.jinja_env.filters["dates"] = date_nowrap
+
+
+def monitored_for(element_id: str) -> list[dict]:
+    """The Model Risk checks whose evidence is the element ``element_id`` of the
+    page being rendered (a Jinja global, so the imported panel macro sees it)."""
+    return list((getattr(request_globals, "monitored", None) or {}).get(element_id) or [])
+
+
+app.jinja_env.globals["monitored_for"] = monitored_for
 
 
 # ── Market data readers (DB) ───────────────────────────────────────────────────
@@ -2914,6 +2925,16 @@ def gated_fits_spec(hist: Sequence[dict], session: str | None) -> dict | None:
                              _fmt(h.get("wing"), ".2f")] for h in hist]))
 
 
+def oos_rows_of(cal: dict) -> list[dict]:
+    """A fit's out-of-sample SPX IV RMSE per expiry (vol pts), with days to expiry."""
+    oos = (cal.get("oos") or {}).get("spx_oos_rmse_by_expiry") or {}
+    t_by_exp = {str(c.get("expiry")): float(c["T"]) * 365.0 for c in cal.get("carry_by_expiry") or []
+                if _num(c.get("T")) is not None}
+    anchor_exp = {str(a.get("expiry")) for a in cal.get("anchors_by_expiry") or []}
+    return sorted(({"expiry": e, "T_days": t_by_exp.get(e), "rmse": float(v), "anchor": e in anchor_exp}
+                   for e, v in oos.items() if _num(v) is not None), key=lambda r: r["expiry"])
+
+
 VX_LEG_REL_TOL = 1e-6     # the page's recomputed VX RMSE against the fit's own record
 
 
@@ -3083,12 +3104,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
     d["param_tiles"] = tiles
 
     # OOS RMSE by expiry, with the in-sample RMSE as the reference line.
-    oos = (cal.get("oos") or {}).get("spx_oos_rmse_by_expiry") or {}
-    t_by_exp = {str(c.get("expiry")): float(c["T"]) * 365.0 for c in cal.get("carry_by_expiry") or []
-                if _num(c.get("T")) is not None}
-    anchor_exp = {str(a.get("expiry")) for a in cal.get("anchors_by_expiry") or []}
-    rows = sorted(({"expiry": e, "T_days": t_by_exp.get(e), "rmse": float(v), "anchor": e in anchor_exp}
-                   for e, v in oos.items() if _num(v) is not None), key=lambda r: r["expiry"])
+    rows = oos_rows_of(cal)
     d["oos_rows"] = rows
     d["n_oos"] = (cal.get("oos") or {}).get("n_spx_oos")
     if rows:
@@ -5567,6 +5583,61 @@ def vx_futures_oos_text(rows: list[dict] | None = None) -> str:
     return f"{rng} index pts RMSE out of sample ({plural(len(have), 'session')}{tail}{src})"
 
 
+# Where each check's evidence is shown (Model Risk links each value there, and
+# that panel links back with a 'Monitored' chip): page file and element id.
+CHECK_EVIDENCE = {
+    "calib_age": ("calibration.html", "history"),
+    "params_at_bound": ("calibration.html", "identifiability"),
+    "oos_rmse": ("calibration.html", "oos"),
+    "short_oos_rmse": ("calibration.html", "oos"),
+    "vix_rmse": ("calibration.html", "vixleg"),
+    "feller": ("calibration.html", "feller"),
+    "median_abs_hs": ("surface.html", "scorecard"),
+    "greeks_source": ("risk.html", "greeks-grid"),
+    "beta_drift": ("research.html", "beta-chains"),
+    "label_lag": ("index.html", "state-regime"),
+    "vx_lag": ("calibration.html", "vixleg"),
+    "classifier": ("research.html", "research-classifier"),
+    "vix_rep_gap": ("surface.html", "vix-replication"),
+    "arb_exec_share": ("surface.html", "arbitrage"),
+}
+
+
+def worst_short_expiry(cal: dict, max_days: float = 30.0) -> dict | None:
+    """The fit's worst out-of-sample expiry within ``max_days`` (oos_rows_of)."""
+    short = [r for r in oos_rows_of(cal) if r["T_days"] is not None and r["T_days"] <= max_days]
+    return max(short, key=lambda r: r["rmse"]) if short else None
+
+
+def fit_check_values(cal: dict) -> dict:
+    """The gated-fit checks of one fit: today's row and every stored session's dot
+    are this function of their own pickle."""
+    losses = _cal_losses(cal)
+    pinned = cal.get("pinned_params")
+    w = worst_short_expiry(cal)
+    return {"params_at_bound": float(len(pinned)) if pinned is not None else None,
+            "oos_rmse": _num(losses.get("spx_oos_iv_rmse")),
+            "short_oos_rmse": w["rmse"] if w else None, "short_expiry": w["expiry"] if w else None,
+            "vix_rmse": _num(losses.get("vix_index_rmse", losses.get("vix_futures_rmse")))}
+
+
+def surface_check_values(surf: dict) -> dict:
+    """The surface-report checks of one stored session (scorecard, VIX replication,
+    the static-arbitrage screen): today's row and each session's dot."""
+    hkey = heston_model_key(surf["models"])
+    row = next((r for r in surf.get("scorecard_rows") or [] if r["model"] == hkey), None)
+    st_ = row["oos"] if row else (artifacts.residual_stats(surf["residuals"], hkey) if hkey else {})
+    rep = ((surf.get("vix") or {}).get("indices") or {}).get("VIX") or {}
+    gap = _num(rep.get("gap_vs_official"))
+    arb = (surf.get("surface") or {}).get("arbitrage") or {}
+    n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
+    return {"median_abs_hs": _num(st_.get("median_abs_hs")), "inside_pct": _num(st_.get("inside_spread_pct")),
+            "n_hs": _num(st_.get("n")), "scorecard": bool(row), "rep_gap": gap,
+            "vix_rep_gap": abs(gap) if gap is not None else None,
+            "arb_exec_share": n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None,
+            "n_ex": n_ex, "n_q": n_q}
+
+
 def load_model_risk() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
@@ -5585,35 +5656,58 @@ def load_model_risk() -> dict[str, Any]:
         d["errors"].append(e)
     mon = []
 
-    def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None):
+    def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None, key=None,
+            history=None, digits=".2f"):
         lim = MONITOR_LIMITS.get(limits_key)
         st = status if status is not None else _rag(value, lim) if lim else "na"
-        mon.append({"model": mid, "check": check, "value": text, "status": st,
+        page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
+        mon.append({"model": mid, "check": check, "value": text, "status": st, "num": value,
                     "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim
                                               else "informational"),
-                    "artifact": artifact, "note": note})
+                    "artifact": artifact, "note": note, "key": key or limits_key,
+                    "limits_key": limits_key or None,
+                    "id": "check-" + desk_monitor.slug(key or limits_key or check),
+                    "href": f"{page}#{anchor}" if page else None, "page": page, "anchor": anchor,
+                    "bullet": desk_monitor.bullet(value, lim, digits) if lim else None,
+                    "history": (desk_monitor.history_view(history, lim, digits)
+                                if (lim and history) else None)})
+    # the gated fits: today's values and each session's, from one function of the pickle
+    gated: list[tuple[str, dict]] = []
+    head: dict = {}
+    with _loader_boundary(d, "gate-passing fits (data_store/calibrations)"):
+        gated.extend((r["session"], fit_check_values(_load_pickle(r["path"]))) for r in scan_calibrations()
+                     if r["legacy"] is False and r["ok"] and r["session"])
+        gated.sort(key=lambda x: x[0])
+        head = next((v for s_, v in gated if s_ == p2.get("session")), {})
+
+    def fit_hist(k):
+        return [(s_, v[k]) for s_, v in gated]
     fit_art = f"data_store/calibrations/{p2.get('calib_file') or 'joint_cal_<session>.pkl'}"
     add(INV_CALIBRATOR, "Headline fit age (NYSE sessions)", _num(p2.get("calib_age")),
         _fmt(p2.get("calib_age")),
-        "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.")
-    add(INV_CALIBRATOR, "Parameters on a box bound", float(len(p2.get("pinned_params") or [])),
+        "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.", digits=".0f")
+    pab = head.get("params_at_bound")
+    add(INV_CALIBRATOR, "Parameters on a box bound",
+        pab if pab is not None else float(len(p2.get("pinned_params") or [])),
         ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
         "A parameter on its bound is set by the box, not the market." + box_refit_note(
-            p2.get("vvix_tradeoff") or [], p2.get("session")))
-    add(INV_CALIBRATOR, "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")),
-        _fmt(p2.get("spx_oos_rmse"), ".2f"),
-        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.")
-    short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
-    worst = max(short, key=lambda r: r["rmse"]) if short else None
-    add(INV_CALIBRATOR, "Worst short-dated expiry OOS RMSE (≤ 30 days)", worst["rmse"] if worst else None,
-        f"{_fmt(worst['rmse'], '.2f')} ({worst['expiry']})" if worst else "—", "short_oos_rmse", fit_art,
-        "One-factor Heston misses the short end; see the calibration page.")
-    add(INV_CALIBRATOR, "VIX index RMSE (index pts)", _num(p2.get("vix_index_rmse")),
-        _fmt(p2.get("vix_index_rmse"), ".2f"),
-        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.")
+            p2.get("vvix_tradeoff") or [], p2.get("session")), history=fit_hist("params_at_bound"),
+        digits=".0f")
+    add(INV_CALIBRATOR, "Out-of-sample SPX IV RMSE (vol pts)", head.get("oos_rmse"),
+        _fmt(head.get("oos_rmse"), ".2f"),
+        "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.",
+        history=fit_hist("oos_rmse"))
+    add(INV_CALIBRATOR, "Worst short-dated expiry OOS RMSE (≤ 30 days)", head.get("short_oos_rmse"),
+        (f"{_fmt(head['short_oos_rmse'], '.2f')} ({head['short_expiry']})"
+         if head.get("short_oos_rmse") is not None else "—"), "short_oos_rmse", fit_art,
+        "One-factor Heston misses the short end; see the calibration page.",
+        history=fit_hist("short_oos_rmse"))
+    add(INV_CALIBRATOR, "VIX index RMSE (index pts)", head.get("vix_rmse"),
+        _fmt(head.get("vix_rmse"), ".2f"),
+        "vix_rmse", fit_art, "^VIX9D, ^VIX, ^VIX3M, ^VIX6M against the model.", history=fit_hist("vix_rmse"))
     add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
-        "Not a no-arbitrage condition; reported, not limited.", status="info")
+        "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
     # M3: β drift — the newest stored chain against the frozen backtest β
     with _loader_boundary(d, "β estimation chains"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -5622,12 +5716,16 @@ def load_model_risk() -> dict[str, Any]:
         later = be.get("later") or []
         newest = later[-1] if later else None
         drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
+        chains = sorted((c for c in be.get("chains") or [] if c["role"] in ("estimation", "later")
+                         and c["ratio"] is not None), key=lambda c: str(c["session"]))
         add(INV_BETA, "β drift: newest chain's ATM vol / VIX against the frozen β", drift,
             (f"{_fmt(newest['ratio'], '.3f')} on {newest['session']} vs β = {_fmt(beta, '.2f')}" if newest
              else "no later chain"),
             "beta_drift", ["data_store/backtest/full_results.pkl", "data_store/vol_system.db"],
             "The backtest marks every straddle at β·VIX: β as the run recorded it (atm_to_vix_ratio) "
-            "against the market DB's newest chain.")
+            "against the market DB's newest chain.", digits=".3f",
+            history=([(str(c["session"]), abs(c["ratio"] - beta)) for c in chains]
+                     if (newest and beta is not None and chains and chains[-1] is newest) else None))
     # M4: market DB lag behind the labels (the regime card's inputs)
     with _loader_boundary(d, "rule labels / market DB"):
         labels = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
@@ -5638,7 +5736,7 @@ def load_model_risk() -> dict[str, Any]:
         add(INV_LABELS, "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag),
             "label_lag",
             ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"],
-            f"Labels {lab_date}; market DB {db_date}.")
+            f"Labels {lab_date}; market DB {db_date}.", digits=".0f")
     # M5: the VX futures table behind the market DB (the fits' out-of-sample VX leg)
     with _loader_boundary(d, "VX futures table / market DB"):
         vx_date = vx_last_date()
@@ -5648,7 +5746,8 @@ def load_model_risk() -> dict[str, Any]:
         add(INV_VX, VX_LAG_CHECK, _num(vx_lag),
             _fmt(vx_lag) if vx_date else "no futures table", "label_lag", VX_TABLE,
             f"vix_futures_daily through {vx_date or '—'}; market DB {db_date}. Only the fits' out-of-sample "
-            f"VX score reads them, so a fit after {vx_date or 'the table'} has none.")
+            f"VX score reads them, so a fit after {vx_date or 'the table'} has none.", key="vx_lag",
+            digits=".0f")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
@@ -5659,7 +5758,7 @@ def load_model_risk() -> dict[str, Any]:
         "", "data_store/greeks/greeks_surface.parquet", f"Surface {g.get('surface_date')}.",
         status=("ok" if g.get("source_matches_headline")
                 else ("breach" if g.get("source_matches_headline") is False else "watch")),
-        limits_text="OK if yes · watch if unknown · breach if no")
+        limits_text="OK if yes · watch if unknown · breach if no", key="greeks_source")
     # M8: classifier vs persistence (research only)
     with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
         clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
@@ -5670,7 +5769,7 @@ def load_model_risk() -> dict[str, Any]:
                 signed(gap, ".1f"),
                 "", "data_store/signals/regime_classifier.pkl",
                 "Research only since C17: below the no-skill baseline, so it never trades.",
-                status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below")
+                status="breach" if gap < 0 else "ok", limits_text="OK ≥ 0 · breach below", key="classifier")
     # surface artifacts: spread-unit fit quality and data checks on the stored chain
     try:
         surf = artifacts.load_surface(DATA)
@@ -5679,40 +5778,48 @@ def load_model_risk() -> dict[str, Any]:
         surf = {"state": "error"}
     if surf.get("state") == "ok":
         sart = f"data_store/surface/{surf['session']}/"
-        hkey = heston_model_key(surf["models"])
-        row = next((r for r in surf.get("scorecard_rows") or [] if r["model"] == hkey), None)
-        st_ = row["oos"] if row else (artifacts.residual_stats(surf["residuals"], hkey) if hkey else {})
+        today = surface_check_values(surf)
+        shist: list[tuple[str, dict]] = []
+        with _loader_boundary(d, "surface artifacts of the stored sessions (data_store/surface/<session>)"):
+            for s_ in artifacts.surface_sessions(DATA):
+                one = surf if s_ == surf["session"] else artifacts.load_surface(DATA, s_)
+                if one.get("state") == "ok":
+                    shist.append((s_, surface_check_values(one)))
+
+        def surf_hist(k):
+            return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
         add(INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
-            _num(st_.get("median_abs_hs")),
-            f"{_fmt(st_.get('median_abs_hs'), '.1f')} ({_fmt(st_.get('inside_spread_pct'), '.1f')}% inside)",
-            "median_abs_hs", sart + ("scorecard.json" if row else "residuals.parquet"),
-            f"{_fmt(st_.get('n'), ',')} quotes of {surf['session']}; Yahoo quotes carry no quote time.")
-        rep = ((surf.get("vix") or {}).get("indices") or {}).get("VIX") or {}
-        gap = _num(rep.get("gap_vs_official"))
+            today["median_abs_hs"],
+            f"{_fmt(today['median_abs_hs'], '.1f')} ({_fmt(today['inside_pct'], '.1f')}% inside)",
+            "median_abs_hs", sart + ("scorecard.json" if today["scorecard"] else "residuals.parquet"),
+            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; Yahoo quotes carry no quote time.",
+            history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
-            abs(gap) if gap is not None else None, signed(gap, ".2f") if gap is not None else "—",
+            today["vix_rep_gap"], signed(today["rep_gap"], ".2f") if today["rep_gap"] is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
-            "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.")
-        arb = (surf.get("surface") or {}).get("arbitrage") or {}
-        n_ex, n_q = _num(arb.get("n_quotes_in_executable_violation")), _num(arb.get("n_quotes"))
-        share = n_ex / n_q * 100.0 if (n_ex is not None and n_q) else None
+            "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.",
+            history=surf_hist("vix_rep_gap"))
+        share = today["arb_exec_share"]
         add(vendor, "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
-            f"{_fmt(share, '.1f')}% ({_fmt(n_ex, ',.0f')} of {_fmt(n_q, ',.0f')})" if share is not None
-            else "—",
+            f"{_fmt(share, '.1f')}% ({_fmt(today['n_ex'], ',.0f')} of {_fmt(today['n_q'], ',.0f')})"
+            if share is not None else "—",
             "arb_exec_share", sart + "surface.json",
-            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.")
+            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.",
+            history=surf_hist("arb_exec_share"), digits=".1f")
     else:
-        for mid_, chk in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)"),
-                          ("Data", "VIX replicated from the stored chain − Cboe close (index pts)"),
-                          ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)")):
+        for mid_, chk, key_ in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
+                                 "median_abs_hs"),
+                                ("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
+                                 "vix_rep_gap"),
+                                ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)",
+                                 "arb_exec_share")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
-                "Shown once the surface report has run.", status="na", limits_text="—")
-    # grouped by model (inventory order), the vendor-data checks last; checks
-    # keep their order within a group
+                "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
+    # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory
+    # order (the vendor-data checks last), the order they were added within a model
     order = [m["id"] for m in d["inventory"]] + [v.get("id") for v in d.get("vendor_inputs") or []] + ["Data"]
-    rank = {m: i for i, m in enumerate(order)}
-    mon.sort(key=lambda m: rank.get(m["model"], len(rank)))
+    mon = desk_monitor.order_checks(mon, order)
     names = {m["id"]: m["name"] for m in d["inventory"]}
     names.update({v.get("id"): v.get("source") for v in d.get("vendor_inputs") or []})
     for m in mon:
@@ -5722,6 +5829,33 @@ def load_model_risk() -> dict[str, Any]:
                        for k in ("ok", "watch", "breach", "info", "na")}
     d["limits"] = MONITOR_LIMITS
     return _clean_keep(d)
+
+
+_BACKLINK_CACHE: dict = {}
+
+
+def monitor_backlinks() -> dict[str, dict[str, list[dict]]]:
+    """{page file: {element id: [check, ...]}}: the Model Risk checks whose evidence
+    each panel shows, for its 'Monitored' chips (the Model Risk loader, cached on
+    the inputs' modification times)."""
+    key = (*_stat_key(DATA / "vol_system.db", DATA / "calibrations", DATA / "surface",
+                      DATA / "signals" / "regime_labels.parquet", DATA / "greeks" / "greeks_surface.parquet",
+                      DATA / "backtest" / "full_results.pkl", INVENTORY_PATH), str(DATA))
+    if key in _BACKLINK_CACHE:
+        return _BACKLINK_CACHE[key]
+    out: dict[str, dict[str, list[dict]]] = {}
+    try:
+        d = load_model_risk()
+    except Exception as exc:  # noqa: BLE001 (the chips are a convenience; Model Risk reports its own errors)
+        _logger.info("monitor backlinks unavailable: %s", exc)
+        return out
+    for m in d.get("monitors") or []:
+        if m.get("page") and m.get("anchor"):
+            out.setdefault(m["page"], {}).setdefault(m["anchor"], []).append(
+                {"model": m["model"], "status": m["status"], "id": m["id"], "check": m["check"]})
+    _BACKLINK_CACHE.clear()
+    _BACKLINK_CACHE[key] = out
+    return out
 
 
 # ── Page chrome: status bar, ticker strip, freshness table ───────────────────
@@ -5955,6 +6089,9 @@ def _render(template: str, d: dict):
         if item.get("level") == "error" or (item.get("level") == "warn" and worst == "ok"):
             worst = item["level"]
     d["worst_stale"] = worst
+    # the Model Risk checks whose evidence this page shows (its panels' 'Monitored' chips)
+    request_globals.monitored = (monitor_backlinks().get(ROUTES.get(request.path, ""), {})
+                                 if request.path != "/model-risk" else {})
     resp = make_response(render_template(template, d=d))
     resp.headers["X-Dashboard-Loader-Errors"] = str(len(errors))
     if errors:

@@ -760,7 +760,11 @@
     };
     $$('[data-filter-for]').forEach(function (b) {
       b.addEventListener('click', function () {
-        var id = b.getAttribute('data-filter-for'), f = keep[b.getAttribute('data-filter')] || keep.all;
+        var id = b.getAttribute('data-filter-for'), name = b.getAttribute('data-filter') || 'all';
+        // 'status:breach': the rows of one status (the Model Risk summary strip)
+        var f = name.indexOf('status:') === 0
+          ? function (tr) { return tr.getAttribute('data-status') === name.slice(7); }
+          : (keep[name] || keep.all);
         $$('#' + id + ' tbody tr').forEach(function (tr) { tr.hidden = !f(tr); });
         $$('[data-filter-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o === b ? 'true' : 'false'); });
       });

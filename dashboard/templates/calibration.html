@@ -56,10 +56,10 @@
 
 {% set f_ok = d.feller_state == 'PASS' %}{% set f_bind = d.feller_state == 'BINDING' %}
 <div class="g">
-  <div class="banner s6 {% if f_ok %}banner-ok{% else %}banner-warn{% endif %}">
+  <div class="banner s6 {% if f_ok %}banner-ok{% else %}banner-warn{% endif %}" id="feller">
     <div class="banner-icon" aria-hidden="true">{% if f_ok %}✓{% elif f_bind %}={% else %}!{% endif %}</div>
     <div>
-      <div class="banner-title">Feller condition: 2κθ {% if f_ok %}&gt;{% elif f_bind %}={% else %}&lt;{% endif %} σ² — {{ d.feller_state }}</div>
+      <div class="banner-title">Feller condition: 2κθ {% if f_ok %}&gt;{% elif f_bind %}={% else %}&lt;{% endif %} σ² — {{ d.feller_state }} {{ m.monitored_chips('feller') }}</div>
       <div class="banner-body">
         2κθ = {{ d.feller_lhs|fmt(".5f") }}; σ² = {{ d.feller_rhs|fmt(".5f") }}; margin 2κθ − σ² = <strong>{{ d.feller_margin|signed(".4f") }}</strong>.
         {% if d.feller_imposed %}Imposed as a soft penalty <code>{{ d.feller_penalty_weight|fmt(".0f") }}·max(0, σ²−2κθ)²</code>; {% if f_bind %}it binds, so σ is set by the constraint.{% elif f_ok %}it does not bind.{% else %}the optimum still violates it.{% endif %}

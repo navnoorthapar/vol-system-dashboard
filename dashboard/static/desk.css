@@ -202,7 +202,7 @@ sub, sup { font-size: 0.72em; }
 .panel-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); line-height: 1.4; }
 .panel-title .qual { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text3); }
 /* the date and the '#' link move as one group: right-aligned, on the title's line or the next */
-.panel-side { margin-left: auto; display: flex; align-items: center; gap: 4px 8px; }
+.panel-side { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 8px; min-width: 0; }
 .panel-meta { font-family: var(--mono); font-size: 10.5px; color: var(--text3); white-space: nowrap; }
 .panel-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 .btn-link { background: none; border-color: transparent; color: var(--text3); font-family: var(--mono); padding: 0 4px; }
@@ -454,6 +454,25 @@ details.method > summary:hover { color: var(--text2); }
 details.method > .prose, details.method > .note, details.method > .tbl-wrap { margin-top: 6px; }
 
 /* status (RAG) */
+/* Model Risk: the status strip, value bullets, history dots and the evidence chips */
+.mon-strip { display: flex; flex-wrap: wrap; gap: 4px; }
+.mon-filter.mon-breach { color: var(--breach); } .mon-filter.mon-watch { color: var(--watch); }
+.mon-filter.mon-ok { color: var(--ok); } .mon-filter.mon-info, .mon-filter.mon-na { color: var(--text2); }
+svg.bullet { display: block; margin: 4px 0 0 auto; overflow: visible; max-width: 100%; }
+.mon-link { white-space: normal; }
+.mon-value { white-space: normal; }
+.tbl td.mon-cell { min-width: 138px; }
+.mon-lim { display: block; margin-top: 3px; font-size: 10.5px; color: var(--text3); white-space: normal; text-align: right; }
+svg.bullet .b-ok { fill: rgba(114, 202, 155, 0.38); } svg.bullet .b-watch { fill: rgba(251, 208, 101, 0.38); }
+svg.bullet .b-breach { fill: rgba(250, 153, 156, 0.38); }
+svg.bullet .b-tick { stroke: var(--text); stroke-width: 2; }
+svg.hist { display: block; overflow: visible; }
+svg.hist .h-ok { fill: var(--ok); } svg.hist .h-watch { fill: var(--watch); } svg.hist .h-breach { fill: var(--breach); }
+svg.hist .h-na { fill: var(--text3); }
+.hist-txt { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text3); }
+.hist-txt .nowrap { white-space: nowrap; }
+.mon-link { text-decoration: none; }
+.mon-link:hover, .mon-link:focus-visible { text-decoration: underline; }
 .rag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
 .rag-ok { color: var(--ok); } .rag-watch { color: var(--watch); } .rag-breach { color: var(--breach); } .rag-na { color: var(--text3); }
 
@@ -614,6 +633,10 @@ dialog.keys .dl { font-size: 12px; }
   .tbl.cards td:first-child::before { content: none; }
   .tbl.cards tbody tr:hover td { background: none; }
   .tbl.cards td:empty { display: none; }
+  .tbl.cards td svg.bullet { margin-left: 0; }
+  .tbl.cards td .mon-lim { text-align: left; }
+  .tbl.cards td.mon-cell { min-width: 0; }
+  .tbl.cards .hist-txt .nowrap { white-space: normal; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

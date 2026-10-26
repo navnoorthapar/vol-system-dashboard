@@ -5778,3 +5778,124 @@ def test_browser_resolves_compact_specs_as_the_server_does(site_browser):
     assert zoom[0] > 50, zoom
     assert abs(zoom[0] - zoom[1]) < 1e-6, zoom
     ctx.close()
+
+
+# ── P3.3: Model Risk as an exceptions view ────────────────────────────────────
+
+_SEVERITY = ("breach", "watch", "ok", "info", "na")
+
+
+def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
+    m = re.search(r'<table class="tbl cards" id="monitor-table">.*?<tbody>(.*?)</tbody>', html, re.DOTALL)
+    assert m is not None
+    tbody = m.group(1)
+    return re.findall(r'<tr id="(check-[\w-]+)" data-status="(\w+)">(.*?)</tr>', tbody, re.DOTALL)
+
+
+def test_model_risk_lists_breaches_first_and_counts_them_in_its_filters(dash, pages):
+    """P3.3: the rows run BREACH, WATCH, OK, INFO (then N/A), so the first n rows,
+    n = the BREACH tally, are all BREACH; within a status, inventory order. The
+    summary strip's filter chips carry the tally."""
+    html = pages["/model-risk"]
+    rows = _monitor_rows(html)
+    statuses = [st for _, st, _ in rows]
+    assert statuses == sorted(statuses, key=_SEVERITY.index)
+    d = dash.load_model_risk()
+    n_breach = d["rag_counts"]["breach"]
+    assert n_breach >= 1
+    assert statuses[:n_breach] == ["breach"] * n_breach
+    inv = [m["id"] for m in d["inventory"]] + [v["id"] for v in d["vendor_inputs"]] + ["Data"]
+    for st in _SEVERITY:
+        models = [m["model"] for m in d["monitors"] if m["status"] == st]
+        assert models == sorted(models, key=inv.index), st
+    chips = dict(re.findall(r'data-filter="status:(\w+)" data-count="(\d+)"', html))
+    assert {k: int(v) for k, v in chips.items()} == {k: v for k, v in d["rag_counts"].items() if v}
+    assert {k: int(v) for k, v in chips.items()} == {st: statuses.count(st) for st in set(statuses)}
+    assert 'data-filter-for="monitor-table" data-filter="all" aria-pressed="true"' in html
+
+
+def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, pages):
+    """P3.3: each check's history is the function that gives today's value, applied
+    to every stored session; its last dot is today's value. The out-of-sample
+    history is every gated fit's spx_oos_iv_rmse, recomputed here from the pickles,
+    with today's rank among them."""
+    d = dash.load_model_risk()
+    with_history = [m for m in d["monitors"] if m["history"]]
+    assert len(with_history) >= 6
+    for m in with_history:
+        assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
+        lim = dash.MONITOR_LIMITS[m["limits_key"]]
+        assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(x["value"], lim)
+                                                               for x in m["history"]["dots"]]
+    oos = next(m for m in d["monitors"] if m["key"] == "oos_rmse")
+    want = [dash._cal_losses(c).get("spx_oos_iv_rmse") for _, c in _gated_pickles(dash)]
+    assert [x["value"] for x in oos["history"]["dots"]] == pytest.approx(want)
+    assert [x["session"] for x in oos["history"]["dots"]] == [s for s, _ in _gated_pickles(dash)]
+    today = want[-1]
+    worse = sum(1 for v in want if v > today + 1e-12)
+    better = sum(1 for v in want if v < today - 1e-12)
+    if worse == 0:
+        assert oos["history"]["rank"].endswith(f"worst of {len(want)}")
+    elif better == 0:
+        assert oos["history"]["rank"].endswith(f"best of {len(want)}")
+    html = pages["/model-risk"]
+    row = {i: body for i, _, body in _monitor_rows(html)}[oos["id"]]
+    assert f"rank today: {oos['history']['rank']}" in _html_unescape(row)
+    assert "today’s limits applied retroactively" in _html_unescape(html)
+    assert "control limit" not in _visible_text(html).lower()
+    for m in d["monitors"]:
+        if not m["history"]:
+            body = {i: b for i, _, b in _monitor_rows(html)}[m["id"]]
+            assert "single observation" in body, m["check"]
+
+
+def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
+    """P3.3: each numeric check has a server-rendered bullet (role=img) whose tick x
+    is proportional to the value on [0, max(1.5·a, value)] and whose label names
+    the value and both limits."""
+    html = pages["/model-risk"]
+    d = {m["id"]: m for m in dash.load_model_risk()["monitors"]}
+    n = 0
+    for rid, _st, body in _monitor_rows(html):
+        svg = re.search(r'<svg class="bullet"[^>]*>', body)
+        m = d[rid]
+        lim = dash.MONITOR_LIMITS.get(m["limits_key"] or "")
+        if lim is None or m["num"] is None:
+            assert svg is None, rid
+            continue
+        a = _attrs(svg.group(0))
+        assert a["role"] == "img"
+        top = max(1.5 * lim[1], m["num"])
+        assert float(a["data-tick"]) == pytest.approx(m["num"] / top * 120, abs=0.01), rid
+        label = _html_unescape(a["aria-label"])
+        assert f"OK ≤ {lim[0]:g}" in label, rid
+        assert f"watch ≤ {lim[1]:g}" in label, rid
+        assert label.startswith("value "), rid
+        n += 1
+    assert n >= 10
+
+
+def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(dash, pages):
+    """P3.3: every value cell links to the panel that shows its evidence (an id that
+    exists on that page), and that panel carries a 'Monitored · <model> ·
+    <status>' chip back to the check's row."""
+    html = pages["/model-risk"]
+    files = {v: k for k, v in dash.ROUTES.items()}
+    d = {m["id"]: m for m in dash.load_model_risk()["monitors"]}
+    linked = 0
+    for rid, st, body in _monitor_rows(html):
+        href = re.search(r'<a href="([\w.-]+\.html)#([\w-]+)" class="mon-value"', body)
+        assert href, rid
+        page, anchor = href.groups()
+        target = pages[files[page]]
+        assert f'id="{anchor}"' in target, (rid, page, anchor)
+        chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"[^>]*>([^<]+)</a>',
+                         target)
+        assert chip, (rid, page)
+        word = {"ok": "OK", "na": "N/A"}.get(st, st.upper())
+        assert _html_unescape(chip.group(1)) == f"Monitored · {d[rid]['model']} · {word}", rid
+        # the chip sits inside the evidence element
+        start = target.index(f'id="{anchor}"')
+        assert target.index(f'href="model-risk.html#{rid}"') > start
+        linked += 1
+    assert linked == len(d)
