@@ -1267,11 +1267,25 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
     assert not re.search(r"37\.14 (vol )?pts", cal)
 
 
+def _raw_specs(html: str) -> dict:
+    return {m.group(1): json.loads(_html_unescape(m.group(2))) for m in re.finditer(
+        r'<script type="application/json" id="([\w-]+)-spec">(.*?)</script>', html, re.DOTALL)}
+
+
 def _spec(html: str, chart_id: str) -> dict:
-    raw = re.search(rf'<script type="application/json" id="{re.escape(chart_id)}-spec">(.*?)</script>', html,
-                    re.DOTALL)
-    assert raw, chart_id
-    return json.loads(_html_unescape(raw.group(1)))
+    """A chart's spec as desk.js draws it: compact x values expanded, shared x values
+    and derived series filled in (desk_charts.resolve, the twin of desk.js resolveSpec)."""
+    raw = _raw_specs(html)
+    assert chart_id in raw, chart_id
+    return _charts().resolve(raw[chart_id], raw)
+
+
+def _charts():
+    import sys
+    if str(ROOT / "dashboard") not in sys.path:
+        sys.path.insert(0, str(ROOT / "dashboard"))
+    import desk_charts
+    return desk_charts
 
 
 def test_term_structure_is_drawn_on_a_linear_tenor_axis(dash, pages):
@@ -5595,3 +5609,172 @@ def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
     assert row.groups() == (src["level"], last, str(src["age"]))
     bar = html[html.index('<header class="statusbar"'):html.index("</header>")]
     assert ">VX<" not in bar
+
+
+# ── P3.2: implied against subsequently realised vol ───────────────────────────
+
+def _vol_frame() -> pd.DataFrame:
+    """VIX, RV21 trailing and forward from the shipped DB, written out here (not desk_market)."""
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        spx = pd.read_sql("SELECT date, close FROM spx_ohlcv ORDER BY date", con, index_col="date")
+        vix = pd.read_sql("SELECT date, close FROM vix_daily ORDER BY date", con, index_col="date")["close"]
+    spx.index, vix.index = pd.to_datetime(spx.index), pd.to_datetime(vix.index)
+    r2 = pd.Series(np.log(spx["close"].to_numpy(float)), index=spx.index).diff() ** 2
+    trl = np.sqrt(r2.rolling(21).mean() * 252) * 100
+    return pd.DataFrame({"vix": vix, "rv_trl": trl.reindex(vix.index),
+                         "rv_fwd": trl.shift(-21).reindex(vix.index)})
+
+
+def test_vrp_beta_table_is_recomputed_from_the_market_db(dash, pages):
+    """P3.2: the β table of Research #vrp: mean, median, share above zero and the
+    variance-space mean of β·VIX − RV21 forward over the backtest window, for
+    β = 1, the backtest's β, 0.80 and the newest chain's ATM / VIX, recomputed
+    here from vol_system.db."""
+    html = pages["/research"]
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        st = pickle.load(f)
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet", columns=["nav"])
+    start, end = str(eq.index[0].date()), str(eq.index[-1].date())
+    d4 = dash.load_page4()
+    newest = d4["beta_est"]["later"][-1]["ratio"]
+    betas = [1.0, round(float(st["atm_to_vix_ratio"]), 2), 0.80, round(float(newest), 2)]
+    f = _vol_frame().loc[start:end].dropna(subset=["rv_fwd"])
+    tbl = html[html.index('id="vrp-beta-table"'):]
+    tbl = tbl[:tbl.index("</table>")]
+    rows = re.findall(r'<tr[^>]*data-vrp-beta="([\d.]+)">(.*?)</tr>', tbl, re.DOTALL)
+    assert [float(b) for b, _ in rows] == list(dict.fromkeys(betas))
+    for b, cells in rows:
+        beta = float(b)
+        v = beta * f["vix"] - f["rv_fwd"]
+        var = (beta * f["vix"]) ** 2 - f["rv_fwd"] ** 2
+        got = [_html_unescape(re.sub(r"<[^>]+>", "", c)) for c in re.findall(r"<td[^>]*>(.*?)</td>", cells)]
+        assert got[2:] == [dash.signed(v.mean(), ".2f"), dash.signed(v.median(), ".2f"),
+                           f"{(v > 0).mean() * 100:.1f}%", dash.signed(var.mean(), ".1f")], b
+    assert f"{start} → {end}, {len(f):,} sessions" in _html_unescape(tbl)
+
+
+def test_vrp_marks_every_s4_entry_and_says_what_it_is_not(dash, pages):
+    """P3.2: the S4 entries of the trade log are marked (count and sides from
+    all_trades); the caption defines both horizons and says it is not P&L."""
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        trades = [t for t in pickle.load(f)["all_trades"] if t.signal == "s4"]
+    spec = _spec(pages["/research"], "chart-vrp-levels")
+    by = {s["name"]: s for s in spec["series"]}
+    assert len(by["S4 short entry"]["data"]) == sum(1 for t in trades if t.direction < 0)
+    assert len(by["S4 long entry"]["data"]) == sum(1 for t in trades if t.direction > 0)
+    assert len(by["S4 short entry"]["data"]) + len(by["S4 long entry"]["data"]) == len(trades)
+    assert {p[0] for s in ("S4 short entry", "S4 long entry") for p in by[s]["data"]} == \
+        {str(pd.Timestamp(t.entry_date).date()) for t in trades}
+    cap = _html_unescape(re.search(r'<p class="note" id="vrp-caption">(.*?)</p>', pages["/research"],
+                                   re.DOTALL).group(1))
+    assert "not P&L" in cap
+    assert "21 sessions to the date" in cap
+    assert "t+1 … t+21" in cap
+    # the second chart zooms with the first (same x values)
+    bars = _spec(pages["/research"], "chart-vrp-bars")
+    assert bars["link"] == spec["link"] == "vrp"
+    assert bars["xs"] == spec["xs"]
+    # the forward series has no value in the last 21 sessions
+    fwd = by["RV21 forward"]["data"]
+    assert all(x is None for x in fwd[-21:])
+    assert fwd[-22] is not None
+
+
+def test_vrp_tables_and_csv_carry_the_same_numbers(dash, pages):
+    """P3.2: each #vrp chart's table (the no-JS fallback) and its CSV (built from
+    the spec's series) carry the same numbers."""
+    html = pages["/research"]
+    yrs = _spec(html, "chart-vrp-years")
+    rows = yrs["table"]["rows"]
+    assert [r[0] for r in rows] == yrs["xs"]
+    assert [r[1] for r in rows] == [dash.signed(v, ".2f") for v in yrs["series"][0]["data"]]
+    lev = _spec(html, "chart-vrp-levels")
+    by = {s["name"]: s["data"] for s in lev["series"]}
+    xs = pd.to_datetime(lev["xs"])
+    for row in lev["table"]["rows"]:
+        year = int(str(row[0])[:4])
+        sel = xs.year == year
+        for col, name in ((1, "VIX"), (2, "RV21 trailing"), (3, "RV21 forward")):
+            vals = [v for v, s in zip(by[name], sel) if s and v is not None]
+            assert abs(float(row[col]) - float(np.mean(vals))) <= 0.01, (year, name)
+    f = _vol_frame()
+    years = f.groupby(f.index.year)["vix"].mean()
+    assert [int(str(r[0])[:4]) for r in lev["table"]["rows"]] == list(years.index)
+
+
+def test_overview_vix_minus_trailing_rv_equals_the_computed_spread(pages):
+    """P3.2: the Overview's 'VIX − RV21 (trailing)' line is the newest session's
+    VIX close minus the RMS realised vol of its last 21 sessions."""
+    f = _vol_frame().dropna(subset=["rv_trl"])
+    last = f.iloc[-1]
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vix-rv-line">(.*?)</p>',
+                                                            pages["/"], re.DOTALL).group(1)))
+    assert f"VIX − RV21 (trailing) {_signed2(last['vix'] - last['rv_trl'])} vol pts" in line
+    assert str(f.index[-1].date()) in line
+    assert f"VIX {last['vix']:.2f}" in line
+    assert f"{last['rv_trl']:.2f}%" in line
+    assert 'href="research.html#vrp"' in pages["/"]
+
+
+def _signed2(x: float) -> str:
+    return ("+" if x >= 0 else "−") + f"{abs(x):.2f}"
+
+
+def test_compact_specs_resolve_to_the_full_series(pages):
+    """P3.2: a long daily chart stores its dates as day gaps, a linked chart names the
+    chart whose dates it shares, and a derived series names its inputs; resolved,
+    each equals what the page used to embed in full (desk_charts.resolve, the twin
+    of desk.js resolveSpec)."""
+    ch = _charts()
+    xs = ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"]
+    days = pd.bdate_range("2024-01-02", periods=300)
+    iso = [str(d.date()) for d in days]
+    c = ch.compact_dates(iso)
+    assert c is not None
+    assert ch.expand_dates(c) == iso
+    assert ch.compact_dates(xs) is None                       # short: kept as it is
+    html = pages["/research"]
+    raw = _raw_specs(html)
+    assert "xs" not in raw["chart-equity"]
+    assert "xsDates" in raw["chart-equity"]
+    eq = _spec(html, "chart-equity")
+    for cid in ("chart-dd", "chart-rolling"):
+        assert raw[cid]["xsFrom"] == "chart-equity"
+        assert _spec(html, cid)["xs"] == eq["xs"]
+    eqp = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet", columns=["nav"])
+    assert eq["xs"] == [str(d.date()) for d in eqp.index]
+    lev, bars = _spec(html, "chart-vrp-levels"), _spec(html, "chart-vrp-bars")
+    by = {s["name"]: s["data"] for s in lev["series"]}
+    assert bars["series"][0]["data"] == [None if (a is None or b is None) else round(a - b, 2)
+                                         for a, b in zip(by["VIX"], by["RV21 forward"])]
+    scaled = next(s for s in lev["series"] if s["name"].endswith("·VIX (backtest mark)"))
+    names = [s["name"] for s in lev["series"]]
+    k = raw["chart-vrp-levels"]["series"][names.index(scaled["name"])]["derive"]["k"]
+    assert scaled["data"] == [round(k * v, 4) for v in by["VIX"]]
+
+
+def test_browser_resolves_compact_specs_as_the_server_does(site_browser):
+    """P3.2: desk.js expands the compact specs to the same x values and data the
+    server-side resolver gives, and the two #vrp charts zoom together."""
+    sb = site_browser
+    html = (sb["site"] / "research.html").read_text()
+    want_bars, want_lev = _spec(html, "chart-vrp-bars"), _spec(html, "chart-vrp-levels")
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "research.html#vrp", wait_until="load")
+    page.locator("#chart-vrp-bars").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-vrp-levels")
+    _wait_for_chart(page, "chart-vrp-bars")
+    got = page.evaluate("""() => ({bx: Desk.charts['chart-vrp-bars'].spec.xs,
+        bd: Desk.charts['chart-vrp-bars'].spec.series[0].data,
+        lx: Desk.charts['chart-vrp-levels'].spec.xs,
+        g1: Desk.charts['chart-vrp-levels'].chart.group, g2: Desk.charts['chart-vrp-bars'].chart.group})""")
+    assert got["lx"] == want_lev["xs"]
+    assert got["bx"] == want_bars["xs"]
+    assert got["bd"] == want_bars["series"][0]["data"]
+    assert got["g1"] == got["g2"] == "vrp"
+    page.click('[data-zoom-for="chart-vrp-levels"][data-years="3"]')
+    zoom = page.evaluate("""() => ['chart-vrp-levels', 'chart-vrp-bars'].map(
+        id => Desk.charts[id].chart.getOption().dataZoom[0].start)""")
+    assert zoom[0] > 50, zoom
+    assert abs(zoom[0] - zoom[1]) < 1e-6, zoom
+    ctx.close()

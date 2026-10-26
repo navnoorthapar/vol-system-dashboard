@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -138,3 +139,105 @@ def test_vx_leg_curve_starts_at_the_models_spot_vix_and_passes_through_each_cont
         assert curve[r["days"]] == pytest.approx(r["model"], rel=1e-12)
     assert [r["days"] for r in leg["rows"]] == sorted(r["days"] for r in leg["rows"])
     assert leg["n_below"] == sum(1 for r in leg["rows"] if r["gap"] < 0)
+
+
+# ── implied against subsequently realised vol (P3.2) ─────────────────────────
+
+def _ref_rv(r: np.ndarray, n: int = 21) -> tuple[np.ndarray, np.ndarray]:
+    """A loop reference: RMS of the n returns to t (trailing) and of t+1..t+n (forward)."""
+    trl = np.full(len(r), np.nan)
+    fwd = np.full(len(r), np.nan)
+    for t in range(len(r)):
+        if t >= n - 1 and np.all(np.isfinite(r[t - n + 1:t + 1])):
+            trl[t] = math.sqrt(252.0 / n * float(np.sum(r[t - n + 1:t + 1] ** 2))) * 100
+        if t + n < len(r):
+            fwd[t] = math.sqrt(252.0 / n * float(np.sum(r[t + 1:t + n + 1] ** 2))) * 100
+    return trl, fwd
+
+
+def test_rv_trailing_and_forward_match_a_reference_on_a_fixture():
+    rng = np.random.default_rng(5)
+    idx = pd.bdate_range("2020-01-01", periods=120)
+    r = pd.Series(rng.normal(0, 0.012, len(idx)), index=idx)
+    trl, fwd = _ref_rv(r.to_numpy())
+    np.testing.assert_allclose(dm.rv_trailing(r).to_numpy(), trl, rtol=1e-12, equal_nan=True)
+    np.testing.assert_allclose(dm.rv_forward(r).to_numpy(), fwd, rtol=1e-12, equal_nan=True)
+    f = dm.rv_forward(r)
+    assert f.iloc[-21:].isna().all()
+    assert f.iloc[:-21].notna().all()
+    assert dm.rv_trailing(r).iloc[:20].isna().all()
+
+
+def test_rv_forward_is_the_forecast_evaluations_target():
+    """The forward RV is forecast_eval.json's y(t), as a vol: y² = 252/21 Σ r²_{t+i}."""
+    from joint_vol_calibration.stats.forecast import target_variance
+    rng = np.random.default_rng(9)
+    r = pd.Series(rng.normal(0, 0.01, 300), index=pd.bdate_range("2021-01-01", periods=300))
+    np.testing.assert_allclose((dm.rv_forward(r) / 100) ** 2, target_variance(r), rtol=1e-12, equal_nan=True)
+
+
+def _db_frame() -> pd.DataFrame:
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    spx = pd.read_sql("SELECT date, close FROM spx_ohlcv ORDER BY date", con, index_col="date")
+    vix = pd.read_sql("SELECT date, close FROM vix_daily ORDER BY date", con, index_col="date")["close"]
+    spx.index, vix.index = pd.to_datetime(spx.index), pd.to_datetime(vix.index)
+    r = pd.Series(np.log(spx["close"].to_numpy(float)), index=spx.index).diff()
+    return pd.DataFrame({"vix": vix, "rv_fwd": dm.rv_forward(r).reindex(vix.index),
+                         "r": r.reindex(vix.index)})
+
+
+def test_rv_forward_on_the_committed_db_ends_21_sessions_before_its_last_session():
+    """Acceptance 1: no forward value in the last 21 sessions (2026-09-24 when the
+    DB ended 2026-10-23; the bot appends sessions, so the property is checked)."""
+    f = _db_frame()
+    last_fwd = f["rv_fwd"].dropna().index[-1]
+    assert list(f.index).index(last_fwd) == len(f) - 22
+    assert f["rv_fwd"].iloc[-21:].isna().all()
+
+
+# the backtest window's ex-post premium, verified by hand when the panel was specified
+BETA_TABLE = {1.00: (3.11, 4.32, 79.2, 50.1), 0.82: (-0.46, 1.19, 61.6, -97.7),
+              0.80: (-0.85, 0.86, 58.2, -112.3), 0.70: (-2.84, -1.01, 39.6, -180.0)}
+
+
+@pytest.mark.parametrize("beta", sorted(BETA_TABLE))
+def test_vrp_beta_table_over_the_backtest_window(beta):
+    """Acceptance 2: the 16 numbers of the β table (±0.01; the variance-space mean
+    ±0.1), recomputed here from vol_system.db without desk_market's helpers."""
+    f = _db_frame().loc["2018-01-02":"2025-03-24"].dropna(subset=["rv_fwd"])
+    assert len(f) == 1816
+    v = beta * f["vix"] - f["rv_fwd"]
+    var = (beta * f["vix"]) ** 2 - f["rv_fwd"] ** 2
+    mean, med, share, vmean = BETA_TABLE[beta]
+    assert abs(v.mean() - mean) <= 0.01
+    assert abs(v.median() - med) <= 0.01
+    assert abs((v > 0).mean() * 100 - share) <= 0.05
+    assert abs(var.mean() - vmean) <= 0.1
+    st = dm.vrp_stats(_db_frame()["vix"], _db_frame()["rv_fwd"], beta, "2018-01-02", "2025-03-24")
+    assert st["n"] == len(f)
+    assert st["mean"] == pytest.approx(v.mean(), abs=1e-12)
+    assert st["median"] == pytest.approx(v.median(), abs=1e-12)
+    assert st["share_pos"] == pytest.approx((v > 0).mean() * 100, abs=1e-12)
+    assert st["var_mean"] == pytest.approx(var.mean(), abs=1e-9)
+
+
+def test_vrp_full_sample_line():
+    f = _db_frame().dropna(subset=["rv_fwd"])
+    v = f["vix"] - f["rv_fwd"]
+    st = dm.vrp_stats(_db_frame()["vix"], _db_frame()["rv_fwd"], 1.0)
+    assert st["mean"] == pytest.approx(v.mean(), abs=1e-12)
+    assert st["share_pos"] == pytest.approx((v > 0).mean() * 100, abs=1e-12)
+    # the backtest window's sessions are a fixed part of it: the full sample through 2026-09-24
+    # gave +3.75 and 84.6% when the panel was specified; later sessions move it little
+    assert 3.0 < st["mean"] < 4.5
+
+
+def test_yearly_means_mark_a_partial_last_year_with_its_span():
+    idx = pd.bdate_range("2023-12-20", "2025-03-24")
+    x = pd.Series(np.arange(len(idx), dtype=float), index=idx)
+    ys = dm.yearly_means(x)
+    assert [y["year"] for y in ys] == [2023, 2024, 2025]
+    assert [y["partial"] for y in ys] == [False, False, True]
+    assert ys[-1]["last"] == "2025-03-24"
+    assert ys[-1]["n"] == len(idx[idx.year == 2025])
+    assert ys[1]["mean"] == pytest.approx(x[x.index.year == 2024].mean())

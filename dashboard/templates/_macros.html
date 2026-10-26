@@ -54,7 +54,7 @@
 {% if tools %}
 <div class="chart-tools">
   <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
-    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
     {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
   </div>
   <div class="legend-bar">
@@ -100,8 +100,9 @@
 </div>
 {%- endmacro %}
 
-{% macro method(title='Methodology and caveats') -%}
-<details class="method"><summary>{{ title }}</summary>{{ caller() }}</details>
+{# cls 'foot': in a trio row, the disclosure sits at the panel's foot (desk.css) #}
+{% macro method(title='Methodology and caveats', cls='') -%}
+<details class="method{% if cls %} {{ cls }}{% endif %}"><summary>{{ title }}</summary>{{ caller() }}</details>
 {%- endmacro %}
 
 {% macro spark(sp, label, cls='') -%}

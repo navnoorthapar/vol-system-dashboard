@@ -69,7 +69,7 @@
     {% else %}
     <div class="kpi-value flat">Rule label unavailable</div>
     {% endif %}
-    {% call m.method('Rule definitions') %}
+    {% call m.method('Rule definitions', 'foot') %}
     <dl class="dl">
       <dt>R0</dt><dd>Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</dd>
       <dt>R1</dt><dd>Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</dd>
@@ -114,6 +114,7 @@
     {% endif %}
     {{ m.spark(d.pdv_spark, 'VIX minus PDV forecast, last ' ~ (d.pdv_sparkline|length) ~ ' sessions to ' ~ d.pdv_date ~ ': from ' ~ (d.pdv_sparkline[0]|signed('.2f')) ~ ' to ' ~ (d.pdv_sparkline[-1]|signed('.2f')) ~ ' vol pts') }}
     <p class="note">Last {{ d.pdv_sparkline|length }} sessions of the spread; the line marks zero.</p>
+    {% if d.vix_rv %}<p class="note" id="vix-rv-line"><a href="research.html#vrp">VIX − RV21 (trailing) {{ d.vix_rv.spread|signed('.2f') }} vol pts</a>, <span class="nowrap">{{ d.vix_rv.date }}</span> (VIX {{ d.vix_rv.vix|fmt('.2f') }} against the RMS realised vol of the last 21 sessions, {{ d.vix_rv.rv|fmt('.2f') }}%).</p>{% endif %}
     {% call m.method() %}
     <div class="prose">
       <p>{% if d.pdv_horizon == 1 %}The forecast target is next-day |r|·√252, about 0.8σ for Gaussian returns, so the spread's level carries a structural positive offset that is not a risk premium.{% else %}The forecast is the expected realised vol (RMS) of the next {{ d.pdv_horizon }} sessions, the VIX horizon. VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity gap (E[σ] &lt; √E[σ²]); it is not a pure premium.{% endif %}

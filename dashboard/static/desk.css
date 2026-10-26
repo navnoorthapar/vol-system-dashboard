@@ -234,6 +234,8 @@ sub, sup { font-size: 0.72em; }
 .btn .key-swatch.dot { width: 7px; height: 7px; border: none; border-radius: 50%; background: currentColor; }
 .btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }
 .btn .key-swatch.diamond { width: 7px; height: 7px; border: none; border-radius: 0; background: currentColor; transform: rotate(45deg); }
+.btn .key-swatch.tri { width: 0; height: 0; border-top: none; border-left: 4.5px solid transparent; border-right: 4.5px solid transparent; border-bottom: 8px solid currentColor; }
+.btn .key-swatch.tri.down { border-bottom: none; border-top: 8px solid currentColor; }
 .legend-bar { display: flex; flex-wrap: wrap; gap: 4px; }
 /* a legend button wider than its bar wraps its label instead of widening the page
    (the variance-swap strip's 'Cboe close (16:15 ET): VIX9D, ...' at 320 px) */
@@ -542,6 +544,9 @@ dialog.keys .dl { font-size: 12px; }
   .g:is(.pair, .level) .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
   .g:is(.pair, .level) .grow-col[hidden] { display: none; }
   .g.pair.start { align-items: start; }
+  /* a trio's shorter panel ends with its disclosure, not with blank space */
+  .g.trio > .panel > .panel-body { display: flex; flex-direction: column; }
+  .g.trio > .panel > .panel-body > .method.foot { margin-top: auto; padding-top: 8px; }
 }
 @media (max-width: 1180px) {
   .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }

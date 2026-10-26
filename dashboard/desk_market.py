@@ -14,6 +14,20 @@ The VX futures leg of a joint fit (Calibration #vixleg)
   recorded losses.vx_futures_rmse_oos. Settlements are only ever paired with
   the fit of the same session: a fit whose session has no stored settlements
   has no VX leg (an older curve is never spliced onto a newer fit).
+
+Implied against subsequently realised vol (Research #vrp)
+  r_t = ln(close_t / close_{t−1}) of SPX (the returns the forecast evaluation
+  uses). Both realised vols are root-mean-square, annualised, in vol pts:
+    RV21 trailing(t) = 100·√(252/21 · Σ_{i=0..20} r²_{t−i})   (known at the close of t)
+    RV21 forward(t)  = 100·√(252/21 · Σ_{i=1..21} r²_{t+i})   (the next 21 sessions)
+  the forward one being forecast_eval.json's target y(t), so it has no value in
+  the last 21 sessions. The ex-post premium of a mark at β·VIX is
+  vrp_β(t) = β·VIX_t − RV21 forward(t) (vol pts) and its variance-space form
+  (β·VIX_t)² − RV21 forward(t)² (vol pts²). VIX is a 30-calendar-day
+  variance-swap rate, skew premium included, so VIX − RV overstates what an
+  at-the-money straddle earns; 21-session windows overlap, so shares and means
+  over consecutive sessions are not independent observations. A description,
+  not a P&L.
 """
 from __future__ import annotations
 
@@ -22,8 +36,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 DAYS_PER_YEAR = 365.0          # the calibrator's T = days_to_expiry / 365
+RV_WINDOW = 21                 # sessions: the forecast target's horizon (forecast_eval.json target)
+ANNUALISE = 252
 CURVE_STEP_DAYS = 5            # spacing of the drawn model curve E^Q[VIX_T]
 
 
@@ -78,3 +95,51 @@ def vx_model_leg(params: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
     return {"rows": out_rows, "n": len(out_rows), "rmse": float(np.sqrt(np.mean(gaps ** 2))),
             "mean_gap": float(np.mean(gaps)), "n_below": int(np.sum(gaps < 0)),
             "curve": [[float(d), float(v)] for d, v in zip(grid, curve_vals)]}
+
+
+# ── implied against subsequently realised vol ────────────────────────────────
+
+def rv_trailing(r: pd.Series, n: int = RV_WINDOW) -> pd.Series:
+    """RMS realised vol of the n sessions ending at t (including t), annualised, vol pts."""
+    return np.sqrt((r.astype(float) ** 2).rolling(n).mean() * ANNUALISE) * 100.0
+
+
+def rv_forward(r: pd.Series, n: int = RV_WINDOW) -> pd.Series:
+    """RMS realised vol of the n sessions after t (t+1 … t+n), annualised, vol pts;
+    NaN for the last n sessions (forecast_eval.json's target, as a vol)."""
+    return rv_trailing(r, n).shift(-n)
+
+
+def vrp(vix: pd.Series, rv_fwd: pd.Series, beta: float = 1.0) -> pd.Series:
+    """Ex-post premium of a mark at β·VIX: β·VIX_t − RV21 forward(t), vol pts."""
+    return beta * vix.astype(float) - rv_fwd
+
+
+def vrp_stats(vix: pd.Series, rv_fwd: pd.Series, beta: float, start: str | None = None,
+              end: str | None = None) -> dict | None:
+    """Mean, median and share above zero of vrp_β over [start, end] (sessions with a
+    forward value), and the variance-space mean (β·VIX)² − RV², vol pts²."""
+    v = vrp(vix, rv_fwd, beta).loc[start:end].dropna()
+    if v.empty:
+        return None
+    rf = rv_fwd.loc[v.index]
+    var = (beta * vix.loc[v.index].astype(float)) ** 2 - rf ** 2
+    return {"beta": float(beta), "n": len(v), "mean": float(v.mean()), "median": float(v.median()),
+            "share_pos": float((v > 0).mean() * 100.0), "var_mean": float(var.mean()),
+            "first": str(pd.Timestamp(v.index[0]).date()), "last": str(pd.Timestamp(v.index[-1]).date())}
+
+
+def yearly_means(x: pd.Series) -> list[dict]:
+    """Calendar-year means of a dated series (NaN dropped); a last year that stops
+    before December is marked partial with the span it covers (a 'YTD' bar)."""
+    x = x.dropna()
+    if x.empty:
+        return []
+    idx = pd.DatetimeIndex(x.index)
+    out = []
+    for yr, g in x.groupby(idx.year):
+        gi = pd.DatetimeIndex(g.index)
+        out.append({"year": int(yr), "mean": float(g.mean()), "n": len(g),
+                    "first": str(gi[0].date()), "last": str(gi[-1].date()),
+                    "partial": bool(yr == idx[-1].year and idx[-1].month < 12)})
+    return out

@@ -196,6 +196,31 @@
   {% endcall %}
 </div>
 
+{% set vr = d.vrp %}
+{% if vr and d.charts.vrp_levels %}
+<div class="g">
+  {% call m.panel('vrp', 'Implied against realised vol · what the β·VIX mark leaves of the premium', 's12', vr.first ~ ' → ' ~ vr.last) %}
+    {{ m.chart(d.charts.vrp_levels, 'h300') }}
+    {% if d.charts.vrp_bars %}{{ m.chart(d.charts.vrp_bars, 'h160') }}{% endif %}
+    <div class="split mt8">
+      <div>
+        <div class="tbl-wrap" tabindex="0" role="region" aria-label="Ex-post premium by β (scrollable)">
+        <table class="tbl dense wrap-head cards" id="vrp-beta-table"><caption>β·VIX − RV21 forward, {{ vr.start }} → {{ vr.end }}, {{ (vr.rows[0].n if vr.rows else none)|fmt(',') }} sessions (vol pts; variance-space: vol pts²)</caption>
+          <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col">Which</th><th scope="col" class="num">Mean</th><th scope="col" class="num">Median</th><th scope="col" class="num">Above zero</th><th scope="col" class="num">(β·VIX)² − RV²</th></tr></thead>
+          <tbody>{% for r in vr.rows %}<tr{% if r.backtest %} class="em"{% endif %} data-vrp-beta="{{ r.beta|fmt('.2f') }}"><td class="num" data-label="β">{{ r.beta|fmt('.2f') }}</td><td class="wrap" data-label="Which">{{ r.why|dates }}</td><td class="num" data-label="Mean">{{ r.mean|signed('.2f') }}</td><td class="num" data-label="Median">{{ r.median|signed('.2f') }}</td><td class="num" data-label="Above zero">{{ r.share_pos|fmt('.1f') }}%</td><td class="num" data-label="(β·VIX)² − RV²">{{ r.var_mean|signed('.1f') }}</td></tr>{% endfor %}</tbody>
+        </table>
+        </div>
+        {% if vr.full %}<p class="note" id="vrp-full">Full sample, {{ vr.full.first }} → {{ vr.full.last }} ({{ vr.full.n|fmt(',') }} sessions with a forward window): VIX − RV21 forward averages <strong>{{ vr.full.mean|signed('.2f') }} vol pts</strong> and is positive on {{ vr.full.share_pos|fmt('.1f') }}% of sessions.{% if vr.now %} Today, {{ vr.now.date }}: VIX {{ vr.now.vix|fmt('.2f') }} against RV21 trailing {{ vr.now.rv|fmt('.2f') }} ({{ vr.now.spread|signed('.2f') }} vol pts); its forward value is not known until 21 sessions later.{% endif %}</p>{% endif %}
+        <p class="note" id="vrp-s4">Triangles on the chart: the {{ vr.n_s4 }} S4 entries of the trade log ({{ vr.n_s4_short }} short ▼, {{ vr.n_s4_long }} long ▲), at the VIX close of the entry session. S4 enters on z_vrp; the marks show where its entries fell, not why they lost or won.</p>
+      </div>
+      <div>{% if d.charts.vrp_years %}<h3 class="sub-head">{{ vr.beta_bt|fmt('.2f') }}·VIX − RV21 forward by calendar year <span class="sub-meta">backtest window, mean, vol pts</span></h3>
+        {{ m.chart(d.charts.vrp_years, 'h200') }}{% endif %}</div>
+    </div>
+    <p class="note" id="vrp-caption">RV21 trailing: the root-mean-square SPX log return of the 21 sessions to the date, annualised (√252); RV21 forward: the same over the next 21 sessions, t+1 … t+21, the target of the <a href="#forecast">forecast evaluation</a>, so it ends {{ vr.fwd_last }}. VIX is a 30-calendar-day variance-swap rate that includes the skew premium, so VIX − RV overstates what an at-the-money straddle earns, and the backtest marks its straddles at {{ vr.beta_bt|fmt('.2f') }}·VIX for that reason. The 21-session windows overlap, so the shares and means are not counts of independent events, and no t-statistic is given. This is a description, not P&amp;L: it does not explain the backtest’s result. The backtest window is shaded.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
 {% set grid = b.get('grid') or [] %}
 {% if be or grid %}
 <div class="g pair" id="beta">

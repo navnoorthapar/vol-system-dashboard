@@ -118,7 +118,7 @@
     }
     if (s.type === 'scatter') {
       var sc = Object.assign(base, {
-        type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6,
+        type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6, symbolRotate: s.rotate || 0,
         itemStyle: s.hollow ? { color: 'transparent', borderColor: c, borderWidth: 1.4, opacity: s.opacity || 1 } : { color: c, opacity: s.opacity || 0.9 },
       });
       // a short label at each point (the VX leg's model − settlement gap)
@@ -323,7 +323,7 @@
     var opt = {
       animation: false, backgroundColor: 'transparent',
       textStyle: { fontFamily: T.sans, color: T.text2 },
-      grid: Object.assign({ left: 54, right: spec.y2 ? 54 : 18, top: 14, bottom: spec.zoom ? 58 : 36, containLabel: false }, spec.grid || {}),
+      grid: Object.assign({ left: 54, right: spec.y2 ? 54 : 18, top: 14, bottom: spec.zoom && spec.zoom !== 'inside' ? 58 : 36, containLabel: false }, spec.grid || {}),
       xAxis: axis(spec.x, T, true, spec),
       yAxis: [axis(spec.y, T, false, spec)],
       tooltip: tooltipFor(spec, T),
@@ -356,7 +356,9 @@
         if (out) out.labels = L;
       }
     }
-    if (spec.zoom) {
+    if (spec.zoom === 'inside') {          // wheel / drag only: a chart that zooms with a linked one
+      opt.dataZoom = [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }];
+    } else if (spec.zoom) {
       opt.dataZoom = [
         { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
         { type: 'slider', xAxisIndex: 0, height: 16, bottom: 8, borderColor: T.line2, fillerColor: alpha(T.colors.info, 0.12),
@@ -417,10 +419,38 @@
   }
 
   // -- chart lifecycle ----
-  function specOf(el) {
-    var s = doc.getElementById(el.getAttribute('data-spec'));
-    return s ? JSON.parse(s.textContent) : null;
+  // A compact spec (desk_charts.py): x values as {start, steps} day gaps, the x
+  // values of another chart (xsFrom), a series derived from others (k·a − b).
+  function expandDates(c) {
+    var p = c.start.split('-'), t = Date.UTC(+p[0], +p[1] - 1, +p[2]), out = [c.start];
+    c.steps.forEach(function (d) { t += d * 86400000; out.push(new Date(t).toISOString().slice(0, 10)); });
+    return out;
   }
+  function parseSpec(id) {
+    var s = doc.getElementById(id);
+    return s ? resolveSpec(JSON.parse(s.textContent)) : null;
+  }
+  function resolveSpec(spec) {
+    if (spec.xsDates) { spec.xs = expandDates(spec.xsDates); delete spec.xsDates; }
+    var ref = spec.xsFrom ? parseSpec(spec.xsFrom + '-spec') : null;
+    if (ref) spec.xs = ref.xs;
+    (spec.series || []).forEach(function (s) {
+      var d = s.derive;
+      if (!d) return;
+      var src = d.from ? (ref && ref.id === d.from ? ref : parseSpec(d.from + '-spec')) : spec;
+      var by = {};
+      ((src && src.series) || []).forEach(function (x) { by[x.name] = x.data; });
+      var a = by[d.a] || [], b = d.b ? by[d.b] : null, k = d.k === undefined ? 1 : d.k;
+      var f = Math.pow(10, d.digits === undefined ? 2 : d.digits);
+      s.data = a.map(function (v, i) {
+        var w = b ? b[i] : 0;
+        return v === null || v === undefined || w === null || w === undefined ? null : Math.round((k * v - w) * f) / f;
+      });
+    });
+    return spec;
+  }
+  Desk.resolveSpec = resolveSpec;
+  function specOf(el) { return parseSpec(el.getAttribute('data-spec')); }
   // A legend button stands for every series with its key (s.legendKey, else the
   // name): on the smile slices one "Heston" button covers each expiry's curve.
   function legendKey(s) { return s.legendKey || s.name; }
@@ -447,6 +477,8 @@
     });
     opt.legend.selected = sel;
     inst.setOption(opt, true);
+    // linked charts (the same x values) zoom and point together
+    if (spec.link && window.echarts.connect) { inst.group = spec.link; window.echarts.connect(spec.link); }
     // drawn before the web fonts arrived: drawn again once they have (canvas text keeps its font)
     Desk.charts[el.id] = { el: el, chart: inst, spec: spec, early: !fontsReady, labels: built.labels };
     return inst;

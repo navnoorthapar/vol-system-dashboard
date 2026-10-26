@@ -2099,6 +2099,7 @@ def load_page4() -> dict[str, Any]:
         eq = None
 
     # ── Engine metrics + trade log: the single source for every KPI ──────────
+    trades: list = []
     with _loader_boundary(d, "backtest engine results (full_results.pkl)"):
         state = _load_pickle(DATA / "backtest" / "full_results.pkl")
         em = state.get("metrics") or {}
@@ -2283,6 +2284,15 @@ def load_page4() -> dict[str, Any]:
         grid_betas = [float(r["beta"]) for r in ((d["bridge"] or {}).get("grid") or [])]
         be["mean_all_in_grid"] = any(abs(g - round(be["mean_all"], 2)) < 1e-9 for g in grid_betas)
         d["beta_est"] = be
+
+    # ── Implied against subsequently realised vol, and the β·VIX premium ────
+    d["vrp"] = None
+    with _loader_boundary(d, "implied vs realised vol (vol_system.db spx_ohlcv, vix_daily)"):
+        later = (d.get("beta_est") or {}).get("later") or []
+        v = vrp_view(_read_spx(), _read_vix_daily(), d.get("start_date"), d.get("end_date"), d.get("beta"),
+                     later[-1] if later else None, trades)
+        d["charts"].update({f"vrp_{k}": c for k, c in v.pop("charts").items()})
+        d["vrp"] = v
 
     # ── The pre-C22 PDV spread (audit row): how often it signalled short vol ─
     d["pre_c22_spread"] = None
@@ -3537,7 +3547,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             y={"name": "Drawdown (%)", "digits": 0, "tipDigits": 2, "tickUnit": "%", "unit": "%", "max": 0},
             series=[{"name": "Drawdown", "type": "line", "color": "neg", "width": 1.2, "area": True,
                      "sampling": "lttb", "data": dd.round(3).tolist()}],
-            xs=xs, zoom=False, csv="drawdown.csv", grid={"top": 10, "bottom": 30},
+            xs_from="chart-equity", zoom=False, csv="drawdown.csv", grid={"top": 10, "bottom": 30},
             describe=(f"Deepest drawdown {_fmt(float(dd.min()), '.1f')}% on "
                       f"{cast(pd.Timestamp, dd.idxmin()).date()}."),
             table=charts.table("Drawdown", ["Statistic", "Value"],
@@ -3554,7 +3564,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             series=[{"name": "Rolling Sharpe", "type": "line", "color": "cat0", "width": 1.3,
                      "sampling": "lttb",
                      "data": [None if not np.isfinite(v) else round(float(v), 3) for v in roll]}],
-            xs=xs, csv="rolling_sharpe_126.csv", grid={"top": 10, "bottom": 30},
+            xs_from="chart-equity", csv="rolling_sharpe_126.csv", grid={"top": 10, "bottom": 30},
             marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
             describe="Annualised Sharpe of the trailing 126 daily returns; blank where the NAV was flat.",
             table=charts.table("Rolling Sharpe", ["Statistic", "Value#"],
@@ -3676,6 +3686,165 @@ def forward_ledger_protocol() -> dict:
                "near-the-money lines two-sided), whatever the fit does")
     return {"rows": rows, "pending": pending, "path": path,
             "module": "joint_vol_calibration/backtest/forward_ledger.py"}
+
+
+# a round reference row of the β table, between the backtest's and the newest chain's
+VRP_REFERENCE_BETA = 0.80
+
+
+def market_vol_frame(spx: pd.DataFrame, vix: pd.Series) -> pd.DataFrame:
+    """VIX, RV21 trailing and RV21 forward on every session with a VIX close (vol pts)."""
+    r = (spx["close_return"] if "close_return" in spx.columns
+         else pd.Series(np.log(spx["close"].to_numpy(float)), index=spx.index).diff())
+    out = pd.DataFrame({"vix": vix.astype(float)})
+    out["rv_trl"] = desk_market.rv_trailing(r).reindex(out.index)
+    out["rv_fwd"] = desk_market.rv_forward(r).reindex(out.index)
+    return out.dropna(subset=["vix"])
+
+
+def vix_rv_now(spx: pd.DataFrame, vix: pd.Series) -> dict | None:
+    """The newest session's VIX against its trailing RV21 (the Overview line)."""
+    f = market_vol_frame(spx, vix).dropna(subset=["rv_trl"])
+    if f.empty:
+        return None
+    last = f.iloc[-1]
+    return {"date": str(pd.Timestamp(f.index[-1]).date()), "vix": float(last["vix"]),
+            "rv": float(last["rv_trl"]), "spread": float(last["vix"] - last["rv_trl"])}
+
+
+def _r2(x: Any) -> float | None:
+    v = _num(x)
+    return None if v is None else round(v, 2)
+
+
+def vrp_view(spx: pd.DataFrame, vix: pd.Series, start: str | None, end: str | None, beta_bt: float | None,
+             newest_chain: dict | None, trades: Sequence[Any]) -> dict:
+    """Research #vrp: VIX against trailing and subsequently realised RV21, the ex-post
+    premium a β·VIX mark leaves over the backtest window (a description, not P&L),
+    calendar-year means at the backtest's β, and the S4 entries on the same axis."""
+    f = market_vol_frame(spx, vix)
+    xs = [str(pd.Timestamp(t).date()) for t in f.index]
+    betas = [(1.0, "VIX itself")]
+    if beta_bt is not None:
+        betas.append((round(beta_bt, 2), "the backtest's mark"))
+    betas.append((VRP_REFERENCE_BETA, "round reference"))
+    if newest_chain:
+        betas.append((round(float(newest_chain["ratio"]), 2),
+                      (f"newest chain's ATM / VIX ({newest_chain['session']}: "
+                       f"{_fmt(newest_chain['ratio'], '.3f')})")))
+    seen: set = set()
+    rows = []
+    for b, why in betas:
+        if b in seen:
+            continue
+        seen.add(b)
+        st = desk_market.vrp_stats(f["vix"], f["rv_fwd"], b, start, end)
+        if st:
+            rows.append({**st, "why": why,
+                         "backtest": beta_bt is not None and abs(b - round(beta_bt, 2)) < 1e-9})
+    full = desk_market.vrp_stats(f["vix"], f["rv_fwd"], 1.0)
+    b_bt = round(beta_bt, 2) if beta_bt is not None else None
+    years = (desk_market.yearly_means(desk_market.vrp(f["vix"], f["rv_fwd"], b_bt).loc[start:end])
+             if b_bt is not None else [])
+    now = vix_rv_now(spx, vix)
+    fwd_last = f["rv_fwd"].dropna()
+    s4 = [t for t in trades if getattr(t, "signal", None) == "s4"]
+    vix_at = dict(zip(xs, f["vix"].round(2).tolist()))
+    entries: dict[int, list[list]] = {d_: [] for d_ in (-1, 1)}
+    for t in s4:
+        day = str(pd.Timestamp(t.entry_date).date())
+        if day in vix_at and int(getattr(t, "direction", 0)) in entries:
+            entries[int(t.direction)].append([day, vix_at[day]])
+    view: dict[str, Any] = {"rows": rows, "full": full, "years": years, "now": now, "start": start,
+                            "end": end,
+            "beta_bt": b_bt, "first": xs[0] if xs else None, "last": xs[-1] if xs else None,
+            "fwd_last": str(pd.Timestamp(fwd_last.index[-1]).date()) if len(fwd_last) else None,
+            "n_s4": len(s4), "n_s4_short": len(entries[-1]), "n_s4_long": len(entries[1]),
+            "charts": {}}
+    if not xs:
+        return view
+    window = ([{"from": start, "to": end, "color": "info", "alpha": 0.07, "label": "backtest window"}]
+              if start and end else [])
+    yr_all = desk_market.yearly_means(f["vix"])
+    v1 = desk_market.vrp(f["vix"], f["rv_fwd"], 1.0)
+    yv = desk_market.yearly_means(v1)
+    yt = {k: {y["year"]: y["mean"] for y in desk_market.yearly_means(f[k])} for k in ("rv_trl", "rv_fwd")}
+    yt["vrp"] = {y["year"]: y["mean"] for y in yv}
+    lev_series = [
+        {"name": "VIX", "type": "line", "color": "headline", "width": 1.3, "legend": True, "sampling": "lttb",
+         "data": [_r2(x) for x in f["vix"]]},
+        # not blue or orange: the bars below are signed in those two
+        {"name": "RV21 trailing", "type": "line", "color": "cat2", "width": 1.1, "legend": True,
+         "sampling": "lttb", "data": [_r2(x) for x in f["rv_trl"]]},
+        {"name": "RV21 forward", "type": "line", "color": "cat3", "width": 1.1, "legend": True,
+         "sampling": "lttb", "data": [_r2(x) for x in f["rv_fwd"]]}]
+    if b_bt is not None:
+        lev_series.append({"name": f"{_fmt(b_bt, '.2f')}·VIX (backtest mark)", "type": "line",
+                           "color": "muted", "width": 1.1, "dash": True, "legend": True, "sampling": "lttb",
+                           "derive": {"a": "VIX", "k": b_bt, "digits": 4}})
+    lev_series += [
+        {"name": "S4 short entry", "type": "scatter", "color": "cat4", "symbol": "triangle", "rotate": 180,
+         "size": 8, "z": 5, "legend": True, "data": entries[-1]},
+        {"name": "S4 long entry", "type": "scatter", "color": "cat4", "symbol": "triangle", "size": 8, "z": 5,
+         "legend": True, "data": entries[1]}]
+    view["charts"]["levels"] = charts.xy(
+        "chart-vrp-levels",
+        "VIX against trailing and subsequently realised 21-session vol, with the S4 entries",
+        x={"type": "time", "csv": "date"},
+        y={"name": "Vol (vol pts)", "digits": 0, "tipDigits": 2},
+        series=lev_series, xs=xs, zoom=True, zoom_presets=(("1Y", 1), ("3Y", 3), ("All", 0)),
+        marks={"areas": window}, csv="vix_rv21.csv", link="vrp", tooltip="axis",
+        describe=(f"Daily {xs[0]} to {xs[-1]}: the VIX close, RV21 over the 21 sessions to each date and "
+                  f"over the 21 sessions after it (to {view['fwd_last']}); the backtest window is shaded "
+                  f"and the {len(s4)} S4 entries ({len(entries[-1])} short, {len(entries[1])} long) are "
+                  "marked at the VIX close of their entry session."),
+        table=charts.table("Calendar-year means (vol pts; each over the sessions that have the value: the "
+                           "forward one stops 21 sessions before the data); the CSV has every session",
+                           ["Year", "VIX#", "RV21 trailing#", "RV21 forward#", "VIX − RV21 forward#"],
+                           [[y["year"] if not y["partial"] else f"{y['year']} (to {y['last']})",
+                             _fmt(y["mean"], ".2f"), _fmt(yt["rv_trl"].get(y["year"]), ".2f"),
+                             _fmt(yt["rv_fwd"].get(y["year"]), ".2f"),
+                             signed(yt["vrp"].get(y["year"]), ".2f")]
+                            for y in yr_all]))
+    v1n = v1.dropna()
+    pos = {y_: float((g > 0).mean() * 100) for y_, g in v1n.groupby(pd.DatetimeIndex(v1n.index).year)}
+    view["charts"]["bars"] = charts.xy(
+        "chart-vrp-bars", "Ex-post premium at β = 1: VIX minus the next 21 sessions' realised vol",
+        x={"type": "time", "csv": "date"},
+        y={"name": "VIX − RV21 fwd (vol pts)", "digits": 0, "tipDigits": 2, "signed": True},
+        # the levels chart's VIX − RV21 forward (its data; the CSV and the table carry it)
+        series=[{"name": "VIX − RV21 forward", "type": "bar", "signed": True, "barMaxWidth": 3,
+                 "derive": {"from": "chart-vrp-levels", "a": "VIX", "b": "RV21 forward"}}],
+        xs_from="chart-vrp-levels", zoom="inside", link="vrp", tooltip="axis", grid={"top": 8, "bottom": 30},
+        marks={"areas": window, "y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+        csv="vix_minus_rv21_forward.csv",
+        describe=(f"{_fmt(full['n'] if full else None, ',')} sessions with a forward window; positive on "
+                  f"{_fmt(full['share_pos'] if full else None, '.1f')}%, mean "
+                  f"{signed(full['mean'] if full else None, '.2f')} vol pts. Zooms with the chart above."),
+        table=charts.table("VIX − RV21 forward by calendar year (vol pts); the CSV has every session",
+                           ["Year", "Mean#", "Above zero (%)#", "Sessions#"],
+                           [[y["year"] if not y["partial"] else f"{y['year']} (to {y['last']})",
+                             signed(y["mean"], ".2f"), _fmt(pos.get(y["year"]), ".1f"), y["n"]] for y in yv]))
+    if years:
+        labels = [f"{y['year']} YTD" if y["partial"] else str(y["year"]) for y in years]
+        view["charts"]["years"] = charts.xy(
+            "chart-vrp-years", f"Mean ex-post premium of the {_fmt(b_bt, '.2f')}·VIX mark by calendar year, "
+            "backtest window",
+            x={"type": "category", "categories": labels, "name": "", "interval": 0, "fit": True},
+            y={"name": f"{_fmt(b_bt, '.2f')}·VIX − RV21 fwd (vol pts)", "digits": 0, "tipDigits": 2,
+               "signed": True},
+            series=[{"name": f"Mean at β = {_fmt(b_bt, '.2f')}", "type": "bar", "signed": True,
+                     "data": [round(y["mean"], 3) for y in years]}],
+            xs=labels, csv=f"vrp_beta_{_fmt(b_bt, '.2f')}_by_year.csv", grid={"top": 10, "bottom": 30},
+            marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+            describe=(f"Calendar-year means of {_fmt(b_bt, '.2f')}·VIX − RV21 forward, {start} → {end}; "
+                      + "; ".join(f"{y['year']} YTD: {y['first']} → {y['last']}, {y['n']} sessions"
+                                  for y in years if y["partial"])),
+            table=charts.table(f"Mean of {_fmt(b_bt, '.2f')}·VIX − RV21 forward by calendar year (vol pts)",
+                               ["Year", "Mean#", "Sessions#", "From", "To"],
+                               [[lab, signed(y["mean"], ".2f"), y["n"], y["first"], y["last"]]
+                                for lab, y in zip(labels, years)]))
+    return view
 
 
 SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian",
@@ -4274,6 +4443,10 @@ def load_overview() -> dict[str, Any]:
             table=charts.table(f"VIX-family index levels, {d.get('ts_date')}", ["Tenor", "Level (vol pts)#"],
                                [[t, _fmt(v, ".2f")] for t, v in zip(d["ts_tenors"], d["ts_values"])]))
     d["pdv_spark"] = sparkline(d.get("pdv_sparkline") or [], height=36, zero=True)
+    # VIX against the realised vol of the last 21 sessions (Research #vrp has the history)
+    d["vix_rv"] = None
+    with _loader_boundary(d, "VIX − RV21 (vol_system.db spx_ohlcv, vix_daily)"):
+        d["vix_rv"] = vix_rv_now(_read_spx(), _read_vix_daily())
     d["surface_state"] = surf.get("state")
     d["inference_state"] = inf.get("state")
     # one line of the surface in desk coordinates (the Surface page's 1M row)
