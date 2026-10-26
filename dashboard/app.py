@@ -2361,6 +2361,11 @@ def load_page4() -> dict[str, Any]:
         be["mean_all_in_grid"] = any(abs(g - round(be["mean_all"], 2)) < 1e-9 for g in grid_betas)
         d["beta_est"] = be
 
+    # ── What each sleeve trades (Research #sleeve-spec) ──────────────────────
+    d["sleeve_spec"] = None
+    with _loader_boundary(d, "sleeve specification (backtest_engine, signal_engine, full_results.pkl)"):
+        d["sleeve_spec"] = sleeve_spec(trades)
+
     # ── Implied against subsequently realised vol, and the β·VIX premium ────
     d["vrp"] = None
     with _loader_boundary(d, "implied vs realised vol (vol_system.db spx_ohlcv, vix_daily)"):
@@ -3767,6 +3772,101 @@ def forward_ledger_protocol() -> dict:
                "near-the-money lines two-sided), whatever the fit does")
     return {"rows": rows, "pending": pending, "path": path,
             "module": "joint_vol_calibration/backtest/forward_ledger.py"}
+
+
+SPEC_SLEEVES = (("s1c", "portfolio"), ("s3", "portfolio"), ("s4", "portfolio"), ("s1", "reference"),
+                ("s2", "reference"))
+
+
+def _vp(x: float) -> str:
+    """A decimal-vol threshold in vol points: 0.02 -> '2', 0.005 -> '0.5'."""
+    return _gm(x * 100)
+
+
+def _gm(x: float) -> str:
+    """A constant as written ('g'), with a true minus sign: -0.5 -> '−0.5'."""
+    return f"{x:g}".replace("-", MINUS)
+
+
+def sleeve_spec(trades: Sequence[Any]) -> dict:
+    """Research #sleeve-spec: what each sleeve trades, read from the engine and
+    signal modules at render time (no constant is typed here) and the side and
+    exit counts from the stored trade log."""
+    from joint_vol_calibration.backtest import backtest_engine as be
+    from joint_vol_calibration.signals import signal_engine as se
+    by: dict[str, dict] = {}
+    for t in trades:
+        sig = str(getattr(t, "signal", ""))
+        e = by.setdefault(sig, {"long": 0, "short": 0, "exits": {}})
+        e["long" if int(getattr(t, "direction", 0)) > 0 else "short"] += 1
+        why = str(getattr(t, "exit_reason", "") or "")
+        e["exits"][why] = e["exits"].get(why, 0) + 1
+    straddle = (f"{be.STRADDLE_TENOR_DAYS}-calendar-day ATM SPX straddle, delta-hedged daily, marked at "
+                "Black–Scholes on β·VIX")
+    overlay = " · overlay"
+    costs = (f"{be.BID_ASK_VOL_PTS:g} vol pts + ${be.COMMISSION_PER_LEG:.2f} a contract per leg, each way; "
+             f"hedge slippage {be.SLIPPAGE_PCT:.2%}")
+    r2 = "a move into R2 closes it"
+    rows = {
+        "s1c": {"name": "S1C · contrarian PDV", "instrument": straddle,
+                "entry": (f"PDV forecast > VIX + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R0 → short; "
+                          f"VIX > PDV + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R1 → long"),
+                "exit": (f"the spread back inside ±{_vp(se.S1_EXIT_BAND)} vol pts or through zero; {r2}"),
+                "hold": se.S1_MAX_HOLD,
+                "sizing": (f"tanh(|spread| / {_vp(se.S1_STRENGTH_SCALE)} vol pts) × {se.S1_MAX_KELLY:.0%} of "
+                           f"sleeve NAV{overlay}")},
+        "s3": {"name": S3_NAME, "instrument": f"SHORT {straddle}; the index leg only",
+               "entry": (f"z of VIX / VVIX ({se.S3_LOOKBACK}-session) < {_gm(se.S3_ZSCORE_ENTRY)} "
+                         "in R0 or R1"),
+               "exit": f"z > {_gm(se.S3_ZSCORE_EXIT)}",
+               "hold": se.S3_MAX_HOLD,
+               "sizing": (f"min(1, |z| / {_gm(se.S3_STRENGTH_SCALE)}) × {se.S3_MAX_KELLY:.0%} of sleeve "
+                          f"NAV{overlay}")},
+        "s4": {"name": "S4 · VRP", "instrument": straddle,
+               "entry": (f"z_vrp > {_gm(se.S4_Z_ENTRY_SHORT)} and falling, in R1 → short; "
+                         f"z_vrp < {_gm(se.S4_Z_ENTRY_LONG)} and rising, in R0 → long"),
+               "exit": f"|z_vrp| < {_gm(se.S4_Z_EXIT)}; {r2}",
+               "hold": se.S4_MAX_HOLD,
+               "sizing": (f"min(1, |z_vrp| / {_gm(se.S4_STRENGTH_SCALE)}) × {se.S4_MAX_KELLY:.0%} of "
+                          f"sleeve NAV{overlay}")},
+        "s1": {"name": "S1 · PDV short-VRP", "instrument": straddle,
+               "entry": (f"PDV forecast > VIX + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R0 → long; "
+                         f"VIX > PDV + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R1 → short"),
+               "exit": f"the spread back inside ±{_vp(se.S1_EXIT_BAND)} vol pts or through zero",
+               "hold": se.S1_MAX_HOLD,
+               "sizing": (f"tanh(|spread| / {_vp(se.S1_STRENGTH_SCALE)} vol pts) × {se.S1_MAX_KELLY:.0%} of "
+                          "sleeve NAV")},
+        "s2": {"name": "S2 · VIX term structure", "instrument": straddle,
+               "entry": (f"z of the VIX3M − VIX slope ({se.S2_LOOKBACK}-session) > "
+                         f"{_gm(se.S2_ZSCORE_ENTRY)} in R0 or R1 → short; slope < 0 (backwardation) in R0 or "
+                         "R1 → long"),
+               "exit": (f"|z| < {_gm(se.S2_ZSCORE_EXIT)}, or VIX moves {se.S2_STOP_LOSS_PCT:.0%} of its "
+                        "entry level against the straddle"),
+               "hold": se.S2_MAX_HOLD,
+               "sizing": (f"min(1, |z| / {_gm(se.S2_STRENGTH_SCALE)}) × {se.S2_MAX_KELLY:.0%} of "
+                          "sleeve NAV")},
+    }
+    exit_words = {"signal": "signal", "expiry": "at expiry, rolled", "open": "open at the end"}
+    out = []
+    for key, role in SPEC_SLEEVES:
+        c = by.get(key) or {"long": 0, "short": 0, "exits": {}}
+        sides = [f"{side} {c[side]}" for side in ("short", "long") if c[side]]
+        exits = [f"{n} {exit_words.get(w, w)}" for w, n in sorted(c["exits"].items(), key=lambda kv: -kv[1])]
+        out.append({"key": key, "role": role, **rows[key], "costs": costs, "n": c["long"] + c["short"],
+                    "sides": " / ".join(sides) or "no trades", "exits": ", ".join(exits)})
+    cb = by.get("combined") or {"long": 0, "short": 0}
+    return {"rows": out,
+            "combined": {"long": cb["long"], "short": cb["short"], "n": cb["long"] + cb["short"]},
+            "margin": (f"a short straddle is capped at NAV / ({be.MARGIN_RATIO:.0%} × K × "
+                       f"{be.CONTRACT_MULT}) contracts, its initial margin"),
+            "z_vrp": (f"z_vrp: the {se.S4_LOOKBACK}-session z-score of VRP = VIX − RV₂₀ (annualised), the "
+                      "day's premium of implied over realised vol"),
+            "constants": {
+                "STRADDLE_TENOR_DAYS": be.STRADDLE_TENOR_DAYS, "S1_ENTRY_THRESHOLD": se.S1_ENTRY_THRESHOLD,
+                "S1_MAX_HOLD": se.S1_MAX_HOLD, "S3_MAX_HOLD": se.S3_MAX_HOLD,
+                "S4_Z_ENTRY_SHORT": se.S4_Z_ENTRY_SHORT, "S4_Z_ENTRY_LONG": se.S4_Z_ENTRY_LONG,
+                "S4_Z_EXIT": se.S4_Z_EXIT, "MAX_KELLY": se.S1_MAX_KELLY, "MARGIN_RATIO": be.MARGIN_RATIO,
+                "SLIPPAGE_PCT": be.SLIPPAGE_PCT, "S3_PROXY_COST": be.S3_PROXY_COST}}
 
 
 # a round reference row of the β table, between the backtest's and the newest chain's

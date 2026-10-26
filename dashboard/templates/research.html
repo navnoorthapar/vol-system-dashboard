@@ -59,6 +59,21 @@
   {% endif %}
 </div>
 
+{% set sp = d.sleeve_spec %}
+{% if sp %}
+<div class="g">
+  {% call m.panel('sleeve-spec', 'Sleeve specification · what each sleeve trades', 's12', 'from the engine and signal modules') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Sleeve specification (scrollable)">
+    <table class="tbl dense cards spec" id="sleeve-spec-table">
+      <thead><tr><th scope="col">Sleeve</th><th scope="col">Role</th><th scope="col">Instrument</th><th scope="col">Side (trades)</th><th scope="col">Entry rule</th><th scope="col">Exit rule</th><th scope="col" class="num">Max hold</th><th scope="col">Sizing</th><th scope="col">Costs</th></tr></thead>
+      <tbody>{% for r in sp.rows %}<tr data-sleeve="{{ r.key }}"{% if r.role == 'reference' %} class="muted"{% endif %}><td class="wrap" data-label="Sleeve"><strong class="name">{{ r.name|sym }}</strong></td><td data-label="Role">{{ m.chip(r.role, 'info' if r.role == 'portfolio' else 'muted') }}</td><td class="wrap" data-label="Instrument">{{ r.instrument }}</td><td class="wrap" data-label="Side (trades)"><span class="nowrap" data-sides>{{ r.sides }}</span>{% if r.exits %}<br><span class="faint">exits: {{ r.exits }}</span>{% endif %}</td><td class="wrap" data-label="Entry rule">{{ r.entry|sym }}</td><td class="wrap" data-label="Exit rule">{{ r.exit|sym }}</td><td class="num" data-label="Max hold">{{ r.hold }} sessions</td><td class="wrap" data-label="Sizing">{{ r.sizing|sym }}</td><td class="wrap" data-label="Costs">{{ r.costs }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note" id="sleeve-spec-note">No option prices exist in the window, so every straddle is priced and marked with Black–Scholes at β·VIX (β = {{ d.beta|fmt('.2f') }}). Sizing is premium as a share of the sleeve’s NAV; {{ sp.margin }}; “overlay”: the portfolio sleeves’ size is then scaled by their pairwise P&amp;L correlation and trailing net Sharpe, lagged one session. Costs are charged at entry and at exit (vol pts of the straddle’s vega); the cash account and the hedge carry r and q. {{ sp.z_vrp }}. PDV forecast: the walk-forward 21-session RMS vol forecast; the spread is the forecast minus VIX. Regimes are the rule labels lagged one session. A position still on when its {{ sp.constants.STRADDLE_TENOR_DAYS }}-day straddle expires is rolled into a fresh one the same close (“at expiry, rolled”). The trade log also holds {{ sp.combined.n }} “combined” records ({{ sp.combined.long }} long, {{ sp.combined.short }} short): the research-only agreement rule over S1C, S3 and S4, which reads S3 as long index vol, the opposite of the short straddle the backtest trades. It is not a coherent strategy, is not in the portfolio and is left out here. S3_PROXY_COST ({{ (sp.constants.S3_PROXY_COST * 100)|fmt('g') }}% of notional) costs only the pre-C22 z-score proxy the C22 bridge keeps; the canonical S3 is costed as a straddle. Every number in the table is read from <code class="path">{{ 'joint_vol_calibration/signals/signal_engine.py'|path }}</code> and <code class="path">{{ 'joint_vol_calibration/backtest/backtest_engine.py'|path }}</code> when the page is built, and the counts from the trade log in <code class="path">{{ 'data_store/backtest/full_results.pkl'|path }}</code>.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
 <div class="g">
   {% call m.panel('equity', 'Cumulative return · portfolio, sleeves and T-bills', 's12', 'R2 sessions shaded') %}
     {% if d.charts.equity %}{{ m.chart(d.charts.equity, 'h400') }}{% endif %}

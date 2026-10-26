@@ -3589,7 +3589,8 @@ def test_browser_model_and_strategy_names_stay_on_one_line_at_desk_width(site_br
 
 # text-heavy tables that become cards in a narrow region
 _CARD_TABLES = {"model-risk.html": ["monitor-table", "inventory-table", "vendor-table"],
-                "calibration.html": ["quintic-vs-heston"], "research.html": ["improvements-table"],
+                "calibration.html": ["quintic-vs-heston"],
+                "research.html": ["improvements-table", "sleeve-spec-table"],     # P3.6: the sleeve spec too
                 "corrections.html": ["c23-bridge"]}
 _CARDS_JS = """id => {
   const t = document.getElementById(id), w = t.closest('.tbl-wrap');
@@ -6066,3 +6067,84 @@ def test_regime_panel_states_the_distance_to_the_r2_gate(dash, pages):
     diff = r["vvix"] - r["gate"]
     side = "above" if diff > 0 else "below" if diff < 0 else "at the gate"
     assert got == f"VVIX {r['vvix']:.2f} vs R2 gate {r['gate']:.2f} ({_signed2(diff)} {side})"
+
+
+
+# ── P3.6: the sleeve specification ────────────────────────────────────────────
+
+def _spec_rows(html: str) -> dict:
+    tbl = re.search(r'<table class="tbl dense cards spec" id="sleeve-spec-table">(.*?)</table>', html,
+                    re.DOTALL)
+    assert tbl is not None
+    out = {}
+    for key, body in re.findall(r'<tr data-sleeve="(\w+)"[^>]*>(.*?)</tr>', tbl.group(1), re.DOTALL):
+        cells = re.findall(r'<td[^>]*data-label="([^"]+)"[^>]*>(.*?)</td>', body, re.DOTALL)
+        out[key] = {k: _html_unescape(re.sub(r"<[^>]+>", " ", v)) for k, v in cells}
+    return out
+
+
+def test_sleeve_spec_sits_above_the_equity_curve_and_counts_the_trade_log(dash, pages):
+    """P3.6: #sleeve-spec comes right after the KPI strip, before #equity; each
+    sleeve's side counts are its trade-log records by direction; the Instrument
+    cell names the β·VIX mark; the 'combined' records are explained, not counted."""
+    html = pages["/research"]
+    assert html.index('id="sleeve-spec"') < html.index('id="equity"')
+    assert html.index('id="kpi-strip"') < html.index('id="sleeve-spec"')
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        trades = pickle.load(f)["all_trades"]
+    rows = _spec_rows(html)
+    assert list(rows) == ["s1c", "s3", "s4", "s1", "s2"]
+    for key, r in rows.items():
+        mine = [t for t in trades if t.signal == key]
+        n_long = sum(1 for t in mine if t.direction > 0)
+        n_short = sum(1 for t in mine if t.direction < 0)
+        parts = ((f"short {n_short}" if n_short else ""), (f"long {n_long}" if n_long else ""))
+        want = " / ".join(x for x in parts if x)
+        assert r["Side (trades)"].split("exits")[0].strip() == want, key
+        assert "β·VIX" in r["Instrument"], key
+    comb = [t for t in trades if t.signal == "combined"]
+    m_ = re.search(r'<p class="note" id="sleeve-spec-note">(.*?)</p>', html, re.DOTALL)
+    assert m_ is not None
+    note = _html_unescape(re.sub(r"<[^>]+>", "", m_.group(1)))
+    n_l, n_s = sum(t.direction > 0 for t in comb), sum(t.direction < 0 for t in comb)
+    assert f"{len(comb)} “combined” records ({n_l} long, {n_s} short)" in note
+    assert "z_vrp:" in note
+
+
+def test_sleeve_spec_constants_are_read_from_the_modules(dash, monkeypatch):
+    """P3.6: every constant in the table is the engine's or the signal module's
+    value at render time; changing one changes the page."""
+    from joint_vol_calibration.backtest import backtest_engine as be
+    from joint_vol_calibration.signals import signal_engine as se
+    _resp, html = _get(dash, "/research")
+    rows = _spec_rows(html)
+    vp = lambda x: f"{x * 100:g}"            # noqa: E731
+    assert f"{be.STRADDLE_TENOR_DAYS}-calendar-day" in rows["s4"]["Instrument"]
+    assert f"VIX + {vp(se.S1_ENTRY_THRESHOLD)} vol pts" in rows["s1c"]["Entry rule"]
+    assert rows["s1c"]["Max hold"].strip() == f"{se.S1_MAX_HOLD} sessions"
+    assert rows["s3"]["Max hold"].strip() == f"{se.S3_MAX_HOLD} sessions"
+    gm = lambda x: f"{x:g}".replace("-", "−")            # noqa: E731 (a true minus sign)
+    assert f"z_vrp > {gm(se.S4_Z_ENTRY_SHORT)} and falling" in rows["s4"]["Entry rule"]
+    assert f"z_vrp < {gm(se.S4_Z_ENTRY_LONG)} and rising" in rows["s4"]["Entry rule"]
+    assert f"|z_vrp| < {gm(se.S4_Z_EXIT)}" in rows["s4"]["Exit rule"]
+    assert f"< {gm(se.S3_ZSCORE_ENTRY)} in R0 or R1" in rows["s3"]["Entry rule"]
+    assert f"{se.S1_MAX_KELLY:.0%} of sleeve NAV" in rows["s1c"]["Sizing"]
+    assert f"hedge slippage {be.SLIPPAGE_PCT:.2%}" in rows["s3"]["Costs"]
+    note = _html_unescape(re.search(r'id="sleeve-spec-note">(.*?)</p>', html, re.DOTALL).group(1))
+    assert f"NAV / ({be.MARGIN_RATIO:.0%} × K × {be.CONTRACT_MULT})" in note
+    assert f"S3_PROXY_COST ({be.S3_PROXY_COST * 100:g}% of notional)" in note
+    monkeypatch.setattr(se, "S4_Z_EXIT", 0.45)
+    monkeypatch.setattr(be, "MARGIN_RATIO", 0.25)
+    _resp, html2 = _get(dash, "/research")
+    assert "|z_vrp| < 0.45" in _spec_rows(html2)["s4"]["Exit rule"]
+    assert "NAV / (25% × K × 100)" in _html_unescape(html2)
+
+
+def test_browser_sleeve_spec_is_on_the_first_screen_and_cards_on_a_phone(site_browser):
+    """P3.6: at 1440 px the sleeve table starts within the first 900 px."""
+    sb = site_browser
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(sb["base"] + "research.html", wait_until="load")
+    top = page.evaluate("document.getElementById('sleeve-spec').getBoundingClientRect().top + scrollY")
+    assert top < 900, top
+    ctx.close()

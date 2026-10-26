@@ -346,6 +346,7 @@ sub, sup { font-size: 0.72em; }
 .tbl tr.muted td.num { color: var(--text2); }
 .tbl tr.em td { color: var(--text); font-weight: 600; }
 .tbl td.wrap { white-space: normal; min-width: 180px; }
+.tbl.spec td.wrap { min-width: 12ch; }   /* nine text columns (Research #sleeve-spec) share the width */
 .tbl.dense td, .tbl.dense th { padding: 3px 6px; }
 .tbl.wrap-head th { white-space: normal; vertical-align: bottom; min-width: 7ch; }   /* long heads wrap, the numbers do not */
 /* the delta-quoted grid (Surface #delta-grid): tinted vol and RR/BF cells, the
