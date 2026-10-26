@@ -156,3 +156,54 @@ def table(caption: str, columns: Iterable, rows: Iterable[Iterable[Any]]) -> dic
 
 def color_cycle(i: int) -> str:
     return CATEGORICAL[i % len(CATEGORICAL)]
+
+
+def dot_plot(points: Sequence[dict], lo_box: float, hi_box: float, spec: str = ".3f", width: float = 240.0,
+             row_h: float = 11.0, label_w: float = 40.0) -> dict | None:
+    """A server-rendered forest plot: one row per point (oldest first), the value
+    as a dot with a ±2·SE whisker, the box bounds as dashed lines.
+
+    ``points``: {session, value, se (None: no whisker), on_bound}. The x range is
+    the points' value ± 2·SE, padded; a box bound within half that span of it is
+    drawn (the range extends to it), a farther one is left off the scale.
+    """
+    pts = [p for p in points if p.get("value") is not None]
+    if not pts:
+        return None
+    ends = []
+    for p in pts:
+        v, se = float(p["value"]), p.get("se")
+        ends += [v - 2 * float(se), v + 2 * float(se)] if se is not None else [v]
+    dlo, dhi = min(ends), max(ends)
+    span = (dhi - dlo) or (abs(dhi) * 0.1) or 1.0
+    shown = [b for b in (lo_box, hi_box) if (b <= dlo and dlo - b <= 0.5 * span) or
+             (b >= dhi and b - dhi <= 0.5 * span) or dlo < b < dhi]
+    xlo, xhi = min([dlo, *shown]), max([dhi, *shown])
+    if xhi - xlo <= 0:                            # one value and no whisker: a range around it
+        xlo, xhi = xlo - span / 2, xhi + span / 2
+    pad = 0.06 * (xhi - xlo)
+    xlo, xhi = xlo - pad, xhi + pad
+    plot_w = width - label_w - 6.0
+
+    def x(u: float) -> float:
+        return round(label_w + (u - xlo) / (xhi - xlo) * plot_w, 2)
+
+    def f(u: float) -> str:                       # a true minus sign
+        return format(u, spec).replace("-", "\u2212")
+    rows = []
+    for i, p in enumerate(pts):
+        v, se = float(p["value"]), p.get("se")
+        rows.append({"session": p["session"], "label": str(p["session"])[5:], "value": v, "se": se,
+                     "on_bound": bool(p.get("on_bound")), "x": x(v), "y": round(6 + i * row_h, 2),
+                     "x0": x(v - 2 * float(se)) if se is not None else None,
+                     "x1": x(v + 2 * float(se)) if se is not None else None,
+                     "text": f(v), "se_text": f(2 * float(se)) if se is not None else None,
+                     "newest": i == len(pts) - 1})
+    h = round(6 + len(pts) * row_h + 12, 2)
+    return {"w": width, "h": h, "rows": rows, "axis_y": round(6 + len(pts) * row_h - 4, 2),
+            "bounds": [{"x": x(b), "value": b, "label": f"{b:g}".replace("-", "\u2212")} for b in shown],
+            # the data range's ends, unless a bound's label sits there
+            "ticks": [{"x": tx, "label": f(u), "anchor": anc}
+                      for u, anc in ((xlo + pad, "start"), (xhi - pad, "end"))
+                      for tx in (x(u),) if all(abs(tx - x(b)) > 36 for b in shown)],
+            "x_min": xlo, "x_max": xhi, "left": label_w, "right": width - 6.0}

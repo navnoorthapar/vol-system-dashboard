@@ -6148,3 +6148,80 @@ def test_browser_sleeve_spec_is_on_the_first_screen_and_cards_on_a_phone(site_br
     top = page.evaluate("document.getElementById('sleeve-spec').getBoundingClientRect().top + scrollY")
     assert top < 900, top
     ctx.close()
+
+
+# ── P3.7: parameter tiles as dot plots with ±2·SE ─────────────────────────────
+
+def _dot_svgs(html: str) -> dict:
+    return {k: (attrs, body) for attrs, k, body in
+            ((m.group(0), m.group(1), m.group(2)) for m in re.finditer(
+                r'<svg class="dots"[^>]*data-param="(\w+)"[^>]*>(.*?)</svg>', html, re.DOTALL))}
+
+
+def test_parameter_dot_plots_are_the_gated_fits_with_their_own_standard_errors(dash, pages):
+    """P3.7: under each parameter, one dot per gate-passing fit (oldest first) with
+    a ±2·SE whisker from that fit's identifiability (diagnostics/<session>.json or
+    its pickle); a parameter on its bound has no whisker; role=img with an
+    aria-label listing the dated values."""
+    html = pages["/calibration"]
+    svgs = _dot_svgs(html)
+    assert sorted(svgs) == sorted(k for k, *_ in dash.PARAM_META)
+    gated = _gated_pickles(dash)
+    specs = {k: sp for k, _sym, _name, sp in dash.PARAM_META}
+    for key, (tag, body) in svgs.items():
+        attrs = _attrs(tag[:tag.index(">") + 1])
+        assert attrs["role"] == "img"
+        label = _html_unescape(attrs["aria-label"])
+        n_whiskers = 0
+        for session, cal in gated:
+            diag_path = SHIPPED / "calibrations" / "diagnostics" / f"{session}.json"
+            ident = cal.get("identifiability") or (json.loads(diag_path.read_text())["identifiability"]
+                                                   if diag_path.exists() else {})
+            v = float(cal["params"][key])
+            text = f"{v:{specs[key]}}".replace("-", "−")
+            if key in (ident.get("on_bound") or []):
+                assert f"{session} {text} (on its bound, no SE)" in label, (key, session)
+            else:
+                se = (ident.get("standard_errors") or {}).get(key)
+                if se is None:
+                    assert f"{session} {text} (no SE stored)" in label, (key, session)
+                else:
+                    assert f"{session} {text} ± {2 * se:{specs[key]}}" in label, (key, session)
+                    n_whiskers += 1
+        assert body.count('class="dp-se"') == n_whiskers, key
+        assert body.count("<circle") == len(gated), key
+    # σ on its bound in the headline fit: the newest dot sits on the dashed line, without a whisker
+    d = dash.load_page2()
+    if "sigma" in (d.get("pinned_params") or []):
+        sig = next(t for t in d["param_tiles"] if t["key"] == "sigma")["dots"]
+        assert sig["rows"][-1]["x0"] is None
+        assert any(abs(b["x"] - sig["rows"][-1]["x"]) < 0.01 for b in sig["bounds"])
+    assert "Gauss–Newton curvature scale, not a confidence interval" in _html_unescape(html)
+
+
+def test_parameter_tiles_speak_trader_units(dash, pages):
+    """P3.7: √θ as the long-run vol, √v₀ as the spot vol, κ as a half-life in sessions."""
+    import math
+    _path, cal = dash.load_headline_calibration()
+    p = cal["params"]
+    text = _html_unescape(pages["/calibration"])
+    assert f"√θ = {math.sqrt(p['theta']) * 100:.2f}% long-run vol" in text
+    assert f"√v₀ = {math.sqrt(p['v0']) * 100:.2f}% spot vol" in text
+    assert f"half-life {math.log(2) / p['kappa'] * 252:.1f} sessions (ln2/κ × 252)" in text
+
+
+def test_dot_plot_geometry():
+    """The forest plot's x scale is linear; a near bound is drawn, a far one is not."""
+    ch = _charts()
+    pts = [{"session": "2026-01-02", "value": 1.0, "se": 0.1},
+           {"session": "2026-02-02", "value": 2.0, "se": None, "on_bound": True}]
+    g = ch.dot_plot(pts, 0.0, 2.0)
+    r0, r1 = g["rows"]
+    scale = (r1["x"] - r0["x"]) / 1.0
+    assert r0["x1"] - r0["x"] == pytest.approx(0.2 * scale, abs=0.02)
+    assert r1["x0"] is None
+    assert [b["value"] for b in g["bounds"]] == [2.0]          # 0.0 lies 0.8 below a span of 1.2: off scale
+    assert ch.dot_plot([], 0, 1) is None
+    # one value and no whisker: no division by zero
+    one = ch.dot_plot([{"session": "2026-01-02", "value": 0.5, "se": None}], 0.0, 10.0)
+    assert one["left"] <= one["rows"][0]["x"] <= one["right"]

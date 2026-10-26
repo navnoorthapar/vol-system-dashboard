@@ -2530,7 +2530,7 @@ def _gated_history() -> list[dict]:
             continue
         c = _load_pickle(row["path"])
         losses = _cal_losses(c)
-        out.append({"session": row["session"], "params": dict(c["params"]),
+        out.append({"session": row["session"], "path": row["path"], "params": dict(c["params"]),
                     "rmse": _num(losses.get("spx_iv_rmse")), "oos": _num(losses.get("spx_oos_iv_rmse")),
                     "vix": _num(losses.get("vix_index_rmse")),
                     "wing": _num(losses.get("spx_oos_put_wing_rmse")),
@@ -3065,6 +3065,17 @@ def vx_leg_view(hist: Sequence[dict], headline: str | None) -> dict:
             "headline_empty": next((v["empty"] for v in views if v["headline"] and not v["leg"]), None)}
 
 
+def param_sub_line(key: str, value: float) -> str | None:
+    """A parameter in trader units: √θ and √v₀ as vols, κ as a half-life in sessions."""
+    if key == "theta" and value > 0:
+        return f"√θ = {math.sqrt(value) * 100:.2f}% long-run vol"
+    if key == "v0" and value > 0:
+        return f"√v₀ = {math.sqrt(value) * 100:.2f}% spot vol"
+    if key == "kappa" and value > 0:
+        return f"half-life {math.log(2) / value * 252:.1f} sessions (ln2/κ × 252)"
+    return None
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
     from joint_vol_calibration.config import HESTON_BOUNDS
@@ -3155,6 +3166,18 @@ def calibration_extras(d: dict, cal: dict) -> None:
     ident = diag.get("ident") if diag.get("state") == "ok" else {}
     se = (ident or {}).get("standard_errors") or {}
     pinned = set(d.get("pinned_params") or [])
+    # each gated fit's own identifiability (its diagnostics file or pickle): the ±2·SE of the dot plots
+    per_fit: dict[str, dict] = {}
+    for h in hist:
+        try:
+            dg = artifacts.calibration_diagnostics(_load_pickle(h["path"]), DATA, h["session"])
+        except (artifacts.ArtifactError, OSError) as e:
+            _record_error(d, f"calibration diagnostics of {h['session']}", e)
+            continue
+        if dg.get("state") == "ok":
+            per_fit[h["session"]] = dg
+    box = next((dg.get("production_box") for s_, dg in per_fit.items() if s_ == session
+                and isinstance(dg.get("production_box"), dict)), None) or {}
     tiles = []
     for key, symbol, name, spec in PARAM_META:
         lo, hi = (float(x) for x in HESTON_BOUNDS[key])
@@ -3163,10 +3186,19 @@ def calibration_extras(d: dict, cal: dict) -> None:
         if key in pinned and side is None:
             side = "bound"
         series = [h["params"][key] for h in hist]
+        blo, bhi = (float(x) for x in (box.get(key) or (lo, hi)))
+        pts = []
+        for h in hist:
+            idf = (per_fit.get(h["session"]) or {}).get("ident") or {}
+            on_b = key in (idf.get("on_bound") or [])
+            pts.append({"session": h["session"], "value": float(h["params"][key]),
+                        "se": None if on_b else _num((idf.get("standard_errors") or {}).get(key)),
+                        "on_bound": on_b, "has_diag": h["session"] in per_fit})
         tiles.append({
             "key": key, "sym": symbol, "name": name, "value": val, "spec": spec,
             "lo": lo, "hi": hi, "side": side, "se": _num(se.get(key)),
-            "spark": sparkline(series, bound=(hi if side == "upper" else lo if side == "lower" else None)),
+            "dots": charts.dot_plot(pts, blo, bhi, spec), "points": pts, "box": (blo, bhi),
+            "sub": param_sub_line(key, val),
             "n_hist": len(series), "hist_first": hist[0]["session"] if hist else None,
             "hist_last": hist[-1]["session"] if hist else None,
             "hist_min": min(series) if series else None, "hist_max": max(series) if series else None,

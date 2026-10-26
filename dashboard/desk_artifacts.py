@@ -513,6 +513,8 @@ def calibration_diagnostics(cal: dict, data_dir: Path, session: str | None) -> d
     return {"state": "ok", "source": src, "ident": ident, "multistart": multi,
             "sigma_profile": rows,
             "kappa_max": prof.get("kappa_max") if isinstance(prof, dict) else None,
+            "production_box": (prof.get("production_box") if isinstance(prof, dict)
+                               and isinstance(prof.get("production_box"), dict) else None),
             "spx_only": spx_only,
             "joint_rough": (obj.get("joint_rough_heston")
                             if isinstance(obj.get("joint_rough_heston"), dict) else None),

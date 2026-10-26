@@ -24,7 +24,7 @@
 </p>
 
 <h2 class="section-title">Parameters <span class="sym">κ θ σ ρ v₀</span></h2>
-<div class="kpis" id="params" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:8px;">
+<div class="kpis params-grid" id="params">
   {% for t in d.param_tiles %}
   <div class="param" id="param-{{ t.key }}">
     <div class="param-head"><span class="param-sym">{{ t.sym }}</span><span class="param-name">{{ t.name }}</span></div>
@@ -34,11 +34,20 @@
       box [{{ t.lo|fmt('g') }}, {{ t.hi|fmt('g') }}]
     </div>
     <div class="param-meta">SE {% if t.se is not none %}{{ t.se|fmt('.3g') }}{% elif t.side %}— (on a bound: no curvature error){% else %}— (identifiability not yet generated){% endif %}</div>
-    {{ m.spark(t.spark, t.name ~ ' across ' ~ t.n_hist ~ ' gate-passing fits, ' ~ (t.hist_first or '') ~ ' to ' ~ (t.hist_last or '') ~ ': from ' ~ (t.hist_min|fmt(t.spec)) ~ ' to ' ~ (t.hist_max|fmt(t.spec))) }}
-    <div class="param-meta">{{ t.n_hist }} gated fits{% if t.hist_first %}, {{ t.hist_first }} → {{ t.hist_last }}{% endif %}{% if t.side in ('upper', 'lower') %}; dashed line = bound{% endif %}</div>
+    {% if t.sub %}<div class="param-meta param-sub">{{ t.sub }}</div>{% endif %}
+    {% set dp = t.dots %}{% if dp %}
+    <svg class="dots" viewBox="0 0 {{ dp.w }} {{ dp.h }}" role="img" data-param="{{ t.key }}" aria-label="{{ t.name }} ({{ t.sym }}) by gated fit, value ± 2·SE: {% for r in dp.rows %}{{ r.session }} {{ r.text }}{% if r.on_bound %} (on its bound, no SE){% elif r.se_text %} ± {{ r.se_text }}{% else %} (no SE stored){% endif %}{{ '; ' if not loop.last }}{% endfor %}; box [{{ t.box[0]|fmt('g') }}, {{ t.box[1]|fmt('g') }}]">
+      <line class="dp-axis" x1="{{ dp.left }}" x2="{{ dp.right }}" y1="{{ dp.axis_y }}" y2="{{ dp.axis_y }}"/>
+      {% for b in dp.bounds %}<line class="dp-bound" x1="{{ b.x }}" x2="{{ b.x }}" y1="0" y2="{{ dp.axis_y }}"/><text class="dp-blabel" x="{{ b.x }}" y="{{ dp.h - 1 }}" text-anchor="middle">{{ b.label }}</text>{% endfor %}
+      {% for k in dp.ticks %}<text class="dp-tick" x="{{ k.x }}" y="{{ dp.h - 1 }}" text-anchor="{{ k.anchor }}">{{ k.label }}</text>{% endfor %}
+      {% for r in dp.rows %}<text class="dp-label" x="0" y="{{ r.y + 3 }}">{{ r.label }}</text>{% if r.x0 is not none %}<line class="dp-se" x1="{{ r.x0 }}" x2="{{ r.x1 }}" y1="{{ r.y }}" y2="{{ r.y }}"/>{% endif %}<circle class="dp-dot{% if r.newest %} newest{% endif %}{% if r.on_bound %} on-bound{% endif %}" cx="{{ r.x }}" cy="{{ r.y }}" r="{{ 3.2 if r.newest else 2.6 }}"><title>{{ r.session }}: {{ r.text }}{% if r.se_text %} ± {{ r.se_text }}{% elif r.on_bound %}, on its bound{% endif %}</title></circle>{% endfor %}
+    </svg>{% endif %}
+    <div class="param-meta">{{ t.n_hist }} gated fits{% if t.hist_first %}, {{ t.hist_first }} → {{ t.hist_last }}{% endif %}</div>
   </div>
   {% endfor %}
 </div>
+
+<p class="note" id="param-dots-note">Under each parameter: every gate-passing fit, oldest first, its value with a ±2·SE whisker, the Gauss–Newton curvature scale, not a confidence interval (the residuals are model misfit, not noise). Dashed: a bound of the production box within the plotted range; a parameter on its bound sits on the line with no whisker. The headline fit’s dot is larger.</p>
 
 <h2 class="section-title">Fit quality</h2>
 <div class="kpis" style="margin-bottom:8px;" id="fit-quality">
