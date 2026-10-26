@@ -29,6 +29,14 @@ gaps); ``xsFrom`` names another chart on the page whose x values a chart shares
 no data: it is k·a − b of the named series of this spec (or of chart ``from``),
 rounded to ``digits``. desk.js (resolveSpec) and ``resolve`` below expand them
 the same way, before anything draws, exports or tests the spec.
+
+Quote-level smiles (the quote inspector): ``quotes`` = {groups: {expiry: the
+packed block of desk_quotes.encode}, source, strip, models}; a series with
+``quote`` = 'ba' | 'mid' | 'model' | 'fit' | 'z' | 'zfit' (and ``model``) holds
+no data: it is that field of its group's quotes (desk_quotes.series_data). The
+block is kept at full precision (round_sig would move the forward by up to
+5·10⁻⁶ of itself, and the forward delta with it); ``strip`` series ('z',
+'zfit') draw in the residual strip under the smile.
 """
 from __future__ import annotations
 
@@ -39,6 +47,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+import desk_quotes
 from desk_format import round_sig
 
 CATEGORICAL = ("cat0", "cat1", "cat2", "cat3", "cat4", "cat5")
@@ -82,6 +91,12 @@ def resolve(spec: dict, others: Mapping[str, dict] | None = None) -> dict:
         a, b, k, n = by[d["a"]], (by[d["b"]] if d.get("b") else None), d.get("k", 1), d.get("digits", 2)
         s["data"] = [None if (v is None or (b is not None and b[i] is None))
                      else round(k * v - (b[i] if b is not None else 0), n) for i, v in enumerate(a)]
+    groups = (out.get("quotes") or {}).get("groups") or {}
+    if groups:
+        dec = {g: desk_quotes.decode(b) for g, b in groups.items()}
+        for s in out.get("series") or []:
+            if s.get("quote"):
+                s["data"] = desk_quotes.series_data(dec[str(s["group"])], s["quote"], s.get("model"))
     return out
 
 
@@ -90,7 +105,7 @@ def xy(chart_id: str, title: str, *, x: dict, y: dict, series: list[dict],
        zoom: bool | str = False, marks: dict | None = None, csv: str | None = None,
        horizontal: bool = False, grid: dict | None = None, describe: str = "",
        table: dict | None = None, zoom_presets: Sequence[tuple] = (), link: str | None = None,
-       xs_from: str | None = None) -> dict:
+       xs_from: str | None = None, quotes: dict | None = None) -> dict:
     """A cartesian chart spec (line / bar / scatter / error bars).
 
     zoom: True for a slider and wheel/drag zoom, 'inside' for wheel/drag only;
@@ -142,7 +157,10 @@ def xy(chart_id: str, title: str, *, x: dict, y: dict, series: list[dict],
         if s.get("group") is not None and not s.get("legendKey"):
             items[key]["group"] = s["group"]
     spec["legend_items"] = list(items.values())
-    return round_sig(spec)
+    out = round_sig(spec)
+    if quotes:
+        out["quotes"] = quotes                    # full precision (see the module docstring)
+    return out
 
 
 def table(caption: str, columns: Iterable, rows: Iterable[Iterable[Any]]) -> dict:

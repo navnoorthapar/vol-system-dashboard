@@ -75,6 +75,8 @@
 </div>
 {% endif %}
 <div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec" role="img" aria-label="{{ spec.title }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
+{% if spec.quotes %}<p class="quote-readout js-only" id="{{ cid }}-readout" data-readout-for="{{ cid }}" tabindex="0" aria-live="polite" aria-describedby="{{ cid }}-readout-help">Quote readout: hover a quote, or focus here and step with ← → (Page Up / Down: 10 quotes; Home / End).</p>
+<span class="sr-only" id="{{ cid }}-readout-help">Arrow keys step through the shown expiry’s quotes; each step reads the quote’s strike, bid, mid and ask and each shown model’s IV and z.</span>{% endif %}
 <p class="sr-only" id="{{ cid }}-desc">{{ spec.describe }}</p>
 <script type="application/json" id="{{ cid }}-spec">{{ spec|tojson }}</script>
 {{ data_table(spec.table, cid ~ '-data') }}

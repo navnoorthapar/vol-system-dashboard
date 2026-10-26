@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement;
-  var Desk = window.Desk = { charts: {}, filters: {} };
+  var Desk = window.Desk = { charts: {}, filters: {}, xmode: {} };
   var MINUS = '\u2212';
 
   function css(name) { return getComputedStyle(root).getPropertyValue(name).trim(); }
@@ -61,6 +61,135 @@
     return 'rgba(' + parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16) + ',' + parseInt(h.slice(4, 6), 16) + ',' + a + ')';
   }
 
+  // -- quote-level smiles: the packed quotes of desk_quotes.py ----
+  // spec.quotes.groups[expiry] holds one expiry's quotes; decodeQuotes is the
+  // twin of desk_quotes.decode (the browser tests compare the two), quotePoints
+  // of desk_quotes.series_data. A series with s.quote holds no data until then.
+  var QP = { iv: 1e5, spread: 1e6, model: 1e4, floor: 0.01, days: 365 };
+  // the standard normal CDF to double precision (Hart 1968, as given by West 2005)
+  function ndtr(x) {
+    var z = Math.abs(x), c = 0;
+    if (z <= 37) {
+      var e = Math.exp(-z * z / 2);
+      if (z < 7.07106781186547) {
+        var n = ((((((3.52624965998911e-2 * z + 0.700383064443688) * z + 6.37396220353165) * z + 33.912866078383) * z
+          + 112.079291497871) * z + 221.213596169931) * z + 220.206867912376);
+        var d = (((((((8.83883476483184e-2 * z + 1.75566716318264) * z + 16.064177579207) * z + 86.7807322029461) * z
+          + 296.564248779674) * z + 637.333633378831) * z + 793.826512519948) * z + 440.413735824752);
+        c = e * n / d;
+      } else {
+        var f = z + 1 / (z + 2 / (z + 3 / (z + 4 / (z + 0.65))));
+        c = e / f / 2.506628274631;
+      }
+    }
+    return x > 0 ? 1 - c : c;
+  }
+  Desk.ndtr = ndtr;
+  function decodeQuotes(g) {
+    var out = [], K = g.K0, F = g.F, T = g.T, models = Object.keys(g.m || {});
+    for (var i = 0; i < g.mid.length; i++) {
+      if (i) K += g.dK[i - 1] * g.step;
+      var mid = g.mid[i] / QP.iv, db = g.db[i] / QP.spread, da = g.da[i] / QP.spread, hs = (db + da) / 2;
+      var k = Math.log(K / F), sw = Math.sqrt(Math.pow(mid / 100, 2) * T / QP.days), d1 = -k / sw + sw / 2;
+      var right = g.r.charAt(i), fl = g.f ? +g.f.charAt(i) : 0;
+      var q = { i: i, strike: K, right: right, k: k, T: T, mid: mid, bid: mid - db, ask: mid + da, hs: hs,
+        delta: right === 'P' ? ndtr(d1) - 1 : ndtr(d1), xd: ndtr(-d1),
+        exec: !!(fl & 1), repaired: !!(fl & 2), outside: !!(fl & 4), models: {} };
+      models.forEach(function (m) {
+        var e = g.m[m][i], st = g.s && g.s[m] ? +g.s[m].charAt(i) : 0;
+        q.models[m] = { iv: e === null ? null : mid + e / QP.model,
+          z: e === null ? null : (e / QP.model) / Math.max(hs, QP.floor),
+          inside: e === null ? null : !!(st & 2), fit: !!(st & 1) };
+      });
+      out.push(q);
+    }
+    return out;
+  }
+  Desk.decodeQuotes = decodeQuotes;
+  function quotePoints(rows, s, xmode, clip) {
+    var f = s.quote, out = [];
+    rows.forEach(function (q) {
+      var x = xmode === 'delta' ? q.xd : q.k, mm = s.model ? q.models[s.model] : null;
+      if (f === 'ba') out.push([x, q.bid, q.ask]);
+      else if (f === 'mid') out.push([x, q.mid]);
+      else if (f === 'model') out.push([x, mm && mm.iv !== null ? mm.iv : null]);
+      else if (f === 'fit' || f === 'oos') { if (mm && mm.fit === (f === 'fit')) out.push([x, q.mid]); }
+      else if ((f === 'z' || f === 'zfit') && mm && mm.z !== null && (f === 'z' || mm.fit)) {
+        out.push([x, Math.max(-clip, Math.min(clip, mm.z)), mm.z]);
+      }
+    });
+    return out;
+  }
+  // every quote series of the spec in one x coordinate: 'k' = ln(K/F), 'delta' = N(−d₁)
+  function fillQuotes(spec, xmode) {
+    spec._xmode = xmode;
+    var clip = spec.quotes.zClip || 10;
+    (spec.series || []).forEach(function (s) {
+      if (s.quote) s.data = quotePoints(spec._rows[String(s.group)] || [], s, xmode, clip);
+    });
+  }
+  // the group a quote chart shows: the tab's, or its only one
+  function quoteGroup(spec, f) { return f !== undefined && f !== null ? String(f) : Object.keys(spec._rows)[0]; }
+  // the x range of the shown group, shared by the smile and its residual strip:
+  // the quotes' extent padded and rounded out to a tick step (a spec's x.min /
+  // x.max, set on the server for small multiples, wins)
+  function quoteRange(spec, f) {
+    if (spec._xmode === 'delta') return [0, 1];
+    var x = spec.x || {};
+    if (x.min !== undefined && x.min !== null && x.max !== undefined && x.max !== null) return [x.min, x.max];
+    var rows = spec._rows[quoteGroup(spec, f)] || [];
+    if (!rows.length) return [null, null];
+    var lo = rows[0].k, hi = rows[rows.length - 1].k, span = Math.max(hi - lo, 0.02);
+    var raw = span / 5, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), step = mag;
+    [1, 2, 2.5, 5, 10].some(function (m) { step = m * mag; return step >= raw; });
+    return [Math.floor((lo - 0.02 * span) / step) * step, Math.ceil((hi + 0.02 * span) / step) * step];
+  }
+  // the forward-delta axis's labels: N(−d₁) of 0.10 is the 10-delta put, of 0.90 the 10-delta call
+  var DELTA_TICKS = [0.10, 0.25, 0.50, 0.75, 0.90];
+  function deltaLabel(v) {
+    if (Math.abs(v - 0.5) < 1e-9) return '50\u0394';
+    return v < 0.5 ? Math.round(v * 100) + '\u0394P' : Math.round((1 - v) * 100) + '\u0394C';
+  }
+  // the quote nearest to x (the pointer's axis value) among the shown group's quotes
+  function nearestQuote(spec, f, x) {
+    var rows = spec._rows[quoteGroup(spec, f)] || [], best = null, bd = Infinity;
+    rows.forEach(function (q) { var d = Math.abs((spec._xmode === 'delta' ? q.xd : q.k) - x); if (d < bd) { bd = d; best = q; } });
+    return best;
+  }
+  // what the inspector says about one quote: the tooltip draws these lines and
+  // the keyboard readout joins them with ' · ', so both say the same thing
+  function quoteLines(spec, q, off) {
+    var Q = spec.quotes, lines = [];
+    var pct = function (v) { return num(v, { digits: 2, unit: '%' }); };
+    lines.push({ head: true, text: 'K ' + num(q.strike, { digits: 0 }) + ' ' + q.right + ' \u00b7 ln(K/F) ' + num(q.k, { digits: 3, signed: true })
+      + ' \u00b7 \u0394 ' + num(q.delta, { digits: 2, signed: true }) + ' \u00b7 ' + num(q.T, { digits: 0 }) + ' d' });
+    lines.push({ text: 'Bid / mid / ask ' + num(q.bid, { digits: 2 }) + ' / ' + num(q.mid, { digits: 2 }) + ' / ' + pct(q.ask)
+      + ' \u00b7 half-spread ' + num(q.hs, { digits: 2 }) + ' vol pts' });
+    (Q.models || []).forEach(function (m) {
+      var mm = q.models[m.key];
+      if (!mm || off[m.label]) return;
+      lines.push({ color: m.color, text: (m.short || m.label) + ' ' + (mm.iv === null ? 'no value' : pct(mm.iv) + ' \u00b7 z '
+        + num(mm.z, { digits: 1, signed: true }) + ' \u00b7 ' + (mm.inside ? '\u25cf inside' : '\u25cb outside'))
+        + (mm.fit && m.key !== Q.anchor ? ' \u00b7 fitted to it' : '') });     // the anchor model's: a flag below
+    });
+    var flags = [];
+    if (Q.anchor && q.models[Q.anchor] && q.models[Q.anchor].fit) flags.push((Q.anchorLabel || 'fit') + ' anchor');
+    if (q.exec) flags.push('in an executable arbitrage row');
+    if (q.outside) flags.push('moved outside its bid\u2013ask by the arbitrage repair');
+    else if (q.repaired) flags.push('moved inside its bid\u2013ask by the arbitrage repair');
+    if (flags.length) lines.push({ flag: true, text: flags.join(' \u00b7 ') });
+    if (Q.source) lines.push({ foot: true, text: Q.source });
+    return lines;
+  }
+  function quoteHtml(lines, T) {
+    return lines.map(function (l) {
+      var st = l.head ? 'color:' + T.text3 + ';margin-bottom:2px' : (l.flag ? 'color:' + T.text2 : (l.foot ? 'color:' + T.text3 + ';font-size:10px;margin-top:2px' : ''));
+      var sw = l.color ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color(l.color, T) + ';margin-right:6px"></span>' : '';
+      return '<div style="' + st + '">' + sw + l.text + '</div>';
+    }).join('');
+  }
+  function quoteText(lines) { return lines.map(function (l) { return l.text; }).join(' \u00b7 '); }
+
   // -- spec -> ECharts option ----
   function axis(a, T, isX, spec) {
     a = a || {};
@@ -99,7 +228,8 @@
 
   function buildSeries(s, spec, T, i) {
     var c = color(s.color || ('cat' + (i % 6)), T);
-    var base = { name: s.name, z: s.z || 2, yAxisIndex: s.y2 ? 1 : 0, emphasis: { focus: 'none' } };
+    var base = { name: s.name, z: s.z || 2, yAxisIndex: s.y2 || s.strip ? 1 : 0, emphasis: { focus: 'none' } };
+    if (s.strip) base.xAxisIndex = 1;               // the residual strip under a quote smile
     var data = seriesData(s, spec);
     if (s.type === 'errorbar') {
       return Object.assign(base, {
@@ -117,6 +247,14 @@
       });
     }
     if (s.type === 'scatter') {
+      // a residual-strip point beyond the strip's ±clip is drawn at the edge as a
+      // triangle pointing the way it is cut off (its value stays in the tooltip)
+      if (s.strip && spec.quotes) {
+        var clip = spec.quotes.zClip || 10;
+        data = data.map(function (p) {
+          return Math.abs(p[2]) > clip ? { value: p, symbol: 'triangle', symbolRotate: p[2] < 0 ? 180 : 0, symbolSize: (s.size || 4) + 3 } : p;
+        });
+      }
       var sc = Object.assign(base, {
         type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6, symbolRotate: s.rotate || 0,
         itemStyle: s.hollow ? { color: 'transparent', borderColor: c, borderWidth: 1.4, opacity: s.opacity || 1 } : { color: c, opacity: s.opacity || 0.9 },
@@ -171,20 +309,27 @@
   // The series that carries the mark lines: on a tab-filtered chart (the smile
   // slices) the first series of the group on show, so the marks are never
   // attached to a series the filter hides.
-  function marks(spec, T, opt, filter) {
-    var m = spec.marks || {};
-    if (!opt.series.length) return;
-    var target = opt.series[0];
+  function markTarget(spec, filter) {
+    var t = 0;
     if (filter !== undefined) {
       (spec.series || []).some(function (s, i) {
-        if (s.group !== undefined && String(s.group) === String(filter)) { target = opt.series[i]; return true; }
+        if (s.group !== undefined && String(s.group) === String(filter)) { t = i; return true; }
         return false;
       });
     }
-    if (m.y || m.x) {
-      var data = [];
+    return t;
+  }
+  function marks(spec, T, opt, filter) {
+    var m = spec.marks || {};
+    if (!opt.series.length) return;
+    var target = opt.series[markTarget(spec, filter)];
+    // on the forward-delta axis the forward has no one place (50Δ is drawn as a grid line)
+    var mx = spec._xmode === 'delta' ? [] : (m.x || []);
+    var dl = spec._xmode === 'delta' ? DELTA_TICKS : [];
+    if (m.y || mx.length || dl.length) {
+      var data = dl.map(function (v) { return { xAxis: v, name: '', lineStyle: { color: T.line2, type: 'dotted', width: 1 } }; });
       (m.y || []).forEach(function (l) { data.push({ yAxis: l.value, name: l.label || '', lineStyle: { color: color(l.color || 'muted', T), type: l.dash === false ? 'solid' : 'dashed', width: 1 } }); });
-      (m.x || []).forEach(function (l) { data.push({ xAxis: l.value, name: l.label || '', lineStyle: { color: color(l.color || 'muted', T), type: 'dashed', width: 1 } }); });
+      mx.forEach(function (l) { data.push({ xAxis: l.value, name: l.label || '', lineStyle: { color: color(l.color || 'muted', T), type: 'dashed', width: 1 } }); });
       target.markLine = { symbol: 'none', silent: true, animation: false, data: data,
         label: { show: true, position: 'insideEndTop', color: T.text3, fontFamily: T.mono, fontSize: 10, formatter: '{b}' } };
     }
@@ -367,8 +512,69 @@
           textStyle: { color: T.text3, fontFamily: T.mono, fontSize: 10 }, labelFormatter: function (v, s) { return s; } },
       ];
     }
+    if (spec.quotes) quoteOption(spec, T, opt, filter, height);
     marks(spec, T, opt, filter);
     return opt;
+  }
+
+  // A quote smile (spec.quotes): the inspector's tooltip, the x range of the
+  // shown expiry, the forward-delta axis and, under the smile, the residual
+  // strip: each shown model's z = (model − mid) / half-spread per quote on a
+  // second grid sharing the x axis, ±1 (inside the spread) shaded, ±2 dashed,
+  // |z| beyond the clip drawn at the edge.
+  function quoteOption(spec, T, opt, filter, height) {
+    var Q = spec.quotes, id = spec.id, delta = spec._xmode === 'delta';
+    var rng = quoteRange(spec, filter);
+    var x0 = opt.xAxis;
+    x0.min = rng[0]; x0.max = rng[1]; x0.scale = false;
+    if (delta) {
+      x0.name = 'Forward delta';
+      x0.axisLabel.formatter = deltaLabel; x0.axisLabel.customValues = DELTA_TICKS;
+      x0.axisTick = { show: false, customValues: DELTA_TICKS };
+      x0.splitLine = { show: false };              // grid lines at the labelled deltas: marks()
+    }
+    opt.tooltip = {
+      trigger: 'axis', confine: true, axisPointer: { type: 'line', lineStyle: { color: T.line2 } },
+      backgroundColor: T.tooltip, borderColor: T.line2, borderWidth: 1, padding: [6, 8],
+      textStyle: { color: T.text, fontFamily: T.mono, fontSize: 11 },
+      extraCssText: 'white-space:normal;max-width:calc(100% - 8px);',    // wraps inside a phone-width chart
+      formatter: function (ps) {
+        ps = Array.isArray(ps) ? ps : [ps];
+        if (!ps.length) return '';
+        var c = Desk.charts[id], sp = c ? c.spec : spec, f = Desk.filters[id];
+        var q = nearestQuote(sp, f, ps[0].axisValue);
+        if (!q) return '';
+        var lines = quoteLines(sp, q, legendOff(id));
+        if (c) { c.qi = q.i; showReadout(id, lines); }
+        return quoteHtml(lines, T);
+      },
+    };
+    if (!Q.strip) return;
+    // the pointer and the tooltip follow the x value on both grids
+    opt.axisPointer = { link: [{ xAxisIndex: 'all' }] };
+    var g0 = opt.grid, sh = Math.max(44, Math.min(96, Math.round((height || 300) * 0.22))), gap = 10;
+    opt.grid = [Object.assign({}, g0, { bottom: g0.bottom + sh + gap }),
+      { left: g0.left, right: g0.right, bottom: g0.bottom, height: sh, containLabel: false }];
+    var x1 = JSON.parse(JSON.stringify(x0));
+    if (delta) { x1.axisLabel.formatter = deltaLabel; }
+    else x1.axisLabel.formatter = axisFmt(spec.x || {});
+    x1.gridIndex = 1;
+    x0.axisLabel = Object.assign({}, x0.axisLabel, { show: false }); x0.name = '';
+    opt.xAxis = [x0, x1];
+    var clip = Q.zClip || 10;
+    var y1 = axis({ name: 'z', digits: 0, signed: true }, T, false, spec);
+    Object.assign(y1, { gridIndex: 1, min: -clip, max: clip, interval: clip, scale: false, nameGap: 30 });
+    opt.yAxis.push(y1);
+    // the bands: a series with no data of its own carries them
+    opt.series.push({ id: 'zband', name: '\u00a0z band', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: [], silent: true,
+      tooltip: { show: false }, z: 1,
+      markArea: { silent: true, data: [[{ yAxis: -1, name: 'inside the spread', itemStyle: { color: alpha(T.colors.muted, 0.16) } }, { yAxis: 1 }]],
+        label: { show: true, position: 'insideLeft', color: T.text3, fontFamily: T.mono, fontSize: 10,
+          backgroundColor: alpha(T.surface, 0.85), padding: [0, 3] } },
+      markLine: { silent: true, symbol: 'none', animation: false, label: { show: false },
+        data: [{ yAxis: 2 }, { yAxis: -2 }].concat(delta ? DELTA_TICKS.map(function (v) {
+          return { xAxis: v, lineStyle: { color: T.line2, type: 'dotted', width: 1 } }; }) : []),
+        lineStyle: { color: T.line2, type: 'dashed', width: 1 } } });
   }
 
   // -- CSV export (from the same spec the chart draws) ----
@@ -386,6 +592,7 @@
       spec.csv_rows.rows.forEach(function (r) { lines.push(r.map(csvCell).join(',')); });
       return lines.join('\n') + '\n';
     }
+    if (spec._rows) return quotesCsv(spec);
     var xn = (spec.x && (spec.x.csv || spec.x.name)) || 'x';
     var series = (spec.series || []).filter(function (s) { return !s.invisible; });
     if (spec.xs) {
@@ -394,7 +601,7 @@
         lines.push([x].concat(series.map(function (s) { var v = s.data[i]; return Array.isArray(v) ? v[1] : v; })).map(csvCell).join(','));
       });
     } else {
-      // a chart whose points carry labels (the σ caps of the frontier) exports them too
+      // a chart whose points carry labels (the \u03c3 caps of the frontier) exports them too
       var labelled = series.some(function (s) { return s.pointLabels; });
       var head = ['series', xn, (spec.y && (spec.y.csv || spec.y.name)) || 'y', 'y_high'];
       lines.push((labelled ? head.concat([spec.pointCsv || 'point']) : head).map(csvCell).join(','));
@@ -410,6 +617,27 @@
     return lines.join('\n') + '\n';
   }
   Desk.specCsv = specCsv;
+  // a quote smile exports its quotes, one row each, every expiry and every model
+  function quotesCsv(spec) {
+    var Q = spec.quotes, ms = Q.models || [];
+    var fx = function (v, d) { return v === null || v === undefined ? '' : Number(v).toFixed(d); };
+    var head = ['expiry', 'T_days', 'strike', 'right', 'ln_K_F', 'forward_delta', 'bid_iv_pct', 'mid_iv_pct', 'ask_iv_pct', 'half_spread_vp'];
+    ms.forEach(function (m) { head.push(m.label + ' IV (%)', m.label + ' z', m.label + ' fitted', m.label + ' inside'); });
+    head.push('arb_exec', 'repaired', 'repaired_outside_spread');
+    var lines = [head.map(csvCell).join(',')];
+    Object.keys(spec._rows).forEach(function (g) {
+      spec._rows[g].forEach(function (q) {
+        var r = [g, fx(q.T, 4), q.strike, q.right, fx(q.k, 6), fx(q.delta, 6), fx(q.bid, 6), fx(q.mid, 5), fx(q.ask, 6), fx(q.hs, 6)];
+        ms.forEach(function (m) {
+          var mm = q.models[m.key] || {};
+          r.push(fx(mm.iv, 4), fx(mm.z, 3), mm.fit ? 1 : 0, mm.inside === null || mm.inside === undefined ? '' : (mm.inside ? 1 : 0));
+        });
+        r.push(q.exec ? 1 : 0, q.repaired ? 1 : 0, q.outside ? 1 : 0);
+        lines.push(r.map(csvCell).join(','));
+      });
+    });
+    return lines.join('\n') + '\n';
+  }
   function download(name, text) {
     var blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
     var a = doc.createElement('a');
@@ -420,7 +648,7 @@
 
   // -- chart lifecycle ----
   // A compact spec (desk_charts.py): x values as {start, steps} day gaps, the x
-  // values of another chart (xsFrom), a series derived from others (k·a − b).
+  // values of another chart (xsFrom), a series derived from others (k\u00b7a \u2212 b).
   function expandDates(c) {
     var p = c.start.split('-'), t = Date.UTC(+p[0], +p[1] - 1, +p[2]), out = [c.start];
     c.steps.forEach(function (d) { t += d * 86400000; out.push(new Date(t).toISOString().slice(0, 10)); });
@@ -447,6 +675,13 @@
         return v === null || v === undefined || w === null || w === undefined ? null : Math.round((k * v - w) * f) / f;
       });
     });
+    // a quote smile: every expiry's packed quotes decoded, its series filled
+    var qg = spec.quotes && spec.quotes.groups;
+    if (qg) {
+      spec._rows = {};
+      Object.keys(qg).forEach(function (g) { spec._rows[g] = decodeQuotes(qg[g]); });
+      fillQuotes(spec, 'k');
+    }
     return spec;
   }
   Desk.resolveSpec = resolveSpec;
@@ -464,6 +699,7 @@
     if (!window.echarts) return null;
     var spec = specOf(el);
     if (!spec) return null;
+    if (spec.quotes && Desk.xmode[el.id] === 'delta') fillQuotes(spec, 'delta');
     var inst = window.echarts.getInstanceByDom(el) || window.echarts.init(el, null, { renderer: 'canvas' });
     var f = Desk.filters[el.id];
     var built = {};
@@ -603,7 +839,7 @@
     });
     $$('[data-copy-link]').forEach(function (b) {
       b.addEventListener('click', function () {
-        // the panel plus the page's tab state (#scorecard&exp=…&model=…)
+        // the panel plus the page's tab state (#scorecard&exp=\u2026&model=\u2026)
         history.replaceState(null, '', state.link(b.getAttribute('data-copy-link')));
         var url = location.href;
         if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { flash(b, 'Copied'); }, function () { flash(b, 'Link set'); });
@@ -616,7 +852,7 @@
   // -- URL-hash state: an optional panel anchor, then key=value pairs ----
   //    #scorecard            the panel (the browser scrolls to it)
   //    #exp=2026-12-18       tab state only
-  //    #scorecard&exp=…      both: the anchor is kept first, desk.js scrolls to it
+  //    #scorecard&exp=\u2026      both: the anchor is kept first, desk.js scrolls to it
   function tokens() { return location.hash.replace(/^#/, '').split('&').filter(Boolean); }
   var state = {
     anchor: function () {
@@ -711,8 +947,68 @@
     $$('[data-group]', doc.getElementById(id + '-data') || doc.createElement('div')).forEach(function (g) {
       g.hidden = String(g.getAttribute('data-group')) !== String(value);
     });
+    resetReadout(id);
     var el = doc.getElementById(id);
     if (el && Desk.charts[id]) render(el);     // not yet drawn: render() applies the filter when it is
+  }
+
+  // -- quote smiles: the keyboard readout and the x-axis switch ----
+  // A canvas tooltip cannot be reached from the keyboard: the readout under the
+  // chart (focusable) steps through the shown expiry's quotes with the arrow
+  // keys, says what the tooltip says and shows the tooltip at that quote.
+  var READOUT_KEYS = { ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10 };
+  function showReadout(id, lines) {
+    var r = doc.getElementById(id + '-readout');
+    if (r) r.textContent = quoteText(lines);
+  }
+  function resetReadout(id) {
+    var r = doc.getElementById(id + '-readout'), c = Desk.charts[id];
+    if (c) c.qi = null;
+    if (r && r.getAttribute('data-idle')) r.textContent = r.getAttribute('data-idle');
+  }
+  function stepQuote(id, key) {
+    var c = Desk.charts[id];
+    if (!c || !c.spec.quotes) return false;
+    var spec = c.spec, f = Desk.filters[id], rows = spec._rows[quoteGroup(spec, f)] || [];
+    if (!rows.length) return false;
+    var i;
+    if (key === 'Home') i = 0;
+    else if (key === 'End') i = rows.length - 1;
+    else if (READOUT_KEYS[key] === undefined) return false;
+    else if (c.qi === null || c.qi === undefined || c.qi >= rows.length) {
+      // the first step starts at the quote nearest the forward
+      i = rows.indexOf(nearestQuote(spec, f, spec._xmode === 'delta' ? 0.5 : 0));
+    } else i = Math.max(0, Math.min(rows.length - 1, c.qi + READOUT_KEYS[key]));
+    var q = rows[i];
+    c.qi = i;
+    showReadout(id, quoteLines(spec, q, legendOff(id)));
+    var px = c.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [spec._xmode === 'delta' ? q.xd : q.k, q.mid]);
+    if (px && isFinite(px[0]) && isFinite(px[1])) c.chart.dispatchAction({ type: 'showTip', x: px[0], y: px[1] });
+    c.qi = i;                   // the tooltip's own update set it to the same quote
+    return true;
+  }
+  Desk.stepQuote = stepQuote;
+  function initQuotes() {
+    $$('.quote-readout[data-readout-for]').forEach(function (r) {
+      var id = r.getAttribute('data-readout-for');
+      r.setAttribute('data-idle', r.textContent);
+      r.addEventListener('keydown', function (e) { if (stepQuote(id, e.key)) e.preventDefault(); });
+      r.addEventListener('blur', function () { var c = Desk.charts[id]; if (c) c.chart.dispatchAction({ type: 'hideTip' }); });
+    });
+    $$('[data-xmode-for]').forEach(function (b) {
+      b.addEventListener('click', function () { setXmode(b.getAttribute('data-xmode-for'), b.getAttribute('data-xmode')); });
+    });
+    $$('[data-xmode-for]').forEach(function (b) {      // a link that names the axis (#\u2026&x=delta)
+      if (b.getAttribute('data-xmode') === 'delta' && state.get('x') === 'delta') setXmode(b.getAttribute('data-xmode-for'), 'delta', true);
+    });
+  }
+  function setXmode(id, mode, init) {
+    Desk.xmode[id] = mode;
+    $$('[data-xmode-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o.getAttribute('data-xmode') === mode ? 'true' : 'false'); });
+    if (!init) state.set('x', mode === 'delta' ? 'delta' : null);
+    resetReadout(id);
+    var el = doc.getElementById(id);
+    if (el && Desk.charts[id]) render(el);
   }
 
   // -- heatmap cells: arrow-key navigation and a readout line ----
@@ -920,7 +1216,7 @@
 
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
     initPrint(); openTarget(); scrollToAnchor();
     window.addEventListener('hashchange', openTarget);
   }

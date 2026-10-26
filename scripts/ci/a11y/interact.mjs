@@ -23,7 +23,13 @@
 //     region is scrolled sideways;
 //   * Model Risk status filters: each chip of the summary strip shows exactly the
 //     rows of its status, as many as it counts, and is the only one pressed; 'All'
-//     shows every row again.
+//     shows every row again;
+//   * the quote inspector (P4.1): hovering a quote of the Surface smile (the
+//     expiry the page shows, every model toggled on) gives a tooltip with its
+//     strike, a bid and an ask, one row with z per model and no raw series name;
+//     the keyboard readout says the same; the residual strip shares the smile's
+//     x range; the forward-delta switch renames the axis and keeps the expiry; a
+//     Calibration smile's tooltip names its quote the same way.
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -302,7 +308,91 @@ async function checkMonitorFilters() {
   return check;
 }
 
-for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters]) {
+// -- the quote inspector (P4.1) ----
+const TIP_JS = id => { const t = [...document.querySelectorAll('#' + id + ' > div')].filter(d => getComputedStyle(d).display !== 'none'
+  && d.style.position === 'absolute' && d.innerText.startsWith('K '))[0]; return t ? t.innerText : null; };
+const joinLines = t => t.split('\n').map(x => x.trim()).filter(Boolean).join(' \u00b7 ');
+async function waitChart(page, id) {
+  return page.evaluate(([cid, ms]) => new Promise(done => {
+    const t0 = Date.now();
+    (function poll() {
+      if (window.Desk && Desk.charts[cid] && document.fonts.status === 'loaded') return done(true);
+      if (Date.now() - t0 > ms) return done(false);
+      setTimeout(poll, 50);
+    })();
+  }), [id, CHART_TIMEOUT_MS]);
+}
+async function hoverQuote(page, id, frac) {
+  const pos = await page.evaluate(([cid, f]) => {
+    const c = Desk.charts[cid], rows = c.spec._rows[Object.keys(c.spec._rows).length > 1 ? Desk.filters[cid] : Object.keys(c.spec._rows)[0]];
+    const q = rows[Math.floor((rows.length - 1) * f)];
+    const px = c.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [q.k, q.mid]);
+    const r = c.el.getBoundingClientRect();
+    return { x: r.left + px[0], y: r.top + px[1] };
+  }, [id, frac]);
+  await page.mouse.move(pos.x, pos.y);
+  await page.waitForTimeout(250);
+  return page.evaluate(TIP_JS, id);
+}
+async function checkQuoteInspector() {
+  const check = { name: 'the quote inspector names the quote under the pointer and from the keyboard', views: [], failures: [] };
+  const { ctx, page, errors } = await openPage('surface.html');
+  const id = 'chart-slices';
+  await page.locator('#' + id).scrollIntoViewIfNeeded();
+  if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id}: not drawn`); await ctx.close(); return check; }
+  const exp = await page.evaluate(cid => Desk.filters[cid], id);
+  const models = await page.evaluate(cid => Desk.charts[cid].spec.quotes.models.map(m => m.label), id);
+  for (const label of models) {
+    const b = page.locator(`[data-legend-for="${id}"][data-series="${label}"]`);
+    if ((await b.getAttribute('aria-pressed')) === 'false') await b.click();
+  }
+  const tip = await hoverQuote(page, id, 0.5);
+  check.views.push({ page: 'surface.html', expiry: exp, tooltip: tip });
+  if (!tip) check.failures.push(`surface.html #${id} ${exp}: no tooltip on a quote`);
+  else {
+    const lines = tip.split('\n').map(x => x.trim()).filter(Boolean);
+    if (!/^K [\d,]+ [PC] /.test(lines[0])) check.failures.push(`surface.html #${id}: tooltip head '${lines[0]}' names no strike`);
+    if (!/Bid \/ mid \/ ask \d+\.\d\d \/ \d+\.\d\d \/ \d+\.\d\d%/.test(tip)) check.failures.push(`surface.html #${id}: tooltip has no bid / ask`);
+    const zRows = lines.filter(x => / \u00b7 z [\u2212+]?\d+\.\d/.test(x)).length;
+    if (zRows !== models.length) check.failures.push(`surface.html #${id}: ${zRows} model rows with z, ${models.length} models shown`);
+    if (/\d{4}-\d{2}-\d{2} mid/.test(tip)) check.failures.push(`surface.html #${id}: tooltip leaks a raw series name`);
+    const ro = await page.locator('#' + id + '-readout').innerText();
+    if (ro !== joinLines(tip)) check.failures.push(`surface.html #${id}: the readout ('${ro.slice(0, 60)}…') is not the tooltip's text`);
+  }
+  await page.focus('#' + id + '-readout');
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(200);
+  const ro2 = await page.locator('#' + id + '-readout').innerText(), tip2 = await page.evaluate(TIP_JS, id);
+  if (!tip2 || ro2 !== joinLines(tip2)) check.failures.push(`surface.html #${id}: after an arrow key the readout and the tooltip differ`);
+  const ax = await page.evaluate(cid => Desk.charts[cid].chart.getOption().xAxis.map(a => [a.min, a.max]), id);
+  if (ax.length !== 2 || ax[0][0] !== ax[1][0] || ax[0][1] !== ax[1][1]) check.failures.push(`surface.html #${id}: residual strip x range ${JSON.stringify(ax)}`);
+  await page.click(`[data-xmode-for="${id}"][data-xmode="delta"]`);
+  await page.waitForTimeout(200);
+  const names = await page.evaluate(cid => Desk.charts[cid].chart.getOption().xAxis.map(a => a.name), id);
+  if (!names.includes('Forward delta')) check.failures.push(`surface.html #${id}: the delta switch left the x axis named ${JSON.stringify(names)}`);
+  const sel = await page.locator(`[data-chart-filter="${id}"] [data-value="${exp}"]`).getAttribute('aria-selected');
+  if (sel !== 'true') check.failures.push(`surface.html #${id}: the delta switch lost the ${exp} expiry`);
+  for (const e of errors) check.failures.push(`surface.html: JavaScript error: ${e}`);
+  await ctx.close();
+  // a Calibration smile
+  const c2 = await openPage('calibration.html');
+  const cid = await c2.page.evaluate(() => { const e = document.querySelector('.chart[id^="chart-smile-"]'); return e ? e.id : null; });
+  if (cid) {
+    await c2.page.locator('#' + cid).scrollIntoViewIfNeeded();
+    const has = await c2.page.evaluate(i => { const s = document.getElementById(i + '-spec'); return !!(s && JSON.parse(s.textContent).quotes); }, cid);
+    if (has && await waitChart(c2.page, cid)) {
+      const t = await hoverQuote(c2.page, cid, 0.8);
+      check.views.push({ page: 'calibration.html', id: cid, tooltip: t });
+      if (!t || !/^K [\d,]+ [PC] /.test(t) || !/ \u00b7 z /.test(t)) check.failures.push(`calibration.html #${cid}: tooltip '${t}' names no quote`);
+    }
+  }
+  for (const e of c2.errors) check.failures.push(`calibration.html: JavaScript error: ${e}`);
+  await c2.ctx.close();
+  return check;
+}
+
+for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
+  checkQuoteInspector]) {
   const c = await run();
   report.checks.push(c);
   report.failures.push(...c.failures);

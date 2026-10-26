@@ -79,6 +79,7 @@ import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the
 import desk_charts as charts  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
+import desk_quotes  # noqa: E402
 import desk_surface  # noqa: E402
 from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
     _HEAT_NEG,
@@ -3293,29 +3294,17 @@ def calibration_extras(d: dict, cal: dict) -> None:
         T_days = _num(a.get("T_days"))
         if T_days is None:
             continue
-        series, tbl_rows = [], []
+        series, tbl_rows, quotes = [], [], None
         if res is not None and (res["expiry"] == exp).any():
             q = res[res["expiry"] == exp].sort_values("k")
             ins = q["in_sample"] if "in_sample" in q.columns else pd.Series(False, index=q.index)
-            if {"bid_iv", "ask_iv"} <= set(q.columns):
-                series.append({"name": "Bid–ask", "type": "errorbar", "color": "muted", "legend": True,
-                               "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
-                                        for r in q.itertuples()]})
             # the out-of-sample mids muted and small, the fit's anchors as large
-            # diamonds drawn above them in their own colour (they looked the same)
-            series.append({"name": "Mid (out of sample)", "type": "scatter", "color": "muted",
-                           "hollow": True, "size": 4, "opacity": 0.6, "legend": True,
-                           "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
-                                    for r, i in zip(q.itertuples(), ins) if not i]})
-            if ins.any():
-                series.append({"name": "Mid (fit anchor)", "type": "scatter", "color": ANCHOR_COLOUR,
-                               "symbol": "diamond", "size": 9, "z": 4, "legend": True,
-                               "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
-                                        for r, i in zip(q.itertuples(), ins) if i]})
-            series.append({"name": "Heston", "type": "line", "color": model_colour("heston_v2"), "width": 1.6,
-                           "legend": True,
-                           "data": [[round(float(k), 3), round(float(v) * 100, 2)]
-                                    for k, v in zip(q["k"], q["model_iv"]) if _num(v) is not None]})
+            # diamonds drawn above them in their own colour (they looked the same);
+            # every series is filled from the packed quotes (desk_quotes)
+            hk = d["smile_model"]
+            series = smile_quote_series(exp, [hk], {hk}, hk if ins.any() else None, oos_mids=True)
+            quotes = smile_quotes_meta(desk_quotes.encode(res, [hk], [exp]), [hk], hk if ins.any() else None,
+                                       (surf.get("surface") or {}))
             # the table behind the chart: one row per ln(K/F) bucket (the CSV has every quote)
             qb = q.assign(kb=k_bucket(q["k"]), ins=ins.values)
             for b, g in qb.groupby("kb"):
@@ -3342,9 +3331,11 @@ def calibration_extras(d: dict, cal: dict) -> None:
                 f"chart-smile-{exp}", f"Smile {exp} ({_fmt(T_days, '.0f')} days)",
                 x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True, "label": "k"},
                 y={"name": "IV (%)", "digits": 0, "tipDigits": 2},
-                series=series, tooltip="item", csv=f"smile_{exp}.csv",
-                grid={"left": 40, "top": 10, "bottom": 34},
-                describe=(("Market bid–ask quotes, mids and the Heston IVs at the quoted strikes"
+                series=series, tooltip="axis" if quotes else "item", csv=f"smile_{exp}.csv",
+                grid={"left": 40, "top": 10, "bottom": 34}, quotes=quotes,
+                describe=(("Market bid–ask quotes, mids and the Heston IVs at the quoted strikes; under the "
+                           "smile, Heston's (model − mid) / half-spread per quote, the band ±1 inside the "
+                           "spread, fit anchors as diamonds"
                            if source == "quotes"
                            else "Heston model smile only (market quotes need the surface residual table)")
                           + f" for the {exp} expiry."),
@@ -4814,6 +4805,70 @@ def heston_model_key(models: Iterable[str]) -> str | None:
     return next((m for m in models if str(m).lower().startswith("heston")), None)
 
 
+# the quote inspector's footnote: where the chain's quotes come from and when
+CHAIN_SHORT = {"yfinance": "Yahoo close", "yahoo": "Yahoo close", "cboe": "Cboe"}
+
+
+def quote_source_note(surface_json: dict) -> str:
+    """'Yahoo close, no quote time': the chain's vendor and quote time (surface.json inputs)."""
+    inp = surface_json.get("inputs") or {}
+    uni = surface_json.get("universe") or {}
+    src = str(inp.get("source") or uni.get("source") or "").strip()
+    qt = inp.get("quote_time") or uni.get("quote_time")
+    name = CHAIN_SHORT.get(src.lower(), src) if src else "Chain source not recorded"
+    return f"{name}, " + (f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time")
+
+
+def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | None],
+                       anchor_model: str | None, oos_mids: bool = False, strip: bool = True) -> list[dict]:
+    """One expiry's smile series (desk_quotes): bid–ask bars, mids, each model at
+    the quoted strikes, the anchor model's fitted quotes as diamonds and, under
+    the smile, each model's z per quote. They hold no data: desk.js fills them
+    from the chart's packed quotes (``quote`` names the field). ``oos_mids``: the
+    mids split into the anchor model's out-of-sample quotes (hollow) and its
+    anchors, as the Calibration smiles draw them."""
+    shown = set(shown)
+    g = str(group)
+    out: list[dict] = [{"name": f"{g} bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
+                        "color": "muted", "group": g, "quote": "ba"}]
+    if oos_mids and anchor_model:
+        out.append({"name": f"{g} mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
+                    "type": "scatter", "color": "muted", "hollow": True, "size": 4, "opacity": 0.6,
+                    "group": g, "quote": "oos", "model": anchor_model})
+    else:
+        out.append({"name": f"{g} mid", "legendKey": "Mid", "legend": True, "type": "scatter",
+                    "color": "headline", "size": 4, "group": g, "quote": "mid"})
+    out.extend({"name": f"{g} {model_label(m)}", "legendKey": model_label(m), "legend": True,
+                "hidden": m not in shown, "type": "line", "color": model_colour(m), "width": 1.5,
+                "group": g, "quote": "model", "model": m} for m in models)
+    anchor_key = "Mid (fit anchor)" if oos_mids else "Heston fit anchors"
+    if anchor_model:
+        out.append({"name": f"{g} {'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
+                    "legendKey": anchor_key, "legend": True, "type": "scatter", "symbol": "diamond",
+                    "size": 9 if oos_mids else 8, "z": 4, "color": ANCHOR_COLOUR, "group": g,
+                    "quote": "fit", "model": anchor_model})
+    if strip:
+        out.extend({"name": f"{g} {model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
+                    "size": 4, "color": model_colour(m), "group": g, "quote": "z", "model": m,
+                    "strip": True} for m in models)
+        if anchor_model:
+            out.append({"name": f"{g} {model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
+                        "type": "scatter", "symbol": "diamond", "size": 7, "z": 4, "color": ANCHOR_COLOUR,
+                        "group": g, "quote": "zfit", "model": anchor_model, "strip": True})
+    return out
+
+
+def smile_quotes_meta(groups: dict, models: Sequence[str], anchor_model: str | None,
+                      surface_json: dict) -> dict:
+    """The chart's ``quotes`` block: the packed expiries and what the inspector names."""
+    return {"groups": groups, "strip": True, "zClip": desk_quotes.Z_CLIP,
+            "source": quote_source_note(surface_json), "anchor": anchor_model,
+            "anchorLabel": model_short(anchor_model) + " fit" if anchor_model else None,
+            # label: the model's legend key (its toggle); short: how the inspector names it
+            "models": [{"key": m, "label": model_label(m), "short": model_short(m), "color": model_colour(m)}
+                       for m in models]}
+
+
 def _model_surface_heat(params: dict) -> dict:
     """Heston IV grid of the headline fit (model, not market) as a heatmap."""
     lm = list(np.round(np.linspace(-0.30, 0.20, 11), 3))
@@ -5290,34 +5345,19 @@ def surface_extras(d: dict, surf: dict) -> None:
     series, groups = [], []
     hres = res[res["model"] == hkey] if hkey else None
     n_anchor = int(hres["in_sample"].astype(bool).sum()) if (hres is not None and "in_sample" in hres) else 0
+    # every quote of every expiry, packed once (desk_quotes): the chart's series
+    # below hold no data, desk.js unpacks them from this block, and the quote
+    # inspector reads strike, right, delta and each model's z from it
+    qblock = desk_quotes.encode(res, overlay, list(exps.index))
     for e in exps.index:
         q = mkt[mkt["expiry"] == e].sort_values("k")
-        mid_name = f"{e} mid"
-        if {"bid_iv", "ask_iv"} <= set(q.columns):
-            series.append({"name": f"{e} bid–ask", "legendKey": "Bid–ask", "legend": True,
-                           "type": "errorbar", "color": "muted", "group": e,
-                           "data": [[round(r.k, 3), round(r.bid_iv * 100, 2), round(r.ask_iv * 100, 2)]
-                                    for r in q.itertuples()]})
-        series.append({"name": mid_name, "legendKey": "Mid", "legend": True, "type": "scatter",
-                       "color": "headline", "size": 4, "group": e,
-                       "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)] for r in q.itertuples()]})
+        series += smile_quote_series(e, overlay, shown, hkey if n_anchor else None)
         by_model = {}
         for m in overlay:
             qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
             qm = qm[~qm.index.duplicated()]
-            ivs = [(round(float(v) * 100, 2) if _num(v) is not None else None)
-                   for v in qm.reindex(q["k"].to_numpy())]
-            by_model[m] = ivs
-            series.append({"name": f"{e} {model_label(m)}", "legendKey": model_label(m), "legend": True,
-                           "hidden": m not in shown, "type": "line", "color": model_colour(m), "width": 1.5,
-                           "group": e, "xFrom": mid_name, "data": ivs})
-        if n_anchor and hres is not None:
-            ha = hres[(hres["expiry"] == e) & hres["in_sample"].astype(bool)].sort_values("k")
-            series.append({"name": f"{e} Heston fit anchor", "legendKey": "Heston fit anchors",
-                           "legend": True, "type": "scatter", "symbol": "diamond", "size": 8, "z": 4,
-                           "color": ANCHOR_COLOUR,
-                           "group": e, "data": [[round(r.k, 3), round(r.mid_iv * 100, 2)]
-                                                for r in ha.itertuples()]})
+            by_model[m] = [(round(float(v) * 100, 2) if _num(v) is not None else None)
+                           for v in qm.reindex(q["k"].to_numpy())]
         # the same expiry as a table: medians by ln(K/F) bucket (the chart's data
         # equivalent; desk.js shows the selected expiry's, every one without JS)
         qb_e = q.assign(kb=k_bucket(q["k"]).to_numpy())
@@ -5343,14 +5383,17 @@ def surface_extras(d: dict, surf: dict) -> None:
         "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
         x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
         y={"name": "Implied vol (%)", "digits": 0, "tipDigits": 2},
-        series=series, tooltip="item", csv=f"smile_slices_{session}.csv",
+        series=series, tooltip="axis", csv=f"smile_slices_{session}.csv",
         marks={"x": [{"value": 0, "label": "F", "color": "muted"}]},
         describe=("One expiry at a time (choose it above the chart): bid–ask bars, mids"
                   + (" and the Heston fit's anchors (diamonds)" if n_anchor else "")
                   + f"; model IVs at the quoted strikes for {', '.join(d['slice_models'])} "
                     f"({' and '.join(d['slice_shown'])} shown, the others behind their toggles). "
-                    "The dashed line is the forward, ln(K/F) = 0."),
-        table=slice_tbl)
+                    "The dashed line is the forward, ln(K/F) = 0. Under the smile, each shown model's "
+                    "(model − mid) / half-spread per quote, the band ±1 is inside the spread. "
+                    "The readout under the chart steps through the quotes with the arrow keys."),
+        table=slice_tbl,
+        quotes=smile_quotes_meta(qblock, overlay, hkey if n_anchor else None, surf.get("surface") or {}))
 
     # out-of-sample median |model − mid| by expiry, one line per model, on the
     # same quotes as the scorecard beside it (the scorecard's by_expiry rows mix

@@ -180,7 +180,7 @@
 <div class="g evenfill" style="margin-top:8px;">
   {% for s in d.smiles %}
   {% call m.panel('smile-' ~ s.expiry, s.expiry ~ ' · ' ~ (s.T_days|fmt('.0f')) ~ ' days', 's4', ((s.n|fmt) ~ ' anchors') if s.n else None) %}
-    {{ m.chart(s.spec, 'h220') }}
+    {{ m.chart(s.spec, 'h300') }}
     {% if s.note %}<p class="note">{{ s.note }}.</p>{% endif %}
   {% endcall %}
   {% endfor %}

@@ -95,7 +95,8 @@
     <div class="tabs js-only" role="tablist" aria-label="Expiry shown in the smile chart" data-state-key="exp" data-chart-filter="chart-slices" hidden>
       {% for e in d.expiries %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if e.expiry == d.default_exp else 'false' }}" aria-controls="slices-panel" data-value="{{ e.expiry }}">{{ e.T_days|fmt('.0f') }}d</button>{% endfor %}
     </div>
-    <div id="slices-panel" role="tabpanel" class="grow-col">{{ m.chart(d.charts.slices, 'h400 grow') }}</div>
+    <div class="seg js-only" role="group" aria-label="x axis of the smile chart"><button class="btn" type="button" data-xmode-for="chart-slices" data-xmode="k" aria-pressed="true">ln(K/F)</button><button class="btn" type="button" data-xmode-for="chart-slices" data-xmode="delta" aria-pressed="false">forward Δ</button></div>
+    <div id="slices-panel" role="tabpanel" class="grow-col">{{ m.chart(d.charts.slices, 'h440 grow') }}</div>
   {% endcall %}
 </div>
 

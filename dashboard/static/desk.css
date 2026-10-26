@@ -400,6 +400,15 @@ code { overflow-wrap: anywhere; }
 .heat .vv { display: block; }
 .heat .z { display: block; font-size: 9.5px; }
 .heat-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 18px; }
+/* the quote inspector's keyboard readout under a smile (desk.js initQuotes): room
+   for a quote's lines at desk width, so a hover does not move the page below */
+.quote-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 4.6em; margin: 4px 0 0; padding: 2px 4px; border-radius: 3px; }
+.quote-readout:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+/* a segmented control: one choice of two or three (aria-pressed buttons) */
+.seg { display: inline-flex; margin: 6px 0 2px; }
+.seg .btn { border-radius: 0; }
+.seg .btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.seg .btn:last-child { border-radius: 0 var(--radius) var(--radius) 0; margin-left: -1px; }
 .ramp { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text3); font-family: var(--mono); flex-wrap: wrap; }
 .ramp-bar { width: 120px; height: 8px; border-radius: 1px; border: 1px solid var(--line2); }
 
@@ -624,7 +633,8 @@ dialog.keys .dl { font-size: 12px; }
   .kpi-label { white-space: normal; overflow: visible; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
-  .chart.h300, .chart.h340, .chart.h400, .chart.h440 { height: 260px; }
+  .chart.h300, .chart.h340, .chart.h400 { height: 260px; }
+  .chart.h440 { height: 340px; }          /* the smile slice: its residual strip shares the height */
   .chart.tall-narrow { height: 680px; }      /* one row per category (the C22 waterfall): three lines of a wrapped step name */
 }
 /* Text-heavy tables (.tbl.cards) in a region narrower than 640 px (a phone, or a

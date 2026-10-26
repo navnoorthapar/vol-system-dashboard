@@ -2539,7 +2539,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     import gzip
     static = ROOT / "dashboard" / "static"
     assert len(gzip.compress((static / "vendor" / "echarts-6.1.0-desk.min.js").read_bytes())) < 240_000
-    assert (static / "desk.js").stat().st_size < 60_000
+    # P4.1: the quote inspector, the residual strip and the linked chart groups
+    # raised the page script from 51 KB; it is served gzipped like the pages
+    assert (static / "desk.js").stat().st_size < 110_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 30_000
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -2791,27 +2794,32 @@ def test_one_colour_per_model_on_every_surface_chart(dash, pages):
     # the same model keeps its colour on the calibration page
     cal = pages["/calibration"]
     smile = next(_spec(cal, cid) for cid in re.findall(r'id="(chart-smile-[^"]+)" data-spec', cal))
-    heston = next(s for s in smile["series"] if s["name"] == "Heston")
+    heston = next(s for s in smile["series"] if s.get("legendKey", s["name"]) == dash.model_label("heston_v2")
+                  and s["type"] == "line")
     assert heston["color"] == dash.model_colour("heston_v2")
 
 
 def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
     """UI-2/UI-17: all four models on the slice within the page budget: a model's
-    points list only IVs, aligned with that expiry's mids (desk.js takes x from
-    them), and the IVs are the residual table's model IVs at those strikes."""
+    points are at its expiry's quotes (P4.1: every series is filled from the one
+    packed quote block, desk_charts.resolve as desk.js does), and the IVs are the
+    residual table's model IVs at those strikes."""
     sl = _spec(pages["/surface"], "chart-slices")
-    by = {s["name"]: s for s in sl["series"]}
+    by = {(s["group"], s["quote"]): s for s in sl["series"] if s.get("quote") in ("mid", "ba")}
     res = pd.read_parquet(_surface_file("residuals.parquet"))
-    with_x = [s for s in sl["series"] if s.get("xFrom")]
+    with_x = [s for s in sl["series"] if s.get("quote") == "model"]
     assert len(with_x) == res["model"].nunique() * res["expiry"].nunique()      # every model, every expiry
     for s in with_x:
-        mids = by[s["xFrom"]]["data"]
+        mids = by[(s["group"], "mid")]["data"]
         assert len(mids) == len(s["data"]), s["name"]
-        e, label = s["group"], s["legendKey"]
-        key = next(k for k in res["model"].unique() if dash.model_label(k) == label)
-        q = res[(res["model"] == key) & (res["expiry"] == e)].sort_values("k")
-        assert [round(float(k), 3) for k in q["k"]] == [m[0] for m in mids], s["name"]
-        assert s["data"] == [round(float(v) * 100, 2) for v in q["model_iv"]], s["name"]
+        e, key = s["group"], s["model"]
+        assert dash.model_label(key) == s["legendKey"]
+        q = res[(res["model"] == key) & (res["expiry"] == e)].sort_values("k", kind="mergesort")
+        assert [p[0] for p in s["data"]] == [m[0] for m in mids], s["name"]
+        assert [m[0] for m in mids] == [round(float(k), 6) for k in q["k"]], s["name"]
+        assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
+        assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
+            [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
 
 
 def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
@@ -2993,7 +3001,7 @@ def test_calibration_smile_anchors_stand_apart_from_the_out_of_sample_mids(dash,
     n = 0
     for cid in re.findall(r'id="(chart-smile-[^"]+)" data-spec', cal):
         spec = _spec(cal, cid)
-        ser = {s["name"]: s for s in spec["series"]}
+        ser = {s.get("legendKey", s["name"]): s for s in spec["series"] if not s.get("strip")}
         if "Mid (fit anchor)" not in ser:
             continue
         a, o = ser["Mid (fit anchor)"], ser["Mid (out of sample)"]
@@ -6225,3 +6233,189 @@ def test_dot_plot_geometry():
     # one value and no whisker: no division by zero
     one = ch.dot_plot([{"session": "2026-01-02", "value": 0.5, "se": None}], 0.0, 10.0)
     assert one["left"] <= one["rows"][0]["x"] <= one["right"]
+
+
+# ── P4.1: the quote inspector on every smile ──────────────────────────────────
+
+def _client_quotes(g: dict) -> list[dict]:
+    """The packed quotes of one smile expiry, unpacked with desk.js's formulas
+    (decodeQuotes), written out here independently of desk_quotes.decode."""
+    from scipy.stats import norm
+    out, K = [], g["K0"]
+    for i in range(len(g["mid"])):
+        if i:
+            K += g["dK"][i - 1] * g["step"]
+        mid, db, da = g["mid"][i] / 1e5, g["db"][i] / 1e6, g["da"][i] / 1e6
+        hs = (db + da) / 2
+        k = np.log(K / g["F"])
+        sw = np.sqrt((mid / 100) ** 2 * g["T"] / 365.0)
+        d1 = -k / sw + sw / 2
+        right = g["r"][i]
+        models = {m: (None if e[i] is None else {"iv": mid + e[i] / 1e4, "z": (e[i] / 1e4) / max(hs, 0.01),
+                                                  "st": int(g["s"][m][i])})
+                  for m, e in g["m"].items()}
+        out.append({"strike": K, "right": right, "k": float(k), "mid": mid,
+                    "delta": float(norm.cdf(d1)) - (1.0 if right == "P" else 0.0), "models": models})
+    return out
+
+
+def _producer_delta(p) -> float:
+    from scipy.stats import norm
+    w = p.mid_iv ** 2 * p.T_days / 365.0
+    return float(norm.cdf(-p.k / np.sqrt(w) + np.sqrt(w) / 2)) - (1.0 if p.right == "P" else 0.0)
+
+
+def _smile_specs(pages) -> list[tuple[str, dict]]:
+    out = [("/surface", _raw_specs(pages["/surface"])["chart-slices"])]
+    cal = _raw_specs(pages["/calibration"])
+    out += [("/calibration", s) for cid, s in cal.items()
+            if cid.startswith("chart-smile-") and s.get("quotes")]
+    return out
+
+
+def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
+    """P4.1: the inspector names a quote's strike, right, forward delta and each
+    model's z. Three quotes per expiry (first, middle, last) of every smile on
+    Surface and Calibration, unpacked with the client's formulas from the page's
+    own spec, give residuals.parquet's strike (exactly), right, the producer's
+    forward delta (1e-6) and each model's error_hs (±0.05), in_sample and
+    inside_spread."""
+    res = pd.read_parquet(_surface_file("residuals.parquet"))
+    specs = _smile_specs(pages)
+    assert len(specs) >= 2, [r for r, _ in specs]
+    n = 0
+    for route, spec in specs:
+        groups = spec["quotes"]["groups"]
+        assert groups, route
+        for e, g in groups.items():
+            qs = _client_quotes(g)
+            for i in sorted({0, len(qs) // 2, len(qs) - 1}):
+                q = qs[i]
+                for m, mm in q["models"].items():
+                    rows = res[(res["model"] == m) & (res["expiry"] == e)].sort_values("k", kind="mergesort")
+                    p = next(rows.iloc[[i]].itertuples())
+                    assert (q["strike"], q["right"]) == (p.strike, p.right), (route, e, i)
+                    assert q["k"] == pytest.approx(p.k, abs=1e-9)
+                    assert abs(q["delta"] - _producer_delta(p)) <= 1e-6, (route, e, i)
+                    if mm is None:
+                        assert not np.isfinite(p.model_iv)
+                        continue
+                    assert abs(mm["z"] - p.error_hs) <= 0.05, (route, e, m, i, mm["z"], p.error_hs)
+                    flags = (bool(mm["st"] & 1), bool(mm["st"] & 2))
+                    assert flags == (bool(p.in_sample), bool(p.inside_spread)), (route, e, m, i)
+                    n += 1
+    assert n >= 3 * len(specs[0][1]["quotes"]["groups"]) * len(specs[0][1]["quotes"]["models"])
+
+
+def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
+    """The tooltip's footnote is the chain's own source and quote time (surface.json),
+    'Yahoo close, no quote time' for a Yahoo snapshot without one."""
+    sj = json.loads(_surface_file("surface.json").read_text())
+    want = dash.quote_source_note(sj)
+    inp = sj.get("inputs") or {}
+    if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
+        assert want == "Yahoo close, no quote time"
+    for route, spec in _smile_specs(pages):
+        assert spec["quotes"]["source"] == want, route
+    assert dash.quote_source_note({"inputs": {"source": "cboe", "quote_time": "2026-10-16T15:45:00"}}) \
+        == "Cboe, quotes at 2026-10-16 15:45:00"
+
+
+def test_smile_series_hold_no_raw_series_name_in_their_legend(pages):
+    """The tooltip leaked a raw series name ('2026-11-16 mid'); every legend button
+    of a smile is a key without the expiry, and the residual strip's series draw
+    on the second grid."""
+    for route, spec in _smile_specs(pages):
+        assert not any(re.match(r"\d{4}-\d{2}-\d{2} ", it["name"]) for it in spec["legend_items"]), route
+        strip = [s for s in spec["series"] if s.get("strip")]
+        assert strip, route
+        assert all(s["quote"] in ("z", "zfit") for s in strip), route
+
+
+def test_browser_quote_inspector_hover_keyboard_and_delta_axis(site_browser):
+    """P4.1: hovering a quote of the shown expiry gives its strike, bid and ask,
+    every model's IV and z (all four toggled on) and no raw series name; the
+    arrow-key readout says the same as the tooltip; the residual strip shares the
+    smile's x range; the forward-delta switch keeps the expiry; desk.js unpacks
+    the quotes as desk_quotes.decode does; the CSV has one row per quote."""
+    sb = site_browser
+    html = (sb["site"] / "surface.html").read_text()
+    spec = _raw_specs(html)["chart-slices"]
+    import desk_quotes
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    exp = page.evaluate("Desk.filters['chart-slices']")
+    assert exp in spec["quotes"]["groups"]
+    # every model on
+    for label in [m["label"] for m in spec["quotes"]["models"]]:
+        b = page.locator(f"[data-legend-for='chart-slices'][data-series='{label}']")
+        if b.get_attribute("aria-pressed") == "false":
+            b.click()
+    js = page.evaluate("""(e) => Desk.charts['chart-slices'].spec._rows[e].map(q => [q.strike, q.right,
+        q.k, q.delta, q.xd, q.bid, q.ask,
+        Object.fromEntries(Object.entries(q.models).map(([m, v]) => [m, v.z]))])""", exp)
+    py = desk_quotes.decode(spec["quotes"]["groups"][exp])
+    assert len(js) == len(py)
+    for a, b in zip(js, py):
+        assert (a[0], a[1]) == (b["strike"], b["right"])
+        assert a[2] == pytest.approx(b["k"], abs=1e-12)
+        assert a[3] == pytest.approx(b["delta"], abs=1e-9)
+        assert a[4] == pytest.approx(b["x_delta"], abs=1e-9)
+        for m, z in a[7].items():
+            assert (z is None) == (b["models"][m]["z"] is None)
+            if z is not None:
+                assert z == pytest.approx(b["models"][m]["z"], abs=1e-9)
+    i = len(py) // 2
+    pos = page.evaluate("""(i) => { const c = Desk.charts['chart-slices'];
+        const q = c.spec._rows[Desk.filters['chart-slices']][i];
+        const px = c.chart.convertToPixel({xAxisIndex: 0, yAxisIndex: 0}, [q.k, q.mid]);
+        const r = c.el.getBoundingClientRect(); return {x: r.left + px[0], y: r.top + px[1]}; }""", i)
+    page.mouse.move(pos["x"], pos["y"])
+    page.wait_for_timeout(250)
+    tip_js = """() => { const t = [...document.querySelectorAll('#chart-slices > div')]
+        .filter(d => getComputedStyle(d).display !== 'none' && d.style.position === 'absolute'
+                && d.innerText.startsWith('K '))[0]; return t ? t.innerText : null; }"""
+    tip = page.evaluate(tip_js)
+    assert tip, "no tooltip"
+    lines = [x.strip() for x in tip.split("\n") if x.strip()]
+    q = py[i]
+    # the hovered quote or a neighbour within a pixel or two
+    head = r"K [\d,]+ [PC] · ln\(K/F\) [−+]?\d\.\d{3} · Δ [−+]\d\.\d{2} · \d+ d$"
+    assert re.match(head, lines[0]), lines[0]
+    assert re.search(r"Bid / mid / ask \d+\.\d\d / \d+\.\d\d / \d+\.\d\d%", tip)
+    assert sum(1 for x in lines if re.search(r" · z [−+]?\d+\.\d", x)) == len(spec["quotes"]["models"]), lines
+    assert not re.search(r"\d{4}-\d{2}-\d{2} mid", tip)
+    assert lines[-1] == spec["quotes"]["source"]
+    readout = page.locator("#chart-slices-readout").inner_text()
+    assert readout == " · ".join(lines)
+    # the keyboard: the readout steps one quote and says what the tooltip then says
+    page.focus("#chart-slices-readout")
+    page.keyboard.press("ArrowRight")
+    page.wait_for_timeout(200)
+    readout2 = page.locator("#chart-slices-readout").inner_text()
+    tip2 = page.evaluate(tip_js)
+    assert readout2 != readout
+    assert readout2 == " · ".join(x.strip() for x in tip2.split("\n") if x.strip())
+    qi = page.evaluate("Desk.charts['chart-slices'].qi")
+    assert readout2.startswith(f"K {py[qi]['strike']:,} {py[qi]['right']}")
+    # the strip shares the smile's x range
+    ax = page.evaluate("Desk.charts['chart-slices'].chart.getOption().xAxis.map(a => [a.min, a.max])")
+    assert len(ax) == 2
+    assert ax[0] == ax[1]
+    assert ax[0][0] <= min(x["k"] for x in py)
+    assert ax[0][1] >= max(x["k"] for x in py)
+    # forward delta: the axis is renamed and the expiry kept
+    page.click("[data-xmode-for='chart-slices'][data-xmode='delta']")
+    page.wait_for_timeout(200)
+    names = page.evaluate("Desk.charts['chart-slices'].chart.getOption().xAxis.map(a => a.name)")
+    assert "Forward delta" in names
+    tab = page.locator(f"[data-chart-filter='chart-slices'] [data-value='{exp}']")
+    assert tab.get_attribute("aria-selected") == "true"
+    assert page.evaluate("Desk.filters['chart-slices']") == exp
+    assert "x=delta" in page.url
+    assert q["k"] < 0 or q["x_delta"] > 0                       # (the quote exists on the delta axis too)
+    csv = page.evaluate("Desk.specCsv(Desk.charts['chart-slices'].spec)")
+    assert len(csv.strip().split("\n")) == 1 + sum(len(g["mid"]) for g in spec["quotes"]["groups"].values())
+    ctx.close()
