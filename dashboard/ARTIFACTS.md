@@ -104,7 +104,8 @@ The headline result pickle's own `identifiability` and `multistart` keys win whe
 
 - `identifiability` (required for `ok`): `param_names` and `rel_jacobian_singular_values` (finite, ≥ 0, largest first) are required; `rel_jtj_condition_number`, `standard_errors`, `relative_standard_errors`, `weakest_direction`, `on_bound`, `n_residuals` and `se_note` are shown when present. An `error` key is an `ArtifactError`.
 - `multistart` or `trf.multistart`: `n_starts`, `n_starts_at_best`, `n_distinct_basins`.
-- `sigma_profile.rows`: each row needs `sigma_cap` and `loss`; `params`, `spx_iv_rmse_exact`, `spx_oos_iv_rmse`, `spx_oos_put_wing_rmse`, `vix_index_rmse`, `sigma_at_cap`, `kappa_at_max` are shown.
+- `sigma_profile.rows`: each row needs `sigma_cap` and `loss`; `params`, `spx_iv_rmse_exact`, `spx_oos_iv_rmse`, `spx_oos_put_wing_rmse`, `vix_index_rmse`, `sigma_at_cap`, `kappa_at_max`, `vvix_model` and `vvix_market` (index pts; finite or absent) are shown.
+- Every session's file (`desk_artifacts.load_sigma_profiles`, the Calibration page's "Joint SPX/VIX trade-off" panel, its σ frontier and the Model Risk box-bound check): per row `sigma_cap`, `spx_oos_iv_rmse`, `vvix_model`, `vvix_market`, `feller_margin`, `params.sigma`, `params.kappa`, `sigma_at_cap`; `sigma_profile.production_box.sigma` (the production cap) and `stored_fit` (`file`, `vvix_model`, `vvix_market`: the published fit's model VVIX, shown only when `file` names the headline pickle). A value present but not finite is an `ArtifactError`.
 - `spx_only.<heston|heston_wide_box|rough_heston>`: `params` (with `H` for rough Heston), `spx_iv_rmse_exact`, `spx_oos_iv_rmse`, `spx_oos_put_wing_rmse`, `vix_index_rmse_oos`.
 - A `session` that differs from the file name is an `ArtifactError`.
 - `summary.json` (optional; the Calibration page's "Heston vs rough Heston" panel and the Overview's joint-fit result):

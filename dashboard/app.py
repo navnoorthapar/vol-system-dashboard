@@ -2399,6 +2399,150 @@ def sigma_ridge(diag: dict, params: dict) -> dict | None:
             "kappa_rse": _num(rse)}
 
 
+# A refit whose model VVIX is within this fraction of the ^VVIX close counts as
+# matching it; the trade-off sentence states the threshold it uses.
+VVIX_MATCH_REL = 0.10
+_COUNT_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+
+
+def count_word(n: int) -> str:
+    """'four' for 4 (prose counts up to ten), digits above."""
+    return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else f"{n:,}"
+
+
+def vvix_tradeoff(profiles: Sequence[dict]) -> list[dict]:
+    """Per diagnosed session, the σ profile's production-cap refit and its widest-cap refit.
+
+    ``profiles`` is desk_artifacts.load_sigma_profiles()["sessions"]. A session
+    counts only when both refits record SPX out-of-sample RMSE and the model
+    VVIX against the market. ``far``: even the widest refit prices VVIX more
+    than VVIX_MATCH_REL above the ^VVIX close. ``binds``: σ sits on the
+    production cap in the production-cap refit.
+    """
+    out = []
+    for p in profiles:
+        rows = [r for r in p["rows"] if None not in (r["spx_oos_iv_rmse"], r["vvix_model"], r["vvix_market"])]
+        cap = p.get("production_cap")
+        prod = next((r for r in rows if cap is not None and abs(r["sigma_cap"] - cap) < 1e-9), None)
+        if not rows or prod is None:
+            continue
+        top = rows[-1]
+        out.append({"session": p["session"], "production_cap": cap, "prod": prod, "top": top,
+                    "binds": bool(prod["sigma_at_cap"]),
+                    "far": top["vvix_model"] > (1.0 + VVIX_MATCH_REL) * top["vvix_market"]})
+    return out
+
+
+def vvix_tradeoff_sentence(tr: Sequence[dict]) -> str | None:
+    """The joint SPX/VIX trade-off in one paragraph, from vvix_tradeoff().
+
+    It replaced the unconditional "Heston needs a vol-of-vol that prices VVIX
+    far above the market", which the σ ≤ 10 refit of 2026-10-16 contradicts
+    (VVIX 112.7 against 109.9). Every number is read from the σ profiles.
+    """
+    if not tr:
+        return None
+    n = len(tr)
+    far = [t for t in tr if t["far"]]
+    esc = [t for t in tr if not t["far"]]
+    parts = []
+    if far:
+        lead = (f"On {'the one' if n == 1 else 'all ' + str(n) if len(far) == n else f'{len(far)} of {n}'}"
+                f" diagnosed session{'' if n == 1 else 's'}")
+        caps = sorted({_fmt(t["top"]["sigma_cap"], "g") for t in far})
+        pairs = ", ".join(f"{_fmt(t['top']['vvix_model'], '.0f')} vs {_fmt(t['top']['vvix_market'], '.0f')}"
+                          for t in far)
+        parts.append(f"{lead} even the σ ≤ {' / '.join(caps)} refit prices VVIX more than "
+                     f"{VVIX_MATCH_REL * 100:.0f}% above the ^VVIX close ({pairs}), so a wider σ box "
+                     f"does not reconcile the SPX smile with VVIX there.")
+    clauses = []
+    for t in esc:
+        pr, tp = t["prod"], t["top"]
+        bind = f"the σ ≤ {_fmt(t['production_cap'], 'g')} box binds, and " if t["binds"] else ""
+        v_oos = "lowers" if tp["spx_oos_iv_rmse"] < pr["spx_oos_iv_rmse"] else "raises"
+        v_vv = "lowers" if tp["vvix_model"] < pr["vvix_model"] else "raises"
+        refit = (f"the σ ≤ {_fmt(tp['sigma_cap'], 'g')} refit (σ {_fmt(tp['sigma'], '.2f')}, "
+                 f"κ {_fmt(tp['kappa'], '.1f')}, Feller margin {signed(tp['feller_margin'], '.1f')})")
+        clauses.append(
+            f"on {t['session']} {bind}{refit} {v_oos} OOS RMSE {_fmt(pr['spx_oos_iv_rmse'], '.2f')} → "
+            f"{_fmt(tp['spx_oos_iv_rmse'], '.2f')} vol pts and {'' if v_vv == v_oos else v_vv + ' '}VVIX "
+            f"{_fmt(pr['vvix_model'], '.0f')} → {_fmt(tp['vvix_model'], '.1f')} against "
+            f"{_fmt(tp['vvix_market'], '.1f')}")
+    if clauses:
+        verb = "does" if len(far) == 1 else "do"
+        tail = ("one session" if len(esc) == 1 else f"{count_word(len(esc))} sessions") + (
+            f", the other {count_word(len(far))} {verb} not escape" if far else "")
+        body = "; ".join(clauses) + f"; {tail}."
+        parts.append(body[0].upper() + body[1:])
+    return " ".join(parts)
+
+
+def box_refit_note(tr: Sequence[dict], session: str | None) -> str:
+    """The widest σ refit of the headline session, for the Model Risk box-bound check:
+    ' σ ≤ 10 refit: OOS 1.19, VVIX 112.7 (2026-10-16 only)' when it is the one
+    session whose widest refit comes within VVIX_MATCH_REL of the ^VVIX close."""
+    t = next((x for x in tr if x["session"] == session), None)
+    if t is None:
+        return ""
+    tp = t["top"]
+    esc = [x["session"] for x in tr if not x["far"]]
+    scope = (f" ({session} only; on the other {count_word(len(tr) - 1)} diagnosed sessions it stays more "
+             f"than {VVIX_MATCH_REL * 100:.0f}% above the ^VVIX close)" if esc == [session] and len(tr) > 1
+             else f" ({session})")
+    return (f" σ ≤ {_fmt(tp['sigma_cap'], 'g')} refit: OOS {_fmt(tp['spx_oos_iv_rmse'], '.2f')}, "
+            f"VVIX {_fmt(tp['vvix_model'], '.1f')} vs {_fmt(tp['vvix_market'], '.1f')}{scope}.")
+
+
+def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> dict | None:
+    """The σ frontier: SPX out-of-sample RMSE against model VVIX − market, one line per session.
+
+    Each point is one refit of the σ profile, labelled with its σ cap; the
+    production cap's point is drawn larger, caps above it hollow. The headline
+    session is drawn in the headline colour, the others muted.
+    """
+    sess = []
+    for p in tr_profiles:
+        rows = [r for r in p["rows"] if None not in (r["spx_oos_iv_rmse"], r["vvix_model"], r["vvix_market"])]
+        if rows:
+            sess.append((p, rows))
+    if not sess:
+        return None
+    series, tbl = [], []
+    for p, rows in sess:
+        cap = p.get("production_cap")
+        head = p["session"] == headline
+        series.append({
+            "name": p["session"], "type": "line", "color": "headline" if head else "muted",
+            "width": 2.0 if head else 1.2, "symbol": "circle", "size": 6 if head else 5,
+            "z": 4 if head else 2,
+            "legend": True, "legendKey": p["session"] if head else "Other sessions",
+            "data": [[r["spx_oos_iv_rmse"], r["vvix_model"] - r["vvix_market"]] for r in rows],
+            "pointLabels": [_fmt(r["sigma_cap"], "g") for r in rows],
+            "hollowPoints": [cap is not None and r["sigma_cap"] > cap + 1e-9 for r in rows],
+            "bigPoints": [cap is not None and abs(r["sigma_cap"] - cap) < 1e-9 for r in rows]})
+        tbl += [[p["session"], _fmt(r["sigma_cap"], "g"), _fmt(r["spx_oos_iv_rmse"], ".2f"),
+                 _fmt(r["vvix_model"], ".1f"), _fmt(r["vvix_market"], ".2f"),
+                 signed(r["vvix_model"] - r["vvix_market"], ".1f")] for r in rows]
+    series.sort(key=lambda s: s["color"] != "headline")          # its legend button first; z puts it on top
+    spec = charts.xy(
+        "sigma-frontier", "σ frontier: SPX out-of-sample error against model VVIX − market, by σ cap",
+        x={"type": "value", "name": "SPX OOS IV RMSE (vol pts)", "digits": 1, "tipDigits": 2, "label": "OOS",
+           "unit": " vol pts"},
+        y={"name": "VVIX model − market (index pts)", "digits": 0, "tipDigits": 1, "signed": True},
+        series=series, tooltip="item", csv="sigma_frontier.csv",
+        marks={"y": [{"value": 0, "label": "model = market", "color": "muted", "dash": True}]},
+        grid={"right": 30, "top": 18},
+        describe=(f"{len(sess)} diagnosed session{'' if len(sess) == 1 else 's'}, one line each; each point "
+                  "is a refit under one σ cap (labelled), the production cap's point larger, caps above it "
+                  "hollow. Down and to the left is better on both legs."),
+        table=charts.table("σ profile by session: SPX out-of-sample RMSE and model VVIX against the ^VVIX "
+                           "close",
+                           ["Session", "σ cap#", "SPX OOS RMSE (vol pts)#", "VVIX model#",
+                            "VVIX market#", "VVIX − market (index pts)#"], tbl))
+    spec["pointCsv"] = "sigma_cap"
+    return spec
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
     from joint_vol_calibration.config import HESTON_BOUNDS
@@ -2411,6 +2555,26 @@ def calibration_extras(d: dict, cal: dict) -> None:
     diag = artifacts.calibration_diagnostics(cal, DATA, session)
     d["ident"] = diag
     d["ridge"] = sigma_ridge(diag, p)
+    # the joint SPX/VIX trade-off across every diagnosed session's σ profile
+    try:
+        sp = artifacts.load_sigma_profiles(DATA)
+    except artifacts.ArtifactError as e:
+        _record_error(d, "calibration diagnostics σ profiles (diagnostics/<session>.json)", e)
+        sp = {"state": "error"}
+    profiles = (sp.get("sessions") or []) if sp.get("state") == "ok" else []
+    d["vvix_tradeoff"] = vvix_tradeoff(profiles)
+    d["vvix_sentence"] = vvix_tradeoff_sentence(d["vvix_tradeoff"])
+    frontier = sigma_frontier_spec(profiles, session)
+    if frontier:
+        d["charts"]["frontier"] = frontier
+    # the published fit's model VVIX (its own diagnostics file, when it names this fit)
+    own = next((x for x in profiles if x["session"] == session), None)
+    sf = (own or {}).get("stored_fit") or {}
+    d["vvix"] = ({"model": sf["vvix_model"], "market": sf["vvix_market"]}
+                 if sf.get("file") == d.get("calib_file") and None not in (sf.get("vvix_model"),
+                                                                           sf.get("vvix_market")) else None)
+    d["sigma_profile_market"] = next((r["vvix_market"] for r in (own or {}).get("rows") or []
+                                      if r["vvix_market"] is not None), None)
     # Heston against rough Heston on every diagnosed session (summary.json):
     # the same anchors, residuals, VIX leg and out-of-sample quotes per session.
     try:
@@ -3384,7 +3548,7 @@ def load_overview() -> dict[str, Any]:
                                        "spx_oos_wing_rmse", "vix_index_rmse", "active_constraints",
                                        "pinned_params", "effective_dof",
                                        "feller_state", "feller_margin", "n_spx_options", "n_spx_expiries",
-                                       "calib_age", "model_version", "oos_rows", "n_oos")}
+                                       "calib_age", "model_version", "oos_rows", "n_oos", "vvix")}
     d["fit"]["tiles"] = p2.get("param_tiles") or []
     d["fit"]["ridge"] = p2.get("ridge")
     p4 = None
@@ -4169,7 +4333,8 @@ def load_model_risk() -> dict[str, Any]:
         "calib_age", fit_art, "Newest gate-passing fit against the newest session with data.")
     add(INV_CALIBRATOR, "Parameters on a box bound", float(len(p2.get("pinned_params") or [])),
         ", ".join(p2.get("active_constraints") or []) or "none", "params_at_bound", fit_art,
-        "A parameter on its bound is set by the box, not the market.")
+        "A parameter on its bound is set by the box, not the market." + box_refit_note(
+            p2.get("vvix_tradeoff") or [], p2.get("session")))
     add(INV_CALIBRATOR, "Out-of-sample SPX IV RMSE (vol pts)", _num(p2.get("spx_oos_rmse")),
         _fmt(p2.get("spx_oos_rmse"), ".2f"),
         "oos_rmse", fit_art, f"{_fmt(p2.get('n_oos'), ',')} quotes not used in the fit.")

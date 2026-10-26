@@ -427,6 +427,10 @@ def calibration_diagnostics(cal: dict, data_dir: Path, session: str | None) -> d
             if not ok or _finite(r.get("loss")) is None:
                 raise ArtifactError(f"calibrations/diagnostics/{session}.json: "
                                     "sigma_profile rows need sigma_cap and loss")
+            for k in ("vvix_model", "vvix_market"):        # printed, and differenced, by the page
+                if r.get(k) is not None and _finite(r.get(k)) is None:
+                    raise ArtifactError(f"calibrations/diagnostics/{session}.json: "
+                                        f"sigma_profile.{k} is not a finite number ({r.get(k)!r})")
             rows.append(r)
     spx_only = obj.get("spx_only") if isinstance(obj.get("spx_only"), dict) else {}
     return {"state": "ok", "source": src, "ident": ident, "multistart": multi,
@@ -489,6 +493,72 @@ def load_diagnostics_summary(data_dir: Path) -> dict:
     return {"state": "ok", "rows": sorted(out, key=lambda r: r["session"]),
             "generated_utc": obj.get("generated_utc"),
             "file": str(path.relative_to(Path(data_dir).parent))}
+
+
+# The σ-profile fields the SPX/VIX trade-off reads, per refit row: the cap, the
+# refit's out-of-sample SPX IV RMSE (vol pts) and the model VVIX (30-day vol of
+# VIX at the refit) against the ^VVIX close (index pts).
+SIGMA_PROFILE_FIELDS = ("sigma_cap", "spx_oos_iv_rmse", "vvix_model", "vvix_market", "vvix_error",
+                        "feller_margin", "loss")
+
+
+def load_sigma_profiles(data_dir: Path) -> dict:
+    """The σ profile of every diagnosed session (calibrations/diagnostics/<session>.json).
+
+    scripts/calibration_diagnostics.py refits the joint Heston fit under each
+    cap on σ (config.SIGMA_PROFILE_CAPS, κ ≤ PROFILE_KAPPA_MAX) and records each
+    refit's parameters, out-of-sample SPX RMSE and model VVIX; the bot writes
+    one file per accepted fit. Returns ``{"state": "ok", "sessions": [...]}``
+    with, per session (oldest first): ``session``, ``production_cap`` (the
+    production box's σ ceiling the file records), ``stored_fit`` (the published
+    fit's file name and its model VVIX against the market) and ``rows`` sorted by
+    cap, each with SIGMA_PROFILE_FIELDS (None where the file has no value),
+    ``sigma`` / ``kappa`` and ``sigma_at_cap``. A field present but not a finite
+    number, or a file of another session, is an ArtifactError.
+    """
+    root = Path(data_dir) / "calibrations" / "diagnostics"
+    files = sorted(f for f in root.glob("*.json") if _DATE.match(f.stem)) if root.is_dir() else []
+    if not files:
+        return absent("identifiability", root / "<session>.json", data_dir=data_dir)
+    out = []
+    for f in files:
+        name = f"calibrations/diagnostics/{f.name}"
+        obj = _read_json(f, name)
+        _check_session(obj, f.stem, name)
+        prof = obj.get("sigma_profile")
+        if not isinstance(prof, dict) or not isinstance(prof.get("rows"), list):
+            continue                       # a file without a σ profile has nothing to add here
+        rows = []
+        for r in prof["rows"]:
+            if not isinstance(r, dict):
+                raise ArtifactError(f"{name}: sigma_profile rows must be objects")
+            row: dict[str, Any] = {}
+            for k in SIGMA_PROFILE_FIELDS:
+                v = _finite(r.get(k))
+                if r.get(k) is not None and v is None:
+                    raise ArtifactError(f"{name}: sigma_profile.{k} is not a finite number ({r.get(k)!r})")
+                row[k] = v
+            params: dict = r["params"] if isinstance(r.get("params"), dict) else {}
+            row["sigma"], row["kappa"] = _finite(params.get("sigma")), _finite(params.get("kappa"))
+            row["sigma_at_cap"] = bool(r.get("sigma_at_cap"))
+            if row["sigma_cap"] is None:
+                raise ArtifactError(f"{name}: every sigma_profile row needs sigma_cap")
+            rows.append(row)
+        box: dict = prof["production_box"] if isinstance(prof.get("production_box"), dict) else {}
+        sig_box: list = box["sigma"] if isinstance(box.get("sigma"), list) else []
+        sf: dict = obj["stored_fit"] if isinstance(obj.get("stored_fit"), dict) else {}
+        stored = {"file": sf.get("file")}
+        for k in ("vvix_model", "vvix_market"):
+            v = _finite(sf.get(k))
+            if sf.get(k) is not None and v is None:
+                raise ArtifactError(f"{name}: stored_fit.{k} is not a finite number ({sf.get(k)!r})")
+            stored[k] = v
+        out.append({"session": f.stem, "production_cap": _finite(sig_box[1]) if len(sig_box) == 2 else None,
+                    "kappa_max": _finite(prof.get("kappa_max")), "stored_fit": stored,
+                    "rows": sorted(rows, key=lambda r: r["sigma_cap"]), "file": name})
+    if not out:
+        return absent("identifiability", root / "<session>.json", data_dir=data_dir)
+    return {"state": "ok", "sessions": out}
 
 
 def surface_oos_by_session(data_dir: Path) -> list[dict]:

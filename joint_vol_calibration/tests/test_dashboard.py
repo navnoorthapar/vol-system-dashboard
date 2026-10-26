@@ -2464,6 +2464,10 @@ MALFORMED = {
     "rough H above one half": ("/calibration", lambda d: _rewrite_json(
         d / "calibrations" / "diagnostics" / "summary.json",
         lambda o: o["rows"][-1].update(joint_rough_H=0.9)), "outside [0, 1/2]"),
+    "model VVIX not a number": ("/calibration", lambda d: _rewrite_json(
+        d / "calibrations" / "diagnostics" / f"{SESSION}.json",
+        lambda o: o["sigma_profile"]["rows"][0].update(vvix_model="n/a")),
+        "vvix_model is not a finite number"),
     "diagnostics of another session": ("/calibration", lambda d: _rewrite_json(
         d / "calibrations" / "diagnostics" / f"{SESSION}.json", lambda o: o.update(session="2026-06-18")),
         "session 2026-06-18"),
@@ -2564,7 +2568,8 @@ def test_calibration_page_reads_the_diagnostics_and_the_quote_smiles(dash, art):
     ms = diag["trf"]["multistart"]
     assert f"{ms['n_starts_at_best']} / {ms['n_starts']}" in text
     prof = re.search(r'<table class="tbl dense" id="sigma-profile">(.*?)</table>', html, re.DOTALL).group(1)
-    assert len(re.findall(r"<tr>", prof.split("<tbody>")[1])) == len(diag["sigma_profile"]["rows"])
+    # every refit a row (the production box's row is highlighted: <tr class="em">)
+    assert len(re.findall(r"<tr[ >]", prof.split("<tbody>")[1])) == len(diag["sigma_profile"]["rows"])
     assert "at cap" in prof
     assert "Rough Heston (lifted)" in html
     assert f"{diag['spx_only']['rough_heston']['params']['H']:.3f}" in html
@@ -3910,3 +3915,187 @@ def test_browser_kpi_tones_and_the_shortcut_dialog(site_browser):
             assert abs(left - (vw - w) / 2) <= 2, (width, box)
         finally:
             ctx.close()
+
+
+def _table_rows(html: str, table_id: str) -> list[list[str]]:
+    """Visible cell texts of a .tbl table's body rows (chips and sr-only spans dropped)."""
+    tbl = re.search(rf'<table class="tbl[^"]*" id="{re.escape(table_id)}"[^>]*>(.*?)</table>', html,
+                    re.DOTALL)
+    assert tbl, table_id
+    out = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(1).split("<tbody>")[1], re.DOTALL):
+        cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, re.DOTALL)
+        out.append([_html_unescape(re.sub(r"<span class=\"(chip|sr-only)[^\"]*\">.*?</span>|<[^>]+>", "", c))
+                    .strip() for c in cells])
+    return out
+
+
+def _diag_files(root: Path) -> dict:
+    return {f.stem: json.loads(f.read_text()) for f in sorted(root.glob("*.json"))
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", f.stem)}
+
+
+def test_sigma_profile_lists_model_vvix_against_the_market(dash, art):
+    """P1.2: the σ-profile table showed what each cap does to the SPX legs but
+    not to VVIX, the joint fit's other side. It now lists the model VVIX and
+    VVIX − market per refit, with the ^VVIX close in its caption (the fixture's
+    2026-10-16 profile: 226 … 113 against 110)."""
+    resp, html = _get(dash, "/calibration")
+    assert _errors(resp) == 0
+    rows = json.loads((FIX / "diagnostics" / f"{SESSION}.json").read_text())["sigma_profile"]["rows"]
+    cells = _table_rows(html, "sigma-profile")
+    assert len(cells) == len(rows) == 8
+    assert [c[8] for c in cells] == [f"{r['vvix_model']:.0f}" for r in rows]
+    assert [c[8] for c in cells] == ["226", "221", "205", "176", "153", "123", "113", "113"]
+    assert [c[9] for c in cells] == [dash.signed(r["vvix_model"] - r["vvix_market"], ".0f") for r in rows]
+    cap = re.search(r'id="sigma-profile"><caption>(.*?)</caption>', html, re.DOTALL).group(1)
+    assert f"^VVIX close of {rows[0]['vvix_market']:.0f}" in cap
+    assert f"^VVIX close of {rows[0]['vvix_market']:.0f}" == "^VVIX close of 110"
+
+
+def _expected_tradeoff(files: dict) -> dict:
+    """The trade-off recomputed from the diagnostics files, independently of app.py."""
+    out: dict[str, list] = {"far": [], "esc": []}
+    for s, d in sorted(files.items()):
+        rows = sorted(d["sigma_profile"]["rows"], key=lambda r: r["sigma_cap"])
+        cap = d["sigma_profile"]["production_box"]["sigma"][1]
+        prod = next(r for r in rows if r["sigma_cap"] == cap)
+        top = rows[-1]
+        key = "far" if top["vvix_model"] > 1.1 * top["vvix_market"] else "esc"
+        out[key].append((s, prod, top))
+    return out
+
+
+def test_vvix_tradeoff_sentence_is_computed_from_every_sigma_profile(dash, pages):
+    """P1.2: the Calibration page said, unconditionally, that Heston 'needs a
+    vol-of-vol that prices VVIX far above the market', which the σ ≤ 10 refit of
+    2026-10-16 contradicts (VVIX 112.7 against 109.9). The sentence is generated
+    from every diagnosed session's σ profile; each number in it is recomputed
+    here from the files, the count included."""
+    html = pages["/calibration"]
+    text = _visible_text(html)
+    assert "Heston needs a vol-of-vol that prices VVIX far above the market" not in text
+    sent = re.search(r'id="vvix-tradeoff">(.*?)</p>', html, re.DOTALL)
+    assert sent
+    sent = _html_unescape(re.sub(r"<[^>]+>", "", sent.group(1)))
+    files = _diag_files(SHIPPED / "calibrations" / "diagnostics")
+    exp = _expected_tradeoff(files)
+    n, far, esc = len(files), exp["far"], exp["esc"]
+    assert n >= 1
+    if far:
+        lead = "all " + str(n) if len(far) == n else f"{len(far)} of {n}"
+        assert f"On {lead if n > 1 else 'the one'} diagnosed session" in sent
+        pairs = ", ".join(f"{t['vvix_model']:.0f} vs {t['vvix_market']:.0f}" for _, _, t in far)
+        assert f"more than 10% above the ^VVIX close ({pairs})" in sent
+    for s, p, t in esc:
+        clause = (f"the σ ≤ {t['sigma_cap']:g} refit (σ {t['params']['sigma']:.2f}, "
+                  f"κ {t['params']['kappa']:.1f}, Feller margin {dash.signed(t['feller_margin'], '.1f')})")
+        assert f"n {s} " in sent, (s, sent)
+        assert clause in sent, (s, sent)
+        assert f"{p['spx_oos_iv_rmse']:.2f} → {t['spx_oos_iv_rmse']:.2f} vol pts" in sent
+        assert (f"VVIX {p['vvix_model']:.0f} → {t['vvix_model']:.1f} against {t['vvix_market']:.1f}"
+                in sent)
+        if p["sigma_at_cap"]:
+            assert f"{s} the σ ≤ {p['sigma_cap']:g} box binds" in sent
+    if len(esc) == 1 and far:
+        assert sent.endswith(f"; one session, the other {dash.count_word(len(far))} do not escape.")
+
+
+def test_vvix_tradeoff_sentence_reads_every_configuration(dash):
+    """The generated sentence on configurations the store may reach: one session,
+    none escaping, two escaping (grammar and counts follow the data)."""
+    def row(cap, oos, vm, mkt=100.0, sig=None, kap=5.0, feller=-1.0, at_cap=False):
+        return {"sigma_cap": cap, "spx_oos_iv_rmse": oos, "vvix_model": vm, "vvix_market": mkt,
+                "sigma": sig if sig is not None else min(cap, 1.9), "kappa": kap, "feller_margin": feller,
+                "sigma_at_cap": at_cap}
+
+    def prof(s, top_vm, top_oos=1.0):
+        return {"session": s, "production_cap": 2.0,
+                "rows": [row(1.0, 3.0, 200.0), row(2.0, 2.0, 180.0, at_cap=True), row(10.0, top_oos, top_vm)]}
+    one = dash.vvix_tradeoff_sentence(dash.vvix_tradeoff([prof("2026-01-02", 150.0)]))
+    assert one.startswith("On the one diagnosed session even the σ ≤ 10 refit prices VVIX more than 10%")
+    assert "(150 vs 100)" in one
+    none_ = dash.vvix_tradeoff_sentence(dash.vvix_tradeoff([prof("2026-01-02", 150.0),
+                                                            prof("2026-01-05", 160.0)]))
+    assert none_.startswith("On all 2 diagnosed sessions")
+    assert "escape" not in none_
+    two = dash.vvix_tradeoff_sentence(dash.vvix_tradeoff(
+        [prof("2026-01-02", 105.0), prof("2026-01-05", 104.0, top_oos=2.5), prof("2026-01-06", 170.0)]))
+    assert two.startswith("On 1 of 3 diagnosed sessions")
+    assert "On 2026-01-02 the σ ≤ 2 box binds, and the σ ≤ 10 refit" in two
+    assert "lowers OOS RMSE 2.00 → 1.00 vol pts and VVIX 180 → 105.0 against 100.0" in two
+    assert "raises OOS RMSE 2.00 → 2.50 vol pts and lowers VVIX 180 → 104.0" in two
+    assert two.endswith("; two sessions, the other one does not escape.")
+    assert dash.vvix_tradeoff_sentence([]) is None
+
+
+def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
+    """P1.2: the σ frontier plots, per diagnosed session, each σ-profile refit's
+    (SPX out-of-sample RMSE, model VVIX − market): the trade-off between the two
+    legs of the joint fit. The headline session is drawn in the headline colour,
+    the production cap's point larger and caps above it hollow; the table behind
+    it lists every point with its session."""
+    html = pages["/calibration"]
+    spec = _spec(html, "sigma-frontier")
+    files = {s: d for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
+             if (d.get("sigma_profile") or {}).get("rows")}
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    assert {s["name"] for s in spec["series"]} == set(files)
+    assert len(spec["series"]) == len(files) >= 1
+    for s in spec["series"]:
+        d = files[s["name"]]
+        rows = sorted(d["sigma_profile"]["rows"], key=lambda r: r["sigma_cap"])
+        cap = d["sigma_profile"]["production_box"]["sigma"][1]
+        assert len(s["data"]) == len(rows) == 8
+        want = [[dash.round_sig(r["spx_oos_iv_rmse"]), dash.round_sig(r["vvix_model"] - r["vvix_market"])]
+                for r in rows]
+        assert s["data"] == want, s["name"]
+        assert s["pointLabels"] == [f"{r['sigma_cap']:g}" for r in rows]
+        assert s["hollowPoints"] == [r["sigma_cap"] > cap for r in rows]
+        assert s["bigPoints"] == [r["sigma_cap"] == cap for r in rows]
+        assert s["color"] == ("headline" if s["name"] == headline else "muted")
+    tbl = spec["table"]
+    assert tbl["columns"][0]["label"] == "Session"
+    assert len(tbl["rows"]) == sum(len(d["sigma_profile"]["rows"]) for d in files.values())
+    # beside the table it reads at desk width: one panel, the table and the chart in one .split
+    panel = html[html.index('id="sigma-tradeoff"'):html.index('id="rough-vs-heston"')]
+    split = panel[panel.index('class="split"'):]
+    assert split.index('id="sigma-profile"') < split.index('id="sigma-frontier"')
+
+
+def test_vvix_kpi_is_the_published_fits_model_vvix(dash, pages):
+    """P1.2: the Calibration KPI strip carried the optimiser's run time where the
+    joint fit's VVIX belongs; the tile now reads model / market VVIX at the
+    published fit (stored_fit of its diagnostics file), on Calibration and on the
+    Overview's headline-fit panel, and the optimiser time moved to its sub-line."""
+    path, cal = dash.load_headline_calibration()
+    session = dash._calibration_session(cal, path)
+    f = SHIPPED / "calibrations" / "diagnostics" / f"{session}.json"
+    if not f.exists():
+        pytest.skip("the headline fit's diagnostics are not generated yet")
+    sf = json.loads(f.read_text())["stored_fit"]
+    assert sf["file"] == Path(path).name
+    want = f"{sf['vvix_model']:.0f} / {sf['vvix_market']:.0f}"
+    for route in ("/calibration", "/"):
+        tile = re.search(r'<div class="kpi-label">VVIX model / market</div>\s*'
+                         r'<div class="kpi-value">(.*?)</div>', pages[route])
+        assert tile, route
+        assert tile.group(1) == want, route
+        assert tile.group(1).split(" / ")[0] == format(sf["vvix_model"], ".0f")
+    assert "Optimiser" not in re.findall(r'<div class="kpi-label">(.*?)</div>', pages["/calibration"])
+    assert f"optimiser {cal['fit_time']:.1f} s" in _visible_text(pages["/calibration"])
+
+
+def test_model_risk_box_bound_check_names_the_wide_refit(dash, pages):
+    """P1.2: the 'Parameters on a box bound' check now says what the widest σ
+    refit of the headline session gives (OOS and VVIX against the close) and
+    whether it is the only diagnosed session where the refit escapes."""
+    d = dash.load_page2()
+    t = next((x for x in d["vvix_tradeoff"] if x["session"] == d["session"]), None)
+    if t is None:
+        pytest.skip("the headline fit's σ profile is not generated yet")
+    tp = t["top"]
+    text = _visible_text(re.sub(r"</?span[^>]*>", "", pages["/model-risk"]))
+    assert (f"σ ≤ {tp['sigma_cap']:g} refit: OOS {tp['spx_oos_iv_rmse']:.2f}, VVIX {tp['vvix_model']:.1f} vs "
+            f"{tp['vvix_market']:.1f} ({d['session']}") in text

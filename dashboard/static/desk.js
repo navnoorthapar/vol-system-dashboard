@@ -142,6 +142,22 @@
       itemStyle: { color: c },
     });
     if (s.area) line.areaStyle = { color: alpha(c, 0.18), origin: s.areaOrigin || 'auto' };
+    // per-point marks (the σ frontier): a hollow marker (s.hollowPoints[j]), a
+    // larger one (s.bigPoints[j]) and a short label beside each point (s.pointLabels)
+    if (s.hollowPoints || s.bigPoints) {
+      line.showSymbol = true;
+      line.data = data.map(function (pt, j) {
+        var o = { value: pt };
+        if (s.hollowPoints && s.hollowPoints[j]) o.itemStyle = { color: T.surface, borderColor: c, borderWidth: 1.4 };
+        if (s.bigPoints && s.bigPoints[j]) o.symbolSize = (s.size || 5) + 4;
+        return o;
+      });
+    }
+    if (s.pointLabels) {
+      line.label = { show: true, position: 'right', distance: 3, color: T.text3, fontFamily: T.mono, fontSize: 10,
+        formatter: function (p) { var l = s.pointLabels[p.dataIndex]; return l === null || l === undefined ? '' : String(l); } };
+      line.labelLayout = { hideOverlap: true };
+    }
     return line;
   }
 
@@ -207,7 +223,9 @@
           else if (s.type === 'errorbar') txt = fy(v[1], s) + ' \u2013 ' + fy(v[2], s);
           else txt = fy(yv, s);
           var sw = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + (typeof p.color === 'string' ? p.color : T.text2) + ';margin-right:6px"></span>';
-          rows.push(sw + p.seriesName + '&nbsp;&nbsp;<b>' + txt + '</b>');
+          var pl = s.pointLabels && s.pointLabels[p.dataIndex] !== undefined && s.pointLabels[p.dataIndex] !== null
+            ? ' \u00b7 ' + (s.pointPrefix || '') + s.pointLabels[p.dataIndex] : '';
+          rows.push(sw + p.seriesName + pl + '&nbsp;&nbsp;<b>' + txt + '</b>');
         });
         // extra lines that belong to the index, not to a series (a waterfall's level after the step)
         (spec.tipRows || []).forEach(function (r) {
@@ -367,11 +385,16 @@
         lines.push([x].concat(series.map(function (s) { var v = s.data[i]; return Array.isArray(v) ? v[1] : v; })).map(csvCell).join(','));
       });
     } else {
-      lines.push(['series', xn, (spec.y && (spec.y.csv || spec.y.name)) || 'y', 'y_high'].map(csvCell).join(','));
+      // a chart whose points carry labels (the σ caps of the frontier) exports them too
+      var labelled = series.some(function (s) { return s.pointLabels; });
+      var head = ['series', xn, (spec.y && (spec.y.csv || spec.y.name)) || 'y', 'y_high'];
+      lines.push((labelled ? head.concat([spec.pointCsv || 'point']) : head).map(csvCell).join(','));
       series.forEach(function (s) {
-        seriesData(s, spec).forEach(function (p) {
+        seriesData(s, spec).forEach(function (p, j) {
           var row = Array.isArray(p) ? p : [null, p];
-          lines.push([s.name, row[0], row[1], row.length > 2 ? row[2] : ''].map(csvCell).join(','));
+          var out = [s.name, row[0], row[1], row.length > 2 ? row[2] : ''];
+          if (labelled) out.push(s.pointLabels ? s.pointLabels[j] : '');
+          lines.push(out.map(csvCell).join(','));
         });
       });
     }

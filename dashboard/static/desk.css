@@ -182,6 +182,11 @@ sub, sup { font-size: 0.72em; }
 .s2 { grid-column: span 2; } .s3 { grid-column: span 3; } .s4 { grid-column: span 4; }
 .s5 { grid-column: span 5; } .s6 { grid-column: span 6; } .s7 { grid-column: span 7; }
 .s8 { grid-column: span 8; } .s9 { grid-column: span 9; } .s12 { grid-column: 1 / -1; }
+/* two blocks side by side inside one panel (a table and the chart that reads it),
+   stacked below desk width */
+.split { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 8px 16px; align-items: start; }
+.split > * { min-width: 0; }
+.split > * > * + * { margin-top: 8px; }
 .section-title {
   font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--text3); margin: 16px 0 6px; display: flex; align-items: center; gap: 8px;
@@ -459,6 +464,7 @@ dialog.keys .dl { font-size: 12px; }
 
 /* ── responsive ──────────────────────────────────────────────────────── */
 @media (max-width: 1180px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
   .s2, .s3 { grid-column: span 6; }
   .s4, .s5 { grid-column: span 6; }
   .s7, .s8, .s9 { grid-column: 1 / -1; }

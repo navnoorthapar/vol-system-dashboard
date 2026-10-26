@@ -31,7 +31,7 @@
 {% macro _table(t) -%}
 <table>
     <caption>{{ t.caption }}</caption>
-    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label }}</th>{% endfor %}</tr></thead>
+    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label|sym }}</th>{% endfor %}</tr></thead>
     <tbody>{% for r in t.rows %}<tr>{% for v in r %}<td{% if t.columns[loop.index0] and t.columns[loop.index0].num %} class="num"{% endif %}>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
   </table>
 {%- endmacro %}

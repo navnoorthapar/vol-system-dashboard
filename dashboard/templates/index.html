@@ -120,6 +120,7 @@
       {{ m.kpi('Out of sample', f.spx_oos_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_oos|fmt(',')) ~ ' quotes') }}
       {{ m.kpi('Put wing OOS', f.spx_oos_wing_rmse|fmt('.2f'), unit='vol pts') }}
       {{ m.kpi('VIX indices', f.vix_index_rmse|fmt('.2f'), unit='pts RMSE') }}
+      {% if f.vvix %}{{ m.kpi('VVIX model / market', (f.vvix.model|fmt('.0f')) ~ ' / ' ~ (f.vvix.market|fmt('.0f')), sub='30-day vol of VIX, index pts') }}{% endif %}
     </div>
     <p class="note">
       {% for t in f.tiles %}<span class="nowrap">{{ t.sym }} {{ t.value|fmt(t.spec) }}{% if t.side %} {{ m.chip('at ' ~ (t.side if t.side != 'bound' else '') ~ ' bound', 'watch') }}{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}

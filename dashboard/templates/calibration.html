@@ -18,7 +18,7 @@
 
 {% if d.kappa is not none %}
 <p class="note" style="margin-bottom:8px;">
-  The headline is the newest fit that passes the quality gate (<code>{{ d.calib_file }}</code>), not the lowest-RMSE fit in the archive: ranking by RMSE rewards the days the data broke.
+  The headline is the newest fit that passes the quality gate (<code>{{ d.calib_file }}</code>), not the lowest-RMSE fit in the archive: ranking by RMSE rewards the days the data broke.{% if d.optimizer %} Optimiser: {{ d.optimizer }}.{% endif %}
   {% if d.archive %}Of {{ d.archive.n_total }} stored fits, {{ d.archive.n_current_ok }} of {{ d.archive.n_current }} current-schema (model_version 2) fits pass the gate; {{ d.archive.n_legacy|plural('pre-C22 fit') }} {{ 'is' if d.archive.n_legacy == 1 else 'are' }} labelled legacy and never ranked.{% endif %}
 </p>
 
@@ -47,7 +47,8 @@
   {{ m.kpi('Put wing OOS', d.spx_oos_wing_rmse|fmt('.3f'), unit='vol pts', sub='puts below the forward') }}
   {{ m.kpi('VIX index RMSE', d.vix_index_rmse|fmt('.3f'), unit='index pts', sub=(d.n_vix_tenors|fmt) ~ ' tenors: ^VIX9D … ^VIX6M') }}
   {% if d.vix_opt_disabled %}{{ m.kpi('VIX options', 'Not in objective', sub='weight w₃ = 0; no error is reported for a leg the fit did not use') }}{% else %}{{ m.kpi('VIX options RMSE', d.vix_opt_rmse|fmt('.2f'), unit='vol pts') }}{% endif %}
-  {{ m.kpi('Optimiser', d.fit_time|fmt('.1f'), unit='s', sub=(d.n_evals|fmt(',')) ~ ' evaluations · ' ~ (d.optimizer or 'settings not recorded')) }}
+  {% set _opt = 'optimiser ' ~ (d.fit_time|fmt('.1f')) ~ ' s, ' ~ (d.n_evals|fmt(',')) ~ ' evaluations' %}
+  {% if d.vvix %}{{ m.kpi('VVIX model / market', (d.vvix.model|fmt('.0f')) ~ ' / ' ~ (d.vvix.market|fmt('.0f')), sub='model 30-day vol of VIX at this fit vs the ^VVIX close, index pts · ' ~ _opt) }}{% else %}{{ m.kpi('VVIX model / market', '—', sub='not yet generated: needs the calibration diagnostics of this fit · ' ~ _opt) }}{% endif %}
 </div>
 {% if d.spx_underidentified %}<p class="note"><span class="chip chip-watch">Not comparable</span> The SPX leg spans {{ d.n_spx_expiries }} expiry; its RMSE is low because there is little to fit.</p>{% endif %}
 
@@ -129,15 +130,6 @@
     </table>
     </div>
     <p class="note">{{ I.se_note|prose }} Source: {{ idn.source }}.</p>
-    {% if idn.sigma_profile %}
-    <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="Sigma profile (scrollable)">
-    <table class="tbl dense" id="sigma-profile"><caption>σ profile: the joint loss refitted under each cap on σ (κ ≤ {{ idn.kappa_max|fmt('.0f') }}); vol pts unless stated</caption>
-      <thead><tr><th scope="col" class="num">{{ 'σ cap'|sym }}</th><th scope="col" class="num">{{ 'σ'|sym }}</th><th scope="col" class="num">{{ 'κ'|sym }}</th><th scope="col" class="num">Loss</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX (pts)</th></tr></thead>
-      <tbody>{% for r in idn.sigma_profile %}<tr><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td></tr>{% endfor %}</tbody>
-    </table>
-    </div>
-    <p class="note">The production box caps σ at {{ d.param_tiles[2].hi|fmt('g') }}. Each row is a diagnostic refit; the published fit is unchanged.</p>
-    {% endif %}
     {% if idn.spx_only %}
     <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="SPX-only model comparison (scrollable)">
     <table class="tbl dense" id="spx-only"><caption>SPX-only fits, same anchors, residuals and optimiser (the VIX index is then out of sample)</caption>
@@ -162,6 +154,30 @@
   {% endcall %}
 </div>
 
+{% set idn = d.ident or {} %}
+{% if idn.state == 'ok' and idn.sigma_profile and d.param_tiles %}
+<div class="g">
+  {% call m.panel('sigma-tradeoff', 'Joint SPX/VIX trade-off · σ profile and VVIX', 's12', d.session ~ ' · ' ~ (d.vvix_tradeoff|length|plural('diagnosed session'))) %}
+    <div class="split">
+      <div>
+        <div class="tbl-wrap" tabindex="0" role="region" aria-label="Sigma profile (scrollable)">
+        <table class="tbl dense" id="sigma-profile"><caption>σ profile of the {{ d.session }} fit: the joint loss refitted under each cap on σ (κ ≤ {{ idn.kappa_max|fmt('.0f') }}). SPX errors in vol pts; VIX and VVIX in index pts. VVIX is the model's 30-day vol of VIX at each refit against the ^VVIX close of {{ d.sigma_profile_market|fmt('.0f') }}; VVIX − mkt = model − market.</caption>
+          <thead><tr><th scope="col" class="num">{{ 'σ cap'|sym }}</th><th scope="col" class="num">{{ 'σ'|sym }}</th><th scope="col" class="num">{{ 'κ'|sym }}</th><th scope="col" class="num">Loss</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX</th><th scope="col" class="num">VVIX model</th><th scope="col" class="num">VVIX − mkt</th></tr></thead>
+          <tbody>{% for r in idn.sigma_profile %}<tr{% if r.sigma_cap == d.param_tiles[2].hi %} class="em"{% endif %}><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td><td class="num">{{ r.vvix_model|fmt('.0f') }}</td><td class="num">{{ (r.vvix_model - r.vvix_market if r.vvix_model is not none and r.vvix_market is not none else none)|signed('.0f') }}</td></tr>{% endfor %}</tbody>
+        </table>
+        </div>
+        <p class="note">Each row is a diagnostic refit and the published fit is unchanged; the highlighted row refits under the production box. The production box is kept at σ ≤ {{ d.param_tiles[2].hi|fmt('g') }}: the NN pricer's training domain, the risk monitor's vomma shock and the bound chips are tied to it, and widening it is filed, not done (<code>config.HESTON_BOUNDS</code>; <a href="corrections.html#c23">Corrections C23-M1</a>).</p>
+      </div>
+      <div>
+        {% if d.charts.frontier %}{{ m.chart(d.charts.frontier, 'h300') }}
+        <p class="note">x: SPX out-of-sample IV RMSE; y: model VVIX minus the ^VVIX close. One line per diagnosed session ({{ d.session }} in white, the others grey), one point per σ cap, labelled; the production cap's point is larger and caps above it are hollow.</p>{% endif %}
+      </div>
+    </div>
+    {% if d.vvix_sentence %}<p class="prose" id="vvix-tradeoff">{{ d.vvix_sentence }}</p>{% endif %}
+  {% endcall %}
+</div>
+{% endif %}
+
 <div class="g">
   {% call m.panel('rough-vs-heston', 'Heston vs rough Heston · joint fit, every diagnosed session', 's12', 'diagnostics/summary.json') %}
     {% set rv = d.rough_vs_heston or {} %}
@@ -173,7 +189,7 @@
       <tbody>{% for r in rv.rows %}<tr{% if r.session == d.session %} class="em"{% endif %}><td><span class="nowrap">{{ r.session }}</span>{% if 'sigma' in r.on_bound %} {{ m.chip('σ at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.sigma_cap2_oos|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_oos|fmt('.2f') }}</td><td class="num">{{ r.rough_minus_heston|signed('.2f') }}</td><td class="num">{{ r.joint_rough_H|fmt('.2f') }}{% if 'H' in r.joint_rough_on_bound %} {{ m.chip('on bound', 'watch') }}{% endif %}</td><td class="num">{{ r.joint_heston_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_lifting_error_estimate_max_vp|fmt('.3f') }}</td><td class="num">{{ r.sigma_free_oos|fmt('.2f') }}</td><td class="num">{{ r.vvix_model_cap2|fmt('.0f') }} / {{ r.vvix_market|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">Heston OOS is the production fit (σ ≤ 2); free-σ OOS refits it with σ ≤ 10 and κ ≤ 60 (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close: Heston needs a vol-of-vol that prices VVIX far above the market to fit the SPX skew. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.</p>
+    <p class="note">Heston OOS is the production fit (σ ≤ 2); free-σ OOS refits it with σ ≤ 10 and κ ≤ 60 (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close; what a wider σ box does to it, session by session, is in the <a href="#sigma-tradeoff">σ-profile panel</a> above. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.</p>
     {% elif rv.state == 'absent' %}
     {{ m.missing(rv, 'The joint Heston and rough Heston fits of every diagnosed session.') }}
     {% else %}
