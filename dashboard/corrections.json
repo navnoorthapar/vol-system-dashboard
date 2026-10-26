@@ -501,6 +501,7 @@
           ],
           "evidence": "136 term-structure rows replaced (38 by more than 0.25 pts, 33 of them in the backtest window), 8 VVIX sessions added, 31 holiday rows removed; portfolio −$216,092 → −$222,177 (c23_bridge.csv); labels 2019-08-09, 2020-02-20, 2020-06-11, 2021-05-11 R1 → R2 and 2021-06-09, 2021-07-08 R2 → R1",
           "id": "C23-D1",
+          "c23_bridge_steps": ["restated", "holidays", "vvix_gaps", "cboe_values"],
           "models": [
             "V1",
             "V2",

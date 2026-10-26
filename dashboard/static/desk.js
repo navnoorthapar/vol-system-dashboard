@@ -497,7 +497,7 @@
   function initPrint() {
     var opened = [], shown = [];
     window.addEventListener('beforeprint', function () {
-      $$('details.method:not([open])').forEach(function (d) { d.open = true; opened.push(d); });
+      $$('details:not([open])').forEach(function (d) { d.open = true; opened.push(d); });
       $$('[role="tabpanel"][hidden]').forEach(function (p) { p.hidden = false; shown.push(p); });
       if (window.echarts) { renderAll(true); Object.keys(Desk.charts).forEach(function (k) { Desk.charts[k].chart.resize(); }); }
     });
@@ -696,6 +696,37 @@
     });
   }
 
+  // -- row filters: aria-pressed buttons that show a subset of a table's rows ----
+  //    (without JavaScript the buttons are not shown and every row is)
+  function initFilters() {
+    var keep = {
+      all: function () { return true; },
+      quantified: function (tr) { return tr.getAttribute('data-status') === 'quantified'; },
+      notest: function (tr) { return tr.getAttribute('data-tests') === '0'; },
+    };
+    $$('[data-filter-for]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.getAttribute('data-filter-for'), f = keep[b.getAttribute('data-filter')] || keep.all;
+        $$('#' + id + ' tbody tr').forEach(function (tr) { tr.hidden = !f(tr); });
+        $$('[data-filter-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o === b ? 'true' : 'false'); });
+      });
+    });
+  }
+
+  // -- a link to an element inside a closed <details> (a collapsed postmortem)
+  //    opens it before the browser scrolls to the element --
+  function openTarget(ev) {
+    var id = state.anchor() || decodeURIComponent(location.hash.replace(/^#/, ''));
+    var el = id && doc.getElementById(id);
+    if (!el) return;
+    var opened = false;
+    for (var p = el; p; p = p.parentElement) {           // the target itself may be a disclosure
+      if (p.tagName === 'DETAILS' && !p.open) { p.open = true; opened = true; }
+    }
+    // the browser scrolled before the disclosure opened (or could not scroll to a closed one)
+    if (opened || (ev && ev.type === 'hashchange')) el.scrollIntoView();
+  }
+
   // -- units toggle: a region shown in one of two units (aria-pressed buttons) ----
   function initUnits() {
     $$('[data-units-for]').forEach(function (b) {
@@ -831,8 +862,9 @@
 
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); initUnits(); init3d(); initTableRoles(); initScrollHints();
-    initPrint(); scrollToAnchor();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
+    initPrint(); openTarget(); scrollToAnchor();
+    window.addEventListener('hashchange', openTarget);
   }
   if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot); else boot();
 })();

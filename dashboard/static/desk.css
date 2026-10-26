@@ -444,6 +444,25 @@ details.method > .prose, details.method > .note, details.method > .tbl-wrap { ma
 .pm.sev-medium { border-left-color: var(--watch); }
 .pm.sev-low { border-left-color: var(--ok); }
 .pm-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+/* a round is a disclosure: its head is the summary, its body the postmortem */
+summary.pm-head { cursor: pointer; list-style: none; }
+summary.pm-head::-webkit-details-marker { display: none; }
+summary.pm-head::before { content: "\25B8"; font-size: 10px; color: var(--text3); }
+details[open] > summary.pm-head::before { content: "\25BE"; }
+details:not([open]) > summary.pm-head { border-bottom: none; }
+summary.pm-head:hover .pm-title { color: var(--info); }
+.pm-count { font-size: 11px; color: var(--text3); }
+/* each finding is a disclosure too: its id, status and flaw on one line, the
+   root cause, fix, evidence and tests on opening (the register above lists all) */
+summary.pm-fsum { cursor: pointer; list-style: none; display: flex; flex-direction: column; gap: 2px; padding-left: 14px; position: relative; }
+summary.pm-fsum::-webkit-details-marker { display: none; }
+summary.pm-fsum::before { content: "\25B8"; position: absolute; left: 0; top: 1px; font-size: 10px; color: var(--text3); }
+details[open] > summary.pm-fsum::before { content: "\25BE"; }
+summary.pm-fsum .pm-k { margin-bottom: 0; }
+summary.pm-fsum:hover strong { color: var(--info); }
+.pm-cell { scroll-margin-top: 48px; }
+.pm-cell:target { box-shadow: inset 3px 0 0 var(--info); }
+.tbl tr[hidden] { display: none !important; }
 .pm-id { font-family: var(--mono); font-weight: 600; color: var(--text); }
 .pm-title { font-weight: 600; color: var(--text); font-size: 13px; }
 .pm-date { font-family: var(--mono); font-size: 11px; color: var(--text3); margin-left: auto; }

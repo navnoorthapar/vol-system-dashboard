@@ -3014,7 +3014,9 @@ def test_print_keeps_cell_colours_opens_drawers_and_every_tab(dash):
     assert ".heat td" in pr
     assert '[role="tabpanel"][hidden] { display: block !important; }' in pr
     assert ".tbl-wrap.capped { max-height: none !important;" in pr
-    assert "$$('details.method:not([open])').forEach(function (d) { d.open = true; opened.push(d); });" in js
+    # every closed disclosure opens for print: the methodology drawers and (P1.8) the
+    # collapsed postmortem rounds and findings of the Corrections page
+    assert "$$('details:not([open])').forEach(function (d) { d.open = true; opened.push(d); });" in js
     assert "opened.forEach(function (d) { d.open = false; })" in js
 
 
@@ -4564,3 +4566,80 @@ def test_browser_findings_strip_is_on_the_first_screen_and_stacks_on_a_phone(sit
                 assert box["cols"][0][1] < box["cols"][1][1] < box["cols"][2][1]
         finally:
             ctx.close()
+
+
+def test_corrections_register_lists_every_finding(dash, pages):
+    """P1.8: the Corrections page was 7,685 px of postmortems with no overview.
+    A register above them lists every finding of corrections.json: its id,
+    round, flaw, status, the portfolio P&L effect where a bridge CSV measures it
+    (else '—'), the number of tests that pin it ('gap' at 0) and a link that
+    resolves to its postmortem entry. Without JavaScript every row shows."""
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    fs = [(r["id"], n, f) for r in reg["rounds"] for n, f in enumerate(r["findings"], 1)]
+    html = pages["/corrections"]
+    tbl = re.search(r'<table class="tbl dense cards" id="register-table">(.*?)</table>', html, re.DOTALL)
+    assert tbl
+    rows = re.findall(r'<tr data-status="(\w+)" data-tests="(\d+)">(.*?)</tr>', tbl.group(1), re.DOTALL)
+    assert len(rows) == len(fs) == 33
+    assert [s for s, _, _ in rows] == [f["status"] for _, _, f in fs]
+    assert (sum(s == "fixed" for s, _, _ in rows), sum(s == "quantified" for s, _, _ in rows)) == (30, 3)
+    gaps = [i for i, (_, n, _) in enumerate(rows) if n == "0"]
+    assert gaps
+    assert all("chip-breach\">gap</span>" in rows[i][2] for i in gaps)
+    assert [int(n) for _, n, _ in rows] == [len(f.get("tests") or []) for _, _, f in fs]
+    c22 = pd.read_csv(SHIPPED / "backtest" / "c22_bridge.csv").set_index("step")
+    c23 = pd.read_csv(SHIPPED / "backtest" / "c23_bridge.csv").set_index("step")
+    for (rid, n, f), (_, _, body) in zip(fs, rows):
+        cells = [_visible_text("<body>" + c).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", body, re.DOTALL)]
+        assert cells[0] == (f.get("id") or f"{rid}.{n}")
+        if f.get("bridge_steps"):
+            want = float(c22.loc[f["bridge_steps"], "d_pnl"].sum())
+        elif f.get("c23_bridge_steps"):
+            want = float(c23.loc[f["c23_bridge_steps"], "d_pnl"].sum())
+        else:
+            want = None
+        effect = "—" if want is None else ("unchanged" if abs(want) < 500 else dash._usd_k(want))
+        assert cells[4] == effect, rid
+        link = re.search(r'<a href="#([\w-]+)">', body).group(1)
+        assert link == f"{rid.lower()}-f{n}"
+        assert re.search(rf'<details class="pm-cell pm-finding" id="{link}"', html), link
+    assert "hidden" not in tbl.group(1)
+    btns = re.findall(r'data-filter-for="register-table" data-filter="(\w+)" aria-pressed="(true|false)"',
+                      html)
+    assert btns == [("all", "true"), ("quantified", "false"), ("notest", "false")]
+    # the rounds are disclosures, the newest open; every finding stays in the page
+    opened = re.findall(r'<details class="pm-details"( open)?>', html)
+    assert opened == [""] * (len(reg["rounds"]) - 1) + [" open"]
+
+
+def test_browser_corrections_register_filters_links_and_height(site_browser):
+    """P1.8: the filter chips show the quantified findings and the ones no test
+    pins; an entry link opens its collapsed round and finding and scrolls to it;
+    the page is under 3,500 px at 1440 (7,685 before)."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "corrections.html", wait_until="load")
+        assert page.evaluate("document.documentElement.scrollHeight") < 3500
+        shown = ("() => [...document.querySelectorAll('#register-table tbody tr')]"
+                 ".filter(t => t.offsetParent).length")
+        n_all = page.evaluate(shown)
+        page.locator('[data-filter="notest"]').click()
+        assert 1 <= page.evaluate(shown) < n_all
+        assert page.locator('[data-filter="notest"]').get_attribute("aria-pressed") == "true"
+        page.locator('[data-filter="quantified"]').click()
+        n_quant = page.locator('#register-table tbody tr[data-status="quantified"]').count()
+        assert page.evaluate(shown) == n_quant
+        page.locator('[data-filter="all"]').click()
+        assert page.evaluate(shown) == n_all
+        first = page.locator("#register-table tbody tr a").first
+        target = first.get_attribute("href")[1:]
+        assert page.evaluate(f"!document.getElementById('{target}').closest('details.pm-details').open")
+        first.click()
+        page.wait_for_timeout(200)
+        st = page.evaluate(f"""() => {{ const el = document.getElementById('{target}');
+          const r = el.getBoundingClientRect();
+          return [el.open, el.closest('details.pm-details').open, r.top >= 0 && r.top < innerHeight]; }}""")
+        assert st == [True, True, True], st
+    finally:
+        ctx.close()

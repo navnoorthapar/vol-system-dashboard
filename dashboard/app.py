@@ -4433,7 +4433,8 @@ def load_corrections() -> dict[str, Any]:
         final_sharpe = (final or {}).get("sharpe")
         if final_sharpe is not None and abs(float(c23[-1]["sharpe"]) - final_sharpe) > 1e-6:
             raise ValueError("c23_bridge.csv does not end at the stored run's Sharpe")
-        d["c23_bridge"] = [{"row": int(r["row"]), "label": r["label"], "pnl": float(r["pnl"]),
+        d["c23_bridge"] = [{"row": int(r["row"]), "step": r["step"], "label": r["label"],
+                            "pnl": float(r["pnl"]),
                             "d_pnl": float(r["d_pnl"]), "sharpe": float(r["sharpe"])} for r in c23]
     steps = {r["step"]: r for r in bridge or []}
     d["c21_pnl"] = (float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])) if bridge else None
@@ -4442,6 +4443,14 @@ def load_corrections() -> dict[str, Any]:
         r["findings"] = []
         for finding in rnd["findings"]:
             f = dict(finding)
+            if f.get("c23_bridge_steps") and d.get("c23_bridge"):
+                c23s = {str(x["step"]): x for x in d["c23_bridge"]}
+                rows23 = [c23s[s] for s in f["c23_bridge_steps"] if s in c23s]
+                if len(rows23) != len(f["c23_bridge_steps"]):
+                    _record_error(d, "corrections registry", ValueError(
+                        f"{rnd['id']}: C23 bridge step(s) {f['c23_bridge_steps']} not all in c23_bridge.csv"))
+                f["c23_rows"] = [x["row"] for x in rows23]
+                f["c23_d_pnl"] = float(sum(x["d_pnl"] for x in rows23))
             if f.get("bridge_steps") and steps:
                 rows = [steps[s] for s in f["bridge_steps"] if s in steps]
                 if len(rows) != len(f["bridge_steps"]):
@@ -4484,8 +4493,37 @@ def load_corrections() -> dict[str, Any]:
                            [[r, signed(v, ".1f", "%")] for r, v in hs]))
     d["headline_trend"] = headline_trend_sentence(hs)
     d["n_findings"] = sum(len(r["findings"]) for r in d["rounds"])
+    d["register"] = findings_register(d["rounds"])
     d["n_tests"] = sum(r["n_tests"] for r in d["rounds"])
     return _clean_keep(d)
+
+
+def findings_register(rounds: Sequence[dict]) -> list[dict]:
+    """One row per finding of every round, for the register above the postmortems:
+    its id (the registry's own, else <round>.<n>), status, the portfolio P&L
+    effect where a bridge CSV measures it (c22_bridge.csv rows named by
+    bridge_steps, c23_bridge.csv rows by c23_bridge_steps), the number of tests
+    that pin it and the anchor of its postmortem entry."""
+    out = []
+    for r in rounds:
+        for n, f in enumerate(r["findings"], 1):
+            pnl_ = f.get("d_pnl") if f.get("bridge_rows") else f.get("c23_d_pnl")
+            src = ("c22_bridge.csv row" + ("s " if len(f["bridge_rows"]) > 1 else " ")
+                   + ", ".join(str(x) for x in f["bridge_rows"]) if f.get("bridge_rows")
+                   else ("c23_bridge.csv rows " + ", ".join(str(x) for x in f["c23_rows"])
+                         if f.get("c23_rows") else None))
+            out.append({"id": f.get("id") or f"{r['id']}.{n}", "round": r["id"], "n": n,
+                        "flaw": f.get("flaw"), "status": f.get("status"), "pnl": pnl_, "pnl_src": src,
+                        "n_tests": len(f.get("tests") or []), "anchor": finding_anchor(r["id"], n)})
+    return out
+
+
+def finding_anchor(round_id: str, n: int) -> str:
+    """The id of a finding's entry on the Corrections page: 'c16-f4'."""
+    return f"{round_id.lower()}-f{n}"
+
+
+app.jinja_env.globals["finding_anchor"] = finding_anchor
 
 
 def headline_trend_sentence(series: Sequence[tuple[str, Any]], tol: float = 0.05) -> str:

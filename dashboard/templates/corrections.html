@@ -47,16 +47,38 @@
   {% endcall %}
 </div>
 
+<div class="g">
+  {% call m.panel('register', 'Findings register · every finding, ' ~ (d.rounds[0].id if d.rounds else 'C16') ~ '–' ~ (d.rounds[-1].id if d.rounds else 'C23'), 's12', (d.register|length) ~ ' findings') %}
+    {% set _nq = d.register|selectattr('status', 'equalto', 'quantified')|list|length %}
+    {% set _ng = d.register|selectattr('n_tests', 'equalto', 0)|list|length %}
+    <div class="tabs js-only" role="group" aria-label="Filter the findings register">
+      <button class="btn" type="button" data-filter-for="register-table" data-filter="all" aria-pressed="true">All ({{ d.register|length }})</button>
+      <button class="btn" type="button" data-filter-for="register-table" data-filter="quantified" aria-pressed="false">Quantified ({{ _nq }})</button>
+      <button class="btn" type="button" data-filter-for="register-table" data-filter="notest" aria-pressed="false">No test ({{ _ng }})</button>
+    </div>
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Findings register (scrollable)">
+    <table class="tbl dense cards" id="register-table">
+      <caption>Every finding: status, portfolio P&amp;L where a bridge CSV measures it, the tests that pin it</caption>
+      <thead><tr><th scope="col">ID</th><th scope="col">Round</th><th scope="col">Flaw</th><th scope="col">Status</th><th scope="col" class="num">Portfolio P&amp;L</th><th scope="col" class="num">Tests</th><th scope="col">Entry</th></tr></thead>
+      <tbody>{% for f in d.register %}<tr data-status="{{ f.status }}" data-tests="{{ f.n_tests }}"><td class="nowrap" data-label="ID">{{ f.id }}</td><td data-label="Round">{{ f.round }}</td><td class="wrap" data-label="Flaw">{{ f.flaw|sym }}</td><td data-label="Status">{{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}</td><td class="num" data-label="Portfolio P&amp;L"{% if f.pnl_src %} title="{{ f.pnl_src }}"{% endif %}>{% if f.pnl is none %}—{% elif f.pnl|abs < 500 %}unchanged{% else %}{{ f.pnl|usd_k }}{% endif %}</td><td class="num" data-label="Tests">{{ f.n_tests }}{% if f.n_tests == 0 %} {{ m.chip('gap', 'breach') }}{% endif %}</td><td data-label="Entry"><a href="#{{ f.anchor }}">{{ f.round }} finding {{ f.n }}</a></td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">Portfolio P&amp;L is the sum of the finding's rows in <code>c22_bridge.csv</code> or <code>c23_bridge.csv</code> (mark-to-model; hover for the rows); — where no bridge measures it. A gap is a finding no regression test pins. {{ d.register|selectattr('status', 'equalto', 'fixed')|list|length }} fixed, {{ _nq }} quantified (measured and published rather than removed); {{ _ng }} without a dedicated regression test. The postmortems below keep each finding's root cause, fix, evidence and tests (open a finding, or follow its entry link); the newest round is open.</p>
+  {% endcall %}
+</div>
+
 <h2 class="section-title">Postmortems</h2>
 <div class="timeline" id="audit-table">
   {% for r in d.rounds %}
   <article class="pm sev-{{ r.severity }}" id="{{ r.id|lower }}" data-round="{{ r.id }}" aria-labelledby="{{ r.id|lower }}-t">
-    <div class="pm-head">
+    <details class="pm-details"{% if loop.last %} open{% endif %}>
+    <summary class="pm-head">
       <span class="pm-id">{{ r.id }}</span>
       <h3 class="pm-title" id="{{ r.id|lower }}-t">{{ r.title|sym }}</h3>
       {{ m.chip(r.severity ~ ' severity', 'breach' if r.severity == 'high' else ('watch' if r.severity == 'medium' else 'ok')) }}
+      <span class="pm-count">{{ r.findings|length|plural('finding') }}</span>
       <span class="pm-date">{{ r.date }}{% if r.date_end and r.date_end != r.date %} → {{ r.date_end }}{% endif %}</span>
-    </div>
+    </summary>
     <div class="pm-grid">
       <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">{{ r.detection }}</div></div>
       <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">{{ r.components|join(', ') }} · {% for c in r.commit_links %}<a href="{{ c.url }}"><code>{{ c.short }}</code></a>{{ ', ' if not loop.last else '' }}{% endfor %}</div></div>
@@ -74,9 +96,9 @@
     </div>
     {% endif %}
     {% for f in r.findings %}
-    <div class="pm-cell" data-status="{{ f.status }}" style="border-right:none;">
-      <div class="pm-k">Finding {{ loop.index }}{% if f.id %} ({{ f.id }}){% endif %} · {{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}</div>
-      <div class="pm-v"><strong>{{ f.flaw|sym }}</strong></div>
+    <details class="pm-cell pm-finding" id="{{ finding_anchor(r.id, loop.index) }}" data-status="{{ f.status }}" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding {{ loop.index }}{% if f.id %} ({{ f.id }}){% endif %} · {{ m.chip(f.status, 'ok' if f.status == 'fixed' else 'watch') }}{% if not f.tests %} {{ m.chip('no test', 'breach') }}{% endif %}</span>
+        <span class="pm-v"><strong>{{ f.flaw|sym }}</strong></span></summary>
       <dl class="dl" style="margin-top:4px;">
         <dt>Root cause</dt><dd>{{ f.root_cause }}</dd>
         <dt>Fix</dt><dd>{{ f.fix }}</dd>
@@ -84,8 +106,9 @@
         {% if f.d_pnl is not none and f.bridge_rows %}<dt>C22 bridge</dt><dd class="src">row{{ 's' if f.bridge_rows|length > 1 else '' }} {{ f.bridge_rows|join(', ') }} · portfolio P&amp;L {% if f.d_pnl|abs < 500 %}unchanged{% else %}{{ f.d_pnl|usd_k }}{% endif %} · Sharpe {{ f.sharpe_from|fmt('.2f') }} → {{ f.sharpe_to|fmt('.2f') }}</dd>{% endif %}
         <dt>Pinned by</dt><dd>{% if f.tests %}{% for t in f.tests %}<code class="path">{{ t.split('/')[-1]|path }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}{% else %}no dedicated regression test (a gap){% endif %}</dd>
       </dl>
-    </div>
+    </details>
     {% endfor %}
+    </details>
   </article>
   {% endfor %}
 </div>
