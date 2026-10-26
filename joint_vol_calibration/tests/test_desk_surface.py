@@ -342,3 +342,22 @@ def test_a_pair_closer_than_seven_days_is_never_a_forward_period():
            {"label": "c", "T": 30 / 365, "atmf": 14.5}]
     fw = ds.forward_vols(pts)
     assert [(f["from"], f["to"]) for f in fw] == [("a", "c")]
+
+
+# ── P2.5: provenance of the committed chains ─────────────────────────────────
+
+def test_the_committed_sessions_are_yahoo_snapshots_without_a_quote_time_and_their_expiry_counts():
+    """The facts the page badge and the Expiries column print, on the committed
+    sessions: every chain is a Yahoo snapshot with no quote time, and the
+    sessions list 43 / 40 / 41 / 43 / 17 expiries."""
+    want = {"2026-03-24": 43, "2026-03-27": 40, "2026-05-29": 41, "2026-06-18": 43, "2026-10-16": 17}
+    for session, n in want.items():
+        sj = _inputs(session)[0]
+        assert sj["inputs"]["source"] == "yfinance"
+        assert sj["inputs"]["quote_time"] is None
+        assert sj["universe"]["n_expiries"] == n == len(sj["term_structure"])
+    sj = _inputs(KNOWN)[0]
+    assert (sj["inputs"]["chain_rows"], sj["universe"]["n_universe"]) == (6191, 2913)
+    arb = sj["arbitrage"]
+    assert max(arb["max_mid_violation_index_points"].values()) == pytest.approx(94.97, abs=0.005)
+    assert len(arb["largest_mid_violations"]) == 25

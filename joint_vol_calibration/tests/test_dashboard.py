@@ -2185,7 +2185,8 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert f"{vx['replicated']:.2f}" in text
     assert f"Cboe close {vx['official']['close']:.2f}" in text
     arb = json.loads((FIX / "surface" / SESSION / "surface.json").read_text())["arbitrage"]
-    atab = re.search(r'<table class="tbl dense" id="arb-table">(.*?)</table>', html, re.DOTALL).group(1)
+    # (P2.5: the long 'Constraint rows' heads wrap: the class gained wrap-head)
+    atab = re.search(r'<table class="tbl dense[^"]*" id="arb-table">(.*?)</table>', html, re.DOTALL).group(1)
     assert f"{arb['executable_violations']['C3_vertical_butterfly']:,}" in re.search(
         r"<td>Butterfly</td>(.*?)</tr>", atab, re.DOTALL).group(1)
     # one residual grid per model, of that model's out-of-sample quotes only
@@ -5083,3 +5084,69 @@ def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     legend = {it["name"] for it in spec["legend_items"]}
     assert {"Variance-swap vol (Cboe formula)", mk[0]["name"]} <= legend
     assert re.search(r'id="vix-markers">', html)
+
+
+def test_chain_badge_names_the_source_and_the_quote_time(dash):
+    """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
+    quote time; a Cboe-sourced chain prints 'Cboe' and its quote time."""
+    yahoo = {"inputs": {"source": "yfinance", "quote_time": None, "chain_rows": 6191},
+             "universe": {"n_universe": 2913, "n_expiries": 17}}
+    assert dash.chain_badge(yahoo, [43, 40, 41, 43]) == (
+        "Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913 scored · "
+        "17 expiries (other stored sessions 40–43)")
+    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-23T15:59:30-04:00", "chain_rows": 9000},
+            "universe": {"n_universe": 4000, "n_expiries": 30}}
+    txt = dash.chain_badge(cboe, [17])
+    assert txt.startswith("Chain: Cboe · quotes at 2026-10-23 15:59:30-04:00 · 9,000 rows → 4,000 scored")
+    assert txt.endswith("30 expiries (other stored session 17)")
+    assert "Yahoo" not in txt
+    assert "no quote time" not in txt
+
+
+def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifacts(dash, pages):
+    inputs = dash.artifacts.load_surface_desk_inputs(SHIPPED)
+    head = _surface_file("surface.json").parent.name
+    sj = next(s["surface"] for s in inputs if s["session"] == head)
+    others = [dash.session_expiries(s["surface"]) for s in inputs if s["session"] != head]
+    want = dash.chain_badge(sj, others)
+    for route in ("/surface", "/calibration"):
+        badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', pages[route], re.DOTALL)
+        if route == "/calibration" and dash.load_page2().get("session") != head:
+            continue                       # the fit's own session's chain, when it has a surface report
+        assert badge, route
+        text = re.sub(r"\s+", " ", _visible_text("<body>" + badge.group(1))).strip()
+        assert text == want, route
+        if sj["inputs"]["source"] == "yfinance" and not sj["inputs"].get("quote_time"):
+            assert "Yahoo" in text
+            assert "no quote time" in text
+    heads = _table_heads(pages["/surface"], "surface-history-table")
+    col = heads.index("Expiries")
+    rows = _table_rows(pages["/surface"], "surface-history-table")
+    by = {s["session"]: dash.session_expiries(s["surface"]) for s in inputs}
+    assert len(rows) == len(by)
+    for r in rows:
+        assert r[col] == str(by[r[0]]), r[0]
+
+
+def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(dash, pages):
+    html = pages["/surface"]
+    arb = json.loads(_surface_file("surface.json").read_text())["arbitrage"]
+    tile_m = re.search(r'id="arb-tile">(.*?)</div>\s*</div>', html, re.DOTALL)
+    tile = _visible_text("<body>" + tile_m.group(1))
+    top = max(arb["largest_mid_violations"], key=lambda v: v["shortfall_index_points"])
+    assert f"Largest mid violation {max(arb['max_mid_violation_index_points'].values()):.1f} idx pts" in tile
+    assert dash.usd_desk(top["shortfall_index_points"] * 100, signed=False) + " per contract" in tile
+    assert "constraint row" in tile
+    assert 'href="#largest-violations"' in html
+    rows = _table_rows(html, "largest-violations")
+    assert len(rows) == len(arb["largest_mid_violations"])
+    ordered = sorted(arb["largest_mid_violations"], key=lambda v: -v["shortfall_index_points"])
+    for r, v in zip(rows, ordered):
+        assert r[2] == f"{v['shortfall_index_points']:.2f}"
+        assert r[3] == dash.usd_desk(v["shortfall_index_points"] * 100, signed=False)
+        for lg in v["legs"]:
+            assert f"{lg['right']}{lg['strike']:.0f}" in r[1]
+            assert str(lg["expiry"])[:10] in r[1]
+    # the panel table counts constraint rows, and says so
+    assert _table_heads(html, "arb-table")[1:] == ["Constraint rows", "Violated at mids",
+                                                   "Violated at bid/ask"]

@@ -2850,12 +2850,19 @@ def calibration_extras(d: dict, cal: dict) -> None:
             for r in ds["rows"]]}
     # the ATM-skew term structure: the market's power law against Heston (#skew-term)
     d["skew_term"] = None
+    d["chain_badge"] = None
     try:
-        sk = skew_term_view(p, session, artifacts.load_surface_desk_inputs(DATA),
-                            artifacts.sigma_profile_refit(DATA, session))
+        desk_inputs = artifacts.load_surface_desk_inputs(DATA)
+        sk = skew_term_view(p, session, desk_inputs, artifacts.sigma_profile_refit(DATA, session))
     except artifacts.ArtifactError as e:
         _record_error(d, "ATM-skew term structure (surface/<session>/surface.json, diagnostics)", e)
-        sk = None
+        desk_inputs, sk = [], None
+    # the chain this fit's session was fitted on, as the surface report records it
+    own_chain = next((s for s in desk_inputs if s["session"] == session), None)
+    if own_chain:
+        d["chain_badge"] = chain_badge(own_chain["surface"], [
+            n for s in desk_inputs if s["session"] != session for n in [session_expiries(s["surface"])]
+            if n is not None])
     if sk:
         rv = d.get("rough_vs_heston")
         jr = rv.get("result") if isinstance(rv, dict) else None
@@ -4279,6 +4286,63 @@ def surface_state_line(cm: Sequence[dict], session: str | None, ref: str | None)
                     (f"{plural(age, 'session')} old" if age is not None else "age unknown"))}
 
 
+# what the stored chain is, as the page badge names it (surface.json inputs.source)
+CHAIN_SOURCES = {"yfinance": "Yahoo Finance close snapshot", "yahoo": "Yahoo Finance close snapshot",
+                 "cboe": "Cboe"}
+
+
+def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
+    """'Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913
+    scored · 17 expiries (other stored sessions 40–43)', from surface.json inputs
+    and universe: counts only, no cause is read into a thin session."""
+    inp = surface_json.get("inputs") or {}
+    uni = surface_json.get("universe") or {}
+    src = str(inp.get("source") or uni.get("source") or "").strip()
+    if not src:
+        return None
+    qt = inp.get("quote_time") or uni.get("quote_time")
+    parts = [f"Chain: {CHAIN_SOURCES.get(src.lower(), src)}",
+             f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+    rows, scored = _num(inp.get("chain_rows")), _num(uni.get("n_universe"))
+    if rows is not None and scored is not None:
+        parts.append(f"{_fmt(int(rows), ',')} rows → {_fmt(int(scored), ',')} scored")
+    n = _num(uni.get("n_expiries"))
+    if n is not None:
+        oth = sorted(int(x) for x in other_expiries)
+        rng = (f"{oth[0]}" if oth[0] == oth[-1] else f"{oth[0]}–{oth[-1]}") if oth else ""
+        parts.append(f"{int(n)} expiries" + (f" (other stored session{'s' if len(oth) > 1 else ''} {rng})"
+                                              if oth else ""))
+    return " · ".join(parts)
+
+
+def session_expiries(sj: dict) -> int | None:
+    """The listed expiries of a stored surface session (universe.n_expiries, else the term structure)."""
+    n = _num((sj.get("universe") or {}).get("n_expiries"))
+    return int(n) if n is not None else (len(sj.get("term_structure") or []) or None)
+
+
+def _weight(w: float) -> str:
+    return signed(w, ".0f") if abs(abs(w) - 1.0) < 1e-12 else signed(w, ".2f")
+
+
+def violation_view(v: dict) -> dict:
+    """One largest_mid_violations row: its constraint, its legs grouped by expiry
+    ('2027-03-31 +1 P6260 −1 P6265'), a short form ('2027-03-31 P 6260/6265'),
+    and the shortfall in index points and in dollars per SPX contract."""
+    legs = v.get("legs") or []
+    exps = list(dict.fromkeys(str(lg["expiry"])[:10] for lg in legs))
+    by = [f"{e} " + " ".join(f"{_weight(float(lg['weight']))} {lg['right']}{_fmt(float(lg['strike']), '.0f')}"
+                             for lg in legs if str(lg["expiry"])[:10] == e) for e in exps]
+    rights = "/".join(dict.fromkeys(str(lg["right"]) for lg in legs))
+    strikes = "/".join(dict.fromkeys(_fmt(float(lg["strike"]), ".0f") for lg in legs))
+    short = f"{'/'.join(exps)} {rights} {strikes}"
+    typ = str(v.get("type") or "")
+    sf = _num(v.get("shortfall_index_points"))
+    return {"type": typ, "label": typ.replace("_", " ", 1).replace("_", " "),
+            "constraint": ARB_LABELS.get(typ, typ), "legs": by, "short": short, "shortfall": sf,
+            "usd": sf * SPX_MULTIPLIER if sf is not None else None, "executable": bool(v.get("executable"))}
+
+
 def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
     """The headline session's constant-maturity grid against every earlier stored
     session (Surface #surface-change): per earlier session, newest first, its
@@ -4441,7 +4505,11 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["desk"] = desk_grid_view(listed, cm)
         d["state_tiles"] = surface_state_tiles(cm, listed)
         # against every earlier stored session, at constant maturity
-        cmp_ = surface_comparison(session, artifacts.load_surface_desk_inputs(DATA))
+        desk_inputs = artifacts.load_surface_desk_inputs(DATA)
+        d["chain_badge"] = chain_badge(sj, [n for s in desk_inputs if s["session"] != session
+                                            for n in [session_expiries(s["surface"])] if n is not None])
+        d["expiries_by_session"] = {s["session"]: session_expiries(s["surface"]) for s in desk_inputs}
+        cmp_ = surface_comparison(session, desk_inputs)
         if cmp_:
             d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
             d["charts"]["rr_term"] = rr_term_spec(cmp_)
@@ -4675,6 +4743,11 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["arb"] = {k: arb.get(k) for k in ("n_quotes", "n_quotes_in_executable_violation",
                                             "n_quotes_in_mid_violation", "constraint_set")}
         d["arb_repair"] = arb.get("repair") or {}
+        lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
+        d["largest_violations"] = sorted(lv, key=lambda x: -(x["shortfall"] or 0.0))
+        mx = [x for x in ((arb.get("max_mid_violation_index_points") or {}).values()) if _num(x) is not None]
+        d["arb_max_mid"] = max(mx) if mx else None
+        d["arb_mid_rows"] = sum(int(r["mid"]) for r in d["arb_rows"] if _num(r["mid"]) is not None)
         d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
                              for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
         d["fit_set"] = (surf.get("surface") or {}).get("fit_set") or {}
@@ -5437,7 +5510,7 @@ def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
     return {"canonical": canonical_url(route), "page_file": ROUTES[route], "route": route,
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
-            "cividis": CIVIDIS_11, "berlin": BERLIN_11, "s3_full": S3_FULL,
+            "cividis": CIVIDIS_11, "berlin": BERLIN_11, "s3_full": S3_FULL, "spx_multiplier": SPX_MULTIPLIER,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
             "font_preloads": FONT_PRELOADS, "chrome": load_chrome(), "page_title": {
                 r: label for r, label, *_ in NAV}.get(route, "Overview")}

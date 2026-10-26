@@ -12,6 +12,7 @@
     {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='short')|join(', ') }}</span>
     {% else %}<span class="nowrap">Quote-grade surface not yet generated</span><span class="sep">·</span><span class="nowrap">headline fit {{ d.calib_session|fmt }}</span>{% endif %}
   </div>
+  {{ m.chain_badge(d.chain_badge) }}
 </div>
 
 {% if s.state == 'ok' %}
@@ -28,7 +29,12 @@
   {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
   {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else '')) }}
   {% endif %}{% endif %}
-  {% if d.arb %}{{ m.kpi('Executable static arbitrage', d.arb.n_quotes_in_executable_violation|fmt(','), sub='of ' ~ (d.arb.n_quotes|fmt(',')) ~ ' quotes sit in a bid/ask-level violation; ' ~ (d.arb.n_quotes_in_mid_violation|fmt(',')) ~ ' at mids') }}{% endif %}
+  {% if d.arb %}{% set lv0 = (d.largest_violations or [none])[0] %}
+  <div class="kpi" id="arb-tile">
+    <div class="kpi-label">Executable static arbitrage</div>
+    <div class="kpi-value">{{ d.arb.n_quotes_in_executable_violation|fmt(',') }}<span class="unit">quotes</span></div>
+    <div class="kpi-sub">of {{ d.arb.n_quotes|fmt(',') }} quotes sit in a constraint row violated at bid/ask; {{ d.arb.n_quotes_in_mid_violation|fmt(',') }} at mids.{% if lv0 %} Largest mid violation <a href="#largest-violations">{{ d.arb_max_mid|fmt('.1f') }} idx pts</a> ({{ lv0.usd|usd_desk(false) }} per contract), {{ lv0.label }}, {{ lv0.short }}.{% endif %}</div>
+  </div>{% endif %}
 </div>
 
 {% if d.desk %}{% set g = d.desk %}
@@ -123,8 +129,8 @@
   {% call m.panel('arbitrage', 'Static arbitrage · screen and repair', 's4') %}
     {% if d.arb_rows %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Static-arbitrage screen (scrollable)">
-    <table class="tbl dense" id="arb-table"><caption>Constraint rows of the stored quotes ({{ d.arb.constraint_set.split(':')[0] if d.arb.constraint_set else 'CRW 2020' }})</caption>
-      <thead><tr><th scope="col">Constraint</th><th scope="col" class="num">Rows</th><th scope="col" class="num">At mids</th><th scope="col" class="num">At bid/ask</th></tr></thead>
+    <table class="tbl dense wrap-head" id="arb-table"><caption>Constraint rows of the stored quotes ({{ d.arb.constraint_set.split(':')[0] if d.arb.constraint_set else 'CRW 2020' }}): a row is one no-arbitrage inequality between quotes, so these count rows, not quotes ({{ d.arb.n_quotes|fmt(',') }} quotes)</caption>
+      <thead><tr><th scope="col">Constraint</th><th scope="col" class="num">Constraint rows</th><th scope="col" class="num">Violated at mids</th><th scope="col" class="num">Violated at bid/ask</th></tr></thead>
       <tbody>{% for r in d.arb_rows %}<tr><td>{{ r.label }}</td><td class="num">{{ r.rows|fmt(',') }}</td><td class="num">{{ r.mid|fmt(',') }}</td><td class="num{% if r.exec %} neg{% endif %}">{{ r.exec|fmt(',') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
@@ -134,6 +140,20 @@
     {% else %}<p class="note">No arbitrage screen in surface.json for this session.</p>{% endif %}
   {% endcall %}
 </div>
+
+{% if d.largest_violations %}
+<div class="g">
+  {% call m.panel('largest-violations-panel', 'Largest static-arbitrage violations at mids · legs and shortfall', 's12', 'of ' ~ (d.arb_mid_rows|fmt(',')) ~ ' rows violated') %}
+    <div class="tbl-wrap capped" tabindex="0" role="region" aria-label="Largest mid violations (scrollable)">
+    <table class="tbl dense wrap-head" id="largest-violations"><caption>The {{ d.largest_violations|length }} largest violations at mids (surface.json arbitrage.largest_mid_violations): legs as weight, put/call and strike per expiry; shortfall in index points and in dollars per SPX contract (×{{ spx_multiplier|fmt('.0f') }})</caption>
+      <thead><tr><th scope="col">Constraint</th><th scope="col">Legs</th><th scope="col" class="num">Shortfall (idx pts)</th><th scope="col" class="num">$ per contract</th><th scope="col">At bid/ask</th></tr></thead>
+      <tbody>{% for v in d.largest_violations %}<tr><td>{{ v.label }}</td><td>{% for lg in v.legs %}<span class="nowrap">{{ lg }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td><td class="num">{{ v.shortfall|fmt('.2f') }}</td><td class="num">{{ v.usd|usd_desk(false) }}</td><td>{{ 'executable' if v.executable else 'mids only' }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">A shortfall is the amount, in index points, by which the legs’ mid prices break the constraint’s inequality (for a vertical spread, a price below zero or above the strike width). “Executable”: the violation survives at the bid and the ask too. The table records which quotes break which constraint, not why.</p>
+  {% endcall %}
+</div>
+{% endif %}
 
 {% if d.vix_rows or d.strip %}
 <div class="g">
@@ -168,8 +188,8 @@
   {% if d.surface_history %}{% call m.panel('surface-history', 'Every session the surface report covers', 's7', (d.surface_history|length) ~ ' sessions') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Surface sessions (scrollable)">
     <table class="tbl dense wrap-head" id="surface-history-table"><caption>Median |z| in half-spreads (all scored quotes) by session and model; repair moves outside the bid–ask; the VIX replicated from the chain against the close; ATM vol / VIX by the replication's VIX-term interpolation and by the backtest's β estimator</caption>
-      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Quotes</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }}</th>{% endfor %}<th scope="col" class="num">Repair moves outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">VIX-term ATM / VIX</th>{% if d.beta_estimator %}<th scope="col" class="num">{{ 'β estimator ATM 30d / VIX'|sym }}</th>{% endif %}</tr></thead>
-      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td>{% for hm in d.history_models %}<td class="num">{{ r.m[hm.key].median_abs_hs|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
+      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Quotes</th><th scope="col" class="num">Expiries</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }}</th>{% endfor %}<th scope="col" class="num">Repair moves outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">VIX-term ATM / VIX</th>{% if d.beta_estimator %}<th scope="col" class="num">{{ 'β estimator ATM 30d / VIX'|sym }}</th>{% endif %}</tr></thead>
+      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td><td class="num">{{ (d.expiries_by_session or {}).get(r.session)|fmt }}</td>{% for hm in d.history_models %}<td class="num">{{ r.m[hm.key].median_abs_hs|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a statistic.</p>

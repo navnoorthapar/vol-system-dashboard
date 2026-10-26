@@ -14,6 +14,7 @@
     {% if d.model_version %}<span class="sep">·</span><span class="nowrap">model_version {{ d.model_version }}</span>{% endif %}
     {% if d.legacy %}<span class="sep">·</span><span class="chip chip-muted" title="Fitted before the C22 schema (calibration_is_legacy)">PRE-C22 FIT</span>{% endif %}
   </div>
+  {{ m.chain_badge(d.chain_badge) }}
 </div>
 
 {% if d.kappa is not none %}

@@ -136,3 +136,8 @@
       </table>
       </div>
 {%- endmacro %}
+
+{# where the page's option chain came from (app.chain_badge): a second badge line under the h1 #}
+{% macro chain_badge(text) -%}
+{% if text %}<div class="page-badge" id="chain-badge">{% for p in text.split(' · ') %}<span class="nowrap">{{ p }}</span>{% if not loop.last %}<span class="sep">·</span>{% endif %}{% endfor %}</div>{% endif %}
+{%- endmacro %}
