@@ -2412,8 +2412,37 @@ def _gated_history() -> list[dict]:
         out.append({"session": row["session"], "params": dict(c["params"]),
                     "rmse": _num(losses.get("spx_iv_rmse")), "oos": _num(losses.get("spx_oos_iv_rmse")),
                     "vix": _num(losses.get("vix_index_rmse")),
+                    "wing": _num(losses.get("spx_oos_put_wing_rmse")),
                     "pinned": list(c.get("pinned_params") or [])})
     return sorted(out, key=lambda r: r["session"])
+
+
+RANGE_NOTE = "a range across sessions, not a sampling interval"
+
+
+def session_range(values: Iterable[Any], spec: str = ".2f", what: str = "sessions") -> str | None:
+    """'5 sessions: 0.40–0.62' over the finite values (None with fewer than two)."""
+    xs = [float(x) for x in values if _num(x) is not None]
+    if len(xs) < 2:
+        return None
+    lo, hi = min(xs), max(xs)
+    signed_ = any(x < 0 for x in xs)
+    f = (lambda x: signed(x, spec)) if signed_ else (lambda x: _fmt(x, spec))
+    return f"{len(xs)} {what}: {f(lo)} to {f(hi)}" if signed_ else f"{len(xs)} {what}: {f(lo)}–{f(hi)}"
+
+
+def rank_text(value: Any, values: Iterable[Any], spec: str = ".2f", lower_is_better: bool = True,
+              what: str = "gated sessions") -> str | None:
+    """'worst of 5 gated sessions (1.28–2.96)': where ``value`` ranks among
+    ``values`` (which include it), best first, and their range."""
+    v = _num(value)
+    xs = [float(x) for x in values if _num(x) is not None]
+    if v is None or len(xs) < 2:
+        return None
+    better = sum(1 for x in xs if (x < v - 1e-12 if lower_is_better else x > v + 1e-12))
+    n, r = len(xs), min(better + 1, len(xs))
+    word = "best" if r == 1 else "worst" if r == n else ordinal(r)
+    return f"{word} of {n} {what} ({_fmt(min(xs), spec)}–{_fmt(max(xs), spec)})"
 
 
 def _bound_side(value: float, lo: float, hi: float) -> str | None:
@@ -2832,6 +2861,17 @@ def calibration_extras(d: dict, cal: dict) -> None:
                                                                            sf.get("vvix_market")) else None)
     d["sigma_profile_market"] = next((r["vvix_market"] for r in (own or {}).get("rows") or []
                                       if r["vvix_market"] is not None), None)
+    # where this fit ranks among the gated fits (lower error is better), one tile each:
+    # its own unrounded history row (the tiles' values are rounded for display)
+    own_h = next((h for h in hist if h["session"] == session), None)
+    d["fit_ranks"] = {key: (rank_text(own_h[key], [h[key] for h in hist]) if own_h else None)
+                      for key in ("rmse", "oos", "wing", "vix")}
+    gaps = [x["stored_fit"]["vvix_model"] - x["stored_fit"]["vvix_market"] for x in profiles
+            if None not in ((x.get("stored_fit") or {}).get("vvix_model"),
+                            (x.get("stored_fit") or {}).get("vvix_market"))]
+    d["fit_ranks"]["vvix"] = (rank_text(d["vvix"]["model"] - d["vvix"]["market"], gaps, ".0f",
+                                        what="diagnosed sessions, model − market")
+                              if d.get("vvix") else None)
     # Heston against rough Heston on every diagnosed session (summary.json):
     # the same anchors, residuals, VIX leg and out-of-sample quotes per session.
     try:
@@ -4249,11 +4289,26 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
             "any_extrap": n_xp > 0 or any(r["extrap"][k] for r in cm for k in keys)}
 
 
-def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict]) -> list[dict]:
-    """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
-    slope 1M → 1Y, all from the constant-maturity rows (never extrapolated)."""
+def _state_values(cm: Sequence[dict]) -> dict[str, float | None]:
     by = {r["label"]: r for r in cm}
     m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
+    return {"atmf": m1.get("atmf"), "rr25": m1.get("rr25"), "bf25": m1.get("bf25"),
+            "vs": m1.get("vs_minus_atmf"),
+            "slope": (y1["atmf"] - m1["atmf"]) if (m1.get("atmf") is not None and y1.get("atmf") is not None)
+            else None}
+
+
+def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
+                        all_cm: Sequence[Sequence[dict]] = ()) -> list[dict]:
+    """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
+    slope 1M → 1Y, all from the constant-maturity rows (never extrapolated),
+    each with its range over every stored session's grid (``all_cm``)."""
+    by = {r["label"]: r for r in cm}
+    m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
+    every = [_state_values(c) for c in all_cm]
+
+    def rng(key: str) -> str | None:
+        return session_range(e[key] for e in every)
     span = (f"{_fmt(listed[0]['T_days'], '.0f')}–{_fmt(listed[-1]['T_days'], '.0f')} d"
             if listed else "no listed expiries")
     where = (f"between {m1['lower']} and {m1['upper']}" if m1.get("available") and m1["lower"] != m1["upper"]
@@ -4261,16 +4316,16 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict]) -> list[dict
     slope = (y1["atmf"] - m1["atmf"]) if (m1.get("atmf") is not None and y1.get("atmf") is not None) else None
     return [
         {"label": "1M ATMF", "value": _fmt(m1.get("atmf"), ".2f"), "unit": "%",
-         "sub": f"SVI-cal at 30 days, {where}"},
+         "sub": f"SVI-cal at 30 days, {where}", "range": rng("atmf")},
         {"label": "1M RR25", "value": signed(m1.get("rr25"), ".2f"), "unit": "vol pts",
-         "sub": "25Δ call − 25Δ put; negative: puts over calls"},
+         "sub": "25Δ call − 25Δ put; negative: puts over calls", "range": rng("rr25")},
         {"label": "1M BF25", "value": signed(m1.get("bf25"), ".2f"), "unit": "vol pts",
-         "sub": "mean of the 25Δ wings − ATMF"},
+         "sub": "mean of the 25Δ wings − ATMF", "range": rng("bf25")},
         {"label": "1M VS − ATMF", "value": signed(m1.get("vs_minus_atmf"), ".2f"), "unit": "vol pts",
-         "sub": "variance-swap vol over ATMF: the skew premium"},
+         "sub": "variance-swap vol over ATMF: the skew premium", "range": rng("vs")},
         {"label": "ATMF slope 1M → 1Y", "value": signed(slope, ".2f"), "unit": "vol pts",
          "sub": (f"1Y {_fmt(y1.get('atmf'), '.2f')}% − 1M {_fmt(m1.get('atmf'), '.2f')}%"
-                 if slope is not None else f"1Y outside the listed {span}")},
+                 if slope is not None else f"1Y outside the listed {span}"), "range": rng("slope")},
     ]
 
 
@@ -4484,6 +4539,11 @@ def surface_extras(d: dict, surf: dict) -> None:
                             "oos": artifacts.residual_stats(res, m)} for m in models]
         d["score_source"] = "residuals.parquet"
     d["score_notes"] = list((surf.get("scorecard") or {}).get("notes") or [])
+    # each model's out-of-sample median |z| on every stored session (its scorecard.json)
+    oos_all = artifacts.surface_oos_by_session(DATA)
+    d["score_ranges"] = {m: session_range(r["median_abs_hs"] for r in oos_all if r["model"] == m)
+                         for m in models}
+    oos_by = {(r["session"], r["model"]): r["median_abs_hs"] for r in oos_all}
     # "same quotes" only when every model is scored on as many out-of-sample
     # quotes (the surfaces hold out alternate strikes; Heston holds out all but
     # its anchors, so their sets differ)
@@ -4503,13 +4563,14 @@ def surface_extras(d: dict, surf: dict) -> None:
         listed = desk_surface.delta_grid(sj, res, surf.get("vix"))
         cm = desk_surface.constant_maturity(listed)
         d["desk"] = desk_grid_view(listed, cm)
-        d["state_tiles"] = surface_state_tiles(cm, listed)
         # against every earlier stored session, at constant maturity
         desk_inputs = artifacts.load_surface_desk_inputs(DATA)
         d["chain_badge"] = chain_badge(sj, [n for s in desk_inputs if s["session"] != session
                                             for n in [session_expiries(s["surface"])] if n is not None])
         d["expiries_by_session"] = {s["session"]: session_expiries(s["surface"]) for s in desk_inputs}
         cmp_ = surface_comparison(session, desk_inputs)
+        every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
+        d["state_tiles"] = surface_state_tiles(cm, listed, every_cm)
         if cmp_:
             d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
             d["charts"]["rr_term"] = rr_term_spec(cmp_)
@@ -4834,7 +4895,11 @@ def surface_extras(d: dict, surf: dict) -> None:
                                  "vix_rep": _num(r.get("vix_replicated")),
                                  "vix_off": _num(r.get("vix_official")),
                                  "beta": _num(r.get("atm_over_vix_official")),
-                                 "m": {m: (r.get("models") or {}).get(m) or {} for m in mk}} for r in idx]
+                                 # the out-of-sample median |z| of the scorecard, as every headline
+                                 "oos": {m: oos_by.get((r["session"], m)) for m in mk}} for r in idx]
+        d["vix_gap_range"] = session_range(
+            (h["vix_rep"] - h["vix_off"]) for h in d["surface_history"]
+            if h["vix_rep"] is not None and h["vix_off"] is not None)
 
 
 def _clean_keep(d: dict) -> dict:

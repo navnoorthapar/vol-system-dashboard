@@ -5150,3 +5150,110 @@ def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(das
     # the panel table counts constraint rows, and says so
     assert _table_heads(html, "arb-table")[1:] == ["Constraint rows", "Violated at mids",
                                                    "Violated at bid/ask"]
+
+
+def _kpi_blocks(html: str, block_id: str) -> dict[str, str]:
+    """{label: the tile's markup} of one KPI strip."""
+    start = html.index(f'id="{block_id}"')
+    ends = [i for i in (html.find('<div class="kpis"', start + 1), html.find('<div class="g"', start))
+            if i > 0]
+    blk = html[start:min(ends)]
+    out = {}
+    for tile in re.split(r'(?=<div class="kpi"[ >])', blk)[1:]:
+        lab = re.search(r'<div class="kpi-label">(.*?)</div>', tile, re.DOTALL)
+        if lab:
+            out[_html_unescape(re.sub(r"<[^>]+>", "", lab.group(1))).strip()] = tile
+    return out
+
+
+def _range_span(tile: str) -> str | None:
+    m = re.search(r'<div class="kpi-ci kpi-range"[^>]*>(.*?)</div>', tile, re.DOTALL)
+    return _html_unescape(m.group(1)).strip() if m else None
+
+
+def test_surface_model_tiles_carry_their_range_over_every_stored_session(dash, pages):
+    """P2.6: every Surface tile of a per-session model metric shows that model's
+    out-of-sample median |z| over every stored session (each scorecard.json),
+    marked as a range across sessions."""
+    html = pages["/surface"]
+    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
+    tiles = _kpi_blocks(html, "surface-scores")
+    model_tiles = {k: v for k, v in tiles.items() if k.endswith("· median |z|")}
+    assert len(model_tiles) >= 4
+    score_rows = dash.load_surface()["score_rows"]
+    for label, tile in model_tiles.items():
+        key = next(r["key"] for r in score_rows if r["short"] + " · median |z|" == label)
+        xs = [r["median_abs_hs"] for r in oos if r["model"] == key]
+        span = _range_span(tile)
+        assert span == f"{len(xs)} sessions: {min(xs):.2f}–{max(xs):.2f} (out of sample)", label
+        assert "A range across sessions, not a sampling interval" in tile
+    for label, tile in _kpi_blocks(html, "surface-state").items():
+        assert "sessions:" in (_range_span(tile) or ""), label
+
+
+def test_calibration_fit_tiles_rank_this_fit_among_the_gated_fits(dash, pages):
+    """P2.6: each fit-quality tile says where this fit ranks among the gated
+    fits and their range (the OOS tile on 2026-10-16: 'worst of 5'), at the
+    site's one precision for vol-pt RMSE (.2f)."""
+    html = pages["/calibration"]
+    tiles = _kpi_blocks(html, "fit-quality")
+    hist = dash._gated_history()
+    d = dash.load_page2()
+    own = next(h for h in hist if h["session"] == d["session"])
+    for label, key in (("SPX IV RMSE", "rmse"), ("Out of sample", "oos"), ("Put wing OOS", "wing"),
+                       ("VIX index RMSE", "vix")):
+        xs = [h[key] for h in hist]
+        better = sum(1 for x in xs if x < own[key] - 1e-12)
+        word = "best" if better == 0 else "worst" if better == len(xs) - 1 else dash.ordinal(better + 1)
+        span = _range_span(tiles[label])
+        assert span == f"{word} of {len(xs)} gated sessions ({min(xs):.2f}–{max(xs):.2f})", label
+        value = re.search(r'<div class="kpi-value[^"]*">([^<]*)', tiles[label]).group(1)
+        assert value == f"{own[key]:.2f}", label
+    if max(h["oos"] for h in hist) == own["oos"]:
+        assert _range_span(tiles["Out of sample"]).startswith(f"worst of {len(hist)}")
+    if "VVIX model / market" in tiles and d.get("vvix"):
+        assert "diagnosed sessions" in (_range_span(tiles["VVIX model / market"]) or "")
+
+
+def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_page(dash, pages):
+    """P2.6: Calibration printed the Heston OOS RMSE as 2.955 where the Overview
+    and Model Risk print 2.96. Every page renders it, and the SVI-cal median |z|,
+    at one precision."""
+    _, cal = dash.load_headline_calibration()
+    heston = dash._cal_losses(cal)["spx_oos_iv_rmse"]
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    svi_m = next(m for m in sc["models"] if m["model"] == "svi_cal")
+    svi = svi_m["metrics"]["out_of_sample"]["median_abs_hs"]
+    for name, v, must in (("Heston OOS RMSE", heston, ("/", "/calibration", "/model-risk")),
+                          ("SVI-cal median |z|", svi, ("/", "/surface"))):
+        seen = {}
+        for route, html in pages.items():
+            text = _visible_text(html)
+            found = {f"{v:.{p}f}" for p in (2, 3, 4)
+                     if re.search(r"(?<![\d.])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
+            if found:
+                seen[route] = found
+        assert set(must) <= set(seen), (name, seen)
+        assert set().union(*seen.values()) == {f"{v:.2f}"}, (name, seen)
+
+
+def test_surface_history_heads_name_their_population(dash, pages):
+    heads = _table_heads(pages["/surface"], "surface-history-table")
+    models = [h for h in heads if "|z|" in h]
+    assert len(models) >= 4
+    assert all(h.endswith("|z|, out of sample") for h in models)
+    assert "Scored quotes" in heads
+    assert "Quotes" not in heads
+    cap = re.search(r'id="surface-history-table"><caption>(.*?)</caption>', pages["/surface"], re.DOTALL)
+    assert "out-of-sample quotes" in _html_unescape(cap.group(1))
+    assert "all scored quotes" not in _html_unescape(cap.group(1))
+    oos = dash.artifacts.surface_oos_by_session(SHIPPED)
+    rows = _table_rows(pages["/surface"], "surface-history-table")
+    history_models = dash.load_surface()["history_models"]
+    for r in rows:
+        for h, cell in zip(heads, r):
+            if "|z|" in h:
+                key = next(m["key"] for m in history_models if h.startswith(m["label"] + " "))
+                v = next((x["median_abs_hs"] for x in oos
+                          if x["session"] == r[0] and x["model"] == key), None)
+                assert cell == dash._fmt(v, ".2f"), (r[0], h)

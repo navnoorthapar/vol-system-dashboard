@@ -41,15 +41,16 @@
 </div>
 
 <h2 class="section-title">Fit quality</h2>
-<div class="kpis" style="margin-bottom:8px;">
+<div class="kpis" style="margin-bottom:8px;" id="fit-quality">
   {% set _sub = ('Not comparable: ' ~ d.n_spx_expiries ~ ' expiry, ' ~ (d.n_spx_options|fmt) ~ ' options') if d.spx_underidentified else ('in sample, ' ~ (d.n_spx_options|fmt) ~ ' anchors') %}
-  {{ m.kpi('SPX IV RMSE', d.spx_rmse|fmt('.3f'), unit='vol pts', sub=_sub) }}
-  {{ m.kpi('Out of sample', d.spx_oos_rmse|fmt('.3f'), unit='vol pts', sub=(d.n_oos|fmt(',')) ~ ' quotes, every expiry') }}
-  {{ m.kpi('Put wing OOS', d.spx_oos_wing_rmse|fmt('.3f'), unit='vol pts', sub='puts below the forward') }}
-  {{ m.kpi('VIX index RMSE', d.vix_index_rmse|fmt('.3f'), unit='index pts', sub=(d.n_vix_tenors|fmt) ~ ' tenors: ^VIX9D … ^VIX6M') }}
+  {% set fr = d.fit_ranks or {} %}
+  {{ m.kpi('SPX IV RMSE', d.spx_rmse|fmt('.2f'), unit='vol pts', sub=_sub, ci=fr.rmse, ci_kind='range') }}
+  {{ m.kpi('Out of sample', d.spx_oos_rmse|fmt('.2f'), unit='vol pts', sub=(d.n_oos|fmt(',')) ~ ' quotes, every expiry', ci=fr.oos, ci_kind='range') }}
+  {{ m.kpi('Put wing OOS', d.spx_oos_wing_rmse|fmt('.2f'), unit='vol pts', sub='puts below the forward', ci=fr.wing, ci_kind='range') }}
+  {{ m.kpi('VIX index RMSE', d.vix_index_rmse|fmt('.2f'), unit='index pts', sub=(d.n_vix_tenors|fmt) ~ ' tenors: ^VIX9D … ^VIX6M', ci=fr.vix, ci_kind='range') }}
   {% if d.vix_opt_disabled %}{{ m.kpi('VIX options', 'Not in objective', sub='weight w₃ = 0; no error is reported for a leg the fit did not use') }}{% else %}{{ m.kpi('VIX options RMSE', d.vix_opt_rmse|fmt('.2f'), unit='vol pts') }}{% endif %}
   {% set _opt = 'optimiser ' ~ (d.fit_time|fmt('.1f')) ~ ' s, ' ~ (d.n_evals|fmt(',')) ~ ' evaluations' %}
-  {% if d.vvix %}{{ m.kpi('VVIX model / market', (d.vvix.model|fmt('.0f')) ~ ' / ' ~ (d.vvix.market|fmt('.0f')), sub='model 30-day vol of VIX at this fit vs the ^VVIX close, index pts · ' ~ _opt) }}{% else %}{{ m.kpi('VVIX model / market', '—', sub='not yet generated: needs the calibration diagnostics of this fit · ' ~ _opt) }}{% endif %}
+  {% if d.vvix %}{{ m.kpi('VVIX model / market', (d.vvix.model|fmt('.0f')) ~ ' / ' ~ (d.vvix.market|fmt('.0f')), sub='model 30-day vol of VIX at this fit vs the ^VVIX close, index pts · ' ~ _opt, ci=fr.vvix, ci_kind='range') }}{% else %}{{ m.kpi('VVIX model / market', '—', sub='not yet generated: needs the calibration diagnostics of this fit · ' ~ _opt) }}{% endif %}
 </div>
 {% if d.spx_underidentified %}<p class="note"><span class="chip chip-watch">Not comparable</span> The SPX leg spans {{ d.n_spx_expiries }} expiry; its RMSE is low because there is little to fit.</p>{% endif %}
 

@@ -19,15 +19,16 @@
 {% set H = d.score_rows|selectattr('key', 'in', ['heston_v2', 'heston'])|first %}
 {% if d.state_tiles %}
 <div class="kpis" style="margin-bottom:8px;" id="surface-state" role="group" aria-label="Surface state: the SVI-cal surface at constant maturity">
-  {% for t in d.state_tiles %}{{ m.kpi(t.label, t.value, unit=t.unit, sub=t.sub) }}{% endfor %}
+  {% for t in d.state_tiles %}{{ m.kpi(t.label, t.value, unit=t.unit, sub=t.sub, ci=t.range, ci_kind='range') }}{% endfor %}
 </div>
 {% endif %}
 <div class="kpis" style="margin-bottom:8px;" id="surface-scores">
   {% for r in d.score_rows %}{% set o = r.oos %}
-  {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes') }}
+  {% set rg = (d.score_ranges or {}).get(r.key) %}
+  {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes', ci=(rg ~ ' (out of sample)') if rg else none, ci_kind='range') }}
   {% endfor %}
   {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
-  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else '')) }}
+  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else ''), ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
   {% endif %}{% endif %}
   {% if d.arb %}{% set lv0 = (d.largest_violations or [none])[0] %}
   <div class="kpi" id="arb-tile">
@@ -187,12 +188,12 @@
     <p class="note">SVI-cal surface, listed expiries; {{ d.session }} solid, the others grey, the session chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endcall %}{% endif %}
   {% if d.surface_history %}{% call m.panel('surface-history', 'Every session the surface report covers', 's7', (d.surface_history|length) ~ ' sessions') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Surface sessions (scrollable)">
-    <table class="tbl dense wrap-head" id="surface-history-table"><caption>Median |z| in half-spreads (all scored quotes) by session and model; repair moves outside the bid–ask; the VIX replicated from the chain against the close; ATM vol / VIX by the replication's VIX-term interpolation and by the backtest's β estimator</caption>
-      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Quotes</th><th scope="col" class="num">Expiries</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }}</th>{% endfor %}<th scope="col" class="num">Repair moves outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">VIX-term ATM / VIX</th>{% if d.beta_estimator %}<th scope="col" class="num">{{ 'β estimator ATM 30d / VIX'|sym }}</th>{% endif %}</tr></thead>
-      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td><td class="num">{{ (d.expiries_by_session or {}).get(r.session)|fmt }}</td>{% for hm in d.history_models %}<td class="num">{{ r.m[hm.key].median_abs_hs|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
+    <table class="tbl dense wrap-head" id="surface-history-table"><caption>Median |z| in half-spreads of each model’s out-of-sample quotes (its scorecard.json, the population every headline on the site uses) by session; repair moves outside the bid–ask; the VIX replicated from the chain against the close; ATM vol / VIX by the replication's VIX-term interpolation and by the backtest's β estimator</caption>
+      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Scored quotes</th><th scope="col" class="num">Expiries</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }} |z|, out of sample</th>{% endfor %}<th scope="col" class="num">Repair moves outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">VIX-term ATM / VIX</th>{% if d.beta_estimator %}<th scope="col" class="num">{{ 'β estimator ATM 30d / VIX'|sym }}</th>{% endif %}</tr></thead>
+      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td><td class="num">{{ (d.expiries_by_session or {}).get(r.session)|fmt }}</td>{% for hm in d.history_models %}<td class="num">{{ r.oos[hm.key]|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a statistic.</p>
+    <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a sampling interval. The tiles at the top give each model’s range over these sessions (dashed rule).</p>
   {% endcall %}{% endif %}
 </div>
 {% endif %}
