@@ -52,7 +52,7 @@
     <div id="dg-cm" role="tabpanel" hidden>
       {{ m.desk_grid(g, g.cm, 'delta-grid-cm', 'Constant maturity (1M = 30 days … 1Y = 365): each pillar interpolated linearly in total variance at fixed delta between the two bracketing listed expiries named under the tenor, never extrapolated beyond the listed expiries; F, half-spread and quotes belong to listed expiries; ' ~ conv, 'Delta grid, constant maturity') }}
     </div>
-    <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, g.vol_lo|fmt('.1f') ~ '%', g.vol_hi|fmt('.1f') ~ '%', 'vol cells') }}<span class="sep">·</span>{{ m.ramp_bar(berlin, '−', '+', 'RR / BF, each about 0 (RR ±' ~ (g.rr_lim|fmt('.1f')) ~ ', BF ±' ~ (g.bf_lim|fmt('.1f')) ~ ' vol pts)') }}</div>
+    <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, g.vol_lo|fmt('.1f') ~ '%', g.vol_hi|fmt('.1f') ~ '%', 'vol cells') }}<span class="sep">·</span>{{ m.ramp_bar(diverge, '−' ~ (g.rr_lim|fmt('.1f')), '+' ~ (g.rr_lim|fmt('.1f')), 'vol pts RR25 / RR10 (BF ±' ~ (g.bf_lim|fmt('.1f')) ~ '), dark at 0') }}</div>
     <p class="note" id="delta-grid-units">Vols and VS vol in %; RR, BF, VS − ATMF and median half-spread in vol pts; ATM skew = ∂σ/∂ln(K/F) at the forward, in vol pts per 0.1 of ln-moneyness. {% if g.any_extrap %}{{ g.extrap_tag }}: the pillar’s strike lies outside its expiry’s quoted ln(K/F) range (at constant maturity: outside either bracketing expiry’s), so the fitted wing is extrapolated there; the RR / BF that would use it shows “—”. {{ g.n_extrap }} of {{ g.listed|length * 5 }} listed pillars.{% else %}Every pillar of this session lies inside its expiry’s quoted ln(K/F) range: no wing is extrapolated.{% endif %} VS vol is the Cboe-formula variance-swap vol of the same expiry’s quotes (the strip below); VS − ATMF is taken against this grid’s ATMF, not the strip’s quote ATM.</p>
   {% endcall %}
 </div>
@@ -83,7 +83,7 @@
 <div class="g pair">
   {% call m.panel('iv-heat', 'Implied vol by expiry and ln(K/F) · market mids', 's7', d.n_quotes|fmt(',') ~ ' quotes') %}
     {{ m.heatmap(d.iv_heat, 'iv-heatmap', 'Median mid implied vol (%) of the quotes in each expiry (rows) and log-moneyness bucket (columns; heads are bucket midpoints)', 'Expiry',
-                 m.ramp_bar(cividis, d.iv_heat.lo|fmt('.1f') ~ '%', d.iv_heat.hi|fmt('.1f') ~ '%', 'cividis')) }}
+                 m.ramp_bar(cividis, d.iv_heat.lo|fmt('.1f') ~ '%', d.iv_heat.hi|fmt('.1f') ~ '%', 'mid implied vol')) }}
     {% if d.surface3d %}
     <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
     <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the implied-vol grid above (same numbers as the table)" hidden></div>
@@ -127,7 +127,7 @@
     {% for r in d.resid_heat %}
     <div id="resid-{{ r.key }}" role="tabpanel" class="grow-col"{% if not loop.first %} hidden{% endif %}>
       {{ m.heatmap(r, 'resid-heat-' ~ r.key, r.label ~ ': median (model − mid) / half-spread of its ' ~ (r.n|fmt(',')) ~ ' out-of-sample quotes by expiry and log-moneyness bucket (column heads are bucket midpoints); |value| ≤ 1 is inside the spread', 'Expiry',
-                   m.ramp_bar(berlin, '−5', '+5', 'model below mid ← 0 → model above mid'), grow=True) }}
+                   m.ramp_bar(diverge, '−5', '+5', 'half-spreads · model below mid ◀ 0 ▶ model above mid'), grow=True) }}
     </div>
     {% endfor %}
   {% endcall %}
@@ -202,7 +202,7 @@
   {% call m.panel('model-surface', 'Model surface · Heston headline fit (not market data)', 's8', d.calib_session) %}
     {% if d.model_heat %}
     {{ m.heatmap(d.model_heat, 'model-heatmap', 'Heston implied vol (%) by maturity (rows) and ln(K/F) (columns), headline fit ' ~ (d.calib_session or ''), 'T',
-                 m.ramp_bar(cividis, d.model_heat.lo|fmt('.1f') ~ '%', d.model_heat.hi|fmt('.1f') ~ '%', 'cividis')) }}
+                 m.ramp_bar(cividis, d.model_heat.lo|fmt('.1f') ~ '%', d.model_heat.hi|fmt('.1f') ~ '%', 'Heston implied vol')) }}
     {% if d.surface3d %}
     <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
     <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the model implied-vol grid above (same numbers as the table)" hidden></div>

@@ -405,8 +405,10 @@ code { overflow-wrap: anywhere; }
 .heat td.flag:focus-visible { box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 6px var(--breach); }
 .heat td.empty { background: var(--bg); color: var(--text3); }
 .heat td.flag { box-shadow: inset 0 0 0 2px var(--breach); font-weight: 600; }
-.heat .vv { display: block; }
-.heat .z { display: block; font-size: 9.5px; }
+/* a cell's first line is its value (the vomma flag: the P&L ratio, 12 px), the
+   second a secondary one; no text in a heatmap is under 10.5 px (it was 9.5) */
+.heat .vv { display: block; font-size: 12px; }
+.heat .z { display: block; font-size: 10.5px; }
 .heat-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 18px; }
 /* the quote inspector's keyboard readout under a smile (desk.js initQuotes): room
    for a quote's lines at desk width, so a hover does not move the page below */

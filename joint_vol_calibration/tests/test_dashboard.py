@@ -1143,7 +1143,7 @@ def test_heatmap_text_contrasts_with_every_cell(dash):
     assert "opacity:0.7" not in html
     # unstable is flagged by outline + text marker, not by a fill alone
     n_flagged = len(re.findall(r'class="node unstable flag"', html))
-    assert n_flagged == len(re.findall(r'<div class="z">⚠ ', html)) == d["n_unstable"]
+    assert n_flagged == len(re.findall(r'<div class="vv">⚠ ', html)) == d["n_unstable"]
     assert '<span class="sym">(∂²V/∂S∂σ)</span>' in html       # σ is not upper-cased to Σ
     # cell details are reachable by keyboard and screen reader, not only a title tooltip
     assert ' title="' not in "".join(re.findall(r'<td class="node[^>]*>', html))
@@ -1906,9 +1906,10 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     gdf = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
     gdf = gdf.assign(lm_key=gdf["log_moneyness"].round(4)).sort_values(["T_days", "lm_key"])
     g_html = pages["/risk"]
-    vv = re.findall(r'<div class="vv">([^<]+)</div>', g_html)
+    # (P4.5: the flag metric is the cell's first line, vomma the second)
+    vv = re.findall(r'<div class="z">([^<]+)</div>', g_html)
     assert vv == [f"{x:,.0f}".replace("-", m) for x in gdf["vomma"]]
-    zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="z">([^<]+)</div>', g_html)]
+    zz = [re.sub(r"^⚠ ", "", z).strip() for z in re.findall(r'<div class="vv">([^<]+)</div>', g_html)]
     assert zz == [f"{abs(x):.2f}" for x in gdf["vomma_pnl_ratio"]]
 
 
@@ -1922,7 +1923,7 @@ def test_a_vomma_just_below_a_half_is_rounded_once(dash, synth):
     gdf.loc[gdf.index[0], "vomma"] = 3267.496
     save_greeks_surface(gdf, path)
     html = dash.app.test_client().get("/risk").get_data(as_text=True)
-    vv = re.findall(r'<div class="vv">([^<]+)</div>', html)
+    vv = re.findall(r'<div class="z">([^<]+)</div>', html)           # vomma: the second line
     assert "3,267" in vv
     assert "3,268" not in vv
 
@@ -6806,3 +6807,104 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
                     for fill in ("pos-fill", "neg-fill"):
                         assert _delta_e76(hex_of[c], tok[fill]) >= 25, (route, cid, s["name"], c, fill)
     assert min(seen["model"] / 20, seen["market"] / 8, seen["tenor"] / 2, seen["pnl"] / 3) >= 1, seen
+
+
+def _on_ramp(colour: str, stops: tuple[str, ...] | list[str], tol: float = 2.5) -> bool:
+    """Whether '#rrggbb' lies on the piecewise-linear sRGB ramp through ``stops``."""
+    def rgb(h: str) -> np.ndarray:
+        h = h.lstrip("#")
+        return np.array([int(h[i:i + 2], 16) for i in (0, 2, 4)], dtype=float)
+    p = rgb(colour)
+    for a, b in itertools.pairwise(stops):
+        a_, b_ = rgb(a), rgb(b)
+        d = b_ - a_
+        t = 0.0 if not d.any() else float(np.clip(np.dot(p - a_, d) / np.dot(d, d), 0, 1))
+        if np.linalg.norm(a_ + t * d - p) <= tol:
+            return True
+    return False
+
+
+def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site_browser):
+    """P4.5: only the P&L heatmaps (Risk scenario grid, Research monthly returns)
+    take the P&L ramp; every other heatmap cell is on cividis or the diverging
+    ramp (DIVERGE_11, whose ends are neither a P&L hue nor breach red: berlin's
+    blue end sat next to --pos), the vomma flag view on cividis (it ran to the
+    loss orange); every ramp key has a number at both ends; no visible text in a
+    heatmap is under 10.5 px (the vomma cells' second line was 9.5 px)."""
+    pnl_tables = {"scenario-grid", "monthly-grid"}
+    n = collections.Counter()
+    for route, html in pages.items():
+        for tid, body in re.findall(r'<table class="heat" id="([^"]+)"[^>]*>(.*?)</table>', html, re.DOTALL):
+            for bg in re.findall(r'<td[^>]*style="background:(#[0-9a-fA-F]{6})', body):
+                if tid in pnl_tables or tid.startswith("scenario"):
+                    n["pnl"] += 1
+                    assert _on_ramp(bg, dash.PNL_DIV), (route, tid, bg)
+                else:
+                    n["other"] += 1
+                    assert _on_ramp(bg, dash.CIVIDIS_11) or _on_ramp(bg, dash.DIVERGE_11), (route, tid, bg)
+        # each ramp key: a number before and after each bar
+        for key in re.findall(r'<div class="ramp[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL):
+            bars = r'<span>([^<]*)</span><span class="ramp-bar"[^>]*></span><span>([^<]*)</span>'
+            for lo, hi in re.findall(bars, key):
+                n["keys"] += 1
+                assert re.search(r"\d", lo), (route, lo, hi)
+                assert re.search(r"\d", hi), (route, lo, hi)
+    for e in dash.DIVERGE_11[:2] + dash.DIVERGE_11[-2:]:
+        for token in ("pos", "pos-fill", "neg", "neg-fill", "breach"):
+            assert _delta_e76(e, _tokens()[token]) >= 25, (e, token)
+    assert min(n["pnl"], n["other"] / 10, n["keys"] / 8) >= 1, n
+    sb = site_browser
+    ctx, page = _page(sb, 320, 900)
+    small = []
+    for name in ("risk.html", "surface.html", "research.html"):
+        page.goto(sb["base"] + name, wait_until="load")
+        small += page.evaluate("""(name) => [...document.querySelectorAll('table.heat *')]
+          .filter(e => [...e.childNodes].some(t => t.nodeType === 3 && t.textContent.trim())
+            && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden'
+            && !e.closest('.sr-only') && parseFloat(getComputedStyle(e).fontSize) < 10.5)
+          .map(e => name + ' ' + e.tagName + '.' + e.className + ' ' + getComputedStyle(e).fontSize)""", name)
+    ctx.close()
+    assert not small, small[:10]
+
+
+def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
+    """P4.5: a tooltip's head carries the x value with its unit and the index
+    name where there is one ('VIX3M · 93 d', not '93.0'), and every row its unit:
+    Overview #chart-ts at the 93-day point, Calibration #chart-oos (vol pts) and
+    Surface #chart-strip (%)."""
+    sb = site_browser
+    tip_js = """(id) => { const t = [...document.querySelectorAll('#' + id + ' > div')]
+        .filter(d => d.style.position === 'absolute' && getComputedStyle(d).display !== 'none'
+          && d.innerText.trim()); return t.length ? t[0].innerText : null; }"""
+    ctx, page = _page(sb)
+
+    def hover(name, cid, js_point):
+        page.goto(sb["base"] + name, wait_until="load")
+        page.locator("#" + cid).scroll_into_view_if_needed()
+        _wait_for_chart(page, cid)
+        pt = page.evaluate(js_point, cid)
+        page.mouse.move(pt["x"], pt["y"])
+        page.wait_for_timeout(300)
+        return page.evaluate(tip_js, cid)
+
+    at_point = """(cid) => { const c = Desk.charts[cid], s = c.spec.series[0];
+        const p = s.data.find(d => d[0] === 93) || s.data[Math.floor(s.data.length / 2)];
+        const px = c.chart.convertToPixel({seriesIndex: 0}, p), r = c.el.getBoundingClientRect();
+        return {x: r.left + px[0], y: r.top + px[1]}; }"""
+    tip = hover("index.html", "chart-ts", at_point)
+    assert tip, "no tooltip on #chart-ts"
+    assert "VIX3M · 93 d" in tip, tip
+    assert re.search(r"\d\.\d+ vol pts", tip), tip
+    mid = """(cid) => { const c = Desk.charts[cid], r = c.el.getBoundingClientRect();
+        const g = c.chart.getModel().getComponent('grid', 0).coordinateSystem.getRect();
+        return {x: r.left + g.x + g.width * 0.4, y: r.top + g.y + g.height * 0.6}; }"""
+    tip = hover("calibration.html", "chart-oos", mid)
+    assert tip, "no tooltip on #chart-oos"
+    assert re.search(r"\d\.\d+ vol pts", tip), tip
+    tip = hover("surface.html", "chart-strip", mid)
+    assert tip, "no tooltip on #chart-strip"
+    assert re.search(r"\d+ d", tip.split("\n")[0]), tip
+    rows = [x for x in tip.split("\n")[1:] if x.strip()]
+    assert rows, tip
+    assert all(re.search(r"\d%$", x.strip()) for x in rows), rows
+    ctx.close()

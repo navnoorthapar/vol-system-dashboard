@@ -388,17 +388,36 @@
     }
   }
 
+  // The tooltip grammar (P4.5): the head carries the x value with its unit and,
+  // where the spec names the point (x.tipNames: a VIX-family tenor), its name
+  // ('VIX3M \u00b7 93 d'); every row carries its unit ('3.89 vol pts'). A unit is the
+  // axis's own (a.unit), else the one its name ends with in parentheses.
+  var UNIT_WORDS = { '%': '%', 'vol pts': ' vol pts', 'index pts': ' index pts', 'index points': ' index points',
+    'half-spreads': ' half-spreads', 'calendar days': ' d', 'days': ' d', '$000s': ' $000s', 'bp': ' bp' };
+  function axisUnit(a) {
+    if (a.unit) return a.unit;
+    var m = /\(([^()]*)\)\s*$/.exec(a.name || '');
+    return m && UNIT_WORDS[m[1].trim()] !== undefined ? UNIT_WORDS[m[1].trim()] : (/\bdays\b/i.test(a.name || '') ? ' d' : '');
+  }
+  Desk.axisUnit = axisUnit;
   function tooltipFor(spec, T) {
     var y = spec.y || {}, x = spec.x || {};
     var fy = function (v, s) {
       var a = (s && s.y2) ? (spec.y2 || y) : y;
-      return num(v, { digits: a.tipDigits === undefined ? (a.digits === undefined ? 2 : a.digits + 1) : a.tipDigits, signed: a.signed, unit: a.unit || '', prefix: a.prefix });
+      return num(v, { digits: a.tipDigits === undefined ? (a.digits === undefined ? 2 : a.digits + 1) : a.tipDigits, signed: a.signed, unit: axisUnit(a), prefix: a.prefix });
     };
-    var fx = function (v) { return x.type === 'value' ? num(v, { digits: x.tipDigits === undefined ? (x.digits === undefined ? 2 : x.digits + 1) : x.tipDigits, signed: x.signed, unit: x.unit || '' }) : String(v); };
+    var xu = axisUnit(x);
+    var fx = function (v) {
+      if (x.type !== 'value') return String(v);
+      // days are whole: '93 d', not '93.0'
+      var dg = x.tipDigits !== undefined ? x.tipDigits : (xu === ' d' && Math.round(v) === Number(v) ? 0 : (x.digits === undefined ? 2 : x.digits + 1));
+      var name = x.tipNames && x.tipNames[String(Math.round(v * 1e6) / 1e6)];
+      return (name ? name + ' \u00b7 ' : '') + num(v, { digits: dg, signed: x.signed, unit: xu });
+    };
     var specSeries = {};
     (spec.series || []).forEach(function (s) { specSeries[s.name] = s; });
     var hz = !!spec.horizontal;          // a horizontal chart's points are [value, category]
-    var tipNum = function (v) { return num(v, { digits: y.tipDigits === undefined ? 2 : y.tipDigits, signed: true, unit: y.unit || '' }); };
+    var tipNum = function (v) { return num(v, { digits: y.tipDigits === undefined ? 2 : y.tipDigits, signed: true, unit: axisUnit(y) }); };
     return {
       trigger: spec.tooltip || 'axis', confine: true,
       axisPointer: { type: spec.tooltip === 'item' ? 'none' : (hz ? 'shadow' : 'line'), lineStyle: { color: T.line2 } },

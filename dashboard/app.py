@@ -87,6 +87,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     _HEAT_POS,
     BERLIN_11,
     CIVIDIS_11,
+    DIVERGE_11,
     MINUS,
     SPX_MULTIPLIER,
     _fmt,
@@ -1654,10 +1655,13 @@ def load_page3() -> dict[str, Any]:
                     continue
                 z = float(r.vomma_zscore)
                 m = float(r.flag_metric)
-                # colour = the flag metric relative to its threshold (full at the threshold)
-                shade = (2.0 * min(m / flag_thr, 1.0)
-                         if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr else z)
-                bg = _vomma_color(shade)
+                # cividis on the flag metric from 0 to its threshold (the ratio, or the
+                # |z| fallback to 2); the breach outline and ⚠ mark a flagged node.
+                # (It was neutral → orange, the P&L loss hue, and blue for negative z.)
+                if d["unstable_rule"]["kind"] == "pnl_ratio" and flag_thr:
+                    bg = seq_colour(min(m, flag_thr), 0.0, flag_thr) or "#1c2127"
+                else:
+                    bg = seq_colour(min(abs(z), 2.0), 0.0, 2.0) or "#1c2127"
                 cells.append({        # unrounded: each value is formatted once, in the template
                     "vomma": float(r.vomma), "z": z, "metric": m,
                     "iv": float(r.iv) * 100, "K": round(float(r.K), 0),
@@ -3251,7 +3255,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     if vix:
         d["charts"]["vix"] = charts.xy(
             "chart-vixleg", "VIX index term structure: market and the Heston fit",
-            x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
+            x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True,
+               "tipNames": {str(v): k for k, v in VIX_FAMILY_DAYS.items()}},
             y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
             series=[{"name": "Cboe index (market)", "type": "line", "role": "cboe", "color": "headline",
                      "symbol": "circle",
@@ -3569,7 +3574,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
                                    f"P&L {_usd(usd, signed=True)} per SPX contract")
                 return c
             return {
-                "cols": [signed(s, ".0f", "%") for s in spots],
+                "cols": [signed(s, ".0f", "%") for s in spots], "lim": lim,
                 "rows": [{"label": signed(v, ".0f", " vol pts"), "cells": [one(s, v) for s in spots]}
                          for v in vols]}
 
@@ -4858,7 +4863,8 @@ def load_overview() -> dict[str, Any]:
                            "data": [[t, v] for t, v in zip(o["days"], o["values"])]})
         d["charts"]["ts"] = charts.xy(
             "chart-ts", f"VIX index term structure on {d.get('ts_date')}, with earlier sessions",
-            x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
+            x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True,
+               "tipNames": {str(v): k for k, v in VIX_FAMILY_DAYS.items()}},
             y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
             series=series, tooltip="item",
             csv=f"vix_term_structure_{d.get('ts_date')}.csv", grid={"top": 12},
@@ -6546,7 +6552,8 @@ def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
     return {"canonical": canonical_url(route), "page_file": ROUTES[route], "route": route,
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
-            "cividis": CIVIDIS_11, "berlin": BERLIN_11, "s3_full": S3_FULL, "spx_multiplier": SPX_MULTIPLIER,
+            "cividis": CIVIDIS_11, "berlin": BERLIN_11,
+            "diverge": DIVERGE_11, "s3_full": S3_FULL, "spx_multiplier": SPX_MULTIPLIER,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
             "font_preloads": FONT_PRELOADS, "chrome": load_chrome(), "page_title": {
                 r: label for r, label, *_ in NAV}.get(route, "Overview")}

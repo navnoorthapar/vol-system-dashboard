@@ -102,7 +102,7 @@
 
 <div class="g pair">
   {% call m.panel('monthly', 'Monthly returns', 's7', 'against the prior month-end NAV') %}
-    {% if d.monthly %}{{ m.heatmap(d.monthly, 'monthly-grid', 'Portfolio return (%) by month; the last column is the calendar year', 'Year', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain', 'blue gain, orange loss; the sign is in every cell'), grow=True) }}{% endif %}
+    {% if d.monthly %}{{ m.heatmap(d.monthly, 'monthly-grid', 'Portfolio return (%) by month; the last column is the calendar year', 'Year', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], '−' ~ ((d.monthly.lim * 100)|fmt('.1f')) ~ '%', '+' ~ ((d.monthly.lim * 100)|fmt('.1f')) ~ '%', 'monthly return · orange loss, blue gain; the sign is in every cell'), grow=True) }}{% endif %}
   {% endcall %}
   {% call m.panel('annual', 'Annual return and half-year Sharpe', 's5') %}
     {% if d.charts.annual %}{{ m.chart(d.charts.annual, 'h180 grow') }}{% endif %}

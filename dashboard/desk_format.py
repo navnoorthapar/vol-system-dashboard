@@ -34,6 +34,13 @@ CIVIDIS_11 = ("#00224E", "#083370", "#35456C", "#4F576C", "#666970", "#7D7C78",
               "#948E77", "#AEA371", "#C8B866", "#E5CF52", "#FEE838")
 BERLIN_11 = ("#9EB0FF", "#60A5DF", "#3280A6", "#20526A", "#112732", "#190C09",
              "#371000", "#5F1F0A", "#964A36", "#CA7B71", "#FFADAD")
+# The diverging ramp of every signed heatmap that is not P&L (residual z, RR / BF,
+# vanna, delta), dark at zero: violet below, teal above. Berlin's blue end
+# (#9EB0FF) sat next to --pos and its red end next to --breach; these ends are
+# neither a P&L hue (blue gain, orange loss) nor breach red. P&L heatmaps alone
+# use the P&L ramp (app.PNL_DIV).
+DIVERGE_11 = ("#d4a0ff", "#a687f0", "#7f63c8", "#574393", "#33295a", "#1c2127",
+              "#1d3d3a", "#22605a", "#2b867c", "#45ad9f", "#7fd3c4")
 
 
 def _num(x: Any) -> float | None:
@@ -260,11 +267,11 @@ def seq_colour(value: Any, lo: float, hi: float) -> str | None:
 
 
 def div_colour(value: Any, limit: float) -> str | None:
-    """Berlin colour of a signed value, symmetric on [−limit, +limit], dark at 0."""
+    """DIVERGE_11 colour of a signed value, symmetric on [−limit, +limit], dark at 0."""
     x = _num(value)
     if x is None or limit <= 0:
         return None
-    return ramp(BERLIN_11, 0.5 + 0.5 * max(-1.0, min(1.0, x / limit)))
+    return ramp(DIVERGE_11, 0.5 + 0.5 * max(-1.0, min(1.0, x / limit)))
 
 
 # Greeks heatmap: the vomma P&L ratio from 0 to its flag threshold, on the

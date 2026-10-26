@@ -58,7 +58,7 @@
     <div id="grid-vomma" role="tabpanel" aria-labelledby="tab-vomma">
       <div class="heat-wrap" tabindex="0" role="region" aria-labelledby="heatmap-title">
         <table class="heat" id="vomma-heatmap" data-readout="vomma-readout">
-          <caption id="heatmap-title">Vomma by maturity and log-moneyness <span class="sym">ln(K/F)</span>, with the {{ metric_lower }} below each value; ⚠ marks {{ rule_short }}; empty cells have no stored Greeks.</caption>
+          <caption id="heatmap-title">The {{ metric_lower }} by maturity and log-moneyness <span class="sym">ln(K/F)</span>, with Black–Scholes vomma under each value; ⚠ marks {{ rule_short }}; empty cells have no stored Greeks.</caption>
           <thead><tr><th scope="col">T</th>{% for col in d.heatmap_cols %}<th scope="col">{{ col }}</th>{% endfor %}</tr></thead>
           <tbody>
           {% for row in d.heatmap_rows %}
@@ -66,8 +66,9 @@
             {% for cell in row.cells %}
               {% if cell.empty %}<td class="empty" data-detail="T {{ row.T }}d · ln(K/F) {{ d.heatmap_cols[loop.index0] }}: no Greeks — {{ cell.reason or 'not stored' }}"><span aria-hidden="true">·</span><span class="sr-only">no data{% if cell.reason %}: {{ cell.reason }}{% endif %}</span></td>
               {% else %}<td class="node{% if cell.unstable %} unstable flag{% endif %}" style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="T {{ row.T }}d · ln(K/F) {{ cell.lm|fmt('+.4f') }} · K {{ cell.K|fmt(',.0f') }} · IV {{ cell.iv|fmt('.1f')|u('%') }} · vomma {{ cell.vomma|fmt(',.1f') }} · {{ metric_name }} {{ cell.metric|fmt('.3f') }} · z {{ cell.z|fmt('+.2f') }}">
-                <div class="vv">{{ cell.vomma|fmt(",.0f") }}</div>
-                <div class="z">{% if cell.unstable %}⚠ {% endif %}{% if ur.kind == 'pnl_ratio' %}{{ cell.metric|fmt(".2f") }}{% else %}z {{ cell.z|fmt("+.1f") }}{% endif %}</div>
+                {# the flag metric first (12 px), vomma under it #}
+                <div class="vv">{% if cell.unstable %}⚠ {% endif %}{% if ur.kind == 'pnl_ratio' %}{{ cell.metric|fmt(".2f") }}{% else %}z {{ cell.z|fmt("+.1f") }}{% endif %}</div>
+                <div class="z">{{ cell.vomma|fmt(",.0f") }}</div>
                 <span class="sr-only">K {{ cell.K|fmt(',.0f') }}, IV {{ cell.iv|fmt('.1f')|u('%') }}</span>
               </td>{% endif %}
             {% endfor %}
@@ -77,14 +78,15 @@
         </table>
       </div>
       <p class="heat-readout" id="vomma-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its strike, IV and z-score.</p>
-      <p class="note">Black–Scholes vomma (∂²V/∂σ², per unit index, per (1.00 vol)²); below it the {{ metric_lower }}{% if ur.kind == 'pnl_ratio' %}, the second-order share of a vol move's P&amp;L with Δσ the surface's per-maturity shock; shading runs from 0 to the {{ ur.threshold|fmt('.2f') }} threshold{% endif %}. Outlined cells marked ⚠ exceed it (the surface's own rule).
+      <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, '0', (ur.threshold|fmt('.2f')) if ur.kind == 'pnl_ratio' and ur.threshold is not none else '2', metric_lower ~ ' (the threshold at the top); ⚠ outlined above it') }}</div>
+      <p class="note">Each cell: the {{ metric_lower }} on top{% if ur.kind == 'pnl_ratio' %}, the second-order share of a vol move's P&amp;L with Δσ the surface's per-maturity shock; shading (cividis) runs from 0 to the {{ ur.threshold|fmt('.2f') }} threshold{% else %}; shading (cividis) runs from 0 to 2{% endif %}; under it, Black–Scholes vomma (∂²V/∂σ², per unit index, per (1.00 vol)²). Outlined cells marked ⚠ exceed the threshold (the surface's own rule).
       {% if d.unstable_by_maturity %}Unstable nodes by maturity: {% for t, n in d.unstable_by_maturity|dictsort %}{{ t }}d {{ n }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}</p>
     </div>
     {% for g in d.greek_grids %}
     {# hidden until its tab is chosen: hiding it after first paint shifted the page (no-JS shows every grid) #}
     <div id="grid-{{ g.key }}" role="tabpanel" aria-labelledby="tab-{{ g.key }}" hidden>
       {{ m.heatmap(g, 'heat-' ~ g.key, g.label ~ ' by maturity (rows) and ln(K/F) (columns), ' ~ g.unit, 'T',
-                   m.ramp_bar(cividis if g.scale == 'seq' else berlin, g.lo|fmt(g.fmt) if g.scale == 'seq' else ('−' ~ (g.lim|fmt('.3g'))), g.hi|fmt(g.fmt) if g.scale == 'seq' else ('+' ~ (g.lim|fmt('.3g'))), 'cividis' if g.scale == 'seq' else 'diverging, dark at zero')) }}
+                   m.ramp_bar(cividis if g.scale == 'seq' else diverge, g.lo|fmt(g.fmt) if g.scale == 'seq' else ('−' ~ (g.lim|fmt('.3g'))), g.hi|fmt(g.fmt) if g.scale == 'seq' else ('+' ~ (g.lim|fmt('.3g'))), g.unit if g.scale == 'seq' else g.unit ~ ', dark at zero')) }}
     </div>
     {% endfor %}
   {% endcall %}
@@ -117,7 +119,7 @@
       <button class="btn" type="button" data-units-for="scenario-units" data-show="alt" aria-pressed="false">$ per SPX contract</button>
     </div>
     <div class="units grow-col" id="scenario-units">
-    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows): index points per straddle on one unit of the index, or dollars per SPX contract (× 100) with the units buttons', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain'), grow=True) }}
+    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows): index points per straddle on one unit of the index, or dollars per SPX contract (× 100) with the units buttons', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], '−' ~ (d.scenario_heat.lim|fmt(',.0f')), '+' ~ (d.scenario_heat.lim|fmt(',.0f')), 'index points per straddle · orange loss, blue gain'), grow=True) }}
     <p class="note">{{ (sc.provenance or {}).get('book', 'Reference book') }}; as of {{ (sc.provenance or {}).get('as_of_date', '—') }}{% if sc.dynamics_shown %}; {{ sc.dynamics_shown|replace('_', '-') }} dynamics shown{% if sc.dynamics_all|length > 1 %} (the file also holds {{ sc.dynamics_all|reject('equalto', sc.dynamics_shown)|join(', ')|replace('_', '-') }}){% endif %}{% endif %}. P&amp;L in {{ (sc.provenance or {}).get('units', 'index points per unit book') }}.</p>
     {% for x in d.scenario_more %}
     {% call m.method(x.dynamics|replace('_', '-')|capitalize ~ ' dynamics: the same book and shocks') %}
