@@ -5161,9 +5161,15 @@ def test_vix_terms_table_prints_each_index_terms_and_its_gap_split(dash, pages):
     n_split = 0
     for r in rows:
         ix = vix["indices"][r[0]]
-        m = ix[ix["headline_method"] or "cboe_rules"]
-        assert r[1] == f"{days(m['near']['days'])} / {days(m['next']['days'])}", r
-        assert r[2] == dash._fmt(m["near_weight"], ".3f"), r
+        m = ix.get(ix.get("headline_method") or "cboe_rules") or {}
+        # an index the chain cannot replicate may record no terms at all ("fewer
+        # than two usable terms"): the row then prints a dash, as the page does
+        if m.get("near") and m.get("next"):
+            assert r[1] == f"{days(m['near']['days'])} / {days(m['next']['days'])}", r
+        else:
+            assert ix.get("replicated") is None, r
+            assert r[1] == "—", r
+        assert r[2] == dash._fmt(m.get("near_weight"), ".3f"), r
         ga = ix.get("gap_attribution") or {}
         if ix.get("replicated") is None or not ga.get("available"):
             assert r[3] == r[4] == "—", r
