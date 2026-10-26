@@ -18,7 +18,7 @@
 {% set H = d.score_rows|selectattr('key', 'in', ['heston_v2', 'heston'])|first %}
 <div class="kpis" style="margin-bottom:8px;" id="surface-scores">
   {% for r in d.score_rows %}{% set o = r.oos %}
-  {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vp · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes') }}
+  {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes') }}
   {% endfor %}
   {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
   {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else '')) }}
@@ -49,8 +49,8 @@
   {% call m.panel('scorecard', 'Model scorecard · ' ~ ('same quotes, same metric' if d.same_quotes else 'each model’s out-of-sample quotes, same metric'), 's7', 'source: ' ~ d.score_source) %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model scorecard (scrollable)">
     <table class="tbl dense wrap-head" id="scorecard-table">
-      <caption>Out-of-sample quotes of each model (the quotes it was not fitted to); |z| = |model − mid| in half-spreads</caption>
-      <thead><tr><th scope="col">Model</th><th scope="col" class="num">Params</th><th scope="col" class="num">Fitted to</th><th scope="col" class="num">Scored</th><th scope="col" class="num">Median |z|</th><th scope="col" class="num">Inside</th><th scope="col" class="num">Within 2</th><th scope="col" class="num">RMSE vp</th><th scope="col" class="num">Bias vp</th><th scope="col" class="num">Dense-grid arb. (fly / cal)</th></tr></thead>
+      <caption>Out-of-sample quotes of each model (the quotes it was not fitted to); |z| = |model − mid| in half-spreads; RMSE and bias (mean of model − mid) in vol pts</caption>
+      <thead><tr><th scope="col">Model</th><th scope="col" class="num">Params</th><th scope="col" class="num">Fitted to</th><th scope="col" class="num">Scored</th><th scope="col" class="num">Median |z|</th><th scope="col" class="num">Inside</th><th scope="col" class="num">Within 2</th><th scope="col" class="num">RMSE</th><th scope="col" class="num">Bias</th><th scope="col" class="num">Dense-grid arb. (fly / cal)</th></tr></thead>
       <tbody>{% for r in d.score_rows %}{% set o = r.oos %}<tr{% if r.key in ('heston_v2', 'heston') %} class="em"{% endif %}><td class="nowrap">{{ r.label }}</td><td class="num">{{ r.n_params|fmt }}</td><td class="num">{{ r.n_in_sample|fmt(',') }}</td><td class="num">{{ o.n|fmt(',') }}</td><td class="num">{{ o.median_abs_hs|fmt('.2f') }}</td><td class="num">{{ o.inside_spread_pct|fmt('.1f')|u('%') }}</td><td class="num">{{ o.within_2hs_pct|fmt('.1f')|u('%') }}</td><td class="num">{{ o.rmse_vp|fmt('.2f') }}</td><td class="num">{{ o.mean_error_vp|signed('.2f') }}</td><td class="num">{% if r.dense %}{{ r.dense.butterfly_violations|fmt(',') }} / {{ r.dense.calendar_violations|fmt(',') }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
@@ -96,7 +96,7 @@
   {% call m.panel('vix-replication', 'VIX family replicated from the same chain', 's5', 'Cboe VIX methodology') %}
     {% if d.vix_rows %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Replicated VIX indices (scrollable)">
-    <table class="tbl dense" id="vix-rep-table"><caption>Replicated index against the Cboe close (index points)</caption>
+    <table class="tbl dense" id="vix-rep-table"><caption>Replicated index against the Cboe close (index points); gap = replicated − Cboe close</caption>
       <thead><tr><th scope="col">Index</th><th scope="col" class="num">Replicated</th><th scope="col" class="num">Cboe close</th><th scope="col" class="num">Gap</th></tr></thead>
       <tbody>{% for r in d.vix_rows %}<tr><td>{{ r.ticker }}</td><td class="num">{{ r.replicated|fmt('.2f') }}</td><td class="num">{{ r.official|fmt('.2f') }}</td><td class="num">{{ r.gap|signed('.2f') }}</td></tr>{% endfor %}</tbody>
     </table>

@@ -2286,7 +2286,7 @@ def load_page4() -> dict[str, Any]:
     d["improvements"] = [
         {"step": "1", "name": "Disable VIX options leg",
          "what": "JOINT_W3 = 0.0 (was 0.2). Attributed at the time to the Heston CIR density; "
-                 "C22 traced the 37.14 vp to a broken VIX put pricer, spot-VIX vegas and a "
+                 "C22 traced the 37.14 vol pts to a broken VIX put pricer, spot-VIX vegas and a "
                  "stale chain, so it was not evidence about the model.",
          "before": "VIX-options leg in the objective with a broken pricer",
          "after":  "SPX + VIX index objective; VIX-options leg off (too few sessions of quotes)."},
@@ -3919,7 +3919,7 @@ def surface_extras(d: dict, surf: dict) -> None:
                              "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
             colour=lambda v: seq_colour(v, lo, hi),
             detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
-                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vp"), used=used),
+                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vol pts"), used=used),
         "compact": True}
     d["iv_heat"]["n"] = sum(c["n"] for r in d["iv_heat"]["rows"] for c in r["cells"])
     pts = []
@@ -4015,7 +4015,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             ["ln(K/F)", "Quotes#", "Bid#", "Mid#", "Ask#"] + [model_short(m) + "#" for m in overlay],
             rows_e)})
     hs_by_exp = mkt.groupby("expiry")["half_spread_vp"].median()
-    slice_tbl = charts.table("Quotes per expiry", ["Expiry", "Days#", "Quotes#", "Median half-spread (vp)#"],
+    slice_tbl = charts.table("Quotes per expiry",
+                             ["Expiry", "Days#", "Quotes#", "Median half-spread (vol pts)#"],
                              [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
                                _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]])
     slice_tbl["groups"] = groups
@@ -4163,8 +4164,9 @@ def surface_extras(d: dict, surf: dict) -> None:
                 tooltip="axis", csv=f"varswap_strip_{session}.csv",
                 describe=("The single-term variance-swap vol of every stored expiry against its ATM vol; "
                           "the gap is the skew premium."),
-                table=charts.table("Variance-swap strip",
-                                   ["Expiry", "Days#", "Var-swap vol#", "ATM vol#", "Var-swap − ATM (vp)#",
+                table=charts.table("Variance-swap strip (vols in %; var-swap − ATM in vol pts)",
+                                   ["Expiry", "Days#", "Var-swap vol#", "ATM vol#",
+                                    "Var-swap − ATM (vol pts)#",
                                     "ATM / var-swap#", "Strikes#"],
                                    [[r["expiry"], _fmt(r["days"], ".0f"), _fmt(r["vs"], ".2f"),
                                      _fmt(r["atm"], ".2f"), signed(r["diff"], ".2f"), _fmt(r["ratio"], ".3f"),

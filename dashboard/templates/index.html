@@ -45,7 +45,7 @@
       <p class="note">Rule inputs on {{ r.date }}{% if r.headline_differs %} — the latest session in the market database; the {{ d.regime_date }} label above was written from data not yet in it{% endif %}:</p>
       <dl class="dl">
         <dt>rv₂₀</dt><dd>{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f")|u('%') }}</dd>
-        <dt>VIX</dt><dd>{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f")|u('%') }}</dd>
+        <dt>VIX</dt><dd>{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f") }}</dd>
         <dt>VVIX</dt><dd>{{ r.vvix|fmt(".2f") }}</dd>
         <dt>R2 gate</dt><dd>{{ r.gate|fmt(".2f") }} (rolling 252-day 80th percentile of VVIX)</dd>
         <dt>Rule gives</dt><dd>R{{ r.label }}{% if r.stored is not none %}; stored label for {{ r.date }}: R{{ r.stored }}{% if r.stored != r.label %} <span class="lvl-warn">(differs)</span>{% endif %}{% endif %}</dd>
@@ -80,7 +80,7 @@
     </div>
     {% endif %}
     <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
-      {{ m.kpi('VIX', d.pdv_vix|fmt('.2f'), unit='%') }}
+      {{ m.kpi('VIX', d.pdv_vix|fmt('.2f'), sub='index level') }}
       {{ m.kpi('PDV forecast', d.pdv_forecast|fmt('.2f'), unit='%', sub=('next-day |r|, annualised' if d.pdv_horizon == 1 else 'next ' ~ d.pdv_horizon ~ '-day realised')) }}
       {{ m.kpi('VIX − PDV', d.pdv_spread|signed('.2f'), unit='vol pts', tone=d.pdv_spread|tone) }}
     </div>

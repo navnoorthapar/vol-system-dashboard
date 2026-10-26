@@ -4383,3 +4383,78 @@ def test_overview_pdv_forecast_discloses_its_rank_on_both_losses(dash, pages):
     assert f"({bw['start']} → {bw['end']})" in text
     # the link target exists on the Research page
     assert 'id="forecast"' in pages["/research"]
+
+
+_VIX_FAMILY = r"(?:VIX|VIX9D|VIX3M|VIX6M|VVIX)"
+
+
+def unit_lint(html: str) -> list[str]:
+    """The site's unit house style, as a lint of one rendered page.
+
+    * 'vp' never appears in what a reader sees: the page text, the heatmap
+      readouts (data-detail), labels and titles, and the chart specs' visible
+      strings (axis names, units, series, the tables behind the charts); code
+      elements are excluded (an artifact field such as rmse_vp is a name).
+    * A VIX-family level (VIX, VIX9D, VIX3M, VIX6M, VVIX) is an index level,
+      never a '%': a KPI tile with that label and a '%' unit span, a dt/dd pair,
+      or the level followed by '%' in the text.
+    """
+    import html as _h
+    out = []
+    body = re.sub(r"<(style|noscript)\b.*?</\1>", " ", html, flags=re.DOTALL)
+    specs = re.findall(r'<script type="application/json"[^>]*>(.*?)</script>', body, re.DOTALL)
+    body = re.sub(r"<script\b.*?</script>", " ", body, flags=re.DOTALL)
+    body = re.sub(r"<code\b.*?</code>", " ", body, flags=re.DOTALL)
+    attrs = " ".join(_h.unescape(v) for v in re.findall(
+        r'(?:data-detail|data-detail-alt|aria-label|title)="([^"]*)"', body))
+    text = _h.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)))
+    for src, s in (("text", text), ("attribute", attrs)):
+        out += [f"'vp' in {src}: …{s[max(0, m.start() - 40):m.end() + 5]}…"
+                for m in re.finditer(r"\bvp\b", s)]
+    for raw in specs:
+        spec = json.loads(_h.unescape(raw))
+        vis = [spec.get("title", ""), spec.get("describe", "")]
+        for ax in ("x", "y", "y2"):
+            a = spec.get(ax) or {}
+            vis += [a.get("name", ""), a.get("unit", ""), a.get("tickUnit", ""), a.get("label", "")]
+        vis += [s_.get("name", "") for s_ in spec.get("series") or []]
+        tbl = spec.get("table") or {}
+        vis += [tbl.get("caption", "")] + [c.get("label", "") for c in tbl.get("columns") or []]
+        out += [f"'vp' in chart {spec.get('id')}: {v}" for v in vis if re.search(r"\bvp\b", str(v))]
+    lv = re.findall(rf'<div class="kpi-label">\s*({_VIX_FAMILY})\s*</div>\s*<div class="kpi-value[^"]*">[^<]*'
+                    r'<span class="unit">\s*%', body)
+    out += [f"KPI {x} in %" for x in lv]
+    out += [f"{x} in % ({y})"
+            for x, y in re.findall(rf"<dt>\s*({_VIX_FAMILY})\s*</dt>\s*<dd>([^<]*%)\s*</dd>", body)]
+    out += [f"{m.group(0)!r}" for m in re.finditer(
+        rf"(?<![\w/])({_VIX_FAMILY})\b[ :=]*[+−-]?\d[\d,]*(?:\.\d+)?\s*%", text)]
+    return out
+
+
+def test_unit_house_style_on_every_page(pages):
+    """P1.6: VIX-family levels are index levels, never '%' (the Overview printed
+    'VIX 19.45 %'); vol differences and errors are 'vol pts' and 'vp' is never
+    shown (the Surface KPIs read 'RMSE 0.48 vp', Calibration 'Lifting error
+    (vp)', the Risk scenario rows '−5 vp'). Every page passes the lint."""
+    for route, html in pages.items():
+        assert unit_lint(html) == [], route
+
+
+def test_unit_lint_catches_a_seeded_offender(pages):
+    """The lint fails on each kind of offender seeded into a page that passes."""
+    html = pages["/"]
+    assert unit_lint(html) == []
+    seeds = {
+        "kpi": html.replace("</main>", '<div class="kpi"><div class="kpi-label">VVIX</div>'
+                                       '<div class="kpi-value">109.70<span class="unit">%</span></div>'
+                                       '</div></main>'),
+        "text": html.replace("</main>", "<p>RMSE 0.48 vp on the held-out quotes</p></main>"),
+        "detail": html.replace("</main>",
+                               '<table><tr><td data-detail="half-spread 0.6 vp">x</td></tr></table></main>'),
+        "dl": html.replace("</main>", "<dl><dt>VIX9D</dt><dd>18.20%</dd></dl></main>"),
+        "prose": html.replace("</main>", "<p>with VIX3M 21.3% on the day</p></main>"),
+    }
+    for kind, seeded in seeds.items():
+        assert unit_lint(seeded), kind
+    # names in code elements are not units
+    assert unit_lint(html.replace("</main>", "<p><code>rmse_vp</code> and <code>vp</code></p></main>")) == []
