@@ -3266,6 +3266,48 @@ def _page(sb, width=1440, height=900):
     return ctx, ctx.new_page()
 
 
+_CHART_DRAWN_JS = """([id, ms]) => new Promise((resolve, reject) => {
+  const t0 = Date.now();
+  (function poll() {
+    if (window.Desk && Desk.charts[id] && document.fonts.status === 'loaded') return resolve(true);
+    if (Date.now() - t0 > ms) return reject(new Error('chart ' + id + ' not drawn in ' + ms + ' ms'));
+    setTimeout(poll, 50);
+  })();
+})"""
+
+
+def _wait_for_chart(page, chart_id: str) -> None:
+    """Wait until desk.js has drawn ``chart_id`` with the web fonts loaded.
+
+    Not page.wait_for_function: when its predicate is not already true, Playwright
+    polls it by evaluating the string in the page, which the pages' CSP
+    (script-src 'self', no 'unsafe-eval') refuses, so a chart drawn a moment late
+    (by the IntersectionObserver) failed the test with an EvalError. A function
+    passed to page.evaluate is not evaluated from a string in the page."""
+    page.evaluate(_CHART_DRAWN_JS, [chart_id, BROWSER_TIMEOUT_MS])
+
+
+def test_browser_tests_never_poll_a_string_predicate():
+    """FINAL-3: the waterfall and period-label tests waited with
+    page.wait_for_function on a string, which fails with an EvalError under the
+    pages' CSP whenever the chart is not drawn at the first check (a full-suite
+    run failed so). Browser tests wait with _wait_for_chart."""
+    call = "wait_for_function" + "("
+    offenders = [f"{f.name}:{i}" for f in sorted(Path(__file__).parent.glob("test_*.py"))
+                 for i, line in enumerate(f.read_text().splitlines(), 1) if call in line]
+    assert not offenders, offenders
+
+
+def _a_slice_expiry(sb) -> str:
+    """An expiry of the frozen Surface page's smile tabs, read from the page: the
+    daily bot replaces the session and so its expiries (a pinned date passed on
+    the committed data and failed in the simulated next session)."""
+    exps = re.findall(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"',
+                      (sb["site"] / "surface.html").read_text())
+    assert len(exps) >= 2, exps
+    return exps[len(exps) // 2]
+
+
 def test_browser_panel_deep_links_land_on_their_panel(site_browser):
     """UI-1: desk.js rewrote '#scorecard' to '#exp=…&model=…' before the browser
     scrolled, so every panel link on Surface and Risk (the Overview's first key
@@ -3277,7 +3319,8 @@ def test_browser_panel_deep_links_land_on_their_panel(site_browser):
         h = f.read_text()
         links |= set(re.findall(r'href="([a-z\-]+\.html#[a-z][^"&]*)"', h))
         links |= {f"{f.name}#{pid}" for pid in re.findall(r'data-copy-link="([^"]+)"', h)}
-    links |= {"surface.html#scorecard&exp=2026-12-18", "risk.html#scenario&greek=vega"}
+    exp = _a_slice_expiry(sb)
+    links |= {f"surface.html#scorecard&exp={exp}", "risk.html#scenario&greek=vega"}
     ctx, page = _page(sb)
     bad = []
     for href in sorted(links):
@@ -3293,9 +3336,9 @@ def test_browser_panel_deep_links_land_on_their_panel(site_browser):
     assert not bad, bad
     page.goto(sb["base"] + "surface.html", wait_until="load")
     assert page.url.endswith("/surface.html")                   # a plain load keeps its URL
-    page.goto(sb["base"] + "surface.html#exp=2026-12-18", wait_until="load")
+    page.goto(sb["base"] + f"surface.html#exp={exp}", wait_until="load")
     page.click("[data-copy-link='scorecard']")
-    assert page.url.endswith("#scorecard&exp=2026-12-18")
+    assert page.url.endswith(f"#scorecard&exp={exp}")
     ctx.close()
 
 
@@ -3331,10 +3374,11 @@ def test_browser_slice_is_drawn_once_and_tables_follow_the_tab(site_browser):
     assert st["failed"], st
     assert not st["btn3d"], st
     assert "surface3d" not in st["notes"], st
-    page.click("[data-chart-filter] [data-value='2026-12-18']")
+    exp = _a_slice_expiry(sb)
+    page.click(f"[data-chart-filter] [data-value='{exp}']")
     shown = page.evaluate("[...document.querySelectorAll('#chart-slices-data [data-group]')]"
                           ".filter(g => !g.hidden).map(g => g.dataset.group)")
-    assert shown == ["2026-12-18"]
+    assert shown == [exp]
     ctx.close()
 
 
@@ -3612,8 +3656,7 @@ def test_browser_waterfall_step_names_are_never_truncated(site_browser):
         ctx, page = _page(sb, width, 900)
         try:
             page.goto(sb["base"] + "corrections.html", wait_until="load")
-            page.wait_for_function("window.Desk && Desk.charts['chart-waterfall'] "
-                                   "&& document.fonts.status === 'loaded'")
+            _wait_for_chart(page, "chart-waterfall")
             page.wait_for_timeout(200)
             st = page.evaluate(_WATERFALL_LABELS_JS)
             assert st["overflow"] != "truncate", width
@@ -3666,8 +3709,7 @@ def test_browser_newest_period_of_the_annual_and_half_year_bars_is_labelled(site
             page.goto(sb["base"] + "research.html", wait_until="load")
             for cid in ("chart-annual", "chart-halfyear"):
                 page.evaluate(f"document.getElementById('{cid}').scrollIntoView()")
-                page.wait_for_function(f"window.Desk && Desk.charts['{cid}'] "
-                                       "&& document.fonts.status === 'loaded'")
+                _wait_for_chart(page, cid)
                 page.wait_for_timeout(200)
                 st = page.evaluate(_X_LABELS_JS, cid)
                 texts = [d["text"].replace("\n", " ") for d in st["drawn"]]
