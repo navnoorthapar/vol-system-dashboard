@@ -268,6 +268,28 @@
     return L;
   }
 
+  // -- category labels under a vertical chart's bars that name periods (x.fit:
+  //    the annual return's '2025 YTD', the half-year Sharpe's '2025-H1 (partial)') --
+  // A label wider than its band wraps at its spaces; where even the widest line
+  // does not fit its band, every step-th label is drawn counting back from the
+  // last, so the newest period (a partial one) is always labelled in full. No
+  // label overlaps another or is cut.
+  var LABEL_GAP = 6;
+  function xLabelLayout(spec, T, width, grid) {
+    var cats = ((spec.x && spec.x.categories) || spec.xs || []).map(String);
+    var font = LABEL_SIZE + 'px ' + T.mono;
+    var band = (width - grid.left - grid.right) / Math.max(1, cats.length);
+    var lines = cats.map(function (c) {
+      return textWidth(c, font) + LABEL_GAP <= band ? [c] : wrapWords(c, band - LABEL_GAP, font);
+    });
+    var widest = Math.max.apply(null, lines.map(function (l) {
+      return Math.max.apply(null, l.map(function (x) { return textWidth(x, font); }));
+    }));
+    return { band: band, lines: lines, text: lines.map(function (l) { return l.join('\n'); }),
+             step: Math.max(1, Math.ceil((widest + LABEL_GAP) / band)), widest: widest,
+             most: Math.max.apply(null, lines.map(function (l) { return l.length; })) };
+  }
+
   function buildOption(spec, T, filter, width, height, out) {
     var opt = {
       animation: false, backgroundColor: 'transparent',
@@ -280,6 +302,15 @@
       series: (spec.series || []).map(function (s, i) { return buildSeries(s, spec, T, i); }),
     };
     if (spec.y2) { var a2 = axis(spec.y2, T, false, spec); a2.splitLine = { show: false }; opt.yAxis.push(a2); }
+    if (!spec.horizontal && spec.x && spec.x.fit && width) {
+      var X = xLabelLayout(spec, T, width, opt.grid), last = X.lines.length - 1, extra = (X.most - 1) * LABEL_LINE;
+      Object.assign(opt.xAxis.axisLabel, {
+        hideOverlap: false, fontSize: LABEL_SIZE, lineHeight: LABEL_LINE,
+        interval: function (i) { return (last - i) % X.step === 0; },
+        formatter: function (v, i) { return X.text[i] !== undefined ? X.text[i] : v; } });
+      opt.grid.bottom += extra; opt.xAxis.nameGap += extra;
+      if (out) out.xLabels = X;
+    }
     if (spec.horizontal) {
       var t = opt.xAxis; opt.xAxis = opt.yAxis[0]; opt.yAxis = [t];
       opt.xAxis.axisLine = { show: true, lineStyle: { color: T.line2 } }; opt.yAxis[0].inverse = true;
@@ -428,7 +459,7 @@
       t = setTimeout(function () {
         Object.keys(Desk.charts).forEach(function (k) {
           var c = Desk.charts[k];
-          if (c.spec && c.spec.labelShare) render(c.el); else c.chart.resize();    // label widths follow the width
+          if (c.spec && (c.spec.labelShare || (c.spec.x && c.spec.x.fit))) render(c.el); else c.chart.resize();    // label layout follows the width
         });
       }, 120);
     });

@@ -492,6 +492,8 @@ dialog.keys .dl { font-size: 12px; }
    is not read twice beside the column header. */
 @container (max-width: 640px) {
   .tbl.cards, .tbl.cards tbody, .tbl.cards tr { display: block; }
+  /* a table-caption in a block table is boxed at min-content width (a word a line) */
+  .tbl.cards > caption { display: block; }
   .tbl.cards thead { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .tbl.cards tr { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; margin: 0 0 8px; }
   .tbl.cards tr:last-child { margin-bottom: 0; }

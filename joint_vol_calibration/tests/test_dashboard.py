@@ -3559,6 +3559,36 @@ def test_browser_text_tables_become_labelled_cards_on_a_phone(site_browser):
             ctx.close()
 
 
+_CARD_CAPTIONS_JS = """() => [...document.querySelectorAll('.tbl.cards > caption')].map(c => {
+  const t = c.closest('table'), r = c.getBoundingClientRect();
+  const lh = parseFloat(getComputedStyle(c).lineHeight);
+  return {id: t.id, ratio: r.width / t.getBoundingClientRect().width, lines: Math.round(r.height / lh)};
+})"""
+
+
+def test_browser_card_table_captions_span_their_table(site_browser):
+    """FINAL-2: at 390 and 320 px the Model Risk vendor table's caption ('Vendor
+    and third-party inputs (the IDs the data checks above carry)') stood one word
+    to a line in a 40 px column beside its cards: a table caption inside a table
+    displayed as a block is boxed in an anonymous table of min-content width. In
+    the card layout a caption is a block as wide as its cards, at every width."""
+    sb = site_browser
+    seen = 0
+    for width in (390, 320, 1440):
+        ctx, page = _page(sb, width, 844)
+        try:
+            for name in _CARD_TABLES:
+                page.goto(sb["base"] + name, wait_until="load")
+                page.evaluate("document.querySelectorAll('details').forEach(d => { d.open = true; })")
+                for cap in page.evaluate(_CARD_CAPTIONS_JS):
+                    seen += 1
+                    assert cap["ratio"] >= 0.95, (width, cap)
+                    assert cap["lines"] <= 3, (width, cap)
+        finally:
+            ctx.close()
+    assert seen                                  # at least one card table carries a caption
+
+
 _WATERFALL_LABELS_JS = """() => {
   const c = Desk.charts['chart-waterfall'], L = c.labels, spec = c.spec;
   const ctx = document.createElement('canvas').getContext('2d'); ctx.font = L.font;
@@ -3600,6 +3630,56 @@ def test_browser_waterfall_step_names_are_never_truncated(site_browser):
             table = page.evaluate("[...document.querySelectorAll("
                                   "'#chart-waterfall-data tbody td:nth-child(2)')].map(td => td.textContent)")
             assert set(st["cats"][1:-1]) <= set(table)          # the table keeps every full name
+        finally:
+            ctx.close()
+
+
+_X_LABELS_JS = """(id) => {
+  // the axis labels ECharts draws: zrender Text elements not hidden as overlaps
+  const c = Desk.charts[id], cats = c.spec.x.categories.map(String), drawn = [];
+  const walk = (el, hidden) => {
+    hidden = hidden || el.ignore || el.invisible;
+    const t = el.type === 'text' && !hidden ? String(el.style.text) : null;
+    if (t !== null && cats.includes(t.split('\\n').join(' '))) {
+      const r = el.getBoundingRect().clone(); if (el.transform) r.applyTransform(el.transform);
+      drawn.push({text: t, x: r.x, w: r.width});
+    }
+    if (el.childrenRef) el.childrenRef().forEach(ch => walk(ch, hidden));
+  };
+  c.chart.getZr().storage.getRoots().forEach(r => walk(r, false));
+  return {cats: cats, drawn: drawn.sort((a, b) => a.x - b.x), width: c.el.clientWidth};
+}"""
+
+
+def test_browser_newest_period_of_the_annual_and_half_year_bars_is_labelled(site_browser):
+    """FINAL-1: at 390 px the annual-return chart drew no label under its last
+    bar, the partial year the P1 note marks '2025 YTD': the label was wider than
+    its band, so ECharts hid it as an overlap (at 320 px every other year went
+    too, and on the half-year chart the newest half-year was never labelled). A
+    label wider than its band now wraps at its spaces, and where labels must be
+    thinned they are thinned counting back from the newest, so the last bar is
+    always labelled in full, with no label overlapping another or the edge."""
+    sb = site_browser
+    for width in (1440, 390, 320):
+        ctx, page = _page(sb, width, 900)
+        try:
+            page.goto(sb["base"] + "research.html", wait_until="load")
+            for cid in ("chart-annual", "chart-halfyear"):
+                page.evaluate(f"document.getElementById('{cid}').scrollIntoView()")
+                page.wait_for_function(f"window.Desk && Desk.charts['{cid}'] "
+                                       "&& document.fonts.status === 'loaded'")
+                page.wait_for_timeout(200)
+                st = page.evaluate(_X_LABELS_JS, cid)
+                texts = [d["text"].replace("\n", " ") for d in st["drawn"]]
+                assert texts, (width, cid)
+                assert texts[-1] == st["cats"][-1], (width, cid, texts)
+                for a, b in zip(st["drawn"], st["drawn"][1:]):
+                    assert a["x"] + a["w"] <= b["x"], (width, cid, a, b)
+                first, last = st["drawn"][0], st["drawn"][-1]
+                assert first["x"] >= 0, (width, cid, first)
+                assert last["x"] + last["w"] <= st["width"], (width, cid, last)
+                if width == 1440 and cid == "chart-annual":
+                    assert texts == st["cats"], texts                  # room for every year
         finally:
             ctx.close()
 

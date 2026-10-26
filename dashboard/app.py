@@ -2958,7 +2958,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         labels = [f"{a['year']}{' YTD' if a['partial'] else ''}" for a in d["ann"]]
         d["charts"]["annual"] = charts.xy(
             "chart-annual", "Annual return against the prior year-end NAV",
-            x={"type": "category", "categories": labels, "interval": 0},
+            x={"type": "category", "categories": labels, "interval": 0, "fit": True},
             y={"name": "Return (%)", "digits": 0, "tipDigits": 2, "signed": True, "tickUnit": "%",
                "unit": "%"},
             series=[{"name": "Return", "type": "bar", "signed": True, "data": d["ann_rets"]}],
@@ -2970,7 +2970,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
     if d.get("wf"):
         d["charts"]["halfyear"] = charts.xy(
             "chart-halfyear", "Half-year Sharpe of the single in-sample run (rf = 0)",
-            x={"type": "category", "categories": d["wf_periods"], "interval": 0},
+            x={"type": "category", "categories": d["wf_periods"], "interval": 0, "fit": True},
             y={"name": "Sharpe", "digits": 0, "tipDigits": 2, "signed": True},
             series=[{"name": "Sharpe", "type": "bar", "signed": True, "data": d["wf_sharpes"]}],
             xs=d["wf_periods"], csv="half_year_sharpe.csv", grid={"bottom": 70},
