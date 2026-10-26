@@ -16,6 +16,20 @@
   </div>
 </div>
 
+{% if d.findings %}
+<h2 class="section-title" id="findings-title">Findings at a glance</h2>
+<div class="findings" id="findings" aria-labelledby="findings-title">
+  {% for col in d.findings %}
+  <section class="find-col" aria-labelledby="find-{{ col.key }}">
+    <h3 class="find-head" id="find-{{ col.key }}"><span class="find-glyph" aria-hidden="true">{{ col.glyph }}</span>{{ col.title }}</h3>
+    <ul class="find-list">
+      {% for it in col['items'] %}<li class="find-item"><a href="{{ it.href }}">{{ it.lead }}</a>: {{ it.text|dates }}</li>{% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+
 <h2 class="section-title">Key results</h2>
 <div class="kpis" id="key-results" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:8px;">
   {% for r in d.key_results %}
@@ -150,7 +164,7 @@
       </tbody>
     </table>
     </div>
-    <p class="note">What the repository holds, whoever wrote it: a record does not say whether the scheduled job or a manual run of the job's code produced it (the git history does). Each input's as-of date and age in NYSE sessions is in the status bar and in the table at the foot of every page. Research prototypes (the ML regime classifier, the NN pricer, the Quintic OU) are on the <a href="research.html#research-classifier">Research</a> and <a href="calibration.html#quintic">Calibration</a> pages; none feeds a number on this page.</p>
+    <p class="note">What the repository holds, whoever wrote it: a record does not say whether the scheduled job or a manual run of the job's code produced it (the git history does). Each input's as-of date and age in NYSE sessions is in the status bar and in the table at the foot of every page. Research prototypes (the ML regime classifier, the NN pricer, the Quintic OU) are on the <a href="research.html#research-classifier">Research</a> and <a href="calibration.html#quintic">Calibration</a> pages; none feeds a number on this page; the findings above cite one prototype's accuracy, as a negative result.</p>
     {% else %}
     <p class="note">Pipeline state unavailable: see the error above.</p>
     {% endif %}

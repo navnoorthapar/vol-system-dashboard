@@ -3642,6 +3642,104 @@ def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") ->
     return out
 
 
+def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf: dict,
+                         pipeline: dict | None) -> list[dict]:
+    """The Overview's three columns: what works, what does not, what is next.
+
+    Each item is one computed sentence with one link to the panel that shows
+    it; an item whose artifact is missing is left out, never filled in. 'Next'
+    items say what is not done yet. The columns carry the same weight: the
+    template renders them with the same classes.
+    """
+    works: list[dict] = []
+    fails: list[dict] = []
+    nxt: list[dict] = []
+
+    def item(lead: str, href: str, text: str) -> dict:
+        return {"lead": lead, "href": href, "text": text}
+    # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
+    sr = surface_result(surf_oos, p2.get("session"))
+    if sr and _num(sr["median_abs_hs"]) is not None:
+        works.append(item(
+            "Arbitrage-free SVI surface", "surface.html#scorecard",
+            f"median {_fmt(sr['median_abs_hs'], '.2f')} half-spreads from the mid, "
+            f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask, on the held-out strikes of "
+            f"{sr['session']}."))
+        try:
+            rep = artifacts.load_surface(DATA, sr["session"])
+        except artifacts.ArtifactError:
+            rep = {}
+        indices = ((rep.get("vix") or {}).get("indices") or {}) if rep.get("state") == "ok" else {}
+        vix = indices.get("VIX") or {}
+        gap = _num(vix.get("gap_vs_official"))
+        if gap is not None:
+            works.append(item(
+                "VIX replicated from the stored chain", "surface.html#vix-replication",
+                f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{sr['session']}, by the Cboe rules."))
+    arc = p2.get("archive") or {}
+    if arc.get("n_legacy") is not None:
+        works.append(item(
+            "The gate keeps broken-data fits off the page", "calibration.html#history",
+            f"{plural(arc['n_legacy'], 'pre-C22 fit')} labelled legacy, none published; "
+            f"{arc.get('n_current_ok')} of {arc.get('n_current')} current-schema fits pass."))
+    # does not work: Heston's short end, the backtest, the classifier
+    short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
+    worst = max(short, key=lambda r: r["rmse"]) if short else None
+    if worst:
+        bits = [(f"{_fmt(worst['rmse'], '.2f')} vol pts out of sample on the {worst['expiry']} expiry "
+                 f"({_fmt(worst['T_days'], '.0f')} days)")]
+        if "sigma" in (p2.get("pinned_params") or []):
+            bits.append("σ on its box cap")
+        vv = p2.get("vvix") or {}
+        if vv:
+            bits.append(f"VVIX {_fmt(vv['model'], '.0f')} against {_fmt(vv['market'], '.0f')}")
+        fails.append(item("One-factor Heston at the short end", "calibration.html#oos",
+                          ", ".join(bits) + f" ({p2.get('session')})."))
+    ci = artifacts.bootstrap_ci(inf, "portfolio", "sharpe") if inf.get("state") == "ok" else None
+    k = (p4 or {}).get("kpi") or {}
+    if k.get("cum_ret") is not None and ci:
+        years = f"{str((p4 or {}).get('start_date'))[:4]}–{str((p4 or {}).get('end_date'))[:4]}"
+        fails.append(item(
+            "The mark-to-model backtest loses", "research.html#inference",
+            f"{_pct_prose(k['cum_ret'], 1)} over {years}, Sharpe {_fmt(ci['point'], '+.2f')} "
+            f"({_fmt(ci['level'] * 100, '.0f')}% CI {_fmt(ci['lo'], '+.2f')} to {_fmt(ci['hi'], '+.2f')})."))
+    try:
+        clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
+        ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
+    except (OSError, EOFError, AttributeError, pickle.UnpicklingError) as exc:
+        _logger.info("classifier evaluation unavailable for the findings: %s", exc)
+        ev = {}
+    acc, base = _num(ev.get("oos_acc")), _num(ev.get("persistence_acc"))
+    if acc is not None and base is not None:
+        fails.append(item(
+            "The ML regime classifier", "research.html#research-classifier",
+            f"{_fmt(acc * 100, '.1f')}% out-of-sample accuracy against {_fmt(base * 100, '.1f')}% for "
+            "the predict-yesterday baseline; research only, it never trades."))
+    # next: what is not done yet
+    fw = (pipeline or {}).get("forward") or {}
+    n_fw = (fw.get("n") or 0) if fw.get("state") == "ok" else 0
+    nxt.append(item(
+        "Forward test at executable prices", "research.html#forward",
+        f"not yet evidence: {plural(n_fw, 'registered session')} so far; the ledger fixes targets "
+        "before any later price exists."))
+    jr = joint_fit_result(diag, p2.get("session"))
+    if jr:
+        h_txt = "sits on its 0.02 floor" if jr["rough_H_on_bound"] else "is weakly identified"
+        nxt.append(item(
+            "Rough Heston in production", "calibration.html#rough-vs-heston",
+            f"not adopted: lower out-of-sample error on {jr['n_lower']} of {jr['n_sessions']} sessions, "
+            f"but H {h_txt} ({jr['session']})."))
+    from joint_vol_calibration.config import HESTON_BOUNDS
+    nxt.append(item(
+        "A wider production σ box", "calibration.html#sigma-tradeoff",
+        f"not done: σ ≤ {_fmt(float(HESTON_BOUNDS['sigma'][1]), 'g')} is kept because the NN pricer's "
+        "domain, the vomma shock and the bound chips are tied to it (Corrections C23-M1)."))
+    return [{"key": "works", "title": "Works", "glyph": "✓", "items": works},
+            {"key": "fails", "title": "Does not work", "glyph": "✕", "items": fails},
+            {"key": "next", "title": "Next · not done yet", "glyph": "→", "items": nxt}]
+
+
 def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     """The newest stored Cboe book per underlying (data_store/options/cboe/*.json records)."""
     root = Path(data_dir or DATA) / "options" / "cboe"
@@ -3736,6 +3834,9 @@ def load_overview() -> dict[str, Any]:
     d["pipeline"] = None
     with _loader_boundary(d, "pipeline state (options/cboe, calibrations, forward)"):
         d["pipeline"] = pipeline_state(diag)
+    d["findings"] = []
+    with _loader_boundary(d, "findings at a glance"):
+        d["findings"] = findings_at_a_glance(p2, p4, surf_oos, diag, inf, d["pipeline"])
     if d.get("ts_values"):
         days = [int(t.rstrip("d")) for t in d["ts_tenors"]]
         d["charts"]["ts"] = charts.xy(

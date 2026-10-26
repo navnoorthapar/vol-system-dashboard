@@ -2261,8 +2261,14 @@ def test_overview_key_results_are_read_from_the_shipped_artifacts(dash, pages):
 def test_overview_keeps_research_prototypes_off_the_first_screen(dash, pages):
     """The demoted ML classifier (it loses to 'predict yesterday') sat on the
     Overview next to the rule label; it is now a Research-page card, and the
-    Overview's loader no longer even computes it."""
-    idx = _visible_text(pages["/"])
+    Overview's loader no longer even computes it. (P1.7: it is named once, as
+    a negative result, in the 'Does not work' column of the findings strip.)"""
+    strip = re.search(r'<div class="findings" id="findings".*?\n</div>', pages["/"], re.DOTALL)
+    if strip:
+        cols = _findings(pages["/"])
+        where = [h for _, h, items in cols if any("classifier" in it for it in items)]
+        assert where in ([], ["✕ Does not work"]), where
+    idx = _visible_text(pages["/"].replace(strip.group(0), "") if strip else pages["/"])
     for word in ("classifier", "XGBoost", "P(R0", "fear_premium"):
         assert word not in idx.replace("ML regime classifier, the NN pricer", ""), word
     assert 'id="research-classifier"' not in pages["/"]
@@ -4458,3 +4464,103 @@ def test_unit_lint_catches_a_seeded_offender(pages):
         assert unit_lint(seeded), kind
     # names in code elements are not units
     assert unit_lint(html.replace("</main>", "<p><code>rmse_vp</code> and <code>vp</code></p></main>")) == []
+
+
+_ROUTE_OF = {"index.html": "/", "surface.html": "/surface", "calibration.html": "/calibration",
+             "risk.html": "/risk", "research.html": "/research", "corrections.html": "/corrections",
+             "model-risk.html": "/model-risk"}
+
+
+def _findings(html: str) -> list[tuple[str, str, list[str]]]:
+    """(class attribute, head, [item html]) for each column of #findings."""
+    strip = re.search(r'<div class="findings" id="findings"[^>]*>(.*?)\n</div>', html, re.DOTALL)
+    assert strip
+    cols = re.findall(r'<section class="([^"]+)"[^>]*>\s*<h3 class="find-head"[^>]*>(.*?)</h3>\s*'
+                      r'<ul class="find-list">(.*?)</ul>', strip.group(1), re.DOTALL)
+    return [(c, _visible_text("<body>" + h).strip(),
+             re.findall(r'<li class="find-item">(.*?)</li>', ul, re.DOTALL))
+            for c, h, ul in cols]
+
+
+def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
+    """P1.7: the Overview's first screen said what the system is, not what it
+    found. #findings lists what works, what does not and what is next, three
+    columns of equal weight, each line a number read from an artifact (recomputed
+    here) and one link to a panel that exists on the frozen page."""
+    html = pages["/"]
+    cols = _findings(html)
+    assert [h for _, h, _ in cols] == ["✓ Works", "✕ Does not work", "→ Next · not done yet"]
+    assert len({c for c, _, _ in cols}) == 1                        # one class set: equal weight
+    for _, head, items in cols:
+        assert 2 <= len(items) <= 4, (head, len(items))
+        for it in items:
+            links = re.findall(r'<a href="([^"]+)">', it)
+            assert len(links) == 1, it
+            page, _, anchor = links[0].partition("#")
+            assert anchor, links[0]
+            assert f'id="{anchor}"' in pages[_ROUTE_OF[page]], links[0]
+    text = {head: [_visible_text("<body>" + it).strip() for it in items] for _, head, items in cols}
+    works, fails, nxt = (" ".join(text[h]) for h in ("✓ Works", "✕ Does not work", "→ Next · not done yet"))
+    # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
+    path, cal = dash.load_headline_calibration()
+    session = dash._calibration_session(cal, path)
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    svi = next(m for m in sc["models"] if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, "
+            f"{svi['inside_spread_pct']:.1f}% inside") in works
+    rep = json.loads(_surface_file("vix_replication.json").read_text())
+    gap = rep["indices"]["VIX"]["gap_vs_official"]
+    assert f"{dash.signed(gap, '.2f')} index pts from the Cboe close" in works
+    rows = dash.scan_calibrations()
+    n_legacy = sum(1 for r in rows if r["legacy"])
+    assert f"{n_legacy:,} pre-C22 fit" in works
+    assert "none published" in works
+    # does not work: Heston's worst short expiry with σ on its cap and its VVIX; the backtest; the classifier
+    t_by = {str(c["expiry"]): float(c["T"]) * 365 for c in cal["carry_by_expiry"]}
+    short = {e: v for e, v in cal["oos"]["spx_oos_rmse_by_expiry"].items() if t_by.get(e, 99) <= 30}
+    e_w = max(short, key=short.get)
+    assert f"{short[e_w]:.2f} vol pts out of sample on the {e_w} expiry" in fails
+    diag = SHIPPED / "calibrations" / "diagnostics" / f"{session}.json"
+    if diag.exists():
+        sf = json.loads(diag.read_text())["stored_fit"]
+        assert f"VVIX {sf['vvix_model']:.0f} against {sf['vvix_market']:.0f}" in fails
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as f:
+        em = pickle.load(f)["metrics"]
+    assert dash._pct_prose(em["cumulative_return"], 1) in fails
+    summ = json.loads((SHIPPED / "backtest" / "inference" / "summary.json").read_text())
+    b = summ["bootstrap"]["portfolio"]["sharpe"]
+    ci = dash.artifacts.bootstrap_ci(dash.artifacts.load_inference(SHIPPED), "portfolio", "sharpe")
+    assert f"Sharpe {ci['point']:+.2f}".replace("-", "−") in fails
+    assert f"95% CI {b['ci95'][0]:+.2f} to {b['ci95'][1]:+.2f}".replace("-", "−") in fails
+    with open(SHIPPED / "signals" / "regime_classifier.pkl", "rb") as f:
+        ev = pickle.load(f).metadata_["evaluation"]
+    assert (f"{ev['oos_acc'] * 100:.1f}% out-of-sample accuracy against {ev['persistence_acc'] * 100:.1f}% "
+            "for the predict-yesterday baseline") in fails
+    # next: phrased as not done
+    n_fw = len(list((SHIPPED / "forward").glob("ledger_*.json"))) if (SHIPPED / "forward").is_dir() else 0
+    assert f"{n_fw} registered session" in nxt
+    assert all(t.split(": ", 1)[1].startswith(("not ", "not yet")) for t in text["→ Next · not done yet"])
+
+
+def test_browser_findings_strip_is_on_the_first_screen_and_stacks_on_a_phone(site_browser):
+    """P1.7: at 1440×900 the strip starts above y = 600 (the first screen); at
+    390 px its three columns stack, full width, in the same type."""
+    for width, height in ((1440, 900), (390, 844)):
+        ctx, page = _page(site_browser, width, height)
+        try:
+            page.goto(site_browser["base"] + "index.html", wait_until="load")
+            box = page.evaluate("""() => { const s = document.getElementById('findings');
+              const cols = [...s.querySelectorAll('.find-col')].map(c => {
+                const r = c.getBoundingClientRect();
+                return [r.left, r.top, r.width, getComputedStyle(c.querySelector('.find-item')).fontSize]; });
+              return {top: s.getBoundingClientRect().top + window.scrollY, cols}; }""")
+            assert len(box["cols"]) == 3
+            assert len({c[3] for c in box["cols"]}) == 1
+            if width == 1440:
+                assert box["top"] < 600, box
+                assert len({round(c[1]) for c in box["cols"]}) == 1          # side by side
+            else:
+                assert len({round(c[0]) for c in box["cols"]}) == 1          # stacked
+                assert box["cols"][0][1] < box["cols"][1][1] < box["cols"][2][1]
+        finally:
+            ctx.close()
