@@ -4298,6 +4298,46 @@ def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
     return {"head": head, "default": earlier[0], "views": views, "grids": grids}
 
 
+def forward_vol_series(fw: Sequence[dict]) -> list[dict]:
+    """The forward ATM vol as steps between the constant-maturity points, and a
+    'calendar' flag marker (never a NaN) where the forward variance is negative."""
+    pts: list[list[Any]] = []
+    for f in fw:
+        if f["fwd_vol"] is None:
+            pts.append([f["t1_days"], None])          # a gap in the steps
+            continue
+        pts += [[f["t1_days"], f["fwd_vol"]], [f["t2_days"], f["fwd_vol"]]]
+    out = [{"name": "Forward ATM vol, SVI-cal (1M → 1Y)", "type": "line", "color": model_colour("svi_cal"),
+            "width": 2, "dash": "dotted", "legend": True, "z": 3, "data": pts}]
+    flags = [f for f in fw if f["flag"]]
+    if flags:
+        out.append({"name": "Calendar flag: negative forward variance", "type": "scatter",
+                    "symbol": "triangle", "color": "breach", "size": 10, "legend": True, "z": 4,
+                    "data": [[(f["t1_days"] + f["t2_days"]) / 2, f["atm1"]] for f in flags]})
+    return out
+
+
+# Cboe's constant maturities of the VIX family (days), when the artifact does not record one
+VIX_FAMILY_DAYS = {"VIX9D": 9, "VIX": 30, "VIX3M": 93, "VIX6M": 184}
+
+
+def vix_official_markers(vx: dict | None) -> list[dict]:
+    """The official VIX-family closes at their constant maturities (vix_replication.json
+    indices.<name>.official), for markers on the variance-swap strip."""
+    out = []
+    for tick, default_days in VIX_FAMILY_DAYS.items():
+        row = ((vx or {}).get("indices") or {}).get(tick) or {}
+        off = row.get("official")
+        close = _num(off.get("close")) if isinstance(off, dict) else _num(off)
+        if close is None:
+            continue
+        rec = row.get(row.get("headline_method") or "") or row.get("parity_forward") or {}
+        days = _num(rec.get("constant_maturity_days")) if isinstance(rec, dict) else None
+        out.append({"ticker": tick, "days": days if days is not None else float(default_days),
+                    "close": close})
+    return out
+
+
 def rr_term_spec(cmp_: dict) -> dict:
     """RR25 against days to expiry (log axis) for every stored session: the headline
     solid, the others grey, the session chosen on the comparison tabs dashed."""
@@ -4311,8 +4351,8 @@ def rr_term_spec(cmp_: dict) -> dict:
             continue
         series.append({"name": f"RR25 {s} (grey)", "legendKey": "Every stored session", "legend": True,
                        "type": "line", "color": "muted", "width": 1, "z": 1, "data": pts})
-        series.append({"name": f"RR25 {s}", "legend": True, "type": "line", "color": "cat2", "width": 1.5,
-                       "dash": True, "group": s, "z": 2, "data": pts})
+        series.append({"name": f"RR25 {s}", "legend": True, "type": "line", "color": model_colour("svi_cal"),
+                       "width": 1.5, "dash": True, "group": s, "z": 2, "data": pts})
     series.append({"name": f"RR25 {head}", "legend": True, "type": "line", "color": model_colour("svi_cal"),
                    "width": 2, "symbol": "circle", "size": 4, "z": 3,
                    "data": [[r["T_days"], r["rr25"]] for r in cmp_["grids"][head]["listed"]]})
@@ -4587,13 +4627,17 @@ def surface_extras(d: dict, surf: dict) -> None:
                                "data": [[r["T_days"], r["atmf"]] for r in cmp_grids[session]["listed"]]})
             for old in (v["session"] for v in d["compare"]["views"]):
                 lst = cmp_grids[old]["listed"]
-                atm_series.append({"name": f"SVI-cal ATM {old}", "type": "line", "color": "cat2",
-                                   "width": 1.2, "dash": True, "legend": True, "group": old,
+                atm_series.append({"name": f"SVI-cal ATM {old}", "type": "line",
+                                   "color": model_colour("svi_cal"), "width": 1.2, "dash": True,
+                                   "legend": True, "group": old,
                                    "data": [[r["T_days"], r["atmf"]] for r in lst]})
                 atm_groups.append({"group": old, "shown": old == d["compare"]["default"], **charts.table(
                     f"SVI-cal ATM vol of {old}, the earlier session compared",
                     ["Expiry", "Days#", "ATM (%)#"],
                     [[r["expiry"], _fmt(r["T_days"], ".0f"), _fmt(r["atmf"], ".2f")] for r in lst])})
+        if cmp_grids and session in cmp_grids:
+            d["forward_vols"] = desk_surface.forward_vols(cmp_grids[session]["cm"])
+            atm_series += forward_vol_series(d["forward_vols"])
         atm_tbl = charts.table("ATM term structure", ["Expiry", "Days#", "ATM mid (%)#", "eSSVI ATM (%)#",
                                                       "eSSVI ATM skew#", "Parity r#", "Parity q#", "Quotes#"],
                                [[t.get("expiry"), _fmt(_num(t.get("T_days")), ".0f"),
@@ -4612,7 +4656,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             y={"name": "ATM vol (%)", "digits": 1, "tipDigits": 2},
             series=atm_series, tooltip="axis", csv=f"atm_term_structure_{session}.csv",
             describe=("ATM implied vol per quoted expiry, from the mids at the parity forward and from the "
-                      "eSSVI and SVI-cal surfaces"
+                      "eSSVI and SVI-cal surfaces, and the forward ATM vol between the constant maturities "
+                      "1M, 2M, 3M, 6M and 1Y as dotted steps"
                       + ("; the dashed line is the SVI-cal ATM of the earlier session chosen on the "
                          "comparison tabs, named with its date." if atm_groups else ".")),
             table=atm_tbl)
@@ -4667,6 +4712,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             _logger.warning("β estimator ratios unavailable for the surface page: %s", exc)
         d["vix_notes"] = list(vx.get("gap_notes") or [])
         d["vix_deviations"] = list(vx.get("deviations") or [])
+        d["vix_markers"] = vix_official_markers(vx)
+        d["vix_calc_time"] = vx.get("calculation_time_ny")
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
                        "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
@@ -4685,10 +4732,17 @@ def surface_extras(d: dict, surf: dict) -> None:
                         {"name": "ATM vol (quotes)", "type": "line", "color": "headline", "symbol": "diamond",
                          "size": 5, "width": 1.5, "dash": True, "legend": True,
                          "data": [[r["days"], r["atm"]] for r in d["strip"]
-                                  if r["atm"] is not None and r["days"] is not None]}],
+                                  if r["atm"] is not None and r["days"] is not None]}]
+                + ([{"name": "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M", "type": "scatter",
+                     "color": "headline", "hollow": True, "size": 10, "legend": True, "z": 4,
+                     "data": [[m_["days"], m_["close"]] for m_ in d["vix_markers"]]}]
+                   if d["vix_markers"] else []),
                 tooltip="axis", csv=f"varswap_strip_{session}.csv",
                 describe=("The single-term variance-swap vol of every stored expiry against its ATM vol; "
-                          "the gap is the skew premium."),
+                          "the gap is the skew premium."
+                          + (" Hollow circles: the official VIX-family closes at their constant maturities "
+                             "(9, 30, 93 and 184 days), where the replication's gaps show against the strip."
+                             if d["vix_markers"] else "")),
                 table=charts.table("Variance-swap strip (vols in %; var-swap − ATM in vol pts)",
                                    ["Expiry", "Days#", "Var-swap vol#", "ATM vol#",
                                     "Var-swap − ATM (vol pts)#",

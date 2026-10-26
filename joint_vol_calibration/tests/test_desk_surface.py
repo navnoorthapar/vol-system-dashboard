@@ -16,6 +16,7 @@ surface report keeps every session it wrote), as a fixture of known values.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import sys
@@ -307,3 +308,37 @@ def test_a_tenor_one_session_lacks_has_no_change():
         assert rows["1Y"][key]["old"] is None
         assert rows["1Y"][key]["new"] is not None
         assert rows["3M"][key]["delta"] is not None
+
+
+# ── P2.4: forward ATM vol between constant maturities ────────────────────────
+
+@pytest.mark.parametrize("session", SESSIONS)
+def test_forward_vols_are_the_formula_on_the_constant_maturity_total_variances(grids, session):
+    cm = ds.constant_maturity(grids[session])
+    fw = ds.forward_vols(cm)
+    pts = [r for r in cm if r["available"]]
+    pairs = list(itertools.pairwise(pts))
+    assert [(f["from"], f["to"]) for f in fw] == [(a["label"], b["label"]) for a, b in pairs]
+    for f, (a, b) in zip(fw, pairs):
+        w1, w2 = (a["atmf"] / 100) ** 2 * a["T"], (b["atmf"] / 100) ** 2 * b["T"]
+        assert f["t2_days"] - f["t1_days"] >= 7
+        assert f["flag"] is None                      # SVI-cal is calendar-ordered
+        assert f["fwd_vol"] == pytest.approx(100 * math.sqrt((w2 - w1) / (b["T"] - a["T"])), rel=1e-12)
+
+
+def test_a_falling_total_variance_is_a_calendar_flag_not_a_nan():
+    pts = [{"label": "1M", "T": 30 / 365, "atmf": 20.0}, {"label": "2M", "T": 61 / 365, "atmf": 13.0},
+           {"label": "3M", "T": 91 / 365, "atmf": 14.0}]
+    fw = ds.forward_vols(pts)
+    assert fw[0]["flag"] == "calendar"
+    assert fw[0]["fwd_vol"] is None
+    assert fw[0]["fwd_var"] < 0
+    assert fw[1]["flag"] is None
+    assert math.isfinite(fw[1]["fwd_vol"])
+
+
+def test_a_pair_closer_than_seven_days_is_never_a_forward_period():
+    pts = [{"label": "a", "T": 13 / 365, "atmf": 14.0}, {"label": "b", "T": 14 / 365, "atmf": 14.3},
+           {"label": "c", "T": 30 / 365, "atmf": 14.5}]
+    fw = ds.forward_vols(pts)
+    assert [(f["from"], f["to"]) for f in fw] == [("a", "c")]

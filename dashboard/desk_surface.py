@@ -292,3 +292,34 @@ def cm_delta(new: Sequence[Mapping], old: Sequence[Mapping]) -> list[dict]:
             row[key] = {"new": a, "old": b, "delta": (a - b) if (a is not None and b is not None) else None}
         out.append(row)
     return out
+
+
+# ── forward ATM vol between constant maturities ──────────────────────────────
+FWD_MIN_DAYS = 7.0      # an AM/PM pair (10-29 / 10-30) is never a forward period
+
+
+def forward_vols(points: Sequence[Mapping], min_days: float = FWD_MIN_DAYS) -> list[dict]:
+    """Forward ATM vol between consecutive constant-maturity points (1M → 2M →
+    3M → 6M → 1Y): σ_fwd = √((w₂ − w₁)/(T₂ − T₁)) with w = ATMF²·T, in vol pts.
+
+    A point closer than ``min_days`` to the previous one is skipped (the next
+    pair spans further). A negative forward variance (w falling with T: calendar
+    arbitrage) is never a NaN: its vol is None and the item carries the flag
+    'calendar'."""
+    pts = [p for p in points if p.get("available", True) and p.get("atmf") is not None]
+    out: list[dict] = []
+    prev = None
+    for p in pts:
+        if prev is not None and (p["T"] - prev["T"]) * DAYS_PER_YEAR < min_days:
+            continue
+        if prev is not None:
+            w1 = (prev["atmf"] / 100.0) ** 2 * prev["T"]
+            w2 = (p["atmf"] / 100.0) ** 2 * p["T"]
+            fvar = (w2 - w1) / (p["T"] - prev["T"])
+            out.append({"from": prev["label"], "to": p["label"], "atm1": prev["atmf"], "atm2": p["atmf"],
+                        "t1_days": prev["T"] * DAYS_PER_YEAR,
+                        "t2_days": p["T"] * DAYS_PER_YEAR, "fwd_var": fvar,
+                        "fwd_vol": 100.0 * math.sqrt(fvar) if fvar >= 0 else None,
+                        "flag": None if fvar >= 0 else "calendar"})
+        prev = p
+    return out

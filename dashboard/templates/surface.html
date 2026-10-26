@@ -64,7 +64,9 @@
     {% endfor %}
     <p class="note">The stored sessions are irregular (the surface report runs on sessions with a stored chain), so a change spans the gap shown, not a day. “—”: a session without that tenor among its listed expiries (never extrapolated), or an RR / BF with a wing beyond the quoted strikes. The tabs also set the dashed lines of the ATM and RR25 charts.</p>
   {% endcall %}{% endif %}
-  {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes, eSSVI and SVI-cal', 's7' if cp else 's5') %}{{ m.chart(d.charts.atm_ts, 'h300') }}{% endcall %}{% endif %}
+  {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes, eSSVI and SVI-cal', 's7' if cp else 's5') %}{{ m.chart(d.charts.atm_ts, 'h300') }}
+    {% if d.forward_vols %}<p class="note" id="forward-vols">Forward ATM vol of the SVI-cal surface between its constant maturities, √((w₂ − w₁)/(T₂ − T₁)) with w = ATMF²·T (dotted steps): {% for f in d.forward_vols %}<span class="nowrap">{{ f.from }} → {{ f.to }} {% if f.flag %}<a class="chip chip-breach" href="#arbitrage">⚑ calendar</a>{% else %}{{ f.fwd_vol|fmt('.2f') }}%{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}. Each pair spans at least 7 days, so no AM/PM pair of one date is a forward period.{% if d.forward_vols|selectattr('flag')|list %} A calendar flag is a negative forward variance: total variance falls with maturity there; see the <a href="#arbitrage">arbitrage screen</a>.{% endif %}</p>{% endif %}
+  {% endcall %}{% endif %}
 </div>
 {% endif %}
 
@@ -154,6 +156,7 @@
   {% call m.panel('varswap', 'Variance-swap strip · same chain', 's7') %}
     {% if d.charts.strip %}{{ m.chart(d.charts.strip, 'h260') }}{% endif %}
     <p class="note">Var-swap minus ATM vol is the skew premium in the 30-day VIX: the reason a straddle is not worth the VIX.</p>
+    {% if d.vix_markers %}<p class="note" id="vix-markers">Hollow circles: the Cboe closes (16:15 ET{% if d.vix_calc_time %}; the replication is timed {{ d.vix_calc_time|replace('T', ' ') }} ET{% endif %}) at their constant maturities, {% for mk in d.vix_markers %}<span class="nowrap">{{ mk.ticker }} {{ mk.close|fmt('.2f') }} at {{ mk.days|fmt('.0f') }} d</span>{{ ', ' if not loop.last else '' }}{% endfor %}: against the single-expiry strip they show the replication gaps of the table beside.</p>{% endif %}
   {% endcall %}
 </div>
 {% endif %}

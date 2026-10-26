@@ -5038,3 +5038,48 @@ def test_browser_session_tabs_switch_the_table_and_both_charts_without_a_request
         assert requests == []          # every session's data is in the page
     finally:
         ctx.close()
+
+
+def test_atm_term_forward_steps_and_a_calendar_flag_marker(dash, pages):
+    """P2.4: the ATM chart draws the forward ATM vol between the constant
+    maturities as steps (the values desk_surface computes); a negative forward
+    variance is a 'calendar' flag marker, never a NaN in the spec."""
+    ds = _desk_module()
+    html = pages["/surface"]
+    spec = _spec(html, "chart-atm-ts")
+    step = next(s for s in spec["series"] if s["name"].startswith("Forward ATM vol"))
+    fw = ds.forward_vols(ds.constant_maturity(ds.delta_grid(*_desk_inputs())))
+    want = [[f["t1_days"], f["fwd_vol"]] for f in fw]
+    got = step["data"][0::2]
+    assert [x for x, _ in got] == pytest.approx([x for x, _ in want], rel=1e-5)
+    assert [y for _, y in got] == pytest.approx([y for _, y in want], rel=1e-5)
+    note = _visible_text("<body>" + re.search(r'id="forward-vols">(.*?)</p>', html, re.DOTALL).group(1))
+    for f in fw:
+        assert f"{f['from']} → {f['to']} {dash._fmt(f['fwd_vol'], '.2f')}%" in note
+    legend = {it["name"] for it in spec["legend_items"]}
+    assert step["name"] in legend
+    # a synthetic falling total variance: a flag item, no NaN anywhere
+    bad = ds.forward_vols([{"label": "1M", "T": 30 / 365, "atmf": 20.0},
+                           {"label": "2M", "T": 61 / 365, "atmf": 13.0}])
+    series = dash.forward_vol_series(bad)
+    flag = [s for s in series if s["type"] == "scatter"]
+    assert len(flag) == 1
+    assert flag[0]["name"].startswith("Calendar flag")
+    assert all(v is None or np.isfinite(v) for s in series for pt in s["data"] for v in pt)
+    assert "NaN" not in json.dumps(series)
+
+
+def test_varswap_strip_marks_the_four_official_closes(dash, pages):
+    html = pages["/surface"]
+    spec = _spec(html, "chart-strip")
+    mk = [s for s in spec["series"] if s["name"].startswith("Cboe close (16:15 ET)")]
+    assert len(mk) == 1
+    assert mk[0]["type"] == "scatter"
+    assert mk[0].get("hollow") is True
+    closes = [r[2] for r in _table_rows(html, "vix-rep-table") if r[2] != "—"]
+    assert len(closes) == 4
+    assert [dash._fmt(y, ".2f") for _, y in mk[0]["data"]] == closes
+    assert [x for x, _ in mk[0]["data"]] == [9, 30, 93, 184]
+    legend = {it["name"] for it in spec["legend_items"]}
+    assert {"Variance-swap vol (Cboe formula)", mk[0]["name"]} <= legend
+    assert re.search(r'id="vix-markers">', html)
