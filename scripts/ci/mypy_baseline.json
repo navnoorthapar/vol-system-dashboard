@@ -3,7 +3,7 @@
   "dashboard/app.py": {
    "arg-type": 20,
    "assignment": 3,
-   "attr-defined": 5,
+   "attr-defined": 4,
    "call-overload": 6,
    "index": 8,
    "operator": 3,
@@ -158,6 +158,6 @@
   }
  },
  "tool": "mypy",
- "total": 370,
+ "total": 369,
  "version": "mypy 2.4.0 (compiled: yes)"
 }

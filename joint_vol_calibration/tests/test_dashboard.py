@@ -2665,7 +2665,8 @@ def test_model_inventory_paths_exist(dash):
     for m in inv["models"]:
         assert (ROOT / m["module"]).is_file(), m["id"]
         # an output not yet written says so and why (the forward ledger's first entry)
-        assert (ROOT / m["outputs"]).exists() or m.get("outputs_pending"), (m["id"], m["outputs"])
+        outs = [m["outputs"]] if isinstance(m["outputs"], str) else m["outputs"]
+        assert (outs and all((ROOT / o).exists() for o in outs)) or m.get("outputs_pending"), (m["id"], outs)
         assert m["tier"] in ("production", "backtest", "research"), m["id"]
         assert m["materiality"] in ("high", "medium", "low"), m["id"]
         assert m.get("page") is None or m["page"] in dash.ROUTES, m["id"]
@@ -3111,6 +3112,105 @@ def test_model_inventory_is_the_validation_packs(dash, pages):
     assert by["Market database lag behind the rule labels (sessions)"] == "M10"
     assert re.search(r'<tr id="inv-m14"><td>M14</td><td class="wrap"><strong>Quote-grade surface</strong>',
                      pages["/model-risk"])
+
+
+# ── C23 polish: what the screenshot review found ─────────────────────────────
+
+def test_partial_years_are_marked_ytd_with_their_span(dash, pages):
+    """STATS-5: the implied-β table headed its last column '2025' although the
+    year runs only to the backtest's end, while the annual chart said '2025 YTD'.
+    A year the record marks partial (benchmarks.json implied_beta.<index>.partial_years,
+    the NAV's last calendar year) is headed 'YTD' wherever a year heads a column or
+    a row, and a note gives the span the artifact records; full years are unmarked."""
+    html = pages["/research"]
+    bm = json.loads((SHIPPED / "backtest" / "inference" / "benchmarks.json").read_text())
+    ib = bm["implied_beta"]
+    years = [str(y) for y in ib["PUT"]["by_year"]]
+    partial = {str(y): p for ix in ("PUT", "WPUT") for y, p in (ib[ix].get("partial_years") or {}).items()}
+    assert partial, "the shipped benchmark window ends mid-year"
+    tab = re.search(r'<table class="tbl dense" id="implied-beta">(.*?)</table>', html, re.DOTALL).group(1)
+    heads = [_visible_text("<body>" + re.sub(r'<(\w+) aria-hidden="true">.*?</\1>', "", h)).strip()
+             for h in re.findall(r"<th[^>]*>(.*?)</th>", tab.split("</thead>")[0], re.DOTALL)][2:]
+    assert heads == [f"{y} YTD" if y in partial else y for y in years]
+    unwrap = re.sub(r'<span class="nowrap">(.*?)</span>', r"\1", html)
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="implied-beta-note">(.*?)</p>',
+                                               unwrap, re.DOTALL).group(1))
+    for y, p in partial.items():
+        lo, hi = p["window"].split("..")
+        assert f"{y} YTD covers {lo} → {hi}" in note
+    for ix in ("PUT", "WPUT"):
+        for p in (ib[ix].get("partial_years") or {}).values():
+            legs = f"{ix} {p['n_periods']:,} roll periods (expiries {p['first_expiry']} → {p['last_expiry']})"
+            assert legs in note
+    # the monthly grid's row heads and the annual chart: the NAV's partial year, with its span
+    d = dash.load_page4()
+    ann = {str(a["year"]): a for a in d["ann"]}
+    assert any(a["partial"] for a in ann.values())
+    rows = [r[0] for r in _cells(html, "monthly-grid")]
+    assert rows == [f"{y} YTD" if ann[y]["partial"] else y for y in ann]
+    text = _visible_text(unwrap)
+    for y, a in ann.items():
+        if a["partial"]:
+            assert f"{y} YTD: {a['first']} → {a['last']}, {a['sessions']:,} sessions" in text
+            assert a["first"][:4] == a["last"][:4] == y
+            assert a["last"] == d["eq_dates"][-1]
+    assert re.search(r"Per-date rate \(annual mean, cc: .*\b\d{4} YTD: \d", text)
+    # the notes' dates never break at their hyphens ('2025-' / '01-17' at 390 px)
+    for raw in (re.search(r'id="implied-beta-note">(.*?)</p>', html, re.DOTALL).group(1),
+                re.search(r"Years compound exactly(.*?)</p>", html, re.DOTALL).group(1)):
+        assert len(re.findall(r"\d{4}-\d{2}-\d{2}", raw)) == \
+            len(re.findall(r'<span class="nowrap">\d{4}-\d{2}-\d{2}</span>', raw)) > 0
+
+
+def _path_cells(html: str, table_id: str) -> dict:
+    """{first visible text of a row's second cell or its id: [paths cited in the row]}."""
+    tbl = re.search(rf'<table class="tbl[^"]*" id="{table_id}">(.*?)</table>', html, re.DOTALL)
+    assert tbl, table_id
+    out = {}
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(1).split("<tbody>")[1], re.DOTALL):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)
+        key = _visible_text("<body>" + cells[1]).strip()
+        out[key] = [re.sub(r"<[^>]+>", "", c)
+                    for c in re.findall(r'<code class="path">(.*?)</code>', tr, re.DOTALL)]
+    return out
+
+
+def test_artifact_citations_name_what_the_code_reads(dash, pages):
+    """P5: the M7 β-drift check cited full_results.pkl while the footer cited
+    full_results.parquet, with nothing saying both exist: the engine writes the
+    NAV to the parquet and the run's state (β, trades, metrics) to the pickle
+    (BacktestEngine.save). Each citation names every file its number is read from,
+    the inventory lists both outputs of the engine, and the Quintic panel names the
+    Quintic fit it reports."""
+    from joint_vol_calibration.backtest import backtest_engine as be
+    html = pages["/model-risk"]
+    mon = _path_cells(html, "monitor-table")
+    beta = next(v for k, v in mon.items() if k.startswith("β drift"))
+    assert beta == ["data_store/backtest/full_results.pkl", "data_store/vol_system.db"]
+    st = pickle.loads((SHIPPED / "backtest" / "full_results.pkl").read_bytes())
+    assert "atm_to_vix_ratio" in st                    # the β the check compares with
+    lag = next(v for k, v in mon.items() if k.startswith("Market database lag"))
+    assert lag == ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"]
+    assert '<td class="wrap">Labels <span class="nowrap">' in html       # its dates stay whole
+    rel = be.RESULTS_PATH.relative_to(ROOT).as_posix()
+    inv = {k.split(" ")[0]: v for k, v in _path_cells(html, "inventory-table").items()}
+    engine = next(v for k, v in inv.items() if k.startswith("Backtest"))
+    assert engine[1:] == [rel, rel[:-len(".parquet")] + ".pkl"]       # module, then both outputs
+    footer = re.search(r"<tr>(?:(?!</tr>).)*?Backtest window end \(fixed\)"
+                       r"(?:(?!</tr>).)*?<code[^>]*>(.*?)</code>", html, re.DOTALL)
+    assert re.sub(r"<[^>]+>", "", footer.group(1)) == rel
+    # every path any page cites exists, or is a pattern, or is an output the inventory marks pending
+    inv_models = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
+    pending = {m["outputs"] for m in inv_models if m.get("outputs_pending")}
+    for route, page in pages.items():
+        for c in re.findall(r'<code class="path">(.*?)</code>', page, re.DOTALL):
+            p = re.sub(r"<[^>]+>", "", c).replace("&lt;", "<").replace("&gt;", ">")
+            if p.startswith(("data_store/", "docs/", "dashboard/", "joint_vol_calibration/", "scripts/")) \
+                    and "<" not in p and p not in pending:
+                assert (ROOT / p).exists(), (route, p)
+    cal = _visible_text(re.sub(r'<wbr>|<span class="nowrap">|</span>', "", pages["/calibration"]))
+    q = max((SHIPPED / "calibrations").glob("quintic_cal_*.pkl")).name
+    assert f"Quintic: data_store/calibrations/{q}" in cal
 
 
 # ── browser checks (Chromium via Playwright; skipped where it is not installed) ──

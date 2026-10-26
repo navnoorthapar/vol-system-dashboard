@@ -376,6 +376,20 @@ def path_breaks(text: Any) -> Any:
 app.jinja_env.filters["path"] = path_breaks
 
 
+def date_nowrap(text: Any) -> Any:
+    """Prose with every ISO date in a no-wrap span: the browser breaks after the
+    hyphen, so '2025-01-17' split as '2025-' / '01-17' at a line end."""
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    return Markup(re.sub(r"\b(\d{4}-\d{2}-\d{2})\b", r'<span class="nowrap">\1</span>',  # noqa: S704
+                         str(escape(text))))
+
+
+app.jinja_env.filters["dates"] = date_nowrap
+
+
 # ── Market data readers (DB) ───────────────────────────────────────────────────
 def _read_spx() -> pd.DataFrame:
     """SPX closes and log returns, date-indexed, ascending.
@@ -1250,7 +1264,7 @@ def load_page2() -> dict[str, Any]:
             mc = qprov.get("mc") or {}
             quad = qprov.get("vix_quadrature") or {}
             q = {
-                "as_of": q_date,
+                "as_of": q_date, "file": Path(qpath).name,
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
                 "theta": round(float(qp["theta"]), 4), "alpha0": round(float(qp["alpha0"]), 4),
                 "alpha1": round(float(qp["alpha1"]), 4), "alpha3": round(float(qp["alpha3"]), 4),
@@ -1565,13 +1579,24 @@ def annual_returns(nav: pd.Series) -> list[dict]:
     year, so the years did not compound to the total.
     """
     nav = nav.dropna()
-    year_end = nav.groupby(nav.index.year).last()
+    idx = cast(pd.DatetimeIndex, nav.index)
+    year_end = nav.groupby(idx.year).last()
     out, base = [], float(nav.iloc[0])
     for yr, end in year_end.items():
+        days = idx[idx.year == yr]
         out.append({"year": int(yr), "ret_pct": (float(end) / base - 1.0) * 100.0,
-                    "partial": bool(yr == nav.index[-1].year and nav.index[-1].month < 12)})
+                    "partial": bool(yr == idx[-1].year and idx[-1].month < 12),
+                    "first": str(days[0].date()), "last": str(days[-1].date()), "sessions": len(days)})
         base = float(end)
     return out
+
+
+def partial_year_note(ann: list[dict]) -> str | None:
+    """'2025 YTD: 2025-01-02 → 2025-03-24, 57 sessions' for each partial year of
+    annual_returns, so a year label marked YTD always carries the span it covers."""
+    parts = [f"{a['year']} YTD: {a['first']} → {a['last']}, {a['sessions']:,} sessions"
+             for a in ann if a.get("partial")]
+    return "; ".join(parts) or None
 
 
 def window_returns(nav: pd.Series, periods: dict, end: str | None = None) -> list[dict]:
@@ -1909,6 +1934,7 @@ def load_page4() -> dict[str, Any]:
         d["ann"] = annual_returns(nav)
         d["ann_years"] = [a["year"] for a in d["ann"]]
         d["ann_rets"] = [round(a["ret_pct"], 2) for a in d["ann"]]
+        d["ann_partial_note"] = partial_year_note(d["ann"])
 
         d["wf"] = half_year_sharpes(nav)
         d["wf_periods"] = [w["period"] + (" (partial)" if w["partial"] else "") for w in d["wf"]]
@@ -2163,7 +2189,9 @@ def load_page4() -> dict[str, Any]:
         _logger.info("classifier evaluation unavailable: %s", exc)
 
     tby = d["tbill_by_year"]
-    rate_txt = ", ".join(f"{y}: {v * 100:.2f}%" for y, v in sorted(tby.items())
+    ytd_years = {a["year"] for a in d.get("ann") or [] if a.get("partial")}
+    rate_txt = ", ".join(f"{y}{' YTD' if y in ytd_years else ''}: {v * 100:.2f}%"
+                         for y, v in sorted(tby.items())
                          if y in (min(tby), 2023, max(tby))) if tby else "not available"
     sh = d["r2_share"] or {}
 
@@ -2881,6 +2909,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         lim = max((abs(v) for m in grid.values() for v in m.values()), default=0.01) or 0.01
         d["monthly"] = {"cols": [*MONTHS, "Year"], "rows": []}
         ann = {a["year"]: a["ret_pct"] / 100.0 for a in d.get("ann") or []}
+        part = {a["year"]: a for a in d.get("ann") or [] if a.get("partial")}
         for yr in sorted(grid):
             cells = []
             for mo in range(1, 13):
@@ -2889,10 +2918,13 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                                   detail=(f"{MONTHS[mo - 1]} {yr}: "
                                           f"{signed(v * 100 if v is not None else None, '.2f', '%')}")))
             y = ann.get(yr)
+            py = part.get(yr)
+            yl = f"{yr} YTD" if py else str(yr)
+            span = f" ({py['first']} → {py['last']})" if py else ""
             cells.append(cell(signed(y * 100 if y is not None else None, ".1f"),
                               pnl_colour(y, max(lim * 3, 0.01)),
-                              detail=f"{yr}: {signed(y * 100 if y is not None else None, '.2f', '%')}"))
-            d["monthly"]["rows"].append({"label": str(yr), "cells": cells})
+                              detail=f"{yl}{span}: {signed(y * 100 if y is not None else None, '.2f', '%')}"))
+            d["monthly"]["rows"].append({"label": yl, "cells": cells})
         d["monthly"]["lim"] = lim
     # sleeves, annual returns, half-year Sharpe as signed bars
     if d.get("signal_labels"):
@@ -2916,7 +2948,8 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                "unit": "%"},
             series=[{"name": "Return", "type": "bar", "signed": True, "data": d["ann_rets"]}],
             xs=labels, csv="annual_returns.csv",
-            describe="Calendar-year returns; they compound to the cumulative return.",
+            describe=("Calendar-year returns; they compound to the cumulative return."
+                      + (f" {d['ann_partial_note']}." if d.get("ann_partial_note") else "")),
             table=charts.table("Annual return (%)", ["Year", "Return#"],
                                [[lab, signed(v, ".2f", "%")] for lab, v in zip(labels, d["ann_rets"])]))
     if d.get("wf"):
@@ -3038,9 +3071,30 @@ def inference_extras(d: dict, inf: dict) -> None:
             if not b:
                 continue
             by = b.get("by_year") or {}
+            py = b.get("partial_years") or {}
             d["implied_beta"].append({"index": ix, "overall": _num(b.get("overall")), "n": b.get("n_periods"),
                                       "years": {str(y): _num(v if not isinstance(v, dict) else v.get("beta"))
-                                                for y, v in by.items()}})
+                                                for y, v in by.items()},
+                                      "partial": {str(y): p for y, p in py.items() if isinstance(p, dict)}})
+        # a year the artifact records as partial is headed 'YTD' and footnoted with
+        # its window and each index's roll periods (benchmarks.json partial_years)
+        if d["implied_beta"]:
+            years = list(d["implied_beta"][0]["years"])
+            ytd = [y for y in years if any(y in r["partial"] for r in d["implied_beta"])
+                   or str(y) in {str(k) for k in (bm.get("partial_years") or {})}]
+            d["implied_beta_cols"] = [f"{y} YTD" if y in ytd else y for y in years]
+            notes = []
+            for y in ytd:
+                per = [r for r in d["implied_beta"] if y in r["partial"]]
+                win = next((r["partial"][y].get("window") for r in per if r["partial"][y].get("window")),
+                           (bm.get("partial_years") or {}).get(y))
+                span = " → ".join(str(win).split("..")) if win else None
+                legs = [f"{r['index']} {int(r['partial'][y]['n_periods']):,} roll periods (expiries "
+                        f"{r['partial'][y].get('first_expiry')} → {r['partial'][y].get('last_expiry')})"
+                        for r in per if r["partial"][y].get("n_periods") is not None]
+                notes.append(f"{y} YTD covers " + (span or "part of the year")
+                             + (f": {', '.join(legs)}" if legs else ""))
+            d["implied_beta_note"] = "; ".join(notes) or None
         d["canonical_beta"] = _num(ib.get("canonical_beta"))
         d["bench_window"] = bm.get("window")
     # volatility-forecast evaluation (forecast_eval.json)
@@ -4074,8 +4128,9 @@ def load_model_risk() -> dict[str, Any]:
         add(INV_BETA, "β drift: newest chain's ATM vol / VIX against the frozen β", drift,
             (f"{_fmt(newest['ratio'], '.3f')} on {newest['session']} vs β = {_fmt(beta, '.2f')}" if newest
              else "no later chain"),
-            "beta_drift", "data_store/backtest/full_results.pkl",
-            "The backtest marks every straddle at β·VIX.")
+            "beta_drift", ["data_store/backtest/full_results.pkl", "data_store/vol_system.db"],
+            "The backtest marks every straddle at β·VIX: β as the run recorded it (atm_to_vix_ratio) "
+            "against the market DB's newest chain.")
     # M4: market DB lag behind the labels (the regime card's inputs)
     with _loader_boundary(d, "rule labels / market DB"):
         labels = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
@@ -4085,7 +4140,8 @@ def load_model_risk() -> dict[str, Any]:
         lag = session_age(db_date, lab_date)
         add(INV_LABELS, "Market database lag behind the rule labels (sessions)", _num(lag), _fmt(lag),
             "label_lag",
-            "data_store/vol_system.db", f"Labels {lab_date}; market DB {db_date}.")
+            ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"],
+            f"Labels {lab_date}; market DB {db_date}.")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:

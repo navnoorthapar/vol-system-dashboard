@@ -228,7 +228,7 @@
       </tbody>
     </table>
     </div>
-    <p class="note">Counts in brackets are quotes. ¹ Model E[VIX_T] against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets (<code>{{ h.file }}</code>{% if h.baseline_file %}; re-pricing: <code>{{ h.baseline_file }}</code>{% endif %}).
+    <p class="note">Counts in brackets are quotes. ¹ Model E[VIX_T] against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets (Quintic: <code class="path">{{ ('data_store/calibrations/' ~ q.file)|path }}</code>; Heston: <code class="path">{{ ('data_store/calibrations/' ~ h.file)|path }}</code>{% if h.baseline_file %}; Heston re-priced on the Quintic targets: <code class="path">{{ ('data_store/calibrations/' ~ h.baseline_file)|path }}</code>{% endif %}).
     {% if not h.gate_ok %}That Heston fit fails today's quality gate ({{ h.gate_reason }}), so it is not the page headline.{% endif %}</p>
     {% else %}<p class="note">No Heston fit exists for the Quintic session ({{ q.as_of|fmt }}), so no like-for-like comparison is shown.</p>{% endif %}
     {% call m.method('Reading this honestly') %}

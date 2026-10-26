@@ -89,7 +89,7 @@
   {% call m.panel('annual', 'Annual return and half-year Sharpe', 's5') %}
     {% if d.charts.annual %}{{ m.chart(d.charts.annual, 'h180') }}{% endif %}
     {% if d.charts.halfyear %}{{ m.chart(d.charts.halfyear, 'h220') }}{% endif %}
-    <p class="note">Years compound exactly to the cumulative return. <strong class="neg">{{ d.wf_neg|fmt }}</strong> of {{ d.wf_total|fmt }} half-years are negative{% if d.wf_flat %} · {{ d.wf_flat }} flat{% endif %}. Sub-periods of one run: nothing is refitted per window, so this is not walk-forward evidence.</p>
+    <p class="note">Years compound exactly to the cumulative return{% if d.ann_partial_note %} ({{ d.ann_partial_note|dates }}){% endif %}. <strong class="neg">{{ d.wf_neg|fmt }}</strong> of {{ d.wf_total|fmt }} half-years are negative{% if d.wf_flat %} · {{ d.wf_flat }} flat{% endif %}. Sub-periods of one run: nothing is refitted per window, so this is not walk-forward evidence.</p>
   {% endcall %}
 </div>
 
@@ -146,10 +146,11 @@
       {% if d.implied_beta %}
       <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="β implied by the put-write indices (scrollable)">
       <table class="tbl dense" id="implied-beta"><caption>β that reprices the put-write index from β·VIX (backtest β {{ d.canonical_beta|fmt('.2f') }})</caption>
-        <thead><tr><th scope="col">Index</th><th scope="col" class="num">All</th>{% for y in (d.implied_beta[0].years.keys()|list) %}<th scope="col" class="num">{{ y }}</th>{% endfor %}</tr></thead>
+        <thead><tr><th scope="col">Index</th><th scope="col" class="num">All</th>{% for y in d.implied_beta_cols %}<th scope="col" class="num nowrap">{{ y }}{% if 'YTD' in y %}<sup aria-hidden="true">*</sup>{% endif %}</th>{% endfor %}</tr></thead>
         <tbody>{% for r in d.implied_beta %}<tr><td>{{ r.index }}</td><td class="num">{{ r.overall|fmt('.3f') }}</td>{% for y, v in r.years.items() %}<td class="num">{{ v|fmt('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
       </table>
       </div>
+      {% if d.implied_beta_note %}<p class="note" id="implied-beta-note"><span aria-hidden="true">* </span>Partial year. {{ d.implied_beta_note|dates }}.</p>{% endif %}
       {% endif %}
     {% else %}
       {{ m.missing({'paths': ['data_store/backtest/inference/benchmarks.json'], 'producer': 'the inference report (scripts/inference_report.py, joint_vol_calibration/stats)'}, 'Correlation, β and excess Sharpe of each sleeve against Cboe PUT, WPUT, BXM, BFLY and CNDR, which settle on real prices, and the β each put-write index implies.') }}
