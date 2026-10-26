@@ -373,13 +373,18 @@ def test_vix_terms_are_the_headline_methods_and_the_split_adds_up_to_the_gap(ses
     vix = _inputs(session)[2]
     rows = ds.vix_terms(vix)
     assert [r["ticker"] for r in rows] == [t for t in ds.VIX_FAMILY if t in vix["indices"]]
-    n_split = 0
     for r in rows:
         ix = vix["indices"][r["ticker"]]
-        m = ix[ix["headline_method"] or "cboe_rules"]
-        assert (r["near"]["days"], r["next"]["days"]) == (m["near"]["days"], m["next"]["days"])
-        assert r["near"]["expiry"] == str(m["near"]["expiry"])[:10]
-        assert r["near_weight"] == m["near_weight"]
+        m = ix.get(ix.get("headline_method") or "cboe_rules") or {}
+        if m.get("near") and m.get("next"):
+            assert (r["near"]["days"], r["next"]["days"]) == (m["near"]["days"], m["next"]["days"])
+            assert r["near"]["expiry"] == str(m["near"]["expiry"])[:10]
+        else:
+            # no terms recorded ('fewer than two usable terms'): only an index
+            # the chain cannot replicate (the bot's sessions include such chains)
+            assert ix.get("replicated") is None
+            assert (r["near"], r["next"]) == (None, None)
+        assert r["near_weight"] == m.get("near_weight")
         if ix.get("replicated") is None:
             assert (r["gap"], r["truncation"], r["unexplained"]) == (None, None, None)
             continue
@@ -388,11 +393,18 @@ def test_vix_terms_are_the_headline_methods_and_the_split_adds_up_to_the_gap(ses
         if not ga.get("available"):
             assert (r["truncation"], r["unexplained"]) == (None, None)
             continue
-        n_split += 1
         assert (r["truncation"], r["unexplained"]) == (-ga["truncation_pts"], -ga["residual_pts"])
         assert r["truncation"] + r["unexplained"] == pytest.approx(r["gap"], abs=1e-9)
         assert r["far_wing"] == ga["far_wing_market_minus_model_pts"]
-    assert n_split >= 3
+
+
+def test_vix_terms_split_is_exercised():
+    """The split branch above is not vacuous: across the stored sessions at
+    least three indices carry an attributed gap. Counted over every session,
+    not per session: a later session whose chain replicates fewer indices (the
+    bot stores whatever the book allows) must not fail the suite."""
+    n = sum(r["truncation"] is not None for s in SESSIONS for r in ds.vix_terms(_inputs(s)[2]))
+    assert n >= 3
 
 
 def test_vix_terms_of_the_known_session():
