@@ -235,6 +235,10 @@ sub, sup { font-size: 0.72em; }
 .btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }
 .btn .key-swatch.diamond { width: 7px; height: 7px; border: none; border-radius: 0; background: currentColor; transform: rotate(45deg); }
 .legend-bar { display: flex; flex-wrap: wrap; gap: 4px; }
+/* a legend button wider than its bar wraps its label instead of widening the page
+   (the variance-swap strip's 'Cboe close (16:15 ET): VIX9D, ...' at 320 px) */
+.legend-bar .btn { white-space: normal; max-width: 100%; text-align: left; }
+.legend-bar .btn .key-swatch { flex: none; }
 .chip {
   display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em;
   text-transform: uppercase; padding: 0 6px; border-radius: 2px; border: 1px solid var(--line2); color: var(--text2);

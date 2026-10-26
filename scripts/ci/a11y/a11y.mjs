@@ -6,7 +6,8 @@
 // page in headless Chromium (Playwright) and fails if
 //   * axe-core reports any WCAG 2.0/2.1/2.2 A or AA violation, at 1440 px (desktop) or
 //     390 px (phone), in the dark and the light colour scheme;
-//   * a page scrolls horizontally at any width from 320 to 1920 px;
+//   * a page scrolls horizontally at any width from 320 to 1920 px, or at 320 px with every
+//     glyph spaced 0.06em wider (a label must not fit only with this machine's fonts);
 //   * a page throws a JavaScript error;
 //   * a page needs the network: every request to another origin is aborted, so the
 //     published pages must work from their own files (the CDN fallback for the
@@ -33,6 +34,7 @@ const PAGES = ['index.html', 'surface.html', 'calibration.html', 'risk.html', 'r
   'corrections.html', 'model-risk.html', '404.html'];
 const AXE_VIEWPORTS = [{ width: 1440, height: 900 }, { width: 390, height: 844 }];
 const OVERFLOW_WIDTHS = [320, 390, 768, 1024, 1440, 1920];
+const STRESS_SPACING = '0.06em';            // the font-metric margin check below
 const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
   '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.xml': 'application/xml',
@@ -98,11 +100,25 @@ for (const name of PAGES) {
     if (sw > width + 1) entry.overflow.push({ width, scrollWidth: sw });
     await ctx.close();
   }
+  {
+    // Font-metric margin: the narrowest width again with every glyph spaced
+    // wider. A label that fits only with this machine's fonts (a fallback
+    // glyph is wider on another runner) scrolls the page here first: CI's
+    // runner overflowed surface.html by 7 px at 320 px while this machine did not.
+    const ctx = await browser.newContext({ viewport: { width: OVERFLOW_WIDTHS[0], height: 900 } });
+    const { page } = await openPage(ctx, name);
+    await page.addStyleTag({ content: `* { letter-spacing: ${STRESS_SPACING} !important; }` });
+    await page.waitForTimeout(200);
+    const sw = await page.evaluate(() => document.documentElement.scrollWidth);
+    if (sw > OVERFLOW_WIDTHS[0] + 1) entry.overflow.push({ width: OVERFLOW_WIDTHS[0], scrollWidth: sw, stressed: true });
+    await ctx.close();
+  }
   entry.blocked = [...new Set(entry.blocked)];
   entry.errors = [...new Set(entry.errors)];
   report.pages.push(entry);
   for (const v of entry.axe) report.failures.push(`${name} @${v.width}px ${v.scheme}: axe ${v.id} (${v.impact}, ${v.nodes} node(s)): ${v.help}`);
-  for (const o of entry.overflow) report.failures.push(`${name}: scrolls horizontally at ${o.width}px (scrollWidth ${o.scrollWidth})`);
+  for (const o of entry.overflow) report.failures.push(`${name}: scrolls horizontally at ${o.width}px` +
+    (o.stressed ? ` with letter-spacing +${STRESS_SPACING}` : '') + ` (scrollWidth ${o.scrollWidth})`);
   for (const e of entry.errors) report.failures.push(`${name}: JavaScript error: ${e}`);
   for (const b of entry.blocked) report.failures.push(`${name}: requests another origin: ${b}`);
   const status = entry.axe.length + entry.overflow.length + entry.errors.length + entry.blocked.length ? 'FAIL' : 'ok';
