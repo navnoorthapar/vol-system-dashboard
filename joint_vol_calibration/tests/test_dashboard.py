@@ -4851,6 +4851,58 @@ def test_skew_term_heston_series_is_the_published_fit_and_its_difference_converg
         assert sk["refit"]["params"] == {k: top["params"][k] for k in keys}
 
 
+
+def _gil_pelaez_call(params: dict, k: float, T: float) -> float:
+    """Forward-normalised Heston call (S = F = 1, r = q = 0) by Gil-Pelaez
+    inversion of the characteristic function (Albrecher et al.'s 'little trap'
+    form), integrated with scipy quad: no code shared with the repository's
+    Lewis-contour pricer."""
+    from scipy.integrate import quad
+
+    ka, th, sg, rho, v0 = (params[x] for x in ("kappa", "theta", "sigma", "rho", "v0"))
+
+    def cf(u: complex) -> complex:
+        b = ka - rho * sg * 1j * u
+        d = np.sqrt(b * b + sg * sg * (1j * u + u * u))
+        g = (b - d) / (b + d)
+        e = np.exp(-d * T)
+        return np.exp(ka * th / sg ** 2 * ((b - d) * T - 2 * np.log((1 - g * e) / (1 - g)))
+                      + v0 * (b - d) / sg ** 2 * (1 - e) / (1 - g * e))
+
+    def prob(shift: complex) -> float:
+        f = lambda u: (np.exp(-1j * u * k) * cf(u + shift) / (1j * u)).real  # noqa: E731
+        return 0.5 + quad(f, 1e-10, 2000.0, limit=2000, epsabs=1e-13, epsrel=1e-12)[0] / np.pi
+
+    return prob(-1j) - np.exp(k) * prob(0.0)
+
+
+def test_heston_short_end_skew_agrees_with_an_independent_pricer(dash):
+    """P2.2: the plan expected the market's short-dated ATM skew to lie above the
+    published Heston fit's; the page shows the opposite and says so in a
+    'does not work' finding. That finding rests on heston_atm_skew, so at the
+    headline session's shortest listed expiry it is checked against a
+    Gil-Pelaez pricer that shares no code with the repository's (Richardson
+    central difference at h = 0.01 / 0.005, Black-76 inverted with brentq), and
+    the side of the SVI-cal market skew it falls on is the side the rows say."""
+    from scipy.optimize import brentq
+    from scipy.stats import norm
+
+    sk = dash.load_page2()["skew_term"]
+    first = next(r for r in sk["rows"] if r["heston"] is not None)
+    T = first["T_days"] / 365.0
+
+    def iv(k: float) -> float:
+        c = _gil_pelaez_call(sk["heston_params"], k, T)
+        black = lambda s: (norm.cdf(-k / (s * np.sqrt(T)) + s * np.sqrt(T) / 2)  # noqa: E731
+                           - np.exp(k) * norm.cdf(-k / (s * np.sqrt(T)) - s * np.sqrt(T) / 2))
+        return brentq(lambda s: black(s) - c, 1e-4, 5.0, xtol=1e-14)
+
+    d_h = (iv(0.01) - iv(-0.01)) / 0.02
+    d_hh = (iv(0.005) - iv(-0.005)) / 0.01
+    ref = (4 * d_hh - d_h) / 3
+    assert first["heston"] == pytest.approx(ref, rel=2e-3), (first["T_days"], first["heston"], ref)
+    assert (abs(ref) > abs(first["svi"])) == (first["ratio"] > 1)
+
 def test_skew_term_chart_is_log_log_with_units_and_the_slope_table_is_polyfit(dash, pages):
     ds = _desk_module()
     html = pages["/calibration"]
