@@ -117,10 +117,17 @@
       });
     }
     if (s.type === 'scatter') {
-      return Object.assign(base, {
+      var sc = Object.assign(base, {
         type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6,
         itemStyle: s.hollow ? { color: 'transparent', borderColor: c, borderWidth: 1.4, opacity: s.opacity || 1 } : { color: c, opacity: s.opacity || 0.9 },
       });
+      // a short label at each point (the VX leg's model − settlement gap)
+      if (s.pointLabels) {
+        sc.label = { show: true, position: s.labelPos || 'right', distance: 4, color: T.text3, fontFamily: T.mono, fontSize: 10,
+          formatter: function (p) { var l = s.pointLabels[p.dataIndex]; return l === null || l === undefined ? '' : String(l); } };
+        sc.labelLayout = { hideOverlap: true };
+      }
+      return sc;
     }
     if (s.type === 'bar') {
       var bar = Object.assign(base, { type: 'bar', data: data, barMaxWidth: s.barMaxWidth || 28, stack: s.stack || undefined });

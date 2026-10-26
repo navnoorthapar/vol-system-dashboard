@@ -90,16 +90,46 @@
   {% endif %}
 </div>
 
-<div class="g pair">
-  {% call m.panel('oos', 'Out-of-sample error by expiry', 's7', (d.n_oos|fmt(',')) ~ ' quotes') %}
-    {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h300 grow') }}
+<div class="g">
+  {% call m.panel('oos', 'Out-of-sample error by expiry', 's12', (d.n_oos|fmt(',')) ~ ' quotes') %}
+    {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h260') }}
     <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors. The short end is where a one-factor model with σ on its box ceiling fails.</p>
     {% else %}<p class="note">This fit stores no out-of-sample errors by expiry.</p>{% endif %}
   {% endcall %}
-  {% call m.panel('vixleg', 'VIX leg · indices, market and model', 's5', d.session) %}
-    {% if d.charts.vix %}{{ m.chart(d.charts.vix, 'h300 grow') }}
-    <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's expected average vol to each horizon. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
-    {% else %}<p class="note">No VIX leg recorded.</p>{% endif %}
+</div>
+
+<div class="g">
+  {% call m.panel('vixleg', 'VIX leg · indices in the fit, VX futures out of sample', 's12', d.session) %}
+    <div class="split">
+      <div>
+        <h3 class="sub-head">VIX indices · {{ d.session }} · in the objective</h3>
+        {% if d.charts.vix %}{{ m.chart(d.charts.vix, 'h260') }}
+        <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's expected average vol to each horizon. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
+        {% else %}<p class="note">No VIX leg recorded.</p>{% endif %}
+      </div>
+      <div id="vx-leg">
+        {% set vl = d.vx_leg or {} %}
+        <h3 class="sub-head">VX futures · E[VIX<sub>T</sub>] against settlements · out of sample</h3>
+        {% if vl.views %}
+        <div class="tabs js-only" role="tablist" aria-label="Gated fit whose VX futures leg is shown" data-state-key="vx" hidden>
+          {% for v in vl.views %}<button class="btn" type="button" role="tab" id="tab-vx-{{ v.session }}" aria-selected="{{ 'true' if v.session == vl.default else 'false' }}" aria-controls="vx-{{ v.session }}" data-value="{{ v.session }}">{{ v.session }}{% if v.headline %} · headline{% endif %}</button>{% endfor %}
+        </div>
+        {% for v in vl.views %}
+        <div id="vx-{{ v.session }}" role="tabpanel" aria-labelledby="tab-vx-{{ v.session }}" class="vx-view"{% if v.session != vl.default %} hidden{% endif %}>
+          {% if v.leg %}
+          {{ m.chart(v.spec, 'h260') }}
+          <p class="note" id="vx-rmse-{{ v.session }}"><strong>{{ v.session }}{% if v.headline %} (headline){% endif %}: RMSE {{ v.leg.rmse|fmt('.2f') }} index pts</strong> over {{ v.leg.n|plural('monthly contract') }}; model below the settlement on {{ v.leg.n_below }} of {{ v.leg.n }}, mean gap {{ v.leg.mean_gap|signed('.2f') }}.{% if v.matches_record %} Equal to the fit’s recorded out-of-sample VX RMSE (<code>losses.vx_futures_rmse_oos</code>).{% elif v.recorded is not none %} The fit recorded {{ v.recorded|fmt('.2f') }} when it ran; the stored settlements have changed since.{% else %} The fit recorded no VX score.{% endif %}</p>
+          {% else %}
+          <p class="vx-empty" data-vx-empty="{{ v.session }}"><strong>{{ v.session }}{% if v.headline %} (headline fit){% endif %}:</strong> {{ v.empty|dates }} No futures curve is drawn for this fit: an earlier session’s settlements are never paired with a later fit.</p>
+          {% endif %}
+        </div>
+        {% endfor %}
+        {% else %}<p class="note">No gate-passing fit to score.</p>{% endif %}
+      </div>
+    </div>
+    {% if (d.vx_leg or {}).views %}{% set vl = d.vx_leg %}
+    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is a close snapshot with no quote time and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
+    {% endif %}
   {% endcall %}
 </div>
 
@@ -180,11 +210,11 @@
   {% call m.panel('history', 'Gate-passing fits', 's5', (d.history|length) ~ ' sessions') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Parameter history of gate-passing fits (scrollable)">
     <table class="tbl dense">
-      <thead><tr><th scope="col">Session</th>{% for k, sy in [('kappa','κ'),('theta','θ'),('sigma','σ'),('rho','ρ'),('v0','v₀')] %}<th scope="col" class="num"><span class="sym">{{ sy }}</span></th>{% endfor %}<th scope="col" class="num">IS</th><th scope="col" class="num">OOS</th></tr></thead>
-      <tbody>{% for h in d.history|reverse %}<tr{% if h.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ h.session }}</td><td class="num">{{ h.kappa|fmt('.2f') }}</td><td class="num">{{ h.theta|fmt('.4f') }}</td><td class="num">{{ h.sigma|fmt('.3f') }}</td><td class="num">{{ h.rho|fmt('.3f') }}</td><td class="num">{{ h.v0|fmt('.4f') }}</td><td class="num">{{ h.rmse|fmt('.2f') }}</td><td class="num">{{ h.oos|fmt('.2f') }}</td></tr>{% endfor %}</tbody>
+      <thead><tr><th scope="col">Session</th>{% for k, sy in [('kappa','κ'),('theta','θ'),('sigma','σ'),('rho','ρ'),('v0','v₀')] %}<th scope="col" class="num"><span class="sym">{{ sy }}</span></th>{% endfor %}<th scope="col" class="num">IS</th><th scope="col" class="num">OOS</th><th scope="col" class="num">VX OOS (index pts)</th></tr></thead>
+      <tbody>{% for h in d.history|reverse %}<tr{% if h.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ h.session }}</td><td class="num">{{ h.kappa|fmt('.2f') }}</td><td class="num">{{ h.theta|fmt('.4f') }}</td><td class="num">{{ h.sigma|fmt('.3f') }}</td><td class="num">{{ h.rho|fmt('.3f') }}</td><td class="num">{{ h.v0|fmt('.4f') }}</td><td class="num">{{ h.rmse|fmt('.2f') }}</td><td class="num">{{ h.oos|fmt('.2f') }}</td><td class="num" data-vx-oos>{{ h.vx|fmt('.2f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">In-sample and out-of-sample SPX IV RMSE in vol pts. Compare session-to-session moves with the standard errors in the identifiability panel.</p>
+    <p class="note">In-sample and out-of-sample SPX IV RMSE in vol pts; VX OOS: the RMSE of the fit’s E[VIX<sub>T</sub>] against the session’s VX settlements, index pts (<a href="#vixleg">VX leg</a>; — where none is stored). Compare session-to-session moves with the standard errors in the identifiability panel.</p>
     {% if d.charts.gated %}{{ m.chart(d.charts.gated, 'h180 grow') }}{% endif %}
   {% endcall %}
 </div>

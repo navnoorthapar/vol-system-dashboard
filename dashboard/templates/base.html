@@ -45,7 +45,7 @@
   <span class="sb-item sb-state lvl-{{ 'ok' if _worst == 'ok' else ('warn' if _worst == 'warn' else 'error') }}">
     {% if d and d.errors %}■ DATA ERROR{% elif _worst == 'error' %}■ STALE INPUT{% elif _worst == 'warn' %}▲ LAGGING INPUT{% else %}● END OF DAY{% endif %}
   </span>
-  {% for s in c.sources %}
+  {% for s in c.sources if s.bar %}
   <span class="sb-item{% if s.short in ('BACKTEST', 'SURFACE', 'GREEKS') %} sb-opt{% endif %}" title="{{ s.label }}: {{ s.artifact }}">
     <span class="sb-k">{{ s.short }}</span><span class="sb-v lvl-{{ s.level }}">{{ (('≤' if s.short == 'BACKTEST' else '') ~ s.date) if s.date else ('n/a' if s.aged else 'pending') }}</span>
   </span>

@@ -76,6 +76,7 @@ if str(DASH) not in sys.path:
 
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
+import desk_market  # noqa: E402
 import desk_surface  # noqa: E402
 from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
     _HEAT_NEG,
@@ -436,6 +437,35 @@ def _read_vix_wide() -> pd.DataFrame:
     wide = df.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
     wide.columns.name = None
     return wide.sort_index()
+
+
+VX_TABLE = "data_store/vol_system.db"     # table vix_futures_daily
+
+
+def vx_last_date() -> str | None:
+    """The newest session the market DB stores VX futures for (None: no futures table)."""
+    with _db() as con:
+        try:
+            row = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()
+        except sqlite3.OperationalError:          # a market DB without the futures table
+            return None
+    return str(row[0])[:10] if row and row[0] else None
+
+
+def vx_session_rows(session: str) -> list[dict]:
+    """The VX futures rows of exactly ``session``: the query of
+    database.get_vix_futures_curve (contracts live on the session, monthly only,
+    price = COALESCE(settle, close)), the rows the calibrator scores out of sample.
+    Never a nearby session's rows: an empty list when the session has none."""
+    with _db() as con:
+        try:
+            df = pd.read_sql(
+                "SELECT expiry_date, expiry_month, is_weekly, COALESCE(settle, close) AS price, "
+                "days_to_expiry FROM vix_futures_daily WHERE date = ? AND expiry_date > ? AND is_weekly = 0 "
+                "ORDER BY expiry_date", con, params=(session, session))
+        except (sqlite3.OperationalError, pd.errors.DatabaseError):
+            return []
+    return cast("list[dict]", df.to_dict("records"))
 
 
 def _latest_market_session() -> str | None:
@@ -2413,6 +2443,7 @@ def _gated_history() -> list[dict]:
                     "rmse": _num(losses.get("spx_iv_rmse")), "oos": _num(losses.get("spx_oos_iv_rmse")),
                     "vix": _num(losses.get("vix_index_rmse")),
                     "wing": _num(losses.get("spx_oos_put_wing_rmse")),
+                    "vx": _num(losses.get("vx_futures_rmse_oos")),
                     "pinned": list(c.get("pinned_params") or [])})
     return sorted(out, key=lambda r: r["session"])
 
@@ -2873,6 +2904,66 @@ def gated_fits_spec(hist: Sequence[dict], session: str | None) -> dict | None:
                              _fmt(h.get("wing"), ".2f")] for h in hist]))
 
 
+VX_LEG_REL_TOL = 1e-6     # the page's recomputed VX RMSE against the fit's own record
+
+
+def vx_empty_sentence(session: str, last: str | None) -> str:
+    """Why a gated fit has no VX leg on the page (nothing is drawn in its place)."""
+    if last is None:
+        return f"The market database has no VX futures table; none stored for {session}."
+    if session > last:
+        return f"VX futures table ends {last}; none stored for {session}."
+    return f"No monthly VX settlements are stored for {session}."
+
+
+def vx_leg_spec(session: str, leg: dict) -> dict:
+    """One gated fit's VX leg: settlements against the model E^Q[VIX_T], gap labels."""
+    rows = leg["rows"]
+    return charts.xy(
+        f"chart-vx-{session}", f"VX futures on {session}: settlements against the Heston fit's E[VIX_T]",
+        x={"type": "value", "name": "Days to expiry (calendar)", "digits": 0, "min": 0, "zero": True},
+        y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
+        series=[{"name": "Heston E[VIX_T]", "type": "line", "color": model_colour("heston_v2"), "width": 1.6,
+                 "legend": True, "data": leg["curve"]},
+                {"name": "VX settlement", "type": "scatter", "color": "headline", "size": 7, "legend": True,
+                 "data": [[r["days"], r["settle"]] for r in rows],
+                 "pointLabels": [signed(r["gap"], ".2f") for r in rows], "pointPrefix": "model − settle ",
+                 "labelPos": "bottom"}],
+        tooltip="item", csv=f"vx_leg_{session}.csv", grid={"left": 46, "top": 12},
+        describe=(f"{leg['n']} monthly VX settlements of {session} and the fit's model price at each "
+                  f"expiry; RMSE {_fmt(leg['rmse'], '.2f')} index pts, model below the settlement on "
+                  f"{leg['n_below']} of {leg['n']}."),
+        table=charts.table(f"VX futures on {session}: settlement and model (index pts)",
+                           ["Contract", "Expiry", "Days#", "Settlement#", "Model E[VIX_T]#",
+                            "Model − settlement#"],
+                           [[r["month"], r["expiry"], _fmt(r["days"], ".0f"), _fmt(r["settle"], ".2f"),
+                             _fmt(r["model"], ".2f"), signed(r["gap"], ".2f")] for r in rows]))
+
+
+def vx_leg_view(hist: Sequence[dict], headline: str | None) -> dict:
+    """The VX futures leg of every gated fit (Calibration #vixleg): each fit against
+    the settlements of its own session only, the RMSE recomputed and checked
+    against the fit's record, and an explicit empty state where the session has
+    no settlements. The tab shown first is the newest fit with a leg."""
+    last = vx_last_date()
+    views = []
+    for h in hist:
+        rows = vx_session_rows(h["session"]) if last is not None else []
+        leg = desk_market.vx_model_leg(h["params"], rows)
+        rec = h.get("vx")
+        views.append({
+            "session": h["session"], "headline": h["session"] == headline, "leg": leg, "recorded": rec,
+            "matches_record": (leg is not None and rec is not None
+                               and abs(leg["rmse"] - rec) <= VX_LEG_REL_TOL * max(1.0, abs(rec))),
+            "spec": vx_leg_spec(h["session"], leg) if leg else None,
+            "empty": None if leg else vx_empty_sentence(h["session"], last)})
+    with_leg = [v["session"] for v in views if v["leg"]]
+    rmses = [v["leg"]["rmse"] for v in views if v["leg"]]
+    return {"views": views, "last": last, "default": (with_leg[-1] if with_leg else headline),
+            "n_with": len(with_leg), "range": (min(rmses), max(rmses)) if rmses else None,
+            "headline_empty": next((v["empty"] for v in views if v["headline"] and not v["leg"]), None)}
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
     from joint_vol_calibration.config import HESTON_BOUNDS
@@ -2881,7 +2972,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     session = d.get("session")
     hist = _gated_history()
     d["history"] = [{"session": h["session"], **{k: h["params"][k] for k, *_ in PARAM_META},
-                     "oos": h["oos"], "rmse": h["rmse"], "vix": h["vix"]} for h in hist]
+                     "oos": h["oos"], "rmse": h["rmse"], "vix": h["vix"], "vx": h["vx"]} for h in hist]
+    d["vx_leg"] = vx_leg_view(hist, session)
     gated = gated_fits_spec(hist, session)
     if gated:
         d["charts"]["gated"] = gated
@@ -4048,6 +4140,19 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             "Rough Heston in production", "calibration.html#rough-vs-heston",
             f"not adopted: lower out-of-sample error on {jr['n_lower']} of {jr['n_sessions']} sessions, "
             f"but H {h_txt} ({jr['session']})."))
+    # the VX futures leg: scored out of sample only, and not at all where none is stored
+    vl = p2.get("vx_leg") or {}
+    legs = [v["leg"] for v in vl.get("views") or [] if v.get("leg")]
+    if legs:
+        lo, hi = vl["range"]
+        n_c, n_b = sum(g["n"] for g in legs), sum(g["n_below"] for g in legs)
+        rng = _fmt(lo, ".2f") if len(legs) == 1 else f"{_fmt(lo, '.2f')}–{_fmt(hi, '.2f')}"
+        tail = f" {vl['headline_empty']}" if vl.get("headline_empty") else ""
+        nxt.append(item(
+            "VX futures in the joint objective", "calibration.html#vixleg",
+            f"not done: the fits score VX settlements out of sample only, {rng} index pts RMSE on "
+            f"{len(legs)} of {len(vl['views'])} gated fits, the model below the settlement on {n_b} of "
+            f"{n_c} contracts.{tail}"))
     from joint_vol_calibration.config import HESTON_BOUNDS
     nxt.append(item(
         "A wider production σ box", "calibration.html#sigma-tradeoff",
@@ -5230,6 +5335,8 @@ INVENTORY_PATH = DASH / "model_inventory.json"
 # the IDs docs/model_validation uses): the dashboard had its own numbering, so
 # "M4" was the rule labeller here and the joint calibrator in the pack.
 INV_CALIBRATOR, INV_GREEKS, INV_BETA, INV_LABELS, INV_CLASSIFIER = "M4", "M6", "M7", "M10", "M11"
+INV_VX = "M5"
+VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
 
@@ -5281,7 +5388,10 @@ def vx_futures_oos_text(rows: list[dict] | None = None) -> str:
     vals = [v for _, v in have]
     rng = _fmt(vals[0], ".2f") if len(vals) == 1 else f"{_fmt(min(vals), '.2f')}–{_fmt(max(vals), '.2f')}"
     tail = f"; none stored for {', '.join(s for s, _ in sorted(none))}" if none else ""
-    return f"{rng} index pts RMSE out of sample ({plural(len(have), 'session')}{tail})"
+    last = vx_last_date()
+    src = ("; settlements from vix_futures_daily in data_store/vol_system.db"
+           + (f", through {last}" if last else ""))
+    return f"{rng} index pts RMSE out of sample ({plural(len(have), 'session')}{tail}{src})"
 
 
 def load_model_risk() -> dict[str, Any]:
@@ -5356,6 +5466,16 @@ def load_model_risk() -> dict[str, Any]:
             "label_lag",
             ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"],
             f"Labels {lab_date}; market DB {db_date}.")
+    # M5: the VX futures table behind the market DB (the fits' out-of-sample VX leg)
+    with _loader_boundary(d, "VX futures table / market DB"):
+        vx_date = vx_last_date()
+        with _db() as con:
+            db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
+        vx_lag = session_age(vx_date, db_date) if vx_date else None
+        add(INV_VX, VX_LAG_CHECK, _num(vx_lag),
+            _fmt(vx_lag) if vx_date else "no futures table", "label_lag", VX_TABLE,
+            f"vix_futures_daily through {vx_date or '—'}; market DB {db_date}. Only the fits' out-of-sample "
+            f"VX score reads them, so a fit after {vx_date or 'the table'} has none.")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
@@ -5537,6 +5657,11 @@ def load_chrome() -> dict:
     except Exception as exc:
         _logger.info("chrome: backtest unavailable (%s)", exc)
     surf_sessions = artifacts.surface_sessions(DATA)
+    vx_date = None
+    try:
+        vx_date = vx_last_date()
+    except (sqlite3.Error, OSError) as exc:
+        _logger.info("chrome: VX futures unavailable (%s)", exc)
     ref = max([x for x in (spx_date, labels_date) if x], default=None)
     c["latest"] = ref
     rows = [
@@ -5549,12 +5674,19 @@ def load_chrome() -> dict:
          "data_store/surface/<session>/", False),
         ("BACKTEST", "Backtest window end (fixed)", bt_end, "data_store/backtest/full_results.parquet",
          False),
+        # aged and styled like the others, but no headline number reads it (the fits
+        # score VX futures out of sample only), so it is not in the status bar and
+        # does not set the page state; Model Risk carries its lag as a check
+        ("VX", "VX futures settlements", vx_date, VX_TABLE, True),
     ]
+    reference_only = {"VX"}
     for short, label, date, art, aged in rows:
         age = session_age(date, ref) if (aged and date) else None
         level = (stale_level(age) if aged else "ok") if date else ("missing" if aged else "unknown")
         c["sources"].append({"short": short, "label": label, "date": date, "age": age, "level": level,
-                             "artifact": art, "aged": aged})
+                             "artifact": art, "aged": aged, "bar": short not in reference_only})
+        if short in reference_only:
+            continue
         if level in ("error", "missing"):
             c["worst"] = "error"
         elif level == "warn" and c["worst"] == "ok":

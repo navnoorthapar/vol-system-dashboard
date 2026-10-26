@@ -15,7 +15,8 @@ Series fields: name, type ('line' | 'bar' | 'scatter' | 'errorbar'), data
 (aligned with ``xs`` or [x, y] / [x, lo, hi] pairs), color (a token name such
 as 'headline', 'cat0'..'cat5', 'pos', 'neg', 'muted', or '#rrggbb'), width,
 dash (True for dashed, 'dotted'), symbol, size, hollow, signed (bars coloured by sign), stack, invisible,
-y2, group (for tab-filtered charts), legend (show a toggle button), legendKey
+y2, pointLabels (a short label per point, on a line or scatter series; labelPos places a
+scatter's), group (for tab-filtered charts), legend (show a toggle button), legendKey
 (the button's name when one button stands for several series, e.g. a model's
 curve on every expiry), hidden (toggled off at first), xFrom (the name of a
 series whose x values this one's y-only data shares).

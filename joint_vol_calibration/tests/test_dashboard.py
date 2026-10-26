@@ -4234,8 +4234,12 @@ def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
     want = f"{min(vals):.2f}–{max(vals):.2f}" if len(vals) > 1 else f"{vals[0]:.2f}"
     tail = f"; none stored for {', '.join(sorted(s for s, _ in none))}" if none else ""
     sess = "session" if len(have) == 1 else "sessions"
+    # P3.1: the text names the table the settlements come from, through its last date
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
     text = (f"Heston misses real VX futures by {want} index pts RMSE out of sample "
-            f"({len(have)} {sess}{tail}).")
+            f"({len(have)} {sess}{tail}; settlements from vix_futures_daily in data_store/vol_system.db, "
+            f"through {last}).")
     row = re.search(r'<tr id="inv-m5">(.*?)</tr>', pages["/model-risk"], re.DOTALL).group(1)
     assert text in _visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row))
 
@@ -5494,3 +5498,100 @@ def test_browser_heatmap_row_head_stays_in_view_on_a_phone(site_browser):
         assert abs(st["left"] - st["before"]) < 2, st
     finally:
         ctx.close()
+
+
+# ── P3.1: the joint fit's VX futures leg ─────────────────────────────────────
+
+def _vx_last() -> str | None:
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        return con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
+
+
+def _gated_pickles(dash) -> list[tuple[str, dict]]:
+    out = []
+    for r in dash.scan_calibrations():
+        if r["legacy"] is False and r["ok"] and r["session"]:
+            with open(r["path"], "rb") as f:
+                out.append((r["session"], pickle.load(f)))
+    return sorted(out, key=lambda x: x[0])
+
+
+def test_vx_leg_is_each_fits_own_out_of_sample_score(dash, pages):
+    """P3.1: Calibration #vixleg redraws every gated fit's VX futures leg from the
+    settlements of its own session: the RMSE it prints is the fit's recorded
+    losses.vx_futures_rmse_oos (to 1e-6), a fit with no settlements on its
+    session gets the empty state and no futures series, and nothing is spliced
+    from an earlier session."""
+    d = dash.load_page2()
+    views = {v["session"]: v for v in d["vx_leg"]["views"]}
+    last = _vx_last()
+    html = pages["/calibration"]
+    gated = _gated_pickles(dash)
+    assert sorted(views) == [s for s, _ in gated]
+    for session, cal in gated:
+        v, rec = views[session], dash._cal_losses(cal).get("vx_futures_rmse_oos")
+        a = html.index(f'<div id="vx-{session}" role="tabpanel"')
+        panel = html[a:min(i for i in (html.find('<div id="vx-', a + 10), html.find('id="vx-caption"', a))
+                           if i > 0)]
+        if v["leg"] is not None:
+            assert rec is not None, session
+            assert abs(v["leg"]["rmse"] - rec) <= 1e-6, session
+            assert f'id="chart-vx-{session}"' in panel
+            assert f"RMSE {rec:.2f} index pts" in _html_unescape(panel)
+        else:
+            assert f"chart-vx-{session}" not in html, session
+            assert v["empty"] in _html_unescape(re.sub(r"</?span[^>]*>", "", panel))
+            if last is not None and session > last:
+                assert v["empty"] == f"VX futures table ends {last}; none stored for {session}."
+    # the headline fit is the newest gated session; it has a leg only if its session has settlements
+    assert d["vx_leg"]["n_with"] == sum(1 for v in views.values() if v["leg"])
+
+
+def test_gated_fits_table_has_the_vx_out_of_sample_column(dash, pages):
+    """P3.1: #history gains 'VX OOS (index pts)', each row the fit's own record or '—'."""
+    html = pages["/calibration"]
+    hist = html[html.index('id="history"'):html.index('id="history"') + 20000]
+    assert "VX OOS (index pts)" in hist
+    got = re.findall(r'<td class="num" data-vx-oos>(.*?)</td>', hist)
+    want = []
+    for _session, cal in reversed(_gated_pickles(dash)):           # the table is newest first
+        v = dash._cal_losses(cal).get("vx_futures_rmse_oos")
+        want.append("—" if v is None else f"{v:.2f}")
+    assert got == want
+
+
+def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
+    """P3.1: a Model Risk check on the VX futures table's lag behind the market
+    DB, in NYSE sessions, with the existing label-lag limits (no new threshold)."""
+    d = dash.load_model_risk()
+    row = next(m for m in d["monitors"]
+               if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        db_date = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
+    lag = dash.session_age(_vx_last(), db_date)
+    assert row["model"] == "M5"
+    assert row["value"] == str(lag)
+    assert row["status"] == dash._rag(float(lag), dash.MONITOR_LIMITS["label_lag"])
+    assert row["limits"] == "OK ≤ 0 · watch ≤ 1 · breach above"
+    assert "VX futures table lag behind the market DB" in _html_unescape(pages["/model-risk"])
+
+
+def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
+    """P3.1: the footer's freshness table lists the VX futures settlements with
+    their as-of date, their age in NYSE sessions and the staleness styling of
+    that age. No headline reads them, so they stay out of the status bar."""
+    c = dash.load_chrome()
+    src = next(s for s in c["sources"] if s["short"] == "VX")
+    last = _vx_last()
+    assert src["date"] == last
+    assert src["age"] == dash.session_age(last, c["latest"])
+    assert src["level"] == dash.stale_level(src["age"])
+    assert src["bar"] is False
+    html = pages["/"]
+    foot = html[html.index('<footer'):]
+    row = re.search(r"<tr><td>VX futures settlements</td><td class=\"lvl-(\w+) nowrap\">([\d-]+)</td>\s*"
+                    r'<td class="num">(\d+)</td>', foot)
+    assert row, "no VX futures row in the freshness table"
+    assert row.groups() == (src["level"], last, str(src["age"]))
+    bar = html[html.index('<header class="statusbar"'):html.index("</header>")]
+    assert ">VX<" not in bar
