@@ -1,0 +1,148 @@
+{
+ "deferred_proposals": [
+  {
+   "id": "B8",
+   "title": "Volatility cone (Burghardt\u2013Lane) with the surface's ATM term structure overlaid",
+   "pages": [
+    "surface"
+   ],
+   "value": "medium",
+   "effort": "M",
+   "rationale": "This is the classic answer to 'is this term structure rich or cheap against what SPX has realized at each horizon?'. The site has realized data back to 2010 but never puts implied and realized on one horizon axis.",
+   "detail": "Add a chart #vol-cone next to the ATM term structure.\n\nCone:\n- Close-to-close realized vol percentiles (5/25/50/75/95) at horizons of 10, 21, 42, 63, 126 and 252 sessions.\n- Built from spx_ohlcv from 2010-01-04 to the surface session (2026-10-16), so there is no look-ahead relative to the surface.\n- Drawn as stacked bands.\n\nOverlay:\n- The surface's ATMF vols (svi_cal atm_vol), with calendar days mapped to sessions at 252/365.\n- Today's trailing RV at each horizon.\n\nValues from this review's check:\n- 21-session cone: 5\u201395% is 6.3\u201329.4, median 12.5; current 21-session RV is 9.9.\n- 1M ATMF is about 13.8.\n\nA toggle switches the sample between 'since 2010' and 'last 3 years'.",
+   "acceptance": "1) Unit test of the percentile computation on a fixture, and the cone's end date equals the surface session.\n2) Implied markers carry the surface session date.\n3) The table fallback lists the percentiles by horizon.\n4) The caption states the sample and the 252/365 conversion.\n5) axe reports 0 violations; no overflow.",
+   "evidence": "Sources:\n- Montreal Exchange note on volatility cones and the horizon mismatch they fix. https://www.m-x.ca/f_publications_en/cone_vol_en.pdf\n- LuxAlgo concept page: Burghardt & Lane 1990, with the implied overlay as the classic use. https://www.luxalgo.com/library/concept/volatility-cones/\n\nData support: YES (spx_ohlcv 2010-01-04 \u2192 2026-10-23; ATM vols in surface.json term_structure).",
+   "honesty_risk": "- The cone depends on the sample, and 2020 is inside it, which the toggle mitigates.\n- Implied includes the variance premium, so implied sitting above the realized median is expected, not 'rich'.\n- Close-to-close RV understates intraday range; the site has no intraday data, so say so."
+  },
+  {
+   "id": "B9",
+   "title": "Risk-neutral density and tail probabilities from the certified SVI-cal surface",
+   "pages": [
+    "surface"
+   ],
+   "value": "medium",
+   "effort": "M",
+   "rationale": "This turns the arbitrage certificate (g \u2265 0) into the object a desk reads: implied move probabilities. The Minneapolis Fed published exactly this view for the S&P.",
+   "detail": "New panel #rnd.\n\nDensity:\n- Density of ln(S_T/F) per constant maturity (1M, 3M, 6M) from the Gatheral\u2013Jacquier g(k): p(k) = g(k)/\u221a(2\u03c0w) \u00b7 exp(\u2212d\u208b\u00b2/2), using svi_cal params.\n- Plotted only over the quoted k range, with the tail mass beyond it printed as a number.\n\nTable:\n- P(S_T < 0.90F), P(S_T > 1.10F), P(|ln S_T/F| > 5%).\n- The martingale check E[S_T/F] and the density mass.\n- g_min from the existing certificate fields.\n\nValues from this review's check on 2026-10-16:\n- 31 d: 3.31% / 0.08%.\n- 91 d: 8.35% / 4.28%.\n- 182 d: 13.86% / 15.01%.\n- Mass 1.000 and E[S/F] = 1.000.",
+   "acceptance": "1) Unit test for every certified slice of every session: mass = 1 \u00b1 1e-3 and E[S/F] = 1 \u00b1 1e-3.\n2) A probability whose threshold lies outside the quoted k range prints 'beyond quoted strikes' instead of a number.\n3) Higher moments are omitted, or flagged as wing-extrapolation dependent.\n4) The caption says 'risk-neutral'.\n5) axe reports 0 violations; no overflow.",
+   "evidence": "Sources:\n- Gatheral & Jacquier, 'Arbitrage-free SVI volatility surfaces' (g(k) density condition). https://arxiv.org/abs/1204.0646\n- Minneapolis Fed market-based probabilities: S&P risk-neutral density charts and large-move probabilities. https://www.minneapolisfed.org/banking/current-and-historical-market-based-probabilities\n\nData support: YES (svi_cal params with butterfly certificates in surface.json for 5 sessions).",
+   "honesty_risk": "- These are risk-neutral, not real-world, probabilities.\n- The tails depend on SVI linear wings beyond the quoted strikes (k \u2265 \u22120.35 on 2026-10-16). In my check the RN skewness and kurtosis were wing-dominated, so do not headline them.\n- 85 quotes were repaired outside the spread; mention it."
+  },
+  {
+   "id": "B12",
+   "title": "Research: round-trip trade panel and worst-drawdown table",
+   "pages": [
+    "research"
+   ],
+   "value": "medium",
+   "effort": "M",
+   "rationale": "A 206-trade backtest with a 37.6% win rate raises one question: are the losses many small trades or a few large ones? pyfolio's round-trip tear sheet and quantstats' drawdown details answer that, and the site shows only aggregates.",
+   "detail": "Build from full_results.pkl all_trades (430 round trips including the reference sleeves).\n\n(a) Strip plot: trade P&L against entry date per sleeve (S1C, S3, S4 solid; S1/S2 reference faint). Colour by sign, size by holding days. Mark the open trade.\n\n(b) Histograms of holding days and per-trade P&L.\n\n(c) Per-sleeve table:\n- closed n, P(profit);\n- mean and median trade;\n- best and worst trade;\n- share of sleeve P&L from the 5 largest trades;\n- median holding days.\n\n(d) Worst-drawdown table, top 5 per series: peak, valley, recovery date or 'not recovered', depth, duration. The portfolio itself is 'not recovered' since its first peak.",
+   "acceptance": "1) Counts reconcile with the existing per-sleeve table (S1C 121, S3 39, S4 46 including 1 open).\n2) The sum of trade P&L equals sleeve P&L, reusing the invariant app.py already enforces.\n3) The drawdown table's top row equals the published max drawdown (\u221222.2% for the portfolio).\n4) Unrecovered drawdowns print 'not recovered'.\n5) axe reports 0 violations; no overflow.",
+   "evidence": "Sources:\n- pyfolio create_round_trip_tear_sheet (plot_round_trip_lifetimes, plot_prob_profit_trade) and show_worst_drawdown_periods. https://github.com/quantopian/pyfolio/blob/master/pyfolio/tears.py\n- quantstats stats.drawdown_details, worst, best. https://github.com/ranaroussi/quantstats\n\nData support: YES (data_store/backtest/full_results.pkl all_trades, 430 entries; full_results.parquet NAVs).",
+   "honesty_risk": "- Every trade is priced and marked to model at \u03b2\u00b7VIX, so label it as such.\n- The open trade carries only its entry cost.\n- Do not drop the 'not recovered' rows to make the table look tidier."
+  },
+  {
+   "id": "B13",
+   "title": "Compact vol-context strip: RV21, VIX \u2212 RV21, VIX 1-year percentile, 1M ATMF and RR25, each with its as-of date",
+   "pages": [
+    "overview",
+    "surface",
+    "calibration",
+    "risk",
+    "research",
+    "corrections",
+    "model-risk"
+   ],
+   "value": "medium",
+   "effort": "S",
+   "rationale": "The ticker gives levels without context. Desk tools pair IV with realized and with a rank or percentile (ORATS ivPctile1y and ivHvRatio; SpotGamma z-scores and vol rank).",
+   "detail": "After 'VIX/VIX3M' in the ticker, add:\n- 'RV21 9.9'\n- 'VIX\u2212RV21 +9.6'\n- 'VIX 1y 78th pct'\nAll three are as of 2026-10-23 from the DB.\n\nThen add the B1 values '1M ATMF 13.8 \u00b7 RR25 \u22125.8', each with its surface date and the existing age styling.\n\nAt 390 px the strip already wraps to 3 lines. Cap it at 2 lines: put secondary items in a labelled, focusable horizontally scrollable region, or a disclosure.",
+   "acceptance": "1) Values are computed at build time from vol_system.db and B1, with unit tests.\n2) Each item's title or aria-label includes its as-of date.\n3) No horizontal page overflow from 320 to 1920 px, and the strip is at most 2 lines at 390 px (screenshot check).\n4) The percentile window (252 sessions) is stated in the tooltip.",
+   "evidence": "Sources:\n- ORATS ivPctile1y, ivHvXernRatio, clsHv fields. https://orats.com/docs/core-research\n- SpotGamma Volatility Dashboard: z-scores and volatility rank. https://spotgamma.com/sharpen-your-skills-volatility-dashboard/\n- Current phone strip: critique-shots/benchmark/index_390_top.png.\n\nData support: YES.",
+   "honesty_risk": "- The strip mixes as-of dates (market 2026-10-23 vs surface 2026-10-16), so each item must carry its own.\n- The percentile depends on the lookback; say which."
+  },
+  {
+   "id": "B14",
+   "title": "Risk page: scenario risk graph (P&L against spot for each vol shock, sticky-strike vs sticky-moneyness)",
+   "pages": [
+    "risk"
+   ],
+   "value": "low",
+   "effort": "S",
+   "rationale": "The scenario grid's numbers are right, but the long-gamma convexity of the reference straddle, and how much the dynamics assumption matters, only becomes visible as curves. That is the standard 'risk profile' view in retail and pro option tools.",
+   "detail": "Add a line chart next to the scenario grid, from greeks/scenario_grid.parquet.\n- x = spot shock % (\u221210, \u22125, \u22123, \u22121, 0, 1, 3, 5, 10), drawn with markers and straight segments, not smoothed.\n- y = P&L in index points.\n- One line per vol shock (\u22125, \u22122, 0, 2, 5, 10 vp).\n- sticky_strike is solid; sticky_moneyness is dashed behind a toggle.\n- A small bar series shows sticky_moneyness \u2212 sticky_strike at 0 vp: the cost of the dynamics assumption.",
+   "acceptance": "1) 6 lines \u00d7 9 points per dynamics, with values equal to the parquet (unit test).\n2) The axis tooltip lists all vol shocks at the hovered spot shock.\n3) The caption repeats 'instantaneous shocks, no theta, one reference book'.\n4) axe reports 0 violations.",
+   "evidence": "Sources:\n- thinkorswim Risk Profile (P&L against underlying price, by date and volatility). https://tickertape.tdameritrade.com/amp/trading/thinkorswim-options-risk-profile-tool-18671\n- Schwab on calculating option P&L. https://www.schwab.com/learn/story/calculating-potential-profit-and-loss-on-options\n\nData support: YES (scenario_grid.parquet: 108 rows, 2 dynamics).",
+   "honesty_risk": "- Spot points are non-uniform, so do not smooth or interpolate between them.\n- The book is a reference straddle, not a position."
+  },
+  {
+   "id": "Q14",
+   "title": "Site-wide units and sign conventions, plus a glossary linked from first use on every page",
+   "pages": [
+    "index",
+    "surface",
+    "calibration",
+    "risk",
+    "research",
+    "corrections",
+    "model-risk"
+   ],
+   "value": "medium",
+   "effort": "M",
+   "rationale": "The same quantity carries different units on different panels, and the site has a dense acronym load (PSR, DSR, SPA, StepM, PBO/CSCV, MCS, QLIKE, Holm, z_vrp, R0\u2013R2, S1\u2013S4, |z|, half-spread, vomma P&L ratio, QV convexity) with 0 <abbr>/<dfn> elements on any page. A cold reader hunts for definitions, and the unit drift reads as carelessness.",
+   "detail": "Set and enforce one house style:\n- vol levels in % (\u03c3 = 19.45%);\n- vol differences and errors in 'vol pts' (never 'vp');\n- VIX-family levels in index pts (no '%': today the Overview shows 'VIX 19.45 %' while axes say 'vol pts' and Model Risk says 'index pts');\n- half-spreads 'hs' defined once;\n- $ with k/M suffixes;\n- signs as model - market and implied - realised, stated in each table caption.\n\nAdd a 'Definitions' section, reachable from the existing '?' overlay and a footer link: one anchor per term, each with formula, units and where it is used. The first occurrence of each term per page becomes <dfn>/<abbr title> linking to it.",
+   "acceptance": "A rendered-HTML lint test fails on '\\bvp\\b' outside CSV headers and on a '%' unit adjacent to a VIX/VIX3M/VIX9D/VIX6M value. A test asserts each glossary term from a list (\u2265 20 terms) appears in the definitions section with an id, and that each page links its first use of any listed term. axe passes with 0 violations; the definitions section is keyboard reachable.",
+   "evidence": "Overview 'VIX 19.45 %' (state-pdv kpi unit '%'); TS chart axis 'Index level (vol pts)'; Model Risk 'VIX index RMSE (index pts)'; headline fit 'pts RMSE'; Surface tiles 'RMSE 0.48 vp' vs 'vol pts' elsewhere. Measured document.querySelectorAll('abbr, dfn').length = 0 on all 7 pages. S4 'enters on z_vrp declining from a peak' with no definition.",
+   "honesty_risk": "Low. Definitions must quote the code's actual formula (e.g. half-spread in vol terms, floored at 0.05 vol pts in weights), not a textbook variant."
+  },
+  {
+   "id": "Q20",
+   "title": "Phone first screen: put the page's subject and first number above the fold",
+   "pages": [
+    "index",
+    "surface",
+    "calibration",
+    "risk",
+    "research",
+    "corrections",
+    "model-risk"
+   ],
+   "value": "low",
+   "effort": "S",
+   "rationale": "At 390x844 the chrome (status strip in 3 lines, header and ticker in 3 lines) ends at y = 164 on every page. The stale banner adds 90\u2013180 px, so h1 starts at y = 274\u2013292. Calibration's first number is at y = 1,153, below the first screen. A reviewer opening the link on a phone sees chrome and caveats but no result.",
+   "detail": "At \u2264 600 px:\n- status strip becomes one line: 'STALE \u00b7 fit 5 sessions \u25b8', where \u25b8 is a <details> showing all source dates (no JS needed);\n- ticker becomes 2 rows (SPX, VIX, VVIX / slope, ratio, rule);\n- stale banner becomes one line with the cause from Q3b and a details disclosure;\n- Calibration moves the 3-sentence gate explanation below the parameter tiles.\nThe staleness signal must stay visible, coloured and textual.",
+   "acceptance": "A Playwright test at 390x844 asserts main top \u2264 110 px, h1 top \u2264 200 px, and the first .kpi-value or .result-v top < 844 on all pages that have KPIs (calibration included). The stale state text ('STALE') remains visible without interaction. There is no horizontal overflow at 320. axe passes with 0 violations, and the details element is keyboard operable.",
+   "evidence": "Measured at 390x844: main top 164 on all pages. h1 at 292 (overview, surface, calibration), 274 (risk), 178 (others). First KPI at 611 (index), 450 (surface), 1,153 (calibration), 620 (risk), 571 (research). Stale banner height 108 px (Overview), 180 px (Research proxy banner).",
+   "honesty_risk": "Collapsing the status strip must not hide staleness. Keep 'STALE' and the oldest input's age in the collapsed line, and keep the full banner semantics (role=status)."
+  },
+  {
+   "id": "D12",
+   "title": "Sortable, copyable data tables (with aria-sort, and TSV copy for Excel)",
+   "pages": [
+    "Surface",
+    "Calibration",
+    "Risk",
+    "Research",
+    "Model Risk"
+   ],
+   "value": "medium",
+   "effort": "M",
+   "rationale": "Quants paste tables into their own notebooks and sort by the column they care about (Sharpe, p-value, |z|). Charts have CSV export but tables like the scorecard, inference, \u03b2 grid, QLIKE and monitoring checks have no export, and none can be sorted.",
+   "detail": "Progressive enhancement in desk.js for table.tbl with a thead. Each th becomes a button that sorts asc/desc/original and sets aria-sort. The numeric parse handles U+2212, '$', ',', '%', 'K/M' suffixes, '\u2014' (sorted last) and 'x / y' cells (first value). Add a 'Copy' button (TSV to the clipboard, cells exactly as displayed) and a 'CSV' button per table panel. The server's row order stays the default, so the no-JS and print views are unchanged. Exclude tables whose order carries meaning (the \u03b2 grid's highlighted rows can stay sortable but keep their markers).",
+   "acceptance": "Playwright on research.html: clicking the 'Sharpe' header of Per-sleeve performance orders rows ascending, then descending, and aria-sort toggles. Copy writes a TSV whose cells equal the DOM text. CSV downloads have the header plus N rows. No-JS screenshots are unchanged. axe reports 0 violations.",
+   "evidence": "desk.js has no sort or table-copy code (grep). There are 33 .tbl tables across the 7 pages (2-11 per page); only charts carry CSV buttons.",
+   "honesty_risk": "Low. Default order and the emphasised rows (portfolio, headline fit) stay as published."
+  }
+ ],
+ "director_notes": {
+  "B13": "Adding RV21, VIX\u2212RV21, a percentile, 1M ATMF and RR25 to the global ticker conflicts with the chrome budget: the ticker already wraps to 3 lines at 390 px and main starts at y = 164. It would also mix as-of dates (market 2026-10-23, surface 2026-10-16) in the site chrome. These numbers land in their panels with their own dates: P2.1 (Surface state row, plus the Overview line) and P3.2 (Overview VIX \u2212 RV21 line).",
+  "B14": "Low value. A line chart of the existing scenario grid for a generic reference straddle repeats numbers the grid already prints. P1.4 adds $ units and P4.5 recolours the grid; neither adds information.",
+  "B9": "Deferred, not rejected on merit (the data supports it). Tail probabilities beyond the quoted range (k \u2265 \u22120.35 on 2026-10-16) are set by the SVI linear wings and need careful 'beyond quoted strikes' handling and copy review. Its value to the reviewer is below P2.1\u2013P2.7. Revisit after P2.",
+  "B8": "Deferred: a second view of implied against realized vol. After P3.2 (VRP and \u03b2 premium) and P2.1 (the term structure in desk units), its marginal value is lower, and it brings a 252/365 horizon mapping and sample-window choices to defend. It has no data or constraint problem; revisit after P3.",
+  "B12": "Deferred: the round-trip trade panel and worst-drawdown table are honest and feasible. First, though, the trade log's 111 'combined' records (108 long, 3 short) must be explained, which P3.6 does. The per-sleeve table and P&L-by-sleeve chart already answer the headline question. Revisit after P3.6.",
+  "D12": "Deferred: sortable and copyable tables. Every chart already has Table and CSV export, and the 33 tables are short (2\u201311 per page), so adding sort state and clipboard code to all of them gains little for this audience.",
+  "Q14-glossary": "Deferred: the definitions section and <dfn>/<abbr> on first use. The target reviewers know PSR, DSR, SPA, PBO and QLIKE. The higher-value half of Q14 (one unit house style, enforced by a lint test) ships in P1.6.",
+  "Q20": "Deferred: the phone first-screen compaction (one-line status strip, two-row ticker, collapsible banner). The review will happen on desktop, and P1.3b already shortens the stale-banner text. The overflow and a11y gates keep phone use correct. Revisit with a dedicated mobile pass."
+ }
+}
