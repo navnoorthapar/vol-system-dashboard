@@ -127,7 +127,7 @@
      "module": "joint_vol_calibration/backtest/forward_ledger.py",
      "inputs": "The captured option book, the signals of an accepted fit",
      "outputs": "data_store/forward/",
-     "outputs_pending": "no entry committed yet: the first is written with the next accepted fit",
+     "outputs_pending": "no entry committed yet: the first is written on the next session with a live captured book, whatever the fit does",
      "limitations": "No entry committed yet; marks are the captured book.",
      "page": "/research"},
     {"id": "M19", "name": "Treasury zero curve", "tier": "production", "materiality": "medium",

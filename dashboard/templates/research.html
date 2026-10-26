@@ -169,6 +169,12 @@
         <tbody>{% for r in fw.rows %}{% set ps = r.position %}<tr><td class="nowrap">{{ r.sleeve }}</td><td>{{ {1: 'long', -1: 'short', 0: 'flat'}.get(r.target, '—') }}</td><td>{% if ps %}<span class="nowrap">{{ ps.contract.expiry }}</span> {{ ps.contract.strike|fmt(',.0f') }} · {{ 'long' if ps.direction == 1 else 'short' }}{% else %}—{% endif %}</td><td class="num">{{ r.open_pnl_exec|usd(true) }}</td><td class="num">{{ r.realised_pnl_net|usd(true) }}</td><td class="num">{{ r.n_opened|fmt }} / {{ r.n_closed|fmt }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
+    {% elif fw.state == 'absent' and d.forward_protocol %}{% set fp = d.forward_protocol %}
+      <div class="awaiting" data-artifact-state="absent">
+        <p class="awaiting-status">{{ m.chip('Awaiting first entry', 'watch') }} <span>{{ fp.pending[:1]|upper }}{{ fp.pending[1:] }}.</span></p>
+        <dl class="dl" id="forward-protocol">{% for k_, v_ in fp.rows %}<dt>{{ k_ }}</dt><dd>{{ v_|sym }}</dd>{% endfor %}</dl>
+        <p class="note">The protocol is fixed before any price: entries are written only by the daily job, at capture time, to <code class="path">{{ fp.path|path }}</code> (<code class="path">{{ fp.module|path }}</code>); nothing is estimated in their place.</p>
+      </div>
     {% else %}
       {{ m.missing(fw, 'Each session the bot captures, the signals become listed SPX straddles at that book’s bid and ask, marked on every later captured book: a forward test nobody can backfill.') }}
     {% endif %}

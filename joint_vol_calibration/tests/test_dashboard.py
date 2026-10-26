@@ -2134,7 +2134,7 @@ def test_artifacts_absent_render_named_placeholders_and_still_publish(dash, no_a
     assert 'data-artifact-state="absent"' in surf
     assert "data_store/surface/&lt;session&gt;/residuals.parquet" in surf
     assert "scripts/surface_report.py" in surf
-    res = pages["/research"]
+    res = pages["/research"].replace("<wbr>", "")
     for path in ("data_store/backtest/inference/summary.json",
                  "data_store/forward/ledger_&lt;session&gt;.json",
                  "data_store/backtest/inference/forecast_eval.json"):
@@ -2282,7 +2282,7 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     assert f"{pl['fits']} (model_version 2), newest {pl['fits_newest']}" in text
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
-        assert "no entry yet: the first is written with the next accepted fit" in text
+        assert dash.forward_ledger_protocol()["pending"] in text
 
 
 def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
@@ -3612,3 +3612,86 @@ def test_waterfall_concise_names_drop_only_a_trailing_parenthetical(dash):
     assert dash.concise_label("VIX tenors 9/30/93/184d, 365-day year") == \
         "VIX tenors 9/30/93/184d, 365-day year"
     assert dash.concise_label("(only a parenthetical)") == "(only a parenthetical)"
+
+
+def test_forward_panel_states_its_protocol_while_awaiting_the_first_entry(dash, no_art):
+    """P6: with no ledger registered the forward panel was a bare 'artifact not
+    yet generated' above a blank block, and the Overview said the first entry
+    comes 'with the next accepted fit', which the job does not wait for (it
+    records every session with a live captured book, whatever the fit does). The
+    panel now states the protocol from forward_ledger.py and option_chain.py and
+    the one status sentence the Overview's pipeline row also shows; no entry is
+    made up."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    from joint_vol_calibration.data import option_chain as oc
+    _, res = _get(dash, "/research")
+    _, idx = _get(dash, "/")
+    panel = re.search(r'<section class="panel[^"]*" id="forward".*?</section>', res, re.DOTALL).group(0)
+    text = _visible_text("<body>" + re.sub(r"<wbr>|</?span[^>]*>", "", panel))
+    fp = dash.forward_ledger_protocol()
+    pending = fp["pending"]
+    assert "Awaiting first entry" in text
+    assert pending[:1].upper() + pending[1:] + "." in text
+    assert "Artifact not yet generated" not in text
+    assert "forward-table" not in panel
+    assert pending in _visible_text(idx)                     # the Overview's pipeline row says the same
+    assert "next accepted fit" not in res + idx
+    for k in ("Records", "Prices", "Hash chain", "Marks", "Invalidated by"):
+        assert f" {k} " in text, k
+    for fact in (f"nearest {fl.TARGET_DAYS} calendar days out (at least {fl.MIN_DAYS})",
+                 f"${fl.NAV_PER_SLEEVE:,.0f} of sleeve NAV",
+                 f"${fl.COMMISSION_PER_LEG:.2f} per contract per leg",
+                 f"schema {fl.SCHEMA}", f"{oc.SESSION_CLOSE_ET:%H:%M} ET close",
+                 f"at least {oc.MIN_TWO_SIDED_SHARE:.0%} of near-the-money lines two-sided",
+                 "data_store/forward/ledger_<session>.json"):
+        assert fact in text, fact
+    assert len(fp["rows"]) == 5
+
+
+def test_carry_panel_lists_the_anchors_and_carry_the_fit_priced(dash, pages):
+    """P7: the Carry and inputs panel left a large blank beside the model smile.
+    It now lists, per expiry, the anchors the headline fit priced and the parity
+    rate and carry it priced them with, read from the fit's anchors_by_expiry, and
+    the anchor and expiry rules the fit records."""
+    d = dash.load_page2()
+    with open(SHIPPED / "calibrations" / d["calib_file"], "rb") as f:
+        cal = pickle.load(f)
+    anchors = cal["anchors_by_expiry"]
+    html = pages["/calibration"]
+    body = re.search(r'id="anchors-table">(.*?)</table>', html, re.DOTALL).group(1).split("<tbody>")[1]
+    rows = [[_visible_text("<body>" + c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
+            for tr in re.findall(r"<tr>(.*?)</tr>", body, re.DOTALL)]
+    assert len(rows) == len(anchors)
+    for row, a in zip(rows, anchors):
+        assert row[0] == str(a["expiry"])[:10]
+        assert row[2:5] == [str(a["n"]), str(a["n_puts"]), str(a["n_wing_puts"])]
+        assert row[6] == dash._fmt(a["r"] * 100, ".2f") + "%"
+        assert row[7] == dash._fmt(a["q"] * 100, ".2f") + "%"
+    assert sum(a["n"] for a in anchors) == cal["n_spx_options"]       # every anchor the fit priced
+    text = _visible_text(html)
+    assert "Anchor rule: " + dash.prose(cal["methods"]["anchors"]) in text
+
+
+_BLANK_JS = """id => {
+  const p = document.getElementById(id), b = p.querySelector('.panel-body');
+  const kids = [...b.querySelectorAll(':scope > *, :scope > * > *')]
+    .filter(e => e.offsetParent && e.getBoundingClientRect().height);
+  const bottom = Math.max(...kids.map(e => e.getBoundingClientRect().bottom));
+  const r = p.getBoundingClientRect();
+  return (r.bottom - bottom) / r.height;
+}"""
+
+
+def test_browser_panels_beside_taller_ones_carry_no_large_blank(site_browser):
+    """P6 / P7: at 1440 px the forward panel (awaiting its first entry) and the
+    Carry and inputs panel each stood beside a taller panel with most of their
+    height blank. Neither leaves more than a third of its height empty."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "calibration.html", wait_until="load")
+        assert page.evaluate(_BLANK_JS, "carry") < 0.34
+        if not (SHIPPED / "forward").is_dir():                   # the panel awaits the first entry
+            page.goto(site_browser["base"] + "research.html", wait_until="load")
+            assert page.evaluate(_BLANK_JS, "forward") < 0.34
+    finally:
+        ctx.close()

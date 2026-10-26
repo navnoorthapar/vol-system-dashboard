@@ -205,6 +205,15 @@
       <dt>√θ, √v₀</dt><dd>{{ d.theta_vol|fmt(".2f")|u('%') }} long-run, {{ d.v0_vol|fmt(".2f")|u('%') }} spot</dd>
       <dt>Inputs</dt><dd>{{ d.n_spx_options|fmt }} SPX options ({{ '≤' if d.n_spx_expiries_inferred else '' }}{{ d.n_spx_expiries|fmt }} expiries), {{ d.n_vix_tenors|fmt }} VIX tenors</dd>
     </dl>
+    {% if d.anchors_by_expiry %}
+    <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="Anchors and carry per expiry (scrollable)">
+    <table class="tbl dense" id="anchors-table"><caption>The SPX anchors the fit priced, and the parity carry it priced them with, per expiry</caption>
+      <thead><tr><th scope="col">Expiry</th><th scope="col" class="num">Days</th><th scope="col" class="num">Anchors</th><th scope="col" class="num">Puts</th><th scope="col" class="num">Wing</th><th scope="col" class="num">K/F</th><th scope="col" class="num"><span class="sym">r</span></th><th scope="col" class="num"><span class="sym">q</span></th></tr></thead>
+      <tbody>{% for a in d.anchors_by_expiry %}<tr><td class="nowrap">{{ a.expiry|fmt }}</td><td class="num">{{ a.T_days|fmt('.0f') }}</td><td class="num">{{ a.n|fmt }}</td><td class="num">{{ a.n_puts|fmt }}</td><td class="num">{{ a.n_wing_puts|fmt }}</td><td class="num">{{ a.kf_min|fmt('.2f') }}–{{ a.kf_max|fmt('.2f') }}</td><td class="num">{{ a.r_pct|fmt('.2f')|u('%') }}</td><td class="num">{{ a.q_pct|fmt('.2f')|u('%') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">From the fit's own record (anchors_by_expiry): r and q are the put–call-parity rate and carry at each anchor expiry; Wing counts the anchor puts in the put wing the anchor rule names.{% if d.anchor_rule %} Anchor rule: {{ d.anchor_rule|prose }}.{% endif %}{% if d.expiry_rule %} Expiries: {{ d.expiry_rule|prose }}.{% endif %}</p>
+    {% endif %}
   {% endcall %}
 </div>
 {% endif %}

@@ -1095,7 +1095,8 @@ def load_page2() -> dict[str, Any]:
     d.update(pinned_params=[], active_constraints=[], feller_imposed=None,
              rho_at_boundary=False, spx_underidentified=None, rho_bound=None,
              feller_penalty_weight=None, strikes_per_expiry=None,
-             n_spx_expiries_inferred=False, carry_recorded=False)
+             n_spx_expiries_inferred=False, carry_recorded=False, anchors_by_expiry=[],
+             anchor_rule=None, expiry_rule=None)
 
     try:
         path, cal = load_headline_calibration()
@@ -1130,6 +1131,17 @@ def load_page2() -> dict[str, Any]:
             d["r_pct"] = round(float(cal["r"]) * 100, 2)
             d["q_pct"] = round(float(cal["q"]) * 100, 2)
         d["carry_mode"] = (cal.get("methods") or {}).get("carry")
+        # the anchors the fit priced and the parity carry it priced them with, per
+        # expiry, as the fit recorded them (anchors_by_expiry, C22+)
+        d["anchors_by_expiry"] = [
+            {"expiry": _date_str(a.get("expiry")), "T_days": _num(a.get("T_days")), "n": a.get("n"),
+             "n_puts": a.get("n_puts"), "n_wing_puts": a.get("n_wing_puts"),
+             "kf_min": _num(a.get("kf_min")), "kf_max": _num(a.get("kf_max")),
+             "r_pct": None if _num(a.get("r")) is None else float(a["r"]) * 100.0,
+             "q_pct": None if _num(a.get("q")) is None else float(a["q"]) * 100.0}
+            for a in cal.get("anchors_by_expiry") or []]
+        d["anchor_rule"] = (cal.get("methods") or {}).get("anchors")
+        d["expiry_rule"] = (cal.get("methods") or {}).get("expiries")
         if _num(cal.get("r_reference")) is not None:
             d["r_ref_pct"] = round(float(cal["r_reference"]) * 100, 2)
             d["r_ref_source"] = cal.get("r_reference_source")
@@ -2968,6 +2980,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                                 for w, v in zip(d["wf_periods"], d["wf_sharpes"])]))
     inference_extras(d, artifacts.load_inference(DATA))
     d["forward"] = artifacts.load_forward_ledger(DATA)
+    d["forward_protocol"] = forward_ledger_protocol()
     if d["forward"].get("state") == "ok":
         led = d["forward"].pop("latest")
         d["forward"]["inputs"] = led.get("inputs") or {}
@@ -2977,6 +2990,41 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                                  "position": next((ps for ps in led.get("positions") or []
                                                    if ps.get("sleeve") == sl), None)}
                                 for sl in ("s1c", "s3", "s4", "s1", "s2")]
+
+
+def forward_ledger_protocol() -> dict:
+    """The forward test's rules as joint_vol_calibration/backtest/forward_ledger.py
+    and option_chain.py set them, shown while no entry is registered, and the one
+    status sentence the Research panel and the Overview's pipeline row share. The
+    job records a session whenever its captured book is live, whatever the fit does
+    (scripts/cloud_refresh.record_forward_ledger); entries are written only then."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    from joint_vol_calibration.data import option_chain as oc
+
+    close = oc.SESSION_CLOSE_ET.strftime("%H:%M")
+    path = f"{fl.FORWARD_DIR.relative_to(ROOT).as_posix()}/ledger_<session>.json"
+    rows = [
+        ("Records", (f"Each session, per sleeve: its target (long, short or flat) and the listed "
+                     f"PM-settled SPX straddle nearest {fl.TARGET_DAYS} calendar days out (at least "
+                     f"{fl.MIN_DAYS}), at the strike nearest the parity forward, sized per "
+                     f"${fl.NAV_PER_SLEEVE:,.0f} of sleeve NAV.")),
+        ("Prices", (f"The session's captured book, quoted at or after the {close} ET close (an earlier "
+                    f"one is refused): bought at the ask, sold at the bid; ${fl.COMMISSION_PER_LEG:.2f} "
+                    "per contract per leg, booked separately.")),
+        ("Hash chain", (f"One file per session, schema {fl.SCHEMA}, holding the SHA-256 of the previous "
+                        "file and of the book it used; its commit time registers the targets before any "
+                        "later price exists.")),
+        ("Marks", ("Every later captured book at bid, ask and mid; at expiry, |S − K| on the official SPX "
+                   "close. A straddle a book cannot price stays unmarked at its last mark, never at a "
+                   "made-up price; the backtest's β·VIX mark is recorded beside the mid.")),
+        ("Invalidated by", ("An edited or missing registered file (every later hash breaks, and this "
+                            "site then refuses to publish), or a book quoted before the close.")),
+    ]
+    pending = (f"no entry yet: the first is written on the next session whose captured book is live "
+               f"(quoted at or after the {close} ET close, at least {oc.MIN_TWO_SIDED_SHARE:.0%} of "
+               "near-the-money lines two-sided), whatever the fit does")
+    return {"rows": rows, "pending": pending, "path": path,
+            "module": "joint_vol_calibration/backtest/forward_ledger.py"}
 
 
 SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian",
@@ -3321,6 +3369,7 @@ def pipeline_state(diag: dict) -> dict:
         out["forward"] = artifacts.load_forward_ledger(DATA)
     except artifacts.ArtifactError as e:
         out["forward"] = {"state": "error", "message": str(e)}
+    out["forward_pending"] = forward_ledger_protocol()["pending"]
     return out
 
 

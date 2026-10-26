@@ -135,11 +135,11 @@
     <table class="tbl dense" id="pipeline">
       <caption class="sr-only">What the repository has stored, and which records the scheduled job wrote</caption>
       <tbody>
-        <tr><th scope="row">Cboe option books</th><td>{% for c in pl.captures %}<span class="nowrap">{{ c.underlying }} {{ c.session }}:</span> {{ c.rows|fmt(',') }} lines ({{ c.two_sided_rows|fmt(',') }} two-sided, {{ c.expiries|fmt }} expiries), quotes {{ (c.quote_time or '')|replace('T', ' ')|replace('Z', ' UTC') }}{% if c.book_state == 'gth' %} (overnight book){% endif %}{{ '; ' if not loop.last else '' }}{% else %}none stored yet{% endfor %}</td></tr>
+        <tr><th scope="row">Cboe option books</th><td>{% for c in pl.captures %}<span class="nowrap">{{ c.underlying }} {{ c.session }}:</span> {{ c.rows|fmt(',') }} lines ({{ c.two_sided_rows|fmt(',') }} two-sided, {{ c.expiries|fmt }} expiries), quotes {{ (c.quote_time or '')|replace('T', ' ')|replace('Z', ' UTC')|dates }}{% if c.book_state == 'gth' %} (overnight book){% endif %}{{ '; ' if not loop.last else '' }}{% else %}none stored yet{% endfor %}</td></tr>
         <tr><th scope="row">Accepted joint fits</th><td>{{ pl.fits|fmt }} (model_version 2), newest {{ pl.fits_newest|fmt }}</td></tr>
         <tr><th scope="row">Surface reports</th><td>{{ pl.surface_sessions|length }} sessions{% if pl.surface_sessions %}, {{ pl.surface_sessions[0] }} → {{ pl.surface_sessions[-1] }}{% endif %}</td></tr>
         <tr><th scope="row">Calibration diagnostics</th><td>{{ pl.diag_sessions|length }} sessions (σ profile, identifiability, rough Heston)</td></tr>
-        <tr><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}no entry yet: the first is written with the next accepted fit, at executable prices{% endif %}</td></tr>
+        <tr><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}{{ pl.forward_pending }}{% endif %}</td></tr>
         <tr><th scope="row">Backtest window</th><td>ends {{ chrome.sources|selectattr('short', 'equalto', 'BACKTEST')|map(attribute='date')|first|fmt }}, fixed (mark-to-model)</td></tr>
       </tbody>
     </table>
