@@ -385,6 +385,9 @@ def test_vix_terms_are_the_headline_methods_and_the_split_adds_up_to_the_gap(ses
             assert ix.get("replicated") is None
             assert (r["near"], r["next"]) == (None, None)
         assert r["near_weight"] == m.get("near_weight")
+        # an index that is not replicated carries its method's own reason, if any
+        assert r["reason"] == (str(m["reason"]) if ix.get("replicated") is None and m.get("reason")
+                               else None)
         if ix.get("replicated") is None:
             assert (r["gap"], r["truncation"], r["unexplained"]) == (None, None, None)
             continue
@@ -444,5 +447,12 @@ def test_a_gap_split_that_does_not_add_up_is_not_shown():
     gone["gap_attribution"] = {"available": False, "reason": "term not fitted"}
     r = ds.vix_terms({"indices": {"VIX": gone}})[0]
     assert (r["gap"], r["truncation"], r["unexplained"]) == (-0.30, None, None)
+    nopair = json.loads(json.dumps(base))
+    nopair.update({"headline_method": None, "replicated": None, "gap_vs_official": None,
+                   "cboe_rules": {"ok": False, "reason": "fewer than two usable terms"},
+                   "gap_attribution": {"available": False, "reason": "index not replicated"}})
+    r = ds.vix_terms({"indices": {"VIX6M": nopair}})[0]
+    assert (r["near"], r["next"], r["near_weight"], r["gap"], r["truncation"]) == (None,) * 5
+    assert r["reason"] == "fewer than two usable terms"
     assert ds.vix_terms(None) == []
     assert ds.vix_terms({"indices": {}}) == []

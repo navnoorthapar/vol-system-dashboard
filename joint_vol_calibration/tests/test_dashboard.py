@@ -5183,6 +5183,9 @@ def test_vix_terms_table_prints_each_index_terms_and_its_gap_split(dash, pages):
                                               re.DOTALL).group(0))
     for t, ix in vix["indices"].items():
         assert (f"{t} is not replicated" in note) == (ix.get("replicated") is None), t
+        m = ix.get(ix.get("headline_method") or "cboe_rules") or {}
+        if ix.get("replicated") is None and not m.get("extrapolated") and m.get("reason"):
+            assert f"{t} is not replicated: {m['reason']}." in note, t
     if n_split:
         assert "Truncation: what strikes beyond the stored strip would add" in note
         bias = [ix["gap_attribution"]["far_wing_market_minus_model_pts"] for ix in vix["indices"].values()
@@ -5199,8 +5202,8 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
     macros = dash.app.jinja_env.get_template("_macros.html").module
     none = {"replicated": False, "extrapolated": False, "near": None, "next": None, "near_weight": None,
             "gap": None, "truncation": None, "unexplained": None, "far_wing": None, "surface": None,
-            "surface_label": None}
-    rows = [{**none, "ticker": "VIX9D"},
+            "surface_label": None, "reason": None}
+    rows = [{**none, "ticker": "VIX9D", "reason": "fewer than two usable terms"},
             {**none, "ticker": "VIX", "replicated": True, "near": {"expiry": "2030-01-28", "days": 28.0},
              "next": {"expiry": "2030-02-18", "days": 49.0}, "near_weight": 19 / 21, "gap": -0.30,
              "truncation": -0.05, "unexplained": -0.25, "surface": "svi_cal", "surface_label": "SVI-cal"},
@@ -5215,8 +5218,7 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
     assert got[1] == ["VIX", "28 / 49", "0.905", "−0.05", "−0.25"]
     assert got[2] == ["VIX6M", "181.7 / 216.7", "0.935", "−0.01", "−0.09"]
     note = _visible_text("<body>" + html)
-    assert "VIX9D is not replicated." in note
-    assert "would extrapolate" not in note.split("VIX9D is not replicated")[1][:40]
+    assert "VIX9D is not replicated: fewer than two usable terms." in note
     assert "SVI-cal surface’s wing" in note
     assert "The stored quotes beyond the surface’s fitted range price below that wing (VIX6M −0.40" in note
     assert "likely understates" not in note

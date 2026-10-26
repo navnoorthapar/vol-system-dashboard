@@ -343,7 +343,9 @@ def vix_terms(vix_rep: Mapping | None) -> list[dict]:
 
     The terms are those of the index's headline method; an index that is not
     replicated shows the Cboe-rules pair it would have used, whose
-    ``extrapolated`` flag says why it was refused (a near weight outside [0, 1]).
+    ``extrapolated`` flag says why it was refused (a near weight outside [0, 1]),
+    or no pair and the method's own ``reason`` (e.g. fewer than two usable
+    terms).
 
     gap_attribution records official − replicated = truncation_pts +
     residual_pts. In the page's sign (gap = replicated − Cboe close) the parts
@@ -377,5 +379,6 @@ def vix_terms(vix_rep: Mapping | None) -> list[dict]:
                     "truncation": -trunc if split and trunc is not None else None,
                     "unexplained": -resid if split and resid is not None else None,
                     "far_wing": _num(ga.get("far_wing_market_minus_model_pts")) if split else None,
-                    "surface": ga.get("surface") if split else None})
+                    "surface": ga.get("surface") if split else None,
+                    "reason": str(terms["reason"]) if (not replicated and terms.get("reason")) else None})
     return out
