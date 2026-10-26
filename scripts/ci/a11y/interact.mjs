@@ -16,8 +16,9 @@
 //   * grid rows: at 1024, 1280, 1440 and 1920 px no row of a .g grid leaves more than
 //     60 px unused (an s7 + s5 row became 12 + 6 below 1181 px: half-empty rows);
 //   * panel bottoms: no .panel ends more than 96 px below its last visible content
-//     (a short panel stretched beside a tall one), every chart drawn first; #carry
-//     and #forward are left to their own fixes;
+//     (a short panel stretched beside a tall one), every chart drawn first; the body
+//     of a closed <details> is not visible content; #carry and #forward are left to
+//     their own fixes;
 //   * heatmap row heads: at 390 px a heatmap's row header stays in view after its
 //     region is scrolled sideways.
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
@@ -204,6 +205,10 @@ async function checkLayout() {
       const r = await page.evaluate(([maxUnused, maxBlank, exempt]) => {
         const vis = el => { const b = el.getBoundingClientRect(), s = getComputedStyle(el);
           return b.width > 0 && b.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+        // the body of a closed <details> keeps a layout box in Chromium although nothing of it
+        // shows: counting it hid a blank panel bottom below a closed disclosure
+        const shut = el => { const d = el.closest('details:not([open])'), s = el.closest('summary');
+          return !!d && d !== el && !(s && s.parentElement === d); };
         const holes = [], blanks = [];
         document.querySelectorAll('.g').forEach(g => {
           const gap = parseFloat(getComputedStyle(g).columnGap) || 0, rows = {};
@@ -218,7 +223,7 @@ async function checkLayout() {
           if (!vis(p) || exempt.includes(p.id)) return;
           let last = -Infinity;
           p.querySelectorAll('.panel-body *').forEach(el => {
-            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only')) return;
+            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)) return;
             last = Math.max(last, el.getBoundingClientRect().bottom);
           });
           if (last === -Infinity) return;

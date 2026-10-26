@@ -521,19 +521,21 @@ dialog.keys .dl { font-size: 12px; }
    a trio goes 6 + 6 + 12. From 1181 px the shorter panel's own content fills
    the row's height: a .grow chart or heatmap grows, a .fill-scroll region takes
    the rest and scrolls, so no panel ends in blank space; a .start row lets each
-   panel end with its content where nothing can grow. */
+   panel end with its content where nothing can grow. A .level row (two equal
+   halves that stay side by side down to 861 px) fills the same way from 1181 px
+   without stacking. */
 .fill-scroll { max-height: 420px; overflow-y: auto; }
 .fill-scroll th { position: sticky; top: 0; z-index: 1; }
 .sub-head { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); margin-top: 14px; }
 .sub-head .sub-meta { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text3); margin-left: 6px; }
 @media (min-width: 1181px) {
-  .g.pair > .panel > .panel-body, .g.pair .grow-col { display: flex; flex-direction: column; }
-  .g.pair .grow-col { flex: 1 1 auto; }
-  .g.pair .panel-body .chart.grow { flex: 1 1 auto; }
-  .g.pair .panel-body .heat-wrap.grow { flex: 1 1 auto; display: flex; flex-direction: column; }
-  .g.pair .panel-body .heat-wrap.grow > table.heat { flex: 1 1 auto; height: 100%; }
-  .g.pair .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
-  .g.pair .grow-col[hidden] { display: none; }
+  .g:is(.pair, .level) > .panel > .panel-body, .g:is(.pair, .level) .grow-col { display: flex; flex-direction: column; }
+  .g:is(.pair, .level) .grow-col { flex: 1 1 auto; }
+  .g:is(.pair, .level) .panel-body .chart.grow { flex: 1 1 auto; }
+  .g:is(.pair, .level) .panel-body .heat-wrap.grow { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .g:is(.pair, .level) .panel-body .heat-wrap.grow > table.heat { flex: 1 1 auto; height: 100%; }
+  .g:is(.pair, .level) .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
+  .g:is(.pair, .level) .grow-col[hidden] { display: none; }
   .g.pair.start { align-items: start; }
 }
 @media (max-width: 1180px) {

@@ -323,3 +323,59 @@ def forward_vols(points: Sequence[Mapping], min_days: float = FWD_MIN_DAYS) -> l
                         "flag": None if fvar >= 0 else "calendar"})
         prev = p
     return out
+
+
+# ── the VIX family replicated from the same chain ────────────────────────────
+VIX_FAMILY = ("VIX9D", "VIX", "VIX3M", "VIX6M")
+GAP_SPLIT_TOL = 1e-6    # index points: the two parts must add up to the stored gap
+
+
+def _term(t: Any) -> dict | None:
+    if not isinstance(t, Mapping) or _num(t.get("days")) is None:
+        return None
+    return {"expiry": str(t.get("expiry"))[:10], "days": float(t["days"])}
+
+
+def vix_terms(vix_rep: Mapping | None) -> list[dict]:
+    """Per VIX-family index of vix_replication.json: the two listed expiries its
+    replication interpolates and the near term's weight, and the gap to the Cboe
+    close split the way the artifact's gap_attribution splits it.
+
+    The terms are those of the index's headline method; an index that is not
+    replicated shows the Cboe-rules pair it would have used, whose
+    ``extrapolated`` flag says why it was refused (a near weight outside [0, 1]).
+
+    gap_attribution records official − replicated = truncation_pts +
+    residual_pts. In the page's sign (gap = replicated − Cboe close) the parts
+    are −truncation_pts, what the strikes beyond the stored strip would add,
+    valued on the attribution surface's wing, and −residual_pts, what the chain
+    leaves unexplained. The split is None when the artifact has no attribution
+    for the index or its parts do not add up to the stored gap within
+    GAP_SPLIT_TOL; ``far_wing`` is the stored quotes beyond the surface's fitted
+    range minus that wing (index points), the sign of the truncation's bias."""
+    out: list[dict] = []
+    for tick in VIX_FAMILY:
+        ix = ((vix_rep or {}).get("indices") or {}).get(tick)
+        if not isinstance(ix, Mapping):
+            continue
+        method = ix.get("headline_method")
+        terms = ix.get(method) if method else ix.get("cboe_rules")
+        terms = terms if isinstance(terms, Mapping) else {}
+        gap = _num(ix.get("gap_vs_official"))
+        replicated = _num(ix.get("replicated")) is not None
+        ga_raw = ix.get("gap_attribution")
+        ga: Mapping = ga_raw if isinstance(ga_raw, Mapping) else {}
+        trunc, resid = _num(ga.get("truncation_pts")), _num(ga.get("residual_pts"))
+        split = (replicated and bool(ga.get("available")) and gap is not None and trunc is not None
+                 and resid is not None and abs(-trunc - resid - gap) <= GAP_SPLIT_TOL)
+        out.append({"ticker": tick, "days": _num(terms.get("constant_maturity_days")), "method": method,
+                    "replicated": replicated,
+                    "near": _term(terms.get("near")), "next": _term(terms.get("next")),
+                    "near_weight": _num(terms.get("near_weight")),
+                    "extrapolated": bool(terms.get("extrapolated")),
+                    "gap": gap if replicated else None,
+                    "truncation": -trunc if split and trunc is not None else None,
+                    "unexplained": -resid if split and resid is not None else None,
+                    "far_wing": _num(ga.get("far_wing_market_minus_model_pts")) if split else None,
+                    "surface": ga.get("surface") if split else None})
+    return out

@@ -5086,6 +5086,52 @@ def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     assert re.search(r'id="vix-markers">', html)
 
 
+
+def test_vix_terms_table_prints_each_index_terms_and_its_gap_split(dash, pages):
+    """P2.7: the replication panel stood beside the taller variance-swap strip
+    with its bottom blank. It now lists, per index of the session the page
+    renders, the two listed expiries the replication interpolates and the near
+    weight, and the gap split as vix_replication.json's gap_attribution splits
+    it (gap = −truncation_pts − residual_pts); read here from the artifact."""
+    html = pages["/surface"]
+    session = dash.load_surface()["session"]
+    vix = json.loads((SHIPPED / "surface" / session / "vix_replication.json").read_text())
+    rows = _table_rows(html, "vix-terms-table")
+    gaps = {r[0]: r[3] for r in _table_rows(html, "vix-rep-table")}
+    assert [r[0] for r in rows] == [t for t in ("VIX9D", "VIX", "VIX3M", "VIX6M") if t in vix["indices"]]
+
+    def days(x: float) -> str:
+        return dash._fmt(x, ".0f") if abs(x - round(x)) < 1e-6 else dash._fmt(x, ".1f")
+
+    def num(txt: str) -> float:
+        return float(txt.replace("−", "-").replace("+", ""))
+
+    n_split = 0
+    for r in rows:
+        ix = vix["indices"][r[0]]
+        m = ix[ix["headline_method"] or "cboe_rules"]
+        assert r[1] == f"{days(m['near']['days'])} / {days(m['next']['days'])}", r
+        assert r[2] == dash._fmt(m["near_weight"], ".3f"), r
+        ga = ix.get("gap_attribution") or {}
+        if ix.get("replicated") is None or not ga.get("available"):
+            assert r[3] == r[4] == "—", r
+            continue
+        n_split += 1
+        assert r[3] == dash.signed(-ga["truncation_pts"], ".2f"), r
+        assert r[4] == dash.signed(-ga["residual_pts"], ".2f"), r
+        # the two parts add up to the gap beside them, up to each one's rounding
+        assert abs(num(r[3]) + num(r[4]) - num(gaps[r[0]])) <= 0.011, (r, gaps[r[0]])
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="vix-terms-note">.*?</p>', html,
+                                              re.DOTALL).group(0))
+    for t, ix in vix["indices"].items():
+        assert (f"{t} is not replicated" in note) == (ix.get("replicated") is None), t
+    if n_split:
+        assert "Truncation: what strikes beyond the stored strip would add" in note
+        bias = [ix["gap_attribution"]["far_wing_market_minus_model_pts"] for ix in vix["indices"].values()
+                if ix.get("replicated") is not None and (ix.get("gap_attribution") or {}).get("available")]
+        assert ("likely understates" in note) == any(b > 0 for b in bias)
+        assert ("likely overstates" in note) == any(b < 0 for b in bias)
+
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no
     quote time; a Cboe-sourced chain prints 'Cboe' and its quote time."""
@@ -5285,6 +5331,8 @@ def test_every_row_of_two_unequal_panels_is_marked_as_a_pair(pages):
 _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
   const vis = el => { const b = el.getBoundingClientRect(), s = getComputedStyle(el);
     return b.width > 0 && b.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const shut = el => { const d = el.closest('details:not([open])'), s = el.closest('summary');
+    return !!d && d !== el && !(s && s.parentElement === d); };
   const holes = [], blanks = [];
   document.querySelectorAll('.g').forEach(g => {
     const gap = parseFloat(getComputedStyle(g).columnGap) || 0, rows = {};
@@ -5300,7 +5348,7 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
     if (!vis(p) || exempt.includes(p.id)) return;
     let last = -Infinity;
     p.querySelectorAll('.panel-body *').forEach(el => {
-      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only')) return;
+      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)) return;
       last = Math.max(last, el.getBoundingClientRect().bottom);
     });
     if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
@@ -5310,12 +5358,15 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
 }"""
 
 
-@pytest.mark.parametrize("width", [1024, 1440])
+@pytest.mark.parametrize("width", [1024, 1440, 1920])
 def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_browser, width):
     """P2.7 (also in scripts/ci/a11y/interact.mjs at 1024, 1280, 1440 and 1920 px):
     no grid row leaves more than 60 px unused, and no panel ends more than 96 px
     below its last visible content once its charts are drawn (#carry and #forward
-    have their own fixes in flight)."""
+    have their own fixes in flight). The body of a closed <details> is not
+    visible content: Chromium keeps a layout box for it, and counting it hid
+    the blank below the replication panel's closed disclosure (135 px at 1440)
+    and the scenario grid's (111 px at 1920)."""
     ctx, page = _page(site_browser, width, 900)
     try:
         for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",

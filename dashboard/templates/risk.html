@@ -108,7 +108,7 @@
 </div>
 {% endif %}
 
-<div class="g">
+<div class="g level">
   {% call m.panel('scenario', 'Scenario grid · spot × vol, full revaluation', 's6') %}
     {% set sc = d.scenario or {} %}
     {% if sc.state == 'ok' %}
@@ -116,8 +116,8 @@
       <button class="btn" type="button" data-units-for="scenario-units" data-show="base" aria-pressed="true">idx pts per straddle</button>
       <button class="btn" type="button" data-units-for="scenario-units" data-show="alt" aria-pressed="false">$ per SPX contract</button>
     </div>
-    <div class="units" id="scenario-units">
-    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows): index points per straddle on one unit of the index, or dollars per SPX contract (× 100) with the units buttons', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain')) }}
+    <div class="units grow-col" id="scenario-units">
+    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows): index points per straddle on one unit of the index, or dollars per SPX contract (× 100) with the units buttons', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain'), grow=True) }}
     <p class="note">{{ (sc.provenance or {}).get('book', 'Reference book') }}; as of {{ (sc.provenance or {}).get('as_of_date', '—') }}{% if sc.dynamics_shown %}; {{ sc.dynamics_shown|replace('_', '-') }} dynamics shown{% if sc.dynamics_all|length > 1 %} (the file also holds {{ sc.dynamics_all|reject('equalto', sc.dynamics_shown)|join(', ')|replace('_', '-') }}){% endif %}{% endif %}. P&amp;L in {{ (sc.provenance or {}).get('units', 'index points per unit book') }}.</p>
     {% for x in d.scenario_more %}
     {% call m.method(x.dynamics|replace('_', '-')|capitalize ~ ' dynamics: the same book and shocks') %}

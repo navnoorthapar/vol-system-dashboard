@@ -361,3 +361,76 @@ def test_the_committed_sessions_are_yahoo_snapshots_without_a_quote_time_and_the
     arb = sj["arbitrage"]
     assert max(arb["max_mid_violation_index_points"].values()) == pytest.approx(94.97, abs=0.005)
     assert len(arb["largest_mid_violations"]) == 25
+
+
+# ── P2.7: each replicated index's terms and its gap split ────────────────────
+
+@pytest.mark.parametrize("session", SESSIONS)
+def test_vix_terms_are_the_headline_methods_and_the_split_adds_up_to_the_gap(session):
+    """The terms and weight are those of the index's headline method, and where
+    the artifact attributes the gap, −truncation − residual equals the stored
+    gap (official − replicated = truncation_pts + residual_pts)."""
+    vix = _inputs(session)[2]
+    rows = ds.vix_terms(vix)
+    assert [r["ticker"] for r in rows] == [t for t in ds.VIX_FAMILY if t in vix["indices"]]
+    n_split = 0
+    for r in rows:
+        ix = vix["indices"][r["ticker"]]
+        m = ix[ix["headline_method"] or "cboe_rules"]
+        assert (r["near"]["days"], r["next"]["days"]) == (m["near"]["days"], m["next"]["days"])
+        assert r["near"]["expiry"] == str(m["near"]["expiry"])[:10]
+        assert r["near_weight"] == m["near_weight"]
+        if ix.get("replicated") is None:
+            assert (r["gap"], r["truncation"], r["unexplained"]) == (None, None, None)
+            continue
+        assert r["gap"] == ix["gap_vs_official"]
+        ga = ix["gap_attribution"]
+        if not ga.get("available"):
+            assert (r["truncation"], r["unexplained"]) == (None, None)
+            continue
+        n_split += 1
+        assert (r["truncation"], r["unexplained"]) == (-ga["truncation_pts"], -ga["residual_pts"])
+        assert r["truncation"] + r["unexplained"] == pytest.approx(r["gap"], abs=1e-9)
+        assert r["far_wing"] == ga["far_wing_market_minus_model_pts"]
+    assert n_split >= 3
+
+
+def test_vix_terms_of_the_known_session():
+    """2026-10-16: VIX interpolates 2026-11-13 (28 d) and 2026-12-04 (49 d) with
+    near weight 19/21; its −0.29 gap is −0.04 of strike truncation and −0.24
+    unexplained. VIX9D is not replicated: its pair 14 / 28 d would extrapolate."""
+    rows = {r["ticker"]: r for r in ds.vix_terms(_inputs(KNOWN)[2])}
+    v = rows["VIX"]
+    assert v["near"] == {"expiry": "2026-11-13", "days": 28.0}
+    assert v["next"] == {"expiry": "2026-12-04", "days": 49.0}
+    assert v["near_weight"] == pytest.approx((49 - 30) / (49 - 28), abs=1e-9)
+    assert [round(v[k], 2) for k in ("gap", "truncation", "unexplained")] == [-0.29, -0.04, -0.24]
+    assert v["surface"] == "svi_cal"
+    assert v["far_wing"] > 0
+    n = rows["VIX9D"]
+    assert (n["replicated"], n["extrapolated"]) == (False, True)
+    assert n["near_weight"] > 1
+    assert (n["near"]["days"], n["next"]["days"]) == (14.0, 28.0)
+
+
+def test_a_gap_split_that_does_not_add_up_is_not_shown():
+    """The split is printed only when the artifact records it and its parts add
+    up to the stored gap; otherwise both parts are None, never a residual
+    made up to fit."""
+    base = {"headline_method": "cboe_rules", "replicated": 20.0, "gap_vs_official": -0.30,
+            "cboe_rules": {"near": {"expiry": "2026-11-13", "days": 28},
+                           "next": {"expiry": "2026-12-04", "days": 49},
+                           "near_weight": 0.9, "extrapolated": False, "constant_maturity_days": 30},
+            "gap_attribution": {"available": True, "truncation_pts": 0.05, "residual_pts": 0.25,
+                                "far_wing_market_minus_model_pts": -0.1, "surface": "svi_cal"}}
+    ok = ds.vix_terms({"indices": {"VIX": base}})[0]
+    assert (ok["truncation"], ok["unexplained"], ok["far_wing"]) == (-0.05, -0.25, -0.1)
+    off = json.loads(json.dumps(base))
+    off["gap_attribution"]["residual_pts"] = 0.20
+    assert ds.vix_terms({"indices": {"VIX": off}})[0]["truncation"] is None
+    gone = json.loads(json.dumps(base))
+    gone["gap_attribution"] = {"available": False, "reason": "term not fitted"}
+    r = ds.vix_terms({"indices": {"VIX": gone}})[0]
+    assert (r["gap"], r["truncation"], r["unexplained"]) == (-0.30, None, None)
+    assert ds.vix_terms(None) == []
+    assert ds.vix_terms({"indices": {}}) == []
