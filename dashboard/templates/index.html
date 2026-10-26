@@ -62,6 +62,7 @@
         <dt>VIX</dt><dd>{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f") }}</dd>
         <dt>VVIX</dt><dd>{{ r.vvix|fmt(".2f") }}</dd>
         <dt>R2 gate</dt><dd>{{ r.gate|fmt(".2f") }} (rolling 252-day 80th percentile of VVIX)</dd>
+        {% if r.vvix is not none and r.gate is not none %}<dt>Gate distance</dt><dd id="r2-gate-distance">VVIX {{ r.vvix|fmt(".2f") }} vs R2 gate {{ r.gate|fmt(".2f") }} ({{ (r.vvix - r.gate)|signed(".2f") }} {{ 'above' if r.vvix > r.gate else ('below' if r.vvix < r.gate else 'at the gate') }})</dd>{% endif %}
         <dt>Rule gives</dt><dd>R{{ r.label }}{% if r.stored is not none %}; stored label for {{ r.date }}: R{{ r.stored }}{% if r.stored != r.label %} <span class="lvl-warn">(differs)</span>{% endif %}{% endif %}</dd>
       </dl>
     </div>
@@ -132,6 +133,25 @@
     {% endif %}
   {% endcall %}
 </div>
+
+{% set vc = d.vx_curve %}{% set vr = d.vix_ratio %}
+{% if vc or (vr and d.charts.vix_ratio) %}
+<div class="g pair">
+  {% call m.panel('vx-curve', 'VX futures curve · on its own date', 's6', vc.date if vc else None) %}
+    {% if vc and d.charts.vx_curve %}
+    <p class="note" id="vx-curve-age"><span class="age-{{ vc.level if vc.level in ('ok', 'warn', 'error') else 'ok' }}">Settlements of <span class="nowrap">{{ vc.date }}</span>{% if vc.age is not none %}, {{ vc.age|plural('NYSE session') }} before the market database’s <span class="nowrap">{{ vc.ref }}</span>{% endif %}</span>; the daily job does not refresh the futures table.</p>
+    {{ m.chart(d.charts.vx_curve, 'h220 grow') }}
+    <p class="note" id="vx-m1m2"><strong>M1 → M2 {{ (vc.m1m2 * 100 if vc.m1m2 is not none else none)|signed('.2f') }}%</strong>{% if vc.m2 %} ({{ vc.m1.settle|fmt('.2f') }} → {{ vc.m2.settle|fmt('.2f') }}){% endif %}: VX2 / VX1 − 1, the second monthly contract over the first; positive is contango. Monthly contracts only (weeklies excluded), at Cboe’s daily settlement{% if vc.prev_date %}; dashed: <span class="nowrap">{{ vc.prev_date }}</span>{% endif %}. A future settles on VIX at its expiry, so this curve is not the spot term structure above and is not drawn on it.</p>
+    {% else %}<p class="note">No VX futures settlements are stored.</p>{% endif %}
+  {% endcall %}
+  {% call m.panel('vix-ratio', 'VIX / VIX3M · since ' ~ (vr.first if vr else ''), 's6', vr.last if vr else None) %}
+    {% if vr and d.charts.vix_ratio %}
+    {{ m.chart(d.charts.vix_ratio, 'h220 grow') }}
+    <p class="note" id="vix-ratio-line">Above 1 (backwardation: the 30-day index over the 3-month one) on <strong>{{ vr.share_above|fmt('.1f') }}% of {{ vr.n|fmt(',') }} sessions</strong>, shaded. Today {{ vr.today|fmt('.3f') }}, the <strong>{{ vr.rank.big }}{% if not vr.rank.record %} percentile{% endif %}</strong> of the {{ vr.n_prior|fmt(',') }} prior sessions since <span class="nowrap">{{ vr.first }}</span>{% if vr.rank.tail %} ({{ vr.rank.tail }}){% endif %}.</p>
+    {% else %}<p class="note">The VIX term-structure table has no ^VIX and ^VIX3M closes.</p>{% endif %}
+  {% endcall %}
+</div>
+{% endif %}
 
 <div class="g pair">
   {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session) %}

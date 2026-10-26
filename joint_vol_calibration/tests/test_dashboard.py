@@ -5987,3 +5987,82 @@ def test_cite_registry_reads_every_cite_call_in_the_templates(dash):
             n_calls += page != f.name
     assert sum(len(v) for v in reg.values()) <= n_calls
     assert {e["page"] for e in reg["calibration.html#oos"]} >= {"index.html"}
+
+
+# ── P3.5: the VIX complex on the Overview ─────────────────────────────────────
+
+def _ts_wide() -> pd.DataFrame:
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        df = pd.read_sql("SELECT date, ticker, close FROM vix_term_structure", con)
+    return df.pivot_table(index="date", columns="ticker", values="close", aggfunc="last").sort_index()
+
+
+def test_overview_term_structure_overlays_carry_their_dates(pages):
+    """P3.5: the term-structure chart's dashed overlays are the curves 1, 5 and 21
+    sessions before the shown one, each named with its date."""
+    w = _ts_wide()[["^VIX9D", "^VIX", "^VIX3M", "^VIX6M"]].dropna()
+    spec = _spec(pages["/"], "chart-ts")
+    names = [s["name"] for s in spec["series"]]
+    assert names[0] == f"{w.index[-1]} (latest)"
+    want = [f"{w.index[-1 - k]} ({k} session{'s' if k > 1 else ''} earlier)" for k in (1, 5, 21)]
+    assert names[1:] == want
+    for s, k in zip(spec["series"][1:], (1, 5, 21)):
+        row = w.iloc[-1 - k]
+        want_vals = [round(float(row[t]), 2) for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M")]
+        assert [p[1] for p in s["data"]] == want_vals
+    legend = [it["name"] for it in spec["legend_items"]]
+    assert legend == names
+
+
+def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
+    """P3.5: the VX curve is the futures table's newest date, never the spot date:
+    M1 → M2 = VX2 / VX1 − 1, recomputed here from vol_system.db; its age in NYSE
+    sessions is shown in the stale styling of that age, and the curve is not on
+    the spot chart."""
+    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+        last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
+        px = [r[0] for r in con.execute(
+            "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
+            "AND is_weekly = 0 AND days_to_expiry > 0 ORDER BY expiry_date", (last, last))]
+        db_last = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
+    html = pages["/"]
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    m1m2 = (px[1] / px[0] - 1) * 100
+    assert line.startswith(f"M1 → M2 {_signed2(m1m2)}%")
+    spec = _spec(html, "chart-vx-curve")
+    assert spec["series"][0]["name"] == f"{last} settlements"
+    assert spec["series"][0]["data"] == pytest.approx(px)
+    age = dash.session_age(last, db_last)
+    badge = re.search(r'<p class="note" id="vx-curve-age"><span class="age-(\w+)">(.*?)</span>;', html,
+                      re.DOTALL)
+    assert badge.group(1) == dash.stale_level(age)
+    assert f"{age} NYSE session" in _html_unescape(re.sub(r"<[^>]+>", "", badge.group(2)))
+    ts = _spec(html, "chart-ts")
+    assert not any("settlement" in s["name"] for s in ts["series"])
+
+
+def test_overview_vix_over_vix3m_share_and_percentile(dash, pages):
+    """P3.5: the share of sessions with VIX / VIX3M above 1 and today's percentile
+    among the prior sessions (percentile_rank wording), recomputed from the DB."""
+    w = _ts_wide()
+    r = (w["^VIX"] / w["^VIX3M"]).dropna()
+    share = (r > 1).mean() * 100
+    pct = (r.iloc[:-1] < r.iloc[-1]).mean() * 100
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vix-ratio-line">(.*?)</p>',
+                                                            pages["/"], re.DOTALL).group(1)))
+    assert f"{share:.1f}% of {len(r):,} sessions" in line
+    assert f"Today {r.iloc[-1]:.3f}" in line
+    rank = dash.percentile_rank(pct)
+    assert rank["big"] in line
+    assert f"{len(r) - 1:,} prior sessions since {r.index[0]}" in line
+
+
+def test_regime_panel_states_the_distance_to_the_r2_gate(dash, pages):
+    """P3.5: 'VVIX x vs R2 gate g (±d above/below)', with d = VVIX − gate."""
+    r = dash.load_page1()["rule"]
+    got = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<dd id="r2-gate-distance">(.*?)</dd>', pages["/"],
+                                                          re.DOTALL).group(1)))
+    diff = r["vvix"] - r["gate"]
+    side = "above" if diff > 0 else "below" if diff < 0 else "at the gate"
+    assert got == f"VVIX {r['vvix']:.2f} vs R2 gate {r['gate']:.2f} ({_signed2(diff)} {side})"

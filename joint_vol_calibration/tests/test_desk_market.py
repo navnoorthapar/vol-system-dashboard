@@ -241,3 +241,56 @@ def test_yearly_means_mark_a_partial_last_year_with_its_span():
     assert ys[-1]["last"] == "2025-03-24"
     assert ys[-1]["n"] == len(idx[idx.year == 2025])
     assert ys[1]["mean"] == pytest.approx(x[x.index.year == 2024].mean())
+
+
+# ── the VIX complex on the Overview (P3.5) ───────────────────────────────────
+
+def test_vx_curve_on_a_fixture_day_is_front_first_monthly_and_its_contango():
+    rows = [{"expiry_date": "2026-12-16", "expiry_month": "2026-12", "is_weekly": 0, "price": 19.0,
+             "days_to_expiry": 60},
+            {"expiry_date": "2026-11-18", "expiry_month": "2026-11", "is_weekly": 0, "price": 18.0,
+             "days_to_expiry": 32},
+            {"expiry_date": "2026-11-04", "expiry_month": "2026-11", "is_weekly": 1, "price": 30.0,
+             "days_to_expiry": 18},
+            {"expiry_date": "2026-10-21", "expiry_month": "2026-10", "is_weekly": 0, "price": 17.0,
+             "days_to_expiry": 4}]
+    c = dm.vx_curve(rows)
+    assert [r["expiry"] for r in c["rows"]] == ["2026-10-21", "2026-11-18", "2026-12-16"]
+    assert c["m1m2"] == pytest.approx(18.0 / 17.0 - 1)
+    one = dm.vx_curve(rows[:1])
+    assert one["m1m2"] is None
+    assert dm.vx_curve([]) is None
+
+
+def test_vx_curve_m1_m2_on_the_committed_db():
+    """Acceptance 2: M1 → M2 = +4.28% on 2026-10-09 (17.12 → 17.85)."""
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    c = dm.vx_curve(_settles(con, "2026-10-09"))
+    assert round(c["m1m2"] * 100, 2) == 4.28
+    assert round(c["m1"]["settle"], 2) == 17.12
+    assert round(c["m2"]["settle"], 2) == 17.85
+
+
+def test_ratio_view_on_a_fixture():
+    r = pd.Series([0.9, 1.1, 1.2, 0.95, 1.05, 0.8], index=pd.bdate_range("2026-01-01", periods=6))
+    v = dm.ratio_view(r)
+    assert v["share_above"] == pytest.approx(50.0)
+    assert v["pct"] == pytest.approx(0.0)
+    assert v["runs"] == [("2026-01-02", "2026-01-05"), ("2026-01-07", "2026-01-07")]
+    v2 = dm.ratio_view(pd.Series([0.9, 0.8, 1.0, 0.85], index=pd.bdate_range("2026-01-01", periods=4)))
+    assert v2["pct"] == pytest.approx(100 / 3)        # strictly below today (0.80), among the prior three
+
+
+def test_vix_over_vix3m_share_and_percentile_on_the_committed_db():
+    """Acceptance 4: backwardation on 7.6% of 4,228 sessions and today's 0.950 at the
+    80.8th percentile, on the DB as it stood through 2026-10-23 (later sessions
+    are the bot's; the snapshot is fixed here)."""
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    df = pd.read_sql("SELECT date, ticker, close FROM vix_term_structure WHERE ticker IN ('^VIX', '^VIX3M') "
+                     "AND date <= '2026-10-23'", con)
+    w = df.pivot_table(index="date", columns="ticker", values="close", aggfunc="last").sort_index()
+    v = dm.ratio_view(w["^VIX"] / w["^VIX3M"])
+    assert v["n"] == 4228
+    assert round(v["share_above"], 1) == 7.6
+    assert round(v["today"], 3) == 0.950
+    assert round(v["pct"], 1) == 80.8

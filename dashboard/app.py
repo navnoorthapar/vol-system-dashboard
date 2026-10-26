@@ -518,6 +518,16 @@ def vx_last_date() -> str | None:
     return str(row[0])[:10] if row and row[0] else None
 
 
+def vx_prev_date(before: str) -> str | None:
+    """The VX futures table's last session before ``before`` (None if none)."""
+    with _db() as con:
+        try:
+            row = con.execute("SELECT MAX(date) FROM vix_futures_daily WHERE date < ?", (before,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return str(row[0])[:10] if row and row[0] else None
+
+
 def vx_session_rows(session: str) -> list[dict]:
     """The VX futures rows of exactly ``session``: the query of
     database.get_vix_futures_curve (contracts live on the session, monthly only,
@@ -4437,6 +4447,98 @@ def pipeline_state(diag: dict) -> dict:
     return out
 
 
+TS_OVERLAY_SESSIONS = ((1, "1 session earlier"), (5, "5 sessions earlier"), (21, "21 sessions earlier"))
+
+
+def overview_vix_complex(d: dict) -> None:
+    """The Overview's VIX complex: the term structure's earlier sessions (dashed,
+    dated), the VX futures curve on its own date, VIX/VIX3M since 2010 and its
+    percentile. Futures stay on their own as-of date: never on the spot chart."""
+    from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
+    vw = _read_vix_wide()
+    tenor_days = dict(VIX_INDEX_TENOR_DAYS)
+    cols = [c for c in tenor_days if c in vw.columns]
+    full = vw[cols].dropna() if cols else pd.DataFrame()
+    d["ts_overlays"] = []
+    if len(full) and d.get("ts_date") == str(full.index[-1].date()):
+        for k, what in TS_OVERLAY_SESSIONS:
+            if len(full) > k:
+                row, day = full.iloc[-1 - k], str(full.index[-1 - k].date())
+                pts = sorted((tenor_days[c], float(row[c])) for c in cols)
+                d["ts_overlays"].append({"date": day, "k": k, "name": f"{day} ({what})",
+                                         "days": [t for t, _ in pts],
+                                         "values": [round(v, 2) for _, v in pts]})
+    # VIX / VIX3M since the start of the term-structure table
+    if "^VIX" in vw.columns and "^VIX3M" in vw.columns:
+        ratio = (vw["^VIX"] / vw["^VIX3M"]).dropna()
+        rv = desk_market.ratio_view(ratio)
+        d["vix_ratio"] = rv
+        if rv:
+            rv["rank"] = percentile_rank(rv["pct"])
+            xs = [str(pd.Timestamp(t).date()) for t in ratio.index]
+            years = pd.DatetimeIndex(ratio.index).year
+            by_year = [(int(y), len(g), float((g > 1).mean() * 100), float(g.mean()))
+                       for y, g in ratio.groupby(years)]
+            d["charts"]["vix_ratio"] = charts.xy(
+                "chart-vix-ratio",
+                f"VIX / VIX3M, {rv['first']} to {rv['last']}, shaded above 1 (backwardation)",
+                x={"type": "time", "csv": "date"},
+                y={"name": "VIX / VIX3M", "digits": 1, "tipDigits": 3},
+                series=[{"name": "VIX / VIX3M", "type": "line", "color": "cat0", "width": 1.0,
+                         "sampling": "lttb", "data": [round(float(x), 3) for x in ratio]}],
+                xs=xs, csv="vix_over_vix3m.csv", grid={"top": 10, "bottom": 30},
+                marks={"y": [{"value": 1.0, "label": "1.0", "color": "muted", "dash": False}],
+                       "areas": [{"from": a, "to": b, "color": "watch", "alpha": 0.22}
+                                 for a, b in rv["runs"]]},
+                describe=(f"Daily VIX over VIX3M closes; above 1 (the 30-day index over the 3-month one) on "
+                          f"{_fmt(rv['share_above'], '.1f')}% of {rv['n']:,} sessions; "
+                          f"today {_fmt(rv['today'], '.3f')}."),
+                table=charts.table("VIX / VIX3M by calendar year; the CSV has every session",
+                                   ["Year", "Sessions#", "Above 1 (%)#", "Mean#"],
+                                   [[y, n, _fmt(sh, ".1f"), _fmt(m_, ".3f")] for y, n, sh, m_ in by_year]))
+    # the VX futures curve: its own newest date, the session before as an overlay
+    d["vx_curve"] = None
+    last = vx_last_date()
+    if last:
+        cur = desk_market.vx_curve(vx_session_rows(last))
+        prev_date = vx_prev_date(last)
+        prev = desk_market.vx_curve(vx_session_rows(prev_date)) if prev_date else None
+        if cur:
+            ref = _latest_market_session()
+            age = session_age(last, ref)
+            d["vx_curve"] = {**cur, "date": last, "prev_date": prev_date if prev else None, "prev": prev,
+                             "age": age, "level": stale_level(age), "ref": ref}
+            pv = {r["expiry"]: r["settle"] for r in (prev or {}).get("rows") or []}
+            cats = [r["expiry"] for r in cur["rows"]]
+            series = [{"name": f"{last} settlements", "type": "line", "color": "headline", "symbol": "circle",
+                       "size": 6, "width": 1.6, "legend": True, "z": 4,
+                       "data": [r["settle"] for r in cur["rows"]]}]
+            if prev:
+                series.append({"name": f"{prev_date} settlements", "type": "line", "color": "muted",
+                               "symbol": "circle", "size": 4, "width": 1.1, "dash": True, "legend": True,
+                               "data": [pv.get(c) for c in cats]})
+            d["charts"]["vx_curve"] = charts.xy(
+                "chart-vx-curve", f"VX monthly futures settlements on {last}" + (
+                    f", with {prev_date}" if prev else ""),
+                x={"type": "category", "categories": [c[2:] for c in cats],
+                   "name": "Contract (final settlement)", "interval": 0, "rotate": 45},
+                y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
+                series=series, xs=[c[2:] for c in cats], csv=f"vx_curve_{last}.csv",
+                grid={"top": 12, "bottom": 64},
+                describe=(f"{cur['n']} monthly contracts on {last}, front month first; "
+                          "M1 → M2 "
+                          f"{_fmt(cur['m1m2'] * 100 if cur['m1m2'] is not None else None, '+.2f')}%."),
+                table=charts.table(f"VX monthly settlements, {last}" + (f" and {prev_date}" if prev else ""),
+                                   ["Contract", "Final settlement", "Days#", f"{last}#",
+                                    *([f"{prev_date}#", "Change#"] if prev else [])],
+                                   [[r["month"], r["expiry"], _fmt(r["days"], ".0f"),
+                                     _fmt(r["settle"], ".2f"),
+                                     *([_fmt(pv.get(r["expiry"]), ".2f"),
+                                        (signed(r["settle"] - pv[r["expiry"]], ".2f")
+                                         if r["expiry"] in pv else "—")]
+                                       if prev else [])] for r in cur["rows"]]))
+
+
 def load_overview() -> dict[str, Any]:
     d = load_page1()
     d.setdefault("charts", {})
@@ -4500,19 +4602,30 @@ def load_overview() -> dict[str, Any]:
     d["findings"] = []
     with _loader_boundary(d, "findings at a glance"):
         d["findings"] = findings_at_a_glance(p2, p4, surf_oos, diag, inf, d["pipeline"])
+    with _loader_boundary(d, "VIX complex (vol_system.db vix_term_structure, vix_futures_daily)"):
+        overview_vix_complex(d)
     if d.get("ts_values"):
         days = [int(t.rstrip("d")) for t in d["ts_tenors"]]
+        ov = d.get("ts_overlays") or []
+        series = [{"name": f"{d.get('ts_date')} (latest)", "type": "line", "color": "cat0",
+                   "symbol": "circle", "size": 7, "width": 2, "legend": True, "z": 4,
+                   "data": [[t, v] for t, v in zip(days, d["ts_values"])]}]
+        for o, col in zip(ov, ("cat2", "cat4", "cat3")):
+            series.append({"name": o["name"], "type": "line", "color": col, "symbol": "circle", "size": 4,
+                           "width": 1.2, "dash": True, "legend": True,
+                           "data": [[t, v] for t, v in zip(o["days"], o["values"])]})
         d["charts"]["ts"] = charts.xy(
-            "chart-ts", f"VIX index term structure on {d.get('ts_date')}",
+            "chart-ts", f"VIX index term structure on {d.get('ts_date')}, with earlier sessions",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True},
             y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
-            series=[{"name": "VIX family", "type": "line", "color": "cat0", "symbol": "circle", "size": 7,
-                     "width": 2, "data": [[t, v] for t, v in zip(days, d["ts_values"])]}],
+            series=series, tooltip="item",
             csv=f"vix_term_structure_{d.get('ts_date')}.csv", grid={"top": 12},
-            describe=("^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session; tenor on a linear axis, "
-                      "straight segments."),
-            table=charts.table(f"VIX-family index levels, {d.get('ts_date')}", ["Tenor", "Level (vol pts)#"],
-                               [[t, _fmt(v, ".2f")] for t, v in zip(d["ts_tenors"], d["ts_values"])]))
+            describe=("^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session, and dashed on "
+                      + ", ".join(o["name"] for o in ov) + "; tenor on a linear axis, straight segments."),
+            table=charts.table(f"VIX-family index levels (vol pts), {d.get('ts_date')} and earlier sessions",
+                               ["Tenor", f"{d.get('ts_date')}#", *(f"{o['date']}#" for o in ov)],
+                               [[t, _fmt(v, ".2f"), *(_fmt(o["values"][i], ".2f") for o in ov)]
+                                for i, (t, v) in enumerate(zip(d["ts_tenors"], d["ts_values"]))]))
     d["pdv_spark"] = sparkline(d.get("pdv_sparkline") or [], height=36, zero=True)
     # VIX against the realised vol of the last 21 sessions (Research #vrp has the history)
     d["vix_rv"] = None

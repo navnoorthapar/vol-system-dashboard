@@ -143,3 +143,41 @@ def yearly_means(x: pd.Series) -> list[dict]:
                     "first": str(gi[0].date()), "last": str(gi[-1].date()),
                     "partial": bool(yr == idx[-1].year and idx[-1].month < 12)})
     return out
+
+
+# ── the VIX complex on the Overview (P3.5) ───────────────────────────────────
+
+def vx_curve(rows: Sequence[Mapping[str, Any]]) -> dict | None:
+    """One session's VX monthly curve (live_monthly: front month first) and its
+    M1 → M2 slope, VX2 / VX1 − 1 (positive: contango). None without a contract."""
+    live = live_monthly(rows)
+    if not live:
+        return None
+    m1m2 = (live[1]["settle"] / live[0]["settle"] - 1.0) if len(live) >= 2 else None
+    return {"rows": live, "n": len(live), "m1m2": m1m2,
+            "m1": live[0], "m2": live[1] if len(live) >= 2 else None}
+
+
+def ratio_view(ratio: pd.Series, threshold: float = 1.0) -> dict | None:
+    """VIX/VIX3M: the share of sessions above ``threshold`` (backwardation), the
+    newest value and its percentile among the PRIOR sessions (percent strictly
+    below it, NaN dropped), and the runs above the threshold (for shading)."""
+    r = ratio.dropna().astype(float)
+    if len(r) < 2:
+        return None
+    above = r > threshold
+    today = float(r.iloc[-1])
+    prior = r.iloc[:-1]
+    runs: list[tuple[str, str]] = []
+    start = None
+    idx = [str(pd.Timestamp(t).date()) for t in r.index]
+    for i, on in enumerate(above.to_numpy()):
+        if on and start is None:
+            start = i
+        if start is not None and (not on or i == len(r) - 1):
+            end = i if on else i - 1
+            runs.append((idx[start], idx[end]))
+            start = None
+    return {"n": len(r), "first": idx[0], "last": idx[-1], "today": today,
+            "share_above": float(above.mean() * 100.0), "n_above": int(above.sum()),
+            "pct": float((prior < today).mean() * 100.0), "n_prior": len(prior), "runs": runs}
