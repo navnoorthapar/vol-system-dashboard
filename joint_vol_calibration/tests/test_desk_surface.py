@@ -210,3 +210,67 @@ def test_the_svi_atm_skew_is_the_slope_of_the_slice_at_the_forward():
     h = 1e-6
     fd = (math.sqrt(ds.svi_w(h, sl) / sl["T"]) - math.sqrt(ds.svi_w(-h, sl) / sl["T"])) / (2 * h)
     assert ds.svi_atm_skew(sl) == pytest.approx(fd, abs=1e-7)
+
+
+# ── P2.2: the ATM-skew term structure ────────────────────────────────────────
+
+@pytest.mark.parametrize("session", SESSIONS)
+def test_the_analytic_svi_atm_skew_equals_a_finite_difference_on_every_slice(session):
+    h = 1e-5
+    for sl in _inputs(session)[0]["surfaces"]["svi_cal"]["params"]["slices"]:
+        fd = (math.sqrt(ds.svi_w(h, sl) / sl["T"]) - math.sqrt(ds.svi_w(-h, sl) / sl["T"])) / (2 * h)
+        assert ds.svi_atm_skew(sl) == pytest.approx(fd, abs=1e-6), sl["expiry"]
+
+
+# the slopes verified when the panel was specified (B2 labelled the all-expiry
+# eSSVI values 'T >= 30 d'): all expiries, then T >= 30 d with its expiry count
+SLOPES = {
+    "2026-03-24": (-0.409, -0.439, -0.465, -0.493, 27),
+    "2026-03-27": (-0.315, -0.358, -0.427, -0.441, 25),
+    "2026-05-29": (-0.336, -0.392, -0.310, -0.415, 26),
+    "2026-06-18": (-0.357, -0.422, -0.325, -0.454, 27),
+    "2026-10-16": (-0.450, -0.557, -0.467, -0.583, 13),
+}
+
+
+@pytest.mark.parametrize("session", sorted(SLOPES))
+def test_skew_power_law_slopes_match_polyfit_and_the_verified_values(session):
+    sj = _inputs(session)[0]
+    sl = sorted(sj["surfaces"]["svi_cal"]["params"]["slices"], key=lambda s: s["T"])
+    ts = sorted(sj["term_structure"], key=lambda t: t["T_days"])
+    t_svi = np.array([s["T"] for s in sl])
+    k_svi = np.array([ds.svi_atm_skew(s) for s in sl])
+    t_ess = np.array([t["T_days"] / 365 for t in ts])
+    k_ess = np.array([t["atm_skew_essvi"] for t in ts])
+    got = []
+    cases = ((t_svi, k_svi, None), (t_ess, k_ess, None), (t_svi, k_svi, 30), (t_ess, k_ess, 30))
+    for t, k, min_days in cases:
+        keep = np.ones(len(t), bool) if min_days is None else t * 365 >= min_days
+        ref = np.polyfit(np.log(t[keep]), np.log(np.abs(k[keep])), 1)[0]
+        s = ds.skew_slope(t, k, min_days)
+        assert s["slope"] == pytest.approx(ref, abs=1e-12)
+        assert s["n"] == int(keep.sum())
+        got.append(s)
+    want = SLOPES[session]
+    for s, w in zip(got, want[:4]):
+        assert s["slope"] == pytest.approx(w, abs=0.001)
+    assert got[2]["n"] == want[4]
+    assert got[2]["t_lo_days"] >= 30
+
+
+def test_the_steepest_slope_prints_unclipped():
+    """2026-10-16's all-expiry eSSVI slope, the steepest of the twenty, prints as
+    −0.557 (the page's signed .3f), not clipped to a display range."""
+    import desk_format
+
+    sj = _inputs(KNOWN)[0]
+    ts = sorted(sj["term_structure"], key=lambda t: t["T_days"])
+    s = ds.skew_slope([t["T_days"] / 365 for t in ts], [t["atm_skew_essvi"] for t in ts])
+    assert desk_format.signed(s["slope"], ".3f") == "−0.557"
+
+
+def test_skew_slope_needs_three_expiries_and_ignores_zero_skews():
+    assert ds.skew_slope([0.1, 0.2], [-1.0, -0.8]) is None
+    s = ds.skew_slope([0.1, 0.2, 0.4, 0.8], [-1.0, 0.0, -0.25, -0.125])
+    assert s["n"] == 3
+    assert s["slope"] == pytest.approx(-1.0, abs=1e-12)

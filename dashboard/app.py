@@ -650,6 +650,34 @@ def heston_model_smile(params: dict,
     return out
 
 
+SKEW_FD_STEP = 0.01     # ln(K/F) step of the Heston ATM-skew differences (and half of it)
+
+
+def heston_atm_skew(params: dict, maturities_days: Sequence[float],
+                    h: float = SKEW_FD_STEP) -> list[float | None]:
+    """∂σ/∂ln(K/F) at the forward of the Heston smile of ``params``, per maturity,
+    in vol (decimal) per unit ln-moneyness.
+
+    Central differences of heston_model_smile at steps h and h/2, combined by
+    Richardson extrapolation, (4·D(h/2) − D(h))/3, which cancels the h² error
+    term: a plain ±0.01 difference is 2% off at 13 days (the short-dated smile
+    is strongly curved at the money). None where a node did not invert."""
+    hh = h / 2.0
+    ks = (-h, -hh, hh, h)
+    out: list[float | None] = []
+    for r in heston_model_smile(params, maturities_days=maturities_days, log_moneyness=ks):
+        iv = dict(zip(r["lm"], r["iv"]))
+        got = [iv.get(round(k, 4)) for k in ks]
+        v = [float(x) for x in got if x is not None]
+        if len(v) != len(ks):
+            out.append(None)
+            continue
+        d_h = (v[3] - v[0]) / (2.0 * h)
+        d_hh = (v[2] - v[1]) / (2.0 * hh)
+        out.append((4.0 * d_hh - d_h) / 3.0)
+    return out
+
+
 # ── PDV forecast series (index page) ───────────────────────────────────────────
 def pdv_features(pdv: Any, log_returns: pd.Series) -> pd.DataFrame:
     """PDV state variables rebuilt from `log_returns` with the model's own half-lives."""
@@ -2616,6 +2644,162 @@ def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> di
     return spec
 
 
+SKEW_SHORT_DAYS = 30.0     # 'the short end' of the skew comparison: listed expiries under 30 days
+
+
+def _session_skews(s: dict) -> dict:
+    """One stored session's ATM skews: SVI-cal (analytic, per slice) and eSSVI
+    (surface.json term_structure.atm_skew_essvi), with their power-law slopes."""
+    sj = s["surface"]
+    sl = sorted((((sj.get("surfaces") or {}).get("svi_cal") or {}).get("params") or {}).get("slices") or [],
+                key=lambda x: float(x["T"]))
+    ts = sorted((t for t in sj.get("term_structure") or [] if _num(t.get("atm_skew_essvi")) is not None),
+                key=lambda t: float(t["T_days"]))
+    t_svi = [float(x["T"]) for x in sl]
+    svi = [desk_surface.svi_atm_skew(x) for x in sl]
+    t_ess = [float(t["T_days"]) / desk_surface.DAYS_PER_YEAR for t in ts]
+    ess = [float(t["atm_skew_essvi"]) for t in ts]
+    return {"session": s["session"], "expiries": [str(x["expiry"])[:10] for x in sl], "T": t_svi, "svi": svi,
+            "essvi_expiries": [str(t["expiry"])[:10] for t in ts], "T_essvi": t_ess, "essvi": ess,
+            "slopes": {"svi_all": desk_surface.skew_slope(t_svi, svi),
+                       "essvi_all": desk_surface.skew_slope(t_ess, ess),
+                       "svi_30": desk_surface.skew_slope(t_svi, svi, SKEW_SHORT_DAYS),
+                       "essvi_30": desk_surface.skew_slope(t_ess, ess, SKEW_SHORT_DAYS)}}
+
+
+def skew_term_view(params: dict, fit_session: str | None, sessions: Sequence[dict],
+                   refit: dict | None) -> dict | None:
+    """The ATM-skew term structure (Calibration #skew-term).
+
+    The market's skew per stored session (SVI-cal and eSSVI), its power-law
+    slope in T (all expiries and T ≥ 30 d), and the Heston skew at the
+    published parameters ``params`` and at the σ-profile's widest refit, both at
+    the listed maturities of the headline session (the fit's own session when a
+    surface report exists for it, else the newest one)."""
+    if not sessions:
+        return None
+    per = [_session_skews(s) for s in sessions]
+    per = [p for p in per if p["T"]]
+    if not per:
+        return None
+    by = {p["session"]: p for p in per}
+    head = by.get(fit_session or "") or per[-1]
+    days = [t * desk_surface.DAYS_PER_YEAR for t in head["T"]]
+    hes = heston_atm_skew(params, days)
+    hes_refit = heston_atm_skew(refit["params"], days) if refit else None
+    ess_by = dict(zip(head["essvi_expiries"], head["essvi"]))
+    rows = []
+    for e, t, m, h_, r_ in zip(head["expiries"], head["T"], head["svi"], hes, hes_refit or [None] * len(hes)):
+        rows.append({"expiry": e, "T": t, "T_days": t * desk_surface.DAYS_PER_YEAR, "svi": m,
+                     "essvi": _num(ess_by.get(e)), "heston": h_, "refit": r_,
+                     "ratio": (abs(h_) / abs(m)) if (h_ is not None and m) else None})
+    return {"head": head["session"], "fit_session": fit_session, "sessions": per, "rows": rows,
+            "heston_params": params, "refit": refit,
+            "slope_ranges": {k: ([p["slopes"][k]["slope"] for p in per if p["slopes"][k]])
+                             for k in ("svi_all", "essvi_all", "svi_30", "essvi_30")}}
+
+
+def skew_term_compare(v: dict) -> dict | None:
+    """Published Heston against the SVI-cal market skew at the headline session's
+    listed expiries: the |Heston| / |market| ratio range, the shortest expiry's
+    pair, and below 30 days how many expiries have the market above Heston."""
+    rows = [r for r in v["rows"] if r["ratio"] is not None]
+    if not rows:
+        return None
+    short = [r for r in rows if r["T_days"] < SKEW_SHORT_DAYS]
+    first = rows[0]
+    near30 = min(rows, key=lambda r: abs(r["T_days"] - 30.0))
+    return {"lo": min(r["ratio"] for r in rows), "hi": max(r["ratio"] for r in rows), "n": len(rows),
+            "first": first, "near30": near30, "n_short": len(short),
+            "short_market_above": sum(1 for r in short if abs(r["svi"]) > abs(r["heston"])),
+            "steeper_all": all(r["ratio"] > 1 for r in rows),
+            "flatter_all": all(r["ratio"] < 1 for r in rows)}
+
+
+def skew_term_sentence(v: dict) -> str | None:
+    """What the chart shows, computed: Heston against the SVI-cal market skew and
+    SVI-cal against eSSVI near 30 days."""
+    c = skew_term_compare(v)
+    if not c:
+        return None
+    f = c["first"]
+    if c["steeper_all"]:
+        rel = "steeper than the SVI-cal market skew at every listed expiry"
+    elif c["flatter_all"]:
+        rel = "flatter than the SVI-cal market skew at every listed expiry"
+    else:
+        n_st = sum(1 for r in v["rows"] if r["ratio"] is not None and r["ratio"] > 1)
+        rel = f"steeper than the SVI-cal market skew on {n_st} of {c['n']} listed expiries"
+    out = (f"On {v['head']} the published Heston fit's ATM skew is {rel} "
+           f"(×{_fmt(c['lo'], '.2f')} to ×{_fmt(c['hi'], '.2f')}; {_fmt(abs(f['heston']), '.2f')} against "
+           f"{_fmt(abs(f['svi']), '.2f')} at {_fmt(f['T_days'], '.0f')} d).")
+    if c["n_short"]:
+        out += (f" Below {_fmt(SKEW_SHORT_DAYS, '.0f')} days the market line lies above the Heston line on "
+                f"{c['short_market_above']} of {c['n_short']} expiries.")
+    n = c["near30"]
+    if n["essvi"] is not None and n["svi"]:
+        out += (f" eSSVI's ψ(θ) ties the skew across expiries, so the two fits of the same quotes differ: at "
+                f"{_fmt(n['T_days'], '.0f')} d eSSVI gives {signed(n['essvi'], '.3f')} and SVI-cal "
+                f"{signed(n['svi'], '.3f')} ({_pct_prose(n['essvi'] / n['svi'] - 1, 0)}).")
+    return out
+
+
+def skew_term_spec(v: dict) -> dict:
+    """Log–log chart of |ATM skew| against T, every stored session, and its table."""
+    head = v["head"]
+    hp = next(p for p in v["sessions"] if p["session"] == head)
+    series: list[dict[str, Any]] = []
+    for p in v["sessions"]:
+        if p["session"] == head:
+            continue
+        series.append({"name": f"SVI-cal {p['session']}", "legendKey": "SVI-cal, other sessions",
+                       "legend": True, "type": "line", "color": "muted", "width": 1, "z": 1,
+                       "data": [[t, abs(s)] for t, s in zip(p["T"], p["svi"])]})
+    series.append({"name": f"SVI-cal {head}", "legend": True, "type": "line",
+                   "color": model_colour("svi_cal"), "width": 2, "symbol": "circle", "size": 4, "z": 3,
+                   "data": [[t, abs(s)] for t, s in zip(hp["T"], hp["svi"])]})
+    series.append({"name": f"eSSVI {head}", "legend": True, "type": "line", "color": model_colour("essvi"),
+                   "width": 1.5, "dash": "dotted", "z": 3,
+                   "data": [[t, abs(s)] for t, s in zip(hp["T_essvi"], hp["essvi"])]})
+    series.append({"name": "Heston, published fit", "legend": True, "type": "line",
+                   "color": model_colour("heston_v2"), "width": 1.5, "z": 3,
+                   "data": [[r["T"], abs(r["heston"])] for r in v["rows"] if r["heston"] is not None]})
+    if v["refit"]:
+        series.append({"name": f"Heston, σ ≤ {_fmt(v['refit']['cap'], 'g')} refit", "legend": True,
+                       "type": "line", "color": model_colour("heston_v2"), "width": 1.5, "dash": True, "z": 3,
+                       "data": [[r["T"], abs(r["refit"])] for r in v["rows"] if r["refit"] is not None]})
+    trows = [[head, r["expiry"], _fmt(r["T_days"], ".0f"), signed(r["svi"], ".3f"), signed(r["essvi"], ".3f"),
+              signed(r["heston"], ".3f"), signed(r["refit"], ".3f")] for r in v["rows"]]
+    for p in v["sessions"]:
+        if p["session"] == head:
+            continue
+        eb = dict(zip(p["essvi_expiries"], p["essvi"]))
+        trows += [[p["session"], e, _fmt(t * desk_surface.DAYS_PER_YEAR, ".0f"), signed(s, ".3f"),
+                   signed(eb.get(e), ".3f"), "—", "—"] for e, t, s in zip(p["expiries"], p["T"], p["svi"])]
+    refit_lab = f"Heston σ ≤ {_fmt(v['refit']['cap'], 'g')}#" if v["refit"] else "Heston refit#"
+    # log axes bounded by the data (ECharts' default runs to whole decades, two
+    # thirds of the plot empty), a 20% margin each side
+    pts: list[list[float]] = [pt for s in series for pt in s["data"] if pt[0] and pt[1]]
+    xb = (round_sig(min(p_[0] for p_ in pts) / 1.2, 2), round_sig(max(p_[0] for p_ in pts) * 1.2, 2))
+    yb = (round_sig(min(p_[1] for p_ in pts) / 1.2, 2), round_sig(max(p_[1] for p_ in pts) * 1.2, 2))
+    return charts.xy(
+        "chart-skew-term", f"ATM skew against maturity on log–log axes, {head} and every stored session",
+        x={"type": "value", "log": True, "name": "T (years, log scale)", "digits": 2, "tipDigits": 3,
+           "min": xb[0], "max": xb[1]},
+        y={"type": "value", "log": True, "name": "|skew| (vol per unit ln(K/F), log)", "digits": 1,
+           "tipDigits": 3, "min": yb[0], "max": yb[1]},
+        series=series, tooltip="item", csv=f"atm_skew_term_{head}.csv", grid={"left": 56},
+        describe=(f"|∂σ/∂ln(K/F)| at the forward against T in years, both axes logarithmic: the SVI-cal "
+                  f"surface of {head} (solid) and of the other stored sessions (grey), the eSSVI fit of "
+                  f"{head} (dotted), and the Heston smile at the published parameters and at the σ-profile "
+                  "refit (dashed). A straight line is a power law; skews are negative and plotted as "
+                  "magnitudes."),
+        table=charts.table(
+            "ATM skew ∂σ/∂ln(K/F) at the forward (vol per unit ln-moneyness; negative = puts over calls); "
+            f"Heston at {head}'s listed maturities only",
+            ["Session", "Expiry", "T (d)#", "SVI-cal#", "eSSVI#", "Heston published#", refit_lab], trows))
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
     from joint_vol_calibration.config import HESTON_BOUNDS
@@ -2664,6 +2848,23 @@ def calibration_extras(d: dict, cal: dict) -> None:
                 if r["joint_rough_oos"] is not None and r["sigma_cap2_oos"] is not None else None),
              "rough_is_heston": r["joint_rough_H"] is not None and r["joint_rough_H"] >= 0.5 - 1e-9}
             for r in ds["rows"]]}
+    # the ATM-skew term structure: the market's power law against Heston (#skew-term)
+    d["skew_term"] = None
+    try:
+        sk = skew_term_view(p, session, artifacts.load_surface_desk_inputs(DATA),
+                            artifacts.sigma_profile_refit(DATA, session))
+    except artifacts.ArtifactError as e:
+        _record_error(d, "ATM-skew term structure (surface/<session>/surface.json, diagnostics)", e)
+        sk = None
+    if sk:
+        rv = d.get("rough_vs_heston")
+        jr = rv.get("result") if isinstance(rv, dict) else None
+        sk["rough_H"] = ({"H": jr.get("rough_H"), "on_floor": jr.get("rough_H_on_bound"),
+                          "session": jr["session"]} if jr else None)
+        sk["sentence"] = skew_term_sentence(sk)
+        sk["compare"] = skew_term_compare(sk)
+        d["skew_term"] = sk
+        d["charts"]["skew_term"] = skew_term_spec(sk)
     ident = diag.get("ident") if diag.get("state") == "ok" else {}
     se = (ident or {}).get("standard_errors") or {}
     pinned = set(d.get("pinned_params") or [])
@@ -3697,6 +3898,25 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             bits.append(f"VVIX {_fmt(vv['model'], '.0f')} against {_fmt(vv['market'], '.0f')}")
         fails.append(item("One-factor Heston at the short end", "calibration.html#oos",
                           ", ".join(bits) + f" ({p2.get('session')})."))
+    # Heston's ATM skew against the market's power law in T (#skew-term): 'works'
+    # only when within 10% of the SVI-cal market skew at every listed expiry
+    sk = p2.get("skew_term") or {}
+    cmp_, rng = sk.get("compare"), (sk.get("slope_ranges") or {}).get("svi_all") or []
+    if cmp_ and rng:
+        f0 = cmp_["first"]
+        rel = ("at every listed expiry" if (cmp_["steeper_all"] or cmp_["flatter_all"])
+               else f"across the {cmp_['n']} listed expiries")
+        text = (f"×{_fmt(cmp_['lo'], '.2f')} to ×{_fmt(cmp_['hi'], '.2f')} the SVI-cal market skew {rel} of "
+                f"{sk['head']} ({_fmt(abs(f0['heston']), '.2f')} against {_fmt(abs(f0['svi']), '.2f')} at "
+                f"{_fmt(f0['T_days'], '.0f')} d); the market's slope in T is {signed(min(rng), '.2f')} to "
+                f"{signed(max(rng), '.2f')} over {plural(len(rng), 'session')} (SVI-cal, all expiries).")
+        if cmp_["lo"] >= 0.9 and cmp_["hi"] <= 1.1:
+            works.append(item("Heston's ATM skew matches the market's", "calibration.html#skew-term", text))
+        else:
+            lead = ("Heston's ATM skew is steeper than the market's" if cmp_["steeper_all"] else
+                    "Heston's ATM skew is flatter than the market's" if cmp_["flatter_all"] else
+                    "Heston's ATM skew against the market's")
+            fails.append(item(lead, "calibration.html#skew-term", text))
     ci = artifacts.bootstrap_ci(inf, "portfolio", "sharpe") if inf.get("state") == "ok" else None
     k = (p4 or {}).get("kpi") or {}
     if k.get("cum_ret") is not None and ci:
@@ -4017,6 +4237,8 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
     n_xp = sum(1 for r in listed for k in keys if r["extrap"][k])
     return {"heads": list(DESK_GRID_HEADS), "listed": rows_l, "cm": rows_c, "vol_lo": lo, "vol_hi": hi,
             "rr_lim": rr_lim, "bf_lim": bf_lim, "n_extrap": n_xp, "extrap_tag": EXTRAP_TAG,
+            # the skew column's term structure, against Heston, is on the Calibration page
+            "links": {"ATM skew": "/calibration#skew-term"},
             "any_extrap": n_xp > 0 or any(r["extrap"][k] for r in cm for k in keys)}
 
 

@@ -138,7 +138,7 @@
     var line = Object.assign(base, {
       type: 'line', data: data, showSymbol: !!s.symbol, symbol: s.symbol || 'circle', symbolSize: s.size || 5,
       connectNulls: false, step: s.step || false, sampling: s.sampling || undefined,
-      lineStyle: { color: c, width: s.width || 1.5, type: s.dash ? 'dashed' : 'solid' },
+      lineStyle: { color: c, width: s.width || 1.5, type: s.dash === 'dotted' ? 'dotted' : (s.dash ? 'dashed' : 'solid') },
       itemStyle: { color: c },
     });
     if (s.area) line.areaStyle = { color: alpha(c, 0.18), origin: s.areaOrigin || 'auto' };

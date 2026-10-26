@@ -229,6 +229,7 @@ sub, sup { font-size: 0.72em; }
 .btn[aria-pressed="false"] .key-swatch { opacity: 0.35; }
 .btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
 .btn .key-swatch.dashed { border-top-style: dashed; }
+.btn .key-swatch.dotted { border-top-style: dotted; }
 .btn .key-swatch.dot { width: 7px; height: 7px; border: none; border-radius: 50%; background: currentColor; }
 .btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }
 .btn .key-swatch.diamond { width: 7px; height: 7px; border: none; border-radius: 0; background: currentColor; transform: rotate(45deg); }

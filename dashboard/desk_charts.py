@@ -14,7 +14,7 @@ Floats are rounded to 6 significant figures (desk_format.round_sig).
 Series fields: name, type ('line' | 'bar' | 'scatter' | 'errorbar'), data
 (aligned with ``xs`` or [x, y] / [x, lo, hi] pairs), color (a token name such
 as 'headline', 'cat0'..'cat5', 'pos', 'neg', 'muted', or '#rrggbb'), width,
-dash, symbol, size, hollow, signed (bars coloured by sign), stack, invisible,
+dash (True for dashed, 'dotted'), symbol, size, hollow, signed (bars coloured by sign), stack, invisible,
 y2, group (for tab-filtered charts), legend (show a toggle button), legendKey
 (the button's name when one button stands for several series, e.g. a model's
 curve on every expiry), hidden (toggled off at first), xFrom (the name of a
@@ -61,7 +61,9 @@ def xy(chart_id: str, title: str, *, x: dict, y: dict, series: list[dict],
         key = s.get("legendKey") or s["name"]
         if key in items:                  # one button per key, from its first series
             continue
-        items[key] = {"name": key, "color": s.get("color", "cat0"), "dash": bool(s.get("dash")),
+        items[key] = {"name": key, "color": s.get("color", "cat0"),
+                      "dash": bool(s.get("dash")) and s.get("dash") != "dotted",
+                      "dotted": s.get("dash") == "dotted",
                       "dot": s.get("type") in ("scatter", "errorbar"),
                       "hollow": s.get("type") == "scatter" and bool(s.get("hollow")),
                       "diamond": s.get("type") == "scatter" and s.get("symbol") == "diamond",

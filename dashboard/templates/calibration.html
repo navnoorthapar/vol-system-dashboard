@@ -101,6 +101,38 @@
   {% endcall %}
 </div>
 
+{% set sk = d.skew_term %}
+{% if sk and d.charts.skew_term %}
+<div class="g">
+  {% call m.panel('skew-term', 'ATM-skew term structure · the market’s power law against Heston', 's12', sk.head ~ ' · ' ~ (sk.sessions|length|plural('stored session'))) %}
+    <div class="split">
+      <div>
+        {{ m.chart(d.charts.skew_term, 'h340') }}
+        {% if sk.sentence %}<p class="prose" id="skew-term-sentence">{{ sk.sentence }}</p>{% endif %}
+      </div>
+      <div>
+        <div class="tbl-wrap" tabindex="0" role="region" aria-label="ATM-skew power-law slopes (scrollable)">
+        <table class="tbl dense wrap-head" id="skew-slopes">
+          <caption>OLS slope of log|skew| on log T per session (|skew| ∝ T^slope), on all listed expiries and on T ≥ 30 days; expiries and their T range in days</caption>
+          <thead><tr><th scope="col">Session</th><th scope="col" class="num">All · T (d)</th><th scope="col" class="num">SVI-cal</th><th scope="col" class="num">eSSVI</th><th scope="col" class="num">T ≥ 30 d · T (d)</th><th scope="col" class="num">SVI-cal</th><th scope="col" class="num">eSSVI</th></tr></thead>
+          <tbody>{% for p in sk.sessions|reverse %}{% set a = p.slopes.svi_all %}{% set b = p.slopes.svi_30 %}<tr{% if p.session == sk.head %} class="em"{% endif %}><td class="nowrap">{{ p.session }}</td><td class="num">{% if a %}{{ a.n }} · {{ a.t_lo_days|fmt('.0f') }}–{{ a.t_hi_days|fmt('.0f') }}{% else %}—{% endif %}</td><td class="num">{{ (p.slopes.svi_all or {}).slope|signed('.3f') }}</td><td class="num">{{ (p.slopes.essvi_all or {}).slope|signed('.3f') }}</td><td class="num">{% if b %}{{ b.n }} · {{ b.t_lo_days|fmt('.0f') }}–{{ b.t_hi_days|fmt('.0f') }}{% else %}—{% endif %}</td><td class="num">{{ (p.slopes.svi_30 or {}).slope|signed('.3f') }}</td><td class="num">{{ (p.slopes.essvi_30 or {}).slope|signed('.3f') }}</td></tr>{% endfor %}</tbody>
+        </table>
+        </div>
+        <p class="note" id="skew-term-caption">Inside a rough-volatility model the skew scales as T^(H−1/2); this is a descriptive slope of one fitted surface per session, sensitive to the shortest expiries and to the parametrisation, not an estimate of H{% if sk.rough_H %} ({% if sk.rough_H.on_floor %}the rough-Heston H sits on its 0.02 floor on {{ sk.rough_H.session }}{% else %}the rough-Heston fit gives H = {{ sk.rough_H.H|fmt('.2f') }} on {{ sk.rough_H.session }}{% endif %}: <a href="#rough-vs-heston">rough vs Heston</a>){% endif %}. {{ sk.sessions|length }} stored sessions: a range across sessions, not a sampling interval.</p>
+        {% call m.method('How the skews are computed') %}
+          <ul class="prose" style="padding-left:16px;">
+            <li>SVI-cal: the analytic slope of each fitted slice at the forward, w′(0) / (2·√(w(0)·T)), with w′(k) = b(ρ + (k − m)/√((k − m)² + σ²)).</li>
+            <li>eSSVI: the surface report’s stored ATM skew (<code>term_structure.atm_skew_essvi</code>), {{ sk.head }} only. eSSVI’s ψ(θ) shapes the skew across expiries, so its short end differs from SVI-cal’s; both are shown, neither is preferred.</li>
+            <li>Heston: central differences of the model smile at h = 0.01 and 0.005 in ln(K/F), Richardson-extrapolated, at {{ sk.head }}’s listed maturities: the published parameters (κ {{ sk.heston_params.kappa|fmt('.2f') }}, σ {{ sk.heston_params.sigma|fmt('.2f') }}){% if sk.refit %} and the σ-profile refit with σ ≤ {{ sk.refit.cap|fmt('g') }} (κ {{ sk.refit.params.kappa|fmt('.2f') }}, σ {{ sk.refit.params.sigma|fmt('.2f') }}; <code>{{ sk.refit.file }}</code>){% endif %}.</li>
+            <li>Skews are negative (puts over calls); the chart plots magnitudes on log axes, so a straight line is a power law.</li>
+          </ul>
+        {% endcall %}
+      </div>
+    </div>
+  {% endcall %}
+</div>
+{% endif %}
+
 <h2 class="section-title">Smiles by anchor expiry</h2>
 {% set src = d.smile_source or {} %}
 {% if src.state != 'ok' %}{{ m.missing(src, 'Market bid–ask quotes and the model at the quoted strikes need the per-quote residual table for ' ~ (d.session or 'this session') ~ '; until it exists each panel shows the model smile only.') }}{% endif %}
@@ -189,7 +221,7 @@
       <tbody>{% for r in rv.rows %}<tr{% if r.session == d.session %} class="em"{% endif %}><td><span class="nowrap">{{ r.session }}</span>{% if 'sigma' in r.on_bound %} {{ m.chip('σ at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.sigma_cap2_oos|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_oos|fmt('.2f') }}</td><td class="num">{{ r.rough_minus_heston|signed('.2f') }}</td><td class="num">{{ r.joint_rough_H|fmt('.2f') }}{% if 'H' in r.joint_rough_on_bound %} {{ m.chip('on bound', 'watch') }}{% endif %}</td><td class="num">{{ r.joint_heston_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_vix_index|fmt('.2f') }}</td><td class="num">{{ r.joint_rough_lifting_error_estimate_max_vp|fmt('.3f') }}</td><td class="num">{{ r.sigma_free_oos|fmt('.2f') }}</td><td class="num">{{ r.vvix_model_cap2|fmt('.0f') }} / {{ r.vvix_market|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">Heston OOS is the production fit (σ ≤ 2); free-σ OOS refits it with σ ≤ 10 and κ ≤ 60 (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close; what a wider σ box does to it, session by session, is in the <a href="#sigma-tradeoff">σ-profile panel</a> above. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.</p>
+    <p class="note">Heston OOS is the production fit (σ ≤ 2); free-σ OOS refits it with σ ≤ 10 and κ ≤ 60 (the σ profile above). The lifting error is the numerics check of the 20-factor approximation at the fitted point. VVIX is the model's 30-day vol of VIX at the boxed optimum against the ^VVIX close; what a wider σ box does to it, session by session, is in the <a href="#sigma-tradeoff">σ-profile panel</a> above. {{ rv.rows|length }} sessions with a stored chain: a range, not a statistic.{% if d.skew_term %} The market’s ATM skew against maturity on the same sessions, and Heston’s, is in the <a href="#skew-term">ATM-skew panel</a>.{% endif %}</p>
     {% elif rv.state == 'absent' %}
     {{ m.missing(rv, 'The joint Heston and rough Heston fits of every diagnosed session.') }}
     {% else %}

@@ -397,6 +397,67 @@ def load_surface(data_dir: Path, session: str | None = None) -> dict:
     return out
 
 
+def load_surface_desk_inputs(data_dir: Path) -> list[dict]:
+    """Every stored surface session's inputs to the desk-coordinate views
+    (dashboard/desk_surface.py), oldest first: ``session``, ``surface``
+    (surface.json, validated), ``vix`` (vix_replication.json, validated, or
+    None) and ``quotes`` (the residual table's model, expiry and k columns, for
+    each expiry's quoted ln(K/F) range). A session without surface.json is
+    left out: it has no fitted surface to read."""
+    data_dir = Path(data_dir)
+    out = []
+    for session in surface_sessions(data_dir):
+        root = data_dir / "surface" / session
+        if not (root / "surface.json").exists():
+            continue
+        obj = _read_json(root / "surface.json", f"surface/{session}/surface.json")
+        _check_session(obj, session, f"surface/{session}/surface.json")
+        validate_surface_json(obj, session)
+        vix = None
+        if (root / "vix_replication.json").exists():
+            vix = _read_json(root / "vix_replication.json", f"surface/{session}/vix_replication.json")
+            _check_session(vix, session, f"surface/{session}/vix_replication.json")
+            validate_vix_replication(vix, session)
+        name = f"surface/{session}/residuals.parquet"
+        try:
+            q = pd.read_parquet(root / "residuals.parquet", columns=["model", "expiry", "k"])
+        except Exception as exc:
+            raise ArtifactError(f"{name}: unreadable ({exc})") from exc
+        if not np.isfinite(pd.to_numeric(q["k"], errors="coerce")).all():
+            raise ArtifactError(f"{name}: k must be finite")
+        q = q.assign(expiry=q["expiry"].astype(str).str[:10], model=q["model"].astype(str))
+        out.append({"session": session, "surface": obj, "vix": vix, "quotes": q})
+    return out
+
+
+HESTON_PARAMS = ("kappa", "theta", "sigma", "rho", "v0")
+
+
+def sigma_profile_refit(data_dir: Path, session: str | None) -> dict | None:
+    """The widest-cap refit of a session's σ profile (calibrations/diagnostics/
+    <session>.json sigma_profile.rows, largest sigma_cap): ``cap`` and its five
+    Heston ``params``. None when the file or a profile is absent; a parameter
+    that is not a finite number is an ArtifactError."""
+    path = Path(data_dir) / "calibrations" / "diagnostics" / f"{session}.json"
+    if not session or not path.exists():
+        return None
+    name = f"calibrations/diagnostics/{session}.json"
+    obj = _read_json(path, name)
+    _check_session(obj, session, name)
+    rows = [r for r in ((obj.get("sigma_profile") or {}).get("rows") or []) if isinstance(r, dict)
+            and _finite(r.get("sigma_cap")) is not None and isinstance(r.get("params"), dict)]
+    if not rows:
+        return None
+    top = max(rows, key=lambda r: float(r["sigma_cap"]))
+    params = {}
+    for k in HESTON_PARAMS:
+        v = _finite(top["params"].get(k))
+        if v is None:
+            raise ArtifactError(f"{name}: sigma_profile params.{k} is not a finite number")
+        params[k] = v
+    return {"cap": float(top["sigma_cap"]), "params": params, "file": name}
+
+
 # ── calibration diagnostics: in the result pickle, or diagnostics/<s>.json ───
 def calibration_diagnostics(cal: dict, data_dir: Path, session: str | None) -> dict:
     """Identifiability, multi-start, sigma profile and model comparison of the headline fit.

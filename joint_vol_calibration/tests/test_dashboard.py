@@ -1255,8 +1255,12 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
     if "AT THE LOWER BOUNDARY" in cal:
         assert "affine Volterra" in cal
         assert "did not converge" in cal
+    # the pre-C22 claim that Heston was fitted to an SVI/SSVI-smoothed surface
+    # (never wired in). P2.2's skew panel names the market's SVI-cal surface,
+    # so the bare string 'SVI' is no longer the test: the stale claims are.
     for stale in ("structural failure", "Feller-satisfying Heston", "SOFR",
-                  "VIX Futures RMSE", "SVI"):
+                  "VIX Futures RMSE", "SVI smoothing", "SSVI-smoothed", "SSVI surface", "SVI / SSVI",
+                  "SVI/SSVI"):
         assert stale not in cal, stale
     # the pre-C22 copy's "VIX options RMSE was 37.14 (vol) pts"; the quote smiles'
     # chart data may hold an IV of 37.14 %
@@ -4793,3 +4797,132 @@ def test_delta_grid_renders_an_extrapolated_pillar_and_dashes_its_rr_bf(dash):
     assert row[col["RR25"]] != "—"
     assert row[col["BF25"]] != "—"
     assert row[col["VS vol"]] == "—"                     # no strip row for the expiry: not invented
+
+
+def _independent_heston_skew(params: dict, t_days: float, h: float) -> float:
+    """Central difference of Heston implied vol at ln(K/F) = ±h: prices from the
+    pricer, inverted here with brentq on Black-76 (not the app's smile code)."""
+    from scipy.optimize import brentq
+    from scipy.stats import norm
+
+    from joint_vol_calibration.models.heston import heston_call_batch
+
+    T = t_days / 365.0
+    K = np.exp(np.array([-h, h]))
+    calls = heston_call_batch(1.0, K, T, 0.0, 0.0, params["kappa"], params["theta"], params["sigma"],
+                              params["rho"], params["v0"])
+
+    def black_call(k_: float, s: float) -> float:
+        d1 = (-np.log(k_) + 0.5 * s * s * T) / (s * np.sqrt(T))
+        return float(norm.cdf(d1) - k_ * norm.cdf(d1 - s * np.sqrt(T)))
+
+    iv = [brentq(lambda s, k_=k_, c=c: black_call(k_, s) - c, 1e-4, 5.0, xtol=1e-14)
+          for k_, c in zip(K, calls)]
+    return (iv[1] - iv[0]) / (2 * h)
+
+
+def test_skew_term_heston_series_is_the_published_fit_and_its_difference_converges(dash, pages):
+    """P2.2: the Heston skew is drawn at the parameters the Calibration page
+    shows, at the headline session's listed maturities, and at the expiry
+    nearest one year it agrees with an independent central difference at
+    h = 0.005 to 1e-4 (a Richardson check of the step)."""
+    d = dash.load_page2()
+    sk = d["skew_term"]
+    _, cal = dash.load_headline_calibration()
+    assert sk["heston_params"] == cal["params"]
+    tiles = {t["key"]: t["value"] for t in d["param_tiles"]}
+    assert tiles == {k: float(cal["params"][k]) for k in tiles}
+    spec = _spec(pages["/calibration"], "chart-skew-term")
+    ser = {s["name"]: s for s in spec["series"]}
+    days = [r["T_days"] for r in sk["rows"]]
+    want = dash.heston_atm_skew(cal["params"], days)
+    got = [y for _, y in ser["Heston, published fit"]["data"]]
+    assert got == pytest.approx([abs(w) for w in want], rel=1e-5)
+    yr = min(sk["rows"], key=lambda r: abs(r["T_days"] - 365))
+    ref = _independent_heston_skew(cal["params"], yr["T_days"], 0.005)
+    assert yr["heston"] == pytest.approx(ref, abs=1e-4)
+    # the σ-profile refit is the diagnostics file's widest cap
+    diag = SHIPPED / "calibrations" / "diagnostics" / f"{d['session']}.json"
+    if diag.exists():
+        rows = json.loads(diag.read_text())["sigma_profile"]["rows"]
+        top = max(rows, key=lambda r: r["sigma_cap"])
+        keys = ("kappa", "theta", "sigma", "rho", "v0")
+        assert sk["refit"]["params"] == {k: top["params"][k] for k in keys}
+
+
+def test_skew_term_chart_is_log_log_with_units_and_the_slope_table_is_polyfit(dash, pages):
+    ds = _desk_module()
+    html = pages["/calibration"]
+    spec = _spec(html, "chart-skew-term")
+    assert spec["x"]["log"] is True
+    assert spec["y"]["log"] is True
+    assert "years" in spec["x"]["name"]
+    assert "vol per unit ln(K/F)" in spec["y"]["name"]
+    cap = _visible_text("<body>" + re.search(r'id="skew-term-caption">(.*?)</p>', html, re.DOTALL).group(1))
+    assert "not an estimate of H" in cap
+    assert "T^(H−1/2)" in cap
+    rows = {r[0]: r for r in _table_rows(html, "skew-slopes")}
+    sessions = dash.artifacts.load_surface_desk_inputs(SHIPPED)
+    assert sorted(rows) == [s["session"] for s in sessions]
+    for s in sessions:
+        sj = s["surface"]
+        sl = sorted(sj["surfaces"]["svi_cal"]["params"]["slices"], key=lambda x: x["T"])
+        ts = sorted(sj["term_structure"], key=lambda t: t["T_days"])
+        t1, k1 = np.array([x["T"] for x in sl]), np.array([ds.svi_atm_skew(x) for x in sl])
+        t2, k2 = np.array([t["T_days"] / 365 for t in ts]), np.array([t["atm_skew_essvi"] for t in ts])
+        cells = rows[s["session"]]
+        for col, (t, k, lo) in zip((2, 3, 5, 6), ((t1, k1, 0), (t2, k2, 0), (t1, k1, 30), (t2, k2, 30))):
+            keep = t * 365 >= lo
+            ref = np.polyfit(np.log(t[keep]), np.log(np.abs(k[keep])), 1)[0]
+            assert cells[col] == dash.signed(ref, ".3f"), (s["session"], col)      # printed unclipped
+        assert cells[1].startswith(f"{len(sl)} · ")
+
+
+def test_skew_term_sentence_states_what_the_data_shows(dash, pages):
+    """The sentence under the chart is computed: whether the published Heston
+    skew is steeper or flatter than the SVI-cal market skew, its ratio range,
+    and on how many expiries under 30 days the market line is above Heston."""
+    sk = dash.load_page2()["skew_term"]
+    rows = sk["rows"]
+    ratios = [abs(r["heston"]) / abs(r["svi"]) for r in rows]
+    short = [r for r in rows if r["T_days"] < 30]
+    above = sum(1 for r in short if abs(r["svi"]) > abs(r["heston"]))
+    sent = re.search(r'id="skew-term-sentence">(.*?)</p>', pages["/calibration"], re.DOTALL)
+    text = _visible_text("<body>" + sent.group(1))
+    assert f"×{min(ratios):.2f} to ×{max(ratios):.2f}" in text
+    if all(x > 1 for x in ratios):
+        assert "steeper than the SVI-cal market skew at every listed expiry" in text
+    elif all(x < 1 for x in ratios):
+        assert "flatter than the SVI-cal market skew at every listed expiry" in text
+    if short:
+        assert f"market line lies above the Heston line on {above} of {len(short)} expiries" in text
+
+
+def test_findings_cite_the_skew_power_law_and_link_to_its_panel(dash, pages):
+    sk = dash.load_page2()["skew_term"]
+    slopes = [p["slopes"]["svi_all"]["slope"] for p in sk["sessions"] if p["slopes"]["svi_all"]]
+    items = [it for _, _, its in _findings(pages["/"]) for it in its if "calibration.html#skew-term" in it]
+    assert len(items) == 1
+    text = _visible_text("<body>" + items[0])
+    assert (f"slope in T is {dash.signed(min(slopes), '.2f')} to {dash.signed(max(slopes), '.2f')} over "
+            f"{len(slopes)} sessions") in text
+    # the Surface grid's skew column and the rough-vs-Heston panel link to it
+    assert '<a href="calibration.html#skew-term">ATM skew</a>' in pages["/surface"].replace(
+        'href="/calibration#', 'href="calibration.html#')
+    rv = re.search(r'id="rough-vs-heston".*?</section>', pages["/calibration"], re.DOTALL).group(0)
+    assert 'href="#skew-term"' in rv
+
+
+def test_browser_skew_term_axes_are_logarithmic(site_browser):
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "calibration.html#skew-term", wait_until="load")
+        page.locator("#chart-skew-term").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-skew-term")
+        types = page.evaluate("""() => { const o = Desk.charts['chart-skew-term'].chart.getOption();
+          return [o.xAxis[0].type, o.yAxis[0].type, o.xAxis[0].name, o.yAxis[0].name]; }""")
+        assert types[:2] == ["log", "log"], types
+        assert "years" in types[2]
+        assert "ln(K/F)" in types[3]
+    finally:
+        ctx.close()

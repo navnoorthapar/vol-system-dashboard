@@ -247,3 +247,27 @@ def constant_maturity(grid: Sequence[Mapping], days: Iterable[int] = CM_DAYS) ->
             row["vs_minus_atmf"] = (row["vs"] - row["atmf"]) if row["vs"] is not None else None
         out.append(row)
     return out
+
+
+# ── the ATM-skew term structure ──────────────────────────────────────────────
+SKEW_SLOPE_MIN_POINTS = 3
+
+
+def skew_slope(t_years: Sequence[float], skews: Sequence[float],
+               min_days: float | None = None) -> dict | None:
+    """OLS slope of log|skew| on log T (a power law |skew| ∝ T^slope), with the
+    number of expiries and their T range in days; expiries shorter than
+    ``min_days`` are left out. None with fewer than three usable expiries.
+
+    A descriptive slope of one fitted surface: inside a rough-volatility model
+    the skew scales as T^(H − 1/2), but this slope is not an estimate of H."""
+    pts = [(float(t), abs(float(s))) for t, s in zip(t_years, skews)
+           if _num(t) is not None and _num(s) is not None and float(t) > 0 and float(s) != 0
+           and (min_days is None or float(t) * DAYS_PER_YEAR >= min_days - 1e-9)]
+    if len(pts) < SKEW_SLOPE_MIN_POINTS:
+        return None
+    x = np.log([p[0] for p in pts])
+    y = np.log([p[1] for p in pts])
+    slope = float(np.polyfit(x, y, 1)[0])
+    days = [p[0] * DAYS_PER_YEAR for p in pts]
+    return {"slope": slope, "n": len(pts), "t_lo_days": min(days), "t_hi_days": max(days)}
