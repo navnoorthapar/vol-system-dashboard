@@ -77,6 +77,7 @@ if str(DASH) not in sys.path:
 
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
+import desk_density  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
@@ -371,6 +372,29 @@ def sym(text: Any) -> Any:
 
 
 app.jinja_env.filters["sym"] = sym
+
+
+_SUBSCRIPTS = re.compile(r"\b(S|g)_(T|min)\b")
+
+
+def subs(text: Any) -> Any:
+    """'S_T' and 'g_min' as S<sub>T</sub> and g<sub>min</sub> (the text is escaped
+    first); a lower-case symbol (g_min, ∫p) in a .sym span, so an upper-cased
+    table head does not turn it into G or P."""
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    escaped = str(escape(text))
+
+    def one(m: re.Match) -> str:
+        out = f"<i>{m.group(1)}</i><sub>{m.group(2)}</sub>"
+        return f'<span class="sym">{out}</span>' if m.group(1).islower() else out
+    escaped = _SUBSCRIPTS.sub(one, escaped).replace("∫p", '<span class="sym">∫p</span>')
+    return Markup(escaped)  # noqa: S704
+
+
+app.jinja_env.filters["subs"] = subs
 
 
 def path_breaks(text: Any) -> Any:
@@ -5114,6 +5138,113 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
             "any_extrap": n_xp > 0 or any(r["extrap"][k] for r in cm for k in keys)}
 
 
+# ── the risk-neutral density of the SVI-cal slices (desk_density.py, B9) ──────
+RND_HEADS = ("Expiry", "Days", "Quoted K/F", *(lab for _, lab, _, _ in desk_density.THRESHOLDS[:2]),
+             "Outside 0.95–1.05 F", desk_density.THRESHOLDS[2][1], "Mass below quoted", "Mass above quoted",
+             "∫p", "E[S_T/F]", "g_min")
+RND_BEYOND = "beyond quoted strikes"
+RND_TABLE_K = (-0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15)
+
+
+def _rnd_pct(p: float | None) -> str:
+    return RND_BEYOND if p is None else _fmt(100 * p, ".2f")
+
+
+def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
+    """The #rnd panels: every listed SVI-cal slice's risk-neutral tail
+    probabilities (a threshold outside its quoted strikes prints RND_BEYOND), the
+    mass beyond the quoted range, the checks ∫p and E[S_T/F] and the certificate's
+    g_min; the density of ln(S_T/F) of the listed expiries nearest 1M, 3M and 6M,
+    drawn inside their quoted strikes only; the tails by expiry, with a gap where
+    the threshold is beyond the quotes."""
+    rows = desk_density.tail_rows(sj, res)
+    if not rows:
+        return None
+    picks = desk_density.chart_expiries(rows)
+    pick_of = {p["row"]["expiry"]: p["label"] for p in picks}
+    view_rows = []
+    for r in rows:
+        pr = r["prob"]
+        view_rows.append({
+            "expiry": r["expiry"], "pick": pick_of.get(r["expiry"]), "certified": r["certified"],
+            "cells": [_fmt(r["T_days"], ".0f"),
+                      (f"{_fmt(r['kf_lo'], '.3f')}–{_fmt(r['kf_hi'], '.3f')}"
+                       if r["kf_lo"] is not None else "—"),
+                      _rnd_pct(pr["lt80"]), _rnd_pct(pr["lt90"]), _rnd_pct(pr["out5"]), _rnd_pct(pr["gt110"]),
+                      _fmt(100 * r["below_quoted"], ".2f") if r["below_quoted"] is not None else "—",
+                      _fmt(100 * r["above_quoted"], ".2f") if r["above_quoted"] is not None else "—",
+                      _fmt(r["mass"], ".4f"), _fmt(r["mean"], ".4f"), desk_density.fmt_g(r["g_min"])]})
+    out: dict[str, Any] = {"heads": list(RND_HEADS), "rows": view_rows, "picks": [
+        {"label": p["label"], "expiry": p["row"]["expiry"], "days": p["row"]["T_days"],
+         "kf_lo": p["row"]["kf_lo"], "kf_hi": p["row"]["kf_hi"]} for p in picks],
+        "n_beyond": sum(1 for r in rows for v in r["prob"].values() if v is None),
+        "max_mass_err": max(abs(r["mass"] - 1.0) for r in rows),
+        "max_mean_err": max(abs(r["mean"] - 1.0) for r in rows),
+        "n_uncertified": sum(1 for r in rows if not r["certified"]),
+        "n_gt110_beyond": sum(1 for r in rows if r["prob"]["gt110"] is None)}
+    out["max_mass_err_text"] = desk_density.fmt_g(out["max_mass_err"])
+    out["max_mean_err_text"] = desk_density.fmt_g(out["max_mean_err"])
+    if len(picks) >= 2:
+        cols = charts.tenor_colours(len(picks))
+        series = []
+        for i, p in enumerate(picks):
+            r = p["row"]
+            sl = desk_density.slice_of(sj, r["expiry"])
+            series.append({"name": f"{p['label']} · {r['expiry']} ({_fmt(r['T_days'], '.0f')} d)",
+                           "type": "line", "role": "tenor", "T": r["T_days"], "color": cols[i],
+                           "width": 1.75, "legend": True,
+                           "data": desk_density.density_curve(sl, r["k_lo"], r["k_hi"])})
+        trows = []
+        for k in RND_TABLE_K:
+            cells = [signed(k, ".2f"), _fmt(math.exp(k), ".3f")]
+            for p in picks:
+                r = p["row"]
+                inside = r["k_lo"] - 1e-12 <= k <= r["k_hi"] + 1e-12
+                cells.append(_fmt(desk_density.density(k, desk_density.slice_of(sj, r["expiry"])), ".3f")
+                             if inside else "—")
+            trows.append(cells)
+        out["density_chart"] = charts.xy(
+            "chart-rnd",
+            f"Risk-neutral density of ln(S_T/F), SVI-cal slices nearest 1M, 3M and 6M, {session}",
+            x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
+            y={"name": "Density of ln(S_T/F)", "digits": 0, "tipDigits": 3, "zero": True},
+            series=series, tooltip="item", csv=f"rnd_density_{session}.csv",
+            describe=("Breeden–Litzenberger density of ln(S_T/F) from each listed SVI-cal slice, "
+                      "p(k) = g(k)/√(2πw)·exp(−d₋²/2), drawn only inside the expiry's quoted strikes; "
+                      "risk-neutral, not a forecast."),
+            table=charts.table("Risk-neutral density of ln(S_T/F) (per unit of ln-moneyness) at round "
+                               "ln(K/F); — outside the expiry's quoted strikes",
+                               ["ln(K/F)#", "K/F#", *(f"{p['label']} {p['row']['expiry']}#" for p in picks)],
+                               trows))
+    days = [r["T_days"] for r in rows]
+    tail_series = []
+    for key, label, dash in (("lt90", "S_T < 0.90 F", None), ("gt110", "S_T > 1.10 F", True),
+                             ("lt80", "S_T < 0.80 F", "dotted")):
+        s_: dict[str, Any] = {"name": f"SVI-cal P({label})", "type": "line", "role": "model",
+                              "model": "svi_cal", "color": charts.model_colour("svi_cal"),
+                              "width": 1.75 if dash is None else 1.5,
+                              "symbol": "circle", "size": 4, "legend": True,
+                              "data": [[r["T_days"], (100 * r["prob"][key]) if r["prob"][key] is not None
+                                        else None] for r in rows]}
+        if dash:
+            s_["dash"] = dash
+        tail_series.append(s_)
+    out["tails_chart"] = charts.xy(
+        "chart-rnd-tails", f"Risk-neutral tail probabilities by days to expiry, SVI-cal, {session}",
+        x={"type": "value", "log": True, "name": "Days to expiry (log scale)", "digits": 0,
+           "min": round_sig(min(days) / 1.15, 2), "max": round_sig(max(days) * 1.15, 2)},
+        y={"name": "Risk-neutral probability (%)", "digits": 0, "tipDigits": 2, "zero": True},
+        series=tail_series, tooltip="item", csv=f"rnd_tails_{session}.csv",
+        describe=("P(S_T < 0.90 F), P(S_T > 1.10 F) and P(S_T < 0.80 F) of each listed SVI-cal slice; "
+                  "a gap is a threshold beyond the expiry's quoted strikes, where no probability is "
+                  "printed."),
+        table=charts.table("Risk-neutral tail probabilities (%) by listed expiry",
+                           ["Expiry", "Days#", "P(S_T < 0.80 F)#", "P(S_T < 0.90 F)#", "P(S_T > 1.10 F)#"],
+                           [[r["expiry"], _fmt(r["T_days"], ".0f"), _rnd_pct(r["prob"]["lt80"]),
+                             _rnd_pct(r["prob"]["lt90"]), _rnd_pct(r["prob"]["gt110"])] for r in rows]))
+    return out
+
+
 def _state_values(cm: Sequence[dict]) -> dict[str, float | None]:
     by = {r["label"]: r for r in cm}
     m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
@@ -5403,6 +5534,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         cmp_ = surface_comparison(session, desk_inputs)
         every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
         d["state_tiles"] = surface_state_tiles(cm, listed, every_cm)
+        d["rnd"] = rnd_view(sj, res, session)
         if cmp_:
             d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
             d["charts"]["rr_term"] = rr_term_spec(cmp_)

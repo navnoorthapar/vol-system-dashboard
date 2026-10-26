@@ -365,6 +365,7 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .tbl tr:last-child td { border-bottom: none; }
 .tbl tr.muted td { color: var(--text3); }
 .tbl tr.muted td.num { color: var(--text2); }
+.tbl td.beyond { color: var(--text2); font-style: italic; font-size: 0.92em; }
 .tbl tr.em td { color: var(--text); font-weight: 600; }
 .tbl td.wrap { white-space: normal; min-width: 180px; }
 .tbl.spec td.wrap { min-width: 12ch; }   /* nine text columns (Research #sleeve-spec) share the width */

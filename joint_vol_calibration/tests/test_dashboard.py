@@ -4763,6 +4763,70 @@ def test_surface_delta_grid_panel_lists_every_expiry_and_five_tenors(dash, pages
     assert html.count('role="region" aria-label="Delta grid, listed expiries (scrollable)"') == 1
 
 
+# the heads as text: S_T and g_min are set as S<sub>T</sub> and g<sub>min</sub>
+RND_HEADS = ["Expiry", "Days", "Quoted K/F", "ST < 0.80 F", "ST < 0.90 F", "Outside 0.95–1.05 F",
+             "ST > 1.10 F", "Mass below quoted", "Mass above quoted", "∫p", "E[ST/F]", "gmin"]
+
+
+def test_surface_rnd_panels_print_every_slices_risk_neutral_tails(dash, pages):
+    """B9: the Surface page reads the certified SVI-cal slices as distributions
+    (desk_density.py, Breeden–Litzenberger). The table lists every listed slice
+    of the rendered session with the module's numbers; a threshold beyond the
+    quoted strikes prints 'beyond quoted strikes', never a number; the captions
+    say risk-neutral and no higher moment is printed; the density chart draws
+    each picked expiry only inside its quoted strikes, and the tail chart has a
+    gap wherever the table says 'beyond quoted strikes'."""
+    dd = importlib.import_module("desk_density")
+    sj, res, _ = _desk_inputs()
+    rows = dd.tail_rows(sj, res)
+    html = pages["/surface"]
+    assert _table_heads(html, "rnd-table-tbl") == RND_HEADS
+    got = _table_rows(html, "rnd-table-tbl")
+    assert len(got) == len(rows) == len(sj["surfaces"]["svi_cal"]["params"]["slices"])
+    col = {h: i for i, h in enumerate(RND_HEADS)}
+    keys = {"ST < 0.80 F": "lt80", "ST < 0.90 F": "lt90", "Outside 0.95–1.05 F": "out5",
+            "ST > 1.10 F": "gt110"}
+    assert "<th scope=\"col\" class=\"num\"><i>S</i><sub>T</sub> &lt; 0.90 F</th>" in html
+    n_beyond = 0
+    for cells, r in zip(got, rows):
+        assert cells[0].split(" ")[0] == r["expiry"]
+        for head, key in keys.items():
+            p = r["prob"][key]
+            if p is None:
+                n_beyond += 1
+                assert cells[col[head]] == "beyond quoted strikes", (r["expiry"], head)
+            else:
+                assert cells[col[head]] == dash._fmt(100 * p, ".2f"), (r["expiry"], head)
+        assert cells[col["Mass below quoted"]] == dash._fmt(100 * r["below_quoted"], ".2f")
+        assert cells[col["∫p"]] == dash._fmt(r["mass"], ".4f")
+        assert cells[col["E[ST/F]"]] == dash._fmt(r["mean"], ".4f")
+        if r["certified"]:                     # a certified slice is a distribution with mean F
+            assert cells[col["∫p"]] == "1.0000"
+            assert cells[col["E[ST/F]"]] == "1.0000"
+        assert cells[col["gmin"]] == dd.fmt_g(r["g_min"])
+        assert not cells[col["gmin"]].startswith(("0.0000", "−"))   # positive: never a bare 0.0000
+    assert n_beyond == sum(1 for r in rows for v in r["prob"].values() if v is None)
+    panel = html[html.index('id="rnd"'):html.index('id="iv-heat"')]
+    text = _visible_text("<body>" + panel)
+    assert "Risk-neutral" in text
+    assert "not a forecast" in text
+    assert re.findall(r"skewness|kurtosis", text, re.IGNORECASE) == ["skewness", "kurtosis"]   # "no … shown"
+    assert "no skewness or kurtosis is shown" in text
+    specs = _raw_specs(html)
+    picks = {p["row"]["expiry"]: p["row"] for p in dd.chart_expiries(rows)}
+    dens = specs["chart-rnd"]["series"]
+    assert len(dens) == len(picks) >= 2
+    for s_ in dens:
+        r = next(v for e, v in picks.items() if e in s_["name"])
+        ks = [x for x, _ in s_["data"]]
+        assert min(ks) >= r["k_lo"] - 1e-6, s_["name"]
+        assert max(ks) <= r["k_hi"] + 1e-6, s_["name"]
+        assert s_["role"] == "tenor"
+    tails = {s_["name"]: s_["data"] for s_ in specs["chart-rnd-tails"]["series"]}
+    for name, key in (("SVI-cal P(S_T < 0.90 F)", "lt90"), ("SVI-cal P(S_T > 1.10 F)", "gt110")):
+        assert [v is None for _, v in tails[name]] == [r["prob"][key] is None for r in rows], name
+
+
 def test_surface_state_tiles_are_the_one_month_constant_maturity_row(dash, pages):
     ds = _desk_module()
     listed = ds.delta_grid(*_desk_inputs())
