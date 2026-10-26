@@ -975,9 +975,15 @@ class TestMultiStartTRF:
         res = synth.calibrate(n_starts=2, de_check=True, de_maxiter=6, de_popsize=5,
                               verbose=False)
         chk = res["de_check"]
-        assert chk["used"] == "trf"
-        assert chk["de_polished_loss"] >= res["loss"] * (1 - 1e-6)
-        assert chk["trf_loss"] == res["loss"]
+        # The check keeps whichever basin is lower. Which one that is with 2
+        # TRF starts and a 6-generation DE depends on the CPU's float kernels
+        # (one CI runner's DE polish beat the 2 starts), so the test checks
+        # the rule, not the winner.
+        lower = chk["de_polished_loss"] < chk["trf_loss"] * (1 - 1e-6)
+        assert chk["used"] == ("de" if lower else "trf")
+        assert res["loss"] == (chk["de_polished_loss"] if lower else chk["trf_loss"])
+        assert res["loss"] <= min(chk["de_polished_loss"], chk["trf_loss"]) * (1 + 1e-6)
+        assert chk["agrees"] == (abs(chk["rel_diff_polished_vs_trf"]) <= 1e-6)
         assert res["methods"]["optimizer"]["de"]["maxiter"] == 6
         # the global check runs in processes by default (deferred updating)
         import os

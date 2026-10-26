@@ -157,6 +157,27 @@ def _csv_rows(text: str) -> list:
     return list(csv.reader(io.StringIO(text)))
 
 
+def _assert_rows_match(got: list, want: list) -> None:
+    """Every field as printed, except that a number may differ by floating-point
+    noise: 1e-9 relative, or 1e-6 absolute ($0.000001). A difference column
+    such as c23_bridge's d_pnl (two ~$216k P&Ls that differ by $0.014) prints
+    the noise of the summation order in its trailing digits, and that order
+    differs between CPUs (numpy picks AVX-512 or AVX2 kernels at run time):
+    one CI runner printed -0.01363441124 where the committed file has
+    -0.01363441031."""
+    assert len(got) == len(want)
+    for r, (g, w) in enumerate(zip(got, want)):
+        assert len(g) == len(w), r
+        for c, (a, b) in enumerate(zip(g, w)):
+            if a == b:
+                continue
+            try:
+                fa, fb = float(a), float(b)
+            except ValueError:
+                raise AssertionError(f"row {r}, field {c}: {a!r} != {b!r}") from None
+            assert fa == pytest.approx(fb, rel=1e-9, abs=1e-6), (r, c, a, b)
+
+
 def test_beta_grid_canonical_row_is_byte_identical(canonical):
     """The β = 0.82 line of beta_sensitivity.csv, every column, as the
     --beta-sensitivity writer would print it from the canonical run."""
@@ -200,7 +221,7 @@ def test_c23_bridge_reproduces_every_row():
     from joint_vol_calibration.backtest import c23_bridge
     df = c23_bridge.run_bridge()
     rebuilt = df.to_csv(index_label="row", float_format=ARTIFACT_CSV_FLOAT_FORMAT)
-    assert _csv_rows(rebuilt) == _csv_rows((BACKTEST_DIR / "c23_bridge.csv").read_text())
+    _assert_rows_match(_csv_rows(rebuilt), _csv_rows((BACKTEST_DIR / "c23_bridge.csv").read_text()))
     assert list(df["step"]) == [k for k, _ in c23_bridge.STEPS]
     c22 = pd.read_csv(BACKTEST_DIR / "c22_bridge.csv").iloc[-1]
     assert df.iloc[-1]["nav"] == pytest.approx(float(c22["nav"]), rel=2e-9)
