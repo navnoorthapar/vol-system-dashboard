@@ -203,6 +203,7 @@
       splitLine: { show: !isX || type === 'value', lineStyle: { color: T.grid } },
       scale: a.zero === undefined ? type === 'value' : !a.zero, inverse: !!a.inverse,
     };
+    if (a.step) ax.interval = a.step;          // one tick step across small multiples
     if (a.min !== undefined && a.min !== null) ax.min = a.min;
     if (a.max !== undefined && a.max !== null) ax.max = a.max;
     if (type === 'category') {
@@ -785,7 +786,8 @@
   function legendKey(s) { return s.legendKey || s.name; }
   function legendOff(id) {
     var off = {};
-    $$('[data-legend-for="' + id + '"]').forEach(function (b) { if (b.getAttribute('aria-pressed') === 'false') off[b.getAttribute('data-series')] = true; });
+    // a group's legend button names every member (data-legend-for="a b c")
+    $$('[data-legend-for~="' + id + '"]').forEach(function (b) { if (b.getAttribute('aria-pressed') === 'false') off[b.getAttribute('data-series')] = true; });
     return off;
   }
   var fontsReady = !doc.fonts || doc.fonts.status === 'loaded';
@@ -821,11 +823,16 @@
     delete opt._idx; delete opt._pos;
     inst.setOption(opt, true);
     // linked charts (the same x values) zoom and point together
-    if (spec.link && window.echarts.connect) { inst.group = spec.link; window.echarts.connect(spec.link); }
+    // a chart group (data-chart-group, else spec.link): echarts.connect links the
+    // pointer and tooltip of its members; their zoom is kept equal by bindGroupZoom
+    var grp = el.getAttribute('data-chart-group') || spec.link;
+    if (grp && window.echarts.connect) { inst.group = grp; window.echarts.connect(grp); bindGroupZoom(inst, el.id, grp); }
     if (spec.exps) bindExpiryPick(inst, el.id);
+    if (spec.zoomTo) bindZoomTo(inst, el.id);
     // drawn before the web fonts arrived: drawn again once they have (canvas text keeps its font)
     Desk.charts[el.id] = { el: el, chart: inst, spec: spec, T: T, early: !fontsReady,
       labels: built.labels, qi: prev ? prev.qi : null };
+    if (grp) joinGroupZoom(el.id, grp);
     return inst;
   }
   // A tab switch on a drawn chart (the smile's expiry), or a model toggled on a
@@ -935,31 +942,59 @@
       b.addEventListener('click', function () {
         var on = b.getAttribute('aria-pressed') !== 'true';
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
-        var id = b.getAttribute('data-legend-for'), key = b.getAttribute('data-series');
-        var c = Desk.charts[id], f = Desk.filters[id];
-        if (!c) return;
-        // one merge for every series of the key (a model's curve on 17 expiries
-        // was 17 dispatches, each a full update); another expiry's stay hidden.
-        // A quote smile draws no data for a series toggled off: its series are set again
-        if (c.spec.quotes) queueRedraw(id);
-        else c.chart.setOption({ legend: { selected: selection(c.spec, id, f) } });
-        if (c.spec.quotes && c.qi !== null && c.qi !== undefined) {       // the readout's model rows follow
-          var q = (c.spec._rows[quoteGroup(c.spec, f)] || [])[c.qi];
-          if (q) showReadout(id, quoteLines(c.spec, q, legendOff(id)));
-        }
+        b.getAttribute('data-legend-for').split(/\s+/).forEach(function (id) { toggleLegend(id); });
       });
     });
+    // one chart's series after a legend button changed (a group's button: each member's)
+    function toggleLegend(id) {
+      var c = Desk.charts[id], f = Desk.filters[id];
+      if (!c) return;              // not drawn yet: render() reads the buttons when it is
+      // one merge for every series of the key (a model's curve on 17 expiries
+      // was 17 dispatches, each a full update); another expiry's stay hidden.
+      // A quote smile draws no data for a series toggled off: its series are set again
+      if (c.spec.quotes) queueRedraw(id);
+      else c.chart.setOption({ legend: { selected: selection(c.spec, id, f) } });
+      if (c.spec.quotes && c.qi !== null && c.qi !== undefined) {       // the readout's model rows follow
+        var q = (c.spec._rows[quoteGroup(c.spec, f)] || [])[c.qi];
+        if (q) showReadout(id, quoteLines(c.spec, q, legendOff(id)));
+      }
+    }
     $$('[data-zoom-for]').forEach(function (b) {
       b.addEventListener('click', function () {
-        var c = Desk.charts[b.getAttribute('data-zoom-for')];
-        $$('[data-zoom-for="' + b.getAttribute('data-zoom-for') + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o === b ? 'true' : 'false'); });
+        var id = b.getAttribute('data-zoom-for'), c = Desk.charts[id];
+        b.setAttribute('aria-pressed', 'true');
         if (!c) return;
         var years = parseFloat(b.getAttribute('data-years'));
         var xs = c.spec.xs || [];
-        if (!years || !xs.length) { c.chart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); return; }
-        var last = new Date(xs[xs.length - 1]);
-        var from = new Date(last); from.setFullYear(last.getFullYear() - years);
-        c.chart.dispatchAction({ type: 'dataZoom', startValue: from.toISOString().slice(0, 10), endValue: xs[xs.length - 1] });
+        if (!xs.length) return;
+        var from = xs[0];
+        if (years) {
+          var last = new Date(xs[xs.length - 1]), f = new Date(last);
+          f.setFullYear(last.getFullYear() - years);
+          from = f.toISOString().slice(0, 10);
+        }
+        // the same window of dates on every member of the chart's group
+        zoomTo(id, from, xs[xs.length - 1], b);
+      });
+    });
+    // a group's CSV: every member's rows under one header (the quote smiles' rows
+    // carry their expiry)
+    $$('[data-csv-group]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var out = [];
+        b.getAttribute('data-csv-group').split(/\s+/).forEach(function (id) {
+          var el = doc.getElementById(id), c = el && Desk.charts[id], spec = c ? c.spec : (el && specOf(el));
+          if (!spec) return;
+          var lines = specCsv(spec).replace(/\n$/, '').split('\n');
+          out = out.length ? out.concat(lines.slice(1)) : lines;
+        });
+        if (out.length) download(b.getAttribute('data-filename') || 'charts.csv', out.join('\n') + '\n');
+      });
+    });
+    $$('[data-zoom-year-for]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        var v = sel.value.split('|');
+        if (v.length === 2) zoomTo(sel.getAttribute('data-zoom-year-for'), v[0], v[1], sel);
       });
     });
     $$('[data-csv-for]').forEach(function (b) {
@@ -1189,6 +1224,91 @@
         }
       });
     });
+  }
+
+  // -- chart groups: one zoom for every member ----
+  // A chart group's members share their x values (the server gives them one
+  // domain). A zoom on one (its slider, the wheel, a preset, the year menu, a
+  // click on a year's bar) is applied to the others as the same window of x
+  // values, each member in a task of its own after the zoomed chart's frame
+  // (all three in one task made a 150 ms long task). echarts.connect may carry
+  // a drag to the others first; a member already at the window is left alone.
+  function groupMembers(grp) {
+    return $$('.chart[data-chart-group="' + grp + '"]').map(function (el) { return el.id; });
+  }
+  function zoomWindow(c) {
+    var dz = c.chart.getModel().getComponent('dataZoom', 0);
+    return dz ? dz.getValueRange() : null;
+  }
+  var zoomEcho = false, zoomByControl = false;
+  function clearZoomControls(id) {
+    $$('[data-zoom-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', 'false'); });
+    $$('[data-zoom-year-for="' + id + '"]').forEach(function (o) { o.value = ''; });
+  }
+  // a window applied to one chart only (escapeConnect: not carried to the group)
+  function setWindow(c, w) {
+    var cur = zoomWindow(c);
+    if (!cur || (Math.abs(cur[0] - w[0]) < 0.5 && Math.abs(cur[1] - w[1]) < 0.5)) return;
+    zoomEcho = true;
+    try { c.chart.dispatchAction({ type: 'dataZoom', batch: [{ startValue: w[0], endValue: w[1] }], escapeConnect: true }); }
+    finally { zoomEcho = false; }
+  }
+  function syncGroup(grp, lead) {
+    var c = Desk.charts[lead], w = c && zoomWindow(c);
+    if (!w) return;
+    var rest = groupMembers(grp).filter(function (id) { return id !== lead; });
+    (function next(i) {
+      if (i >= rest.length) return;
+      var m = Desk.charts[rest[i]];
+      if (m) setWindow(m, w);
+      setTimeout(function () { next(i + 1); }, 0);
+    })(0);
+  }
+  function bindGroupZoom(inst, id, grp) {
+    if (inst.__groupZoom) return;
+    inst.__groupZoom = true;
+    inst.on('datazoom', function () {
+      if (zoomEcho) return;
+      // a drag or the wheel: no preset or year names the window any more
+      if (!zoomByControl) groupMembers(grp).forEach(function (m) { clearZoomControls(m); });
+      afterPaint('zoom:' + grp, function () { syncGroup(grp, id); });
+    });
+  }
+  // a member drawn after the group was zoomed takes the group's window
+  function joinGroupZoom(id, grp) {
+    var c = Desk.charts[id];
+    if (!c || !zoomWindow(c)) return;
+    groupMembers(grp).some(function (o) {
+      var m = o !== id && Desk.charts[o], w = m && zoomWindow(m);
+      if (w) { setWindow(c, w); return true; }
+      return false;
+    });
+  }
+  // the zoom of a chart and of its group; its presets and year menu show none chosen
+  function zoomTo(id, from, to, keep) {
+    var el = doc.getElementById(id);
+    if (!el) return;
+    // the chart itself now; its group follows (bindGroupZoom)
+    zoomByControl = true;
+    try { if (Desk.charts[id]) Desk.charts[id].chart.dispatchAction({ type: 'dataZoom', batch: [{ startValue: from, endValue: to }], escapeConnect: true }); }
+    finally { zoomByControl = false; }
+    $$('[data-zoom-for="' + id + '"]').forEach(function (o) { if (o !== keep) o.setAttribute('aria-pressed', 'false'); });
+    $$('[data-zoom-year-for="' + id + '"]').forEach(function (o) { if (o !== keep) o.value = o.querySelector('option[value="' + from + '|' + to + '"]') ? from + '|' + to : ''; });
+  }
+  // a click on a bar of a chart whose categories are windows of another (the
+  // annual returns: each year of the equity group)
+  function bindZoomTo(inst, id) {
+    if (inst.__zoomTo) return;
+    inst.__zoomTo = true;
+    var zr = inst.getZr();
+    var at = function (e) {
+      var c = Desk.charts[id], p = [e.offsetX, e.offsetY];
+      if (!c || !c.spec.zoomTo || !inst.containPixel({ gridIndex: 0 }, p)) return null;
+      var i = Math.round(inst.convertFromPixel({ xAxisIndex: 0 }, p[0]));
+      return c.spec.zoomTo.windows[i] || null;
+    };
+    zr.on('click', function (e) { var w = at(e); if (w) zoomTo(Desk.charts[id].spec.zoomTo.chart, w[0], w[1]); });
+    zr.on('mousemove', function (e) { zr.setCursorStyle(at(e) ? 'pointer' : 'default'); });
   }
 
   // -- the expiry as the shared cursor of Surface ----

@@ -3295,6 +3295,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
         if T_days is None:
             continue
         series, tbl_rows, quotes = [], [], None
+        note_short: str | None = None
         if res is not None and (res["expiry"] == exp).any():
             q = res[res["expiry"] == exp].sort_values("k")
             ins = q["in_sample"] if "in_sample" in q.columns else pd.Series(False, index=q.index)
@@ -3314,7 +3315,15 @@ def calibration_extras(d: dict, cal: dict) -> None:
                                  signed(float(g["error_hs"].median()), ".1f"),
                                  _fmt(g["inside_spread"].astype(bool).mean() * 100, ".0f")])
             source = "quotes"
+            k_rng = (float(q["k"].min()), float(q["k"].max()))
+            ivs = pd.concat([pd.to_numeric(q[c], errors="coerce") for c in ("mid_iv", "model_iv")]) * 100.0
+            hs = pd.to_numeric(q["half_spread_vp"], errors="coerce") if "half_spread_vp" in q.columns else 0.0
+            mid_pct = q["mid_iv"] * 100.0
+            y_rng = (float((mid_pct - hs).min()), float(max(ivs.max(), (mid_pct + hs).max())))
             inside = float(q["inside_spread"].astype(bool).mean() * 100.0)
+            note_short = f"{len(q)} quotes, {int(ins.sum())} of them fit anchors"
+            badge = (f"Heston inside {_fmt(inside, '.0f')}% · median |z| "
+                     f"{_fmt(float(q['error_hs'].abs().median()), '.1f')}")
             note = (f"{len(q)} quotes, {int(ins.sum())} of them fit anchors; Heston inside the bid–ask on "
                     f"{_fmt(inside, '.0f')}%, median |model − mid| "
                     f"{_fmt(float(q['error_hs'].abs().median()), '.1f')} half-spreads")
@@ -3325,8 +3334,12 @@ def calibration_extras(d: dict, cal: dict) -> None:
             tbl_rows = [[_fmt(k, "+.3f"), _fmt(v * 100, ".2f")] for k, v in zip(sm["lm"], sm["iv"])]
             source = "model"
             note = None
+            k_rng = (float(min(sm["lm"])), float(max(sm["lm"])))
+            y_rng = (float(min(sm["iv"])) * 100.0, float(max(sm["iv"])) * 100.0)
+            badge = None
         d["smiles"].append({
             "expiry": exp, "T_days": T_days, "n": a.get("n"), "source": source, "note": note,
+            "badge": badge, "note_short": note_short, "k_range": k_rng, "y_range": y_rng,
             "spec": charts.xy(
                 f"chart-smile-{exp}", f"Smile {exp} ({_fmt(T_days, '.0f')} days)",
                 x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True, "label": "k"},
@@ -3346,6 +3359,60 @@ def calibration_extras(d: dict, cal: dict) -> None:
                        charts.table(f"{exp}: Heston model implied vol (%) by ln(K/F)",
                                     ["ln(K/F)#", "Heston IV#"], tbl_rows))),
         })
+    # the panels as small multiples: one x domain, one y step, one legend, one table
+    d["smile_group"] = group_smiles(d["smiles"], session)
+
+
+def nice_step(span: float, n: int = 5) -> float:
+    """The 1-2-2.5-5 step that cuts ``span`` into at most about ``n`` intervals."""
+    raw = max(float(span), 1e-12) / n
+    mag = 10.0 ** np.floor(np.log10(raw))
+    return float(next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw - 1e-15))
+
+
+def shared_domain(ranges: Sequence[tuple[float, float]], pad: float = 0.02) -> tuple[float, float, float]:
+    """One x domain over every range: the union padded by ``pad`` of its span and
+    rounded out to a nice step (desk.js quoteRange does the same for one expiry),
+    so no small multiple clips a quote. Returns (min, max, step)."""
+    lo, hi = min(r[0] for r in ranges), max(r[1] for r in ranges)
+    span = max(hi - lo, 0.02)
+    step = nice_step(span)
+    return (round(float(np.floor((lo - pad * span) / step) * step), 10),
+            round(float(np.ceil((hi + pad * span) / step) * step), 10), step)
+
+
+SMILE_GROUP = "cal-smiles"
+
+
+def group_smiles(smiles: list[dict], session: Any) -> dict | None:
+    """The Calibration smile small multiples as one group: one ln(K/F) domain and
+    one y tick step over every panel (set on each spec), one link for a shared
+    pointer, the legend items of all of them and one table with an expiry
+    column. None unless there are two or more panels with market quotes."""
+    quoted = [s for s in smiles if s["source"] == "quotes"]
+    if len(quoted) < 2 or len(quoted) != len(smiles):
+        return None
+    x0, x1, _ = shared_domain([s["k_range"] for s in smiles])
+    # one y tick step (about six intervals on the widest panel); each panel's y
+    # range is its own, rounded out to that step, so every panel's ticks fall on it
+    y_step = nice_step(max(s["y_range"][1] - s["y_range"][0] for s in smiles), 6)
+    items: dict[str, dict] = {}
+    rows = []
+    for s in smiles:
+        sp = s["spec"]
+        sp["x"] = {**sp["x"], "min": x0, "max": x1}
+        sp["y"] = {**sp["y"], "step": y_step,
+                   "min": round(float(np.floor(s["y_range"][0] / y_step) * y_step), 10),
+                   "max": round(float(np.ceil(s["y_range"][1] / y_step) * y_step), 10)}
+        sp["link"] = SMILE_GROUP
+        for it in sp.get("legend_items") or []:
+            items.setdefault(it["name"], it)
+        rows += [[s["expiry"], *r] for r in (sp.get("table") or {}).get("rows") or []]
+    cols = (smiles[0]["spec"].get("table") or {}).get("columns") or []
+    return {"ids": [s["spec"]["id"] for s in smiles], "legend_items": list(items.values()),
+            "x": [x0, x1], "y_step": y_step, "csv": f"smiles_{session}.csv",
+            "table": charts.table(f"Quotes by expiry and ln(K/F) bucket (medians; IV in %), {session}",
+                                  ["Expiry", *[c["label"] + ("#" if c["num"] else "") for c in cols]], rows)}
 
 
 # ── Risk page extras ─────────────────────────────────────────────────────────
@@ -3606,6 +3673,19 @@ def _runs(mask: pd.Series) -> list[tuple]:
     return out
 
 
+RESEARCH_TS = "research-ts"         # the Research time-series chart group (equity, drawdown, Sharpe)
+
+
+def year_windows(dates: Sequence[str], years: Sequence[int]) -> list[list[str] | None]:
+    """Each calendar year's first and last date among ``dates`` (ISO, ascending), or
+    None for a year with none: the window a click on that year's bar zooms to."""
+    out: list[list[str] | None] = []
+    for y in years:
+        inside = [x for x in dates if str(x)[:4] == str(int(y))]
+        out.append([str(inside[0]), str(inside[-1])] if inside else None)
+    return out
+
+
 def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
     """Tear-sheet series: equity with regime shading, drawdown, rolling Sharpe,
     monthly returns grid, sleeve bars, annual and half-year bars, inference."""
@@ -3634,6 +3714,10 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         areas = [{"from": a.strftime("%Y-%m-%d"), "to": b.strftime("%Y-%m-%d"), "color": "watch",
                   "alpha": 0.07} for a, b in _runs(r2)]
         d["r2_share_bt"] = float(r2.mean())
+        # equity, drawdown and rolling Sharpe are one chart group (RESEARCH_TS): one
+        # x domain, the same plot-area margins, a linked pointer and one zoom (the
+        # slider and the presets on equity drive all three), R2 shaded on each
+        ts_grid = {"left": 58, "right": 18}
         d["charts"]["equity"] = charts.xy(
             "chart-equity", "Cumulative return from $1M: portfolio, sleeves and T-bills",
             x={"type": "time", "csv": "date"},
@@ -3641,7 +3725,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                "unit": "%"},
             series=series, xs=xs, zoom=True, zoom_presets=(("1Y", 1), ("3Y", 3), ("All", 0)),
             marks={"areas": areas, "y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
-            csv="equity_curves.csv",
+            csv="equity_curves.csv", link=RESEARCH_TS, grid=ts_grid,
             describe=(f"Daily from {d['start_date']} to {d['end_date']}; R2 sessions (shaded) are "
                       f"{_fmt(d['r2_share_bt'] * 100, '.0f')}% of the window."),
             table=charts.table(f"Cumulative return from {d['start_date']} to {d['end_date']}",
@@ -3656,7 +3740,8 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             y={"name": "Drawdown (%)", "digits": 0, "tipDigits": 2, "tickUnit": "%", "unit": "%", "max": 0},
             series=[{"name": "Drawdown", "type": "line", "color": "neg", "width": 1.2, "area": True,
                      "sampling": "lttb", "data": dd.round(3).tolist()}],
-            xs_from="chart-equity", zoom=False, csv="drawdown.csv", grid={"top": 10, "bottom": 30},
+            xs_from="chart-equity", zoom="inside", csv="drawdown.csv", link=RESEARCH_TS,
+            grid={**ts_grid, "top": 10, "bottom": 30}, marks={"areas": areas},
             describe=(f"Deepest drawdown {_fmt(float(dd.min()), '.1f')}% on "
                       f"{cast(pd.Timestamp, dd.idxmin()).date()}."),
             table=charts.table("Drawdown", ["Statistic", "Value"],
@@ -3673,8 +3758,9 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             series=[{"name": "Rolling Sharpe", "type": "line", "color": "cat0", "width": 1.3,
                      "sampling": "lttb",
                      "data": [None if not np.isfinite(v) else round(float(v), 3) for v in roll]}],
-            xs_from="chart-equity", csv="rolling_sharpe_126.csv", grid={"top": 10, "bottom": 30},
-            marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+            xs_from="chart-equity", zoom="inside", csv="rolling_sharpe_126.csv", link=RESEARCH_TS,
+            grid={**ts_grid, "top": 10, "bottom": 30},
+            marks={"areas": areas, "y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
             describe="Annualised Sharpe of the trailing 126 daily returns; blank where the NAV was flat.",
             table=charts.table("Rolling Sharpe", ["Statistic", "Value#"],
                                [["Latest",
@@ -3737,6 +3823,14 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
                       + (f" {d['ann_partial_note']}." if d.get("ann_partial_note") else "")),
             table=charts.table("Annual return (%)", ["Year", "Return#"],
                                [[lab, signed(v, ".2f", "%")] for lab, v in zip(labels, d["ann_rets"])]))
+        # a click on a year's bar (or the year menu by the presets) zooms the
+        # research time-series group to that year's first and last session
+        wins = year_windows(d.get("eq_dates") or [], [a["year"] for a in d["ann"]])
+        if any(wins):
+            d["charts"]["annual"]["zoomTo"] = {"chart": "chart-equity", "windows": wins}
+            if "equity" in d["charts"]:
+                d["charts"]["equity"]["zoom_years"] = [
+                    {"label": lab, "from": w[0], "to": w[1]} for lab, w in zip(labels, wins) if w]
     if d.get("wf"):
         d["charts"]["halfyear"] = charts.xy(
             "chart-halfyear", "Half-year Sharpe of the single in-sample run (rf = 0)",

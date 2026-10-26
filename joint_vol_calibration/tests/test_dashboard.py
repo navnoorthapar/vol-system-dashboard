@@ -1034,9 +1034,14 @@ def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
                 rf'<script type="application/json" id="{re.escape(a["data-spec"])}">(.*?)</script>', html,
                 re.DOTALL).group(1)))
             assert spec["id"] == cid and spec["series"], (route, cid)
-            # the table toggle and the CSV button name this chart
-            assert f'data-table-for="{cid}-data"' in html
-            assert f'data-csv-for="{cid}"' in html
+            # the table toggle and the CSV button name this chart, or (a small
+            # multiple, P4.4) its group's one CSV lists it beside the group's table
+            groups = [g.split() for g in re.findall(r'data-csv-group="([^"]+)"', html)]
+            if any(cid in g for g in groups):
+                assert 'data-table-for="smile-group-data"' in html
+            else:
+                assert f'data-table-for="{cid}-data"' in html
+                assert f'data-csv-for="{cid}"' in html
             n += 1
         assert "SPX price sparkline" not in html
         for svg in re.findall(r'<svg class="spark[^"]*"[^>]*>', html):
@@ -6550,4 +6555,174 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     ctx, page = _page(sb)
     page.goto(sb["base"] + "index.html", wait_until="load")
     assert "Previous / next expiry" not in page.locator("#keysDialog").inner_text()
+    ctx.close()
+
+
+def test_chart_group_domains_and_year_windows_are_pure(dash):
+    """P4.4: the helpers behind the chart groups. nice_step is a 1-2-2.5-5 step;
+    shared_domain covers every range, padded, on that step; year_windows gives
+    each year's first and last date (None for a year without one); group_smiles
+    sets one x domain and one y step on every panel, links them, merges their
+    legends and prefixes the expiry to every table row."""
+    assert dash.nice_step(0.8) == pytest.approx(0.2)
+    assert dash.nice_step(60, 6) == pytest.approx(10)
+    assert dash.nice_step(0.37) == pytest.approx(0.1)
+    lo, hi, step = dash.shared_domain([(-0.33, 0.05), (-0.12, 0.31), (-0.2, 0.1)])
+    assert step == pytest.approx(0.2)
+    assert lo <= -0.33
+    assert hi >= 0.31
+    assert lo / step == pytest.approx(round(lo / step))
+    assert hi / step == pytest.approx(round(hi / step))
+    dates = ["2021-12-31", "2022-01-03", "2022-06-01", "2022-12-30", "2023-01-03"]
+    assert dash.year_windows(dates, [2022, 2023, 2024]) == [["2022-01-03", "2022-12-30"],
+                                                            ["2023-01-03", "2023-01-03"], None]
+
+    def panel(exp, k, y, items):
+        return {"expiry": exp, "source": "quotes", "k_range": k, "y_range": y,
+                "spec": {"id": f"chart-smile-{exp}", "x": {"name": "ln(K/F)"}, "y": {"name": "IV (%)"},
+                         "legend_items": [{"name": n} for n in items],
+                         "table": dash.charts.table("t", ["ln(K/F)", "Quotes#"], [["−0.1", 3]])}}
+    sm = [panel("2026-11-16", (-0.3, 0.05), (11.0, 58.0), ["Bid–ask", "Mid"]),
+          panel("2027-01-15", (-0.15, 0.2), (12.0, 31.0), ["Bid–ask", "Mid", "Heston"])]
+    g = dash.group_smiles(sm, "2026-10-16")
+    assert g["ids"] == ["chart-smile-2026-11-16", "chart-smile-2027-01-15"]
+    assert {(s["spec"]["x"]["min"], s["spec"]["x"]["max"]) for s in sm} == {tuple(g["x"])}
+    assert g["x"][0] <= -0.3
+    assert g["x"][1] >= 0.2
+    assert all(s["spec"]["y"]["step"] == g["y_step"] == 10 for s in sm)
+    assert [(s["spec"]["y"]["min"], s["spec"]["y"]["max"]) for s in sm] == [(10, 60), (10, 40)]
+    assert all(s["spec"]["link"] == dash.SMILE_GROUP for s in sm)
+    assert [i["name"] for i in g["legend_items"]] == ["Bid–ask", "Mid", "Heston"]
+    assert g["table"]["rows"] == [["2026-11-16", "−0.1", "3"], ["2027-01-15", "−0.1", "3"]]
+    assert [c["label"] for c in g["table"]["columns"]] == ["Expiry", "ln(K/F)", "Quotes"]
+    assert dash.group_smiles(sm[:1], "x") is None
+
+
+def test_browser_research_time_series_are_one_chart_group(site_browser):
+    """P4.4: drawdown and the rolling Sharpe sit under the equity curve, full
+    width, as one group: a pointer on the equity curve shows the same date on all
+    three, a preset, the year menu, a click on a year's bar and the wheel on any
+    member give all three the same window, R2 is shaded on each, their plot areas
+    line up within 1 px at 1440 px and a preset click makes no long task over
+    100 ms. Dates are read from the specs."""
+    sb = site_browser
+    html = (sb["site"] / "research.html").read_text()
+    raw = _raw_specs(html)
+    ids = ["chart-equity", "chart-dd", "chart-rolling"]
+    assert all(raw[i].get("link") == "research-ts" for i in ids)
+    assert all((raw[i].get("marks") or {}).get("areas") for i in ids)          # R2 on each
+    assert all(f'id="{i}" data-spec="{i}-spec" data-chart-group="research-ts"' in html for i in ids)
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "research.html", wait_until="load")
+    for i in ids:
+        page.locator("#" + i).scroll_into_view_if_needed()
+        _wait_for_chart(page, i)
+    win_js = """(ids) => ids.map(id => {
+        const r = Desk.charts[id].chart.getModel().getComponent('dataZoom', 0).getValueRange();
+        return r.map(v => new Date(v).toISOString().slice(0, 10)); })"""
+    rect_js = """(ids) => ids.map(id => { const g = Desk.charts[id].chart.getModel().getComponent('grid', 0)
+        .coordinateSystem.getRect(); const r = Desk.charts[id].el.getBoundingClientRect();
+        return [r.left + g.x, r.left + g.x + g.width]; })"""
+    rects = page.evaluate(rect_js, ids)
+    assert max(r[0] for r in rects) - min(r[0] for r in rects) <= 1, rects
+    assert max(r[1] for r in rects) - min(r[1] for r in rects) <= 1, rects
+    xs = page.evaluate("Desk.charts['chart-equity'].spec.xs")
+    # the pointer: a date in the middle of the window
+    day = xs[len(xs) // 2]
+    page.locator("#chart-equity").scroll_into_view_if_needed()
+    pt = page.evaluate("""(d) => { const c = Desk.charts['chart-equity'];
+        const x = c.chart.convertToPixel({xAxisIndex: 0}, d), r = c.el.getBoundingClientRect();
+        return {x: r.left + x, y: r.top + r.height / 3}; }""", day)
+    page.mouse.move(pt["x"], pt["y"])
+    page.wait_for_timeout(300)
+    heads = page.evaluate("""(ids) => ids.map(id => {
+        const t = [...document.querySelectorAll('#' + id + ' > div')]
+          .filter(d => d.style.position === 'absolute' && getComputedStyle(d).display !== 'none'
+            && d.innerText.trim());
+        return t.length ? t[0].innerText.split('\\n')[0].trim() : null; })""", ids)
+    # the same session on all three (the pointer lands on this day or a neighbour)
+    assert len(set(heads)) == 1, heads
+    assert heads[0] in xs[xs.index(day) - 1:xs.index(day) + 2], (day, heads)
+    # 3Y: one window on all three, and no long task over 100 ms
+    page.evaluate("""() => { window.__lt = []; new PerformanceObserver(l => l.getEntries()
+        .forEach(e => window.__lt.push(e.duration))).observe({type: 'longtask'}); }""")
+    page.click("[data-zoom-for='chart-equity'][data-years='3']")
+    page.wait_for_timeout(400)
+    w3 = page.evaluate(win_js, ids)
+    assert len({tuple(w) for w in w3}) == 1, w3
+    assert w3[0][1] == xs[-1]
+    assert max(page.evaluate("window.__lt") or [0]) <= 100
+    # a year's bar on the annual chart: that year's first and last session
+    page.locator("#chart-annual").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-annual")
+    cats = raw["chart-annual"]["x"]["categories"]
+    year = next(c for c in cats[1:] if c.isdigit())
+    want = [next(x for x in xs if x.startswith(year)), [x for x in xs if x.startswith(year)][-1]]
+    pos = page.evaluate("""(cat) => { const c = Desk.charts['chart-annual'];
+        const x = c.chart.convertToPixel({xAxisIndex: 0}, cat), r = c.el.getBoundingClientRect();
+        return {x: r.left + x, y: r.top + r.height / 2}; }""", year)
+    page.mouse.click(pos["x"], pos["y"])
+    page.wait_for_timeout(400)
+    assert page.evaluate(win_js, ids) == [want] * 3
+    assert page.get_attribute("[data-zoom-for='chart-equity'][data-years='3']", "aria-pressed") == "false"
+    assert page.input_value("[data-zoom-year-for='chart-equity']") == "|".join(want)
+    # the year menu (the keyboard's way to the same windows)
+    opts = page.evaluate("[...document.querySelectorAll('[data-zoom-year-for=\"chart-equity\"] option')]"
+                         ".map(o => o.value)")
+    page.select_option("[data-zoom-year-for='chart-equity']", opts[1])
+    page.wait_for_timeout(400)
+    assert page.evaluate(win_js, ids) == [opts[1].split("|")] * 3
+    # the wheel on the drawdown chart zooms the group too
+    page.locator("#chart-dd").scroll_into_view_if_needed()
+    box = page.locator("#chart-dd").bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, 400)
+    page.wait_for_timeout(500)
+    ww = page.evaluate(win_js, ids)
+    assert len({tuple(w) for w in ww}) == 1, ww
+    assert ww[0] != opts[1].split("|")
+    ctx.close()
+
+
+def test_browser_calibration_smiles_are_small_multiples(site_browser):
+    """P4.4: the six Calibration smiles share one ln(K/F) domain and one y tick
+    step, one legend bar drives all of them (Heston toggled once is off in every
+    panel), each panel's head carries Heston's inside-spread share and median |z|,
+    and one Table / CSV replaces the six pairs: the CSV has one row per quote of
+    every panel. The page's tab stops fall by the 30 the six pairs and legends
+    held (135 → 105 on the committed data)."""
+    sb = site_browser
+    html = (sb["site"] / "calibration.html").read_text()
+    raw = _raw_specs(html)
+    ids = [i for i in re.findall(r'id="(chart-smile-[^"]+)" data-spec', html) if raw[i].get("quotes")]
+    assert len(ids) >= 2
+    assert len({(raw[i]["x"]["min"], raw[i]["x"]["max"]) for i in ids}) == 1
+    assert len({raw[i]["y"]["step"] for i in ids}) == 1
+    assert not any(f'data-csv-for="{i}"' in html or f'data-table-for="{i}-data"' in html for i in ids)
+    assert html.count("data-csv-group=") == 1
+    for i in ids:
+        exp = i[len("chart-smile-"):]
+        head = re.search(rf'id="smile-{exp}".*?<span class="panel-meta">([^<]*)</span>', html,
+                         re.DOTALL).group(1)
+        assert re.match(r"Heston inside \d+% · median \|z\| \d+\.\d$", head), head
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "calibration.html", wait_until="load")
+    for i in ids:
+        page.locator("#" + i).scroll_into_view_if_needed()
+        _wait_for_chart(page, i)
+    ax = page.evaluate("(ids) => ids.map(id => Desk.charts[id].chart.getOption().xAxis"
+                       ".map(a => [a.min, a.max]))", ids)
+    assert len({json.dumps(a) for a in ax}) == 1, ax
+    hk = page.get_attribute("#smile-group-tools [data-series^='Heston (']", "data-series")
+    page.click(f"#smile-group-tools [data-series='{hk}']")
+    page.wait_for_timeout(400)
+    left = page.evaluate("""([ids, hk]) => ids.map(id => Desk.charts[id].chart.getOption().series
+        .filter(s => s.name.endsWith(' ' + hk)).reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
+    assert left == [0] * len(ids), left
+    with page.expect_download() as dl:
+        page.click("[data-csv-group]")
+    rows = Path(dl.value.path()).read_text().strip().split("\n")
+    assert rows[0].startswith("expiry,")
+    n_quotes = sum(len(g["mid"]) for i in ids for g in raw[i]["quotes"]["groups"].values())
+    assert len(rows) - 1 == n_quotes
     ctx.close()

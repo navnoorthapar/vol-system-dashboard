@@ -705,3 +705,8 @@ dialog.keys .dl { font-size: 12px; }
   white-space: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
 .row-pick:hover { text-decoration: underline; text-underline-offset: 2px; }
 tr[aria-current="true"] > th[scope="row"] { color: var(--text); box-shadow: inset 3px 0 0 var(--text2); }
+
+/* the year menu beside a chart's zoom presets (Research equity group) */
+.zoom-year { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text3); }
+.zoom-year select.btn { padding-right: 4px; }
+.charts-failed .zoom-year { display: none !important; }

@@ -177,11 +177,26 @@
 <h2 class="section-title">Smiles by anchor expiry</h2>
 {% set src = d.smile_source or {} %}
 {% if src.state != 'ok' %}{{ m.missing(src, 'Market bid–ask quotes and the model at the quoted strikes need the per-quote residual table for ' ~ (d.session or 'this session') ~ '; until it exists each panel shows the model smile only.') }}{% endif %}
+{% set sg = d.smile_group %}
+{% if sg %}
+{# one legend and one Table / CSV for the six panels (small multiples: one
+   ln(K/F) domain, one y step, a linked pointer) #}
+<div class="chart-tools smile-group-tools" id="smile-group-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in every smile panel">
+    {% for it in sg.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ sg.ids|join(' ') }}" data-series="{{ it.name }}" aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="smile-group-data" aria-expanded="false" aria-controls="smile-group-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-group="{{ sg.ids|join(' ') }}" data-filename="{{ sg.csv }}">CSV</button>
+  </div>
+</div>
+{{ m.data_table(sg.table, 'smile-group-data') }}
+{% endif %}
 <div class="g evenfill" style="margin-top:8px;">
   {% for s in d.smiles %}
-  {% call m.panel('smile-' ~ s.expiry, s.expiry ~ ' · ' ~ (s.T_days|fmt('.0f')) ~ ' days', 's4', ((s.n|fmt) ~ ' anchors') if s.n else None) %}
-    {{ m.chart(s.spec, 'h300') }}
-    {% if s.note %}<p class="note">{{ s.note }}.</p>{% endif %}
+  {% call m.panel('smile-' ~ s.expiry, s.expiry ~ ' · ' ~ (s.T_days|fmt('.0f')) ~ ' d', 's4', (s.badge if sg and s.badge else (((s.n|fmt) ~ ' anchors') if s.n else None))) %}
+    {{ m.chart(s.spec, 'h300', tools=not sg) }}
+    {% if sg and s.note_short %}<p class="note">{{ s.note_short }}.</p>{% elif s.note %}<p class="note">{{ s.note }}.</p>{% endif %}
   {% endcall %}
   {% endfor %}
 </div>

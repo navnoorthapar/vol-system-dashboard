@@ -79,8 +79,11 @@
     {% if d.charts.equity %}{{ m.chart(d.charts.equity, 'h400') }}{% endif %}
     <p class="note">Each sleeve's own NAV relative to its start; the portfolio's daily P&amp;L is the equal-weight mean of S1C, S3 and S4. Full daily resolution; drag or use the slider to zoom.</p>
   {% endcall %}
-  {% call m.panel('drawdown', 'Drawdown', 's6') %}{% if d.charts.drawdown %}{{ m.chart(d.charts.drawdown, 'h180') }}{% endif %}{% endcall %}
-  {% call m.panel('rolling', 'Rolling 126-session Sharpe', 's6') %}{% if d.charts.rolling %}{{ m.chart(d.charts.rolling, 'h180') }}{% endif %}{% endcall %}
+  {# under the equity curve, full width on its x axis: one chart group (a pointer
+     on one shows the date on all three; the slider, the presets, the year menu
+     and a click on a year's bar zoom all three) #}
+  {% call m.panel('drawdown', 'Drawdown', 's12', 'zooms with the curve above') %}{% if d.charts.drawdown %}{{ m.chart(d.charts.drawdown, 'h180') }}{% endif %}{% endcall %}
+  {% call m.panel('rolling', 'Rolling 126-session Sharpe', 's12', 'zooms with the curve above') %}{% if d.charts.rolling %}{{ m.chart(d.charts.rolling, 'h180') }}{% endif %}{% endcall %}
 </div>
 
 <div class="g pair">

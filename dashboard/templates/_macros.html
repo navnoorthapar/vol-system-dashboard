@@ -67,6 +67,7 @@
   <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
     {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else it.color)))) }})"></span>{{ it.name }}</button>{% endfor %}
     {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
+    {% if spec.zoom_years %}<label class="zoom-year js-only">Year <select class="btn" data-zoom-year-for="{{ cid }}"><option value="">—</option>{% for z in spec.zoom_years %}<option value="{{ z['from'] }}|{{ z.to }}">{{ z.label }}</option>{% endfor %}</select></label>{% endif %}
   </div>
   <div class="legend-bar">
     <button class="btn" type="button" data-table-for="{{ cid }}-data" aria-expanded="false" aria-controls="{{ cid }}-data">Table</button>
@@ -74,7 +75,7 @@
   </div>
 </div>
 {% endif %}
-<div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec" role="img" aria-label="{{ spec.title }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
+<div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec"{% if spec.link %} data-chart-group="{{ spec.link }}"{% endif %} role="img" aria-label="{{ spec.title }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
 {% if spec.quotes %}<p class="quote-readout js-only" id="{{ cid }}-readout" data-readout-for="{{ cid }}" tabindex="0" aria-live="polite" aria-describedby="{{ cid }}-readout-help">Quote readout: hover a quote, or focus here and step with ← → (Page Up / Down: 10 quotes; Home / End).</p>
 <span class="sr-only" id="{{ cid }}-readout-help">Arrow keys step through the shown expiry’s quotes; each step reads the quote’s strike, bid, mid and ask and each shown model’s IV and z.</span>{% endif %}
 <p class="sr-only" id="{{ cid }}-desc">{{ spec.describe }}</p>
