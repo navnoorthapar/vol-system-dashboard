@@ -83,6 +83,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     BERLIN_11,
     CIVIDIS_11,
     MINUS,
+    SPX_MULTIPLIER,
     _fmt,
     _num,
     _pct_prose,
@@ -91,6 +92,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     _usd,
     _usd_k,
     _vomma_color,
+    cash_greeks,
     cell,
     contrast_ratio,
     div_colour,
@@ -103,6 +105,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     signed,
     sparkline,
     tone,
+    usd_desk,
 )
 
 app = Flask(
@@ -324,6 +327,7 @@ app.jinja_env.filters["fmt"] = _fmt
 app.jinja_env.filters["ordinal"] = ordinal
 app.jinja_env.filters["usd_k"] = _usd_k
 app.jinja_env.filters["usd"] = _usd
+app.jinja_env.filters["usd_desk"] = usd_desk
 app.jinja_env.filters["pct"] = _pct_prose
 app.jinja_env.filters["signed"] = signed
 app.jinja_env.filters["pnl"] = pnl
@@ -1417,6 +1421,27 @@ def _greeks_provenance(path: Path) -> dict:
     return prov
 
 
+UNSTABLE_FAR_K = 0.09     # |ln(K/F)| from which a node counts as away from the money (a K_EDGES edge)
+
+
+def unstable_vega_share(gdf: pd.DataFrame) -> dict | None:
+    """The convexity-dominated nodes weighted by what they hold: the vega-weighted
+    share of the is_unstable nodes, and where they sit. The KPI read '41 of 83',
+    a node count that weighs a deep-wing node with little vega like an ATM one."""
+    if gdf is None or not len(gdf) or "vega" not in gdf.columns:
+        return None
+    vega = gdf["vega"].astype(float)
+    unst = gdf["is_unstable"].astype(bool)
+    far = gdf["log_moneyness"].astype(float).abs() >= UNSTABLE_FAR_K - 1e-12
+    tot = float(vega.sum())
+    if not tot > 0:
+        return None
+    return {"share": float(vega[unst].sum()) / tot, "n": int(unst.sum()), "n_nodes": len(gdf),
+            "n_far": int((unst & far).sum()), "far_k": UNSTABLE_FAR_K,
+            "vega_far_mean": float(vega[far].mean()) if far.any() else None,
+            "vega_near_mean": float(vega[~far].mean()) if (~far).any() else None}
+
+
 def load_page3() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "heatmap_rows": [], "heatmap_cols": [],
                          "unstable_nodes": [], "qv_labels": [], "qv_values": [],
@@ -1522,6 +1547,7 @@ def load_page3() -> dict[str, Any]:
         d["unstable_maturities"] = sorted({n["T_days"] for n in d["unstable_nodes"]})
         d["unstable_by_maturity"] = {int(t): int(n)
                                      for t, n in gdf.groupby("T_days")["is_unstable"].sum().items()}
+        d["unstable_vega"] = unstable_vega_share(gdf)
 
         imax, imin = gdf["vomma"].idxmax(), gdf["vomma"].idxmin()
         d["vomma_max"] = float(gdf.loc[imax, "vomma"])
@@ -2931,8 +2957,10 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
 
     d["scenario"] = artifacts.load_scenario_grid(DATA)
     d["scenario_more"] = []
+    d["cash_greeks"] = None
     if d["scenario"].get("state") == "ok":
         g_all = d["scenario"]["grid"]
+        d["cash_greeks"] = reference_cash_greeks(d["scenario"].get("provenance") or {})
         lim = float(g_all["pnl"].abs().max()) or 1.0      # one colour scale for every dynamics
 
         def heat(g: pd.DataFrame) -> dict:
@@ -2941,14 +2969,21 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
             lut = {(float(a), float(b)): float(c) for a, b, c in
                    zip(g["spot_shock_pct"].to_numpy(float), g["vol_shock_vp"].to_numpy(float),
                        g["pnl"].to_numpy(float))}
+            def one(s: float, v: float) -> dict:
+                pnl_ = lut.get((float(s), float(v)))
+                c = cell(signed(pnl_, ",.0f"), pnl_colour(pnl_, lim),
+                         detail=(f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vol pts')}: "
+                                 f"P&L {signed(pnl_, ',.0f')} idx pts"))
+                # the same cell in dollars for one SPX contract (×100), shown by the units toggle
+                usd = None if pnl_ is None else pnl_ * SPX_MULTIPLIER
+                c["alt"] = _usd(usd, signed=True)
+                c["alt_detail"] = (f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vol pts')}: "
+                                   f"P&L {_usd(usd, signed=True)} per SPX contract")
+                return c
             return {
                 "cols": [signed(s, ".0f", "%") for s in spots],
-                "rows": [{"label": signed(v, ".0f", " vp"), "cells": [
-                    cell(signed(lut.get((float(s), float(v))), ",.0f"),
-                         pnl_colour(lut.get((float(s), float(v))), lim),
-                         detail=(f"spot {signed(s, '.0f', '%')}, vol {signed(v, '.0f', ' vp')}: "
-                                 f"P&L {signed(lut.get((float(s), float(v))), ',.0f')}"))
-                    for s in spots]} for v in vols]}
+                "rows": [{"label": signed(v, ".0f", " vol pts"), "cells": [one(s, v) for s in spots]}
+                         for v in vols]}
 
         g = g_all
         if "dynamics" in g_all.columns:
@@ -3025,6 +3060,22 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
                            ["Component", "Cumulative P&L#"],
                            [["Total", signed(d["hedge"]["cum_total"], ",.2f")]]
                            + [[n, signed(v, ",.2f")] for n, v in d["hedge"]["cum"].items()]))
+
+
+def reference_cash_greeks(prov: dict) -> dict | None:
+    """Cash Greeks of the scenario grid's reference book (one 30-day SPX straddle
+    struck at the forward, Black-76 at the fit's ATM-forward vol), per SPX
+    contract, from the grid's provenance (desk_format.cash_greeks)."""
+    raw = {k: _num(prov.get(k)) for k in ("S", "forward", "strike", "T", "iv_atm_forward", "discount")}
+    vals = {k: v for k, v in raw.items() if v is not None and v > 0}
+    if len(vals) != len(raw):
+        return None
+    g = cash_greeks(vals["S"], vals["forward"], vals["strike"], vals["T"], vals["iv_atm_forward"],
+                    vals["discount"])
+    as_of = _date_str(prov.get("as_of_date"))
+    age = session_age(as_of, _latest_market_session())
+    return {**g, **vals, "tenor_days": _num(prov.get("tenor_days")), "as_of": as_of, "age": age,
+            "age_level": stale_level(age), "multiplier": SPX_MULTIPLIER}
 
 
 # ── Research page extras ─────────────────────────────────────────────────────

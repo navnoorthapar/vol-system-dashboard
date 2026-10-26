@@ -159,6 +159,58 @@ def prose(text: Any) -> str:
     return _HYPHEN_NUMBER.sub(lambda m: MINUS + m.group(1), s)
 
 
+# ── desk units: cash Greeks of an SPX straddle ───────────────────────────────
+SPX_MULTIPLIER = 100.0     # index points → dollars for one SPX option contract
+VOL_PT = 0.01              # one vol point (1.00 vol = 100 vol pts)
+SPOT_PCT = 0.01            # a 1% spot move
+
+
+def cash_greeks(S: float, F: float, K: float, T: float, sigma: float, D: float,
+                multiplier: float = SPX_MULTIPLIER) -> dict:
+    """Black-76 Greeks of one straddle (call + put at K) and their desk units.
+
+    S spot, F the forward to T (F = S·e^{(r−q)T}, so ∂F/∂S = F/S), K strike,
+    T years, sigma the straddle's vol (decimal), D the discount factor. With
+    d₁ = (ln(F/K) + ½σ²T)/(σ√T), d₂ = d₁ − σ√T and φ the normal density:
+      vega  ∂V/∂σ    = 2·D·F·φ(d₁)·√T
+      gamma ∂²V/∂S²  = (F/S)²·2·D·φ(d₁)/(F·σ·√T)
+      vanna ∂²V/∂S∂σ = −(F/S)·2·D·φ(d₁)·d₂/σ
+      volga ∂²V/∂σ²  = vega·d₁·d₂/σ
+    per unit of the index and per 1.00 of vol. The desk units are dollars for
+    one SPX contract (× ``multiplier``):
+      $vega  per vol pt               = vega·0.01·m
+      $gamma per 1% spot move         = ½·gamma·(0.01·S)²·m   (the P&L of the move)
+      $vanna per 1% spot per vol pt   = vanna·(0.01·S)·0.01·m
+      $volga per vol pt²              = volga·0.01²·m          (P&L ≈ ½·$volga·Δσ²)
+    """
+    sq = math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * sq)
+    d2 = d1 - sigma * sq
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    vega = 2.0 * D * F * pdf * sq
+    gamma = (F / S) ** 2 * 2.0 * D * pdf / (F * sigma * sq)
+    vanna = -(F / S) * 2.0 * D * pdf * d2 / sigma
+    volga = vega * d1 * d2 / sigma
+    return {"vega": vega, "gamma": gamma, "vanna": vanna, "volga": volga, "d1": d1, "d2": d2,
+            "vega_usd": vega * VOL_PT * multiplier,
+            "gamma_usd": 0.5 * gamma * (SPOT_PCT * S) ** 2 * multiplier,
+            "vanna_usd": vanna * (SPOT_PCT * S) * VOL_PT * multiplier,
+            "volga_usd": volga * VOL_PT ** 2 * multiplier}
+
+
+def usd_desk(value: Any, signed: bool = True) -> str:
+    """Dollars at desk precision: whole dollars from $100, cents below
+    (1750.67 -> '+$1,751', 8.7534 -> '+$8.75', -0.0539 -> '−$0.05')."""
+    x = _num(value)
+    if x is None:
+        return "—"
+    body = f"${abs(x):,.0f}" if abs(x) >= 99.995 else f"${abs(x):.2f}"
+    if float(body[1:].replace(",", "")) == 0.0:
+        return body
+    sign = MINUS if x < 0 else ("+" if signed else "")
+    return f"{sign}{body}"
+
+
 # ── contrast (WCAG 2.x) ───────────────────────────────────────────────────────
 def _relative_luminance(hex_colour: str) -> float:
     """WCAG 2.x relative luminance of '#rrggbb'."""

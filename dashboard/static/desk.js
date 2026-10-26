@@ -673,7 +673,11 @@
         var th = c.parentNode.querySelector('th'), col = tbl.tHead && tbl.tHead.rows[0].cells[c.cellIndex];
         return (th ? th.textContent.trim() + ' \u00b7 ' : '') + (col ? col.textContent.trim() + ' \u00b7 ' : '');
       }
-      function show(c) { if (out) out.textContent = (withHeads ? heads(c) : '') + c.getAttribute('data-detail'); }
+      function show(c) {
+        // the readout follows the units toggle of the region the table is in
+        var u = c.closest('.units'), alt = u && u.getAttribute('data-show') === 'alt' && c.getAttribute('data-detail-alt');
+        if (out) out.textContent = (withHeads ? heads(c) : '') + (alt || c.getAttribute('data-detail'));
+      }
       tbl.addEventListener('mouseover', function (e) { var c = e.target.closest('td[data-detail]'); if (c) show(c); });
       tbl.addEventListener('focusin', function (e) { var c = e.target.closest('td[data-detail]'); if (c) show(c); });
       tbl.addEventListener('keydown', function (e) {
@@ -688,6 +692,18 @@
         if (next && next.tagName === 'TD') {
           e.preventDefault(); c.tabIndex = -1; next.tabIndex = 0; next.focus();
         }
+      });
+    });
+  }
+
+  // -- units toggle: a region shown in one of two units (aria-pressed buttons) ----
+  function initUnits() {
+    $$('[data-units-for]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.getAttribute('data-units-for'), region = doc.getElementById(id);
+        if (!region) return;
+        region.setAttribute('data-show', b.getAttribute('data-show'));
+        $$('[data-units-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o === b ? 'true' : 'false'); });
       });
     });
   }
@@ -815,7 +831,7 @@
 
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); init3d(); initTableRoles(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); initUnits(); init3d(); initTableRoles(); initScrollHints();
     initPrint(); scrollToAnchor();
   }
   if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot); else boot();

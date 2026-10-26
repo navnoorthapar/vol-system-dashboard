@@ -244,6 +244,9 @@ sub, sup { font-size: 0.72em; }
 .chip-info   { color: var(--info);   border-color: rgba(138, 187, 255, 0.45); background: var(--tint-info); }
 .chip-muted  { color: var(--text3); }
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+/* a region shown in one of two units (the scenario grid: idx pts, or $ per SPX
+   contract); without JavaScript the base unit shows */
+.units:not([data-show="alt"]) [data-unit="alt"], .units[data-show="alt"] [data-unit="base"] { display: none; }
 
 /* ── KPI tiles ───────────────────────────────────────────────────────── */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }

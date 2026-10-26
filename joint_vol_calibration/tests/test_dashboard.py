@@ -4233,3 +4233,123 @@ def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
     assert labels
     assert "alternate strikes held out" in _html_unescape(labels[0])
     assert _html_unescape(labels[0]).startswith("Arbitrage-free SVI surface")
+
+
+def _scenario_prov() -> dict:
+    import pyarrow.parquet as pq
+    raw = pq.read_schema(SHIPPED / "greeks" / "scenario_grid.parquet").metadata[b"scenario_provenance"]
+    return json.loads(raw.decode())
+
+
+def test_cash_greeks_are_unit_conversions_of_the_reference_straddle(dash, pages):
+    """P1.4: the Risk KPIs printed raw vomma (max 19,931, per unit index, per
+    (1.00 vol)²), a number no desk reads. They are now the reference 30-day ATM
+    straddle's cash Greeks per SPX contract, recomputed here independently
+    (scipy's normal density, the stated conversion constants) to 1e-9, checked
+    against the grid's own delta and revaluation, and found in the tiles."""
+    from scipy.stats import norm
+    pv = _scenario_prov()
+    S, F, K, T, sig, D = (pv[k] for k in ("S", "forward", "strike", "T", "iv_atm_forward", "discount"))
+    d1 = (np.log(F / K) + 0.5 * sig ** 2 * T) / (sig * np.sqrt(T))
+    d2 = d1 - sig * np.sqrt(T)
+    vega = 2 * D * F * norm.pdf(d1) * np.sqrt(T)
+    gamma = (F / S) ** 2 * 2 * D * norm.pdf(d1) / (F * sig * np.sqrt(T))
+    vanna = -(F / S) * 2 * D * norm.pdf(d1) * d2 / sig
+    volga = vega * d1 * d2 / sig
+    want = {"vega_usd": vega * 0.01 * 100, "gamma_usd": 0.5 * gamma * (0.01 * S) ** 2 * 100,
+            "vanna_usd": vanna * (0.01 * S) * 0.01 * 100, "volga_usd": volga * 0.01 ** 2 * 100}
+    got = dash.cash_greeks(S, F, K, T, sig, D)
+    for k, v in want.items():
+        assert got[k] == pytest.approx(v, rel=1e-9, abs=1e-12), k
+    # the same Black-76 straddle the grid revalues: its delta, and its P&L for small moves
+    assert D * (F / S) * (2 * norm.cdf(d1) - 1) == pytest.approx(pv["hedge_delta"], rel=1e-9)
+    g = pd.read_parquet(SHIPPED / "greeks" / "scenario_grid.parquet")
+    g = g[g["dynamics"] == "sticky_strike"] if "dynamics" in g.columns else g
+    at = {(r.spot_shock_pct, r.vol_shock_vp): r.pnl for r in g.itertuples()}
+    if (0.0, 2.0) in at:
+        want_2vp = 2 * want["vega_usd"] + 0.5 * want["volga_usd"] * 4
+        assert at[(0.0, 2.0)] * 100 == pytest.approx(want_2vp, rel=2e-3)
+    if (1.0, 0.0) in at:
+        assert at[(1.0, 0.0)] * 100 == pytest.approx(want["gamma_usd"], rel=0.05)
+    html = pages["/risk"]
+    for k, v in want.items():
+        tile = re.search(rf'id="kpi-{k}">.*?<div class="kpi-value">(.*?)</div>', html, re.DOTALL)
+        assert tile, k
+        assert tile.group(1) == dash.usd_desk(v), (k, tile.group(1))
+    strip = html[html.index('id="risk-kpis"'):html.index('id="greeks-grid"')]
+    assert "per unit index, per (1.00 vol)²" not in strip
+    assert "Max vomma" not in strip
+    # the staleness of the fit the Greeks come from stays on every tile
+    age = dash.session_age(pv["as_of_date"], dash._latest_market_session())
+    for k in want:
+        sub = re.search(rf'id="kpi-{k}">.*?<div class="kpi-sub">(.*?)</div></div>', html, re.DOTALL).group(1)
+        assert f"fit of {pv['as_of_date']}" in sub
+        if age:
+            assert f"{dash.plural(age, 'session')} old" in sub
+
+
+def test_convexity_dominated_vega_share_is_vega_weighted(dash, pages):
+    """P1.4: 'Unstable nodes 41 of 83' weighed a deep-wing node with no vega like
+    an ATM one; the KPI is the vega-weighted share of the flagged nodes."""
+    g = pd.read_parquet(SHIPPED / "greeks" / "greeks_surface.parquet")
+    u = g["is_unstable"].astype(bool)
+    share = float(g.loc[u, "vega"].sum() / g["vega"].sum()) * 100
+    far = g["log_moneyness"].abs() >= 0.09 - 1e-12
+    tile = re.search(r'id="kpi-convexity">.*?<div class="kpi-value">(.*?)<span', pages["/risk"], re.DOTALL)
+    assert tile
+    assert tile.group(1) == f"{share:.1f}"
+    sub = _visible_text("<body>" + re.search(r'id="kpi-convexity">(.*?)</div></div>', pages["/risk"],
+                                              re.DOTALL).group(1))
+    assert f"{int(u.sum())} of {len(g)} nodes" in sub
+    assert f"{int((u & far).sum())} of them at |ln(K/F)| ≥ 0.09" in sub
+    assert f"{g.loc[far, 'vega'].mean():,.0f} against {g.loc[~far, 'vega'].mean():,.0f}" in sub
+
+
+def test_scenario_grid_reads_in_dollars_per_contract_on_a_toggle(dash, pages):
+    """P1.4: the scenario grid gains a units toggle (aria-pressed buttons): index
+    points per straddle, or dollars per SPX contract (× 100). Without JavaScript
+    the index-point cells show; the dollar cells equal the grid's pnl × 100."""
+    html = pages["/risk"]
+    panel = html[html.index('id="scenario"'):html.index('id="qv-vanna"')]
+    btns = re.findall(r'<button class="btn" type="button" data-units-for="scenario-units" data-show="(\w+)" '
+                      r'aria-pressed="(true|false)">(.*?)</button>', panel)
+    assert [(b[0], b[1]) for b in btns] == [("base", "true"), ("alt", "false")]
+    assert btns[1][2] == "$ per SPX contract"
+    g = pd.read_parquet(SHIPPED / "greeks" / "scenario_grid.parquet")
+    g = g[g["dynamics"] == "sticky_strike"] if "dynamics" in g.columns else g
+    spots = sorted(g["spot_shock_pct"].unique())
+    vols = sorted(g["vol_shock_vp"].unique())
+    lut = {(r.spot_shock_pct, r.vol_shock_vp): r.pnl for r in g.itertuples()}
+    tbl = re.search(r'<table class="heat" id="scenario-grid"[^>]*>(.*?)</table>', html, re.DOTALL).group(1)
+    rows = re.findall(r"<tr><th scope=\"row\">(.*?)</th>(.*?)</tr>", tbl.split("<tbody>")[1], re.DOTALL)
+    assert len(rows) == len(vols)
+    for (label, body), v in zip(rows, vols):
+        assert label == dash.signed(v, ".0f", " vol pts")
+        alts = re.findall(r'<span data-unit="alt">(.*?)</span>', body)
+        base = re.findall(r'<span data-unit="base">(.*?)</span>', body)
+        assert alts == [dash._usd(lut[(s, v)] * 100, signed=True) for s in spots]
+        for a, s in zip(alts, spots):                      # pnl × 100, rounded to the dollar
+            assert abs(int(a.replace("$", "").replace(",", "").replace("−", "-")) - lut[(s, v)] * 100) <= 0.5
+        assert base == [dash.signed(lut[(s, v)], ",.0f") for s in spots]
+    css = DESK_CSS.read_text()
+    assert '.units:not([data-show="alt"]) [data-unit="alt"]' in css
+    assert "initUnits" in DESK_JS.read_text()
+
+
+def test_browser_scenario_units_toggle(site_browser):
+    """The units buttons switch every cell and the readout, and keep aria-pressed in step."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "risk.html", wait_until="load")
+        cell = page.locator("#scenario-grid tbody td").first
+        assert cell.locator('[data-unit="base"]:not(.sr-only)').is_visible()
+        assert not cell.locator('[data-unit="alt"]:not(.sr-only)').is_visible()
+        page.locator('[data-units-for="scenario-units"][data-show="alt"]').click()
+        alt_btn = page.locator('[data-units-for="scenario-units"][data-show="alt"]')
+        assert alt_btn.get_attribute("aria-pressed") == "true"
+        assert cell.locator('[data-unit="alt"]:not(.sr-only)').is_visible()
+        assert not cell.locator('[data-unit="base"]:not(.sr-only)').is_visible()
+        cell.hover()
+        assert "per SPX contract" in page.locator("#scenario-grid-readout").inner_text()
+    finally:
+        ctx.close()

@@ -76,7 +76,7 @@
     <tbody>
       {% for row in h.rows %}
       <tr><th scope="row">{{ row.label }}</th>
-        {% for cell in row.cells %}{% if cell.empty %}<td class="empty" data-detail="{{ cell.detail }}"><span aria-hidden="true">·</span><span class="sr-only">{{ cell.detail or 'no data' }}</span></td>{% else %}<td{% if cell.flag %} class="flag"{% endif %} style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="{{ cell.detail }}">{{ cell.text }}{% if not h.compact %}<span class="sr-only">; {{ cell.detail }}</span>{% endif %}</td>{% endif %}{% endfor %}
+        {% for cell in row.cells %}{% if cell.empty %}<td class="empty" data-detail="{{ cell.detail }}"><span aria-hidden="true">·</span><span class="sr-only">{{ cell.detail or 'no data' }}</span></td>{% else %}<td{% if cell.flag %} class="flag"{% endif %} style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="{{ cell.detail }}"{% if cell.alt %} data-detail-alt="{{ cell.alt_detail }}"{% endif %}>{% if cell.alt %}<span data-unit="base">{{ cell.text }}</span><span data-unit="alt">{{ cell.alt }}</span>{% else %}{{ cell.text }}{% endif %}{% if not h.compact %}{% if cell.alt %}<span class="sr-only" data-unit="base">; {{ cell.detail }}</span><span class="sr-only" data-unit="alt">; {{ cell.alt_detail }}</span>{% else %}<span class="sr-only">; {{ cell.detail }}</span>{% endif %}{% endif %}</td>{% endif %}{% endfor %}
       </tr>
       {% endfor %}
     </tbody>

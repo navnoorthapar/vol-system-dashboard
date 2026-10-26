@@ -31,12 +31,23 @@
   </div>
 </div>
 
-<div class="kpis" style="margin-bottom:8px;">
-  {{ m.kpi('Unstable nodes', (d.n_unstable|fmt) ~ ' of ' ~ (d.n_cells|fmt), sub=rule_txt ~ ((('; Δσ = ' ~ ur.iv_shock) if (ur.kind == 'pnl_ratio' and ur.iv_shock) else ''))) }}
-  {{ m.kpi('Max vomma', d.vomma_max|fmt(',.0f'), sub='at ' ~ d.vomma_max_at.T_days ~ 'd, ln(K/F) = ' ~ (d.vomma_max_at.lm|fmt('+.3f'))) }}
-  {{ m.kpi('Min vomma', d.vomma_min|fmt(',.0f'), sub='at ' ~ d.vomma_min_at.T_days ~ 'd, ln(K/F) = ' ~ (d.vomma_min_at.lm|fmt('+.3f'))) }}
-  {{ m.kpi('Mean vomma', d.vomma_mean|fmt(',.0f'), sub='all ' ~ (d.n_cells|fmt) ~ ' nodes; per unit index, per (1.00 vol)²') }}
+{% set uv = d.unstable_vega %}{% set cg = d.cash_greeks %}
+<div class="kpis" id="risk-kpis" style="margin-bottom:8px;">
+  {% if uv %}
+  <div class="kpi" id="kpi-convexity"><div class="kpi-label">Convexity-dominated vega</div>
+    <div class="kpi-value">{{ (uv.share * 100)|fmt('.1f') }}<span class="unit">%</span></div>
+    <div class="kpi-sub">vega-weighted share of the {{ uv.n }} of {{ uv.n_nodes }} nodes with {{ rule_txt }}; {{ uv.n_far }} of them at |ln(K/F)| ≥ {{ uv.far_k|fmt('.2f') }}, where node vega averages {{ uv.vega_far_mean|fmt(',.0f') }} against {{ uv.vega_near_mean|fmt(',.0f') }} nearer the money</div></div>
+  {% else %}{{ m.kpi('Unstable nodes', (d.n_unstable|fmt) ~ ' of ' ~ (d.n_cells|fmt), sub=rule_txt) }}{% endif %}
+  {% if cg %}
+  {% set _age %}<span class="age-{{ cg.age_level if cg.age_level in ('warn', 'error') else 'ok' }}">fit of {{ cg.as_of }}{% if cg.age %}, {{ cg.age|plural('session') }} old{% endif %}</span>{% endset %}
+  {% for key, label, unit_txt in [('vega_usd', '$Vega', 'per vol pt'), ('gamma_usd', '$Gamma', 'P&L of a 1% spot move'), ('vanna_usd', '$Vanna', 'per 1% spot, per vol pt'), ('volga_usd', '$Volga', 'per vol pt²; P&L ≈ ½·$volga·Δσ²')] %}
+  <div class="kpi" id="kpi-{{ key }}"><div class="kpi-label">{{ label }} · ref. straddle</div>
+    <div class="kpi-value">{{ cg[key]|usd_desk }}</div>
+    <div class="kpi-sub">{{ unit_txt }}, one SPX contract · {{ _age }}</div></div>
+  {% endfor %}
+  {% endif %}
 </div>
+{% if cg %}<p class="note" id="cash-greeks-note" style="margin:-2px 0 8px;">Cash Greeks of the scenario grid's reference book: one {{ cg.tenor_days|fmt('.0f') }}-day SPX straddle struck at the forward ({{ cg.forward|fmt(',.1f') }}; S {{ cg.S|fmt(',.1f') }}), Black-76 at the fit's ATM-forward vol {{ (cg.iv_atm_forward * 100)|fmt('.2f') }}%, × {{ cg.multiplier|fmt('.0f') }} for one SPX contract. $gamma is ½·Γ·(1% of S)²·100. Unit conversions of the same Greeks, not a position: the site holds no book.</p>{% endif %}
 
 <div class="g">
   {% call m.panel('greeks-grid', 'Greeks by maturity and ln(K/F)', 's12', d.surface_date) %}
@@ -101,14 +112,20 @@
   {% call m.panel('scenario', 'Scenario grid · spot × vol, full revaluation', 's6') %}
     {% set sc = d.scenario or {} %}
     {% if sc.state == 'ok' %}
-    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows)', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain')) }}
+    <div class="tabs js-only" role="group" aria-label="Units of the scenario P&amp;L">
+      <button class="btn" type="button" data-units-for="scenario-units" data-show="base" aria-pressed="true">idx pts per straddle</button>
+      <button class="btn" type="button" data-units-for="scenario-units" data-show="alt" aria-pressed="false">$ per SPX contract</button>
+    </div>
+    <div class="units" id="scenario-units">
+    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows): index points per straddle on one unit of the index, or dollars per SPX contract (× 100) with the units buttons', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain')) }}
     <p class="note">{{ (sc.provenance or {}).get('book', 'Reference book') }}; as of {{ (sc.provenance or {}).get('as_of_date', '—') }}{% if sc.dynamics_shown %}; {{ sc.dynamics_shown|replace('_', '-') }} dynamics shown{% if sc.dynamics_all|length > 1 %} (the file also holds {{ sc.dynamics_all|reject('equalto', sc.dynamics_shown)|join(', ')|replace('_', '-') }}){% endif %}{% endif %}. P&amp;L in {{ (sc.provenance or {}).get('units', 'index points per unit book') }}.</p>
     {% for x in d.scenario_more %}
     {% call m.method(x.dynamics|replace('_', '-')|capitalize ~ ' dynamics: the same book and shocks') %}
     {{ m.heatmap(x.heat, 'scenario-grid-' ~ x.dynamics|replace('_', '-'), 'P&L of the reference book under ' ~ (x.dynamics|replace('_', '-')) ~ ' dynamics, by spot shock (columns) and parallel vol shock (rows)', 'Vol') }}
-    <p class="note">Same colour scale as the grid above. Under sticky-moneyness the smile moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
+    <p class="note">Same colour scale and units as the grid above. Under sticky-moneyness the smile moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
     {% endcall %}
     {% endfor %}
+    </div>
     {% else %}
     {{ m.missing(sc, 'A spot (−10% … +10%) × parallel vol (−5 … +10 vol pts) P&L grid of a reference book, fully revalued, under sticky-strike and sticky-moneyness dynamics.') }}
     {% endif %}
