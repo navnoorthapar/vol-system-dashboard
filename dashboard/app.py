@@ -166,6 +166,12 @@ _REGIME_LABELS = ["R0", "R1", "R2"]
 # (BacktestEngine.run: pnl_total = (s1c + s3 + s4) / 3). load_page4 VERIFIES
 # this against the stored equity curve instead of trusting the constant.
 PORTFOLIO_SLEEVES = ("s1c", "s3", "s4")
+# S3 is priced as the index leg of a dispersion trade: a SHORT SPX straddle
+# (backtest_engine.S3_LEG_DIRECTION = -1); no single-stock option data, so the
+# single-name leg is not modelled. "S3 dispersion" overclaimed what is traded.
+S3_NAME = "S3 · short SPX straddle"                     # tables
+S3_SHORT = "S3 index-leg short"                         # chart legends and categories
+S3_FULL = "S3 · short SPX straddle (index leg of a dispersion trade; no single-name leg)"
 
 
 # ── NYSE session calendar ──────────────────────────────────────────────────────
@@ -545,6 +551,40 @@ def latest_good_calibration_path(cal_dir: str | Path | None = None) -> str | Non
     if not candidates:
         return None
     return max(candidates)[2]
+
+
+def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
+                            rows: list[dict] | None = None) -> str | None:
+    """Why the headline fit is older than the newest session, from what the store holds.
+
+    The stale banner said "No newer fit passed the quality gate" whether or not
+    a newer fit existed. The cause is read from the store: a stored fit after
+    the headline that failed the gate (with the gate's recorded reason); a
+    stored SPX chain after it with no fit; or neither. The daily job stores a
+    session's chain and fit only when the fit passes the gate, so with neither
+    stored the store cannot say whether a later session was fitted and
+    rejected or not fitted at all, and the text says so.
+    """
+    if not session:
+        return None
+    data = Path(data_dir) if data_dir is not None else DATA
+    chains = sorted(m.group(1) for f in (data / "options").glob("spx_*.parquet")
+                    if (m := re.fullmatch(r"spx_(\d{4}-\d{2}-\d{2})\.parquet", f.name)))
+    rows = rows if rows is not None else scan_calibrations(data / "calibrations")
+    newer = sorted((r for r in rows if r["session"] and r["session"] > session),
+                   key=lambda r: r["session"])
+    if newer:
+        last = newer[-1]
+        why = ("is a pre-C22 (legacy) result, never ranked" if last["legacy"]
+               else f"failed the quality gate: {last['reason']}")
+        more = f" ({len(newer)} stored fits after {session}, none accepted)" if len(newer) > 1 else ""
+        return f"The {last['session']} fit is stored but {why}{more}; the {session} fit is shown."
+    later = [c for c in chains if c > session]
+    if later:
+        return f"An SPX closing chain for {later[-1]} is stored but no fit of it; the {session} fit is shown."
+    return (f"No SPX closing chain or fit after {session} is stored. The daily job stores both only for a "
+            "fit that passes the quality gate, so whether a later session was fitted and rejected, or not "
+            "fitted, is in the job's run log, not in the store.")
 
 
 def load_headline_calibration() -> tuple[str, dict]:
@@ -1035,6 +1075,9 @@ def load_page1() -> dict[str, Any]:
         _staleness("calibration", "Heston calibration", d["calib_date"], ref),
         _staleness("pdv", "PDV forecast", d["pdv_date"], ref),
     ]
+    if d["stale"][2]["level"] in ("warn", "error"):
+        with _loader_boundary(d, "calibration archive"):
+            d["stale"][2]["cause"] = calibration_stale_cause(d["calib_date"])
     pdv_item = d["stale"][3]
     d["pdv_age"] = pdv_item["age"]
     d["pdv_stale"] = bool(pdv_item["age"] is not None and pdv_item["age"] >= 1)
@@ -1258,6 +1301,9 @@ def load_page2() -> dict[str, Any]:
     # and how many are pre-C22 (labelled, never ranked).
     with _loader_boundary(d, "calibration archive"):
         rows = scan_calibrations()
+        for item in d["stale"]:
+            if item["component"] == "calibration" and item["level"] in ("warn", "error"):
+                item["cause"] = calibration_stale_cause(d["session"], rows=rows)
         d["archive"] = {
             "n_total": len(rows),
             "n_legacy": sum(1 for r in rows if r["legacy"]),
@@ -1934,7 +1980,7 @@ def load_page4() -> dict[str, Any]:
         # the unrounded curves: printing the 2-dp chart series at 1 dp showed S3's
         # final +5.647% as "+5.7%".
         d["eq_summary"] = []
-        for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
+        for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", S3_SHORT),
                           ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
             if col in eq.columns and eq[col].notna().any():
                 rel = eq[col].dropna() / float(eq[col].dropna().iloc[0]) - 1.0
@@ -2101,12 +2147,12 @@ def load_page4() -> dict[str, Any]:
 
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
 
-        d["signal_labels"] = ["S1C contrarian", "S3 dispersion", "S4 VRP"]
+        d["signal_labels"] = ["S1C contrarian", S3_SHORT, "S4 VRP"]
         d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None
                            else round(sleeves[s]["total_pnl"] / 1000, 1)
                            for s in PORTFOLIO_SLEEVES]
 
-        for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", "S3 Dispersion", False),
+        for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", S3_NAME, False),
                                  ("s4", "S4 VRP", False), ("s1", "S1 PDV (ref)", True),
                                  ("s2", "S2 VIX TS (ref)", True)):
             s = sleeves[sig]
@@ -2949,6 +2995,8 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
         "n": len(days), "start": str(h.index[0].date()), "end": str(h.index[-1].date()),
         "explained_share": float(1.0 - resid.var(ddof=1) / tot.var(ddof=1)),
         "rms_total": float(np.sqrt((tot ** 2).mean())), "rms_resid": float(np.sqrt((resid ** 2).mean())),
+        # the second-order Taylor check: the residual's sd against the daily P&L's
+        "resid_sd": float(resid.std(ddof=1)), "total_sd": float(tot.std(ddof=1)),
         "cum": {name: float(h[c].fillna(0.0).sum()) for c, name, _ in comps},
         "cum_total": float(tot.sum()),
         "K": _num(h["S"].iloc[0]),
@@ -3010,7 +3058,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
              "data": d["eq_nav"]},
             {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True,
              "data": d["eq_nav_s1c"]},
-            {"name": "S3 dispersion", "type": "line", "color": "cat1", "width": 1.3, "legend": True,
+            {"name": S3_SHORT, "type": "line", "color": "cat1", "width": 1.3, "legend": True,
              "data": d["eq_nav_s3"]},
             {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True,
              "data": d["eq_nav_s4"]},
@@ -3192,7 +3240,7 @@ def forward_ledger_protocol() -> dict:
 
 
 SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian",
-                "s2": "S2 VIX TS (ref)", "s3": "S3 dispersion", "s4": "S4 VRP",
+                "s2": "S2 VIX TS (ref)", "s3": S3_NAME, "s4": "S4 VRP",
                 "always_short_straddle": "Always-short straddle"}
 
 
@@ -3410,24 +3458,32 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         h = sr["heston"]
         cert = (f"; {sr['butterfly']} butterfly and {sr['calendar']} calendar violations on its dense grid"
                 if sr["butterfly"] is not None and sr["calendar"] is not None else "")
+        # what is held out and what the quotes are, from the surface's own record
+        fit_in = artifacts.surface_fit_inputs(DATA, sr["session"])
+        held = ("alternate strikes held out" if str(fit_in.get("rule") or "").startswith("alternate strikes")
+                else "held-out strikes")
+        src = str(fit_in.get("source") or "").lower()
+        qt = fit_in.get("quote_time")
+        snap = (" Yahoo close snapshot, no quote time." if src in ("yfinance", "yahoo") and not qt
+                else (f" Quotes as of {qt}." if qt else ""))
         out.append({
-            "key": "Quote-grade surface · held-out strikes",
+            "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
             "detail": (f"Median |model − mid| of the arbitrage-free, calendar-ordered SVI surface on "
                        f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}; "
                        f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask{cert}."
                        + (f" Heston on its own held-out quotes of that session: "
                           f"{_fmt(h['median_abs_hs'], '.1f')} half-spreads, "
-                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside." if h else "")),
+                          f"{_fmt(h['inside_spread_pct'], '.1f')}% inside." if h else "") + snap),
             "ci": (f"Range over {sr['n_sessions']} stored sessions: {sr['range']} half-spreads "
                    f"({sr['inside_range']}% inside)" if sr["n_sessions"] > 1 else None),
             # shown beside the range (it was rendered only when there was no range)
             "ci_kind": "range",
             "ci_note": ("A range across sessions, not a sampling interval. Held-out strikes sit between "
-                        "fitted ones (an interpolation test), and Yahoo quotes carry no quote time."),
+                        "fitted ones (an interpolation test)."),
             "href": "surface.html#scorecard", "source": f"data_store/surface/{sr['session']}/scorecard.json"})
     else:
-        out.append({"key": "Quote-grade surface · held-out strikes", "value": "—", "unit": "",
+        out.append({"key": "Arbitrage-free SVI surface · held-out strikes", "value": "—", "unit": "",
                     "detail": "The surface report has not run for any stored session, so no model is scored "
                               "in half-spreads yet.",
                     "ci": None, "ci_note": "needs data_store/surface/<session>/scorecard.json "
@@ -4308,10 +4364,39 @@ def _rag(value: float | None, limits: tuple) -> str:
     return "ok" if value <= g else ("watch" if value <= a else "breach")
 
 
+def vx_futures_oos_text(rows: list[dict] | None = None) -> str:
+    """M5's limitation, from the gated fits: the range of their out-of-sample VX
+    futures RMSE (losses.vx_futures_rmse_oos, index pts) and the sessions that
+    store none. It was typed into model_inventory.json as '1.85–3.18'."""
+    rows = rows if rows is not None else scan_calibrations()
+    have: list[tuple[str, float]] = []
+    none: list[tuple[str, None]] = []
+    for r in rows:
+        if r["legacy"] is not False or not r["ok"] or not r["session"]:
+            continue
+        v = _num(_cal_losses(_load_pickle(r["path"])).get("vx_futures_rmse_oos"))
+        if v is not None:
+            have.append((r["session"], v))
+        else:
+            none.append((r["session"], None))
+    if not have:
+        return "an unmeasured amount: no gate-passing fit records VX futures out of sample"
+    vals = [v for _, v in have]
+    rng = _fmt(vals[0], ".2f") if len(vals) == 1 else f"{_fmt(min(vals), '.2f')}–{_fmt(max(vals), '.2f')}"
+    tail = f"; none stored for {', '.join(s for s, _ in sorted(none))}" if none else ""
+    return f"{rng} index pts RMSE out of sample ({plural(len(have), 'session')}{tail})"
+
+
 def load_model_risk() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
+        # numbers in the inventory's prose are computed from the artifacts, never typed
+        vx_txt = None
+        for m in inv["models"]:
+            if "{vx_futures_oos_rmse}" in m.get("limitations", ""):
+                vx_txt = vx_txt or vx_futures_oos_text()
+                m["limitations"] = m["limitations"].replace("{vx_futures_oos_rmse}", vx_txt)
         d["inventory"] = inv["models"]
         d["vendor_inputs"] = inv.get("vendor_inputs") or []
         d["inventory_about"] = inv.get("about")
@@ -4649,7 +4734,7 @@ def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
     return {"canonical": canonical_url(route), "page_file": ROUTES[route], "route": route,
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
-            "cividis": CIVIDIS_11, "berlin": BERLIN_11,
+            "cividis": CIVIDIS_11, "berlin": BERLIN_11, "s3_full": S3_FULL,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
             "font_preloads": FONT_PRELOADS, "chrome": load_chrome(), "page_title": {
                 r: label for r, label, *_ in NAV}.get(route, "Overview")}

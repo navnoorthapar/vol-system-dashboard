@@ -36,7 +36,6 @@
   {{ m.kpi('Max vomma', d.vomma_max|fmt(',.0f'), sub='at ' ~ d.vomma_max_at.T_days ~ 'd, ln(K/F) = ' ~ (d.vomma_max_at.lm|fmt('+.3f'))) }}
   {{ m.kpi('Min vomma', d.vomma_min|fmt(',.0f'), sub='at ' ~ d.vomma_min_at.T_days ~ 'd, ln(K/F) = ' ~ (d.vomma_min_at.lm|fmt('+.3f'))) }}
   {{ m.kpi('Mean vomma', d.vomma_mean|fmt(',.0f'), sub='all ' ~ (d.n_cells|fmt) ~ ' nodes; per unit index, per (1.00 vol)²') }}
-  {% if d.hedge %}{{ m.kpi('Hedge P&L explained', d.hedge.explained_share|pct(2, false), sub='variance share, 2020 hedged straddle') }}{% endif %}
 </div>
 
 <div class="g">
@@ -129,7 +128,12 @@
     <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));">
       {{ m.kpi('Total P&L', h.cum_total|signed(',.1f'), unit='idx pts', tone=h.cum_total|tone) }}
       {% for name, v in h.cum.items() %}{{ m.kpi(name, v|signed(',.1f'), unit='idx pts', tone=v|tone) }}{% endfor %}
-      {{ m.kpi('Explained variance', h.explained_share|pct(2, false), sub='residual RMS ' ~ (h.rms_resid|fmt('.2f')) ~ ' vs ' ~ (h.rms_total|fmt('.1f'))) }}
+      <div class="kpi kpi-wide" id="taylor-check">
+        <div class="kpi-label">Second-order Taylor check</div>
+        <div class="kpi-value">{{ h.resid_sd|fmt('.2f') }}<span class="unit">idx pts residual sd</span></div>
+        <div class="kpi-ci">vs daily P&amp;L sd {{ h.total_sd|fmt('.1f') }} idx pts, {{ h.n }} days</div>
+        <div class="kpi-sub">Marks and Greeks share one vol input (the VIX term structure, Run A in <code>delta_hedger.py</code>), so this tests the expansion, not hedge effectiveness against market prices.</div>
+      </div>
     </div>
     {{ m.chart(d.charts.hedge, 'h340') }}
     {% call m.method() %}

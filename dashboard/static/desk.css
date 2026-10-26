@@ -256,6 +256,8 @@ sub, sup { font-size: 0.72em; }
 .kpi-ci.faint { font-family: var(--sans); color: var(--text3); }
 /* a range across sessions is not a confidence interval: marked apart from one */
 .kpi-range { border-left: 2px dashed var(--line2); padding-left: 6px; }
+/* a tile whose caveat needs two tracks of a KPI strip (the hedge's Taylor check) */
+.kpi-wide { grid-column: span 2; }
 
 /* parameter tiles */
 .param { background: var(--surface); padding: 8px 10px; min-width: 0; }

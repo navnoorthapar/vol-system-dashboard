@@ -1854,14 +1854,14 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     # equity-curve table: final / lowest / highest from the unrounded curves
     eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
     table = re.search(r'id="chart-equity-data">(.*?)</div>', pages["/research"], re.DOTALL).group(1)
-    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 Dispersion"),
+    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 index-leg short"),
                       ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
         rel = eq[col] / eq[col].iloc[0] - 1
         want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
                        for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
     # the C22 case (+5.647% printed as +5.7%) is now +6.105% on the C23 record
-    assert '<tr><td>S3 Dispersion</td><td class="num">+6.1%</td>' in table
+    assert '<tr><td>S3 index-leg short</td><td class="num">+6.1%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
     _, cal = dash.load_headline_calibration()
     smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
@@ -2209,7 +2209,12 @@ def test_surface_key_result_is_the_arbitrage_free_surface_in_half_spreads(dash, 
     s = by["svi_cal"]["metrics"]["out_of_sample"]
     h = next(m for k, m in by.items() if k.startswith("heston"))["metrics"]["out_of_sample"]
     t = _card(html, "surface.html#scorecard")
-    assert "Quote-grade surface · held-out strikes" in t
+    # P1.3: named for what it is and how it is tested (surface.json fit_set.rule), and the snapshot it scores
+    rule = json.loads((FIX / "surface" / SESSION / "surface.json").read_text())["fit_set"]["rule"]
+    assert rule.startswith("alternate strikes")
+    assert "Arbitrage-free SVI surface · alternate strikes held out" in t
+    assert "Quote-grade surface" not in t
+    assert "Yahoo close snapshot, no quote time" in t
     assert f"{s['median_abs_hs']:.2f} half-spreads" in t
     assert f"{s['n']:,} held-out quotes of {SESSION}" in t
     assert f"{s['inside_spread_pct']:.1f}% inside the bid–ask" in t
@@ -2527,7 +2532,7 @@ def test_research_inference_panels_show_the_summary(dash, art):
     assert f"{fmt(b['ci95'][0])} to {fmt(b['ci95'][1])}" in port
     nul = re.search(r'<table class="tbl dense" id="null-table">(.*?)</table>', html, re.DOTALL).group(1)
     s3 = s["nulls"]["sleeves"]["s3"]
-    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 dispersion</td>(.*?)</tr>", nul,
+    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 · short SPX straddle</td>(.*?)</tr>", nul,
                                               re.DOTALL).group(1))
     assert f"{s3['circular']['total_pnl']['p_value']:.3f}" in row
     assert f"{s3['shuffle']['total_pnl']['p_value']:.3f}" in row
@@ -4099,3 +4104,132 @@ def test_model_risk_box_bound_check_names_the_wide_refit(dash, pages):
     text = _visible_text(re.sub(r"</?span[^>]*>", "", pages["/model-risk"]))
     assert (f"σ ≤ {tp['sigma_cap']:g} refit: OOS {tp['spx_oos_iv_rmse']:.2f}, VVIX {tp['vvix_model']:.1f} vs "
             f"{tp['vvix_market']:.1f} ({d['session']}") in text
+
+
+def test_risk_hedge_is_a_taylor_check_not_hedge_effectiveness(dash, pages):
+    """P1.3a: a 99.99% 'Hedge P&L explained' tile headlined the Risk page, though
+    the marks and the Greeks share one vol input (the VIX term structure, Run A),
+    so the share tests the second-order expansion, not a hedge against market
+    prices. The top tile is gone; #hedge shows the Taylor check as the residual's
+    sd against the daily P&L's, recomputed here from the parquet."""
+    html = pages["/risk"]
+    text = _visible_text(html)
+    assert "Hedge P&L explained" not in text
+    assert "Explained variance" not in text
+    h = pd.read_parquet(SHIPPED / "backtest" / "delta_hedge_2020.parquet").dropna(subset=["pnl_total"])
+    hedge = _visible_text("<body>" + html[html.index('id="hedge"'):html.index('id="chart-hedge"')])
+    assert "Second-order Taylor check" in hedge
+    assert f"{h['pnl_residual_a'].std(ddof=1):.2f} idx pts residual sd" in hedge
+    assert f"vs daily P&L sd {h['pnl_total'].std(ddof=1):.1f} idx pts, {len(h)} days" in hedge
+    assert "tests the expansion, not hedge effectiveness against market prices" in hedge
+
+
+def test_stale_calibration_banner_names_its_cause_from_the_store(dash, synth):
+    """P1.3b: the stale banner said 'No newer fit passed the quality gate' whether
+    or not a newer fit existed. Its cause is read from the store: a later fit that
+    failed the gate (with the gate's reason), a later chain with no fit, or
+    neither (and then it says the store cannot tell a rejected fit from none)."""
+    data, dates = synth["data"], synth["dates"]
+    cal_dir = data / "calibrations"
+    for p in cal_dir.glob("*.pkl"):
+        p.unlink()
+    old, newer = str(dates[-11].date()), str(dates[-3].date())
+    _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0)})
+
+    def banner() -> str:
+        html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+        b = re.search(r'data-stale="calibration"(.*?)</div>\s*</div>\s*</div>', html, re.DOTALL)
+        assert b
+        return _visible_text("<body>" + b.group(1))
+    causes = []
+    t = banner()                                   # neither a later chain nor a later fit
+    assert f"No SPX closing chain or fit after {old} is stored" in t
+    assert "whether a later session was fitted and rejected, or not fitted" in t
+    causes.append(t)
+    (data / "options").mkdir(exist_ok=True)        # a later chain, no fit of it
+    (data / "options" / f"spx_{newer}.parquet").write_bytes(b"")
+    t = banner()
+    assert f"An SPX closing chain for {newer} is stored but no fit of it; the {old} fit is shown." in t
+    causes.append(t)
+    bad = _cal(newer, 1.0, n_vix=1)                # a later fit the gate rejects
+    _write_cals(cal_dir, {f"joint_cal_{newer}.pkl": bad})
+    ok, reason = dash.calibration_gate(bad)
+    assert not ok
+    t = banner()
+    assert f"The {newer} fit is stored but failed the quality gate: {reason}; the {old} fit is shown." in t
+    causes.append(t)
+    assert len(set(causes)) == 3
+    assert not any("No newer fit passed the quality gate" in c for c in causes)
+
+
+def test_stale_calibration_banner_on_the_shipped_store(dash, pages):
+    """The shipped store's cause is computed from its own chains and fits."""
+    path, cal = dash.load_headline_calibration()
+    session = dash._calibration_session(cal, path)
+    cause = dash.calibration_stale_cause(session)
+    assert session in cause
+    later_chains = [f for f in (SHIPPED / "options").glob("spx_*.parquet") if f.stem[4:] > session]
+    later_fits = [r for r in dash.scan_calibrations() if r["session"] and r["session"] > session]
+    if not later_chains and not later_fits:
+        assert cause.startswith(f"No SPX closing chain or fit after {session} is stored.")
+    if dash.load_page2()["calib_age"] >= dash.STALE_WARN_SESSIONS:
+        assert cause in _visible_text(pages["/calibration"])
+
+
+def test_s3_is_named_for_what_it_trades(dash, pages):
+    """P1.3c: 'S3 dispersion' named a trade the backtest does not hold: S3 is the
+    index leg alone, a short SPX straddle (backtest_engine.S3_LEG_DIRECTION = −1,
+    every S3 trade short), with no single-name leg. No page says 'S3 dispersion';
+    every chart legend and category for S3 says what it is."""
+    import importlib
+    engine = importlib.import_module("joint_vol_calibration.backtest.backtest_engine")
+    assert engine.S3_LEG_DIRECTION == -1
+    for route, html in pages.items():
+        assert not re.search(r"S3[ ·]+dispersion", _visible_text(html), re.IGNORECASE), route
+        assert not re.search(r"S3 dispersion", html, re.IGNORECASE), route
+    html = pages["/research"]
+    labels = []
+    for m in re.finditer(r'<script type="application/json" id="([\w-]+)-spec">', html):
+        spec = _spec(html, m.group(1))
+        labels += [s["name"] for s in spec.get("series") or [] if str(s.get("name", "")).startswith("S3")]
+        labels += [c for c in ((spec.get("x") or {}).get("categories") or []) if str(c).startswith("S3")]
+    assert labels
+    assert all("short SPX straddle" in x or "index-leg short" in x for x in labels), labels
+    text = _visible_text(html)
+    assert "S3 · short SPX straddle (index leg of a dispersion trade; no single-name leg)" in text
+
+
+def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
+    """P1.3d: model_inventory.json typed M5's 'misses real VX futures by
+    1.85–3.18 points'. The range is the min and max of losses.vx_futures_rmse_oos
+    over the gate-passing fits, with the sessions that store none, recomputed
+    here from the pickles."""
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    m5 = next(m for m in inv["models"] if m["id"] == "M5")
+    assert "{vx_futures_oos_rmse}" in m5["limitations"]
+    assert not re.search(r"\d\.\d\d–\d\.\d\d", m5["limitations"])
+    have, none = [], []
+    for r in dash.scan_calibrations():
+        if r["legacy"] is False and r["ok"] and r["session"]:
+            with open(r["path"], "rb") as f:
+                v = dash._cal_losses(pickle.load(f)).get("vx_futures_rmse_oos")
+            (have if v is not None else none).append((r["session"], v))
+    assert have
+    vals = [v for _, v in have]
+    want = f"{min(vals):.2f}–{max(vals):.2f}" if len(vals) > 1 else f"{vals[0]:.2f}"
+    tail = f"; none stored for {', '.join(sorted(s for s, _ in none))}" if none else ""
+    sess = "session" if len(have) == 1 else "sessions"
+    text = (f"Heston misses real VX futures by {want} index pts RMSE out of sample "
+            f"({len(have)} {sess}{tail}).")
+    row = re.search(r'<tr id="inv-m5">(.*?)</tr>', pages["/model-risk"], re.DOTALL).group(1)
+    assert text in _visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row))
+
+
+def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
+    """P1.3e: the first Overview result read 'Quote-grade surface · held-out
+    strikes'; it is the arbitrage-free SVI surface with alternate strikes held
+    out (surface.json fit_set.rule), on a Yahoo close snapshot with no quote time."""
+    labels = re.findall(r'<span class="result-k">(.*?)</span>', pages["/"])
+    assert labels
+    assert "alternate strikes held out" in _html_unescape(labels[0])
+    assert _html_unescape(labels[0]).startswith("Arbitrage-free SVI surface")

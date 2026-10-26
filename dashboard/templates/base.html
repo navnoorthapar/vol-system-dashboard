@@ -103,7 +103,7 @@
         <div class="banner-title">{{ s.label }} is {{ s.age|plural('NYSE session') }} old</div>
         <div class="banner-body">
           {{ s.label }} as of {{ s.date }}; the newest session the site has data for is {{ s.ref }}.
-          {% if s.component == 'calibration' %}No newer fit passed the quality gate, so the latest accepted fit is shown.{% endif %}
+          {% if s.component == 'calibration' and s.cause %}{{ s.cause }}{% endif %}
           {% if s.component == 'pdv' %}The spread below pairs VIX and the forecast on that date only.{% endif %}
           {% if s.component == 'market' %}The market database lags the other inputs on this page.{% endif %}
           {% if s.component == 'greeks' %}The surface is rebuilt only from a fit that passes the gate.{% endif %}

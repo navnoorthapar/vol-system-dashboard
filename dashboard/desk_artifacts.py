@@ -309,6 +309,22 @@ def validate_surface_json(obj: dict, session: str) -> None:
                 raise ArtifactError(f"{name}: term_structure {k} {v} is not in vol points")
 
 
+def surface_fit_inputs(data_dir: Path, session: str) -> dict:
+    """What a session's surface was fitted on (surface/<session>/surface.json):
+    ``rule`` (fit_set.rule, which quotes were held out), ``source`` and
+    ``quote_time`` (inputs). Empty when the file does not exist."""
+    path = Path(data_dir) / "surface" / session / "surface.json"
+    if not path.exists():
+        return {}
+    obj = _read_json(path, f"surface/{session}/surface.json")
+    _check_session(obj, session, f"surface/{session}/surface.json")
+    validate_surface_json(obj, session)
+    fit_set: dict = obj["fit_set"] if isinstance(obj.get("fit_set"), dict) else {}
+    inputs: dict = obj["inputs"] if isinstance(obj.get("inputs"), dict) else {}
+    return {"rule": fit_set.get("rule"), "source": inputs.get("source"),
+            "quote_time": inputs.get("quote_time")}
+
+
 def validate_vix_replication(obj: dict, session: str) -> None:
     name = f"surface/{session}/vix_replication.json"
     idx = obj.get("indices")

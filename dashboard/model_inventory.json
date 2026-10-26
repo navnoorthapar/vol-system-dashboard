@@ -34,7 +34,7 @@
      "module": "joint_vol_calibration/models/heston.py",
      "inputs": "Heston parameters, VIX tenors, VX settlements",
      "outputs": "data_store/calibrations/",
-     "limitations": "Heston misses real VX futures by 1.85–3.18 points out of sample.",
+     "limitations": "Heston misses real VX futures by {vx_futures_oos_rmse}.",
      "page": "/calibration"},
     {"id": "M6", "name": "Greeks surface", "tier": "production", "materiality": "medium",
      "use": "Black–Scholes Greeks at the model IV (vomma, vanna, vega, OTM delta) and QV convexity by maturity and strike; the unstable-node flag.",
