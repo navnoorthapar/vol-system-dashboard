@@ -146,6 +146,7 @@
   }
   // the forward-delta axis's labels: N(−d₁) of 0.10 is the 10-delta put, of 0.90 the 10-delta call
   var DELTA_TICKS = [0.10, 0.25, 0.50, 0.75, 0.90];
+  var CLIP_NAME = ' beyond the clip';
   function deltaLabel(v) {
     if (Math.abs(v - 0.5) < 1e-9) return '50\u0394';
     return v < 0.5 ? Math.round(v * 100) + '\u0394P' : Math.round((1 - v) * 100) + '\u0394C';
@@ -229,36 +230,67 @@
   function buildSeries(s, spec, T, i) {
     var c = color(s.color || ('cat' + (i % 6)), T);
     var base = { name: s.name, z: s.z || 2, yAxisIndex: s.y2 || s.strip ? 1 : 0, emphasis: { focus: 'none' } };
+    // a quote smile's tooltip follows the axis, not a hovered item: its series
+    // need no hover states (fewer elements to build on every redraw)
+    if (spec.quotes) { base.silent = true; base.emphasis = { disabled: true }; }
     if (s.strip) base.xAxisIndex = 1;               // the residual strip under a quote smile
     var data = seriesData(s, spec);
+    // a quote smile's bid–ask bars: one line series, each bar its lower cap, the
+    // bar and its upper cap, then a break (quoteOption sizes the caps). A custom
+    // series built an element per quote on every expiry switch.
+    if (s.type === 'errorbar' && spec.quotes) {
+      return Object.assign(base, { type: 'line', data: data, _bars: true, showSymbol: false, connectNulls: false,
+        lineStyle: { color: c, width: 1.2 }, itemStyle: { color: c } });
+    }
     if (s.type === 'errorbar') {
       return Object.assign(base, {
         type: 'custom', data: data, encode: { x: 0, y: [1, 2] }, tooltip: { show: true },
         renderItem: function (params, api) {
           var x = api.value(0), lo = api.coord([x, api.value(1)]), hi = api.coord([x, api.value(2)]);
           var w = 3;
-          var st = { stroke: c, lineWidth: 1.2 };
-          return { type: 'group', children: [
-            { type: 'line', shape: { x1: lo[0], y1: lo[1], x2: hi[0], y2: hi[1] }, style: st },
-            { type: 'line', shape: { x1: lo[0] - w, y1: lo[1], x2: lo[0] + w, y2: lo[1] }, style: st },
-            { type: 'line', shape: { x1: hi[0] - w, y1: hi[1], x2: hi[0] + w, y2: hi[1] }, style: st },
-          ] };
+          // one polyline per bar (the lower cap, up the bar, the upper cap; the cap
+          // is retraced, which draws nothing new): a quarter of the elements a
+          // group of three lines took, so a smile redraws faster
+          return { type: 'polyline', style: { stroke: c, lineWidth: 1.2, fill: null }, shape: { points: [
+            [lo[0] - w, lo[1]], [lo[0] + w, lo[1]], [lo[0], lo[1]], [hi[0], hi[1]], [hi[0] - w, hi[1]], [hi[0] + w, hi[1]]] } };
         },
       });
     }
     if (s.type === 'scatter') {
       // a residual-strip point beyond the strip's ±clip is drawn at the edge as a
-      // triangle pointing the way it is cut off (its value stays in the tooltip)
+      // triangle pointing the way it is cut off (its value stays in the tooltip):
+      // on a model's strip those triangles are a series of their own (buildOption)
+      // and the strip keeps a gap there, so the strip draws as one path
+      var clipped = null;
       if (s.strip && spec.quotes) {
         var clip = spec.quotes.zClip || 10;
-        data = data.map(function (p) {
-          return Math.abs(p[2]) > clip ? { value: p, symbol: 'triangle', symbolRotate: p[2] < 0 ? 180 : 0, symbolSize: (s.size || 4) + 3 } : p;
-        });
+        var tri = function (p) { return { value: p, symbol: 'triangle', symbolRotate: p[2] < 0 ? 180 : 0, symbolSize: (s.size || 4) + 3 }; };
+        if (s.quote === 'z') {
+          clipped = data.filter(function (p) { return Math.abs(p[2]) > clip; }).map(tri);
+          data = data.map(function (p) { return Math.abs(p[2]) > clip ? [p[0], null, p[2]] : p; });
+        } else data = data.map(function (p) { return Math.abs(p[2]) > clip ? tri(p) : p; });
       }
       var sc = Object.assign(base, {
         type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6, symbolRotate: s.rotate || 0,
         itemStyle: s.hollow ? { color: 'transparent', borderColor: c, borderWidth: 1.4, opacity: s.opacity || 1 } : { color: c, opacity: s.opacity || 0.9 },
       });
+      // a quote smile's points are drawn as one path per series (a large scatter):
+      // a symbol element per quote made an expiry switch take twice as long. Not
+      // when it has none (the large path then fails to paint) or when a point
+      // carries its own symbol (the strip's clip triangles)
+      // a quote smile's mids and z strips are drawn as one path per series (a
+      // large scatter): a symbol element per quote made an expiry switch take
+      // twice as long. Not when it is empty (the large path then fails to paint),
+      // and not the few fit anchors (some expiries have none: a series that
+      // changed draw mode on a switch would have to be rebuilt)
+      if (spec.quotes) {
+        sc.large = (s.quote === 'mid' || s.quote === 'z') && data.length > 0 && !data.some(function (p) { return p && !Array.isArray(p); });
+        sc.largeThreshold = 0;
+      }
+      if (clipped) {
+        sc._clip = Object.assign({}, sc, { name: s.name + CLIP_NAME, data: clipped, large: false });
+        delete sc._clip._clip;
+      }
       // a short label at each point (the VX leg's model − settlement gap)
       if (s.pointLabels) {
         sc.label = { show: true, position: s.labelPos || 'right', distance: 4, color: T.text3, fontFamily: T.mono, fontSize: 10,
@@ -319,10 +351,19 @@
     }
     return t;
   }
+  // the spec indices of the series a filtered chart draws: its group's and the ungrouped
+  function groupIdx(spec, f) {
+    var out = [];
+    (spec.series || []).forEach(function (s, i) {
+      if (f === undefined || s.group === undefined || String(s.group) === String(f)) out.push(i);
+    });
+    return out;
+  }
   function marks(spec, T, opt, filter) {
     var m = spec.marks || {};
     if (!opt.series.length) return;
-    var target = opt.series[markTarget(spec, filter)];
+    var pos = opt._pos ? opt._pos[markTarget(spec, filter)] : markTarget(spec, filter);
+    var target = opt.series[pos || 0];
     // on the forward-delta axis the forward has no one place (50Δ is drawn as a grid line)
     var mx = spec._xmode === 'delta' ? [] : (m.x || []);
     var dl = spec._xmode === 'delta' ? DELTA_TICKS : [];
@@ -464,7 +505,7 @@
              most: Math.max.apply(null, lines.map(function (l) { return l.length; })) };
   }
 
-  function buildOption(spec, T, filter, width, height, out) {
+  function buildOption(spec, T, filter, width, height, out, off) {
     var opt = {
       animation: false, backgroundColor: 'transparent',
       textStyle: { fontFamily: T.sans, color: T.text2 },
@@ -473,8 +514,31 @@
       yAxis: [axis(spec.y, T, false, spec)],
       tooltip: tooltipFor(spec, T),
       legend: { show: false },
-      series: (spec.series || []).map(function (s, i) { return buildSeries(s, spec, T, i); }),
+      series: [],
     };
+    // on a tab-filtered chart (the smile's 17 expiries) only the shown group's
+    // series are drawn: ECharts processes every series of an option on each
+    // update, hidden or not, and 205 of them made an expiry switch take 100 ms
+    opt._idx = groupIdx(spec, filter);
+    // Each grouped series is named by its place in the group ('g0', 'g1', ...)
+    // and its draw mode, so an expiry switch merges the new data into the series
+    // already drawn. On a quote smile a series toggled off carries no data: ECharts
+    // still processes a hidden series on every update, and the two models behind
+    // their toggles made each update twice as slow. opt._pos: a spec index's place
+    // among the drawn series
+    var slot = 0, empty = !!(spec.quotes && off);
+    opt._pos = {};
+    opt._idx.forEach(function (i) {
+      var s = spec.series[i], b = buildSeries(s, spec, T, i);
+      if (empty && off[legendKey(s)]) {
+        b.data = []; b.large = false;
+        if (b._clip) { b._clip.data = []; }
+      }
+      b.id = (filter !== undefined && s.group !== undefined ? 'g' + (slot++) : 's' + i) + (b.large ? 'L' : '');
+      opt._pos[i] = opt.series.length;
+      opt.series.push(b);
+      if (b._clip) { b._clip.id = b.id + 'c'; opt.series.push(b._clip); delete b._clip; }
+    });
     if (spec.y2) { var a2 = axis(spec.y2, T, false, spec); a2.splitLine = { show: false }; opt.yAxis.push(a2); }
     if (!spec.horizontal && spec.x && spec.x.fit && width) {
       var X = xLabelLayout(spec, T, width, opt.grid), last = X.lines.length - 1, extra = (X.most - 1) * LABEL_LINE;
@@ -512,7 +576,7 @@
           textStyle: { color: T.text3, fontFamily: T.mono, fontSize: 10 }, labelFormatter: function (v, s) { return s; } },
       ];
     }
-    if (spec.quotes) quoteOption(spec, T, opt, filter, height);
+    if (spec.quotes) quoteOption(spec, T, opt, filter, width, height);
     marks(spec, T, opt, filter);
     return opt;
   }
@@ -522,11 +586,25 @@
   // strip: each shown model's z = (model − mid) / half-spread per quote on a
   // second grid sharing the x axis, ±1 (inside the spread) shaded, ±2 dashed,
   // |z| beyond the clip drawn at the edge.
-  function quoteOption(spec, T, opt, filter, height) {
+  function quoteOption(spec, T, opt, filter, width, height) {
     var Q = spec.quotes, id = spec.id, delta = spec._xmode === 'delta';
     var rng = quoteRange(spec, filter);
     var x0 = opt.xAxis;
     x0.min = rng[0]; x0.max = rng[1]; x0.scale = false;
+    // the bid–ask bars' caps: 3 px either side, in x units
+    var plotW = Math.max(40, (width || 600) - (opt.grid.left || 0) - (opt.grid.right || 0));
+    var cap = rng[0] === null ? 0 : 3 * (rng[1] - rng[0]) / plotW;
+    opt.series.forEach(function (s) {
+      if (!s._bars) return;
+      delete s._bars;
+      var pts = [];
+      s.data.forEach(function (p) {
+        var x = p[0], lo = p[1], hi = p[2];
+        if (x === null || lo === null || hi === null) return;
+        pts.push([x - cap, lo], [x + cap, lo], [x, lo], [x, hi], [x - cap, hi], [x + cap, hi], [x, null]);
+      });
+      s.data = pts;
+    });
     if (delta) {
       x0.name = 'Forward delta';
       x0.axisLabel.formatter = deltaLabel; x0.axisLabel.customValues = DELTA_TICKS;
@@ -553,8 +631,10 @@
     // the pointer and the tooltip follow the x value on both grids
     opt.axisPointer = { link: [{ xAxisIndex: 'all' }] };
     var g0 = opt.grid, sh = Math.max(44, Math.min(96, Math.round((height || 300) * 0.22))), gap = 10;
-    opt.grid = [Object.assign({}, g0, { bottom: g0.bottom + sh + gap }),
-      { left: g0.left, right: g0.right, bottom: g0.bottom, height: sh, containLabel: false }];
+    // both grids are placed by their margins: ECharts 6's outer-bounds pass
+    // (measuring every axis label to keep them in the box) cost a tenth of each update
+    opt.grid = [Object.assign({}, g0, { bottom: g0.bottom + sh + gap, outerBoundsMode: 'none' }),
+      { left: g0.left, right: g0.right, bottom: g0.bottom, height: sh, containLabel: false, outerBoundsMode: 'none' }];
     var x1 = JSON.parse(JSON.stringify(x0));
     if (delta) { x1.axisLabel.formatter = deltaLabel; }
     else x1.axisLabel.formatter = axisFmt(spec.x || {});
@@ -695,29 +775,69 @@
     return off;
   }
   var fontsReady = !doc.fonts || doc.fonts.status === 'loaded';
+  // shown = in the tab's group (the smile expiry) and not toggled off; every
+  // series of the spec is named (ECharts merges the map: another group's names
+  // must not keep an earlier 'shown')
+  function selection(spec, id, f, off) {
+    var sel = {}, inGroup = {};
+    off = off || legendOff(id);
+    groupIdx(spec, f).forEach(function (i) { inGroup[i] = true; });
+    (spec.series || []).forEach(function (s, i) {
+      sel[s.name] = !!inGroup[i] && !off[legendKey(s)];
+      if (s.strip && s.quote === 'z') sel[s.name + CLIP_NAME] = sel[s.name];      // its clip triangles
+    });
+    return sel;
+  }
+  // A full draw: the spec is parsed once and kept (Desk.charts[id].spec), the
+  // option built from it; a tab switch or a legend toggle then only merges what
+  // changes (applyFilter, initTools). Each series gets an id for those merges.
   function render(el, print) {
     if (!window.echarts) return null;
-    var spec = specOf(el);
+    var prev = Desk.charts[el.id];
+    var spec = prev && prev.spec ? prev.spec : specOf(el);
     if (!spec) return null;
-    if (spec.quotes && Desk.xmode[el.id] === 'delta') fillQuotes(spec, 'delta');
+    var mode = Desk.xmode[el.id] === 'delta' ? 'delta' : 'k';
+    if (spec.quotes && spec._xmode !== mode) fillQuotes(spec, mode);
     var inst = window.echarts.getInstanceByDom(el) || window.echarts.init(el, null, { renderer: 'canvas' });
-    var f = Desk.filters[el.id];
+    var f = Desk.filters[el.id], T = theme(print);
     var built = {};
-    var opt = buildOption(spec, theme(print), f, el.clientWidth, el.clientHeight, built);
-    // shown = in the tab's group (the smile expiry) and not toggled off
-    var off = legendOff(el.id), sel = {};
-    (spec.series || []).forEach(function (s) {
-      var on = !off[legendKey(s)];
-      if (f !== undefined && s.group !== undefined) on = on && String(s.group) === String(f);
-      sel[s.name] = on;
-    });
-    opt.legend.selected = sel;
+    var off = legendOff(el.id);
+    var opt = buildOption(spec, T, f, el.clientWidth, el.clientHeight, built, off);
+    opt.legend.selected = selection(spec, el.id, f, off);
+    delete opt._idx; delete opt._pos;
     inst.setOption(opt, true);
     // linked charts (the same x values) zoom and point together
     if (spec.link && window.echarts.connect) { inst.group = spec.link; window.echarts.connect(spec.link); }
     // drawn before the web fonts arrived: drawn again once they have (canvas text keeps its font)
-    Desk.charts[el.id] = { el: el, chart: inst, spec: spec, early: !fontsReady, labels: built.labels };
+    Desk.charts[el.id] = { el: el, chart: inst, spec: spec, T: T, early: !fontsReady,
+      labels: built.labels, qi: prev ? prev.qi : null };
     return inst;
+  }
+  // A tab switch on a drawn chart (the smile's expiry), or a model toggled on a
+  // quote smile: one merge of the series the new state draws (by id: the same
+  // place in the group keeps its series, its mark lines with it; the others are
+  // replaced), the legend state and, on a quote smile, the x range of both
+  // grids. The spec is not parsed again and nothing else is rebuilt.
+  function applyFilter(c) {
+    var spec = c.spec, el = c.el, f = Desk.filters[el.id], off = legendOff(el.id);
+    // the drawn size, not the element's: reading that would lay the page out again
+    // in the middle of a tab switch (the tables of the new group just shown)
+    var opt = buildOption(spec, c.T, f, c.chart.getWidth(), c.chart.getHeight(), {}, off);
+    var up = { series: opt.series, legend: { selected: selection(spec, el.id, f, off) } };
+    if (spec.quotes) up.xAxis = opt.xAxis;
+    c.chart.setOption(up, { replaceMerge: ['series'] });
+  }
+  // The tab (or toggle) shows its new state in the next frame and the chart is
+  // drawn in the task after that frame: the reader sees the click land at once,
+  // and a run of switches (an arrow key held on the expiry tabs) draws the last
+  // one only, not every expiry it passed.
+  var redrawQueued = {};
+  function queueRedraw(id) {
+    if (redrawQueued[id]) return;
+    redrawQueued[id] = true;
+    var run = function () { redrawQueued[id] = false; if (Desk.charts[id]) applyFilter(Desk.charts[id]); };
+    if (window.requestAnimationFrame) window.requestAnimationFrame(function () { setTimeout(run, 0); });
+    else setTimeout(run, 0);
   }
   function renderAll(print) { $$('.chart[data-spec]').forEach(function (el) { render(el, print); }); }
   Desk.render = render;
@@ -770,7 +890,8 @@
       t = setTimeout(function () {
         Object.keys(Desk.charts).forEach(function (k) {
           var c = Desk.charts[k];
-          if (c.spec && (c.spec.labelShare || (c.spec.x && c.spec.x.fit))) render(c.el); else c.chart.resize();    // label layout follows the width
+          // label layout follows the width, a quote smile's strip the height
+          if (c.spec && (c.spec.labelShare || (c.spec.x && c.spec.x.fit) || c.spec.quotes)) render(c.el); else c.chart.resize();
         });
       }, 120);
     });
@@ -801,11 +922,15 @@
         var id = b.getAttribute('data-legend-for'), key = b.getAttribute('data-series');
         var c = Desk.charts[id], f = Desk.filters[id];
         if (!c) return;
-        (c.spec.series || []).forEach(function (s) {
-          if (legendKey(s) !== key) return;
-          if (on && f !== undefined && s.group !== undefined && String(s.group) !== String(f)) return;  // another expiry's
-          c.chart.dispatchAction({ type: on ? 'legendSelect' : 'legendUnSelect', name: s.name });
-        });
+        // one merge for every series of the key (a model's curve on 17 expiries
+        // was 17 dispatches, each a full update); another expiry's stay hidden.
+        // A quote smile draws no data for a series toggled off: its series are set again
+        if (c.spec.quotes) queueRedraw(id);
+        else c.chart.setOption({ legend: { selected: selection(c.spec, id, f) } });
+        if (c.spec.quotes && c.qi !== null && c.qi !== undefined) {       // the readout's model rows follow
+          var q = (c.spec._rows[quoteGroup(c.spec, f)] || [])[c.qi];
+          if (q) showReadout(id, quoteLines(c.spec, q, legendOff(id)));
+        }
       });
     });
     $$('[data-zoom-for]').forEach(function (b) {
@@ -823,8 +948,8 @@
     });
     $$('[data-csv-for]').forEach(function (b) {
       b.addEventListener('click', function () {
-        var el = doc.getElementById(b.getAttribute('data-csv-for'));
-        var spec = el && specOf(el);
+        var el = doc.getElementById(b.getAttribute('data-csv-for')), c = el && Desk.charts[el.id];
+        var spec = c ? c.spec : (el && specOf(el));
         if (spec) download(b.getAttribute('data-filename') || (el.id + '.csv'), specCsv(spec));
       });
     });
@@ -916,8 +1041,12 @@
         if (key && !init) state.set(key, tab.getAttribute('data-value'));
         var target = list.getAttribute('data-chart-filter');
         if (target) target.split(/\s+/).forEach(function (id) { filterChart(id, tab.getAttribute('data-value')); });
+        // a chart drawn while its panel was hidden has the wrong size; a resize
+        // of one that has not changed size would redraw it for nothing. The tabs
+        // of one shared panel (the smile's expiries) never hide it: nothing to check
         $$('.chart[data-spec]', doc.getElementById(tab.getAttribute('aria-controls')) || doc.body).forEach(function (el) {
-          if (Desk.charts[el.id]) Desk.charts[el.id].chart.resize();
+          var c = Desk.charts[el.id];
+          if (c) { if (!shared && (c.chart.getWidth() !== el.clientWidth || c.chart.getHeight() !== el.clientHeight)) c.chart.resize(); }
           else if (!Desk.isPending(el)) render(el);
         });
       }
@@ -948,8 +1077,7 @@
       g.hidden = String(g.getAttribute('data-group')) !== String(value);
     });
     resetReadout(id);
-    var el = doc.getElementById(id);
-    if (el && Desk.charts[id]) render(el);     // not yet drawn: render() applies the filter when it is
+    if (Desk.charts[id]) queueRedraw(id);     // not yet drawn: render() applies the filter when it is
   }
 
   // -- quote smiles: the keyboard readout and the x-axis switch ----

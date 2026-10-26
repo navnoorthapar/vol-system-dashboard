@@ -29,7 +29,16 @@
 //     strike, a bid and an ask, one row with z per model and no raw series name;
 //     the keyboard readout says the same; the residual strip shares the smile's
 //     x range; the forward-delta switch renames the axis and keeps the expiry; a
-//     Calibration smile's tooltip names its quote the same way.
+//     Calibration smile's tooltip names its quote the same way;
+//   * the smile's expiry switch is fast (P4.2): the median of five expiry-tab
+//     clicks, timed by the Event Timing API (PerformanceObserver 'event',
+//     durationThreshold 16, from the input to the next paint), is at most 50 ms,
+//     and at most 150 ms with the CPU throttled 4× (CDP); a legend toggle at most
+//     30 ms. The chart itself is drawn in the task after that paint, so the time
+//     from the input to the frame that shows the new expiry's chart is measured
+//     too (the chart's 'finished' event, then the next frame): its median at most
+//     100 ms, 300 ms at 4×. (It re-parsed a 250 KB spec and rebuilt every series
+//     on each click: 160 ms, 640 ms at 4×, measured on the previous desk.js.)
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -391,14 +400,81 @@ async function checkQuoteInspector() {
   return check;
 }
 
+// -- the smile's expiry switch (P4.2) ----
+const SWITCH_MAX_MS = { 1: 50, 4: 150 };
+const DRAWN_MAX_MS = { 1: 100, 4: 300 };
+const LEGEND_MAX_MS = 30;
+const median = xs => { const s = [...xs].sort((a, b) => a - b); return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2; };
+// one interaction's duration: the longest Event Timing entry it produced (none:
+// under the 16 ms threshold), and the time from its click to the frame after the
+// chart's next 'finished' event (null: the chart was not drawn again)
+async function timed(page, act, id) {
+  await page.evaluate(cid => {
+    window.__ev = []; window.__drawn = null;
+    const ch = Desk.charts[cid].chart;
+    const done = () => { ch.off('finished', done); requestAnimationFrame(() => { window.__drawn = performance.now(); }); };
+    ch.on('finished', done);
+  }, id);
+  await act();
+  await page.waitForTimeout(400);
+  const { ev, drawn } = await page.evaluate(() => ({ ev: window.__ev, drawn: window.__drawn }));
+  const click = ev.find(e => e.n === 'click'), timing = ev.filter(e => e !== click);
+  return { ms: timing.length ? Math.max(...timing.map(e => e.d)) : 16,
+           drawn: drawn !== null && click ? Math.round(drawn - click.t) : null };
+}
+async function checkSwitchSpeed() {
+  const check = { name: 'the smile switches expiry and toggles a model quickly', views: [], failures: [] };
+  for (const rate of [1, 4]) {
+    const { ctx, page, errors } = await openPage('surface.html');
+    const id = 'chart-slices';
+    await page.locator('#' + id).scrollIntoViewIfNeeded();
+    if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id}: not drawn`); await ctx.close(); continue; }
+    if (rate > 1) { const cdp = await ctx.newCDPSession(page); await cdp.send('Emulation.setCPUThrottlingRate', { rate }); }
+    await page.evaluate(() => {
+      new PerformanceObserver(l => { for (const e of l.getEntries()) (window.__ev = window.__ev || []).push({ n: e.name + ' (timing)', d: e.duration }); })
+        .observe({ type: 'event', durationThreshold: 16 });
+      // the click's own start, under the threshold or not
+      document.addEventListener('click', e => { (window.__ev = window.__ev || []).push({ n: 'click', d: 0, t: e.timeStamp }); }, true);
+    });
+    const tabs = await page.evaluate(cid => [...document.querySelectorAll(`[data-chart-filter="${cid}"] [role="tab"]`)]
+      .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('data-value')), id);
+    const picks = [0.1, 0.3, 0.5, 0.7, 0.9].map(f => tabs[Math.floor(f * (tabs.length - 1))]);
+    const runs = [];
+    for (const v of picks) runs.push(await timed(page, () => page.click(`[data-chart-filter="${id}"] [data-value="${v}"]`), id));
+    const clicks = runs.map(r => r.ms), drawn = runs.map(r => r.drawn);
+    const view = { rate, clicks, median: median(clicks), drawn };
+    if (view.median > SWITCH_MAX_MS[rate]) check.failures.push(`surface.html #${id} at ${rate}× CPU: median expiry switch ${view.median} ms (${clicks.join(', ')}), limit ${SWITCH_MAX_MS[rate]} ms`);
+    if (drawn.some(d => d === null)) check.failures.push(`surface.html #${id} at ${rate}× CPU: an expiry switch did not draw the chart again (${drawn.join(', ')})`);
+    else {
+      view.drawnMedian = median(drawn);
+      if (view.drawnMedian > DRAWN_MAX_MS[rate]) check.failures.push(`surface.html #${id} at ${rate}× CPU: median click-to-chart ${view.drawnMedian} ms (${drawn.join(', ')}), limit ${DRAWN_MAX_MS[rate]} ms`);
+    }
+    if (rate === 1) {
+      const btn = page.locator(`[data-legend-for="${id}"][aria-pressed="false"]`).first();
+      const key = await btn.getAttribute('data-series');
+      const toggles = [];
+      for (let i = 0; i < 5; i++) toggles.push((await timed(page, () => page.click(`[data-legend-for="${id}"][data-series="${key}"]`), id)).ms);
+      view.legend = toggles; view.legendMedian = median(toggles);
+      if (view.legendMedian > LEGEND_MAX_MS) check.failures.push(`surface.html #${id}: median legend toggle ${view.legendMedian} ms (${toggles.join(', ')}), limit ${LEGEND_MAX_MS} ms`);
+    }
+    check.views.push(view);
+    for (const e of errors) check.failures.push(`surface.html: JavaScript error: ${e}`);
+    await ctx.close();
+  }
+  return check;
+}
+
+const ONLY = process.env.INTERACT_ONLY ? process.env.INTERACT_ONLY.split(',') : null;
 for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
-  checkQuoteInspector]) {
+  checkQuoteInspector, checkSwitchSpeed]) {
+  if (ONLY && !ONLY.includes(run.name)) continue;
   const c = await run();
   report.checks.push(c);
   report.failures.push(...c.failures);
   console.log(`${(c.failures.length ? 'FAIL' : 'ok').padEnd(5)} ${c.name}` +
     (c.charts ? `: ${c.charts.filter(x => x.bars).length} chart(s), ${c.charts.reduce((a, x) => a + (x.bars || 0), 0)} bars` : '') +
-    (c.tiles ? `: ${c.tiles.length} tile(s)` : '') + (c.views ? `: ${c.views.length} width(s)` : ''));
+    (c.tiles ? `: ${c.tiles.length} tile(s)` : '') + (c.views ? `: ${c.views.length} width(s)` : '') +
+    (run === checkSwitchSpeed ? ' ' + JSON.stringify(c.views.map(v => ({ rate: v.rate, median: v.median, drawn: v.drawnMedian, legend: v.legendMedian }))) : ''));
 }
 
 await browser.close();

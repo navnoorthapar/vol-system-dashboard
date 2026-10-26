@@ -6419,3 +6419,58 @@ def test_browser_quote_inspector_hover_keyboard_and_delta_axis(site_browser):
     csv = page.evaluate("Desk.specCsv(Desk.charts['chart-slices'].spec)")
     assert len(csv.strip().split("\n")) == 1 + sum(len(g["mid"]) for g in spec["quotes"]["groups"].values())
     ctx.close()
+
+
+def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_only(site_browser):
+    """P4.2: every expiry-tab click re-parsed the 250 KB smile spec and rebuilt all
+    17 × 12 series (64–112 ms, 304–448 ms at 4× CPU). A switch now keeps the parsed
+    spec, draws the shown expiry's series only (a model toggled off carries no
+    data), keeps the forward line on a drawn series of that expiry, draws the strip's
+    clipped points as triangles and leaves no earlier expiry marked shown in the
+    legend. (The timing itself is the interact.mjs gate.)"""
+    sb = site_browser
+    html = (sb["site"] / "surface.html").read_text()
+    spec = _raw_specs(html)["chart-slices"]
+    exps = list(spec["quotes"]["groups"])
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    page.evaluate("Desk.charts['chart-slices'].spec.__kept = true")
+    first = page.evaluate("Desk.filters['chart-slices']")
+    state_js = """(exp) => {
+      const c = Desk.charts['chart-slices'], o = c.chart.getOption(), sel = o.legend[0].selected;
+      const off = [...document.querySelectorAll('[data-legend-for="chart-slices"][aria-pressed="false"]')]
+        .map(b => b.dataset.series);
+      const keyOf = n => (c.spec.series.find(x => x.name === n || x.name + ' beyond the clip' === n) || {});
+      const drawn = o.series.filter(s => s.id !== 'zband');
+      const clip = c.spec.quotes.zClip || 10;
+      return {
+        kept: c.spec.__kept === true, filter: Desk.filters['chart-slices'],
+        names: drawn.map(s => s.name),
+        marked: drawn.filter(s => s.markLine && (s.markLine.data || []).length).map(s => s.name),
+        shownElsewhere: Object.keys(sel).filter(k => sel[k] && !k.startsWith(exp + ' ')),
+        offWithData: drawn.filter(s => (s.data || []).length).map(s => s.name)
+          .filter(n => off.includes(keyOf(n).legendKey || keyOf(n).name)),
+        rows: c.spec._rows[exp].length,
+        bars: ((o.series.find(s => s.name === exp + ' bid–ask') || {}).data || []).length,
+        clipped: c.spec._rows[exp].filter(q => Object.values(q.models)
+          .some(m => m.z !== null && Math.abs(m.z) > clip)).length,
+        triangles: o.series.filter(s => / beyond the clip$/.test(s.name))
+          .reduce((n, s) => n + (s.data || []).filter(p => p.symbol === 'triangle').length, 0) }; }"""
+    for exp in [*[e for e in exps if e != first][:3], first]:
+        page.click(f"[data-chart-filter='chart-slices'] [data-value='{exp}']")
+        page.wait_for_timeout(250)
+        st = page.evaluate(state_js, exp)
+        assert st["kept"], "the spec was parsed again"
+        assert st["filter"] == exp
+        assert st["names"], st
+        assert all(n.startswith(exp + " ") for n in st["names"]), st["names"]
+        assert st["marked"], st
+        assert all(n.startswith(exp + " ") for n in st["marked"]), st["marked"]
+        assert not st["shownElsewhere"], st["shownElsewhere"]
+        assert not st["offWithData"], st["offWithData"]
+        # one bar per quote: lower cap, the bar, upper cap and a break (7 points)
+        assert st["bars"] == 7 * st["rows"]
+        assert st["triangles"] <= st["clipped"] * len(spec["quotes"]["models"])
+    ctx.close()
