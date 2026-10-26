@@ -686,9 +686,21 @@
     window.addEventListener('resize', function () { clearTimeout(t); t = setTimeout(mark, 150); });
   }
 
+  // -- card tables: explicit table roles, since display: block on a phone (desk.css
+  //    .tbl.cards) drops the implicit ones in some browsers --
+  function initTableRoles() {
+    var roles = { TABLE: 'table', THEAD: 'rowgroup', TBODY: 'rowgroup', TR: 'row', TD: 'cell' };
+    $$('table.cards').forEach(function (t) {
+      [t].concat($$('thead, tbody, tr, th, td', t)).forEach(function (el) {
+        var r = el.tagName === 'TH' ? (el.getAttribute('scope') === 'row' ? 'rowheader' : 'columnheader') : roles[el.tagName];
+        if (r && !el.hasAttribute('role')) el.setAttribute('role', r);
+      });
+    });
+  }
+
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); init3d(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initHeatmaps(); init3d(); initTableRoles(); initScrollHints();
     initPrint(); scrollToAnchor();
   }
   if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot); else boot();

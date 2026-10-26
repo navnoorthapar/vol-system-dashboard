@@ -71,7 +71,7 @@
 <div class="g">
   {% call m.panel('sleeves', 'Per-sleeve performance', 's8') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Per-sleeve performance (scrollable)">
-    <table class="tbl">
+    <table class="tbl" id="sleeve-table">
       <thead><tr><th scope="col">Signal</th><th scope="col" class="num">Total P&amp;L</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">Ann. return</th><th scope="col" class="num">Win rate</th><th scope="col" class="num">Trades</th><th scope="col">Role</th></tr></thead>
       <tbody>{% for s in d.signal_metrics %}<tr{% if s.is_research %} class="muted"{% endif %}><td class="nowrap">{{ s.label }}</td><td class="num {{ 'pos' if s.green else 'neg' }}">{{ s.total_pnl }}</td><td class="num">{{ s.sharpe }}</td><td class="num">{{ s.ann_ret }}</td><td class="num">{{ s.win_rate }}</td><td class="num">{{ s.n_trades }}</td><td>{% if s.is_research %}{{ m.chip('reference') }}{% else %}{{ m.chip('portfolio', 'info') }}{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
@@ -101,7 +101,7 @@
       <table class="tbl dense" id="bootstrap-table">
         <caption>Annualised Sharpe (rf = 0) with its {{ (bs.level * 100)|fmt('.0f') }}% {{ bs.method or 'bootstrap' }} interval ({{ bs.reps|fmt(',') }} draws), probabilistic and deflated Sharpe</caption>
         <thead><tr><th scope="col">Series</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">Interval</th><th scope="col">Excludes 0</th><th scope="col" class="num">PSR(SR &gt; 0)</th><th scope="col" class="num">DSR</th><th scope="col" class="num">Skew</th><th scope="col" class="num">Kurtosis</th></tr></thead>
-        <tbody>{% for r in d.boot_rows %}<tr{% if r.key == 'portfolio' %} class="em"{% endif %}><td>{{ r.series }}</td><td class="num">{{ r.point|signed('.2f') }}</td><td class="num nowrap">{{ r.lo|signed('.2f') }} to {{ r.hi|signed('.2f') }}</td><td>{% if r.excludes_zero %}{{ m.chip('yes', 'watch') }}{% else %}no{% endif %}</td><td class="num">{{ r.psr|fmt('.2f') }}</td><td class="num">{{ r.dsr|fmt('.3f') }}</td><td class="num">{{ r.skew|signed('.1f') }}</td><td class="num">{{ r.kurt|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
+        <tbody>{% for r in d.boot_rows %}<tr{% if r.key == 'portfolio' %} class="em"{% endif %}><td class="nowrap">{{ r.series }}</td><td class="num">{{ r.point|signed('.2f') }}</td><td class="num nowrap">{{ r.lo|signed('.2f') }} to {{ r.hi|signed('.2f') }}</td><td>{% if r.excludes_zero %}{{ m.chip('yes', 'watch') }}{% else %}no{% endif %}</td><td class="num">{{ r.psr|fmt('.2f') }}</td><td class="num">{{ r.dsr|fmt('.3f') }}</td><td class="num">{{ r.skew|signed('.1f') }}</td><td class="num">{{ r.kurt|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
       {% set dn = d.dsr_note or {} %}
@@ -111,7 +111,7 @@
       <table class="tbl dense" id="null-table">
         <caption>Timing against exposure-matched nulls: total P&amp;L, {{ d.null_settings.n_circular|fmt(',') }} circular shifts (≥ {{ d.null_settings.circular_min_shift|fmt }} sessions) and {{ d.null_settings.n_shuffle|fmt(',') }} trade shuffles</caption>
         <thead><tr><th scope="col">Sleeve</th><th scope="col" class="num">Real P&amp;L</th><th scope="col" class="num">Null mean</th><th scope="col" class="num">Null 5–95%</th><th scope="col" class="num">Timing part</th><th scope="col" class="num">p (shift)</th><th scope="col" class="num">Holm p</th><th scope="col" class="num">p (shuffle)</th></tr></thead>
-        <tbody>{% for r in d.null_rows %}<tr{% if r.key == 'portfolio' %} class="em"{% endif %}><td>{{ r.series }}</td><td class="num">{{ r.real|usd_k }}</td><td class="num">{{ r.null_mean|usd_k }}</td><td class="num nowrap">{{ r.q05|usd_k }} to {{ r.q95|usd_k }}</td><td class="num">{{ r.timing|usd_k }}</td><td class="num">{{ r.p|fmt('.3f') }}</td><td class="num">{{ r.p_holm|fmt('.2f') }}</td><td class="num">{{ r.p_shuffle|fmt('.3f') }}</td></tr>{% endfor %}</tbody>
+        <tbody>{% for r in d.null_rows %}<tr{% if r.key == 'portfolio' %} class="em"{% endif %}><td class="nowrap">{{ r.series }}</td><td class="num">{{ r.real|usd_k }}</td><td class="num">{{ r.null_mean|usd_k }}</td><td class="num nowrap">{{ r.q05|usd_k }} to {{ r.q95|usd_k }}</td><td class="num">{{ r.timing|usd_k }}</td><td class="num">{{ r.p|fmt('.3f') }}</td><td class="num">{{ r.p_holm|fmt('.2f') }}</td><td class="num">{{ r.p_shuffle|fmt('.3f') }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
       <p class="note">The timing part is real P&amp;L minus the null mean: what entry timing added over the same exposure placed at random.</p>
@@ -139,7 +139,7 @@
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Benchmark co-movement (scrollable)">
       <table class="tbl dense" id="bench-table"><caption>Daily correlation of excess returns, {{ (d.bench_window or [])|join(' → ') }}</caption>
         <thead><tr><th scope="col">Series</th>{% for ix in d.bench_indices %}<th scope="col" class="num">{{ ix }}</th>{% endfor %}</tr></thead>
-        <tbody>{% for r in d.bench_rows %}<tr><td>{{ r.series }}</td>{% for ix in d.bench_indices %}{% set c_ = r.cells[ix] %}<td class="num" data-detail="β {{ c_.beta|signed('.3f') }} · Sharpe difference {{ c_.sharpe_diff|signed('.2f') }}">{{ c_.corr|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        <tbody>{% for r in d.bench_rows %}<tr><td class="nowrap">{{ r.series }}</td>{% for ix in d.bench_indices %}{% set c_ = r.cells[ix] %}<td class="num" data-detail="β {{ c_.beta|signed('.3f') }} · Sharpe difference {{ c_.sharpe_diff|signed('.2f') }}">{{ c_.corr|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
       </table>
       </div>
       <p class="note">PUT, WPUT, BXM, BFLY and CNDR settle on real SPX option prices. A β·VIX mark that tracked real prices would co-move with them; the always-short straddle row is the backtest's own premium factor.</p>
@@ -166,7 +166,7 @@
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Forward ledger by sleeve (scrollable)">
       <table class="tbl dense" id="forward-table"><caption>Ledger of {{ fw.last }}, per $1M sleeve</caption>
         <thead><tr><th scope="col">Sleeve</th><th scope="col">Target</th><th scope="col">Open straddle</th><th scope="col" class="num">Open P&amp;L (exec)</th><th scope="col" class="num">Realised (net)</th><th scope="col" class="num">Opened / closed</th></tr></thead>
-        <tbody>{% for r in fw.rows %}{% set ps = r.position %}<tr><td>{{ r.sleeve }}</td><td>{{ {1: 'long', -1: 'short', 0: 'flat'}.get(r.target, '—') }}</td><td>{% if ps %}<span class="nowrap">{{ ps.contract.expiry }}</span> {{ ps.contract.strike|fmt(',.0f') }} · {{ 'long' if ps.direction == 1 else 'short' }}{% else %}—{% endif %}</td><td class="num">{{ r.open_pnl_exec|usd(true) }}</td><td class="num">{{ r.realised_pnl_net|usd(true) }}</td><td class="num">{{ r.n_opened|fmt }} / {{ r.n_closed|fmt }}</td></tr>{% endfor %}</tbody>
+        <tbody>{% for r in fw.rows %}{% set ps = r.position %}<tr><td class="nowrap">{{ r.sleeve }}</td><td>{{ {1: 'long', -1: 'short', 0: 'flat'}.get(r.target, '—') }}</td><td>{% if ps %}<span class="nowrap">{{ ps.contract.expiry }}</span> {{ ps.contract.strike|fmt(',.0f') }} · {{ 'long' if ps.direction == 1 else 'short' }}{% else %}—{% endif %}</td><td class="num">{{ r.open_pnl_exec|usd(true) }}</td><td class="num">{{ r.realised_pnl_net|usd(true) }}</td><td class="num">{{ r.n_opened|fmt }} / {{ r.n_closed|fmt }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
     {% else %}
@@ -178,7 +178,7 @@
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Forecast losses (scrollable)">
       <table class="tbl dense" id="forecast-table"><caption>21-day realised-vol forecasts, {{ fm.start }} → {{ fm.end }} ({{ fm.n|fmt(',') }} origins); lower QLIKE is better</caption>
         <thead><tr><th scope="col">Model</th><th scope="col" class="num">QLIKE</th><th scope="col" class="num">Rank</th><th scope="col" class="num">R² (vol)</th><th scope="col">90% MCS</th></tr></thead>
-        <tbody>{% for r in d.forecast_rows %}<tr{% if r.model == 'pdv' %} class="em"{% endif %}><td>{{ r.model|upper }}</td><td class="num">{{ r.qlike|fmt('.3f') }}</td><td class="num">{{ r.rank|fmt }}</td><td class="num">{{ r.r2|fmt('.3f') }}</td><td>{{ 'in' if r.in_mcs else ('out' if r.in_mcs is not none else '—') }}</td></tr>{% endfor %}</tbody>
+        <tbody>{% for r in d.forecast_rows %}<tr{% if r.model == 'pdv' %} class="em"{% endif %}><td class="nowrap">{{ r.model|upper }}</td><td class="num">{{ r.qlike|fmt('.3f') }}</td><td class="num">{{ r.rank|fmt }}</td><td class="num">{{ r.r2|fmt('.3f') }}</td><td>{{ 'in' if r.in_mcs else ('out' if r.in_mcs is not none else '—') }}</td></tr>{% endfor %}</tbody>
       </table>
       </div>
       <p class="note">PDV drives S1/S1C. VIX² is risk-neutral, so it contains the variance premium. Mean realised vol {{ (fm.realised * 100)|fmt('.1f') }}%.</p>
@@ -241,9 +241,9 @@
     </ul>
     {% call m.method('Historical change log, steps 1–8') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="System improvements (scrollable)">
-    <table class="tbl dense">
+    <table class="tbl dense cards" id="improvements-table">
       <thead><tr><th scope="col" class="num">Step</th><th scope="col">Change</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
-      <tbody>{% for imp in d.improvements %}<tr><td class="num">{{ imp.step }}</td><td class="wrap"><strong>{{ imp.name }}</strong> — {{ imp.what }}</td><td class="wrap">{{ imp.before }}</td><td class="wrap">{{ imp.after }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for imp in d.improvements %}<tr><td class="num" data-label="Step">{{ imp.step }}</td><td class="wrap" data-label="Change"><strong>{{ imp.name }}</strong> — {{ imp.what }}</td><td class="wrap" data-label="Before">{{ imp.before }}</td><td class="wrap" data-label="After">{{ imp.after }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     {% endcall %}

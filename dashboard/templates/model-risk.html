@@ -14,9 +14,9 @@
 <div class="g">
   {% call m.panel('monitors', 'Monitoring checks', 's12') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Monitoring checks (scrollable)">
-    <table class="tbl" id="monitor-table">
+    <table class="tbl cards" id="monitor-table">
       <thead><tr><th scope="col">Model</th><th scope="col">Check</th><th scope="col" class="num">Value</th><th scope="col">Status</th><th scope="col">Limits</th><th scope="col">Artifact</th><th scope="col">Note</th></tr></thead>
-      <tbody>{% for x in d.monitors %}<tr data-status="{{ x.status }}"><td class="wrap"><a href="#inv-{{ x.model|lower }}">{{ x.model }}</a>{% if x.model_name %}<br><span class="faint">{{ x.model_name|sym }}</span>{% endif %}</td><td class="wrap">{{ x.check|sym }}</td><td class="num">{{ x.value }}</td><td>{{ m.rag(x.status) }}</td><td class="nowrap">{{ x.limits }}</td><td>{% for a_ in ([x.artifact] if x.artifact is string else x.artifact) %}<code class="path">{{ a_|path }}</code>{{ '<br>'|safe if not loop.last }}{% endfor %}</td><td class="wrap">{{ x.note|dates }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for x in d.monitors %}<tr data-status="{{ x.status }}"><td class="wrap" data-label="Model"><a href="#inv-{{ x.model|lower }}">{{ x.model }}</a>{% if x.model_name %}<br><span class="faint name">{{ x.model_name|sym }}</span>{% endif %}</td><td class="wrap" data-label="Check">{{ x.check|sym }}</td><td class="num" data-label="Value">{{ x.value }}</td><td data-label="Status">{{ m.rag(x.status) }}</td><td class="nowrap" data-label="Limits">{{ x.limits }}</td><td data-label="Artifact">{% for a_ in ([x.artifact] if x.artifact is string else x.artifact) %}<code class="path">{{ a_|path }}</code>{{ '<br>'|safe if not loop.last }}{% endfor %}</td><td class="wrap" data-label="Note">{{ x.note|dates }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     {% call m.method('How to read the status') %}
@@ -28,17 +28,17 @@
 <div class="g">
   {% call m.panel('inventory', 'Model inventory', 's12') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model inventory (scrollable)">
-    <table class="tbl" id="inventory-table">
+    <table class="tbl cards" id="inventory-table">
       <thead><tr><th scope="col">ID</th><th scope="col">Model</th><th scope="col">Tier</th><th scope="col">Materiality</th><th scope="col">Use</th><th scope="col">Inputs → outputs</th><th scope="col">Known limitations</th></tr></thead>
-      <tbody>{% for x in d.inventory %}<tr id="inv-{{ x.id|lower }}"><td>{{ x.id }}</td><td class="wrap"><strong>{{ x.name|sym }}</strong><br><code class="path">{{ x.module|path }}</code>{% if x.page %} · <a href="{{ x.page }}">page</a>{% endif %}</td><td>{{ m.chip(x.tier, 'info' if x.tier == 'production' else ('watch' if x.tier == 'backtest' else 'muted')) }}</td><td>{{ x.materiality or '—' }}</td><td class="wrap">{{ x.use }}</td><td class="wrap">{{ x.inputs }} → {% for o_ in ([x.outputs] if x.outputs is string else x.outputs) %}<code class="path">{{ o_|path }}</code>{{ ' + ' if not loop.last }}{% endfor %}{% if x.outputs_pending %} ({{ x.outputs_pending }}){% endif %}{% if x.outputs_note %} ({{ x.outputs_note }}){% endif %}</td><td class="wrap">{{ x.limitations }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for x in d.inventory %}<tr id="inv-{{ x.id|lower }}"><td data-label="ID">{{ x.id }}</td><td class="wrap" data-label="Model"><strong class="name">{{ x.name|sym }}</strong><br><code class="path">{{ x.module|path }}</code>{% if x.page %} · <a href="{{ x.page }}">page</a>{% endif %}</td><td data-label="Tier">{{ m.chip(x.tier, 'info' if x.tier == 'production' else ('watch' if x.tier == 'backtest' else 'muted')) }}</td><td data-label="Materiality">{{ x.materiality or '—' }}</td><td class="wrap" data-label="Use">{{ x.use }}</td><td class="wrap" data-label="Inputs → outputs">{{ x.inputs }} → {% for o_ in ([x.outputs] if x.outputs is string else x.outputs) %}<code class="path">{{ o_|path }}</code>{{ ' + ' if not loop.last }}{% endfor %}{% if x.outputs_pending %} ({{ x.outputs_pending }}){% endif %}{% if x.outputs_note %} ({{ x.outputs_note }}){% endif %}</td><td class="wrap" data-label="Known limitations">{{ x.limitations }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note">{{ d.inventory_about }}</p>
     {% if d.vendor_inputs %}
     <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="Vendor and third-party inputs (scrollable)">
-    <table class="tbl dense" id="vendor-table"><caption>Vendor and third-party inputs (the IDs the data checks above carry)</caption>
+    <table class="tbl dense cards" id="vendor-table"><caption>Vendor and third-party inputs (the IDs the data checks above carry)</caption>
       <thead><tr><th scope="col">ID</th><th scope="col">Source</th><th scope="col">What it supplies</th><th scope="col">Note</th></tr></thead>
-      <tbody>{% for v in d.vendor_inputs %}<tr id="inv-{{ (v.id or '')|lower }}"><td>{{ v.id }}</td><td class="wrap">{{ v.source }}</td><td class="wrap">{{ v.data }}</td><td class="wrap">{{ v.note }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for v in d.vendor_inputs %}<tr id="inv-{{ (v.id or '')|lower }}"><td data-label="ID">{{ v.id }}</td><td class="wrap" data-label="Source">{{ v.source }}</td><td class="wrap" data-label="What it supplies">{{ v.data }}</td><td class="wrap" data-label="Note">{{ v.note }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     {% endif %}

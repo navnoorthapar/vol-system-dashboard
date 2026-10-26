@@ -1681,14 +1681,15 @@ def test_artifact_paths_break_between_names_never_inside_one(dash, pages):
     module columns broke a path anywhere ('data_store/vol_syste' over 'm.db',
     'joint_vol_calibration/m' over 'odels/heston.py'): word-break: break-all and
     overflow-wrap: anywhere. A path now breaks only after '/' or '_', where the
-    path filter puts a <wbr>; its names stay whole."""
+    path filter puts a <wbr>; its names stay whole (a CamelCase test class may
+    also break between its words: test_path_filter_breaks_between_camel_case_words)."""
     assert str(dash.path_breaks("data_store/vol_system.db")) == "data_<wbr>store/<wbr>vol_<wbr>system.db"
     assert str(dash.path_breaks("data_store/surface/<session>/")) == \
         "data_<wbr>store/<wbr>surface/<wbr>&lt;session&gt;/"
     assert str(dash.path_breaks("calibrations/joint_cal_2026-10-16.pkl")) == \
         'calibrations/<wbr>joint_<wbr>cal_<wbr><span class="nowrap">2026-10-16.pkl</span>'
     assert str(dash.path_breaks("test_pdv.py::TestNoLookAhead::test_x")) == \
-        "test_<wbr>pdv.py::<wbr>TestNoLookAhead::<wbr>test_<wbr>x"
+        "test_<wbr>pdv.py::<wbr>Test<wbr>No<wbr>Look<wbr>Ahead::<wbr>test_<wbr>x"
     assert str(dash.path_breaks(None)) == ""
 
     def paths(fragment):
@@ -2148,14 +2149,14 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert _errors(resp) == 0
     sc = json.loads((FIX / "surface" / SESSION / "scorecard.json").read_text())
     text = _visible_text(html)
-    table = re.search(r'<table class="tbl dense" id="scorecard-table">(.*?)</table>', html,
+    table = re.search(r'<table class="tbl dense[^"]*" id="scorecard-table">(.*?)</table>', html,
                       re.DOTALL).group(1)
     rank = [r["model"] for r in sc["ranking_by_oos_median_abs_hs"]]
-    rows = re.findall(r"<tr[^>]*><td>([^<]+)</td>", table.split("<tbody>")[1])
+    rows = re.findall(r"<tr[^>]*><td[^>]*>([^<]+)</td>", table.split("<tbody>")[1])
     assert [dash.model_label(m) for m in rank] == rows            # the producer's ranking order
     for m in sc["models"]:
         o = m["metrics"]["out_of_sample"]
-        row = re.search(rf"<td>{re.escape(dash.model_label(m['model']))}</td>(.*?)</tr>", table,
+        row = re.search(rf"<td[^>]*>{re.escape(dash.model_label(m['model']))}</td>(.*?)</tr>", table,
                         re.DOTALL).group(1)
         cells = re.findall(r'<td class="num">([^<]*)</td>', row)
         assert cells[2] == f"{o['n']:,}" and cells[3] == f"{o['median_abs_hs']:.2f}", m["model"]
@@ -2341,7 +2342,8 @@ def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
 
 def test_corrections_page_shows_the_c23_waterfall_from_its_file(pages):
     bridge = pd.read_csv(SHIPPED / "backtest" / "c23_bridge.csv")
-    tab = re.search(r'<table class="tbl dense" id="c23-bridge">(.*?)</table>', pages["/corrections"],
+    tab = re.search(r'<table class="tbl dense[^"]*" id="c23-bridge">(.*?)</table>',
+                    pages["/corrections"],
                     re.DOTALL).group(1)
     body = _visible_text("<body>" + tab)
     assert len(re.findall(r"<tr>", tab.split("<tbody>")[1])) == len(bridge)
@@ -2514,13 +2516,15 @@ def test_research_inference_panels_show_the_summary(dash, art):
     s = json.loads((FIX / "inference" / "summary.json").read_text())
     b = s["bootstrap"]["portfolio"]["sharpe"]
     boot = re.search(r'<table class="tbl dense" id="bootstrap-table">(.*?)</table>', html, re.DOTALL).group(1)
-    port = _visible_text("<body>" + re.search(r"<td>Portfolio</td>(.*?)</tr>", boot, re.DOTALL).group(1))
+    port = _visible_text("<body>" + re.search(r"<td[^>]*>Portfolio</td>(.*?)</tr>", boot,
+                                               re.DOTALL).group(1))
     def fmt(x):
         return f"{x:+.2f}".replace("-", "−")
     assert f"{fmt(b['ci95'][0])} to {fmt(b['ci95'][1])}" in port
     nul = re.search(r'<table class="tbl dense" id="null-table">(.*?)</table>', html, re.DOTALL).group(1)
     s3 = s["nulls"]["sleeves"]["s3"]
-    row = _visible_text("<body>" + re.search(r"<td>S3 dispersion</td>(.*?)</tr>", nul, re.DOTALL).group(1))
+    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 dispersion</td>(.*?)</tr>", nul,
+                                              re.DOTALL).group(1))
     assert f"{s3['circular']['total_pnl']['p_value']:.3f}" in row
     assert f"{s3['shuffle']['total_pnl']['p_value']:.3f}" in row
     # the KPI interval and the overview key result use the same bootstrap row
@@ -2532,7 +2536,8 @@ def test_research_inference_panels_show_the_summary(dash, art):
     # forecast table: PDV's QLIKE rank as the file states
     fe = json.loads((FIX / "inference" / "forecast_eval.json").read_text())["backtest_window"]
     ftab = re.search(r'<table class="tbl dense" id="forecast-table">(.*?)</table>', html, re.DOTALL).group(1)
-    pdv = _visible_text("<body>" + re.search(r"<td>PDV</td>(.*?)</tr>", ftab, re.DOTALL).group(1))
+    pdv = _visible_text("<body>" + re.search(r"<td[^>]*>PDV</td>(.*?)</tr>", ftab,
+                                              re.DOTALL).group(1))
     assert f"{fe['losses']['qlike']['pdv']:.3f}" in pdv
     assert str(fe["rank"]["qlike"]["pdv"]) in pdv
 
@@ -3110,8 +3115,8 @@ def test_model_inventory_is_the_validation_packs(dash, pages):
     assert by["Greeks surface built from the headline fit"] == "M6"
     assert by["β drift: newest chain's ATM vol / VIX against the frozen β"] == "M7"
     assert by["Market database lag behind the rule labels (sessions)"] == "M10"
-    assert re.search(r'<tr id="inv-m14"><td>M14</td><td class="wrap"><strong>Quote-grade surface</strong>',
-                     pages["/model-risk"])
+    assert re.search(r'<tr id="inv-m14"><td[^>]*>M14</td><td class="wrap"[^>]*>'
+                     r'<strong[^>]*>Quote-grade surface</strong>', pages["/model-risk"])
 
 
 # ── C23 polish: what the screenshot review found ─────────────────────────────
@@ -3191,7 +3196,7 @@ def test_artifact_citations_name_what_the_code_reads(dash, pages):
     assert "atm_to_vix_ratio" in st                    # the β the check compares with
     lag = next(v for k, v in mon.items() if k.startswith("Market database lag"))
     assert lag == ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"]
-    assert '<td class="wrap">Labels <span class="nowrap">' in html       # its dates stay whole
+    assert re.search(r'<td class="wrap"[^>]*>Labels <span class="nowrap">', html)      # its dates stay whole
     rel = be.RESULTS_PATH.relative_to(ROOT).as_posix()
     inv = {k.split(" ")[0]: v for k, v in _path_cells(html, "inventory-table").items()}
     engine = next(v for k, v in inv.items() if k.startswith("Backtest"))
@@ -3363,7 +3368,7 @@ def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser
 
 
 _LINE_BREAKS_JS = """els => els.map(el => {
-  // every place the rendered text starts a new line, with the character before it
+  // every place the rendered text starts a new line, with the characters either side
   const out = [];
   const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let top = null, prev = '', n;
@@ -3372,7 +3377,7 @@ _LINE_BREAKS_JS = """els => els.map(el => {
       const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + 1);
       const rect = r.getClientRects()[0];
       if (!rect) continue;
-      if (top !== null && rect.top > top + 2) out.push([el.textContent, prev]);
+      if (top !== null && rect.top > top + 2) out.push([el.textContent, prev, n.data[i]]);
       top = rect.top; prev = n.data[i];
     }
   }
@@ -3389,21 +3394,43 @@ _PANEL_HEADS_JS = """() => Array.from(document.querySelectorAll('.panel-head')).
 }).filter(Boolean)"""
 
 
+def _between_names(prev: str, nxt: str) -> bool:
+    """A line break the path filter allows: after '/', '_' or '::', or between
+    the words of a CamelCase name (a lower-case letter or digit, then a capital)."""
+    return prev in "/_:" or (bool(re.fullmatch(r"[a-z0-9]", prev)) and nxt.isupper())
+
+
+def test_path_filter_breaks_between_camel_case_words(dash):
+    """P8: at 320 px Corrections broke 'TestGenerateSignal1Contrarian' inside a
+    word; the path filter offers a break between its words as well as after
+    '/', '_' and '::'."""
+    out = str(dash.path_breaks("test_signal_engine.py::TestGenerateSignal1Contrarian::test_r2_exit"))
+    assert "::<wbr>Test<wbr>Generate<wbr>Signal1<wbr>Contrarian::<wbr>test_<wbr>r2_<wbr>exit" in out
+    assert str(dash.path_breaks("data_store/vol_system.db")) == "data_<wbr>store/<wbr>vol_<wbr>system.db"
+    assert str(dash.path_breaks("README.md")) == "README.md"
+
+
 def test_browser_paths_and_panel_links_at_phone_width(site_browser):
-    """C23 verify, at 390 px: a path in the freshness table or the Model Risk
-    columns, or a test ID on Corrections, wraps only after '/', '_' or '::' (they
-    broke as 'vol_syste' / 'm.db' and 'test_surf' / 'ace_svi.py'), and
-    every panel's '#' link sits at the right of its header (it dropped to the
-    left of a second line alone when the title and its date filled the first)."""
+    """C23 verify, at 390 and 320 px: a path in the freshness table or the Model
+    Risk columns, or a test ID on Corrections, wraps only after '/', '_' or '::'
+    or between the words of a CamelCase test class (they broke as 'vol_syste' /
+    'm.db', 'test_surf' / 'ace_svi.py' and, at 320 px, inside
+    'TestGenerateSignal1Contrarian'), and at 390 px every panel's '#' link sits at
+    the right of its header (it dropped to the left of a second line alone when
+    the title and its date filled the first)."""
     ctx, page = _page(site_browser, 390, 844)
     try:
-        for name in ("index", "surface", "calibration", "risk", "research", "corrections", "model-risk"):
-            page.goto(site_browser["base"] + f"{name}.html", wait_until="load")
-            codes = page.locator("code.path")
-            assert codes.count(), name
-            breaks = page.evaluate(_LINE_BREAKS_JS, codes.element_handles())
-            assert [b for b in breaks if b[1] not in "/_:"] == [], (name, breaks)
-            assert page.evaluate(_PANEL_HEADS_JS) == [], name
+        for width in (390, 320):
+            page.set_viewport_size({"width": width, "height": 844})
+            for name in ("index", "surface", "calibration", "risk", "research", "corrections", "model-risk"):
+                page.goto(site_browser["base"] + f"{name}.html", wait_until="load")
+                codes = page.locator("code.path")
+                assert codes.count(), name
+                breaks = page.evaluate(_LINE_BREAKS_JS, codes.element_handles())
+                assert [b for b in breaks if not _between_names(b[1], b[2])] == [], (width, name, breaks)
+                if width == 390:
+                    assert page.evaluate(_PANEL_HEADS_JS) == [], name
+        page.set_viewport_size({"width": 390, "height": 844})
         page.goto(site_browser["base"] + "model-risk.html", wait_until="load")
         breaks = page.evaluate(_LINE_BREAKS_JS, page.locator("#monitor-table code.path").element_handles())
         assert breaks, "the monitor table's paths do wrap at 390 px"        # the check above saw breaks
@@ -3439,3 +3466,94 @@ def test_long_daily_series_are_downsampled_for_drawing(pages):
         assert all(s.get("sampling") == "lttb" for s in spec["series"]), cid
         assert len(spec["series"][0]["data"]) == len(spec["xs"]) > 1000, cid
     assert "sampling: s.sampling || undefined" in DESK_JS.read_text()
+
+
+# the cells that name a model or a strategy, in every table that lists them
+_NAME_CELLS = {
+    "surface.html": ["#scorecard-table tbody td:first-child"],
+    "calibration.html": ["#spx-only tbody td:first-child"],
+    "research.html": ["#sleeve-table tbody td:first-child", "#bootstrap-table tbody td:first-child",
+                      "#null-table tbody td:first-child", "#bench-table tbody td:first-child",
+                      "#forecast-table tbody td:first-child"],
+    "model-risk.html": ["#monitor-table tbody td:first-child .faint",
+                        "#inventory-table tbody td:nth-child(2) strong"],
+}
+_ONE_LINE_JS = """sel => [...document.querySelectorAll(sel)].map(el => {
+  const r = document.createRange(); r.selectNodeContents(el);
+  const w = el.closest('.tbl-wrap');
+  return [el.textContent.trim(), new Set([...r.getClientRects()].map(q => Math.round(q.top))).size,
+          w.scrollWidth <= w.clientWidth + 1];
+})"""
+
+
+def test_browser_model_and_strategy_names_stay_on_one_line_at_desk_width(site_browser):
+    """P2: at 1440 px the Surface scorecard wrapped 'SVI, calendar-ordered' onto
+    three lines and 'Heston (v2 fit)' onto two. Every table that names models or
+    strategies keeps each name on one line at desk width, and still fits its
+    region (no sideways scroll traded for it); at 390 px they scroll as before."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        for name, sels in _NAME_CELLS.items():
+            page.goto(site_browser["base"] + name, wait_until="load")
+            for sel in sels:
+                cells = page.evaluate(_ONE_LINE_JS, sel)
+                assert cells, (name, sel)
+                assert [c[0] for c in cells if c[1] != 1] == [], (name, sel)
+                assert all(c[2] for c in cells), (name, sel, "the table no longer fits its region")
+    finally:
+        ctx.close()
+
+
+# text-heavy tables that become cards in a narrow region
+_CARD_TABLES = {"model-risk.html": ["monitor-table", "inventory-table", "vendor-table"],
+                "calibration.html": ["quintic-vs-heston"], "research.html": ["improvements-table"],
+                "corrections.html": ["c23-bridge"]}
+_CARDS_JS = """id => {
+  const t = document.getElementById(id), w = t.closest('.tbl-wrap');
+  const heads = [...t.querySelectorAll('thead th')].map(h => h.textContent.trim().toLowerCase());
+  const rows = [...t.querySelectorAll('tbody tr')];
+  return {display: getComputedStyle(t).display, fits: w.scrollWidth <= w.clientWidth + 1,
+    role: t.getAttribute('role'), n_cells: t.querySelectorAll('tbody td').length,
+    labels_ok: rows.every(r => [...r.children].every((c, i) =>
+      (c.getAttribute('data-label') || '').toLowerCase() === heads[i]))};
+}"""
+
+
+def _ax_count(cdp, element_id: str, role: str) -> int:
+    """Nodes of ``role`` under #element_id in Chromium's own accessibility tree."""
+    root = cdp.send("DOM.getDocument")["root"]["nodeId"]
+    node = cdp.send("DOM.querySelector", {"nodeId": root, "selector": f"#{element_id}"})["nodeId"]
+    return len(cdp.send("Accessibility.queryAXTree", {"nodeId": node, "role": role})["nodes"])
+
+
+def test_browser_text_tables_become_labelled_cards_on_a_phone(site_browser):
+    """P3: at 390 and 320 px the Model Risk monitoring and inventory tables and the
+    Quintic table were rows scrolled sideways, several screens tall, with large
+    empty areas. In a region narrower than 640 px each text-heavy table is a stack
+    of cards, one per row, every field labelled with its column's header; nothing
+    scrolls sideways, and the table keeps its semantics (explicit roles, and in
+    Chromium's accessibility tree a column header per column and a cell per
+    cell). At 1440 px the wide-region tables stay tables."""
+    sb = site_browser
+    for width in (390, 320, 1440):
+        ctx, page = _page(sb, width, 844)
+        cdp = ctx.new_cdp_session(page)
+        try:
+            for name, ids in _CARD_TABLES.items():
+                page.goto(sb["base"] + name, wait_until="load")
+                page.evaluate("document.querySelectorAll('details').forEach(d => { d.open = true; })")
+                for tid in ids:
+                    st = page.evaluate(_CARDS_JS, tid)
+                    assert st["labels_ok"], (width, tid)
+                    assert st["fits"], (width, tid, st)
+                    assert st["role"] == "table", (width, tid)
+                    if width < 640:
+                        assert st["display"] == "block", (width, tid, st)
+                    elif tid in ("monitor-table", "inventory-table", "quintic-vs-heston", "c23-bridge"):
+                        assert st["display"] == "table", (width, tid, st)
+                    if width == 390:
+                        heads = page.evaluate(f"document.querySelectorAll('#{tid} thead th').length")
+                        assert _ax_count(cdp, tid, "columnheader") == heads, (tid, "column headers")
+                        assert _ax_count(cdp, tid, "cell") == st["n_cells"], (tid, "cells")
+        finally:
+            ctx.close()
