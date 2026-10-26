@@ -12,7 +12,14 @@
 //   * KPI tones: every .kpi-value.pos / .kpi-value.neg tile computes to --pos / --neg
 //     (the .kpi-value rule overrode the tone classes, so no tile showed its sign);
 //   * the keyboard dialog: '?' opens #keysDialog centred in the viewport, at desk and
-//     phone width (the universal margin reset opened it in the top-left corner).
+//     phone width (the universal margin reset opened it in the top-left corner);
+//   * grid rows: at 1024, 1280, 1440 and 1920 px no row of a .g grid leaves more than
+//     60 px unused (an s7 + s5 row became 12 + 6 below 1181 px: half-empty rows);
+//   * panel bottoms: no .panel ends more than 96 px below its last visible content
+//     (a short panel stretched beside a tall one), every chart drawn first; #carry
+//     and #forward are left to their own fixes;
+//   * heatmap row heads: at 390 px a heatmap's row header stays in view after its
+//     region is scrolled sideways.
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -180,7 +187,86 @@ async function checkKeysDialog() {
   return check;
 }
 
-for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog]) {
+// -- grid rows and panel bottoms (P2.7) ----
+const LAYOUT_WIDTHS = [1024, 1280, 1440, 1920];
+const MAX_UNUSED_PX = 60;
+const MAX_BLANK_PX = 96;
+const BLANK_EXEMPT = ['carry', 'forward'];
+async function checkLayout() {
+  const check = { name: 'grid rows are full and panels end with their content', views: [], failures: [] };
+  for (const width of LAYOUT_WIDTHS) {
+    for (const name of PAGES) {
+      const { ctx, page, errors } = await openPage(name, { width, height: 900 });
+      // draw every chart (the IntersectionObserver draws them as they come into view)
+      const h = await page.evaluate(() => document.documentElement.scrollHeight);
+      for (let y = 0; y < h; y += 700) { await page.evaluate(v => window.scrollTo(0, v), y); await page.waitForTimeout(40); }
+      await page.waitForTimeout(300);
+      const r = await page.evaluate(([maxUnused, maxBlank, exempt]) => {
+        const vis = el => { const b = el.getBoundingClientRect(), s = getComputedStyle(el);
+          return b.width > 0 && b.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+        const holes = [], blanks = [];
+        document.querySelectorAll('.g').forEach(g => {
+          const gap = parseFloat(getComputedStyle(g).columnGap) || 0, rows = {};
+          [...g.children].filter(vis).forEach(k => { const t = Math.round(k.getBoundingClientRect().top); (rows[t] = rows[t] || []).push(k); });
+          Object.values(rows).forEach(ks => {
+            const used = ks.reduce((a, k) => a + k.getBoundingClientRect().width, 0) + gap * (ks.length - 1);
+            const unused = g.getBoundingClientRect().width - used;
+            if (unused > maxUnused) holes.push(`${ks.map(k => '#' + (k.id || k.className)).join(' + ')} leaves ${Math.round(unused)} px`);
+          });
+        });
+        document.querySelectorAll('.panel').forEach(p => {
+          if (!vis(p) || exempt.includes(p.id)) return;
+          let last = -Infinity;
+          p.querySelectorAll('.panel-body *').forEach(el => {
+            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only')) return;
+            last = Math.max(last, el.getBoundingClientRect().bottom);
+          });
+          if (last === -Infinity) return;
+          const blank = p.getBoundingClientRect().bottom - last;
+          if (blank > maxBlank) blanks.push(`#${p.id} ends ${Math.round(blank)} px below its content`);
+        });
+        return { holes, blanks };
+      }, [MAX_UNUSED_PX, MAX_BLANK_PX, BLANK_EXEMPT]);
+      check.views.push({ name, width, holes: r.holes.length, blanks: r.blanks.length });
+      for (const x of r.holes) check.failures.push(`${name} @${width}px: row ${x} unused`);
+      for (const x of r.blanks) check.failures.push(`${name} @${width}px: ${x}`);
+      for (const e of errors) check.failures.push(`${name} @${width}px: JavaScript error: ${e}`);
+      await ctx.close();
+    }
+  }
+  return check;
+}
+
+// -- heatmap row heads on a phone (P2.7) ----
+async function checkStickyHeatHeads() {
+  const check = { name: 'heatmap row heads stay in view while the region scrolls', heatmaps: [], failures: [] };
+  for (const name of ['surface.html', 'research.html', 'risk.html']) {
+    const { ctx, page } = await openPage(name, { width: 390, height: 844 });
+    const res = await page.evaluate(async () => {
+      const out = [];
+      for (const wrap of document.querySelectorAll('.heat-wrap')) {
+        if (wrap.closest('[hidden]') || wrap.scrollWidth <= wrap.clientWidth + 1) continue;
+        wrap.scrollIntoView({ block: 'center' });
+        wrap.scrollLeft = Math.min(200, wrap.scrollWidth - wrap.clientWidth);
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const th = wrap.querySelector('tbody th[scope="row"]');
+        if (!th) continue;
+        const a = th.getBoundingClientRect(), w = wrap.getBoundingClientRect();
+        out.push({ id: wrap.querySelector('table').id, left: a.left, right: a.right, wl: w.left, vw: innerWidth });
+      }
+      return out;
+    });
+    for (const h of res) {
+      check.heatmaps.push({ name, ...h });
+      if (h.left < h.wl - 1 || h.right > h.vw + 1) check.failures.push(`${name} #${h.id} @390px: row header at ${h.left.toFixed(0)}–${h.right.toFixed(0)} px after a sideways scroll, region starts at ${h.wl.toFixed(0)} px`);
+    }
+    await ctx.close();
+  }
+  if (!check.heatmaps.length) check.failures.push('no heatmap scrolls sideways at 390 px');
+  return check;
+}
+
+for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads]) {
   const c = await run();
   report.checks.push(c);
   report.failures.push(...c.failures);

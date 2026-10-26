@@ -35,14 +35,14 @@
   <div class="page-badge"><span class="nowrap">{{ d.n_tests }} regression tests cited</span><span class="sep">·</span><span class="nowrap">{{ d.rounds|map(attribute='commit_links')|map('length')|sum }} commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span><span class="sep">·</span><span class="nowrap">C23 from <code>c23_bridge.csv</code></span></div>
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('waterfall', 'C22 waterfall · portfolio P&L, one correction at a time', 's8', '$000s') %}
     {% if d.charts.waterfall %}{{ m.chart(d.charts.waterfall, 'h400 tall-narrow') }}{% endif %}
     {% set _rb = (b.rows or {}).get('beta') %}{% set _rg = (b.rows or {}).get('r2_gate') %}
     <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative), replayed on the C23-restated VIX record, so the last bar is today's canonical run; the published C22 run ended at −$216,092 and the C23 table below accounts for the difference.{% if _rb and _rb.prev %} The β step moves it by {{ _rb.d_pnl|usd_k }} (S1C {{ _rb.prev.s1c_pnl|usd_k }} → {{ _rb.s1c_pnl|usd_k }}, S1 {{ _rb.prev.s1_pnl|usd_k }} → {{ _rb.s1_pnl|usd_k }}){% endif %}{% if _rg %}; the single R2 gate by {{ _rg.d_pnl|usd_k }}{% endif %}.</p>
   {% endcall %}
   {% call m.panel('headline', 'Published result after each round', 's4') %}
-    {% if d.charts.headline %}{{ m.chart(d.charts.headline, 'h300') }}{% endif %}
+    {% if d.charts.headline %}{{ m.chart(d.charts.headline, 'h300 grow') }}{% endif %}
     <p class="note">C16 published no portfolio figure; C19 and C20 left it unchanged; C23 is the stored canonical run.</p>
   {% endcall %}
 </div>

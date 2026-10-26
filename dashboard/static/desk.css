@@ -515,6 +515,35 @@ dialog.keys h2 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 dialog.keys .dl { font-size: 12px; }
 
 /* ── responsive ──────────────────────────────────────────────────────── */
+/* Paired rows (P2.7). The template marks a row of two panels .pair (three:
+   .trio) instead of relying on :has(). Up to 1180 px the members of a pair
+   stack at full width (an s7 + s5 row used to become 12 + 6, a half-empty row);
+   a trio goes 6 + 6 + 12. From 1181 px the shorter panel's own content fills
+   the row's height: a .grow chart or heatmap grows, a .fill-scroll region takes
+   the rest and scrolls, so no panel ends in blank space; a .start row lets each
+   panel end with its content where nothing can grow. */
+.fill-scroll { max-height: 420px; overflow-y: auto; }
+.fill-scroll th { position: sticky; top: 0; z-index: 1; }
+.sub-head { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); margin-top: 14px; }
+.sub-head .sub-meta { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text3); margin-left: 6px; }
+@media (min-width: 1181px) {
+  .g.pair > .panel > .panel-body, .g.pair .grow-col { display: flex; flex-direction: column; }
+  .g.pair .grow-col { flex: 1 1 auto; }
+  .g.pair .panel-body .chart.grow { flex: 1 1 auto; }
+  .g.pair .panel-body .heat-wrap.grow { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .g.pair .panel-body .heat-wrap.grow > table.heat { flex: 1 1 auto; height: 100%; }
+  .g.pair .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
+  .g.pair .grow-col[hidden] { display: none; }
+  .g.pair.start { align-items: start; }
+}
+@media (max-width: 1180px) {
+  .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }
+  .g.evenfill > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
+/* phones: a heatmap's row header (the expiry) stays in view while its region scrolls sideways */
+@media (max-width: 599px) {
+  table.heat th[scope="row"] { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+}
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
   .s2, .s3 { grid-column: span 6; }

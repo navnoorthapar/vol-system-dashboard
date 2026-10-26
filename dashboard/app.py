@@ -2829,6 +2829,50 @@ def skew_term_spec(v: dict) -> dict:
             ["Session", "Expiry", "T (d)#", "SVI-cal#", "eSSVI#", "Heston published#", refit_lab], trows))
 
 
+def implied_beta_spec(rows: Sequence[dict], cols: Sequence[str], canonical: float | None) -> dict:
+    """The β that reprices each put-write index from β·VIX, by year (the table
+    beside it as a chart), against the backtest's fixed β."""
+    years = list(rows[0]["years"])
+    series = [{"name": r["index"], "type": "line", "color": "headline" if i == 0 else "info",
+               "dash": i > 0, "symbol": "circle", "size": 5, "width": 1.5, "legend": True,
+               "data": [r["years"].get(y) for y in years]} for i, r in enumerate(rows)]
+    return charts.xy(
+        "chart-implied-beta", "β implied by the put-write indices, by year, against the backtest's β",
+        x={"type": "category", "categories": list(cols), "name": ""},
+        y={"name": "Implied β", "digits": 2, "tipDigits": 3},
+        series=series, xs=list(cols), csv="implied_beta_by_year.csv",
+        marks=({"y": [{"value": canonical, "label": f"backtest β {_fmt(canonical, '.2f')}",
+                       "color": "muted"}]} if canonical is not None else None),
+        describe=("Per year, the β at which β·VIX reprices PUT and WPUT; the dashed line is the backtest's "
+                  "fixed β. A YTD year is partial (see the note under the table)."),
+        table=charts.table("β implied by the put-write indices by year", ["Index"] + [c + "#" for c in cols],
+                           [[r["index"]] + [_fmt(r["years"].get(y), ".2f") for y in years] for r in rows]))
+
+
+def gated_fits_spec(hist: Sequence[dict], session: str | None) -> dict | None:
+    """In-sample and out-of-sample SPX IV RMSE of every gated fit, by session."""
+    if len(hist) < 2:
+        return None
+    sess = [h["session"] for h in hist]
+    col = model_colour("heston_v2")
+    return charts.xy(
+        "chart-gated-fits", "SPX IV RMSE of every gated fit, in and out of sample, by session",
+        x={"type": "category", "categories": sess, "name": "", "interval": 0},
+        y={"name": "RMSE (vol pts)", "digits": 1, "tipDigits": 2, "zero": True},
+        series=[{"name": "Out of sample", "type": "line", "color": col, "symbol": "circle", "size": 6,
+                 "width": 1.5, "legend": True, "data": [h["oos"] for h in hist]},
+                {"name": "In sample", "type": "line", "color": col, "dash": True, "symbol": "circle",
+                 "size": 4, "width": 1.2, "legend": True, "data": [h["rmse"] for h in hist]}],
+        xs=sess, csv="gated_fits_rmse.csv",
+        marks={"x": [{"value": session, "label": "headline", "color": "muted"}]} if session in sess else None,
+        describe=("Each gate-passing fit's SPX implied-vol RMSE on its anchors (dashed) and on the quotes it "
+                  "did not use (solid), oldest first; the headline fit is marked."),
+        table=charts.table("SPX IV RMSE (vol pts) of the gated fits",
+                           ["Session", "In sample#", "Out of sample#", "Put wing OOS#"],
+                           [[h["session"], _fmt(h["rmse"], ".2f"), _fmt(h["oos"], ".2f"),
+                             _fmt(h.get("wing"), ".2f")] for h in hist]))
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
     from joint_vol_calibration.config import HESTON_BOUNDS
@@ -2838,6 +2882,9 @@ def calibration_extras(d: dict, cal: dict) -> None:
     hist = _gated_history()
     d["history"] = [{"session": h["session"], **{k: h["params"][k] for k, *_ in PARAM_META},
                      "oos": h["oos"], "rmse": h["rmse"], "vix": h["vix"]} for h in hist]
+    gated = gated_fits_spec(hist, session)
+    if gated:
+        d["charts"]["gated"] = gated
     diag = artifacts.calibration_diagnostics(cal, DATA, session)
     d["ident"] = diag
     d["ridge"] = sigma_ridge(diag, p)
@@ -3660,6 +3707,9 @@ def inference_extras(d: dict, inf: dict) -> None:
             d["implied_beta_note"] = "; ".join(notes) or None
         d["canonical_beta"] = _num(ib.get("canonical_beta"))
         d["bench_window"] = bm.get("window")
+        if d["implied_beta"]:
+            d["charts"]["implied_beta"] = implied_beta_spec(d["implied_beta"], d["implied_beta_cols"],
+                                                            d["canonical_beta"])
     # volatility-forecast evaluation (forecast_eval.json)
     fe = inf.get("forecast") or {}
     bw = fe.get("backtest_window") or {}
@@ -4386,15 +4436,18 @@ def violation_view(v: dict) -> dict:
     and the shortfall in index points and in dollars per SPX contract."""
     legs = v.get("legs") or []
     exps = list(dict.fromkeys(str(lg["expiry"])[:10] for lg in legs))
-    by = [f"{e} " + " ".join(f"{_weight(float(lg['weight']))} {lg['right']}{_fmt(float(lg['strike']), '.0f')}"
-                             for lg in legs if str(lg["expiry"])[:10] == e) for e in exps]
+    groups = [{"expiry": e,
+               "legs": [f"{_weight(float(lg['weight']))} {lg['right']}{_fmt(float(lg['strike']), '.0f')}"
+                        for lg in legs if str(lg["expiry"])[:10] == e]} for e in exps]
+    by = [f"{g['expiry']} " + " ".join(g["legs"]) for g in groups]
     rights = "/".join(dict.fromkeys(str(lg["right"]) for lg in legs))
     strikes = "/".join(dict.fromkeys(_fmt(float(lg["strike"]), ".0f") for lg in legs))
     short = f"{'/'.join(exps)} {rights} {strikes}"
     typ = str(v.get("type") or "")
     sf = _num(v.get("shortfall_index_points"))
     return {"type": typ, "label": typ.replace("_", " ", 1).replace("_", " "),
-            "constraint": ARB_LABELS.get(typ, typ), "legs": by, "short": short, "shortfall": sf,
+            "constraint": ARB_LABELS.get(typ, typ), "legs": by, "leg_groups": groups, "short": short,
+            "shortfall": sf,
             "usd": sf * SPX_MULTIPLIER if sf is not None else None, "executable": bool(v.get("executable"))}
 
 

@@ -5257,3 +5257,97 @@ def test_surface_history_heads_name_their_population(dash, pages):
                 v = next((x["median_abs_hs"] for x in oos
                           if x["session"] == r[0] and x["model"] == key), None)
                 assert cell == dash._fmt(v, ".2f"), (r[0], h)
+
+
+# ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
+
+def test_every_row_of_two_unequal_panels_is_marked_as_a_pair(pages):
+    """P2.7: below 1181 px an s7 + s5 (or s8 + s4) row became 12 + 6, a
+    half-empty row. Every grid row of two panels with unequal spans now carries
+    the template-set .pair class (no :has() dependency), and a row of three s4
+    panels .trio, so desk.css can stack or split them."""
+    n = 0
+    for route, html in pages.items():
+        # each grid row runs to the next one (a panel is a <section>; no section sits between rows)
+        for chunk in re.split(r'(?=<div class="g[ "])', html)[1:]:
+            cls = re.match(r'<div class="([^"]*)"', chunk).group(1).split()
+            body = chunk.split("</main>")[0]
+            spans = re.findall(r'<section class="panel (s\d+)', body)
+            spans = [s for s in spans if s != "s12"]
+            if len(spans) == 2 and spans[0] != spans[1]:
+                assert "pair" in cls, (route, spans, body[:200])
+                n += 1
+            if len(spans) == 3 and set(spans) == {"s4"}:
+                assert "trio" in cls, (route, spans)
+    assert n >= 10
+
+
+_LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
+  const vis = el => { const b = el.getBoundingClientRect(), s = getComputedStyle(el);
+    return b.width > 0 && b.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const holes = [], blanks = [];
+  document.querySelectorAll('.g').forEach(g => {
+    const gap = parseFloat(getComputedStyle(g).columnGap) || 0, rows = {};
+    [...g.children].filter(vis).forEach(k => {
+      const t = Math.round(k.getBoundingClientRect().top); (rows[t] = rows[t] || []).push(k); });
+    Object.values(rows).forEach(ks => {
+      const used = ks.reduce((a, k) => a + k.getBoundingClientRect().width, 0) + gap * (ks.length - 1);
+      const unused = g.getBoundingClientRect().width - used;
+      if (unused > maxUnused) holes.push(ks.map(k => k.id).join('+') + ' ' + Math.round(unused));
+    });
+  });
+  document.querySelectorAll('.panel').forEach(p => {
+    if (!vis(p) || exempt.includes(p.id)) return;
+    let last = -Infinity;
+    p.querySelectorAll('.panel-body *').forEach(el => {
+      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only')) return;
+      last = Math.max(last, el.getBoundingClientRect().bottom);
+    });
+    if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
+      blanks.push(p.id + ' ' + Math.round(p.getBoundingClientRect().bottom - last));
+  });
+  return {holes, blanks};
+}"""
+
+
+@pytest.mark.parametrize("width", [1024, 1440])
+def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_browser, width):
+    """P2.7 (also in scripts/ci/a11y/interact.mjs at 1024, 1280, 1440 and 1920 px):
+    no grid row leaves more than 60 px unused, and no panel ends more than 96 px
+    below its last visible content once its charts are drawn (#carry and #forward
+    have their own fixes in flight)."""
+    ctx, page = _page(site_browser, width, 900)
+    try:
+        for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",
+                     "corrections.html", "model-risk.html"):
+            page.goto(site_browser["base"] + name, wait_until="load")
+            h = page.evaluate("document.documentElement.scrollHeight")
+            for y in range(0, h, 700):
+                page.evaluate(f"window.scrollTo(0, {y})")
+                page.wait_for_timeout(40)
+            page.wait_for_timeout(300)
+            r = page.evaluate(_LAYOUT_JS, [60, 96, ["carry", "forward"]])
+            assert r == {"holes": [], "blanks": []}, (name, width, r)
+    finally:
+        ctx.close()
+
+
+def test_browser_heatmap_row_head_stays_in_view_on_a_phone(site_browser):
+    ctx, page = _page(site_browser, 390, 844)
+    try:
+        page.goto(site_browser["base"] + "surface.html", wait_until="load")
+        st = page.evaluate("""async () => {
+          const wrap = document.getElementById('iv-heatmap').closest('.heat-wrap');
+          wrap.scrollIntoView({block: 'center'});
+          const before = wrap.querySelector('tbody th[scope=row]').getBoundingClientRect().left;
+          wrap.scrollLeft = 200;
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const th = wrap.querySelector('tbody th[scope=row]').getBoundingClientRect();
+          return {scrolled: wrap.scrollLeft, before, left: th.left, right: th.right,
+                  wrapLeft: wrap.getBoundingClientRect().left, vw: innerWidth}; }""")
+        assert st["scrolled"] > 100, st
+        assert st["left"] >= st["wrapLeft"] - 1, st
+        assert st["right"] <= st["vw"], st
+        assert abs(st["left"] - st["before"]) < 2, st
+    finally:
+        ctx.close()

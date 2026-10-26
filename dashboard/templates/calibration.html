@@ -90,14 +90,14 @@
   {% endif %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('oos', 'Out-of-sample error by expiry', 's7', (d.n_oos|fmt(',')) ~ ' quotes') %}
-    {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h300') }}
+    {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h300 grow') }}
     <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors. The short end is where a one-factor model with σ on its box ceiling fails.</p>
     {% else %}<p class="note">This fit stores no out-of-sample errors by expiry.</p>{% endif %}
   {% endcall %}
   {% call m.panel('vixleg', 'VIX leg · indices, market and model', 's5', d.session) %}
-    {% if d.charts.vix %}{{ m.chart(d.charts.vix, 'h300') }}
+    {% if d.charts.vix %}{{ m.chart(d.charts.vix, 'h300 grow') }}
     <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's expected average vol to each horizon. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
     {% else %}<p class="note">No VIX leg recorded.</p>{% endif %}
   {% endcall %}
@@ -138,7 +138,7 @@
 <h2 class="section-title">Smiles by anchor expiry</h2>
 {% set src = d.smile_source or {} %}
 {% if src.state != 'ok' %}{{ m.missing(src, 'Market bid–ask quotes and the model at the quoted strikes need the per-quote residual table for ' ~ (d.session or 'this session') ~ '; until it exists each panel shows the model smile only.') }}{% endif %}
-<div class="g" style="margin-top:8px;">
+<div class="g evenfill" style="margin-top:8px;">
   {% for s in d.smiles %}
   {% call m.panel('smile-' ~ s.expiry, s.expiry ~ ' · ' ~ (s.T_days|fmt('.0f')) ~ ' days', 's4', ((s.n|fmt) ~ ' anchors') if s.n else None) %}
     {{ m.chart(s.spec, 'h220') }}
@@ -147,7 +147,7 @@
   {% endfor %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('identifiability', 'Identifiability · multi-start and Jacobian', 's7') %}
     {% set idn = d.ident or {} %}
     {% if idn.state == 'ok' %}{% set I = idn.ident %}
@@ -184,7 +184,8 @@
       <tbody>{% for h in d.history|reverse %}<tr{% if h.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ h.session }}</td><td class="num">{{ h.kappa|fmt('.2f') }}</td><td class="num">{{ h.theta|fmt('.4f') }}</td><td class="num">{{ h.sigma|fmt('.3f') }}</td><td class="num">{{ h.rho|fmt('.3f') }}</td><td class="num">{{ h.v0|fmt('.4f') }}</td><td class="num">{{ h.rmse|fmt('.2f') }}</td><td class="num">{{ h.oos|fmt('.2f') }}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">In-sample and out-of-sample SPX IV RMSE in vol pts. Compare day-to-day moves with the standard errors in the identifiability panel.</p>
+    <p class="note">In-sample and out-of-sample SPX IV RMSE in vol pts. Compare session-to-session moves with the standard errors in the identifiability panel.</p>
+    {% if d.charts.gated %}{{ m.chart(d.charts.gated, 'h180 grow') }}{% endif %}
   {% endcall %}
 </div>
 
@@ -232,11 +233,11 @@
   {% endcall %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('model-smile', 'Model smile of this fit · all maturities', 's7', d.session) %}
     {% set sm = d.mat_smiles %}
     {% set spec = d.charts.model_smile %}
-    {% if spec %}{{ m.chart(spec, 'h300') }}{% endif %}
+    {% if spec %}{{ m.chart(spec, 'h300 grow') }}{% endif %}
     <div class="chart-data sr-only" id="model-smile-cells">
       <table><caption>Model implied vol (%) by maturity: lowest, nearest-the-money and highest ln(K/F) plotted</caption>
         <thead><tr><th scope="col">Maturity</th><th scope="col">Lowest ln(K/F)</th><th scope="col">Near the money</th><th scope="col">Highest ln(K/F)</th></tr></thead>

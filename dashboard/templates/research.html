@@ -68,7 +68,7 @@
   {% call m.panel('rolling', 'Rolling 126-session Sharpe', 's6') %}{% if d.charts.rolling %}{{ m.chart(d.charts.rolling, 'h180') }}{% endif %}{% endcall %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('sleeves', 'Per-sleeve performance', 's8') %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Per-sleeve performance (scrollable)">
     <table class="tbl" id="sleeve-table">
@@ -79,21 +79,21 @@
     <p class="note">S3 is a short SPX straddle: the index leg of a dispersion trade, with no single-name leg (the store has no single-stock options). S1 and S2 are reference strategies, not in the portfolio. Sharpe: {{ d.sharpe_convention or 'convention not recorded in the stored results' }}.
     {% for t in d.open_trades %}{{ t.signal|upper }}'s count includes a straddle opened on the last session ({{ t.entry }}) and still open, carrying only its entry cost ({{ t.net_pnl|usd(true) }}); the engine's win rate counts it as a loss.{% endfor %}</p>
   {% endcall %}
-  {% call m.panel('sleeve-pnl', 'Total P&L by sleeve', 's4', '$000s') %}{% if d.charts.sleeves %}{{ m.chart(d.charts.sleeves, 'h220') }}{% endif %}{% endcall %}
+  {% call m.panel('sleeve-pnl', 'Total P&L by sleeve', 's4', '$000s') %}{% if d.charts.sleeves %}{{ m.chart(d.charts.sleeves, 'h220 grow') }}{% endif %}{% endcall %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('monthly', 'Monthly returns', 's7', 'against the prior month-end NAV') %}
-    {% if d.monthly %}{{ m.heatmap(d.monthly, 'monthly-grid', 'Portfolio return (%) by month; the last column is the calendar year', 'Year', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain', 'blue gain, orange loss; the sign is in every cell')) }}{% endif %}
+    {% if d.monthly %}{{ m.heatmap(d.monthly, 'monthly-grid', 'Portfolio return (%) by month; the last column is the calendar year', 'Year', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], 'loss', 'gain', 'blue gain, orange loss; the sign is in every cell'), grow=True) }}{% endif %}
   {% endcall %}
   {% call m.panel('annual', 'Annual return and half-year Sharpe', 's5') %}
-    {% if d.charts.annual %}{{ m.chart(d.charts.annual, 'h180') }}{% endif %}
-    {% if d.charts.halfyear %}{{ m.chart(d.charts.halfyear, 'h220') }}{% endif %}
+    {% if d.charts.annual %}{{ m.chart(d.charts.annual, 'h180 grow') }}{% endif %}
+    {% if d.charts.halfyear %}{{ m.chart(d.charts.halfyear, 'h220 grow') }}{% endif %}
     <p class="note">Years compound exactly to the cumulative return{% if d.ann_partial_note %} ({{ d.ann_partial_note|dates }}){% endif %}. <strong class="neg">{{ d.wf_neg|fmt }}</strong> of {{ d.wf_total|fmt }} half-years are negative{% if d.wf_flat %} · {{ d.wf_flat }} flat{% endif %}. Sub-periods of one run: nothing is refitted per window, so this is not walk-forward evidence.</p>
   {% endcall %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('inference', 'Inference · intervals, nulls, multiple testing', 's7', 'mark-to-model P&L') %}
     {% if inf.state == 'ok' %}
       {% set bs = d.boot_settings or {} %}
@@ -151,6 +151,7 @@
       </table>
       </div>
       {% if d.implied_beta_note %}<p class="note" id="implied-beta-note"><span aria-hidden="true">* </span>Partial year. {{ d.implied_beta_note|dates }}.</p>{% endif %}
+      {% if d.charts.implied_beta %}{{ m.chart(d.charts.implied_beta, 'h180 grow') }}{% endif %}
       {% endif %}
     {% else %}
       {{ m.missing({'paths': ['data_store/backtest/inference/benchmarks.json'], 'producer': 'the inference report (scripts/inference_report.py, joint_vol_calibration/stats)'}, 'Correlation, β and excess Sharpe of each sleeve against Cboe PUT, WPUT, BXM, BFLY and CNDR, which settle on real prices, and the β each put-write index implies.') }}
@@ -158,7 +159,7 @@
   {% endcall %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('forward', 'Forward test · pre-registered, executable prices', 's7') %}
     {% set fw = d.forward or {} %}
     {% if fw.state == 'ok' %}
@@ -197,7 +198,7 @@
 
 {% set grid = b.get('grid') or [] %}
 {% if be or grid %}
-<div class="g" id="beta">
+<div class="g pair" id="beta">
   {% call m.panel('beta-chains', 'β = ATM vol / VIX · the chains behind it', 's6') %}
     {% if be %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β estimation chains (scrollable)">
@@ -224,7 +225,7 @@
 </div>
 {% endif %}
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('why', 'Why the edge disappeared', 's8') %}
     <div class="prose">
       <p>Priced at {{ beta_txt }} × VIX, S1 is {{ s1.get('total_pnl')|usd_k }} ({{ s1.get('win_rate')|pct(0, false) }} win){% if s1f %}, and its sign flips between β = {{ s1f.lo|fmt('.2f') }} and {{ s1f.hi|fmt('.2f') }}{% endif %}. The contrarian inversion S1C is {{ s1c.get('total_pnl')|usd_k }}, so neither direction of the PDV-spread trade makes money. The portfolio is {{ k.get('cum_ret')|pct }} cumulative (Sharpe {{ k.get('sharpe')|fmt(".2f") }}, max drawdown {{ k.get('mdd')|pct }}); S3 ({{ s3.get('total_pnl')|usd_k }}, {{ s3.get('win_rate')|pct(0, false) }} win) is the only positive sleeve, {{ s3_beta_txt }}, and below the T-bill return.</p>
@@ -257,7 +258,7 @@
 </div>
 
 <h2 class="section-title" id="research-prototypes">Research prototypes · not used for trading</h2>
-<div class="g">
+<div class="g pair start">
   {% set c = d.clf or {} %}
   {% call m.panel('research-classifier', 'ML regime classifier · research only', 's6') %}
     {% if c.clf_available %}

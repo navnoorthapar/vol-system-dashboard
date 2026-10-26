@@ -69,8 +69,8 @@
 {{ data_table(spec.table, cid ~ '-data') }}
 {%- endmacro %}
 
-{% macro heatmap(h, id, caption, row_head='T', ramp=None) -%}
-<div class="heat-wrap" tabindex="0" role="region" aria-labelledby="{{ id }}-cap">
+{% macro heatmap(h, id, caption, row_head='T', ramp=None, grow=False) -%}
+<div class="heat-wrap{% if grow %} grow{% endif %}" tabindex="0" role="region" aria-labelledby="{{ id }}-cap">
   <table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}>
     <caption id="{{ id }}-cap">{{ caption }}</caption>
     <thead><tr><th scope="col">{{ row_head }}</th>{% for c in h.cols %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>

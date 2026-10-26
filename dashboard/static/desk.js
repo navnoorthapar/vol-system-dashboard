@@ -480,6 +480,15 @@
         Object.keys(Desk.charts).forEach(function (k) { var c = Desk.charts[k]; if (c.early) render(c.el); });
       });
     }
+    // a chart that grows to its row's height (.grow, a paired row) is resized
+    // when the row settles (fonts, a neighbour drawn, a tab), not only when the
+    // window is
+    if ('ResizeObserver' in window) {
+      var ro = new ResizeObserver(function (entries) {
+        entries.forEach(function (e) { var c = Desk.charts[e.target.id]; if (c) c.chart.resize(); });
+      });
+      $$('.chart.grow[data-spec]').forEach(function (el) { ro.observe(el); });
+    }
     var t;
     window.addEventListener('resize', function () {
       clearTimeout(t);

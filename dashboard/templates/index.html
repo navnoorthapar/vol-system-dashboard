@@ -46,7 +46,7 @@
 </div>
 <p class="note" style="margin:0 0 12px;">Every figure is read from the committed artifact named under it. A half-spread is half the quoted bid–ask in implied-vol terms, so a model within one half-spread of the mid sits inside the quote. Backtest dollars are mark-to-model, never traded fills.</p>
 
-<div class="g">
+<div class="g trio">
   {% call m.panel('state-regime', 'Regime · rule label', 's4', d.regime_date) %}
     {% if d.regime is not none %}
     <div class="kpi-value" style="display:flex;align-items:center;gap:8px;">
@@ -132,7 +132,7 @@
   {% endcall %}
 </div>
 
-<div class="g">
+<div class="g pair">
   {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session) %}
     <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
       {{ m.kpi('SPX RMSE in sample', f.spx_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_spx_options|fmt) ~ ' anchors, ' ~ (f.n_spx_expiries|fmt) ~ ' expiries') }}
