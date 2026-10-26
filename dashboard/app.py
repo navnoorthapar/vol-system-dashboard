@@ -3842,6 +3842,14 @@ def _clean_keep(d: dict) -> dict:
 CORRECTIONS_PATH = DASH / "corrections.json"
 
 
+def concise_label(label: str) -> str:
+    """A step name without its trailing parenthetical ('R2 gate = upstream default
+    (adaptive (rolling 80th pct))' -> 'R2 gate = upstream default'): the axis label
+    desk.js falls back to where the full name does not fit its band. The tooltip
+    and the chart's table keep the full name."""
+    return re.sub(r"\s*\((?:[^()]|\([^()]*\))*\)\s*$", "", label).strip() or label
+
+
 def waterfall_spec(bridge: list[dict]) -> dict:
     """C22 waterfall as stacked bars: an invisible base plus the step, in $000s.
 
@@ -3853,7 +3861,10 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     is a negative segment below zero), so the spec carries its own CSV rows
     (step, Δ P&L, P&L after) and tooltip lines, and each step bar's tip is set
     only where that bar is drawn. Bars run horizontally: seventeen step names
-    collided when rotated under a vertical chart on a phone.
+    collided when rotated under a vertical chart on a phone. desk.js wraps each
+    name into the lines its band holds (labelShare / labelMax bound the label
+    column; labelsShort are the concise names it falls back to), so no name is
+    cut with an ellipsis as it was ('PDV spread: 21-day RMS-vol forecast (daily pur...').
     """
     start = float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])
     levels = [start] + [float(r["pnl"]) for r in bridge]
@@ -3913,7 +3924,11 @@ def waterfall_spec(bridge: list[dict]) -> dict:
                            [["—", "C21 as published", "", _usd(start), ""]]
                            + [[r["row"], r["label"], _usd(r["d_pnl"], signed=True), _usd(r["pnl"]),
                                _fmt(r["sharpe"], ".2f")] for r in bridge]))
-    spec["labelShare"], spec["labelMax"] = 0.36, 300      # desk.js sizes the step names to the width
+    spec["labelShare"], spec["labelMax"] = 0.45, 380      # desk.js wraps the step names in that column
+    spec["labelFont"] = "sans"                             # names, not numbers
+    short = [concise_label(c) for c in cats]
+    if short != cats:
+        spec["labelsShort"] = short
     spec["tipRows"] = [{"name": "P&L after", "data": round_sig(after), "digits": 1, "signed": True}]
     spec["csv_rows"] = {
         "columns": ["row", "step", "d_pnl_usd", "pnl_after_usd", "sharpe_after"],

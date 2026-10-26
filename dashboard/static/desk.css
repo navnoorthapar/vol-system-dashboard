@@ -479,7 +479,7 @@ dialog.keys .dl { font-size: 12px; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
   .chart.h300, .chart.h340, .chart.h400, .chart.h440 { height: 260px; }
-  .chart.tall-narrow { height: 480px; }      /* one row per category (the C22 waterfall) */
+  .chart.tall-narrow { height: 680px; }      /* one row per category (the C22 waterfall): three lines of a wrapped step name */
 }
 /* Text-heavy tables (.tbl.cards) in a region narrower than 640 px (a phone, or a
    narrow panel): each row a card, each cell a field labelled from its data-label,

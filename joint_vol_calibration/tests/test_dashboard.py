@@ -3557,3 +3557,58 @@ def test_browser_text_tables_become_labelled_cards_on_a_phone(site_browser):
                         assert _ax_count(cdp, tid, "cell") == st["n_cells"], (tid, "cells")
         finally:
             ctx.close()
+
+
+_WATERFALL_LABELS_JS = """() => {
+  const c = Desk.charts['chart-waterfall'], L = c.labels, spec = c.spec;
+  const ctx = document.createElement('canvas').getContext('2d'); ctx.font = L.font;
+  return {cats: spec.x.categories, short: spec.labelsShort || [], lines: L.lines, used: L.short,
+          maxLines: L.maxLines, band: L.band, lineHeight: L.lineHeight, width: L.width,
+          widest: Math.max(...L.lines.flat().map(x => ctx.measureText(x).width)),
+          overflow: c.chart.getOption().yAxis[0].axisLabel.overflow,
+          gridLeft: c.chart.getOption().grid[0].left};
+}"""
+
+
+def test_browser_waterfall_step_names_are_never_truncated(site_browser):
+    """P4: the C22 waterfall cut its step names with an ellipsis ('PDV spread:
+    21-day RMS-vol forecast (daily pur...') at every width. desk.js now wraps each
+    name into the lines its band holds; where the full name would need more, the
+    concise name (without its trailing parenthetical) is drawn and the tooltip and
+    table keep the full one. At 1440 px every name is drawn in full; at no width
+    is a name cut, wider than its column or taller than its band."""
+    sb = site_browser
+    for width in (1440, 1024, 390, 320):
+        ctx, page = _page(sb, width, 900)
+        try:
+            page.goto(sb["base"] + "corrections.html", wait_until="load")
+            page.wait_for_function("window.Desk && Desk.charts['chart-waterfall'] "
+                                   "&& document.fonts.status === 'loaded'")
+            page.wait_for_timeout(200)
+            st = page.evaluate(_WATERFALL_LABELS_JS)
+            assert st["overflow"] != "truncate", width
+            for i, (cat, lines) in enumerate(zip(st["cats"], st["lines"])):
+                drawn = " ".join(lines)
+                assert drawn == (st["short"][i] if i in st["used"] else cat), (width, cat, lines)
+                assert not re.search(r"…|\.\.\.", drawn), (width, drawn)
+                assert len(lines) <= st["maxLines"], (width, cat, lines)
+            assert st["maxLines"] * st["lineHeight"] <= st["band"] + 0.5, (width, st)
+            assert st["widest"] <= st["width"] + 1, (width, st["widest"], st["width"])
+            assert st["gridLeft"] >= st["width"], width
+            if width == 1440:
+                assert st["used"] == [], st
+            table = page.evaluate("[...document.querySelectorAll("
+                                  "'#chart-waterfall-data tbody td:nth-child(2)')].map(td => td.textContent)")
+            assert set(st["cats"][1:-1]) <= set(table)          # the table keeps every full name
+        finally:
+            ctx.close()
+
+
+def test_waterfall_concise_names_drop_only_a_trailing_parenthetical(dash):
+    assert dash.concise_label("R2 gate = upstream default (adaptive (rolling 80th pct))") == \
+        "R2 gate = upstream default"
+    assert dash.concise_label("PDV spread: 21-day RMS-vol forecast (daily purged refit)") == \
+        "PDV spread: 21-day RMS-vol forecast"
+    assert dash.concise_label("VIX tenors 9/30/93/184d, 365-day year") == \
+        "VIX tenors 9/30/93/184d, 365-day year"
+    assert dash.concise_label("(only a parenthetical)") == "(only a parenthetical)"

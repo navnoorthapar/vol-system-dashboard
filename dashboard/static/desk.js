@@ -215,7 +215,60 @@
     };
   }
 
-  function buildOption(spec, T, filter, width) {
+  // -- category names longer than a horizontal chart's label column (the C22
+  //    waterfall's steps) --
+  // Each name wraps at its spaces into the lines its band holds, in a column no
+  // wider than the longest name needs, up to labelShare of the chart and labelMax
+  // px. A name that would need more lines falls back to its concise form
+  // (spec.labelsShort: the name without its trailing parenthetical; the tooltip and
+  // the table keep the full name); if one still does not fit, the column widens,
+  // up to 0.6 of the chart. Nothing is cut with an ellipsis.
+  var LABEL_SIZE = 10.5, LABEL_LINE = 13, measureCtx = null;
+  function textWidth(s, font) {
+    if (!measureCtx) measureCtx = doc.createElement('canvas').getContext('2d');
+    measureCtx.font = font;
+    return measureCtx.measureText(s).width;
+  }
+  function wrapWords(s, w, font) {
+    var lines = [], cur = '';
+    String(s).split(' ').forEach(function (word) {
+      var t = cur ? cur + ' ' + word : word;
+      if (!cur || textWidth(t, font) <= w) cur = t; else { lines.push(cur); cur = word; }
+    });
+    if (cur) lines.push(cur);
+    return lines;
+  }
+  function labelLayout(spec, T, width, height, grid) {
+    var cats = ((spec.x && spec.x.categories) || spec.xs || []).map(String);
+    var short = spec.labelsShort || [];
+    var font = LABEL_SIZE + 'px ' + (spec.labelFont === 'sans' ? T.sans : T.mono);
+    var band = (height - grid.top - grid.bottom) / Math.max(1, cats.length);
+    var maxLines = Math.max(1, Math.floor(band / LABEL_LINE));
+    var cap = Math.max(90, Math.min(spec.labelMax || 300, Math.round(width * spec.labelShare)));
+    var widest = 0;
+    cats.forEach(function (c) { widest = Math.max(widest, textWidth(c, font)); });
+    function lay(w) {
+      var used = [];
+      var lines = cats.map(function (c, i) {
+        var l = wrapWords(c, w, font);
+        if (l.length > maxLines && short[i] && short[i] !== c) { l = wrapWords(short[i], w, font); used.push(i); }
+        return l;
+      });
+      var most = Math.max.apply(null, lines.map(function (l) { return l.length; }));
+      return { width: w, lines: lines, short: used, most: most };
+    }
+    var w = Math.min(cap, Math.ceil(widest) + 1), L = lay(w);
+    var wMax = Math.max(w, Math.min(spec.labelMax || 300, Math.round(width * 0.6)));
+    while (L.most > maxLines && w < wMax) { w = Math.min(wMax, w + 4); L = lay(w); }
+    L.font = font; L.size = LABEL_SIZE; L.lineHeight = LABEL_LINE; L.band = band; L.maxLines = maxLines;
+    L.text = L.lines.map(function (l) { return l.join('\n'); });
+    L.widest = Math.max.apply(null, L.lines.map(function (l) {
+      return Math.max.apply(null, l.map(function (x) { return textWidth(x, font); }));
+    }));
+    return L;
+  }
+
+  function buildOption(spec, T, filter, width, height, out) {
     var opt = {
       animation: false, backgroundColor: 'transparent',
       textStyle: { fontFamily: T.sans, color: T.text2 },
@@ -232,12 +285,15 @@
       opt.xAxis.axisLine = { show: true, lineStyle: { color: T.line2 } }; opt.yAxis[0].inverse = true;
       opt.yAxis[0].axisLabel.rotate = 0; opt.yAxis[0].nameGap = 0;
       opt.series.forEach(function (s) { s.data = (s.data || []).map(function (d) { return Array.isArray(d) ? [d[1], d[0]] : d; }); });
-      // long category labels (a waterfall's step names): a share of the chart's
-      // width, truncated with an ellipsis, so they never overlap on a phone
+      // long category labels (a waterfall's step names): wrapped, never truncated
       if (spec.labelShare && width) {
-        var lw = Math.max(90, Math.min(spec.labelMax || 300, Math.round(width * spec.labelShare)));
-        opt.grid.left = lw + 10;
-        Object.assign(opt.yAxis[0].axisLabel, { width: lw, overflow: 'truncate', hideOverlap: false, interval: 0 });
+        var L = labelLayout(spec, T, width, height || 0, opt.grid);
+        opt.grid.left = L.width + 10;
+        Object.assign(opt.yAxis[0].axisLabel, {
+          width: L.width + 2, overflow: 'none', lineHeight: L.lineHeight, hideOverlap: false, interval: 0,
+          fontSize: L.size, fontFamily: spec.labelFont === 'sans' ? T.sans : T.mono,
+          formatter: function (v, i) { return L.text[i] !== undefined ? L.text[i] : v; } });
+        if (out) out.labels = L;
       }
     }
     if (spec.zoom) {
@@ -315,7 +371,8 @@
     if (!spec) return null;
     var inst = window.echarts.getInstanceByDom(el) || window.echarts.init(el, null, { renderer: 'canvas' });
     var f = Desk.filters[el.id];
-    var opt = buildOption(spec, theme(print), f, el.clientWidth);
+    var built = {};
+    var opt = buildOption(spec, theme(print), f, el.clientWidth, el.clientHeight, built);
     // shown = in the tab's group (the smile expiry) and not toggled off
     var off = legendOff(el.id), sel = {};
     (spec.series || []).forEach(function (s) {
@@ -326,7 +383,7 @@
     opt.legend.selected = sel;
     inst.setOption(opt, true);
     // drawn before the web fonts arrived: drawn again once they have (canvas text keeps its font)
-    Desk.charts[el.id] = { el: el, chart: inst, spec: spec, early: !fontsReady };
+    Desk.charts[el.id] = { el: el, chart: inst, spec: spec, early: !fontsReady, labels: built.labels };
     return inst;
   }
   function renderAll(print) { $$('.chart[data-spec]').forEach(function (el) { render(el, print); }); }
