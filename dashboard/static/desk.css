@@ -621,6 +621,10 @@ dialog.keys .dl { font-size: 12px; }
   .g:is(.pair, .level) .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
   .g:is(.pair, .level) .grow-col[hidden] { display: none; }
   .g.pair.start { align-items: start; }
+  /* an open disclosure makes its panel taller than the row was laid out for; the
+     panel beside it then ends with its own content instead of stretching a chart
+     (a 0.55–0.95 β range drawn 1,359 px tall) or a blank 1,250 px body (F3) */
+  .g:is(.pair, .level):has(details[open]) { align-items: start; }
 }
 /* a trio's shorter panel ends with its disclosure, not with blank space (side by
    side from 861 px: 4 + 4 + 4, or 6 + 6 + 12 up to 1180 px) */
@@ -628,6 +632,7 @@ dialog.keys .dl { font-size: 12px; }
   .g.trio > .panel > .panel-body { display: flex; flex-direction: column; }
   .g.trio > .panel > .panel-body > .method.foot { margin-top: auto; padding-top: 8px; }
   .g.trio .panel-body .chart.grow { flex: 1 1 auto; }
+  .g.trio:has(details[open]) { align-items: start; }
 }
 @media (max-width: 1180px) {
   .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }

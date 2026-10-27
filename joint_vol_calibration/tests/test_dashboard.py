@@ -3878,6 +3878,52 @@ def test_browser_panels_beside_taller_ones_carry_no_large_blank(site_browser):
         ctx.close()
 
 
+_OPEN_ALL_JS = """() => { document.querySelectorAll('.g details').forEach(d => { d.open = true; }); }"""
+_PANEL_FIT_JS = """id => { const p = document.getElementById(id);
+  let last = -Infinity;
+  p.querySelectorAll('.panel-body *').forEach(el => { const b = el.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0 && !el.closest('details:not([open]) > :not(summary)'))
+      last = Math.max(last, b.bottom); });
+  const charts = [...p.querySelectorAll('.chart.grow')]
+    .map(c => Math.round(c.getBoundingClientRect().height));
+  return {blank: Math.round(p.getBoundingClientRect().bottom - last), charts: charts}; }"""
+
+
+def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_beside_it(site_browser):
+    """F3: opening a <details> made its panel taller than the row; the panel
+    beside it stretched with it: at 1440 px 'Why the edge disappeared' ended
+    1,250 px below its text beside the open change log, and the implied-β chart
+    grew to 1,359 px for a 0.55–0.95 range beside the open inference notes,
+    exaggerating its year-to-year swings. A row with an open disclosure now lets
+    each panel end with its own content, and no grow chart exceeds 420 px."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "research.html", wait_until="load")
+        page.evaluate(_OPEN_ALL_JS)
+        page.locator("#chart-implied-beta").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-implied-beta")
+        page.wait_for_timeout(300)
+        for pid in ("why", "limits", "benchmarks", "inference"):
+            fit = page.evaluate(_PANEL_FIT_JS, pid)
+            assert fit["blank"] <= 96, (pid, fit)
+            assert all(h <= 420 for h in fit["charts"]), (pid, fit)
+        # the Surface's variance-swap strip beside its open replication notes (F9: 1,250 px)
+        page.goto(site_browser["base"] + "surface.html", wait_until="load")
+        page.evaluate(_OPEN_ALL_JS)
+        rows = page.evaluate("""() => [...document.querySelectorAll('.g.pair, .g.level, .g.trio')]
+          .filter(g => g.querySelector('details[open]'))
+          .flatMap(g => [...g.children].filter(p => p.classList.contains('panel')).map(p => p.id))""")
+        assert "varswap" in rows, rows
+        for pid in rows:
+            page.locator("#" + pid).scroll_into_view_if_needed()
+            page.wait_for_timeout(150)
+            fit = page.evaluate(_PANEL_FIT_JS, pid)
+            assert fit["blank"] <= 96, (pid, fit)
+            assert all(h <= 420 for h in fit["charts"]), (pid, fit)
+    finally:
+        ctx.close()
+
+
 # ── P1 trust pass ─────────────────────────────────────────────────────────────
 
 _SIGNED_FILLS_JS = """cid => {
