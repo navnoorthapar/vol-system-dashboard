@@ -4702,8 +4702,11 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, "
             f"{svi['inside_spread_pct']:.1f}% inside") in works
     rep = json.loads(_surface_file("vix_replication.json").read_text())
-    gap = rep["indices"]["VIX"]["gap_vs_official"]
-    assert f"{dash.signed(gap, '.2f')} index pts from the Cboe close" in works
+    gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
+    if gap is None:     # a session whose chain does not replicate the VIX: no replication line
+        assert "index pts from the Cboe close" not in works
+    else:
+        assert f"{dash.signed(gap, '.2f')} index pts from the Cboe close" in works
     rows = dash.scan_calibrations()
     n_legacy = sum(1 for r in rows if r["legacy"])
     assert f"{n_legacy:,} pre-C22 fit" in works
@@ -6053,7 +6056,11 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
     with_history = [m for m in d["monitors"] if m["history"]]
     assert len(with_history) >= 6
     for m in with_history:
-        assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
+        if m["num"] is None:        # today's session cannot compute it: no dot stands in for today
+            assert m["history"]["last"] is None, m["check"]
+            assert m["history"]["today_missing"], m["check"]
+        else:
+            assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
         lim = dash.MONITOR_LIMITS[m["limits_key"]]
         assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(x["value"], lim)
                                                                for x in m["history"]["dots"]]

@@ -74,3 +74,20 @@ def test_slugs_are_ascii_ids():
     assert dmo.slug("oos_rmse") == "oos-rmse"
     assert dmo.slug("β drift: newest chain's ATM vol / VIX") == "beta-drift-newest-chain-s-atm-vol-vix"
     assert dmo.slug("") == "check"
+
+
+def test_history_never_shows_an_earlier_session_as_today():
+    """A check today's session cannot compute (None) keeps the earlier dots but
+    ranks nothing and reports no value for today, instead of promoting the
+    previous session's value to 'today'."""
+    h = dmo.history_view([("a", 1.0), ("b", 2.0), ("c", None)], (1.5, 3.0))
+    assert h["last"] is None
+    assert h["today_missing"]
+    assert h["rank"] is None
+    assert [d["session"] for d in h["dots"]] == ["a", "b"]
+    assert h["last_session"] == "b"
+    full = dmo.history_view([("a", 1.0), ("b", 2.0), ("c", 0.5)], (1.5, 3.0))
+    assert full["last"] == 0.5
+    assert not full["today_missing"]
+    assert full["rank"] == "best of 3"
+
