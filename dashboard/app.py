@@ -5274,7 +5274,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
         cells += [tint(signed(r.get("skew_vp"), ".2f"), None), tint(_fmt(r.get("vs"), ".2f"), None),
                   tint(signed(r.get("vs_minus_atmf"), ".2f"), None),
                   tint(_fmt(r.get("half_spread_vp"), ".2f"), None), tint(_fmt(r.get("n_quotes"), ","), None)]
-        return {"head": head, "sub": sub, "cells": cells, "available": r.get("available", True)}
+        return {"head": head, "sub": sub, "sub2": "", "cells": cells, "available": r.get("available", True)}
 
     rows_l = [{**row(r, r["expiry"]), "exp": str(r["expiry"])} for r in listed]
     rows_c = []
@@ -5285,7 +5285,13 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
             sub = f"= {_short_exp(r['lower'])}"
         else:
             sub = f"{_short_exp(r['lower'])} → {_short_exp(r['upper'])}"
-        rows_c.append(row(r, r["label"], sub))
+        # the strike counts of the two strips the VS vol interpolates: a thin
+        # strip on one side moves the constant-maturity VS (R3-T1)
+        n_lo, n_hi = r.get("strikes") or (None, None)
+        sub2 = ("" if not r["available"] or n_lo is None or n_hi is None else
+                f"{_fmt(n_lo, ',')} VS strikes" if r["lower"] == r["upper"] else
+                f"{_fmt(n_lo, ',')} / {_fmt(n_hi, ',')} VS strikes")
+        rows_c.append({**row(r, r["label"], sub), "sub2": sub2})
     n_xp = sum(1 for r in listed for k in keys if r["extrap"][k])
     return {"heads": list(DESK_GRID_HEADS), "listed": rows_l, "cm": rows_c, "vol_lo": lo, "vol_hi": hi,
             "rr_lim": rr_lim, "bf_lim": bf_lim, "n_extrap": n_xp, "extrap_tag": EXTRAP_TAG,
@@ -5508,11 +5514,20 @@ def _state_values(cm: Sequence[dict]) -> dict[str, float | None]:
             else None}
 
 
+def official_close(index_row: dict) -> float | None:
+    """The Cboe close of one replicated index (vix_replication.json indices.<ticker>)."""
+    off = index_row.get("official")
+    return _num(off.get("close")) if isinstance(off, dict) else _num(off)
+
+
 def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
-                        all_cm: Sequence[Sequence[dict]] = ()) -> list[dict]:
+                        all_cm: Sequence[Sequence[dict]] = (), vix_rep: dict | None = None) -> list[dict]:
     """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
     slope 1M → 1Y, all from the constant-maturity rows (never extrapolated),
-    each with its range over every stored session's grid (``all_cm``)."""
+    each with its range over every stored session's grid (``all_cm``). The VS
+    tile names its VS level beside the VIX replicated from the same chain and
+    the Cboe close (``vix_rep``, vix_replication.json): three 30-day variance
+    numbers that differ."""
     by = {r["label"]: r for r in cm}
     m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
     every = [_state_values(c) for c in all_cm]
@@ -5524,6 +5539,12 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
     where = (f"between {m1['lower']} and {m1['upper']}" if m1.get("available") and m1["lower"] != m1["upper"]
              else (f"the {m1['lower']} expiry" if m1.get("available") else f"outside the listed {span}"))
     slope = (y1["atmf"] - m1["atmf"]) if (m1.get("atmf") is not None and y1.get("atmf") is not None) else None
+    vix = ((vix_rep or {}).get("indices") or {}).get("VIX") or {}
+    vs_sub = (f"VS {_fmt(m1['vs'], '.2f')}% (the bracketing strips at 30 days) over ATMF: the skew premium"
+              if m1.get("vs") is not None else "variance-swap vol over ATMF: the skew premium")
+    if vix:
+        vs_sub += (f" · VIX replicated {_fmt(_num(vix.get('replicated')), '.2f')}"
+                   f" · Cboe close {_fmt(official_close(vix), '.2f')}")
     return [
         {"label": "1M ATMF", "value": _fmt(m1.get("atmf"), ".2f"), "unit": "%",
          "sub": f"SVI-cal at 30 days, {where}", "range": rng("atmf")},
@@ -5532,7 +5553,7 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
         {"label": "1M BF25", "value": signed(m1.get("bf25"), ".2f"), "unit": "vol pts",
          "sub": "mean of the 25Δ wings − ATMF", "range": rng("bf25")},
         {"label": "1M VS − ATMF", "value": signed(m1.get("vs_minus_atmf"), ".2f"), "unit": "vol pts",
-         "sub": "variance-swap vol over ATMF: the skew premium", "range": rng("vs")},
+         "sub": vs_sub, "range": rng("vs")},
         {"label": "ATMF slope 1M → 1Y", "value": signed(slope, ".2f"), "unit": "vol pts",
          "sub": (f"1Y {_fmt(y1.get('atmf'), '.2f')}% − 1M {_fmt(m1.get('atmf'), '.2f')}%"
                  if slope is not None else f"1Y outside the listed {span}"), "range": rng("slope")},
@@ -5840,7 +5861,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["expiries_by_session"] = {s["session"]: session_expiries(s["surface"]) for s in desk_inputs}
         cmp_ = surface_comparison(session, desk_inputs)
         every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
-        d["state_tiles"] = surface_state_tiles(cm, listed, every_cm)
+        d["state_tiles"] = surface_state_tiles(cm, listed, every_cm, surf.get("vix"))
         d["rnd"] = rnd_view(sj, res, session)
         d["cone"] = None
         with _loader_boundary(d, "volatility cone (vol_system.db spx_ohlcv, surface.json svi_cal)"):
@@ -6094,9 +6115,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             if not row:
                 continue
             off = row.get("official")
-            off_close = _num(off.get("close")) if isinstance(off, dict) else _num(off)
             d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")),
-                                  "official": off_close, "gap": _num(row.get("gap_vs_official")),
+                                  "official": official_close(row), "gap": _num(row.get("gap_vs_official")),
                                   "method": row.get("headline_method"),
                                   "in_range": row.get("official_inside_day_range"),
                                   "day_range": ([_num(off.get("low")), _num(off.get("high"))]

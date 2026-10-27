@@ -5016,6 +5016,71 @@ def test_surface_state_tiles_are_the_one_month_constant_maturity_row(dash, pages
     assert html.index('id="surface-state"') < html.index('id="surface-scores"')
 
 
+def _kpi_sub(html: str, block_id: str, label: str) -> str:
+    """The visible sub-line of the KPI tile ``label`` in the tile row ``block_id``."""
+    start = html.index(f'id="{block_id}"')
+    ends = [i for i in (html.find('<div class="kpis"', start), html.find('<div class="g"', start)) if i > 0]
+    blk = html[start:min(ends)]
+    for tile in blk.split('<div class="kpi">')[1:]:
+        lab = re.search(r'<div class="kpi-label">(.*?)</div>', tile, re.DOTALL)
+        if lab and _html_unescape(re.sub(r"<[^>]+>", "", lab.group(1))).strip() == label:
+            sub = re.search(r'<div class="kpi-sub">(.*?)</div>', tile, re.DOTALL)
+            assert sub, f"{label}: no sub-line"
+            return _html_unescape(re.sub(r"<[^>]+>", "", sub.group(1))).strip()
+    raise AssertionError(f"no {label!r} tile in #{block_id}")
+
+
+def test_surface_vs_tile_names_its_vs_beside_the_replicated_vix_and_the_cboe_close(dash, pages):
+    """R3-T1: the '1M VS − ATMF' tile printed '+5.18' with no VS level, on a page
+    that also prints the 30-day variance as the VIX replicated from this chain
+    and the Cboe close (19.11, 19.70 and 19.99 on 2026-10-16). Its sub-line names
+    all three: the 1M row's VS and vix_replication.json's VIX."""
+    ds = _desk_module()
+    sj, res, vx = _desk_inputs()
+    m1 = ds.constant_maturity(ds.delta_grid(sj, res, vx))[0]
+    assert m1["label"] == "1M"
+    sub = _kpi_sub(pages["/surface"], "surface-state", "1M VS − ATMF")
+    if m1["vs"] is not None:
+        assert f"VS {dash._fmt(m1['vs'], '.2f')}% (the bracketing strips at 30 days)" in sub, sub
+    vix = (vx.get("indices") or {}).get("VIX")
+    if vix:
+        off = vix.get("official")
+        close = off.get("close") if isinstance(off, dict) else off
+        assert f"VIX replicated {dash._fmt(vix.get('replicated'), '.2f')}" in sub, sub
+        assert f"Cboe close {dash._fmt(close, '.2f')}" in sub, sub
+
+
+def test_constant_maturity_grid_names_the_strike_counts_of_its_two_vs_strips(dash, pages):
+    """R3-T1: a constant-maturity VS vol interpolates two strips, and a thin one
+    moves it (the 2026-10-16 1M VS read a 194-strike and an 86-strike strip).
+    Under each tenor: the two strips' strike counts, the 'Strikes' column of the
+    variance-swap strip table."""
+    ds = _desk_module()
+    cm = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))
+    html = pages["/surface"]
+    strip = _raw_specs(html)["chart-strip"]["table"]
+    cols = [c["label"] for c in strip["columns"]]
+    n = {r[0]: r[cols.index("Strikes")] for r in strip["rows"]}
+    tbl = html[html.index('id="delta-grid-cm"'):]
+    tbl = tbl[tbl.index("<tbody>"):tbl.index("</table>")]
+    heads = re.findall(r'<th scope="row">(.*?)</th>', tbl, re.DOTALL)
+    assert len(heads) == len(cm)
+    checked = 0
+    for r, th in zip(cm, heads):
+        subs = [_html_unescape(re.sub(r"<[^>]+>", "", x)).strip()
+                for x in re.findall(r'<span class="dg-sub">(.*?)</span>', th, re.DOTALL)]
+        if not r["available"] or r["lower"] not in n or r["upper"] not in n:
+            assert not any("strikes" in x for x in subs), (r["label"], subs)
+            continue
+        want = (f"{n[r['lower']]} VS strikes" if r["lower"] == r["upper"]
+                else f"{n[r['lower']]} / {n[r['upper']]} VS strikes")
+        assert want in subs, (r["label"], subs)
+        checked += 1
+    assert checked
+    assert cm[0]["label"] == "1M"
+    assert cm[0]["available"]
+
+
 def test_overview_surface_line_is_the_one_month_row_with_its_age(dash, pages):
     ds = _desk_module()
     m1 = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))[0]

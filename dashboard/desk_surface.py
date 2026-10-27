@@ -150,8 +150,9 @@ def delta_grid(surface_json: Mapping, residuals: Any, vix_rep: Mapping | None) -
     and extrapolation flag, ATMF, RR25/BF25/RR10/BF10 (vol pts), the ATM skew
     (decimal vol per unit k, and ×10 in vol pts as ``skew_vp``), w(0) and w′(0)
     (for constant-maturity interpolation), the variance-swap vol of the same
-    expiry from the replication strip and its spread over this ATMF, and the
-    term structure's quote count and median half-spread."""
+    expiry from the replication strip, its spread over this ATMF and the
+    strip's strike count (puts + calls), and the term structure's quote count
+    and median half-spread."""
     svi_cal = (surface_json.get("surfaces") or {}).get("svi_cal") or {}
     slices = (svi_cal.get("params") or {}).get("slices") or []
     ts = {str(t.get("expiry"))[:10]: t for t in surface_json.get("term_structure") or []}
@@ -175,7 +176,8 @@ def delta_grid(surface_json: Mapping, residuals: Any, vix_rep: Mapping | None) -
         rr10, bf10 = rr_bf(vol, extrap, "10")
         skew = svi_atm_skew(sl)
         t = ts.get(e) or {}
-        vs = _num((strip.get(e) or {}).get("var_swap_vol"))
+        st = strip.get(e)
+        vs = _num((st or {}).get("var_swap_vol"))
         rows.append({
             "expiry": e, "T": T, "T_days": T * DAYS_PER_YEAR, "forward": _num(t.get("forward")),
             "k": ks, "vol": vol, "extrap": extrap, "atmf": vol["ATM"],
@@ -183,6 +185,7 @@ def delta_grid(surface_json: Mapping, residuals: Any, vix_rep: Mapping | None) -
             "skew": skew, "skew_vp": skew * 100.0 * SKEW_UNIT_K,
             "w0": float(svi_w(0.0, sl)), "w0p": float(svi_w_prime(0.0, sl)),
             "vs": vs, "vs_minus_atmf": (vs - vol["ATM"]) if vs is not None else None,
+            "n_strikes": ((st.get("n_puts") or 0) + (st.get("n_calls") or 0)) if st else None,
             "half_spread_vp": _num(t.get("median_half_spread_vp")),
             "n_quotes": int(t["n_quotes"]) if _num(t.get("n_quotes")) is not None else None,
             "k_lo": k_lo, "k_hi": k_hi})
@@ -215,8 +218,9 @@ def constant_maturity(grid: Sequence[Mapping], days: Iterable[int] = CM_DAYS) ->
     Every pillar is interpolated linearly in total variance at fixed delta
     between the bracketing listed expiries (an exact match is taken as listed);
     the ATM skew from w(0) and w′(0) interpolated linearly in T; the
-    variance-swap vol linearly in total variance. A pillar extrapolated on
-    either side stays flagged. A tenor outside the listed T range has
+    variance-swap vol linearly in total variance, with the strike counts of
+    the two strips it reads (``strikes``: lower, upper). A pillar extrapolated
+    on either side stays flagged. A tenor outside the listed T range has
     ``available`` False and no values (never extrapolated)."""
     out = []
     for D in days:
@@ -227,7 +231,7 @@ def constant_maturity(grid: Sequence[Mapping], days: Iterable[int] = CM_DAYS) ->
                                "extrap": {key: False for key, _, _ in PILLARS},
                                "atmf": None, "rr25": None, "bf25": None, "rr10": None, "bf10": None,
                                "skew": None, "skew_vp": None, "vs": None, "vs_minus_atmf": None,
-                               "half_spread_vp": None, "n_quotes": None}
+                               "strikes": (None, None), "half_spread_vp": None, "n_quotes": None}
         br = bracket(grid, T)
         if br is not None:
             lo, hi = br
@@ -245,6 +249,7 @@ def constant_maturity(grid: Sequence[Mapping], days: Iterable[int] = CM_DAYS) ->
             row["skew_vp"] = row["skew"] * 100.0 * SKEW_UNIT_K
             row["vs"] = _lin_w(lo["vs"], lo["T"], hi["vs"], hi["T"], T)
             row["vs_minus_atmf"] = (row["vs"] - row["atmf"]) if row["vs"] is not None else None
+            row["strikes"] = (lo.get("n_strikes"), hi.get("n_strikes"))
         out.append(row)
     return out
 

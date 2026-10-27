@@ -142,7 +142,7 @@
 <table class="tbl dense dgrid" id="{{ id }}">
   <caption>{{ caption }}</caption>
   <thead><tr>{% for h in g.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{% if g.links and g.links.get(h) %}<a href="{{ g.links[h] }}">{{ h }}</a>{% else %}{{ h }}{% endif %}</th>{% endfor %}</tr></thead>
-  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}{% if r.sub2 %}<span class="dg-sub">{{ r.sub2 }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
 </table>
 </div>
 {%- endmacro %}
