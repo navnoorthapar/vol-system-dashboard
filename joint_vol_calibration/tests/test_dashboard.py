@@ -2377,8 +2377,10 @@ def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
     if prov.get("r") is None and rows:
         r_lo, r_hi = min(c["r"] for c in rows) * 100, max(c["r"] for c in rows) * 100
         q_lo, q_hi = min(c["q"] for c in rows) * 100, max(c["q"] for c in rows) * 100
-        assert f"r(T) {r_lo:.2f}–{r_hi:.2f}%" in text
-        assert f"q(T) {q_lo:.2f}–{q_hi:.2f}% from the fit's parity forwards" in text
+        # the site's formatter: a negative bound takes the typographic minus (q(T) on 2026-10-26)
+        f = dash._fmt
+        assert f"r(T) {f(r_lo, '.2f')}–{f(r_hi, '.2f')}%" in text
+        assert f"q(T) {f(q_lo, '.2f')}–{f(q_hi, '.2f')}% from the fit's parity forwards" in text
 
 
 def test_corrections_page_shows_the_c23_waterfall_from_its_file(pages):
@@ -5682,6 +5684,19 @@ def test_calibration_fit_tiles_rank_this_fit_among_the_gated_fits(dash, pages):
         assert "diagnosed sessions" in (_range_span(tiles["VVIX model / market"]) or "")
 
 
+def test_fit_losses_reach_the_tiles_unrounded(dash):
+    """The tiles print .2f; load_page2 pre-rounded the losses to .3f, so the
+    2026-10-26 put-wing OOS RMSE 2.30497 became 2.305 and printed 2.31 beside
+    its rank range (2.30)."""
+    _, cal = dash.load_headline_calibration()
+    losses = dash._cal_losses(cal)
+    d = dash.load_page2()
+    for key, src in (("spx_rmse", "spx_iv_rmse"), ("spx_oos_rmse", "spx_oos_iv_rmse"),
+                     ("spx_oos_wing_rmse", "spx_oos_put_wing_rmse"), ("vix_index_rmse", "vix_index_rmse")):
+        if dash._num(losses.get(src)) is not None:
+            assert d[key] == float(losses[src]), key
+
+
 def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_page(dash, pages):
     """P2.6: Calibration printed the Heston OOS RMSE as 2.955 where the Overview
     and Model Risk print 2.96. Every page renders it, and the SVI-cal median |z|,
@@ -7550,14 +7565,16 @@ def test_browser_phone_status_list_closes_on_escape_and_outside(site_browser):
             assert page.evaluate("document.activeElement.matches('.sb-phone > summary')"), name
             summary.click()
             assert page.evaluate(is_open), name
-            page.locator("main h1").click()
+            # a point in the left gutter below the open list: a long list covers the h1
+            lb = page.locator(".sb-phone .sb-list").bounding_box()
+            out = (4, min(840, lb["y"] + lb["height"] + 24))
+            page.mouse.click(*out)
             assert not page.evaluate(is_open), name
             summary.tap()
             assert page.evaluate(is_open), name
             page.locator(".sb-list li").first.tap()
             assert page.evaluate(is_open), name
-            box = page.locator("main h1").bounding_box()
-            page.touchscreen.tap(box["x"] + 4, box["y"] + box["height"] / 2)
+            page.touchscreen.tap(*out)
             assert not page.evaluate(is_open), name
     finally:
         ctx.close()

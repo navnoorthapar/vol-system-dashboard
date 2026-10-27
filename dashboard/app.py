@@ -1383,16 +1383,15 @@ def load_page2() -> dict[str, Any]:
                 d["r_ref_detail"] = "13-week bill, continuously compounded; reference"
 
         losses = _cal_losses(cal)
-        d["spx_rmse"] = (round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None
-                         else None)
+        # unrounded: the tiles round once, at display (2.30497 pre-rounded to 2.305 printed 2.31)
+        d["spx_rmse"] = _num(losses.get("spx_iv_rmse"))
         # VIX leg: the Cboe SPOT indices (^VIX9D/^VIX/^VIX3M/^VIX6M) against
         # heston_vix_term_index. Pre-C22 results only have the old key name.
         vix_rmse = _num(losses.get("vix_index_rmse", losses.get("vix_futures_rmse")))
-        d["vix_index_rmse"] = round(vix_rmse, 3) if vix_rmse is not None else None
+        d["vix_index_rmse"] = vix_rmse
         for key, src in (("spx_oos_rmse", "spx_oos_iv_rmse"),
                          ("spx_oos_wing_rmse", "spx_oos_put_wing_rmse")):
-            if _num(losses.get(src)) is not None:
-                d[key] = round(float(losses[src]), 3)
+            d[key] = _num(losses.get(src))
         d["n_vix_options"] = cal.get("n_vix_options")
         # The VIX-options leg is in the objective only when its weight is > 0
         # (liquid contracts on the spot session alone do not activate it).
