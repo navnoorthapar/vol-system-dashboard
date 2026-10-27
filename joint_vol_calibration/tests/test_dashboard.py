@@ -6905,6 +6905,21 @@ def _delta_e76(a: str, b: str) -> float:
     return float(sum((p - q) ** 2 for p, q in zip(la, lb)) ** 0.5)
 
 
+def _lch_hue(h: str) -> tuple[float, float]:
+    """(chroma, hue in degrees) of '#rrggbb' in CIE LCh (the Lab of _delta_e76)."""
+    import math
+    rgb = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b_ = (((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92 for c in rgb)
+    x = (0.4124 * r + 0.3576 * g + 0.1805 * b_) / 0.95047
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b_
+    z = (0.0193 * r + 0.1192 * g + 0.9505 * b_) / 1.08883
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+    a, bb = 500 * (f(x) - f(y)), 200 * (f(y) - f(z))
+    return math.hypot(a, bb), math.degrees(math.atan2(bb, a)) % 360
+
+
 def test_every_series_follows_the_encoding_registry(dash, pages):
     """P4.5 (extends test_one_colour_per_model_on_every_surface_chart): over every
     page's chart specs, (a) a series that stands for a model (role 'model') has
@@ -6913,7 +6928,11 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
     model colour (the Calibration tenors were cat0 / cat1 / cat4); (c) series
     indexed by maturity take the tenor ramp, lighter to darker with T; (d) on a
     P&L or return chart no series is within ΔE76 25 of the gain or loss fill
-    (S3 was cat1, 16.6 from --neg-fill); (e) market observables and Cboe indices
+    (S3 was cat1, 16.6 from --neg-fill), nor, unless it is neutral (LCh chroma
+    under 15), within 30° of hue of either: the Risk P&L explain drew Vega in
+    vermilion cat5 (13° from the loss orange) under a gain-blue +403.5 tile and
+    Gamma in sky-blue cat0 (29° from the gain blue), and Research drew S1C and
+    the rolling Sharpe in cat0 (F7); (e) market observables and Cboe indices
     are 'headline'; (f) no series uses 'info' (the gain blue). The ramp reaches
     3:1 on the panels."""
     ch = dash.charts
@@ -6965,6 +6984,9 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
                         continue                    # the sign colours themselves, by design
                     for fill in ("pos-fill", "neg-fill"):
                         assert _delta_e76(hex_of[c], tok[fill]) >= 25, (route, cid, s["name"], c, fill)
+                        chroma, hue = _lch_hue(hex_of[c])
+                        gap = abs((hue - _lch_hue(tok[fill])[1] + 180) % 360 - 180)
+                        assert chroma < 15 or gap >= 30, (route, cid, s["name"], c, fill, round(gap))
     assert min(seen["model"] / 20, seen["market"] / 8, seen["tenor"] / 2, seen["pnl"] / 3) >= 1, seen
 
 

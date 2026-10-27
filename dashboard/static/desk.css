@@ -261,7 +261,8 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .btn[aria-pressed="true"], .btn[aria-selected="true"] { color: var(--text); background: var(--surface3); border-color: var(--pos-fill); }
 .btn[aria-pressed="false"] .key-swatch { opacity: 0.35; }
 .btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
-.btn .key-swatch.dashed { border-top-style: dashed; }
+/* drawn, not a dashed border: a 12 px dashed border renders as one solid stroke */
+.btn .key-swatch.dashed { border-top: none; height: 2px; width: 14px; background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
 .btn .key-swatch.dotted { border-top-style: dotted; }
 .btn .key-swatch.dot { width: 7px; height: 7px; border: none; border-radius: 50%; background: currentColor; }
 .btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }

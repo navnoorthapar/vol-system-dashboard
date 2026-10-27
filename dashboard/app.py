@@ -3637,11 +3637,14 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     except Exception as e:
         _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)", e)
         return
-    # a P&L chart: no series within ΔE 25 of the gain / loss fills (Vega was cat1,
-    # ΔE 16.6 from --neg-fill); the residual is the dotted grey
-    comps = [("pnl_gamma", "Gamma", "cat0"), ("pnl_vega_a", "Vega", "cat5"), ("pnl_theta", "Theta", "cat2"),
-             ("pnl_vanna", "Vanna", "cat4"), ("pnl_volga", "Volga", "cat3"),
+    # a P&L chart: no series within ΔE 25 or 30° of hue of the gain blue / loss
+    # orange (Vega was cat1, then vermilion cat5 under a gain-blue tile, Gamma sky
+    # blue; F7): the spot Greeks green (gamma solid, vanna dashed), the vol Greeks
+    # pink (vega solid, volga dashed), theta yellow; the residual is the dotted grey
+    comps = [("pnl_gamma", "Gamma", "cat2"), ("pnl_vega_a", "Vega", "cat4"), ("pnl_theta", "Theta", "cat3"),
+             ("pnl_vanna", "Vanna", "cat2"), ("pnl_volga", "Volga", "cat4"),
              ("pnl_financing", "Financing", "muted"), ("pnl_residual_a", "Residual", "muted")]
+    comp_dash = {"Vanna": True, "Volga": True, "Residual": "dotted"}
     need = {"pnl_total"} | {c for c, *_ in comps}
     missing = need - set(h.columns)
     if missing:
@@ -3660,7 +3663,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     tot = days["pnl_total"]
     xs = [t.strftime("%Y-%m-%d") for t in h.index]
     series = [{"name": name, "type": "line", "color": color, "width": 1.3, "legend": True,
-               **({"dash": "dotted"} if name == "Residual" else {}),
+               **({"dash": comp_dash[name]} if name in comp_dash else {}),
                "data": [round(float(v), 4) for v in h[c].fillna(0.0).cumsum()]} for c, name, color in comps]
     series.insert(0, {"name": "Total", "type": "line", "color": "headline", "width": 2.2, "legend": True,
                       "data": [round(float(v), 4) for v in h["pnl_total"].fillna(0.0).cumsum()]})
@@ -3758,7 +3761,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         series = [
             {"name": SLEEVE_LABELS["portfolio"], "type": "line", "color": "headline", "width": 2.2,
              "legend": True, "data": d["eq_nav"]},
-            {"name": SLEEVE_LABELS["s1c"], "type": "line", "color": "cat0", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["s1c"], "type": "line", "color": "cat2", "width": 1.3, "legend": True,
              "data": d["eq_nav_s1c"]},
             {"name": SLEEVE_LABELS["s3"], "type": "line", "color": "cat3", "width": 1.3, "legend": True,
              "data": d["eq_nav_s3"]},
@@ -3769,8 +3772,8 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         ]
         if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
             tb = eq["nav_tbill"]
-            series.append({"name": "T-bill (collateral)", "type": "line", "color": "cat2", "width": 1.2,
-                           "dash": True, "legend": True,
+            series.append({"name": "T-bill (collateral)", "type": "line", "color": "muted", "width": 1.2,
+                           "dash": "dotted", "legend": True,
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
         for s_ in series:                 # ~1,800 daily points a line: drawn with LTTB downsampling
             s_["sampling"] = "lttb"
@@ -3820,7 +3823,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             "chart-rolling", "Rolling 126-session Sharpe (rf = 0)",
             x={"type": "time", "csv": "date"},
             y={"name": "Sharpe (annualised)", "digits": 1, "tipDigits": 2, "signed": True},
-            series=[{"name": "Rolling Sharpe", "type": "line", "color": "cat0", "width": 1.3,
+            series=[{"name": "Rolling Sharpe", "type": "line", "color": "headline", "width": 1.3,
                      "sampling": "lttb",
                      "data": [None if not np.isfinite(v) else round(float(v), 3) for v in roll]}],
             xs_from="chart-equity", zoom="inside", csv="rolling_sharpe_126.csv", link=RESEARCH_TS,
@@ -3971,7 +3974,7 @@ def _gm(x: float) -> str:
 
 
 # ── round trips and worst drawdowns (desk_trades.py, B12) ─────────────────────
-TRADE_SLEEVES = (("s1c", SLEEVE_LABELS["s1c"], "cat0", "circle", False),
+TRADE_SLEEVES = (("s1c", SLEEVE_LABELS["s1c"], "cat2", "circle", False),
                  ("s3", SLEEVE_LABELS["s3"], "cat3", "diamond", False),
                  ("s4", SLEEVE_LABELS["s4"], "cat4", "triangle", False),
                  ("s1", SLEEVE_LABELS["s1"], "muted", "circle", True),
