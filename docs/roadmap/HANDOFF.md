@@ -3,6 +3,11 @@
 This is a living brief. Any Claude session with access to this repository (any account, cloud
 only) continues from here. Read it first, then `docs/roadmap/README.md`.
 
+**Read next:** `docs/roadmap/FUND_GRADE_PLAN.md`, the strategy: an honest assessment of what a
+fund reviewer holds against the project today and the tiered plan (integrity, desk research
+substance, the joint SPX/VIX problem, engineering, desk UX) that closes the gap. This file is
+the operational brief; that one says what to build and why.
+
 **The mandate.** Keep improving this system until a top volatility fund (US$1B+ AUM) would
 trust it as a desk tool and as evidence of its author's judgement. That bar is concrete; see
 "The fund-grade bar". Work in loops: critique, fix, verify, ship, redeploy, update this file.
@@ -50,28 +55,10 @@ Repeat. Reaching the bar starts the research roadmap below; it does not end the 
 
 Every commit subject carries its item ID, for example `(R3-D4)` or `A1-F16:`. Skip what is already on main.
 
-### A. Round-3 critic findings still open (medium)
-- **R3-D3:** Research #monthly heatmap. The Year column uses a ±8.1% colour scale, but the only legend shows ±2.7%. Give it its own legend or a shared scale.
-- **R3-D2:** Calibration and Surface monitoring chips print the model ID, not the check ('MONITORED · M4 · BREACH' beside 'MONITORED · M4 · WATCH').
-  - Add a short label to each Model Risk check in app.py ('short-end RMSE', 'OOS RMSE', 'VIX RMSE', 'box bound', 'fit age', 'Feller').
-  - Print it in the chip: 'M4 short-end RMSE · BREACH'.
-- **T3:** The Overview 'Works' line and Model Risk V1 say the VIX was replicated 'by the Cboe rules', but Surface lists 8 departures.
-  - Change it to 'by the Cboe formula, with N listed departures (Surface)', where N = len(deviations + gap_notes) from vix_replication.json.
-  - Use the same wording in V1.
-- **T2:** The Overview line '5 of 5 current-schema fits pass' is true by construction, because only gate-passing fits are stored.
-  - Reword it to '5 current-schema fits stored (the job stores only gate-passing fits; rejections are counted in the run log)', or cite the gate's regression tests.
-  - The count comes from the data.
-- **R3-D6:** On every smile chart (Surface #smile and the Calibration small multiples), the upper axis's '10' tick label sits on the residual panel's '+10'.
-  - desk.js quoteOption uses gap = 10 px.
-  - Set gap = 20, or showMaxLabel:false on the residual y axis.
+### A. Round-3 critic findings (medium)
+All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log. Nothing open here.
 
 ### B. Round-2 backlog still open
-- **B4 (F14):** ISO 'YYYY-MM-DD' dates in place of yy-mm-dd ('26-10-29 · 13d'): the Surface heatmap rows, the |z|-by-expiry axis, the OOS-error bars, the VX-futures axis and the constant-maturity brackets.
-  - Keep the 320 px and 0.06em gates green.
-  - The test asserts that no page text or chart spec contains yy-mm-dd.
-- **B1/B2 (F12, F15):**
-  - Dodge cone end labels that sit under ~12 px apart (dashboard/desk_cone.py).
-  - The Calibration σ-profile frontier labels only the headline session's caps; other sessions show theirs in the tooltip.
 - **C3 (F20):** In the Surface tail-probability table, ∫p and E[S_T/F] are 1.0000 in every row.
   - Replace both with one 'distribution check' column: max(|∫p−1|, |E[S_T/F]−1|) in scientific notation.
 - **C1 (F11):** The Overview prints 'rv₂₀ 9.75%' next to 'RV21 9.67%'.
@@ -120,6 +107,9 @@ Every commit subject carries its item ID, for example `(R3-D4)` or `A1-F16:`. Sk
 - **calibration.html (~line 345)** still prints a raw 'E[VIX_T]' in a note. Use the |subs filter.
 - **docs/roadmap/ui_plan.json** holds stale P2.5 acceptance text ('tile shows 95.0'). It is history; update or annotate it.
 - **`make reproduce`** (rebuilds the backtest, Greeks, C7 and the v2 calibrations, then diffs against what is committed) was not re-run after round 3. Run it.
+- **docs/model_validation/README.md line ~171** still says M14 replicates the VIX '(Cboe rules)'; the site now says 'the Cboe formula, with its listed departures' (T3). Align the doc, and note the departures count is 12 on 2026-10-26 (6 deviations + 6 gap notes), not 8.
+- **The Calibration page's census sentence** ('k of k fits pass') was not reworded with the Overview's (T2). Reword it the same way.
+- **B1/B2 (cone and frontier labels)** were fixed in the chart specs with spec-level tests; no pixel-level browser measurement of label rectangles at 390–1920 px was added. Add one to the interact gate.
 
 ### E. Owner decisions (ask the owner; do not decide alone)
 - The licence of `data_store/benchmarks/*.csv` (Cboe strategy-index data).
@@ -216,7 +206,17 @@ python scripts/ci/simulate_next_session.py --full                               
 
 ## Status log (newest first; every session appends one entry)
 
-- **2026-10-27, first build session, final entry.**
-  - Round 3 shipped in batches; see the merged PRs and `git log` for the item IDs done.
-  - Everything in sections A–E above that is not in `git log` is still open.
-  - The next step is section A, then B, C and D, then a full critique round against the fund-grade bar.
+- **2026-10-27, 09:05 UTC, first build session, final entry.**
+  - **Shipped to main today** (PRs #11, #12, #13 and the final batch): the deploy unblock on the
+    bot's 2026-10-26 fit (fit tiles round once); A1/F16; B3/F13; R3-T4+D1; R3-T1; R3-T5; R3-T8;
+    R3-T7; R3-T9; R3-D5; R3-D4; R3-D3; R3-D2; T3; T2; R3-D6; B4/F14; B1+B2/F12+F15; this file and
+    FUND_GRADE_PLAN.md. R3-T6 was checked and found no longer to apply (the 2026-10-26 headline
+    fit is a TRF fit, matching M4's text); nothing changed for it.
+  - **Site:** navnoorbawa.me redeployed three times today from main; the bot's first run on the
+    new pipeline accepted the 2026-10-26 fit. The forward ledger has its first entry.
+  - **Still open:** everything in sections B (C3, C1, C2, C4, D2, A3, A2, C5, D1, D3), C (all
+    low findings), D (loose ends) and E (owner decisions); then the fund-grade bar and
+    FUND_GRADE_PLAN.md tiers 0–4.
+  - **Next step for the next session:** FUND_GRADE_PLAN.md tier 0 (the recompute audit first),
+    interleaved with section B above. Re-run the four-critic review after tier 0.
+
