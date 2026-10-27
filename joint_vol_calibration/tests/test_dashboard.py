@@ -8613,3 +8613,39 @@ def test_browser_ticker_is_one_scrolling_row_to_860_px_and_at_most_two_lines_abo
         assert colours[0] == colours[1], colours
     finally:
         ctx.close()
+
+
+# ── B4-F14: ISO dates on every expiry label ───────────────────────────────────
+
+YY_MM_DD = re.compile(r"(?<![\d-])\d{2}-\d{2}-\d{2}(?![\d-])")
+ISO_EXPIRY_LABEL = re.compile(r"^\d{4}-\d{2}-\d{2}( · \d+d)?$")
+
+
+def test_expiry_labels_are_iso_dates_never_yy_mm_dd(dash, pages):
+    """B4-F14: the Surface heatmap rows, the |z|-by-expiry axis, the OOS-error
+    bars, the VX-futures axis and the constant-maturity brackets wrote expiries
+    as '26-10-29 · 13d'; every one is ISO 'YYYY-MM-DD' (with its '· 13d'), and
+    no page text or chart spec carries a yy-mm-dd date."""
+    for route, html in pages.items():
+        assert not YY_MM_DD.findall(html), (route, YY_MM_DD.findall(html)[:5])
+    by_file = _pages_by_file(dash, pages)
+    for page, chart in (("calibration.html", "chart-oos"), ("index.html", "chart-vx-curve"),
+                        ("surface.html", "chart-by-expiry")):
+        if f'id="{chart}-spec"' not in by_file[page]:
+            continue
+        spec = _spec(by_file[page], chart)
+        cats = spec["x"]["categories"]
+        assert cats, chart
+        assert all(ISO_EXPIRY_LABEL.match(c) for c in cats), (chart, cats)
+        assert spec["x"].get("rotate"), chart     # the longer labels are rotated, not overlapped
+    surface = _visible_text(by_file["surface.html"])
+    rows = re.findall(r'<tr[^>]* data-exp="([\d-]+)"[^>]*><th scope="row">([^<]*)',
+                      by_file["surface.html"])
+    assert rows
+    for exp, label in rows:
+        assert _html_unescape(label).startswith(exp), (exp, label)
+    brackets = re.findall(r'<span class="dg-sub">(= [^<]*|[^<]*→[^<]*)</span>', by_file["surface.html"])
+    for b in brackets:
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", b)
+        assert dates, b
+        assert all(d in surface for d in dates), b

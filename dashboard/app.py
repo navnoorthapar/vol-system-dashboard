@@ -3278,19 +3278,18 @@ def calibration_extras(d: dict, cal: dict) -> None:
     d["oos_rows"] = rows
     d["n_oos"] = (cal.get("oos") or {}).get("n_spx_oos")
     if rows:
-        cats = [f"{r['expiry'][2:]} · {_fmt(r['T_days'], '.0f')}d" if r["T_days"] is not None else r["expiry"]
+        cats = [f"{r['expiry']} · {_fmt(r['T_days'], '.0f')}d" if r["T_days"] is not None else r["expiry"]
                 for r in rows]
         marks = {"y": [{"value": d["spx_rmse"], "label": f"in-sample {_fmt(d['spx_rmse'], '.2f')}",
                         "color": "info"}]} if d.get("spx_rmse") is not None else None
         d["charts"]["oos"] = charts.xy(
             "chart-oos", "Out-of-sample SPX IV RMSE by expiry",
-            x={"type": "category", "categories": cats, "name": "Expiry · days to expiry", "interval": 0},
+            x={"type": "category", "categories": cats, "name": "", "interval": "auto", "rotate": 40},
             y={"name": "RMSE (vol pts)", "digits": 1, "tipDigits": 2, "zero": True},
             series=[{"name": "Heston OOS RMSE", "type": "bar", "role": "model", "model": "heston_v2",
                      "color": model_colour("heston_v2"),
                      "data": [r["rmse"] for r in rows], "fill": 0.55}],
-            xs=cats, marks=marks, csv=f"oos_rmse_by_expiry_{session}.csv",
-            grid={"bottom": 64},
+            xs=cats, marks=marks, csv=f"oos_rmse_by_expiry_{session}.csv", grid={"bottom": 72},
             describe=(f"{len(rows)} expiries; RMSE from {_fmt(min(r['rmse'] for r in rows), '.2f')} to "
                       f"{_fmt(max(r['rmse'] for r in rows), '.2f')} vol pts against "
                       f"{_fmt(d.get('spx_rmse'), '.2f')} in sample."),
@@ -4965,10 +4964,10 @@ def overview_vix_complex(d: dict) -> None:
             d["charts"]["vx_curve"] = charts.xy(
                 "chart-vx-curve", f"VX monthly futures settlements on {last}" + (
                     f", with {prev_date}" if prev else ""),
-                x={"type": "category", "categories": [c[2:] for c in cats],
+                x={"type": "category", "categories": cats,
                    "name": "Contract (final settlement)", "interval": 0, "rotate": 45},
                 y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
-                series=series, xs=[c[2:] for c in cats], csv=f"vx_curve_{last}.csv",
+                series=series, xs=cats, csv=f"vx_curve_{last}.csv",
                 grid={"top": 12, "bottom": 64},
                 describe=(f"{cur['n']} monthly contracts on {last}, front month first; "
                           "M1 → M2 "
@@ -5243,7 +5242,7 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
             cells.append({**cell(v["text"], colour(v["value"]), detail=detail(g, v)), "n": len(g)})
         # exp: the row's expiry (Surface selects it across the heatmaps, the delta
         # grid, the by-expiry chart and the smile: desk.js initExpiryCursor)
-        rows.append({"label": f"{e[2:]} · {_fmt(exps[e], '.0f')}d", "exp": str(e), "cells": cells})
+        rows.append({"label": f"{e} · {_fmt(exps[e], '.0f')}d", "exp": str(e), "cells": cells})
     return rows
 
 
@@ -5254,8 +5253,8 @@ DESK_GRID_HEADS = ("Expiry", "T (d)", "F", *(lab for _, lab, _ in desk_surface.P
 EXTRAP_TAG = "◇ extrapolated"
 
 
-def _short_exp(e: str | None) -> str:
-    return e[2:] if e else "—"
+def _exp_text(e: str | None) -> str:
+    return e or "—"
 
 
 def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
@@ -5305,9 +5304,9 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
         if not r["available"]:
             sub = "outside the listed expiries"
         elif r["lower"] == r["upper"]:
-            sub = f"= {_short_exp(r['lower'])}"
+            sub = f"= {_exp_text(r['lower'])}"
         else:
-            sub = f"{_short_exp(r['lower'])} → {_short_exp(r['upper'])}"
+            sub = f"{_exp_text(r['lower'])} → {_exp_text(r['upper'])}"
         # the strike counts of the two strips the VS vol interpolates: a thin
         # strip on one side moves the constant-maturity VS (R3-T1)
         n_lo, n_hi = r.get("strikes") or (None, None)
@@ -6023,7 +6022,7 @@ def surface_extras(d: dict, surf: dict) -> None:
     # in the fitted quotes, so they are not used here)
     if d["score_rows"]:
         cats = [x["expiry"] for x in d["expiries"]]
-        labels = [f"{e[2:]} · {_fmt(t, '.0f')}d" for e, t in zip(cats, [x["T_days"] for x in d["expiries"]])]
+        labels = [f"{e} · {_fmt(t, '.0f')}d" for e, t in zip(cats, [x["T_days"] for x in d["expiries"]])]
         ser, tbl = [], []
         for r in d["score_rows"]:
             qo = res[res["model"] == r["key"]]
