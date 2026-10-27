@@ -3924,6 +3924,31 @@ def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_besid
         ctx.close()
 
 
+_ELLIPSIS_CUT_JS = """() => [...document.querySelectorAll('body *')].filter(el => {
+  const s = getComputedStyle(el);
+  if (s.textOverflow !== 'ellipsis' || s.overflowX === 'visible' || el.closest('[hidden]')) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 && el.scrollWidth > el.clientWidth + 1 && !el.getAttribute('title');
+}).map(el => el.className + ': ' + el.textContent.trim())"""
+
+
+def test_browser_no_label_is_cut_short_with_an_ellipsis(site_browser):
+    """F5: a .kpi-label was one line with text-overflow: ellipsis and no title,
+    so 'SPX RMSE in sample' read 'SPX RMSE IN SA…' and 'VVIX model / market'
+    'VVIX MODEL / MA…' on the Overview at 1440 and 768 px (and eleven more
+    tiles at 768 or 1024 px on Surface, Calibration and Risk). The page did
+    not scroll, so the overflow gate never saw it; the label now wraps."""
+    for width in (768, 1024, 1440):
+        ctx, page = _page(site_browser, width, 900)
+        try:
+            for name in ("index.html", "surface.html", "calibration.html", "risk.html"):
+                page.goto(site_browser["base"] + name, wait_until="load")
+                page.evaluate("() => document.fonts.ready.then(() => true)")
+                assert page.evaluate(_ELLIPSIS_CUT_JS) == [], (name, width)
+        finally:
+            ctx.close()
+
+
 # ── P1 trust pass ─────────────────────────────────────────────────────────────
 
 _SIGNED_FILLS_JS = """cid => {

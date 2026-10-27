@@ -291,7 +291,8 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 /* ── KPI tiles ───────────────────────────────────────────────────────── */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .kpi { background: var(--surface); padding: 7px 10px 8px; min-width: 0; }
-.kpi-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* a label wraps to a second line rather than end in an ellipsis: 'SPX RMSE IN SA…' hid its own subject (F5) */
+.kpi-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); white-space: normal; overflow-wrap: break-word; }
 .kpi-value { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; color: var(--text); overflow-wrap: anywhere; }
 .kpi-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 2px; }
 .kpi-sub { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 1px; }
@@ -684,7 +685,6 @@ dialog.keys .dl { font-size: 12px; }
   .tk { padding: 0 8px; }
   .brand .brand-sub { display: none; }
   .kpi-value { font-size: 18px; }
-  .kpi-label { white-space: normal; overflow: visible; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
   .chart.h300, .chart.h340, .chart.h400 { height: 260px; }
