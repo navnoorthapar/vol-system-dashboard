@@ -58,7 +58,7 @@
       <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
       <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
       <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
-      <li><span class="sb-k">BUILD</span><span class="sb-v">2b9a8d7</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">7243afd</span></li>
       <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
     </ul>
   </details>
@@ -93,7 +93,7 @@
   
   <span class="sb-right">
     <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
-    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/2b9a8d7954ff49222cff46b3e40a04c8379528b3">2b9a8d7</a></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7243afd85878de38828f0d0f638a1f6129d6cf1f">7243afd</a></span>
     <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
   </span>
 </header>
@@ -216,7 +216,7 @@
   <section class="panel s12 " id="definitions" aria-labelledby="definitions-t">
   <div class="panel-head">
     <h2 class="panel-title" id="definitions-t">Conventions and definitions · every page</h2>
-    <span class="panel-side"><span class="panel-meta">23 terms</span>
+    <span class="panel-side"><span class="panel-meta">24 terms</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="definitions" aria-label="Copy a link to the Conventions and definitions · every page panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -238,6 +238,8 @@
       <dd>Vol of the 25Δ call − vol of the 25Δ put, at undiscounted forward delta on the slice&#39;s own vol (not premium-adjusted); negative: puts over calls. <span class="def-meta">Units: vol pts · used on Surface · <code class="path">dashboard/<wbr>desk_<wbr>surface.py</code> (delta_grid)</span></dd></div>
       <div class="def" id="def-bf25" data-term="bf25"><dt><dfn title="25-delta butterfly">BF25</dfn> <span class="def-exp">25-delta butterfly</span></dt>
       <dd>(25Δ call vol + 25Δ put vol)/2 − <a class="term" href="#def-atmf"><abbr title="at-the-money-forward vol">ATMF</abbr></a>, same deltas as <a class="term" href="#def-rr25"><abbr title="25-delta risk reversal">RR25</abbr></a>. <span class="def-meta">Units: vol pts · used on Surface · <code class="path">dashboard/<wbr>desk_<wbr>surface.py</code> (delta_grid)</span></dd></div>
+      <div class="def" id="def-atm-skew" data-term="atm-skew"><dt><dfn>ATM skew</dfn></dt>
+      <dd>∂σ/∂ln(K/F) at the forward, k = ln(K/F) = 0; for an SVI-cal slice w′(0)/(2·√(w(0)·T)) in decimal vol. Calibration and the Overview quote it per unit k; the Surface grid scales it to vol pts per 0.1 of k, ×10: −1.50 per unit k is −15.0 vol pts per 0.1 of k. Negative: puts over calls. <span class="def-meta">Units: vol per unit ln(K/F); vol pts per 0.1 of ln(K/F) on the Surface grid · used on Surface, Calibration, Overview · <code class="path">dashboard/<wbr>desk_<wbr>surface.py</code> (svi_atm_skew, SKEW_UNIT_K)</span></dd></div>
       <div class="def" id="def-svi-cal" data-term="svi-cal"><dt><dfn title="calendar-ordered SVI surface">SVI-cal</dfn> <span class="def-exp">calendar-ordered SVI surface</span></dt>
       <dd>The calendar-ordered SVI surface: one raw-SVI slice (a, b, ρ, m, σ) per listed expiry, each with a butterfly certificate (Durrleman&#39;s g ≥ 0, so its density is non-negative). <span class="def-meta">Units: — · used on Surface, Calibration, Overview · <code class="path">joint_<wbr>vol_<wbr>calibration/<wbr>surface/<wbr>svi.py</code></span></dd></div>
       <div class="def" id="def-essvi" data-term="essvi"><dt><dfn title="extended surface SVI">eSSVI</dfn> <span class="def-exp">extended surface SVI</span></dt>
@@ -339,6 +341,6 @@
 </dialog>
 
 
-<script src="static/desk.js?v=da8bcf3b4e2c"></script>
+<script src="static/desk.js?v=5d4815fb4046"></script>
 </body>
 </html>
