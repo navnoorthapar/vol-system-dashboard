@@ -2556,9 +2556,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     assert len(gzip.compress((static / "vendor" / "echarts-6.1.0-desk.min.js").read_bytes())) < 240_000
     # P4.1: the quote inspector, the residual strip and the linked chart groups
     # raised the page script from 51 KB; it is served gzipped like the pages. F4's keyboard
-    # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped
+    # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped; R3-T9's table CSV
+    # numbers (one-number cells parsed, block children spaced) past 31 KB
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_500
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -3029,6 +3030,28 @@ def test_waterfall_exports_steps_not_bar_encodings(dash, pages):
     js = DESK_JS.read_text()
     assert "if (spec.csv_rows)" in js
     assert "(spec.tipRows || [])" in js
+
+
+def test_waterfall_end_bar_is_named_for_the_record_it_holds(dash, pages):
+    """R3-D5: the end bar read 'C22 canonical' but held the bridge's last level,
+    replayed on the C23 record (today's canonical run), while the caption beside it
+    quoted the C22 run as published, so one name carried two values on one page.
+    The end category now names today's run on the C23 record, and the caption's
+    published C22 figure comes from c23_bridge.csv instead of the template."""
+    w = _spec(pages["/corrections"], "chart-waterfall")
+    c22 = sorted(dash._read_csv_rows(SHIPPED / "backtest" / "c22_bridge.csv"), key=lambda r: int(r["row"]))
+    c23 = sorted(dash._read_csv_rows(SHIPPED / "backtest" / "c23_bridge.csv"), key=lambda r: int(r["row"]))
+    end = w["x"]["categories"][-1]
+    assert "C22" not in end, end
+    assert "C23" in end, end
+    assert end == dash.WATERFALL_END
+    assert w["xs"][-1] == end
+    total = next(s for s in w["series"] if s["name"] == "Run total")
+    assert total["data"][-1] == pytest.approx(float(c22[-1]["pnl"]) / 1e3, rel=1e-4)
+    assert "canonical today" in w["describe"]
+    note = _visible_text("<body>" + re.search(r'id="waterfall".*?<p class="note">(.*?)</p>',
+                                              pages["/corrections"], re.DOTALL).group(1))
+    assert f"the published C22 run ended at {dash._usd(float(c23[0]['pnl']), signed=True)}" in note
 
 
 def test_surface_badge_lists_the_models(pages):
@@ -5307,6 +5330,10 @@ def test_skew_term_sentence_states_what_the_data_shows(dash, pages):
         assert "flatter than the SVI-cal market skew at every listed expiry" in text
     if short:
         assert f"market line lies above the Heston line on {above} of {len(short)} expiries" in text
+    # the pair carries its unit, the decimal skew per unit ln(K/F), not the grid's ×10 (R3-T8)
+    f = next(r for r in rows if r["ratio"] is not None)
+    assert (f"|skew| {abs(f['heston']):.2f} against {abs(f['svi']):.2f} vol per unit ln(K/F) at "
+            f"{f['T_days']:.0f} d") in text
 
 
 def test_findings_cite_the_skew_power_law_and_link_to_its_panel(dash, pages):
@@ -5317,6 +5344,11 @@ def test_findings_cite_the_skew_power_law_and_link_to_its_panel(dash, pages):
     text = _visible_text("<body>" + items[0])
     assert (f"slope in T is {dash.signed(min(slopes), '.2f')} to {dash.signed(max(slopes), '.2f')} over "
             f"{len(slopes)} sessions") in text
+    # the Overview's pair names its unit and that it is a magnitude (R3-T8): the
+    # Surface grid prints the same skew ×10, in vol pts per 0.1 of ln(K/F)
+    f = next(r for r in sk["rows"] if r["ratio"] is not None)
+    assert (f"(|skew| {abs(f['heston']):.2f} against {abs(f['svi']):.2f} vol per unit ln(K/F) at "
+            f"{f['T_days']:.0f} d)") in text
     # the Surface grid's skew column and the rough-vs-Heston panel link to it
     assert '<a href="calibration.html#skew-term">ATM skew</a>' in pages["/surface"].replace(
         'href="/calibration#', 'href="calibration.html#')
@@ -5545,11 +5577,36 @@ def test_vix_terms_table_prints_each_index_terms_and_its_gap_split(dash, pages):
         if ix.get("replicated") is None and not m.get("extrapolated") and m.get("reason"):
             assert f"{t} is not replicated: {m['reason']}." in note, t
     if n_split:
-        assert "Truncation: what strikes beyond the stored strip would add" in note
+        assert "Missing-strike shortfall: the replication on the stored strip less the same" in note
         bias = [ix["gap_attribution"]["far_wing_market_minus_model_pts"] for ix in vix["indices"].values()
                 if ix.get("replicated") is not None and (ix.get("gap_attribution") or {}).get("available")]
         assert ("likely understates" in note) == any(b > 0 for b in bias)
         assert ("likely overstates" in note) == any(b < 0 for b in bias)
+
+
+def test_vix_replication_prose_gives_the_gap_split_with_the_tables_signs(dash, pages):
+    """R3-T7: under the terms table (gap = replicated − Cboe close) the method
+    prose gave the same split as official − replicated, each part with the
+    opposite sign. The page's sentence now carries the table's own VIX row, and
+    the column names its convention."""
+    html = pages["/surface"]
+    session = dash.load_surface()["session"]
+    vix = json.loads((SHIPPED / "surface" / session / "vix_replication.json").read_text())
+    head = re.search(r'<table[^>]*id="vix-terms-table".*?</thead>', html, re.DOTALL).group(0)
+    assert "Missing-strike shortfall (replicated − full strip)" in _visible_text("<body>" + head)
+    prose = _visible_text("<body>" + re.search(r'<ul class="prose"[^>]*>.*?</ul>', html[html.index(
+        'id="vix-terms-table"'):], re.DOTALL).group(0))
+    assert "official − replicated" not in prose
+    assert "official - replicated" not in prose
+    row = {r[0]: r for r in _table_rows(html, "vix-terms-table")}.get("VIX")
+    ga = (vix["indices"].get("VIX") or {}).get("gap_attribution") or {}
+    if row is None or row[3] == "—":
+        assert "missing-strike shortfall" not in prose
+        return
+    assert ga.get("available")
+    gap = {r[0]: r[3] for r in _table_rows(html, "vix-rep-table")}["VIX"]
+    assert f"{gap} = missing-strike shortfall {row[3]} + unexplained {row[4]}" in prose
+    assert f"Unexplained by the chain: {row[4]}," in prose
 
 
 def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(dash):
@@ -7760,6 +7817,78 @@ def test_browser_tables_sort_copy_and_export(site_browser, tmp_path):
             assert after[-n_beyond:] == ["beyond quoted strikes"] * n_beyond
             nums = [float(x) for x in after[:-n_beyond]]
             assert nums in (sorted(nums), sorted(nums, reverse=True))
+    finally:
+        ctx.close()
+
+
+_TABLE_CSV_JS = """(id) => { const t = document.getElementById(id), w = t.closest('.tbl-wrap') || t;
+  const own = w.previousElementSibling, bar = own && own.classList.contains('tbl-tools') ? own
+    : t.closest('.panel').querySelector('.panel-actions');
+  [...bar.querySelectorAll('button.tbl-act')].find(b => b.textContent === 'CSV').click(); }"""
+
+
+def _table_csv(page, table_id: str, tmp_path) -> list[list[str]]:
+    """The rows of the CSV a table's own CSV button downloads."""
+    import csv
+
+    with page.expect_download() as dl:
+        page.evaluate(_TABLE_CSV_JS, table_id)
+    path = tmp_path / f"{table_id}.csv"
+    dl.value.save_as(path)
+    text = path.read_text(encoding="utf-8")
+    assert "\u2212" not in text, table_id
+    return list(csv.reader(text.splitlines()))
+
+
+def test_browser_table_csv_carries_numbers_not_display_strings(site_browser, tmp_path):
+    """R3-T9: a table's CSV carried the cells as displayed, so a spreadsheet read
+    '\u22120.99' (U+2212) as text and the delta grid's tenor ran into its
+    bracketing expiries ('1M26-11-13 \u2192 \u2026'). A cell that is one number
+    exports as that number, any other cell as its text with an ASCII minus (a
+    'lo to hi' interval stays text), and a block child is a word of its own."""
+    sb = site_browser
+    ctx = _context(sb)
+    page = ctx.new_page()
+    try:
+        page.goto(sb["base"] + "research.html", wait_until="load")
+        got = page.evaluate("""() => ['\u22120.99', '+0.84', '\u2212$273,733', '12.5%', '$1.2k',
+            '9.5 \u00d7 10\u207b\u2079', '\u22121.81 to \u22120.30', '1M', '2026-10-16', '\u2014',
+            '46 (1 open)'].map(Desk.csvValue)""")
+        assert got == [-0.99, 0.84, -273733, 12.5, 1200, 9.5e-9, "-1.81 to -0.30", "1M",
+                       "2026-10-16", "\u2014", "46 (1 open)"]
+        shown = page.evaluate("""() => [...document.querySelectorAll('#bootstrap-table tbody tr')]
+            .map(r => [...r.cells].map(c => c.textContent.replace(/\\s+/g, ' ').trim()))""")
+        rows = _table_csv(page, "bootstrap-table", tmp_path)
+        assert len(rows) == 1 + len(shown)
+        j = rows[0].index("Interval")
+        one = re.compile(r"[+\u2212-]?\d+(?:\.\d+)?")
+        n_num = 0
+        for want, row in zip(shown, rows[1:]):
+            assert len(row) == len(want)
+            for w, cell in zip(want, row):
+                if one.fullmatch(w):            # a number: written plainly, its sign ASCII
+                    n_num += 1
+                    assert float(cell) == float(w.replace("\u2212", "-")), (w, cell)
+                    assert not cell.startswith("+")
+                else:
+                    assert cell == w.replace("\u2212", "-"), (w, cell)
+            assert " to " in row[j]
+            assert not one.fullmatch(row[j])           # the interval stays text
+        assert n_num > 0
+        # Surface's constant-maturity grid: the tenor, its expiry pair and the
+        # strike count are separate words, and every quote cell is a number
+        page.goto(sb["base"] + "surface.html", wait_until="load")
+        heads = page.evaluate("""() => [...document.querySelectorAll('#delta-grid-cm tbody th')]
+            .map(th => [...th.childNodes].map(n => n.textContent.trim()).filter(Boolean).join(' '))""")
+        rows = _table_csv(page, "delta-grid-cm", tmp_path)
+        assert [r[0] for r in rows[1:]] == heads
+        assert any(" " in h for h in heads)
+        shown = page.evaluate("""() => [...document.querySelectorAll('#delta-grid-cm tbody tr')]
+            .map(r => [...r.cells].slice(1).map(c => c.textContent.trim()))""")
+        for want, row in zip(shown, rows[1:]):
+            for w, cell in zip(want, row[1:]):
+                if one.fullmatch(w):
+                    assert float(cell) == float(w.replace("\u2212", "-")), (w, cell)
     finally:
         ctx.close()
 

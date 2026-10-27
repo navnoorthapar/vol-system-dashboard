@@ -36,6 +36,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
+from desk_format import signed
 from scipy.optimize import brentq
 from scipy.special import ndtr
 
@@ -354,7 +355,7 @@ def vix_terms(vix_rep: Mapping | None) -> list[dict]:
 
     gap_attribution records official − replicated = truncation_pts +
     residual_pts. In the page's sign (gap = replicated − Cboe close) the parts
-    are −truncation_pts, what the strikes beyond the stored strip would add,
+    are −truncation_pts, the missing-strike shortfall (replicated − full strip),
     valued on the attribution surface's wing, and −residual_pts, what the chain
     leaves unexplained. The split is None when the artifact has no attribution
     for the index or its parts do not add up to the stored gap within
@@ -384,6 +385,62 @@ def vix_terms(vix_rep: Mapping | None) -> list[dict]:
                     "truncation": -trunc if split and trunc is not None else None,
                     "unexplained": -resid if split and resid is not None else None,
                     "far_wing": _num(ga.get("far_wing_market_minus_model_pts")) if split else None,
+                    "fit_inside": _num(ga.get("fit_inside_range_pts")) if split else None,
+                    "fit_range": _fit_range(ga.get("fit_range_K_over_F")) if split else None,
                     "surface": ga.get("surface") if split else None,
                     "reason": str(terms["reason"]) if (not replicated and terms.get("reason")) else None})
+    return out
+
+
+def _fit_range(fr: Any) -> tuple[float, float] | None:
+    """gap_attribution.fit_range_K_over_F as (low, high), or None."""
+    if not isinstance(fr, Sequence) or isinstance(fr, str) or len(fr) != 2:
+        return None
+    lo, hi = _num(fr[0]), _num(fr[1])
+    return (lo, hi) if lo is not None and hi is not None else None
+
+
+# the producer's gap-attribution sentence (surface/report.py gap notes): it
+# states the split as official − replicated, against the page's convention
+GAP_NOTE_PREFIX = "Gap attribution ("
+
+
+def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list[str]:
+    """vix_replication.json's gap_notes with the producer's gap-attribution
+    sentence rebuilt from ``terms`` (vix_terms rows, optionally carrying a
+    ``surface_label``), so the prose gives the VIX split the #vix-terms-table
+    prints, on the page's convention: gap = replicated − Cboe close =
+    missing-strike shortfall (replicated − full strip) + unexplained.
+
+    The producer's sentence is dropped whatever the split; the rebuilt one is
+    added only where vix_terms shows the VIX split (it adds up to the gap)."""
+    out = [str(n) for n in (notes or []) if not str(n).startswith(GAP_NOTE_PREFIX)]
+    r = next((t for t in terms if t.get("ticker") == "VIX"), None)
+    if r is None or r.get("truncation") is None or r.get("unexplained") is None or r.get("gap") is None:
+        return out
+    label = r.get("surface_label") or r.get("surface") or "fitted"
+    gap, short, unexp = r["gap"], r["truncation"], r["unexplained"]
+    fr = r.get("fit_range")
+    fitted = f"the fitted K/F {fr[0]:.2f}–{fr[1]:.2f}" if fr else "the fitted range"
+    s = (f"Gap attribution (VIX, {label} surface; gap = replicated − Cboe close): "
+         f"{signed(gap)} = missing-strike shortfall {signed(short)} + unexplained "
+         f"{signed(unexp)} (each part rounded on its own). Missing-strike shortfall "
+         f"(replicated − full strip): what the replication lacks without the strikes beyond "
+         f"the stored strip, valued on the surface’s wing.")
+    fw = r.get("far_wing")
+    if fw is not None:
+        if abs(fw) < 0.005:
+            s += f" The stored quotes beyond {fitted} price in line with that wing."
+        else:
+            s += (f" The stored quotes beyond {fitted} price {abs(fw):.2f} index points "
+                  f"{'above' if fw > 0 else 'below'} that wing, so the shortfall likely "
+                  f"{'understates' if fw > 0 else 'overstates'} what the strip lacks.")
+    fi = r.get("fit_inside")
+    if fi is not None:
+        s += (f" Inside {fitted}, market minus surface is {signed(fi)}; with the far-wing "
+              f"term it sets the replication against the surface and is not part of the gap.")
+    share = f", {100.0 * unexp / gap:.0f}% of the gap" if abs(gap) > 1e-12 else ""
+    s += (f" Unexplained by the chain: {signed(unexp)}{share} (snapshot timing against the "
+          f"16:15 ET print, stale quotes, the rate).")
+    out.append(s)
     return out

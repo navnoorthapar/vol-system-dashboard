@@ -446,6 +446,53 @@ def test_vix_terms_of_the_known_session():
     assert (n["near"]["days"], n["next"]["days"]) == (14.0, 28.0)
 
 
+@pytest.mark.parametrize("session", SESSIONS)
+def test_the_gap_attribution_sentence_restates_the_tables_split_on_its_sign(session):
+    """R3-T7: the producer's gap-attribution sentence gave the split as
+    official − replicated ('would add +0.04 … unexplained +0.24') under a table
+    of replicated − Cboe close (−0.04, −0.24). vix_gap_notes drops it and, where
+    the table shows the VIX split, rebuilds it from that row's own values."""
+    from desk_format import signed
+    vix = _inputs(session)[2]
+    rows = ds.vix_terms(vix)
+    notes = ds.vix_gap_notes(vix.get("gap_notes"), rows)
+    kept = [n for n in vix.get("gap_notes") or [] if not n.startswith(ds.GAP_NOTE_PREFIX)]
+    assert notes[:len(kept)] == kept
+    assert not any("official - replicated" in n for n in notes)
+    v = next((r for r in rows if r["ticker"] == "VIX"), None)
+    if v is None or v["truncation"] is None:
+        assert notes == kept
+        return
+    (rebuilt,) = notes[len(kept):]
+    assert rebuilt.startswith(ds.GAP_NOTE_PREFIX)
+    assert (f"{signed(v['gap'])} = missing-strike shortfall {signed(v['truncation'])} + unexplained "
+            f"{signed(v['unexplained'])}") in rebuilt
+    assert f"Unexplained by the chain: {signed(v['unexplained'])}," in rebuilt
+    # the residual's share of the gap keeps its sign: both parts are on one convention
+    assert f"{100.0 * v['unexplained'] / v['gap']:.0f}% of the gap" in rebuilt
+    lo, hi = vix["indices"]["VIX"]["gap_attribution"]["fit_range_K_over_F"]
+    assert f"K/F {lo:.2f}–{hi:.2f}" in rebuilt
+    assert ("understates" in rebuilt) == (v["far_wing"] >= 0.005)
+    assert ("overstates" in rebuilt) == (v["far_wing"] <= -0.005)
+
+
+def test_the_rebuilt_gap_sentence_reads_only_what_the_row_holds():
+    """No split, no sentence (the producer's is still dropped); a row without
+    far-wing or fit-inside figures gives the split alone."""
+    note = ds.GAP_NOTE_PREFIX + "VIX, SVI-cal surface): replicated - official = -0.30 ..."
+    row = {"ticker": "VIX", "gap": -0.30, "truncation": None, "unexplained": None}
+    assert ds.vix_gap_notes(["a", note], [row]) == ["a"]
+    assert ds.vix_gap_notes(None, []) == []
+    row = {**row, "truncation": -0.05, "unexplained": -0.25, "far_wing": None, "fit_inside": None,
+           "fit_range": None, "surface": "svi_cal", "surface_label": "SVI-cal"}
+    (out,) = ds.vix_gap_notes([note], [row])
+    assert out.startswith("Gap attribution (VIX, SVI-cal surface; gap = replicated − Cboe close): "
+                          "−0.30 = missing-strike shortfall −0.05 + unexplained −0.25")
+    assert "Unexplained by the chain: −0.25, 83% of the gap" in out
+    for absent in ("wing, so", "market minus surface", "None"):
+        assert absent not in out
+
+
 def test_a_gap_split_that_does_not_add_up_is_not_shown():
     """The split is printed only when the artifact records it and its parts add
     up to the stored gap; otherwise both parts are None, never a residual

@@ -2855,6 +2855,7 @@ def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> di
 
 
 SKEW_SHORT_DAYS = 30.0     # 'the short end' of the skew comparison: listed expiries under 30 days
+SKEW_UNIT = "vol per unit ln(K/F)"   # the prose unit of a decimal ATM skew (the Surface grid's is ×10)
 
 
 def _session_skews(s: dict) -> dict:
@@ -2941,8 +2942,8 @@ def skew_term_sentence(v: dict) -> str | None:
         n_st = sum(1 for r in v["rows"] if r["ratio"] is not None and r["ratio"] > 1)
         rel = f"steeper than the SVI-cal market skew on {n_st} of {c['n']} listed expiries"
     out = (f"On {v['head']} the published Heston fit's ATM skew is {rel} "
-           f"(×{_fmt(c['lo'], '.2f')} to ×{_fmt(c['hi'], '.2f')}; {_fmt(abs(f['heston']), '.2f')} against "
-           f"{_fmt(abs(f['svi']), '.2f')} at {_fmt(f['T_days'], '.0f')} d).")
+           f"(×{_fmt(c['lo'], '.2f')} to ×{_fmt(c['hi'], '.2f')}; |skew| {_fmt(abs(f['heston']), '.2f')} "
+           f"against {_fmt(abs(f['svi']), '.2f')} {SKEW_UNIT} at {_fmt(f['T_days'], '.0f')} d).")
     if c["n_short"]:
         out += (f" Below {_fmt(SKEW_SHORT_DAYS, '.0f')} days the market line lies above the Heston line on "
                 f"{c['short_market_above']} of {c['n_short']} expiries.")
@@ -4768,9 +4769,10 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         rel = ("at every listed expiry" if (cmp_["steeper_all"] or cmp_["flatter_all"])
                else f"across the {cmp_['n']} listed expiries")
         text = (f"×{_fmt(cmp_['lo'], '.2f')} to ×{_fmt(cmp_['hi'], '.2f')} the SVI-cal market skew {rel} of "
-                f"{sk['head']} ({_fmt(abs(f0['heston']), '.2f')} against {_fmt(abs(f0['svi']), '.2f')} at "
-                f"{_fmt(f0['T_days'], '.0f')} d); the market's slope in T is {signed(min(rng), '.2f')} to "
-                f"{signed(max(rng), '.2f')} over {plural(len(rng), 'session')} (SVI-cal, all expiries).")
+                f"{sk['head']} (|skew| {_fmt(abs(f0['heston']), '.2f')} against "
+                f"{_fmt(abs(f0['svi']), '.2f')} {SKEW_UNIT} at {_fmt(f0['T_days'], '.0f')} d); the market's "
+                f"slope in T is {signed(min(rng), '.2f')} to {signed(max(rng), '.2f')} over "
+                f"{plural(len(rng), 'session')} (SVI-cal, all expiries).")
         if cmp_["lo"] >= 0.9 and cmp_["hi"] <= 1.1:
             works.append(item("Heston's ATM skew matches the market's", "calibration.html#skew-term", text))
         else:
@@ -6136,13 +6138,14 @@ def surface_extras(d: dict, surf: dict) -> None:
         except (OSError, ValueError, KeyError, ImportError, sqlite3.Error) as exc:
             # supplementary: the replication's own figure stands, the comparison is left out
             _logger.warning("β estimator ratios unavailable for the surface page: %s", exc)
-        d["vix_notes"] = list(vx.get("gap_notes") or [])
         d["vix_deviations"] = list(vx.get("deviations") or [])
         d["vix_markers"] = vix_official_markers(vx)
         d["vix_calc_time"] = vx.get("calculation_time_ny")
         # each index's two terms and its gap split as gap_attribution splits it (#vix-terms-table)
         d["vix_terms"] = [{**r, "surface_label": model_short(r["surface"]) if r["surface"] else None}
                           for r in desk_surface.vix_terms(vx)]
+        # the gap-attribution sentence restated from that table, on its sign
+        d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"])
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
                        "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
@@ -6219,8 +6222,16 @@ def concise_label(label: str) -> str:
     return re.sub(r"\s*\((?:[^()]|\([^()]*\))*\)\s*$", "", label).strip() or label
 
 
+WATERFALL_END = "Canonical today (C23 record)"
+
+
 def waterfall_spec(bridge: list[dict]) -> dict:
     """C22 waterfall as stacked bars: an invisible base plus the step, in $000s.
+
+    The bridge is replayed on the C23-restated record, so its end bar is today's
+    canonical run, not the C22 run as published (c23_bridge.csv row 0, which the
+    C23 table restates); the end category says so rather than 'C22 canonical',
+    which put one name on two values on the same page.
 
     Every level of this bridge is a loss, so the bars hang below zero: the base
     spans from 0 to the end of the step nearer zero and the visible bar covers
@@ -6237,7 +6248,7 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     """
     start = float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])
     levels = [start] + [float(r["pnl"]) for r in bridge]
-    cats = ["C21 published"] + [str(r["label"]) for r in bridge] + ["C22 canonical"]
+    cats = ["C21 published"] + [str(r["label"]) for r in bridge] + [WATERFALL_END]
     k = 1e3
     base: list[float | None] = [None]
     raise_: list[float | None] = [None]
@@ -6286,8 +6297,9 @@ def waterfall_spec(bridge: list[dict]) -> dict:
         ],
         xs=cats, tooltip="axis", horizontal=True, grid={"bottom": 30, "left": 160, "top": 8},
         csv="c22_waterfall.csv",
-        describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} in {len(bridge)} "
-                  "cumulative steps; each bar is one correction's effect on portfolio P&L."),
+        describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} (canonical today, "
+                  f"on the C23 record) in {len(bridge)} cumulative steps; each bar is one correction's "
+                  "effect on portfolio P&L."),
         table=charts.table("C22 bridge: each correction applied in turn ($)",
                            ["Row#", "Correction", "Δ P&L#", "P&L after#", "Sharpe after#"],
                            [["—", "C21 as published", "", _usd(start), ""]]
