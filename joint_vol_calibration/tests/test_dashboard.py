@@ -1094,7 +1094,7 @@ def test_colour_tokens_meet_wcag_aa(dash, pages):
         for bg in backgrounds:
             assert dash.contrast_ratio(tok[name], bg) >= 4.5, (name, tok[name], bg)
     for name in [f"cat-{i}" for i in range(6)] + ["series-headline", "series-muted", "pos-fill", "neg-fill",
-                                                  "focus"]:
+                                                  "tail-down", "tail-up", "focus"]:
         for bg in (tok["bg"], tok["surface"], tok["surface2"]):
             assert dash.contrast_ratio(tok[name], bg) >= 3.0, (name, tok[name], bg)
     # a pressed toggle / selected tab is marked by a 3:1 border, not by colour of text alone
@@ -7010,13 +7010,28 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
     vermilion cat5 (13° from the loss orange) under a gain-blue +403.5 tile and
     Gamma in sky-blue cat0 (29° from the gain blue), and Research drew S1C and
     the rolling Sharpe in cat0 (F7); (e) market observables and Cboe indices
-    are 'headline'; (f) no series uses 'info' (the gain blue). The ramp reaches
+    are 'headline'; (f) no series uses 'info' (the gain blue); (g) a risk-neutral
+    tail (role 'tail') takes its side's TAIL_COLOURS hue: the Surface tails were
+    all three SVI-cal cat0, 29° of hue from the gain blue, the upside told from
+    the downside by its dash alone (B3-F13); the two sides are 60° or more of LCh
+    hue apart and each 30° or more from the gain and loss fills. The ramp reaches
     3:1 on the panels."""
     ch = dash.charts
     tok = _tokens()
     hex_of = {"headline": tok["series-headline"], "muted": tok["series-muted"], "pos": tok["pos-fill"],
               "neg": tok["neg-fill"], **{f"cat{i}": tok[f"cat-{i}"] for i in range(6)},
-              **{f"ramp{i}": tok[f"ramp-{i}"] for i in range(6)}, "cat-default": tok["cat-0"]}
+              **{f"ramp{i}": tok[f"ramp-{i}"] for i in range(6)}, "cat-default": tok["cat-0"],
+              **{c: tok[c] for c in ch.TAIL_COLOURS.values()}}
+
+    def hue_gap(a: str, b: str) -> float:
+        return abs((_lch_hue(a)[1] - _lch_hue(b)[1] + 180) % 360 - 180)
+    down, up = (hex_of[ch.TAIL_COLOURS[side]] for side in ("below", "above"))
+    assert hue_gap(down, up) >= 60, (down, up)
+    for c in (down, up):
+        assert _lch_hue(c)[0] >= 15, c
+        for fill in ("pos-fill", "neg-fill"):
+            assert hue_gap(c, tok[fill]) >= 30, (c, fill)
+    assert not set(ch.TAIL_COLOURS.values()) & ch.MODEL_COLOUR_TOKENS
     for i in range(6):
         for bg in (tok["bg"], tok["surface"], tok["surface2"]):
             assert dash.contrast_ratio(tok[f"ramp-{i}"], bg) >= 3.0, (i, bg)
@@ -7045,6 +7060,9 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
             if role in ("market", "cboe"):                                                  # (e)
                 seen["market"] += 1
                 assert c == "headline", where
+            if role == "tail":                                                              # (g)
+                seen["tail"] += 1
+                assert c == ch.TAIL_COLOURS[s["side"]], where
         for cid, sp in specs.items():
             tenors = sorted((s["T"], s["color"]) for s in sp.get("series") or [] if s.get("role") == "tenor")
             if tenors:                                                                      # (c)
@@ -7065,6 +7083,130 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
                         gap = abs((hue - _lch_hue(tok[fill])[1] + 180) % 360 - 180)
                         assert chroma < 15 or gap >= 30, (route, cid, s["name"], c, fill, round(gap))
     assert min(seen["model"] / 20, seen["market"] / 8, seen["tenor"] / 2, seen["pnl"] / 3) >= 1, seen
+    sides = {s.get("side") for s in _raw_specs(pages["/surface"])["chart-rnd-tails"]["series"]}
+    assert seen["tail"] >= 2, seen
+    assert sides == set(ch.TAIL_COLOURS), sides
+
+
+# a subscript written out raw, as a reader would see it: S_T, VIX_T, g_min, RV_h (a
+# symbol of up to four letters, '_', an index of up to three; not a path or a key)
+_RAW_SUBSCRIPT = re.compile(r"(?<![\w/.-])[A-Za-z]{1,4}_[A-Za-z0-9]{1,3}(?![\w/.-])")
+
+
+def _spec_names(sp: dict) -> list[tuple[str, str]]:
+    """(field, text) of every name a reader of the chart sees: its title and
+    description, the axis names, the series and legend names, the tooltip rows
+    and the data table's caption and heads."""
+    out = [("title", sp.get("title") or ""), ("describe", sp.get("describe") or "")]
+    for ax in ("x", "y", "y2"):
+        a = sp.get(ax) or {}
+        out += [(f"{ax}.name", a.get("name") or ""), (f"{ax}.label", a.get("label") or "")]
+    for s in sp.get("series") or []:
+        out += [("series", s.get("name") or ""), ("series", s.get("legendKey") or "")]
+    out += [("legend", it["name"]) for it in sp.get("legend_items") or []]
+    out += [("tipRows", r["name"]) for r in sp.get("tipRows") or []]
+    t = sp.get("table") or {}
+    for tb in (t, *(t.get("groups") or [])):
+        out.append(("caption", tb.get("caption") or ""))
+        out += [("column", c["label"]) for c in tb.get("columns") or []]
+    return out
+
+
+def test_no_chart_name_axis_legend_or_tooltip_shows_a_raw_subscript(dash, pages):
+    """B3-F13: the Surface tail chart's legend buttons and tooltips read 'SVI-cal
+    P(S_T < 0.90 F)', the density's y axis 'Density of ln(S_T/F)' and the
+    Calibration VX charts 'Heston E[VIX_T]', where the tables beside them set
+    S<sub>T</sub>. Over every chart spec on every page, every subscript in a name
+    the reader sees is one app.subs sets (desk.js sets the axis names and the
+    tooltip rows with the same pattern), and the page leaves none raw: not in a
+    chart's accessible name, its legend buttons, its description, nor in a
+    table's caption or heads."""
+    js = DESK_JS.read_text()
+    assert re.search(r"var SUBS = /(.*?)/g;", js).group(1) == dash._SUBSCRIPTS.pattern
+    for use in ("name: subs(a.name || '', 1)", "subs(p.seriesName)", "subs(r.name)"):
+        assert use in js, use
+    seen: collections.Counter = collections.Counter()
+    n_charts = 0
+    for route, html in pages.items():
+        legends: dict[str, list[str]] = collections.defaultdict(list)
+        buttons = re.findall(r'<button[^>]*data-legend-for="([^"]*)"[^>]*>(.*?)</button>', html, re.DOTALL)
+        for ids, inner in buttons:
+            for i in ids.split():
+                legends[i].append(inner)
+            # a set subscript sits in one span with its label: the button is a flex
+            # box, and the bare <i> and <sub> stood apart as items ('P( S T < 0.80 F)')
+            one_label = r'<span class="key-swatch[^>]*></span><span>.*</span>'
+            assert "<sub>" not in inner or re.fullmatch(one_label, inner, re.DOTALL), (route, inner)
+        for cid, sp in _raw_specs(html).items():
+            n_charts += 1
+            for field, text in _spec_names(sp):
+                for tok in _RAW_SUBSCRIPT.findall(text):
+                    seen[tok] += 1
+                    assert dash._SUBSCRIPTS.fullmatch(tok), (route, cid, field, tok)
+            shown = list(legends.get(cid, []))
+            div = re.search(rf'<div class="chart[^"]*" id="{re.escape(cid)}"[^>]*>', html)
+            if div:
+                shown.append(_html_unescape(_attrs(div.group(0)).get("aria-label", "")))
+            desc = re.search(rf'<p class="sr-only" id="{re.escape(cid)}-desc">(.*?)</p>', html, re.DOTALL)
+            if desc:
+                shown.append(desc.group(1))
+            for text in shown:
+                plain = _html_unescape(re.sub(r"<[^>]+>", "", text))
+                assert not _RAW_SUBSCRIPT.search(plain), (route, cid, plain)
+        for cell in re.findall(r"<(?:caption|th)\b[^>]*>(.*?)</(?:caption|th)>", html, re.DOTALL):
+            plain = _html_unescape(re.sub(r"<[^>]+>", "", cell))
+            assert not _RAW_SUBSCRIPT.search(plain), (route, plain)
+    assert n_charts >= len(pages), n_charts
+    assert seen["S_T"] >= 1, seen
+    # the plain-text twin (an aria-label) and the markup agree on what they set
+    assert dash.subs_text("E[VIX_T] and S_T") == "E[VIX T] and S T"
+    assert str(dash.subs("E[VIX_T] and S_T")) == "E[VIX<sub>T</sub>] and <i>S</i><sub>T</sub>"
+
+
+def test_browser_tail_hues_and_chart_subscripts_as_drawn(site_browser):
+    """B3-F13 in the browser: the Surface tail chart draws the two downside tails
+    in one colour (--tail-down) and the upside tail in another (--tail-up); the
+    density's y axis name is rich text (an italic S, a subscript T), a tail's
+    tooltip row sets S<sub>T</sub>, and the tails' legend buttons hold their swatch
+    and one label, no bare text or <sub> as a flex item of its own."""
+    sb = site_browser
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    for cid in ("chart-rnd", "chart-rnd-tails"):
+        page.locator("#" + cid).scroll_into_view_if_needed()
+        _wait_for_chart(page, cid)
+    got = page.evaluate("""() => {
+      const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+      const d = Desk.charts['chart-rnd'].chart.getOption();
+      const t = Desk.charts['chart-rnd-tails'].chart.getOption();
+      const tip = t.series.map(s => {
+        const i = s.data.findIndex(v => v && v[1] !== null && v[1] !== undefined);
+        const p = {seriesName: s.name, value: s.data[i], dataIndex: i, color: '#fff'};
+        return i < 0 ? null : t.tooltip[0].formatter(p);
+      });
+      const bare = b => [...b.childNodes].filter(n => n.nodeType === 3 && n.textContent.trim()).length;
+      const btns = [...document.querySelectorAll('[data-legend-for="chart-rnd-tails"]')];
+      return {axis: d.yAxis[0].name, rich: Object.keys(d.yAxis[0].nameTextStyle.rich || {}),
+              colours: t.series.map(s => [s.name, s.lineStyle.color]),
+              down: css('--tail-down'), up: css('--tail-up'),
+              tip: tip, kids: btns.map(b => [b.childElementCount, bare(b)])};
+    }""")
+    ctx.close()
+    assert "_" not in got["axis"], got["axis"]
+    assert "{i|S}{s|T}" in got["axis"], got["axis"]
+    assert {"i", "s"} <= set(got["rich"])
+    by_side = {">": set(), "<": set()}
+    for name, colour in got["colours"]:
+        by_side[">" if " > " in name else "<"].add(colour.lower())
+    want = {"<": {got["down"].lower()}, ">": {got["up"].lower()}}
+    assert by_side == want, (by_side, want)
+    tips = [t for t in got["tip"] if t]
+    assert tips, got["tip"]
+    for t in tips:
+        assert "<i>S</i><sub>T</sub>" in t, t
+        assert "S_T" not in t, t
+    assert got["kids"], got
+    assert all(k == [2, 0] for k in got["kids"]), got["kids"]
 
 
 def _on_ramp(colour: str, stops: tuple[str, ...] | list[str], tol: float = 2.5) -> bool:

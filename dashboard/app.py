@@ -379,13 +379,17 @@ def sym(text: Any) -> Any:
 app.jinja_env.filters["sym"] = sym
 
 
-_SUBSCRIPTS = re.compile(r"\b(S|g)_(T|min)\b")
+# the subscripted symbols of the pages' text (S_T, g_min, E[VIX_T], RV_h); desk.js
+# (SUBS) sets the same ones on the charts' axis names and tooltips
+_SUBSCRIPTS = re.compile(r"\b(S|g|VIX|RV)_(T|min|h)\b")
 
 
-def subs(text: Any) -> Any:
+def subs(text: Any, wrap: bool = False) -> Any:
     """'S_T' and 'g_min' as S<sub>T</sub> and g<sub>min</sub> (the text is escaped
-    first); a lower-case symbol (g_min, ∫p) in a .sym span, so an upper-cased
-    table head does not turn it into G or P."""
+    first; a one-letter symbol in italics, an index name such as VIX upright); a
+    lower-case symbol (g_min, ∫p) in a .sym span, so an upper-cased table head
+    does not turn it into G or P. wrap: a text that sets a subscript in one <span>
+    (a legend button is a flex box, which set 'P(', S, T and the rest apart)."""
     from markupsafe import Markup, escape
 
     if text is None:
@@ -393,13 +397,22 @@ def subs(text: Any) -> Any:
     escaped = str(escape(text))
 
     def one(m: re.Match) -> str:
-        out = f"<i>{m.group(1)}</i><sub>{m.group(2)}</sub>"
+        base = f"<i>{m.group(1)}</i>" if len(m.group(1)) == 1 else m.group(1)
+        out = f"{base}<sub>{m.group(2)}</sub>"
         return f'<span class="sym">{out}</span>' if m.group(1).islower() else out
-    escaped = _SUBSCRIPTS.sub(one, escaped).replace("∫p", '<span class="sym">∫p</span>')
-    return Markup(escaped)  # noqa: S704
+    out, n = _SUBSCRIPTS.subn(one, escaped)
+    out = out.replace("∫p", '<span class="sym">∫p</span>')
+    return Markup(f"<span>{out}</span>" if wrap and n else out)  # noqa: S704
+
+
+def subs_text(text: Any) -> str:
+    """The plain-text twin of subs, for a chart's aria-label and its screen-reader
+    description: 'S_T' as 'S T', so no name reads out an underscore."""
+    return "" if text is None else _SUBSCRIPTS.sub(r"\1 \2", str(text))
 
 
 app.jinja_env.filters["subs"] = subs
+app.jinja_env.filters["subs_text"] = subs_text
 app.jinja_env.globals["glossary"] = desk_glossary.TERMS
 app.jinja_env.globals["glossary_conventions"] = desk_glossary.CONVENTIONS
 
@@ -5287,6 +5300,7 @@ RND_HEADS = ("Expiry", "Days", "Quoted K/F", *(lab for _, lab, _, _ in desk_dens
              "∫p", "E[S_T/F]", "g_min")
 RND_BEYOND = "beyond quoted strikes"
 RND_TABLE_K = (-0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15)
+RND_TAIL_DASH: dict[str, bool | str | None] = {"lt80": "dotted", "lt90": None, "gt110": True}
 
 
 def _rnd_pct(p: float | None) -> str:
@@ -5362,10 +5376,13 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
                                trows))
     days = [r["T_days"] for r in rows]
     tail_series = []
-    for key, label, dash in (("lt90", "S_T < 0.90 F", None), ("gt110", "S_T > 1.10 F", True),
-                             ("lt80", "S_T < 0.80 F", "dotted")):
-        s_: dict[str, Any] = {"name": f"SVI-cal P({label})", "type": "line", "role": "model",
-                              "model": "svi_cal", "color": charts.model_colour("svi_cal"),
+    # one hue per side (desk_charts.TAIL_COLOURS); the two downside tails differ by
+    # their dash, and the upside tail keeps one too, so print and colour-blind
+    # readers still tell it apart
+    for key, label, side, _ in desk_density.THRESHOLDS:
+        dash = RND_TAIL_DASH[key]
+        s_: dict[str, Any] = {"name": f"SVI-cal P({label})", "type": "line", "role": "tail",
+                              "side": side, "color": charts.TAIL_COLOURS[side],
                               "width": 1.75 if dash is None else 1.5,
                               "symbol": "circle", "size": 4, "legend": True,
                               "data": [[r["T_days"], (100 * r["prob"][key]) if r["prob"][key] is not None
@@ -5379,7 +5396,8 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
            "min": round_sig(min(days) / 1.15, 2), "max": round_sig(max(days) * 1.15, 2)},
         y={"name": "Risk-neutral probability (%)", "digits": 0, "tipDigits": 2, "zero": True},
         series=tail_series, tooltip="item", csv=f"rnd_tails_{session}.csv",
-        describe=("P(S_T < 0.90 F), P(S_T > 1.10 F) and P(S_T < 0.80 F) of each listed SVI-cal slice; "
+        describe=("P(S_T < 0.80 F) and P(S_T < 0.90 F), the downside tails, in one colour, and "
+                  "P(S_T > 1.10 F), the upside tail, in another, of each listed SVI-cal slice; "
                   "a gap is a threshold beyond the expiry's quoted strikes, where no probability is "
                   "printed."),
         table=charts.table("Risk-neutral tail probabilities (%) by listed expiry",
