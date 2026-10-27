@@ -4053,6 +4053,7 @@ def trades_view(trades: list, em: dict, eq: pd.DataFrame) -> dict:
     counts = desk_trades.histogram(pnl_k, edges)
     neg = [c if i < edges.index(0) + 1 else None for i, c in enumerate(counts)]
     pos = [c if i >= edges.index(0) + 1 else None for i, c in enumerate(counts)]
+    labels, counts, neg, pos = labels[::-1], counts[::-1], neg[::-1], pos[::-1]   # gains on top (F18)
     hist_pnl = charts.xy(
         "chart-trade-pnl-hist", "Closed round trips of the portfolio sleeves by P&L per trade ($000s)",
         x={"type": "category", "categories": labels, "name": "", "interval": 0},
@@ -5428,7 +5429,7 @@ def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str,
         for pc, dash, width in CONE_LINES:
             s_: dict[str, Any] = {"name": f"{pc}th pct RV · {sm['label'].lower()}", "type": "line",
                                   "role": "other", "color": "muted", "width": width, "group": sm["key"],
-                                  "symbol": "circle", "size": 3, "endLabel": f"{pc}%",
+                                  "symbol": "circle", "size": 3, "endLabel": f"p{pc}",
                                   "data": [[h, round_sig(by_h[h]["pct"][pc], 4)] for h in hz
                                            if by_h[h]["pct"][pc] is not None]}
             if dash:

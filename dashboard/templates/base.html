@@ -112,7 +112,7 @@
     <div class="banner banner-stale-{{ s.level }}" data-stale="{{ s.component }}" data-age="{{ s.age }}" role="status">
       <div class="banner-icon" aria-hidden="true">{% if s.level == 'error' %}!{% else %}⟳{% endif %}</div>
       <div>
-        <div class="banner-title" data-disclose="stale-{{ s.component }}-body">{{ s.label }} is {{ s.age|plural('NYSE session') }} old</div>
+        <div class="banner-title" data-disclose="stale-{{ s.component }}-body">{{ s.label }}: {{ s.age|plural('NYSE session') }} old</div>
         <div class="banner-body fold-body" id="stale-{{ s.component }}-body">
           {{ s.label }} as of {{ s.date }}; the newest session the site has data for is {{ s.ref }}.
           {% if s.component == 'calibration' and s.cause %}{{ s.cause }}{% endif %}

@@ -336,7 +336,9 @@ def test_calibration_page_shows_age_and_staleness_banner(dash, synth):
     assert d["calib_age"] == 10
     html = dash.app.test_client().get("/calibration").get_data(as_text=True)
     assert 'class="banner banner-stale-error"' in html
-    assert "Heston calibration is 10 NYSE sessions old" in html
+    # no verb: 'Surface artifacts is 5 NYSE sessions old' read wrong for a plural label (F17)
+    assert "Heston calibration: 10 NYSE sessions old" in html
+    assert " is 10 NYSE sessions old" not in html
 
 
 def test_legacy_fits_are_counted_and_never_headlined(dash, synth):
@@ -7595,6 +7597,15 @@ def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages
     assert "intraday" in rank_note
 
 
+def test_cone_percentile_labels_are_not_vol_levels(pages):
+    """F12: the cone's end labels read '95%', '50%', '5%' on a vol-in-% axis, so
+    '95%' looked like a vol level; they are 'p95' … 'p5'."""
+    spec = _raw_specs(pages["/surface"])["chart-vol-cone"]
+    ends = [s_["endLabel"] for s_ in spec["series"] if s_.get("endLabel")]
+    assert ends
+    assert all(re.fullmatch(r"p\d{1,2}", e) for e in ends), ends
+
+
 def test_every_1m_on_the_surface_is_the_30_day_constant_maturity(pages):
     """'1M' is the SVI-cal surface interpolated to exactly 30 days (the KPI tile,
     the constant-maturity grid); a listed expiry is named by its date and days,
@@ -7680,6 +7691,35 @@ def _tbody_rows(html: str, table_id: str) -> list[list[str]]:
     return [[_html_unescape(re.sub(r"<[^>]+>", "", c)).strip()
              for c in re.findall(r"<td[^>]*>(.*?)</td>", tr)]
             for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", t, flags=re.DOTALL)]
+
+
+def test_trade_pnl_histogram_puts_gains_on_top(pages):
+    """F18: the horizontal P&L histogram listed '< −60' first, so the largest
+    losses sat at the top, the reverse of every other P&L axis on the page; the
+    first category (drawn at the top) is now the largest gains."""
+    spec = _raw_specs(pages["/research"])["chart-trade-pnl-hist"]
+    xs = spec["xs"]
+    assert xs[0].startswith("≥ +"), xs
+    assert xs[-1].startswith("< −"), xs
+    assert [r[0] for r in spec["table"]["rows"]] == xs
+
+
+def test_trade_stats_mean_names_both_dollar_bases(dash, pages):
+    """F8: the Trades tile's 'average −$1,083 of portfolio P&L per trade' and the
+    trade-statistics note's 'a mean of −3.2k per trade' are the same trades in
+    two units (the portfolio is the equal-weight mean of three sleeves); the
+    note now says both, and the two agree."""
+    html = pages["/research"]
+    note = _visible_text("<body>" + html[html.index('id="trade-stats-note"'):].split("</p>")[0])
+    m = re.search(r"a mean of ([+−-][\d,.]+)k per trade in sleeve dollars \(\s*(−?\$[\d,]+) of portfolio P&L",
+                  note)
+    assert m, note
+    tile = re.search(r"average (−?\$[\d,]+) of portfolio P&L per trade", _visible_text(html))
+    assert tile
+    assert m.group(2) == tile.group(1)
+    mean_k = float(m.group(1).replace("−", "-").replace(",", ""))
+    tile_usd = float(tile.group(1).replace("−", "-").replace("$", "").replace(",", ""))
+    assert mean_k * 1000 / 3 == pytest.approx(tile_usd, abs=0.05 * 1000 / 3 + 1)
 
 
 def test_round_trips_reconcile_with_the_sleeve_table_and_the_engine(dash, pages):
