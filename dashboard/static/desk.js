@@ -1581,6 +1581,13 @@
       doc.addEventListener('keydown', function (e) { if (e.key === 'Escape' && links.classList.contains('open')) { set(false); btn.focus(); } });
       doc.addEventListener('click', function (e) { if (!btn.contains(e.target) && !links.contains(e.target)) set(false); });
     }
+    // the phone strip's source list (Q20) closes like the menu; a tap on no
+    // control fires no click in iOS Safari, so pointerdown too
+    var sb = $('.sb-phone');
+    if (sb) {
+      doc.addEventListener('keydown', function (e) { if (e.key === 'Escape' && sb.open) { sb.open = false; sb.firstElementChild.focus(); } });
+      ['click', 'pointerdown'].forEach(function (t) { doc.addEventListener(t, function (e) { if (sb.open && !sb.contains(e.target)) sb.open = false; }); });
+    }
     var dlg = $('#keysDialog'), pending = false, timer;
     var go = {};
     $$('.nav-link[data-key]').forEach(function (a) { go[a.getAttribute('data-key')] = a.getAttribute('href'); });

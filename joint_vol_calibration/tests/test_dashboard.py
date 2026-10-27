@@ -7306,6 +7306,43 @@ def test_browser_phone_first_screen_shows_the_subject_and_first_number(site_brow
         ctx.close()
 
 
+def test_browser_phone_status_list_closes_on_escape_and_outside(site_browser):
+    """A1 (F16): the phone strip's source list (details.sb-phone) stayed open on
+    Escape and on a click or a tap elsewhere, over the page head. At 390 px
+    Escape closes it and focus is back on its summary; a click or a tap
+    outside closes it; a click or a tap on its own list does not."""
+    sb = site_browser
+    ctx = sb["browser"].new_context(viewport={"width": 390, "height": 844}, has_touch=True)
+    ctx.set_default_timeout(BROWSER_TIMEOUT_MS)
+    is_open = "document.querySelector('.sb-phone').open"
+    try:
+        page = ctx.new_page()
+        for name in ("index.html", "calibration.html"):
+            page.goto(sb["base"] + name, wait_until="load")
+            summary = page.locator(".sb-phone > summary")
+            summary.focus()
+            page.keyboard.press("Enter")
+            assert page.evaluate(is_open), name
+            page.locator(".sb-list li").first.click()            # its own list: stays open
+            assert page.evaluate(is_open), name
+            page.keyboard.press("Escape")
+            assert not page.evaluate(is_open), name
+            assert page.evaluate("document.activeElement.matches('.sb-phone > summary')"), name
+            summary.click()
+            assert page.evaluate(is_open), name
+            page.locator("main h1").click()
+            assert not page.evaluate(is_open), name
+            summary.tap()
+            assert page.evaluate(is_open), name
+            page.locator(".sb-list li").first.tap()
+            assert page.evaluate(is_open), name
+            box = page.locator("main h1").bounding_box()
+            page.touchscreen.tap(box["x"] + 4, box["y"] + box["height"] / 2)
+            assert not page.evaluate(is_open), name
+    finally:
+        ctx.close()
+
+
 # ── D12: sortable, copyable tables ────────────────────────────────────────────
 
 def test_tables_are_published_in_the_servers_order_without_sort_controls(pages):
