@@ -84,6 +84,7 @@ import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
 import desk_surface  # noqa: E402
+import desk_trades  # noqa: E402
 from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
     _HEAT_NEG,
     _HEAT_NEUTRAL,
@@ -2399,6 +2400,17 @@ def load_page4() -> dict[str, Any]:
     with _loader_boundary(d, "sleeve specification (backtest_engine, signal_engine, full_results.pkl)"):
         d["sleeve_spec"] = sleeve_spec(trades)
 
+    # ── Round trips and worst drawdowns (Research #round-trips, #drawdowns) ─
+    d["rt"] = None
+    # only when the engine results and the NAVs loaded (their loaders report a missing file once)
+    if trades and eq is not None:
+        with _loader_boundary(d, "round trips and drawdowns (full_results.pkl all_trades, "
+                                 "full_results.parquet)"):
+            em_rt = _load_pickle(DATA / "backtest" / "full_results.pkl").get("metrics") or {}
+            rt = trades_view(trades, em_rt, eq)
+            d["charts"].update(rt.pop("charts"))
+            d["rt"] = rt
+
     # ── Implied against subsequently realised vol, and the β·VIX premium ────
     d["vrp"] = None
     with _loader_boundary(d, "implied vs realised vol (vol_system.db spx_ohlcv, vix_daily)"):
@@ -3954,6 +3966,126 @@ def _vp(x: float) -> str:
 def _gm(x: float) -> str:
     """A constant as written ('g'), with a true minus sign: -0.5 -> '−0.5'."""
     return f"{x:g}".replace("-", MINUS)
+
+
+# ── round trips and worst drawdowns (desk_trades.py, B12) ─────────────────────
+TRADE_SLEEVES = (("s1c", "S1C contrarian", "cat0", "circle", False),
+                 ("s3", S3_SHORT, "cat3", "diamond", False),
+                 ("s4", "S4 VRP", "cat4", "triangle", False),
+                 ("s1", "S1 PDV (ref)", "muted", "circle", True),
+                 ("s2", "S2 VIX TS (ref)", "muted", "rect", True))
+DD_SERIES = (("nav", "Portfolio", "max_drawdown"), ("nav_s1c", "S1C contrarian", "s1c_max_drawdown"),
+             ("nav_s3", S3_SHORT, "s3_max_drawdown"), ("nav_s4", "S4 VRP", "s4_max_drawdown"))
+
+
+def _k_signed(x: float | None) -> str:
+    """Dollars as signed $000s (one decimal)."""
+    return "—" if x is None else signed(x / 1000.0, ",.1f")
+
+
+def _by_year(rts: Sequence[dict]) -> list[tuple[str, list[float]]]:
+    """Round trips' P&L grouped by entry year, oldest first."""
+    out: dict[str, list[float]] = {}
+    for r in rts:
+        out.setdefault(r["entry"][:4], []).append(r["pnl"])
+    return sorted(out.items())
+
+
+def trades_view(trades: list, em: dict, eq: pd.DataFrame) -> dict:
+    """Research #round-trips and #drawdowns: every round trip of the portfolio
+    sleeves (the reference sleeves in the statistics only), per-sleeve statistics, the
+    P&L and holding-period histograms of the closed portfolio trades, and the
+    five deepest drawdowns of the portfolio and of each sleeve. Counts, sums and
+    the deepest drawdown are reconciled with the engine metrics (a mismatch is
+    a loader error, never a quiet difference). 'combined' records are not read."""
+    rows, series, end = [], [], str(pd.Timestamp(eq.index[-1]).date())
+    by_sig = {}
+    for sig, label, colour, symbol, ref in TRADE_SLEEVES:
+        rts = desk_trades.round_trips(trades, (sig,))
+        n_em = em.get(f"{sig}_n_trades")
+        if n_em is None or len(rts) != int(n_em):
+            raise ValueError(f"{sig}: {len(rts)} round trips in the trade log, {n_em} in the engine metrics")
+        st = desk_trades.sleeve_stats(rts)
+        tp = _num(em.get(f"{sig}_total_pnl"))
+        if tp is None or abs(st["total"] - tp) > 1.0:
+            raise ValueError(f"{sig}: the round trips add up to {st['total']:,.2f}, the engine to {tp}")
+        by_sig[sig] = rts
+        rows.append({"sig": sig, "label": label, "ref": ref, **st})
+        if ref:                           # in the statistics only: the page budget holds 206 points
+            continue
+        closed = [r for r in rts if not r["open"]]
+        series.append({"name": label, "type": "scatter", "color": colour, "symbol": symbol, "size": 6,
+                       "legend": True, "data": [[r["entry"], round(r["pnl"] / 1000.0, 1)] for r in closed]})
+        series.extend({"name": f"{label} open on {r['entry']} (entry cost only)", "type": "scatter",
+                       "color": colour, "symbol": symbol, "size": 9, "hollow": True, "legend": True,
+                       "data": [[r["entry"], round(r["pnl"] / 1000.0, 1)]]} for r in rts if r["open"])
+    port = [r for sig in PORTFOLIO_SLEEVES for r in by_sig[sig] if not r["open"]]
+    strip = charts.xy(
+        "chart-round-trips", "P&L of every round trip of S1C, S3 and S4 by entry date ($000s)",
+        x={"type": "time", "name": "", "csv": "entry"},
+        y={"name": "P&L per round trip ($000s)", "digits": 0, "tipDigits": 1, "signed": True},
+        series=series, tooltip="item", csv="round_trips.csv", zoom="inside",
+        marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+        describe=(f"{len(port)} closed round trips of S1C, S3 and S4, each a dot at its entry date and its "
+                  "mark-to-model P&L at β·VIX in $000s; the open trade is hollow and carries only its entry "
+                  "cost."),
+        # the data alternative summarises by sleeve and entry year (every trade is in the CSV,
+        # which desk.js builds from the points; a 319-row table broke the page budget)
+        table=charts.table("Trades by sleeve and entry year, closed ($000s, mark-to-model); every trade "
+                           "is in the CSV",
+                           ["Sleeve", "Year", "Trades#", "Winning#", "Total P&L#", "Best#", "Worst#"],
+                           [[lab, y, len(ps), sum(1 for v in ps if v > 0), _k_signed(sum(ps)),
+                             _k_signed(max(ps)), _k_signed(min(ps))]
+                            for sig, lab, *_ in TRADE_SLEEVES if sig in PORTFOLIO_SLEEVES
+                            for y, ps in _by_year([r for r in by_sig[sig] if not r["open"]])]))
+    pnl_k = [r["pnl"] / 1000.0 for r in port]
+    edges = desk_trades.PNL_BINS_K
+    labels = ([f"< {signed(edges[0], ',.0f')}"] + [f"{signed(a, ',.0f')} to {signed(b, ',.0f')}"
+                                                    for a, b in itertools.pairwise(edges)]
+              + [f"≥ {signed(edges[-1], ',.0f')}"])
+    counts = desk_trades.histogram(pnl_k, edges)
+    neg = [c if i < edges.index(0) + 1 else None for i, c in enumerate(counts)]
+    pos = [c if i >= edges.index(0) + 1 else None for i, c in enumerate(counts)]
+    hist_pnl = charts.xy(
+        "chart-trade-pnl-hist", "Closed round trips of the portfolio sleeves by P&L per trade ($000s)",
+        x={"type": "category", "categories": labels, "name": "", "interval": 0},
+        y={"name": "Trades", "digits": 0, "tipDigits": 0, "zero": True},
+        series=[{"name": "Losing", "type": "bar", "color": "neg", "stack": "h", "data": neg, "legend": True},
+                {"name": "Winning", "type": "bar", "color": "pos", "stack": "h", "data": pos,
+                 "legend": True}],
+        xs=labels, horizontal=True, tooltip="axis", csv="round_trip_pnl_histogram.csv",
+        grid={"left": 92, "bottom": 30},
+        describe=f"Counts of the {len(port)} closed round trips of S1C, S3 and S4 by P&L bin in $000s.",
+        table=charts.table("Closed round trips by P&L ($000s), S1C, S3 and S4",
+                           ["P&L ($000s)", "Trades#"],
+                           [[lab, n] for lab, n in zip(labels, counts, strict=True)]))
+    dedges = desk_trades.DAY_BINS
+    dlabels = [f"{a}–{b - 1}" for a, b in itertools.pairwise(dedges)] + [f"≥ {dedges[-1]}"]
+    dcounts = desk_trades.histogram([r["days"] for r in port], dedges, open_low=False)
+    hist_days = charts.xy(
+        "chart-trade-days-hist", "Closed round trips of the portfolio sleeves by calendar days held",
+        x={"type": "category", "categories": dlabels, "name": "Calendar days held", "interval": 0},
+        y={"name": "Trades", "digits": 0, "tipDigits": 0, "zero": True},
+        series=[{"name": "Trades", "type": "bar", "color": "headline", "data": dcounts}],
+        xs=dlabels, tooltip="axis", csv="round_trip_days_histogram.csv",
+        describe=(f"Counts of the {len(port)} closed round trips of S1C, S3 and S4 by calendar days from "
+                  "entry to exit."),
+        table=charts.table("Closed round trips by calendar days held, S1C, S3 and S4",
+                           ["Days held", "Trades#"],
+                           [[lab, n] for lab, n in zip(dlabels, dcounts, strict=True)]))
+    dds = []
+    for col, label, key in DD_SERIES:
+        if col not in eq.columns:
+            raise ValueError(f"full_results.parquet has no {col}")
+        top = desk_trades.worst_drawdowns(eq[col])
+        want = _num(em.get(key))
+        if not top or want is None or abs(top[0]["depth"] - want) > 1e-9:
+            raise ValueError(f"{col}: deepest drawdown {top[0]['depth'] if top else None}, "
+                             f"engine {key} {want}")
+        dds.append({"label": label, "periods": top, "n_all": len(desk_trades.drawdown_periods(eq[col]))})
+    port_stats = desk_trades.sleeve_stats([r for sig in PORTFOLIO_SLEEVES for r in by_sig[sig]])
+    return {"rows": rows, "drawdowns": dds, "end": end, "n_port_closed": len(port), "port": port_stats,
+            "charts": {"round_trips": strip, "trade_pnl_hist": hist_pnl, "trade_days_hist": hist_days}}
 
 
 def sleeve_spec(trades: Sequence[Any]) -> dict:

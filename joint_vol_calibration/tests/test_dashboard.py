@@ -2538,8 +2538,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     than its budget (raw HTML; GitHub Pages serves it gzipped at about a fifth)."""
     out = tmp_path / "site"
     assert freezer.freeze(str(out), dash) == 0
+    # research.html: 400 kB until B12 added every portfolio round trip (206 points), two
+    # histograms and the trade and drawdown tables, about 30 kB raw (404 kB with them)
     budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 400_000, "corrections.html": 120_000,
+              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 120_000,
               "model-risk.html": 80_000}
     for name, cap in budget.items():
         size = (out / name).stat().st_size
@@ -7425,3 +7427,89 @@ def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages
     rank_note = txt(html[html.index('id="vol-cone-rank-note"'):][:3000])
     assert "variance risk premium" in rank_note
     assert "intraday" in rank_note
+
+
+# ── B12: round trips and worst drawdowns ──────────────────────────────────────
+
+def _tbody_rows(html: str, table_id: str) -> list[list[str]]:
+    t = html[html.index(f'id="{table_id}"'):]
+    t = t[t.index("<tbody>"):t.index("</table>")]
+    return [[_html_unescape(re.sub(r"<[^>]+>", "", c)).strip()
+             for c in re.findall(r"<td[^>]*>(.*?)</td>", tr)]
+            for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", t, flags=re.DOTALL)]
+
+
+def test_round_trips_reconcile_with_the_sleeve_table_and_the_engine(dash, pages):
+    """#round-trips, #trade-stats and #drawdowns: every sleeve's count equals the
+    per-sleeve table's (the open S4 straddle counted apart), the round trips add
+    up to the engine's sleeve P&L, the strip plot holds every closed trade, the
+    'combined' records are not read, each series' deepest drawdown is the
+    engine's max drawdown (the portfolio's is the published KPI) and every
+    unrecovered drawdown prints 'not recovered'. Before B12 the page showed only
+    aggregates."""
+    tr_mod = _load("desk_trades_under_test", "dashboard/desk_trades.py")
+    state = pickle.loads((SHIPPED / "backtest" / "full_results.pkl").read_bytes())
+    em, trades = state["metrics"], state["all_trades"]
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    html = pages["/research"]
+    for pid in ("round-trips", "trade-hists", "trade-stats", "drawdowns"):
+        assert f'id="{pid}"' in html, pid
+    sleeve_rows = {r[0]: r for r in _tbody_rows(html, "sleeve-table")}
+    stats = _tbody_rows(html, "trade-stats-tbl")
+    labels = {"s1c": "S1C contrarian", "s3": dash.S3_SHORT, "s4": "S4 VRP", "s1": "S1 PDV (ref)",
+              "s2": "S2 VIX TS (ref)"}
+    table_label = {"s1c": "S1C Contrarian", "s3": dash.S3_NAME, "s4": "S4 VRP", "s1": "S1 PDV (ref)",
+                   "s2": "S2 VIX TS (ref)"}
+    assert [r[0] for r in stats] == list(labels.values())
+    spec = _spec(html, "chart-round-trips")
+    by_name = {s["name"]: s for s in spec["series"]}
+    n_closed_port = 0
+    for (sig, lab), row in zip(labels.items(), stats, strict=True):
+        rts = tr_mod.round_trips(trades, (sig,))
+        n_open = sum(r["open"] for r in rts)
+        assert int(row[1]) + int(row[2]) == len(rts) == int(em[f"{sig}_n_trades"])
+        assert int(row[2]) == n_open
+        # the per-sleeve table's 'Trades' cell: '46 (1 open)'
+        want = f"{len(rts)}" + (f" ({n_open} open)" if n_open else "")
+        assert sleeve_rows[table_label[sig]][5] == want, (sig, sleeve_rows[table_label[sig]])
+        assert sum(r["pnl"] for r in rts) == pytest.approx(em[f"{sig}_total_pnl"], abs=1.0)
+        assert row[3] == dash.signed(em[f"{sig}_total_pnl"] / 1000, ",.1f")
+        if sig in dash.PORTFOLIO_SLEEVES:
+            pts = by_name[lab]["data"]
+            assert len(pts) == len(rts) - n_open
+            assert sum(y for _x, y in pts) == pytest.approx(
+                sum(r["pnl"] for r in rts if not r["open"]) / 1000, abs=0.05 * len(pts))
+            n_closed_port += len(rts) - n_open
+        else:
+            assert lab not in by_name                   # reference sleeves: the statistics only
+    assert not any("combined" in s["name"].lower() for s in spec["series"])
+    assert f"{n_closed_port} closed" in html
+    hist = _spec(html, "chart-trade-pnl-hist")
+    assert sum(int(r[1]) for r in hist["table"]["rows"]) == n_closed_port
+    days = _spec(html, "chart-trade-days-hist")
+    assert sum(int(r[1]) for r in days["table"]["rows"]) == n_closed_port
+    # the strip's data alternative: closed trades by sleeve and entry year, adding up to the sleeve
+    by_sleeve = collections.Counter()
+    for r in spec["table"]["rows"]:
+        by_sleeve[r[0]] += int(r[2])
+    for sig in dash.PORTFOLIO_SLEEVES:
+        rts = tr_mod.round_trips(trades, (sig,))
+        assert by_sleeve[labels[sig]] == sum(1 for r in rts if not r["open"]), sig
+    # drawdowns: the deepest of each series is the engine's; 'not recovered' where it is so
+    dd = _tbody_rows(html, "drawdowns-tbl")
+    assert dd[0][0] == "Portfolio"
+    assert dd[0][5] == f"{em['max_drawdown'] * 100:.1f}%".replace("-", "−")
+    # the published max drawdown (the KPI tile) is the table's top row
+    mdd = f"{em['max_drawdown'] * 100:.1f}".replace("-", "−")
+    assert re.search(r"Max drawdown\s*" + re.escape(mdd) + r"\s*%", _visible_text(html))
+    for col, lab, key in (("nav", "Portfolio", "max_drawdown"),
+                          ("nav_s1c", labels["s1c"], "s1c_max_drawdown"),
+                          ("nav_s3", labels["s3"], "s3_max_drawdown"),
+                          ("nav_s4", labels["s4"], "s4_max_drawdown")):
+        rows = [r for r in dd if r[0] == lab]
+        periods = tr_mod.worst_drawdowns(eq[col])
+        assert periods[0]["depth"] == pytest.approx(em[key], abs=1e-12)
+        assert len(rows) == len(periods) == min(5, len(tr_mod.drawdown_periods(eq[col])))
+        for r, p in zip(rows, periods, strict=True):
+            assert r[2:5] == [p["peak"], p["valley"], p["recovery"] or "not recovered"]
+            assert r[5] == f"{p['depth'] * 100:.1f}%".replace("-", "−")
