@@ -69,6 +69,14 @@ TERMS: tuple[dict[str, Any], ...] = (
     {"id": "bf25", "term": "BF25", "abbr": "25-delta butterfly", "pat": r"\bBF25\b",
      "text": "(25Δ call vol + 25Δ put vol)/2 − ATMF, same deltas as RR25.",
      "units": "vol pts", "used": "Surface", "source": "dashboard/desk_surface.py", "fn": "delta_grid"},
+    {"id": "atm-skew", "term": "ATM skew", "abbr": None, "pat": r"\bATM skews?\b",
+     "text": "∂σ/∂ln(K/F) at the forward, k = ln(K/F) = 0; for an SVI-cal slice w′(0)/(2·√(w(0)·T)) in "
+             "decimal vol. Calibration and the Overview quote it per unit k; the Surface grid scales it to "
+             "vol pts per 0.1 of k, ×10: −1.50 per unit k is −15.0 vol pts per 0.1 of k. Negative: puts "
+             "over calls.",
+     "units": "vol per unit ln(K/F); vol pts per 0.1 of ln(K/F) on the Surface grid",
+     "used": "Surface, Calibration, Overview", "source": "dashboard/desk_surface.py",
+     "fn": "svi_atm_skew, SKEW_UNIT_K"},
     {"id": "svi-cal", "term": "SVI-cal", "abbr": "calendar-ordered SVI surface", "pat": r"\bSVI-cal\b",
      "text": "The calendar-ordered SVI surface: one raw-SVI slice (a, b, ρ, m, σ) per listed expiry, each "
              "with a butterfly certificate (Durrleman's g ≥ 0, so its density is non-negative).",

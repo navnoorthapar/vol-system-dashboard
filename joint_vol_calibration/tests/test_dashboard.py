@@ -5307,6 +5307,10 @@ def test_skew_term_sentence_states_what_the_data_shows(dash, pages):
         assert "flatter than the SVI-cal market skew at every listed expiry" in text
     if short:
         assert f"market line lies above the Heston line on {above} of {len(short)} expiries" in text
+    # the pair carries its unit, the decimal skew per unit ln(K/F), not the grid's ×10 (R3-T8)
+    f = next(r for r in rows if r["ratio"] is not None)
+    assert (f"|skew| {abs(f['heston']):.2f} against {abs(f['svi']):.2f} vol per unit ln(K/F) at "
+            f"{f['T_days']:.0f} d") in text
 
 
 def test_findings_cite_the_skew_power_law_and_link_to_its_panel(dash, pages):
@@ -5317,6 +5321,11 @@ def test_findings_cite_the_skew_power_law_and_link_to_its_panel(dash, pages):
     text = _visible_text("<body>" + items[0])
     assert (f"slope in T is {dash.signed(min(slopes), '.2f')} to {dash.signed(max(slopes), '.2f')} over "
             f"{len(slopes)} sessions") in text
+    # the Overview's pair names its unit and that it is a magnitude (R3-T8): the
+    # Surface grid prints the same skew ×10, in vol pts per 0.1 of ln(K/F)
+    f = next(r for r in sk["rows"] if r["ratio"] is not None)
+    assert (f"(|skew| {abs(f['heston']):.2f} against {abs(f['svi']):.2f} vol per unit ln(K/F) at "
+            f"{f['T_days']:.0f} d)") in text
     # the Surface grid's skew column and the rough-vs-Heston panel link to it
     assert '<a href="calibration.html#skew-term">ATM skew</a>' in pages["/surface"].replace(
         'href="/calibration#', 'href="calibration.html#')

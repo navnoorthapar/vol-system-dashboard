@@ -68,6 +68,24 @@ def test_the_half_spread_definition_quotes_the_fits_floor():
     assert "(ask IV − bid IV)/2" in hs["text"]
 
 
+def test_the_atm_skew_definition_gives_both_scalings_the_pages_use():
+    """Calibration and the Overview quote the ATM skew per unit ln(K/F), the
+    Surface grid in vol pts per SKEW_UNIT_K of it (R3-T8): the definition's
+    worked conversion is the grid's own factor, and it names both units."""
+    import desk_surface
+
+    sk = next(t for t in gl.TERMS if t["id"] == "atm-skew")
+    m = re.search(r"(−[\d.]+) per unit k is (−[\d.]+) vol pts per ([\d.]+) of k", sk["text"])
+    assert m, sk["text"]
+    per_k, vp, step = (float(g.replace("−", "-")) for g in m.groups())
+    assert step == desk_surface.SKEW_UNIT_K
+    assert vp == pytest.approx(per_k * 100.0 * desk_surface.SKEW_UNIT_K)
+    assert "vol per unit ln(K/F)" in sk["units"]
+    assert f"vol pts per {desk_surface.SKEW_UNIT_K:g} of ln(K/F)" in sk["units"]
+    assert re.search(sk["pat"], "the ATM skew")
+    assert re.search(sk["pat"], "ATM skews")
+
+
 def test_only_the_first_use_in_running_prose_is_linked():
     html = _page("<h2>PSR heading</h2><table><tr><td>PSR cell</td></tr></table>"
                  "<p>The <b>PSR</b> is 0.31 and the PSR again; DSR too.</p><li>PSR in a list</li>")

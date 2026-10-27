@@ -2855,6 +2855,7 @@ def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> di
 
 
 SKEW_SHORT_DAYS = 30.0     # 'the short end' of the skew comparison: listed expiries under 30 days
+SKEW_UNIT = "vol per unit ln(K/F)"   # the prose unit of a decimal ATM skew (the Surface grid's is ×10)
 
 
 def _session_skews(s: dict) -> dict:
@@ -2941,8 +2942,8 @@ def skew_term_sentence(v: dict) -> str | None:
         n_st = sum(1 for r in v["rows"] if r["ratio"] is not None and r["ratio"] > 1)
         rel = f"steeper than the SVI-cal market skew on {n_st} of {c['n']} listed expiries"
     out = (f"On {v['head']} the published Heston fit's ATM skew is {rel} "
-           f"(×{_fmt(c['lo'], '.2f')} to ×{_fmt(c['hi'], '.2f')}; {_fmt(abs(f['heston']), '.2f')} against "
-           f"{_fmt(abs(f['svi']), '.2f')} at {_fmt(f['T_days'], '.0f')} d).")
+           f"(×{_fmt(c['lo'], '.2f')} to ×{_fmt(c['hi'], '.2f')}; |skew| {_fmt(abs(f['heston']), '.2f')} "
+           f"against {_fmt(abs(f['svi']), '.2f')} {SKEW_UNIT} at {_fmt(f['T_days'], '.0f')} d).")
     if c["n_short"]:
         out += (f" Below {_fmt(SKEW_SHORT_DAYS, '.0f')} days the market line lies above the Heston line on "
                 f"{c['short_market_above']} of {c['n_short']} expiries.")
@@ -4768,9 +4769,10 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         rel = ("at every listed expiry" if (cmp_["steeper_all"] or cmp_["flatter_all"])
                else f"across the {cmp_['n']} listed expiries")
         text = (f"×{_fmt(cmp_['lo'], '.2f')} to ×{_fmt(cmp_['hi'], '.2f')} the SVI-cal market skew {rel} of "
-                f"{sk['head']} ({_fmt(abs(f0['heston']), '.2f')} against {_fmt(abs(f0['svi']), '.2f')} at "
-                f"{_fmt(f0['T_days'], '.0f')} d); the market's slope in T is {signed(min(rng), '.2f')} to "
-                f"{signed(max(rng), '.2f')} over {plural(len(rng), 'session')} (SVI-cal, all expiries).")
+                f"{sk['head']} (|skew| {_fmt(abs(f0['heston']), '.2f')} against "
+                f"{_fmt(abs(f0['svi']), '.2f')} {SKEW_UNIT} at {_fmt(f0['T_days'], '.0f')} d); the market's "
+                f"slope in T is {signed(min(rng), '.2f')} to {signed(max(rng), '.2f')} over "
+                f"{plural(len(rng), 'session')} (SVI-cal, all expiries).")
         if cmp_["lo"] >= 0.9 and cmp_["hi"] <= 1.1:
             works.append(item("Heston's ATM skew matches the market's", "calibration.html#skew-term", text))
         else:
