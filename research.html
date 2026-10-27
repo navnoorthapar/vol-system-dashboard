@@ -28,7 +28,7 @@
   <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
   
-  <link rel="stylesheet" href="static/desk.css?v=ae3987f96844">
+  <link rel="stylesheet" href="static/desk.css?v=b3e8bc8bbea6">
   <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
     .chart { display: none !important; }
@@ -58,7 +58,7 @@
       <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
       <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
       <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
-      <li><span class="sb-k">BUILD</span><span class="sb-v">7243afd</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">7cefb74</span></li>
       <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
     </ul>
   </details>
@@ -93,7 +93,7 @@
   
   <span class="sb-right">
     <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
-    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7243afd85878de38828f0d0f638a1f6129d6cf1f">7243afd</a></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7cefb74eee316a882ea492b54f4ad701d0af351d">7cefb74</a></span>
     <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
   </span>
 </header>
@@ -562,7 +562,7 @@
   </div>
   <div class="panel-body">
     <div class="heat-wrap grow" tabindex="0" role="region" aria-labelledby="monthly-grid-cap">
-  <table class="heat" id="monthly-grid" data-readout="monthly-grid-readout">
+  <table class="heat" id="monthly-grid" data-readout="monthly-grid-readout" data-total>
     <caption id="monthly-grid-cap">Portfolio return (%) by month; the last column is the calendar year</caption>
     <thead><tr><th scope="col">Year</th><th scope="col">Jan</th><th scope="col">Feb</th><th scope="col">Mar</th><th scope="col">Apr</th><th scope="col">May</th><th scope="col">Jun</th><th scope="col">Jul</th><th scope="col">Aug</th><th scope="col">Sep</th><th scope="col">Oct</th><th scope="col">Nov</th><th scope="col">Dec</th><th scope="col">Year</th></tr></thead>
     <tbody>
@@ -603,7 +603,8 @@
   </table>
 </div>
 <p class="heat-readout" id="monthly-grid-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
-<div class="ramp" aria-hidden="true"><span>−2.7%</span><span class="ramp-bar" style="background:linear-gradient(90deg,#fbb360,#1c2127,#8abbff)"></span><span>+2.7%</span><span>· monthly return · orange loss, blue gain; the sign is in every cell</span></div>
+
+<div class="ramp" aria-hidden="true"><span>−2.7%</span><span class="ramp-bar" style="background:linear-gradient(90deg,#fbb360,#1c2127,#8abbff)"></span><span>+2.7%</span><span>· month cells · orange loss, blue gain; the sign is in every cell</span></div><div class="ramp" aria-hidden="true"><span>−8.2%</span><span class="ramp-bar" style="background:linear-gradient(90deg,#fbb360,#1c2127,#8abbff)"></span><span>+8.2%</span><span>· Year column, on its own wider scale</span></div>
   </div>
 </section>
   <section class="panel s5 " id="annual" aria-labelledby="annual-t">
@@ -931,7 +932,7 @@
   <section class="panel s6 " id="beta-chains" aria-labelledby="beta-chains-t">
   <div class="panel-head">
     <h2 class="panel-title" id="beta-chains-t"><span class="sym">β</span> = ATM vol / VIX · the chains behind it</h2>
-    <span class="panel-side"><a class="chip chip-watch mon-link" href="model-risk.html#check-beta-drift" aria-label="Monitored · M7 · WATCH: β drift: newest chain&#39;s ATM vol / VIX against the frozen β" title="Model Risk check: β drift: newest chain&#39;s ATM vol / VIX against the frozen β" data-monitored="check-beta-drift">Monitored · M7 · WATCH</a>
+    <span class="panel-side"><a class="chip chip-watch mon-link" href="model-risk.html#check-beta-drift" aria-label="M7 β drift · WATCH, Model Risk check: β drift: newest chain&#39;s ATM vol / VIX against the frozen β" title="Model Risk check: β drift: newest chain&#39;s ATM vol / VIX against the frozen β" data-monitored="check-beta-drift">M7 <span class="sym">β</span> drift · WATCH</a>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="beta-chains" aria-label="Copy a link to the β = ATM vol / VIX · the chains behind it panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -1027,7 +1028,7 @@
   <section class="panel s6 " id="research-classifier" aria-labelledby="research-classifier-t">
   <div class="panel-head">
     <h2 class="panel-title" id="research-classifier-t">ML regime classifier · research only</h2>
-    <span class="panel-side"><a class="chip chip-breach mon-link" href="model-risk.html#check-classifier" aria-label="Monitored · M11 · BREACH: Classifier accuracy minus the persistence baseline (percentage pts)" title="Model Risk check: Classifier accuracy minus the persistence baseline (percentage pts)" data-monitored="check-classifier">Monitored · M11 · BREACH</a>
+    <span class="panel-side"><a class="chip chip-breach mon-link" href="model-risk.html#check-classifier" aria-label="M11 classifier skill · BREACH, Model Risk check: Classifier accuracy minus the persistence baseline (percentage pts)" title="Model Risk check: Classifier accuracy minus the persistence baseline (percentage pts)" data-monitored="check-classifier">M11 classifier skill · BREACH</a>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="research-classifier" aria-label="Copy a link to the ML regime classifier · research only panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">

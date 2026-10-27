@@ -28,7 +28,7 @@
   <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
   
-  <link rel="stylesheet" href="static/desk.css?v=ae3987f96844">
+  <link rel="stylesheet" href="static/desk.css?v=b3e8bc8bbea6">
   <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
     .chart { display: none !important; }
@@ -58,7 +58,7 @@
       <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
       <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
       <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
-      <li><span class="sb-k">BUILD</span><span class="sb-v">7243afd</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">7cefb74</span></li>
       <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
     </ul>
   </details>
@@ -93,7 +93,7 @@
   
   <span class="sb-right">
     <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
-    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7243afd85878de38828f0d0f638a1f6129d6cf1f">7243afd</a></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7cefb74eee316a882ea492b54f4ad701d0af351d">7cefb74</a></span>
     <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
   </span>
 </header>
@@ -207,7 +207,7 @@
   <section class="panel s12 " id="greeks-grid" aria-labelledby="greeks-grid-t">
   <div class="panel-head">
     <h2 class="panel-title" id="greeks-grid-t">Greeks by maturity and ln(K/F)</h2>
-    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-greeks-source" aria-label="Monitored · M6 · OK: Greeks surface built from the headline fit" title="Model Risk check: Greeks surface built from the headline fit" data-monitored="check-greeks-source">Monitored · M6 · OK</a><span class="panel-meta">2026-10-26</span>
+    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-greeks-source" aria-label="M6 Greeks source · OK, Model Risk check: Greeks surface built from the headline fit" title="Model Risk check: Greeks surface built from the headline fit" data-monitored="check-greeks-source">M6 Greeks source · OK</a><span class="panel-meta">2026-10-26</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="greeks-grid" aria-label="Copy a link to the Greeks by maturity and ln(K/F) panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -889,6 +889,7 @@
   </table>
 </div>
 <p class="heat-readout" id="heat-iv-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+
 <div class="ramp" aria-hidden="true"><span>11.8</span><span class="ramp-bar" style="background:linear-gradient(90deg,#00224E,#083370,#35456C,#4F576C,#666970,#7D7C78,#948E77,#AEA371,#C8B866,#E5CF52,#FEE838)"></span><span>40.1</span><span>· implied vol, %</span></div>
     </div>
     
@@ -928,6 +929,7 @@
   </table>
 </div>
 <p class="heat-readout" id="heat-vega-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+
 <div class="ramp" aria-hidden="true"><span>1.9</span><span class="ramp-bar" style="background:linear-gradient(90deg,#00224E,#083370,#35456C,#4F576C,#666970,#7D7C78,#948E77,#AEA371,#C8B866,#E5CF52,#FEE838)"></span><span>3,054.3</span><span>· per unit index, per 1.00 vol</span></div>
     </div>
     
@@ -967,6 +969,7 @@
   </table>
 </div>
 <p class="heat-readout" id="heat-vanna-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+
 <div class="ramp" aria-hidden="true"><span>−2.13</span><span class="ramp-bar" style="background:linear-gradient(90deg,#d4a0ff,#a687f0,#7f63c8,#574393,#33295a,#1c2127,#1d3d3a,#22605a,#2b867c,#45ad9f,#7fd3c4)"></span><span>+2.13</span><span>· per unit index, per 1.00 vol, dark at zero</span></div>
     </div>
     
@@ -1006,6 +1009,7 @@
   </table>
 </div>
 <p class="heat-readout" id="heat-delta-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+
 <div class="ramp" aria-hidden="true"><span>−0.499</span><span class="ramp-bar" style="background:linear-gradient(90deg,#d4a0ff,#a687f0,#7f63c8,#574393,#33295a,#1c2127,#1d3d3a,#22605a,#2b867c,#45ad9f,#7fd3c4)"></span><span>+0.499</span><span>· forward delta of the out-of-the-money option: N(d₁) for the call at K ≥ F, N(d₁) − 1 for the put at K &lt; F, dark at zero</span></div>
     </div>
     
@@ -1121,6 +1125,7 @@
   </table>
 </div>
 <p class="heat-readout" id="scenario-grid-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+
 <div class="ramp" aria-hidden="true"><span>−662</span><span class="ramp-bar" style="background:linear-gradient(90deg,#fbb360,#1c2127,#8abbff)"></span><span>+662</span><span>· index points per straddle · orange loss, blue gain</span></div>
     <p class="note">Long one 30-day SPX straddle struck at the 30-day forward, on one unit of the index, delta-hedged at inception in the index at its Black-Scholes (sticky-strike) delta; instantaneous shocks, full Black-76 revaluation on the headline Heston fit&#39;s smile; as of 2026-10-26; sticky-strike dynamics shown (the file also holds sticky-moneyness). P&amp;L in index points per straddle on one unit of the index (×100 for one SPX contract).</p>
     
@@ -1159,6 +1164,7 @@
   </table>
 </div>
 <p class="heat-readout" id="scenario-grid-sticky-moneyness-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+
 
     <p class="note">Same colour scale and units as the grid above. Under sticky-moneyness the smile (<a class="cite" href="calibration.html#model-smile">the headline fit’s model smile</a>) moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
     </details>

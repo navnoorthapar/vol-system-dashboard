@@ -28,7 +28,7 @@
   <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
   
-  <link rel="stylesheet" href="static/desk.css?v=ae3987f96844">
+  <link rel="stylesheet" href="static/desk.css?v=b3e8bc8bbea6">
   <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
     .chart { display: none !important; }
@@ -58,7 +58,7 @@
       <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
       <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
       <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
-      <li><span class="sb-k">BUILD</span><span class="sb-v">7243afd</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">7cefb74</span></li>
       <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
     </ul>
   </details>
@@ -93,7 +93,7 @@
   
   <span class="sb-right">
     <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
-    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7243afd85878de38828f0d0f638a1f6129d6cf1f">7243afd</a></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7cefb74eee316a882ea492b54f4ad701d0af351d">7cefb74</a></span>
     <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
   </span>
 </header>
@@ -321,7 +321,7 @@
   <div class="banner s6 banner-warn" id="feller">
     <div class="banner-icon" aria-hidden="true">!</div>
     <div>
-      <div class="banner-title">Feller condition: 2κθ &lt; σ² — VIOLATED <a class="chip chip-muted mon-link" href="model-risk.html#check-feller" aria-label="Monitored · M4 · INFO: Feller condition (diagnostic, not imposed)" title="Model Risk check: Feller condition (diagnostic, not imposed)" data-monitored="check-feller">Monitored · M4 · INFO</a></div>
+      <div class="banner-title">Feller condition: 2κθ &lt; σ² — VIOLATED <a class="chip chip-muted mon-link" href="model-risk.html#check-feller" aria-label="M4 Feller · INFO, Model Risk check: Feller condition (diagnostic, not imposed)" title="Model Risk check: Feller condition (diagnostic, not imposed)" data-monitored="check-feller">M4 Feller · INFO</a></div>
       <div class="banner-body">
         2κθ = 0.48111; σ² = 3.35996; margin 2κθ − σ² = <strong>−2.8789</strong>.
         <strong>Diagnostic only — not imposed.</strong> 2κθ ≥ σ² is not a no-arbitrage condition: when it fails the variance process can reach zero and reflect, and the Fourier pricer stays valid.
@@ -348,7 +348,7 @@
   <section class="panel s12 " id="oos" aria-labelledby="oos-t">
   <div class="panel-head">
     <h2 class="panel-title" id="oos-t">Out-of-sample error by expiry</h2>
-    <span class="panel-side"><a class="chip chip-watch mon-link" href="model-risk.html#check-oos-rmse" aria-label="Monitored · M4 · WATCH: Out-of-sample SPX IV RMSE (vol pts)" title="Model Risk check: Out-of-sample SPX IV RMSE (vol pts)" data-monitored="check-oos-rmse">Monitored · M4 · WATCH</a><a class="chip chip-watch mon-link" href="model-risk.html#check-short-oos-rmse" aria-label="Monitored · M4 · WATCH: Worst short-dated expiry OOS RMSE (≤ 30 days)" title="Model Risk check: Worst short-dated expiry OOS RMSE (≤ 30 days)" data-monitored="check-short-oos-rmse">Monitored · M4 · WATCH</a><span class="panel-meta">3,049 quotes</span>
+    <span class="panel-side"><a class="chip chip-watch mon-link" href="model-risk.html#check-oos-rmse" aria-label="M4 OOS RMSE · WATCH, Model Risk check: Out-of-sample SPX IV RMSE (vol pts)" title="Model Risk check: Out-of-sample SPX IV RMSE (vol pts)" data-monitored="check-oos-rmse">M4 OOS RMSE · WATCH</a><a class="chip chip-watch mon-link" href="model-risk.html#check-short-oos-rmse" aria-label="M4 short-end RMSE · WATCH, Model Risk check: Worst short-dated expiry OOS RMSE (≤ 30 days)" title="Model Risk check: Worst short-dated expiry OOS RMSE (≤ 30 days)" data-monitored="check-short-oos-rmse">M4 short-end RMSE · WATCH</a><span class="panel-meta">3,049 quotes</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="oos" aria-label="Copy a link to the Out-of-sample error by expiry panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -390,7 +390,7 @@
   <section class="panel s12 " id="vixleg" aria-labelledby="vixleg-t">
   <div class="panel-head">
     <h2 class="panel-title" id="vixleg-t">VIX leg · indices in the fit, VX futures out of sample</h2>
-    <span class="panel-side"><a class="chip chip-breach mon-link" href="model-risk.html#check-vx-lag" aria-label="Monitored · M5 · BREACH: VX futures table lag behind the market DB (NYSE sessions)" title="Model Risk check: VX futures table lag behind the market DB (NYSE sessions)" data-monitored="check-vx-lag">Monitored · M5 · BREACH</a><a class="chip chip-watch mon-link" href="model-risk.html#check-vix-rmse" aria-label="Monitored · M4 · WATCH: VIX index RMSE (index pts)" title="Model Risk check: VIX index RMSE (index pts)" data-monitored="check-vix-rmse">Monitored · M4 · WATCH</a><span class="panel-meta">2026-10-26</span>
+    <span class="panel-side"><a class="chip chip-breach mon-link" href="model-risk.html#check-vx-lag" aria-label="M5 VX lag · BREACH, Model Risk check: VX futures table lag behind the market DB (NYSE sessions)" title="Model Risk check: VX futures table lag behind the market DB (NYSE sessions)" data-monitored="check-vx-lag">M5 VX lag · BREACH</a><a class="chip chip-watch mon-link" href="model-risk.html#check-vix-rmse" aria-label="M4 VIX RMSE · WATCH, Model Risk check: VIX index RMSE (index pts)" title="Model Risk check: VIX index RMSE (index pts)" data-monitored="check-vix-rmse">M4 VIX RMSE · WATCH</a><span class="panel-meta">2026-10-26</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="vixleg" aria-label="Copy a link to the VIX leg · indices in the fit, VX futures out of sample panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -851,7 +851,7 @@
   <section class="panel s7 " id="identifiability" aria-labelledby="identifiability-t">
   <div class="panel-head">
     <h2 class="panel-title" id="identifiability-t">Identifiability · multi-start and Jacobian</h2>
-    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-params-at-bound" aria-label="Monitored · M4 · OK: Parameters on a box bound" title="Model Risk check: Parameters on a box bound" data-monitored="check-params-at-bound">Monitored · M4 · OK</a>
+    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-params-at-bound" aria-label="M4 box bound · OK, Model Risk check: Parameters on a box bound" title="Model Risk check: Parameters on a box bound" data-monitored="check-params-at-bound">M4 box bound · OK</a>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="identifiability" aria-label="Copy a link to the Identifiability · multi-start and Jacobian panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -906,7 +906,7 @@
   <section class="panel s5 " id="history" aria-labelledby="history-t">
   <div class="panel-head">
     <h2 class="panel-title" id="history-t">Gate-passing fits</h2>
-    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-calib-age" aria-label="Monitored · M4 · OK: Headline fit age (NYSE sessions)" title="Model Risk check: Headline fit age (NYSE sessions)" data-monitored="check-calib-age">Monitored · M4 · OK</a><span class="panel-meta">6 sessions</span>
+    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-calib-age" aria-label="M4 fit age · OK, Model Risk check: Headline fit age (NYSE sessions)" title="Model Risk check: Headline fit age (NYSE sessions)" data-monitored="check-calib-age">M4 fit age · OK</a><span class="panel-meta">6 sessions</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="history" aria-label="Copy a link to the Gate-passing fits panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">

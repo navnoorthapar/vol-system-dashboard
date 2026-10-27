@@ -28,7 +28,7 @@
   <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
   
-  <link rel="stylesheet" href="static/desk.css?v=ae3987f96844">
+  <link rel="stylesheet" href="static/desk.css?v=b3e8bc8bbea6">
   <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
     .chart { display: none !important; }
@@ -58,7 +58,7 @@
       <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
       <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
       <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
-      <li><span class="sb-k">BUILD</span><span class="sb-v">7243afd</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">7cefb74</span></li>
       <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
     </ul>
   </details>
@@ -93,7 +93,7 @@
   
   <span class="sb-right">
     <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
-    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7243afd85878de38828f0d0f638a1f6129d6cf1f">7243afd</a></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/7cefb74eee316a882ea492b54f4ad701d0af351d">7cefb74</a></span>
     <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
   </span>
 </header>
@@ -170,7 +170,7 @@
   <section class="find-col" aria-labelledby="find-works">
     <h3 class="find-head" id="find-works" data-disclose="find-list-works" data-count="3"><span class="find-glyph" aria-hidden="true">✓</span>Works</h3>
     <ul class="find-list fold-body" id="find-list-works">
-      <li class="find-item"><a href="surface.html#scorecard">Arbitrage-free SVI surface</a>: median 1.60 half-spreads from the mid, 31.0% inside the bid–ask, on the held-out strikes of <span class="nowrap">2026-10-26</span>.</li><li class="find-item"><a href="surface.html#vix-replication">VIX replicated from the stored chain</a>: −0.34 <a class="term" href="model-risk.html#def-index-pts"><abbr title="index points">index pts</abbr></a> from the Cboe close (replicated − official) on <span class="nowrap">2026-10-26</span>, by the Cboe rules.</li><li class="find-item"><a href="calibration.html#history">The gate keeps broken-data fits off the page</a>: 37 pre-C22 fits labelled legacy, none published; 6 of 6 current-schema fits pass.</li>
+      <li class="find-item"><a href="surface.html#scorecard">Arbitrage-free SVI surface</a>: median 1.60 half-spreads from the mid, 31.0% inside the bid–ask, on the held-out strikes of <span class="nowrap">2026-10-26</span>.</li><li class="find-item"><a href="surface.html#vix-replication">VIX replicated from the stored chain</a>: −0.34 <a class="term" href="model-risk.html#def-index-pts"><abbr title="index points">index pts</abbr></a> from the Cboe close (replicated − official) on <span class="nowrap">2026-10-26</span>, by the Cboe formula, with 12 listed departures (Surface).</li><li class="find-item"><a href="calibration.html#history">The gate keeps broken-data fits off the page</a>: 37 pre-C22 fits labelled legacy, none published; 6 current-schema fits stored (the job stores only fits that pass the gate; a rejected fit is recorded in its run log, not stored).</li>
     </ul>
   </section>
   
@@ -225,7 +225,7 @@
   <section class="panel s4 " id="state-regime" aria-labelledby="state-regime-t">
   <div class="panel-head">
     <h2 class="panel-title" id="state-regime-t">Regime · rule label</h2>
-    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-label-lag" aria-label="Monitored · M10 · OK: Market database lag behind the rule labels (sessions)" title="Model Risk check: Market database lag behind the rule labels (sessions)" data-monitored="check-label-lag">Monitored · M10 · OK</a><span class="panel-meta">2026-10-26</span>
+    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-label-lag" aria-label="M10 DB lag · OK, Model Risk check: Market database lag behind the rule labels (sessions)" title="Model Risk check: Market database lag behind the rule labels (sessions)" data-monitored="check-label-lag">M10 DB lag · OK</a><span class="panel-meta">2026-10-26</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-regime" aria-label="Copy a link to the Regime · rule label panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
@@ -507,7 +507,7 @@
   <section class="panel s6 " id="state-pipeline" aria-labelledby="state-pipeline-t">
   <div class="panel-head">
     <h2 class="panel-title" id="state-pipeline-t">Pipeline · what is stored</h2>
-    <span class="panel-side"><span class="panel-meta">build 7243afd</span>
+    <span class="panel-side"><span class="panel-meta">build 7cefb74</span>
     <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-pipeline" aria-label="Copy a link to the Pipeline · what is stored panel" title="Copy a link to this panel">#</button></span></span>
   </div>
   <div class="panel-body">
