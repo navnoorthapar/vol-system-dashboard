@@ -7355,3 +7355,73 @@ def test_a_definition_never_links_to_itself(pages):
     mr = pages["/model-risk"]
     for m in re.finditer(r'<div class="def" id="def-([\w-]+)">(.*?)</div>', mr, flags=re.DOTALL):
         assert f'href="#def-{m.group(1)}"' not in m.group(2), m.group(1)
+
+
+# ── B8: the volatility cone with the surface's ATM term structure ────────────
+
+def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages):
+    """#vol-cone: the percentiles of SPX RV at 10–252 sessions in both samples, each
+    ending on the surface's session (no look-ahead: the database runs later), the
+    RV of the windows ending that day and the SVI-cal ATMF at T·252/365 sessions,
+    named with the session; the table lists the percentiles by horizon; the
+    rank table reads the module. Before B8 the Surface had no realised vol."""
+    cone = _load("desk_cone_under_test", "dashboard/desk_cone.py")
+    surf = _surface_file("surface.json")
+    session = surf.parent.name
+    html = pages["/surface"]
+    assert 'id="vol-cone"' in html
+    assert 'id="vol-cone-rank"' in html
+    spec = _spec(html, "chart-vol-cone")
+    close = dash._read_spx()["close"]
+    assert close.index.max() >= pd.Timestamp(session)
+    by_name = {s["name"]: s for s in spec["series"]}
+    assert by_name[f"SVI-cal ATMF {session}"]["role"] == "model"
+    rv_now = by_name[f"SPX RV, windows ending {session}"]
+    sj = json.loads(surf.read_text())
+    res = pd.read_parquet(surf.parent / "residuals.parquet")
+    listed = _load("desk_surface_under_test", "dashboard/desk_surface.py").delta_grid(sj, res, None)
+    table = {(r[0], r[2]): r for r in spec["table"]["rows"]}
+    tab_values = re.findall(r'role="tab" aria-selected="(?:true|false)" aria-controls="vol-cone-panel" '
+                            r'data-value="([\w-]+)"', html)
+    assert tab_values == [k for k, _l, _s in cone.SAMPLES]
+    for key, label, _short in cone.SAMPLES:
+        start = cone.sample_start(key, close, session)
+        r = cone.sample_returns(close, start, session)
+        assert str(r.index[-1].date()) == session
+        rows = cone.cone(r)
+        for c in rows:
+            assert c["last"] == session
+            for pc in cone.PCTS:
+                s = by_name[f"{pc}th pct RV · {label.lower()}"]
+                assert s["group"] == key
+                got = {int(x): y for x, y in s["data"]}[c["h"]]
+                assert got == pytest.approx(c["pct"][pc], rel=1e-3)
+            row = table[(str(c["h"]), label)]
+            assert row[4:9] == [f"{c['pct'][pc]:.1f}" for pc in cone.PCTS]
+            assert row[3] == f"{c['n']:,}"
+        if key == "since-2010":
+            assert [y for _x, y in rv_now["data"]] == pytest.approx([c["current"] for c in rows], rel=1e-3)
+            pts, beyond = cone.implied_points(listed, r)
+            got = by_name[f"SVI-cal ATMF {session}"]["data"]
+            assert [x for x, _ in got] == pytest.approx([p["sessions"] for p in pts], rel=1e-3)
+            assert [y for _, y in got] == pytest.approx([p["atmf"] for p in pts], rel=1e-3)
+            assert all(p["sessions"] <= 252 for p in pts)
+            assert len(pts) + beyond == sum(1 for x in listed if x.get("atmf") is not None)
+            # the rank table, row by row
+            tbl = html[html.index('id="vol-cone-rank-tbl"'):]
+            tbl = tbl[:tbl.index("</table>")]
+            body = [[_html_unescape(re.sub(r"<[^>]+>", "", c_)).strip()
+                     for c_ in re.findall(r"<td[^>]*>(.*?)</td>", tr)]
+                    for tr in re.findall(r"<tr>(.*?)</tr>", tbl[tbl.index("<tbody>"):])]
+            assert [b[0] for b in body] == [p["expiry"] for p in pts]
+            assert [b[3] for b in body] == [f"{p['atmf']:.2f}" for p in pts]
+            assert [b[4] for b in body] == [f"{p['rank']:.0f}" for p in pts]
+    assert len(spec["table"]["rows"]) == len(cone.HORIZONS) * len(cone.SAMPLES)
+    def txt(frag: str) -> str:
+        return _html_unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", frag)))
+    note = txt(html[html.index('id="vol-cone-note"'):html.index('id="vol-cone-rank"')])
+    assert f"since 2010 2010-01-04 → {session}" in note
+    assert "T·252/365 sessions" in note
+    rank_note = txt(html[html.index('id="vol-cone-rank-note"'):][:3000])
+    assert "variance risk premium" in rank_note
+    assert "intraday" in rank_note

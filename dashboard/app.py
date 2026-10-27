@@ -77,6 +77,7 @@ if str(DASH) not in sys.path:
 
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
+import desk_cone  # noqa: E402
 import desk_density  # noqa: E402
 import desk_glossary  # noqa: E402
 import desk_market  # noqa: E402
@@ -5248,6 +5249,95 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
     return out
 
 
+# ── the volatility cone with the surface's ATM term structure (desk_cone.py, B8) ─
+CONE_LINES = ((5, "dotted", 1.1), (25, True, 1.2), (50, None, 1.6), (75, True, 1.2), (95, "dotted", 1.1))
+
+
+def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str) -> dict | None:
+    """The #vol-cone panel: percentiles of SPX close-to-close RV at 10–252
+    sessions over two samples ending at the surface's session (a tab picks
+    one), the newest window's RV at each horizon, and the SVI-cal ATMF of the
+    listed expiries at T·252/365 sessions, each ranked against RV over that
+    many sessions in both samples."""
+    end = pd.Timestamp(session)
+    close = close.astype(float).sort_index()
+    if close.empty or close.index.max() < end:
+        raise ValueError(f"spx_ohlcv ends {close.index.max().date() if len(close) else '—'}, "
+                         f"before the surface session {session}")
+    samples: list[dict[str, Any]] = []
+    for key, label, short in desk_cone.SAMPLES:
+        start = desk_cone.sample_start(key, close, end)
+        r = desk_cone.sample_returns(close, start, end)
+        samples.append({"key": key, "label": label, "short": short, "start": str(start.date()),
+                        "n_returns": len(r),
+                        "cone": desk_cone.cone(r), "r": r})
+    pts_by = {}
+    for sm in samples:
+        pts, beyond = desk_cone.implied_points(listed, sm["r"])
+        pts_by[sm["key"]] = pts
+    pts = pts_by[samples[0]["key"]]
+    if not pts:
+        return None
+    hz = list(desk_cone.HORIZONS)
+    series: list[dict[str, Any]] = []
+    for sm in samples:
+        by_h = {c["h"]: c for c in sm["cone"]}
+        for pc, dash, width in CONE_LINES:
+            s_: dict[str, Any] = {"name": f"{pc}th pct RV · {sm['label'].lower()}", "type": "line",
+                                  "role": "other", "color": "muted", "width": width, "group": sm["key"],
+                                  "symbol": "circle", "size": 3, "endLabel": f"{pc}%",
+                                  "data": [[h, round_sig(by_h[h]["pct"][pc], 4)] for h in hz
+                                           if by_h[h]["pct"][pc] is not None]}
+            if dash:
+                s_["dash"] = dash
+            series.append(s_)
+    cur = samples[0]["cone"]
+    series.append({"name": f"SPX RV, windows ending {session}", "type": "line", "role": "market",
+                   "color": "headline", "width": 1.5, "symbol": "diamond", "size": 6, "legend": True,
+                   "data": [[c["h"], round_sig(c["current"], 4)] for c in cur if c["current"] is not None]})
+    series.append({"name": f"SVI-cal ATMF {session}", "type": "scatter", "role": "model", "model": "svi_cal",
+                   "color": charts.model_colour("svi_cal"), "size": 7, "legend": True,
+                   "data": [[round_sig(p["sessions"], 4), round_sig(p["atmf"], 4)] for p in pts]})
+    rows = []
+    for h in hz:
+        for sm in samples:
+            c = next(x for x in sm["cone"] if x["h"] == h)
+            rows.append([str(h), _fmt(h * desk_cone.DAYS_PER_YEAR / desk_cone.SESSIONS_PER_YEAR, ".0f"),
+                         sm["label"], _fmt(c["n"], ","),
+                         *(_fmt(c["pct"][pc], ".1f") for pc in desk_cone.PCTS), _fmt(c["current"], ".1f")])
+    xs = [p["sessions"] for p in pts] + hz
+    chart = charts.xy(
+        "chart-vol-cone",
+        f"Volatility cone of SPX realised vol with the SVI-cal ATM term structure, {session}",
+        x={"type": "value", "log": True, "name": "Horizon (NYSE sessions, log scale)", "digits": 0,
+           "min": round_sig(min(xs) / 1.15, 2), "max": round_sig(max(xs) * 1.2, 2)},
+        y={"name": "Vol (%)", "digits": 0, "tipDigits": 1, "zero": True},
+        series=series, tooltip="item", csv=f"vol_cone_{session}.csv", grid={"right": 44},
+        describe=("Percentiles (5, 25, 50, 75, 95) of SPX close-to-close realised vol over windows of 10 to "
+                  f"252 sessions, in the sample the tab picks, ending {session}; the realised vol of the "
+                  "windows ending that day; and the SVI-cal ATMF of each listed expiry, its calendar days "
+                  "placed at days × 252/365 sessions."),
+        table=charts.table(
+            f"Realised-vol cone of SPX (%), windows ending on or before {session}; RV_h = 100·√(252/h·Σr²)",
+            ["Sessions#", "≈ days#", "Sample", "Windows#", *(f"{pc}th pct#" for pc in desk_cone.PCTS),
+             f"RV ending {session}#"], rows))
+    imp_rows = []
+    for i, p in enumerate(pts):
+        imp_rows.append({"expiry": p["expiry"], "days": p["T_days"], "sessions": p["sessions"], "h": p["h"],
+                         "atmf": p["atmf"], "ranks": [pts_by[sm["key"]][i]["rank"] for sm in samples]})
+    one_m = min(pts, key=lambda p: abs(p["T_days"] - 30.0))
+    i1 = pts.index(one_m)
+    c21 = {sm["key"]: next(x for x in sm["cone"] if x["h"] == 21) for sm in samples}
+    return {"chart": chart, "session": session, "rows": imp_rows, "n_beyond": beyond,
+            "samples": [{k: v for k, v in sm.items() if k not in ("r", "cone")} for sm in samples],
+            "default": samples[0]["key"],
+            "one_m": {"expiry": one_m["expiry"], "days": one_m["T_days"], "atmf": one_m["atmf"],
+                      "h": one_m["h"],
+                      "ranks": [pts_by[sm["key"]][i1]["rank"] for sm in samples]},
+            "c21": {k: {"p5": v["pct"][5], "p50": v["pct"][50], "p95": v["pct"][95], "current": v["current"]}
+                    for k, v in c21.items()}}
+
+
 def _state_values(cm: Sequence[dict]) -> dict[str, float | None]:
     by = {r["label"]: r for r in cm}
     m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
@@ -5538,6 +5628,9 @@ def surface_extras(d: dict, surf: dict) -> None:
         every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
         d["state_tiles"] = surface_state_tiles(cm, listed, every_cm)
         d["rnd"] = rnd_view(sj, res, session)
+        d["cone"] = None
+        with _loader_boundary(d, "volatility cone (vol_system.db spx_ohlcv, surface.json svi_cal)"):
+            d["cone"] = vol_cone_view(_read_spx()["close"], listed, session)
         if cmp_:
             d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
             d["charts"]["rr_term"] = rr_term_spec(cmp_)
