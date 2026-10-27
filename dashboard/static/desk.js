@@ -680,7 +680,9 @@
     if (!Q.strip) return;
     // the pointer and the tooltip follow the x value on both grids
     opt.axisPointer = { link: [{ xAxisIndex: 'all' }] };
-    var g0 = opt.grid, sh = Math.max(44, Math.min(96, Math.round((height || 300) * 0.22))), gap = 10;
+    // gap: the upper axis's bottom label and the strip's +clip label each overhang
+    // their grid edge by half a line, so 10 px set them touching
+    var g0 = opt.grid, sh = Math.max(44, Math.min(96, Math.round((height || 300) * 0.22))), gap = 20;
     // both grids are placed by their margins: ECharts 6's outer-bounds pass
     // (measuring every axis label to keep them in the box) cost a tenth of each update
     opt.grid = [Object.assign({}, g0, { bottom: g0.bottom + sh + gap, outerBoundsMode: 'none' }),

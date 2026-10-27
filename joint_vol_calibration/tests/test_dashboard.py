@@ -6999,6 +6999,49 @@ def test_browser_quote_inspector_hover_keyboard_and_delta_axis(site_browser):
     ctx.close()
 
 
+_STRIP_LABEL_GAP_JS = """(id) => {
+  const ch = Desk.charts[id].chart, m = ch.getModel();
+  const g = [0, 1].map(i => m.getComponent('grid', i).coordinateSystem.getRect());
+  const labels = [];
+  ch.getZr().storage.getDisplayList(true).forEach(e => {
+    if (e.type !== 'tspan' || e.ignore || e.invisible || !e.style || !e.style.text) return;
+    const t = e.getComputedTransform();
+    if (t && Math.abs(t[1]) > 1e-6) return;                 // a rotated axis name
+    const r = e.getBoundingRect().clone(); if (t) r.applyTransform(t);
+    if (r.x + r.width > g[0].x + 1) return;                  // y-axis labels sit left of the plots
+    labels.push({ text: e.style.text, mid: r.y + r.height / 2, top: r.y, bottom: r.y + r.height });
+  });
+  const on = k => labels.filter(l => l.mid >= g[k].y - 1 && l.mid <= g[k].y + g[k].height + 1);
+  const upper = on(0).sort((a, b) => b.bottom - a.bottom)[0], lower = on(1).sort((a, b) => a.top - b.top)[0];
+  return { upper, lower, gap: upper && lower ? lower.top - upper.bottom : null };
+}"""
+
+
+def test_browser_smile_axis_labels_clear_the_residual_strip_labels(site_browser):
+    """R3-R3-D6: on every smile with a residual strip (Surface #smile and the
+    Calibration small multiples) the upper axis's bottom label and the strip's
+    +clip label each overhang their grid edge by half a line, and the 10 px between
+    the grids set them touching ('10' over '+10'). The two stay apart at a phone
+    and a desktop width."""
+    sb = site_browser
+    cal = (sb["site"] / "calibration.html").read_text()
+    on_page = {"surface.html": ["chart-slices"],
+               "calibration.html": re.findall(r'id="(chart-smile-[^"]+)" data-spec', cal)}
+    assert on_page["calibration.html"]
+    for width in (320, 1440):
+        for name, ids in on_page.items():
+            ctx, page = _page(sb, width=width)
+            page.goto(sb["base"] + name, wait_until="load")
+            for cid in ids:
+                page.locator(f"#{cid}").scroll_into_view_if_needed()
+                _wait_for_chart(page, cid)
+                r = page.evaluate(_STRIP_LABEL_GAP_JS, cid)
+                assert r["upper"], (width, cid, r)
+                assert r["lower"], (width, cid, r)
+                assert r["gap"] >= 4, (width, cid, r)
+            ctx.close()
+
+
 def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_only(site_browser):
     """P4.2: every expiry-tab click re-parsed the 250 KB smile spec and rebuilt all
     17 × 12 series (64–112 ms, 304–448 ms at 4× CPU). A switch now keeps the parsed
