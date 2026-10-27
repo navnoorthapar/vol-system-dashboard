@@ -5686,6 +5686,13 @@ def _widest_strike_gap(legs: list[dict]) -> float:
     return max((b - a for a, b in itertools.pairwise(ks)), default=0.0)
 
 
+def _largest_violation_rows(html: str) -> list[list[str]]:
+    """Surface's largest mid violations in rank order: the panel's table, then the
+    disclosed rest (R3-D4)."""
+    rest = _table_rows(html, "largest-violations-rest") if 'id="largest-violations-rest"' in html else []
+    return _table_rows(html, "largest-violations") + rest
+
+
 def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(dash, pages):
     """R3-T4: the tile read 'Executable static arbitrage … Largest mid violation
     95.0 idx pts ($9,497 per contract), C2 vertical spread, 2027-03-31 P
@@ -5703,7 +5710,7 @@ def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(das
     assert "constraint row" in tile
     assert "no quote time" in tile or "quotes at" in tile
     assert 'href="#largest-violations"' in html
-    rows = _table_rows(html, "largest-violations")
+    rows = _largest_violation_rows(html)
     assert len(rows) == len(arb["largest_mid_violations"])
     ordered = sorted(arb["largest_mid_violations"], key=lambda v: -v["shortfall_index_points"])
     named = set()
@@ -5739,6 +5746,61 @@ def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(das
     # the panel table counts constraint rows, and says so
     assert _table_heads(html, "arb-table")[1:] == ["Constraint rows", "Violated at mids",
                                                    "Violated at bid/ask"]
+
+
+def test_largest_violations_list_the_top_rows_and_disclose_the_rest(dash, pages):
+    """R3-D4: '#largest-violations' was titled 'The 25 largest violations at mids'
+    but its 25 rows sat in a 280 px scroll region of the s4 panel that showed two
+    of them at 1440 px, with no sign that the others existed. The panel now lists
+    the largest LARGEST_VIOLATIONS_SHOWN rows and says how many more follow, and
+    the rest sit in a disclosure that names their count and ranks."""
+    html = pages["/surface"]
+    arb = json.loads(_surface_file("surface.json").read_text())["arbitrage"]
+    lv = dash.arb_violations(arb)
+    k, n = dash.LARGEST_VIOLATIONS_SHOWN, len(lv)
+    top = _table_rows(html, "largest-violations")
+    assert [r[2] for r in top] == [f"{v['shortfall']:.2f}" for v in lv[:k]]
+    head = re.search(r'<h3 class="sub-head">The \d+ largest violations at mids.*?</h3>', html, re.DOTALL)
+    head_text = re.sub(r"\s+", " ", _visible_text("<body>" + head.group(0)))
+    assert f"The {n} largest violations at mids" in head_text
+    if n <= k:
+        assert 'id="largest-violations-rest"' not in html
+        assert "more below" not in head_text
+        return
+    assert f"the {k} largest here, {n - k} more below" in head_text
+    rest = _table_rows(html, "largest-violations-rest")
+    assert [r[2] for r in rest] == [f"{v['shortfall']:.2f}" for v in lv[k:]]
+    disc = re.search(r'<details class="method"><summary>([^<]*)</summary>\s*<div class="tbl-wrap"[^>]*>\s*'
+                     r'<table class="tbl[^"]*" id="largest-violations-rest"', html)
+    assert disc, "the rest of the list is not in a disclosure"
+    assert _html_unescape(disc.group(1)) == f"The other {n - k} violations · ranks {k + 1}–{n}"
+
+
+def test_browser_largest_violations_are_all_in_view_or_disclosed(site_browser):
+    """R3-D4: at 1440 x 900 the largest-violations table (2,004 px) sat in a
+    280 px scroll region, 14% of it visible and no scrollbar shown. Every row the
+    panel lists is now in view without scrolling the region, and opening the
+    disclosure below shows the rest."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "surface.html", wait_until="load")
+        page.locator("#largest-violations").scroll_into_view_if_needed()
+        r = page.evaluate("""() => {
+          const t = document.getElementById('largest-violations'), w = t.closest('.tbl-wrap');
+          const rest = document.getElementById('largest-violations-rest');
+          const d = rest && rest.closest('details');
+          const shut = !!d && !d.open && !rest.checkVisibility();
+          if (d) d.open = true;
+          return {rows: t.tBodies[0].rows.length, client: w.clientHeight, scroll: w.scrollHeight,
+                  shut: shut, rest: rest ? rest.tBodies[0].rows.length : 0,
+                  shown: !!rest && rest.checkVisibility() && rest.getBoundingClientRect().height > 0}; }""")
+        assert r["rows"] >= 1, r
+        assert r["scroll"] <= r["client"] + 1, r
+        if r["rest"]:
+            assert r["shut"], r
+            assert r["shown"], r
+    finally:
+        ctx.close()
 
 
 def test_bad_quote_flag_names_the_leg_the_impossible_rows_share(dash):

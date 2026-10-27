@@ -5682,6 +5682,12 @@ def flag_bad_quotes(views: list[dict], repaired: Sequence[dict] = ()) -> list[di
     return views
 
 
+# Surface #largest-violations lists this many rows in the panel and the rest in a
+# disclosure below it: the 25 rows (59-94 px each in the s4 panel) sat in a 280 px
+# scroll region that showed two of them, with no sign the others existed (R3-D4)
+LARGEST_VIOLATIONS_SHOWN = 8
+
+
 def arb_violations(arb: dict) -> list[dict]:
     """arbitrage.largest_mid_violations as violation_view rows, largest first, bad quotes flagged."""
     lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
@@ -6102,6 +6108,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["largest_violations"] = arb_violations(arb)
         d["arb_bad_rows"] = sum(1 for v in d["largest_violations"] if v["bad_quote"])
         d["arb_clean_top"] = next((v for v in d["largest_violations"] if not v["bad_quote"]), None)
+        d["lv_shown"] = LARGEST_VIOLATIONS_SHOWN
         d["arb_chain"] = ", ".join(chain_source(surf.get("surface") or {}) or [])
         d["arb_mid_rows"] = sum(int(r["mid"]) for r in d["arb_rows"] if _num(r["mid"]) is not None)
         d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
