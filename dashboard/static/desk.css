@@ -71,6 +71,11 @@
   --ramp-3: #a58eea;
   --ramp-4: #9580e2;
   --ramp-5: #8670d6;
+  /* risk-neutral tails (desk_charts.TAIL_COLOURS): one hue for the downside tails,
+     another for the upside; no model colour, each 30° or more of LCh hue from
+     the gain and loss fills, 3:1 on the panels */
+  --tail-down: #e07be0;
+  --tail-up:   #8fd14f;
   --series-muted: #9aa3b0;
   /* type */
   --sans: "Inter Desk", Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -266,6 +271,7 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .btn[aria-pressed="true"], .btn[aria-selected="true"] { color: var(--text); background: var(--surface3); border-color: var(--pos-fill); }
 .btn[aria-pressed="false"] .key-swatch { opacity: 0.35; }
 .btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
+.btn sub { line-height: 0; }   /* a label's S<sub>T</sub> keeps the button its height */
 /* drawn, not a dashed border: a 12 px dashed border renders as one solid stroke */
 .btn .key-swatch.dashed { border-top: none; height: 2px; width: 14px; background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
 .btn .key-swatch.dotted { border-top-style: dotted; }
@@ -747,7 +753,7 @@ dialog.keys .dl { font-size: 12px; }
     --pos: #0b4fb3; --neg: #8a4b00; --pos-fill: #0b4fb3; --neg-fill: #a35a00;
     --ok: #00703c; --watch: #7a5c00; --breach: #b00020; --info: #0b4fb3;
     --tint-ok: #fff; --tint-watch: #fff; --tint-breach: #fff; --tint-info: #fff;
-    --series-headline: #111111;
+    --series-headline: #111111; --tail-down: #a3369f; --tail-up: #4d7a00;
   }
   html, body { background: #fff !important; color: #111 !important; }
   .nav, .statusbar .sb-right, .skip-link, .nav-toggle, .chart-tools, .panel-actions, .js-only, dialog { display: none !important; }
