@@ -336,6 +336,8 @@
     if (s.area) line.areaStyle = { color: alpha(c, 0.18), origin: s.areaOrigin || 'auto' };
     // a short name at the line's last shown point (the equity curves: 'S3', 'T-bill')
     if (s.endLabel) line.endLabel = { show: true, formatter: s.endLabel, color: c, fontFamily: T.mono, fontSize: 10, distance: 4 };
+    // end labels that would touch are pushed apart vertically, never hidden (the cone's p5…p95)
+    if (s.endLabel && s.endLabelDodge) line.labelLayout = { moveOverlap: 'shiftY' };
     // per-point marks (the σ frontier): a hollow marker (s.hollowPoints[j]), a
     // larger one (s.bigPoints[j]) and a short label beside each point (s.pointLabels)
     if (s.hollowPoints || s.bigPoints) {
@@ -347,7 +349,8 @@
         return o;
       });
     }
-    if (s.pointLabels) {
+    // s.tipLabels: the labels go to the tooltip only (the σ frontier's other sessions)
+    if (s.pointLabels && !s.tipLabels) {
       line.label = { show: true, position: 'right', distance: 3, color: T.text3, fontFamily: T.mono, fontSize: 10,
         formatter: function (p) { var l = s.pointLabels[p.dataIndex]; return l === null || l === undefined ? '' : String(l); } };
       line.labelLayout = { hideOverlap: true };
@@ -680,7 +683,9 @@
     if (!Q.strip) return;
     // the pointer and the tooltip follow the x value on both grids
     opt.axisPointer = { link: [{ xAxisIndex: 'all' }] };
-    var g0 = opt.grid, sh = Math.max(44, Math.min(96, Math.round((height || 300) * 0.22))), gap = 10;
+    // gap: the upper axis's bottom label and the strip's +clip label each overhang
+    // their grid edge by half a line, so 10 px set them touching
+    var g0 = opt.grid, sh = Math.max(44, Math.min(96, Math.round((height || 300) * 0.22))), gap = 20;
     // both grids are placed by their margins: ECharts 6's outer-bounds pass
     // (measuring every axis label to keep them in the box) cost a tenth of each update
     opt.grid = [Object.assign({}, g0, { bottom: g0.bottom + sh + gap, outerBoundsMode: 'none' }),

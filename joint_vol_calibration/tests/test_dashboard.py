@@ -4309,6 +4309,22 @@ def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
     assert split.index('id="sigma-profile"') < split.index('id="sigma-frontier"')
 
 
+def test_sigma_frontier_labels_only_the_headline_sessions_caps(dash, pages):
+    """F15: every session's eight σ caps were printed beside its points, so the
+    sessions' labels piled on one another where the lines cross. Only the
+    headline session's caps are drawn on the chart; the other sessions keep
+    theirs for the tooltip (tipLabels), which desk.js does not draw."""
+    spec = _spec(pages["/calibration"], "sigma-frontier")
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    assert any(s["name"] == headline for s in spec["series"])
+    for s in spec["series"]:
+        assert s["pointLabels"], s["name"]
+        assert bool(s.get("tipLabels")) is (s["name"] != headline), s["name"]
+    js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
+    assert "if (s.pointLabels && !s.tipLabels) {" in js
+
+
 def test_vvix_kpi_is_the_published_fits_model_vvix(dash, pages):
     """P1.2: the Calibration KPI strip carried the optimiser's run time where the
     joint fit's VVIX belongs; the tile now reads model / market VVIX at the
@@ -6999,6 +7015,49 @@ def test_browser_quote_inspector_hover_keyboard_and_delta_axis(site_browser):
     ctx.close()
 
 
+_STRIP_LABEL_GAP_JS = """(id) => {
+  const ch = Desk.charts[id].chart, m = ch.getModel();
+  const g = [0, 1].map(i => m.getComponent('grid', i).coordinateSystem.getRect());
+  const labels = [];
+  ch.getZr().storage.getDisplayList(true).forEach(e => {
+    if (e.type !== 'tspan' || e.ignore || e.invisible || !e.style || !e.style.text) return;
+    const t = e.getComputedTransform();
+    if (t && Math.abs(t[1]) > 1e-6) return;                 // a rotated axis name
+    const r = e.getBoundingRect().clone(); if (t) r.applyTransform(t);
+    if (r.x + r.width > g[0].x + 1) return;                  // y-axis labels sit left of the plots
+    labels.push({ text: e.style.text, mid: r.y + r.height / 2, top: r.y, bottom: r.y + r.height });
+  });
+  const on = k => labels.filter(l => l.mid >= g[k].y - 1 && l.mid <= g[k].y + g[k].height + 1);
+  const upper = on(0).sort((a, b) => b.bottom - a.bottom)[0], lower = on(1).sort((a, b) => a.top - b.top)[0];
+  return { upper, lower, gap: upper && lower ? lower.top - upper.bottom : null };
+}"""
+
+
+def test_browser_smile_axis_labels_clear_the_residual_strip_labels(site_browser):
+    """R3-R3-D6: on every smile with a residual strip (Surface #smile and the
+    Calibration small multiples) the upper axis's bottom label and the strip's
+    +clip label each overhang their grid edge by half a line, and the 10 px between
+    the grids set them touching ('10' over '+10'). The two stay apart at a phone
+    and a desktop width."""
+    sb = site_browser
+    cal = (sb["site"] / "calibration.html").read_text()
+    on_page = {"surface.html": ["chart-slices"],
+               "calibration.html": re.findall(r'id="(chart-smile-[^"]+)" data-spec', cal)}
+    assert on_page["calibration.html"]
+    for width in (320, 1440):
+        for name, ids in on_page.items():
+            ctx, page = _page(sb, width=width)
+            page.goto(sb["base"] + name, wait_until="load")
+            for cid in ids:
+                page.locator(f"#{cid}").scroll_into_view_if_needed()
+                _wait_for_chart(page, cid)
+                r = page.evaluate(_STRIP_LABEL_GAP_JS, cid)
+                assert r["upper"], (width, cid, r)
+                assert r["lower"], (width, cid, r)
+                assert r["gap"] >= 4, (width, cid, r)
+            ctx.close()
+
+
 def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_only(site_browser):
     """P4.2: every expiry-tab click re-parsed the 250 KB smile spec and rebuilt all
     17 × 12 series (64–112 ms, 304–448 ms at 4× CPU). A switch now keeps the parsed
@@ -8268,6 +8327,22 @@ def test_cone_percentile_labels_are_not_vol_levels(pages):
     assert all(re.fullmatch(r"p\d{1,2}", e) for e in ends), ends
 
 
+def test_cone_end_labels_dodge_rather_than_touch(pages):
+    """F12: the cone's p5 … p95 end labels sit at the 252-session end of five
+    lines a few vol points apart, so on a narrow chart (or the last-3-years
+    tab, where the cone is tighter) two labels under ~12 px apart overlapped.
+    Every end-labelled cone series asks desk.js to push its label apart from
+    the others' (ECharts moveOverlap 'shiftY': moved, never hidden), on both
+    tabs, and desk.js turns that flag into the label layout."""
+    spec = _raw_specs(pages["/surface"])["chart-vol-cone"]
+    ends = [s_ for s_ in spec["series"] if s_.get("endLabel")]
+    cone = _load("desk_cone_under_test", "dashboard/desk_cone.py")
+    assert {s_["group"] for s_ in ends} == {k for k, _, _ in cone.SAMPLES}
+    assert all(s_.get("endLabelDodge") is True for s_ in ends)
+    js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
+    assert re.search(r"s\.endLabel && s\.endLabelDodge\) line\.labelLayout = \{ moveOverlap: 'shiftY' \}", js)
+
+
 def test_every_1m_on_the_surface_is_the_30_day_constant_maturity(pages):
     """'1M' is the SVI-cal surface interpolated to exactly 30 days (the KPI tile,
     the constant-maturity grid); a listed expiry is named by its date and days,
@@ -8570,3 +8645,39 @@ def test_browser_ticker_is_one_scrolling_row_to_860_px_and_at_most_two_lines_abo
         assert colours[0] == colours[1], colours
     finally:
         ctx.close()
+
+
+# ── B4-F14: ISO dates on every expiry label ───────────────────────────────────
+
+YY_MM_DD = re.compile(r"(?<![\d-])\d{2}-\d{2}-\d{2}(?![\d-])")
+ISO_EXPIRY_LABEL = re.compile(r"^\d{4}-\d{2}-\d{2}( · \d+d)?$")
+
+
+def test_expiry_labels_are_iso_dates_never_yy_mm_dd(dash, pages):
+    """B4-F14: the Surface heatmap rows, the |z|-by-expiry axis, the OOS-error
+    bars, the VX-futures axis and the constant-maturity brackets wrote expiries
+    as '26-10-29 · 13d'; every one is ISO 'YYYY-MM-DD' (with its '· 13d'), and
+    no page text or chart spec carries a yy-mm-dd date."""
+    for route, html in pages.items():
+        assert not YY_MM_DD.findall(html), (route, YY_MM_DD.findall(html)[:5])
+    by_file = _pages_by_file(dash, pages)
+    for page, chart in (("calibration.html", "chart-oos"), ("index.html", "chart-vx-curve"),
+                        ("surface.html", "chart-by-expiry")):
+        if f'id="{chart}-spec"' not in by_file[page]:
+            continue
+        spec = _spec(by_file[page], chart)
+        cats = spec["x"]["categories"]
+        assert cats, chart
+        assert all(ISO_EXPIRY_LABEL.match(c) for c in cats), (chart, cats)
+        assert spec["x"].get("rotate"), chart     # the longer labels are rotated, not overlapped
+    surface = _visible_text(by_file["surface.html"])
+    rows = re.findall(r'<tr[^>]* data-exp="([\d-]+)"[^>]*><th scope="row">([^<]*)',
+                      by_file["surface.html"])
+    assert rows
+    for exp, label in rows:
+        assert _html_unescape(label).startswith(exp), (exp, label)
+    brackets = re.findall(r'<span class="dg-sub">(= [^<]*|[^<]*→[^<]*)</span>', by_file["surface.html"])
+    for b in brackets:
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", b)
+        assert dates, b
+        assert all(d in surface for d in dates), b
