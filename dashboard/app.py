@@ -5557,18 +5557,28 @@ CHAIN_SOURCES = {"yfinance": "Yahoo Finance close snapshot", "yahoo": "Yahoo Fin
                  "cboe": "Cboe"}
 
 
-def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
-    """'Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913
-    scored · 17 expiries (other stored sessions 40–43)', from surface.json inputs
-    and universe: counts only, no cause is read into a thin session."""
+def chain_source(surface_json: dict) -> list[str] | None:
+    """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip()
     if not src:
         return None
     qt = inp.get("quote_time") or uni.get("quote_time")
-    parts = [f"Chain: {CHAIN_SOURCES.get(src.lower(), src)}",
-             f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+    return [CHAIN_SOURCES.get(src.lower(), src),
+            f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+
+
+def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
+    """'Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913
+    scored · 17 expiries (other stored sessions 40–43)', from surface.json inputs
+    and universe: counts only, no cause is read into a thin session."""
+    inp = surface_json.get("inputs") or {}
+    uni = surface_json.get("universe") or {}
+    src = chain_source(surface_json)
+    if not src:
+        return None
+    parts = [f"Chain: {src[0]}", src[1]]
     rows, scored = _num(inp.get("chain_rows")), _num(uni.get("n_universe"))
     if rows is not None and scored is not None:
         parts.append(f"{_fmt(int(rows), ',')} rows → {_fmt(int(scored), ',')} scored")
@@ -5609,7 +5619,50 @@ def violation_view(v: dict) -> dict:
     return {"type": typ, "label": typ.replace("_", " ", 1).replace("_", " "),
             "constraint": ARB_LABELS.get(typ, typ), "legs": by, "leg_groups": groups, "short": short,
             "shortfall": sf,
-            "usd": sf * SPX_MULTIPLIER if sf is not None else None, "executable": bool(v.get("executable"))}
+            "usd": sf * SPX_MULTIPLIER if sf is not None else None, "executable": bool(v.get("executable")),
+            "leg_keys": [(str(lg["expiry"])[:10], str(lg["right"]), float(lg["strike"]), float(lg["weight"]))
+                         for lg in legs],
+            "bad_quote": None}
+
+
+def flag_bad_quotes(views: list[dict], repaired: Sequence[dict] = ()) -> list[dict]:
+    """Name, on each largest_mid_violations row one bad quote explains, that leg
+    ('2027-03-31 P6265'). A row no real prices can produce has a shortfall larger
+    than its widest gap between adjacent strikes (a vertical's |K2 − K1|, a
+    butterfly's wider wing, a calendar's strike gap). The leg named is the one
+    most such rows share (then the larger summed weight, then the larger move in
+    the repair's ``repaired`` list), and every listed row holding a leg so named
+    carries it. A one-strike row (C1, C4) has no width and is never flagged on its own."""
+    moved = {(str(r.get("expiry"))[:10], str(r.get("right")), float(r["strike"])):
+             abs(_num(r.get("repair_dprice")) or 0.0)
+             for r in repaired if isinstance(r, dict) and _num(r.get("strike")) is not None}
+
+    def width(v: dict) -> float:
+        ks = sorted({lg[2] for lg in v["leg_keys"]})
+        return max((b - a for a, b in itertools.pairwise(ks)), default=0.0)
+    left = [v for v in views if (v["shortfall"] or 0.0) > width(v) > 0.0]
+    bad: list[tuple[str, str, float]] = []
+    while left:                               # each pass names the leg most remaining rows share
+        score: dict[tuple[str, str, float], tuple[int, float]] = {}
+        for v in left:
+            for e, r, k, w in v["leg_keys"]:
+                n, sw = score.get((e, r, k), (0, 0.0))
+                score[(e, r, k)] = (n + 1, sw + abs(w))
+        leg = max(score, key=lambda g: (*score[g], moved.get(g, 0.0), g))
+        bad.append(leg)
+        left = [v for v in left if leg not in {lg[:3] for lg in v["leg_keys"]}]
+    for v in views:
+        held = {lg[:3] for lg in v["leg_keys"]}
+        hit = next((g for g in bad if g in held), None)
+        v["bad_quote"] = f"{hit[0]} {hit[1]}{_fmt(hit[2], '.0f')}" if hit else None
+    return views
+
+
+def arb_violations(arb: dict) -> list[dict]:
+    """arbitrage.largest_mid_violations as violation_view rows, largest first, bad quotes flagged."""
+    lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
+    rep = (arb.get("quotes_repaired_outside_spread") or {}).get("largest") or []
+    return flag_bad_quotes(sorted(lv, key=lambda x: -(x["shortfall"] or 0.0)), rep)
 
 
 def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
@@ -6022,10 +6075,10 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["arb"] = {k: arb.get(k) for k in ("n_quotes", "n_quotes_in_executable_violation",
                                             "n_quotes_in_mid_violation", "constraint_set")}
         d["arb_repair"] = arb.get("repair") or {}
-        lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
-        d["largest_violations"] = sorted(lv, key=lambda x: -(x["shortfall"] or 0.0))
-        mx = [x for x in ((arb.get("max_mid_violation_index_points") or {}).values()) if _num(x) is not None]
-        d["arb_max_mid"] = max(mx) if mx else None
+        d["largest_violations"] = arb_violations(arb)
+        d["arb_bad_rows"] = sum(1 for v in d["largest_violations"] if v["bad_quote"])
+        d["arb_clean_top"] = next((v for v in d["largest_violations"] if not v["bad_quote"]), None)
+        d["arb_chain"] = ", ".join(chain_source(surf.get("surface") or {}) or [])
         d["arb_mid_rows"] = sum(int(r["mid"]) for r in d["arb_rows"] if _num(r["mid"]) is not None)
         d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
                              for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
@@ -6402,6 +6455,9 @@ VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
 
+ARB_CHECK = "Quotes failing static arbitrage at bid/ask (% of scored quotes)"
+
+
 def chain_vendor(source: Any) -> str:
     """The vendor-input ID of a stored chain's source ('Data' when it is not recorded)."""
     return CHAIN_VENDORS.get(str(source or "").lower(), "Data")
@@ -6419,7 +6475,7 @@ MONITOR_LIMITS = {
     "label_lag": (0, 1),            # sessions the market DB lags the labels
     "median_abs_hs": (2.0, 5.0),    # half-spreads, Heston out-of-sample median |model − mid|
     "vix_rep_gap": (0.5, 1.5),      # index pts, |VIX replicated from the chain − Cboe close|
-    "arb_exec_share": (2.0, 5.0),   # % of scored quotes in an executable static-arbitrage row
+    "arb_exec_share": (2.0, 5.0),   # % of scored quotes in a row failing static arbitrage at bid/ask
 }
 
 
@@ -6674,19 +6730,25 @@ def load_model_risk() -> dict[str, Any]:
             "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.",
             history=surf_hist("vix_rep_gap"))
         share = today["arb_exec_share"]
-        add(vendor, "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
+        lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
+        legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
+        n_bad = sum(1 for v in lv if v["bad_quote"])
+        add(vendor, ARB_CHECK, share,
             f"{_fmt(share, '.1f')}% ({_fmt(today['n_ex'], ',.0f')} of {_fmt(today['n_q'], ',.0f')})"
             if share is not None else "—",
             "arb_exec_share", sart + "surface.json",
-            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.",
+            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain."
+            + (f" Single-quote outliers: {n_bad} of its {len(lv)} largest mid violations (bad quote "
+               + legs[0] + (f" and {len(legs) - 1} more leg{'s' if len(legs) > 2 else ''}"
+                            if len(legs) > 1 else "")
+               + "), counted in the share." if n_bad else ""),
             history=surf_hist("arb_exec_share"), digits=".1f")
     else:
         for mid_, chk, key_ in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
                                  "median_abs_hs"),
                                 ("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
                                  "vix_rep_gap"),
-                                ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)",
-                                 "arb_exec_share")):
+                                ("Data", ARB_CHECK, "arb_exec_share")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
     # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory

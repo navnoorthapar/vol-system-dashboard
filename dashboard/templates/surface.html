@@ -30,11 +30,11 @@
   {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
   {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else ''), ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
   {% endif %}{% endif %}
-  {% if d.arb %}{% set lv0 = (d.largest_violations or [none])[0] %}
+  {% if d.arb %}{% set lv0 = d.arb_clean_top %}
   <div class="kpi" id="arb-tile">
-    <div class="kpi-label">Executable static arbitrage</div>
+    <div class="kpi-label">Quotes failing static arbitrage at bid/ask</div>
     <div class="kpi-value">{{ d.arb.n_quotes_in_executable_violation|fmt(',') }}<span class="unit">quotes</span></div>
-    <div class="kpi-sub">of {{ d.arb.n_quotes|fmt(',') }} quotes sit in a constraint row violated at bid/ask; {{ d.arb.n_quotes_in_mid_violation|fmt(',') }} at mids.{% if lv0 %} Largest mid violation <a href="#largest-violations">{{ d.arb_max_mid|fmt('.1f') }} idx pts</a> ({{ lv0.usd|usd_desk(false) }} per contract), {{ lv0.label }}, {{ lv0.short }}.{% endif %}</div>
+    <div class="kpi-sub">of {{ d.arb.n_quotes|fmt(',') }} quotes sit in a constraint row violated at bid/ask; {{ d.arb.n_quotes_in_mid_violation|fmt(',') }} at mids. {% if d.arb_chain %}{{ d.arb_chain }}{% if d.largest_violations %}; {% else %}.{% endif %}{% endif %}{% if d.largest_violations %}<a href="#largest-violations">{{ d.arb_bad_rows }} of the {{ d.largest_violations|length }} largest rows</a> from single-quote outliers.{% endif %}{% if lv0 %} Largest mid violation without an outlier leg: {{ lv0.shortfall|fmt('.1f') }} idx pts ({{ lv0.usd|usd_desk(false) }} per contract), {{ lv0.label }}, {{ lv0.short }}.{% endif %}</div>
   </div>{% endif %}
 </div>
 
@@ -193,10 +193,10 @@
     <div class="tbl-wrap fill-scroll" tabindex="0" role="region" aria-label="Largest mid violations (scrollable)">
     <table class="tbl dense wrap-head" id="largest-violations"><caption>arbitrage.largest_mid_violations: legs as weight and strike per expiry; shortfall in idx pts and $ per SPX contract (×{{ spx_multiplier|fmt('.0f') }})</caption>
       <thead><tr><th scope="col">Constraint</th><th scope="col">Legs</th><th scope="col" class="num">Shortfall (idx pts)</th><th scope="col" class="num">$ per contract</th><th scope="col">At bid/ask</th></tr></thead>
-      <tbody>{% for v in d.largest_violations %}<tr><td>{{ v.label }}</td><td class="legs">{% for g in v.leg_groups %}{% if not loop.first %}<br>{% endif %}<span class="nowrap">{{ g.expiry }}</span> {% for l in g.legs %}<span class="nowrap">{{ l }}</span>{{ ' ' if not loop.last else '' }}{% endfor %}{% endfor %}</td><td class="num">{{ v.shortfall|fmt('.2f') }}</td><td class="num">{{ v.usd|usd_desk(false) }}</td><td>{{ 'executable' if v.executable else 'mids only' }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for v in d.largest_violations %}<tr><td>{{ v.label }}</td><td class="legs">{% for g in v.leg_groups %}{% if not loop.first %}<br>{% endif %}<span class="nowrap">{{ g.expiry }}</span> {% for l in g.legs %}<span class="nowrap">{{ l }}</span>{{ ' ' if not loop.last else '' }}{% endfor %}{% endfor %}</td><td class="num">{{ v.shortfall|fmt('.2f') }}</td><td class="num">{{ '—' if v.bad_quote else v.usd|usd_desk(false) }}</td><td>{% if v.bad_quote %}bad quote: <span class="nowrap">{{ v.bad_quote }}</span>{% else %}{{ 'executable' if v.executable else 'mids only' }}{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
-    <p class="note">A shortfall is the amount, in index points, by which the legs’ mid prices break the constraint’s inequality (for a vertical spread, a price below zero or above the strike width). “Executable”: the violation survives at the bid and the ask too. The table records which quotes break which constraint, not why.</p>
+    <p class="note">A shortfall is the amount, in index points, by which the legs’ mid prices break the constraint’s inequality (for a vertical spread, a price below zero or above the strike width). “Executable”: the violation survives at the bid and the ask too. “Bad quote”: the shortfall is larger than the row’s widest strike gap, more than any spread on those strikes pays, so one quote is wrong rather than tradeable; the leg named is the one such rows share, and every row holding it is flagged with it, with no dollar value.</p>
     {% endif %}
     {% if d.arb_surfaces %}<p class="note">Dense-grid checks of the fitted surfaces: {% for a in d.arb_surfaces %}{{ a.label }} {{ a.dense.butterfly_violations|fmt(',') }} butterfly / {{ a.dense.calendar_violations|fmt(',') }} calendar violations{{ '; ' if not loop.last else '.' }}{% endfor %}</p>{% endif %}
     {% else %}<p class="note">No arbitrage screen in surface.json for this session.</p>{% endif %}

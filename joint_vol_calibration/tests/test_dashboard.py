@@ -2648,8 +2648,25 @@ def test_model_risk_checks_use_the_surface_artifacts(dash, art):
     assert hs["status"] == want
     arb = json.loads((FIX / "surface" / SESSION / "surface.json").read_text())["arbitrage"]
     share = arb["n_quotes_in_executable_violation"] / arb["n_quotes"] * 100
-    arb_row = mon["Quotes in an executable static-arbitrage row (% of scored quotes)"]
+    arb_row = mon["Quotes failing static arbitrage at bid/ask (% of scored quotes)"]
     assert arb_row["value"].startswith(f"{share:.1f}%")
+
+
+def test_model_risk_v1_counts_the_single_quote_outliers_apart(dash):
+    """R3-D1: V1 read '6.8% (198 of 2,913) BREACH' under 'executable static-arbitrage
+    row', the label the Surface tile gave one bad Yahoo quote. The check is now
+    named for what the screen measures, and its note counts the largest rows a
+    single-quote outlier explains, with the leg they share."""
+    row = next(m for m in dash.load_model_risk()["monitors"] if m["key"] == "arb_exec_share")
+    assert row["check"] == "Quotes failing static arbitrage at bid/ask (% of scored quotes)"
+    assert "executable" not in row["check"].lower()
+    lv = dash.arb_violations(json.loads(_surface_file("surface.json").read_text())["arbitrage"])
+    bad = [v["bad_quote"] for v in lv if v["bad_quote"]]
+    if bad:
+        assert (f"Single-quote outliers: {len(bad)} of its {len(lv)} largest mid violations "
+                f"(bad quote {bad[0]}") in row["note"]
+    else:
+        assert "outlier" not in row["note"]
 
 
 def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
@@ -5517,28 +5534,89 @@ def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifac
         assert r[col] == str(by[r[0]]), r[0]
 
 
+def _widest_strike_gap(legs: list[dict]) -> float:
+    ks = sorted({float(lg["strike"]) for lg in legs})
+    return max((b - a for a, b in itertools.pairwise(ks)), default=0.0)
+
+
 def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(dash, pages):
+    """R3-T4: the tile read 'Executable static arbitrage … Largest mid violation
+    95.0 idx pts ($9,497 per contract), C2 vertical spread, 2027-03-31 P
+    6260/6265': a 5-point vertical priced 95 points through its bound by one bad
+    Yahoo quote (P6265 151.4/154.1 between P6260 53.5/54.3 and P6270 62.6/65.1),
+    and 24 of the 25 listed rows were tagged 'executable'. A row whose shortfall
+    is larger than its widest strike gap now reads 'bad quote: <leg>' with no
+    dollar value, and the tile headlines the largest row without one."""
     html = pages["/surface"]
     arb = json.loads(_surface_file("surface.json").read_text())["arbitrage"]
     tile_m = re.search(r'id="arb-tile">(.*?)</div>\s*</div>', html, re.DOTALL)
     tile = _visible_text("<body>" + tile_m.group(1))
-    top = max(arb["largest_mid_violations"], key=lambda v: v["shortfall_index_points"])
-    assert f"Largest mid violation {max(arb['max_mid_violation_index_points'].values()):.1f} idx pts" in tile
-    assert dash.usd_desk(top["shortfall_index_points"] * 100, signed=False) + " per contract" in tile
+    assert "Quotes failing static arbitrage at bid/ask" in tile
+    assert "Executable" not in tile
     assert "constraint row" in tile
+    assert "no quote time" in tile or "quotes at" in tile
     assert 'href="#largest-violations"' in html
     rows = _table_rows(html, "largest-violations")
     assert len(rows) == len(arb["largest_mid_violations"])
     ordered = sorted(arb["largest_mid_violations"], key=lambda v: -v["shortfall_index_points"])
+    named = set()
     for r, v in zip(rows, ordered):
         assert r[2] == f"{v['shortfall_index_points']:.2f}"
-        assert r[3] == dash.usd_desk(v["shortfall_index_points"] * 100, signed=False)
         for lg in v["legs"]:
             assert f"{lg['right']}{lg['strike']:.0f}" in r[1]
             assert str(lg["expiry"])[:10] in r[1]
+        if r[4].startswith("bad quote: "):
+            assert r[3] == "—"
+            exp, leg = r[4][len("bad quote: "):].split()
+            assert any(str(lg["expiry"])[:10] == exp and f"{lg['right']}{lg['strike']:.0f}" == leg
+                       for lg in v["legs"]), r
+            named.add(r[4])
+        else:
+            # no row wider in shortfall than its strike gap passes as tradeable
+            assert not 0.0 < _widest_strike_gap(v["legs"]) < v["shortfall_index_points"], r
+            assert r[3] == dash.usd_desk(v["shortfall_index_points"] * 100, signed=False)
+            assert r[4] == ("executable" if v["executable"] else "mids only")
+    # every flagged row that holds a named leg carries it: flagged rows share their leg
+    for r, v in zip(rows, ordered):
+        held = {f"bad quote: {str(lg['expiry'])[:10]} {lg['right']}{lg['strike']:.0f}" for lg in v["legs"]}
+        assert not (held & named) or r[4] in held & named, r
+    n_bad = sum(1 for r in rows if r[4].startswith("bad quote: "))
+    assert f"{n_bad} of the {len(rows)} largest rows from single-quote outliers" in tile
+    clean = next((v for r, v in zip(rows, ordered) if not r[4].startswith("bad quote: ")), None)
+    if clean:
+        sf = clean["shortfall_index_points"]
+        assert (f"Largest mid violation without an outlier leg: {sf:.1f} idx pts "
+                f"({dash.usd_desk(sf * 100, signed=False)} per contract)") in tile
+    else:
+        assert "Largest mid violation" not in tile
     # the panel table counts constraint rows, and says so
     assert _table_heads(html, "arb-table")[1:] == ["Constraint rows", "Violated at mids",
                                                    "Violated at bid/ask"]
+
+
+def test_bad_quote_flag_names_the_leg_the_impossible_rows_share(dash):
+    """flag_bad_quotes on the 2026-10-16 shape: one off quote (P6265) breaks a
+    vertical, a butterfly and a calendar spread by more than their strike gaps,
+    and a wide calendar butterfly that holds it is flagged with it; a violation
+    inside its strike gap and a one-strike calendar row stay tradeable."""
+    def row(typ, sf, *legs):
+        return dash.violation_view({"type": typ, "shortfall_index_points": sf, "executable": True,
+                                    "legs": [{"expiry": e, "right": "P", "strike": k, "weight": w}
+                                             for e, k, w in legs]})
+    t1, t2 = "2027-03-31", "2027-04-16"
+    views = [row("C2_vertical_spread", 95.0, (t1, 6260.0, 1.0), (t1, 6265.0, -1.0)),
+             row("C3_vertical_butterfly", 94.9, (t1, 6260.0, 0.5), (t1, 6265.0, -1.0), (t1, 6270.0, 0.5)),
+             row("C5_calendar_vertical_spread", 79.0, (t1, 6265.0, -1.0), (t2, 6275.0, 1.0)),
+             row("C6_calendar_butterfly", 58.0, (t1, 6265.0, -1.0), (t2, 6200.0, 0.5), (t2, 6400.0, 0.5)),
+             row("C2_vertical_spread", 20.0, (t1, 7000.0, 1.0), (t1, 7010.0, -1.0)),
+             row("C3_vertical_butterfly", 9.4, (t1, 6245.0, 1 / 3), (t1, 6255.0, -1.0), (t1, 6260.0, 2 / 3)),
+             row("C4_calendar_spread", 3.0, (t1, 6500.0, -1.0), (t2, 6500.0, 1.0))]
+    moved = [{"expiry": t1, "right": "P", "strike": 7010.0, "repair_dprice": -15.0}]
+    out = dash.flag_bad_quotes(views, moved)
+    assert [v["bad_quote"] for v in out] == [f"{t1} P6265"] * 4 + [f"{t1} P7010", None, None]
+    # a lone two-leg row with no repair move either way still names one of its own legs
+    lone = dash.flag_bad_quotes([row("C2_vertical_spread", 20.0, (t1, 7000.0, 1.0), (t1, 7010.0, -1.0))])
+    assert lone[0]["bad_quote"] in (f"{t1} P7000", f"{t1} P7010")
 
 
 def _kpi_blocks(html: str, block_id: str) -> dict[str, str]:
