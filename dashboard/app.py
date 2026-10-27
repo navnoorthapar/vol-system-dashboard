@@ -5290,7 +5290,7 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
     """The #rnd panels: every listed SVI-cal slice's risk-neutral tail
     probabilities (a threshold outside its quoted strikes prints RND_BEYOND), the
     mass beyond the quoted range, the checks ∫p and E[S_T/F] and the certificate's
-    g_min; the density of ln(S_T/F) of the listed expiries nearest 1M, 3M and 6M,
+    g_min; the density of ln(S_T/F) of the listed expiries nearest 30, 91 and 182 days,
     drawn inside their quoted strikes only; the tails by expiry, with a gap where
     the threshold is beyond the quotes."""
     rows = desk_density.tail_rows(sj, res)
@@ -5311,7 +5311,7 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
                       _fmt(100 * r["above_quoted"], ".2f") if r["above_quoted"] is not None else "—",
                       _fmt(r["mass"], ".4f"), _fmt(r["mean"], ".4f"), desk_density.fmt_g(r["g_min"])]})
     out: dict[str, Any] = {"heads": list(RND_HEADS), "rows": view_rows, "picks": [
-        {"label": p["label"], "expiry": p["row"]["expiry"], "days": p["row"]["T_days"],
+        {"label": p["label"], "tenor": p["tenor"], "expiry": p["row"]["expiry"], "days": p["row"]["T_days"],
          "kf_lo": p["row"]["kf_lo"], "kf_hi": p["row"]["kf_hi"]} for p in picks],
         "n_beyond": sum(1 for r in rows for v in r["prob"].values() if v is None),
         "max_mass_err": max(abs(r["mass"] - 1.0) for r in rows),
@@ -5326,7 +5326,7 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
         for i, p in enumerate(picks):
             r = p["row"]
             sl = desk_density.slice_of(sj, r["expiry"])
-            series.append({"name": f"{p['label']} · {r['expiry']} ({_fmt(r['T_days'], '.0f')} d)",
+            series.append({"name": f"{r['expiry']} ({_fmt(r['T_days'], '.0f')} d)",
                            "type": "line", "role": "tenor", "T": r["T_days"], "color": cols[i],
                            "width": 1.75, "legend": True,
                            "data": desk_density.density_curve(sl, r["k_lo"], r["k_hi"])})
@@ -5341,7 +5341,7 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
             trows.append(cells)
         out["density_chart"] = charts.xy(
             "chart-rnd",
-            f"Risk-neutral density of ln(S_T/F), SVI-cal slices nearest 1M, 3M and 6M, {session}",
+            f"Risk-neutral density of ln(S_T/F), SVI-cal slices nearest 30, 91 and 182 days, {session}",
             x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
             y={"name": "Density of ln(S_T/F)", "digits": 0, "tipDigits": 3, "zero": True},
             series=series, tooltip="item", csv=f"rnd_density_{session}.csv",
@@ -5350,7 +5350,8 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
                       "risk-neutral, not a forecast."),
             table=charts.table("Risk-neutral density of ln(S_T/F) (per unit of ln-moneyness) at round "
                                "ln(K/F); — outside the expiry's quoted strikes",
-                               ["ln(K/F)#", "K/F#", *(f"{p['label']} {p['row']['expiry']}#" for p in picks)],
+                               ["ln(K/F)#", "K/F#", *(f"{p['row']['expiry']} ({p['row']['T_days']:.0f} d)#"
+                                                         for p in picks)],
                                trows))
     days = [r["T_days"] for r in rows]
     tail_series = []
@@ -5385,12 +5386,15 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
 CONE_LINES = ((5, "dotted", 1.1), (25, True, 1.2), (50, None, 1.6), (75, True, 1.2), (95, "dotted", 1.1))
 
 
-def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str) -> dict | None:
+def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str,
+                  atmf_30: float | None = None) -> dict | None:
     """The #vol-cone panel: percentiles of SPX close-to-close RV at 10–252
     sessions over two samples ending at the surface's session (a tab picks
     one), the newest window's RV at each horizon, and the SVI-cal ATMF of the
     listed expiries at T·252/365 sessions, each ranked against RV over that
-    many sessions in both samples."""
+    many sessions in both samples. ``atmf_30`` is the 30-day constant-maturity
+    ATMF (the '1M' tile), printed beside the nearest listed expiry's so the two
+    are never read as one number."""
     end = pd.Timestamp(session)
     close = close.astype(float).sort_index()
     if close.empty or close.index.max() < end:
@@ -5464,7 +5468,7 @@ def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str) -> dic
             "samples": [{k: v for k, v in sm.items() if k not in ("r", "cone")} for sm in samples],
             "default": samples[0]["key"],
             "one_m": {"expiry": one_m["expiry"], "days": one_m["T_days"], "atmf": one_m["atmf"],
-                      "h": one_m["h"],
+                      "h": one_m["h"], "atmf_30": atmf_30,
                       "ranks": [pts_by[sm["key"]][i1]["rank"] for sm in samples]},
             "c21": {k: {"p5": v["pct"][5], "p50": v["pct"][50], "p95": v["pct"][95], "current": v["current"]}
                     for k, v in c21.items()}}
@@ -5762,7 +5766,8 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["rnd"] = rnd_view(sj, res, session)
         d["cone"] = None
         with _loader_boundary(d, "volatility cone (vol_system.db spx_ohlcv, surface.json svi_cal)"):
-            d["cone"] = vol_cone_view(_read_spx()["close"], listed, session)
+            atmf_30 = next((r["atmf"] for r in cm if r["label"] == "1M" and r["available"]), None)
+            d["cone"] = vol_cone_view(_read_spx()["close"], listed, session, atmf_30)
         if cmp_:
             d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
             d["charts"]["rr_term"] = rr_term_spec(cmp_)

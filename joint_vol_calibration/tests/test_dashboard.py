@@ -7429,6 +7429,41 @@ def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages
     assert "intraday" in rank_note
 
 
+def test_every_1m_on_the_surface_is_the_30_day_constant_maturity(pages):
+    """'1M' is the SVI-cal surface interpolated to exactly 30 days (the KPI tile,
+    the constant-maturity grid); a listed expiry is named by its date and days,
+    never '1M'. Before the fix the cone headline read '1M: … 2026-11-16 (31 d) is
+    13.82%' beside the 13.92% tile, and the density legend, its table and the
+    tail table called the 31-day slice '1M'."""
+    html = pages["/surface"]
+    specs = _raw_specs(html)
+    strings = [_visible_text(html)]
+    for sp in specs.values():
+        strings += [str(s_.get("name", "")) for s_ in sp.get("series", [])]
+        strings += [str(c["label"]) for c in (sp.get("table") or {}).get("columns", [])]
+        strings.append(str(sp.get("title", "")))
+    text = " ¦ ".join(strings)
+    tile = re.search(r"1M ATMF (\d+\.\d{2}) ?%", text)
+    assert tile, "the 1M ATMF tile"
+    v30 = tile.group(1)
+    # '1M' never names a listed date (a constant-maturity row's 'lower → upper' is the bracket)
+    assert not re.findall(r"\b1M\b\s*[·:(]?\s*\d{2,4}-\d{2}-\d{2}(?!\s*→)", text)
+    # (a tile's sub-line ending in a date runs into the next tile's '1M RR25' label)
+    assert not re.findall(r"\d{4}-\d{2}-\d{2}\)?\s*1M\b(?! (?:ATMF|RR25|BF25|VS))", text)
+    assert all("1M" not in r[0] for r in _tbody_rows(html, "rnd-table-tbl"))
+    assert not re.findall(r"\b1M\s*:", text)
+    # every percentage printed against '1M' is the 30-day value
+    vals = re.findall(r"\b1M\b[^0-9¦]{0,40}?(\d+\.\d{2}) ?%", text)
+    assert vals
+    assert set(vals) == {v30}, vals
+    head = _visible_text("<body>" + html[html.index('id="vol-cone-1m"'):].split("</p>")[0])
+    listed = re.search(r"ATMF of (\d+\.\d{2})%", head)
+    assert listed
+    assert "nearest 30 days" in head
+    if listed.group(1) != v30:                 # the two are told apart where both print
+        assert f"1M tile’s {v30}%" in head
+
+
 # ── B12: round trips and worst drawdowns ──────────────────────────────────────
 
 def _tbody_rows(html: str, table_id: str) -> list[list[str]]:

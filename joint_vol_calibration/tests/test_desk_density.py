@@ -175,14 +175,15 @@ def test_the_known_session_matches_the_values_verified_by_hand(tails):
     assert 100 * m6["prob"]["gt110"] == pytest.approx(15.01, abs=0.05)
     picks = dd.chart_expiries(tails[KNOWN])
     assert [(p["label"], p["row"]["expiry"]) for p in picks] == [
-        ("1M", "2026-11-16"), ("3M", "2027-01-15"), ("6M", "2027-04-16")]
+        ("nearest 30 d", "2026-11-16"), ("nearest 91 d", "2027-01-15"), ("nearest 182 d", "2027-04-16")]
 
 
 def test_chart_expiries_take_the_nearest_listed_expiry_within_tolerance():
     rows = [{"expiry": e, "T_days": t, "k_lo": -0.3} for e, t in
             (("a", 10.0), ("b", 28.0), ("c", 33.0), ("d", 300.0))]
     picks = dd.chart_expiries(rows)
-    assert [(p["label"], p["row"]["expiry"]) for p in picks] == [("1M", "b")]   # no 3M or 6M within 35%
+    # none within 35% of 91 or 182 days
+    assert [(p["label"], p["row"]["expiry"]) for p in picks] == [("nearest 30 d", "b")]
 
 
 def test_the_density_curve_stays_inside_the_quoted_range():

@@ -55,8 +55,10 @@ THRESHOLDS: tuple[tuple[str, str, str, float], ...] = (
     ("gt110", "S_T > 1.10 F", "above", 1.10),
 )
 BAND = (0.95, 1.05)            # P(S_T outside 0.95–1.05 F)
-CHART_TENORS = (30, 91, 182)   # the density chart: the listed expiries nearest 1M, 3M and 6M
-CHART_LABELS = {30: "1M", 91: "3M", 182: "6M"}
+CHART_TENORS = (30, 91, 182)   # the density chart: the listed expiries nearest 30, 91 and 182 days
+# A listed slice is never named by a constant-maturity tenor ('1M' is the
+# surface interpolated to exactly 30 days, desk_surface.CM_LABELS): it is
+# named by its date and days, and by the tenor it is nearest to.
 TENOR_TOL = 0.35               # a listed expiry stands for a tenor within 35% of its days
 CHART_STEP = 0.005             # k spacing of the drawn density
 INTEGRATION_RANGE = (-40.0, 40.0)   # p and eᵏp are below 1e-30 well inside it on every stored slice
@@ -172,7 +174,7 @@ def chart_expiries(rows: Sequence[Mapping], tenors: Sequence[int] = CHART_TENORS
             continue
         r = min(cands, key=lambda r: abs(r["T_days"] - D))
         used.add(r["expiry"])
-        out.append({"tenor": D, "label": CHART_LABELS.get(D, f"{D}d"), "row": r})
+        out.append({"tenor": D, "label": f"nearest {D} d", "row": r})
     return out
 
 
