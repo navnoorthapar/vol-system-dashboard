@@ -2556,9 +2556,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     assert len(gzip.compress((static / "vendor" / "echarts-6.1.0-desk.min.js").read_bytes())) < 240_000
     # P4.1: the quote inspector, the residual strip and the linked chart groups
     # raised the page script from 51 KB; it is served gzipped like the pages. F4's keyboard
-    # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped
+    # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped; R3-T9's table CSV
+    # numbers (one-number cells parsed, block children spaced) past 31 KB
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_500
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -7794,6 +7795,78 @@ def test_browser_tables_sort_copy_and_export(site_browser, tmp_path):
             assert after[-n_beyond:] == ["beyond quoted strikes"] * n_beyond
             nums = [float(x) for x in after[:-n_beyond]]
             assert nums in (sorted(nums), sorted(nums, reverse=True))
+    finally:
+        ctx.close()
+
+
+_TABLE_CSV_JS = """(id) => { const t = document.getElementById(id), w = t.closest('.tbl-wrap') || t;
+  const own = w.previousElementSibling, bar = own && own.classList.contains('tbl-tools') ? own
+    : t.closest('.panel').querySelector('.panel-actions');
+  [...bar.querySelectorAll('button.tbl-act')].find(b => b.textContent === 'CSV').click(); }"""
+
+
+def _table_csv(page, table_id: str, tmp_path) -> list[list[str]]:
+    """The rows of the CSV a table's own CSV button downloads."""
+    import csv
+
+    with page.expect_download() as dl:
+        page.evaluate(_TABLE_CSV_JS, table_id)
+    path = tmp_path / f"{table_id}.csv"
+    dl.value.save_as(path)
+    text = path.read_text(encoding="utf-8")
+    assert "\u2212" not in text, table_id
+    return list(csv.reader(text.splitlines()))
+
+
+def test_browser_table_csv_carries_numbers_not_display_strings(site_browser, tmp_path):
+    """R3-T9: a table's CSV carried the cells as displayed, so a spreadsheet read
+    '\u22120.99' (U+2212) as text and the delta grid's tenor ran into its
+    bracketing expiries ('1M26-11-13 \u2192 \u2026'). A cell that is one number
+    exports as that number, any other cell as its text with an ASCII minus (a
+    'lo to hi' interval stays text), and a block child is a word of its own."""
+    sb = site_browser
+    ctx = _context(sb)
+    page = ctx.new_page()
+    try:
+        page.goto(sb["base"] + "research.html", wait_until="load")
+        got = page.evaluate("""() => ['\u22120.99', '+0.84', '\u2212$273,733', '12.5%', '$1.2k',
+            '9.5 \u00d7 10\u207b\u2079', '\u22121.81 to \u22120.30', '1M', '2026-10-16', '\u2014',
+            '46 (1 open)'].map(Desk.csvValue)""")
+        assert got == [-0.99, 0.84, -273733, 12.5, 1200, 9.5e-9, "-1.81 to -0.30", "1M",
+                       "2026-10-16", "\u2014", "46 (1 open)"]
+        shown = page.evaluate("""() => [...document.querySelectorAll('#bootstrap-table tbody tr')]
+            .map(r => [...r.cells].map(c => c.textContent.replace(/\\s+/g, ' ').trim()))""")
+        rows = _table_csv(page, "bootstrap-table", tmp_path)
+        assert len(rows) == 1 + len(shown)
+        j = rows[0].index("Interval")
+        one = re.compile(r"[+\u2212-]?\d+(?:\.\d+)?")
+        n_num = 0
+        for want, row in zip(shown, rows[1:]):
+            assert len(row) == len(want)
+            for w, cell in zip(want, row):
+                if one.fullmatch(w):            # a number: written plainly, its sign ASCII
+                    n_num += 1
+                    assert float(cell) == float(w.replace("\u2212", "-")), (w, cell)
+                    assert not cell.startswith("+")
+                else:
+                    assert cell == w.replace("\u2212", "-"), (w, cell)
+            assert " to " in row[j]
+            assert not one.fullmatch(row[j])           # the interval stays text
+        assert n_num > 0
+        # Surface's constant-maturity grid: the tenor, its expiry pair and the
+        # strike count are separate words, and every quote cell is a number
+        page.goto(sb["base"] + "surface.html", wait_until="load")
+        heads = page.evaluate("""() => [...document.querySelectorAll('#delta-grid-cm tbody th')]
+            .map(th => [...th.childNodes].map(n => n.textContent.trim()).filter(Boolean).join(' '))""")
+        rows = _table_csv(page, "delta-grid-cm", tmp_path)
+        assert [r[0] for r in rows[1:]] == heads
+        assert any(" " in h for h in heads)
+        shown = page.evaluate("""() => [...document.querySelectorAll('#delta-grid-cm tbody tr')]
+            .map(r => [...r.cells].slice(1).map(c => c.textContent.trim()))""")
+        for want, row in zip(shown, rows[1:]):
+            for w, cell in zip(want, row[1:]):
+                if one.fullmatch(w):
+                    assert float(cell) == float(w.replace("\u2212", "-")), (w, cell)
     finally:
         ctx.close()
 

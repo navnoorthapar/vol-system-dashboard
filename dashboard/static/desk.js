@@ -1718,20 +1718,26 @@
   // rows as written, CSV = a download. Without JavaScript nothing changes.
   var SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹', DASH = /^[—–-]+$/;
   // U+2212, $, %, $k / $M, 'm × 10⁻ⁿ', the first of 'a / b', 'a–b', 'a to b'; null for text
-  function cellNumber(text) {
+  // (and, whole === true, for anything but one number: not a map's index)
+  function cellNumber(text, whole) {
+    whole = whole === true;
     var s = String(text).replace(/−/g, '-').replace(/\s+/g, ' ').trim();
     if (!s || DASH.test(s)) return null;
-    s = s.split(/ \/ |–| to /)[0].trim();
-    var m = /^([+-]?)(\$?)(\d[\d,]*(?:\.\d+)?|\.\d+)(?: ?× ?10([⁻⁰¹²³⁴-⁹]+))?(%|k|M|bn)?(?: .*)?$/.exec(s);
-    if (!m || (m[5] && m[5] !== '%' && !m[2])) return null;      // '1M' is a tenor
-    var v = parseFloat(m[3].replace(/,/g, ''));
-    if (m[4]) v *= Math.pow(10, +m[4].replace(/./g, function (c) { return c === '⁻' ? '-' : SUP.indexOf(c); }));
-    v *= { k: 1e3, M: 1e6, bn: 1e9 }[m[5]] || 1;
+    if (!whole) s = s.split(/ \/ |–| to /)[0].trim();
+    var m = /^([+-]?)(\$?)(\d[\d,]*(?:\.\d+)?|\.\d+)(?: ?× ?10([⁻⁰¹²³⁴-⁹]+))?(%|k|M|bn)?( .*)?$/.exec(s);
+    if (!m || (m[5] && m[5] !== '%' && !m[2]) || (whole && m[6])) return null;      // '1M' is a tenor
+    var e = ({ k: 3, M: 6, bn: 9 }[m[5]] || 0) + (m[4] ? +m[4].replace(/./g, function (c) { return c === '⁻' ? '-' : SUP.indexOf(c); }) : 0);
+    var v = parseFloat(m[3].replace(/,/g, '') + 'e' + e);    // 9.5e-9, not 9.500000000000001e-9
     return m[1] === '-' ? -v : v;
   }
   Desk.cellNumber = cellNumber;
+  // a CSV cell: the number a cell is, else its text with an ASCII minus
+  Desk.csvValue = function (x) { var v = cellNumber(x, true); return v === null ? x.replace(/−/g, '-') : v; };
   function cellText(c) {
-    var k = c.cloneNode(true);
+    var k = c.cloneNode(true), src = $$('*', c);
+    $$('*', k).forEach(function (x, i) {      // a block child (a tenor's expiry pair) is a word of its own
+      if (!/^(inline|none|contents)$/.test(getComputedStyle(src[i]).display)) { x.before(' '); x.after(' '); }
+    });
     $$('.sr-only, .th-sort-ind, [hidden], [aria-hidden="true"]', k).forEach(function (x) { x.remove(); });
     return k.textContent.replace(/\s+/g, ' ').trim();
   }
@@ -1791,7 +1797,7 @@
         else flash(b, 'Blocked');
       });
       var csv = mk('CSV', 'Download the table as CSV', function () {
-        download((t.id || 'table-' + ti) + '.csv', tableRows(t).map(function (r) { return r.map(csvCell).join(','); }).join('\n') + '\n');
+        download((t.id || 'table-' + ti) + '.csv', tableRows(t).map(function (r) { return r.map(function (x) { return csvCell(Desk.csvValue(x)); }).join(','); }).join('\n') + '\n');
       });
       var acts = p && per[p.id] === 1 && p.querySelector('.panel-actions'), bar = acts;
       if (!acts) {
