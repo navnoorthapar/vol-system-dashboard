@@ -6575,6 +6575,25 @@ CHECK_EVIDENCE = {
     "arb_exec_share": ("surface.html", "arbitrage"),
 }
 
+# Each check's short name, for the 'Monitored' chip on its evidence panel: a panel
+# that shows two of one model's checks (#oos: OOS and short-end) tells them apart.
+CHECK_SHORT = {
+    "calib_age": "fit age",
+    "params_at_bound": "box bound",
+    "oos_rmse": "OOS RMSE",
+    "short_oos_rmse": "short-end RMSE",
+    "vix_rmse": "VIX RMSE",
+    "feller": "Feller",
+    "median_abs_hs": "OOS half-spreads",
+    "greeks_source": "Greeks source",
+    "beta_drift": "β drift",
+    "label_lag": "DB lag",
+    "vx_lag": "VX lag",
+    "classifier": "classifier skill",
+    "vix_rep_gap": "VIX replication",
+    "arb_exec_share": "static arbitrage",
+}
+
 
 def worst_short_expiry(cal: dict, max_days: float = 30.0) -> dict | None:
     """The fit's worst out-of-sample expiry within ``max_days`` (oos_rows_of)."""
@@ -6634,7 +6653,8 @@ def load_model_risk() -> dict[str, Any]:
         lim = MONITOR_LIMITS.get(limits_key)
         st = status if status is not None else _rag(value, lim) if lim else "na"
         page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
-        mon.append({"model": mid, "check": check, "value": text, "status": st, "num": value,
+        mon.append({"model": mid, "check": check, "short": CHECK_SHORT.get(key or limits_key, check),
+                    "value": text, "status": st, "num": value,
                     "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim
                                               else "informational"),
                     "artifact": artifact, "note": note, "key": key or limits_key,
@@ -6831,7 +6851,8 @@ def monitor_backlinks() -> dict[str, dict[str, list[dict]]]:
     for m in d.get("monitors") or []:
         if m.get("page") and m.get("anchor"):
             out.setdefault(m["page"], {}).setdefault(m["anchor"], []).append(
-                {"model": m["model"], "status": m["status"], "id": m["id"], "check": m["check"]})
+                {"model": m["model"], "status": m["status"], "id": m["id"], "check": m["check"],
+                 "short": m["short"]})
     _BACKLINK_CACHE.clear()
     _BACKLINK_CACHE[key] = out
     return out

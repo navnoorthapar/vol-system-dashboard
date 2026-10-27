@@ -20,7 +20,7 @@
 
 {# a link back to each Model Risk check whose evidence this element shows #}
 {% macro monitored_chips(id) -%}
-{%- for c in monitored_for(id) -%}<a class="chip chip-{{ c.status if c.status in ('ok', 'watch', 'breach') else 'muted' }} mon-link" href="model-risk.html#{{ c.id }}" aria-label="Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}: {{ c.check }}" title="Model Risk check: {{ c.check }}" data-monitored="{{ c.id }}">Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}</a>{%- endfor -%}
+{%- for c in monitored_for(id) -%}{%- set _w = {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) -%}<a class="chip chip-{{ c.status if c.status in ('ok', 'watch', 'breach') else 'muted' }} mon-link" href="model-risk.html#{{ c.id }}" aria-label="{{ c.model }} {{ c.short }} · {{ _w }}, Model Risk check: {{ c.check }}" title="Model Risk check: {{ c.check }}" data-monitored="{{ c.id }}">{{ c.model }} {{ c.short|sym }} · {{ _w }}</a>{%- endfor -%}
 {%- endmacro %}
 
 {# ci_kind 'range': a range across sessions (dashed rule), never read as an interval #}

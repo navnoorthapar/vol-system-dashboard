@@ -6414,28 +6414,44 @@ def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
 
 def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(dash, pages):
     """P3.3: every value cell links to the panel that shows its evidence (an id that
-    exists on that page), and that panel carries a 'Monitored · <model> ·
-    <status>' chip back to the check's row."""
+    exists on that page), and that panel carries a '<model> <check> · <status>' chip
+    back to the check's row. The chip names the check (its short name), so a panel
+    showing two of one model's checks (#oos) never reads 'M4 · BREACH' beside
+    'M4 · WATCH'."""
     html = pages["/model-risk"]
     files = {v: k for k, v in dash.ROUTES.items()}
     d = {m["id"]: m for m in dash.load_model_risk()["monitors"]}
+    # every check with an evidence panel has its own short name
+    assert set(dash.CHECK_EVIDENCE) <= set(dash.CHECK_SHORT)
+    assert len(set(dash.CHECK_SHORT.values())) == len(dash.CHECK_SHORT)
     linked = 0
+    seen: dict[tuple[str, str], list[str]] = {}
     for rid, st, body in _monitor_rows(html):
         href = re.search(r'<a href="([\w.-]+\.html)#([\w-]+)" class="mon-value"', body)
         assert href, rid
         page, anchor = href.groups()
         target = pages[files[page]]
         assert f'id="{anchor}"' in target, (rid, page, anchor)
-        chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"[^>]*>([^<]+)</a>',
+        chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"([^>]*)>(.+?)</a>',
                          target)
         assert chip, (rid, page)
         word = {"ok": "OK", "na": "N/A"}.get(st, st.upper())
-        assert _html_unescape(chip.group(1)) == f"Monitored · {d[rid]['model']} · {word}", rid
+        short = dash.CHECK_SHORT[d[rid]["key"]]
+        text = _html_unescape(re.sub(r"<[^>]+>", "", chip.group(2)))
+        assert text == f"{d[rid]['model']} {short} · {word}", rid
+        # the accessible name starts with the visible text and spells out the check
+        aria = _html_unescape(re.search(r'aria-label="([^"]*)"', chip.group(1)).group(1))
+        assert aria.startswith(text), rid
+        assert d[rid]["check"] in aria, rid
+        seen.setdefault((page, anchor), []).append(text)
         # the chip sits inside the evidence element
         start = target.index(f'id="{anchor}"')
         assert target.index(f'href="model-risk.html#{rid}"') > start
         linked += 1
     assert linked == len(d)
+    # chips on one panel read differently from each other
+    for where, texts in seen.items():
+        assert len({t.rsplit(" · ", 1)[0] for t in texts}) == len(texts), (where, texts)
 
 
 # ── P3.4: the evidence graph ──────────────────────────────────────────────────
