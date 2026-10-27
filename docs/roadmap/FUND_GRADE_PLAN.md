@@ -214,3 +214,121 @@ pieces; the work is to pose it exactly and report it honestly.
 - **2026-10-27.** Plan written at the end of the first build. Tiers 0–4 all open. Critic medians
   before round 3: 7–8 on every page (trust and design lenses). Owner decisions still open:
   benchmark data licence, LFS vs data branch, v0.23.0 tag and Zenodo DOI.
+
+## 7. Reviewer proposals (2026-10-27): three independent read-only reviews of main
+
+Three reviewers (head of vol research; head of quant engineering / model validation; a senior
+vol trader doubling as hiring manager) read the repo on 2026-10-27, each with evidence from the
+files. Their shared thesis matches §1: a reproducible model-validation record, not an alpha
+claim; its strongest claim is evidence discipline. Below are their proposals that add to or
+sharpen tiers 0–4, with the evidence they cited. Treat each as an item with the same rules.
+
+### Weaknesses they add to §2
+- **The headline picks the best session.** The Overview leads with SVI-cal at 0.55 half-spreads
+  / 80% inside on 2026-10-16; the six-session range is 0.45–1.98 and 32–86% inside. Lead with
+  the range, not the best.
+- **The production model fails its own limits and is still what Risk manages from.** Heston σ
+  is on its 2.0 cap in 2 of 5 v2 fits, Feller is violated in all 5, the short-end OOS check
+  breaches on 4, the VIX-options leg is off (w3 = 0), and the VVIX the fit implies (190.7 on
+  2026-03-24) is far above the market (124.1). Make the SVI-cal surface the Risk page's default
+  and show Heston Greeks as a model-risk difference column.
+- **eSSVI, a published inventory model, is 3–10× worse than per-slice SVI on every session
+  with a systematic negative bias, and nothing explains why.** A 51-parameter global surface
+  should not lose by that much; find the cause (fit weights, the calendar constraint, a bug)
+  or retire it with a Corrections entry.
+- **The VX futures curve is stale by design** (dated 2026-10-09 while the market DB is
+  2026-10-26): the daily job does not refresh settlements. A vol trader opens the VIX complex
+  first.
+- **The inference stack is heavier than the P&L it is applied to.** Every dollar is
+  Black–Scholes at a frozen β·VIX with no option price inside the window. Say so in one
+  sentence at the top of Research, then show what the proxy *can* support.
+- **Engineering hygiene seen in the first ten minutes:** 7,242-line app.py with 400-line
+  functions, 82 blind excepts behind the ruff baseline, a version-pinned but hash-less lock
+  file, pip-audit `|| true`, and a 17 MB SQLite cache tracked in git.
+
+### Additions to tier 0 (integrity)
+- **0.6 Hash-pinned installs and a gating pip-audit.** `requirements-lock.txt` has 0 `--hash`
+  lines; the bot holds `contents: write` and installs whatever PyPI serves for those version
+  strings. Recompile with `uv pip compile --generate-hashes` (keeping the +cpu torch index
+  handling), install with `--require-hashes` in tests.yml, daily_refresh.yml and the
+  Dockerfile; make pip-audit a gate with a committed allowlist whose entries carry an expiry
+  and a reason. Acceptance: `grep -c -- --hash requirements-lock.txt` > 0; the audit job has no
+  `|| true`. Effort: hours.
+- **0.7 Make the Cboe book the primary scorecard and replication source; demote Yahoo to
+  fallback.** Every artifact records `source`, `capture_time` and the zero-bid share; a
+  Yahoo-sourced session is badged everywhere (this sharpens 0.2). Effort: days.
+- **0.8 Capture the 16:15 ET closing book (or compare like with like).** The replicated VIX is
+  compared with the official 16:15 ET settle while the book is an overnight (GTH) capture, so
+  the "gap" mixes replication error with the overnight move. Either capture at the close slot
+  or report the gap against a same-instant reference, and publish the gap distribution over
+  sessions. Effort: hours to days.
+- **0.9 Per-session run ledger.** Commit the gate's accept/reject history (session, slot,
+  outcome, reason, timings) as an artifact, so the bot's record is data, not an Actions log;
+  make the stale-input banner read from it ("the gate rejected 2026-10-23: 1% two-sided near
+  ATM"). Effort: days.
+- **0.10 Externally timestamped ledger heads.** The forward ledger is hash-chained (once 1.5
+  lands); additionally publish each session's chain head to an external timestamp (a git tag,
+  a GitHub release note, or an OpenTimestamps proof) so pre-registration is verifiable by a
+  third party. Effort: hours.
+- **0.11 Untrack the SQLite cache and gate repo growth.** `data_store/vol_system.db` (17 MB) is
+  a rebuildable cache the bot never commits but git tracks; untrack it and turn
+  `scripts/ci/repo_growth.py`'s 4 MB warning into a gate. Effort: hours (plus the LFS decision,
+  3.5).
+
+### Additions to tier 1 (desk substance)
+- **1.7 Score the VIX-options smile out of sample from the daily Cboe VIX book.** The bot
+  already captures the VIX book (`data_store/options/cboe/vix_*.parquet`); Heston VIX call/put
+  pricers exist in `joint_calibrator.py`; Quintic OU's VIX² is polynomial in a Gaussian. Price
+  every VIX quote under each model, report inside-spread %, median |err| in half-spreads, and
+  market-vs-model 25Δ-call-minus-ATM VIX skew per expiry. Keep it out of the fit (w3 stays 0)
+  so the headline does not move. This is the concrete form of 1.4 and the first real joint
+  SPX/VIX test. Acceptance: `vix_options.json` per session with n_quotes ≥ 20 and per-model
+  rows; a test pins Heston VIX call prices against a brute-force non-central-χ² integral to
+  1e-8. Effort: days.
+- **1.8 Out-of-time surface scoring and a measured skew-stickiness ratio.** The current
+  held-out set is strikes between fitted strikes (an interpolation test). Add: re-price
+  session t's quotes with session t−1's surface frozen in strike, frozen in log-moneyness, and
+  with Heston at t−1 parameters and the new spot; report each next to the same-day fit; compute
+  SSR from consecutive 1M constant-maturity points with a rolling-20-session SE. This is the
+  concrete form of 1.1 and 1.2. Acceptance: `dynamics.json` per session; a unit test recovers
+  SSR 1.0 and 0.0 from synthetic surface pairs to 0.02. Effort: days.
+- **1.9 Model-implied variance-swap curve vs the chain-replicated strip at every expiry**, as
+  a scorecard row per inventory model (sharpens 1.3). Effort: hours.
+- **1.10 Running model-mark-vs-executable error from the forward ledger; re-mark the backtest
+  at the ledger-implied β once 60 sessions exist.** The ledger marks each position at the
+  captured bid/ask and at the model mark, so the per-position error exists; publish its
+  distribution and, at n ≥ 60, the canonical backtest at the ledger β's 5th/50th/95th
+  percentiles. The 2026-10-26 chain gives β = 0.753 against the frozen 0.82. Effort: days.
+- **1.11 An executable-price control through the identical inference stack.** A VX
+  front-month roll (real settlements, no option marks) run through the same bootstrap / DSR /
+  SPA code, so the reader sees the apparatus applied to something executable beside the
+  proxy. Effort: days.
+- **1.12 Refresh VX settlements in the close slot** and put the VX curve, roll yield and
+  VX1−VIX basis on the Overview at the market-DB date. Effort: hours.
+- **1.13 Range-based realised variance** (Yang–Zhang / Garman–Klass from the stored SPX OHLC)
+  as a second forecast target and cone/VRP input; the current RV is close-to-close only.
+  Effort: days.
+- **1.14 Per-session skew-exponent and rough-H consistency row** in the calibration
+  diagnostics (the ATM-skew power law's exponent against the rough Heston H it implies).
+  Effort: hours.
+- **1.15 Explain or fix the eSSVI deficit** (see the weakness above). Effort: days.
+
+### Additions to tier 3 (engineering)
+- **3.7 Mutation testing of the backtest accounting and the calibration quality gate**
+  (the `make mutation` job exists; point it at `backtest/` and the gate). Effort: days.
+- **3.8 Machine-checked validation pack with monitoring limits and a breach log.** Every
+  number in `docs/model_validation/README.md` is read from an artifact by a test; each
+  Model Risk limit has a committed breach log the page renders. Effort: days.
+- **3.9 Retire the 82 blind excepts first**, then the mechanical ruff debt; strict mypy on the
+  money path (pricing, calibration, backtest accounting) before the dashboard. Sharpens 3.2.
+
+### Additions to tier 4 (desk UX)
+- **4.4 Cut the Overview to one screen:** a single-line provenance strip (it is in the DOM
+  twice), a thesis sentence, three numbers, then the "what moved" sheet (1.1/1.8). Effort:
+  hours.
+- **4.5 A one-page PM tear sheet** (HTML + PDF) regenerated by the daily job from the same
+  artifacts. Effort: hours.
+- **4.6 Make the stale-input banner actionable** (reads from 0.9's run ledger: what was
+  rejected, last accepted vs attempted session). Effort: hours.
+- **4.7 Make the SVI-cal surface the Risk page's default** with Heston Greeks as a difference
+  column (see the weakness above). Effort: days.
