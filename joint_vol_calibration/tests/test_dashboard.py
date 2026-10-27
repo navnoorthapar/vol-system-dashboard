@@ -2958,6 +2958,29 @@ def test_research_s3_timing_headline_is_the_c23_exposure_matched_null(dash, page
         assert f"p = {legacy:.3f}" not in text
 
 
+def test_research_t_bills_are_collateral_income_not_a_hurdle(dash, pages):
+    """R3-T5: the NAV is already an excess return over T-bills (rf = 0), yet the
+    KPI row called the T-bill return a 'benchmark', the equity chart drew it as
+    'T-bill (collateral)' among the sleeves and the prose put S3 'below the T-bill
+    return'. Each now says the T-bill income is earned on top of the NAV."""
+    html = pages["/research"]
+    text = _visible_text(html)
+    for old in ("T-bill benchmark", "below the T-bill return", "T-bill (collateral)"):
+        assert old not in html, old
+    # the KPI keeps the collateral's compounded ^IRX return, read from the metrics
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as fh:
+        cash = pickle.load(fh)["metrics"]["cash_cum_return"]
+    kpi = re.search(r'kpi-label">T-bills on the collateral \(earned on top of the NAV\)</div>\s*'
+                    r'<div class="kpi-value">(.*?)<span', html, re.DOTALL)
+    assert kpi, "T-bill KPI missing"
+    assert _visible_text("<body>" + kpi.group(1)).strip() == f"{cash * 100:+.1f}".replace("-", dash.MINUS)
+    assert "an excess return over T-bills (the hurdle is 0)" in text
+    names = [s["name"] for s in _spec(html, "chart-equity")["series"]]
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
+        assert "T-bill return (not in the NAV)" in names
+
+
 def test_corrections_trend_sentence_agrees_with_the_published_series(dash, pages):
     """UI-4: 'Every successive fix made the backtest worse' sat beside a chart on
     which C22 raised the result from −26.1% to −21.6%. The sentence is now read

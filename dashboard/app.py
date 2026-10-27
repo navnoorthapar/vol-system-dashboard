@@ -3784,8 +3784,10 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         ]
         if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
             tb = eq["nav_tbill"]
-            series.append({"name": "T-bill (collateral)", "type": "line", "color": "muted", "width": 1.2,
-                           "dash": "dotted", "legend": True,
+            # the collateral's T-bill income, earned on top of the NAV (which is already
+            # an excess return over it): drawn for scale, not as a hurdle to beat
+            series.append({"name": "T-bill return (not in the NAV)", "type": "line", "color": "muted",
+                           "width": 1.2, "dash": "dotted", "legend": True,
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
         for s_ in series:                 # ~1,800 daily points a line: drawn with LTTB downsampling
             s_["sampling"] = "lttb"
