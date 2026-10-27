@@ -6612,11 +6612,27 @@ def load_chrome() -> dict:
             c["worst"] = "error"
         elif level == "warn" and c["worst"] == "ok":
             c["worst"] = "warn"
+    c["oldest"] = oldest_source(c["sources"])
     c["holidays"] = [str(h.date()) for h in nyse_holidays(
         f"{(ref or '2026')[:4]}-01-01", f"{int((ref or '2026')[:4]) + 2}-12-31")]
     _CHROME_CACHE.clear()
     _CHROME_CACHE[key] = c
     return c
+
+
+def oldest_source(sources: Sequence[dict]) -> dict | None:
+    """The status-bar input with the most NYSE sessions of age (a missing one
+    first): the one-line phone status strip names it (Q20). Reference-only
+    sources (not in the bar) are left out; ties go to the earlier row."""
+    best: dict | None = None
+    for s in sources:
+        if not (s.get("bar") and s.get("aged")):
+            continue
+        if s.get("level") == "missing":
+            return s
+        if s.get("age") is not None and (best is None or s["age"] > best["age"]):
+            best = s
+    return best
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────────

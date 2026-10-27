@@ -34,6 +34,7 @@
     .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal; }
     .js-only { display: none !important; }
     [role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
+    .banner-body.fold-body { display: block !important; } .find-list.fold-body { display: flex !important; }   /* nothing folds (Q20) */
   </style></noscript>
   {% block head %}{% endblock %}
 </head>
@@ -45,6 +46,17 @@
   <span class="sb-item sb-state lvl-{{ 'ok' if _worst == 'ok' else ('warn' if _worst == 'warn' else 'error') }}">
     {% if d and d.errors %}■ DATA ERROR{% elif _worst == 'error' %}■ STALE INPUT{% elif _worst == 'warn' %}▲ LAGGING INPUT{% else %}● END OF DAY{% endif %}
   </span>
+  {#- phones (Q20): the strip is one line, the state and the oldest input with its age; every source's date is one tap away -#}
+  {% set o = c.oldest %}
+  <details class="sb-phone">
+    <summary class="sb-item">{% if o %}<span class="sb-k">{{ o.short }}</span><span class="sb-v lvl-{{ o.level }}">{% if o.level == 'missing' %}missing{% elif o.age %}{{ o.age|plural('session') }} old{% else %}current{% endif %}</span>{% else %}<span class="sb-v">sources</span>{% endif %}<span class="sr-only">: every source’s date</span></summary>
+    <ul class="sb-list">
+      {% for s in c.sources if s.bar %}<li><span class="sb-k">{{ s.short }}</span><span class="sb-v lvl-{{ s.level }}">{{ (('≤' if s.short == 'BACKTEST' else '') ~ s.date) if s.date else ('n/a' if s.aged else 'pending') }}</span>{% if s.aged and s.age is not none %}<span class="sb-age">{{ s.age|plural('session') }}</span>{% endif %}</li>
+      {% endfor %}<li><span class="sb-k">MODEL</span><span class="sb-v">v{{ c.model_version|fmt }}</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">{{ c.build.short or 'unknown' }}</span></li>
+      <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of {{ c.latest|fmt }}</span></li>
+    </ul>
+  </details>
   {% for s in c.sources if s.bar %}
   <span class="sb-item{% if s.short in ('BACKTEST', 'SURFACE', 'GREEKS') %} sb-opt{% endif %}" title="{{ s.label }}: {{ s.artifact }}">
     <span class="sb-k">{{ s.short }}</span><span class="sb-v lvl-{{ s.level }}">{{ (('≤' if s.short == 'BACKTEST' else '') ~ s.date) if s.date else ('n/a' if s.aged else 'pending') }}</span>
@@ -71,7 +83,7 @@
   <div class="nav-right"><span class="js-only">Press <kbd>?</kbd> for shortcuts</span></div>
 </nav>
 
-<div class="ticker" role="region" aria-label="Market ticker, last close">
+<div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">
   {% for t in c.ticker %}
   <span class="tk"><span class="tk-label">{{ t.label }}</span><span class="tk-val">{{ t.value }}</span>{% if t.chg %}<span class="tk-chg">{{ t.chg }}</span>{% endif %}{% if t.note %}<span class="tk-note">{{ t.note }}</span>{% endif %}</span>
   {% else %}
@@ -97,11 +109,11 @@
     </div>
     {% endif %}
     {% for s in d.stale or [] %}{% if s.level in ('warn', 'error') %}
-    <div class="banner banner-stale-{{ s.level }}" data-stale="{{ s.component }}" data-age="{{ s.age }}">
+    <div class="banner banner-stale-{{ s.level }}" data-stale="{{ s.component }}" data-age="{{ s.age }}" role="status">
       <div class="banner-icon" aria-hidden="true">{% if s.level == 'error' %}!{% else %}⟳{% endif %}</div>
       <div>
-        <div class="banner-title">{{ s.label }} is {{ s.age|plural('NYSE session') }} old</div>
-        <div class="banner-body">
+        <div class="banner-title" data-disclose="stale-{{ s.component }}-body">{{ s.label }} is {{ s.age|plural('NYSE session') }} old</div>
+        <div class="banner-body fold-body" id="stale-{{ s.component }}-body">
           {{ s.label }} as of {{ s.date }}; the newest session the site has data for is {{ s.ref }}.
           {% if s.component == 'calibration' and s.cause %}{{ s.cause }}{% endif %}
           {% if s.component == 'pdv' %}The spread below pairs VIX and the forecast on that date only.{% endif %}

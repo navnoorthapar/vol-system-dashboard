@@ -4519,7 +4519,7 @@ def _findings(html: str) -> list[tuple[str, str, list[str]]]:
     strip = re.search(r'<div class="findings" id="findings"[^>]*>(.*?)\n</div>', html, re.DOTALL)
     assert strip
     cols = re.findall(r'<section class="([^"]+)"[^>]*>\s*<h3 class="find-head"[^>]*>(.*?)</h3>\s*'
-                      r'<ul class="find-list">(.*?)</ul>', strip.group(1), re.DOTALL)
+                      r'<ul class="find-list[^"]*"[^>]*>(.*?)</ul>', strip.group(1), re.DOTALL)
     return [(c, _visible_text("<body>" + h).strip(),
              re.findall(r'<li class="find-item">(.*?)</li>', ul, re.DOTALL))
             for c, h, ul in cols]
@@ -6972,3 +6972,156 @@ def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     assert rows, tip
     assert all(re.search(r"\d%$", x.strip()) for x in rows), rows
     ctx.close()
+
+
+# ── Q20: the phone first screen ───────────────────────────────────────────────
+
+def test_oldest_source_names_the_status_bars_oldest_input(dash):
+    """Q20: the one-line phone status strip names the input with the most NYSE
+    sessions of age; a missing input comes first; a reference-only source (VX,
+    not in the bar) and an unaged one (the fixed backtest window) never."""
+    src = [{"short": "SPX", "bar": True, "aged": True, "age": 0, "level": "ok"},
+           {"short": "FIT", "bar": True, "aged": True, "age": 5, "level": "error"},
+           {"short": "GREEKS", "bar": True, "aged": True, "age": 5, "level": "error"},
+           {"short": "BACKTEST", "bar": True, "aged": False, "age": None, "level": "ok"},
+           {"short": "VX", "bar": False, "aged": True, "age": 40, "level": "error"}]
+    assert dash.oldest_source(src)["short"] == "FIT"              # ties: the earlier row
+    assert dash.oldest_source([*src, {"short": "LABELS", "bar": True, "aged": True, "age": None,
+                                      "level": "missing"}])["short"] == "LABELS"
+    assert dash.oldest_source(src[3:]) is None
+
+
+def test_every_page_carries_the_phone_status_strip_and_fold_hooks(dash, pages):
+    """Q20, server side: every page's status bar holds a <details> whose summary
+    names the oldest input and its age (load_chrome's sources) and whose list
+    gives every status-bar source its date; each stale banner keeps its full
+    text and role=status, its title naming the body it folds; the Overview's
+    findings columns name their lists. Without JavaScript nothing is folded:
+    no list or banner body is rendered hidden."""
+    c = dash.load_chrome()
+    o = c["oldest"]
+    assert o is not None
+    assert o["short"] in {s["short"] for s in c["sources"] if s["bar"]}
+    want = ("missing" if o["level"] == "missing" else
+            (dash.plural(o["age"], "session") + " old") if o["age"] else "current")
+    for route, html in pages.items():
+        bar = html[html.index('<header class="statusbar"'):html.index("</header>")]
+        det = re.search(r'<details class="sb-phone">\s*<summary class="sb-item">(.*?)</summary>'
+                        r'(.*?)</details>', bar, re.DOTALL)
+        assert det, route
+        summary = _visible_text("<body>" + det.group(1)).split(":")[0].split()
+        assert summary == [o["short"], *want.split()], route
+        listed = re.findall(r'<li><span class="sb-k">([^<]+)</span>', det.group(2))
+        assert listed[:-3] == [s["short"] for s in c["sources"] if s["bar"]], route
+        assert listed[-3:] == ["MODEL", "BUILD", "VIEW"], route
+        banners = list(re.finditer(
+            r'<div class="banner banner-stale-\w+" data-stale="(\w+)" data-age="\d+" role="status">'
+            r'.*?<div class="banner-title" data-disclose="([\w-]+)">.*?'
+            r'<div class="banner-body fold-body" id="([\w-]+)">', html, re.DOTALL))
+        for m in banners:
+            assert m.group(2) == m.group(3) == f"stale-{m.group(1)}-body", route
+        assert len(banners) == html.count('class="banner banner-stale-'), route   # each one a status
+        assert not re.search(r'<(ul|div) class="(find-list|banner-body)[^"]*"[^>]* hidden', html), route
+        if "fold-body" in html:                    # no JavaScript: the <noscript> style unfolds every body
+            assert ".banner-body.fold-body { display: block !important; }" in html, route
+    assert ('<div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">'
+            in pages["/"])
+    heads = re.findall(r'<h3 class="find-head" id="find-(\w+)" data-disclose="find-list-(\w+)" '
+                       r'data-count="(\d+)">', pages["/"])
+    assert len(heads) == 3
+    assert all(a == b for a, b, _ in heads)
+    for (_, head, items), (_, _, n) in zip(_findings(pages["/"]), heads):
+        assert int(n) == len(items), head
+
+
+def test_browser_phone_first_screen_shows_the_subject_and_first_number(site_browser):
+    """Q20 acceptance at 390 x 844: on every page <main> starts at y <= 110 (it was
+    164: a 3-line status strip and a 3-line ticker), the h1 at y <= 200 (292 on
+    Overview, Surface and Calibration, under a 108-198 px stale banner) and the
+    first key number (.kpi-value, .result-v, or a Calibration parameter tile)
+    above y = 844 (Overview 1,484, Calibration 2,043 at 'Fit quality'). The
+    staleness stays on screen without a tap: the strip's state reads STALE and
+    names the oldest input; the stale banner's title stays. The strip's
+    <details> and each folded heading open from the keyboard. At 1440 nothing
+    is folded and the one-line strip is not shown."""
+    sb = site_browser
+    ctx, page = _page(sb, 390, 844)
+    geo_js = """() => {
+      const top = e => e ? Math.round(e.getBoundingClientRect().top + scrollY) : null;
+      const vis = e => e && e.offsetParent !== null && getComputedStyle(e).visibility !== 'hidden';
+      const num = [...document.querySelectorAll('main .kpi-value, main .result-v, main .param-val')]
+        .filter(vis)[0];
+      const state = document.querySelector('.statusbar .sb-state');
+      const phone = document.querySelector('.statusbar .sb-phone > summary');
+      const stale = [...document.querySelectorAll('.banner[data-stale]')];
+      return {main: top(document.querySelector('main')), h1: top(document.querySelector('h1')),
+              num: top(num), state: vis(state) ? state.innerText.trim() : null,
+              phone: vis(phone) ? phone.innerText.trim() : null,
+              stale_titles: stale.map(b => { const t = b.querySelector('.banner-title');
+                const r = t.getBoundingClientRect(); return r.height > 0 ? t.innerText.trim() : null; }),
+              sw: document.documentElement.scrollWidth}; }"""
+    try:
+        for name in _ROUTE_OF:
+            page.goto(sb["base"] + name, wait_until="load")
+            g = page.evaluate(geo_js)
+            assert g["main"] <= 110, (name, g)
+            assert g["h1"] <= 200, (name, g)
+            if g["num"] is not None or name in ("index.html", "surface.html", "calibration.html",
+                                                "risk.html", "research.html"):
+                assert g["num"] is not None, (name, g)
+                assert g["num"] < 844, (name, g)
+            assert g["sw"] <= 390, (name, g)
+            assert g["phone"], (name, g)
+            assert re.search(r"\b(old|current|missing)\b", g["phone"]), (name, g)
+            if g["stale_titles"]:
+                assert re.search(r"STALE|LAGGING", g["state"] or ""), (name, g)
+                assert all(t and " old" in t for t in g["stale_titles"]), (name, g)
+        # the strip's details from the keyboard: skip link, then the summary
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        page.keyboard.press("Tab")
+        page.keyboard.press("Tab")
+        assert page.evaluate("document.activeElement.matches('.sb-phone > summary')")
+        page.keyboard.press("Enter")
+        assert page.evaluate("document.querySelector('.sb-phone').open")
+        assert page.locator(".sb-list").is_visible()
+        page.keyboard.press("Enter")
+        assert not page.evaluate("document.querySelector('.sb-phone').open")
+        # a folded heading is a button; Enter unfolds it
+        btn = page.locator("#find-works button.disclose")
+        assert btn.get_attribute("aria-expanded") == "false"
+        assert not page.locator("#find-list-works").is_visible()
+        btn.focus()
+        page.keyboard.press("Enter")
+        assert btn.get_attribute("aria-expanded") == "true"
+        assert page.locator("#find-list-works").is_visible()
+        stale = page.locator(".banner[data-stale] button.disclose")
+        if stale.count():
+            body = page.locator(".banner[data-stale] .banner-body").first
+            assert not body.is_visible()
+            stale.first.focus()
+            page.keyboard.press("Space")
+            assert body.is_visible()
+    finally:
+        ctx.close()
+    ctx, page = _page(sb, 1440, 900)
+    try:
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        assert not page.locator(".sb-phone").is_visible()
+        assert page.locator(".statusbar .sb-right").is_visible()
+        assert page.locator("#find-list-works").is_visible()
+        assert all(b.is_visible() for b in page.locator(".banner[data-stale] .banner-body").all())
+        assert page.locator("button.disclose").count() == 0      # nothing folds: headings stay headings
+        page.set_viewport_size({"width": 390, "height": 844})     # turned narrow: folds
+        page.wait_for_timeout(200)
+        assert not page.locator("#find-list-works").is_visible()
+        assert page.locator("#find-works button.disclose").get_attribute("aria-expanded") == "false"
+    finally:
+        ctx.close()
+    ctx = sb["browser"].new_context(viewport={"width": 390, "height": 844}, java_script_enabled=False)
+    try:                                           # no JavaScript: nothing folds
+        page = ctx.new_page()
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        assert page.locator("#find-list-works").is_visible()
+        assert all(b.is_visible() for b in page.locator(".banner[data-stale] .banner-body").all())
+    finally:
+        ctx.close()

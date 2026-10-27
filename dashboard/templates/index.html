@@ -21,8 +21,8 @@
 <div class="findings" id="findings" aria-labelledby="findings-title">
   {% for col in d.findings %}
   <section class="find-col" aria-labelledby="find-{{ col.key }}">
-    <h3 class="find-head" id="find-{{ col.key }}"><span class="find-glyph" aria-hidden="true">{{ col.glyph }}</span>{{ col.title }}</h3>
-    <ul class="find-list">
+    <h3 class="find-head" id="find-{{ col.key }}" data-disclose="find-list-{{ col.key }}" data-count="{{ col['items']|length }}"><span class="find-glyph" aria-hidden="true">{{ col.glyph }}</span>{{ col.title }}</h3>
+    <ul class="find-list fold-body" id="find-list-{{ col.key }}">
       {% for it in col['items'] %}<li class="find-item"><a href="{{ it.href }}">{{ it.lead }}</a>: {{ it.text|dates }}</li>{% endfor %}
     </ul>
   </section>

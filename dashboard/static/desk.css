@@ -136,6 +136,30 @@ sub, sup { font-size: 0.72em; }
 .lvl-error, .lvl-missing { color: var(--breach); }
 .lvl-unknown { color: var(--text3); }
 
+/* phones (Q20): the strip's one-line form (shown at <= 600 px, below) */
+.sb-phone { display: none; }
+.sb-phone > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: baseline; gap: 4px; }
+.sb-phone > summary::-webkit-details-marker { display: none; }
+.sb-phone > summary::after { content: "▸"; content: "▸" / ""; color: var(--text2); margin-left: 2px; }
+.sb-phone[open] > summary::after { content: "▾"; content: "▾" / ""; }
+.sb-list { position: absolute; left: 0; right: 0; top: 100%; z-index: 110; list-style: none; margin: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px 12px;
+  padding: 6px 10px 8px; background: var(--bg-deep); border-bottom: 1px solid var(--line2); }
+.sb-list li { white-space: nowrap; }
+.sb-list .sb-age { color: var(--text3); margin-left: 6px; }
+/* a heading that folds its content on phones (Q20; desk.js initNarrowDisclosure) */
+button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; text-align: left;
+  text-transform: inherit; letter-spacing: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: inherit;
+  min-height: 24px; }   /* WCAG 2.5.8 target size */
+@media screen and (max-width: 600px) {
+  .fold-body:not(.unfolded) { display: none; }
+  [data-disclose]::after { content: "▸"; content: "▸" / ""; margin-left: 6px; color: var(--text2); font-weight: 400; }
+  [data-disclose].unfolded::after { content: "▾"; content: "▾" / ""; }
+  [data-disclose][data-count]::after { content: "· " attr(data-count) " ▸"; content: "· " attr(data-count) " ▸" / ""; color: var(--text3); }
+  [data-disclose][data-count].unfolded::after { content: "· " attr(data-count) " ▾"; content: "· " attr(data-count) " ▾" / ""; }
+}
+
+
 /* ── navigation ──────────────────────────────────────────────────────── */
 .nav {
   position: sticky; top: 0; z-index: 100;
@@ -631,6 +655,20 @@ dialog.keys .dl { font-size: 12px; }
   .pm-cell:nth-child(odd) { border-right: none; }
   .site-footer .foot-inner { grid-template-columns: minmax(0, 1fr); }
   .statusbar .sb-opt { display: none; }
+}
+/* phones (Q20): the chrome is three short rows (status, nav, ticker), so the
+   page's title and first number are on the first screen at 390 x 844 */
+@media (max-width: 600px) {
+  .statusbar { position: relative; flex-wrap: nowrap; gap: 0 10px; padding-top: 2px; padding-bottom: 2px; min-height: 22px; }
+  .statusbar > .sb-item:not(.sb-state), .statusbar > .sb-right { display: none; }
+  .statusbar .sb-phone { display: block; min-width: 0; }
+  .ticker { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding: 2px 4px; min-height: 24px;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+  .ticker::-webkit-scrollbar { display: none; }
+  .ticker:focus-visible { outline-offset: -2px; }
+  .tk { flex: 0 0 auto; }
+  .banner { padding: 6px 10px; }
+  .banner-stack { margin-bottom: 8px; }
 }
 @media (max-width: 480px) {
   .page { padding: 10px 10px 24px; }

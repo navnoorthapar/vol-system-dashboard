@@ -1571,6 +1571,8 @@
       : ', ' + behind + ' NYSE session' + (behind === 1 ? '' : 's') + ' behind your clock' +
         (behind === 1 ? ' (the site rebuilds after each close, about 22:00 UTC).' : '.'));
     el.className = 'sb-v ' + (behind >= 5 ? 'lvl-error' : behind >= 2 ? 'lvl-warn' : 'lvl-ok');
+    // the phone strip's source list carries the same reading (Q20)
+    $$('[data-freshness-copy]').forEach(function (c) { c.textContent = el.textContent; c.title = el.title; c.className = el.className; });
   }
 
   // -- scroll regions: say so in text (not only the edge shadow) when cut off --
@@ -1606,6 +1608,50 @@
       });
     });
   }
+
+  // -- phone first screen (Q20): at <= 600 px desk.css folds a stale banner's
+  // explanation and each findings column (.fold-body) behind its heading
+  // ([data-disclose]) before the first paint, so nothing shifts; without
+  // JavaScript the <noscript> style in base.html unfolds them. Here the heading's
+  // content becomes a disclosure button (aria-expanded, aria-controls) that
+  // toggles .unfolded on the heading and its body. Wider screens and print
+  // never fold. Runs as soon as the script loads (the last element of <body>).
+  var NARROW = '(max-width: 600px)';
+  function initNarrowDisclosure() {
+    var heads = $$('[data-disclose]');
+    if (!heads.length || !window.matchMedia) return;
+    var mq = window.matchMedia(NARROW);
+    var sync = function () {
+      heads.forEach(function (h) {
+        var b = h.querySelector('button.disclose'), body = doc.getElementById(h.getAttribute('data-disclose'));
+        if (b && body) b.setAttribute('aria-expanded', (!mq.matches || body.classList.contains('unfolded')) ? 'true' : 'false');
+      });
+    };
+    // headings become buttons on a narrow screen only (where something folds)
+    var enhance = function () {
+      heads.forEach(function (h) {
+        var body = doc.getElementById(h.getAttribute('data-disclose'));
+        if (!body || h.querySelector('button.disclose')) return;
+        var btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.className = 'disclose';
+        btn.setAttribute('aria-controls', body.id);
+        while (h.firstChild) btn.appendChild(h.firstChild);
+        h.appendChild(btn);
+        btn.addEventListener('click', function () {
+          var open = !body.classList.contains('unfolded');
+          body.classList.toggle('unfolded', open);
+          h.classList.toggle('unfolded', open);
+          sync();
+        });
+      });
+      sync();
+    };
+    if (mq.matches) enhance();
+    var onChange = function () { if (mq.matches) enhance(); else sync(); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange);
+  }
+  initNarrowDisclosure();
 
   function boot() {
     root.classList.add('has-js');
