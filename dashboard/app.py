@@ -182,9 +182,11 @@ PORTFOLIO_SLEEVES = ("s1c", "s3", "s4")
 # S3 is priced as the index leg of a dispersion trade: a SHORT SPX straddle
 # (backtest_engine.S3_LEG_DIRECTION = -1); no single-stock option data, so the
 # single-name leg is not modelled. "S3 dispersion" overclaimed what is traded.
-S3_NAME = "S3 · short SPX straddle"                     # tables
-S3_SHORT = "S3 index-leg short"                         # chart legends and categories
-S3_FULL = "S3 · short SPX straddle (index leg of a dispersion trade; no single-name leg)"
+# One name per sleeve, read by every table, legend, category and sentence that
+# names one (a second spelling of a row in the next table read as another sleeve).
+SLEEVE_LABELS = {"portfolio": "Portfolio", "s1c": "S1C contrarian", "s3": "S3 short SPX straddle",
+                 "s4": "S4 VRP", "s1": "S1 PDV (ref)", "s2": "S2 VIX TS (ref)"}
+S3_FULL = f"{SLEEVE_LABELS['s3']} (index leg of a dispersion trade; no single-name leg)"
 
 
 # ── NYSE session calendar ──────────────────────────────────────────────────────
@@ -2175,8 +2177,9 @@ def load_page4() -> dict[str, Any]:
         # the unrounded curves: printing the 2-dp chart series at 1 dp showed S3's
         # final +5.647% as "+5.7%".
         d["eq_summary"] = []
-        for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", S3_SHORT),
-                          ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+        for col, name in ((c, SLEEVE_LABELS[k]) for c, k in (("nav", "portfolio"), ("nav_s1c", "s1c"),
+                                                              ("nav_s3", "s3"), ("nav_s4", "s4"),
+                                                              ("nav_s1", "s1"))):
             if col in eq.columns and eq[col].notna().any():
                 rel = eq[col].dropna() / float(eq[col].dropna().iloc[0]) - 1.0
                 d["eq_summary"].append({"name": name, "final": float(rel.iloc[-1]),
@@ -2343,14 +2346,13 @@ def load_page4() -> dict[str, Any]:
 
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
 
-        d["signal_labels"] = ["S1C contrarian", S3_SHORT, "S4 VRP"]
+        d["signal_labels"] = [SLEEVE_LABELS[s] for s in PORTFOLIO_SLEEVES]
         d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None
                            else round(sleeves[s]["total_pnl"] / 1000, 1)
                            for s in PORTFOLIO_SLEEVES]
 
-        for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", S3_NAME, False),
-                                 ("s4", "S4 VRP", False), ("s1", "S1 PDV (ref)", True),
-                                 ("s2", "S2 VIX TS (ref)", True)):
+        for sig, is_ref in (("s1c", False), ("s3", False), ("s4", False), ("s1", True), ("s2", True)):
+            lbl = SLEEVE_LABELS[sig]
             s = sleeves[sig]
             if s["total_pnl"] is None:
                 continue
@@ -3754,15 +3756,15 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
     if eq is not None:
         xs = d["eq_dates"]
         series = [
-            {"name": "Portfolio", "type": "line", "color": "headline", "width": 2.2, "legend": True,
-             "data": d["eq_nav"]},
-            {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["portfolio"], "type": "line", "color": "headline", "width": 2.2,
+             "legend": True, "data": d["eq_nav"]},
+            {"name": SLEEVE_LABELS["s1c"], "type": "line", "color": "cat0", "width": 1.3, "legend": True,
              "data": d["eq_nav_s1c"]},
-            {"name": S3_SHORT, "type": "line", "color": "cat3", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["s3"], "type": "line", "color": "cat3", "width": 1.3, "legend": True,
              "data": d["eq_nav_s3"]},
-            {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["s4"], "type": "line", "color": "cat4", "width": 1.3, "legend": True,
              "data": d["eq_nav_s4"]},
-            {"name": "S1 (reference)", "type": "line", "color": "muted", "width": 1.2, "dash": True,
+            {"name": SLEEVE_LABELS["s1"], "type": "line", "color": "muted", "width": 1.2, "dash": True,
              "legend": True, "hidden": True, "data": d["eq_nav_s1"]},
         ]
         if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
@@ -3969,13 +3971,15 @@ def _gm(x: float) -> str:
 
 
 # ── round trips and worst drawdowns (desk_trades.py, B12) ─────────────────────
-TRADE_SLEEVES = (("s1c", "S1C contrarian", "cat0", "circle", False),
-                 ("s3", S3_SHORT, "cat3", "diamond", False),
-                 ("s4", "S4 VRP", "cat4", "triangle", False),
-                 ("s1", "S1 PDV (ref)", "muted", "circle", True),
-                 ("s2", "S2 VIX TS (ref)", "muted", "rect", True))
-DD_SERIES = (("nav", "Portfolio", "max_drawdown"), ("nav_s1c", "S1C contrarian", "s1c_max_drawdown"),
-             ("nav_s3", S3_SHORT, "s3_max_drawdown"), ("nav_s4", "S4 VRP", "s4_max_drawdown"))
+TRADE_SLEEVES = (("s1c", SLEEVE_LABELS["s1c"], "cat0", "circle", False),
+                 ("s3", SLEEVE_LABELS["s3"], "cat3", "diamond", False),
+                 ("s4", SLEEVE_LABELS["s4"], "cat4", "triangle", False),
+                 ("s1", SLEEVE_LABELS["s1"], "muted", "circle", True),
+                 ("s2", SLEEVE_LABELS["s2"], "muted", "rect", True))
+DD_SERIES = (("nav", SLEEVE_LABELS["portfolio"], "max_drawdown"),
+             ("nav_s1c", SLEEVE_LABELS["s1c"], "s1c_max_drawdown"),
+             ("nav_s3", SLEEVE_LABELS["s3"], "s3_max_drawdown"),
+             ("nav_s4", SLEEVE_LABELS["s4"], "s4_max_drawdown"))
 
 
 def _k_signed(x: float | None) -> str:
@@ -4108,35 +4112,35 @@ def sleeve_spec(trades: Sequence[Any]) -> dict:
              f"hedge slippage {be.SLIPPAGE_PCT:.2%}")
     r2 = "a move into R2 closes it"
     rows = {
-        "s1c": {"name": "S1C · contrarian PDV", "instrument": straddle,
+        "s1c": {"name": SLEEVE_LABELS["s1c"], "instrument": straddle,
                 "entry": (f"PDV forecast > VIX + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R0 → short; "
                           f"VIX > PDV + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R1 → long"),
                 "exit": (f"the spread back inside ±{_vp(se.S1_EXIT_BAND)} vol pts or through zero; {r2}"),
                 "hold": se.S1_MAX_HOLD,
                 "sizing": (f"tanh(|spread| / {_vp(se.S1_STRENGTH_SCALE)} vol pts) × {se.S1_MAX_KELLY:.0%} of "
                            f"sleeve NAV{overlay}")},
-        "s3": {"name": S3_NAME, "instrument": f"SHORT {straddle}; the index leg only",
+        "s3": {"name": SLEEVE_LABELS["s3"], "instrument": f"SHORT {straddle}; the index leg only",
                "entry": (f"z of VIX / VVIX ({se.S3_LOOKBACK}-session) < {_gm(se.S3_ZSCORE_ENTRY)} "
                          "in R0 or R1"),
                "exit": f"z > {_gm(se.S3_ZSCORE_EXIT)}",
                "hold": se.S3_MAX_HOLD,
                "sizing": (f"min(1, |z| / {_gm(se.S3_STRENGTH_SCALE)}) × {se.S3_MAX_KELLY:.0%} of sleeve "
                           f"NAV{overlay}")},
-        "s4": {"name": "S4 · VRP", "instrument": straddle,
+        "s4": {"name": SLEEVE_LABELS["s4"], "instrument": straddle,
                "entry": (f"z_vrp > {_gm(se.S4_Z_ENTRY_SHORT)} and falling, in R1 → short; "
                          f"z_vrp < {_gm(se.S4_Z_ENTRY_LONG)} and rising, in R0 → long"),
                "exit": f"|z_vrp| < {_gm(se.S4_Z_EXIT)}; {r2}",
                "hold": se.S4_MAX_HOLD,
                "sizing": (f"min(1, |z_vrp| / {_gm(se.S4_STRENGTH_SCALE)}) × {se.S4_MAX_KELLY:.0%} of "
                           f"sleeve NAV{overlay}")},
-        "s1": {"name": "S1 · PDV short-VRP", "instrument": straddle,
+        "s1": {"name": SLEEVE_LABELS["s1"], "instrument": straddle,
                "entry": (f"PDV forecast > VIX + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R0 → long; "
                          f"VIX > PDV + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R1 → short"),
                "exit": f"the spread back inside ±{_vp(se.S1_EXIT_BAND)} vol pts or through zero",
                "hold": se.S1_MAX_HOLD,
                "sizing": (f"tanh(|spread| / {_vp(se.S1_STRENGTH_SCALE)} vol pts) × {se.S1_MAX_KELLY:.0%} of "
                           "sleeve NAV")},
-        "s2": {"name": "S2 · VIX term structure", "instrument": straddle,
+        "s2": {"name": SLEEVE_LABELS["s2"], "instrument": straddle,
                "entry": (f"z of the VIX3M − VIX slope ({se.S2_LOOKBACK}-session) > "
                          f"{_gm(se.S2_ZSCORE_ENTRY)} in R0 or R1 → short; slope < 0 (backwardation) in R0 or "
                          "R1 → long"),
@@ -4329,8 +4333,7 @@ def vrp_view(spx: pd.DataFrame, vix: pd.Series, start: str | None, end: str | No
     return view
 
 
-SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian",
-                "s2": "S2 VIX TS (ref)", "s3": S3_NAME, "s4": "S4 VRP",
+SLEEVE_NAMES = {**{k: SLEEVE_LABELS[k] for k in ("portfolio", "s1", "s1c", "s2", "s3", "s4")},
                 "always_short_straddle": "Always-short straddle"}
 
 
@@ -6934,7 +6937,8 @@ def _page_context() -> dict:
     return {"canonical": canonical_url(route), "page_file": ROUTES[route], "route": route,
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
             "cividis": CIVIDIS_11, "berlin": BERLIN_11,
-            "diverge": DIVERGE_11, "s3_full": S3_FULL, "spx_multiplier": SPX_MULTIPLIER,
+            "diverge": DIVERGE_11, "s3_full": S3_FULL, "sleeve_labels": SLEEVE_LABELS,
+            "spx_multiplier": SPX_MULTIPLIER,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
             "font_preloads": FONT_PRELOADS, "chrome": load_chrome(), "page_title": {
                 r: label for r, label, *_ in NAV}.get(route, "Overview")}

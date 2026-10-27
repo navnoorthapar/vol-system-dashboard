@@ -1880,14 +1880,14 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     # equity-curve table: final / lowest / highest from the unrounded curves
     eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
     table = re.search(r'id="chart-equity-data">(.*?)</div>', pages["/research"], re.DOTALL).group(1)
-    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 index-leg short"),
-                      ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C contrarian"),
+                      ("nav_s3", "S3 short SPX straddle"), ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (ref)")):
         rel = eq[col] / eq[col].iloc[0] - 1
         want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
                        for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
     # the C22 case (+5.647% printed as +5.7%) is now +6.105% on the C23 record
-    assert '<tr><td>S3 index-leg short</td><td class="num">+6.1%</td>' in table
+    assert '<tr><td>S3 short SPX straddle</td><td class="num">+6.1%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
     _, cal = dash.load_headline_calibration()
     smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
@@ -2571,7 +2571,7 @@ def test_research_inference_panels_show_the_summary(dash, art):
     assert f"{fmt(b['ci95'][0])} to {fmt(b['ci95'][1])}" in port
     nul = re.search(r'<table class="tbl dense" id="null-table">(.*?)</table>', html, re.DOTALL).group(1)
     s3 = s["nulls"]["sleeves"]["s3"]
-    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 · short SPX straddle</td>(.*?)</tr>", nul,
+    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 short SPX straddle</td>(.*?)</tr>", nul,
                                               re.DOTALL).group(1))
     assert f"{s3['circular']['total_pnl']['p_value']:.3f}" in row
     assert f"{s3['shuffle']['total_pnl']['p_value']:.3f}" in row
@@ -4243,9 +4243,9 @@ def test_s3_is_named_for_what_it_trades(dash, pages):
         labels += [s["name"] for s in spec.get("series") or [] if str(s.get("name", "")).startswith("S3")]
         labels += [c for c in ((spec.get("x") or {}).get("categories") or []) if str(c).startswith("S3")]
     assert labels
-    assert all("short SPX straddle" in x or "index-leg short" in x for x in labels), labels
+    assert all("short SPX straddle" in x for x in labels), labels
     text = _visible_text(html)
-    assert "S3 · short SPX straddle (index leg of a dispersion trade; no single-name leg)" in text
+    assert "S3 short SPX straddle (index leg of a dispersion trade; no single-name leg)" in text
 
 
 def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
@@ -7464,6 +7464,48 @@ def test_every_1m_on_the_surface_is_the_30_day_constant_maturity(pages):
         assert f"1M tile’s {v30}%" in head
 
 
+def test_each_sleeve_has_one_name_on_every_page(dash, pages):
+    """One registry label per sleeve (dashboard.SLEEVE_LABELS), read by every
+    table, legend, category and sentence. Before, research.html called S3 'S3
+    index-leg short' in the B12 tables and charts and 'S3 · short SPX straddle'
+    in the per-sleeve table right above them, S1C 'S1C Contrarian' and 'S1C
+    contrarian', and S1 'S1 PDV (ref)', 'S1 (reference)' and 'S1 · PDV short-VRP'."""
+    labels = dash.SLEEVE_LABELS
+    assert len(set(labels.values())) == len(labels)
+    code = re.compile(r"^(S1C|S1|S2|S3|S4)\b")
+    # a sleeve code followed by a descriptor is a name of that sleeve
+    descr = r"\s*(?:·\s*)?(?:[Cc]ontrarian|PDV|VRP|VIX|index-leg|short SPX|[Dd]ispersion|\(ref(?:erence)?\))"
+    marks = ("S4 short entry", "S4 long entry")         # the VRP chart's entry markers, not a sleeve name
+    for route, html in pages.items():
+        strings = [_visible_text(html)]
+        for sp in _raw_specs(html).values():
+            names = [str(x.get("name", "")) for x in sp.get("series", [])]
+            names += [str(c) for ax in ("x", "y") for c in ((sp.get(ax) or {}).get("categories") or [])]
+            names += [str(r[0]) for r in (sp.get("table") or {}).get("rows", []) if r]
+            for n in names if route == "/research" else ():   # elsewhere a row may be a finding's title
+                m = code.match(n)
+                if m and not n.startswith(marks):
+                    key = m.group(1).lower()
+                    assert n.startswith(labels[key]), (route, n)
+            strings += names
+        heads = [_html_unescape(re.sub(r"<[^>]+>", "", c)).strip()
+                 for c in re.findall(r"<tr[^>]*>\s*<t[dh][^>]*>(.*?)</t[dh]>", html, re.DOTALL)]
+        for n in heads if route == "/research" else ():
+            m = code.match(n)
+            if m:
+                assert n.startswith(labels[m.group(1).lower()]), (route, n)
+        text = " ¦ ".join(strings + heads)
+        for key, label in labels.items():
+            if key == "portfolio":
+                continue
+            c = key.upper()
+            for m in re.finditer(rf"\b{c}\b{descr}", text):
+                assert text[m.start():].startswith(label), (route, text[m.start():m.start() + 40])
+    research = _visible_text(pages["/research"])
+    for key in ("s1c", "s3", "s4", "s1", "s2"):
+        assert labels[key] in research, key
+
+
 # ── B12: round trips and worst drawdowns ──────────────────────────────────────
 
 def _tbody_rows(html: str, table_id: str) -> list[list[str]]:
@@ -7491,10 +7533,8 @@ def test_round_trips_reconcile_with_the_sleeve_table_and_the_engine(dash, pages)
         assert f'id="{pid}"' in html, pid
     sleeve_rows = {r[0]: r for r in _tbody_rows(html, "sleeve-table")}
     stats = _tbody_rows(html, "trade-stats-tbl")
-    labels = {"s1c": "S1C contrarian", "s3": dash.S3_SHORT, "s4": "S4 VRP", "s1": "S1 PDV (ref)",
-              "s2": "S2 VIX TS (ref)"}
-    table_label = {"s1c": "S1C Contrarian", "s3": dash.S3_NAME, "s4": "S4 VRP", "s1": "S1 PDV (ref)",
-                   "s2": "S2 VIX TS (ref)"}
+    labels = {k: dash.SLEEVE_LABELS[k] for k in ("s1c", "s3", "s4", "s1", "s2")}
+    table_label = labels
     assert [r[0] for r in stats] == list(labels.values())
     spec = _spec(html, "chart-round-trips")
     by_name = {s["name"]: s for s in spec["series"]}
