@@ -15,6 +15,7 @@ Run with:
   pytest tests/test_joint_calibrator.py -v
 """
 
+import itertools
 import math
 
 import numpy as np
@@ -31,6 +32,8 @@ from joint_vol_calibration.calibration.joint_calibrator import (
     heston_vix_call_price,
     heston_vix_put_price,
     is_acceptable_calibration,
+    recorded_inputs,
+    recorded_vix_targets,
 )
 from joint_vol_calibration.config import HESTON_BOUNDS, JOINT_W1, JOINT_W2, VIX_INDEX_TENOR_DAYS
 from joint_vol_calibration.data import option_chain as oc
@@ -46,13 +49,13 @@ from joint_vol_calibration.models.heston import (
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
-_P = dict(kappa=3.0, theta=0.04, sigma=0.5, v0=0.04)  # stable Heston params
+_P = {"kappa": 3.0, "theta": 0.04, "sigma": 0.5, "v0": 0.04}  # stable Heston params
 _R = 0.045
 _Q = 0.013
 _S = 5000.0
 
 # Synthetic market (session Wed 2026-09-23)
-_TRUE = dict(kappa=3.0, theta=0.05, sigma=0.7, rho=-0.75, v0=0.025)
+_TRUE = {"kappa": 3.0, "theta": 0.05, "sigma": 0.7, "rho": -0.75, "v0": 0.025}
 _SESSION = "2026-09-23"
 _SPOT = 7600.0
 _R_TRUE, _Q_TRUE = 0.042, 0.011
@@ -106,6 +109,14 @@ def _patch_db(mp, session=_SESSION, S=_SPOT, vix_row=None, spx_surface=None,
                pd.DataFrame({"date": [dates[-1]], "rate": [0.0410], "discount_yield": [0.0403]}))
     mp.setattr(jc.db, "get_vix_futures_curve", lambda as_of_date:
                pd.DataFrame(columns=["expiry_month", "settle", "close", "price", "days_to_expiry"]))
+    # The synthetic market has no Treasury curve: the calibrator's default
+    # reference (the session's zero curve, C23) falls back to the patched ^IRX
+    # bill above instead of reading the shipped partitions for the real session.
+    from joint_vol_calibration.data import rates as _rates
+
+    def _no_curve(as_of, **kw):
+        raise LookupError("synthetic market: no Treasury curve")
+    mp.setattr(_rates, "get_zero_curve", _no_curve)
 
     def _surface(as_of_date, underlying):
         if underlying == "VIX":
@@ -119,8 +130,7 @@ def synth():
     """Calibrator on the synthetic Heston market (built once)."""
     with pytest.MonkeyPatch.context() as mp:
         _patch_db(mp)
-        cal = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain())
-    return cal
+        return JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain())
 
 
 def _tvec(p=_TRUE):
@@ -137,16 +147,16 @@ class TestHestonVixOptionPricing:
 
     def test_call_monotone_decreasing_in_strike(self):
         prices = [heston_vix_call_price(K, 0.25, **_P) for K in (15, 18, 20, 22, 25, 30)]
-        assert all(a >= b for a, b in zip(prices, prices[1:]))
+        assert all(a >= b for a, b in itertools.pairwise(prices))
 
     def test_put_monotone_increasing_in_strike(self):
         prices = [heston_vix_put_price(K, 0.25, **_P) for K in (15, 18, 20, 22, 25)]
-        assert all(a <= b for a, b in zip(prices, prices[1:]))
+        assert all(a <= b for a, b in itertools.pairwise(prices))
 
     @pytest.mark.parametrize("T", [30 / 365, 60 / 365, 0.25])
     @pytest.mark.parametrize("params", [
-        _P, dict(kappa=3.28, theta=0.0462, sigma=0.516, v0=0.0116),
-        dict(kappa=5.2, theta=0.06, sigma=1.7, v0=0.013)])          # d < 2: singular density
+        _P, {"kappa": 3.28, "theta": 0.0462, "sigma": 0.516, "v0": 0.0116},
+        {"kappa": 5.2, "theta": 0.06, "sigma": 1.7, "v0": 0.013}])          # d < 2: singular density
     def test_put_call_parity_with_exact_vix_forward(self, T, params):
         """C - P = DF (E[VIX_T] - K) with E[VIX_T] the exact futures price.
 
@@ -162,7 +172,7 @@ class TestHestonVixOptionPricing:
             assert c - p == pytest.approx(math.exp(-_R * T) * (F - K), abs=2e-3)
 
     def test_put_nonnegative_across_strikes(self):
-        params = dict(kappa=3.28, theta=0.0462, sigma=0.516, v0=0.0116)
+        params = {"kappa": 3.28, "theta": 0.0462, "sigma": 0.516, "v0": 0.0116}
         for T in (30 / 365, 60 / 365):
             for K in np.arange(5.0, 61.0, 5.0):
                 assert heston_vix_put_price(K, T, **params) >= 0.0
@@ -205,7 +215,7 @@ class TestHestonCallBatch:
     def test_batch_monotone_in_strike(self):
         strikes = np.array([4000., 4500., 5000., 5500., 6000.])
         result = heston_call_batch(_S, strikes, 0.25, _R, _Q, 2.0, 0.04, 0.5, -0.7, 0.04)
-        assert all(a >= b for a, b in zip(result, result[1:]))
+        assert all(a >= b for a, b in itertools.pairwise(result))
 
 
 # ── Synthetic market: legs, carry, anchors ────────────────────────────────────
@@ -284,10 +294,15 @@ class TestSyntheticMarket:
         assert synth.w1 + synth.w2 == pytest.approx(1.0)
         assert synth.w1 / synth.w2 == pytest.approx(JOINT_W1 / JOINT_W2)
 
-    def test_reference_rate_is_the_stored_cc_rate(self, synth):
+    def test_reference_rate_is_the_stored_cc_rate(self):
         """tbill_rates.rate is already continuously compounded. The first C22
         version converted it a second time (4.10% -> 4.18%, labelled as a
-        discount yield)."""
+        discount yield). (The ^IRX reference; the default since C23 is the
+        Treasury curve, test_rate_reference.py.)"""
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp)
+            synth = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain(),
+                                    rate_reference="irx")
         assert synth.r_reference == 0.0410
         assert synth.r_reference_source == (
             f"^IRX 13-week bill {_SESSION}: 4.0300% bank discount = 4.1000% cc")
@@ -368,7 +383,9 @@ class TestBatesNestsHeston:
 
     def test_bounds_contain_heston(self):
         lam, mu_j, sigma_j = JointCalibrator._BATES_JUMP_BOUNDS
-        assert lam[0] == 0.0 and mu_j[0] < 0.0 < mu_j[1] and sigma_j[0] == 0.0
+        assert lam[0] == 0.0
+        assert mu_j[0] < 0.0 < mu_j[1]
+        assert sigma_j[0] == 0.0
 
 
 # ── Time to expiry, staleness, empty surfaces ────────────────────────────────
@@ -397,7 +414,8 @@ class TestSessionTiming:
                       spx_surface=_db_rows(chain, sun),
                       spx_dates=["2026-09-16", "2026-09-17", fri])
             cal = JointCalibrator(as_of_date=sun)
-        assert cal.spot_date == fri and cal.spx_snapshot_session == fri
+        assert cal.spot_date == fri
+        assert cal.spx_snapshot_session == fri
         g = cal.spx_surface[cal.spx_surface["expiry"] == "2026-10-02"]
         assert g["time_to_expiry"].iloc[0] == pytest.approx(14 / 365)
         assert cal._spx_leg(**_TRUE) < 1e-10
@@ -412,7 +430,8 @@ class TestSessionTiming:
         assert cal.spx_snapshot_session == old != cal.spot_date
         res = _fake_result(spx_snapshot_session=old, spx_snapshot_date=old)
         ok, reason = is_acceptable_calibration(res)
-        assert not ok and "stale" in reason
+        assert not ok
+        assert "stale" in reason
 
     def test_empty_surface_raises_value_error(self):
         """Pre-C22: KeyError('time_to_expiry') from a log line."""
@@ -497,12 +516,14 @@ def test_gth_book_measures_T_from_its_quote_time_and_says_so():
         cal = JointCalibrator(as_of_date=_SESSION, spx_chain=chain)
     origin = oc.t_origin("2026-09-24T01:30:00Z", _SESSION)
     for exp, T in cal.spx_surface.groupby("expiry")["time_to_expiry"].first().items():
-        assert T == oc.year_fraction(_SESSION, exp, "PM", origin=origin)
-        assert T < oc.year_fraction(_SESSION, exp, "PM")
+        assert oc.year_fraction(_SESSION, exp, "PM", origin=origin) == T
+        assert oc.year_fraction(_SESSION, exp, "PM") > T
     m = cal._methods({})
     assert m["T_origin"] == "2026-09-23T21:30:00-04:00"
-    assert "quote time 2026-09-23T21:30:00-04:00" in m["T"] and "Global Trading Hours" in m["T"]
-    assert "16:15 ET" in m["vix_leg_timing"] and "residual timing mismatch" in m["vix_leg_timing"]
+    assert "quote time 2026-09-23T21:30:00-04:00" in m["T"]
+    assert "Global Trading Hours" in m["T"]
+    assert "16:15 ET" in m["vix_leg_timing"]
+    assert "residual timing mismatch" in m["vix_leg_timing"]
 
 
 class TestSyntheticCalibration:
@@ -524,8 +545,10 @@ class TestSyntheticCalibration:
 
     def test_result_provenance(self, synth_fit):
         cal, res = synth_fit
-        assert res["model_version"] == 2 and not calibration_is_legacy(res)
-        assert res["n_spx_expiries"] == 6 and res["n_spx_options"] >= 48
+        assert res["model_version"] == 2
+        assert not calibration_is_legacy(res)
+        assert res["n_spx_expiries"] == 6
+        assert res["n_spx_options"] >= 48
         assert res["leg_losses"]["vix_futures_rmse"] == \
             res["leg_losses"]["vix_index_rmse"]           # back-compat alias
         assert res["r"] == pytest.approx(_R_TRUE, abs=2e-3)
@@ -534,8 +557,14 @@ class TestSyntheticCalibration:
         used = cal.spx_surface.groupby("expiry")["discount"].first()
         T = cal.spx_surface.groupby("expiry")["time_to_expiry"].first()
         assert res["r"] == pytest.approx(float(np.median(-np.log(used) / T)))
-        assert res["feller"] == "off" and "feller" not in res["pinned_params"]
-        assert res["methods"]["optimizer"]["scipy_polish"] is False
+        assert res["feller"] == "off"
+        assert "feller" not in res["pinned_params"]
+        assert res["optimizer"] == "trf_multistart"
+        opt = res["methods"]["optimizer"]
+        assert opt["method"] == "trf_multistart"
+        assert opt["jacobian"] == "analytic"
+        assert res["multistart"]["n_starts"] == opt["n_sobol_starts"] + (
+            1 if (opt["warm_start"] or {}).get("source") else 0)
         # no quote time: a closing book, T from the session's 16:00 ET close
         assert res["methods"]["T_origin"] == "2026-09-23T16:00:00-04:00"
         assert "16:00 ET close (closing book)" in res["methods"]["T"]
@@ -585,20 +614,24 @@ class TestCalibrationQualityGate:
     def test_single_expiry_rejected(self):
         """Every production fit 2026-09-08..09-23 used ONE expiry (9 options)."""
         ok, reason = is_acceptable_calibration(_fake_result(n_spx_expiries=1, n_spx_options=9))
-        assert not ok and "term structure under-identified" in reason
+        assert not ok
+        assert "term structure under-identified" in reason
 
     def test_too_few_options_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(n_spx_options=20))
-        assert not ok and "options" in reason
+        assert not ok
+        assert "options" in reason
 
     def test_missing_put_wing_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(n_put_wing_expiries=0))
-        assert not ok and "put wing" in reason
+        assert not ok
+        assert "put wing" in reason
 
     def test_stale_surface_rejected(self):
         ok, reason = is_acceptable_calibration(_fake_result(spx_snapshot_session="2026-06-18",
                                                             spx_snapshot_date="2026-06-20"))
-        assert not ok and "stale" in reason
+        assert not ok
+        assert "stale" in reason
 
     def test_staleness_is_the_reason_reported_first(self):
         """A months-old chain seen from a later session has few unexpired
@@ -607,7 +640,8 @@ class TestCalibrationQualityGate:
         ok, reason = is_acceptable_calibration(_fake_result(
             spx_snapshot_session="2026-06-18", spx_snapshot_date="2026-06-18",
             spot_date="2026-10-16", n_spx_expiries=3, n_spx_options=26))
-        assert not ok and "stale" in reason
+        assert not ok
+        assert "stale" in reason
 
     def test_legacy_result_rejected_unless_allowed(self):
         legacy = {"params": {"kappa": 5.0, "theta": 0.0431, "sigma": 0.657, "rho": -0.95,
@@ -617,9 +651,11 @@ class TestCalibrationQualityGate:
                   "spx_snapshot_date": "2026-09-11"}
         assert calibration_is_legacy(legacy)
         ok, reason = is_acceptable_calibration(legacy)
-        assert not ok and "legacy" in reason
+        assert not ok
+        assert "legacy" in reason
         ok, reason = is_acceptable_calibration(legacy, allow_legacy=True)
-        assert not ok and "options" in reason      # the 9-option 09-11 headline
+        assert not ok
+        assert "options" in reason
         # 05-31 showcase: Sunday snapshot holding Friday's session — fresh
         showcase = dict(legacy, n_spx_options=54, spot_date="2026-05-29",
                         spx_snapshot_date="2026-05-31",
@@ -637,30 +673,36 @@ class TestCalibrationQualityGate:
     def test_vol_of_vol_collapse_rejected(self):
         ok, reason = is_acceptable_calibration(
             {"kappa": 20.0, "sigma": 0.0015, "rho": -0.0003}, spx_iv_rmse=5.74)
-        assert not ok and "sigma" in reason
+        assert not ok
+        assert "sigma" in reason
 
     def test_no_skew_rejected(self):
         ok, reason = is_acceptable_calibration({"kappa": 2.0, "sigma": 0.4, "rho": -0.02}, 1.0)
-        assert not ok and "skew" in reason
+        assert not ok
+        assert "skew" in reason
 
     def test_kappa_pinned_rejected(self):
         ok, reason = is_acceptable_calibration({"kappa": 0.10, "sigma": 0.3, "rho": -0.5}, 1.0)
-        assert not ok and "kappa" in reason
+        assert not ok
+        assert "kappa" in reason
 
     def test_v0_at_floor_rejected(self):
         ok, reason = is_acceptable_calibration(
             {"kappa": 2.0, "sigma": 0.4, "rho": -0.6, "theta": 0.05, "v0": 1.5e-4}, 1.0)
-        assert not ok and "v0" in reason
+        assert not ok
+        assert "v0" in reason
 
     def test_high_rmse_rejected(self):
         ok, reason = is_acceptable_calibration({"kappa": 2.0, "sigma": 0.4, "rho": -0.6}, 4.5)
-        assert not ok and "RMSE" in reason
+        assert not ok
+        assert "RMSE" in reason
 
     def test_single_vix_tenor_rejected(self):
         """C20: a 1-tenor VIX leg cannot identify the joint fit (07-23: 0.049vp)."""
         healthy = {"kappa": 2.26, "sigma": 0.474, "rho": -0.95}
         ok, reason = is_acceptable_calibration(healthy, spx_iv_rmse=0.049, n_vix_tenors=1)
-        assert not ok and "tenor" in reason.lower()
+        assert not ok
+        assert "tenor" in reason.lower()
         assert is_acceptable_calibration(healthy, spx_iv_rmse=0.049, n_vix_tenors=4)[0]
 
     def test_tenor_check_skipped_when_unknown(self):
@@ -673,17 +715,20 @@ class TestFellerClassification:
 
     def test_clear_pass(self):
         state, margin = classify_feller(1.77, 0.0666, 0.460)
-        assert state == "PASS" and margin > 0
+        assert state == "PASS"
+        assert margin > 0
 
     def test_binding_not_reported_as_failure(self):
         kappa, theta, sigma = 4.022199139627185, 0.04630341824281701, 0.6103173509096278
         assert 2 * kappa * theta < sigma**2
         state, margin = classify_feller(kappa, theta, sigma)
-        assert state == "BINDING" and -1e-4 < margin < 0
+        assert state == "BINDING"
+        assert -1e-4 < margin < 0
 
     def test_genuine_violation_still_flagged(self):
         state, margin = classify_feller(4.6217, 0.07637, 0.84115)
-        assert state == "VIOLATED" and margin < -1e-4
+        assert state == "VIOLATED"
+        assert margin < -1e-4
 
     def test_states_are_exhaustive_and_ordered(self):
         kappa, theta = 2.0, 0.05
@@ -739,7 +784,8 @@ class TestRealSnapshot:
         kf = s["strike"] / s["forward"]
         assert kf.between(0.70, 1.30).all()
         assert s["implied_vol"].between(0.01, 2.0).all()
-        assert (s["bs_vega"] > 0).all() and (s["market_price_f"] > 0).all()
+        assert (s["bs_vega"] > 0).all()
+        assert (s["market_price_f"] > 0).all()
         assert s["expiry"].nunique() == 6
         assert cal.spx_snapshot_session == cal.spot_date == "2026-03-24"
 
@@ -755,9 +801,468 @@ class TestRealSnapshot:
     def test_loss_ranks_params(self, cal):
         p_bad = np.array([0.2, 0.002, 0.1, -0.1, 0.002])
         p_good = np.array([5.0, 0.065, 1.5, -0.8, 0.07])
-        assert np.isfinite(cal.joint_loss(p_good)) and cal.joint_loss(p_good) < cal.joint_loss(p_bad)
+        assert np.isfinite(cal.joint_loss(p_good))
+        assert cal.joint_loss(p_good) < cal.joint_loss(p_bad)
         assert cal.joint_loss([25.0, 0.04, 0.5, -0.7, 0.04]) == 1e6
         assert cal.joint_loss([2.0, 0.04, 0.5, 0.1, 0.04]) == 1e6
+
+
+# ── C23: least-squares form, multi-start TRF, identifiability ─────────────────
+
+_NAMES = ("kappa", "theta", "sigma", "rho", "v0")
+_V2_SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16")
+
+
+def _committed(session):
+    import pickle
+
+    from joint_vol_calibration.config import DATA_DIR
+    with open(DATA_DIR / "calibrations" / f"joint_cal_{session}.pkl", "rb") as f:
+        return pickle.load(f)
+
+
+class TestResidualForm:
+    """sum(r**2) is the joint loss, so least squares minimises the same objective."""
+
+    @pytest.mark.parametrize("p", [_tvec(), [5.0, 0.065, 1.5, -0.8, 0.07], [0.3, 0.2, 1.9, -0.1, 0.5]])
+    def test_sum_of_squares_is_the_joint_loss(self, synth, p):
+        r = synth.residuals(p)
+        assert len(r) == len(synth.spx_surface) + len(synth.vix_ts)
+        assert float(r @ r) == pytest.approx(synth.joint_loss(p), rel=1e-13)
+
+    def test_soft_feller_penalty_is_a_residual(self):
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp)
+            cal = JointCalibrator(as_of_date=_SESSION, spx_chain=_heston_chain(), feller="soft")
+        p = [1.0, 0.02, 1.5, -0.7, 0.03]          # 2 kappa theta = 0.04 < sigma^2 = 2.25
+        r = cal.residuals(p)
+        assert r[-1] == pytest.approx(math.sqrt(50.0) * (1.5 ** 2 - 2 * 1.0 * 0.02))
+        assert float(r @ r) == pytest.approx(cal.joint_loss(p), rel=1e-13)
+        J = cal.residual_model().jac(p)
+        assert J[-1].tolist() == pytest.approx(
+            (math.sqrt(50.0) * np.array([-2 * 0.02, -2 * 1.0, 2 * 1.5, 0, 0])).tolist())
+
+    @pytest.mark.parametrize("session", _V2_SESSIONS)
+    def test_committed_losses_recompute_from_residuals(self, session):
+        """On the VIX targets the fit recorded (recorded_vix_targets), the
+        residual vector reproduces the committed loss exactly."""
+        ref = _committed(session)
+        cal = JointCalibrator(as_of_date=session, **recorded_inputs(ref))
+        x = [ref["params"][k] for k in _NAMES]
+        r = cal.residuals(x)
+        assert float(r @ r) == pytest.approx(ref["loss"], rel=1e-12)
+        assert cal._methods({})["vix_targets"] == "vix_targets argument"
+
+    @pytest.mark.parametrize("session", _V2_SESSIONS)
+    def test_restated_vix_closes_move_the_committed_loss_by_under_1e6(self, session):
+        """C23 restated the database's VIX family as Cboe's closes. The
+        committed fits were made on Yahoo's float32 copies of the same prints
+        (measured: <= 9.2e-7 pts apart, loss <= 4.9e-7 relative). On the
+        database targets the same parameters give that much different a loss,
+        which is why the reproductions above pass the recorded targets."""
+        ref = _committed(session)
+        cal = JointCalibrator(as_of_date=session, rate_reference="irx")
+        rec = recorded_vix_targets(ref)
+        db_t = dict(zip(cal.vix_ts["ticker"], cal.vix_ts["market_price"]))
+        assert set(db_t) == set(rec)
+        assert max(abs(db_t[k] - rec[k]) for k in rec) <= 1e-5
+        x = [ref["params"][k] for k in _NAMES]
+        r = cal.residuals(x)
+        assert float(r @ r) == pytest.approx(ref["loss"], rel=1e-6)
+        assert cal._methods({})["vix_targets"] == "database (vix_term_structure)"
+
+    def test_vix_targets_must_name_the_databases_indices(self):
+        ref = _committed("2026-10-16")
+        rec = recorded_vix_targets(ref)
+        with pytest.raises(ValueError, match="do not match"):
+            JointCalibrator(as_of_date="2026-10-16", vix_targets={**rec, "^VIX1D": 20.0})
+        bumped = {k: v + (1.0 if k == "^VIX" else 0.0) for k, v in rec.items()}
+        cal = JointCalibrator(as_of_date="2026-10-16", vix_targets=bumped)
+        got = dict(zip(cal.vix_ts["ticker"], cal.vix_ts["market_price"]))
+        assert got == bumped
+        with pytest.raises(ValueError, match="records no VIX index targets"):
+            recorded_vix_targets({"vix_index": []})
+
+    def test_analytic_jacobian_matches_finite_differences(self, synth):
+        model = synth.residual_model()
+        p = np.array([4.0, 0.06, 1.2, -0.7, 0.03])
+        J = model.jac(p)
+        Jfd = np.zeros_like(J)
+        for j in range(5):
+            h = 1e-5 * abs(p[j])
+            up, dn = p.copy(), p.copy()
+            up[j] += h
+            dn[j] -= h
+            Jfd[:, j] = (model(up) - model(dn)) / (2 * h)
+        assert np.abs(J - Jfd).max(axis=0) / np.abs(Jfd).max(axis=0) == pytest.approx(
+            np.zeros(5), abs=1e-6)
+        # the grid cached by the residual call at p is reused, same answer
+        model(p)
+        np.testing.assert_allclose(model.jac(p), J, rtol=1e-10, atol=1e-14)
+
+
+class TestMultiStartTRF:
+    def test_synthetic_fit_reports_starts_basins_and_identifiability(self, synth_fit):
+        _, res = synth_fit
+        ms = res["multistart"]
+        assert ms["n_starts"] == len(ms["runs"]) >= 8
+        assert ms["n_starts_at_best"] >= 1
+        assert ms["n_distinct_basins"] >= 1
+        assert min(r["loss"] for r in ms["runs"]) == pytest.approx(res["loss"], rel=1e-12)
+        assert res["success"] is True
+        assert res["n_evals"] == (
+            ms["n_residual_evals"] + ms["n_jacobian_evals"])
+        idf = res["identifiability"]
+        assert idf["on_bound"] == []
+        assert set(idf["free_params"]) == set(_NAMES)
+        sv = idf["rel_jacobian_singular_values"]
+        assert sv == sorted(sv, reverse=True)
+        assert sv[-1] > 0
+        assert idf["rel_jtj_condition_number"] == pytest.approx((sv[0] / sv[-1]) ** 2)
+        C = np.array(idf["correlation"]["matrix"])
+        np.testing.assert_allclose(np.diag(C), 1.0)
+        np.testing.assert_allclose(C, C.T, atol=1e-12)
+        # A noiseless market: the curvature-scale errors are tiny next to the
+        # parameters and the generating values sit within a few of them
+        for k in _NAMES:
+            assert idf["relative_standard_errors"][k] < 0.05
+
+    def test_unknown_optimizer_rejected(self, synth):
+        with pytest.raises(ValueError, match="optimizer"):
+            synth.calibrate(optimizer="nelder-mead", verbose=False)
+        with pytest.raises(ValueError, match="jacobian"):
+            synth.calibrate(jacobian="complex-step", verbose=False)
+
+    def test_finite_difference_jacobian_reaches_the_same_optimum(self, synth_fit):
+        cal, res = synth_fit
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp)
+            fd = cal.calibrate(jacobian="2-point", n_starts=2, warm_start=None, verbose=False)
+        assert fd["loss"] == pytest.approx(res["loss"], rel=1e-4, abs=1e-12)
+        for k in _NAMES:
+            assert fd["params"][k] == pytest.approx(res["params"][k], rel=1e-3)
+        cal.calibrate(verbose=False)           # leave the shared fixture as it was
+
+    def test_warm_start_argument_is_the_first_start(self, synth):
+        res = synth.calibrate(n_starts=1, warm_start=dict(_TRUE), verbose=False)
+        assert res["multistart"]["runs"][0]["label"] == "warm:argument"
+        assert res["methods"]["optimizer"]["warm_start"]["source"] == "argument"
+        # started at the truth, the fit stays there
+        for k in _NAMES:
+            assert res["params"][k] == pytest.approx(_TRUE[k], rel=2e-3)
+
+    @pytest.mark.parametrize("session", _V2_SESSIONS)
+    def test_reaches_the_committed_de_optimum(self, session):
+        """C23: on every committed model_version 2 session the default TRF
+        lands on the stored DE + L-BFGS-B optimum (equal or lower loss), and
+        every start ends in the same basin."""
+        ref = _committed(session)
+        cal = JointCalibrator(as_of_date=session, **recorded_inputs(ref))
+        res = cal.calibrate(verbose=False)
+        assert res["loss"] <= ref["loss"] * (1 + 1e-7)
+        assert res["loss"] >= ref["loss"] * (1 - 1e-5)
+        assert res["multistart"]["n_distinct_basins"] == 1
+        for k in _NAMES:
+            tol = 5e-3 if k == "kappa" else 2e-3        # kappa is the flat direction
+            assert res["params"][k] == pytest.approx(ref["params"][k], rel=tol), k
+        assert is_acceptable_calibration(res) == (True, "ok")
+        assert res["pinned_params"] == ref["pinned_params"]
+        assert res["identifiability"]["on_bound"] == ref["pinned_params"]
+        assert res["leg_losses"]["spx_oos_iv_rmse"] == pytest.approx(
+            ref["leg_losses"]["spx_oos_iv_rmse"], abs=2e-3)
+
+    def test_de_global_check_agrees_on_the_synthetic_market(self, synth):
+        res = synth.calibrate(n_starts=2, de_check=True, de_maxiter=6, de_popsize=5,
+                              verbose=False)
+        chk = res["de_check"]
+        # The check keeps whichever basin is lower. Which one that is with 2
+        # TRF starts and a 6-generation DE depends on the CPU's float kernels
+        # (one CI runner's DE polish beat the 2 starts), so the test checks
+        # the rule, not the winner.
+        lower = chk["de_polished_loss"] < chk["trf_loss"] * (1 - 1e-6)
+        assert chk["used"] == ("de" if lower else "trf")
+        assert res["loss"] == (chk["de_polished_loss"] if lower else chk["trf_loss"])
+        assert res["loss"] <= min(chk["de_polished_loss"], chk["trf_loss"]) * (1 + 1e-6)
+        assert chk["agrees"] == (abs(chk["rel_diff_polished_vs_trf"]) <= 1e-6)
+        assert res["methods"]["optimizer"]["de"]["maxiter"] == 6
+        # the global check runs in processes by default (deferred updating)
+        import os
+        assert chk["workers"] == (os.cpu_count() or 1)
+        if chk["workers"] > 1:
+            assert res["methods"]["optimizer"]["de"]["updating"] == "deferred"
+
+    def test_legacy_de_path_still_available(self, synth):
+        res = synth.calibrate(de_maxiter=3, de_popsize=5, optimizer="de", verbose=False)
+        assert res["optimizer"] == "de"
+        assert res["methods"]["optimizer"]["scipy_polish"] is False
+        # serial 'immediate' by default: the committed fits' exact trajectory
+        assert res["methods"]["optimizer"]["workers"] == 1
+        assert res["methods"]["optimizer"]["updating"] == "immediate"
+        assert "multistart" not in res
+        assert "identifiability" in res
+
+
+def test_process_parallel_de_is_bit_identical_to_serial_deferred(synth):
+    """scipy's integer workers are processes (multiprocessing.Pool), so the
+    old 'pricer is not thread-safe, workers=1' rationale never applied. A
+    2-process DE must reproduce the serial updating='deferred' run exactly."""
+    model = synth.residual_model()
+    bounds = [HESTON_BOUNDS[k] for k in _NAMES]
+    serial = synth._optimise(model.loss, bounds, 2, 5, False, "latinhypercube", "t", workers=map)
+    pooled = synth._optimise(model.loss, bounds, 2, 5, False, "latinhypercube", "t", workers=2)
+    np.testing.assert_array_equal(serial[1], pooled[1])
+    assert serial[2] == pooled[2]
+    assert serial[0].nfev == pooled[0].nfev
+
+
+class TestPreviousAcceptedFit:
+    def _write(self, d, session, **over):
+        import pickle
+        res = _fake_result(spot_date=session, spx_snapshot_date=session,
+                           spx_snapshot_session=session, **over)
+        with open(d / f"joint_cal_{session}.pkl", "wb") as f:
+            pickle.dump(res, f)
+        return res
+
+    def test_strictly_earlier_accepted_fit_only(self, tmp_path):
+        good = self._write(tmp_path, "2026-09-10")
+        self._write(tmp_path, "2026-09-15", n_vix_tenors=1)            # gate-rejected
+        self._write(tmp_path, "2026-09-16", model_version=1)           # legacy
+        self._write(tmp_path, "2026-09-23")                            # the session itself
+        self._write(tmp_path, "2026-09-24")                            # later: look-ahead
+        (tmp_path / "joint_cal_2026-09-22.pkl").write_bytes(b"not a pickle")
+        path, res = jc.previous_accepted_fit("2026-09-23", tmp_path)
+        assert path.name == "joint_cal_2026-09-10.pkl"
+        assert res == good
+        assert jc.previous_accepted_fit("2026-09-10", tmp_path) == (None, None)
+        assert jc.previous_accepted_fit("2026-09-23", tmp_path / "missing") == (None, None)
+
+    def test_committed_chain_of_warm_starts(self):
+        assert jc.previous_accepted_fit("2026-03-24") == (None, None)
+        assert jc.previous_accepted_fit("2026-03-27")[0].name == "joint_cal_2026-03-24.pkl"
+        # the 07..10-12 pickles are legacy (model_version 1): skipped
+        assert jc.previous_accepted_fit("2026-10-16")[0].name == "joint_cal_2026-06-18.pkl"
+
+
+class TestIdentifiabilityReport:
+    def test_linear_least_squares_standard_errors(self):
+        rng = np.random.default_rng(7)
+        A = rng.normal(size=(60, 3))
+        x_true = np.array([2.0, -1.0, 0.5])
+        y = A @ x_true + 0.1 * rng.normal(size=60)
+        x_hat, *_ = np.linalg.lstsq(A, y, rcond=None)
+        r = A @ x_hat - y
+        names = ("a", "b", "c")
+        lo, hi = np.full(3, -10.0), np.full(3, 10.0)
+        rep = jc.identifiability_report(A, r, x_hat, names, lo, hi)
+        s2 = float(r @ r) / (60 - 3)
+        cov = s2 * np.linalg.inv(A.T @ A)
+        for i, n in enumerate(names):
+            assert rep["standard_errors"][n] == pytest.approx(math.sqrt(cov[i, i]), rel=1e-12)
+        corr = cov / np.sqrt(np.outer(np.diag(cov), np.diag(cov)))
+        np.testing.assert_allclose(rep["correlation"]["matrix"], corr, rtol=1e-10)
+        sv = np.linalg.svd(A * np.abs(x_hat)[None, :], compute_uv=False)
+        np.testing.assert_allclose(rep["rel_jacobian_singular_values"], sv, rtol=1e-12)
+
+    def test_on_bound_parameter_excluded_and_weak_direction_found(self):
+        rng = np.random.default_rng(11)
+        base = rng.normal(size=(40, 1))
+        # columns 0 and 1 nearly collinear -> the weakest direction is (1, -1, 0)/sqrt2
+        A = np.hstack([base, base + 1e-4 * rng.normal(size=(40, 1)), rng.normal(size=(40, 1))])
+        x = np.array([1.0, 1.0, 2.0])
+        r = 0.01 * rng.normal(size=40)
+        rep = jc.identifiability_report(A, r, x, ("a", "b", "c"),
+                                        np.array([0.0, 0.0, 0.0]), np.array([5.0, 5.0, 2.0]))
+        assert rep["on_bound"] == ["c"]
+        assert rep["standard_errors"]["c"] is None
+        assert rep["correlation"]["params"] == ["a", "b"]
+        w = rep["weakest_direction"]
+        assert abs(abs(w["a"]) - 2 ** -0.5) < 1e-3
+        assert abs(w["a"] + w["b"]) < 1e-3
+        assert rep["rel_jacobian_condition_number"] > 1e3
+
+
+@pytest.fixture(scope="module")
+def profile(synth):
+    with pytest.MonkeyPatch.context() as mp:
+        _patch_db(mp)
+        return synth.sigma_profile(caps=(0.4, 0.55, 0.7, 1.0, 3.0), kappa_max=40.0,
+                                   n_starts=2, base=dict(_TRUE))
+
+
+class TestSigmaProfile:
+    """sigma_profile refits under each sigma cap: on the synthetic market
+    (true sigma = 0.7) a cap below the truth binds and costs loss; any cap
+    above it recovers the generating parameters at ~zero loss."""
+
+    def test_loss_never_rises_with_the_cap(self, profile):
+        losses = [r["loss"] for r in profile["rows"]]
+        assert all(b <= a * (1 + 1e-9) + 1e-15 for a, b in itertools.pairwise(losses))
+        assert profile["caps"] == [0.4, 0.55, 0.7, 1.0, 3.0]
+        assert profile["kappa_max"] == 40.0
+        assert profile["production_box"]["sigma"] == list(HESTON_BOUNDS["sigma"])
+
+    def test_binding_caps_flagged_and_free_caps_recover_truth(self, profile):
+        rows = {r["sigma_cap"]: r for r in profile["rows"]}
+        for cap in (0.4, 0.55):
+            assert rows[cap]["sigma_at_cap"]
+            assert rows[cap]["params"]["sigma"] == pytest.approx(cap)
+            assert rows[cap]["loss"] > 100 * rows[3.0]["loss"]
+        for cap in (1.0, 3.0):
+            r = rows[cap]
+            assert not r["sigma_at_cap"]
+            assert not r["kappa_at_max"]
+            assert r["spx_iv_rmse"] < 0.05
+            assert r["spx_oos_iv_rmse"] < 0.2
+            for k in _NAMES:
+                assert r["params"][k] == pytest.approx(_TRUE[k], rel=0.05), (cap, k)
+
+    def test_profile_does_not_touch_the_fit(self, synth):
+        before = synth.params
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_db(mp)
+            synth.sigma_profile(caps=(1.0,), n_starts=1, base=dict(_TRUE))
+        assert synth.params is before
+
+    def test_rows_carry_the_vvix_check(self, profile, synth):
+        r = profile["rows"][-1]
+        # the synthetic DB row has no ^VVIX: the model side is still reported
+        assert r["vvix_market"] is None
+        assert r["vvix_error"] is None
+        p = r["params"]
+        assert r["vvix_model"] == pytest.approx(jc.heston_vvix(p["kappa"], p["theta"],
+                                                               p["sigma"], p["v0"]))
+
+
+class TestSpxOnlyComparison:
+    """calibrate_spx_only: Heston and lifted rough Heston on the same
+    residuals, box and optimiser."""
+
+    def test_heston_spx_only_recovers_the_synthetic_market(self, synth):
+        out = synth.calibrate_spx_only("heston", n_starts=2, warm=dict(_TRUE))
+        assert out["model"] == "heston"
+        assert out["spx_iv_rmse_exact"] < 0.05
+        assert out["spx_oos_iv_rmse"] < 0.2
+        assert out["on_bound"] == []
+        for k in _NAMES:
+            assert out["params"][k] == pytest.approx(_TRUE[k], rel=0.05)
+        # the VIX leg is off, so the index error is out of sample (and small:
+        # the synthetic indices are Heston's own)
+        assert out["vix_index_rmse_oos"] < 0.1
+        assert out["identifiability"]["free_params"] == list(_NAMES)
+
+    def test_rough_heston_nests_heston(self, synth):
+        """On a market priced by Heston (H = 1/2) the rough fit goes to the
+        H = 1/2 edge of its box and reprices it."""
+        out = synth.calibrate_spx_only("rough_heston", n_starts=0, warm=dict(_TRUE),
+                                       n_steps=100, numerics_check=False)
+        assert out["params"]["H"] > 0.45
+        assert out["spx_iv_rmse_exact"] < 0.1
+        ms = out["multistart"]
+        assert ms["n_starts"] == 2
+        assert {r["label"] for r in ms["runs"]} == {"warm_H0.30",
+                                                                            "warm_H0.10"}
+        assert out["settings"]["n_steps"] == 100
+        assert out["settings"]["n_factors"] == 20
+
+    def test_unknown_model_rejected(self, synth):
+        with pytest.raises(ValueError, match="model"):
+            synth.calibrate_spx_only("sabr")
+        with pytest.raises(ValueError, match="legs"):
+            synth.calibrate_comparison("heston", legs="vix")
+        with pytest.raises(ValueError, match="box"):
+            synth.calibrate_comparison("rough_heston", box="wide")
+
+    def test_joint_heston_comparison_is_the_production_fit(self, synth):
+        prod = synth.calibrate(n_starts=2, warm_start=dict(_TRUE), verbose=False)
+        cmp_ = synth.calibrate_comparison("heston", legs="joint", n_starts=2, warm=dict(_TRUE))
+        assert cmp_["loss"] == pytest.approx(prod["loss"], rel=1e-9, abs=1e-15)
+        assert cmp_["weights"] == {"w_spx": synth.w1, "w_vix": synth.w2}
+        assert cmp_["vix_index_rmse"] == pytest.approx(prod["leg_losses"]["vix_index_rmse"],
+                                                       rel=1e-6, abs=1e-9)
+        assert cmp_["box"]["sigma"] == list(HESTON_BOUNDS["sigma"])
+        wide = synth.calibrate_comparison("heston", legs="spx", box="wide", n_starts=1,
+                                          warm=dict(_TRUE))
+        assert wide["box"]["sigma"][1] == max(jc.SIGMA_PROFILE_CAPS)
+        assert wide["box"]["kappa"][1] == jc.PROFILE_KAPPA_MAX
+
+    def test_rough_joint_residuals_at_half_are_the_heston_residuals(self, synth):
+        """Cross-model check: with H = 1/2 the rough joint residual vector
+        (anchors + VIX indices, same weights) equals HestonJointResiduals'
+        to the rough engine's time-stepping error."""
+        from joint_vol_calibration.models import rough_heston as rh
+        p = _tvec()
+        heston = synth.residual_model()(p)
+        rough = rh.RoughHestonSPXResiduals(
+            synth._spx_groups(), synth.w1, vix_tenors=synth.vix_ts["tenor_years"].to_numpy(),
+            vix_market=synth.vix_ts["market_price"].to_numpy(), w_vix=synth.w2,
+            n_steps=400).adapt(np.r_[p, 0.5])
+        assert rough.shape == heston.shape
+        n_vix = len(synth.vix_ts)
+        np.testing.assert_allclose(rough[-n_vix:], heston[-n_vix:], rtol=0, atol=1e-12)
+        # SPX residuals are IV-scale (~1e-2 x vol error): agree to ~1e-6 vol
+        np.testing.assert_allclose(rough[:-n_vix], heston[:-n_vix], rtol=0, atol=2e-7)
+
+
+def test_real_session_vvix_check_reads_the_spot_session_close():
+    cal = JointCalibrator(as_of_date="2026-10-16")
+    assert cal.vvix_market == pytest.approx(109.91, abs=0.01)
+    ref = _committed("2026-10-16")
+    p = ref["params"]
+    chk = cal._vvix_check(p["kappa"], p["theta"], p["sigma"], p["v0"])
+    assert chk["vvix_error"] == pytest.approx(chk["vvix_model"] - 109.91, abs=0.01)
+    # the production fit's VIX-of-vol is far above the market's (C23 finding)
+    assert chk["vvix_model"] > 1.5 * chk["vvix_market"]
+
+
+def test_basin_grouping_and_sobol_starts():
+    groups = jc._group_basins([1.0, 1.0 + 1e-8, 1.2, 1.0 + 5e-7, 3.0])
+    assert groups == [[0, 1, 3], [2], [4]]
+    lo, hi = jc._box_arrays(HESTON_BOUNDS, _NAMES)
+    s1 = jc.sobol_starts(8, jc.HESTON_START_BOX, lo, hi, _NAMES)
+    s2 = jc.sobol_starts(8, jc.HESTON_START_BOX, lo, hi, _NAMES)
+    np.testing.assert_array_equal(s1, s2)                       # seeded
+    assert s1.shape == (8, 5)
+    assert np.all(s1 > lo)
+    assert np.all(s1 < hi)
+    for j, k in enumerate(_NAMES):
+        a, b, _ = jc.HESTON_START_BOX[k]
+        assert np.all(s1[:, j] >= a - 1e-12)
+        assert np.all(s1[:, j] <= b + 1e-12)
+    # a start box edge outside a tighter active box is clipped to it
+    hi2 = hi.copy()
+    hi2[2] = 1.0
+    s3 = jc.sobol_starts(5, jc.HESTON_START_BOX, lo, hi2, _NAMES)
+    assert s3.shape == (5, 5)
+    assert np.all(s3[:, 2] < 1.0)
+
+
+def test_multistart_trf_survives_a_start_with_non_finite_residuals():
+    """The daily fit runs the multi-start TRF: a start at which the residual
+    vector is not finite (least_squares refuses it) is recorded as failed and
+    the fit comes from the remaining starts; only all-failed raises."""
+    A = np.array([[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]])
+    b = np.array([1.0, -1.0, 2.0])                 # inconsistent: optimum loss > 0
+
+    def fun(x):
+        return np.full(3, np.nan) if x[0] > 5.0 else A @ x - b    # a failing corner
+
+    lo, hi = np.full(2, -10.0), np.full(2, 10.0)
+    starts = np.array([[8.0, 0.0], [0.0, 0.0], [2.0, 2.0]])
+    best, rep = jc.multistart_trf(fun, None, starts, lo, hi, ["bad", "a", "b"])
+    np.testing.assert_allclose(best.x, np.linalg.lstsq(A, b, rcond=None)[0], atol=1e-8)
+    bad = rep["runs"][0]
+    assert bad["status"] == "failed"
+    assert bad["loss"] is None
+    assert bad["x"] is None
+    assert "ValueError" in bad["message"]
+    assert rep["n_failed_starts"] == 1
+    assert rep["n_starts"] == 3
+    assert rep["n_distinct_basins"] == 1
+    assert rep["n_starts_at_best"] == 2
+    assert rep["best_label"] in ("a", "b")
+    with pytest.raises(RuntimeError, match="all 1 TRF start"):
+        jc.multistart_trf(fun, None, starts[:1], lo, hi, ["bad"])
 
 
 if __name__ == "__main__":

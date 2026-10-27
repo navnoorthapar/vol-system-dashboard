@@ -24,7 +24,6 @@ from joint_vol_calibration.backtest.delta_hedger import (
     ENTRY_DATE,
     EXIT_DATE,
     K_ENTRY,
-    R,
     Q,
     VIX_TENORS,
     DeltaHedger,
@@ -36,12 +35,17 @@ from joint_vol_calibration.backtest.delta_hedger import (
     _is_unstable,
     _zscore,
     compute_hedge_metrics,
+    entry_rate,
     hedge_attribution,
     run_simulation,
     save_results,
     load_results,
     stress_test,
 )
+
+# A rate for the synthetic paths below. The C7 study itself uses the Treasury
+# zero rate at entry (delta_hedger.entry_rate; the module's R is None since C23).
+R = 0.015
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -481,7 +485,9 @@ class TestConstants:
         assert COVID_CRASH_DATE == "2020-03-16"
 
     def test_r_q_reasonable(self):
-        assert 0 < R < 0.05
+        from joint_vol_calibration.backtest import delta_hedger as dh
+        assert dh.R is None                       # the study's rate comes from the curve
+        assert 0 < entry_rate() < 0.05
         assert 0 < Q < 0.03
 
 
@@ -537,7 +543,8 @@ class TestRunSimulationIntegration:
         """pnl_total = ΔV − Δ_{t−1}·ΔS + r(Δ_{t−1}S_{t−1} − V_{t−1})ΔT − qΔ_{t−1}S_{t−1}ΔT."""
         prev, cur = sim.iloc[:-1], sim.iloc[1:]
         dT = prev["T_rem"].values - cur["T_rem"].values
-        fin = (R * (prev["delta"].values * prev["S"].values - prev["straddle_value"].values)
+        r = sim.attrs["r"]                        # the rate the run used (entry_rate)
+        fin = (r * (prev["delta"].values * prev["S"].values - prev["straddle_value"].values)
                - Q * prev["delta"].values * prev["S"].values) * dT
         expected = (cur["straddle_value"].values - prev["straddle_value"].values
                     - prev["delta"].values * (cur["S"].values - prev["S"].values) + fin)

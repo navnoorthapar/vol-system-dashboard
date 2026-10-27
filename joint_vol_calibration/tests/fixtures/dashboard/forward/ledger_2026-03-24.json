@@ -1,0 +1,287 @@
+{
+ "actions": [
+  {
+   "action": "open",
+   "id": "s1:2026-03-24::2026-04-23:6575",
+   "sleeve": "s1"
+  },
+  {
+   "action": "open",
+   "id": "s1c:2026-03-24::2026-04-23:6575",
+   "sleeve": "s1c"
+  },
+  {
+   "action": "open",
+   "id": "s3:2026-03-24::2026-04-23:6575",
+   "sleeve": "s3"
+  },
+  {
+   "action": "open",
+   "id": "s4:2026-03-24::2026-04-23:6575",
+   "sleeve": "s4"
+  }
+ ],
+ "closed": [],
+ "inputs": {
+  "beta": null,
+  "chain_rows_two_sided": 715,
+  "chain_sha256": "5254754cc402bb1bfb7ddf268d03a75344134a7f30bba8e6bc537c4eee599378",
+  "quote_time": null,
+  "r_ref": 0.036872,
+  "spot": 6556.37,
+  "t_origin": null
+ },
+ "positions": [
+  {
+   "contract": {
+    "expiry": "2026-04-23",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6575.0
+   },
+   "contracts_per_1m": 2,
+   "direction": -1,
+   "entry": {
+    "ask": 337.5,
+    "bid": 333.6,
+    "call": {
+     "ask": 173.7,
+     "bid": 171.9,
+     "mid": 172.8
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.04448320886,
+    "forward": 6585.080503,
+    "iv_mid": 0.2235841293,
+    "price_exec": 333.6,
+    "price_mid": 335.55,
+    "put": {
+     "ask": 163.8,
+     "bid": 161.7,
+     "mid": 162.75
+    },
+    "session": "2026-03-24"
+   },
+   "hedge": {
+    "forward": 6585.080503,
+    "pnl": 0.0,
+    "units": 0.04448320886
+   },
+   "id": "s1:2026-03-24::2026-04-23:6575",
+   "kelly": 0.1,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s1"
+  },
+  {
+   "contract": {
+    "expiry": "2026-04-23",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6575.0
+   },
+   "contracts_per_1m": 3,
+   "direction": 1,
+   "entry": {
+    "ask": 337.5,
+    "bid": 333.6,
+    "call": {
+     "ask": 173.7,
+     "bid": 171.9,
+     "mid": 172.8
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.04448320886,
+    "forward": 6585.080503,
+    "iv_mid": 0.2235841293,
+    "price_exec": 337.5,
+    "price_mid": 335.55,
+    "put": {
+     "ask": 163.8,
+     "bid": 161.7,
+     "mid": 162.75
+    },
+    "session": "2026-03-24"
+   },
+   "hedge": {
+    "forward": 6585.080503,
+    "pnl": 0.0,
+    "units": -0.04448320886
+   },
+   "id": "s1c:2026-03-24::2026-04-23:6575",
+   "kelly": 0.12,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s1c"
+  },
+  {
+   "contract": {
+    "expiry": "2026-04-23",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6575.0
+   },
+   "contracts_per_1m": 2,
+   "direction": -1,
+   "entry": {
+    "ask": 337.5,
+    "bid": 333.6,
+    "call": {
+     "ask": 173.7,
+     "bid": 171.9,
+     "mid": 172.8
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.04448320886,
+    "forward": 6585.080503,
+    "iv_mid": 0.2235841293,
+    "price_exec": 333.6,
+    "price_mid": 335.55,
+    "put": {
+     "ask": 163.8,
+     "bid": 161.7,
+     "mid": 162.75
+    },
+    "session": "2026-03-24"
+   },
+   "hedge": {
+    "forward": 6585.080503,
+    "pnl": 0.0,
+    "units": 0.04448320886
+   },
+   "id": "s3:2026-03-24::2026-04-23:6575",
+   "kelly": 0.08,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s3"
+  },
+  {
+   "contract": {
+    "expiry": "2026-04-23",
+    "root": "",
+    "settlement": "PM",
+    "strike": 6575.0
+   },
+   "contracts_per_1m": 2,
+   "direction": 1,
+   "entry": {
+    "ask": 337.5,
+    "bid": 333.6,
+    "call": {
+     "ask": 173.7,
+     "bid": 171.9,
+     "mid": 172.8
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.04448320886,
+    "forward": 6585.080503,
+    "iv_mid": 0.2235841293,
+    "price_exec": 337.5,
+    "price_mid": 335.55,
+    "put": {
+     "ask": 163.8,
+     "bid": 161.7,
+     "mid": 162.75
+    },
+    "session": "2026-03-24"
+   },
+   "hedge": {
+    "forward": 6585.080503,
+    "pnl": 0.0,
+    "units": -0.04448320886
+   },
+   "id": "s4:2026-03-24::2026-04-23:6575",
+   "kelly": 0.1,
+   "mark": null,
+   "sessions_marked": 0,
+   "sleeve": "s4"
+  }
+ ],
+ "previous": null,
+ "schema": "forward_ledger/1",
+ "session": "2026-03-24",
+ "signals": {
+  "s1": {
+   "kelly": 0.1,
+   "position": -1,
+   "straddle_direction": -1
+  },
+  "s1c": {
+   "kelly": 0.12,
+   "position": 1,
+   "straddle_direction": 1
+  },
+  "s2": {
+   "kelly": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s3": {
+   "kelly": 0.08,
+   "position": 1,
+   "straddle_direction": -1
+  },
+  "s4": {
+   "kelly": 0.1,
+   "position": 1,
+   "straddle_direction": 1
+  }
+ },
+ "summary": {
+  "s1": {
+   "n_closed": 0,
+   "n_opened": 1,
+   "open_id": "s1:2026-03-24::2026-04-23:6575",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s1c": {
+   "n_closed": 0,
+   "n_opened": 1,
+   "open_id": "s1c:2026-03-24::2026-04-23:6575",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s2": {
+   "n_closed": 0,
+   "n_opened": 0,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s3": {
+   "n_closed": 0,
+   "n_opened": 1,
+   "open_id": "s3:2026-03-24::2026-04-23:6575",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s4": {
+   "n_closed": 0,
+   "n_opened": 1,
+   "open_id": "s4:2026-03-24::2026-04-23:6575",
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  }
+ }
+}

@@ -22,10 +22,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from joint_vol_calibration.backtest import forward_ledger as fl
 from joint_vol_calibration.config import VIX_INDEX_TENOR_DAYS
-from joint_vol_calibration.data import database as dbm
-from joint_vol_calibration.data import yf_downloader as dl
 from joint_vol_calibration.data import cboe_downloader as cboe
+from joint_vol_calibration.data import database as dbm
+from joint_vol_calibration.data import rates
+from joint_vol_calibration.data import yf_downloader as dl
 from joint_vol_calibration.models.heston import heston_vix_term_index
 from joint_vol_calibration.tests.test_joint_calibrator import _TRUE, _heston_chain
 
@@ -104,7 +106,7 @@ def env(tmp_path, monkeypatch):
             ts_rows.append({"date": d, "ticker": t, "tenor_days": n, "is_vvix": 0,
                             "close": heston_vix_term_index(_TRUE["kappa"], _TRUE["theta"],
                                                            _TRUE["sigma"], _TRUE["v0"], n / 365)})
-    ts = pd.DataFrame(ts_rows)
+    ts = pd.DataFrame(ts_rows).assign(source="yfinance")      # as yf_downloader labels it
     tb = pd.DataFrame({"date": days, "rate": 0.0400})
 
     monkeypatch.setattr(dl, "download_spx_ohlcv", lambda start, end: spx.copy())
@@ -113,9 +115,34 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "download_tbill_rate", lambda start, end: tb.copy())
     monkeypatch.setattr(cboe, "download_vix_history", lambda: pd.DataFrame(
         columns=["date", "open", "high", "low", "close", "source"]))       # no network
+    # Cboe's VIX-family files have not posted these sessions (so every Yahoo
+    # row is provisional), and the Treasury / NY Fed feeds return nothing (so
+    # there is no discount curve and fits fall back to ^IRX): no network.
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: pd.DataFrame(
+                            columns=["date", "ticker", "tenor_days", "close", "is_vvix", "source"]))
+    monkeypatch.setattr(rates, "download_treasury_year", lambda year, kind: pd.DataFrame(
+        columns=["date", "series", "value", "source"]))
+    monkeypatch.setattr(rates, "download_nyfed_sofr", lambda start=None, end=None: pd.DataFrame(
+        columns=["date", "series", "value", "source"]))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    # The post-fit steps have their own tests below; here an accepted fit records
+    # a ledger from fixed signals (the synthetic DB is too short for the real
+    # ones) and the derived artifacts are a no-op.
+    monkeypatch.setattr(fl, "signals_for_session", lambda session, start_date=None: _SIGNALS)
+    monkeypatch.setattr(cr, "_real_refresh_session_artifacts", cr.refresh_session_artifacts,
+                        raising=False)
+    monkeypatch.setattr(cr, "refresh_session_artifacts", lambda session, headline, **kw: {})
+    def no_capture(und, now=None, **kw):
+        raise OSError("no network in tests")
+    monkeypatch.setattr(cboe, "capture_option_chain", no_capture)
     return cr
+
+
+# every sleeve flat except S4 short: the ledger opens one straddle
+_SIGNALS = {s: {"position": 0.0, "kelly": 0.0} for s in ("s1", "s1c", "s2", "s3")}
+_SIGNALS["s4"] = {"position": -1.0, "kelly": 0.10}
 
 
 class _FakeTicker:
@@ -221,6 +248,12 @@ def test_empty_book_skips_and_persists_nothing(env):
     assert pathlib.Path(cal["diagnostic_chain"]).exists()       # kept for post-mortem, outside the DB
     assert st["headline_calibration"]["date"] == "2026-09-22"
     assert st["headline_calibration"]["age_sessions"] == 1
+    # a dead book is not a ledger session either: nothing registered, so a
+    # later slot with a live book can still record it
+    assert st["forward_ledger"]["status"] == "no_live_book"
+    assert "not a live book" in st["forward_ledger"]["reason"]
+    assert not (env.DATA / "forward").exists()
+    assert any("forward ledger" in w for w in st["warnings"])
     assert code == 0
 
 
@@ -317,6 +350,525 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert code2 == 0 and st2["calibration"]["status"] == "exists"
 
 
+# ── Book slot: forward ledger, Cboe captures, derived artifacts (C23) ─────────
+
+def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
+    """The forward test at executable prices: one canonical, hash-chained file
+    per session (forward_ledger.record_session). With no Cboe capture stored
+    the book is the Yahoo chain the calibrate step downloaded."""
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    led = st["forward_ledger"]
+    assert led["ok"], led
+    assert led["status"] == "recorded"
+    assert led["book"] == "yahoo"
+    path = env.DATA / "forward" / f"ledger_{SESSION}.json"
+    assert led["path"] == str(path)
+    ledger = fl.load_ledger(path)
+    fl.validate_ledger(ledger)
+    assert ledger["previous"] is None
+    assert ledger["inputs"]["quote_after_close"] is True       # the GTH book, after the 16:00 close
+    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:30:00Z"
+    assert [p["sleeve"] for p in ledger["positions"]] == ["s4"]
+    assert led["actions"] == ["s4 open"]
+    # the ledger's chain hash is the committed snapshot's
+    stored = pd.read_parquet(dbm.options_snapshot_path(SESSION, "SPX"))
+    assert ledger["inputs"]["chain_sha256"] == fl.chain_sha256(fl.observed_book(stored))
+    assert ledger["inputs"]["book"]["source"] == "yahoo"
+    assert ledger["inputs"]["book"]["extra_expiries"] == []          # no open position yet
+    # the retry slot: the session exists, nothing is rewritten
+    before = path.read_bytes()
+    _, st2 = _run(env, "calibrate")
+    assert st2["calibration"]["status"] == "exists"
+    assert st2["forward_ledger"]["status"] == "exists"
+    assert path.read_bytes() == before
+
+
+def test_a_ledger_failure_is_loud_but_keeps_the_fit_and_chain(env, monkeypatch, capsys):
+    def clash(*a, **k):
+        raise FileExistsError("a different ledger is registered for 2026-09-23")
+    monkeypatch.setattr(fl, "record_session", clash)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["calibration"]["status"] == "accepted"
+    assert (env.DATA / "calibrations" / f"joint_cal_{SESSION}.pkl").exists()
+    assert str(dbm.options_snapshot_path(SESSION, "SPX")) in st["persisted"]
+    assert any("forward ledger" in e for e in st["errors"])
+    assert "::error title=Forward ledger::" in capsys.readouterr().out
+    assert not st["publish_blockers"]
+
+
+def _full_spx_capture(session=SESSION, quote_time="2026-09-24T01:15:00Z"):
+    """A Cboe SPX capture as the bot stores it: every listed expiry (weekday
+    dailies for two months, then monthlies) two-sided, in the
+    options_snapshots schema."""
+    start = date.fromisoformat(session)
+    exps = [(start + timedelta(days=i)).isoformat() for i in range(1, 62)
+            if (start + timedelta(days=i)).weekday() < 5]
+    exps += ["2026-12-18", "2027-03-19"]
+    raw = _heston_chain(expiries=exps, S=7600.0)
+    frame = pd.DataFrame({
+        "snapshot_date": session, "expiry": raw["expiration"], "strike": raw["strike"],
+        "right": np.where(raw["option_type"] == "call", "C", "P"), "bid": raw["bid"], "ask": raw["ask"],
+        "mid_price": 0.5 * (raw["bid"] + raw["ask"]), "root": "SPXW",
+        "contract_symbol": raw["contractSymbol"],
+        "settlement": "PM", "underlying_price": 7600.0, "quote_time": quote_time, "source": "cboe"})
+    return cboe.ChainCapture(
+        underlying="SPX", frame=frame, session=session, quote_time=quote_time, book_state="gth",
+        fetched_at="2026-09-24T01:30:05Z", payload_timestamp="2026-09-24T01:30:00Z",
+        underlying_last_trade_time="2026-09-23T16:14:59", underlying_price=7600.0,
+        url="https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json", sha256="cd" * 32,
+        n_bytes=4321)
+
+
+def _fit_fails(monkeypatch):
+    from joint_vol_calibration.calibration import joint_calibrator as jc
+
+    def boom(self, *a, **k):
+        raise RuntimeError("optimiser diverged")
+    monkeypatch.setattr(jc.JointCalibrator, "calibrate", boom)
+
+
+def test_the_ledger_trades_on_the_full_cboe_capture_whatever_the_fit_does(env, monkeypatch):
+    """STATS-1/STATS-2: the ledger's book is the session's full Cboe capture
+    (every listed expiry), not the calibration-expiry Yahoo download, and the
+    session is recorded although the fit failed."""
+    monkeypatch.setattr(cboe, "capture_option_chain",
+                        lambda und, now=None, **kw: _full_spx_capture() if und == "SPX" else _capture(und))
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert st["calibration"]["status"] == "failed"
+    assert code == 0                                         # headline 1 session old: warning only
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded", led
+    assert led["book"] == "cboe"
+    ledger = fl.load_ledger(led["path"])
+    pq_path = env.DATA / "options" / "cboe" / f"spx_{SESSION}_013005Z.parquet"
+    capture = pd.read_parquet(pq_path)
+    assert ledger["inputs"]["book"]["source"] == "cboe"
+    assert ledger["inputs"]["book"]["file"] == f"options/cboe/{pq_path.name}"
+    assert ledger["inputs"]["book"]["raw_sha256"] == "cd" * 32
+    assert ledger["inputs"]["chain_sha256"] == fl.chain_sha256(fl.observed_book(capture))
+    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:15:00Z"
+    assert ledger["inputs"]["chain_expiries"] == capture["expiry"].nunique()
+    (pos,) = ledger["positions"]
+    assert pos["sleeve"] == "s4"
+    assert pos["contract"]["expiry"] in set(capture["expiry"])
+
+
+def test_every_later_book_slot_can_mark_what_the_ledger_opened():
+    """The defect behind STATS-1, on the real expiry rule: a 30-day straddle
+    opened on a session's book is outside the next sessions' calibration
+    download (option_chain.select_calibration_expiries with fetch_spx_chain's
+    one neighbour) on most sessions of its life, while a full listing (the
+    Cboe capture) holds it on every session until it expires."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    start = date.fromisoformat("2026-10-16")
+    listing = [(start + timedelta(days=i)).isoformat() for i in range(120)
+               if (start + timedelta(days=i)).weekday() < 5]
+    opened = "2026-11-16"                                 # 31 days: the ledger's pick on 10-16
+    sessions = [d for d in listing if "2026-10-19" <= d < opened]
+    in_calibration_download = [d for d in sessions if opened in oc.select_calibration_expiries(
+        [e for e in listing if e > d], d, neighbours=1)]
+    assert len(in_calibration_download) <= len(sessions) // 3
+    assert all(opened in [e for e in listing if e > d] for d in sessions)
+
+
+def test_the_yahoo_fallback_adds_the_open_positions_expiries(env, monkeypatch):
+    """Without a Cboe capture the ledger uses the Yahoo chain plus the
+    expiries of its open straddles, so a target change closes the straddle at
+    this session's bids instead of waiting for the expiry to re-enter the
+    calibration download."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    code, _ = _run(env, "market")                        # the DB: closes, VIX rows, ^IRX
+    assert code == 0
+    prev_session, exp = "2026-09-16", "2026-10-16"
+    book = _heston_chain(expiries=[exp], S=7600.0)
+    flat = {s: {"position": 0.0, "kelly": 0.0} for s in fl.SLEEVES}
+    short_s4 = flat | {"s4": {"position": -1.0, "kelly": 0.1}}
+    first = fl.step(None, prev_session, book, short_s4, r_ref=0.04)
+    fl.write_ledger(first, env.DATA / "forward")
+    assert [p["contract"]["expiry"] for p in first["positions"]] == [exp]
+    raw, meta = oc.fetch_spx_chain(SESSION, ticker_factory=_DailyBookTicker)
+    assert exp not in meta["requested"]                  # not a calibration expiry on 09-23
+    monkeypatch.setattr(fl, "signals_for_session", lambda session, start_date=None: flat)
+    # the defect: the calibration download alone cannot price the straddle
+    alone = fl.step(first, SESSION, raw, flat, r_ref=0.04)
+    assert {a["sleeve"]: a for a in alone["actions"]}["s4"]["reason_code"] == "expiry_not_in_book"
+    led = env.record_forward_ledger(SESSION, {"source": "yahoo", "raw": raw, "symbol": meta["symbol"],
+                                              "quote_time": "2026-09-24T01:30:00Z"},
+                                    ticker_factory=_DailyBookTicker)
+    assert led["status"] == "recorded", led
+    ledger = fl.load_ledger(led["path"])
+    assert ledger["inputs"]["book"]["extra_expiries"] == [exp]
+    assert ledger["inputs"]["open_expiries_not_in_book"] == []
+    assert {a["sleeve"]: a["action"] for a in ledger["actions"]}["s4"] == "close"
+    (c,) = ledger["closed"]
+    assert c["closed"]["how"] == "close"
+    assert c["closed"]["pnl_exec"] is not None
+    assert fl.verify_chain([first, ledger]) == []
+
+
+def test_a_book_quoted_before_the_close_is_not_the_ledgers(env, monkeypatch):
+    """A capture whose quotes predate the session's 16:00 ET close is skipped
+    for the next candidate book, not booked at prices older than the signal."""
+    early = _full_spx_capture(quote_time="2026-09-23T19:45:00Z")          # 15:45 ET
+    monkeypatch.setattr(cboe, "capture_option_chain",
+                        lambda und, now=None, **kw: early if und == "SPX" else _capture(und))
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    _, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded"
+    assert led["book"] == "yahoo"                          # the next candidate
+    assert any("before the 2026-09-23 close" in r for r in led["refused_books"])
+
+
+def _capture(und, session=SESSION, rows=4):
+    """A ChainCapture as cboe_downloader.capture_option_chain returns it."""
+    frame = pd.DataFrame({"snapshot_date": session, "underlying": und, "root": f"{und}W",
+                          "expiry": "2026-10-16", "strike": 7000.0 + 25 * np.arange(rows),
+                          "right": "C", "bid": 10.0, "ask": 10.5, "quote_time": "2026-09-24T01:15:00Z",
+                          "source": "cboe", "contract_symbol": [f"{und}W261016C{i}" for i in range(rows)]})
+    return cboe.ChainCapture(
+        underlying=und, frame=frame, session=session, quote_time="2026-09-24T01:15:00Z",
+        book_state="gth", fetched_at="2026-09-24T01:30:05Z", payload_timestamp="2026-09-24T01:30:00Z",
+        underlying_last_trade_time="2026-09-23T16:14:59", underlying_price=7600.0,
+        url=f"https://cdn.cboe.com/api/global/delayed_quotes/options/_{und}.json",
+        sha256="ab" * 32, n_bytes=1234)
+
+
+def test_the_cboe_books_are_captured_whatever_the_fit_does(env, monkeypatch, capsys):
+    """The full SPX and VIX books, timestamped, under data_store/options/cboe/,
+    stored even when the Yahoo book is empty and the calibration is skipped;
+    one capture per underlying and session (the retry slot skips them)."""
+    calls = []
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        return _capture(und)
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert st["calibration"]["status"] == "skipped"
+    capt = st["capture"]
+    assert capt["status"] == "captured"
+    d = env.DATA / "options" / "cboe"
+    for und in ("spx", "vix"):
+        pq_path = d / f"{und}_{SESSION}_013005Z.parquet"
+        js = json.loads((d / f"{und}_{SESSION}_013005Z.json").read_text())
+        assert str(pq_path) in st["persisted"]
+        assert len(pd.read_parquet(pq_path)) == js["rows"] == 4
+        assert js["book_state"] == "gth"
+        assert js["sha256"] == "ab" * 32
+        assert capt["captures"][und.upper()]["quote_time"] == "2026-09-24T01:15:00Z"
+    assert not list(d.glob(".*.tmp"))
+    # the captures are not options snapshots: the DB and the calibrator never see them
+    assert _spx_snapshot_rows(SESSION)[0] == 0
+    # retry slot: nothing fetched again, nothing rewritten
+    code, st = _run(env, "capture")
+    assert st["capture"]["status"] == "exists"
+    assert calls == ["SPX", "VIX"]
+    assert "persisted" not in st or not st["persisted"]
+
+
+def test_a_capture_of_another_session_or_a_failed_download_is_not_stored(env, monkeypatch, capsys):
+    def fake(und, now=None, **kw):
+        if und == "VIX":
+            raise OSError("cdn.cboe.com unreachable")
+        return _capture(und, session="2026-09-24")             # the book rolled already
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    code, st = _run(env, "capture")
+    assert code == 0
+    capt = st["capture"]
+    assert capt["status"] == "failed"
+    assert capt["captures"]["SPX"]["status"] == "rejected"
+    assert "session 2026-09-24's, not 2026-09-23's" in capt["captures"]["SPX"]["reason"]
+    assert capt["captures"]["VIX"]["status"] == "failed"
+    assert not (env.DATA / "options" / "cboe").exists()
+    assert "::warning title=Cboe capture::" in capsys.readouterr().out
+
+
+def test_a_capture_write_error_fails_that_capture_not_the_run(env, monkeypatch, capsys):
+    """PROD-7: only the download was guarded, so an OSError from save_capture (a
+    full disk) propagated out of main(): no market or calibrate step, no status
+    file, no GITHUB_OUTPUT. Now that underlying is "failed", what it left of its
+    capture is removed (the retry slot captures it whole), and the run goes on."""
+    monkeypatch.setattr(cboe, "capture_option_chain", lambda und, **kw: _capture(und))
+    real = cboe.save_capture
+
+    def full_disk(cap, out_dir):
+        if cap.underlying != "SPX":
+            return real(cap, out_dir)
+        d = pathlib.Path(out_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        stem = cboe.capture_stem(cap)
+        cap.frame.to_parquet(d / f"{stem}.parquet", index=False)      # renamed into place ...
+        (d / f".{stem}.json.tmp").write_text("{")                     # ... then the JSON fails
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(cboe, "save_capture", full_disk)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    capt = st["capture"]
+    assert capt["status"] == "partial"
+    assert capt["captures"]["SPX"]["status"] == "failed"
+    assert "No space left on device" in capt["captures"]["SPX"]["reason"]
+    assert capt["captures"]["VIX"]["status"] == "captured"
+    d = env.DATA / "options" / "cboe"
+    assert sorted(p.name for p in d.iterdir()) == [f"vix_{SESSION}_013005Z.json",
+                                                   f"vix_{SESSION}_013005Z.parquet"]
+    stem = d / f"vix_{SESSION}_013005Z"
+    assert capt["files"] == [str(stem.with_suffix(".parquet")), str(stem.with_suffix(".json"))]
+    assert st["market"]["ok"]
+    assert st["calibration"]["status"] == "skipped"  # the later steps ran
+    assert code == 0
+    assert not st["publish_blockers"]
+    assert "::warning title=Cboe capture::Cboe chain capture partial" in capsys.readouterr().out
+    # the retry slot captures SPX again (nothing of the failed capture is left to say "exists")
+    monkeypatch.setattr(cboe, "save_capture", real)
+    code, st = _run(env, "capture")
+    assert st["capture"]["captures"]["SPX"]["status"] == "captured"
+    assert st["capture"]["captures"]["VIX"]["status"] == "exists"
+
+
+def test_a_crash_in_the_capture_step_does_not_skip_the_run(env, monkeypatch, capsys):
+    def crash(now_utc, expected, out_dir=None):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(env, "capture_cboe_chains", crash)
+    _accepted_pickle(env, "2026-09-22")
+    _, st = _run(env, "market,capture,calibrate", ticker=_EmptyBookTicker)
+    assert st["capture"]["status"] == "failed"
+    assert "RuntimeError: unexpected" in st["capture"]["reason"]
+    assert st["market"]["ok"]
+    assert st["calibration"]["status"] == "skipped"
+    assert st["session"] == SESSION
+    assert "exit_code" in st
+    assert "::warning title=Cboe capture::" in capsys.readouterr().out
+
+
+def test_no_capture_while_the_book_is_another_sessions(env, monkeypatch):
+    """Same refusal as the calibration: from the 09:30 ET open the live book
+    is the new session's."""
+    monkeypatch.setattr(cboe, "capture_option_chain", lambda und, **kw: _capture(und))
+    status = env.DATA.parent / "status.json"
+    during = NOW + timedelta(hours=13, minutes=30)                 # Thu 11:00 ET
+    env.main(["--steps", "capture", "--status-file", str(status)], now_utc=during)
+    capt = json.loads(status.read_text())["capture"]
+    assert capt["status"] == "skipped"
+    assert "refusing" in capt["reason"]
+
+
+def test_session_artifacts_are_rebuilt_from_an_accepted_fit(env, monkeypatch):
+    """After an accepted fit: the session's surface report, its diagnostics
+    (the script, stubbed here), and the Greeks surface and scenario grid of the
+    new headline fit, all written under data_store/."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    ran = []
+
+    def diagnostics(session, out_dir, timeout):
+        ran.append((session, out_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{session}.json").write_text("{}")
+    monkeypatch.setattr(env, "_run_diagnostics", diagnostics)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    arts = st["artifacts"]
+    assert {k: v["ok"] for k, v in arts.items()} == {"surface": True, "diagnostics": True,
+                                                    "greeks": True, "scenario": True}
+    sdir = env.DATA / "surface" / SESSION
+    assert sorted(p.name for p in sdir.iterdir()) == ["residuals.parquet", "scorecard.json",
+                                                     "surface.json", "vix_replication.json"]
+    idx = json.loads((env.DATA / "surface" / "index.json").read_text())
+    assert [r["session"] for r in idx["sessions"]] == [SESSION]
+    assert ran == [(SESSION, env.DATA / "calibrations" / "diagnostics")]
+    from joint_vol_calibration.greeks.risk_monitor import load_greeks_surface
+    from joint_vol_calibration.greeks.scenario_grid import load_scenario_grid
+    g = load_greeks_surface(env.DATA / "greeks" / "greeks_surface.parquet").attrs["provenance"]
+    sgp = load_scenario_grid(env.DATA / "greeks" / "scenario_grid.parquet").attrs["provenance"]
+    for prov in (g, sgp):
+        assert prov["as_of_date"] == SESSION
+        assert prov["source"]["calibration_file"].endswith(f"joint_cal_{SESSION}.pkl")
+
+
+def test_a_failed_artifact_is_reported_and_loses_nothing(env, monkeypatch, capsys):
+    """A surface-report crash fails the job (exit 1, annotated) but the fit,
+    the chain, the ledger and the other artifacts stand, and the site may
+    still publish."""
+    from joint_vol_calibration.surface import report
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    monkeypatch.setattr(env, "_run_diagnostics", lambda s, d, t: None)
+
+    def boom(*a, **k):
+        raise ValueError("SVI fit diverged")
+    monkeypatch.setattr(report, "write_session", boom)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["artifacts"]["surface"] == {"ok": False, "error": "ValueError: SVI fit diverged",
+                                          "seconds": st["artifacts"]["surface"]["seconds"]}
+    assert st["artifacts"]["greeks"]["ok"]
+    assert st["artifacts"]["scenario"]["ok"]
+    assert st["calibration"]["status"] == "accepted"
+    assert st["forward_ledger"]["ok"]
+    assert str(dbm.options_snapshot_path(SESSION, "SPX")) in st["persisted"]
+    assert not st["publish_blockers"]
+    assert "::error title=Session artifacts::surface artifact" in capsys.readouterr().out
+
+
+def _greeks_source(cr, name="greeks_surface.parquet", key=b"greeks_provenance"):
+    import pyarrow.parquet as pq
+    meta = pq.read_schema(cr.DATA / "greeks" / name).metadata
+    return json.loads(meta[key])["source"]["calibration_file"]
+
+
+def test_a_failed_artifact_is_rebuilt_by_the_next_run(env, monkeypatch):
+    """PROD-5 / ENG-6: the artifacts were built only by the run that accepted the
+    fit. The diagnostics timed out there; the retry slot found the pickle
+    ('exists') and rebuilt nothing, so the session's diagnostics never existed.
+    Every run with the calibrate step now backfills what is missing."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    calls = []
+
+    def timeout(session, out_dir, timeout):
+        calls.append(session)
+        raise TimeoutError("calibration_diagnostics.py: 1200 s")
+    monkeypatch.setattr(env, "_run_diagnostics", timeout)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 1
+    assert st["calibration"]["status"] == "accepted"
+    assert {k: v["ok"] for k, v in st["artifacts"].items()} == {
+        "surface": True, "diagnostics": False, "greeks": True, "scenario": True}
+    # the failed part is not retried in the same run, and nothing else is missing
+    assert st["artifact_backfill"]["gaps"] == {}
+    assert calls == [SESSION]
+    diag = env.DATA / "calibrations" / "diagnostics" / f"{SESSION}.json"
+    assert not diag.exists()
+
+    def works(session, out_dir, timeout):
+        calls.append(session)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{session}.json").write_text("{}")
+    monkeypatch.setattr(env, "_run_diagnostics", works)
+    code, st = _run(env, "calibrate")                          # the 04:30 retry
+    assert st["calibration"]["status"] == "exists"
+    bf = st["artifact_backfill"]
+    assert bf["gaps"] == {SESSION: ["diagnostics"]}
+    assert list(bf["rebuilt"]) == [SESSION]
+    assert list(bf["rebuilt"][SESSION]) == ["diagnostics"]
+    assert bf["rebuilt"][SESSION]["diagnostics"]["ok"]
+    assert code == 0
+    assert diag.exists()
+    assert calls == [SESSION, SESSION]
+    code, st = _run(env, "calibrate")                          # repaired: nothing to do
+    assert code == 0
+    assert st["artifact_backfill"] == {"gaps": {}, "rebuilt": {}, "deferred": []}
+    assert calls == [SESSION, SESSION]
+    code, st = _run(env, "market,labels")                      # the close slot never backfills
+    assert "artifact_backfill" not in st
+
+
+def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
+    """The artifact commit was dropped (gate failure) or a part failed: the
+    Greeks surface and scenario grid named the previous headline fit. The next
+    run rebuilds both from the headline, and a missing file the same way."""
+    monkeypatch.setattr(env, "refresh_session_artifacts", env._real_refresh_session_artifacts)
+    monkeypatch.setattr(env, "_run_diagnostics", lambda s, d, t: (d.mkdir(parents=True, exist_ok=True),
+                                                                  (d / f"{s}.json").write_text("{}")))
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert code == 0, st["errors"]
+    head = f"joint_cal_{SESSION}.pkl"
+    assert _greeks_source(env).endswith(head)
+    import pyarrow.parquet as pq
+    g = env.DATA / "greeks" / "greeks_surface.parquet"
+    t = pq.read_table(g)
+    meta = dict(t.schema.metadata)
+    prov = json.loads(meta[b"greeks_provenance"])
+    prov["source"]["calibration_file"] = "data_store/calibrations/joint_cal_2026-09-22.pkl"
+    meta[b"greeks_provenance"] = json.dumps(prov).encode()
+    pq.write_table(t.replace_schema_metadata(meta), g)          # the previous headline's surface
+    (env.DATA / "greeks" / "scenario_grid.parquet").unlink()   # and no scenario grid
+    code, st = _run(env, "calibrate")
+    bf = st["artifact_backfill"]
+    assert bf["gaps"] == {SESSION: ["greeks", "scenario"]}
+    assert {k: v["ok"] for k, v in bf["rebuilt"][SESSION].items()} == {"greeks": True, "scenario": True}
+    assert code == 0
+    assert _greeks_source(env).endswith(head)
+    assert _greeks_source(env, "scenario_grid.parquet", b"scenario_provenance").endswith(head)
+    assert not list((env.DATA / "greeks").glob(".*.tmp"))
+
+
+def test_backfill_rebuilds_newest_first_and_defers_the_rest(env, monkeypatch):
+    gaps = {"2026-09-23": ["diagnostics"], "2026-09-22": ["surface", "diagnostics"],
+            "2026-09-21": ["surface"]}
+    monkeypatch.setattr(env, "artifact_gaps", lambda head: dict(gaps))
+    seen = []
+    def rebuild(s, h, parts=None, **kw):
+        seen.append((s, parts))
+        return {p: {"ok": True} for p in parts}
+    monkeypatch.setattr(env, "refresh_session_artifacts", rebuild)
+    out = env.backfill_session_artifacts("h.pkl", skip=["2026-09-23"], max_sessions=1)
+    assert seen == [("2026-09-22", ("surface", "diagnostics"))]
+    assert out["deferred"] == ["2026-09-21"]
+    assert list(out["gaps"]) == ["2026-09-22", "2026-09-21"]
+    with pytest.raises(ValueError, match="unknown artifact part"):
+        env._real_refresh_session_artifacts(SESSION, None, parts=("bogus",))
+
+
+def test_the_backfill_keeps_to_its_time_budget(env, monkeypatch):
+    """A job that reaches its 45-minute timeout is cancelled before the step that
+    uploads the captures, so the backfill has a budget: a session is started only
+    with a minute left, its diagnostics get at most what is left, the rest waits
+    for the next run; main() shrinks the budget by what the run already used."""
+    gaps = {"2026-09-23": ["diagnostics"], "2026-09-22": ["diagnostics"]}
+    monkeypatch.setattr(env, "artifact_gaps", lambda head: dict(gaps))
+    now = [0.0]
+    seen = []
+
+    def rebuild(s, h, parts=None, diagnostics_timeout=None, **kw):
+        seen.append((s, diagnostics_timeout))
+        now[0] += 500.0                                   # this session took 500 s
+        return {p: {"ok": True} for p in parts}
+    monkeypatch.setattr(env, "refresh_session_artifacts", rebuild)
+    out = env.backfill_session_artifacts("h.pkl", budget_s=530.0, clock=lambda: now[0])
+    assert seen == [("2026-09-23", 530.0)]
+    assert out["deferred"] == ["2026-09-22"]                 # 30 s left: not started
+    seen.clear()
+    out = env.backfill_session_artifacts("h.pkl", budget_s=5000.0, clock=lambda: now[0])
+    assert [s for s, _ in seen] == ["2026-09-23", "2026-09-22"]
+    assert seen[0][1] == env.DIAGNOSTICS_TIMEOUT_S           # capped by the part's own timeout
+    budgets = []
+    monkeypatch.setattr(env, "backfill_session_artifacts",
+                        lambda head, skip=(), budget_s=None, **kw: budgets.append(budget_s) or
+                        {"gaps": {}, "rebuilt": {}, "deferred": []})
+    _run(env, "calibrate")
+    assert len(budgets) == 1
+    assert 0 < budgets[0] <= env.BACKFILL_BUDGET_S
+
+
+def test_a_greeks_write_that_dies_keeps_the_previous_surface(env, monkeypatch):
+    """PROD-3: save_greeks_surface writes in place; a crash mid-write left a
+    surface without its provenance, which the data gate then tripped on. The
+    bot writes it under a temporary name and renames it into place."""
+    from joint_vol_calibration.greeks import risk_monitor
+    g = env.DATA / "greeks" / "greeks_surface.parquet"
+    g.parent.mkdir(parents=True)
+    g.write_bytes(b"previous surface")
+
+    def dies(cal, out_path, *a, **k):
+        assert pathlib.Path(out_path) != g
+        pathlib.Path(out_path).write_bytes(b"half a parq")
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(risk_monitor, "build_surface_from_calibration", dies)
+    res = env._real_refresh_session_artifacts(SESSION, "h.pkl", parts=("greeks",))
+    assert not res["greeks"]["ok"]
+    assert "No space left" in res["greeks"]["error"]
+    assert g.read_bytes() == b"previous surface"
+    assert sorted(p.name for p in g.parent.iterdir()) == ["greeks_surface.parquet"]
+
+
 def test_gate_rejection_after_a_fit_persists_nothing(env, monkeypatch):
     """A chain that passes the quote-state gate but whose FIT the shared gate
     rejects (here: a one-tenor VIX leg) must leave no snapshot and no pickle;
@@ -335,6 +887,11 @@ def test_gate_rejection_after_a_fit_persists_nothing(env, monkeypatch):
     assert not dbm.options_snapshot_path(SESSION, "SPX").exists()
     assert pathlib.Path(cal["diagnostic_chain"]).exists()
     assert code == 0                           # headline 1 session old: warning only
+    # the strategy's trades do not depend on the fit (STATS-2): the session is
+    # recorded in the forward ledger on the book it downloaded
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded", led
+    assert fl.load_ledger(led["path"])["session"] == SESSION
 
 
 def test_accepted_fit_without_its_stored_chain_fails_the_run(env, monkeypatch):
@@ -456,8 +1013,7 @@ def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch
     used to apply stored the previous session's ts_slope under later dates
     when ^VIX3M was missing; the rows must carry NaN, the rule label and the
     pdv_iv_spread source tag."""
-    from joint_vol_calibration.signals.regime_classifier import (
-        FEATURE_COLS, build_rule_label_frame)
+    from joint_vol_calibration.signals.regime_classifier import FEATURE_COLS, build_rule_label_frame
     idx = pd.bdate_range("2024-01-01", periods=420)
     rng = np.random.default_rng(7)
     ret = rng.normal(0, 0.01, len(idx))
@@ -484,6 +1040,57 @@ def test_labels_store_missing_observables_as_nan_not_yesterdays(env, monkeypatch
     assert tail["ts_slope"].iloc[-2:].isna().all()               # not the 3rd-last value
     assert (tail["regime"] == frame["regime"].iloc[-5:]).all()
     assert tail["pdv_iv_spread_source"].notna().all()
+
+
+def test_rebuild_labels_restates_history_extend_cannot_reach(env, monkeypatch):
+    """After a restatement of the record far back (C23: Cboe's VIX family
+    replaced Yahoo's to 2010), every stored label row is rebuilt from the
+    database. extend_regime_labels only heals the trailing window a 900-day
+    fetch can label with a full 252-day gate, so an old wrong label survives
+    it; rebuild_regime_labels repairs it and the features, and refuses (writing
+    nothing) when the database cannot rebuild a stored date."""
+    from joint_vol_calibration.signals.regime_classifier import FEATURE_COLS, build_rule_label_frame
+    idx = pd.bdate_range("2023-01-02", periods=700)
+    rng = np.random.default_rng(11)
+    ret = rng.normal(0, 0.01, len(idx))
+    spx = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "log_return": ret,
+                        "close": 4000 * np.exp(np.cumsum(ret))})
+    vix = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"),
+                        "^VIX": 16 + rng.normal(0, 1.5, len(idx)).cumsum() * 0.05,
+                        "^VIX9D": 15.0, "^VIX3M": 18.0, "^VIX6M": 19.0,
+                        "^VVIX": 95 + rng.normal(0, 4, len(idx))})
+    served = {"vix": vix}
+    monkeypatch.setattr(dbm, "get_spx_ohlcv", lambda as_of_date, start_date=None:
+                        spx[spx["date"] <= as_of_date].reset_index(drop=True))
+    monkeypatch.setattr(dbm, "get_vix_term_structure_wide", lambda as_of_date, start_date=None:
+                        served["vix"][served["vix"]["date"] <= as_of_date].reset_index(drop=True))
+    truth = build_rule_label_frame(spx, vix, vvix_threshold=None)
+    stored = truth[[*FEATURE_COLS, "regime", "pdv_iv_spread_source"]].copy()
+    old = stored.index[40]                                   # long before any heal window
+    stored.loc[old, "regime"] = (int(stored.loc[old, "regime"]) + 1) % 3
+    stored.loc[stored.index[41], "vvix"] += 0.5
+    (env.DATA / "signals").mkdir()
+    path = env.DATA / "signals" / "regime_labels.parquet"
+    stored.to_parquet(path)
+    as_of = date.fromisoformat(spx["date"].iloc[-1])
+
+    assert env.extend_regime_labels(as_of) == 0
+    assert int(pd.read_parquet(path).loc[old, "regime"]) != int(truth.loc[old, "regime"])
+
+    out = env.rebuild_regime_labels(as_of)
+    rl = pd.read_parquet(path)
+    assert out["labels_changed"] == 1
+    assert out["changed"][0][0] == str(old.date())
+    assert out["features_changed"] >= 1
+    assert out["rows_added"] == 0
+    assert (rl["regime"] == truth["regime"]).all()
+    np.testing.assert_allclose(rl["vvix"].to_numpy(float), truth["vvix"].to_numpy(float))
+
+    served["vix"] = vix.iloc[300:]                           # a store that lost its history
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="cannot rebuild"):
+        env.rebuild_regime_labels(as_of)
+    assert path.read_bytes() == before
 
 
 # ── Publishable vs exit status (the workflow deploys on publishable) ──────────
@@ -584,6 +1191,81 @@ def test_market_captures_survive_a_dropped_session_and_a_fresh_db(env, monkeypat
     assert "2026-09-22" in set(pd.read_parquet(part)["date"])
 
 
+def test_rederive_rebuilds_the_partitions_and_labels_over_mains_files(env, monkeypatch):
+    """PROD-2: the push loop's answer to a binary conflict (commit_and_push.sh
+    REDERIVE). After a market run, main is given a different copy of the 2026
+    SPX partition (a row the run never downloaded; the run's last session
+    missing). --rederive, with no download and no restore, merges the run's
+    database into main's file, so main's extra row and the run's session are
+    both there, and re-extends the labels as of the run's session."""
+    code, _ = _run(env, "market")
+    assert code == 0
+    part = dbm.MARKET_DIR / "spx_ohlcv" / "spx_ohlcv_2026.parquet"
+    run_part = pd.read_parquet(part)
+    mains = run_part[run_part["date"] != SESSION].copy()
+    extra = mains.iloc[[0]].assign(date="2026-01-02", close=1234.5)
+    pd.concat([extra, mains]).sort_values("date").to_parquet(part, index=False)
+    status = env.DATA.parent / "status.json"
+    before = status.read_text()
+
+    def no_network(*a, **k):
+        raise AssertionError("rederive must not download or restore")
+    monkeypatch.setattr(dl, "download_spx_ohlcv", no_network)
+    monkeypatch.setattr(env, "restore_captures", no_network)
+    labelled = []
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: labelled.append(as_of) or 1)
+    code = env.main(["--rederive", "--steps", "market,labels", "--status-file", str(status)], now_utc=NOW)
+    assert code == 0
+    got = pd.read_parquet(part)
+    assert SESSION in set(got["date"])
+    assert "2026-01-02" in set(got["date"])
+    assert got.loc[got["date"] == "2026-01-02", "close"].item() == 1234.5
+    assert len(got) == len(run_part) + 1
+    assert labelled == [date.fromisoformat(SESSION)]
+    assert status.read_text() == before                        # the run's status file is the run's
+    # the market step alone: the labels are not touched
+    labelled.clear()
+    assert env.main(["--rederive", "--steps", "market,capture,calibrate,freeze"], now_utc=NOW) == 0
+    assert labelled == []
+
+
+def test_merge_main_data_rederives_mains_sessions_over_the_branchs_record(env, tmp_path, monkeypatch):
+    """ENG-1 (scripts/ci/merge_main_data.py rederive): main's partition (the bot's
+    provisional Yahoo rows) is upserted into
+    the branch's database and the partition re-exported: main's new session
+    is in, the branch's Cboe row for the same session stays, a row main
+    stored on an NYSE holiday does not come in."""
+    spec = importlib.util.spec_from_file_location(
+        "merge_main_data_test_mod", SCRIPT.parent / "ci" / "merge_main_data.py")
+    merge = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, merge)
+    spec.loader.exec_module(merge)
+    code, _ = _run(env, "market")
+    assert code == 0
+    rel = "data_store/market/vix_term_structure/vix_term_structure_2026.parquet"
+    part = dbm.MARKET_DIR / "vix_term_structure" / "vix_term_structure_2026.parquet"
+    cboe = pd.DataFrame([{"date": SESSION, "ticker": "^VIX", "tenor_days": 30, "close": 17.76,
+                          "is_vvix": 0, "source": "cboe"}])
+    dbm.insert_vix_term_structure(cboe)                        # the branch's restated print
+    dbm.export_market_partitions(tables=("vix_term_structure",), since=SESSION)
+    mains = pd.read_parquet(part)
+    mains.loc[(mains["date"] == SESSION) & (mains["ticker"] == "^VIX"), ["close", "source"]] = \
+        [20.37, "yfinance"]
+    extra = mains[mains["date"] == SESSION].assign(date="2026-09-24", source="yfinance")
+    holiday = mains[mains["date"] == SESSION].assign(date="2026-09-07", source="yfinance")
+    theirs = tmp_path / "theirs"
+    (theirs / rel).parent.mkdir(parents=True)
+    pd.concat([mains, extra, holiday], ignore_index=True).to_parquet(theirs / rel, index=False)
+    out = merge.rederive(theirs, [rel], env)
+    assert out["tables"] == ["vix_term_structure"]
+    assert "labels_added" not in out
+    got = pd.read_parquet(part)
+    vix = got[(got["date"] == SESSION) & (got["ticker"] == "^VIX")].iloc[0]
+    assert (vix["close"], vix["source"]) == (17.76, "cboe")
+    assert set(got.loc[got["date"] == "2026-09-24", "ticker"]) == set(extra["ticker"])
+    assert "2026-09-07" not in set(got["date"])
+
+
 def test_no_persist_flag_leaves_capture_dirs_alone(env):
     status = env.DATA.parent / "status.json"
     code = env.main(["--steps", "market", "--status-file", str(status), "--no-persist"],
@@ -628,6 +1310,137 @@ def test_cboe_vix_print_overrides_yahoo(env, monkeypatch):
     assert _vix_close(SESSION) == (17.76, "cboe")
     part = pd.read_parquet(dbm.MARKET_DIR / "vix_daily" / "vix_daily_2026.parquet")
     assert part.loc[part["date"] == SESSION, ["close", "source"]].values.tolist() == [[17.76, "cboe"]]
+
+
+def _ts_row(day, ticker):
+    con = sqlite3.connect(str(dbm.DB_PATH))
+    try:
+        return con.execute("SELECT close, source FROM vix_term_structure WHERE date=? AND ticker=?",
+                           (day, ticker)).fetchone()
+    finally:
+        con.close()
+
+
+def test_vix_term_structure_is_cboe_primary(env, monkeypatch, capsys):
+    """Every consumer (labels, backtest, calibrator VIX leg) reads
+    vix_term_structure, and the bot used to fill it from Yahoo only (float32
+    copies, NULL source, holiday rows); the Cboe overlay corrected vix_daily
+    alone. Now Cboe's files are written on top: a session both print stores
+    Cboe's value and a > 0.25 pt difference is reported (not a failure); a
+    session Cboe has not posted yet keeps Yahoo's row, labelled 'yfinance'
+    (provisional), until the next run after Cboe posts it."""
+    yahoo = dl.download_vix_term_structure(None, None)
+    yahoo.loc[(yahoo["date"] == "2026-09-22") & (yahoo["ticker"] == "^VIX"), "close"] = 20.37
+    monkeypatch.setattr(dl, "download_vix_term_structure", lambda start, end: yahoo.copy())
+    cb = yahoo[yahoo["date"] < SESSION].copy()                # Cboe lags one session
+    cb["close"] = cb["close"].round(2)
+    cb.loc[(cb["date"] == "2026-09-22") & (cb["ticker"] == "^VIX"), "close"] = 17.76
+    cb["source"] = "cboe"
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: cb.copy())
+    code, st = _run(env, "market")
+    assert code == 0
+    fam = st["market"]["vix_family"]
+    assert fam["ok"]
+    assert not fam["errors"]
+    assert _ts_row("2026-09-22", "^VIX") == (17.76, "cboe")
+    assert _ts_row(SESSION, "^VIX")[1] == "yfinance"
+    assert fam["n_provisional"] == 4
+    assert all(p.startswith(SESSION) for p in fam["provisional"])
+    assert fam["n_mismatches"] == 1
+    assert fam["mismatches"][0] == {"date": "2026-09-22", "ticker": "^VIX", "cboe": 17.76,
+                                    "yfinance": 20.37, "diff": pytest.approx(17.76 - 20.37)}
+    out = capsys.readouterr().out
+    assert "::warning title=VIX family cross-check::1 VIX-family print(s) differ" in out
+    assert any("Cboe 17.76 vs Yahoo 20.37" in w for w in st["warnings"])
+    part = pd.read_parquet(dbm.MARKET_DIR / "vix_term_structure" / "vix_term_structure_2026.parquet")
+    assert part["source"].notna().all()                      # every persisted row says where it came from
+    assert set(part.loc[part["date"] == SESSION, "source"]) == {"yfinance"}
+
+    # Next run: Cboe has posted the session; its print replaces the provisional row.
+    cb2 = pd.concat([cb, yahoo[yahoo["date"] == SESSION].assign(source="cboe", close=19.5)])
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: cb2.copy())
+    code, st = _run(env, "market")
+    assert code == 0
+    assert _ts_row(SESSION, "^VIX") == (19.5, "cboe")
+    assert st["market"]["vix_family"]["n_provisional"] == 0
+
+
+def test_a_cboe_outage_stores_yahoo_as_provisional_and_warns(env, monkeypatch, capsys):
+    """The run still stores the session (Yahoo, labelled 'yfinance') and does
+    not fail; a stored Cboe print is never replaced by Yahoo's."""
+    def down(start=None, end=None, tickers=None):
+        raise OSError("cdn.cboe.com unreachable")
+    yahoo = dl.download_vix_term_structure(None, None)
+    good = yahoo[yahoo["date"] == "2026-09-22"].assign(source="cboe", close=18.0)
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history",
+                        lambda start=None, end=None, tickers=None: good.copy())
+    assert _run(env, "market")[0] == 0
+    monkeypatch.setattr(cboe, "download_vix_term_structure_history", down)
+    code, st = _run(env, "market")
+    assert code == 0
+    fam = st["market"]["vix_family"]
+    assert fam["ok"] is False
+    assert "cdn.cboe.com unreachable" in fam["errors"][0]
+    assert _ts_row(SESSION, "^VIX")[1] == "yfinance"
+    assert _ts_row("2026-09-22", "^VIX") == (18.0, "cboe")
+    assert "::warning title=VIX family download::" in capsys.readouterr().out
+
+
+def _treasury_rows(days, level=0.0405):
+    """A flat-ish Treasury day: bills (bank discount) and par yields."""
+    rows = []
+    for d in days:
+        for w in (4, 8, 13, 26, 52):
+            n = 7 * w
+            # the bank-discount quote of a bill whose cc yield is `level`
+            disc = (1 - np.exp(-level * n / 365)) * 360 / n
+            rows.append({"date": d, "series": rates.bill_series(w, "BD"), "value": round(disc, 6)})
+        rows.extend({"date": d, "series": f"UST_PAR_{tenor}", "value": level + 0.001}
+                    for tenor in ("2Y", "5Y", "10Y"))
+    return pd.DataFrame(rows).assign(source="treasury")
+
+
+def test_rates_feed_the_curve_the_bot_fits_with(env, monkeypatch, tmp_path):
+    """The bot's market step refreshes rates_daily (Treasury + NY Fed) and
+    persists it; without that the zero curve goes stale 7 days after the last
+    committed quote and every fit falls back to ^IRX. With a curve, the fit
+    records it as its reference and cleans the chain with r(T) per expiry."""
+    calls = []
+
+    def treasury(year, kind):
+        calls.append((year, kind))
+        return _treasury_rows(_business_days(SESSION, 5)) if kind == "daily_treasury_bill_rates" \
+            else pd.DataFrame(columns=["date", "series", "value", "source"])
+    monkeypatch.setattr(rates, "download_treasury_year", treasury)
+    code, st = _run(env, "market,calibrate", ticker=_DailyBookTicker)
+    assert sorted(set(calls)) == [(2026, k) for k in rates.TREASURY_KINDS]
+    curve = st["market"]["rates"]["curve"]
+    assert curve["ok"]
+    assert curve["curve_date"] == SESSION
+    assert curve["r_91d"] == pytest.approx(0.0405, abs=1e-6)
+    part = dbm.MARKET_DIR / "rates_daily" / "rates_daily_2026.parquet"
+    assert str(part) in st["persisted"]
+    assert len(pd.read_parquet(part)) == len(_treasury_rows(_business_days(SESSION, 5)))
+    cal = st["calibration"]
+    assert cal["status"] == "accepted", cal["reason"]
+    assert code == 0
+    with open(env.DATA / "calibrations" / f"joint_cal_{SESSION}.pkl", "rb") as f:
+        res = pickle.load(f)
+    assert res["rate_reference"]["kind"] == "treasury_curve"
+    assert res["rate_reference"]["curve_date"] == SESSION
+    assert res["r_reference"] == pytest.approx(curve["r_91d"], abs=1e-12)
+    assert res["r_reference_source"].startswith(f"Treasury zero curve {SESSION}")
+    assert res["chain_diagnostics"]["r_ref"] == "r(T) per expiry"
+    assert cal["summary"]["r_reference_source"] == res["r_reference_source"]
+
+
+def test_no_curve_is_a_warning_and_the_fit_falls_back_to_irx(env, capsys):
+    code, st = _run(env, "market")
+    assert code == 0
+    assert st["market"]["rates"]["curve"]["ok"] is False
+    assert "::warning title=Discount curve::no usable Treasury zero curve" in capsys.readouterr().out
 
 
 def test_download_window_reaches_back_to_the_last_stored_session():

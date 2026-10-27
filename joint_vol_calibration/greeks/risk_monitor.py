@@ -168,6 +168,8 @@ GREEKS_UNITS = {
     "vanna": "change in call delta per 1.00 of implied vol (÷100 → per vol point)",
     "qv_convexity": "Var[∫_0^T v_t dt] of the CIR variance, (variance·years)^2, exact",
     "iv_shock": "model-implied ATM implied-vol move used for the instability measure, decimal",
+    "r": "continuously compounded rate of the maturity (calibration_carry: Treasury zero curve)",
+    "q": "continuously compounded carry yield of the maturity, q = r - ln(F/S)/T",
     "vomma_pnl_ratio": "½·vomma·Δσ² / (vega·|Δσ|), dimensionless",
     "vomma_zscore": "pooled cross-sectional z-score of vomma (descriptive only)",
     "is_unstable": "|vomma_pnl_ratio| > threshold",
@@ -399,6 +401,7 @@ def compute_greeks_surface(
     iv_shock_horizon: float = IV_SHOCK_HORIZON_YEARS,
     iv_shock_n_sd: float = IV_SHOCK_N_SD,
     source: Optional[dict] = None,
+    carry: dict | None = None,
 ) -> pd.DataFrame:
     """
     Compute the second-order Greeks surface for a Heston calibration.
@@ -412,7 +415,8 @@ def compute_greeks_surface(
 
     Parameters
     ----------
-    S, r, q       : spot, risk-free rate, dividend yield (continuous)
+    S, r, q       : spot, risk-free rate, dividend yield (continuous): numbers,
+                    or functions of the maturity T in years (calibration_carry)
     params        : dict with keys {kappa, theta, sigma, rho, v0}
     strikes       : absolute strikes used for every maturity; default is the
                     log-moneyness grid below applied to each maturity's forward
@@ -425,6 +429,7 @@ def compute_greeks_surface(
     qv_method     : "exact" (closed form, default) or "mc" (cross-check)
     iv_shock_horizon, iv_shock_n_sd : sizing of the model IV shock
     source        : extra provenance (e.g. calibration file) to record
+    carry         : where r and q came from (calibration_carry's record)
 
     Returns
     -------
@@ -454,8 +459,12 @@ def compute_greeks_surface(
     dropped: List[dict] = []
     n_grid = 0
 
+    by_maturity: list[dict] = []
     for T in maturities:
-        F = S * np.exp((r - q) * T)
+        r_T = float(r(T)) if callable(r) else float(r)
+        q_T = float(q(T)) if callable(q) else float(q)
+        F = S * np.exp((r_T - q_T) * T)
+        by_maturity.append({"T_days": round(T * 365), "r": r_T, "q": q_T, "F": float(F)})
         K_arr = (F * np.exp(lm_grid) if strikes is None
                  else np.asarray(strikes, dtype=float))
         n_K = len(K_arr)
@@ -463,12 +472,12 @@ def compute_greeks_surface(
         T_days = int(round(T * 365))
         x = np.log(K_arr / F)
 
-        otm_disc, _, ok = heston_otm_prices(S, K_arr, T, r, q, p)
+        otm_disc, _, ok = heston_otm_prices(S, K_arr, T, r_T, q_T, p)
         if not ok:
             raise RuntimeError(
                 f"Heston Fourier pricer did not converge at T={T_days}d for params {p}"
             )
-        otm_fwd = otm_disc * np.exp(r * T)
+        otm_fwd = otm_disc * np.exp(r_T * T)
         ivs, status = implied_vol_black(
             otm_fwd, F, K_arr, T, is_call=(x >= 0), discount=1.0,
             sigma_min=1e-4, sigma_max=10.0,
@@ -501,7 +510,7 @@ def compute_greeks_surface(
         K_v, iv_v = K_arr[valid], ivs[valid]
         n_v = int(valid.sum())
         Sv, Tv = np.full(n_v, S), np.full(n_v, T)
-        rv, qv = np.full(n_v, r), np.full(n_v, q)
+        rv, qv = np.full(n_v, r_T), np.full(n_v, q_T)
 
         if qv_method == "exact":
             qv_conv = qv_variance_exact(kappa, theta, sigma, v0, T)
@@ -523,6 +532,8 @@ def compute_greeks_surface(
             "vanna":         _bs_vanna(Sv, K_v, Tv, rv, qv, iv_v),
             "qv_convexity":  float(qv_conv),
             "iv_shock":      float(model_iv_shock(p, T, iv_shock_horizon, iv_shock_n_sd)),
+            "r":             r_T,
+            "q":             q_T,
         })
         if as_of_date:
             frame.insert(0, "as_of_date", as_of_date)
@@ -547,7 +558,10 @@ def compute_greeks_surface(
         "as_of_date": as_of_date,
         "built_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "code_revision": _git_revision(),
-        "S": float(S), "r": float(r), "q": float(q),
+        "S": float(S),
+        "r": None if callable(r) else float(r), "q": None if callable(q) else float(q),
+        "carry": {**(carry or {"forward": "flat r, q", "discount": "flat r"}),
+                  "by_maturity": by_maturity},
         "params": p,
         "params_outside_heston_bounds": sorted(outside),
         "source": source or {},
@@ -749,6 +763,73 @@ def load_greeks_surface(path: Optional[Path] = None) -> pd.DataFrame:
     return df
 
 
+# ── Carry of a calibration ────────────────────────────────────────────────────
+
+def _interp_in_t(t: np.ndarray, y: np.ndarray, T: float) -> float:
+    """y(T) linear in T inside [t0, tn]; outside, the nearest end's y/t ratio
+    times T (a constant carry yield, y = ln F/S or ln D)."""
+    if t[0] <= T <= t[-1]:
+        return float(np.interp(T, t, y))
+    j = 0 if t[0] > T else -1
+    return float(y[j] / t[j] * T)
+
+
+def calibration_carry(cal: dict, *, curve: bool = True) -> tuple:
+    """(r(T), q(T), record) of a joint_cal_*.pkl result, per maturity T (years).
+
+    Forward: the fit's own parity forwards (carry_by_expiry), ln(F_T/S)
+    linear in T between listed expiries. Discount: the Treasury zero curve as
+    of the fit's session (rates.get_zero_curve) with ``curve``; when the
+    curve is unavailable (or curve=False), the fit's parity discounts, ln D_T
+    linear in T. q(T) = r(T) - ln(F(T)/S)/T, so S e^{(r-q)T} is the parity
+    forward whichever discount is used. A result without carry_by_expiry
+    (pre-C22) returns its flat r and q.
+
+    Before C23 the surface used one r and q for every maturity (the medians
+    over the anchor expiries), which put the 1-year forward of 2026-10-16
+    0.5% away from that expiry's parity forward.
+    """
+    S = float(cal["S"])
+    rows = cal.get("carry_by_expiry") or []
+    if not rows:
+        r0, q0 = float(cal["r"]), float(cal["q"])
+        return (lambda T: r0), (lambda T: q0), {"forward": "flat r, q of the calibration file",
+                                                "discount": "flat r of the calibration file"}
+    c = pd.DataFrame(rows).sort_values("T")
+    t = c["T"].to_numpy(float)
+    lf = np.log(c["forward"].to_numpy(float) / S)
+    ld = np.log(c["discount"].to_numpy(float))
+    rec = {"forward": (f"parity forwards of {len(c)} listed expiries (carry_by_expiry), "
+                       "ln(F/S) linear in T"),
+           "expiries_T_days": [round(float(x) * 365.0, 3) for x in t]}
+    zc = None
+    if curve:
+        from joint_vol_calibration.data import rates
+        from joint_vol_calibration.data.database import StaleDataError
+        session = str(cal.get("spot_date") or cal.get("as_of_date"))[:10]
+        try:
+            zc = rates.get_zero_curve(session)
+        except (LookupError, StaleDataError) as exc:
+            rec["curve_unavailable"] = str(exc)
+    if zc is not None:
+        rec["discount"] = f"Treasury zero curve {zc.curve_date} (rates.get_zero_curve)"
+
+        def r_fn(T):
+            return float(zc.zero_rate(max(float(T), 1e-6)))
+    else:
+        rec["discount"] = "parity discounts (carry_by_expiry), ln D linear in T"
+
+        def r_fn(T):
+            T = max(float(T), 1e-6)
+            return -_interp_in_t(t, ld, T) / T
+
+    def q_fn(T):
+        T = max(float(T), 1e-6)
+        return r_fn(T) - _interp_in_t(t, lf, T) / T
+
+    return r_fn, q_fn, rec
+
+
 # ── RiskMonitor Class ─────────────────────────────────────────────────────────
 
 def _calibrator_default_q() -> float:
@@ -788,22 +869,27 @@ class RiskMonitor:
         params: dict,
         as_of_date: Optional[str] = None,
         source: Optional[dict] = None,
+        carry: dict | None = None,
     ):
         self.S          = S
-        self.r          = r
-        self.q          = q
+        self.r          = r          # a number, or r(T) (calibration_carry)
+        self.q          = q          # a number, or q(T)
         self.params     = params
         self.as_of_date = as_of_date
         self.source     = dict(source or {})
+        self.carry      = carry
         self.surface: Optional[pd.DataFrame] = None
         self.flagged: Optional[pd.DataFrame] = None
 
     @classmethod
     def from_calibration(cls, path, q: Optional[float] = None) -> "RiskMonitor":
         """
-        Build a monitor from a joint_cal_*.pkl: params, spot S, rate r, the
-        dividend yield the calibrator used (recorded q, else JointCalibrator's
-        default) and the market date (as_of_date) all come from the file.
+        Build a monitor from a joint_cal_*.pkl: params, spot S and the market
+        date (as_of_date) come from the file. Carry: per maturity from the
+        fit's parity forwards and the Treasury zero curve (calibration_carry)
+        when the file records carry_by_expiry (model_version 2) and no ``q``
+        is given; otherwise flat: its r and the dividend yield the calibrator
+        used (``q``, else the recorded q, else JointCalibrator's default).
         """
         path = Path(path)
         with open(path, "rb") as f:
@@ -812,12 +898,17 @@ class RiskMonitor:
         for key in ("S", "r", "as_of_date"):
             if cal.get(key) is None:
                 raise ValueError(f"{path.name} has no '{key}'; cannot build a dated surface")
-        if q is not None:
-            q_val, q_src = float(q), "argument"
+        carry = None
+        if q is None and cal.get("carry_by_expiry"):
+            r_val, q_val, carry = calibration_carry(cal)
+            q_src = "q(T) = r(T) - ln(F_T/S)/T from the fit's parity forwards"
+        elif q is not None:
+            r_val, q_val, q_src = float(cal["r"]), float(q), "argument"
         elif cal.get("q") is not None:
-            q_val, q_src = float(cal["q"]), "calibration file"
+            r_val, q_val, q_src = float(cal["r"]), float(cal["q"]), "calibration file"
         else:
-            q_val, q_src = _calibrator_default_q(), "JointCalibrator default (not recorded in file)"
+            r_val, q_val = float(cal["r"]), _calibrator_default_q()
+            q_src = "JointCalibrator default (not recorded in file)"
         try:
             rel = str(path.resolve().relative_to(ROOT_DIR.resolve()))
         except ValueError:
@@ -831,8 +922,8 @@ class RiskMonitor:
             "spot_date": cal.get("spot_date"),
             "run_date": cal.get("run_date"),
         }
-        return cls(float(cal["S"]), float(cal["r"]), q_val, params,
-                   as_of_date=str(cal["as_of_date"]), source=source)
+        return cls(float(cal["S"]), r_val, q_val, params,
+                   as_of_date=str(cal["as_of_date"]), source=source, carry=carry)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -853,7 +944,7 @@ class RiskMonitor:
             strikes=strikes, maturities=maturities,
             as_of_date=self.as_of_date,
             mc_n_paths=mc_n_paths, mc_n_steps=mc_n_steps,
-            verbose=verbose, source=self.source, **kwargs,
+            verbose=verbose, source=self.source, carry=self.carry, **kwargs,
         )
         self.flagged = None
         return self.surface
@@ -916,7 +1007,11 @@ class RiskMonitor:
 
         args = [df[c].to_numpy(dtype=float) for c in ("K", "T")]
         n = len(df)
-        S_, r_, q_ = np.full(n, self.S), np.full(n, self.r), np.full(n, self.q)
+        S_ = np.full(n, self.S)
+        if {"r", "q"} <= set(df.columns):           # per-maturity carry, one value per node
+            r_, q_ = df["r"].to_numpy(dtype=float), df["q"].to_numpy(dtype=float)
+        else:
+            r_, q_ = np.full(n, float(self.r)), np.full(n, float(self.q))
         fd = _bs_vomma_numerical(S_, args[0], args[1], r_, q_, df["iv"].to_numpy(dtype=float))
         rel_err = np.abs(fd - df["vomma"].to_numpy()) / (np.abs(df["vomma"].to_numpy()) + 1e-4)
         checks["vomma_fd_check"] = bool((rel_err < 0.05).all())

@@ -53,9 +53,11 @@ VIX under Heston — index versus futures (two different instruments):
 """
 
 import logging
+import math
 import pickle
 import warnings
-from typing import Callable, NamedTuple, Optional, Tuple
+from collections.abc import Callable
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -63,8 +65,13 @@ from scipy import optimize
 from scipy.special import ndtr
 
 from joint_vol_calibration.config import (
-    HESTON_DEFAULTS, HESTON_BOUNDS, MC_PATHS, MC_STEPS_PER_YEAR,
-    MC_ANTITHETIC, RANDOM_SEED, MC_CACHE_DIR,
+    HESTON_BOUNDS,
+    HESTON_DEFAULTS,
+    MC_ANTITHETIC,
+    MC_CACHE_DIR,
+    MC_PATHS,
+    MC_STEPS_PER_YEAR,
+    RANDOM_SEED,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,7 +97,7 @@ def _clog1p(z: np.ndarray) -> np.ndarray:
     return 0.5 * np.log1p(2.0 * re + re * re + im * im) + 1j * np.arctan2(im, 1.0 + re)
 
 
-def _one_minus_exp_over(x: np.ndarray) -> np.ndarray:
+def _one_minus_exp_over(x: float | np.ndarray) -> np.ndarray:
     """(1 - e^{-x}) / x for x >= 0, with the x -> 0 limit (= 1) handled exactly."""
     x = np.asarray(x, dtype=float)
     small = np.abs(x) < 1e-8
@@ -253,9 +260,9 @@ def _lewis_call_prices(
     log_cf: Callable[[np.ndarray], np.ndarray],
     total_var: float,
     jump_extent: float = 0.0,
-    grid: Optional[_LewisGrid] = None,
+    grid: _LewisGrid | None = None,
     rtol: float = _PRICE_RTOL,
-) -> Tuple[np.ndarray, _LewisGrid]:
+) -> tuple[np.ndarray, _LewisGrid]:
     """
     Core engine: discounted call prices for one expiry, plus the grid used.
 
@@ -379,8 +386,8 @@ def heston_call_price(
     sigma: float,
     rho: float,
     v0: float,
-    damping_alpha: Optional[float] = None,
-    n_integration_points: Optional[int] = None,
+    damping_alpha: float | None = None,
+    n_integration_points: int | None = None,
 ) -> float:
     """
     Price one European call under Heston (present value, i.e. discounted).
@@ -429,8 +436,8 @@ def heston_call_batch(
     sigma: float,
     rho: float,
     v0: float,
-    n_points: Optional[int] = None,
-    v_upper: Optional[float] = None,
+    n_points: int | None = None,
+    v_upper: float | None = None,
 ) -> np.ndarray:
     """
     Price European calls for one expiry, vectorised over strikes.
@@ -649,8 +656,8 @@ def bates_call_price(
     lam: float,
     mu_j: float,
     sigma_j: float,
-    damping_alpha: Optional[float] = None,
-    n_integration_points: Optional[int] = None,
+    damping_alpha: float | None = None,
+    n_integration_points: int | None = None,
 ) -> float:
     """
     Price one European call under the Bates (1996) SVJ model.
@@ -682,8 +689,8 @@ def bates_call_batch(
     lam: float,
     mu_j: float,
     sigma_j: float,
-    n_points: Optional[int] = None,
-    v_upper: Optional[float] = None,
+    n_points: int | None = None,
+    v_upper: float | None = None,
 ) -> np.ndarray:
     """
     Batch-price European calls under Bates (1996) SVJ, vectorised over strikes.
@@ -713,6 +720,173 @@ def bates_call_batch(
         jump_extent=jump_extent,
     )
     return _clip_calls(calls, S, strikes, T, r, q)
+
+
+# ── Analytic parameter Jacobian (C23) ────────────────────────────────────────
+#
+# d(call)/d(kappa, theta, sigma, rho, v0) on the SAME trapezoid grid the
+# adaptive engine converged on, from the closed-form gradient of the
+# little-trap log-CF (chain rule through beta, d, g; cf. Cui, del Bano
+# Rollin & Germano 2017, arXiv:1511.08718, who differentiate the same CF).
+# On a fixed grid the price is a finite sum of smooth terms, so this is the
+# exact derivative of the quadrature (no step-size choice, no grid-switch
+# noise); it differs from the derivative of the true price only by the
+# derivative of the 1e-10*DF*F quadrature error. The control-variate variance
+# w is held fixed: C_BS(w) + DF sqrt(FK)/pi * sum(phi_BS(w)) does not depend
+# on w beyond that same quadrature error.
+
+HESTON_PARAM_NAMES = ("kappa", "theta", "sigma", "rho", "v0")
+
+
+def _heston_log_cf_grad(z, T: float, kappa: float, theta: float, sigma: float,
+                        rho: float, v0: float):
+    """log-CF (as _heston_log_cf) and its gradient w.r.t. (kappa, theta,
+    sigma, rho, v0), shape (5, len(z)). Same little-trap algebra; the
+    derivative of each intermediate is carried alongside it.
+
+    The sigma-derivative contains 2 L dS2/sigma^4 - 2 dL/sigma^2 with
+    L = O(sigma^2), a cancellation as sigma -> 0; at sigma = 1e-3 (the box
+    floor) the price Jacobian still agrees with a 4th-order central
+    difference to < 1e-5 of each column's scale
+    (tests/test_heston_jacobian.py).
+    """
+    z = np.asarray(z, dtype=complex)
+    sig = max(float(sigma), 1e-12)
+    s2 = sig * sig
+    s = z * (z + 1j)
+    beta = kappa - 1j * rho * sig * z
+    d = np.sqrt(beta * beta + s2 * s)
+    bpd = beta + d
+    one_m_e = -np.expm1(-d * T)
+    E = 1.0 - one_m_e
+    g = -s2 * s / (bpd * bpd)
+    Q = 1.0 - g * E
+    M = bpd * Q
+    D = -s * one_m_e / M
+    R = g * one_m_e / (1.0 - g)
+    L = _clog1p(R)
+    A = -s * T / bpd - 2.0 * L / s2
+    C = kappa * theta * A
+    log_cf = C + D * v0
+
+    grad = np.empty((5, *z.shape), dtype=complex)
+    grad[1] = kappa * A                       # theta: C is linear in theta
+    grad[4] = D                               # v0
+    zero = np.zeros_like(z)
+    # (index, d beta, d sigma^2, d kappa)
+    for idx, dbeta, dS2, dkap in ((0, 1.0 + zero, 0.0, 1.0),
+                                  (2, -1j * rho * z, 2.0 * sig, 0.0),
+                                  (3, -1j * sig * z, 0.0, 0.0)):
+        dd = (beta * dbeta + 0.5 * dS2 * s) / d
+        dbpd = dbeta + dd
+        dE = -T * E * dd
+        d_ome = -dE
+        dg = -dS2 * s / (bpd * bpd) - 2.0 * g * dbpd / bpd
+        dQ = -(dg * E + g * dE)
+        dM = dbpd * Q + bpd * dQ
+        dD = (-s * d_ome - D * dM) / M
+        dR = (dg * one_m_e + g * d_ome + R * dg) / (1.0 - g)
+        dL = dR / (1.0 + R)
+        dA = s * T * dbpd / (bpd * bpd) - 2.0 * dL / s2 + 2.0 * L * dS2 / (s2 * s2)
+        grad[idx] = kappa * theta * dA + dkap * theta * A + v0 * dD
+    return log_cf, grad
+
+
+def _lewis_call_derivs(S: float, strikes: np.ndarray, T: float, r: float, q: float,
+                       log_cf_grad: Callable, grid: _LewisGrid) -> np.ndarray:
+    """d(call)/d(params) on a fixed Lewis grid, shape (len(strikes), P).
+
+    log_cf_grad(z) -> (log_cf (n,), grad (P, n)). Strikes <= 0 (call =
+    DF (F - K), no parameter dependence) get zero rows.
+    """
+    strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
+    df = np.exp(-r * T)
+    F = S * np.exp((r - q) * T)
+    pos = np.isfinite(strikes) & (strikes > 0)
+    u = grid.h * np.arange(grid.n)
+    log_cf, grad = log_cf_grad(u - 0.5j)
+    P = grad.shape[0]
+    out = np.zeros((len(strikes), P))
+    if not pos.any():
+        return out
+    K = strikes[pos]
+    x = np.log(F / K)
+    w = np.full(grid.n, grid.h)
+    w[0] *= 0.5
+    # d/dp of (phi_BS - phi)/uu = -phi * dlogphi/dp / uu
+    gw = -(np.exp(log_cf) / (u * u + 0.25) * w)[None, :] * grad
+    pref = df * np.sqrt(F * K) / np.pi
+    acc = np.zeros((len(K), P))
+    # one phase matrix per block, shared by every parameter column (same
+    # explicit multiply-sum as _lewis_sum: no BLAS thread pool)
+    for start in range(0, grid.n, _LEWIS_BLOCK):
+        sl = slice(start, start + _LEWIS_BLOCK)
+        phase = np.exp(1j * np.outer(x, u[sl]))
+        acc += (phase[:, None, :] * gw[None, :, sl]).sum(axis=2).real
+    out[pos] = pref[:, None] * acc
+    return out
+
+
+def heston_call_batch_grid(
+    S: float, strikes: np.ndarray, T: float, r: float, q: float,
+    kappa: float, theta: float, sigma: float, rho: float, v0: float,
+) -> tuple[np.ndarray, _LewisGrid | None]:
+    """heston_call_batch's prices plus the Lewis grid the adaptive engine
+    converged on (None for T <= 0), so a Jacobian at the same parameters can
+    reuse it (heston_call_batch_jac(..., grid=grid))."""
+    strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
+    if T <= 0:
+        F = S * np.exp((r - q) * T)
+        return np.maximum(F - strikes, 0.0) * np.exp(-r * T), None
+    raw, grid = _lewis_call_prices(
+        S, strikes, T, r, q,
+        lambda z: _heston_log_cf(z, T, kappa, theta, sigma, rho, v0),
+        float(_expected_integrated_variance(T, kappa, theta, v0)),
+    )
+    return _clip_calls(raw, S, strikes, T, r, q), grid
+
+
+def heston_call_batch_jac(
+    S: float,
+    strikes: np.ndarray,
+    T: float,
+    r: float,
+    q: float,
+    kappa: float,
+    theta: float,
+    sigma: float,
+    rho: float,
+    v0: float,
+    grid: _LewisGrid | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calls for one expiry and their analytic Jacobian
+    d(call)/d(kappa, theta, sigma, rho, v0), shape (M, 5).
+
+    grid=None: the prices are exactly heston_call_batch's and the derivative
+    is taken on the grid the adaptive engine converged on for these
+    parameters (see the comment block above). With a grid (from
+    heston_call_batch_grid at the same parameters) both are evaluated on it
+    without re-adapting. Where a price is clipped to the no-arbitrage band
+    its row is zero (the clipped price does not move). Puts priced by parity
+    off the same F and DF share the call's derivative.
+    """
+    strikes = np.atleast_1d(np.asarray(strikes, dtype=float))
+    if T <= 0:
+        F = S * np.exp((r - q) * T)
+        return np.maximum(F - strikes, 0.0) * np.exp(-r * T), np.zeros((len(strikes), 5))
+    raw, grid = _lewis_call_prices(
+        S, strikes, T, r, q,
+        lambda z: _heston_log_cf(z, T, kappa, theta, sigma, rho, v0),
+        float(_expected_integrated_variance(T, kappa, theta, v0)),
+        grid=grid,
+    )
+    calls = _clip_calls(raw, S, strikes, T, r, q)
+    jac = _lewis_call_derivs(
+        S, strikes, T, r, q,
+        lambda z: _heston_log_cf_grad(z, T, kappa, theta, sigma, rho, v0), grid)
+    clipped = (calls != raw) | ~np.isfinite(raw)
+    jac[clipped] = 0.0
+    return calls, jac
 
 
 # ── Greeks ────────────────────────────────────────────────────────────────────
@@ -906,6 +1080,33 @@ def heston_vix_term_index(kappa: float, theta: float, sigma: float, v0: float, T
     return float(out) if np.ndim(out) == 0 else out
 
 
+def _d_one_minus_exp_over(x: np.ndarray) -> np.ndarray:
+    """d/dx (1 - e^{-x})/x = -(1 - e^{-x} - x e^{-x}) / x^2 (series near 0)."""
+    x = np.asarray(x, dtype=float)
+    small = np.abs(x) < 1e-3
+    safe = np.where(small, 1.0, x)
+    exact = -(-np.expm1(-safe) - safe * np.exp(-safe)) / (safe * safe)
+    return np.where(small, -0.5 + x / 3.0 - x * x / 8.0 + x ** 3 / 30.0 - x ** 4 / 144.0, exact)
+
+
+def heston_vix_term_index_jac(kappa: float, theta: float, sigma: float, v0: float, T):
+    """heston_vix_term_index and its Jacobian w.r.t. (kappa, theta, sigma,
+    rho, v0), shape (len(T), 5). The sigma and rho columns are zero: the
+    spot-starting index is E[average variance], which does not depend on
+    them under Heston. A non-positive average variance (outside any box this
+    project uses) gets a zero row."""
+    T = np.atleast_1d(np.asarray(T, dtype=float))
+    f = _one_minus_exp_over(kappa * T)
+    avg = theta + (v0 - theta) * f
+    idx = 100.0 * np.sqrt(np.maximum(avg, 0.0))
+    half = np.where(avg > 0, 50.0 / np.sqrt(np.where(avg > 0, avg, 1.0)), 0.0)
+    jac = np.zeros((len(T), 5))
+    jac[:, 0] = half * (v0 - theta) * T * _d_one_minus_exp_over(kappa * T)
+    jac[:, 1] = half * (1.0 - f)
+    jac[:, 4] = half * f
+    return idx, jac
+
+
 def heston_vix_index(
     kappa: float,
     theta: float,
@@ -1018,6 +1219,56 @@ def heston_vix_future_exact(kappa: float, theta: float, sigma: float, v0: float,
     a = theta * (1.0 - b)
     out = 100.0 * _expected_sqrt_affine_cir(a, b, kappa, theta, sigma, v0, T)
     return float(out[0]) if np.ndim(T) == 0 else out
+
+
+_VVIX_W = np.arange(-30.0, 8.0 + 1e-9, 0.05)
+
+
+def _expected_log_affine_cir(a, b, kappa, theta, sigma, v0, T):
+    """E[ln(a + b v_T)] for CIR v_T (started at v0), vectorised over T; a > 0.
+
+    Frullani: ln(Y/m) = int_0^inf (e^{-t} - e^{-tY/m}) / t dt, so with
+    t = e^w, E[ln Y] = ln m + int (e^{-e^w} - E[e^{-e^w Y/m}]) dw, m = E[Y],
+    and the CIR Laplace transform of _expected_sqrt_affine_cir. The integrand
+    is O(e^{2w}) as w -> -inf (the O(e^w) terms cancel because m = E[Y]) and
+    vanishes faster than exponentially as w -> +inf (a > 0), so a trapezoid
+    on [-30, 8] with step 0.05 converges far below the 1e-10 level.
+    """
+    T = np.atleast_1d(np.asarray(T, dtype=float))
+    ekT = np.exp(-kappa * T)
+    one_m_ekT = -np.expm1(-kappa * T)
+    c = sigma**2 * T * _one_minus_exp_over(kappa * T) / 4.0
+    m = np.maximum(a + b * (theta * one_m_ekT + v0 * ekT), 1e-300)
+    w = _VVIX_W[None, :]
+    s = np.exp(w) / m[:, None]
+    bs = b * s
+    y = 2.0 * c[:, None] * bs
+    l1p = np.where(y < 1e-8, 1.0 - 0.5 * y, np.log1p(y) / np.where(y < 1e-8, 1.0, y))
+    log_L = -(a * s + theta * one_m_ekT[:, None] * bs * l1p
+              + v0 * ekT[:, None] * bs / (1.0 + y))
+    integrand = np.exp(-np.exp(w)) - np.exp(log_L)
+    hw = _VVIX_W[1] - _VVIX_W[0]
+    body = hw * (integrand.sum(axis=1) - 0.5 * (integrand[:, 0] + integrand[:, -1]))
+    return np.log(m) + body
+
+
+def heston_vvix(kappa: float, theta: float, sigma: float, v0: float,
+                T: float = _VIX_TAU, tau: float = _VIX_TAU) -> float:
+    """Model counterpart of Cboe's ^VVIX: the 30-day log-contract (variance
+    swap) volatility of VIX on its forward, in vol points,
+        VVIX^2 = -(2/T) E[ln(VIX_T / E[VIX_T])],   VIX_T = 100 sqrt(a + b v_T),
+    which is what the VVIX formula estimates from a strip of 30-day VIX
+    options. Exact up to quadrature (CIR Laplace transform, no sampling).
+    It grows with sigma; the joint loss is blind to it while the VIX-options
+    weight is 0 (the spot indices do not depend on sigma), so the comparison
+    with the market ^VVIX is reported as an out-of-sample check.
+    """
+    b = float(_one_minus_exp_over(kappa * tau))
+    a = theta * (1.0 - b)
+    e_sqrt = float(_expected_sqrt_affine_cir(a, b, kappa, theta, sigma, v0, T)[0])
+    e_log = float(_expected_log_affine_cir(a, b, kappa, theta, sigma, v0, T)[0])
+    var = (2.0 / T) * (math.log(e_sqrt) - 0.5 * e_log)
+    return 100.0 * math.sqrt(max(var, 0.0))
 
 
 def heston_vix_futures_upper_bound(
@@ -1212,7 +1463,7 @@ def _implied_vol_surface_loss(
     S: float,
     r: float,
     q: float,
-    weights: Optional[np.ndarray] = None,
+    weights: np.ndarray | None = None,
     feller_penalty: float = 0.0,
 ) -> float:
     """
@@ -1245,7 +1496,7 @@ def _implied_vol_surface_loss(
     -------
     float — weighted MSE loss (vol decimal squared)
     """
-    kappa, theta, sigma, rho, v0 = params
+    kappa, theta, sigma, _rho, _v0 = params
     surface = market_surface.reset_index(drop=True)
     n = len(surface)
     if n == 0:
@@ -1455,10 +1706,10 @@ def heston_monte_carlo(
     n_paths: int = MC_PATHS,
     n_steps_per_year: int = MC_STEPS_PER_YEAR,
     seed: int = RANDOM_SEED,
-    cache_key: Optional[str] = None,
+    cache_key: str | None = None,
     scheme: str = "qe",
     antithetic: bool = MC_ANTITHETIC,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Simulate Heston paths.
 
@@ -1585,8 +1836,8 @@ def mc_option_price(
     T: float,
     r: float,
     right: str = "C",
-    antithetic: Optional[bool] = None,
-) -> Tuple[float, float]:
+    antithetic: bool | None = None,
+) -> tuple[float, float]:
     """
     Price a European option from pre-simulated paths.
 
@@ -1601,10 +1852,7 @@ def mc_option_price(
     Tuple[float, float] : (price, standard_error)
     """
     S_T = paths_S[:, -1]
-    if right.upper() == "C":
-        payoffs = np.maximum(S_T - K, 0.0)
-    else:
-        payoffs = np.maximum(K - S_T, 0.0)
+    payoffs = np.maximum(S_T - K, 0.0) if right.upper() == "C" else np.maximum(K - S_T, 0.0)
 
     discounted = np.exp(-r * T) * payoffs
     n = len(discounted)
@@ -1640,9 +1888,9 @@ class HestonModel:
 
     def __init__(self):
         self.params: dict = dict(HESTON_DEFAULTS)
-        self.calib_result: Optional[dict] = None
+        self.calib_result: dict | None = None
         self.is_calibrated: bool = False
-        self._S: Optional[float] = None
+        self._S: float | None = None
         self._r: float = _DEFAULT_RATE
         self._q: float = _DEFAULT_DIV
 
@@ -1672,7 +1920,7 @@ class HestonModel:
 
         return result
 
-    def _spot(self, S: Optional[float]) -> float:
+    def _spot(self, S: float | None) -> float:
         return self._S if S is None else S
 
     def price(
@@ -1680,7 +1928,7 @@ class HestonModel:
         K: float,
         T: float,
         right: str = "C",
-        S: Optional[float] = None,
+        S: float | None = None,
     ) -> float:
         """Price a European option under calibrated Heston (present value)."""
         self._check_calibrated()
@@ -1689,12 +1937,11 @@ class HestonModel:
         if right.upper() == "C":
             return heston_call_price(s, K, T, self._r, self._q,
                                      p["kappa"], p["theta"], p["sigma"], p["rho"], p["v0"])
-        else:
-            return heston_put_price(s, K, T, self._r, self._q,
-                                    p["kappa"], p["theta"], p["sigma"], p["rho"], p["v0"])
+        return heston_put_price(s, K, T, self._r, self._q,
+                                p["kappa"], p["theta"], p["sigma"], p["rho"], p["v0"])
 
     def implied_vol(
-        self, K: float, T: float, right: str = "C", S: Optional[float] = None
+        self, K: float, T: float, right: str = "C", S: float | None = None
     ) -> float:
         """Model-implied vol for a given strike/maturity (NaN if ill-posed)."""
         price = self.price(K, T, right, S)
@@ -1702,7 +1949,7 @@ class HestonModel:
         return implied_vol_from_price(price, s, K, T, self._r, self._q, right=right)
 
     def greeks(
-        self, K: float, T: float, right: str = "C", S: Optional[float] = None
+        self, K: float, T: float, right: str = "C", S: float | None = None
     ) -> dict:
         """Compute all Greeks for a given option (units: see heston_greeks)."""
         self._check_calibrated()

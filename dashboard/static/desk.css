@@ -1,0 +1,722 @@
+/* desk.css — design system of the dashboard (dark research-terminal theme).
+ *
+ * Tokens follow Palantir Blueprint's dark palette (Apache-2.0) on a 4 px grid.
+ * Colour carries meaning only:
+ *   --pos / --neg      P&L and signed changes: blue gain / orange loss, always
+ *                      with a sign glyph (+ / −, ▲ / ▼), never colour alone;
+ *   --ok / --watch / --breach   status (RAG), always with a word and a glyph;
+ *   --info             links and focus.
+ * Text tokens reach WCAG 2.2 AA (4.5:1) on every surface; series colours and
+ * focus rings reach 3:1 (SC 1.4.11). Both are checked by test_dashboard.py.
+ */
+@font-face {
+  font-family: "Inter Desk";
+  src: url("fonts/InterDesk-4.1-wght400-700.woff2") format("woff2");
+  font-weight: 400 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Desk Mono";
+  src: url("fonts/DeskMono-400.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Desk Mono";
+  src: url("fonts/DeskMono-500.woff2") format("woff2");
+  font-weight: 500 700; font-style: normal; font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  /* surfaces */
+  --bg-deep:  #0d1014;
+  --bg:       #111418;
+  --surface:  #1c2127;
+  --surface2: #252a31;
+  --surface3: #2f343c;
+  --tooltip:  #252a31;
+  --line:     #2f343c;
+  --line2:    #404854;
+  --grid:     #2a2f37;
+  /* text */
+  --text:     #e5e8eb;
+  --text2:    #abb3bf;
+  --text3:    #9aa3b0;
+  /* meaning */
+  --pos:      #8abbff;
+  --neg:      #fbb360;
+  --pos-fill: #4c90f0;
+  --neg-fill: #ec9a3c;
+  --ok:       #72ca9b;
+  --watch:    #fbd065;
+  --breach:   #fa999c;
+  --info:     #8abbff;
+  --focus:    #8abbff;
+  --tint-ok:     #1b2a26;
+  --tint-watch:  #2b2819;
+  --tint-breach: #2e1f22;
+  --tint-info:   #1c2738;
+  /* categorical series (Okabe–Ito, the six that reach 3:1 on the panels) */
+  --cat-0: #56b4e9;
+  --cat-1: #e69f00;
+  --cat-2: #009e73;
+  --cat-3: #f0e442;
+  --cat-4: #cc79a7;
+  --cat-5: #d55e00;
+  --series-headline: #e5e8eb;
+  /* series indexed by maturity (desk_charts.TENOR_RAMP): a violet lightness ramp,
+     shortest lightest; no model, status or P&L colour, 3:1 on the panels */
+  --ramp-0: #ece6ff;
+  --ramp-1: #d3c8fa;
+  --ramp-2: #bbaaf2;
+  --ramp-3: #a58eea;
+  --ramp-4: #9580e2;
+  --ramp-5: #8670d6;
+  --series-muted: #9aa3b0;
+  /* type */
+  --sans: "Inter Desk", Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Desk Mono", "Inter Desk", ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --num-features: "tnum" 1, "zero" 1, "cv01" 1;
+  /* geometry (4 px grid) */
+  --u: 4px;
+  --gap: 8px;
+  --radius: 3px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); color: var(--text); }
+html { font-size: 13px; -webkit-text-size-adjust: 100%; }
+body {
+  font-family: var(--sans);
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums lining-nums;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  display: flex; flex-direction: column;
+}
+h1, h2, h3, h4 { font: inherit; }
+a { color: var(--info); text-underline-offset: 2px; }
+a:hover { color: var(--text); }
+code, .code, kbd { font-family: var(--mono); font-size: 0.92em; color: var(--text2); }
+kbd { border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 2px; padding: 0 4px; background: var(--surface2); }
+strong { font-weight: 600; color: var(--text); }
+sub, sup { font-size: 0.72em; }
+.num, td.num, th.num, .kpi-value, .tk-val, .tk-chg, .mono-num { font-feature-settings: var(--num-features); }
+.mono { font-family: var(--mono); }
+.sym { text-transform: none !important; letter-spacing: 0 !important; }   /* σ must not become Σ, β not B */
+
+/* ── accessibility ───────────────────────────────────────────────────── */
+.sr-only {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: absolute; left: 12px; top: -48px; z-index: 300; padding: 8px 14px;
+  background: var(--text); color: #000; font-weight: 600; border-radius: var(--radius); text-decoration: none;
+}
+.skip-link:focus { top: 8px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* ── status bar (data as-of per source, model, build) ────────────────── */
+.statusbar {
+  background: var(--bg-deep); border-bottom: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11px; color: var(--text3);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px;
+  padding: 3px 16px; min-height: 24px;
+}
+.statusbar .sb-item { white-space: nowrap; }
+.statusbar .sb-k { color: var(--text3); margin-right: 4px; }
+.statusbar .sb-v { color: var(--text2); }
+.statusbar .sb-right { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+/* the view-time freshness text replaces "as of <date>" after first paint: its
+   width is reserved so the status bar never re-wraps (no layout shift) */
+.statusbar #freshness { display: inline-block; min-width: 18ch; }
+.sb-state { font-weight: 500; letter-spacing: 0.04em; }
+.lvl-ok    { color: var(--ok); }
+.lvl-warn  { color: var(--watch); }
+.lvl-error, .lvl-missing { color: var(--breach); }
+.lvl-unknown { color: var(--text3); }
+
+/* ── navigation ──────────────────────────────────────────────────────── */
+.nav {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(17, 20, 24, 0.97); border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; padding: 0 16px; height: 40px;
+}
+.brand { display: flex; align-items: center; gap: 8px; margin-right: 20px; white-space: nowrap; color: var(--text); text-decoration: none; font-weight: 600; font-size: 13px; }
+.brand svg { flex-shrink: 0; }
+.brand .brand-sub { color: var(--text3); font-weight: 400; }
+.nav-links { display: flex; height: 100%; }
+.nav-link {
+  display: flex; align-items: center; padding: 0 12px; height: 100%;
+  color: var(--text2); text-decoration: none; font-size: 12.5px; font-weight: 500;
+  border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.nav-link:hover { color: var(--text); background: var(--surface); }
+.nav-link[aria-current="page"] { color: var(--text); border-bottom-color: var(--pos-fill); }
+.nav-link:focus-visible { outline-offset: -2px; }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--text3); }
+.nav-toggle { display: none; background: none; border: 1px solid var(--line2); color: var(--text2); border-radius: var(--radius); padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; margin-left: auto; }
+
+/* ── ticker strip ────────────────────────────────────────────────────── */
+.ticker {
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  font-family: var(--mono); font-size: 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 0; padding: 3px 8px; min-height: 28px;
+}
+.tk { display: inline-flex; align-items: baseline; gap: 6px; padding: 0 10px; border-right: 1px solid var(--line); white-space: nowrap; }
+.tk:last-child { border-right: none; }
+.tk-label { color: var(--text3); font-size: 11px; letter-spacing: 0.04em; }
+.tk-val { color: var(--text); font-weight: 500; }
+.tk-chg { font-size: 11.5px; }
+.tk-note { color: var(--text3); font-size: 11px; }
+
+/* ── signed numbers / P&L convention ─────────────────────────────────── */
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+.flat { color: var(--text2); }
+
+/* ── page ────────────────────────────────────────────────────────────── */
+.page { width: 100%; max-width: 1680px; margin: 0 auto; padding: 12px 16px 32px; flex: 1; }
+.page-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 4px 0 12px; }
+.page-title { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+.page-sub { flex: 0 0 100%; font-size: 12.5px; color: var(--text2); }
+.page-badge { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; color: var(--text3); }
+.page-badge .sep { color: var(--text3); padding: 0 2px; display: inline-block; }
+.nowrap { white-space: nowrap; }
+
+/* 12-column grid */
+.g { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }
+.g > * { min-width: 0; }
+.s2 { grid-column: span 2; } .s3 { grid-column: span 3; } .s4 { grid-column: span 4; }
+.s5 { grid-column: span 5; } .s6 { grid-column: span 6; } .s7 { grid-column: span 7; }
+.s8 { grid-column: span 8; } .s9 { grid-column: span 9; } .s12 { grid-column: 1 / -1; }
+/* two blocks side by side inside one panel (a table and the chart that reads it),
+   stacked below desk width */
+.split { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 8px 16px; align-items: start; }
+.split > * { min-width: 0; }
+.split > * > * + * { margin-top: 8px; }
+.section-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text3); margin: 16px 0 6px; display: flex; align-items: center; gap: 8px;
+}
+.section-title::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+/* ── panels ──────────────────────────────────────────────────────────── */
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); display: flex; flex-direction: column; min-width: 0; scroll-margin-top: 48px; }
+.panel-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  min-height: 30px; padding: 4px 10px; border-bottom: 1px solid var(--line);
+}
+.panel-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); line-height: 1.4; }
+.panel-title .qual { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text3); }
+/* the date and the '#' link move as one group: right-aligned, on the title's line or the next */
+.panel-side { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 8px; min-width: 0; }
+.panel-meta { font-family: var(--mono); font-size: 10.5px; color: var(--text3); white-space: nowrap; }
+.panel-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.btn-link { background: none; border-color: transparent; color: var(--text3); font-family: var(--mono); padding: 0 4px; }
+.btn-link:hover, .btn-link:focus-visible { color: var(--info); border-color: var(--line2); }
+.tbl-wrap.capped { max-height: 420px; overflow-y: auto; }
+.tbl-wrap.capped th { position: sticky; top: 0; z-index: 1; }
+.panel-body { padding: 10px 12px; flex: 1; min-width: 0; }
+.panel-body > * + * { margin-top: 8px; }
+.panel-foot { padding: 6px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--text3); }
+.panel.flush .panel-body { padding: 0; }
+.prose { font-size: 12.5px; color: var(--text2); line-height: 1.55; max-width: 115ch; }
+.prose p + p { margin-top: 6px; }
+.note { font-size: 11.5px; color: var(--text3); line-height: 1.5; max-width: 120ch; }
+.src { font-family: var(--mono); font-size: 10.5px; color: var(--text3); overflow-wrap: anywhere; }
+
+/* ── buttons, chips, tabs ────────────────────────────────────────────── */
+.btn {
+  font: inherit; font-size: 11px; line-height: 1.5; color: var(--text2); background: var(--surface2);
+  border: 1px solid var(--line2); border-radius: 2px; padding: 1px 7px; cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px; text-decoration: none;
+}
+.btn:hover { color: var(--text); border-color: var(--text3); }
+.btn[hidden] { display: none; }   /* a legend button of another tab's series (desk.js filterChart) */
+.btn[aria-pressed="true"], .btn[aria-selected="true"] { color: var(--text); background: var(--surface3); border-color: var(--pos-fill); }
+.btn[aria-pressed="false"] .key-swatch { opacity: 0.35; }
+.btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
+.btn .key-swatch.dashed { border-top-style: dashed; }
+.btn .key-swatch.dotted { border-top-style: dotted; }
+.btn .key-swatch.dot { width: 7px; height: 7px; border: none; border-radius: 50%; background: currentColor; }
+.btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }
+.btn .key-swatch.diamond { width: 7px; height: 7px; border: none; border-radius: 0; background: currentColor; transform: rotate(45deg); }
+.btn .key-swatch.tri { width: 0; height: 0; border-top: none; border-left: 4.5px solid transparent; border-right: 4.5px solid transparent; border-bottom: 8px solid currentColor; }
+.btn .key-swatch.tri.down { border-bottom: none; border-top: 8px solid currentColor; }
+.legend-bar { display: flex; flex-wrap: wrap; gap: 4px; }
+/* a legend button wider than its bar wraps its label instead of widening the page
+   (the variance-swap strip's 'Cboe close (16:15 ET): VIX9D, ...' at 320 px) */
+.legend-bar .btn { white-space: normal; max-width: 100%; text-align: left; }
+.legend-bar .btn .key-swatch { flex: none; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; padding: 0 6px; border-radius: 2px; border: 1px solid var(--line2); color: var(--text2);
+  white-space: nowrap; line-height: 18px; vertical-align: 1px;
+}
+.chip-ok     { color: var(--ok);     border-color: rgba(114, 202, 155, 0.45); background: var(--tint-ok); }
+.chip-watch  { color: var(--watch);  border-color: rgba(251, 208, 101, 0.45); background: var(--tint-watch); }
+.chip-breach { color: var(--breach); border-color: rgba(250, 153, 156, 0.45); background: var(--tint-breach); }
+.chip-info   { color: var(--info);   border-color: rgba(138, 187, 255, 0.45); background: var(--tint-info); }
+.chip-muted  { color: var(--text3); }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+/* a region shown in one of two units (the scenario grid: idx pts, or $ per SPX
+   contract); without JavaScript the base unit shows */
+.units:not([data-show="alt"]) [data-unit="alt"], .units[data-show="alt"] [data-unit="base"] { display: none; }
+
+/* ── KPI tiles ───────────────────────────────────────────────────────── */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.kpi { background: var(--surface); padding: 7px 10px 8px; min-width: 0; }
+.kpi-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-value { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; color: var(--text); overflow-wrap: anywhere; }
+.kpi-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 2px; }
+.kpi-sub { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 1px; }
+.kpi-ci { font-family: var(--mono); font-size: 10.5px; color: var(--text2); margin-top: 2px; }
+.kpi-ci.faint { font-family: var(--sans); color: var(--text3); }
+/* a range across sessions is not a confidence interval: marked apart from one */
+.kpi-range { border-left: 2px dashed var(--line2); padding-left: 6px; }
+/* a tile whose caveat needs two tracks of a KPI strip (the hedge's Taylor check) */
+.kpi-wide { grid-column: span 2; }
+
+/* parameter tiles */
+.param { background: var(--surface); padding: 8px 10px; min-width: 0; }
+.param-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.param-sym { font-size: 15px; font-weight: 600; }
+.param-name { font-size: 10.5px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; }
+.param-val { font-size: 19px; font-weight: 600; line-height: 1.3; }
+.param-meta { font-size: 11px; color: var(--text3); }
+.param-sub { color: var(--text2); }
+.kpis.params-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 8px; }
+@media (max-width: 599px) { .kpis.params-grid { grid-template-columns: minmax(0, 1fr); } }   /* the dot plots stay legible */
+/* each gated fit's value ± 2·SE under its parameter (Calibration #params) */
+svg.dots { display: block; width: 100%; height: auto; margin: 4px 0 2px; overflow: visible; }
+svg.dots text { font-family: var(--mono); font-size: 8.5px; fill: var(--text3); }
+svg.dots .dp-axis { stroke: var(--line2); stroke-width: 1; }
+svg.dots .dp-bound { stroke: var(--breach); stroke-width: 1; stroke-dasharray: 3 2; }
+svg.dots .dp-se { stroke: var(--series-muted); stroke-width: 1.4; }
+svg.dots .dp-dot { fill: var(--series-muted); }
+svg.dots .dp-dot.newest { fill: var(--series-headline); }
+svg.dots .dp-dot.on-bound { fill: none; stroke: var(--breach); stroke-width: 1.4; }
+svg.dots .dp-blabel { fill: var(--breach); }
+.spark { display: block; width: 100%; height: 28px; margin-top: 4px; }
+.spark .spark-line { fill: none; stroke: var(--text2); stroke-width: 1.25; vector-effect: non-scaling-stroke; }
+.spark .spark-last { fill: var(--text); }
+.spark .spark-bound { stroke: var(--breach); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.spark .spark-zero { stroke: var(--line2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.spark .spark-area-pos { fill: rgba(76, 144, 240, 0.22); }
+.spark .spark-area-neg { fill: rgba(236, 154, 60, 0.22); }
+
+/* findings at a glance (Overview): three columns of equal weight, one class set */
+.findings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; margin-bottom: 8px; }
+.find-col { background: var(--surface); padding: 8px 12px 10px; min-width: 0; }
+.find-head { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.find-glyph { font-family: var(--mono); color: var(--text3); }
+.find-list { list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.find-item { font-size: 12px; color: var(--text2); line-height: 1.45; overflow-wrap: anywhere; }
+.find-item a { font-weight: 600; }
+@media (max-width: 860px) { .findings { grid-template-columns: minmax(0, 1fr); } }
+
+/* key results */
+.result { background: var(--surface); padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.result-k { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
+.result-v { font-size: 24px; font-weight: 600; line-height: 1.2; letter-spacing: -0.01em; }
+.result-v .unit { font-size: 0.55em; font-weight: 500; color: var(--text2); margin-left: 3px; }
+.result-d { font-size: 12px; color: var(--text2); }
+/* A signed value's tone. The value rules above (.kpi-value: --text) come after
+   .pos / .neg at the same specificity, so the tone class never showed; these
+   win. The sign glyph stays in the text, so colour is never the only cue. */
+.kpi-value.pos, .result-v.pos, .param-val.pos { color: var(--pos); }
+.kpi-value.neg, .result-v.neg, .param-val.neg { color: var(--neg); }
+
+/* ── tables ──────────────────────────────────────────────────────────── */
+/* Horizontal scroll regions: keyboard-focusable (tabindex=0) and visibly
+   scrollable. Edge shadows appear on the side that has more content (the
+   covers scroll with the content, the shadows do not), and desk.js adds a
+   text hint when a region overflows. position: relative keeps the visually
+   hidden spans inside cells within the scroll box. */
+.tbl-wrap, .heat-wrap {
+  overflow-x: auto; max-width: 100%; position: relative;
+  background:
+    linear-gradient(to right, var(--surface) 30%, rgba(28, 33, 39, 0)) left center / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--surface) 30%, rgba(28, 33, 39, 0)) right center / 32px 100% no-repeat local,
+    linear-gradient(to right, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) left center / 10px 100% no-repeat scroll,
+    linear-gradient(to left, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) right center / 10px 100% no-repeat scroll;
+}
+.site-footer .tbl-wrap { background: none; }
+.scroll-hint { display: none; font-size: 11px; color: var(--text3); margin: 0 0 4px; }
+.scroll-hint::before { content: "\2194\00a0"; color: var(--info); }
+.scroll-hint.show { display: block; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tbl caption { text-align: left; font-size: 11px; color: var(--text3); padding: 0 0 4px; }
+/* A caption inside a horizontal scroll region is as wide as its table, so on a
+   phone the middle of each line was off-screen: it wraps to the region's
+   visible width (a size container) and stays put while the table scrolls. */
+.tbl-wrap, .heat-wrap { container-type: inline-size; }
+.tbl-wrap > table > caption, .heat-wrap > table > caption { position: sticky; left: 0; max-width: 100cqw; }
+.tbl th {
+  text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text3); padding: 5px 8px; border-bottom: 1px solid var(--line2); background: var(--surface); white-space: nowrap;
+}
+.tbl td { padding: 4px 8px; border-bottom: 1px solid var(--line); color: var(--text2); vertical-align: top; }
+.tbl td:first-child { color: var(--text); }
+.tbl .num, .tbl th.num { text-align: right; white-space: nowrap; }
+.tbl td.num { color: var(--text); }
+.tbl tbody tr:hover td { background: var(--surface2); }
+.tbl tr:last-child td { border-bottom: none; }
+.tbl tr.muted td { color: var(--text3); }
+.tbl tr.muted td.num { color: var(--text2); }
+.tbl tr.em td { color: var(--text); font-weight: 600; }
+.tbl td.wrap { white-space: normal; min-width: 180px; }
+.tbl.spec td.wrap { min-width: 12ch; }   /* nine text columns (Research #sleeve-spec) share the width */
+.tbl.dense td, .tbl.dense th { padding: 3px 6px; }
+.tbl.wrap-head th { white-space: normal; vertical-align: bottom; min-width: 7ch; }   /* long heads wrap, the numbers do not */
+/* the delta-quoted grid (Surface #delta-grid): tinted vol and RR/BF cells, the
+   expiry or tenor as the row header (sticky while the region scrolls sideways),
+   the bracketing expiries of a constant-maturity row under its tenor */
+.dgrid { font-family: var(--mono); font-size: 11.5px; }
+.dgrid caption { font-family: var(--sans); }
+.dgrid thead th { vertical-align: bottom; }
+.dgrid th[scope="row"] { position: sticky; left: 0; z-index: 1; text-transform: none; letter-spacing: 0; font-size: 11.5px; font-weight: 600; color: var(--text); white-space: nowrap; background: var(--surface); }
+.dgrid .dg-sub { display: block; font-weight: 400; font-size: 10px; color: var(--text3); }
+.dgrid td.tint { border-bottom-color: var(--surface); }
+.dgrid tbody tr:hover td.tint { filter: brightness(1.08); }
+.dgrid .xp-tag { display: block; font-family: var(--sans); font-size: 9.5px; font-weight: 600; white-space: nowrap; }
+.dgrid tr.muted th[scope="row"] { color: var(--text3); }
+/* a model's name stays on one line in a desktop-wide region; in a narrower one (a
+   1024 px screen, or a card on a phone) it wraps rather than scroll the table */
+.tbl .name { white-space: nowrap; }
+@container (max-width: 1100px) { .tbl .name { white-space: normal; } }
+.dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; font-size: 12px; align-items: baseline; }
+.dl dd, .pm-v, .tbl td.wrap { overflow-wrap: anywhere; }
+code { overflow-wrap: anywhere; }
+.dl dt { color: var(--text3); }
+.dl dd { color: var(--text); font-feature-settings: var(--num-features); }
+
+/* heatmap tables (server-rendered: work without JS, numbers in every cell) */
+
+.heat { border-collapse: separate; border-spacing: 1px; font-family: var(--mono); font-size: 10.5px; width: 100%; }
+.heat caption { text-align: left; font-family: var(--sans); font-size: 11px; color: var(--text3); padding-bottom: 4px; }
+.heat th { font-weight: 500; color: var(--text3); padding: 2px 4px; white-space: nowrap; text-align: center; }
+.heat th[scope="row"] { text-align: left; padding-right: 8px; color: var(--text2); }
+.heat td { min-width: 40px; height: 26px; text-align: center; vertical-align: middle; border-radius: 1px; padding: 0 3px; white-space: nowrap; }
+/* two-tone focus ring: black and white, so one of the two reaches 3:1 on any
+   cell colour (the single --focus ring vanished on the light ends of the ramps) */
+.heat td:focus-visible { outline: 2px solid #000; outline-offset: -2px; box-shadow: inset 0 0 0 4px #fff; }
+.heat td.flag:focus-visible { box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 6px var(--breach); }
+.heat td.empty { background: var(--bg); color: var(--text3); }
+.heat td.flag { box-shadow: inset 0 0 0 2px var(--breach); font-weight: 600; }
+/* a cell's first line is its value (the vomma flag: the P&L ratio, 12 px), the
+   second a secondary one; no text in a heatmap is under 10.5 px (it was 9.5) */
+.heat .vv { display: block; font-size: 12px; }
+.heat .z { display: block; font-size: 10.5px; }
+.heat-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 18px; }
+/* the quote inspector's keyboard readout under a smile (desk.js initQuotes): room
+   for a quote's lines at desk width, so a hover does not move the page below */
+.quote-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 4.6em; margin: 4px 0 0; padding: 2px 4px; border-radius: 3px; }
+.quote-readout:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+/* a segmented control: one choice of two or three (aria-pressed buttons) */
+.seg { display: inline-flex; margin: 6px 0 2px; }
+.seg .btn { border-radius: 0; }
+.seg .btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.seg .btn:last-child { border-radius: 0 var(--radius) var(--radius) 0; margin-left: -1px; }
+.ramp { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text3); font-family: var(--mono); flex-wrap: wrap; }
+.ramp-bar { width: 120px; height: 8px; border-radius: 1px; border: 1px solid var(--line2); }
+
+/* ── charts ──────────────────────────────────────────────────────────── */
+.chart { position: relative; width: 100%; height: 260px; }
+.chart.h180 { height: 180px; } .chart.h220 { height: 220px; } .chart.h300 { height: 300px; }
+.chart.h340 { height: 340px; } .chart.h400 { height: 400px; } .chart.h440 { height: 440px; }
+.chart-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: space-between; }
+.chart-data.show { position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal; }
+.chart-data table { border-collapse: collapse; font-size: 11.5px; }
+.chart-data th, .chart-data td { padding: 2px 8px; border-bottom: 1px solid var(--line); text-align: left; font-feature-settings: var(--num-features); }
+.chart-data th { color: var(--text3); font-weight: 600; }
+.chart-data caption { text-align: left; color: var(--text3); font-size: 11px; padding-bottom: 3px; }
+.chart-fallback { display: none; }
+.charts-failed .chart, .no-js .chart { display: none; }
+/* controls that only drive a chart do nothing without one (the smile's expiry
+   tabs stay: they also switch the per-expiry tables shown in its place) */
+.charts-failed [data-load-3d], .charts-failed [data-legend-for], .charts-failed [data-zoom-for] { display: none !important; }
+.charts-failed .chart-fallback { display: block; padding: 6px 10px; border: 1px dashed var(--line2); border-radius: var(--radius); font-size: 11.5px; color: var(--watch); }
+.charts-failed .chart-data.sr-only, .no-js .chart-data.sr-only {
+  position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal;
+}
+
+/* ── banners and states ──────────────────────────────────────────────── */
+.banner { display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--text3); border-radius: var(--radius); }
+.banner-icon { font-weight: 700; width: 14px; text-align: center; flex-shrink: 0; color: var(--text3); }
+.banner-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.banner-body { font-size: 12px; color: var(--text2); line-height: 1.5; }
+.banner-body ul { margin: 4px 0 0 18px; }
+.banner-error { border-left-color: var(--breach); background: var(--tint-breach); }
+.banner-error .banner-title, .banner-error .banner-icon { color: var(--breach); }
+.banner-stale-warn { border-left-color: var(--watch); }
+.banner-stale-warn .banner-title, .banner-stale-warn .banner-icon { color: var(--watch); }
+.banner-stale-error { border-left-color: var(--breach); }
+.banner-stale-error .banner-title, .banner-stale-error .banner-icon { color: var(--breach); }
+.banner-info { border-left-color: var(--info); }
+.banner-info .banner-icon { color: var(--info); }
+.banner-warn { border-left-color: var(--watch); }
+.banner-warn .banner-icon, .banner-warn .banner-title { color: var(--watch); }
+.banner-ok { border-left-color: var(--ok); }
+.banner-ok .banner-icon { color: var(--ok); }
+.banner-stack { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.age-ok { color: var(--text3); }
+.age-warn { color: var(--watch); font-weight: 600; }
+.age-error { color: var(--breach); font-weight: 600; }
+.missing {
+  border: 1px dashed var(--line2); border-radius: var(--radius); padding: 10px 12px; background: var(--bg);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.awaiting { display: flex; flex-direction: column; gap: 8px; }
+.awaiting-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12px; color: var(--text2); }
+.missing-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); }
+.missing-body { font-size: 12px; color: var(--text3); line-height: 1.5; overflow-wrap: anywhere; }
+.missing code { color: var(--text2); }
+
+/* methodology drawers */
+details.method { border-top: 1px solid var(--line); padding-top: 6px; }
+details.method > summary {
+  cursor: pointer; list-style: none; font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text3); display: inline-flex; align-items: center; gap: 6px;
+}
+details.method > summary::-webkit-details-marker { display: none; }
+details.method > summary::before { content: "\25B8"; font-size: 10px; }
+details.method[open] > summary::before { content: "\25BE"; }
+details.method > summary:hover { color: var(--text2); }
+details.method > .prose, details.method > .note, details.method > .tbl-wrap { margin-top: 6px; }
+
+/* status (RAG) */
+/* Model Risk: the status strip, value bullets, history dots and the evidence chips */
+.mon-strip { display: flex; flex-wrap: wrap; gap: 4px; }
+.mon-filter.mon-breach { color: var(--breach); } .mon-filter.mon-watch { color: var(--watch); }
+.mon-filter.mon-ok { color: var(--ok); } .mon-filter.mon-info, .mon-filter.mon-na { color: var(--text2); }
+svg.bullet { display: block; margin: 4px 0 0 auto; overflow: visible; max-width: 100%; }
+.mon-link { white-space: normal; }
+.mon-value { white-space: normal; }
+.tbl td.mon-cell { min-width: 138px; }
+.mon-lim { display: block; margin-top: 3px; font-size: 10.5px; color: var(--text3); white-space: normal; text-align: right; }
+svg.bullet .b-ok { fill: rgba(114, 202, 155, 0.38); } svg.bullet .b-watch { fill: rgba(251, 208, 101, 0.38); }
+svg.bullet .b-breach { fill: rgba(250, 153, 156, 0.38); }
+svg.bullet .b-tick { stroke: var(--text); stroke-width: 2; }
+svg.hist { display: block; overflow: visible; }
+svg.hist .h-ok { fill: var(--ok); } svg.hist .h-watch { fill: var(--watch); } svg.hist .h-breach { fill: var(--breach); }
+svg.hist .h-na { fill: var(--text3); }
+.hist-txt { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text3); }
+.hist-txt .nowrap { white-space: nowrap; }
+.mon-link { text-decoration: none; }
+.mon-link:hover, .mon-link:focus-visible { text-decoration: underline; }
+.rag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+.rag-ok { color: var(--ok); } .rag-watch { color: var(--watch); } .rag-breach { color: var(--breach); } .rag-na { color: var(--text3); }
+
+/* timeline (corrections) */
+.timeline { display: flex; flex-direction: column; gap: var(--gap); }
+.pm { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--line2); border-radius: var(--radius); scroll-margin-top: 48px; }
+.pm.sev-high { border-left-color: var(--breach); }
+.pm.sev-medium { border-left-color: var(--watch); }
+.pm.sev-low { border-left-color: var(--ok); }
+.pm-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+/* a round is a disclosure: its head is the summary, its body the postmortem */
+summary.pm-head { cursor: pointer; list-style: none; }
+summary.pm-head::-webkit-details-marker { display: none; }
+summary.pm-head::before { content: "\25B8"; font-size: 10px; color: var(--text3); }
+details[open] > summary.pm-head::before { content: "\25BE"; }
+details:not([open]) > summary.pm-head { border-bottom: none; }
+summary.pm-head:hover .pm-title { color: var(--info); }
+.pm-count { font-size: 11px; color: var(--text3); }
+/* each finding is a disclosure too: its id, status and flaw on one line, the
+   root cause, fix, evidence and tests on opening (the register above lists all) */
+summary.pm-fsum { cursor: pointer; list-style: none; display: flex; flex-direction: column; gap: 2px; padding-left: 14px; position: relative; }
+summary.pm-fsum::-webkit-details-marker { display: none; }
+summary.pm-fsum::before { content: "\25B8"; position: absolute; left: 0; top: 1px; font-size: 10px; color: var(--text3); }
+details[open] > summary.pm-fsum::before { content: "\25BE"; }
+summary.pm-fsum .pm-k { margin-bottom: 0; }
+summary.pm-fsum:hover strong { color: var(--info); }
+.pm-cell { scroll-margin-top: 48px; }
+.pm-cell:target { box-shadow: inset 3px 0 0 var(--info); }
+.tbl tr[hidden] { display: none !important; }
+.pm-id { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.pm-title { font-weight: 600; color: var(--text); font-size: 13px; }
+.pm-date { font-family: var(--mono); font-size: 11px; color: var(--text3); margin-left: auto; }
+.pm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; }
+.pm-cell { padding: 8px 12px; border-bottom: 1px solid var(--line); min-width: 0; }
+.pm-cell:nth-child(odd) { border-right: 1px solid var(--line); }
+.pm-k { font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text3); margin-bottom: 2px; }
+.pm-v { font-size: 12px; color: var(--text2); line-height: 1.5; }
+.pm-v code { font-size: 11px; }
+.pm-effect { color: var(--text); }
+
+/* utilities */
+.mt8 { margin-top: 8px; } .mt12 { margin-top: 12px; }
+.faint { color: var(--text3); } .dim { color: var(--text2); }
+.hidden-tabs[hidden] { display: none; }
+
+/* footer */
+.site-footer { border-top: 1px solid var(--line); background: var(--bg-deep); padding: 12px 16px 20px; font-size: 11.5px; color: var(--text3); }
+.site-footer .foot-inner { max-width: 1680px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
+.site-footer a { color: var(--text2); }
+.site-footer .tbl td, .site-footer .tbl th { padding: 2px 6px; font-size: 11px; background: transparent; }
+.tbl code.path { overflow-wrap: break-word; }   /* breaks at the <wbr> after / and _ (the path filter) */
+.foot-links { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+
+/* keyboard shortcut dialog */
+/* margin: auto restores the browser's centring of a dialog, which the universal
+   reset (margin: 0) removed: the dialog opened in the top-left corner */
+dialog.keys { background: var(--surface); color: var(--text); border: 1px solid var(--line2); border-radius: var(--radius); padding: 14px 16px; max-width: 420px; width: calc(100% - 32px); margin: auto; }
+dialog.keys:modal { inset: 0; }
+dialog.keys::backdrop { background: rgba(0, 0, 0, 0.55); }
+dialog.keys h2 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+dialog.keys .dl { font-size: 12px; }
+
+/* ── responsive ──────────────────────────────────────────────────────── */
+/* Paired rows (P2.7). The template marks a row of two panels .pair (three:
+   .trio) instead of relying on :has(). Up to 1180 px the members of a pair
+   stack at full width (an s7 + s5 row used to become 12 + 6, a half-empty row);
+   a trio goes 6 + 6 + 12. From 1181 px the shorter panel's own content fills
+   the row's height: a .grow chart or heatmap grows, a .fill-scroll region takes
+   the rest and scrolls, so no panel ends in blank space; a .start row lets each
+   panel end with its content where nothing can grow. A .level row (two equal
+   halves that stay side by side down to 861 px) fills the same way from 1181 px
+   without stacking. */
+.fill-scroll { max-height: 420px; overflow-y: auto; }
+.fill-scroll th { position: sticky; top: 0; z-index: 1; }
+.sub-head { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); margin-top: 14px; }
+.sub-head .sub-meta { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text3); margin-left: 6px; }
+.split > * > .sub-head:first-child { margin-top: 0; }
+/* a fit with no VX settlements on its session: said, never filled (Calibration #vixleg) */
+.vx-empty { border: 1px dashed var(--line2); border-radius: var(--radius); padding: 12px 16px; color: var(--text2); line-height: 1.5;
+  min-height: 296px; display: flex; flex-direction: column; justify-content: center; }   /* the height of a drawn leg: no jump between tabs */
+@media (max-width: 860px) { .vx-empty { min-height: 0; } }
+@media (min-width: 1181px) {
+  .g:is(.pair, .level) > .panel > .panel-body, .g:is(.pair, .level) .grow-col { display: flex; flex-direction: column; }
+  .g:is(.pair, .level) .grow-col { flex: 1 1 auto; }
+  .g:is(.pair, .level) .panel-body .chart.grow { flex: 1 1 auto; }
+  .g:is(.pair, .level) .panel-body .heat-wrap.grow { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .g:is(.pair, .level) .panel-body .heat-wrap.grow > table.heat { flex: 1 1 auto; height: 100%; }
+  .g:is(.pair, .level) .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
+  .g:is(.pair, .level) .grow-col[hidden] { display: none; }
+  .g.pair.start { align-items: start; }
+}
+/* a trio's shorter panel ends with its disclosure, not with blank space (side by
+   side from 861 px: 4 + 4 + 4, or 6 + 6 + 12 up to 1180 px) */
+@media (min-width: 861px) {
+  .g.trio > .panel > .panel-body { display: flex; flex-direction: column; }
+  .g.trio > .panel > .panel-body > .method.foot { margin-top: auto; padding-top: 8px; }
+  .g.trio .panel-body .chart.grow { flex: 1 1 auto; }
+}
+@media (max-width: 1180px) {
+  .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }
+  .g.evenfill > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
+/* phones: a heatmap's row header (the expiry) stays in view while its region scrolls sideways */
+@media (max-width: 599px) {
+  table.heat th[scope="row"] { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+}
+@media (max-width: 1180px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .s2, .s3 { grid-column: span 6; }
+  .s4, .s5 { grid-column: span 6; }
+  .s7, .s8, .s9 { grid-column: 1 / -1; }
+}
+@media (max-width: 860px) {
+  .s2, .s3, .s4, .s5, .s6 { grid-column: 1 / -1; }
+  .nav-links { display: none; position: absolute; top: 40px; left: 0; right: 0; flex-direction: column; height: auto; background: var(--bg); border-bottom: 1px solid var(--line2); padding: 4px 0; }
+  .nav-links.open { display: flex; }
+  .nav-link { height: 40px; border-bottom: none; border-left: 2px solid transparent; padding: 0 16px; }
+  .nav-link[aria-current="page"] { border-left-color: var(--pos-fill); border-bottom-color: transparent; background: var(--surface); }
+  .nav-toggle { display: inline-flex; }
+  .nav-right { display: none; }
+  .pm-grid { grid-template-columns: minmax(0, 1fr); }
+  .pm-cell:nth-child(odd) { border-right: none; }
+  .site-footer .foot-inner { grid-template-columns: minmax(0, 1fr); }
+  .statusbar .sb-opt { display: none; }
+}
+@media (max-width: 480px) {
+  .page { padding: 10px 10px 24px; }
+  .statusbar, .ticker { padding-left: 10px; padding-right: 10px; }
+  /* the view-time freshness note ("1 session behind (refreshes after the next close)")
+     is longer than a 320 px screen: let status items wrap instead of scrolling the page */
+  .statusbar .sb-item { white-space: normal; min-width: 0; overflow-wrap: anywhere; }
+  .tk { padding: 0 8px; }
+  .brand .brand-sub { display: none; }
+  .kpi-value { font-size: 18px; }
+  .kpi-label { white-space: normal; overflow: visible; }
+  .result-v { font-size: 21px; }
+  .chart { height: 220px; }
+  .chart.h300, .chart.h340, .chart.h400 { height: 260px; }
+  .chart.h440 { height: 340px; }          /* the smile slice: its residual strip shares the height */
+  .chart.tall-narrow { height: 680px; }      /* one row per category (the C22 waterfall): three lines of a wrapped step name */
+}
+/* Text-heavy tables (.tbl.cards) in a region narrower than 640 px (a phone, or a
+   narrow panel): each row a card, each cell a field labelled from its data-label,
+   instead of rows scrolled sideways. The region (.tbl-wrap) is the size container.
+   The header row stays in the accessibility tree (visually hidden); desk.js gives
+   the rows and cells explicit table roles, since some browsers drop them with
+   display: block. The label is generated content with an empty alternative, so it
+   is not read twice beside the column header. */
+@container (max-width: 640px) {
+  .tbl.cards, .tbl.cards tbody, .tbl.cards tr { display: block; }
+  /* a table-caption in a block table is boxed at min-content width (a word a line) */
+  .tbl.cards > caption { display: block; }
+  .tbl.cards thead { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .tbl.cards tr { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; margin: 0 0 8px; }
+  .tbl.cards tr:last-child { margin-bottom: 0; }
+  .tbl.cards td { display: flow-root; padding: 2px 0 2px 114px; border: none; text-align: left; white-space: normal; min-width: 0; }
+  .tbl.cards td::before {
+    content: attr(data-label); content: attr(data-label) / "";
+    float: left; width: 106px; margin-left: -114px; padding-top: 1px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text3);
+  }
+  .tbl.cards td:first-child { padding: 0 0 4px; font-weight: 600; color: var(--text); }
+  .tbl.cards td:first-child::before { content: none; }
+  .tbl.cards tbody tr:hover td { background: none; }
+  .tbl.cards td:empty { display: none; }
+  .tbl.cards td svg.bullet { margin-left: 0; }
+  .tbl.cards td .mon-lim { text-align: left; }
+  .tbl.cards td.mon-cell { min-width: 0; }
+  .tbl.cards .hist-txt .nowrap { white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* ── print: light, every chart's table shown, no chrome ──────────────── */
+@media print {
+  :root {
+    color-scheme: light;
+    --bg-deep: #fff; --bg: #fff; --surface: #fff; --surface2: #f2f2f2; --surface3: #e6e6e6; --tooltip: #fff;
+    --line: #cccccc; --line2: #b3b3b3; --grid: #dddddd;
+    --text: #111111; --text2: #333333; --text3: #555555;
+    --pos: #0b4fb3; --neg: #8a4b00; --pos-fill: #0b4fb3; --neg-fill: #a35a00;
+    --ok: #00703c; --watch: #7a5c00; --breach: #b00020; --info: #0b4fb3;
+    --tint-ok: #fff; --tint-watch: #fff; --tint-breach: #fff; --tint-info: #fff;
+    --series-headline: #111111;
+  }
+  html, body { background: #fff !important; color: #111 !important; }
+  .nav, .statusbar .sb-right, .skip-link, .nav-toggle, .chart-tools, .panel-actions, .js-only, dialog { display: none !important; }
+  .page { max-width: none; padding: 0; }
+  .panel, .banner, .pm, .kpis { break-inside: avoid; }
+  .tbl-wrap, .heat-wrap { overflow: visible !important; }
+  .tbl-wrap.capped { max-height: none !important; overflow-y: visible !important; }   /* a capped table overlapped the chart below it */
+  .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 4px 0 0; overflow: visible; clip: auto; white-space: normal; }
+  /* heat cells, ramps and swatches print in their colours (browsers drop
+     backgrounds by default, which left faint grey numbers on white) */
+  .heat td, .ramp-bar, .key-swatch, .rag, .chip { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* every tab panel prints (desk.js also opens each methodology drawer before printing) */
+  [role="tabpanel"][hidden] { display: block !important; }
+  details.method { display: block; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9px; color: #555; }
+}
+
+/* Surface: a heatmap or delta-grid row head is a button once desk.js runs (it
+   selects the row's expiry); it reads as the label it holds. The selected
+   expiry's rows carry aria-current and a bar at their head. */
+.row-pick { font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; text-align: inherit;
+  white-space: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
+.row-pick:hover { text-decoration: underline; text-underline-offset: 2px; }
+tr[aria-current="true"] > th[scope="row"] { color: var(--text); box-shadow: inset 3px 0 0 var(--text2); }
+
+/* the year menu beside a chart's zoom presets (Research equity group) */
+.zoom-year { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text3); }
+.zoom-year select.btn { padding-right: 4px; }
+.charts-failed .zoom-year { display: none !important; }

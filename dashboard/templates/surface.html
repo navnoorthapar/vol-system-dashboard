@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block og_title %}Surface — SPX Implied-Vol Surface vs Models — SPX/VIX Vol Research{% endblock %}
+{% block og_description %}The SPX implied-vol surface: market bid–ask quotes, model overlays, residuals in half-spread units, arbitrage status and the VIX replicated from the same chain.{% endblock %}
+
+{% block content %}
+{% set s = d.surf or {} %}
+<div class="page-head">
+  <h1 class="page-title">SPX implied-volatility surface</h1>
+  <p class="page-sub">Market quotes against the models, measured in the unit a market maker uses: half the bid–ask spread. A model inside the spread is as good as the quote.</p>
+  <div class="page-badge">
+    {% if s.state == 'ok' %}<span class="nowrap">Session {{ d.session }}</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|length }} expiries</span><span class="sep">·</span><span class="nowrap">{{ d.expiries|sum(attribute='n')|fmt(',') }} quotes</span><span class="sep">·</span><span class="nowrap">models: {{ d.models|map(attribute='short')|join(', ') }}</span>
+    {% else %}<span class="nowrap">Quote-grade surface not yet generated</span><span class="sep">·</span><span class="nowrap">headline fit {{ d.calib_session|fmt }}</span>{% endif %}
+  </div>
+  {{ m.chain_badge(d.chain_badge) }}
+</div>
+
+{% if s.state == 'ok' %}
+{% set H = d.score_rows|selectattr('key', 'in', ['heston_v2', 'heston'])|first %}
+{% if d.state_tiles %}
+<div class="kpis" style="margin-bottom:8px;" id="surface-state" role="group" aria-label="Surface state: the SVI-cal surface at constant maturity">
+  {% for t in d.state_tiles %}{{ m.kpi(t.label, t.value, unit=t.unit, sub=t.sub, ci=t.range, ci_kind='range') }}{% endfor %}
+</div>
+{% endif %}
+<div class="kpis" style="margin-bottom:8px;" id="surface-scores">
+  {% for r in d.score_rows %}{% set o = r.oos %}
+  {% set rg = (d.score_ranges or {}).get(r.key) %}
+  {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes', ci=(rg ~ ' (out of sample)') if rg else none, ci_kind='range') }}
+  {% endfor %}
+  {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
+  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else ''), ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
+  {% endif %}{% endif %}
+  {% if d.arb %}{% set lv0 = (d.largest_violations or [none])[0] %}
+  <div class="kpi" id="arb-tile">
+    <div class="kpi-label">Executable static arbitrage</div>
+    <div class="kpi-value">{{ d.arb.n_quotes_in_executable_violation|fmt(',') }}<span class="unit">quotes</span></div>
+    <div class="kpi-sub">of {{ d.arb.n_quotes|fmt(',') }} quotes sit in a constraint row violated at bid/ask; {{ d.arb.n_quotes_in_mid_violation|fmt(',') }} at mids.{% if lv0 %} Largest mid violation <a href="#largest-violations">{{ d.arb_max_mid|fmt('.1f') }} idx pts</a> ({{ lv0.usd|usd_desk(false) }} per contract), {{ lv0.label }}, {{ lv0.short }}.{% endif %}</div>
+  </div>{% endif %}
+</div>
+
+{% if d.desk %}{% set g = d.desk %}
+<div class="g">
+  {% call m.panel('delta-grid', 'Surface in desk coordinates · delta pillars, RR / BF, skew and var-swap', 's12', 'SVI-cal · ' ~ d.session) %}
+    <div class="tabs js-only" role="tablist" aria-label="Rows of the delta grid" data-state-key="grid" hidden>
+      <button class="btn" type="button" role="tab" aria-selected="true" aria-controls="dg-listed" data-value="listed">Listed expiries ({{ g.listed|length }})</button>
+      <button class="btn" type="button" role="tab" aria-selected="false" aria-controls="dg-cm" data-value="cm">Constant maturity ({{ g.cm|length }})</button>
+    </div>
+    {% set conv = 'undiscounted forward delta on the slice’s own vol (not premium-adjusted); ATMF = ln(K/F) = 0; RR = call − put (negative = puts over calls); BF = (call + put)/2 − ATMF; values of the fitted SVI-cal surface, not raw quotes' %}
+    <div id="dg-listed" role="tabpanel">
+      {{ m.desk_grid(g, g.listed, 'delta-grid-listed', 'Listed expiries, ' ~ d.session ~ ': ' ~ conv, 'Delta grid, listed expiries') }}
+    </div>
+    <div id="dg-cm" role="tabpanel" hidden>
+      {{ m.desk_grid(g, g.cm, 'delta-grid-cm', 'Constant maturity (1M = 30 days … 1Y = 365): each pillar interpolated linearly in total variance at fixed delta between the two bracketing listed expiries named under the tenor, never extrapolated beyond the listed expiries; F, half-spread and quotes belong to listed expiries; ' ~ conv, 'Delta grid, constant maturity') }}
+    </div>
+    <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, g.vol_lo|fmt('.1f') ~ '%', g.vol_hi|fmt('.1f') ~ '%', 'vol cells') }}<span class="sep">·</span>{{ m.ramp_bar(diverge, '−' ~ (g.rr_lim|fmt('.1f')), '+' ~ (g.rr_lim|fmt('.1f')), 'vol pts RR25 / RR10 (BF ±' ~ (g.bf_lim|fmt('.1f')) ~ '), dark at 0') }}</div>
+    <p class="note" id="delta-grid-units">Vols and VS vol in %; RR, BF, VS − ATMF and median half-spread in vol pts; ATM skew = ∂σ/∂ln(K/F) at the forward, in vol pts per 0.1 of ln-moneyness. {% if g.any_extrap %}{{ g.extrap_tag }}: the pillar’s strike lies outside its expiry’s quoted ln(K/F) range (at constant maturity: outside either bracketing expiry’s), so the fitted wing is extrapolated there; the RR / BF that would use it shows “—”. {{ g.n_extrap }} of {{ g.listed|length * 5 }} listed pillars.{% else %}Every pillar of this session lies inside its expiry’s quoted ln(K/F) range: no wing is extrapolated.{% endif %} VS vol is the Cboe-formula variance-swap vol of the same expiry’s quotes (the strip below); VS − ATMF is taken against this grid’s ATMF, not the strip’s quote ATM.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
+{% if d.compare or d.charts.atm_ts %}{% set cp = d.compare %}
+<div class="g pair">
+  {% if cp %}{% call m.panel('surface-change', 'Against an earlier session · constant maturity', 's5', cp.views|length|plural('earlier session')) %}
+    <div class="tabs js-only" role="tablist" aria-label="Earlier session compared" data-state-key="vs" data-chart-filter="chart-atm-ts chart-rr-term" hidden>
+      {% for v in cp.views %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if v.session == cp.default else 'false' }}" aria-controls="vs-{{ v.session }}" data-value="{{ v.session }}">{{ v.session }}</button>{% endfor %}
+    </div>
+    {% for v in cp.views %}
+    <div id="vs-{{ v.session }}" role="tabpanel"{% if v.session != cp.default %} hidden{% endif %}>
+      {{ m.vs_table(cp.head, v) }}
+    </div>
+    {% endfor %}
+    {% if d.charts.rr_term %}<h3 class="sub-head" id="rr-term">25Δ risk reversal by expiry, every stored session</h3>
+    {{ m.chart(d.charts.rr_term, 'h260 grow') }}
+    <p class="note" id="rr-term-note">SVI-cal surface, listed expiries; {{ d.session }} solid, the others grey, the session chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endif %}
+    <p class="note">The stored sessions are irregular (the surface report runs on sessions with a stored chain), so a change spans the gap shown, not a day. “—”: a session without that tenor among its listed expiries (never extrapolated), or an RR / BF with a wing beyond the quoted strikes. The tabs also set the dashed lines of the ATM and RR25 charts.</p>
+  {% endcall %}{% endif %}
+  {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes, eSSVI and SVI-cal', 's7' if cp else 's5') %}{{ m.chart(d.charts.atm_ts, 'h300 grow') }}
+    {% if d.forward_vols %}<p class="note" id="forward-vols">Forward ATM vol of the SVI-cal surface between its constant maturities, √((w₂ − w₁)/(T₂ − T₁)) with w = ATMF²·T (dotted steps): {% for f in d.forward_vols %}<span class="nowrap">{{ f.from }} → {{ f.to }} {% if f.flag %}<a class="chip chip-breach" href="#arbitrage">⚑ calendar</a>{% else %}{{ f.fwd_vol|fmt('.2f') }}%{% endif %}</span>{{ ' · ' if not loop.last else '' }}{% endfor %}. Each pair spans at least 7 days, so no AM/PM pair of one date is a forward period.{% if d.forward_vols|selectattr('flag')|list %} A calendar flag is a negative forward variance: total variance falls with maturity there; see the <a href="#arbitrage">arbitrage screen</a>.{% endif %}</p>{% endif %}
+  {% endcall %}{% endif %}
+</div>
+{% endif %}
+
+<div class="g pair">
+  {% call m.panel('iv-heat', 'Implied vol by expiry and ln(K/F) · market mids', 's7', d.n_quotes|fmt(',') ~ ' quotes') %}
+    {{ m.heatmap(d.iv_heat, 'iv-heatmap', 'Median mid implied vol (%) of the quotes in each expiry (rows) and log-moneyness bucket (columns; heads are bucket midpoints)', 'Expiry',
+                 m.ramp_bar(cividis, d.iv_heat.lo|fmt('.1f') ~ '%', d.iv_heat.hi|fmt('.1f') ~ '%', 'mid implied vol')) }}
+    {% if d.surface3d %}
+    <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
+    <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the implied-vol grid above (same numbers as the table)" hidden></div>
+    <script type="application/json" id="surface3d-spec">{{ d.surface3d|tojson }}</script>
+    {% endif %}
+    <p class="note">Two-sided out-of-the-money quotes on each expiry's parity forward ({{ ((d.universe.universe_filters or {}).note or 'the calibrator’s universe')|prose }}). Median half-spread {{ d.median_half_spread|fmt('.2f') }} vol pts. The outer columns hold every quote beyond ±0.30, so the {{ d.iv_heat.n|fmt(',') }} quotes in the cells are all of them; the colour scale spans the cells shown.</p>
+  {% endcall %}
+  {% call m.panel('slices', 'Smile slice · bid–ask, mid and models', 's5') %}
+    <div class="tabs js-only" role="tablist" aria-label="Expiry shown in the smile chart" data-state-key="exp" data-chart-filter="chart-slices" hidden>
+      {% for e in d.expiries %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if e.expiry == d.default_exp else 'false' }}" aria-controls="slices-panel" data-value="{{ e.expiry }}">{{ e.T_days|fmt('.0f') }}d</button>{% endfor %}
+    </div>
+    <div class="seg js-only" role="group" aria-label="x axis of the smile chart"><button class="btn" type="button" data-xmode-for="chart-slices" data-xmode="k" aria-pressed="true">ln(K/F)</button><button class="btn" type="button" data-xmode-for="chart-slices" data-xmode="delta" aria-pressed="false">forward Δ</button></div>
+    <div id="slices-panel" role="tabpanel" class="grow-col">{{ m.chart(d.charts.slices, 'h440 grow') }}</div>
+  {% endcall %}
+</div>
+
+<div class="g pair">
+  {% call m.panel('scorecard', 'Model scorecard · ' ~ ('same quotes, same metric' if d.same_quotes else 'each model’s out-of-sample quotes, same metric'), 's7', 'source: ' ~ d.score_source) %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model scorecard (scrollable)">
+    <table class="tbl dense wrap-head" id="scorecard-table">
+      <caption>Out-of-sample quotes of each model (the quotes it was not fitted to); |z| = |model − mid| in half-spreads; RMSE and bias (mean of model − mid) in vol pts</caption>
+      <thead><tr><th scope="col">Model</th><th scope="col" class="num">Params</th><th scope="col" class="num">Fitted to</th><th scope="col" class="num">Scored</th><th scope="col" class="num">Median |z|</th><th scope="col" class="num">Inside</th><th scope="col" class="num">Within 2</th><th scope="col" class="num">RMSE</th><th scope="col" class="num">Bias</th><th scope="col" class="num">Dense-grid arb. (fly / cal)</th></tr></thead>
+      <tbody>{% for r in d.score_rows %}{% set o = r.oos %}<tr{% if r.key in ('heston_v2', 'heston') %} class="em"{% endif %}><td class="nowrap">{{ r.label }}</td><td class="num">{{ r.n_params|fmt }}</td><td class="num">{{ r.n_in_sample|fmt(',') }}</td><td class="num">{{ o.n|fmt(',') }}</td><td class="num">{{ o.median_abs_hs|fmt('.2f') }}</td><td class="num">{{ o.inside_spread_pct|fmt('.1f')|u('%') }}</td><td class="num">{{ o.within_2hs_pct|fmt('.1f')|u('%') }}</td><td class="num">{{ o.rmse_vp|fmt('.2f') }}</td><td class="num">{{ o.mean_error_vp|signed('.2f') }}</td><td class="num">{% if r.dense %}{{ r.dense.butterfly_violations|fmt(',') }} / {{ r.dense.calendar_violations|fmt(',') }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% for n_ in d.score_notes %}<p class="note">{{ n_|prose }}</p>{% endfor %}
+    {% if H %}<p class="note">The surfaces interpolate between fitted strikes where {{ m.cite('Heston', 'calibration.html#oos') }} must extrapolate from its anchors: read them as the quote-noise floor, not as rival models.</p>{% endif %}
+    {% call m.method('Model descriptions') %}<dl class="dl">{% for r in d.score_rows %}<dt>{{ r.label }}</dt><dd>{{ r.description|prose }}</dd>{% endfor %}</dl>{% endcall %}
+  {% endcall %}
+  {% call m.panel('by-expiry', 'Median |z| by expiry · every model', 's5') %}
+    {% if d.charts.by_expiry %}{{ m.chart(d.charts.by_expiry, 'h300 grow') }}
+    <p class="note">Out-of-sample quotes only: the quote sets of the scorecard beside it, split by expiry.</p>{% else %}<p class="note">No model scores for this session.</p>{% endif %}
+  {% endcall %}
+</div>
+
+<div class="g pair">
+  {% call m.panel('residuals', 'Residuals in half-spreads · (model − mid) / half-spread', 's8', 'out-of-sample quotes') %}
+    <div class="tabs js-only" role="tablist" aria-label="Model shown in the residual grid" data-state-key="model" hidden>
+      {% for r in d.resid_heat %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if loop.first else 'false' }}" aria-controls="resid-{{ r.key }}" data-value="{{ r.key }}">{{ r.label }}</button>{% endfor %}
+    </div>
+    {% for r in d.resid_heat %}
+    <div id="resid-{{ r.key }}" role="tabpanel" class="grow-col"{% if not loop.first %} hidden{% endif %}>
+      {{ m.heatmap(r, 'resid-heat-' ~ r.key, r.label ~ ': median (model − mid) / half-spread of its ' ~ (r.n|fmt(',')) ~ ' out-of-sample quotes by expiry and log-moneyness bucket (column heads are bucket midpoints); |value| ≤ 1 is inside the spread', 'Expiry',
+                   m.ramp_bar(diverge, '−5', '+5', 'half-spreads · model below mid ◀ 0 ▶ model above mid'), grow=True) }}
+    </div>
+    {% endfor %}
+  {% endcall %}
+  {% call m.panel('arbitrage', 'Static arbitrage · screen and repair', 's4') %}
+    {% if d.arb_rows %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Static-arbitrage screen (scrollable)">
+    <table class="tbl dense wrap-head" id="arb-table"><caption>Constraint rows of the stored quotes ({{ d.arb.constraint_set.split(':')[0] if d.arb.constraint_set else 'CRW 2020' }}): a row is one no-arbitrage inequality between quotes, so these count rows, not quotes ({{ d.arb.n_quotes|fmt(',') }} quotes)</caption>
+      <thead><tr><th scope="col">Constraint</th><th scope="col" class="num">Constraint rows</th><th scope="col" class="num">Violated at mids</th><th scope="col" class="num">Violated at bid/ask</th></tr></thead>
+      <tbody>{% for r in d.arb_rows %}<tr><td>{{ r.label }}</td><td class="num">{{ r.rows|fmt(',') }}</td><td class="num">{{ r.mid|fmt(',') }}</td><td class="num{% if r.exec %} neg{% endif %}">{{ r.exec|fmt(',') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% set rp = d.arb_repair %}
+    {% if rp %}<p class="note">An l1 repair (linear programme, HiGHS) moves {{ rp.n_perturbed|fmt(',') }} quotes, {{ rp.n_perturbed_outside_spread|fmt(',') }} of them outside their bid–ask (largest move {{ rp.max_abs_dprice_half_spreads|fmt('.0f') }} half-spreads); those are flagged and left out of the surfaces' fitted set.</p>{% endif %}
+    {% if d.largest_violations %}<h3 class="sub-head">The {{ d.largest_violations|length }} largest violations at mids <span class="sub-meta">of {{ d.arb_mid_rows|fmt(',') }} constraint rows violated</span></h3>
+    <div class="tbl-wrap fill-scroll" tabindex="0" role="region" aria-label="Largest mid violations (scrollable)">
+    <table class="tbl dense wrap-head" id="largest-violations"><caption>arbitrage.largest_mid_violations: legs as weight and strike per expiry; shortfall in idx pts and $ per SPX contract (×{{ spx_multiplier|fmt('.0f') }})</caption>
+      <thead><tr><th scope="col">Constraint</th><th scope="col">Legs</th><th scope="col" class="num">Shortfall (idx pts)</th><th scope="col" class="num">$ per contract</th><th scope="col">At bid/ask</th></tr></thead>
+      <tbody>{% for v in d.largest_violations %}<tr><td>{{ v.label }}</td><td class="legs">{% for g in v.leg_groups %}{% if not loop.first %}<br>{% endif %}<span class="nowrap">{{ g.expiry }}</span> {% for l in g.legs %}<span class="nowrap">{{ l }}</span>{{ ' ' if not loop.last else '' }}{% endfor %}{% endfor %}</td><td class="num">{{ v.shortfall|fmt('.2f') }}</td><td class="num">{{ v.usd|usd_desk(false) }}</td><td>{{ 'executable' if v.executable else 'mids only' }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">A shortfall is the amount, in index points, by which the legs’ mid prices break the constraint’s inequality (for a vertical spread, a price below zero or above the strike width). “Executable”: the violation survives at the bid and the ask too. The table records which quotes break which constraint, not why.</p>
+    {% endif %}
+    {% if d.arb_surfaces %}<p class="note">Dense-grid checks of the fitted surfaces: {% for a in d.arb_surfaces %}{{ a.label }} {{ a.dense.butterfly_violations|fmt(',') }} butterfly / {{ a.dense.calendar_violations|fmt(',') }} calendar violations{{ '; ' if not loop.last else '.' }}{% endfor %}</p>{% endif %}
+    {% else %}<p class="note">No arbitrage screen in surface.json for this session.</p>{% endif %}
+  {% endcall %}
+</div>
+
+{% if d.vix_rows or d.strip %}
+<div class="g pair">
+  {% call m.panel('vix-replication', 'VIX family replicated from the same chain', 's5', 'Cboe VIX methodology') %}
+    {% if d.vix_rows %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Replicated VIX indices (scrollable)">
+    <table class="tbl dense" id="vix-rep-table"><caption>Replicated index against the Cboe close (index points); gap = replicated − Cboe close</caption>
+      <thead><tr><th scope="col">Index</th><th scope="col" class="num">Replicated</th><th scope="col" class="num">Cboe close</th><th scope="col" class="num">Gap</th></tr></thead>
+      <tbody>{% for r in d.vix_rows %}<tr><td>{{ r.ticker }}</td><td class="num">{{ r.replicated|fmt('.2f') }}</td><td class="num">{{ r.official|fmt('.2f') }}</td><td class="num">{{ r.gap|signed('.2f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% endif %}
+    {{ m.vix_terms(d.vix_terms) }}
+    {% set vb = d.vix_beta or {} %}
+    {% set be_ = (d.beta_estimator or {}).get(d.session) %}
+    {% if vb.atm_over_vix_official is defined %}<p class="note" id="atm-vix-note">VIX-term ATM / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the ATM mids of the VIX's own two expiries, combined with its constant-maturity weights).{% if be_ is not none %} The backtest's β estimator (30-day ATM-forward Black-76 vol / VIX) gives {{ be_|fmt('.3f') }} on the same chain.{% endif %} The backtest marks every straddle at one fixed β; see {{ m.cite('the β chains on Research', 'research.html#beta-chains') }}.</p>{% endif %}
+    {% call m.method('Where the replication departs from Cboe') %}
+      <ul class="prose" style="padding-left:16px;">{% for n_ in d.vix_deviations %}<li>{{ n_|prose }}</li>{% endfor %}{% for n_ in d.vix_notes %}<li>{{ n_|prose }}</li>{% endfor %}</ul>
+    {% endcall %}
+  {% endcall %}
+  {% call m.panel('varswap', 'Variance-swap strip · same chain', 's7') %}
+    {% if d.charts.strip %}{{ m.chart(d.charts.strip, 'h260 grow') }}{% endif %}
+    <p class="note">Var-swap minus ATM vol is the skew premium in the 30-day VIX: the reason a straddle is not worth the VIX.</p>
+    {% if d.vix_markers %}<p class="note" id="vix-markers">Hollow circles: the Cboe closes (16:15 ET{% if d.vix_calc_time %}; the replication is timed {{ d.vix_calc_time|replace('T', ' ') }} ET{% endif %}) at their constant maturities, {% for mk in d.vix_markers %}<span class="nowrap">{{ mk.ticker }} {{ mk.close|fmt('.2f') }} at {{ mk.days|fmt('.0f') }} d</span>{{ ', ' if not loop.last else '' }}{% endfor %}: against the single-expiry strip they show the replication gaps of the table beside.</p>{% endif %}
+  {% endcall %}
+</div>
+{% endif %}
+
+{% if d.surface_history %}
+<div class="g">
+  {% if d.surface_history %}{% call m.panel('surface-history', 'Every session the surface report covers', 's12', (d.surface_history|length) ~ ' sessions') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Surface sessions (scrollable)">
+    <table class="tbl dense wrap-head" id="surface-history-table"><caption>Median |z| in half-spreads of each model’s out-of-sample quotes (its scorecard.json, the population every headline on the site uses) by session; repair moves outside the bid–ask; the VIX replicated from the chain against the close; ATM vol / VIX by the replication's VIX-term interpolation and by the backtest's β estimator</caption>
+      <thead><tr><th scope="col">Session</th><th scope="col" class="num">Scored quotes</th><th scope="col" class="num">Expiries</th>{% for hm in d.history_models %}<th scope="col" class="num">{{ hm.label }} |z|, out of sample</th>{% endfor %}<th scope="col" class="num">Repair moves outside spread</th><th scope="col" class="num">VIX rep. − close</th><th scope="col" class="num">VIX-term ATM / VIX</th>{% if d.beta_estimator %}<th scope="col" class="num">{{ 'β estimator ATM 30d / VIX'|sym }}</th>{% endif %}</tr></thead>
+      <tbody>{% for r in d.surface_history|reverse %}<tr{% if r.session == d.session %} class="em"{% endif %}><td class="nowrap">{{ r.session }}</td><td class="num">{{ r.n|fmt(',') }}</td><td class="num">{{ (d.expiries_by_session or {}).get(r.session)|fmt }}</td>{% for hm in d.history_models %}<td class="num">{{ r.oos[hm.key]|fmt('.2f') }}</td>{% endfor %}<td class="num">{{ r.arb_out|fmt(',') }}</td><td class="num">{{ ((r.vix_rep - r.vix_off) if (r.vix_rep is not none and r.vix_off is not none) else none)|signed('.2f') }}</td><td class="num">{{ r.beta|fmt('.3f') }}</td>{% if d.beta_estimator %}<td class="num">{{ d.beta_estimator.get(r.session)|fmt('.3f') }}</td>{% endif %}</tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">{{ d.surface_history|length }} session{{ '' if d.surface_history|length == 1 else 's' }} with a stored chain: a range across sessions, not a sampling interval. The tiles at the top give each model’s range over these sessions (dashed rule).</p>
+  {% endcall %}{% endif %}
+</div>
+{% endif %}
+
+{% else %}
+{{ m.missing(s, 'The market surface: two-sided OTM quotes with bid / mid / ask implied vols on each expiry’s parity forward, every model priced on the same quotes, residuals in half-spread units, the static-arbitrage screen and the VIX replicated from the same chain.') }}
+<div class="g" style="margin-top:8px;">
+  {% call m.panel('model-surface', 'Model surface · Heston headline fit (not market data)', 's8', d.calib_session) %}
+    {% if d.model_heat %}
+    {{ m.heatmap(d.model_heat, 'model-heatmap', 'Heston implied vol (%) by maturity (rows) and ln(K/F) (columns), headline fit ' ~ (d.calib_session or ''), 'T',
+                 m.ramp_bar(cividis, d.model_heat.lo|fmt('.1f') ~ '%', d.model_heat.hi|fmt('.1f') ~ '%', 'Heston implied vol')) }}
+    {% if d.surface3d %}
+    <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
+    <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the model implied-vol grid above (same numbers as the table)" hidden></div>
+    <script type="application/json" id="surface3d-spec">{{ d.surface3d|tojson }}</script>
+    {% endif %}
+    {% endif %}
+    <p class="note">Model implied vols at the headline parameters (<code>{{ d.calib_file }}</code>), forward-normalised. The market surface replaces this panel when the surface artifacts exist; until then no market quotes are shown here rather than unscored ones.</p>
+  {% endcall %}
+  {% call m.panel('surface-plan', 'What this page will show', 's4') %}
+    <ul class="prose" style="padding-left:16px;">
+      <li>Inside-spread share and median |model − mid| in half-spreads, per model, on one quote set.</li>
+      <li>Smile slices with bid–ask bars, the fit's anchors filled and out-of-sample quotes hollow.</li>
+      <li>A residual grid by expiry and moneyness, dark where the model is inside the spread.</li>
+      <li>Butterfly, vertical and calendar arbitrage counts before and after repair.</li>
+      <li>The VIX replicated from this chain against the Cboe close.</li>
+    </ul>
+    <p class="note">Contract: <code>dashboard/ARTIFACTS.md</code>.</p>
+  {% endcall %}
+</div>
+{% endif %}
+{% endblock %}

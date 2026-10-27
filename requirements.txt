@@ -28,3 +28,16 @@ yfinance>=0.2.54,<2
 # On Linux without a GPU install the CPU wheel:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch>=2.4,<3
+# stats/ (C23 inference layer): Politis-White block length, Hansen SPA, Romano-Wolf
+# StepM, the Model Confidence Set and the GARCH/GJR forecast baselines (NCSA licence;
+# pulls in statsmodels, BSD-3).
+arch>=7.0,<9
+# stats/trials.py reads the committed trials ledger docs/trials_ledger.yaml (MIT licence).
+PyYAML>=6.0,<7
+# Security floors on transitive dependencies (pip-audit, 2026-10-20; see
+# docs/engineering.md "Dependencies"): idna CVE-2026-45409, urllib3
+# CVE-2026-44431/44432/97687/97688/97689 (both on the download path via
+# requests/yfinance), werkzeug CVE-2026-102598 (local preview and freeze only).
+idna>=3.15
+urllib3>=2.8.0
+werkzeug>=3.1.9

@@ -1,0 +1,117 @@
+{
+ "beta": {
+  "atm_over_var_swap_30d_svi_cal": 0.7337403037,
+  "atm_over_vix_official": 0.7118856356,
+  "atm_over_vix_replicated": 0.7222254963,
+  "atm_vol_30d_essvi": 13.93557432,
+  "atm_vol_30d_method": "near / next ATM mid IVs of the replicated VIX's own terms, combined with the VIX constant-maturity weights",
+  "atm_vol_30d_quotes": 14.23059386,
+  "atm_vol_30d_svi_cal": 13.92817163,
+  "var_swap_vol_30d_essvi_k_-3_to_2": 17.81076137,
+  "var_swap_vol_30d_svi_cal_k_-3_to_2": 18.98242683,
+  "var_swap_vol_30d_svi_k_-3_to_2": 19.06467046,
+  "vix_official": 19.99,
+  "vix_replicated": 19.70380986
+ },
+ "calculation_time_ny": "2026-10-16T16:00",
+ "deviations": [
+  "R is the ^IRX bill rate (cc), not Cboe's CMT spline; dVIX/dR ~ VIX T / 2.",
+  "Calculation time is the chain's T origin; Yahoo snapshots carry no quote time.",
+  "parity_forward replaces the single-strike forward with the cleaned chain's parity-regression F and D (robust to one stale strike).",
+  "K0 falls back to the nearest lower strike with both sides quoted when the listed K0 lacks one (two-sided-only storage); flagged per term.",
+  "VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days (analogues, not Cboe's index-specific series sets).",
+  "Root-less (pre-C22) chains are treated as PM-settled."
+ ],
+ "gap_notes": [
+  "The stored chain holds no zero-bid lines (two-sided capture), so Cboe's two-consecutive-zero-bid stop cannot trigger: every stored OTM strike with a bid enters the strip, which can only add variance relative to Cboe's rule on the same book; the stored book's own strike range is the binding limit.",
+  "No quote time is stored for this snapshot (Yahoo); the calculation uses 16:00 ET on the session and the official close is the 16:15 ET print (the official index traded 15.72-22.31 that session). Any intraday drift between the snapshot and 16:15 is unmeasured."
+ ],
+ "indices": {
+  "VIX": {
+   "gap_vs_official": -0.2861901395,
+   "headline_method": "cboe_rules",
+   "official": {
+    "close": 19.99,
+    "high": 22.31,
+    "low": 15.72,
+    "open": 16.02,
+    "source": "cboe",
+    "table": "vix_daily",
+    "term_structure_close": 19.98999977
+   },
+   "official_inside_day_range": true,
+   "replicated": 19.70380986
+  },
+  "VIX3M": {
+   "gap_vs_official": -0.4250093027,
+   "headline_method": "cboe_rules",
+   "official": {
+    "close": 20.5,
+    "source": "yfinance",
+    "table": "vix_term_structure"
+   },
+   "replicated": 20.0749907
+  },
+  "VIX6M": {
+   "gap_vs_official": -0.1044964806,
+   "headline_method": "cboe_rules",
+   "official": {
+    "close": 21.67000008,
+    "source": "yfinance",
+    "table": "vix_term_structure"
+   },
+   "replicated": 21.5655036
+  },
+  "VIX9D": {
+   "gap_vs_official": -0.2470657163,
+   "headline_method": "cboe_rules",
+   "official": {
+    "close": 20.12000084,
+    "source": "yfinance",
+    "table": "vix_term_structure"
+   },
+   "replicated": 19.87293512
+  }
+ },
+ "rate": {
+  "R_cc": 0.04147901649,
+  "source": "^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"
+ },
+ "schema_version": 1,
+ "session": "2026-10-16",
+ "strip": [
+  {
+   "atm_over_vs": 0.7240015014,
+   "atm_vol_quotes": 14.19524268,
+   "days": 13.0,
+   "expiry": "2026-10-29",
+   "n_calls": 62,
+   "n_puts": 83,
+   "settlement": "PM",
+   "var_swap_vol": 19.60664813,
+   "vs_minus_atm_vp": 5.411405447
+  },
+  {
+   "atm_over_vs": 0.7222817977,
+   "atm_vol_quotes": 14.25499356,
+   "days": 28.0,
+   "expiry": "2026-11-13",
+   "n_calls": 84,
+   "n_puts": 110,
+   "settlement": "PM",
+   "var_swap_vol": 19.73605538,
+   "vs_minus_atm_vp": 5.481061822
+  },
+  {
+   "atm_over_vs": 0.7165971498,
+   "atm_vol_quotes": 14.38939327,
+   "days": 91.0,
+   "expiry": "2027-01-15",
+   "n_calls": 46,
+   "n_puts": 88,
+   "settlement": "PM",
+   "var_swap_vol": 20.08017095,
+   "vs_minus_atm_vp": 5.690777681
+  }
+ ]
+}

@@ -1,0 +1,486 @@
+{
+ "models": [
+  {
+   "available": true,
+   "dense_grid": {
+    "butterfly_min_per_DF": 6.565561946e-09,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": 1.696496567e-06,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [],
+    "calendar_violations": 0,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   },
+   "description": "eSSVI global surface (theta, psi, rho per expiry); Gatheral-Jacquier butterfly conditions, monotone theta and wing slopes, and slice ordering certified on a 4,001-point k-grid; inverse half-spread weights",
+   "metrics": {
+    "all": {
+     "inside_spread_pct": 28.73326468,
+     "mean_error_vp": -0.4696174378,
+     "median_abs_hs": 2.037376576,
+     "median_abs_vp": 0.2734585413,
+     "n": 2913,
+     "rmse_hs": 6.12405773,
+     "rmse_outside_spread_vp": 1.86844791,
+     "rmse_vp": 2.081316293,
+     "within_2hs_pct": 48.91864058
+    },
+    "by_expiry": {
+     "2026-10-29": {
+      "T_days": 13.0,
+      "inside_spread_pct": 18.46153846,
+      "mean_error_vp": -0.7623338249,
+      "median_abs_hs": 2.437903621,
+      "median_abs_vp": 0.512878825,
+      "n": 130,
+      "rmse_hs": 4.576869545,
+      "rmse_outside_spread_vp": 2.497912115,
+      "rmse_vp": 2.786861613,
+      "within_2hs_pct": 37.69230769
+     },
+     "2026-11-13": {
+      "T_days": 28.0,
+      "inside_spread_pct": 16.47058824,
+      "mean_error_vp": -0.562073284,
+      "median_abs_hs": 1.943823933,
+      "median_abs_vp": 0.3131882167,
+      "n": 170,
+      "rmse_hs": 4.218894763,
+      "rmse_outside_spread_vp": 1.773960889,
+      "rmse_vp": 1.974127451,
+      "within_2hs_pct": 51.76470588
+     },
+     "2027-01-15": {
+      "T_days": 91.0,
+      "inside_spread_pct": 17.39130435,
+      "mean_error_vp": -0.05360144744,
+      "median_abs_hs": 2.329854721,
+      "median_abs_vp": 0.2605699271,
+      "n": 115,
+      "rmse_hs": 3.774053434,
+      "rmse_outside_spread_vp": 0.6288166646,
+      "rmse_vp": 0.7220578192,
+      "within_2hs_pct": 39.13043478
+     }
+    },
+    "excluding_arbitrage_flagged": {
+     "inside_spread_pct": 29.45544554,
+     "mean_error_vp": -0.4712392059,
+     "median_abs_hs": 2.001990961,
+     "median_abs_vp": 0.2663184539,
+     "n": 2828,
+     "rmse_hs": 3.93243848,
+     "rmse_outside_spread_vp": 1.864845374,
+     "rmse_vp": 2.082758516,
+     "within_2hs_pct": 49.89391796
+    },
+    "in_sample": {
+     "inside_spread_pct": 29.00494001,
+     "mean_error_vp": -0.4887761906,
+     "median_abs_hs": 2.024736736,
+     "median_abs_vp": 0.2667166695,
+     "n": 1417,
+     "rmse_hs": 3.966315191,
+     "rmse_outside_spread_vp": 1.90375433,
+     "rmse_vp": 2.125923387,
+     "within_2hs_pct": 49.40014114
+    },
+    "n_unpriced": 0,
+    "out_of_sample": {
+     "inside_spread_pct": 28.47593583,
+     "mean_error_vp": -0.4514704106,
+     "median_abs_hs": 2.05345158,
+     "median_abs_vp": 0.2761794832,
+     "n": 1496,
+     "rmse_hs": 7.62409095,
+     "rmse_outside_spread_vp": 1.834379375,
+     "rmse_vp": 2.038164689,
+     "within_2hs_pct": 48.46256684
+    }
+   },
+   "model": "essvi",
+   "n_in_sample": 1417,
+   "n_params": 51,
+   "params": {}
+  },
+  {
+   "available": true,
+   "dense_grid": {
+    "butterfly_min_per_DF": 1.999235502e-08,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": -0.0002582037421,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [
+     "2026-11-13->2026-11-16",
+     "2027-03-31->2027-04-16"
+    ],
+    "calendar_violations": 14,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   },
+   "description": "raw SVI per expiry; Durrleman g(k) >= 0 on 241 points of k in [-1.5, 1] and Lee wing bounds; no calendar constraint between slices; inverse half-spread weights",
+   "metrics": {
+    "all": {
+     "inside_spread_pct": 87.1610024,
+     "mean_error_vp": -0.009043969416,
+     "median_abs_hs": 0.4702229822,
+     "median_abs_vp": 0.0687700458,
+     "n": 2913,
+     "rmse_hs": 4.666014117,
+     "rmse_outside_spread_vp": 0.328375949,
+     "rmse_vp": 0.3630870296,
+     "within_2hs_pct": 96.53278407
+    },
+    "by_expiry": {
+     "2026-10-29": {
+      "T_days": 13.0,
+      "inside_spread_pct": 86.15384615,
+      "mean_error_vp": -0.03422909682,
+      "median_abs_hs": 0.3524710643,
+      "median_abs_vp": 0.1104969689,
+      "n": 130,
+      "rmse_hs": 0.6894051796,
+      "rmse_outside_spread_vp": 0.04584270432,
+      "rmse_vp": 0.1387475551,
+      "within_2hs_pct": 98.46153846
+     },
+     "2026-11-13": {
+      "T_days": 28.0,
+      "inside_spread_pct": 65.29411765,
+      "mean_error_vp": -0.08345635228,
+      "median_abs_hs": 0.7413428805,
+      "median_abs_vp": 0.1250141646,
+      "n": 170,
+      "rmse_hs": 1.077110025,
+      "rmse_outside_spread_vp": 0.1600460866,
+      "rmse_vp": 0.3299507737,
+      "within_2hs_pct": 92.94117647
+     },
+     "2027-01-15": {
+      "T_days": 91.0,
+      "inside_spread_pct": 90.43478261,
+      "mean_error_vp": 0.002081055749,
+      "median_abs_hs": 0.5845361295,
+      "median_abs_vp": 0.06641071803,
+      "n": 115,
+      "rmse_hs": 0.7270969882,
+      "rmse_outside_spread_vp": 0.03061143551,
+      "rmse_vp": 0.1065357421,
+      "within_2hs_pct": 99.13043478
+     }
+    },
+    "excluding_arbitrage_flagged": {
+     "inside_spread_pct": 88.86138614,
+     "mean_error_vp": -0.01104171089,
+     "median_abs_hs": 0.4560317888,
+     "median_abs_vp": 0.06654051678,
+     "n": 2828,
+     "rmse_hs": 0.6935951325,
+     "rmse_outside_spread_vp": 0.05615828899,
+     "rmse_vp": 0.1532740256,
+     "within_2hs_pct": 98.51485149
+    },
+    "in_sample": {
+     "inside_spread_pct": 88.56739591,
+     "mean_error_vp": -0.012831812,
+     "median_abs_hs": 0.4608883462,
+     "median_abs_vp": 0.0665411161,
+     "n": 1417,
+     "rmse_hs": 0.6973799699,
+     "rmse_outside_spread_vp": 0.06225227091,
+     "rmse_vp": 0.1604993535,
+     "within_2hs_pct": 98.5885674
+    },
+    "n_unpriced": 0,
+    "out_of_sample": {
+     "inside_spread_pct": 85.82887701,
+     "mean_error_vp": -0.005456153282,
+     "median_abs_hs": 0.4806397288,
+     "median_abs_vp": 0.07033459205,
+     "n": 1496,
+     "rmse_hs": 6.475570313,
+     "rmse_outside_spread_vp": 0.4541988091,
+     "rmse_vp": 0.481978149,
+     "within_2hs_pct": 94.5855615
+    }
+   },
+   "model": "svi",
+   "n_in_sample": 1417,
+   "n_params": 85,
+   "params": {}
+  },
+  {
+   "available": true,
+   "dense_grid": {
+    "butterfly_min_per_DF": 2.016560624e-08,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": 1.442724847e-05,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [],
+    "calendar_violations": 0,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   },
+   "description": "raw SVI per expiry with Durrleman g(k) >= 0 on 241 points of k in [-1.5, 1] and Lee wing bounds, and calendar ordering w_(i-1) <= w_i <= w_(i+1) certified on a 4,001-point k-grid and in the wing slopes; block coordinate descent from the eSSVI fit; inverse half-spread weights",
+   "metrics": {
+    "all": {
+     "inside_spread_pct": 81.70271198,
+     "mean_error_vp": -0.02206602632,
+     "median_abs_hs": 0.5382078695,
+     "median_abs_vp": 0.08318776227,
+     "n": 2913,
+     "rmse_hs": 4.684675474,
+     "rmse_outside_spread_vp": 0.3304955231,
+     "rmse_vp": 0.3761985696,
+     "within_2hs_pct": 96.08650875
+    },
+    "by_expiry": {
+     "2026-10-29": {
+      "T_days": 13.0,
+      "inside_spread_pct": 86.92307692,
+      "mean_error_vp": -0.03807130111,
+      "median_abs_hs": 0.3460619704,
+      "median_abs_vp": 0.1168709949,
+      "n": 130,
+      "rmse_hs": 0.6879387408,
+      "rmse_outside_spread_vp": 0.04507937649,
+      "rmse_vp": 0.1421110869,
+      "within_2hs_pct": 98.46153846
+     },
+     "2026-11-13": {
+      "T_days": 28.0,
+      "inside_spread_pct": 62.35294118,
+      "mean_error_vp": -0.08450247497,
+      "median_abs_hs": 0.7517484631,
+      "median_abs_vp": 0.1269283912,
+      "n": 170,
+      "rmse_hs": 1.114626076,
+      "rmse_outside_spread_vp": 0.1636710986,
+      "rmse_vp": 0.3339068256,
+      "within_2hs_pct": 92.35294118
+     },
+     "2027-01-15": {
+      "T_days": 91.0,
+      "inside_spread_pct": 66.95652174,
+      "mean_error_vp": -0.005653173406,
+      "median_abs_hs": 0.7867274615,
+      "median_abs_vp": 0.08930977901,
+      "n": 115,
+      "rmse_hs": 0.9539439883,
+      "rmse_outside_spread_vp": 0.06005078119,
+      "rmse_vp": 0.1492282632,
+      "within_2hs_pct": 97.39130435
+     }
+    },
+    "excluding_arbitrage_flagged": {
+     "inside_spread_pct": 83.5572843,
+     "mean_error_vp": -0.02387512047,
+     "median_abs_hs": 0.5217294444,
+     "median_abs_vp": 0.07964987909,
+     "n": 2828,
+     "rmse_hs": 0.7780607658,
+     "rmse_outside_spread_vp": 0.06969132054,
+     "rmse_vp": 0.1834483638,
+     "within_2hs_pct": 98.05516266
+    },
+    "in_sample": {
+     "inside_spread_pct": 83.48623853,
+     "mean_error_vp": -0.02636050834,
+     "median_abs_hs": 0.5287672155,
+     "median_abs_vp": 0.07964442139,
+     "n": 1417,
+     "rmse_hs": 0.7852263818,
+     "rmse_outside_spread_vp": 0.07756653066,
+     "rmse_vp": 0.1917932805,
+     "within_2hs_pct": 98.09456598
+    },
+    "n_unpriced": 0,
+    "out_of_sample": {
+     "inside_spread_pct": 80.01336898,
+     "mean_error_vp": -0.01799832509,
+     "median_abs_hs": 0.548686268,
+     "median_abs_vp": 0.08587870517,
+     "n": 1496,
+     "rmse_hs": 6.49225888,
+     "rmse_outside_spread_vp": 0.4549590267,
+     "rmse_vp": 0.4906475028,
+     "within_2hs_pct": 94.18449198
+    }
+   },
+   "model": "svi_cal",
+   "n_in_sample": 1417,
+   "n_params": 85,
+   "params": {}
+  },
+  {
+   "available": true,
+   "dense_grid": {
+    "butterfly_min_per_DF": 1.707172984e-09,
+    "butterfly_points": 3383,
+    "butterfly_violating_expiries": [],
+    "butterfly_violations": 0,
+    "calendar_min_dw": 3.108211209e-05,
+    "calendar_points": 3216,
+    "calendar_violating_pairs": [],
+    "calendar_violations": 0,
+    "call_spread_slope_violations": 0,
+    "grid_points_per_expiry": 201,
+    "nonfinite_iv_points": 0,
+    "tolerances": {
+     "butterfly_per_DF": 1e-09,
+     "calendar_total_variance": 1e-10
+    }
+   },
+   "description": "Heston at the stored model_version-2 joint SPX/VIX-index fit (DE + L-BFGS-B on 53 z-grid anchors and 4 VIX indices; repo Lewis engine)",
+   "metrics": {
+    "all": {
+     "inside_spread_pct": 7.586680398,
+     "mean_error_vp": 0.07077171918,
+     "median_abs_hs": 6.319243648,
+     "median_abs_vp": 0.9839102644,
+     "n": 2913,
+     "rmse_hs": 10.42240153,
+     "rmse_outside_spread_vp": 2.710733089,
+     "rmse_vp": 2.93318296,
+     "within_2hs_pct": 14.45245451
+    },
+    "by_expiry": {
+     "2026-10-29": {
+      "T_days": 13.0,
+      "inside_spread_pct": 2.307692308,
+      "mean_error_vp": 0.3131280559,
+      "median_abs_hs": 9.758493553,
+      "median_abs_vp": 2.040649877,
+      "n": 130,
+      "rmse_hs": 10.76524479,
+      "rmse_outside_spread_vp": 3.571648057,
+      "rmse_vp": 3.890373625,
+      "within_2hs_pct": 4.615384615
+     },
+     "2026-11-13": {
+      "T_days": 28.0,
+      "inside_spread_pct": 2.941176471,
+      "mean_error_vp": 0.5851143135,
+      "median_abs_hs": 6.961453035,
+      "median_abs_vp": 1.172394123,
+      "n": 170,
+      "rmse_hs": 9.702879922,
+      "rmse_outside_spread_vp": 1.701390842,
+      "rmse_vp": 1.910978801,
+      "within_2hs_pct": 15.29411765
+     },
+     "2027-01-15": {
+      "T_days": 91.0,
+      "inside_spread_pct": 9.565217391,
+      "mean_error_vp": 0.7380107481,
+      "median_abs_hs": 8.460725638,
+      "median_abs_vp": 0.8211636802,
+      "n": 115,
+      "rmse_hs": 8.732147262,
+      "rmse_outside_spread_vp": 0.9611665202,
+      "rmse_vp": 1.070698598,
+      "within_2hs_pct": 16.52173913
+     }
+    },
+    "excluding_arbitrage_flagged": {
+     "inside_spread_pct": 7.743988685,
+     "mean_error_vp": 0.03534773682,
+     "median_abs_hs": 6.217790618,
+     "median_abs_vp": 0.9569469884,
+     "n": 2828,
+     "rmse_hs": 8.33216197,
+     "rmse_outside_spread_vp": 2.723940878,
+     "rmse_vp": 2.950182996,
+     "within_2hs_pct": 14.78076379
+    },
+    "in_sample": {
+     "inside_spread_pct": 7.547169811,
+     "mean_error_vp": 0.889748405,
+     "median_abs_hs": 6.954175448,
+     "median_abs_vp": 1.044134199,
+     "n": 53,
+     "rmse_hs": 8.77854673,
+     "rmse_outside_spread_vp": 1.129896069,
+     "rmse_vp": 1.271382203,
+     "within_2hs_pct": 13.20754717
+    },
+    "n_unpriced": 0,
+    "out_of_sample": {
+     "inside_spread_pct": 7.587412587,
+     "mean_error_vp": 0.0555948785,
+     "median_abs_hs": 6.315791115,
+     "median_abs_vp": 0.9838607186,
+     "n": 2860,
+     "rmse_hs": 10.45042453,
+     "rmse_outside_spread_vp": 2.73140733,
+     "rmse_vp": 2.955172485,
+     "within_2hs_pct": 14.47552448
+    }
+   },
+   "model": "heston_v2",
+   "n_in_sample": 53,
+   "n_params": 5,
+   "params": {}
+  }
+ ],
+ "n_quotes": 2913,
+ "notes": [
+  "Every model is scored on the same quotes (the calibrator's OOS universe) with the same metrics and dense-grid checks.",
+  "Surfaces are fitted to alternate strikes, so their out-of-sample quotes are the strikes in between (an interpolation test); Heston's in-sample set is its calibration anchors, fitted jointly with the VIX index leg.",
+  "svi_cal is the arbitrage-free surface (butterfly and calendar certified on grids); svi has no calendar constraint and its calendar violations are counted in dense_grid.",
+  "Yahoo snapshots carry no quote time: part of every model's spread misses can be stale quotes rather than model error."
+ ],
+ "ranking_by_oos_median_abs_hs": [
+  {
+   "model": "svi",
+   "oos_inside_spread_pct": 85.82887701,
+   "oos_median_abs_hs": 0.4806397288,
+   "oos_rmse_hs": 6.475570313,
+   "oos_rmse_vp": 0.481978149
+  },
+  {
+   "model": "svi_cal",
+   "oos_inside_spread_pct": 80.01336898,
+   "oos_median_abs_hs": 0.548686268,
+   "oos_rmse_hs": 6.49225888,
+   "oos_rmse_vp": 0.4906475028
+  },
+  {
+   "model": "essvi",
+   "oos_inside_spread_pct": 28.47593583,
+   "oos_median_abs_hs": 2.05345158,
+   "oos_rmse_hs": 7.62409095,
+   "oos_rmse_vp": 2.038164689
+  },
+  {
+   "model": "heston_v2",
+   "oos_inside_spread_pct": 7.587412587,
+   "oos_median_abs_hs": 6.315791115,
+   "oos_rmse_hs": 10.45042453,
+   "oos_rmse_vp": 2.955172485
+  }
+ ],
+ "schema_version": 1,
+ "session": "2026-10-16"
+}

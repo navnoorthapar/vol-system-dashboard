@@ -1,5 +1,31 @@
-# Test and lint tools on top of the runtime set.
+# Test, lint, type-check and benchmark tools on top of the runtime set.
+# None of these is imported by the package at run time. Mirrored in
+# pyproject.toml [project.optional-dependencies] dev. CI installs the exact
+# versions from requirements-lock.txt (compiled from this file).
 -r requirements.txt
 pytest>=9,<10
 pytest-cov>=7,<8
-ruff>=0.6
+# Lint gate (scripts/ci/baseline_gate.py ruff): the baseline counts are
+# version-specific, so the range is one minor release.
+ruff>=0.17,<0.18
+# Property-based tests of the pricing invariants (tests/test_properties_*.py).
+# MPL-2.0: an unmodified test-only tool, never vendored or shipped.
+hypothesis>=6.170,<7
+# Micro-benchmarks (scripts/bench/, `make bench`; docs/benchmarks.md).
+pytest-benchmark>=5.3,<6
+# Type-check gate (scripts/ci/baseline_gate.py mypy), with the pandas and
+# SciPy stubs it checks against; baseline counts are version-specific too.
+mypy>=2.4,<2.5
+pandas-stubs>=3.0.5,<3.1
+scipy-stubs>=1.17.1,<1.18
+# Independent test oracles (C23), never imported by runtime code: the tests
+# that use them call pytest.importorskip and skip cleanly without them.
+#   QuantLib (BSD-3): AnalyticHestonEngine / BatesEngine / AnalyticRoughHestonEngine
+#   oracles in tests/test_external_oracles.py and tests/test_rough_heston.py.
+QuantLib==1.44
+#   py_lets_be_rational (MIT; deps cody-special, piecewise-rational, both MIT):
+#   Jaeckel's "Let's Be Rational" implied-vol oracle in tests/test_external_oracles.py.
+py_lets_be_rational==1.1.2
+# Test oracle only: test_stats_forecast.py checks the Diebold-Mariano test against
+# statsmodels' implementation (BSD-3; installed with arch, pinned here for the tests).
+statsmodels>=0.14

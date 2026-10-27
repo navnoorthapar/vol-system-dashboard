@@ -1,5 +1,6 @@
 """
-joint_calibrator.py — Joint SPX/VIX Smile Calibration Engine (C4, revised C22).
+joint_calibrator.py — Joint SPX/VIX calibration engine: the SPX smile and the VIX
+index term structure (C4, revised C22).
 
 Minimises a single weighted loss over the market observables:
 
@@ -65,6 +66,14 @@ the routine fit. Its old 37 vp "structural failure" figure was measured with
 the broken put pricer, spot-VIX vegas and a stale chain, so it says nothing
 about the model.
 
+Optimiser and diagnostics (C23). The loss is a sum of squares and is
+minimised as one (HestonJointResiduals + multistart_trf); every result
+records its starts, basins and an identifiability report. sigma_profile()
+measures the cost of the sigma <= 2 box, calibrate_comparison() fits Heston
+and lifted rough Heston like for like, and
+scripts/calibration_diagnostics.py writes both for every committed
+session (data_store/calibrations/diagnostics/).
+
 Usage
 -----
     from joint_vol_calibration.calibration.joint_calibrator import JointCalibrator
@@ -72,32 +81,56 @@ Usage
     result = cal.calibrate()
 """
 
+import functools
 import logging
 import math
+import os
 import pickle
 import time
-from typing import Optional
+import warnings
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy import optimize, stats
+from scipy.stats import qmc
 
 from joint_vol_calibration.config import (
-    HESTON_BOUNDS, JOINT_W1, JOINT_W2, JOINT_W3,
-    RANDOM_SEED, DATA_DIR, VIX_INDEX_TENOR_DAYS,
+    DATA_DIR,
+    HESTON_BOUNDS,
+    HESTON_START_BOX,
+    JOINT_W1,
+    JOINT_W2,
+    JOINT_W3,
+    PROFILE_KAPPA_MAX,
+    RANDOM_SEED,
+    ROUGH_HESTON_H_BOUNDS,
+    ROUGH_HESTON_N_FACTORS,
+    ROUGH_HESTON_START_BOX,
+    ROUGH_HESTON_TIME_STEPS,
+    SIGMA_PROFILE_CAPS,
+    VIX_INDEX_TENOR_DAYS,
 )
 from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
 from joint_vol_calibration.data.option_chain import CAL_EXPIRY_TARGETS_DAYS
 from joint_vol_calibration.models.heston import (
-    heston_call_batch,
-    heston_vix_term_index,
-    heston_vix_index,
-    heston_vix_future_exact,
-    heston_vix_futures_curve,      # noqa: F401  (re-exported for back-compat)
+    HESTON_PARAM_NAMES,
+    _one_minus_exp_over,
     bates_call_batch,
     bates_vix_term_index,
-    _one_minus_exp_over,
+    heston_call_batch,
+    heston_call_batch_grid,
+    heston_call_batch_jac,
+    heston_vix_future_exact,
+    heston_vix_futures_curve,  # noqa: F401  (re-exported for back-compat)
+    heston_vix_index,
+    heston_vix_term_index,
+    heston_vix_term_index_jac,
+    heston_vvix,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,7 +220,7 @@ def _at_bound(val: float, bound: float, span: float, rel_tol: float) -> bool:
     return abs(val - bound) <= rel_tol * scale
 
 
-def count_pinned_params(params: dict, feller_state: Optional[str] = None,
+def count_pinned_params(params: dict, feller_state: str | None = None,
                         rel_tol: float = 1e-3, feller_imposed: bool = True) -> list:
     """Names of the constraints that are active at a fit.
 
@@ -201,7 +234,7 @@ def count_pinned_params(params: dict, feller_state: Optional[str] = None,
 
     effective d.o.f. = 5 - len(result).
     """
-    pinned = []
+    pinned: list[str] = []
     for name in ("kappa", "theta", "sigma", "rho", "v0"):
         if name not in params or name not in HESTON_BOUNDS:
             continue
@@ -215,7 +248,7 @@ def count_pinned_params(params: dict, feller_state: Optional[str] = None,
     return pinned
 
 
-def active_constraints(params: dict, feller_state: Optional[str] = None,
+def active_constraints(params: dict, feller_state: str | None = None,
                        feller_imposed: bool = True, rel_tol: float = 1e-3) -> list:
     """Human-readable list of the active constraints (replaces the old
     'Pinned: rho, sigma at boundary' message)."""
@@ -245,20 +278,20 @@ def calibration_is_legacy(cal: dict) -> bool:
         return True
 
 
-def _session_of(snapshot_date) -> Optional[str]:
+def _session_of(snapshot_date) -> str | None:
     if snapshot_date is None:
         return None
     return oc.session_on_or_before(snapshot_date).isoformat()
 
 
-def is_acceptable_calibration(params: dict, spx_iv_rmse: Optional[float] = None,
-                              n_vix_tenors: Optional[int] = None, *,
-                              n_spx_expiries: Optional[int] = None,
-                              n_spx_options: Optional[int] = None,
-                              n_put_wing_expiries: Optional[int] = None,
-                              spx_snapshot_session: Optional[str] = None,
-                              spot_date: Optional[str] = None,
-                              model_version: Optional[int] = None,
+def is_acceptable_calibration(params: dict, spx_iv_rmse: float | None = None,
+                              n_vix_tenors: int | None = None, *,
+                              n_spx_expiries: int | None = None,
+                              n_spx_options: int | None = None,
+                              n_put_wing_expiries: int | None = None,
+                              spx_snapshot_session: str | None = None,
+                              spot_date: str | None = None,
+                              model_version: int | None = None,
                               allow_legacy: bool = False) -> tuple:
     """Reject degenerate, under-identified or stale Heston fits.
 
@@ -457,29 +490,577 @@ def heston_vix_put_price(
         * math.exp(-r * T)
 
 
+# ── Residual model, multi-start TRF and identifiability (C23) ────────────────
+#
+# The joint loss is a weighted sum of squares, so it is minimised as a
+# nonlinear least-squares problem: scipy.optimize.least_squares
+# (trust-region reflective, bounds handled by reflection) on the residual
+# vector r(p) with sum(r**2) == joint_loss(p), from several Sobol starts plus
+# the previous session's accepted fit. Measured on the five committed
+# model_version 2 sessions in scripts/calibration_diagnostics.py.
+
+_TRF_N_STARTS = 8
+_TRF_MAX_NFEV = 200            # residual evaluations per start (Jacobians not counted)
+_TRF_TOL = 1e-12               # ftol = xtol = gtol
+_BASIN_LOSS_RTOL = 1e-6        # two starts share a basin if their losses agree to this
+_PIN_REL_TOL = 1e-3            # same rule as count_pinned_params
+
+
+class HestonJointResiduals:
+    """Residual vector of the joint loss, with an analytic Jacobian.
+
+    sum(self(p)**2) equals JointCalibrator.joint_loss(p) inside the box:
+      SPX   sqrt(w1/n_spx) * (model - market) / vega   per anchor
+      VIX   sqrt(w2/n_vix) * (model - market) / 100    per spot index
+      VIXo  sqrt(w3/n_vo)  * (model - market) / vega   per VIX option (w3 > 0)
+      soft Feller sqrt(50) * max(0, sigma^2 - 2 kappa theta)
+    Only arrays and floats are stored, so the object pickles cheaply into
+    scipy's worker processes (differential_evolution(workers=n)).
+
+    jac(p): d r / d p from heston_call_batch_jac on the grid the residual
+    evaluation at the same p converged on (cached), the closed-form VIX index
+    derivative and the Feller term; a VIX-options block (w3 > 0, research
+    only) is differenced numerically.
+    """
+
+    names = HESTON_PARAM_NAMES
+
+    def __init__(self, groups, vix_tenors, vix_market, w_spx: float, w_vix: float,
+                 w_vix_opt: float = 0.0, feller: str = "off", vix_options=None,
+                 r_ref: float = 0.0):
+        self.groups = [tuple(g) for g in groups]
+        self.vix_tenors = np.asarray(vix_tenors, dtype=float)
+        self.vix_market = np.asarray(vix_market, dtype=float)
+        n_spx = sum(len(g[3]) for g in self.groups)
+        self.c_spx = math.sqrt(w_spx / n_spx) if (w_spx > 0 and n_spx) else 0.0
+        self.c_vix = (math.sqrt(w_vix / len(self.vix_tenors))
+                      if (w_vix > 0 and len(self.vix_tenors)) else 0.0)
+        self.feller = feller
+        self.r_ref = float(r_ref)
+        self.vix_opt = None
+        self.c_vo = 0.0
+        if w_vix_opt > 0 and vix_options is not None and len(vix_options):
+            vo = vix_options
+            self.vix_opt = (vo["strike"].to_numpy(float), vo["time_to_expiry"].to_numpy(float),
+                            (vo["right"] == "C").to_numpy(), vo["market_price_f"].to_numpy(float),
+                            vo["bs_vega"].to_numpy(float))
+            self.c_vo = math.sqrt(w_vix_opt / len(vo))
+        self.n_calls = 0
+        self.n_jac = 0
+        self._grid_cache: tuple[bytes, list] | None = None
+
+    # -- residuals -----------------------------------------------------------
+    def _spx(self, p, keep_grids: bool):
+        out, grids = [], []
+        for T, F, D, K, is_put, mkt, vega in self.groups:
+            r_T = -math.log(D) / T
+            calls, grid = heston_call_batch_grid(F, K, T, r_T, r_T, *p)
+            model = calls.copy()
+            model[is_put] = calls[is_put] - D * (F - K[is_put])
+            out.append(self.c_spx * (model - mkt) / vega)
+            grids.append(grid)
+        if keep_grids:
+            self._grid_cache = (np.asarray(p, float).tobytes(), grids)
+        return out
+
+    def _vix_opt_resid(self, p):
+        kappa, theta, sigma, _, v0 = p
+        K, T, is_call, mkt, vega = self.vix_opt
+        model = np.array([(heston_vix_call_price if c else heston_vix_put_price)(
+            k, t, kappa, theta, sigma, v0, self.r_ref, n_grid=800)
+            for k, t, c in zip(K, T, is_call)])
+        return self.c_vo * (model - mkt) / vega
+
+    def __call__(self, p) -> np.ndarray:
+        self.n_calls += 1
+        p = np.asarray(p, dtype=float)
+        kappa, theta, sigma, _rho, v0 = p
+        parts = self._spx(p, keep_grids=True) if self.c_spx else []
+        if self.c_vix:
+            model = heston_vix_term_index(kappa, theta, sigma, v0, self.vix_tenors)
+            parts.append(self.c_vix * (np.atleast_1d(model) - self.vix_market) / 100.0)
+        if self.vix_opt is not None:
+            parts.append(self._vix_opt_resid(p))
+        if self.feller == "soft":
+            parts.append(np.array([math.sqrt(_FELLER_PENALTY)
+                                   * max(0.0, sigma * sigma - 2.0 * kappa * theta)]))
+        return np.concatenate(parts) if parts else np.zeros(0)
+
+    def loss(self, p) -> float:
+        """sum(r**2), 1e6 outside HESTON_BOUNDS (the DE objective)."""
+        if not JointCalibrator._in_bounds(*np.asarray(p, dtype=float)):
+            return 1e6
+        r = self(p)
+        return float(r @ r)
+
+    # -- Jacobian ------------------------------------------------------------
+    def jac(self, p) -> np.ndarray:
+        self.n_jac += 1
+        p = np.asarray(p, dtype=float)
+        kappa, theta, sigma, rho, v0 = p
+        key = p.tobytes()
+        grids = (self._grid_cache[1] if self._grid_cache is not None
+                 and self._grid_cache[0] == key else [None] * len(self.groups))
+        rows = []
+        if self.c_spx:
+            for (T, F, D, K, _, _, vega), grid in zip(self.groups, grids):
+                r_T = -math.log(D) / T
+                _, J = heston_call_batch_jac(F, K, T, r_T, r_T, kappa, theta, sigma, rho, v0, grid=grid)
+                rows.append(self.c_spx * J / vega[:, None])
+        if self.c_vix:
+            _, Jv = heston_vix_term_index_jac(kappa, theta, sigma, v0, self.vix_tenors)
+            rows.append(self.c_vix * Jv / 100.0)
+        if self.vix_opt is not None:
+            base = self._vix_opt_resid(p)
+            Jo = np.zeros((len(base), 5))
+            for j in range(5):
+                h = 1e-6 * max(abs(p[j]), 1e-3)
+                pp = p.copy()
+                pp[j] += h
+                Jo[:, j] = (self._vix_opt_resid(pp) - base) / h
+            rows.append(Jo)
+        if self.feller == "soft":
+            row = np.zeros((1, 5))
+            if sigma * sigma - 2.0 * kappa * theta > 0:
+                row[0] = math.sqrt(_FELLER_PENALTY) * np.array(
+                    [-2.0 * theta, -2.0 * kappa, 2.0 * sigma, 0.0, 0.0])
+            rows.append(row)
+        return np.vstack(rows) if rows else np.zeros((0, 5))
+
+
+def _box_arrays(bounds: dict, names: Sequence[str]) -> tuple:
+    return (np.array([bounds[n][0] for n in names], dtype=float),
+            np.array([bounds[n][1] for n in names], dtype=float))
+
+
+def sobol_starts(n: int, start_box: dict, lo: np.ndarray, hi: np.ndarray,
+                 names: Sequence[str], seed: int = RANDOM_SEED) -> np.ndarray:
+    """n scrambled-Sobol start points in start_box (log or linear per
+    parameter), each coordinate clipped to the interior of [lo, hi]."""
+    if n <= 0:
+        return np.zeros((0, len(names)))
+    m = math.ceil(math.log2(max(n, 1)))
+    u = qmc.Sobol(len(names), scramble=True, seed=seed).random_base2(m)[:n]
+    out = np.empty_like(u)
+    for j, name in enumerate(names):
+        a, b, scale = start_box[name]
+        a, b = max(a, lo[j]), min(b, hi[j])
+        if b < a:                                   # start box outside the active box
+            a = b = 0.5 * (lo[j] + hi[j])
+        if scale == "log" and a > 0:
+            out[:, j] = np.exp(np.log(a) + u[:, j] * (np.log(b) - np.log(a)))
+        else:
+            out[:, j] = a + u[:, j] * (b - a)
+    margin = 1e-6 * (hi - lo)
+    return np.clip(out, lo + margin, hi - margin)
+
+
+def _group_basins(losses: Sequence[float], rtol: float = _BASIN_LOSS_RTOL) -> list:
+    """Sorted loss levels -> list of index groups whose losses agree to rtol
+    (relative to the group's lowest loss). Starts that end on the same flat
+    valley at different parameters (kappa is a flat direction) count once."""
+    order = np.argsort(np.asarray(losses, dtype=float), kind="stable")
+    groups: list[list[int]] = []
+    for i in order:
+        if groups and losses[i] <= losses[groups[-1][0]] * (1.0 + rtol) + 1e-300:
+            groups[-1].append(int(i))
+        else:
+            groups.append([int(i)])
+    return groups
+
+
+def multistart_trf(fun: Callable, jac, starts: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                   labels: Sequence[str] | None = None, *, max_nfev: int = _TRF_MAX_NFEV,
+                   tol: float = _TRF_TOL, x_scale="jac") -> tuple:
+    """least_squares(method='trf') from every start; returns (best, report).
+
+    best: the OptimizeResult with the lowest sum of squares (ties keep the
+    earlier start, so a warm start listed first wins a tie). report: one row
+    per start (label, x0, x, loss = sum r^2, nfev, njev, status, seconds)
+    plus the basin grouping. jac=None differences numerically ('2-point').
+
+    A start whose residuals are not finite at x0 (least_squares raises) or
+    whose optimum is not finite is recorded as failed (status "failed",
+    loss None) and the others still run, so one bad Sobol corner cannot
+    cost the daily fit; RuntimeError only if every start fails.
+    """
+    labels = list(labels) if labels is not None else [f"start{i}" for i in range(len(starts))]
+    runs: list[dict[str, Any]] = []
+    best, best_loss = None, np.inf
+    for start, label in zip(starts, labels):
+        x0 = np.clip(np.asarray(start, dtype=float), lo, hi)
+        t0 = time.perf_counter()
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)   # Lewis cap at extreme trial points
+                sol = optimize.least_squares(
+                    fun, x0, jac=jac if jac is not None else "2-point", bounds=(lo, hi),
+                    method="trf", x_scale=x_scale, ftol=tol, xtol=tol, gtol=tol,
+                    max_nfev=max_nfev)
+            loss = float(2.0 * sol.cost)
+            if not (np.isfinite(loss) and np.all(np.isfinite(sol.x))):
+                raise FloatingPointError(f"non-finite optimum (loss {loss})")
+        except (ValueError, FloatingPointError, ArithmeticError, np.linalg.LinAlgError) as exc:
+            logger.warning("     TRF start %s failed: %s", label, exc)
+            runs.append({"label": label, "x0": [float(v) for v in x0], "x": None,
+                         "loss": None, "nfev": None, "njev": None, "status": "failed",
+                         "message": f"{type(exc).__name__}: {exc}",
+                         "seconds": time.perf_counter() - t0})
+            continue
+        runs.append({"label": label, "x0": [float(v) for v in x0],
+                     "x": [float(v) for v in sol.x], "loss": loss,
+                     "nfev": int(sol.nfev), "njev": int(sol.njev or 0),
+                     "status": int(sol.status), "message": str(sol.message),
+                     "seconds": time.perf_counter() - t0})
+        if loss < best_loss:
+            best, best_loss = sol, loss
+    if best is None:
+        raise RuntimeError(f"all {len(runs)} TRF start(s) failed: "
+                           + "; ".join(f"{r['label']}: {r['message']}" for r in runs))
+    ok = [i for i, r in enumerate(runs) if r["loss"] is not None]
+    groups = [[ok[i] for i in g] for g in _group_basins([runs[i]["loss"] for i in ok])]
+    best_group = groups[0] if groups else []
+    report = {
+        "runs": runs,
+        "n_starts": len(runs),
+        "n_failed_starts": len(runs) - len(ok),
+        "n_distinct_basins": len(groups),
+        "n_starts_at_best": len(best_group),
+        "basin_losses": [runs[g[0]]["loss"] for g in groups],
+        "best_label": runs[best_group[0]]["label"] if best_group else None,
+    }
+    if len(best_group) > 1:
+        X = np.array([runs[i]["x"] for i in best_group])
+        report["best_basin_param_range"] = [float(v) for v in X.max(0) - X.min(0)]
+    return best, report
+
+
+def identifiability_report(J: np.ndarray, r: np.ndarray, x: np.ndarray,
+                           names: Sequence[str], lo: np.ndarray, hi: np.ndarray,
+                           rel_tol: float = _PIN_REL_TOL) -> dict:
+    """Local identifiability of a least-squares fit from its Jacobian.
+
+    * singular values of the relative-sensitivity Jacobian J diag(|x|)
+      (d r / d ln p) and their condition number; cond(J^T J) is its square;
+    * the direction of the smallest singular value (which parameter
+      combination the data barely see);
+    * Gauss-Newton standard errors s^2 (J_f^T J_f)^{-1}, s^2 = sum r^2 / (n - k),
+      and the correlation matrix, over the k parameters NOT on a bound (a
+      parameter at its box edge has no interior curvature-based error bar).
+
+    The residuals are weighted pseudo-observations whose misfit is mostly
+    model error, not independent noise, so the standard errors are a local
+    curvature scale (how far a parameter moves before the loss changes by
+    the average squared residual), not a sampling distribution.
+    """
+    J = np.asarray(J, dtype=float)
+    r = np.asarray(r, dtype=float)
+    x = np.asarray(x, dtype=float)
+    names = list(names)
+    scale = np.where(np.abs(x) > 0, np.abs(x), 1.0)
+    Jr = J * scale[None, :]
+    sv = np.linalg.svd(Jr, compute_uv=False)
+    _, _, Vt = np.linalg.svd(Jr, full_matrices=False)
+    weakest = Vt[-1] * np.sign(Vt[-1][np.argmax(np.abs(Vt[-1]))])
+    on_bound = []
+    for j, n in enumerate(names):
+        span = (hi[j] - lo[j]) or 1.0
+        if _at_bound(x[j], lo[j], span, rel_tol) or _at_bound(x[j], hi[j], span, rel_tol):
+            on_bound.append(n)
+    free = [j for j, n in enumerate(names) if n not in on_bound]
+    n_obs, k = len(r), len(free)
+    out: dict[str, Any] = {
+        "param_names": names,
+        "n_residuals": int(n_obs),
+        "rel_jacobian_singular_values": [float(v) for v in sv],
+        "rel_jacobian_condition_number": float(sv[0] / sv[-1]) if sv[-1] > 0 else float("inf"),
+        "rel_jtj_condition_number": float((sv[0] / sv[-1]) ** 2) if sv[-1] > 0 else float("inf"),
+        "weakest_direction": {n: float(v) for n, v in zip(names, weakest)},
+        "on_bound": on_bound,
+        "free_params": [names[j] for j in free],
+        "standard_errors": dict.fromkeys(names),
+        "relative_standard_errors": dict.fromkeys(names),
+        "correlation": None,
+        "se_note": ("Gauss-Newton s^2 (J^T J)^-1 over the free parameters: a local "
+                    "curvature scale, not a sampling distribution (the residuals are "
+                    "model misfit, not iid noise)"),
+    }
+    if k == 0 or n_obs <= k:
+        return out
+    Jf = J[:, free]
+    s2 = float(r @ r) / (n_obs - k)
+    try:
+        cov = s2 * np.linalg.inv(Jf.T @ Jf)
+    except np.linalg.LinAlgError:
+        return out
+    se = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    corr = cov / np.outer(se, se)
+    for i, j in enumerate(free):
+        out["standard_errors"][names[j]] = float(se[i])
+        out["relative_standard_errors"][names[j]] = (float(se[i] / abs(x[j]))
+                                                     if x[j] != 0 else None)
+    out["correlation"] = {"params": [names[j] for j in free],
+                          "matrix": [[float(v) for v in row] for row in corr]}
+    out["residual_variance"] = s2
+    return out
+
+
+def gauss_newton_profile_check(fun: Callable, x: np.ndarray, report: dict,
+                               lo: np.ndarray, hi: np.ndarray,
+                               steps: Sequence[float] = (-1.0, 1.0)) -> dict:
+    """How well the Gauss-Newton standard errors describe the loss.
+
+    For each free parameter, hold it at x_j + m SE_j and re-fit the other
+    free parameters; return dSSR / (m^2 s^2) per step m. A quadratic loss
+    with the Gauss-Newton Hessian gives exactly 1. Below 1 the loss rises
+    more slowly than J^T J predicts (the dropped sum r_i Hess(r_i) term
+    matters because the residuals are model misfit), so that SE is
+    optimistic; above 1, conservative. Measured, not assumed.
+    """
+    names = report["param_names"]
+    x = np.asarray(x, dtype=float)
+    r0 = fun(x)
+    base = float(r0 @ r0)
+    s2 = report.get("residual_variance")
+    free = [names.index(k) for k in report["free_params"]]
+    out: dict[str, dict[str, float]] = {}
+    if not s2:
+        return out
+    for i in free:
+        se = report["standard_errors"][names[i]]
+        others = [j for j in free if j != i]
+        ratios = {}
+        for m in steps:
+            xi = x.copy()
+            xi[i] = float(np.clip(x[i] + m * se, lo[i], hi[i]))
+
+            def sub(y, xi=xi, others=others):
+                z = xi.copy()
+                z[others] = y
+                return fun(z)
+            sol = optimize.least_squares(sub, x[others], bounds=(lo[others], hi[others]),
+                                         method="trf", x_scale="jac", ftol=1e-12, xtol=1e-12)
+            eff = (xi[i] - x[i]) / se
+            ratios[f"{m:+g}"] = float((2.0 * sol.cost - base) / (s2 * eff * eff))
+        out[names[i]] = ratios
+    return out
+
+
+def recorded_vix_targets(result: dict) -> dict:
+    """{ticker: level} of the spot VIX indices a stored fit was calibrated to
+    (``result["vix_index"][i]["market"]``), for
+    JointCalibrator(..., vix_targets=...).
+
+    C23 restated the database's VIX index family as Cboe's official closes.
+    The committed fits were made on Yahoo's float32 copies of the same prints
+    (26.950001 for Cboe's 26.95; |change| <= 1e-5 pts on every committed
+    session), so they reproduce exactly on the targets they recorded, and to
+    about 1e-7 relative loss on the restated database.
+    """
+    rows = result.get("vix_index") or []
+    out = {str(r["ticker"]): float(r["market"]) for r in rows if r.get("market") is not None}
+    if not out:
+        raise ValueError("the result records no VIX index targets (result['vix_index'])")
+    return out
+
+
+# ── Reference rate: the Treasury zero curve (C23), ^IRX for the committed fits ─
+
+RATE_REFERENCE_KINDS = ("treasury_curve", "irx")
+DEFAULT_RATE_REFERENCE = "treasury_curve"
+_IRX_SOURCE = "^IRX 13-week bill (tbill_rates, cc)"
+
+
+@dataclass(frozen=True)
+class RateReference:
+    """The continuously compounded reference rate of one session.
+
+    kind      "treasury_curve" (rates.get_zero_curve: Treasury bills and par
+              curve, look-ahead gated) or "irx" (Yahoo's ^IRX 13-week bill,
+              the reference of every fit committed before C23)
+    r_91d     the 91-day rate (cc): the scalar summary, comparable with the
+              13-week bill; for "irx" it is the ^IRX rate itself
+    label     human-readable source, recorded in the fit
+    curve     the ZeroCurve (treasury_curve only)
+    fallback  why a requested curve was not used (then kind is "irx")
+
+    ``rate(T)`` is r(T) at maturity T (ACT/365 years): the curve's zero rate,
+    or the flat ^IRX rate. option_chain.clean_option_chain takes it as
+    ``r_ref`` (``for_clean()``): the parity plausibility check and the
+    fixed-D fallback discount each expiry at its own maturity's rate.
+    """
+    kind: str
+    r_91d: float
+    label: str
+    curve: Any = None
+    fallback: str | None = None
+
+    def rate(self, T: float) -> float:
+        if self.curve is None:
+            return float(self.r_91d)
+        return float(self.curve.zero_rate(max(float(T), 1e-6)))
+
+    def for_clean(self):
+        """r_ref for clean_option_chain: a scalar for "irx" (so a committed
+        fit's chain cleans bit for bit as before), r(T) for the curve."""
+        return float(self.r_91d) if self.curve is None else self.rate
+
+    def record(self) -> dict:
+        out = {"kind": self.kind, "r_91d": float(self.r_91d), "label": self.label}
+        if self.curve is not None:
+            out["curve_date"] = str(self.curve.curve_date)
+            out["zero_rates"] = {f"{d}d": float(self.curve.zero_rate(d / 365.0))
+                                 for d in (30, 91, 182, 365, 730)}
+        if self.fallback:
+            out["fallback"] = self.fallback
+        return out
+
+
+def _irx_reference(spot_date: str, fallback: str | None = None) -> RateReference:
+    r = float(db.get_tbill_rate(spot_date))
+    label = f"^IRX 13-week bill, {r:.4%} cc"
+    try:
+        start = (pd.Timestamp(spot_date) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        ser = db.get_tbill_rates_series(spot_date, start_date=start)
+    except Exception:                      # label detail only
+        ser = None
+    if ser is not None and len(ser) and np.isclose(float(ser["rate"].iloc[-1]), r,
+                                                   rtol=0.0, atol=1e-12):
+        row = ser.iloc[-1]
+        d = row.get("discount_yield")
+        label = (f"^IRX 13-week bill {str(row['date'])[:10]}: "
+                 + (f"{float(d):.4%} bank discount = " if d is not None and pd.notna(d) else "")
+                 + f"{r:.4%} cc")
+    return RateReference("irx", r, label, None, fallback)
+
+
+def reference_rate(spot_date: str, kind: str = DEFAULT_RATE_REFERENCE) -> RateReference:
+    """The reference rate of session ``spot_date``.
+
+    "treasury_curve": the zero curve as of the session (rates.get_zero_curve,
+    newest Treasury date <= the session, at most 7 days old). When the curve
+    is missing or stale the ^IRX bill is used instead and the reason is kept
+    in ``fallback`` (and in the fit's record): a curve outage must not lose a
+    session's fit. "irx": the ^IRX bill (tbill_rates, stored cc).
+    """
+    if kind not in RATE_REFERENCE_KINDS:
+        raise ValueError(f"rate reference must be one of {RATE_REFERENCE_KINDS}, got {kind!r}")
+    if kind == "irx":
+        return _irx_reference(spot_date)
+    from joint_vol_calibration.data import rates
+    try:
+        curve = rates.get_zero_curve(spot_date)
+    except (LookupError, db.StaleDataError) as exc:
+        logger.warning("  Treasury zero curve unavailable for %s (%s): using ^IRX", spot_date, exc)
+        return _irx_reference(spot_date, fallback=f"treasury curve unavailable: {exc}")
+    r91 = float(curve.zero_rate(91.0 / 365.0))
+    label = (f"Treasury zero curve {curve.curve_date} (bills + par curve, cc): "
+             f"r(91d) {r91:.4%}, r(1y) {float(curve.zero_rate(1.0)):.4%}")
+    return RateReference("treasury_curve", r91, label, curve)
+
+
+def recorded_rate_reference(result: dict) -> str:
+    """The rate-reference kind a stored fit used: its ``rate_reference``
+    record, else "irx" (every fit committed before C23 used ^IRX). A fit
+    whose curve was unavailable records kind "irx" with the fallback."""
+    rec = result.get("rate_reference")
+    if isinstance(rec, dict) and rec.get("kind") in RATE_REFERENCE_KINDS:
+        return str(rec["kind"])
+    return "irx"
+
+
+def recorded_inputs(result: dict) -> dict:
+    """JointCalibrator keyword arguments that rebuild a stored fit's
+    objective: its recorded VIX targets and its rate reference (or the rate
+    it was given as an argument)."""
+    rec = result.get("rate_reference")
+    out: dict[str, Any] = {"vix_targets": recorded_vix_targets(result)}
+    if isinstance(rec, dict) and rec.get("kind") == "argument":
+        out["r"] = float(rec["r_91d"])
+    else:
+        out["rate_reference"] = recorded_rate_reference(result)
+    return out
+
+
+def session_rate_reference(session: str, cal_dir=None) -> RateReference:
+    """The reference rate of ``session``'s stored joint fit (its record;
+    "irx" for every fit committed before C23), else the calibrator's default.
+    The surface layer cleans a session's chain with it, so its universe is
+    the one that fit was scored on."""
+    cal_dir = Path(cal_dir) if cal_dir is not None else Path(DATA_DIR) / "calibrations"
+    path = cal_dir / f"joint_cal_{session}.pkl"
+    kind = DEFAULT_RATE_REFERENCE
+    if path.exists():
+        try:
+            with open(path, "rb") as f:
+                res = pickle.load(f)  # noqa: S301 (trusted: this module's own joint_cal_*.pkl results)
+        except (OSError, EOFError, pickle.UnpicklingError, AttributeError,
+                ImportError, ValueError, TypeError):
+            res = None
+        if isinstance(res, dict) and not calibration_is_legacy(res):
+            kind = recorded_rate_reference(res)
+    return reference_rate(session, kind)
+
+
+def previous_accepted_fit(spot_date: str, cal_dir=None) -> tuple:
+    """(path, result) of the newest ACCEPTED model_version >= 2 joint Heston
+    fit of a session strictly before spot_date, or (None, None).
+
+    Strictly earlier, so a warm start never sees the session being fitted or
+    a later one (refitting 2026-03-24 cannot start from 2026-03-27). Accepted
+    = is_acceptable_calibration(result) (the gate the dashboard uses).
+    """
+    cal_dir = Path(cal_dir) if cal_dir is not None else Path(DATA_DIR) / "calibrations"
+    if not cal_dir.is_dir():
+        return None, None
+    target = str(spot_date)[:10]
+    for path in sorted(cal_dir.glob("joint_cal_*.pkl"), reverse=True):
+        session = path.stem[len("joint_cal_"):]
+        if session >= target:
+            continue
+        try:
+            with open(path, "rb") as f:
+                res = pickle.load(f)  # noqa: S301 (trusted: this module's own joint_cal_*.pkl results)
+        except (OSError, EOFError, pickle.UnpicklingError, AttributeError,
+                ImportError, ValueError, TypeError):   # unreadable: not a warm start
+            continue
+        if not isinstance(res, dict) or calibration_is_legacy(res):
+            continue
+        if str(res.get("spot_date", session))[:10] >= target:
+            continue
+        if is_acceptable_calibration(res)[0]:
+            return path, res
+    return None, None
+
+
 # ── Main Class ────────────────────────────────────────────────────────────────
 
 class JointCalibrator:
     """
-    Joint SPX/VIX smile calibration engine for the Heston model.
+    Joint SPX/VIX calibration engine for the Heston model: the SPX smile and
+    the VIX index term structure (the VIX-options leg is off by default, w3 = 0).
 
     Loads market data once at construction, then minimises the weighted loss
-    with differential evolution (global search, scipy's internal polish off)
-    followed by one L-BFGS-B polish.
+    as a least-squares problem: multi-start trust-region reflective
+    (scipy least_squares) from the previous session's accepted fit and
+    scrambled-Sobol starts, analytic Jacobian (C23). The pre-C23 differential
+    evolution + L-BFGS-B path remains as calibrate(optimizer="de") and as an
+    optional global check (de_check=True).
 
     Attributes (set after calibrate())
     ------------------------------------
     params     : dict — calibrated Heston parameters
     result     : dict — the full calibration result (what save() persists)
     fit_time   : float — wall-clock seconds for calibration
+    fit_cpu_time : float — CPU seconds of the optimisation (this process)
     losses     : dict — per-leg losses at the optimum
     """
 
     def __init__(
         self,
         as_of_date: str,
-        r: Optional[float] = None,
-        q: Optional[float] = None,
+        r: float | None = None,
+        q: float | None = None,
         w1: float = JOINT_W1,
         w2: float = JOINT_W2,
         w3: float = JOINT_W3,
@@ -487,17 +1068,19 @@ class JointCalibrator:
         spx_chain=None,
         carry: str = "parity",
         feller: str = "off",
+        vix_targets: Mapping[str, float] | None = None,
+        rate_reference: str = DEFAULT_RATE_REFERENCE,
     ):
         """
         Parameters
         ----------
         as_of_date : 'YYYY-MM-DD' — the latest date whose data may be used;
                      the fit describes the last SPX session on or before it
-        r          : reference continuously-compounded rate. None: the ^IRX
-                     13-week bill for the spot session (db.get_tbill_rate,
-                     stored cc). Used to discount VIX options and as the
-                     fallback discount when an expiry's parity slope is
-                     implausible; the SPX leg prices off parity D_T, F_T.
+        r          : reference continuously-compounded rate (one number for
+                     every maturity). None: ``rate_reference``. Used to
+                     discount VIX options and, per expiry, in the chain's
+                     parity plausibility check and fixed-D fallback; the SPX
+                     leg prices off parity D_T, F_T.
         q          : dividend yield, used only with carry="flat"
                      (default 0.013 there)
         w1, w2, w3 : leg weights (SPX IV, VIX index, VIX options); the active
@@ -509,6 +1092,16 @@ class JointCalibrator:
         carry      : "parity" (default; per-expiry F_T, D_T from put-call
                      parity) or "flat" (S e^{(r-q)T}, e^{-rT}; research only)
         feller     : "off" (default) or "soft" (penalty 50*viol^2)
+        vix_targets: {ticker: level} replacing the database's spot VIX
+                     indices on the spot session (the same tickers, else
+                     ValueError), e.g. recorded_vix_targets(result) to
+                     reproduce a committed fit on the targets it recorded.
+                     None (default): the database's closes
+        rate_reference: "treasury_curve" (default since C23: the Treasury
+                     zero curve r(T) of the spot session, reference_rate;
+                     ^IRX when the curve is missing or stale, recorded) or
+                     "irx" (the 13-week bill, as every fit committed before
+                     C23; recorded_inputs(result) gives a stored fit's)
         """
         if feller not in _FELLER_MODES:
             raise ValueError(f"feller must be one of {_FELLER_MODES}, got {feller!r}")
@@ -520,11 +1113,18 @@ class JointCalibrator:
         self.feller = feller
         self.w1, self.w2, self.w3 = w1, w2, w3
         self._spx_chain_in = spx_chain
+        self._vix_targets = None if vix_targets is None else {str(k): float(v)
+                                                              for k, v in vix_targets.items()}
+        if rate_reference not in RATE_REFERENCE_KINDS:
+            raise ValueError(f"rate_reference must be one of {RATE_REFERENCE_KINDS}, "
+                             f"got {rate_reference!r}")
+        self._rate_kind = rate_reference
 
-        self.params: Optional[dict] = None
-        self.result = None
-        self.fit_time: Optional[float] = None
-        self.losses: Optional[dict] = None
+        self.params: dict | None = None
+        self.result: dict | None = None
+        self.fit_time: float | None = None
+        self.fit_cpu_time: float | None = None
+        self.losses: dict | None = None
         self._n_evals = 0
 
         logger.info("JointCalibrator: loading market data for %s", as_of_date)
@@ -544,10 +1144,11 @@ class JointCalibrator:
         logger.info("  SPX spot S = %.2f (session %s)", self.S, self.spot_date)
 
         if self._r_arg is not None:
-            self.r_reference = float(self._r_arg)
-            self.r_reference_source = "argument"
+            self.rate_ref = RateReference("argument", float(self._r_arg), "argument")
         else:
-            self.r_reference, self.r_reference_source = self._reference_rate()
+            self.rate_ref = reference_rate(self.spot_date, self._rate_kind)
+        self.r_reference = float(self.rate_ref.r_91d)
+        self.r_reference_source = self.rate_ref.label
         # Back-compat attributes (scalar summaries; set from parity below)
         self.r = self.r_reference
         self.q = FLAT_CARRY_Q if self._q_arg is None else float(self._q_arg)
@@ -588,7 +1189,8 @@ class JointCalibrator:
                 "an SPX-only calibration", len(self.vix_ts), _MIN_VIX_TENORS)
 
     def _reference_rate(self) -> tuple:
-        """(rate, label) of the ^IRX 13-week bill for the spot session.
+        """(rate, label) of the ^IRX 13-week bill for the spot session
+        (reference_rate(..., "irx"); kept for callers of the C22 API).
 
         tbill_rates.rate is ALREADY continuously compounded (the data layer
         converts the ^IRX bank-discount yield on download, and migrated the
@@ -596,23 +1198,10 @@ class JointCalibrator:
         second time, which put the reference rate ~7 bp too high (2026-06-18:
         3.80% instead of 3.73% cc) and labelled the cc rate a discount yield.
         """
-        r = float(db.get_tbill_rate(self.spot_date))
-        label = f"^IRX 13-week bill, {r:.4%} cc"
-        try:
-            start = (pd.Timestamp(self.spot_date) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
-            ser = db.get_tbill_rates_series(self.spot_date, start_date=start)
-        except Exception:                      # label detail only
-            ser = None
-        if ser is not None and len(ser) and np.isclose(float(ser["rate"].iloc[-1]), r,
-                                                       rtol=0.0, atol=1e-12):
-            row = ser.iloc[-1]
-            d = row.get("discount_yield")
-            label = (f"^IRX 13-week bill {str(row['date'])[:10]}: "
-                     + (f"{float(d):.4%} bank discount = " if d is not None and pd.notna(d) else "")
-                     + f"{r:.4%} cc")
-        return r, label
+        ref = _irx_reference(self.spot_date)
+        return ref.r_91d, ref.label
 
-    def _session_for(self, snapshot_date) -> Optional[str]:
+    def _session_for(self, snapshot_date) -> str | None:
         """Session whose closing book a snapshot taken on ``snapshot_date``
         holds: the last SPX session in the DB on or before that date (a
         Sunday 05-31 snapshot holds Friday 05-29's quotes)."""
@@ -627,8 +1216,8 @@ class JointCalibrator:
         src = self._spx_chain_in
         if isinstance(src, oc.CleanChain):
             sess = str(src.diagnostics.get("session", self.spot_date))
-            self.spx_snapshot_date = sess
-            self.spx_snapshot_session = sess
+            self.spx_snapshot_date: str | None = sess
+            self.spx_snapshot_session: str | None = sess
             return src
         if src is not None:
             raw = src
@@ -655,7 +1244,7 @@ class JointCalibrator:
             self._spx_hist["date"].astype(str).str[:10] == self.spx_snapshot_session, "close"]
         S_sess = float(sess_close.iloc[-1]) if len(sess_close) else self.S
         return oc.clean_option_chain(raw, self.spx_snapshot_session, S_sess,
-                                     r_ref=self.r_reference)
+                                     r_ref=self.rate_ref.for_clean())
 
     def _prepare_spx_surface(self) -> pd.DataFrame:
         """
@@ -734,7 +1323,7 @@ class JointCalibrator:
         sigma_atm = float(np.interp(0.0, k, iv))
         z = k / (sigma_atm * math.sqrt(T))
         g = g.assign(z=z)
-        used = []
+        used: list[int] = []
         for zt in _ANCHOR_Z_GRID:
             dist = np.abs(z - zt)
             dist[used] = np.inf
@@ -766,6 +1355,7 @@ class JointCalibrator:
         DataFrame with columns [ticker, tenor_years, market_price]
         """
         empty = pd.DataFrame(columns=["ticker", "tenor_years", "market_price"])
+        self.vvix_market = None
         ts_wide = db.get_vix_term_structure_wide(as_of_date=self.as_of_date)
         if ts_wide.empty:
             return empty
@@ -780,6 +1370,8 @@ class JointCalibrator:
             latest = on_spot.iloc[-1]
         else:
             latest = ts_wide.iloc[-1]
+        if "^VVIX" in latest and pd.notna(latest["^VVIX"]) and latest["^VVIX"] > 0:
+            self.vvix_market = float(latest["^VVIX"])     # out-of-sample check only
         rows = []
         for col, tenor in _VIX_TS_TENORS.items():
             if col in latest and pd.notna(latest[col]) and latest[col] > 0:
@@ -787,6 +1379,14 @@ class JointCalibrator:
                              "market_price": float(latest[col])})
         if not rows:
             return empty
+        targets = getattr(self, "_vix_targets", None)
+        if targets is not None:
+            have = {str(r["ticker"]) for r in rows}
+            if have != set(targets):
+                raise ValueError(f"vix_targets {sorted(targets)} do not match the "
+                                 f"database's VIX indices on {spot}: {sorted(have)}")
+            for r in rows:
+                r["market_price"] = targets[str(r["ticker"])]
         return pd.DataFrame(rows).sort_values("tenor_years").reset_index(drop=True)
 
     def _prepare_vx_futures(self) -> pd.DataFrame:
@@ -841,7 +1441,7 @@ class JointCalibrator:
         df = df[(df["time_to_expiry"] >= 7.0 / 365.0) & (df["time_to_expiry"] <= 91.0 / 365.0)]
         df = df[(df["bid"] > 0) & (df["ask"] >= df["bid"])].copy()
         df["mid_price"] = 0.5 * (df["bid"] + df["ask"])
-        selected = []
+        selected: list[pd.Series] = []
         for target_T in (30.0 / 365.0, 60.0 / 365.0):
             exps = df.groupby("expiry")["time_to_expiry"].first()
             if exps.empty:
@@ -1039,7 +1639,7 @@ class JointCalibrator:
             "spx_oos_iv_rmse": float(np.sqrt(np.mean(e ** 2)) * 100) if len(e) else float("nan"),
             "spx_oos_put_wing_rmse": (float(np.sqrt(np.mean(wing ** 2)) * 100)
                                       if len(wing) else float("nan")),
-            "n_spx_oos": int(len(e)),
+            "n_spx_oos": len(e),
             "n_spx_oos_expiries": int(err["expiry"].nunique()),
             "spx_oos_rmse_by_expiry": by_exp,
         }
@@ -1053,7 +1653,7 @@ class JointCalibrator:
                 for t, T, m, x in zip(self.vix_ts["ticker"], self.vix_ts["tenor_years"],
                                       self.vix_ts["market_price"], np.atleast_1d(model))]
 
-    def _vx_futures_oos(self, kappa, theta, sigma, v0) -> Optional[float]:
+    def _vx_futures_oos(self, kappa, theta, sigma, v0) -> float | None:
         if self.vx_futures.empty:
             return None
         T = self.vx_futures["days_to_expiry"].to_numpy(float) / 365.0
@@ -1070,7 +1670,7 @@ class JointCalibrator:
             gk = g["strike"] / g["forward"]
             by_exp.append({
                 "expiry": exp, "T_days": round(float(g["time_to_expiry"].iloc[0]) * 365, 2),
-                "n": int(len(g)), "n_puts": int((g["right"] == "P").sum()),
+                "n": len(g), "n_puts": int((g["right"] == "P").sum()),
                 "n_wing_puts": int(((g["right"] == "P") & (gk < _PUT_WING_KF)).sum()),
                 "kf_min": float(gk.min()), "kf_max": float(gk.max()),
                 "forward": float(g["forward"].iloc[0]),
@@ -1082,7 +1682,7 @@ class JointCalibrator:
         anchor_r = s.groupby("expiry")["r_T"].first()
         anchor_q = s.groupby("expiry")["q_T"].first()
         return {
-            "n_spx_options": int(len(s)),
+            "n_spx_options": len(s),
             "n_spx_expiries": int(s["expiry"].nunique()),
             "n_spx_puts": int((s["right"] == "P").sum()),
             "n_spx_calls": int((s["right"] == "C").sum()),
@@ -1090,9 +1690,9 @@ class JointCalibrator:
             "n_put_wing_expiries": int(sum(1 for e in by_exp
                                            if e["n_wing_puts"] >= _MIN_WING_PUTS_PER_EXPIRY)),
             "anchors_by_expiry": by_exp,
-            "n_vix_tenors":  int(len(self.vix_ts)),
-            "n_vix_options": int(len(self.vix_options)),
-            "n_vx_futures":  int(len(self.vx_futures)),
+            "n_vix_tenors":  len(self.vix_ts),
+            "n_vix_options": len(self.vix_options),
+            "n_vx_futures":  len(self.vx_futures),
             "spot_date":     self.spot_date,
             "spx_snapshot_date": getattr(self, "spx_snapshot_date", None),
             "spx_snapshot_session": getattr(self, "spx_snapshot_session", None),
@@ -1104,6 +1704,7 @@ class JointCalibrator:
             "q": float(anchor_q.median()),
             "r_reference": float(self.r_reference),
             "r_reference_source": self.r_reference_source,
+            "rate_reference": self.rate_ref.record(),
             "carry_by_expiry": carry,
             "chain_diagnostics": dict(getattr(self, "spx_chain_diagnostics", {})),
             "weights": {"w1": self.w1, "w2": self.w2, "w3": self.w3},
@@ -1128,6 +1729,9 @@ class JointCalibrator:
     def _methods(self, de_cfg: dict) -> dict:
         return {
             "vix_leg": "spot_index_term_structure (heston_vix_term_index, Cboe 9/30/93/184d)",
+            "vix_targets": ("database (vix_term_structure)"
+                            if getattr(self, "_vix_targets", None) is None
+                            else "vix_targets argument"),
             "spx_quotes": "two-sided mid, no lastPrice",
             "spx_iv": "own Black-76 on parity F_T, D_T (Yahoo IV diagnostic only)",
             "carry": self.carry,
@@ -1141,13 +1745,30 @@ class JointCalibrator:
 
     # ── Calibration ────────────────────────────────────────────────────────────
 
-    def _optimise(self, loss, bounds, de_maxiter, de_popsize, polish, init, label):
+    def _optimise(self, loss, bounds, de_maxiter, de_popsize, polish, init, label,
+                  workers: int = 1):
+        """Differential evolution (+ one L-BFGS-B polish).
+
+        workers > 1 evaluates each generation in that many PROCESSES (scipy's
+        integer ``workers`` is a multiprocessing.Pool, so the pricer's thread
+        safety never mattered; the old ``workers=1`` comment said otherwise)
+        and requires updating='deferred', which changes the DE trajectory
+        relative to the serial 'immediate' run that produced the committed
+        model_version 2 fits. workers = 1 reproduces those runs exactly. The
+        objective must pickle (a HestonJointResiduals.loss does; the
+        evaluation counter then lives in the workers and is not returned).
+        A map-like callable is passed through (``workers=map`` is the serial
+        'deferred' run that a process pool must reproduce bit for bit).
+        """
         self._n_evals = 0
         t0 = time.time()
+        if not callable(workers):
+            workers = int(workers)
         de = optimize.differential_evolution(
             loss, bounds=bounds, maxiter=de_maxiter, popsize=de_popsize, tol=1e-6,
             seed=RANDOM_SEED, mutation=(0.5, 1.5), recombination=0.9, init=init,
-            workers=1,              # single-threaded (pricer is not thread-safe)
+            workers=workers,
+            updating="immediate" if (not callable(workers) and workers == 1) else "deferred",
             polish=False,           # one explicit L-BFGS-B polish below
         )
         x, fun = de.x, de.fun
@@ -1161,16 +1782,102 @@ class JointCalibrator:
             logger.info("     %s polish done: loss=%.6g, evals=%d", label, fun, self._n_evals)
         return de, x, float(fun), time.time() - t0
 
+    # ── Least-squares form of the joint loss (C23) ────────────────────────────
+
+    def residual_model(self, w_spx: float | None = None, w_vix: float | None = None,
+                       w_vix_opt: float | None = None) -> HestonJointResiduals:
+        """The joint loss as a residual vector (default: this calibrator's
+        normalised weights; w_vix=0 gives the SPX-only problem)."""
+        return HestonJointResiduals(
+            self._spx_groups(),
+            self.vix_ts["tenor_years"].to_numpy(float) if not self.vix_ts.empty else [],
+            self.vix_ts["market_price"].to_numpy(float) if not self.vix_ts.empty else [],
+            self.w1 if w_spx is None else w_spx,
+            self.w2 if w_vix is None else w_vix,
+            self.w3 if w_vix_opt is None else w_vix_opt,
+            feller=self.feller, vix_options=self.vix_options, r_ref=self.r_reference)
+
+    def residuals(self, params_vec) -> np.ndarray:
+        """Residual vector r with sum(r**2) == joint_loss(params_vec) in the box."""
+        return self.residual_model()(params_vec)
+
+    def warm_start_fit(self) -> tuple:
+        """(path, result) of the previous session's accepted fit (strictly
+        before this spot session), or (None, None)."""
+        return previous_accepted_fit(self.spot_date, Path(DATA_DIR) / "calibrations")
+
+    def _trf_fit(self, model: HestonJointResiduals, lo, hi, n_starts: int, warm,
+                 jacobian: str, label: str = "Heston", start_box: dict | None = None) -> tuple:
+        """Multi-start TRF on ``model``: warm start(s) first, then Sobol."""
+        starts, labels = [], []
+        for name, x in warm:
+            starts.append(np.clip(np.asarray(x, dtype=float), lo, hi))
+            labels.append(name)
+        sob = sobol_starts(n_starts, start_box or HESTON_START_BOX, lo, hi, HESTON_PARAM_NAMES)
+        starts.extend(sob)
+        labels.extend(f"sobol{i}" for i in range(len(sob)))
+        if not starts:
+            raise ValueError("multi-start TRF needs at least one start")
+        jac = model.jac if (jacobian == "analytic") else None
+        n0, j0 = model.n_calls, model.n_jac
+        t0 = time.perf_counter()
+        best, rep = multistart_trf(model, jac, np.array(starts), lo, hi, labels)
+        rep["seconds"] = time.perf_counter() - t0
+        rep["n_residual_evals"] = model.n_calls - n0      # incl. FD Jacobian calls
+        rep["n_jacobian_evals"] = model.n_jac - j0        # analytic Jacobians
+        logger.info("     %s TRF: %d starts -> loss %.8g (%d/%d starts in the best basin, "
+                    "%d basin(s)) | %d residual + %d Jacobian evals, %.1fs", label,
+                    rep["n_starts"], 2 * best.cost, rep["n_starts_at_best"], rep["n_starts"],
+                    rep["n_distinct_basins"], rep["n_residual_evals"],
+                    rep["n_jacobian_evals"], rep["seconds"])
+        return best, rep
+
+    def _identifiability(self, model: HestonJointResiduals, x, lo, hi) -> dict:
+        x = np.asarray(x, dtype=float)
+        r = model(x)
+        J = model.jac(x) if model.vix_opt is None else optimize.approx_fprime(x, model, 1e-7)
+        return identifiability_report(J, r, x, HESTON_PARAM_NAMES, lo, hi)
+
     def calibrate(
         self,
         de_maxiter: int = 200,
         de_popsize: int = 10,
         polish: bool = True,
         verbose: bool = True,
+        *,
+        optimizer: str = "trf",
+        n_starts: int = _TRF_N_STARTS,
+        warm_start="auto",
+        jacobian: str = "analytic",
+        de_check: bool = False,
+        de_workers: int | None = None,
     ) -> dict:
         """
-        Calibrate Heston by minimising joint_loss: differential evolution
-        (global, scipy's own polish disabled) then one L-BFGS-B polish.
+        Calibrate Heston by minimising joint_loss.
+
+        optimizer="trf" (default since C23): the loss is a sum of squares, so
+          it is minimised by scipy least_squares(method="trf") on the residual
+          vector (HestonJointResiduals) from the warm start (the previous
+          session's accepted fit, strictly earlier; warm_start="auto") and
+          ``n_starts`` scrambled-Sobol points in config.HESTON_START_BOX, with
+          the analytic Jacobian (jacobian="analytic"; "2-point" differences
+          numerically). The lowest loss wins. The result records every start,
+          the number of distinct basins and an identifiability report
+          (Jacobian singular values, Gauss-Newton standard errors and
+          correlations, parameters on bounds).
+        optimizer="de": the pre-C23 method, differential evolution (Latin
+          hypercube, seed 42, scipy polish off) then one L-BFGS-B polish;
+          serial by default (de_workers=None -> 1), which reproduces the
+          committed fits exactly.
+        de_check=True (with "trf"): also run that DE as a global check,
+          polish its optimum with TRF, keep whichever loss is lower and
+          record both. It runs in de_workers PROCESSES (default None -> all
+          CPUs; scipy's integer workers is a multiprocessing pool, with
+          updating="deferred"): measured 1.8-2.9x faster than serial on 4
+          idle CPUs (data_store/calibrations/diagnostics), slower when the
+          machine is already loaded.
+
+        warm_start: "auto", None/False (none), or a params dict / 5-vector.
 
         Returns the full result dict (also stored in self.result and
         persisted by save()): params, loss, leg_losses (in-sample
@@ -1179,21 +1886,64 @@ class JointCalibrator:
         Feller diagnostics, active constraints, data provenance, rates used,
         method choices and model_version.
         """
+        if optimizer not in ("trf", "de"):
+            raise ValueError(f"optimizer must be 'trf' or 'de', got {optimizer!r}")
+        if jacobian not in ("analytic", "2-point"):
+            raise ValueError(f"jacobian must be 'analytic' or '2-point', got {jacobian!r}")
+        if de_workers is None:
+            de_workers = 1 if optimizer == "de" else (os.cpu_count() or 1)
         lvl = logging.INFO if verbose else logging.DEBUG
         logger.log(lvl, "[C4] Joint calibration: as of %s (session %s) | S=%.0f | "
-                   "%d SPX anchors / %d expiries | %d VIX indices | feller=%s",
+                   "%d SPX anchors / %d expiries | %d VIX indices | feller=%s | %s",
                    self.as_of_date, self.spot_date, self.S, len(self.spx_surface),
-                   self.spx_surface["expiry"].nunique(), len(self.vix_ts), self.feller)
+                   self.spx_surface["expiry"].nunique(), len(self.vix_ts), self.feller,
+                   optimizer)
         logger.log(lvl, "     Weights: w1=%.4f, w2=%.4f, w3=%.4f", self.w1, self.w2, self.w3)
 
-        bounds = [HESTON_BOUNDS[k] for k in ("kappa", "theta", "sigma", "rho", "v0")]
-        de, best, best_loss, self.fit_time = self._optimise(
-            self.joint_loss, bounds, de_maxiter, de_popsize, polish,
-            "latinhypercube", "Heston")
-        n_evals = self._n_evals
+        bounds = [HESTON_BOUNDS[k] for k in HESTON_PARAM_NAMES]
+        lo, hi = _box_arrays(HESTON_BOUNDS, HESTON_PARAM_NAMES)
+        model = self.residual_model()
         de_cfg = {"maxiter": de_maxiter, "popsize": de_popsize,
                   "members": de_popsize * len(bounds), "seed": RANDOM_SEED, "tol": 1e-6,
-                  "scipy_polish": False, "lbfgsb_polish": bool(polish)}
+                  "scipy_polish": False, "lbfgsb_polish": bool(polish),
+                  "workers": int(de_workers),
+                  "updating": "immediate" if int(de_workers) == 1 else "deferred",
+                  "bounds": {k: list(v) for k, v in HESTON_BOUNDS.items()}}
+        multistart = de_report = None
+        t_start = time.time()
+        c_start = time.process_time()       # this process only (not DE worker processes)
+        if optimizer == "de":
+            serial = int(de_workers) == 1
+            n0 = model.n_calls
+            de, best, best_loss, _ = self._optimise(
+                self.joint_loss if serial else model.loss, bounds,
+                de_maxiter, de_popsize, polish, "latinhypercube", "Heston",
+                workers=de_workers)
+            # serial: joint_loss counts every call; parallel: the workers'
+            # counters are lost, so DE's own nfev plus the in-process polish
+            n_evals = self._n_evals if serial else int(de.nfev) + (model.n_calls - n0)
+            success, message = bool(de.success), str(de.message)
+            opt_cfg = de_cfg
+        else:
+            warm, warm_info = self._warm_starts(warm_start)
+            sol, multistart = self._trf_fit(model, lo, hi, n_starts, warm, jacobian)
+            best, best_loss = sol.x, float(2.0 * sol.cost)
+            success, message = bool(sol.status > 0), str(sol.message)
+            n_evals = multistart["n_residual_evals"] + multistart["n_jacobian_evals"]
+            opt_cfg = {"method": "trf_multistart", "n_sobol_starts": int(n_starts),
+                       "sobol_seed": RANDOM_SEED, "start_box": dict(HESTON_START_BOX),
+                       "warm_start": warm_info, "jacobian": jacobian,
+                       "x_scale": "jac", "ftol": _TRF_TOL, "xtol": _TRF_TOL,
+                       "gtol": _TRF_TOL, "max_nfev_per_start": _TRF_MAX_NFEV,
+                       "basin_loss_rtol": _BASIN_LOSS_RTOL, "de_check": bool(de_check),
+                       "bounds": {k: list(v) for k, v in HESTON_BOUNDS.items()}}
+            if de_check:
+                de_report, best, best_loss = self._de_global_check(
+                    model, bounds, lo, hi, de_maxiter, de_popsize, de_workers, jacobian,
+                    best, best_loss)
+                opt_cfg["de"] = de_cfg
+        self.fit_time = time.time() - t_start
+        self.fit_cpu_time = time.process_time() - c_start
 
         kappa, theta, sigma, rho, v0 = (float(x) for x in best)
         self.params = {"kappa": kappa, "theta": theta, "sigma": sigma, "rho": rho, "v0": v0}
@@ -1226,9 +1976,15 @@ class JointCalibrator:
             "loss":       best_loss,
             "leg_losses": self.losses,
             "fit_time":   self.fit_time,
+            # CPU seconds of the optimisation in this process: stable on a
+            # loaded machine where fit_time (wall clock) is not; excludes
+            # DE worker processes when de_workers > 1
+            "fit_cpu_time": self.fit_cpu_time,
             "n_evals":    n_evals,
-            "success":    bool(de.success),
-            "de_message": str(de.message),
+            "success":    success,
+            "optimizer":  "trf_multistart" if optimizer == "trf" else "de",
+            "optimizer_message": message,
+            "de_message": message,                 # pre-C23 key (the DE message then)
             "feller":        self.feller,
             "feller_state":  feller_state,
             "feller_margin": float(feller_margin),
@@ -1238,15 +1994,344 @@ class JointCalibrator:
             "active_constraints": active_constraints(self.params, feller_state,
                                                      feller_imposed=imposed),
             "vix_index": self._vix_index_table(kappa, theta, sigma, v0),
+            "vvix_check": self._vvix_check(kappa, theta, sigma, v0),
             "oos": {k: v for k, v in oos.items() if k not in ("spx_oos_iv_rmse",
                                                               "spx_oos_put_wing_rmse")},
-            "methods": self._methods(de_cfg),
+            "methods": self._methods(opt_cfg),
             **self._provenance(),
         }
+        if multistart is not None:
+            result["multistart"] = multistart
+        if de_report is not None:
+            result["de_check"] = de_report
+        try:
+            result["identifiability"] = self._identifiability(model, best, lo, hi)
+        except (np.linalg.LinAlgError, ValueError, ArithmeticError) as exc:
+            # a diagnostic must never fail the fit
+            logger.warning("  identifiability report failed: %s", exc)
+            result["identifiability"] = {"error": str(exc)}
         self.result = result
         if verbose:
             self._log_result(result)
         return result
+
+    # ── sigma-profile (C23 diagnostic) ────────────────────────────────────────
+
+    def fit_summary(self, params) -> dict:
+        """Leg statistics of the joint Heston loss at a parameter vector:
+        loss, in-sample anchor RMSE (vega-approx and exact inversion),
+        out-of-sample RMSE (all, put wing, by expiry), VIX index RMSE, VX
+        futures OOS, Feller margin."""
+        kappa, theta, sigma, rho, v0 = (float(v) for v in params)
+        l1 = self._spx_leg(kappa, theta, sigma, rho, v0)
+        l2 = self._vix_index_leg(kappa, theta, sigma, v0)
+        ins = self._surface_errors(self.spx_surface, heston_call_batch,
+                                   (kappa, theta, sigma, rho, v0))["error"].dropna()
+        oos = self._out_of_sample(heston_call_batch, (kappa, theta, sigma, rho, v0))
+        r = self.residuals([kappa, theta, sigma, rho, v0])   # no box check (profile fits)
+        return {
+            "params": dict(zip(HESTON_PARAM_NAMES, (kappa, theta, sigma, rho, v0))),
+            "loss": float(r @ r),
+            "spx_iv_rmse": float(np.sqrt(l1)) * 100,
+            "spx_iv_rmse_exact": float(np.sqrt(np.mean(ins ** 2)) * 100) if len(ins) else None,
+            "spx_oos_iv_rmse": oos["spx_oos_iv_rmse"],
+            "spx_oos_put_wing_rmse": oos["spx_oos_put_wing_rmse"],
+            "spx_oos_rmse_by_expiry": oos["spx_oos_rmse_by_expiry"],
+            "n_spx_oos": oos["n_spx_oos"],
+            "vix_index_rmse": float(np.sqrt(l2)) * 100,
+            "vx_futures_rmse_oos": self._vx_futures_oos(kappa, theta, sigma, v0),
+            **self._vvix_check(kappa, theta, sigma, v0),
+            "feller_margin": float(2.0 * kappa * theta - sigma * sigma),
+        }
+
+    def _vvix_check(self, kappa, theta, sigma, v0) -> dict:
+        """Model 30-day VIX log-contract vol (heston_vvix) vs the session's
+        ^VVIX close: out of sample, since no leg of the loss sees it."""
+        model = float(heston_vvix(kappa, theta, sigma, v0))
+        mkt = getattr(self, "vvix_market", None)
+        return {"vvix_model": model, "vvix_market": mkt,
+                "vvix_error": (model - mkt) if mkt is not None else None}
+
+    def sigma_profile(self, caps: Sequence[float] = SIGMA_PROFILE_CAPS,
+                      kappa_max: float = PROFILE_KAPPA_MAX, n_starts: int = 4,
+                      base=None, verbose: bool = False) -> dict:
+        """Refit the joint loss with sigma <= cap for every cap, so the cost
+        of the production box (config.HESTON_BOUNDS, sigma <= 2) is measured
+        rather than hidden.
+
+        Every refit uses the multi-start TRF with kappa's ceiling widened to
+        ``kappa_max`` (config.PROFILE_KAPPA_MAX; the production ceiling would
+        bind first, see config). Starts: ``base`` (default: this calibrator's
+        fit, else none) clipped into the box, the previous cap's optimum
+        (continuation, so the loss can only fall as the cap rises), and
+        ``n_starts`` Sobol points. Diagnostic only: it never changes
+        self.params or self.result.
+        """
+        if base is None and self.params is not None:
+            base = [self.params[k] for k in HESTON_PARAM_NAMES]
+        elif isinstance(base, dict):
+            base = [float(base[k]) for k in HESTON_PARAM_NAMES]
+        model = self.residual_model()
+        rows, prev = [], None
+        for cap in caps:
+            box = dict(HESTON_BOUNDS)
+            box["sigma"] = (HESTON_BOUNDS["sigma"][0], float(cap))
+            box["kappa"] = (HESTON_BOUNDS["kappa"][0], float(kappa_max))
+            lo, hi = _box_arrays(box, HESTON_PARAM_NAMES)
+            warm = []
+            if base is not None:
+                warm.append(("base", np.clip(base, lo, hi)))
+            if prev is not None:
+                warm.append(("previous_cap", np.clip(prev, lo, hi)))
+            sol, rep = self._trf_fit(model, lo, hi, n_starts, warm, "analytic",
+                                     label=f"sigma<={cap:g}")
+            x = sol.x
+            row = self.fit_summary(x)
+            row.update({
+                "sigma_cap": float(cap), "kappa_max": float(kappa_max),
+                "sigma_at_cap": bool(_at_bound(x[2], cap, cap, _PIN_REL_TOL)),
+                "kappa_at_max": bool(_at_bound(x[0], kappa_max, kappa_max, _PIN_REL_TOL)),
+                "n_distinct_basins": rep["n_distinct_basins"],
+                "n_starts": rep["n_starts"], "seconds": rep["seconds"],
+            })
+            rows.append(row)
+            prev = x
+            if verbose:
+                logger.info("  sigma <= %-4g loss %.6e | sigma %.3f kappa %.2f | in %.3f vp, "
+                            "OOS %.3f vp", cap, row["loss"], x[2], x[0], row["spx_iv_rmse"],
+                            row["spx_oos_iv_rmse"])
+        return {"caps": [float(c) for c in caps], "kappa_max": float(kappa_max),
+                "production_box": {k: list(v) for k, v in HESTON_BOUNDS.items()},
+                "rows": rows}
+
+    # ── SPX-only model comparison (C23) ───────────────────────────────────────
+
+    def calibrate_spx_only(self, model: str = "heston", **kwargs) -> dict:
+        """calibrate_comparison(model, legs="spx", ...): the VIX leg off."""
+        return self.calibrate_comparison(model, legs="spx", **kwargs)
+
+    def calibrate_comparison(self, model: str = "heston", legs: str = "spx",
+                             n_starts: int = 4, warm=None,
+                             n_factors: int = ROUGH_HESTON_N_FACTORS,
+                             n_steps: int = ROUGH_HESTON_TIME_STEPS,
+                             numerics_check: bool = True, box: str = "production") -> dict:
+        """Heston or lifted rough Heston fitted like for like.
+
+        legs="spx": the SPX anchors only (the VIX index is then out of
+        sample); legs="joint": the production joint loss (this calibrator's
+        normalised w1, w2 on the same anchors and spot VIX indices; for rough
+        Heston the index is rough_heston_vix_term_index).
+
+        Both models see the same anchors and residuals sqrt(1/n) (model -
+        market)/vega (the joint loss with the VIX leg off), the production
+        box for the five Heston parameters (rough Heston adds H in
+        config.ROUGH_HESTON_H_BOUNDS), the same TRF tolerances, and Sobol
+        starts plus warm starts. Heston uses the analytic Jacobian; rough
+        Heston prices on frozen Lewis grids refreshed at each optimum
+        (models/rough_heston.fit_trf_with_grid_refresh) with exact theta / v0
+        Jacobian columns and one-sided differences for the rest.
+
+        warm: Heston -> [5-vector or params dict] (default: this calibrator's
+        joint fit); rough Heston -> a Heston 5-vector, used at H = 0.30 and
+        0.10 (default: the joint fit). Reported: in-sample anchor RMSE (exact
+        inversion), out-of-sample RMSE over the full cleaned surface (all,
+        put wing, by expiry), the VIX index RMSE (out of sample: the VIX leg
+        is off), fit time, evaluations, every start, and an identifiability
+        report. numerics_check (rough): anchor IVs re-priced with twice the
+        factors and four times the Riccati steps, so the approximation error
+        is measured next to the misfit (timed apart from fit_seconds; a
+        self-convergence gap; scaled by
+        1/(1 - 2^-1.5) for the n^-1.5 lifting rate it estimates the
+        20-factor error, cf. the QuantLib Adams comparison in
+        tests/test_rough_heston.py). box="wide" (Heston only) fits in the
+        sigma-profile box instead (sigma <= max(SIGMA_PROFILE_CAPS), kappa <=
+        PROFILE_KAPPA_MAX), so rough Heston can also be compared with a Heston
+        that is not held by the production sigma <= 2 prior.
+        """
+        from joint_vol_calibration.models import rough_heston as rh
+
+        if model not in ("heston", "rough_heston"):
+            raise ValueError(f"model must be 'heston' or 'rough_heston', got {model!r}")
+        if legs not in ("spx", "joint"):
+            raise ValueError(f"legs must be 'spx' or 'joint', got {legs!r}")
+        w_spx, w_vix = (1.0, 0.0) if legs == "spx" else (self.w1, self.w2)
+        if box not in ("production", "wide") or (box == "wide" and model != "heston"):
+            raise ValueError(f"box must be 'production' (or 'wide' for Heston), got {box!r}")
+        hbox = dict(HESTON_BOUNDS)
+        if box == "wide":
+            hbox["sigma"] = (HESTON_BOUNDS["sigma"][0], float(max(SIGMA_PROFILE_CAPS)))
+            hbox["kappa"] = (HESTON_BOUNDS["kappa"][0], float(PROFILE_KAPPA_MAX))
+        if warm is None and self.params is not None:
+            warm = [self.params[k] for k in HESTON_PARAM_NAMES]
+        elif isinstance(warm, dict):
+            warm = [float(warm[k]) for k in HESTON_PARAM_NAMES]
+        groups = self._spx_groups()
+        t0 = time.perf_counter()
+        if model == "heston":
+            names: tuple[str, ...] = HESTON_PARAM_NAMES
+            lo, hi = _box_arrays(hbox, names)
+            res_model = self.residual_model(w_spx=w_spx, w_vix=w_vix, w_vix_opt=0.0)
+            warm_list = [("warm", warm)] if warm is not None else []
+            sbox = dict(HESTON_START_BOX)
+            if box == "wide":       # starts that can reach the large-sigma basin too
+                sbox["kappa"] = (0.5, 40.0, "log")
+                sbox["sigma"] = (0.2, 8.0, "log")
+            sol, rep = self._trf_fit(res_model, lo, hi, n_starts, warm_list, "analytic",
+                                     label=f"Heston {legs} ({box} box)", start_box=sbox)
+            x, loss = sol.x, float(2.0 * sol.cost)
+            J, r = res_model.jac(x), res_model(x)
+            pricer = heston_call_batch
+            vix_model = heston_vix_term_index(x[0], x[1], x[2], x[4],
+                                              self.vix_ts["tenor_years"].to_numpy(float)) \
+                if not self.vix_ts.empty else None
+            n_evals = rep["n_residual_evals"] + rep["n_jacobian_evals"]
+            numerics = None
+        else:
+            names = rh.ROUGH_HESTON_PARAM_NAMES
+            rbox = dict(HESTON_BOUNDS)
+            rbox["H"] = ROUGH_HESTON_H_BOUNDS
+            lo, hi = _box_arrays(rbox, names)
+            resid = rh.RoughHestonSPXResiduals(
+                groups, w_spx, n_factors, n_steps,
+                vix_tenors=self.vix_ts["tenor_years"].to_numpy(float),
+                vix_market=self.vix_ts["market_price"].to_numpy(float), w_vix=w_vix)
+            starts, labels = [], []
+            if warm is not None:
+                for H0 in (0.30, 0.10):
+                    starts.append(np.r_[np.asarray(warm, dtype=float), H0])
+                    labels.append(f"warm_H{H0:.2f}")
+            sob = sobol_starts(n_starts, ROUGH_HESTON_START_BOX, lo, hi, names)
+            starts.extend(sob)
+            labels.extend(f"sobol{i}" for i in range(len(sob)))
+            x, loss, runs = rh.fit_trf_with_grid_refresh(resid, starts, labels, lo, hi)
+            groups_b = _group_basins([run["loss"] for run in runs])
+            rep = {"runs": runs, "n_starts": len(runs), "n_distinct_basins": len(groups_b),
+                   "n_starts_at_best": len(groups_b[0]),
+                   "basin_losses": [runs[g[0]]["loss"] for g in groups_b],
+                   "best_label": runs[groups_b[0][0]]["label"],
+                   "n_residual_evals": resid.n_calls, "n_grid_adaptations": resid.n_adapt}
+            r = resid.adapt(x)
+            J = resid.jac(x, lo, hi)
+            pricer = functools.partial(rh.rough_heston_call_batch, n_factors=n_factors,
+                                       n_steps=n_steps)
+            vix_model = rh.rough_heston_vix_term_index(
+                x[0], x[1], x[2], x[4], x[5], self.vix_ts["tenor_years"].to_numpy(float),
+                n_factors) if not self.vix_ts.empty else None
+            n_evals = resid.n_calls
+            numerics = None
+            fit_seconds = time.perf_counter() - t0      # the numerics check is not fit time
+            if numerics_check:
+                base_iv = self._surface_errors(self.spx_surface, pricer, tuple(x))["model_iv"]
+                fine = functools.partial(rh.rough_heston_call_batch, n_factors=2 * n_factors,
+                                         n_steps=4 * n_steps)
+                fine_iv = self._surface_errors(self.spx_surface, fine, tuple(x))["model_iv"]
+                d_iv = (base_iv - fine_iv).to_numpy(float) * 100
+                d_iv = d_iv[np.isfinite(d_iv)]
+                max_d = float(np.max(np.abs(d_iv))) if len(d_iv) else None
+                numerics = {
+                    "reference": {"n_factors": 2 * n_factors, "n_steps": 4 * n_steps},
+                    "anchor_iv_max_abs_diff_vp": max_d,
+                    "anchor_iv_rms_diff_vp": float(np.sqrt(np.mean(d_iv ** 2))) if len(d_iv) else None,
+                    # the lifting error falls like n^-1.5 (tests), so the gap
+                    # to 2n factors is (1 - 2^-1.5) of the n-factor error
+                    "lifting_error_estimate_max_vp": (max_d / (1.0 - 2.0 ** -1.5)
+                                                      if max_d is not None else None),
+                    "frozen_vs_adaptive_rel_loss_diff": float(max(
+                        abs(run["loss"] - run["frozen_loss"]) / max(run["loss"], 1e-300)
+                        for run in runs)),
+                    "seconds": time.perf_counter() - t0 - fit_seconds,
+                }
+        seconds = fit_seconds if model == "rough_heston" else time.perf_counter() - t0
+        ins = self._surface_errors(self.spx_surface, pricer, tuple(x))["error"].dropna()
+        oos = self._out_of_sample(pricer, tuple(x))
+        out = {
+            "model": model,
+            "legs": legs,
+            "weights": {"w_spx": float(w_spx), "w_vix": float(w_vix)},
+            "box": {n: [float(a), float(b)] for n, a, b in zip(names, lo, hi)},
+            "params": {n: float(v) for n, v in zip(names, x)},
+            "loss": float(loss),
+            "spx_iv_rmse_exact": float(np.sqrt(np.mean(ins ** 2)) * 100) if len(ins) else None,
+            "n_spx_anchors": len(ins),
+            "spx_oos_iv_rmse": oos["spx_oos_iv_rmse"],
+            "spx_oos_put_wing_rmse": oos["spx_oos_put_wing_rmse"],
+            "spx_oos_rmse_by_expiry": oos["spx_oos_rmse_by_expiry"],
+            "n_spx_oos": oos["n_spx_oos"],
+            # out of sample for legs="spx", in sample for legs="joint"
+            "vix_index_rmse_oos" if legs == "spx" else "vix_index_rmse": (
+                float(np.sqrt(np.mean((np.atleast_1d(vix_model)
+                                       - self.vix_ts["market_price"].to_numpy(float)) ** 2)))
+                if vix_model is not None else None),
+            "fit_seconds": float(seconds),
+            "n_evals": int(n_evals),
+            "multistart": rep,
+            "on_bound": [n for j, n in enumerate(names)
+                         if _at_bound(x[j], lo[j], (hi[j] - lo[j]) or 1.0, _PIN_REL_TOL)
+                         or _at_bound(x[j], hi[j], (hi[j] - lo[j]) or 1.0, _PIN_REL_TOL)],
+        }
+        try:
+            out["identifiability"] = identifiability_report(J, r, x, names, lo, hi)
+        except (np.linalg.LinAlgError, ValueError, ArithmeticError) as exc:
+            out["identifiability"] = {"error": str(exc)}
+        if model == "rough_heston":
+            out["numerics"] = numerics
+            out["settings"] = {"n_factors": int(n_factors), "n_steps": int(n_steps),
+                               "lewis_rtol": rh.ROUGH_LEWIS_RTOL,
+                               "H_bounds": list(ROUGH_HESTON_H_BOUNDS)}
+        return out
+
+    def _warm_starts(self, warm_start) -> tuple:
+        """[(label, x)] for the TRF and a JSON-able description."""
+        if warm_start is None or warm_start is False:
+            return [], None
+        if isinstance(warm_start, str):
+            if warm_start != "auto":
+                raise ValueError(f"warm_start must be 'auto', None, a dict or a vector, "
+                                 f"got {warm_start!r}")
+            path, res = self.warm_start_fit()
+            if res is None:
+                return [], {"source": None, "reason": "no accepted earlier-session fit"}
+            x = [float(res["params"][k]) for k in HESTON_PARAM_NAMES]
+            return [("warm:" + path.name, x)], {
+                "source": path.name, "session": str(res.get("spot_date"))[:10],
+                "params": dict(zip(HESTON_PARAM_NAMES, x))}
+        if isinstance(warm_start, dict):
+            x = [float(warm_start[k]) for k in HESTON_PARAM_NAMES]
+        else:
+            x = [float(v) for v in warm_start]
+        return [("warm:argument", x)], {"source": "argument",
+                                        "params": dict(zip(HESTON_PARAM_NAMES, x))}
+
+    def _de_global_check(self, model, bounds, lo, hi, de_maxiter, de_popsize, de_workers,
+                         jacobian, trf_x, trf_loss) -> tuple:
+        """DE (in de_workers processes) + a TRF polish of its optimum, as a
+        global check on the multi-start TRF. Returns (report, x, loss) with
+        the lower of the two."""
+        de, de_x, de_loss, de_time = self._optimise(
+            model.loss, bounds, de_maxiter, de_popsize, False, "latinhypercube",
+            "Heston DE check", workers=de_workers)
+        jac = model.jac if jacobian == "analytic" else None
+        t0 = time.perf_counter()
+        pol, _ = multistart_trf(model, jac, np.array([de_x]), lo, hi, ["de_optimum"])
+        pol_time = time.perf_counter() - t0
+        pol_loss = float(2.0 * pol.cost)
+        rel = (pol_loss - trf_loss) / trf_loss if trf_loss > 0 else 0.0
+        report = {
+            "de_loss": float(de_loss), "de_polished_loss": pol_loss,
+            "de_seconds": float(de_time), "polish_seconds": float(pol_time),
+            "de_nfev": int(de.nfev), "de_nit": int(de.nit), "de_success": bool(de.success),
+            "de_x": [float(v) for v in de_x], "de_polished_x": [float(v) for v in pol.x],
+            "trf_loss": float(trf_loss), "rel_diff_polished_vs_trf": float(rel),
+            "agrees": bool(abs(rel) <= _BASIN_LOSS_RTOL),
+            "workers": int(de_workers),
+        }
+        if pol_loss < trf_loss * (1.0 - _BASIN_LOSS_RTOL):
+            logger.warning("     DE check found a lower basin (%.8g < %.8g): using it",
+                           pol_loss, trf_loss)
+            report["used"] = "de"
+            return report, pol.x, pol_loss
+        report["used"] = "trf"
+        return report, trf_x, trf_loss
 
     # ── Bates (1996) SVJ Calibration ──────────────────────────────────────────
 
@@ -1475,7 +2560,7 @@ class JointCalibrator:
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
-    def save(self, path: Optional[str] = None) -> str:
+    def save(self, path: str | None = None) -> str:
         """
         Persist the full calibration result dict (the same schema the daily
         pipeline writes). Default path: data_store/calibrations/joint_cal_{spot_date}.pkl

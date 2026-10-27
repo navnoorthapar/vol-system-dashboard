@@ -1,0 +1,119 @@
+{
+  "files": {
+    "BFLY": {
+      "file": "BFLY.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/BFLY_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:20+00:00",
+      "rows_published": 10155,
+      "rows_stored": 2459,
+      "sha256_download": "48d39c5e86655aa7488423f6127511e9c8818939a52e7c650e7235c2e75ab5f2",
+      "sha256_stored": "a57b8ddfd192fec5882c3ba9caee0e8e52770d411942368d4c2f56c3a0dc1cac",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/BFLY_History.csv"
+    },
+    "BXM": {
+      "file": "BXM.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/BXM_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:19+00:00",
+      "rows_published": 6181,
+      "rows_stored": 2459,
+      "sha256_download": "d9550b86e983d8b4b5d34c9486ffae7b26188329271875a8f716cd2aa949c404",
+      "sha256_stored": "35808640a1f72745c03a7725fd961f64d67f21fd216d6b59cee4c22e30d75650",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/BXM_History.csv"
+    },
+    "CNDR": {
+      "file": "CNDR.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/CNDR_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:20+00:00",
+      "rows_published": 10155,
+      "rows_stored": 2459,
+      "sha256_download": "7147fc91ea27da60f5250918a3ffd163e63b4006c7112aa3e7e302ce0135638a",
+      "sha256_stored": "6b9940a0d172e26b054c5d4fe12b3b64eacb415c6921fe0e227b3d1d6721190f",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/CNDR_History.csv"
+    },
+    "PUT": {
+      "file": "PUT.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/PUT_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:19+00:00",
+      "rows_published": 4987,
+      "rows_stored": 2462,
+      "sha256_download": "dcdff9142059ec80899e822570fd4b629306074c5ab98aeab5fd7e37c126e1d6",
+      "sha256_stored": "d328cbd52f247576b3ed0173dfd5ffa9b963cd9e11e8a59a9ce24ad399d000d7",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/PUT_History.csv"
+    },
+    "SET": {
+      "file": "SET.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/SET_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:20+00:00",
+      "rows_published": 6954,
+      "rows_stored": 2458,
+      "sha256_download": "e67028d85698a0576c3f924ed7f4ed25a21d5e0acd74a5840a9328300c07ea18",
+      "sha256_stored": "842f56c14807672e55b8d1cdac9edcd5fb526fdae97605a3518641e74d969475",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/SET_History.csv"
+    },
+    "VXTH": {
+      "file": "VXTH.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VXTH_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:20+00:00",
+      "rows_published": 5167,
+      "rows_stored": 2459,
+      "sha256_download": "48f082b6a6706f7f781be8e9fd570cf19c74defab9f6c7ae3f990d751021a130",
+      "sha256_stored": "203e08689cf0dab532166d107891f5b705423338ce8ff5124365305cf373acbd",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VXTH_History.csv"
+    },
+    "WPUT": {
+      "file": "WPUT.csv",
+      "final_url": "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/WPUT_History.csv",
+      "first_date": "2017-01-03",
+      "http_status": 200,
+      "last_date": "2026-10-19",
+      "redirect_statuses": [
+        307
+      ],
+      "retrieved_at_utc": "2026-10-20T12:48:19+00:00",
+      "rows_published": 5209,
+      "rows_stored": 2459,
+      "sha256_download": "748aa5b51b4e7152a0260f9ea5a34e4b9b01cb65b1a82b6a0319f3dba500999a",
+      "sha256_stored": "700380d29c0bb0023492afd95ff9cb505fba8d054dff0957089e85a275097de6",
+      "url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/WPUT_History.csv"
+    }
+  },
+  "source": "Cboe Global Markets index history CSVs (cdn.cboe.com)",
+  "start": "2017-01-01",
+  "terms": "https://www.cboe.com/terms (personal, non-commercial use); levels only, stored from the start date below"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "vol-desk-echarts-build",
+  "private": true,
+  "description": "Reproducible tree-shaken Apache ECharts build for the static dashboard (see build.mjs).",
+  "license": "MIT",
+  "dependencies": {
+    "echarts": "6.1.0",
+    "echarts-gl": "2.1.0",
+    "esbuild": "0.25.10"
+  },
+  "scripts": {
+    "build": "node build.mjs ../static/vendor/echarts-6.1.0-desk.min.js && node patch_gl.mjs ../static/vendor/echarts-gl-2.1.0-csp.min.js"
+  }
+}

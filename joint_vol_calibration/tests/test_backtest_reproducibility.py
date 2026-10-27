@@ -157,6 +157,27 @@ def _csv_rows(text: str) -> list:
     return list(csv.reader(io.StringIO(text)))
 
 
+def _assert_rows_match(got: list, want: list) -> None:
+    """Every field as printed, except that a number may differ by floating-point
+    noise: 1e-9 relative, or 1e-6 absolute ($0.000001). A difference column
+    such as c23_bridge's d_pnl (two ~$216k P&Ls that differ by $0.014) prints
+    the noise of the summation order in its trailing digits, and that order
+    differs between CPUs (numpy picks AVX-512 or AVX2 kernels at run time):
+    one CI runner printed -0.01363441124 where the committed file has
+    -0.01363441031."""
+    assert len(got) == len(want)
+    for r, (g, w) in enumerate(zip(got, want)):
+        assert len(g) == len(w), r
+        for c, (a, b) in enumerate(zip(g, w)):
+            if a == b:
+                continue
+            try:
+                fa, fb = float(a), float(b)
+            except ValueError:
+                raise AssertionError(f"row {r}, field {c}: {a!r} != {b!r}") from None
+            assert fa == pytest.approx(fb, rel=1e-9, abs=1e-6), (r, c, a, b)
+
+
 def test_beta_grid_canonical_row_is_byte_identical(canonical):
     """The β = 0.82 line of beta_sensitivity.csv, every column, as the
     --beta-sensitivity writer would print it from the canonical run."""
@@ -188,6 +209,50 @@ def test_bridge_last_row_is_byte_identical(canonical):
     assert r2[:i] + r2[i + 1:] == last[:i] + last[i + 1:]
     pnl = rec["pnl"] - float(prev[header.index("pnl")])
     assert float(last[i]) == pytest.approx(pnl, abs=1.0)    # row 13's P&L is rounded to 6 digits
+
+
+def test_c23_bridge_reproduces_every_row():
+    """c23_bridge.csv (the C23 data-correction waterfall) re-run in full, 4
+    backtests: every field of every row as its writer prints it. Row 0 is the
+    published C22 headline, row 4 the canonical run. Row 1 (the corrected
+    record with every logged correction reverted) must land on row 0 to under
+    $1 (measured: $0.014), which checks that the reconstruction from the log
+    is the pre-C23 record up to the sub-half-cent restatements."""
+    from joint_vol_calibration.backtest import c23_bridge
+    df = c23_bridge.run_bridge()
+    rebuilt = df.to_csv(index_label="row", float_format=ARTIFACT_CSV_FLOAT_FORMAT)
+    _assert_rows_match(_csv_rows(rebuilt), _csv_rows((BACKTEST_DIR / "c23_bridge.csv").read_text()))
+    assert list(df["step"]) == [k for k, _ in c23_bridge.STEPS]
+    c22 = pd.read_csv(BACKTEST_DIR / "c22_bridge.csv").iloc[-1]
+    assert df.iloc[-1]["nav"] == pytest.approx(float(c22["nav"]), rel=2e-9)
+    assert abs(df.iloc[1]["pnl"] - c23_bridge.PUBLISHED_C22["pnl"]) < 1.0
+    assert df["d_pnl"].sum() == pytest.approx(df.iloc[-1]["pnl"] - df.iloc[0]["pnl"])
+
+
+def test_c23_record_states_undo_each_logged_correction():
+    """record_states walks the correction log backwards, one action per row."""
+    from joint_vol_calibration.backtest.c23_bridge import record_states
+    now = pd.DataFrame({"date": ["2020-01-02", "2020-01-02", "2020-01-06", "2020-01-06"],
+                        "ticker": ["^VIX", "^VVIX", "^VIX", "^VVIX"],
+                        "close": [13.0, 90.0, 14.0, 91.0]})
+    # the last row lies outside the loaded window and is ignored
+    log = pd.DataFrame({
+        "table": "vix_term_structure",
+        "date": ["2020-01-02", "2020-01-06", "2020-01-04", "2030-01-01"],
+        "ticker": ["^VIX", "^VVIX", "^VIX", "^VIX"],
+        "old_close": [13.5, np.nan, 12.0, 1.0],
+        "action": ["replaced_by_cboe", "added_from_cboe", "removed_non_session", "replaced_by_cboe"]})
+    st = record_states(now, log)
+    key = lambda f: dict(zip(zip(f["date"], f["ticker"]), f["close"]))   # noqa: E731
+    assert key(st["cboe_values"]) == key(now)
+    assert key(st["vvix_gaps"])[("2020-01-02", "^VIX")] == 13.5          # Yahoo's value back
+    assert ("2020-01-06", "^VVIX") in key(st["vvix_gaps"])
+    assert ("2020-01-06", "^VVIX") not in key(st["holidays"])            # Cboe-only row gone
+    assert key(st["restated"])[("2020-01-04", "^VIX")] == 12.0           # holiday row back
+    assert len(st["restated"]) == len(st["holidays"]) + 1
+    bad = log.assign(date=["2020-01-03", *log["date"][1:]])
+    with pytest.raises(ValueError, match="not in the database"):
+        record_states(now, bad)
 
 
 def _assert_c7_matches(df: pd.DataFrame, committed: pd.DataFrame) -> None:
@@ -284,3 +349,31 @@ def test_default_beta_is_the_estimate_from_the_real_chains():
     meta = json.loads((Path(__file__).parent / "fixtures" / "spx_chain_live_20261012.json").read_text())
     ratios = list(inc["ratio"]) + [meta["ratio_full_chain"]]
     assert round(float(np.mean(ratios)), 2) == ATM_TO_VIX_RATIO
+
+
+def test_rule_label_file_reproduces_from_the_database():
+    """data_store/signals/regime_labels.parquet (the dashboard's regime card and
+    regime_pdv read it) is the adaptive rule on the shipped database, label and
+    features, on every date through the backtest end. After C23 restated the
+    VIX family as Cboe's closes, 6 labels moved (2019-08-09, 2020-02-20,
+    2020-06-11, 2021-05-11 to R2; 2021-06-09, 2021-07-08 to R1); the file was
+    rebuilt with `cloud_refresh.py --steps labels --rebuild-labels`."""
+    from pathlib import Path
+
+    from joint_vol_calibration.config import BT_END
+    from joint_vol_calibration.data.database import get_spx_ohlcv, get_vix_term_structure_wide
+    from joint_vol_calibration.signals.regime_classifier import FEATURE_COLS, build_rule_label_frame
+
+    rl = pd.read_parquet(Path(__file__).resolve().parents[2] / "data_store" / "signals"
+                         / "regime_labels.parquet")
+    end = BT_END
+    frame = build_rule_label_frame(get_spx_ohlcv(end, "2009-01-01"),
+                                   get_vix_term_structure_wide(end, "2009-01-01"), vvix_threshold=None)
+    rl = rl[rl.index <= pd.Timestamp(end)]
+    assert len(rl) > 3500
+    assert rl.index.isin(frame.index).all()
+    f = frame.loc[rl.index]
+    assert (rl["regime"].astype(int) == f["regime"].astype(int)).all()
+    for c in FEATURE_COLS:
+        np.testing.assert_allclose(rl[c].to_numpy(float), f[c].to_numpy(float), rtol=0, atol=1e-12,
+                                   err_msg=c)

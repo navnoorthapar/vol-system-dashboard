@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% set ur = d.unstable_rule or {} %}
+{% if ur.kind == 'pnl_ratio' %}{% set rule_txt = 'vomma P&L ratio ½·vomma·|Δσ|/vega > ' ~ (ur.get('threshold')|fmt('.2f') if ur.get('threshold') is not none else 'the recorded threshold') %}{% set rule_short = 'ratio > ' ~ (ur.get('threshold')|fmt('.2f') if ur.get('threshold') is not none else 'threshold') %}{% set metric_name = 'Vomma P&L ratio' %}{% set metric_lower = 'vomma P&L ratio' %}
+{% else %}{% set rule_txt = '|vomma z-score| > 2 (fallback: the surface records no vomma P&L ratio)' %}{% set rule_short = '|z| > 2' %}{% set metric_name = '|Vomma z-score|' %}{% set metric_lower = '|vomma z-score|' %}{% endif %}
+{% block og_title %}Risk — Greeks, Scenarios and P&amp;L Explain — SPX/VIX Vol Research{% endblock %}
+{% block og_description %}Greeks of the headline Heston surface (vomma flag, vega, vanna, delta), a spot × vol scenario grid and the daily Greek P&amp;L explain of a delta-hedged straddle.{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Risk · Greeks, scenarios and P&amp;L explain</h1>
+  <p class="page-sub">Second-order Greeks of the stored Heston surface, where a vol move's P&amp;L is mostly convexity, and how well the Greeks explain a hedged position's daily P&amp;L.</p>
+  <div class="page-badge"><span class="nowrap">Surface {{ d.surface_date|fmt }}</span>{% if d.greeks_age %} <span class="age-{{ d.stale[0].level if d.stale else 'ok' }}">({{ d.greeks_age|plural('session') }} old)</span>{% endif %}<span class="sep">·</span><span class="nowrap">{{ d.n_cells|fmt }} of {{ d.n_grid|fmt }} grid nodes</span><span class="sep">·</span><span class="nowrap">{{ d.n_maturities|fmt }} maturities</span></div>
+</div>
+
+{% if d.n_cells is not none %}
+<div id="greeks-provenance" class="banner {% if d.provenance and d.source_matches_headline %}banner-info{% else %}banner-stale-warn{% endif %}" style="margin-bottom:8px;">
+  <div class="banner-icon" aria-hidden="true">{% if d.provenance and d.source_matches_headline %}i{% else %}!{% endif %}</div>
+  <div>
+    <div class="banner-title">Surface provenance</div>
+    <div class="banner-body">
+      {% if d.provenance %}
+      Built from <code>{{ d.provenance.source_calibration|fmt }}</code> at S = {{ d.provenance.S|fmt(",.1f") }}
+      ({% if d.provenance.get('r') is not none %}r = {{ (d.provenance.get('r') * 100)|fmt(".2f") }}%, q = {{ (d.provenance.get('q') * 100)|fmt(".2f") if d.provenance.get('q') is not none else '—' }}%{% elif d.carry_by_maturity %}{% set cb = d.carry_by_maturity %}carry per maturity, {{ cb.t_lo }}–{{ cb.t_hi }} days: r(T) {{ (cb.r_lo * 100)|fmt(".2f") }}–{{ (cb.r_hi * 100)|fmt(".2f") }}%{% if cb.discount %} ({{ cb.discount }}){% endif %}, q(T) {{ (cb.q_lo * 100)|fmt(".2f") }}–{{ (cb.q_hi * 100)|fmt(".2f") }}% from the fit's parity forwards{% else %}carry not recorded{% endif %}), session {{ d.provenance.spot_date|fmt }}{% if d.source_matches_headline %}, {{ m.cite('the parameters of the calibration-page headline fit', 'calibration.html#identifiability') }}{% endif %}.
+      {% if d.source_matches_headline == false %}<strong>These are not the parameters of the calibration-page headline fit.</strong>{% endif %}
+      {% else %}
+      The stored surface records no source calibration, spot, rates or parameters — only its build date ({{ d.as_of|fmt }}); its inputs cannot be verified from the artifact.
+      {% endif %}
+      {{ d.n_missing|fmt }} of the {{ d.n_grid|fmt }} grid nodes carry no Greeks in the stored surface (empty cells below; each says why).
+    </div>
+  </div>
+</div>
+
+{% set uv = d.unstable_vega %}{% set cg = d.cash_greeks %}
+<div class="kpis" id="risk-kpis" style="margin-bottom:8px;">
+  {% if uv %}
+  <div class="kpi" id="kpi-convexity"><div class="kpi-label">Convexity-dominated vega</div>
+    <div class="kpi-value">{{ (uv.share * 100)|fmt('.1f') }}<span class="unit">%</span></div>
+    <div class="kpi-sub">vega-weighted share of the {{ uv.n }} of {{ uv.n_nodes }} nodes with {{ rule_txt }}; {{ uv.n_far }} of them at |ln(K/F)| ≥ {{ uv.far_k|fmt('.2f') }}, where node vega averages {{ uv.vega_far_mean|fmt(',.0f') }} against {{ uv.vega_near_mean|fmt(',.0f') }} nearer the money</div></div>
+  {% else %}{{ m.kpi('Unstable nodes', (d.n_unstable|fmt) ~ ' of ' ~ (d.n_cells|fmt), sub=rule_txt) }}{% endif %}
+  {% if cg %}
+  {% set _age %}<span class="age-{{ cg.age_level if cg.age_level in ('warn', 'error') else 'ok' }}">fit of {{ cg.as_of }}{% if cg.age %}, {{ cg.age|plural('session') }} old{% endif %}</span>{% endset %}
+  {% for key, label, unit_txt in [('vega_usd', '$Vega', 'per vol pt'), ('gamma_usd', '$Gamma', 'P&L of a 1% spot move'), ('vanna_usd', '$Vanna', 'per 1% spot, per vol pt'), ('volga_usd', '$Volga', 'per vol pt²; P&L ≈ ½·$volga·Δσ²')] %}
+  <div class="kpi" id="kpi-{{ key }}"><div class="kpi-label">{{ label }} · ref. straddle</div>
+    <div class="kpi-value">{{ cg[key]|usd_desk }}</div>
+    <div class="kpi-sub">{{ unit_txt }}, one SPX contract · {{ _age }}</div></div>
+  {% endfor %}
+  {% endif %}
+</div>
+{% if cg %}<p class="note" id="cash-greeks-note" style="margin:-2px 0 8px;">Cash Greeks of the scenario grid's reference book: one {{ cg.tenor_days|fmt('.0f') }}-day SPX straddle struck at the forward ({{ cg.forward|fmt(',.1f') }}; S {{ cg.S|fmt(',.1f') }}), Black-76 at the fit's ATM-forward vol {{ (cg.iv_atm_forward * 100)|fmt('.2f') }}%, × {{ cg.multiplier|fmt('.0f') }} for one SPX contract. $gamma is ½·Γ·(1% of S)²·100. Unit conversions of the same Greeks, not a position: the site holds no book.</p>{% endif %}
+
+<div class="g">
+  {% call m.panel('greeks-grid', 'Greeks by maturity and ln(K/F)', 's12', d.surface_date) %}
+    <div class="tabs js-only" role="tablist" aria-label="Greek shown in the grid" data-state-key="greek" hidden>
+      <button class="btn" type="button" role="tab" id="tab-vomma" aria-controls="grid-vomma" aria-selected="true" data-value="vomma">Vomma flag</button>
+      {% for g in d.greek_grids %}<button class="btn" type="button" role="tab" id="tab-{{ g.key }}" aria-controls="grid-{{ g.key }}" aria-selected="false" data-value="{{ g.key }}">{{ g.label }}</button>{% endfor %}
+    </div>
+    <div id="grid-vomma" role="tabpanel" aria-labelledby="tab-vomma">
+      <div class="heat-wrap" tabindex="0" role="region" aria-labelledby="heatmap-title">
+        <table class="heat" id="vomma-heatmap" data-readout="vomma-readout">
+          <caption id="heatmap-title">The {{ metric_lower }} by maturity and log-moneyness <span class="sym">ln(K/F)</span>, with Black–Scholes vomma under each value; ⚠ marks {{ rule_short }}; empty cells have no stored Greeks.</caption>
+          <thead><tr><th scope="col">T</th>{% for col in d.heatmap_cols %}<th scope="col">{{ col }}</th>{% endfor %}</tr></thead>
+          <tbody>
+          {% for row in d.heatmap_rows %}
+            <tr><th scope="row">{{ row.label }}</th>
+            {% for cell in row.cells %}
+              {% if cell.empty %}<td class="empty" data-detail="T {{ row.T }}d · ln(K/F) {{ d.heatmap_cols[loop.index0] }}: no Greeks — {{ cell.reason or 'not stored' }}"><span aria-hidden="true">·</span><span class="sr-only">no data{% if cell.reason %}: {{ cell.reason }}{% endif %}</span></td>
+              {% else %}<td class="node{% if cell.unstable %} unstable flag{% endif %}" style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="T {{ row.T }}d · ln(K/F) {{ cell.lm|fmt('+.4f') }} · K {{ cell.K|fmt(',.0f') }} · IV {{ cell.iv|fmt('.1f')|u('%') }} · vomma {{ cell.vomma|fmt(',.1f') }} · {{ metric_name }} {{ cell.metric|fmt('.3f') }} · z {{ cell.z|fmt('+.2f') }}">
+                {# the flag metric first (12 px), vomma under it #}
+                <div class="vv">{% if cell.unstable %}⚠ {% endif %}{% if ur.kind == 'pnl_ratio' %}{{ cell.metric|fmt(".2f") }}{% else %}z {{ cell.z|fmt("+.1f") }}{% endif %}</div>
+                <div class="z">{{ cell.vomma|fmt(",.0f") }}</div>
+                <span class="sr-only">K {{ cell.K|fmt(',.0f') }}, IV {{ cell.iv|fmt('.1f')|u('%') }}</span>
+              </td>{% endif %}
+            {% endfor %}
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="heat-readout" id="vomma-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its strike, IV and z-score.</p>
+      <div class="ramp" aria-hidden="true">{{ m.ramp_bar(cividis, '0', (ur.threshold|fmt('.2f')) if ur.kind == 'pnl_ratio' and ur.threshold is not none else '2', metric_lower ~ ' (the threshold at the top); ⚠ outlined above it') }}</div>
+      <p class="note">Each cell: the {{ metric_lower }} on top{% if ur.kind == 'pnl_ratio' %}, the second-order share of a vol move's P&amp;L with Δσ the surface's per-maturity shock; shading (cividis) runs from 0 to the {{ ur.threshold|fmt('.2f') }} threshold{% else %}; shading (cividis) runs from 0 to 2{% endif %}; under it, Black–Scholes vomma (∂²V/∂σ², per unit index, per (1.00 vol)²). Outlined cells marked ⚠ exceed the threshold (the surface's own rule).
+      {% if d.unstable_by_maturity %}Unstable nodes by maturity: {% for t, n in d.unstable_by_maturity|dictsort %}{{ t }}d {{ n }}{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}</p>
+    </div>
+    {% for g in d.greek_grids %}
+    {# hidden until its tab is chosen: hiding it after first paint shifted the page (no-JS shows every grid) #}
+    <div id="grid-{{ g.key }}" role="tabpanel" aria-labelledby="tab-{{ g.key }}" hidden>
+      {{ m.heatmap(g, 'heat-' ~ g.key, g.label ~ ' by maturity (rows) and ln(K/F) (columns), ' ~ g.unit, 'T',
+                   m.ramp_bar(cividis if g.scale == 'seq' else diverge, g.lo|fmt(g.fmt) if g.scale == 'seq' else ('−' ~ (g.lim|fmt('.3g'))), g.hi|fmt(g.fmt) if g.scale == 'seq' else ('+' ~ (g.lim|fmt('.3g'))), g.unit if g.scale == 'seq' else g.unit ~ ', dark at zero')) }}
+    </div>
+    {% endfor %}
+  {% endcall %}
+</div>
+
+{% if d.n_unstable %}
+<div class="g">
+  {% call m.panel('unstable', 'Unstable nodes · ' ~ rule_short, 's6', 'sorted by ' ~ metric_lower) %}
+    <div class="tbl-wrap capped" tabindex="0" role="region" aria-label="Unstable node details (scrollable)">
+    <table class="tbl dense">
+      {# the column the table is sorted by comes right after the node's position, so it is on screen on a phone #}
+      <thead><tr><th scope="col">Maturity</th><th scope="col" class="num">ln(K/F)</th><th scope="col" class="num" aria-sort="descending">{{ metric_name }}</th><th scope="col" class="num">Strike K</th><th scope="col" class="num">IV</th><th scope="col" class="num">Vomma</th><th scope="col" class="num">z</th></tr></thead>
+      <tbody>{% for n in d.unstable_nodes %}<tr><td>{{ n.T_days }}d</td><td class="num">{{ n.lm|fmt("+.3f") }}</td><td class="num">{{ n.metric|fmt(".3f") }}</td><td class="num">{{ n.K|fmt(",.0f") }}</td><td class="num">{{ n.iv|fmt(".1f")|u('%') }}</td><td class="num">{{ n.vomma|fmt(",.0f") }}</td><td class="num">{{ n.z|fmt("+.2f") }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+  {% endcall %}
+  {% call m.panel('flag-scatter', metric_name ~ ' against ln(K/F)', 's6') %}
+    {% if d.charts.scatter %}{{ m.chart(d.charts.scatter, 'h300') }}{{ m.tenor_key(d.charts.scatter) }}{% endif %}
+    <p class="note">Largest at short maturities away from the money, where a vol move's P&amp;L is mostly convexity rather than vega.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
+<div class="g level">
+  {% call m.panel('scenario', 'Scenario grid · spot × vol, full revaluation', 's6') %}
+    {% set sc = d.scenario or {} %}
+    {% if sc.state == 'ok' %}
+    <div class="tabs js-only" role="group" aria-label="Units of the scenario P&amp;L">
+      <button class="btn" type="button" data-units-for="scenario-units" data-show="base" aria-pressed="true">idx pts per straddle</button>
+      <button class="btn" type="button" data-units-for="scenario-units" data-show="alt" aria-pressed="false">$ per SPX contract</button>
+    </div>
+    <div class="units grow-col" id="scenario-units">
+    {{ m.heatmap(d.scenario_heat, 'scenario-grid', 'P&L of the reference book by spot shock (columns) and parallel vol shock (rows): index points per straddle on one unit of the index, or dollars per SPX contract (× 100) with the units buttons', 'Vol', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], '−' ~ (d.scenario_heat.lim|fmt(',.0f')), '+' ~ (d.scenario_heat.lim|fmt(',.0f')), 'index points per straddle · orange loss, blue gain'), grow=True) }}
+    <p class="note">{{ (sc.provenance or {}).get('book', 'Reference book') }}; as of {{ (sc.provenance or {}).get('as_of_date', '—') }}{% if sc.dynamics_shown %}; {{ sc.dynamics_shown|replace('_', '-') }} dynamics shown{% if sc.dynamics_all|length > 1 %} (the file also holds {{ sc.dynamics_all|reject('equalto', sc.dynamics_shown)|join(', ')|replace('_', '-') }}){% endif %}{% endif %}. P&amp;L in {{ (sc.provenance or {}).get('units', 'index points per unit book') }}.</p>
+    {% for x in d.scenario_more %}
+    {% call m.method(x.dynamics|replace('_', '-')|capitalize ~ ' dynamics: the same book and shocks') %}
+    {{ m.heatmap(x.heat, 'scenario-grid-' ~ x.dynamics|replace('_', '-'), 'P&L of the reference book under ' ~ (x.dynamics|replace('_', '-')) ~ ' dynamics, by spot shock (columns) and parallel vol shock (rows)', 'Vol') }}
+    <p class="note">Same colour scale and units as the grid above. Under sticky-moneyness the smile ({{ m.cite('the headline fit’s model smile', 'calibration.html#model-smile') }}) moves with the forward, so a fixed strike's vol falls as spot falls on the negative skew; the difference between the two grids is the smile-dynamics risk a sticky-strike book ignores.</p>
+    {% endcall %}
+    {% endfor %}
+    </div>
+    {% else %}
+    {{ m.missing(sc, 'A spot (−10% … +10%) × parallel vol (−5 … +10 vol pts) P&L grid of a reference book, fully revalued, under sticky-strike and sticky-moneyness dynamics.') }}
+    {% endif %}
+  {% endcall %}
+  {% call m.panel('qv-vanna', 'QV convexity and mean vanna by maturity', 's6') %}
+    {% if d.charts.qv %}{{ m.chart(d.charts.qv, 'h180') }}{% endif %}
+    {% if d.charts.vanna %}{{ m.chart(d.charts.vanna, 'h180') }}{% endif %}
+    {% call m.method() %}
+    <p class="prose">QV convexity is the variance of integrated variance ∫₀ᵀ v_t dt under the surface's Heston parameters ({% if d.provenance and d.provenance.qv_method == 'exact' %}exact closed form for the CIR variance{% else %}Monte Carlo{% endif %}); it does not depend on strike. Vanna (<span class="sym">(∂²V/∂S∂σ)</span>) = −φ(d₁)·d₂/σ is negative below the forward and positive above it, so its average mostly reflects which strikes the surface holds; it is not a measure of the spot–vol leverage effect.</p>
+    {% endcall %}
+  {% endcall %}
+</div>
+
+{% if d.hedge %}{% set h = d.hedge %}
+<div class="g">
+  {% call m.panel('hedge', 'P&L explain · delta-hedged 1-year ATM straddle, 2020', 's12', h.start ~ ' → ' ~ h.end) %}
+    <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));">
+      {{ m.kpi('Total P&L', h.cum_total|signed(',.1f'), unit='idx pts', tone=h.cum_total|tone) }}
+      {% for name, v in h.cum.items() %}{{ m.kpi(name, v|signed(',.1f'), unit='idx pts', tone=v|tone) }}{% endfor %}
+      <div class="kpi kpi-wide" id="taylor-check">
+        <div class="kpi-label">Second-order Taylor check</div>
+        <div class="kpi-value">{{ h.resid_sd|fmt('.2f') }}<span class="unit">idx pts residual sd</span></div>
+        <div class="kpi-ci">vs daily P&amp;L sd {{ h.total_sd|fmt('.1f') }} idx pts, {{ h.n }} days</div>
+        <div class="kpi-sub">Marks and Greeks share one vol input ({{ m.cite('the VIX term structure', 'index.html#state-ts') }}, Run A in <code>delta_hedger.py</code>), so this tests the expansion, not hedge effectiveness against market prices.</div>
+      </div>
+    </div>
+    {{ m.chart(d.charts.hedge, 'h340') }}
+    {% call m.method() %}
+    <div class="prose">
+      <p>Long one ATM straddle struck at {{ h.K|fmt(',.2f') }} on {{ h.start }} with one year to expiry, delta-hedged at each close through {{ h.end }} ({{ h.n }} rebalances). Each day's P&amp;L is split into Θ, Γ, ν (realised Δσ), vanna, volga and financing from the previous close's Greeks; the residual is what the second-order expansion misses (third-order terms, and the vol path between closes).</p>
+      <p>Greeks are Black–Scholes at the VIX term structure interpolated to the remaining tenor (C7, Run A); financing accrues at the simulator's flat rate. The residual is the honesty check. Its largest days are {% for t in h.top_resid %}{{ t.date }} ({{ t.value|signed('.2f') }}){{ ', ' if not loop.last else '' }}{% endfor %}; {{ h.covid_resid_share|pct(0, false) }} of its sum of squares falls in 20 February – 30 April 2020{% if h.unstable_days %}, when the ex-ante vomma flag fired on {{ h.unstable_days }} days ({{ h.flag_first }} → {{ h.flag_last }}){% endif %}. Index points per straddle on one unit of SPX.</p>
+    </div>
+    {% endcall %}
+  {% endcall %}
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,183 @@
+{# Shared page components. Every chart: role="img" container with an accessible
+   name, a JSON spec (never executed) and a server-rendered table behind it. #}
+
+{% macro panel(id, title, span='s6', meta=None, cls='') -%}
+<section class="panel {{ span }} {{ cls }}" id="{{ id }}" aria-labelledby="{{ id }}-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="{{ id }}-t">{{ title|sym }}</h2>
+    <span class="panel-side">{{ monitored_chips(id) }}{% if meta %}<span class="panel-meta">{{ meta }}</span>{% endif %}
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="{{ id }}" aria-label="Copy a link to the {{ title }} panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">{{ caller() }}</div>
+  {%- set _cb = cited_on(id) %}{% if _cb %}
+  <div class="panel-foot cite-foot" id="{{ id }}-cited">Cited on: {% for c in _cb %}<a href="{{ c.page }}{% if c.panel %}#{{ c.panel }}{% endif %}">{{ c.label }}</a>{{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}
+</section>
+{%- endmacro %}
+
+{# a figure restated from another page: the link to it (app.cite_registry reads
+   these calls, with a literal 'page.html#id', to write that panel's 'Cited on' footer) #}
+{% macro cite(label, href) -%}<a class="cite" href="{{ href }}">{{ label }}</a>{%- endmacro %}
+
+{# a link back to each Model Risk check whose evidence this element shows #}
+{% macro monitored_chips(id) -%}
+{%- for c in monitored_for(id) -%}<a class="chip chip-{{ c.status if c.status in ('ok', 'watch', 'breach') else 'muted' }} mon-link" href="model-risk.html#{{ c.id }}" aria-label="Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}: {{ c.check }}" title="Model Risk check: {{ c.check }}" data-monitored="{{ c.id }}">Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}</a>{%- endfor -%}
+{%- endmacro %}
+
+{# ci_kind 'range': a range across sessions (dashed rule), never read as an interval #}
+{% macro kpi(label, value, sub=None, unit=None, ci=None, tone=None, ci_kind=None) -%}
+<div class="kpi">
+  <div class="kpi-label">{{ label|sym }}</div>
+  <div class="kpi-value{% if tone %} {{ tone }}{% endif %}">{{ value }}{% if unit and value|string != '—' %}<span class="unit">{{ unit }}</span>{% endif %}</div>
+  {% if ci %}<div class="kpi-ci{% if ci_kind == 'range' %} kpi-range" title="A range across sessions, not a sampling interval{% endif %}">{{ ci }}</div>{% endif %}
+  {% if sub %}<div class="kpi-sub">{{ sub }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro chip(text, tone='muted') -%}<span class="chip chip-{{ tone }}">{{ text|sym }}</span>{%- endmacro %}
+
+{% macro rag(status) -%}
+{%- set m = {'ok': ('●', 'OK'), 'watch': ('▲', 'WATCH'), 'breach': ('■', 'BREACH'), 'info': ('◆', 'INFO'), 'na': ('○', 'N/A')} -%}
+<span class="rag rag-{{ 'na' if status == 'info' else status }}"><span aria-hidden="true">{{ m[status][0] }}</span>{{ m[status][1] }}</span>
+{%- endmacro %}
+
+{% macro _table(t) -%}
+<table>
+    <caption>{{ t.caption }}</caption>
+    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label|sym }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for r in t.rows %}<tr>{% for v in r %}<td{% if t.columns[loop.index0] and t.columns[loop.index0].num %} class="num"{% endif %}>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table>
+{%- endmacro %}
+
+{# t.groups: one more table per tab group (the smile slices' expiries); desk.js
+   shows the selected group's, and every group shows without JavaScript #}
+{% macro data_table(t, id, sr=True) -%}
+<div class="chart-data{% if sr %} sr-only{% endif %}" id="{{ id }}">
+  {% if t and t.rows %}
+  {{ _table(t) }}
+  {% for g in t.groups or [] %}<div class="chart-data-group" data-group="{{ g.group }}"{% if not g.shown %} hidden{% endif %}>{{ _table(g) }}</div>
+  {% endfor %}
+  {% else %}No data.{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro chart(spec, height='', tools=True) -%}
+{%- set cid = spec.id -%}
+{% if tools %}
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else ('ramp-' ~ it.color[4:] if it.color.startswith('ramp') else it.color))))) }})"></span>{{ it.name }}</button>{% endfor %}
+    {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
+    {% if spec.zoom_years %}<label class="zoom-year js-only">Year <select class="btn" data-zoom-year-for="{{ cid }}"><option value="">—</option>{% for z in spec.zoom_years %}<option value="{{ z['from'] }}|{{ z.to }}">{{ z.label }}</option>{% endfor %}</select></label>{% endif %}
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="{{ cid }}-data" aria-expanded="false" aria-controls="{{ cid }}-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="{{ cid }}" data-filename="{{ spec.csv }}">CSV</button>
+  </div>
+</div>
+{% endif %}
+<div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec"{% if spec.link %} data-chart-group="{{ spec.link }}"{% endif %} role="img" aria-label="{{ spec.title }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
+{% if spec.quotes %}<p class="quote-readout js-only" id="{{ cid }}-readout" data-readout-for="{{ cid }}" tabindex="0" aria-live="polite" aria-describedby="{{ cid }}-readout-help">Quote readout: hover a quote, or focus here and step with ← → (Page Up / Down: 10 quotes; Home / End).</p>
+<span class="sr-only" id="{{ cid }}-readout-help">Arrow keys step through the shown expiry’s quotes; each step reads the quote’s strike, bid, mid and ask and each shown model’s IV and z.</span>{% endif %}
+<p class="sr-only" id="{{ cid }}-desc">{{ spec.describe }}</p>
+<script type="application/json" id="{{ cid }}-spec">{{ spec|tojson }}</script>
+{{ data_table(spec.table, cid ~ '-data') }}
+{%- endmacro %}
+
+{% macro heatmap(h, id, caption, row_head='T', ramp=None, grow=False) -%}
+<div class="heat-wrap{% if grow %} grow{% endif %}" tabindex="0" role="region" aria-labelledby="{{ id }}-cap">
+  <table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}>
+    <caption id="{{ id }}-cap">{{ caption }}</caption>
+    <thead><tr><th scope="col">{{ row_head }}</th>{% for c in h.cols %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for row in h.rows %}
+      <tr{% if row.exp %} data-exp="{{ row.exp }}"{% endif %}><th scope="row">{{ row.label }}</th>
+        {% for cell in row.cells %}{% if cell.empty %}<td class="empty" data-detail="{{ cell.detail }}"><span aria-hidden="true">·</span><span class="sr-only">{{ cell.detail or 'no data' }}</span></td>{% else %}<td{% if cell.flag %} class="flag"{% endif %} style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="{{ cell.detail }}"{% if cell.alt %} data-detail-alt="{{ cell.alt_detail }}"{% endif %}>{% if cell.alt %}<span data-unit="base">{{ cell.text }}</span><span data-unit="alt">{{ cell.alt }}</span>{% else %}{{ cell.text }}{% endif %}{% if not h.compact %}{% if cell.alt %}<span class="sr-only" data-unit="base">; {{ cell.detail }}</span><span class="sr-only" data-unit="alt">; {{ cell.alt_detail }}</span>{% else %}<span class="sr-only">; {{ cell.detail }}</span>{% endif %}{% endif %}</td>{% endif %}{% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="heat-readout" id="{{ id }}-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
+{% if ramp %}<div class="ramp" aria-hidden="true">{{ ramp }}</div>{% endif %}
+{%- endmacro %}
+
+{# the gradient key of a chart whose series are maturities (role 'tenor', desk_charts.TENOR_RAMP) #}
+{% macro tenor_key(spec) -%}
+{% set ts = spec.series|selectattr('role', 'defined')|selectattr('role', 'equalto', 'tenor')|list %}
+{% if ts %}<div class="ramp tenor-key" aria-hidden="true"><span>{{ ts[0].T|fmt('.0f') }} d</span><span class="ramp-bar" style="background:linear-gradient(90deg,{% for s in ts %}var(--ramp-{{ s.color[4:] }}){{ ',' if not loop.last }}{% endfor %})"></span><span>{{ ts[-1].T|fmt('.0f') }} d</span><span>· maturity, short to long</span></div>{% endif %}
+{%- endmacro %}
+
+{% macro ramp_bar(stops, lo_label, hi_label, mid_label=None) -%}
+<span>{{ lo_label }}</span><span class="ramp-bar" style="background:linear-gradient(90deg,{{ stops|join(',') }})"></span><span>{{ hi_label }}</span>{% if mid_label %}<span>· {{ mid_label }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro missing(state, what) -%}
+<div class="missing" data-artifact-state="absent">
+  <div class="missing-title">Artifact not yet generated</div>
+  <div class="missing-body">{{ what }} This panel reads
+    {% for p in state.paths %}<code>{{ p }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}{% if state.producer %}, written by {{ state.producer }}{% endif %}.
+    Nothing is estimated in its place.</div>
+</div>
+{%- endmacro %}
+
+{# cls 'foot': in a trio row, the disclosure sits at the panel's foot (desk.css) #}
+{% macro method(title='Methodology and caveats', cls='') -%}
+<details class="method{% if cls %} {{ cls }}{% endif %}"><summary>{{ title }}</summary>{{ caller() }}</details>
+{%- endmacro %}
+
+{% macro spark(sp, label, cls='') -%}
+{% if sp %}
+<svg class="spark {{ cls }}" viewBox="0 0 {{ sp.width }} {{ sp.height }}" preserveAspectRatio="none" role="img" aria-label="{{ label }}">
+  {% if sp.zero_y is defined %}<line class="spark-zero" x1="0" x2="{{ sp.width }}" y1="{{ sp.zero_y }}" y2="{{ sp.zero_y }}"/>{% endif %}
+  {% if sp.bound_y is defined %}<line class="spark-bound" x1="0" x2="{{ sp.width }}" y1="{{ sp.bound_y }}" y2="{{ sp.bound_y }}"/>{% endif %}
+  <polyline class="spark-line" points="{{ sp.points }}"/>
+  <rect class="spark-last" x="{{ sp.last.x - 1.2 }}" y="{{ sp.last.y - 1.2 }}" width="2.4" height="2.4"/>
+</svg>
+{% endif %}
+{%- endmacro %}
+
+{# the delta-quoted surface grid (Surface #delta-grid): g from app.desk_grid_view #}
+{% macro desk_grid(g, rows, id, caption, label) -%}
+<div class="tbl-wrap" tabindex="0" role="region" aria-label="{{ label }} (scrollable)">
+<table class="tbl dense dgrid" id="{{ id }}">
+  <caption>{{ caption }}</caption>
+  <thead><tr>{% for h in g.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{% if g.links and g.links.get(h) %}<a href="{{ g.links[h] }}">{{ h }}</a>{% else %}{{ h }}{% endif %}</th>{% endfor %}</tr></thead>
+  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+</div>
+{%- endmacro %}
+
+{# term days: a whole day prints whole, an AM term's fraction keeps one decimal #}
+{% macro _term_days(x) %}{{ x|fmt('.0f') if (x % 1 < 1e-6 or x % 1 > 1 - 1e-6) else x|fmt('.1f') }}{% endmacro %}
+
+{# each VIX-family index's two terms and its gap split (Surface #vix-replication):
+   vt from desk_surface.vix_terms, each row with a surface_label #}
+{% macro vix_terms(vt) -%}
+    {% if vt %}{% set split = vt|selectattr('truncation', 'ne', none)|list %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Terms and gap split of the replicated indices (scrollable)">
+    <table class="tbl dense wrap-head" id="vix-terms-table"><caption>The two listed expiries each index interpolates and the near term’s weight; the gap above split as gap = truncation + unexplained (index points; each part rounded on its own)</caption>
+      <thead><tr><th scope="col">Index</th><th scope="col" class="num">Near / next (d)</th><th scope="col" class="num">Near weight</th><th scope="col" class="num">Truncation</th><th scope="col" class="num">Unexplained</th></tr></thead>
+      <tbody>{% for r in vt %}<tr><td>{{ r.ticker }}</td><td class="num">{% if r.near and r.next %}{{ _term_days(r.near.days) }} / {{ _term_days(r.next.days) }}{% else %}—{% endif %}</td><td class="num">{{ r.near_weight|fmt('.3f') }}</td><td class="num">{{ r.truncation|signed('.2f') }}</td><td class="num">{{ r.unexplained|signed('.2f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% set fw = split|selectattr('far_wing', 'ne', none)|list %}{% set above = fw|selectattr('far_wing', 'gt', 0)|list %}{% set below = fw|selectattr('far_wing', 'lt', 0)|list %}
+    <p class="note" id="vix-terms-note">Near weight: the near term’s share of the constant-maturity combination; outside [0, 1] it would extrapolate.{% for r in vt if not r.replicated %} {{ r.ticker }} is not replicated{% if r.extrapolated %}: its nearest candidate pair would extrapolate{% elif r.reason %}: {{ r.reason }}{% endif %}.{% endfor %}{% if split %} Truncation: what strikes beyond the stored strip would add, valued on the {{ split[0].surface_label or 'fitted' }} surface’s wing (negative: the strip lacks them). Unexplained: what the chain leaves of the gap (snapshot timing against the 16:15 ET print, stale quotes or the rate; not measured).{% if above %} The stored quotes beyond the surface’s fitted range price above that wing ({% for r in above %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the truncation there likely understates.{% endif %}{% if below %} {{ 'They price below it' if above else 'The stored quotes beyond the surface’s fitted range price below that wing' }} ({% for r in below %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the truncation there likely overstates.{% endif %}{% endif %}</p>
+    {% endif %}
+{%- endmacro %}
+
+{# one earlier session against the headline at constant maturity (Surface
+   #surface-change): v from app.surface_comparison's views #}
+{% macro vs_table(head, v) -%}
+      <div class="tbl-wrap" tabindex="0" role="region" aria-label="Change against {{ v.session }} (scrollable)">
+      <table class="tbl dense dgrid" id="vs-table-{{ v.session }}">
+        <caption><strong class="vs-head">vs {{ v.session }}, {{ v.gap|plural('NYSE session') }} earlier</strong>: the SVI-cal surface at constant maturity, each cell {{ v.session }} → {{ head }} (ATMF in %; RR, BF and Δ in vol pts); Δ = {{ head }} − {{ v.session }}</caption>
+        <thead><tr><th scope="col">Tenor</th><th scope="col" class="num">ATMF</th><th scope="col" class="num">Δ ATMF</th><th scope="col" class="num">RR25</th><th scope="col" class="num">Δ RR25</th><th scope="col" class="num">BF25</th><th scope="col" class="num">Δ BF25</th></tr></thead>
+        <tbody>{% for r in v.rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.label }}</th>{% for k in ('atmf', 'rr25', 'bf25') %}{% set c = r[k] %}<td class="num">{{ c.old|fmt('.2f') if k == 'atmf' else c.old|signed('.2f') }} → {{ c.new|fmt('.2f') if k == 'atmf' else c.new|signed('.2f') }}</td><td class="num">{{ c.delta|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      </table>
+      </div>
+{%- endmacro %}
+
+{# where the page's option chain came from (app.chain_badge): a second badge line under the h1 #}
+{% macro chain_badge(text) -%}
+{% if text %}<div class="page-badge" id="chain-badge">{% for p in text.split(' · ') %}<span class="nowrap">{{ p }}</span>{% if not loop.last %}<span class="sep">·</span>{% endif %}{% endfor %}</div>{% endif %}
+{%- endmacro %}

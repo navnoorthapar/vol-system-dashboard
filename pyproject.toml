@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "joint-vol-calibration"
-version = "0.22.0"
+version = "0.23.0"
 description = "Joint SPX/VIX volatility calibration, regime signals, backtest and the static dashboard behind navnoorbawa.me"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,11 +12,29 @@ authors = [{ name = "Navnoor Bawa" }]
 requires-python = ">=3.11"
 # Ranges live in requirements.txt (one list for pip and for this file); the
 # exact tested set is requirements-lock.txt.
+# C23 added (via requirements.txt):
+#   arch    stats/: block length, SPA, StepM, MCS, GARCH/GJR baselines (NCSA licence)
+#   PyYAML  stats/trials.py reads docs/trials_ledger.yaml (MIT licence)
 dynamic = ["dependencies"]
 
 [project.optional-dependencies]
-# Mirrors requirements-dev.txt.
-dev = ["pytest>=9,<10", "pytest-cov>=7,<8", "ruff>=0.6"]
+# Mirrors requirements-dev.txt (test, lint, type-check, benchmark tools and the
+# independent test oracles; none is imported by the package at run time).
+dev = [
+    "pytest>=9,<10",
+    "pytest-cov>=7,<8",
+    "ruff>=0.17,<0.18",
+    "hypothesis>=6.170,<7",
+    "pytest-benchmark>=5.3,<6",
+    "mypy>=2.4,<2.5",
+    "pandas-stubs>=3.0.5,<3.1",
+    "scipy-stubs>=1.17.1,<1.18",
+    # Test oracles: QuantLib (BSD-3) Heston/Bates/rough-Heston engines,
+    # py_lets_be_rational (MIT) implied vol, statsmodels (BSD-3) Diebold-Mariano.
+    "QuantLib==1.44",
+    "py_lets_be_rational==1.1.2",
+    "statsmodels>=0.14",
+]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
@@ -33,14 +51,21 @@ filterwarnings = [
     # The class-scoped-fixture form removed in pytest 10 must not come back.
     "error::pytest.PytestRemovedIn10Warning",
 ]
+markers = [
+    "property: Hypothesis property-based tests (tests/test_properties_*.py); the example budget comes from the HYPOTHESIS_PROFILE environment variable",
+    "slow: takes more than a few seconds; `make test-fast` deselects it",
+]
 
 # ── coverage (pytest --cov) ───────────────────────────────────────────────────
 [tool.coverage.run]
 source = ["joint_vol_calibration", "scripts", "dashboard"]
-omit = ["joint_vol_calibration/tests/*"]
+# Benchmarks (scripts/bench) run under pytest-benchmark, not in the suite.
+omit = ["joint_vol_calibration/tests/*", "scripts/bench/*"]
+branch = true
 
 [tool.coverage.report]
 skip_empty = true
+show_missing = true
 
 # ── ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -49,15 +74,71 @@ line-length = 110
 extend-exclude = ["docs", ".site-build"]
 
 [tool.ruff.lint]
-# Target rule set: real-bug rules only (unused/shadowed names, loop-variable
-# capture, blind excepts, silently swallowed errors); style is not checked.
-# `ruff check .` reports the backlog against it. CI gates only the subset that
-# is already clean and always a bug: `ruff check --select E9,F63,F7,F82 .`
-# (syntax errors, invalid comparisons, misplaced statements, undefined names).
-select = ["F", "E9", "B", "BLE", "S110", "PLW"]
+# A broad rule set: bugs (pyflakes, bugbear, blind excepts, pylint errors and
+# warnings, numpy/pandas pitfalls, naive datetimes), security (bandit), and
+# modernisation/simplification. The code predates most of it, so CI gates the
+# set against a committed per-file baseline instead of demanding zero:
+# scripts/ci/baseline_gate.py fails when any (file, rule) count grows and the
+# baseline (scripts/ci/ruff_baseline.json) may only shrink. `make lint` runs it.
+select = [
+    "F", "E", "W",          # pyflakes, pycodestyle
+    "B", "BLE",             # bugbear, blind except
+    "S",                    # bandit
+    "PLE", "PLW",           # pylint errors / warnings
+    "UP", "SIM", "C4", "PIE", "RET", "FURB", "PERF",
+    "RUF",                  # ruff-specific (unused noqa, mutable class defaults, ...)
+    "NPY", "PD",            # numpy (legacy RNG, NumPy 2 deprecations), pandas-vet
+    "DTZ",                  # timezone-naive datetimes (session dating is tz-sensitive)
+    "A", "ERA", "ISC", "TID", "T10", "EXE", "ICN", "LOG", "G", "PT", "I",
+]
 ignore = [
-    "B905",   # zip() without strict=: too noisy for the numerical code
+    "B905",     # zip() without strict=: too noisy for the numerical code
+    "RUF001",   # σ, κ, −, × in strings, docstrings and comments are deliberate
+    "RUF002",   #   notation, not confusable characters
+    "RUF003",
+    "PD011",    # .values: fires on dicts and numpy records, not only pandas
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"joint_vol_calibration/tests/*" = ["B011", "BLE", "S110"]
+# assert is how pytest checks; tests also unpickle the shipped artifacts and run
+# the project's own CLIs, by design.
+"joint_vol_calibration/tests/*" = ["B011", "BLE", "S110", "S101", "S301", "S603", "S607"]
+"scripts/bench/*" = ["S101", "S301", "S603"]
+# CI tools run fixed commands (git, python -m ruff/mypy, the README's
+# regeneration commands) and reproduce.py unpickles the repo's own artifacts.
+"scripts/ci/*" = ["S603", "S607"]
+"scripts/ci/reproduce.py" = ["S301"]
+
+# ── mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+files = ["joint_vol_calibration", "scripts", "dashboard"]
+# yfinance, hmmlearn, xgboost and sklearn ship no usable stubs; numpy, pandas
+# (pandas-stubs) and scipy (scipy-stubs) are checked.
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+# Default mode everywhere, gated against scripts/ci/mypy_baseline.json (counts
+# per file and error code; may only shrink). `make typecheck` runs the gate.
+
+# Strict (every flag --strict enables that mypy allows per module): the
+# implied-vol solver and the option-chain hygiene layer. These modules are not
+# in the baseline, so a single error there fails CI. (`strict = true` is a
+# global flag: inside an override it switches strict on for every module.)
+[[tool.mypy.overrides]]
+module = [
+    "joint_vol_calibration.models.implied_vol",
+    "joint_vol_calibration.data.option_chain",
+]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true

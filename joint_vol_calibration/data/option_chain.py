@@ -48,7 +48,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Callable, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, Tuple, TypeVar, Union
 
 import numpy as np
 import pandas as pd
@@ -57,13 +57,24 @@ from zoneinfo import ZoneInfo
 
 from joint_vol_calibration.data import database as _db
 
+if TYPE_CHECKING:                     # annotations only; no import at run time
+    from numpy.typing import ArrayLike  # anything np.asarray accepts (incl. pd.Series)
+
 logger = logging.getLogger(__name__)
 
 NY_TZ = ZoneInfo("America/New_York")
 
+# Inputs the session helpers accept: a date (datetime and pd.Timestamp are
+# subclasses) or anything pd.Timestamp parses, e.g. an ISO string.
+DateLike = Union[date, str, np.datetime64]
+# A recorded quote time: datetime / pd.Timestamp / ISO string; None, '' and NaN
+# (a float, from a missing DataFrame cell) mean "not recorded".
+QuoteTimeLike = Union[datetime, str, float, None]
+_T = TypeVar("_T")
+
 # ── Single source of truth for the calibration expiry grid ────────────────────
 # Target tenors (calendar days) of the SPX smile slices the joint fit uses.
-CAL_EXPIRY_TARGETS_DAYS: tuple = (14, 30, 60, 91, 180, 365)
+CAL_EXPIRY_TARGETS_DAYS: Tuple[int, ...] = (14, 30, 60, 91, 180, 365)
 CAL_MIN_EXPIRY_DAYS: int = 7           # never use an expiry closer than this
 CAL_EXPIRY_TOLERANCE: float = 0.5      # |days - target| <= 50% of target
 
@@ -91,7 +102,7 @@ _MINUTES_PER_YEAR = 365.0 * 24.0 * 60.0
 # wrappers keep this module's date-object API. A second, rule-based copy lived
 # here until C22 verification and disagreed on 9 days in 1995-2045.
 
-def _as_date(d) -> date:
+def _as_date(d: DateLike) -> date:
     if isinstance(d, datetime):
         return d.date()
     if isinstance(d, date):
@@ -99,28 +110,28 @@ def _as_date(d) -> date:
     return pd.Timestamp(d).date()
 
 
-def nyse_holidays(year: int) -> set:
+def nyse_holidays(year: int) -> set[date]:
     """Weekday NYSE closures of one calendar year (holidays + special closures)."""
     return {date.fromisoformat(h) for h in _db.nyse_holidays(f"{year}-01-01", f"{year}-12-31")}
 
 
-def is_nyse_session(d) -> bool:
+def is_nyse_session(d: DateLike) -> bool:
     """True if ``d`` is an NYSE trading day."""
     return bool(_db.is_nyse_session(_as_date(d)))
 
 
-def previous_session(d) -> date:
+def previous_session(d: DateLike) -> date:
     """Most recent NYSE session strictly before ``d``."""
     return date.fromisoformat(_db.previous_session(_as_date(d)))
 
 
-def session_on_or_before(d) -> date:
+def session_on_or_before(d: DateLike) -> date:
     """Most recent NYSE session on or before ``d`` (the session whose closing
     quotes a weekend/holiday snapshot holds)."""
     return date.fromisoformat(_db.session_on_or_before(_as_date(d)))
 
 
-def sessions_between(start, end) -> int:
+def sessions_between(start: DateLike, end: DateLike) -> int:
     """Number of NYSE sessions s with start < s <= end (0 when end <= start)."""
     return int(_db.sessions_between(_as_date(start), _as_date(end)))
 
@@ -150,18 +161,18 @@ def ny_date(now_utc: Optional[datetime] = None) -> date:
     return _now_et(now_utc).date()
 
 
-def next_session(d) -> date:
+def next_session(d: DateLike) -> date:
     """First NYSE session strictly after ``d``."""
     d = _as_date(d)
     return _db.nyse_sessions(d + timedelta(days=1), d + timedelta(days=14))[0].date()
 
 
-def session_close(session) -> datetime:
+def session_close(session: DateLike) -> datetime:
     """16:00 ET on ``session`` (New York, tz-aware): the default T origin."""
     return datetime.combine(_as_date(session), SESSION_CLOSE_ET, tzinfo=NY_TZ)
 
 
-def gth_window(session) -> tuple:
+def gth_window(session: DateLike) -> Tuple[datetime, datetime]:
     """(open, close) of the Cboe Global Trading Hours session that trades FOR
     ``session``: 20:15 ET on the calendar evening before it (Sunday evening
     for a Monday, Monday evening for a Tuesday after a Monday holiday) to
@@ -171,7 +182,7 @@ def gth_window(session) -> tuple:
             datetime.combine(s, GTH_CLOSE_ET, tzinfo=NY_TZ))
 
 
-def _as_instant(when) -> Optional[datetime]:
+def _as_instant(when: QuoteTimeLike) -> Optional[datetime]:
     """A quote time (datetime, pandas Timestamp or ISO string) as a tz-aware
     datetime; naive values are taken as UTC (database.utc_iso writes UTC).
     None/NaN/'' -> None."""
@@ -188,7 +199,7 @@ def _as_instant(when) -> Optional[datetime]:
     return ts.to_pydatetime()
 
 
-def t_origin(quote_time, session) -> datetime:
+def t_origin(quote_time: QuoteTimeLike, session: DateLike) -> datetime:
     """The New York time T is measured from, for quotes of ``session``
     observed at ``quote_time`` (UTC instant; ISO string or datetime).
 
@@ -210,7 +221,7 @@ def t_origin(quote_time, session) -> datetime:
     return qt if lo <= qt < hi else close
 
 
-def _chain_quote_time(raw: pd.DataFrame):
+def _chain_quote_time(raw: Optional[pd.DataFrame]) -> Optional[datetime]:
     """The quote time a stored chain records (options_snapshots.quote_time,
     ISO UTC): the latest non-empty value, or None (legacy snapshots)."""
     if raw is None or "quote_time" not in raw.columns:
@@ -219,7 +230,8 @@ def _chain_quote_time(raw: pd.DataFrame):
     return max(vals) if vals else None
 
 
-def year_fraction(session, expiry, settlement: str = "PM", origin=None) -> float:
+def year_fraction(session: DateLike, expiry: DateLike, settlement: str = "PM",
+                  origin: QuoteTimeLike = None) -> float:
     """Time from the T origin to expiry settlement, in years.
 
     ``origin`` None (the default) is the session's 16:00 ET close; otherwise
@@ -229,9 +241,11 @@ def year_fraction(session, expiry, settlement: str = "PM", origin=None) -> float
     change in between is not counted, as with the whole-day count). PM
     settlement is 16:00 ET on the expiry date, so from the close T =
     days/365 exactly; AM settlement (SPX monthlies, SOQ) is 09:30 ET, 6.5
-    hours earlier.
+    hours earlier. An ``origin`` that holds no time ('' or NaN, as a missing
+    quote_time cell reads) counts as None, the session close.
     """
-    if origin is None:
+    start_dt = None if origin is None else _as_instant(origin)
+    if start_dt is None:
         days = (_as_date(expiry) - _as_date(session)).days
         minutes = days * 1440.0
         if str(settlement).upper() == "AM":
@@ -240,7 +254,7 @@ def year_fraction(session, expiry, settlement: str = "PM", origin=None) -> float
         return minutes / _MINUTES_PER_YEAR
     settle_et = AM_SETTLE_ET if str(settlement).upper() == "AM" else PM_SETTLE_ET
     settle = datetime.combine(_as_date(expiry), settle_et)            # NY wall clock
-    start = _as_instant(origin).astimezone(NY_TZ).replace(tzinfo=None)
+    start = start_dt.astimezone(NY_TZ).replace(tzinfo=None)
     return (settle - start).total_seconds() / 60.0 / _MINUTES_PER_YEAR
 
 
@@ -261,13 +275,13 @@ def tbill_discount_to_cc(d: float, days: int = 91) -> float:
 # ── Expiry selection ──────────────────────────────────────────────────────────
 
 def select_calibration_expiries(
-    listed: Iterable,
-    session_date,
+    listed: Iterable[DateLike],
+    session_date: DateLike,
     targets: Sequence[int] = CAL_EXPIRY_TARGETS_DAYS,
     min_days: int = CAL_MIN_EXPIRY_DAYS,
     tolerance: float = CAL_EXPIRY_TOLERANCE,
     neighbours: int = 0,
-) -> list:
+) -> list[str]:
     """Pick one listed expiry per target tenor.
 
     For each target (in order) the listed expiry nearest to it in calendar
@@ -287,7 +301,7 @@ def select_calibration_expiries(
     exp = sorted({_as_date(e) for e in listed})
     days = {e: (e - sess).days for e in exp}
     eligible = [e for e in exp if days[e] >= min_days]
-    chosen = []
+    chosen: list[date] = []
     for tgt in targets:
         cands = [e for e in eligible if e not in chosen
                  and abs(days[e] - tgt) <= tolerance * tgt]
@@ -305,7 +319,8 @@ def select_calibration_expiries(
 
 # ── Black-76 helpers (vectorised) ─────────────────────────────────────────────
 
-def black76_price(F, K, T, D, vol, is_call):
+def black76_price(F: ArrayLike, K: ArrayLike, T: ArrayLike, D: ArrayLike, vol: ArrayLike,
+                  is_call: Union[bool, np.ndarray]) -> np.ndarray:
     """Discounted Black-76 price, vectorised."""
     F, K, T, D, vol = (np.asarray(x, dtype=float) for x in (F, K, T, D, vol))
     sd = np.maximum(vol * np.sqrt(np.maximum(T, 0.0)), 1e-300)
@@ -313,19 +328,23 @@ def black76_price(F, K, T, D, vol, is_call):
     d2 = d1 - sd
     call = D * (F * ndtr(d1) - K * ndtr(d2))
     put = D * (K * ndtr(-d2) - F * ndtr(-d1))
-    return np.where(np.asarray(is_call, dtype=bool), call, put)
+    out: np.ndarray = np.where(np.asarray(is_call, dtype=bool), call, put)
+    return out
 
 
-def black76_vega(F, K, T, D, vol):
+def black76_vega(F: ArrayLike, K: ArrayLike, T: ArrayLike, D: ArrayLike,
+                 vol: ArrayLike) -> np.ndarray:
     """dPrice/dvol (per unit vol, i.e. per 100 vol points), vectorised."""
     F, K, T, D, vol = (np.asarray(x, dtype=float) for x in (F, K, T, D, vol))
     sd = np.maximum(vol * np.sqrt(np.maximum(T, 0.0)), 1e-300)
     d1 = np.log(F / K) / sd + 0.5 * sd
-    return D * F * np.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi) * np.sqrt(T)
+    out: np.ndarray = D * F * np.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi) * np.sqrt(T)
+    return out
 
 
-def black76_implied_vol(price, F, K, T, D, is_call,
-                        lo: float = 1e-4, hi: float = 5.0, n_iter: int = 80):
+def black76_implied_vol(price: ArrayLike, F: ArrayLike, K: ArrayLike, T: ArrayLike,
+                        D: ArrayLike, is_call: Union[bool, np.ndarray],
+                        lo: float = 1e-4, hi: float = 5.0, n_iter: int = 80) -> np.ndarray:
     """Vectorised Black-76 implied vol by bisection on the OTM-equivalent price.
 
     The price is first mapped by parity to the out-of-the-money option at the
@@ -353,13 +372,13 @@ def black76_implied_vol(price, F, K, T, D, is_call,
         a = np.where(fm < 0, m, a)
         b = np.where(fm < 0, b, m)
     iv = 0.5 * (a + b)
-    iv = np.where(ok & (iv > lo * 1.0001), iv, np.nan)
-    return iv
+    out: np.ndarray = np.where(ok & (iv > lo * 1.0001), iv, np.nan)
+    return out
 
 
 # ── Root / settlement handling ────────────────────────────────────────────────
 
-def contract_root(symbol) -> str:
+def contract_root(symbol: object) -> str:
     """OCC root of a Yahoo contract symbol, e.g. 'SPXW261016C07710000' -> 'SPXW'."""
     s = str(symbol or "")
     i = 0
@@ -413,7 +432,7 @@ def _normalise(raw: pd.DataFrame) -> pd.DataFrame:
         out["yahoo_iv"] = np.nan
     if "contractSymbol" in df.columns or "contract_symbol" in df.columns:
         out["contract_symbol"] = df.get("contractSymbol", df.get("contract_symbol"))
-    out["volume"] = pd.to_numeric(df.get("volume"), errors="coerce") if "volume" in df.columns else np.nan
+    out["volume"] = pd.to_numeric(df["volume"], errors="coerce") if "volume" in df.columns else np.nan
     oi = "openInterest" if "openInterest" in df.columns else "open_interest"
     out["open_interest"] = pd.to_numeric(df[oi], errors="coerce") if oi in df.columns else np.nan
     out = out.dropna(subset=["strike"])
@@ -434,7 +453,7 @@ def _resolve_settlement(df: pd.DataFrame) -> pd.DataFrame:
 # ── Parity forward / discount ─────────────────────────────────────────────────
 
 def _parity_fit(pairs: pd.DataFrame, T: float, spot: float,
-                r_ref: Optional[float]) -> dict:
+                r_ref: Optional[float]) -> dict[str, Any]:
     """Estimate (F, D) for one expiry from two-sided C/P pairs at common strikes.
 
     (C - P) = D*F - D*K is linear in K. Weighted least squares on near-ATM
@@ -460,7 +479,7 @@ def _parity_fit(pairs: pd.DataFrame, T: float, spot: float,
     if len(Kn) < 2:
         return {"ok": False, "reason": "fewer than 2 parity pairs"}
 
-    def wls(Kx, yx, ux):
+    def wls(Kx: np.ndarray, yx: np.ndarray, ux: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         w = 1.0 / ux
         A = np.vstack([np.ones_like(Kx), Kx]).T
         coef, *_ = np.linalg.lstsq(A * w[:, None], yx * w, rcond=None)
@@ -538,7 +557,7 @@ class CleanChain:
     """
     quotes: pd.DataFrame
     carry: pd.DataFrame
-    diagnostics: dict = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     ok: bool = True
     reason: str = "ok"
 
@@ -550,15 +569,15 @@ _QUOTE_COLS = ["expiry", "strike", "right", "root", "settlement", "bid", "ask",
 
 
 def clean_option_chain(
-    raw: pd.DataFrame,
-    session_date,
+    raw: Optional[pd.DataFrame],
+    session_date: DateLike,
     spot: float,
-    r_ref: Optional[float] = None,
+    r_ref: float | Callable[[float], float] | None = None,
     max_rel_spread: float = MAX_REL_SPREAD,
     min_two_sided_share: float = MIN_TWO_SIDED_SHARE,
     atm_band: float = ATM_GATE_BAND,
     min_days: int = CAL_MIN_EXPIRY_DAYS,
-    quote_time=None,
+    quote_time: QuoteTimeLike = None,
 ) -> CleanChain:
     """Clean a raw SPX chain into quotes the calibrator can trust.
 
@@ -571,8 +590,11 @@ def clean_option_chain(
                    closed session when they were downloaded)
     spot         : SPX close of that session (used for the near-ATM bands
                    and to express carry as q_T; pricing uses F_T, D_T)
-    r_ref        : reference continuously-compounded rate (T-bill), used only
-                   when an expiry's parity discount is implausible
+    r_ref        : reference continuously-compounded rate, used only when an
+                   expiry's parity discount is implausible: a number (one rate
+                   for every expiry, e.g. ^IRX) or a function r(T) of the
+                   expiry's T in years (a term curve, e.g.
+                   rates.ZeroCurve.zero_rate), evaluated at each expiry
     quote_time   : when the quotes were observed (UTC; ISO string or
                    datetime). None: the frame's ``quote_time`` column if it
                    has one (stored snapshots), else unknown. It sets the T
@@ -586,7 +608,8 @@ def clean_option_chain(
     origin = t_origin(qt, sess)
     gth = origin != session_close(sess)
     diag = {"session": str(sess), "n_raw": 0 if raw is None else int(len(raw)),
-            "r_ref": None if r_ref is None else float(r_ref),
+            "r_ref": (None if r_ref is None else "r(T) per expiry" if callable(r_ref)
+                      else float(r_ref)),
             "quote_time": None if qt is None else _db.utc_iso(qt),
             "t_origin": origin.isoformat(timespec="seconds"),
             "t_origin_basis": "quote_time (Cboe GTH book)" if gth else "session close 16:00 ET"}
@@ -642,7 +665,8 @@ def clean_option_chain(
         pairs = pd.concat([c, p], axis=1, join="inner").reset_index()
         if len(pairs) < 2:
             continue
-        fit = _parity_fit(pairs, T, spot, r_ref)
+        r_ref_T = float(r_ref(T)) if callable(r_ref) else r_ref
+        fit = _parity_fit(pairs, T, spot, r_ref_T)
         if not fit["ok"]:
             logger.info("  expiry %s dropped: %s", exp, fit["reason"])
             continue
@@ -723,9 +747,13 @@ def observed_quotes(raw: pd.DataFrame, clean: Optional[CleanChain] = None,
 
 # ── Live download ─────────────────────────────────────────────────────────────
 
-def _with_retries(fn, what: str, attempts: int, pause: float, sleep: Callable):
+def _with_retries(fn: Callable[[], _T], what: str, attempts: int, pause: float,
+                  sleep: Callable[[float], object]) -> _T:
     """fn() with up to ``attempts`` tries (Yahoo fails transiently: empty JSON,
-    429s); the last exception propagates."""
+    429s); the last exception propagates. ``attempts`` < 1 is an error (it
+    used to return None without calling fn)."""
+    if attempts < 1:
+        raise ValueError(f"attempts must be >= 1, got {attempts}")
     for i in range(attempts):
         try:
             return fn()
@@ -734,17 +762,18 @@ def _with_retries(fn, what: str, attempts: int, pause: float, sleep: Callable):
                 raise
             logger.info("  %s failed (%s); retrying in %.0fs", what, exc, pause * (i + 1))
             sleep(pause * (i + 1))
+    raise AssertionError("unreachable: the last attempt returns or raises")
 
 
 def fetch_spx_chain(
-    session_date,
-    ticker_factory: Optional[Callable] = None,
+    session_date: DateLike,
+    ticker_factory: Optional[Callable[[str], Any]] = None,
     symbols: Sequence[str] = ("^SPX", "^GSPC"),
     neighbours: int = 1,
     attempts: int = 3,
     pause: float = 2.0,
-    sleep: Optional[Callable] = None,
-) -> tuple:
+    sleep: Optional[Callable[[float], object]] = None,
+) -> Tuple[pd.DataFrame, dict[str, Any]]:
     """Download only the calibration expiries (plus neighbours) of the SPX chain.
 
     Returns (raw DataFrame, meta dict with 'listed', 'requested', 'failed',
@@ -759,8 +788,9 @@ def fetch_spx_chain(
     if sleep is None:
         import time as _time
         sleep = _time.sleep
-    meta = {"listed": [], "requested": [], "failed": [], "symbol": None}
-    tk, listed = None, []
+    meta: dict[str, Any] = {"listed": [], "requested": [], "failed": [], "symbol": None}
+    tk: Any = None                    # a yfinance Ticker (untyped)
+    listed: list[str] = []
     for sym in symbols:
         tk = ticker_factory(sym)
         listed = list(_with_retries(lambda: getattr(tk, "options", None) or [],

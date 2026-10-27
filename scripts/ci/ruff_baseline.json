@@ -1,0 +1,469 @@
+{
+ "counts": {
+  "dashboard/app.py": {
+   "BLE001": 28,
+   "E501": 1,
+   "RUF012": 1,
+   "S112": 1
+  },
+  "dashboard/freeze_site.py": {
+   "E501": 1
+  },
+  "dashboard/make_og_image.py": {
+   "ICN001": 1
+  },
+  "joint_vol_calibration/backtest/backtest_engine.py": {
+   "BLE001": 1,
+   "E501": 6,
+   "ERA001": 1,
+   "I001": 2,
+   "ICN001": 1,
+   "ISC004": 20,
+   "NPY002": 1,
+   "PLW2901": 1,
+   "RUF012": 2,
+   "RUF046": 2,
+   "RUF059": 3,
+   "S301": 1,
+   "SIM108": 1,
+   "UP006": 37,
+   "UP035": 3,
+   "UP037": 6,
+   "UP045": 28
+  },
+  "joint_vol_calibration/backtest/c22_bridge.py": {
+   "BLE001": 3,
+   "E501": 1,
+   "I001": 1,
+   "UP006": 9,
+   "UP035": 2,
+   "UP045": 5
+  },
+  "joint_vol_calibration/backtest/delta_hedger.py": {
+   "BLE001": 1,
+   "C420": 1,
+   "E501": 1,
+   "I001": 2,
+   "ICN001": 1,
+   "RET504": 2,
+   "S301": 1,
+   "UP006": 2,
+   "UP035": 1,
+   "UP045": 10
+  },
+  "joint_vol_calibration/backtest/report_generator.py": {
+   "BLE001": 2,
+   "DTZ005": 2,
+   "E501": 8,
+   "I001": 2,
+   "ICN001": 1,
+   "ISC004": 3,
+   "PERF102": 1,
+   "RET504": 1,
+   "UP006": 4,
+   "UP035": 1,
+   "UP045": 6
+  },
+  "joint_vol_calibration/backtest/run_backtest.py": {
+   "BLE001": 1,
+   "E402": 4,
+   "E501": 3,
+   "I001": 1,
+   "UP006": 9,
+   "UP035": 4,
+   "UP045": 2
+  },
+  "joint_vol_calibration/calibration/joint_calibrator.py": {
+   "BLE001": 3,
+   "RUF005": 4,
+   "RUF012": 1,
+   "S301": 1
+  },
+  "joint_vol_calibration/calibration/quintic_calibrator.py": {
+   "BLE001": 1,
+   "I001": 1,
+   "PLW1510": 2,
+   "RUF059": 1,
+   "S110": 1,
+   "S607": 2,
+   "UP006": 1,
+   "UP031": 1,
+   "UP035": 1,
+   "UP045": 8
+  },
+  "joint_vol_calibration/data/cboe_downloader.py": {
+   "BLE001": 1,
+   "DTZ007": 1,
+   "E501": 1
+  },
+  "joint_vol_calibration/data/database.py": {
+   "B904": 1,
+   "BLE001": 1,
+   "DTZ007": 1,
+   "E501": 4,
+   "ISC004": 1,
+   "PD010": 1,
+   "PERF401": 3,
+   "PLW2901": 3,
+   "RUF012": 1,
+   "S110": 1,
+   "S608": 7
+  },
+  "joint_vol_calibration/data/option_chain.py": {
+   "B023": 2,
+   "BLE001": 1,
+   "I001": 1,
+   "PLW2901": 3,
+   "RUF005": 1,
+   "RUF046": 5,
+   "UP006": 4,
+   "UP007": 4,
+   "UP017": 2,
+   "UP035": 2,
+   "UP045": 12
+  },
+  "joint_vol_calibration/data/pipeline.py": {
+   "BLE001": 18,
+   "E501": 4,
+   "S101": 4
+  },
+  "joint_vol_calibration/data/yf_downloader.py": {
+   "BLE001": 3,
+   "DTZ007": 1,
+   "ERA001": 1,
+   "PD002": 26,
+   "PLW2901": 1,
+   "SIM108": 1,
+   "UP045": 6
+  },
+  "joint_vol_calibration/greeks/risk_monitor.py": {
+   "BLE001": 1,
+   "I001": 2,
+   "ICN001": 1,
+   "PERF401": 1,
+   "PLW1510": 1,
+   "RUF046": 3,
+   "S301": 1,
+   "S607": 1,
+   "UP006": 2,
+   "UP017": 1,
+   "UP035": 2,
+   "UP037": 1,
+   "UP045": 24
+  },
+  "joint_vol_calibration/models/heston.py": {
+   "S301": 2,
+   "SIM300": 2,
+   "UP031": 5
+  },
+  "joint_vol_calibration/models/implied_vol.py": {
+   "UP006": 8,
+   "UP007": 10,
+   "UP035": 2,
+   "UP045": 1
+  },
+  "joint_vol_calibration/models/nn_pricer.py": {
+   "B023": 4,
+   "BLE001": 1,
+   "C408": 1,
+   "E501": 2,
+   "E702": 8,
+   "NPY002": 2,
+   "PLW1510": 1,
+   "RUF046": 4,
+   "RUF100": 1,
+   "S607": 1,
+   "SIM300": 2,
+   "UP006": 5,
+   "UP017": 1,
+   "UP035": 1,
+   "UP045": 27
+  },
+  "joint_vol_calibration/models/pdv.py": {
+   "BLE001": 3,
+   "C408": 1,
+   "FURB171": 1,
+   "I001": 2,
+   "ISC004": 4,
+   "PLW0406": 1,
+   "PLW2901": 1,
+   "RET504": 1,
+   "RUF012": 4,
+   "RUF046": 2,
+   "S301": 1,
+   "UP006": 6,
+   "UP035": 1,
+   "UP045": 29
+  },
+  "joint_vol_calibration/models/quintic_ou.py": {
+   "E741": 1,
+   "RUF005": 2,
+   "RUF007": 1,
+   "RUF046": 2,
+   "UP006": 10,
+   "UP035": 2,
+   "UP045": 3
+  },
+  "joint_vol_calibration/signals/regime_classifier.py": {
+   "BLE001": 2,
+   "E702": 2,
+   "I001": 2,
+   "ICN001": 1,
+   "PD010": 1,
+   "RUF005": 2,
+   "RUF012": 1,
+   "RUF046": 7,
+   "S101": 1,
+   "S301": 3,
+   "UP006": 26,
+   "UP031": 1,
+   "UP035": 3,
+   "UP045": 55
+  },
+  "joint_vol_calibration/signals/regime_pdv.py": {
+   "BLE001": 1,
+   "RET504": 1,
+   "S301": 1,
+   "UP006": 17,
+   "UP035": 3,
+   "UP045": 11
+  },
+  "joint_vol_calibration/signals/signal_engine.py": {
+   "BLE001": 1,
+   "ERA001": 1,
+   "I001": 1,
+   "ICN001": 1,
+   "UP045": 28
+  },
+  "joint_vol_calibration/tests/test_backtest_accounting.py": {
+   "C420": 1,
+   "E731": 1,
+   "PIE807": 1,
+   "PT006": 1,
+   "PT011": 3,
+   "PT018": 11,
+   "RUF007": 1,
+   "RUF012": 1,
+   "RUF059": 10,
+   "SIM300": 1
+  },
+  "joint_vol_calibration/tests/test_backtest_engine.py": {
+   "I001": 4,
+   "PT018": 4,
+   "RUF059": 2
+  },
+  "joint_vol_calibration/tests/test_backtest_reproducibility.py": {
+   "C420": 1,
+   "I001": 3,
+   "PT018": 1,
+   "RUF005": 1
+  },
+  "joint_vol_calibration/tests/test_c21_audit_fixes.py": {
+   "I001": 1,
+   "PT018": 2
+  },
+  "joint_vol_calibration/tests/test_cboe_downloader.py": {
+   "E501": 4
+  },
+  "joint_vol_calibration/tests/test_cloud_refresh.py": {
+   "F401": 1,
+   "PT006": 2,
+   "PT018": 23,
+   "RUF005": 1,
+   "UP017": 11
+  },
+  "joint_vol_calibration/tests/test_dashboard.py": {
+   "B023": 6,
+   "E501": 12,
+   "PT018": 11,
+   "RUF005": 1
+  },
+  "joint_vol_calibration/tests/test_data_layer.py": {
+   "E501": 10,
+   "ERA001": 1,
+   "RUF005": 3,
+   "RUF012": 3
+  },
+  "joint_vol_calibration/tests/test_data_pipeline.py": {
+   "I001": 1,
+   "PT018": 1,
+   "SIM105": 2
+  },
+  "joint_vol_calibration/tests/test_delta_hedger.py": {
+   "C408": 1,
+   "E731": 1,
+   "F841": 1,
+   "I001": 2,
+   "PT018": 1,
+   "RET504": 1,
+   "RUF005": 7,
+   "RUF059": 12
+  },
+  "joint_vol_calibration/tests/test_heston.py": {
+   "C408": 9,
+   "I001": 1,
+   "PT006": 3,
+   "PT011": 2,
+   "PT018": 4,
+   "PT030": 2
+  },
+  "joint_vol_calibration/tests/test_heston_reference.py": {
+   "B023": 6,
+   "E501": 40,
+   "E731": 5,
+   "NPY201": 1,
+   "RUF005": 1,
+   "RUF007": 2,
+   "RUF012": 1,
+   "RUF059": 8
+  },
+  "joint_vol_calibration/tests/test_implied_vol.py": {
+   "C408": 1,
+   "PT006": 3,
+   "PT018": 5,
+   "RUF059": 1
+  },
+  "joint_vol_calibration/tests/test_infra_config.py": {
+   "FURB167": 4,
+   "PT018": 7
+  },
+  "joint_vol_calibration/tests/test_joint_calibrator.py": {
+   "PERF401": 1,
+   "RUF005": 1,
+   "RUF012": 1
+  },
+  "joint_vol_calibration/tests/test_lookahead.py": {
+   "C401": 1,
+   "C408": 2,
+   "I001": 1,
+   "NPY002": 13,
+   "PERF401": 1,
+   "PT011": 3,
+   "PT018": 1,
+   "PT022": 1,
+   "RUF012": 1,
+   "RUF059": 1
+  },
+  "joint_vol_calibration/tests/test_nn_pricer.py": {
+   "C408": 10,
+   "E501": 1,
+   "E702": 2,
+   "I001": 2,
+   "PT006": 1,
+   "PT011": 1,
+   "PT018": 22,
+   "PT030": 1,
+   "RUF005": 1,
+   "RUF012": 2,
+   "RUF043": 1,
+   "RUF059": 3
+  },
+  "joint_vol_calibration/tests/test_option_chain.py": {
+   "B007": 1,
+   "PT006": 2,
+   "PT018": 6,
+   "UP017": 6
+  },
+  "joint_vol_calibration/tests/test_pdv.py": {
+   "E702": 1,
+   "ERA001": 1,
+   "I001": 1,
+   "PT011": 2,
+   "PT018": 4,
+   "RUF059": 2
+  },
+  "joint_vol_calibration/tests/test_pdv21_wiring.py": {
+   "PT011": 1,
+   "RUF059": 1
+  },
+  "joint_vol_calibration/tests/test_quintic_calibrator.py": {
+   "E702": 2,
+   "E731": 1,
+   "PT006": 1,
+   "PT018": 3,
+   "RUF059": 2
+  },
+  "joint_vol_calibration/tests/test_quintic_ou.py": {
+   "E702": 2,
+   "I001": 1,
+   "PT018": 3,
+   "RUF007": 1,
+   "RUF059": 1
+  },
+  "joint_vol_calibration/tests/test_rates.py": {
+   "I001": 2,
+   "S324": 1
+  },
+  "joint_vol_calibration/tests/test_regime_classifier.py": {
+   "E702": 5,
+   "I001": 2,
+   "PD003": 1,
+   "PT011": 3,
+   "PT018": 3,
+   "RUF059": 5
+  },
+  "joint_vol_calibration/tests/test_regime_pdv.py": {
+   "E402": 5,
+   "F401": 1,
+   "I001": 2,
+   "NPY201": 1,
+   "PT018": 6
+  },
+  "joint_vol_calibration/tests/test_risk_monitor.py": {
+   "C408": 1,
+   "I001": 1,
+   "PLW1510": 2,
+   "PT018": 11,
+   "RUF012": 1,
+   "RUF046": 1,
+   "SIM300": 1
+  },
+  "joint_vol_calibration/tests/test_shipped_artifacts.py": {
+   "PT018": 1
+  },
+  "joint_vol_calibration/tests/test_signal_engine.py": {
+   "E702": 2,
+   "I001": 1,
+   "NPY002": 1,
+   "PT011": 1,
+   "PT018": 8,
+   "RET504": 2,
+   "RUF007": 1
+  },
+  "scripts/backfill_calibration_provenance.py": {
+   "EXE001": 1,
+   "RUF010": 1,
+   "S301": 1
+  },
+  "scripts/backfill_tbill_history.py": {
+   "EXE001": 1,
+   "I001": 2
+  },
+  "scripts/cloud_refresh.py": {
+   "BLE001": 8,
+   "DTZ011": 2,
+   "E501": 1,
+   "EXE001": 1,
+   "F401": 1,
+   "FURB162": 1,
+   "ISC004": 6,
+   "PLW1510": 1,
+   "RUF005": 1,
+   "UP017": 3
+  },
+  "scripts/heston_quintic_baseline.py": {
+   "BLE001": 1,
+   "EXE001": 1,
+   "FURB192": 1,
+   "I001": 1,
+   "PLW1510": 1,
+   "RET504": 1,
+   "S301": 2,
+   "S607": 1,
+   "UP017": 1
+  }
+ },
+ "tool": "ruff",
+ "total": 1295,
+ "version": "ruff 0.17.1"
+}

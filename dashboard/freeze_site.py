@@ -5,18 +5,21 @@ The dashboard (app.py) is a read-only view of data_store/, so it renders
 deterministically. This script drives Flask's test client over the routes in
 app.ROUTES, rewrites the absolute nav links to relative .html (so the pages work
 both at navnoorbawa.me and the github.io project URL), and writes the CNAME,
-.nojekyll, robots.txt, sitemap.xml and 404 page GitHub Pages needs.
+.nojekyll, robots.txt, sitemap.xml, the 404 page and a redirect page at each
+retired URL (app.LEGACY_REDIRECTS: greeks.html -> risk.html, backtest.html ->
+research.html).
 
-It FAILS CLOSED: if any page returns a non-200 status, contains a traceback, or
-reports a loader error (app.py sets the X-Dashboard-Loader-Errors header and
-renders a red error banner when an input fails to load), nothing is written and
-the script exits 1. scripts/cloud_refresh.py then stops before the deploy step,
-so the previous good build stays live instead of a page with missing data.
-
-The vendored assets under dashboard/static (Chart.js) are copied to
-<out>/static. The build also fails if a page references a static file that
-does not exist, or if the vendored Chart.js no longer matches the SRI hash the
-pages carry (a browser would refuse to run it).
+It FAILS CLOSED: nothing is written and the script exits 1 if any page
+  * returns a non-200 status, contains a traceback, or reports a loader error
+    (app.py sets the X-Dashboard-Loader-Errors header and renders a red banner
+    when an input fails to load or an artifact breaks its contract);
+  * references a static file that does not exist;
+  * loads a script, stylesheet or font from another origin;
+  * carries an inline executable <script> (the pages declare a CSP of
+    script-src 'self'; only type="application/json" data blocks are inline);
+or if a vendored file under dashboard/static/vendor no longer matches the SRI
+hash the pages carry (app.VENDORED). scripts/cloud_refresh.py then stops before
+the deploy step, so the previous good build stays live.
 
 Stale inputs (age in NYSE sessions past app.STALE_WARN_SESSIONS) do not block
 the build — the pages carry their own banners — but are echoed as GitHub
@@ -40,20 +43,42 @@ from typing import Any
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(ROOT, "dashboard", "static")
 
+# The 404 page uses the site's palette inline (it must work at any path depth,
+# so it does not depend on the relative static/ files).
 _404_HTML = (
     "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>404 · SPX/VIX Vol System</title>"
-    "<link rel='icon' href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%2300ff88' stroke-width='3' stroke-linecap='round'/></svg>\">"
-    "<style>html,body{height:100%;margin:0}body{background:#0a0a0a;color:#e8e8e8;"
-    "font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;"
-    "align-items:center;justify-content:center;text-align:center}"
-    "h1{font-size:72px;margin:0;color:#00ff88}p{color:#8a8a8a}"
-    "a{color:#00ff88;text-decoration:none;font-weight:700}</style></head>"
-    "<body><main><h1>404</h1>"
-    "<p>That page isn't part of the vol system.</p>"
-    "<p><a href='/'>← Back to the dashboard</a></p></main></body></html>"
+    "<meta http-equiv='Content-Security-Policy' "
+    "content=\"default-src 'self'; style-src 'unsafe-inline'; img-src data:\">"
+    "<meta name='robots' content='noindex'>"
+    "<title>Not found · SPX/VIX Vol Research</title>"
+    "<link rel='icon' href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%23111418'/><path d='M5 9 Q16 29 27 9' fill='none' stroke='%238abbff' stroke-width='3' stroke-linecap='round'/></svg>\">"
+    "<style>html,body{height:100%;margin:0}body{background:#111418;color:#e5e8eb;"
+    "font:14px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;display:flex;"
+    "align-items:center;justify-content:center;text-align:center;padding:16px}"
+    "main{max-width:420px;border:1px solid #2f343c;border-radius:3px;background:#1c2127;padding:24px 28px}"
+    "h1{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#abb3bf;margin:0 0 8px}"
+    "p{color:#abb3bf;margin:6px 0}code{font-family:ui-monospace,Menlo,monospace;color:#e5e8eb}"
+    "a{color:#8abbff}</style></head>"
+    "<body><main><h1>404 · not found</h1>"
+    "<p>That page is not part of this site.</p>"
+    "<p><a href='/'>Overview</a> · <a href='/surface.html'>Surface</a> · "
+    "<a href='/calibration.html'>Calibration</a> · <a href='/risk.html'>Risk</a> · "
+    "<a href='/research.html'>Research</a> · <a href='/corrections.html'>Corrections</a> · "
+    "<a href='/model-risk.html'>Model Risk</a></p></main></body></html>"
 )
+
+
+def redirect_html(target: str, canonical: str) -> str:
+    """A static redirect for a retired page URL (GitHub Pages has no server redirects)."""
+    return (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        f"<meta http-equiv='refresh' content='0; url={target}'>"
+        f"<link rel='canonical' href='{canonical}'><meta name='robots' content='noindex'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>Moved</title></head><body style='background:#111418;color:#e5e8eb;font:14px system-ui'>"
+        f"<p>This page moved to <a style='color:#8abbff' href='{target}'>{target}</a>.</p></body></html>"
+    )
 
 
 def load_app(root: str = ROOT) -> Any:
@@ -67,6 +92,15 @@ def load_app(root: str = ROOT) -> Any:
     return mod
 
 
+def _rewrites(mod: Any) -> list[tuple[str, str]]:
+    """Absolute route links -> relative file names (with and without a #fragment)."""
+    out = []
+    for route, fname in mod.ROUTES.items():
+        out.append((f'href="{route}"', f'href="{fname}"'))
+        out.append((f'href="{route}#', f'href="{fname}#'))
+    return out
+
+
 def render_pages(mod: Any) -> tuple[dict, list[str], list[str]]:
     """Render every route. Returns (pages, problems, warnings).
 
@@ -74,7 +108,7 @@ def render_pages(mod: Any) -> tuple[dict, list[str], list[str]]:
     means the site must not be published.
     """
     client = mod.app.test_client()
-    rewrites = [(f'href="{route}"', f'href="{fname}"') for route, fname in mod.ROUTES.items()]
+    rewrites = _rewrites(mod)
     pages, problems, warnings = {}, [], []
     for route, fname in mod.ROUTES.items():
         resp = client.get(route)
@@ -93,6 +127,7 @@ def render_pages(mod: Any) -> tuple[dict, list[str], list[str]]:
         elif n_err != "0":
             page_problems.append(
                 f"{n_err} loader error(s): {resp.headers.get('X-Dashboard-Error-Components', '?')}")
+        page_problems += page_policy_problems(html)
         stale = resp.headers.get("X-Dashboard-Stale")
         if stale:
             warnings.append(f"{route}: stale inputs (NYSE sessions old): {stale}")
@@ -106,26 +141,53 @@ def render_pages(mod: Any) -> tuple[dict, list[str], list[str]]:
     return pages, problems, warnings
 
 
+_EXTERNAL = re.compile(r"<(?:script|link|img|iframe|source)\b[^>]*\b(?:src|href)="
+                       r"\"(?:https?:)?//[^\"]+\"[^>]*>", re.IGNORECASE)
+_SCRIPT = re.compile(r"<script\b([^>]*)>", re.IGNORECASE)
+
+
+def page_policy_problems(html: str) -> list[str]:
+    """Third-party resources or inline executable scripts in a rendered page."""
+    out = []
+    for tag in _EXTERNAL.findall(html):
+        if re.search(r'rel="(canonical|alternate)"', tag):
+            continue
+        out.append(f"loads a resource from another origin: {tag[:120]}")
+    for attrs in _SCRIPT.findall(html):
+        if "src=" in attrs:
+            continue
+        if 'type="application/json"' not in attrs:
+            out.append(f"inline executable <script{attrs}> (the CSP allows script-src 'self' only)")
+    return out
+
+
 def sri_sha384(path: str) -> str:
     """Subresource-integrity value ('sha384-<base64>') of a file."""
     with open(path, "rb") as fh:
         return "sha384-" + base64.b64encode(hashlib.sha384(fh.read()).digest()).decode()
 
 
+def _static_path(ref: str) -> str:
+    return os.path.join(STATIC, os.path.relpath(ref.split("?", 1)[0].split("#", 1)[0], "static"))
+
+
 def check_static(mod: Any, pages: dict) -> list[str]:
     """Problems with the static assets the rendered pages reference."""
     problems = []
-    chartjs = getattr(mod, "CHARTJS", None)
-    if chartjs:
-        local = os.path.join(STATIC, os.path.relpath(chartjs["src"], "static"))
+    for name, v in getattr(mod, "VENDORED", {}).items():
+        local = _static_path(v["src"])
         if not os.path.exists(local):
-            problems.append(f"vendored Chart.js missing: {local}")
-        elif sri_sha384(local) != chartjs["sri"]:
-            problems.append(f"vendored Chart.js does not match its SRI hash ({chartjs['sri']})")
+            problems.append(f"vendored {name} missing: {local}")
+        elif sri_sha384(local) != v["sri"]:
+            problems.append(f"vendored {name} does not match its SRI hash ({v['sri']})")
     for route, page in pages.items():
-        for ref in sorted(set(re.findall(r'(?:src|href)="(static/[^"]+)"', page["html"]))):
-            if not os.path.exists(os.path.join(STATIC, os.path.relpath(ref, "static"))):
-                problems.append(f"{route}: references missing static file {ref}")
+        refs = sorted(set(re.findall(r'(?:src|href|data-src)="(static/[^"]+)"', page["html"])))
+        problems.extend(f"{route}: references missing static file {ref}"
+                        for ref in refs if not os.path.exists(_static_path(ref)))
+        for name, v in getattr(mod, "VENDORED", {}).items():
+            tags = re.finditer(rf'<script[^>]+src="{re.escape(v["src"])}"[^>]*>', page["html"])
+            problems.extend(f"{route}: {name} is loaded without its integrity hash"
+                            for m in tags if f'integrity="{v["sri"]}"' not in m.group(0))
     return problems
 
 
@@ -150,6 +212,9 @@ def write_site(out: str, mod: Any, pages: dict) -> None:
     for page in pages.values():
         with open(os.path.join(out, page["file"]), "w") as f:
             f.write(page["html"])
+    for old, new in getattr(mod, "LEGACY_REDIRECTS", {}).items():
+        with open(os.path.join(out, old), "w") as f:
+            f.write(redirect_html(new, mod.SITE_URL + new))
     with open(os.path.join(out, "CNAME"), "w") as f:
         f.write("navnoorbawa.me\n")
     with open(os.path.join(out, ".nojekyll"), "w") as f:
@@ -158,10 +223,9 @@ def write_site(out: str, mod: Any, pages: dict) -> None:
         f.write(f"User-agent: *\nAllow: /\nSitemap: {mod.SITE_URL}sitemap.xml\n")
     with open(os.path.join(out, "sitemap.xml"), "w") as f:
         f.write(sitemap_xml(mod, pages))
-    # Branded 404 — GitHub Pages serves /404.html on unknown paths
     with open(os.path.join(out, "404.html"), "w") as f:
         f.write(_404_HTML)
-    # Vendored assets (Chart.js), served from the same origin as the pages
+    # Vendored and own assets, served from the same origin as the pages
     if os.path.isdir(STATIC):
         shutil.copytree(STATIC, os.path.join(out, "static"), dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", ".*"))
@@ -189,7 +253,8 @@ def freeze(out: str, mod: Any = None) -> int:
         print(f"NOT WRITTEN: {len(problems)} problem(s); nothing was written to {out}")
         return 1
     write_site(out, mod, pages)
-    print(f"WROTE {len(pages)} pages + static/, CNAME, .nojekyll, robots.txt, sitemap.xml, 404.html -> {out}")
+    print(f"WROTE {len(pages)} pages + {len(getattr(mod, 'LEGACY_REDIRECTS', {}))} redirects + static/, "
+          f"CNAME, .nojekyll, robots.txt, sitemap.xml, 404.html -> {out}")
     return 0
 
 

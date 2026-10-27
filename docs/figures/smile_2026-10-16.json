@@ -1,0 +1,45 @@
+{
+ "session": "2026-10-16",
+ "surface_model": "svi_cal",
+ "heston_model": "heston_v2",
+ "expiries": [
+  {
+   "expiry": "2026-10-30",
+   "T_days": 14.0,
+   "n_quotes": 347,
+   "svi_cal_oos_median_abs_hs": 0.4823,
+   "svi_cal_n_oos": 173,
+   "heston_v2_oos_median_abs_hs": 13.4651,
+   "heston_v2_n_oos": 338
+  },
+  {
+   "expiry": "2026-11-16",
+   "T_days": 31.0,
+   "n_quotes": 80,
+   "svi_cal_oos_median_abs_hs": 0.6891,
+   "svi_cal_n_oos": 40,
+   "heston_v2_oos_median_abs_hs": 5.1349,
+   "heston_v2_n_oos": 71
+  },
+  {
+   "expiry": "2027-01-15",
+   "T_days": 91.0,
+   "n_quotes": 115,
+   "svi_cal_oos_median_abs_hs": 0.7774,
+   "svi_cal_n_oos": 57,
+   "heston_v2_oos_median_abs_hs": 8.362,
+   "heston_v2_n_oos": 106
+  },
+  {
+   "expiry": "2027-10-15",
+   "T_days": 363.729,
+   "n_quotes": 140,
+   "svi_cal_oos_median_abs_hs": 0.3635,
+   "svi_cal_n_oos": 70,
+   "heston_v2_oos_median_abs_hs": 4.2202,
+   "heston_v2_n_oos": 132
+  }
+ ],
+ "source": "data_store/surface/2026-10-16/residuals.parquet",
+ "source_sha256": "817199eda5b704840e9bccad4fb1bc734859e8ba5bc9cd7b695fe9c49082bc77"
+}

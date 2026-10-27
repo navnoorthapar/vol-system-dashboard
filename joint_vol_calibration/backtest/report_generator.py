@@ -309,7 +309,7 @@ class ReportGenerator:
 </div>
 
 <footer>
-  Joint SPX/VIX Smile Calibration System — C10 Backtest Report &nbsp;|&nbsp;
+  Joint SPX/VIX Calibration System — C10 Backtest Report &nbsp;|&nbsp;
   Signals use t−1 information; rules, thresholds, β and S1C's direction were
   chosen with knowledge of the whole sample &nbsp;|&nbsp; Fixed seed={self.engine.seed} &nbsp;|&nbsp;
   {datetime.now().strftime("%Y-%m-%d %H:%M UTC")}

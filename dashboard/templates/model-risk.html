@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block og_title %}Model Risk — Inventory and Monitoring — SPX/VIX Vol Research{% endblock %}
+{% block og_description %}Every model the system runs, with its use, inputs, outputs and limitations, and monitoring checks against explicit thresholds.{% endblock %}
+
+{% block content %}
+{% set rc = d.rag_counts or {} %}
+<div class="page-head">
+  <h1 class="page-title">Model risk · inventory and monitoring</h1>
+  <p class="page-sub">The structure of a model-risk review (an inventory, then outcome checks against stated limits) applied to a personal research system. The limits are this page's working thresholds, stated so a reader can disagree with them.</p>
+  <div class="page-badge"><span class="nowrap">{{ d.inventory|length }} models</span><span class="sep">·</span><span class="nowrap">{{ d.monitors|length }} checks</span><span class="sep">·</span><span class="nowrap">{{ rc.ok|fmt }} OK · {{ rc.watch|fmt }} watch · {{ rc.breach|fmt }} breach · {{ rc.info|fmt }} informational</span></div>
+</div>
+
+<div class="g">
+  {% call m.panel('monitors', 'Monitoring checks · exceptions first', 's12') %}
+    {% set _rag = {'breach': ('■', 'breach'), 'watch': ('▲', 'watch'), 'ok': ('●', 'OK'), 'info': ('◆', 'info'), 'na': ('○', 'N/A')} %}
+    <div class="mon-strip js-only" role="group" aria-label="Show the checks of one status">
+      <button class="btn" type="button" data-filter-for="monitor-table" data-filter="all" aria-pressed="true">All {{ d.monitors|length }}</button>
+      {% for st in ('breach', 'watch', 'ok', 'info', 'na') if rc[st] %}<button class="btn mon-filter mon-{{ st }}" type="button" data-filter-for="monitor-table" data-filter="status:{{ st }}" data-count="{{ rc[st] }}" aria-pressed="false"><span aria-hidden="true">{{ _rag[st][0] }}</span> {{ rc[st] }} {{ _rag[st][1] }}</button>{% endfor %}
+    </div>
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Monitoring checks (scrollable)">
+    <table class="tbl cards" id="monitor-table">
+      <thead><tr><th scope="col">Model</th><th scope="col">Check</th><th scope="col" class="num">Value</th><th scope="col">Status</th><th scope="col">History</th><th scope="col">Artifact</th><th scope="col">Note</th></tr></thead>
+      <tbody>{% for x in d.monitors %}<tr id="{{ x.id }}" data-status="{{ x.status }}"><td class="wrap" data-label="Model"><a href="#inv-{{ x.model|lower }}">{{ x.model }}</a>{% if x.model_name %}<br><span class="faint name">{{ x.model_name|sym }}</span>{% endif %}</td><td class="wrap" data-label="Check">{{ x.check|sym }}</td><td class="num mon-cell" data-label="Value">{% if x.href %}<a href="{{ x.href }}" class="mon-value" title="Evidence: {{ x.href }}">{{ x.value|dates }}</a>{% else %}{{ x.value|dates }}{% endif %}{% if x.bullet %}{% set bl = x.bullet %}<svg class="bullet" viewBox="0 0 {{ bl.w }} {{ bl.h }}" width="{{ bl.w }}" height="{{ bl.h }}" role="img" aria-label="{{ bl.label }}" data-value="{{ bl.value }}" data-top="{{ bl.top }}" data-tick="{{ bl.tick }}">{% for band in bl.bands %}<rect class="b-{{ band.cls }}" x="{{ band.x }}" y="2" width="{{ band.w }}" height="{{ bl.h - 4 }}"/>{% endfor %}<line class="b-tick" x1="{{ bl.tick }}" x2="{{ bl.tick }}" y1="0" y2="{{ bl.h }}"/></svg>{% endif %}<span class="mon-lim">{{ x.limits }}</span></td><td data-label="Status">{{ m.rag(x.status) }}</td><td data-label="History">{% set h = x.history %}{% if h %}{% set n = h.dots|length %}{% set span = (h.hi - h.lo) if h.hi > h.lo else 1 %}<svg class="hist" viewBox="0 0 80 18" width="80" height="18" role="img" aria-label="{{ n }} stored sessions, oldest first: {% for t in h.dots %}{{ t.text }} on {{ t.session }} ({{ _rag[t.status][1] }}){{ ', ' if not loop.last }}{% endfor %}; {% if h.today_missing %}no value today{% else %}rank today: {{ h.rank }}{% endif %}">{% for t in h.dots %}<circle class="h-{{ t.status }}" cx="{{ (5 + loop.index0 * 70 / (n - 1))|round(1) }}" cy="{{ (14 - (t.value - h.lo) / span * 10)|round(1) if h.hi > h.lo else 9 }}" r="{{ 3.6 if loop.last and not h.today_missing else 2.8 }}"><title>{{ t.text }} on {{ t.session }} ({{ _rag[t.status][1] }})</title></circle>{% endfor %}</svg><span class="hist-txt"><span class="nowrap">{{ h.range }}</span> · <span class="nowrap">{% if h.today_missing %}no value today; last {{ h.last_session }}{% else %}rank today: {{ h.rank }}{% endif %}</span></span>{% else %}<span class="faint">single observation</span>{% endif %}</td><td data-label="Artifact">{% for a_ in ([x.artifact] if x.artifact is string else x.artifact) %}<code class="path">{{ a_|path }}</code>{{ '<br>'|safe if not loop.last }}{% endfor %}</td><td class="wrap" data-label="Note">{{ x.note|dates }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note" id="monitor-history-note">Value: links to the panel that shows the evidence; the bar under it runs from 0 through the OK, watch and breach bands of the limits printed beneath it, with a tick at the value. History: one dot per stored session, oldest first, coloured by today’s limits; stored sessions, irregular spacing; today’s limits applied retroactively. A dot is a measurement on that session, not a point of a control chart.</p>
+    {% call m.method('How to read the status') %}
+    <p class="prose">OK, WATCH and BREACH compare the value with the limits in the same row (green ≤ the first limit, watch ≤ the second, breach above); every status also carries a word and a glyph, so colour is never the only cue. INFO rows are reported, not limited: the Feller condition is a diagnostic here, not a no-arbitrage requirement. A BREACH is not an outage: it marks where the model is weakest, which the linked page explains. The rows run worst first (breach, watch, OK, informational), and within a status in inventory order.</p>
+    {% endcall %}
+  {% endcall %}
+</div>
+
+<div class="g">
+  {% call m.panel('inventory', 'Model inventory', 's12') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Model inventory (scrollable)">
+    <table class="tbl cards" id="inventory-table">
+      <thead><tr><th scope="col">ID</th><th scope="col">Model</th><th scope="col">Tier</th><th scope="col">Materiality</th><th scope="col">Use</th><th scope="col">Inputs → outputs</th><th scope="col">Known limitations</th></tr></thead>
+      <tbody>{% for x in d.inventory %}<tr id="inv-{{ x.id|lower }}"><td data-label="ID">{{ x.id }}</td><td class="wrap" data-label="Model"><strong class="name">{{ x.name|sym }}</strong><br><code class="path">{{ x.module|path }}</code>{% if x.page %} · <a href="{{ x.page }}">page</a>{% endif %}</td><td data-label="Tier">{{ m.chip(x.tier, 'info' if x.tier == 'production' else ('watch' if x.tier == 'backtest' else 'muted')) }}</td><td data-label="Materiality">{{ x.materiality or '—' }}</td><td class="wrap" data-label="Use">{{ x.use }}</td><td class="wrap" data-label="Inputs → outputs">{{ x.inputs }} → {% for o_ in ([x.outputs] if x.outputs is string else x.outputs) %}<code class="path">{{ o_|path }}</code>{{ ' + ' if not loop.last }}{% endfor %}{% if x.outputs_pending %} ({{ x.outputs_pending }}){% endif %}{% if x.outputs_note %} ({{ x.outputs_note }}){% endif %}</td><td class="wrap" data-label="Known limitations">{{ x.limitations }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note">{{ d.inventory_about }}</p>
+    {% if d.vendor_inputs %}
+    <div class="tbl-wrap mt8" tabindex="0" role="region" aria-label="Vendor and third-party inputs (scrollable)">
+    <table class="tbl dense cards" id="vendor-table"><caption>Vendor and third-party inputs (the IDs the data checks above carry)</caption>
+      <thead><tr><th scope="col">ID</th><th scope="col">Source</th><th scope="col">What it supplies</th><th scope="col">Note</th></tr></thead>
+      <tbody>{% for v in d.vendor_inputs %}<tr id="inv-{{ (v.id or '')|lower }}"><td data-label="ID">{{ v.id }}</td><td class="wrap" data-label="Source">{{ v.source }}</td><td class="wrap" data-label="What it supplies">{{ v.data }}</td><td class="wrap" data-label="Note">{{ v.note }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    {% endif %}
+  {% endcall %}
+</div>
+{% endblock %}

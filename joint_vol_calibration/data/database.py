@@ -27,7 +27,11 @@ Design philosophy:
   file can be committed while its un-checkpointed pages sit in an ignored
   ``-wal`` sidecar.
 - Validation hooks (``validate_sessions``, ``find_bad_prints``,
-  ``cross_check_vix``) LOG WARNINGS. They never drop or rewrite data.
+  ``cross_check_vix``, ``compare_sources``) LOG WARNINGS. They never drop
+  or rewrite data. Two writer rules do (C23), each logged: a session-keyed
+  table (SESSION_KEYED_TABLES) stores no row dated on a day the NYSE was
+  closed, and in the VIX-index tables a stored Cboe value (the official
+  print) is replaced only by another Cboe value.
 
 Tables:
   spx_ohlcv               — SPX daily OHLCV (Yahoo ^GSPC); log_return derived
@@ -42,6 +46,12 @@ Tables:
   options_snapshots       — SPX/VIX option chains keyed by quote session
   tbill_rates             — ^IRX 13-week bill: continuously compounded rate
                             plus the raw bank-discount yield
+  cboe_index_daily        — other Cboe indices (VIX1D, VIX1Y, SKEW, COR1M,
+                            COR3M, DSPX, strategy benchmarks), one row per
+                            session and symbol (C23)
+  rates_daily             — rate quotes as published: Treasury bills and par
+                            curve, SOFR, H.15 3-month bill; the inputs of
+                            data/rates.py's zero curve (C23)
   classifier_predictions  — XGBoost regime-classifier output (research only;
                             this is NOT the rule-label series the dashboard
                             and backtest use — that lives in
@@ -51,7 +61,8 @@ Persistence for the daily bot (the SQLite file is a rebuildable cache; the
 parquet files are what a run should commit):
   export_market_partitions / import_market_partitions
       yearly partitions  data_store/market/<table>/<table>_<YYYY>.parquet
-      for spx_ohlcv, vix_daily, vix_term_structure, tbill_rates.
+      for spx_ohlcv, vix_daily, vix_term_structure, tbill_rates (by
+      default) and, on request, cboe_index_daily and rates_daily.
   export_options_snapshot(s) / import_options_snapshots
       one file per chain  data_store/options/<spx|vix>_<YYYY-MM-DD>.parquet
   Export MERGES into an existing partition (database wins on a key clash) and
@@ -66,15 +77,17 @@ import math
 import os
 import re
 import sqlite3
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
-from datetime import datetime, time as dtime, timezone
+from datetime import UTC, datetime
+from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+from dateutil.relativedelta import MO
 from pandas.tseries.holiday import (
     AbstractHolidayCalendar,
     GoodFriday,
@@ -87,7 +100,6 @@ from pandas.tseries.holiday import (
     sunday_to_monday,
 )
 from pandas.tseries.offsets import CustomBusinessDay, DateOffset
-from dateutil.relativedelta import MO
 
 from joint_vol_calibration.config import (
     DATA_DIR,
@@ -233,19 +245,19 @@ def sessions_between(earlier, later) -> int:
 
 def _utcnow() -> datetime:
     """Clock used by the session helpers (tests monkeypatch this)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _now_ny(now: Optional[datetime] = None) -> datetime:
+def _now_ny(now: datetime | None = None) -> datetime:
     """``now`` (default: the clock) in New York time. Naive datetimes are taken as UTC."""
     if now is None:
         now = _utcnow()
     if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     return now.astimezone(NY_TZ)
 
 
-def last_closed_session(now: Optional[datetime] = None,
+def last_closed_session(now: datetime | None = None,
                         cutoff: dtime = CLOSE_DATA_CUTOFF) -> str:
     """The most recent NYSE session whose close has printed, as of ``now``.
 
@@ -261,7 +273,7 @@ def last_closed_session(now: Optional[datetime] = None,
     return previous_session(today)
 
 
-def quote_session(now: Optional[datetime] = None) -> str:
+def quote_session(now: datetime | None = None) -> str:
     """The NYSE session whose quotes a live feed is showing at ``now``.
 
     From the 09:30 ET open of a session day it is that day (intraday quotes
@@ -278,15 +290,47 @@ def quote_session(now: Optional[datetime] = None) -> str:
 def utc_iso(when: datetime) -> str:
     """ISO-8601 UTC timestamp ('2026-10-09T20:15:00Z'); naive datetimes are taken as UTC."""
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def is_intraday(now: Optional[datetime] = None) -> bool:
+def is_intraday(now: datetime | None = None) -> bool:
     """True between the 09:30 open and the data cutoff (16:15 ET) of a session day."""
     ny = _now_ny(now)
     return (is_nyse_session(pd.Timestamp(ny.date()))
             and SESSION_OPEN <= ny.time() < CLOSE_DATA_CUTOFF)
+
+
+def is_session_array(dates) -> np.ndarray:
+    """Vectorised ``is_nyse_session`` over date-likes (unparseable -> False)."""
+    idx = pd.DatetimeIndex(pd.to_datetime(pd.Series(list(dates)), errors="coerce"))
+    if idx.tz is not None:
+        idx = idx.tz_convert(NY_TZ).tz_localize(None)
+    idx = idx.normalize()
+    return np.asarray(idx.notna() & (idx.weekday < 5) & ~idx.isin(_holiday_index()), dtype=bool)
+
+
+def drop_non_sessions(df: pd.DataFrame, label: str = "series", *, col: str = "date") -> pd.DataFrame:
+    """``df`` without the rows dated on days the NYSE was closed, saying which.
+
+    The session-keyed tables (SESSION_KEYED_TABLES) store one row per NYSE
+    session. Both sources print values on exchange holidays: Cboe's
+    VIX_History.csv carries a VIX close on 33 NYSE holidays from 2022-05-30
+    to 2026-09-07 (counted 2026-10-20; its VIX9D/VIX3M/VIX6M/VVIX files
+    carry none since 2010), and Yahoo served ^VIX on 2026-05-25 and
+    2026-09-07. Before C23 such rows were stored (29 in vix_daily, 2 in
+    vix_term_structure). Returns ``df`` itself when nothing is dropped.
+    """
+    if df is None or df.empty:
+        return df
+    keep = pd.Series(is_session_array(df[col]), index=df.index)
+    if keep.all():
+        return df
+    dropped = df.loc[~keep, col].astype(str)
+    logger.info("%s: not storing %d row(s) dated on days the NYSE was closed: %s%s", label,
+                int((~keep).sum()), ", ".join(sorted(set(dropped))[:10]),
+                " ..." if dropped.nunique() > 10 else "")
+    return df[keep]
 
 
 def validate_sessions(dates: Iterable, start=None, end=None, *,
@@ -361,7 +405,7 @@ ROOT_SETTLEMENT = {"SPX": "AM", "SPXW": "PM", "VIX": "AM", "VIXW": "AM"}
 _MINUTES_PER_YEAR = 525_600.0   # Cboe VIX methodology: T in minutes / 525,600
 
 
-def parse_occ_symbol(symbol) -> Optional[dict]:
+def parse_occ_symbol(symbol) -> dict | None:
     """Split an OCC option symbol into root, expiry (YYYY-MM-DD), right ('C'/'P') and strike.
 
     Returns None when ``symbol`` is not an OCC symbol.
@@ -380,12 +424,12 @@ def parse_occ_symbol(symbol) -> Optional[dict]:
     }
 
 
-def settlement_for_root(root) -> Optional[str]:
+def settlement_for_root(root) -> str | None:
     """'AM' or 'PM' for a known option root, else None."""
     return ROOT_SETTLEMENT.get(str(root).upper()) if root else None
 
 
-def time_to_settlement(snapshot_date, expiry, settlement: Optional[str] = None) -> float:
+def time_to_settlement(snapshot_date, expiry, settlement: str | None = None) -> float:
     """Years from the 16:00 ET close of ``snapshot_date`` to the contract's settlement.
 
     AM-settled contracts settle at 09:30 ET on ``expiry``, PM-settled at 16:00
@@ -449,7 +493,8 @@ def tbill_discount_to_cc(discount_yield, days: int = TBILL_TENOR_DAYS):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Bumped when a migration in `_migrate` must run on an existing file.
-SCHEMA_VERSION = 1
+# v2 (C23): tables cboe_index_daily and rates_daily (created, nothing rewritten).
+SCHEMA_VERSION = 2
 
 _TABLE_DDL = {
     "spx_ohlcv": """
@@ -567,6 +612,39 @@ _TABLE_DDL = {
         date            TEXT PRIMARY KEY,
         rate            REAL NOT NULL,     -- continuously compounded, ACT/365, decimal (tbill_discount_to_cc)
         discount_yield  REAL               -- ^IRX as quoted (bank-discount basis), decimal; may be <= 0
+    )""",
+    "cboe_index_daily": """
+    -- Other Cboe indices from their official history files (C23): VIX1D, VIX1Y,
+    -- SKEW, the implied-correlation indices COR1M/COR3M, the dispersion index
+    -- DSPX, and any strategy benchmark (PUT, WPUT, BXM, BFLY, CNDR, ...).
+    -- One row per NYSE session and index. Single-value files (SKEW, DSPX)
+    -- leave open/high/low NULL. Read via get_cboe_index(as_of_date).
+    CREATE TABLE IF NOT EXISTS cboe_index_daily (
+        date        TEXT NOT NULL,       -- NY session
+        symbol      TEXT NOT NULL,       -- Cboe file name, e.g. 'SKEW', 'COR3M'
+        open        REAL,
+        high        REAL,
+        low         REAL,
+        close       REAL NOT NULL,
+        source      TEXT,                -- 'cboe'
+        PRIMARY KEY (date, symbol)
+    )""",
+    "rates_daily": """
+    -- Daily interest-rate quotes as published (C23), the inputs of
+    -- data/rates.py's zero curve: US Treasury bill rates (bank discount and
+    -- coupon equivalent) and the par yield curve (home.treasury.gov), SOFR
+    -- (NY Fed), and on request FRED copies (DGS*, SOFR, the H.15 3-month
+    -- bill DTB3). value is the published quote / 100; its basis is fixed by
+    -- the series name (rates.bill_series, rates.PAR_MONTHS). Dated by the
+    -- publisher's business day, which is NOT always an NYSE session (the
+    -- bond market closes on Columbus and Veterans Day). Read via
+    -- get_rates_daily(as_of_date).
+    CREATE TABLE IF NOT EXISTS rates_daily (
+        date        TEXT NOT NULL,
+        series      TEXT NOT NULL,       -- e.g. 'UST_BILL_13W_BD', 'UST_PAR_2Y', 'SOFR'
+        value       REAL NOT NULL,       -- decimal (4.10% -> 0.041), basis per series
+        source      TEXT NOT NULL,       -- 'treasury' | 'nyfed' | 'fred'
+        PRIMARY KEY (date, series)
     )""",
 }
 
@@ -875,9 +953,7 @@ def _records(df: pd.DataFrame, cols: Sequence[str]) -> list:
                 clean[k] = None
             elif isinstance(v, (float, np.floating)):
                 clean[k] = None if math.isnan(v) else float(v)
-            elif isinstance(v, (np.integer,)):
-                clean[k] = int(v)
-            elif isinstance(v, (np.bool_, bool)):
+            elif isinstance(v, (np.integer, np.bool_, bool)):
                 clean[k] = int(v)
             else:
                 clean[k] = v
@@ -976,7 +1052,7 @@ def insert_spx_ohlcv(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     return len(rows)
 
 
-def _recompute_log_returns(conn, from_date: Optional[str]) -> int:
+def _recompute_log_returns(conn, from_date: str | None) -> int:
     """Recompute log_return for every row from ``from_date`` on, against the previous stored close."""
     anchor = None
     if from_date is not None:
@@ -1000,7 +1076,7 @@ def _recompute_log_returns(conn, from_date: Optional[str]) -> int:
     return len(updates)
 
 
-def get_spx_ohlcv(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_spx_ohlcv(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return SPX OHLCV for [start_date, as_of_date].
 
@@ -1019,7 +1095,7 @@ def get_spx_ohlcv(as_of_date: str, start_date: Optional[str] = None) -> pd.DataF
     return _get_dated("spx_ohlcv", as_of_date, start_date)
 
 
-def _get_dated(table: str, as_of_date: str, start_date: Optional[str],
+def _get_dated(table: str, as_of_date: str, start_date: str | None,
                order: str = "date ASC") -> pd.DataFrame:
     _validate_date(as_of_date)
     sql = f"SELECT * FROM {table} WHERE date <= ?"
@@ -1039,24 +1115,74 @@ def _get_dated(table: str, as_of_date: str, start_date: Optional[str],
 # VIX daily
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Source vocabulary and precedence ──────────────────────────────────────────
+
+# One spelling per data source in every `source` column. option_chain's
+# observed_quotes() tags its rows 'yahoo' and yf_downloader 'yfinance' (both
+# Yahoo through yfinance): the writers below store 'yfinance' for either.
+_SOURCE_ALIASES = {"yahoo": "yfinance", "yf": "yfinance", "y!": "yfinance"}
+
+# The official publisher of the VIX index family. In the VIX-index tables
+# (vix_daily, vix_term_structure, cboe_index_daily) a stored row from this
+# source is replaced only by another row from it.
+OFFICIAL_INDEX_SOURCE = "cboe"
+
+
+def canonical_source(values) -> pd.Series:
+    """``values`` (a Series) with known aliases mapped to one spelling; None stays None."""
+    s = pd.Series(values) if not isinstance(values, pd.Series) else values
+
+    def one(v):
+        if v is None or (not isinstance(v, str) and pd.isna(v)):
+            return None
+        return _SOURCE_ALIASES.get(str(v).strip().lower(), v)
+    return pd.Series([one(v) for v in s.astype(object)], index=s.index, dtype=object)
+
+
+def _skip_over_official(conn, table: str, df: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+    """Drop incoming non-Cboe rows whose key is stored with source 'cboe'.
+
+    Cboe's index files are the official print. The bot writes Yahoo's window
+    first and Cboe's on top; when the Cboe download failed, the Yahoo rows
+    used to replace the official closes for the whole 400-day window
+    (2026-02-06: Yahoo ^VIX 20.37, Cboe 17.76) and the run committed them.
+    """
+    not_official = df["source"].astype(object).ne(OFFICIAL_INDEX_SOURCE).to_numpy()
+    if not not_official.any():
+        return df
+    key_sql = ", ".join(keys)
+    # table and key names come from this module's constants; the values are bound
+    official = {tuple(map(str, r)) for r in conn.execute(
+        f"SELECT {key_sql} FROM {table} WHERE source = ? AND date BETWEEN ? AND ?",  # noqa: S608
+        (OFFICIAL_INDEX_SOURCE, df["date"].min(), df["date"].max()))}
+    if not official:
+        return df
+    incoming = [tuple(map(str, r)) for r in df[list(keys)].to_numpy()]
+    keep = ~(not_official & np.array([k in official for k in incoming], dtype=bool))
+    if not keep.all():
+        logger.info("%s: kept %d stored Cboe close(s); the incoming non-Cboe rows for those "
+                    "keys were skipped", table, int((~keep).sum()))
+    return df[keep]
+
+
 def insert_vix_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     """Upsert VIX index daily OHLC. An optional `source` column ('cboe'/'yfinance') is stored.
 
     A stored row whose source is 'cboe' (VIX_History.csv, the official
     print) is only ever replaced by another Cboe row: incoming rows from any
-    other source (Yahoo's ^VIX, or unrecorded) for those dates are skipped.
-    The bot writes Yahoo's window first and Cboe's on top; when the Cboe
-    download failed, the Yahoo rows used to replace the official closes for
-    the whole 400-day window (2026-02-06: Yahoo 20.37, Cboe 17.76) and the
-    run committed them. Returns the rows written.
+    other source (Yahoo's ^VIX, or unrecorded) for those dates are skipped
+    (_skip_over_official). Rows dated on days the NYSE was closed are not
+    stored (drop_non_sessions). Returns the rows written.
     """
     _ensure_schema()
     df = _normalise_date_column(df)
     if df.empty:
         return 0
     df = df.drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
-    if "source" not in df.columns:
-        df["source"] = None
+    df = drop_non_sessions(df, "vix_daily")
+    if df.empty:
+        return 0
+    df["source"] = canonical_source(df["source"]) if "source" in df.columns else None
     find_bad_prints(df, "vix_daily")
     validate_sessions(df["date"], label="vix_daily")
     sql = """
@@ -1066,23 +1192,14 @@ def insert_vix_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
     with _connection() as conn:
         if warn_dropped:
             _warn_dropped(conn, "vix_daily", df, ["date"], "vix_daily")
-        not_cboe = df["source"].astype(object).ne("cboe").to_numpy()
-        if not_cboe.any():
-            official = {r[0] for r in conn.execute(
-                "SELECT date FROM vix_daily WHERE source = 'cboe' AND date BETWEEN ? AND ?",
-                (df["date"].iloc[0], df["date"].iloc[-1]))}
-            keep = ~(not_cboe & df["date"].isin(official).to_numpy())
-            if not keep.all():
-                logger.info("vix_daily: kept %d stored Cboe close(s); the incoming non-Cboe "
-                            "rows for those dates were skipped", int((~keep).sum()))
-                df = df[keep]
+        df = _skip_over_official(conn, "vix_daily", df, ["date"])
         rows = _records(df, ["date", "open", "high", "low", "close", "source"])
         conn.executemany(sql, rows)
     logger.info("Upserted %d VIX daily rows", len(rows))
     return len(rows)
 
 
-def get_vix_daily(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_vix_daily(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return VIX daily levels up to as_of_date.
 
@@ -1305,6 +1422,15 @@ def insert_options_snapshot(df: pd.DataFrame, underlying: str) -> int:
                            "settlement time", und, int(off.sum()))
         df["time_to_expiry"] = given.where(~known & given.notna(), tte)
 
+    if "source" in df.columns:
+        spelled = df["source"].astype(str).str.strip().str.lower()
+        aliased = df["source"].notna() & spelled.isin(_SOURCE_ALIASES)
+        if aliased.any():
+            logger.info("%s snapshot: source %s stored as %s", und,
+                        sorted(df.loc[aliased, "source"].astype(str).unique()),
+                        sorted(set(canonical_source(df.loc[aliased, "source"]))))
+        df["source"] = canonical_source(df["source"])
+
     for snap in sorted(df["snapshot_date"].unique()):
         if not is_nyse_session(snap):
             logger.warning("%s snapshot dated %s, which is not an NYSE session — snapshot dates "
@@ -1335,7 +1461,7 @@ def insert_options_snapshot(df: pd.DataFrame, underlying: str) -> int:
 
 
 def get_options_surface(as_of_date: str, underlying: str,
-                        max_age_sessions: Optional[int] = None) -> pd.DataFrame:
+                        max_age_sessions: int | None = None) -> pd.DataFrame:
     """
     Return the most recent options chain for an underlying as of a date.
 
@@ -1394,10 +1520,11 @@ def get_options_surface(as_of_date: str, underlying: str,
 
 _DATED_TABLES = {"spx_ohlcv": "date", "vix_daily": "date", "vix_term_structure": "date",
                  "tbill_rates": "date", "vix_futures_daily": "date",
-                 "vix_futures_settlements": "settlement_date", "options_snapshots": "snapshot_date"}
+                 "vix_futures_settlements": "settlement_date", "options_snapshots": "snapshot_date",
+                 "cboe_index_daily": "date", "rates_daily": "date"}
 
 
-def get_latest_date(table: str) -> Optional[str]:
+def get_latest_date(table: str) -> str | None:
     """Latest stored date in one of the dated tables (None if it is empty)."""
     if table not in _DATED_TABLES:
         raise ValueError(f"not a dated table: {table}")
@@ -1406,7 +1533,7 @@ def get_latest_date(table: str) -> Optional[str]:
         return conn.execute(f"SELECT MAX({_DATED_TABLES[table]}) FROM {table}").fetchone()[0]
 
 
-def get_options_snapshot_dates(underlying: Optional[str] = None) -> list:
+def get_options_snapshot_dates(underlying: str | None = None) -> list:
     """Sorted snapshot dates stored (optionally for one underlying)."""
     _ensure_schema()
     sql = "SELECT DISTINCT snapshot_date FROM options_snapshots"
@@ -1431,12 +1558,21 @@ def insert_vix_term_structure(df: pd.DataFrame, *, warn_dropped: bool = True) ->
     tenor_days for ^VIX9D/^VIX/^VIX3M/^VIX6M/^VVIX always comes from config
     (VIX_INDEX_TENOR_DAYS / VVIX_TENOR_DAYS); a conflicting value in ``df`` is
     overridden with a warning, so no writer can store a second tenor map.
+
+    Cboe is the primary source (C23): a stored (date, ticker) row from Cboe's
+    official file is only replaced by another Cboe row, so a Yahoo row is a
+    provisional value that stands until Cboe publishes that session
+    (pipeline.refresh_vix_index_family writes both in that order). Rows
+    dated on days the NYSE was closed are not stored.
     """
     _ensure_schema()
     df = _normalise_date_column(df)
     if df.empty:
         return 0
     df = df.drop_duplicates(["date", "ticker"], keep="last").copy()
+    df = drop_non_sessions(df, "vix_term_structure").copy()
+    if df.empty:
+        return 0
     canon = df["ticker"].map(_TERM_TENORS)
     if "tenor_days" in df.columns:
         given = pd.to_numeric(df["tenor_days"], errors="coerce")
@@ -1453,11 +1589,9 @@ def insert_vix_term_structure(df: pd.DataFrame, *, warn_dropped: bool = True) ->
     df["tenor_days"] = df["tenor_days"].astype(int)
     df["is_vvix"] = (df["is_vvix"].astype(bool) if "is_vvix" in df.columns
                      else df["ticker"].eq("^VVIX")).astype(int)
-    if "source" not in df.columns:
-        df["source"] = None
+    df["source"] = canonical_source(df["source"]) if "source" in df.columns else None
     for ticker, sub in df.groupby("ticker"):
         validate_sessions(sub["date"], label=f"vix_term_structure {ticker}")
-    rows = _records(df, ["date", "ticker", "tenor_days", "close", "is_vvix", "source"])
     sql = """
         INSERT OR REPLACE INTO vix_term_structure
             (date, ticker, tenor_days, close, is_vvix, source)
@@ -1466,12 +1600,14 @@ def insert_vix_term_structure(df: pd.DataFrame, *, warn_dropped: bool = True) ->
     with _connection() as conn:
         if warn_dropped:
             _warn_dropped(conn, "vix_term_structure", df, ["date", "ticker"], "vix_term_structure")
+        df = _skip_over_official(conn, "vix_term_structure", df, ["date", "ticker"])
+        rows = _records(df, ["date", "ticker", "tenor_days", "close", "is_vvix", "source"])
         conn.executemany(sql, rows)
     logger.info("Upserted %d VIX term structure rows", len(rows))
     return len(rows)
 
 
-def get_vix_term_structure(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_vix_term_structure(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return VIX term structure up to as_of_date (long format, one row per date and ticker).
 
@@ -1480,14 +1616,21 @@ def get_vix_term_structure(as_of_date: str, start_date: Optional[str] = None) ->
     return _get_dated("vix_term_structure", as_of_date, start_date, order="date ASC, tenor_days ASC")
 
 
-def get_vix_term_structure_wide(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_vix_term_structure_wide(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return VIX term structure in wide format: one column per ticker.
 
     Columns: [^VIX9D, ^VIX, ^VIX3M, ^VIX6M, ^VVIX] (plus derived slope).
     Useful for regime classifier feature construction.
     """
-    df_long = get_vix_term_structure(as_of_date, start_date)
+    return vix_term_structure_wide(get_vix_term_structure(as_of_date, start_date))
+
+
+def vix_term_structure_wide(df_long: pd.DataFrame) -> pd.DataFrame:
+    """get_vix_term_structure_wide's pivot of long (date, ticker, close) rows:
+    one column per ticker plus the two slope columns, ``date`` a column.
+    Public so a caller that edits long rows (backtest.c23_bridge) builds the
+    exact frame the database reader would."""
     if df_long.empty:
         return pd.DataFrame()
     wide = df_long.pivot(index="date", columns="ticker", values="close")
@@ -1500,8 +1643,50 @@ def get_vix_term_structure_wide(as_of_date: str, start_date: Optional[str] = Non
     return wide.reset_index()
 
 
+def compare_sources(primary: pd.DataFrame, secondary: pd.DataFrame, tol: float = 0.25, *,
+                    keys: Sequence[str] = ("date", "ticker"), value: str = "close",
+                    labels: tuple = ("cboe", "yfinance"), log: bool = True) -> pd.DataFrame:
+    """Rows where two downloads of the same series disagree by more than ``tol``.
+
+    ``primary`` and ``secondary`` are long frames with ``keys`` and ``value``
+    columns (e.g. cboe_downloader.download_vix_term_structure_history and
+    yf_downloader.download_vix_term_structure for the same window). Only NYSE
+    sessions are compared. Read-only: nothing is stored or dropped.
+
+    Returns rows [*keys, <labels[0]>, <labels[1]>, diff] with
+    |diff| = |primary - secondary| > tol, sorted by key, and logs one
+    warning per ticker. (Measured 2026-10-20: the pre-C23 stored term
+    structure, downloaded from Yahoo, differs from Cboe's files by more than
+    0.25 pts on 38 of 20,859 (date, ticker) rows; see
+    data_store/market/corrections/.)
+    """
+    keys = list(keys)
+    a, b = labels
+    cols = [*keys, a, b, "diff"]
+    if primary is None or secondary is None or primary.empty or secondary.empty:
+        return pd.DataFrame(columns=cols)
+    p = primary[[*keys, value]].copy()
+    s = secondary[[*keys, value]].copy()
+    for f in (p, s):
+        f["date"] = _to_date_str(f["date"])
+    p = drop_non_sessions(p.drop_duplicates(keys, keep="last"), f"compare_sources {a}")
+    s = drop_non_sessions(s.drop_duplicates(keys, keep="last"), f"compare_sources {b}")
+    m = p.merge(s, on=keys, suffixes=("_a", "_b"))
+    m["diff"] = m[f"{value}_a"] - m[f"{value}_b"]
+    out = m[m["diff"].abs() > tol].rename(columns={f"{value}_a": a, f"{value}_b": b})
+    out = out[cols].sort_values(keys).reset_index(drop=True)
+    if log and not out.empty:
+        group = keys[1] if len(keys) > 1 else keys[0]
+        for g, grp in out.groupby(group):
+            logger.warning("%s vs %s %s: %d row(s) differ by more than %.2f: %s%s", a, b, g, len(grp), tol,
+                           ", ".join(f"{r[0]} ({r[1]:.2f} vs {r[2]:.2f})"
+                                     for r in grp[["date", a, b]].head(8).itertuples(index=False)),
+                           " ..." if len(grp) > 8 else "")
+    return out
+
+
 def cross_check_vix(reference: pd.DataFrame, tol: float = 0.25,
-                    start: Optional[str] = None, end: Optional[str] = None,
+                    start: str | None = None, end: str | None = None,
                     *, log: bool = True) -> pd.DataFrame:
     """Compare stored VIX-family closes with an independent reference.
 
@@ -1571,7 +1756,7 @@ def insert_classifier_predictions(df: pd.DataFrame) -> int:
     return len(rows)
 
 
-def get_classifier_predictions(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_classifier_predictions(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """Return classifier predictions strictly up to as_of_date (look-ahead safe)."""
     _ensure_schema()
     return _get_dated("classifier_predictions", as_of_date, start_date)
@@ -1587,7 +1772,7 @@ def insert_regime_labels(df: pd.DataFrame) -> int:
     return insert_classifier_predictions(df)
 
 
-def get_regime_labels(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_regime_labels(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """Deprecated alias of get_classifier_predictions (classifier output, not rule labels)."""
     return get_classifier_predictions(as_of_date, start_date)
 
@@ -1665,7 +1850,7 @@ def get_tbill_rate(as_of_date: str, fallback: float = 0.045) -> float:
     return float(row["rate"])
 
 
-def get_tbill_rates_series(as_of_date: str, start_date: Optional[str] = None) -> pd.DataFrame:
+def get_tbill_rates_series(as_of_date: str, start_date: str | None = None) -> pd.DataFrame:
     """
     Return full T-bill rate series up to as_of_date.
 
@@ -1677,6 +1862,187 @@ def get_tbill_rates_series(as_of_date: str, start_date: Optional[str] = None) ->
     date; rate is continuously compounded.
     """
     return _get_dated("tbill_rates", as_of_date, start_date)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Other Cboe indices (VIX1D, VIX1Y, SKEW, COR1M, COR3M, DSPX, benchmarks)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def insert_cboe_index(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
+    """Upsert Cboe index closes [date, symbol, close, (open, high, low), (source)].
+
+    Same rules as the VIX family: rows dated on days the NYSE was closed are
+    not stored, and a stored Cboe row is only replaced by another Cboe row.
+    Returns the rows written.
+    """
+    _ensure_schema()
+    df = _normalise_date_column(df)
+    if df.empty:
+        return 0
+    if "symbol" not in df.columns:
+        raise ValueError("cboe_index_daily rows need a 'symbol' column")
+    df = df.copy()
+    df["symbol"] = df["symbol"].astype(str).str.upper().str.lstrip("^")
+    df = df.drop_duplicates(["date", "symbol"], keep="last")
+    df = drop_non_sessions(df, "cboe_index_daily").copy()
+    if df.empty:
+        return 0
+    for col in ("open", "high", "low"):
+        if col not in df.columns:
+            df[col] = np.nan
+    df["source"] = canonical_source(df["source"]) if "source" in df.columns else None
+    df = df[pd.to_numeric(df["close"], errors="coerce").notna()]
+    cols = ["date", "symbol", "open", "high", "low", "close", "source"]
+    with _connection() as conn:
+        if warn_dropped:
+            for sym, sub in df.groupby("symbol"):
+                stored = conn.execute("SELECT COUNT(*) FROM cboe_index_daily WHERE symbol = ?",
+                                      (sym,)).fetchone()[0]
+                if stored:
+                    _warn_dropped_keyed(conn, "cboe_index_daily", sub, "symbol", str(sym))
+        df = _skip_over_official(conn, "cboe_index_daily", df, ["date", "symbol"])
+        rows = _records(df, cols)
+        conn.executemany(  # the column names are the schema's own, the values are bound
+            f"INSERT OR REPLACE INTO cboe_index_daily ({', '.join(cols)}) "  # noqa: S608
+            f"VALUES ({', '.join(':' + c for c in cols)})", rows)
+    logger.info("Upserted %d Cboe index rows (%s)", len(rows), ", ".join(sorted(df["symbol"].unique())))
+    return len(rows)
+
+
+def _warn_dropped_keyed(conn, table: str, incoming: pd.DataFrame, col: str, value: str) -> list:
+    """_warn_dropped for one series of a (date, <col>)-keyed table."""
+    lo, hi = incoming["date"].min(), incoming["date"].max()
+    stored = {r[0] for r in conn.execute(  # table and column from the callers' constants
+        f"SELECT date FROM {table} WHERE {col} = ? AND date BETWEEN ? AND ?", (value, lo, hi))}  # noqa: S608
+    gone = sorted(stored - set(incoming["date"]))
+    if gone:
+        logger.warning("%s %s: source no longer returns %d stored row(s) in %s..%s (kept): %s%s",
+                       table, value, len(gone), lo, hi, ", ".join(gone[:10]),
+                       " ..." if len(gone) > 10 else "")
+    return gone
+
+
+def get_cboe_index(as_of_date: str, symbols: Iterable[str] | None = None,
+                   start_date: str | None = None) -> pd.DataFrame:
+    """Cboe index rows with date <= as_of_date (optionally from start_date), long format.
+
+    LOOK-AHEAD GUARD: date <= as_of_date strictly. Columns [date (datetime),
+    symbol, open, high, low, close, source], sorted by (date, symbol).
+    """
+    _validate_date(as_of_date)
+    _ensure_schema()
+    sql = "SELECT * FROM cboe_index_daily WHERE date <= ?"
+    params: list = [as_of_date]
+    if start_date:
+        _validate_date(start_date)
+        sql += " AND date >= ?"
+        params.append(start_date)
+    if symbols:
+        syms = [str(s).upper().lstrip("^") for s in symbols]
+        sql += f" AND symbol IN ({', '.join('?' * len(syms))})"
+        params += syms
+    sql += " ORDER BY date ASC, symbol ASC"
+    with _connection() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def get_cboe_index_wide(as_of_date: str, symbols: Iterable[str] | None = None,
+                        start_date: str | None = None) -> pd.DataFrame:
+    """get_cboe_index pivoted to one close column per symbol (index: date)."""
+    long = get_cboe_index(as_of_date, symbols, start_date)
+    if long.empty:
+        return pd.DataFrame()
+    # pivot, not pivot_table: (date, symbol) is the key, and a duplicate must raise, not be averaged
+    wide = long.pivot(index="date", columns="symbol", values="close")  # noqa: PD010
+    wide.columns.name = None
+    return wide
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Rate quotes (Treasury bills, par curve, SOFR): inputs of data/rates.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+# A stored row from a higher-ranked source is replaced only by a row of the
+# same or a higher rank: Treasury publishes the bill and par-curve quotes, and
+# FRED republishes the par curve (DGS*) as a fallback.
+_RATE_SOURCE_RANK = {"treasury": 2, "nyfed": 2, "fred": 1}
+
+
+def insert_rates_daily(df: pd.DataFrame, *, warn_dropped: bool = True) -> int:
+    """Upsert rate quotes [date, series, value, source]; value is the published quote / 100.
+
+    Not session-filtered: the publishers' business days are not NYSE
+    sessions. A stored Treasury row is not replaced by a FRED copy of it.
+    """
+    _ensure_schema()
+    df = _normalise_date_column(df)
+    if df.empty:
+        return 0
+    missing = {"series", "value", "source"} - set(df.columns)
+    if missing:
+        raise ValueError(f"rates_daily rows need columns {sorted(missing)}")
+    df = df.copy()
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["value"]).drop_duplicates(["date", "series"], keep="last")
+    if df.empty:
+        return 0
+    wild = df["value"].abs() > 0.25
+    if wild.any():
+        logger.warning("rates_daily: %d value(s) beyond +/-25%% — percent stored as decimal? %s",
+                       int(wild.sum()), ", ".join(df.loc[wild, "date"].head(5)))
+    rank = df["source"].map(_RATE_SOURCE_RANK).fillna(0).to_numpy()
+    with _connection() as conn:
+        stored = pd.read_sql_query(
+            "SELECT date, series, source FROM rates_daily WHERE date BETWEEN ? AND ?", conn,
+            params=[df["date"].min(), df["date"].max()])
+        if warn_dropped and not stored.empty:
+            got = set(zip(df["date"], df["series"]))
+            mine = stored[stored["series"].isin(df["series"].unique())
+                          & stored["source"].isin(df["source"].unique())]
+            gone = [f"{d}/{s}" for d, s in zip(mine["date"], mine["series"]) if (d, s) not in got]
+            if gone:
+                logger.warning("rates_daily: source no longer returns %d stored row(s) (kept): %s%s",
+                               len(gone), ", ".join(gone[:10]), " ..." if len(gone) > 10 else "")
+        if not stored.empty:
+            have = {(d, s): _RATE_SOURCE_RANK.get(src, 0)
+                    for d, s, src in stored.itertuples(index=False)}
+            outranked = np.array([have.get((d, s), -1) > r
+                                  for d, s, r in zip(df["date"], df["series"], rank)], dtype=bool)
+            if outranked.any():
+                logger.info("rates_daily: kept %d stored higher-ranked quote(s)", int(outranked.sum()))
+                df = df[~outranked]
+        rows = _records(df, ["date", "series", "value", "source"])
+        conn.executemany("INSERT OR REPLACE INTO rates_daily (date, series, value, source) "
+                         "VALUES (:date, :series, :value, :source)", rows)
+    logger.info("Upserted %d rate quotes (%d series)", len(rows), df["series"].nunique())
+    return len(rows)
+
+
+def get_rates_daily(as_of_date: str, series: Iterable[str] | None = None,
+                    start_date: str | None = None) -> pd.DataFrame:
+    """Rate quotes dated on or before as_of_date, long format [date (str), series, value, source].
+
+    LOOK-AHEAD GUARD: date <= as_of_date. This is the quote's own date; a
+    series published the NEXT business day (SOFR, H.15) needs a stricter
+    gate, which data/rates.py applies.
+    """
+    _validate_date(as_of_date)
+    _ensure_schema()
+    sql = "SELECT date, series, value, source FROM rates_daily WHERE date <= ?"
+    params: list = [as_of_date]
+    if start_date:
+        _validate_date(start_date)
+        sql += " AND date >= ?"
+        params.append(start_date)
+    if series:
+        ser = list(series)
+        sql += f" AND series IN ({', '.join('?' * len(ser))})"
+        params += ser
+    sql += " ORDER BY date ASC, series ASC"
+    with _connection() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1694,8 +2060,20 @@ _MARKET_TABLES = {
                            {"tenor_days": "int64", "close": "float64", "is_vvix": "int64"}),
     "tbill_rates": (["date"], ["date", "rate", "discount_yield"],
                     {"rate": "float64", "discount_yield": "float64"}),
+    "cboe_index_daily": (["date", "symbol"], ["date", "symbol", "open", "high", "low", "close", "source"],
+                         {"open": "float64", "high": "float64", "low": "float64", "close": "float64"}),
+    "rates_daily": (["date", "series"], ["date", "series", "value", "source"], {"value": "float64"}),
 }
-MARKET_TABLES = tuple(_MARKET_TABLES)
+# What export/import_market_partitions handle by default — the four tables
+# the daily bot restores and commits. The C23 reference tables are opt-in
+# (tables=REFERENCE_TABLES), so the bot's restore/persist steps are unchanged
+# until it is wired to download them.
+MARKET_TABLES = ("spx_ohlcv", "vix_daily", "vix_term_structure", "tbill_rates")
+REFERENCE_TABLES = ("cboe_index_daily", "rates_daily")
+
+# Tables keyed by NYSE session: their writers never store, and the export
+# never writes, a row dated on a day the NYSE was closed.
+SESSION_KEYED_TABLES = ("vix_daily", "vix_term_structure", "cboe_index_daily")
 
 
 def _canonical(df: pd.DataFrame, cols: Sequence[str], dtypes: dict, keys: Sequence[str]) -> pd.DataFrame:
@@ -1708,13 +2086,42 @@ def _canonical(df: pd.DataFrame, cols: Sequence[str], dtypes: dict, keys: Sequen
     return df.sort_values(list(keys)).reset_index(drop=True)
 
 
+# Relative tolerance under which two float values in a persisted file count as
+# the same value. Derived columns (tbill_rates.rate = -ln(1 - d*91/360)*365/91)
+# differ in the last bit between runner CPUs: in 61f7252 three
+# tbill_rates_2025 rows changed by 6.9e-18 and the file was rewritten, and
+# both 2026-10-20 book runs flagged it as changed again. Market prints carry
+# at most 6 significant decimals, so 1e-12 can never hide a real revision.
+_PARQUET_FLOAT_RTOL = 1e-12
+
+
+def _same_content(old: pd.DataFrame, new: pd.DataFrame, rtol: float = _PARQUET_FLOAT_RTOL) -> bool:
+    """True if ``old`` and ``new`` hold the same rows: float columns to ``rtol``
+    (NaN equals NaN), every other column exactly (compared as text)."""
+    if list(old.columns) != list(new.columns) or len(old) != len(new):
+        return False
+    old, new = old.reset_index(drop=True), new.reset_index(drop=True)
+    for col in new.columns:
+        a, b = old[col], new[col]
+        if pd.api.types.is_float_dtype(a) and pd.api.types.is_float_dtype(b):
+            x, y = a.to_numpy(float), b.to_numpy(float)
+            if not np.array_equal(np.isnan(x), np.isnan(y)):
+                return False
+            ok = ~np.isnan(x)
+            if not np.allclose(x[ok], y[ok], rtol=rtol, atol=1e-15):
+                return False
+        elif a.astype(str).tolist() != b.astype(str).tolist():
+            return False
+    return True
+
+
 def _write_parquet_if_changed(df: pd.DataFrame, path: Path) -> bool:
-    """Write ``df`` to ``path`` (zstd) unless the file already holds exactly this content."""
+    """Write ``df`` to ``path`` (zstd) unless the file already holds this content
+    (_same_content: floats to a relative 1e-12, everything else exactly)."""
     if path.exists():
         try:
             old = pd.read_parquet(path)
-            if list(old.columns) == list(df.columns) and \
-                    old.to_csv(index=False) == df.to_csv(index=False):
+            if _same_content(old, df):
                 return False
         except Exception:   # unreadable file: rewrite it
             pass
@@ -1725,9 +2132,9 @@ def _write_parquet_if_changed(df: pd.DataFrame, path: Path) -> bool:
     return True
 
 
-def export_market_partitions(root: Optional[Path] = None,
-                             tables: Optional[Iterable[str]] = None,
-                             since: Optional[str] = None) -> list:
+def export_market_partitions(root: Path | None = None,
+                             tables: Iterable[str] | None = None,
+                             since: str | None = None) -> list:
     """Persist market tables as yearly parquet partitions.
 
     Layout: ``<root>/<table>/<table>_<YYYY>.parquet`` (root defaults to
@@ -1735,8 +2142,13 @@ def export_market_partitions(root: Optional[Path] = None,
     are touched. Each partition is MERGED with the file already there: on a
     key clash the database row wins, and rows the file holds that the database
     lacks are KEPT — so a session a remote source later drops, or a database
-    rebuilt from a shorter download, can never erase what was captured. A file
-    is rewritten only if its content changes. Returns the paths written.
+    rebuilt from a shorter download, can never erase what was captured. The
+    one exception: in the session-keyed tables (SESSION_KEYED_TABLES) a row
+    dated on a day the NYSE was closed is not a capture of a session, and is
+    left out of the file whichever side holds it. A file is rewritten only
+    if its content changes (_same_content). ``tables`` defaults to
+    MARKET_TABLES; pass REFERENCE_TABLES (or any _MARKET_TABLES name) to
+    persist the C23 reference tables. Returns the paths written.
     """
     root = Path(root) if root is not None else MARKET_DIR
     written = []
@@ -1753,10 +2165,15 @@ def export_market_partitions(root: Optional[Path] = None,
         if df.empty:
             continue
         df = _canonical(df, cols, dtypes, keys)
+        session_keyed = table in SESSION_KEYED_TABLES
+        if session_keyed:
+            df = drop_non_sessions(df, f"export {table}")
         for year, part in df.groupby(df["date"].str[:4]):
             path = root / table / f"{table}_{year}.parquet"
             if path.exists():
                 old = _canonical(pd.read_parquet(path).reindex(columns=cols), cols, dtypes, keys)
+                if session_keyed:
+                    old = drop_non_sessions(old, f"{path.name}")
                 part = pd.concat([old, part], ignore_index=True)
                 part = _canonical(part.drop_duplicates(keys, keep="last"), cols, dtypes, keys)
             if _write_parquet_if_changed(part, path):
@@ -1765,12 +2182,55 @@ def export_market_partitions(root: Optional[Path] = None,
     return written
 
 
-def import_market_partitions(root: Optional[Path] = None,
-                             tables: Optional[Iterable[str]] = None) -> dict:
+def read_market_partitions(table: str, root: Path | None = None) -> pd.DataFrame:
+    """Every persisted row of ``table`` (all years), canonical columns and dtypes; empty if none."""
+    root = Path(root) if root is not None else MARKET_DIR
+    keys, cols, dtypes = _MARKET_TABLES[table]
+    files = sorted((root / table).glob(f"{table}_*.parquet"))
+    if not files:
+        return pd.DataFrame(columns=cols)
+    df = pd.concat([pd.read_parquet(f).reindex(columns=cols) for f in files], ignore_index=True)
+    return _canonical(df, cols, dtypes, keys)
+
+
+def replace_market_partitions(table: str, df: pd.DataFrame, root: Path | None = None) -> list:
+    """Make the persisted partitions of ``table`` hold exactly ``df``'s rows.
+
+    FOR DELIBERATE, SCRIPTED CORRECTIONS ONLY (pipeline.correct_vix_index_family):
+    unlike export_market_partitions this does not merge. Rows a file holds
+    that ``df`` lacks are removed, and the file of a year with no row left in
+    ``df`` is deleted. ``df`` must therefore be the WHOLE corrected table; an
+    empty ``df`` is refused. Returns the paths rewritten or deleted.
+    """
+    root = Path(root) if root is not None else MARKET_DIR
+    keys, cols, dtypes = _MARKET_TABLES[table]
+    if df is None or df.empty:
+        raise ValueError(f"replace_market_partitions({table}): refusing to empty the record")
+    df = _canonical(df.drop_duplicates(list(keys), keep="last"), cols, dtypes, keys)
+    written = []
+    years = set()
+    for year, part in df.groupby(df["date"].str[:4]):
+        years.add(year)
+        path = root / table / f"{table}_{year}.parquet"
+        if _write_parquet_if_changed(part.reset_index(drop=True), path):
+            written.append(path)
+    for path in sorted((root / table).glob(f"{table}_*.parquet")):
+        if path.stem.rsplit("_", 1)[-1] not in years:
+            path.unlink()
+            written.append(path)
+            logger.warning("replace_market_partitions(%s): deleted %s (no row left for that year)",
+                           table, path.name)
+    logger.info("replace_market_partitions(%s): %d file(s) rewritten under %s", table, len(written), root)
+    return written
+
+
+def import_market_partitions(root: Path | None = None,
+                             tables: Iterable[str] | None = None) -> dict:
     """Upsert every persisted market partition under ``root`` into the database.
 
     Use at the start of a run, before downloading: the files are the record of
-    what earlier runs captured. Returns {table: rows upserted}.
+    what earlier runs captured. ``tables`` defaults to MARKET_TABLES. Returns
+    {table: rows upserted}.
     """
     root = Path(root) if root is not None else MARKET_DIR
     inserters = {
@@ -1778,6 +2238,8 @@ def import_market_partitions(root: Optional[Path] = None,
         "vix_daily": insert_vix_daily,
         "vix_term_structure": insert_vix_term_structure,
         "tbill_rates": insert_tbill_rates,
+        "cboe_index_daily": insert_cboe_index,
+        "rates_daily": insert_rates_daily,
     }
     counts = {}
     for table in (tables or MARKET_TABLES):
@@ -1789,16 +2251,16 @@ def import_market_partitions(root: Optional[Path] = None,
     return counts
 
 
-def options_snapshot_path(snapshot_date: str, underlying: str, root: Optional[Path] = None) -> Path:
+def options_snapshot_path(snapshot_date: str, underlying: str, root: Path | None = None) -> Path:
     root = Path(root) if root is not None else OPTIONS_DIR
     return root / f"{underlying.lower()}_{snapshot_date}.parquet"
 
 
 def export_options_snapshot(snapshot_date: str, underlying: str,
-                            root: Optional[Path] = None, *,
-                            moneyness: Optional[tuple] = None,
-                            max_years: Optional[float] = None,
-                            two_sided_only: bool = False) -> Optional[Path]:
+                            root: Path | None = None, *,
+                            moneyness: tuple | None = None,
+                            max_years: float | None = None,
+                            two_sided_only: bool = False) -> Path | None:
     """Persist one stored chain to ``<root>/<underlying>_<snapshot_date>.parquet``.
 
     All columns except the surrogate id, sorted by (root, expiry, right,
@@ -1830,7 +2292,7 @@ def export_options_snapshot(snapshot_date: str, underlying: str,
     return path if _write_parquet_if_changed(df, path) else None
 
 
-def export_options_snapshots(root: Optional[Path] = None, since: Optional[str] = None,
+def export_options_snapshots(root: Path | None = None, since: str | None = None,
                              **filters) -> list:
     """``export_options_snapshot`` for every stored chain (optionally only sessions >= since).
 
@@ -1849,7 +2311,7 @@ def export_options_snapshots(root: Optional[Path] = None, since: Optional[str] =
     return out
 
 
-def import_options_snapshots(root: Optional[Path] = None, overwrite: bool = False) -> int:
+def import_options_snapshots(root: Path | None = None, overwrite: bool = False) -> int:
     """Load persisted chains into the database.
 
     A chain the database already holds for that (session, underlying) is left
@@ -1943,6 +2405,8 @@ def get_data_coverage() -> dict:
             ("vix_futures_settlements","settlement_date"),
             ("tbill_rates",            "date"),
             ("classifier_predictions", "date"),
+            ("cboe_index_daily",       "date"),
+            ("rates_daily",            "date"),
         ]:
             row = conn.execute(
                 f"SELECT COUNT(*), MIN({col}), MAX({col}) FROM {table}"

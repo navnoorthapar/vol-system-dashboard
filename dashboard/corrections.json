@@ -1,0 +1,766 @@
+{
+  "about": "Correction rounds C16-C23 in postmortem form (root cause, detection, fix, regression tests, evidence). Evidence before C22 is the effect published when each fix landed; C22 evidence is computed at build time from data_store/backtest/c22_bridge.csv (replayed on the C23-restated VIX record), the β grid and the stored run; C23 evidence is quoted from the committed C23 artifacts named in each finding. A round may span days (date to date_end). 'models' are the validation pack's inventory IDs (docs/model_validation/README.md §1); a finding may carry its own id, models, severity, dates, commits and effect, and the pack's findings log (§6) is rendered from this file too. docs/corrections.md is rendered from this file (scripts/render_corrections.py). test_dashboard.py checks that every listed test exists in the suite and every commit is a full SHA dated inside its round.",
+  "repo": "https://github.com/navnoorthapar/vol-system-dashboard",
+  "headline_series": {
+    "about": "Portfolio cumulative return as published after each round; C16 published no portfolio figure; C23 from the stored canonical run.",
+    "points": [
+      {
+        "round": "C17",
+        "cum_ret_pct": -9.1
+      },
+      {
+        "round": "C18",
+        "cum_ret_pct": -19.0
+      },
+      {
+        "round": "C19",
+        "cum_ret_pct": -19.0
+      },
+      {
+        "round": "C20",
+        "cum_ret_pct": -19.0
+      },
+      {
+        "round": "C21",
+        "cum_ret_pct": -26.1
+      },
+      {
+        "round": "C22",
+        "cum_ret_pct": -21.6
+      },
+      {
+        "round": "C23",
+        "cum_ret_pct": null,
+        "from_artifact": "full_results.pkl"
+      }
+    ]
+  },
+  "rounds": [
+    {
+      "id": "C16",
+      "date": "2026-06-11",
+      "severity": "high",
+      "title": "Methodology audit: look-ahead, a circular feature, retrospective sizing",
+      "components": [
+        "signals",
+        "classifier",
+        "sizing"
+      ],
+      "detection": "Self-audit of the methodology before the result was published.",
+      "commits": [
+        "47e1ffebc910c5ad31c85c5bac0cb2511172a62b"
+      ],
+      "effect": "The published +19% headline was a label-noise artifact.",
+      "findings": [
+        {
+          "flaw": "PDV look-ahead bias",
+          "status": "fixed",
+          "root_cause": "The PDV model was fitted on the full sample, so every backtest year traded a forecast that had seen its own future.",
+          "fix": "PDVLinear refitted per backtest year on strictly earlier returns (walk-forward) before it feeds the pdv_iv_spread feature.",
+          "tests": [
+            "joint_vol_calibration/tests/test_pdv.py::TestNoLookAhead::test_walk_forward_no_lookahead_poison",
+            "joint_vol_calibration/tests/test_pdv.py::TestNoLookAhead::test_poison_actually_bites_later"
+          ],
+          "evidence": "S1/S1C now trade a causal PDV forecast"
+        },
+        {
+          "flaw": "Circular classifier feature",
+          "status": "fixed",
+          "root_cause": "vvix was a training feature while the R2 label is defined as VVIX above a threshold, so 86.2% accuracy partly measured rule recovery.",
+          "fix": "vvix removed from the classifier's features; honest accuracy 63.4%.",
+          "tests": [
+            "joint_vol_calibration/tests/test_regime_classifier.py::TestVersionRobustPickle::test_shipped_classifier_is_built_on_the_canonical_gate"
+          ],
+          "evidence": "Historical C16 figure: honest accuracy 63.4%; C17 then found it lost to the persistence baseline"
+        },
+        {
+          "flaw": "Retrospective Kelly netting",
+          "status": "fixed",
+          "root_cause": "Correlation and Sharpe multipliers used same-day P&L to size the same day's positions.",
+          "fix": "Multipliers shifted one session and applied to position size in a second simulation pass, so contracts and costs reflect the real size.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestCorrelationNetting::test_engine_applies_the_overlay_one_session_late"
+          ],
+          "evidence": "Ex-ante sizing; no same-day information"
+        },
+        {
+          "flaw": "S1C data snooping",
+          "status": "quantified",
+          "root_cause": "S1C's direction was chosen after watching S1 fail on 2018–2025; that cannot be undone in code.",
+          "fix": "Tested on 2013–2017, a window not used to design it (C17 re-ran it under corrected labels): S1C −$333K; the apparent edge was an artifact.",
+          "tests": [],
+          "evidence": "Pseudo-out-of-sample under C17: S1C −$333K — the apparent edge was an artifact"
+        },
+        {
+          "flaw": "S3 arbitrary P&L scale",
+          "status": "quantified",
+          "root_cause": "S3's P&L was an assumed 2% per z-unit (no single-stock options data).",
+          "fix": "Sensitivity run at 0.5% / 1% / 2% / 4% per z-unit; C22 replaced the proxy with the index leg (a short SPX straddle).",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestS3::test_null_test_exposes_the_z_proxy_bias"
+          ],
+          "evidence": "C16 sensitivity run: P&L +$5K…+$52K, win 15–17 of 17 at every scale (before C18, C21 and C22 re-priced every trade and C22 replaced the proxy with the index leg)"
+        }
+      ],
+      "models": [
+        "M9",
+        "M8"
+      ]
+    },
+    {
+      "id": "C17",
+      "date": "2026-06-11",
+      "severity": "high",
+      "title": "Red-team: the classifier against a persistence baseline; margin; an unbounded tail",
+      "components": [
+        "classifier",
+        "risk limits",
+        "signals"
+      ],
+      "detection": "Red-team review in the same week as C16.",
+      "commits": [
+        "8c3ba9b650eeb8554a30bf8c1b5541306fa46abd"
+      ],
+      "effect": "The classifier loses to 'predict yesterday's regime' and was demoted from the trading loop; portfolio −9.1% as published after this round.",
+      "findings": [
+        {
+          "flaw": "Classifier never benchmarked against persistence",
+          "status": "fixed",
+          "root_cause": "Regime labels are same-day observables, so yesterday's label is a no-skill baseline; it scored 90.0% on 2020+ against the classifier's 63.4%.",
+          "fix": "ML demoted to research; the backtest trades the lagged deterministic rule labels.",
+          "tests": [
+            "joint_vol_calibration/tests/test_regime_classifier.py::TestEvaluateClassifier::test_persistence_baseline_reported",
+            "joint_vol_calibration/tests/test_regime_classifier.py::TestEvaluateClassifier::test_persistence_uses_previous_session_label"
+          ],
+          "evidence": "63.4% vs 90.0% — the ML added negative value",
+          "evidence_key": "clf"
+        },
+        {
+          "flaw": "Margin model documented but not enforced",
+          "status": "fixed",
+          "root_cause": "MARGIN_RATIO was defined but never applied, so short straddles had unlimited capacity.",
+          "fix": "Short straddles capped at nav / (0.20 * K * 100) contracts at entry.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_engine.py::TestC17Fixes::test_margin_cap_on_short_straddles"
+          ],
+          "evidence": "Cost model now matches its documentation"
+        },
+        {
+          "flaw": "S1C had no R2 exit",
+          "status": "fixed",
+          "root_cause": "An open S1C short straddle could ride a VVIX spike for up to 21 days with no stop.",
+          "fix": "S1C force-closes when the regime moves into R2, as S1X, S2X and S4 do.",
+          "tests": [
+            "joint_vol_calibration/tests/test_signal_engine.py::TestGenerateSignal1Contrarian::test_r2_transition_forces_exit"
+          ],
+          "evidence": "Worst-case short-gamma exposure now bounded by the R2 rule"
+        },
+        {
+          "flaw": "Dead monthly recalibration; a flat 5% hurdle",
+          "status": "fixed",
+          "root_cause": "The monthly Heston loop never produced a calibration (no pre-2026 options data) and nothing consumed its output; Sharpe used a flat 5%.",
+          "fix": "Loop removed; Sharpe and Sortino measured against the per-date ^IRX path (later superseded in C22).",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_engine.py::TestC17Fixes::test_compute_metrics_accepts_rf_series"
+          ],
+          "evidence": "Backtest claims now match what the code does"
+        }
+      ],
+      "models": [
+        "M11"
+      ]
+    },
+    {
+      "id": "C18",
+      "date": "2026-06-14",
+      "severity": "high",
+      "title": "Straddles never rolled: one stale-strike position marked past expiry",
+      "components": [
+        "backtest engine"
+      ],
+      "detection": "Word-by-word audit of the engine's position series: positions never returned to flat.",
+      "commits": [
+        "3d52f421dafa9eac13671d54e95ab5d0ec4a5f97"
+      ],
+      "effect": "Inverted the contrarian thesis: S1 −$1.53M → +$463K, S1C −$97K → −$404K, portfolio −9.1% → −19.0%; S3 unchanged.",
+      "findings": [
+        {
+          "flaw": "Same-day re-entry kept one straddle alive",
+          "status": "fixed",
+          "root_cause": "The state machine re-entered on the day it exited, so the strike was fixed at first entry and the tenor decayed to its 1-day floor: a directional |S - K| bet, not a vol trade. Every P&L figure from C10 to C17 was contaminated.",
+          "fix": "A forced flat day so positions roll into fresh 30-day ATM straddles.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestExpiryRoll::test_rolls_into_fresh_atm_straddles",
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestExpiryRoll::test_no_trade_outlives_its_expiry"
+          ],
+          "evidence": "Inverted the thesis: S1 −$1.53M → +$463K, S1C −$97K → −$404K, portfolio −9.1% → −19.0%; S3 unchanged"
+        }
+      ],
+      "models": [
+        "M8"
+      ]
+    },
+    {
+      "id": "C19",
+      "date": "2026-06-20",
+      "severity": "low",
+      "title": "Signal-engine logic fixes and data-gap repair",
+      "components": [
+        "signals",
+        "data"
+      ],
+      "detection": "Follow-up review of the signal state machines after C18.",
+      "commits": [
+        "e1cfbd0eb0f5577d9e7ad79a5cedb9c772d69807"
+      ],
+      "effect": "Cleanup; the canonical numbers did not change.",
+      "findings": [
+        {
+          "flaw": "S2 stop-loss not propagated; dead code; incomplete summaries; data gaps",
+          "status": "fixed",
+          "root_cause": "Stop-loss exits did not reach the S2 position; signal summaries skipped sleeves; market data had gaps.",
+          "fix": "Stops propagate to the S2 position, dead code removed, summaries cover every sleeve, gaps repaired.",
+          "tests": [
+            "joint_vol_calibration/tests/test_signal_engine.py::TestGenerateSignal2::test_short_straddle_stopped_when_front_vol_rises",
+            "joint_vol_calibration/tests/test_signal_engine.py::TestGenerateSignal2::test_long_straddle_stopped_when_front_vol_falls"
+          ],
+          "evidence": "Cleanup — the canonical numbers did not change"
+        }
+      ],
+      "models": [
+        "M8",
+        "V1"
+      ]
+    },
+    {
+      "id": "C20",
+      "date": "2026-08-04",
+      "severity": "high",
+      "title": "The calibration selector rewarded broken data",
+      "components": [
+        "calibration",
+        "dashboard"
+      ],
+      "detection": "The headline fit was traced to a day the VIX feed returned only ^VIX.",
+      "commits": [
+        "35690a261ddf7c944d28be2a9329736794307db6",
+        "9058371bd30bbfc1d259e74446fa6b349eca3fc9"
+      ],
+      "effect": "The published 'best calibration' had been the day the VIX feed failed; fits are now gated on at least 3 VIX tenors with provenance recorded.",
+      "findings": [
+        {
+          "flaw": "Archived fits ranked by SPX RMSE with no data-sufficiency check",
+          "status": "fixed",
+          "root_cause": "With one VIX tenor the VIX leg is one point Heston matches exactly, so under-identified joint fits scored best and headlined the site.",
+          "fix": "Gate on >= 3 VIX tenors; Feller reported as PASS / BINDING / VIOLATED. C22 went further: the headline is the newest gate-passing fit, never the lowest RMSE.",
+          "tests": [
+            "joint_vol_calibration/tests/test_joint_calibrator.py::TestCalibrationQualityGate::test_single_vix_tenor_rejected",
+            "joint_vol_calibration/tests/test_dashboard.py::test_selector_takes_newest_acceptable_fit_not_lowest_rmse"
+          ],
+          "evidence": "The published “best calibration” had been the day the VIX feed failed"
+        }
+      ],
+      "models": [
+        "M4"
+      ],
+      "date_end": "2026-09-05"
+    },
+    {
+      "id": "C21",
+      "date": "2026-09-05",
+      "severity": "high",
+      "title": "The cash hurdle was a test fixture; straddles marked a day too rich",
+      "components": [
+        "backtest engine",
+        "data",
+        "daily bot"
+      ],
+      "detection": "Adversarial audit of the backtest inputs and the daily bot.",
+      "commits": [
+        "15b4db5f98f05b9ed2bb9f8fa2c2b934a74097cf",
+        "90dc851581a5197ce2eec126c78673293b2edb90"
+      ],
+      "effect": "Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, MaxDD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K.",
+      "findings": [
+        {
+          "flaw": "^IRX history inside the window was seven synthetic test rows",
+          "status": "fixed",
+          "root_cause": "test_rates.py wrote np.linspace(0.015, 0.020) into the tracked database and it was forward-filled for five years.",
+          "fix": "Real ^IRX history loaded (1,809 rows); the suite now works on a private copy and cannot write the tracked database.",
+          "tests": [
+            "joint_vol_calibration/tests/test_c21_audit_fixes.py::TestRiskFreeHurdle::test_metrics_reject_a_stub_rate_series",
+            "joint_vol_calibration/tests/test_rates.py::TestIsolation::test_database_module_points_at_a_temp_file"
+          ],
+          "evidence": "Part of the round's combined effect above; the two backtest fixes were not re-run separately"
+        },
+        {
+          "flaw": "First holding day carried no time decay",
+          "status": "fixed",
+          "root_cause": "T_rem was computed from the pre-increment day count, so every mark valued the straddle one day too rich, flattering the short side.",
+          "fix": "Time to expiry decays from the first holding day.",
+          "tests": [
+            "joint_vol_calibration/tests/test_c21_audit_fixes.py::TestStraddleTimeDecay::test_first_holding_day_decays"
+          ],
+          "evidence": "Part of the round's combined effect above; the two backtest fixes were not re-run separately"
+        },
+        {
+          "flaw": "The bot published classifier output as rule labels",
+          "status": "fixed",
+          "root_cause": "The daily refresh relabelled regime_labels.parquet with the demoted classifier and refit a frozen option surface.",
+          "fix": "The bot writes deterministic rule labels and calibrates on a live chain.",
+          "tests": [
+            "joint_vol_calibration/tests/test_c21_audit_fixes.py::TestRegimeLabelProvenance::test_refresh_labels_with_rule_not_classifier"
+          ],
+          "evidence": "The published labels are the rule's again"
+        }
+      ],
+      "models": [
+        "M8",
+        "V1"
+      ]
+    },
+    {
+      "id": "C22",
+      "date": "2026-10-12",
+      "severity": "high",
+      "title": "Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L",
+      "components": [
+        "backtest engine",
+        "signals",
+        "calibration",
+        "daily bot"
+      ],
+      "detection": "A subsystem-by-subsystem audit (about 270 findings, each reproduced before fixing) after the live calibration failed for a month.",
+      "commits": [
+        "a51eccc15d25b750c6a1523b3a53331b8596280d"
+      ],
+      "findings": [
+        {
+          "flaw": "ATM straddles priced at the VIX",
+          "status": "fixed",
+          "root_cause": "The VIX is a 30-day variance-swap rate that contains the skew premium; straddles were priced and marked at it.",
+          "fix": "ATM vol = β × VIX, with β estimated from stored SPX chains.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestAtmVol::test_entry_vol_is_beta_times_vix",
+            "joint_vol_calibration/tests/test_backtest_reproducibility.py::test_default_beta_is_the_estimate_from_the_real_chains"
+          ],
+          "bridge_steps": [
+            "beta"
+          ],
+          "evidence_key": "beta"
+        },
+        {
+          "flaw": "Two R2 gates and a hard-coded VVIX override",
+          "status": "fixed",
+          "root_cause": "Published labels used the adaptive gate while the backtest traded a fixed 100-point VVIX gate, and the signal engine OR-ed a VVIX > 100 override onto any labels.",
+          "fix": "One adaptive gate (rolling 252-day 80th percentile of VVIX) everywhere; no override.",
+          "tests": [
+            "joint_vol_calibration/tests/test_regime_classifier.py::TestR2Gate::test_default_gate_is_adaptive",
+            "joint_vol_calibration/tests/test_signal_engine.py::TestSignalEngineGenerate::test_default_regimes_are_lagged_canonical_rule_labels"
+          ],
+          "bridge_steps": [
+            "r2_gate"
+          ],
+          "evidence_key": "r2_gate"
+        },
+        {
+          "flaw": "Free hedging, no carry, sizing off $1M, no-op netting",
+          "status": "fixed",
+          "root_cause": "The opening hedge and unwind were free, the book earned no carry, size used $1M instead of the sleeve's NAV, and the netting factor was clipped into a no-op.",
+          "fix": "Costs charged once each, premium and hedge financed, size off the running sleeve NAV, real netting.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestHedgeCosts::test_open_rebalance_and_unwind_charged_once_each",
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestFinancing::test_trade_financing_matches_formula",
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestBookkeeping::test_sizing_and_margin_use_running_sleeve_nav",
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestCorrelationNetting::test_legacy_multiplier_could_never_reduce_size"
+          ],
+          "bridge_steps": [
+            "hedge_costs",
+            "financing",
+            "sleeve_nav",
+            "corr_netting"
+          ],
+          "evidence_key": "costs"
+        },
+        {
+          "flaw": "S3 P&L was a z-score times an assumed 2%",
+          "status": "fixed",
+          "root_cause": "The 'survivor' was positive on 99.5% of random-walk null paths: it measured mean reversion of a ratio, not option P&L.",
+          "fix": "S3 is the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestS3::test_index_leg_is_a_short_spx_straddle",
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestS3::test_null_real_statistic_is_the_engines_s3"
+          ],
+          "bridge_steps": [
+            "s3_exit",
+            "s3_index_leg"
+          ],
+          "evidence_key": "s3"
+        },
+        {
+          "flaw": "PDV spread compared the 30-day VIX with a 1-day forecast",
+          "status": "fixed",
+          "root_cause": "The pre-C22 forecast was next-day E|r|, so 'VIX > forecast + 2 vol pts' held on almost every session.",
+          "fix": "The spread uses a 21-day RMS-vol forecast refitted daily on labels fully observed at the forecast origin.",
+          "tests": [
+            "joint_vol_calibration/tests/test_pdv21_wiring.py::TestBacktestEngine::test_canonical_horizon_is_21",
+            "joint_vol_calibration/tests/test_pdv.py::TestWalkForwardVolForecast::test_no_lookahead_poison"
+          ],
+          "bridge_steps": [
+            "pdv_h21"
+          ],
+          "evidence_key": "pdv_h21"
+        },
+        {
+          "flaw": "Sharpe charged cash twice",
+          "status": "fixed",
+          "root_cause": "Option P&L on unfunded collateral is already an excess return; subtracting ^IRX again double-counted it.",
+          "fix": "Sharpe uses rf = 0 (collateral assumed to earn T-bills), with the T-bill benchmark shown beside it.",
+          "tests": [
+            "joint_vol_calibration/tests/test_backtest_accounting.py::TestSharpeConvention::test_engine_does_not_charge_tbills_on_excess_pnl"
+          ],
+          "bridge_steps": [
+            "sharpe"
+          ],
+          "evidence_key": "sharpe"
+        },
+        {
+          "flaw": "VIX indices fitted as futures; ATM-call anchors; one-expiry live fits",
+          "status": "fixed",
+          "root_cause": "The calibrator fitted spot VIX indices with the futures formula, anchored on adjacent ATM calls only, and the daily bot accepted fits from one SPX expiry (9 options) for a month.",
+          "fix": "Spot-index VIX leg, forward-moneyness z-grid anchors with put-wing quotes, and a gate on expiries, options and the put wing.",
+          "tests": [
+            "joint_vol_calibration/tests/test_joint_calibrator.py::TestSyntheticMarket::test_vix_index_leg_zero_at_generating_params",
+            "joint_vol_calibration/tests/test_joint_calibrator.py::TestCalibrationQualityGate::test_single_expiry_rejected",
+            "joint_vol_calibration/tests/test_joint_calibrator.py::TestCalibrationQualityGate::test_missing_put_wing_rejected"
+          ],
+          "evidence": "Headline Heston fit replaced; one-expiry fits are rejected by the gate"
+        }
+      ],
+      "effect": "Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run.",
+      "models": [
+        "M1",
+        "M3",
+        "M4",
+        "M5",
+        "M7",
+        "M8",
+        "M9",
+        "M10"
+      ],
+      "date_end": "2026-10-19"
+    },
+    {
+      "id": "C23",
+      "date": "2026-10-20",
+      "date_end": "2026-10-21",
+      "severity": "high",
+      "title": "Vendor data, the calibration's identification, spread-unit evidence and statistical inference",
+      "components": [
+        "data layer",
+        "calibration",
+        "surface",
+        "statistics",
+        "rates",
+        "daily bot",
+        "dashboard",
+        "engineering"
+      ],
+      "detection": "A reviewer-standard pass over every subsystem in six parallel chains (surface, calibration, statistics, data, UI, engineering), each result measured on the five committed model_version 2 sessions and merged only with the full suite green. An independent adversarial review of the merged branch then confirmed 62 findings; the ones that corrected a published claim are finding 11.",
+      "commits": [
+        "c63e515f1c64b311d924d091ac8145bdd3fb6527",
+        "256655374fe2302942cc71e7594e6f2aa91fa7ac",
+        "958be6996b9ea0f837dc256638be5ffb787bccbf",
+        "49f5fd03619dd1559f8e0a5185b8e9eb93ddc310",
+        "1c886e33525cfdb0322ad3c88fec25f8f63c2965",
+        "ca36d24448b9d3923f4b517499366eb8318366f5",
+        "9c486c388f9d274021d1d96473eedf628898a0cb",
+        "a678e57c10a32d835ee261021a37ea7c971494ad",
+        "e6a92bcf532cbd67462163e791eba829f0bdb853",
+        "ba360c82b9d716213c8409c4338002a0faaab84b",
+        "a92308c85659450830e78bc58d12124f4b994ae6",
+        "741dfe3a36f90c0f8feaa263ed896fdd79b02777",
+        "113efa540b9ab2c1fc03d06edaa24a378a040bbb",
+        "d63b7976f73d33d978baabf4711956e0d303d51d",
+        "59e73b1056b206532d14737285f086e7c909aa28",
+        "dd4dc019ff1b14253a2f97990da877ecfec97aad",
+        "b69eb451c39fa1778e2f6f892343a550ea78a05b",
+        "1a4ca03f1edbc58d26553a18a1bee3e1e8b61100"
+      ],
+      "effect": "Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it. The review round (finding 11) corrected published claims without moving a headline number.",
+      "findings": [
+        {
+          "flaw": "The labels, backtest and calibrator read Yahoo's copies of the VIX index family",
+          "status": "fixed",
+          "root_cause": "Production overlaid Cboe's official closes on vix_daily only; every consumer read vix_term_structure, Yahoo's float32 copies with NULL provenance, NYSE-holiday rows and 8 VVIX sessions missing (forward-filled).",
+          "fix": "Cboe's index files are the record (Yahoo only as a provisional same-evening row, replaced when Cboe posts); the database cache re-synced from it; the daily job writes Cboe first and reports cross-source differences above 0.25 pts.",
+          "tests": [
+            "joint_vol_calibration/tests/test_data_layer.py::TestC23RecordCorrection::test_apply_db_removes_holiday_rows_and_installs_the_cboe_values",
+            "joint_vol_calibration/tests/test_cloud_refresh.py::test_vix_term_structure_is_cboe_primary",
+            "joint_vol_calibration/tests/test_backtest_reproducibility.py::test_c23_bridge_reproduces_every_row"
+          ],
+          "evidence": "136 term-structure rows replaced (38 by more than 0.25 pts, 33 of them in the backtest window), 8 VVIX sessions added, 31 holiday rows removed; portfolio −$216,092 → −$222,177 (c23_bridge.csv); labels 2019-08-09, 2020-02-20, 2020-06-11, 2021-05-11 R1 → R2 and 2021-06-09, 2021-07-08 R2 → R1",
+          "id": "C23-D1",
+          "c23_bridge_steps": ["restated", "holidays", "vvix_gaps", "cboe_values"],
+          "models": [
+            "V1",
+            "V2",
+            "M8",
+            "M10"
+          ],
+          "severity": "high",
+          "date": "2026-10-20",
+          "commits": [
+            "c63e515f1c64b311d924d091ac8145bdd3fb6527",
+            "256655374fe2302942cc71e7594e6f2aa91fa7ac"
+          ],
+          "effect": "portfolio −$216,092 → −$222,177, Sharpe −0.88 → −0.99; 6 of 4,162 labels move"
+        },
+        {
+          "flaw": "The σ ≤ 2 box, not the market, sets the headline fit",
+          "status": "quantified",
+          "root_cause": "σ sits on its 2.0 ceiling in 2 of the 5 model_version 2 fits (2026-03-24, 2026-10-16); the page said 4 of 5 parameters are set by the market without saying what the box costs.",
+          "fix": "A σ profile (the joint loss refitted under caps 1 to 10, κ ≤ 60) and Gauss–Newton identifiability are stored per session and shown; the production box is kept (the NN domain, the vomma shock sizing and the gate depend on it) and its cost is published. The review round (C23f) removed the count the σ profile contradicts: κ is interior but moves with the σ cap along a κ–σ ridge (κ 1.2 at σ ≤ 1, 5.0 at the cap, 27.4 freed) and its curvature SE is 19%, so the pages say σ is on its bound and κ is set by the box, not that 4 of 5 parameters are set by the data.",
+          "tests": [
+            "joint_vol_calibration/tests/test_identifiability.py::test_sigma_box_rationale_in_config_matches_the_artifacts",
+            "joint_vol_calibration/tests/test_identifiability.py::test_diagnostics_artifact_is_consistent",
+            "joint_vol_calibration/tests/test_dashboard.py::test_no_identification_count_where_the_sigma_profile_contradicts_it"
+          ],
+          "evidence": "2026-10-16: freeing σ gives σ 6.90, κ 27.4, loss −27.7%, out-of-sample RMSE 2.96 → 1.19 vol pts and model VVIX 205 → 113 against the market's 110; on 2026-03-24 the box costs 2.1% of the loss (data_store/calibrations/diagnostics/)",
+          "id": "C23-M1",
+          "models": [
+            "M4"
+          ],
+          "severity": "medium",
+          "date": "2026-10-20",
+          "commits": [
+            "958be6996b9ea0f837dc256638be5ffb787bccbf"
+          ],
+          "effect": "none (the fit is published with its σ profile and the box's cost)"
+        },
+        {
+          "flaw": "Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage",
+          "status": "fixed",
+          "root_cause": "No per-quote residuals were stored, the calibration chart drew the model only, and nothing screened the stored quotes for static arbitrage.",
+          "fix": "A surface package: Cohen–Reisinger–Wang screen and l1 repair on HiGHS, an executable-arbitrage certificate, eSSVI and calendar-ordered SVI surfaces, and one scorecard that scores every model on the calibrator's out-of-sample quotes in half-spreads.",
+          "tests": [
+            "joint_vol_calibration/tests/test_surface_arbitrage.py::test_committed_session_screen_counts",
+            "joint_vol_calibration/tests/test_surface_report.py::test_spread_unit_claims_hold",
+            "joint_vol_calibration/tests/test_surface_report.py::test_committed_artifacts_match_a_recomputation"
+          ],
+          "evidence": "Out-of-sample median |model − mid| over the 5 sessions: Heston 4.4–15.6 half-spreads (3.0–12.3% inside the bid–ask); the arbitrage-free SVI surface 0.45–1.98 (32–80% inside); executable static arbitrage on all 5 sessions, 160–629 quotes per session in an executable row (data_store/surface/)",
+          "id": "C23-M2",
+          "models": [
+            "M3",
+            "M4",
+            "M14"
+          ],
+          "severity": "medium",
+          "date": "2026-10-20",
+          "commits": [
+            "49f5fd03619dd1559f8e0a5185b8e9eb93ddc310",
+            "e6a92bcf532cbd67462163e791eba829f0bdb853"
+          ],
+          "effect": "Heston 4.4–15.6 half-spreads out of sample; executable static arbitrage on all 5 sessions"
+        },
+        {
+          "flaw": "The backtest had no statistical inference",
+          "status": "fixed",
+          "root_cause": "Sharpe ratios and a 200-path S3 null were published without intervals, deflation for the configurations tried since C10, or exposure-matched nulls for every sleeve.",
+          "fix": "Stationary-bootstrap intervals, PSR/DSR against a committed trials ledger, Hansen SPA and StepM, CSCV PBO, exposure-matched circular-shift and trade-shuffle nulls for every sleeve, and forecast comparisons (QLIKE, Diebold–Mariano, MCS).",
+          "tests": [
+            "joint_vol_calibration/tests/test_stats_inference_report.py::test_headline_is_generated_from_the_stored_numbers",
+            "joint_vol_calibration/tests/test_stats_inference_report.py::test_bootstrap_rebuilds_exactly_from_the_committed_curve",
+            "joint_vol_calibration/tests/test_stats_nulls.py::test_circular_null_detects_real_timing_and_not_luck",
+            "joint_vol_calibration/tests/test_stats_inference_report.py::test_dsr_reports_the_ledger_count_range_beside_the_lenient_bound"
+          ],
+          "evidence": "Portfolio Sharpe −0.99, 95% CI −1.81 to −0.30; S3 timing p 0.078 against 3,550 circular shifts (Holm over 6 sleeves 0.47); Hansen SPA p 0.65 for the published series against cash; S3's deflated Sharpe ratio is 0.000–0.019 at the ledger's trial counts (N 147–210) and reaches 0.27 only at N 4.6, the eigenvalue participation ratio of the 83 re-run trial series (not a trial count), with the skill-less trial variance; CSCV PBO 0.34 for the 16 configurations of the published portfolio (data_store/backtest/inference/summary.json)",
+          "id": "C23-S1",
+          "models": [
+            "M8",
+            "M17"
+          ],
+          "severity": "high",
+          "date": "2026-10-20",
+          "commits": [
+            "1c886e33525cfdb0322ad3c88fec25f8f63c2965"
+          ],
+          "effect": "portfolio Sharpe 95% interval −1.81 to −0.30; no published series beats cash"
+        },
+        {
+          "flaw": "Flat rates in the hedger and the Greeks surface",
+          "status": "fixed",
+          "root_cause": "The C7 hedger hard-coded R = 1.5% ('2020 US Treasury'), and the Greeks surface used one median r and q for every maturity, so its 1-year forward was 0.50% below that expiry's parity forward.",
+          "fix": "A daily Treasury zero curve (bills and par yields, look-ahead gated, refused when more than 7 days old) feeds the calibrator's reference, the chain cleaner, the C7 study and per-maturity Greeks carry.",
+          "tests": [
+            "joint_vol_calibration/tests/test_rate_reference.py::test_c7_uses_the_one_year_zero_rate_at_entry",
+            "joint_vol_calibration/tests/test_rate_reference.py::test_greeks_carry_reprices_the_parity_forwards_on_the_treasury_curve"
+          ],
+          "evidence": "C7 cumulative P&L 167.95 → 168.34 index points; Greeks surface 1-year forward 7,931.8 → 7,971.7 (the parity forward); the committed fits recorded ^IRX and are unchanged",
+          "id": "C23-R1",
+          "models": [
+            "M6",
+            "M19",
+            "M20"
+          ],
+          "severity": "medium",
+          "date": "2026-10-21",
+          "commits": [
+            "ca36d24448b9d3923f4b517499366eb8318366f5"
+          ],
+          "effect": "C7 cumulative P&L 167.95 → 168.34 index points"
+        },
+        {
+          "flaw": "A presentation test could lose a captured session",
+          "status": "fixed",
+          "root_cause": "The daily job committed the chain and the fit only if the dashboard tests passed; a test that pinned a value of the committed data failed on the first new fit, and the 2026-10-19 overnight book (accepted three times) was lost.",
+          "fix": "Separate gates: data tests gate the capture commit, artifact tests the derived artifacts, presentation tests only the deploy; CI simulates the bot's next session before merge.",
+          "tests": [
+            "joint_vol_calibration/tests/test_infra_config.py::test_a_presentation_test_cannot_lose_the_captures",
+            "joint_vol_calibration/tests/test_infra_config.py::test_each_commit_adds_its_own_paths"
+          ],
+          "evidence": "No published number moved; the simulated next session (scripts/ci/simulate_next_session.py) found 5 more tests that would have blocked the deploy on the first accepted fit",
+          "id": "C23-O1",
+          "models": [
+            "operations"
+          ],
+          "severity": "medium",
+          "date": "2026-10-20",
+          "date_end": "2026-10-21",
+          "commits": [
+            "9c486c388f9d274021d1d96473eedf628898a0cb",
+            "a678e57c10a32d835ee261021a37ea7c971494ad"
+          ],
+          "effect": "none; the next-session simulation now runs in CI"
+        },
+        {
+          "id": "C23-O2",
+          "models": [
+            "operations"
+          ],
+          "severity": "low",
+          "date": "2026-10-21",
+          "commits": [
+            "741dfe3a36f90c0f8feaa263ed896fdd79b02777"
+          ],
+          "flaw": "`make reproduce` refitted the calibrations from a deleted scratch pickle and with the wrong optimiser",
+          "status": "fixed",
+          "root_cause": "The refit step read each fit's recorded inputs from the scratch copy's pickle, which run_step deletes first, so all five calibration steps failed; with the path right, the default TRF refit would still have missed the committed DE fits by up to 2e-3 relative.",
+          "fix": "Each refit reads its inputs from the committed pickle in the checkout and runs the optimiser that made it (DE for every fit committed before C23).",
+          "tests": [
+            "joint_vol_calibration/tests/test_infra_config.py::test_reproduce_refits_each_fit_from_its_committed_record"
+          ],
+          "evidence": "make reproduce plus the three --full steps: 14 of 14 artifacts bit for bit (docs/reproduce.md)",
+          "effect": "none (the refits failed; now 14 of 14 bit for bit)"
+        },
+        {
+          "id": "C23-U1",
+          "models": [
+            "dashboard"
+          ],
+          "severity": "low",
+          "date": "2026-10-21",
+          "commits": [
+            "113efa540b9ab2c1fc03d06edaa24a378a040bbb"
+          ],
+          "flaw": "The accessibility gate audited retired pages; the Risk page printed 'r = —%'; the ML classifier sat on the Overview",
+          "status": "fixed",
+          "root_cause": "The CI accessibility gate listed two pages that had become redirects and could not inject axe under the pages' CSP; every page scrolled horizontally at 320 px when the view was a session behind; the Risk banner read one flat carry the per-maturity Greeks no longer had; a demoted research model was on the first screen.",
+          "fix": "The gate audits the seven pages and the 404 (the redirects are not pages), with CSP bypassed for the audit context only; status items wrap below 480 px; the Risk page states its r(T), q(T) ranges and the curve; the classifier moved to the Research page.",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_risk_provenance_states_the_per_maturity_carry",
+            "joint_vol_calibration/tests/test_dashboard.py::test_overview_keeps_research_prototypes_off_the_first_screen"
+          ],
+          "evidence": "axe-core 4.13.0: 0 violations on the 7 pages and the 404 at 1440 and 390 px in both colour schemes; no horizontal scroll from 320 to 1920 px (docs/engineering.md)",
+          "effect": "none"
+        },
+        {
+          "id": "C23-E1",
+          "models": [
+            "M3"
+          ],
+          "severity": "low",
+          "date": "2026-10-20",
+          "commits": [
+            "ba360c82b9d716213c8409c4338002a0faaab84b"
+          ],
+          "flaw": "`option_chain.year_fraction` raised on an origin with no time in it",
+          "status": "fixed",
+          "root_cause": "A missing quote_time cell reads as an empty string or a missing value, which the time parser did not accept; making the module pass mypy's strict flags found it.",
+          "fix": "An origin with no time counts as the session close.",
+          "tests": [
+            "joint_vol_calibration/tests/test_properties_iv.py::test_year_fraction_clock"
+          ],
+          "evidence": "the path raised; it never returned a wrong T",
+          "effect": "none"
+        },
+        {
+          "id": "C23-E2",
+          "models": [
+            "V4"
+          ],
+          "severity": "low",
+          "date": "2026-10-20",
+          "commits": [
+            "a92308c85659450830e78bc58d12124f4b994ae6"
+          ],
+          "flaw": "Known advisories in three locked packages on the download and preview paths",
+          "status": "fixed",
+          "root_cause": "pip-audit 2.10.1 on the lock (2026-10-20): idna 3.11 (CVE-2026-45409), urllib3 2.6.3 (five CVEs), werkzeug 3.1.8 (CVE-2026-102598); none in the numerical stack.",
+          "fix": "Floors idna ≥ 3.15, urllib3 ≥ 2.8.0 and werkzeug ≥ 3.1.9 in requirements.txt and a recompiled lock that keeps every numerical pin.",
+          "tests": [
+            "joint_vol_calibration/tests/test_infra_config.py::test_lock_keeps_the_security_floors"
+          ],
+          "evidence": "requirements-lock.txt pins idna 3.20, urllib3 2.8.0, werkzeug 3.1.9; the committed pickles and bit-exact artifacts are unaffected",
+          "effect": "none on a number; urllib3 and idna are on the daily job's download path"
+        },
+        {
+          "id": "C23-V1",
+          "models": [
+            "M4",
+            "M6",
+            "M14",
+            "M17",
+            "M18"
+          ],
+          "severity": "medium",
+          "date": "2026-10-21",
+          "commits": [
+            "d63b7976f73d33d978baabf4711956e0d303d51d",
+            "59e73b1056b206532d14737285f086e7c909aa28",
+            "dd4dc019ff1b14253a2f97990da877ecfec97aad",
+            "b69eb451c39fa1778e2f6f892343a550ea78a05b",
+            "1a4ca03f1edbc58d26553a18a1bee3e1e8b61100"
+          ],
+          "flaw": "Published claims that the branch's own artifacts contradicted (independent review of C23)",
+          "status": "fixed",
+          "root_cause": "Claims were checked on the grids that produced them: the 'arbitrage-free' SVI surface was constrained at 241 nodes, the forward ledger was tested on synthetic books that always held the position's expiry, the Risk page's delta grid was labelled from the column name, and the S3 deflated Sharpe ratio was quoted at its most lenient trial count.",
+          "fix": "SVI slices are accepted only with refined-grid butterfly and calendar certificates (Durrleman g ≥ 0 and calendar order on a 1e-4 grid over k in [−3, 2], a 1/k grid to |k| = 2,000–3,000 and the |k| → ∞ limits), which also gate the label; the ledger trades and marks on the session's full Cboe book whatever the fit does; the Risk grid shows the OTM option's forward delta; every DSR and PBO is reported with its basis; page copy states only what the data supports.",
+          "tests": [
+            "joint_vol_calibration/tests/test_surface_svi.py::test_butterfly_certificate_finds_the_dip_between_grid_nodes",
+            "joint_vol_calibration/tests/test_surface_svi.py::test_ordering_certificate_catches_crossings_the_check_grid_missed",
+            "joint_vol_calibration/tests/test_forward_ledger.py::test_a_book_without_the_expiry_defers_the_close_to_the_next_book_that_has_it",
+            "joint_vol_calibration/tests/test_dashboard.py::test_risk_delta_grid_is_the_otm_options_forward_delta",
+            "joint_vol_calibration/tests/test_stats_inference_report.py::test_every_pbo_is_reported_with_its_basis",
+            "joint_vol_calibration/tests/test_dashboard.py::test_corrections_trend_sentence_agrees_with_the_published_series"
+          ],
+          "evidence": "Before: 21 SVI-cal slices with g < 0 between grid nodes (worst −2.58e-5 at k = 0.19 on 2026-10-16) and 35 crossing calendar pairs; after: 0 and 0 in all five sessions, every session's objective equal or lower, the published 0.45–1.98 half-spread range unchanged. The ledger's position expiry was in its book on 3 of 19 sessions; now the full Cboe book (55 expiries). The Risk grid showed +0.99 for a 30%-OTM put; now −0.01. S3's DSR: 0.000–0.019 at the ledger's counts, 0.27 only at N 4.6. 'Every fix made the backtest worse': C22 raised it from −26.1% to −21.6%",
+          "effect": "no headline number moved; the surface, ledger, Risk-page and inference claims now hold"
+        }
+      ],
+      "models": [
+        "V1",
+        "V2",
+        "M3",
+        "M4",
+        "M6",
+        "M8",
+        "M10",
+        "M14",
+        "M17",
+        "M18",
+        "M19"
+      ]
+    }
+  ]
+}
