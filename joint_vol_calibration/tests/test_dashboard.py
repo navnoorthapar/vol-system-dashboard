@@ -7552,6 +7552,58 @@ def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site
     assert not small, small[:10]
 
 
+def test_research_monthly_year_column_has_its_own_key_and_gap(dash, pages, site_browser):
+    """R3-D3: Research #monthly coloured its Year column on a scale three times
+    the months' while the only key read the months' ±limit, so a −5% year was
+    the colour of a −1.6% month. The month cells stay on the first key's limit;
+    the Year cells are on the second key's, which names the column; the Year
+    column sits 6 px apart, its fill clipped at the gap."""
+    d = dash.load_page4()
+    mo = d["monthly"]
+    assert mo["year_lim"] > mo["lim"] > 0
+    html = pages["/research"]
+    keys = re.search(r'id="monthly-grid-readout"[^>]*>.*?</p>\s*'
+                     r'((?:<div class="ramp" aria-hidden="true">.*?</div>)+)', html, re.DOTALL)
+    assert keys, "no ramp key under #monthly-grid"
+    bars = re.findall(r'<span>([^<]*)</span><span class="ramp-bar"[^>]*></span><span>([^<]*)</span>'
+                      r'<span>· ([^<]*)</span>', keys.group(1))
+    pct = [dash._fmt(v * 100, ".1f") for v in (mo["lim"], mo["year_lim"])]
+    assert [(lo, hi) for lo, hi, _ in bars] == [(f"−{v}%", f"+{v}%") for v in pct]
+    assert [what.split(",")[0].split(" · ")[0] for _, _, what in bars] == ["month cells", "Year column"]
+    tbl = re.search(r'<table class="heat" id="monthly-grid"[^>]*\bdata-total\b[^>]*>(.*?)</table>',
+                    html, re.DOTALL)
+    assert tbl, "#monthly-grid does not mark its total column"
+    ann = {str(a["year"]): a["ret_pct"] / 100.0 for a in d["ann"]}
+    trs = re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(1).split("<tbody>")[1], re.DOTALL)
+    assert len(trs) == len(mo["rows"]) == len(ann) > 0
+    for tr in trs:
+        yr = re.search(r'<th scope="row">(\d{4})', tr).group(1)
+        tds = re.findall(r"<td([^>]*)>", tr)
+        assert len(tds) == len(mo["cols"])
+        bg = re.search(r"background:(#[0-9a-fA-F]{6})", tds[-1]).group(1)
+        assert bg == dash.pnl_colour(ann[yr], mo["year_lim"]), yr
+        for attrs in tds[:-1]:
+            m_ = re.search(r'background:(#[0-9a-fA-F]{6}).*data-detail="(\w{3}) \d{4}: ([^"%]+)%"', attrs)
+            if m_:
+                v = float(m_.group(3).replace("−", "-")) / 100.0
+                assert _on_ramp(m_.group(1), dash.PNL_DIV), (yr, m_.group(2))
+                assert abs(v) <= mo["lim"] + 1e-4, (yr, m_.group(2))
+    sb = site_browser
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(sb["base"] + "research.html", wait_until="load")
+    cols = page.evaluate("""() => [...document.querySelectorAll('#monthly-grid tr')].map(tr => {
+      const c = [...tr.children], last = c[c.length - 1], prev = c[c.length - 2];
+      const cs = getComputedStyle(last), pcs = getComputedStyle(prev);
+      return {gap: last.getBoundingClientRect().left + parseFloat(cs.borderLeftWidth)
+                   - prev.getBoundingClientRect().right,
+              clip: cs.backgroundClip, prevGap: parseFloat(pcs.borderLeftWidth)};
+    })""")
+    ctx.close()
+    assert len(cols) == len(trs) + 1
+    for c in cols:
+        assert (c["gap"] >= 6, c["clip"], c["prevGap"]) == (True, "padding-box", 0), c
+
+
 def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     """P4.5: a tooltip's head carries the x value with its unit and the index
     name where there is one ('VIX3M · 93 d', not '93.0'), and every row its unit:

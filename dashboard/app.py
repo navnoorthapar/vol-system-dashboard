@@ -3861,7 +3861,10 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             grid.setdefault(int(yr), {})[int(mo)] = float(v) / prev - 1.0
             prev = float(v)
         lim = max((abs(v) for m in grid.values() for v in m.values()), default=0.01) or 0.01
-        d["monthly"] = {"cols": [*MONTHS, "Year"], "rows": []}
+        # the Year column compounds twelve months, so it takes its own wider scale,
+        # keyed by a second ramp and set off by a gap (desk.css .heat[data-total])
+        ylim = max(lim * 3, 0.01)
+        d["monthly"] = {"cols": [*MONTHS, "Year"], "rows": [], "total": True}
         ann = {a["year"]: a["ret_pct"] / 100.0 for a in d.get("ann") or []}
         part = {a["year"]: a for a in d.get("ann") or [] if a.get("partial")}
         for yr in sorted(grid):
@@ -3876,10 +3879,11 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             yl = f"{yr} YTD" if py else str(yr)
             span = f" ({py['first']} → {py['last']})" if py else ""
             cells.append(cell(signed(y * 100 if y is not None else None, ".1f"),
-                              pnl_colour(y, max(lim * 3, 0.01)),
+                              pnl_colour(y, ylim),
                               detail=f"{yl}{span}: {signed(y * 100 if y is not None else None, '.2f', '%')}"))
             d["monthly"]["rows"].append({"label": yl, "cells": cells})
         d["monthly"]["lim"] = lim
+        d["monthly"]["year_lim"] = ylim
     # sleeves, annual returns, half-year Sharpe as signed bars
     if d.get("signal_labels"):
         d["charts"]["sleeves"] = charts.xy(

@@ -442,6 +442,11 @@ code { overflow-wrap: anywhere; }
 .heat td:focus-visible { outline: 2px solid #000; outline-offset: -2px; box-shadow: inset 0 0 0 4px #fff; }
 .heat td.flag:focus-visible { box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 6px var(--breach); }
 .heat td.empty { background: var(--bg); color: var(--text3); }
+/* a total column on its own colour scale (Research #monthly's Year) sits 6 px
+   apart: a transparent border the fill stops at; its focus ring is drawn inside
+   that border, where the fill starts */
+.heat[data-total] tr > :last-child { border-left: 6px solid transparent; background-clip: padding-box !important; }
+.heat[data-total] td:last-child:focus-visible { outline-color: transparent; box-shadow: inset 0 0 0 2px #000, inset 0 0 0 4px #fff; }
 .heat td.flag { box-shadow: inset 0 0 0 2px var(--breach); font-weight: 600; }
 /* a cell's first line is its value (the vomma flag: the P&L ratio, 12 px), the
    second a secondary one; no text in a heatmap is under 10.5 px (it was 9.5) */
