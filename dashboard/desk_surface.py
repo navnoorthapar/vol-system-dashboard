@@ -444,3 +444,13 @@ def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list
           f"16:15 ET print, stale quotes, the rate).")
     out.append(s)
     return out
+
+
+def vix_departure_count(vix_rep: Mapping | None) -> int:
+    """How many lines Surface's 'Where the replication departs from Cboe' lists
+    for vix_replication.json ``vix_rep``: its deviations and its gap notes as
+    vix_gap_notes restates them. The Overview and Model Risk cite this count, so
+    neither page says the replication follows Cboe's rules without them."""
+    vx = vix_rep or {}
+    return (len(vx.get("deviations") or [])
+            + len(vix_gap_notes(vx.get("gap_notes"), vix_terms(vx))))

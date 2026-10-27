@@ -20,7 +20,7 @@
 
 {# a link back to each Model Risk check whose evidence this element shows #}
 {% macro monitored_chips(id) -%}
-{%- for c in monitored_for(id) -%}<a class="chip chip-{{ c.status if c.status in ('ok', 'watch', 'breach') else 'muted' }} mon-link" href="model-risk.html#{{ c.id }}" aria-label="Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}: {{ c.check }}" title="Model Risk check: {{ c.check }}" data-monitored="{{ c.id }}">Monitored · {{ c.model }} · {{ {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) }}</a>{%- endfor -%}
+{%- for c in monitored_for(id) -%}{%- set _w = {'ok': 'OK', 'na': 'N/A'}.get(c.status, c.status|upper) -%}<a class="chip chip-{{ c.status if c.status in ('ok', 'watch', 'breach') else 'muted' }} mon-link" href="model-risk.html#{{ c.id }}" aria-label="{{ c.model }} {{ c.short }} · {{ _w }}, Model Risk check: {{ c.check }}" title="Model Risk check: {{ c.check }}" data-monitored="{{ c.id }}">{{ c.model }} {{ c.short|sym }} · {{ _w }}</a>{%- endfor -%}
 {%- endmacro %}
 
 {# ci_kind 'range': a range across sessions (dashed rule), never read as an interval #}
@@ -85,7 +85,7 @@
 
 {% macro heatmap(h, id, caption, row_head='T', ramp=None, grow=False) -%}
 <div class="heat-wrap{% if grow %} grow{% endif %}" tabindex="0" role="region" aria-labelledby="{{ id }}-cap">
-  <table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}>
+  <table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}{% if h.total %} data-total{% endif %}>
     <caption id="{{ id }}-cap">{{ caption }}</caption>
     <thead><tr><th scope="col">{{ row_head }}</th>{% for c in h.cols %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>
     <tbody>
@@ -98,7 +98,8 @@
   </table>
 </div>
 <p class="heat-readout" id="{{ id }}-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
-{% if ramp %}<div class="ramp" aria-hidden="true">{{ ramp }}</div>{% endif %}
+{# ramp: one key, or a list of keys (a total column on its own scale has its own) #}
+{% if ramp %}{% for r in ([ramp] if ramp is string else ramp) %}<div class="ramp" aria-hidden="true">{{ r }}</div>{% endfor %}{% endif %}
 {%- endmacro %}
 
 {# the gradient key of a chart whose series are maturities (role 'tenor', desk_charts.TENOR_RAMP) #}

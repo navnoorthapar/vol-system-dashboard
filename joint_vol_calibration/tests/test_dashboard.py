@@ -4776,6 +4776,14 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     n_legacy = sum(1 for r in rows if r["legacy"])
     assert f"{n_legacy:,} pre-C22 fit" in works
     assert "none published" in works
+    # R3-T2: the job stores only gate-passing fits, so 'k of k current-schema fits
+    # pass' was true by construction; the line says what is stored and why
+    n_current = sum(1 for r in rows if r["legacy"] is False)
+    n_ok = sum(1 for r in rows if r["legacy"] is False and r["ok"])
+    assert f"{dash.plural(n_current, 'current-schema fit')} stored" in works
+    assert "the job stores only fits that pass the gate" in works
+    assert "current-schema fits pass" not in works
+    assert (f"{n_ok:,} of them passing the current gate" in works) == (n_ok != n_current)
     # does not work: Heston's worst short expiry with σ on its cap and its VVIX; the backtest; the classifier
     t_by = {str(c["expiry"]): float(c["T"]) * 365 for c in cal["carry_by_expiry"]}
     short = {e: v for e, v in cal["oos"]["spx_oos_rmse_by_expiry"].items() if t_by.get(e, 99) <= 30}
@@ -4801,6 +4809,32 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     n_fw = len(list((SHIPPED / "forward").glob("ledger_*.json"))) if (SHIPPED / "forward").is_dir() else 0
     assert f"{n_fw} registered session" in nxt
     assert all(t.split(": ", 1)[1].startswith(("not ", "not yet")) for t in text["→ Next · not done yet"])
+
+
+def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(pages):
+    """R3-T3: the Overview and Model Risk said the VIX was replicated 'by the
+    Cboe rules' while Surface's 'Where the replication departs from Cboe' lists
+    the departures (the rate, the quote time, the forward, PM lines for AM
+    monthlies, ...). Both now say 'the Cboe formula, with N listed departures
+    (Surface)', N counted from that list on the rendered Surface page."""
+    m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
+                  pages["/surface"], re.DOTALL)
+    rep = json.loads(_surface_file("vix_replication.json").read_text())
+    if m is None:       # no replication on this session: no claim either way
+        assert "listed departure" not in pages["/"] + pages["/model-risk"]
+        return
+    n = len(re.findall(r"<li>", m.group(1)))
+    assert n > 0
+    assert n >= len(rep.get("deviations") or [])
+    tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
+    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
+    if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
+        assert f"by the Cboe formula, {tail}." in works
+    mr = _visible_text(pages["/model-risk"])
+    assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
+    for html in (pages["/"], pages["/model-risk"]):
+        assert "Cboe rules" not in html
+        assert "Cboe VIX rules" not in html
 
 
 def test_browser_findings_strip_is_on_the_first_screen_and_stacks_on_a_phone(site_browser):
@@ -5686,6 +5720,13 @@ def _widest_strike_gap(legs: list[dict]) -> float:
     return max((b - a for a, b in itertools.pairwise(ks)), default=0.0)
 
 
+def _largest_violation_rows(html: str) -> list[list[str]]:
+    """Surface's largest mid violations in rank order: the panel's table, then the
+    disclosed rest (R3-D4)."""
+    rest = _table_rows(html, "largest-violations-rest") if 'id="largest-violations-rest"' in html else []
+    return _table_rows(html, "largest-violations") + rest
+
+
 def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(dash, pages):
     """R3-T4: the tile read 'Executable static arbitrage … Largest mid violation
     95.0 idx pts ($9,497 per contract), C2 vertical spread, 2027-03-31 P
@@ -5703,7 +5744,7 @@ def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(das
     assert "constraint row" in tile
     assert "no quote time" in tile or "quotes at" in tile
     assert 'href="#largest-violations"' in html
-    rows = _table_rows(html, "largest-violations")
+    rows = _largest_violation_rows(html)
     assert len(rows) == len(arb["largest_mid_violations"])
     ordered = sorted(arb["largest_mid_violations"], key=lambda v: -v["shortfall_index_points"])
     named = set()
@@ -5739,6 +5780,61 @@ def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(das
     # the panel table counts constraint rows, and says so
     assert _table_heads(html, "arb-table")[1:] == ["Constraint rows", "Violated at mids",
                                                    "Violated at bid/ask"]
+
+
+def test_largest_violations_list_the_top_rows_and_disclose_the_rest(dash, pages):
+    """R3-D4: '#largest-violations' was titled 'The 25 largest violations at mids'
+    but its 25 rows sat in a 280 px scroll region of the s4 panel that showed two
+    of them at 1440 px, with no sign that the others existed. The panel now lists
+    the largest LARGEST_VIOLATIONS_SHOWN rows and says how many more follow, and
+    the rest sit in a disclosure that names their count and ranks."""
+    html = pages["/surface"]
+    arb = json.loads(_surface_file("surface.json").read_text())["arbitrage"]
+    lv = dash.arb_violations(arb)
+    k, n = dash.LARGEST_VIOLATIONS_SHOWN, len(lv)
+    top = _table_rows(html, "largest-violations")
+    assert [r[2] for r in top] == [f"{v['shortfall']:.2f}" for v in lv[:k]]
+    head = re.search(r'<h3 class="sub-head">The \d+ largest violations at mids.*?</h3>', html, re.DOTALL)
+    head_text = re.sub(r"\s+", " ", _visible_text("<body>" + head.group(0)))
+    assert f"The {n} largest violations at mids" in head_text
+    if n <= k:
+        assert 'id="largest-violations-rest"' not in html
+        assert "more below" not in head_text
+        return
+    assert f"the {k} largest here, {n - k} more below" in head_text
+    rest = _table_rows(html, "largest-violations-rest")
+    assert [r[2] for r in rest] == [f"{v['shortfall']:.2f}" for v in lv[k:]]
+    disc = re.search(r'<details class="method"><summary>([^<]*)</summary>\s*<div class="tbl-wrap"[^>]*>\s*'
+                     r'<table class="tbl[^"]*" id="largest-violations-rest"', html)
+    assert disc, "the rest of the list is not in a disclosure"
+    assert _html_unescape(disc.group(1)) == f"The other {n - k} violations · ranks {k + 1}–{n}"
+
+
+def test_browser_largest_violations_are_all_in_view_or_disclosed(site_browser):
+    """R3-D4: at 1440 x 900 the largest-violations table (2,004 px) sat in a
+    280 px scroll region, 14% of it visible and no scrollbar shown. Every row the
+    panel lists is now in view without scrolling the region, and opening the
+    disclosure below shows the rest."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "surface.html", wait_until="load")
+        page.locator("#largest-violations").scroll_into_view_if_needed()
+        r = page.evaluate("""() => {
+          const t = document.getElementById('largest-violations'), w = t.closest('.tbl-wrap');
+          const rest = document.getElementById('largest-violations-rest');
+          const d = rest && rest.closest('details');
+          const shut = !!d && !d.open && !rest.checkVisibility();
+          if (d) d.open = true;
+          return {rows: t.tBodies[0].rows.length, client: w.clientHeight, scroll: w.scrollHeight,
+                  shut: shut, rest: rest ? rest.tBodies[0].rows.length : 0,
+                  shown: !!rest && rest.checkVisibility() && rest.getBoundingClientRect().height > 0}; }""")
+        assert r["rows"] >= 1, r
+        assert r["scroll"] <= r["client"] + 1, r
+        if r["rest"]:
+            assert r["shut"], r
+            assert r["shown"], r
+    finally:
+        ctx.close()
 
 
 def test_bad_quote_flag_names_the_leg_the_impossible_rows_share(dash):
@@ -6352,28 +6448,44 @@ def test_model_risk_bullets_scale_the_value_against_the_limits(dash, pages):
 
 def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(dash, pages):
     """P3.3: every value cell links to the panel that shows its evidence (an id that
-    exists on that page), and that panel carries a 'Monitored · <model> ·
-    <status>' chip back to the check's row."""
+    exists on that page), and that panel carries a '<model> <check> · <status>' chip
+    back to the check's row. The chip names the check (its short name), so a panel
+    showing two of one model's checks (#oos) never reads 'M4 · BREACH' beside
+    'M4 · WATCH'."""
     html = pages["/model-risk"]
     files = {v: k for k, v in dash.ROUTES.items()}
     d = {m["id"]: m for m in dash.load_model_risk()["monitors"]}
+    # every check with an evidence panel has its own short name
+    assert set(dash.CHECK_EVIDENCE) <= set(dash.CHECK_SHORT)
+    assert len(set(dash.CHECK_SHORT.values())) == len(dash.CHECK_SHORT)
     linked = 0
+    seen: dict[tuple[str, str], list[str]] = {}
     for rid, st, body in _monitor_rows(html):
         href = re.search(r'<a href="([\w.-]+\.html)#([\w-]+)" class="mon-value"', body)
         assert href, rid
         page, anchor = href.groups()
         target = pages[files[page]]
         assert f'id="{anchor}"' in target, (rid, page, anchor)
-        chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"[^>]*>([^<]+)</a>',
+        chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"([^>]*)>(.+?)</a>',
                          target)
         assert chip, (rid, page)
         word = {"ok": "OK", "na": "N/A"}.get(st, st.upper())
-        assert _html_unescape(chip.group(1)) == f"Monitored · {d[rid]['model']} · {word}", rid
+        short = dash.CHECK_SHORT[d[rid]["key"]]
+        text = _html_unescape(re.sub(r"<[^>]+>", "", chip.group(2)))
+        assert text == f"{d[rid]['model']} {short} · {word}", rid
+        # the accessible name starts with the visible text and spells out the check
+        aria = _html_unescape(re.search(r'aria-label="([^"]*)"', chip.group(1)).group(1))
+        assert aria.startswith(text), rid
+        assert d[rid]["check"] in aria, rid
+        seen.setdefault((page, anchor), []).append(text)
         # the chip sits inside the evidence element
         start = target.index(f'id="{anchor}"')
         assert target.index(f'href="model-risk.html#{rid}"') > start
         linked += 1
     assert linked == len(d)
+    # chips on one panel read differently from each other
+    for where, texts in seen.items():
+        assert len({t.rsplit(" · ", 1)[0] for t in texts}) == len(texts), (where, texts)
 
 
 # ── P3.4: the evidence graph ──────────────────────────────────────────────────
@@ -7488,6 +7600,58 @@ def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site
           .map(e => name + ' ' + e.tagName + '.' + e.className + ' ' + getComputedStyle(e).fontSize)""", name)
     ctx.close()
     assert not small, small[:10]
+
+
+def test_research_monthly_year_column_has_its_own_key_and_gap(dash, pages, site_browser):
+    """R3-D3: Research #monthly coloured its Year column on a scale three times
+    the months' while the only key read the months' ±limit, so a −5% year was
+    the colour of a −1.6% month. The month cells stay on the first key's limit;
+    the Year cells are on the second key's, which names the column; the Year
+    column sits 6 px apart, its fill clipped at the gap."""
+    d = dash.load_page4()
+    mo = d["monthly"]
+    assert mo["year_lim"] > mo["lim"] > 0
+    html = pages["/research"]
+    keys = re.search(r'id="monthly-grid-readout"[^>]*>.*?</p>\s*'
+                     r'((?:<div class="ramp" aria-hidden="true">.*?</div>)+)', html, re.DOTALL)
+    assert keys, "no ramp key under #monthly-grid"
+    bars = re.findall(r'<span>([^<]*)</span><span class="ramp-bar"[^>]*></span><span>([^<]*)</span>'
+                      r'<span>· ([^<]*)</span>', keys.group(1))
+    pct = [dash._fmt(v * 100, ".1f") for v in (mo["lim"], mo["year_lim"])]
+    assert [(lo, hi) for lo, hi, _ in bars] == [(f"−{v}%", f"+{v}%") for v in pct]
+    assert [what.split(",")[0].split(" · ")[0] for _, _, what in bars] == ["month cells", "Year column"]
+    tbl = re.search(r'<table class="heat" id="monthly-grid"[^>]*\bdata-total\b[^>]*>(.*?)</table>',
+                    html, re.DOTALL)
+    assert tbl, "#monthly-grid does not mark its total column"
+    ann = {str(a["year"]): a["ret_pct"] / 100.0 for a in d["ann"]}
+    trs = re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(1).split("<tbody>")[1], re.DOTALL)
+    assert len(trs) == len(mo["rows"]) == len(ann) > 0
+    for tr in trs:
+        yr = re.search(r'<th scope="row">(\d{4})', tr).group(1)
+        tds = re.findall(r"<td([^>]*)>", tr)
+        assert len(tds) == len(mo["cols"])
+        bg = re.search(r"background:(#[0-9a-fA-F]{6})", tds[-1]).group(1)
+        assert bg == dash.pnl_colour(ann[yr], mo["year_lim"]), yr
+        for attrs in tds[:-1]:
+            m_ = re.search(r'background:(#[0-9a-fA-F]{6}).*data-detail="(\w{3}) \d{4}: ([^"%]+)%"', attrs)
+            if m_:
+                v = float(m_.group(3).replace("−", "-")) / 100.0
+                assert _on_ramp(m_.group(1), dash.PNL_DIV), (yr, m_.group(2))
+                assert abs(v) <= mo["lim"] + 1e-4, (yr, m_.group(2))
+    sb = site_browser
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(sb["base"] + "research.html", wait_until="load")
+    cols = page.evaluate("""() => [...document.querySelectorAll('#monthly-grid tr')].map(tr => {
+      const c = [...tr.children], last = c[c.length - 1], prev = c[c.length - 2];
+      const cs = getComputedStyle(last), pcs = getComputedStyle(prev);
+      return {gap: last.getBoundingClientRect().left + parseFloat(cs.borderLeftWidth)
+                   - prev.getBoundingClientRect().right,
+              clip: cs.backgroundClip, prevGap: parseFloat(pcs.borderLeftWidth)};
+    })""")
+    ctx.close()
+    assert len(cols) == len(trs) + 1
+    for c in cols:
+        assert (c["gap"] >= 6, c["clip"], c["prevGap"]) == (True, "padding-box", 0), c
 
 
 def test_browser_tooltips_name_the_point_and_carry_units(site_browser):

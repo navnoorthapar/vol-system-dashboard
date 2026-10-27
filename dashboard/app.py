@@ -3861,7 +3861,10 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             grid.setdefault(int(yr), {})[int(mo)] = float(v) / prev - 1.0
             prev = float(v)
         lim = max((abs(v) for m in grid.values() for v in m.values()), default=0.01) or 0.01
-        d["monthly"] = {"cols": [*MONTHS, "Year"], "rows": []}
+        # the Year column compounds twelve months, so it takes its own wider scale,
+        # keyed by a second ramp and set off by a gap (desk.css .heat[data-total])
+        ylim = max(lim * 3, 0.01)
+        d["monthly"] = {"cols": [*MONTHS, "Year"], "rows": [], "total": True}
         ann = {a["year"]: a["ret_pct"] / 100.0 for a in d.get("ann") or []}
         part = {a["year"]: a for a in d.get("ann") or [] if a.get("partial")}
         for yr in sorted(grid):
@@ -3876,10 +3879,11 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             yl = f"{yr} YTD" if py else str(yr)
             span = f" ({py['first']} → {py['last']})" if py else ""
             cells.append(cell(signed(y * 100 if y is not None else None, ".1f"),
-                              pnl_colour(y, max(lim * 3, 0.01)),
+                              pnl_colour(y, ylim),
                               detail=f"{yl}{span}: {signed(y * 100 if y is not None else None, '.2f', '%')}"))
             d["monthly"]["rows"].append({"label": yl, "cells": cells})
         d["monthly"]["lim"] = lim
+        d["monthly"]["year_lim"] = ylim
     # sleeves, annual returns, half-year Sharpe as signed bars
     if d.get("signal_labels"):
         d["charts"]["sleeves"] = charts.xy(
@@ -4706,6 +4710,15 @@ def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") ->
     return out
 
 
+def vix_departures_tail(vix_rep: dict | None) -> str:
+    """', with N listed departures (Surface)' after 'the Cboe formula': the
+    replication departs from Cboe's rules (rate, quote time, forward, AM/PM
+    lines, ...), and the Overview and Model Risk say how many lines Surface's
+    #vix-replication lists, counted as that list counts them."""
+    n = desk_surface.vix_departure_count(vix_rep)
+    return f", with {plural(n, 'listed departure')} (Surface)" if n else ""
+
+
 def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf: dict,
                          pipeline: dict | None) -> list[dict]:
     """The Overview's three columns: what works, what does not, what is next.
@@ -4740,13 +4753,19 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{sr['session']}, by the Cboe rules."))
+                f"{sr['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
+        # The job stores a fit only when it passes the gate, so 'k of k current fits
+        # pass' is true by construction, not evidence; a rejection is in the run log.
+        # A stored fit fails here only if the gate has tightened since it was stored.
+        n_cur, n_ok = arc.get("n_current"), arc.get("n_current_ok")
+        held = "" if n_ok == n_cur else f", {n_ok} of them passing the current gate"
         works.append(item(
             "The gate keeps broken-data fits off the page", "calibration.html#history",
             f"{plural(arc['n_legacy'], 'pre-C22 fit')} labelled legacy, none published; "
-            f"{arc.get('n_current_ok')} of {arc.get('n_current')} current-schema fits pass."))
+            f"{plural(n_cur, 'current-schema fit')} stored{held} (the job stores only fits that "
+            "pass the gate; a rejected fit is recorded in its run log, not stored)."))
     # does not work: Heston's short end, the backtest, the classifier
     short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
     worst = max(short, key=lambda r: r["rmse"]) if short else None
@@ -5682,6 +5701,12 @@ def flag_bad_quotes(views: list[dict], repaired: Sequence[dict] = ()) -> list[di
     return views
 
 
+# Surface #largest-violations lists this many rows in the panel and the rest in a
+# disclosure below it: the 25 rows (59-94 px each in the s4 panel) sat in a 280 px
+# scroll region that showed two of them, with no sign the others existed (R3-D4)
+LARGEST_VIOLATIONS_SHOWN = 8
+
+
 def arb_violations(arb: dict) -> list[dict]:
     """arbitrage.largest_mid_violations as violation_view rows, largest first, bad quotes flagged."""
     lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
@@ -6102,6 +6127,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["largest_violations"] = arb_violations(arb)
         d["arb_bad_rows"] = sum(1 for v in d["largest_violations"] if v["bad_quote"])
         d["arb_clean_top"] = next((v for v in d["largest_violations"] if not v["bad_quote"]), None)
+        d["lv_shown"] = LARGEST_VIOLATIONS_SHOWN
         d["arb_chain"] = ", ".join(chain_source(surf.get("surface") or {}) or [])
         d["arb_mid_rows"] = sum(int(r["mid"]) for r in d["arb_rows"] if _num(r["mid"]) is not None)
         d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
@@ -6564,6 +6590,25 @@ CHECK_EVIDENCE = {
     "arb_exec_share": ("surface.html", "arbitrage"),
 }
 
+# Each check's short name, for the 'Monitored' chip on its evidence panel: a panel
+# that shows two of one model's checks (#oos: OOS and short-end) tells them apart.
+CHECK_SHORT = {
+    "calib_age": "fit age",
+    "params_at_bound": "box bound",
+    "oos_rmse": "OOS RMSE",
+    "short_oos_rmse": "short-end RMSE",
+    "vix_rmse": "VIX RMSE",
+    "feller": "Feller",
+    "median_abs_hs": "OOS half-spreads",
+    "greeks_source": "Greeks source",
+    "beta_drift": "β drift",
+    "label_lag": "DB lag",
+    "vx_lag": "VX lag",
+    "classifier": "classifier skill",
+    "vix_rep_gap": "VIX replication",
+    "arb_exec_share": "static arbitrage",
+}
+
 
 def worst_short_expiry(cal: dict, max_days: float = 30.0) -> dict | None:
     """The fit's worst out-of-sample expiry within ``max_days`` (oos_rows_of)."""
@@ -6623,7 +6668,8 @@ def load_model_risk() -> dict[str, Any]:
         lim = MONITOR_LIMITS.get(limits_key)
         st = status if status is not None else _rag(value, lim) if lim else "na"
         page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
-        mon.append({"model": mid, "check": check, "value": text, "status": st, "num": value,
+        mon.append({"model": mid, "check": check, "short": CHECK_SHORT.get(key or limits_key, check),
+                    "value": text, "status": st, "num": value,
                     "limits": limits_text or (f"OK ≤ {lim[0]:g} · watch ≤ {lim[1]:g} · breach above" if lim
                                               else "informational"),
                     "artifact": artifact, "note": note, "key": key or limits_key,
@@ -6760,7 +6806,8 @@ def load_model_risk() -> dict[str, Any]:
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
             today["vix_rep_gap"], signed(today["rep_gap"], ".2f") if today["rep_gap"] is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
-            "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.",
+            f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
+            "a gap points at a thin or stale strip.",
             history=surf_hist("vix_rep_gap"))
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
@@ -6820,7 +6867,8 @@ def monitor_backlinks() -> dict[str, dict[str, list[dict]]]:
     for m in d.get("monitors") or []:
         if m.get("page") and m.get("anchor"):
             out.setdefault(m["page"], {}).setdefault(m["anchor"], []).append(
-                {"model": m["model"], "status": m["status"], "id": m["id"], "check": m["check"]})
+                {"model": m["model"], "status": m["status"], "id": m["id"], "check": m["check"],
+                 "short": m["short"]})
     _BACKLINK_CACHE.clear()
     _BACKLINK_CACHE[key] = out
     return out
