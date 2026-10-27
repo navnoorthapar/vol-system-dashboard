@@ -4776,6 +4776,14 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     n_legacy = sum(1 for r in rows if r["legacy"])
     assert f"{n_legacy:,} pre-C22 fit" in works
     assert "none published" in works
+    # R3-T2: the job stores only gate-passing fits, so 'k of k current-schema fits
+    # pass' was true by construction; the line says what is stored and why
+    n_current = sum(1 for r in rows if r["legacy"] is False)
+    n_ok = sum(1 for r in rows if r["legacy"] is False and r["ok"])
+    assert f"{dash.plural(n_current, 'current-schema fit')} stored" in works
+    assert "the job stores only fits that pass the gate" in works
+    assert "current-schema fits pass" not in works
+    assert (f"{n_ok:,} of them passing the current gate" in works) == (n_ok != n_current)
     # does not work: Heston's worst short expiry with σ on its cap and its VVIX; the backtest; the classifier
     t_by = {str(c["expiry"]): float(c["T"]) * 365 for c in cal["carry_by_expiry"]}
     short = {e: v for e, v in cal["oos"]["spx_oos_rmse_by_expiry"].items() if t_by.get(e, 99) <= 30}

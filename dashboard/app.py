@@ -4756,10 +4756,16 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
                 f"{sr['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
+        # The job stores a fit only when it passes the gate, so 'k of k current fits
+        # pass' is true by construction, not evidence; a rejection is in the run log.
+        # A stored fit fails here only if the gate has tightened since it was stored.
+        n_cur, n_ok = arc.get("n_current"), arc.get("n_current_ok")
+        held = "" if n_ok == n_cur else f", {n_ok} of them passing the current gate"
         works.append(item(
             "The gate keeps broken-data fits off the page", "calibration.html#history",
             f"{plural(arc['n_legacy'], 'pre-C22 fit')} labelled legacy, none published; "
-            f"{arc.get('n_current_ok')} of {arc.get('n_current')} current-schema fits pass."))
+            f"{plural(n_cur, 'current-schema fit')} stored{held} (the job stores only fits that "
+            "pass the gate; a rejected fit is recorded in its run log, not stored)."))
     # does not work: Heston's short end, the backtest, the classifier
     short = [r for r in p2.get("oos_rows") or [] if r["T_days"] is not None and r["T_days"] <= 30]
     worst = max(short, key=lambda r: r["rmse"]) if short else None
