@@ -1609,13 +1609,8 @@
     });
   }
 
-  // -- phone first screen (Q20): at <= 600 px desk.css folds a stale banner's
-  // explanation and each findings column (.fold-body) behind its heading
-  // ([data-disclose]) before the first paint, so nothing shifts; without
-  // JavaScript the <noscript> style in base.html unfolds them. Here the heading's
-  // content becomes a disclosure button (aria-expanded, aria-controls) that
-  // toggles .unfolded on the heading and its body. Wider screens and print
-  // never fold. Runs as soon as the script loads (the last element of <body>).
+  // -- phone first screen (Q20): desk.css folds .fold-body at <= 600 px before the
+  // first paint (<noscript> unfolds it); here its heading becomes a disclosure button.
   var NARROW = '(max-width: 600px)';
   function initNarrowDisclosure() {
     var heads = $$('[data-disclose]');
@@ -1627,7 +1622,6 @@
         if (b && body) b.setAttribute('aria-expanded', (!mq.matches || body.classList.contains('unfolded')) ? 'true' : 'false');
       });
     };
-    // headings become buttons on a narrow screen only (where something folds)
     var enhance = function () {
       heads.forEach(function (h) {
         var body = doc.getElementById(h.getAttribute('data-disclose'));
@@ -1653,9 +1647,99 @@
   }
   initNarrowDisclosure();
 
+  // -- sortable, copyable tables (D12): a head of a rectangular .tbl sorts up,
+  // down, then back to the published order (aria-sort); Copy = TSV of the shown
+  // rows as written, CSV = a download. Without JavaScript nothing changes.
+  var SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹', DASH = /^[—–-]+$/;
+  // U+2212, $, %, $k / $M, 'm × 10⁻ⁿ', the first of 'a / b', 'a–b', 'a to b'; null for text
+  function cellNumber(text) {
+    var s = String(text).replace(/−/g, '-').replace(/\s+/g, ' ').trim();
+    if (!s || DASH.test(s)) return null;
+    s = s.split(/ \/ |–| to /)[0].trim();
+    var m = /^([+-]?)(\$?)(\d[\d,]*(?:\.\d+)?|\.\d+)(?: ?× ?10([⁻⁰¹²³⁴-⁹]+))?(%|k|M|bn)?(?: .*)?$/.exec(s);
+    if (!m || (m[5] && m[5] !== '%' && !m[2])) return null;      // '1M' is a tenor
+    var v = parseFloat(m[3].replace(/,/g, ''));
+    if (m[4]) v *= Math.pow(10, +m[4].replace(/./g, function (c) { return c === '⁻' ? '-' : SUP.indexOf(c); }));
+    v *= { k: 1e3, M: 1e6, bn: 1e9 }[m[5]] || 1;
+    return m[1] === '-' ? -v : v;
+  }
+  Desk.cellNumber = cellNumber;
+  function cellText(c) {
+    var k = c.cloneNode(true);
+    $$('.sr-only, .th-sort-ind, [hidden], [aria-hidden="true"]', k).forEach(function (x) { x.remove(); });
+    return k.textContent.replace(/\s+/g, ' ').trim();
+  }
+  function tableRows(t) {
+    return [t.tHead.rows[0]].concat($$('tbody > tr', t).filter(function (r) { return !r.hidden; }))
+      .map(function (r) { return Array.prototype.map.call(r.cells, cellText); });
+  }
+  Desk.tableTsv = function (t) { return tableRows(t).map(function (r) { return r.join('\t'); }).join('\n') + '\n'; };
+  function sortable(t) {
+    var h = t.tHead, rows = $$('tbody > tr', t);
+    return !t.closest('.chart-data, .site-footer, [data-nosort]') && h && h.rows.length === 1 && rows.length > 1 &&
+      !t.querySelector('[colspan], [rowspan]') && rows.every(function (r) { return r.cells.length === h.rows[0].cells.length; });
+  }
+  function initTableTools() {
+    var tables = $$('table.tbl').filter(sortable), per = {};
+    tables.forEach(function (t) { var p = t.closest('.panel'); if (p) per[p.id] = (per[p.id] || 0) + 1; });
+    tables.forEach(function (t, ti) {
+      var tbody = t.tBodies[0], rows = $$('tr', tbody), heads = $$('th', t.tHead.rows[0]), state = null;
+      var initial = heads.map(function (h) { return h.getAttribute('aria-sort'); });
+      var ord = function (r) { return +r.getAttribute('data-order'); };
+      rows.forEach(function (r, i) { r.setAttribute('data-order', i); });
+      heads.forEach(function (th, j) {
+        if (th.querySelector('a, button, input, select, [tabindex]')) return;   // a head that is a link stays one
+        var vals = rows.map(function (r) { return cellText(r.cells[j]); }).filter(function (x) { return x && !DASH.test(x); });
+        var num = vals.length && vals.filter(function (x) { return cellNumber(x) !== null; }).length >= Math.max(1, vals.length / 2);
+        var btn = doc.createElement('button'), lab = doc.createElement('span'), ind = doc.createElement('span');
+        btn.type = 'button'; btn.className = 'th-sort'; lab.className = 'th-sort-label'; ind.className = 'th-sort-ind';
+        ind.setAttribute('aria-hidden', 'true');
+        while (th.firstChild) lab.appendChild(th.firstChild);
+        btn.appendChild(lab); th.appendChild(btn); th.appendChild(ind); th.classList.add('sortable');
+        btn.addEventListener('click', function () {
+          var next = state && state.col === j ? (state.dir === 'ascending' ? 'descending' : null) : 'ascending';
+          state = next && { col: j, dir: next };
+          heads.forEach(function (h, i) { if (!next && initial[i]) h.setAttribute('aria-sort', initial[i]); else h.removeAttribute('aria-sort'); });
+          var list = $$('tr', tbody), dir = next === 'ascending' ? 1 : -1, keys = new Map();
+          if (next) th.setAttribute('aria-sort', next);
+          list.forEach(function (r) { var x = cellText(r.cells[j]); keys.set(r, num ? cellNumber(x) : (x && !DASH.test(x) ? x : null)); });
+          list.sort(function (a, b) {
+            if (!next) return ord(a) - ord(b);
+            var ka = keys.get(a), kb = keys.get(b);   // a dash or a word sorts last both ways
+            if (ka === null || kb === null) return ka === kb ? ord(a) - ord(b) : (ka === null ? 1 : -1);
+            return dir * (num ? ka - kb : String(ka).localeCompare(kb, undefined, { numeric: true })) || ord(a) - ord(b);
+          }).forEach(function (r) { tbody.appendChild(r); });
+        });
+      });
+      var cap = (t.caption && cellText(t.caption)) || 'table', p = t.closest('.panel');
+      var mk = function (label, what, fn) {
+        var b = doc.createElement('button');
+        b.type = 'button'; b.className = 'btn btn-link tbl-act'; b.textContent = label;
+        b.setAttribute('aria-label', what + ': ' + cap.slice(0, 80));
+        b.addEventListener('click', function () { fn(b); });
+        return b;
+      };
+      var copy = mk('Copy', 'Copy the table as tab-separated text', function (b) {
+        var text = Desk.tableTsv(t), ok = function () { flash(b, 'Copied'); };
+        if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, function () { flash(b, 'Blocked'); });
+        else flash(b, 'Blocked');
+      });
+      var csv = mk('CSV', 'Download the table as CSV', function () {
+        download((t.id || 'table-' + ti) + '.csv', tableRows(t).map(function (r) { return r.map(csvCell).join(','); }).join('\n') + '\n');
+      });
+      var acts = p && per[p.id] === 1 && p.querySelector('.panel-actions'), bar = acts;
+      if (!acts) {
+        bar = doc.createElement('div'); bar.className = 'tbl-tools';
+        var at = t.closest('.tbl-wrap') || t;
+        at.parentNode.insertBefore(bar, at);
+      }
+      bar.insertBefore(csv, bar.firstChild); bar.insertBefore(copy, csv);
+    });
+  }
+
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initTableTools(); initScrollHints();
     initPrint(); openTarget(); scrollToAnchor();
     window.addEventListener('hashchange', openTarget);
   }

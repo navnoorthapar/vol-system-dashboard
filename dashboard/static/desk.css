@@ -759,3 +759,18 @@ tr[aria-current="true"] > th[scope="row"] { color: var(--text); box-shadow: inse
 .zoom-year { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text3); }
 .zoom-year select.btn { padding-right: 4px; }
 .charts-failed .zoom-year { display: none !important; }
+
+/* ── sortable, copyable tables (D12; desk.js initTableTools) ─────────── */
+/* the head's button and its arrow take no layout space (no shift when desk.js
+   adds them): the arrow sits in the cell's padding */
+.tbl th.sortable { position: relative; }
+.tbl th > button.th-sort { all: unset; cursor: pointer; text-transform: inherit; letter-spacing: inherit; font: inherit; color: inherit; }
+.tbl th > button.th-sort:hover, .tbl th[aria-sort] > button.th-sort { color: var(--text); }
+.tbl th > button.th-sort:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.th-sort-ind { position: absolute; top: 50%; right: 1px; transform: translateY(-50%); font-size: 8px; line-height: 1; color: var(--text2); pointer-events: none; }
+.th-sort-ind::after { content: ""; }
+.tbl th.sortable:hover .th-sort-ind::after, .tbl th.sortable:focus-within .th-sort-ind::after { content: "↕"; content: "↕" / ""; color: var(--text3); }
+.tbl th.sortable[aria-sort="ascending"] .th-sort-ind::after { content: "▲"; content: "▲" / ""; color: var(--text2); }
+.tbl th.sortable[aria-sort="descending"] .th-sort-ind::after { content: "▼"; content: "▼" / ""; color: var(--text2); }
+.tbl-tools { display: flex; justify-content: flex-end; gap: 4px; margin: 0 0 4px; }
+@media print { .tbl-tools, .tbl-act, .th-sort-ind { display: none !important; } }

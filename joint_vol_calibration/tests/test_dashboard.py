@@ -2379,7 +2379,7 @@ def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
 
 def test_corrections_page_shows_the_c23_waterfall_from_its_file(pages):
     bridge = pd.read_csv(SHIPPED / "backtest" / "c23_bridge.csv")
-    tab = re.search(r'<table class="tbl dense[^"]*" id="c23-bridge">(.*?)</table>',
+    tab = re.search(r'<table class="tbl dense[^"]*" id="c23-bridge"[^>]*>(.*?)</table>',
                     pages["/corrections"],
                     re.DOTALL).group(1)
     body = _visible_text("<body>" + tab)
@@ -7123,5 +7123,101 @@ def test_browser_phone_first_screen_shows_the_subject_and_first_number(site_brow
         page.goto(sb["base"] + "index.html", wait_until="load")
         assert page.locator("#find-list-works").is_visible()
         assert all(b.is_visible() for b in page.locator(".banner[data-stale] .banner-body").all())
+    finally:
+        ctx.close()
+
+
+# ── D12: sortable, copyable tables ────────────────────────────────────────────
+
+def test_tables_are_published_in_the_servers_order_without_sort_controls(pages):
+    """D12: sorting and copying are desk.js enhancements; the HTML (what a page
+    shows without JavaScript and in print) carries no sort button, arrow or copy
+    control; the only aria-sort is the Risk vomma table's, which the server
+    publishes sorted."""
+    for route, html in pages.items():
+        for token in ("th-sort", "tbl-tools", "tbl-act"):
+            assert token not in html, (route, token)
+        assert html.count("aria-sort=") == (1 if route == "/risk" else 0), route
+    # a table whose order is its meaning (the cumulative C23 waterfall) is left out
+    assert '<table class="tbl dense cards" id="c23-bridge" data-nosort>' in pages["/corrections"]
+
+
+def test_browser_tables_sort_copy_and_export(site_browser, tmp_path):
+    """D12 acceptance on research.html: clicking the 'Sharpe' head of Per-sleeve
+    performance orders the rows ascending, then descending, then back to the
+    published order, and aria-sort follows; 'Copy' writes a TSV whose cells are
+    the cells' text as written; 'CSV' downloads the head and every row. The
+    number parser reads U+2212, $, %, $…k, 'm × 10⁻ⁿ', 'a / b', 'a to b' and
+    'a–b', and refuses dates and tenors; on Surface's tail table the 'beyond
+    quoted strikes' cells sort last both ways."""
+    sb = site_browser
+    ctx = _context(sb)
+    ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=sb["base"].rstrip("/"))
+    page = ctx.new_page()
+    try:
+        page.goto(sb["base"] + "research.html", wait_until="load")
+        parse = page.evaluate("""() => ['\\u2212$273,733', '12.5%', '$1.2k', '$3.4M',
+            '9.5 \\u00d7 10\\u207b\\u2079', '205 / 110', '\\u22121.81 to \\u22120.30', '0.703\\u20131.061',
+            '46 (1 open)', '2026-10-16', '1M',
+            '\\u2014', 'S3 \\u00b7 short SPX straddle', '+0.42'].map(Desk.cellNumber)""")
+        assert parse[:9] == [-273733, 12.5, 1200, 3.4e6, pytest.approx(9.5e-9), 205, -1.81, 0.703, 46]
+        assert parse[9:13] == [None, None, None, None]
+        assert parse[13] == 0.42
+        tbl = page.locator("#sleeve-table")
+        heads = [h.strip() for h in tbl.locator("thead th").all_text_contents()]
+        col = heads.index("Sharpe")
+        published = [r.strip() for r in tbl.locator("tbody tr td:first-child").all_text_contents()]
+
+        def sharpe() -> list[float]:
+            return page.evaluate("""(j) => [...document.querySelectorAll('#sleeve-table tbody tr')]
+                .map(r => Desk.cellNumber(r.cells[j].textContent))""", col)
+        th = tbl.locator("thead th").nth(col)
+        btn = th.locator("button.th-sort")
+        btn.click()
+        assert th.get_attribute("aria-sort") == "ascending"
+        assert sharpe() == sorted(sharpe())
+        btn.click()
+        assert th.get_attribute("aria-sort") == "descending"
+        assert sharpe() == sorted(sharpe(), reverse=True)
+        btn.press("Enter")                                  # the keyboard, a third time: published order
+        assert th.get_attribute("aria-sort") is None
+        assert [r.strip() for r in tbl.locator("tbody tr td:first-child").all_text_contents()] == published
+        # Copy: the cells as written (the chip's 'portfolio', not the CSS capitals), tab-separated
+        want = page.evaluate("""() => { const t = document.getElementById('sleeve-table');
+            const txt = c => c.textContent.replace(/\\s+/g, ' ').trim();
+            return [[...t.tHead.rows[0].cells].map(txt),
+                    ...[...t.tBodies[0].rows].map(r => [...r.cells].map(txt))]
+              .map(r => r.join('\\t')).join('\\n') + '\\n'; }""")
+        page.locator("#sleeves .panel-actions button.tbl-act", has_text="Copy").click()
+        page.wait_for_timeout(200)
+        got = page.evaluate("navigator.clipboard.readText()")
+        assert got == want
+        assert got.splitlines()[0].split("\t")[:3] == ["Signal", "Total P&L", "Sharpe"]
+        n = tbl.locator("tbody tr").count()
+        with page.expect_download() as dl:
+            page.locator("#sleeves .panel-actions button.tbl-act", has_text="CSV").click()
+        path = tmp_path / "sleeves.csv"
+        dl.value.save_as(path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1 + n
+        assert lines[0].startswith("Signal,Total P&L,Sharpe,")
+        assert dl.value.suggested_filename == "sleeve-table.csv"
+        # numbers before text: 'beyond quoted strikes' sorts last both ways
+        page.goto(sb["base"] + "surface.html", wait_until="load")
+        t2 = page.locator("#rnd-table-tbl")
+        h2 = [h.strip() for h in t2.locator("thead th").all_text_contents()]
+        j = h2.index("ST > 1.10 F")
+        cells = """(j) => [...document.querySelectorAll('#rnd-table-tbl tbody tr')]
+            .map(r => r.cells[j].textContent.trim())"""
+        before = page.evaluate(cells, j)
+        n_beyond = before.count("beyond quoted strikes")
+        assert 0 < n_beyond < len(before)
+        b2 = t2.locator("thead th").nth(j).locator("button.th-sort")
+        for _ in range(2):
+            b2.click()
+            after = page.evaluate(cells, j)
+            assert after[-n_beyond:] == ["beyond quoted strikes"] * n_beyond
+            nums = [float(x) for x in after[:-n_beyond]]
+            assert nums in (sorted(nums), sorted(nums, reverse=True))
     finally:
         ctx.close()
