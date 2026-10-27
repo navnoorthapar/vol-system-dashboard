@@ -3299,7 +3299,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
             "chart-vixleg", "VIX index term structure: market and the Heston fit",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True,
                "tipNames": {str(v): k for k, v in VIX_FAMILY_DAYS.items()}},
-            y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
+            y={"name": "Index level (index pts)", "digits": 1, "tipDigits": 2},
             series=[{"name": "Cboe index (market)", "type": "line", "role": "cboe", "color": "headline",
                      "symbol": "circle",
                      "size": 7, "width": 1.5, "legend": True,
@@ -5028,12 +5028,13 @@ def load_overview() -> dict[str, Any]:
             "chart-ts", f"VIX index term structure on {d.get('ts_date')}, with earlier sessions",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True,
                "tipNames": {str(v): k for k, v in VIX_FAMILY_DAYS.items()}},
-            y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
+            y={"name": "Index level (index pts)", "digits": 1, "tipDigits": 2},
             series=series, tooltip="item",
             csv=f"vix_term_structure_{d.get('ts_date')}.csv", grid={"top": 12},
             describe=("^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session, and dashed on "
                       + ", ".join(o["name"] for o in ov) + "; tenor on a linear axis, straight segments."),
-            table=charts.table(f"VIX-family index levels (vol pts), {d.get('ts_date')} and earlier sessions",
+            table=charts.table(f"VIX-family index levels (index pts), {d.get('ts_date')} and earlier "
+                               "sessions",
                                ["Tenor", f"{d.get('ts_date')}#", *(f"{o['date']}#" for o in ov)],
                                [[t, _fmt(v, ".2f"), *(_fmt(o["values"][i], ".2f") for o in ov)]
                                 for i, (t, v) in enumerate(zip(d["ts_tenors"], d["ts_values"]))]))
@@ -6615,7 +6616,7 @@ def load_model_risk() -> dict[str, Any]:
         ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
-            add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (pts)", gap,
+            add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (percentage pts)", gap,
                 signed(gap, ".1f"),
                 "", "data_store/signals/regime_classifier.pkl",
                 "Research only since C17: below the no-skill baseline, so it never trades.",

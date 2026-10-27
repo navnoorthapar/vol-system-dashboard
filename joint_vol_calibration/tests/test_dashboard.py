@@ -4522,6 +4522,11 @@ def unit_lint(html: str) -> list[str]:
     * A VIX-family level (VIX, VIX9D, VIX3M, VIX6M, VVIX) is an index level,
       never a '%': a KPI tile with that label and a '%' unit span, a dt/dd pair,
       or the level followed by '%' in the text.
+    * 'pts' always says which points: 'vol pts', 'index pts', 'idx pts' (SPX
+      index points of P&L) or 'percentage pts', never bare (the Overview's
+      '0.82 pts RMSE', Calibration's 'VIX indices (pts)'), in the text, the
+      KPI unit spans and the chart specs; and an index level is never in 'vol
+      pts' (the VIX term-structure axes read 'Index level (vol pts)').
     """
     import html as _h
     out = []
@@ -4552,6 +4557,16 @@ def unit_lint(html: str) -> list[str]:
             for x, y in re.findall(rf"<dt>\s*({_VIX_FAMILY})\s*</dt>\s*<dd>([^<]*%)\s*</dd>", body)]
     out += [f"{m.group(0)!r}" for m in re.finditer(
         rf"(?<![\w/])({_VIX_FAMILY})\b[ :=]*[+−-]?\d[\d,]*(?:\.\d+)?\s*%", text)]
+    bare = r"(?<!vol )(?<!index )(?<!idx )(?<!percentage )\bpts\b"
+    level = r"[Ii]ndex level[^()]*\(vol pts\)"
+    for src, s in (("text", text), ("attribute", attrs)):
+        out += [f"bare 'pts' in {src}: …{s[max(0, m.start() - 40):m.end() + 5]}…"
+                for m in re.finditer(bare, s)]
+    for raw in specs:
+        blob = json.dumps(json.loads(_h.unescape(raw)), ensure_ascii=False)
+        out += [f"bare 'pts' in a chart: …{blob[max(0, m.start() - 40):m.end() + 5]}…"
+                for m in re.finditer(bare, blob)]
+        out += [f"index level in vol pts: {m.group(0)}" for m in re.finditer(level, blob)]
     return out
 
 
@@ -4577,6 +4592,11 @@ def test_unit_lint_catches_a_seeded_offender(pages):
                                '<table><tr><td data-detail="half-spread 0.6 vp">x</td></tr></table></main>'),
         "dl": html.replace("</main>", "<dl><dt>VIX9D</dt><dd>18.20%</dd></dl></main>"),
         "prose": html.replace("</main>", "<p>with VIX3M 21.3% on the day</p></main>"),
+        "bare pts": html.replace("</main>", '<div class="kpi"><div class="kpi-label">VIX indices</div>'
+                                            '<div class="kpi-value">0.82<span class="unit">pts RMSE</span>'
+                                            '</div></div></main>'),
+        "level axis": html.replace("</main>", '<script type="application/json" id="x-spec">'
+                                              '{"y": {"name": "Index level (vol pts)"}}</script></main>'),
     }
     for kind, seeded in seeds.items():
         assert unit_lint(seeded), kind
@@ -7009,7 +7029,7 @@ def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site
 def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     """P4.5: a tooltip's head carries the x value with its unit and the index
     name where there is one ('VIX3M · 93 d', not '93.0'), and every row its unit:
-    Overview #chart-ts at the 93-day point, Calibration #chart-oos (vol pts) and
+    Overview #chart-ts at the 93-day point (index pts), Calibration #chart-oos (vol pts) and
     Surface #chart-strip (%)."""
     sb = site_browser
     tip_js = """(id) => { const t = [...document.querySelectorAll('#' + id + ' > div')]
@@ -7033,7 +7053,7 @@ def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     tip = hover("index.html", "chart-ts", at_point)
     assert tip, "no tooltip on #chart-ts"
     assert "VIX3M · 93 d" in tip, tip
-    assert re.search(r"\d\.\d+ vol pts", tip), tip
+    assert re.search(r"\d\.\d+ index pts", tip), tip          # an index level (F6: was 'vol pts')
     mid = """(cid) => { const c = Desk.charts[cid], r = c.el.getBoundingClientRect();
         const g = c.chart.getModel().getComponent('grid', 0).coordinateSystem.getRect();
         return {x: r.left + g.x + g.width * 0.4, y: r.top + g.y + g.height * 0.6}; }"""
