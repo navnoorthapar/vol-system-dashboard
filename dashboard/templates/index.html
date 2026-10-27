@@ -21,8 +21,8 @@
 <div class="findings" id="findings" aria-labelledby="findings-title">
   {% for col in d.findings %}
   <section class="find-col" aria-labelledby="find-{{ col.key }}">
-    <h3 class="find-head" id="find-{{ col.key }}"><span class="find-glyph" aria-hidden="true">{{ col.glyph }}</span>{{ col.title }}</h3>
-    <ul class="find-list">
+    <h3 class="find-head" id="find-{{ col.key }}" data-disclose="find-list-{{ col.key }}" data-count="{{ col['items']|length }}"><span class="find-glyph" aria-hidden="true">{{ col.glyph }}</span>{{ col.title }}</h3>
+    <ul class="find-list fold-body" id="find-list-{{ col.key }}">
       {% for it in col['items'] %}<li class="find-item"><a href="{{ it.href }}">{{ it.lead }}</a>: {{ it.text|dates }}</li>{% endfor %}
     </ul>
   </section>
@@ -82,7 +82,7 @@
   {% call m.panel('state-ts', 'VIX term structure', 's4', d.ts_date) %}
     {% if d.charts.ts %}
     {{ m.chart(d.charts.ts, 'h220 grow') }}
-    <p class="note">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|signed(".2f") }} pts, {{ d.ts_regime|lower }}){% if d.ts_date != d.vix_date %}; latest full curve — VIX itself is from {{ d.vix_date|fmt }}{% endif %}.</p>
+    <p class="note">{{ d.ts_tenors[0] }} {{ d.ts_values[0]|fmt(".2f") }} → {{ d.ts_tenors[-1] }} {{ d.ts_values[-1]|fmt(".2f") }} (slope {{ (d.ts_values[-1] - d.ts_values[0])|signed(".2f") }} index pts, {{ d.ts_regime|lower }}){% if d.ts_date != d.vix_date %}; latest full curve — VIX itself is from {{ d.vix_date|fmt }}{% endif %}.</p>
     {% else %}<p class="note">No term-structure data.</p>{% endif %}
   {% endcall %}
 
@@ -159,7 +159,7 @@
       {{ m.kpi('SPX RMSE in sample', f.spx_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_spx_options|fmt) ~ ' anchors, ' ~ (f.n_spx_expiries|fmt) ~ ' expiries') }}
       {{ m.kpi('Out of sample', f.spx_oos_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_oos|fmt(',')) ~ ' quotes') }}
       {{ m.kpi('Put wing OOS', f.spx_oos_wing_rmse|fmt('.2f'), unit='vol pts') }}
-      {{ m.kpi('VIX indices', f.vix_index_rmse|fmt('.2f'), unit='pts RMSE') }}
+      {{ m.kpi('VIX indices', f.vix_index_rmse|fmt('.2f'), unit='index pts RMSE') }}
       {% if f.vvix %}{{ m.kpi('VVIX model / market', (f.vvix.model|fmt('.0f')) ~ ' / ' ~ (f.vvix.market|fmt('.0f')), sub='30-day vol of VIX, index pts') }}{% endif %}
     </div>
     <p class="note" id="fit-evidence">Evidence on the Calibration page: {{ m.cite('out-of-sample error by expiry', 'calibration.html#oos') }} · {{ m.cite('the VIX leg, indices and VX futures', 'calibration.html#vixleg') }}.</p>

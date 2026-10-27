@@ -100,6 +100,47 @@
   {% call m.panel('sleeve-pnl', 'Total P&L by sleeve', 's4', '$000s') %}{% if d.charts.sleeves %}{{ m.chart(d.charts.sleeves, 'h220 grow') }}{% endif %}{% endcall %}
 </div>
 
+{% if d.rt %}{% set rt = d.rt %}
+<div class="g pair">
+  {% call m.panel('round-trips', 'Every trade · P&L by entry date', 's8', 'mark-to-model at β·VIX') %}
+    {{ m.chart(d.charts.round_trips, 'h300 grow') }}
+    <p class="quote-readout point-readout js-only" id="chart-round-trips-readout" data-points-for="chart-round-trips" tabindex="0" aria-live="polite" aria-describedby="chart-round-trips-readout-help">Trade readout: hover a dot, or focus here and step through the trades by entry date with ← → (Page Up / Down: 10 trades; Home / End).</p>
+    <span class="sr-only" id="chart-round-trips-readout-help">Arrow keys step through the shown sleeves’ round trips in order of entry date; each step reads the sleeve, the entry date and the P&amp;L in $000s.</span>
+    <p class="note" id="round-trips-note">Each dot is one round trip (a straddle from entry to exit), at its entry date and its net P&amp;L in $000s: priced and marked with Black–Scholes at β·VIX, after costs and financing, so no dot is a traded fill. The reference strategies S1 and S2 are in the statistics below, not on the chart. The open trade is hollow and carries only its entry cost. The trade log’s “combined” records (the research-only agreement rule, not in the portfolio; see the <a href="#sleeve-spec">sleeve specification</a>) are left out.</p>
+  {% endcall %}
+  {% call m.panel('trade-hists', 'Closed round trips · P&L and days held', 's4', rt.n_port_closed ~ ' closed · S1C, S3, S4') %}
+    <h3 class="sub-head">P&amp;L per round trip<span class="sub-meta">$000s, closed trades</span></h3>
+    {{ m.chart(d.charts.trade_pnl_hist, 'h240') }}
+    <h3 class="sub-head">Days held<span class="sub-meta">calendar days, entry to exit</span></h3>
+    {{ m.chart(d.charts.trade_days_hist, 'h160') }}
+  {% endcall %}
+</div>
+<div class="g">
+  {% call m.panel('trade-stats', 'Round-trip statistics by sleeve', 's12', 'closed trades') %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Round-trip statistics by sleeve (scrollable)">
+    <table class="tbl dense wrap-head" id="trade-stats-tbl">
+      <caption>Trades of each sleeve, mark-to-model at β·VIX, in $000s of the sleeve’s own NAV: closed trades only except Total (every trade, the open one’s entry cost included); P(profit) = share of closed trades with P&amp;L &gt; 0; 5 worst / losses = the five largest losses’ share of all losses (and 5 best / gains of all gains); days are calendar days from entry to exit</caption>
+      <thead><tr><th scope="col">Sleeve</th><th scope="col" class="num">Closed</th><th scope="col" class="num">Open</th><th scope="col" class="num">Total</th><th scope="col" class="num">P(profit)</th><th scope="col" class="num">Mean</th><th scope="col" class="num">Median</th><th scope="col" class="num">Best</th><th scope="col" class="num">Worst</th><th scope="col" class="num">5 worst / losses</th><th scope="col" class="num">5 best / gains</th><th scope="col" class="num">Median days</th></tr></thead>
+      <tbody>{% for r in rt.rows %}<tr{% if r.ref %} class="muted"{% endif %}><td class="nowrap">{{ r.label }}</td><td class="num">{{ r.n_closed }}</td><td class="num">{{ r.n_open }}</td><td class="num">{{ (r.total / 1000)|signed(',.1f') }}</td><td class="num">{{ (r.p_profit * 100)|fmt('.1f') }}%</td><td class="num">{{ (r.mean / 1000)|signed(',.1f') }}</td><td class="num">{{ (r.median / 1000)|signed(',.1f') }}</td><td class="num">{{ (r.best / 1000)|signed(',.1f') }}</td><td class="num">{{ (r.worst / 1000)|signed(',.1f') }}</td><td class="num">{{ (r.worst_share * 100)|fmt('.0f') }}%</td><td class="num">{{ (r.best_share * 100)|fmt('.0f') }}%</td><td class="num">{{ r.median_days|fmt('.0f') }}</td></tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note" id="trade-stats-note">Dollars are each sleeve’s own (a $1M NAV per sleeve); the portfolio is the equal-weight mean of S1C, S3 and S4, so a trade moves it by a third as much. The counts and totals are the trade log’s and equal the per-sleeve table above (checked when the page is built). Across the three portfolio sleeves {{ rt.port.n_closed }} round trips closed, {{ (rt.port.p_profit * 100)|fmt('.1f') }}% at a profit, with a median of {{ (rt.port.median / 1000)|signed(',.1f') }}k and a mean of {{ (rt.port.mean / 1000)|signed(',.1f') }}k per trade in sleeve dollars (<span class="nowrap">{{ k.get('avg_pnl')|usd }}</span> of portfolio P&amp;L, the Trades tile: a third of it). The five largest losses are {% for r in rt.rows if not r.ref %}{{ (r.worst_share * 100)|fmt('.0f') }}% of {{ r.label }}’s losses{{ ', ' if not loop.last else '' }}{% endfor %}.</p>
+  {% endcall %}
+</div>
+<div class="g">
+  {% call m.panel('drawdowns', 'Worst drawdowns · portfolio and each sleeve', 's12', 'NAV to ' ~ rt.end) %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Worst drawdowns (scrollable)">
+    <table class="tbl dense wrap-head" id="drawdowns-tbl">
+      <caption>The five deepest drawdowns of each NAV (fewer where there are fewer): the peak is the last session at the running high before the fall, the valley the low before the peak is regained, the recovery the first session back at the peak; depth = valley / peak − 1; sessions from the peak to the recovery, or to {{ rt.end }} when not recovered</caption>
+      <thead><tr><th scope="col">Series</th><th scope="col" class="num">Rank</th><th scope="col">Peak</th><th scope="col">Valley</th><th scope="col">Recovery</th><th scope="col" class="num">Depth</th><th scope="col" class="num">Sessions to valley</th><th scope="col" class="num">Sessions</th></tr></thead>
+      <tbody>{% for s in rt.drawdowns %}{% for p in s.periods %}<tr><td class="nowrap">{{ s.label }}</td><td class="num">{{ loop.index }}</td><td class="nowrap">{{ p.peak }}</td><td class="nowrap">{{ p.valley }}</td><td class="nowrap">{% if p.recovery %}{{ p.recovery }}{% else %}<span class="neg">not recovered</span>{% endif %}</td><td class="num">{{ (p.depth * 100)|signed('.1f') }}%</td><td class="num">{{ p.to_valley|fmt(',') }}</td><td class="num">{{ p.sessions|fmt(',') }}{% if not p.recovery %} to date{% endif %}</td></tr>{% endfor %}{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note" id="drawdowns-note">Each series’ deepest drawdown equals the engine’s max drawdown (checked when the page is built). {% set p0 = rt.drawdowns[0].periods[0] %}{% if not p0.recovery %}The portfolio has stayed below its {{ p0.peak }} high ever since ({{ rt.drawdowns[0].n_all|plural('drawdown period') }} in the whole run): {{ p0.sessions|fmt(',') }} sessions to {{ rt.end }}, at its deepest on {{ p0.valley }}. {% endif %}The NAVs are mark-to-model: these are drawdowns of β·VIX marks, not of traded prices.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
 <div class="g pair">
   {% call m.panel('monthly', 'Monthly returns', 's7', 'against the prior month-end NAV') %}
     {% if d.monthly %}{{ m.heatmap(d.monthly, 'monthly-grid', 'Portfolio return (%) by month; the last column is the calendar year', 'Year', m.ramp_bar(['#fbb360', '#1c2127', '#8abbff'], '−' ~ ((d.monthly.lim * 100)|fmt('.1f')) ~ '%', '+' ~ ((d.monthly.lim * 100)|fmt('.1f')) ~ '%', 'monthly return · orange loss, blue gain; the sign is in every cell'), grow=True) }}{% endif %}
@@ -256,8 +297,8 @@
   {% call m.panel('beta-grid', 'β sensitivity · the full backtest re-run at each β', 's6') %}
     {% if grid %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β sensitivity grid (scrollable)">
-    <table class="tbl dense" id="beta-grid">
-      <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col" class="num">Portfolio</th><th scope="col" class="num">Sharpe</th><th scope="col" class="num">S1C</th><th scope="col" class="num">S3</th><th scope="col" class="num">S4</th><th scope="col" class="num">S1 (ref)</th></tr></thead>
+    <table class="tbl dense wrap-head" id="beta-grid">
+      <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col" class="num">Portfolio</th><th scope="col" class="num">Sharpe</th>{% for k in ('s1c', 's3', 's4', 's1') %}<th scope="col" class="num">{{ sleeve_labels[k] }}</th>{% endfor %}</tr></thead>
       <tbody>{% for g in grid|sort(attribute='beta', reverse=true) %}{% set _canon = d.beta is not none and (g.beta - d.beta)|abs < 1e-9 %}{% set _all = be and (g.beta - (be.mean_all|round(2)))|abs < 1e-9 %}
         <tr data-beta="{{ g.beta|fmt('.2f') }}"{% if _canon %} class="em"{% endif %}><td class="num nowrap">{{ g.beta|fmt('.2f') }}{% if _canon %} ●{% endif %}{% if _all %} ◆{% endif %}</td><td class="num">{{ g.pnl|usd_k }}</td><td class="num">{{ g.sharpe|fmt('.2f') }}</td><td class="num">{{ g.s1c_pnl|usd_k }}</td><td class="num">{{ g.s3_pnl|usd_k }}</td><td class="num">{{ g.s4_pnl|usd_k }}</td><td class="num">{{ g.s1_pnl|usd_k }}</td></tr>{% endfor %}</tbody>
     </table>
@@ -276,8 +317,8 @@
     {% call m.method('Sleeve notes, stress windows and the C18 inversion') %}
     <div class="prose">
       <p><strong>{{ s3_full }}</strong> fires only at VIX/VVIX extremes: {{ s3.get('n_trades')|fmt }} trades in {{ yrs }}{% if s3.get('rolls') %} ({{ s3.entries }} entries plus {{ s3.rolls }} rolls of a position held past its straddle's expiry){% endif %}, {{ s3.get('win_rate')|pct(0, false) }} win rate. Since C22 it is priced as the index leg of the dispersion trade (a short SPX straddle; there is no single-stock options data), and {{ s3_timing_txt }}.</p>
-      <p><strong>S1 · PDV short-VRP (reference):</strong> {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles sold in R1; worst trade {{ s1t.get('worst_pnl')|usd_k }} ({{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}). Selling straddles at the VIX books the skew premium as profit.</p>
-      <p><strong>S1C · contrarian PDV</strong> flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. It stays a sleeve because the portfolio's composition is held fixed across correction rounds so they remain comparable. <strong>S4 · VRP</strong> enters on z_vrp declining from a peak; its P&amp;L on {{ yrs }} is {{ s4.get('total_pnl')|usd_k }}.</p>
+      <p><strong>{{ sleeve_labels.s1 }}</strong>, the PDV short-VRP reference strategy: {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles sold in R1; worst trade {{ s1t.get('worst_pnl')|usd_k }} ({{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}). Selling straddles at the VIX books the skew premium as profit.</p>
+      <p><strong>{{ sleeve_labels.s1c }}</strong> flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. It stays a sleeve because the portfolio's composition is held fixed across correction rounds so they remain comparable. <strong>{{ sleeve_labels.s4 }}</strong> enters on z_vrp declining from a peak; its P&amp;L on {{ yrs }} is {{ s4.get('total_pnl')|usd_k }}.</p>
       <p>Stress windows, each measured from the close before it opens: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} ({{ c.start|fmt }} → {{ c.end|fmt }}) {{ c.total_return|pct }}{{ '; ' if not loop.last else '' }}{% endfor %}. {% if d.end_date and d.end_date < '2025-04-02' %}The backtest ends {{ d.end_date }}, so the April 2025 tariff shock is <em>not</em> in it, and this is no evidence of resilience to it.{% endif %}</p>
       <p>The C16–C23 corrections, each with its root cause, fix, tests and effect, are on the {{ m.cite('Corrections', 'corrections.html#register') }} page.</p>
     </div>

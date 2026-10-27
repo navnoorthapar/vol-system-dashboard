@@ -88,7 +88,7 @@
     <div class="pm-cell" style="border-right:none;">
       <div class="pm-k">C23 waterfall · the C22 run restated on the Cboe record (<code>c23_bridge.csv</code>)</div>
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="C23 waterfall (scrollable)">
-      <table class="tbl dense cards" id="c23-bridge">
+      <table class="tbl dense cards" id="c23-bridge" data-nosort>
         <thead><tr><th scope="col" class="num">Row</th><th scope="col">Step (cumulative)</th><th scope="col" class="num">Portfolio P&amp;L</th><th scope="col" class="num">{{ 'Δ P&L'|sym }}</th><th scope="col" class="num">Sharpe</th></tr></thead>
         <tbody>{% for x in d.c23_bridge %}<tr><td class="num" data-label="Row">{{ x.row }}</td><td class="wrap" data-label="Step (cumulative)">{{ x.label }}</td><td class="num" data-label="Portfolio P&amp;L">{{ x.pnl|usd(true) }}</td><td class="num" data-label="Δ P&amp;L">{{ x.d_pnl|usd(true) if x.row else '' }}</td><td class="num" data-label="Sharpe">{{ x.sharpe|fmt('.3f') }}</td></tr>{% endfor %}</tbody>
       </table>

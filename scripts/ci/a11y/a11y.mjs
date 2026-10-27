@@ -8,6 +8,9 @@
 //     390 px (phone), in the dark and the light colour scheme;
 //   * a page scrolls horizontally at any width from 320 to 1920 px, or at 320 px with every
 //     glyph spaced 0.06em wider (a label must not fit only with this machine's fonts);
+//   * a text cut short with an ellipsis (text-overflow: ellipsis, scrollWidth > clientWidth)
+//     carries no title with the whole text, at any of those widths: the overflow check
+//     cannot see it, since the page itself does not scroll;
 //   * a page throws a JavaScript error;
 //   * a page needs the network: every request to another origin is aborted, so the
 //     published pages must work from their own files (the CDN fallback for the
@@ -74,7 +77,7 @@ async function openPage(ctx, name) {
 }
 
 for (const name of PAGES) {
-  const entry = { page: name, axe: [], overflow: [], errors: [], blocked: [] };
+  const entry = { page: name, axe: [], overflow: [], truncated: [], errors: [], blocked: [] };
   for (const scheme of ['dark', 'light']) {
     for (const vp of AXE_VIEWPORTS) {
       // bypassCSP: the pages' CSP (script-src 'self') would block the injected axe-core;
@@ -98,6 +101,13 @@ for (const name of PAGES) {
     const { page } = await openPage(ctx, name);
     const sw = await page.evaluate(() => document.documentElement.scrollWidth);
     if (sw > width + 1) entry.overflow.push({ width, scrollWidth: sw });
+    const cut = await page.evaluate(() => [...document.querySelectorAll('body *')].filter(el => {
+      const s = getComputedStyle(el);
+      if (s.textOverflow !== 'ellipsis' || s.overflowX === 'visible' || el.closest('[hidden]')) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && el.scrollWidth > el.clientWidth + 1 && !el.getAttribute('title');
+    }).map(el => `${el.tagName.toLowerCase()}.${[...el.classList].join('.')} "${el.textContent.trim().slice(0, 40)}"`));
+    for (const c of cut) entry.truncated.push({ width, what: c });
     await ctx.close();
   }
   {
@@ -119,10 +129,14 @@ for (const name of PAGES) {
   for (const v of entry.axe) report.failures.push(`${name} @${v.width}px ${v.scheme}: axe ${v.id} (${v.impact}, ${v.nodes} node(s)): ${v.help}`);
   for (const o of entry.overflow) report.failures.push(`${name}: scrolls horizontally at ${o.width}px` +
     (o.stressed ? ` with letter-spacing +${STRESS_SPACING}` : '') + ` (scrollWidth ${o.scrollWidth})`);
+  for (const t of entry.truncated) report.failures.push(`${name} @${t.width}px: ${t.what} is cut short ` +
+    'with an ellipsis and has no title');
   for (const e of entry.errors) report.failures.push(`${name}: JavaScript error: ${e}`);
   for (const b of entry.blocked) report.failures.push(`${name}: requests another origin: ${b}`);
-  const status = entry.axe.length + entry.overflow.length + entry.errors.length + entry.blocked.length ? 'FAIL' : 'ok';
+  const status = entry.axe.length + entry.overflow.length + entry.truncated.length + entry.errors.length +
+    entry.blocked.length ? 'FAIL' : 'ok';
   console.log(`${status.padEnd(5)} ${name.padEnd(18)} axe violations ${entry.axe.length}, overflow ${entry.overflow.length}, ` +
+              `truncated ${entry.truncated.length}, ` +
               `js errors ${entry.errors.length}, external requests ${entry.blocked.length}`);
 }
 

@@ -136,6 +136,30 @@ sub, sup { font-size: 0.72em; }
 .lvl-error, .lvl-missing { color: var(--breach); }
 .lvl-unknown { color: var(--text3); }
 
+/* phones (Q20): the strip's one-line form (shown at <= 600 px, below) */
+.sb-phone { display: none; }
+.sb-phone > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: baseline; gap: 4px; }
+.sb-phone > summary::-webkit-details-marker { display: none; }
+.sb-phone > summary::after { content: "▸"; content: "▸" / ""; color: var(--text2); margin-left: 2px; }
+.sb-phone[open] > summary::after { content: "▾"; content: "▾" / ""; }
+.sb-list { position: absolute; left: 0; right: 0; top: 100%; z-index: 110; list-style: none; margin: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px 12px;
+  padding: 6px 10px 8px; background: var(--bg-deep); border-bottom: 1px solid var(--line2); }
+.sb-list li { white-space: nowrap; }
+.sb-list .sb-age { color: var(--text3); margin-left: 6px; }
+/* a heading that folds its content on phones (Q20; desk.js initNarrowDisclosure) */
+button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; text-align: left;
+  text-transform: inherit; letter-spacing: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: inherit;
+  min-height: 24px; }   /* WCAG 2.5.8 target size */
+@media screen and (max-width: 600px) {
+  .fold-body:not(.unfolded) { display: none; }
+  [data-disclose]::after { content: "▸"; content: "▸" / ""; margin-left: 6px; color: var(--text2); font-weight: 400; }
+  [data-disclose].unfolded::after { content: "▾"; content: "▾" / ""; }
+  [data-disclose][data-count]::after { content: "· " attr(data-count) " ▸"; content: "· " attr(data-count) " ▸" / ""; color: var(--text3); }
+  [data-disclose][data-count].unfolded::after { content: "· " attr(data-count) " ▾"; content: "· " attr(data-count) " ▾" / ""; }
+}
+
+
 /* ── navigation ──────────────────────────────────────────────────────── */
 .nav {
   position: sticky; top: 0; z-index: 100;
@@ -162,6 +186,7 @@ sub, sup { font-size: 0.72em; }
   background: var(--surface); border-bottom: 1px solid var(--line);
   font-family: var(--mono); font-size: 12px;
   display: flex; flex-wrap: wrap; align-items: center; gap: 2px 0; padding: 3px 8px; min-height: 28px;
+  position: relative;   /* holds a .sr-only item inside the row when it scrolls */
 }
 .tk { display: inline-flex; align-items: baseline; gap: 6px; padding: 0 10px; border-right: 1px solid var(--line); white-space: nowrap; }
 .tk:last-child { border-right: none; }
@@ -169,6 +194,10 @@ sub, sup { font-size: 0.72em; }
 .tk-val { color: var(--text); font-weight: 500; }
 .tk-chg { font-size: 11.5px; }
 .tk-note { color: var(--text3); font-size: 11px; }
+/* a note on its own source's date (the surface) takes that age's status-bar colour */
+.tk-note.lvl-ok { color: var(--ok); }
+.tk-note.lvl-warn { color: var(--watch); }
+.tk-note.lvl-error, .tk-note.lvl-missing { color: var(--breach); }
 
 /* ── signed numbers / P&L convention ─────────────────────────────────── */
 .pos { color: var(--pos); }
@@ -237,7 +266,8 @@ sub, sup { font-size: 0.72em; }
 .btn[aria-pressed="true"], .btn[aria-selected="true"] { color: var(--text); background: var(--surface3); border-color: var(--pos-fill); }
 .btn[aria-pressed="false"] .key-swatch { opacity: 0.35; }
 .btn .key-swatch { width: 12px; height: 0; border-top: 2px solid currentColor; display: inline-block; }
-.btn .key-swatch.dashed { border-top-style: dashed; }
+/* drawn, not a dashed border: a 12 px dashed border renders as one solid stroke */
+.btn .key-swatch.dashed { border-top: none; height: 2px; width: 14px; background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
 .btn .key-swatch.dotted { border-top-style: dotted; }
 .btn .key-swatch.dot { width: 7px; height: 7px; border: none; border-radius: 50%; background: currentColor; }
 .btn .key-swatch.hollow { width: 7px; height: 7px; border: 1.4px solid currentColor; border-radius: 50%; background: none; }
@@ -267,7 +297,8 @@ sub, sup { font-size: 0.72em; }
 /* ── KPI tiles ───────────────────────────────────────────────────────── */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .kpi { background: var(--surface); padding: 7px 10px 8px; min-width: 0; }
-.kpi-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* a label wraps to a second line rather than end in an ellipsis: 'SPX RMSE IN SA…' hid its own subject (F5) */
+.kpi-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); white-space: normal; overflow-wrap: break-word; }
 .kpi-value { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; color: var(--text); overflow-wrap: anywhere; }
 .kpi-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 2px; }
 .kpi-sub { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 1px; }
@@ -365,6 +396,7 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .tbl tr:last-child td { border-bottom: none; }
 .tbl tr.muted td { color: var(--text3); }
 .tbl tr.muted td.num { color: var(--text2); }
+.tbl td.beyond { color: var(--text2); font-style: italic; font-size: 0.92em; }
 .tbl tr.em td { color: var(--text); font-weight: 600; }
 .tbl td.wrap { white-space: normal; min-width: 180px; }
 .tbl.spec td.wrap { min-width: 12ch; }   /* nine text columns (Research #sleeve-spec) share the width */
@@ -414,6 +446,7 @@ code { overflow-wrap: anywhere; }
    for a quote's lines at desk width, so a hover does not move the page below */
 .quote-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 4.6em; margin: 4px 0 0; padding: 2px 4px; border-radius: 3px; }
 .quote-readout:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+.point-readout { min-height: 2.4em; }
 /* a segmented control: one choice of two or three (aria-pressed buttons) */
 .seg { display: inline-flex; margin: 6px 0 2px; }
 .seg .btn { border-radius: 0; }
@@ -596,6 +629,10 @@ dialog.keys .dl { font-size: 12px; }
   .g:is(.pair, .level) .panel-body .fill-scroll { flex: 1 1 0; min-height: 280px; max-height: none; }
   .g:is(.pair, .level) .grow-col[hidden] { display: none; }
   .g.pair.start { align-items: start; }
+  /* an open disclosure makes its panel taller than the row was laid out for; the
+     panel beside it then ends with its own content instead of stretching a chart
+     (a 0.55–0.95 β range drawn 1,359 px tall) or a blank 1,250 px body (F3) */
+  .g:is(.pair, .level):has(details[open]) { align-items: start; }
 }
 /* a trio's shorter panel ends with its disclosure, not with blank space (side by
    side from 861 px: 4 + 4 + 4, or 6 + 6 + 12 up to 1180 px) */
@@ -603,6 +640,7 @@ dialog.keys .dl { font-size: 12px; }
   .g.trio > .panel > .panel-body { display: flex; flex-direction: column; }
   .g.trio > .panel > .panel-body > .method.foot { margin-top: auto; padding-top: 8px; }
   .g.trio .panel-body .chart.grow { flex: 1 1 auto; }
+  .g.trio:has(details[open]) { align-items: start; }
 }
 @media (max-width: 1180px) {
   .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }
@@ -631,6 +669,26 @@ dialog.keys .dl { font-size: 12px; }
   .site-footer .foot-inner { grid-template-columns: minmax(0, 1fr); }
   .statusbar .sb-opt { display: none; }
 }
+/* the ticker (ten items with the B13 vol context) is one scrollable row up to
+   860 px, where it would wrap to three or four lines, and at most two wrapped
+   lines above (one at 1920) */
+@media (max-width: 860px) {
+  .ticker { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+  .ticker::-webkit-scrollbar { display: none; }
+  .ticker:focus-visible { outline-offset: -2px; }
+  .tk { flex: 0 0 auto; }
+}
+/* phones (Q20): the chrome is three short rows (status, nav, ticker), so the
+   page's title and first number are on the first screen at 390 x 844 */
+@media (max-width: 600px) {
+  .statusbar { position: relative; flex-wrap: nowrap; gap: 0 10px; padding-top: 2px; padding-bottom: 2px; min-height: 22px; }
+  .statusbar > .sb-item:not(.sb-state), .statusbar > .sb-right { display: none; }
+  .statusbar .sb-phone { display: block; min-width: 0; }
+  .ticker { padding: 2px 4px; min-height: 24px; }
+  .banner { padding: 6px 10px; }
+  .banner-stack { margin-bottom: 8px; }
+}
 @media (max-width: 480px) {
   .page { padding: 10px 10px 24px; }
   .statusbar, .ticker { padding-left: 10px; padding-right: 10px; }
@@ -640,7 +698,6 @@ dialog.keys .dl { font-size: 12px; }
   .tk { padding: 0 8px; }
   .brand .brand-sub { display: none; }
   .kpi-value { font-size: 18px; }
-  .kpi-label { white-space: normal; overflow: visible; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
   .chart.h300, .chart.h340, .chart.h400 { height: 260px; }
@@ -720,3 +777,33 @@ tr[aria-current="true"] > th[scope="row"] { color: var(--text); box-shadow: inse
 .zoom-year { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text3); }
 .zoom-year select.btn { padding-right: 4px; }
 .charts-failed .zoom-year { display: none !important; }
+
+/* ── sortable, copyable tables (D12; desk.js initTableTools) ─────────── */
+/* the head's button and its arrow take no layout space (no shift when desk.js
+   adds them): the arrow sits in the cell's padding */
+.tbl th.sortable { position: relative; }
+.tbl th > button.th-sort { all: unset; cursor: pointer; text-transform: inherit; letter-spacing: inherit; font: inherit; color: inherit; }
+.tbl th > button.th-sort:hover, .tbl th[aria-sort] > button.th-sort { color: var(--text); }
+.tbl th > button.th-sort:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.th-sort-ind { position: absolute; top: 50%; right: 1px; transform: translateY(-50%); font-size: 8px; line-height: 1; color: var(--text2); pointer-events: none; }
+.th-sort-ind::after { content: ""; }
+.tbl th.sortable:hover .th-sort-ind::after, .tbl th.sortable:focus-within .th-sort-ind::after { content: "↕"; content: "↕" / ""; color: var(--text3); }
+.tbl th.sortable[aria-sort="ascending"] .th-sort-ind::after { content: "▲"; content: "▲" / ""; color: var(--text2); }
+.tbl th.sortable[aria-sort="descending"] .th-sort-ind::after { content: "▼"; content: "▼" / ""; color: var(--text2); }
+.tbl-tools { display: flex; justify-content: flex-end; gap: 4px; margin: 0 0 4px; }
+@media print { .tbl-tools, .tbl-act, .th-sort-ind { display: none !important; } }
+
+/* ── conventions and definitions (Q14) ───────────────────────────────── */
+a.term { color: inherit; text-decoration: underline dotted; text-decoration-color: var(--text3); text-underline-offset: 2px; }
+a.term:hover { color: var(--info); text-decoration-color: currentColor; }
+a.term abbr { text-decoration: none; }
+.conv-list { margin-bottom: 10px; }
+.defs { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px 16px; }
+.defs .def { padding: 6px 0; border-top: 1px solid var(--line); scroll-margin-top: 56px; }
+.defs .def:target { background: var(--surface2); outline: 1px solid var(--line2); }
+.defs dt { font-weight: 600; color: var(--text); }
+.defs dfn { font-style: normal; }
+.defs .def-exp { color: var(--text3); font-weight: 400; font-size: 11.5px; }
+.defs dd { font-size: 12px; color: var(--text2); line-height: 1.5; overflow-wrap: anywhere; }
+.defs .def-meta { display: block; color: var(--text3); font-size: 11px; margin-top: 2px; }
+@media (max-width: 480px) { .defs { grid-template-columns: minmax(0, 1fr); } }

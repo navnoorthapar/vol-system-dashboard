@@ -294,3 +294,23 @@ def test_vix_over_vix3m_share_and_percentile_on_the_committed_db():
     assert round(v["share_above"], 1) == 7.6
     assert round(v["today"], 3) == 0.950
     assert round(v["pct"], 1) == 80.8
+
+
+def test_pctile_prior_ranks_the_newest_value_against_the_window_before_it():
+    """B13: the ticker's VIX percentile: of the ``window`` sessions before the
+    newest (NaN dropped, the newest itself left out), how many closed strictly
+    lower; ties do not count as below. Fewer earlier sessions than the window:
+    None (no shorter window is put in its place)."""
+    idx = pd.bdate_range("2026-01-01", periods=7)
+    x = pd.Series([30.0, 10.0, np.nan, 12.0, 15.0, 15.0, 15.0], index=idx)
+    p = dm.pctile_prior(x, window=4)
+    # the four sessions before the newest (NaN dropped): 10, 12, 15, 15 → two strictly below 15
+    assert (p["n_below"], p["n"], p["pct"]) == (2, 4, 50.0)
+    assert p["value"] == 15.0
+    assert (p["date"], p["first"], p["last"]) == ("2026-01-09", "2026-01-02", "2026-01-08")
+    assert dm.pctile_prior(x, window=5)["n_below"] == 2        # 30 enters the window, above 15
+    assert dm.pctile_prior(x, window=6) is None                  # only five earlier values
+    assert dm.PCTILE_WINDOW == 252
+    big = pd.Series(np.arange(300.0), index=pd.bdate_range("2025-01-01", periods=300))
+    assert dm.pctile_prior(big)["pct"] == 100.0                  # above all 252 before it
+    assert dm.pctile_prior(big[::-1].set_axis(big.index))["pct"] == 0.0

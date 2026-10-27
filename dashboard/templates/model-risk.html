@@ -50,4 +50,17 @@
     {% endif %}
   {% endcall %}
 </div>
+
+<div class="g">
+  {% call m.panel('definitions', 'Conventions and definitions · every page', 's12', glossary|length ~ ' terms') %}
+    <h3 class="sub-head" id="conventions">Units and signs</h3>
+    <dl class="dl conv-list">{% for k, v in glossary_conventions %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl>
+    <h3 class="sub-head">Terms</h3>
+    <dl class="defs">{% for t in glossary %}
+      <div class="def" id="def-{{ t.id }}" data-term="{{ t.id }}"><dt><dfn{% if t.abbr %} title="{{ t.abbr }}"{% endif %}>{{ t.term }}</dfn>{% if t.abbr %} <span class="def-exp">{{ t.abbr }}</span>{% endif %}</dt>
+      <dd>{{ t.text }} <span class="def-meta">Units: {{ t.units }} · used on {{ t.used }}{% if t.source %} · <code class="path">{{ t.source|path }}</code>{% if t.fn %} ({{ t.fn }}){% endif %}{% else %} · the house style above{% endif %}</span></dd></div>{% endfor %}
+    </dl>
+    <p class="note">The first use of each term on every page links here. A definition quotes the formula the code computes (the file named after it), not a textbook variant.</p>
+  {% endcall %}
+</div>
 {% endblock %}

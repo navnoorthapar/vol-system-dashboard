@@ -80,6 +80,54 @@
 </div>
 {% endif %}
 
+{% if d.cone %}{% set vc = d.cone %}
+<div class="g pair">
+  {% call m.panel('vol-cone', 'Volatility cone · SPX realised vol by horizon, SVI-cal ATMF on it', 's7', 'windows ending ' ~ vc.session) %}
+    <div class="tabs js-only" role="tablist" aria-label="Sample of the volatility cone" data-state-key="cone" data-chart-filter="chart-vol-cone" hidden>
+      {% for sm in vc.samples %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if sm.key == vc.default else 'false' }}" aria-controls="vol-cone-panel" data-value="{{ sm.key }}">{{ sm.label }}</button>{% endfor %}
+    </div>
+    <div id="vol-cone-panel" role="tabpanel" class="grow-col">{{ m.chart(vc.chart, 'h300 grow') }}</div>
+    <p class="note" id="vol-cone-note">Grey lines: the 5th, 25th, median, 75th and 95th percentiles of SPX realised vol RV<sub>h</sub> = 100·√(252/h · Σ r²) over every window of h = 10, 21, 42, 63, 126 and 252 sessions (close-to-close log returns, zero mean, the site’s RV21 convention), in the sample the tab picks: {% for sm in vc.samples %}<span class="nowrap">{{ sm.label|lower }} {{ sm.start }} → {{ vc.session }}</span>{{ ', ' if not loop.last else '' }}{% endfor %}. Every sample ends on the surface’s session, so no later close enters. An expiry of T calendar days sits at T·252/365 sessions. The windows overlap (one per session), so neighbouring windows share most of their returns: at 252 sessions the last 3 years hold about three independent years. Since 2010 includes 2020; the last 3 years does not.</p>
+  {% endcall %}
+  {% call m.panel('vol-cone-rank', 'SVI-cal ATMF against the realised cone', 's5', vc.rows|length|plural('listed expiry', 'listed expiries')) %}
+    <p id="vol-cone-1m">The listed expiry nearest 30 days, <span class="nowrap">{{ vc.one_m.expiry }} ({{ vc.one_m.days|fmt('.0f') }} d)</span>, has an SVI-cal ATMF of <b class="num">{{ vc.one_m.atmf|fmt('.2f') }}%</b>{% if vc.one_m.atmf_30 is not none %} (the 1M tile’s {{ vc.one_m.atmf_30|fmt('.2f') }}% is the surface interpolated to exactly 30 days){% endif %}, above {{ vc.one_m.ranks[0]|fmt('.0f') }}% of the {{ vc.one_m.h }}-session RV windows since 2010 and {{ vc.one_m.ranks[1]|fmt('.0f') }}% of those in the last 3 years. The 21-session cone since 2010 runs {{ vc.c21['since-2010'].p5|fmt('.1f') }}–{{ vc.c21['since-2010'].p95|fmt('.1f') }}% (5th–95th percentile), median {{ vc.c21['since-2010'].p50|fmt('.1f') }}%; the 21 sessions to {{ vc.session }} realised {{ vc.c21['since-2010'].current|fmt('.1f') }}%.</p>
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="SVI-cal ATMF ranked against realised vol (scrollable)">
+    <table class="tbl dense wrap-head" id="vol-cone-rank-tbl">
+      <caption>SVI-cal ATMF of each listed expiry up to 252 sessions, {{ vc.session }}, and the share (%) of realised-vol windows of the same length (T·252/365 sessions, rounded) below it, since 2010 and in the last 3 years</caption>
+      <thead><tr><th scope="col">Expiry</th><th scope="col" class="num">Days</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">ATMF (%)</th>{% for sm in vc.samples %}<th scope="col" class="num">{{ sm.short }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for r in vc.rows %}<tr><td class="nowrap">{{ r.expiry }}</td><td class="num">{{ r.days|fmt('.0f') }}</td><td class="num">{{ r.sessions|fmt('.1f') }}</td><td class="num">{{ r.atmf|fmt('.2f') }}</td>{% for k in r.ranks %}<td class="num">{{ k|fmt('.0f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note" id="vol-cone-rank-note">Implied vol carries the variance risk premium, so an ATMF above the realised median is the usual state, not by itself rich. Close-to-close RV leaves out intraday range (the database holds daily closes only). The ATMF is the SVI-cal slice at ln(K/F) = 0 of a listed expiry, not an interpolation{% if vc.n_beyond %}; {{ vc.n_beyond|plural('listed expiry', 'listed expiries') }} beyond 252 sessions {{ 'is' if vc.n_beyond == 1 else 'are' }} past the cone and left out{% endif %}.</p>
+  {% endcall %}
+</div>
+{% endif %}
+
+{% if d.rnd %}{% set rn = d.rnd %}
+<div class="g pair">
+  {% call m.panel('rnd', 'Risk-neutral density · SVI-cal slices nearest 30, 91 and 182 days', 's6', 'Breeden–Litzenberger · ' ~ d.session) %}
+    {% if rn.density_chart %}{{ m.chart(rn.density_chart, 'h300 grow') }}{{ m.tenor_key(rn.density_chart) }}{% endif %}
+    <p class="note" id="rnd-note">Risk-neutral density of ln({{ 'S_T'|subs }}/F) under each expiry’s T-forward measure, read off one butterfly-certified SVI-cal slice: p(k) = g(k)/√(2πw)·exp(−d₋²/2), with w(k) the slice’s total variance and g Durrleman’s function: the call price’s second strike derivative (Breeden–Litzenberger) in closed form. Each curve is a listed expiry ({% for p in rn.picks %}<span class="nowrap">{{ p.expiry }} ({{ p.days|fmt('.0f') }} d, {{ p.label }})</span>{{ '; ' if not loop.last else '' }}{% endfor %}), not an interpolation, and is drawn only across its quoted strikes; beyond them the slice is the SVI linear wing, an extrapolation.</p>
+  {% endcall %}
+  {% call m.panel('rnd-tails', 'Risk-neutral tail probabilities by expiry', 's6', 'SVI-cal · ' ~ d.session) %}
+    {% if rn.tails_chart %}{{ m.chart(rn.tails_chart, 'h300 grow') }}{% endif %}
+    <p class="note" id="rnd-tails-note">Risk-neutral, not a forecast: these probabilities price claims and carry the market’s risk premia, so they are not real-world odds. A move is measured from each expiry’s parity forward F, not from spot. A gap is a threshold beyond the expiry’s quoted strikes{% if rn.n_gt110_beyond %} ({{ rn.n_gt110_beyond }} of {{ rn.rows|length }} expiries quote no strike as high as 1.10 F){% endif %}: no probability is printed there.</p>
+  {% endcall %}
+</div>
+<div class="g">
+  {% call m.panel('rnd-table', 'Tail probabilities and distribution checks · every listed SVI-cal slice', 's12', rn.rows|length|plural('expiry', 'expiries')) %}
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Risk-neutral tail probabilities (scrollable)">
+    <table class="tbl dense wrap-head" id="rnd-table-tbl">
+      <caption>Risk-neutral probabilities in % of each listed SVI-cal slice, {{ d.session }}: P({{ 'S_T'|subs }} &lt; K) = N(−d₋) + φ(d₋)·w′/(2√w) at K = threshold × F, printed only when K lies inside the expiry’s quoted K/F range (“{{ 'beyond quoted strikes' }}” otherwise); mass below / above quoted = P({{ 'S_T'|subs }} &lt; lowest quoted strike) and P({{ 'S_T'|subs }} &gt; highest), in %; ∫p and E[{{ 'S_T'|subs }}/F] over the whole line, wings included; {{ 'g_min'|subs }} from the butterfly certificate</caption>
+      <thead><tr>{% for h in rn.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{{ h|subs }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for r in rn.rows %}<tr{% if r.pick %} class="em"{% endif %}><td class="nowrap">{{ r.expiry }}{% if r.pick %} <span class="sub-meta">{{ r.pick }}</span>{% endif %}{% if not r.certified %} <span class="chip chip-warn">not certified</span>{% endif %}</td>{% for c in r.cells %}<td class="num{% if c == 'beyond quoted strikes' %} beyond{% endif %}">{{ c }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+    </div>
+    <p class="note" id="rnd-table-note">“Beyond quoted strikes”: {{ rn.n_beyond }} thresholds lie outside their expiry’s quoted K/F range, where the slice is SVI wing extrapolation, so no probability is printed. The mass below and above the quoted range is the same closed form at the range’s edge, set by the quoted smile there; how that mass spreads beyond the edge is the linear wing, so the density is drawn only inside the quotes and no skewness or kurtosis is shown (the wings set them). Over every slice |∫p − 1| ≤ {{ rn.max_mass_err_text }} and |E[{{ 'S_T'|subs }}/F] − 1| ≤ {{ rn.max_mean_err_text }}: each slice is a distribution with the forward as its mean (checked in the tests for every certified slice of every stored session). {{ 'g_min'|subs }} ≥ 0 is the butterfly certificate: the density is non-negative everywhere.{% if d.arb_repair and d.arb_repair.n_perturbed_outside_spread %} The slices are fitted to the repaired quotes: {{ d.arb_repair.n_perturbed_outside_spread|fmt(',') }} quotes the l1 repair moved outside their bid–ask are left out of the fitted set (<a href="#arbitrage">static arbitrage</a>).{% endif %}</p>
+  {% endcall %}
+</div>
+{% endif %}
+
 <div class="g pair">
   {% call m.panel('iv-heat', 'Implied vol by expiry and ln(K/F) · market mids', 's7', d.n_quotes|fmt(',') ~ ' quotes') %}
     {{ m.heatmap(d.iv_heat, 'iv-heatmap', 'Median mid implied vol (%) of the quotes in each expiry (rows) and log-moneyness bucket (columns; heads are bucket midpoints)', 'Expiry',

@@ -1207,6 +1207,55 @@
       if (b.getAttribute('data-xmode') === 'delta' && state.get('x') === 'delta') setXmode(b.getAttribute('data-xmode-for'), 'delta', true);
     });
   }
+  // -- scatter strips: the keyboard readout of every shown point (F4) ----
+  // The per-trade strip is a canvas: its readout (focusable) steps through the
+  // shown series' points in order of x (the entry date), reads the series, the
+  // date and the value, and shows the tooltip at that point.
+  function stripPoints(id) {
+    var c = Desk.charts[id];
+    if (!c) return [];
+    var off = legendOff(id), pts = [];
+    (c.chart.getOption().series || []).forEach(function (s, si) {
+      if (s.type !== 'scatter' || off[s.name]) return;
+      (s.data || []).forEach(function (d, di) {
+        var v = Array.isArray(d) ? d : (d && d.value);
+        if (!v || v[1] === null || v[1] === undefined) return;
+        var x = typeof v[0] === 'number' ? new Date(v[0]).toISOString().slice(0, 10) : String(v[0]).slice(0, 10);
+        pts.push({ name: s.name, si: si, di: di, x: x, y: Number(v[1]) });
+      });
+    });
+    pts.sort(function (a, b) { return a.x < b.x ? -1 : (a.x > b.x ? 1 : a.y - b.y); });
+    return pts;
+  }
+  function stepPoint(id, key, r) {
+    var c = Desk.charts[id], pts = stripPoints(id);
+    if (!c || !pts.length) return false;
+    var i, cur = c.pi;
+    if (key === 'Home') i = 0;
+    else if (key === 'End') i = pts.length - 1;
+    else if (READOUT_KEYS[key] === undefined) return false;
+    else i = (cur === null || cur === undefined) ? 0 : Math.max(0, Math.min(pts.length - 1, cur + READOUT_KEYS[key]));
+    var p = pts[i], y = c.spec.y || {};
+    c.pi = i;
+    r.textContent = p.name + ', entered ' + p.x + ': ' + (y.name || 'value') + ' ' +
+      num(p.y, { digits: y.tipDigits === undefined ? 1 : y.tipDigits, signed: true }) +
+      ' \u00b7 ' + (i + 1) + ' of ' + pts.length + ' by entry date';
+    c.chart.dispatchAction({ type: 'showTip', seriesIndex: p.si, dataIndex: p.di });
+    return true;
+  }
+  function initPointReadouts() {
+    $$('[data-points-for]').forEach(function (r) {
+      var id = r.getAttribute('data-points-for');
+      r.addEventListener('keydown', function (e) { if (stepPoint(id, e.key, r)) e.preventDefault(); });
+      r.addEventListener('blur', function () { var c = Desk.charts[id]; if (c) c.chart.dispatchAction({ type: 'hideTip' }); });
+    });
+    // a sleeve toggled in the legend renumbers the points: start again from the first
+    $$('[data-legend-for]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        (b.getAttribute('data-legend-for') || '').split(' ').forEach(function (id) { var c = Desk.charts[id]; if (c) c.pi = null; });
+      });
+    });
+  }
   function setXmode(id, mode, init) {
     Desk.xmode[id] = mode;
     $$('[data-xmode-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o.getAttribute('data-xmode') === mode ? 'true' : 'false'); });
@@ -1571,6 +1620,8 @@
       : ', ' + behind + ' NYSE session' + (behind === 1 ? '' : 's') + ' behind your clock' +
         (behind === 1 ? ' (the site rebuilds after each close, about 22:00 UTC).' : '.'));
     el.className = 'sb-v ' + (behind >= 5 ? 'lvl-error' : behind >= 2 ? 'lvl-warn' : 'lvl-ok');
+    // the phone strip's source list carries the same reading (Q20)
+    $$('[data-freshness-copy]').forEach(function (c) { c.textContent = el.textContent; c.title = el.title; c.className = el.className; });
   }
 
   // -- scroll regions: say so in text (not only the edge shadow) when cut off --
@@ -1607,9 +1658,137 @@
     });
   }
 
+  // -- phone first screen (Q20): desk.css folds .fold-body at <= 600 px before the
+  // first paint (<noscript> unfolds it); here its heading becomes a disclosure button.
+  var NARROW = '(max-width: 600px)';
+  function initNarrowDisclosure() {
+    var heads = $$('[data-disclose]');
+    if (!heads.length || !window.matchMedia) return;
+    var mq = window.matchMedia(NARROW);
+    var sync = function () {
+      heads.forEach(function (h) {
+        var b = h.querySelector('button.disclose'), body = doc.getElementById(h.getAttribute('data-disclose'));
+        if (b && body) b.setAttribute('aria-expanded', (!mq.matches || body.classList.contains('unfolded')) ? 'true' : 'false');
+      });
+    };
+    var enhance = function () {
+      heads.forEach(function (h) {
+        var body = doc.getElementById(h.getAttribute('data-disclose'));
+        if (!body || h.querySelector('button.disclose')) return;
+        var btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.className = 'disclose';
+        btn.setAttribute('aria-controls', body.id);
+        while (h.firstChild) btn.appendChild(h.firstChild);
+        h.appendChild(btn);
+        btn.addEventListener('click', function () {
+          var open = !body.classList.contains('unfolded');
+          body.classList.toggle('unfolded', open);
+          h.classList.toggle('unfolded', open);
+          sync();
+        });
+      });
+      sync();
+    };
+    if (mq.matches) enhance();
+    var onChange = function () { if (mq.matches) enhance(); else sync(); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange);
+  }
+  initNarrowDisclosure();
+
+  // -- sortable, copyable tables (D12): a head of a rectangular .tbl sorts up,
+  // down, then back to the published order (aria-sort); Copy = TSV of the shown
+  // rows as written, CSV = a download. Without JavaScript nothing changes.
+  var SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹', DASH = /^[—–-]+$/;
+  // U+2212, $, %, $k / $M, 'm × 10⁻ⁿ', the first of 'a / b', 'a–b', 'a to b'; null for text
+  function cellNumber(text) {
+    var s = String(text).replace(/−/g, '-').replace(/\s+/g, ' ').trim();
+    if (!s || DASH.test(s)) return null;
+    s = s.split(/ \/ |–| to /)[0].trim();
+    var m = /^([+-]?)(\$?)(\d[\d,]*(?:\.\d+)?|\.\d+)(?: ?× ?10([⁻⁰¹²³⁴-⁹]+))?(%|k|M|bn)?(?: .*)?$/.exec(s);
+    if (!m || (m[5] && m[5] !== '%' && !m[2])) return null;      // '1M' is a tenor
+    var v = parseFloat(m[3].replace(/,/g, ''));
+    if (m[4]) v *= Math.pow(10, +m[4].replace(/./g, function (c) { return c === '⁻' ? '-' : SUP.indexOf(c); }));
+    v *= { k: 1e3, M: 1e6, bn: 1e9 }[m[5]] || 1;
+    return m[1] === '-' ? -v : v;
+  }
+  Desk.cellNumber = cellNumber;
+  function cellText(c) {
+    var k = c.cloneNode(true);
+    $$('.sr-only, .th-sort-ind, [hidden], [aria-hidden="true"]', k).forEach(function (x) { x.remove(); });
+    return k.textContent.replace(/\s+/g, ' ').trim();
+  }
+  function tableRows(t) {
+    return [t.tHead.rows[0]].concat($$('tbody > tr', t).filter(function (r) { return !r.hidden; }))
+      .map(function (r) { return Array.prototype.map.call(r.cells, cellText); });
+  }
+  Desk.tableTsv = function (t) { return tableRows(t).map(function (r) { return r.join('\t'); }).join('\n') + '\n'; };
+  function sortable(t) {
+    var h = t.tHead, rows = $$('tbody > tr', t);
+    return !t.closest('.chart-data, .site-footer, [data-nosort]') && h && h.rows.length === 1 && rows.length > 1 &&
+      !t.querySelector('[colspan], [rowspan]') && rows.every(function (r) { return r.cells.length === h.rows[0].cells.length; });
+  }
+  function initTableTools() {
+    var tables = $$('table.tbl').filter(sortable), per = {};
+    tables.forEach(function (t) { var p = t.closest('.panel'); if (p) per[p.id] = (per[p.id] || 0) + 1; });
+    tables.forEach(function (t, ti) {
+      var tbody = t.tBodies[0], rows = $$('tr', tbody), heads = $$('th', t.tHead.rows[0]), state = null;
+      var initial = heads.map(function (h) { return h.getAttribute('aria-sort'); });
+      var ord = function (r) { return +r.getAttribute('data-order'); };
+      rows.forEach(function (r, i) { r.setAttribute('data-order', i); });
+      heads.forEach(function (th, j) {
+        if (th.querySelector('a, button, input, select, [tabindex]')) return;   // a head that is a link stays one
+        var vals = rows.map(function (r) { return cellText(r.cells[j]); }).filter(function (x) { return x && !DASH.test(x); });
+        var num = vals.length && vals.filter(function (x) { return cellNumber(x) !== null; }).length >= Math.max(1, vals.length / 2);
+        var btn = doc.createElement('button'), lab = doc.createElement('span'), ind = doc.createElement('span');
+        btn.type = 'button'; btn.className = 'th-sort'; lab.className = 'th-sort-label'; ind.className = 'th-sort-ind';
+        ind.setAttribute('aria-hidden', 'true');
+        while (th.firstChild) lab.appendChild(th.firstChild);
+        btn.appendChild(lab); th.appendChild(btn); th.appendChild(ind); th.classList.add('sortable');
+        btn.addEventListener('click', function () {
+          var next = state && state.col === j ? (state.dir === 'ascending' ? 'descending' : null) : 'ascending';
+          state = next && { col: j, dir: next };
+          heads.forEach(function (h, i) { if (!next && initial[i]) h.setAttribute('aria-sort', initial[i]); else h.removeAttribute('aria-sort'); });
+          var list = $$('tr', tbody), dir = next === 'ascending' ? 1 : -1, keys = new Map();
+          if (next) th.setAttribute('aria-sort', next);
+          list.forEach(function (r) { var x = cellText(r.cells[j]); keys.set(r, num ? cellNumber(x) : (x && !DASH.test(x) ? x : null)); });
+          list.sort(function (a, b) {
+            if (!next) return ord(a) - ord(b);
+            var ka = keys.get(a), kb = keys.get(b);   // a dash or a word sorts last both ways
+            if (ka === null || kb === null) return ka === kb ? ord(a) - ord(b) : (ka === null ? 1 : -1);
+            return dir * (num ? ka - kb : String(ka).localeCompare(kb, undefined, { numeric: true })) || ord(a) - ord(b);
+          }).forEach(function (r) { tbody.appendChild(r); });
+        });
+      });
+      var cap = (t.caption && cellText(t.caption)) || 'table', p = t.closest('.panel');
+      var mk = function (label, what, fn) {
+        var b = doc.createElement('button');
+        b.type = 'button'; b.className = 'btn btn-link tbl-act'; b.textContent = label;
+        b.setAttribute('aria-label', what + ': ' + cap.slice(0, 80));
+        b.addEventListener('click', function () { fn(b); });
+        return b;
+      };
+      var copy = mk('Copy', 'Copy the table as tab-separated text', function (b) {
+        var text = Desk.tableTsv(t), ok = function () { flash(b, 'Copied'); };
+        if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, function () { flash(b, 'Blocked'); });
+        else flash(b, 'Blocked');
+      });
+      var csv = mk('CSV', 'Download the table as CSV', function () {
+        download((t.id || 'table-' + ti) + '.csv', tableRows(t).map(function (r) { return r.map(csvCell).join(','); }).join('\n') + '\n');
+      });
+      var acts = p && per[p.id] === 1 && p.querySelector('.panel-actions'), bar = acts;
+      if (!acts) {
+        bar = doc.createElement('div'); bar.className = 'tbl-tools';
+        var at = t.closest('.tbl-wrap') || t;
+        at.parentNode.insertBefore(bar, at);
+      }
+      bar.insertBefore(csv, bar.firstChild); bar.insertBefore(copy, csv);
+    });
+  }
+
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initPointReadouts(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initTableTools(); initScrollHints();
     initPrint(); openTarget(); scrollToAnchor();
     window.addEventListener('hashchange', openTarget);
   }

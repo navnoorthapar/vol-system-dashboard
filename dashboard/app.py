@@ -77,10 +77,14 @@ if str(DASH) not in sys.path:
 
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
+import desk_cone  # noqa: E402
+import desk_density  # noqa: E402
+import desk_glossary  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
 import desk_surface  # noqa: E402
+import desk_trades  # noqa: E402
 from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates use them)
     _HEAT_NEG,
     _HEAT_NEUTRAL,
@@ -178,9 +182,11 @@ PORTFOLIO_SLEEVES = ("s1c", "s3", "s4")
 # S3 is priced as the index leg of a dispersion trade: a SHORT SPX straddle
 # (backtest_engine.S3_LEG_DIRECTION = -1); no single-stock option data, so the
 # single-name leg is not modelled. "S3 dispersion" overclaimed what is traded.
-S3_NAME = "S3 · short SPX straddle"                     # tables
-S3_SHORT = "S3 index-leg short"                         # chart legends and categories
-S3_FULL = "S3 · short SPX straddle (index leg of a dispersion trade; no single-name leg)"
+# One name per sleeve, read by every table, legend, category and sentence that
+# names one (a second spelling of a row in the next table read as another sleeve).
+SLEEVE_LABELS = {"portfolio": "Portfolio", "s1c": "S1C contrarian", "s3": "S3 short SPX straddle",
+                 "s4": "S4 VRP", "s1": "S1 PDV (ref)", "s2": "S2 VIX TS (ref)"}
+S3_FULL = f"{SLEEVE_LABELS['s3']} (index leg of a dispersion trade; no single-name leg)"
 
 
 # ── NYSE session calendar ──────────────────────────────────────────────────────
@@ -371,6 +377,31 @@ def sym(text: Any) -> Any:
 
 
 app.jinja_env.filters["sym"] = sym
+
+
+_SUBSCRIPTS = re.compile(r"\b(S|g)_(T|min)\b")
+
+
+def subs(text: Any) -> Any:
+    """'S_T' and 'g_min' as S<sub>T</sub> and g<sub>min</sub> (the text is escaped
+    first); a lower-case symbol (g_min, ∫p) in a .sym span, so an upper-cased
+    table head does not turn it into G or P."""
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    escaped = str(escape(text))
+
+    def one(m: re.Match) -> str:
+        out = f"<i>{m.group(1)}</i><sub>{m.group(2)}</sub>"
+        return f'<span class="sym">{out}</span>' if m.group(1).islower() else out
+    escaped = _SUBSCRIPTS.sub(one, escaped).replace("∫p", '<span class="sym">∫p</span>')
+    return Markup(escaped)  # noqa: S704
+
+
+app.jinja_env.filters["subs"] = subs
+app.jinja_env.globals["glossary"] = desk_glossary.TERMS
+app.jinja_env.globals["glossary_conventions"] = desk_glossary.CONVENTIONS
 
 
 def path_breaks(text: Any) -> Any:
@@ -2146,8 +2177,9 @@ def load_page4() -> dict[str, Any]:
         # the unrounded curves: printing the 2-dp chart series at 1 dp showed S3's
         # final +5.647% as "+5.7%".
         d["eq_summary"] = []
-        for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", S3_SHORT),
-                          ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+        for col, name in ((c, SLEEVE_LABELS[k]) for c, k in (("nav", "portfolio"), ("nav_s1c", "s1c"),
+                                                              ("nav_s3", "s3"), ("nav_s4", "s4"),
+                                                              ("nav_s1", "s1"))):
             if col in eq.columns and eq[col].notna().any():
                 rel = eq[col].dropna() / float(eq[col].dropna().iloc[0]) - 1.0
                 d["eq_summary"].append({"name": name, "final": float(rel.iloc[-1]),
@@ -2314,14 +2346,13 @@ def load_page4() -> dict[str, Any]:
 
         d["research_s1"], d["research_s1c"], d["research_s4"] = _card("s1"), _card("s1c"), _card("s4")
 
-        d["signal_labels"] = ["S1C contrarian", S3_SHORT, "S4 VRP"]
+        d["signal_labels"] = [SLEEVE_LABELS[s] for s in PORTFOLIO_SLEEVES]
         d["signal_pnl"] = [None if sleeves[s]["total_pnl"] is None
                            else round(sleeves[s]["total_pnl"] / 1000, 1)
                            for s in PORTFOLIO_SLEEVES]
 
-        for sig, lbl, is_ref in (("s1c", "S1C Contrarian", False), ("s3", S3_NAME, False),
-                                 ("s4", "S4 VRP", False), ("s1", "S1 PDV (ref)", True),
-                                 ("s2", "S2 VIX TS (ref)", True)):
+        for sig, is_ref in (("s1c", False), ("s3", False), ("s4", False), ("s1", True), ("s2", True)):
+            lbl = SLEEVE_LABELS[sig]
             s = sleeves[sig]
             if s["total_pnl"] is None:
                 continue
@@ -2370,6 +2401,17 @@ def load_page4() -> dict[str, Any]:
     d["sleeve_spec"] = None
     with _loader_boundary(d, "sleeve specification (backtest_engine, signal_engine, full_results.pkl)"):
         d["sleeve_spec"] = sleeve_spec(trades)
+
+    # ── Round trips and worst drawdowns (Research #round-trips, #drawdowns) ─
+    d["rt"] = None
+    # only when the engine results and the NAVs loaded (their loaders report a missing file once)
+    if trades and eq is not None:
+        with _loader_boundary(d, "round trips and drawdowns (full_results.pkl all_trades, "
+                                 "full_results.parquet)"):
+            em_rt = _load_pickle(DATA / "backtest" / "full_results.pkl").get("metrics") or {}
+            rt = trades_view(trades, em_rt, eq)
+            d["charts"].update(rt.pop("charts"))
+            d["rt"] = rt
 
     # ── Implied against subsequently realised vol, and the β·VIX premium ────
     d["vrp"] = None
@@ -3257,7 +3299,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
             "chart-vixleg", "VIX index term structure: market and the Heston fit",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True,
                "tipNames": {str(v): k for k, v in VIX_FAMILY_DAYS.items()}},
-            y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
+            y={"name": "Index level (index pts)", "digits": 1, "tipDigits": 2},
             series=[{"name": "Cboe index (market)", "type": "line", "role": "cboe", "color": "headline",
                      "symbol": "circle",
                      "size": 7, "width": 1.5, "legend": True,
@@ -3595,11 +3637,14 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     except Exception as e:
         _record_error(d, "C7 hedge simulation (delta_hedge_2020.parquet)", e)
         return
-    # a P&L chart: no series within ΔE 25 of the gain / loss fills (Vega was cat1,
-    # ΔE 16.6 from --neg-fill); the residual is the dotted grey
-    comps = [("pnl_gamma", "Gamma", "cat0"), ("pnl_vega_a", "Vega", "cat5"), ("pnl_theta", "Theta", "cat2"),
-             ("pnl_vanna", "Vanna", "cat4"), ("pnl_volga", "Volga", "cat3"),
+    # a P&L chart: no series within ΔE 25 or 30° of hue of the gain blue / loss
+    # orange (Vega was cat1, then vermilion cat5 under a gain-blue tile, Gamma sky
+    # blue; F7): the spot Greeks green (gamma solid, vanna dashed), the vol Greeks
+    # pink (vega solid, volga dashed), theta yellow; the residual is the dotted grey
+    comps = [("pnl_gamma", "Gamma", "cat2"), ("pnl_vega_a", "Vega", "cat4"), ("pnl_theta", "Theta", "cat3"),
+             ("pnl_vanna", "Vanna", "cat2"), ("pnl_volga", "Volga", "cat4"),
              ("pnl_financing", "Financing", "muted"), ("pnl_residual_a", "Residual", "muted")]
+    comp_dash = {"Vanna": True, "Volga": True, "Residual": "dotted"}
     need = {"pnl_total"} | {c for c, *_ in comps}
     missing = need - set(h.columns)
     if missing:
@@ -3618,7 +3663,7 @@ def risk_extras(d: dict, gdf: pd.DataFrame | None) -> None:
     tot = days["pnl_total"]
     xs = [t.strftime("%Y-%m-%d") for t in h.index]
     series = [{"name": name, "type": "line", "color": color, "width": 1.3, "legend": True,
-               **({"dash": "dotted"} if name == "Residual" else {}),
+               **({"dash": comp_dash[name]} if name in comp_dash else {}),
                "data": [round(float(v), 4) for v in h[c].fillna(0.0).cumsum()]} for c, name, color in comps]
     series.insert(0, {"name": "Total", "type": "line", "color": "headline", "width": 2.2, "legend": True,
                       "data": [round(float(v), 4) for v in h["pnl_total"].fillna(0.0).cumsum()]})
@@ -3714,21 +3759,21 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
     if eq is not None:
         xs = d["eq_dates"]
         series = [
-            {"name": "Portfolio", "type": "line", "color": "headline", "width": 2.2, "legend": True,
-             "data": d["eq_nav"]},
-            {"name": "S1C contrarian", "type": "line", "color": "cat0", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["portfolio"], "type": "line", "color": "headline", "width": 2.2,
+             "legend": True, "data": d["eq_nav"]},
+            {"name": SLEEVE_LABELS["s1c"], "type": "line", "color": "cat2", "width": 1.3, "legend": True,
              "data": d["eq_nav_s1c"]},
-            {"name": S3_SHORT, "type": "line", "color": "cat3", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["s3"], "type": "line", "color": "cat3", "width": 1.3, "legend": True,
              "data": d["eq_nav_s3"]},
-            {"name": "S4 VRP", "type": "line", "color": "cat4", "width": 1.3, "legend": True,
+            {"name": SLEEVE_LABELS["s4"], "type": "line", "color": "cat4", "width": 1.3, "legend": True,
              "data": d["eq_nav_s4"]},
-            {"name": "S1 (reference)", "type": "line", "color": "muted", "width": 1.2, "dash": True,
+            {"name": SLEEVE_LABELS["s1"], "type": "line", "color": "muted", "width": 1.2, "dash": True,
              "legend": True, "hidden": True, "data": d["eq_nav_s1"]},
         ]
         if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
             tb = eq["nav_tbill"]
-            series.append({"name": "T-bill (collateral)", "type": "line", "color": "cat2", "width": 1.2,
-                           "dash": True, "legend": True,
+            series.append({"name": "T-bill (collateral)", "type": "line", "color": "muted", "width": 1.2,
+                           "dash": "dotted", "legend": True,
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
         for s_ in series:                 # ~1,800 daily points a line: drawn with LTTB downsampling
             s_["sampling"] = "lttb"
@@ -3778,7 +3823,7 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
             "chart-rolling", "Rolling 126-session Sharpe (rf = 0)",
             x={"type": "time", "csv": "date"},
             y={"name": "Sharpe (annualised)", "digits": 1, "tipDigits": 2, "signed": True},
-            series=[{"name": "Rolling Sharpe", "type": "line", "color": "cat0", "width": 1.3,
+            series=[{"name": "Rolling Sharpe", "type": "line", "color": "headline", "width": 1.3,
                      "sampling": "lttb",
                      "data": [None if not np.isfinite(v) else round(float(v), 3) for v in roll]}],
             xs_from="chart-equity", zoom="inside", csv="rolling_sharpe_126.csv", link=RESEARCH_TS,
@@ -3928,6 +3973,129 @@ def _gm(x: float) -> str:
     return f"{x:g}".replace("-", MINUS)
 
 
+# ── round trips and worst drawdowns (desk_trades.py, B12) ─────────────────────
+TRADE_SLEEVES = (("s1c", SLEEVE_LABELS["s1c"], "cat2", "circle", False),
+                 ("s3", SLEEVE_LABELS["s3"], "cat3", "diamond", False),
+                 ("s4", SLEEVE_LABELS["s4"], "cat4", "triangle", False),
+                 ("s1", SLEEVE_LABELS["s1"], "muted", "circle", True),
+                 ("s2", SLEEVE_LABELS["s2"], "muted", "rect", True))
+DD_SERIES = (("nav", SLEEVE_LABELS["portfolio"], "max_drawdown"),
+             ("nav_s1c", SLEEVE_LABELS["s1c"], "s1c_max_drawdown"),
+             ("nav_s3", SLEEVE_LABELS["s3"], "s3_max_drawdown"),
+             ("nav_s4", SLEEVE_LABELS["s4"], "s4_max_drawdown"))
+
+
+def _k_signed(x: float | None) -> str:
+    """Dollars as signed $000s (one decimal)."""
+    return "—" if x is None else signed(x / 1000.0, ",.1f")
+
+
+def _by_year(rts: Sequence[dict]) -> list[tuple[str, list[float]]]:
+    """Round trips' P&L grouped by entry year, oldest first."""
+    out: dict[str, list[float]] = {}
+    for r in rts:
+        out.setdefault(r["entry"][:4], []).append(r["pnl"])
+    return sorted(out.items())
+
+
+def trades_view(trades: list, em: dict, eq: pd.DataFrame) -> dict:
+    """Research #round-trips and #drawdowns: every round trip of the portfolio
+    sleeves (the reference sleeves in the statistics only), per-sleeve statistics, the
+    P&L and holding-period histograms of the closed portfolio trades, and the
+    five deepest drawdowns of the portfolio and of each sleeve. Counts, sums and
+    the deepest drawdown are reconciled with the engine metrics (a mismatch is
+    a loader error, never a quiet difference). 'combined' records are not read."""
+    rows, series, end = [], [], str(pd.Timestamp(eq.index[-1]).date())
+    by_sig = {}
+    for sig, label, colour, symbol, ref in TRADE_SLEEVES:
+        rts = desk_trades.round_trips(trades, (sig,))
+        n_em = em.get(f"{sig}_n_trades")
+        if n_em is None or len(rts) != int(n_em):
+            raise ValueError(f"{sig}: {len(rts)} round trips in the trade log, {n_em} in the engine metrics")
+        st = desk_trades.sleeve_stats(rts)
+        tp = _num(em.get(f"{sig}_total_pnl"))
+        if tp is None or abs(st["total"] - tp) > 1.0:
+            raise ValueError(f"{sig}: the round trips add up to {st['total']:,.2f}, the engine to {tp}")
+        by_sig[sig] = rts
+        rows.append({"sig": sig, "label": label, "ref": ref, **st})
+        if ref:                           # in the statistics only: the page budget holds 206 points
+            continue
+        closed = [r for r in rts if not r["open"]]
+        series.append({"name": label, "type": "scatter", "color": colour, "symbol": symbol, "size": 6,
+                       "legend": True, "data": [[r["entry"], round(r["pnl"] / 1000.0, 1)] for r in closed]})
+        series.extend({"name": f"{label} open on {r['entry']} (entry cost only)", "type": "scatter",
+                       "color": colour, "symbol": symbol, "size": 9, "hollow": True, "legend": True,
+                       "data": [[r["entry"], round(r["pnl"] / 1000.0, 1)]]} for r in rts if r["open"])
+    port = [r for sig in PORTFOLIO_SLEEVES for r in by_sig[sig] if not r["open"]]
+    strip = charts.xy(
+        "chart-round-trips", "P&L of every round trip of S1C, S3 and S4 by entry date ($000s)",
+        x={"type": "time", "name": "", "csv": "entry"},
+        y={"name": "P&L per round trip ($000s)", "digits": 0, "tipDigits": 1, "signed": True},
+        series=series, tooltip="item", csv="round_trips.csv", zoom="inside",
+        marks={"y": [{"value": 0, "label": "", "color": "muted", "dash": False}]},
+        describe=(f"{len(port)} closed round trips of S1C, S3 and S4, each a dot at its entry date and its "
+                  "mark-to-model P&L at β·VIX in $000s; the open trade is hollow and carries only its entry "
+                  "cost."),
+        # the data alternative summarises by sleeve and entry year (every trade is in the CSV,
+        # which desk.js builds from the points; a 319-row table broke the page budget)
+        table=charts.table("Trades by sleeve and entry year, closed ($000s, mark-to-model); every trade "
+                           "is in the CSV",
+                           ["Sleeve", "Year", "Trades#", "Winning#", "Total P&L#", "Best#", "Worst#"],
+                           [[lab, y, len(ps), sum(1 for v in ps if v > 0), _k_signed(sum(ps)),
+                             _k_signed(max(ps)), _k_signed(min(ps))]
+                            for sig, lab, *_ in TRADE_SLEEVES if sig in PORTFOLIO_SLEEVES
+                            for y, ps in _by_year([r for r in by_sig[sig] if not r["open"]])]))
+    pnl_k = [r["pnl"] / 1000.0 for r in port]
+    edges = desk_trades.PNL_BINS_K
+    labels = ([f"< {signed(edges[0], ',.0f')}"] + [f"{signed(a, ',.0f')} to {signed(b, ',.0f')}"
+                                                    for a, b in itertools.pairwise(edges)]
+              + [f"≥ {signed(edges[-1], ',.0f')}"])
+    counts = desk_trades.histogram(pnl_k, edges)
+    neg = [c if i < edges.index(0) + 1 else None for i, c in enumerate(counts)]
+    pos = [c if i >= edges.index(0) + 1 else None for i, c in enumerate(counts)]
+    labels, counts, neg, pos = labels[::-1], counts[::-1], neg[::-1], pos[::-1]   # gains on top (F18)
+    hist_pnl = charts.xy(
+        "chart-trade-pnl-hist", "Closed round trips of the portfolio sleeves by P&L per trade ($000s)",
+        x={"type": "category", "categories": labels, "name": "", "interval": 0},
+        y={"name": "Trades", "digits": 0, "tipDigits": 0, "zero": True},
+        series=[{"name": "Losing", "type": "bar", "color": "neg", "stack": "h", "data": neg, "legend": True},
+                {"name": "Winning", "type": "bar", "color": "pos", "stack": "h", "data": pos,
+                 "legend": True}],
+        xs=labels, horizontal=True, tooltip="axis", csv="round_trip_pnl_histogram.csv",
+        grid={"left": 92, "bottom": 30},
+        describe=f"Counts of the {len(port)} closed round trips of S1C, S3 and S4 by P&L bin in $000s.",
+        table=charts.table("Closed round trips by P&L ($000s), S1C, S3 and S4",
+                           ["P&L ($000s)", "Trades#"],
+                           [[lab, n] for lab, n in zip(labels, counts, strict=True)]))
+    dedges = desk_trades.DAY_BINS
+    dlabels = [f"{a}–{b - 1}" for a, b in itertools.pairwise(dedges)] + [f"≥ {dedges[-1]}"]
+    dcounts = desk_trades.histogram([r["days"] for r in port], dedges, open_low=False)
+    hist_days = charts.xy(
+        "chart-trade-days-hist", "Closed round trips of the portfolio sleeves by calendar days held",
+        x={"type": "category", "categories": dlabels, "name": "Calendar days held", "interval": 0},
+        y={"name": "Trades", "digits": 0, "tipDigits": 0, "zero": True},
+        series=[{"name": "Trades", "type": "bar", "color": "headline", "data": dcounts}],
+        xs=dlabels, tooltip="axis", csv="round_trip_days_histogram.csv",
+        describe=(f"Counts of the {len(port)} closed round trips of S1C, S3 and S4 by calendar days from "
+                  "entry to exit."),
+        table=charts.table("Closed round trips by calendar days held, S1C, S3 and S4",
+                           ["Days held", "Trades#"],
+                           [[lab, n] for lab, n in zip(dlabels, dcounts, strict=True)]))
+    dds = []
+    for col, label, key in DD_SERIES:
+        if col not in eq.columns:
+            raise ValueError(f"full_results.parquet has no {col}")
+        top = desk_trades.worst_drawdowns(eq[col])
+        want = _num(em.get(key))
+        if not top or want is None or abs(top[0]["depth"] - want) > 1e-9:
+            raise ValueError(f"{col}: deepest drawdown {top[0]['depth'] if top else None}, "
+                             f"engine {key} {want}")
+        dds.append({"label": label, "periods": top, "n_all": len(desk_trades.drawdown_periods(eq[col]))})
+    port_stats = desk_trades.sleeve_stats([r for sig in PORTFOLIO_SLEEVES for r in by_sig[sig]])
+    return {"rows": rows, "drawdowns": dds, "end": end, "n_port_closed": len(port), "port": port_stats,
+            "charts": {"round_trips": strip, "trade_pnl_hist": hist_pnl, "trade_days_hist": hist_days}}
+
+
 def sleeve_spec(trades: Sequence[Any]) -> dict:
     """Research #sleeve-spec: what each sleeve trades, read from the engine and
     signal modules at render time (no constant is typed here) and the side and
@@ -3948,35 +4116,35 @@ def sleeve_spec(trades: Sequence[Any]) -> dict:
              f"hedge slippage {be.SLIPPAGE_PCT:.2%}")
     r2 = "a move into R2 closes it"
     rows = {
-        "s1c": {"name": "S1C · contrarian PDV", "instrument": straddle,
+        "s1c": {"name": SLEEVE_LABELS["s1c"], "instrument": straddle,
                 "entry": (f"PDV forecast > VIX + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R0 → short; "
                           f"VIX > PDV + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R1 → long"),
                 "exit": (f"the spread back inside ±{_vp(se.S1_EXIT_BAND)} vol pts or through zero; {r2}"),
                 "hold": se.S1_MAX_HOLD,
                 "sizing": (f"tanh(|spread| / {_vp(se.S1_STRENGTH_SCALE)} vol pts) × {se.S1_MAX_KELLY:.0%} of "
                            f"sleeve NAV{overlay}")},
-        "s3": {"name": S3_NAME, "instrument": f"SHORT {straddle}; the index leg only",
+        "s3": {"name": SLEEVE_LABELS["s3"], "instrument": f"SHORT {straddle}; the index leg only",
                "entry": (f"z of VIX / VVIX ({se.S3_LOOKBACK}-session) < {_gm(se.S3_ZSCORE_ENTRY)} "
                          "in R0 or R1"),
                "exit": f"z > {_gm(se.S3_ZSCORE_EXIT)}",
                "hold": se.S3_MAX_HOLD,
                "sizing": (f"min(1, |z| / {_gm(se.S3_STRENGTH_SCALE)}) × {se.S3_MAX_KELLY:.0%} of sleeve "
                           f"NAV{overlay}")},
-        "s4": {"name": "S4 · VRP", "instrument": straddle,
+        "s4": {"name": SLEEVE_LABELS["s4"], "instrument": straddle,
                "entry": (f"z_vrp > {_gm(se.S4_Z_ENTRY_SHORT)} and falling, in R1 → short; "
                          f"z_vrp < {_gm(se.S4_Z_ENTRY_LONG)} and rising, in R0 → long"),
                "exit": f"|z_vrp| < {_gm(se.S4_Z_EXIT)}; {r2}",
                "hold": se.S4_MAX_HOLD,
                "sizing": (f"min(1, |z_vrp| / {_gm(se.S4_STRENGTH_SCALE)}) × {se.S4_MAX_KELLY:.0%} of "
                           f"sleeve NAV{overlay}")},
-        "s1": {"name": "S1 · PDV short-VRP", "instrument": straddle,
+        "s1": {"name": SLEEVE_LABELS["s1"], "instrument": straddle,
                "entry": (f"PDV forecast > VIX + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R0 → long; "
                          f"VIX > PDV + {_vp(se.S1_ENTRY_THRESHOLD)} vol pts in R1 → short"),
                "exit": f"the spread back inside ±{_vp(se.S1_EXIT_BAND)} vol pts or through zero",
                "hold": se.S1_MAX_HOLD,
                "sizing": (f"tanh(|spread| / {_vp(se.S1_STRENGTH_SCALE)} vol pts) × {se.S1_MAX_KELLY:.0%} of "
                           "sleeve NAV")},
-        "s2": {"name": "S2 · VIX term structure", "instrument": straddle,
+        "s2": {"name": SLEEVE_LABELS["s2"], "instrument": straddle,
                "entry": (f"z of the VIX3M − VIX slope ({se.S2_LOOKBACK}-session) > "
                          f"{_gm(se.S2_ZSCORE_ENTRY)} in R0 or R1 → short; slope < 0 (backwardation) in R0 or "
                          "R1 → long"),
@@ -4169,8 +4337,7 @@ def vrp_view(spx: pd.DataFrame, vix: pd.Series, start: str | None, end: str | No
     return view
 
 
-SLEEVE_NAMES = {"portfolio": "Portfolio", "s1": "S1 PDV (ref)", "s1c": "S1C contrarian",
-                "s2": "S2 VIX TS (ref)", "s3": S3_NAME, "s4": "S4 VRP",
+SLEEVE_NAMES = {**{k: SLEEVE_LABELS[k] for k in ("portfolio", "s1", "s1c", "s2", "s3", "s4")},
                 "always_short_straddle": "Always-short straddle"}
 
 
@@ -4865,12 +5032,13 @@ def load_overview() -> dict[str, Any]:
             "chart-ts", f"VIX index term structure on {d.get('ts_date')}, with earlier sessions",
             x={"type": "value", "name": "Tenor (calendar days)", "digits": 0, "min": 0, "zero": True,
                "tipNames": {str(v): k for k, v in VIX_FAMILY_DAYS.items()}},
-            y={"name": "Index level (vol pts)", "digits": 1, "tipDigits": 2},
+            y={"name": "Index level (index pts)", "digits": 1, "tipDigits": 2},
             series=series, tooltip="item",
             csv=f"vix_term_structure_{d.get('ts_date')}.csv", grid={"top": 12},
             describe=("^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session, and dashed on "
                       + ", ".join(o["name"] for o in ov) + "; tenor on a linear axis, straight segments."),
-            table=charts.table(f"VIX-family index levels (vol pts), {d.get('ts_date')} and earlier sessions",
+            table=charts.table(f"VIX-family index levels (index pts), {d.get('ts_date')} and earlier "
+                               "sessions",
                                ["Tenor", f"{d.get('ts_date')}#", *(f"{o['date']}#" for o in ov)],
                                [[t, _fmt(v, ".2f"), *(_fmt(o["values"][i], ".2f") for o in ov)]
                                 for i, (t, v) in enumerate(zip(d["ts_tenors"], d["ts_values"]))]))
@@ -5112,6 +5280,206 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
             # the skew column's term structure, against Heston, is on the Calibration page
             "links": {"ATM skew": "/calibration#skew-term"},
             "any_extrap": n_xp > 0 or any(r["extrap"][k] for r in cm for k in keys)}
+
+
+# ── the risk-neutral density of the SVI-cal slices (desk_density.py, B9) ──────
+RND_HEADS = ("Expiry", "Days", "Quoted K/F", *(lab for _, lab, _, _ in desk_density.THRESHOLDS[:2]),
+             "Outside 0.95–1.05 F", desk_density.THRESHOLDS[2][1], "Mass below quoted", "Mass above quoted",
+             "∫p", "E[S_T/F]", "g_min")
+RND_BEYOND = "beyond quoted strikes"
+RND_TABLE_K = (-0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15)
+
+
+def _rnd_pct(p: float | None) -> str:
+    return RND_BEYOND if p is None else _fmt(100 * p, ".2f")
+
+
+def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
+    """The #rnd panels: every listed SVI-cal slice's risk-neutral tail
+    probabilities (a threshold outside its quoted strikes prints RND_BEYOND), the
+    mass beyond the quoted range, the checks ∫p and E[S_T/F] and the certificate's
+    g_min; the density of ln(S_T/F) of the listed expiries nearest 30, 91 and 182 days,
+    drawn inside their quoted strikes only; the tails by expiry, with a gap where
+    the threshold is beyond the quotes."""
+    rows = desk_density.tail_rows(sj, res)
+    if not rows:
+        return None
+    picks = desk_density.chart_expiries(rows)
+    pick_of = {p["row"]["expiry"]: p["label"] for p in picks}
+    view_rows = []
+    for r in rows:
+        pr = r["prob"]
+        view_rows.append({
+            "expiry": r["expiry"], "pick": pick_of.get(r["expiry"]), "certified": r["certified"],
+            "cells": [_fmt(r["T_days"], ".0f"),
+                      (f"{_fmt(r['kf_lo'], '.3f')}–{_fmt(r['kf_hi'], '.3f')}"
+                       if r["kf_lo"] is not None else "—"),
+                      _rnd_pct(pr["lt80"]), _rnd_pct(pr["lt90"]), _rnd_pct(pr["out5"]), _rnd_pct(pr["gt110"]),
+                      _fmt(100 * r["below_quoted"], ".2f") if r["below_quoted"] is not None else "—",
+                      _fmt(100 * r["above_quoted"], ".2f") if r["above_quoted"] is not None else "—",
+                      _fmt(r["mass"], ".4f"), _fmt(r["mean"], ".4f"), desk_density.fmt_g(r["g_min"])]})
+    out: dict[str, Any] = {"heads": list(RND_HEADS), "rows": view_rows, "picks": [
+        {"label": p["label"], "tenor": p["tenor"], "expiry": p["row"]["expiry"], "days": p["row"]["T_days"],
+         "kf_lo": p["row"]["kf_lo"], "kf_hi": p["row"]["kf_hi"]} for p in picks],
+        "n_beyond": sum(1 for r in rows for v in r["prob"].values() if v is None),
+        "max_mass_err": max(abs(r["mass"] - 1.0) for r in rows),
+        "max_mean_err": max(abs(r["mean"] - 1.0) for r in rows),
+        "n_uncertified": sum(1 for r in rows if not r["certified"]),
+        "n_gt110_beyond": sum(1 for r in rows if r["prob"]["gt110"] is None)}
+    out["max_mass_err_text"] = desk_density.fmt_g(out["max_mass_err"])
+    out["max_mean_err_text"] = desk_density.fmt_g(out["max_mean_err"])
+    if len(picks) >= 2:
+        cols = charts.tenor_colours(len(picks))
+        series = []
+        for i, p in enumerate(picks):
+            r = p["row"]
+            sl = desk_density.slice_of(sj, r["expiry"])
+            series.append({"name": f"{r['expiry']} ({_fmt(r['T_days'], '.0f')} d)",
+                           "type": "line", "role": "tenor", "T": r["T_days"], "color": cols[i],
+                           "width": 1.75, "legend": True,
+                           "data": desk_density.density_curve(sl, r["k_lo"], r["k_hi"])})
+        trows = []
+        for k in RND_TABLE_K:
+            cells = [signed(k, ".2f"), _fmt(math.exp(k), ".3f")]
+            for p in picks:
+                r = p["row"]
+                inside = r["k_lo"] - 1e-12 <= k <= r["k_hi"] + 1e-12
+                cells.append(_fmt(desk_density.density(k, desk_density.slice_of(sj, r["expiry"])), ".3f")
+                             if inside else "—")
+            trows.append(cells)
+        out["density_chart"] = charts.xy(
+            "chart-rnd",
+            f"Risk-neutral density of ln(S_T/F), SVI-cal slices nearest 30, 91 and 182 days, {session}",
+            x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
+            y={"name": "Density of ln(S_T/F)", "digits": 0, "tipDigits": 3, "zero": True},
+            series=series, tooltip="item", csv=f"rnd_density_{session}.csv",
+            describe=("Breeden–Litzenberger density of ln(S_T/F) from each listed SVI-cal slice, "
+                      "p(k) = g(k)/√(2πw)·exp(−d₋²/2), drawn only inside the expiry's quoted strikes; "
+                      "risk-neutral, not a forecast."),
+            table=charts.table("Risk-neutral density of ln(S_T/F) (per unit of ln-moneyness) at round "
+                               "ln(K/F); — outside the expiry's quoted strikes",
+                               ["ln(K/F)#", "K/F#", *(f"{p['row']['expiry']} ({p['row']['T_days']:.0f} d)#"
+                                                         for p in picks)],
+                               trows))
+    days = [r["T_days"] for r in rows]
+    tail_series = []
+    for key, label, dash in (("lt90", "S_T < 0.90 F", None), ("gt110", "S_T > 1.10 F", True),
+                             ("lt80", "S_T < 0.80 F", "dotted")):
+        s_: dict[str, Any] = {"name": f"SVI-cal P({label})", "type": "line", "role": "model",
+                              "model": "svi_cal", "color": charts.model_colour("svi_cal"),
+                              "width": 1.75 if dash is None else 1.5,
+                              "symbol": "circle", "size": 4, "legend": True,
+                              "data": [[r["T_days"], (100 * r["prob"][key]) if r["prob"][key] is not None
+                                        else None] for r in rows]}
+        if dash:
+            s_["dash"] = dash
+        tail_series.append(s_)
+    out["tails_chart"] = charts.xy(
+        "chart-rnd-tails", f"Risk-neutral tail probabilities by days to expiry, SVI-cal, {session}",
+        x={"type": "value", "log": True, "name": "Days to expiry (log scale)", "digits": 0,
+           "min": round_sig(min(days) / 1.15, 2), "max": round_sig(max(days) * 1.15, 2)},
+        y={"name": "Risk-neutral probability (%)", "digits": 0, "tipDigits": 2, "zero": True},
+        series=tail_series, tooltip="item", csv=f"rnd_tails_{session}.csv",
+        describe=("P(S_T < 0.90 F), P(S_T > 1.10 F) and P(S_T < 0.80 F) of each listed SVI-cal slice; "
+                  "a gap is a threshold beyond the expiry's quoted strikes, where no probability is "
+                  "printed."),
+        table=charts.table("Risk-neutral tail probabilities (%) by listed expiry",
+                           ["Expiry", "Days#", "P(S_T < 0.80 F)#", "P(S_T < 0.90 F)#", "P(S_T > 1.10 F)#"],
+                           [[r["expiry"], _fmt(r["T_days"], ".0f"), _rnd_pct(r["prob"]["lt80"]),
+                             _rnd_pct(r["prob"]["lt90"]), _rnd_pct(r["prob"]["gt110"])] for r in rows]))
+    return out
+
+
+# ── the volatility cone with the surface's ATM term structure (desk_cone.py, B8) ─
+CONE_LINES = ((5, "dotted", 1.1), (25, True, 1.2), (50, None, 1.6), (75, True, 1.2), (95, "dotted", 1.1))
+
+
+def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str,
+                  atmf_30: float | None = None) -> dict | None:
+    """The #vol-cone panel: percentiles of SPX close-to-close RV at 10–252
+    sessions over two samples ending at the surface's session (a tab picks
+    one), the newest window's RV at each horizon, and the SVI-cal ATMF of the
+    listed expiries at T·252/365 sessions, each ranked against RV over that
+    many sessions in both samples. ``atmf_30`` is the 30-day constant-maturity
+    ATMF (the '1M' tile), printed beside the nearest listed expiry's so the two
+    are never read as one number."""
+    end = pd.Timestamp(session)
+    close = close.astype(float).sort_index()
+    if close.empty or close.index.max() < end:
+        raise ValueError(f"spx_ohlcv ends {close.index.max().date() if len(close) else '—'}, "
+                         f"before the surface session {session}")
+    samples: list[dict[str, Any]] = []
+    for key, label, short in desk_cone.SAMPLES:
+        start = desk_cone.sample_start(key, close, end)
+        r = desk_cone.sample_returns(close, start, end)
+        samples.append({"key": key, "label": label, "short": short, "start": str(start.date()),
+                        "n_returns": len(r),
+                        "cone": desk_cone.cone(r), "r": r})
+    pts_by = {}
+    for sm in samples:
+        pts, beyond = desk_cone.implied_points(listed, sm["r"])
+        pts_by[sm["key"]] = pts
+    pts = pts_by[samples[0]["key"]]
+    if not pts:
+        return None
+    hz = list(desk_cone.HORIZONS)
+    series: list[dict[str, Any]] = []
+    for sm in samples:
+        by_h = {c["h"]: c for c in sm["cone"]}
+        for pc, dash, width in CONE_LINES:
+            s_: dict[str, Any] = {"name": f"{pc}th pct RV · {sm['label'].lower()}", "type": "line",
+                                  "role": "other", "color": "muted", "width": width, "group": sm["key"],
+                                  "symbol": "circle", "size": 3, "endLabel": f"p{pc}",
+                                  "data": [[h, round_sig(by_h[h]["pct"][pc], 4)] for h in hz
+                                           if by_h[h]["pct"][pc] is not None]}
+            if dash:
+                s_["dash"] = dash
+            series.append(s_)
+    cur = samples[0]["cone"]
+    series.append({"name": f"SPX RV, windows ending {session}", "type": "line", "role": "market",
+                   "color": "headline", "width": 1.5, "symbol": "diamond", "size": 6, "legend": True,
+                   "data": [[c["h"], round_sig(c["current"], 4)] for c in cur if c["current"] is not None]})
+    series.append({"name": f"SVI-cal ATMF {session}", "type": "scatter", "role": "model", "model": "svi_cal",
+                   "color": charts.model_colour("svi_cal"), "size": 7, "legend": True,
+                   "data": [[round_sig(p["sessions"], 4), round_sig(p["atmf"], 4)] for p in pts]})
+    rows = []
+    for h in hz:
+        for sm in samples:
+            c = next(x for x in sm["cone"] if x["h"] == h)
+            rows.append([str(h), _fmt(h * desk_cone.DAYS_PER_YEAR / desk_cone.SESSIONS_PER_YEAR, ".0f"),
+                         sm["label"], _fmt(c["n"], ","),
+                         *(_fmt(c["pct"][pc], ".1f") for pc in desk_cone.PCTS), _fmt(c["current"], ".1f")])
+    xs = [p["sessions"] for p in pts] + hz
+    chart = charts.xy(
+        "chart-vol-cone",
+        f"Volatility cone of SPX realised vol with the SVI-cal ATM term structure, {session}",
+        x={"type": "value", "log": True, "name": "Horizon (NYSE sessions, log scale)", "digits": 0,
+           "min": round_sig(min(xs) / 1.15, 2), "max": round_sig(max(xs) * 1.2, 2)},
+        y={"name": "Vol (%)", "digits": 0, "tipDigits": 1, "zero": True},
+        series=series, tooltip="item", csv=f"vol_cone_{session}.csv", grid={"right": 44},
+        describe=("Percentiles (5, 25, 50, 75, 95) of SPX close-to-close realised vol over windows of 10 to "
+                  f"252 sessions, in the sample the tab picks, ending {session}; the realised vol of the "
+                  "windows ending that day; and the SVI-cal ATMF of each listed expiry, its calendar days "
+                  "placed at days × 252/365 sessions."),
+        table=charts.table(
+            f"Realised-vol cone of SPX (%), windows ending on or before {session}; RV_h = 100·√(252/h·Σr²)",
+            ["Sessions#", "≈ days#", "Sample", "Windows#", *(f"{pc}th pct#" for pc in desk_cone.PCTS),
+             f"RV ending {session}#"], rows))
+    imp_rows = []
+    for i, p in enumerate(pts):
+        imp_rows.append({"expiry": p["expiry"], "days": p["T_days"], "sessions": p["sessions"], "h": p["h"],
+                         "atmf": p["atmf"], "ranks": [pts_by[sm["key"]][i]["rank"] for sm in samples]})
+    one_m = min(pts, key=lambda p: abs(p["T_days"] - 30.0))
+    i1 = pts.index(one_m)
+    c21 = {sm["key"]: next(x for x in sm["cone"] if x["h"] == 21) for sm in samples}
+    return {"chart": chart, "session": session, "rows": imp_rows, "n_beyond": beyond,
+            "samples": [{k: v for k, v in sm.items() if k not in ("r", "cone")} for sm in samples],
+            "default": samples[0]["key"],
+            "one_m": {"expiry": one_m["expiry"], "days": one_m["T_days"], "atmf": one_m["atmf"],
+                      "h": one_m["h"], "atmf_30": atmf_30,
+                      "ranks": [pts_by[sm["key"]][i1]["rank"] for sm in samples]},
+            "c21": {k: {"p5": v["pct"][5], "p50": v["pct"][50], "p95": v["pct"][95], "current": v["current"]}
+                    for k, v in c21.items()}}
 
 
 def _state_values(cm: Sequence[dict]) -> dict[str, float | None]:
@@ -5403,6 +5771,11 @@ def surface_extras(d: dict, surf: dict) -> None:
         cmp_ = surface_comparison(session, desk_inputs)
         every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
         d["state_tiles"] = surface_state_tiles(cm, listed, every_cm)
+        d["rnd"] = rnd_view(sj, res, session)
+        d["cone"] = None
+        with _loader_boundary(d, "volatility cone (vol_system.db spx_ohlcv, surface.json svi_cal)"):
+            atmf_30 = next((r["atmf"] for r in cm if r["label"] == "1M" and r["available"]), None)
+            d["cone"] = vol_cone_view(_read_spx()["close"], listed, session, atmf_30)
         if cmp_:
             d["compare"] = {k: v for k, v in cmp_.items() if k != "grids"}
             d["charts"]["rr_term"] = rr_term_spec(cmp_)
@@ -6247,7 +6620,7 @@ def load_model_risk() -> dict[str, Any]:
         ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
-            add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (pts)", gap,
+            add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (percentage pts)", gap,
                 signed(gap, ".1f"),
                 "", "data_store/signals/regime_classifier.pkl",
                 "Research only since C17: below the no-skill baseline, so it never trades.",
@@ -6384,24 +6757,28 @@ def load_chrome() -> dict:
     c: dict[str, Any] = {"ticker": [], "sources": [], "worst": "ok", "build": build_info(),
                          "model_version": None}
     spx_date = vix_date = labels_date = None
+    spx = vd = None
     try:
         spx = _read_spx()
         last, prev = float(spx["close"].iloc[-1]), float(spx["close"].iloc[-2])
         spx_date = str(spx.index[-1].date())
         c["ticker"].append({"label": "SPX", "value": _fmt(last, ",.2f"),
-                            "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True), "note": None})
+                            "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True), "note": None,
+                            "title": f"SPX close {spx_date} (market DB), change on the previous close"})
         vd = _read_vix_daily()
         vix_date = str(vd.index[-1].date())
         c["ticker"].append({"label": "VIX", "value": _fmt(float(vd.iloc[-1]), ".2f"),
                             "chg": pnl(float(vd.iloc[-1]) - float(vd.iloc[-2]), ".2f", glyph=True),
-                            "note": None if vix_date == spx_date else vix_date})
+                            "note": None if vix_date == spx_date else vix_date,
+                            "title": f"VIX close {vix_date} (index pts), change on the previous close"})
         vw = _read_vix_wide()
         if "^VVIX" in vw.columns:
             vv = vw["^VVIX"].dropna()
+            vv_date = str(vv.index[-1].date())
             c["ticker"].append({"label": "VVIX", "value": _fmt(float(vv.iloc[-1]), ".2f"),
                                 "chg": pnl(float(vv.iloc[-1]) - float(vv.iloc[-2]), ".2f", glyph=True),
-                                "note": (None if str(vv.index[-1].date()) == spx_date
-                                         else str(vv.index[-1].date()))})
+                                "note": None if vv_date == spx_date else vv_date,
+                                "title": f"VVIX close {vv_date} (index pts), change on the previous close"})
         cols = [t for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M") if t in vw.columns]
         full = vw[cols].dropna() if len(cols) == 4 else pd.DataFrame()
         if len(full):
@@ -6410,19 +6787,26 @@ def load_chrome() -> dict:
             slope = float(row["^VIX6M"] - row["^VIX9D"])
             c["ticker"].append({"label": "9D→6M", "value": signed(slope, ".2f"),
                                 "chg": "contango" if slope > 0 else "backwardation",
-                                "note": None if ts_date == spx_date else ts_date})
+                                "note": None if ts_date == spx_date else ts_date,
+                                "title": f"VIX6M − VIX9D close {ts_date} (index pts); positive: contango"})
             c["ticker"].append({"label": "VIX/VIX3M",
                                 "value": _fmt(float(row["^VIX"] / row["^VIX3M"]), ".3f"),
-                                "chg": None, "note": None if ts_date == spx_date else ts_date})
+                                "chg": None, "note": None if ts_date == spx_date else ts_date,
+                                "title": f"VIX / VIX3M close {ts_date}; above 1: backwardation"})
     except Exception as exc:
         _logger.info("chrome: market data unavailable (%s)", exc)
+    if spx is not None and vd is not None:
+        try:
+            c["ticker"] += ticker_vol_context(spx, vd, spx_date)
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            _logger.info("chrome: vol context unavailable (%s)", exc)
     try:
         rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet",
                              columns=["regime"])["regime"].dropna()
         labels_date = str(pd.Timestamp(rl.index[-1]).date())
         lab = int(rl.iloc[-1])
         c["ticker"].append({"label": "RULE", "value": _REGIME_LABELS[lab], "chg": _REGIME_NAMES[lab].lower(),
-                            "note": labels_date})
+                            "note": labels_date, "title": f"Rule regime label of {labels_date}"})
     except Exception as exc:
         _logger.info("chrome: labels unavailable (%s)", exc)
     calib_date = greeks_date = None
@@ -6453,6 +6837,14 @@ def load_chrome() -> dict:
         _logger.info("chrome: VX futures unavailable (%s)", exc)
     ref = max([x for x in (spx_date, labels_date) if x], default=None)
     c["latest"] = ref
+    if surf_sessions:
+        try:
+            item = ticker_surface_item(artifacts.load_surface(DATA), ref)
+            if item:
+                c["ticker"].append(item)
+        except (artifacts.ArtifactError, OSError, AttributeError, KeyError, IndexError, TypeError,
+                ValueError) as exc:
+            _logger.info("chrome: surface state unavailable (%s)", exc)
     rows = [
         ("SPX", "SPX close (market DB)", spx_date, "data_store/vol_system.db", True),
         ("VIX", "VIX close (market DB)", vix_date, "data_store/vol_system.db", True),
@@ -6480,11 +6872,85 @@ def load_chrome() -> dict:
             c["worst"] = "error"
         elif level == "warn" and c["worst"] == "ok":
             c["worst"] = "warn"
+    c["oldest"] = oldest_source(c["sources"])
     c["holidays"] = [str(h.date()) for h in nyse_holidays(
         f"{(ref or '2026')[:4]}-01-01", f"{int((ref or '2026')[:4]) + 2}-12-31")]
     _CHROME_CACHE.clear()
     _CHROME_CACHE[key] = c
     return c
+
+
+def ticker_vol_context(spx: pd.DataFrame, vix: pd.Series, spx_date: str | None) -> list[dict]:
+    """B13: the ticker's realised-vol context, after VIX/VIX3M: RV21 (the
+    Overview's vix_rv_now: RMS of the 21 daily SPX log returns to the close,
+    annualised ×252, %), VIX − RV21 (vol pts) and VIX's percentile among the
+    252 sessions before its newest close (desk_market.pctile_prior: percent
+    strictly lower). Each carries its as-of date in its title, and in its note
+    when that is not the SPX close's date; none is shown without its data."""
+    out: list[dict] = []
+    vr = vix_rv_now(spx, vix)
+    if vr:
+        note = None if vr["date"] == spx_date else vr["date"]
+        out.append({"label": "RV21", "value": _fmt(vr["rv"], ".2f"), "chg": None, "note": note,
+                    "title": (f"RV21 {vr['date']}: SPX realised vol of the 21 sessions to that close, "
+                              "root-mean-square of the daily log returns, annualised (×252), in %")})
+        out.append({"label": "VIX−RV21", "value": signed(vr["spread"], ".2f"), "chg": None, "note": note,
+                    "title": (f"VIX − RV21 {vr['date']}: VIX close {_fmt(vr['vix'], '.2f')} − RV21 "
+                              f"{_fmt(vr['rv'], '.2f')}, vol pts; VIX is a 30-day variance-swap rate, so "
+                              "the gap overstates what an at-the-money straddle earns")})
+    p = desk_market.pctile_prior(vix)
+    if p:
+        rk = percentile_rank(p["pct"]) or {}
+        value = {"high": "1y high", "low": "1y low"}.get(rk.get("record") or "", rk.get("big", "—"))
+        window = (f"{p['n_below']} of the {p['n']} sessions before it ({p['first']} → {p['last']}) "
+                  "closed strictly lower")
+        out.append({"label": "VIX 1Y PCTL", "value": value, "chg": None,
+                    "note": None if p["date"] == spx_date else p["date"],
+                    "title": f"VIX close {_fmt(p['value'], '.2f')} on {p['date']}: {window}",
+                    "sr": f" (percentile among the {p['n']} sessions before {p['date']})"})
+    return out
+
+
+def ticker_surface_item(surf: dict, ref: str | None) -> dict | None:
+    """B13: the surface state in the ticker: the SVI-cal surface's 1M (30-day
+    constant-maturity) ATMF vol and RR25, the Surface page's tiles, on the
+    surface's own session (always shown, with the staleness styling of its age
+    against ``ref``). None when the surface or its 1M row is missing: the row
+    is interpolated between listed expiries, never extrapolated."""
+    if surf.get("state") != "ok" or not surf.get("surface"):
+        return None
+    cm = desk_surface.constant_maturity(
+        desk_surface.delta_grid(surf["surface"], surf["residuals"], surf.get("vix")))
+    m1 = next((r for r in cm if r["label"] == "1M"), None)
+    if not m1 or not m1.get("available") or _num(m1.get("atmf")) is None or _num(m1.get("rr25")) is None:
+        return None
+    session = surf["session"]
+    age = session_age(session, ref)
+    where = (f"between the {m1['lower']} and {m1['upper']} expiries" if m1["lower"] != m1["upper"]
+             else f"the {m1['lower']} expiry")
+    old = ("the newest session" if age == 0 else
+           (f"{plural(age, 'NYSE session')} old" if age is not None else "age unknown"))
+    return {"label": "1M ATMF", "value": f"{_fmt(m1['atmf'], '.2f')}%", "chg": None,
+            "more": [{"label": "RR25", "value": signed(m1["rr25"], ".2f")}],
+            "note": session, "note_level": stale_level(age),
+            "title": (f"SVI-cal surface of {session} ({old}) at 30 days, {where}: ATMF vol "
+                      f"{_fmt(m1['atmf'], '.2f')}%, RR25 (25Δ call − 25Δ put vol) "
+                      f"{signed(m1['rr25'], '.2f')} vol pts")}
+
+
+def oldest_source(sources: Sequence[dict]) -> dict | None:
+    """The status-bar input with the most NYSE sessions of age (a missing one
+    first): the one-line phone status strip names it (Q20). Reference-only
+    sources (not in the bar) are left out; ties go to the earlier row."""
+    best: dict | None = None
+    for s in sources:
+        if not (s.get("bar") and s.get("aged")):
+            continue
+        if s.get("level") == "missing":
+            return s
+        if s.get("age") is not None and (best is None or s["age"] > best["age"]):
+            best = s
+    return best
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────────
@@ -6553,7 +7019,8 @@ def _page_context() -> dict:
     return {"canonical": canonical_url(route), "page_file": ROUTES[route], "route": route,
             "nav": NAV, "routes": ROUTES, "vendored": VENDORED, "csp": CSP,
             "cividis": CIVIDIS_11, "berlin": BERLIN_11,
-            "diverge": DIVERGE_11, "s3_full": S3_FULL, "spx_multiplier": SPX_MULTIPLIER,
+            "diverge": DIVERGE_11, "s3_full": S3_FULL, "sleeve_labels": SLEEVE_LABELS,
+            "spx_multiplier": SPX_MULTIPLIER,
             "css": own_asset("static/desk.css"), "js": own_asset("static/desk.js"),
             "font_preloads": FONT_PRELOADS, "chrome": load_chrome(), "page_title": {
                 r: label for r, label, *_ in NAV}.get(route, "Overview")}
@@ -6575,7 +7042,10 @@ def _render(template: str, d: dict):
     # the Model Risk checks whose evidence this page shows (its panels' 'Monitored' chips)
     request_globals.monitored = (monitor_backlinks().get(ROUTES.get(request.path, ""), {})
                                  if request.path != "/model-risk" else {})
-    resp = make_response(render_template(template, d=d))
+    page = render_template(template, d=d)
+    # Q14: the first use of each glossary term links to its definition (Model Risk #definitions)
+    page = desk_glossary.link_first_uses(page, "" if request.path == "/model-risk" else "model-risk.html")
+    resp = make_response(page)
     resp.headers["X-Dashboard-Loader-Errors"] = str(len(errors))
     if errors:
         resp.headers["X-Dashboard-Error-Components"] = "; ".join(e["component"] for e in errors)

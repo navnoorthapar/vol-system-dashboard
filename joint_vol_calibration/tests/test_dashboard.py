@@ -336,7 +336,9 @@ def test_calibration_page_shows_age_and_staleness_banner(dash, synth):
     assert d["calib_age"] == 10
     html = dash.app.test_client().get("/calibration").get_data(as_text=True)
     assert 'class="banner banner-stale-error"' in html
-    assert "Heston calibration is 10 NYSE sessions old" in html
+    # no verb: 'Surface artifacts is 5 NYSE sessions old' read wrong for a plural label (F17)
+    assert "Heston calibration: 10 NYSE sessions old" in html
+    assert " is 10 NYSE sessions old" not in html
 
 
 def test_legacy_fits_are_counted_and_never_headlined(dash, synth):
@@ -1387,7 +1389,9 @@ def test_classifier_accuracy_is_read_from_the_shipped_model(pages):
     idx = pages["/research"]
     oos = f"{round(ev['oos_acc'] * 100, 1)}%"
     pers = f"{round(ev['persistence_acc'] * 100, 1)}%"
-    assert f"{oos} out-of-sample, it loses to the {pers}" in idx
+    # visible text: 'out-of-sample' is the page's first use of a glossary term, a link (Q14)
+    assert re.search(rf"{re.escape(oos)} out-of-sample ?, it loses to the {re.escape(pers)}",
+                     _visible_text(idx))
     assert re.search(r"<dt>Out-of-sample accuracy:</dt><dd><span[^>]*>" + re.escape(oos), idx)
     assert re.search(r"<dt>Persistence baseline:</dt><dd><span[^>]*>" + re.escape(pers), idx)
 
@@ -1878,14 +1882,14 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     # equity-curve table: final / lowest / highest from the unrounded curves
     eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
     table = re.search(r'id="chart-equity-data">(.*?)</div>', pages["/research"], re.DOTALL).group(1)
-    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C Contrarian"), ("nav_s3", "S3 index-leg short"),
-                      ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (reference)")):
+    for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C contrarian"),
+                      ("nav_s3", "S3 short SPX straddle"), ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (ref)")):
         rel = eq[col] / eq[col].iloc[0] - 1
         want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
                        for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
     # the C22 case (+5.647% printed as +5.7%) is now +6.105% on the C23 record
-    assert '<tr><td>S3 index-leg short</td><td class="num">+6.1%</td>' in table
+    assert '<tr><td>S3 short SPX straddle</td><td class="num">+6.1%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
     _, cal = dash.load_headline_calibration()
     smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
@@ -2379,7 +2383,7 @@ def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
 
 def test_corrections_page_shows_the_c23_waterfall_from_its_file(pages):
     bridge = pd.read_csv(SHIPPED / "backtest" / "c23_bridge.csv")
-    tab = re.search(r'<table class="tbl dense[^"]*" id="c23-bridge">(.*?)</table>',
+    tab = re.search(r'<table class="tbl dense[^"]*" id="c23-bridge"[^>]*>(.*?)</table>',
                     pages["/corrections"],
                     re.DOTALL).group(1)
     body = _visible_text("<body>" + tab)
@@ -2536,8 +2540,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     than its budget (raw HTML; GitHub Pages serves it gzipped at about a fifth)."""
     out = tmp_path / "site"
     assert freezer.freeze(str(out), dash) == 0
+    # research.html: 400 kB until B12 added every portfolio round trip (206 points), two
+    # histograms and the trade and drawdown tables, about 30 kB raw (404 kB with them)
     budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 400_000, "corrections.html": 120_000,
+              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 120_000,
               "model-risk.html": 80_000}
     for name, cap in budget.items():
         size = (out / name).stat().st_size
@@ -2547,9 +2553,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     static = ROOT / "dashboard" / "static"
     assert len(gzip.compress((static / "vendor" / "echarts-6.1.0-desk.min.js").read_bytes())) < 240_000
     # P4.1: the quote inspector, the residual strip and the linked chart groups
-    # raised the page script from 51 KB; it is served gzipped like the pages
+    # raised the page script from 51 KB; it is served gzipped like the pages. F4's keyboard
+    # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 30_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_000
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -2567,7 +2574,7 @@ def test_research_inference_panels_show_the_summary(dash, art):
     assert f"{fmt(b['ci95'][0])} to {fmt(b['ci95'][1])}" in port
     nul = re.search(r'<table class="tbl dense" id="null-table">(.*?)</table>', html, re.DOTALL).group(1)
     s3 = s["nulls"]["sleeves"]["s3"]
-    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 · short SPX straddle</td>(.*?)</tr>", nul,
+    row = _visible_text("<body>" + re.search(r"<td[^>]*>S3 short SPX straddle</td>(.*?)</tr>", nul,
                                               re.DOTALL).group(1))
     assert f"{s3['circular']['total_pnl']['p_value']:.3f}" in row
     assert f"{s3['shuffle']['total_pnl']['p_value']:.3f}" in row
@@ -3874,6 +3881,129 @@ def test_browser_panels_beside_taller_ones_carry_no_large_blank(site_browser):
         ctx.close()
 
 
+_OPEN_ALL_JS = """() => { document.querySelectorAll('.g details').forEach(d => { d.open = true; }); }"""
+_PANEL_FIT_JS = """id => { const p = document.getElementById(id);
+  let last = -Infinity;
+  p.querySelectorAll('.panel-body *').forEach(el => { const b = el.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0 && !el.closest('details:not([open]) > :not(summary)'))
+      last = Math.max(last, b.bottom); });
+  const charts = [...p.querySelectorAll('.chart.grow')]
+    .map(c => Math.round(c.getBoundingClientRect().height));
+  return {blank: Math.round(p.getBoundingClientRect().bottom - last), charts: charts}; }"""
+
+
+def test_browser_an_open_disclosure_stretches_no_chart_and_leaves_no_blank_beside_it(site_browser):
+    """F3: opening a <details> made its panel taller than the row; the panel
+    beside it stretched with it: at 1440 px 'Why the edge disappeared' ended
+    1,250 px below its text beside the open change log, and the implied-β chart
+    grew to 1,359 px for a 0.55–0.95 range beside the open inference notes,
+    exaggerating its year-to-year swings. A row with an open disclosure now lets
+    each panel end with its own content, and no grow chart exceeds 420 px."""
+    ctx, page = _page(site_browser, 1440, 900)
+    try:
+        page.goto(site_browser["base"] + "research.html", wait_until="load")
+        page.evaluate(_OPEN_ALL_JS)
+        page.locator("#chart-implied-beta").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-implied-beta")
+        page.wait_for_timeout(300)
+        for pid in ("why", "limits", "benchmarks", "inference"):
+            fit = page.evaluate(_PANEL_FIT_JS, pid)
+            assert fit["blank"] <= 96, (pid, fit)
+            assert all(h <= 420 for h in fit["charts"]), (pid, fit)
+        # the Surface's variance-swap strip beside its open replication notes (F9: 1,250 px)
+        page.goto(site_browser["base"] + "surface.html", wait_until="load")
+        page.evaluate(_OPEN_ALL_JS)
+        rows = page.evaluate("""() => [...document.querySelectorAll('.g.pair, .g.level, .g.trio')]
+          .filter(g => g.querySelector('details[open]'))
+          .flatMap(g => [...g.children].filter(p => p.classList.contains('panel')).map(p => p.id))""")
+        assert "varswap" in rows, rows
+        for pid in rows:
+            page.locator("#" + pid).scroll_into_view_if_needed()
+            page.wait_for_timeout(150)
+            fit = page.evaluate(_PANEL_FIT_JS, pid)
+            assert fit["blank"] <= 96, (pid, fit)
+            assert all(h <= 420 for h in fit["charts"]), (pid, fit)
+    finally:
+        ctx.close()
+
+
+_ELLIPSIS_CUT_JS = """() => [...document.querySelectorAll('body *')].filter(el => {
+  const s = getComputedStyle(el);
+  if (s.textOverflow !== 'ellipsis' || s.overflowX === 'visible' || el.closest('[hidden]')) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 && el.scrollWidth > el.clientWidth + 1 && !el.getAttribute('title');
+}).map(el => el.className + ': ' + el.textContent.trim())"""
+
+
+def test_browser_no_label_is_cut_short_with_an_ellipsis(site_browser):
+    """F5: a .kpi-label was one line with text-overflow: ellipsis and no title,
+    so 'SPX RMSE in sample' read 'SPX RMSE IN SA…' and 'VVIX model / market'
+    'VVIX MODEL / MA…' on the Overview at 1440 and 768 px (and eleven more
+    tiles at 768 or 1024 px on Surface, Calibration and Risk). The page did
+    not scroll, so the overflow gate never saw it; the label now wraps."""
+    for width in (768, 1024, 1440):
+        ctx, page = _page(site_browser, width, 900)
+        try:
+            for name in ("index.html", "surface.html", "calibration.html", "risk.html"):
+                page.goto(site_browser["base"] + name, wait_until="load")
+                page.evaluate("() => document.fonts.ready.then(() => true)")
+                assert page.evaluate(_ELLIPSIS_CUT_JS) == [], (name, width)
+        finally:
+            ctx.close()
+
+
+def test_browser_every_trade_is_reachable_from_the_keyboard(site_browser):
+    """F4: the per-trade strip ('Every trade · P&L by entry date') was a canvas
+    with no focusable element, and its Table summarises by sleeve and year, so
+    one trade's P&L and entry date were reachable only by mouse. A focusable
+    readout under it steps through the shown trades by entry date with the arrow
+    keys (Home / End, Page Up / Down by 10), says the sleeve, the entry date and
+    the P&L, and shows the tooltip at that dot; a sleeve toggled off in the
+    legend is skipped."""
+    sb = site_browser
+    raw = _raw_specs((sb["site"] / "research.html").read_text())["chart-round-trips"]
+    pts = sorted((str(d[0]), float(d[1]), s_["name"]) for s_ in raw["series"] for d in s_["data"])
+    ctx, page = _page(sb, 1440, 900)
+    try:
+        page.goto(sb["base"] + "research.html", wait_until="load")
+        page.locator("#chart-round-trips").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-round-trips")
+        r = page.locator("#chart-round-trips-readout")
+        assert r.get_attribute("tabindex") == "0"
+        r.focus()
+        page.keyboard.press("Home")
+        first = r.inner_text()
+        x0, y0, n0 = pts[0]
+        assert n0 in first, first
+        assert x0[:10] in first, first
+        assert dash_num(y0) in first, (first, y0)
+        assert f"1 of {len(pts)}" in first, first
+        page.keyboard.press("ArrowRight")
+        assert f"2 of {len(pts)}" in r.inner_text()
+        page.keyboard.press("End")
+        last = r.inner_text()
+        assert pts[-1][2] in last, last
+        assert pts[-1][0][:10] in last, last
+        tip = page.evaluate("""() => [...document.querySelectorAll('#chart-round-trips > div')]
+            .some(d => d.style.position === 'absolute' && getComputedStyle(d).display !== 'none'
+                  && d.innerText.trim())""")
+        assert tip, "no tooltip at the stepped trade"
+        # a sleeve toggled off is skipped
+        s3 = next(n for _x, _y, n in pts if n.startswith("S3"))
+        page.click(f"[data-legend-for~='chart-round-trips'][data-series='{s3}']")
+        r.focus()
+        page.keyboard.press("Home")
+        left = sum(1 for _x, _y, n in pts if n != s3)
+        assert f"1 of {left}" in r.inner_text(), r.inner_text()
+    finally:
+        ctx.close()
+
+
+def dash_num(v: float) -> str:
+    """A $000s P&L as the readout prints it: one decimal, sign, Unicode minus."""
+    return ("+" if v > 0 else "−" if v < 0 else "") + f"{abs(v):,.1f}"
+
+
 # ── P1 trust pass ─────────────────────────────────────────────────────────────
 
 _SIGNED_FILLS_JS = """cid => {
@@ -4239,9 +4369,9 @@ def test_s3_is_named_for_what_it_trades(dash, pages):
         labels += [s["name"] for s in spec.get("series") or [] if str(s.get("name", "")).startswith("S3")]
         labels += [c for c in ((spec.get("x") or {}).get("categories") or []) if str(c).startswith("S3")]
     assert labels
-    assert all("short SPX straddle" in x or "index-leg short" in x for x in labels), labels
+    assert all("short SPX straddle" in x for x in labels), labels
     text = _visible_text(html)
-    assert "S3 · short SPX straddle (index leg of a dispersion trade; no single-name leg)" in text
+    assert "S3 short SPX straddle (index leg of a dispersion trade; no single-name leg)" in text
 
 
 def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
@@ -4447,6 +4577,11 @@ def unit_lint(html: str) -> list[str]:
     * A VIX-family level (VIX, VIX9D, VIX3M, VIX6M, VVIX) is an index level,
       never a '%': a KPI tile with that label and a '%' unit span, a dt/dd pair,
       or the level followed by '%' in the text.
+    * 'pts' always says which points: 'vol pts', 'index pts', 'idx pts' (SPX
+      index points of P&L) or 'percentage pts', never bare (the Overview's
+      '0.82 pts RMSE', Calibration's 'VIX indices (pts)'), in the text, the
+      KPI unit spans and the chart specs; and an index level is never in 'vol
+      pts' (the VIX term-structure axes read 'Index level (vol pts)').
     """
     import html as _h
     out = []
@@ -4477,6 +4612,16 @@ def unit_lint(html: str) -> list[str]:
             for x, y in re.findall(rf"<dt>\s*({_VIX_FAMILY})\s*</dt>\s*<dd>([^<]*%)\s*</dd>", body)]
     out += [f"{m.group(0)!r}" for m in re.finditer(
         rf"(?<![\w/])({_VIX_FAMILY})\b[ :=]*[+−-]?\d[\d,]*(?:\.\d+)?\s*%", text)]
+    bare = r"(?<!vol )(?<!index )(?<!idx )(?<!percentage )\bpts\b"
+    level = r"[Ii]ndex level[^()]*\(vol pts\)"
+    for src, s in (("text", text), ("attribute", attrs)):
+        out += [f"bare 'pts' in {src}: …{s[max(0, m.start() - 40):m.end() + 5]}…"
+                for m in re.finditer(bare, s)]
+    for raw in specs:
+        blob = json.dumps(json.loads(_h.unescape(raw)), ensure_ascii=False)
+        out += [f"bare 'pts' in a chart: …{blob[max(0, m.start() - 40):m.end() + 5]}…"
+                for m in re.finditer(bare, blob)]
+        out += [f"index level in vol pts: {m.group(0)}" for m in re.finditer(level, blob)]
     return out
 
 
@@ -4502,6 +4647,11 @@ def test_unit_lint_catches_a_seeded_offender(pages):
                                '<table><tr><td data-detail="half-spread 0.6 vp">x</td></tr></table></main>'),
         "dl": html.replace("</main>", "<dl><dt>VIX9D</dt><dd>18.20%</dd></dl></main>"),
         "prose": html.replace("</main>", "<p>with VIX3M 21.3% on the day</p></main>"),
+        "bare pts": html.replace("</main>", '<div class="kpi"><div class="kpi-label">VIX indices</div>'
+                                            '<div class="kpi-value">0.82<span class="unit">pts RMSE</span>'
+                                            '</div></div></main>'),
+        "level axis": html.replace("</main>", '<script type="application/json" id="x-spec">'
+                                              '{"y": {"name": "Index level (vol pts)"}}</script></main>'),
     }
     for kind, seeded in seeds.items():
         assert unit_lint(seeded), kind
@@ -4519,7 +4669,7 @@ def _findings(html: str) -> list[tuple[str, str, list[str]]]:
     strip = re.search(r'<div class="findings" id="findings"[^>]*>(.*?)\n</div>', html, re.DOTALL)
     assert strip
     cols = re.findall(r'<section class="([^"]+)"[^>]*>\s*<h3 class="find-head"[^>]*>(.*?)</h3>\s*'
-                      r'<ul class="find-list">(.*?)</ul>', strip.group(1), re.DOTALL)
+                      r'<ul class="find-list[^"]*"[^>]*>(.*?)</ul>', strip.group(1), re.DOTALL)
     return [(c, _visible_text("<body>" + h).strip(),
              re.findall(r'<li class="find-item">(.*?)</li>', ul, re.DOTALL))
             for c, h, ul in cols]
@@ -4764,6 +4914,70 @@ def test_surface_delta_grid_panel_lists_every_expiry_and_five_tenors(dash, pages
     assert ">Constant maturity (5)</button>" in html
     # the grid sits in a labelled, focusable scroll region (phones scroll it, not the page)
     assert html.count('role="region" aria-label="Delta grid, listed expiries (scrollable)"') == 1
+
+
+# the heads as text: S_T and g_min are set as S<sub>T</sub> and g<sub>min</sub>
+RND_HEADS = ["Expiry", "Days", "Quoted K/F", "ST < 0.80 F", "ST < 0.90 F", "Outside 0.95–1.05 F",
+             "ST > 1.10 F", "Mass below quoted", "Mass above quoted", "∫p", "E[ST/F]", "gmin"]
+
+
+def test_surface_rnd_panels_print_every_slices_risk_neutral_tails(dash, pages):
+    """B9: the Surface page reads the certified SVI-cal slices as distributions
+    (desk_density.py, Breeden–Litzenberger). The table lists every listed slice
+    of the rendered session with the module's numbers; a threshold beyond the
+    quoted strikes prints 'beyond quoted strikes', never a number; the captions
+    say risk-neutral and no higher moment is printed; the density chart draws
+    each picked expiry only inside its quoted strikes, and the tail chart has a
+    gap wherever the table says 'beyond quoted strikes'."""
+    dd = importlib.import_module("desk_density")
+    sj, res, _ = _desk_inputs()
+    rows = dd.tail_rows(sj, res)
+    html = pages["/surface"]
+    assert _table_heads(html, "rnd-table-tbl") == RND_HEADS
+    got = _table_rows(html, "rnd-table-tbl")
+    assert len(got) == len(rows) == len(sj["surfaces"]["svi_cal"]["params"]["slices"])
+    col = {h: i for i, h in enumerate(RND_HEADS)}
+    keys = {"ST < 0.80 F": "lt80", "ST < 0.90 F": "lt90", "Outside 0.95–1.05 F": "out5",
+            "ST > 1.10 F": "gt110"}
+    assert "<th scope=\"col\" class=\"num\"><i>S</i><sub>T</sub> &lt; 0.90 F</th>" in html
+    n_beyond = 0
+    for cells, r in zip(got, rows):
+        assert cells[0].split(" ")[0] == r["expiry"]
+        for head, key in keys.items():
+            p = r["prob"][key]
+            if p is None:
+                n_beyond += 1
+                assert cells[col[head]] == "beyond quoted strikes", (r["expiry"], head)
+            else:
+                assert cells[col[head]] == dash._fmt(100 * p, ".2f"), (r["expiry"], head)
+        assert cells[col["Mass below quoted"]] == dash._fmt(100 * r["below_quoted"], ".2f")
+        assert cells[col["∫p"]] == dash._fmt(r["mass"], ".4f")
+        assert cells[col["E[ST/F]"]] == dash._fmt(r["mean"], ".4f")
+        if r["certified"]:                     # a certified slice is a distribution with mean F
+            assert cells[col["∫p"]] == "1.0000"
+            assert cells[col["E[ST/F]"]] == "1.0000"
+        assert cells[col["gmin"]] == dd.fmt_g(r["g_min"])
+        assert not cells[col["gmin"]].startswith(("0.0000", "−"))   # positive: never a bare 0.0000
+    assert n_beyond == sum(1 for r in rows for v in r["prob"].values() if v is None)
+    panel = html[html.index('id="rnd"'):html.index('id="iv-heat"')]
+    text = _visible_text("<body>" + panel)
+    assert "Risk-neutral" in text
+    assert "not a forecast" in text
+    assert re.findall(r"skewness|kurtosis", text, re.IGNORECASE) == ["skewness", "kurtosis"]   # "no … shown"
+    assert "no skewness or kurtosis is shown" in text
+    specs = _raw_specs(html)
+    picks = {p["row"]["expiry"]: p["row"] for p in dd.chart_expiries(rows)}
+    dens = specs["chart-rnd"]["series"]
+    assert len(dens) == len(picks) >= 2
+    for s_ in dens:
+        r = next(v for e, v in picks.items() if e in s_["name"])
+        ks = [x for x, _ in s_["data"]]
+        assert min(ks) >= r["k_lo"] - 1e-6, s_["name"]
+        assert max(ks) <= r["k_hi"] + 1e-6, s_["name"]
+        assert s_["role"] == "tenor"
+    tails = {s_["name"]: s_["data"] for s_ in specs["chart-rnd-tails"]["series"]}
+    for name, key in (("SVI-cal P(S_T < 0.90 F)", "lt90"), ("SVI-cal P(S_T > 1.10 F)", "gt110")):
+        assert [v is None for _, v in tails[name]] == [r["prob"][key] is None for r in rows], name
 
 
 def test_surface_state_tiles_are_the_one_month_constant_maturity_row(dash, pages):
@@ -6753,6 +6967,21 @@ def _delta_e76(a: str, b: str) -> float:
     return float(sum((p - q) ** 2 for p, q in zip(la, lb)) ** 0.5)
 
 
+def _lch_hue(h: str) -> tuple[float, float]:
+    """(chroma, hue in degrees) of '#rrggbb' in CIE LCh (the Lab of _delta_e76)."""
+    import math
+    rgb = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b_ = (((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92 for c in rgb)
+    x = (0.4124 * r + 0.3576 * g + 0.1805 * b_) / 0.95047
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b_
+    z = (0.0193 * r + 0.1192 * g + 0.9505 * b_) / 1.08883
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+    a, bb = 500 * (f(x) - f(y)), 200 * (f(y) - f(z))
+    return math.hypot(a, bb), math.degrees(math.atan2(bb, a)) % 360
+
+
 def test_every_series_follows_the_encoding_registry(dash, pages):
     """P4.5 (extends test_one_colour_per_model_on_every_surface_chart): over every
     page's chart specs, (a) a series that stands for a model (role 'model') has
@@ -6761,7 +6990,11 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
     model colour (the Calibration tenors were cat0 / cat1 / cat4); (c) series
     indexed by maturity take the tenor ramp, lighter to darker with T; (d) on a
     P&L or return chart no series is within ΔE76 25 of the gain or loss fill
-    (S3 was cat1, 16.6 from --neg-fill); (e) market observables and Cboe indices
+    (S3 was cat1, 16.6 from --neg-fill), nor, unless it is neutral (LCh chroma
+    under 15), within 30° of hue of either: the Risk P&L explain drew Vega in
+    vermilion cat5 (13° from the loss orange) under a gain-blue +403.5 tile and
+    Gamma in sky-blue cat0 (29° from the gain blue), and Research drew S1C and
+    the rolling Sharpe in cat0 (F7); (e) market observables and Cboe indices
     are 'headline'; (f) no series uses 'info' (the gain blue). The ramp reaches
     3:1 on the panels."""
     ch = dash.charts
@@ -6813,6 +7046,9 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
                         continue                    # the sign colours themselves, by design
                     for fill in ("pos-fill", "neg-fill"):
                         assert _delta_e76(hex_of[c], tok[fill]) >= 25, (route, cid, s["name"], c, fill)
+                        chroma, hue = _lch_hue(hex_of[c])
+                        gap = abs((hue - _lch_hue(tok[fill])[1] + 180) % 360 - 180)
+                        assert chroma < 15 or gap >= 30, (route, cid, s["name"], c, fill, round(gap))
     assert min(seen["model"] / 20, seen["market"] / 8, seen["tenor"] / 2, seen["pnl"] / 3) >= 1, seen
 
 
@@ -6877,7 +7113,7 @@ def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site
 def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     """P4.5: a tooltip's head carries the x value with its unit and the index
     name where there is one ('VIX3M · 93 d', not '93.0'), and every row its unit:
-    Overview #chart-ts at the 93-day point, Calibration #chart-oos (vol pts) and
+    Overview #chart-ts at the 93-day point (index pts), Calibration #chart-oos (vol pts) and
     Surface #chart-strip (%)."""
     sb = site_browser
     tip_js = """(id) => { const t = [...document.querySelectorAll('#' + id + ' > div')]
@@ -6901,7 +7137,7 @@ def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     tip = hover("index.html", "chart-ts", at_point)
     assert tip, "no tooltip on #chart-ts"
     assert "VIX3M · 93 d" in tip, tip
-    assert re.search(r"\d\.\d+ vol pts", tip), tip
+    assert re.search(r"\d\.\d+ index pts", tip), tip          # an index level (F6: was 'vol pts')
     mid = """(cid) => { const c = Desk.charts[cid], r = c.el.getBoundingClientRect();
         const g = c.chart.getModel().getComponent('grid', 0).coordinateSystem.getRect();
         return {x: r.left + g.x + g.width * 0.4, y: r.top + g.y + g.height * 0.6}; }"""
@@ -6915,3 +7151,767 @@ def test_browser_tooltips_name_the_point_and_carry_units(site_browser):
     assert rows, tip
     assert all(re.search(r"\d%$", x.strip()) for x in rows), rows
     ctx.close()
+
+
+# ── Q20: the phone first screen ───────────────────────────────────────────────
+
+def test_oldest_source_names_the_status_bars_oldest_input(dash):
+    """Q20: the one-line phone status strip names the input with the most NYSE
+    sessions of age; a missing input comes first; a reference-only source (VX,
+    not in the bar) and an unaged one (the fixed backtest window) never."""
+    src = [{"short": "SPX", "bar": True, "aged": True, "age": 0, "level": "ok"},
+           {"short": "FIT", "bar": True, "aged": True, "age": 5, "level": "error"},
+           {"short": "GREEKS", "bar": True, "aged": True, "age": 5, "level": "error"},
+           {"short": "BACKTEST", "bar": True, "aged": False, "age": None, "level": "ok"},
+           {"short": "VX", "bar": False, "aged": True, "age": 40, "level": "error"}]
+    assert dash.oldest_source(src)["short"] == "FIT"              # ties: the earlier row
+    assert dash.oldest_source([*src, {"short": "LABELS", "bar": True, "aged": True, "age": None,
+                                      "level": "missing"}])["short"] == "LABELS"
+    assert dash.oldest_source(src[3:]) is None
+
+
+def test_every_page_carries_the_phone_status_strip_and_fold_hooks(dash, pages):
+    """Q20, server side: every page's status bar holds a <details> whose summary
+    names the oldest input and its age (load_chrome's sources) and whose list
+    gives every status-bar source its date; each stale banner keeps its full
+    text and role=status, its title naming the body it folds; the Overview's
+    findings columns name their lists. Without JavaScript nothing is folded:
+    no list or banner body is rendered hidden."""
+    c = dash.load_chrome()
+    o = c["oldest"]
+    assert o is not None
+    assert o["short"] in {s["short"] for s in c["sources"] if s["bar"]}
+    want = ("missing" if o["level"] == "missing" else
+            (dash.plural(o["age"], "session") + " old") if o["age"] else "current")
+    for route, html in pages.items():
+        bar = html[html.index('<header class="statusbar"'):html.index("</header>")]
+        det = re.search(r'<details class="sb-phone">\s*<summary class="sb-item">(.*?)</summary>'
+                        r'(.*?)</details>', bar, re.DOTALL)
+        assert det, route
+        summary = _visible_text("<body>" + det.group(1)).split(":")[0].split()
+        assert summary == [o["short"], *want.split()], route
+        listed = re.findall(r'<li><span class="sb-k">([^<]+)</span>', det.group(2))
+        assert listed[:-3] == [s["short"] for s in c["sources"] if s["bar"]], route
+        assert listed[-3:] == ["MODEL", "BUILD", "VIEW"], route
+        banners = list(re.finditer(
+            r'<div class="banner banner-stale-\w+" data-stale="(\w+)" data-age="\d+" role="status">'
+            r'.*?<div class="banner-title" data-disclose="([\w-]+)">.*?'
+            r'<div class="banner-body fold-body" id="([\w-]+)">', html, re.DOTALL))
+        for m in banners:
+            assert m.group(2) == m.group(3) == f"stale-{m.group(1)}-body", route
+        assert len(banners) == html.count('class="banner banner-stale-'), route   # each one a status
+        assert not re.search(r'<(ul|div) class="(find-list|banner-body)[^"]*"[^>]* hidden', html), route
+        if "fold-body" in html:                    # no JavaScript: the <noscript> style unfolds every body
+            assert ".banner-body.fold-body { display: block !important; }" in html, route
+    assert ('<div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">'
+            in pages["/"])
+    heads = re.findall(r'<h3 class="find-head" id="find-(\w+)" data-disclose="find-list-(\w+)" '
+                       r'data-count="(\d+)">', pages["/"])
+    assert len(heads) == 3
+    assert all(a == b for a, b, _ in heads)
+    for (_, head, items), (_, _, n) in zip(_findings(pages["/"]), heads):
+        assert int(n) == len(items), head
+
+
+def test_browser_phone_first_screen_shows_the_subject_and_first_number(site_browser):
+    """Q20 acceptance at 390 x 844: on every page <main> starts at y <= 110 (it was
+    164: a 3-line status strip and a 3-line ticker), the h1 at y <= 200 (292 on
+    Overview, Surface and Calibration, under a 108-198 px stale banner) and the
+    first key number (.kpi-value, .result-v, or a Calibration parameter tile)
+    above y = 844 (Overview 1,484, Calibration 2,043 at 'Fit quality'). The
+    staleness stays on screen without a tap: the strip's state reads STALE and
+    names the oldest input; the stale banner's title stays. The strip's
+    <details> and each folded heading open from the keyboard. At 1440 nothing
+    is folded and the one-line strip is not shown."""
+    sb = site_browser
+    ctx, page = _page(sb, 390, 844)
+    geo_js = """() => {
+      const top = e => e ? Math.round(e.getBoundingClientRect().top + scrollY) : null;
+      const vis = e => e && e.offsetParent !== null && getComputedStyle(e).visibility !== 'hidden';
+      const num = [...document.querySelectorAll('main .kpi-value, main .result-v, main .param-val')]
+        .filter(vis)[0];
+      const state = document.querySelector('.statusbar .sb-state');
+      const phone = document.querySelector('.statusbar .sb-phone > summary');
+      const stale = [...document.querySelectorAll('.banner[data-stale]')];
+      return {main: top(document.querySelector('main')), h1: top(document.querySelector('h1')),
+              num: top(num), state: vis(state) ? state.innerText.trim() : null,
+              phone: vis(phone) ? phone.innerText.trim() : null,
+              stale_titles: stale.map(b => { const t = b.querySelector('.banner-title');
+                const r = t.getBoundingClientRect(); return r.height > 0 ? t.innerText.trim() : null; }),
+              sw: document.documentElement.scrollWidth}; }"""
+    try:
+        for name in _ROUTE_OF:
+            page.goto(sb["base"] + name, wait_until="load")
+            g = page.evaluate(geo_js)
+            assert g["main"] <= 110, (name, g)
+            assert g["h1"] <= 200, (name, g)
+            if g["num"] is not None or name in ("index.html", "surface.html", "calibration.html",
+                                                "risk.html", "research.html"):
+                assert g["num"] is not None, (name, g)
+                assert g["num"] < 844, (name, g)
+            assert g["sw"] <= 390, (name, g)
+            assert g["phone"], (name, g)
+            assert re.search(r"\b(old|current|missing)\b", g["phone"]), (name, g)
+            if g["stale_titles"]:
+                assert re.search(r"STALE|LAGGING", g["state"] or ""), (name, g)
+                assert all(t and " old" in t for t in g["stale_titles"]), (name, g)
+        # the strip's details from the keyboard: skip link, then the summary
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        page.keyboard.press("Tab")
+        page.keyboard.press("Tab")
+        assert page.evaluate("document.activeElement.matches('.sb-phone > summary')")
+        page.keyboard.press("Enter")
+        assert page.evaluate("document.querySelector('.sb-phone').open")
+        assert page.locator(".sb-list").is_visible()
+        page.keyboard.press("Enter")
+        assert not page.evaluate("document.querySelector('.sb-phone').open")
+        # a folded heading is a button; Enter unfolds it
+        btn = page.locator("#find-works button.disclose")
+        assert btn.get_attribute("aria-expanded") == "false"
+        assert not page.locator("#find-list-works").is_visible()
+        btn.focus()
+        page.keyboard.press("Enter")
+        assert btn.get_attribute("aria-expanded") == "true"
+        assert page.locator("#find-list-works").is_visible()
+        stale = page.locator(".banner[data-stale] button.disclose")
+        if stale.count():
+            body = page.locator(".banner[data-stale] .banner-body").first
+            assert not body.is_visible()
+            stale.first.focus()
+            page.keyboard.press("Space")
+            assert body.is_visible()
+    finally:
+        ctx.close()
+    ctx, page = _page(sb, 1440, 900)
+    try:
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        assert not page.locator(".sb-phone").is_visible()
+        assert page.locator(".statusbar .sb-right").is_visible()
+        assert page.locator("#find-list-works").is_visible()
+        assert all(b.is_visible() for b in page.locator(".banner[data-stale] .banner-body").all())
+        assert page.locator("button.disclose").count() == 0      # nothing folds: headings stay headings
+        page.set_viewport_size({"width": 390, "height": 844})     # turned narrow: folds
+        page.wait_for_timeout(200)
+        assert not page.locator("#find-list-works").is_visible()
+        assert page.locator("#find-works button.disclose").get_attribute("aria-expanded") == "false"
+    finally:
+        ctx.close()
+    ctx = sb["browser"].new_context(viewport={"width": 390, "height": 844}, java_script_enabled=False)
+    try:                                           # no JavaScript: nothing folds
+        page = ctx.new_page()
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        assert page.locator("#find-list-works").is_visible()
+        assert all(b.is_visible() for b in page.locator(".banner[data-stale] .banner-body").all())
+    finally:
+        ctx.close()
+
+
+# ── D12: sortable, copyable tables ────────────────────────────────────────────
+
+def test_tables_are_published_in_the_servers_order_without_sort_controls(pages):
+    """D12: sorting and copying are desk.js enhancements; the HTML (what a page
+    shows without JavaScript and in print) carries no sort button, arrow or copy
+    control; the only aria-sort is the Risk vomma table's, which the server
+    publishes sorted."""
+    for route, html in pages.items():
+        for token in ("th-sort", "tbl-tools", "tbl-act"):
+            assert token not in html, (route, token)
+        assert html.count("aria-sort=") == (1 if route == "/risk" else 0), route
+    # a table whose order is its meaning (the cumulative C23 waterfall) is left out
+    assert '<table class="tbl dense cards" id="c23-bridge" data-nosort>' in pages["/corrections"]
+
+
+def test_browser_tables_sort_copy_and_export(site_browser, tmp_path):
+    """D12 acceptance on research.html: clicking the 'Sharpe' head of Per-sleeve
+    performance orders the rows ascending, then descending, then back to the
+    published order, and aria-sort follows; 'Copy' writes a TSV whose cells are
+    the cells' text as written; 'CSV' downloads the head and every row. The
+    number parser reads U+2212, $, %, $…k, 'm × 10⁻ⁿ', 'a / b', 'a to b' and
+    'a–b', and refuses dates and tenors; on Surface's tail table the 'beyond
+    quoted strikes' cells sort last both ways."""
+    sb = site_browser
+    ctx = _context(sb)
+    ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=sb["base"].rstrip("/"))
+    page = ctx.new_page()
+    try:
+        page.goto(sb["base"] + "research.html", wait_until="load")
+        parse = page.evaluate("""() => ['\\u2212$273,733', '12.5%', '$1.2k', '$3.4M',
+            '9.5 \\u00d7 10\\u207b\\u2079', '205 / 110', '\\u22121.81 to \\u22120.30', '0.703\\u20131.061',
+            '46 (1 open)', '2026-10-16', '1M',
+            '\\u2014', 'S3 \\u00b7 short SPX straddle', '+0.42'].map(Desk.cellNumber)""")
+        assert parse[:9] == [-273733, 12.5, 1200, 3.4e6, pytest.approx(9.5e-9), 205, -1.81, 0.703, 46]
+        assert parse[9:13] == [None, None, None, None]
+        assert parse[13] == 0.42
+        tbl = page.locator("#sleeve-table")
+        heads = [h.strip() for h in tbl.locator("thead th").all_text_contents()]
+        col = heads.index("Sharpe")
+        published = [r.strip() for r in tbl.locator("tbody tr td:first-child").all_text_contents()]
+
+        def sharpe() -> list[float]:
+            return page.evaluate("""(j) => [...document.querySelectorAll('#sleeve-table tbody tr')]
+                .map(r => Desk.cellNumber(r.cells[j].textContent))""", col)
+        th = tbl.locator("thead th").nth(col)
+        btn = th.locator("button.th-sort")
+        btn.click()
+        assert th.get_attribute("aria-sort") == "ascending"
+        assert sharpe() == sorted(sharpe())
+        btn.click()
+        assert th.get_attribute("aria-sort") == "descending"
+        assert sharpe() == sorted(sharpe(), reverse=True)
+        btn.press("Enter")                                  # the keyboard, a third time: published order
+        assert th.get_attribute("aria-sort") is None
+        assert [r.strip() for r in tbl.locator("tbody tr td:first-child").all_text_contents()] == published
+        # Copy: the cells as written (the chip's 'portfolio', not the CSS capitals), tab-separated
+        want = page.evaluate("""() => { const t = document.getElementById('sleeve-table');
+            const txt = c => c.textContent.replace(/\\s+/g, ' ').trim();
+            return [[...t.tHead.rows[0].cells].map(txt),
+                    ...[...t.tBodies[0].rows].map(r => [...r.cells].map(txt))]
+              .map(r => r.join('\\t')).join('\\n') + '\\n'; }""")
+        page.locator("#sleeves .panel-actions button.tbl-act", has_text="Copy").click()
+        page.wait_for_timeout(200)
+        got = page.evaluate("navigator.clipboard.readText()")
+        assert got == want
+        assert got.splitlines()[0].split("\t")[:3] == ["Signal", "Total P&L", "Sharpe"]
+        n = tbl.locator("tbody tr").count()
+        with page.expect_download() as dl:
+            page.locator("#sleeves .panel-actions button.tbl-act", has_text="CSV").click()
+        path = tmp_path / "sleeves.csv"
+        dl.value.save_as(path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1 + n
+        assert lines[0].startswith("Signal,Total P&L,Sharpe,")
+        assert dl.value.suggested_filename == "sleeve-table.csv"
+        # numbers before text: 'beyond quoted strikes' sorts last both ways
+        page.goto(sb["base"] + "surface.html", wait_until="load")
+        t2 = page.locator("#rnd-table-tbl")
+        h2 = [h.strip() for h in t2.locator("thead th").all_text_contents()]
+        j = h2.index("ST > 1.10 F")
+        cells = """(j) => [...document.querySelectorAll('#rnd-table-tbl tbody tr')]
+            .map(r => r.cells[j].textContent.trim())"""
+        before = page.evaluate(cells, j)
+        n_beyond = before.count("beyond quoted strikes")
+        assert 0 < n_beyond < len(before)
+        b2 = t2.locator("thead th").nth(j).locator("button.th-sort")
+        for _ in range(2):
+            b2.click()
+            after = page.evaluate(cells, j)
+            assert after[-n_beyond:] == ["beyond quoted strikes"] * n_beyond
+            nums = [float(x) for x in after[:-n_beyond]]
+            assert nums in (sorted(nums), sorted(nums, reverse=True))
+    finally:
+        ctx.close()
+
+
+# ── Q14: conventions and definitions, linked from first use ──────────────────
+
+def _glossary():
+    return _load("desk_glossary_under_test", "dashboard/desk_glossary.py")
+
+
+def test_definitions_section_lists_every_term_with_an_anchor(pages):
+    """Model Risk #definitions: the units and signs, then one anchor per term
+    (≥ 20) with its <dfn>, expansion, units and where it is used; the footer and
+    the '?' overlay of every page link to it."""
+    gl = _glossary()
+    mr = pages["/model-risk"]
+    sec = mr[mr.index('id="definitions"'):]
+    sec = sec[:sec.index("</section>")] if "</section>" in sec else sec
+    assert 'id="conventions"' in sec
+    for k, _v in gl.CONVENTIONS:
+        assert f"<dt>{k}</dt>" in sec, k
+    assert len(gl.TERMS) >= 20
+    for t in gl.TERMS:
+        m = re.search(rf'<div class="def" id="def-{re.escape(t["id"])}"[^>]*><dt><dfn[^>]*>(.*?)</dfn>', sec)
+        assert m, t["id"]
+        assert _html_unescape(m.group(1)) == t["term"]
+        block = sec[m.start():sec.index("</div>", m.start())]
+        assert "Units: " in block, t["id"]
+        assert "used on " in block, t["id"]
+    for route, html in pages.items():
+        footer = html[html.index("<footer"):]
+        assert 'href="model-risk.html#definitions"' in footer, route
+        keys = html[html.index('id="keysDialog"'):]
+        assert 'href="model-risk.html#definitions"' in keys[:keys.index("</dialog>")], route
+
+
+class _ProseRuns:
+    """The text runs of <main>'s running prose (p, li, dd) a reader sees, in
+    page order, each tagged with the glossary link it sits in ('' outside one)
+    and the definitions it is part of (a definition never links its own term):
+    an html.parser walk independent of desk_glossary's regex tokenizer.
+    Headings, tables, controls, code, SVG, <dt> and hidden, aria-hidden,
+    sr-only and chip text are not prose."""
+
+    SKIP = frozenset({"h1", "h2", "h3", "h4", "th", "td", "button", "summary", "code", "pre", "kbd",
+                      "script", "style", "svg", "title", "option", "select", "textarea", "label",
+                      "noscript", "dt"})
+    VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+                      "source", "track", "wbr"})
+
+    def __init__(self, html: str):
+        from html.parser import HTMLParser
+
+        runs: list[tuple[str, str, set]] = []
+        stack: list[tuple[str, bool, str, str]] = []
+        skip, void = self.SKIP, self.VOID
+
+        class P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                if tag in void:
+                    return
+                a = dict(attrs)
+                cls = (a.get("class") or "").split()
+                hide = (tag in skip or "hidden" in a or a.get("aria-hidden") == "true"
+                        or "sr-only" in cls or "chip" in cls)
+                term = ""
+                if tag == "a":
+                    m = re.fullmatch(r"[^#]*#def-([\w-]+)", a.get("href") or "")
+                    term = m.group(1) if m and "term" in cls else ""
+                    hide = hide or not term                     # an ordinary link's text is not linked
+                stack.append((tag, hide, term, a.get("data-term") or ""))
+
+            def handle_endtag(self, tag):
+                for k in range(len(stack) - 1, -1, -1):
+                    if stack[k][0] == tag:
+                        del stack[k:]
+                        break
+
+            def handle_data(self, data):
+                if any(e[1] for e in stack) or not any(e[0] in ("p", "li", "dd") for e in stack):
+                    return
+                runs.append((data, next((e[2] for e in reversed(stack) if e[2]), ""),
+                             {e[3] for e in stack if e[3]}))
+
+        main = html[html.index("<main"):html.rindex("</main>")]
+        P(convert_charrefs=True).feed(main)
+        self.runs = runs
+
+
+def test_every_page_links_the_first_use_of_its_terms(pages):
+    """Every page links each glossary term once, at its first use in the prose
+    of <main>, to its definition (on Model Risk, the same page); an acronym
+    carries its expansion in <abbr>. Before Q14 no page had an <abbr> or <dfn>."""
+    gl = _glossary()
+    by_id = {t["id"]: t for t in gl.TERMS}
+    seen: set[str] = set()
+    for route, html in pages.items():
+        main = html[html.index("<main"):html.rindex("</main>")]
+        links = re.findall(r'<a class="term" href="([^"]*)#def-([\w-]+)">(.*?)</a>', main)
+        assert links, route
+        ids = [i for _h, i, _x in links]
+        assert len(ids) == len(set(ids)), (route, ids)            # the first use only
+        for href, i, inner in links:
+            assert i in by_id, (route, i)
+            assert href == ("" if route == "/model-risk" else "model-risk.html"), (route, href)
+            t = by_id[i]
+            if t["abbr"]:
+                assert inner.startswith('<abbr title="'), (route, i)
+                assert _html_unescape(_attrs(inner[:inner.index(">") + 1])["title"]) == t["abbr"]
+            else:
+                assert "<abbr" not in inner
+            assert re.fullmatch(t["pat"], re.sub(r"<[^>]+>", "", inner)), (route, i, inner)
+        # each term's first prose use is its link; a term in the prose is linked
+        runs = _ProseRuns(html).runs
+        for t in gl.TERMS:
+            pat = re.compile(t["pat"].replace("&amp;", "&"))
+            hits = [(k, link) for k, (text, link, own) in enumerate(runs)
+                    if pat.search(text) and t["id"] not in own]
+            if not hits:
+                assert t["id"] not in ids, (route, t["id"])
+                continue
+            assert hits[0][1] == t["id"], (route, t["id"], runs[hits[0][0]][0][:80])
+        seen |= set(ids)
+    # the acronym load the review counted is covered where a reader meets it
+    assert {"psr", "dsr", "spa", "stepm", "pbo", "holm", "qlike", "z-vrp"} <= set(
+        gl.first_uses(pages["/research"]))
+    assert {"svi-cal", "half-spread", "atmf", "rr25"} <= set(gl.first_uses(pages["/surface"]))
+    assert len(seen) >= 20
+
+
+def test_a_definition_never_links_to_itself(pages):
+    mr = pages["/model-risk"]
+    for m in re.finditer(r'<div class="def" id="def-([\w-]+)">(.*?)</div>', mr, flags=re.DOTALL):
+        assert f'href="#def-{m.group(1)}"' not in m.group(2), m.group(1)
+
+
+# ── B8: the volatility cone with the surface's ATM term structure ────────────
+
+def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages):
+    """#vol-cone: the percentiles of SPX RV at 10–252 sessions in both samples, each
+    ending on the surface's session (no look-ahead: the database runs later), the
+    RV of the windows ending that day and the SVI-cal ATMF at T·252/365 sessions,
+    named with the session; the table lists the percentiles by horizon; the
+    rank table reads the module. Before B8 the Surface had no realised vol."""
+    cone = _load("desk_cone_under_test", "dashboard/desk_cone.py")
+    surf = _surface_file("surface.json")
+    session = surf.parent.name
+    html = pages["/surface"]
+    assert 'id="vol-cone"' in html
+    assert 'id="vol-cone-rank"' in html
+    spec = _spec(html, "chart-vol-cone")
+    close = dash._read_spx()["close"]
+    assert close.index.max() >= pd.Timestamp(session)
+    by_name = {s["name"]: s for s in spec["series"]}
+    assert by_name[f"SVI-cal ATMF {session}"]["role"] == "model"
+    rv_now = by_name[f"SPX RV, windows ending {session}"]
+    sj = json.loads(surf.read_text())
+    res = pd.read_parquet(surf.parent / "residuals.parquet")
+    listed = _load("desk_surface_under_test", "dashboard/desk_surface.py").delta_grid(sj, res, None)
+    table = {(r[0], r[2]): r for r in spec["table"]["rows"]}
+    tab_values = re.findall(r'role="tab" aria-selected="(?:true|false)" aria-controls="vol-cone-panel" '
+                            r'data-value="([\w-]+)"', html)
+    assert tab_values == [k for k, _l, _s in cone.SAMPLES]
+    for key, label, _short in cone.SAMPLES:
+        start = cone.sample_start(key, close, session)
+        r = cone.sample_returns(close, start, session)
+        assert str(r.index[-1].date()) == session
+        rows = cone.cone(r)
+        for c in rows:
+            assert c["last"] == session
+            for pc in cone.PCTS:
+                s = by_name[f"{pc}th pct RV · {label.lower()}"]
+                assert s["group"] == key
+                got = {int(x): y for x, y in s["data"]}[c["h"]]
+                assert got == pytest.approx(c["pct"][pc], rel=1e-3)
+            row = table[(str(c["h"]), label)]
+            assert row[4:9] == [f"{c['pct'][pc]:.1f}" for pc in cone.PCTS]
+            assert row[3] == f"{c['n']:,}"
+        if key == "since-2010":
+            assert [y for _x, y in rv_now["data"]] == pytest.approx([c["current"] for c in rows], rel=1e-3)
+            pts, beyond = cone.implied_points(listed, r)
+            got = by_name[f"SVI-cal ATMF {session}"]["data"]
+            assert [x for x, _ in got] == pytest.approx([p["sessions"] for p in pts], rel=1e-3)
+            assert [y for _, y in got] == pytest.approx([p["atmf"] for p in pts], rel=1e-3)
+            assert all(p["sessions"] <= 252 for p in pts)
+            assert len(pts) + beyond == sum(1 for x in listed if x.get("atmf") is not None)
+            # the rank table, row by row
+            tbl = html[html.index('id="vol-cone-rank-tbl"'):]
+            tbl = tbl[:tbl.index("</table>")]
+            body = [[_html_unescape(re.sub(r"<[^>]+>", "", c_)).strip()
+                     for c_ in re.findall(r"<td[^>]*>(.*?)</td>", tr)]
+                    for tr in re.findall(r"<tr>(.*?)</tr>", tbl[tbl.index("<tbody>"):])]
+            assert [b[0] for b in body] == [p["expiry"] for p in pts]
+            assert [b[3] for b in body] == [f"{p['atmf']:.2f}" for p in pts]
+            assert [b[4] for b in body] == [f"{p['rank']:.0f}" for p in pts]
+    assert len(spec["table"]["rows"]) == len(cone.HORIZONS) * len(cone.SAMPLES)
+    def txt(frag: str) -> str:
+        return _html_unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", frag)))
+    note = txt(html[html.index('id="vol-cone-note"'):html.index('id="vol-cone-rank"')])
+    assert f"since 2010 2010-01-04 → {session}" in note
+    assert "T·252/365 sessions" in note
+    rank_note = txt(html[html.index('id="vol-cone-rank-note"'):][:3000])
+    assert "variance risk premium" in rank_note
+    assert "intraday" in rank_note
+
+
+def test_cone_percentile_labels_are_not_vol_levels(pages):
+    """F12: the cone's end labels read '95%', '50%', '5%' on a vol-in-% axis, so
+    '95%' looked like a vol level; they are 'p95' … 'p5'."""
+    spec = _raw_specs(pages["/surface"])["chart-vol-cone"]
+    ends = [s_["endLabel"] for s_ in spec["series"] if s_.get("endLabel")]
+    assert ends
+    assert all(re.fullmatch(r"p\d{1,2}", e) for e in ends), ends
+
+
+def test_every_1m_on_the_surface_is_the_30_day_constant_maturity(pages):
+    """'1M' is the SVI-cal surface interpolated to exactly 30 days (the KPI tile,
+    the constant-maturity grid); a listed expiry is named by its date and days,
+    never '1M'. Before the fix the cone headline read '1M: … 2026-11-16 (31 d) is
+    13.82%' beside the 13.92% tile, and the density legend, its table and the
+    tail table called the 31-day slice '1M'."""
+    html = pages["/surface"]
+    specs = _raw_specs(html)
+    strings = [_visible_text(html)]
+    for sp in specs.values():
+        strings += [str(s_.get("name", "")) for s_ in sp.get("series", [])]
+        strings += [str(c["label"]) for c in (sp.get("table") or {}).get("columns", [])]
+        strings.append(str(sp.get("title", "")))
+    text = " ¦ ".join(strings)
+    tile = re.search(r"1M ATMF (\d+\.\d{2}) ?%", text)
+    assert tile, "the 1M ATMF tile"
+    v30 = tile.group(1)
+    # '1M' never names a listed date (a constant-maturity row's 'lower → upper' is the bracket)
+    assert not re.findall(r"\b1M\b\s*[·:(]?\s*\d{2,4}-\d{2}-\d{2}(?!\s*→)", text)
+    # (a tile's sub-line ending in a date runs into the next tile's '1M RR25' label)
+    assert not re.findall(r"\d{4}-\d{2}-\d{2}\)?\s*1M\b(?! (?:ATMF|RR25|BF25|VS))", text)
+    assert all("1M" not in r[0] for r in _tbody_rows(html, "rnd-table-tbl"))
+    assert not re.findall(r"\b1M\s*:", text)
+    # every percentage printed against '1M' is the 30-day value
+    vals = re.findall(r"\b1M\b[^0-9¦]{0,40}?(\d+\.\d{2}) ?%", text)
+    assert vals
+    assert set(vals) == {v30}, vals
+    head = _visible_text("<body>" + html[html.index('id="vol-cone-1m"'):].split("</p>")[0])
+    listed = re.search(r"ATMF of (\d+\.\d{2})%", head)
+    assert listed
+    assert "nearest 30 days" in head
+    if listed.group(1) != v30:                 # the two are told apart where both print
+        assert f"1M tile’s {v30}%" in head
+
+
+def test_each_sleeve_has_one_name_on_every_page(dash, pages):
+    """One registry label per sleeve (dashboard.SLEEVE_LABELS), read by every
+    table, legend, category and sentence. Before, research.html called S3 'S3
+    index-leg short' in the B12 tables and charts and 'S3 · short SPX straddle'
+    in the per-sleeve table right above them, S1C 'S1C Contrarian' and 'S1C
+    contrarian', and S1 'S1 PDV (ref)', 'S1 (reference)' and 'S1 · PDV short-VRP'."""
+    labels = dash.SLEEVE_LABELS
+    assert len(set(labels.values())) == len(labels)
+    code = re.compile(r"^(S1C|S1|S2|S3|S4)\b")
+    # a sleeve code followed by a descriptor is a name of that sleeve
+    descr = r"\s*(?:·\s*)?(?:[Cc]ontrarian|PDV|VRP|VIX|index-leg|short SPX|[Dd]ispersion|\(ref(?:erence)?\))"
+    marks = ("S4 short entry", "S4 long entry")         # the VRP chart's entry markers, not a sleeve name
+    for route, html in pages.items():
+        strings = [_visible_text(html)]
+        for sp in _raw_specs(html).values():
+            names = [str(x.get("name", "")) for x in sp.get("series", [])]
+            names += [str(c) for ax in ("x", "y") for c in ((sp.get(ax) or {}).get("categories") or [])]
+            names += [str(r[0]) for r in (sp.get("table") or {}).get("rows", []) if r]
+            for n in names if route == "/research" else ():   # elsewhere a row may be a finding's title
+                m = code.match(n)
+                if m and not n.startswith(marks):
+                    key = m.group(1).lower()
+                    assert n.startswith(labels[key]), (route, n)
+            strings += names
+        heads = [_html_unescape(re.sub(r"<[^>]+>", "", c)).strip()
+                 for c in re.findall(r"<tr[^>]*>\s*<t[dh][^>]*>(.*?)</t[dh]>", html, re.DOTALL)]
+        for n in heads if route == "/research" else ():
+            m = code.match(n)
+            if m:
+                assert n.startswith(labels[m.group(1).lower()]), (route, n)
+        text = " ¦ ".join(strings + heads)
+        for key, label in labels.items():
+            if key == "portfolio":
+                continue
+            c = key.upper()
+            for m in re.finditer(rf"\b{c}\b{descr}", text):
+                assert text[m.start():].startswith(label), (route, text[m.start():m.start() + 40])
+    research = _visible_text(pages["/research"])
+    for key in ("s1c", "s3", "s4", "s1", "s2"):
+        assert labels[key] in research, key
+
+
+# ── B12: round trips and worst drawdowns ──────────────────────────────────────
+
+def _tbody_rows(html: str, table_id: str) -> list[list[str]]:
+    t = html[html.index(f'id="{table_id}"'):]
+    t = t[t.index("<tbody>"):t.index("</table>")]
+    return [[_html_unescape(re.sub(r"<[^>]+>", "", c)).strip()
+             for c in re.findall(r"<td[^>]*>(.*?)</td>", tr)]
+            for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", t, flags=re.DOTALL)]
+
+
+def test_trade_pnl_histogram_puts_gains_on_top(pages):
+    """F18: the horizontal P&L histogram listed '< −60' first, so the largest
+    losses sat at the top, the reverse of every other P&L axis on the page; the
+    first category (drawn at the top) is now the largest gains."""
+    spec = _raw_specs(pages["/research"])["chart-trade-pnl-hist"]
+    xs = spec["xs"]
+    assert xs[0].startswith("≥ +"), xs
+    assert xs[-1].startswith("< −"), xs
+    assert [r[0] for r in spec["table"]["rows"]] == xs
+
+
+def test_trade_stats_mean_names_both_dollar_bases(dash, pages):
+    """F8: the Trades tile's 'average −$1,083 of portfolio P&L per trade' and the
+    trade-statistics note's 'a mean of −3.2k per trade' are the same trades in
+    two units (the portfolio is the equal-weight mean of three sleeves); the
+    note now says both, and the two agree."""
+    html = pages["/research"]
+    note = _visible_text("<body>" + html[html.index('id="trade-stats-note"'):].split("</p>")[0])
+    m = re.search(r"a mean of ([+−-][\d,.]+)k per trade in sleeve dollars \(\s*(−?\$[\d,]+) of portfolio P&L",
+                  note)
+    assert m, note
+    tile = re.search(r"average (−?\$[\d,]+) of portfolio P&L per trade", _visible_text(html))
+    assert tile
+    assert m.group(2) == tile.group(1)
+    mean_k = float(m.group(1).replace("−", "-").replace(",", ""))
+    tile_usd = float(tile.group(1).replace("−", "-").replace("$", "").replace(",", ""))
+    assert mean_k * 1000 / 3 == pytest.approx(tile_usd, abs=0.05 * 1000 / 3 + 1)
+
+
+def test_round_trips_reconcile_with_the_sleeve_table_and_the_engine(dash, pages):
+    """#round-trips, #trade-stats and #drawdowns: every sleeve's count equals the
+    per-sleeve table's (the open S4 straddle counted apart), the round trips add
+    up to the engine's sleeve P&L, the strip plot holds every closed trade, the
+    'combined' records are not read, each series' deepest drawdown is the
+    engine's max drawdown (the portfolio's is the published KPI) and every
+    unrecovered drawdown prints 'not recovered'. Before B12 the page showed only
+    aggregates."""
+    tr_mod = _load("desk_trades_under_test", "dashboard/desk_trades.py")
+    state = pickle.loads((SHIPPED / "backtest" / "full_results.pkl").read_bytes())
+    em, trades = state["metrics"], state["all_trades"]
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    html = pages["/research"]
+    for pid in ("round-trips", "trade-hists", "trade-stats", "drawdowns"):
+        assert f'id="{pid}"' in html, pid
+    sleeve_rows = {r[0]: r for r in _tbody_rows(html, "sleeve-table")}
+    stats = _tbody_rows(html, "trade-stats-tbl")
+    labels = {k: dash.SLEEVE_LABELS[k] for k in ("s1c", "s3", "s4", "s1", "s2")}
+    table_label = labels
+    assert [r[0] for r in stats] == list(labels.values())
+    spec = _spec(html, "chart-round-trips")
+    by_name = {s["name"]: s for s in spec["series"]}
+    n_closed_port = 0
+    for (sig, lab), row in zip(labels.items(), stats, strict=True):
+        rts = tr_mod.round_trips(trades, (sig,))
+        n_open = sum(r["open"] for r in rts)
+        assert int(row[1]) + int(row[2]) == len(rts) == int(em[f"{sig}_n_trades"])
+        assert int(row[2]) == n_open
+        # the per-sleeve table's 'Trades' cell: '46 (1 open)'
+        want = f"{len(rts)}" + (f" ({n_open} open)" if n_open else "")
+        assert sleeve_rows[table_label[sig]][5] == want, (sig, sleeve_rows[table_label[sig]])
+        assert sum(r["pnl"] for r in rts) == pytest.approx(em[f"{sig}_total_pnl"], abs=1.0)
+        assert row[3] == dash.signed(em[f"{sig}_total_pnl"] / 1000, ",.1f")
+        if sig in dash.PORTFOLIO_SLEEVES:
+            pts = by_name[lab]["data"]
+            assert len(pts) == len(rts) - n_open
+            assert sum(y for _x, y in pts) == pytest.approx(
+                sum(r["pnl"] for r in rts if not r["open"]) / 1000, abs=0.05 * len(pts))
+            n_closed_port += len(rts) - n_open
+        else:
+            assert lab not in by_name                   # reference sleeves: the statistics only
+    assert not any("combined" in s["name"].lower() for s in spec["series"])
+    assert f"{n_closed_port} closed" in html
+    hist = _spec(html, "chart-trade-pnl-hist")
+    assert sum(int(r[1]) for r in hist["table"]["rows"]) == n_closed_port
+    days = _spec(html, "chart-trade-days-hist")
+    assert sum(int(r[1]) for r in days["table"]["rows"]) == n_closed_port
+    # the strip's data alternative: closed trades by sleeve and entry year, adding up to the sleeve
+    by_sleeve = collections.Counter()
+    for r in spec["table"]["rows"]:
+        by_sleeve[r[0]] += int(r[2])
+    for sig in dash.PORTFOLIO_SLEEVES:
+        rts = tr_mod.round_trips(trades, (sig,))
+        assert by_sleeve[labels[sig]] == sum(1 for r in rts if not r["open"]), sig
+    # drawdowns: the deepest of each series is the engine's; 'not recovered' where it is so
+    dd = _tbody_rows(html, "drawdowns-tbl")
+    assert dd[0][0] == "Portfolio"
+    assert dd[0][5] == f"{em['max_drawdown'] * 100:.1f}%".replace("-", "−")
+    # the published max drawdown (the KPI tile) is the table's top row
+    mdd = f"{em['max_drawdown'] * 100:.1f}".replace("-", "−")
+    assert re.search(r"Max drawdown\s*" + re.escape(mdd) + r"\s*%", _visible_text(html))
+    for col, lab, key in (("nav", "Portfolio", "max_drawdown"),
+                          ("nav_s1c", labels["s1c"], "s1c_max_drawdown"),
+                          ("nav_s3", labels["s3"], "s3_max_drawdown"),
+                          ("nav_s4", labels["s4"], "s4_max_drawdown")):
+        rows = [r for r in dd if r[0] == lab]
+        periods = tr_mod.worst_drawdowns(eq[col])
+        assert periods[0]["depth"] == pytest.approx(em[key], abs=1e-12)
+        assert len(rows) == len(periods) == min(5, len(tr_mod.drawdown_periods(eq[col])))
+        for r, p in zip(rows, periods, strict=True):
+            assert r[2:5] == [p["peak"], p["valley"], p["recovery"] or "not recovered"]
+            assert r[5] == f"{p['depth'] * 100:.1f}%".replace("-", "−")
+
+
+# ── B13: the vol-context strip in the ticker ──────────────────────────────────
+
+def _ticker(c: dict, label: str) -> dict | None:
+    return next((t for t in c["ticker"] if t["label"] == label), None)
+
+
+def test_ticker_vol_context_is_computed_from_the_market_db(dash, synth):
+    """B13: after VIX/VIX3M the ticker reads RV21 (RMS of the last 21 daily SPX
+    log returns, annualised ×252, %), VIX − RV21 (vol pts) and VIX's percentile
+    among the 252 sessions before its newest close (percent strictly lower),
+    each recomputed here from the store's own rows; every ticker item's title
+    names its as-of date and the percentile's states its 252-session window.
+    A store without surface artifacts has no surface item (nothing in its place)."""
+    c = dash.load_chrome()
+    labels = [t["label"] for t in c["ticker"]]
+    i = labels.index("VIX/VIX3M")
+    assert labels[i + 1:i + 4] == ["RV21", "VIX−RV21", "VIX 1Y PCTL"]
+    assert labels[i + 4] == "RULE"
+    last = str(synth["dates"][-1].date())
+    r, vix = synth["r"].iloc[1:], synth["vix"]
+    rv = 100.0 * float(np.sqrt(np.mean(r.iloc[-21:].to_numpy() ** 2) * 252))
+    assert _ticker(c, "RV21")["value"] == f"{rv:.2f}"
+    assert _ticker(c, "VIX−RV21")["value"] == dash.signed(float(vix.iloc[-1]) - rv, ".2f")
+    n_below = int((vix.iloc[-253:-1] < vix.iloc[-1]).sum())
+    pc = _ticker(c, "VIX 1Y PCTL")
+    assert pc["value"] == dash.percentile_rank(n_below / 252 * 100)["big"]
+    assert f"{n_below} of the 252 sessions before it" in pc["title"]
+    assert "252 sessions" in pc["sr"]
+    for t in c["ticker"]:
+        assert re.search(r"\d{4}-\d{2}-\d{2}", t.get("title") or ""), t["label"]
+    for lab in ("RV21", "VIX−RV21", "VIX 1Y PCTL"):
+        assert last in _ticker(c, lab)["title"], lab
+        assert _ticker(c, lab)["note"] is None           # the SPX close's date: no note
+    assert _ticker(c, "1M ATMF") is None
+
+
+def test_ticker_surface_item_carries_the_surface_date_and_its_age(dash, pages):
+    """B13: the SVI-cal 1M ATMF and RR25 in the ticker are the Overview's surface
+    line (the same 30-day constant-maturity row), on the surface's own session,
+    always shown as a note styled by its age against the newest session; the
+    title names the session, its age and the expiries it interpolates between."""
+    c = dash.load_chrome()
+    item = _ticker(c, "1M ATMF")
+    assert item is not None
+    assert c["ticker"][-1] is item
+    surf = dash.artifacts.load_surface(dash.DATA)
+    session = surf["session"]
+    age = dash.session_age(session, c["latest"])
+    assert item["note"] == session
+    assert item["note_level"] == dash.stale_level(age)
+    assert session in item["title"]
+    assert re.search(r"between the \d{4}-\d{2}-\d{2} and \d{4}-\d{2}-\d{2} expiries|"
+                     r"the \d{4}-\d{2}-\d{2} expiry", item["title"])
+    ov = _visible_text(pages["/"])
+    line = re.search(r"1M ATMF ([\d.]+)% · RR25 ([+−]?[\d.]+) · BF25", ov)
+    assert line, "no surface line on the Overview"
+    assert item["value"] == line.group(1) + "%"
+    assert item["more"] == [{"label": "RR25", "value": line.group(2)}]
+    for route, html in pages.items():
+        tk = html[html.index('<div class="ticker"'):html.index("<main")]
+        assert (f'<span class="tk-label">1M ATMF</span><span class="tk-val">{item["value"]}</span>'
+                f'<span class="tk-label">RR25</span><span class="tk-val">{line.group(2)}</span>'
+                f'<span class="tk-note lvl-{item["note_level"]}">{session}</span>') in tk, route
+        titled = re.findall(r'<span class="tk" title="[^"]*\d{4}-\d{2}-\d{2}[^"]*">', tk)
+        assert len(titled) == len(c["ticker"]), route
+
+
+def test_browser_ticker_is_one_scrolling_row_to_860_px_and_at_most_two_lines_above(site_browser):
+    """B13 acceptance 3: with ten items the ticker would wrap to four lines at 601
+    px and three at 768; it is one row up to 860 px that scrolls inside itself
+    (from the keyboard too: it is a focusable region) and at most two lines from
+    861 to 1920 px, and the page never scrolls sideways (the screen-reader text
+    of the percentile item stays inside the row)."""
+    sb = site_browser
+    geo = """() => { const t = document.querySelector('.ticker');
+      const tops = new Set([...t.querySelectorAll('.tk')]
+        .map(e => Math.round(e.getBoundingClientRect().top)));
+      return {lines: tops.size, sw: t.scrollWidth, cw: t.clientWidth, left: t.scrollLeft,
+              dsw: document.documentElement.scrollWidth}; }"""
+    ctx, page = _page(sb, 390, 844)
+    try:
+        for w in (320, 390, 601, 768, 860, 861, 1024, 1280, 1440, 1920):
+            page.set_viewport_size({"width": w, "height": 844})
+            page.goto(sb["base"] + "index.html", wait_until="load")
+            g = page.evaluate(geo)
+            assert g["dsw"] <= w, (w, g)
+            if w <= 860:
+                assert g["lines"] == 1, (w, g)
+                assert g["sw"] > g["cw"], (w, g)
+            else:
+                assert g["lines"] <= 2, (w, g)
+        page.set_viewport_size({"width": 768, "height": 844})
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        page.focus(".ticker")
+        for _ in range(4):
+            page.keyboard.press("ArrowRight")
+        page.wait_for_timeout(400)
+        g = page.evaluate(geo)
+        assert g["left"] > 0, g
+        # the surface date takes the status bar's age colour (lvl-ok / warn / error), not the grey note
+        colours = page.evaluate("""() => {
+          const n = document.querySelector('.ticker .tk-note[class*="lvl-"]');
+          if (!n) return null;
+          const p = document.createElement('span');
+          p.className = [...n.classList].find(c => c.startsWith('lvl-'));
+          document.body.appendChild(p);
+          const out = [getComputedStyle(n).color, getComputedStyle(p).color];
+          p.remove(); return out; }""")
+        assert colours, "no dated ticker note"
+        assert colours[0] == colours[1], colours
+    finally:
+        ctx.close()
