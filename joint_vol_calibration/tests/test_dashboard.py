@@ -5554,11 +5554,36 @@ def test_vix_terms_table_prints_each_index_terms_and_its_gap_split(dash, pages):
         if ix.get("replicated") is None and not m.get("extrapolated") and m.get("reason"):
             assert f"{t} is not replicated: {m['reason']}." in note, t
     if n_split:
-        assert "Truncation: what strikes beyond the stored strip would add" in note
+        assert "Missing-strike shortfall: the replication on the stored strip less the same" in note
         bias = [ix["gap_attribution"]["far_wing_market_minus_model_pts"] for ix in vix["indices"].values()
                 if ix.get("replicated") is not None and (ix.get("gap_attribution") or {}).get("available")]
         assert ("likely understates" in note) == any(b > 0 for b in bias)
         assert ("likely overstates" in note) == any(b < 0 for b in bias)
+
+
+def test_vix_replication_prose_gives_the_gap_split_with_the_tables_signs(dash, pages):
+    """R3-T7: under the terms table (gap = replicated − Cboe close) the method
+    prose gave the same split as official − replicated, each part with the
+    opposite sign. The page's sentence now carries the table's own VIX row, and
+    the column names its convention."""
+    html = pages["/surface"]
+    session = dash.load_surface()["session"]
+    vix = json.loads((SHIPPED / "surface" / session / "vix_replication.json").read_text())
+    head = re.search(r'<table[^>]*id="vix-terms-table".*?</thead>', html, re.DOTALL).group(0)
+    assert "Missing-strike shortfall (replicated − full strip)" in _visible_text("<body>" + head)
+    prose = _visible_text("<body>" + re.search(r'<ul class="prose"[^>]*>.*?</ul>', html[html.index(
+        'id="vix-terms-table"'):], re.DOTALL).group(0))
+    assert "official − replicated" not in prose
+    assert "official - replicated" not in prose
+    row = {r[0]: r for r in _table_rows(html, "vix-terms-table")}.get("VIX")
+    ga = (vix["indices"].get("VIX") or {}).get("gap_attribution") or {}
+    if row is None or row[3] == "—":
+        assert "missing-strike shortfall" not in prose
+        return
+    assert ga.get("available")
+    gap = {r[0]: r[3] for r in _table_rows(html, "vix-rep-table")}["VIX"]
+    assert f"{gap} = missing-strike shortfall {row[3]} + unexplained {row[4]}" in prose
+    assert f"Unexplained by the chain: {row[4]}," in prose
 
 
 def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(dash):

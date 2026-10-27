@@ -6138,13 +6138,14 @@ def surface_extras(d: dict, surf: dict) -> None:
         except (OSError, ValueError, KeyError, ImportError, sqlite3.Error) as exc:
             # supplementary: the replication's own figure stands, the comparison is left out
             _logger.warning("β estimator ratios unavailable for the surface page: %s", exc)
-        d["vix_notes"] = list(vx.get("gap_notes") or [])
         d["vix_deviations"] = list(vx.get("deviations") or [])
         d["vix_markers"] = vix_official_markers(vx)
         d["vix_calc_time"] = vx.get("calculation_time_ny")
         # each index's two terms and its gap split as gap_attribution splits it (#vix-terms-table)
         d["vix_terms"] = [{**r, "surface_label": model_short(r["surface"]) if r["surface"] else None}
                           for r in desk_surface.vix_terms(vx)]
+        # the gap-attribution sentence restated from that table, on its sign
+        d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"])
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
                        "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
