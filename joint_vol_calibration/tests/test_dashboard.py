@@ -4309,6 +4309,22 @@ def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
     assert split.index('id="sigma-profile"') < split.index('id="sigma-frontier"')
 
 
+def test_sigma_frontier_labels_only_the_headline_sessions_caps(dash, pages):
+    """F15: every session's eight σ caps were printed beside its points, so the
+    sessions' labels piled on one another where the lines cross. Only the
+    headline session's caps are drawn on the chart; the other sessions keep
+    theirs for the tooltip (tipLabels), which desk.js does not draw."""
+    spec = _spec(pages["/calibration"], "sigma-frontier")
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    assert any(s["name"] == headline for s in spec["series"])
+    for s in spec["series"]:
+        assert s["pointLabels"], s["name"]
+        assert bool(s.get("tipLabels")) is (s["name"] != headline), s["name"]
+    js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
+    assert "if (s.pointLabels && !s.tipLabels) {" in js
+
+
 def test_vvix_kpi_is_the_published_fits_model_vvix(dash, pages):
     """P1.2: the Calibration KPI strip carried the optimiser's run time where the
     joint fit's VVIX belongs; the tile now reads model / market VVIX at the
@@ -8309,6 +8325,22 @@ def test_cone_percentile_labels_are_not_vol_levels(pages):
     ends = [s_["endLabel"] for s_ in spec["series"] if s_.get("endLabel")]
     assert ends
     assert all(re.fullmatch(r"p\d{1,2}", e) for e in ends), ends
+
+
+def test_cone_end_labels_dodge_rather_than_touch(pages):
+    """F12: the cone's p5 … p95 end labels sit at the 252-session end of five
+    lines a few vol points apart, so on a narrow chart (or the last-3-years
+    tab, where the cone is tighter) two labels under ~12 px apart overlapped.
+    Every end-labelled cone series asks desk.js to push its label apart from
+    the others' (ECharts moveOverlap 'shiftY': moved, never hidden), on both
+    tabs, and desk.js turns that flag into the label layout."""
+    spec = _raw_specs(pages["/surface"])["chart-vol-cone"]
+    ends = [s_ for s_ in spec["series"] if s_.get("endLabel")]
+    cone = _load("desk_cone_under_test", "dashboard/desk_cone.py")
+    assert {s_["group"] for s_ in ends} == {k for k, _, _ in cone.SAMPLES}
+    assert all(s_.get("endLabelDodge") is True for s_ in ends)
+    js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
+    assert re.search(r"s\.endLabel && s\.endLabelDodge\) line\.labelLayout = \{ moveOverlap: 'shiftY' \}", js)
 
 
 def test_every_1m_on_the_surface_is_the_30_day_constant_maturity(pages):

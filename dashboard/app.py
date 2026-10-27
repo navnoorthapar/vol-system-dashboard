@@ -2807,9 +2807,11 @@ def box_refit_note(tr: Sequence[dict], session: str | None) -> str:
 def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> dict | None:
     """The σ frontier: SPX out-of-sample RMSE against model VVIX − market, one line per session.
 
-    Each point is one refit of the σ profile, labelled with its σ cap; the
-    production cap's point is drawn larger, caps above it hollow. The headline
-    session is drawn in the headline colour, the others muted.
+    Each point is one refit of the σ profile; the headline session's points
+    are labelled with their σ cap, the other sessions' caps are in the tooltip
+    only, so no two sessions' labels collide. The production cap's point is
+    drawn larger, caps above it hollow. The headline session is drawn in the
+    headline colour, the others muted.
     """
     sess = []
     for p in tr_profiles:
@@ -2828,7 +2830,7 @@ def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> di
             "z": 4 if head else 2,
             "legend": True, "legendKey": p["session"] if head else "Other sessions",
             "data": [[r["spx_oos_iv_rmse"], r["vvix_model"] - r["vvix_market"]] for r in rows],
-            "pointLabels": [_fmt(r["sigma_cap"], "g") for r in rows],
+            "pointLabels": [_fmt(r["sigma_cap"], "g") for r in rows], "tipLabels": not head,
             "hollowPoints": [cap is not None and r["sigma_cap"] > cap + 1e-9 for r in rows],
             "bigPoints": [cap is not None and abs(r["sigma_cap"] - cap) < 1e-9 for r in rows]})
         tbl += [[p["session"], _fmt(r["sigma_cap"], "g"), _fmt(r["spx_oos_iv_rmse"], ".2f"),
@@ -2844,8 +2846,9 @@ def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> di
         marks={"y": [{"value": 0, "label": "model = market", "color": "muted", "dash": True}]},
         grid={"right": 30, "top": 18},
         describe=(f"{len(sess)} diagnosed session{'' if len(sess) == 1 else 's'}, one line each; each point "
-                  "is a refit under one σ cap (labelled), the production cap's point larger, caps above it "
-                  "hollow. Down and to the left is better on both legs."),
+                  "is a refit under one σ cap (labelled on the headline session, in the tooltip on the "
+                  "others), the production cap's point larger, caps above it hollow. Down and to the left is "
+                  "better on both legs."),
         table=charts.table("σ profile by session: SPX out-of-sample RMSE and model VVIX against the ^VVIX "
                            "close",
                            ["Session", "σ cap#", "SPX OOS RMSE (vol pts)#", "VVIX model#",
@@ -5474,7 +5477,7 @@ def vol_cone_view(close: pd.Series, listed: Sequence[dict], session: str,
         for pc, dash, width in CONE_LINES:
             s_: dict[str, Any] = {"name": f"{pc}th pct RV · {sm['label'].lower()}", "type": "line",
                                   "role": "other", "color": "muted", "width": width, "group": sm["key"],
-                                  "symbol": "circle", "size": 3, "endLabel": f"p{pc}",
+                                  "symbol": "circle", "size": 3, "endLabel": f"p{pc}", "endLabelDodge": True,
                                   "data": [[h, round_sig(by_h[h]["pct"][pc], 4)] for h in hz
                                            if by_h[h]["pct"][pc] is not None]}
             if dash:
