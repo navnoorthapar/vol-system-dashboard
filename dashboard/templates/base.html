@@ -85,7 +85,7 @@
 
 <div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">
   {% for t in c.ticker %}
-  <span class="tk"><span class="tk-label">{{ t.label }}</span><span class="tk-val">{{ t.value }}</span>{% if t.chg %}<span class="tk-chg">{{ t.chg }}</span>{% endif %}{% if t.note %}<span class="tk-note">{{ t.note }}</span>{% endif %}</span>
+  <span class="tk"{% if t.title %} title="{{ t.title }}"{% endif %}><span class="tk-label">{{ t.label }}</span><span class="tk-val">{{ t.value }}</span>{% for m in t.more or [] %}<span class="tk-label">{{ m.label }}</span><span class="tk-val">{{ m.value }}</span>{% endfor %}{% if t.chg %}<span class="tk-chg">{{ t.chg }}</span>{% endif %}{% if t.sr %}<span class="sr-only">{{ t.sr }}</span>{% endif %}{% if t.note %}<span class="tk-note{% if t.note_level %} lvl-{{ t.note_level }}{% endif %}">{{ t.note }}</span>{% endif %}</span>
   {% else %}
   <span class="tk"><span class="tk-label">MARKET</span><span class="tk-val">—</span><span class="tk-note">market data unavailable</span></span>
   {% endfor %}

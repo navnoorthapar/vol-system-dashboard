@@ -11,6 +11,8 @@ The owner's brief: make the UI the best in the world at what it does (a volatili
 - Q14 Site-wide units/sign conventions block + glossary (<dfn>/<abbr>) linked from first use on every page.
 - Q20 Phone first screen: page subject and first number above the fold (compact status strip / ticker / banner).
 - B13 Compact vol-context strip only if it fits the chrome budget at 390 px (director rejected for the global ticker; consider per-page).
+      Done on c23/ui-r2 once Q20 made the phone ticker one scrolling row: RV21, VIX−RV21, VIX 1Y PCTL (252 sessions)
+      and the SVI-cal 1M ATMF · RR25 on the surface's own date; one row to 860 px, at most two lines above.
 - Skip: B14 (low value), Q4-rerun, Q8-NAV, Q15, Q19-bands, D10-axes (rejected on merit).
 
 ## B. Loop until dry (max 3 rounds)

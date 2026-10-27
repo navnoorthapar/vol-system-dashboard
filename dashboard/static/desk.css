@@ -186,6 +186,7 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
   background: var(--surface); border-bottom: 1px solid var(--line);
   font-family: var(--mono); font-size: 12px;
   display: flex; flex-wrap: wrap; align-items: center; gap: 2px 0; padding: 3px 8px; min-height: 28px;
+  position: relative;   /* holds a .sr-only item inside the row when it scrolls */
 }
 .tk { display: inline-flex; align-items: baseline; gap: 6px; padding: 0 10px; border-right: 1px solid var(--line); white-space: nowrap; }
 .tk:last-child { border-right: none; }
@@ -193,6 +194,10 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .tk-val { color: var(--text); font-weight: 500; }
 .tk-chg { font-size: 11.5px; }
 .tk-note { color: var(--text3); font-size: 11px; }
+/* a note on its own source's date (the surface) takes that age's status-bar colour */
+.tk-note.lvl-ok { color: var(--ok); }
+.tk-note.lvl-warn { color: var(--watch); }
+.tk-note.lvl-error, .tk-note.lvl-missing { color: var(--breach); }
 
 /* ── signed numbers / P&L convention ─────────────────────────────────── */
 .pos { color: var(--pos); }
@@ -664,17 +669,23 @@ dialog.keys .dl { font-size: 12px; }
   .site-footer .foot-inner { grid-template-columns: minmax(0, 1fr); }
   .statusbar .sb-opt { display: none; }
 }
+/* the ticker (ten items with the B13 vol context) is one scrollable row up to
+   860 px, where it would wrap to three or four lines, and at most two wrapped
+   lines above (one at 1920) */
+@media (max-width: 860px) {
+  .ticker { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+  .ticker::-webkit-scrollbar { display: none; }
+  .ticker:focus-visible { outline-offset: -2px; }
+  .tk { flex: 0 0 auto; }
+}
 /* phones (Q20): the chrome is three short rows (status, nav, ticker), so the
    page's title and first number are on the first screen at 390 x 844 */
 @media (max-width: 600px) {
   .statusbar { position: relative; flex-wrap: nowrap; gap: 0 10px; padding-top: 2px; padding-bottom: 2px; min-height: 22px; }
   .statusbar > .sb-item:not(.sb-state), .statusbar > .sb-right { display: none; }
   .statusbar .sb-phone { display: block; min-width: 0; }
-  .ticker { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding: 2px 4px; min-height: 24px;
-    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
-  .ticker::-webkit-scrollbar { display: none; }
-  .ticker:focus-visible { outline-offset: -2px; }
-  .tk { flex: 0 0 auto; }
+  .ticker { padding: 2px 4px; min-height: 24px; }
   .banner { padding: 6px 10px; }
   .banner-stack { margin-bottom: 8px; }
 }

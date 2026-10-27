@@ -7794,3 +7794,117 @@ def test_round_trips_reconcile_with_the_sleeve_table_and_the_engine(dash, pages)
         for r, p in zip(rows, periods, strict=True):
             assert r[2:5] == [p["peak"], p["valley"], p["recovery"] or "not recovered"]
             assert r[5] == f"{p['depth'] * 100:.1f}%".replace("-", "−")
+
+
+# ── B13: the vol-context strip in the ticker ──────────────────────────────────
+
+def _ticker(c: dict, label: str) -> dict | None:
+    return next((t for t in c["ticker"] if t["label"] == label), None)
+
+
+def test_ticker_vol_context_is_computed_from_the_market_db(dash, synth):
+    """B13: after VIX/VIX3M the ticker reads RV21 (RMS of the last 21 daily SPX
+    log returns, annualised ×252, %), VIX − RV21 (vol pts) and VIX's percentile
+    among the 252 sessions before its newest close (percent strictly lower),
+    each recomputed here from the store's own rows; every ticker item's title
+    names its as-of date and the percentile's states its 252-session window.
+    A store without surface artifacts has no surface item (nothing in its place)."""
+    c = dash.load_chrome()
+    labels = [t["label"] for t in c["ticker"]]
+    i = labels.index("VIX/VIX3M")
+    assert labels[i + 1:i + 4] == ["RV21", "VIX−RV21", "VIX 1Y PCTL"]
+    assert labels[i + 4] == "RULE"
+    last = str(synth["dates"][-1].date())
+    r, vix = synth["r"].iloc[1:], synth["vix"]
+    rv = 100.0 * float(np.sqrt(np.mean(r.iloc[-21:].to_numpy() ** 2) * 252))
+    assert _ticker(c, "RV21")["value"] == f"{rv:.2f}"
+    assert _ticker(c, "VIX−RV21")["value"] == dash.signed(float(vix.iloc[-1]) - rv, ".2f")
+    n_below = int((vix.iloc[-253:-1] < vix.iloc[-1]).sum())
+    pc = _ticker(c, "VIX 1Y PCTL")
+    assert pc["value"] == dash.percentile_rank(n_below / 252 * 100)["big"]
+    assert f"{n_below} of the 252 sessions before it" in pc["title"]
+    assert "252 sessions" in pc["sr"]
+    for t in c["ticker"]:
+        assert re.search(r"\d{4}-\d{2}-\d{2}", t.get("title") or ""), t["label"]
+    for lab in ("RV21", "VIX−RV21", "VIX 1Y PCTL"):
+        assert last in _ticker(c, lab)["title"], lab
+        assert _ticker(c, lab)["note"] is None           # the SPX close's date: no note
+    assert _ticker(c, "1M ATMF") is None
+
+
+def test_ticker_surface_item_carries_the_surface_date_and_its_age(dash, pages):
+    """B13: the SVI-cal 1M ATMF and RR25 in the ticker are the Overview's surface
+    line (the same 30-day constant-maturity row), on the surface's own session,
+    always shown as a note styled by its age against the newest session; the
+    title names the session, its age and the expiries it interpolates between."""
+    c = dash.load_chrome()
+    item = _ticker(c, "1M ATMF")
+    assert item is not None
+    assert c["ticker"][-1] is item
+    surf = dash.artifacts.load_surface(dash.DATA)
+    session = surf["session"]
+    age = dash.session_age(session, c["latest"])
+    assert item["note"] == session
+    assert item["note_level"] == dash.stale_level(age)
+    assert session in item["title"]
+    assert re.search(r"between the \d{4}-\d{2}-\d{2} and \d{4}-\d{2}-\d{2} expiries|"
+                     r"the \d{4}-\d{2}-\d{2} expiry", item["title"])
+    ov = _visible_text(pages["/"])
+    line = re.search(r"1M ATMF ([\d.]+)% · RR25 ([+−]?[\d.]+) · BF25", ov)
+    assert line, "no surface line on the Overview"
+    assert item["value"] == line.group(1) + "%"
+    assert item["more"] == [{"label": "RR25", "value": line.group(2)}]
+    for route, html in pages.items():
+        tk = html[html.index('<div class="ticker"'):html.index("<main")]
+        assert (f'<span class="tk-label">1M ATMF</span><span class="tk-val">{item["value"]}</span>'
+                f'<span class="tk-label">RR25</span><span class="tk-val">{line.group(2)}</span>'
+                f'<span class="tk-note lvl-{item["note_level"]}">{session}</span>') in tk, route
+        titled = re.findall(r'<span class="tk" title="[^"]*\d{4}-\d{2}-\d{2}[^"]*">', tk)
+        assert len(titled) == len(c["ticker"]), route
+
+
+def test_browser_ticker_is_one_scrolling_row_to_860_px_and_at_most_two_lines_above(site_browser):
+    """B13 acceptance 3: with ten items the ticker would wrap to four lines at 601
+    px and three at 768; it is one row up to 860 px that scrolls inside itself
+    (from the keyboard too: it is a focusable region) and at most two lines from
+    861 to 1920 px, and the page never scrolls sideways (the screen-reader text
+    of the percentile item stays inside the row)."""
+    sb = site_browser
+    geo = """() => { const t = document.querySelector('.ticker');
+      const tops = new Set([...t.querySelectorAll('.tk')]
+        .map(e => Math.round(e.getBoundingClientRect().top)));
+      return {lines: tops.size, sw: t.scrollWidth, cw: t.clientWidth, left: t.scrollLeft,
+              dsw: document.documentElement.scrollWidth}; }"""
+    ctx, page = _page(sb, 390, 844)
+    try:
+        for w in (320, 390, 601, 768, 860, 861, 1024, 1280, 1440, 1920):
+            page.set_viewport_size({"width": w, "height": 844})
+            page.goto(sb["base"] + "index.html", wait_until="load")
+            g = page.evaluate(geo)
+            assert g["dsw"] <= w, (w, g)
+            if w <= 860:
+                assert g["lines"] == 1, (w, g)
+                assert g["sw"] > g["cw"], (w, g)
+            else:
+                assert g["lines"] <= 2, (w, g)
+        page.set_viewport_size({"width": 768, "height": 844})
+        page.goto(sb["base"] + "index.html", wait_until="load")
+        page.focus(".ticker")
+        for _ in range(4):
+            page.keyboard.press("ArrowRight")
+        page.wait_for_timeout(400)
+        g = page.evaluate(geo)
+        assert g["left"] > 0, g
+        # the surface date takes the status bar's age colour (lvl-ok / warn / error), not the grey note
+        colours = page.evaluate("""() => {
+          const n = document.querySelector('.ticker .tk-note[class*="lvl-"]');
+          if (!n) return null;
+          const p = document.createElement('span');
+          p.className = [...n.classList].find(c => c.startsWith('lvl-'));
+          document.body.appendChild(p);
+          const out = [getComputedStyle(n).color, getComputedStyle(p).color];
+          p.remove(); return out; }""")
+        assert colours, "no dated ticker note"
+        assert colours[0] == colours[1], colours
+    finally:
+        ctx.close()

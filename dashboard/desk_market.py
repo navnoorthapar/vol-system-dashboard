@@ -28,6 +28,10 @@ Implied against subsequently realised vol (Research #vrp)
   at-the-money straddle earns; 21-session windows overlap, so shares and means
   over consecutive sessions are not independent observations. A description,
   not a P&L.
+
+The ticker's VIX percentile (B13)
+  pctile_prior: the newest close against the 252 sessions before it, the
+  percent of them strictly lower (ratio_view's convention, on a fixed window).
 """
 from __future__ import annotations
 
@@ -42,6 +46,7 @@ DAYS_PER_YEAR = 365.0          # the calibrator's T = days_to_expiry / 365
 RV_WINDOW = 21                 # sessions: the forecast target's horizon (forecast_eval.json target)
 ANNUALISE = 252
 CURVE_STEP_DAYS = 5            # spacing of the drawn model curve E^Q[VIX_T]
+PCTILE_WINDOW = 252            # sessions (about a year): the ticker's VIX percentile
 
 
 def _num(x: Any) -> float | None:
@@ -127,6 +132,24 @@ def vrp_stats(vix: pd.Series, rv_fwd: pd.Series, beta: float, start: str | None 
     return {"beta": float(beta), "n": len(v), "mean": float(v.mean()), "median": float(v.median()),
             "share_pos": float((v > 0).mean() * 100.0), "var_mean": float(var.mean()),
             "first": str(pd.Timestamp(v.index[0]).date()), "last": str(pd.Timestamp(v.index[-1]).date())}
+
+
+def pctile_prior(x: pd.Series, window: int = PCTILE_WINDOW) -> dict | None:
+    """The newest value against the ``window`` sessions before it (NaN dropped,
+    the newest left out): ``n_below`` of them strictly lower (a tie is not
+    below) and ``pct`` = 100·n_below / window, the convention of ratio_view and
+    the Overview's percentiles. None with fewer than ``window`` earlier values:
+    no shorter window is put in its place."""
+    s = x.dropna().astype(float)
+    if len(s) < window + 1:
+        return None
+    today = float(s.iloc[-1])
+    prior = s.iloc[-window - 1:-1]
+    n_below = int((prior < today).sum())
+    return {"date": str(pd.Timestamp(s.index[-1]).date()), "value": today, "n_below": n_below,
+            "n": int(window), "pct": n_below / window * 100.0,
+            "first": str(pd.Timestamp(prior.index[0]).date()),
+            "last": str(pd.Timestamp(prior.index[-1]).date())}
 
 
 def yearly_means(x: pd.Series) -> list[dict]:

@@ -6757,24 +6757,28 @@ def load_chrome() -> dict:
     c: dict[str, Any] = {"ticker": [], "sources": [], "worst": "ok", "build": build_info(),
                          "model_version": None}
     spx_date = vix_date = labels_date = None
+    spx = vd = None
     try:
         spx = _read_spx()
         last, prev = float(spx["close"].iloc[-1]), float(spx["close"].iloc[-2])
         spx_date = str(spx.index[-1].date())
         c["ticker"].append({"label": "SPX", "value": _fmt(last, ",.2f"),
-                            "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True), "note": None})
+                            "chg": pnl((last / prev - 1) * 100, ".2f", "%", glyph=True), "note": None,
+                            "title": f"SPX close {spx_date} (market DB), change on the previous close"})
         vd = _read_vix_daily()
         vix_date = str(vd.index[-1].date())
         c["ticker"].append({"label": "VIX", "value": _fmt(float(vd.iloc[-1]), ".2f"),
                             "chg": pnl(float(vd.iloc[-1]) - float(vd.iloc[-2]), ".2f", glyph=True),
-                            "note": None if vix_date == spx_date else vix_date})
+                            "note": None if vix_date == spx_date else vix_date,
+                            "title": f"VIX close {vix_date} (index pts), change on the previous close"})
         vw = _read_vix_wide()
         if "^VVIX" in vw.columns:
             vv = vw["^VVIX"].dropna()
+            vv_date = str(vv.index[-1].date())
             c["ticker"].append({"label": "VVIX", "value": _fmt(float(vv.iloc[-1]), ".2f"),
                                 "chg": pnl(float(vv.iloc[-1]) - float(vv.iloc[-2]), ".2f", glyph=True),
-                                "note": (None if str(vv.index[-1].date()) == spx_date
-                                         else str(vv.index[-1].date()))})
+                                "note": None if vv_date == spx_date else vv_date,
+                                "title": f"VVIX close {vv_date} (index pts), change on the previous close"})
         cols = [t for t in ("^VIX9D", "^VIX", "^VIX3M", "^VIX6M") if t in vw.columns]
         full = vw[cols].dropna() if len(cols) == 4 else pd.DataFrame()
         if len(full):
@@ -6783,19 +6787,26 @@ def load_chrome() -> dict:
             slope = float(row["^VIX6M"] - row["^VIX9D"])
             c["ticker"].append({"label": "9D→6M", "value": signed(slope, ".2f"),
                                 "chg": "contango" if slope > 0 else "backwardation",
-                                "note": None if ts_date == spx_date else ts_date})
+                                "note": None if ts_date == spx_date else ts_date,
+                                "title": f"VIX6M − VIX9D close {ts_date} (index pts); positive: contango"})
             c["ticker"].append({"label": "VIX/VIX3M",
                                 "value": _fmt(float(row["^VIX"] / row["^VIX3M"]), ".3f"),
-                                "chg": None, "note": None if ts_date == spx_date else ts_date})
+                                "chg": None, "note": None if ts_date == spx_date else ts_date,
+                                "title": f"VIX / VIX3M close {ts_date}; above 1: backwardation"})
     except Exception as exc:
         _logger.info("chrome: market data unavailable (%s)", exc)
+    if spx is not None and vd is not None:
+        try:
+            c["ticker"] += ticker_vol_context(spx, vd, spx_date)
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            _logger.info("chrome: vol context unavailable (%s)", exc)
     try:
         rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet",
                              columns=["regime"])["regime"].dropna()
         labels_date = str(pd.Timestamp(rl.index[-1]).date())
         lab = int(rl.iloc[-1])
         c["ticker"].append({"label": "RULE", "value": _REGIME_LABELS[lab], "chg": _REGIME_NAMES[lab].lower(),
-                            "note": labels_date})
+                            "note": labels_date, "title": f"Rule regime label of {labels_date}"})
     except Exception as exc:
         _logger.info("chrome: labels unavailable (%s)", exc)
     calib_date = greeks_date = None
@@ -6826,6 +6837,14 @@ def load_chrome() -> dict:
         _logger.info("chrome: VX futures unavailable (%s)", exc)
     ref = max([x for x in (spx_date, labels_date) if x], default=None)
     c["latest"] = ref
+    if surf_sessions:
+        try:
+            item = ticker_surface_item(artifacts.load_surface(DATA), ref)
+            if item:
+                c["ticker"].append(item)
+        except (artifacts.ArtifactError, OSError, AttributeError, KeyError, IndexError, TypeError,
+                ValueError) as exc:
+            _logger.info("chrome: surface state unavailable (%s)", exc)
     rows = [
         ("SPX", "SPX close (market DB)", spx_date, "data_store/vol_system.db", True),
         ("VIX", "VIX close (market DB)", vix_date, "data_store/vol_system.db", True),
@@ -6859,6 +6878,64 @@ def load_chrome() -> dict:
     _CHROME_CACHE.clear()
     _CHROME_CACHE[key] = c
     return c
+
+
+def ticker_vol_context(spx: pd.DataFrame, vix: pd.Series, spx_date: str | None) -> list[dict]:
+    """B13: the ticker's realised-vol context, after VIX/VIX3M: RV21 (the
+    Overview's vix_rv_now: RMS of the 21 daily SPX log returns to the close,
+    annualised ×252, %), VIX − RV21 (vol pts) and VIX's percentile among the
+    252 sessions before its newest close (desk_market.pctile_prior: percent
+    strictly lower). Each carries its as-of date in its title, and in its note
+    when that is not the SPX close's date; none is shown without its data."""
+    out: list[dict] = []
+    vr = vix_rv_now(spx, vix)
+    if vr:
+        note = None if vr["date"] == spx_date else vr["date"]
+        out.append({"label": "RV21", "value": _fmt(vr["rv"], ".2f"), "chg": None, "note": note,
+                    "title": (f"RV21 {vr['date']}: SPX realised vol of the 21 sessions to that close, "
+                              "root-mean-square of the daily log returns, annualised (×252), in %")})
+        out.append({"label": "VIX−RV21", "value": signed(vr["spread"], ".2f"), "chg": None, "note": note,
+                    "title": (f"VIX − RV21 {vr['date']}: VIX close {_fmt(vr['vix'], '.2f')} − RV21 "
+                              f"{_fmt(vr['rv'], '.2f')}, vol pts; VIX is a 30-day variance-swap rate, so "
+                              "the gap overstates what an at-the-money straddle earns")})
+    p = desk_market.pctile_prior(vix)
+    if p:
+        rk = percentile_rank(p["pct"]) or {}
+        value = {"high": "1y high", "low": "1y low"}.get(rk.get("record") or "", rk.get("big", "—"))
+        window = (f"{p['n_below']} of the {p['n']} sessions before it ({p['first']} → {p['last']}) "
+                  "closed strictly lower")
+        out.append({"label": "VIX 1Y PCTL", "value": value, "chg": None,
+                    "note": None if p["date"] == spx_date else p["date"],
+                    "title": f"VIX close {_fmt(p['value'], '.2f')} on {p['date']}: {window}",
+                    "sr": f" (percentile among the {p['n']} sessions before {p['date']})"})
+    return out
+
+
+def ticker_surface_item(surf: dict, ref: str | None) -> dict | None:
+    """B13: the surface state in the ticker: the SVI-cal surface's 1M (30-day
+    constant-maturity) ATMF vol and RR25, the Surface page's tiles, on the
+    surface's own session (always shown, with the staleness styling of its age
+    against ``ref``). None when the surface or its 1M row is missing: the row
+    is interpolated between listed expiries, never extrapolated."""
+    if surf.get("state") != "ok" or not surf.get("surface"):
+        return None
+    cm = desk_surface.constant_maturity(
+        desk_surface.delta_grid(surf["surface"], surf["residuals"], surf.get("vix")))
+    m1 = next((r for r in cm if r["label"] == "1M"), None)
+    if not m1 or not m1.get("available") or _num(m1.get("atmf")) is None or _num(m1.get("rr25")) is None:
+        return None
+    session = surf["session"]
+    age = session_age(session, ref)
+    where = (f"between the {m1['lower']} and {m1['upper']} expiries" if m1["lower"] != m1["upper"]
+             else f"the {m1['lower']} expiry")
+    old = ("the newest session" if age == 0 else
+           (f"{plural(age, 'NYSE session')} old" if age is not None else "age unknown"))
+    return {"label": "1M ATMF", "value": f"{_fmt(m1['atmf'], '.2f')}%", "chg": None,
+            "more": [{"label": "RR25", "value": signed(m1["rr25"], ".2f")}],
+            "note": session, "note_level": stale_level(age),
+            "title": (f"SVI-cal surface of {session} ({old}) at 30 days, {where}: ATMF vol "
+                      f"{_fmt(m1['atmf'], '.2f')}%, RR25 (25Δ call − 25Δ put vol) "
+                      f"{signed(m1['rr25'], '.2f')} vol pts")}
 
 
 def oldest_source(sources: Sequence[dict]) -> dict | None:
