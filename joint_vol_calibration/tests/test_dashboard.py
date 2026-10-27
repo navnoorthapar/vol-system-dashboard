@@ -1094,7 +1094,7 @@ def test_colour_tokens_meet_wcag_aa(dash, pages):
         for bg in backgrounds:
             assert dash.contrast_ratio(tok[name], bg) >= 4.5, (name, tok[name], bg)
     for name in [f"cat-{i}" for i in range(6)] + ["series-headline", "series-muted", "pos-fill", "neg-fill",
-                                                  "focus"]:
+                                                  "tail-down", "tail-up", "focus"]:
         for bg in (tok["bg"], tok["surface"], tok["surface2"]):
             assert dash.contrast_ratio(tok[name], bg) >= 3.0, (name, tok[name], bg)
     # a pressed toggle / selected tab is marked by a 3:1 border, not by colour of text alone
@@ -2377,8 +2377,10 @@ def test_risk_provenance_states_the_per_maturity_carry(dash, pages):
     if prov.get("r") is None and rows:
         r_lo, r_hi = min(c["r"] for c in rows) * 100, max(c["r"] for c in rows) * 100
         q_lo, q_hi = min(c["q"] for c in rows) * 100, max(c["q"] for c in rows) * 100
-        assert f"r(T) {r_lo:.2f}–{r_hi:.2f}%" in text
-        assert f"q(T) {q_lo:.2f}–{q_hi:.2f}% from the fit's parity forwards" in text
+        # the site's formatter: a negative bound takes the typographic minus (q(T) on 2026-10-26)
+        f = dash._fmt
+        assert f"r(T) {f(r_lo, '.2f')}–{f(r_hi, '.2f')}%" in text
+        assert f"q(T) {f(q_lo, '.2f')}–{f(q_hi, '.2f')}% from the fit's parity forwards" in text
 
 
 def test_corrections_page_shows_the_c23_waterfall_from_its_file(pages):
@@ -2648,8 +2650,25 @@ def test_model_risk_checks_use_the_surface_artifacts(dash, art):
     assert hs["status"] == want
     arb = json.loads((FIX / "surface" / SESSION / "surface.json").read_text())["arbitrage"]
     share = arb["n_quotes_in_executable_violation"] / arb["n_quotes"] * 100
-    arb_row = mon["Quotes in an executable static-arbitrage row (% of scored quotes)"]
+    arb_row = mon["Quotes failing static arbitrage at bid/ask (% of scored quotes)"]
     assert arb_row["value"].startswith(f"{share:.1f}%")
+
+
+def test_model_risk_v1_counts_the_single_quote_outliers_apart(dash):
+    """R3-D1: V1 read '6.8% (198 of 2,913) BREACH' under 'executable static-arbitrage
+    row', the label the Surface tile gave one bad Yahoo quote. The check is now
+    named for what the screen measures, and its note counts the largest rows a
+    single-quote outlier explains, with the leg they share."""
+    row = next(m for m in dash.load_model_risk()["monitors"] if m["key"] == "arb_exec_share")
+    assert row["check"] == "Quotes failing static arbitrage at bid/ask (% of scored quotes)"
+    assert "executable" not in row["check"].lower()
+    lv = dash.arb_violations(json.loads(_surface_file("surface.json").read_text())["arbitrage"])
+    bad = [v["bad_quote"] for v in lv if v["bad_quote"]]
+    if bad:
+        assert (f"Single-quote outliers: {len(bad)} of its {len(lv)} largest mid violations "
+                f"(bad quote {bad[0]}") in row["note"]
+    else:
+        assert "outlier" not in row["note"]
 
 
 def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
@@ -2937,6 +2956,29 @@ def test_research_s3_timing_headline_is_the_c23_exposure_matched_null(dash, page
         legacy = pickle.load(fh)["metrics"]["s3_null_p_value"]
     if f"{legacy:.3f}" != p:
         assert f"p = {legacy:.3f}" not in text
+
+
+def test_research_t_bills_are_collateral_income_not_a_hurdle(dash, pages):
+    """R3-T5: the NAV is already an excess return over T-bills (rf = 0), yet the
+    KPI row called the T-bill return a 'benchmark', the equity chart drew it as
+    'T-bill (collateral)' among the sleeves and the prose put S3 'below the T-bill
+    return'. Each now says the T-bill income is earned on top of the NAV."""
+    html = pages["/research"]
+    text = _visible_text(html)
+    for old in ("T-bill benchmark", "below the T-bill return", "T-bill (collateral)"):
+        assert old not in html, old
+    # the KPI keeps the collateral's compounded ^IRX return, read from the metrics
+    with open(SHIPPED / "backtest" / "full_results.pkl", "rb") as fh:
+        cash = pickle.load(fh)["metrics"]["cash_cum_return"]
+    kpi = re.search(r'kpi-label">T-bills on the collateral \(earned on top of the NAV\)</div>\s*'
+                    r'<div class="kpi-value">(.*?)<span', html, re.DOTALL)
+    assert kpi, "T-bill KPI missing"
+    assert _visible_text("<body>" + kpi.group(1)).strip() == f"{cash * 100:+.1f}".replace("-", dash.MINUS)
+    assert "an excess return over T-bills (the hurdle is 0)" in text
+    names = [s["name"] for s in _spec(html, "chart-equity")["series"]]
+    eq = pd.read_parquet(SHIPPED / "backtest" / "full_results.parquet")
+    if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
+        assert "T-bill return (not in the NAV)" in names
 
 
 def test_corrections_trend_sentence_agrees_with_the_published_series(dash, pages):
@@ -4997,6 +5039,71 @@ def test_surface_state_tiles_are_the_one_month_constant_maturity_row(dash, pages
     assert html.index('id="surface-state"') < html.index('id="surface-scores"')
 
 
+def _kpi_sub(html: str, block_id: str, label: str) -> str:
+    """The visible sub-line of the KPI tile ``label`` in the tile row ``block_id``."""
+    start = html.index(f'id="{block_id}"')
+    ends = [i for i in (html.find('<div class="kpis"', start), html.find('<div class="g"', start)) if i > 0]
+    blk = html[start:min(ends)]
+    for tile in blk.split('<div class="kpi">')[1:]:
+        lab = re.search(r'<div class="kpi-label">(.*?)</div>', tile, re.DOTALL)
+        if lab and _html_unescape(re.sub(r"<[^>]+>", "", lab.group(1))).strip() == label:
+            sub = re.search(r'<div class="kpi-sub">(.*?)</div>', tile, re.DOTALL)
+            assert sub, f"{label}: no sub-line"
+            return _html_unescape(re.sub(r"<[^>]+>", "", sub.group(1))).strip()
+    raise AssertionError(f"no {label!r} tile in #{block_id}")
+
+
+def test_surface_vs_tile_names_its_vs_beside_the_replicated_vix_and_the_cboe_close(dash, pages):
+    """R3-T1: the '1M VS − ATMF' tile printed '+5.18' with no VS level, on a page
+    that also prints the 30-day variance as the VIX replicated from this chain
+    and the Cboe close (19.11, 19.70 and 19.99 on 2026-10-16). Its sub-line names
+    all three: the 1M row's VS and vix_replication.json's VIX."""
+    ds = _desk_module()
+    sj, res, vx = _desk_inputs()
+    m1 = ds.constant_maturity(ds.delta_grid(sj, res, vx))[0]
+    assert m1["label"] == "1M"
+    sub = _kpi_sub(pages["/surface"], "surface-state", "1M VS − ATMF")
+    if m1["vs"] is not None:
+        assert f"VS {dash._fmt(m1['vs'], '.2f')}% (the bracketing strips at 30 days)" in sub, sub
+    vix = (vx.get("indices") or {}).get("VIX")
+    if vix:
+        off = vix.get("official")
+        close = off.get("close") if isinstance(off, dict) else off
+        assert f"VIX replicated {dash._fmt(vix.get('replicated'), '.2f')}" in sub, sub
+        assert f"Cboe close {dash._fmt(close, '.2f')}" in sub, sub
+
+
+def test_constant_maturity_grid_names_the_strike_counts_of_its_two_vs_strips(dash, pages):
+    """R3-T1: a constant-maturity VS vol interpolates two strips, and a thin one
+    moves it (the 2026-10-16 1M VS read a 194-strike and an 86-strike strip).
+    Under each tenor: the two strips' strike counts, the 'Strikes' column of the
+    variance-swap strip table."""
+    ds = _desk_module()
+    cm = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))
+    html = pages["/surface"]
+    strip = _raw_specs(html)["chart-strip"]["table"]
+    cols = [c["label"] for c in strip["columns"]]
+    n = {r[0]: r[cols.index("Strikes")] for r in strip["rows"]}
+    tbl = html[html.index('id="delta-grid-cm"'):]
+    tbl = tbl[tbl.index("<tbody>"):tbl.index("</table>")]
+    heads = re.findall(r'<th scope="row">(.*?)</th>', tbl, re.DOTALL)
+    assert len(heads) == len(cm)
+    checked = 0
+    for r, th in zip(cm, heads):
+        subs = [_html_unescape(re.sub(r"<[^>]+>", "", x)).strip()
+                for x in re.findall(r'<span class="dg-sub">(.*?)</span>', th, re.DOTALL)]
+        if not r["available"] or r["lower"] not in n or r["upper"] not in n:
+            assert not any("strikes" in x for x in subs), (r["label"], subs)
+            continue
+        want = (f"{n[r['lower']]} VS strikes" if r["lower"] == r["upper"]
+                else f"{n[r['lower']]} / {n[r['upper']]} VS strikes")
+        assert want in subs, (r["label"], subs)
+        checked += 1
+    assert checked
+    assert cm[0]["label"] == "1M"
+    assert cm[0]["available"]
+
+
 def test_overview_surface_line_is_the_one_month_row_with_its_age(dash, pages):
     ds = _desk_module()
     m1 = ds.constant_maturity(ds.delta_grid(*_desk_inputs()))[0]
@@ -5517,28 +5624,89 @@ def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifac
         assert r[col] == str(by[r[0]]), r[0]
 
 
+def _widest_strike_gap(legs: list[dict]) -> float:
+    ks = sorted({float(lg["strike"]) for lg in legs})
+    return max((b - a for a, b in itertools.pairwise(ks)), default=0.0)
+
+
 def test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them(dash, pages):
+    """R3-T4: the tile read 'Executable static arbitrage … Largest mid violation
+    95.0 idx pts ($9,497 per contract), C2 vertical spread, 2027-03-31 P
+    6260/6265': a 5-point vertical priced 95 points through its bound by one bad
+    Yahoo quote (P6265 151.4/154.1 between P6260 53.5/54.3 and P6270 62.6/65.1),
+    and 24 of the 25 listed rows were tagged 'executable'. A row whose shortfall
+    is larger than its widest strike gap now reads 'bad quote: <leg>' with no
+    dollar value, and the tile headlines the largest row without one."""
     html = pages["/surface"]
     arb = json.loads(_surface_file("surface.json").read_text())["arbitrage"]
     tile_m = re.search(r'id="arb-tile">(.*?)</div>\s*</div>', html, re.DOTALL)
     tile = _visible_text("<body>" + tile_m.group(1))
-    top = max(arb["largest_mid_violations"], key=lambda v: v["shortfall_index_points"])
-    assert f"Largest mid violation {max(arb['max_mid_violation_index_points'].values()):.1f} idx pts" in tile
-    assert dash.usd_desk(top["shortfall_index_points"] * 100, signed=False) + " per contract" in tile
+    assert "Quotes failing static arbitrage at bid/ask" in tile
+    assert "Executable" not in tile
     assert "constraint row" in tile
+    assert "no quote time" in tile or "quotes at" in tile
     assert 'href="#largest-violations"' in html
     rows = _table_rows(html, "largest-violations")
     assert len(rows) == len(arb["largest_mid_violations"])
     ordered = sorted(arb["largest_mid_violations"], key=lambda v: -v["shortfall_index_points"])
+    named = set()
     for r, v in zip(rows, ordered):
         assert r[2] == f"{v['shortfall_index_points']:.2f}"
-        assert r[3] == dash.usd_desk(v["shortfall_index_points"] * 100, signed=False)
         for lg in v["legs"]:
             assert f"{lg['right']}{lg['strike']:.0f}" in r[1]
             assert str(lg["expiry"])[:10] in r[1]
+        if r[4].startswith("bad quote: "):
+            assert r[3] == "—"
+            exp, leg = r[4][len("bad quote: "):].split()
+            assert any(str(lg["expiry"])[:10] == exp and f"{lg['right']}{lg['strike']:.0f}" == leg
+                       for lg in v["legs"]), r
+            named.add(r[4])
+        else:
+            # no row wider in shortfall than its strike gap passes as tradeable
+            assert not 0.0 < _widest_strike_gap(v["legs"]) < v["shortfall_index_points"], r
+            assert r[3] == dash.usd_desk(v["shortfall_index_points"] * 100, signed=False)
+            assert r[4] == ("executable" if v["executable"] else "mids only")
+    # every flagged row that holds a named leg carries it: flagged rows share their leg
+    for r, v in zip(rows, ordered):
+        held = {f"bad quote: {str(lg['expiry'])[:10]} {lg['right']}{lg['strike']:.0f}" for lg in v["legs"]}
+        assert not (held & named) or r[4] in held & named, r
+    n_bad = sum(1 for r in rows if r[4].startswith("bad quote: "))
+    assert f"{n_bad} of the {len(rows)} largest rows from single-quote outliers" in tile
+    clean = next((v for r, v in zip(rows, ordered) if not r[4].startswith("bad quote: ")), None)
+    if clean:
+        sf = clean["shortfall_index_points"]
+        assert (f"Largest mid violation without an outlier leg: {sf:.1f} idx pts "
+                f"({dash.usd_desk(sf * 100, signed=False)} per contract)") in tile
+    else:
+        assert "Largest mid violation" not in tile
     # the panel table counts constraint rows, and says so
     assert _table_heads(html, "arb-table")[1:] == ["Constraint rows", "Violated at mids",
                                                    "Violated at bid/ask"]
+
+
+def test_bad_quote_flag_names_the_leg_the_impossible_rows_share(dash):
+    """flag_bad_quotes on the 2026-10-16 shape: one off quote (P6265) breaks a
+    vertical, a butterfly and a calendar spread by more than their strike gaps,
+    and a wide calendar butterfly that holds it is flagged with it; a violation
+    inside its strike gap and a one-strike calendar row stay tradeable."""
+    def row(typ, sf, *legs):
+        return dash.violation_view({"type": typ, "shortfall_index_points": sf, "executable": True,
+                                    "legs": [{"expiry": e, "right": "P", "strike": k, "weight": w}
+                                             for e, k, w in legs]})
+    t1, t2 = "2027-03-31", "2027-04-16"
+    views = [row("C2_vertical_spread", 95.0, (t1, 6260.0, 1.0), (t1, 6265.0, -1.0)),
+             row("C3_vertical_butterfly", 94.9, (t1, 6260.0, 0.5), (t1, 6265.0, -1.0), (t1, 6270.0, 0.5)),
+             row("C5_calendar_vertical_spread", 79.0, (t1, 6265.0, -1.0), (t2, 6275.0, 1.0)),
+             row("C6_calendar_butterfly", 58.0, (t1, 6265.0, -1.0), (t2, 6200.0, 0.5), (t2, 6400.0, 0.5)),
+             row("C2_vertical_spread", 20.0, (t1, 7000.0, 1.0), (t1, 7010.0, -1.0)),
+             row("C3_vertical_butterfly", 9.4, (t1, 6245.0, 1 / 3), (t1, 6255.0, -1.0), (t1, 6260.0, 2 / 3)),
+             row("C4_calendar_spread", 3.0, (t1, 6500.0, -1.0), (t2, 6500.0, 1.0))]
+    moved = [{"expiry": t1, "right": "P", "strike": 7010.0, "repair_dprice": -15.0}]
+    out = dash.flag_bad_quotes(views, moved)
+    assert [v["bad_quote"] for v in out] == [f"{t1} P6265"] * 4 + [f"{t1} P7010", None, None]
+    # a lone two-leg row with no repair move either way still names one of its own legs
+    lone = dash.flag_bad_quotes([row("C2_vertical_spread", 20.0, (t1, 7000.0, 1.0), (t1, 7010.0, -1.0))])
+    assert lone[0]["bad_quote"] in (f"{t1} P7000", f"{t1} P7010")
 
 
 def _kpi_blocks(html: str, block_id: str) -> dict[str, str]:
@@ -5602,6 +5770,19 @@ def test_calibration_fit_tiles_rank_this_fit_among_the_gated_fits(dash, pages):
         assert _range_span(tiles["Out of sample"]).startswith(f"worst of {len(hist)}")
     if "VVIX model / market" in tiles and d.get("vvix"):
         assert "diagnosed sessions" in (_range_span(tiles["VVIX model / market"]) or "")
+
+
+def test_fit_losses_reach_the_tiles_unrounded(dash):
+    """The tiles print .2f; load_page2 pre-rounded the losses to .3f, so the
+    2026-10-26 put-wing OOS RMSE 2.30497 became 2.305 and printed 2.31 beside
+    its rank range (2.30)."""
+    _, cal = dash.load_headline_calibration()
+    losses = dash._cal_losses(cal)
+    d = dash.load_page2()
+    for key, src in (("spx_rmse", "spx_iv_rmse"), ("spx_oos_rmse", "spx_oos_iv_rmse"),
+                     ("spx_oos_wing_rmse", "spx_oos_put_wing_rmse"), ("vix_index_rmse", "vix_index_rmse")):
+        if dash._num(losses.get(src)) is not None:
+            assert d[key] == float(losses[src]), key
 
 
 def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_page(dash, pages):
@@ -6995,13 +7176,28 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
     vermilion cat5 (13° from the loss orange) under a gain-blue +403.5 tile and
     Gamma in sky-blue cat0 (29° from the gain blue), and Research drew S1C and
     the rolling Sharpe in cat0 (F7); (e) market observables and Cboe indices
-    are 'headline'; (f) no series uses 'info' (the gain blue). The ramp reaches
+    are 'headline'; (f) no series uses 'info' (the gain blue); (g) a risk-neutral
+    tail (role 'tail') takes its side's TAIL_COLOURS hue: the Surface tails were
+    all three SVI-cal cat0, 29° of hue from the gain blue, the upside told from
+    the downside by its dash alone (B3-F13); the two sides are 60° or more of LCh
+    hue apart and each 30° or more from the gain and loss fills. The ramp reaches
     3:1 on the panels."""
     ch = dash.charts
     tok = _tokens()
     hex_of = {"headline": tok["series-headline"], "muted": tok["series-muted"], "pos": tok["pos-fill"],
               "neg": tok["neg-fill"], **{f"cat{i}": tok[f"cat-{i}"] for i in range(6)},
-              **{f"ramp{i}": tok[f"ramp-{i}"] for i in range(6)}, "cat-default": tok["cat-0"]}
+              **{f"ramp{i}": tok[f"ramp-{i}"] for i in range(6)}, "cat-default": tok["cat-0"],
+              **{c: tok[c] for c in ch.TAIL_COLOURS.values()}}
+
+    def hue_gap(a: str, b: str) -> float:
+        return abs((_lch_hue(a)[1] - _lch_hue(b)[1] + 180) % 360 - 180)
+    down, up = (hex_of[ch.TAIL_COLOURS[side]] for side in ("below", "above"))
+    assert hue_gap(down, up) >= 60, (down, up)
+    for c in (down, up):
+        assert _lch_hue(c)[0] >= 15, c
+        for fill in ("pos-fill", "neg-fill"):
+            assert hue_gap(c, tok[fill]) >= 30, (c, fill)
+    assert not set(ch.TAIL_COLOURS.values()) & ch.MODEL_COLOUR_TOKENS
     for i in range(6):
         for bg in (tok["bg"], tok["surface"], tok["surface2"]):
             assert dash.contrast_ratio(tok[f"ramp-{i}"], bg) >= 3.0, (i, bg)
@@ -7030,6 +7226,9 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
             if role in ("market", "cboe"):                                                  # (e)
                 seen["market"] += 1
                 assert c == "headline", where
+            if role == "tail":                                                              # (g)
+                seen["tail"] += 1
+                assert c == ch.TAIL_COLOURS[s["side"]], where
         for cid, sp in specs.items():
             tenors = sorted((s["T"], s["color"]) for s in sp.get("series") or [] if s.get("role") == "tenor")
             if tenors:                                                                      # (c)
@@ -7050,6 +7249,130 @@ def test_every_series_follows_the_encoding_registry(dash, pages):
                         gap = abs((hue - _lch_hue(tok[fill])[1] + 180) % 360 - 180)
                         assert chroma < 15 or gap >= 30, (route, cid, s["name"], c, fill, round(gap))
     assert min(seen["model"] / 20, seen["market"] / 8, seen["tenor"] / 2, seen["pnl"] / 3) >= 1, seen
+    sides = {s.get("side") for s in _raw_specs(pages["/surface"])["chart-rnd-tails"]["series"]}
+    assert seen["tail"] >= 2, seen
+    assert sides == set(ch.TAIL_COLOURS), sides
+
+
+# a subscript written out raw, as a reader would see it: S_T, VIX_T, g_min, RV_h (a
+# symbol of up to four letters, '_', an index of up to three; not a path or a key)
+_RAW_SUBSCRIPT = re.compile(r"(?<![\w/.-])[A-Za-z]{1,4}_[A-Za-z0-9]{1,3}(?![\w/.-])")
+
+
+def _spec_names(sp: dict) -> list[tuple[str, str]]:
+    """(field, text) of every name a reader of the chart sees: its title and
+    description, the axis names, the series and legend names, the tooltip rows
+    and the data table's caption and heads."""
+    out = [("title", sp.get("title") or ""), ("describe", sp.get("describe") or "")]
+    for ax in ("x", "y", "y2"):
+        a = sp.get(ax) or {}
+        out += [(f"{ax}.name", a.get("name") or ""), (f"{ax}.label", a.get("label") or "")]
+    for s in sp.get("series") or []:
+        out += [("series", s.get("name") or ""), ("series", s.get("legendKey") or "")]
+    out += [("legend", it["name"]) for it in sp.get("legend_items") or []]
+    out += [("tipRows", r["name"]) for r in sp.get("tipRows") or []]
+    t = sp.get("table") or {}
+    for tb in (t, *(t.get("groups") or [])):
+        out.append(("caption", tb.get("caption") or ""))
+        out += [("column", c["label"]) for c in tb.get("columns") or []]
+    return out
+
+
+def test_no_chart_name_axis_legend_or_tooltip_shows_a_raw_subscript(dash, pages):
+    """B3-F13: the Surface tail chart's legend buttons and tooltips read 'SVI-cal
+    P(S_T < 0.90 F)', the density's y axis 'Density of ln(S_T/F)' and the
+    Calibration VX charts 'Heston E[VIX_T]', where the tables beside them set
+    S<sub>T</sub>. Over every chart spec on every page, every subscript in a name
+    the reader sees is one app.subs sets (desk.js sets the axis names and the
+    tooltip rows with the same pattern), and the page leaves none raw: not in a
+    chart's accessible name, its legend buttons, its description, nor in a
+    table's caption or heads."""
+    js = DESK_JS.read_text()
+    assert re.search(r"var SUBS = /(.*?)/g;", js).group(1) == dash._SUBSCRIPTS.pattern
+    for use in ("name: subs(a.name || '', 1)", "subs(p.seriesName)", "subs(r.name)"):
+        assert use in js, use
+    seen: collections.Counter = collections.Counter()
+    n_charts = 0
+    for route, html in pages.items():
+        legends: dict[str, list[str]] = collections.defaultdict(list)
+        buttons = re.findall(r'<button[^>]*data-legend-for="([^"]*)"[^>]*>(.*?)</button>', html, re.DOTALL)
+        for ids, inner in buttons:
+            for i in ids.split():
+                legends[i].append(inner)
+            # a set subscript sits in one span with its label: the button is a flex
+            # box, and the bare <i> and <sub> stood apart as items ('P( S T < 0.80 F)')
+            one_label = r'<span class="key-swatch[^>]*></span><span>.*</span>'
+            assert "<sub>" not in inner or re.fullmatch(one_label, inner, re.DOTALL), (route, inner)
+        for cid, sp in _raw_specs(html).items():
+            n_charts += 1
+            for field, text in _spec_names(sp):
+                for tok in _RAW_SUBSCRIPT.findall(text):
+                    seen[tok] += 1
+                    assert dash._SUBSCRIPTS.fullmatch(tok), (route, cid, field, tok)
+            shown = list(legends.get(cid, []))
+            div = re.search(rf'<div class="chart[^"]*" id="{re.escape(cid)}"[^>]*>', html)
+            if div:
+                shown.append(_html_unescape(_attrs(div.group(0)).get("aria-label", "")))
+            desc = re.search(rf'<p class="sr-only" id="{re.escape(cid)}-desc">(.*?)</p>', html, re.DOTALL)
+            if desc:
+                shown.append(desc.group(1))
+            for text in shown:
+                plain = _html_unescape(re.sub(r"<[^>]+>", "", text))
+                assert not _RAW_SUBSCRIPT.search(plain), (route, cid, plain)
+        for cell in re.findall(r"<(?:caption|th)\b[^>]*>(.*?)</(?:caption|th)>", html, re.DOTALL):
+            plain = _html_unescape(re.sub(r"<[^>]+>", "", cell))
+            assert not _RAW_SUBSCRIPT.search(plain), (route, plain)
+    assert n_charts >= len(pages), n_charts
+    assert seen["S_T"] >= 1, seen
+    # the plain-text twin (an aria-label) and the markup agree on what they set
+    assert dash.subs_text("E[VIX_T] and S_T") == "E[VIX T] and S T"
+    assert str(dash.subs("E[VIX_T] and S_T")) == "E[VIX<sub>T</sub>] and <i>S</i><sub>T</sub>"
+
+
+def test_browser_tail_hues_and_chart_subscripts_as_drawn(site_browser):
+    """B3-F13 in the browser: the Surface tail chart draws the two downside tails
+    in one colour (--tail-down) and the upside tail in another (--tail-up); the
+    density's y axis name is rich text (an italic S, a subscript T), a tail's
+    tooltip row sets S<sub>T</sub>, and the tails' legend buttons hold their swatch
+    and one label, no bare text or <sub> as a flex item of its own."""
+    sb = site_browser
+    ctx, page = _page(sb)
+    page.goto(sb["base"] + "surface.html", wait_until="load")
+    for cid in ("chart-rnd", "chart-rnd-tails"):
+        page.locator("#" + cid).scroll_into_view_if_needed()
+        _wait_for_chart(page, cid)
+    got = page.evaluate("""() => {
+      const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+      const d = Desk.charts['chart-rnd'].chart.getOption();
+      const t = Desk.charts['chart-rnd-tails'].chart.getOption();
+      const tip = t.series.map(s => {
+        const i = s.data.findIndex(v => v && v[1] !== null && v[1] !== undefined);
+        const p = {seriesName: s.name, value: s.data[i], dataIndex: i, color: '#fff'};
+        return i < 0 ? null : t.tooltip[0].formatter(p);
+      });
+      const bare = b => [...b.childNodes].filter(n => n.nodeType === 3 && n.textContent.trim()).length;
+      const btns = [...document.querySelectorAll('[data-legend-for="chart-rnd-tails"]')];
+      return {axis: d.yAxis[0].name, rich: Object.keys(d.yAxis[0].nameTextStyle.rich || {}),
+              colours: t.series.map(s => [s.name, s.lineStyle.color]),
+              down: css('--tail-down'), up: css('--tail-up'),
+              tip: tip, kids: btns.map(b => [b.childElementCount, bare(b)])};
+    }""")
+    ctx.close()
+    assert "_" not in got["axis"], got["axis"]
+    assert "{i|S}{s|T}" in got["axis"], got["axis"]
+    assert {"i", "s"} <= set(got["rich"])
+    by_side = {">": set(), "<": set()}
+    for name, colour in got["colours"]:
+        by_side[">" if " > " in name else "<"].add(colour.lower())
+    want = {"<": {got["down"].lower()}, ">": {got["up"].lower()}}
+    assert by_side == want, (by_side, want)
+    tips = [t for t in got["tip"] if t]
+    assert tips, got["tip"]
+    for t in tips:
+        assert "<i>S</i><sub>T</sub>" in t, t
+        assert "S_T" not in t, t
+    assert got["kids"], got
+    assert all(k == [2, 0] for k in got["kids"]), got["kids"]
 
 
 def _on_ramp(colour: str, stops: tuple[str, ...] | list[str], tol: float = 2.5) -> bool:
@@ -7302,6 +7625,45 @@ def test_browser_phone_first_screen_shows_the_subject_and_first_number(site_brow
         page.goto(sb["base"] + "index.html", wait_until="load")
         assert page.locator("#find-list-works").is_visible()
         assert all(b.is_visible() for b in page.locator(".banner[data-stale] .banner-body").all())
+    finally:
+        ctx.close()
+
+
+def test_browser_phone_status_list_closes_on_escape_and_outside(site_browser):
+    """A1 (F16): the phone strip's source list (details.sb-phone) stayed open on
+    Escape and on a click or a tap elsewhere, over the page head. At 390 px
+    Escape closes it and focus is back on its summary; a click or a tap
+    outside closes it; a click or a tap on its own list does not."""
+    sb = site_browser
+    ctx = sb["browser"].new_context(viewport={"width": 390, "height": 844}, has_touch=True)
+    ctx.set_default_timeout(BROWSER_TIMEOUT_MS)
+    is_open = "document.querySelector('.sb-phone').open"
+    try:
+        page = ctx.new_page()
+        for name in ("index.html", "calibration.html"):
+            page.goto(sb["base"] + name, wait_until="load")
+            summary = page.locator(".sb-phone > summary")
+            summary.focus()
+            page.keyboard.press("Enter")
+            assert page.evaluate(is_open), name
+            page.locator(".sb-list li").first.click()            # its own list: stays open
+            assert page.evaluate(is_open), name
+            page.keyboard.press("Escape")
+            assert not page.evaluate(is_open), name
+            assert page.evaluate("document.activeElement.matches('.sb-phone > summary')"), name
+            summary.click()
+            assert page.evaluate(is_open), name
+            # a point in the left gutter below the open list: a long list covers the h1
+            lb = page.locator(".sb-phone .sb-list").bounding_box()
+            out = (4, min(840, lb["y"] + lb["height"] + 24))
+            page.mouse.click(*out)
+            assert not page.evaluate(is_open), name
+            summary.tap()
+            assert page.evaluate(is_open), name
+            page.locator(".sb-list li").first.tap()
+            assert page.evaluate(is_open), name
+            page.touchscreen.tap(*out)
+            assert not page.evaluate(is_open), name
     finally:
         ctx.close()
 

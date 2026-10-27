@@ -42,8 +42,8 @@
 
 {% macro _table(t) -%}
 <table>
-    <caption>{{ t.caption }}</caption>
-    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label|sym }}</th>{% endfor %}</tr></thead>
+    <caption>{{ t.caption|subs }}</caption>
+    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label|subs|sym }}</th>{% endfor %}</tr></thead>
     <tbody>{% for r in t.rows %}<tr>{% for v in r %}<td{% if t.columns[loop.index0] and t.columns[loop.index0].num %} class="num"{% endif %}>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
   </table>
 {%- endmacro %}
@@ -64,8 +64,8 @@
 {%- set cid = spec.id -%}
 {% if tools %}
 <div class="chart-tools">
-  <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title }}">
-    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else ('ramp-' ~ it.color[4:] if it.color.startswith('ramp') else it.color))))) }})"></span>{{ it.name }}</button>{% endfor %}
+  <div class="legend-bar" role="group" aria-label="Series shown in {{ spec.title|subs_text }}">
+    {% for it in spec.legend_items %}<button class="btn js-only" type="button" data-legend-for="{{ cid }}" data-series="{{ it.name }}"{% if it.group is defined %} data-group="{{ it.group }}"{% endif %} aria-pressed="{{ 'false' if it.hidden else 'true' }}"><span class="key-swatch{% if it.dash %} dashed{% elif it.dotted %} dotted{% endif %}{% if it.hollow %} hollow{% elif it.diamond %} diamond{% elif it.tri %} tri{% if it.down %} down{% endif %}{% elif it.dot %} dot{% endif %}" style="color:var(--{{ 'series-headline' if it.color == 'headline' else ('series-muted' if it.color == 'muted' else ('pos-fill' if it.color == 'pos' else ('neg-fill' if it.color == 'neg' else ('cat-' ~ it.color[3:] if it.color.startswith('cat') else ('ramp-' ~ it.color[4:] if it.color.startswith('ramp') else it.color))))) }})"></span>{{ it.name|subs(wrap=True) }}</button>{% endfor %}
     {% for z in spec.zoom_presets or [] %}<button class="btn js-only" type="button" data-zoom-for="{{ cid }}" data-years="{{ z.years }}" aria-pressed="{{ 'true' if z.years == 0 else 'false' }}">{{ z.label }}</button>{% endfor %}
     {% if spec.zoom_years %}<label class="zoom-year js-only">Year <select class="btn" data-zoom-year-for="{{ cid }}"><option value="">—</option>{% for z in spec.zoom_years %}<option value="{{ z['from'] }}|{{ z.to }}">{{ z.label }}</option>{% endfor %}</select></label>{% endif %}
   </div>
@@ -75,10 +75,10 @@
   </div>
 </div>
 {% endif %}
-<div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec"{% if spec.link %} data-chart-group="{{ spec.link }}"{% endif %} role="img" aria-label="{{ spec.title }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
+<div class="chart {{ height }}" id="{{ cid }}" data-spec="{{ cid }}-spec"{% if spec.link %} data-chart-group="{{ spec.link }}"{% endif %} role="img" aria-label="{{ spec.title|subs_text }}" aria-describedby="{{ cid }}-desc {{ cid }}-data"></div>
 {% if spec.quotes %}<p class="quote-readout js-only" id="{{ cid }}-readout" data-readout-for="{{ cid }}" tabindex="0" aria-live="polite" aria-describedby="{{ cid }}-readout-help">Quote readout: hover a quote, or focus here and step with ← → (Page Up / Down: 10 quotes; Home / End).</p>
 <span class="sr-only" id="{{ cid }}-readout-help">Arrow keys step through the shown expiry’s quotes; each step reads the quote’s strike, bid, mid and ask and each shown model’s IV and z.</span>{% endif %}
-<p class="sr-only" id="{{ cid }}-desc">{{ spec.describe }}</p>
+<p class="sr-only" id="{{ cid }}-desc">{{ spec.describe|subs_text }}</p>
 <script type="application/json" id="{{ cid }}-spec">{{ spec|tojson }}</script>
 {{ data_table(spec.table, cid ~ '-data') }}
 {%- endmacro %}
@@ -142,7 +142,7 @@
 <table class="tbl dense dgrid" id="{{ id }}">
   <caption>{{ caption }}</caption>
   <thead><tr>{% for h in g.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{% if g.links and g.links.get(h) %}<a href="{{ g.links[h] }}">{{ h }}</a>{% else %}{{ h }}{% endif %}</th>{% endfor %}</tr></thead>
-  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}{% if r.sub2 %}<span class="dg-sub">{{ r.sub2 }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
 </table>
 </div>
 {%- endmacro %}

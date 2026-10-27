@@ -46,13 +46,14 @@
         cat3: css('--cat-3'), cat4: css('--cat-4'), cat5: css('--cat-5'),
         ramp0: css('--ramp-0'), ramp1: css('--ramp-1'), ramp2: css('--ramp-2'),
         ramp3: css('--ramp-3'), ramp4: css('--ramp-4'), ramp5: css('--ramp-5'),
+        'tail-down': css('--tail-down'), 'tail-up': css('--tail-up'),
       },
     };
     if (print) {
       t.text = '#111111'; t.text2 = '#333333'; t.text3 = '#555555';
       t.line = '#bbbbbb'; t.line2 = '#999999'; t.grid = '#dddddd'; t.surface = '#ffffff'; t.tooltip = '#ffffff';
       t.colors.headline = '#111111'; t.colors.muted = '#666666';
-      t.colors.cat3 = '#8a7a00';
+      t.colors.cat3 = '#8a7a00'; t.colors['tail-down'] = '#a3369f'; t.colors['tail-up'] = '#4d7a00';
       // the maturity ramp on paper: light to dark violet that still reads on white
       ['#9c8ad8', '#8a76cf', '#7762c4', '#6450b4', '#523fa0', '#412f88'].forEach(function (h, i) { t.colors['ramp' + i] = h; });
     }
@@ -195,13 +196,22 @@
   }
   function quoteText(lines) { return lines.map(function (l) { return l.text; }).join(' \u00b7 '); }
 
+  // -- 'S_T', 'g_min' as the tables set them (app.subs, the same pattern): as
+  //    rich text on the canvas (rich), as <sub> in a tooltip ----
+  var SUBS = /\b(S|g|VIX|RV)_(T|min|h)\b/g;
+  function subs(t, rich) {
+    return String(t).replace(SUBS, function (m, a, b) {
+      return (a.length > 1 ? a : rich ? '{i|' + a + '}' : '<i>' + a + '</i>') + (rich ? '{s|' + b + '}' : '<sub>' + b + '</sub>');
+    });
+  }
+
   // -- spec -> ECharts option ----
   function axis(a, T, isX, spec) {
     a = a || {};
     var type = a.type || 'value';
     var ax = {
-      type: type, name: a.name || '', nameLocation: 'middle', nameGap: isX ? 26 : 42,
-      nameTextStyle: { color: T.text3, fontFamily: T.sans, fontSize: 11 },
+      type: type, name: subs(a.name || '', 1), nameLocation: 'middle', nameGap: isX ? 26 : 42,
+      nameTextStyle: { color: T.text3, fontFamily: T.sans, fontSize: 11, rich: { i: { fontStyle: 'italic' }, s: { fontSize: 8, padding: [5, 0, 0, 0] } } },
       axisLine: { show: isX, lineStyle: { color: T.line2 } }, axisTick: { show: false },
       axisLabel: { color: T.text3, fontFamily: T.mono, fontSize: 10.5, hideOverlap: true },
       splitLine: { show: !isX || type === 'value', lineStyle: { color: T.grid } },
@@ -444,12 +454,12 @@
           var sw = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + (typeof p.color === 'string' ? p.color : T.text2) + ';margin-right:6px"></span>';
           var pl = s.pointLabels && s.pointLabels[p.dataIndex] !== undefined && s.pointLabels[p.dataIndex] !== null
             ? ' \u00b7 ' + (s.pointPrefix || '') + s.pointLabels[p.dataIndex] : '';
-          rows.push(sw + p.seriesName + pl + '&nbsp;&nbsp;<b>' + txt + '</b>');
+          rows.push(sw + subs(p.seriesName) + pl + '&nbsp;&nbsp;<b>' + txt + '</b>');
         });
         // extra lines that belong to the index, not to a series (a waterfall's level after the step)
         (spec.tipRows || []).forEach(function (r) {
           var v = idx === null ? null : r.data[idx];
-          if (v !== null && v !== undefined) rows.push(r.name + '&nbsp;&nbsp;<b>' + num(v, { digits: r.digits === undefined ? 1 : r.digits, signed: !!r.signed, unit: r.unit || '' }) + '</b>');
+          if (v !== null && v !== undefined) rows.push(subs(r.name) + '&nbsp;&nbsp;<b>' + num(v, { digits: r.digits === undefined ? 1 : r.digits, signed: !!r.signed, unit: r.unit || '' }) + '</b>');
         });
         return '<div style="color:' + T.text3 + ';margin-bottom:2px">' + head + '</div>' + rows.join('<br>');
       },
@@ -1580,6 +1590,13 @@
       btn.addEventListener('click', function () { set(!links.classList.contains('open')); });
       doc.addEventListener('keydown', function (e) { if (e.key === 'Escape' && links.classList.contains('open')) { set(false); btn.focus(); } });
       doc.addEventListener('click', function (e) { if (!btn.contains(e.target) && !links.contains(e.target)) set(false); });
+    }
+    // the phone strip's source list (Q20) closes like the menu; a tap on no
+    // control fires no click in iOS Safari, so pointerdown too
+    var sb = $('.sb-phone');
+    if (sb) {
+      doc.addEventListener('keydown', function (e) { if (e.key === 'Escape' && sb.open) { sb.open = false; sb.firstElementChild.focus(); } });
+      ['click', 'pointerdown'].forEach(function (t) { doc.addEventListener(t, function (e) { if (sb.open && !sb.contains(e.target)) sb.open = false; }); });
     }
     var dlg = $('#keysDialog'), pending = false, timer;
     var go = {};

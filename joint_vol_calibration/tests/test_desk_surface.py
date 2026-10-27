@@ -148,6 +148,24 @@ def test_constant_maturity_rows_are_linear_in_total_variance(grids, session):
         assert r["atmf"] == r["vol"]["ATM"]
 
 
+@pytest.mark.parametrize("session", SESSIONS)
+def test_constant_maturity_rows_carry_the_strike_counts_of_their_two_strips(grids, session):
+    """R3-T1: a constant-maturity VS vol reads two strips; each row carries their
+    strike counts (puts + calls). On 2026-10-16 the 1M VS of 19.11 interpolated
+    the 194-strike 2026-11-13 strip and the 86-strike 2026-11-16 one."""
+    n = {str(r["expiry"])[:10]: (r.get("n_puts") or 0) + (r.get("n_calls") or 0)
+         for r in json.loads((SURF / session / "vix_replication.json").read_text())["strip"]}
+    cm = ds.constant_maturity(grids[session])
+    for r in cm:
+        if not r["available"]:
+            assert r["strikes"] == (None, None)
+            continue
+        assert r["strikes"] == (n.get(r["lower"]), n.get(r["upper"])), r["label"]
+    if session == KNOWN:
+        assert (cm[0]["lower"], cm[0]["upper"], cm[0]["strikes"]) == ("2026-11-13", "2026-11-16", (194, 86))
+        assert cm[0]["vs"] == pytest.approx(19.106, abs=1e-3)
+
+
 def _slice(T: float, **kw) -> dict:
     sl = {"a": 0.0004, "b": 0.05, "rho": -0.6, "m": 0.0, "sigma": 0.12, "T": T,
           "expiry": f"2030-01-{int(T * 365):02d}"}

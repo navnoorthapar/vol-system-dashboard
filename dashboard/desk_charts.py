@@ -58,9 +58,12 @@ CATEGORICAL = ("cat0", "cat1", "cat2", "cat3", "cat4", "cat5")
 # role 'model' and its key (``model``); on a page that draws models no other
 # series takes a model colour. Market observables and Cboe indices are
 # 'headline', bid–ask 'muted', fit anchors 'cat3'; series indexed by maturity
-# take TENOR_RAMP (a lightness ramp, short to long) with a gradient key. No
-# series uses 'info' (it is --pos, the gain colour, and links). The tests read
-# these tables (test_every_series_follows_the_encoding_registry).
+# take TENOR_RAMP (a lightness ramp, short to long) with a gradient key; a
+# risk-neutral tail (role 'tail') takes its side's TAIL_COLOURS hue, the downside
+# tails one and the upside another, neither within 30° of LCh hue of the gain or
+# loss fill (the SVI-cal cat0 is 29° from the gain blue). No series uses 'info'
+# (it is --pos, the gain colour, and links). The tests read these tables
+# (test_every_series_follows_the_encoding_registry).
 MODEL_ENCODING: dict[str, dict[str, Any]] = {
     "heston_v2": {"color": "cat1", "dash": None, "label": "Heston"},
     "heston": {"color": "cat1", "dash": None, "label": "Heston"},
@@ -76,6 +79,7 @@ MODEL_COLOUR_TOKENS = frozenset({e["color"] for e in MODEL_ENCODING.values()} | 
 ROLE_COLOURS = {"market": "headline", "cboe": "headline", "bidask": "muted", "anchor": "cat3",
                 "other": "muted"}
 TENOR_RAMP = ("ramp0", "ramp1", "ramp2", "ramp3", "ramp4", "ramp5")
+TAIL_COLOURS = {"below": "tail-down", "above": "tail-up"}
 
 
 def model_colour(key: str) -> str:

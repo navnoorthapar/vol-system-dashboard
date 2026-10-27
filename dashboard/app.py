@@ -379,13 +379,17 @@ def sym(text: Any) -> Any:
 app.jinja_env.filters["sym"] = sym
 
 
-_SUBSCRIPTS = re.compile(r"\b(S|g)_(T|min)\b")
+# the subscripted symbols of the pages' text (S_T, g_min, E[VIX_T], RV_h); desk.js
+# (SUBS) sets the same ones on the charts' axis names and tooltips
+_SUBSCRIPTS = re.compile(r"\b(S|g|VIX|RV)_(T|min|h)\b")
 
 
-def subs(text: Any) -> Any:
+def subs(text: Any, wrap: bool = False) -> Any:
     """'S_T' and 'g_min' as S<sub>T</sub> and g<sub>min</sub> (the text is escaped
-    first); a lower-case symbol (g_min, ∫p) in a .sym span, so an upper-cased
-    table head does not turn it into G or P."""
+    first; a one-letter symbol in italics, an index name such as VIX upright); a
+    lower-case symbol (g_min, ∫p) in a .sym span, so an upper-cased table head
+    does not turn it into G or P. wrap: a text that sets a subscript in one <span>
+    (a legend button is a flex box, which set 'P(', S, T and the rest apart)."""
     from markupsafe import Markup, escape
 
     if text is None:
@@ -393,13 +397,22 @@ def subs(text: Any) -> Any:
     escaped = str(escape(text))
 
     def one(m: re.Match) -> str:
-        out = f"<i>{m.group(1)}</i><sub>{m.group(2)}</sub>"
+        base = f"<i>{m.group(1)}</i>" if len(m.group(1)) == 1 else m.group(1)
+        out = f"{base}<sub>{m.group(2)}</sub>"
         return f'<span class="sym">{out}</span>' if m.group(1).islower() else out
-    escaped = _SUBSCRIPTS.sub(one, escaped).replace("∫p", '<span class="sym">∫p</span>')
-    return Markup(escaped)  # noqa: S704
+    out, n = _SUBSCRIPTS.subn(one, escaped)
+    out = out.replace("∫p", '<span class="sym">∫p</span>')
+    return Markup(f"<span>{out}</span>" if wrap and n else out)  # noqa: S704
+
+
+def subs_text(text: Any) -> str:
+    """The plain-text twin of subs, for a chart's aria-label and its screen-reader
+    description: 'S_T' as 'S T', so no name reads out an underscore."""
+    return "" if text is None else _SUBSCRIPTS.sub(r"\1 \2", str(text))
 
 
 app.jinja_env.filters["subs"] = subs
+app.jinja_env.filters["subs_text"] = subs_text
 app.jinja_env.globals["glossary"] = desk_glossary.TERMS
 app.jinja_env.globals["glossary_conventions"] = desk_glossary.CONVENTIONS
 
@@ -1370,16 +1383,15 @@ def load_page2() -> dict[str, Any]:
                 d["r_ref_detail"] = "13-week bill, continuously compounded; reference"
 
         losses = _cal_losses(cal)
-        d["spx_rmse"] = (round(float(losses["spx_iv_rmse"]), 3) if _num(losses.get("spx_iv_rmse")) is not None
-                         else None)
+        # unrounded: the tiles round once, at display (2.30497 pre-rounded to 2.305 printed 2.31)
+        d["spx_rmse"] = _num(losses.get("spx_iv_rmse"))
         # VIX leg: the Cboe SPOT indices (^VIX9D/^VIX/^VIX3M/^VIX6M) against
         # heston_vix_term_index. Pre-C22 results only have the old key name.
         vix_rmse = _num(losses.get("vix_index_rmse", losses.get("vix_futures_rmse")))
-        d["vix_index_rmse"] = round(vix_rmse, 3) if vix_rmse is not None else None
+        d["vix_index_rmse"] = vix_rmse
         for key, src in (("spx_oos_rmse", "spx_oos_iv_rmse"),
                          ("spx_oos_wing_rmse", "spx_oos_put_wing_rmse")):
-            if _num(losses.get(src)) is not None:
-                d[key] = round(float(losses[src]), 3)
+            d[key] = _num(losses.get(src))
         d["n_vix_options"] = cal.get("n_vix_options")
         # The VIX-options leg is in the objective only when its weight is > 0
         # (liquid contracts on the spot session alone do not activate it).
@@ -3772,8 +3784,10 @@ def research_extras(d: dict, eq: pd.DataFrame | None) -> None:
         ]
         if "nav_tbill" in eq.columns and eq["nav_tbill"].notna().any():
             tb = eq["nav_tbill"]
-            series.append({"name": "T-bill (collateral)", "type": "line", "color": "muted", "width": 1.2,
-                           "dash": "dotted", "legend": True,
+            # the collateral's T-bill income, earned on top of the NAV (which is already
+            # an excess return over it): drawn for scale, not as a hurdle to beat
+            series.append({"name": "T-bill return (not in the NAV)", "type": "line", "color": "muted",
+                           "width": 1.2, "dash": "dotted", "legend": True,
                            "data": ((tb / float(tb.iloc[0]) - 1.0) * 100.0).round(3).tolist()})
         for s_ in series:                 # ~1,800 daily points a line: drawn with LTTB downsampling
             s_["sampling"] = "lttb"
@@ -5262,7 +5276,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
         cells += [tint(signed(r.get("skew_vp"), ".2f"), None), tint(_fmt(r.get("vs"), ".2f"), None),
                   tint(signed(r.get("vs_minus_atmf"), ".2f"), None),
                   tint(_fmt(r.get("half_spread_vp"), ".2f"), None), tint(_fmt(r.get("n_quotes"), ","), None)]
-        return {"head": head, "sub": sub, "cells": cells, "available": r.get("available", True)}
+        return {"head": head, "sub": sub, "sub2": "", "cells": cells, "available": r.get("available", True)}
 
     rows_l = [{**row(r, r["expiry"]), "exp": str(r["expiry"])} for r in listed]
     rows_c = []
@@ -5273,7 +5287,13 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
             sub = f"= {_short_exp(r['lower'])}"
         else:
             sub = f"{_short_exp(r['lower'])} → {_short_exp(r['upper'])}"
-        rows_c.append(row(r, r["label"], sub))
+        # the strike counts of the two strips the VS vol interpolates: a thin
+        # strip on one side moves the constant-maturity VS (R3-T1)
+        n_lo, n_hi = r.get("strikes") or (None, None)
+        sub2 = ("" if not r["available"] or n_lo is None or n_hi is None else
+                f"{_fmt(n_lo, ',')} VS strikes" if r["lower"] == r["upper"] else
+                f"{_fmt(n_lo, ',')} / {_fmt(n_hi, ',')} VS strikes")
+        rows_c.append({**row(r, r["label"], sub), "sub2": sub2})
     n_xp = sum(1 for r in listed for k in keys if r["extrap"][k])
     return {"heads": list(DESK_GRID_HEADS), "listed": rows_l, "cm": rows_c, "vol_lo": lo, "vol_hi": hi,
             "rr_lim": rr_lim, "bf_lim": bf_lim, "n_extrap": n_xp, "extrap_tag": EXTRAP_TAG,
@@ -5288,6 +5308,7 @@ RND_HEADS = ("Expiry", "Days", "Quoted K/F", *(lab for _, lab, _, _ in desk_dens
              "∫p", "E[S_T/F]", "g_min")
 RND_BEYOND = "beyond quoted strikes"
 RND_TABLE_K = (-0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15)
+RND_TAIL_DASH: dict[str, bool | str | None] = {"lt80": "dotted", "lt90": None, "gt110": True}
 
 
 def _rnd_pct(p: float | None) -> str:
@@ -5363,10 +5384,13 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
                                trows))
     days = [r["T_days"] for r in rows]
     tail_series = []
-    for key, label, dash in (("lt90", "S_T < 0.90 F", None), ("gt110", "S_T > 1.10 F", True),
-                             ("lt80", "S_T < 0.80 F", "dotted")):
-        s_: dict[str, Any] = {"name": f"SVI-cal P({label})", "type": "line", "role": "model",
-                              "model": "svi_cal", "color": charts.model_colour("svi_cal"),
+    # one hue per side (desk_charts.TAIL_COLOURS); the two downside tails differ by
+    # their dash, and the upside tail keeps one too, so print and colour-blind
+    # readers still tell it apart
+    for key, label, side, _ in desk_density.THRESHOLDS:
+        dash = RND_TAIL_DASH[key]
+        s_: dict[str, Any] = {"name": f"SVI-cal P({label})", "type": "line", "role": "tail",
+                              "side": side, "color": charts.TAIL_COLOURS[side],
                               "width": 1.75 if dash is None else 1.5,
                               "symbol": "circle", "size": 4, "legend": True,
                               "data": [[r["T_days"], (100 * r["prob"][key]) if r["prob"][key] is not None
@@ -5380,7 +5404,8 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
            "min": round_sig(min(days) / 1.15, 2), "max": round_sig(max(days) * 1.15, 2)},
         y={"name": "Risk-neutral probability (%)", "digits": 0, "tipDigits": 2, "zero": True},
         series=tail_series, tooltip="item", csv=f"rnd_tails_{session}.csv",
-        describe=("P(S_T < 0.90 F), P(S_T > 1.10 F) and P(S_T < 0.80 F) of each listed SVI-cal slice; "
+        describe=("P(S_T < 0.80 F) and P(S_T < 0.90 F), the downside tails, in one colour, and "
+                  "P(S_T > 1.10 F), the upside tail, in another, of each listed SVI-cal slice; "
                   "a gap is a threshold beyond the expiry's quoted strikes, where no probability is "
                   "printed."),
         table=charts.table("Risk-neutral tail probabilities (%) by listed expiry",
@@ -5491,11 +5516,20 @@ def _state_values(cm: Sequence[dict]) -> dict[str, float | None]:
             else None}
 
 
+def official_close(index_row: dict) -> float | None:
+    """The Cboe close of one replicated index (vix_replication.json indices.<ticker>)."""
+    off = index_row.get("official")
+    return _num(off.get("close")) if isinstance(off, dict) else _num(off)
+
+
 def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
-                        all_cm: Sequence[Sequence[dict]] = ()) -> list[dict]:
+                        all_cm: Sequence[Sequence[dict]] = (), vix_rep: dict | None = None) -> list[dict]:
     """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
     slope 1M → 1Y, all from the constant-maturity rows (never extrapolated),
-    each with its range over every stored session's grid (``all_cm``)."""
+    each with its range over every stored session's grid (``all_cm``). The VS
+    tile names its VS level beside the VIX replicated from the same chain and
+    the Cboe close (``vix_rep``, vix_replication.json): three 30-day variance
+    numbers that differ."""
     by = {r["label"]: r for r in cm}
     m1, y1 = by.get("1M") or {}, by.get("1Y") or {}
     every = [_state_values(c) for c in all_cm]
@@ -5507,6 +5541,12 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
     where = (f"between {m1['lower']} and {m1['upper']}" if m1.get("available") and m1["lower"] != m1["upper"]
              else (f"the {m1['lower']} expiry" if m1.get("available") else f"outside the listed {span}"))
     slope = (y1["atmf"] - m1["atmf"]) if (m1.get("atmf") is not None and y1.get("atmf") is not None) else None
+    vix = ((vix_rep or {}).get("indices") or {}).get("VIX") or {}
+    vs_sub = (f"VS {_fmt(m1['vs'], '.2f')}% (the bracketing strips at 30 days) over ATMF: the skew premium"
+              if m1.get("vs") is not None else "variance-swap vol over ATMF: the skew premium")
+    if vix:
+        vs_sub += (f" · VIX replicated {_fmt(_num(vix.get('replicated')), '.2f')}"
+                   f" · Cboe close {_fmt(official_close(vix), '.2f')}")
     return [
         {"label": "1M ATMF", "value": _fmt(m1.get("atmf"), ".2f"), "unit": "%",
          "sub": f"SVI-cal at 30 days, {where}", "range": rng("atmf")},
@@ -5515,7 +5555,7 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
         {"label": "1M BF25", "value": signed(m1.get("bf25"), ".2f"), "unit": "vol pts",
          "sub": "mean of the 25Δ wings − ATMF", "range": rng("bf25")},
         {"label": "1M VS − ATMF", "value": signed(m1.get("vs_minus_atmf"), ".2f"), "unit": "vol pts",
-         "sub": "variance-swap vol over ATMF: the skew premium", "range": rng("vs")},
+         "sub": vs_sub, "range": rng("vs")},
         {"label": "ATMF slope 1M → 1Y", "value": signed(slope, ".2f"), "unit": "vol pts",
          "sub": (f"1Y {_fmt(y1.get('atmf'), '.2f')}% − 1M {_fmt(m1.get('atmf'), '.2f')}%"
                  if slope is not None else f"1Y outside the listed {span}"), "range": rng("slope")},
@@ -5539,18 +5579,28 @@ CHAIN_SOURCES = {"yfinance": "Yahoo Finance close snapshot", "yahoo": "Yahoo Fin
                  "cboe": "Cboe"}
 
 
-def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
-    """'Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913
-    scored · 17 expiries (other stored sessions 40–43)', from surface.json inputs
-    and universe: counts only, no cause is read into a thin session."""
+def chain_source(surface_json: dict) -> list[str] | None:
+    """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip()
     if not src:
         return None
     qt = inp.get("quote_time") or uni.get("quote_time")
-    parts = [f"Chain: {CHAIN_SOURCES.get(src.lower(), src)}",
-             f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+    return [CHAIN_SOURCES.get(src.lower(), src),
+            f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+
+
+def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
+    """'Chain: Yahoo Finance close snapshot · no quote time · 6,191 rows → 2,913
+    scored · 17 expiries (other stored sessions 40–43)', from surface.json inputs
+    and universe: counts only, no cause is read into a thin session."""
+    inp = surface_json.get("inputs") or {}
+    uni = surface_json.get("universe") or {}
+    src = chain_source(surface_json)
+    if not src:
+        return None
+    parts = [f"Chain: {src[0]}", src[1]]
     rows, scored = _num(inp.get("chain_rows")), _num(uni.get("n_universe"))
     if rows is not None and scored is not None:
         parts.append(f"{_fmt(int(rows), ',')} rows → {_fmt(int(scored), ',')} scored")
@@ -5591,7 +5641,50 @@ def violation_view(v: dict) -> dict:
     return {"type": typ, "label": typ.replace("_", " ", 1).replace("_", " "),
             "constraint": ARB_LABELS.get(typ, typ), "legs": by, "leg_groups": groups, "short": short,
             "shortfall": sf,
-            "usd": sf * SPX_MULTIPLIER if sf is not None else None, "executable": bool(v.get("executable"))}
+            "usd": sf * SPX_MULTIPLIER if sf is not None else None, "executable": bool(v.get("executable")),
+            "leg_keys": [(str(lg["expiry"])[:10], str(lg["right"]), float(lg["strike"]), float(lg["weight"]))
+                         for lg in legs],
+            "bad_quote": None}
+
+
+def flag_bad_quotes(views: list[dict], repaired: Sequence[dict] = ()) -> list[dict]:
+    """Name, on each largest_mid_violations row one bad quote explains, that leg
+    ('2027-03-31 P6265'). A row no real prices can produce has a shortfall larger
+    than its widest gap between adjacent strikes (a vertical's |K2 − K1|, a
+    butterfly's wider wing, a calendar's strike gap). The leg named is the one
+    most such rows share (then the larger summed weight, then the larger move in
+    the repair's ``repaired`` list), and every listed row holding a leg so named
+    carries it. A one-strike row (C1, C4) has no width and is never flagged on its own."""
+    moved = {(str(r.get("expiry"))[:10], str(r.get("right")), float(r["strike"])):
+             abs(_num(r.get("repair_dprice")) or 0.0)
+             for r in repaired if isinstance(r, dict) and _num(r.get("strike")) is not None}
+
+    def width(v: dict) -> float:
+        ks = sorted({lg[2] for lg in v["leg_keys"]})
+        return max((b - a for a, b in itertools.pairwise(ks)), default=0.0)
+    left = [v for v in views if (v["shortfall"] or 0.0) > width(v) > 0.0]
+    bad: list[tuple[str, str, float]] = []
+    while left:                               # each pass names the leg most remaining rows share
+        score: dict[tuple[str, str, float], tuple[int, float]] = {}
+        for v in left:
+            for e, r, k, w in v["leg_keys"]:
+                n, sw = score.get((e, r, k), (0, 0.0))
+                score[(e, r, k)] = (n + 1, sw + abs(w))
+        leg = max(score, key=lambda g: (*score[g], moved.get(g, 0.0), g))
+        bad.append(leg)
+        left = [v for v in left if leg not in {lg[:3] for lg in v["leg_keys"]}]
+    for v in views:
+        held = {lg[:3] for lg in v["leg_keys"]}
+        hit = next((g for g in bad if g in held), None)
+        v["bad_quote"] = f"{hit[0]} {hit[1]}{_fmt(hit[2], '.0f')}" if hit else None
+    return views
+
+
+def arb_violations(arb: dict) -> list[dict]:
+    """arbitrage.largest_mid_violations as violation_view rows, largest first, bad quotes flagged."""
+    lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
+    rep = (arb.get("quotes_repaired_outside_spread") or {}).get("largest") or []
+    return flag_bad_quotes(sorted(lv, key=lambda x: -(x["shortfall"] or 0.0)), rep)
 
 
 def surface_comparison(head: str, inputs: Sequence[dict]) -> dict | None:
@@ -5770,7 +5863,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["expiries_by_session"] = {s["session"]: session_expiries(s["surface"]) for s in desk_inputs}
         cmp_ = surface_comparison(session, desk_inputs)
         every_cm = [g["cm"] for g in (cmp_ or {}).get("grids", {}).values()]
-        d["state_tiles"] = surface_state_tiles(cm, listed, every_cm)
+        d["state_tiles"] = surface_state_tiles(cm, listed, every_cm, surf.get("vix"))
         d["rnd"] = rnd_view(sj, res, session)
         d["cone"] = None
         with _loader_boundary(d, "volatility cone (vol_system.db spx_ohlcv, surface.json svi_cal)"):
@@ -6004,10 +6097,10 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["arb"] = {k: arb.get(k) for k in ("n_quotes", "n_quotes_in_executable_violation",
                                             "n_quotes_in_mid_violation", "constraint_set")}
         d["arb_repair"] = arb.get("repair") or {}
-        lv = [violation_view(v) for v in arb.get("largest_mid_violations") or [] if isinstance(v, dict)]
-        d["largest_violations"] = sorted(lv, key=lambda x: -(x["shortfall"] or 0.0))
-        mx = [x for x in ((arb.get("max_mid_violation_index_points") or {}).values()) if _num(x) is not None]
-        d["arb_max_mid"] = max(mx) if mx else None
+        d["largest_violations"] = arb_violations(arb)
+        d["arb_bad_rows"] = sum(1 for v in d["largest_violations"] if v["bad_quote"])
+        d["arb_clean_top"] = next((v for v in d["largest_violations"] if not v["bad_quote"]), None)
+        d["arb_chain"] = ", ".join(chain_source(surf.get("surface") or {}) or [])
         d["arb_mid_rows"] = sum(int(r["mid"]) for r in d["arb_rows"] if _num(r["mid"]) is not None)
         d["arb_surfaces"] = [{"label": model_label(k), "dense": (v or {}).get("dense_grid") or {}}
                              for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
@@ -6024,9 +6117,8 @@ def surface_extras(d: dict, surf: dict) -> None:
             if not row:
                 continue
             off = row.get("official")
-            off_close = _num(off.get("close")) if isinstance(off, dict) else _num(off)
             d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")),
-                                  "official": off_close, "gap": _num(row.get("gap_vs_official")),
+                                  "official": official_close(row), "gap": _num(row.get("gap_vs_official")),
                                   "method": row.get("headline_method"),
                                   "in_range": row.get("official_inside_day_range"),
                                   "day_range": ([_num(off.get("low")), _num(off.get("high"))]
@@ -6384,6 +6476,9 @@ VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
 
+ARB_CHECK = "Quotes failing static arbitrage at bid/ask (% of scored quotes)"
+
+
 def chain_vendor(source: Any) -> str:
     """The vendor-input ID of a stored chain's source ('Data' when it is not recorded)."""
     return CHAIN_VENDORS.get(str(source or "").lower(), "Data")
@@ -6401,7 +6496,7 @@ MONITOR_LIMITS = {
     "label_lag": (0, 1),            # sessions the market DB lags the labels
     "median_abs_hs": (2.0, 5.0),    # half-spreads, Heston out-of-sample median |model − mid|
     "vix_rep_gap": (0.5, 1.5),      # index pts, |VIX replicated from the chain − Cboe close|
-    "arb_exec_share": (2.0, 5.0),   # % of scored quotes in an executable static-arbitrage row
+    "arb_exec_share": (2.0, 5.0),   # % of scored quotes in a row failing static arbitrage at bid/ask
 }
 
 
@@ -6656,19 +6751,25 @@ def load_model_risk() -> dict[str, Any]:
             "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.",
             history=surf_hist("vix_rep_gap"))
         share = today["arb_exec_share"]
-        add(vendor, "Quotes in an executable static-arbitrage row (% of scored quotes)", share,
+        lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
+        legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
+        n_bad = sum(1 for v in lv if v["bad_quote"])
+        add(vendor, ARB_CHECK, share,
             f"{_fmt(share, '.1f')}% ({_fmt(today['n_ex'], ',.0f')} of {_fmt(today['n_q'], ',.0f')})"
             if share is not None else "—",
             "arb_exec_share", sart + "surface.json",
-            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain.",
+            "Bid/ask-level butterfly, vertical and calendar screen of the stored chain."
+            + (f" Single-quote outliers: {n_bad} of its {len(lv)} largest mid violations (bad quote "
+               + legs[0] + (f" and {len(legs) - 1} more leg{'s' if len(legs) > 2 else ''}"
+                            if len(legs) > 1 else "")
+               + "), counted in the share." if n_bad else ""),
             history=surf_hist("arb_exec_share"), digits=".1f")
     else:
         for mid_, chk, key_ in ((INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
                                  "median_abs_hs"),
                                 ("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
                                  "vix_rep_gap"),
-                                ("Data", "Quotes in an executable static-arbitrage row (% of scored quotes)",
-                                 "arb_exec_share")):
+                                ("Data", ARB_CHECK, "arb_exec_share")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
     # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory
