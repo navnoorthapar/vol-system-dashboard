@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src &#39;self&#39;; script-src &#39;self&#39;; style-src &#39;self&#39; &#39;unsafe-inline&#39;; img-src &#39;self&#39; data:; font-src &#39;self&#39;; connect-src &#39;self&#39;; object-src &#39;none&#39;; base-uri &#39;self&#39;; form-action &#39;none&#39;">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Corrections · SPX/VIX Vol Research</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%23111418'/><path d='M5 9 Q16 29 27 9' fill='none' stroke='%238abbff' stroke-width='3' stroke-linecap='round'/></svg>">
+  <meta name="theme-color" content="#111418">
+  <meta name="color-scheme" content="dark">
+  <!-- Open Graph: per-page title and description; no test count (a hand-typed
+       count went stale in four places in C22; README/CI carry it). -->
+  <meta property="og:type"         content="website">
+  <meta property="og:url"          content="https://navnoorbawa.me/corrections.html">
+  <meta property="og:title"        content="Corrections C16–C23 — SPX/VIX Vol Research">
+  <meta property="og:description"  content="Every correction round as a postmortem: symptom, root cause, detection, fix, the regression tests that pin it, the commit and its effect on the published result, with the C22 waterfall.">
+  <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
+  <meta property="og:image:width"  content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Calibration System: research dashboard preview card.">
+  <meta name="twitter:image:alt"   content="Joint SPX/VIX Calibration System dashboard preview card.">
+  <meta name="author"              content="Navnoor Bawa">
+  <link rel="canonical"            href="https://navnoorbawa.me/corrections.html">
+  <meta name="twitter:card"        content="summary_large_image">
+  <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
+  <meta name="description"         content="Every correction round as a postmortem: symptom, root cause, detection, fix, the regression tests that pin it, the commit and its effect on the published result, with the C22 waterfall.">
+  <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
+  
+  <link rel="stylesheet" href="static/desk.css?v=ae3987f96844">
+  <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
+  <noscript><style>
+    .chart { display: none !important; }
+    .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal; }
+    .js-only { display: none !important; }
+    [role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
+    .banner-body.fold-body { display: block !important; } .find-list.fold-body { display: flex !important; }   /* nothing folds (Q20) */
+  </style></noscript>
+  
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+
+<header class="statusbar" aria-label="Data status">
+  <span class="sb-item sb-state lvl-ok">
+    ● END OF DAY
+  </span>
+  <details class="sb-phone">
+    <summary class="sb-item"><span class="sb-k">SPX</span><span class="sb-v lvl-ok">current</span><span class="sr-only">: every source’s date</span></summary>
+    <ul class="sb-list">
+      <li><span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
+      <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
+      <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">2b9a8d7</span></li>
+      <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
+    </ul>
+  </details>
+  
+  <span class="sb-item" title="SPX close (market DB): data_store/vol_system.db">
+    <span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item" title="VIX close (market DB): data_store/vol_system.db">
+    <span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item" title="Rule regime labels: data_store/signals/regime_labels.parquet">
+    <span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item" title="Headline Heston fit: data_store/calibrations/">
+    <span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item sb-opt" title="Greeks surface: data_store/greeks/greeks_surface.parquet">
+    <span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item sb-opt" title="Quote-grade surface: data_store/surface/&lt;session&gt;/">
+    <span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item sb-opt" title="Backtest window end (fixed): data_store/backtest/full_results.parquet">
+    <span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span>
+  </span>
+  
+  <span class="sb-right">
+    <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/2b9a8d7954ff49222cff46b3e40a04c8379528b3">2b9a8d7</a></span>
+    <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
+  </span>
+</header>
+
+<nav class="nav" aria-label="Primary">
+  <a class="brand" href="index.html">
+    <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 9 Q16 31 28 9" fill="none" stroke="#8abbff" stroke-width="3.2" stroke-linecap="round"/></svg>
+    <span>SPX/VIX <span class="brand-sub">Vol Research</span></span>
+  </a>
+  <button class="nav-toggle" id="navToggle" type="button" aria-controls="navLinks" aria-expanded="false">Menu</button>
+  <div class="nav-links" id="navLinks">
+    
+    <a href="index.html" class="nav-link" data-key="o">Overview</a>
+    
+    <a href="surface.html" class="nav-link" data-key="s">Surface</a>
+    
+    <a href="calibration.html" class="nav-link" data-key="c">Calibration</a>
+    
+    <a href="risk.html" class="nav-link" data-key="r">Risk</a>
+    
+    <a href="research.html" class="nav-link" data-key="e">Research</a>
+    
+    <a href="corrections.html" class="nav-link" data-key="x" aria-current="page">Corrections</a>
+    
+    <a href="model-risk.html" class="nav-link" data-key="m">Model Risk</a>
+    
+  </div>
+  <div class="nav-right"><span class="js-only">Press <kbd>?</kbd> for shortcuts</span></div>
+</nav>
+
+<div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">
+  
+  <span class="tk" title="SPX close 2026-10-26 (market DB), change on the previous close"><span class="tk-label">SPX</span><span class="tk-val">7,676.77</span><span class="tk-chg"><span class="pos">▲ +0.70%</span></span></span>
+  
+  <span class="tk" title="VIX close 2026-10-26 (index pts), change on the previous close"><span class="tk-label">VIX</span><span class="tk-val">18.39</span><span class="tk-chg"><span class="neg">▼ −1.06</span></span></span>
+  
+  <span class="tk" title="VVIX close 2026-10-26 (index pts), change on the previous close"><span class="tk-label">VVIX</span><span class="tk-val">101.43</span><span class="tk-chg"><span class="neg">▼ −8.27</span></span></span>
+  
+  <span class="tk" title="VIX6M − VIX9D close 2026-10-26 (index pts); positive: contango"><span class="tk-label">9D→6M</span><span class="tk-val">+3.71</span><span class="tk-chg">contango</span></span>
+  
+  <span class="tk" title="VIX / VIX3M close 2026-10-26; above 1: backwardation"><span class="tk-label">VIX/VIX3M</span><span class="tk-val">0.922</span></span>
+  
+  <span class="tk" title="RV21 2026-10-26: SPX realised vol of the 21 sessions to that close, root-mean-square of the daily log returns, annualised (×252), in %"><span class="tk-label">RV21</span><span class="tk-val">9.81</span></span>
+  
+  <span class="tk" title="VIX − RV21 2026-10-26: VIX close 18.39 − RV21 9.81, vol pts; VIX is a 30-day variance-swap rate, so the gap overstates what an at-the-money straddle earns"><span class="tk-label">VIX−RV21</span><span class="tk-val">+8.58</span></span>
+  
+  <span class="tk" title="VIX close 18.39 on 2026-10-26: 170 of the 252 sessions before it (2025-10-23 → 2026-10-23) closed strictly lower"><span class="tk-label">VIX 1Y PCTL</span><span class="tk-val">67th</span><span class="sr-only"> (percentile among the 252 sessions before 2026-10-26)</span></span>
+  
+  <span class="tk" title="Rule regime label of 2026-10-26"><span class="tk-label">RULE</span><span class="tk-val">R1</span><span class="tk-chg">short gamma</span><span class="tk-note">2026-10-26</span></span>
+  
+  <span class="tk" title="SVI-cal surface of 2026-10-26 (the newest session) at 30 days, between the 2026-11-25 and 2026-11-27 expiries: ATMF vol 14.03%, RR25 (25Δ call − 25Δ put vol) −4.80 vol pts"><span class="tk-label">1M ATMF</span><span class="tk-val">14.03%</span><span class="tk-label">RR25</span><span class="tk-val">−4.80</span><span class="tk-note lvl-ok">2026-10-26</span></span>
+  
+</div>
+
+<main class="page" id="main" tabindex="-1">
+  
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="page-head">
+  <h1 class="page-title" id="audit-title">C16–C23 corrections — 33 findings, 30 fixed, 3 quantified</h1>
+  <p class="page-sub" id="audit-sub">Each round as a blameless postmortem: what was wrong, why, how it was found, the fix, the tests that now pin it and what it did to the published result. Most corrections lowered the published result (from −9.1% after C17 to −22.2% after C23); C22 raised it from −26.1% to −21.6%; no round restored a positive return.</p>
+  <div class="page-badge"><span class="nowrap">64 regression tests cited</span><span class="sep">·</span><span class="nowrap">27 commits linked</span><span class="sep">·</span><span class="nowrap">C22 evidence from <code>c22_bridge.csv</code></span><span class="sep">·</span><span class="nowrap">C23 from <code>c23_bridge.csv</code></span></div>
+</div>
+
+<div class="g pair">
+  <section class="panel s8 " id="waterfall" aria-labelledby="waterfall-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="waterfall-t">C22 waterfall · portfolio P&amp;L, one correction at a time</h2>
+    <span class="panel-side"><span class="panel-meta">$000s</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="waterfall" aria-label="Copy a link to the C22 waterfall · portfolio P&amp;L, one correction at a time panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in C22 waterfall: portfolio P&amp;L from the published C21 run to the canonical run ($000s)">
+    <button class="btn js-only" type="button" data-legend-for="chart-waterfall" data-series="Step raises P&amp;L" aria-pressed="true"><span class="key-swatch" style="color:var(--pos-fill)"></span>Step raises P&amp;L</button><button class="btn js-only" type="button" data-legend-for="chart-waterfall" data-series="Step lowers P&amp;L" aria-pressed="true"><span class="key-swatch" style="color:var(--neg-fill)"></span>Step lowers P&amp;L</button><button class="btn js-only" type="button" data-legend-for="chart-waterfall" data-series="Run total" aria-pressed="true"><span class="key-swatch" style="color:var(--series-headline)"></span>Run total</button>
+    
+    
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="chart-waterfall-data" aria-expanded="false" aria-controls="chart-waterfall-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="chart-waterfall" data-filename="c22_waterfall.csv">CSV</button>
+  </div>
+</div>
+
+<div class="chart h400 tall-narrow" id="chart-waterfall" data-spec="chart-waterfall-spec" role="img" aria-label="C22 waterfall: portfolio P&amp;L from the published C21 run to the canonical run ($000s)" aria-describedby="chart-waterfall-desc chart-waterfall-data"></div>
+
+<p class="sr-only" id="chart-waterfall-desc">From −$261K (C21 as published) to −$222K in 15 cumulative steps; each bar is one correction&#39;s effect on portfolio P&amp;L.</p>
+<script type="application/json" id="chart-waterfall-spec">{"csv": "c22_waterfall.csv", "csv_rows": {"columns": ["row", "step", "d_pnl_usd", "pnl_after_usd", "sharpe_after"], "rows": [["", "C21 published", "", -261206.0, ""], [0, "C21 engine as published", -3620.54, -264826.54, -1.8413], [1, "VIX tenors 9/30/93/184d, 365-day year", -523.84, -265350.38, -1.8427], [2, "Sharpe on excess P\u0026L, rf=0", 0.0, -265350.38, -1.1714], [3, "^IRX gaps: previous print", 0.0, -265350.38, -1.1714], [4, "S3 proxy exit-day P\u0026L + cost", -1341.15, -266691.53, -1.1766], [5, "hedge open/unwind costs", -15252.3, -281943.84, -1.254], [6, "premium + hedge financing", 20542.16, -261401.68, -1.1454], [7, "expiry settle / roll", 0.0, -261401.68, -1.1454], [8, "open trade in trade log", 0.0, -261401.68, -1.1454], [9, "size off sleeve NAV", 51921.3, -209480.38, -1.3335], [10, "real correlation netting", 15932.12, -193548.25, -1.3338], [11, "ATM vol = 0.82 \u00d7 VIX", 107869.87, -85678.38, -0.3698], [12, "S3 = short SPX straddle (index leg)", -35626.57, -121304.95, -0.5687], [13, "R2 gate = upstream default (adaptive (rolling 80th pct))", -138840.54, -260145.5, -1.2808], [14, "PDV spread: 21-day RMS-vol forecast (daily purged refit)", 37968.4, -222177.1, -0.9875]]}, "describe": "From \u2212$261K (C21 as published) to \u2212$222K in 15 cumulative steps; each bar is one correction\u0027s effect on portfolio P\u0026L.", "grid": {"bottom": 30, "left": 160, "top": 8}, "horizontal": true, "id": "chart-waterfall", "kind": "xy", "labelFont": "sans", "labelMax": 380, "labelShare": 0.45, "labelsShort": ["C21 published", "C21 engine as published", "VIX tenors 9/30/93/184d, 365-day year", "Sharpe on excess P\u0026L, rf=0", "^IRX gaps: previous print", "S3 proxy exit-day P\u0026L + cost", "hedge open/unwind costs", "premium + hedge financing", "expiry settle / roll", "open trade in trade log", "size off sleeve NAV", "real correlation netting", "ATM vol = 0.82 \u00d7 VIX", "S3 = short SPX straddle", "R2 gate = upstream default", "PDV spread: 21-day RMS-vol forecast", "C22 canonical"], "legend_items": [{"color": "pos", "dash": false, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "Step raises P\u0026L"}, {"color": "neg", "dash": false, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "Step lowers P\u0026L"}, {"color": "headline", "dash": false, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "Run total"}], "series": [{"data": [null, -261.206, -264.827, -265.35, -265.35, -265.35, -266.692, -261.402, -261.402, -261.402, -209.48, -193.548, -85.6784, -85.6784, -121.305, -222.177, null], "invisible": true, "name": "base", "stack": "w", "type": "bar"}, {"color": "pos", "data": [null, null, null, null, null, null, null, -20.5422, null, null, -51.9213, -15.9321, -107.87, null, null, -37.9684, null], "legend": true, "name": "Step raises P\u0026L", "stack": "w", "tip": [null, null, null, null, null, null, null, 20.5422, null, null, 51.9213, 15.9321, 107.87, null, null, 37.9684, null], "type": "bar"}, {"color": "neg", "data": [null, -3.62054, -0.523841, null, null, -1.34115, -15.2523, null, null, null, null, null, null, -35.6266, -138.841, null, null], "legend": true, "name": "Step lowers P\u0026L", "stack": "w", "tip": [null, -3.62054, -0.523841, null, null, -1.34115, -15.2523, null, null, null, null, null, null, -35.6266, -138.841, null, null], "type": "bar"}, {"color": "headline", "data": [-261.206, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, -222.177], "fill": 0.35, "legend": true, "name": "Run total", "stack": "w", "type": "bar"}], "table": {"caption": "C22 bridge: each correction applied in turn ($)", "columns": [{"label": "Row", "num": true}, {"label": "Correction", "num": false}, {"label": "\u0394 P\u0026L", "num": true}, {"label": "P\u0026L after", "num": true}, {"label": "Sharpe after", "num": true}], "rows": [["\u2014", "C21 as published", "", "\u2212$261,206", ""], ["0", "C21 engine as published", "\u2212$3,621", "\u2212$264,827", "\u22121.84"], ["1", "VIX tenors 9/30/93/184d, 365-day year", "\u2212$524", "\u2212$265,350", "\u22121.84"], ["2", "Sharpe on excess P\u0026L, rf=0", "$0", "\u2212$265,350", "\u22121.17"], ["3", "^IRX gaps: previous print", "$0", "\u2212$265,350", "\u22121.17"], ["4", "S3 proxy exit-day P\u0026L + cost", "\u2212$1,341", "\u2212$266,692", "\u22121.18"], ["5", "hedge open/unwind costs", "\u2212$15,252", "\u2212$281,944", "\u22121.25"], ["6", "premium + hedge financing", "+$20,542", "\u2212$261,402", "\u22121.15"], ["7", "expiry settle / roll", "$0", "\u2212$261,402", "\u22121.15"], ["8", "open trade in trade log", "$0", "\u2212$261,402", "\u22121.15"], ["9", "size off sleeve NAV", "+$51,921", "\u2212$209,480", "\u22121.33"], ["10", "real correlation netting", "+$15,932", "\u2212$193,548", "\u22121.33"], ["11", "ATM vol = 0.82 \u00d7 VIX", "+$107,870", "\u2212$85,678", "\u22120.37"], ["12", "S3 = short SPX straddle (index leg)", "\u2212$35,627", "\u2212$121,305", "\u22120.57"], ["13", "R2 gate = upstream default (adaptive (rolling 80th pct))", "\u2212$138,841", "\u2212$260,145", "\u22121.28"], ["14", "PDV spread: 21-day RMS-vol forecast (daily purged refit)", "+$37,968", "\u2212$222,177", "\u22120.99"]]}, "tipRows": [{"data": [-261.206, -264.827, -265.35, -265.35, -265.35, -266.692, -281.944, -261.402, -261.402, -261.402, -209.48, -193.548, -85.6784, -121.305, -260.145, -222.177, -222.177], "digits": 1, "name": "P\u0026L after", "signed": true}], "title": "C22 waterfall: portfolio P\u0026L from the published C21 run to the canonical run ($000s)", "tooltip": "axis", "x": {"categories": ["C21 published", "C21 engine as published", "VIX tenors 9/30/93/184d, 365-day year", "Sharpe on excess P\u0026L, rf=0", "^IRX gaps: previous print", "S3 proxy exit-day P\u0026L + cost", "hedge open/unwind costs", "premium + hedge financing", "expiry settle / roll", "open trade in trade log", "size off sleeve NAV", "real correlation netting", "ATM vol = 0.82 \u00d7 VIX", "S3 = short SPX straddle (index leg)", "R2 gate = upstream default (adaptive (rolling 80th pct))", "PDV spread: 21-day RMS-vol forecast (daily purged refit)", "C22 canonical"], "interval": 0, "type": "category"}, "xs": ["C21 published", "C21 engine as published", "VIX tenors 9/30/93/184d, 365-day year", "Sharpe on excess P\u0026L, rf=0", "^IRX gaps: previous print", "S3 proxy exit-day P\u0026L + cost", "hedge open/unwind costs", "premium + hedge financing", "expiry settle / roll", "open trade in trade log", "size off sleeve NAV", "real correlation netting", "ATM vol = 0.82 \u00d7 VIX", "S3 = short SPX straddle (index leg)", "R2 gate = upstream default (adaptive (rolling 80th pct))", "PDV spread: 21-day RMS-vol forecast (daily purged refit)", "C22 canonical"], "y": {"digits": 0, "max": 0, "name": "Portfolio P\u0026L ($000s)", "signed": true, "tipDigits": 1, "zero": true}}</script>
+<div class="chart-data sr-only" id="chart-waterfall-data">
+  
+  <table>
+    <caption>C22 bridge: each correction applied in turn ($)</caption>
+    <thead><tr><th scope="col" class="num">Row</th><th scope="col">Correction</th><th scope="col" class="num"><span class="sym">Δ</span> P&amp;L</th><th scope="col" class="num">P&amp;L after</th><th scope="col" class="num">Sharpe after</th></tr></thead>
+    <tbody><tr><td class="num">—</td><td>C21 as published</td><td class="num"></td><td class="num">−$261,206</td><td class="num"></td></tr><tr><td class="num">0</td><td>C21 engine as published</td><td class="num">−$3,621</td><td class="num">−$264,827</td><td class="num">−1.84</td></tr><tr><td class="num">1</td><td>VIX tenors 9/30/93/184d, 365-day year</td><td class="num">−$524</td><td class="num">−$265,350</td><td class="num">−1.84</td></tr><tr><td class="num">2</td><td>Sharpe on excess P&amp;L, rf=0</td><td class="num">$0</td><td class="num">−$265,350</td><td class="num">−1.17</td></tr><tr><td class="num">3</td><td>^IRX gaps: previous print</td><td class="num">$0</td><td class="num">−$265,350</td><td class="num">−1.17</td></tr><tr><td class="num">4</td><td>S3 proxy exit-day P&amp;L + cost</td><td class="num">−$1,341</td><td class="num">−$266,692</td><td class="num">−1.18</td></tr><tr><td class="num">5</td><td>hedge open/unwind costs</td><td class="num">−$15,252</td><td class="num">−$281,944</td><td class="num">−1.25</td></tr><tr><td class="num">6</td><td>premium + hedge financing</td><td class="num">+$20,542</td><td class="num">−$261,402</td><td class="num">−1.15</td></tr><tr><td class="num">7</td><td>expiry settle / roll</td><td class="num">$0</td><td class="num">−$261,402</td><td class="num">−1.15</td></tr><tr><td class="num">8</td><td>open trade in trade log</td><td class="num">$0</td><td class="num">−$261,402</td><td class="num">−1.15</td></tr><tr><td class="num">9</td><td>size off sleeve NAV</td><td class="num">+$51,921</td><td class="num">−$209,480</td><td class="num">−1.33</td></tr><tr><td class="num">10</td><td>real correlation netting</td><td class="num">+$15,932</td><td class="num">−$193,548</td><td class="num">−1.33</td></tr><tr><td class="num">11</td><td>ATM vol = 0.82 × VIX</td><td class="num">+$107,870</td><td class="num">−$85,678</td><td class="num">−0.37</td></tr><tr><td class="num">12</td><td>S3 = short SPX straddle (index leg)</td><td class="num">−$35,627</td><td class="num">−$121,305</td><td class="num">−0.57</td></tr><tr><td class="num">13</td><td>R2 gate = upstream default (adaptive (rolling 80th pct))</td><td class="num">−$138,841</td><td class="num">−$260,145</td><td class="num">−1.28</td></tr><tr><td class="num">14</td><td>PDV spread: 21-day RMS-vol forecast (daily purged refit)</td><td class="num">+$37,968</td><td class="num">−$222,177</td><td class="num">−0.99</td></tr></tbody>
+  </table>
+  
+  
+</div>
+    
+    <p class="note">Each bar is one correction's effect on portfolio P&amp;L in the order the bridge applies them (each row is cumulative), replayed on the C23-restated VIX record, so the last bar is today’s <a class="cite" href="research.html#equity">canonical run</a>; the published C22 run ended at −$216,092 and the C23 table below accounts for the difference. The <a class="cite" href="research.html#beta-grid">β step</a> moves it by +$108K (S1C −$414K → −$116K, S1 +$576K → −$508K); the single <a class="term" href="model-risk.html#def-regimes"><abbr title="rule regime labels">R2</abbr></a> gate by −$139K.</p>
+  </div>
+</section>
+  <section class="panel s4 " id="headline" aria-labelledby="headline-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="headline-t">Published result after each round</h2>
+    <span class="panel-side">
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="headline" aria-label="Copy a link to the Published result after each round panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in Published portfolio cumulative return after each round">
+    
+    
+    
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="chart-headline-data" aria-expanded="false" aria-controls="chart-headline-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="chart-headline" data-filename="headline_by_round.csv">CSV</button>
+  </div>
+</div>
+
+<div class="chart h300 grow" id="chart-headline" data-spec="chart-headline-spec" role="img" aria-label="Published portfolio cumulative return after each round" aria-describedby="chart-headline-desc chart-headline-data"></div>
+
+<p class="sr-only" id="chart-headline-desc">C17 to C22 as published at the time; C23 from the stored canonical run.</p>
+<script type="application/json" id="chart-headline-spec">{"csv": "headline_by_round.csv", "describe": "C17 to C22 as published at the time; C23 from the stored canonical run.", "grid": {"top": 12}, "id": "chart-headline", "kind": "xy", "legend_items": [], "series": [{"color": "headline", "data": [-9.1, -19.0, -19.0, -19.0, -26.1, -21.6, -22.2177], "name": "Published cumulative return", "size": 7, "symbol": "circle", "type": "line"}], "table": {"caption": "Published cumulative return by round (%)", "columns": [{"label": "Round", "num": false}, {"label": "Cumulative return", "num": true}], "rows": [["C17", "\u22129.1%"], ["C18", "\u221219.0%"], ["C19", "\u221219.0%"], ["C20", "\u221219.0%"], ["C21", "\u221226.1%"], ["C22", "\u221221.6%"], ["C23", "\u221222.2%"]]}, "title": "Published portfolio cumulative return after each round", "tooltip": "axis", "x": {"categories": ["C17", "C18", "C19", "C20", "C21", "C22", "C23"], "interval": 0, "type": "category"}, "xs": ["C17", "C18", "C19", "C20", "C21", "C22", "C23"], "y": {"digits": 0, "name": "Cumulative return (%)", "signed": true, "tickUnit": "%", "tipDigits": 1, "unit": "%"}}</script>
+<div class="chart-data sr-only" id="chart-headline-data">
+  
+  <table>
+    <caption>Published cumulative return by round (%)</caption>
+    <thead><tr><th scope="col">Round</th><th scope="col" class="num">Cumulative return</th></tr></thead>
+    <tbody><tr><td>C17</td><td class="num">−9.1%</td></tr><tr><td>C18</td><td class="num">−19.0%</td></tr><tr><td>C19</td><td class="num">−19.0%</td></tr><tr><td>C20</td><td class="num">−19.0%</td></tr><tr><td>C21</td><td class="num">−26.1%</td></tr><tr><td>C22</td><td class="num">−21.6%</td></tr><tr><td>C23</td><td class="num">−22.2%</td></tr></tbody>
+  </table>
+  
+  
+</div>
+    <p class="note">C16 published no portfolio figure; C19 and C20 left it unchanged; C23 is the stored canonical run, with its intervals and nulls in <a class="cite" href="research.html#inference">the inference on Research</a>.</p>
+  </div>
+</section>
+</div>
+
+<div class="g">
+  <section class="panel s12 " id="register" aria-labelledby="register-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="register-t">Findings register · every finding, C16–C23</h2>
+    <span class="panel-side"><span class="panel-meta">33 findings</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="register" aria-label="Copy a link to the Findings register · every finding, C16–C23 panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+    
+    <div class="tabs js-only" role="group" aria-label="Filter the findings register">
+      <button class="btn" type="button" data-filter-for="register-table" data-filter="all" aria-pressed="true">All (33)</button>
+      <button class="btn" type="button" data-filter-for="register-table" data-filter="quantified" aria-pressed="false">Quantified (3)</button>
+      <button class="btn" type="button" data-filter-for="register-table" data-filter="notest" aria-pressed="false">No test (1)</button>
+    </div>
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Findings register (scrollable)">
+    <table class="tbl dense cards" id="register-table">
+      <caption>Every finding: status, portfolio P&amp;L where a bridge CSV measures it, the tests that pin it</caption>
+      <thead><tr><th scope="col">ID</th><th scope="col">Round</th><th scope="col">Flaw</th><th scope="col">Status</th><th scope="col" class="num">Portfolio P&amp;L</th><th scope="col" class="num">Tests</th><th scope="col">Entry</th></tr></thead>
+      <tbody><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C16.1</td><td data-label="Round">C16</td><td class="wrap" data-label="Flaw">PDV look-ahead bias</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c16-f1">C16 finding 1</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C16.2</td><td data-label="Round">C16</td><td class="wrap" data-label="Flaw">Circular classifier feature</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c16-f2">C16 finding 2</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C16.3</td><td data-label="Round">C16</td><td class="wrap" data-label="Flaw">Retrospective Kelly netting</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c16-f3">C16 finding 3</a></td></tr><tr data-status="quantified" data-tests="0"><td class="nowrap" data-label="ID">C16.4</td><td data-label="Round">C16</td><td class="wrap" data-label="Flaw">S1C data snooping</td><td data-label="Status"><span class="chip chip-watch">quantified</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">0 <span class="chip chip-breach">gap</span></td><td data-label="Entry"><a href="#c16-f4">C16 finding 4</a></td></tr><tr data-status="quantified" data-tests="1"><td class="nowrap" data-label="ID">C16.5</td><td data-label="Round">C16</td><td class="wrap" data-label="Flaw">S3 arbitrary P&amp;L scale</td><td data-label="Status"><span class="chip chip-watch">quantified</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c16-f5">C16 finding 5</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C17.1</td><td data-label="Round">C17</td><td class="wrap" data-label="Flaw">Classifier never benchmarked against persistence</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c17-f1">C17 finding 1</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C17.2</td><td data-label="Round">C17</td><td class="wrap" data-label="Flaw">Margin model documented but not enforced</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c17-f2">C17 finding 2</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C17.3</td><td data-label="Round">C17</td><td class="wrap" data-label="Flaw">S1C had no R2 exit</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c17-f3">C17 finding 3</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C17.4</td><td data-label="Round">C17</td><td class="wrap" data-label="Flaw">Dead monthly recalibration; a flat 5% hurdle</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c17-f4">C17 finding 4</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C18.1</td><td data-label="Round">C18</td><td class="wrap" data-label="Flaw">Same-day re-entry kept one straddle alive</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c18-f1">C18 finding 1</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C19.1</td><td data-label="Round">C19</td><td class="wrap" data-label="Flaw">S2 stop-loss not propagated; dead code; incomplete summaries; data gaps</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c19-f1">C19 finding 1</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C20.1</td><td data-label="Round">C20</td><td class="wrap" data-label="Flaw">Archived fits ranked by SPX RMSE with no data-sufficiency check</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c20-f1">C20 finding 1</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C21.1</td><td data-label="Round">C21</td><td class="wrap" data-label="Flaw">^IRX history inside the window was seven synthetic test rows</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c21-f1">C21 finding 1</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C21.2</td><td data-label="Round">C21</td><td class="wrap" data-label="Flaw">First holding day carried no time decay</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c21-f2">C21 finding 2</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C21.3</td><td data-label="Round">C21</td><td class="wrap" data-label="Flaw">The bot published classifier output as rule labels</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c21-f3">C21 finding 3</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C22.1</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">ATM straddles priced at the VIX</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c22_bridge.csv row 11">+$108K</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c22-f1">C22 finding 1</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C22.2</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">Two R2 gates and a hard-coded VVIX override</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c22_bridge.csv row 13">−$139K</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c22-f2">C22 finding 2</a></td></tr><tr data-status="fixed" data-tests="4"><td class="nowrap" data-label="ID">C22.3</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">Free hedging, no carry, sizing off $1M, no-op netting</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c22_bridge.csv rows 5, 6, 9, 10">+$73K</td><td class="num" data-label="Tests">4</td><td data-label="Entry"><a href="#c22-f3">C22 finding 3</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C22.4</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">S3 P&amp;L was a z-score times an assumed 2%</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c22_bridge.csv rows 4, 12">−$37K</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c22-f4">C22 finding 4</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C22.5</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">PDV spread compared the 30-day VIX with a 1-day forecast</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c22_bridge.csv row 14">+$38K</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c22-f5">C22 finding 5</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C22.6</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">Sharpe charged cash twice</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c22_bridge.csv row 2">unchanged</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c22-f6">C22 finding 6</a></td></tr><tr data-status="fixed" data-tests="3"><td class="nowrap" data-label="ID">C22.7</td><td data-label="Round">C22</td><td class="wrap" data-label="Flaw">VIX indices fitted as futures; ATM-call anchors; one-expiry live fits</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">3</td><td data-label="Entry"><a href="#c22-f7">C22 finding 7</a></td></tr><tr data-status="fixed" data-tests="3"><td class="nowrap" data-label="ID">C23-D1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">The labels, backtest and calibrator read Yahoo&#39;s copies of the VIX index family</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L" title="c23_bridge.csv rows 1, 2, 3, 4">−$6K</td><td class="num" data-label="Tests">3</td><td data-label="Entry"><a href="#c23-f1">C23 finding 1</a></td></tr><tr data-status="quantified" data-tests="3"><td class="nowrap" data-label="ID">C23-M1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">The <span class="sym">σ</span> ≤ 2 box, not the market, sets the headline fit</td><td data-label="Status"><span class="chip chip-watch">quantified</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">3</td><td data-label="Entry"><a href="#c23-f2">C23 finding 2</a></td></tr><tr data-status="fixed" data-tests="3"><td class="nowrap" data-label="ID">C23-M2</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">3</td><td data-label="Entry"><a href="#c23-f3">C23 finding 3</a></td></tr><tr data-status="fixed" data-tests="4"><td class="nowrap" data-label="ID">C23-S1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">The backtest had no statistical inference</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">4</td><td data-label="Entry"><a href="#c23-f4">C23 finding 4</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C23-R1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">Flat rates in the hedger and the Greeks surface</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c23-f5">C23 finding 5</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C23-O1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">A presentation test could lose a captured session</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c23-f6">C23 finding 6</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C23-O2</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">`make reproduce` refitted the calibrations from a deleted scratch pickle and with the wrong optimiser</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c23-f7">C23 finding 7</a></td></tr><tr data-status="fixed" data-tests="2"><td class="nowrap" data-label="ID">C23-U1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">The accessibility gate audited retired pages; the Risk page printed &#39;r = —%&#39;; the ML classifier sat on the Overview</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">2</td><td data-label="Entry"><a href="#c23-f8">C23 finding 8</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C23-E1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">`option_chain.year_fraction` raised on an origin with no time in it</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c23-f9">C23 finding 9</a></td></tr><tr data-status="fixed" data-tests="1"><td class="nowrap" data-label="ID">C23-E2</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">Known advisories in three locked packages on the download and preview paths</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">1</td><td data-label="Entry"><a href="#c23-f10">C23 finding 10</a></td></tr><tr data-status="fixed" data-tests="6"><td class="nowrap" data-label="ID">C23-V1</td><td data-label="Round">C23</td><td class="wrap" data-label="Flaw">Published claims that the branch&#39;s own artifacts contradicted (independent review of C23)</td><td data-label="Status"><span class="chip chip-ok">fixed</span></td><td class="num" data-label="Portfolio P&amp;L">—</td><td class="num" data-label="Tests">6</td><td data-label="Entry"><a href="#c23-f11">C23 finding 11</a></td></tr></tbody>
+    </table>
+    </div>
+    <p class="note">Portfolio P&amp;L is the sum of the finding's rows in <code>c22_bridge.csv</code> or <code>c23_bridge.csv</code> (mark-to-model; hover for the rows); — where no bridge measures it. A gap is a finding no regression test pins. 30 fixed, 3 quantified (measured and published rather than removed); 1 without a dedicated regression test. The postmortems below keep each finding's root cause, fix, evidence and tests (open a finding, or follow its entry link); the newest round is open.</p>
+  </div>
+  <div class="panel-foot cite-foot" id="register-cited">Cited on: <a href="research.html#why">Research</a></div>
+</section>
+</div>
+
+<h2 class="section-title">Postmortems</h2>
+<div class="timeline" id="audit-table">
+  
+  <article class="pm sev-high" id="c16" data-round="C16" aria-labelledby="c16-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C16</span>
+      <h3 class="pm-title" id="c16-t">Methodology audit: look-ahead, a circular feature, retrospective sizing</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">5 findings</span>
+      <span class="pm-date">2026-06-11</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">Self-audit of the methodology before the result was published.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">signals, classifier, sizing · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/47e1ffebc910c5ad31c85c5bac0cb2511172a62b"><code>47e1ffe</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">The published +19% headline was a label-noise artifact.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c16-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>PDV look-ahead bias</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The PDV model was fitted on the full sample, so every backtest year traded a forecast that had seen its own future.</dd>
+        <dt>Fix</dt><dd>PDVLinear refitted per backtest year on strictly earlier returns (walk-forward) before it feeds the pdv_iv_spread feature.</dd>
+        <dt>Evidence</dt><dd>S1/S1C now trade a causal PDV forecast</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>pdv.py::<wbr>Test<wbr>No<wbr>Look<wbr>Ahead::<wbr>test_<wbr>walk_<wbr>forward_<wbr>no_<wbr>lookahead_<wbr>poison</code>, <code class="path">test_<wbr>pdv.py::<wbr>Test<wbr>No<wbr>Look<wbr>Ahead::<wbr>test_<wbr>poison_<wbr>actually_<wbr>bites_<wbr>later</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c16-f2" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 2 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Circular classifier feature</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>vvix was a training feature while the R2 label is defined as VVIX above a threshold, so 86.2% accuracy partly measured rule recovery.</dd>
+        <dt>Fix</dt><dd>vvix removed from the classifier&#39;s features; honest accuracy 63.4%.</dd>
+        <dt>Evidence</dt><dd>Historical C16 figure: honest accuracy 63.4%; C17 then found it lost to the persistence baseline</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>regime_<wbr>classifier.py::<wbr>Test<wbr>Version<wbr>Robust<wbr>Pickle::<wbr>test_<wbr>shipped_<wbr>classifier_<wbr>is_<wbr>built_<wbr>on_<wbr>the_<wbr>canonical_<wbr>gate</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c16-f3" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 3 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Retrospective Kelly netting</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Correlation and Sharpe multipliers used same-day P&amp;L to size the same day&#39;s positions.</dd>
+        <dt>Fix</dt><dd>Multipliers shifted one session and applied to position size in a second simulation pass, so contracts and costs reflect the real size.</dd>
+        <dt>Evidence</dt><dd>Ex-ante sizing; no same-day information</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Correlation<wbr>Netting::<wbr>test_<wbr>engine_<wbr>applies_<wbr>the_<wbr>overlay_<wbr>one_<wbr>session_<wbr>late</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c16-f4" data-status="quantified" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 4 · <span class="chip chip-watch">quantified</span> <span class="chip chip-breach">no test</span></span>
+        <span class="pm-v"><strong>S1C data snooping</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>S1C&#39;s direction was chosen after watching S1 fail on 2018–2025; that cannot be undone in code.</dd>
+        <dt>Fix</dt><dd>Tested on 2013–2017, a window not used to design it (C17 re-ran it under corrected labels): S1C −$333K; the apparent edge was an artifact.</dd>
+        <dt>Evidence</dt><dd>Pseudo-<a class="term" href="model-risk.html#def-oos">out-of-sample</a> under C17: S1C −$333K — the apparent edge was an artifact</dd>
+        
+        <dt>Pinned by</dt><dd>no dedicated regression test (a gap)</dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c16-f5" data-status="quantified" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 5 · <span class="chip chip-watch">quantified</span></span>
+        <span class="pm-v"><strong>S3 arbitrary P&amp;L scale</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>S3&#39;s P&amp;L was an assumed 2% per z-unit (no single-stock options data).</dd>
+        <dt>Fix</dt><dd>Sensitivity run at 0.5% / 1% / 2% / 4% per z-unit; C22 replaced the proxy with the index leg (a short SPX straddle).</dd>
+        <dt>Evidence</dt><dd>C16 sensitivity run: P&amp;L +$5K…+$52K, win 15–17 of 17 at every scale (before C18, C21 and C22 re-priced every trade and C22 replaced the proxy with the index leg)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>S3::<wbr>test_<wbr>null_<wbr>test_<wbr>exposes_<wbr>the_<wbr>z_<wbr>proxy_<wbr>bias</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-high" id="c17" data-round="C17" aria-labelledby="c17-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C17</span>
+      <h3 class="pm-title" id="c17-t">Red-team: the classifier against a persistence baseline; margin; an unbounded tail</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">4 findings</span>
+      <span class="pm-date">2026-06-11</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">Red-team review in the same week as C16.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">classifier, risk limits, signals · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/8c3ba9b650eeb8554a30bf8c1b5541306fa46abd"><code>8c3ba9b</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">The classifier loses to &#39;predict yesterday&#39;s regime&#39; and was demoted from the trading loop; portfolio −9.1% as published after this round.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c17-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Classifier never benchmarked against persistence</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Regime labels are same-day observables, so yesterday&#39;s label is a no-skill baseline; it scored 90.0% on 2020+ against the classifier&#39;s 63.4%.</dd>
+        <dt>Fix</dt><dd>ML demoted to research; the backtest trades the lagged deterministic rule labels.</dd>
+        <dt>Evidence</dt><dd>63.4% vs 90.0% — the ML added negative value (the C22 retrain on the adaptive gate: 74.9% vs 87.0%; still below the baseline)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>regime_<wbr>classifier.py::<wbr>Test<wbr>Evaluate<wbr>Classifier::<wbr>test_<wbr>persistence_<wbr>baseline_<wbr>reported</code>, <code class="path">test_<wbr>regime_<wbr>classifier.py::<wbr>Test<wbr>Evaluate<wbr>Classifier::<wbr>test_<wbr>persistence_<wbr>uses_<wbr>previous_<wbr>session_<wbr>label</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c17-f2" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 2 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Margin model documented but not enforced</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>MARGIN_RATIO was defined but never applied, so short straddles had unlimited capacity.</dd>
+        <dt>Fix</dt><dd>Short straddles capped at nav / (0.20 * K * 100) contracts at entry.</dd>
+        <dt>Evidence</dt><dd>Cost model now matches its documentation</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>engine.py::<wbr>Test<wbr>C17<wbr>Fixes::<wbr>test_<wbr>margin_<wbr>cap_<wbr>on_<wbr>short_<wbr>straddles</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c17-f3" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 3 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>S1C had no R2 exit</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>An open S1C short straddle could ride a VVIX spike for up to 21 days with no stop.</dd>
+        <dt>Fix</dt><dd>S1C force-closes when the regime moves into R2, as S1X, S2X and S4 do.</dd>
+        <dt>Evidence</dt><dd>Worst-case short-gamma exposure now bounded by the R2 rule</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>signal_<wbr>engine.py::<wbr>Test<wbr>Generate<wbr>Signal1<wbr>Contrarian::<wbr>test_<wbr>r2_<wbr>transition_<wbr>forces_<wbr>exit</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c17-f4" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 4 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Dead monthly recalibration; a flat 5% hurdle</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The monthly Heston loop never produced a calibration (no pre-2026 options data) and nothing consumed its output; Sharpe used a flat 5%.</dd>
+        <dt>Fix</dt><dd>Loop removed; Sharpe and Sortino measured against the per-date ^IRX path (later superseded in C22).</dd>
+        <dt>Evidence</dt><dd>Backtest claims now match what the code does</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>engine.py::<wbr>Test<wbr>C17<wbr>Fixes::<wbr>test_<wbr>compute_<wbr>metrics_<wbr>accepts_<wbr>rf_<wbr>series</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-high" id="c18" data-round="C18" aria-labelledby="c18-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C18</span>
+      <h3 class="pm-title" id="c18-t">Straddles never rolled: one stale-strike position marked past expiry</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">1 finding</span>
+      <span class="pm-date">2026-06-14</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">Word-by-word audit of the engine&#39;s position series: positions never returned to flat.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">backtest engine · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/3d52f421dafa9eac13671d54e95ab5d0ec4a5f97"><code>3d52f42</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">Inverted the contrarian thesis: S1 −$1.53M → +$463K, S1C −$97K → −$404K, portfolio −9.1% → −19.0%; S3 unchanged.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c18-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Same-day re-entry kept one straddle alive</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The state machine re-entered on the day it exited, so the strike was fixed at first entry and the tenor decayed to its 1-day floor: a directional |S - K| bet, not a vol trade. Every P&amp;L figure from C10 to C17 was contaminated.</dd>
+        <dt>Fix</dt><dd>A forced flat day so positions roll into fresh 30-day ATM straddles.</dd>
+        <dt>Evidence</dt><dd>Inverted the thesis: S1 −$1.53M → +$463K, S1C −$97K → −$404K, portfolio −9.1% → −19.0%; S3 unchanged</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Expiry<wbr>Roll::<wbr>test_<wbr>rolls_<wbr>into_<wbr>fresh_<wbr>atm_<wbr>straddles</code>, <code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Expiry<wbr>Roll::<wbr>test_<wbr>no_<wbr>trade_<wbr>outlives_<wbr>its_<wbr>expiry</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-low" id="c19" data-round="C19" aria-labelledby="c19-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C19</span>
+      <h3 class="pm-title" id="c19-t">Signal-engine logic fixes and data-gap repair</h3>
+      <span class="chip chip-ok">low severity</span>
+      <span class="pm-count">1 finding</span>
+      <span class="pm-date">2026-06-20</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">Follow-up review of the signal state machines after C18.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">signals, data · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/e1cfbd0eb0f5577d9e7ad79a5cedb9c772d69807"><code>e1cfbd0</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">Cleanup; the canonical numbers did not change.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c19-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>S2 stop-loss not propagated; dead code; incomplete summaries; data gaps</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Stop-loss exits did not reach the S2 position; signal summaries skipped sleeves; market data had gaps.</dd>
+        <dt>Fix</dt><dd>Stops propagate to the S2 position, dead code removed, summaries cover every sleeve, gaps repaired.</dd>
+        <dt>Evidence</dt><dd>Cleanup — the canonical numbers did not change</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>signal_<wbr>engine.py::<wbr>Test<wbr>Generate<wbr>Signal2::<wbr>test_<wbr>short_<wbr>straddle_<wbr>stopped_<wbr>when_<wbr>front_<wbr>vol_<wbr>rises</code>, <code class="path">test_<wbr>signal_<wbr>engine.py::<wbr>Test<wbr>Generate<wbr>Signal2::<wbr>test_<wbr>long_<wbr>straddle_<wbr>stopped_<wbr>when_<wbr>front_<wbr>vol_<wbr>falls</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-high" id="c20" data-round="C20" aria-labelledby="c20-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C20</span>
+      <h3 class="pm-title" id="c20-t">The calibration selector rewarded broken data</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">1 finding</span>
+      <span class="pm-date">2026-08-04 → 2026-09-05</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">The headline fit was traced to a day the VIX feed returned only ^VIX.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">calibration, dashboard · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/35690a261ddf7c944d28be2a9329736794307db6"><code>35690a2</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/9058371bd30bbfc1d259e74446fa6b349eca3fc9"><code>9058371</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">The published &#39;best calibration&#39; had been the day the VIX feed failed; fits are now gated on at least 3 VIX tenors with provenance recorded.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c20-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Archived fits ranked by SPX RMSE with no data-sufficiency check</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>With one VIX tenor the VIX leg is one point Heston matches exactly, so under-identified joint fits scored best and headlined the site.</dd>
+        <dt>Fix</dt><dd>Gate on &gt;= 3 VIX tenors; Feller reported as PASS / BINDING / VIOLATED. C22 went further: the headline is the newest gate-passing fit, never the lowest RMSE.</dd>
+        <dt>Evidence</dt><dd>The published “best calibration” had been the day the VIX feed failed</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>joint_<wbr>calibrator.py::<wbr>Test<wbr>Calibration<wbr>Quality<wbr>Gate::<wbr>test_<wbr>single_<wbr>vix_<wbr>tenor_<wbr>rejected</code>, <code class="path">test_<wbr>dashboard.py::<wbr>test_<wbr>selector_<wbr>takes_<wbr>newest_<wbr>acceptable_<wbr>fit_<wbr>not_<wbr>lowest_<wbr>rmse</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-high" id="c21" data-round="C21" aria-labelledby="c21-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C21</span>
+      <h3 class="pm-title" id="c21-t">The cash hurdle was a test fixture; straddles marked a day too rich</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">3 findings</span>
+      <span class="pm-date">2026-09-05</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">Adversarial audit of the backtest inputs and the daily bot.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">backtest engine, data, daily bot · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/15b4db5f98f05b9ed2bb9f8fa2c2b934a74097cf"><code>15b4db5</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/90dc851581a5197ce2eec126c78673293b2edb90"><code>90dc851</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, MaxDD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c21-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>^IRX history inside the window was seven synthetic test rows</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>test_rates.py wrote np.linspace(0.015, 0.020) into the tracked database and it was forward-filled for five years.</dd>
+        <dt>Fix</dt><dd>Real ^IRX history loaded (1,809 rows); the suite now works on a private copy and cannot write the tracked database.</dd>
+        <dt>Evidence</dt><dd>Part of the round&#39;s combined effect above; the two backtest fixes were not re-run separately</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>c21_<wbr>audit_<wbr>fixes.py::<wbr>Test<wbr>Risk<wbr>Free<wbr>Hurdle::<wbr>test_<wbr>metrics_<wbr>reject_<wbr>a_<wbr>stub_<wbr>rate_<wbr>series</code>, <code class="path">test_<wbr>rates.py::<wbr>Test<wbr>Isolation::<wbr>test_<wbr>database_<wbr>module_<wbr>points_<wbr>at_<wbr>a_<wbr>temp_<wbr>file</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c21-f2" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 2 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>First holding day carried no time decay</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>T_rem was computed from the pre-increment day count, so every mark valued the straddle one day too rich, flattering the short side.</dd>
+        <dt>Fix</dt><dd>Time to expiry decays from the first holding day.</dd>
+        <dt>Evidence</dt><dd>Part of the round&#39;s combined effect above; the two backtest fixes were not re-run separately</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>c21_<wbr>audit_<wbr>fixes.py::<wbr>Test<wbr>Straddle<wbr>Time<wbr>Decay::<wbr>test_<wbr>first_<wbr>holding_<wbr>day_<wbr>decays</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c21-f3" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 3 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>The bot published classifier output as rule labels</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The daily refresh relabelled regime_labels.parquet with the demoted classifier and refit a frozen option surface.</dd>
+        <dt>Fix</dt><dd>The bot writes deterministic rule labels and calibrates on a live chain.</dd>
+        <dt>Evidence</dt><dd>The published labels are the rule&#39;s again</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>c21_<wbr>audit_<wbr>fixes.py::<wbr>Test<wbr>Regime<wbr>Label<wbr>Provenance::<wbr>test_<wbr>refresh_<wbr>labels_<wbr>with_<wbr>rule_<wbr>not_<wbr>classifier</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-high" id="c22" data-round="C22" aria-labelledby="c22-t">
+    <details class="pm-details">
+    <summary class="pm-head">
+      <span class="pm-id">C22</span>
+      <h3 class="pm-title" id="c22-t">Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&amp;L</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">7 findings</span>
+      <span class="pm-date">2026-10-12 → 2026-10-19</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">A subsystem-by-subsystem audit (about 270 findings, each reproduced before fixing) after the live calibration failed for a month.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">backtest engine, signals, calibration, daily bot · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/a51eccc15d25b750c6a1523b3a53331b8596280d"><code>a51eccc</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">Portfolio P&amp;L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run.</div></div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c22-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>ATM straddles priced at the VIX</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The VIX is a 30-day variance-swap rate that contains the skew premium; straddles were priced and marked at it.</dd>
+        <dt>Fix</dt><dd>ATM vol = β × VIX, with β estimated from stored SPX chains.</dd>
+        <dt>Evidence</dt><dd>β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later chain, 2026-10-16, gives 0.70 — the mean over all 7 chains, 0.79, is not in the β grid. C22 bridge row 11: S1 +$576K → −$508K from β alone, before the later C22 steps; at β = 1 under the full C22 configuration (β grid), S1 shows +$2.5M</dd>
+        <dt>C22 bridge</dt><dd class="src">row 11 · portfolio P&amp;L +$108K · Sharpe −1.33 → −0.37</dd>
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Atm<wbr>Vol::<wbr>test_<wbr>entry_<wbr>vol_<wbr>is_<wbr>beta_<wbr>times_<wbr>vix</code>, <code class="path">test_<wbr>backtest_<wbr>reproducibility.py::<wbr>test_<wbr>default_<wbr>beta_<wbr>is_<wbr>the_<wbr>estimate_<wbr>from_<wbr>the_<wbr>real_<wbr>chains</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c22-f2" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 2 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Two R2 gates and a hard-coded VVIX override</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Published labels used the adaptive gate while the backtest traded a fixed 100-point VVIX gate, and the signal engine OR-ed a VVIX &gt; 100 override onto any labels.</dd>
+        <dt>Fix</dt><dd>One adaptive gate (rolling 252-day 80th percentile of VVIX) everywhere; no override.</dd>
+        <dt>Evidence</dt><dd>The backtest traded the fixed gate while the labels used the adaptive one (48% vs 23% of the backtest sessions in R2). C22 bridge row 13: portfolio −$139K</dd>
+        <dt>C22 bridge</dt><dd class="src">row 13 · portfolio P&amp;L −$139K · Sharpe −0.57 → −1.28</dd>
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>regime_<wbr>classifier.py::<wbr>Test<wbr>R2<wbr>Gate::<wbr>test_<wbr>default_<wbr>gate_<wbr>is_<wbr>adaptive</code>, <code class="path">test_<wbr>signal_<wbr>engine.py::<wbr>Test<wbr>Signal<wbr>Engine<wbr>Generate::<wbr>test_<wbr>default_<wbr>regimes_<wbr>are_<wbr>lagged_<wbr>canonical_<wbr>rule_<wbr>labels</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c22-f3" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 3 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Free hedging, no carry, sizing off $1M, no-op netting</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The opening hedge and unwind were free, the book earned no carry, size used $1M instead of the sleeve&#39;s NAV, and the netting factor was clipped into a no-op.</dd>
+        <dt>Fix</dt><dd>Costs charged once each, premium and hedge financed, size off the running sleeve NAV, real netting.</dd>
+        <dt>Evidence</dt><dd>C22 bridge rows 5, 6, 9, 10: −$15K, +$21K, +$52K, +$16K</dd>
+        <dt>C22 bridge</dt><dd class="src">rows 5, 6, 9, 10 · portfolio P&amp;L +$73K · Sharpe −1.18 → −1.33</dd>
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Hedge<wbr>Costs::<wbr>test_<wbr>open_<wbr>rebalance_<wbr>and_<wbr>unwind_<wbr>charged_<wbr>once_<wbr>each</code>, <code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Financing::<wbr>test_<wbr>trade_<wbr>financing_<wbr>matches_<wbr>formula</code>, <code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Bookkeeping::<wbr>test_<wbr>sizing_<wbr>and_<wbr>margin_<wbr>use_<wbr>running_<wbr>sleeve_<wbr>nav</code>, <code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Correlation<wbr>Netting::<wbr>test_<wbr>legacy_<wbr>multiplier_<wbr>could_<wbr>never_<wbr>reduce_<wbr>size</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c22-f4" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 4 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>S3 P&amp;L was a z-score times an assumed 2%</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The &#39;survivor&#39; was positive on 99.5% of random-walk null paths: it measured mean reversion of a ratio, not option P&amp;L.</dd>
+        <dt>Fix</dt><dd>S3 is the index leg of the dispersion trade (a short SPX straddle) on the same engine, with a timing null test.</dd>
+        <dt>Evidence</dt><dd>S3 +$23K (z-units, as published in C21) → +$61K (index leg); timing null test on S3 at base (pass-1) size, before the sizing overlay: p = 0.065 (the C22 200-path null; C23 replaced it with exposure-matched nulls, Finding 4 of C23); positive for β ≥ 0.80 in the sensitivity grid, negative at 0.78</dd>
+        <dt>C22 bridge</dt><dd class="src">rows 4, 12 · portfolio P&amp;L −$37K · Sharpe −1.17 → −0.57</dd>
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>S3::<wbr>test_<wbr>index_<wbr>leg_<wbr>is_<wbr>a_<wbr>short_<wbr>spx_<wbr>straddle</code>, <code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>S3::<wbr>test_<wbr>null_<wbr>real_<wbr>statistic_<wbr>is_<wbr>the_<wbr>engines_<wbr>s3</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c22-f5" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 5 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>PDV spread compared the 30-day VIX with a 1-day forecast</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The pre-C22 forecast was next-day E|r|, so &#39;VIX &gt; forecast + 2 <a class="term" href="model-risk.html#def-vol-pts"><abbr title="volatility points">vol pts</abbr></a>&#39; held on almost every session.</dd>
+        <dt>Fix</dt><dd>The spread uses a 21-day RMS-vol forecast refitted daily on labels fully observed at the forecast origin.</dd>
+        <dt>Evidence</dt><dd>the pre-C22 σ̂ (a 1-day E|r| forecast) averaged 0.71× the realised RMS vol of the next 21 sessions in the backtest window, so “VIX &gt; σ̂ + 2 vol pts” held on 95% of its 1,816 sessions. C22 bridge row 14: portfolio +$38K</dd>
+        <dt>C22 bridge</dt><dd class="src">row 14 · portfolio P&amp;L +$38K · Sharpe −1.28 → −0.99</dd>
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>pdv21_<wbr>wiring.py::<wbr>Test<wbr>Backtest<wbr>Engine::<wbr>test_<wbr>canonical_<wbr>horizon_<wbr>is_<wbr>21</code>, <code class="path">test_<wbr>pdv.py::<wbr>Test<wbr>Walk<wbr>Forward<wbr>Vol<wbr>Forecast::<wbr>test_<wbr>no_<wbr>lookahead_<wbr>poison</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c22-f6" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 6 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Sharpe charged cash twice</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Option P&amp;L on unfunded collateral is already an excess return; subtracting ^IRX again double-counted it.</dd>
+        <dt>Fix</dt><dd>Sharpe uses rf = 0 (collateral assumed to earn T-bills), with the T-bill benchmark shown beside it.</dd>
+        <dt>Evidence</dt><dd>C22 bridge row 2: Sharpe −1.84 → −1.17 with P&amp;L unchanged</dd>
+        <dt>C22 bridge</dt><dd class="src">row 2 · portfolio P&amp;L unchanged · Sharpe −1.84 → −1.17</dd>
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Sharpe<wbr>Convention::<wbr>test_<wbr>engine_<wbr>does_<wbr>not_<wbr>charge_<wbr>tbills_<wbr>on_<wbr>excess_<wbr>pnl</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c22-f7" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 7 · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>VIX indices fitted as futures; ATM-call anchors; one-expiry live fits</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The calibrator fitted spot VIX indices with the futures formula, anchored on adjacent ATM calls only, and the daily bot accepted fits from one SPX expiry (9 options) for a month.</dd>
+        <dt>Fix</dt><dd>Spot-index VIX leg, forward-moneyness z-grid anchors with put-wing quotes, and a gate on expiries, options and the put wing.</dd>
+        <dt>Evidence</dt><dd>Headline Heston fit replaced; one-expiry fits are rejected by the gate</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>joint_<wbr>calibrator.py::<wbr>Test<wbr>Synthetic<wbr>Market::<wbr>test_<wbr>vix_<wbr>index_<wbr>leg_<wbr>zero_<wbr>at_<wbr>generating_<wbr>params</code>, <code class="path">test_<wbr>joint_<wbr>calibrator.py::<wbr>Test<wbr>Calibration<wbr>Quality<wbr>Gate::<wbr>test_<wbr>single_<wbr>expiry_<wbr>rejected</code>, <code class="path">test_<wbr>joint_<wbr>calibrator.py::<wbr>Test<wbr>Calibration<wbr>Quality<wbr>Gate::<wbr>test_<wbr>missing_<wbr>put_<wbr>wing_<wbr>rejected</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+  <article class="pm sev-high" id="c23" data-round="C23" aria-labelledby="c23-t">
+    <details class="pm-details" open>
+    <summary class="pm-head">
+      <span class="pm-id">C23</span>
+      <h3 class="pm-title" id="c23-t">Vendor data, the calibration&#39;s identification, spread-unit evidence and statistical inference</h3>
+      <span class="chip chip-breach">high severity</span>
+      <span class="pm-count">11 findings</span>
+      <span class="pm-date">2026-10-20 → 2026-10-21</span>
+    </summary>
+    <div class="pm-grid">
+      <div class="pm-cell"><div class="pm-k">Detection</div><div class="pm-v">A reviewer-standard pass over every subsystem in six parallel chains (surface, calibration, statistics, data, UI, engineering), each result measured on the five committed model_version 2 sessions and merged only with the full suite green. An independent adversarial review of the merged branch then confirmed 62 findings; the ones that corrected a published claim are finding 11.</div></div>
+      <div class="pm-cell"><div class="pm-k">Components · commits</div><div class="pm-v">data layer, calibration, surface, statistics, rates, daily bot, dashboard, engineering · <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/c63e515f1c64b311d924d091ac8145bdd3fb6527"><code>c63e515</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/256655374fe2302942cc71e7594e6f2aa91fa7ac"><code>2566553</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/958be6996b9ea0f837dc256638be5ffb787bccbf"><code>958be69</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/49f5fd03619dd1559f8e0a5185b8e9eb93ddc310"><code>49f5fd0</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/1c886e33525cfdb0322ad3c88fec25f8f63c2965"><code>1c886e3</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/ca36d24448b9d3923f4b517499366eb8318366f5"><code>ca36d24</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/9c486c388f9d274021d1d96473eedf628898a0cb"><code>9c486c3</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/a678e57c10a32d835ee261021a37ea7c971494ad"><code>a678e57</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/e6a92bcf532cbd67462163e791eba829f0bdb853"><code>e6a92bc</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/ba360c82b9d716213c8409c4338002a0faaab84b"><code>ba360c8</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/a92308c85659450830e78bc58d12124f4b994ae6"><code>a92308c</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/741dfe3a36f90c0f8feaa263ed896fdd79b02777"><code>741dfe3</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/113efa540b9ab2c1fc03d06edaa24a378a040bbb"><code>113efa5</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/d63b7976f73d33d978baabf4711956e0d303d51d"><code>d63b797</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/59e73b1056b206532d14737285f086e7c909aa28"><code>59e73b1</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/dd4dc019ff1b14253a2f97990da877ecfec97aad"><code>dd4dc01</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/b69eb451c39fa1778e2f6f892343a550ea78a05b"><code>b69eb45</code></a>, <a href="https://github.com/navnoorthapar/vol-system-dashboard/commit/1a4ca03f1edbc58d26553a18a1bee3e1e8b61100"><code>1a4ca03</code></a></div></div>
+      <div class="pm-cell" style="grid-column:1 / -1;"><div class="pm-k">Effect on the published result</div><div class="pm-v pm-effect">Portfolio P&amp;L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe&#39;s 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it. The review round (finding 11) corrected published claims without moving a headline number.</div></div>
+    </div>
+    
+    <div class="pm-cell" style="border-right:none;">
+      <div class="pm-k">C23 waterfall · the C22 run restated on the Cboe record (<code>c23_bridge.csv</code>)</div>
+      <div class="tbl-wrap" tabindex="0" role="region" aria-label="C23 waterfall (scrollable)">
+      <table class="tbl dense cards" id="c23-bridge" data-nosort>
+        <thead><tr><th scope="col" class="num">Row</th><th scope="col">Step (cumulative)</th><th scope="col" class="num">Portfolio P&amp;L</th><th scope="col" class="num"><span class="sym">Δ</span> P&amp;L</th><th scope="col" class="num">Sharpe</th></tr></thead>
+        <tbody><tr><td class="num" data-label="Row">0</td><td class="wrap" data-label="Step (cumulative)">C22 canonical as published (pre-C23 record)</td><td class="num" data-label="Portfolio P&amp;L">−$216,092</td><td class="num" data-label="Δ P&amp;L"></td><td class="num" data-label="Sharpe">−0.879</td></tr><tr><td class="num" data-label="Row">1</td><td class="wrap" data-label="Step (cumulative)">same 2-decimal prints restated as Cboe&#39;s (|change| &lt;= 0.005)</td><td class="num" data-label="Portfolio P&amp;L">−$216,092</td><td class="num" data-label="Δ P&amp;L">$0</td><td class="num" data-label="Sharpe">−0.879</td></tr><tr><td class="num" data-label="Row">2</td><td class="wrap" data-label="Step (cumulative)">term-structure rows on NYSE holidays removed</td><td class="num" data-label="Portfolio P&amp;L">−$216,092</td><td class="num" data-label="Δ P&amp;L">$0</td><td class="num" data-label="Sharpe">−0.879</td></tr><tr><td class="num" data-label="Row">3</td><td class="wrap" data-label="Step (cumulative)">VVIX sessions missing from Yahoo added from Cboe</td><td class="num" data-label="Portfolio P&amp;L">−$222,594</td><td class="num" data-label="Δ P&amp;L">−$6,502</td><td class="num" data-label="Sharpe">−0.991</td></tr><tr><td class="num" data-label="Row">4</td><td class="wrap" data-label="Step (cumulative)">term-structure values replaced by Cboe&#39;s (|change| &gt; 0.005)</td><td class="num" data-label="Portfolio P&amp;L">−$222,177</td><td class="num" data-label="Δ P&amp;L">+$417</td><td class="num" data-label="Sharpe">−0.987</td></tr></tbody>
+      </table>
+      </div>
+    </div>
+    
+    
+    <details class="pm-cell pm-finding" id="c23-f1" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 1 (C23-D1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>The labels, backtest and calibrator read Yahoo&#39;s copies of the VIX index family</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Production overlaid Cboe&#39;s official closes on vix_daily only; every consumer read vix_term_structure, Yahoo&#39;s float32 copies with NULL provenance, NYSE-holiday rows and 8 VVIX sessions missing (forward-filled).</dd>
+        <dt>Fix</dt><dd>Cboe&#39;s index files are the record (Yahoo only as a provisional same-evening row, replaced when Cboe posts); the database cache re-synced from it; the daily job writes Cboe first and reports cross-source differences above 0.25 <a class="term" href="model-risk.html#def-index-pts"><abbr title="index points">index pts</abbr></a>.</dd>
+        <dt>Evidence</dt><dd>136 term-structure rows replaced (38 by more than 0.25 index pts, 33 of them in the backtest window), 8 VVIX sessions added, 31 holiday rows removed; portfolio −$216,092 → −$222,177 (c23_bridge.csv); labels 2019-08-09, 2020-02-20, 2020-06-11, 2021-05-11 R1 → R2 and 2021-06-09, 2021-07-08 R2 → R1</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>data_<wbr>layer.py::<wbr>Test<wbr>C23<wbr>Record<wbr>Correction::<wbr>test_<wbr>apply_<wbr>db_<wbr>removes_<wbr>holiday_<wbr>rows_<wbr>and_<wbr>installs_<wbr>the_<wbr>cboe_<wbr>values</code>, <code class="path">test_<wbr>cloud_<wbr>refresh.py::<wbr>test_<wbr>vix_<wbr>term_<wbr>structure_<wbr>is_<wbr>cboe_<wbr>primary</code>, <code class="path">test_<wbr>backtest_<wbr>reproducibility.py::<wbr>test_<wbr>c23_<wbr>bridge_<wbr>reproduces_<wbr>every_<wbr>row</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f2" data-status="quantified" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 2 (C23-M1) · <span class="chip chip-watch">quantified</span></span>
+        <span class="pm-v"><strong>The <span class="sym">σ</span> ≤ 2 box, not the market, sets the headline fit</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>σ sits on its 2.0 ceiling in 2 of the 5 model_version 2 fits (2026-03-24, 2026-10-16); the page said 4 of 5 parameters are set by the market without saying what the box costs.</dd>
+        <dt>Fix</dt><dd>A σ profile (the joint loss refitted under caps 1 to 10, κ ≤ 60) and Gauss–Newton identifiability are stored per session and shown; the production box is kept (the NN domain, the vomma shock sizing and the gate depend on it) and its cost is published. The review round (C23f) removed the count the σ profile contradicts: κ is interior but moves with the σ cap along a κ–σ ridge (κ 1.2 at σ ≤ 1, 5.0 at the cap, 27.4 freed) and its curvature SE is 19%, so the pages say σ is on its bound and κ is set by the box, not that 4 of 5 parameters are set by the data.</dd>
+        <dt>Evidence</dt><dd>2026-10-16: freeing σ gives σ 6.90, κ 27.4, loss −27.7%, out-of-sample RMSE 2.96 → 1.19 vol pts and model VVIX 205 → 113 against the market&#39;s 110; on 2026-03-24 the box costs 2.1% of the loss (data_store/calibrations/diagnostics/)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>identifiability.py::<wbr>test_<wbr>sigma_<wbr>box_<wbr>rationale_<wbr>in_<wbr>config_<wbr>matches_<wbr>the_<wbr>artifacts</code>, <code class="path">test_<wbr>identifiability.py::<wbr>test_<wbr>diagnostics_<wbr>artifact_<wbr>is_<wbr>consistent</code>, <code class="path">test_<wbr>dashboard.py::<wbr>test_<wbr>no_<wbr>identification_<wbr>count_<wbr>where_<wbr>the_<wbr>sigma_<wbr>profile_<wbr>contradicts_<wbr>it</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f3" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 3 (C23-M2) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Model error was never measured against the bid–ask, and quotes were not screened for static arbitrage</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>No per-quote residuals were stored, the calibration chart drew the model only, and nothing screened the stored quotes for static arbitrage.</dd>
+        <dt>Fix</dt><dd>A surface package: Cohen–Reisinger–Wang screen and l1 repair on HiGHS, an executable-arbitrage certificate, <a class="term" href="model-risk.html#def-essvi"><abbr title="extended surface SVI">eSSVI</abbr></a> and calendar-ordered SVI surfaces, and one scorecard that scores every model on the calibrator&#39;s out-of-sample quotes in <a class="term" href="model-risk.html#def-half-spread">half-spreads</a>.</dd>
+        <dt>Evidence</dt><dd>Out-of-sample median |model − mid| over the 5 sessions: Heston 4.4–15.6 half-spreads (3.0–12.3% inside the bid–ask); the arbitrage-free SVI surface 0.45–1.98 (32–80% inside); executable static arbitrage on all 5 sessions, 160–629 quotes per session in an executable row (data_store/surface/)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>surface_<wbr>arbitrage.py::<wbr>test_<wbr>committed_<wbr>session_<wbr>screen_<wbr>counts</code>, <code class="path">test_<wbr>surface_<wbr>report.py::<wbr>test_<wbr>spread_<wbr>unit_<wbr>claims_<wbr>hold</code>, <code class="path">test_<wbr>surface_<wbr>report.py::<wbr>test_<wbr>committed_<wbr>artifacts_<wbr>match_<wbr>a_<wbr>recomputation</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f4" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 4 (C23-S1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>The backtest had no statistical inference</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Sharpe ratios and a 200-path S3 null were published without intervals, deflation for the configurations tried since C10, or exposure-matched nulls for every sleeve.</dd>
+        <dt>Fix</dt><dd>Stationary-bootstrap intervals, <a class="term" href="model-risk.html#def-psr"><abbr title="probabilistic Sharpe ratio">PSR</abbr></a>/<a class="term" href="model-risk.html#def-dsr"><abbr title="deflated Sharpe ratio">DSR</abbr></a> against a committed trials ledger, Hansen <a class="term" href="model-risk.html#def-spa"><abbr title="superior predictive ability test">SPA</abbr></a> and <a class="term" href="model-risk.html#def-stepm"><abbr title="stepwise multiple testing">StepM</abbr></a>, <a class="term" href="model-risk.html#def-cscv"><abbr title="combinatorially symmetric cross-validation">CSCV</abbr></a> <a class="term" href="model-risk.html#def-pbo"><abbr title="probability of backtest overfitting">PBO</abbr></a>, exposure-matched circular-shift and trade-shuffle nulls for every sleeve, and forecast comparisons (<a class="term" href="model-risk.html#def-qlike"><abbr title="quasi-likelihood loss">QLIKE</abbr></a>, Diebold–Mariano, <a class="term" href="model-risk.html#def-mcs"><abbr title="model confidence set">MCS</abbr></a>).</dd>
+        <dt>Evidence</dt><dd>Portfolio Sharpe −0.99, 95% CI −1.81 to −0.30; S3 timing p 0.078 against 3,550 circular shifts (<a class="term" href="model-risk.html#def-holm"><abbr title="Holm step-down adjustment">Holm</abbr></a> over 6 sleeves 0.47); Hansen SPA p 0.65 for the published series against cash; S3&#39;s deflated Sharpe ratio is 0.000–0.019 at the ledger&#39;s trial counts (N 147–210) and reaches 0.27 only at N 4.6, the eigenvalue participation ratio of the 83 re-run trial series (not a trial count), with the skill-less trial variance; CSCV PBO 0.34 for the 16 configurations of the published portfolio (data_store/backtest/inference/summary.json)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>stats_<wbr>inference_<wbr>report.py::<wbr>test_<wbr>headline_<wbr>is_<wbr>generated_<wbr>from_<wbr>the_<wbr>stored_<wbr>numbers</code>, <code class="path">test_<wbr>stats_<wbr>inference_<wbr>report.py::<wbr>test_<wbr>bootstrap_<wbr>rebuilds_<wbr>exactly_<wbr>from_<wbr>the_<wbr>committed_<wbr>curve</code>, <code class="path">test_<wbr>stats_<wbr>nulls.py::<wbr>test_<wbr>circular_<wbr>null_<wbr>detects_<wbr>real_<wbr>timing_<wbr>and_<wbr>not_<wbr>luck</code>, <code class="path">test_<wbr>stats_<wbr>inference_<wbr>report.py::<wbr>test_<wbr>dsr_<wbr>reports_<wbr>the_<wbr>ledger_<wbr>count_<wbr>range_<wbr>beside_<wbr>the_<wbr>lenient_<wbr>bound</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f5" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 5 (C23-R1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Flat rates in the hedger and the Greeks surface</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The C7 hedger hard-coded R = 1.5% (&#39;2020 US Treasury&#39;), and the Greeks surface used one median r and q for every maturity, so its 1-year forward was 0.50% below that expiry&#39;s parity forward.</dd>
+        <dt>Fix</dt><dd>A daily Treasury zero curve (bills and par yields, look-ahead gated, refused when more than 7 days old) feeds the calibrator&#39;s reference, the chain cleaner, the C7 study and per-maturity Greeks carry.</dd>
+        <dt>Evidence</dt><dd>C7 cumulative P&amp;L 167.95 → 168.34 index points; Greeks surface 1-year forward 7,931.8 → 7,971.7 (the parity forward); the committed fits recorded ^IRX and are unchanged</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>rate_<wbr>reference.py::<wbr>test_<wbr>c7_<wbr>uses_<wbr>the_<wbr>one_<wbr>year_<wbr>zero_<wbr>rate_<wbr>at_<wbr>entry</code>, <code class="path">test_<wbr>rate_<wbr>reference.py::<wbr>test_<wbr>greeks_<wbr>carry_<wbr>reprices_<wbr>the_<wbr>parity_<wbr>forwards_<wbr>on_<wbr>the_<wbr>treasury_<wbr>curve</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f6" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 6 (C23-O1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>A presentation test could lose a captured session</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The daily job committed the chain and the fit only if the dashboard tests passed; a test that pinned a value of the committed data failed on the first new fit, and the 2026-10-19 overnight book (accepted three times) was lost.</dd>
+        <dt>Fix</dt><dd>Separate gates: data tests gate the capture commit, artifact tests the derived artifacts, presentation tests only the deploy; CI simulates the bot&#39;s next session before merge.</dd>
+        <dt>Evidence</dt><dd>No published number moved; the simulated next session (scripts/ci/simulate_next_session.py) found 5 more tests that would have blocked the deploy on the first accepted fit</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>infra_<wbr>config.py::<wbr>test_<wbr>a_<wbr>presentation_<wbr>test_<wbr>cannot_<wbr>lose_<wbr>the_<wbr>captures</code>, <code class="path">test_<wbr>infra_<wbr>config.py::<wbr>test_<wbr>each_<wbr>commit_<wbr>adds_<wbr>its_<wbr>own_<wbr>paths</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f7" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 7 (C23-O2) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>`make reproduce` refitted the calibrations from a deleted scratch pickle and with the wrong optimiser</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The refit step read each fit&#39;s recorded inputs from the scratch copy&#39;s pickle, which run_step deletes first, so all five calibration steps failed; with the path right, the default TRF refit would still have missed the committed DE fits by up to 2e-3 relative.</dd>
+        <dt>Fix</dt><dd>Each refit reads its inputs from the committed pickle in the checkout and runs the optimiser that made it (DE for every fit committed before C23).</dd>
+        <dt>Evidence</dt><dd>make reproduce plus the three --full steps: 14 of 14 artifacts bit for bit (docs/reproduce.md)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>infra_<wbr>config.py::<wbr>test_<wbr>reproduce_<wbr>refits_<wbr>each_<wbr>fit_<wbr>from_<wbr>its_<wbr>committed_<wbr>record</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f8" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 8 (C23-U1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>The accessibility gate audited retired pages; the Risk page printed &#39;r = —%&#39;; the ML classifier sat on the Overview</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>The CI accessibility gate listed two pages that had become redirects and could not inject axe under the pages&#39; CSP; every page scrolled horizontally at 320 px when the view was a session behind; the Risk banner read one flat carry the per-maturity Greeks no longer had; a demoted research model was on the first screen.</dd>
+        <dt>Fix</dt><dd>The gate audits the seven pages and the 404 (the redirects are not pages), with CSP bypassed for the audit context only; status items wrap below 480 px; the Risk page states its r(T), q(T) ranges and the curve; the classifier moved to the Research page.</dd>
+        <dt>Evidence</dt><dd>axe-core 4.13.0: 0 violations on the 7 pages and the 404 at 1440 and 390 px in both colour schemes; no horizontal scroll from 320 to 1920 px (docs/engineering.md)</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>dashboard.py::<wbr>test_<wbr>risk_<wbr>provenance_<wbr>states_<wbr>the_<wbr>per_<wbr>maturity_<wbr>carry</code>, <code class="path">test_<wbr>dashboard.py::<wbr>test_<wbr>overview_<wbr>keeps_<wbr>research_<wbr>prototypes_<wbr>off_<wbr>the_<wbr>first_<wbr>screen</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f9" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 9 (C23-E1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>`option_chain.year_fraction` raised on an origin with no time in it</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>A missing quote_time cell reads as an empty string or a missing value, which the time parser did not accept; making the module pass mypy&#39;s strict flags found it.</dd>
+        <dt>Fix</dt><dd>An origin with no time counts as the session close.</dd>
+        <dt>Evidence</dt><dd>the path raised; it never returned a wrong T</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>properties_<wbr>iv.py::<wbr>test_<wbr>year_<wbr>fraction_<wbr>clock</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f10" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 10 (C23-E2) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Known advisories in three locked packages on the download and preview paths</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>pip-audit 2.10.1 on the lock (2026-10-20): idna 3.11 (CVE-2026-45409), urllib3 2.6.3 (five CVEs), werkzeug 3.1.8 (CVE-2026-102598); none in the numerical stack.</dd>
+        <dt>Fix</dt><dd>Floors idna ≥ 3.15, urllib3 ≥ 2.8.0 and werkzeug ≥ 3.1.9 in requirements.txt and a recompiled lock that keeps every numerical pin.</dd>
+        <dt>Evidence</dt><dd>requirements-lock.txt pins idna 3.20, urllib3 2.8.0, werkzeug 3.1.9; the committed pickles and bit-exact artifacts are unaffected</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>infra_<wbr>config.py::<wbr>test_<wbr>lock_<wbr>keeps_<wbr>the_<wbr>security_<wbr>floors</code></dd>
+      </dl>
+    </details>
+    
+    <details class="pm-cell pm-finding" id="c23-f11" data-status="fixed" style="border-right:none;">
+      <summary class="pm-fsum"><span class="pm-k">Finding 11 (C23-V1) · <span class="chip chip-ok">fixed</span></span>
+        <span class="pm-v"><strong>Published claims that the branch&#39;s own artifacts contradicted (independent review of C23)</strong></span></summary>
+      <dl class="dl" style="margin-top:4px;">
+        <dt>Root cause</dt><dd>Claims were checked on the grids that produced them: the &#39;arbitrage-free&#39; SVI surface was constrained at 241 nodes, the forward ledger was tested on synthetic books that always held the position&#39;s expiry, the Risk page&#39;s delta grid was labelled from the column name, and the S3 deflated Sharpe ratio was quoted at its most lenient trial count.</dd>
+        <dt>Fix</dt><dd>SVI slices are accepted only with refined-grid butterfly and calendar certificates (Durrleman g ≥ 0 and calendar order on a 1e-4 grid over k in [−3, 2], a 1/k grid to |k| = 2,000–3,000 and the |k| → ∞ limits), which also gate the label; the ledger trades and marks on the session&#39;s full Cboe book whatever the fit does; the Risk grid shows the OTM option&#39;s forward delta; every DSR and PBO is reported with its basis; page copy states only what the data supports.</dd>
+        <dt>Evidence</dt><dd>Before: 21 <a class="term" href="model-risk.html#def-svi-cal"><abbr title="calendar-ordered SVI surface">SVI-cal</abbr></a> slices with g &lt; 0 between grid nodes (worst −2.58e-5 at k = 0.19 on 2026-10-16) and 35 crossing calendar pairs; after: 0 and 0 in all five sessions, every session&#39;s objective equal or lower, the published 0.45–1.98 half-spread range unchanged. The ledger&#39;s position expiry was in its book on 3 of 19 sessions; now the full Cboe book (55 expiries). The Risk grid showed +0.99 for a 30%-OTM put; now −0.01. S3&#39;s DSR: 0.000–0.019 at the ledger&#39;s counts, 0.27 only at N 4.6. &#39;Every fix made the backtest worse&#39;: C22 raised it from −26.1% to −21.6%</dd>
+        
+        <dt>Pinned by</dt><dd><code class="path">test_<wbr>surface_<wbr>svi.py::<wbr>test_<wbr>butterfly_<wbr>certificate_<wbr>finds_<wbr>the_<wbr>dip_<wbr>between_<wbr>grid_<wbr>nodes</code>, <code class="path">test_<wbr>surface_<wbr>svi.py::<wbr>test_<wbr>ordering_<wbr>certificate_<wbr>catches_<wbr>crossings_<wbr>the_<wbr>check_<wbr>grid_<wbr>missed</code>, <code class="path">test_<wbr>forward_<wbr>ledger.py::<wbr>test_<wbr>a_<wbr>book_<wbr>without_<wbr>the_<wbr>expiry_<wbr>defers_<wbr>the_<wbr>close_<wbr>to_<wbr>the_<wbr>next_<wbr>book_<wbr>that_<wbr>has_<wbr>it</code>, <code class="path">test_<wbr>dashboard.py::<wbr>test_<wbr>risk_<wbr>delta_<wbr>grid_<wbr>is_<wbr>the_<wbr>otm_<wbr>options_<wbr>forward_<wbr>delta</code>, <code class="path">test_<wbr>stats_<wbr>inference_<wbr>report.py::<wbr>test_<wbr>every_<wbr>pbo_<wbr>is_<wbr>reported_<wbr>with_<wbr>its_<wbr>basis</code>, <code class="path">test_<wbr>dashboard.py::<wbr>test_<wbr>corrections_<wbr>trend_<wbr>sentence_<wbr>agrees_<wbr>with_<wbr>the_<wbr>published_<wbr>series</code></dd>
+      </dl>
+    </details>
+    
+    </details>
+  </article>
+  
+</div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="foot-inner">
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Data freshness by source (scrollable)">
+      <table class="tbl dense">
+        <caption>Data freshness: each source's as-of date and age in NYSE sessions against the newest session (2026-10-26)</caption>
+        <thead><tr><th scope="col">Source</th><th scope="col">As of</th><th scope="col" class="num">Age</th><th scope="col">Artifact</th></tr></thead>
+        <tbody>
+          
+          <tr><td>SPX close (market DB)</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+          
+          <tr><td>VIX close (market DB)</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+          
+          <tr><td>Rule regime labels</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>signals/<wbr>regime_<wbr>labels.parquet</code></td></tr>
+          
+          <tr><td>Headline Heston fit</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>calibrations/</code></td></tr>
+          
+          <tr><td>Greeks surface</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>greeks/<wbr>greeks_<wbr>surface.parquet</code></td></tr>
+          
+          <tr><td>Quote-grade surface</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">—</td><td><code class="path">data_<wbr>store/<wbr>surface/<wbr>&lt;session&gt;/</code></td></tr>
+          
+          <tr><td>Backtest window end (fixed)</td><td class="lvl-ok nowrap">2025-03-24</td>
+            <td class="num">—</td><td><code class="path">data_<wbr>store/<wbr>backtest/<wbr>full_<wbr>results.parquet</code></td></tr>
+          
+          <tr><td>VX futures settlements</td><td class="lvl-error nowrap">2026-10-09</td>
+            <td class="num">11</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+          
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <p>Static end-of-day build. Every figure is computed from the repository's stored artifacts at build time; inputs that fail to load are reported, never replaced. Personal research project by Navnoor Bawa; backtest P&amp;L is mark-to-model. Not investment advice.</p>
+      <p class="foot-links">
+        <a href="https://github.com/navnoorthapar/vol-system-dashboard">Source on GitHub</a>
+        <a href="https://www.linkedin.com/in/navnoorbawa/">LinkedIn</a>
+        <a href="https://navnoorbawa.substack.com">Substack</a>
+        <a href="model-risk.html#definitions">Units, signs and definitions</a>
+      </p>
+      <p class="mt8">Charts: Apache ECharts 6.1.0 (Apache-2.0), vendored with integrity hashes. Fonts: Inter 4.1 and Desk Mono (derived from IBM Plex Mono), SIL OFL 1.1, self-hosted. Licences in <code>static/vendor/licenses</code> and <code>static/fonts</code>.</p>
+    </div>
+  </div>
+</footer>
+
+<dialog class="keys" id="keysDialog" aria-labelledby="keysTitle">
+  <h2 id="keysTitle">Keyboard shortcuts</h2>
+  <dl class="dl">
+    <dt><kbd>g</kbd> <kbd>o</kbd></dt><dd>Overview</dd><dt><kbd>g</kbd> <kbd>s</kbd></dt><dd>Surface</dd><dt><kbd>g</kbd> <kbd>c</kbd></dt><dd>Calibration</dd><dt><kbd>g</kbd> <kbd>r</kbd></dt><dd>Risk</dd><dt><kbd>g</kbd> <kbd>e</kbd></dt><dd>Research</dd><dt><kbd>g</kbd> <kbd>x</kbd></dt><dd>Corrections</dd><dt><kbd>g</kbd> <kbd>m</kbd></dt><dd>Model Risk</dd>
+    <dt><kbd>?</kbd></dt><dd>This list</dd>
+    <dt><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move between heatmap cells</dd>
+    
+  </dl>
+  <p class="mt8"><a href="model-risk.html#definitions">Units, signs and definitions</a>: every term the pages abbreviate, with its formula.</p>
+  <p class="mt12"><button class="btn" type="button" data-close-dialog>Close</button></p>
+</dialog>
+
+
+<script src="static/vendor/echarts-6.1.0-desk.min.js" integrity="sha384-91oWllvVjknURH3iVY4aXknr/M7IadTMvoXGVuobX0GYrzD8gMLUwsVnC+tRn1k4" crossorigin="anonymous"></script>
+<script src="static/desk.js?v=da8bcf3b4e2c"></script>
+</body>
+</html>

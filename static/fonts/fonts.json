@@ -1,0 +1,80 @@
+{
+  "files": {
+    "DeskMono-400.woff2": {
+      "bytes": 9980,
+      "features": [
+        "kern",
+        "calt",
+        "ccmp",
+        "locl",
+        "zero",
+        "tnum",
+        "lnum",
+        "ss02"
+      ],
+      "instance": {},
+      "license": "OFL-IBM-Plex-Mono.txt",
+      "renamed_to": "Desk Mono Regular",
+      "sha256": "66adc71a4f680d0bd81bc937e72305eda5bbe9279a5db0eeb12fe08fc85af37e",
+      "source": "https://cdn.jsdelivr.net/npm/@ibm/plex-mono@2.5.0/fonts/complete/woff2/IBMPlexMono-Regular.woff2",
+      "source_sha256": "ba204497f16b6d334cee9d1e963a831b73e3a56e1d6300a8489d18df7214b350"
+    },
+    "DeskMono-500.woff2": {
+      "bytes": 9984,
+      "features": [
+        "kern",
+        "calt",
+        "ccmp",
+        "locl",
+        "zero",
+        "tnum",
+        "lnum",
+        "ss02"
+      ],
+      "instance": {},
+      "license": "OFL-IBM-Plex-Mono.txt",
+      "renamed_to": "Desk Mono Medium",
+      "sha256": "ea40a7e3c72a9a5748c3040c7960b8564b4e3ae6d21710986a50e13ec5da28fd",
+      "source": "https://cdn.jsdelivr.net/npm/@ibm/plex-mono@2.5.0/fonts/complete/woff2/IBMPlexMono-Medium.woff2",
+      "source_sha256": "33faf307fa6031fb4062276d7320a6d632de890cbb347576fd80cfa01077bc25"
+    },
+    "InterDesk-4.1-wght400-700.woff2": {
+      "bytes": 46812,
+      "features": [
+        "kern",
+        "calt",
+        "ccmp",
+        "locl",
+        "mark",
+        "mkmk",
+        "case",
+        "tnum",
+        "pnum",
+        "lnum",
+        "zero",
+        "frac",
+        "numr",
+        "dnom",
+        "sups",
+        "subs",
+        "cv01",
+        "cv05",
+        "ss02"
+      ],
+      "instance": {
+        "opsz": 14,
+        "wght": [
+          400,
+          700
+        ]
+      },
+      "license": "OFL-Inter.txt",
+      "renamed_to": null,
+      "sha256": "b1a3fb9bc14383db726f3bffe5e1f057bdb4a3ce05a108451638dc1ba98bd064",
+      "source": "https://cdn.jsdelivr.net/gh/rsms/inter@v4.1/docs/font-files/InterVariable.woff2",
+      "source_sha256": "693b77d4f32ee9b8bfc995589b5fad5e99adf2832738661f5402f9978429a8e3"
+    }
+  },
+  "fonttools": "4.60.1",
+  "unicodes": "U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+0391-03A9,U+03B1-03C9,U+2000-206F,U+2070-209F,U+20AC,U+2122,U+2190-2199,U+2202,U+2206,U+2211,U+2212,U+2215,U+221A,U+221E,U+222B,U+2248,U+2260,U+2264,U+2265,U+25A0-25CF,U+2713,U+26A0"
+}

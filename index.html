@@ -3,1346 +3,599 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Market — SPX/VIX Vol System</title>
-  <!-- Inline SVG favicon (volatility smile) — no file needed -->
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d0f12'/><path d='M5 10 Q16 28 27 10' fill='none' stroke='%235cc8a0' stroke-width='3' stroke-linecap='round'/></svg>">
-  <meta name="theme-color" content="#0d0f12">
+  <meta http-equiv="Content-Security-Policy" content="default-src &#39;self&#39;; script-src &#39;self&#39;; style-src &#39;self&#39; &#39;unsafe-inline&#39;; img-src &#39;self&#39; data:; font-src &#39;self&#39;; connect-src &#39;self&#39;; object-src &#39;none&#39;; base-uri &#39;self&#39;; form-action &#39;none&#39;">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Overview · SPX/VIX Vol Research</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%23111418'/><path d='M5 9 Q16 29 27 9' fill='none' stroke='%238abbff' stroke-width='3' stroke-linecap='round'/></svg>">
+  <meta name="theme-color" content="#111418">
   <meta name="color-scheme" content="dark">
-  <!-- Open Graph — LinkedIn / Twitter / Substack link preview. No test count here:
-       a hand-typed count went stale in four places (C22); README/CI carry it. -->
+  <!-- Open Graph: per-page title and description; no test count (a hand-typed
+       count went stale in four places in C22; README/CI carry it). -->
   <meta property="og:type"         content="website">
   <meta property="og:url"          content="https://navnoorbawa.me/">
-  <meta property="og:title"        content="Market Overview — SPX/VIX Vol System">
-  <meta property="og:description"  content="End-of-day SPX/VIX regime (rule label), VIX term structure and the PDV realised-vol forecast against implied vol.">
+  <meta property="og:title"        content="Overview — Joint SPX/VIX Calibration">
+  <meta property="og:description"  content="End-of-day SPX/VIX volatility research system: an arbitrage-free surface and a joint SPX/VIX Heston fit scored against the bid–ask, rough Heston beside it, and a mark-to-model backtest with bootstrap intervals and timing nulls.">
   <meta property="og:image"        content="https://navnoorbawa.me/og-image.png">
   <meta property="og:image:width"  content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt"    content="Joint SPX/VIX Smile Calibration System — 14 components, a 2018–25 backtest and a documented negative result.">
-  <meta name="twitter:image:alt"   content="Joint SPX/VIX Smile Calibration System dashboard preview card.">
+  <meta property="og:image:alt"    content="Joint SPX/VIX Calibration System: research dashboard preview card.">
+  <meta name="twitter:image:alt"   content="Joint SPX/VIX Calibration System dashboard preview card.">
   <meta name="author"              content="Navnoor Bawa">
   <link rel="canonical"            href="https://navnoorbawa.me/">
   <meta name="twitter:card"        content="summary_large_image">
   <meta name="twitter:image"       content="https://navnoorbawa.me/og-image.png">
-  <meta name="description"         content="End-of-day SPX/VIX regime (rule label), VIX term structure and the PDV realised-vol forecast against implied vol.">
-  <style>
-    /* ── Reset & base ────────────────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    /* Colour tokens. Every text token reaches WCAG 2.2 AA (>= 4.5:1) on --bg,
-       --surface, --surface2, the tooltip and the tinted banner backgrounds;
-       checked by test_dashboard.py::test_colour_tokens_meet_wcag_aa.
-       Colour carries meaning only: --accent = positive / brand, --red =
-       negative or failed, --amber = caution or stale, --blue = information.
-       Numbers are neutral (--text) unless their sign or state is the point. */
-    :root {
-      color-scheme: dark;
-      --bg:       #0d0f12;
-      --surface:  #14171b;
-      --surface2: #1a1e23;
-      --tooltip:  #1f242a;
-      --border:   #252a31;
-      --border2:  #30363e;
-      --accent:   #5cc8a0;
-      --accent2:  #52b892;
-      --text:     #e7e9ec;
-      --text2:    #adb3bb;
-      --text3:    #8f969f;
-      --red:      #f0787c;
-      --blue:     #7fadf7;
-      --yellow:   #e2c46a;
-      --amber:    #e3a54a;
-      --orange:   #e8925a;
-      --purple:   #b99cf0;
-      --cyan:     #6cc5d9;
-      --pink:     #e58fbd;
-      --focus:    #7fadf7;
-      --tint-red:   #2a2125;
-      --tint-amber: #25221f;
-      --tint-green: #1a2526;
-      --tint-blue:  #1c232d;
-      --mono:     ui-monospace, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
-      --sans:     Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      --radius:   6px;
-      --radius2:  8px;
-      --gap:      16px;
-    }
-
-    html, body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
-      font-size: 14px;
-      line-height: 1.55;
-      /* tabular, lining figures everywhere: columns of numbers line up */
-      font-variant-numeric: tabular-nums lining-nums;
-      -webkit-font-smoothing: antialiased;
-    }
-    body { min-height: 100%; display: flex; flex-direction: column; }
-    h1, h2, h3 { font: inherit; }
-    a { color: var(--blue); text-underline-offset: 2px; }
-    code, .code { font-family: var(--mono); font-size: 0.92em; color: var(--text2); }
-    strong { font-weight: 600; color: var(--text); }
-    em { font-style: italic; }
-    sub { font-size: 0.75em; }
-
-    /* ── Accessibility helpers ──────────────────────────────────────────── */
-    .sr-only {
-      position: absolute !important;
-      width: 1px; height: 1px;
-      padding: 0; margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-    .skip-link {
-      position: absolute;
-      left: 12px; top: -48px;
-      z-index: 200;
-      padding: 8px 14px;
-      background: var(--text);
-      color: #000;
-      font-weight: 600;
-      border-radius: var(--radius);
-      text-decoration: none;
-    }
-    .skip-link:focus { top: 8px; }
-    :focus-visible {
-      outline: 2px solid var(--focus);
-      outline-offset: 2px;
-    }
-    .nav-link:focus-visible { outline-offset: -2px; }
-
-    /* Horizontal scroll regions: keyboard-focusable (tabindex=0) and visibly
-       scrollable — edge shadows appear on the side that has more content
-       (pure CSS: the covers scroll with the content, the shadows do not). */
-    .table-scroll, .heatmap-wrap {
-      position: relative;   /* contains the visually hidden captions */
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      max-width: 100%;
-      background:
-        linear-gradient(to right, var(--surface) 30%, rgba(20,23,27,0)) left center / 36px 100% no-repeat local,
-        linear-gradient(to left,  var(--surface) 30%, rgba(20,23,27,0)) right center / 36px 100% no-repeat local,
-        linear-gradient(to right, rgba(127,173,247,0.30), rgba(127,173,247,0)) left center / 12px 100% no-repeat scroll,
-        linear-gradient(to left,  rgba(127,173,247,0.30), rgba(127,173,247,0)) right center / 12px 100% no-repeat scroll;
-    }
-    .table-scroll:focus-visible, .heatmap-wrap:focus-visible { outline-offset: 0; }
-    .scroll-hint { display: none; font-size: 11.5px; color: var(--text3); margin: 0 0 6px; }
-    .scroll-hint::before { content: "\2194\00a0"; color: var(--blue); }
-    [data-overflow="true"] + .scroll-hint, .scroll-hint.show { display: block; }
-
-    /* ── Site header + navigation ───────────────────────────────────────── */
-    .top-banner {
-      min-height: 34px;
-      background: var(--bg);
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      padding: 0 24px;
-      gap: 12px;
-      font-size: 12px;
-      color: var(--text3);
-      white-space: nowrap;
-      overflow: hidden;
-    }
-    .top-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-    .top-banner-links { display: flex; align-items: center; gap: 14px; flex-shrink: 0; list-style: none; }
-    .top-banner-links a { color: var(--text2); text-decoration: none; font-size: 12px; }
-    .top-banner-links a:hover { color: var(--text); text-decoration: underline; }
-    .top-banner-sep { color: var(--text3); }
-
-    .nav {
-      position: sticky;     /* a direct child of <body>, so it sticks for the whole page */
-      top: 0;
-      z-index: 100;
-      background: rgba(13,15,18,0.96);
-      border-bottom: 1px solid var(--border2);
-      display: flex;
-      align-items: center;
-      padding: 0 24px;
-      height: 50px;
-    }
-    .nav-brand {
-      font-size: 13.5px;
-      font-weight: 600;
-      color: var(--text);
-      margin-right: 32px;
-      white-space: nowrap;
-      letter-spacing: 0.01em;
-    }
-    .nav-brand span { color: var(--text3); font-weight: 400; }
-    .nav-brand::before {
-      content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px;
-      background: var(--accent); margin-right: 9px; vertical-align: 1px;
-    }
-    .nav-links { display: flex; }
-    .nav-link {
-      display: flex;
-      align-items: center;
-      padding: 0 16px;
-      height: 50px;
-      color: var(--text2);
-      text-decoration: none;
-      font-size: 13px;
-      font-weight: 500;
-      border-bottom: 2px solid transparent;
-      white-space: nowrap;
-    }
-    .nav-link:hover { color: var(--text); }
-    .nav-link.active,
-    .nav-link[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
-    .nav-dot { display: none; }
-    .nav-status {
-      margin-left: auto;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 12px;
-      color: var(--text2);
-    }
-    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-    .status-dot.warn  { background: var(--amber); }
-    .status-dot.error { background: var(--red); }
-    .nav-toggle {
-      display: none;
-      flex-direction: column;
-      justify-content: center;
-      gap: 5px;
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 8px;
-      margin-left: auto;
-      margin-right: 4px;
-    }
-    .nav-toggle span { display: block; width: 20px; height: 2px; background: var(--text2); border-radius: 2px; }
-    .nav-toggle.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
-    .nav-toggle.open span:nth-child(2) { opacity: 0; }
-    .nav-toggle.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
-
-    /* ── Page layout ─────────────────────────────────────────────────────── */
-    .page {
-      width: 100%;
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 28px 28px 48px;
-      flex: 1;
-    }
-    .page-header {
-      display: flex;
-      align-items: baseline;
-      flex-wrap: wrap;
-      gap: 4px 16px;
-      margin-bottom: 20px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid var(--border);
-    }
-    .page-title { font-size: 22px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; line-height: 1.3; }
-    .page-subtitle { font-size: 13px; color: var(--text2); flex-basis: 100%; }
-    .page-badge { font-size: 12.5px; color: var(--text2); flex-basis: 100%; }
-    /* inline-block: a line can break at every separator, even between no-wrap items */
-    .page-badge .sep { color: var(--text3); padding: 0 6px; display: inline-block; }
-    .page-note { font-size: 13px; color: var(--text2); margin: 0 0 20px; max-width: 110ch; line-height: 1.6; }
-    .section-title {
-      font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
-      color: var(--text2); margin: 28px 0 12px;
-    }
-
-    /* ── Grid helpers ────────────────────────────────────────────────────── */
-    .grid       { display: grid; gap: var(--gap); }
-    /* min-width:0 lets wide children (tables) scroll inside their own wrapper
-       instead of forcing the grid track wider than the card (C22: mobile clipping) */
-    .grid > *   { min-width: 0; }
-    .grid-2     { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid-3     { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .grid-4     { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .grid-5     { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-    .grid-6     { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-    .col-2      { grid-column: span 2; }
-    .col-3      { grid-column: span 3; }
-    .col-full   { grid-column: 1 / -1; }
-    .row        { margin-bottom: var(--gap); }
-    .tiles      { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
-    .tiles > *  { min-width: 0; }
-    .kv-2       { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 16px; font-size: 12.5px; color: var(--text2); }
-    .kv-2 .v    { color: var(--text); }
-    .card-head  { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin-bottom: 12px; }
-    .card-head > .chart-title, .card-head > .card-label { margin-bottom: 0; }
-    .legend     { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text2); align-items: center; }
-    .legend .swatch { display: inline-block; width: 16px; height: 0; border-top: 2px solid currentColor; vertical-align: middle; margin-right: 6px; }
-    .legend .swatch.dashed { border-top-style: dashed; }
-    .legend .key { color: var(--text2); }
-
-    /* ── Cards ───────────────────────────────────────────────────────────── */
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius2);
-      padding: 18px 20px;
-      position: relative;
-      overflow: hidden;
-    }
-    .card-sm { padding: 14px 16px; }
-    .card.flush { padding: 0; }
-    .subcard { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
-    .card-label, .chart-title {
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--text2);
-      margin-bottom: 10px;
-      line-height: 1.4;
-    }
-    .card-label .qual, .chart-title .qual { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text3); }
-    .card-value {
-      font-size: 26px;
-      font-weight: 600;
-      color: var(--text);
-      letter-spacing: -0.01em;
-      line-height: 1.15;
-      overflow-wrap: anywhere;
-    }
-    .card-value.lg { font-size: 32px; }
-    .card-value.sm { font-size: 20px; }
-    .card-value .unit { font-size: 0.6em; font-weight: 500; color: var(--text2); margin-left: 3px; }
-    .card-value.green { color: var(--accent); }
-    .card-value.red   { color: var(--red); }
-    .card-value.blue  { color: var(--blue); }
-    .card-value.yellow{ color: var(--amber); }
-    .card-value.dim   { color: var(--text2); }
-    .card-sub { font-size: 12.5px; color: var(--text2); margin-top: 6px; line-height: 1.5; }
-    .card-sub + .card-sub { margin-top: 2px; }
-
-    /* Status chips (word + colour, never colour alone) */
-    .chip {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
-      padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border2); color: var(--text2);
-      white-space: nowrap;
-    }
-    .chip-green { color: var(--accent); border-color: rgba(92,200,160,0.35); background: var(--tint-green); }
-    .chip-red   { color: var(--red);    border-color: rgba(240,120,124,0.35); background: var(--tint-red); }
-    .chip-amber, .chip-yellow { color: var(--amber); border-color: rgba(227,165,74,0.35); background: var(--tint-amber); }
-    .chip-blue  { color: var(--blue);   border-color: rgba(127,173,247,0.35); background: var(--tint-blue); }
-
-    /* ── Stat row ────────────────────────────────────────────────────────── */
-    .stat-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-top: 6px; font-size: 12.5px; color: var(--text2); }
-    .stat-change.up   { color: var(--accent); }
-    .stat-change.down { color: var(--red); }
-
-    /* ── Banners: a coloured rule on the left, neutral body ─────────────── */
-    .banner {
-      border-radius: var(--radius2);
-      padding: 12px 16px;
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--text3);
-    }
-    .banner-icon { font-size: 15px; line-height: 1.45; flex-shrink: 0; width: 16px; text-align: center; color: var(--text3); }
-    .banner-title { font-size: 13.5px; font-weight: 600; margin-bottom: 2px; color: var(--text); }
-    .banner-body { font-size: 13px; color: var(--text2); line-height: 1.6; }
-    .banner-body ul { margin: 4px 0 0 18px; }
-    .banner-warn        { border-left-color: var(--amber); }
-    .banner-warn .banner-icon, .banner-warn .banner-title { color: var(--amber); }
-    .banner-info        { border-left-color: var(--blue); }
-    .banner-info .banner-icon { color: var(--blue); }
-    .banner-ok          { border-left-color: var(--accent); }
-    .banner-ok .banner-icon { color: var(--accent); }
-    /* Loader failure: the numbers for this component are NOT shown */
-    .banner-error       { border-left-color: var(--red); background: var(--tint-red); }
-    .banner-error .banner-title, .banner-error .banner-icon { color: var(--red); }
-    /* Staleness: amber from STALE_WARN_SESSIONS, red from STALE_ERROR_SESSIONS */
-    .banner-stale-warn  { border-left-color: var(--amber); }
-    .banner-stale-warn .banner-title, .banner-stale-warn .banner-icon { color: var(--amber); }
-    .banner-stale-error { border-left-color: var(--red); }
-    .banner-stale-error .banner-title, .banner-stale-error .banner-icon { color: var(--red); }
-    .banner-stack { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
-    .age-ok    { color: var(--text3); }
-    .age-warn  { color: var(--amber); font-weight: 600; }
-    .age-error { color: var(--red); font-weight: 600; }
-
-    /* ── Tables ──────────────────────────────────────────────────────────── */
-    .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .data-table th {
-      text-align: left;
-      padding: 8px 12px;
-      font-size: 11.5px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--text3);
-      border-bottom: 1px solid var(--border2);
-      white-space: nowrap;
-    }
-    .data-table td {
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--border);
-      color: var(--text2);
-      vertical-align: top;
-    }
-    .data-table td:first-child { color: var(--text); }
-    .data-table .num, .data-table th.num { text-align: right; white-space: nowrap; color: var(--text); }
-    .data-table tr:last-child td { border-bottom: none; }
-    .data-table tbody tr:hover td { background: var(--surface2); }
-    .data-table .green { color: var(--accent); }
-    .data-table .red   { color: var(--red); }
-    .data-table .amber { color: var(--amber); }
-    .data-table tr.muted td { color: var(--text3); }
-    .data-table tr.muted td.num { color: var(--text2); }
-    .data-table.compact td, .data-table.compact th { padding: 6px 10px; }
-    .data-table td.small { font-size: 12.5px; }
-
-    /* ── Charts ──────────────────────────────────────────────────────────── */
-    .chart-wrap { position: relative; height: 260px; }
-    .chart-wrap.tall   { height: 320px; }
-    .chart-wrap.xtall  { height: 400px; }
-    .chart-wrap.short  { height: 180px; }
-    .chart-wrap.spark  { height: 36px !important; }   /* sparkline: fixed at every width */
-    /* Greek symbols must not be upper-cased (σ -> Σ changes the symbol) */
-    .sym { text-transform: none; letter-spacing: 0; }
-    .chart-note { margin-top: 10px; font-size: 12px; color: var(--text3); line-height: 1.55; max-width: 120ch; }
-    /* Data alternative of a chart: visually hidden unless the chart library fails */
-    .chart-data table { border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-    .chart-data th, .chart-data td { padding: 2px 8px; border-bottom: 1px solid var(--border); text-align: left; }
-    .chart-data caption { text-align: left; color: var(--text3); font-size: 12px; padding-bottom: 4px; }
-    .chart-fallback { display: none; }
-    .charts-failed .chart-wrap { height: auto !important; }
-    .charts-failed .chart-wrap canvas { display: none; }
-    .charts-failed .chart-fallback {
-      display: block;
-      padding: 10px 12px;
-      border: 1px dashed var(--border2);
-      border-radius: var(--radius);
-      font-size: 12px;
-      color: var(--amber);
-    }
-    .charts-failed .chart-data.sr-only {
-      position: static !important;
-      width: auto; height: auto; margin: 8px 0 0;
-      overflow: visible; clip: auto; white-space: normal;
-      font-size: 12px; color: var(--text2);
-    }
-
-    /* ── Heatmap table ───────────────────────────────────────────────────── */
-    .heatmap { border-collapse: separate; border-spacing: 2px; font-size: 11.5px; width: 100%; }
-    .heatmap th {
-      padding: 4px 4px 6px;
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--text3);
-      white-space: nowrap;
-      text-align: center;
-    }
-    .heatmap th.row-head { text-align: left; padding-right: 10px; }
-    .heatmap td {
-      min-width: 52px;
-      height: 42px;
-      text-align: center;
-      vertical-align: middle;
-      font-size: 11.5px;
-      border-radius: 3px;
-      cursor: default;
-    }
-    .heatmap td.empty { background: var(--bg); }
-    /* Unstable = an outline AND a text marker, not colour alone (colour-blind safe) */
-    .heatmap td.unstable { outline: 2px solid var(--red); outline-offset: -2px; }
-    .heatmap .mat-label { font-size: 12px; font-weight: 600; color: var(--text2); padding-right: 12px; white-space: nowrap; text-align: left; }
-    .heatmap .z { font-size: 10.5px; }
-    .heatmap .vv { font-weight: 500; }
-    .heatmap td.unstable .vv { font-weight: 700; }
-    .heat-key { display: inline-block; width: 22px; height: 10px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
-
-    /* ── Probability bars ────────────────────────────────────────────────── */
-    .progress-bar-wrap { margin-top: 8px; }
-    .progress-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-    .progress-label { width: 92px; font-size: 12px; color: var(--text2); flex-shrink: 0; }
-    .progress-track { flex: 1; height: 6px; background: var(--border2); border-radius: 3px; overflow: hidden; }
-    .progress-fill  { height: 100%; border-radius: 3px; background: var(--text3); }
-    .progress-val   { width: 50px; font-size: 12px; color: var(--text); text-align: right; }
-
-    .divider { height: 1px; background: var(--border); margin: 14px 0; }
-
-    /* ── Tags ────────────────────────────────────────────────────────────── */
-    .tag {
-      display: inline-block;
-      padding: 1px 7px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      vertical-align: 1px;
-      border: 1px solid var(--border2);
-      color: var(--text2);
-    }
-    .tag-green { color: var(--accent); border-color: rgba(92,200,160,0.35); }
-    .tag-red   { color: var(--red);    border-color: rgba(240,120,124,0.35); }
-    .tag-blue  { color: var(--blue);   border-color: rgba(127,173,247,0.35); }
-    .tag-amber { color: var(--amber);  border-color: rgba(227,165,74,0.35); }
-    .tag-dim   { color: var(--text2); }
-
-    /* ── Parameter boxes ─────────────────────────────────────────────────── */
-    .param-sym  { font-size: 13px; font-weight: 600; color: var(--text2); margin-bottom: 6px; }
-    .param-sym .qual { font-weight: 400; color: var(--text3); }
-    .param-val  { font-size: 24px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); overflow-wrap: anywhere; line-height: 1.2; }
-    .param-desc { font-size: 12px; color: var(--text3); margin-top: 6px; }
-
-    /* ── Utilities ───────────────────────────────────────────────────────── */
-    .mono { font-variant-numeric: tabular-nums; }   /* numbers: tabular sans; code uses <code> */
-    .bold { font-weight: 600; }
-    .mt8  { margin-top: 8px; }
-    .mt12 { margin-top: 12px; }
-    .mt16 { margin-top: 16px; }
-    .mb12 { margin-bottom: 12px; }
-    .mb16 { margin-bottom: 16px; }
-    .flex { display: flex; align-items: center; }
-    .flex-wrap { flex-wrap: wrap; }
-    .gap8 { gap: 8px; }
-    .gap12{ gap: 12px; }
-    .space-between { justify-content: space-between; }
-    .text-right { text-align: right; }
-    .green { color: var(--accent); }
-    .red   { color: var(--red); }
-    .blue  { color: var(--blue); }
-    .yellow{ color: var(--yellow); }
-    .amber { color: var(--amber); }
-    .dim   { color: var(--text2); }
-    .faint { color: var(--text3); }
-    .prose { font-size: 13px; color: var(--text2); line-height: 1.65; max-width: 120ch; }
-    .prose p + p { margin-top: 8px; }
-    .small { font-size: 12px; }
-    .nowrap { white-space: nowrap; }
-    .defs { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px; align-items: baseline; }
-    .defs dt { font-weight: 600; color: var(--text); padding-left: 8px; border-left: 2px solid var(--border2); }
-    .defs dd { color: var(--text2); }
-
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
-    canvas { display: block; }
-
-    /* ── Footer ──────────────────────────────────────────────────────────── */
-    .site-footer {
-      border-top: 1px solid var(--border);
-      padding: 16px 28px 24px;
-      font-size: 12px;
-      color: var(--text3);
-    }
-    .site-footer p { max-width: 1400px; margin: 0 auto; }
-
-    /* ── Tablet (≤ 1100px / ≤ 900px) ─────────────────────────────────────── */
-    @media (max-width: 1100px) {
-      .grid-5, .grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
-    }
-    @media (max-width: 900px) {
-      .grid-4, .grid-5, .grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-      .grid-3          { grid-template-columns: minmax(0, 1fr) !important; }
-      .col-3, .col-2   { grid-column: 1 / -1 !important; }
-      .page  { padding: 20px 16px 40px !important; }
-      .nav   { padding: 0 12px; }
-      .top-banner { padding: 0 12px; }
-      .nav-brand { margin-right: 12px; }
-    }
-
-    /* ── Mobile nav: menu button (≤ 768px) ────────────────────────────────── */
-    @media (max-width: 768px) {
-      .nav-toggle { display: flex; }
-      .nav-status { display: none; }          /* the status is repeated in the page banners */
-      .nav-links {
-        display: none;
-        position: absolute;
-        top: 50px; left: 0; right: 0;
-        background: var(--bg);
-        border-bottom: 1px solid var(--border2);
-        flex-direction: column;
-        padding: 6px 0;
-        z-index: 99;
-      }
-      .nav-links.open { display: flex; }
-      .nav-link { height: 44px; padding: 0 20px; border-bottom: none; border-left: 2px solid transparent; }
-      .nav-link.active,
-      .nav-link[aria-current="page"] { border-left-color: var(--accent); border-bottom-color: transparent; background: var(--surface); }
-      /* Tables scroll inside their focusable .table-scroll wrapper */
-      .table-scroll .data-table { white-space: nowrap; }
-      .table-scroll .data-table td.wrap,
-      .table-scroll .data-table td:first-child { white-space: normal; min-width: 130px; }
-      .table-scroll .data-table td.wrap { min-width: 240px; }
-      .top-banner { padding: 6px 12px; }
-      .top-banner-text { font-size: 11.5px; }
-      .grid-2 { grid-template-columns: minmax(0, 1fr) !important; }
-    }
-
-    /* ── Small phone (≤ 480px) ───────────────────────────────────────────── */
-    @media (max-width: 480px) {
-      .grid-4, .grid-5, .grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px; }
-      .grid-3, .grid-2  { grid-template-columns: minmax(0, 1fr) !important; }
-      .col-2, .col-3, .col-full { grid-column: 1 / -1 !important; }
-      .page       { padding: 14px 12px 32px !important; }
-      .card       { padding: 14px !important; }
-      .card-value { font-size: 21px !important; }
-      .card-value.lg { font-size: 24px !important; }
-      .card-value.sm { font-size: 18px !important; }
-      .chart-wrap       { height: 220px !important; }
-      .chart-wrap.tall  { height: 250px !important; }
-      .chart-wrap.xtall { height: 280px !important; }
-      .chart-wrap.short { height: 160px !important; }
-      .chart-wrap.spark { height: 36px !important; }
-      .param-val  { font-size: 19px !important; }
-      .nav-brand span { display: none; }
-      .page-title    { font-size: 19px; }
-      .top-banner-text { display: none; }
-      .top-banner-links { margin-left: auto; }
-      .banner { padding: 10px 12px; }
-    }
-
-    /* ── Reduced motion ───────────────────────────────────────────────────── */
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation: none !important;
-        transition: none !important;
-        scroll-behavior: auto !important;
-      }
-    }
-
-    /* ── Print ────────────────────────────────────────────────────────────── */
-    @media print {
-      :root {
-        color-scheme: light;
-        --bg: #ffffff; --surface: #ffffff; --surface2: #f4f4f4; --tooltip: #ffffff;
-        --border: #cccccc; --border2: #bbbbbb;
-        --text: #111111; --text2: #333333; --text3: #555555;
-        --accent: #00703c; --accent2: #00703c; --red: #b00020; --blue: #0b4fb3; --yellow: #7a5c00;
-        --amber: #8a4b00; --orange: #a04400; --purple: #5b2a9e; --cyan: #005f80; --pink: #a3125f;
-        --tint-red: #ffffff; --tint-amber: #ffffff; --tint-green: #ffffff; --tint-blue: #ffffff;
-      }
-      html, body { background: #fff !important; color: #111 !important; }
-      .nav, .top-banner, .skip-link, .nav-toggle, .scroll-hint { display: none !important; }
-      .page { max-width: none; padding: 0 !important; }
-      .card, .banner, .subcard { break-inside: avoid; box-shadow: none !important; background: #fff !important; border-color: #ccc !important; }
-      .table-scroll, .heatmap-wrap { overflow: visible !important; background: none !important; }
-      .table-scroll .data-table { white-space: normal !important; }
-      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9px; color: #555; }
-      .chart-wrap { break-inside: avoid; }
-    }
-  </style>
-  <!-- Without JavaScript there are no charts: show every chart's data table instead -->
+  <meta name="description"         content="End-of-day SPX/VIX volatility research system: an arbitrage-free surface and a joint SPX/VIX Heston fit scored against the bid–ask, rough Heston beside it, and a mark-to-model backtest with bootstrap intervals and timing nulls.">
+  <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
+  
+  <link rel="stylesheet" href="static/desk.css?v=ae3987f96844">
+  <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
-    .chart-wrap { display: none !important; }
-    .chart-data.sr-only {
-      position: static !important; width: auto; height: auto; margin: 8px 0 0;
-      overflow: visible; clip: auto; white-space: normal; font-size: 12px; color: var(--text2);
-    }
+    .chart { display: none !important; }
+    .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal; }
+    .js-only { display: none !important; }
+    [role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
+    .banner-body.fold-body { display: block !important; } .find-list.fold-body { display: flex !important; }   /* nothing folds (Q20) */
   </style></noscript>
   
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 
-<header class="top-banner">
-  <p class="top-banner-text">
-    Joint SPX/VIX volatility research system &nbsp;·&nbsp; 14 components &nbsp;·&nbsp; end-of-day data &nbsp;·&nbsp; Navnoor Bawa
-  </p>
-  <ul class="top-banner-links" aria-label="Author links">
-    <li><a href="https://github.com/navnoorthapar/vol-system-dashboard" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></li>
-    <li class="top-banner-sep" aria-hidden="true">·</li>
-    <li><a href="https://navnoorbawa.substack.com" target="_blank" rel="noopener">Substack<span class="sr-only"> (opens in a new tab)</span></a></li>
-    <li class="top-banner-sep" aria-hidden="true">·</li>
-    <li><a href="https://www.linkedin.com/in/navnoorbawa/" target="_blank" rel="noopener">LinkedIn<span class="sr-only"> (opens in a new tab)</span></a></li>
-  </ul>
+
+<header class="statusbar" aria-label="Data status">
+  <span class="sb-item sb-state lvl-ok">
+    ● END OF DAY
+  </span>
+  <details class="sb-phone">
+    <summary class="sb-item"><span class="sb-k">SPX</span><span class="sb-v lvl-ok">current</span><span class="sr-only">: every source’s date</span></summary>
+    <ul class="sb-list">
+      <li><span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
+      <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
+      <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">2b9a8d7</span></li>
+      <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
+    </ul>
+  </details>
+  
+  <span class="sb-item" title="SPX close (market DB): data_store/vol_system.db">
+    <span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item" title="VIX close (market DB): data_store/vol_system.db">
+    <span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item" title="Rule regime labels: data_store/signals/regime_labels.parquet">
+    <span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item" title="Headline Heston fit: data_store/calibrations/">
+    <span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item sb-opt" title="Greeks surface: data_store/greeks/greeks_surface.parquet">
+    <span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item sb-opt" title="Quote-grade surface: data_store/surface/&lt;session&gt;/">
+    <span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span>
+  </span>
+  
+  <span class="sb-item sb-opt" title="Backtest window end (fixed): data_store/backtest/full_results.parquet">
+    <span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span>
+  </span>
+  
+  <span class="sb-right">
+    <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/2b9a8d7954ff49222cff46b3e40a04c8379528b3">2b9a8d7</a></span>
+    <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
+  </span>
 </header>
 
 <nav class="nav" aria-label="Primary">
-  <div class="nav-brand">SPX/VIX <span>Vol Research</span></div>
-  <button class="nav-toggle" id="navToggle" type="button" aria-label="Menu" aria-controls="navLinks" aria-expanded="false">
-    <span></span><span></span><span></span>
-  </button>
+  <a class="brand" href="index.html">
+    <svg width="18" height="18" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 9 Q16 31 28 9" fill="none" stroke="#8abbff" stroke-width="3.2" stroke-linecap="round"/></svg>
+    <span>SPX/VIX <span class="brand-sub">Vol Research</span></span>
+  </a>
+  <button class="nav-toggle" id="navToggle" type="button" aria-controls="navLinks" aria-expanded="false">Menu</button>
   <div class="nav-links" id="navLinks">
     
-    <a href="index.html" class="nav-link active" aria-current="page">
-      <span class="nav-dot" aria-hidden="true"></span>Market
-    </a>
+    <a href="index.html" class="nav-link" data-key="o" aria-current="page">Overview</a>
     
-    <a href="calibration.html" class="nav-link">
-      <span class="nav-dot" aria-hidden="true"></span>Calibration
-    </a>
+    <a href="surface.html" class="nav-link" data-key="s">Surface</a>
     
-    <a href="greeks.html" class="nav-link">
-      <span class="nav-dot" aria-hidden="true"></span>Greeks
-    </a>
+    <a href="calibration.html" class="nav-link" data-key="c">Calibration</a>
     
-    <a href="backtest.html" class="nav-link">
-      <span class="nav-dot" aria-hidden="true"></span>Backtest
-    </a>
+    <a href="risk.html" class="nav-link" data-key="r">Risk</a>
+    
+    <a href="research.html" class="nav-link" data-key="e">Research</a>
+    
+    <a href="corrections.html" class="nav-link" data-key="x">Corrections</a>
+    
+    <a href="model-risk.html" class="nav-link" data-key="m">Model Risk</a>
     
   </div>
-  
-  <div class="nav-status" title="End-of-day snapshot, rebuilt after each US market close">
-    <div class="status-dot error" aria-hidden="true"></div>
-    Stale input
-  </div>
+  <div class="nav-right"><span class="js-only">Press <kbd>?</kbd> for shortcuts</span></div>
 </nav>
+
+<div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">
+  
+  <span class="tk" title="SPX close 2026-10-26 (market DB), change on the previous close"><span class="tk-label">SPX</span><span class="tk-val">7,676.77</span><span class="tk-chg"><span class="pos">▲ +0.70%</span></span></span>
+  
+  <span class="tk" title="VIX close 2026-10-26 (index pts), change on the previous close"><span class="tk-label">VIX</span><span class="tk-val">18.39</span><span class="tk-chg"><span class="neg">▼ −1.06</span></span></span>
+  
+  <span class="tk" title="VVIX close 2026-10-26 (index pts), change on the previous close"><span class="tk-label">VVIX</span><span class="tk-val">101.43</span><span class="tk-chg"><span class="neg">▼ −8.27</span></span></span>
+  
+  <span class="tk" title="VIX6M − VIX9D close 2026-10-26 (index pts); positive: contango"><span class="tk-label">9D→6M</span><span class="tk-val">+3.71</span><span class="tk-chg">contango</span></span>
+  
+  <span class="tk" title="VIX / VIX3M close 2026-10-26; above 1: backwardation"><span class="tk-label">VIX/VIX3M</span><span class="tk-val">0.922</span></span>
+  
+  <span class="tk" title="RV21 2026-10-26: SPX realised vol of the 21 sessions to that close, root-mean-square of the daily log returns, annualised (×252), in %"><span class="tk-label">RV21</span><span class="tk-val">9.81</span></span>
+  
+  <span class="tk" title="VIX − RV21 2026-10-26: VIX close 18.39 − RV21 9.81, vol pts; VIX is a 30-day variance-swap rate, so the gap overstates what an at-the-money straddle earns"><span class="tk-label">VIX−RV21</span><span class="tk-val">+8.58</span></span>
+  
+  <span class="tk" title="VIX close 18.39 on 2026-10-26: 170 of the 252 sessions before it (2025-10-23 → 2026-10-23) closed strictly lower"><span class="tk-label">VIX 1Y PCTL</span><span class="tk-val">67th</span><span class="sr-only"> (percentile among the 252 sessions before 2026-10-26)</span></span>
+  
+  <span class="tk" title="Rule regime label of 2026-10-26"><span class="tk-label">RULE</span><span class="tk-val">R1</span><span class="tk-chg">short gamma</span><span class="tk-note">2026-10-26</span></span>
+  
+  <span class="tk" title="SVI-cal surface of 2026-10-26 (the newest session) at 30 days, between the 2026-11-25 and 2026-11-27 expiries: ATMF vol 14.03%, RR25 (25Δ call − 25Δ put vol) −4.80 vol pts"><span class="tk-label">1M ATMF</span><span class="tk-val">14.03%</span><span class="tk-label">RR25</span><span class="tk-val">−4.80</span><span class="tk-note lvl-ok">2026-10-26</span></span>
+  
+</div>
 
 <main class="page" id="main" tabindex="-1">
   
-  <div class="banner-stack">
-    
-    
-    <div class="banner banner-stale-error" data-stale="calibration" data-age="5">
-      <div class="banner-icon" aria-hidden="true">!</div>
-      <div>
-        <div class="banner-title">Heston calibration is 5 NYSE sessions old</div>
-        <div class="banner-body">
-          Heston calibration as of 2026-10-16; the newest session the site has data for is 2026-10-23.
-          No newer fit passed the quality gate, so the latest accepted fit is shown.
-          
-          
-          
-        </div>
-      </div>
-    </div>
-    
-  </div>
-  
   
 
-<div class="page-header">
-  <h1 class="page-title">Market Overview</h1>
-  <div class="page-subtitle">End-of-day rule regime, implied versus forecast volatility, and the VIX term structure.</div>
-  <div class="page-badge" id="freshness-badge" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>
-    <span class="nowrap" data-date="2026-10-23">Last close 2026-10-23</span>
-    <span class="sep">·</span><span class="nowrap">Regime 2026-10-23</span><span class="sep">·</span><span class="nowrap">Calibration 2026-10-16</span> <span class="age-error">(5 sessions old)</span><span class="sep">·</span><span class="nowrap">PDV forecast 2026-10-23</span>
+<div class="page-head">
+  <h1 class="page-title">Joint SPX/VIX calibration</h1>
+  <p class="page-sub" id="what-it-is">An end-of-day research system for SPX and VIX options. Its daily job is built to store each U.S. session's option books, fit an arbitrage-free market surface and one stochastic-volatility model jointly to the SPX smile and the VIX index term structure (VIX options are a research leg, not in the fit), and score both on quotes they were not fitted to, in units of the quoted <a class="term" href="model-risk.html#def-half-spread">half-spread</a>; the pipeline panel lists what is stored so far. Greeks, scenarios and a mark-to-model backtest with its statistical inference are built from the same fits.</p>
+  <div class="page-badge">
+    <span class="nowrap">Last close 2026-10-26</span><span class="sep">·</span>
+    <span class="nowrap">Rule label 2026-10-26</span><span class="sep">·</span>
+    <span class="nowrap">Headline fit 2026-10-26</span><span class="sep">·</span>
+    <span class="nowrap">PDV forecast 2026-10-26</span>
   </div>
 </div>
-<script>
-/* View-time freshness check. The site is a static end-of-day snapshot, rebuilt
-   after each US close. This counts the NYSE sessions between the snapshot's last
-   close and the most recent session that SHOULD have data by now (viewer's clock),
-   skipping weekends and the NYSE holidays emitted by the server, and escalates
-   with the same thresholds as the server-side banners (2 = amber, 5 = red). */
-(function () {
-  var badge = document.getElementById('freshness-badge');
-  if (!badge) return;
-  var span = badge.querySelector('[data-date]');
-  var dd = span && span.getAttribute('data-date');
-  if (!dd || !/^\d{4}-\d{2}-\d{2}$/.test(dd)) return;
-  var holidays = {};
-  try { JSON.parse(badge.getAttribute('data-holidays') || '[]').forEach(function (h) { holidays[h] = true; }); } catch (e) {}
-  function iso(t) { return new Date(t).toISOString().slice(0, 10); }
-  function isSession(t) { var w = new Date(t).getUTCDay(); return w !== 0 && w !== 6 && !holidays[iso(t)]; }
-  var DAY = 86400000;
-  var probe = new Date();
-  // EOD data for a session is published after ~22:00 UTC; before that, today has no close yet.
-  var t = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
-  if (probe.getUTCHours() < 22) t -= DAY;
-  while (!isSession(t)) t -= DAY;
-  var dataDay = Date.parse(dd + 'T00:00:00Z');
-  var behind = 0;
-  for (var x = t; x > dataDay && behind < 400; x -= DAY) { if (isSession(x)) behind++; }
-  var note = document.createElement('span');
-  var cls, txt;
-  if (behind === 0) { cls = 'age-ok'; txt = 'current as of the latest U.S. session'; }
-  else if (behind === 1) { cls = 'age-ok'; txt = 'refreshes after the next U.S. close'; }
-  else { cls = behind >= 5 ? 'age-error' : 'age-warn'; txt = behind + ' sessions behind today'; }
-  note.innerHTML = '<span class="sep">·</span><span class="' + cls + '"></span>';
-  note.lastChild.textContent = txt;
-  badge.appendChild(note);
-})();
-</script>
 
-<!-- ── Row 1: market snapshot ─────────────────────────────────────────────── -->
-<div class="grid grid-4 row">
 
-  <div class="card card-sm">
-    <h2 class="card-label">S&amp;P 500</h2>
-    <div class="card-value">7,623.68</div>
-    
-    <div class="stat-row">
-      <span class="stat-change down">−0.52%</span>
-      <span>vs previous close</span>
-    </div>
-    
-    <div class="card-sub">Close 2026-10-23</div>
-  </div>
-
-  <div class="card card-sm">
-    <h2 class="card-label">VIX  <span class="qual">30-day implied</span></h2>
-    
-    
-    
-    <div class="card-value">19.45</div>
-    <div class="stat-row"><span class="chip chip-green">NORMAL — 15 to 20</span></div>
-    <div class="card-sub">Close 2026-10-23</div>
-    
-  </div>
-  <!-- VVIX -->
-  <div class="card card-sm">
-    <h2 class="card-label">VVIX  <span class="qual">vol of VIX</span></h2>
-    
-    <div class="card-value">109.70</div>
-    
-    <div class="stat-row">
-      <span class="chip chip-red">ABOVE R2 GATE</span>
-    </div>
-    <div class="card-sub">Gate 107.06: rolling 252-day 80th percentile</div>
-    
-    
-    
-  </div>
-
-  <div class="card card-sm">
-    <h2 class="card-label">VIX term structure</h2>
-    
-    <div class="card-value sm">Contango</div>
-    <div class="card-sub">9d 18.70 → 184d 21.96 (slope +3.26 pts)</div>
-    <div class="card-sub" >
-      All tenors 2026-10-23
-    </div>
-    
-  </div>
-
+<h2 class="section-title" id="findings-title">Findings at a glance</h2>
+<div class="findings" id="findings" aria-labelledby="findings-title">
+  
+  <section class="find-col" aria-labelledby="find-works">
+    <h3 class="find-head" id="find-works" data-disclose="find-list-works" data-count="3"><span class="find-glyph" aria-hidden="true">✓</span>Works</h3>
+    <ul class="find-list fold-body" id="find-list-works">
+      <li class="find-item"><a href="surface.html#scorecard">Arbitrage-free SVI surface</a>: median 1.60 half-spreads from the mid, 31.0% inside the bid–ask, on the held-out strikes of <span class="nowrap">2026-10-26</span>.</li><li class="find-item"><a href="surface.html#vix-replication">VIX replicated from the stored chain</a>: −0.34 <a class="term" href="model-risk.html#def-index-pts"><abbr title="index points">index pts</abbr></a> from the Cboe close (replicated − official) on <span class="nowrap">2026-10-26</span>, by the Cboe rules.</li><li class="find-item"><a href="calibration.html#history">The gate keeps broken-data fits off the page</a>: 37 pre-C22 fits labelled legacy, none published; 6 of 6 current-schema fits pass.</li>
+    </ul>
+  </section>
+  
+  <section class="find-col" aria-labelledby="find-fails">
+    <h3 class="find-head" id="find-fails" data-disclose="find-list-fails" data-count="4"><span class="find-glyph" aria-hidden="true">✕</span>Does not work</h3>
+    <ul class="find-list fold-body" id="find-list-fails">
+      <li class="find-item"><a href="calibration.html#oos">One-factor Heston at the short end</a>: 4.20 <a class="term" href="model-risk.html#def-vol-pts"><abbr title="volatility points">vol pts</abbr></a> <a class="term" href="model-risk.html#def-oos">out of sample</a> on the <span class="nowrap">2026-11-06</span> expiry (11 days), VVIX 198 against 101 (<span class="nowrap">2026-10-26</span>).</li><li class="find-item"><a href="calibration.html#skew-term">Heston&#39;s ATM skew is steeper than the market&#39;s</a>: ×1.06 to ×1.70 the <a class="term" href="model-risk.html#def-svi-cal"><abbr title="calendar-ordered SVI surface">SVI-cal</abbr></a> market skew at every listed expiry of <span class="nowrap">2026-10-26</span> (1.91 against 1.14 at 11 d); the market&#39;s slope in T is −0.45 to −0.32 over 6 sessions (SVI-cal, all expiries).</li><li class="find-item"><a href="research.html#inference">The mark-to-model backtest loses</a>: −22.2% over 2018–2025, Sharpe −0.99 (95% CI −1.81 to −0.30).</li><li class="find-item"><a href="research.html#research-classifier">The ML regime classifier</a>: 74.9% out-of-sample accuracy against 87.0% for the predict-yesterday baseline; research only, it never trades.</li>
+    </ul>
+  </section>
+  
+  <section class="find-col" aria-labelledby="find-next">
+    <h3 class="find-head" id="find-next" data-disclose="find-list-next" data-count="4"><span class="find-glyph" aria-hidden="true">→</span>Next · not done yet</h3>
+    <ul class="find-list fold-body" id="find-list-next">
+      <li class="find-item"><a href="research.html#forward">Forward test at executable prices</a>: not yet evidence: 1 registered session so far; the ledger fixes targets before any later price exists.</li><li class="find-item"><a href="calibration.html#rough-vs-heston">Rough Heston in production</a>: not adopted: lower out-of-sample error on 4 of 6 sessions, but H is weakly identified (<span class="nowrap">2026-10-26</span>).</li><li class="find-item"><a href="calibration.html#vixleg">VX futures in the joint objective</a>: not done: the fits score VX settlements out of sample only, 1.85–3.18 index pts RMSE on 4 of 6 gated fits, the model below the settlement on 35 of 35 contracts. VX futures table ends <span class="nowrap">2026-10-09</span>; none stored for <span class="nowrap">2026-10-26</span>.</li><li class="find-item"><a href="calibration.html#sigma-tradeoff">A wider production σ box</a>: not done: σ ≤ 2 is kept because the NN pricer&#39;s domain, the vomma shock and the bound chips are tied to it (Corrections C23-M1).</li>
+    </ul>
+  </section>
+  
 </div>
 
-<!-- ── Row 2: regime · PDV vs implied · term-structure chart ─────────────── -->
-<div class="grid grid-3 row">
 
-  <!-- Current regime: the deterministic rule label -->
-  <div class="card">
-    <h2 class="card-label">Current regime <span class="qual">· rule label</span></h2>
-    
-    <div class="card-value sm" style="display:flex;align-items:center;gap:10px;">
-      <span aria-hidden="true" style="width:10px;height:10px;border-radius:2px;background:#f0787c;flex-shrink:0;"></span>
-      <span>R2 · VOMMA ACTIVE</span>
-    </div>
-    <div class="card-sub">
-      Deterministic rule (rv₂₀ vs VIX · VVIX gate) — the label the backtest
-      trades on. As of 2026-10-23.
-    </div>
-    
-    
-    <div class="subcard mt12" id="rule-inputs">
-      <div class="small faint" style="margin-bottom:4px;">Rule inputs on 2026-10-23</div>
-      <div class="kv-2" style="grid-template-columns:repeat(2,minmax(0,1fr));">
-        <div>rv₂₀ <span class="v">9.75%</span></div>
-        <div>VIX <span class="v">19.45%</span></div>
-        <div>VVIX <span class="v">109.70</span></div>
-        <div>R2 gate <span class="v">107.06</span></div>
-      </div>
-      <div class="small dim" style="margin-top:6px;">
-        VVIX above the gate → R2.
-        
-        
-      </div>
-    </div>
-    
-    
+<h2 class="section-title">Key results</h2>
+<div class="kpis" id="key-results" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:8px;">
+  
+  <a class="result" href="surface.html#scorecard" style="text-decoration:none;color:inherit;">
+    <span class="result-k">Arbitrage-free SVI surface · alternate strikes held out</span>
+    <span class="result-v">1.60<span class="unit">half-spreads</span></span>
+    <span class="result-d">Median |model − mid| of the arbitrage-free, calendar-ordered SVI surface on 1,573 held-out quotes of 2026-10-26; 31.0% inside the bid–ask; 0 butterfly and 0 calendar violations on its dense grid. Heston on its own held-out quotes of that session: 12.5 half-spreads, 3.0% inside. Quotes as of 2026-10-27T05:26:50Z.</span>
+    <span class="kpi-ci kpi-range">Range over 6 stored sessions: 0.45–1.98 half-spreads (31–80% inside)</span><span class="kpi-ci faint">A range across sessions, not a sampling interval. Held-out strikes sit between fitted ones (an interpolation test).</span>
+    <span class="src">data_store/surface/2026-10-26/scorecard.json</span>
+  </a>
+  
+  <a class="result" href="calibration.html#rough-vs-heston" style="text-decoration:none;color:inherit;">
+    <span class="result-k">Joint SPX/VIX fit · out of sample</span>
+    <span class="result-v">1.72<span class="unit">vol pts, Heston</span></span>
+    <span class="result-d">SPX IV RMSE on the 3,049 quotes outside the fit, 2026-10-26, with the four VIX indices in the objective. Rough Heston on the same quotes: 1.42 (H 0.37); lower on 4 of 6 sessions, and on 2 it returns H = ½, i.e. Heston.</span>
+    <span class="kpi-ci kpi-range">Range over 6 sessions: Heston 1.28–2.96, rough Heston 1.09–1.83 vol pts; κ ±30% (Gauss–Newton curvature scale)</span>
+    <span class="src">data_store/calibrations/diagnostics/summary.json</span>
+  </a>
+  
+  <a class="result" href="research.html#inference" style="text-decoration:none;color:inherit;">
+    <span class="result-k">Backtest Sharpe · mark-to-model</span>
+    <span class="result-v">−0.99<span class="unit">portfolio</span></span>
+    <span class="result-d">2018–2025, straddles marked at β·VIX (no option prices in the window); Hansen SPA, published series vs cash: p 0.65. S3 entry timing vs 3,550 exposure-matched circular shifts: p 0.078 (Holm over 6 sleeves 0.47).</span>
+    <span class="kpi-ci">95% CI −1.81 to −0.30 (stationary bootstrap, percentile, 10,000 draws)</span>
+    <span class="src">data_store/backtest/inference/summary.json</span>
+  </a>
+  
+</div>
+<p class="note" style="margin:0 0 12px;">Every figure is read from the committed artifact named under it. A half-spread is half the quoted bid–ask in implied-vol terms, so a model within one half-spread of the mid sits inside the quote. Backtest dollars are mark-to-model, never traded fills.</p>
 
-    <!-- ML classifier: research-only (demoted, C17) -->
-    <div class="divider"></div>
+<div class="g trio">
+  <section class="panel s4 " id="state-regime" aria-labelledby="state-regime-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="state-regime-t">Regime · rule label</h2>
+    <span class="panel-side"><a class="chip chip-ok mon-link" href="model-risk.html#check-label-lag" aria-label="Monitored · M10 · OK: Market database lag behind the rule labels (sessions)" title="Model Risk check: Market database lag behind the rule labels (sessions)" data-monitored="check-label-lag">Monitored · M10 · OK</a><span class="panel-meta">2026-10-26</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-regime" aria-label="Copy a link to the Regime · rule label panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
     
-    <div class="flex space-between" style="margin-bottom:4px;">
-      <span class="small dim">ML classifier <span class="chip chip-amber" style="margin-left:4px;">research only</span></span>
-      <span class="small" style="font-weight:600;">R1 · 63.2%</span>
+    <div class="kpi-value" style="display:flex;align-items:center;gap:8px;">
+      <span aria-hidden="true" style="width:10px;height:10px;border-radius:2px;background:#009e73;flex-shrink:0;"></span>
+      <span>R1 · SHORT GAMMA</span>
     </div>
-    <div class="progress-bar-wrap" role="group" aria-label="Classifier probabilities">
-      
-      <div class="progress-row">
-        <div class="progress-label">R0 long γ</div>
-        <div class="progress-track"><div class="progress-fill" style="width:0.0%;"></div></div>
-        <div class="progress-val">0.0%</div>
-      </div>
-      
-      <div class="progress-row">
-        <div class="progress-label">R1 short γ</div>
-        <div class="progress-track"><div class="progress-fill" style="width:63.2%;"></div></div>
-        <div class="progress-val">63.2%</div>
-      </div>
-      
-      <div class="progress-row">
-        <div class="progress-label">R2 vomma</div>
-        <div class="progress-track"><div class="progress-fill" style="width:36.8%;"></div></div>
-        <div class="progress-val">36.8%</div>
-      </div>
-      
-    </div>
-    <div class="card-sub small">
-      Next-session forecast from the features of 2026-10-23.
-      Classifier disagrees with the rule label here — 75.0% out-of-sample, it loses to the 86.7% “predict-yesterday” baseline, so it is <strong>not used for trading</strong> (shown for research only).
+    <p class="note">Deterministic rule (rv₂₀ against VIX, VVIX gate); the label the backtest trades, lagged one session. Label as of 2026-10-26.</p>
+    
+    <div id="rule-inputs">
+      <p class="note">Rule inputs on 2026-10-26:</p>
+      <dl class="dl">
+        <dt>rv₂₀</dt><dd>9.67%</dd>
+        <dt>VIX</dt><dd>18.39</dd>
+        <dt>VVIX</dt><dd>101.43</dd>
+        <dt>R2 gate</dt><dd>107.06 (rolling 252-day 80th percentile of VVIX)</dd>
+        <dt>Gate distance</dt><dd id="r2-gate-distance">VVIX 101.43 vs <a class="term" href="model-risk.html#def-regimes"><abbr title="rule regime labels">R2</abbr></a> gate 107.06 (−5.63 below)</dd>
+        <dt>Rule gives</dt><dd>R1; stored label for 2026-10-26: R1</dd>
+      </dl>
     </div>
     
-
-    <!-- Regime legend: the rule, as build_regime_labels applies it -->
-    <div class="divider"></div>
-    <dl class="defs" aria-label="Rule-label definitions">
-      <dt style="border-left-color:var(--blue);">R0</dt><dd>Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</dd>
-      <dt style="border-left-color:var(--accent);">R1</dt><dd>Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</dd>
-      <dt style="border-left-color:var(--red);">R2</dt><dd>VVIX above its rolling 252-day 80th percentile (overrides R0/R1) → vomma trades</dd>
+    
+    <details class="method foot"><summary>Rule definitions</summary>
+    <dl class="dl">
+      <dt>R0</dt><dd>Realised &gt; implied (rv₂₀ &gt; VIX) → long gamma</dd>
+      <dt>R1</dt><dd>Implied ≥ realised (rv₂₀ ≤ VIX) → sell premium</dd>
+      <dt>R2</dt><dd>VVIX above its rolling 252-day 80th percentile (overrides R0/R1) → vomma trades</dd>
     </dl>
+    </details>
   </div>
+</section>
 
-  <!-- PDV forecast vs VIX -->
-  <div class="card">
-    <h2 class="card-label">PDV forecast vs implied vol</h2>
+  <section class="panel s4 " id="state-ts" aria-labelledby="state-ts-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="state-ts-t">VIX term structure</h2>
+    <span class="panel-side"><span class="panel-meta">2026-10-26</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-ts" aria-label="Copy a link to the VIX term structure panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
     
     
-    <div class="grid grid-2" style="gap:12px;">
-      <div>
-        <div class="small faint">VIX · 2026-10-23</div>
-        <div class="card-value">19.45<span class="unit">%</span></div>
-      </div>
-      <div>
-        <div class="small faint">PDV forecast · next 21-day realised vol</div>
-        <div class="card-value">14.25<span class="unit">%</span></div>
-      </div>
-    </div>
-    <div class="divider"></div>
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in VIX index term structure on 2026-10-26, with earlier sessions">
+    <button class="btn js-only" type="button" data-legend-for="chart-ts" data-series="2026-10-26 (latest)" aria-pressed="true"><span class="key-swatch" style="color:var(--series-headline)"></span>2026-10-26 (latest)</button><button class="btn js-only" type="button" data-legend-for="chart-ts" data-series="2026-10-23 (1 session earlier)" aria-pressed="true"><span class="key-swatch" style="color:var(--series-muted)"></span>2026-10-23 (1 session earlier)</button><button class="btn js-only" type="button" data-legend-for="chart-ts" data-series="2026-10-19 (5 sessions earlier)" aria-pressed="true"><span class="key-swatch dashed" style="color:var(--series-muted)"></span>2026-10-19 (5 sessions earlier)</button><button class="btn js-only" type="button" data-legend-for="chart-ts" data-series="2026-09-25 (21 sessions earlier)" aria-pressed="true"><span class="key-swatch dotted" style="color:var(--series-muted)"></span>2026-09-25 (21 sessions earlier)</button>
     
-    <div class="small faint">VIX − PDV forecast</div>
-    <div class="card-value lg">+5.20<span class="unit">vol pts</span></div>
-    
-    <div class="card-sub">
-      Within this spread's usual range
-      
-    </div>
-    
-
-    <!-- Historical context: the SAME quantity (VIX − this model's forecast) on prior sessions -->
-    <div class="subcard mt12">
-      
-      <div style="display:flex;align-items:baseline;gap:10px;">
-        <div id="pdv-percentile" class="card-value sm nowrap" style="flex-shrink:0;">79th</div>
-        <div class="small dim">percentile of 3,642 prior sessions (2012-04-30 → 2026-10-22); mean +3.37 vol pts</div>
-      </div>
-      
-      
-      <div class="small faint" style="margin:10px 0 2px;">Last 60 sessions to 2026-10-23 (shaded above zero)</div>
-      <div class="chart-wrap spark">
-        <canvas id="sparklineChart" role="img" aria-label="Sparkline: VIX minus PDV forecast, last 60 sessions" aria-describedby="sparklineChart-data"></canvas>
-      </div>
-      
-      <p class="chart-data sr-only" id="sparklineChart-data">
-        VIX minus PDV forecast from 2026-07-31 to 2026-10-23:
-        first +1.41 vol pts, last +5.20 vol pts,
-        range +1.41 to +6.16 vol pts.
-      </p>
-      
-    </div>
-    <p class="chart-note">
-      The forecast is the expected realised vol (RMS) of the next 21 sessions, the VIX horizon.
-      VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity
-      gap (E[σ] &lt; √E[σ²]); it is not a pure premium.
-      Forecast and history are the purged walk-forward forecast (refitted daily on labels known at each close), so the
-      percentile ranks today against out-of-sample values only, not against zero.
-    </p>
-    <div class="kv-2 mt8">
-      <div>σ₁ (5.0-day EWMA) <span class="v">10.96%</span></div>
-      <div>σ₂ (60.0-day EWMA) <span class="v">12.26%</span></div>
-    </div>
     
   </div>
-
-  <!-- VIX term-structure chart -->
-  <div class="card">
-    <h2 class="card-label">VIX term structure <span class="qual">· 2026-10-23</span></h2>
-    <div class="chart-wrap tall">
-      <canvas id="tsChart" role="img" aria-label="Line chart: VIX index term structure by tenor on 2026-10-23" aria-describedby="tsChart-data"></canvas>
-    </div>
-    <div class="chart-data sr-only" id="tsChart-data">
-      
-      <table>
-        <caption>VIX-family index levels, 2026-10-23</caption>
-        <thead><tr><th scope="col">Tenor</th><th scope="col">Level (vol pts)</th></tr></thead>
-        <tbody><tr><td>9d</td><td>18.70</td></tr><tr><td>30d</td><td>19.45</td></tr><tr><td>93d</td><td>20.48</td></tr><tr><td>184d</td><td>21.96</td></tr></tbody>
-      </table>
-      
-    </div>
-    <p class="chart-note">^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session. The x axis is the tenor in calendar days on a linear scale; points are joined by straight lines (no smoothing).</p>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="chart-ts-data" aria-expanded="false" aria-controls="chart-ts-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="chart-ts" data-filename="vix_term_structure_2026-10-26.csv">CSV</button>
   </div>
-
 </div>
 
-<!-- ── Row 3: label history + classifier · PDV model ─────────────────────── -->
-<div class="grid grid-2 row">
+<div class="chart h220 grow" id="chart-ts" data-spec="chart-ts-spec" role="img" aria-label="VIX index term structure on 2026-10-26, with earlier sessions" aria-describedby="chart-ts-desc chart-ts-data"></div>
 
-  <div class="card">
-    <h2 class="card-label">Rule-label distribution <span class="qual">· 2010 – 2026</span></h2>
-    <div class="tiles" style="grid-template-columns:repeat(3,minmax(0,1fr));">
-      
-      <div class="subcard" style="border-top:2px solid var(--blue);">
-        <div class="small dim">R0 long gamma</div>
-        <div class="card-value sm">10.3<span class="unit">%</span></div>
-        <div class="small faint">428 of 4,166 sessions</div>
-      </div>
-      
-      <div class="subcard" style="border-top:2px solid var(--accent);">
-        <div class="small dim">R1 short gamma</div>
-        <div class="card-value sm">67.7<span class="unit">%</span></div>
-        <div class="small faint">2,822 of 4,166 sessions</div>
-      </div>
-      
-      <div class="subcard" style="border-top:2px solid var(--red);">
-        <div class="small dim">R2 vomma active</div>
-        <div class="card-value sm">22.0<span class="unit">%</span></div>
-        <div class="small faint">916 of 4,166 sessions</div>
-      </div>
-      
-    </div>
-
-    <div class="divider"></div>
-
-    <div class="kv-2">
-      <div>Out-of-sample accuracy: <span class="v">75.0%</span></div>
-      <div>Persistence baseline: <span class="v">86.7%</span></div>
-      <div>Features: <span class="v">5</span> (vvix excluded — C16)</div>
-      <div>Top feature: <span class="v"><code>fear_premium</code> (37%)</span></div>
-      <div>Model: <span class="v">XGBoost, 3 classes</span></div>
-      <div>Status: <span class="chip chip-red">Research only (C17)</span></div>
-    </div>
-    <p class="chart-note">
-      Accuracy is the shipped model's own evaluation on 2020-01-02 → 2025-12-31
-      (1,508 sessions, adaptive-gate rule labels);
-      its spread feature is the rv₂₀ proxy it was trained on.
-      <strong>C17: the classifier loses to the no-skill persistence baseline</strong> (“predict yesterday's regime”;
-      yesterday's label is fully observable). History: C16 reported 86.2% (fixed 100-point VVIX gate, vvix as a
-      feature) and C17 63.4% vs 90.0% (fixed labels, a full-sample PDV feature with look-ahead); C22 retrained it on
-      the one adaptive gate with holdout calibration, and the conclusion did not change. The backtest uses the lagged
-      deterministic rule labels; a Gaussian HMM in <code>regime_classifier.py</code> is research-only as well.
-      Regimes are too persistent for daily ML classification to add value.
-    </p>
-  </div>
-
-  <div class="card">
-    <h2 class="card-label">PDV model <span class="qual">· EWMA approximation of Guyon–Lekeufack (2023)</span></h2>
-    
-    <div class="subcard" style="font-size:13px;">
-      <code style="color:var(--text);font-size:13px;">σ̂(t) = 0.400·σ₁ + 0.103·σ₂ − 0.722·lev + 0.0774</code>
-    </div>
-    
-    <div class="kv-2 mt12">
-      <div>σ₁ half-life: <span class="v">5.0 days</span></div>
-      <div>σ₂ half-life: <span class="v">60.0 days</span></div>
-      <div id="pdv-skill">Walk-forward R²: <span class="v">0.29 (ex-2020 0.26)</span></div>
-      <div>GARCH(1,1) benchmark persistence: <span class="v">0.978</span></div>
-    </div>
-    
-    <p class="chart-note">R² of the daily-refitted (purged) walk-forward forecast against realised 21-day RMS vol,
-      3,622 forecasts 2012-04-30 → 2026-09-24, recomputed from the database at build time.
-      The equation is the shipped model's full-sample fit; the forecast on the card is the walk-forward one.</p>
-    
-
-    
-    
-    <div class="banner banner-warn mt12">
-      <div class="banner-icon" aria-hidden="true">!</div>
-      <div>
-        <div class="banner-title">COVID stress test — 2020-03-16</div>
-        <div class="banner-body">
-          PDV-linear forecast made at the 2020-03-13 close (refitted on the 2,484 labels known then):
-          <strong>54.5%</strong>.
-          Realised over its 21-session horizon (2020-03-16 → 2020-04-14, RMS, annualised):
-          <strong class="red">77.1%</strong>.
-          Error <strong class="red">−22.5 vol pts</strong> — a backward-looking model cannot see a jump coming.
-        </div>
-      </div>
-    </div>
+<p class="sr-only" id="chart-ts-desc">^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session, and dashed on 2026-10-23 (1 session earlier), 2026-10-19 (5 sessions earlier), 2026-09-25 (21 sessions earlier); tenor on a linear axis, straight segments.</p>
+<script type="application/json" id="chart-ts-spec">{"csv": "vix_term_structure_2026-10-26.csv", "describe": "^VIX9D, ^VIX, ^VIX3M and ^VIX6M on one session, and dashed on 2026-10-23 (1 session earlier), 2026-10-19 (5 sessions earlier), 2026-09-25 (21 sessions earlier); tenor on a linear axis, straight segments.", "grid": {"top": 12}, "id": "chart-ts", "kind": "xy", "legend_items": [{"color": "headline", "dash": false, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "2026-10-26 (latest)"}, {"color": "muted", "dash": false, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "2026-10-23 (1 session earlier)"}, {"color": "muted", "dash": true, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "2026-10-19 (5 sessions earlier)"}, {"color": "muted", "dash": false, "diamond": false, "dot": false, "dotted": true, "hidden": false, "hollow": false, "name": "2026-09-25 (21 sessions earlier)"}], "series": [{"color": "headline", "data": [[9, 17.92], [30, 18.39], [93, 19.94], [184, 21.63]], "legend": true, "name": "2026-10-26 (latest)", "role": "cboe", "size": 7, "symbol": "circle", "type": "line", "width": 2, "z": 4}, {"color": "muted", "dash": false, "data": [[9, 18.7], [30, 19.45], [93, 20.48], [184, 21.96]], "legend": true, "name": "2026-10-23 (1 session earlier)", "role": "other", "size": 4, "symbol": "circle", "type": "line", "width": 1.2}, {"color": "muted", "dash": true, "data": [[9, 17.93], [30, 18.44], [93, 19.6], [184, 21.12]], "legend": true, "name": "2026-10-19 (5 sessions earlier)", "role": "other", "size": 4, "symbol": "circle", "type": "line", "width": 1.2}, {"color": "muted", "dash": "dotted", "data": [[9, 12.76], [30, 14.87], [93, 17.93], [184, 20.01]], "legend": true, "name": "2026-09-25 (21 sessions earlier)", "role": "other", "size": 4, "symbol": "circle", "type": "line", "width": 1.2}], "table": {"caption": "VIX-family index levels (index pts), 2026-10-26 and earlier sessions", "columns": [{"label": "Tenor", "num": false}, {"label": "2026-10-26", "num": true}, {"label": "2026-10-23", "num": true}, {"label": "2026-10-19", "num": true}, {"label": "2026-09-25", "num": true}], "rows": [["9d", "17.92", "18.70", "17.93", "12.76"], ["30d", "18.39", "19.45", "18.44", "14.87"], ["93d", "19.94", "20.48", "19.60", "17.93"], ["184d", "21.63", "21.96", "21.12", "20.01"]]}, "title": "VIX index term structure on 2026-10-26, with earlier sessions", "tooltip": "item", "x": {"digits": 0, "min": 0, "name": "Tenor (calendar days)", "tipNames": {"184": "VIX6M", "30": "VIX", "9": "VIX9D", "93": "VIX3M"}, "type": "value", "zero": true}, "y": {"digits": 1, "name": "Index level (index pts)", "tipDigits": 2}}</script>
+<div class="chart-data sr-only" id="chart-ts-data">
+  
+  <table>
+    <caption>VIX-family index levels (index pts), 2026-10-26 and earlier sessions</caption>
+    <thead><tr><th scope="col">Tenor</th><th scope="col" class="num">2026-10-26</th><th scope="col" class="num">2026-10-23</th><th scope="col" class="num">2026-10-19</th><th scope="col" class="num">2026-09-25</th></tr></thead>
+    <tbody><tr><td>9d</td><td class="num">17.92</td><td class="num">18.70</td><td class="num">17.93</td><td class="num">12.76</td></tr><tr><td>30d</td><td class="num">18.39</td><td class="num">19.45</td><td class="num">18.44</td><td class="num">14.87</td></tr><tr><td>93d</td><td class="num">19.94</td><td class="num">20.48</td><td class="num">19.60</td><td class="num">17.93</td></tr><tr><td>184d</td><td class="num">21.63</td><td class="num">21.96</td><td class="num">21.12</td><td class="num">20.01</td></tr></tbody>
+  </table>
+  
+  
+</div>
+    <p class="note">9d 17.92 → 184d 21.63 (slope +3.71 index pts, contango).</p>
     
   </div>
+  <div class="panel-foot cite-foot" id="state-ts-cited">Cited on: <a href="risk.html#hedge">Risk</a></div>
+</section>
 
+  <section class="panel s4 " id="state-pdv" aria-labelledby="state-pdv-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="state-pdv-t">Implied vs forecast vol</h2>
+    <span class="panel-side"><span class="panel-meta">2026-10-26</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-pdv" aria-label="Copy a link to the Implied vs forecast vol panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+    
+    <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+      <div class="kpi">
+  <div class="kpi-label">VIX</div>
+  <div class="kpi-value">18.39</div>
+  
+  <div class="kpi-sub">index level</div>
+</div>
+      <div class="kpi">
+  <div class="kpi-label">PDV forecast</div>
+  <div class="kpi-value">13.66<span class="unit">%</span></div>
+  
+  <div class="kpi-sub">next 21-day realised</div>
+</div>
+      <div class="kpi">
+  <div class="kpi-label">VIX − PDV</div>
+  <div class="kpi-value pos">+4.73<span class="unit">vol pts</span></div>
+  
+  
+</div>
+    </div>
+    
+    
+    
+    <p class="note" id="pdv-forecast-rank"><a href="research.html#forecast">PDV ranks 2 of 7 on 21-day MSE and 6 of 7 on QLIKE (<span class="nowrap">2018-01-02</span> → <span class="nowrap">2025-03-24</span>)</a>; in the 90% model confidence set: yes on both; best on both: VIX² (risk-neutral, contains the variance premium).</p>
+    
+    
+    
+    <p class="note">Within this spread's usual range.</p>
+    
+    
+    <p class="note" id="pdv-percentile-line"><strong id="pdv-percentile">75th</strong> percentile of 3,643 prior sessions (2012-04-30 → 2026-10-23); mean +3.38 vol pts.</p>
+    
+    
+<svg class="spark " viewBox="0 0 100.0 36" preserveAspectRatio="none" role="img" aria-label="VIX minus PDV forecast, last 60 sessions to 2026-10-26: from +1.79 to +4.73 vol pts">
+  <line class="spark-zero" x1="0" x2="100.0" y1="34.0" y2="34.0"/>
+  
+  <polyline class="spark-line" points="2.0,24.7 3.63,19.25 5.25,21.95 6.88,24.6 8.51,22.88 10.14,18.94 11.76,20.18 13.39,21.9 15.02,19.04 16.64,20.81 18.27,17.95 19.9,17.74 21.53,20.75 23.15,19.71 24.78,21.74 26.41,18.05 28.03,17.95 29.66,18.1 31.29,19.87 32.92,20.49 34.54,18.73 36.17,15.25 37.8,18.94 39.42,22.42 41.05,22.21 42.68,18.47 44.31,16.13 45.93,11.19 47.56,19.3 49.19,14.16 50.81,14.68 52.44,13.01 54.07,23.19 55.69,24.34 57.32,23.61 58.95,25.69 60.58,24.13 62.2,20.18 63.83,21.74 65.46,19.3 67.08,18.73 68.71,16.96 70.34,14.62 71.97,18.05 73.59,14.78 75.22,15.35 76.85,15.19 78.47,15.3 80.1,16.29 81.73,13.74 83.36,12.65 84.98,13.01 86.61,12.86 88.24,2.0 89.86,7.3 91.49,10.78 93.12,11.61 94.75,8.03 96.37,6.99 98.0,9.43"/>
+  <rect class="spark-last" x="96.8" y="8.23" width="2.4" height="2.4"/>
+</svg>
+
+    <p class="note">Last 60 sessions of the spread; the line marks zero.</p>
+    <p class="note" id="vix-rv-line"><a href="research.html#vrp">VIX − RV21 (trailing) +8.58 vol pts</a>, <span class="nowrap">2026-10-26</span> (VIX 18.39 against the RMS realised vol of the last 21 sessions, 9.81%).</p>
+    <details class="method"><summary>Methodology and caveats</summary>
+    <div class="prose">
+      <p>The forecast is the expected realised vol (RMS) of the next 21 sessions, the VIX horizon. VIX is a risk-neutral variance quote, so the spread mixes the variance risk premium with a convexity gap (E[σ] &lt; √E[σ²]); it is not a pure premium.
+      Forecast and history are the purged walk-forward forecast (refitted daily on labels known at each close), so the percentile ranks today against out-of-sample values only.</p>
+      <p>σ₁ (EWMA, 5-day half-life) 10.97%; σ₂ (EWMA, 60-day half-life) 12.25%.
+      <span id="pdv-skill">Walk-forward R²: <span class="v">0.29 (ex-2020 0.26)</span></span> on 3,623 forecasts 2012-04-30 → 2026-09-25.</p>
+      
+      <p>COVID stress test, 2020-03-16: forecast made at the 2020-03-13 close (refitted on the 2,484 labels known then) 54.5%.
+      Realised over its 21-session horizon (2020-03-16 → 2020-04-14, RMS, annualised): 77.1%; error −22.5 vol pts. A backward-looking model cannot see a jump coming.</p>
+      
+    </div>
+    </details>
+    
+  </div>
+  <div class="panel-foot cite-foot" id="state-pdv-cited">Cited on: <a href="research.html#forecast">Research</a></div>
+</section>
 </div>
 
+
+
+<div class="g pair">
+  <section class="panel s6 " id="vx-curve" aria-labelledby="vx-curve-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="vx-curve-t">VX futures curve · on its own date</h2>
+    <span class="panel-side"><span class="panel-meta">2026-10-09</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="vx-curve" aria-label="Copy a link to the VX futures curve · on its own date panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+    <p class="note" id="vx-curve-age"><span class="age-error">Settlements of <span class="nowrap">2026-10-09</span>, 11 NYSE sessions before the market database’s <span class="nowrap">2026-10-26</span></span>; the daily job does not refresh the futures table.</p>
+    
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in VX monthly futures settlements on 2026-10-09, with 2026-10-08">
+    <button class="btn js-only" type="button" data-legend-for="chart-vx-curve" data-series="2026-10-09 settlements" aria-pressed="true"><span class="key-swatch" style="color:var(--series-headline)"></span>2026-10-09 settlements</button><button class="btn js-only" type="button" data-legend-for="chart-vx-curve" data-series="2026-10-08 settlements" aria-pressed="true"><span class="key-swatch dashed" style="color:var(--series-muted)"></span>2026-10-08 settlements</button>
+    
+    
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="chart-vx-curve-data" aria-expanded="false" aria-controls="chart-vx-curve-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="chart-vx-curve" data-filename="vx_curve_2026-10-09.csv">CSV</button>
+  </div>
+</div>
+
+<div class="chart h220 grow" id="chart-vx-curve" data-spec="chart-vx-curve-spec" role="img" aria-label="VX monthly futures settlements on 2026-10-09, with 2026-10-08" aria-describedby="chart-vx-curve-desc chart-vx-curve-data"></div>
+
+<p class="sr-only" id="chart-vx-curve-desc">9 monthly contracts on 2026-10-09, front month first; M1 → M2 +4.28%.</p>
+<script type="application/json" id="chart-vx-curve-spec">{"csv": "vx_curve_2026-10-09.csv", "describe": "9 monthly contracts on 2026-10-09, front month first; M1 \u2192 M2 +4.28%.", "grid": {"bottom": 64, "top": 12}, "id": "chart-vx-curve", "kind": "xy", "legend_items": [{"color": "headline", "dash": false, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "2026-10-09 settlements"}, {"color": "muted", "dash": true, "diamond": false, "dot": false, "dotted": false, "hidden": false, "hollow": false, "name": "2026-10-08 settlements"}], "series": [{"color": "headline", "data": [17.1186, 17.8517, 18.4448, 19.2723, 19.8061, 20.004, 20.3231, 20.4707, 20.675], "legend": true, "name": "2026-10-09 settlements", "role": "market", "size": 6, "symbol": "circle", "type": "line", "width": 1.6, "z": 4}, {"color": "muted", "dash": true, "data": [17.6239, 18.0079, 18.5248, 19.325, 19.7985, 19.9957, 20.325, 20.475, 20.75], "legend": true, "name": "2026-10-08 settlements", "size": 4, "symbol": "circle", "type": "line", "width": 1.1}], "table": {"caption": "VX monthly settlements, 2026-10-09 and 2026-10-08", "columns": [{"label": "Contract", "num": false}, {"label": "Final settlement", "num": false}, {"label": "Days", "num": true}, {"label": "2026-10-09", "num": true}, {"label": "2026-10-08", "num": true}, {"label": "Change", "num": true}], "rows": [["2026-10", "2026-10-21", "12", "17.12", "17.62", "\u22120.51"], ["2026-11", "2026-11-18", "40", "17.85", "18.01", "\u22120.16"], ["2026-12", "2026-12-16", "68", "18.44", "18.52", "\u22120.08"], ["2027-01", "2027-01-20", "103", "19.27", "19.32", "\u22120.05"], ["2027-02", "2027-02-17", "131", "19.81", "19.80", "+0.01"], ["2027-03", "2027-03-17", "159", "20.00", "20.00", "+0.01"], ["2027-04", "2027-04-21", "194", "20.32", "20.32", "0.00"], ["2027-05", "2027-05-18", "221", "20.47", "20.48", "0.00"], ["2027-06", "2027-06-16", "250", "20.68", "20.75", "\u22120.07"]]}, "title": "VX monthly futures settlements on 2026-10-09, with 2026-10-08", "tooltip": "axis", "x": {"categories": ["26-10-21", "26-11-18", "26-12-16", "27-01-20", "27-02-17", "27-03-17", "27-04-21", "27-05-18", "27-06-16"], "interval": 0, "name": "Contract (final settlement)", "rotate": 45, "type": "category"}, "xs": ["26-10-21", "26-11-18", "26-12-16", "27-01-20", "27-02-17", "27-03-17", "27-04-21", "27-05-18", "27-06-16"], "y": {"digits": 1, "name": "VX (index pts)", "tipDigits": 2}}</script>
+<div class="chart-data sr-only" id="chart-vx-curve-data">
+  
+  <table>
+    <caption>VX monthly settlements, 2026-10-09 and 2026-10-08</caption>
+    <thead><tr><th scope="col">Contract</th><th scope="col">Final settlement</th><th scope="col" class="num">Days</th><th scope="col" class="num">2026-10-09</th><th scope="col" class="num">2026-10-08</th><th scope="col" class="num">Change</th></tr></thead>
+    <tbody><tr><td>2026-10</td><td>2026-10-21</td><td class="num">12</td><td class="num">17.12</td><td class="num">17.62</td><td class="num">−0.51</td></tr><tr><td>2026-11</td><td>2026-11-18</td><td class="num">40</td><td class="num">17.85</td><td class="num">18.01</td><td class="num">−0.16</td></tr><tr><td>2026-12</td><td>2026-12-16</td><td class="num">68</td><td class="num">18.44</td><td class="num">18.52</td><td class="num">−0.08</td></tr><tr><td>2027-01</td><td>2027-01-20</td><td class="num">103</td><td class="num">19.27</td><td class="num">19.32</td><td class="num">−0.05</td></tr><tr><td>2027-02</td><td>2027-02-17</td><td class="num">131</td><td class="num">19.81</td><td class="num">19.80</td><td class="num">+0.01</td></tr><tr><td>2027-03</td><td>2027-03-17</td><td class="num">159</td><td class="num">20.00</td><td class="num">20.00</td><td class="num">+0.01</td></tr><tr><td>2027-04</td><td>2027-04-21</td><td class="num">194</td><td class="num">20.32</td><td class="num">20.32</td><td class="num">0.00</td></tr><tr><td>2027-05</td><td>2027-05-18</td><td class="num">221</td><td class="num">20.47</td><td class="num">20.48</td><td class="num">0.00</td></tr><tr><td>2027-06</td><td>2027-06-16</td><td class="num">250</td><td class="num">20.68</td><td class="num">20.75</td><td class="num">−0.07</td></tr></tbody>
+  </table>
+  
+  
+</div>
+    <p class="note" id="vx-m1m2"><strong>M1 → M2 +4.28%</strong> (17.12 → 17.85): VX2 / VX1 − 1, the second monthly contract over the first; positive is contango. Monthly contracts only (weeklies excluded), at Cboe’s daily settlement; dashed: <span class="nowrap">2026-10-08</span>. A future settles on VIX at its expiry, so this curve is not the spot term structure above and is not drawn on it.</p>
+    
+  </div>
+</section>
+  <section class="panel s6 " id="vix-ratio" aria-labelledby="vix-ratio-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="vix-ratio-t">VIX / VIX3M · since 2010-01-04</h2>
+    <span class="panel-side"><span class="panel-meta">2026-10-26</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="vix-ratio" aria-label="Copy a link to the VIX / VIX3M · since 2010-01-04 panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+    
+<div class="chart-tools">
+  <div class="legend-bar" role="group" aria-label="Series shown in VIX / VIX3M, 2010-01-04 to 2026-10-26, shaded above 1 (backwardation)">
+    
+    
+    
+  </div>
+  <div class="legend-bar">
+    <button class="btn" type="button" data-table-for="chart-vix-ratio-data" aria-expanded="false" aria-controls="chart-vix-ratio-data">Table</button>
+    <button class="btn js-only" type="button" data-csv-for="chart-vix-ratio" data-filename="vix_over_vix3m.csv">CSV</button>
+  </div>
+</div>
+
+<div class="chart h220 grow" id="chart-vix-ratio" data-spec="chart-vix-ratio-spec" role="img" aria-label="VIX / VIX3M, 2010-01-04 to 2026-10-26, shaded above 1 (backwardation)" aria-describedby="chart-vix-ratio-desc chart-vix-ratio-data"></div>
+
+<p class="sr-only" id="chart-vix-ratio-desc">Daily VIX over VIX3M closes; above 1 (the 30-day index over the 3-month one) on 7.6% of 4,229 sessions; today 0.922.</p>
+<script type="application/json" id="chart-vix-ratio-spec">{"csv": "vix_over_vix3m.csv", "describe": "Daily VIX over VIX3M closes; above 1 (the 30-day index over the 3-month one) on 7.6% of 4,229 sessions; today 0.922.", "grid": {"bottom": 30, "top": 10}, "id": "chart-vix-ratio", "kind": "xy", "legend_items": [], "marks": {"areas": [{"alpha": 0.22, "color": "watch", "from": "2010-01-22", "to": "2010-01-25"}, {"alpha": 0.22, "color": "watch", "from": "2010-02-04", "to": "2010-02-08"}, {"alpha": 0.22, "color": "watch", "from": "2010-04-27", "to": "2010-04-27"}, {"alpha": 0.22, "color": "watch", "from": "2010-05-06", "to": "2010-05-07"}, {"alpha": 0.22, "color": "watch", "from": "2010-05-14", "to": "2010-05-24"}, {"alpha": 0.22, "color": "watch", "from": "2010-05-26", "to": "2010-05-26"}, {"alpha": 0.22, "color": "watch", "from": "2010-05-28", "to": "2010-06-01"}, {"alpha": 0.22, "color": "watch", "from": "2010-06-04", "to": "2010-06-08"}, {"alpha": 0.22, "color": "watch", "from": "2010-11-26", "to": "2010-11-26"}, {"alpha": 0.22, "color": "watch", "from": "2011-03-15", "to": "2011-03-18"}, {"alpha": 0.22, "color": "watch", "from": "2011-06-16", "to": "2011-06-16"}, {"alpha": 0.22, "color": "watch", "from": "2011-07-27", "to": "2011-08-30"}, {"alpha": 0.22, "color": "watch", "from": "2011-09-02", "to": "2011-09-13"}, {"alpha": 0.22, "color": "watch", "from": "2011-09-21", "to": "2011-10-04"}, {"alpha": 0.22, "color": "watch", "from": "2011-10-19", "to": "2011-10-20"}, {"alpha": 0.22, "color": "watch", "from": "2011-11-01", "to": "2011-11-01"}, {"alpha": 0.22, "color": "watch", "from": "2011-11-09", "to": "2011-11-09"}, {"alpha": 0.22, "color": "watch", "from": "2012-12-28", "to": "2012-12-28"}, {"alpha": 0.22, "color": "watch", "from": "2013-02-25", "to": "2013-02-25"}, {"alpha": 0.22, "color": "watch", "from": "2013-04-15", "to": "2013-04-15"}, {"alpha": 0.22, "color": "watch", "from": "2013-04-18", "to": "2013-04-18"}, {"alpha": 0.22, "color": "watch", "from": "2013-06-20", "to": "2013-06-20"}, {"alpha": 0.22, "color": "watch", "from": "2013-10-07", "to": "2013-10-09"}, {"alpha": 0.22, "color": "watch", "from": "2013-10-15", "to": "2013-10-15"}, {"alpha": 0.22, "color": "watch", "from": "2014-01-24", "to": "2014-01-27"}, {"alpha": 0.22, "color": "watch", "from": "2014-01-29", "to": "2014-01-29"}, {"alpha": 0.22, "color": "watch", "from": "2014-01-31", "to": "2014-02-05"}, {"alpha": 0.22, "color": "watch", "from": "2014-04-11", "to": "2014-04-11"}, {"alpha": 0.22, "color": "watch", "from": "2014-07-31", "to": "2014-08-01"}, {"alpha": 0.22, "color": "watch", "from": "2014-10-09", "to": "2014-10-17"}, {"alpha": 0.22, "color": "watch", "from": "2014-12-12", "to": "2014-12-12"}, {"alpha": 0.22, "color": "watch", "from": "2014-12-16", "to": "2014-12-16"}, {"alpha": 0.22, "color": "watch", "from": "2015-01-14", "to": "2015-01-15"}, {"alpha": 0.22, "color": "watch", "from": "2015-06-29", "to": "2015-06-29"}, {"alpha": 0.22, "color": "watch", "from": "2015-07-08", "to": "2015-07-09"}, {"alpha": 0.22, "color": "watch", "from": "2015-08-20", "to": "2015-09-01"}, {"alpha": 0.22, "color": "watch", "from": "2015-09-14", "to": "2015-09-14"}, {"alpha": 0.22, "color": "watch", "from": "2015-09-24", "to": "2015-09-24"}, {"alpha": 0.22, "color": "watch", "from": "2015-09-28", "to": "2015-09-29"}, {"alpha": 0.22, "color": "watch", "from": "2015-12-11", "to": "2015-12-11"}, {"alpha": 0.22, "color": "watch", "from": "2016-01-07", "to": "2016-01-08"}, {"alpha": 0.22, "color": "watch", "from": "2016-01-13", "to": "2016-01-15"}, {"alpha": 0.22, "color": "watch", "from": "2016-02-08", "to": "2016-02-08"}, {"alpha": 0.22, "color": "watch", "from": "2016-02-11", "to": "2016-02-11"}, {"alpha": 0.22, "color": "watch", "from": "2016-06-22", "to": "2016-06-22"}, {"alpha": 0.22, "color": "watch", "from": "2016-06-24", "to": "2016-06-27"}, {"alpha": 0.22, "color": "watch", "from": "2016-11-02", "to": "2016-11-08"}, {"alpha": 0.22, "color": "watch", "from": "2017-04-12", "to": "2017-04-13"}, {"alpha": 0.22, "color": "watch", "from": "2018-02-02", "to": "2018-02-13"}, {"alpha": 0.22, "color": "watch", "from": "2018-02-15", "to": "2018-02-20"}, {"alpha": 0.22, "color": "watch", "from": "2018-03-01", "to": "2018-03-01"}, {"alpha": 0.22, "color": "watch", "from": "2018-03-22", "to": "2018-03-28"}, {"alpha": 0.22, "color": "watch", "from": "2018-04-02", "to": "2018-04-03"}, {"alpha": 0.22, "color": "watch", "from": "2018-04-06", "to": "2018-04-10"}, {"alpha": 0.22, "color": "watch", "from": "2018-10-10", "to": "2018-10-15"}, {"alpha": 0.22, "color": "watch", "from": "2018-10-18", "to": "2018-10-19"}, {"alpha": 0.22, "color": "watch", "from": "2018-10-23", "to": "2018-10-31"}, {"alpha": 0.22, "color": "watch", "from": "2018-11-06", "to": "2018-11-06"}, {"alpha": 0.22, "color": "watch", "from": "2018-11-12", "to": "2018-11-12"}, {"alpha": 0.22, "color": "watch", "from": "2018-11-14", "to": "2018-11-14"}, {"alpha": 0.22, "color": "watch", "from": "2018-11-20", "to": "2018-11-20"}, {"alpha": 0.22, "color": "watch", "from": "2018-12-06", "to": "2018-12-11"}, {"alpha": 0.22, "color": "watch", "from": "2018-12-17", "to": "2019-01-03"}, {"alpha": 0.22, "color": "watch", "from": "2019-01-22", "to": "2019-01-22"}, {"alpha": 0.22, "color": "watch", "from": "2019-05-07", "to": "2019-05-09"}, {"alpha": 0.22, "color": "watch", "from": "2019-05-13", "to": "2019-05-13"}, {"alpha": 0.22, "color": "watch", "from": "2019-06-03", "to": "2019-06-03"}, {"alpha": 0.22, "color": "watch", "from": "2019-08-05", "to": "2019-08-06"}, {"alpha": 0.22, "color": "watch", "from": "2019-08-12", "to": "2019-08-12"}, {"alpha": 0.22, "color": "watch", "from": "2019-08-14", "to": "2019-08-15"}, {"alpha": 0.22, "color": "watch", "from": "2020-01-27", "to": "2020-01-27"}, {"alpha": 0.22, "color": "watch", "from": "2020-01-31", "to": "2020-01-31"}, {"alpha": 0.22, "color": "watch", "from": "2020-02-24", "to": "2020-04-23"}, {"alpha": 0.22, "color": "watch", "from": "2020-06-11", "to": "2020-06-11"}, {"alpha": 0.22, "color": "watch", "from": "2020-10-26", "to": "2020-11-03"}, {"alpha": 0.22, "color": "watch", "from": "2021-01-27", "to": "2021-01-27"}, {"alpha": 0.22, "color": "watch", "from": "2021-12-01", "to": "2021-12-01"}, {"alpha": 0.22, "color": "watch", "from": "2022-01-26", "to": "2022-01-26"}, {"alpha": 0.22, "color": "watch", "from": "2022-02-23", "to": "2022-02-24"}, {"alpha": 0.22, "color": "watch", "from": "2022-02-28", "to": "2022-03-01"}, {"alpha": 0.22, "color": "watch", "from": "2022-03-07", "to": "2022-03-08"}, {"alpha": 0.22, "color": "watch", "from": "2022-04-26", "to": "2022-04-26"}, {"alpha": 0.22, "color": "watch", "from": "2022-04-29", "to": "2022-04-29"}, {"alpha": 0.22, "color": "watch", "from": "2022-09-26", "to": "2022-09-27"}, {"alpha": 0.22, "color": "watch", "from": "2022-09-29", "to": "2022-09-29"}, {"alpha": 0.22, "color": "watch", "from": "2022-10-11", "to": "2022-10-13"}, {"alpha": 0.22, "color": "watch", "from": "2024-08-02", "to": "2024-08-07"}, {"alpha": 0.22, "color": "watch", "from": "2024-10-07", "to": "2024-10-07"}, {"alpha": 0.22, "color": "watch", "from": "2024-10-31", "to": "2024-10-31"}, {"alpha": 0.22, "color": "watch", "from": "2024-11-04", "to": "2024-11-05"}, {"alpha": 0.22, "color": "watch", "from": "2024-12-18", "to": "2024-12-18"}, {"alpha": 0.22, "color": "watch", "from": "2025-03-03", "to": "2025-03-13"}, {"alpha": 0.22, "color": "watch", "from": "2025-03-31", "to": "2025-03-31"}, {"alpha": 0.22, "color": "watch", "from": "2025-04-02", "to": "2025-04-24"}, {"alpha": 0.22, "color": "watch", "from": "2025-10-16", "to": "2025-10-16"}, {"alpha": 0.22, "color": "watch", "from": "2025-11-18", "to": "2025-11-18"}, {"alpha": 0.22, "color": "watch", "from": "2025-11-20", "to": "2025-11-20"}, {"alpha": 0.22, "color": "watch", "from": "2026-03-03", "to": "2026-03-03"}, {"alpha": 0.22, "color": "watch", "from": "2026-03-06", "to": "2026-03-09"}, {"alpha": 0.22, "color": "watch", "from": "2026-03-12", "to": "2026-03-12"}, {"alpha": 0.22, "color": "watch", "from": "2026-03-23", "to": "2026-03-24"}, {"alpha": 0.22, "color": "watch", "from": "2026-03-26", "to": "2026-03-30"}, {"alpha": 0.22, "color": "watch", "from": "2026-04-07", "to": "2026-04-07"}], "y": [{"color": "muted", "dash": false, "label": "1.0", "value": 1.0}]}, "series": [{"color": "headline", "data": [0.88, 0.864, 0.879, 0.882, 0.863, 0.825, 0.838, 0.838, 0.851, 0.834, 0.842, 0.873, 0.962, 1.039, 1.009, 0.975, 0.959, 0.962, 0.97, 0.956, 0.937, 0.939, 1.004, 1.004, 1.003, 0.998, 0.982, 0.975, 0.929, 0.944, 0.933, 0.906, 0.897, 0.918, 0.945, 0.918, 0.911, 0.901, 0.898, 0.9, 0.898, 0.89, 0.861, 0.878, 0.889, 0.905, 0.872, 0.867, 0.869, 0.877, 0.858, 0.853, 0.851, 0.839, 0.831, 0.874, 0.894, 0.886, 0.886, 0.877, 0.883, 0.878, 0.88, 0.861, 0.866, 0.864, 0.867, 0.822, 0.853, 0.831, 0.841, 0.908, 0.876, 0.828, 0.846, 0.841, 0.857, 0.88, 1.004, 0.945, 0.88, 0.932, 0.894, 0.951, 0.945, 1.244, 1.118, 0.995, 0.981, 0.958, 0.966, 1.014, 1.011, 1.023, 1.033, 1.121, 1.072, 1.038, 0.992, 1.032, 0.969, 1.002, 1.045, 0.986, 0.974, 1.032, 1.036, 1.001, 0.998, 0.971, 0.93, 0.932, 0.909, 0.901, 0.888, 0.857, 0.903, 0.93, 0.92, 0.948, 0.929, 0.937, 0.993, 0.98, 0.953, 0.905, 0.926, 0.903, 0.892, 0.887, 0.861, 0.867, 0.863, 0.86, 0.858, 0.863, 0.848, 0.882, 0.883, 0.87, 0.86, 0.879, 0.908, 0.89, 0.866, 0.867, 0.87, 0.856, 0.845, 0.832, 0.851, 0.85, 0.885, 0.88, 0.876, 0.876, 0.852, 0.86, 0.892, 0.863, 0.876, 0.906, 0.894, 0.901, 0.861, 0.907, 0.897, 0.875, 0.871, 0.842, 0.889, 0.884, 0.874, 0.859, 0.857, 0.871, 0.886, 0.87, 0.876, 0.874, 0.896, 0.895, 0.912, 0.877, 0.894, 0.892, 0.897, 0.898, 0.875, 0.894, 0.868, 0.863, 0.866, 0.861, 0.791, 0.81, 0.83, 0.844, 0.82, 0.837, 0.875, 0.873, 0.867, 0.867, 0.906, 0.911, 0.916, 0.915, 0.924, 0.937, 0.937, 0.903, 0.9, 0.884, 0.882, 0.886, 0.868, 0.868, 0.899, 0.886, 0.938, 0.913, 0.836, 0.843, 0.861, 0.913, 0.897, 1.019, 0.922, 0.934, 0.89, 0.882, 0.858, 0.856, 0.858, 0.87, 0.863, 0.888, 0.858, 0.864, 0.865, 0.835, 0.794, 0.816, 0.828, 0.789, 0.806, 0.84, 0.827, 0.829, 0.834, 0.849, 0.854, 0.843, 0.849, 0.855, 0.845, 0.856, 0.839, 0.845, 0.854, 0.842, 0.863, 0.881, 0.904, 0.925, 0.901, 0.91, 0.884, 0.874, 0.973, 0.969, 0.929, 0.906, 0.882, 0.869, 0.892, 0.886, 0.889, 0.889, 0.878, 0.889, 0.896, 0.913, 0.89, 0.869, 0.976, 0.985, 0.958, 0.934, 0.918, 0.959, 0.955, 0.91, 0.916, 0.946, 0.924, 0.927, 0.961, 0.918, 0.94, 1.012, 1.093, 1.037, 1.004, 0.939, 0.931, 0.916, 0.896, 0.894, 0.932, 0.909, 0.897, 0.894, 0.888, 0.903, 0.889, 0.872, 0.877, 0.891, 0.829, 0.841, 0.846, 0.815, 0.799, 0.851, 0.825, 0.815, 0.801, 0.85, 0.855, 0.858, 0.834, 0.843, 0.869, 0.874, 0.879, 0.917, 0.924, 0.894, 0.866, 0.89, 0.869, 0.895, 0.918, 0.902, 0.876, 0.854, 0.915, 0.923, 0.93, 0.905, 0.885, 0.881, 0.88, 0.945, 0.936, 0.922, 0.926, 0.927, 0.942, 0.923, 0.938, 0.959, 0.94, 0.997, 1.005, 0.974, 0.942, 0.92, 0.894, 0.922, 0.963, 0.956, 0.934, 0.889, 0.874, 0.885, 0.887, 0.888, 0.898, 0.888, 0.92, 0.949, 0.955, 0.963, 0.933, 0.959, 0.937, 0.937, 0.915, 0.912, 0.955, 0.968, 1.013, 1.034, 1.102, 1.057, 1.05, 1.011, 1.109, 1.081, 1.26, 1.128, 1.175, 1.153, 1.11, 1.06, 1.079, 1.052, 1.166, 1.136, 1.109, 1.043, 1.032, 1.086, 1.034, 1.009, 1.013, 0.998, 0.995, 1.004, 1.046, 1.013, 1.018, 1.051, 1.041, 1.024, 0.99, 0.954, 0.94, 0.968, 0.977, 1.031, 1.056, 1.043, 1.026, 1.013, 1.039, 1.017, 1.042, 1.048, 1.009, 0.987, 0.979, 0.97, 0.949, 0.965, 0.948, 0.939, 0.929, 0.994, 0.987, 1.001, 1.017, 0.98, 0.96, 0.996, 0.965, 0.942, 0.925, 0.986, 1.022, 0.996, 0.965, 0.966, 0.951, 0.931, 1.019, 0.972, 0.951, 0.951, 0.96, 0.974, 0.977, 0.936, 0.946, 0.934, 0.947, 0.946, 0.947, 0.923, 0.909, 0.913, 0.922, 0.931, 0.933, 0.936, 0.953, 0.893, 0.851, 0.842, 0.856, 0.852, 0.837, 0.867, 0.864, 0.838, 0.837, 0.822, 0.858, 0.879, 0.863, 0.871, 0.882, 0.878, 0.87, 0.856, 0.874, 0.874, 0.873, 0.851, 0.848, 0.888, 0.864, 0.84, 0.801, 0.836, 0.858, 0.857, 0.857, 0.866, 0.885, 0.88, 0.861, 0.856, 0.853, 0.871, 0.876, 0.878, 0.873, 0.893, 0.861, 0.856, 0.876, 0.83, 0.794, 0.814, 0.823, 0.808, 0.817, 0.832, 0.831, 0.845, 0.821, 0.813, 0.821, 0.873, 0.839, 0.822, 0.806, 0.752, 0.755, 0.738, 0.751, 0.71, 0.754, 0.781, 0.786, 0.796, 0.795, 0.818, 0.84, 0.823, 0.822, 0.833, 0.847, 0.833, 0.845, 0.843, 0.887, 0.901, 0.891, 0.849, 0.889, 0.887, 0.885, 0.883, 0.865, 0.852, 0.887, 0.882, 0.864, 0.875, 0.871, 0.888, 0.868, 0.888, 0.901, 0.925, 0.926, 0.915, 0.933, 0.902, 0.923, 0.952, 0.918, 0.894, 0.927, 0.907, 0.891, 0.891, 0.889, 0.869, 0.873, 0.88, 0.922, 0.918, 0.936, 0.929, 0.918, 0.897, 0.888, 0.898, 0.924, 0.886, 0.916, 0.867, 0.892, 0.828, 0.839, 0.827, 0.867, 0.842, 0.885, 0.878, 0.87, 0.886, 0.841, 0.849, 0.862, 0.87, 0.853, 0.883, 0.897, 0.886, 0.886, 0.863, 0.873, 0.871, 0.853, 0.83, 0.828, 0.879, 0.92, 0.884, 0.866, 0.849, 0.896, 0.911, 0.917, 0.869, 0.837, 0.851, 0.85, 0.825, 0.838, 0.813, 0.758, 0.802, 0.776, 0.77, 0.733, 0.754, 0.799, 0.778, 0.794, 0.789, 0.821, 0.832, 0.834, 0.852, 0.847, 0.869, 0.887, 0.838, 0.818, 0.89, 0.897, 0.898, 0.854, 0.859, 0.852, 0.853, 0.842, 0.84, 0.833, 0.853, 0.877, 0.909, 0.869, 0.893, 0.911, 0.886, 0.878, 0.853, 0.846, 0.87, 0.909, 0.899, 0.887, 0.91, 0.892, 0.897, 0.907, 0.907, 0.942, 0.93, 0.968, 0.951, 0.948, 0.936, 0.963, 0.941, 0.948, 0.971, 0.964, 0.963, 0.932, 0.927, 0.871, 0.878, 0.902, 0.909, 0.867, 0.866, 0.873, 0.871, 0.861, 0.895, 0.904, 0.902, 0.895, 0.919, 0.934, 0.941, 0.923, 0.929, 0.92, 0.925, 0.916, 0.915, 0.926, 0.943, 0.934, 0.926, 0.972, 0.974, 0.945, 0.945, 0.977, 0.977, 1.038, 0.962, 0.88, 0.87, 0.846, 0.838, 0.828, 0.837, 0.837, 0.834, 0.83, 0.83, 0.826, 0.844, 0.815, 0.844, 0.859, 0.865, 0.879, 0.9, 0.903, 0.929, 0.918, 0.872, 0.929, 0.897, 0.886, 0.889, 0.88, 0.881, 0.87, 0.887, 0.877, 0.874, 0.88, 0.953, 0.969, 0.946, 1.059, 0.978, 0.941, 0.959, 0.943, 0.909, 0.902, 0.9, 0.886, 0.867, 0.808, 0.842, 0.815, 0.801, 0.792, 0.868, 0.916, 0.849, 0.901, 0.889, 0.898, 0.866, 0.881, 0.867, 0.889, 0.869, 0.917, 0.908, 0.905, 0.897, 0.888, 0.875, 0.864, 0.86, 1.014, 0.925, 0.975, 1.002, 0.926, 0.919, 0.909, 0.909, 0.91, 0.914, 0.919, 0.915, 0.928, 0.914, 0.889, 0.885, 0.894, 0.879, 0.887, 0.856, 0.834, 0.852, 0.851, 0.846, 0.821, 0.85, 0.847, 0.874, 0.879, 0.879, 0.912, 0.918, 0.908, 0.952, 0.945, 0.943, 0.972, 0.948, 0.906, 0.923, 0.953, 0.975, 0.92, 0.937, 0.934, 0.936, 0.936, 1.007, 0.97, 0.97, 0.939, 0.914, 0.908, 0.917, 0.914, 0.912, 0.91, 0.882, 0.901, 0.902, 0.901, 0.904, 0.884, 0.883, 0.901, 0.886, 0.885, 0.834, 0.837, 0.851, 0.868, 0.865, 0.859, 0.886, 0.894, 0.901, 0.889, 0.854, 0.854, 0.874, 0.876, 0.868, 0.888, 0.844, 0.828, 0.856, 0.907, 0.902, 0.921, 0.914, 0.949, 0.923, 0.899, 0.925, 0.949, 0.936, 0.939, 0.942, 0.942, 0.918, 0.92, 0.923, 0.929, 0.902, 0.885, 0.902, 0.902, 0.923, 0.928, 0.895, 0.876, 0.856, 0.899, 0.9, 0.9, 0.912, 0.964, 0.988, 0.963, 0.988, 0.998, 0.973, 1.018, 1.025, 1.016, 0.958, 0.949, 0.95, 1.014, 0.905, 0.873, 0.874, 0.869, 0.887, 0.888, 0.886, 0.88, 0.895, 0.892, 0.902, 0.902, 0.882, 0.881, 0.889, 0.864, 0.906, 0.882, 0.851, 0.862, 0.844, 0.831, 0.824, 0.877, 0.878, 0.894, 0.872, 0.866, 0.886, 0.88, 0.889, 0.912, 0.937, 0.939, 0.944, 0.956, 0.922, 0.904, 0.914, 0.964, 0.964, 0.969, 0.978, 0.982, 0.921, 0.926, 0.919, 0.898, 0.876, 0.879, 0.891, 0.918, 0.929, 0.933, 0.912, 0.914, 0.897, 0.901, 0.902, 0.871, 0.887, 0.847, 0.849, 0.853, 0.85, 0.88, 0.887, 0.919, 1.043, 1.017, 0.975, 1.006, 0.995, 1.018, 1.065, 1.002, 1.014, 0.969, 0.936, 0.935, 0.921, 0.914, 0.912, 0.895, 0.911, 0.952, 0.941, 0.939, 0.918, 0.882, 0.902, 0.898, 0.886, 0.946, 0.899, 0.881, 0.898, 0.889, 0.889, 0.905, 0.9, 0.947, 0.994, 0.937, 0.899, 0.923, 0.916, 0.927, 0.937, 0.903, 0.928, 0.921, 0.932, 0.92, 0.91, 0.906, 0.922, 0.933, 0.979, 0.959, 0.932, 0.989, 1.014, 0.986, 0.976, 0.931, 0.9, 0.898, 0.903, 0.895, 0.902, 0.926, 0.936, 0.924, 0.912, 0.903, 0.879, 0.901, 0.913, 0.917, 0.921, 0.898, 0.881, 0.864, 0.858, 0.886, 0.868, 0.88, 0.899, 0.859, 0.87, 0.834, 0.844, 0.848, 0.844, 0.829, 0.834, 0.859, 0.877, 0.86, 0.836, 0.856, 0.845, 0.873, 0.89, 0.883, 0.906, 0.883, 0.841, 0.836, 0.843, 0.85, 0.907, 0.884, 0.89, 0.878, 0.889, 0.875, 0.866, 0.843, 0.88, 0.907, 0.897, 0.922, 0.91, 0.914, 0.909, 0.871, 0.971, 0.903, 0.928, 0.907, 0.861, 0.88, 0.906, 0.902, 0.934, 0.935, 1.035, 1.015, 0.956, 0.984, 0.967, 0.967, 0.945, 0.903, 0.9, 0.869, 0.861, 0.912, 0.886, 0.885, 0.856, 0.869, 0.849, 0.862, 0.848, 0.846, 0.853, 0.84, 0.847, 0.859, 0.869, 0.859, 0.88, 0.91, 0.88, 0.872, 0.885, 0.906, 0.857, 0.865, 0.845, 0.842, 0.897, 0.929, 0.872, 0.943, 0.927, 0.95, 0.955, 0.948, 0.937, 0.907, 0.934, 0.973, 0.928, 1.037, 1.066, 1.114, 1.066, 1.102, 1.103, 1.035, 0.944, 0.9, 0.938, 0.907, 0.899, 0.898, 0.874, 0.897, 0.867, 0.85, 0.876, 0.88, 0.855, 0.841, 0.829, 0.842, 0.841, 0.827, 0.868, 0.834, 0.878, 0.883, 0.874, 0.848, 0.817, 0.812, 0.795, 0.788, 0.837, 0.854, 0.805, 0.802, 0.792, 0.76, 0.847, 0.882, 0.968, 0.969, 1.004, 0.97, 1.021, 0.952, 0.91, 0.893, 0.867, 0.825, 0.833, 0.845, 0.872, 0.883, 0.973, 0.914, 0.958, 0.986, 0.962, 0.912, 0.908, 0.957, 0.967, 1.026, 1.013, 0.991, 0.953, 0.941, 0.882, 0.877, 0.861, 0.901, 0.953, 0.938, 0.961, 0.929, 0.889, 0.897, 0.874, 0.87, 0.897, 0.873, 0.86, 0.836, 0.81, 0.86, 0.828, 0.849, 0.827, 0.83, 0.819, 0.82, 0.826, 0.79, 0.792, 0.826, 0.842, 0.844, 0.868, 0.87, 0.914, 0.91, 0.887, 0.894, 0.897, 0.896, 0.85, 0.829, 0.779, 0.811, 0.821, 0.879, 0.899, 0.867, 0.858, 0.872, 0.871, 0.852, 0.876, 0.88, 0.852, 0.817, 0.814, 0.854, 0.862, 0.818, 0.822, 0.861, 0.854, 0.854, 0.822, 0.823, 0.805, 0.824, 0.811, 0.838, 0.883, 0.826, 0.833, 0.877, 0.906, 0.904, 0.826, 0.86, 0.845, 0.845, 0.801, 0.795, 0.836, 0.841, 0.85, 0.829, 0.838, 0.908, 0.885, 0.887, 0.9, 0.907, 0.906, 0.889, 0.904, 0.89, 0.921, 0.89, 0.862, 0.851, 0.883, 0.926, 0.914, 0.894, 0.854, 0.877, 0.85, 0.833, 0.874, 0.903, 0.907, 1.007, 0.987, 0.958, 0.95, 0.943, 0.945, 1.021, 1.01, 0.949, 0.872, 0.865, 0.848, 0.822, 0.818, 0.825, 0.828, 0.818, 0.847, 0.878, 0.93, 0.871, 0.838, 0.825, 0.813, 0.846, 0.859, 0.841, 0.886, 0.868, 0.816, 0.86, 0.858, 0.857, 0.827, 0.856, 0.883, 0.924, 1.016, 1.194, 1.308, 1.218, 1.182, 1.05, 1.028, 1.072, 1.063, 0.996, 0.977, 0.99, 0.969, 0.997, 0.95, 0.94, 1.023, 0.975, 0.956, 1.0, 0.96, 0.933, 0.964, 0.967, 1.0, 0.968, 1.047, 1.032, 0.99, 0.946, 0.927, 0.916, 0.899, 0.888, 0.867, 0.86, 0.84, 0.862, 0.866, 0.826, 0.806, 0.839, 0.847, 0.858, 0.842, 0.827, 0.85, 0.851, 0.819, 0.82, 0.819, 0.812, 0.832, 0.847, 0.845, 0.821, 0.876, 0.849, 0.87, 0.911, 0.93, 0.909, 0.922, 0.877, 0.865, 0.817, 0.838, 0.851, 0.835, 0.871, 0.872, 0.834, 0.868, 0.901, 0.815, 0.849, 0.877, 0.932, 0.932, 1.0, 0.976, 0.958, 0.913, 0.93, 0.974, 0.886, 0.837, 0.805, 0.799, 0.859, 0.842, 0.883, 0.92, 0.94, 0.942, 0.968, 1.015, 1.03, 0.983, 0.997, 1.013, 1.018, 1.005, 0.985, 0.992, 0.999, 0.92, 0.956, 0.966, 0.944, 0.933, 0.891, 0.908, 0.939, 0.933, 0.923, 0.955, 1.001, 0.99, 0.984, 1.015, 0.968, 0.964, 0.947, 0.933, 0.9, 0.896, 0.935, 0.927, 0.9, 0.906, 0.918, 0.873, 0.858, 0.857, 0.859, 0.872, 0.887, 0.884, 0.872, 0.847, 0.871, 0.871, 0.811, 0.796, 0.782, 0.784, 0.798, 0.816, 0.807, 0.833, 0.802, 0.801, 0.817, 0.794, 0.82, 0.839, 0.815, 0.857, 0.838, 0.861, 0.826, 0.802, 0.796, 0.794, 0.809, 0.804, 0.8, 0.814, 0.794, 0.818, 0.825, 0.821, 0.856, 0.851, 0.826, 0.84, 0.849, 0.841, 0.806, 0.807, 0.793, 0.815, 0.812, 0.824, 0.829, 0.845, 0.86, 0.87, 0.842, 0.872, 0.844, 0.829, 0.811, 0.804, 0.853, 0.85, 0.833, 0.817, 0.83, 0.845, 0.839, 0.845, 0.899, 0.959, 0.934, 0.923, 0.915, 0.911, 0.927, 0.939, 1.004, 0.936, 1.076, 1.007, 0.925, 0.888, 0.864, 0.837, 0.854, 0.843, 0.831, 0.8, 0.821, 0.838, 0.817, 0.808, 0.792, 0.789, 0.76, 0.762, 0.791, 0.761, 0.791, 0.8, 0.797, 0.795, 0.77, 0.792, 0.816, 0.8, 0.791, 0.752, 0.759, 0.772, 0.782, 0.763, 0.757, 0.768, 0.789, 0.785, 0.754, 0.75, 0.792, 0.803, 0.841, 0.845, 0.841, 0.812, 0.818, 0.831, 0.826, 0.765, 0.772, 0.771, 0.791, 0.929, 0.878, 0.937, 0.937, 0.896, 0.86, 0.873, 0.885, 0.798, 0.754, 0.766, 0.839, 0.796, 0.774, 0.831, 0.812, 0.827, 0.828, 0.801, 0.799, 0.82, 0.839, 0.907, 0.935, 0.949, 0.925, 0.928, 0.903, 0.875, 0.847, 0.832, 0.834, 0.851, 0.876, 0.907, 0.932, 0.956, 0.99, 1.007, 1.067, 1.065, 1.031, 1.035, 0.883, 0.88, 0.859, 0.867, 0.849, 0.854, 0.854, 0.828, 0.811, 0.808, 0.806, 0.796, 0.821, 0.811, 0.828, 0.844, 0.841, 0.77, 0.762, 0.789, 0.804, 0.772, 0.804, 0.81, 0.831, 0.812, 0.784, 0.765, 0.756, 0.747, 0.748, 0.75, 0.781, 0.813, 0.827, 0.849, 0.826, 0.799, 0.794, 0.777, 0.79, 0.784, 0.778, 0.791, 0.772, 0.797, 0.835, 0.851, 0.796, 0.809, 0.798, 0.794, 0.78, 0.773, 0.824, 0.828, 0.826, 0.818, 0.781, 0.798, 0.787, 0.786, 0.768, 0.78, 0.809, 0.814, 0.893, 0.863, 0.837, 0.824, 0.816, 0.794, 0.777, 0.811, 0.846, 0.844, 0.8, 0.769, 0.784, 0.795, 0.816, 0.832, 0.811, 0.79, 0.841, 0.819, 0.813, 0.81, 0.816, 0.853, 0.873, 0.88, 0.891, 0.878, 0.843, 0.85, 0.863, 0.91, 0.906, 0.882, 0.913, 0.907, 0.915, 0.964, 0.994, 1.032, 1.013, 0.987, 0.977, 0.99, 0.974, 0.992, 0.84, 0.837, 0.836, 0.809, 0.837, 0.8, 0.825, 0.816, 0.815, 0.823, 0.776, 0.784, 0.791, 0.815, 0.802, 0.815, 0.842, 0.999, 0.979, 0.893, 0.843, 0.831, 0.796, 0.799, 0.789, 0.815, 0.824, 0.796, 0.783, 0.784, 0.799, 0.794, 0.796, 0.826, 0.862, 0.819, 0.833, 0.844, 0.817, 0.836, 0.856, 0.842, 0.83, 0.811, 0.807, 0.853, 0.809, 0.87, 0.851, 0.843, 0.832, 0.889, 0.828, 0.832, 0.828, 0.806, 0.789, 0.778, 0.8, 0.807, 0.816, 0.796, 0.776, 0.783, 0.783, 0.793, 0.814, 0.818, 0.823, 0.814, 0.818, 0.819, 0.787, 0.784, 0.83, 0.824, 0.99, 0.946, 0.886, 0.866, 0.865, 0.963, 0.911, 0.88, 0.833, 0.855, 0.85, 0.806, 0.809, 0.829, 0.793, 0.767, 0.745, 0.839, 0.808, 0.807, 0.825, 0.774, 0.78, 0.794, 0.793, 0.785, 0.8, 0.8, 0.773, 0.764, 0.746, 0.782, 0.781, 0.765, 0.748, 0.761, 0.765, 0.773, 0.778, 0.755, 0.776, 0.811, 0.808, 0.805, 0.808, 0.802, 0.83, 0.856, 0.845, 0.84, 0.841, 0.882, 0.881, 0.867, 0.874, 0.801, 0.835, 0.822, 0.811, 0.783, 0.736, 0.748, 0.775, 0.759, 0.799, 0.83, 0.836, 0.832, 0.896, 0.842, 0.828, 0.802, 0.775, 0.794, 0.779, 0.785, 0.817, 0.835, 0.865, 0.861, 0.862, 0.837, 0.819, 0.786, 0.769, 0.761, 0.795, 0.814, 0.82, 0.78, 0.79, 0.802, 0.786, 0.779, 0.793, 0.812, 0.828, 0.798, 0.843, 0.775, 0.743, 0.753, 0.765, 0.784, 0.812, 0.794, 0.812, 0.833, 0.881, 0.899, 0.9, 0.864, 0.849, 0.84, 0.848, 0.846, 0.823, 0.923, 0.934, 0.909, 0.915, 1.016, 1.327, 1.262, 1.204, 1.224, 1.166, 1.12, 1.102, 0.996, 1.003, 1.015, 1.029, 1.0, 0.982, 0.942, 0.934, 0.977, 0.998, 1.049, 0.986, 0.975, 0.954, 0.943, 0.91, 0.861, 0.887, 0.906, 0.917, 0.911, 0.891, 0.981, 0.964, 0.955, 1.078, 1.091, 1.016, 1.026, 1.025, 0.972, 1.047, 1.004, 0.982, 0.966, 1.014, 1.025, 1.003, 0.994, 0.959, 0.939, 0.929, 0.908, 0.929, 0.932, 0.953, 0.942, 0.988, 0.979, 0.939, 0.902, 0.919, 0.916, 0.925, 0.934, 0.887, 0.886, 0.893, 0.85, 0.868, 0.854, 0.89, 0.927, 0.886, 0.894, 0.883, 0.89, 0.888, 0.869, 0.868, 0.891, 0.994, 0.934, 0.945, 0.881, 0.855, 0.842, 0.82, 0.841, 0.834, 0.849, 0.846, 0.867, 0.842, 0.831, 0.85, 0.88, 0.865, 0.922, 0.888, 0.989, 0.944, 0.992, 0.962, 0.939, 0.92, 0.93, 0.906, 0.851, 0.853, 0.859, 0.886, 0.852, 0.838, 0.864, 0.838, 0.841, 0.86, 0.853, 0.849, 0.844, 0.845, 0.843, 0.869, 0.911, 0.863, 0.864, 0.826, 0.803, 0.792, 0.785, 0.777, 0.798, 0.865, 0.912, 0.867, 0.904, 0.867, 0.833, 0.833, 0.847, 0.812, 0.824, 0.809, 0.822, 0.827, 0.819, 0.871, 0.849, 0.852, 0.874, 0.897, 0.897, 0.876, 0.851, 0.858, 0.838, 0.84, 0.895, 0.85, 0.802, 0.813, 0.801, 0.826, 0.832, 0.851, 0.833, 0.821, 0.814, 0.812, 0.791, 0.898, 0.912, 0.95, 0.959, 1.109, 1.159, 1.074, 1.05, 0.981, 0.961, 1.01, 1.003, 0.991, 1.021, 1.115, 1.079, 1.075, 1.071, 1.05, 1.004, 0.964, 0.961, 0.988, 1.017, 0.928, 0.946, 0.94, 1.011, 0.988, 1.001, 0.984, 0.937, 0.974, 1.009, 0.976, 0.989, 0.94, 0.954, 0.959, 0.959, 0.957, 0.916, 1.0, 1.006, 1.035, 1.029, 1.002, 0.994, 0.967, 0.985, 1.047, 1.07, 1.065, 1.124, 1.148, 1.251, 1.184, 1.157, 1.119, 1.071, 1.021, 1.056, 0.978, 0.99, 0.968, 0.966, 0.95, 0.921, 0.957, 0.967, 0.975, 0.942, 0.945, 1.005, 0.972, 0.96, 0.926, 0.964, 0.976, 0.945, 0.927, 0.918, 0.915, 0.912, 0.91, 0.934, 0.911, 0.927, 0.917, 0.923, 0.936, 0.905, 0.905, 0.886, 0.895, 0.874, 0.928, 0.931, 0.919, 0.918, 0.882, 0.913, 0.913, 0.94, 0.959, 0.938, 0.895, 0.88, 0.875, 0.882, 0.86, 0.86, 0.871, 0.881, 0.879, 0.949, 0.936, 0.892, 0.903, 0.885, 0.868, 0.867, 0.86, 0.879, 0.877, 0.851, 0.863, 0.893, 0.865, 0.854, 0.831, 0.848, 0.842, 0.85, 0.83, 0.844, 0.845, 0.874, 0.871, 0.855, 0.861, 0.861, 0.914, 0.9, 0.854, 0.941, 1.029, 1.035, 1.036, 0.949, 1.038, 0.987, 0.94, 0.913, 0.936, 0.943, 0.91, 0.898, 0.956, 0.927, 0.978, 0.981, 0.963, 0.994, 1.005, 0.965, 0.939, 0.941, 0.95, 0.944, 0.941, 0.933, 0.938, 0.92, 0.924, 0.918, 0.89, 0.914, 0.924, 0.927, 0.951, 0.951, 0.944, 0.939, 0.911, 0.878, 0.865, 0.887, 0.902, 0.905, 0.858, 0.863, 0.837, 0.843, 0.845, 0.883, 0.871, 0.907, 0.875, 0.845, 0.829, 0.847, 0.828, 0.855, 0.888, 0.953, 0.993, 0.984, 1.123, 1.024, 0.999, 0.947, 0.968, 1.029, 0.945, 1.038, 1.005, 0.938, 0.919, 0.927, 0.892, 0.915, 0.976, 0.975, 0.984, 0.965, 0.94, 0.971, 0.977, 0.921, 0.9, 0.859, 0.87, 0.873, 0.854, 0.846, 0.824, 0.853, 0.838, 0.827, 0.837, 0.865, 0.834, 0.919, 0.887, 0.887, 0.918, 0.904, 0.959, 0.991, 0.967, 0.917, 0.944, 0.995, 0.955, 0.935, 0.888, 0.851, 0.822, 0.83, 0.839, 0.856, 0.86, 0.874, 0.86, 0.844, 0.805, 0.82, 0.82, 0.786, 0.824, 0.798, 0.821, 0.823, 0.797, 0.806, 0.777, 0.813, 0.819, 0.832, 0.837, 0.804, 0.821, 0.83, 0.817, 0.83, 0.801, 0.792, 0.777, 0.785, 0.814, 0.885, 0.905, 0.872, 0.865, 0.84, 0.917, 0.915, 0.886, 0.866, 0.827, 0.81, 0.811, 0.828, 0.826, 0.817, 0.814, 0.816, 0.815, 0.842, 0.888, 0.868, 0.821, 0.876, 0.87, 0.869, 0.873, 0.839, 0.84, 0.842, 0.846, 0.849, 0.853, 0.84, 0.864, 0.862, 0.866, 0.906, 1.004, 0.956, 0.962, 0.934, 1.011, 0.996, 0.961, 0.94, 0.941, 0.95, 0.932, 0.941, 0.895, 0.902, 0.883, 0.921, 0.909, 0.937, 0.97, 1.142, 1.167, 1.163, 1.309, 1.344, 1.206, 1.22, 1.163, 1.216, 1.183, 1.265, 1.199, 1.215, 1.318, 1.197, 1.221, 1.163, 1.048, 1.036, 1.007, 1.087, 1.183, 1.188, 1.225, 1.176, 1.114, 1.108, 1.115, 1.076, 1.044, 1.05, 1.076, 1.042, 1.026, 1.03, 1.036, 1.04, 1.023, 1.023, 1.07, 1.049, 1.026, 1.013, 0.95, 0.942, 0.949, 0.937, 0.974, 0.979, 0.972, 0.946, 0.956, 0.924, 0.884, 0.907, 0.964, 0.966, 0.934, 0.924, 0.922, 0.931, 0.9, 0.912, 0.893, 0.908, 0.915, 0.916, 0.909, 0.913, 0.897, 0.888, 0.895, 0.894, 0.919, 0.929, 0.932, 1.009, 0.948, 0.944, 0.941, 0.937, 0.937, 0.957, 0.941, 0.949, 0.956, 0.945, 0.97, 0.937, 0.936, 0.903, 0.897, 0.902, 0.918, 0.9, 0.913, 0.88, 0.932, 0.907, 0.88, 0.887, 0.846, 0.841, 0.843, 0.837, 0.862, 0.846, 0.825, 0.845, 0.823, 0.832, 0.823, 0.819, 0.817, 0.804, 0.803, 0.785, 0.789, 0.824, 0.792, 0.786, 0.777, 0.778, 0.786, 0.802, 0.808, 0.8, 0.796, 0.789, 0.811, 0.818, 0.775, 0.829, 0.814, 0.813, 0.893, 0.885, 0.917, 0.897, 0.902, 0.863, 0.848, 0.845, 0.852, 0.86, 0.848, 0.878, 0.848, 0.859, 0.862, 0.824, 0.825, 0.845, 0.833, 0.842, 0.853, 0.894, 0.925, 0.914, 0.894, 0.884, 0.896, 0.92, 0.935, 0.939, 0.938, 0.96, 0.975, 0.968, 0.959, 0.95, 1.012, 1.019, 1.067, 1.049, 1.048, 1.059, 1.061, 0.986, 0.949, 0.908, 0.958, 0.936, 0.915, 0.931, 0.899, 0.886, 0.895, 0.903, 0.896, 0.909, 0.891, 0.871, 0.87, 0.853, 0.845, 0.848, 0.863, 0.866, 0.856, 0.869, 0.866, 0.901, 0.899, 0.895, 0.912, 0.885, 0.883, 0.872, 0.857, 0.912, 0.889, 0.888, 0.849, 0.863, 0.88, 0.895, 0.9, 0.954, 0.93, 0.936, 0.894, 0.866, 0.902, 0.89, 0.869, 0.883, 0.893, 0.871, 0.839, 0.83, 0.843, 0.863, 0.856, 1.041, 0.951, 0.977, 0.93, 0.871, 0.831, 0.813, 0.787, 0.797, 0.798, 0.8, 0.781, 0.754, 0.779, 0.781, 0.807, 0.814, 0.843, 0.852, 0.824, 0.955, 0.944, 0.872, 0.887, 0.926, 0.95, 0.884, 0.905, 0.881, 0.846, 0.84, 0.804, 0.805, 0.801, 0.805, 0.854, 0.838, 0.823, 0.853, 0.869, 0.848, 0.845, 0.894, 0.879, 0.876, 0.826, 0.854, 0.856, 0.831, 0.823, 0.805, 0.812, 0.801, 0.807, 0.798, 0.792, 0.809, 0.836, 0.814, 0.831, 0.803, 0.819, 0.824, 0.818, 0.826, 0.843, 0.842, 0.859, 0.86, 0.84, 0.803, 0.878, 0.901, 0.979, 0.916, 0.845, 0.852, 0.881, 0.878, 0.868, 0.858, 0.828, 0.841, 0.815, 0.824, 0.818, 0.839, 0.816, 0.827, 0.796, 0.799, 0.819, 0.841, 0.802, 0.797, 0.814, 0.823, 0.854, 0.846, 0.903, 0.847, 0.83, 0.828, 0.829, 0.822, 0.829, 0.822, 0.811, 0.796, 0.781, 0.811, 0.794, 0.864, 0.792, 0.79, 0.81, 0.792, 0.807, 0.836, 0.904, 0.85, 0.819, 0.809, 0.794, 0.809, 0.842, 0.819, 0.809, 0.822, 0.844, 0.813, 0.811, 0.803, 0.774, 0.786, 0.792, 0.777, 0.77, 0.763, 0.781, 0.825, 0.906, 0.895, 0.828, 0.809, 0.811, 0.808, 0.862, 0.795, 0.794, 0.807, 0.802, 0.815, 0.808, 0.843, 0.832, 0.852, 0.899, 0.862, 0.863, 0.835, 0.857, 0.896, 0.974, 0.956, 0.905, 0.872, 0.853, 0.877, 0.968, 0.951, 0.969, 0.918, 0.952, 0.922, 0.919, 0.883, 0.858, 0.893, 0.889, 0.865, 0.828, 0.803, 0.804, 0.786, 0.78, 0.771, 0.771, 0.779, 0.795, 0.813, 0.807, 0.798, 0.805, 0.798, 0.774, 0.784, 0.804, 0.821, 0.83, 0.851, 0.826, 0.787, 0.79, 0.783, 0.793, 0.803, 0.817, 0.847, 0.863, 0.848, 0.981, 0.917, 0.967, 1.011, 0.959, 0.965, 0.941, 0.877, 0.842, 0.875, 0.806, 0.835, 0.864, 0.828, 0.844, 0.85, 0.869, 0.84, 0.791, 0.773, 0.777, 0.785, 0.776, 0.792, 0.787, 0.771, 0.782, 0.841, 0.834, 0.82, 0.855, 0.838, 0.816, 0.868, 0.841, 0.907, 0.924, 0.939, 0.963, 0.97, 0.981, 1.0, 0.988, 0.96, 0.925, 0.887, 0.879, 0.913, 0.885, 0.89, 0.874, 0.85, 0.917, 0.949, 0.962, 0.942, 0.925, 0.959, 0.95, 0.99, 1.005, 1.009, 0.984, 1.017, 1.022, 0.993, 0.99, 0.989, 1.02, 1.004, 0.982, 0.959, 0.951, 0.953, 0.933, 0.921, 0.91, 0.899, 0.892, 0.887, 0.892, 0.857, 0.842, 0.812, 0.815, 0.82, 0.841, 0.811, 0.806, 0.845, 0.857, 0.854, 0.841, 0.903, 0.893, 0.854, 0.872, 0.861, 0.853, 0.841, 0.869, 0.944, 0.929, 1.011, 0.981, 0.963, 1.007, 0.98, 0.949, 0.905, 0.955, 0.934, 0.991, 0.971, 0.968, 0.96, 0.94, 0.931, 0.92, 0.944, 0.953, 0.945, 0.94, 0.958, 0.954, 0.939, 0.918, 0.936, 0.927, 0.914, 0.907, 0.921, 0.906, 0.903, 0.931, 0.934, 0.994, 0.982, 0.962, 0.984, 0.962, 0.966, 0.957, 0.962, 0.941, 0.956, 0.973, 0.971, 0.966, 0.936, 0.953, 0.942, 0.93, 0.903, 0.926, 0.947, 0.939, 0.923, 0.895, 0.909, 0.897, 0.894, 0.881, 0.887, 0.905, 0.935, 0.918, 0.918, 0.897, 0.919, 0.933, 0.901, 0.882, 0.875, 0.87, 0.882, 0.841, 0.852, 0.838, 0.855, 0.844, 0.843, 0.836, 0.847, 0.915, 0.93, 0.917, 0.903, 0.962, 0.977, 0.974, 0.971, 0.967, 0.962, 0.975, 0.944, 0.925, 0.907, 0.941, 0.976, 0.953, 0.952, 0.952, 0.954, 0.974, 0.973, 0.969, 0.987, 1.015, 1.015, 0.987, 1.003, 0.992, 0.981, 0.98, 0.97, 0.991, 0.977, 0.991, 1.008, 1.013, 1.004, 0.987, 0.988, 0.985, 0.981, 0.973, 0.974, 0.984, 0.972, 0.959, 0.969, 0.957, 0.961, 0.967, 0.95, 0.948, 0.93, 0.927, 0.942, 0.935, 0.899, 0.875, 0.908, 0.923, 0.926, 0.926, 0.913, 0.905, 0.893, 0.87, 0.869, 0.892, 0.888, 0.875, 0.851, 0.83, 0.869, 0.897, 0.901, 0.901, 0.906, 0.974, 0.928, 0.901, 0.91, 0.899, 0.894, 0.88, 0.86, 0.887, 0.865, 0.886, 0.901, 0.895, 0.892, 0.932, 0.924, 0.933, 0.912, 0.925, 0.905, 0.927, 0.873, 0.868, 0.903, 0.913, 0.914, 0.914, 0.917, 0.918, 0.911, 0.905, 0.904, 0.933, 0.932, 0.895, 0.899, 0.882, 0.907, 0.898, 0.9, 0.92, 0.91, 0.926, 0.895, 0.882, 0.922, 0.92, 0.978, 0.983, 0.972, 0.966, 0.97, 0.971, 0.963, 0.95, 0.925, 0.931, 0.951, 0.947, 0.989, 0.977, 0.995, 0.954, 0.961, 0.936, 0.93, 0.934, 0.907, 0.913, 0.922, 0.907, 0.901, 0.892, 0.89, 0.887, 0.881, 0.891, 0.89, 0.888, 0.876, 0.9, 0.909, 0.907, 0.879, 0.852, 0.863, 0.849, 0.822, 0.836, 0.822, 0.828, 0.867, 0.875, 0.836, 0.808, 0.817, 0.857, 0.861, 0.882, 0.827, 0.82, 0.837, 0.819, 0.821, 0.824, 0.843, 0.861, 0.841, 0.83, 0.839, 0.845, 0.88, 0.91, 0.895, 0.878, 0.867, 0.888, 0.835, 0.815, 0.823, 0.819, 0.813, 0.81, 0.815, 0.869, 0.848, 0.823, 0.844, 0.808, 0.802, 0.782, 0.78, 0.797, 0.836, 0.836, 0.845, 0.841, 0.848, 0.844, 0.859, 0.881, 0.86, 0.874, 0.874, 0.84, 0.844, 0.832, 0.829, 0.825, 0.831, 0.84, 0.829, 0.855, 0.855, 0.835, 0.867, 0.837, 0.851, 0.853, 0.896, 0.898, 0.919, 0.89, 0.882, 0.884, 0.873, 0.845, 0.851, 0.885, 0.885, 0.902, 0.899, 0.913, 0.907, 0.891, 0.917, 0.885, 0.881, 0.873, 0.858, 0.852, 0.832, 0.863, 0.87, 0.869, 0.857, 0.861, 0.876, 0.847, 0.836, 0.861, 0.868, 0.875, 0.901, 0.962, 0.951, 0.938, 0.96, 0.953, 0.943, 0.947, 0.946, 0.969, 0.952, 0.948, 0.932, 0.941, 0.932, 0.913, 0.923, 0.939, 0.916, 0.928, 0.939, 0.964, 0.967, 0.955, 0.939, 0.947, 0.959, 0.955, 0.95, 0.931, 0.909, 0.88, 0.866, 0.874, 0.875, 0.868, 0.884, 0.858, 0.889, 0.869, 0.871, 0.887, 0.871, 0.855, 0.861, 0.83, 0.824, 0.827, 0.833, 0.837, 0.837, 0.822, 0.834, 0.825, 0.824, 0.835, 0.815, 0.831, 0.814, 0.832, 0.844, 0.812, 0.812, 0.801, 0.824, 0.837, 0.815, 0.818, 0.814, 0.819, 0.816, 0.853, 0.875, 0.881, 0.861, 0.864, 0.856, 0.862, 0.854, 0.85, 0.879, 0.903, 0.892, 0.872, 0.881, 0.864, 0.878, 0.891, 0.882, 0.894, 0.879, 0.899, 0.895, 0.887, 0.892, 0.871, 0.864, 0.857, 0.857, 0.889, 0.942, 0.903, 0.889, 0.898, 0.94, 0.945, 0.922, 0.902, 0.903, 0.902, 0.909, 0.898, 0.878, 0.886, 0.909, 0.908, 0.908, 0.904, 0.925, 0.884, 0.881, 0.893, 0.878, 0.883, 0.876, 0.853, 0.851, 0.854, 0.858, 0.866, 0.851, 0.856, 0.88, 0.908, 0.901, 0.953, 0.933, 0.917, 0.912, 0.927, 0.904, 0.951, 0.984, 0.977, 0.97, 0.965, 0.972, 0.961, 0.941, 0.948, 0.939, 0.924, 0.917, 0.943, 0.929, 0.915, 0.883, 0.898, 0.885, 0.872, 0.863, 0.856, 0.913, 0.913, 0.884, 0.873, 0.857, 0.861, 0.85, 0.859, 0.87, 0.842, 0.878, 0.924, 0.928, 0.881, 0.886, 0.884, 0.869, 0.865, 0.848, 0.873, 0.887, 0.853, 0.843, 0.853, 0.862, 0.837, 0.862, 0.87, 0.875, 0.864, 0.853, 0.849, 0.857, 0.861, 0.859, 0.862, 0.87, 0.866, 0.869, 0.886, 0.881, 0.867, 0.882, 0.885, 0.917, 0.962, 0.963, 0.927, 0.919, 0.979, 0.988, 0.951, 0.967, 0.982, 0.964, 0.971, 1.002, 1.144, 1.036, 1.031, 0.986, 0.962, 0.957, 0.912, 0.878, 0.852, 0.831, 0.833, 0.869, 0.876, 0.907, 0.872, 0.885, 0.87, 0.905, 0.869, 0.861, 0.955, 0.966, 0.951, 0.984, 0.932, 0.928, 0.903, 0.876, 0.859, 0.865, 0.875, 0.896, 0.856, 0.853, 0.85, 0.833, 0.83, 0.833, 0.868, 0.87, 0.922, 0.918, 0.947, 0.93, 1.002, 0.995, 0.998, 0.996, 0.985, 0.979, 0.992, 0.964, 0.965, 0.94, 0.955, 0.949, 0.96, 0.961, 0.971, 0.982, 0.969, 0.98, 1.023, 0.999, 1.019, 1.015, 0.921, 0.897, 0.888, 0.891, 0.88, 0.849, 0.858, 0.906, 0.906, 0.924, 0.94, 0.928, 0.881, 0.865, 0.853, 0.849, 0.831, 0.816, 0.819, 0.821, 0.817, 0.782, 0.83, 0.835, 0.805, 0.802, 0.805, 0.836, 0.875, 1.139, 0.998, 0.913, 0.9, 0.83, 0.849, 0.883, 0.919, 0.914, 0.928, 0.889, 0.89, 0.929, 0.915, 0.932, 0.939, 0.936, 0.884, 0.905, 0.878, 0.861, 0.848, 0.857, 0.846, 0.944, 0.905, 0.912, 0.884, 0.891, 0.952, 0.923, 0.878, 0.864, 0.888, 0.867, 0.876, 0.868, 0.846, 0.829, 0.861, 0.852, 0.87, 0.935, 0.956, 0.97, 0.967, 0.996, 0.973, 1.027, 1.032, 1.01, 1.049, 1.035, 1.083, 1.062, 1.024, 1.025, 0.982, 0.963, 0.988, 0.955, 0.956, 0.947, 0.918, 0.9, 0.924, 0.94, 0.984, 1.014, 0.998, 1.003, 1.096, 1.234, 1.274, 1.261, 1.124, 1.14, 1.108, 1.043, 1.039, 1.055, 1.01, 1.063, 1.038, 1.015, 1.001, 0.979, 0.977, 0.958, 0.967, 0.965, 0.945, 0.963, 0.974, 0.953, 0.946, 0.937, 0.909, 0.907, 0.905, 0.88, 0.859, 0.877, 0.873, 0.921, 0.909, 0.937, 0.891, 0.891, 0.887, 0.869, 0.871, 0.854, 0.852, 0.875, 0.838, 0.854, 0.85, 0.85, 0.873, 0.92, 0.9, 0.943, 0.917, 0.917, 0.909, 0.872, 0.852, 0.853, 0.839, 0.861, 0.863, 0.86, 0.853, 0.88, 0.859, 0.838, 0.834, 0.847, 0.867, 0.866, 0.854, 0.839, 0.838, 0.853, 0.845, 0.828, 0.829, 0.815, 0.828, 0.851, 0.844, 0.874, 0.96, 0.893, 0.891, 0.861, 0.856, 0.81, 0.844, 0.803, 0.791, 0.802, 0.81, 0.812, 0.824, 0.821, 0.855, 0.801, 0.821, 0.817, 0.828, 0.814, 0.837, 0.886, 0.864, 0.832, 0.824, 0.826, 0.823, 0.832, 0.816, 0.817, 0.847, 0.865, 0.852, 0.848, 0.836, 0.85, 0.856, 0.845, 0.86, 0.831, 0.859, 0.867, 0.868, 0.88, 0.873, 0.856, 0.875, 0.846, 0.848, 0.95, 0.909, 0.945, 0.941, 1.018, 0.941, 0.898, 0.894, 0.916, 0.88, 0.853, 0.831, 0.84, 0.853, 0.846, 0.851, 0.842, 0.892, 0.874, 0.913, 0.9, 0.87, 0.856, 0.861, 0.915, 0.919, 0.965, 1.006, 0.986, 1.026, 0.978, 0.939, 0.895, 0.859, 0.832, 0.853, 0.836, 0.816, 0.81, 0.8, 0.837, 0.843, 0.815, 0.78, 0.818, 0.838, 0.838, 0.877, 0.861, 0.817, 0.791, 0.785, 0.758, 0.765, 0.797, 0.806, 0.822, 0.805, 0.813, 0.813, 0.827, 0.84, 0.81, 0.829, 0.848, 0.865, 0.838, 0.835, 0.944, 0.873, 0.834, 0.84, 0.847, 0.851, 0.847, 0.858, 0.869, 0.844, 0.885, 0.904, 0.97, 0.872, 0.864, 0.871, 0.866, 0.939, 0.929, 0.939, 0.917, 0.925, 0.905, 0.949, 0.916, 0.881, 0.895, 0.921, 0.955, 1.001, 0.949, 0.995, 1.07, 1.006, 0.977, 0.97, 1.013, 0.997, 0.943, 0.919, 0.945, 0.942, 0.976, 1.002, 1.015, 0.988, 1.01, 1.061, 1.051, 0.988, 0.987, 0.966, 0.976, 1.008, 0.928, 0.894, 0.88, 0.896, 0.882, 0.874, 0.864, 0.852, 0.888, 0.907, 0.891, 0.899, 0.878, 0.868, 0.87, 0.888, 0.841, 0.834, 0.869, 0.835, 0.845, 0.839, 0.839, 0.865, 0.855, 0.844, 0.828, 0.863, 0.852, 0.855, 0.84, 0.838, 0.834, 0.855, 0.838, 0.824, 0.821, 0.826, 0.809, 0.813, 0.801, 0.986, 0.91, 0.932, 0.971, 0.908, 0.862, 0.837, 0.84, 0.894, 0.838, 0.874, 0.925, 0.915, 0.929, 0.915, 0.904, 0.866, 0.866, 0.848, 0.829, 0.849, 0.868, 0.834, 0.809, 0.874, 0.855, 0.829, 0.858, 0.914, 0.914, 0.87, 0.852, 0.908, 0.906, 0.924, 0.917, 0.961, 0.876, 0.841, 0.838, 0.853, 0.834, 0.811, 0.796, 0.815, 0.808, 0.785, 0.786, 0.772, 0.798, 0.822, 0.802, 0.84, 0.818, 0.854, 0.848, 0.845, 0.826, 0.826, 0.851, 0.891, 0.857, 0.822, 0.825, 0.855, 0.872, 0.904, 0.852, 0.887, 0.888, 0.898, 0.832, 0.812, 0.822, 0.807, 0.838, 0.85, 0.829, 0.882, 0.887, 0.889, 0.882, 0.85, 0.862, 0.851, 0.851, 0.852, 0.835, 0.848, 0.85, 0.898, 0.89, 0.975, 0.941, 0.912, 0.891, 0.946, 0.95, 0.922], "name": "VIX / VIX3M", "role": "market", "sampling": "lttb", "type": "line", "width": 1.0}], "table": {"caption": "VIX / VIX3M by calendar year; the CSV has every session", "columns": [{"label": "Year", "num": false}, {"label": "Sessions", "num": true}, {"label": "Above 1 (%)", "num": true}, {"label": "Mean", "num": true}], "rows": [["2010", "252", "8.7", "0.901"], ["2011", "252", "20.2", "0.941"], ["2012", "250", "0.4", "0.873"], ["2013", "252", "3.2", "0.901"], ["2014", "252", "7.5", "0.904"], ["2015", "252", "7.5", "0.891"], ["2016", "252", "6.0", "0.857"], ["2017", "251", "0.8", "0.825"], ["2018", "251", "21.1", "0.931"], ["2019", "252", "5.2", "0.900"], ["2020", "253", "20.9", "0.936"], ["2021", "252", "0.8", "0.843"], ["2022", "251", "6.0", "0.925"], ["2023", "250", "0.0", "0.881"], ["2024", "252", "3.6", "0.901"], ["2025", "250", "11.6", "0.899"], ["2026", "205", "4.9", "0.881"]]}, "title": "VIX / VIX3M, 2010-01-04 to 2026-10-26, shaded above 1 (backwardation)", "tooltip": "axis", "x": {"csv": "date", "type": "time"}, "xsDates": {"start": "2010-01-04", "steps": [1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 5, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 2, 1, 1, 3, 2, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 2, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 2, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 2, 1, 1, 3, 2, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 2, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 2, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 3, 1, 2, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 2, 3, 1, 1, 2, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1, 3]}, "y": {"digits": 1, "name": "VIX / VIX3M", "tipDigits": 3}}</script>
+<div class="chart-data sr-only" id="chart-vix-ratio-data">
+  
+  <table>
+    <caption>VIX / VIX3M by calendar year; the CSV has every session</caption>
+    <thead><tr><th scope="col">Year</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">Above 1 (%)</th><th scope="col" class="num">Mean</th></tr></thead>
+    <tbody><tr><td>2010</td><td class="num">252</td><td class="num">8.7</td><td class="num">0.901</td></tr><tr><td>2011</td><td class="num">252</td><td class="num">20.2</td><td class="num">0.941</td></tr><tr><td>2012</td><td class="num">250</td><td class="num">0.4</td><td class="num">0.873</td></tr><tr><td>2013</td><td class="num">252</td><td class="num">3.2</td><td class="num">0.901</td></tr><tr><td>2014</td><td class="num">252</td><td class="num">7.5</td><td class="num">0.904</td></tr><tr><td>2015</td><td class="num">252</td><td class="num">7.5</td><td class="num">0.891</td></tr><tr><td>2016</td><td class="num">252</td><td class="num">6.0</td><td class="num">0.857</td></tr><tr><td>2017</td><td class="num">251</td><td class="num">0.8</td><td class="num">0.825</td></tr><tr><td>2018</td><td class="num">251</td><td class="num">21.1</td><td class="num">0.931</td></tr><tr><td>2019</td><td class="num">252</td><td class="num">5.2</td><td class="num">0.900</td></tr><tr><td>2020</td><td class="num">253</td><td class="num">20.9</td><td class="num">0.936</td></tr><tr><td>2021</td><td class="num">252</td><td class="num">0.8</td><td class="num">0.843</td></tr><tr><td>2022</td><td class="num">251</td><td class="num">6.0</td><td class="num">0.925</td></tr><tr><td>2023</td><td class="num">250</td><td class="num">0.0</td><td class="num">0.881</td></tr><tr><td>2024</td><td class="num">252</td><td class="num">3.6</td><td class="num">0.901</td></tr><tr><td>2025</td><td class="num">250</td><td class="num">11.6</td><td class="num">0.899</td></tr><tr><td>2026</td><td class="num">205</td><td class="num">4.9</td><td class="num">0.881</td></tr></tbody>
+  </table>
+  
+  
+</div>
+    <p class="note" id="vix-ratio-line">Above 1 (backwardation: the 30-day index over the 3-month one) on <strong>7.6% of 4,229 sessions</strong>, shaded. Today 0.922, the <strong>70th percentile</strong> of the 4,228 prior sessions since <span class="nowrap">2010-01-04</span>.</p>
+    
+  </div>
+</section>
+</div>
+
+
+<div class="g pair">
+  <section class="panel s6 " id="state-fit" aria-labelledby="state-fit-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="state-fit-t">Headline fit · Heston, joint SPX/VIX</h2>
+    <span class="panel-side"><span class="panel-meta">2026-10-26</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-fit" aria-label="Copy a link to the Headline fit · Heston, joint SPX/VIX panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
+      <div class="kpi">
+  <div class="kpi-label">SPX RMSE in sample</div>
+  <div class="kpi-value">1.10<span class="unit">vol pts</span></div>
+  
+  <div class="kpi-sub">53 anchors, 6 expiries</div>
+</div>
+      <div class="kpi">
+  <div class="kpi-label">Out of sample</div>
+  <div class="kpi-value">1.72<span class="unit">vol pts</span></div>
+  
+  <div class="kpi-sub">3,049 quotes</div>
+</div>
+      <div class="kpi">
+  <div class="kpi-label">Put wing OOS</div>
+  <div class="kpi-value">2.30<span class="unit">vol pts</span></div>
+  
+  
+</div>
+      <div class="kpi">
+  <div class="kpi-label">VIX indices</div>
+  <div class="kpi-value">0.62<span class="unit">index pts RMSE</span></div>
+  
+  
+</div>
+      <div class="kpi">
+  <div class="kpi-label">VVIX model / market</div>
+  <div class="kpi-value">198 / 101</div>
+  
+  <div class="kpi-sub">30-day vol of VIX, index pts</div>
+</div>
+    </div>
+    <p class="note" id="fit-evidence">Evidence on the Calibration page: <a class="cite" href="calibration.html#oos">out-of-sample error by expiry</a> · <a class="cite" href="calibration.html#vixleg">the VIX leg, indices and VX futures</a>.</p>
+    <p class="note">
+      <span class="nowrap">κ 4.370</span> · <span class="nowrap">θ 0.0550</span> · <span class="nowrap">σ 1.833</span> · <span class="nowrap">ρ −0.691</span> · <span class="nowrap">v₀ 0.0276</span>
+    </p>
+    <p class="note" id="surface-line">Market surface, SVI-cal at 30 days: <span class="nowrap">1M <a class="term" href="model-risk.html#def-atmf"><abbr title="at-the-money-forward vol">ATMF</abbr></a> 14.03%</span> · <span class="nowrap"><a class="term" href="model-risk.html#def-rr25"><abbr title="25-delta risk reversal">RR25</abbr></a> −4.80</span> · <span class="nowrap"><a class="term" href="model-risk.html#def-bf25"><abbr title="25-delta butterfly">BF25</abbr></a> +0.72 vol pts</span> (surface <span class="nowrap">2026-10-26</span>, the newest session). <a href="surface.html#delta-grid">Delta grid</a>.</p>
+    
+    <p class="note" id="fit-constraints">No parameter on a bound. Feller VIOLATED (margin −2.88; diagnostic, not imposed). <span id="free-sigma">Refitted in a wider box (σ ≤ 10, κ ≤ 60; production has κ ≤ 20), it goes to σ 1.83, κ 4.4, loss 0.0%, out-of-sample RMSE 1.72 → 1.72 vol pts.</span> <a href="calibration.html">Calibration page</a>.</p>
+  </div>
+</section>
+
+  <section class="panel s6 " id="state-pipeline" aria-labelledby="state-pipeline-t">
+  <div class="panel-head">
+    <h2 class="panel-title" id="state-pipeline-t">Pipeline · what is stored</h2>
+    <span class="panel-side"><span class="panel-meta">build 2b9a8d7</span>
+    <span class="panel-actions"><button class="btn btn-link js-only" type="button" data-copy-link="state-pipeline" aria-label="Copy a link to the Pipeline · what is stored panel" title="Copy a link to this panel">#</button></span></span>
+  </div>
+  <div class="panel-body">
+    
+    
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Pipeline state (scrollable)">
+    <table class="tbl dense" id="pipeline">
+      <caption class="sr-only">What the repository has stored, and which records the scheduled job wrote</caption>
+      <tbody>
+        <tr><th scope="row">Cboe option books</th><td><span class="nowrap">SPX 2026-10-26:</span> 28,920 lines (28,005 two-sided, 54 expiries), quotes <span class="nowrap">2026-10-27</span> 02:33:38 UTC (overnight book); <span class="nowrap">VIX 2026-10-26:</span> 1,400 lines (1,234 two-sided, 12 expiries), quotes <span class="nowrap">2026-10-27</span> 00:40:52 UTC (overnight book)</td></tr>
+        <tr><th scope="row">Accepted joint fits</th><td>6 (model_version 2), newest 2026-10-26</td></tr>
+        <tr><th scope="row">Surface reports</th><td>6 sessions, 2026-03-24 → 2026-10-26</td></tr>
+        <tr><th scope="row">Calibration diagnostics</th><td>6 sessions (σ profile, identifiability, rough Heston)</td></tr>
+        <tr><th scope="row">Forward ledger</th><td>1 session, 2026-10-26 → 2026-10-26</td></tr>
+        <tr><th scope="row">Backtest window</th><td>ends 2025-03-24, fixed (mark-to-model)</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note">What the repository holds, whoever wrote it: a record does not say whether the scheduled job or a manual run of the job's code produced it (the git history does). Each input's as-of date and age in NYSE sessions is in the status bar and in the table at the foot of every page. Research prototypes (the ML regime classifier, the NN pricer, the Quintic OU) are on the <a href="research.html#research-classifier">Research</a> and <a href="calibration.html#quintic">Calibration</a> pages; none feeds a number on this page; the findings above cite one prototype's accuracy, as a negative result.</p>
+    
+  </div>
+</section>
+</div>
 
 </main>
 
 <footer class="site-footer">
-  <p>Static end-of-day snapshot. Every figure is computed from the repository's stored artifacts at build time; inputs that fail to load are reported, never replaced. Research and methodology only — mark-to-model, not investment advice.</p>
+  <div class="foot-inner">
+    <div class="tbl-wrap" tabindex="0" role="region" aria-label="Data freshness by source (scrollable)">
+      <table class="tbl dense">
+        <caption>Data freshness: each source's as-of date and age in NYSE sessions against the newest session (2026-10-26)</caption>
+        <thead><tr><th scope="col">Source</th><th scope="col">As of</th><th scope="col" class="num">Age</th><th scope="col">Artifact</th></tr></thead>
+        <tbody>
+          
+          <tr><td>SPX close (market DB)</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+          
+          <tr><td>VIX close (market DB)</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+          
+          <tr><td>Rule regime labels</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>signals/<wbr>regime_<wbr>labels.parquet</code></td></tr>
+          
+          <tr><td>Headline Heston fit</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>calibrations/</code></td></tr>
+          
+          <tr><td>Greeks surface</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>greeks/<wbr>greeks_<wbr>surface.parquet</code></td></tr>
+          
+          <tr><td>Quote-grade surface</td><td class="lvl-ok nowrap">2026-10-26</td>
+            <td class="num">—</td><td><code class="path">data_<wbr>store/<wbr>surface/<wbr>&lt;session&gt;/</code></td></tr>
+          
+          <tr><td>Backtest window end (fixed)</td><td class="lvl-ok nowrap">2025-03-24</td>
+            <td class="num">—</td><td><code class="path">data_<wbr>store/<wbr>backtest/<wbr>full_<wbr>results.parquet</code></td></tr>
+          
+          <tr><td>VX futures settlements</td><td class="lvl-error nowrap">2026-10-09</td>
+            <td class="num">11</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+          
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <p>Static end-of-day build. Every figure is computed from the repository's stored artifacts at build time; inputs that fail to load are reported, never replaced. Personal research project by Navnoor Bawa; backtest P&amp;L is mark-to-model. Not investment advice.</p>
+      <p class="foot-links">
+        <a href="https://github.com/navnoorthapar/vol-system-dashboard">Source on GitHub</a>
+        <a href="https://www.linkedin.com/in/navnoorbawa/">LinkedIn</a>
+        <a href="https://navnoorbawa.substack.com">Substack</a>
+        <a href="model-risk.html#definitions">Units, signs and definitions</a>
+      </p>
+      <p class="mt8">Charts: Apache ECharts 6.1.0 (Apache-2.0), vendored with integrity hashes. Fonts: Inter 4.1 and Desk Mono (derived from IBM Plex Mono), SIL OFL 1.1, self-hosted. Licences in <code>static/vendor/licenses</code> and <code>static/fonts</code>.</p>
+    </div>
+  </div>
 </footer>
 
-<script>
-  // Menu button (≤ 768px)
-  (function() {
-    var btn   = document.getElementById('navToggle');
-    var links = document.getElementById('navLinks');
-    if (!btn || !links) return;
-    function setOpen(open) {
-      links.classList.toggle('open', open);
-      btn.classList.toggle('open', open);
-      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    }
-    btn.addEventListener('click', function() { setOpen(!links.classList.contains('open')); });
-    links.querySelectorAll('.nav-link').forEach(function(a) {
-      a.addEventListener('click', function() { setOpen(false); });
-    });
-    document.addEventListener('click', function(e) {
-      if (!btn.contains(e.target) && !links.contains(e.target)) setOpen(false);
-    });
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && links.classList.contains('open')) { setOpen(false); btn.focus(); }
-    });
-  })();
-
-  // Scroll regions: say so (text, not only the edge shadow) when content is cut off
-  (function () {
-    function mark() {
-      document.querySelectorAll('.table-scroll, .heatmap-wrap').forEach(function (el) {
-        var over = el.scrollWidth > el.clientWidth + 1;
-        el.setAttribute('data-overflow', over ? 'true' : 'false');
-        var hint = el.previousElementSibling;
-        if (!hint || !hint.classList.contains('scroll-hint')) {
-          hint = document.createElement('p');
-          hint.className = 'scroll-hint';
-          hint.textContent = 'Scroll sideways for more columns';
-          el.parentNode.insertBefore(hint, el);
-        }
-        hint.classList.toggle('show', over);
-      });
-    }
-    mark();
-    window.addEventListener('resize', mark);
-  })();
-</script>
-
-<!-- Chart.js 4.4.3, vendored (dashboard/static) so the site has no
-     third-party script on its critical path; freeze_site.py refuses to publish if
-     the file's sha384 differs from sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54. (No integrity attribute on the
-     same-origin copy: browsers enforce SRI only on CORS-enabled loads, which a
-     file:// preview is not.) If the local copy fails, the pinned CDN build is tried
-     WITH that SRI; if that fails too, every chart is replaced by its data summary
-     instead of the page throwing 'Chart is not defined'. -->
-<script src="static/chart.umd-4.4.3.js"></script>
-<script>
-  // Shared chart styling (text colours meet WCAG AA on the card surface)
-  var VS = {
-    sans:  "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-    tick:  '#8f969f',   // --text3
-    title: '#adb3bb',   // --text2
-    grid:  'rgba(255,255,255,0.06)',
-    zero:  'rgba(255,255,255,0.22)',
-    // series: neutral headline, then distinct muted hues (>= 3:1 on the card)
-    series: { portfolio: '#e7e9ec', s1c: '#7fadf7', s3: '#e3a54a', s4: '#b99cf0', s1: '#8f969f',
-              pos: '#5cc8a0', neg: '#f0787c', info: '#7fadf7' },
-    // maturity is ordinal: one sequential ramp, short (light) to long (violet)
-    maturity: { 14: '#e8d77a', 30: '#e3b04a', 60: '#e8925a', 91: '#d6727a', 180: '#b06aa8', 365: '#8a6fe0' },
-  };
-  // Number formatting shared by ticks and tooltips: true minus sign, fixed decimals.
-  function vsNum(v, digits, signed) {
-    if (v === null || v === undefined || !isFinite(v)) return '—';
-    var s = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
-    return (v < 0 ? '−' : (signed && v > 0 ? '+' : '')) + s;
-  }
-
-  // vsCharts(fn): run a page's chart code once Chart.js is available.
-  (function () {
-    var queue = [];
-    var state = 'pending';
-    function setup() {
-      Chart.defaults.font.family = VS.sans;
-      Chart.defaults.font.size = 11;
-      Chart.defaults.color            = VS.tick;
-      Chart.defaults.borderColor      = VS.grid;
-      Chart.defaults.scale.grid.color = VS.grid;
-      Chart.defaults.scale.border = { display: false };
-      Chart.defaults.scale.title.color = VS.title;
-      Chart.defaults.scale.title.font = { size: 11, weight: '500' };
-      Chart.defaults.plugins.legend.labels.color = VS.title;
-      Chart.defaults.plugins.legend.labels.usePointStyle = true;
-      Chart.defaults.plugins.legend.labels.pointStyleWidth = 10;
-      Chart.defaults.plugins.legend.labels.boxHeight = 6;
-      Chart.defaults.plugins.tooltip.backgroundColor = '#1f242a';
-      Chart.defaults.plugins.tooltip.borderColor      = '#30363e';
-      Chart.defaults.plugins.tooltip.borderWidth       = 1;
-      Chart.defaults.plugins.tooltip.titleColor        = '#e7e9ec';
-      Chart.defaults.plugins.tooltip.bodyColor         = '#adb3bb';
-      Chart.defaults.plugins.tooltip.padding           = 10;
-      Chart.defaults.plugins.tooltip.boxPadding        = 4;
-      Chart.defaults.elements.line.borderWidth = 1.6;
-      Chart.defaults.elements.point.radius = 0;
-      Chart.defaults.elements.bar.borderRadius = 2;
-      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        Chart.defaults.animation = false;
-      }
-      // Re-lay out the charts for paper (Chart.js responsive docs: resize on beforeprint)
-      var printColours = { tick: '#333333', title: '#111111', grid: '#cccccc', ink: '#111111' };
-      VS.ink = VS.series.portfolio;   // the near-white headline series turns black on paper
-      function restyle(c) {
-        Chart.defaults.color = c.tick;
-        Chart.defaults.borderColor = c.grid;
-        Chart.defaults.scale.grid.color = c.grid;
-        Chart.defaults.plugins.legend.labels.color = c.title;
-        // per-chart options are resolved at creation, so set them on each chart too
-        Object.values(Chart.instances).forEach(function (ch) {
-          Object.values(ch.options.scales || {}).forEach(function (sc) {
-            if (sc.grid) sc.grid.color = c.grid;
-            if (sc.ticks) sc.ticks.color = c.tick;
-            if (sc.title) sc.title.color = c.title;
-          });
-          var lg = ch.options.plugins && ch.options.plugins.legend;
-          if (lg && lg.labels) lg.labels.color = c.title;
-          ch.data.datasets.forEach(function (ds) {
-            if (ds.borderColor === VS.ink || ds.borderColor === printColours.ink) {
-              ds.borderColor = c.ink; ds.backgroundColor = c.ink;
-            }
-          });
-          ch.resize();
-          ch.update('none');
-        });
-      }
-      window.addEventListener('beforeprint', function () { restyle(printColours); });
-      window.addEventListener('afterprint',  function () { restyle(VS); });
-      state = 'ready';
-    }
-    function run(fn) {
-      try { fn(); } catch (e) { console.error('chart rendering failed:', e); }
-    }
-    function fail() {
-      state = 'failed';
-      queue = [];
-      document.documentElement.classList.add('charts-failed');
-      document.querySelectorAll('.chart-wrap').forEach(function (w) {
-        var p = document.createElement('p');
-        p.className = 'chart-fallback';
-        p.textContent = 'Chart unavailable: the charting library could not be loaded. The values are listed below.';
-        w.appendChild(p);
-      });
-    }
-    window.vsCharts = function (fn) {
-      if (state === 'ready') run(fn);
-      else if (state === 'pending') queue.push(fn);
-    };
-    if (window.Chart) { setup(); return; }
-    var s = document.createElement('script');
-    s.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js";
-    s.integrity = "sha384-tgbB5AKnszdcfwcZtTfuhR3Ko1XZdlDfsLtkxiiAZiVkkXCkFmp+FQFh+V/UTo54";
-    s.crossOrigin = 'anonymous';
-    s.onload = function () {
-      if (!window.Chart) return fail();
-      setup();
-      queue.splice(0).forEach(run);
-    };
-    s.onerror = fail;
-    document.head.appendChild(s);
-  })();
-
-  // Axis option helpers (colours and fonts come from Chart.defaults above)
-  function makeLineOpts(yLabel) {
-    return {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { display: true, position: 'top', align: 'start' },
-        tooltip: { mode: 'index' },
-      },
-      scales: {
-        x: { ticks: { maxTicksLimit: 8 }, grid: { display: false } },
-        y: { title: { display: !!yLabel, text: yLabel } },
-      },
-    };
-  }
-
-  function makeBarOpts(yLabel, horizontal) {
-    return {
-      indexAxis: horizontal ? 'y' : 'x',
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: { mode: 'index' },
-      },
-      scales: {
-        x: { grid: { display: false } },
-        y: { title: { display: !!yLabel, text: yLabel },
-             grid: { color: function (c) { return c.tick && c.tick.value === 0 ? VS.zero : VS.grid; } } },
-      },
-    };
-  }
-</script>
+<dialog class="keys" id="keysDialog" aria-labelledby="keysTitle">
+  <h2 id="keysTitle">Keyboard shortcuts</h2>
+  <dl class="dl">
+    <dt><kbd>g</kbd> <kbd>o</kbd></dt><dd>Overview</dd><dt><kbd>g</kbd> <kbd>s</kbd></dt><dd>Surface</dd><dt><kbd>g</kbd> <kbd>c</kbd></dt><dd>Calibration</dd><dt><kbd>g</kbd> <kbd>r</kbd></dt><dd>Risk</dd><dt><kbd>g</kbd> <kbd>e</kbd></dt><dd>Research</dd><dt><kbd>g</kbd> <kbd>x</kbd></dt><dd>Corrections</dd><dt><kbd>g</kbd> <kbd>m</kbd></dt><dd>Model Risk</dd>
+    <dt><kbd>?</kbd></dt><dd>This list</dd>
+    <dt><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move between heatmap cells</dd>
+    
+  </dl>
+  <p class="mt8"><a href="model-risk.html#definitions">Units, signs and definitions</a>: every term the pages abbreviate, with its formula.</p>
+  <p class="mt12"><button class="btn" type="button" data-close-dialog>Close</button></p>
+</dialog>
 
 
-<script>
-vsCharts(function () {
-  // VIX Term Structure chart — x = tenor in calendar days on a LINEAR axis
-  // (a category axis spaced the 9/30/93/184-day tenors evenly and the spline bent the curve)
-  const tsCtx = document.getElementById('tsChart').getContext('2d');
-  const tsLabels = ["9d", "30d", "93d", "184d"];
-  const tsValues = [18.7, 19.45, 20.48, 21.96];
-  const tsDays = tsLabels.map(t => parseInt(t, 10));
-
-  new Chart(tsCtx, {
-    type: 'line',
-    data: {
-      datasets: [{
-        label: 'VIX term structure',
-        data: tsDays.map((x, i) => ({ x, y: tsValues[i], tenor: tsLabels[i] })),
-        borderColor: VS.series.info,
-        backgroundColor: VS.series.info,
-        tension: 0,
-        pointRadius: 4,
-        pointHoverRadius: 5,
-        borderWidth: 2,
-      }]
-    },
-    options: {
-      ...makeLineOpts(),
-      plugins: {
-        ...makeLineOpts().plugins,
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title: items => items.length ? `${items[0].raw.tenor} index · 2026-10-23` : '',
-            label: ctx => `  ${vsNum(ctx.parsed.y, 2)} vol pts`
-          }
-        }
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          min: 0,
-          grid: { display: false },
-          ticks: { stepSize: 30, callback: v => v + 'd' },
-          title: { display: true, text: 'Tenor (calendar days)' },
-        },
-        y: {
-          ticks: { callback: v => vsNum(v, 1) },
-          title: { display: true, text: 'Index level (vol pts)' },
-        },
-      },
-    }
-  });
-
-  // Sparkline — VIX − PDV forecast, recent sessions
-  
-  const spkCtx = document.getElementById('sparklineChart');
-  if (spkCtx) {
-    const spkData = [1.41, 1.79, 2.84, 2.32, 1.81, 2.14, 2.9, 2.66, 2.33, 2.88, 2.54, 3.09, 3.13, 2.55, 2.75, 2.36, 3.07, 3.09, 3.06, 2.72, 2.6, 2.94, 3.61, 2.9, 2.23, 2.27, 2.99, 3.44, 4.39, 2.83, 3.82, 3.72, 4.04, 2.08, 1.86, 2.0, 1.6, 1.9, 2.66, 2.36, 2.83, 2.94, 3.28, 3.73, 3.07, 3.7, 3.59, 3.62, 3.6, 3.41, 3.9, 4.11, 4.04, 4.07, 6.16, 5.14, 4.47, 4.31, 5.0, 5.2];
-    const spkDates = ["2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"];
-    new Chart(spkCtx, {
-      type: 'line',
-      data: {
-        labels: spkDates,
-        datasets: [{
-          data: spkData,
-          borderColor: VS.title,
-          borderWidth: 1.4,
-          pointRadius: 0,
-          fill: { target: 'origin', above: 'rgba(127,173,247,0.16)', below: 'rgba(240,120,124,0.16)' },
-          tension: 0,
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        animation: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: false } },
-        scales: { x: { display: false }, y: { display: false } }
-      }
-    });
-  }
-  
-});
-</script>
-
-
+<script src="static/vendor/echarts-6.1.0-desk.min.js" integrity="sha384-91oWllvVjknURH3iVY4aXknr/M7IadTMvoXGVuobX0GYrzD8gMLUwsVnC+tRn1k4" crossorigin="anonymous"></script>
+<script src="static/desk.js?v=da8bcf3b4e2c"></script>
 </body>
 </html>
