@@ -4803,6 +4803,32 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     assert all(t.split(": ", 1)[1].startswith(("not ", "not yet")) for t in text["→ Next · not done yet"])
 
 
+def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(pages):
+    """R3-T3: the Overview and Model Risk said the VIX was replicated 'by the
+    Cboe rules' while Surface's 'Where the replication departs from Cboe' lists
+    the departures (the rate, the quote time, the forward, PM lines for AM
+    monthlies, ...). Both now say 'the Cboe formula, with N listed departures
+    (Surface)', N counted from that list on the rendered Surface page."""
+    m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
+                  pages["/surface"], re.DOTALL)
+    rep = json.loads(_surface_file("vix_replication.json").read_text())
+    if m is None:       # no replication on this session: no claim either way
+        assert "listed departure" not in pages["/"] + pages["/model-risk"]
+        return
+    n = len(re.findall(r"<li>", m.group(1)))
+    assert n > 0
+    assert n >= len(rep.get("deviations") or [])
+    tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
+    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
+    if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
+        assert f"by the Cboe formula, {tail}." in works
+    mr = _visible_text(pages["/model-risk"])
+    assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
+    for html in (pages["/"], pages["/model-risk"]):
+        assert "Cboe rules" not in html
+        assert "Cboe VIX rules" not in html
+
+
 def test_browser_findings_strip_is_on_the_first_screen_and_stacks_on_a_phone(site_browser):
     """P1.7: at 1440×900 the strip starts above y = 600 (the first screen); at
     390 px its three columns stack, full width, in the same type."""

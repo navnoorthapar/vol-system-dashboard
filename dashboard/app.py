@@ -4710,6 +4710,15 @@ def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") ->
     return out
 
 
+def vix_departures_tail(vix_rep: dict | None) -> str:
+    """', with N listed departures (Surface)' after 'the Cboe formula': the
+    replication departs from Cboe's rules (rate, quote time, forward, AM/PM
+    lines, ...), and the Overview and Model Risk say how many lines Surface's
+    #vix-replication lists, counted as that list counts them."""
+    n = desk_surface.vix_departure_count(vix_rep)
+    return f", with {plural(n, 'listed departure')} (Surface)" if n else ""
+
+
 def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf: dict,
                          pipeline: dict | None) -> list[dict]:
     """The Overview's three columns: what works, what does not, what is next.
@@ -4744,7 +4753,7 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
             works.append(item(
                 "VIX replicated from the stored chain", "surface.html#vix-replication",
                 f"{signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
-                f"{sr['session']}, by the Cboe rules."))
+                f"{sr['session']}, by the Cboe formula{vix_departures_tail(rep.get('vix'))}."))
     arc = p2.get("archive") or {}
     if arc.get("n_legacy") is not None:
         works.append(item(
@@ -6791,7 +6800,8 @@ def load_model_risk() -> dict[str, Any]:
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
             today["vix_rep_gap"], signed(today["rep_gap"], ".2f") if today["rep_gap"] is not None else "—",
             "vix_rep_gap", sart + "vix_replication.json",
-            "Cboe VIX rules on the stored two-sided chain; a gap points at a thin or stale strip.",
+            f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
+            "a gap points at a thin or stale strip.",
             history=surf_hist("vix_rep_gap"))
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
