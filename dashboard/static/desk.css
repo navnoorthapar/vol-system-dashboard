@@ -774,3 +774,18 @@ tr[aria-current="true"] > th[scope="row"] { color: var(--text); box-shadow: inse
 .tbl th.sortable[aria-sort="descending"] .th-sort-ind::after { content: "▼"; content: "▼" / ""; color: var(--text2); }
 .tbl-tools { display: flex; justify-content: flex-end; gap: 4px; margin: 0 0 4px; }
 @media print { .tbl-tools, .tbl-act, .th-sort-ind { display: none !important; } }
+
+/* ── conventions and definitions (Q14) ───────────────────────────────── */
+a.term { color: inherit; text-decoration: underline dotted; text-decoration-color: var(--text3); text-underline-offset: 2px; }
+a.term:hover { color: var(--info); text-decoration-color: currentColor; }
+a.term abbr { text-decoration: none; }
+.conv-list { margin-bottom: 10px; }
+.defs { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px 16px; }
+.defs .def { padding: 6px 0; border-top: 1px solid var(--line); scroll-margin-top: 56px; }
+.defs .def:target { background: var(--surface2); outline: 1px solid var(--line2); }
+.defs dt { font-weight: 600; color: var(--text); }
+.defs dfn { font-style: normal; }
+.defs .def-exp { color: var(--text3); font-weight: 400; font-size: 11.5px; }
+.defs dd { font-size: 12px; color: var(--text2); line-height: 1.5; overflow-wrap: anywhere; }
+.defs .def-meta { display: block; color: var(--text3); font-size: 11px; margin-top: 2px; }
+@media (max-width: 480px) { .defs { grid-template-columns: minmax(0, 1fr); } }

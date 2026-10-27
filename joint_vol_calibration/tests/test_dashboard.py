@@ -1387,7 +1387,9 @@ def test_classifier_accuracy_is_read_from_the_shipped_model(pages):
     idx = pages["/research"]
     oos = f"{round(ev['oos_acc'] * 100, 1)}%"
     pers = f"{round(ev['persistence_acc'] * 100, 1)}%"
-    assert f"{oos} out-of-sample, it loses to the {pers}" in idx
+    # visible text: 'out-of-sample' is the page's first use of a glossary term, a link (Q14)
+    assert re.search(rf"{re.escape(oos)} out-of-sample ?, it loses to the {re.escape(pers)}",
+                     _visible_text(idx))
     assert re.search(r"<dt>Out-of-sample accuracy:</dt><dd><span[^>]*>" + re.escape(oos), idx)
     assert re.search(r"<dt>Persistence baseline:</dt><dd><span[^>]*>" + re.escape(pers), idx)
 
@@ -7221,3 +7223,135 @@ def test_browser_tables_sort_copy_and_export(site_browser, tmp_path):
             assert nums in (sorted(nums), sorted(nums, reverse=True))
     finally:
         ctx.close()
+
+
+# ── Q14: conventions and definitions, linked from first use ──────────────────
+
+def _glossary():
+    return _load("desk_glossary_under_test", "dashboard/desk_glossary.py")
+
+
+def test_definitions_section_lists_every_term_with_an_anchor(pages):
+    """Model Risk #definitions: the units and signs, then one anchor per term
+    (≥ 20) with its <dfn>, expansion, units and where it is used; the footer and
+    the '?' overlay of every page link to it."""
+    gl = _glossary()
+    mr = pages["/model-risk"]
+    sec = mr[mr.index('id="definitions"'):]
+    sec = sec[:sec.index("</section>")] if "</section>" in sec else sec
+    assert 'id="conventions"' in sec
+    for k, _v in gl.CONVENTIONS:
+        assert f"<dt>{k}</dt>" in sec, k
+    assert len(gl.TERMS) >= 20
+    for t in gl.TERMS:
+        m = re.search(rf'<div class="def" id="def-{re.escape(t["id"])}"[^>]*><dt><dfn[^>]*>(.*?)</dfn>', sec)
+        assert m, t["id"]
+        assert _html_unescape(m.group(1)) == t["term"]
+        block = sec[m.start():sec.index("</div>", m.start())]
+        assert "Units: " in block, t["id"]
+        assert "used on " in block, t["id"]
+    for route, html in pages.items():
+        footer = html[html.index("<footer"):]
+        assert 'href="model-risk.html#definitions"' in footer, route
+        keys = html[html.index('id="keysDialog"'):]
+        assert 'href="model-risk.html#definitions"' in keys[:keys.index("</dialog>")], route
+
+
+class _ProseRuns:
+    """The text runs of <main>'s running prose (p, li, dd) a reader sees, in
+    page order, each tagged with the glossary link it sits in ('' outside one)
+    and the definitions it is part of (a definition never links its own term):
+    an html.parser walk independent of desk_glossary's regex tokenizer.
+    Headings, tables, controls, code, SVG, <dt> and hidden, aria-hidden,
+    sr-only and chip text are not prose."""
+
+    SKIP = frozenset({"h1", "h2", "h3", "h4", "th", "td", "button", "summary", "code", "pre", "kbd",
+                      "script", "style", "svg", "title", "option", "select", "textarea", "label",
+                      "noscript", "dt"})
+    VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+                      "source", "track", "wbr"})
+
+    def __init__(self, html: str):
+        from html.parser import HTMLParser
+
+        runs: list[tuple[str, str, set]] = []
+        stack: list[tuple[str, bool, str, str]] = []
+        skip, void = self.SKIP, self.VOID
+
+        class P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                if tag in void:
+                    return
+                a = dict(attrs)
+                cls = (a.get("class") or "").split()
+                hide = (tag in skip or "hidden" in a or a.get("aria-hidden") == "true"
+                        or "sr-only" in cls or "chip" in cls)
+                term = ""
+                if tag == "a":
+                    m = re.fullmatch(r"[^#]*#def-([\w-]+)", a.get("href") or "")
+                    term = m.group(1) if m and "term" in cls else ""
+                    hide = hide or not term                     # an ordinary link's text is not linked
+                stack.append((tag, hide, term, a.get("data-term") or ""))
+
+            def handle_endtag(self, tag):
+                for k in range(len(stack) - 1, -1, -1):
+                    if stack[k][0] == tag:
+                        del stack[k:]
+                        break
+
+            def handle_data(self, data):
+                if any(e[1] for e in stack) or not any(e[0] in ("p", "li", "dd") for e in stack):
+                    return
+                runs.append((data, next((e[2] for e in reversed(stack) if e[2]), ""),
+                             {e[3] for e in stack if e[3]}))
+
+        main = html[html.index("<main"):html.rindex("</main>")]
+        P(convert_charrefs=True).feed(main)
+        self.runs = runs
+
+
+def test_every_page_links_the_first_use_of_its_terms(pages):
+    """Every page links each glossary term once, at its first use in the prose
+    of <main>, to its definition (on Model Risk, the same page); an acronym
+    carries its expansion in <abbr>. Before Q14 no page had an <abbr> or <dfn>."""
+    gl = _glossary()
+    by_id = {t["id"]: t for t in gl.TERMS}
+    seen: set[str] = set()
+    for route, html in pages.items():
+        main = html[html.index("<main"):html.rindex("</main>")]
+        links = re.findall(r'<a class="term" href="([^"]*)#def-([\w-]+)">(.*?)</a>', main)
+        assert links, route
+        ids = [i for _h, i, _x in links]
+        assert len(ids) == len(set(ids)), (route, ids)            # the first use only
+        for href, i, inner in links:
+            assert i in by_id, (route, i)
+            assert href == ("" if route == "/model-risk" else "model-risk.html"), (route, href)
+            t = by_id[i]
+            if t["abbr"]:
+                assert inner.startswith('<abbr title="'), (route, i)
+                assert _html_unescape(_attrs(inner[:inner.index(">") + 1])["title"]) == t["abbr"]
+            else:
+                assert "<abbr" not in inner
+            assert re.fullmatch(t["pat"], re.sub(r"<[^>]+>", "", inner)), (route, i, inner)
+        # each term's first prose use is its link; a term in the prose is linked
+        runs = _ProseRuns(html).runs
+        for t in gl.TERMS:
+            pat = re.compile(t["pat"].replace("&amp;", "&"))
+            hits = [(k, link) for k, (text, link, own) in enumerate(runs)
+                    if pat.search(text) and t["id"] not in own]
+            if not hits:
+                assert t["id"] not in ids, (route, t["id"])
+                continue
+            assert hits[0][1] == t["id"], (route, t["id"], runs[hits[0][0]][0][:80])
+        seen |= set(ids)
+    # the acronym load the review counted is covered where a reader meets it
+    assert {"psr", "dsr", "spa", "stepm", "pbo", "holm", "qlike", "z-vrp"} <= set(
+        gl.first_uses(pages["/research"]))
+    assert {"svi-cal", "half-spread", "atmf", "rr25"} <= set(gl.first_uses(pages["/surface"]))
+    assert len(seen) >= 20
+
+
+def test_a_definition_never_links_to_itself(pages):
+    mr = pages["/model-risk"]
+    for m in re.finditer(r'<div class="def" id="def-([\w-]+)">(.*?)</div>', mr, flags=re.DOTALL):
+        assert f'href="#def-{m.group(1)}"' not in m.group(2), m.group(1)

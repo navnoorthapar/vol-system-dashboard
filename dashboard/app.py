@@ -78,6 +78,7 @@ if str(DASH) not in sys.path:
 import desk_artifacts as artifacts  # noqa: E402  (dashboard/ modules, after the path setup)
 import desk_charts as charts  # noqa: E402
 import desk_density  # noqa: E402
+import desk_glossary  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
@@ -395,6 +396,8 @@ def subs(text: Any) -> Any:
 
 
 app.jinja_env.filters["subs"] = subs
+app.jinja_env.globals["glossary"] = desk_glossary.TERMS
+app.jinja_env.globals["glossary_conventions"] = desk_glossary.CONVENTIONS
 
 
 def path_breaks(text: Any) -> Any:
@@ -6723,7 +6726,10 @@ def _render(template: str, d: dict):
     # the Model Risk checks whose evidence this page shows (its panels' 'Monitored' chips)
     request_globals.monitored = (monitor_backlinks().get(ROUTES.get(request.path, ""), {})
                                  if request.path != "/model-risk" else {})
-    resp = make_response(render_template(template, d=d))
+    page = render_template(template, d=d)
+    # Q14: the first use of each glossary term links to its definition (Model Risk #definitions)
+    page = desk_glossary.link_first_uses(page, "" if request.path == "/model-risk" else "model-risk.html")
+    resp = make_response(page)
     resp.headers["X-Dashboard-Loader-Errors"] = str(len(errors))
     if errors:
         resp.headers["X-Dashboard-Error-Components"] = "; ".join(e["component"] for e in errors)
