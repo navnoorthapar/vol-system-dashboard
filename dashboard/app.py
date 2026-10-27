@@ -6222,8 +6222,16 @@ def concise_label(label: str) -> str:
     return re.sub(r"\s*\((?:[^()]|\([^()]*\))*\)\s*$", "", label).strip() or label
 
 
+WATERFALL_END = "Canonical today (C23 record)"
+
+
 def waterfall_spec(bridge: list[dict]) -> dict:
     """C22 waterfall as stacked bars: an invisible base plus the step, in $000s.
+
+    The bridge is replayed on the C23-restated record, so its end bar is today's
+    canonical run, not the C22 run as published (c23_bridge.csv row 0, which the
+    C23 table restates); the end category says so rather than 'C22 canonical',
+    which put one name on two values on the same page.
 
     Every level of this bridge is a loss, so the bars hang below zero: the base
     spans from 0 to the end of the step nearer zero and the visible bar covers
@@ -6240,7 +6248,7 @@ def waterfall_spec(bridge: list[dict]) -> dict:
     """
     start = float(bridge[0]["pnl"]) - float(bridge[0]["d_pnl"])
     levels = [start] + [float(r["pnl"]) for r in bridge]
-    cats = ["C21 published"] + [str(r["label"]) for r in bridge] + ["C22 canonical"]
+    cats = ["C21 published"] + [str(r["label"]) for r in bridge] + [WATERFALL_END]
     k = 1e3
     base: list[float | None] = [None]
     raise_: list[float | None] = [None]
@@ -6289,8 +6297,9 @@ def waterfall_spec(bridge: list[dict]) -> dict:
         ],
         xs=cats, tooltip="axis", horizontal=True, grid={"bottom": 30, "left": 160, "top": 8},
         csv="c22_waterfall.csv",
-        describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} in {len(bridge)} "
-                  "cumulative steps; each bar is one correction's effect on portfolio P&L."),
+        describe=(f"From {_usd_k(start)} (C21 as published) to {_usd_k(levels[-1])} (canonical today, "
+                  f"on the C23 record) in {len(bridge)} cumulative steps; each bar is one correction's "
+                  "effect on portfolio P&L."),
         table=charts.table("C22 bridge: each correction applied in turn ($)",
                            ["Row#", "Correction", "Δ P&L#", "P&L after#", "Sharpe after#"],
                            [["—", "C21 as published", "", _usd(start), ""]]

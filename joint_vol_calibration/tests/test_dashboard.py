@@ -3032,6 +3032,28 @@ def test_waterfall_exports_steps_not_bar_encodings(dash, pages):
     assert "(spec.tipRows || [])" in js
 
 
+def test_waterfall_end_bar_is_named_for_the_record_it_holds(dash, pages):
+    """R3-D5: the end bar read 'C22 canonical' but held the bridge's last level,
+    replayed on the C23 record (today's canonical run), while the caption beside it
+    quoted the C22 run as published, so one name carried two values on one page.
+    The end category now names today's run on the C23 record, and the caption's
+    published C22 figure comes from c23_bridge.csv instead of the template."""
+    w = _spec(pages["/corrections"], "chart-waterfall")
+    c22 = sorted(dash._read_csv_rows(SHIPPED / "backtest" / "c22_bridge.csv"), key=lambda r: int(r["row"]))
+    c23 = sorted(dash._read_csv_rows(SHIPPED / "backtest" / "c23_bridge.csv"), key=lambda r: int(r["row"]))
+    end = w["x"]["categories"][-1]
+    assert "C22" not in end, end
+    assert "C23" in end, end
+    assert end == dash.WATERFALL_END
+    assert w["xs"][-1] == end
+    total = next(s for s in w["series"] if s["name"] == "Run total")
+    assert total["data"][-1] == pytest.approx(float(c22[-1]["pnl"]) / 1e3, rel=1e-4)
+    assert "canonical today" in w["describe"]
+    note = _visible_text("<body>" + re.search(r'id="waterfall".*?<p class="note">(.*?)</p>',
+                                              pages["/corrections"], re.DOTALL).group(1))
+    assert f"the published C22 run ended at {dash._usd(float(c23[0]['pnl']), signed=True)}" in note
+
+
 def test_surface_badge_lists_the_models(pages):
     """UI-10: the badge read 'models:' and nothing else."""
     badge = _visible_text("<body>" + re.search(r'<div class="page-badge">(.*?)</div>', pages["/surface"],
