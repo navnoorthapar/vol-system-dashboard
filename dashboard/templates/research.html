@@ -104,6 +104,8 @@
 <div class="g pair">
   {% call m.panel('round-trips', 'Every trade · P&L by entry date', 's8', 'mark-to-model at β·VIX') %}
     {{ m.chart(d.charts.round_trips, 'h300 grow') }}
+    <p class="quote-readout point-readout js-only" id="chart-round-trips-readout" data-points-for="chart-round-trips" tabindex="0" aria-live="polite" aria-describedby="chart-round-trips-readout-help">Trade readout: hover a dot, or focus here and step through the trades by entry date with ← → (Page Up / Down: 10 trades; Home / End).</p>
+    <span class="sr-only" id="chart-round-trips-readout-help">Arrow keys step through the shown sleeves’ round trips in order of entry date; each step reads the sleeve, the entry date and the P&amp;L in $000s.</span>
     <p class="note" id="round-trips-note">Each dot is one round trip (a straddle from entry to exit), at its entry date and its net P&amp;L in $000s: priced and marked with Black–Scholes at β·VIX, after costs and financing, so no dot is a traded fill. The reference strategies S1 and S2 are in the statistics below, not on the chart. The open trade is hollow and carries only its entry cost. The trade log’s “combined” records (the research-only agreement rule, not in the portfolio; see the <a href="#sleeve-spec">sleeve specification</a>) are left out.</p>
   {% endcall %}
   {% call m.panel('trade-hists', 'Closed round trips · P&L and days held', 's4', rt.n_port_closed ~ ' closed · S1C, S3, S4') %}

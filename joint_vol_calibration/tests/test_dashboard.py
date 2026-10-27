@@ -2551,9 +2551,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     static = ROOT / "dashboard" / "static"
     assert len(gzip.compress((static / "vendor" / "echarts-6.1.0-desk.min.js").read_bytes())) < 240_000
     # P4.1: the quote inspector, the residual strip and the linked chart groups
-    # raised the page script from 51 KB; it is served gzipped like the pages
+    # raised the page script from 51 KB; it is served gzipped like the pages. F4's keyboard
+    # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 30_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_000
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -3947,6 +3948,58 @@ def test_browser_no_label_is_cut_short_with_an_ellipsis(site_browser):
                 assert page.evaluate(_ELLIPSIS_CUT_JS) == [], (name, width)
         finally:
             ctx.close()
+
+
+def test_browser_every_trade_is_reachable_from_the_keyboard(site_browser):
+    """F4: the per-trade strip ('Every trade · P&L by entry date') was a canvas
+    with no focusable element, and its Table summarises by sleeve and year, so
+    one trade's P&L and entry date were reachable only by mouse. A focusable
+    readout under it steps through the shown trades by entry date with the arrow
+    keys (Home / End, Page Up / Down by 10), says the sleeve, the entry date and
+    the P&L, and shows the tooltip at that dot; a sleeve toggled off in the
+    legend is skipped."""
+    sb = site_browser
+    raw = _raw_specs((sb["site"] / "research.html").read_text())["chart-round-trips"]
+    pts = sorted((str(d[0]), float(d[1]), s_["name"]) for s_ in raw["series"] for d in s_["data"])
+    ctx, page = _page(sb, 1440, 900)
+    try:
+        page.goto(sb["base"] + "research.html", wait_until="load")
+        page.locator("#chart-round-trips").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-round-trips")
+        r = page.locator("#chart-round-trips-readout")
+        assert r.get_attribute("tabindex") == "0"
+        r.focus()
+        page.keyboard.press("Home")
+        first = r.inner_text()
+        x0, y0, n0 = pts[0]
+        assert n0 in first, first
+        assert x0[:10] in first, first
+        assert dash_num(y0) in first, (first, y0)
+        assert f"1 of {len(pts)}" in first, first
+        page.keyboard.press("ArrowRight")
+        assert f"2 of {len(pts)}" in r.inner_text()
+        page.keyboard.press("End")
+        last = r.inner_text()
+        assert pts[-1][2] in last, last
+        assert pts[-1][0][:10] in last, last
+        tip = page.evaluate("""() => [...document.querySelectorAll('#chart-round-trips > div')]
+            .some(d => d.style.position === 'absolute' && getComputedStyle(d).display !== 'none'
+                  && d.innerText.trim())""")
+        assert tip, "no tooltip at the stepped trade"
+        # a sleeve toggled off is skipped
+        s3 = next(n for _x, _y, n in pts if n.startswith("S3"))
+        page.click(f"[data-legend-for~='chart-round-trips'][data-series='{s3}']")
+        r.focus()
+        page.keyboard.press("Home")
+        left = sum(1 for _x, _y, n in pts if n != s3)
+        assert f"1 of {left}" in r.inner_text(), r.inner_text()
+    finally:
+        ctx.close()
+
+
+def dash_num(v: float) -> str:
+    """A $000s P&L as the readout prints it: one decimal, sign, Unicode minus."""
+    return ("+" if v > 0 else "−" if v < 0 else "") + f"{abs(v):,.1f}"
 
 
 # ── P1 trust pass ─────────────────────────────────────────────────────────────

@@ -441,6 +441,7 @@ code { overflow-wrap: anywhere; }
    for a quote's lines at desk width, so a hover does not move the page below */
 .quote-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 4.6em; margin: 4px 0 0; padding: 2px 4px; border-radius: 3px; }
 .quote-readout:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+.point-readout { min-height: 2.4em; }
 /* a segmented control: one choice of two or three (aria-pressed buttons) */
 .seg { display: inline-flex; margin: 6px 0 2px; }
 .seg .btn { border-radius: 0; }

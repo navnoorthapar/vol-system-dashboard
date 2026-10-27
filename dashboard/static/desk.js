@@ -1207,6 +1207,55 @@
       if (b.getAttribute('data-xmode') === 'delta' && state.get('x') === 'delta') setXmode(b.getAttribute('data-xmode-for'), 'delta', true);
     });
   }
+  // -- scatter strips: the keyboard readout of every shown point (F4) ----
+  // The per-trade strip is a canvas: its readout (focusable) steps through the
+  // shown series' points in order of x (the entry date), reads the series, the
+  // date and the value, and shows the tooltip at that point.
+  function stripPoints(id) {
+    var c = Desk.charts[id];
+    if (!c) return [];
+    var off = legendOff(id), pts = [];
+    (c.chart.getOption().series || []).forEach(function (s, si) {
+      if (s.type !== 'scatter' || off[s.name]) return;
+      (s.data || []).forEach(function (d, di) {
+        var v = Array.isArray(d) ? d : (d && d.value);
+        if (!v || v[1] === null || v[1] === undefined) return;
+        var x = typeof v[0] === 'number' ? new Date(v[0]).toISOString().slice(0, 10) : String(v[0]).slice(0, 10);
+        pts.push({ name: s.name, si: si, di: di, x: x, y: Number(v[1]) });
+      });
+    });
+    pts.sort(function (a, b) { return a.x < b.x ? -1 : (a.x > b.x ? 1 : a.y - b.y); });
+    return pts;
+  }
+  function stepPoint(id, key, r) {
+    var c = Desk.charts[id], pts = stripPoints(id);
+    if (!c || !pts.length) return false;
+    var i, cur = c.pi;
+    if (key === 'Home') i = 0;
+    else if (key === 'End') i = pts.length - 1;
+    else if (READOUT_KEYS[key] === undefined) return false;
+    else i = (cur === null || cur === undefined) ? 0 : Math.max(0, Math.min(pts.length - 1, cur + READOUT_KEYS[key]));
+    var p = pts[i], y = c.spec.y || {};
+    c.pi = i;
+    r.textContent = p.name + ', entered ' + p.x + ': ' + (y.name || 'value') + ' ' +
+      num(p.y, { digits: y.tipDigits === undefined ? 1 : y.tipDigits, signed: true }) +
+      ' \u00b7 ' + (i + 1) + ' of ' + pts.length + ' by entry date';
+    c.chart.dispatchAction({ type: 'showTip', seriesIndex: p.si, dataIndex: p.di });
+    return true;
+  }
+  function initPointReadouts() {
+    $$('[data-points-for]').forEach(function (r) {
+      var id = r.getAttribute('data-points-for');
+      r.addEventListener('keydown', function (e) { if (stepPoint(id, e.key, r)) e.preventDefault(); });
+      r.addEventListener('blur', function () { var c = Desk.charts[id]; if (c) c.chart.dispatchAction({ type: 'hideTip' }); });
+    });
+    // a sleeve toggled in the legend renumbers the points: start again from the first
+    $$('[data-legend-for]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        (b.getAttribute('data-legend-for') || '').split(' ').forEach(function (id) { var c = Desk.charts[id]; if (c) c.pi = null; });
+      });
+    });
+  }
   function setXmode(id, mode, init) {
     Desk.xmode[id] = mode;
     $$('[data-xmode-for="' + id + '"]').forEach(function (o) { o.setAttribute('aria-pressed', o.getAttribute('data-xmode') === mode ? 'true' : 'false'); });
@@ -1739,7 +1788,7 @@
 
   function boot() {
     root.classList.add('has-js');
-    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initTableTools(); initScrollHints();
+    initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initPointReadouts(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initTableTools(); initScrollHints();
     initPrint(); openTarget(); scrollToAnchor();
     window.addEventListener('hashchange', openTarget);
   }
