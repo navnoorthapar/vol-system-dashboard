@@ -93,15 +93,27 @@ def bullet(value: Any, limits: Sequence[float], digits: str = ".2f", width: floa
 def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], digits: str = ".2f",
                  lower_is_better: bool = True) -> dict | None:
     """One dot per stored session (oldest first), each coloured by today's limits;
-    the range, and where the newest (today's) value ranks: 'worst of 5'."""
+    the range, and where the newest (today's) value ranks: 'worst of 5'.
+
+    The last point is today's. When today has no value (a check the newest
+    session cannot compute, e.g. a VIX the chain does not replicate) the dots of
+    the earlier sessions remain, ``last`` is None and nothing is ranked: an
+    earlier session's value is never shown as today's."""
     pts: list[tuple[str, float]] = []
     for s, raw in points:
         v = _num(raw)
         if v is not None:
             pts.append((str(s), v))
+    today_missing = bool(points) and _num(points[-1][1]) is None
     if len(pts) < 2:
         return None
     vals = [v for _, v in pts]
+    if today_missing:
+        return {"dots": [{"session": s, "value": v, "status": rag(v, limits), "text": format(v, digits)}
+                         for s, v in pts],
+                "lo": min(vals), "hi": max(vals), "n": len(vals), "rank": None, "today_missing": True,
+                "range": f"{format(min(vals), digits)}–{format(max(vals), digits)}",
+                "last": None, "first_session": pts[0][0], "last_session": pts[-1][0]}
     today = vals[-1]
     sign = 1.0 if lower_is_better else -1.0
     better = sum(1 for x in vals if sign * (x - today) < -1e-12)
@@ -114,7 +126,7 @@ def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], dig
                      for s, v in pts],
             "lo": min(vals), "hi": max(vals), "n": n, "rank": f"{word} of {n}",
             "range": f"{format(min(vals), digits)}–{format(max(vals), digits)}",
-            "last": today, "first_session": pts[0][0], "last_session": pts[-1][0]}
+            "last": today, "today_missing": False, "first_session": pts[0][0], "last_session": pts[-1][0]}
 
 
 def _ordinal(n: int) -> str:

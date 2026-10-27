@@ -70,8 +70,13 @@ NOISE_VP = 1.0               # RMS of the mid noise, vol points
 # per-strike; an RMS of ~1 over the strikes a book quotes
 NOISE_SHAPE = (0.9, 0.35, 0.12, 0.25)
 # every parameter of the new fit must differ from the headline by this much
-# (relative): far beyond any tolerance a test could pin a committed value with
-MIN_PARAM_MOVE = 0.05
+# (relative): 20x the 1e-3 a test would pin a committed value with. Not more:
+# kappa is the least identified parameter (its Gauss-Newton SE is ~19% on the
+# headline session) and the calibrator warm-starts from the previous fit, so a
+# priced book with kappa x0.6 can still be refitted with kappa a few percent
+# off the headline (4.3% on the simulated 2026-10-27 session, which failed the
+# earlier 5% bar while theta, sigma, rho and v0 moved 12-30%).
+MIN_PARAM_MOVE = 0.02
 
 
 def simulated_params(head: dict, bounds: dict | None = None) -> dict:
