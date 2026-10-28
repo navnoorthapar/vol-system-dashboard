@@ -1177,8 +1177,12 @@ def residual_table(a: Audit, c: Ctx) -> None:
                 bool(((hs - r["half_spread_vp"]).abs() <= 1e-6).all()), True)
         a.equal("residuals.parquet", f"{x.name}: error_vp = model − mid (1e-6 vol pts)",
                 bool(((ev - r["error_vp"]).abs()[ok] <= 1e-6).all()), True)
-        a.equal("residuals.parquet", f"{x.name}: error_hs = error / max(half-spread, 0.01) (1e-3)",
-                bool(((M.z_hs(r) - r["error_hs"]).abs()[ok] <= 1e-3).all()), True)
+        # relative: near the 0.01 floor a z of thousands moves by 1e-3 with the
+        # stored IVs' last digit (a simulated book reached z ≈ 4,283)
+        z = M.z_hs(r)
+        a.equal("residuals.parquet", f"{x.name}: error_hs = error / max(half-spread, 0.01) (1e-6 relative)",
+                bool(((z - r["error_hs"]).abs()[ok] <= 1e-6 * np.maximum(1.0, z.abs()[ok]) + 1e-3).all()),
+                True)
         ins = (r["model_iv"] >= r["bid_iv"]) & (r["model_iv"] <= r["ask_iv"])
         a.equal("residuals.parquet", f"{x.name}: inside_spread = bid ≤ model ≤ ask",
                 int((ins != r["inside_spread"].astype(bool))[ok].sum()), 0)
