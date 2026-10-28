@@ -308,3 +308,31 @@ def test_lifting_error_at_the_floor_where_the_joint_fit_lands():
         exact = theta * T - (theta - v0) * T * _mittag_leffler(a, 2.0, -kappa * T ** a)
         lifted = rh.rough_heston_expected_variance_integral(T, kappa, theta, v0, 0.02)
         assert abs(100 * math.sqrt(lifted / T) - 100 * math.sqrt(exact / T)) < 0.02
+
+
+def test_an_unresolved_far_frequency_does_not_inflate_the_lewis_grid():
+    """Found when the 2026-10-27 calibration diagnostics timed out on the bot
+    (20 min, then 12 min): near H = 1/2 the time grid cannot resolve one
+    truncation-scan frequency (u = 4.95e5, |phi| = 8.6e-4 where the true value is
+    ~0), which pushed the Lewis truncation of the 1-year slice to u = 5e4 and its
+    grid to 80,293 nodes (1.02 million on 2026-10-26's parameters), so each
+    residual evaluation took seconds. phi is zero above a frequency where it has
+    decayed below e^-70; the prices do not move."""
+    F, T, r = 7740.0, 0.9649, 0.04
+    K = F * np.linspace(0.72, 1.27, 8)
+    p = (3.8304, 0.0576, 1.6295, -0.6851, 0.0249)          # the 2026-10-27 joint fit
+    calls, grid = rh.rough_heston_call_batch_grid(F, K, T, r, r, *p, 0.4888)
+    assert grid is not None
+    assert grid.n < 2_000
+    # the same prices as a run with four times the Riccati steps (which resolves it)
+    fine, _ = rh.rough_heston_call_batch_grid(F, K, T, r, r, *p, 0.4888,
+                                              n_steps=4 * rh.ROUGH_HESTON_TIME_STEPS)
+    np.testing.assert_allclose(calls, fine, atol=1e-6 * F)
+    # the mask leaves a CF that decays monotonically, and anything below the floor, alone
+    z = np.array([1.0, 2.0, 3.0, 4.0]) - 0.5j
+    lc = np.array([-0.1, -80.0, -5.0, -90.0]) + 0j
+    out = rh._mask_rebound(lc, z)
+    assert np.array_equal(out[:2], lc[:2])
+    assert np.isneginf(out[2:].real).all()
+    smooth = np.array([-0.1, -1.0, -10.0, -60.0]) + 0j
+    assert np.array_equal(rh._mask_rebound(smooth, z), smooth)

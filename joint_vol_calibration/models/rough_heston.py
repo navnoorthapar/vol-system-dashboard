@@ -306,6 +306,33 @@ def _mask_unresolved(log_cf: np.ndarray) -> np.ndarray:
     bad = ~np.isfinite(log_cf) | (log_cf.real > 1e-12)
     return np.where(bad, -np.inf + 0j, log_cf) if bad.any() else log_cf
 
+# ln|phi| below which the CF on the Lewis contour has decayed for pricing
+# purposes (e^-70 ~ 4e-31 of the forward; the quadrature's rtol is 1e-7)
+_DECAYED_LOG_CF = -70.0
+
+
+def _mask_rebound(log_cf: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Zero phi at every frequency above one where |phi| has already decayed
+    below e^_DECAYED_LOG_CF. The density of ln(S_T/F) is smooth, so its
+    transform does not climb back from e^-70 to 1e-3 further out; such a value
+    is the time grid failing to resolve that frequency. Seen at H = 0.4888,
+    T = 0.96: one truncation-scan node at u = 4.95e5 with |phi| = 8.6e-4 (the
+    true value is ~0) pushed the Lewis truncation to u = 5e4 and the slice to
+    80,293 nodes, so one residual evaluation took 8 s instead of 0.2 s and the
+    diagnostics timed out. ``z`` is any 1-D frequency array (u - i/2)."""
+    if log_cf.ndim != 1 or len(log_cf) < 2:
+        return log_cf
+    order = np.argsort(z.real, kind="stable")
+    decayed = np.logical_or.accumulate(log_cf.real[order] < _DECAYED_LOG_CF)
+    # a node is masked when a LOWER frequency had decayed (not the node itself)
+    above = np.r_[False, decayed[:-1]]
+    if not above.any():
+        return log_cf
+    out = log_cf.copy()
+    out[order[above]] = -np.inf + 0j
+    return out
+
+
 def rough_heston_call_batch_grid(
     S: float, strikes, T: float, r: float, q: float,
     kappa: float, theta: float, sigma: float, rho: float, v0: float, H: float,
@@ -326,7 +353,8 @@ def rough_heston_call_batch_grid(
         z = np.asarray(z, dtype=complex)
         int_f, int_psi, _ = _riccati_sweep(z.ravel(), T, kappa, sigma, rho, H, n_factors,
                                            n_steps)
-        return _mask_unresolved((v0 * int_f + kappa * theta * int_psi).reshape(z.shape))
+        lc = _mask_unresolved((v0 * int_f + kappa * theta * int_psi).reshape(z.shape))
+        return _mask_rebound(lc, z) if z.ndim == 1 else lc
 
     calls, grid = _lewis_call_prices(S, strikes, T, r, q, log_cf, max(total_var, 1e-12),
                                      grid=grid, rtol=rtol)
