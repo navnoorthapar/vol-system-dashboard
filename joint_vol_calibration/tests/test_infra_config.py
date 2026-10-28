@@ -719,3 +719,34 @@ def test_the_run_record_is_committed_with_the_captures(tmp_path, monkeypatch):
     assert "data_store/runs" in _step(DAILY, "Bundle this run's captures")
     assert "data_store/runs" in _step(DAILY, "Commit data files")
     assert set(re.findall(r'slot="(\w+)"', _step(DAILY, "Choose steps"))) <= set(cr.RUN_SLOTS)
+
+
+def test_the_bot_alerts_on_repeated_failure_and_reports_its_deploy_streak():
+    """FUND_GRADE_PLAN 0.4: the last step, on failure only and never fatal, runs
+    the alert (scripts/ci/bot_alert.py) with the permissions it needs; before the
+    run's freeze, the deploy streak is computed from gh-pages commit messages
+    into a gitignored file the Overview reads (never committed, so not under
+    data_store/), in a scratch repository (the checkout's remote is untouched)."""
+    import yaml
+
+    wf = yaml.safe_load(DAILY)
+    assert wf["permissions"] == {"contents": "write", "issues": "write", "actions": "read"}
+    steps = wf["jobs"]["refresh"]["steps"]
+    names = [s.get("name") for s in steps]
+    last = steps[-1]
+    assert last["name"] == "Alert on repeated failure"
+    assert last["if"] == "failure()"
+    assert last["continue-on-error"] is True
+    assert "scripts/ci/bot_alert.py" in last["run"]
+    assert {"GH_TOKEN", "GH_REPO", "RUN_ID", "EVENT"} <= set(last["env"])
+    st = steps[names.index("Deploy streak (gh-pages history)")]
+    assert names.index("Deploy streak (gh-pages history)") < names.index("Run cloud_refresh.py")
+    assert st["continue-on-error"] is True
+    for part in ("--filter=tree:0", 'git init -q --bare "$g"', 'git -C "$g"', "fetch -q --no-tags"):
+        assert part in st["run"], part
+    assert "scripts/ci/deploy_streak.py --out .deploy-streak.json" in st["run"]
+    assert ".deploy-streak.json" in (ROOT / ".gitignore").read_text()
+    assert 'DEPLOY_STREAK_FILE = ROOT / ".deploy-streak.json"' in (ROOT / "dashboard" / "app.py").read_text()
+    # the deploy commit message the streak parses
+    deploy = steps[names.index("Deploy to GitHub Pages")]["with"]["full_commit_message"]
+    assert deploy.startswith("Deploy session ${{ steps.refresh.outputs.session }} from ")

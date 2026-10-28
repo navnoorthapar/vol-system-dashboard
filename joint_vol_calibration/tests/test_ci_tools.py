@@ -22,6 +22,10 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
     unless a dated, reasoned allowlist entry covers it; an expired or
     malformed entry fails; an unreachable advisory service is retried and
     then fails, never passes.
+  * bot_alert.py (the daily workflow's last step, on failure): two failed
+    scheduled runs in a row open, or comment on, one bot-failure issue.
+  * deploy_streak.py (the daily workflow, before the freeze): consecutive NYSE
+    sessions with a deploy commit on gh-pages, across holidays.
 """
 from __future__ import annotations
 
@@ -598,3 +602,166 @@ class TestPipAuditGate:
         audit_target = mk[mk.index("\naudit:"):mk.index("\ndocker-build:")]
         assert "|| true" not in audit_target
         assert "pip_audit_gate.py" in audit_target
+
+
+@pytest.fixture
+def alert(monkeypatch):
+    return _load("scripts/ci/bot_alert.py", "bot_alert_under_test", monkeypatch)
+
+
+class _FakeGh:
+    """A fake `gh`: canned run history and open issues, every call recorded."""
+
+    def __init__(self, runs, open_issues=(), fail=0):
+        self.runs, self.open_issues, self.fail, self.calls = list(runs), list(open_issues), fail, []
+
+    def __call__(self, args):
+        args = list(args)
+        self.calls.append(args)
+        if self.fail:
+            self.fail -= 1
+            raise subprocess.CalledProcessError(1, ["gh", *args], stderr="HTTP 502")
+        if args[:2] == ["run", "list"]:
+            return json.dumps(self.runs)
+        if args[:2] == ["issue", "list"]:
+            return json.dumps(self.open_issues)
+        if args[:2] == ["issue", "create"]:
+            return "https://github.com/o/r/issues/77\n"
+        return ""
+
+    def made(self, *verb):
+        return [c for c in self.calls if c[:len(verb)] == list(verb)]
+
+
+def _runs(*conclusions, current=None):
+    """gh run list --json rows, newest first; ``current`` is this (in-progress) run."""
+    rows = ([{"databaseId": current, "event": "schedule", "status": "in_progress", "conclusion": ""}]
+            if current else [])
+    rows += [{"databaseId": 100 - i, "event": "schedule", "status": "completed", "conclusion": c,
+              "createdAt": f"run {i}", "url": f"https://x/runs/{100 - i}"} for i, c in enumerate(conclusions)]
+    return rows
+
+
+class TestBotAlert:
+    """FUND_GRADE_PLAN 0.4: two failed scheduled runs in a row open (or comment on)
+    one bot-failure issue; never a second open issue; a manual run never alerts."""
+
+    def _alert(self, alert, gh, event="schedule"):
+        return alert.alert("200", event, "https://x/runs/200", "book", runner=gh, sleep=lambda s: None)
+
+    def test_two_failures_in_a_row_open_one_issue(self, alert):
+        gh = _FakeGh(_runs("failure", "success", current=200))
+        res = self._alert(alert, gh)
+        assert (res["action"], res["streak"]) == ("created", 2)
+        assert len(gh.made("issue", "create")) == 1
+        create = gh.made("issue", "create")[0]
+        assert create[create.index("--label") + 1] == alert.LABEL
+        assert "https://x/runs/200" in create[create.index("--body") + 1]
+        assert "https://x/runs/100" in create[create.index("--body") + 1]
+        assert gh.made("label", "create")              # the label exists before the issue uses it
+        assert gh.calls.index(gh.made("label", "create")[0]) < gh.calls.index(create)
+        assert gh.made("issue", "comment") == []
+
+    def test_a_failure_after_a_success_does_not_alert(self, alert):
+        gh = _FakeGh(_runs("success", "failure", "failure", current=200))
+        res = self._alert(alert, gh)
+        assert (res["action"], res["streak"]) == ("none", 1)
+        assert [c[:2] for c in gh.calls] == [["run", "list"]]
+
+    def test_an_open_issue_gets_a_comment_not_a_second_issue(self, alert):
+        gh = _FakeGh(_runs("failure", "failure", "success"), open_issues=[{"number": 12, "url": "u"},
+                                                                            {"number": 9, "url": "v"}])
+        res = self._alert(alert, gh)
+        assert (res["action"], res["streak"], res["issue"]) == ("commented", 3, 9)
+        assert gh.made("issue", "create") == []
+        assert gh.made("issue", "comment")[0][2] == "9"
+
+    def test_runs_that_say_nothing_about_the_bot_are_passed_over(self, alert):
+        """Cancelled, queued and manual runs neither extend nor break a streak."""
+        runs = _runs("cancelled", "failure", "skipped", "success", current=200)
+        runs.insert(1, {"databaseId": 150, "event": "workflow_dispatch", "status": "completed",
+                        "conclusion": "success"})
+        runs.insert(1, {"databaseId": 151, "event": "schedule", "status": "queued", "conclusion": ""})
+        assert alert.failure_streak(runs, "200")[0] == 2
+        assert alert.failure_streak(_runs("timed_out", "startup_failure", "success"), "200")[0] == 3
+
+    def test_a_manual_run_never_alerts(self, alert):
+        gh = _FakeGh(_runs("failure", "failure"))
+        res = self._alert(alert, gh, event="workflow_dispatch")
+        assert res["action"] == "none"
+        assert gh.calls == []
+
+    def test_a_gh_failure_is_retried_then_reported(self, alert, monkeypatch, capsys):
+        gh = _FakeGh(_runs("failure", current=200), fail=1)
+        assert self._alert(alert, gh)["action"] == "created"         # one 502, then through
+        monkeypatch.setattr(alert, "gh", _FakeGh([], fail=99))
+        monkeypatch.setattr(alert.time, "sleep", lambda s: None)
+        assert alert.main(["--run-id", "200", "--event", "schedule"]) == 1
+        assert "::warning title=Bot alert::" in capsys.readouterr().out
+
+    def test_dry_run_decides_without_writing(self, alert):
+        gh = _FakeGh(_runs("failure", current=200))
+        res = alert.alert("200", "schedule", "u", runner=gh, sleep=lambda s: None, dry_run=True)
+        assert res["action"] == "created"
+        assert [c[:2] for c in gh.calls] == [["run", "list"], ["issue", "list"]]
+
+
+@pytest.fixture
+def streak(monkeypatch):
+    return _load("scripts/ci/deploy_streak.py", "deploy_streak_under_test", monkeypatch)
+
+
+class TestDeployStreak:
+    """FUND_GRADE_PLAN 0.4: 'N consecutive NYSE sessions deployed' from the deploy
+    commits on gh-pages; a holiday does not break the run, a missing session does."""
+
+    @staticmethod
+    def _log(*sessions):
+        return [f"Deploy session {s} from {'a' * 40} (calibration accepted; run {i})"
+                for i, s in enumerate(sessions)]
+
+    def test_a_holiday_and_a_weekend_do_not_break_the_streak(self, streak):
+        from joint_vol_calibration.data import database as db
+        holiday = "2026-11-26"                         # Thanksgiving: a calendar fact, not data
+        assert not db.is_nyse_session(holiday)
+        after = [db.session_on_or_before("2026-11-30")]            # Monday after the Friday
+        before = [db.previous_session(holiday)]                     # Wednesday
+        before.insert(0, db.previous_session(before[0]))
+        friday = db.session_on_or_before("2026-11-29")
+        sessions = [*before, friday, *after]
+        rec = streak.record(["Initial commit", *self._log(*reversed(sessions)), *self._log(sessions[-1])])
+        assert (rec["streak"], rec["first"], rec["through"]) == (len(sessions), sessions[0], sessions[-1])
+        assert rec["deploys"] == len(sessions)                      # a session deployed twice counts once
+        assert rec["commits_read"] == len(sessions) + 2
+
+    def test_a_missing_session_ends_it(self, streak):
+        from joint_vol_calibration.data import database as db
+        s3 = "2026-10-28"
+        s2 = db.previous_session(s3)
+        s1 = db.previous_session(s2)
+        s0 = db.previous_session(s1)
+        rec = streak.record(self._log(s3, s2, s0))                  # s1 never deployed
+        assert (rec["streak"], rec["first"], rec["through"], rec["deploys"]) == (2, s2, s3, 3)
+
+    def test_other_subjects_and_no_deploys(self, streak, tmp_path):
+        assert streak.deployed_sessions(["Deploy session unknown from x", "Deploy session 2026-13-01 from x",
+                                         "Merge branch", "  Deploy session 2026-10-27 from x (y)"]) == {
+            __import__("datetime").date(2026, 10, 27)}
+        log, out = tmp_path / "log.txt", tmp_path / ".deploy-streak.json"
+        log.write_text("Initial commit\n")
+        assert streak.main(["--log", str(log), "--out", str(out)]) == 0
+        rec = json.loads(out.read_text())
+        assert (rec["schema"], rec["streak"], rec["first"]) == ("deploy_streak/1", 0, None)
+        log.write_text("\n".join(self._log("2026-10-27")) + "\n")
+        streak.main(["--log", str(log), "--out", str(out)])
+        assert json.loads(out.read_text())["streak"] == 1
+        assert sorted(p.name for p in tmp_path.iterdir()) == [".deploy-streak.json", "log.txt"]   # no .tmp
+
+    def test_it_parses_the_workflows_own_deploy_message(self, streak):
+        import yaml
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / "daily_refresh.yml").read_text())
+        step = next(s for s in wf["jobs"]["refresh"]["steps"] if s.get("name") == "Deploy to GitHub Pages")
+        msg = re.sub(r"\$\{\{ steps\.refresh\.outputs\.session \}\}", "2026-10-27",
+                     step["with"]["full_commit_message"])
+        msg = re.sub(r"\$\{\{[^}]*\}\}", "x", msg)
+        assert streak.deployed_sessions([msg]) == {__import__("datetime").date(2026, 10, 27)}

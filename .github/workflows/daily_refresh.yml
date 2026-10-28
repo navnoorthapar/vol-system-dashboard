@@ -50,6 +50,8 @@ on:
 
 permissions:
   contents: write              # commit data back to main and push gh-pages
+  issues: write                # the failure alert (scripts/ci/bot_alert.py), last step
+  actions: read                # ... which reads this workflow's earlier runs
 
 concurrency:
   group: daily-refresh
@@ -100,6 +102,28 @@ jobs:
           echo "steps=$steps" >> "$GITHUB_OUTPUT"
           echo "slot=$slot" >> "$GITHUB_OUTPUT"
           echo "Slot: $slot -> steps: $steps"
+
+      # The deploy streak the Overview prints (scripts/ci/deploy_streak.py): consecutive
+      # NYSE sessions with a deploy commit on gh-pages before this run. Commit messages
+      # only (--filter=tree:0), fetched into a scratch repository so the checkout's own
+      # remote and fetches stay as they are. The JSON is gitignored, never committed;
+      # with no file (this step failed) the site has no streak row, and nothing else.
+      - name: Deploy streak (gh-pages history)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          g="$RUNNER_TEMP/gh-pages.git"
+          rm -rf "$g" && git init -q --bare "$g"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          for i in 1 2 3; do
+            if git -C "$g" -c http.https://github.com/.extraheader="$auth" fetch -q --no-tags \
+                 --filter=tree:0 "https://github.com/$REPO.git" gh-pages; then break; fi
+            if [ "$i" = 3 ]; then echo "::warning::could not fetch gh-pages: no deploy streak"; exit 1; fi
+            sleep $((i * 10))
+          done
+          git -C "$g" log --format=%s FETCH_HEAD | python scripts/ci/deploy_streak.py --out .deploy-streak.json
 
       # REFRESH_SLOT: the run writes its record, data_store/runs/run_<run_utc>_<slot>.json
       # (what ran, the calibration's outcome and the gate's reason, the chain's quote
@@ -330,3 +354,21 @@ jobs:
             ${{ steps.commitartifacts.outputs.sha }} (calibration ${{ steps.refresh.outputs.calibration }};
             run ${{ github.run_id }})
           cname: navnoorbawa.me          # preserve custom domain
+
+      # Two scheduled runs failed in a row: one open issue labelled bot-failure gets a
+      # comment, or is opened (scripts/ci/bot_alert.py; a manual run never alerts).
+      # Last, and continue-on-error: it comes after every commit and the deploy and
+      # can never cost either.
+      - name: Alert on repeated failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SLOT: ${{ steps.plan.outputs.slot }}
+        run: >
+          python scripts/ci/bot_alert.py --workflow daily_refresh.yml --run-id "$RUN_ID"
+          --event "$EVENT" --run-url "$RUN_URL" --slot "$SLOT"

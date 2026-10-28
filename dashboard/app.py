@@ -72,6 +72,9 @@ _logger = logging.getLogger("vol_dashboard")
 ROOT = Path(__file__).resolve().parent.parent
 DASH = Path(__file__).resolve().parent
 DATA = ROOT / "data_store"
+# The deploy streak the daily workflow computes from gh-pages history before it
+# freezes (scripts/ci/deploy_streak.py; gitignored, never committed): absent locally.
+DEPLOY_STREAK_FILE = ROOT / ".deploy-streak.json"
 sys.path.insert(0, str(ROOT))
 if str(DASH) not in sys.path:
     sys.path.insert(0, str(DASH))
@@ -4929,10 +4932,35 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     return [newest[u] for u in sorted(newest)]
 
 
+def deploy_streak(path: Path | None = None) -> dict | None:
+    """The site's deploy streak (scripts/ci/deploy_streak.py): N consecutive NYSE
+    sessions with a deploy commit on gh-pages, first and last, before this build.
+    The daily workflow writes the file before it freezes; a local or CI freeze has
+    none, and a file that is not a whole deploy_streak/1 record is logged and
+    left out (no row rather than a number the record does not support)."""
+    p = Path(path) if path is not None else DEPLOY_STREAK_FILE
+    if not p.is_file():
+        return None
+    try:
+        rec = json.loads(p.read_text())
+        n, first, through = rec["streak"], rec["first"], rec["through"]
+        ok = (rec.get("schema") == "deploy_streak/1" and isinstance(n, int) and not isinstance(n, bool)
+              and n >= 1 and all(isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x)
+                                 for x in (first, through)) and first <= through)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _logger.warning("deploy streak %s unreadable: %s", p, e)
+        return None
+    if not ok:
+        _logger.warning("deploy streak %s is not a deploy_streak/1 record with a streak: %s", p, rec)
+        return None
+    return {"streak": n, "first": first, "through": through}
+
+
 def pipeline_state(diag: dict) -> dict:
-    """What the daily job has stored: books, fits, derived artifacts, the forward ledger."""
+    """What the daily job has stored: books, fits, derived artifacts, the forward
+    ledger; and how many consecutive sessions the site was deployed for."""
     out: dict[str, Any] = {"captures": [], "fits": None, "fits_newest": None, "surface_sessions": [],
-                           "diag_sessions": [], "forward": None}
+                           "diag_sessions": [], "forward": None, "deploys": deploy_streak()}
     out["captures"] = latest_cboe_captures()
     fits = [r for r in scan_calibrations() if r["legacy"] is False and r["ok"] and r["session"]]
     out["fits"] = len(fits)

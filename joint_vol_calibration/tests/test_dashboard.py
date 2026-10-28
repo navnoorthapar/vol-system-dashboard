@@ -2326,6 +2326,48 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
         assert dash.forward_ledger_protocol()["pending"] in text
 
 
+def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.4: the daily workflow writes the deploy streak
+    (scripts/ci/deploy_streak.py, from the gh-pages deploy commits) before it
+    freezes; the pipeline panel prints it from that file. A local freeze has no
+    file and no row, and a file that is not a whole record is no row either."""
+    from datetime import date, timedelta
+    f = tmp_path / ".deploy-streak.json"
+    monkeypatch.setattr(dash, "DEPLOY_STREAK_FILE", f)
+
+    errors0 = _errors(dash.app.test_client().get("/"))
+
+    def row():
+        resp = dash.app.test_client().get("/")
+        assert _errors(resp) == errors0                      # the streak file is never a loader error
+        html = resp.get_data(as_text=True)
+        m = re.search(r'<tr id="deploy-streak">(.*?)</tr>', html, re.DOTALL)
+        return " ".join(_visible_text("<body>" + m.group(1)).split()) if m else None
+
+    assert row() is None                                     # no file: no row, no error
+    through = date(2026, 1, 2) + timedelta(days=400)          # a synthetic record: any dates
+    first = through - timedelta(days=17)
+    n = 13
+    f.write_text(json.dumps({"schema": "deploy_streak/1", "streak": n, "first": first.isoformat(),
+                             "through": through.isoformat(), "deploys": n + 2}))
+    want = {"streak": n, "first": first.isoformat(), "through": through.isoformat()}
+    assert dash.deploy_streak() == want
+    text = row()
+    assert text == (f"Deployed (gh-pages) {n} consecutive NYSE sessions, "
+                    f"{first.isoformat()} → {through.isoformat()}")
+    f.write_text(json.dumps({"schema": "deploy_streak/1", "streak": 1, "first": through.isoformat(),
+                             "through": through.isoformat()}))
+    assert f"1 consecutive NYSE session, {through.isoformat()} → {through.isoformat()}" in row()
+    for bad in ("{not json", json.dumps({"schema": "deploy_streak/1", "streak": 0, "first": None,
+                                         "through": None}),
+                json.dumps({"schema": "other/1", "streak": 3, "first": "2026-01-02",
+                            "through": "2026-01-06"}),
+                json.dumps({"schema": "deploy_streak/1", "streak": "3", "first": "a", "through": "b"})):
+        f.write_text(bad)
+        assert dash.deploy_streak() is None, bad
+        assert row() is None, bad
+
+
 def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
     resp, html = _get(dash, "/calibration")
     assert _errors(resp) == 0

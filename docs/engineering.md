@@ -29,6 +29,20 @@ Third-party actions are pinned by commit SHA (a test enforces it); `.github/depe
 updates for the actions, the pip set and the a11y tools, each release at least 14 days old, and leaves the CPU builds
 of torch and xgboost to the lock compile.
 
+## The daily bot (`.github/workflows/daily_refresh.yml`)
+
+- **Run records.** Every run commits `data_store/runs/run_<run_utc>_<slot>.json` with its captures (what ran, the
+  calibration outcome and the gate's reason, exit code, publish blockers, step timings, the commit and run id;
+  `dashboard/ARTIFACTS.md` section 6). The stale-calibration banner names a rejected session from them.
+- **Failure alert.** The last step, `if: failure()` and `continue-on-error` (it can never cost a commit or the deploy),
+  runs `scripts/ci/bot_alert.py`: when this scheduled run and the scheduled run before it both failed (cancelled,
+  queued and manual runs are passed over), it comments on the open issue labelled `bot-failure`, or opens one. One
+  open issue at most; closing it re-arms the alert. The workflow has `issues: write` and `actions: read` for it.
+- **Deploy streak.** Before the run's freeze, `scripts/ci/deploy_streak.py` reads the deploy commits on gh-pages
+  (`Deploy session <s> from ...`; commit messages only, fetched with `--filter=tree:0` into a scratch repository) and
+  writes `.deploy-streak.json` (gitignored): consecutive NYSE sessions with a deploy, across weekends and holidays,
+  before this build. The Overview's pipeline panel prints it; a local or CI freeze has no file and no row.
+
 ## Lint and type gates
 
 `scripts/ci/baseline_gate.py` runs `python -m ruff` / `python -m mypy` (the locked versions), counts findings per

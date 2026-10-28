@@ -183,6 +183,7 @@
         <tr><th scope="row">Surface reports</th><td>{{ pl.surface_sessions|length }} sessions{% if pl.surface_sessions %}, {{ pl.surface_sessions[0] }} → {{ pl.surface_sessions[-1] }}{% endif %}</td></tr>
         <tr><th scope="row">Calibration diagnostics</th><td>{{ pl.diag_sessions|length }} sessions (σ profile, identifiability, rough Heston)</td></tr>
         <tr><th scope="row">Forward ledger</th><td>{% if pl.forward and pl.forward.state == 'ok' %}{{ pl.forward.n|plural('session') }}, {{ pl.forward.first }} → {{ pl.forward.last }}{% else %}{{ pl.forward_pending }}{% endif %}</td></tr>
+        {% if pl.deploys %}<tr id="deploy-streak"><th scope="row">Deployed (gh-pages)</th><td>{{ pl.deploys.streak|plural('consecutive NYSE session') }}, {{ pl.deploys.first }} → {{ pl.deploys.through }}</td></tr>{% endif %}
         <tr><th scope="row">Backtest window</th><td>ends {{ chrome.sources|selectattr('short', 'equalto', 'BACKTEST')|map(attribute='date')|first|fmt }}, fixed (mark-to-model)</td></tr>
       </tbody>
     </table>
