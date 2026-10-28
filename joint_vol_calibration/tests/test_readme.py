@@ -713,3 +713,23 @@ def test_validation_pack_counts_and_outcomes_are_the_artifacts():
     # §4 copies no monitoring status the daily job changes
     mon = PACK.split("## 4. Ongoing monitoring")[1].split("## 5.")[0]
     assert not re.search(r"\b\d+ of the \d+ checks breach", mon)
+
+
+def test_ui_plan_marks_its_withdrawn_acceptance_text_as_history():
+    """HANDOFF D: docs/roadmap/ui_plan.json still read 'the tile shows 95.0' as
+    P2.5's acceptance after R3-T4 withdrew that number (a single bad Yahoo quote,
+    not executable arbitrage). The plan is history: a superseded acceptance line
+    is marked, its item says why in a history_note, and the withdrawal it cites
+    is in the corrections register."""
+    plan = json.loads((ROOT / "docs" / "roadmap" / "ui_plan.json").read_text())
+    items = {i["id"]: i for pk in plan["packages"] for i in pk["items"]}
+    p25 = items["P2.5"]
+    line = next(x for x in p25["acceptance"].splitlines() if "95.0" in x)
+    assert "[Superseded, see history_note]" in line
+    assert "3da6928" in p25["history_note"]
+    for item in items.values():
+        if "[Superseded" in item.get("acceptance", ""):
+            assert item.get("history_note"), item["id"]
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    shas = [c for r in reg["rounds"] for c in r["commits"]]
+    assert any(c.startswith("3da6928") for c in shas)
