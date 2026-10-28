@@ -53,11 +53,11 @@ MINUS = "−"
 WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
 
 
-def _result_sessions() -> tuple[str, ...]:
-    """Every stored session in the span the README's results state, with a surface
-    scorecard and a model_version 2 fit."""
-    m = re.search(r"accepted fit, (\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", FIRST_SCREEN)
-    assert m, "the results do not state the span of their sessions"
+def _result_sessions(text: str) -> tuple[str, ...]:
+    """Every stored session in the span ``text`` states ('... an accepted fit,
+    <first> → <last>'), with a surface scorecard and a model_version 2 fit."""
+    m = re.search(r"accepted fit, (\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", text)
+    assert m, "the text does not state the span of its sessions"
     out = []
     for d in sorted((DATA / "surface").iterdir()):
         s = d.name
@@ -72,8 +72,10 @@ def _result_sessions() -> tuple[str, ...]:
     return tuple(out)
 
 
-RESULT_SESSIONS = _result_sessions()
+RESULT_SESSIONS = _result_sessions(FIRST_SCREEN)
 LAST = RESULT_SESSIONS[-1]
+PACK_RAW = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+PACK = " ".join(PACK_RAW.split())
 
 
 def _cal(s: str) -> dict:
@@ -623,3 +625,91 @@ def test_citation_is_this_version():
     assert README_RAW.splitlines()[0] == f"# {title}"
     assert "no release tag" in " ".join(cff.split())       # nothing claims a tag or DOI that does not exist
     assert "doi" not in cff.lower()
+
+
+def _pack_row(model: str, outcome: str) -> str:
+    """The validation pack's §3 outcome row of ``model`` whose outcome cell starts with ``outcome``."""
+    rows = [x for x in PACK_RAW.splitlines() if x.startswith(f"| {model} | {outcome}")]
+    assert len(rows) == 1, (model, outcome, rows)
+    return rows[0]
+
+
+def test_validation_pack_counts_and_outcomes_are_the_artifacts():
+    """VALIDATOR-10: the validation pack was frozen at five sessions ('σ on its
+    2.0 box ceiling in 2 of 5', 'rough lower on 3 of 5', '32–80% inside', 'cond
+    150–293', 'no entry committed yet', '5 of the 13 checks breach … 7.46 vol pts')
+    and disagreed with the site. It now states the span of its sessions; every
+    count, range and §3 outcome row it touches is recomputed here from data_store
+    over the sessions in that span, and it copies no monitoring status."""
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    sessions = _result_sessions(PACK)
+    n, w, last = len(sessions), WORDS.get(len(sessions), len(sessions)), sessions[-1]
+    cals = {s: _cal(s) for s in sessions}
+    rows = {r["session"]: r for r in json.loads(
+        (DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]}
+    diag = [rows[s] for s in sessions]
+    sc = {s: {m["model"]: m for m in json.loads((DATA / "surface" / s / "scorecard.json").read_text())
+              ["models"]} for s in sessions}
+    assert f"the {w} sessions with a stored chain and an accepted fit, {sessions[0]} → {last}" in PACK
+    # §1 limitations
+    capped = [s for s, c in cals.items() if "sigma" in (c.get("pinned_params") or [])]
+    cap = HESTON_BOUNDS["sigma"][1]
+    params = [c["params"] for c in cals.values()]
+    feller = sum(2 * q["kappa"] * q["theta"] < q["sigma"] ** 2 for q in params)
+    assert (f"σ on its {cap:.1f} box ceiling in {len(capped)} of the {n} fits to {last} "
+            f"({', '.join(capped)}); Feller violated in all {feller}") in PACK
+    assert feller == n
+    half = sum(r["joint_rough_H"] >= 0.5 - 1e-9 for r in diag)
+    assert f"½ on {half} of the {n} sessions to {last}" in PACK
+    ledgers = sorted(p.stem.removeprefix("ledger_") for p in (DATA / "forward").glob("ledger_*.json"))
+    if ledgers:
+        assert f"first entry {ledgers[0]}, not yet evidence" in PACK
+        assert "no entry" not in PACK
+        assert f"first entry {ledgers[0]} (`data_store/forward/`)" in _pack_row("M18", "Forward test")
+    # §2: identifiability over the sessions, the common held-out counts, the replication's departures
+    cond = rng((r["rel_jtj_condition_number"] for r in diag), ".0f")
+    assert f"cond(JᵀJ) of the relative-sensitivity Jacobian is {cond} over the {w} sessions to {last}" in PACK
+    se = {k: rng((r["relative_standard_errors"][k] * 100 for r in diag), ".0f")
+          for k in ("kappa", "theta", "rho", "v0")}
+    assert f"κ {se['kappa']}%, θ {se['theta']}%, ρ {se['rho']}%, v₀ {se['v0']}%" in PACK
+    assert f"Gauss–Newton errors of {se['kappa']}% on κ" in PACK
+    common = " / ".join(f"{sc[s]['svi_cal']['metrics']['common_out_of_sample']['n']:,}" for s in sessions)
+    assert f"{common} quotes, {sessions[0]} → {last}" in PACK
+    vr = json.loads((DATA / "surface" / last / "vix_replication.json").read_text())
+    assert (f"on {last}, {len(vr.get('deviations') or [])} deviations from Cboe's rules and "
+            f"{len(vr.get('gap_notes') or [])} notes on the gap") in PACK
+    assert "(Cboe rules)" not in PACK
+    assert "with Cboe's rules" not in PACK
+    # §3 outcome rows
+    oos = " / ".join(fmt(c["leg_losses"]["spx_oos_iv_rmse"], ".2f") for c in cals.values())
+    dates = " / ".join([sessions[0], *(s[5:] for s in sessions[1:])])
+    assert f"| {oos} vp for {dates} (" in _pack_row("M4", "Out-of-sample SPX IV RMSE")
+    assert f", {w} v2 sessions |" in _pack_row("M4", "Out-of-sample SPX IV RMSE")
+    hes = [sc[s]["heston_v2"]["metrics"]["out_of_sample"] for s in sessions]
+    assert (f"{rng((h['median_abs_hs'] for h in hes), '.1f')} half-spreads; "
+            f"{rng((h['inside_spread_pct'] for h in hes), '.1f')}% inside, {w} sessions"
+            ) in _pack_row("M4", "Error in")
+    svi = {s: sc[s]["svi_cal"]["metrics"]["out_of_sample"] for s in sessions}
+    row = _pack_row("M14", "The certified")
+    assert (f"median {rng((o['median_abs_hs'] for o in svi.values()), '.2f')} half-spreads; "
+            f"{rng((o['inside_spread_pct'] for o in svi.values()), '.0f')}% inside the bid/ask, {w} sessions "
+            f"({last}: {fmt(svi[last]['median_abs_hs'], '.2f')}, "
+            f"{fmt(svi[last]['inside_spread_pct'], '.1f')}%)") in row
+    arb = [json.loads((DATA / "surface" / s / "surface.json").read_text())["arbitrage"] for s in sessions]
+    assert all(a["executable_arbitrage_certificate"]["executable_arbitrage"] for a in arb)
+    n_ex = rng((a["n_quotes_in_executable_violation"] for a in arb), ",d")
+    assert (f"executable at the bid/ask on all {n} sessions; {n_ex} quotes per session"
+            in _pack_row("M14", "Static arbitrage"))
+    idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
+    rep_ = " / ".join(fmt(idx[s]["vix_replicated"], ".2f") for s in sessions)
+    off = " / ".join(fmt(idx[s]["vix_official"], ".2f") for s in sessions)
+    assert f"| {rep_} against {off} (" in _pack_row("M14", "VIX replicated")
+    lower = [r for r in diag if r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01]
+    pairs = ", ".join(f"{fmt(r['joint_rough_oos'], '.2f')} vs {fmt(r['sigma_cap2_oos'], '.2f')}"
+                      for r in lower)
+    assert (f"rough lower on {len(lower)} of {n} sessions ({pairs} vp); H = ½, identical, on {half}"
+            in _pack_row("M4, M15", "Rough Heston"))
+    # §4 copies no monitoring status the daily job changes
+    mon = PACK.split("## 4. Ongoing monitoring")[1].split("## 5.")[0]
+    assert not re.search(r"\b\d+ of the \d+ checks breach", mon)

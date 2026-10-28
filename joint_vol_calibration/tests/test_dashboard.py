@@ -4753,6 +4753,16 @@ def test_quintic_stop_reason_is_the_fits_own(dash, pages):
     assert "iteration limits without" not in text
 
 
+def test_model_risk_links_the_validation_pack(pages):
+    """VALIDATOR-10: Model Risk named 'docs/model_validation/README.md §1' as
+    plain text and no page linked the validation pack; the page header links it."""
+    a = re.search(r'<a id="validation-pack-link" href="([^"]+)"', pages["/model-risk"])
+    assert a
+    assert a.group(1).endswith("/docs/model_validation/README.md")
+    assert (ROOT / "docs" / "model_validation" / "README.md").exists()
+    assert a.group(1).startswith("https://github.com/navnoorthapar/vol-system-dashboard/")
+
+
 def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
     """P1.3e: the first Overview result read 'Quote-grade surface · held-out
     strikes'; it is the arbitrage-free SVI surface with alternate strikes held
