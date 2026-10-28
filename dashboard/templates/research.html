@@ -33,7 +33,7 @@
 
 <div class="page-head">
   <h1 class="page-title">Research · delta-hedged straddle backtest, <span class="nowrap">{{ d.start_date|fmt }} → {{ d.end_date|fmt }}</span>{% if d.eq_dates %} ({{ "{:,}".format(d.eq_dates|length) }} sessions){% endif %}</h1>
-  <p class="page-sub">Equal-weight S1C + S3 + S4 sleeves on $1M of collateral, after every correction from C16 to C23. A documented negative result.</p>
+  <p class="page-sub">Equal-weight S1C + S3 + S4 sleeves on $1M of collateral, after every correction round from C16 on. A documented negative result.</p>
   <div class="page-badge">
     {% if d.final_nav is not none %}<span class="nowrap">Final NAV ${{ "{:,.0f}".format(d.final_nav) }}</span><span class="sep">·</span><span class="nowrap">P&amp;L {{ d.total_pnl|usd(true) }}</span><span class="sep">·</span><span class="nowrap">straddles marked at ATM vol = {{ beta_txt }} × VIX</span>{% else %}NAV —{% endif %}
   </div>
@@ -320,7 +320,7 @@
       <p><strong>{{ sleeve_labels.s1 }}</strong>, the PDV short-VRP reference strategy: {{ s1t.get('n_short')|fmt }} of {{ s1t.get('n')|fmt }} trades are short straddles sold in R1; worst trade {{ s1t.get('worst_pnl')|usd_k }} ({{ s1t.get('worst_entry')|fmt }} → {{ s1t.get('worst_exit')|fmt }}). Selling straddles at the VIX books the skew premium as profit.</p>
       <p><strong>{{ sleeve_labels.s1c }}</strong> flipped S1's direction on the premise that S1 lost both ways; C18 showed that premise was the bug. It stays a sleeve because the portfolio's composition is held fixed across correction rounds so they remain comparable. <strong>{{ sleeve_labels.s4 }}</strong> enters on z_vrp declining from a peak; its P&amp;L on {{ yrs }} is {{ s4.get('total_pnl')|usd_k }}.</p>
       <p>Stress windows, each measured from the close before it opens: {% for c in d.crisis %}{{ c.name|replace('_', ' ') }} ({{ c.start|fmt }} → {{ c.end|fmt }}) {{ c.total_return|pct }}{{ '; ' if not loop.last else '' }}{% endfor %}. {% if d.end_date and d.end_date < '2025-04-02' %}The backtest ends {{ d.end_date }}, so the April 2025 tariff shock is <em>not</em> in it, and this is no evidence of resilience to it.{% endif %}</p>
-      <p>The C16–C23 corrections, each with its root cause, fix, tests and effect, are on the {{ m.cite('Corrections', 'corrections.html#register') }} page.</p>
+      <p>The corrections from C16 on, each with its root cause, fix, tests and effect, are on the {{ m.cite('Corrections', 'corrections.html#register') }} page.</p>
     </div>
     {% endcall %}
   {% endcall %}

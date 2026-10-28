@@ -1,9 +1,9 @@
-# Corrections C16–C23
+# Corrections from C16
 
 Every round of correction since March 2026, as a blameless postmortem: what was wrong, the root cause, how it was
 found, the fix, the regression tests that now pin it, the commits, and what it did to the published result. The
 numbers in each round are the ones published when it closed; the backtest has been re-run against the same window
-(2018-01-02 → 2025-03-24) after every round. Most rounds lowered the published result or removed a thesis; C22 raised
+(2018-01-02 → 2025-03-24) after every round that touched it (C24 corrected claims and secondary numbers only). Most rounds lowered the published result or removed a thesis; C22 raised
 the portfolio from −26.1% to −21.6% while turning S1's profit into a loss, and no round restored a positive return.
 
 The rounds below are rendered from `dashboard/corrections.json` by `scripts/render_corrections.py`, the same registry
@@ -13,7 +13,7 @@ the generated block keep the longer explanations that used to sit in the README.
 
 <!-- BEGIN GENERATED: scripts/render_corrections.py -->
 
-C16–C23: 8 rounds, 33 findings (30 fixed, 3 quantified), 64 regression tests cited. Rendered from `dashboard/corrections.json`, the registry the site's Corrections page reads.
+C16–C24: 9 rounds, 41 findings (38 fixed, 3 quantified), 79 regression tests cited. Rendered from `dashboard/corrections.json`, the registry the site's Corrections page reads.
 
 | Round | Date | Severity | Title | Effect on the published result |
 |---|---|---|---|---|
@@ -25,6 +25,7 @@ C16–C23: 8 rounds, 33 findings (30 fixed, 3 quantified), 64 regression tests c
 | [C21](#c21) | 2026-09-05 | high | The cash hurdle was a test fixture; straddles marked a day too rich | Portfolio −19.0% → −26.1%, Sharpe −1.57 → −1.80, MaxDD −25.9% → −31.5%; S1 +$463K → +$694K, S1C −$404K → −$600K. |
 | [C22](#c22) | 2026-10-12 → 2026-10-19 | high | Full-system audit: pricing at the VIX, free hedging, two R2 gates, a z-score P&L | Portfolio P&L −$261,206 (C21 as published) → −$216,092 (NAV $783,908), Sharpe −1.80 → −0.88, max drawdown −31.5% → −21.6%, as published in C22; S1 +$693,938 → −$287,644. Its 15-step waterfall is replayed today on the C23-restated VIX record, so it ends at the C23 canonical run. |
 | [C23](#c23) | 2026-10-20 → 2026-10-21 | high | Vendor data, the calibration's identification, spread-unit evidence and statistical inference | Portfolio P&L −$216,092 → −$222,177, Sharpe −0.88 → −0.99 (C23 waterfall, data_store/backtest/c23_bridge.csv: 8 VVIX sessions from Cboe −$6,502; 136 Cboe values +$417); 6 of 4,162 rule labels move; the portfolio Sharpe's 95% bootstrap interval is −1.81 to −0.30. The headline Heston fit is unchanged, now reported with its σ profile and rough Heston beside it. The review round (finding 11) corrected published claims without moving a headline number. |
+| [C24](#c24) | 2026-10-27 → 2026-10-28 | medium | Published claims and secondary numbers the round-3 review and the fund-grade audit found wrong | No backtest number moved (no bridge row; portfolio P&L and Sharpe unchanged). Withdrawn or corrected: a 95.0 idx pt 'executable arbitrage' tile, a double-rounded fit tile, the 'Cboe rules' replication claim, 99 smile-table cells, four contradictory chain-provenance labels, typed inventory, caption, README and validation-pack facts, and BREACH rows that were permanent by design. |
 
 ### C16
 
@@ -372,6 +373,86 @@ The C23 waterfall: the published C22 run restated row by row on the Cboe record 
 - Effect on the published result: no headline number moved; the surface, ledger, Risk-page and inference claims now hold
 - Commits: [`d63b797`](https://github.com/navnoorthapar/vol-system-dashboard/commit/d63b7976f73d33d978baabf4711956e0d303d51d), [`59e73b1`](https://github.com/navnoorthapar/vol-system-dashboard/commit/59e73b1056b206532d14737285f086e7c909aa28), [`dd4dc01`](https://github.com/navnoorthapar/vol-system-dashboard/commit/dd4dc019ff1b14253a2f97990da877ecfec97aad), [`b69eb45`](https://github.com/navnoorthapar/vol-system-dashboard/commit/b69eb451c39fa1778e2f6f892343a550ea78a05b), [`1a4ca03`](https://github.com/navnoorthapar/vol-system-dashboard/commit/1a4ca03f1edbc58d26553a18a1bee3e1e8b61100)
 - Pinned by: `joint_vol_calibration/tests/test_surface_svi.py::test_butterfly_certificate_finds_the_dip_between_grid_nodes`, `joint_vol_calibration/tests/test_surface_svi.py::test_ordering_certificate_catches_crossings_the_check_grid_missed`, `joint_vol_calibration/tests/test_forward_ledger.py::test_a_book_without_the_expiry_defers_the_close_to_the_next_book_that_has_it`, `joint_vol_calibration/tests/test_dashboard.py::test_risk_delta_grid_is_the_otm_options_forward_delta`, `joint_vol_calibration/tests/test_stats_inference_report.py::test_every_pbo_is_reported_with_its_basis`, `joint_vol_calibration/tests/test_dashboard.py::test_corrections_trend_sentence_agrees_with_the_published_series`
+
+### C24
+
+**Published claims and secondary numbers the round-3 review and the fund-grade audit found wrong** · 2026-10-27 → 2026-10-28 · severity medium · components: surface, calibration, dashboard, data layer, documentation
+
+- **Detection.** The round-3 critics on the 2026-10-26 site (R3-*), then the tier-0 recompute audit (scripts/ci/recompute_audit.py, which recomputes every Overview and Surface number from data_store by an independent path) and four independent reviewers of the same build (VALIDATOR, QUANT, CODE, CIO and CITSEC findings).
+- **Effect on the published result.** No backtest number moved (no bridge row; portfolio P&L and Sharpe unchanged). Withdrawn or corrected: a 95.0 idx pt 'executable arbitrage' tile, a double-rounded fit tile, the 'Cboe rules' replication claim, 99 smile-table cells, four contradictory chain-provenance labels, typed inventory, caption, README and validation-pack facts, and BREACH rows that were permanent by design.
+- **Commits.** [`2be8a19`](https://github.com/navnoorthapar/vol-system-dashboard/commit/2be8a194da2090f1cc86d0b1a0b168c01291f8d0), [`3da6928`](https://github.com/navnoorthapar/vol-system-dashboard/commit/3da69288a976f6417c920fbc114b99c81d488adb), [`ff13c30`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ff13c309d61bba726d43ea2cb46de7635e536851), [`53f1f16`](https://github.com/navnoorthapar/vol-system-dashboard/commit/53f1f168f17a96ef9fe53acc2c9195c20938666b), [`39cd713`](https://github.com/navnoorthapar/vol-system-dashboard/commit/39cd7139ae5e78276ce154290be1f392a1df580b), [`7e6b34b`](https://github.com/navnoorthapar/vol-system-dashboard/commit/7e6b34b7eb8a9b4fc21b26c2b4029a2cac1b9959), [`bd49907`](https://github.com/navnoorthapar/vol-system-dashboard/commit/bd4990774c14425c30907829672b51066ed2705b), [`789d171`](https://github.com/navnoorthapar/vol-system-dashboard/commit/789d171c785e12fe8eeb99c8da492d3bedfd5ee0), [`ddc86e8`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ddc86e890792b10885c1fed34810ef37458cdbf5), [`39188a5`](https://github.com/navnoorthapar/vol-system-dashboard/commit/39188a567eb4b9dfba6e69e5d98154e6eadeb690), [`993788d`](https://github.com/navnoorthapar/vol-system-dashboard/commit/993788ddd45efdc9d9506a25e713a1b179f72188)
+
+**Finding 1 [C24-A1] (fixed): The Surface tile published one bad Yahoo quote as executable static arbitrage**
+
+- Root cause: The tile headlined the largest mid violation of the screen, 95.0 idx pts ($9,497 per contract) on a 5-point 2027-03-31 P 6260/6265 vertical: P6265 quoted 151.4/154.1 between P6260 and P6270 near 54 and 63, a price no real book produces. 24 of the 25 largest-violation rows were tagged 'executable', and Model Risk V1 carried the same label.
+- Fix: A listed violation larger than its widest adjacent strike gap is flagged as a single-quote outlier and names the leg it shares; the tile is 'Quotes failing static arbitrage at bid/ask', counts the outlier rows apart and headlines the largest row without an outlier leg; Model Risk V1's note counts them apart from the share.
+- Evidence: Surface on 2026-10-26: 'Largest mid violation 95.0 idx pts ($9,497 per contract)' withdrawn; the screen's share is reported with the single-quote outliers named (R3-T4, R3-D1)
+- Effect on the published result: a published 'executable arbitrage' of 95.0 idx pts withdrawn; no backtest number moved
+- Commits: [`3da6928`](https://github.com/navnoorthapar/vol-system-dashboard/commit/3da69288a976f6417c920fbc114b99c81d488adb)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them`, `joint_vol_calibration/tests/test_dashboard.py::test_bad_quote_flag_names_the_leg_the_impossible_rows_share`, `joint_vol_calibration/tests/test_dashboard.py::test_model_risk_v1_counts_the_single_quote_outliers_apart`
+
+**Finding 2 [C24-T1] (fixed): Fit tiles rounded twice and printed a number one unit off**
+
+- Root cause: load_page2 pre-rounded the fit losses to .3f and the tiles printed them at .2f, so the 2026-10-26 put-wing out-of-sample RMSE 2.30497 became 2.305 and printed 2.31 beside its own rank range (2.30).
+- Fix: The losses reach the templates unrounded and are rounded once, at display.
+- Evidence: Calibration on 2026-10-26: put-wing OOS RMSE 2.31 → 2.30 (the presentation gate failed the bot's deploy on it)
+- Effect on the published result: one Calibration tile one display unit lower; no backtest number moved
+- Commits: [`2be8a19`](https://github.com/navnoorthapar/vol-system-dashboard/commit/2be8a194da2090f1cc86d0b1a0b168c01291f8d0)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_fit_losses_reach_the_tiles_unrounded`
+
+**Finding 3 [C24-V1] (fixed): The site said the VIX is replicated 'by the Cboe rules' while listing the departures**
+
+- Root cause: The Overview's 'Works' line and the Model Risk V1 note were written before Surface listed where the replication departs from Cboe (Treasury rate for the CMT spline, no quote time, a parity-regression forward, SPXW PM lines for AM monthlies, ...).
+- Fix: Both say 'the Cboe formula, with N listed departures (Surface)', N counted as the Surface list counts them.
+- Evidence: Overview and Model Risk: 'Cboe rules' withdrawn on every page; the validation pack says the same (C24-I1)
+- Effect on the published result: a published methodology claim corrected; no number moved
+- Commits: [`ff13c30`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ff13c309d61bba726d43ea2cb46de7635e536851)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures`
+
+**Finding 4 [C24-M1] (fixed): The smile tables printed model medians of pre-rounded vols**
+
+- Root cause: Each model column of the Surface smile slice's per-expiry tables took the median of IVs already rounded to 0.01 vol pts, so where an even bucket's middle pair straddled a rounding step the cell was one display unit off.
+- Fix: The model medians are taken from the unrounded IVs, as the bid, mid and ask columns already were. Found by the independent recompute audit (scripts/ci/recompute_audit.py).
+- Evidence: 99 of 796 model cells on 2026-10-26 one display unit off (2027-11-19, Heston, ln(K/F) −0.20…−0.14: median of 22.2606 and 22.7291 is 22.4948, printed 22.50)
+- Effect on the published result: 99 table cells move by 0.01 vol pts; no backtest number moved
+- Commits: [`7e6b34b`](https://github.com/navnoorthapar/vol-system-dashboard/commit/7e6b34b7eb8a9b4fc21b26c2b4029a2cac1b9959)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_smile_slice_tables_take_medians_of_unrounded_model_ivs`
+
+**Finding 5 [C24-D1] (fixed): A build from a clean checkout rendered the stale database cache, not the committed record**
+
+- Root cause: data_store/vol_system.db is tracked but the daily job never commits it: each run upserts the committed parquet record into it before rendering. A clean checkout (make freeze, CI, a reviewer's build) rendered the cache as last committed, so its site differed from the deployed one.
+- Fix: app.record_db() copies the cache to a scratch file, upserts the record into it exactly as the job does, and every loader reads the copy; freeze_site.py and the presentation tests render inside it; the tracked cache is never written.
+- Evidence: A clean checkout showed SPX and VIX one session old, a false STALE FORECAST banner, the β monitor in BREACH where the deployed page said WATCH, and VX-lag counts of 11 and 12 on different pages; the deployed site, which the job renders after its upsert, was not affected
+- Effect on the published result: local, CI and reviewer builds now match the deployed site; no published number moved
+- Commits: [`53f1f16`](https://github.com/navnoorthapar/vol-system-dashboard/commit/53f1f168f17a96ef9fe53acc2c9195c20938666b)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_a_clean_checkout_renders_the_committed_record_not_the_stale_cache`
+
+**Finding 6 [C24-P1] (fixed): Four pages described one Yahoo download four different ways, none true**
+
+- Root cause: The job stamped the Yahoo download instant into the chain's quote_time, so 2026-10-26 read 'close snapshot · quotes at 2026-10-27 05:26:50Z' on Surface, 'Quotes as of 2026-10-27T05:26:50Z' on the Overview, 'a close snapshot with no quote time' on Calibration and 'Yahoo quotes carry no quote time' on Model Risk.
+- Fix: chain_provenance() reads the surface report's inputs once and every label goes through it: a Yahoo chain is 'Yahoo Finance download · fetched <time> UTC; Yahoo reports no quote times, T measured from the fetch'; 'quotes at' is kept for books that record quote times (Cboe).
+- Evidence: 2026-10-26 chain: 'quotes at 2026-10-27 05:26:50Z' and 'close snapshot' withdrawn on Surface, Overview, Calibration and Model Risk
+- Effect on the published result: provenance claims corrected on four pages; no number moved
+- Commits: [`39cd713`](https://github.com/navnoorthapar/vol-system-dashboard/commit/39cd7139ae5e78276ce154290be1f392a1df580b)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot`
+
+**Finding 7 [C24-I1] (fixed): Typed text on the site, the README and the validation pack stated facts the data contradict**
+
+- Root cause: Counts, sessions and states were typed into prose that the daily job outgrew: Model Risk's inventory said 'σ sits on its box ceiling in 2 of 5 fits' (six are stored), 'the vomma shock is sized from the fitted σ, on its 2.0 cap in the headline fit' (σ 1.833, interior) and 'No entry committed yet' (a forward-ledger entry is committed); Calibration's #oos caption named 'σ on its box ceiling' under an interior fit; the README led with the near-best 2026-10-16 session (0.55 half-spreads, 80.0% inside) and 'no ledger entry'; the validation pack was frozen at five sessions.
+- Fix: Every changing fact in the inventory prose is a placeholder computed from its artifact (desk_inventory.py) under a guard that refuses typed counts, dates, bound claims and 'not yet'; the Calibration captions are conditional on the fit's own values; the README and the pack lead with the range over the sessions they name, each checked against data_store by test_readme.py.
+- Evidence: Model Risk M4 '2 of 5' → '2 of 6 gate-passing fits (2026-03-24, 2026-10-16)'; M6 'on its 2.0 cap' → '1.83 … inside its box'; M18 'No entry committed yet' → '1 session registered (2026-10-26)'; README result 1 '0.55 half-spreads (80.0% inside)' → '0.45–1.98 half-spreads, 31.0–80.0% inside (2026-10-26: 1.60, 31.0% inside)' (VALIDATOR-04, VALIDATOR-06, VALIDATOR-09, VALIDATOR-10, CODE-03, CODE-04, CIO-04, CIO-05, QUANT-05, CITSEC-13)
+- Effect on the published result: published claims corrected on Model Risk, Calibration, the README and the validation pack; no number moved
+- Commits: [`bd49907`](https://github.com/navnoorthapar/vol-system-dashboard/commit/bd4990774c14425c30907829672b51066ed2705b), [`789d171`](https://github.com/navnoorthapar/vol-system-dashboard/commit/789d171c785e12fe8eeb99c8da492d3bedfd5ee0), [`ddc86e8`](https://github.com/navnoorthapar/vol-system-dashboard/commit/ddc86e890792b10885c1fed34810ef37458cdbf5), [`39188a5`](https://github.com/navnoorthapar/vol-system-dashboard/commit/39188a567eb4b9dfba6e69e5d98154e6eadeb690)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_inventory_prose_states_no_fact_the_data_can_change`, `joint_vol_calibration/tests/test_dashboard.py::test_inventory_facts_are_the_artifacts`, `joint_vol_calibration/tests/test_dashboard.py::test_oos_caption_matches_the_headline_fit`, `joint_vol_calibration/tests/test_readme.py::test_result_2_joint_calibration_heston_and_rough`, `joint_vol_calibration/tests/test_readme.py::test_validation_pack_counts_and_outcomes_are_the_artifacts`
+
+**Finding 8 [C24-S1] (fixed): Half the Model Risk breaches were permanent by design, and most production models had no check**
+
+- Root cause: The research classifier (below persistence by design, it never trades) and the VX futures table (the daily job does not refresh it) were BREACH every session; 8 of 12 production models had no check and the page did not say so; the dashboard's own models that publish numbers were not in the inventory.
+- Fix: A watch or breach of a research-tier model, or of a check whose cause is structural, carries the status BY DESIGN with its reason, after the live statuses; M14, M18 and M19 gained checks, every other production model states why it has none, and the density, desk coordinates and vol cone are in the inventory (M21–M23).
+- Evidence: Model Risk on the 2026-10-26 record: 4 BREACH → 2 live BREACH (Heston's half-spread error, β drift) and 2 BY DESIGN (M5 VX lag, M11 classifier) (CIO-14, VALIDATOR-12, VALIDATOR-13)
+- Effect on the published result: the breach count reads only live breaches; no number moved
+- Commits: [`993788d`](https://github.com/navnoorthapar/vol-system-dashboard/commit/993788ddd45efdc9d9506a25e713a1b179f72188)
+- Pinned by: `joint_vol_calibration/tests/test_dashboard.py::test_by_design_breaches_are_apart_from_live_ones`, `joint_vol_calibration/tests/test_dashboard.py::test_every_production_model_names_its_checks_or_why_it_has_none`
 
 <!-- END GENERATED -->
 

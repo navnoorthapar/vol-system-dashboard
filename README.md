@@ -36,7 +36,7 @@ independent validation.
 
 **Links.** [Live dashboard](https://navnoorbawa.me) · [Docs](docs/README.md) ·
 [Validation pack](docs/model_validation/README.md) · [Reproduce](docs/reproduce.md) ·
-[Corrections C16–C23](docs/corrections.md) · [What free resources reach](docs/free_resources_scorecard.md) ·
+[Corrections](docs/corrections.md) · [What free resources reach](docs/free_resources_scorecard.md) ·
 [Install](docs/install.md) · [Cite](CITATION.cff)
 
 ---

@@ -1,8 +1,8 @@
 {
-  "about": "Correction rounds C16-C23 in postmortem form (root cause, detection, fix, regression tests, evidence). Evidence before C22 is the effect published when each fix landed; C22 evidence is computed at build time from data_store/backtest/c22_bridge.csv (replayed on the C23-restated VIX record), the β grid and the stored run; C23 evidence is quoted from the committed C23 artifacts named in each finding. A round may span days (date to date_end). 'models' are the validation pack's inventory IDs (docs/model_validation/README.md §1); a finding may carry its own id, models, severity, dates, commits and effect, and the pack's findings log (§6) is rendered from this file too. docs/corrections.md is rendered from this file (scripts/render_corrections.py). test_dashboard.py checks that every listed test exists in the suite and every commit is a full SHA dated inside its round.",
+  "about": "Correction rounds from C16 on, in postmortem form (root cause, detection, fix, regression tests, evidence). Evidence before C22 is the effect published when each fix landed; C22 evidence is computed at build time from data_store/backtest/c22_bridge.csv (replayed on the C23-restated VIX record), the β grid and the stored run; C23 evidence is quoted from the committed C23 artifacts named in each finding. A round may span days (date to date_end). 'models' are the validation pack's inventory IDs (docs/model_validation/README.md §1); a finding may carry its own id, models, severity, dates, commits and effect, and the pack's findings log (§6) is rendered from this file too. docs/corrections.md is rendered from this file (scripts/render_corrections.py). test_dashboard.py checks that every listed test exists in the suite and every commit is a full SHA dated inside its round.",
   "repo": "https://github.com/navnoorthapar/vol-system-dashboard",
   "headline_series": {
-    "about": "Portfolio cumulative return as published after each round; C16 published no portfolio figure; C23 from the stored canonical run.",
+    "about": "Portfolio cumulative return as published after each round; C16 published no portfolio figure; C23 from the stored canonical run; C24 changed no portfolio figure.",
     "points": [
       {
         "round": "C17",
@@ -758,6 +758,235 @@
         "M10",
         "M14",
         "M17",
+        "M18",
+        "M19"
+      ]
+    },
+    {
+      "id": "C24",
+      "date": "2026-10-27",
+      "date_end": "2026-10-28",
+      "severity": "medium",
+      "title": "Published claims and secondary numbers the round-3 review and the fund-grade audit found wrong",
+      "components": [
+        "surface",
+        "calibration",
+        "dashboard",
+        "data layer",
+        "documentation"
+      ],
+      "detection": "The round-3 critics on the 2026-10-26 site (R3-*), then the tier-0 recompute audit (scripts/ci/recompute_audit.py, which recomputes every Overview and Surface number from data_store by an independent path) and four independent reviewers of the same build (VALIDATOR, QUANT, CODE, CIO and CITSEC findings).",
+      "commits": [
+        "2be8a194da2090f1cc86d0b1a0b168c01291f8d0",
+        "3da69288a976f6417c920fbc114b99c81d488adb",
+        "ff13c309d61bba726d43ea2cb46de7635e536851",
+        "53f1f168f17a96ef9fe53acc2c9195c20938666b",
+        "39cd7139ae5e78276ce154290be1f392a1df580b",
+        "7e6b34b7eb8a9b4fc21b26c2b4029a2cac1b9959",
+        "bd4990774c14425c30907829672b51066ed2705b",
+        "789d171c785e12fe8eeb99c8da492d3bedfd5ee0",
+        "ddc86e890792b10885c1fed34810ef37458cdbf5",
+        "39188a567eb4b9dfba6e69e5d98154e6eadeb690",
+        "993788ddd45efdc9d9506a25e713a1b179f72188"
+      ],
+      "effect": "No backtest number moved (no bridge row; portfolio P&L and Sharpe unchanged). Withdrawn or corrected: a 95.0 idx pt 'executable arbitrage' tile, a double-rounded fit tile, the 'Cboe rules' replication claim, 99 smile-table cells, four contradictory chain-provenance labels, typed inventory, caption, README and validation-pack facts, and BREACH rows that were permanent by design.",
+      "findings": [
+        {
+          "flaw": "The Surface tile published one bad Yahoo quote as executable static arbitrage",
+          "status": "fixed",
+          "root_cause": "The tile headlined the largest mid violation of the screen, 95.0 idx pts ($9,497 per contract) on a 5-point 2027-03-31 P 6260/6265 vertical: P6265 quoted 151.4/154.1 between P6260 and P6270 near 54 and 63, a price no real book produces. 24 of the 25 largest-violation rows were tagged 'executable', and Model Risk V1 carried the same label.",
+          "fix": "A listed violation larger than its widest adjacent strike gap is flagged as a single-quote outlier and names the leg it shares; the tile is 'Quotes failing static arbitrage at bid/ask', counts the outlier rows apart and headlines the largest row without an outlier leg; Model Risk V1's note counts them apart from the share.",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_arbitrage_tile_names_the_largest_violation_and_the_table_lists_them",
+            "joint_vol_calibration/tests/test_dashboard.py::test_bad_quote_flag_names_the_leg_the_impossible_rows_share",
+            "joint_vol_calibration/tests/test_dashboard.py::test_model_risk_v1_counts_the_single_quote_outliers_apart"
+          ],
+          "evidence": "Surface on 2026-10-26: 'Largest mid violation 95.0 idx pts ($9,497 per contract)' withdrawn; the screen's share is reported with the single-quote outliers named (R3-T4, R3-D1)",
+          "id": "C24-A1",
+          "models": [
+            "M14",
+            "V1"
+          ],
+          "severity": "medium",
+          "date": "2026-10-27",
+          "commits": [
+            "3da69288a976f6417c920fbc114b99c81d488adb"
+          ],
+          "effect": "a published 'executable arbitrage' of 95.0 idx pts withdrawn; no backtest number moved"
+        },
+        {
+          "flaw": "Fit tiles rounded twice and printed a number one unit off",
+          "status": "fixed",
+          "root_cause": "load_page2 pre-rounded the fit losses to .3f and the tiles printed them at .2f, so the 2026-10-26 put-wing out-of-sample RMSE 2.30497 became 2.305 and printed 2.31 beside its own rank range (2.30).",
+          "fix": "The losses reach the templates unrounded and are rounded once, at display.",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_fit_losses_reach_the_tiles_unrounded"
+          ],
+          "evidence": "Calibration on 2026-10-26: put-wing OOS RMSE 2.31 → 2.30 (the presentation gate failed the bot's deploy on it)",
+          "id": "C24-T1",
+          "models": [
+            "M4"
+          ],
+          "severity": "low",
+          "date": "2026-10-27",
+          "commits": [
+            "2be8a194da2090f1cc86d0b1a0b168c01291f8d0"
+          ],
+          "effect": "one Calibration tile one display unit lower; no backtest number moved"
+        },
+        {
+          "flaw": "The site said the VIX is replicated 'by the Cboe rules' while listing the departures",
+          "status": "fixed",
+          "root_cause": "The Overview's 'Works' line and the Model Risk V1 note were written before Surface listed where the replication departs from Cboe (Treasury rate for the CMT spline, no quote time, a parity-regression forward, SPXW PM lines for AM monthlies, ...).",
+          "fix": "Both say 'the Cboe formula, with N listed departures (Surface)', N counted as the Surface list counts them.",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures"
+          ],
+          "evidence": "Overview and Model Risk: 'Cboe rules' withdrawn on every page; the validation pack says the same (C24-I1)",
+          "id": "C24-V1",
+          "models": [
+            "M14",
+            "V1"
+          ],
+          "severity": "medium",
+          "date": "2026-10-27",
+          "commits": [
+            "ff13c309d61bba726d43ea2cb46de7635e536851"
+          ],
+          "effect": "a published methodology claim corrected; no number moved"
+        },
+        {
+          "flaw": "The smile tables printed model medians of pre-rounded vols",
+          "status": "fixed",
+          "root_cause": "Each model column of the Surface smile slice's per-expiry tables took the median of IVs already rounded to 0.01 vol pts, so where an even bucket's middle pair straddled a rounding step the cell was one display unit off.",
+          "fix": "The model medians are taken from the unrounded IVs, as the bid, mid and ask columns already were. Found by the independent recompute audit (scripts/ci/recompute_audit.py).",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_smile_slice_tables_take_medians_of_unrounded_model_ivs"
+          ],
+          "evidence": "99 of 796 model cells on 2026-10-26 one display unit off (2027-11-19, Heston, ln(K/F) −0.20…−0.14: median of 22.2606 and 22.7291 is 22.4948, printed 22.50)",
+          "id": "C24-M1",
+          "models": [
+            "M14"
+          ],
+          "severity": "low",
+          "date": "2026-10-28",
+          "commits": [
+            "7e6b34b7eb8a9b4fc21b26c2b4029a2cac1b9959"
+          ],
+          "effect": "99 table cells move by 0.01 vol pts; no backtest number moved"
+        },
+        {
+          "flaw": "A build from a clean checkout rendered the stale database cache, not the committed record",
+          "status": "fixed",
+          "root_cause": "data_store/vol_system.db is tracked but the daily job never commits it: each run upserts the committed parquet record into it before rendering. A clean checkout (make freeze, CI, a reviewer's build) rendered the cache as last committed, so its site differed from the deployed one.",
+          "fix": "app.record_db() copies the cache to a scratch file, upserts the record into it exactly as the job does, and every loader reads the copy; freeze_site.py and the presentation tests render inside it; the tracked cache is never written.",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_a_clean_checkout_renders_the_committed_record_not_the_stale_cache"
+          ],
+          "evidence": "A clean checkout showed SPX and VIX one session old, a false STALE FORECAST banner, the β monitor in BREACH where the deployed page said WATCH, and VX-lag counts of 11 and 12 on different pages; the deployed site, which the job renders after its upsert, was not affected",
+          "id": "C24-D1",
+          "models": [
+            "V1",
+            "V2",
+            "M7"
+          ],
+          "severity": "low",
+          "date": "2026-10-28",
+          "commits": [
+            "53f1f168f17a96ef9fe53acc2c9195c20938666b"
+          ],
+          "effect": "local, CI and reviewer builds now match the deployed site; no published number moved"
+        },
+        {
+          "flaw": "Four pages described one Yahoo download four different ways, none true",
+          "status": "fixed",
+          "root_cause": "The job stamped the Yahoo download instant into the chain's quote_time, so 2026-10-26 read 'close snapshot · quotes at 2026-10-27 05:26:50Z' on Surface, 'Quotes as of 2026-10-27T05:26:50Z' on the Overview, 'a close snapshot with no quote time' on Calibration and 'Yahoo quotes carry no quote time' on Model Risk.",
+          "fix": "chain_provenance() reads the surface report's inputs once and every label goes through it: a Yahoo chain is 'Yahoo Finance download · fetched <time> UTC; Yahoo reports no quote times, T measured from the fetch'; 'quotes at' is kept for books that record quote times (Cboe).",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot"
+          ],
+          "evidence": "2026-10-26 chain: 'quotes at 2026-10-27 05:26:50Z' and 'close snapshot' withdrawn on Surface, Overview, Calibration and Model Risk",
+          "id": "C24-P1",
+          "models": [
+            "M3",
+            "M14",
+            "V1"
+          ],
+          "severity": "medium",
+          "date": "2026-10-28",
+          "commits": [
+            "39cd7139ae5e78276ce154290be1f392a1df580b"
+          ],
+          "effect": "provenance claims corrected on four pages; no number moved"
+        },
+        {
+          "flaw": "Typed text on the site, the README and the validation pack stated facts the data contradict",
+          "status": "fixed",
+          "root_cause": "Counts, sessions and states were typed into prose that the daily job outgrew: Model Risk's inventory said 'σ sits on its box ceiling in 2 of 5 fits' (six are stored), 'the vomma shock is sized from the fitted σ, on its 2.0 cap in the headline fit' (σ 1.833, interior) and 'No entry committed yet' (a forward-ledger entry is committed); Calibration's #oos caption named 'σ on its box ceiling' under an interior fit; the README led with the near-best 2026-10-16 session (0.55 half-spreads, 80.0% inside) and 'no ledger entry'; the validation pack was frozen at five sessions.",
+          "fix": "Every changing fact in the inventory prose is a placeholder computed from its artifact (desk_inventory.py) under a guard that refuses typed counts, dates, bound claims and 'not yet'; the Calibration captions are conditional on the fit's own values; the README and the pack lead with the range over the sessions they name, each checked against data_store by test_readme.py.",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_inventory_prose_states_no_fact_the_data_can_change",
+            "joint_vol_calibration/tests/test_dashboard.py::test_inventory_facts_are_the_artifacts",
+            "joint_vol_calibration/tests/test_dashboard.py::test_oos_caption_matches_the_headline_fit",
+            "joint_vol_calibration/tests/test_readme.py::test_result_2_joint_calibration_heston_and_rough",
+            "joint_vol_calibration/tests/test_readme.py::test_validation_pack_counts_and_outcomes_are_the_artifacts"
+          ],
+          "evidence": "Model Risk M4 '2 of 5' → '2 of 6 gate-passing fits (2026-03-24, 2026-10-16)'; M6 'on its 2.0 cap' → '1.83 … inside its box'; M18 'No entry committed yet' → '1 session registered (2026-10-26)'; README result 1 '0.55 half-spreads (80.0% inside)' → '0.45–1.98 half-spreads, 31.0–80.0% inside (2026-10-26: 1.60, 31.0% inside)' (VALIDATOR-04, VALIDATOR-06, VALIDATOR-09, VALIDATOR-10, CODE-03, CODE-04, CIO-04, CIO-05, QUANT-05, CITSEC-13)",
+          "id": "C24-I1",
+          "models": [
+            "M4",
+            "M6",
+            "M7",
+            "M15",
+            "M18"
+          ],
+          "severity": "medium",
+          "date": "2026-10-28",
+          "commits": [
+            "bd4990774c14425c30907829672b51066ed2705b",
+            "789d171c785e12fe8eeb99c8da492d3bedfd5ee0",
+            "ddc86e890792b10885c1fed34810ef37458cdbf5",
+            "39188a567eb4b9dfba6e69e5d98154e6eadeb690"
+          ],
+          "effect": "published claims corrected on Model Risk, Calibration, the README and the validation pack; no number moved"
+        },
+        {
+          "flaw": "Half the Model Risk breaches were permanent by design, and most production models had no check",
+          "status": "fixed",
+          "root_cause": "The research classifier (below persistence by design, it never trades) and the VX futures table (the daily job does not refresh it) were BREACH every session; 8 of 12 production models had no check and the page did not say so; the dashboard's own models that publish numbers were not in the inventory.",
+          "fix": "A watch or breach of a research-tier model, or of a check whose cause is structural, carries the status BY DESIGN with its reason, after the live statuses; M14, M18 and M19 gained checks, every other production model states why it has none, and the density, desk coordinates and vol cone are in the inventory (M21–M23).",
+          "tests": [
+            "joint_vol_calibration/tests/test_dashboard.py::test_by_design_breaches_are_apart_from_live_ones",
+            "joint_vol_calibration/tests/test_dashboard.py::test_every_production_model_names_its_checks_or_why_it_has_none"
+          ],
+          "evidence": "Model Risk on the 2026-10-26 record: 4 BREACH → 2 live BREACH (Heston's half-spread error, β drift) and 2 BY DESIGN (M5 VX lag, M11 classifier) (CIO-14, VALIDATOR-12, VALIDATOR-13)",
+          "id": "C24-S1",
+          "models": [
+            "M5",
+            "M11",
+            "M14",
+            "M18",
+            "M19"
+          ],
+          "severity": "low",
+          "date": "2026-10-28",
+          "commits": [
+            "993788ddd45efdc9d9506a25e713a1b179f72188"
+          ],
+          "effect": "the breach count reads only live breaches; no number moved"
+        }
+      ],
+      "models": [
+        "V1",
+        "V2",
+        "M3",
+        "M4",
+        "M5",
+        "M6",
+        "M7",
+        "M11",
+        "M14",
+        "M15",
         "M18",
         "M19"
       ]

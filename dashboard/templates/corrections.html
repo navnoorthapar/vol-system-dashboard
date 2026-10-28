@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
-{% block og_title %}Corrections C16–C23 — SPX/VIX Vol Research{% endblock %}
+{% block og_title %}Corrections {{ d.rounds[0].id if d.rounds else 'C16' }}–{{ d.rounds[-1].id if d.rounds else '' }} — SPX/VIX Vol Research{% endblock %}
 {% block og_description %}Every correction round as a postmortem: symptom, root cause, detection, fix, the regression tests that pin it, the commit and its effect on the published result, with the C22 waterfall.{% endblock %}
 
 {% block content %}

@@ -154,7 +154,7 @@ NAV: list[tuple[str, str, str, str]] = [
     ("/research", "Research", "e",
      "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
     ("/corrections", "Corrections", "x",
-     "Correction rounds C16–C23 as postmortems, each tied to commits and regression tests."),
+     "Every correction round from C16 on as a postmortem, each tied to commits and regression tests."),
     ("/model-risk", "Model Risk", "m", "Model inventory and monitoring checks with explicit thresholds."),
 ]
 

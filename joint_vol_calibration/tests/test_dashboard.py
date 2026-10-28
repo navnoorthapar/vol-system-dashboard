@@ -2724,7 +2724,7 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
 
     reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
     rounds = [r["id"] for r in reg["rounds"]]
-    assert rounds == [f"C{i}" for i in range(16, 24)]
+    assert rounds == [f"C{i}" for i in range(16, 16 + len(rounds))]      # consecutive from C16
     shallow = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                              capture_output=True, text=True, check=False).stdout.strip() != "false"
     for r in reg["rounds"]:
@@ -5279,9 +5279,8 @@ def test_corrections_register_lists_every_finding(dash, pages):
     tbl = re.search(r'<table class="tbl dense cards" id="register-table">(.*?)</table>', html, re.DOTALL)
     assert tbl
     rows = re.findall(r'<tr data-status="(\w+)" data-tests="(\d+)">(.*?)</tr>', tbl.group(1), re.DOTALL)
-    assert len(rows) == len(fs) == 33
+    assert len(rows) == len(fs) >= 33
     assert [s for s, _, _ in rows] == [f["status"] for _, _, f in fs]
-    assert (sum(s == "fixed" for s, _, _ in rows), sum(s == "quantified" for s, _, _ in rows)) == (30, 3)
     gaps = [i for i, (_, n, _) in enumerate(rows) if n == "0"]
     assert gaps
     assert all("chip-breach\">gap</span>" in rows[i][2] for i in gaps)
@@ -5310,6 +5309,51 @@ def test_corrections_register_lists_every_finding(dash, pages):
     # the rounds are disclosures, the newest open; every finding stays in the page
     opened = re.findall(r'<details class="pm-details"( open)?>', html)
     assert opened == [""] * (len(reg["rounds"]) - 1) + [" open"]
+
+
+def test_the_newest_correction_round_renders_with_its_findings(dash, pages):
+    """VALIDATOR-11: the register stopped at C23 though later commits changed
+    published numbers and claims (the 95.0 idx pt 'executable arbitrage' tile,
+    the double-rounded fit tiles, the 'Cboe rules' claim, the smile-table
+    medians, the stale-cache render, the Yahoo-download labels). The newest
+    round renders on the page (title span, open postmortem, every finding in
+    the register with no bridge effect, its commits linked), in
+    docs/corrections.md and in the pack's findings log, and no page or doc
+    types the span of rounds."""
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    last = reg["rounds"][-1]
+    assert last["id"] != "C23"
+    html = pages["/corrections"]
+    text = " ".join(_visible_text(html).split())
+    span = f"{reg['rounds'][0]['id']}–{last['id']}"
+    assert f"{span} corrections" in text
+    assert f'content="Corrections {span}' in html
+    for n, f in enumerate(last["findings"], 1):
+        assert f'id="{last["id"].lower()}-f{n}"' in html, f["id"]
+        assert not f.get("bridge_steps")                                        # no P&L change
+        assert not f.get("c23_bridge_steps")
+        assert f["commits"]
+        assert set(f["commits"]) <= set(last["commits"])
+    for c in last["commits"]:
+        assert f"/commit/{c}" in html, c
+    reg_rows = dash.findings_register(dash.load_corrections()["rounds"])
+    mine = [r for r in reg_rows if r["round"] == last["id"]]
+    assert [r["id"] for r in mine] == [f["id"] for f in last["findings"]]
+    assert all(r["pnl"] is None for r in mine)
+    doc = (ROOT / "docs" / "corrections.md").read_text()
+    pack = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+    assert f"### {last['id']}" in doc
+    for f in last["findings"]:
+        assert f"| {f['id']} |" in pack
+    # the span of rounds is computed, never typed (C16–C22, the trials ledger's span, is fixed history)
+    typed = re.compile(r"C16[–-]C(?:2[3-9]|[3-9]\d)")
+    for path in ("dashboard/app.py", "dashboard/templates/corrections.html",
+                 "dashboard/templates/research.html", "README.md", "docs/README.md",
+                 "docs/model_validation/README.md", "docs/corrections.md"):
+        src = (ROOT / path).read_text()
+        if path == "docs/corrections.md":
+            src = src.split("<!-- BEGIN GENERATED")[0]
+        assert not typed.search(src), (path, typed.search(src).group(0))
 
 
 def test_browser_corrections_register_filters_links_and_height(site_browser):

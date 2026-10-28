@@ -227,10 +227,10 @@ external libraries as dev-only oracles (QuantLib for Heston, Bates and rough-Hes
 for implied vols); property tests that state the theory rather than the implementation, with mutation checks that show
 they can fail; rebuilding every committed artifact from the captures (`make reproduce`); an external market check of
 the backtest's mark (Cboe strategy indices); a committed trials ledger so the deflated Sharpe counts every
-configuration tried; and eight correction rounds (findings log below), each re-run against the same window and published
-with its effect. What does not: a second person who did not build the models.
+configuration tried; and the correction rounds (findings log below), each published with its effect and, where it
+touched the backtest, re-run against the same window. What does not: a second person who did not build the models.
 
-## 6. Findings log (C16–C23)
+## 6. Findings log (from C16)
 
 Severity: **high** changed a published headline number or its sign; **medium** changed a secondary published number
 or a production control; **low** neither. The log is rendered from `dashboard/corrections.json`, the registry that
@@ -260,5 +260,13 @@ one row; C23 is one row per finding, with the finding's own ID.
 | C23-E1 | 2026-10-20 | M3 | low | `option_chain.year_fraction` raised on an origin with no time in it | none | fixed | `ba360c8` |
 | C23-E2 | 2026-10-20 | V4 | low | Known advisories in three locked packages on the download and preview paths | none on a number; urllib3 and idna are on the daily job's download path | fixed | `a92308c` |
 | C23-V1 | 2026-10-21 | M4, M6, M14, M17, M18 | medium | Published claims that the branch's own artifacts contradicted (independent review of C23) | no headline number moved; the surface, ledger, Risk-page and inference claims now hold | fixed | `d63b797`, `59e73b1`, `dd4dc01`, `b69eb45`, `1a4ca03` |
+| C24-A1 | 2026-10-27 | M14, V1 | medium | The Surface tile published one bad Yahoo quote as executable static arbitrage | a published 'executable arbitrage' of 95.0 idx pts withdrawn; no backtest number moved | fixed | `3da6928` |
+| C24-T1 | 2026-10-27 | M4 | low | Fit tiles rounded twice and printed a number one unit off | one Calibration tile one display unit lower; no backtest number moved | fixed | `2be8a19` |
+| C24-V1 | 2026-10-27 | M14, V1 | medium | The site said the VIX is replicated 'by the Cboe rules' while listing the departures | a published methodology claim corrected; no number moved | fixed | `ff13c30` |
+| C24-M1 | 2026-10-28 | M14 | low | The smile tables printed model medians of pre-rounded vols | 99 table cells move by 0.01 vol pts; no backtest number moved | fixed | `7e6b34b` |
+| C24-D1 | 2026-10-28 | V1, V2, M7 | low | A build from a clean checkout rendered the stale database cache, not the committed record | local, CI and reviewer builds now match the deployed site; no published number moved | fixed | `53f1f16` |
+| C24-P1 | 2026-10-28 | M3, M14, V1 | medium | Four pages described one Yahoo download four different ways, none true | provenance claims corrected on four pages; no number moved | fixed | `39cd713` |
+| C24-I1 | 2026-10-28 | M4, M6, M7, M15, M18 | medium | Typed text on the site, the README and the validation pack stated facts the data contradict | published claims corrected on Model Risk, Calibration, the README and the validation pack; no number moved | fixed | `bd49907`, `789d171`, `ddc86e8`, `39188a5` |
+| C24-S1 | 2026-10-28 | M5, M11, M14, M18, M19 | low | Half the Model Risk breaches were permanent by design, and most production models had no check | the breach count reads only live breaches; no number moved | fixed | `993788d` |
 
 <!-- END GENERATED -->
