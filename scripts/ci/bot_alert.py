@@ -23,6 +23,10 @@ Actions tab and nothing else: the bot lost three overnight books in a row
     LABEL (bot-failure), or opens one (the label is created if missing).
     There is never a second open issue: closing it re-arms the alert.
 
+The weekly reproduction (.github/workflows/reproduce.yml) uses the same script
+with its own label (reproduce-failure), every failure alerting (--alert-after 1
+--all-events) and its report as the body (--body-file).
+
 The GitHub CLI is the only dependency (GH_TOKEN; the workflow grants
 `issues: write` and `actions: read`). The runner that calls it is injectable,
 so the decision and the issue calls are tested on a fake run history
@@ -38,6 +42,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 LABEL = "bot-failure"
 ALERT_AFTER = 2                  # consecutive failed scheduled runs, this one included
@@ -101,22 +106,43 @@ def issue_body(streak: int, run_url: str, slot: str, earlier: list[dict]) -> str
     return "\n".join(lines)
 
 
+MAX_BODY = 60_000                # GitHub's issue body limit is 65,536 characters
+
+
 def alert(run_id: str, event: str, run_url: str, slot: str = "", workflow: str = "daily_refresh.yml",
-          runner: Runner = gh, sleep: Callable[[float], None] = time.sleep, dry_run: bool = False) -> dict:
-    """Decide and act; returns what was done ({action, streak, issue})."""
-    if event != "schedule":
+          runner: Runner | None = None, sleep: Callable[[float], None] | None = None, dry_run: bool = False,
+          label: str = LABEL, alert_after: int = ALERT_AFTER, all_events: bool = False,
+          title: str | None = None, details: str | None = None) -> dict:
+    """Decide and act; returns what was done ({action, streak, issue}).
+
+    The defaults are the daily bot's (two failed scheduled runs in a row).
+    Another workflow names its own label and threshold: the weekly
+    reproduction (.github/workflows/reproduce.yml) alerts on every failure,
+    a manual run's included (alert_after 1, all_events), with its report as
+    ``details``. ``runner`` and ``sleep`` default to the GitHub CLI and
+    time.sleep (looked up at call time, so a test can replace them)."""
+    runner = runner or gh
+    sleep = sleep or time.sleep
+    if event != "schedule" and not all_events:
         return {"action": "none", "streak": None, "issue": None,
                 "why": f"a {event or 'manual'} run: only scheduled runs count"}
-    runs = json.loads(_retry(runner, ["run", "list", "--workflow", workflow, "--event", "schedule",
-                                      "--limit", str(HISTORY), "--json",
-                                      "databaseId,event,status,conclusion,createdAt,url"], sleep) or "[]")
-    streak, earlier = failure_streak(runs, run_id)
+    earlier: list[dict] = []
+    streak = 1
+    if alert_after > 1:
+        runs = json.loads(_retry(runner, ["run", "list", "--workflow", workflow, "--event", "schedule",
+                                          "--limit", str(HISTORY), "--json",
+                                          "databaseId,event,status,conclusion,createdAt,url"], sleep) or "[]")
+        streak, earlier = failure_streak(runs, run_id)
     out: dict = {"action": "none", "streak": streak, "issue": None}
-    if streak < ALERT_AFTER:
-        out["why"] = f"{streak} failed scheduled run in a row (alert at {ALERT_AFTER})"
+    if streak < alert_after:
+        out["why"] = f"{streak} failed scheduled run in a row (alert at {alert_after})"
         return out
-    body = issue_body(streak, run_url, slot, earlier)
-    open_issues = json.loads(_retry(runner, ["issue", "list", "--label", LABEL, "--state", "open",
+    if details is None:
+        body = issue_body(streak, run_url, slot, earlier)
+    else:
+        body = f"{title or workflow + ' failed'}: {run_url}\n\n{details}"
+    body = body[:MAX_BODY]
+    open_issues = json.loads(_retry(runner, ["issue", "list", "--label", label, "--state", "open",
                                              "--json", "number,url", "--limit", "10"], sleep) or "[]")
     if open_issues:
         n = min(int(i["number"]) for i in open_issues)
@@ -126,10 +152,10 @@ def alert(run_id: str, event: str, run_url: str, slot: str = "", workflow: str =
         return out
     out["action"] = "created"
     if not dry_run:
-        _retry(runner, ["label", "create", LABEL, "--color", "B60205", "--force", "--description",
-                        "The daily bot's scheduled runs failed repeatedly (scripts/ci/bot_alert.py)"], sleep)
-        made = _retry(runner, ["issue", "create", "--label", LABEL, "--title",
-                               f"Daily bot: {streak} scheduled runs failed in a row", "--body", body], sleep)
+        _retry(runner, ["label", "create", label, "--color", "B60205", "--force", "--description",
+                        f"{workflow} failed (scripts/ci/bot_alert.py)"], sleep)
+        title = title or f"Daily bot: {streak} scheduled runs failed in a row"
+        made = _retry(runner, ["issue", "create", "--label", label, "--title", title, "--body", body], sleep)
         out["issue"] = made.strip().splitlines()[-1] if made.strip() else None
     return out
 
@@ -141,18 +167,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--workflow", default="daily_refresh.yml")
     ap.add_argument("--run-url", default="")
     ap.add_argument("--slot", default="")
+    ap.add_argument("--label", default=LABEL)
+    ap.add_argument("--alert-after", type=int, default=ALERT_AFTER,
+                    help="consecutive failed scheduled runs (this one included) that raise the alert")
+    ap.add_argument("--all-events", action="store_true", help="a manual run alerts too")
+    ap.add_argument("--title", default=None, help="the issue title (default: the daily bot's)")
+    ap.add_argument("--body-file", type=Path, default=None,
+                    help="the issue body after the run link (default: the daily bot's text); a missing "
+                         "file is said so in the body")
     ap.add_argument("--dry-run", action="store_true", help="decide and print, open or comment on nothing")
     args = ap.parse_args(argv)
+    details = None
+    if args.body_file is not None:
+        details = (args.body_file.read_text() if args.body_file.is_file()
+                   else f"(no report: {args.body_file} was not written; see the job log)")
     try:
-        res = alert(args.run_id, args.event, args.run_url, args.slot, args.workflow, dry_run=args.dry_run)
+        res = alert(args.run_id, args.event, args.run_url, args.slot, args.workflow, dry_run=args.dry_run,
+                    label=args.label, alert_after=args.alert_after, all_events=args.all_events,
+                    title=args.title, details=details)
     except (subprocess.CalledProcessError, OSError, ValueError) as e:
         detail = getattr(e, "stderr", "") or e
-        print(f"::warning title=Bot alert::could not check or raise the failure alert: {detail}", flush=True)
+        print(f"::warning title=Failure alert::could not check or raise the failure alert: {detail}",
+              flush=True)
         return 1
     print(json.dumps(res), flush=True)
     if res["action"] != "none":
-        print(f"::warning title=Bot alert::{res['streak']} scheduled runs failed in a row: issue "
-              f"{res['action']} ({res['issue']})", flush=True)
+        print(f"::warning title=Failure alert::{res['streak']} failed run(s) in a row: issue "
+              f"{res['action']} ({res['issue']}, label {args.label})", flush=True)
     return 0
 
 

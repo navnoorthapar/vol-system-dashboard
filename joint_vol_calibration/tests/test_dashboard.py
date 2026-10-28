@@ -2680,6 +2680,49 @@ def test_calibration_page_reads_the_diagnostics_and_the_quote_smiles(dash, art):
                 f"{q['inside_spread'].mean() * 100:.0f}%") in text, e
 
 
+def test_model_risk_prints_the_last_reproduction(dash, pages, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.3: the weekly make reproduce commits its result
+    (data_store/reproduce/status.json, scripts/ci/reproduce.py --status); Model
+    Risk prints 'Last reproduced <date>: k of n artifacts within tolerance (b
+    exact)' from it, every value read from the record, and 'Not yet reproduced'
+    without one. The shipped store's line is whatever its record says."""
+    import functools
+
+    def line(html):
+        m = re.search(r'<span id="reproduced">(.*?)</span></div>', html, re.DOTALL)
+        assert m
+        text = " ".join(_visible_text("<body>" + m.group(1)).split())
+        return re.sub(r"\s+([,):])", r"\1", re.sub(r"\(\s+", "(", text))   # tag edges, not page spaces
+
+    shipped = dash.reproduce_status()
+    text = line(pages["/model-risk"])
+    if shipped is None:
+        assert text.startswith("Not yet reproduced")
+    else:
+        assert text.startswith(f"Last reproduced {shipped['date']}: {shipped['n_ok']:,} of "
+                               f"{shipped['n_checks']:,} artifact")
+    f = tmp_path / "status.json"
+    orig = dash.reproduce_status
+    monkeypatch.setattr(dash, "reproduce_status", functools.partial(orig, f))
+    get = lambda: dash.app.test_client().get("/model-risk").get_data(as_text=True)   # noqa: E731
+    assert line(get()) == "Not yet reproduced (make reproduce, weekly)"
+    rec = {"schema": "reproduce_status/1", "commit": "e" * 40, "finished_utc": "2031-02-03T07:08:09+00:00",
+           "run_url": "https://github.com/o/r/actions/runs/5", "full": False, "n_checks": 17, "n_ok": 16,
+           "n_exact": 9, "max_deviation": 2e-9, "max_deviation_artifact": "c7",
+           "failed": [{"artifact": "c7"}]}
+    f.write_text(json.dumps(rec))
+    html = get()
+    assert line(html) == (f"Last reproduced {rec['finished_utc'][:10]}: {rec['n_ok']} of {rec['n_checks']} "
+                          f"artifacts within tolerance ({rec['n_exact']} exact) (make reproduce, weekly)")
+    assert f'<a href="{rec["run_url"]}">{rec["finished_utc"][:10]}</a>' in html
+    for bad in ({**rec, "n_ok": rec["n_checks"] + 1}, {**rec, "schema": "x/1"}, {**rec, "n_exact": "9"},
+                {**rec, "finished_utc": "yesterday"}):
+        f.write_text(json.dumps(bad))
+        assert line(get()).startswith("Not yet reproduced"), bad
+    f.write_text(json.dumps({**rec, "run_url": "javascript:alert(1)"}))
+    assert "javascript:" not in get()
+
+
 def test_model_risk_checks_use_the_surface_artifacts(dash, art):
     resp, _html = _get(dash, "/model-risk")
     assert _errors(resp) == 0

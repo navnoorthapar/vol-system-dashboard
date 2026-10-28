@@ -12,9 +12,12 @@ review round's fixes, 2026-10-21). Counts are from those days; the gates keep th
 | `bench` | every benchmark body once, without timing (`--benchmark-disable`) | a benchmark that no longer computes the right thing (each checks its result first) |
 | `a11y` | axe-core 4.13.0 in Playwright 1.63.0 Chromium over the frozen site | any WCAG 2.0/2.1/2.2 A/AA violation at 1440 or 390 px in either colour scheme; horizontal scroll at 320–1920 px; a JS error; a request to another origin |
 | `audit` | pip-audit 2.10.1 (installed from the hashed `scripts/ci/pip_audit_lock.txt`) on every pin of `requirements-lock.txt` at its public version, through `scripts/ci/pip_audit_gate.py` | an advisory with no entry in `scripts/ci/pip_audit_allowlist.json` (id or alias, package, a reason, an expiry at most 180 days ahead); an expired or malformed entry; no report after four attempts (an unreachable advisory service fails, never passes) |
-| `reproduce` | `make reproduce` (weekly and on demand) | an artifact outside its tolerance (docs/reproduce.md) |
 | `mutation` | `make mutation` (weekly and on demand); `tests/test_ci_tools.py` checks every mutant's site on each push | a mutant the properties do not kill (other than the documented equivalent); a mutant whose site is no longer unique (stale) |
 | `simulate` | `scripts/ci/simulate_next_session.py --full`: the daily bot's book slot, offline, on a copy of the checkout for the session after the database's last one, then the bot's three gates (read from `daily_refresh.yml`) and the full suite in that copy. The book is priced by parameters moved off the headline (κ × 0.6, θ × 1.2, σ × 0.7 below 1.9, ρ + 0.1, v₀ × 1.3) plus about 1 vol point of parity-preserving smile noise, and the job fails unless every fitted parameter moves at least 5%; the Cboe capture is replayed, then the forward ledger and every derived artifact | the simulated session not accepted or not recorded; any gate or suite failure, i.e. a test that pins a value the bot replaces (the 2026-10-20 incident class). What it does not catch: pins on features of real chains that a synthetic constant-carry Heston book does not reproduce |
+
+`make reproduce` (an artifact outside its tolerance fails; docs/reproduce.md) runs weekly and on demand in its own
+workflow, `.github/workflows/reproduce.yml`, which commits its result to `data_store/reproduce/status.json` (shown on
+Model Risk) and opens or comments on one `reproduce-failure` issue when it fails.
 
 Every job installs `requirements-lock.txt` with `pip install --require-hashes`: the lock records the SHA-256 of every
 file each pin may install (from PyPI, and from the PyTorch CPU index for torch), so a file replaced on either index, or

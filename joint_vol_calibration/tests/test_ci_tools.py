@@ -697,13 +697,39 @@ class TestBotAlert:
         monkeypatch.setattr(alert, "gh", _FakeGh([], fail=99))
         monkeypatch.setattr(alert.time, "sleep", lambda s: None)
         assert alert.main(["--run-id", "200", "--event", "schedule"]) == 1
-        assert "::warning title=Bot alert::" in capsys.readouterr().out
+        assert "::warning title=Failure alert::" in capsys.readouterr().out
 
     def test_dry_run_decides_without_writing(self, alert):
         gh = _FakeGh(_runs("failure", current=200))
         res = alert.alert("200", "schedule", "u", runner=gh, sleep=lambda s: None, dry_run=True)
         assert res["action"] == "created"
         assert [c[:2] for c in gh.calls] == [["run", "list"], ["issue", "list"]]
+
+
+    def test_another_workflow_alerts_on_every_failure_with_its_report(self, alert, tmp_path, monkeypatch):
+        """The weekly reproduction's use: its own label, every failure (a manual run's
+        too), the report as the body; no run history is read."""
+        gh = _FakeGh([])
+        res = alert.alert("9", "workflow_dispatch", "https://x/runs/9", workflow="reproduce.yml", runner=gh,
+                          sleep=lambda s: None, label="reproduce-failure", alert_after=1, all_events=True,
+                          title="make reproduce failed", details="| artifact | FAIL |")
+        assert (res["action"], res["streak"]) == ("created", 1)
+        assert gh.made("run", "list") == []
+        create = gh.made("issue", "create")[0]
+        assert create[create.index("--label") + 1] == "reproduce-failure"
+        assert create[create.index("--title") + 1] == "make reproduce failed"
+        body = create[create.index("--body") + 1]
+        assert "https://x/runs/9" in body
+        assert "| artifact | FAIL |" in body
+        listed = gh.made("issue", "list")[0]
+        assert listed[listed.index("--label") + 1] == "reproduce-failure"
+        missing = tmp_path / "none.md"
+        gh2 = _FakeGh([])
+        monkeypatch.setattr(alert, "gh", gh2)
+        assert alert.main(["--run-id", "9", "--event", "schedule", "--label", "reproduce-failure",
+                           "--alert-after", "1", "--body-file", str(missing)]) == 0
+        body = gh2.made("issue", "create")[0][gh2.made("issue", "create")[0].index("--body") + 1]
+        assert f"no report: {missing}" in body
 
 
 @pytest.fixture
@@ -765,3 +791,88 @@ class TestDeployStreak:
                      step["with"]["full_commit_message"])
         msg = re.sub(r"\$\{\{[^}]*\}\}", "x", msg)
         assert streak.deployed_sessions([msg]) == {__import__("datetime").date(2026, 10, 27)}
+
+
+@pytest.fixture
+def repro(monkeypatch):
+    return _load("scripts/ci/reproduce.py", "reproduce_status_under_test", monkeypatch)
+
+
+class TestReproduceStatus:
+    """FUND_GRADE_PLAN 0.3: make reproduce writes its result as a status JSON
+    (scripts/ci/reproduce.py --status), committed weekly by reproduce.yml and
+    printed on Model Risk; every count is derived from the checks."""
+
+    def _checks(self, repro):
+        exact = repro.Check("greeks: a.parquet", 1e-10)
+        close = repro.Check("calibration: b.pkl", 1e-6)
+        close.note(3e-8, "params.kappa")
+        over = repro.Check("c7: c.parquet", 1e-10)
+        over.note(2e-9, "pnl[4]")
+        broken = repro.Check("backtest: d.pkl", 1e-10)
+        broken.note(float("nan"), "nav[0]")
+        broken.problems.append("missing key 'metrics'")
+        return [exact, close, over, broken]
+
+    def test_the_status_counts_come_from_the_checks(self, repro, tmp_path):
+        checks = self._checks(repro)
+        rec = repro.status_record(checks, commit="c" * 40, run_url="https://github.com/o/r/actions/runs/1",
+                                  finished_utc="2026-11-02T07:30:00+00:00")
+        assert rec["schema"] == "reproduce_status/1"
+        assert (rec["n_checks"], rec["n_ok"], rec["n_exact"]) == (
+            len(checks), sum(c.ok for c in checks), sum(c.ok and c.deviation == 0 for c in checks))
+        finite = [c for c in checks if c.deviation == c.deviation]
+        worst = max(finite, key=lambda c: c.deviation)
+        assert (rec["max_deviation"], rec["max_deviation_artifact"]) == (worst.deviation, worst.artifact)
+        assert [f["artifact"] for f in rec["failed"]] == [c.artifact for c in checks if not c.ok]
+        assert rec["failed"][-1]["deviation"] is None                   # NaN: null, never invalid JSON
+        assert rec["failed"][-1]["problems"] == ["missing key 'metrics'"]
+        path = tmp_path / "reproduce" / "status.json"
+        repro.write_status(path, rec)
+        assert json.loads(path.read_text()) == rec
+        assert [p.name for p in path.parent.iterdir()] == ["status.json"]
+
+    def test_main_writes_the_status_whatever_the_outcome(self, repro, tmp_path, monkeypatch):
+        failing = repro.Step("greeks", [], [], error="no headline fit named")
+        monkeypatch.setattr(repro, "build_steps", lambda root, parts=None: [failing])
+        monkeypatch.setattr(repro, "copy_tree", lambda src, dst: dst.mkdir(parents=True, exist_ok=True))
+        monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setenv("GITHUB_RUN_ID", "77")
+        status = tmp_path / "status.json"
+        assert repro.main(["--out", str(tmp_path / "out"), "--status", str(status)]) == 1
+        rec = json.loads(status.read_text())
+        assert (rec["n_checks"], rec["n_ok"], rec["run_url"]) == (1, 0, "https://github.com/o/r/actions/runs/77")
+        assert rec["failed"][0]["problems"] == ["not run: no headline fit named"]
+        assert rec["commit"] == subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
+                                               text=True, check=True).stdout.strip()
+
+    def test_the_weekly_workflow_commits_it_and_raises_an_issue_on_failure(self):
+        import yaml
+        text = (ROOT / ".github" / "workflows" / "reproduce.yml").read_text()
+        wf = yaml.safe_load(text)
+        on = wf[True]                                   # YAML 1.1 reads the key `on` as True
+        assert {"schedule", "workflow_dispatch"} <= set(on)
+        assert wf["concurrency"] == {"group": "reproduce", "cancel-in-progress": False}
+        assert (wf["permissions"]["contents"], wf["permissions"]["issues"]) == ("write", "write")
+        (job,) = wf["jobs"].values()
+        assert "if" not in job
+        steps = {s.get("name"): s for s in job["steps"]}
+        run = steps["Rebuild in a scratch copy and diff against the committed artifacts"]["run"]
+        assert "make reproduce" in run
+        assert "STATUS=data_store/reproduce/status.json" in run
+        commit = steps["Commit the result"]
+        assert commit["if"].startswith("always()")
+        assert "scripts/ci/commit_and_push.sh" in commit["run"]
+        assert "data_store/reproduce/status.json" in commit["run"]
+        issue = job["steps"][-1]
+        assert (issue["if"], issue["continue-on-error"]) == ("failure()", True)
+        for part in ("scripts/ci/bot_alert.py", "--label reproduce-failure", "--alert-after 1",
+                     "--all-events", "--body-file"):
+            assert part in issue["run"], part
+        mk = (ROOT / "Makefile").read_text()
+        assert "$(if $(STATUS),--status $(STATUS))" in mk[mk.index("\nreproduce:"):mk.index("\nmutation:")]
+        tests = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
+        assert "reproduce" not in tests["jobs"]
+        assert "make reproduce" not in "\n".join(ln for ln in (ROOT / ".github" / "workflows" / "tests.yml")
+                                                 .read_text().splitlines() if not ln.lstrip().startswith("#"))

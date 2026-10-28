@@ -8,6 +8,9 @@ PYTHON     ?= python
 PYTEST      = $(PYTHON) -m pytest -p no:cacheprovider
 SITE       ?= .site-build
 OUT        ?= .reproduce
+# make reproduce STATUS=<path> also writes the result as a status JSON (the weekly
+# workflow, .github/workflows/reproduce.yml: data_store/reproduce/status.json)
+STATUS     ?=
 BENCH_JSON ?= .bench/benchmarks.json
 # Single-threaded BLAS/OpenMP and a fixed hash seed for runs whose numbers are
 # compared or published (reproduce, bench).
@@ -72,10 +75,10 @@ a11y: freeze  ## axe-core (WCAG 2.2 AA) + overflow check on the frozen site (nee
 	node scripts/ci/a11y/interact.mjs $(SITE)
 
 reproduce:  ## rebuild backtest, Greeks, C7 and the v2 calibrations in a scratch copy; diff vs committed
-	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT)
+	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) $(if $(STATUS),--status $(STATUS))
 
 reproduce-full:  ## reproduce + beta grid, C22 waterfall and the 200-path S3 null test
-	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) --full
+	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) --full $(if $(STATUS),--status $(STATUS))
 
 mutation:  ## curated pricer / IV-solver mutants against the property tests
 	$(PYTHON) scripts/ci/mutation_check.py

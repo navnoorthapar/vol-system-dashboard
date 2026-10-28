@@ -6730,8 +6730,40 @@ def surface_check_values(surf: dict) -> dict:
             "n_ex": n_ex, "n_q": n_q}
 
 
+def reproduce_status(path: Path | None = None) -> dict | None:
+    """The weekly reproduction's result (data_store/reproduce/status.json, written
+    by scripts/ci/reproduce.py --status and committed by .github/workflows/
+    reproduce.yml): when it finished, how many artifacts were rebuilt within
+    tolerance and how many exactly, and the run. None when it has not run yet;
+    a file that is not a whole reproduce_status/1 record is logged and treated
+    the same (the page then says it has not been reproduced, never a count the
+    record does not support)."""
+    p = Path(path) if path is not None else DATA / "reproduce" / "status.json"
+    if not p.is_file():
+        return None
+    try:
+        rec = json.loads(p.read_text())
+        n, k, b = rec["n_checks"], rec["n_ok"], rec["n_exact"]
+        when = str(rec["finished_utc"])
+        day = when[:10]
+        ok = (rec.get("schema") == "reproduce_status/1"
+              and all(isinstance(x, int) and not isinstance(x, bool) for x in (n, k, b))
+              and 0 <= b <= k <= n and n >= 1 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is not None)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _logger.warning("reproduce status %s unreadable: %s", p, e)
+        return None
+    if not ok:
+        _logger.warning("reproduce status %s is not a whole reproduce_status/1 record", p)
+        return None
+    url = rec.get("run_url")
+    return {"date": day, "n_checks": n, "n_ok": k, "n_exact": b, "commit": str(rec.get("commit") or "")[:7],
+            "run_url": url if isinstance(url, str) and url.startswith("https://") else None,
+            "failed": [str(f.get("artifact")) for f in rec.get("failed") or [] if isinstance(f, dict)]}
+
+
 def load_model_risk() -> dict[str, Any]:
-    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
+    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": [],
+                         "reproduced": reproduce_status()}
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
         # numbers in the inventory's prose are computed from the artifacts, never typed
