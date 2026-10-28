@@ -130,6 +130,29 @@ def session_captures(session: str, underlying: str = "SPX") -> list:
     return sorted(out, key=lambda x: (str(x[1].get("fetched_at") or ""), x[0].name), reverse=True)
 
 
+def captured_sessions(underlying: str = "SPX") -> list:
+    """Every session with a stored Cboe capture of ``underlying``, newest first."""
+    names = (p.name for p in cboe_capture_dir().glob(f"{underlying.lower()}_*.parquet"))
+    return sorted({n.split("_")[1] for n in names if len(n.split("_")) == 3}, reverse=True)
+
+
+def cboe_book_refusal(session: str) -> str | None:
+    """None when ``session``'s surface can be built from one of its stored Cboe
+    captures (select_session_chain(source="cboe") finds one that passes the
+    quote-state gates and cleans), whatever its Heston fit did; otherwise
+    why not (no capture, no stored close, every capture refused)."""
+    session = str(pd.Timestamp(session).date())
+    if not session_captures(session):
+        return f"no stored Cboe capture of {session}"
+    try:
+        spot = session_spot(session)
+        ref = _jc.session_rate_reference(session)
+        select_session_chain(session, spot, ref.for_clean(), source="cboe")
+    except (ValueError, OSError) as e:
+        return str(e)
+    return None
+
+
 def stored_chain_from_capture(frame: pd.DataFrame, underlying: str = "SPX") -> pd.DataFrame:
     """A stored Cboe capture in the stored-chain layout the surface layer
     reads (options_snapshots, as data_store/options/spx_<s>.parquet holds a

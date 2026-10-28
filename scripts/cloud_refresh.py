@@ -37,7 +37,9 @@ fail-soft: a failure is reported (exit 1) but never undoes what was captured,
 and the workflow commits captures and derived artifacts behind separate test
 gates (refresh_session_artifacts). Every run with the calibrate step then
 backfills what an earlier run failed to build or commit: a committed accepted
-fit without its surface report or diagnostics, a surface report written
+fit without its surface report or diagnostics, a session whose stored Cboe
+book passes the quote-state gates and has no surface report (fit accepted or
+not: the market surface does not wait for the Heston gate), a surface report written
 under an older method (surface.report.REPORT_VERSION), or a Greeks surface /
 scenario grid built from another fit than the headline
 (backfill_session_artifacts, at most MAX_BACKFILL_SESSIONS sessions a run).
@@ -819,7 +821,8 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
                               diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S,
                               parts=ARTIFACT_PARTS) -> dict:
     """Rebuild what derives from an accepted session's fit (``parts``, default
-    all four, in this order), each part fail-soft:
+    all four, in this order; the surface alone for a session with a stored Cboe
+    book and no accepted fit, artifact_gaps), each part fail-soft:
 
       surface      data_store/surface/<session>/ (residuals, surface, scorecard,
                    VIX replication) and index.json (surface.report)
@@ -954,7 +957,14 @@ def artifact_gaps(headline_path: "str | None") -> dict:
                    previous headline next to a new one)
 
     Only sessions whose SPX chain is stored (data_store/options/spx_<s>.parquet)
-    are checked: the surface report and the diagnostics are built from it."""
+    are checked: the surface report and the diagnostics are built from it.
+
+    The surface does not wait for the Heston fit (CITSEC-05): a session with a
+    stored Cboe SPX capture that passes the quote-state gates
+    (surface.quotes.cboe_book_refusal) needs 'surface' when its report is
+    missing or stale, accepted fit or not (its scorecard then has no Heston
+    row and says why). Diagnostics need a fit and are asked for only for
+    accepted ones."""
     from joint_vol_calibration.data import database as dbm
     gaps: dict = {}
     idx = DATA / "surface" / "index.json"
@@ -974,6 +984,18 @@ def artifact_gaps(headline_path: "str | None") -> dict:
             need.append("diagnostics")
         if need:
             gaps[sess] = need
+    from joint_vol_calibration.surface import quotes as sqm
+    for sess in sqm.captured_sessions():
+        if sess in gaps or (sess in acc and dbm.options_snapshot_path(sess, "SPX").exists()):
+            continue                          # checked above, with its diagnostics
+        if (sess in listed and (DATA / "surface" / sess / "surface.json").exists()
+                and not _stale_surface(sess)):
+            continue
+        why = sqm.cboe_book_refusal(sess)
+        if why is None:
+            gaps[sess] = ["surface"]
+        else:
+            log.info("  %s: no surface report (%s)", sess, why)
     if headline_path:
         head = pathlib.Path(headline_path)
         sess = next((s_ for s_, p_ in acc.items() if pathlib.Path(p_).name == head.name), None)

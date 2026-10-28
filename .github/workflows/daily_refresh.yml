@@ -25,7 +25,9 @@ name: Daily Market Refresh
 #          After an accepted fit the run rebuilds the session's surface report and
 #          diagnostics and the headline fit's Greeks surface and scenario grid (about 5 min).
 #          Every book run also rebuilds what an earlier run failed to build or commit
-#          (the backfill: at most 2 sessions a run).
+#          (the backfill: at most 2 sessions a run), the surface report of a session
+#          whose Cboe book passes the quote-state gates whatever its fit did, and every
+#          surface report written under an older method (surface.report.REPORT_VERSION).
 #          The retry skips what already exists (a calibration, a capture), but it is a
 #          full job: install, market step, freeze.
 #

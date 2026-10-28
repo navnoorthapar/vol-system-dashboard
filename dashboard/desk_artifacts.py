@@ -249,7 +249,11 @@ def _metric_block(m: Any, name: str) -> dict | None:
 
 
 def scorecard_rows(obj: dict, session: str) -> list[dict]:
-    """The scorecard's model rows, in the producer's out-of-sample ranking order."""
+    """The scorecard's scored model rows, in the producer's out-of-sample
+    ranking order. A row the producer marks ``available: false`` (a model it
+    could not score on the session: Heston on a session with no accepted fit,
+    whose surface is still built from the session's book) is left out; the
+    scorecard's notes say why."""
     name = f"surface/{session}/scorecard.json"
     models = obj.get("models")
     if not isinstance(models, list) or not models:
@@ -259,6 +263,8 @@ def scorecard_rows(obj: dict, session: str) -> list[dict]:
     for i, m in enumerate(models):
         if not isinstance(m, dict) or not m.get("model"):
             raise ArtifactError(f"{name}: every model row needs 'model'")
+        if m.get("available") is False:
+            continue
         met = m.get("metrics")
         if not isinstance(met, dict):
             raise ArtifactError(f"{name}: model {m['model']} has no metrics")

@@ -848,6 +848,43 @@ def test_a_surface_written_under_an_older_method_is_rebuilt(env, monkeypatch):
     assert env.artifact_gaps(None) == {}
 
 
+def test_a_captured_session_without_an_accepted_fit_gets_its_surface(env, monkeypatch):
+    """CITSEC-05: the surface was built only after an accepted Heston fit, so a
+    session with a full Cboe book and a rejected (or no) fit had none. Now a
+    session whose stored Cboe capture passes the quote-state gates
+    (surface.quotes.cboe_book_refusal) is a 'surface' gap without a fit (no
+    diagnostics: they need one); a session whose captures all fail the gates
+    is not, and a current surface is left alone."""
+    from joint_vol_calibration.surface import quotes as sqm
+    from joint_vol_calibration.surface import report
+    live, empty, done = "2026-09-17", "2026-09-18", "2026-09-21"
+    cdir = env.DATA / "options" / "cboe"
+    cdir.mkdir(parents=True)
+    for s_ in (live, empty, done):
+        (cdir / f"spx_{s_}_013000Z.parquet").write_bytes(b"capture")
+        (cdir / f"vix_{s_}_013001Z.parquet").write_bytes(b"capture")
+    monkeypatch.setattr(env, "accepted_sessions", dict)
+    asked = []
+
+    def refusal(s_):
+        asked.append(s_)
+        return "not a live book (12% of near-ATM lines two-sided)" if s_ == empty else None
+    monkeypatch.setattr(sqm, "cboe_book_refusal", refusal)
+    _committed_surface(env, done, report.REPORT_VERSION)
+    assert sqm.captured_sessions() == [done, empty, live]
+    assert env.artifact_gaps(None) == {live: ["surface"]}
+    assert sorted(asked) == [live, empty]                      # a current surface is not re-checked
+    _committed_surface(env, done)                              # ... a stale one is
+    assert env.artifact_gaps(None) == {done: ["surface"], live: ["surface"]}
+    # what the backfill then builds for it: the surface alone
+    seen = []
+    monkeypatch.setattr(env, "refresh_session_artifacts",
+                        lambda s_, h, parts=None, **kw: seen.append((s_, parts)) or
+                        {p: {"ok": True} for p in parts})
+    env.backfill_session_artifacts(None)
+    assert seen == [(done, ("surface",)), (live, ("surface",))]
+
+
 def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
     """The artifact commit was dropped (gate failure) or a part failed: the
     Greeks surface and scenario grid named the previous headline fit. The next

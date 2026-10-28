@@ -290,6 +290,26 @@ def heston_v2_factory(ctx: ScoreContext) -> ModelSpec | None:
              "scored_on_fit_chain": not _fit_book_note(cal, ctx)})
 
 
+def heston_v2_unavailable_reason(ctx: ScoreContext) -> str:
+    """Why heston_v2_factory scores nothing on ``ctx``'s session: the surface
+    is built from the session's book whatever the Heston fit did (CITSEC-05),
+    so a session can have a surface and no fit."""
+    s = ctx.sq.session
+    path = Path(ctx.calibrations_dir) / f"joint_cal_{s}.pkl"
+    if not path.exists():
+        return (f"no joint SPX/VIX Heston fit is stored for {s} (data_store/calibrations/"
+                f"{path.name}): the calibration was rejected by its gate or not run on this "
+                "session. The surface, the arbitrage screen and the VIX replication are built "
+                "from the session's book and do not depend on it.")
+    return (f"the stored fit {path.name} is not a model_version-2 fit of {s}'s own quotes, so it "
+            "is not scored here.")
+
+
+# Why a model the registry names scores nothing on a session (the scorecard's
+# row says so instead of leaving a bare 'available: false').
+UNAVAILABLE_REASONS: dict = {"heston_v2": heston_v2_unavailable_reason}
+
+
 MODEL_REGISTRY: dict = {
     "essvi": essvi_factory,
     "svi": svi_factory,
@@ -331,7 +351,9 @@ def score_models(ctx: ScoreContext, models: list | None = None) -> tuple:
     rows, frames = [], []
     for name, spec in specs:
         if spec is None:
-            rows.append({"model": name, "available": False})
+            why = UNAVAILABLE_REASONS.get(name)
+            rows.append({"model": name, "available": False,
+                         **({"reason": why(ctx)} if why is not None else {})})
             continue
         miv = model_ivs(spec, q)
         res = mt.residual_frame(q, miv, model=spec.name, in_sample=spec.in_sample,

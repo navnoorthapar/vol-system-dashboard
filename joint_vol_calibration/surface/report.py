@@ -294,6 +294,18 @@ def _quote_source_note(sq: sqm.SessionQuotes) -> str:
             + (f", as of {d['quote_time']}." if d.get("quote_time") else ", with no quote time."))
 
 
+def _heston_note(models: list) -> str:
+    """The scorecard's line on the Heston row: its in- and out-of-sample sets,
+    or why the session has none (the surface does not wait for a fit)."""
+    row = next((m for m in models if str(m.get("model", "")).startswith("heston")), None)
+    if row is not None and row.get("available"):
+        return ("Heston's in-sample set is its calibration anchors, fitted jointly with the VIX "
+                "index leg, and its out-of-sample set is every other quote.")
+    if row is not None:
+        return f"Heston is not scored on this session: {row.get('reason') or 'no stored fit'}"
+    return "Heston is not in this scorecard."
+
+
 def _timing_deviation(sq: sqm.SessionQuotes, calc: datetime) -> str:
     """The calculation-time departure, from the chain's T origin and record."""
     d, inp = sq.clean_diagnostics, sq.inputs
@@ -526,9 +538,8 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                               f"({own_n}); metrics.common_out_of_sample scores every model on "
                               f"the same {common['n']:,} quotes, those no model was fitted to."),
                              ("Surfaces are fitted to alternate strikes, so their out-of-sample "
-                              "quotes are the strikes in between (an interpolation test); Heston's "
-                              "in-sample set is its calibration anchors, fitted jointly with the "
-                              "VIX index leg, and its out-of-sample set is every other quote."),
+                              "quotes are the strikes in between (an interpolation test); "
+                              + _heston_note(card["models"])),
                              _svi_cal_note(surfaces.get("svi_cal")),
                              _quote_source_note(sq)]}
 

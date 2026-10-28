@@ -2222,6 +2222,70 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert "2026-06-18" in html
 
 
+def _no_fit_surface_store(tmp_path: Path) -> Path:
+    """The artifact store with SESSION's surface as the producer writes it for a
+    session with a live Cboe book and no accepted Heston fit (CITSEC-05): no
+    joint_cal_<SESSION>.pkl and no diagnostics, the scorecard's Heston row
+    unavailable with its reason, no Heston residuals, the rankings and index row
+    without it. The headline fit is then an earlier session's."""
+    data = _artifact_store(tmp_path, diagnostics=False)
+    (data / "calibrations" / f"joint_cal_{SESSION}.pkl").unlink()
+    d = data / "surface" / SESSION
+    res = pd.read_parquet(d / "residuals.parquet")
+    heston = [m for m in res["model"].unique() if str(m).startswith("heston")]
+    kept = res[~res["model"].isin(heston)].reset_index(drop=True)
+    kept.to_parquet(d / "residuals.parquet", index=False)
+    sc = json.loads((d / "scorecard.json").read_text())
+    why = (f"no joint SPX/VIX Heston fit is stored for {SESSION} (data_store/calibrations/"
+           f"joint_cal_{SESSION}.pkl): the calibration was rejected by its gate or not run on this session.")
+    sc["models"] = [{"model": m["model"], "available": False, "reason": why} if m["model"] in heston else m
+                    for m in sc["models"]]
+    for key in ("ranking_by_oos_median_abs_hs", "ranking_by_common_oos_median_abs_hs"):
+        if key in sc:
+            sc[key] = [r for r in sc[key] if r["model"] not in heston]
+    if "models" in (sc.get("common_out_of_sample") or {}):
+        sc["common_out_of_sample"]["models"] = [m for m in sc["common_out_of_sample"]["models"]
+                                                if m not in heston]
+    sc["notes"][1] = ("Surfaces are fitted to alternate strikes, so their out-of-sample quotes are the "
+                      "strikes in between (an interpolation test); Heston is not scored on this "
+                      "session: " + why)
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    idx = json.loads((data / "surface" / "index.json").read_text())
+    for row in idx["sessions"]:
+        if row["session"] == SESSION:
+            row["models"] = {m: v for m, v in row["models"].items() if m not in heston}
+    (data / "surface" / "index.json").write_text(json.dumps(idx))
+    return data
+
+
+def test_a_surface_session_without_a_heston_fit_renders_everywhere(dash, tmp_path, monkeypatch):
+    """CITSEC-05: the bot now builds a session's surface from its Cboe book
+    whatever the Heston gate did, so the newest surface session can have no
+    fit and a scorecard whose Heston row is unavailable. Every page still
+    publishes with no loader error; the Surface scorecard lists the models it
+    scored and says why Heston is absent; no page prints a Heston error for
+    that session."""
+    data = _no_fit_surface_store(tmp_path)
+    monkeypatch.setattr(dash, "DATA", data)
+    sc = json.loads((data / "surface" / SESSION / "scorecard.json").read_text())
+    pages = {}
+    for route in ("/", "/surface", "/calibration", "/risk", "/research", "/corrections", "/model-risk"):
+        resp, pages[route] = _get(dash, route)
+        assert _errors(resp) == 0, route
+    html = pages["/surface"]
+    assert 'data-artifact-state="ok"' in html or 'id="scorecard-table"' in html
+    table = re.search(r'<table class="tbl dense[^"]*" id="scorecard-table">(.*?)</table>', html,
+                      re.DOTALL).group(1)
+    rows = re.findall(r"<tr[^>]*><td[^>]*>([^<]+)</td>", table.split("<tbody>")[1])
+    assert rows == [dash.model_label(r["model"]) for r in sc["ranking_by_oos_median_abs_hs"]]
+    assert dash.model_label("heston_v2") not in rows
+    assert sc["notes"][1] in _visible_text(html)
+    # Model Risk's calibrator check reads the session's scorecard: no Heston number, and why
+    why = next(m["reason"] for m in sc["models"] if m.get("available") is False)
+    assert re.search(rf"Heston is not scored on {SESSION}\s*:\s*{re.escape(why)}",
+                     _visible_text(pages["/model-risk"]))
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href

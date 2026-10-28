@@ -484,3 +484,43 @@ def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
         gth = oc.t_origin(side["quote_time"], s) != oc.session_close(s)
         assert sq.diagnostics["t_origin_basis"] == (oc.GTH_BASIS if gth else oc.CLOSE_BASIS)
         assert sq.diagnostics["n_expiries"] > 17                      # the full listing
+
+
+def test_a_session_with_a_live_cboe_book_and_no_fit_gets_a_surface(tmp_path, monkeypatch):
+    """CITSEC-05: the surface was built only after the Heston fit passed its
+    gate (2026-10-20 has a full Cboe book, no accepted fit and no surface).
+    With no stored fit, the report is still written from the session's Cboe
+    book; the scorecard's Heston row is absent and says why, and the other
+    models, the arbitrage screen and the VIX replication are unchanged."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z")
+    assert sqm.captured_sessions() == [SESSION]
+    assert sqm.cboe_book_refusal(SESSION) is None
+    nofit = tmp_path / "calibrations"
+    nofit.mkdir()
+    out = report.run_session(SESSION, calibrations_dir=nofit, models=["essvi", "heston_v2"])
+    assert out["surface"]["inputs"]["source"] == "cboe"
+    rows = {m["model"]: m for m in out["scorecard"]["models"]}
+    assert rows["essvi"]["available"]
+    assert rows["heston_v2"]["available"] is False
+    assert rows["heston_v2"]["reason"].startswith(f"no joint SPX/VIX Heston fit is stored for {SESSION}")
+    assert set(out["residuals"]["model"]) == {"essvi"}
+    assert out["scorecard"]["common_out_of_sample"]["models"] == ["essvi"]
+    assert any(n.endswith("Heston is not scored on this session: " + rows["heston_v2"]["reason"])
+               for n in out["scorecard"]["notes"])
+    assert out["vix_replication"]["indices"]["VIX"].get("replicated") is not None
+    row = report.index_row(out)
+    assert set(row["models"]) == {"essvi"}
+    with_fit = report.run_session(SESSION, models=["essvi", "heston_v2"])
+    assert {m["model"]: m for m in with_fit["scorecard"]["models"]}["heston_v2"]["available"]
+    assert with_fit["vix_replication"]["indices"] == out["vix_replication"]["indices"]
+    assert with_fit["surface"]["arbitrage"] == out["surface"]["arbitrage"]
+
+
+def test_a_session_whose_books_fail_the_gates_has_no_cboe_surface(tmp_path, monkeypatch):
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z", empty_atm=True)
+    assert "not a live book" in sqm.cboe_book_refusal(SESSION)
+    assert sqm.cboe_book_refusal("2026-10-15").startswith("no stored Cboe capture")

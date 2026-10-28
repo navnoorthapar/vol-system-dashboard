@@ -6798,11 +6798,19 @@ def load_model_risk() -> dict[str, Any]:
 
         def surf_hist(k):
             return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
+        # a session's surface is built whatever its Heston fit did: its scorecard
+        # then has no Heston row and says why (surface.scorecard.UNAVAILABLE_REASONS)
+        unscored = next((str(m.get("reason") or "no stored fit")
+                         for m in ((surf.get("scorecard") or {}).get("models") or [])
+                         if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                         and m.get("available") is False), None)
         add(INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
             today["median_abs_hs"],
             f"{_fmt(today['median_abs_hs'], '.1f')} ({_fmt(today['inside_pct'], '.1f')}% inside)",
-            "median_abs_hs", sart + ("scorecard.json" if today["scorecard"] else "residuals.parquet"),
-            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; Yahoo quotes carry no quote time.",
+            "median_abs_hs",
+            sart + ("scorecard.json" if today["scorecard"] or unscored else "residuals.parquet"),
+            (f"Heston is not scored on {surf['session']}: {unscored}" if unscored else
+             f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; Yahoo quotes carry no quote time."),
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
