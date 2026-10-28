@@ -58,7 +58,7 @@
     <div id="rule-inputs">
       <p class="note">Rule inputs on {{ r.date }}{% if r.headline_differs %} — the latest session in the market database; the {{ d.regime_date }} label above was written from data not yet in it{% endif %}:</p>
       <dl class="dl">
-        <dt>rv₂₀</dt><dd>{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f")|u('%') }}</dd>
+        <dt>rv₂₀ (20-session)</dt><dd>{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f")|u('%') }}</dd>
         <dt>VIX</dt><dd>{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f") }}</dd>
         <dt>VVIX</dt><dd>{{ r.vvix|fmt(".2f") }}</dd>
         <dt>R2 gate</dt><dd>{{ r.gate|fmt(".2f") }} (rolling 252-day 80th percentile of VVIX)</dd>

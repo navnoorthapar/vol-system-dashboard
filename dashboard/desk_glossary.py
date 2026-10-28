@@ -136,10 +136,17 @@ TERMS: tuple[dict[str, Any], ...] = (
      "text": "100·√(252/21 · Σ r²) over 21 daily SPX close-to-close log returns: trailing (known at the "
              "close) or forward (the next 21 sessions).",
      "units": "%", "used": "Overview, Research", "source": "dashboard/desk_market.py"},
+    {"id": "rv20", "term": "rv₂₀", "abbr": "the rule's 20-session realised vol", "pat": r"rv₂₀",
+     "text": "100·√(252 · mean r²) over the last 20 daily SPX log returns (at least 15 present): the "
+             "realised vol the regime rule compares with VIX. It differs from RV21 by its window "
+             "(20 against 21 sessions) and its minimum count, not by method.",
+     "units": "%", "used": "Overview", "source": "joint_vol_calibration/signals/regime_classifier.py",
+     "fn": "_label_rv"},
     {"id": "regimes", "term": "R0–R2", "abbr": "rule regime labels", "pat": r"\bR[012]\b",
      "text": "The rule's regime labels: R0 long gamma, R1 short gamma, R2 vomma active (VVIX above its "
              "threshold at the close); the backtest reads them lagged one session.",
-     "units": "label", "used": "Overview, Research", "source": "joint_vol_calibration/signals/regime_pdv.py"},
+     "units": "label", "used": "Overview, Research",
+     "source": "joint_vol_calibration/signals/regime_classifier.py", "fn": "build_rule_label_frame"},
     {"id": "vomma-ratio", "term": "vomma P&L ratio", "abbr": None, "pat": r"\bvomma P&amp;L ratio\b",
      "text": "½·vomma·Δσ² / (vega·|Δσ|) = ½·d₁·d₂·|Δσ|/σ for a vol move Δσ: the second-order vol P&L "
              "against the first; a node is flagged convexity-dominated above the monitor's threshold.",

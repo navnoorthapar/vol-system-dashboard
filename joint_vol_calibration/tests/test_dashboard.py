@@ -8885,3 +8885,26 @@ def test_the_surface_source_shows_its_age_without_setting_the_page_state(dash, p
             elif s["level"] == "warn" and worst_without == "ok":
                 worst_without = "warn"
     assert c["worst"] == worst_without
+
+
+def test_rv20_and_rv21_are_defined_and_named_by_their_windows(dash, pages):
+    """C1 (F11): the Overview printed 'rv₂₀ 9.67%' in the rule inputs beside 'RV21
+    9.81' in the ticker with no word on why they differ. rv₂₀ has a glossary entry
+    taken from the code that computes it (regime_classifier._label_rv: 20 sessions,
+    at least 15 returns), its rule input says '20-session', and the page's first
+    rv₂₀ links to it; RV21 keeps its 21-session definition."""
+    import inspect
+
+    from joint_vol_calibration.signals import regime_classifier as rc
+    terms = {t["id"]: t for t in dash.desk_glossary.TERMS}
+    assert "rv20" in terms
+    assert "rv21" in terms
+    src = inspect.getsource(rc._label_rv)
+    assert "20" in src
+    assert "min_periods=15" in src
+    assert "20 daily SPX log returns" in terms["rv20"]["text"]
+    assert "at least 15" in terms["rv20"]["text"]
+    assert terms["regimes"]["source"].endswith("regime_classifier.py")
+    html = pages["/"]
+    assert "rv₂₀ (20-session)" in _visible_text(html)
+    assert "#def-rv20" in html
