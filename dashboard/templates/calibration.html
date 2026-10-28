@@ -20,7 +20,7 @@
 {% if d.kappa is not none %}
 <p class="note" style="margin-bottom:8px;">
   The headline is the newest fit that passes the quality gate (<code>{{ d.calib_file }}</code>), not the lowest-RMSE fit in the archive: ranking by RMSE rewards the days the data broke.{% if d.optimizer %} Optimiser: {{ d.optimizer }}.{% endif %}
-  {% if d.archive %}Of {{ d.archive.n_total }} stored fits, {{ d.archive.n_current_ok }} of {{ d.archive.n_current }} current-schema (model_version 2) fits pass the gate; {{ d.archive.n_legacy|plural('pre-C22 fit') }} {{ 'is' if d.archive.n_legacy == 1 else 'are' }} labelled legacy and never ranked.{% endif %}
+  {% if d.archive %}Of {{ d.archive.n_total }} stored fits, {{ d.archive.n_current|plural('current-schema (model_version 2) fit') }} {{ 'is' if d.archive.n_current == 1 else 'are' }} stored{% if d.archive.n_current_ok != d.archive.n_current %}, {{ d.archive.n_current_ok }} of them passing the current gate{% endif %} (the job stores only fits that pass the gate; a rejected fit is recorded in its run log, not stored); {{ d.archive.n_legacy|plural('pre-C22 fit') }} {{ 'is' if d.archive.n_legacy == 1 else 'are' }} labelled legacy and never ranked.{% endif %}
 </p>
 
 <h2 class="section-title">Parameters <span class="sym">κ θ σ ρ v₀</span></h2>

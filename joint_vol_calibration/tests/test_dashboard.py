@@ -8746,3 +8746,20 @@ def test_no_uppercased_label_turns_a_greek_symbol_into_a_capital(pages):
     assert bad == []
     for ch in sorted(labels):
         assert f'[data-label*="{ch}"]' in css, ch
+
+
+def test_calibration_census_says_what_is_stored_not_k_of_k_pass(dash, pages):
+    """HANDOFF D (T2's twin): the job stores only gate-passing fits, so the
+    Calibration page's 'k of k current-schema fits pass the gate' was true by
+    construction. It says what is stored and why, like the Overview, and names a
+    gate-failing count only when the gate has tightened since a fit was stored."""
+    rows = dash.scan_calibrations()
+    n_current = sum(1 for r in rows if r["legacy"] is False)
+    n_ok = sum(1 for r in rows if r["legacy"] is False and r["ok"])
+    text = _visible_text(pages["/calibration"])
+    if n_current == 0:
+        pytest.skip("no current-schema fit stored")
+    assert "fits pass the gate" not in text
+    assert f"{dash.plural(n_current, 'current-schema (model_version 2) fit')}" in text
+    assert "the job stores only fits that pass the gate" in text
+    assert (f"{n_ok:,} of them passing the current gate" in text) == (n_ok != n_current)
