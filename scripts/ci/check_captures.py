@@ -15,6 +15,9 @@ run created (untracked under data_store/options, data_store/calibrations
 without its diagnostics, data_store/forward, data_store/runs) is recognised
 by its name and read back:
 
+  options/cboe_manifest/<stem>.json                 the public record of a raw book held
+                                                    in the private store: schema, stem,
+                                                    session, hashes, rows, private path
   options/cboe/<und>_<session>_<HHMMSS>Z.parquet   readable, >= 1 row, its JSON
            + .json                                  pair present with the same row
                                                     count, session and a sha256
@@ -55,6 +58,7 @@ DATE = r"(?P<session>\d{4}-\d{2}-\d{2})"
 PATTERNS = {
     "cboe_book": re.compile(rf"^data_store/options/cboe/(?P<und>[a-z]+)_{DATE}_\d{{6}}Z"
                             r"\.(?P<ext>parquet|json)$"),
+    "cboe_manifest": re.compile(rf"^data_store/options/cboe_manifest/(?P<und>[a-z]+)_{DATE}_\d{{6}}Z\.json$"),
     "chain": re.compile(rf"^data_store/options/(?P<und>[a-z]+)_{DATE}\.parquet$"),
     "fit": re.compile(rf"^data_store/calibrations/joint_cal_{DATE}\.pkl$"),
     "ledger": re.compile(rf"^data_store/forward/ledger_{DATE}\.json$"),
@@ -133,11 +137,34 @@ def check_ledger_link(root: Path, path: Path, led: dict) -> None:
         raise ValueError(f"previous {led.get('previous')} does not link to the head of the chain: {want}")
 
 
+def check_manifest(path: Path, session: str) -> None:
+    """The public record of a raw book held in the private store
+    (cboe_downloader.write_manifest): its schema, stem and session, the three
+    SHA-256s, a positive row count and the private path of its parquet."""
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    man = json.loads(path.read_text())
+    if not isinstance(man, dict) or man.get("schema") != cboe.MANIFEST_SCHEMA:
+        raise ValueError(f"not a {cboe.MANIFEST_SCHEMA} manifest")
+    if man.get("stem") != path.stem or man.get("session") != session:
+        raise ValueError(f"the manifest is {man.get('stem')} of {man.get('session')}, the file {path.stem}")
+    for k in ("sha256", "parquet_sha256", "sidecar_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(man.get(k, ""))):
+            raise ValueError(f"no {k}")
+    if not (isinstance(man.get("rows"), int) and man["rows"] >= 1):
+        raise ValueError(f"rows {man.get('rows')!r}")
+    want = f"{cboe.PRIVATE_BOOKS_SUBDIR}/{path.stem}.parquet"
+    if man.get("private_path") != want or not man.get("private_repo"):
+        raise ValueError(f"private path {man.get('private_path')!r} in {man.get('private_repo')!r}")
+
+
 def check(root: Path, rel: str, kind: str, g: dict) -> None:
     """Raise ValueError (or an I/O / format error) unless ``rel`` is a whole capture."""
     path = root / rel
     if kind == "run":
         check_run_record(path, g["stamp"], g["slot"])
+        return
+    if kind == "cboe_manifest":
+        check_manifest(path, g["session"])
         return
     s = g["session"]
     if kind == "cboe_book":
@@ -186,13 +213,21 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, required=True, help="write the verified paths here")
     ap.add_argument("--root", type=Path, default=ROOT)
+    ap.add_argument("--no-raw-cboe", action="store_true",
+                    help="the private Cboe store is configured: a raw book is never listed (it is "
+                         "reported, and left out of every public commit)")
     args = ap.parse_args(argv)
     root = args.root.resolve()
-    ok, bad, other = [], [], []
+    ok, bad, other, private = [], [], [], []
     for rel in new_files(root):
         kind, g = classify(rel)
         if kind is None:
             other.append(rel)
+            continue
+        if kind == "cboe_book" and args.no_raw_cboe:
+            private.append(rel)
+            print(f"::warning title=Raw Cboe book::{rel} is still in the public tree: the private store "
+                  "did not take it; it is left out of the public commit", flush=True)
             continue
         try:
             check(root, rel, kind, g)
@@ -206,7 +241,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  ok     {p}")
     for p in other:
         print(f"  other  {p} (not a capture: left to the data commit)")
-    print(f"{len(ok)} capture file(s) verified, {len(bad)} failed, {len(other)} other new file(s)")
+    for p in private:
+        print(f"  private {p} (raw book: not for this public repository)")
+    print(f"{len(ok)} capture file(s) verified, {len(bad)} failed, {len(other)} other new file(s)"
+          + (f", {len(private)} raw book file(s) kept out" if private else ""))
     return 1 if bad else 0
 
 

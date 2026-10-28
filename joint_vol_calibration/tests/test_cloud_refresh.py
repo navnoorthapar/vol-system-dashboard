@@ -128,6 +128,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.delenv("REFRESH_SLOT", raising=False)          # no run record unless a test asks
+    monkeypatch.delenv("CBOE_BOOKS_DIR", raising=False)        # no private book store unless a test asks
     # The post-fit steps have their own tests below; here an accepted fit records
     # a ledger from fixed signals (the synthetic DB is too short for the real
     # ones) and the derived artifacts are a no-op.
@@ -456,6 +457,53 @@ def test_the_ledger_trades_on_the_full_cboe_capture_whatever_the_fit_does(env, m
     (pos,) = ledger["positions"]
     assert pos["sleeve"] == "s4"
     assert pos["contract"]["expiry"] in set(capture["expiry"])
+
+
+def test_books_held_in_the_private_store_are_found_and_not_captured_again(env, monkeypatch, tmp_path):
+    """CITSEC-06: with the private data repository configured, the workflow moves
+    each raw book there (scripts/ci/cboe_private.py) and the public tree keeps a
+    manifest. A later slot of the same session must neither capture the book
+    again (a manifest, or the book in the private checkout, counts) nor lose it:
+    the forward ledger marks on the book from the private checkout
+    (CBOE_BOOKS_DIR, cboe_downloader.find_books)."""
+    calls = []
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        return _full_spx_capture() if und == "SPX" else _capture(und)
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    _code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert st["forward_ledger"]["status"] == "recorded"
+    first = fl.load_ledger(st["forward_ledger"]["path"])
+    # what the workflow does next when configured: books to the private checkout, a manifest here
+    pub = env.DATA / "options" / "cboe"
+    priv = tmp_path / "private" / cboe.PRIVATE_BOOKS_SUBDIR
+    priv.mkdir(parents=True)
+    for pq_path in sorted(pub.glob("*.parquet")):
+        cboe.write_manifest(pq_path, cboe.manifest_dir(env.DATA), "owner/books")
+        for f in (pq_path, pq_path.with_suffix(".json")):
+            f.rename(priv / f.name)
+    assert not list(pub.glob("*"))
+    pathlib.Path(st["forward_ledger"]["path"]).unlink()            # its commit failed
+    monkeypatch.setenv("CBOE_BOOKS_DIR", str(priv))
+    _code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert calls == ["SPX", "VIX"]                                 # nothing fetched again
+    assert st["capture"]["status"] == "exists"
+    assert st["capture"]["captures"]["SPX"]["file"].startswith(str(priv))
+    assert not list(pub.glob("*.parquet"))                         # nothing raw written publicly
+    led = st["forward_ledger"]
+    assert (led["status"], led["book"]) == ("recorded", "cboe")
+    again = fl.load_ledger(led["path"])
+    assert again["inputs"]["book"] == first["inputs"]["book"]      # the same book, read privately
+    assert again["inputs"]["chain_sha256"] == first["inputs"]["chain_sha256"]
+    # without the private checkout the manifest alone still says the book is stored
+    monkeypatch.delenv("CBOE_BOOKS_DIR")
+    _code, st = _run(env, "capture")
+    assert st["capture"]["status"] == "exists"
+    assert st["capture"]["captures"]["VIX"]["file"].endswith(".json")
+    assert calls == ["SPX", "VIX"]
 
 
 def test_every_later_book_slot_can_mark_what_the_ledger_opened():

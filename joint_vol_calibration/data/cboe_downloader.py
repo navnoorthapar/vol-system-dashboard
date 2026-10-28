@@ -803,6 +803,115 @@ def save_capture(cap: ChainCapture, out_dir) -> tuple:
     return pq_path, js_path
 
 
+# ── Where the raw books live: the public store or a private one ──────────────
+#
+# Cboe's terms bar storing and redistributing its quotes (DATA_SOURCES.md), and
+# this repository is public. When the owner has created the private data
+# repository (secrets CBOE_DATA_REPO and CBOE_DATA_TOKEN), the daily workflow
+# checks it out and points BOOKS_DIR_ENV at its options/cboe/ directory; each
+# new raw book (<stem>.parquet and its <stem>.json) goes there, and the public
+# repository keeps only a manifest, data_store/options/cboe_manifest/<stem>.json
+# (write_manifest: hashes, counts, timestamps, the private path; never a quote).
+# Every reader of raw books finds them through book_dirs / find_books, so a book
+# a later run needs (the forward ledger's marks of open positions, a backfill, a
+# reproduction) is found in the private checkout as well as in the public tree;
+# book_captured also counts a manifest, so the retry slot does not capture a
+# book again that an earlier slot moved to the private store.
+
+BOOKS_DIR_ENV = "CBOE_BOOKS_DIR"
+PRIVATE_BOOKS_SUBDIR = "options/cboe"          # inside the private repository
+MANIFEST_SCHEMA = "cboe_manifest/1"
+
+
+def public_books_dir(data_dir=None):
+    """data_store/options/cboe/ (or <data_dir>/options/cboe/)."""
+    from pathlib import Path
+    return (Path(data_dir) if data_dir is not None else db.DATA_DIR) / "options" / "cboe"
+
+
+def manifest_dir(data_dir=None):
+    """data_store/options/cboe_manifest/: the public record of books held privately."""
+    from pathlib import Path
+    return (Path(data_dir) if data_dir is not None else db.DATA_DIR) / "options" / "cboe_manifest"
+
+
+def book_dirs(data_dir=None, env=None) -> list:
+    """Every directory a raw book can be in, private checkout first: the
+    directory BOOKS_DIR_ENV names (when set and present), then the public
+    data_store/options/cboe/ (the books committed before the private store,
+    and this run's captures until the workflow moves them)."""
+    import os
+    from pathlib import Path
+    env = os.environ if env is None else env
+    out = []
+    private = (env.get(BOOKS_DIR_ENV) or "").strip()
+    if private and Path(private).is_dir():
+        out.append(Path(private))
+    pub = public_books_dir(data_dir)
+    if pub not in out:
+        out.append(pub)
+    return out
+
+
+def find_books(underlying: str, session: str, data_dir=None, env=None) -> list:
+    """The stored raw books (parquet paths) of ``underlying`` for ``session``,
+    oldest capture first, wherever they are (book_dirs); a book in both places
+    is listed once, from the first directory that has it."""
+    seen: dict = {}
+    for d in book_dirs(data_dir, env):
+        for p in sorted(d.glob(f"{underlying.lower()}_{session}_*.parquet")):
+            seen.setdefault(p.name, p)
+    return [seen[n] for n in sorted(seen)]
+
+
+def book_captured(underlying: str, session: str, data_dir=None, env=None) -> str | None:
+    """Where a capture of ``underlying`` for ``session`` is recorded (a raw book
+    or a manifest of one held privately), or None: the retry slot's test of
+    whether a book is already stored."""
+    books = find_books(underlying, session, data_dir, env)
+    if books:
+        return str(books[-1])
+    man = sorted(manifest_dir(data_dir).glob(f"{underlying.lower()}_{session}_*.json"))
+    return str(man[-1]) if man else None
+
+
+def _file_sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_manifest(pq_path, out_dir, private_repo: str) -> tuple:
+    """The public record of a raw book moved to the private store:
+    <out_dir>/<stem>.json with the book's own record (<stem>.json beside the
+    parquet: session, quote time, book state, row counts, the SHA-256 of the
+    raw response), the SHA-256 of both files, and where they are in the
+    private repository. No quote. Atomic. Returns (path, manifest)."""
+    import os
+    from pathlib import Path
+    pq_path = Path(pq_path)
+    js_path = pq_path.with_suffix(".json")
+    side = json.loads(js_path.read_text())
+    stem = pq_path.stem
+    keep = ("underlying", "session", "quote_time", "book_state", "fetched_at", "payload_timestamp",
+            "stated_delay_minutes", "underlying_last_trade_time", "underlying_price", "url", "sha256",
+            "n_bytes", "rows", "two_sided_rows", "expiries", "roots")
+    man = {"schema": MANIFEST_SCHEMA, "stem": stem, **{k: side.get(k) for k in keep},
+           "parquet_sha256": _file_sha256(pq_path), "sidecar_sha256": _file_sha256(js_path),
+           "private_repo": private_repo,
+           "private_path": f"{PRIVATE_BOOKS_SUBDIR}/{pq_path.name}",
+           "private_sidecar": f"{PRIVATE_BOOKS_SUBDIR}/{js_path.name}"}
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"{stem}.json"
+    tmp = d / f".{stem}.json.tmp"
+    tmp.write_text(json.dumps(man, indent=2) + "\n")
+    os.replace(tmp, out)
+    return out, man
+
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 def _normalise_expiry_month(series: pd.Series) -> pd.Series:

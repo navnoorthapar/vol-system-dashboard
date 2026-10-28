@@ -430,6 +430,8 @@ class TestRepoGrowth:
         assert growth.kind_of("data_store/options/spx_2026-10-16.parquet") == "SPX chain"
         assert growth.kind_of("data_store/options/cboe/vix_2026-10-20_040625Z.json") == "cboe books"
         assert growth.kind_of("data_store/runs/run_20261028T023000Z_book.json") == "run records"   # 0.9
+        manifest = "data_store/options/cboe_manifest/spx_2026-10-27_023000Z.json"
+        assert growth.kind_of(manifest) == "cboe manifests"
         assert growth.kind_of("README.md") == "other"
 
     def test_the_daily_workflow_reports_it(self):

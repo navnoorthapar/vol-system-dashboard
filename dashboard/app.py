@@ -4917,14 +4917,19 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
 
 
 def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
-    """The newest stored Cboe book per underlying (data_store/options/cboe/*.json records)."""
-    root = Path(data_dir or DATA) / "options" / "cboe"
+    """The newest stored Cboe book per underlying: the records beside the raw books
+    committed here (data_store/options/cboe/*.json) and the manifests of books
+    held in the private data repository (data_store/options/cboe_manifest/*.json,
+    cboe_downloader.write_manifest: the same fields, no quotes)."""
+    base = Path(data_dir or DATA) / "options"
     newest: dict[str, dict] = {}
-    for f in sorted(root.glob("*.json")) if root.is_dir() else []:
+    files = [f for sub in ("cboe", "cboe_manifest") if (base / sub).is_dir()
+             for f in sorted((base / sub).glob("*.json"))]
+    for f in files:
         try:
             rec = json.loads(f.read_text())
         except (OSError, ValueError) as exc:
-            raise ValueError(f"options/cboe/{f.name}: unreadable record ({exc})") from exc
+            raise ValueError(f"options/{f.parent.name}/{f.name}: unreadable record ({exc})") from exc
         und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
         key = (str(rec.get("session")), str(rec.get("quote_time")))
         if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):

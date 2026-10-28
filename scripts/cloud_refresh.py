@@ -609,9 +609,15 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
         return st
     from joint_vol_calibration.data import cboe_downloader as cboe
     for und in CAPTURE_UNDERLYINGS:
-        have = sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
-        if have:
-            st["captures"][und] = {"status": "exists", "file": str(have[-1])}
+        # stored here, in the private store (CBOE_BOOKS_DIR) or recorded by a
+        # manifest of a book moved there: the retry slot does not capture it again
+        if out_dir is None:
+            found = cboe.book_captured(und, expected, data_dir=DATA)
+        else:
+            have = sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
+            found = str(have[-1]) if have else None
+        if found:
+            st["captures"][und] = {"status": "exists", "file": found}
             continue
         try:
             cap = cboe.capture_option_chain(und)
@@ -673,11 +679,14 @@ def _discard_partial_capture(d: pathlib.Path, cap, cboe) -> None:
 def _ledger_books(session: str, yahoo: "dict | None"):
     """Candidate books for the session's forward ledger, best first: every
     stored Cboe SPX capture of the session (the full listing: each expiry an
-    open straddle can have), oldest first, then the Yahoo chain the calibrate
-    step downloaded (``yahoo``: recalibrate_heston's ``book_out``)."""
+    open straddle can have), oldest first, wherever it is stored
+    (cboe_downloader.find_books: the private store named by CBOE_BOOKS_DIR,
+    then data_store/options/cboe), then the Yahoo chain the calibrate step
+    downloaded (``yahoo``: recalibrate_heston's ``book_out``)."""
     import pandas as pd
 
-    for pq_path in sorted(capture_dir().glob(f"spx_{session}_*.parquet")):
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    for pq_path in cboe.find_books("SPX", session, data_dir=DATA):
         js = pq_path.with_suffix(".json")
         side = json.loads(js.read_text()) if js.exists() else {}
         raw = pd.read_parquet(pq_path)

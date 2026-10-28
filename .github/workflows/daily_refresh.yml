@@ -106,6 +106,30 @@ jobs:
           echo "slot=$slot" >> "$GITHUB_OUTPUT"
           echo "Slot: $slot -> steps: $steps"
 
+      # Raw Cboe books: Cboe's terms bar storing and redistributing its quotes and this
+      # repository is public (DATA_SOURCES.md). With the secrets CBOE_DATA_REPO (owner/name
+      # of a PRIVATE repository) and CBOE_DATA_TOKEN (contents read/write on it only) set,
+      # the run's raw books go there (scripts/ci/cboe_private.py) and the public commits
+      # keep a manifest of each (data_store/options/cboe_manifest/), never the quotes.
+      # The private repository is cloned into $RUNNER_TEMP, so readers of earlier books
+      # (cboe_downloader.find_books) find them through CBOE_BOOKS_DIR. configured is set
+      # before the clone: a failed clone must not route raw books to the public commits.
+      - name: Private Cboe book store
+        id: cboestore
+        continue-on-error: true
+        env:
+          CBOE_DATA_REPO: ${{ secrets.CBOE_DATA_REPO }}
+          CBOE_DATA_TOKEN: ${{ secrets.CBOE_DATA_TOKEN }}
+        run: |
+          if [ -z "$CBOE_DATA_REPO" ] || [ -z "$CBOE_DATA_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Raw Cboe books are committed publicly::raw Cboe option books are being committed to this public repository until the private data repository is configured (secrets CBOE_DATA_REPO and CBOE_DATA_TOKEN; see DATA_SOURCES.md)"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          d=$(python scripts/ci/cboe_private.py checkout --dir "$RUNNER_TEMP/cboe-data" --repo "$CBOE_DATA_REPO" | tail -1)
+          echo "books_dir=$d" >> "$GITHUB_OUTPUT"
+
       # The deploy streak the Overview prints (scripts/ci/deploy_streak.py): consecutive
       # NYSE sessions with a deploy commit on gh-pages before this run. Commit messages
       # only (--filter=tree:0), fetched into a scratch repository so the checkout's own
@@ -138,7 +162,31 @@ jobs:
         env:
           STEPS: ${{ steps.plan.outputs.steps }}
           REFRESH_SLOT: ${{ steps.plan.outputs.slot }}
+          CBOE_BOOKS_DIR: ${{ steps.cboestore.outputs.books_dir }}
         run: python scripts/cloud_refresh.py --steps "$STEPS"
+
+      # Configured: this run's raw books go to the private repository (copied, committed
+      # and pushed with retries); only then is each checked byte-identical to its
+      # private copy, given its public manifest (data_store/options/cboe_manifest/) and
+      # removed from the public tree. If the push fails there is no manifest (a later
+      # slot captures the session again), the books stay on the runner, and every
+      # public commit and artifact below still leaves data_store/options/cboe out.
+      - name: Move this run's raw Cboe books to the private store
+        id: privatebooks
+        if: always() && steps.refresh.outcome != 'skipped' && steps.cboestore.outputs.configured == 'true'
+        env:
+          CBOE_DATA_REPO: ${{ secrets.CBOE_DATA_REPO }}
+          CBOE_DATA_TOKEN: ${{ secrets.CBOE_DATA_TOKEN }}
+          SLOT: ${{ steps.plan.outputs.slot }}
+        run: |
+          p="$RUNNER_TEMP/cboe-data"; lst="$RUNNER_TEMP/private-books.lst"
+          [ -d "$p/.git" ] || python scripts/ci/cboe_private.py checkout --dir "$p" --repo "$CBOE_DATA_REPO"
+          python scripts/ci/cboe_private.py export --dir "$p" --list "$lst"
+          if [ ! -s "$lst" ]; then echo "No new raw Cboe books."; exit 0; fi
+          python scripts/ci/cboe_private.py push --dir "$p" --message "Raw Cboe books of run ${GITHUB_RUN_ID} (${SLOT})" || {
+            echo "::error title=Raw Cboe books not stored::the private repository did not take this run's raw books; they are only on this runner (never in a public commit or artifact). A later slot inside the live book captures them again."
+            exit 1; }
+          python scripts/ci/cboe_private.py finish --dir "$p" --repo "$CBOE_DATA_REPO" --list "$lst"
 
       # Everything this run created or changed under the record's directories leaves
       # the runner first, before any gate or push can fail: on 2026-10-19, -20 and
@@ -148,13 +196,17 @@ jobs:
       - name: Bundle this run's captures
         id: bundle
         if: always() && steps.refresh.outcome != 'skipped'
+        env:
+          PRIVATE_BOOKS: ${{ steps.cboestore.outputs.configured }}
         run: |
           b="$RUNNER_TEMP/captures"
           rm -rf "$b" && mkdir -p "$b"
+          raw=()            # the artifact is public too: no raw book in it once the private store exists
+          if [ "$PRIVATE_BOOKS" = "true" ]; then raw=(':(exclude)data_store/options/cboe'); fi
           git ls-files -z --others --modified --exclude-standard -- \
             data_store/options data_store/calibrations data_store/forward data_store/market \
             data_store/signals data_store/runs ':(exclude)data_store/calibrations/diagnostics' \
-            > "$RUNNER_TEMP/captures.lst"
+            "${raw[@]}" > "$RUNNER_TEMP/captures.lst"
           n=0
           while IFS= read -r -d '' f; do
             [ -f "$f" ] || continue
@@ -184,7 +236,12 @@ jobs:
       - name: Check the captures (integrity only)
         id: capturecheck
         if: always() && steps.refresh.outcome != 'skipped'
-        run: python scripts/ci/check_captures.py --out "$RUNNER_TEMP/captures.ok"
+        env:
+          PRIVATE_BOOKS: ${{ steps.cboestore.outputs.configured }}
+        run: |
+          flag=()
+          if [ "$PRIVATE_BOOKS" = "true" ]; then flag=(--no-raw-cboe); fi
+          python scripts/ci/check_captures.py --out "$RUNNER_TEMP/captures.ok" "${flag[@]}"
 
       - name: Commit captures
         id: commitcaptures
@@ -290,7 +347,10 @@ jobs:
           HEADLINE: ${{ steps.refresh.outputs.headline_calibration }}
           STEPS: ${{ steps.plan.outputs.steps }}
           RUN_UTC: ${{ steps.refresh.outputs.run_utc }}
+          PRIVATE_BOOKS: ${{ steps.cboestore.outputs.configured }}
         run: |
+          raw=()
+          if [ "$PRIVATE_BOOKS" = "true" ]; then raw=(':(exclude)data_store/options/cboe'); fi
           export REDERIVE="python scripts/cloud_refresh.py --rederive --steps '$STEPS' --now '$RUN_UTC'"
           title="Auto-refresh session ${SESSION:-unknown} (${SLOT}): labels +${LABELS_ADDED:-0}; calibration ${CALIBRATION:-not-run}"
           body="Capture files changed: ${PERSISTED:-0}. Headline calibration: ${HEADLINE:-none}."
@@ -298,7 +358,7 @@ jobs:
           scripts/ci/commit_and_push.sh "$title" "$body" \
             data_store/signals/regime_labels.parquet data_store/market data_store/options \
             data_store/calibrations ':(exclude)data_store/calibrations/diagnostics' data_store/forward \
-            data_store/runs
+            data_store/runs "${raw[@]}"
 
       # What derives from a new fit (cloud_refresh.refresh_session_artifacts): the
       # session's surface report and diagnostics, the headline fit's Greeks surface and

@@ -2314,8 +2314,8 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     the stored records state them."""
     pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
     text = _visible_text(pages["/"])
-    cboe = SHIPPED / "options" / "cboe"
-    caps = sorted(cboe.glob("*.json")) if cboe.is_dir() else []
+    caps = [f for sub in ("cboe", "cboe_manifest") if (SHIPPED / "options" / sub).is_dir()
+            for f in sorted((SHIPPED / "options" / sub).glob("*.json"))]
     for rec in (json.loads(f.read_text()) for f in caps):
         latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
         if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
@@ -2324,6 +2324,30 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
         assert dash.forward_ledger_protocol()["pending"] in text
+
+
+def test_pipeline_panel_reads_books_held_in_the_private_store(dash, tmp_path):
+    """CITSEC-06: once the raw books go to the private data repository the public
+    tree keeps a manifest of each (data_store/options/cboe_manifest/); the
+    pipeline panel's newest book per underlying reads those as it reads the
+    records beside committed books."""
+    opts = tmp_path / "options"
+    (opts / "cboe").mkdir(parents=True)
+    (opts / "cboe_manifest").mkdir()
+    old = {"underlying": "SPX", "session": "2026-10-20", "quote_time": "2026-10-21T03:32:10Z", "rows": 5}
+    new = {"schema": "cboe_manifest/1", "underlying": "SPX", "session": "2026-10-27",
+           "quote_time": "2026-10-28T02:15:00Z", "rows": 7, "private_path": "options/cboe/x.parquet"}
+    vix = {"underlying": "VIX", "session": "2026-10-20", "quote_time": "2026-10-21T03:32:11Z", "rows": 2}
+    (opts / "cboe" / "spx_2026-10-20_040622Z.json").write_text(json.dumps(old))
+    (opts / "cboe" / "vix_2026-10-20_040625Z.json").write_text(json.dumps(vix))
+    (opts / "cboe_manifest" / "spx_2026-10-27_023000Z.json").write_text(json.dumps(new))
+    got = {c["underlying"]: c for c in dash.latest_cboe_captures(tmp_path)}
+    assert (got["SPX"]["session"], got["SPX"]["rows"], got["SPX"]["file"]) == (
+        new["session"], new["rows"], "spx_2026-10-27_023000Z.json")
+    assert got["VIX"]["session"] == vix["session"]
+    (opts / "cboe_manifest" / "spx_2026-10-28_023000Z.json").write_text("{not json")
+    with pytest.raises(ValueError, match=r"options/cboe_manifest/spx_2026-10-28_023000Z\.json"):
+        dash.latest_cboe_captures(tmp_path)
 
 
 def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):

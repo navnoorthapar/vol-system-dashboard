@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # (kind, regex on the repo-relative path); the first match wins
 KINDS = [
     ("cboe books", r"^data_store/options/cboe/"),
+    ("cboe manifests", r"^data_store/options/cboe_manifest/"),
     ("SPX chain", r"^data_store/options/[a-z]+_\d{4}-\d{2}-\d{2}\.parquet$"),
     ("fit", r"^data_store/calibrations/joint_cal_"),
     ("diagnostics", r"^data_store/calibrations/diagnostics/"),

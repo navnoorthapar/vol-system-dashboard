@@ -51,10 +51,26 @@ jobs:
       - name: Install dependencies (locked)
         run: python -m pip install --require-hashes -r requirements-lock.txt
 
+      # The raw Cboe books held in the private data repository, when it is configured
+      # (daily_refresh.yml, DATA_SOURCES.md): a reproduction step that reads a book finds
+      # it through CBOE_BOOKS_DIR (cboe_downloader.find_books).
+      - name: Private Cboe book store
+        id: cboestore
+        continue-on-error: true
+        env:
+          CBOE_DATA_REPO: ${{ secrets.CBOE_DATA_REPO }}
+          CBOE_DATA_TOKEN: ${{ secrets.CBOE_DATA_TOKEN }}
+        run: |
+          if [ -z "$CBOE_DATA_REPO" ] || [ -z "$CBOE_DATA_TOKEN" ]; then echo "Not configured."; exit 0; fi
+          d=$(python scripts/ci/cboe_private.py checkout --dir "$RUNNER_TEMP/cboe-data" --repo "$CBOE_DATA_REPO" | tail -1)
+          echo "books_dir=$d" >> "$GITHUB_OUTPUT"
+
       # Writes the status JSON whatever the outcome (exit 1: an artifact outside its
       # tolerance), so a failed reproduction is committed and shown too.
       - name: Rebuild in a scratch copy and diff against the committed artifacts
         id: reproduce
+        env:
+          CBOE_BOOKS_DIR: ${{ steps.cboestore.outputs.books_dir }}
         run: make reproduce OUT="$RUNNER_TEMP/reproduce" STATUS=data_store/reproduce/status.json
 
       - name: Report

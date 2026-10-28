@@ -856,3 +856,136 @@ def test_each_new_ledger_is_attested_after_the_capture_commit():
     assert checkout["with"]["persist-credentials"] is False
     assert re.fullmatch(r"actions/attest-build-provenance@[0-9a-f]{40}", attest["uses"])
     assert attest["with"]["subject-path"] == "${{ needs.refresh.outputs.ledgers }}"
+
+
+def _raw_book(d, stem, rows=3):
+    """A raw Cboe book pair as cboe_downloader.save_capture writes it (synthetic quotes)."""
+    import json
+
+    import pandas as pd
+    und, session = stem.split("_")[0], stem.split("_")[1]
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"snapshot_date": [session] * rows, "bid": [1.0 + i for i in range(rows)],
+                  "ask": [1.5 + i for i in range(rows)]}).to_parquet(d / f"{stem}.parquet", index=False)
+    (d / f"{stem}.json").write_text(json.dumps({
+        "underlying": und.upper(), "session": session, "quote_time": f"{session}T21:00:00Z",
+        "book_state": "closing", "sha256": "ab" * 32, "rows": rows, "two_sided_rows": rows, "expiries": 1}))
+    return d / f"{stem}.parquet"
+
+
+def test_raw_cboe_books_go_to_the_private_store_and_only_manifests_stay_public(tmp_path):
+    """CITSEC-06, the owner's decision: with the private data repository
+    configured, the run's raw books are copied into its checkout, pushed, checked
+    byte-identical, given a public manifest and removed from the public tree; the
+    capture check then lists the manifests and never a raw book. A book the
+    private repository did not take gets no manifest and stays out of every
+    public commit."""
+    import json
+    import subprocess
+    import sys
+
+    *_, git, work, _ = _repo(tmp_path)
+    remote = tmp_path / "private.git"
+    git("init", "--bare", "-q", str(remote), cwd=tmp_path)
+    seed = tmp_path / "seed"
+    git("clone", "-q", str(remote), str(seed), cwd=tmp_path)
+    (seed / "README.md").write_text("private raw Cboe books\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "init", cwd=seed)
+    git("push", "-q", "origin", "HEAD:main", cwd=seed)
+    script = [sys.executable, str(ROOT / "scripts" / "ci" / "cboe_private.py")]
+    priv, lst = tmp_path / "cboe-data", tmp_path / "private.lst"
+
+    def run(*a):
+        return subprocess.run([*script, *a, "--root", str(work)], capture_output=True, text=True, check=False)
+    r = run("checkout", "--dir", str(priv), "--repo", str(remote))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip().splitlines()[-1] == str(priv / "options" / "cboe")
+    pub = work / "data_store" / "options" / "cboe"
+    books = [_raw_book(pub, "spx_2026-10-27_023000Z"), _raw_book(pub, "vix_2026-10-27_023001Z", rows=2)]
+    assert run("export", "--dir", str(priv), "--list", str(lst)).returncode == 0
+    listed = lst.read_text().split()
+    assert sorted(listed) == sorted(f"data_store/options/cboe/{p.name}" for b in books
+                                    for p in (b, b.with_suffix(".json")))
+    assert not (work / "data_store" / "options" / "cboe_manifest").exists()   # none before the push
+    assert run("push", "--dir", str(priv), "--message", "books").returncode == 0
+    held = git("ls-tree", "-r", "--name-only", "main", cwd=remote).split()
+    assert sorted(held) == sorted(["README.md", *(f"options/cboe/{p.name}" for b in books
+                                                  for p in (b, b.with_suffix(".json")))])
+    r = run("finish", "--dir", str(priv), "--repo", "owner/books", "--list", str(lst))
+    assert r.returncode == 0, r.stdout
+    assert not list(pub.glob("*"))                                 # the public raw copies are gone
+    man = sorted((work / "data_store" / "options" / "cboe_manifest").glob("*.json"))
+    assert [m.stem for m in man] == [b.stem for b in books]
+    assert json.loads(man[0].read_text())["private_path"] == f"options/cboe/{books[0].name}"
+    out = tmp_path / "ok.txt"
+    check = [sys.executable, str(ROOT / "scripts" / "ci" / "check_captures.py"), "--out", str(out),
+             "--root", str(work), "--no-raw-cboe"]
+    r = subprocess.run(check, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stdout
+    assert out.read_text().split() == [f"data_store/options/cboe_manifest/{m.name}" for m in man]
+    # a book the private repository did not take: no manifest, never listed for a public commit
+    late = _raw_book(pub, "spx_2026-10-28_023000Z")
+    r = subprocess.run(check, capture_output=True, text=True, check=False)
+    assert f"data_store/options/cboe/{late.name}" not in out.read_text()
+    assert "::warning title=Raw Cboe book::" in r.stdout
+    assert run("export", "--dir", str(priv), "--list", str(lst)).returncode == 0
+    (priv / "options" / "cboe" / late.name).write_bytes(b"not the same book")
+    r = run("finish", "--dir", str(priv), "--repo", "owner/books", "--list", str(lst))
+    assert r.returncode == 1
+    assert "the private copy is missing or differs" in r.stdout
+    assert late.exists()
+    assert not (work / "data_store" / "options" / "cboe_manifest" / f"{late.stem}.json").exists()
+    # a malformed manifest fails the capture check
+    bad = work / "data_store" / "options" / "cboe_manifest" / "spx_2026-10-29_023000Z.json"
+    bad.write_text(json.dumps({**json.loads(man[0].read_text()), "stem": "spx_2026-10-29_023000Z",
+                               "session": "2026-10-29", "parquet_sha256": "x"}))
+    r = subprocess.run(check, capture_output=True, text=True, check=False)
+    assert r.returncode == 1
+    assert "no parquet_sha256" in r.stdout
+
+
+def test_the_workflow_keeps_raw_books_out_of_public_commits_when_the_private_store_is_set():
+    """The workflow side: the private store is used only when both secrets are set
+    (otherwise a warning says raw books are still committed publicly); when set,
+    cloud_refresh reads earlier books from its checkout, this run's books are moved
+    before the bundle, and the bundle, the capture check and the data commit all
+    leave data_store/options/cboe out. reproduce.yml checks the store out too."""
+    import yaml
+
+    wf = yaml.safe_load(DAILY)
+    steps = wf["jobs"]["refresh"]["steps"]
+    names = [s.get("name") for s in steps]
+    store = steps[names.index("Private Cboe book store")]
+    assert store["continue-on-error"] is True
+    assert store["env"] == {"CBOE_DATA_REPO": "${{ secrets.CBOE_DATA_REPO }}",
+                            "CBOE_DATA_TOKEN": "${{ secrets.CBOE_DATA_TOKEN }}"}
+    run = store["run"]
+    assert '[ -z "$CBOE_DATA_REPO" ] || [ -z "$CBOE_DATA_TOKEN" ]' in run
+    assert "raw Cboe option books are being committed to this public repository" in run
+    assert run.index('echo "configured=true"') < run.index("cboe_private.py checkout")
+    assert names.index("Private Cboe book store") < names.index("Run cloud_refresh.py")
+    refresh = steps[names.index("Run cloud_refresh.py")]
+    assert refresh["env"]["CBOE_BOOKS_DIR"] == "${{ steps.cboestore.outputs.books_dir }}"
+    move = steps[names.index("Move this run's raw Cboe books to the private store")]
+    i_move = names.index("Move this run's raw Cboe books to the private store")
+    assert names.index("Run cloud_refresh.py") < i_move < names.index("Bundle this run's captures")
+    assert "steps.cboestore.outputs.configured == 'true'" in move["if"]
+    order = [move["run"].index(f"cboe_private.py {c}") for c in ("export", "push", "finish")]
+    assert order == sorted(order)
+    for name in ("Bundle this run's captures", "Commit data files"):
+        st = steps[names.index(name)]
+        assert st["env"]["PRIVATE_BOOKS"] == "${{ steps.cboestore.outputs.configured }}", name
+        assert "raw=(':(exclude)data_store/options/cboe')" in st["run"], name
+        assert '"${raw[@]}"' in st["run"], name
+    cc = steps[names.index("Check the captures (integrity only)")]
+    assert "flag=(--no-raw-cboe)" in cc["run"]
+    assert '"${flag[@]}"' in cc["run"]
+    repro = yaml.safe_load((ROOT / ".github" / "workflows" / "reproduce.yml").read_text())
+    rsteps = {s.get("name"): s for s in repro["jobs"]["reproduce"]["steps"]}
+    assert "cboe_private.py checkout" in rsteps["Private Cboe book store"]["run"]
+    rebuild = rsteps["Rebuild in a scratch copy and diff against the committed artifacts"]
+    assert rebuild["env"]["CBOE_BOOKS_DIR"] == "${{ steps.cboestore.outputs.books_dir }}"
+    doc = (ROOT / "DATA_SOURCES.md").read_text()
+    for part in ("CBOE_DATA_REPO", "CBOE_DATA_TOKEN", "Contents: Read and write", "cboe_manifest"):
+        assert part in doc, part
