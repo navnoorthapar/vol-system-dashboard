@@ -467,12 +467,21 @@ def score_tiles(a: Audit, c: Ctx) -> None:
         rep, off = M.num(vix.get("replicated")), c.official("VIX", c.session)
         a.num(P_SCORES, "VIX replicated (vix_replication.json)", t.select_one(".kpi-value"), rep)
         sub = t.select_one(".kpi-sub")
-        nums(a, P_SCORES, "Cboe close (DB) and gap = replicated − close", sub,
-             [off, None if rep is None or off is None else rep - off])
+        # the replicated level against the official VIX's range that day (the record's
+        # vix_daily low and high; the page prints the range the replication stored)
         hl = c.store.sql("SELECT low, high FROM vix_daily WHERE date = ?", (c.session,))
-        inside = bool(len(hl) and off is not None and hl["low"].iloc[0] <= off <= hl["high"].iloc[0])
-        a.equal(P_SCORES, "'close inside the day range' (DB low/high)",
-                "close inside the day range" in text_of(sub), inside)
+        lo = M.num(hl["low"].iloc[0]) if len(hl) else None
+        hi = M.num(hl["high"].iloc[0]) if len(hl) else None
+        ranged = rep is not None and lo is not None and hi is not None
+        nums(a, P_SCORES, "Cboe close (DB), gap = replicated − close, the day's VIX range", sub,
+             [off, None if rep is None or off is None else rep - off, *([lo, hi] if ranged else [])])
+        if rep is not None and lo is not None and hi is not None:
+            where = "inside" if lo <= rep <= hi else "outside"
+            a.text(P_SCORES, "replicated level against the day's VIX range", sub,
+                   f"{where} the day\u2019s VIX range", contains=True)
+        else:
+            a.equal(P_SCORES, "no day-range clause without a recorded range",
+                    "VIX range" in text_of(sub), False)
         rg = M.session_range([c.vix_gap(x) for x in c.all if x.vx])
         ci = t.select_one(".kpi-ci")
         if rg is None:

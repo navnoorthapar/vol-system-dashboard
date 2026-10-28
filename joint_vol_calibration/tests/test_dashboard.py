@@ -5986,7 +5986,7 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
         for route, html in pages.items():
             text = _visible_text(html)
             found = {f"{v:.{p}f}" for p in (2, 3, 4)
-                     if re.search(r"(?<![\d.])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
+                     if re.search(r"(?<![\d.\u2212-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
             if found:
                 seen[route] = found
         assert set(must) <= set(seen), (name, seen)
@@ -9003,3 +9003,27 @@ def test_smile_slice_tables_take_medians_of_unrounded_model_ivs(dash, pages):
                 assert cell == want, (e, row[0], m_label)
                 checked += 1
     assert checked > 0
+
+
+def test_the_vix_tile_says_where_the_replicated_level_sits_in_the_days_range(dash, pages):
+    """Found by simulate_next_session: the replication stores whether the REPLICATED
+    VIX lies inside the official VIX's range that day (report.py), but the tile said
+    'close inside the day range', which any close is. It now says whether the
+    replicated level is inside or outside the day's VIX range, and prints the range."""
+    from bs4 import BeautifulSoup
+    vx = json.loads(_surface_file("vix_replication.json").read_text())
+    row = (vx.get("indices") or {}).get("VIX") or {}
+    soup = BeautifulSoup(pages["/surface"], "lxml")
+    tile = next((k for k in soup.select("#surface-scores .kpi")
+                 if k.select_one(".kpi-label").get_text(strip=True) == "VIX from this chain"), None)
+    if tile is None or row.get("replicated") is None:
+        pytest.skip("no VIX replicated on the newest surface session")
+    sub = tile.select_one(".kpi-sub").get_text(" ", strip=True)
+    assert "close inside the day range" not in sub
+    off = row.get("official") or {}
+    if row.get("official_inside_day_range") is None or off.get("low") is None:
+        assert "VIX range" not in sub
+    else:
+        where = "inside" if row["official_inside_day_range"] else "outside"
+        rng = f"{dash._fmt(float(off['low']), '.2f')}–{dash._fmt(float(off['high']), '.2f')}"
+        assert f"{where} the day’s VIX range {rng}" in sub
