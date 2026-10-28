@@ -4502,6 +4502,155 @@ def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
     assert text in _visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row))
 
 
+def _inventory_row(pages: dict, mid: str) -> str:
+    hit = re.search(rf'<tr id="inv-{mid.lower()}">(.*?)</tr>', pages["/model-risk"], re.DOTALL)
+    assert hit, mid
+    row = hit.group(1)
+    return " ".join(_visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row)).split())
+
+
+def test_inventory_prose_states_no_fact_the_data_can_change(dash, pages):
+    """VALIDATOR-04, CODE-03, CIO-04, QUANT-05, CITSEC-13: model_inventory.json typed
+    'σ sits on its box ceiling in 2 of 5 fits' (six are stored), 'on its 2.0 cap in
+    the headline fit' (σ 1.833) and 'No entry committed yet' (a ledger entry is
+    committed), and the page printed them beside checks that said otherwise.
+    The literal prose now states no count over fits or sessions, no session date,
+    no parameter on a bound and no artifact that does not exist yet
+    (desk_inventory.STALE_PROSE): each such fact is a placeholder the page fills
+    from the artifacts, and every placeholder the JSON uses is one it fills."""
+    di = dash.desk_inventory
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    used: set[str] = set()
+    for m in inv["models"]:
+        for field in di.PROSE_FIELDS:
+            text = m.get(field) or ""
+            assert di.stale_prose(text) == [], (m["id"], field, di.stale_prose(text))
+            used |= set(di.placeholders(text))
+        used |= set(di.placeholders(m.get("outputs_pending") or ""))
+    known = set(dash.inventory_values(dash.load_page3(), [], {}))
+    assert used <= known, sorted(used - known)
+    assert {"sigma_box", "greeks_sigma", "beta_later", "rough_h", "ledger_record"} <= used
+    tbl = re.search(r'id="inventory-table">(.*?)</table>', pages["/model-risk"], re.DOTALL).group(1)
+    assert not re.search(r"\{[a-z0-9_]+\}", tbl)
+
+
+def test_inventory_facts_are_the_artifacts(dash, pages):
+    """Each fact the inventory's placeholders fill is recomputed here from its
+    artifact (the gated pickles, diagnostics/summary.json, the Greeks surface's
+    provenance, the β chains, forecast_eval.json, the classifier and Quintic
+    pickles, the forward ledger files) and must be the rendered text, whichever
+    way the data fall."""
+    import pyarrow.parquet as pq
+
+    from joint_vol_calibration.backtest import run_backtest as rb
+    from joint_vol_calibration.config import HESTON_BOUNDS, ROUGH_HESTON_H_BOUNDS
+
+    def count(k: int, n: int, what: str) -> str:
+        if k == 0:
+            return f"no {what}" if n == 1 else f"none of the {n} {what}s"
+        if n == 1:
+            return f"the only {what}"
+        return f"all {n} {what}s" if k == n else f"{k} of {n} {what}s"
+
+    gated = []
+    for r in dash.scan_calibrations():
+        if r["legacy"] is False and r["ok"] and r["session"]:
+            with open(r["path"], "rb") as f:
+                gated.append((r["session"], pickle.load(f)))
+    gated.sort(key=lambda x: x[0])
+    n = len(gated)
+    assert n
+    m4 = _inventory_row(pages, "M4")
+    s_lo, s_hi = HESTON_BOUNDS["sigma"]
+    pinned = [(s, "ceiling" if c["params"]["sigma"] >= (s_lo + s_hi) / 2 else "floor") for s, c in gated
+              if "sigma" in (c.get("pinned_params") or [])]
+    for side in ("ceiling", "floor"):
+        on = [s for s, b in pinned if b == side]
+        if on:
+            what = count(len(on), n, "gate-passing fit")
+            assert f"σ sits on its box {side} in {what} ({', '.join(on)})" in m4
+        else:
+            assert f"box {side}" not in m4
+    if not pinned:
+        assert f"σ is inside its box in {count(n, n, 'gate-passing fit')}" in m4
+    w3 = [c["weights"]["w3"] for _, c in gated if (c.get("weights") or {}).get("w3") is not None]
+    if w3 and not any(w3):
+        assert f"the VIX-options leg has weight 0 in {count(len(w3), len(w3), 'gate-passing fit')}" in m4
+    elif w3:
+        what = count(sum(1 for w in w3 if w > 0), len(w3), "gate-passing fit")
+        assert f"the VIX-options leg is weighted in {what}" in m4
+    rows = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    prof = [r for r in rows if all(r.get(k) is not None for k in (
+        "sigma_free", "kappa_free", "sigma_free_oos", "sigma_cap2_oos", "sigma_free_loss_rel"))]
+    costliest = min(prof, key=lambda r: r["sigma_free_loss_rel"]) if prof else None
+    if costliest and costliest["sigma_free_loss_rel"] < -1e-6:
+        assert f"the {costliest['session']} fit moves" in m4
+        assert (f"to σ {costliest['sigma_free']:.2f}, κ {costliest['kappa_free']:.1f} "
+                "and its out-of-sample error "
+                f"from {costliest['sigma_cap2_oos']:.2f} to {costliest['sigma_free_oos']:.2f} vol pts") in m4
+    vv = [(r["vvix_model_cap2"], r["vvix_market"]) for r in rows
+          if r.get("vvix_model_cap2") is not None and r.get("vvix_market") is not None]
+    if vv:
+        mods, mkts = [a for a, _ in vv], [b for _, b in vv]
+        assert (f"(model {min(mods):.0f}–{max(mods):.0f} "
+                f"against ^VVIX {min(mkts):.0f}–{max(mkts):.0f})") in m4
+    # M6: the σ of the fit the Greeks surface was built from, and 'cap' only when σ is on it
+    meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
+    prov = json.loads(meta[b"greeks_provenance"])
+    sig, (lo, hi) = float(prov["params"]["sigma"]), HESTON_BOUNDS["sigma"]
+    m6 = _inventory_row(pages, "M6")
+    assert f"{sig:.2f} in the {prov['as_of_date']} fit the surface is built from" in m6
+    assert ("cap" in m6) is (abs(sig - hi) <= 1e-4 * (hi - lo))
+    assert ("floor" in m6) is (abs(sig - lo) <= 1e-4 * (hi - lo))
+    # M7: every chain after β's estimation set
+    tab = rb.estimate_beta(include_live=False)
+    later = [(str(pd.Timestamp(r["session"]).date()), float(r["ratio"])) for r in tab.to_dict("records")
+             if str(r["status"]).startswith("out-of-sample") and pd.notna(r["ratio"])]
+    m7 = _inventory_row(pages, "M7")
+    for s, ratio in later:
+        assert f"{ratio:.2f} ({s})" in m7
+    assert ("holds no chain after the estimation set" in m7) is (not later)
+    assert "first later chain" not in m7
+    # M9: the PDV forecaster's rank on both losses
+    rank = json.loads((SHIPPED / "backtest" / "inference" / "forecast_eval.json").read_text())
+    rank = rank["backtest_window"]["rank"]
+    m9 = _inventory_row(pages, "M9")
+    for key, label in (("mse", "21-day MSE"), ("qlike", "QLIKE")):
+        assert f"{dash.ordinal(rank[key]['pdv'])} of {len(rank[key])} on {label}" in m9
+    # M11: the classifier's stored evaluation
+    ev = dash._load_pickle(SHIPPED / "signals" / "regime_classifier.pkl").metadata_["evaluation"]
+    m11 = _inventory_row(pages, "M11")
+    assert f"({ev['oos_acc'] * 100:.1f}% against {ev['persistence_acc'] * 100:.1f}% accuracy" in m11
+    assert ("Loses to" in m11) is (ev["oos_acc"] < ev["persistence_acc"])
+    # M13: the stored Quintic fit's own record
+    q = dash._load_pickle(max((SHIPPED / "calibrations").glob("quintic_cal_*.pkl")))
+    m13 = _inventory_row(pages, "M13")
+    assert ("Not converged" in m13) is (not q["success"])
+    if q["at_bound"].get("epsilon"):
+        assert f"ε on its {dash._fmt(q['params_dict']['epsilon'], 'g')} bound" in m13
+    # M15: rough Heston's H on its floor, and at ½ (Heston)
+    h_lo, h_hi = ROUGH_HESTON_H_BOUNDS
+    floor = [r["session"] for r in rows if r["joint_rough_H"] <= h_lo + 1e-6]
+    half = [r["session"] for r in rows if r["joint_rough_H"] >= h_hi - 1e-9]
+    m15 = _inventory_row(pages, "M15")
+    for s in floor:
+        assert s in m15.split("floor on ")[1].split(";")[0]
+    if half and len(rows) > 1:
+        assert f"{count(len(half), len(rows), 'diagnosed session')}: " in m15
+        assert all(s in m15 for s in half)
+    # M18: the ledger files, and no 'no entry' once one exists
+    files = sorted((SHIPPED / "forward").glob("ledger_*.json"))
+    m18 = _inventory_row(pages, "M18")
+    if files:
+        first, last = files[0].stem[len("ledger_"):], files[-1].stem[len("ledger_"):]
+        span = first if len(files) == 1 else f"{first} → {last}"
+        noun = "session" if len(files) == 1 else "sessions"
+        assert f"{len(files)} {noun} registered ({span}), its hash chain intact" in m18
+        assert "no entry" not in m18.lower()
+    else:
+        assert "No entry committed yet" in m18
+
+
 def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
     """P1.3e: the first Overview result read 'Quote-grade surface · held-out
     strikes'; it is the arbitrage-free SVI surface with alternate strikes held

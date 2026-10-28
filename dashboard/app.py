@@ -82,6 +82,7 @@ import desk_charts as charts  # noqa: E402
 import desk_cone  # noqa: E402
 import desk_density  # noqa: E402
 import desk_glossary  # noqa: E402
+import desk_inventory  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
@@ -2650,7 +2651,8 @@ def _gated_history() -> list[dict]:
                     "vix": _num(losses.get("vix_index_rmse")),
                     "wing": _num(losses.get("spx_oos_put_wing_rmse")),
                     "vx": _num(losses.get("vx_futures_rmse_oos")),
-                    "pinned": list(c.get("pinned_params") or [])})
+                    "pinned": list(c.get("pinned_params") or []),
+                    "w3": _num((c.get("weights") or {}).get("w3"))})
     return sorted(out, key=lambda r: r["session"])
 
 
@@ -6752,19 +6754,84 @@ def surface_check_values(surf: dict) -> dict:
             "n_ex": n_ex, "n_q": n_q}
 
 
+def _output_written(outputs: Any) -> bool:
+    """Every output path exists and, for a directory, holds a file (the inventory
+    prints an output's 'pending' note until then). 'data_store/...' resolves
+    under DATA, the record the pages read."""
+    outs = [outputs] if isinstance(outputs, str) else list(outputs or [])
+
+    def one(rel: str) -> bool:
+        p = DATA / rel[len("data_store/"):] if rel.startswith("data_store/") else ROOT / rel
+        return any(x.is_file() for x in p.iterdir()) if p.is_dir() else p.is_file()
+    return bool(outs) and all(one(o) for o in outs)
+
+
+def inventory_values(greeks: dict, beta_later: list[dict] | None,
+                     classifier_eval: dict | None) -> dict[str, str]:
+    """The model inventory's {placeholders}, each from its artifact (desk_inventory).
+    ``greeks`` is load_page3's result, ``beta_later`` beta_estimation's later
+    chains and ``classifier_eval`` the research classifier's stored evaluation;
+    the rest is read here."""
+    from joint_vol_calibration.config import (
+        HESTON_BOUNDS,
+        PROFILE_KAPPA_MAX,
+        ROUGH_HESTON_H_BOUNDS,
+        SIGMA_PROFILE_CAPS,
+    )
+
+    s_lo, s_hi = (float(x) for x in HESTON_BOUNDS["sigma"])
+    hist = _gated_history()
+
+    def side(h: dict) -> str | None:
+        if "sigma" not in h["pinned"]:
+            return None
+        return "ceiling" if float(h["params"]["sigma"]) >= (s_lo + s_hi) / 2 else "floor"
+    diag = artifacts.load_diagnostics_summary(DATA)
+    rows = (diag.get("rows") or []) if diag.get("state") == "ok" else []
+    prov = greeks.get("provenance") or {}
+    g_sigma = _num((prov.get("params") or {}).get("sigma"))
+    qpaths = sorted(glob.glob(str(DATA / "calibrations" / "quintic_cal_*.pkl")))
+    q = _load_pickle(qpaths[-1]) if qpaths else {}
+    q_par = q.get("params_dict") or {}
+    q_names = {"a0": "alpha0", "a1": "alpha1", "a3": "alpha3", "a5": "alpha5"}
+    conv = q.get("convergence") or {}
+    inf = artifacts.load_inference(DATA)
+    ev = classifier_eval or {}
+    return {
+        "vx_futures_oos_rmse": vx_futures_oos_text(),
+        "sigma_box": desk_inventory.sigma_box_text([(h["session"], side(h)) for h in hist]),
+        "sigma_box_cost": desk_inventory.sigma_box_cost_text(
+            rows, {h["session"]: h["params"] for h in hist}, max(SIGMA_PROFILE_CAPS), PROFILE_KAPPA_MAX),
+        "vvix_boxed": desk_inventory.vvix_boxed_text(rows),
+        "vix_options_leg": desk_inventory.vix_options_leg_text([h["w3"] for h in hist]),
+        "greeks_sigma": desk_inventory.greeks_sigma_text(
+            _date_str(prov.get("as_of_date")), g_sigma, (s_lo, s_hi),
+            _bound_side(g_sigma, s_lo, s_hi) if g_sigma is not None else None),
+        "beta_later": desk_inventory.beta_later_text([(c["session"], c["ratio"]) for c in beta_later or []]),
+        "pdv_rank": desk_inventory.pdv_rank_text(
+            pdv_forecast_rank(inf.get("forecast")) if inf.get("state") == "ok" else None),
+        "classifier_skill": desk_inventory.classifier_text(
+            None if ev.get("oos_acc") is None else float(ev["oos_acc"]) * 100,
+            None if ev.get("persistence_acc") is None else float(ev["persistence_acc"]) * 100),
+        "quintic_fit": desk_inventory.quintic_text(
+            bool(qpaths), bool(q.get("success")), [conv.get("de_message"), conv.get("polish_message")],
+            [(k, q_par.get(q_names.get(k, k))) for k, on in (q.get("at_bound") or {}).items() if on]),
+        "rough_h": desk_inventory.rough_h_text(rows, *(float(x) for x in ROUGH_HESTON_H_BOUNDS)),
+        "ledger_record": desk_inventory.ledger_text(artifacts.load_forward_ledger(DATA)),
+    }
+
+
 def load_model_risk() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
+    inv_models: list[dict] = []
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
-        # numbers in the inventory's prose are computed from the artifacts, never typed
-        vx_txt = None
-        for m in inv["models"]:
-            if "{vx_futures_oos_rmse}" in m.get("limitations", ""):
-                vx_txt = vx_txt or vx_futures_oos_text()
-                m["limitations"] = m["limitations"].replace("{vx_futures_oos_rmse}", vx_txt)
+        inv_models = inv["models"]
         d["inventory"] = inv["models"]
         d["vendor_inputs"] = inv.get("vendor_inputs") or []
         d["inventory_about"] = inv.get("about")
+    beta_later: list[dict] | None = None
+    clf_eval: dict | None = None
     p2 = load_page2()
     for e in p2.get("errors") or []:
         d["errors"].append(e)
@@ -6829,6 +6896,7 @@ def load_model_risk() -> dict[str, Any]:
         beta = _num(st.get("atm_to_vix_ratio", (st.get("metrics") or {}).get("atm_to_vix_ratio")))
         be = beta_estimation(None)
         later = be.get("later") or []
+        beta_later = later
         newest = later[-1] if later else None
         drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
         chains = sorted((c for c in be.get("chains") or [] if c["role"] in ("estimation", "later")
@@ -6878,6 +6946,7 @@ def load_model_risk() -> dict[str, Any]:
     with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
         clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
         ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
+        clf_eval = ev
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
             add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (percentage pts)", gap,
@@ -6939,6 +7008,11 @@ def load_model_risk() -> dict[str, Any]:
                                 ("Data", ARB_CHECK, "arb_exec_share")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
+    # every count, session and state in the inventory's prose is computed from the
+    # artifacts (desk_inventory), never typed; an unknown placeholder fails the build
+    with _loader_boundary(d, "model inventory prose (dashboard/model_inventory.json placeholders)"):
+        d["inventory"] = desk_inventory.fill_models(
+            inv_models, inventory_values(g, beta_later, clf_eval), _output_written)
     # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory
     # order (the vendor-data checks last), the order they were added within a model
     order = [m["id"] for m in d["inventory"]] + [v.get("id") for v in d.get("vendor_inputs") or []] + ["Data"]
