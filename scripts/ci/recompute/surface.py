@@ -312,7 +312,8 @@ def chain_badge(a: Audit, c: Ctx) -> None:
         return
     qt = inp.get("quote_time") or uni.get("quote_time")
     a.text(P_HEAD, "chain source", badge[0] if badge else None, "Chain: " + parts[0])
-    a.text(P_HEAD, "quote time", badge[1] if len(badge) > 1 else None, parts[1])
+    for i, want in enumerate(parts[1:], start=1):
+        a.text(P_HEAD, f"quote time, part {i}", badge[i] if len(badge) > i else None, want)
     rows_el = next((b for b in badge if "rows →" in text_of(b)), None)
     shown = M.num(inp.get("chain_rows")) is not None and M.num(uni.get("n_universe")) is not None
     a.equal(P_HEAD, "chain rows shown (surface.json records chain_rows and n_universe)",
@@ -524,7 +525,7 @@ def chain_parts(c: Ctx) -> list[str]:
     """[name, time clause] of the session's chain (data.chain_words); [] when no
     chain source is recorded."""
     w = chain_words(c.sj.get("inputs") or {}, c.sj.get("universe") or {})
-    return list(w) if w else []
+    return [w[0], *w[2]] if w else []
 
 
 def chain_text(c: Ctx) -> str:

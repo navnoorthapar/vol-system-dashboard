@@ -5667,7 +5667,8 @@ def chain_provenance(surface_json: dict) -> dict | None:
     (option_chain.t_origin; VALIDATOR-01, QUANT-01): such a chain is named a
     download with its fetch time, never 'quotes at'. A Cboe book records the
     time of its quotes. Keys: vendor ('yahoo', 'cboe' or the raw source), name,
-    short, time (the quote-time clause), fetched_as_quote_time."""
+    short, time (the quote-time clause), badge (that clause in parts short
+    enough to set unbroken on a 320 px phone), fetched_as_quote_time."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip().lower()
@@ -5677,15 +5678,17 @@ def chain_provenance(surface_json: dict) -> dict | None:
     if src in YAHOO:
         if qt:
             from_fetch = str(inp.get("t_origin_basis") or "").startswith("quote_time")
+            badge = [f"fetched {_utc_text(qt)}", "Yahoo reports no quote times",
+                     *(["T measured from the fetch"] if from_fetch else [])]
             return {"vendor": "yahoo", "name": "Yahoo Finance download", "short": "Yahoo download",
-                    "time": (f"fetched {_utc_text(qt)}; Yahoo reports no quote times"
-                             + (", T measured from the fetch" if from_fetch else "")),
+                    "time": f"{badge[0]}; {', '.join(badge[1:])}", "badge": badge,
                     "fetched_as_quote_time": True}
         return {"vendor": "yahoo", "name": CHAIN_SOURCES[src], "short": "Yahoo close",
-                "time": "no quote time", "fetched_as_quote_time": False}
+                "time": "no quote time", "badge": ["no quote time"], "fetched_as_quote_time": False}
     name = CHAIN_SOURCES.get(src, src)
-    return {"vendor": src, "name": name, "short": name,
-            "time": f"quotes at {_utc_text(qt)}" if qt else "no quote time", "fetched_as_quote_time": False}
+    time = f"quotes at {_utc_text(qt)}" if qt else "no quote time"
+    return {"vendor": src, "name": name, "short": name, "time": time, "badge": [time],
+            "fetched_as_quote_time": False}
 
 
 def _chain_clause(surface_json: dict) -> str:
@@ -5714,7 +5717,7 @@ def chain_sentence(surface_json: dict) -> str:
 def chain_source(surface_json: dict) -> list[str] | None:
     """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
     pv = chain_provenance(surface_json)
-    return [pv["name"], pv["time"]] if pv else None
+    return [pv["name"], *pv["badge"]] if pv else None
 
 
 def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
@@ -5726,7 +5729,7 @@ def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str |
     src = chain_source(surface_json)
     if not src:
         return None
-    parts = [f"Chain: {src[0]}", src[1]]
+    parts = [f"Chain: {src[0]}", *src[1:]]
     rows, scored = _num(inp.get("chain_rows")), _num(uni.get("n_universe"))
     if rows is not None and scored is not None:
         parts.append(f"{_fmt(int(rows), ',')} rows → {_fmt(int(scored), ',')} scored")

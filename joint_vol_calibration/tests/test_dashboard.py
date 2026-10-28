@@ -8903,6 +8903,8 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
         assert "close snapshot" not in text
         assert "fetched 2026-10-27 05:26 UTC" in text
         assert "T measured from the fetch" in text
+    # the badge sets each part unbroken: every part fits a 320 px phone (at most 40 characters)
+    assert all(len(p) <= 40 for p in dash.chain_source(fetched)), dash.chain_source(fetched)
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
     assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
     # every page that names the newest surface session's chain says what it is

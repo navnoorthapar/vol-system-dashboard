@@ -623,7 +623,7 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
         detail += [float(cur["butterfly"]), float(cur["calendar"])]
     if hes:
         detail += [hes["mhs"], hes["inside"]]
-    detail += [f" {words[0]}, {words[1]}."] if words else []
+    detail += [f" {words[0]}, {words[1]}."] if words else []  # (name, time clause, badge parts)
     el = part(c, ".result-d")
     said(a, P_KEY, "surface card: detail", el, detail, "scorecard.json, surface.json inputs")
     if words:

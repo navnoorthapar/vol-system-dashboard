@@ -282,7 +282,7 @@
 
 {% set grid = b.get('grid') or [] %}
 {% if be or grid %}
-<div class="g pair" id="beta">
+<div class="g pair top" id="beta">
   {% call m.panel('beta-chains', 'β = ATM vol / VIX · the chains behind it', 's6') %}
     {% if be %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β estimation chains (scrollable)">

@@ -118,8 +118,9 @@ def _utc_minutes(ts: Any) -> str:
     return t.replace("T", " ")
 
 
-def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str] | None:
-    """(name, time clause) a page must use for a stored chain, from surface.json inputs:
+def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str, list[str]] | None:
+    """(name, time clause, the clause's badge parts) a page must use for a stored
+    chain, from surface.json inputs:
     a Yahoo chain has no quote times, so one whose quote_time holds the job's fetch
     instant is a download 'fetched …' (with 'T measured from the fetch' when its T
     origin was that instant), one without is a close snapshot with 'no quote time';
@@ -131,12 +132,14 @@ def chain_words(inputs: dict, universe: dict | None = None) -> tuple[str, str] |
     qt = inputs.get("quote_time") or uni.get("quote_time")
     if src in ("yfinance", "yahoo"):
         if not qt:
-            return "Yahoo Finance close snapshot", "no quote time"
-        tail = ", T measured from the fetch" if str(inputs.get("t_origin_basis") or "").startswith(
-            "quote_time") else ""
-        return "Yahoo Finance download", f"fetched {_utc_minutes(qt)}; Yahoo reports no quote times{tail}"
+            return "Yahoo Finance close snapshot", "no quote time", ["no quote time"]
+        parts = [f"fetched {_utc_minutes(qt)}", "Yahoo reports no quote times"]
+        if str(inputs.get("t_origin_basis") or "").startswith("quote_time"):
+            parts.append("T measured from the fetch")
+        return "Yahoo Finance download", f"{parts[0]}; {', '.join(parts[1:])}", parts
     name = "Cboe" if src == "cboe" else src
-    return name, (f"quotes at {_utc_minutes(qt)}" if qt else "no quote time")
+    clause = f"quotes at {_utc_minutes(qt)}" if qt else "no quote time"
+    return name, clause, [clause]
 
 
 def _record(root: Path, table: str) -> pd.DataFrame:
