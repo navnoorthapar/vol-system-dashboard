@@ -297,6 +297,13 @@ def _quote_source_note(sq: sqm.SessionQuotes) -> str:
             + (f", as of {d['quote_time']}." if d.get("quote_time") else ", with no quote time."))
 
 
+def _vix_term_window(rep: dict, terms: list, calc: datetime) -> dict | None:
+    """vx.cboe_term_window of the replication the VIX headline uses (its
+    headline_method; cboe_rules when none is headline, so an extrapolated
+    pair is still checked)."""
+    return vx.cboe_term_window(rep.get(rep.get("headline_method") or "cboe_rules") or {}, terms, calc)
+
+
 def _heston_note(models: list) -> str:
     """The scorecard's line on the Heston row: its in- and out-of-sample sets,
     or why the session has none (the surface does not wait for a fit)."""
@@ -566,8 +573,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                         rep["official_inside_day_range"] = bool(off["low"] <= head["level"] <= off["high"])
             indices[name] = rep
         # Cboe's near and next terms have more than 23 and fewer than 37 days
-        indices["VIX"]["cboe_term_window"] = vx.cboe_term_window(
-            indices["VIX"].get("cboe_rules") or {}, terms, calc)
+        indices["VIX"]["cboe_term_window"] = _vix_term_window(indices["VIX"], terms, calc)
         model_surfaces = {n: o for n, o in objs.items() if o is not None}
         strip = vx.variance_swap_strip(terms, sq.r_ref, q, carry=carry_map,
                                        surfaces=model_surfaces)

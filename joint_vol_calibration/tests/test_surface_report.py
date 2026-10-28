@@ -556,3 +556,24 @@ def test_a_capture_that_cannot_be_read_is_refused_not_a_crash(tmp_path, monkeypa
     assert sq.inputs["source"] == "yfinance"
     assert f"options/cboe/{path.name}: unreadable (" in sq.inputs["source_reason"]
     assert "unreadable" in sqm.cboe_book_refusal(SESSION)
+
+
+def test_the_bracket_checked_is_the_one_the_vix_headline_uses():
+    """The term-window deviation read cboe_rules alone: when its single-strike
+    forward is refused and the headline is parity_forward, the replication the
+    page prints was not checked against Cboe's window."""
+    from datetime import datetime
+
+    from joint_vol_calibration.data import option_chain as oc
+
+    calc = datetime(2026, 10, 26, 16, 0, tzinfo=oc.NY_TZ).replace(tzinfo=None)
+    terms = [{"expiry": e, "candidate": True} for e in ("2026-11-06", "2026-11-27")]
+    pf = {"ok": True, "near": {"expiry": "2026-11-06", "days": 10.6},
+          "next": {"expiry": "2026-11-27", "days": 31.6}}
+    rep = {"cboe_rules": {"ok": False, "reason": "implausible forward"}, "parity_forward": pf,
+           "headline_method": "parity_forward"}
+    win = report._vix_term_window(rep, terms, calc)
+    assert win is not None
+    assert not win["inside"]
+    assert win["near"] == {"expiry": "2026-11-06", "days": 10.6}
+    assert report._vix_term_window({**rep, "headline_method": None}, terms, calc) is None
