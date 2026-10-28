@@ -91,3 +91,22 @@ def test_history_never_shows_an_earlier_session_as_today():
     assert not full["today_missing"]
     assert full["rank"] == "best of 3"
 
+
+
+def test_a_two_sided_check_keeps_each_sessions_sign():
+    """T11: the VIX replication gap's history stored |gap|, so a session where the
+    chain replicated below the Cboe close read the same as one above it. A
+    two-sided history keeps the sign in each dot and the range; the status and
+    the rank use the size against the limits."""
+    pts = [("a", -0.78), ("b", 0.09), ("c", -0.34)]
+    h = dmo.history_view(pts, (0.5, 1.5), two_sided=True)
+    assert [d["text"] for d in h["dots"]] == ["−0.78", "+0.09", "−0.34"]
+    assert [d["value"] for d in h["dots"]] == [-0.78, 0.09, -0.34]
+    assert [d["status"] for d in h["dots"]] == ["watch", "ok", "ok"]
+    assert h["range"] == "−0.78 to +0.09"
+    assert h["rank"] == "2nd of 3"                       # |−0.34| between 0.09 and 0.78
+    assert h["last"] == -0.34
+    one_sided = dmo.history_view([("a", 0.78), ("b", 0.09), ("c", 0.34)], (0.5, 1.5))
+    assert one_sided["range"] == "0.09–0.78"
+    tiny = dmo.history_view([("a", 0.0), ("b", -0.001)], (0.5, 1.5), two_sided=True)
+    assert tiny["dots"][1]["text"] == "0.00"

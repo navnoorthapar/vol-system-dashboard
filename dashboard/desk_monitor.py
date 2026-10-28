@@ -19,6 +19,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 SEVERITY = ("breach", "watch", "ok", "info", "na")
+MINUS = "\u2212"
 STATUS_WORDS = {"breach": "breach", "watch": "watch", "ok": "OK", "info": "info", "na": "N/A"}
 BULLET_W, BULLET_H = 120, 10
 
@@ -91,9 +92,14 @@ def bullet(value: Any, limits: Sequence[float], digits: str = ".2f", width: floa
 
 
 def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], digits: str = ".2f",
-                 lower_is_better: bool = True) -> dict | None:
+                 lower_is_better: bool = True, two_sided: bool = False) -> dict | None:
     """One dot per stored session (oldest first), each coloured by today's limits;
     the range, and where the newest (today's) value ranks: 'worst of 5'.
+
+    ``two_sided``: a signed measurement whose limits bound its size (a gap that
+    may fall either side of zero). Each dot keeps its sign, in its text, its
+    height and the range ('−0.78 to +0.09'); its status and today's rank use
+    |value|.
 
     The last point is today's. When today has no value (a check the newest
     session cannot compute, e.g. a VIX the chain does not replicate) the dots of
@@ -108,25 +114,36 @@ def history_view(points: Sequence[tuple[str, Any]], limits: Sequence[float], dig
     if len(pts) < 2:
         return None
     vals = [v for _, v in pts]
+    size = abs if two_sided else float
+
+    def text(v: float) -> str:
+        return signed(v, digits) if two_sided else _plain(v, digits)
+    lo_, hi_ = min(vals), max(vals)
+    rng = f"{text(lo_)} to {text(hi_)}" if two_sided else f"{text(lo_)}–{text(hi_)}"
+    dots = [{"session": s, "value": v, "status": rag(size(v), limits), "text": text(v)} for s, v in pts]
     if today_missing:
-        return {"dots": [{"session": s, "value": v, "status": rag(v, limits), "text": format(v, digits)}
-                         for s, v in pts],
-                "lo": min(vals), "hi": max(vals), "n": len(vals), "rank": None, "today_missing": True,
-                "range": f"{format(min(vals), digits)}–{format(max(vals), digits)}",
-                "last": None, "first_session": pts[0][0], "last_session": pts[-1][0]}
-    today = vals[-1]
+        return {"dots": dots, "lo": lo_, "hi": hi_, "n": len(vals), "rank": None, "today_missing": True,
+                "range": rng, "last": None, "first_session": pts[0][0], "last_session": pts[-1][0]}
+    today = size(vals[-1])
     sign = 1.0 if lower_is_better else -1.0
-    better = sum(1 for x in vals if sign * (x - today) < -1e-12)
-    worse = sum(1 for x in vals if sign * (x - today) > 1e-12)
+    better = sum(1 for x in vals if sign * (size(x) - today) < -1e-12)
+    worse = sum(1 for x in vals if sign * (size(x) - today) > 1e-12)
     n = len(vals)
     tied = "tied " if n - better - worse > 1 else ""
     word = (f"{tied}worst" if worse == 0 else f"{tied}best" if better == 0
             else f"{tied}{_ordinal(better + 1)}")
-    return {"dots": [{"session": s, "value": v, "status": rag(v, limits), "text": format(v, digits)}
-                     for s, v in pts],
-            "lo": min(vals), "hi": max(vals), "n": n, "rank": f"{word} of {n}",
-            "range": f"{format(min(vals), digits)}–{format(max(vals), digits)}",
-            "last": today, "today_missing": False, "first_session": pts[0][0], "last_session": pts[-1][0]}
+    return {"dots": dots, "lo": lo_, "hi": hi_, "n": n, "rank": f"{word} of {n}", "range": rng,
+            "last": vals[-1], "today_missing": False, "first_session": pts[0][0], "last_session": pts[-1][0]}
+
+
+def _plain(v: float, digits: str) -> str:
+    return format(v, digits).replace("-", MINUS)
+
+
+def signed(v: float, digits: str) -> str:
+    """'+0.09', '−0.78', '0.00' (a value that rounds to zero carries no sign)."""
+    body = format(abs(v), digits)
+    return body if float(body) == 0.0 else ("+" if v > 0 else MINUS) + body
 
 
 def _ordinal(n: int) -> str:

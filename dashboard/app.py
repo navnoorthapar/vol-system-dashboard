@@ -6666,7 +6666,7 @@ def load_model_risk() -> dict[str, Any]:
     mon = []
 
     def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None, key=None,
-            history=None, digits=".2f"):
+            history=None, digits=".2f", two_sided=False):
         lim = MONITOR_LIMITS.get(limits_key)
         st = status if status is not None else _rag(value, lim) if lim else "na"
         page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
@@ -6679,7 +6679,7 @@ def load_model_risk() -> dict[str, Any]:
                     "id": "check-" + desk_monitor.slug(key or limits_key or check),
                     "href": f"{page}#{anchor}" if page else None, "page": page, "anchor": anchor,
                     "bullet": desk_monitor.bullet(value, lim, digits) if lim else None,
-                    "history": (desk_monitor.history_view(history, lim, digits)
+                    "history": (desk_monitor.history_view(history, lim, digits, two_sided=two_sided)
                                 if (lim and history) else None)})
     # the gated fits: today's values and each session's, from one function of the pickle
     gated: list[tuple[str, dict]] = []
@@ -6810,7 +6810,7 @@ def load_model_risk() -> dict[str, Any]:
             "vix_rep_gap", sart + "vix_replication.json",
             f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
             "a gap points at a thin or stale strip.",
-            history=surf_hist("vix_rep_gap"))
+            history=surf_hist("rep_gap"), two_sided=True)
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
         legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))

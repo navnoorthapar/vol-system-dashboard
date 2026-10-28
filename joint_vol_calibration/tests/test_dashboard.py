@@ -8681,3 +8681,25 @@ def test_expiry_labels_are_iso_dates_never_yy_mm_dd(dash, pages):
         dates = re.findall(r"\d{4}-\d{2}-\d{2}", b)
         assert dates, b
         assert all(d in surface for d in dates), b
+
+
+def test_model_risk_vix_gap_history_keeps_the_sign(dash):
+    """T11: every dot of the VIX-replication check's history is the signed gap
+    (replicated − Cboe close) of its session's vix_replication.json, not |gap|;
+    the limit check still applies to the size."""
+    d = dash.load_model_risk()
+    row = next(m for m in d["monitors"] if m["key"] == "vix_rep_gap")
+    h = row["history"]
+    if h is None:
+        pytest.skip("fewer than two stored surface sessions replicate the VIX")
+    gaps = {}
+    for p in sorted((SHIPPED / "surface").glob("*/vix_replication.json")):
+        g = json.loads(p.read_text()).get("indices", {}).get("VIX", {}).get("gap_vs_official")
+        if g is not None:
+            gaps[p.parent.name] = float(g)
+    for dot in h["dots"]:
+        assert dot["value"] == pytest.approx(gaps[dot["session"]], abs=1e-12)
+        assert dot["status"] == dash.desk_monitor.rag(abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"])
+    if any(v < 0 for v in gaps.values()):
+        assert "−" in h["range"]
+    assert row["num"] == pytest.approx(abs(row["num"]))          # today's limit check: the size
