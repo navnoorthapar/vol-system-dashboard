@@ -24,9 +24,12 @@ Added per quote:
   tenor_bucket     calendar days to expiry: 7-30d, 30-90d, 90-180d,
                    180-365d, 365-730d (right-closed)
 
-Inputs are read through the repo's look-ahead-gated getters: the stored
-chain from data_store/options/spx_<session>.parquet
-(database.options_snapshot_path), the session's SPX close
+Inputs are read through the repo's look-ahead-gated getters: the session's
+newest stored Cboe book (data_store/options/cboe/spx_<session>_<HHMMSS>Z
+.parquet, its sidecar's quote time, the full listing) when it passes the
+forward ledger's quote-state gates, else the session's Yahoo chain
+data_store/options/spx_<session>.parquet (database.options_snapshot_path;
+select_session_chain records which and why), the session's SPX close
 (get_spx_ohlcv(as_of_date=session)) and the reference rate the session's
 joint fit used (joint_calibrator.session_rate_reference: ^IRX for every fit
 committed before C23, the Treasury zero curve r(T) after), so the universe is
@@ -78,6 +81,10 @@ class SessionQuotes:
              discount, r, q, method, n_pairs, resid_rmse)
     raw    : the stored chain as read (every stored line, incl. zero bids
              where the snapshot kept them) — the VIX replication reads this
+    inputs : which chain it is and why (select_session_chain): source,
+             source_reason, chain (repository path), chain_sha256,
+             raw_sha256 (a Cboe capture's payload hash), book_state,
+             fetched_at, refused (books that failed the quote-state gates)
     """
     session: str
     spot: float
@@ -88,10 +95,147 @@ class SessionQuotes:
     clean_diagnostics: dict = field(default_factory=dict)
     diagnostics: dict = field(default_factory=dict)
     r_ref_source: str = _jc._IRX_SOURCE
+    inputs: dict = field(default_factory=dict)
 
     @property
     def expiries(self) -> list:
         return list(dict.fromkeys(self.quotes["expiry"]))
+
+
+# ── which chain a session's surface is built from ─────────────────────────────
+
+# Columns of a Cboe capture (cboe_downloader.parse_cboe_options_payload) that
+# the stored-chain schema does not have, or holds with another meaning.
+CAPTURE_EXTRA_COLUMNS = ("bid_size", "ask_size", "theo", "rho", "last_trade_price",
+                         "option_last_trade_time")
+
+
+def cboe_capture_dir() -> Path:
+    """data_store/options/cboe/ (follows database.OPTIONS_DIR)."""
+    return Path(db.OPTIONS_DIR) / "cboe"
+
+
+def session_captures(session: str, underlying: str = "SPX") -> list:
+    """Every stored Cboe capture of ``session``, newest first by fetch time:
+    [(parquet path, sidecar dict)] (cloud_refresh.capture_cboe_chains writes
+    <und>_<session>_<HHMMSS>Z.parquet and .json; the sidecar holds quote_time,
+    book_state, fetched_at, rows, two_sided_rows and the raw payload's sha256)."""
+    import json
+
+    out = []
+    for p in cboe_capture_dir().glob(f"{underlying.lower()}_{session}_*.parquet"):
+        js = p.with_suffix(".json")
+        side = json.loads(js.read_text()) if js.exists() else {}
+        out.append((p, side))
+    return sorted(out, key=lambda x: (str(x[1].get("fetched_at") or ""), x[0].name), reverse=True)
+
+
+def stored_chain_from_capture(frame: pd.DataFrame, underlying: str = "SPX") -> pd.DataFrame:
+    """A stored Cboe capture in the stored-chain layout the surface layer
+    reads (options_snapshots, as data_store/options/spx_<s>.parquet holds a
+    Yahoo chain): the one place the two layouts are mapped.
+
+      underlying          added (a capture's file name carries it)
+      implied_vol         Cboe's own IV in a capture; a stored chain's column
+                          holds this repository's Black-76 IV (the cleaner
+                          recomputes it), so Cboe's moves to vendor_iv
+      open_interest,      nullable Int64 in a capture, float here (NaN when
+      volume              missing)
+      extras              CAPTURE_EXTRA_COLUMNS are dropped
+      quote_time, source  kept: the capture's delayed-quote instant and 'cboe'
+
+    Every line is kept, zero bids and one-sided lines included: the cleaner
+    keeps two-sided lines only, and the VIX replication's zero-bid stop reads
+    the rest. delta..theta stay as Cboe delivers them."""
+    df = frame.drop(columns=[c for c in CAPTURE_EXTRA_COLUMNS if c in frame.columns]).copy()
+    df.insert(1, "underlying", underlying.upper())
+    df["vendor_iv"] = (pd.to_numeric(df["implied_vol"], errors="coerce") if "implied_vol" in df.columns
+                       else np.nan)
+    df["implied_vol"] = np.nan
+    for col in ("open_interest", "volume"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+    return df.reset_index(drop=True)
+
+
+def file_sha256(path: Path) -> str | None:
+    import hashlib
+
+    path = Path(path)
+    if not path.exists():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def select_session_chain(session: str, spot: float, r_clean, *,
+                         source: str = "auto") -> tuple:
+    """(raw, clean, inputs): the chain ``session``'s surface is built from.
+
+    The newest stored Cboe SPX capture of the session (session_captures)
+    that passes the forward ledger's quote-state gates
+    (forward_ledger.book_time_refusal: quoted at or after the 16:00 ET close;
+    book_share_refusal: >= option_chain.MIN_TWO_SIDED_SHARE of near-ATM lines
+    two-sided) and cleans, with T from its quote time (option_chain.t_origin);
+    else the session's Yahoo chain data_store/options/spx_<session>.parquet,
+    the calibration's download, as the labelled fallback. ``source``:
+    "auto" (that order), "cboe" (the capture or ValueError), "yahoo" (the
+    stored Yahoo chain only). ``inputs`` records which and why."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+
+    if source not in ("auto", "cboe", "yahoo"):
+        raise ValueError(f"source must be 'auto', 'cboe' or 'yahoo', got {source!r}")
+    refused: list[str] = []
+    caps = session_captures(session) if source != "yahoo" else []
+    for path, side in caps:
+        label = f"options/cboe/{path.name}"
+        frame = pd.read_parquet(path)
+        qt = side.get("quote_time")
+        if not qt and "quote_time" in frame.columns and frame["quote_time"].notna().any():
+            qt = str(frame["quote_time"].dropna().iloc[0])
+        why = fl.book_time_refusal(session, qt, side.get("fetched_at"))
+        if why:
+            refused.append(f"{label}: {why}")
+            continue
+        raw = stored_chain_from_capture(frame)
+        clean = oc.clean_option_chain(raw, session, spot, r_ref=r_clean, quote_time=qt,
+                                      fetched_at=side.get("fetched_at"))
+        why = fl.book_share_refusal(clean) or (None if clean.ok else clean.reason)
+        if why:
+            refused.append(f"{label}: {why}")
+            continue
+        newest = "the newest" if path == caps[0][0] else "an earlier"
+        return raw, clean, {
+            "source": "cboe",
+            "source_reason": (f"{newest} stored Cboe book of the session; it passes the "
+                              "quote-state gates (quoted at or after the 16:00 ET close, "
+                              f"{clean.diagnostics['near_atm_two_sided_share']:.1%} of near-ATM "
+                              "lines two-sided)"
+                              + (f"; refused: {'; '.join(refused)}" if refused else "")),
+            "chain": f"data_store/options/cboe/{path.name}", "chain_sha256": file_sha256(path),
+            "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
+            "fetched_at": side.get("fetched_at"), "capture_rows": side.get("rows"),
+            "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused}
+    if source == "cboe":
+        raise ValueError(f"no stored Cboe book of {session} passes the quote-state gates"
+                         + (f": {'; '.join(refused)}" if refused else ""))
+    path = db.options_snapshot_path(session, "SPX")
+    if not path.exists():
+        raise FileNotFoundError(f"no stored SPX chain for {session}: {path}"
+                                + (f" (Cboe books refused: {'; '.join(refused)})" if refused else ""))
+    raw = pd.read_parquet(path)
+    clean = oc.clean_option_chain(raw, session, spot, r_ref=r_clean)
+    why = ("Yahoo chain requested" if source == "yahoo" else
+           "no stored Cboe book of the session" if not caps else
+           f"no stored Cboe book passes the quote-state gates ({'; '.join(refused)})")
+    return raw, clean, {
+        "source": clean.diagnostics.get("source"),
+        "source_reason": f"{why}; the session's Yahoo chain (the calibration's download) is the fallback",
+        "chain": f"data_store/options/spx_{session}.parquet", "chain_sha256": file_sha256(path),
+        "raw_sha256": None, "book_state": None, "fetched_at": None, "refused": refused}
 
 
 def read_stored_chain(session: str, underlying: str = "SPX") -> pd.DataFrame:
@@ -227,20 +371,22 @@ def universe_from_clean(clean: oc.CleanChain, session: str) -> tuple:
 
 def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
                         spot: float | None = None,
-                        r_ref: float | None = None) -> SessionQuotes:
-    """Build the scoring universe of ``session`` from its stored chain.
+                        r_ref: float | None = None, source: str = "auto") -> SessionQuotes:
+    """Build the scoring universe of ``session`` from its best stored book.
 
-    chain : a stored/raw chain frame to use instead of the committed parquet
-    spot  : SPX close override (default: the stored close of ``session``)
-    r_ref : reference rate override (one cc rate for every expiry). Default:
-            the rate reference of the session's joint fit
-            (joint_calibrator.session_rate_reference)
+    chain  : a stored/raw chain frame to use instead of the stored books
+    spot   : SPX close override (default: the stored close of ``session``)
+    r_ref  : reference rate override (one cc rate for every expiry). Default:
+             the rate reference of the session's joint fit
+             (joint_calibrator.session_rate_reference)
+    source : which stored book (select_session_chain): "auto" (the session's
+             Cboe capture when it passes the quote-state gates, else its
+             Yahoo chain), "cboe" or "yahoo"
 
     Raises ValueError when the cleaned chain is unusable (the cleaner's
     fail-closed reason is passed through).
     """
     session = str(pd.Timestamp(session).date())
-    raw = read_stored_chain(session) if chain is None else chain
     S = session_spot(session) if spot is None else float(spot)
     if r_ref is None:
         ref = _jc.session_rate_reference(session)
@@ -249,7 +395,14 @@ def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
     else:
         r = r_clean = float(r_ref)
         r_src = "argument"
-    clean = oc.clean_option_chain(raw, session, S, r_ref=r_clean)
+    if chain is None:
+        raw, clean, inputs = select_session_chain(session, S, r_clean, source=source)
+    else:
+        raw = chain
+        clean = oc.clean_option_chain(raw, session, S, r_ref=r_clean)
+        inputs = {"source": clean.diagnostics.get("source"), "source_reason": "chain argument",
+                  "chain": "argument", "chain_sha256": None, "raw_sha256": None,
+                  "book_state": None, "fetched_at": None, "refused": []}
     if not clean.ok:
         raise ValueError(f"SPX chain for {session} unusable: {clean.reason}")
     quotes, counts = universe_from_clean(clean, session)
@@ -281,10 +434,11 @@ def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
                      "expiries are excluded, as in the calibrator"),
         },
     }
+    inputs = {**inputs, "fetched_at": inputs.get("fetched_at") or diag["fetched_at"]}
     return SessionQuotes(session=session, spot=S, r_ref=r, quotes=quotes,
                          carry=clean.carry.copy(), raw=raw,
                          clean_diagnostics=dict(clean.diagnostics), diagnostics=diag,
-                         r_ref_source=r_src)
+                         r_ref_source=r_src, inputs=inputs)
 
 
 def expiry_groups(quotes: pd.DataFrame):

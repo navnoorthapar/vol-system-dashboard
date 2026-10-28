@@ -765,31 +765,23 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
         for cand in _ledger_books(session, yahoo):
             meta, raw = dict(cand["meta"]), cand["raw"]
             label = meta.get("file") or meta["source"]
-            try:
-                fl.quote_after_close(session, cand["quote_time"])
-            except ValueError as e:
-                refused.append(f"{label}: {e}")
+            # the quote-state gates (forward_ledger.book_time_refusal and
+            # book_share_refusal), which the session's surface applies alike
+            why = fl.book_time_refusal(session, cand["quote_time"], meta.get("fetched_at"))
+            if why:
+                refused.append(f"{label}: {why}")
                 continue
-            # A book with no quote time (Yahoo) downloaded before the close
-            # cannot hold quotes from after it.
-            if cand["quote_time"] is None and meta.get("fetched_at"):
-                try:
-                    fl.quote_after_close(session, meta["fetched_at"])
-                except ValueError:
-                    refused.append(f"{label}: downloaded at {meta['fetched_at']}, before the "
-                                   f"{session} close that the session's signals use")
-                    continue
             if meta["source"] == "yahoo":
                 raw, extra = _with_open_expiries(raw, open_exps, cand["symbol"], ticker_factory)
                 meta.update(extra)
             clean = oc.clean_option_chain(raw, session, spot, r_ref=ref.for_clean(),
                                           quote_time=cand["quote_time"],
                                           fetched_at=meta.get("fetched_at"))
-            share = float(clean.diagnostics.get("near_atm_two_sided_share") or 0.0)
-            if share < oc.MIN_TWO_SIDED_SHARE:
-                refused.append(f"{label}: not a live book ({share:.0%} of near-ATM lines two-sided)")
+            why = fl.book_share_refusal(clean)
+            if why:
+                refused.append(f"{label}: {why}")
                 continue
-            meta["near_atm_two_sided_share"] = share
+            meta["near_atm_two_sided_share"] = float(clean.diagnostics["near_atm_two_sided_share"])
             out = fl.record_session(session, raw, clean=clean, spot=spot, r_ref=ref.r_91d,
                                     quote_time=cand["quote_time"], directory=d, book_meta=meta)
             led = fl.load_ledger(out)

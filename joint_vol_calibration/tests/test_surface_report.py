@@ -3,6 +3,7 @@ Surface report artifacts (surface/report.py, scripts/surface_report.py): the
 schema, byte-for-byte determinism, and agreement of the committed
 data_store/surface artifacts with a recomputation.
 """
+import hashlib
 import json
 import subprocess
 import sys
@@ -345,3 +346,137 @@ def test_committed_residuals_are_the_compact_writers_output(session, tmp_path):
         again = tmp_path / "again.parquet"
         report.write_residuals(df, again)
         assert again.read_bytes() == path.read_bytes()
+
+
+# ── 0.7: the session's Cboe book is the surface's source; Yahoo the fallback ──
+
+def _capture_store(tmp_path, monkeypatch, quote_time, *, book_state="closing", empty_atm=False):
+    """A data_store/options/ with SESSION's committed Yahoo chain and a Cboe
+    capture of SESSION made of the same quotes in the capture layout
+    (cboe_downloader.parse_cboe_options_payload: no 'underlying', Cboe's own
+    IV in implied_vol, nullable integer counts), stamped ``quote_time``."""
+    import shutil
+
+    from joint_vol_calibration.data import database as db
+
+    opts = tmp_path / "options"
+    (opts / "cboe").mkdir(parents=True)
+    yahoo = db.options_snapshot_path(SESSION, "SPX")
+    shutil.copy2(yahoo, opts / yahoo.name)
+    frame = pd.read_parquet(yahoo).drop(columns=["underlying"])
+    frame = frame.assign(source="cboe", quote_time=quote_time, implied_vol=0.5,
+                         open_interest=frame["open_interest"].round().astype("Int64"),
+                         volume=frame["volume"].round().astype("Int64"))
+    if empty_atm:                                   # an empty book: no near-ATM bids
+        near = (frame["strike"] / frame["underlying_price"] - 1.0).abs() < 0.03
+        frame.loc[near, "bid"] = 0.0
+    stem = f"spx_{SESSION}_013000Z"
+    frame.to_parquet(opts / "cboe" / f"{stem}.parquet", index=False)
+    side = {"underlying": "SPX", "session": SESSION, "quote_time": quote_time,
+            "book_state": book_state, "fetched_at": "2026-10-17T01:30:00Z",
+            "sha256": hashlib.sha256(b"payload").hexdigest(), "rows": len(frame),
+            "two_sided_rows": int(((frame["bid"] > 0) & (frame["ask"] >= frame["bid"])).sum())}
+    (opts / "cboe" / f"{stem}.json").write_text(json.dumps(side))
+    monkeypatch.setattr(db, "OPTIONS_DIR", opts)
+    return opts / "cboe" / f"{stem}.parquet", side
+
+
+def test_the_surface_is_built_from_the_sessions_cboe_book(tmp_path, monkeypatch):
+    """CITSEC-01 / QUANT-03 / VALIDATOR-02: the surface was built from the
+    Yahoo chain while the session's Cboe book sat next to it. With a stored
+    capture that passes the forward ledger's quote-state gates, the report
+    reads the capture (mapped to the stored-chain layout), measures T from its
+    quote time, and surface.json, the scorecard notes, the Heston row and the
+    VIX timing line say so."""
+    from joint_vol_calibration.surface import quotes as sqm
+    from joint_vol_calibration.surface import scorecard as sc
+
+    qt = "2026-10-17T00:30:00Z"                                       # Fri 20:30 ET: closing book
+    path, side = _capture_store(tmp_path, monkeypatch, qt)
+    out = report.run_session(SESSION, models=["essvi", "heston_v2"])
+    inp = out["surface"]["inputs"]
+    assert inp["source"] == "cboe"
+    assert inp["chain"] == f"data_store/options/cboe/{path.name}"
+    assert inp["chain_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert inp["raw_sha256"] == side["sha256"]
+    assert inp["quote_time"] == qt
+    assert inp["fetched_at"] == side["fetched_at"]
+    assert inp["book_state"] == side["book_state"]
+    assert inp["source_reason"].startswith("the newest stored Cboe book of the session")
+    assert inp["refused_books"] == []
+    assert inp["chain_rows"] == side["rows"]
+    # a closing book (after the close, outside the next GTH window): T from the close
+    assert inp["t_origin_basis"] == "session close 16:00 ET"
+    assert any(n.startswith("Quotes are Cboe's delayed SPX book") for n in out["scorecard"]["notes"])
+    heston = {m["model"]: m for m in out["scorecard"]["models"]}["heston_v2"]
+    assert "The fit was made on the session's Yahoo chain" in heston["description"]
+    assert heston["fit"]["scored_on_fit_chain"] is False
+    assert any(d.startswith("Calculation time is the session's 16:00 ET close; the book was quoted "
+                            f"at {qt}") for d in out["vix_replication"]["deviations"])
+    assert not any("Yahoo" in d for d in out["vix_replication"]["deviations"])
+    # the mapping: Cboe's IV is not read as this repository's
+    raw = sqm.stored_chain_from_capture(pd.read_parquet(path))
+    assert set(raw["underlying"]) == {"SPX"}
+    assert raw["implied_vol"].isna().all()
+    assert (raw["vendor_iv"] == 0.5).all()
+    # the same quotes from the Yahoo chain (forced): the universe is identical
+    yq = sqm.load_session_quotes(SESSION, source="yahoo")
+    cq = sqm.load_session_quotes(SESSION)
+    pd.testing.assert_frame_equal(yq.quotes, cq.quotes)
+    assert yq.inputs["source"] == "yfinance"
+    assert "Yahoo chain requested" in yq.inputs["source_reason"]
+    none = np.zeros(len(yq.quotes), dtype=bool)
+    ctx = sc.ScoreContext(yq, none, sc.surface_fit_mask(yq.quotes, none))
+    assert "The fit was made" not in sc.heston_v2_factory(ctx).description
+
+
+@pytest.mark.parametrize(("quote_time", "empty_atm", "why"), [
+    ("2026-10-16T19:00:00Z", False, "before the 2026-10-16 close"),        # 15:00 ET
+    ("2026-10-17T00:30:00Z", True, "not a live book"),                     # no near-ATM bids
+])
+def test_a_cboe_book_failing_the_quote_state_gates_falls_back_to_yahoo(
+        tmp_path, monkeypatch, quote_time, empty_atm, why):
+    """The forward ledger's gates decide (forward_ledger.book_time_refusal,
+    book_share_refusal): a capture quoted before the close, or an empty book,
+    is not the session's; the Yahoo chain is used and the report says why."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, quote_time, empty_atm=empty_atm)
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["source"] == "yfinance"
+    assert sq.inputs["chain"] == f"data_store/options/spx_{SESSION}.parquet"
+    assert why in sq.inputs["source_reason"]
+    assert sq.inputs["source_reason"].endswith("the session's Yahoo chain (the calibration's "
+                                               "download) is the fallback")
+    assert len(sq.inputs["refused"]) == 1
+    with pytest.raises(ValueError, match="no stored Cboe book"):
+        sqm.load_session_quotes(SESSION, source="cboe")
+
+
+def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
+    """Every session with a stored Cboe capture that passes the quote-state
+    gates is read from that capture, with its quote time as the T origin of a
+    GTH book (whatever sessions the bot has captured)."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    from joint_vol_calibration.data import database as db
+    from joint_vol_calibration.data import option_chain as oc
+    from joint_vol_calibration.surface import quotes as sqm
+
+    sessions = sorted({p.name.split("_")[1] for p in (db.OPTIONS_DIR / "cboe").glob("spx_*.parquet")})
+    for s in sessions:
+        try:
+            sqm.session_spot(s)
+        except ValueError:
+            continue                                  # the test database lacks the session's close
+        path, side = sqm.session_captures(s)[0]
+        if fl.book_time_refusal(s, side.get("quote_time")):
+            continue
+        sq = sqm.load_session_quotes(s)
+        if sq.inputs["source"] != "cboe":            # refused by the near-ATM gate: said so
+            assert "no stored Cboe book passes" in sq.inputs["source_reason"], s
+            continue
+        assert sq.inputs["chain"] == f"data_store/options/cboe/{path.name}"
+        assert sq.diagnostics["quote_time"] == side["quote_time"]
+        gth = oc.t_origin(side["quote_time"], s) != oc.session_close(s)
+        assert sq.diagnostics["t_origin_basis"] == (oc.GTH_BASIS if gth else oc.CLOSE_BASIS)
+        assert sq.diagnostics["n_expiries"] > 17                      # the full listing

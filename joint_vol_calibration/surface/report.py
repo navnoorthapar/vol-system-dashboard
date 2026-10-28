@@ -18,9 +18,12 @@ residuals.parquet — one row per (model, quote) of the scoring universe:
     (leg of a row violated at mids), repair_dprice (LP price change, index
     points). Sorted by model order, then T, strike.
 
-surface.json — inputs (chain path and SHA-256, spot, rate, T origin,
-    source, quote time (None for a Yahoo chain: it records none), the
-    download instant fetched_at, book_state, the near-ATM two-sided share),
+surface.json — inputs (which book and why: the session's newest stored
+    Cboe capture when it passes the forward ledger's quote-state gates, else
+    its Yahoo chain (quotes.select_session_chain); its path and SHA-256, the
+    capture's payload SHA-256, the books refused and why, spot, rate, T
+    origin, source, quote time (None for a Yahoo chain: it records none),
+    the download instant fetched_at, book_state, the near-ATM two-sided share),
     universe counts, the static-arbitrage screen (row counts and
     violations per CRW row type, mid and executable; the bid / ask box
     certificate; the total-variance calendar diagnostic), the l1-BA repair
@@ -57,7 +60,6 @@ index.json (in data_store/surface/) — one summary row per session written.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from datetime import date, datetime, timedelta
@@ -68,7 +70,6 @@ import numpy as np
 import pandas as pd
 
 from joint_vol_calibration.config import DATA_DIR
-from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
 from joint_vol_calibration.surface import arbitrage as arb
 from joint_vol_calibration.surface import essvi as es
@@ -181,16 +182,6 @@ def write_residuals(df: pd.DataFrame, path: Path) -> None:
                   use_byte_stream_split=floats, use_dictionary=others, **kw)
 
 
-def _sha256(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 # ── per-session computation ───────────────────────────────────────────────────
 
 def _calc_time_ny(sq: sqm.SessionQuotes) -> datetime:
@@ -266,6 +257,38 @@ def _repaired_quotes(q: pd.DataFrame, flags: pd.DataFrame, n: int = 25) -> dict:
     per_exp = {str(e): int(c) for e, c in q.loc[out, "expiry"].value_counts(sort=False).items()}
     return {"n": int(out.sum()), "by_expiry": dict(sorted(per_exp.items())),
             "largest": d.head(n).to_dict(orient="records")}
+
+
+def _quote_source_note(sq: sqm.SessionQuotes) -> str:
+    """The scorecard's line on what the quotes are, from the chain's own record."""
+    d, inp = sq.diagnostics, sq.inputs
+    src = d.get("source")
+    if src == "cboe":
+        return (f"Quotes are Cboe's delayed SPX book ({inp.get('chain')}) as of {d.get('quote_time')} "
+                f"({inp.get('book_state') or 'book state not recorded'}): every model is scored "
+                "against the exchange's own bid and ask at one instant.")
+    if not oc.records_quote_time(src):
+        return ("Quotes are the session's Yahoo chain, which records no quote time"
+                + (f" (downloaded {inp['fetched_at']})" if inp.get("fetched_at") else "")
+                + ": part of every model's spread misses can be stale quotes rather than model error.")
+    return (f"Quotes are from {src or 'an unrecorded source'}"
+            + (f", as of {d['quote_time']}." if d.get("quote_time") else ", with no quote time."))
+
+
+def _timing_deviation(sq: sqm.SessionQuotes, calc: datetime) -> str:
+    """The calculation-time departure, from the chain's T origin and record."""
+    d, inp = sq.clean_diagnostics, sq.inputs
+    if str(d.get("t_origin_basis", "")).startswith("quote_time"):
+        return (f"Calculation time is the book's quote time, {calc:%Y-%m-%d %H:%M} ET "
+                f"({inp.get('book_state') or 'GTH'} book; Cboe's delayed feed, payload timestamp "
+                "minus 15 minutes), not the 16:15 ET close the official index is compared with: "
+                "the gap mixes the replication with the market's move between the two instants.")
+    if d.get("quote_time"):
+        return (f"Calculation time is the session's 16:00 ET close; the book was quoted at "
+                f"{d['quote_time']} (its closing book) and the official close is the 16:15 ET print.")
+    return ("Calculation time is the session's 16:00 ET close: the chain records no quote time "
+            "(Yahoo)" + (f"; it was downloaded {inp['fetched_at']}" if inp.get("fetched_at") else "")
+            + ". The official close is the 16:15 ET print.")
 
 
 def _settlement_deviations(terms: list) -> list:
@@ -367,12 +390,17 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
 
 
 def run_session(session: str, *, calibrations_dir: Path | None = None,
-                chain: pd.DataFrame | None = None, models: list | None = None) -> dict:
+                chain: pd.DataFrame | None = None, models: list | None = None,
+                source: str = "auto") -> dict:
     """Compute every artifact of ``session``. Returns {'residuals': frame,
-    'surface': dict, 'scorecard': dict, 'vix_replication': dict}."""
+    'surface': dict, 'scorecard': dict, 'vix_replication': dict}.
+
+    The quotes are the session's newest stored Cboe book when it passes the
+    quote-state gates, else its Yahoo chain (quotes.select_session_chain;
+    ``source`` forces one); surface.json inputs record which and why."""
     session = str(pd.Timestamp(session).date())
     with single_thread_blas():
-        sq = sqm.load_session_quotes(session, chain=chain)
+        sq = sqm.load_session_quotes(session, chain=chain, source=source)
         q = sq.quotes
         screen = arb.screen(q)
         flags = screen.quote_flags
@@ -417,18 +445,22 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                          "atm_vol_mid_quotes": 100.0 * float(np.interp(
                              0.0, np.sort(g["k"].to_numpy(float)),
                              g["mid_iv"].to_numpy(float)[np.argsort(g["k"].to_numpy(float))]))})
-        chain_path = db.options_snapshot_path(session, "SPX")
+        src = sq.inputs
         surface_doc = {
             "schema_version": SCHEMA_VERSION, "session": session,
             "inputs": {
-                "chain": f"data_store/options/spx_{session}.parquet" if chain is None else "argument",
-                "chain_sha256": _sha256(chain_path) if chain is None else None,
+                # which book (the session's Cboe capture when it passes the
+                # quote-state gates, else its Yahoo chain) and why
+                "chain": src.get("chain"), "chain_sha256": src.get("chain_sha256"),
+                "raw_sha256": src.get("raw_sha256"),
                 "chain_rows": len(sq.raw), "source": sq.diagnostics.get("source"),
+                "source_reason": src.get("source_reason"),
+                "refused_books": list(src.get("refused") or []),
                 # None for a Yahoo chain (it records none); fetched_at is when it
                 # was downloaded and never a T origin
                 "quote_time": sq.diagnostics.get("quote_time"),
-                "fetched_at": sq.diagnostics.get("fetched_at"),
-                "book_state": None,
+                "fetched_at": src.get("fetched_at"),
+                "book_state": src.get("book_state"),
                 "near_atm_two_sided_share": sq.diagnostics.get("near_atm_two_sided_share"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),
@@ -478,8 +510,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                               "in-sample set is its calibration anchors, fitted jointly with the "
                               "VIX index leg, and its out-of-sample set is every other quote."),
                              _svi_cal_note(surfaces.get("svi_cal")),
-                             ("Yahoo snapshots carry no quote time: part of every model's spread "
-                              "misses can be stale quotes rather than model error.")]}
+                             _quote_source_note(sq)]}
 
         # vix_replication.json
         calc = _calc_time_ny(sq)
@@ -561,7 +592,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                  if sq.r_ref_source == sqm.IRX_SOURCE else
                  "R is the Treasury zero curve's 91-day rate (cc) for both terms, not Cboe's "
                  "CMT spline per expiry; dVIX/dR ~ VIX T / 2."),
-                "Calculation time is the chain's T origin; Yahoo snapshots carry no quote time.",
+                _timing_deviation(sq, calc),
                 ("parity_forward replaces the single-strike forward with the cleaned chain's "
                  "parity-regression F and D (robust to one stale strike)."),
                 ("K0 falls back to the nearest lower strike with both sides quoted when the listed "
@@ -608,7 +639,9 @@ def index_row(out: dict) -> dict:
                               "calendar_violations": m["dense_grid"]["calendar_violations"]}
     v = vx_doc["indices"]["VIX"]
     arbd = out["surface"]["arbitrage"]
+    inp = out["surface"].get("inputs") or {}
     return {"session": sc_doc["session"], "n_quotes": sc_doc["n_quotes"],
+            "source": inp.get("source"), "quote_time": inp.get("quote_time"),
             "arbitrage_quotes_outside_spread": arbd["repair"].get("n_perturbed_outside_spread"),
             "executable_arbitrage": arbd["executable_arbitrage_certificate"].get("executable_arbitrage"),
             "vix_gap_attribution": {k: v.get("gap_attribution", {}).get(k) for k in
