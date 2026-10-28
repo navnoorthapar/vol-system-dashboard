@@ -678,7 +678,8 @@ def _ledger_books(session: str, yahoo: "dict | None"):
                         "rows": len(raw)}}
     if yahoo and yahoo.get("raw") is not None and len(yahoo["raw"]):
         yield {"raw": yahoo["raw"], "quote_time": yahoo.get("quote_time"), "symbol": yahoo.get("symbol"),
-               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"])}}
+               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"]),
+                        "fetched_at": yahoo.get("fetched_at")}}
 
 
 def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3, pause: float = 2.0):
@@ -716,6 +717,7 @@ def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3
             part = legs.copy()
             part["expiration"] = exp
             part["option_type"] = side
+            part["source"] = "yfinance"        # as option_chain.fetch_spx_chain labels it
             frames.append(part)
         info["extra_expiries"].append(exp)
     return pd.concat(frames, ignore_index=True), info
@@ -730,7 +732,8 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
 
     The book is the first of _ledger_books (the session's full Cboe capture,
     else the Yahoo chain plus the open positions' expiries) that is quoted at
-    or after the 16:00 ET close and passes the calibration's own quote-state
+    or after the 16:00 ET close (a Yahoo chain records no quote time: it must
+    have been downloaded after the close) and passes the calibration's own quote-state
     gate (near-ATM two-sided share >= option_chain.MIN_TWO_SIDED_SHARE). The
     caller has checked that ``session`` is the last closed session and that
     the DB holds it; the capture and the calibrate step only store or hand on
@@ -767,11 +770,21 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
             except ValueError as e:
                 refused.append(f"{label}: {e}")
                 continue
+            # A book with no quote time (Yahoo) downloaded before the close
+            # cannot hold quotes from after it.
+            if cand["quote_time"] is None and meta.get("fetched_at"):
+                try:
+                    fl.quote_after_close(session, meta["fetched_at"])
+                except ValueError:
+                    refused.append(f"{label}: downloaded at {meta['fetched_at']}, before the "
+                                   f"{session} close that the session's signals use")
+                    continue
             if meta["source"] == "yahoo":
                 raw, extra = _with_open_expiries(raw, open_exps, cand["symbol"], ticker_factory)
                 meta.update(extra)
             clean = oc.clean_option_chain(raw, session, spot, r_ref=ref.for_clean(),
-                                          quote_time=cand["quote_time"])
+                                          quote_time=cand["quote_time"],
+                                          fetched_at=meta.get("fetched_at"))
             share = float(clean.diagnostics.get("near_atm_two_sided_share") or 0.0)
             if share < oc.MIN_TWO_SIDED_SHARE:
                 refused.append(f"{label}: not a live book ({share:.0%} of near-ATM lines two-sided)")
@@ -1009,7 +1022,11 @@ def _persist_snapshot(raw, clean, session: str, spot: float,
     stored for the session in one transaction (re-runs never duplicate).
     ``quote_time`` (ISO UTC, database.utc_iso) is stored with every row: it
     sets the T origin when the snapshot is cleaned again (option_chain.t_origin),
-    so it must be the exact value the live clean used.
+    so it must be the exact value the live clean used. A Yahoo chain has none
+    (None, the default): its download instant is ``fetched_at`` in the fit's
+    chain_diagnostics and the run status, and no T is measured from it.
+    (options_snapshots has no fetched_at column: adding one migrates the
+    shipped database, which the bot never commits.)
     """
     from joint_vol_calibration.data import database as dbm
     from joint_vol_calibration.data import option_chain as oc
@@ -1040,7 +1057,8 @@ def _save_rejected_chain(raw, session: str, reason: str) -> "str | None":
 
 
 def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
-                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None) -> dict:
+                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None,
+                       clock=None) -> dict:
     """Download the SPX chain for the last closed session and fit the joint model.
 
     Returns a status dict: {"status": accepted|rejected|skipped|exists|failed,
@@ -1051,8 +1069,17 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
 
     ``book_out`` (a dict), when given, receives the downloaded chain as soon
     as it is in hand, whatever the fit then does: {"source": "yahoo", "raw",
-    "quote_time", "symbol"} — the forward ledger's fallback book
-    (record_forward_ledger), which does not depend on the calibration.
+    "quote_time" (None: Yahoo records none), "fetched_at", "symbol"} — the
+    forward ledger's fallback book (record_forward_ledger), which does not
+    depend on the calibration.
+
+    ``clock`` () -> datetime: the run's clock, read when the download
+    returns (``fetched_at``); default ``now_utc``. A Yahoo chain carries no
+    quote time, so its T runs from the session's 16:00 ET close
+    (option_chain.t_origin) and the download instant is recorded as
+    ``fetched_at`` (status, the fit's chain_diagnostics), never stored as
+    ``quote_time`` (the 2026-10-26 chain carried the run's start as its quote
+    time and was labelled a GTH book).
     """
     import pandas as pd
 
@@ -1096,29 +1123,30 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     # The calibrator's default reference: the Treasury zero curve r(T) of the
     # session (^IRX when the curve is missing or stale; recorded in the fit).
     ref = reference_rate(spot_date)
-    # One string for the live clean and the stored snapshot, so a refit from
-    # the stored chain measures T from exactly the same origin.
-    quote_time = utc_iso(now_utc)
 
     try:
         raw, meta = oc.fetch_spx_chain(spot_date, ticker_factory=ticker_factory)
     except Exception as e:
         st.update(status="failed", reason=f"option chain download failed: {e}")
         return st
+    # One string for the live clean and the stored snapshot. Yahoo records no
+    # quote time: T runs from the close, and this is when the chain arrived.
+    fetched_at = utc_iso((clock or (lambda: now_utc))())
     st["chain"] = {"symbol": meta.get("symbol"), "n_listed": len(meta.get("listed", [])),
                    "requested": meta.get("requested", []), "failed": meta.get("failed", [])}
     if raw.empty:
         st["reason"] = "no SPX option chain returned"
         return st
     if book_out is not None:
-        book_out.update(source="yahoo", raw=raw, quote_time=quote_time, symbol=meta.get("symbol"))
+        book_out.update(source="yahoo", raw=raw, quote_time=None, fetched_at=fetched_at,
+                        symbol=meta.get("symbol"))
 
-    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), quote_time=quote_time)
+    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), fetched_at=fetched_at)
     d = clean.diagnostics
     st["chain"].update({k: d.get(k) for k in ("n_raw", "n_two_sided", "n_near_atm",
                                               "near_atm_two_sided_share", "n_clean",
-                                              "n_expiries_with_carry", "quote_time",
-                                              "t_origin", "t_origin_basis")})
+                                              "n_expiries_with_carry", "source", "quote_time",
+                                              "fetched_at", "t_origin", "t_origin_basis")})
     log.info("  Chain hygiene: %s raw -> %s two-sided -> %s clean rows; near-ATM two-sided "
              "share %.0f%%; T from %s (%s)", d.get("n_raw"), d.get("n_two_sided"),
              d.get("n_clean", 0), 100 * (d.get("near_atm_two_sided_share") or 0),
@@ -1171,7 +1199,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     with open(out, "wb") as f:
         pickle.dump(result, f)
     try:
-        n_opt = _persist_snapshot(raw, clean, spot_date, S, quote_time)
+        n_opt = _persist_snapshot(raw, clean, spot_date, S)       # Yahoo: no quote time
         log.info("  Saved %d observed two-sided quotes as the %s SPX snapshot", n_opt, spot_date)
     except Exception as e:     # the fit stands, but its input record is missing
         st["snapshot_error"] = f"could not store the accepted {spot_date} chain: {e}"
@@ -1561,8 +1589,11 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
         with _Group("option chain + joint calibration"):
             if market_ok:
                 try:
+                    run_start = now_utc
                     cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs,
-                                             book_out=yahoo_book)
+                                             book_out=yahoo_book,
+                                             clock=lambda: run_start + timedelta(
+                                                 seconds=time.monotonic() - run_t0))
                 except Exception as e:
                     cal = {"status": "failed", "reason": f"calibrate step crashed: {e}"}
                     log.exception("calibrate step crashed")

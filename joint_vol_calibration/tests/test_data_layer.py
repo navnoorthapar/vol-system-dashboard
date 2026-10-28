@@ -179,7 +179,9 @@ class TestSessionCalendar:
         assert pm["time_to_expiry"] == pytest.approx(7 / 365)            # Fri close -> Fri close
         assert am["time_to_expiry"] == pytest.approx((7 * 1440 - 390) / 525_600)
         assert set(df["underlying_price"]) == {7811.54}
-        assert set(df["quote_time"]) == {"2026-10-10T14:00:00Z"}
+        # Yahoo records no quote time: the download instant is fetched_at (QUANT-01)
+        assert df["quote_time"].isna().all()
+        assert set(df["fetched_at"]) == {"2026-10-10T14:00:00Z"}
 
     def test_migration_redates_weekend_snapshots(self, legacy_db):
         db.init_database()

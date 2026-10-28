@@ -47,6 +47,14 @@ def test_artifacts_and_schema(written):
     assert surf["session"] == SESSION
     assert surf["inputs"]["chain"] == f"data_store/options/spx_{SESSION}.parquet"
     assert len(surf["inputs"]["chain_sha256"]) == 64
+    # provenance (CITSEC-02): the vendor, when it was quoted (a Yahoo chain:
+    # never; T from the close) and downloaded, and the quote-state gate's share
+    inp = surf["inputs"]
+    assert inp["source"] == "yfinance"
+    assert inp["quote_time"] is None
+    assert {"fetched_at", "book_state"} <= set(inp)
+    assert inp["t_origin_basis"] == "session close 16:00 ET"
+    assert 0.8 <= inp["near_atm_two_sided_share"] <= 1.0
     assert set(surf["surfaces"]) == {"essvi", "svi", "svi_cal"}
     ess = surf["surfaces"]["essvi"]
     assert ess["analytic_conditions"]["butterfly_ok"]

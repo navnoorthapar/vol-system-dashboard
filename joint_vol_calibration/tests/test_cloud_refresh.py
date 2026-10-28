@@ -305,16 +305,21 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert res["r_reference"] == pytest.approx(0.0400, abs=1e-12)
     assert res["r_reference_source"].startswith("^IRX") and "cc" in res["r_reference_source"]
     assert res["chain_diagnostics"]["r_ref"] == res["r_reference"]     # one rate, cleaning and fit
-    # Wed 21:30 ET: the live book is the Cboe GTH session trading for Thursday,
-    # so T runs from the quote time (not the 16:00 close), and the stored
-    # snapshot records that time for a refit.
-    assert cal["chain"]["quote_time"] == "2026-09-24T01:30:00Z"
-    assert cal["chain"]["t_origin"] == "2026-09-23T21:30:00-04:00"
-    assert res["methods"]["T_origin"] == "2026-09-23T21:30:00-04:00"
-    assert "Global Trading Hours" in res["methods"]["T"]
-    assert "residual timing mismatch" in res["methods"]["vix_leg_timing"]
-    assert res["anchors_by_expiry"][0]["T_days"] < (date.fromisoformat(
-        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days
+    # Wed 21:30 ET, inside the GTH window, but Yahoo records no quote time
+    # (QUANT-01): the run used to stamp its own clock as the quote time and
+    # measure T from it. The download instant is fetched_at, T runs from the
+    # 16:00 close, and the stored snapshot records no quote time.
+    fetched = cal["chain"]["fetched_at"]
+    assert NOW <= datetime.fromisoformat(fetched) < NOW + timedelta(minutes=10)
+    assert cal["chain"]["quote_time"] is None
+    assert cal["chain"]["source"] == "yfinance"
+    assert cal["chain"]["t_origin"] == "2026-09-23T16:00:00-04:00"
+    assert res["methods"]["T_origin"] == "2026-09-23T16:00:00-04:00"
+    assert f"records no quote time; downloaded {fetched}" in res["methods"]["T"]
+    assert "Global Trading Hours" not in res["methods"]["T"]
+    assert "residual timing mismatch" not in res["methods"]["vix_leg_timing"]
+    assert res["anchors_by_expiry"][0]["T_days"] == pytest.approx((date.fromisoformat(
+        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days, abs=1e-9)
     # Stored: the observed two-sided quotes (incl. the one too wide for the
     # cleaner), never a one-sided line.
     n, n_two_sided = _spx_snapshot_rows(SESSION)
@@ -330,7 +335,9 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     chain_file = dbm.options_snapshot_path(SESSION, "SPX")
     assert chain_file.exists() and str(chain_file) in st["persisted"]
     assert len(pd.read_parquet(chain_file)) == n
-    assert set(pd.read_parquet(chain_file)["quote_time"]) == {"2026-09-24T01:30:00Z"}
+    stored = pd.read_parquet(chain_file)
+    assert stored["quote_time"].isna().all()                   # never the download instant
+    assert res["chain_diagnostics"]["fetched_at"] == fetched   # which the fit records
     # The committed chain reproduces the committed fit's inputs: a calibrator
     # built from the stored snapshot (fresh DB loaded from the parquet) has the
     # same carry, anchors and out-of-sample surface as the live run.
@@ -367,8 +374,11 @@ def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
     ledger = fl.load_ledger(path)
     fl.validate_ledger(ledger)
     assert ledger["previous"] is None
-    assert ledger["inputs"]["quote_after_close"] is True       # the GTH book, after the 16:00 close
-    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:30:00Z"
+    # Yahoo records no quote time (QUANT-01): none is claimed; the book was
+    # downloaded after the 16:00 close (a pre-close download is refused)
+    assert ledger["inputs"]["quote_after_close"] is None
+    assert ledger["inputs"]["quote_time"] is None
+    assert ledger["inputs"]["book"]["fetched_at"] == st["calibration"]["chain"]["fetched_at"]
     assert [p["sleeve"] for p in ledger["positions"]] == ["s4"]
     assert led["actions"] == ["s4 open"]
     # the ledger's chain hash is the committed snapshot's
@@ -525,6 +535,22 @@ def test_a_book_quoted_before_the_close_is_not_the_ledgers(env, monkeypatch):
     assert led["status"] == "recorded"
     assert led["book"] == "yahoo"                          # the next candidate
     assert any("before the 2026-09-23 close" in r for r in led["refused_books"])
+
+
+def test_a_yahoo_book_downloaded_before_the_close_is_not_the_ledgers(env):
+    """Yahoo records no quote time (QUANT-01), so the ledger can no longer
+    read one off the Yahoo book; a book downloaded before the 16:00 ET close
+    still cannot hold the closing quotes and is refused on its fetched_at."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    code, _ = _run(env, "market")
+    assert code == 0
+    raw, meta = oc.fetch_spx_chain(SESSION, ticker_factory=_DailyBookTicker)
+    early = {"source": "yahoo", "raw": raw, "symbol": meta["symbol"], "quote_time": None,
+             "fetched_at": "2026-09-23T19:45:00Z"}                      # 15:45 ET
+    led = env.record_forward_ledger(SESSION, early, ticker_factory=_DailyBookTicker)
+    assert led["status"] == "no_live_book"
+    assert "downloaded at 2026-09-23T19:45:00Z, before the 2026-09-23 close" in led["reason"]
 
 
 def _capture(und, session=SESSION, rows=4):

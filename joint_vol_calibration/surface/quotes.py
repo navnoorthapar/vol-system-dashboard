@@ -36,12 +36,14 @@ the calibrator's own.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.special import ndtr
 
 from joint_vol_calibration.calibration import joint_calibrator as _jc
+from joint_vol_calibration.config import DATA_DIR
 from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
 
@@ -98,6 +100,26 @@ def read_stored_chain(session: str, underlying: str = "SPX") -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"no stored {underlying} chain for {session}: {path}")
     return pd.read_parquet(path)
+
+
+def fit_fetched_at(session: str) -> str | None:
+    """When the chain of ``session``'s committed joint fit was downloaded
+    (its chain_diagnostics fetched_at), or None. A Yahoo chain records no
+    quote time and options_snapshots no download instant, so the fit's record
+    is where a stored Yahoo chain's fetch time lives."""
+    import pickle
+
+    path = Path(DATA_DIR) / "calibrations" / f"joint_cal_{session}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            cal = pickle.load(f)  # noqa: S301 (trusted: the calibrator's own committed result)
+    except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ImportError, ValueError, TypeError):
+        return None
+    diag = cal.get("chain_diagnostics") if isinstance(cal, dict) else None
+    got = (diag or {}).get("fetched_at")
+    return str(got) if got else None
 
 
 def stored_sessions(underlying: str = "SPX") -> list:
@@ -241,9 +263,16 @@ def load_session_quotes(session: str, *, chain: pd.DataFrame | None = None,
         "median_half_spread_vp": float(np.median(quotes["half_spread_vp"])),
         "t_origin": clean.diagnostics.get("t_origin"),
         "t_origin_basis": clean.diagnostics.get("t_origin_basis"),
+        # what the chain is and when it was quoted / downloaded (a Yahoo
+        # chain records no quote time: quote_time None, fetched_at set)
+        "source": clean.diagnostics.get("source"),
         "quote_time": clean.diagnostics.get("quote_time"),
-        "source": (str(raw["source"].dropna().iloc[0])
-                   if "source" in raw.columns and raw["source"].notna().any() else None),
+        "fetched_at": (clean.diagnostics.get("fetched_at")
+                       or (fit_fetched_at(session)
+                           if not oc.records_quote_time(clean.diagnostics.get("source")) else None)),
+        "n_raw": clean.diagnostics.get("n_raw"),
+        "n_two_sided": clean.diagnostics.get("n_two_sided"),
+        "near_atm_two_sided_share": clean.diagnostics.get("near_atm_two_sided_share"),
         "universe_filters": {
             "otm_vs_parity_forward": True, "min_T_days": MIN_T_DAYS,
             "max_T_years": MAX_T_YEARS, "K_over_F": [MONEYNESS_LO, MONEYNESS_HI],

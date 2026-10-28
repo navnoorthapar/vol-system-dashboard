@@ -19,7 +19,9 @@ residuals.parquet — one row per (model, quote) of the scoring universe:
     points). Sorted by model order, then T, strike.
 
 surface.json — inputs (chain path and SHA-256, spot, rate, T origin,
-    source), universe counts, the static-arbitrage screen (row counts and
+    source, quote time (None for a Yahoo chain: it records none), the
+    download instant fetched_at, book_state, the near-ATM two-sided share),
+    universe counts, the static-arbitrage screen (row counts and
     violations per CRW row type, mid and executable; the bid / ask box
     certificate; the total-variance calendar diagnostic), the l1-BA repair
     summary with the largest violating rows and the quotes it moves outside
@@ -422,7 +424,12 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 "chain": f"data_store/options/spx_{session}.parquet" if chain is None else "argument",
                 "chain_sha256": _sha256(chain_path) if chain is None else None,
                 "chain_rows": len(sq.raw), "source": sq.diagnostics.get("source"),
+                # None for a Yahoo chain (it records none); fetched_at is when it
+                # was downloaded and never a T origin
                 "quote_time": sq.diagnostics.get("quote_time"),
+                "fetched_at": sq.diagnostics.get("fetched_at"),
+                "book_state": None,
+                "near_atm_two_sided_share": sq.diagnostics.get("near_atm_two_sided_share"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),
                 "spot": sq.spot, "r_ref_cc": sq.r_ref, "r_ref_source": sq.r_ref_source,
