@@ -95,7 +95,7 @@
     <table class="tbl dense wrap-head" id="vol-cone-rank-tbl">
       <caption>SVI-cal ATMF of each listed expiry up to 252 sessions, {{ vc.session }}, and the share (%) of realised-vol windows of the same length (T·252/365 sessions, rounded) below it, since 2010 and in the last 3 years</caption>
       <thead><tr><th scope="col">Expiry</th><th scope="col" class="num">Days</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">ATMF (%)</th>{% for sm in vc.samples %}<th scope="col" class="num">{{ sm.short }}</th>{% endfor %}</tr></thead>
-      <tbody>{% for r in vc.rows %}<tr><td class="nowrap">{{ r.expiry }}</td><td class="num">{{ r.days|fmt('.0f') }}</td><td class="num">{{ r.sessions|fmt('.1f') }}</td><td class="num">{{ r.atmf|fmt('.2f') }}</td>{% for k in r.ranks %}<td class="num">{{ k|fmt('.0f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      <tbody>{% for r in vc.rows %}<tr><td class="nowrap">{{ r.expiry }}</td><td class="num">{{ r.days|fmt('.0f') }}</td><td class="num">{{ r.h|fmt('d') }}</td><td class="num">{{ r.atmf|fmt('.2f') }}</td>{% for k in r.ranks %}<td class="num">{{ k|fmt('.0f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note" id="vol-cone-rank-note">Implied vol carries the variance risk premium, so an ATMF above the realised median is the usual state, not by itself rich. Close-to-close RV leaves out intraday range (the database holds daily closes only). The ATMF is the SVI-cal slice at ln(K/F) = 0 of a listed expiry, not an interpolation{% if vc.n_beyond %}; {{ vc.n_beyond|plural('listed expiry', 'listed expiries') }} beyond 252 sessions {{ 'is' if vc.n_beyond == 1 else 'are' }} past the cone and left out{% endif %}.</p>

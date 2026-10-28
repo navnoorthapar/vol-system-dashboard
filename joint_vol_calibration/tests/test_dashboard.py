@@ -8307,6 +8307,8 @@ def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages
             assert [b[0] for b in body] == [p["expiry"] for p in pts]
             assert [b[3] for b in body] == [f"{p['atmf']:.2f}" for p in pts]
             assert [b[4] for b in body] == [f"{p['rank']:.0f}" for p in pts]
+            # R3-D12: the Sessions column is the whole window the rank uses, not 9.0, 9.7, …
+            assert [b[2] for b in body] == [str(p["h"]) for p in pts]
     assert len(spec["table"]["rows"]) == len(cone.HORIZONS) * len(cone.SAMPLES)
     def txt(frag: str) -> str:
         return _html_unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", frag)))
