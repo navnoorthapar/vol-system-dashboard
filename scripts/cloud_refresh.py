@@ -991,7 +991,10 @@ def artifact_gaps(headline_path: "str | None") -> dict:
         if (sess in listed and (DATA / "surface" / sess / "surface.json").exists()
                 and not _stale_surface(sess)):
             continue
-        why = sqm.cboe_book_refusal(sess)
+        try:
+            why = sqm.cboe_book_refusal(sess)
+        except Exception as e:  # noqa: BLE001 (a session whose book cannot be checked is no gap; logged)
+            why = f"{type(e).__name__}: {e}"
         if why is None:
             gaps[sess] = ["surface"]
         else:

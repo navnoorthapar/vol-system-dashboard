@@ -125,8 +125,11 @@ def session_captures(session: str, underlying: str = "SPX") -> list:
     out = []
     for p in cboe_capture_dir().glob(f"{underlying.lower()}_{session}_*.parquet"):
         js = p.with_suffix(".json")
-        side = json.loads(js.read_text()) if js.exists() else {}
-        out.append((p, side))
+        try:
+            side = json.loads(js.read_text()) if js.exists() else {}
+        except (OSError, ValueError):
+            side = {}                 # no sidecar record: the frame's own quote_time is read
+        out.append((p, side if isinstance(side, dict) else {}))
     return sorted(out, key=lambda x: (str(x[1].get("fetched_at") or ""), x[0].name), reverse=True)
 
 
@@ -215,17 +218,21 @@ def select_session_chain(session: str, spot: float, r_clean, *,
     caps = session_captures(session) if source != "yahoo" else []
     for path, side in caps:
         label = f"options/cboe/{path.name}"
-        frame = pd.read_parquet(path)
-        qt = side.get("quote_time")
-        if not qt and "quote_time" in frame.columns and frame["quote_time"].notna().any():
-            qt = str(frame["quote_time"].dropna().iloc[0])
-        why = fl.book_time_refusal(session, qt, side.get("fetched_at"))
-        if why:
-            refused.append(f"{label}: {why}")
+        try:
+            frame = pd.read_parquet(path)
+            qt = side.get("quote_time")
+            if not qt and "quote_time" in frame.columns and frame["quote_time"].notna().any():
+                qt = str(frame["quote_time"].dropna().iloc[0])
+            why = fl.book_time_refusal(session, qt, side.get("fetched_at"))
+            if why:
+                refused.append(f"{label}: {why}")
+                continue
+            raw = stored_chain_from_capture(frame)
+            clean = oc.clean_option_chain(raw, session, spot, r_ref=r_clean, quote_time=qt,
+                                          fetched_at=side.get("fetched_at"))
+        except Exception as e:  # noqa: BLE001 (a capture that cannot be read or cleaned is refused, never the book)
+            refused.append(f"{label}: unreadable ({type(e).__name__}: {e})")
             continue
-        raw = stored_chain_from_capture(frame)
-        clean = oc.clean_option_chain(raw, session, spot, r_ref=r_clean, quote_time=qt,
-                                      fetched_at=side.get("fetched_at"))
         why = fl.book_share_refusal(clean) or (None if clean.ok else clean.reason)
         if why:
             refused.append(f"{label}: {why}")

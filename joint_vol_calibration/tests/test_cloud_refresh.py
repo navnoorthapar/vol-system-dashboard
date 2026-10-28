@@ -885,6 +885,22 @@ def test_a_captured_session_without_an_accepted_fit_gets_its_surface(env, monkey
     assert seen == [(done, ("surface",)), (live, ("surface",))]
 
 
+def test_a_capture_whose_check_raises_is_no_gap_and_no_crash(env, monkeypatch):
+    """artifact_gaps runs on every calibrate run: a capture whose quote-state
+    check raises (an unforeseen read error) must not crash the backfill (which
+    fails the run) on every run after it; the session is logged and skipped."""
+    from joint_vol_calibration.surface import quotes as sqm
+    cdir = env.DATA / "options" / "cboe"
+    cdir.mkdir(parents=True)
+    (cdir / "spx_2026-09-17_013000Z.parquet").write_bytes(b"capture")
+    monkeypatch.setattr(env, "accepted_sessions", dict)
+
+    def boom(s_):
+        raise KeyError("strike")
+    monkeypatch.setattr(sqm, "cboe_book_refusal", boom)
+    assert env.artifact_gaps(None) == {}
+
+
 def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
     """The artifact commit was dropped (gate failure) or a part failed: the
     Greeks surface and scenario grid named the previous headline fit. The next

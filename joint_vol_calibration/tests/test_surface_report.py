@@ -539,3 +539,20 @@ def test_a_session_whose_books_fail_the_gates_has_no_cboe_surface(tmp_path, monk
     _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z", empty_atm=True)
     assert "not a live book" in sqm.cboe_book_refusal(SESSION)
     assert sqm.cboe_book_refusal("2026-10-15").startswith("no stored Cboe capture")
+
+
+def test_a_capture_that_cannot_be_read_is_refused_not_a_crash(tmp_path, monkeypatch):
+    """A truncated capture parquet or sidecar (a disk or commit gone wrong)
+    crashed the session's surface report, and through
+    cloud_refresh.artifact_gaps every backfill run. It is now a refused book:
+    the report falls back to the Yahoo chain and says why, and the Cboe-only
+    check gives a reason instead of raising."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    path, _side = _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z")
+    path.write_bytes(b"PAR1 truncated")
+    path.with_suffix(".json").write_text("{not json")
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["source"] == "yfinance"
+    assert f"options/cboe/{path.name}: unreadable (" in sq.inputs["source_reason"]
+    assert "unreadable" in sqm.cboe_book_refusal(SESSION)
