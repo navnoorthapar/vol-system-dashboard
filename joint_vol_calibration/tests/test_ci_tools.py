@@ -406,3 +406,126 @@ class TestRepoGrowth:
         assert "--budget-mb" in step
         assert "always()" in step
         assert "|| true" in step  # reporting never fails the run
+
+
+# ── recompute_audit.py (tests.yml and the bot's presentation gate) ────────────
+
+def _recompute(monkeypatch):
+    """scripts/ci/recompute (the package) importable as ``recompute``."""
+    monkeypatch.syspath_prepend(str(ROOT / "scripts" / "ci"))
+    for name in [m for m in sys.modules if m == "recompute" or m.startswith("recompute.")]:
+        monkeypatch.delitem(sys.modules, name)
+    import recompute.core
+    import recompute.data
+    return recompute
+
+
+class TestRecomputeAudit:
+    def test_no_module_imports_the_code_it_audits(self):
+        """Tier 0.1: the audit recomputes by an independent path. A check that called
+        the dashboard's functions would only test that the code agrees with itself."""
+        import ast
+
+        audited = {p.stem for p in (ROOT / "dashboard").glob("*.py")} | {"joint_vol_calibration", "dashboard"}
+        files = [*sorted((ROOT / "scripts" / "ci" / "recompute").glob("*.py")),
+                 ROOT / "scripts" / "ci" / "recompute_audit.py"]
+        assert len(files) >= 5
+        bad = []
+        for f in files:
+            for node in ast.walk(ast.parse(f.read_text(), str(f))):
+                names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) and not node.level
+                         else [])
+                bad += [f"{f.name}: {n}" for n in names if n.split(".")[0] in audited]
+            assert "spec_from_file_location" not in f.read_text(), f.name
+        assert bad == []
+
+    def test_a_number_passes_only_when_the_value_rounds_to_it(self, monkeypatch):
+        core = _recompute(monkeypatch).core
+        assert core.parse_num("−1,573.20 pts") == (-1573.2, 2)
+        assert core.parse_num("▲ +0.70%") == (0.7, 2)
+        assert core.parse_num("67th") == (67.0, 0)
+        assert [x[0] for x in core.numbers_in("2026-10-26: 1.60 half-spreads, 31.0%")] == [1.6, 31.0]
+        assert core.rounds_to(1.604999, 1.60, 2)
+        assert core.rounds_to(1.5951, 1.60, 2)
+        assert not core.rounds_to(1.6051, 1.60, 2)                  # one display unit off fails
+        assert not core.rounds_to(None, 1.60, 2)
+        assert core.rounds_to(0.0960, 9.60, 2, scale=100.0)
+
+    def test_a_missing_or_wrong_number_fails_and_is_never_skipped(self, monkeypatch):
+        core = _recompute(monkeypatch).core
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<main><p id="a">ATMF 14.03%</p><p id="b">RR −4.80</p></main>', "lxml")
+        a = core.Audit("t", soup)
+        assert a.num("p", "ATMF", a.need("#a", "p"), 14.0349)
+        assert not a.num("p", "RR", a.need("#b", "p"), -4.81)
+        assert a.need("#c", "p") is None
+        assert [c.ok for c in a.checks] == [True, False, False]
+        cov = a.coverage()
+        assert cov["total"] == 2
+        assert cov["covered"] == 2
+
+    def test_its_nyse_calendar_matches_the_published_closures(self, monkeypatch):
+        data = _recompute(monkeypatch).data
+        import datetime as dt
+        published = {  # NYSE full-day closures 2022-2026 as the exchange lists them
+            "2022-01-17", "2022-02-21", "2022-04-15", "2022-05-30", "2022-06-20", "2022-07-04", "2022-09-05",
+            "2022-11-24", "2022-12-26", "2023-01-02", "2023-01-16", "2023-02-20", "2023-04-07", "2023-05-29",
+            "2023-06-19", "2023-07-04", "2023-09-04", "2023-11-23", "2023-12-25", "2024-01-01", "2024-01-15",
+            "2024-02-19", "2024-03-29", "2024-05-27", "2024-06-19", "2024-07-04", "2024-09-02", "2024-11-28",
+            "2024-12-25", "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26", "2025-06-19",
+            "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25", "2026-01-01", "2026-01-19", "2026-02-16",
+            "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"}
+        got = {str(d) for y in range(2022, 2027) for d in data.nyse_closures(y)}
+        assert got == published
+        assert data.sessions_between("2026-09-04", "2026-09-08") == 1    # Labor Day
+        assert data.sessions_between("2026-10-23", "2026-10-26") == 1
+        assert data.sessions_between("2026-10-26", "2026-10-26") == 0
+        assert data.is_session(dt.date(2026, 10, 26))
+        assert not data.is_session(dt.date(2026, 11, 26))
+
+    def test_its_svi_delta_strike_inverts_the_forward_delta(self, monkeypatch):
+        data = _recompute(monkeypatch).data
+        sl = {"a": 0.002, "b": 0.03, "rho": -0.7, "m": 0.01, "sigma": 0.05, "T": 0.08}
+        for d in (-0.10, -0.25, 0.25, 0.10):
+            k = data.strike_at_delta(sl, d)
+            want = d if d > 0 else 1 + d
+            w = float(data.svi_total_variance(k, sl))
+            assert data.fwd_call_delta(k, w) == pytest.approx(want, abs=1e-12)
+        assert data.svi_vol(0.0, sl) ** 2 * sl["T"] == pytest.approx(float(data.svi_total_variance(0.0, sl)))
+
+    def test_ci_runs_it_on_the_rendered_site(self):
+        wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
+        step = wf[wf.index("- name: Recompute audit"):]
+        step = step[:step.index("\n      - name:", 10)]
+        assert 'scripts/ci/recompute_audit.py "$RUNNER_TEMP/site"' in step
+        assert "GITHUB_STEP_SUMMARY" in step
+        assert "|| true" not in step                                  # a mismatch fails the job
+
+    def test_its_record_view_applies_the_committed_record(self, monkeypatch, tmp_path):
+        """The pages render from the cache brought up to the committed record
+        (app.record_db); the audit builds the same view by its own code, so a
+        cache that lags the record does not make the audit read stale rows."""
+        import sqlite3
+
+        import pandas as pd
+        data = _recompute(monkeypatch).data
+        root = tmp_path / "data_store"
+        (root / "market" / "spx_ohlcv").mkdir(parents=True)
+        con = sqlite3.connect(root / "vol_system.db")
+        con.execute("CREATE TABLE spx_ohlcv (date TEXT, open REAL, high REAL, low REAL, close REAL, "
+                    "volume INTEGER, log_return REAL)")
+        con.executemany("INSERT INTO spx_ohlcv VALUES (?, 1, 1, 1, ?, 0, NULL)",
+                        [("2026-10-22", 100.0), ("2026-10-23", 101.0)])
+        con.commit()
+        con.close()
+        pd.DataFrame({"date": ["2026-10-23", "2026-10-26"], "open": [1.0, 1.0], "high": [1.0, 1.0],
+                      "low": [1.0, 1.0], "close": [102.0, 103.0], "volume": [0, 0]}).to_parquet(
+            root / "market" / "spx_ohlcv" / "spx_ohlcv_2026.parquet")
+        spx = data.Store(root).spx()
+        assert list(spx.index) == ["2026-10-22", "2026-10-23", "2026-10-26"]
+        assert list(spx["close"]) == [100.0, 102.0, 103.0]               # the record's value wins
+        assert spx["log_return"].iloc[-1] == pytest.approx(__import__("math").log(103 / 102))
+        r = data.cache_vs_record(data.Store(root), "spx_ohlcv", ("close",))
+        assert r["record_ahead"] == ["2026-10-26"]
+        assert r["not_in_record"] == 1                                    # 2026-10-22 is only cached

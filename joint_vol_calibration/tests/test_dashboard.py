@@ -8705,6 +8705,68 @@ def test_expiry_labels_are_iso_dates_never_yy_mm_dd(dash, pages):
         assert all(d in surface for d in dates), b
 
 
+# ── the recompute audit (FUND_GRADE_PLAN.md tier 0.1) ─────────────────────────
+
+@pytest.fixture(scope="module")
+def recompute_audit(tmp_path_factory):
+    """scripts/ci/recompute_audit.py, which imports its checks as ``recompute``."""
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+    try:
+        return _load("recompute_audit_under_test", "scripts/ci/recompute_audit.py")
+    finally:
+        sys.path.remove(str(ROOT / "scripts" / "ci"))
+
+
+@pytest.fixture(scope="module")
+def frozen_site(dash, freezer, tmp_path_factory):
+    out = tmp_path_factory.mktemp("frozen_site")
+    assert freezer.freeze(str(out), dash) == 0
+    return out
+
+
+def test_every_audited_number_recomputes_from_data_store(recompute_audit, frozen_site):
+    """Tier 0.1: every number the Overview and Surface print, recomputed from
+    data_store by scripts/ci/recompute/ (its own readers and arithmetic, nothing
+    imported from dashboard/), matches the rendered page at its printed precision,
+    and the page prints every number a check expects. Runs in the bot's
+    presentation gate, so a deploy with a number the audit cannot reproduce stops."""
+    res = recompute_audit.run(frozen_site, SHIPPED)
+    bad = [f"{c.page} · {c.panel} · {c.label}: printed {c.printed}, recomputed {c.expected} {c.note}"
+           for c in res["checks"] if not c.ok]
+    assert bad == []
+    assert len(res["checks"]) > 1000
+    for page in ("Overview", "Surface"):
+        cov = res["coverage"][page]
+        assert cov["covered"] >= 0.99 * cov["total"], (page, cov["missed"])
+
+
+def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_site, tmp_path):
+    """The audit is only evidence if it can fail: the SPX close in the ticker and
+    the 1M ATMF, each moved by one unit of their last printed digit in a copy of
+    the frozen Overview, are reported as mismatches."""
+    site = tmp_path / "site"
+    shutil.copytree(frozen_site, site)
+    page = site / "index.html"
+    html = page.read_text(encoding="utf-8")
+    for label in ("SPX", "1M ATMF"):
+        m = re.search(r'<span class="tk-label">' + re.escape(label)
+                      + r'</span>\s*<span class="tk-val">([^<]+)</span>', html)
+        assert m, label
+        raw = m.group(1)
+        num = re.search(r"\d[\d,]*\.\d+", raw)
+        assert num, raw
+        digits = num.group(0)
+        dec = len(digits.split(".")[1])
+        bumped = f"{float(digits.replace(',', '')) + 10 ** -dec:,.{dec}f}"
+        html = html[:m.start(1)] + raw.replace(digits, bumped) + html[m.end(1):]
+    page.write_text(html, encoding="utf-8")
+    res = recompute_audit.run(site, SHIPPED)
+    failed = {(c.panel, c.label) for c in res["checks"] if not c.ok and c.page == "Overview"}
+    assert ("ticker", "SPX close") in failed
+    assert ("ticker", "1M ATMF (SVI-cal, 30 days), %") in failed
+
+
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     """T11: every dot of the VIX-replication check's history is the signed gap
     (replicated − Cboe close) of its session's vix_replication.json, not |gap|;
