@@ -2261,7 +2261,7 @@ def test_surface_key_result_is_the_arbitrage_free_surface_in_half_spreads(dash, 
     assert rule.startswith("alternate strikes")
     assert "Arbitrage-free SVI surface · alternate strikes held out" in t
     assert "Quote-grade surface" not in t
-    assert "Yahoo close snapshot, no quote time" in t
+    assert "Yahoo Finance close snapshot, no quote time" in t
     assert f"{s['median_abs_hs']:.2f} half-spreads" in t
     assert f"{s['n']:,} held-out quotes of {SESSION}" in t
     assert f"{s['inside_spread_pct']:.1f}% inside the bid–ask" in t
@@ -8821,3 +8821,34 @@ def test_a_clean_checkout_renders_the_committed_record_not_the_stale_cache(dash,
     assert f"{close:,.2f}" in html
     assert hashlib.sha256((store / "vol_system.db").read_bytes()).hexdigest() == before
     assert dash.db_file() == store / "vol_system.db"          # the override is gone
+
+
+def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash, pages):
+    """VALIDATOR-01 / QUANT-01 / CITSEC-02 / CIO-03: the job stamped the Yahoo
+    download instant into quote_time, so the 2026-10-26 chain read 'Yahoo Finance
+    close snapshot · quotes at 2026-10-27 05:26:50Z' and 'Quotes as of …' although
+    Yahoo reports no quote times, and its T ran from that fetch ('Cboe GTH book').
+    Such a chain is named a download with its fetch time on every page that
+    names a chain; 'quotes at' belongs to a book that records quote times."""
+    fetched = {"inputs": {"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z",
+                          "t_origin_basis": "quote_time (Cboe GTH book)"}}
+    pv = dash.chain_provenance(fetched)
+    assert pv["vendor"] == "yahoo"
+    assert pv["fetched_as_quote_time"]
+    for text in (" · ".join(dash.chain_source(fetched)), dash.quote_source_note(fetched),
+                 dash.chain_sentence(fetched)):
+        assert "quotes at" not in text
+        assert "close snapshot" not in text
+        assert "fetched 2026-10-27 05:26 UTC" in text
+        assert "T measured from the fetch" in text
+    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
+    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
+    # every page that names the newest surface session's chain says what it is
+    sj = json.loads(_surface_file("surface.json").read_text())
+    want = dash.chain_provenance(sj)
+    for route in ("/", "/surface", "/model-risk"):
+        text = _visible_text(pages[route])
+        assert "Quotes as of" not in text, route
+        if want and want["fetched_as_quote_time"]:
+            assert "close snapshot · quotes at" not in text, route
+            assert want["time"].split(";")[0] in text, route

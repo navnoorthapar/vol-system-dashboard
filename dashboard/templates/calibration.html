@@ -137,7 +137,7 @@
       </div>
     </div>
     {% if (d.vx_leg or {}).views %}{% set vl = d.vx_leg %}
-    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is a close snapshot with no quote time and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
+    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is {{ d.chain_sentence or 'a chain with no surface report to name its source' }} and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
     {% endif %}
   {% endcall %}
 </div>

@@ -3277,6 +3277,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
         desk_inputs, sk = [], None
     # the chain this fit's session was fitted on, as the surface report records it
     own_chain = next((s for s in desk_inputs if s["session"] == session), None)
+    d["chain_sentence"] = chain_sentence(own_chain["surface"]) if own_chain else None
     if own_chain:
         d["chain_badge"] = chain_badge(own_chain["surface"], [
             n for s in desk_inputs if s["session"] != session for n in [session_expiries(s["surface"])]
@@ -4639,10 +4640,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         fit_in = artifacts.surface_fit_inputs(DATA, sr["session"])
         held = ("alternate strikes held out" if str(fit_in.get("rule") or "").startswith("alternate strikes")
                 else "held-out strikes")
-        src = str(fit_in.get("source") or "").lower()
-        qt = fit_in.get("quote_time")
-        snap = (" Yahoo close snapshot, no quote time." if src in ("yfinance", "yahoo") and not qt
-                else (f" Quotes as of {qt}." if qt else ""))
+        pv = chain_provenance({"inputs": fit_in})
+        snap = f" {pv['name']}, {pv['time']}." if pv else ""
         out.append({
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
@@ -5185,17 +5184,10 @@ def heston_model_key(models: Iterable[str]) -> str | None:
 
 
 # the quote inspector's footnote: where the chain's quotes come from and when
-CHAIN_SHORT = {"yfinance": "Yahoo close", "yahoo": "Yahoo close", "cboe": "Cboe"}
-
-
 def quote_source_note(surface_json: dict) -> str:
-    """'Yahoo close, no quote time': the chain's vendor and quote time (surface.json inputs)."""
-    inp = surface_json.get("inputs") or {}
-    uni = surface_json.get("universe") or {}
-    src = str(inp.get("source") or uni.get("source") or "").strip()
-    qt = inp.get("quote_time") or uni.get("quote_time")
-    name = CHAIN_SHORT.get(src.lower(), src) if src else "Chain source not recorded"
-    return f"{name}, " + (f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time")
+    """'Yahoo close, no quote time': the chain's vendor and quote time (chain_provenance)."""
+    pv = chain_provenance(surface_json)
+    return f"{pv['short']}, {pv['time']}" if pv else "Chain source not recorded, no quote time"
 
 
 def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | None],
@@ -5656,18 +5648,73 @@ def surface_state_line(cm: Sequence[dict], session: str | None, ref: str | None)
 # what the stored chain is, as the page badge names it (surface.json inputs.source)
 CHAIN_SOURCES = {"yfinance": "Yahoo Finance close snapshot", "yahoo": "Yahoo Finance close snapshot",
                  "cboe": "Cboe"}
+YAHOO = ("yfinance", "yahoo")
+
+
+def _utc_text(ts: Any) -> str:
+    """'2026-10-27T05:26:50Z' -> '2026-10-27 05:26 UTC'; other strings as written, 'T' spaced."""
+    t = str(ts)
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)", t)
+    return f"{m.group(1)} {m.group(2)} UTC" if m else t.replace("T", " ")
+
+
+def chain_provenance(surface_json: dict) -> dict | None:
+    """What a stored chain is, from surface.json inputs (and universe).
+
+    A Yahoo download carries no quote times. Until 2026-10-27 the job stamped
+    the download instant into its quote_time, and a download inside Global
+    Trading Hours was then treated as a timed book, T measured from it
+    (option_chain.t_origin; VALIDATOR-01, QUANT-01): such a chain is named a
+    download with its fetch time, never 'quotes at'. A Cboe book records the
+    time of its quotes. Keys: vendor ('yahoo', 'cboe' or the raw source), name,
+    short, time (the quote-time clause), fetched_as_quote_time."""
+    inp = surface_json.get("inputs") or {}
+    uni = surface_json.get("universe") or {}
+    src = str(inp.get("source") or uni.get("source") or "").strip().lower()
+    if not src:
+        return None
+    qt = inp.get("quote_time") or uni.get("quote_time")
+    if src in YAHOO:
+        if qt:
+            from_fetch = str(inp.get("t_origin_basis") or "").startswith("quote_time")
+            return {"vendor": "yahoo", "name": "Yahoo Finance download", "short": "Yahoo download",
+                    "time": (f"fetched {_utc_text(qt)}; Yahoo reports no quote times"
+                             + (", T measured from the fetch" if from_fetch else "")),
+                    "fetched_as_quote_time": True}
+        return {"vendor": "yahoo", "name": CHAIN_SOURCES[src], "short": "Yahoo close",
+                "time": "no quote time", "fetched_as_quote_time": False}
+    name = CHAIN_SOURCES.get(src, src)
+    return {"vendor": src, "name": name, "short": name,
+            "time": f"quotes at {_utc_text(qt)}" if qt else "no quote time", "fetched_as_quote_time": False}
+
+
+def _chain_clause(surface_json: dict) -> str:
+    """'Yahoo Finance close snapshot, no quote time' (chain_provenance), for a note."""
+    pv = chain_provenance(surface_json)
+    return f"{pv['name']}, {pv['time']}" if pv else "chain source not recorded"
+
+
+def chain_sentence(surface_json: dict) -> str:
+    """The chain in a sentence: 'a Yahoo Finance close snapshot with no quote time',
+    'a Yahoo Finance download fetched 2026-10-27 05:26 UTC (Yahoo reports no quote
+    times; T measured from the fetch)', 'a Cboe book with quotes at …'."""
+    pv = chain_provenance(surface_json)
+    if not pv:
+        return "a chain whose source is not recorded"
+    if pv["fetched_as_quote_time"]:
+        when, _, rest = pv["time"].partition("; ")
+        return f"a {pv['name']} {when} ({rest.replace(', ', '; ')})"
+    if pv["time"] == "no quote time":
+        return f"a {pv['name']} with no quote time"
+    if pv["vendor"] == "cboe":
+        return f"a {pv['name']} book with {pv['time']}"
+    return f"a {pv['name']}, {pv['time']}"
 
 
 def chain_source(surface_json: dict) -> list[str] | None:
     """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
-    inp = surface_json.get("inputs") or {}
-    uni = surface_json.get("universe") or {}
-    src = str(inp.get("source") or uni.get("source") or "").strip()
-    if not src:
-        return None
-    qt = inp.get("quote_time") or uni.get("quote_time")
-    return [CHAIN_SOURCES.get(src.lower(), src),
-            f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+    pv = chain_provenance(surface_json)
+    return [pv["name"], pv["time"]] if pv else None
 
 
 def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
@@ -6858,7 +6905,8 @@ def load_model_risk() -> dict[str, Any]:
             today["median_abs_hs"],
             f"{_fmt(today['median_abs_hs'], '.1f')} ({_fmt(today['inside_pct'], '.1f')}% inside)",
             "median_abs_hs", sart + ("scorecard.json" if today["scorecard"] else "residuals.parquet"),
-            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; Yahoo quotes carry no quote time.",
+            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
+            + _chain_clause(surf.get("surface") or {}) + ".",
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",

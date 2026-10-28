@@ -322,7 +322,7 @@ def surface_fit_inputs(data_dir: Path, session: str) -> dict:
     fit_set: dict = obj["fit_set"] if isinstance(obj.get("fit_set"), dict) else {}
     inputs: dict = obj["inputs"] if isinstance(obj.get("inputs"), dict) else {}
     return {"rule": fit_set.get("rule"), "source": inputs.get("source"),
-            "quote_time": inputs.get("quote_time")}
+            "quote_time": inputs.get("quote_time"), "t_origin_basis": inputs.get("t_origin_basis")}
 
 
 def validate_vix_replication(obj: dict, session: str) -> None:
