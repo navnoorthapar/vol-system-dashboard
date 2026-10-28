@@ -408,7 +408,11 @@ def state_tiles(a: Audit, c: Ctx) -> None:
             vix = (c.vx.get("indices") or {}).get("VIX") or {}
             want = [m1["vs"], 30] if m1["vs"] is not None else []
             if vix:
-                want += [M.num(vix.get("replicated")), c.official("VIX", c.session)]
+                rep, off = M.num(vix.get("replicated")), c.official("VIX", c.session)
+                want += [rep, off] if rep is not None else [off]
+                if rep is None:
+                    a.text(P_STATE, "VIX not replicated (vix_replication.json)", sub,
+                           "VIX not replicated", contains=True)
             nums(a, P_STATE, "1M VS vol, VIX replicated, Cboe close (DB)", sub, want)
         elif now["slope"] is not None:
             nums(a, P_STATE, "1Y and 1M ATMF", sub, [y1["atmf"], m1["atmf"]])
@@ -465,23 +469,22 @@ def score_tiles(a: Audit, c: Ctx) -> None:
     a.equal(P_SCORES, "VIX tile shown", t is not None, bool(vix))
     if vix and t is not None:
         rep, off = M.num(vix.get("replicated")), c.official("VIX", c.session)
-        a.num(P_SCORES, "VIX replicated (vix_replication.json)", t.select_one(".kpi-value"), rep)
+        cell(a, P_SCORES, "VIX replicated (vix_replication.json)", t.select_one(".kpi-value"), rep)
         sub = t.select_one(".kpi-sub")
-        # the replicated level against the official VIX's range that day (the record's
-        # vix_daily low and high; the page prints the range the replication stored)
-        hl = c.store.sql("SELECT low, high FROM vix_daily WHERE date = ?", (c.session,))
-        lo = M.num(hl["low"].iloc[0]) if len(hl) else None
-        hi = M.num(hl["high"].iloc[0]) if len(hl) else None
-        ranged = rep is not None and lo is not None and hi is not None
-        nums(a, P_SCORES, "Cboe close (DB), gap = replicated − close, the day's VIX range", sub,
-             [off, None if rep is None or off is None else rep - off, *([lo, hi] if ranged else [])])
-        if rep is not None and lo is not None and hi is not None:
-            where = "inside" if lo <= rep <= hi else "outside"
-            a.text(P_SCORES, "replicated level against the day's VIX range", sub,
-                   f"{where} the day\u2019s VIX range", contains=True)
+        if rep is None:
+            # the reason, re-derived: the Cboe-rules pair's own days fail to bracket the maturity
+            cr = vix.get("cboe_rules") or {}
+            days = M.num(cr.get("constant_maturity_days"))
+            near, nxt = (M.num((cr.get(k) or {}).get("days")) for k in ("near", "next"))
+            brackets = (near <= days <= nxt) if (days is not None and near is not None
+                                                 and nxt is not None) else None
+            why = (f"no stored expiry pair brackets {days:.0f} days" if brackets is False
+                   else "see the VIX family table")
+            a.text(P_SCORES, "VIX not replicated, and why (vix_replication.json terms)", sub,
+                   f"not replicated: {why} · Cboe close", contains=True)
+            nums(a, P_SCORES, "maturity, Cboe close (DB)", sub, [*([days] if brackets is False else []), off])
         else:
-            a.equal(P_SCORES, "no day-range clause without a recorded range",
-                    "VIX range" in text_of(sub), False)
+            vix_tile_sub(a, c, sub, rep, off)
         rg = M.session_range([c.vix_gap(x) for x in c.all if x.vx])
         ci = t.select_one(".kpi-ci")
         if rg is None:
@@ -489,6 +492,26 @@ def score_tiles(a: Audit, c: Ctx) -> None:
         else:
             nums(a, P_SCORES, f"VIX gap range over {rg[0]} sessions (replicated − DB close)", ci,
                  range_nums(rg))
+
+
+def vix_tile_sub(a: Audit, c: Ctx, sub: Tag | None, rep: float, off: float | None) -> None:
+    """A replicated VIX tile's sub-line: the Cboe close, the gap and where the
+    replicated level sits in the day's VIX range."""
+    # the replicated level against the official VIX's range that day (the record's
+    # vix_daily low and high; the page prints the range the replication stored)
+    hl = c.store.sql("SELECT low, high FROM vix_daily WHERE date = ?", (c.session,))
+    lo = M.num(hl["low"].iloc[0]) if len(hl) else None
+    hi = M.num(hl["high"].iloc[0]) if len(hl) else None
+    ranged = lo is not None and hi is not None
+    nums(a, P_SCORES, "Cboe close (DB), gap = replicated − close, the day's VIX range", sub,
+         [off, None if off is None else rep - off, *([lo, hi] if ranged else [])])
+    if lo is not None and hi is not None:
+        where = "inside" if lo <= rep <= hi else "outside"
+        a.text(P_SCORES, "replicated level against the day's VIX range", sub,
+               f"{where} the day\u2019s VIX range", contains=True)
+    else:
+        a.equal(P_SCORES, "no day-range clause without a recorded range",
+                "VIX range" in text_of(sub), False)
 
 
 P_ARBT = "#arb-tile"
@@ -1807,8 +1830,8 @@ def history(a: Audit, c: Ctx) -> None:
         q, off = M.num(b.get("atm_vol_30d_quotes")), c.official("VIX", name)
         cell(a, P_HIST, f"{name} VIX-term ATM / DB VIX close", td[j + 2],
              None if q is None or not off else q / off)
-        a.num(P_HIST, f"{name} VIX-term ATM / VIX (index.json)", td[j + 2],
-              M.num(r.get("atm_over_vix_official")))
+        cell(a, P_HIST, f"{name} VIX-term ATM / VIX (index.json)", td[j + 2],
+             M.num(r.get("atm_over_vix_official")))
         if beta:
             be = beta.get(name)
             cell(a, P_HIST, f"{name} β estimator on the DB chain", td[j + 3], be["ratio"] if be else None)

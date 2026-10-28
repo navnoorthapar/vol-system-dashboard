@@ -3204,6 +3204,13 @@ def test_no_identification_count_where_the_sigma_profile_contradicts_it(dash, pa
     d = dash.load_page2()
     rg = d["ridge"]
     prof = d["ident"]["sigma_profile"]
+    assert "of 5 parameters interior (not on a bound)" in cal
+    if not prof:
+        # the headline fit's diagnostics are pending: no ridge is claimed for it
+        assert rg is None
+        for t in (idx, cal):
+            assert "κ–σ ridge" not in t
+        return
     kap = [r["params"]["kappa"] for r in sorted(prof, key=lambda r: r["sigma_cap"])]
     assert rg["kappa_lo"] == pytest.approx(kap[0])
     assert rg["kappa_top"] == pytest.approx(kap[-1])
@@ -3211,7 +3218,6 @@ def test_no_identification_count_where_the_sigma_profile_contradicts_it(dash, pa
         assert "moves with the σ cap along a κ–σ ridge" in idx
         assert "moves with the σ cap along a κ–σ ridge" in cal
         assert f"κ ≤ {d['ident']['kappa_max']:g}" in cal
-    assert "of 5 parameters interior (not on a bound)" in cal
     # the free-σ refit names its wider box (κ ≤ 60, not production's 20)
     assert re.search(r"Refitted in a wider box \(σ ≤ \d+, κ ≤ \d+; production has κ ≤ \d+\)", idx)
 
@@ -4291,6 +4297,15 @@ def test_vvix_tradeoff_sentence_reads_every_configuration(dash):
     assert dash.vvix_tradeoff_sentence([]) is None
 
 
+def _sigma_shown(dash, files: dict) -> str:
+    """The session whose σ profile the trade-off panel shows and the frontier
+    highlights: the headline fit's, or, while its diagnostics are pending, the
+    newest diagnosed session before it."""
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    return headline if headline in files else max(s for s in files if s < headline)
+
+
 def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
     """P1.2: the σ frontier plots, per diagnosed session, each σ-profile refit's
     (SPX out-of-sample RMSE, model VVIX − market): the trade-off between the two
@@ -4301,8 +4316,7 @@ def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
     spec = _spec(html, "sigma-frontier")
     files = {s: d for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
              if (d.get("sigma_profile") or {}).get("rows")}
-    _, cal = dash.load_headline_calibration()
-    headline = dash._calibration_session(cal, "")
+    shown = _sigma_shown(dash, files)
     assert {s["name"] for s in spec["series"]} == set(files)
     assert len(spec["series"]) == len(files) >= 1
     for s in spec["series"]:
@@ -4316,7 +4330,7 @@ def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
         assert s["pointLabels"] == [f"{r['sigma_cap']:g}" for r in rows]
         assert s["hollowPoints"] == [r["sigma_cap"] > cap for r in rows]
         assert s["bigPoints"] == [r["sigma_cap"] == cap for r in rows]
-        assert s["color"] == ("headline" if s["name"] == headline else "muted")
+        assert s["color"] == ("headline" if s["name"] == shown else "muted")
     tbl = spec["table"]
     assert tbl["columns"][0]["label"] == "Session"
     assert len(tbl["rows"]) == sum(len(d["sigma_profile"]["rows"]) for d in files.values())
@@ -4332,12 +4346,13 @@ def test_sigma_frontier_labels_only_the_headline_sessions_caps(dash, pages):
     headline session's caps are drawn on the chart; the other sessions keep
     theirs for the tooltip (tipLabels), which desk.js does not draw."""
     spec = _spec(pages["/calibration"], "sigma-frontier")
-    _, cal = dash.load_headline_calibration()
-    headline = dash._calibration_session(cal, "")
-    assert any(s["name"] == headline for s in spec["series"])
+    files = {s: d for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
+             if (d.get("sigma_profile") or {}).get("rows")}
+    shown = _sigma_shown(dash, files)
+    assert any(s["name"] == shown for s in spec["series"])
     for s in spec["series"]:
         assert s["pointLabels"], s["name"]
-        assert bool(s.get("tipLabels")) is (s["name"] != headline), s["name"]
+        assert bool(s.get("tipLabels")) is (s["name"] != shown), s["name"]
     js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
     assert "if (s.pointLabels && !s.tipLabels) {" in js
 
@@ -5161,7 +5176,10 @@ def test_surface_vs_tile_names_its_vs_beside_the_replicated_vix_and_the_cboe_clo
     if vix:
         off = vix.get("official")
         close = off.get("close") if isinstance(off, dict) else off
-        assert f"VIX replicated {dash._fmt(vix.get('replicated'), '.2f')}" in sub, sub
+        if vix.get("replicated") is None:
+            assert "VIX not replicated" in sub, sub
+        else:
+            assert f"VIX replicated {dash._fmt(vix.get('replicated'), '.2f')}" in sub, sub
         assert f"Cboe close {dash._fmt(close, '.2f')}" in sub, sub
 
 
@@ -5913,7 +5931,8 @@ def _kpi_blocks(html: str, block_id: str) -> dict[str, str]:
 
 def _range_span(tile: str) -> str | None:
     m = re.search(r'<div class="kpi-ci kpi-range"[^>]*>(.*?)</div>', tile, re.DOTALL)
-    return _html_unescape(m.group(1)).strip() if m else None
+    # its visible text: the value pairs sit in nowrap spans (the ranges filter)
+    return _html_unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip() if m else None
 
 
 def test_surface_model_tiles_carry_their_range_over_every_stored_session(dash, pages):
@@ -8788,7 +8807,8 @@ def test_model_risk_vix_gap_history_keeps_the_sign(dash):
         assert dot["status"] == dash.desk_monitor.rag(abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"])
     if any(v < 0 for v in gaps.values()):
         assert "−" in h["range"]
-    assert row["num"] == pytest.approx(abs(row["num"]))          # today's limit check: the size
+    if row["num"] is not None:                    # None: today's session does not replicate the VIX
+        assert row["num"] == pytest.approx(abs(row["num"]))      # today's limit check: the size
 
 
 def test_the_vix_leg_names_what_the_model_index_is(pages):
@@ -9029,3 +9049,79 @@ def test_the_vix_tile_says_where_the_replicated_level_sits_in_the_days_range(das
         where = "inside" if row["official_inside_day_range"] else "outside"
         rng = f"{dash._fmt(float(off['low']), '.2f')}–{dash._fmt(float(off['high']), '.2f')}"
         assert f"{where} the day’s VIX range {rng}" in sub
+
+
+def test_an_unreplicated_vix_says_why_on_its_tiles(dash):
+    """Found on the bot's 2026-10-27 session: no stored Cboe expiry pair bracketed
+    30 days, so the VIX had no replicated level, and the tiles printed 'VIX
+    replicated —' and 'gap —' with no reason. They now say it is not replicated and
+    why, and keep the Cboe close."""
+    row = {"headline_method": None, "official": {"close": 17.52, "low": 17.43, "high": 18.55},
+           "cboe_rules": {"constant_maturity_days": 30, "extrapolated": True, "near_weight": 1.022}}
+    assert dash.vix_not_replicated_why(row) == "no stored expiry pair brackets 30 days"
+    assert dash.vix_not_replicated_why({"cboe_rules": {"reason": "fewer than two terms"}}) \
+        == "see the VIX family table"
+    cm = [{"label": "1M", "days": 30, "atmf": 13.7, "rr25": -4.4, "bf25": 0.7, "vs": 17.7,
+           "vs_minus_atmf": 3.9, "available": True, "lower": "2026-11-25", "upper": "2026-11-27"},
+          {"label": "1Y", "days": 365, "atmf": 16.7, "available": True, "lower": "a", "upper": "b"}]
+    tiles = dash.surface_state_tiles(cm, [{"T_days": 10}, {"T_days": 400}], vix_rep={"indices": {"VIX": row}})
+    vs = next(t for t in tiles if t["label"] == "1M VS − ATMF")
+    assert "VIX not replicated · Cboe close 17.52" in vs["sub"]
+    assert "VIX replicated —" not in vs["sub"]
+
+
+def test_the_vix_tile_names_the_reason_when_the_newest_session_has_no_replicated_vix(dash, pages):
+    """The page side of the test above, on whichever session is newest: a VIX with
+    no replicated level says 'not replicated' and why, and prints no gap."""
+    from bs4 import BeautifulSoup
+    vx = json.loads(_surface_file("vix_replication.json").read_text())
+    row = (vx.get("indices") or {}).get("VIX") or {}
+    soup = BeautifulSoup(pages["/surface"], "lxml")
+    tile = next((k for k in soup.select("#surface-scores .kpi")
+                 if k.select_one(".kpi-label").get_text(strip=True) == "VIX from this chain"), None)
+    if tile is None or row.get("replicated") is not None:
+        pytest.skip("the newest surface session replicates the VIX")
+    sub = " ".join(tile.select_one(".kpi-sub").get_text(" ", strip=True).split())
+    assert sub.startswith(f"not replicated: {dash.vix_not_replicated_why(row)} · Cboe close ")
+    assert "gap" not in sub
+
+
+def test_the_sigma_panel_stays_while_the_headline_fits_diagnostics_are_pending(dash, monkeypatch):
+    """Found when the bot's diagnostics for 2026-10-27 timed out twice: the σ
+    trade-off panel needed the headline fit's own σ profile, so it vanished, and
+    the Overview, Risk and Calibration links to #sigma-tradeoff broke (the bot's
+    presentation gate failed on them, and the site was not redeployed). While
+    the headline's diagnostics are pending the panel shows the newest diagnosed
+    fit before it and names it; every session's frontier and trade-off stay."""
+    from bs4 import BeautifulSoup
+    files = sorted(s for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
+                   if (d.get("sigma_profile") or {}).get("rows"))
+    assert files
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    real = dash.artifacts.calibration_diagnostics
+
+    def pending(c, data_dir, session):              # the headline's file not written yet
+        out = real(c, data_dir, session)
+        return {**out, "sigma_profile": [], "kappa_max": None} if session == headline else out
+
+    monkeypatch.setattr(dash.artifacts, "calibration_diagnostics", pending)
+    d = dash.load_page2()
+    prior = [s for s in files if s < headline]
+    sv = d["sigma_view"]
+    assert sv is not None
+    assert sv["pending"] is True
+    assert sv["session"] == prior[-1]
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    soup = BeautifulSoup(html, "lxml")
+    panel = soup.select_one("#sigma-tradeoff")
+    assert panel is not None
+    note = " ".join(panel.select_one("#sigma-pending").get_text().split())
+    assert note == (f"The {headline} fit has no σ profile yet: its diagnostics "
+                    f"(scripts/calibration_diagnostics.py) have not completed. "
+                    f"Shown: {prior[-1]}, the newest diagnosed fit.")
+    assert f"σ profile of the {prior[-1]} fit" in panel.select_one("#sigma-profile caption").get_text()
+    assert len(panel.select("#sigma-profile tbody tr")) == len(sv["rows"]) > 0
+    assert panel.select_one("#vvix-tradeoff") is not None
+    spec = _spec(html, "sigma-frontier")
+    assert [s["name"] for s in spec["series"] if s["color"] == "headline"] == [prior[-1]]

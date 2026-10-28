@@ -28,7 +28,8 @@
   {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes', ci=(rg ~ ' (out of sample)') if rg else none, ci_kind='range') }}
   {% endfor %}
   {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
-  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ ((' · inside' if v.in_range else ' · outside') ~ ' the day’s VIX range ' ~ (v.day_range[0]|fmt('.2f')) ~ '–' ~ (v.day_range[1]|fmt('.2f')) if (v.in_range is not none and v.day_range) else ''), ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
+  {% if v.replicated is none %}{% set vsub = 'not replicated: ' ~ v.why ~ ' · Cboe close ' ~ (v.official|fmt('.2f')) %}{% else %}{% set vsub = 'Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ ((' · inside' if v.in_range else ' · outside') ~ ' the day’s VIX range ' ~ (v.day_range[0]|fmt('.2f')) ~ '–' ~ (v.day_range[1]|fmt('.2f')) if (v.in_range is not none and v.day_range) else '') %}{% endif %}
+  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub=vsub, ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
   {% endif %}{% endif %}
   {% if d.arb %}{% set lv0 = d.arb_clean_top %}
   <div class="kpi" id="arb-tile">

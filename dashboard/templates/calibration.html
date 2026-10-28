@@ -201,7 +201,7 @@
   {% endfor %}
 </div>
 
-<div class="g pair">
+<div class="g pair top">
   {% call m.panel('identifiability', 'Identifiability · multi-start and Jacobian', 's7') %}
     {% set idn = d.ident or {} %}
     {% if idn.state == 'ok' %}{% set I = idn.ident %}
@@ -244,22 +244,24 @@
 </div>
 
 {% set idn = d.ident or {} %}
-{% if idn.state == 'ok' and idn.sigma_profile and d.param_tiles %}
+{% set sv = d.sigma_view %}
+{% if sv and d.param_tiles %}
 <div class="g">
-  {% call m.panel('sigma-tradeoff', 'Joint SPX/VIX trade-off · σ profile and VVIX', 's12', d.session ~ ' · ' ~ (d.vvix_tradeoff|length|plural('diagnosed session'))) %}
+  {% call m.panel('sigma-tradeoff', 'Joint SPX/VIX trade-off · σ profile and VVIX', 's12', sv.session ~ ' · ' ~ (d.vvix_tradeoff|length|plural('diagnosed session'))) %}
+    {% if sv.pending %}<p class="note" id="sigma-pending">The {{ d.session }} fit has no σ profile yet: its diagnostics (<code>scripts/calibration_diagnostics.py</code>) have not completed. Shown: {{ sv.session }}, the newest diagnosed fit.</p>{% endif %}
     <div class="split">
       <div>
         <div class="tbl-wrap" tabindex="0" role="region" aria-label="Sigma profile (scrollable)">
-        <table class="tbl dense" id="sigma-profile"><caption>σ profile of the {{ d.session }} fit: the joint loss refitted under each cap on σ (κ ≤ {{ idn.kappa_max|fmt('.0f') }}). SPX errors in vol pts; VIX and VVIX in index pts. VVIX is the model's 30-day vol of VIX at each refit against the ^VVIX close of {{ d.sigma_profile_market|fmt('.0f') }}; VVIX − mkt = model − market.</caption>
+        <table class="tbl dense" id="sigma-profile"><caption>σ profile of the {{ sv.session }} fit: the joint loss refitted under each cap on σ (κ ≤ {{ sv.kappa_max|fmt('.0f') }}). SPX errors in vol pts; VIX and VVIX in index pts. VVIX is the model's 30-day vol of VIX at each refit against the ^VVIX close of {{ d.sigma_profile_market|fmt('.0f') }}; VVIX − mkt = model − market.</caption>
           <thead><tr><th scope="col" class="num">{{ 'σ cap'|sym }}</th><th scope="col" class="num">{{ 'σ'|sym }}</th><th scope="col" class="num">{{ 'κ'|sym }}</th><th scope="col" class="num">Loss</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX</th><th scope="col" class="num">VVIX model</th><th scope="col" class="num">VVIX − mkt</th></tr></thead>
-          <tbody>{% for r in idn.sigma_profile %}<tr{% if r.sigma_cap == d.param_tiles[2].hi %} class="em"{% endif %}><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td><td class="num">{{ r.vvix_model|fmt('.0f') }}</td><td class="num">{{ (r.vvix_model - r.vvix_market if r.vvix_model is not none and r.vvix_market is not none else none)|signed('.0f') }}</td></tr>{% endfor %}</tbody>
+          <tbody>{% for r in sv.rows %}<tr{% if r.sigma_cap == d.param_tiles[2].hi %} class="em"{% endif %}><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td><td class="num">{{ r.vvix_model|fmt('.0f') }}</td><td class="num">{{ (r.vvix_model - r.vvix_market if r.vvix_model is not none and r.vvix_market is not none else none)|signed('.0f') }}</td></tr>{% endfor %}</tbody>
         </table>
         </div>
         <p class="note">Each row is a diagnostic refit and the published fit is unchanged; the highlighted row refits under the production box. The production box is kept at σ ≤ {{ d.param_tiles[2].hi|fmt('g') }}: the NN pricer's training domain, {{ m.cite('the risk monitor’s vomma shock', 'risk.html#scenario') }} and the bound chips are tied to it, and widening it is filed, not done (<code>config.HESTON_BOUNDS</code>; <a href="corrections.html#c23">Corrections C23-M1</a>).</p>
       </div>
       <div>
         {% if d.charts.frontier %}{{ m.chart(d.charts.frontier, 'h300') }}
-        <p class="note">x: SPX out-of-sample IV RMSE; y: model VVIX minus the ^VVIX close. One line per diagnosed session ({{ d.session }} in white, the others grey), one point per σ cap, labelled; the production cap's point is larger and caps above it are hollow.</p>{% endif %}
+        <p class="note">x: SPX out-of-sample IV RMSE; y: model VVIX minus the ^VVIX close. One line per diagnosed session ({{ sv.session }} in white, the others grey), one point per σ cap, labelled; the production cap's point is larger and caps above it are hollow.</p>{% endif %}
       </div>
     </div>
     {% if d.vvix_sentence %}<p class="prose" id="vvix-tradeoff">{{ d.vvix_sentence }}</p>{% endif %}

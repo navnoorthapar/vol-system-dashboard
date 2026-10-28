@@ -46,7 +46,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -2878,6 +2878,31 @@ def box_refit_note(tr: Sequence[dict], session: str | None) -> str:
             f"VVIX {_fmt(tp['vvix_model'], '.1f')} vs {_fmt(tp['vvix_market'], '.1f')}{scope}.")
 
 
+def sigma_view(diag: dict, session: str | None, profiles: Sequence[dict], d: dict) -> dict | None:
+    """The σ profile the Calibration page's trade-off panel shows: this fit's
+    (``diag``, calibration_diagnostics), or, while its diagnostics are pending
+    (the bot builds them after the fit and can time out), the newest diagnosed
+    fit before it, marked ``pending`` so the page names it. None when no
+    session before this one has a σ profile. ``profiles`` is
+    load_sigma_profiles()["sessions"], oldest first; ``d`` takes a read error."""
+    if diag.get("state") == "ok" and diag.get("sigma_profile"):
+        return {"session": session, "rows": diag["sigma_profile"], "kappa_max": diag.get("kappa_max"),
+                "pending": False}
+    prior = [x["session"] for x in profiles if session is None or x["session"] < session]
+    if not prior:
+        return None
+    try:
+        # the earlier file's identifiability stands in for the pickle's; only its profile is read
+        older = artifacts.calibration_diagnostics({}, DATA, prior[-1])
+    except artifacts.ArtifactError as e:
+        _record_error(d, f"calibration diagnostics σ profile (diagnostics/{prior[-1]}.json)", e)
+        return None
+    if older.get("state") != "ok" or not older.get("sigma_profile"):
+        return None
+    return {"session": prior[-1], "rows": older["sigma_profile"], "kappa_max": older.get("kappa_max"),
+            "pending": True}
+
+
 def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> dict | None:
     """The σ frontier: SPX out-of-sample RMSE against model VVIX − market, one line per session.
 
@@ -3246,7 +3271,9 @@ def calibration_extras(d: dict, cal: dict) -> None:
     profiles = (sp.get("sessions") or []) if sp.get("state") == "ok" else []
     d["vvix_tradeoff"] = vvix_tradeoff(profiles)
     d["vvix_sentence"] = vvix_tradeoff_sentence(d["vvix_tradeoff"])
-    frontier = sigma_frontier_spec(profiles, session)
+    d["sigma_view"] = sigma_view(diag, session, profiles, d)
+    shown = (d["sigma_view"] or {}).get("session")
+    frontier = sigma_frontier_spec(profiles, shown)
     if frontier:
         d["charts"]["frontier"] = frontier
     # the published fit's model VVIX (its own diagnostics file, when it names this fit)
@@ -3255,7 +3282,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     d["vvix"] = ({"model": sf["vvix_model"], "market": sf["vvix_market"]}
                  if sf.get("file") == d.get("calib_file") and None not in (sf.get("vvix_model"),
                                                                            sf.get("vvix_market")) else None)
-    d["sigma_profile_market"] = next((r["vvix_market"] for r in (own or {}).get("rows") or []
+    shown_p = next((x for x in profiles if x["session"] == shown), None)
+    d["sigma_profile_market"] = next((r["vvix_market"] for r in (shown_p or {}).get("rows") or []
                                       if r["vvix_market"] is not None), None)
     # where this fit ranks among the gated fits (lower error is better), one tile each:
     # its own unrounded history row (the tiles' values are rounded for display)
@@ -5614,6 +5642,18 @@ def official_close(index_row: dict) -> float | None:
     return _num(off.get("close")) if isinstance(off, dict) else _num(off)
 
 
+def vix_not_replicated_why(index_row: Mapping) -> str:
+    """Why an index of vix_replication.json has no replicated level, short enough
+    for a tile: the Cboe-rules expiry pair would extrapolate (no stored pair
+    brackets the index's maturity), or the VIX family table below has the reason."""
+    terms = index_row.get("cboe_rules")
+    terms = terms if isinstance(terms, Mapping) else {}
+    days = _num(terms.get("constant_maturity_days"))
+    if terms.get("extrapolated") and days is not None:
+        return f"no stored expiry pair brackets {days:.0f} days"
+    return "see the VIX family table"
+
+
 def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
                         all_cm: Sequence[Sequence[dict]] = (), vix_rep: dict | None = None) -> list[dict]:
     """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
@@ -5637,8 +5677,9 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
     vs_sub = (f"VS {_fmt(m1['vs'], '.2f')}% (the bracketing strips at 30 days) over ATMF: the skew premium"
               if m1.get("vs") is not None else "variance-swap vol over ATMF: the skew premium")
     if vix:
-        vs_sub += (f" · VIX replicated {_fmt(_num(vix.get('replicated')), '.2f')}"
-                   f" · Cboe close {_fmt(official_close(vix), '.2f')}")
+        rep = _num(vix.get("replicated"))
+        vs_sub += (f" · VIX replicated {_fmt(rep, '.2f')}" if rep is not None else " · VIX not replicated")
+        vs_sub += f" · Cboe close {_fmt(official_close(vix), '.2f')}"
     return [
         {"label": "1M ATMF", "value": _fmt(m1.get("atmf"), ".2f"), "unit": "%",
          "sub": f"SVI-cal at 30 days, {where}", "range": rng("atmf")},
@@ -6276,7 +6317,9 @@ def surface_extras(d: dict, surf: dict) -> None:
             if not row:
                 continue
             off = row.get("official")
-            d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")),
+            rep = _num(row.get("replicated"))
+            d["vix_rows"].append({"ticker": tick, "replicated": rep,
+                                  "why": vix_not_replicated_why(row) if rep is None else None,
                                   "official": official_close(row), "gap": _num(row.get("gap_vs_official")),
                                   "method": row.get("headline_method"),
                                   "in_range": row.get("official_inside_day_range"),

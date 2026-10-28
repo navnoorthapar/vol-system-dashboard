@@ -153,7 +153,7 @@
 </div>
 {% endif %}
 
-<div class="g pair">
+<div class="g pair top">
   {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session) %}
     <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
       {{ m.kpi('SPX RMSE in sample', f.spx_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_spx_options|fmt) ~ ' anchors, ' ~ (f.n_spx_expiries|fmt) ~ ' expiries') }}
