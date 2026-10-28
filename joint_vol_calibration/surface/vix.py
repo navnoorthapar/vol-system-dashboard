@@ -48,11 +48,14 @@ Deviations forced by the stored data (reported per session, never hidden):
     those chains the two-consecutive-zero-bid stop cannot trigger and the
     strip runs to the last stored strike. Older (pre-C22) snapshots keep
     zero bids and the rule applies.
-  * missing expiries: the bot stores only the calibration expiries and their
-    neighbours, so a Cboe candidate term can be absent; the bracket then
-    uses the nearest stored candidates (wider bracket), and the result is
-    flagged. A second, diagnostic replication brackets with any stored
-    expiry (any weekday).
+  * missing expiries: the bot's Yahoo download stores only the calibration
+    expiries and their neighbours, so a Cboe candidate term can be absent;
+    the bracket then uses the nearest stored candidates (wider bracket).
+    cboe_term_window checks the pair against Cboe's window (more than 23
+    and fewer than 37 days) and the report lists a pair outside it, with the
+    missing candidates, among the session's deviations. A session's Cboe
+    capture holds the full listing, so its bracket is Cboe's. A second,
+    diagnostic replication brackets with any stored expiry (any weekday).
   * settlement of root-less chains: pre-C22 snapshots carry no OCC root;
     their lines are treated as PM-settled (the cleaner's convention), which
     misplaces T by 6.5 hours on AM-only dates.
@@ -327,6 +330,66 @@ def replicate_index(terms: list, R: float, days: int, *, candidates_only: bool =
             "near_weight": w_near, "extrapolated": bool(w_near < 0 or w_near > 1),
             "candidates_only": candidates_only,
             "forward_source": "parity_regression" if carry is not None else "cboe_single_strike"}
+
+
+# Cboe VIX methodology: the near- and next-term options have more than 23
+# and less than 37 days to expiration.
+CBOE_VIX_TERM_WINDOW_DAYS = (23.0, 37.0)
+
+
+def cboe_term_window(rep: dict, terms: list, calc_time_ny: datetime,
+                     window: tuple = CBOE_VIX_TERM_WINDOW_DAYS) -> dict | None:
+    """Whether a replicated VIX's two terms are Cboe's: each with more than
+    window[0] and fewer than window[1] days to settlement. With a full
+    listing the bracket method picks such a pair; a stored chain that lacks
+    the candidates in the window (the bot's Yahoo download keeps 17
+    expiries: on 2026-10-26 the near term was 10.6 days out) brackets wider.
+
+    rep   : replicate_index output (None when it did not replicate)
+    terms : term_tables output of the same chain at ``calc_time_ny``
+
+    Returns {"window_days", "near", "next" ({expiry, days}), "inside",
+    "missing_candidates"}: the VIX candidate dates (AM monthly settlement
+    dates, end-of-week PM dates) whose settlement falls inside the window and
+    that the stored chain does not hold, each with its days. None when ``rep``
+    did not replicate."""
+    if not (rep or {}).get("ok"):
+        return None
+    lo, hi = float(window[0]), float(window[1])
+    held = {t["expiry"] for t in terms if t.get("candidate")}
+    missing = []
+    start = calc_time_ny.date()
+    for i in range(int(hi) + 2):
+        d = (start + timedelta(days=i)).isoformat()
+        sett = "AM" if is_spx_am_settlement_date(d) else "PM" if is_end_of_week_expiry(d) else None
+        if sett is None or d in held:
+            continue
+        days = minutes_to_settlement(calc_time_ny, d, sett) / 1440.0
+        if lo < days < hi:
+            missing.append({"expiry": d, "settlement": sett, "days": days})
+    near, nxt = rep["near"], rep["next"]
+    inside = all(lo < t["days"] < hi for t in (near, nxt))
+    return {"window_days": [lo, hi],
+            "near": {"expiry": near["expiry"], "days": near["days"]},
+            "next": {"expiry": nxt["expiry"], "days": nxt["days"]},
+            "inside": bool(inside), "missing_candidates": missing}
+
+
+def term_window_deviation(win: dict | None, name: str = "VIX") -> str | None:
+    """The deviation line for a bracket outside Cboe's term window (None when
+    the bracket is Cboe's or nothing was replicated)."""
+    if not win or win["inside"]:
+        return None
+    lo, hi = win["window_days"]
+    n, x = win["near"], win["next"]
+    miss = win["missing_candidates"]
+    return (f"{name} bracket {n['expiry']} ({n['days']:.1f} d) / {x['expiry']} ({x['days']:.1f} d) "
+            f"is not Cboe's: Cboe's near and next terms have more than {lo:.0f} and fewer than "
+            f"{hi:.0f} days to expiration, and the stored chain "
+            + (("lacks the candidate expiries " if len(miss) > 1 else "lacks the candidate expiry ")
+               + ", ".join(f"{m['expiry']} ({m['days']:.1f} d)" for m in miss)
+               if miss else "holds no candidate expiry in that window")
+            + "; the level interpolates a wider bracket.")
 
 
 HEADLINE_METHODS = ("cboe_rules", "parity_forward")

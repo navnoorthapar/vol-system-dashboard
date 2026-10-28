@@ -4905,7 +4905,13 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(p
         return
     n = len(re.findall(r"<li>", m.group(1)))
     assert n > 0
-    assert n >= len(rep.get("deviations") or [])
+    # QUANT-02 / VALIDATOR-05: the departures are the artifact's deviations; its gap
+    # notes (strip coverage, model variance swaps, the attribution) are listed
+    # apart and not counted
+    assert n == len(rep.get("deviations") or [])
+    notes = re.search(r"<summary>Notes on the replication \(not departures\)</summary>(.*?)</details>",
+                      pages["/surface"], re.DOTALL)
+    assert (notes is not None) == bool(rep.get("gap_notes"))
     tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
     works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
     if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
@@ -5708,8 +5714,12 @@ def test_vix_replication_prose_gives_the_gap_split_with_the_tables_signs(dash, p
     vix = json.loads((SHIPPED / "surface" / session / "vix_replication.json").read_text())
     head = re.search(r'<table[^>]*id="vix-terms-table".*?</thead>', html, re.DOTALL).group(0)
     assert "Missing-strike shortfall (replicated − full strip)" in _visible_text("<body>" + head)
-    prose = _visible_text("<body>" + re.search(r'<ul class="prose"[^>]*>.*?</ul>', html[html.index(
-        'id="vix-terms-table"'):], re.DOTALL).group(0))
+    # the replication's method lists under the terms table: its departures, then its
+    # notes (the gap attribution is a note, not a departure)
+    panel = html[html.index('id="vix-terms-table"'):]
+    panel = panel[:panel.index("</section>")] if "</section>" in panel else panel
+    prose = " ".join(_visible_text("<body>" + u) for u in
+                     re.findall(r'<ul class="prose"[^>]*>.*?</ul>', panel, re.DOTALL))
     assert "official − replicated" not in prose
     assert "official - replicated" not in prose
     row = {r[0]: r for r in _table_rows(html, "vix-terms-table")}.get("VIX")

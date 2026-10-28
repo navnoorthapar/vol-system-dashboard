@@ -15,6 +15,7 @@ import pytest
 
 from joint_vol_calibration.surface import report
 from joint_vol_calibration.surface import svi as sv
+from joint_vol_calibration.surface import vix as vix_mod
 
 REPO = Path(__file__).resolve().parents[2]
 SESSION = "2026-10-16"
@@ -81,7 +82,14 @@ def test_artifacts_and_schema(written):
     vixd = json.loads((d / "vix_replication.json").read_text())
     assert set(vixd["indices"]) == {"VIX9D", "VIX", "VIX3M", "VIX6M"}
     assert vixd["indices"]["VIX"]["headline_method"] == "cboe_rules"
-    assert any("2026-11-20" in n for n in vixd["gap_notes"])
+    # the Yahoo chain lacks the SPX monthly 2026-11-20: the bracket is wider than
+    # Cboe's 23-37 day window, a listed deviation (not a gap note)
+    win = vixd["indices"]["VIX"]["cboe_term_window"]
+    assert not win["inside"]
+    assert "2026-11-20" in [m["expiry"] for m in win["missing_candidates"]]
+    assert [d for d in vixd["deviations"] if d.startswith("VIX bracket ")] == [
+        vix_mod.term_window_deviation(win)]
+    assert not any("2026-11-20" in n for n in vixd["gap_notes"])
     ga = vixd["indices"]["VIX"]["gap_attribution"]
     assert ga["available"]
     assert ga["surface"] == "svi_cal"
@@ -484,6 +492,13 @@ def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
         gth = oc.t_origin(side["quote_time"], s) != oc.session_close(s)
         assert sq.diagnostics["t_origin_basis"] == (oc.GTH_BASIS if gth else oc.CLOSE_BASIS)
         assert sq.diagnostics["n_expiries"] > 17                      # the full listing
+        # CITSEC-03: with the full listing the VIX bracket is Cboe's (both terms 23-37 days out)
+        calc = report._calc_time_ny(sq)
+        terms = vix_mod.term_tables(sq.raw, s, calc)
+        rep = vix_mod.replicate_index(terms, sq.r_ref, 30, spot=sq.spot)
+        win = vix_mod.cboe_term_window(rep, terms, calc)
+        assert win["inside"], (s, win)
+        assert win["missing_candidates"] == []
 
 
 def test_a_session_with_a_live_cboe_book_and_no_fit_gets_a_surface(tmp_path, monkeypatch):

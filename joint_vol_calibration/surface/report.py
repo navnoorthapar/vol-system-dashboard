@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +91,10 @@ SCHEMA_VERSION = 1
 #   2  plan 0.7: the session's Cboe book when it passes the quote-state
 #      gates, else the Yahoo chain (no quote time; T from the close), and
 #      the choice recorded in surface.json inputs
-REPORT_VERSION = 2
+#   3  a VIX bracket outside Cboe's 23-37 day term window is a deviation
+#      (indices.VIX.cboe_term_window); a session without an accepted
+#      Heston fit gets a surface, its Heston row unavailable with a reason
+REPORT_VERSION = 3
 SURFACE_DIR = DATA_DIR / "surface"
 
 
@@ -368,17 +371,9 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                      "unmeasured.")
     v = vixrep.get("cboe_rules", {})
     if v.get("ok"):
+        # a bracket outside Cboe's 23-37 day window is a deviation
+        # (vx.term_window_deviation), not a note
         near, nxt = v["near"], v["next"]
-        target = date.fromisoformat(sq.session) + timedelta(days=30)
-        exp_dates = {t["expiry"] for t in terms}
-        d = target + timedelta(days=1)
-        while not vx.is_end_of_week_expiry(d.isoformat()):
-            d += timedelta(days=1)
-        if d.isoformat() not in exp_dates:
-            notes.append(f"The first Cboe candidate expiry after 30 days ({d.isoformat()}) is not "
-                         f"in the stored chain (the bot stores calibration expiries and "
-                         f"neighbours), so the bracket is {near['expiry']} ({near['days']:.1f}d) - "
-                         f"{nxt['expiry']} ({nxt['days']:.1f}d) instead of a <= 7-day bracket.")
         for lab, t in (("near", near), ("next", nxt)):
             notes.append(f"{lab}-term {t['expiry']}: {t['n_puts']} puts / {t['n_calls']} calls, "
                          f"strip K/F {t['lowest_K_over_F']:.3f}-{t['highest_K_over_F']:.3f}"
@@ -570,6 +565,9 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                     if "low" in off:
                         rep["official_inside_day_range"] = bool(off["low"] <= head["level"] <= off["high"])
             indices[name] = rep
+        # Cboe's near and next terms have more than 23 and fewer than 37 days
+        indices["VIX"]["cboe_term_window"] = vx.cboe_term_window(
+            indices["VIX"].get("cboe_rules") or {}, terms, calc)
         model_surfaces = {n: o for n, o in objs.items() if o is not None}
         strip = vx.variance_swap_strip(terms, sq.r_ref, q, carry=carry_map,
                                        surfaces=model_surfaces)
@@ -631,6 +629,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 ("VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days "
                  "(analogues, not Cboe's index-specific series sets)."),
                 *_settlement_deviations(terms),
+                *filter(None, [vx.term_window_deviation(indices["VIX"]["cboe_term_window"])]),
             ],
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,

@@ -447,10 +447,14 @@ def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list
 
 
 def vix_departure_count(vix_rep: Mapping | None) -> int:
-    """How many lines Surface's 'Where the replication departs from Cboe' lists
-    for vix_replication.json ``vix_rep``: its deviations and its gap notes as
-    vix_gap_notes restates them. The Overview and Model Risk cite this count, so
-    neither page says the replication follows Cboe's rules without them."""
-    vx = vix_rep or {}
-    return (len(vx.get("deviations") or [])
-            + len(vix_gap_notes(vx.get("gap_notes"), vix_terms(vx))))
+    """How many departures from Cboe's methodology vix_replication.json
+    ``vix_rep`` lists: its deviations (the rate, the calculation time, the
+    forward, PM lines for AM monthlies, a bracket outside Cboe's 23-37 day
+    window, ...), which Surface's 'Where the replication departs from Cboe'
+    lists. Its gap notes (strip coverage, model variance swaps, the gap
+    attribution) describe the replication and are not departures: Surface
+    lists them apart and they are not counted (they were, and 2026-10-26's
+    '12 listed departures' were 6 departures and 6 notes). The Overview and
+    Model Risk cite this count, so neither page says the replication follows
+    Cboe's rules without them."""
+    return len((vix_rep or {}).get("deviations") or [])

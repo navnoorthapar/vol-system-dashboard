@@ -4715,8 +4715,9 @@ def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") ->
 def vix_departures_tail(vix_rep: dict | None) -> str:
     """', with N listed departures (Surface)' after 'the Cboe formula': the
     replication departs from Cboe's rules (rate, quote time, forward, AM/PM
-    lines, ...), and the Overview and Model Risk say how many lines Surface's
-    #vix-replication lists, counted as that list counts them."""
+    lines, a bracket outside Cboe's term window, ...), and the Overview and
+    Model Risk say how many departures Surface's #vix-replication lists: the
+    artifact's deviations, not its descriptive gap notes."""
     n = desk_surface.vix_departure_count(vix_rep)
     return f", with {plural(n, 'listed departure')} (Surface)" if n else ""
 
