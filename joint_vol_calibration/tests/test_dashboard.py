@@ -2692,7 +2692,9 @@ def test_model_risk_v1_counts_the_single_quote_outliers_apart(dash):
 def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
     d = dash.load_model_risk()
     na = [m for m in d["monitors"] if m["value"] == "artifact not yet generated"]
-    assert len(na) == 3
+    # the surface report's four checks: Heston's half-spreads, the VIX replication, the arbitrage share and
+    # the SVI-cal certificates (VALIDATOR-12)
+    assert {m["key"] for m in na} == {"median_abs_hs", "vix_rep_gap", "arb_exec_share", "svi_certificate"}
     assert all(m["status"] == "na" for m in na)
 
 
@@ -4763,6 +4765,116 @@ def test_model_risk_links_the_validation_pack(pages):
     assert a.group(1).startswith("https://github.com/navnoorthapar/vol-system-dashboard/")
 
 
+def test_every_production_model_names_its_checks_or_why_it_has_none(dash, pages):
+    """VALIDATOR-12: 8 of 12 production-tier models had no monitoring check and
+    the page did not say so. Each production model now has a check, or an
+    explicit 'not monitored' reason the page prints (never both, so a reason
+    cannot outlive a new check); every limits key a check uses is in
+    MONITOR_LIMITS (the VX lag reused label_lag's)."""
+    d = dash.load_model_risk()
+    html = pages["/model-risk"]
+    by_model: dict[str, list[dict]] = {}
+    for c in d["monitors"]:
+        by_model.setdefault(c["model"], []).append(c)
+        assert not c.get("limits_key") or c["limits_key"] in dash.MONITOR_LIMITS, c["check"]
+    prod = [m for m in d["inventory"] if m["tier"] == "production"]
+    assert len(prod) >= 12
+    for m in prod:
+        checks = by_model.get(m["id"], [])
+        reason = (m.get("not_monitored") or "").strip()
+        assert bool(checks) != bool(reason), (m["id"], [c["check"] for c in checks], reason)
+        row = re.search(rf'<tr id="inv-{m["id"].lower()}">(.*?)</tr>', html, re.DOTALL)
+        assert row, m["id"]
+        cell = row.group(1)
+        if checks:
+            assert 'data-monitoring="checks"' in cell, m["id"]
+            for c in checks:
+                assert f'href="#{c["id"]}"' in cell, (m["id"], c["id"])
+        else:
+            text = " ".join(_visible_text("<body>" + cell).split())
+            assert 'data-monitoring="none"' in cell, m["id"]
+            assert "Not monitored per session: " in text, m["id"]
+    # the checks VALIDATOR-12 asked for: the surface's certificates, the ledger's chain, the rate reference
+    assert {"svi_certificate", "ledger_chain", "rate_reference"} <= {c["key"] for c in d["monitors"]}
+
+
+def test_new_model_risk_checks_read_their_artifacts(dash):
+    """M14, M18 and M19 checks, each from its artifact: the newest surface
+    report's SVI-cal certificate flag, the forward ledger files, the headline
+    pickle's rate reference."""
+    d = {c["key"]: c for c in dash.load_model_risk()["monitors"]}
+    surf = dash.artifacts.load_surface(dash.DATA)
+    cert = surf["surface"]["surfaces"]["svi_cal"]["arbitrage_free_certified"]
+    assert d["svi_certificate"]["model"] == "M14"
+    assert (d["svi_certificate"]["value"], d["svi_certificate"]["status"]) == (
+        ("yes", "ok") if cert else ("no", "breach"))
+    files = sorted((dash.DATA / "forward").glob("ledger_*.json"))
+    assert d["ledger_chain"]["model"] == "M18"
+    if files:
+        assert d["ledger_chain"]["value"] == f"yes, {dash.plural(len(files), 'session')}"
+        assert d["ledger_chain"]["status"] == "ok"
+    p2 = dash.load_page2()
+    with open(dash.DATA / "calibrations" / p2["calib_file"], "rb") as f:
+        kind = (pickle.load(f).get("rate_reference") or {}).get("kind")
+    assert d["rate_reference"]["model"] == "M19"
+    assert d["rate_reference"]["status"] == ("ok" if kind == "treasury_curve" else "watch")
+
+
+def test_by_design_breaches_are_apart_from_live_ones(dash, pages):
+    """CIO-14: half the BREACH rows were permanent by design (the research
+    classifier below persistence, the VX futures table the daily job does not
+    refresh), which trains a reader to ignore red. A check of a research-tier
+    model, or one in BY_DESIGN_CHECKS, that is over its limit carries the status
+    'design' with its reason, listed after the live statuses; a production or
+    backtest model's breach stays a breach."""
+    rows = [{"model": "M4", "key": "oos_rmse", "status": "breach"},
+            {"model": "M11", "key": "classifier", "status": "breach"},
+            {"model": "M11", "key": "classifier", "status": "ok"},
+            {"model": "M5", "key": "vx_lag", "status": "watch"},
+            {"model": "M7", "key": "beta_drift", "status": "breach"}]
+    tiers = {"M4": "production", "M5": "production", "M7": "backtest", "M11": "research"}
+    out = dash.by_design(rows, tiers)
+    assert [r["status"] for r in out] == ["breach", "design", "ok", "design", "breach"]
+    assert out[1]["limit_status"] == "breach"
+    assert out[1]["by_design"] == dash.RESEARCH_BY_DESIGN
+    assert out[3]["by_design"] == dash.BY_DESIGN_CHECKS["vx_lag"]
+    assert rows[1]["status"] == "breach"                         # the input is not edited
+    # the reason is true: the daily job has no VX futures step
+    refresh = (ROOT / "scripts" / "cloud_refresh.py").read_text()
+    assert "vix_futures" not in refresh
+    # on the page: no research-tier model is a live watch or breach; each design row says why
+    d = dash.load_model_risk()
+    tier = {m["id"]: m["tier"] for m in d["inventory"]}
+    for c in d["monitors"]:
+        if tier.get(c["model"]) == "research":
+            assert c["status"] not in ("watch", "breach"), c["check"]
+    html = pages["/model-risk"]
+    designs = [c for c in d["monitors"] if c["status"] == "design"]
+    for c in designs:
+        row = re.search(rf'<tr id="{c["id"]}" data-status="design">(.*?)</tr>', html, re.DOTALL)
+        assert row, c["id"]
+        text = _html_unescape(" ".join(_visible_text("<body>" + row.group(1)).split()))
+        assert "BY DESIGN" in text
+        assert f"By design ({c['limit_status']} on its limits): {c['by_design']}." in text
+    if designs:
+        assert f"{len(designs)} by design" in _visible_text(html)
+
+
+def test_dashboard_side_models_are_in_the_inventory():
+    """VALIDATOR-13: the dashboard's own models publish numbers (the density and
+    tail probabilities, the delta grid and constant maturity behind the ticker,
+    the realised-vol cone) and were missing from the inventory 'of every model
+    the system runs'. Each module is listed, with its limitations."""
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    modules = {m["module"]: m for m in inv["models"]}
+    for mod in ("dashboard/desk_density.py", "dashboard/desk_surface.py", "dashboard/desk_cone.py"):
+        assert mod in modules, mod
+        m = modules[mod]
+        assert m["tier"] == "production"
+        assert len(m["limitations"]) > 80, mod
+        assert m["page"] == "/surface"
+
+
 def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
     """P1.3e: the first Overview result read 'Quote-grade surface · held-out
     strikes'; it is the arbitrage-free SVI surface with alternate strikes held
@@ -6437,7 +6549,9 @@ def test_gated_fits_table_has_the_vx_out_of_sample_column(dash, pages):
 
 def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
     """P3.1: a Model Risk check on the VX futures table's lag behind the market
-    DB, in NYSE sessions, with the existing label-lag limits (no new threshold)."""
+    DB, in NYSE sessions, with limits of its own (VALIDATOR-12: it reused
+    label_lag's), equal to label_lag's; over them it is BY DESIGN (CIO-14), since
+    the daily job does not refresh the table."""
     d = dash.load_model_risk()
     row = next(m for m in d["monitors"]
                if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
@@ -6446,7 +6560,9 @@ def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
     lag = dash.session_age(_vx_last(), db_date)
     assert row["model"] == "M5"
     assert row["value"] == str(lag)
-    assert row["status"] == dash._rag(float(lag), dash.MONITOR_LIMITS["label_lag"])
+    assert dash.MONITOR_LIMITS["vx_lag"] == dash.MONITOR_LIMITS["label_lag"]
+    by_limits = dash._rag(float(lag), dash.MONITOR_LIMITS["vx_lag"])
+    assert row["status"] == ("design" if by_limits in ("watch", "breach") else by_limits)
     assert row["limits"] == "OK ≤ 0 · watch ≤ 1 · breach above"
     assert "VX futures table lag behind the market DB" in _html_unescape(pages["/model-risk"])
 
@@ -6643,7 +6759,7 @@ def test_browser_resolves_compact_specs_as_the_server_does(site_browser):
 
 # ── P3.3: Model Risk as an exceptions view ────────────────────────────────────
 
-_SEVERITY = ("breach", "watch", "ok", "info", "na")
+_SEVERITY = ("breach", "watch", "ok", "info", "design", "na")
 
 
 def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
@@ -6766,7 +6882,7 @@ def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(da
         chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"([^>]*)>(.+?)</a>',
                          target)
         assert chip, (rid, page)
-        word = {"ok": "OK", "na": "N/A"}.get(st, st.upper())
+        word = {"ok": "OK", "na": "N/A", "design": "BY DESIGN"}.get(st, st.upper())
         short = dash.CHECK_SHORT[d[rid]["key"]]
         text = _html_unescape(re.sub(r"<[^>]+>", "", chip.group(2)))
         assert text == f"{d[rid]['model']} {short} · {word}", rid

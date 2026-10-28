@@ -26,7 +26,7 @@ from desk_format import _fmt, _num, ordinal, plural, signed
 PLACEHOLDER = re.compile(r"\{([a-z0-9_]+)\}")
 # the inventory fields the page prints as prose ('outputs_pending' is printed
 # only while the output is unwritten, so its 'not yet' is conditional by construction)
-PROSE_FIELDS = ("use", "inputs", "limitations", "outputs_note")
+PROSE_FIELDS = ("use", "inputs", "limitations", "outputs_note", "not_monitored")
 # What literal inventory prose may not state, with the reason: each is a fact the
 # daily job changes, so it must come from a placeholder.
 STALE_PROSE: tuple[tuple[str, str], ...] = (

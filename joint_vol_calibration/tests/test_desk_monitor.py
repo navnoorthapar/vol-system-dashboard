@@ -24,11 +24,12 @@ import desk_monitor as dmo  # noqa: E402
 
 def test_checks_run_worst_first_then_in_inventory_order():
     spec = [("M7", "ok", "a"), ("M4", "breach", "b"), ("V1", "breach", "c"), ("M4", "info", "d"),
-            ("M4", "watch", "e"), ("M4", "breach", "f"), ("M5", "na", "g")]
+            ("M4", "watch", "e"), ("M4", "breach", "f"), ("M5", "na", "g"), ("M11", "design", "h")]
     rows = [{"model": m, "status": st, "check": c} for m, st, c in spec]
-    got = dmo.order_checks(rows, ["M4", "M5", "M7", "V1"])
-    assert [r["check"] for r in got] == ["b", "f", "c", "e", "a", "d", "g"]
-    assert dmo.tally(got) == {"breach": 3, "watch": 1, "ok": 1, "info": 1, "na": 1}
+    got = dmo.order_checks(rows, ["M4", "M5", "M7", "M11", "V1"])
+    # a by-design check (CIO-14) runs after the live statuses, before N/A
+    assert [r["check"] for r in got] == ["b", "f", "c", "e", "a", "d", "h", "g"]
+    assert dmo.tally(got) == {"breach": 3, "watch": 1, "ok": 1, "info": 1, "design": 1, "na": 1}
 
 
 @pytest.mark.parametrize(("value", "limits"), [(2.96, (1.5, 3.0)), (0.0, (0.0, 1.0)), (10.0, (0.0, 1.0)),

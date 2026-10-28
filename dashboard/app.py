@@ -1431,6 +1431,7 @@ def load_page2() -> dict[str, Any]:
             d["r_ref_pct"] = round(float(cal["r_reference"]) * 100, 2)
             d["r_ref_source"] = cal.get("r_reference_source")
             kind = (cal.get("rate_reference") or {}).get("kind")
+            d["r_ref_kind"] = kind or "irx"
             if kind == "treasury_curve":
                 d["r_ref_label"] = "Treasury r(91d)"
                 d["r_ref_detail"] = ("Treasury zero curve, 91-day zero rate, continuously "
@@ -6678,7 +6679,7 @@ INVENTORY_PATH = DASH / "model_inventory.json"
 # the IDs docs/model_validation uses): the dashboard had its own numbering, so
 # "M4" was the rule labeller here and the joint calibrator in the pack.
 INV_CALIBRATOR, INV_GREEKS, INV_BETA, INV_LABELS, INV_CLASSIFIER = "M4", "M6", "M7", "M10", "M11"
-INV_VX = "M5"
+INV_VX, INV_SURFACE, INV_LEDGER, INV_RATES = "M5", "M14", "M18", "M19"
 VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
@@ -6704,7 +6705,36 @@ MONITOR_LIMITS = {
     "median_abs_hs": (2.0, 5.0),    # half-spreads, Heston out-of-sample median |model − mid|
     "vix_rep_gap": (0.5, 1.5),      # index pts, |VIX replicated from the chain − Cboe close|
     "arb_exec_share": (2.0, 5.0),   # % of scored quotes in a row failing static arbitrage at bid/ask
+    "vx_lag": (0, 1),               # NYSE sessions the VX futures table lags the market DB
 }
+
+# Checks over their limit for a reason that does not change from session to session
+# (CIO-14: half the breaches were permanent, which trains a reader to ignore red).
+# They carry the status 'design', with the reason, after the live statuses; the
+# limits and the bullet still show by how much.
+BY_DESIGN_CHECKS = {
+    "vx_lag": ("the daily job does not refresh vix_futures_daily (scripts/cloud_refresh.py has no VX futures "
+               "step); only the fits' out-of-sample VX score reads it"),
+}
+RESEARCH_BY_DESIGN = ("research tier: the model feeds no published number and never trades, so falling short "
+                      "of its baseline is the published negative result, not a failure")
+
+
+def by_design(checks: Sequence[dict], tiers: dict[str, str]) -> list[dict]:
+    """``checks`` with each watch or breach that holds by design set to status
+    'design', with the reason (by_design) and the status its limits give
+    (limit_status): every check of a research-tier model (``tiers``: inventory
+    id -> tier) and each check in BY_DESIGN_CHECKS. A production or backtest
+    model's breach stays a breach."""
+    out = []
+    for check in checks:
+        c = dict(check)
+        why = (RESEARCH_BY_DESIGN if tiers.get(str(c.get("model"))) == "research"
+               else BY_DESIGN_CHECKS.get(str(c.get("key") or "")))
+        if why and c.get("status") in ("watch", "breach"):
+            c.update(status="design", limit_status=c["status"], by_design=why)
+        out.append(c)
+    return out
 
 
 def _rag(value: float | None, limits: tuple) -> str:
@@ -6757,6 +6787,9 @@ CHECK_EVIDENCE = {
     "classifier": ("research.html", "research-classifier"),
     "vix_rep_gap": ("surface.html", "vix-replication"),
     "arb_exec_share": ("surface.html", "arbitrage"),
+    "svi_certificate": ("surface.html", "scorecard"),
+    "ledger_chain": ("research.html", "forward"),
+    "rate_reference": ("calibration.html", "carry"),
 }
 
 # Each check's short name, for the 'Monitored' chip on its evidence panel: a panel
@@ -6776,6 +6809,9 @@ CHECK_SHORT = {
     "classifier": "classifier skill",
     "vix_rep_gap": "VIX replication",
     "arb_exec_share": "static arbitrage",
+    "svi_certificate": "SVI certificates",
+    "ledger_chain": "ledger chain",
+    "rate_reference": "rate reference",
 }
 
 
@@ -6950,6 +6986,14 @@ def load_model_risk() -> dict[str, Any]:
     add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
         "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
+    # M19: the rate reference of the headline fit: the Treasury zero curve, or ^IRX if the curve was refused
+    rk = p2.get("r_ref_kind")
+    add(INV_RATES, "Rate reference of the headline fit (the Treasury zero curve, or the ^IRX fallback)", None,
+        "Treasury zero curve" if rk == "treasury_curve" else ("^IRX" if rk else "not recorded"), "", fit_art,
+        (str(p2.get("r_ref_source") or "") + ". " if p2.get("r_ref_source") else "")
+        + "The curve is refused when older than 7 days; the fit then falls back to ^IRX and records it.",
+        status="ok" if rk == "treasury_curve" else ("watch" if rk else "na"),
+        limits_text="OK on the curve · watch on ^IRX", key="rate_reference")
     # M3: β drift — the newest stored chain against the frozen backtest β
     with _loader_boundary(d, "β estimation chains"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
@@ -6987,7 +7031,7 @@ def load_model_risk() -> dict[str, Any]:
             db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
         vx_lag = session_age(vx_date, db_date) if vx_date else None
         add(INV_VX, VX_LAG_CHECK, _num(vx_lag),
-            _fmt(vx_lag) if vx_date else "no futures table", "label_lag", VX_TABLE,
+            _fmt(vx_lag) if vx_date else "no futures table", "vx_lag", VX_TABLE,
             f"vix_futures_daily through {vx_date or '—'}; market DB {db_date}. Only the fits' out-of-sample "
             f"VX score reads them, so a fit after {vx_date or 'the table'} has none.", key="vx_lag",
             digits=".0f")
@@ -7046,6 +7090,14 @@ def load_model_risk() -> dict[str, Any]:
             f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
             "a gap points at a thin or stale strip.",
             history=surf_hist("rep_gap"), two_sided=True)
+        cert = (((surf.get("surface") or {}).get("surfaces") or {}).get("svi_cal") or {}).get(
+            "arbitrage_free_certified")
+        add(INV_SURFACE, "SVI-cal surface carries its butterfly and calendar certificates", None,
+            "yes" if cert else ("no" if cert is False else "not recorded"), "", sart + "surface.json",
+            "The label 'arbitrage-free', the density and tails (M21) and the desk coordinates (M22) "
+            "rest on them.",
+            status="ok" if cert else ("breach" if cert is False else "na"),
+            limits_text="OK if yes · breach if no", key="svi_certificate")
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
         legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
@@ -7065,9 +7117,26 @@ def load_model_risk() -> dict[str, Any]:
                                  "median_abs_hs"),
                                 ("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
                                  "vix_rep_gap"),
-                                ("Data", ARB_CHECK, "arb_exec_share")):
+                                ("Data", ARB_CHECK, "arb_exec_share"),
+                                (INV_SURFACE,
+                                 "SVI-cal surface carries its butterfly and calendar certificates",
+                                 "svi_certificate")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
+    # M18: the forward ledger's hash chain (each entry names the SHA-256 of the one before)
+    try:
+        led = artifacts.load_forward_ledger(DATA)
+        broken = None
+    except artifacts.ArtifactError as e:
+        led, broken = {"state": "error"}, str(e)
+    n_led = led.get("n") if led.get("state") == "ok" else None
+    add(INV_LEDGER, "Forward ledger hash chain intact", None,
+        f"yes, {plural(n_led, 'session')}" if n_led else ("no" if broken else "no entry yet"), "",
+        "data_store/forward/",
+        broken or "Each entry names the SHA-256 of the one before it, so an edited entry breaks the chain.",
+        status="ok" if n_led else ("breach" if broken else "na"),
+        limits_text="OK if intact · breach if broken",
+        key="ledger_chain")
     # every count, session and state in the inventory's prose is computed from the
     # artifacts (desk_inventory), never typed; an unknown placeholder fails the build
     with _loader_boundary(d, "model inventory prose (dashboard/model_inventory.json placeholders)"):
@@ -7076,14 +7145,17 @@ def load_model_risk() -> dict[str, Any]:
     # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory
     # order (the vendor-data checks last), the order they were added within a model
     order = [m["id"] for m in d["inventory"]] + [v.get("id") for v in d.get("vendor_inputs") or []] + ["Data"]
+    mon = by_design(mon, {m["id"]: m.get("tier") for m in d["inventory"]})
     mon = desk_monitor.order_checks(mon, order)
+    for m in d["inventory"]:
+        m["monitors"] = [{"id": c["id"], "short": c["short"], "status": c["status"]} for c in mon
+                         if c["model"] == m["id"]]
     names = {m["id"]: m["name"] for m in d["inventory"]}
     names.update({v.get("id"): v.get("source") for v in d.get("vendor_inputs") or []})
     for m in mon:
         m["model_name"] = names.get(m["model"])
     d["monitors"] = mon
-    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k)
-                       for k in ("ok", "watch", "breach", "info", "na")}
+    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k) for k in desk_monitor.SEVERITY}
     d["limits"] = MONITOR_LIMITS
     return _clean_keep(d)
 
