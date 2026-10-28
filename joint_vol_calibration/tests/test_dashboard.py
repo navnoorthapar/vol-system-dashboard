@@ -4651,6 +4651,108 @@ def test_inventory_facts_are_the_artifacts(dash, pages):
         assert "No entry committed yet" in m18
 
 
+def test_short_end_sentence_names_the_box_only_when_sigma_is_on_it(dash):
+    """VALIDATOR-09: the #oos caption typed 'the short end is where a one-factor
+    model with σ on its box ceiling fails' under a fit with σ interior. The
+    sentence is now the fit's own worst expiry, and names the box only when σ
+    sits on it; both ways on synthetic rows."""
+    rows = [{"expiry": "2026-11-06", "T_days": 10.6, "rmse": 4.2},
+            {"expiry": "2026-12-18", "T_days": 52.6, "rmse": 1.7}]
+    interior = dash.short_end_sentence(rows, None)
+    assert interior == ("The worst expiry is 2026-11-06, 11 days out (4.20 vol pts): "
+                        "a one-factor model misses the short end.")
+    assert "box" not in interior
+    assert dash.short_end_sentence(rows, "upper").endswith(", here with σ on its box ceiling.")
+    assert dash.short_end_sentence(rows, "lower").endswith(", here with σ on its box floor.")
+    long_worst = [{**rows[0], "rmse": 1.0}, rows[1]]
+    assert dash.short_end_sentence(long_worst, "upper") == (
+        "The worst expiry is 2026-12-18, 53 days out (1.70 vol pts), not the short end (≤ 30 days).")
+    assert dash.short_end_sentence([], None) is None
+
+
+def test_oos_caption_matches_the_headline_fit(dash, pages):
+    """The rendered #oos caption against the headline pickle: 'box ceiling'
+    appears iff σ is pinned at the top of the production box, and the worst
+    expiry it names is the fit's own."""
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    p2 = dash.load_page2()
+    with open(dash.DATA / "calibrations" / p2["calib_file"], "rb") as f:
+        cal = pickle.load(f)
+    lo, hi = HESTON_BOUNDS["sigma"]
+    on_ceiling = "sigma" in (cal.get("pinned_params") or []) and cal["params"]["sigma"] >= (lo + hi) / 2
+    oos = re.search(r'id="oos".*?</section>', pages["/calibration"], re.DOTALL)
+    assert oos
+    text = " ".join(_visible_text("<body>" + oos.group(0)).split())
+    assert ("box ceiling" in text) is on_ceiling
+    by_exp = (cal.get("oos") or {}).get("spx_oos_rmse_by_expiry") or {}
+    if by_exp:
+        worst = max(by_exp, key=lambda k: by_exp[k])
+        sentence = text.split("The worst expiry is ", 1)[1].split(". ", 1)[0]
+        assert sentence.startswith(worst)
+        assert f"({by_exp[worst]:.2f}" in sentence
+
+
+def test_bates_note_counts_the_stored_fits(dash, tmp_path):
+    """The ρ-at-bound banner typed 'The one Bates SVJ fit did not converge';
+    the note is now read from the stored bates_cal_<session>.pkl files."""
+    def fit(session, ok):
+        path = tmp_path / f"bates_cal_{session}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump({"success": ok, "params": {}}, f)
+        return path
+    one = [fit("2026-03-24", False)]
+    assert dash.bates_fits_note(one) == ("The one stored Bates SVJ fit (2026-03-24) did not converge, "
+                                         "so it is not a result.")
+    two = [*one, fit("2026-10-26", False)]
+    assert dash.bates_fits_note(two) == ("None of the 2 stored Bates SVJ fits (2026-03-24, 2026-10-26) "
+                                         "converged, so none is a result.")
+    mixed = [*one, fit("2026-10-27", True)]
+    assert dash.bates_fits_note(mixed) == ("1 stored Bates SVJ fit converged (2026-10-27); "
+                                           "1 did not (2026-03-24).")
+    assert dash.bates_fits_note([]) == "No Bates SVJ fit is stored."
+    shipped = sorted((SHIPPED / "calibrations").glob("bates_cal_*.pkl"))
+    assert dash.load_page2()["bates_note"] == dash.bates_fits_note(shipped)
+
+
+def test_calibration_captions_name_the_config_boxes(dash, monkeypatch):
+    """The Calibration captions typed σ ≤ 2, σ ≤ 10, κ ≤ 60 and H ∈ [0.02, ½];
+    they now print joint_vol_calibration.config's values, so a changed box
+    cannot leave the prose behind."""
+    from joint_vol_calibration import config
+
+    monkeypatch.setattr(config, "SIGMA_PROFILE_CAPS", (1.0, 2.0, 11.0))
+    monkeypatch.setattr(config, "PROFILE_KAPPA_MAX", 61.0)
+    monkeypatch.setattr(config, "ROUGH_HESTON_H_BOUNDS", (0.03, 0.5))
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    text = " ".join(_visible_text(html).split())
+    assert "free-σ OOS refits it with σ ≤ 11 and κ ≤ 61" in text
+    if 'id="rough-verdict"' in html:
+        assert "plus H ∈ [0.03, ½]" in text
+    assert "σ ≤ 10 and κ ≤ 60" not in text
+    assert "[0.02, ½]" not in text
+
+
+def test_quintic_stop_reason_is_the_fits_own(dash, pages):
+    """'The Quintic optimiser stopped at its iteration limits' was typed for any
+    non-converged fit; the reason is now the stored fit's own messages."""
+    q = dash.load_page2().get("quintic")
+    if not q:
+        return
+    qcal = dash._load_pickle(SHIPPED / "calibrations" / q["file"])
+    text = " ".join(_visible_text(pages["/calibration"]).split())
+    conv = qcal.get("convergence") or {}
+    msgs = [m for m in (conv.get("de_message"), conv.get("polish_message")) if m]
+    if qcal.get("success"):
+        assert "The Quintic optimiser stopped" not in text
+    else:
+        reason = "iteration limit" if any("iteration" in str(m).lower() for m in msgs) else None
+        assert "The Quintic optimiser stopped without meeting its tolerance" in text
+        if reason:
+            assert f"tolerance ({reason})" in text
+    assert "iteration limits without" not in text
+
+
 def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
     """P1.3e: the first Overview result read 'Quote-grade surface · held-out
     strikes'; it is the arbitrage-free SVI surface with alternate strikes held

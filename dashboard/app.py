@@ -1565,6 +1565,9 @@ def load_page2() -> dict[str, Any]:
             q_date = _date_str(qprov.get("spot_date")) or _calibration_session(qcal, qpath)
             mc = qprov.get("mc") or {}
             quad = qprov.get("vix_quadrature") or {}
+            from joint_vol_calibration.models.quintic_ou import QUINTIC_BOUNDS
+            eps_lo = float(QUINTIC_BOUNDS[7][0])
+            qconv = qcal.get("convergence") or {}
             q = {
                 "as_of": q_date, "file": Path(qpath).name,
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
@@ -1581,7 +1584,9 @@ def load_page2() -> dict[str, Any]:
                 "vix_opt_rmse": _num(ql.get("vix_options_rmse")),
                 "xi0_check": _num(ql.get("xi0_index_reproduction_rmse")),
                 "at_bound": [k for k, v in (qcal.get("at_bound") or {}).items() if v],
-                "eps_saturated": abs(float(qp["epsilon"]) + 0.99) < 0.02,
+                "eps_saturated": abs(float(qp["epsilon"]) - eps_lo) < 0.02, "eps_lo": eps_lo,
+                "stop_reason": (None if qcal.get("success") else desk_inventory.optimiser_stop_reason(
+                    [qconv.get("de_message"), qconv.get("polish_message")])),
                 "n_spx": qprov.get("n_spx_options"), "n_vix_opts": qprov.get("n_vix_options"),
                 "mc_paths": mc.get("n_paths"), "quad_points": quad.get("points_per_dim"),
                 "fit_time": _num(qcal.get("fit_time")), "n_evals": qcal.get("n_evals"),
@@ -3205,10 +3210,61 @@ def param_sub_line(key: str, value: float) -> str | None:
     return None
 
 
+def short_end_sentence(rows: list[dict], sigma_side: str | None, max_days: float = 30.0) -> str | None:
+    """The #oos caption's claim about the short end, from the fit's own
+    out-of-sample rows (oos_rows_of) and the side of the box σ sits on
+    ('upper', 'lower', 'bound' or None). The caption read 'the short end is
+    where a one-factor model with σ on its box ceiling fails' under a fit with
+    σ interior (VALIDATOR-09)."""
+    have = [r for r in rows if _num(r.get("rmse")) is not None]
+    if not have:
+        return None
+    w = max(have, key=lambda r: float(r["rmse"]))
+    days = _num(w.get("T_days"))
+    lead = (f"The worst expiry is {w['expiry']}"
+            + (f", {_fmt(days, '.0f')} days out" if days is not None else "")
+            + f" ({_fmt(float(w['rmse']), '.2f')} vol pts)")
+    if days is None or days > max_days:
+        return f"{lead}, not the short end (≤ {max_days:g} days)."
+    bound = {"upper": ", here with σ on its box ceiling", "lower": ", here with σ on its box floor",
+             "bound": ", here with σ on a box bound"}.get(sigma_side or "", "")
+    return f"{lead}: a one-factor model misses the short end{bound}."
+
+
+def bates_fits_note(paths: Sequence[str | Path]) -> str:
+    """What the stored Bates SVJ fits (bates_cal_<session>.pkl) show, for the
+    ρ-at-bound banner, which typed 'The one Bates SVJ fit did not converge'."""
+    fits = []
+    for p in sorted(str(x) for x in paths):
+        c = _load_pickle(p)
+        fits.append((Path(p).stem[len("bates_cal_"):], bool(c.get("success"))))
+    if not fits:
+        return "No Bates SVJ fit is stored."
+    bad = [s for s, ok in fits if not ok]
+    good = [s for s, ok in fits if ok]
+    if not good:
+        if len(fits) == 1:
+            return f"The one stored Bates SVJ fit ({bad[0]}) did not converge, so it is not a result."
+        return (f"None of the {len(fits)} stored Bates SVJ fits ({', '.join(bad)}) converged, "
+                "so none is a result.")
+    return (f"{plural(len(good), 'stored Bates SVJ fit')} converged ({', '.join(good)})"
+            + (f"; {len(bad)} did not ({', '.join(bad)})" if bad else "") + ".")
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
-    from joint_vol_calibration.config import HESTON_BOUNDS
+    from joint_vol_calibration.config import (
+        HESTON_BOUNDS,
+        PROFILE_KAPPA_MAX,
+        ROUGH_HESTON_H_BOUNDS,
+        SIGMA_PROFILE_CAPS,
+    )
 
+    # the boxes the captions name, from config (the template typed σ ≤ 2, σ ≤ 10, κ ≤ 60, H ∈ [0.02, ½])
+    d["boxes"] = {"sigma_hi": float(HESTON_BOUNDS["sigma"][1]), "free_sigma": float(max(SIGMA_PROFILE_CAPS)),
+                  "free_kappa": float(PROFILE_KAPPA_MAX), "h_lo": float(ROUGH_HESTON_H_BOUNDS[0]),
+                  "h_hi": float(ROUGH_HESTON_H_BOUNDS[1])}
+    d["bates_note"] = bates_fits_note(glob.glob(str(DATA / "calibrations" / "bates_cal_*.pkl")))
     p = cal["params"]
     session = d.get("session")
     hist = _gated_history()
@@ -3338,6 +3394,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     # OOS RMSE by expiry, with the in-sample RMSE as the reference line.
     rows = oos_rows_of(cal)
     d["oos_rows"] = rows
+    sigma_side = next((t["side"] for t in tiles if t["key"] == "sigma"), None)
+    d["oos_short_end"] = short_end_sentence(rows, str(sigma_side) if sigma_side else None)
     d["n_oos"] = (cal.get("oos") or {}).get("n_spx_oos")
     if rows:
         cats = [f"{r['expiry']} · {_fmt(r['T_days'], '.0f')}d" if r["T_days"] is not None else r["expiry"]
@@ -4887,7 +4945,9 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         "before any later price exists."))
     jr = joint_fit_result(diag, p2.get("session"))
     if jr:
-        h_txt = "sits on its 0.02 floor" if jr["rough_H_on_bound"] else "is weakly identified"
+        from joint_vol_calibration.config import ROUGH_HESTON_H_BOUNDS
+        h_txt = (f"sits on its {_fmt(float(ROUGH_HESTON_H_BOUNDS[0]), 'g')} floor" if jr["rough_H_on_bound"]
+                 else "is weakly identified")
         nxt.append(item(
             "Rough Heston in production", "calibration.html#rough-vs-heston",
             f"not adopted: lower out-of-sample error on {jr['n_lower']} of {jr['n_sessions']} sessions, "

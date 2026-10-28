@@ -214,17 +214,22 @@ _QUINTIC_SYMBOLS = {"epsilon": "ε", "lam_x": "λx", "lam_y": "λy", "theta": "�
                     "a3": "α3", "a5": "α5"}
 
 
+def optimiser_stop_reason(stop_messages: Sequence[Any]) -> str:
+    """Why an optimiser that did not converge stopped, from its own messages:
+    'iteration limit' when one says so, else its first message."""
+    msgs = [str(m) for m in stop_messages if m]
+    if any("iteration" in m.lower() for m in msgs):
+        return "iteration limit"
+    return msgs[0] if msgs else "the optimiser reported failure"
+
+
 def quintic_text(stored: bool, converged: bool, stop_messages: Sequence[Any],
                  on_bound: Sequence[tuple[str, Any]]) -> str:
     """M13: the stored Quintic OU fit's state (success flag, optimiser stop
     messages, parameters on a bound with their values)."""
     if not stored:
         return "No fit is stored"
-    why = None
-    if not converged:
-        msgs = [str(m) for m in stop_messages if m]
-        why = ("iteration limit" if any("iteration" in m.lower() for m in msgs)
-               else (msgs[0] if msgs else "the optimiser reported failure"))
+    why = None if converged else optimiser_stop_reason(stop_messages)
     bounds = [f"{_QUINTIC_SYMBOLS.get(k, k)} on its {_fmt(_num(v), 'g')} bound" if _num(v) is not None
               else f"{_QUINTIC_SYMBOLS.get(k, k)} on a bound" for k, v in on_bound]
     parts = [p for p in (why, *bounds) if p]
