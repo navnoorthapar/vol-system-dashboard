@@ -796,6 +796,58 @@ def test_a_failed_artifact_is_rebuilt_by_the_next_run(env, monkeypatch):
     assert "artifact_backfill" not in st
 
 
+def _committed_surface(env, sess, version=None, vix_version=None):
+    """data_store/surface/<sess>/ as a committed session holds it (surface.json
+    and vix_replication.json stamped ``version``; None: no report_version, as
+    every artifact written before the field), its chain, its diagnostics and
+    its index row."""
+    from joint_vol_calibration.data import database as dbm
+    d = env.DATA / "surface" / sess
+    d.mkdir(parents=True, exist_ok=True)
+    for name, v in (("surface.json", version), ("vix_replication.json", vix_version or version)):
+        doc = {"schema_version": 1, "session": sess}
+        if v is not None:
+            doc["report_version"] = v
+        (d / name).write_text(json.dumps(doc))
+    chain = dbm.options_snapshot_path(sess, "SPX")
+    chain.parent.mkdir(parents=True, exist_ok=True)
+    chain.write_bytes(b"chain")
+    diag = env.DATA / "calibrations" / "diagnostics" / f"{sess}.json"
+    diag.parent.mkdir(parents=True, exist_ok=True)
+    diag.write_text("{}")
+    idx = env.DATA / "surface" / "index.json"
+    rows = json.loads(idx.read_text())["sessions"] if idx.exists() else []
+    idx.write_text(json.dumps({"sessions": [*[r for r in rows if r["session"] != sess],
+                                            {"session": sess}]}))
+
+
+def test_a_surface_written_under_an_older_method_is_rebuilt(env, monkeypatch):
+    """0.7 changed what a session's surface report says (its book, its T
+    origin, its provenance). artifact_gaps rebuilt only MISSING surfaces, so
+    a method change reached new sessions only. A committed surface.json or
+    vix_replication.json stored under an older report_version (none: the
+    artifacts before the field) is now a 'surface' gap, which the backfill
+    rebuilds MAX_BACKFILL_SESSIONS a run; a current one is not."""
+    from joint_vol_calibration.surface import report
+    cur = report.REPORT_VERSION
+    old, mixed, fresh = "2026-09-17", "2026-09-18", "2026-09-21"
+    monkeypatch.setattr(env, "accepted_sessions",
+                        lambda: {s: f"joint_cal_{s}.pkl" for s in (old, mixed, fresh)})
+    _committed_surface(env, old)                                # predates report_version
+    _committed_surface(env, mixed, cur, vix_version=cur - 1)    # one file left behind
+    _committed_surface(env, fresh, cur)
+    assert env.artifact_gaps(None) == {mixed: ["surface"], old: ["surface"]}
+    (env.DATA / "surface" / old / "surface.json").write_text("{not json")
+    assert env.artifact_gaps(None)[old] == ["surface"]          # unreadable: rebuilt too
+    assert report.stored_report_version({}) == 1
+    assert report.stored_report_version({"report_version": cur}) == cur
+    _committed_surface(env, old, cur)
+    _committed_surface(env, mixed, cur)
+    assert env.artifact_gaps(None) == {}
+    _committed_surface(env, fresh, cur + 1)                     # written by newer code: left alone
+    assert env.artifact_gaps(None) == {}
+
+
 def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):
     """The artifact commit was dropped (gate failure) or a part failed: the
     Greeks surface and scenario grid named the previous headline fit. The next

@@ -2,7 +2,7 @@
 report.py — run the surface layer on one stored session and write its
 artifacts under data_store/surface/<session>/.
 
-Artifacts (schema_version 1; floats rounded to 10 significant digits, keys
+Artifacts (schema_version 1, report_version REPORT_VERSION; floats rounded to 10 significant digits, keys
 sorted, no wall-clock fields, so a rerun on the same inputs reproduces the
 files byte for byte on the same machine):
 
@@ -80,7 +80,26 @@ from joint_vol_calibration.surface import vix as vx
 from joint_vol_calibration.surface._blas import single_thread_blas
 
 SCHEMA_VERSION = 1
+# The methodology version of a session's artifacts: report_version in
+# surface.json, scorecard.json, vix_replication.json and the index row. Raise
+# it with any change to what a committed session's artifacts would say. The
+# bot's backfill (scripts/cloud_refresh.artifact_gaps) then rebuilds every
+# committed session stored under an older version, MAX_BACKFILL_SESSIONS a
+# run, so a method change reaches the whole record, not only new sessions.
+#   1  (no field) to C23f: the session's Yahoo chain; a Yahoo download's run
+#      clock stored as its quote time
+#   2  plan 0.7: the session's Cboe book when it passes the quote-state
+#      gates, else the Yahoo chain (no quote time; T from the close), and
+#      the choice recorded in surface.json inputs
+REPORT_VERSION = 2
 SURFACE_DIR = DATA_DIR / "surface"
+
+
+def stored_report_version(doc: Any) -> int:
+    """The report_version a stored artifact (a parsed JSON object) was written
+    under; 1 for one that predates the field."""
+    v = doc.get("report_version") if isinstance(doc, dict) else None
+    return int(v) if isinstance(v, int) and not isinstance(v, bool) else 1
 SIG_DIGITS = 10
 WIDE_K_GRID = np.linspace(-3.0, 2.0, 2001)      # eSSVI g check (its conditions are analytic)
 
@@ -447,7 +466,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                              g["mid_iv"].to_numpy(float)[np.argsort(g["k"].to_numpy(float))]))})
         src = sq.inputs
         surface_doc = {
-            "schema_version": SCHEMA_VERSION, "session": session,
+            "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "inputs": {
                 # which book (the session's Cboe capture when it passes the
                 # quote-state gates, else its Yahoo chain) and why
@@ -493,7 +512,8 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                           key=lambda r: (r["oos_median_abs_hs"] is None, r["oos_median_abs_hs"]))
         common = card["common_out_of_sample"]
         own_n = ", ".join(f"{m['model']} {m['metrics']['out_of_sample'].get('n', 0):,}" for m in avail)
-        scorecard_doc = {"schema_version": SCHEMA_VERSION, "session": session,
+        scorecard_doc = {"schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION,
+                         "session": session,
                          "n_quotes": len(q), "models": card["models"],
                          "common_out_of_sample": common,
                          "ranking_by_oos_median_abs_hs": _rank("out_of_sample"),
@@ -579,7 +599,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
             if atm30:
                 beta["atm_over_vix_replicated"] = atm30 / indices["VIX"]["replicated"]
         vix_doc = {
-            "schema_version": SCHEMA_VERSION, "session": session,
+            "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "calculation_time_ny": calc.isoformat(timespec="minutes"),
             "rate": {"R_cc": sq.r_ref,
                      "source": ("^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"
@@ -641,6 +661,7 @@ def index_row(out: dict) -> dict:
     arbd = out["surface"]["arbitrage"]
     inp = out["surface"].get("inputs") or {}
     return {"session": sc_doc["session"], "n_quotes": sc_doc["n_quotes"],
+            "report_version": out["surface"].get("report_version"),
             "source": inp.get("source"), "quote_time": inp.get("quote_time"),
             "arbitrage_quotes_outside_spread": arbd["repair"].get("n_perturbed_outside_spread"),
             "executable_arbitrage": arbd["executable_arbitrage_certificate"].get("executable_arbitrage"),

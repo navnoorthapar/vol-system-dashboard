@@ -88,6 +88,10 @@ def test_artifacts_and_schema(written):
     assert ga["residual_pts"] + ga["gap_pts"] + ga["truncation_pts"] == pytest.approx(0.0, abs=1e-8)
     idx = json.loads((out / "index.json").read_text())
     assert [r["session"] for r in idx["sessions"]] == [SESSION]
+    # the method version the bot's backfill compares (cloud_refresh.artifact_gaps)
+    for doc in (surf, card, vixd, idx["sessions"][0]):
+        assert doc["report_version"] == report.REPORT_VERSION
+        assert report.stored_report_version(doc) == report.REPORT_VERSION
 
 
 def test_spread_unit_claims_hold(written):

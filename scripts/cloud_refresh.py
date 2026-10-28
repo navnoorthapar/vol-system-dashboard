@@ -37,9 +37,10 @@ fail-soft: a failure is reported (exit 1) but never undoes what was captured,
 and the workflow commits captures and derived artifacts behind separate test
 gates (refresh_session_artifacts). Every run with the calibrate step then
 backfills what an earlier run failed to build or commit: a committed accepted
-fit without its surface report or diagnostics, or a Greeks surface / scenario
-grid built from another fit than the headline (backfill_session_artifacts, at
-most MAX_BACKFILL_SESSIONS sessions a run).
+fit without its surface report or diagnostics, a surface report written
+under an older method (surface.report.REPORT_VERSION), or a Greeks surface /
+scenario grid built from another fit than the headline
+(backfill_session_artifacts, at most MAX_BACKFILL_SESSIONS sessions a run).
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
 is not what the bot commits. At the start of every run (freeze-only
@@ -922,12 +923,30 @@ def _artifact_source(path: pathlib.Path, key: bytes) -> "str | None":
         return None
 
 
+def _stale_surface(sess: str) -> bool:
+    """True when data_store/surface/<sess>/ was written under an older method
+    than surface.report.REPORT_VERSION (or its surface.json or
+    vix_replication.json cannot be read): the backfill rebuilds it."""
+    from joint_vol_calibration.surface import report
+    for name in ("surface.json", "vix_replication.json"):
+        try:
+            doc = json.loads((DATA / "surface" / sess / name).read_text())
+        except (OSError, ValueError):
+            return True
+        if report.stored_report_version(doc) < report.REPORT_VERSION:
+            return True
+    return False
+
+
 def artifact_gaps(headline_path: "str | None") -> dict:
     """What is missing or stale among the artifacts derived from the committed
     accepted fits: {session: [parts]}, newest session first.
 
-      surface      data_store/surface/<s>/surface.json missing, or index.json
-                   does not list <s>
+      surface      data_store/surface/<s>/surface.json missing, index.json
+                   does not list <s>, or its surface.json / vix_replication.json
+                   was written under an older report_version than
+                   surface.report.REPORT_VERSION (a method change: the
+                   backfill rebuilds the committed record over its next runs)
       diagnostics  data_store/calibrations/diagnostics/<s>.json missing
       greeks,      (the headline session) the parquet is missing, unreadable,
       scenario     or its provenance names another calibration than the
@@ -948,7 +967,8 @@ def artifact_gaps(headline_path: "str | None") -> dict:
         if not dbm.options_snapshot_path(sess, "SPX").exists():
             continue
         need = []
-        if sess not in listed or not (DATA / "surface" / sess / "surface.json").exists():
+        if (sess not in listed or not (DATA / "surface" / sess / "surface.json").exists()
+                or _stale_surface(sess)):
             need.append("surface")
         if not (DATA / "calibrations" / "diagnostics" / f"{sess}.json").exists():
             need.append("diagnostics")
