@@ -41,9 +41,11 @@ import math
 import os
 import pickle
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -265,14 +267,68 @@ def _staleness(component: str, label: str, date: str | None, ref: str | None) ->
 
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
+# The database the pages read: DATA/vol_system.db unless record_db() has pushed a
+# scratch copy of it brought up to the committed record (data root, copy).
+_DB_OVERRIDE: list[tuple[Path, Path]] = []
+
+
+def db_file() -> Path:
+    for root, copy in reversed(_DB_OVERRIDE):
+        if root == DATA:
+            return copy
+    return DATA / "vol_system.db"
+
+
 def _db() -> sqlite3.Connection:
     """Read-only connection: the display layer must never write to the DB.
 
     mode=ro also refuses to create an empty database when the file is missing,
     so a missing DB surfaces as a loader error instead of an empty page.
     """
-    path = (DATA / "vol_system.db").resolve()
+    path = db_file().resolve()
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+@contextlib.contextmanager
+def record_db(scratch_dir: str | Path | None = None) -> Iterator[dict]:
+    """Render from the committed record, not from the checkout's SQLite cache.
+
+    data_store/vol_system.db is git-tracked but the daily job never commits it:
+    each run first loads the committed parquet record (market partitions under
+    DATA/market, option chains under DATA/options) into it, then renders. A
+    clean checkout's cache therefore lags the record by every session since it
+    was last committed, so `make freeze`, CI and a reviewer's local build showed
+    a different site from the deployed one (other prices, other Model Risk
+    statuses). Here a scratch copy of the cache gets the same upserts the job
+    does, and every loader (and β's chain table) reads the copy until the block
+    exits; the tracked file is never written. Yields the rows upserted."""
+    from joint_vol_calibration.data import database as dbm
+
+    rb = _import_run_backtest()
+    tmp = Path(tempfile.mkdtemp(prefix="record_db_", dir=scratch_dir))
+    copy = tmp / "vol_system.db"
+    saved = (dbm.DB_PATH, rb.DB_PATH)
+    pushed = False
+    try:
+        shutil.copy2(db_file(), copy)
+        dbm.DB_PATH = rb.DB_PATH = copy
+        counts: dict = {}
+        if (DATA / "market").is_dir():
+            counts.update(dbm.import_market_partitions(DATA / "market"))
+        if (DATA / "options").is_dir():
+            counts["options"] = dbm.import_options_snapshots(DATA / "options")
+        _DB_OVERRIDE.append((DATA, copy))
+        pushed = True
+        _CHROME_CACHE.clear()
+        _BACKLINK_CACHE.clear()
+        yield counts
+    finally:
+        dbm.DB_PATH, rb.DB_PATH = saved
+        if pushed:
+            _DB_OVERRIDE.pop()
+        _CHROME_CACHE.clear()
+        _BACKLINK_CACHE.clear()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _record_error(d: dict, component: str, exc: Any) -> None:
@@ -2098,7 +2154,7 @@ def beta_estimation(regimes: pd.Series | None = None) -> dict:
     from joint_vol_calibration.backtest.backtest_engine import BETA_ESTIMATION_SESSIONS
 
     rb = _import_run_backtest()
-    db = Path(rb.DB_PATH)
+    db = Path(rb.DB_PATH)       # record_db() points it at the synced copy too
     st = db.stat()
     key = (str(db.resolve()), st.st_mtime_ns, st.st_size)
     if key not in _BETA_CACHE:            # ~1.5 s; the test-suite renders the page many times
@@ -6855,7 +6911,7 @@ def monitor_backlinks() -> dict[str, dict[str, list[dict]]]:
     """{page file: {element id: [check, ...]}}: the Model Risk checks whose evidence
     each panel shows, for its 'Monitored' chips (the Model Risk loader, cached on
     the inputs' modification times)."""
-    key = (*_stat_key(DATA / "vol_system.db", DATA / "calibrations", DATA / "surface",
+    key = (*_stat_key(db_file(), DATA / "calibrations", DATA / "surface",
                       DATA / "signals" / "regime_labels.parquet", DATA / "greeks" / "greeks_surface.parquet",
                       DATA / "backtest" / "full_results.pkl", INVENTORY_PATH), str(DATA))
     if key in _BACKLINK_CACHE:
@@ -6912,7 +6968,7 @@ def load_chrome() -> dict:
     page's own loader owns its errors, and any page error blocks the publish.
     """
     cal_dir = DATA / "calibrations"
-    key = (*_stat_key(DATA / "vol_system.db", DATA / "signals" / "regime_labels.parquet", cal_dir,
+    key = (*_stat_key(db_file(), DATA / "signals" / "regime_labels.parquet", cal_dir,
                       DATA / "greeks" / "greeks_surface.parquet", DATA / "backtest" / "full_results.parquet",
                       DATA / "surface", DATA / "backtest" / "inference"), str(DATA))
     if key in _CHROME_CACHE:

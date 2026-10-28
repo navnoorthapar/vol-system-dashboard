@@ -9,6 +9,11 @@ both at navnoorbawa.me and the github.io project URL), and writes the CNAME,
 retired URL (app.LEGACY_REDIRECTS: greeks.html -> risk.html, backtest.html ->
 research.html).
 
+It renders from the committed record: app.record_db() loads the parquet record
+(market partitions, option chains) into a scratch copy of the SQLite cache, as
+the daily job does before its own freeze, so a clean checkout builds the site
+the job deploys (the tracked cache is never committed by the job and lags it).
+
 It FAILS CLOSED: nothing is written and the script exits 1 if any page
   * returns a non-200 status, contains a traceback, or reports a loader error
     (app.py sets the X-Dashboard-Loader-Errors header and renders a red banner
@@ -32,6 +37,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import os
@@ -240,10 +246,17 @@ def write_site(out: str, mod: Any, pages: dict) -> None:
         print("WARN  og-image.png not found — run dashboard/make_og_image.py")
 
 
-def freeze(out: str, mod: Any = None) -> int:
-    """Render, check and (only if every page is clean) write the site. Returns an exit code."""
+def freeze(out: str, mod: Any = None, record: bool = True) -> int:
+    """Render, check and (only if every page is clean) write the site. Returns an exit code.
+
+    ``record``: render from the committed record (app.record_db), not the cache."""
     mod = mod or load_app()
-    pages, problems, warnings = render_pages(mod)
+    sync = getattr(mod, "record_db", None) if record else None
+    with sync() if sync is not None else contextlib.nullcontext({}) as restored:
+        if restored:
+            print(f"RECORD  rendering from the committed record (rows upserted into a scratch cache: "
+                  f"{restored})")
+        pages, problems, warnings = render_pages(mod)
     problems += check_static(mod, pages)
     for w in warnings:
         print(f"::warning title=Stale dashboard input::{w}")

@@ -68,8 +68,25 @@ def _load(name: str, rel: str):
 
 @pytest.fixture(scope="module")
 def dash():
-    """dashboard/app.py, imported once per module (tests monkeypatch DATA)."""
-    return _load("dashboard_app_under_test", "dashboard/app.py")
+    """dashboard/app.py, imported once per module (tests monkeypatch DATA), reading
+    the committed record as the daily job and freeze_site do (app.record_db), not
+    the checkout's cache, which the job never commits."""
+    mod = _load("dashboard_app_under_test", "dashboard/app.py")
+    with mod.record_db():
+        _ACTIVE_APP.append(mod)
+        try:
+            yield mod
+        finally:
+            _ACTIVE_APP.remove(mod)
+
+
+_ACTIVE_APP: list = []
+
+
+def _market_db() -> Path:
+    """The market database the rendered pages read: the copy brought up to the
+    committed record while the dash fixture is up (app.record_db), else the cache."""
+    return _ACTIVE_APP[-1].db_file() if _ACTIVE_APP else SHIPPED / "vol_system.db"
 
 
 @pytest.fixture(scope="module")
@@ -1342,7 +1359,7 @@ def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
     assert "April 2025 tariff shock is <em>not</em> in it" in bt
     assert "single options snapshot" not in bt
     assert "22 times in 7 years" not in bt
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         n_dates = con.execute("SELECT COUNT(DISTINCT snapshot_date) FROM options_snapshots "
                               "WHERE underlying='SPX'").fetchone()[0]
     assert f"the database's {n_dates} SPX chain" in bt
@@ -1492,7 +1509,7 @@ def test_a_bridge_from_another_run_is_a_loader_error(dash, synth):
 def test_change_log_quotes_facts_from_the_db(dash, pages):
     """The log said '2018: ~1.5%' (^IRX averaged 1.95%) and R2 '~53% → ~25%'."""
     d = dash.load_page4()
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         t = pd.read_sql("SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?", con,
                         params=(d["start_date"], d["end_date"]), parse_dates=["date"])
     m2018 = t[t["date"].dt.year == 2018]["rate"].mean()
@@ -4476,7 +4493,7 @@ def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
     tail = f"; none stored for {', '.join(sorted(s for s, _ in none))}" if none else ""
     sess = "session" if len(have) == 1 else "sessions"
     # P3.1: the text names the table the settlements come from, through its last date
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
     text = (f"Heston misses real VX futures by {want} index pts RMSE out of sample "
             f"({len(have)} {sess}{tail}; settlements from vix_futures_daily in data_store/vol_system.db, "
@@ -6100,7 +6117,7 @@ def test_browser_heatmap_row_head_stays_in_view_on_a_phone(site_browser):
 # ── P3.1: the joint fit's VX futures leg ─────────────────────────────────────
 
 def _vx_last() -> str | None:
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         return con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
 
 
@@ -6163,7 +6180,7 @@ def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
     d = dash.load_model_risk()
     row = next(m for m in d["monitors"]
                if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         db_date = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
     lag = dash.session_age(_vx_last(), db_date)
     assert row["model"] == "M5"
@@ -6198,7 +6215,7 @@ def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
 
 def _vol_frame() -> pd.DataFrame:
     """VIX, RV21 trailing and forward from the shipped DB, written out here (not desk_market)."""
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         spx = pd.read_sql("SELECT date, close FROM spx_ohlcv ORDER BY date", con, index_col="date")
         vix = pd.read_sql("SELECT date, close FROM vix_daily ORDER BY date", con, index_col="date")["close"]
     spx.index, vix.index = pd.to_datetime(spx.index), pd.to_datetime(vix.index)
@@ -6409,10 +6426,13 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
         if m["num"] is None:        # today's session cannot compute it: no dot stands in for today
             assert m["history"]["last"] is None, m["check"]
             assert m["history"]["today_missing"], m["check"]
+        elif m["key"] == "vix_rep_gap":   # T11: a two-sided check plots the signed gap; the limit uses |gap|
+            assert abs(m["history"]["last"]) == pytest.approx(m["num"], abs=1e-12), m["check"]
         else:
             assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
         lim = dash.MONITOR_LIMITS[m["limits_key"]]
-        assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(x["value"], lim)
+        size = abs if m["key"] == "vix_rep_gap" else float
+        assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(size(x["value"]), lim)
                                                                for x in m["history"]["dots"]]
     oos = next(m for m in d["monitors"] if m["key"] == "oos_rmse")
     want = [dash._cal_losses(c).get("spx_oos_iv_rmse") for _, c in _gated_pickles(dash)]
@@ -6595,7 +6615,7 @@ def test_cite_registry_reads_every_cite_call_in_the_templates(dash):
 # ── P3.5: the VIX complex on the Overview ─────────────────────────────────────
 
 def _ts_wide() -> pd.DataFrame:
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         df = pd.read_sql("SELECT date, ticker, close FROM vix_term_structure", con)
     return df.pivot_table(index="date", columns="ticker", values="close", aggfunc="last").sort_index()
 
@@ -6622,7 +6642,7 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     M1 → M2 = VX2 / VX1 − 1, recomputed here from vol_system.db; its age in NYSE
     sessions is shown in the stale styling of that age, and the curve is not on
     the spot chart."""
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
         px = [r[0] for r in con.execute(
             "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
@@ -8763,3 +8783,41 @@ def test_calibration_census_says_what_is_stored_not_k_of_k_pass(dash, pages):
     assert f"{dash.plural(n_current, 'current-schema (model_version 2) fit')}" in text
     assert "the job stores only fits that pass the gate" in text
     assert (f"{n_ok:,} of them passing the current gate" in text) == (n_ok != n_current)
+
+
+def test_a_clean_checkout_renders_the_committed_record_not_the_stale_cache(dash, freezer, tmp_path,
+                                                                           monkeypatch):
+    """VALIDATOR-03 / CODE-02 / CIO-01: the tracked SQLite cache is never committed by
+    the daily job, so a checkout's cache lags the committed parquet record and
+    `make freeze`, CI and a reviewer's build showed older prices and other Model
+    Risk statuses than the deployed site. freeze() renders from a scratch copy of
+    the cache brought up to the record (app.record_db), and never writes the cache.
+    Here the cache lacks the record's newest SPX and VIX session."""
+    store = tmp_path / "data_store"
+    store.mkdir()
+    for p in SHIPPED.iterdir():
+        if p.name != "vol_system.db":
+            (store / p.name).symlink_to(p)
+    shutil.copy2(SHIPPED / "vol_system.db", store / "vol_system.db")
+    parts = sorted((SHIPPED / "market" / "spx_ohlcv").glob("*.parquet"))
+    rec = pd.concat([pd.read_parquet(f) for f in parts])
+    last = str(rec["date"].astype(str).str[:10].max())
+    con = sqlite3.connect(store / "vol_system.db")
+    with con:
+        for table in ("spx_ohlcv", "vix_daily"):
+            con.execute(f"DELETE FROM {table} WHERE substr(date, 1, 10) >= ?", (last,))  # noqa: S608
+    con.close()
+    before = hashlib.sha256((store / "vol_system.db").read_bytes()).hexdigest()
+    monkeypatch.setattr(dash, "DATA", store)
+    dash._CHROME_CACHE.clear()
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 0
+    from bs4 import BeautifulSoup
+    html = (out / "index.html").read_text()
+    item = BeautifulSoup(html, "lxml").select_one('header.statusbar span.sb-item[title^="SPX close"] .sb-v')
+    assert item is not None
+    assert item.get_text(strip=True) == last
+    close = float(rec.loc[rec["date"].astype(str).str[:10] == last, "close"].iloc[-1])
+    assert f"{close:,.2f}" in html
+    assert hashlib.sha256((store / "vol_system.db").read_bytes()).hexdigest() == before
+    assert dash.db_file() == store / "vol_system.db"          # the override is gone
