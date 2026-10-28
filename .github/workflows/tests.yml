@@ -2,7 +2,7 @@ name: tests
 
 # The full pytest suite, with coverage, on every push and PR to main, plus the
 # lint/type gates, a benchmark smoke run, the accessibility gate on the frozen
-# site, a vulnerability report and the next-session simulation (the daily bot's
+# site, a vulnerability gate and the next-session simulation (the daily bot's
 # run and gates on a new fit, so no test pins a value the bot replaces). Pushes made by the daily bot use
 # GITHUB_TOKEN and do not trigger this workflow, so a weekly run also tests
 # main as the bot left it (the daily job runs the publish-path subset itself
@@ -53,7 +53,7 @@ jobs:
 
       # Same pinned set as the daily job (CPU torch, xgboost-cpu).
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       # The property tests skip without Hypothesis; in CI a missing tool must
       # fail, not silently skip them.
@@ -121,7 +121,7 @@ jobs:
           cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       - name: Simulate the next session, then the gates and the full suite
         run: python scripts/ci/simulate_next_session.py --full --out "$RUNNER_TEMP/sim"
@@ -164,7 +164,7 @@ jobs:
           cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       # Always a bug, and clean: annotated inline on the PR.
       - name: Syntax errors and undefined names
@@ -231,7 +231,7 @@ jobs:
           cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       # The benchmark files skip without the plugin; here that must fail.
       - name: pytest-benchmark is installed
@@ -262,7 +262,7 @@ jobs:
           cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       - name: Render the static site
         run: python dashboard/freeze_site.py "$RUNNER_TEMP/site"
@@ -302,11 +302,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # A gate (FUND_GRADE_PLAN 0.6): a known advisory against any pin of the lock
+  # fails the workflow unless scripts/ci/pip_audit_allowlist.json carries a
+  # reviewed exception for it (id, package, reason, expiry at most 180 days
+  # ahead); an expired exception fails too. pip-audit itself comes from a hashed
+  # lock, and an unreachable advisory service is retried, never passed.
   audit:
-    name: known vulnerabilities (pip-audit, report only)
+    name: known vulnerabilities (pip-audit gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -319,16 +323,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install pip-audit (locked)
+        run: python -m pip install --require-hashes -r scripts/ci/pip_audit_lock.txt
+
       # Audits the pinned names and versions against the PyPI/OSV advisory
-      # database without installing them; findings go to the job summary and
-      # do not fail the workflow (the fix is a lock bump, reviewed separately).
-      - name: pip-audit on requirements-lock.txt
-        run: |
-          python -m pip install "pip-audit==2.10.1"
-          python -m pip_audit -r requirements-lock.txt --no-deps --disable-pip \
-            --progress-spinner off --format markdown > "$RUNNER_TEMP/audit.md" || true
-          { echo "## pip-audit (requirements-lock.txt)"; cat "$RUNNER_TEMP/audit.md"; } >> "$GITHUB_STEP_SUMMARY"
-          cat "$RUNNER_TEMP/audit.md"
+      # database without installing them; the result goes to the job summary.
+      - name: pip-audit gate on requirements-lock.txt
+        run: python scripts/ci/pip_audit_gate.py --summary "$GITHUB_STEP_SUMMARY"
 
   # The curated mutants (scripts/ci/mutation_check.py) against the property and
   # Jacobian tests. Weekly, like reproduce: ~10 min. A mutant whose site is no
@@ -355,7 +356,7 @@ jobs:
           cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       - name: Mutants (make mutation)
         run: |
@@ -389,7 +390,7 @@ jobs:
           cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies (locked)
-        run: python -m pip install -r requirements-lock.txt
+        run: python -m pip install --require-hashes -r requirements-lock.txt
 
       - name: Rebuild in a scratch copy and diff against the committed artifacts
         run: make reproduce OUT="$RUNNER_TEMP/reproduce"

@@ -12,7 +12,8 @@
 # The base image is pinned by digest (python:3.11.15-slim-bookworm, multi-arch
 # index, pushed 2026-08-05), so a rebuild gets the same OS layer. On linux/amd64
 # the Python packages are the exact tested set (requirements-lock.txt, the one
-# CI and the daily job install); on any other architecture the lock's
+# CI and the daily job install, each file checked against the SHA-256 the lock
+# records: --require-hashes); on any other architecture the lock's
 # x86_64-only builds (torch +cpu, xgboost-cpu) do not exist, so the ranges in
 # requirements-dev.txt are resolved instead and the build says so. On Apple
 # Silicon, `docker build --platform linux/amd64 .` gives the locked set under
@@ -38,7 +39,7 @@ RUN apt-get update \
 WORKDIR /work
 COPY requirements.txt requirements-dev.txt requirements-lock.txt ./
 RUN if [ "$(uname -m)" = "x86_64" ]; then \
-        pip install -r requirements-lock.txt; \
+        pip install --require-hashes -r requirements-lock.txt; \
     else \
         echo "NOTE: $(uname -m): installing the requirements-dev.txt ranges, not the x86_64 lock"; \
         pip install -r requirements-dev.txt; \

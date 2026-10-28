@@ -63,13 +63,77 @@ def test_no_hand_typed_test_counts_in_ci():
     assert not re.search(r"\d+ passed", TESTS + DAILY)
 
 
+def _requirements(path):
+    """The requirement entries of a pip requirements file as ``(pin, options)``:
+    backslash continuations joined, comments and global options (``--index-url``)
+    dropped, so ``name==1.0 \\`` followed by ``--hash=sha256:...`` lines is one
+    entry ``("name==1.0", ["--hash=sha256:..."])``."""
+    text = re.sub(r"\\\s*\n", " ", Path(path).read_text())
+    entries = []
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].strip()
+        if not line or line.startswith(("#", "-")):
+            continue
+        pin, *options = line.split()
+        entries.append((pin, options))
+    return entries
+
+
+def _lock_pins():
+    return {pin.split("==")[0].lower(): pin.split("==", 1)[1]
+            for pin, _ in _requirements(ROOT / "requirements-lock.txt")}
+
+
 def test_lock_pins_every_package_and_uses_cpu_torch():
-    lines = [ln.strip() for ln in (ROOT / "requirements-lock.txt").read_text().splitlines()
-             if ln.strip() and not ln.startswith(("#", "--"))]
-    assert lines and all(re.fullmatch(r"[A-Za-z0-9_.\-\[\]]+==\S+", ln) for ln in lines), lines
-    names = {ln.split("==")[0].lower() for ln in lines}
+    entries = _requirements(ROOT / "requirements-lock.txt")
+    pins = [pin for pin, _ in entries]
+    assert pins and all(re.fullmatch(r"[A-Za-z0-9_.\-\[\]]+==\S+", p) for p in pins), pins
+    names = {p.split("==")[0].lower() for p in pins}
     assert not any(n.startswith(("nvidia-", "triton")) for n in names)
-    assert any(ln.startswith("torch==") and ln.endswith("+cpu") for ln in lines)
+    assert any(p.startswith("torch==") and p.endswith("+cpu") for p in pins)
+
+
+_HASHED_LOCKS = ("requirements-lock.txt", "scripts/ci/pip_audit_lock.txt")
+
+
+def test_every_lock_pin_is_hashed_and_every_install_requires_hashes():
+    """FUND_GRADE_PLAN 0.6 / CODE-08: the lock pinned versions only, and the bot
+    (which can push to main and gh-pages) installed whatever either index served
+    under those version strings. Every pin of both locks now carries the SHA-256
+    of each file it may install, and every install of a lock, and every pip
+    install in a workflow, runs with --require-hashes, so pip refuses any other
+    file. (The Dockerfile's and the Makefile's non-x86_64 fallbacks resolve the
+    ranges of requirements-dev.txt and are the only unhashed installs.)"""
+    for lock in _HASHED_LOCKS:
+        entries = _requirements(ROOT / lock)
+        assert entries, lock
+        for pin, options in entries:
+            assert re.fullmatch(r"[A-Za-z0-9_.\-]+==\S+", pin), (lock, pin)
+            hashes = [o for o in options if o.startswith("--hash=")]
+            assert hashes, f"{lock}: {pin} has no --hash"
+            assert hashes == options, (lock, pin, options)
+            assert all(re.fullmatch(r"--hash=sha256:[0-9a-f]{64}", h) for h in hashes), (lock, pin)
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    sources = {p.relative_to(ROOT).as_posix(): p.read_text() for p in workflows}
+    for name in ("Dockerfile", "Makefile"):
+        sources[name] = (ROOT / name).read_text()
+    lock_installs = 0
+    for name, text in sources.items():
+        joined = re.sub(r"\\\s*\n", " ", text)
+        commands = [c for ln in joined.splitlines() if not ln.lstrip().startswith("#")
+                    for c in re.split(r";|&&|\|\|", ln)]
+        for line in commands:
+            if not re.search(r"\bpip install\b", line):
+                continue
+            in_workflow = name.startswith(".github/")
+            if in_workflow or any(lock in line for lock in _HASHED_LOCKS):
+                assert "--require-hashes" in line, f"{name}: {line.strip()}"
+                assert any(f"-r {lock}" in line for lock in _HASHED_LOCKS), f"{name}: {line.strip()}"
+                lock_installs += 1
+            else:
+                assert "requirements-dev.txt" in line, f"{name}: an unhashed install: {line.strip()}"
+    assert lock_installs >= 3          # tests.yml, daily_refresh.yml, the Dockerfile at least
+    assert "--require-hashes" in _step(DAILY, "Install dependencies (locked)")
 
 
 def test_lock_keeps_the_security_floors():
@@ -80,9 +144,7 @@ def test_lock_keeps_the_security_floors():
 
     floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
     req = (ROOT / "requirements.txt").read_text()
-    pins = dict(re.findall(r"^([A-Za-z0-9_.\-]+)==(\S+)$", (ROOT / "requirements-lock.txt").read_text(),
-                           re.MULTILINE))
-    pins = {k.lower(): v for k, v in pins.items()}
+    pins = _lock_pins()
     for name, floor in floors.items():
         assert re.search(rf"^{name}>={re.escape(floor)}$", req, re.MULTILINE), name
         assert Version(pins[name]) >= Version(floor), (name, pins[name])

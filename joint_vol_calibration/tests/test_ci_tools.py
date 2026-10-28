@@ -18,6 +18,10 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
     restated rows kept, holiday artefacts out).
   * repo_growth.py (the daily workflow's last step): what a run's commits add
     to the repository, by kind of file, with a warning above a budget.
+  * pip_audit_gate.py (CI's audit job): an advisory against a locked pin fails
+    unless a dated, reasoned allowlist entry covers it; an expired or
+    malformed entry fails; an unreachable advisory service is retried and
+    then fails, never passes.
 """
 from __future__ import annotations
 
@@ -406,3 +410,165 @@ class TestRepoGrowth:
         assert "--budget-mb" in step
         assert "always()" in step
         assert "|| true" in step  # reporting never fails the run
+
+
+# ── pip_audit_gate.py ─────────────────────────────────────────────────────────
+
+@pytest.fixture
+def audit(monkeypatch):
+    return _load("scripts/ci/pip_audit_gate.py", "pip_audit_gate_under_test", monkeypatch)
+
+
+def _report(*deps):
+    """A pip-audit JSON report; each dep is (name, version, [(id, [aliases])]),
+    or (name, version, None, skip reason)."""
+    out = []
+    for d in deps:
+        if len(d) == 4:
+            out.append({"name": d[0], "version": d[1], "skip_reason": d[3]})
+        else:
+            out.append({"name": d[0], "version": d[1],
+                        "vulns": [{"id": i, "aliases": a, "fix_versions": ["9.9"]} for i, a in d[2]]})
+    return {"dependencies": out, "fixes": []}
+
+
+def _entry(id_="GHSA-aaaa", package="pillow", reason="nothing here decodes an untrusted image file",
+           expires="2026-12-01"):
+    return {"id": id_, "package": package, "reason": reason, "expires": expires}
+
+
+class TestPipAuditGate:
+    TODAY = __import__("datetime").date(2026, 11, 1)
+
+    def test_an_unlisted_finding_fails(self, audit):
+        """FUND_GRADE_PLAN 0.6: the audit job ran `|| true` with continue-on-error,
+        so no advisory could ever fail CI."""
+        rep = _report(("Pillow", "12.3.0", [("GHSA-aaaa", ["CVE-1"])]))
+        v = audit.judge(rep, {"entries": []}, self.TODAY)
+        assert not v.ok
+        assert [(f.package, f.id) for f in v.uncovered] == [("pillow", "GHSA-aaaa")]
+
+    def test_a_listed_unexpired_finding_passes_by_id_or_alias(self, audit):
+        rep = _report(("Pillow", "12.3.0", [("GHSA-aaaa", ["CVE-1"]), ("PYSEC-2", ["CVE-2"])]))
+        v = audit.judge(rep, {"entries": [_entry(), _entry(id_="CVE-2")]}, self.TODAY)
+        assert v.ok, v
+        assert len(v.covered) == 2
+        assert v.unused == []
+
+    def test_the_entry_must_name_the_package(self, audit):
+        rep = _report(("urllib3", "2.8.0", [("GHSA-aaaa", [])]))
+        v = audit.judge(rep, {"entries": [_entry(package="pillow")]}, self.TODAY)
+        assert not v.ok
+        assert [e.package for e in v.unused] == ["pillow"]
+
+    def test_an_expired_entry_fails_even_when_it_still_matches(self, audit):
+        rep = _report(("pillow", "12.3.0", [("GHSA-aaaa", [])]))
+        v = audit.judge(rep, {"entries": [_entry(expires="2026-10-31")]}, self.TODAY)
+        assert not v.ok
+        assert any("expired on 2026-10-31" in p for p in v.problems)
+        assert [f.id for f in v.uncovered] == ["GHSA-aaaa"]
+        # and when nothing matches it any more: the stale exception still has to go
+        v = audit.judge(_report(), {"entries": [_entry(expires="2026-10-31")]}, self.TODAY)
+        assert not v.ok
+
+    @pytest.mark.parametrize(("bad", "why"), [
+        ({"reason": ""}, "missing reason"),
+        ({"reason": "n/a"}, "20 characters"),
+        ({"expires": "soon"}, "not a YYYY-MM-DD"),
+        ({"expires": None}, "missing expires"),
+        ({"package": ""}, "missing package"),
+        ({"expires": "2027-12-01"}, "more than 180 days"),
+    ])
+    def test_a_malformed_entry_fails(self, audit, bad, why):
+        rep = _report(("pillow", "12.3.0", [("GHSA-aaaa", [])]))
+        v = audit.judge(rep, {"entries": [{**_entry(), **bad}]}, self.TODAY)
+        assert not v.ok
+        assert any(why in p for p in v.problems), v.problems
+
+    def test_the_allowlist_must_be_an_object_with_entries(self, audit):
+        assert not audit.judge(_report(), [], self.TODAY).ok
+        assert audit.judge(_report(), {"entries": []}, self.TODAY).ok
+
+    def test_skipped_dependencies_are_reported_not_failed(self, audit):
+        v = audit.judge(_report(("foo", "1.0", None, "not on PyPI")), {"entries": []}, self.TODAY)
+        assert v.ok
+        assert v.skipped == [("foo", "not on PyPI")]
+        assert "- not audited: foo (not on PyPI)" in audit.report_lines(v)
+
+    def test_the_lock_is_audited_at_public_versions(self, audit):
+        h = "    --hash=sha256:"
+        lock = ("--index-url https://pypi.org/simple\n\narch==8.0.0 \\\n" + h + "a" * 64 + " \\\n"
+                + h + "b" * 64 + "\nTorch==2.14.0+cpu \\\n" + h + "c" * 64 + "\n# a comment==1.0\n")
+        pins = audit.lock_pins(lock)
+        assert pins == {"arch": "8.0.0", "torch": "2.14.0+cpu"}
+        assert audit.audit_input(pins) == "arch==8.0.0\ntorch==2.14.0\n"
+
+    def test_a_network_error_is_retried_then_fails_closed(self, audit):
+        calls, pauses, inputs = [], [], []
+
+        def flaky(cmd, ok_on):
+            calls.append(cmd)
+            inputs.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+            if len(calls) >= ok_on:
+                out = cmd[cmd.index("--output") + 1]
+                Path(out).write_text(json.dumps(_report(("pillow", "12.3.0", []))))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "ConnectionError: HTTPSConnectionPool(pypi.org)")
+
+        rep = audit.run_audit("pillow==12.3.0 \\\n  --hash=sha256:" + "a" * 64 + "\n",
+                              runner=lambda c: flaky(c, 3), retries=4, sleep=pauses.append, pause_s=1.0)
+        assert rep is not None
+        assert len(calls) == 3
+        assert pauses == [1.0, 2.0]
+        assert inputs[0] == "pillow==12.3.0\n"                 # pins only: no hashes, no index options
+        assert {"--no-deps", "--disable-pip"} <= set(calls[0])
+        calls.clear()
+        pauses.clear()
+        assert audit.run_audit("pillow==12.3.0\n", runner=lambda c: flaky(c, 99), retries=3,
+                               sleep=pauses.append, pause_s=1.0) is None
+        assert len(calls) == 3
+        assert pauses == [1.0, 2.0]
+
+    def test_main_exit_codes(self, audit, tmp_path, monkeypatch):
+        allow = tmp_path / "allow.json"
+        allow.write_text(json.dumps({"entries": [_entry(expires="2026-12-01")]}))
+        rep = tmp_path / "rep.json"
+        summary = tmp_path / "summary.md"
+        rep.write_text(json.dumps(_report(("pillow", "12.3.0", [("GHSA-aaaa", [])]))))
+        assert audit.main(["--report", str(rep), "--allowlist", str(allow), "--summary", str(summary)],
+                          today=self.TODAY) == 0
+        assert "OK: no uncovered advisory" in summary.read_text()
+        rep.write_text(json.dumps(_report(("pillow", "12.3.0", [("GHSA-bbbb", [])]))))
+        assert audit.main(["--report", str(rep), "--allowlist", str(allow)], today=self.TODAY) == 1
+        lock = tmp_path / "lock.txt"
+        lock.write_text("pillow==12.3.0\n")
+        monkeypatch.setattr(audit, "RETRY_SLEEP_S", 0.0)
+        no_report = lambda c: subprocess.CompletedProcess(c, 1, "", "network down")  # noqa: E731
+        assert audit.main(["--lock", str(lock), "--allowlist", str(allow)], runner=no_report,
+                          today=self.TODAY) == 2
+
+    def test_the_committed_allowlist_is_well_formed(self, audit):
+        """Every committed entry has a reason and a valid date; whether an entry has
+        expired is the CI job's question (it depends on the day it runs)."""
+        from datetime import date
+        data = json.loads((ROOT / "scripts" / "ci" / "pip_audit_allowlist.json").read_text())
+        for e in data["entries"]:
+            entries, problems = audit.load_allowlist({"entries": [e]}, date.fromisoformat(e["expires"]))
+            assert problems == [], e
+            assert len(entries) == 1
+            assert e["package"] == audit.normalise(e["package"]), e
+        keys = [(e["package"], e["id"]) for e in data["entries"]]
+        assert len(keys) == len(set(keys))
+
+    def test_the_audit_job_is_a_gate(self):
+        wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
+        job = wf[wf.index("\n  audit:"):wf.index("\n  mutation:")]
+        job = "\n".join(ln for ln in job.splitlines() if not ln.lstrip().startswith("#"))
+        assert "continue-on-error" not in job
+        assert "|| true" not in job
+        assert "scripts/ci/pip_audit_gate.py" in job
+        assert "--require-hashes -r scripts/ci/pip_audit_lock.txt" in job
+        mk = (ROOT / "Makefile").read_text()
+        audit_target = mk[mk.index("\naudit:"):mk.index("\ndocker-build:")]
+        assert "|| true" not in audit_target
+        assert "pip_audit_gate.py" in audit_target

@@ -11,12 +11,16 @@ review round's fixes, 2026-10-21). Counts are from those days; the gates keep th
 | `lint` | ruff syntax rules (annotated on the PR), then the broad rule set and mypy against committed baselines, and each committed baseline against the base branch's (`baseline_gate.py --against`) | a new finding in any (file, rule) pair; any mypy error in a strict module; a baseline that grew, unless the PR carries the `re-baseline` label |
 | `bench` | every benchmark body once, without timing (`--benchmark-disable`) | a benchmark that no longer computes the right thing (each checks its result first) |
 | `a11y` | axe-core 4.13.0 in Playwright 1.63.0 Chromium over the frozen site | any WCAG 2.0/2.1/2.2 A/AA violation at 1440 or 390 px in either colour scheme; horizontal scroll at 320–1920 px; a JS error; a request to another origin |
-| `audit` | pip-audit 2.10.1 on `requirements-lock.txt` | none (report only, in the job summary) |
+| `audit` | pip-audit 2.10.1 (installed from the hashed `scripts/ci/pip_audit_lock.txt`) on every pin of `requirements-lock.txt` at its public version, through `scripts/ci/pip_audit_gate.py` | an advisory with no entry in `scripts/ci/pip_audit_allowlist.json` (id or alias, package, a reason, an expiry at most 180 days ahead); an expired or malformed entry; no report after four attempts (an unreachable advisory service fails, never passes) |
 | `reproduce` | `make reproduce` (weekly and on demand) | an artifact outside its tolerance (docs/reproduce.md) |
 | `mutation` | `make mutation` (weekly and on demand); `tests/test_ci_tools.py` checks every mutant's site on each push | a mutant the properties do not kill (other than the documented equivalent); a mutant whose site is no longer unique (stale) |
 | `simulate` | `scripts/ci/simulate_next_session.py --full`: the daily bot's book slot, offline, on a copy of the checkout for the session after the database's last one, then the bot's three gates (read from `daily_refresh.yml`) and the full suite in that copy. The book is priced by parameters moved off the headline (κ × 0.6, θ × 1.2, σ × 0.7 below 1.9, ρ + 0.1, v₀ × 1.3) plus about 1 vol point of parity-preserving smile noise, and the job fails unless every fitted parameter moves at least 5%; the Cboe capture is replayed, then the forward ledger and every derived artifact | the simulated session not accepted or not recorded; any gate or suite failure, i.e. a test that pins a value the bot replaces (the 2026-10-20 incident class). What it does not catch: pins on features of real chains that a synthetic constant-carry Heston book does not reproduce |
 
-Every job installs `requirements-lock.txt`, which is compiled from `requirements-dev.txt`, so the test tools added in
+Every job installs `requirements-lock.txt` with `pip install --require-hashes`: the lock records the SHA-256 of every
+file each pin may install (from PyPI, and from the PyTorch CPU index for torch), so a file replaced on either index, or
+a same-named upload on the other index, fails the install in the jobs that can push to main and gh-pages
+(`test_infra_config.py::test_every_lock_pin_is_hashed_and_every_install_requires_hashes`). The lock is compiled from
+`requirements-dev.txt`, so the test tools added in
 C23 (Hypothesis, pytest-benchmark, mypy and the pandas/SciPy stubs) reach CI through that compile. The property and
 benchmark files skip when their tool is missing, so the `test` and `bench` jobs first check that it is installed and
 fail if not: a missing tool cannot turn into silently skipped tests.
@@ -106,9 +110,22 @@ three packages, none of them in the numerical stack. The lock was recompiled the
 | urllib3 | 2.6.3 | CVE-2026-44431, CVE-2026-44432, CVE-2026-97687, CVE-2026-97688, CVE-2026-97689 | 2.8.0 (2.7.0 for the first two) | 2.8.0 |
 | werkzeug | 3.1.8 | CVE-2026-102598 | 3.1.9 | 3.1.9 |
 
-torch `2.14.0+cpu` is not on PyPI under that version and was not audited. urllib3 and idna sit on the daily job's
+torch `2.14.0+cpu` is not on PyPI under that version and was not audited then. urllib3 and idna sit on the daily job's
 download path (requests, yfinance); werkzeug serves only the local preview and the freeze's in-process test client,
-since the published site is static files. The `audit` job re-runs pip-audit on every push (report only).
+since the published site is static files.
+
+Since FUND_GRADE_PLAN 0.6 the `audit` job is a gate (`scripts/ci/pip_audit_gate.py`). It audits every pin at its public
+version (torch as `2.14.0`, so the CPU build is audited too) and fails on any advisory that
+`scripts/ci/pip_audit_allowlist.json` does not cover with a reason and an expiry. Its first run (2026-10-28) found 44
+advisories (43 distinct) in four packages; each is an allowlist entry with its reason. The pins were left unchanged
+(the change added the hashes only):
+
+| Package | Locked | Advisories | Fixed in | Why allowed, until |
+|---|---|---|---|---|
+| certifi | 2026.2.25 | PYSEC-2026-4320 (a root whose intermediates were compromised) | 2026.10.18 | applies to the bot's downloads; the fix is inside the 14-day cooldown until 2026-11-01; bump it then (entry expires 2026-11-08) |
+| pillow | 12.3.0 | 39 (decoders, TIFF/PDF/EPS writers) | 13.0.0 | nothing here opens or decodes an image; matplotlib only writes the repo's own figures (2026-12-31) |
+| filelock | 3.32.3 | 3 (ReadWriteLock, soft locks; two Windows only) | 4.2.1 | torch dependency; nothing here uses those locks (2026-12-31) |
+| setuptools | 84.0.0 | GHSA-xmj3-9gf7-h52w (Windows legacy egg install) | 84.1.0 | torch dependency; Linux runners, pip installs (2026-12-31) |
 
 ## Licences
 
@@ -123,5 +140,6 @@ zrender (BSD-3), claygl (BSD-2) and tslib (0BSD), vendored with their licence fi
 
 **Development tools.** Permissive except Hypothesis (MPL-2.0, file-level copyleft) and axe-core (MPL-2.0); both are
 used unmodified as test tools and are neither vendored nor shipped. mypy (MIT), pytest-benchmark (BSD-2),
-pandas-stubs (BSD-3), scipy-stubs (BSD-3), pip-audit (Apache-2.0, installed in its CI job only), Playwright
+pandas-stubs (BSD-3), scipy-stubs (BSD-3), pip-audit (Apache-2.0, installed in its CI job only, from
+`scripts/ci/pip_audit_lock.txt`), Playwright
 (Apache-2.0). Numba (BSD-2) is optional for one benchmark and is not a dependency.
