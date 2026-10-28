@@ -87,6 +87,12 @@ class Check:
     ok: bool
     note: str = ""
 
+    def __post_init__(self) -> None:
+        # a comparison of recomputed values can yield numpy scalars (np.bool_),
+        # which the --json report cannot serialise
+        self.ok = bool(self.ok)
+        self.printed, self.expected, self.note = str(self.printed), str(self.expected), str(self.note)
+
 
 @dataclass
 class Audit:

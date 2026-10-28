@@ -452,6 +452,15 @@ class TestRecomputeAudit:
         assert not core.rounds_to(None, 1.60, 2)
         assert core.rounds_to(0.0960, 9.60, 2, scale=100.0)
 
+    def test_a_check_built_from_numpy_values_serialises_to_the_json_report(self, monkeypatch):
+        """Found when the 2026-10-27 session first ran the unreplicated-VIX checks: a
+        check whose verdict was a numpy comparison made --json, which CI uploads,
+        raise 'Object of type bool is not JSON serializable'."""
+        import numpy as np
+        core = _recompute(monkeypatch).core
+        c = core.Check("p", "panel", "what", np.float64(1.5), np.float64(1.5), np.float64(1.5) <= 2.0)
+        assert json.loads(json.dumps(c.__dict__))["ok"] is True
+
     def test_a_missing_or_wrong_number_fails_and_is_never_skipped(self, monkeypatch):
         core = _recompute(monkeypatch).core
         from bs4 import BeautifulSoup
