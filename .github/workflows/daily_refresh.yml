@@ -64,6 +64,9 @@ jobs:
     timeout-minutes: 45          # an accepted fit adds ~5 min of diagnostics and artifacts
     env:
       PYTHONUNBUFFERED: "1"    # keep print/log lines in step order in the job log
+    outputs:                   # for the attest-ledger job below
+      ledgers: ${{ steps.ledgers.outputs.paths }}
+      capture_sha: ${{ steps.commitcaptures.outputs.sha }}
 
     steps:
       - name: Checkout
@@ -200,6 +203,17 @@ jobs:
             "Auto-refresh session ${SESSION:-unknown} (${SLOT}): captures" \
             "${#files[@]} new capture file(s) (Cboe books, accepted chain, fit, forward ledger, run record); calibration ${CALIBRATION:-not-run}." \
             "${files[@]}"
+
+      # The forward ledger files the capture commit took (after check_captures verified
+      # each links to the head of the chain), for the attest-ledger job below.
+      - name: New forward ledger files
+        id: ledgers
+        if: always() && steps.commitcaptures.outcome == 'success'
+        run: |
+          # comma-separated: actions/attest reads subject-path as CSV
+          paths=$(grep -E '^data_store/forward/ledger_[0-9]{4}-[0-9]{2}-[0-9]{2}\.json$' "$RUNNER_TEMP/captures.ok" | paste -sd, - || true)
+          echo "paths=$paths" >> "$GITHUB_OUTPUT"
+          echo "New ledger file(s): ${paths:-none}"
 
       # Tests against the data this run produced (the suite works on a private copy of
       # data_store and fails if anything under data_store/ changes), in three gates.
@@ -372,3 +386,36 @@ jobs:
         run: >
           python scripts/ci/bot_alert.py --workflow daily_refresh.yml --run-id "$RUN_ID"
           --event "$EVENT" --run-url "$RUN_URL" --slot "$SLOT"
+
+  # An external, independent timestamp of each new forward-ledger file (FUND_GRADE_PLAN
+  # 0.10): a Sigstore-signed build-provenance attestation, logged in the public Rekor
+  # transparency log, binding the file's SHA-256 to this workflow run and the capture
+  # commit. The ledger chain is hash-linked file to file (forward_ledger.verify_chain;
+  # check_captures.py rejects a broken link before it is committed), but the repository
+  # owner could rewrite the whole chain; a logged attestation of each head cannot be
+  # back-dated. Verify with: gh attestation verify data_store/forward/ledger_<s>.json
+  # --repo <owner>/<repo>. A job of its own so only it holds id-token: write, and
+  # continue-on-error: it can never fail the run or cost a commit or the deploy.
+  attest-ledger:
+    name: Attest new forward-ledger files
+    needs: refresh
+    if: always() && needs.refresh.outputs.ledgers != '' && needs.refresh.outputs.capture_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write            # Sigstore signing certificate (OIDC)
+      attestations: write        # store the attestation with the repository
+    steps:
+      - name: Checkout the capture commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.refresh.outputs.capture_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: ${{ needs.refresh.outputs.ledgers }}

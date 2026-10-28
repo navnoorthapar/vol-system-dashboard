@@ -22,7 +22,10 @@ by its name and read back:
                                                     snapshot_date the session's
   calibrations/joint_cal_<session>.pkl              unpickles to a fit of that
                                                     session that passes the gate
-  forward/ledger_<session>.json                     a valid ledger of that session
+  forward/ledger_<session>.json                     a valid ledger of that session that
+                                                    links to the head of the chain (the
+                                                    newest ledger before it; none after
+                                                    it is committed)
   runs/run_<YYYYmmddTHHMMSSZ>_<slot>.json           the run record (cloud_refresh
                                                     run_record): its schema, and the
                                                     run time and slot of its name
@@ -102,6 +105,34 @@ def check_run_record(path: Path, stamp: str, slot: str) -> None:
         raise ValueError(f"complete {rec['complete']!r} with exit code {rec['exit_code']!r}")
 
 
+def _ledger_session(name: str) -> str:
+    return name[len("ledger_"):-len(".json")]
+
+
+def check_ledger_link(root: Path, path: Path, led: dict) -> None:
+    """The forward ledger is a hash chain that only grows at its head
+    (FUND_GRADE_PLAN 0.10): a new ledger must name the newest ledger before it
+    (its session and the SHA-256 of its canonical JSON, forward_ledger.
+    ledger_sha256), or null when there is none, and no committed ledger may
+    come after it. A broken link is rejected here, before the capture commit,
+    rather than found by test_forward_ledger.py's chain test on main."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    s = led["session"]
+    others = {p.name: p for p in path.parent.glob("ledger_*.json") if p != path}
+    r = subprocess.run(["git", "ls-files", "-z", "--", str(path.parent.relative_to(root))], cwd=root,
+                       capture_output=True, check=True)
+    committed = {Path(x).name for x in r.stdout.decode().split("\0") if x}
+    later = sorted(n for n in others if n in committed and _ledger_session(n) > s)
+    if later:
+        raise ValueError(f"{later[-1]} is committed after session {s}: "
+                         "the ledger chain only grows at its head")
+    before = sorted(n for n in others if _ledger_session(n) < s)
+    head = fl.load_ledger(others[before[-1]]) if before else None
+    want = None if head is None else {"session": head["session"], "sha256": fl.ledger_sha256(head)}
+    if led.get("previous") != want:
+        raise ValueError(f"previous {led.get('previous')} does not link to the head of the chain: {want}")
+
+
 def check(root: Path, rel: str, kind: str, g: dict) -> None:
     """Raise ValueError (or an I/O / format error) unless ``rel`` is a whole capture."""
     path = root / rel
@@ -146,6 +177,7 @@ def check(root: Path, rel: str, kind: str, g: dict) -> None:
         led = fl.load_ledger(path)
         if led.get("session") != s:
             raise ValueError(f"the ledger is session {led.get('session')}'s, the file {s}")
+        check_ledger_link(root, path, led)
     else:                                   # pragma: no cover (classify returns only these)
         raise ValueError(kind)
 

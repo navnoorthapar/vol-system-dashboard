@@ -750,3 +750,109 @@ def test_the_bot_alerts_on_repeated_failure_and_reports_its_deploy_streak():
     # the deploy commit message the streak parses
     deploy = steps[names.index("Deploy to GitHub Pages")]["with"]["full_commit_message"]
     assert deploy.startswith("Deploy session ${{ steps.refresh.outputs.session }} from ")
+
+
+def _fixture_ledgers():
+    """Two linked forward ledgers built by forward_ledger.step on the committed
+    test chains (tests/fixtures), not the bot's data."""
+    import pandas as pd
+
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    fix = Path(__file__).parent / "fixtures"
+
+    def chain(s):
+        d = pd.read_csv(fix / f"forward_spx_chain_{s}.csv", keep_default_na=False, na_values=[""])
+        d["root"] = d["root"].fillna("")
+        return d
+    sig = {s: {"position": 0, "kelly": 0.0} for s in ("s1", "s1c", "s2", "s3", "s4")}
+    a = fl.step(None, "2026-03-24", chain("2026-03-24"), sig)
+    b = fl.step(a, "2026-03-27", chain("2026-03-27"), sig)
+    return fl, a, b
+
+
+def test_check_captures_rejects_a_ledger_that_breaks_the_chain(tmp_path):
+    """FUND_GRADE_PLAN 0.10: a new forward ledger must link to the head of the
+    committed chain (its session and SHA-256), or be the chain's first file with
+    previous null, and may not come before a committed ledger; anything else is
+    left out of the capture commit (::error::), before test_forward_ledger.py's
+    chain test would find it on main."""
+    import copy
+    import json
+    import subprocess
+    import sys
+    fl, a, b = _fixture_ledgers()
+    *_, git, work, _ = _repo(tmp_path)
+    fwd = work / "data_store" / "forward"
+
+    def run():
+        out = tmp_path / "ok.txt"
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "check_captures.py"), "--out",
+                            str(out), "--root", str(work)], capture_output=True, text=True, check=False)
+        return r.returncode, out.read_text().split(), r.stdout
+
+    def put(led, name=None):
+        p = fwd / (name or f"ledger_{led['session']}.json")
+        p.unlink(missing_ok=True)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(led))
+        return f"data_store/forward/{p.name}"
+
+    first = put(a)                                   # the chain's first file: previous null
+    assert run()[:2] == (0, [first])
+    git("add", "-A", cwd=work)
+    git("commit", "-qm", "first ledger", cwd=work)
+    rel = put(b)                                     # links to the committed head
+    assert run()[:2] == (0, [rel])
+    forged = copy.deepcopy(b)
+    forged["previous"]["sha256"] = "0" * 64
+    put(forged)
+    code, ok, out = run()
+    assert (code, ok) == (1, [])
+    assert "does not link to the head of the chain" in out
+    put({**copy.deepcopy(b), "previous": None})      # a second genesis
+    assert run()[:2] == (1, [])
+    (fwd / f"ledger_{b['session']}.json").unlink()
+    head = fl.load_ledger(fwd / f"ledger_{a['session']}.json")
+    tampered = copy.deepcopy(head)                   # one number of the committed head edited
+    tampered["inputs"]["chain_rows_two_sided"] += 1
+    assert fl.ledger_sha256(tampered) != b["previous"]["sha256"]
+    (fwd / f"ledger_{a['session']}.json").write_text(json.dumps(tampered))
+    put(b)
+    assert run()[:2] == (1, [])                      # b no longer links to what is on disk
+    git("checkout", "--", "data_store/forward", cwd=work)
+    older = {**copy.deepcopy(a), "session": "2026-03-20"}   # before the committed head
+    put(older)
+    put(b)
+    code, ok, out = run()
+    assert ok == [f"data_store/forward/ledger_{b['session']}.json"]
+    assert "the ledger chain only grows at its head" in out
+
+
+def test_each_new_ledger_is_attested_after_the_capture_commit():
+    """FUND_GRADE_PLAN 0.10: the ledger files the capture commit took are attested
+    (Sigstore build provenance, logged in Rekor) by a job of their own that alone
+    holds id-token: write, pinned by commit SHA like every action, never failing
+    the run."""
+    import yaml
+
+    wf = yaml.safe_load(DAILY)
+    refresh = wf["jobs"]["refresh"]
+    assert "id-token" not in wf["permissions"]
+    assert refresh["outputs"]["ledgers"] == "${{ steps.ledgers.outputs.paths }}"
+    assert refresh["outputs"]["capture_sha"] == "${{ steps.commitcaptures.outputs.sha }}"
+    names = [s.get("name") for s in refresh["steps"]]
+    led = refresh["steps"][names.index("New forward ledger files")]
+    assert names.index("Commit captures") < names.index("New forward ledger files")
+    assert "steps.commitcaptures.outcome == 'success'" in led["if"]
+    assert "captures.ok" in led["run"]
+    assert "paste -sd," in led["run"]               # actions/attest reads subject-path as CSV
+    job = wf["jobs"]["attest-ledger"]
+    assert job["needs"] == "refresh"
+    assert job["continue-on-error"] is True
+    assert "needs.refresh.outputs.ledgers != ''" in job["if"]
+    assert job["permissions"] == {"contents": "read", "id-token": "write", "attestations": "write"}
+    checkout, attest = job["steps"]
+    assert checkout["with"]["ref"] == "${{ needs.refresh.outputs.capture_sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert re.fullmatch(r"actions/attest-build-provenance@[0-9a-f]{40}", attest["uses"])
+    assert attest["with"]["subject-path"] == "${{ needs.refresh.outputs.ledgers }}"

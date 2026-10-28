@@ -41,6 +41,13 @@ of torch and xgboost to the lock compile.
   runs `scripts/ci/bot_alert.py`: when this scheduled run and the scheduled run before it both failed (cancelled,
   queued and manual runs are passed over), it comments on the open issue labelled `bot-failure`, or opens one. One
   open issue at most; closing it re-arms the alert. The workflow has `issues: write` and `actions: read` for it.
+- **Forward-ledger chain and attestation.** Each `data_store/forward/ledger_<s>.json` names the SHA-256 of the one
+  before it; `scripts/ci/check_captures.py` rejects a new ledger that does not link to the head of the chain (or comes
+  before a committed one), and `test_forward_ledger.py::test_committed_ledgers_form_one_valid_chain` checks the whole
+  committed chain in the data gate. The job `attest-ledger` then attests each new ledger file of the capture commit
+  with `actions/attest-build-provenance` (Sigstore, logged in the public Rekor log: an external timestamp the
+  repository owner cannot back-date); it alone holds `id-token: write`, and it never fails the run. Verify a file with
+  `gh attestation verify data_store/forward/ledger_<s>.json --repo navnoorthapar/vol-system-dashboard`.
 - **Deploy streak.** Before the run's freeze, `scripts/ci/deploy_streak.py` reads the deploy commits on gh-pages
   (`Deploy session <s> from ...`; commit messages only, fetched with `--filter=tree:0` into a scratch repository) and
   writes `.deploy-streak.json` (gitignored): consecutive NYSE sessions with a deploy, across weekends and holidays,
