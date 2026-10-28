@@ -185,6 +185,43 @@ def test_theta_v0_derivatives_are_exact():
             np.testing.assert_allclose(dj[:, col], fj, rtol=1e-6, atol=1e-6 * np.abs(fj).max())
 
 
+def test_far_tail_noise_past_the_decay_floor_is_masked_per_slice():
+    """Past the frequencies the Riccati steps resolve, the sweep returns noise
+    whose real part lands anywhere, not only above 0. Every node of a slice at
+    or above the lowest frequency where ln|phi| < _LOG_CF_FLOOR is masked (the
+    CF does not come back); nothing below it, and not another slice's nodes."""
+    u = np.arange(0.0, 2000.0)
+    fast = -0.1 * u - 0.3j * u                  # below the floor from u = 501
+    slow = -0.01 * u - 0.3j * u                 # never below it on this range
+    noisy = fast.copy()
+    noisy[1500] = -5.0 + 2.0j                    # |phi| = e^-5: noise, not decay
+    assert rh._mask_unresolved(noisy)[1500] == noisy[1500]   # the |phi| > 1 rule alone
+    out = rh._mask_unresolved(noisy, u)
+    cut = u > -rh._LOG_CF_FLOOR / 0.1
+    np.testing.assert_array_equal(out[~cut], noisy[~cut])
+    assert np.all(out[cut].real == -np.inf)
+    both = rh._mask_unresolved(np.r_[noisy, slow], np.r_[u, u], np.r_[u * 0, u * 0 + 1])
+    np.testing.assert_array_equal(both[:len(u)], out)
+    np.testing.assert_array_equal(both[len(u):], slow)
+
+
+def test_the_2026_10_27_slice_prices_on_an_ordinary_grid():
+    """The diagnostics of 2026-10-27 timed out (1,200 s) in the SPX-only rough
+    fit: one start converged where noise at |phi| ~ 1e-12 near u = 9e5 read as
+    an undecayed tail, the Lewis scan sized the 2027-04-16 slice at ~975,000
+    nodes (205 at the neighbouring optimum), and each frozen-grid residual took
+    26 s. With the tail masked the slice prices on an ordinary grid, to the
+    800-step prices well inside the 200-step accuracy."""
+    p = (3.49951, 0.05163, 1.2528, -0.68472, 0.02258, 0.48788)
+    T, F, D = 0.46628510273972607, 7867.365493592704, 0.9779507991330129
+    K = F * np.exp(np.linspace(-0.26, 0.17, 9))
+    r = -math.log(D) / T
+    calls, grid = rh.rough_heston_call_batch_grid(F, K, T, r, r, *p)
+    assert grid.n < 1000
+    fine = rh.rough_heston_call_batch(F, K, T, r, r, *p, n_steps=800)
+    np.testing.assert_allclose(calls, fine, rtol=0, atol=1e-6 * F)
+
+
 # ── 5. shape ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("H", [0.05, 0.15, 0.35])

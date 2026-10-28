@@ -299,11 +299,38 @@ def rough_heston_vix_term_index(kappa: float, theta: float, sigma: float, v0: fl
 ROUGH_LEWIS_RTOL = 1e-7
 
 
-def _mask_unresolved(log_cf: np.ndarray) -> np.ndarray:
-    """|phi(u - i/2)| <= E[(S_T/F)^(1/2)] <= 1 on the Lewis contour; a far-tail
-    node the time grid cannot resolve is set to phi = 0 rather than allowed to
-    report |phi| > 1 (it carries no price weight)."""
+# ln|phi| below which the CF carries no price weight at any quadrature target
+# (e^-50 ~ 2e-22 of DF*F, against ROUGH_LEWIS_RTOL = 1e-7); see _mask_unresolved.
+_LOG_CF_FLOOR = -50.0
+
+
+def _mask_unresolved(log_cf: np.ndarray, u=None, slice_of=None) -> np.ndarray:
+    """Set phi = 0 at far-tail nodes the time grid cannot resolve.
+
+    |phi(u - i/2)| <= E[(S_T/F)^(1/2)] <= 1 on the Lewis contour, so a node
+    reporting |phi| > 1 is unresolved. Past the frequency where the Riccati
+    steps stop resolving psi^n (u ~ 2.5e5 at 200 steps, T = 0.47 y, where
+    the true ln|phi| is ~ -1.6e4), the sweep returns noise whose real part
+    lands anywhere, not only above 0: on 2026-10-27 noise at |phi| ~ 1e-12
+    near u = 9e5 read as an undecayed tail to the Lewis truncation scan, which
+    sized one slice at 976,333 nodes (205 at the neighbouring optimum) and
+    made each frozen-grid residual 26 s instead of 0.02 s.
+    So, given the frequencies ``u`` (the real part of z; ``slice_of`` labels
+    the slice of each node when several are stacked), every node of a slice
+    at or above the lowest frequency where ln|phi| has fallen below
+    _LOG_CF_FLOOR is set to phi = 0 too: the CF of the lifted model decays and
+    does not come back, so nothing beyond that point carries price weight.
+    """
+    log_cf = np.asarray(log_cf)
     bad = ~np.isfinite(log_cf) | (log_cf.real > 1e-12)
+    if u is not None:
+        u = np.broadcast_to(np.asarray(u, dtype=float), log_cf.shape)
+        key = (np.zeros(log_cf.shape) if slice_of is None
+               else np.broadcast_to(np.asarray(slice_of), log_cf.shape))
+        low = np.isfinite(log_cf) & (log_cf.real < _LOG_CF_FLOOR)
+        for k in np.unique(key[low]):
+            same = key == k
+            bad |= same & (u >= u[same & low].min())
     return np.where(bad, -np.inf + 0j, log_cf) if bad.any() else log_cf
 
 def rough_heston_call_batch_grid(
@@ -326,7 +353,8 @@ def rough_heston_call_batch_grid(
         z = np.asarray(z, dtype=complex)
         int_f, int_psi, _ = _riccati_sweep(z.ravel(), T, kappa, sigma, rho, H, n_factors,
                                            n_steps)
-        return _mask_unresolved((v0 * int_f + kappa * theta * int_psi).reshape(z.shape))
+        return _mask_unresolved((v0 * int_f + kappa * theta * int_psi).reshape(z.shape),
+                                z.real)
 
     calls, grid = _lewis_call_prices(S, strikes, T, r, q, log_cf, max(total_var, 1e-12),
                                      grid=grid, rtol=rtol)
@@ -396,7 +424,8 @@ class RoughHestonSurfacePricer:
         T_col = np.concatenate([np.full(g.n, s[0]) for s, g in zip(self.slices, self.grids)])
         int_f, int_psi, _ = _riccati_sweep(z, T_col, kappa, sigma, rho, H, self.n_factors,
                                            self.n_steps)
-        log_cf = _mask_unresolved(v0 * int_f + kappa * theta * int_psi)
+        log_cf = _mask_unresolved(v0 * int_f + kappa * theta * int_psi, z.real,
+                                  np.repeat(np.arange(len(self.grids)), [g.n for g in self.grids]))
         self._last: tuple[bytes, np.ndarray, np.ndarray, np.ndarray] = (
             np.asarray(p, dtype=float).tobytes(), log_cf, int_f, int_psi)
         out, start = [], 0
