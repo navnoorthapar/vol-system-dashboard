@@ -139,7 +139,7 @@ def gfmt(a: Audit, panel: str, label: str, el: Tag | str | None, want: float | N
     quadratures' noise)."""
     txt = text_of(el)
     m = re.fullmatch(r"(-?\d+\.\d) × 10([⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+)", txt)
-    if want is None or abs(want) >= 1e-3 or want == 0.0 or m is None:
+    if want is None or abs(want) >= 1e-3 or m is None or (want == 0.0 and not floor):
         cell(a, panel, label, el, want)
         return
     e = int(m.group(2).translate(SUPER))
@@ -1001,7 +1001,7 @@ def rnd(a: Audit, c: Ctx) -> None:
             a.equal(P_RNDT, f"{e} 'not certified' chip", first.select_one(".chip-warn") is not None,
                     not r["certified"])
             cells = td[1:]
-            if not same_len(a, P_RNDT, f"{e} cells", cells, range(11)):
+            if not same_len(a, P_RNDT, f"{e} cells", cells, range(10)):
                 continue
             cell(a, P_RNDT, f"{e} days", cells[0], r["T_days"])
             if r["k_lo"] is None:
@@ -1012,11 +1012,11 @@ def rnd(a: Audit, c: Ctx) -> None:
                 tail_cell(a, P_RNDT, f"{e} P {key}", cells[2 + i], r["prob"][key], marked=True)
             cell(a, P_RNDT, f"{e} mass below quoted", cells[6], r["below"], scale=100.0)
             cell(a, P_RNDT, f"{e} mass above quoted", cells[7], r["above"], scale=100.0)
-            cell(a, P_RNDT, f"{e} ∫p", cells[8], r["mass"])
-            cell(a, P_RNDT, f"{e} E[S_T/F]", cells[9], r["mean"])
-            gfmt(a, P_RNDT, f"{e} g_min (the slice's certificate)", cells[10], r["g_min"])
+            gfmt(a, P_RNDT, f"{e} distribution check max(|∫p − 1|, |E[S_T/F] − 1|)", cells[8],
+                 max(abs(r["mass"] - 1.0), abs(r["mean"] - 1.0)), floor=QUAD_NOISE)
+            gfmt(a, P_RNDT, f"{e} g_min (the slice's certificate)", cells[9], r["g_min"])
     tbl = a.one("#rnd-table-tbl")
-    statics(a, P_RNDT, "table caption", tbl.find("caption") if tbl else None, [2], [c.session])
+    statics(a, P_RNDT, "table caption", tbl.find("caption") if tbl else None, [2, 1, 0], [c.session])
     for th in heads(tbl):
         statics(a, P_RNDT, f"head '{text_of(th)}'", th, [x for _, x, _ in M.THRESHOLDS] + list(M.BAND))
     rnd_table_note(a, c, tr_)

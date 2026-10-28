@@ -5050,7 +5050,7 @@ def test_surface_delta_grid_panel_lists_every_expiry_and_five_tenors(dash, pages
 
 # the heads as text: S_T and g_min are set as S<sub>T</sub> and g<sub>min</sub>
 RND_HEADS = ["Expiry", "Days", "Quoted K/F", "ST < 0.80 F", "ST < 0.90 F", "Outside 0.95–1.05 F",
-             "ST > 1.10 F", "Mass below quoted", "Mass above quoted", "∫p", "E[ST/F]", "gmin"]
+             "ST > 1.10 F", "Mass below quoted", "Mass above quoted", "Distribution check", "gmin"]
 
 
 def test_surface_rnd_panels_print_every_slices_risk_neutral_tails(dash, pages):
@@ -5083,11 +5083,13 @@ def test_surface_rnd_panels_print_every_slices_risk_neutral_tails(dash, pages):
             else:
                 assert cells[col[head]] == dash._fmt(100 * p, ".2f"), (r["expiry"], head)
         assert cells[col["Mass below quoted"]] == dash._fmt(100 * r["below_quoted"], ".2f")
-        assert cells[col["∫p"]] == dash._fmt(r["mass"], ".4f")
-        assert cells[col["E[ST/F]"]] == dash._fmt(r["mean"], ".4f")
+        # C3: ∫p and E[S_T/F] printed 1.0000 in every row; one column carries the
+        # larger of their errors at the precision it has (m.m × 10⁻ⁿ when tiny)
+        err = max(abs(r["mass"] - 1.0), abs(r["mean"] - 1.0))
+        assert cells[col["Distribution check"]] == dd.fmt_g(err)
         if r["certified"]:                     # a certified slice is a distribution with mean F
-            assert cells[col["∫p"]] == "1.0000"
-            assert cells[col["E[ST/F]"]] == "1.0000"
+            assert err < 1e-6
+            assert cells[col["Distribution check"]] != "1.0000"
         assert cells[col["gmin"]] == dd.fmt_g(r["g_min"])
         assert not cells[col["gmin"]].startswith(("0.0000", "−"))   # positive: never a bare 0.0000
     assert n_beyond == sum(1 for r in rows for v in r["prob"].values() if v is None)

@@ -5376,7 +5376,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
 # ── the risk-neutral density of the SVI-cal slices (desk_density.py, B9) ──────
 RND_HEADS = ("Expiry", "Days", "Quoted K/F", *(lab for _, lab, _, _ in desk_density.THRESHOLDS[:2]),
              "Outside 0.95–1.05 F", desk_density.THRESHOLDS[2][1], "Mass below quoted", "Mass above quoted",
-             "∫p", "E[S_T/F]", "g_min")
+             "Distribution check", "g_min")
 RND_BEYOND = "beyond quoted strikes"
 RND_TABLE_K = (-0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15)
 RND_TAIL_DASH: dict[str, bool | str | None] = {"lt80": "dotted", "lt90": None, "gt110": True}
@@ -5409,7 +5409,10 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
                       _rnd_pct(pr["lt80"]), _rnd_pct(pr["lt90"]), _rnd_pct(pr["out5"]), _rnd_pct(pr["gt110"]),
                       _fmt(100 * r["below_quoted"], ".2f") if r["below_quoted"] is not None else "—",
                       _fmt(100 * r["above_quoted"], ".2f") if r["above_quoted"] is not None else "—",
-                      _fmt(r["mass"], ".4f"), _fmt(r["mean"], ".4f"), desk_density.fmt_g(r["g_min"])]})
+                      # one check instead of ∫p and E[S_T/F], which printed 1.0000 in every
+                      # row (C3): the larger of their errors, at the precision it has
+                      desk_density.fmt_g(max(abs(r["mass"] - 1.0), abs(r["mean"] - 1.0))),
+                      desk_density.fmt_g(r["g_min"])]})
     out: dict[str, Any] = {"heads": list(RND_HEADS), "rows": view_rows, "picks": [
         {"label": p["label"], "tenor": p["tenor"], "expiry": p["row"]["expiry"], "days": p["row"]["T_days"],
          "kf_lo": p["row"]["kf_lo"], "kf_hi": p["row"]["kf_hi"]} for p in picks],
