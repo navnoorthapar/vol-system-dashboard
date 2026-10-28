@@ -8852,3 +8852,36 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
         if want and want["fetched_as_quote_time"]:
             assert "close snapshot · quotes at" not in text, route
             assert want["time"].split(";")[0] in text, route
+
+
+def test_the_surface_source_shows_its_age_without_setting_the_page_state(dash, pages):
+    """C2 (F17): the freshness table's quote-grade surface row printed '—' for its
+    age and the phone strip gave it none, beside sources that print theirs. Every
+    dated source but the fixed backtest window now shows its age in NYSE sessions;
+    the surface is still left out of the page's state (it is as old as the fit it
+    was scored with, which already counts)."""
+    from bs4 import BeautifulSoup
+    c = dash.load_chrome()
+    surf = next(s for s in c["sources"] if s["short"] == "SURFACE")
+    if not surf["date"]:
+        pytest.skip("no surface session stored")
+    assert surf["age"] == dash.session_age(surf["date"], c["latest"])
+    assert surf["level"] == dash.stale_level(surf["age"])
+    assert next(s for s in c["sources"] if s["short"] == "BACKTEST")["age"] is None
+    soup = BeautifulSoup(pages["/"], "lxml")
+    row = next(tr for tr in soup.select("footer table tbody tr")
+               if tr.select_one("td").get_text(strip=True) == surf["label"])
+    assert row.select("td")[2].get_text(strip=True) == str(surf["age"])
+    li = next(li for li in soup.select("header.statusbar ul.sb-list li")
+              if li.select_one(".sb-k").get_text(strip=True) == "SURFACE")
+    assert li.select_one(".sb-age").get_text(strip=True) == dash.plural(surf["age"], "session")
+    others = [dict(s, level="ok") if s["short"] == "SURFACE" else s for s in c["sources"]]
+    assert dash.oldest_source(others) == dash.oldest_source(c["sources"])
+    worst_without = "ok"
+    for s in c["sources"]:
+        if s["bar"] and s["aged"] and s["short"] != "VX":
+            if s["level"] in ("error", "missing"):
+                worst_without = "error"
+            elif s["level"] == "warn" and worst_without == "ok":
+                worst_without = "warn"
+    assert c["worst"] == worst_without

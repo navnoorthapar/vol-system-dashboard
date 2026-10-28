@@ -7128,12 +7128,17 @@ def load_chrome() -> dict:
         ("VX", "VX futures settlements", vx_date, VX_TABLE, True),
     ]
     reference_only = {"VX"}
+    fixed = {"BACKTEST"}                  # a closed window: its age is not news
     for short, label, date, art, aged in rows:
-        age = session_age(date, ref) if (aged and date) else None
-        level = (stale_level(age) if aged else "ok") if date else ("missing" if aged else "unknown")
+        # every dated source but the fixed backtest window shows its age (C2: the
+        # surface's read '—'); only the 'aged' ones set the page's state, so the
+        # surface, as old as the fit it was scored with, does not count twice
+        age = session_age(date, ref) if (date and short not in fixed) else None
+        level = ((stale_level(age) if age is not None else "ok") if date
+                 else ("missing" if aged else "unknown"))
         c["sources"].append({"short": short, "label": label, "date": date, "age": age, "level": level,
                              "artifact": art, "aged": aged, "bar": short not in reference_only})
-        if short in reference_only:
+        if short in reference_only or not aged:
             continue
         if level in ("error", "missing"):
             c["worst"] = "error"
