@@ -8703,3 +8703,17 @@ def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     if any(v < 0 for v in gaps.values()):
         assert "−" in h["range"]
     assert row["num"] == pytest.approx(abs(row["num"]))          # today's limit check: the size
+
+
+def test_the_vix_leg_names_what_the_model_index_is(pages):
+    """T10: the VIX-index leg is 100·√(expected average variance), the variance-swap
+    rate the Cboe formula replicates; the page called it 'the model's expected
+    average vol', which by Jensen is lower. The Quintic note set E[VIX_T] raw."""
+    cal = pages["/calibration"]
+    if 'id="vixleg"' not in cal:
+        pytest.skip("no VIX leg on the page")
+    text = _visible_text(cal)
+    assert "expected average vol to each horizon" not in text
+    if "No VIX leg recorded." not in text:
+        assert "100·√(expected average variance over the horizon)" in text
+    assert "E[VIX_T]" not in text

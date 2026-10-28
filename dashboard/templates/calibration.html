@@ -113,7 +113,7 @@
       <div>
         <h3 class="sub-head">VIX indices · {{ d.session }} · in the objective</h3>
         {% if d.charts.vix %}{{ m.chart(d.charts.vix, 'h260') }}
-        <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's expected average vol to each horizon. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
+        <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's index to each horizon: 100·√(expected average variance over the horizon), the variance-swap rate the Cboe formula replicates, not an expected average vol. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
         {% else %}<p class="note">No VIX leg recorded.</p>{% endif %}
       </div>
       <div id="vx-leg">
@@ -342,7 +342,7 @@
       </tbody>
     </table>
     </div>
-    <p class="note">Counts in brackets are quotes. ¹ Model E[VIX_T] against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets (Quintic: <code class="path">{{ ('data_store/calibrations/' ~ q.file)|path }}</code>; Heston: <code class="path">{{ ('data_store/calibrations/' ~ h.file)|path }}</code>{% if h.baseline_file %}; Heston re-priced on the Quintic targets: <code class="path">{{ ('data_store/calibrations/' ~ h.baseline_file)|path }}</code>{% endif %}).
+    <p class="note">Counts in brackets are quotes. ¹ Model {{ 'E[VIX_T]'|subs }} against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets (Quintic: <code class="path">{{ ('data_store/calibrations/' ~ q.file)|path }}</code>; Heston: <code class="path">{{ ('data_store/calibrations/' ~ h.file)|path }}</code>{% if h.baseline_file %}; Heston re-priced on the Quintic targets: <code class="path">{{ ('data_store/calibrations/' ~ h.baseline_file)|path }}</code>{% endif %}).
     {% if not h.gate_ok %}That Heston fit fails today's quality gate ({{ h.gate_reason }}), so it is not the page headline.{% endif %}</p>
     {% else %}<p class="note">No Heston fit exists for the Quintic session ({{ q.as_of|fmt }}), so no like-for-like comparison is shown.</p>{% endif %}
     {% call m.method('Reading this honestly') %}
