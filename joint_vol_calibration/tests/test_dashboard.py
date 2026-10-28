@@ -2914,7 +2914,11 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         assert dash.model_label(key) == s["legendKey"]
         q = res[(res["model"] == key) & (res["expiry"] == e)].sort_values("k", kind="mergesort")
         assert [p[0] for p in s["data"]] == [m[0] for m in mids], s["name"]
-        assert [m[0] for m in mids] == [round(float(k), 6) for k in q["k"]], s["name"]
+        # the packed block carries K and F and the page takes k = ln(K/F) from them, so
+        # it agrees with the residual table's k (10 significant digits) to rounding:
+        # an exact compare after rounding both to 6 decimals failed at a ...5 boundary
+        # once the Cboe book (8,819 quotes) was scored
+        assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
         assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
@@ -6042,8 +6046,10 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
         seen = {}
         for route, html in pages.items():
             text = _visible_text(html)
+            # both are non-negative: a signed number that shares the digits is another
+            # figure (2026-10-26's Cboe-sourced 1.659 met a '−1.659' on Calibration)
             found = {f"{v:.{p}f}" for p in (2, 3, 4)
-                     if re.search(r"(?<![\d.])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
+                     if re.search(r"(?<![\d.−+-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
             if found:
                 seen[route] = found
         assert set(must) <= set(seen), (name, seen)
