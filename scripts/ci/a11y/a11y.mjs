@@ -11,6 +11,8 @@
 //   * a text cut short with an ellipsis (text-overflow: ellipsis, scrollWidth > clientWidth)
 //     carries no title with the whole text, at any of those widths: the overflow check
 //     cannot see it, since the page itself does not scroll;
+//   * with JavaScript off (every chart replaced by its data table), a page scrolls
+//     horizontally at 320, 390 or 1440 px;
 //   * a page throws a JavaScript error;
 //   * a page needs the network: every request to another origin is aborted, so the
 //     published pages must work from their own files (the CDN fallback for the
@@ -38,6 +40,7 @@ const PAGES = ['index.html', 'surface.html', 'calibration.html', 'risk.html', 'r
 const AXE_VIEWPORTS = [{ width: 1440, height: 900 }, { width: 390, height: 844 }];
 const OVERFLOW_WIDTHS = [320, 390, 768, 1024, 1440, 1920];
 const STRESS_SPACING = '0.06em';            // the font-metric margin check below
+const NOJS_WIDTHS = [320, 390, 1440];         // A3: the pages with JavaScript off
 const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
   '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.xml': 'application/xml',
@@ -123,6 +126,16 @@ for (const name of PAGES) {
     if (sw > OVERFLOW_WIDTHS[0] + 1) entry.overflow.push({ width: OVERFLOW_WIDTHS[0], scrollWidth: sw, stressed: true });
     await ctx.close();
   }
+  // A3: with JavaScript off every chart is replaced by its data table (the
+  // <noscript> style); none of them may push the page wider than the viewport.
+  entry.nojs = [];
+  for (const width of NOJS_WIDTHS) {
+    const ctx = await browser.newContext({ viewport: { width, height: 900 }, javaScriptEnabled: false });
+    const { page } = await openPage(ctx, name);
+    const sw = await page.evaluate(() => document.documentElement.scrollWidth);
+    if (sw > width + 1) entry.nojs.push({ width, scrollWidth: sw });
+    await ctx.close();
+  }
   entry.blocked = [...new Set(entry.blocked)];
   entry.errors = [...new Set(entry.errors)];
   report.pages.push(entry);
@@ -131,12 +144,14 @@ for (const name of PAGES) {
     (o.stressed ? ` with letter-spacing +${STRESS_SPACING}` : '') + ` (scrollWidth ${o.scrollWidth})`);
   for (const t of entry.truncated) report.failures.push(`${name} @${t.width}px: ${t.what} is cut short ` +
     'with an ellipsis and has no title');
+  for (const o of entry.nojs) report.failures.push(`${name}: with JavaScript off, scrolls horizontally at ` +
+    `${o.width}px (scrollWidth ${o.scrollWidth})`);
   for (const e of entry.errors) report.failures.push(`${name}: JavaScript error: ${e}`);
   for (const b of entry.blocked) report.failures.push(`${name}: requests another origin: ${b}`);
   const status = entry.axe.length + entry.overflow.length + entry.truncated.length + entry.errors.length +
-    entry.blocked.length ? 'FAIL' : 'ok';
+    entry.blocked.length + entry.nojs.length ? 'FAIL' : 'ok';
   console.log(`${status.padEnd(5)} ${name.padEnd(18)} axe violations ${entry.axe.length}, overflow ${entry.overflow.length}, ` +
-              `truncated ${entry.truncated.length}, ` +
+              `truncated ${entry.truncated.length}, no-JS overflow ${entry.nojs.length}, ` +
               `js errors ${entry.errors.length}, external requests ${entry.blocked.length}`);
 }
 
