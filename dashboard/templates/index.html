@@ -37,7 +37,7 @@
     <span class="result-k">{{ r.key }}</span>
     <span class="result-v">{{ r.value }}<span class="unit">{{ r.unit }}</span></span>
     <span class="result-d">{{ r.detail }}</span>
-    {% if r.ci %}<span class="kpi-ci{% if r.ci_kind == 'range' %} kpi-range{% endif %}">{{ r.ci }}</span>{% if r.ci_note %}<span class="kpi-ci faint">{{ r.ci_note }}</span>{% endif %}{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
+    {% if r.ci %}<span class="kpi-ci{% if r.ci_kind == 'range' %} kpi-range{% endif %}">{{ r.ci|ranges if r.ci_kind == 'range' else r.ci }}</span>{% if r.ci_note %}<span class="kpi-ci faint">{{ r.ci_note }}</span>{% endif %}{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
     <span class="src">{{ r.source }}</span>
   </a>
   {% else %}

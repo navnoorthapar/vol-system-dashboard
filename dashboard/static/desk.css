@@ -317,6 +317,9 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .kpi-range { border-left: 2px dashed var(--line2); padding-left: 6px; }
 /* a tile whose caveat needs two tracks of a KPI strip (the hedge's Taylor check) */
 .kpi-wide { grid-column: span 2; }
+/* phones: a strip of two columns with an odd count, its last tile alone in the row, takes
+   the whole row instead of leaving the strip's grey background showing (R3-D11) */
+@media (max-width: 599px) { .kpis > .kpi:last-child:nth-child(odd):not(.kpi-wide) { grid-column: 1 / -1; } }
 
 /* parameter tiles */
 .param { background: var(--surface); padding: 8px 10px; min-width: 0; }

@@ -508,6 +508,24 @@ def date_nowrap(text: Any) -> Any:
 
 app.jinja_env.filters["dates"] = date_nowrap
 
+# a value range as printed: '12.51–25.79', '−9.62 to −3.48', '67–97' (numbers with
+# an optional sign, %, ×), the pair kept on one line
+_VALUE_RANGE = re.compile(r"[+\u2212-]?[\d.,]+%?(?:–| to )[+\u2212-]?[\d.,]+%?")
+
+
+def range_nowrap(text: Any) -> Any:
+    """A range line with each value pair in a no-wrap span (R3-D11: at 320 px a KPI
+    range broke inside '12.51–25.79' and '−9.62 to −3.48'); the text is unchanged."""
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    return Markup(_VALUE_RANGE.sub(lambda m: f'<span class="nowrap">{m.group(0)}</span>',  # noqa: S704
+                                   str(escape(text))))
+
+
+app.jinja_env.filters["ranges"] = range_nowrap
+
 
 def monitored_for(element_id: str) -> list[dict]:
     """The Model Risk checks whose evidence is the element ``element_id`` of the
