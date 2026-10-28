@@ -731,6 +731,12 @@ dialog.keys .dl { font-size: 12px; }
     float: left; width: 106px; margin-left: -114px; padding-top: 1px;
     font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text3);
   }
+  /* a label with a lower-case Greek symbol keeps its case: β must not become B (cf. .sym) */
+  .tbl.cards td:is([data-label*="α"], [data-label*="β"], [data-label*="γ"], [data-label*="δ"], [data-label*="θ"],
+                   [data-label*="κ"], [data-label*="λ"], [data-label*="ν"], [data-label*="ρ"], [data-label*="σ"],
+                   [data-label*="τ"], [data-label*="φ"], [data-label*="ψ"], [data-label*="ω"])::before {
+    text-transform: none; letter-spacing: 0;
+  }
   .tbl.cards td:first-child { padding: 0 0 4px; font-weight: 600; color: var(--text); }
   .tbl.cards td:first-child::before { content: none; }
   .tbl.cards tbody tr:hover td { background: none; }

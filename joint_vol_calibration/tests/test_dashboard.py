@@ -8717,3 +8717,30 @@ def test_the_vix_leg_names_what_the_model_index_is(pages):
     if "No VIX leg recorded." not in text:
         assert "100·√(expected average variance over the horizon)" in text
     assert "E[VIX_T]" not in text
+
+
+UPPERCASE_SELECTORS = ("th", ".kpi-label", ".panel-title", ".result-k", ".find-head", ".param-name",
+                       ".missing-title", ".section-title", ".chip", "details.method > summary")
+LOWER_GREEK = re.compile("[α-ω]")
+
+
+def test_no_uppercased_label_turns_a_greek_symbol_into_a_capital(pages):
+    """R3-D9: an upper-cased head set β as 'Β' (the Research β table's
+    '(β·VIX)² − RV²'). In every element desk.css upper-cases, each lower-case
+    Greek letter sits in a .sym span; a phone card label (td::before from
+    data-label) with one keeps its case through a CSS rule that names it."""
+    from bs4 import BeautifulSoup
+    css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
+    bad, labels = [], set()
+    for route, html in pages.items():
+        soup = BeautifulSoup(html, "lxml")
+        for el in soup.select(", ".join(UPPERCASE_SELECTORS)):
+            for node in el.find_all(string=LOWER_GREEK):
+                chain = [node.parent, *node.parent.parents]
+                if not any("sym" in (p.get("class") or []) for p in chain if hasattr(p, "get")):
+                    bad.append((route, str(node)[:60]))
+        for td in soup.select("table.cards td[data-label]"):
+            labels.update(LOWER_GREEK.findall(td["data-label"]))
+    assert bad == []
+    for ch in sorted(labels):
+        assert f'[data-label*="{ch}"]' in css, ch

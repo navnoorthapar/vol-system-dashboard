@@ -265,7 +265,7 @@
       <div>
         <div class="tbl-wrap" tabindex="0" role="region" aria-label="Ex-post premium by β (scrollable)">
         <table class="tbl dense wrap-head cards" id="vrp-beta-table"><caption>β·VIX − RV21 forward, {{ vr.start }} → {{ vr.end }}, {{ (vr.rows[0].n if vr.rows else none)|fmt(',') }} sessions (vol pts; variance-space: vol pts²)</caption>
-          <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col">Which</th><th scope="col" class="num">Mean</th><th scope="col" class="num">Median</th><th scope="col" class="num">Above zero</th><th scope="col" class="num">(β·VIX)² − RV²</th></tr></thead>
+          <thead><tr><th scope="col" class="num">{{ 'β'|sym }}</th><th scope="col">Which</th><th scope="col" class="num">Mean</th><th scope="col" class="num">Median</th><th scope="col" class="num">Above zero</th><th scope="col" class="num">{{ '(β·VIX)² − RV²'|sym }}</th></tr></thead>
           <tbody>{% for r in vr.rows %}<tr{% if r.backtest %} class="em"{% endif %} data-vrp-beta="{{ r.beta|fmt('.2f') }}"><td class="num" data-label="β">{{ r.beta|fmt('.2f') }}</td><td class="wrap" data-label="Which">{{ r.why|dates }}</td><td class="num" data-label="Mean">{{ r.mean|signed('.2f') }}</td><td class="num" data-label="Median">{{ r.median|signed('.2f') }}</td><td class="num" data-label="Above zero">{{ r.share_pos|fmt('.1f') }}%</td><td class="num" data-label="(β·VIX)² − RV²">{{ r.var_mean|signed('.1f') }}</td></tr>{% endfor %}</tbody>
         </table>
         </div>
