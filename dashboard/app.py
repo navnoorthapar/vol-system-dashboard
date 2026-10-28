@@ -6084,7 +6084,9 @@ def surface_extras(d: dict, surf: dict) -> None:
         for m in overlay:
             qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
             qm = qm[~qm.index.duplicated()]
-            by_model[m] = [(round(float(v) * 100, 2) if _num(v) is not None else None)
+            # unrounded: the table's median of rounded IVs was off by 0.01 in 99 of
+            # 796 cells, when an even count's middle pair straddled a rounding step
+            by_model[m] = [(float(v) * 100 if _num(v) is not None else None)
                            for v in qm.reindex(q["k"].to_numpy())]
         # the same expiry as a table: medians by ln(K/F) bucket (the chart's data
         # equivalent; desk.js shows the selected expiry's, every one without JS)

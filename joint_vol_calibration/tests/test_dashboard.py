@@ -8908,3 +8908,34 @@ def test_rv20_and_rv21_are_defined_and_named_by_their_windows(dash, pages):
     html = pages["/"]
     assert "rv₂₀ (20-session)" in _visible_text(html)
     assert "#def-rv20" in html
+
+
+def test_smile_slice_tables_take_medians_of_unrounded_model_ivs(dash, pages):
+    """Found by the recompute audit (tier 0.1): each model column of the smile
+    slice's per-expiry tables printed the median of IVs already rounded to 0.01
+    vol pts, so where an even count's middle pair straddled a rounding step the
+    cell was one display unit off (99 of 796 cells on 2026-10-26). Every model
+    cell is now the median of the unrounded IVs, recomputed here from residuals."""
+    spec = _spec(pages["/surface"], "chart-slices")
+    surf = _surface_file("residuals.parquet")
+    res = pd.read_parquet(surf)
+    groups = spec["table"]["groups"]
+    assert groups
+    checked = 0
+    for g in groups:
+        e = g["group"]
+        models = [c["label"] for c in g["columns"]][5:]
+        mkt = res[(res["model"] == res["model"].iloc[0]) & (res["expiry"].astype(str).str[:10] == e)]
+        kb = dash.k_bucket(mkt["k"]).to_numpy()
+        labels = {dash.k_bucket_label(b): b for b in set(kb.tolist())}
+        for row in g["rows"]:
+            b = labels[row[0]]
+            ks = mkt["k"].to_numpy()[kb == b]
+            for m_label, cell in zip(models, row[5:]):
+                key = next(m for m in res["model"].unique() if dash.model_short(m) == m_label)
+                qm = res[(res["model"] == key) & (res["expiry"].astype(str).str[:10] == e)].set_index("k")
+                vals = qm["model_iv"][~qm.index.duplicated()].reindex(ks).dropna() * 100
+                want = dash._fmt(float(vals.median()), ".2f") if len(vals) else "—"
+                assert cell == want, (e, row[0], m_label)
+                checked += 1
+    assert checked > 0
