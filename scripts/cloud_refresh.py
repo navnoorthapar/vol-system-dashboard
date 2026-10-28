@@ -80,7 +80,12 @@ Every run writes a machine-readable status JSON (--status-file, default
 .refresh-status.json at the repo root) with the session, the steps run, the
 calibration outcome and reason, the headline calibration's date and age and
 the publishable flag; a Markdown summary goes to $GITHUB_STEP_SUMMARY and
-key=value pairs to $GITHUB_OUTPUT when those are set.
+key=value pairs to $GITHUB_OUTPUT when those are set. When the workflow names
+the slot ($REFRESH_SLOT: close, book or manual), the run also writes its record,
+committed with the captures: data_store/runs/run_<run_utc>_<slot>.json (what
+ran, what the calibration did and why, the chain's quote state, the captures,
+the forward ledger, the exit code, publishable and its blockers, step timings,
+GITHUB_SHA and GITHUB_RUN_ID; run_record).
 
 Importing this module has no side effects (no chdir, no logging setup, no
 frozen date): everything happens in main().
@@ -94,7 +99,7 @@ import pickle
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -166,17 +171,24 @@ def _annotate(level: str, title: str, message: str) -> None:
 
 
 class _Group:
-    """::group:: / ::endgroup:: around one step's log lines."""
+    """::group:: / ::endgroup:: around one step's log lines; with ``timings``,
+    the step's wall time in seconds goes to ``timings[key]`` (the run record)."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, timings: "dict | None" = None, key: "str | None" = None):
         self.name = name
+        self.timings = timings
+        self.key = key or name
+        self.t0 = 0.0
 
     def __enter__(self):
+        self.t0 = time.monotonic()
         if os.environ.get("GITHUB_ACTIONS"):
             print(f"::group::{self.name}", flush=True)
         return self
 
     def __exit__(self, *exc):
+        if self.timings is not None:
+            self.timings[self.key] = round(time.monotonic() - self.t0, 1)
         if os.environ.get("GITHUB_ACTIONS"):
             print("::endgroup::", flush=True)
         return False
@@ -1274,6 +1286,131 @@ def freeze_site() -> dict:
     return {"ok": True, "reason": "ok"}
 
 
+# -- The run record (data_store/runs/) -----------------------------------------
+#
+# The status JSON above went only to a gitignored file and a 30-day artifact, so
+# the bot's history of what it attempted and why the gate said no lived in
+# Actions logs that expire (FUND_GRADE_PLAN 0.9, VALIDATOR-15). Each workflow
+# run (REFRESH_SLOT set by daily_refresh.yml's "Choose steps") now writes one
+# record, committed with the captures: data_store/runs/run_<run_utc>_<slot>.json.
+# It is written twice: before the freeze (so the site rendered by this run
+# already reads it: app.calibration_stale_cause) and at the end, complete. The
+# gates, the commits and the deploy come after this script in the workflow and
+# are not in it (the deploy is in gh-pages history: scripts/ci/deploy_streak.py).
+
+RUN_SCHEMA = "run_ledger/1"
+RUN_SLOTS = ("close", "book", "manual")
+_CHAIN_KEYS = ("symbol", "n_listed", "n_raw", "n_two_sided", "n_near_atm", "near_atm_two_sided_share",
+               "n_clean", "n_expiries_with_carry", "quote_time", "t_origin", "t_origin_basis")
+_CAPTURE_KEYS = ("status", "reason", "rows", "two_sided_rows", "expiries", "book_state", "quote_time",
+                 "sha256")
+_GITHUB_KEYS = {"sha": "GITHUB_SHA", "run_id": "GITHUB_RUN_ID", "run_attempt": "GITHUB_RUN_ATTEMPT",
+                "event": "GITHUB_EVENT_NAME", "ref": "GITHUB_REF"}
+
+
+def runs_dir() -> pathlib.Path:
+    return DATA / "runs"
+
+
+def run_record_name(run_utc: str, slot: str) -> str:
+    """run_<YYYYmmddTHHMMSSZ>_<slot>.json for a run started at ``run_utc``."""
+    t = datetime.fromisoformat(run_utc).astimezone(UTC)
+    return f"run_{t:%Y%m%dT%H%M%SZ}_{slot}.json"
+
+
+def _first_line(x) -> "str | None":
+    return str(x).splitlines()[0] if x not in (None, "") else None
+
+
+def run_record(status: dict, slot: str, env=None, complete: bool = True) -> dict:
+    """The committed record of one run, from main()'s status dict: what ran,
+    what the calibration did and why, the quote state of the chain it fitted,
+    the captures, the forward ledger, the derived artifacts, the exit code,
+    whether the site was publishable and what blocked it, the step timings and
+    the GitHub commit and run that produced it."""
+    env = os.environ if env is None else env
+    cal = status.get("calibration") or {}
+    capt = status.get("capture") or {}
+    led = status.get("forward_ledger") or {}
+    head = status.get("headline_calibration") or {}
+    bf = status.get("artifact_backfill") or {}
+    rec: dict[str, Any] = {
+        "schema": RUN_SCHEMA,
+        "run_utc": status["run_utc"],
+        "slot": slot,
+        "complete": complete,
+        "steps": list(status.get("steps") or []),
+        "expected_session": status.get("expected_session"),
+        "session": status.get("session"),
+        "calibration": None,
+        "capture": None,
+        "forward_ledger": None,
+        "artifacts": {name: {"ok": bool(r.get("ok")), "error": _first_line(r.get("error"))}
+                      for name, r in (status.get("artifacts") or {}).items()},
+        "backfill": {"rebuilt": {s: {n: bool(r.get("ok")) for n, r in arts.items()}
+                                 for s, arts in (bf.get("rebuilt") or {}).items()},
+                     "deferred": list(bf.get("deferred") or [])} if bf else None,
+        "headline_calibration": {"session": head.get("date"), "age_sessions": head.get("age_sessions")},
+        "freeze": status.get("freeze"),
+        "exit_code": status.get("exit_code"),
+        "publishable": status.get("publishable"),
+        "publish_blockers": list(status.get("publish_blockers") or []),
+        "errors": [str(e) for e in status.get("errors") or []],
+        "warnings": [str(w) for w in status.get("warnings") or []],
+        "timings_s": dict(status.get("timings_s") or {}),
+        "github": {k: env.get(v) or None for k, v in _GITHUB_KEYS.items()},
+    }
+    if cal:
+        ch = cal.get("chain") or {}
+        rec["calibration"] = {"status": cal.get("status"), "reason": _first_line(cal.get("reason")),
+                              "session": cal.get("session"),
+                              "chain": {k: ch[k] for k in _CHAIN_KEYS if k in ch}}
+    if capt:
+        caps = {}
+        for u, c in (capt.get("captures") or {}).items():
+            caps[u] = {k: c[k] for k in _CAPTURE_KEYS if k in c}
+            if c.get("file"):
+                caps[u]["file"] = pathlib.Path(c["file"]).name
+        rec["capture"] = {"status": capt.get("status"), "reason": capt.get("reason"),
+                          "session": capt.get("session"), "captures": caps}
+    if led:
+        rec["forward_ledger"] = {"status": led.get("status"),
+                                 "reason": _first_line(led.get("reason") or led.get("error")),
+                                 "file": pathlib.Path(led["path"]).name if led.get("path") else None,
+                                 "book": led.get("book_file") or led.get("book")}
+    return rec
+
+
+def _json_default(x):
+    item = getattr(x, "item", None)                  # numpy scalars
+    return item() if callable(item) else str(x)
+
+
+def write_run_record(status: dict, slot: str, complete: bool = True, directory=None) -> pathlib.Path:
+    """Write (or rewrite) this run's record; returns its path."""
+    d = pathlib.Path(directory) if directory is not None else runs_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / run_record_name(status["run_utc"], slot)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(run_record(status, slot, complete=complete), indent=2, sort_keys=True,
+                              default=_json_default) + "\n")
+    tmp.replace(path)
+    return path
+
+
+def _record_run(status: dict, slot: "str | None", complete: bool) -> None:
+    """write_run_record for main(): reported, never fatal (the record must not cost the data)."""
+    if not slot:
+        return
+    try:
+        path = write_run_record(status, slot, complete=complete)
+        status["run_record"] = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+    except Exception as e:  # noqa: BLE001 (record-keeping must never fail the run)
+        msg = f"could not write the run record: {type(e).__name__}: {e}"
+        status["warnings"].append(msg)
+        _annotate("warning", "Run record", msg)
+
+
 # -- Reporting -----------------------------------------------------------------
 
 def _fmt(x, spec: str = ".3f", none: str = "—") -> str:
@@ -1474,6 +1611,14 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # calibration is NOT one of them: it fails the job (exit 1) but the site
     # still deploys, with the dashboard's staleness banner on the old fit.
     blockers = []
+    # The run record (data_store/runs/): written when the workflow names the
+    # slot, so a local run leaves the store as it was.
+    timings: dict = {}
+    status["timings_s"] = timings
+    slot = os.environ.get("REFRESH_SLOT", "").strip() or None
+    if slot and slot not in RUN_SLOTS:
+        status["warnings"].append(f"REFRESH_SLOT {slot!r} is not one of {RUN_SLOTS}: no run record")
+        slot = None
     log.info("=" * 60)
     log.info("Daily auto-refresh -- %s UTC -- steps: %s", status["run_utc"], ",".join(steps))
     log.info("=" * 60)
@@ -1482,7 +1627,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # history, not the stale committed DB); export only what a step captured.
     persist = not args.no_persist
     if persist:
-        with _Group("restore committed captures"):
+        with _Group("restore committed captures", timings, "restore"):
             try:
                 status["restored"] = restore_captures()
             except Exception as e:
@@ -1496,7 +1641,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # First, before anything slower: the Cboe book can only be fetched while it is
     # live, and it is captured whatever the Yahoo chain or the fit do later.
     if "capture" in steps:
-        with _Group("Cboe option-chain capture"):
+        with _Group("Cboe option-chain capture", timings, "capture"):
             try:
                 capt = capture_cboe_chains(now_utc, closed.isoformat())
             except Exception as e:  # it should not raise; the market and fit steps must run
@@ -1511,7 +1656,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
 
     market_ok = True
     if "market" in steps:
-        with _Group("market data"):
+        with _Group("market data", timings, "market"):
             m = refresh_market_data(today, end=closed)
             status["market"] = m
             if m["hard_failure"]:
@@ -1538,7 +1683,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
             _annotate("error", "Missing session", chk["reason"])
 
     if "labels" in steps:
-        with _Group("regime labels"):
+        with _Group("regime labels", timings, "labels"):
             if market_ok:
                 try:
                     if args.rebuild_labels:
@@ -1558,7 +1703,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
 
     yahoo_book: dict = {}
     if "calibrate" in steps:
-        with _Group("option chain + joint calibration"):
+        with _Group("option chain + joint calibration", timings, "calibrate"):
             if market_ok:
                 try:
                     cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs,
@@ -1593,7 +1738,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # depend on whether a Heston fit was accepted. A failure is loud but costs
     # neither the fit nor the captures.
     if any(s in steps for s in ("capture", "calibrate")):
-        with _Group("forward ledger"):
+        with _Group("forward ledger", timings, "forward_ledger"):
             expected = closed.isoformat()
             if market_ok and sess == expected:
                 led = record_forward_ledger(expected, yahoo_book or None, ticker_factory=ticker_factory)
@@ -1614,7 +1759,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
 
     accepted = (status.get("calibration") or {}).get("status") == "accepted"
     if persist and any(s in steps for s in ("market", "calibrate")):
-        with _Group("persist captures"):
+        with _Group("persist captures", timings, "persist"):
             since = status.get("market", {}).get("start") if "market" in steps else None
             chains = [status["calibration"]["session"]] if accepted else []
             try:
@@ -1633,7 +1778,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # reads the stored chain). Fail-soft: exit 1 and an annotation, but the site
     # still publishes and the workflow still commits the captures.
     if accepted:
-        with _Group("session artifacts"):
+        with _Group("session artifacts", timings, "artifacts"):
             head = status.get("headline_calibration") or {}
             arts = refresh_session_artifacts(status["calibration"]["session"], head.get("path"))
             status["artifacts"] = arts
@@ -1648,7 +1793,7 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     # missing or stale (a part that failed, or an artifact commit the gate dropped,
     # on an earlier run). Without this the retry slot found the pickle and stopped.
     if "calibrate" in steps:
-        with _Group("artifact backfill"):
+        with _Group("artifact backfill", timings, "backfill"):
             try:
                 head = status.get("headline_calibration") or {}
                 done = [status["calibration"]["session"]] if accepted else []
@@ -1673,7 +1818,9 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                          bf["deferred"])
 
     if "freeze" in steps:
-        with _Group("freeze site"):
+        # the site this run renders reads this run's record too (the stale banner)
+        _record_run(status, slot, complete=False)
+        with _Group("freeze site", timings, "freeze"):
             fz = freeze_site()
             status["freeze"] = fz
             if not fz["ok"]:
@@ -1691,6 +1838,8 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
     status["publishable"] = bool("freeze" in steps and (status.get("freeze") or {}).get("ok")
                                  and not blockers)
     status["exit_code"] = 1 if hard_fail else 0
+    timings["total"] = round(time.monotonic() - run_t0, 1)
+    _record_run(status, slot, complete=True)
     _write_reports(status, pathlib.Path(args.status_file) if args.status_file else None)
     log.info("=" * 60)
     log.info("Refresh %s (exit %d; site %s)", "FAILED" if hard_fail else "complete",

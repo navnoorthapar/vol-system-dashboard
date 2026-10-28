@@ -4418,15 +4418,69 @@ def test_stale_calibration_banner_names_its_cause_from_the_store(dash, synth):
     assert not any("No newer fit passed the quality gate" in c for c in causes)
 
 
+def _run_record(runs: Path, run_utc: str, slot: str, session: str, status: str, reason: str) -> None:
+    """A daily-job run record (scripts/cloud_refresh.py run_record, the fields the banner reads)."""
+    from datetime import UTC, datetime
+    t = datetime.fromisoformat(run_utc).astimezone(UTC)
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / f"run_{t:%Y%m%dT%H%M%SZ}_{slot}.json").write_text(json.dumps(
+        {"schema": "run_ledger/1", "run_utc": run_utc, "slot": slot, "complete": True,
+         "calibration": {"status": status, "reason": reason, "session": session, "chain": {}}}))
+
+
+def test_stale_banner_names_the_rejection_from_the_run_records(dash, synth):
+    """FUND_GRADE_PLAN 0.9 / VALIDATOR-15: with no later chain or fit stored (the
+    job stores neither for a rejected fit) the banner could only say the store
+    cannot tell a rejected fit from none. The daily job's run records
+    (data_store/runs) name the session the gate rejected, the slot and the
+    gate's reason; every expected string is built from the records written here."""
+    data, dates = synth["data"], synth["dates"]
+    cal_dir = data / "calibrations"
+    for p in cal_dir.glob("*.pkl"):
+        p.unlink()
+    old, mid, newer = (str(dates[i].date()) for i in (-11, -4, -3))
+    _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0)})
+    runs = data / "runs"
+    gate = "SPX IV RMSE above the gate's limit"
+    _run_record(runs, f"{mid}T23:30:00+00:00", "book", mid, "skipped", "no live two-sided quotes")
+    _run_record(runs, f"{newer}T23:30:00+00:00", "book", newer, "rejected", gate)
+    _run_record(runs, f"{newer}T23:59:00+00:00", "manual", newer, "skipped", "the book is another session's")
+    _run_record(runs, f"{newer}T22:07:00+00:00", "close", newer, "accepted", "ok")   # not a later failure
+    cause = dash.calibration_stale_cause(old)
+    assert cause == (f"The gate rejected {newer} (book): {gate} (3 runs after {old} tried a fit: "
+                     f"1 rejected, 2 skipped); the {old} fit is shown.")
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    b = re.search(r'data-stale="calibration"(.*?)</div>\s*</div>\s*</div>', html, re.DOTALL)
+    assert b
+    assert f"The gate rejected {newer} (book): {gate}" in _visible_text("<body>" + b.group(1))
+    # the Overview's staleness strip carries the same cause
+    assert f"The gate rejected {newer} (book)" in _visible_text(
+        dash.app.test_client().get("/").get_data(as_text=True))
+    (runs / "run_99999999T000000Z_book.json").write_text("{not json")       # skipped, not fatal
+    assert dash.calibration_stale_cause(old) == cause
+    for p in runs.glob("*.json"):
+        p.unlink()
+    _run_record(runs, f"{newer}T23:30:00+00:00", "book", newer, "skipped", "the session guard refused")
+    assert dash.calibration_stale_cause(old) == (
+        f"The book run did not fit {newer}: the session guard refused; the {old} fit is shown.")
+    for p in runs.glob("*.json"):
+        p.unlink()
+    assert dash.calibration_stale_cause(old).startswith(f"No SPX closing chain or fit after {old}")
+
+
 def test_stale_calibration_banner_on_the_shipped_store(dash, pages):
-    """The shipped store's cause is computed from its own chains and fits."""
+    """The shipped store's cause is computed from its own chains, fits and run
+    records (the bot commits a record of every run, a rejected fit's included)."""
     path, cal = dash.load_headline_calibration()
     session = dash._calibration_session(cal, path)
     cause = dash.calibration_stale_cause(session)
     assert session in cause
     later_chains = [f for f in (SHIPPED / "options").glob("spx_*.parquet") if f.stem[4:] > session]
     later_fits = [r for r in dash.scan_calibrations() if r["session"] and r["session"] > session]
-    if not later_chains and not later_fits:
+    from_runs = dash._run_record_cause(session, dash.load_run_records(SHIPPED))
+    if not later_fits and from_runs:
+        assert cause == from_runs
+    elif not later_chains and not later_fits:
         assert cause.startswith(f"No SPX closing chain or fit after {session} is stored.")
     if dash.load_page2()["calib_age"] >= dash.STALE_WARN_SESSIONS:
         assert cause in _visible_text(pages["/calibration"])

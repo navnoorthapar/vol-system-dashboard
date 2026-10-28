@@ -101,10 +101,16 @@ jobs:
           echo "slot=$slot" >> "$GITHUB_OUTPUT"
           echo "Slot: $slot -> steps: $steps"
 
+      # REFRESH_SLOT: the run writes its record, data_store/runs/run_<run_utc>_<slot>.json
+      # (what ran, the calibration's outcome and the gate's reason, the chain's quote
+      # state, the captures, exit code, publishable, timings, GITHUB_SHA and
+      # GITHUB_RUN_ID), committed with the captures: the bot's history is data, not
+      # an Actions log that expires (FUND_GRADE_PLAN 0.9).
       - name: Run cloud_refresh.py
         id: refresh
         env:
           STEPS: ${{ steps.plan.outputs.steps }}
+          REFRESH_SLOT: ${{ steps.plan.outputs.slot }}
         run: python scripts/cloud_refresh.py --steps "$STEPS"
 
       # Everything this run created or changed under the record's directories leaves
@@ -120,7 +126,8 @@ jobs:
           rm -rf "$b" && mkdir -p "$b"
           git ls-files -z --others --modified --exclude-standard -- \
             data_store/options data_store/calibrations data_store/forward data_store/market \
-            data_store/signals ':(exclude)data_store/calibrations/diagnostics' > "$RUNNER_TEMP/captures.lst"
+            data_store/signals data_store/runs ':(exclude)data_store/calibrations/diagnostics' \
+            > "$RUNNER_TEMP/captures.lst"
           n=0
           while IFS= read -r -d '' f; do
             [ -f "$f" ] || continue
@@ -167,7 +174,7 @@ jobs:
           if [ "${#files[@]}" -eq 0 ]; then echo "No new captures."; exit 0; fi
           scripts/ci/commit_and_push.sh \
             "Auto-refresh session ${SESSION:-unknown} (${SLOT}): captures" \
-            "${#files[@]} new capture file(s) (Cboe books, accepted chain, fit, forward ledger); calibration ${CALIBRATION:-not-run}." \
+            "${#files[@]} new capture file(s) (Cboe books, accepted chain, fit, forward ledger, run record); calibration ${CALIBRATION:-not-run}." \
             "${files[@]}"
 
       # Tests against the data this run produced (the suite works on a private copy of
@@ -252,7 +259,8 @@ jobs:
           [ -n "$REASON" ] && [ "$REASON" != "ok" ] && body="$body Calibration reason: $REASON"
           scripts/ci/commit_and_push.sh "$title" "$body" \
             data_store/signals/regime_labels.parquet data_store/market data_store/options \
-            data_store/calibrations ':(exclude)data_store/calibrations/diagnostics' data_store/forward
+            data_store/calibrations ':(exclude)data_store/calibrations/diagnostics' data_store/forward \
+            data_store/runs
 
       # What derives from a new fit (cloud_refresh.refresh_session_artifacts): the
       # session's surface report and diagnostics, the headline fit's Greeks surface and

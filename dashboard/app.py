@@ -44,6 +44,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -710,17 +711,68 @@ def latest_good_calibration_path(cal_dir: str | Path | None = None) -> str | Non
     return max(candidates)[2]
 
 
+def load_run_records(data_dir: Path | None = None) -> list[dict]:
+    """The daily job's run records (data_store/runs/run_<run_utc>_<slot>.json,
+    scripts/cloud_refresh.py run_record), oldest first. A file that cannot be
+    read is logged and skipped: the records explain a banner, they are not a
+    number on a page (scripts/ci/check_captures.py validates each before the
+    job commits it)."""
+    d = (Path(data_dir) if data_dir is not None else DATA) / "runs"
+    out = []
+    for f in sorted(d.glob("run_*.json")) if d.is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError) as e:
+            _logger.warning("run record %s unreadable: %s", f.name, e)
+            continue
+        if isinstance(rec, dict) and rec.get("schema") == "run_ledger/1" and rec.get("run_utc"):
+            out.append(rec)
+    return sorted(out, key=lambda r: str(r["run_utc"]))
+
+
+def _run_record_cause(session: str, records: list[dict]) -> str | None:
+    """'The gate rejected <s> (<slot>): <reason>' from the newest run that tried
+    to fit a session after ``session`` and did not store a fit."""
+    tried = [r for r in records
+             if (c := r.get("calibration") or {}).get("session") and str(c["session"]) > session
+             and c.get("status") in ("rejected", "skipped", "failed")]
+    if not tried:
+        return None
+    newest = max(str(r["calibration"]["session"]) for r in tried)
+    on_newest = [r for r in tried if str(r["calibration"]["session"]) == newest]
+    rejected = [r for r in on_newest if r["calibration"]["status"] == "rejected"]
+    r = (rejected or on_newest)[-1]
+    c = r["calibration"]
+    reason = str(c.get("reason") or "no reason recorded").rstrip(".")
+    slot = r.get("slot") or "run"
+    if c["status"] == "rejected":
+        head = f"The gate rejected {newest} ({slot}): {reason}"
+    elif c["status"] == "skipped":
+        head = f"The {slot} run did not fit {newest}: {reason}"
+    else:
+        head = f"The {newest} fit failed ({slot}): {reason}"
+    counts = Counter(x["calibration"]["status"] for x in tried)
+    more = ""
+    if len(tried) > 1:
+        more = (f" ({len(tried)} runs after {session} tried a fit: "
+                + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + ")")
+    return f"{head}{more}; the {session} fit is shown."
+
+
 def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                             rows: list[dict] | None = None) -> str | None:
     """Why the headline fit is older than the newest session, from what the store holds.
 
     The stale banner said "No newer fit passed the quality gate" whether or not
     a newer fit existed. The cause is read from the store: a stored fit after
-    the headline that failed the gate (with the gate's recorded reason); a
-    stored SPX chain after it with no fit; or neither. The daily job stores a
-    session's chain and fit only when the fit passes the gate, so with neither
-    stored the store cannot say whether a later session was fitted and
-    rejected or not fitted at all, and the text says so.
+    the headline that failed the gate (with the gate's recorded reason); the
+    daily job's run records (data_store/runs, FUND_GRADE_PLAN 0.9): a later
+    session the gate rejected, with its slot and reason, or that a run skipped
+    or failed to fit; a stored SPX chain after it with no fit; or none of
+    these. The daily job stores a session's chain and fit only when the fit
+    passes the gate, so with no record and nothing stored the store cannot say
+    whether a later session was fitted and rejected or not fitted at all, and
+    the text says so.
     """
     if not session:
         return None
@@ -736,6 +788,9 @@ def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                else f"failed the quality gate: {last['reason']}")
         more = f" ({len(newer)} stored fits after {session}, none accepted)" if len(newer) > 1 else ""
         return f"The {last['session']} fit is stored but {why}{more}; the {session} fit is shown."
+    from_runs = _run_record_cause(session, load_run_records(data))
+    if from_runs:
+        return from_runs
     later = [c for c in chains if c > session]
     if later:
         return f"An SPX closing chain for {later[-1]} is stored but no fit of it; the {session} fit is shown."

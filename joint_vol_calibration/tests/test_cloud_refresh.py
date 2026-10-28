@@ -127,6 +127,7 @@ def env(tmp_path, monkeypatch):
         columns=["date", "series", "value", "source"]))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.delenv("REFRESH_SLOT", raising=False)          # no run record unless a test asks
     # The post-fit steps have their own tests below; here an accepted fit records
     # a ledger from fixed signals (the synthetic DB is too short for the real
     # ones) and the derived artifacts are a no-op.
@@ -1142,6 +1143,89 @@ def test_close_slot_reports_the_headline(env, monkeypatch, tmp_path):
     code, st = _run(env, "market,labels")
     assert code == 0 and st["headline_calibration"]["date"] == "2026-09-22"
     assert "headline_calibration=2026-09-22" in output.read_text()
+
+
+def test_each_workflow_run_writes_its_record(env, monkeypatch):
+    """FUND_GRADE_PLAN 0.9 / VALIDATOR-15: what the bot attempted and why the gate
+    said no lived only in the gitignored status JSON and in Actions logs that
+    expire. A workflow run (REFRESH_SLOT) writes data_store/runs/run_<run_utc>_<slot>.json
+    for the capture commit; every field is the run's own (compared with its
+    status JSON, nothing pinned), and it is on disk before the freeze so the site
+    this run renders reads it."""
+    monkeypatch.setenv("REFRESH_SLOT", "book")
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "4242")
+    at_freeze = []
+
+    def freeze(*a, **k):
+        at_freeze.extend(json.loads(p.read_text()) for p in (env.DATA / "runs").glob("run_*.json"))
+        return _FreezeOK()
+    monkeypatch.setattr(env.subprocess, "run", freeze)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,calibrate,freeze", ticker=_EmptyBookTicker)
+    files = sorted((env.DATA / "runs").glob("run_*.json"))
+    assert [f.name for f in files] == [env.run_record_name(st["run_utc"], "book")]
+    rec = json.loads(files[0].read_text())
+    assert (rec["schema"], rec["slot"], rec["complete"]) == ("run_ledger/1", "book", True)
+    for key in ("run_utc", "steps", "session", "expected_session", "exit_code", "publishable",
+                "publish_blockers", "errors", "warnings"):
+        assert rec[key] == st[key], key
+    cal = st["calibration"]
+    assert rec["calibration"]["status"] == cal["status"] != "accepted"
+    assert rec["calibration"]["reason"] == cal["reason"].splitlines()[0]
+    assert rec["calibration"]["session"] == cal["session"]
+    assert "near_atm_two_sided_share" in rec["calibration"]["chain"]
+    assert all(cal["chain"][k] == v for k, v in rec["calibration"]["chain"].items())
+    assert rec["forward_ledger"]["status"] == st["forward_ledger"]["status"]
+    assert rec["exit_code"] == code
+    assert rec["headline_calibration"]["session"] == st["headline_calibration"]["date"]
+    assert (rec["github"]["sha"], rec["github"]["run_id"]) == ("f" * 40, "4242")
+    assert {"restore", "market", "calibrate", "forward_ledger", "freeze", "total"} <= set(rec["timings_s"])
+    assert all(v >= 0 for v in rec["timings_s"].values())
+    assert st["run_record"].endswith(files[0].name)
+    # before the freeze: the same run, not yet complete
+    assert len(at_freeze) == 1
+    assert (at_freeze[0]["complete"], at_freeze[0]["exit_code"]) == (False, None)
+    assert at_freeze[0]["calibration"]["status"] == cal["status"]
+
+
+def test_a_run_without_a_known_slot_writes_no_record(env, monkeypatch):
+    """A local run (no REFRESH_SLOT) leaves the store as it was; an unknown slot
+    name is a warning, not a file name."""
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert "run_record" not in st
+    assert not (env.DATA / "runs").exists()
+    monkeypatch.setenv("REFRESH_SLOT", "../book")
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert not (env.DATA / "runs").exists()
+    assert any("REFRESH_SLOT" in w for w in st["warnings"])
+
+
+def test_a_run_record_that_cannot_be_written_costs_nothing_else(env, monkeypatch):
+    monkeypatch.setenv("REFRESH_SLOT", "book")
+    _accepted_pickle(env, "2026-09-22")
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(env, "write_run_record", broken)
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert any("could not write the run record: OSError: disk full" in w for w in st["warnings"])
+
+
+def test_the_run_record_is_json_whatever_the_status_holds(env, tmp_path):
+    """numpy scalars from the chain diagnostics serialise as numbers."""
+    status = {"run_utc": "2026-10-28T02:31:05+00:00", "steps": ["calibrate"], "errors": [], "warnings": [],
+              "calibration": {"status": "rejected", "reason": "a\nb", "session": "2026-10-27",
+                              "chain": {"n_raw": np.int64(7), "near_atm_two_sided_share": np.float64(0.5)}}}
+    p = env.write_run_record(status, "book", directory=tmp_path)
+    assert p.name == "run_20261028T023105Z_book.json"
+    rec = json.loads(p.read_text())
+    assert rec["calibration"]["chain"] == {"n_raw": 7, "near_atm_two_sided_share": 0.5}
+    assert rec["calibration"]["reason"] == "a"
+    assert (rec["capture"], rec["forward_ledger"]) == (None, None)
 
 
 def test_freeze_failure_is_a_hard_failure(env, monkeypatch):

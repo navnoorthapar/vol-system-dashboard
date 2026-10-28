@@ -677,3 +677,45 @@ def test_check_captures_reads_every_new_capture_back(tmp_path):
         assert any(bad in e for e in errors), bad
     assert "other  data_store/options/notes.txt" in r.stdout
     assert "diagnostics" not in out.read_text()
+
+
+def test_the_run_record_is_committed_with_the_captures(tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.9: cloud_refresh's run record (data_store/runs/) is a
+    capture: written by the record writer itself, read back by check_captures
+    (a record whose name and content disagree, or another schema, is left out),
+    bundled before the gates and committed by the capture commit (the data commit
+    is its second chance). The workflow names the slot (REFRESH_SLOT)."""
+    import importlib.util
+    import json
+    import subprocess
+    import sys
+
+    spec = importlib.util.spec_from_file_location("cloud_refresh_runrec",
+                                                  ROOT / "scripts" / "cloud_refresh.py")
+    cr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cr)
+    *_, work, _ = _repo(tmp_path)
+    runs = work / "data_store" / "runs"
+    status = {"run_utc": "2026-10-28T02:31:05+00:00", "steps": ["market", "capture"], "errors": [],
+              "warnings": [], "exit_code": 0, "publishable": False, "publish_blockers": []}
+    good = cr.write_run_record(status, "book", directory=runs)
+    partial = cr.write_run_record({**status, "run_utc": "2026-10-28T04:31:00+00:00", "exit_code": None},
+                                  "book", complete=False, directory=runs)   # a run that stopped early
+    wrong = runs / "run_20261028T023105Z_close.json"                        # names another slot
+    wrong.write_text(good.read_text())
+    other = runs / "run_20261028T050000Z_manual.json"
+    other.write_text(json.dumps({"schema": "something_else/1"}))
+    out = tmp_path / "ok.txt"
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "check_captures.py"), "--out", str(out),
+                        "--root", str(work)], capture_output=True, text=True, check=False)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert out.read_text().split() == [f"data_store/runs/{good.name}", f"data_store/runs/{partial.name}"]
+    errors = [ln for ln in r.stdout.splitlines() if ln.startswith("::error")]
+    assert len(errors) == 2
+    assert wrong.name in errors[0] + errors[1]
+    assert other.name in errors[0] + errors[1]
+    refresh = _step(DAILY, "Run cloud_refresh.py")
+    assert "REFRESH_SLOT: ${{ steps.plan.outputs.slot }}" in refresh
+    assert "data_store/runs" in _step(DAILY, "Bundle this run's captures")
+    assert "data_store/runs" in _step(DAILY, "Commit data files")
+    assert set(re.findall(r'slot="(\w+)"', _step(DAILY, "Choose steps"))) <= set(cr.RUN_SLOTS)

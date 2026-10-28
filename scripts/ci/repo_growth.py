@@ -44,6 +44,7 @@ KINDS = [
     ("surface json", r"^data_store/surface/"),
     ("Greeks / scenario", r"^data_store/greeks/"),
     ("forward ledger", r"^data_store/forward/"),
+    ("run records", r"^data_store/runs/"),
     ("market partitions", r"^data_store/market/"),
     ("labels", r"^data_store/signals/"),
     ("other", r""),

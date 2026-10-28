@@ -35,6 +35,10 @@ committed. Here a new session happens before merge:
                   only (Greeks nodes, scenario P&L, the model VIX term),
                   passed here and failed in the bot. The run fails unless
                   every parameter of the new fit moved by MIN_PARAM_MOVE.
+     Each slot writes its run record (data_store/runs/, REFRESH_SLOT close and
+     book), which must be complete and agree with the slot's status, and the
+     capture commit's integrity check (scripts/ci/check_captures.py) must pass
+     on everything the two runs wrote.
   3. The three gates of .github/workflows/daily_refresh.yml (their test lists
      are read from the workflow) run in the copy, and with --full the whole
      suite as the weekly tests.yml run would see main after the bot.
@@ -327,9 +331,12 @@ def drive(status_file: Path) -> int:
     # session's market data and label, then the book slot (02:30 UTC).
     close = datetime.combine(oc.next_session(last), datetime.min.time()).replace(
         hour=18, minute=7, tzinfo=oc.NY_TZ).astimezone(UTC)
+    # Each slot writes its run record (data_store/runs/) as the workflow's slots do.
+    os.environ["REFRESH_SLOT"] = "close"
     code_close = cr.main(["--steps", "market,labels", "--status-file", str(status_file.with_name(
         "status_close.json"))], now_utc=close)
     print(f"close slot exit {code_close}", flush=True)
+    os.environ["REFRESH_SLOT"] = "book"
     code = cr.main(["--steps", "market,capture,calibrate,freeze", "--status-file", str(status_file)],
                    now_utc=now, ticker_factory=Ticker)
     code = max(code, code_close)
@@ -344,6 +351,27 @@ def drive(status_file: Path) -> int:
 
 
 # ── the outer run ─────────────────────────────────────────────────────────────
+
+def run_record_problems(tree: Path, statuses: dict) -> list[str]:
+    """The simulated slots' run records (data_store/runs/, FUND_GRADE_PLAN 0.9):
+    for each slot's status ({slot: status dict}), one complete record of that
+    run whose calibration outcome and exit code are the run's."""
+    recs = [json.loads(p.read_text()) for p in sorted((tree / "data_store" / "runs").glob("run_*.json"))]
+    problems = []
+    for slot, st in statuses.items():
+        mine = [r for r in recs if r.get("slot") == slot and r.get("run_utc") == st.get("run_utc")]
+        if len(mine) != 1:
+            problems.append(f"{len(mine)} {slot} run record(s) for run {st.get('run_utc')}, expected 1")
+            continue
+        r = mine[0]
+        want = (st.get("calibration") or {}).get("status")
+        got = (r.get("calibration") or {}).get("status")
+        if not r.get("complete") or r.get("exit_code") != st.get("exit_code") or got != want:
+            problems.append(f"the {slot} run record (complete {r.get('complete')}, exit "
+                            f"{r.get('exit_code')}, calibration {got}) is not the run's "
+                            f"(exit {st.get('exit_code')}, calibration {want})")
+    return problems
+
 
 def _pytest(cwd: Path, files: list, log: Path) -> tuple:
     t0 = time.perf_counter()
@@ -403,6 +431,17 @@ def main(argv=None) -> int:
             problems.append(f"artifact {name}: {res.get('error')}")
     if not st.get("publishable"):
         problems.append(f"not publishable: {st.get('publish_blockers')}")
+    close_file = status_file.with_name("status_close.json")
+    close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
+    problems += run_record_problems(tree, {"close": close_st, "book": st})
+    # the capture commit's integrity gate, on what the simulated runs wrote
+    ok_list = out / "captures.ok"
+    with open(out / "logs" / "check_captures.log", "w") as fh:
+        rc = subprocess.run([sys.executable, str(tree / "scripts" / "ci" / "check_captures.py"), "--out",
+                             str(ok_list), "--root", str(tree)], cwd=tree, env=env, stdout=fh,
+                            stderr=subprocess.STDOUT, check=False).returncode
+    if rc != 0:
+        problems.append(f"check_captures.py exited {rc} on the simulated captures (logs/check_captures.log)")
     ok_arts = sorted(k for k, v in (st.get("artifacts") or {}).items() if v.get("ok"))
     rmse = (cal.get("summary") or {}).get("spx_iv_rmse")
     rows = [("bot run", r.returncode, sim.get("seconds"),

@@ -12,8 +12,8 @@ that failed on anything, and a push that failed for any reason, discarded the
 session's book with the runner (2026-10-19, 2026-10-20, 2026-10-21). They are
 now committed first and on their own, behind these checks only: each file the
 run created (untracked under data_store/options, data_store/calibrations
-without its diagnostics, data_store/forward) is recognised by its name and
-read back:
+without its diagnostics, data_store/forward, data_store/runs) is recognised
+by its name and read back:
 
   options/cboe/<und>_<session>_<HHMMSS>Z.parquet   readable, >= 1 row, its JSON
            + .json                                  pair present with the same row
@@ -23,6 +23,9 @@ read back:
   calibrations/joint_cal_<session>.pkl              unpickles to a fit of that
                                                     session that passes the gate
   forward/ledger_<session>.json                     a valid ledger of that session
+  runs/run_<YYYYmmddTHHMMSSZ>_<slot>.json           the run record (cloud_refresh
+                                                    run_record): its schema, and the
+                                                    run time and slot of its name
 
 The paths that pass are written to LIST (one per line) for
 scripts/ci/commit_and_push.sh. A file that fails is reported (::error::) and
@@ -52,8 +55,12 @@ PATTERNS = {
     "chain": re.compile(rf"^data_store/options/(?P<und>[a-z]+)_{DATE}\.parquet$"),
     "fit": re.compile(rf"^data_store/calibrations/joint_cal_{DATE}\.pkl$"),
     "ledger": re.compile(rf"^data_store/forward/ledger_{DATE}\.json$"),
+    "run": re.compile(r"^data_store/runs/run_(?P<stamp>\d{8}T\d{6}Z)_(?P<slot>[a-z]+)\.json$"),
 }
-CAPTURE_DIRS = ("data_store/options", "data_store/calibrations", "data_store/forward")
+CAPTURE_DIRS = ("data_store/options", "data_store/calibrations", "data_store/forward", "data_store/runs")
+RUN_SCHEMA = "run_ledger/1"
+RUN_KEYS = ("schema", "run_utc", "slot", "complete", "steps", "expected_session", "calibration", "capture",
+            "forward_ledger", "exit_code", "publishable", "publish_blockers", "timings_s", "github")
 
 
 def new_files(root: Path) -> list[str]:
@@ -77,9 +84,30 @@ def _rows(path: Path) -> int:
     return int(pq.read_metadata(path).num_rows)
 
 
+def check_run_record(path: Path, stamp: str, slot: str) -> None:
+    """A run record is whole: valid JSON of the run-ledger schema whose run time
+    and slot are those of its name. A record left by a run that stopped before
+    its end (complete: false, the pre-freeze write) is kept: it says so."""
+    from datetime import UTC, datetime
+    rec = json.loads(path.read_text())
+    if not isinstance(rec, dict) or rec.get("schema") != RUN_SCHEMA:
+        raise ValueError(f"not a {RUN_SCHEMA} record")
+    missing = [k for k in RUN_KEYS if k not in rec]
+    if missing:
+        raise ValueError(f"missing {', '.join(missing)}")
+    t = datetime.fromisoformat(str(rec["run_utc"])).astimezone(UTC)
+    if f"{t:%Y%m%dT%H%M%SZ}" != stamp or rec["slot"] != slot:
+        raise ValueError(f"the record is run {rec['run_utc']} ({rec['slot']}), the file {stamp} ({slot})")
+    if rec["complete"] not in (True, False) or (rec["complete"] and not isinstance(rec["exit_code"], int)):
+        raise ValueError(f"complete {rec['complete']!r} with exit code {rec['exit_code']!r}")
+
+
 def check(root: Path, rel: str, kind: str, g: dict) -> None:
     """Raise ValueError (or an I/O / format error) unless ``rel`` is a whole capture."""
     path = root / rel
+    if kind == "run":
+        check_run_record(path, g["stamp"], g["slot"])
+        return
     s = g["session"]
     if kind == "cboe_book":
         pq_path, js_path = path.with_suffix(".parquet"), path.with_suffix(".json")

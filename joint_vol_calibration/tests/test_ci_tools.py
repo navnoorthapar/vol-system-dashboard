@@ -233,6 +233,31 @@ class TestSimulatedSession:
                                          .splitlines(), 1) if dated.search(line)]
         assert hits == []
 
+    def test_each_simulated_slot_must_leave_its_run_record(self, sim, tmp_path):
+        """FUND_GRADE_PLAN 0.9: the simulation runs the close and book slots with
+        REFRESH_SLOT set, so each must leave one complete record that agrees with
+        its status; the capture check then runs on what they wrote."""
+        import inspect
+        runs = tmp_path / "data_store" / "runs"
+        runs.mkdir(parents=True)
+        book = {"run_utc": "2026-10-28T02:30:00+00:00", "exit_code": 0, "calibration": {"status": "accepted"}}
+        close = {"run_utc": "2026-10-27T22:07:00+00:00", "exit_code": 0}
+        statuses = {"close": close, "book": book}
+        assert len(sim.run_record_problems(tmp_path, statuses)) == 2              # nothing written
+        for slot, st in statuses.items():
+            (runs / f"run_x_{slot}.json").write_text(json.dumps(
+                {"slot": slot, "run_utc": st["run_utc"], "complete": True, "exit_code": st["exit_code"],
+                 "calibration": st.get("calibration")}))
+        assert sim.run_record_problems(tmp_path, statuses) == []
+        bad = {**book, "calibration": {"status": "rejected"}}
+        assert "is not the run's" in sim.run_record_problems(tmp_path, {"book": bad})[0]
+        src = inspect.getsource(sim.drive)
+        assert src.index('os.environ["REFRESH_SLOT"] = "close"') < src.index('"market,labels"')
+        assert src.index('os.environ["REFRESH_SLOT"] = "book"') < src.index('"market,capture,calibrate')
+        main = inspect.getsource(sim.main)
+        assert "run_record_problems(" in main
+        assert "check_captures.py" in main
+
     def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
         import inspect
         src = inspect.getsource(sim.drive)
@@ -400,6 +425,7 @@ class TestRepoGrowth:
         assert growth.kind_of("data_store/surface/2026-10-16/surface.json") == "surface json"
         assert growth.kind_of("data_store/options/spx_2026-10-16.parquet") == "SPX chain"
         assert growth.kind_of("data_store/options/cboe/vix_2026-10-20_040625Z.json") == "cboe books"
+        assert growth.kind_of("data_store/runs/run_20261028T023000Z_book.json") == "run records"   # 0.9
         assert growth.kind_of("README.md") == "other"
 
     def test_the_daily_workflow_reports_it(self):
