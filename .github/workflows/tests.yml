@@ -212,6 +212,39 @@ jobs:
           done
           exit $rc
 
+  # What a pull request adds to the repository (git keeps every version): it may not
+  # add any file under data_store/ (the daily bot owns it), and its pack may not grow
+  # the repository by more than 2 MB unless the pull request is labelled allow-growth
+  # (scripts/ci/repo_growth.py --gate; FUND_GRADE_PLAN 0.11). Full history: the
+  # merge base and the thin pack against the base need it.
+  growth:
+    name: repository growth gate (pull requests)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: No data_store/ files, growth within budget
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          ALLOW_GROWTH: ${{ contains(github.event.pull_request.labels.*.name, 'allow-growth') }}
+        run: |
+          allow=()
+          if [ "$ALLOW_GROWTH" = "true" ]; then allow=(--allow-growth); fi
+          python scripts/ci/repo_growth.py --range "$BASE..$HEAD" --gate --budget-mb 2 \
+            --summary "$GITHUB_STEP_SUMMARY" "${allow[@]}"
+
   bench:
     name: benchmark smoke (no timings asserted)
     runs-on: ubuntu-latest

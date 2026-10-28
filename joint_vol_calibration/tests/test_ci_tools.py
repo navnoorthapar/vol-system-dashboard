@@ -434,6 +434,91 @@ class TestRepoGrowth:
         assert growth.kind_of(manifest) == "cboe manifests"
         assert growth.kind_of("README.md") == "other"
 
+    def test_the_pull_request_gate_fails_on_data_store_files_and_growth(self, tmp_path, monkeypatch):
+        """FUND_GRADE_PLAN 0.11: a pull request may not add any file under data_store/
+        (the bot owns it) nor grow the repository past the budget (unless labelled
+        allow-growth, which never lifts the data_store/ rule). Changing an existing
+        data file is not an addition; main's own commits are not the PR's."""
+        import os
+        import shutil
+        if not shutil.which("git"):
+            pytest.skip("git not available")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@example.com\n"
+                                            "[init]\n\tdefaultBranch = main\n")
+        repo = tmp_path / "repo"
+        (repo / "data_store" / "signals").mkdir(parents=True)
+
+        def git(*a):
+            r = subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True, text=True)
+            return r.stdout.strip()
+
+        def gate(*extra, budget="0.1"):
+            r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "repo_growth.py"), "--range",
+                                f"main..{git('rev-parse', 'HEAD')}", "--gate", "--budget-mb", budget,
+                                "--repo", str(repo), *extra],
+                               cwd=repo, capture_output=True, text=True, check=False)
+            return r.returncode, r.stdout
+        git("init", "-q")
+        (repo / "data_store" / "signals" / "regime_labels.parquet").write_bytes(os.urandom(1000))
+        (repo / "app.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        git("checkout", "-q", "-b", "feature")
+        (repo / "app.py").write_text("x = 2\n")
+        (repo / "data_store" / "signals" / "regime_labels.parquet").write_bytes(os.urandom(2000))  # a change
+        git("commit", "-qam", "code")
+        git("checkout", "-q", "main")                      # the bot adds a file on main meanwhile
+        (repo / "data_store" / "runs").mkdir()
+        (repo / "data_store" / "runs" / "run_20261028T023000Z_book.json").write_text("{}")
+        git("add", "-A")
+        git("commit", "-qm", "bot")
+        git("checkout", "-q", "feature")
+        git("merge", "-q", "--no-edit", "main")            # the branch merges main: not its own addition
+        code, out = gate()
+        assert code == 0, out
+        assert "| files added under data_store/ | 0 |" in out
+        (repo / "data_store" / "forward").mkdir()
+        (repo / "data_store" / "forward" / "ledger_2026-10-27.json").write_text("{}")
+        git("add", "-A")
+        git("commit", "-qm", "an agent commits data")
+        code, out = gate()
+        assert code == 1
+        assert "::error title=Repository growth::data_store/forward/ledger_2026-10-27.json" in out
+        assert gate("--allow-growth")[0] == 1                    # the label never lifts this rule
+        git("rm", "-q", "data_store/forward/ledger_2026-10-27.json")
+        (repo / "big.bin").write_bytes(os.urandom(300_000))
+        git("add", "-A")
+        git("commit", "-qm", "a large file")
+        code, out = gate()
+        assert code == 1
+        assert "budget 0.1 MB" in out
+        assert "| files added under data_store/ | 0 |" in out
+        assert gate("--allow-growth")[0] == 0
+        assert gate(budget="1")[0] == 0
+        mv = repo / "data_store" / "market"
+        mv.mkdir()
+        git("mv", "big.bin", "data_store/market/big.bin")         # a rename into data_store/ is an addition
+        git("commit", "-qm", "move")
+        assert gate(budget="1")[0] == 1
+
+    def test_pull_requests_run_the_gate(self):
+        import yaml
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
+        job = wf["jobs"]["growth"]
+        assert job["if"] == "github.event_name == 'pull_request'"
+        assert "continue-on-error" not in job
+        checkout, _python, step = job["steps"]
+        assert checkout["with"]["fetch-depth"] == 0
+        assert step["env"]["BASE"] == "${{ github.event.pull_request.base.sha }}"
+        assert step["env"]["HEAD"] == "${{ github.event.pull_request.head.sha }}"
+        assert "allow-growth" in step["env"]["ALLOW_GROWTH"]
+        run = step["run"]
+        assert 'repo_growth.py --range "$BASE..$HEAD" --gate --budget-mb' in run
+        assert "|| true" not in run
+        assert "continue-on-error" not in step
+
     def test_the_daily_workflow_reports_it(self):
         wf = (ROOT / ".github" / "workflows" / "daily_refresh.yml").read_text()
         step = wf[wf.index("- name: Repository growth of this run"):]
