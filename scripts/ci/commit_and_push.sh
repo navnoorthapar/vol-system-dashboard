@@ -91,11 +91,17 @@ is_rederivable() {
 }
 
 # Move this run's commit (if any) and its uncommitted changes onto origin/main.
+# Returns 0 when there is a commit to push, 3 when origin/main already holds
+# everything, and 2 when a step failed. The caller tests the status, and bash
+# ignores `set -e` inside a function whose status is tested (even in a subshell
+# that sets it again), so every step that can fail returns 2 explicitly: a
+# failed reset, rebase or REDERIVE used to fall through to "Nothing left to
+# commit" and exit 0 with the run's rows missing from main (CODE-01).
 sync_onto_main() {
   local mb f save entry recommit=0
   local -A mainchg=() mine=() dirty=()
   local clash_committed=() clash_dirty=() rederive=() keep=() bad=()
-  mb=$(git merge-base HEAD origin/main)
+  mb=$(git merge-base HEAD origin/main) || return 2
   while IFS= read -r -d '' f; do mainchg["$f"]=1; done < <(git diff -z --name-only "$mb" origin/main)
   while IFS= read -r -d '' f; do mine["$f"]=1; done < <(git diff -z --name-only "$mb" HEAD)
   while IFS= read -r -d '' entry; do dirty["${entry:3}"]=1; done \
@@ -111,7 +117,7 @@ sync_onto_main() {
   done
   if [ "${#bad[@]}" -gt 0 ]; then
     echo "::error::main changed what this commit changes: ${bad[*]} (re-derivable only with REDERIVE set; REDERIVE ${REDERIVE:+set}${REDERIVE:-unset})"
-    exit 1
+    return 4
   fi
   for f in "${clash_dirty[@]}"; do
     if is_rederivable "$f" && [ -n "${REDERIVE:-}" ]; then rederive+=("$f"); else keep+=("$f"); fi
@@ -123,27 +129,32 @@ sync_onto_main() {
     echo "Main also changed uncommitted file(s) of this run; keeping this run's: ${keep[*]}"
   fi
   if [ "${#clash_committed[@]}" -gt 0 ]; then
-    git reset -q --mixed HEAD~1                  # the commit is made again on top of main
+    git reset -q --mixed HEAD~1 || return 2      # the commit is made again on top of main
     recommit=1
   fi
-  save=$(mktemp -d)
-  for f in "${keep[@]}"; do mkdir -p "$save/$(dirname "$f")"; cp -p -- "$f" "$save/$f"; done
+  save=$(mktemp -d) || return 2
+  for f in "${keep[@]}"; do mkdir -p "$save/$(dirname "$f")" && cp -p -- "$f" "$save/$f" || return 2; done
   for f in "${rederive[@]}" "${keep[@]}"; do     # to the base version, so the move cannot clash
-    if git cat-file -e "HEAD:$f" 2>/dev/null; then git checkout -q -- "$f"; else rm -f -- "$f"; fi
+    if git cat-file -e "HEAD:$f" 2>/dev/null; then git checkout -q -- "$f" || return 2; else rm -f -- "$f"; fi
   done
   if [ "$recommit" = 1 ] || [ "$(git rev-list --count origin/main..HEAD)" = 0 ]; then
-    git reset -q --keep origin/main
+    git reset -q --keep origin/main || return 2
   else
-    git rebase -q --autostash origin/main
+    git rebase -q --autostash origin/main || return 2
   fi
-  for f in "${keep[@]}"; do mkdir -p "$(dirname "$f")"; cp -p -- "$save/$f" "$f"; done
+  for f in "${keep[@]}"; do mkdir -p "$(dirname "$f")" && cp -p -- "$save/$f" "$f" || return 2; done
   rm -rf "$save"
   if [ "${#rederive[@]}" -gt 0 ]; then
     echo "Re-deriving: $REDERIVE"
-    bash -c "$REDERIVE"
+    bash -c "$REDERIVE" || { echo "::error::re-deriving ${rederive[*]} over main's failed"; return 2; }
   fi
   if [ "$recommit" = 1 ]; then
-    if stage; then commit; else echo "Nothing left to commit: origin/main already holds it."; return 1; fi
+    if stage; then
+      commit || return 2
+    else
+      echo "Nothing left to commit: origin/main already holds it."
+      return 3
+    fi
   fi
   return 0
 }
@@ -164,9 +175,15 @@ else
       echo "origin/main could not be fetched after $fetch_attempts tries; next push attempt"
       continue
     fi
-    if ! sync_onto_main; then
-      pushed=1; break                            # nothing of ours is left to push
-    fi
+    rc=0
+    sync_onto_main || rc=$?
+    case "$rc" in
+      0) ;;
+      3) pushed=1; break ;;                      # nothing of ours is left to push
+      4) exit 1 ;;                               # a real conflict, named above
+      *) echo "::error::moving this run's commit onto origin/main failed (status $rc); nothing pushed"
+         exit 1 ;;
+    esac
   done
   [ "$pushed" = 1 ] || { echo "::error::push to main failed after $attempts attempts"; exit 1; }
 fi

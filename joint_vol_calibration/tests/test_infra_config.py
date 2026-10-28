@@ -507,6 +507,23 @@ def test_new_captures_land_although_main_rewrote_a_partition(tmp_path, rederive)
     assert (work / "data_store" / "vol_system.db").read_text() == "db-run"
 
 
+def test_a_failed_re_derive_fails_the_push_loudly(tmp_path):
+    """CODE-01: sync_onto_main ran under `if !`, where bash ignores `set -e`, so a
+    REDERIVE that crashed fell through to "Nothing left to commit" and the script
+    exited 0: the data step reported success, the deploy went ahead, and the run's
+    rows never reached main. A failed step now fails the script with an error."""
+    env, git, work, other = _repo(tmp_path)
+    _main_moves(git, other, _PART, "v0\nmain-row\n")
+    ds = work / "data_store"
+    (ds / "vol_system.db").write_text("db-run")
+    (ds / _PART.removeprefix("data_store/")).write_text("v0\nrun-row\n")
+    r = _push_script(env, work, "data", "b", "data_store/market", extra_env={"REDERIVE": "exit 7"})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "::error::" in r.stdout
+    assert "Nothing left to commit" not in r.stdout
+    assert git("log", "--format=%s", "origin/main", cwd=work).split("\n")[0] == "main moved"
+
+
 def test_a_conflict_in_a_re_derivable_file_is_re_derived_over_main(tmp_path):
     """PROD-2: the data commit (partitions, labels) conflicted with main on a
     binary partition and the whole commit was dropped. It is now rebuilt over
