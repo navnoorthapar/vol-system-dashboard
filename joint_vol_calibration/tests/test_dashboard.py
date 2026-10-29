@@ -6337,6 +6337,47 @@ def test_vx_table_change_is_the_difference_of_the_printed_settlements(dash, synt
     assert _signed2(float((Decimal(m.group(3)) / Decimal(m.group(2)) - 1) * 100)) == m.group(1)
 
 
+def test_record_db_renders_the_vx_settlements_the_bot_recorded(dash, synth):
+    """FUND_GRADE_PLAN 1.12: the bot records each session's VX settlements under
+    market/vix_futures_daily/ and never commits the cache. Rendering from the
+    record (app.record_db, as freeze_site and the bot do) puts the recorded
+    session's curve on the Overview, with its age counted from it."""
+    dates = synth["dates"]
+    data = synth["data"]
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-30:-10]], VX_EXPIRIES_2024)
+    newest = str(dates[-1].date())
+    rows = _vx_curve_rows(newest, VX_EXPIRIES_2024)
+    part = data / "market" / "vix_futures_daily" / f"vix_futures_daily_{newest[:4]}.parquet"
+    part.parent.mkdir(parents=True)
+    rows.to_parquet(part, index=False)
+    assert dash.load_overview()["vx_curve"]["date"] == str(dates[-11].date())     # the cache alone
+    with dash.record_db() as counts:
+        assert counts["vix_futures_daily"] == len(rows)
+        ov = dash.load_overview()["vx_curve"]
+        html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert (ov["date"], ov["age"]) == (newest, 0)
+    assert [r["settle"] for r in ov["rows"]] == pytest.approx(rows.loc[rows["expiry_date"] > newest,
+                                                                       "settle"].tolist())
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-curve-age">(.*?)</p>',
+                                                            html, re.DOTALL).group(1)))
+    assert line == (f"Settlements of {newest}, the newest session; the daily job stores each session’s "
+                    "Cboe settlements after its close.")
+
+
+def _vx_curve_rows(session: str, expiries: tuple[str, ...]) -> pd.DataFrame:
+    """One session's monthly VX rows as the bot records them (the settlement file:
+    symbol and settle, no OHLC), in contango at 4 dp."""
+    live = [e for e in expiries if e >= session]
+    return pd.DataFrame({"date": session, "expiry_date": live, "expiry_month": [e[:7] for e in live],
+                         "symbol": None, "is_weekly": 0, "open": np.nan, "high": np.nan, "low": np.nan,
+                         "close": np.nan,
+                         "settle": [round(16.0 + 0.55 * i + 0.0123, 4) for i in range(len(live))],
+                         "volume": pd.array([None] * len(live), dtype="Int64"),
+                         "open_interest": pd.array([None] * len(live), dtype="Int64"),
+                         "days_to_expiry": [(pd.Timestamp(e) - pd.Timestamp(session)).days for e in live],
+                         "source": "cboe_settlement"})
+
+
 def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
     """P3.1: the footer's freshness table lists the VX futures settlements with
     their as-of date, their age in NYSE sessions and the staleness styling of

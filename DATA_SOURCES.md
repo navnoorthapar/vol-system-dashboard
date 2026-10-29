@@ -76,7 +76,7 @@ The owner has four options. They can be combined.
   - `https://cdn.cboe.com/data/us/futures/market_statistics/historical_data/VX/VX_<expiry>.csv`
   - `https://www.cboe.com/us/futures/market_statistics/settlement/csv?dt=<date>`
 - **Terms:** as above.
-- **Committed:** yes, in `vol_system.db` (30,963 daily rows and 201 settlements).
+- **Committed:** yes, in `vol_system.db` (30,963 daily rows through 2026-10-09 and 201 settlements). From FUND_GRADE_PLAN 1.12 the daily job also stores each session's monthly settlements from the settlement file (`scripts/cloud_refresh.py` `refresh_vx_futures`) and commits the table as yearly partitions under `data_store/market/vix_futures_daily/` (its whole history on the first run).
 - **Risk:** medium-high.
 
 ### Cboe: delayed option quotes

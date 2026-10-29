@@ -137,7 +137,42 @@ def env(tmp_path, monkeypatch):
     def no_capture(und, now=None, **kw):
         raise OSError("no network in tests")
     monkeypatch.setattr(cboe, "capture_option_chain", no_capture)
+    # Cboe's CFE settlement file of any session (_vx_settlement_csv); the VX
+    # per-contract files are unreachable: no network
+    monkeypatch.setattr(cboe, "download_vx_settlements", lambda trade_date: cboe.parse_vx_settlement_csv(
+        _vx_settlement_csv(trade_date), trade_date))
+    monkeypatch.setattr(cboe, "download_vix_futures_daily_history",
+                        lambda start=None, end=None, expiries=None: pd.DataFrame())
     return cr
+
+
+_MONTH_CODES = "FGHJKMNQUVXZ"
+
+
+def _vx_settlement_csv(session: str) -> str:
+    """A CFE settlement file for ``session`` in Cboe's format: the nine monthly VX
+    contracts from the session's month on, in contango, at 4 dp and moving from
+    session to session, plus a weekly and a VXM mini line the job leaves out."""
+    y, m = int(session[:4]), int(session[5:7])
+    exps = [e for e in (dbm.vx_monthly_expiry(y + (m - 1 + k) // 12, (m - 1 + k) % 12 + 1) for k in range(11))
+            if e >= session][:9]
+    shift = 0.0137 * (date.fromisoformat(session).toordinal() % 29)
+    lines = ["Product,Symbol,Expiration Date,Price"]
+    for i, e in enumerate(exps):
+        lines.append(f"VX,VX/{_MONTH_CODES[int(e[5:7]) - 1]}{e[3]},{e},{17.5 + 0.45 * i + shift:.4f}")
+    lines.append(f"VX,VX40/X6,{exps[0]},{30.0:.4f}")                 # a weekly: not stored
+    lines.append(f"VXM,VXM/X6,{exps[1]},{17.0:.4f}")                 # the mini: not VX
+    return "\n".join(lines) + "\n"
+
+
+def _vx_monthlies(session: str) -> list[tuple[str, float]]:
+    """(expiry, settle) of the monthly contracts in _vx_settlement_csv(session), from its text."""
+    out = []
+    for ln in _vx_settlement_csv(session).splitlines()[1:]:
+        prod, sym, exp, px = ln.split(",")
+        if prod == "VX" and sym.startswith("VX/"):
+            out.append((exp, float(px)))
+    return out
 
 
 # every sleeve flat except S4 short: the ledger opens one straddle
@@ -1264,6 +1299,102 @@ def test_merge_main_data_rederives_mains_sessions_over_the_branchs_record(env, t
     assert (vix["close"], vix["source"]) == (17.76, "cboe")
     assert set(got.loc[got["date"] == "2026-09-24", "ticker"]) == set(extra["ticker"])
     assert "2026-09-07" not in set(got["date"])
+
+
+def _vx_rows(session: str) -> list[tuple[str, float]]:
+    con = sqlite3.connect(str(dbm.DB_PATH))
+    try:
+        return con.execute("SELECT expiry_date, settle FROM vix_futures_daily WHERE date = ? "
+                           "ORDER BY expiry_date", (session,)).fetchall()
+    finally:
+        con.close()
+
+
+def test_close_slot_stores_the_sessions_vx_settlements_in_the_record(env, monkeypatch):
+    """FUND_GRADE_PLAN 1.12 / CITSEC-11: no step of the bot refreshed
+    vix_futures_daily, so the Overview's VX curve was of 2026-10-09 on a page of
+    2026-10-27. The close slot (market,labels) now stores the session's monthly VX
+    settlements (the weekly and the VXM mini left out) and, from an empty
+    partition directory, exports them to data_store/market/vix_futures_daily/,
+    so the record holds them; the next run restores them from there."""
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: 1)   # the env stores no labels
+    vx_dir = dbm.MARKET_DIR / "vix_futures_daily"
+    assert not vx_dir.exists()
+    code, st = _run(env, "market,labels")
+    assert code == 0
+    vx = st["market"]["vx_futures"]
+    want = _vx_monthlies(SESSION)
+    assert (vx["ok"], vx["stored"], vx["last"], vx["missing"]) == (True, [SESSION], SESSION, [])
+    assert vx["rows"] == len(want) == st["market"]["rows"]["vix_futures_daily"]
+    assert _vx_rows(SESSION) == want
+    part = vx_dir / f"vix_futures_daily_{SESSION[:4]}.parquet"
+    assert str(part) in st["persisted"]
+    rec = pd.read_parquet(part)
+    assert sorted(zip(rec["expiry_date"], rec["settle"])) == want
+    assert set(rec["date"]) == {SESSION}
+    assert (rec["is_weekly"] == 0).all()
+    assert not st["warnings"] or not any("VX" in w for w in st["warnings"])
+    # a clean clone: the next run restores the session's settlements from the record
+    dbm.DB_PATH.unlink()
+    dbm._SCHEMA_READY.clear()
+    dbm.init_database()
+    code, st = _run(env, "market")
+    assert code == 0
+    assert st["restored"]["market"]["vix_futures_daily"] == len(want)
+    assert st["market"]["vx_futures"]["sessions"] == []          # nothing left to fetch
+    assert _vx_rows(SESSION) == want
+
+
+def test_vx_refresh_fills_the_gap_from_the_newest_stored_session(env, monkeypatch):
+    """The job fetches every NYSE session after the newest one the table holds
+    (one settlement file each), not only today's: a slot that failed is made up
+    by the next one."""
+    stale = "2026-09-17"
+    dbm.insert_vix_futures_daily(cboe.parse_vx_settlement_csv(_vx_settlement_csv(stale), stale))
+    asked = []
+    real = cboe.download_vx_settlements
+    monkeypatch.setattr(cboe, "download_vx_settlements", lambda d: asked.append(d) or real(d))
+    code, st = _run(env, "market")
+    assert code == 0
+    gap = ["2026-09-18", "2026-09-21", "2026-09-22", SESSION]
+    assert asked == gap
+    assert st["market"]["vx_futures"]["stored"] == gap
+    for d in gap:
+        assert _vx_rows(d) == _vx_monthlies(d)
+
+
+@pytest.mark.parametrize("failure", ["raises", "not_posted", "stale_copy"])
+def test_a_failed_vx_download_never_fails_the_close_slot(env, monkeypatch, failure):
+    """A VX download that fails, a file Cboe has not posted, or a repeat of the
+    previous session's prices stores nothing for the session, is reported as a
+    warning, and the close slot's other steps (SPX, labels, the partitions) run
+    and pass as before; the next slot retries."""
+    prev = "2026-09-22"
+    dbm.insert_vix_futures_daily(cboe.parse_vx_settlement_csv(_vx_settlement_csv(prev), prev))
+
+    def broken(trade_date):
+        if failure == "raises":
+            raise OSError("Cboe is down")
+        if failure == "not_posted":
+            return cboe.parse_vx_settlement_csv("Product,Symbol,Expiration Date,Price\n", trade_date)
+        return cboe.parse_vx_settlement_csv(_vx_settlement_csv(prev), trade_date)   # yesterday's prices
+    monkeypatch.setattr(cboe, "download_vx_settlements", broken)
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: 1)   # the env stores no labels
+    code, st = _run(env, "market,labels")
+    assert code == 0
+    assert st["labels_added"] == 1
+    assert not st["publish_blockers"]
+    assert not st["errors"]
+    vx = st["market"]["vx_futures"]
+    assert (vx["ok"], vx["stored"], vx["missing"], vx["last"]) == (False, [], [SESSION], prev)
+    assert _vx_rows(SESSION) == []
+    warn = [w for w in st["warnings"] if "VX futures table ends " + prev in w]
+    assert len(warn) == 1
+    assert SESSION in warn[0]
+    assert "the next slot retries" in warn[0]
+    if failure == "stale_copy":
+        assert "every price equals the previous session's" in warn[0]
+    assert (dbm.MARKET_DIR / "spx_ohlcv" / "spx_ohlcv_2026.parquet").exists()
 
 
 def test_no_persist_flag_leaves_capture_dirs_alone(env):

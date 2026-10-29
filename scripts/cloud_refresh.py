@@ -7,7 +7,9 @@ Steps (run all, or a subset with --steps):
              last CLOSED NYSE session (never an in-progress bar): SPX and ^IRX
              from Yahoo; the VIX index family from Cboe's official files (Yahoo
              only as the provisional row of a session Cboe has not posted);
-             the Treasury bill/par files and NY Fed SOFR (the discount curve)
+             the Treasury bill/par files and NY Fed SOFR (the discount curve);
+             Cboe's VX futures settlements of each session since the newest
+             stored (refresh_vx_futures; fail-soft)
   labels     Extend regime_labels.parquet with new trading days (rule labels),
              as of the last closed session
   calibrate  Download the SPX option chain for the last CLOSED NYSE session,
@@ -220,11 +222,14 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
                                surface layer read (rates.get_zero_curve refuses
                                a curve more than 7 days old, so a feed outage
                                shows up as a fallback to ^IRX, recorded).
+      vix_futures_daily        Cboe's VX daily settlements, monthly contracts,
+                               of every session after the newest stored one
+                               (refresh_vx_futures).
 
     Returns {"ok", "hard_failure", "reason", "rows", "start", "vix_family",
-    "rates"}; an empty or failed SPX download is a hard failure (the run must
-    not publish the committed DB's stale close as current). VIX-family and
-    rate failures are warnings (main() annotates them).
+    "rates", "vx_futures"}; an empty or failed SPX download is a hard failure
+    (the run must not publish the committed DB's stale close as current).
+    VIX-family, rate and VX failures are warnings (main() annotates them).
     """
     from joint_vol_calibration.data import yf_downloader as dl
     from joint_vol_calibration.data.database import (
@@ -268,6 +273,97 @@ def refresh_market_data(today: "date | None" = None, end: "date | None" = None) 
     rows.update(fam["rows"])
     out["vix_family"] = fam
     out["rates"] = refresh_discount_curve(end_d)
+    out["vx_futures"] = vx = refresh_vx_futures(end_d)
+    rows["vix_futures_daily"] = vx["rows"]
+    return out
+
+
+# A longer gap than this is a backfill (pipeline.py, the per-contract files), not
+# the daily job's: the settlement file is one request per session.
+VX_MAX_SESSIONS = 30
+
+
+def refresh_vx_futures(end: date) -> dict:
+    """VX futures (FUND_GRADE_PLAN 1.12): Cboe's daily settlements of every NYSE
+    session after the newest one stored, through ``end`` (at most VX_MAX_SESSIONS),
+    into vix_futures_daily; persist_captures exports them to data_store/market/
+    vix_futures_daily/, so the record, not only the cache, holds them.
+
+    Source: the session's CFE settlement file (cboe_downloader.download_vx_settlements,
+    which refuses a file Cboe names for another session); a session it does not
+    give is looked for in the monthly contracts' own files (cdn.cboe.com, one per
+    contract, dated by row; they trail the settlement file by a session or more).
+    Each session is checked before anything is stored (cboe_downloader.check_vx_session:
+    monthly contracts, standard expiries, settlements in bounds, at least two still
+    trading, not a repeat of the session before).
+
+    Never raises. The VX leg is reference data (the Overview's VX panel, the fits'
+    out-of-sample VX score), so a failed or late download is reported (``errors``,
+    ``missing``; main() annotates it) and the slot's other steps carry on; the next
+    slot retries from the newest stored session. ``ok``: the table holds ``end``."""
+    import pandas as pd
+
+    from joint_vol_calibration.data import cboe_downloader as cboe
+    from joint_vol_calibration.data import database as dbm
+
+    out: dict[str, Any] = {"ok": False, "sessions": [], "stored": [], "rows": 0, "missing": [],
+                           "rejected": {}, "errors": [], "last": None, "source": {}}
+    try:
+        last = dbm.get_latest_date("vix_futures_daily")
+        last = str(last)[:10] if last else None
+        first = date.fromisoformat(last) + timedelta(days=1) if last else end
+        todo = [str(t.date()) for t in dbm.nyse_sessions(first, end)]
+        if len(todo) > VX_MAX_SESSIONS:
+            out["errors"].append(f"the VX table ends {last}, {len(todo)} sessions before {end}; only the "
+                                 f"newest {VX_MAX_SESSIONS} are fetched (backfill the rest: pipeline.py)")
+            todo = todo[-VX_MAX_SESSIONS:]
+        out["sessions"] = todo
+        prev = dbm.get_vix_futures_curve(last) if last else None
+        good: dict[str, pd.DataFrame] = {}
+        for s in todo:
+            try:
+                rows = cboe.download_vx_settlements(s)
+            except Exception as e:  # noqa: BLE001 (fail-soft: reported, the next source is tried)
+                out["errors"].append(f"{s} settlement file: {type(e).__name__}: {e}")
+                continue
+            if rows.empty:                          # not posted (or another session's file)
+                continue
+            kept, why = cboe.check_vx_session(rows, s, previous=prev)
+            if why:
+                out["rejected"][s] = why
+            if not kept.empty:
+                good[s], prev = kept, kept
+                out["source"][s] = "settlement file"
+        missing = [s for s in todo if s not in good]
+        if missing:
+            try:
+                hist = cboe.download_vix_futures_daily_history(start=missing[0], end=end.isoformat())
+            except Exception as e:  # noqa: BLE001 (fail-soft)
+                hist = pd.DataFrame()
+                out["errors"].append(f"contract files: {type(e).__name__}: {e}")
+            for s in missing:
+                rows = hist[hist["date"] == s] if not hist.empty else hist
+                if rows.empty:
+                    continue
+                kept, why = cboe.check_vx_session(rows, s)
+                if why:
+                    out["rejected"].setdefault(s, []).extend(why)
+                if not kept.empty:
+                    good[s] = kept
+                    out["source"][s] = "contract files"
+        if good:
+            out["rows"] = dbm.insert_vix_futures_daily(pd.concat([good[s] for s in sorted(good)],
+                                                                 ignore_index=True))
+        out["stored"] = sorted(good)
+        out["missing"] = [s for s in todo if s not in good]
+        newest = dbm.get_latest_date("vix_futures_daily")
+        out["last"] = str(newest)[:10] if newest else None
+        out["ok"] = out["last"] is not None and out["last"] >= end.isoformat()
+    except Exception as e:  # noqa: BLE001 (fail-soft: the slot's other steps must run)
+        log.warning("  VX futures refresh failed: %s", e)
+        out["errors"].append(f"VX futures refresh failed: {type(e).__name__}: {e}")
+    log.info("  VX futures: stored %s (%d rows); missing %s; table ends %s", out["stored"] or "nothing",
+             out["rows"], out["missing"] or "none", out["last"])
     return out
 
 
@@ -343,6 +439,18 @@ def market_warnings(m: dict) -> list:
                     f"{'; '.join(fam['errors'])}"
                     + ("" if fam.get("ok") else " -- Yahoo's rows stored as provisional (source "
                        "'yfinance') until Cboe's files carry those sessions")))
+    vx = m.get("vx_futures") or {}
+    if vx and not vx.get("ok"):
+        why = "; ".join([*vx.get("errors", []),
+                         *(f"{s}: {', '.join(w)}" for s, w in (vx.get("rejected") or {}).items())])
+        out.append(("VX settlements",
+                    f"the VX futures table ends {vx.get('last') or 'nowhere'}"
+                    + (f"; not stored: {', '.join(vx['missing'])}" if vx.get("missing") else "")
+                    + (f" ({why})" if why else " (Cboe has not posted them yet)")
+                    + "; the next slot retries"))
+    elif vx.get("rejected"):
+        out.append(("VX settlements", "rows left out: " + "; ".join(
+            f"{s}: {', '.join(w)}" for s, w in vx["rejected"].items())))
     rt = m.get("rates") or {}
     if rt.get("errors"):
         out.append(("Rates download", "; ".join(rt["errors"])))
@@ -1202,14 +1310,21 @@ def persist_captures(market_since: "str | None", chain_sessions=()) -> list:
 
     Market partitions (MARKET_TABLES, plus rates_daily: the Treasury/NY Fed
     quotes the discount curve is built from) are merged for every year >=
-    ``market_since`` (None: skip); each session in ``chain_sessions`` gets its
+    ``market_since`` (None: skip), every year of a MARKET_TABLES table with no
+    partition yet; each session in ``chain_sessions`` gets its
     stored SPX chain written to data_store/options/spx_<session>.parquet.
     Returns the paths that changed.
     """
     from joint_vol_calibration.data import database as dbm
     written = []
     if market_since:
+        # a market table the record holds no partition of yet (vix_futures_daily on
+        # the first run after FUND_GRADE_PLAN 1.12) is exported whole, once: the
+        # record then holds its history, not only the download window's years
+        new = [t for t in dbm.MARKET_TABLES if not any((dbm.MARKET_DIR / t).glob(f"{t}_*.parquet"))]
         written += dbm.export_market_partitions(since=market_since)
+        if new:
+            written += dbm.export_market_partitions(tables=new)
         written += dbm.export_market_partitions(since=market_since, tables=("rates_daily",))
     for s in chain_sessions:
         p = dbm.export_options_snapshot(s, "SPX")
@@ -1323,6 +1438,12 @@ def _write_reports(status: dict, status_file: "pathlib.Path | None") -> None:
                if status.get("publish_blockers") else "") + " |",
             f"| market rows | {status.get('market', {}).get('rows', {})} |",
         ]
+        vx = (status.get("market") or {}).get("vx_futures")
+        if vx:
+            lines.append(f"| VX futures | table ends {vx.get('last') or '—'}; stored "
+                         f"{', '.join(vx.get('stored') or []) or 'nothing'}"
+                         + (f"; **not stored** {', '.join(vx['missing'])}" if vx.get("missing") else "")
+                         + " |")
         fam = (status.get("market") or {}).get("vix_family")
         if fam:
             lines.append(f"| VIX family | Cboe primary; {fam.get('n_provisional', 0)} provisional "

@@ -398,10 +398,93 @@ def parse_vx_settlement_csv(text: str, trade_date: str) -> pd.DataFrame:
     return out
 
 
+_SERVED_SETTLEMENT = re.compile(r"FuturesSettlements_(\d{4}-\d{2}-\d{2})\.csv")
+
+
+def served_settlement_date(resp) -> str | None:
+    """The trade date of the settlement file Cboe actually served: the filename in
+    its Content-Disposition header (``FuturesSettlements_<YYYY-MM-DD>.csv``);
+    None when the response does not name one."""
+    headers = getattr(resp, "headers", None) or {}
+    m = _SERVED_SETTLEMENT.search(str(headers.get("content-disposition") or ""))
+    return m.group(1) if m else None
+
+
 def download_vx_settlements(trade_date: str) -> pd.DataFrame:
-    """Every VX contract's daily settlement on ``trade_date`` (see parse_vx_settlement_csv)."""
+    """Every VX contract's daily settlement on ``trade_date`` (see parse_vx_settlement_csv).
+
+    For a date it has not posted yet Cboe serves its NEWEST file instead (asked
+    for 2026-10-29 at 22:33 ET on 10-28, it sent FuturesSettlements_2026-10-28.csv
+    with 10-28's prices). A file whose name gives another date is therefore
+    another session's prices: it is returned empty, as for a closed day."""
     db._validate_date(trade_date)
-    return parse_vx_settlement_csv(_get(_VX_SETTLEMENT_URL.format(date=trade_date)).text, trade_date)
+    resp = _get(_VX_SETTLEMENT_URL.format(date=trade_date))
+    served = served_settlement_date(resp)
+    if served is not None and served != trade_date:
+        logger.info("VX settlements for %s: Cboe served its %s file (not posted yet)", trade_date, served)
+        return parse_vx_settlement_csv("Product,Symbol,Expiration Date,Price\n", trade_date)
+    return parse_vx_settlement_csv(resp.text, trade_date)
+
+
+# Bounds on a stored VX settlement (index points): VX has settled between about
+# 9 and 70 since 2004, so a value outside is a parse or feed error, not a price.
+VX_SETTLE_BOUNDS = (1.0, 150.0)
+# A session's file lists 8-9 monthly contracts; fewer than this still trading
+# after the session is an incomplete file, not a curve.
+VX_MIN_LIVE_MONTHLIES = 2
+
+
+def check_vx_session(rows: pd.DataFrame, session: str,
+                     previous: pd.DataFrame | None = None) -> tuple[pd.DataFrame, list[str]]:
+    """The monthly VX contracts of ``session`` the daily job may store, and what it
+    left out and why (one line each).
+
+    ``rows``: parse_vx_settlement_csv or parse_vx_contract_csv rows. Kept: rows
+    dated ``session`` of a standard monthly contract (its expiry is its month's
+    database.vx_expiry_for_month, on or after the session), one per contract, with
+    a finite settlement inside VX_SETTLE_BOUNDS. Weeklies are left out: on a day a
+    weekly does not trade Cboe prints a monthly's settlement for it. The whole
+    session is refused (nothing kept) when fewer than VX_MIN_LIVE_MONTHLIES
+    contracts still trade after it (an incomplete file), or when every price
+    equals ``previous`` (the stored monthly settlements of the session before:
+    expiry_date, settle), i.e. Cboe served the earlier session's file again."""
+    why: list[str] = []
+    empty = rows.iloc[0:0]
+    if rows.empty:
+        return empty, ["no rows"]
+    df = rows[rows["date"].astype(str).str[:10] == session].copy()
+    if len(df) < len(rows):
+        why.append(f"{len(rows) - len(df)} row(s) dated another session")
+    weekly = df["is_weekly"].astype(int) == 1
+    df = df[~weekly]
+    std = df["expiry_month"].map(db.vx_expiry_for_month)
+    bad_exp = (df["expiry_date"] != std) | (df["expiry_date"] < session)
+    if bad_exp.any():
+        why.append("not a standard monthly expiry on or after the session: "
+                   + ", ".join(sorted(df.loc[bad_exp, "expiry_date"].astype(str))))
+    df = df[~bad_exp]
+    px = pd.to_numeric(df["settle"], errors="coerce")
+    lo, hi = VX_SETTLE_BOUNDS
+    bad_px = ~(px.between(lo, hi) & np.isfinite(px))
+    if bad_px.any():
+        why.append(f"settlement outside [{lo:g}, {hi:g}]: "
+                   + ", ".join(f"{e} {v}" for e, v in zip(df.loc[bad_px, "expiry_date"], px[bad_px])))
+    df = df[~bad_px]
+    dup = df["expiry_date"].duplicated(keep=False)
+    if dup.any():
+        why.append("more than one row for " + ", ".join(sorted(set(df.loc[dup, "expiry_date"]))))
+        df = df[~dup]
+    live = int((df["expiry_date"] > session).sum())
+    if live < VX_MIN_LIVE_MONTHLIES:
+        return empty, [*why, (f"{live} monthly contract(s) still trading after {session} "
+                              f"(fewer than {VX_MIN_LIVE_MONTHLIES}): an incomplete file")]
+    if previous is not None and not previous.empty:
+        before = dict(zip(previous["expiry_date"].astype(str), pd.to_numeric(previous["settle"])))
+        both = [(float(p), before[e]) for e, p in zip(df["expiry_date"], df["settle"]) if e in before]
+        if len(both) >= VX_MIN_LIVE_MONTHLIES and all(abs(a - b) < 1e-9 for a, b in both):
+            return empty, [*why, ("every price equals the previous session's: Cboe served that "
+                                  f"session's file again, not {session}'s")]
+    return df.sort_values("expiry_date").reset_index(drop=True), why
 
 
 def download_vix_futures_daily_history(

@@ -31,7 +31,7 @@ from scipy.stats import norm as _norm
 DATE_FMT = "%Y-%m-%d"
 # the market tables the record holds, with their keys
 RECORD_KEYS = {"spx_ohlcv": ("date",), "vix_daily": ("date",), "vix_term_structure": ("date", "ticker"),
-               "tbill_rates": ("date",)}
+               "tbill_rates": ("date",), "vix_futures_daily": ("date", "expiry_date")}
 # a cached value may differ from the record by float32 noise (Yahoo's provisional print kept
 # until Cboe's official one replaces it in the record), never by a printed digit
 CACHE_ATOL = 1e-4

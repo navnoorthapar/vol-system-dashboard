@@ -235,6 +235,58 @@ def test_daily_settlement_csv_keeps_vx_only_with_exact_expiries():
     assert set(df.loc[df["is_weekly"] == 1, "symbol"]) == {"VX41/V6", "VX43/V6", "VX44/X6", "VX45/X6", "VX47/X6"}
 
 
+def test_a_settlement_file_cboe_names_for_another_session_is_not_that_sessions(monkeypatch):
+    """Asked for a session it has not posted, Cboe serves its newest file (dt=2026-10-29
+    at 22:33 ET on 10-28 returned FuturesSettlements_2026-10-28.csv, 10-28's prices).
+    Stored under the requested date those would be a false session; the file's own
+    name decides, and a header-less response is parsed as before."""
+    text = _text("cboe_vx_settlement_2026-10-09.csv")
+    served = {"content-disposition": "attachment; filename=FuturesSettlements_2026-10-09.csv"}
+    resp = _Resp(text)
+    resp.headers = served
+    monkeypatch.setattr(cb._SESSION, "get", lambda url, timeout=None: resp)
+    assert cb.served_settlement_date(resp) == "2026-10-09"
+    assert len(cb.download_vx_settlements("2026-10-09")) == 14
+    assert cb.download_vx_settlements("2026-10-13").empty            # 10-09's file, asked for 10-13
+    resp.headers = {}
+    assert cb.served_settlement_date(resp) is None
+    assert len(cb.download_vx_settlements("2026-10-09")) == 14
+
+
+def test_check_vx_session_keeps_the_monthlies_and_says_what_it_left_out():
+    """What the daily job stores of a session's settlements: the monthly contracts
+    (standard expiries, settlements in bounds, one row each); the whole session is
+    refused when fewer than two contracts still trade after it, or when it repeats
+    the previous session's prices exactly (another session's file)."""
+    day = cb.parse_vx_settlement_csv(_text("cboe_vx_settlement_2026-10-09.csv"), "2026-10-09")
+    kept, why = cb.check_vx_session(day, "2026-10-09")
+    assert why == []
+    assert kept["expiry_date"].tolist() == day.loc[day["is_weekly"] == 0, "expiry_date"].tolist()
+    assert (kept["is_weekly"] == 0).all()
+    bad = day.copy()
+    nov = bad["expiry_date"] == "2026-11-18"
+    bad.loc[nov, "settle"] = 1875.0                                    # a 100x feed error
+    bad.loc[bad["symbol"] == "VX/Z6", "expiry_date"] = "2026-12-15"    # not December's expiry
+    bad = pd.concat([bad, bad[bad["symbol"] == "VX/F7"]])              # a duplicated contract
+    kept, why = cb.check_vx_session(bad, "2026-10-09")
+    assert "2026-11-18" not in set(kept["expiry_date"])
+    assert "2026-12-15" not in set(kept["expiry_date"])
+    assert "2027-01-20" not in set(kept["expiry_date"])
+    assert len(kept) == len(day[day["is_weekly"] == 0]) - 3
+    assert len(why) == 3
+    assert any("1875" in w for w in why)
+    assert any("2026-12-15" in w for w in why)
+    assert any("more than one row for 2027-01-20" in w for w in why)
+    front = day[day["expiry_date"] <= "2026-11-18"]                    # Oct and Nov only
+    assert cb.check_vx_session(front[front["is_weekly"] == 0], "2026-10-09")[0].shape[0] == 2
+    assert cb.check_vx_session(front[front["expiry_date"] == "2026-10-21"], "2026-10-09")[0].empty
+    again, why = cb.check_vx_session(day.assign(date="2026-10-12"), "2026-10-12",
+                                     previous=cb.check_vx_session(day, "2026-10-09")[0])
+    assert again.empty
+    assert "previous session" in why[0]
+    assert cb.check_vx_session(day, "2026-10-12")[0].empty            # rows of another date
+
+
 def test_daily_settlement_csv_on_a_closed_day_is_empty():
     assert cb.parse_vx_settlement_csv(_text("cboe_vx_settlement_2026-10-10.csv"), "2026-10-10").empty
 

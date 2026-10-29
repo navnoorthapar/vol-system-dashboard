@@ -820,6 +820,47 @@ class TestPersistence:
         assert db.export_market_partitions() == []
         assert path.read_bytes() == blob
 
+    def test_vx_futures_are_in_the_record_from_an_empty_partition_dir(self, tmp_db, tmp_path, monkeypatch):
+        """FUND_GRADE_PLAN 1.12: vix_futures_daily lived in the SQLite cache only,
+        which the bot never commits. It is now a market table: exported by default
+        to market/vix_futures_daily/<year> from an empty directory (the bot's first
+        run), a per-contract row's OHLC/OI and a settlement-file row's NULLs both
+        surviving, merged with what a file already holds, and restored into a
+        fresh database by the default import."""
+        assert not (tmp_path / "market").exists()
+        hist = cb.parse_vx_contract_csv((FIX / "cboe_VX_2026-10-21.csv").read_text(), "2026-10-21")
+        hist = hist[hist["date"] >= "2026-09-01"]
+        settle = cb.parse_vx_settlement_csv((FIX / "cboe_vx_settlement_2026-10-09.csv").read_text(),
+                                            "2026-10-09")
+        settle = settle[settle["is_weekly"] == 0]
+        db.insert_vix_futures_daily(hist)
+        db.insert_vix_futures_daily(settle)
+        written = db.export_market_partitions()
+        assert [p.relative_to(tmp_path / "market").as_posix() for p in written] == [
+            "vix_futures_daily/vix_futures_daily_2026.parquet"]
+        rec = db.read_market_partitions("vix_futures_daily")
+        assert len(rec) == len(set(zip(hist["date"], hist["expiry_date"])) | set(zip(settle["date"],
+                                                                                  settle["expiry_date"])))
+        oct9 = rec[(rec["date"] == "2026-10-09") & (rec["expiry_date"] == "2026-10-21")].iloc[0]
+        assert oct9["settle"] == pytest.approx(17.1186)
+        assert oct9["symbol"] == "VX/V6"                                        # both sources merged
+        assert oct9["open_interest"] > 0
+        nov = rec[(rec["date"] == "2026-10-09") & (rec["expiry_date"] == "2026-11-18")].iloc[0]
+        assert pd.isna(nov["open"])                                             # settlement file only
+        assert pd.isna(nov["volume"])
+        assert db.export_market_partitions() == []                              # nothing changed
+        # the record keeps a row the database no longer holds (a later, shorter download)
+        self._fresh_db(monkeypatch, tmp_path / "next_run.db")
+        db.insert_vix_futures_daily(settle.assign(date="2026-10-12", settle=settle["settle"] + 0.1))
+        db.export_market_partitions(since="2026-10-01")
+        assert set(db.read_market_partitions("vix_futures_daily")["date"]) >= {"2026-10-09", "2026-10-12"}
+        self._fresh_db(monkeypatch, tmp_path / "clean_clone.db")
+        n = db.import_market_partitions()["vix_futures_daily"]
+        assert n == len(db.read_market_partitions("vix_futures_daily"))
+        curve = db.get_vix_futures_curve("2026-10-09")
+        assert curve["settle"].tolist() == pytest.approx(
+            settle.loc[settle["expiry_date"] > "2026-10-09", "settle"].tolist())
+
     def test_option_chain_export_import(self, tmp_db, tmp_path, monkeypatch):
         rows = TestOptionSnapshots.ROWS + [("2026-10-16", 7800.0, "C", "SPXW", 61.7, 62.0)]
         db.insert_options_snapshot(chain("2026-10-09", rows, source="cboe", underlying_price=7811.54,
@@ -1156,7 +1197,8 @@ class TestC23ReferenceTables:
         db.insert_rates_daily(pd.DataFrame({"date": ["2026-10-16"], "series": ["SOFR"], "value": [0.0388],
                                             "source": ["fred"]}))
         assert db.export_market_partitions() == []
-        assert db.MARKET_TABLES == ("spx_ohlcv", "vix_daily", "vix_term_structure", "tbill_rates")
+        assert db.MARKET_TABLES == ("spx_ohlcv", "vix_daily", "vix_term_structure", "tbill_rates",
+                                    "vix_futures_daily")
         written = db.export_market_partitions(tables=db.REFERENCE_TABLES)
         assert sorted(p.name for p in written) == ["cboe_index_daily_2026.parquet",
                                                    "rates_daily_2026.parquet"]

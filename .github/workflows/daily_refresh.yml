@@ -10,7 +10,11 @@ name: Daily Market Refresh
 #          (source 'yfinance') until a later run (the book slot runs `market` again)
 #          stores Cboe's print over it. The Treasury bill/par files and NY Fed SOFR
 #          feed rates_daily, the discount curve (stale after 7 days by design).
-#          Commits the labels and the market partitions (rates_daily included).
+#          Cboe's VX futures settlements of each session since the newest stored
+#          (cloud_refresh.refresh_vx_futures; a failed or late download is a
+#          warning, never a failure of the slot; the book slot retries).
+#          Commits the labels and the market partitions (rates_daily and
+#          vix_futures_daily included).
 #
 #   book   02:30 UTC Tue-Sat   market,capture,calibrate,freeze   (+ retry 04:30 UTC)
 #          The SPX option chain needs live two-sided quotes. After 16:15 ET Cboe's book
