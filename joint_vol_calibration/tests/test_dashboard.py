@@ -4820,6 +4820,26 @@ def test_new_model_risk_checks_read_their_artifacts(dash):
     assert d["rate_reference"]["status"] == ("ok" if kind == "treasury_curve" else "watch")
 
 
+def test_rate_reference_note_reads_the_curve_age_limit_from_the_code(dash, monkeypatch):
+    """M19's note typed 'refused when older than 7 days'. The limit is the
+    default of rates.get_zero_curve (the calibrator does not override it), so a
+    changed default must change the page: here it is moved to 5."""
+    import inspect
+
+    from joint_vol_calibration.data import rates
+
+    default = inspect.signature(rates.get_zero_curve).parameters["max_age_days"].default
+    assert dash.curve_max_age_days() == default
+    moved, original = default - 2, rates.get_zero_curve
+
+    def patched(as_of, *, max_age_days=moved, same_day=True, root=None):
+        return original(as_of, max_age_days=max_age_days, same_day=same_day, root=root)
+    monkeypatch.setattr(rates, "get_zero_curve", patched)
+    d = {c["key"]: c for c in dash.load_model_risk()["monitors"]}
+    assert f"missing or older than {moved} days" in d["rate_reference"]["note"]
+    assert f"older than {default} days" not in d["rate_reference"]["note"]
+
+
 def test_by_design_breaches_are_apart_from_live_ones(dash, pages):
     """CIO-14: half the BREACH rows were permanent by design (the research
     classifier below persistence, the VX futures table the daily job does not

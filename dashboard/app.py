@@ -6720,6 +6720,17 @@ RESEARCH_BY_DESIGN = ("research tier: the model feeds no published number and ne
                       "of its baseline is the published negative result, not a failure")
 
 
+def curve_max_age_days() -> int:
+    """The age (calendar days) past which the calibrator refuses the Treasury
+    curve and falls back to ^IRX: the default of rates.get_zero_curve, which
+    joint_calibrator.reference_rate calls without overriding it. Model Risk
+    typed '7 days'."""
+    import inspect
+
+    from joint_vol_calibration.data import rates
+    return int(inspect.signature(rates.get_zero_curve).parameters["max_age_days"].default)
+
+
 def by_design(checks: Sequence[dict], tiers: dict[str, str]) -> list[dict]:
     """``checks`` with each watch or breach that holds by design set to status
     'design', with the reason (by_design) and the status its limits give
@@ -6988,10 +6999,12 @@ def load_model_risk() -> dict[str, Any]:
         "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
     # M19: the rate reference of the headline fit: the Treasury zero curve, or ^IRX if the curve was refused
     rk = p2.get("r_ref_kind")
+    rk_text = {"treasury_curve": "Treasury zero curve", "irx": "^IRX"}.get(str(rk), str(rk))
     add(INV_RATES, "Rate reference of the headline fit (the Treasury zero curve, or the ^IRX fallback)", None,
-        "Treasury zero curve" if rk == "treasury_curve" else ("^IRX" if rk else "not recorded"), "", fit_art,
+        rk_text if rk else "not recorded", "", fit_art,
         (str(p2.get("r_ref_source") or "") + ". " if p2.get("r_ref_source") else "")
-        + "The curve is refused when older than 7 days; the fit then falls back to ^IRX and records it.",
+        + f"The curve is refused when missing or older than {_fmt(curve_max_age_days(), '.0f')} days; "
+        "the fit then falls back to ^IRX and records it.",
         status="ok" if rk == "treasury_curve" else ("watch" if rk else "na"),
         limits_text="OK on the curve · watch on ^IRX", key="rate_reference")
     # M3: β drift — the newest stored chain against the frozen backtest β
