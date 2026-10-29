@@ -1,0 +1,121 @@
+name: reproduce
+
+# Weekly: rebuild the committed artifacts from the committed captures in a scratch copy
+# and diff them against what is committed (make reproduce; docs/reproduce.md), then commit
+# the result, data_store/reproduce/status.json (commit, run, finished_utc, n_checks, n_ok,
+# n_exact, max_deviation, failed), which the Model Risk page prints: "Last reproduced
+# <date>: k of n artifacts within tolerance (b exact)". The owner approved this one writer
+# under data_store/ besides the daily bot: a single file that only this workflow writes,
+# so it never conflicts with the bot's commits (scripts/ci/commit_and_push.sh rebases).
+# A failure opens, or comments on, one issue labelled reproduce-failure.
+#
+# This was a job in tests.yml, whose result went only to a 30-day artifact, and whose
+# concurrency group cancels a running job when main moves (a merge during the Monday run
+# killed it). Its own group here never cancels a run in progress.
+on:
+  schedule:
+    - cron: "41 6 * * 1"       # Monday 06:41 UTC, between the bot's 04:30 retry and 22:07 close
+  workflow_dispatch:
+
+permissions:
+  contents: write              # commit data_store/reproduce/status.json to main
+  issues: write                # the failure issue (scripts/ci/bot_alert.py)
+  actions: read
+
+concurrency:
+  group: reproduce
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  reproduce:
+    name: rebuild committed artifacts (make reproduce)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false   # no write token in .git/config while PyPI code runs
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install dependencies (locked)
+        run: python -m pip install --require-hashes -r requirements-lock.txt
+
+      # The raw Cboe books held in the private data repository, when it is configured
+      # (daily_refresh.yml, DATA_SOURCES.md): a reproduction step that reads a book finds
+      # it through CBOE_BOOKS_DIR (cboe_downloader.find_books).
+      - name: Private Cboe book store
+        id: cboestore
+        continue-on-error: true
+        env:
+          CBOE_DATA_REPO: ${{ secrets.CBOE_DATA_REPO }}
+          CBOE_DATA_TOKEN: ${{ secrets.CBOE_DATA_TOKEN }}
+        run: |
+          if [ -z "$CBOE_DATA_REPO" ] || [ -z "$CBOE_DATA_TOKEN" ]; then echo "Not configured."; exit 0; fi
+          d=$(python scripts/ci/cboe_private.py checkout --dir "$RUNNER_TEMP/cboe-data" --repo "$CBOE_DATA_REPO" | tail -1)
+          echo "books_dir=$d" >> "$GITHUB_OUTPUT"
+
+      # Writes the status JSON whatever the outcome (exit 1: an artifact outside its
+      # tolerance), so a failed reproduction is committed and shown too.
+      - name: Rebuild in a scratch copy and diff against the committed artifacts
+        id: reproduce
+        env:
+          CBOE_BOOKS_DIR: ${{ steps.cboestore.outputs.books_dir }}
+        run: make reproduce OUT="$RUNNER_TEMP/reproduce" STATUS=data_store/reproduce/status.json
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/reproduce/report.md" ]; then
+            cat "$RUNNER_TEMP/reproduce/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the reproduction report and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: reproduce-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/reproduce/report.md
+            ${{ runner.temp }}/reproduce/report.json
+            ${{ runner.temp }}/reproduce/logs
+            data_store/reproduce/status.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Commit the result
+        if: always() && steps.reproduce.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          f=data_store/reproduce/status.json
+          if [ ! -f "$f" ]; then echo "::error::make reproduce wrote no $f"; exit 1; fi
+          line=$(python -c "import json,sys; s=json.load(open(sys.argv[1])); print(f\"{s['n_ok']} of {s['n_checks']} artifacts within tolerance ({s['n_exact']} exact)\")" "$f")
+          scripts/ci/commit_and_push.sh "Weekly reproduction: $line" \
+            "make reproduce at ${GITHUB_SHA::7} (run ${GITHUB_RUN_ID}); data_store/reproduce/status.json is shown on Model Risk." \
+            "$f"
+
+      - name: Open or update the failure issue
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >
+          python scripts/ci/bot_alert.py --workflow reproduce.yml --run-id "$RUN_ID" --event "$EVENT"
+          --run-url "$RUN_URL" --label reproduce-failure --alert-after 1 --all-events
+          --title "make reproduce failed" --body-file "$RUNNER_TEMP/reproduce/report.md"

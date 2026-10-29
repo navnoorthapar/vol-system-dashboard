@@ -10,6 +10,8 @@ for the artifacts added in C23, written against what their producers write:
 | `data_store/backtest/inference/` | `scripts/inference_report.py` (`joint_vol_calibration/stats`) | `inference_summary/1` |
 | `data_store/forward/ledger_<session>.json` | `joint_vol_calibration/backtest/forward_ledger.py` | `forward_ledger/1` |
 | `data_store/greeks/scenario_grid.parquet` | `joint_vol_calibration/greeks/scenario_grid.py` (the daily bot rebuilds it from each new headline fit) | section 5 |
+| `data_store/runs/run_<run_utc>_<slot>.json` | `scripts/cloud_refresh.py` (`run_record`, one per daily-workflow run) | `run_ledger/1`, section 6 |
+| `data_store/reproduce/status.json` | `scripts/ci/reproduce.py --status` (the weekly `.github/workflows/reproduce.yml`) | `reproduce_status/1`, section 7 |
 
 `dashboard/desk_artifacts.py` is the executable form of this file. If the two
 disagree, the code is what runs, and this file should be fixed to match it.
@@ -150,6 +152,24 @@ The headline result pickle's own `identifiability` and `multistart` keys win whe
 
 - `(spot_shock_pct, vol_shock_vp[, dynamics])` must be unique.
 - Parquet key-value metadata `b"scenario_provenance"` holds a JSON object with `book` (description), `as_of_date` and `units`. These are shown under the grid. The producer also records `source.calibration_file`, the parameters, carry, strike, forward, hedge delta, the shock lists and `n_vol_floored`, and writes the extra columns `spot`, `iv_strike`, `straddle_value`, `hedge_pnl` and `vol_floored`.
+
+## 6. Run records: `data_store/runs/run_<run_utc>_<slot>.json`
+
+**Producer:** `scripts/cloud_refresh.py` when `REFRESH_SLOT` is set (the daily workflow sets it to `close`, `book` or `manual`), once before the freeze (`complete: false`) and again at the end of the run (`complete: true`); committed with the captures after `scripts/ci/check_captures.py` reads each back. **Consumer:** the stale-calibration banner (Overview and Calibration, `app.calibration_stale_cause`): when the newest run that tried a session after the headline fit's did not store a fit, the banner names it ("The gate rejected <session> (<slot>): <reason>").
+
+- `schema == "run_ledger/1"`; `run_utc` and `slot` match the file name.
+- `calibration`: `status` (`accepted`, `rejected`, `skipped`, `exists`, `failed`), `reason` (the gate's, first line), `session`, `chain` (the quote state of the chain it fitted: raw, two-sided and near-ATM counts, near-ATM two-sided share, quote time, T origin); `null` when the run did not calibrate.
+- `capture`, `forward_ledger`, `artifacts`, `backfill`, `headline_calibration`, `freeze`, `exit_code`, `publishable`, `publish_blockers`, `errors`, `warnings`, `timings_s` (seconds per step and in total) and `github` (`sha`, `run_id`, `run_attempt`, `event`, `ref`).
+- A record that cannot be read is skipped with a log line (it explains a banner; it is not a number on a page).
+
+## 7. Reproduction status: `data_store/reproduce/status.json`
+
+**Producer:** `scripts/ci/reproduce.py --status` (`status_record`), run and committed weekly by `.github/workflows/reproduce.yml`, the only writer of this path. **Consumer:** the Model Risk page head (`app.reproduce_status`): "Last reproduced <date>: k of n artifacts within tolerance (b exact)", the date linking to the run; "Not yet reproduced" without the file.
+
+- `schema == "reproduce_status/1"`; `commit` (full SHA), `run_url` (or `null` outside Actions), `finished_utc` (ISO 8601, UTC), `full`.
+- `n_checks >= 1`, `n_ok` (within tolerance, no structural problem), `n_exact` (within tolerance with deviation exactly 0); `0 <= n_exact <= n_ok <= n_checks`, integers.
+- `max_deviation`, `max_deviation_artifact` (the largest finite relative deviation; `null` when none), `failed` (`artifact`, `deviation` or `null` for NaN, `tolerance`, `problems`).
+- A file that breaks any of these is logged and the page says "Not yet reproduced".
 
 ## Producing an artifact
 

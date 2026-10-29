@@ -78,3 +78,6 @@ GRILL_NOTES.md
 # SQLite WAL sidecars (transient)
 data_store/vol_system.db-wal
 data_store/vol_system.db-shm
+
+# The deploy streak the daily workflow writes before the freeze (scripts/ci/deploy_streak.py)
+.deploy-streak.json*

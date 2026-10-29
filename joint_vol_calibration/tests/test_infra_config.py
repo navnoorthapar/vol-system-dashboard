@@ -63,13 +63,77 @@ def test_no_hand_typed_test_counts_in_ci():
     assert not re.search(r"\d+ passed", TESTS + DAILY)
 
 
+def _requirements(path):
+    """The requirement entries of a pip requirements file as ``(pin, options)``:
+    backslash continuations joined, comments and global options (``--index-url``)
+    dropped, so ``name==1.0 \\`` followed by ``--hash=sha256:...`` lines is one
+    entry ``("name==1.0", ["--hash=sha256:..."])``."""
+    text = re.sub(r"\\\s*\n", " ", Path(path).read_text())
+    entries = []
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].strip()
+        if not line or line.startswith(("#", "-")):
+            continue
+        pin, *options = line.split()
+        entries.append((pin, options))
+    return entries
+
+
+def _lock_pins():
+    return {pin.split("==")[0].lower(): pin.split("==", 1)[1]
+            for pin, _ in _requirements(ROOT / "requirements-lock.txt")}
+
+
 def test_lock_pins_every_package_and_uses_cpu_torch():
-    lines = [ln.strip() for ln in (ROOT / "requirements-lock.txt").read_text().splitlines()
-             if ln.strip() and not ln.startswith(("#", "--"))]
-    assert lines and all(re.fullmatch(r"[A-Za-z0-9_.\-\[\]]+==\S+", ln) for ln in lines), lines
-    names = {ln.split("==")[0].lower() for ln in lines}
+    entries = _requirements(ROOT / "requirements-lock.txt")
+    pins = [pin for pin, _ in entries]
+    assert pins and all(re.fullmatch(r"[A-Za-z0-9_.\-\[\]]+==\S+", p) for p in pins), pins
+    names = {p.split("==")[0].lower() for p in pins}
     assert not any(n.startswith(("nvidia-", "triton")) for n in names)
-    assert any(ln.startswith("torch==") and ln.endswith("+cpu") for ln in lines)
+    assert any(p.startswith("torch==") and p.endswith("+cpu") for p in pins)
+
+
+_HASHED_LOCKS = ("requirements-lock.txt", "scripts/ci/pip_audit_lock.txt")
+
+
+def test_every_lock_pin_is_hashed_and_every_install_requires_hashes():
+    """FUND_GRADE_PLAN 0.6 / CODE-08: the lock pinned versions only, and the bot
+    (which can push to main and gh-pages) installed whatever either index served
+    under those version strings. Every pin of both locks now carries the SHA-256
+    of each file it may install, and every install of a lock, and every pip
+    install in a workflow, runs with --require-hashes, so pip refuses any other
+    file. (The Dockerfile's and the Makefile's non-x86_64 fallbacks resolve the
+    ranges of requirements-dev.txt and are the only unhashed installs.)"""
+    for lock in _HASHED_LOCKS:
+        entries = _requirements(ROOT / lock)
+        assert entries, lock
+        for pin, options in entries:
+            assert re.fullmatch(r"[A-Za-z0-9_.\-]+==\S+", pin), (lock, pin)
+            hashes = [o for o in options if o.startswith("--hash=")]
+            assert hashes, f"{lock}: {pin} has no --hash"
+            assert hashes == options, (lock, pin, options)
+            assert all(re.fullmatch(r"--hash=sha256:[0-9a-f]{64}", h) for h in hashes), (lock, pin)
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    sources = {p.relative_to(ROOT).as_posix(): p.read_text() for p in workflows}
+    for name in ("Dockerfile", "Makefile"):
+        sources[name] = (ROOT / name).read_text()
+    lock_installs = 0
+    for name, text in sources.items():
+        joined = re.sub(r"\\\s*\n", " ", text)
+        commands = [c for ln in joined.splitlines() if not ln.lstrip().startswith("#")
+                    for c in re.split(r";|&&|\|\|", ln)]
+        for line in commands:
+            if not re.search(r"\bpip install\b", line):
+                continue
+            in_workflow = name.startswith(".github/")
+            if in_workflow or any(lock in line for lock in _HASHED_LOCKS):
+                assert "--require-hashes" in line, f"{name}: {line.strip()}"
+                assert any(f"-r {lock}" in line for lock in _HASHED_LOCKS), f"{name}: {line.strip()}"
+                lock_installs += 1
+            else:
+                assert "requirements-dev.txt" in line, f"{name}: an unhashed install: {line.strip()}"
+    assert lock_installs >= 3          # tests.yml, daily_refresh.yml, the Dockerfile at least
+    assert "--require-hashes" in _step(DAILY, "Install dependencies (locked)")
 
 
 def test_lock_keeps_the_security_floors():
@@ -80,9 +144,7 @@ def test_lock_keeps_the_security_floors():
 
     floors = {"idna": "3.15", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
     req = (ROOT / "requirements.txt").read_text()
-    pins = dict(re.findall(r"^([A-Za-z0-9_.\-]+)==(\S+)$", (ROOT / "requirements-lock.txt").read_text(),
-                           re.MULTILINE))
-    pins = {k.lower(): v for k, v in pins.items()}
+    pins = _lock_pins()
     for name, floor in floors.items():
         assert re.search(rf"^{name}>={re.escape(floor)}$", req, re.MULTILINE), name
         assert Version(pins[name]) >= Version(floor), (name, pins[name])
@@ -632,3 +694,315 @@ def test_check_captures_reads_every_new_capture_back(tmp_path):
         assert any(bad in e for e in errors), bad
     assert "other  data_store/options/notes.txt" in r.stdout
     assert "diagnostics" not in out.read_text()
+
+
+def test_the_run_record_is_committed_with_the_captures(tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.9: cloud_refresh's run record (data_store/runs/) is a
+    capture: written by the record writer itself, read back by check_captures
+    (a record whose name and content disagree, or another schema, is left out),
+    bundled before the gates and committed by the capture commit (the data commit
+    is its second chance). The workflow names the slot (REFRESH_SLOT)."""
+    import importlib.util
+    import json
+    import subprocess
+    import sys
+
+    spec = importlib.util.spec_from_file_location("cloud_refresh_runrec",
+                                                  ROOT / "scripts" / "cloud_refresh.py")
+    cr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cr)
+    *_, work, _ = _repo(tmp_path)
+    runs = work / "data_store" / "runs"
+    status = {"run_utc": "2026-10-28T02:31:05+00:00", "steps": ["market", "capture"], "errors": [],
+              "warnings": [], "exit_code": 0, "publishable": False, "publish_blockers": []}
+    good = cr.write_run_record(status, "book", directory=runs)
+    partial = cr.write_run_record({**status, "run_utc": "2026-10-28T04:31:00+00:00", "exit_code": None},
+                                  "book", complete=False, directory=runs)   # a run that stopped early
+    wrong = runs / "run_20261028T023105Z_close.json"                        # names another slot
+    wrong.write_text(good.read_text())
+    other = runs / "run_20261028T050000Z_manual.json"
+    other.write_text(json.dumps({"schema": "something_else/1"}))
+    out = tmp_path / "ok.txt"
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "check_captures.py"), "--out", str(out),
+                        "--root", str(work)], capture_output=True, text=True, check=False)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert out.read_text().split() == [f"data_store/runs/{good.name}", f"data_store/runs/{partial.name}"]
+    errors = [ln for ln in r.stdout.splitlines() if ln.startswith("::error")]
+    assert len(errors) == 2
+    assert wrong.name in errors[0] + errors[1]
+    assert other.name in errors[0] + errors[1]
+    refresh = _step(DAILY, "Run cloud_refresh.py")
+    assert "REFRESH_SLOT: ${{ steps.plan.outputs.slot }}" in refresh
+    assert "data_store/runs" in _step(DAILY, "Bundle this run's captures")
+    assert "data_store/runs" in _step(DAILY, "Commit data files")
+    assert set(re.findall(r'slot="(\w+)"', _step(DAILY, "Choose steps"))) <= set(cr.RUN_SLOTS)
+
+
+def test_the_bot_alerts_on_repeated_failure_and_reports_its_deploy_streak():
+    """FUND_GRADE_PLAN 0.4: the last step, on failure only and never fatal, runs
+    the alert (scripts/ci/bot_alert.py) with the permissions it needs; before the
+    run's freeze, the deploy streak is computed from gh-pages commit messages
+    into a gitignored file the Overview reads (never committed, so not under
+    data_store/), in a scratch repository (the checkout's remote is untouched)."""
+    import yaml
+
+    wf = yaml.safe_load(DAILY)
+    assert wf["permissions"] == {"contents": "write", "issues": "write", "actions": "read"}
+    steps = wf["jobs"]["refresh"]["steps"]
+    names = [s.get("name") for s in steps]
+    last = steps[-1]
+    assert last["name"] == "Alert on repeated failure"
+    assert last["if"] == "failure()"
+    assert last["continue-on-error"] is True
+    assert "scripts/ci/bot_alert.py" in last["run"]
+    assert {"GH_TOKEN", "GH_REPO", "RUN_ID", "EVENT"} <= set(last["env"])
+    st = steps[names.index("Deploy streak (gh-pages history)")]
+    assert names.index("Deploy streak (gh-pages history)") < names.index("Run cloud_refresh.py")
+    assert st["continue-on-error"] is True
+    for part in ("--filter=tree:0", 'git init -q --bare "$g"', 'git -C "$g"', "fetch -q --no-tags"):
+        assert part in st["run"], part
+    assert "scripts/ci/deploy_streak.py --out .deploy-streak.json" in st["run"]
+    assert ".deploy-streak.json" in (ROOT / ".gitignore").read_text()
+    assert 'DEPLOY_STREAK_FILE = ROOT / ".deploy-streak.json"' in (ROOT / "dashboard" / "app.py").read_text()
+    # the deploy commit message the streak parses
+    deploy = steps[names.index("Deploy to GitHub Pages")]["with"]["full_commit_message"]
+    assert deploy.startswith("Deploy session ${{ steps.refresh.outputs.session }} from ")
+
+
+def _fixture_ledgers():
+    """Two linked forward ledgers built by forward_ledger.step on the committed
+    test chains (tests/fixtures), not the bot's data."""
+    import pandas as pd
+
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    fix = Path(__file__).parent / "fixtures"
+
+    def chain(s):
+        d = pd.read_csv(fix / f"forward_spx_chain_{s}.csv", keep_default_na=False, na_values=[""])
+        d["root"] = d["root"].fillna("")
+        return d
+    sig = {s: {"position": 0, "kelly": 0.0} for s in ("s1", "s1c", "s2", "s3", "s4")}
+    a = fl.step(None, "2026-03-24", chain("2026-03-24"), sig)
+    b = fl.step(a, "2026-03-27", chain("2026-03-27"), sig)
+    return fl, a, b
+
+
+def test_check_captures_rejects_a_ledger_that_breaks_the_chain(tmp_path):
+    """FUND_GRADE_PLAN 0.10: a new forward ledger must link to the head of the
+    committed chain (its session and SHA-256), or be the chain's first file with
+    previous null, and may not come before a committed ledger; anything else is
+    left out of the capture commit (::error::), before test_forward_ledger.py's
+    chain test would find it on main."""
+    import copy
+    import json
+    import subprocess
+    import sys
+    fl, a, b = _fixture_ledgers()
+    *_, git, work, _ = _repo(tmp_path)
+    fwd = work / "data_store" / "forward"
+
+    def run():
+        out = tmp_path / "ok.txt"
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "ci" / "check_captures.py"), "--out",
+                            str(out), "--root", str(work)], capture_output=True, text=True, check=False)
+        return r.returncode, out.read_text().split(), r.stdout
+
+    def put(led, name=None):
+        p = fwd / (name or f"ledger_{led['session']}.json")
+        p.unlink(missing_ok=True)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(led))
+        return f"data_store/forward/{p.name}"
+
+    first = put(a)                                   # the chain's first file: previous null
+    assert run()[:2] == (0, [first])
+    git("add", "-A", cwd=work)
+    git("commit", "-qm", "first ledger", cwd=work)
+    rel = put(b)                                     # links to the committed head
+    assert run()[:2] == (0, [rel])
+    forged = copy.deepcopy(b)
+    forged["previous"]["sha256"] = "0" * 64
+    put(forged)
+    code, ok, out = run()
+    assert (code, ok) == (1, [])
+    assert "does not link to the head of the chain" in out
+    put({**copy.deepcopy(b), "previous": None})      # a second genesis
+    assert run()[:2] == (1, [])
+    (fwd / f"ledger_{b['session']}.json").unlink()
+    head = fl.load_ledger(fwd / f"ledger_{a['session']}.json")
+    tampered = copy.deepcopy(head)                   # one number of the committed head edited
+    tampered["inputs"]["chain_rows_two_sided"] += 1
+    assert fl.ledger_sha256(tampered) != b["previous"]["sha256"]
+    (fwd / f"ledger_{a['session']}.json").write_text(json.dumps(tampered))
+    put(b)
+    assert run()[:2] == (1, [])                      # b no longer links to what is on disk
+    git("checkout", "--", "data_store/forward", cwd=work)
+    older = {**copy.deepcopy(a), "session": "2026-03-20"}   # before the committed head
+    put(older)
+    put(b)
+    code, ok, out = run()
+    assert ok == [f"data_store/forward/ledger_{b['session']}.json"]
+    assert "the ledger chain only grows at its head" in out
+
+
+def test_each_new_ledger_is_attested_after_the_capture_commit():
+    """FUND_GRADE_PLAN 0.10: the ledger files the capture commit took are attested
+    (Sigstore build provenance, logged in Rekor) by a job of their own that alone
+    holds id-token: write, pinned by commit SHA like every action, never failing
+    the run."""
+    import yaml
+
+    wf = yaml.safe_load(DAILY)
+    refresh = wf["jobs"]["refresh"]
+    assert "id-token" not in wf["permissions"]
+    assert refresh["outputs"]["ledgers"] == "${{ steps.ledgers.outputs.paths }}"
+    assert refresh["outputs"]["capture_sha"] == "${{ steps.commitcaptures.outputs.sha }}"
+    names = [s.get("name") for s in refresh["steps"]]
+    led = refresh["steps"][names.index("New forward ledger files")]
+    assert names.index("Commit captures") < names.index("New forward ledger files")
+    assert "steps.commitcaptures.outcome == 'success'" in led["if"]
+    assert "captures.ok" in led["run"]
+    assert "paste -sd," in led["run"]               # actions/attest reads subject-path as CSV
+    job = wf["jobs"]["attest-ledger"]
+    assert job["needs"] == "refresh"
+    assert job["continue-on-error"] is True
+    assert "needs.refresh.outputs.ledgers != ''" in job["if"]
+    assert job["permissions"] == {"contents": "read", "id-token": "write", "attestations": "write"}
+    checkout, attest = job["steps"]
+    assert checkout["with"]["ref"] == "${{ needs.refresh.outputs.capture_sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert re.fullmatch(r"actions/attest-build-provenance@[0-9a-f]{40}", attest["uses"])
+    assert attest["with"]["subject-path"] == "${{ needs.refresh.outputs.ledgers }}"
+
+
+def _raw_book(d, stem, rows=3):
+    """A raw Cboe book pair as cboe_downloader.save_capture writes it (synthetic quotes)."""
+    import json
+
+    import pandas as pd
+    und, session = stem.split("_")[0], stem.split("_")[1]
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"snapshot_date": [session] * rows, "bid": [1.0 + i for i in range(rows)],
+                  "ask": [1.5 + i for i in range(rows)]}).to_parquet(d / f"{stem}.parquet", index=False)
+    (d / f"{stem}.json").write_text(json.dumps({
+        "underlying": und.upper(), "session": session, "quote_time": f"{session}T21:00:00Z",
+        "book_state": "closing", "sha256": "ab" * 32, "rows": rows, "two_sided_rows": rows, "expiries": 1}))
+    return d / f"{stem}.parquet"
+
+
+def test_raw_cboe_books_go_to_the_private_store_and_only_manifests_stay_public(tmp_path):
+    """CITSEC-06, the owner's decision: with the private data repository
+    configured, the run's raw books are copied into its checkout, pushed, checked
+    byte-identical, given a public manifest and removed from the public tree; the
+    capture check then lists the manifests and never a raw book. A book the
+    private repository did not take gets no manifest and stays out of every
+    public commit."""
+    import json
+    import subprocess
+    import sys
+
+    *_, git, work, _ = _repo(tmp_path)
+    remote = tmp_path / "private.git"
+    git("init", "--bare", "-q", str(remote), cwd=tmp_path)
+    seed = tmp_path / "seed"
+    git("clone", "-q", str(remote), str(seed), cwd=tmp_path)
+    (seed / "README.md").write_text("private raw Cboe books\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "init", cwd=seed)
+    git("push", "-q", "origin", "HEAD:main", cwd=seed)
+    script = [sys.executable, str(ROOT / "scripts" / "ci" / "cboe_private.py")]
+    priv, lst = tmp_path / "cboe-data", tmp_path / "private.lst"
+
+    def run(*a):
+        return subprocess.run([*script, *a, "--root", str(work)], capture_output=True, text=True, check=False)
+    r = run("checkout", "--dir", str(priv), "--repo", str(remote))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip().splitlines()[-1] == str(priv / "options" / "cboe")
+    pub = work / "data_store" / "options" / "cboe"
+    books = [_raw_book(pub, "spx_2026-10-27_023000Z"), _raw_book(pub, "vix_2026-10-27_023001Z", rows=2)]
+    assert run("export", "--dir", str(priv), "--list", str(lst)).returncode == 0
+    listed = lst.read_text().split()
+    assert sorted(listed) == sorted(f"data_store/options/cboe/{p.name}" for b in books
+                                    for p in (b, b.with_suffix(".json")))
+    assert not (work / "data_store" / "options" / "cboe_manifest").exists()   # none before the push
+    assert run("push", "--dir", str(priv), "--message", "books").returncode == 0
+    held = git("ls-tree", "-r", "--name-only", "main", cwd=remote).split()
+    assert sorted(held) == sorted(["README.md", *(f"options/cboe/{p.name}" for b in books
+                                                  for p in (b, b.with_suffix(".json")))])
+    r = run("finish", "--dir", str(priv), "--repo", "owner/books", "--list", str(lst))
+    assert r.returncode == 0, r.stdout
+    assert not list(pub.glob("*"))                                 # the public raw copies are gone
+    man = sorted((work / "data_store" / "options" / "cboe_manifest").glob("*.json"))
+    assert [m.stem for m in man] == [b.stem for b in books]
+    assert json.loads(man[0].read_text())["private_path"] == f"options/cboe/{books[0].name}"
+    out = tmp_path / "ok.txt"
+    check = [sys.executable, str(ROOT / "scripts" / "ci" / "check_captures.py"), "--out", str(out),
+             "--root", str(work), "--no-raw-cboe"]
+    r = subprocess.run(check, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stdout
+    assert out.read_text().split() == [f"data_store/options/cboe_manifest/{m.name}" for m in man]
+    # a book the private repository did not take: no manifest, never listed for a public commit
+    late = _raw_book(pub, "spx_2026-10-28_023000Z")
+    r = subprocess.run(check, capture_output=True, text=True, check=False)
+    assert f"data_store/options/cboe/{late.name}" not in out.read_text()
+    assert "::warning title=Raw Cboe book::" in r.stdout
+    assert run("export", "--dir", str(priv), "--list", str(lst)).returncode == 0
+    (priv / "options" / "cboe" / late.name).write_bytes(b"not the same book")
+    r = run("finish", "--dir", str(priv), "--repo", "owner/books", "--list", str(lst))
+    assert r.returncode == 1
+    assert "the private copy is missing or differs" in r.stdout
+    assert late.exists()
+    assert not (work / "data_store" / "options" / "cboe_manifest" / f"{late.stem}.json").exists()
+    # a malformed manifest fails the capture check
+    bad = work / "data_store" / "options" / "cboe_manifest" / "spx_2026-10-29_023000Z.json"
+    bad.write_text(json.dumps({**json.loads(man[0].read_text()), "stem": "spx_2026-10-29_023000Z",
+                               "session": "2026-10-29", "parquet_sha256": "x"}))
+    r = subprocess.run(check, capture_output=True, text=True, check=False)
+    assert r.returncode == 1
+    assert "no parquet_sha256" in r.stdout
+
+
+def test_the_workflow_keeps_raw_books_out_of_public_commits_when_the_private_store_is_set():
+    """The workflow side: the private store is used only when both secrets are set
+    (otherwise a warning says raw books are still committed publicly); when set,
+    cloud_refresh reads earlier books from its checkout, this run's books are moved
+    before the bundle, and the bundle, the capture check and the data commit all
+    leave data_store/options/cboe out. reproduce.yml checks the store out too."""
+    import yaml
+
+    wf = yaml.safe_load(DAILY)
+    steps = wf["jobs"]["refresh"]["steps"]
+    names = [s.get("name") for s in steps]
+    store = steps[names.index("Private Cboe book store")]
+    assert store["continue-on-error"] is True
+    assert store["env"] == {"CBOE_DATA_REPO": "${{ secrets.CBOE_DATA_REPO }}",
+                            "CBOE_DATA_TOKEN": "${{ secrets.CBOE_DATA_TOKEN }}"}
+    run = store["run"]
+    assert '[ -z "$CBOE_DATA_REPO" ] || [ -z "$CBOE_DATA_TOKEN" ]' in run
+    assert "raw Cboe option books are being committed to this public repository" in run
+    assert run.index('echo "configured=true"') < run.index("cboe_private.py checkout")
+    assert names.index("Private Cboe book store") < names.index("Run cloud_refresh.py")
+    refresh = steps[names.index("Run cloud_refresh.py")]
+    assert refresh["env"]["CBOE_BOOKS_DIR"] == "${{ steps.cboestore.outputs.books_dir }}"
+    move = steps[names.index("Move this run's raw Cboe books to the private store")]
+    i_move = names.index("Move this run's raw Cboe books to the private store")
+    assert names.index("Run cloud_refresh.py") < i_move < names.index("Bundle this run's captures")
+    assert "steps.cboestore.outputs.configured == 'true'" in move["if"]
+    order = [move["run"].index(f"cboe_private.py {c}") for c in ("export", "push", "finish")]
+    assert order == sorted(order)
+    for name in ("Bundle this run's captures", "Commit data files"):
+        st = steps[names.index(name)]
+        assert st["env"]["PRIVATE_BOOKS"] == "${{ steps.cboestore.outputs.configured }}", name
+        assert "raw=(':(exclude)data_store/options/cboe')" in st["run"], name
+        assert '"${raw[@]}"' in st["run"], name
+    cc = steps[names.index("Check the captures (integrity only)")]
+    assert "flag=(--no-raw-cboe)" in cc["run"]
+    assert '"${flag[@]}"' in cc["run"]
+    repro = yaml.safe_load((ROOT / ".github" / "workflows" / "reproduce.yml").read_text())
+    rsteps = {s.get("name"): s for s in repro["jobs"]["reproduce"]["steps"]}
+    assert "cboe_private.py checkout" in rsteps["Private Cboe book store"]["run"]
+    rebuild = rsteps["Rebuild in a scratch copy and diff against the committed artifacts"]
+    assert rebuild["env"]["CBOE_BOOKS_DIR"] == "${{ steps.cboestore.outputs.books_dir }}"
+    doc = (ROOT / "DATA_SOURCES.md").read_text()
+    for part in ("CBOE_DATA_REPO", "CBOE_DATA_TOKEN", "Contents: Read and write", "cboe_manifest"):
+        assert part in doc, part

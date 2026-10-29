@@ -2331,8 +2331,8 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     the stored records state them."""
     pl = dash.pipeline_state(dash.artifacts.load_diagnostics_summary(dash.DATA))
     text = _visible_text(pages["/"])
-    cboe = SHIPPED / "options" / "cboe"
-    caps = sorted(cboe.glob("*.json")) if cboe.is_dir() else []
+    caps = [f for sub in ("cboe", "cboe_manifest") if (SHIPPED / "options" / sub).is_dir()
+            for f in sorted((SHIPPED / "options" / sub).glob("*.json"))]
     for rec in (json.loads(f.read_text()) for f in caps):
         latest = next(c for c in pl["captures"] if c["underlying"] == rec["underlying"])
         if latest["file"].startswith(f"{rec['underlying'].lower()}_{rec['session']}"):
@@ -2341,6 +2341,72 @@ def test_overview_pipeline_panel_reads_the_stored_records(dash, pages):
     assert f"{len(pl['surface_sessions'])} sessions" in text
     if pl["forward"]["state"] != "ok":
         assert dash.forward_ledger_protocol()["pending"] in text
+
+
+def test_pipeline_panel_reads_books_held_in_the_private_store(dash, tmp_path):
+    """CITSEC-06: once the raw books go to the private data repository the public
+    tree keeps a manifest of each (data_store/options/cboe_manifest/); the
+    pipeline panel's newest book per underlying reads those as it reads the
+    records beside committed books."""
+    opts = tmp_path / "options"
+    (opts / "cboe").mkdir(parents=True)
+    (opts / "cboe_manifest").mkdir()
+    old = {"underlying": "SPX", "session": "2026-10-20", "quote_time": "2026-10-21T03:32:10Z", "rows": 5}
+    new = {"schema": "cboe_manifest/1", "underlying": "SPX", "session": "2026-10-27",
+           "quote_time": "2026-10-28T02:15:00Z", "rows": 7, "private_path": "options/cboe/x.parquet"}
+    vix = {"underlying": "VIX", "session": "2026-10-20", "quote_time": "2026-10-21T03:32:11Z", "rows": 2}
+    (opts / "cboe" / "spx_2026-10-20_040622Z.json").write_text(json.dumps(old))
+    (opts / "cboe" / "vix_2026-10-20_040625Z.json").write_text(json.dumps(vix))
+    (opts / "cboe_manifest" / "spx_2026-10-27_023000Z.json").write_text(json.dumps(new))
+    got = {c["underlying"]: c for c in dash.latest_cboe_captures(tmp_path)}
+    assert (got["SPX"]["session"], got["SPX"]["rows"], got["SPX"]["file"]) == (
+        new["session"], new["rows"], "spx_2026-10-27_023000Z.json")
+    assert got["VIX"]["session"] == vix["session"]
+    (opts / "cboe_manifest" / "spx_2026-10-28_023000Z.json").write_text("{not json")
+    with pytest.raises(ValueError, match=r"options/cboe_manifest/spx_2026-10-28_023000Z\.json"):
+        dash.latest_cboe_captures(tmp_path)
+
+
+def test_overview_pipeline_panel_prints_the_deploy_streak(dash, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.4: the daily workflow writes the deploy streak
+    (scripts/ci/deploy_streak.py, from the gh-pages deploy commits) before it
+    freezes; the pipeline panel prints it from that file. A local freeze has no
+    file and no row, and a file that is not a whole record is no row either."""
+    from datetime import date, timedelta
+    f = tmp_path / ".deploy-streak.json"
+    monkeypatch.setattr(dash, "DEPLOY_STREAK_FILE", f)
+
+    errors0 = _errors(dash.app.test_client().get("/"))
+
+    def row():
+        resp = dash.app.test_client().get("/")
+        assert _errors(resp) == errors0                      # the streak file is never a loader error
+        html = resp.get_data(as_text=True)
+        m = re.search(r'<tr id="deploy-streak">(.*?)</tr>', html, re.DOTALL)
+        return " ".join(_visible_text("<body>" + m.group(1)).split()) if m else None
+
+    assert row() is None                                     # no file: no row, no error
+    through = date(2026, 1, 2) + timedelta(days=400)          # a synthetic record: any dates
+    first = through - timedelta(days=17)
+    n = 13
+    f.write_text(json.dumps({"schema": "deploy_streak/1", "streak": n, "first": first.isoformat(),
+                             "through": through.isoformat(), "deploys": n + 2}))
+    want = {"streak": n, "first": first.isoformat(), "through": through.isoformat()}
+    assert dash.deploy_streak() == want
+    text = row()
+    assert text == (f"Deployed (gh-pages) {n} consecutive NYSE sessions, "
+                    f"{first.isoformat()} → {through.isoformat()}")
+    f.write_text(json.dumps({"schema": "deploy_streak/1", "streak": 1, "first": through.isoformat(),
+                             "through": through.isoformat()}))
+    assert f"1 consecutive NYSE session, {through.isoformat()} → {through.isoformat()}" in row()
+    for bad in ("{not json", json.dumps({"schema": "deploy_streak/1", "streak": 0, "first": None,
+                                         "through": None}),
+                json.dumps({"schema": "other/1", "streak": 3, "first": "2026-01-02",
+                            "through": "2026-01-06"}),
+                json.dumps({"schema": "deploy_streak/1", "streak": "3", "first": "a", "through": "b"})):
+        f.write_text(bad)
+        assert dash.deploy_streak() is None, bad
+        assert row() is None, bad
 
 
 def test_rough_vs_heston_panel_lists_every_diagnosed_session(dash, art):
@@ -2653,6 +2719,49 @@ def test_calibration_page_reads_the_diagnostics_and_the_quote_smiles(dash, art):
         q = h[h["expiry"] == e]
         assert (f"{len(q)} quotes, {int(q['in_sample'].sum())} of them fit anchors; Heston inside the bid–ask on "
                 f"{q['inside_spread'].mean() * 100:.0f}%") in text, e
+
+
+def test_model_risk_prints_the_last_reproduction(dash, pages, tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.3: the weekly make reproduce commits its result
+    (data_store/reproduce/status.json, scripts/ci/reproduce.py --status); Model
+    Risk prints 'Last reproduced <date>: k of n artifacts within tolerance (b
+    exact)' from it, every value read from the record, and 'Not yet reproduced'
+    without one. The shipped store's line is whatever its record says."""
+    import functools
+
+    def line(html):
+        m = re.search(r'<span id="reproduced">(.*?)</span></div>', html, re.DOTALL)
+        assert m
+        text = " ".join(_visible_text("<body>" + m.group(1)).split())
+        return re.sub(r"\s+([,):])", r"\1", re.sub(r"\(\s+", "(", text))   # tag edges, not page spaces
+
+    shipped = dash.reproduce_status()
+    text = line(pages["/model-risk"])
+    if shipped is None:
+        assert text.startswith("Not yet reproduced")
+    else:
+        assert text.startswith(f"Last reproduced {shipped['date']}: {shipped['n_ok']:,} of "
+                               f"{shipped['n_checks']:,} artifact")
+    f = tmp_path / "status.json"
+    orig = dash.reproduce_status
+    monkeypatch.setattr(dash, "reproduce_status", functools.partial(orig, f))
+    get = lambda: dash.app.test_client().get("/model-risk").get_data(as_text=True)   # noqa: E731
+    assert line(get()) == "Not yet reproduced (make reproduce, weekly)"
+    rec = {"schema": "reproduce_status/1", "commit": "e" * 40, "finished_utc": "2031-02-03T07:08:09+00:00",
+           "run_url": "https://github.com/o/r/actions/runs/5", "full": False, "n_checks": 17, "n_ok": 16,
+           "n_exact": 9, "max_deviation": 2e-9, "max_deviation_artifact": "c7",
+           "failed": [{"artifact": "c7"}]}
+    f.write_text(json.dumps(rec))
+    html = get()
+    assert line(html) == (f"Last reproduced {rec['finished_utc'][:10]}: {rec['n_ok']} of {rec['n_checks']} "
+                          f"artifacts within tolerance ({rec['n_exact']} exact) (make reproduce, weekly)")
+    assert f'<a href="{rec["run_url"]}">{rec["finished_utc"][:10]}</a>' in html
+    for bad in ({**rec, "n_ok": rec["n_checks"] + 1}, {**rec, "schema": "x/1"}, {**rec, "n_exact": "9"},
+                {**rec, "finished_utc": "yesterday"}):
+        f.write_text(json.dumps(bad))
+        assert line(get()).startswith("Not yet reproduced"), bad
+    f.write_text(json.dumps({**rec, "run_url": "javascript:alert(1)"}))
+    assert "javascript:" not in get()
 
 
 def test_model_risk_checks_use_the_surface_artifacts(dash, art):
@@ -4450,15 +4559,69 @@ def test_stale_calibration_banner_names_its_cause_from_the_store(dash, synth):
     assert not any("No newer fit passed the quality gate" in c for c in causes)
 
 
+def _run_record(runs: Path, run_utc: str, slot: str, session: str, status: str, reason: str) -> None:
+    """A daily-job run record (scripts/cloud_refresh.py run_record, the fields the banner reads)."""
+    from datetime import UTC, datetime
+    t = datetime.fromisoformat(run_utc).astimezone(UTC)
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / f"run_{t:%Y%m%dT%H%M%SZ}_{slot}.json").write_text(json.dumps(
+        {"schema": "run_ledger/1", "run_utc": run_utc, "slot": slot, "complete": True,
+         "calibration": {"status": status, "reason": reason, "session": session, "chain": {}}}))
+
+
+def test_stale_banner_names_the_rejection_from_the_run_records(dash, synth):
+    """FUND_GRADE_PLAN 0.9 / VALIDATOR-15: with no later chain or fit stored (the
+    job stores neither for a rejected fit) the banner could only say the store
+    cannot tell a rejected fit from none. The daily job's run records
+    (data_store/runs) name the session the gate rejected, the slot and the
+    gate's reason; every expected string is built from the records written here."""
+    data, dates = synth["data"], synth["dates"]
+    cal_dir = data / "calibrations"
+    for p in cal_dir.glob("*.pkl"):
+        p.unlink()
+    old, mid, newer = (str(dates[i].date()) for i in (-11, -4, -3))
+    _write_cals(cal_dir, {f"joint_cal_{old}.pkl": _cal(old, 1.0)})
+    runs = data / "runs"
+    gate = "SPX IV RMSE above the gate's limit"
+    _run_record(runs, f"{mid}T23:30:00+00:00", "book", mid, "skipped", "no live two-sided quotes")
+    _run_record(runs, f"{newer}T23:30:00+00:00", "book", newer, "rejected", gate)
+    _run_record(runs, f"{newer}T23:59:00+00:00", "manual", newer, "skipped", "the book is another session's")
+    _run_record(runs, f"{newer}T22:07:00+00:00", "close", newer, "accepted", "ok")   # not a later failure
+    cause = dash.calibration_stale_cause(old)
+    assert cause == (f"The gate rejected {newer} (book): {gate} (3 runs after {old} tried a fit: "
+                     f"1 rejected, 2 skipped); the {old} fit is shown.")
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    b = re.search(r'data-stale="calibration"(.*?)</div>\s*</div>\s*</div>', html, re.DOTALL)
+    assert b
+    assert f"The gate rejected {newer} (book): {gate}" in _visible_text("<body>" + b.group(1))
+    # the Overview's staleness strip carries the same cause
+    assert f"The gate rejected {newer} (book)" in _visible_text(
+        dash.app.test_client().get("/").get_data(as_text=True))
+    (runs / "run_99999999T000000Z_book.json").write_text("{not json")       # skipped, not fatal
+    assert dash.calibration_stale_cause(old) == cause
+    for p in runs.glob("*.json"):
+        p.unlink()
+    _run_record(runs, f"{newer}T23:30:00+00:00", "book", newer, "skipped", "the session guard refused")
+    assert dash.calibration_stale_cause(old) == (
+        f"The book run did not fit {newer}: the session guard refused; the {old} fit is shown.")
+    for p in runs.glob("*.json"):
+        p.unlink()
+    assert dash.calibration_stale_cause(old).startswith(f"No SPX closing chain or fit after {old}")
+
+
 def test_stale_calibration_banner_on_the_shipped_store(dash, pages):
-    """The shipped store's cause is computed from its own chains and fits."""
+    """The shipped store's cause is computed from its own chains, fits and run
+    records (the bot commits a record of every run, a rejected fit's included)."""
     path, cal = dash.load_headline_calibration()
     session = dash._calibration_session(cal, path)
     cause = dash.calibration_stale_cause(session)
     assert session in cause
     later_chains = [f for f in (SHIPPED / "options").glob("spx_*.parquet") if f.stem[4:] > session]
     later_fits = [r for r in dash.scan_calibrations() if r["session"] and r["session"] > session]
-    if not later_chains and not later_fits:
+    from_runs = dash._run_record_cause(session, dash.load_run_records(SHIPPED))
+    if not later_fits and from_runs:
+        assert cause == from_runs
+    elif not later_chains and not later_fits:
         assert cause.startswith(f"No SPX closing chain or fit after {session} is stored.")
     if dash.load_page2()["calib_age"] >= dash.STALE_WARN_SESSIONS:
         assert cause in _visible_text(pages["/calibration"])

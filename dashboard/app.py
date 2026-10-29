@@ -46,6 +46,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -73,6 +74,9 @@ _logger = logging.getLogger("vol_dashboard")
 ROOT = Path(__file__).resolve().parent.parent
 DASH = Path(__file__).resolve().parent
 DATA = ROOT / "data_store"
+# The deploy streak the daily workflow computes from gh-pages history before it
+# freezes (scripts/ci/deploy_streak.py; gitignored, never committed): absent locally.
+DEPLOY_STREAK_FILE = ROOT / ".deploy-streak.json"
 sys.path.insert(0, str(ROOT))
 if str(DASH) not in sys.path:
     sys.path.insert(0, str(DASH))
@@ -784,17 +788,68 @@ def latest_good_calibration_path(cal_dir: str | Path | None = None) -> str | Non
     return max(candidates)[2]
 
 
+def load_run_records(data_dir: Path | None = None) -> list[dict]:
+    """The daily job's run records (data_store/runs/run_<run_utc>_<slot>.json,
+    scripts/cloud_refresh.py run_record), oldest first. A file that cannot be
+    read is logged and skipped: the records explain a banner, they are not a
+    number on a page (scripts/ci/check_captures.py validates each before the
+    job commits it)."""
+    d = (Path(data_dir) if data_dir is not None else DATA) / "runs"
+    out = []
+    for f in sorted(d.glob("run_*.json")) if d.is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError) as e:
+            _logger.warning("run record %s unreadable: %s", f.name, e)
+            continue
+        if isinstance(rec, dict) and rec.get("schema") == "run_ledger/1" and rec.get("run_utc"):
+            out.append(rec)
+    return sorted(out, key=lambda r: str(r["run_utc"]))
+
+
+def _run_record_cause(session: str, records: list[dict]) -> str | None:
+    """'The gate rejected <s> (<slot>): <reason>' from the newest run that tried
+    to fit a session after ``session`` and did not store a fit."""
+    tried = [r for r in records
+             if (c := r.get("calibration") or {}).get("session") and str(c["session"]) > session
+             and c.get("status") in ("rejected", "skipped", "failed")]
+    if not tried:
+        return None
+    newest = max(str(r["calibration"]["session"]) for r in tried)
+    on_newest = [r for r in tried if str(r["calibration"]["session"]) == newest]
+    rejected = [r for r in on_newest if r["calibration"]["status"] == "rejected"]
+    r = (rejected or on_newest)[-1]
+    c = r["calibration"]
+    reason = str(c.get("reason") or "no reason recorded").rstrip(".")
+    slot = r.get("slot") or "run"
+    if c["status"] == "rejected":
+        head = f"The gate rejected {newest} ({slot}): {reason}"
+    elif c["status"] == "skipped":
+        head = f"The {slot} run did not fit {newest}: {reason}"
+    else:
+        head = f"The {newest} fit failed ({slot}): {reason}"
+    counts = Counter(x["calibration"]["status"] for x in tried)
+    more = ""
+    if len(tried) > 1:
+        more = (f" ({len(tried)} runs after {session} tried a fit: "
+                + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) + ")")
+    return f"{head}{more}; the {session} fit is shown."
+
+
 def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                             rows: list[dict] | None = None) -> str | None:
     """Why the headline fit is older than the newest session, from what the store holds.
 
     The stale banner said "No newer fit passed the quality gate" whether or not
     a newer fit existed. The cause is read from the store: a stored fit after
-    the headline that failed the gate (with the gate's recorded reason); a
-    stored SPX chain after it with no fit; or neither. The daily job stores a
-    session's chain and fit only when the fit passes the gate, so with neither
-    stored the store cannot say whether a later session was fitted and
-    rejected or not fitted at all, and the text says so.
+    the headline that failed the gate (with the gate's recorded reason); the
+    daily job's run records (data_store/runs, FUND_GRADE_PLAN 0.9): a later
+    session the gate rejected, with its slot and reason, or that a run skipped
+    or failed to fit; a stored SPX chain after it with no fit; or none of
+    these. The daily job stores a session's chain and fit only when the fit
+    passes the gate, so with no record and nothing stored the store cannot say
+    whether a later session was fitted and rejected or not fitted at all, and
+    the text says so.
     """
     if not session:
         return None
@@ -810,6 +865,9 @@ def calibration_stale_cause(session: str | None, data_dir: Path | None = None,
                else f"failed the quality gate: {last['reason']}")
         more = f" ({len(newer)} stored fits after {session}, none accepted)" if len(newer) > 1 else ""
         return f"The {last['session']} fit is stored but {why}{more}; the {session} fit is shown."
+    from_runs = _run_record_cause(session, load_run_records(data))
+    if from_runs:
+        return from_runs
     later = [c for c in chains if c > session]
     if later:
         return f"An SPX closing chain for {later[-1]} is stored but no fit of it; the {session} fit is shown."
@@ -4960,14 +5018,19 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
 
 
 def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
-    """The newest stored Cboe book per underlying (data_store/options/cboe/*.json records)."""
-    root = Path(data_dir or DATA) / "options" / "cboe"
+    """The newest stored Cboe book per underlying: the records beside the raw books
+    committed here (data_store/options/cboe/*.json) and the manifests of books
+    held in the private data repository (data_store/options/cboe_manifest/*.json,
+    cboe_downloader.write_manifest: the same fields, no quotes)."""
+    base = Path(data_dir or DATA) / "options"
     newest: dict[str, dict] = {}
-    for f in sorted(root.glob("*.json")) if root.is_dir() else []:
+    files = [f for sub in ("cboe", "cboe_manifest") if (base / sub).is_dir()
+             for f in sorted((base / sub).glob("*.json"))]
+    for f in files:
         try:
             rec = json.loads(f.read_text())
         except (OSError, ValueError) as exc:
-            raise ValueError(f"options/cboe/{f.name}: unreadable record ({exc})") from exc
+            raise ValueError(f"options/{f.parent.name}/{f.name}: unreadable record ({exc})") from exc
         und = str(rec.get("underlying") or f.name.split("_")[0]).upper()
         key = (str(rec.get("session")), str(rec.get("quote_time")))
         if und not in newest or key > (str(newest[und].get("session")), str(newest[und].get("quote_time"))):
@@ -4975,10 +5038,35 @@ def latest_cboe_captures(data_dir: Path | None = None) -> list[dict]:
     return [newest[u] for u in sorted(newest)]
 
 
+def deploy_streak(path: Path | None = None) -> dict | None:
+    """The site's deploy streak (scripts/ci/deploy_streak.py): N consecutive NYSE
+    sessions with a deploy commit on gh-pages, first and last, before this build.
+    The daily workflow writes the file before it freezes; a local or CI freeze has
+    none, and a file that is not a whole deploy_streak/1 record is logged and
+    left out (no row rather than a number the record does not support)."""
+    p = Path(path) if path is not None else DEPLOY_STREAK_FILE
+    if not p.is_file():
+        return None
+    try:
+        rec = json.loads(p.read_text())
+        n, first, through = rec["streak"], rec["first"], rec["through"]
+        ok = (rec.get("schema") == "deploy_streak/1" and isinstance(n, int) and not isinstance(n, bool)
+              and n >= 1 and all(isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x)
+                                 for x in (first, through)) and first <= through)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _logger.warning("deploy streak %s unreadable: %s", p, e)
+        return None
+    if not ok:
+        _logger.warning("deploy streak %s is not a deploy_streak/1 record with a streak: %s", p, rec)
+        return None
+    return {"streak": n, "first": first, "through": through}
+
+
 def pipeline_state(diag: dict) -> dict:
-    """What the daily job has stored: books, fits, derived artifacts, the forward ledger."""
+    """What the daily job has stored: books, fits, derived artifacts, the forward
+    ledger; and how many consecutive sessions the site was deployed for."""
     out: dict[str, Any] = {"captures": [], "fits": None, "fits_newest": None, "surface_sessions": [],
-                           "diag_sessions": [], "forward": None}
+                           "diag_sessions": [], "forward": None, "deploys": deploy_streak()}
     out["captures"] = latest_cboe_captures()
     fits = [r for r in scan_calibrations() if r["legacy"] is False and r["ok"] and r["session"]]
     out["fits"] = len(fits)
@@ -6819,8 +6907,40 @@ def surface_check_values(surf: dict) -> dict:
             "n_ex": n_ex, "n_q": n_q}
 
 
+def reproduce_status(path: Path | None = None) -> dict | None:
+    """The weekly reproduction's result (data_store/reproduce/status.json, written
+    by scripts/ci/reproduce.py --status and committed by .github/workflows/
+    reproduce.yml): when it finished, how many artifacts were rebuilt within
+    tolerance and how many exactly, and the run. None when it has not run yet;
+    a file that is not a whole reproduce_status/1 record is logged and treated
+    the same (the page then says it has not been reproduced, never a count the
+    record does not support)."""
+    p = Path(path) if path is not None else DATA / "reproduce" / "status.json"
+    if not p.is_file():
+        return None
+    try:
+        rec = json.loads(p.read_text())
+        n, k, b = rec["n_checks"], rec["n_ok"], rec["n_exact"]
+        when = str(rec["finished_utc"])
+        day = when[:10]
+        ok = (rec.get("schema") == "reproduce_status/1"
+              and all(isinstance(x, int) and not isinstance(x, bool) for x in (n, k, b))
+              and 0 <= b <= k <= n and n >= 1 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is not None)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _logger.warning("reproduce status %s unreadable: %s", p, e)
+        return None
+    if not ok:
+        _logger.warning("reproduce status %s is not a whole reproduce_status/1 record", p)
+        return None
+    url = rec.get("run_url")
+    return {"date": day, "n_checks": n, "n_ok": k, "n_exact": b, "commit": str(rec.get("commit") or "")[:7],
+            "run_url": url if isinstance(url, str) and url.startswith("https://") else None,
+            "failed": [str(f.get("artifact")) for f in rec.get("failed") or [] if isinstance(f, dict)]}
+
+
 def load_model_risk() -> dict[str, Any]:
-    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": []}
+    d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": [],
+                         "reproduced": reproduce_status()}
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
         # numbers in the inventory's prose are computed from the artifacts, never typed

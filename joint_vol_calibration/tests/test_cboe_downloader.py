@@ -569,3 +569,86 @@ def test_committed_captures_match_their_records(meta_path):
         stamp = datetime.fromisoformat(meta["payload_timestamp"])
         assert stamp - quoted == timedelta(minutes=meta["stated_delay_minutes"])
     assert meta["book_state"] == cb.book_state_at(quoted, meta["session"])
+
+
+# ── where the raw books live: the public tree or the private store ────────────
+
+def test_the_book_resolver_finds_books_in_the_private_store_and_the_public_tree(tmp_path):
+    """CITSEC-06: with the private data repository configured, the run's raw books
+    are moved there and later runs read them from its checkout (CBOE_BOOKS_DIR).
+    find_books is the one way every reader finds a session's books: private
+    checkout first, then data_store/options/cboe/, each book once; book_captured
+    (the retry slot's "already captured" test) also counts a manifest."""
+    data = tmp_path / "data_store"
+    pub, priv = cb.public_books_dir(data), tmp_path / "private" / "options" / "cboe"
+    for d, names in ((pub, ("spx_2026-10-20_040622Z", "spx_2026-10-26_052653Z")),
+                     (priv, ("spx_2026-10-26_052653Z", "spx_2026-10-26_070000Z", "vix_2026-10-26_052654Z"))):
+        d.mkdir(parents=True)
+        for n in names:
+            (d / f"{n}.parquet").write_bytes(d.name.encode() + n.encode())
+    env = {cb.BOOKS_DIR_ENV: str(priv)}
+    assert cb.book_dirs(data, env={}) == [pub]
+    assert cb.book_dirs(data, env={cb.BOOKS_DIR_ENV: str(tmp_path / "absent")}) == [pub]
+    assert cb.book_dirs(data, env=env) == [priv, pub]
+    got = cb.find_books("SPX", "2026-10-26", data, env=env)
+    assert [p.name for p in got] == ["spx_2026-10-26_052653Z.parquet", "spx_2026-10-26_070000Z.parquet"]
+    assert got[0].parent == priv                                   # a book in both: the private copy
+    public_only = cb.find_books("SPX", "2026-10-26", data, env={})
+    assert [p.name for p in public_only] == ["spx_2026-10-26_052653Z.parquet"]
+    assert cb.find_books("SPX", "2026-10-20", data, env=env)[0].parent == pub
+    assert cb.book_captured("VIX", "2026-10-26", data, env={}) is None
+    man = cb.manifest_dir(data)
+    man.mkdir(parents=True)
+    (man / "vix_2026-10-26_052654Z.json").write_text("{}")
+    assert cb.book_captured("VIX", "2026-10-26", data, env={}) == str(man / "vix_2026-10-26_052654Z.json")
+    assert cb.book_captured("VIX", "2026-10-26", data, env=env).endswith("private/options/cboe/"
+                                                                          "vix_2026-10-26_052654Z.parquet")
+
+
+def test_a_manifest_records_a_private_book_without_its_quotes(serve_chains, tmp_path):
+    """The public record of a book moved to the private store: the book's own
+    record, both files' SHA-256 and where they are; no quote, no column of the
+    frame."""
+    cap = cb.capture_option_chain("SPX", now=CAPTURED_AT)
+    pq_path, js_path = cb.save_capture(cap, tmp_path / "books")
+    out, man = cb.write_manifest(pq_path, tmp_path / "manifest", "owner/private-books")
+    assert out.name == js_path.name
+    assert json.loads(out.read_text()) == man
+    side = json.loads(js_path.read_text())
+    assert man["schema"] == cb.MANIFEST_SCHEMA
+    assert man["stem"] == pq_path.stem
+    for k in ("session", "quote_time", "book_state", "rows", "two_sided_rows", "expiries", "sha256"):
+        assert man[k] == side[k], k
+    assert man["parquet_sha256"] == hashlib.sha256(pq_path.read_bytes()).hexdigest()
+    assert man["sidecar_sha256"] == hashlib.sha256(js_path.read_bytes()).hexdigest()
+    assert (man["private_repo"], man["private_path"], man["private_sidecar"]) == (
+        "owner/private-books", f"options/cboe/{pq_path.name}", f"options/cboe/{js_path.name}")
+    text = out.read_text()
+    per_option = {"bid", "ask", "mid_price", "implied_vol", "strike", "expiry", "contract_symbol",
+                  "open_interest", "volume", "delta", "gamma"}
+    assert per_option <= set(cap.frame.columns)
+    assert not per_option & set(man)                               # no quote column
+    assert all(k == "roots" or not isinstance(v, list | dict) for k, v in man.items())
+    assert not any(sym in text for sym in cap.frame["contract_symbol"])
+    assert not list((tmp_path / "manifest").glob(".*"))
+
+
+_MANIFESTS = pathlib.Path(__file__).resolve().parents[2] / "data_store" / "options" / "cboe_manifest"
+
+
+@pytest.mark.parametrize("path", sorted(_MANIFESTS.glob("*.json")) or [None],
+                         ids=lambda p: p.name if p else "none")
+def test_committed_manifests_are_whole(path):
+    """Every committed manifest of a privately held book names its stem, session,
+    hashes and private path (check_captures.py checks each before the commit)."""
+    if path is None:
+        pytest.skip("no Cboe book is held privately yet")
+    man = json.loads(path.read_text())
+    assert man["schema"] == cb.MANIFEST_SCHEMA
+    assert man["stem"] == path.stem
+    assert path.stem.startswith(f"{man['underlying'].lower()}_{man['session']}_")
+    assert man["rows"] >= man["two_sided_rows"] >= 0
+    assert man["rows"] > 0
+    for k in ("sha256", "parquet_sha256", "sidecar_sha256"):
+        assert len(man[k]) == 64, k
+    assert man["private_path"] == f"{cb.PRIVATE_BOOKS_SUBDIR}/{path.stem}.parquet"

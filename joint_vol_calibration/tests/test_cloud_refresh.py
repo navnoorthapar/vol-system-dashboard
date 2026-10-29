@@ -127,6 +127,8 @@ def env(tmp_path, monkeypatch):
         columns=["date", "series", "value", "source"]))
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.delenv("REFRESH_SLOT", raising=False)          # no run record unless a test asks
+    monkeypatch.delenv("CBOE_BOOKS_DIR", raising=False)        # no private book store unless a test asks
     # The post-fit steps have their own tests below; here an accepted fit records
     # a ledger from fixed signals (the synthetic DB is too short for the real
     # ones) and the derived artifacts are a no-op.
@@ -455,6 +457,53 @@ def test_the_ledger_trades_on_the_full_cboe_capture_whatever_the_fit_does(env, m
     (pos,) = ledger["positions"]
     assert pos["sleeve"] == "s4"
     assert pos["contract"]["expiry"] in set(capture["expiry"])
+
+
+def test_books_held_in_the_private_store_are_found_and_not_captured_again(env, monkeypatch, tmp_path):
+    """CITSEC-06: with the private data repository configured, the workflow moves
+    each raw book there (scripts/ci/cboe_private.py) and the public tree keeps a
+    manifest. A later slot of the same session must neither capture the book
+    again (a manifest, or the book in the private checkout, counts) nor lose it:
+    the forward ledger marks on the book from the private checkout
+    (CBOE_BOOKS_DIR, cboe_downloader.find_books)."""
+    calls = []
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        return _full_spx_capture() if und == "SPX" else _capture(und)
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    _code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert st["forward_ledger"]["status"] == "recorded"
+    first = fl.load_ledger(st["forward_ledger"]["path"])
+    # what the workflow does next when configured: books to the private checkout, a manifest here
+    pub = env.DATA / "options" / "cboe"
+    priv = tmp_path / "private" / cboe.PRIVATE_BOOKS_SUBDIR
+    priv.mkdir(parents=True)
+    for pq_path in sorted(pub.glob("*.parquet")):
+        cboe.write_manifest(pq_path, cboe.manifest_dir(env.DATA), "owner/books")
+        for f in (pq_path, pq_path.with_suffix(".json")):
+            f.rename(priv / f.name)
+    assert not list(pub.glob("*"))
+    pathlib.Path(st["forward_ledger"]["path"]).unlink()            # its commit failed
+    monkeypatch.setenv("CBOE_BOOKS_DIR", str(priv))
+    _code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    assert calls == ["SPX", "VIX"]                                 # nothing fetched again
+    assert st["capture"]["status"] == "exists"
+    assert st["capture"]["captures"]["SPX"]["file"].startswith(str(priv))
+    assert not list(pub.glob("*.parquet"))                         # nothing raw written publicly
+    led = st["forward_ledger"]
+    assert (led["status"], led["book"]) == ("recorded", "cboe")
+    again = fl.load_ledger(led["path"])
+    assert again["inputs"]["book"] == first["inputs"]["book"]      # the same book, read privately
+    assert again["inputs"]["chain_sha256"] == first["inputs"]["chain_sha256"]
+    # without the private checkout the manifest alone still says the book is stored
+    monkeypatch.delenv("CBOE_BOOKS_DIR")
+    _code, st = _run(env, "capture")
+    assert st["capture"]["status"] == "exists"
+    assert st["capture"]["captures"]["VIX"]["file"].endswith(".json")
+    assert calls == ["SPX", "VIX"]
 
 
 def test_every_later_book_slot_can_mark_what_the_ledger_opened():
@@ -1142,6 +1191,89 @@ def test_close_slot_reports_the_headline(env, monkeypatch, tmp_path):
     code, st = _run(env, "market,labels")
     assert code == 0 and st["headline_calibration"]["date"] == "2026-09-22"
     assert "headline_calibration=2026-09-22" in output.read_text()
+
+
+def test_each_workflow_run_writes_its_record(env, monkeypatch):
+    """FUND_GRADE_PLAN 0.9 / VALIDATOR-15: what the bot attempted and why the gate
+    said no lived only in the gitignored status JSON and in Actions logs that
+    expire. A workflow run (REFRESH_SLOT) writes data_store/runs/run_<run_utc>_<slot>.json
+    for the capture commit; every field is the run's own (compared with its
+    status JSON, nothing pinned), and it is on disk before the freeze so the site
+    this run renders reads it."""
+    monkeypatch.setenv("REFRESH_SLOT", "book")
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    monkeypatch.setenv("GITHUB_RUN_ID", "4242")
+    at_freeze = []
+
+    def freeze(*a, **k):
+        at_freeze.extend(json.loads(p.read_text()) for p in (env.DATA / "runs").glob("run_*.json"))
+        return _FreezeOK()
+    monkeypatch.setattr(env.subprocess, "run", freeze)
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,calibrate,freeze", ticker=_EmptyBookTicker)
+    files = sorted((env.DATA / "runs").glob("run_*.json"))
+    assert [f.name for f in files] == [env.run_record_name(st["run_utc"], "book")]
+    rec = json.loads(files[0].read_text())
+    assert (rec["schema"], rec["slot"], rec["complete"]) == ("run_ledger/1", "book", True)
+    for key in ("run_utc", "steps", "session", "expected_session", "exit_code", "publishable",
+                "publish_blockers", "errors", "warnings"):
+        assert rec[key] == st[key], key
+    cal = st["calibration"]
+    assert rec["calibration"]["status"] == cal["status"] != "accepted"
+    assert rec["calibration"]["reason"] == cal["reason"].splitlines()[0]
+    assert rec["calibration"]["session"] == cal["session"]
+    assert "near_atm_two_sided_share" in rec["calibration"]["chain"]
+    assert all(cal["chain"][k] == v for k, v in rec["calibration"]["chain"].items())
+    assert rec["forward_ledger"]["status"] == st["forward_ledger"]["status"]
+    assert rec["exit_code"] == code
+    assert rec["headline_calibration"]["session"] == st["headline_calibration"]["date"]
+    assert (rec["github"]["sha"], rec["github"]["run_id"]) == ("f" * 40, "4242")
+    assert {"restore", "market", "calibrate", "forward_ledger", "freeze", "total"} <= set(rec["timings_s"])
+    assert all(v >= 0 for v in rec["timings_s"].values())
+    assert st["run_record"].endswith(files[0].name)
+    # before the freeze: the same run, not yet complete
+    assert len(at_freeze) == 1
+    assert (at_freeze[0]["complete"], at_freeze[0]["exit_code"]) == (False, None)
+    assert at_freeze[0]["calibration"]["status"] == cal["status"]
+
+
+def test_a_run_without_a_known_slot_writes_no_record(env, monkeypatch):
+    """A local run (no REFRESH_SLOT) leaves the store as it was; an unknown slot
+    name is a warning, not a file name."""
+    _accepted_pickle(env, "2026-09-22")
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert "run_record" not in st
+    assert not (env.DATA / "runs").exists()
+    monkeypatch.setenv("REFRESH_SLOT", "../book")
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert not (env.DATA / "runs").exists()
+    assert any("REFRESH_SLOT" in w for w in st["warnings"])
+
+
+def test_a_run_record_that_cannot_be_written_costs_nothing_else(env, monkeypatch):
+    monkeypatch.setenv("REFRESH_SLOT", "book")
+    _accepted_pickle(env, "2026-09-22")
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(env, "write_run_record", broken)
+    code, st = _run(env, "market,calibrate", ticker=_EmptyBookTicker)
+    assert code == 0
+    assert any("could not write the run record: OSError: disk full" in w for w in st["warnings"])
+
+
+def test_the_run_record_is_json_whatever_the_status_holds(env, tmp_path):
+    """numpy scalars from the chain diagnostics serialise as numbers."""
+    status = {"run_utc": "2026-10-28T02:31:05+00:00", "steps": ["calibrate"], "errors": [], "warnings": [],
+              "calibration": {"status": "rejected", "reason": "a\nb", "session": "2026-10-27",
+                              "chain": {"n_raw": np.int64(7), "near_atm_two_sided_share": np.float64(0.5)}}}
+    p = env.write_run_record(status, "book", directory=tmp_path)
+    assert p.name == "run_20261028T023105Z_book.json"
+    rec = json.loads(p.read_text())
+    assert rec["calibration"]["chain"] == {"n_raw": 7, "near_atm_two_sided_share": 0.5}
+    assert rec["calibration"]["reason"] == "a"
+    assert (rec["capture"], rec["forward_ledger"]) == (None, None)
 
 
 def test_freeze_failure_is_a_hard_failure(env, monkeypatch):

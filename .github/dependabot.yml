@@ -8,7 +8,12 @@
 # requirements-lock.txt is compiled from requirements-dev.txt with uv (command
 # in its header). Dependabot bumps the pins in place; the CPU builds (torch
 # +cpu from the PyTorch index, xgboost-cpu) are left to that compile, because
-# Dependabot would replace them with the PyPI (CUDA) builds.
+# Dependabot would replace them with the PyPI (CUDA) builds. Every pin carries
+# its --hash lines and every install uses --require-hashes: a bump that drops
+# or fails to refresh the hashes fails tests.yml (test_infra_config.py) and the
+# install, so recompile with uv (the header's command) instead of merging it.
+# scripts/ci/pip_audit_lock.txt (the audit job's tool) is outside this
+# directory's scan; it is recompiled by hand (command in its header).
 version: 2
 updates:
   - package-ecosystem: github-actions
