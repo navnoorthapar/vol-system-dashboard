@@ -364,6 +364,52 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
     return notes
 
 
+def drop_unfittable_expiries(sq: sqm.SessionQuotes, max_rounds: int = 3) -> tuple:
+    """Screen ``sq.quotes`` for static arbitrage and drop every expiry the
+    surfaces cannot be fitted to: the fit set is alternate strikes minus the
+    quotes the l1 bid/ask repair moves outside their spread, and an expiry with
+    none left has no slice. Its quotes leave the scored universe, the rest are
+    screened again (a calendar constraint may have tied them to it), and the
+    expiry is recorded in ``sq.diagnostics['dropped_expiries']`` with its reason;
+    n_universe and n_expiries count what is scored.
+
+    The scorecard used to raise on such an expiry ('surface fit set misses 1
+    quoted expiries'), so one broken expiry cost the session its whole surface
+    report and the deploy (found by simulate_next_session.py on a book whose
+    expiries a day apart carried independent noise). Returns (screen,
+    arb_flag, fit_mask) for the quotes kept."""
+    dropped: list[dict] = []
+    for _ in range(max_rounds + 1):
+        q = sq.quotes
+        screen = arb.screen(q)
+        arb_flag = screen.quote_flags["repair_outside_spread"].to_numpy(bool)
+        fit_mask = sc.surface_fit_mask(q, arb_flag)
+        has_fit = pd.Series(fit_mask).groupby(q["expiry"].to_numpy(), sort=False).any()
+        empty = [str(e) for e, ok in has_fit.items() if not ok]
+        if not empty:
+            break
+        if len(empty) == len(has_fit):
+            raise ValueError(f"{sq.session}: the arbitrage repair leaves no expiry a fit-set quote")
+        for e in empty:
+            g = q[q["expiry"] == e]
+            dropped.append({"expiry": e, "T_days": float(g["T_days"].iloc[0]), "n_quotes": len(g),
+                            "reason": "the l1 bid/ask repair moves every fit-set quote (alternate "
+                                      "strikes) outside its spread, so no slice can be fitted"})
+        sq.quotes = q[~q["expiry"].isin(empty)].reset_index(drop=True)
+    else:
+        raise ValueError(f"{sq.session}: expiries kept losing their fit set after {max_rounds} rounds")
+    if dropped:
+        d = sq.diagnostics
+        d["dropped_expiries"] = dropped
+        d["n_dropped_no_fit_set"] = sum(x["n_quotes"] for x in dropped)
+        d["n_universe"] = int(d.get("n_universe", 0)) - d["n_dropped_no_fit_set"]
+        d["n_expiries"] = int(sq.quotes["expiry"].nunique())
+        d["T_days_min"] = float(sq.quotes["T_days"].min())
+        d["T_days_max"] = float(sq.quotes["T_days"].max())
+        d["median_half_spread_vp"] = float(np.median(sq.quotes["half_spread_vp"]))
+    return screen, arb_flag, fit_mask
+
+
 def run_session(session: str, *, calibrations_dir: Path | None = None,
                 chain: pd.DataFrame | None = None, models: list | None = None) -> dict:
     """Compute every artifact of ``session``. Returns {'residuals': frame,
@@ -371,11 +417,10 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
     session = str(pd.Timestamp(session).date())
     with single_thread_blas():
         sq = sqm.load_session_quotes(session, chain=chain)
+        screen, arb_flag, fit_mask = drop_unfittable_expiries(sq)
         q = sq.quotes
-        screen = arb.screen(q)
         flags = screen.quote_flags
-        arb_flag = flags["repair_outside_spread"].to_numpy(bool)
-        ctx = sc.ScoreContext(sq, arb_flag, sc.surface_fit_mask(q, arb_flag),
+        ctx = sc.ScoreContext(sq, arb_flag, fit_mask,
                               calibrations_dir=Path(calibrations_dir or sc.CALIBRATIONS_DIR))
         card, resid = sc.score_models(ctx, models)
         essvi_surface, _ = sc._essvi(ctx)

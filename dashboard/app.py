@@ -6306,6 +6306,9 @@ def surface_extras(d: dict, surf: dict) -> None:
                              for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
         d["fit_set"] = (surf.get("surface") or {}).get("fit_set") or {}
         d["universe"] = (surf.get("surface") or {}).get("universe") or {}
+        # expiries the report left out of the scored universe (report.drop_unfittable_expiries)
+        d["dropped_expiries"] = [x for x in d["universe"].get("dropped_expiries") or []
+                                 if isinstance(x, dict)]
         d["inputs"] = (surf.get("surface") or {}).get("inputs") or {}
 
     # VIX replicated from the same chain (vix_replication.json)

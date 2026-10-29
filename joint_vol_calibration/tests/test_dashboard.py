@@ -9125,3 +9125,33 @@ def test_the_sigma_panel_stays_while_the_headline_fits_diagnostics_are_pending(d
     assert panel.select_one("#vvix-tradeoff") is not None
     spec = _spec(html, "sigma-frontier")
     assert [s["name"] for s in spec["series"] if s["color"] == "headline"] == [prior[-1]]
+
+
+def test_an_expiry_left_out_of_the_scored_universe_is_named_on_the_surface_page(dash, monkeypatch):
+    """report.drop_unfittable_expiries leaves out an expiry with no fit-set quote
+    (it used to cost the session its whole surface report). The Surface page names
+    each one with its quote count beside the repair that caused it, and says
+    nothing when none was left out."""
+    from bs4 import BeautifulSoup
+    client = dash.app.test_client()
+    soup = BeautifulSoup(client.get("/surface").get_data(as_text=True), "lxml")
+    sj = dash.artifacts.load_surface(dash.DATA).get("surface") or {}
+    if (sj.get("universe") or {}).get("dropped_expiries"):
+        pytest.skip("the newest surface session already left an expiry out")
+    assert soup.select_one("#arb-dropped") is None
+    real = dash.artifacts.load_surface
+
+    def with_drop(*args, **kwargs):
+        out = real(*args, **kwargs)
+        uni = dict((out.get("surface") or {}).get("universe") or {})
+        uni["dropped_expiries"] = [{"expiry": "2030-01-18", "T_days": 1180.0, "n_quotes": 1234,
+                                    "reason": "test"}]
+        return {**out, "surface": {**(out.get("surface") or {}), "universe": uni}}
+
+    monkeypatch.setattr(dash.artifacts, "load_surface", with_drop)
+    soup = BeautifulSoup(client.get("/surface").get_data(as_text=True), "lxml")
+    note = soup.select_one("#arbitrage #arb-dropped")
+    assert note is not None
+    text = " ".join(note.get_text().split())
+    assert text.startswith("Left out of the scored universe: 2030-01-18 (1,234 quotes).")
+    assert "outside its spread" in text
