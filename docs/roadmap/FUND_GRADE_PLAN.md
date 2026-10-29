@@ -211,6 +211,15 @@ pieces; the work is to pose it exactly and report it honestly.
 
 ## 6. Decisions and progress (append; newest first)
 
+- **2026-10-29.** Tier 0.1 shipped (PR #15): `scripts/ci/recompute_audit.py` recomputes every
+  number on Overview and Surface from data_store by independent code and gates CI and the bot's
+  deploy; the live site passes it (11,933 of 11,933 checks, 100% coverage). The site renders from
+  the committed record; chain provenance is truthful. Integrated, shipping next: 0.3, 0.4, 0.6, 0.7,
+  0.9, 0.10, 0.11 (growth gate) and the producer half of 0.2. Building: the many-expiry Surface
+  (needed by 0.7), 0.5, 0.8, 0.2's badge test, 0.4's forced failure. Owner decisions taken: the DB
+  stays tracked and is rebuilt at render; raw Cboe books go to a private repository (secrets
+  pending); the weekly reproduce status is committed under data_store/. Critic medians: not yet
+  re-run (after tier 0 ships).
 - **2026-10-27.** Plan written at the end of the first build. Tiers 0–4 all open. Critic medians
   before round 3: 7–8 on every page (trust and design lenses). Owner decisions still open:
   benchmark data licence, LFS vs data branch, v0.23.0 tag and Zenodo DOI.
