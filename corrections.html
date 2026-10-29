@@ -28,11 +28,11 @@
   <link rel="preload" href="static/fonts/InterDesk-4.1-wght400-700.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="static/fonts/DeskMono-400.woff2" as="font" type="font/woff2" crossorigin>
   
-  <link rel="stylesheet" href="static/desk.css?v=b3e8bc8bbea6">
+  <link rel="stylesheet" href="static/desk.css?v=100c224aff58">
   <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
     .chart { display: none !important; }
-    .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal; }
+    .chart-data.sr-only { position: static !important; width: auto; max-width: 100%; height: auto; margin: 6px 0 0; overflow-x: auto; overflow-y: visible; clip: auto; white-space: normal; }
     .js-only { display: none !important; }
     [role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
     .banner-body.fold-body { display: block !important; } .find-list.fold-body { display: flex !important; }   /* nothing folds (Q20) */
@@ -50,41 +50,41 @@
   <details class="sb-phone">
     <summary class="sb-item"><span class="sb-k">SPX</span><span class="sb-v lvl-ok">current</span><span class="sr-only">: every source’s date</span></summary>
     <ul class="sb-list">
-      <li><span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
-      <li><span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
-      <li><span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
-      <li><span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
-      <li><span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-26</span><span class="sb-age">0 sessions</span></li>
-      <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span></li>
+      <li><span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-28</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-28</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-28</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-28</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-28</span><span class="sb-age">0 sessions</span></li>
+      <li><span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-28</span><span class="sb-age">0 sessions</span></li>
       <li><span class="sb-k">BACKTEST</span><span class="sb-v lvl-ok">≤2025-03-24</span></li>
       <li><span class="sb-k">MODEL</span><span class="sb-v">v2</span></li>
-      <li><span class="sb-k">BUILD</span><span class="sb-v">47e87f9</span></li>
-      <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-26</span></li>
+      <li><span class="sb-k">BUILD</span><span class="sb-v">088fc8d</span></li>
+      <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of 2026-10-28</span></li>
     </ul>
   </details>
   
   <span class="sb-item" title="SPX close (market DB): data_store/vol_system.db">
-    <span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-26</span>
+    <span class="sb-k">SPX</span><span class="sb-v lvl-ok">2026-10-28</span>
   </span>
   
   <span class="sb-item" title="VIX close (market DB): data_store/vol_system.db">
-    <span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-26</span>
+    <span class="sb-k">VIX</span><span class="sb-v lvl-ok">2026-10-28</span>
   </span>
   
   <span class="sb-item" title="Rule regime labels: data_store/signals/regime_labels.parquet">
-    <span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-26</span>
+    <span class="sb-k">LABELS</span><span class="sb-v lvl-ok">2026-10-28</span>
   </span>
   
   <span class="sb-item" title="Headline Heston fit: data_store/calibrations/">
-    <span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-26</span>
+    <span class="sb-k">FIT</span><span class="sb-v lvl-ok">2026-10-28</span>
   </span>
   
   <span class="sb-item sb-opt" title="Greeks surface: data_store/greeks/greeks_surface.parquet">
-    <span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-26</span>
+    <span class="sb-k">GREEKS</span><span class="sb-v lvl-ok">2026-10-28</span>
   </span>
   
   <span class="sb-item sb-opt" title="Quote-grade surface: data_store/surface/&lt;session&gt;/">
-    <span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-26</span>
+    <span class="sb-k">SURFACE</span><span class="sb-v lvl-ok">2026-10-28</span>
   </span>
   
   <span class="sb-item sb-opt" title="Backtest window end (fixed): data_store/backtest/full_results.parquet">
@@ -93,8 +93,8 @@
   
   <span class="sb-right">
     <span class="sb-item sb-opt"><span class="sb-k">MODEL</span><span class="sb-v">v2</span></span>
-    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/47e87f98120fbeda1d29695162da26ecf8bf27fb">47e87f9</a></span>
-    <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-26" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-26</span></span>
+    <span class="sb-item"><span class="sb-k">BUILD</span><a class="sb-v" href="https://github.com/navnoorthapar/vol-system-dashboard/commit/088fc8d6cd7150c56983135817b885c35beda2b9">088fc8d</a></span>
+    <span class="sb-item"><span class="sb-k">VIEW</span><span class="sb-v" id="freshness" data-date="2026-10-28" data-holidays='["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24", "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25"]'>as of 2026-10-28</span></span>
   </span>
 </header>
 
@@ -126,25 +126,25 @@
 
 <div class="ticker" role="region" aria-label="Market ticker, last close" tabindex="0">
   
-  <span class="tk" title="SPX close 2026-10-26 (market DB), change on the previous close"><span class="tk-label">SPX</span><span class="tk-val">7,676.77</span><span class="tk-chg"><span class="pos">▲ +0.70%</span></span></span>
+  <span class="tk" title="SPX close 2026-10-28 (market DB), change on the previous close"><span class="tk-label">SPX</span><span class="tk-val">7,743.98</span><span class="tk-chg"><span class="pos">▲ +0.28%</span></span></span>
   
-  <span class="tk" title="VIX close 2026-10-26 (index pts), change on the previous close"><span class="tk-label">VIX</span><span class="tk-val">18.39</span><span class="tk-chg"><span class="neg">▼ −1.06</span></span></span>
+  <span class="tk" title="VIX close 2026-10-28 (index pts), change on the previous close"><span class="tk-label">VIX</span><span class="tk-val">16.91</span><span class="tk-chg"><span class="neg">▼ −0.61</span></span></span>
   
-  <span class="tk" title="VVIX close 2026-10-26 (index pts), change on the previous close"><span class="tk-label">VVIX</span><span class="tk-val">101.43</span><span class="tk-chg"><span class="neg">▼ −8.27</span></span></span>
+  <span class="tk" title="VVIX close 2026-10-28 (index pts), change on the previous close"><span class="tk-label">VVIX</span><span class="tk-val">96.61</span><span class="tk-chg"><span class="neg">▼ −2.84</span></span></span>
   
-  <span class="tk" title="VIX6M − VIX9D close 2026-10-26 (index pts); positive: contango"><span class="tk-label">9D→6M</span><span class="tk-val">+3.71</span><span class="tk-chg">contango</span></span>
+  <span class="tk" title="VIX6M − VIX9D close 2026-10-28 (index pts); positive: contango"><span class="tk-label">9D→6M</span><span class="tk-val">+5.64</span><span class="tk-chg">contango</span></span>
   
-  <span class="tk" title="VIX / VIX3M close 2026-10-26; above 1: backwardation"><span class="tk-label">VIX/VIX3M</span><span class="tk-val">0.922</span></span>
+  <span class="tk" title="VIX / VIX3M close 2026-10-28; above 1: backwardation"><span class="tk-label">VIX/VIX3M</span><span class="tk-val">0.880</span></span>
   
-  <span class="tk" title="RV21 2026-10-26: SPX realised vol of the 21 sessions to that close, root-mean-square of the daily log returns, annualised (×252), in %"><span class="tk-label">RV21</span><span class="tk-val">9.81</span></span>
+  <span class="tk" title="RV21 2026-10-28: SPX realised vol of the 21 sessions to that close, root-mean-square of the daily log returns, annualised (×252), in %"><span class="tk-label">RV21</span><span class="tk-val">9.69</span></span>
   
-  <span class="tk" title="VIX − RV21 2026-10-26: VIX close 18.39 − RV21 9.81, vol pts; VIX is a 30-day variance-swap rate, so the gap overstates what an at-the-money straddle earns"><span class="tk-label">VIX−RV21</span><span class="tk-val">+8.58</span></span>
+  <span class="tk" title="VIX − RV21 2026-10-28: VIX close 16.91 − RV21 9.69, vol pts; VIX is a 30-day variance-swap rate, so the gap overstates what an at-the-money straddle earns"><span class="tk-label">VIX−RV21</span><span class="tk-val">+7.22</span></span>
   
-  <span class="tk" title="VIX close 18.39 on 2026-10-26: 170 of the 252 sessions before it (2025-10-23 → 2026-10-23) closed strictly lower"><span class="tk-label">VIX 1Y PCTL</span><span class="tk-val">67th</span><span class="sr-only"> (percentile among the 252 sessions before 2026-10-26)</span></span>
+  <span class="tk" title="VIX close 16.91 on 2026-10-28: 117 of the 252 sessions before it (2025-10-27 → 2026-10-27) closed strictly lower"><span class="tk-label">VIX 1Y PCTL</span><span class="tk-val">46th</span><span class="sr-only"> (percentile among the 252 sessions before 2026-10-28)</span></span>
   
-  <span class="tk" title="Rule regime label of 2026-10-26"><span class="tk-label">RULE</span><span class="tk-val">R1</span><span class="tk-chg">short gamma</span><span class="tk-note">2026-10-26</span></span>
+  <span class="tk" title="Rule regime label of 2026-10-28"><span class="tk-label">RULE</span><span class="tk-val">R1</span><span class="tk-chg">short gamma</span><span class="tk-note">2026-10-28</span></span>
   
-  <span class="tk" title="SVI-cal surface of 2026-10-26 (the newest session) at 30 days, between the 2026-11-25 and 2026-11-27 expiries: ATMF vol 14.03%, RR25 (25Δ call − 25Δ put vol) −4.80 vol pts"><span class="tk-label">1M ATMF</span><span class="tk-val">14.03%</span><span class="tk-label">RR25</span><span class="tk-val">−4.80</span><span class="tk-note lvl-ok">2026-10-26</span></span>
+  <span class="tk" title="SVI-cal surface of 2026-10-28 (the newest session) at 30 days, between the 2026-11-27 and 2026-11-30 expiries: ATMF vol 13.40%, RR25 (25Δ call − 25Δ put vol) −4.31 vol pts"><span class="tk-label">1M ATMF</span><span class="tk-val">13.40%</span><span class="tk-label">RR25</span><span class="tk-val">−4.31</span><span class="tk-note lvl-ok">2026-10-28</span></span>
   
 </div>
 
@@ -599,7 +599,7 @@
       <dl class="dl" style="margin-top:4px;">
         <dt>Root cause</dt><dd>The VIX is a 30-day variance-swap rate that contains the skew premium; straddles were priced and marked at it.</dd>
         <dt>Fix</dt><dd>ATM vol = β × VIX, with β estimated from stored SPX chains.</dd>
-        <dt>Evidence</dt><dd>β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later chain, 2026-10-16, gives 0.70 — the mean over all 7 chains, 0.79, is not in the β grid. C22 bridge row 11: S1 +$576K → −$508K from β alone, before the later C22 steps; at β = 1 under the full C22 configuration (β grid), S1 shows +$2.5M</dd>
+        <dt>Evidence</dt><dd>β = 0.82 = mean of 4 DB chains and 1 live capture (0.80–0.84); the first later chain, 2026-10-16, gives 0.70 — the mean over all 9 chains, 0.79, is not in the β grid. C22 bridge row 11: S1 +$576K → −$508K from β alone, before the later C22 steps; at β = 1 under the full C22 configuration (β grid), S1 shows +$2.5M</dd>
         <dt>C22 bridge</dt><dd class="src">row 11 · portfolio P&amp;L +$108K · Sharpe −1.33 → −0.37</dd>
         <dt>Pinned by</dt><dd><code class="path">test_<wbr>backtest_<wbr>accounting.py::<wbr>Test<wbr>Atm<wbr>Vol::<wbr>test_<wbr>entry_<wbr>vol_<wbr>is_<wbr>beta_<wbr>times_<wbr>vix</code>, <code class="path">test_<wbr>backtest_<wbr>reproducibility.py::<wbr>test_<wbr>default_<wbr>beta_<wbr>is_<wbr>the_<wbr>estimate_<wbr>from_<wbr>the_<wbr>real_<wbr>chains</code></dd>
       </dl>
@@ -849,33 +849,33 @@
   <div class="foot-inner">
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Data freshness by source (scrollable)">
       <table class="tbl dense">
-        <caption>Data freshness: each source's as-of date and age in NYSE sessions against the newest session (2026-10-26)</caption>
+        <caption>Data freshness: each source's as-of date and age in NYSE sessions against the newest session (2026-10-28)</caption>
         <thead><tr><th scope="col">Source</th><th scope="col">As of</th><th scope="col" class="num">Age</th><th scope="col">Artifact</th></tr></thead>
         <tbody>
           
-          <tr><td>SPX close (market DB)</td><td class="lvl-ok nowrap">2026-10-26</td>
+          <tr><td>SPX close (market DB)</td><td class="lvl-ok nowrap">2026-10-28</td>
             <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
           
-          <tr><td>VIX close (market DB)</td><td class="lvl-ok nowrap">2026-10-26</td>
+          <tr><td>VIX close (market DB)</td><td class="lvl-ok nowrap">2026-10-28</td>
             <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
           
-          <tr><td>Rule regime labels</td><td class="lvl-ok nowrap">2026-10-26</td>
+          <tr><td>Rule regime labels</td><td class="lvl-ok nowrap">2026-10-28</td>
             <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>signals/<wbr>regime_<wbr>labels.parquet</code></td></tr>
           
-          <tr><td>Headline Heston fit</td><td class="lvl-ok nowrap">2026-10-26</td>
+          <tr><td>Headline Heston fit</td><td class="lvl-ok nowrap">2026-10-28</td>
             <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>calibrations/</code></td></tr>
           
-          <tr><td>Greeks surface</td><td class="lvl-ok nowrap">2026-10-26</td>
+          <tr><td>Greeks surface</td><td class="lvl-ok nowrap">2026-10-28</td>
             <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>greeks/<wbr>greeks_<wbr>surface.parquet</code></td></tr>
           
-          <tr><td>Quote-grade surface</td><td class="lvl-ok nowrap">2026-10-26</td>
-            <td class="num">—</td><td><code class="path">data_<wbr>store/<wbr>surface/<wbr>&lt;session&gt;/</code></td></tr>
+          <tr><td>Quote-grade surface</td><td class="lvl-ok nowrap">2026-10-28</td>
+            <td class="num">0</td><td><code class="path">data_<wbr>store/<wbr>surface/<wbr>&lt;session&gt;/</code></td></tr>
           
           <tr><td>Backtest window end (fixed)</td><td class="lvl-ok nowrap">2025-03-24</td>
             <td class="num">—</td><td><code class="path">data_<wbr>store/<wbr>backtest/<wbr>full_<wbr>results.parquet</code></td></tr>
           
           <tr><td>VX futures settlements</td><td class="lvl-error nowrap">2026-10-09</td>
-            <td class="num">11</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
+            <td class="num">13</td><td><code class="path">data_<wbr>store/<wbr>vol_<wbr>system.db</code></td></tr>
           
         </tbody>
       </table>
@@ -907,6 +907,6 @@
 
 
 <script src="static/vendor/echarts-6.1.0-desk.min.js" integrity="sha384-91oWllvVjknURH3iVY4aXknr/M7IadTMvoXGVuobX0GYrzD8gMLUwsVnC+tRn1k4" crossorigin="anonymous"></script>
-<script src="static/desk.js?v=1caf9b5b40e9"></script>
+<script src="static/desk.js?v=f2da70bee512"></script>
 </body>
 </html>
