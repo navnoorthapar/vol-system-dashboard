@@ -37,7 +37,7 @@
     <span class="result-k">{{ r.key }}</span>
     <span class="result-v">{{ r.value }}<span class="unit">{{ r.unit }}</span></span>
     <span class="result-d">{{ r.detail }}</span>
-    {% if r.ci %}<span class="kpi-ci{% if r.ci_kind == 'range' %} kpi-range{% endif %}">{{ r.ci }}</span>{% if r.ci_note %}<span class="kpi-ci faint">{{ r.ci_note }}</span>{% endif %}{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
+    {% if r.ci %}<span class="kpi-ci{% if r.ci_kind == 'range' %} kpi-range{% endif %}">{{ r.ci|ranges if r.ci_kind == 'range' else r.ci }}</span>{% if r.ci_note %}<span class="kpi-ci faint">{{ r.ci_note }}</span>{% endif %}{% else %}<span class="kpi-ci">Interval: — <span class="faint">{{ r.ci_note }}</span></span>{% endif %}
     <span class="src">{{ r.source }}</span>
   </a>
   {% else %}
@@ -58,7 +58,7 @@
     <div id="rule-inputs">
       <p class="note">Rule inputs on {{ r.date }}{% if r.headline_differs %} — the latest session in the market database; the {{ d.regime_date }} label above was written from data not yet in it{% endif %}:</p>
       <dl class="dl">
-        <dt>rv₂₀</dt><dd>{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f")|u('%') }}</dd>
+        <dt>rv₂₀ (20-session)</dt><dd>{{ (r.rv20 * 100 if r.rv20 is not none else none)|fmt(".2f")|u('%') }}</dd>
         <dt>VIX</dt><dd>{{ (r.vix * 100 if r.vix is not none else none)|fmt(".2f") }}</dd>
         <dt>VVIX</dt><dd>{{ r.vvix|fmt(".2f") }}</dd>
         <dt>R2 gate</dt><dd>{{ r.gate|fmt(".2f") }} (rolling 252-day 80th percentile of VVIX)</dd>
@@ -153,7 +153,7 @@
 </div>
 {% endif %}
 
-<div class="g pair">
+<div class="g pair top">
   {% call m.panel('state-fit', 'Headline fit · Heston, joint SPX/VIX', 's6', f.session) %}
     <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));">
       {{ m.kpi('SPX RMSE in sample', f.spx_rmse|fmt('.2f'), unit='vol pts', sub=(f.n_spx_options|fmt) ~ ' anchors, ' ~ (f.n_spx_expiries|fmt) ~ ' expiries') }}

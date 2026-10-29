@@ -70,7 +70,7 @@
   // spec.quotes.groups[expiry] holds one expiry's quotes; decodeQuotes is the
   // twin of desk_quotes.decode (the browser tests compare the two), quotePoints
   // of desk_quotes.series_data. A series with s.quote holds no data until then.
-  var QP = { iv: 1e5, spread: 1e6, model: 1e4, floor: 0.01, days: 365 };
+  var QP = { iv: 1e5, spread: 1e8, model: 1e4, floor: 0.01, days: 365 };
   // the standard normal CDF to double precision (Hart 1968, as given by West 2005)
   function ndtr(x) {
     var z = Math.abs(x), c = 0;

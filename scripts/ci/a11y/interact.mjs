@@ -11,6 +11,9 @@
 //     (on the horizontal sleeve chart every bar was drawn in the gain colour);
 //   * KPI tones: every .kpi-value.pos / .kpi-value.neg tile computes to --pos / --neg
 //     (the .kpi-value rule overrode the tone classes, so no tile showed its sign);
+//   * KPI strips on a phone (320 and 390 px): no value pair of a range under a KPI
+//     ('12.51–25.79', '−9.62 to −3.48') breaks across lines, and no strip leaves an
+//     empty cell beside its last tile;
 //   * the keyboard dialog: '?' opens #keysDialog centred in the viewport, at desk and
 //     phone width (the universal margin reset opened it in the top-left corner);
 //   * grid rows: at 1024, 1280, 1440 and 1920 px no row of a .g grid leaves more than
@@ -180,6 +183,52 @@ async function checkKpiTones() {
     await ctx.close();
   }
   if (!check.tiles.length) check.failures.push('no toned KPI tile on ' + TONE_PAGES.join(', '));
+  return check;
+}
+
+// -- KPI strips on a phone ----
+// R3-D11: at 320 px a range under a KPI broke inside a value pair ('12.51–' / '25.79'),
+// and an odd last tile of a two-column strip left the strip's grey background showing.
+const KPI_WIDTHS = [{ width: 320, height: 800 }, { width: 390, height: 844 }];
+async function checkKpiStrips() {
+  const check = { name: 'KPI ranges keep each value pair on a line; strips have no empty cell', views: [], failures: [] };
+  for (const name of PAGES) {
+    for (const vp of KPI_WIDTHS) {
+      const { ctx, page } = await openPage(name, vp);
+      const got = await page.evaluate(() => {
+        const pair = /[+\u2212-]?[\d.,]+%?(?:–| to )[+\u2212-]?[\d.,]+%?/g;
+        const broken = [];
+        for (const el of document.querySelectorAll('.kpi-range')) {
+          if (!el.getClientRects().length) continue;
+          const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          let text = '', nodes = [];
+          for (let n = walk.nextNode(); n; n = walk.nextNode()) { nodes.push([n, text.length]); text += n.data; }
+          for (const m of text.matchAll(pair)) {
+            const at = (i) => { const k = nodes.findLastIndex(([, s]) => s <= i); return [nodes[k][0], i - nodes[k][1]]; };
+            const r = document.createRange();
+            r.setStart(...at(m.index)); r.setEnd(...at(m.index + m[0].length - 1)); r.setEnd(r.endContainer, r.endOffset + 1);
+            const tops = new Set([...r.getClientRects()].filter(q => q.width > 0).map(q => Math.round(q.top)));
+            if (tops.size > 1) broken.push(m[0]);
+          }
+        }
+        const holes = [];
+        for (const g of document.querySelectorAll('.kpis')) {
+          const tiles = [...g.children].filter(k => k.getClientRects().length);
+          if (!tiles.length) continue;
+          const gr = g.getBoundingClientRect();
+          const lastTop = Math.max(...tiles.map(k => Math.round(k.getBoundingClientRect().top)));
+          const right = Math.max(...tiles.filter(k => Math.round(k.getBoundingClientRect().top) === lastTop)
+            .map(k => k.getBoundingClientRect().right));
+          if (gr.right - right > 24) holes.push(`${g.id || g.closest('[id]')?.id || '.kpis'}: ${Math.round(gr.right - right)} px empty`);
+        }
+        return { broken, holes };
+      });
+      check.views.push({ page: name, width: vp.width, ...got });
+      for (const b of got.broken) check.failures.push(`${name} @${vp.width}px: KPI range '${b}' breaks across lines`);
+      for (const h of got.holes) check.failures.push(`${name} @${vp.width}px: KPI strip ${h} in its last row`);
+      await ctx.close();
+    }
+  }
   return check;
 }
 
@@ -465,7 +514,7 @@ async function checkSwitchSpeed() {
 }
 
 const ONLY = process.env.INTERACT_ONLY ? process.env.INTERACT_ONLY.split(',') : null;
-for (const run of [checkSignedBars, checkKpiTones, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
+for (const run of [checkSignedBars, checkKpiTones, checkKpiStrips, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
   checkQuoteInspector, checkSwitchSpeed]) {
   if (ONLY && !ONLY.includes(run.name)) continue;
   const c = await run();

@@ -28,7 +28,8 @@
   {{ m.kpi(r.short ~ ' · median |z|', o.median_abs_hs|fmt('.2f'), unit='half-spreads', sub=(o.inside_spread_pct|fmt('.1f')) ~ '% inside the bid–ask · RMSE ' ~ (o.rmse_vp|fmt('.2f')) ~ ' vol pts · ' ~ (o.n|fmt(',')) ~ ' out-of-sample quotes', ci=(rg ~ ' (out of sample)') if rg else none, ci_kind='range') }}
   {% endfor %}
   {% if d.vix_rows %}{% set v = d.vix_rows|selectattr('ticker', 'equalto', 'VIX')|first %}{% if v %}
-  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub='Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ (' · close inside the day range' if v.in_range else ''), ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
+  {% if v.replicated is none %}{% set vsub = 'not replicated: ' ~ v.why ~ ' · Cboe close ' ~ (v.official|fmt('.2f')) %}{% else %}{% set vsub = 'Cboe close ' ~ (v.official|fmt('.2f')) ~ ' · gap ' ~ (v.gap|signed('.2f')) ~ ((' · inside' if v.in_range else ' · outside') ~ ' the day’s VIX range ' ~ (v.day_range[0]|fmt('.2f')) ~ '–' ~ (v.day_range[1]|fmt('.2f')) if (v.in_range is not none and v.day_range) else '') %}{% endif %}
+  {{ m.kpi('VIX from this chain', v.replicated|fmt('.2f'), sub=vsub, ci=('gap, ' ~ d.vix_gap_range) if d.vix_gap_range else none, ci_kind='range') }}
   {% endif %}{% endif %}
   {% if d.arb %}{% set lv0 = d.arb_clean_top %}
   <div class="kpi" id="arb-tile">
@@ -95,7 +96,7 @@
     <table class="tbl dense wrap-head" id="vol-cone-rank-tbl">
       <caption>SVI-cal ATMF of each listed expiry up to 252 sessions, {{ vc.session }}, and the share (%) of realised-vol windows of the same length (T·252/365 sessions, rounded) below it, since 2010 and in the last 3 years</caption>
       <thead><tr><th scope="col">Expiry</th><th scope="col" class="num">Days</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">ATMF (%)</th>{% for sm in vc.samples %}<th scope="col" class="num">{{ sm.short }}</th>{% endfor %}</tr></thead>
-      <tbody>{% for r in vc.rows %}<tr><td class="nowrap">{{ r.expiry }}</td><td class="num">{{ r.days|fmt('.0f') }}</td><td class="num">{{ r.sessions|fmt('.1f') }}</td><td class="num">{{ r.atmf|fmt('.2f') }}</td>{% for k in r.ranks %}<td class="num">{{ k|fmt('.0f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      <tbody>{% for r in vc.rows %}<tr><td class="nowrap">{{ r.expiry }}</td><td class="num">{{ r.days|fmt('.0f') }}</td><td class="num">{{ r.h|fmt('d') }}</td><td class="num">{{ r.atmf|fmt('.2f') }}</td>{% for k in r.ranks %}<td class="num">{{ k|fmt('.0f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note" id="vol-cone-rank-note">Implied vol carries the variance risk premium, so an ATMF above the realised median is the usual state, not by itself rich. Close-to-close RV leaves out intraday range (the database holds daily closes only). The ATMF is the SVI-cal slice at ln(K/F) = 0 of a listed expiry, not an interpolation{% if vc.n_beyond %}; {{ vc.n_beyond|plural('listed expiry', 'listed expiries') }} beyond 252 sessions {{ 'is' if vc.n_beyond == 1 else 'are' }} past the cone and left out{% endif %}.</p>
@@ -118,7 +119,7 @@
   {% call m.panel('rnd-table', 'Tail probabilities and distribution checks · every listed SVI-cal slice', 's12', rn.rows|length|plural('expiry', 'expiries')) %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Risk-neutral tail probabilities (scrollable)">
     <table class="tbl dense wrap-head" id="rnd-table-tbl">
-      <caption>Risk-neutral probabilities in % of each listed SVI-cal slice, {{ d.session }}: P({{ 'S_T'|subs }} &lt; K) = N(−d₋) + φ(d₋)·w′/(2√w) at K = threshold × F, printed only when K lies inside the expiry’s quoted K/F range (“{{ 'beyond quoted strikes' }}” otherwise); mass below / above quoted = P({{ 'S_T'|subs }} &lt; lowest quoted strike) and P({{ 'S_T'|subs }} &gt; highest), in %; ∫p and E[{{ 'S_T'|subs }}/F] over the whole line, wings included; {{ 'g_min'|subs }} from the butterfly certificate</caption>
+      <caption>Risk-neutral probabilities in % of each listed SVI-cal slice, {{ d.session }}: P({{ 'S_T'|subs }} &lt; K) = N(−d₋) + φ(d₋)·w′/(2√w) at K = threshold × F, printed only when K lies inside the expiry’s quoted K/F range (“{{ 'beyond quoted strikes' }}” otherwise); mass below / above quoted = P({{ 'S_T'|subs }} &lt; lowest quoted strike) and P({{ 'S_T'|subs }} &gt; highest), in %; distribution check = max(|∫p − 1|, |E[{{ 'S_T'|subs }}/F] − 1|) over the whole line, wings included (0 for an exact distribution with mean F); {{ 'g_min'|subs }} from the butterfly certificate</caption>
       <thead><tr>{% for h in rn.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{{ h|subs }}</th>{% endfor %}</tr></thead>
       <tbody>{% for r in rn.rows %}<tr{% if r.pick %} class="em"{% endif %}><td class="nowrap">{{ r.expiry }}{% if r.pick %} <span class="sub-meta">{{ r.pick }}</span>{% endif %}{% if not r.certified %} <span class="chip chip-warn">not certified</span>{% endif %}</td>{% for c in r.cells %}<td class="num{% if c == 'beyond quoted strikes' %} beyond{% endif %}">{{ c }}</td>{% endfor %}</tr>{% endfor %}</tbody>
     </table>
@@ -189,6 +190,7 @@
     </div>
     {% set rp = d.arb_repair %}
     {% if rp %}<p class="note">An l1 repair (linear programme, HiGHS) moves {{ rp.n_perturbed|fmt(',') }} quotes, {{ rp.n_perturbed_outside_spread|fmt(',') }} of them outside their bid–ask (largest move {{ rp.max_abs_dprice_half_spreads|fmt('.0f') }} half-spreads); those are flagged and left out of the surfaces' fitted set.</p>{% endif %}
+    {% set dx = d.dropped_expiries %}{% if dx %}<p class="note" id="arb-dropped">Left out of the scored universe: {% for x in dx %}<span class="nowrap">{{ x.expiry }}</span> ({{ x.n_quotes|fmt(',') }} quotes){{ ', ' if not loop.last else '' }}{% endfor %}. The repair moves every fit-set quote of {{ 'that expiry' if dx|length == 1 else 'each' }} outside its spread, so no slice can be fitted to it; the rest of the session is scored.</p>{% endif %}
     {% if d.largest_violations %}{% set lv = d.largest_violations %}{% set lv_k = d.lv_shown %}{% set lv_more = lv|length - lv_k %}
     {% macro lv_table(rows, tid, caption) %}<table class="tbl dense wrap-head" id="{{ tid }}"><caption>{{ caption }}</caption>
       <thead><tr><th scope="col">Constraint</th><th scope="col">Legs</th><th scope="col" class="num">Shortfall (idx pts)</th><th scope="col" class="num">$ per contract</th><th scope="col">At bid/ask</th></tr></thead>

@@ -68,8 +68,25 @@ def _load(name: str, rel: str):
 
 @pytest.fixture(scope="module")
 def dash():
-    """dashboard/app.py, imported once per module (tests monkeypatch DATA)."""
-    return _load("dashboard_app_under_test", "dashboard/app.py")
+    """dashboard/app.py, imported once per module (tests monkeypatch DATA), reading
+    the committed record as the daily job and freeze_site do (app.record_db), not
+    the checkout's cache, which the job never commits."""
+    mod = _load("dashboard_app_under_test", "dashboard/app.py")
+    with mod.record_db():
+        _ACTIVE_APP.append(mod)
+        try:
+            yield mod
+        finally:
+            _ACTIVE_APP.remove(mod)
+
+
+_ACTIVE_APP: list = []
+
+
+def _market_db() -> Path:
+    """The market database the rendered pages read: the copy brought up to the
+    committed record while the dash fixture is up (app.record_db), else the cache."""
+    return _ACTIVE_APP[-1].db_file() if _ACTIVE_APP else SHIPPED / "vol_system.db"
 
 
 @pytest.fixture(scope="module")
@@ -1342,7 +1359,7 @@ def test_backtest_window_crisis_and_data_claims_come_from_the_data(dash, pages):
     assert "April 2025 tariff shock is <em>not</em> in it" in bt
     assert "single options snapshot" not in bt
     assert "22 times in 7 years" not in bt
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         n_dates = con.execute("SELECT COUNT(DISTINCT snapshot_date) FROM options_snapshots "
                               "WHERE underlying='SPX'").fetchone()[0]
     assert f"the database's {n_dates} SPX chain" in bt
@@ -1492,7 +1509,7 @@ def test_a_bridge_from_another_run_is_a_loader_error(dash, synth):
 def test_change_log_quotes_facts_from_the_db(dash, pages):
     """The log said '2018: ~1.5%' (^IRX averaged 1.95%) and R2 '~53% → ~25%'."""
     d = dash.load_page4()
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         t = pd.read_sql("SELECT date, rate FROM tbill_rates WHERE date BETWEEN ? AND ?", con,
                         params=(d["start_date"], d["end_date"]), parse_dates=["date"])
     m2018 = t[t["date"].dt.year == 2018]["rate"].mean()
@@ -2244,7 +2261,7 @@ def test_surface_key_result_is_the_arbitrage_free_surface_in_half_spreads(dash, 
     assert rule.startswith("alternate strikes")
     assert "Arbitrage-free SVI surface · alternate strikes held out" in t
     assert "Quote-grade surface" not in t
-    assert "Yahoo close snapshot, no quote time" in t
+    assert "Yahoo Finance close snapshot, no quote time" in t
     assert f"{s['median_abs_hs']:.2f} half-spreads" in t
     assert f"{s['n']:,} held-out quotes of {SESSION}" in t
     assert f"{s['inside_spread_pct']:.1f}% inside the bid–ask" in t
@@ -3187,6 +3204,13 @@ def test_no_identification_count_where_the_sigma_profile_contradicts_it(dash, pa
     d = dash.load_page2()
     rg = d["ridge"]
     prof = d["ident"]["sigma_profile"]
+    assert "of 5 parameters interior (not on a bound)" in cal
+    if not prof:
+        # the headline fit's diagnostics are pending: no ridge is claimed for it
+        assert rg is None
+        for t in (idx, cal):
+            assert "κ–σ ridge" not in t
+        return
     kap = [r["params"]["kappa"] for r in sorted(prof, key=lambda r: r["sigma_cap"])]
     assert rg["kappa_lo"] == pytest.approx(kap[0])
     assert rg["kappa_top"] == pytest.approx(kap[-1])
@@ -3194,7 +3218,6 @@ def test_no_identification_count_where_the_sigma_profile_contradicts_it(dash, pa
         assert "moves with the σ cap along a κ–σ ridge" in idx
         assert "moves with the σ cap along a κ–σ ridge" in cal
         assert f"κ ≤ {d['ident']['kappa_max']:g}" in cal
-    assert "of 5 parameters interior (not on a bound)" in cal
     # the free-σ refit names its wider box (κ ≤ 60, not production's 20)
     assert re.search(r"Refitted in a wider box \(σ ≤ \d+, κ ≤ \d+; production has κ ≤ \d+\)", idx)
 
@@ -4274,6 +4297,15 @@ def test_vvix_tradeoff_sentence_reads_every_configuration(dash):
     assert dash.vvix_tradeoff_sentence([]) is None
 
 
+def _sigma_shown(dash, files: dict) -> str:
+    """The session whose σ profile the trade-off panel shows and the frontier
+    highlights: the headline fit's, or, while its diagnostics are pending, the
+    newest diagnosed session before it."""
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    return headline if headline in files else max(s for s in files if s < headline)
+
+
 def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
     """P1.2: the σ frontier plots, per diagnosed session, each σ-profile refit's
     (SPX out-of-sample RMSE, model VVIX − market): the trade-off between the two
@@ -4284,8 +4316,7 @@ def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
     spec = _spec(html, "sigma-frontier")
     files = {s: d for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
              if (d.get("sigma_profile") or {}).get("rows")}
-    _, cal = dash.load_headline_calibration()
-    headline = dash._calibration_session(cal, "")
+    shown = _sigma_shown(dash, files)
     assert {s["name"] for s in spec["series"]} == set(files)
     assert len(spec["series"]) == len(files) >= 1
     for s in spec["series"]:
@@ -4299,7 +4330,7 @@ def test_sigma_frontier_is_every_sessions_sigma_profile(dash, pages):
         assert s["pointLabels"] == [f"{r['sigma_cap']:g}" for r in rows]
         assert s["hollowPoints"] == [r["sigma_cap"] > cap for r in rows]
         assert s["bigPoints"] == [r["sigma_cap"] == cap for r in rows]
-        assert s["color"] == ("headline" if s["name"] == headline else "muted")
+        assert s["color"] == ("headline" if s["name"] == shown else "muted")
     tbl = spec["table"]
     assert tbl["columns"][0]["label"] == "Session"
     assert len(tbl["rows"]) == sum(len(d["sigma_profile"]["rows"]) for d in files.values())
@@ -4315,12 +4346,13 @@ def test_sigma_frontier_labels_only_the_headline_sessions_caps(dash, pages):
     headline session's caps are drawn on the chart; the other sessions keep
     theirs for the tooltip (tipLabels), which desk.js does not draw."""
     spec = _spec(pages["/calibration"], "sigma-frontier")
-    _, cal = dash.load_headline_calibration()
-    headline = dash._calibration_session(cal, "")
-    assert any(s["name"] == headline for s in spec["series"])
+    files = {s: d for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
+             if (d.get("sigma_profile") or {}).get("rows")}
+    shown = _sigma_shown(dash, files)
+    assert any(s["name"] == shown for s in spec["series"])
     for s in spec["series"]:
         assert s["pointLabels"], s["name"]
-        assert bool(s.get("tipLabels")) is (s["name"] != headline), s["name"]
+        assert bool(s.get("tipLabels")) is (s["name"] != shown), s["name"]
     js = (ROOT / "dashboard" / "static" / "desk.js").read_text()
     assert "if (s.pointLabels && !s.tipLabels) {" in js
 
@@ -4476,7 +4508,7 @@ def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
     tail = f"; none stored for {', '.join(sorted(s for s, _ in none))}" if none else ""
     sess = "session" if len(have) == 1 else "sessions"
     # P3.1: the text names the table the settlements come from, through its last date
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
     text = (f"Heston misses real VX futures by {want} index pts RMSE out of sample "
             f"({len(have)} {sess}{tail}; settlements from vix_futures_daily in data_store/vol_system.db, "
@@ -5033,7 +5065,7 @@ def test_surface_delta_grid_panel_lists_every_expiry_and_five_tenors(dash, pages
 
 # the heads as text: S_T and g_min are set as S<sub>T</sub> and g<sub>min</sub>
 RND_HEADS = ["Expiry", "Days", "Quoted K/F", "ST < 0.80 F", "ST < 0.90 F", "Outside 0.95–1.05 F",
-             "ST > 1.10 F", "Mass below quoted", "Mass above quoted", "∫p", "E[ST/F]", "gmin"]
+             "ST > 1.10 F", "Mass below quoted", "Mass above quoted", "Distribution check", "gmin"]
 
 
 def test_surface_rnd_panels_print_every_slices_risk_neutral_tails(dash, pages):
@@ -5066,11 +5098,13 @@ def test_surface_rnd_panels_print_every_slices_risk_neutral_tails(dash, pages):
             else:
                 assert cells[col[head]] == dash._fmt(100 * p, ".2f"), (r["expiry"], head)
         assert cells[col["Mass below quoted"]] == dash._fmt(100 * r["below_quoted"], ".2f")
-        assert cells[col["∫p"]] == dash._fmt(r["mass"], ".4f")
-        assert cells[col["E[ST/F]"]] == dash._fmt(r["mean"], ".4f")
+        # C3: ∫p and E[S_T/F] printed 1.0000 in every row; one column carries the
+        # larger of their errors at the precision it has (m.m × 10⁻ⁿ when tiny)
+        err = max(abs(r["mass"] - 1.0), abs(r["mean"] - 1.0))
+        assert cells[col["Distribution check"]] == dd.fmt_g(err)
         if r["certified"]:                     # a certified slice is a distribution with mean F
-            assert cells[col["∫p"]] == "1.0000"
-            assert cells[col["E[ST/F]"]] == "1.0000"
+            assert err < 1e-6
+            assert cells[col["Distribution check"]] != "1.0000"
         assert cells[col["gmin"]] == dd.fmt_g(r["g_min"])
         assert not cells[col["gmin"]].startswith(("0.0000", "−"))   # positive: never a bare 0.0000
     assert n_beyond == sum(1 for r in rows for v in r["prob"].values() if v is None)
@@ -5142,7 +5176,10 @@ def test_surface_vs_tile_names_its_vs_beside_the_replicated_vix_and_the_cboe_clo
     if vix:
         off = vix.get("official")
         close = off.get("close") if isinstance(off, dict) else off
-        assert f"VIX replicated {dash._fmt(vix.get('replicated'), '.2f')}" in sub, sub
+        if vix.get("replicated") is None:
+            assert "VIX not replicated" in sub, sub
+        else:
+            assert f"VIX replicated {dash._fmt(vix.get('replicated'), '.2f')}" in sub, sub
         assert f"Cboe close {dash._fmt(close, '.2f')}" in sub, sub
 
 
@@ -5894,7 +5931,8 @@ def _kpi_blocks(html: str, block_id: str) -> dict[str, str]:
 
 def _range_span(tile: str) -> str | None:
     m = re.search(r'<div class="kpi-ci kpi-range"[^>]*>(.*?)</div>', tile, re.DOTALL)
-    return _html_unescape(m.group(1)).strip() if m else None
+    # its visible text: the value pairs sit in nowrap spans (the ranges filter)
+    return _html_unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip() if m else None
 
 
 def test_surface_model_tiles_carry_their_range_over_every_stored_session(dash, pages):
@@ -5969,7 +6007,7 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
         for route, html in pages.items():
             text = _visible_text(html)
             found = {f"{v:.{p}f}" for p in (2, 3, 4)
-                     if re.search(r"(?<![\d.])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
+                     if re.search(r"(?<![\d.\u2212-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
             if found:
                 seen[route] = found
         assert set(must) <= set(seen), (name, seen)
@@ -6100,7 +6138,7 @@ def test_browser_heatmap_row_head_stays_in_view_on_a_phone(site_browser):
 # ── P3.1: the joint fit's VX futures leg ─────────────────────────────────────
 
 def _vx_last() -> str | None:
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         return con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
 
 
@@ -6163,7 +6201,7 @@ def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
     d = dash.load_model_risk()
     row = next(m for m in d["monitors"]
                if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         db_date = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
     lag = dash.session_age(_vx_last(), db_date)
     assert row["model"] == "M5"
@@ -6198,7 +6236,7 @@ def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
 
 def _vol_frame() -> pd.DataFrame:
     """VIX, RV21 trailing and forward from the shipped DB, written out here (not desk_market)."""
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         spx = pd.read_sql("SELECT date, close FROM spx_ohlcv ORDER BY date", con, index_col="date")
         vix = pd.read_sql("SELECT date, close FROM vix_daily ORDER BY date", con, index_col="date")["close"]
     spx.index, vix.index = pd.to_datetime(spx.index), pd.to_datetime(vix.index)
@@ -6409,10 +6447,13 @@ def test_model_risk_history_ends_with_todays_value_and_uses_todays_limits(dash, 
         if m["num"] is None:        # today's session cannot compute it: no dot stands in for today
             assert m["history"]["last"] is None, m["check"]
             assert m["history"]["today_missing"], m["check"]
+        elif m["key"] == "vix_rep_gap":   # T11: a two-sided check plots the signed gap; the limit uses |gap|
+            assert abs(m["history"]["last"]) == pytest.approx(m["num"], abs=1e-12), m["check"]
         else:
             assert m["history"]["last"] == pytest.approx(m["num"], abs=1e-12), m["check"]
         lim = dash.MONITOR_LIMITS[m["limits_key"]]
-        assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(x["value"], lim)
+        size = abs if m["key"] == "vix_rep_gap" else float
+        assert [x["status"] for x in m["history"]["dots"]] == [dash._rag(size(x["value"]), lim)
                                                                for x in m["history"]["dots"]]
     oos = next(m for m in d["monitors"] if m["key"] == "oos_rmse")
     want = [dash._cal_losses(c).get("spx_oos_iv_rmse") for _, c in _gated_pickles(dash)]
@@ -6595,7 +6636,7 @@ def test_cite_registry_reads_every_cite_call_in_the_templates(dash):
 # ── P3.5: the VIX complex on the Overview ─────────────────────────────────────
 
 def _ts_wide() -> pd.DataFrame:
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         df = pd.read_sql("SELECT date, ticker, close FROM vix_term_structure", con)
     return df.pivot_table(index="date", columns="ticker", values="close", aggfunc="last").sort_index()
 
@@ -6622,7 +6663,7 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     M1 → M2 = VX2 / VX1 − 1, recomputed here from vol_system.db; its age in NYSE
     sessions is shown in the stale styling of that age, and the curve is not on
     the spot chart."""
-    with sqlite3.connect(f"file:{SHIPPED / 'vol_system.db'}?mode=ro", uri=True) as con:
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
         px = [r[0] for r in con.execute(
             "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
@@ -6839,7 +6880,7 @@ def _client_quotes(g: dict) -> list[dict]:
     for i in range(len(g["mid"])):
         if i:
             K += g["dK"][i - 1] * g["step"]
-        mid, db, da = g["mid"][i] / 1e5, g["db"][i] / 1e6, g["da"][i] / 1e6
+        mid, db, da = g["mid"][i] / 1e5, g["db"][i] / 1e8, g["da"][i] / 1e8
         hs = (db + da) / 2
         k = np.log(K / g["F"])
         sw = np.sqrt((mid / 100) ** 2 * g["T"] / 365.0)
@@ -6872,7 +6913,7 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     model's z. Three quotes per expiry (first, middle, last) of every smile on
     Surface and Calibration, unpacked with the client's formulas from the page's
     own spec, give residuals.parquet's strike (exactly), right, the producer's
-    forward delta (1e-6) and each model's error_hs (±0.05), in_sample and
+    forward delta (1e-6) and each model's error_hs (±0.01), in_sample and
     inside_spread."""
     res = pd.read_parquet(_surface_file("residuals.parquet"))
     specs = _smile_specs(pages)
@@ -6894,7 +6935,7 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
                     if mm is None:
                         assert not np.isfinite(p.model_iv)
                         continue
-                    assert abs(mm["z"] - p.error_hs) <= 0.05, (route, e, m, i, mm["z"], p.error_hs)
+                    assert abs(mm["z"] - p.error_hs) <= 0.01, (route, e, m, i, mm["z"], p.error_hs)
                     flags = (bool(mm["st"] & 1), bool(mm["st"] & 2))
                     assert flags == (bool(p.in_sample), bool(p.inside_spread)), (route, e, m, i)
                     n += 1
@@ -8307,6 +8348,8 @@ def test_vol_cone_ends_on_the_surface_session_and_matches_the_module(dash, pages
             assert [b[0] for b in body] == [p["expiry"] for p in pts]
             assert [b[3] for b in body] == [f"{p['atmf']:.2f}" for p in pts]
             assert [b[4] for b in body] == [f"{p['rank']:.0f}" for p in pts]
+            # R3-D12: the Sessions column is the whole window the rank uses, not 9.0, 9.7, …
+            assert [b[2] for b in body] == [str(p["h"]) for p in pts]
     assert len(spec["table"]["rows"]) == len(cone.HORIZONS) * len(cone.SAMPLES)
     def txt(frag: str) -> str:
         return _html_unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", frag)))
@@ -8681,3 +8724,434 @@ def test_expiry_labels_are_iso_dates_never_yy_mm_dd(dash, pages):
         dates = re.findall(r"\d{4}-\d{2}-\d{2}", b)
         assert dates, b
         assert all(d in surface for d in dates), b
+
+
+# ── the recompute audit (FUND_GRADE_PLAN.md tier 0.1) ─────────────────────────
+
+@pytest.fixture(scope="module")
+def recompute_audit(tmp_path_factory):
+    """scripts/ci/recompute_audit.py, which imports its checks as ``recompute``."""
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+    try:
+        return _load("recompute_audit_under_test", "scripts/ci/recompute_audit.py")
+    finally:
+        sys.path.remove(str(ROOT / "scripts" / "ci"))
+
+
+@pytest.fixture(scope="module")
+def frozen_site(dash, freezer, tmp_path_factory):
+    out = tmp_path_factory.mktemp("frozen_site")
+    assert freezer.freeze(str(out), dash) == 0
+    return out
+
+
+def test_every_audited_number_recomputes_from_data_store(recompute_audit, frozen_site):
+    """Tier 0.1: every number the Overview and Surface print, recomputed from
+    data_store by scripts/ci/recompute/ (its own readers and arithmetic, nothing
+    imported from dashboard/), matches the rendered page at its printed precision,
+    and the page prints every number a check expects. Runs in the bot's
+    presentation gate, so a deploy with a number the audit cannot reproduce stops."""
+    res = recompute_audit.run(frozen_site, SHIPPED)
+    bad = [f"{c.page} · {c.panel} · {c.label}: printed {c.printed}, recomputed {c.expected} {c.note}"
+           for c in res["checks"] if not c.ok]
+    assert bad == []
+    assert len(res["checks"]) > 1000
+    for page in ("Overview", "Surface"):
+        cov = res["coverage"][page]
+        assert cov["covered"] >= 0.99 * cov["total"], (page, cov["missed"])
+
+
+def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_site, tmp_path):
+    """The audit is only evidence if it can fail: the SPX close in the ticker and
+    the 1M ATMF, each moved by one unit of their last printed digit in a copy of
+    the frozen Overview, are reported as mismatches."""
+    site = tmp_path / "site"
+    shutil.copytree(frozen_site, site)
+    page = site / "index.html"
+    html = page.read_text(encoding="utf-8")
+    for label in ("SPX", "1M ATMF"):
+        m = re.search(r'<span class="tk-label">' + re.escape(label)
+                      + r'</span>\s*<span class="tk-val">([^<]+)</span>', html)
+        assert m, label
+        raw = m.group(1)
+        num = re.search(r"\d[\d,]*\.\d+", raw)
+        assert num, raw
+        digits = num.group(0)
+        dec = len(digits.split(".")[1])
+        bumped = f"{float(digits.replace(',', '')) + 10 ** -dec:,.{dec}f}"
+        html = html[:m.start(1)] + raw.replace(digits, bumped) + html[m.end(1):]
+    page.write_text(html, encoding="utf-8")
+    res = recompute_audit.run(site, SHIPPED)
+    failed = {(c.panel, c.label) for c in res["checks"] if not c.ok and c.page == "Overview"}
+    assert ("ticker", "SPX close") in failed
+    assert ("ticker", "1M ATMF (SVI-cal, 30 days), %") in failed
+
+
+def test_model_risk_vix_gap_history_keeps_the_sign(dash):
+    """T11: every dot of the VIX-replication check's history is the signed gap
+    (replicated − Cboe close) of its session's vix_replication.json, not |gap|;
+    the limit check still applies to the size."""
+    d = dash.load_model_risk()
+    row = next(m for m in d["monitors"] if m["key"] == "vix_rep_gap")
+    h = row["history"]
+    if h is None:
+        pytest.skip("fewer than two stored surface sessions replicate the VIX")
+    gaps = {}
+    for p in sorted((SHIPPED / "surface").glob("*/vix_replication.json")):
+        g = json.loads(p.read_text()).get("indices", {}).get("VIX", {}).get("gap_vs_official")
+        if g is not None:
+            gaps[p.parent.name] = float(g)
+    for dot in h["dots"]:
+        assert dot["value"] == pytest.approx(gaps[dot["session"]], abs=1e-12)
+        assert dot["status"] == dash.desk_monitor.rag(abs(dot["value"]), dash.MONITOR_LIMITS["vix_rep_gap"])
+    if any(v < 0 for v in gaps.values()):
+        assert "−" in h["range"]
+    if row["num"] is not None:                    # None: today's session does not replicate the VIX
+        assert row["num"] == pytest.approx(abs(row["num"]))      # today's limit check: the size
+
+
+def test_the_vix_leg_names_what_the_model_index_is(pages):
+    """T10: the VIX-index leg is 100·√(expected average variance), the variance-swap
+    rate the Cboe formula replicates; the page called it 'the model's expected
+    average vol', which by Jensen is lower. The Quintic note set E[VIX_T] raw."""
+    cal = pages["/calibration"]
+    if 'id="vixleg"' not in cal:
+        pytest.skip("no VIX leg on the page")
+    text = _visible_text(cal)
+    assert "expected average vol to each horizon" not in text
+    if "No VIX leg recorded." not in text:
+        assert "100·√(expected average variance over the horizon)" in text
+    assert "E[VIX_T]" not in text
+
+
+UPPERCASE_SELECTORS = ("th", ".kpi-label", ".panel-title", ".result-k", ".find-head", ".param-name",
+                       ".missing-title", ".section-title", ".chip", "details.method > summary")
+LOWER_GREEK = re.compile("[α-ω]")
+
+
+def test_no_uppercased_label_turns_a_greek_symbol_into_a_capital(pages):
+    """R3-D9: an upper-cased head set β as 'Β' (the Research β table's
+    '(β·VIX)² − RV²'). In every element desk.css upper-cases, each lower-case
+    Greek letter sits in a .sym span; a phone card label (td::before from
+    data-label) with one keeps its case through a CSS rule that names it."""
+    from bs4 import BeautifulSoup
+    css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
+    bad, labels = [], set()
+    for route, html in pages.items():
+        soup = BeautifulSoup(html, "lxml")
+        for el in soup.select(", ".join(UPPERCASE_SELECTORS)):
+            for node in el.find_all(string=LOWER_GREEK):
+                chain = [node.parent, *node.parent.parents]
+                if not any("sym" in (p.get("class") or []) for p in chain if hasattr(p, "get")):
+                    bad.append((route, str(node)[:60]))
+        for td in soup.select("table.cards td[data-label]"):
+            labels.update(LOWER_GREEK.findall(td["data-label"]))
+    assert bad == []
+    for ch in sorted(labels):
+        assert f'[data-label*="{ch}"]' in css, ch
+
+
+def test_calibration_census_says_what_is_stored_not_k_of_k_pass(dash, pages):
+    """HANDOFF D (T2's twin): the job stores only gate-passing fits, so the
+    Calibration page's 'k of k current-schema fits pass the gate' was true by
+    construction. It says what is stored and why, like the Overview, and names a
+    gate-failing count only when the gate has tightened since a fit was stored."""
+    rows = dash.scan_calibrations()
+    n_current = sum(1 for r in rows if r["legacy"] is False)
+    n_ok = sum(1 for r in rows if r["legacy"] is False and r["ok"])
+    text = _visible_text(pages["/calibration"])
+    if n_current == 0:
+        pytest.skip("no current-schema fit stored")
+    assert "fits pass the gate" not in text
+    assert f"{dash.plural(n_current, 'current-schema (model_version 2) fit')}" in text
+    assert "the job stores only fits that pass the gate" in text
+    assert (f"{n_ok:,} of them passing the current gate" in text) == (n_ok != n_current)
+
+
+def test_a_clean_checkout_renders_the_committed_record_not_the_stale_cache(dash, freezer, tmp_path,
+                                                                           monkeypatch):
+    """VALIDATOR-03 / CODE-02 / CIO-01: the tracked SQLite cache is never committed by
+    the daily job, so a checkout's cache lags the committed parquet record and
+    `make freeze`, CI and a reviewer's build showed older prices and other Model
+    Risk statuses than the deployed site. freeze() renders from a scratch copy of
+    the cache brought up to the record (app.record_db), and never writes the cache.
+    Here the cache lacks the record's newest SPX and VIX session."""
+    store = tmp_path / "data_store"
+    store.mkdir()
+    for p in SHIPPED.iterdir():
+        if p.name != "vol_system.db":
+            (store / p.name).symlink_to(p)
+    shutil.copy2(SHIPPED / "vol_system.db", store / "vol_system.db")
+    parts = sorted((SHIPPED / "market" / "spx_ohlcv").glob("*.parquet"))
+    rec = pd.concat([pd.read_parquet(f) for f in parts])
+    last = str(rec["date"].astype(str).str[:10].max())
+    con = sqlite3.connect(store / "vol_system.db")
+    with con:
+        for table in ("spx_ohlcv", "vix_daily"):
+            con.execute(f"DELETE FROM {table} WHERE substr(date, 1, 10) >= ?", (last,))  # noqa: S608
+    con.close()
+    before = hashlib.sha256((store / "vol_system.db").read_bytes()).hexdigest()
+    monkeypatch.setattr(dash, "DATA", store)
+    dash._CHROME_CACHE.clear()
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 0
+    from bs4 import BeautifulSoup
+    html = (out / "index.html").read_text()
+    item = BeautifulSoup(html, "lxml").select_one('header.statusbar span.sb-item[title^="SPX close"] .sb-v')
+    assert item is not None
+    assert item.get_text(strip=True) == last
+    close = float(rec.loc[rec["date"].astype(str).str[:10] == last, "close"].iloc[-1])
+    assert f"{close:,.2f}" in html
+    assert hashlib.sha256((store / "vol_system.db").read_bytes()).hexdigest() == before
+    assert dash.db_file() == store / "vol_system.db"          # the override is gone
+
+
+def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash, pages):
+    """VALIDATOR-01 / QUANT-01 / CITSEC-02 / CIO-03: the job stamped the Yahoo
+    download instant into quote_time, so the 2026-10-26 chain read 'Yahoo Finance
+    close snapshot · quotes at 2026-10-27 05:26:50Z' and 'Quotes as of …' although
+    Yahoo reports no quote times, and its T ran from that fetch ('Cboe GTH book').
+    Such a chain is named a download with its fetch time on every page that
+    names a chain; 'quotes at' belongs to a book that records quote times."""
+    fetched = {"inputs": {"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z",
+                          "t_origin_basis": "quote_time (Cboe GTH book)"}}
+    pv = dash.chain_provenance(fetched)
+    assert pv["vendor"] == "yahoo"
+    assert pv["fetched_as_quote_time"]
+    for text in (" · ".join(dash.chain_source(fetched)), dash.quote_source_note(fetched),
+                 dash.chain_sentence(fetched)):
+        assert "quotes at" not in text
+        assert "close snapshot" not in text
+        assert "fetched 2026-10-27 05:26 UTC" in text
+        assert "T measured from the fetch" in text
+    # the badge sets each part unbroken: every part fits a 320 px phone (at most 40 characters)
+    assert all(len(p) <= 40 for p in dash.chain_source(fetched)), dash.chain_source(fetched)
+    cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
+    assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
+    # every page that names the newest surface session's chain says what it is
+    sj = json.loads(_surface_file("surface.json").read_text())
+    want = dash.chain_provenance(sj)
+    for route in ("/", "/surface", "/model-risk"):
+        text = _visible_text(pages[route])
+        assert "Quotes as of" not in text, route
+        if want and want["fetched_as_quote_time"]:
+            assert "close snapshot · quotes at" not in text, route
+            assert want["time"].split(";")[0] in text, route
+
+
+def test_the_surface_source_shows_its_age_without_setting_the_page_state(dash, pages):
+    """C2 (F17): the freshness table's quote-grade surface row printed '—' for its
+    age and the phone strip gave it none, beside sources that print theirs. Every
+    dated source but the fixed backtest window now shows its age in NYSE sessions;
+    the surface is still left out of the page's state (it is as old as the fit it
+    was scored with, which already counts)."""
+    from bs4 import BeautifulSoup
+    c = dash.load_chrome()
+    surf = next(s for s in c["sources"] if s["short"] == "SURFACE")
+    if not surf["date"]:
+        pytest.skip("no surface session stored")
+    assert surf["age"] == dash.session_age(surf["date"], c["latest"])
+    assert surf["level"] == dash.stale_level(surf["age"])
+    assert next(s for s in c["sources"] if s["short"] == "BACKTEST")["age"] is None
+    soup = BeautifulSoup(pages["/"], "lxml")
+    row = next(tr for tr in soup.select("footer table tbody tr")
+               if tr.select_one("td").get_text(strip=True) == surf["label"])
+    assert row.select("td")[2].get_text(strip=True) == str(surf["age"])
+    li = next(li for li in soup.select("header.statusbar ul.sb-list li")
+              if li.select_one(".sb-k").get_text(strip=True) == "SURFACE")
+    assert li.select_one(".sb-age").get_text(strip=True) == dash.plural(surf["age"], "session")
+    others = [dict(s, level="ok") if s["short"] == "SURFACE" else s for s in c["sources"]]
+    assert dash.oldest_source(others) == dash.oldest_source(c["sources"])
+    worst_without = "ok"
+    for s in c["sources"]:
+        if s["bar"] and s["aged"] and s["short"] != "VX":
+            if s["level"] in ("error", "missing"):
+                worst_without = "error"
+            elif s["level"] == "warn" and worst_without == "ok":
+                worst_without = "warn"
+    assert c["worst"] == worst_without
+
+
+def test_rv20_and_rv21_are_defined_and_named_by_their_windows(dash, pages):
+    """C1 (F11): the Overview printed 'rv₂₀ 9.67%' in the rule inputs beside 'RV21
+    9.81' in the ticker with no word on why they differ. rv₂₀ has a glossary entry
+    taken from the code that computes it (regime_classifier._label_rv: 20 sessions,
+    at least 15 returns), its rule input says '20-session', and the page's first
+    rv₂₀ links to it; RV21 keeps its 21-session definition."""
+    import inspect
+
+    from joint_vol_calibration.signals import regime_classifier as rc
+    terms = {t["id"]: t for t in dash.desk_glossary.TERMS}
+    assert "rv20" in terms
+    assert "rv21" in terms
+    src = inspect.getsource(rc._label_rv)
+    assert "20" in src
+    assert "min_periods=15" in src
+    assert "20 daily SPX log returns" in terms["rv20"]["text"]
+    assert "at least 15" in terms["rv20"]["text"]
+    assert terms["regimes"]["source"].endswith("regime_classifier.py")
+    html = pages["/"]
+    assert "rv₂₀ (20-session)" in _visible_text(html)
+    assert "#def-rv20" in html
+
+
+def test_smile_slice_tables_take_medians_of_unrounded_model_ivs(dash, pages):
+    """Found by the recompute audit (tier 0.1): each model column of the smile
+    slice's per-expiry tables printed the median of IVs already rounded to 0.01
+    vol pts, so where an even count's middle pair straddled a rounding step the
+    cell was one display unit off (99 of 796 cells on 2026-10-26). Every model
+    cell is now the median of the unrounded IVs, recomputed here from residuals."""
+    spec = _spec(pages["/surface"], "chart-slices")
+    surf = _surface_file("residuals.parquet")
+    res = pd.read_parquet(surf)
+    groups = spec["table"]["groups"]
+    assert groups
+    checked = 0
+    for g in groups:
+        e = g["group"]
+        models = [c["label"] for c in g["columns"]][5:]
+        mkt = res[(res["model"] == res["model"].iloc[0]) & (res["expiry"].astype(str).str[:10] == e)]
+        kb = dash.k_bucket(mkt["k"]).to_numpy()
+        labels = {dash.k_bucket_label(b): b for b in set(kb.tolist())}
+        for row in g["rows"]:
+            b = labels[row[0]]
+            ks = mkt["k"].to_numpy()[kb == b]
+            for m_label, cell in zip(models, row[5:]):
+                key = next(m for m in res["model"].unique() if dash.model_short(m) == m_label)
+                qm = res[(res["model"] == key) & (res["expiry"].astype(str).str[:10] == e)].set_index("k")
+                vals = qm["model_iv"][~qm.index.duplicated()].reindex(ks).dropna() * 100
+                want = dash._fmt(float(vals.median()), ".2f") if len(vals) else "—"
+                assert cell == want, (e, row[0], m_label)
+                checked += 1
+    assert checked > 0
+
+
+def test_the_vix_tile_says_where_the_replicated_level_sits_in_the_days_range(dash, pages):
+    """Found by simulate_next_session: the replication stores whether the REPLICATED
+    VIX lies inside the official VIX's range that day (report.py), but the tile said
+    'close inside the day range', which any close is. It now says whether the
+    replicated level is inside or outside the day's VIX range, and prints the range."""
+    from bs4 import BeautifulSoup
+    vx = json.loads(_surface_file("vix_replication.json").read_text())
+    row = (vx.get("indices") or {}).get("VIX") or {}
+    soup = BeautifulSoup(pages["/surface"], "lxml")
+    tile = next((k for k in soup.select("#surface-scores .kpi")
+                 if k.select_one(".kpi-label").get_text(strip=True) == "VIX from this chain"), None)
+    if tile is None or row.get("replicated") is None:
+        pytest.skip("no VIX replicated on the newest surface session")
+    sub = tile.select_one(".kpi-sub").get_text(" ", strip=True)
+    assert "close inside the day range" not in sub
+    off = row.get("official") or {}
+    if row.get("official_inside_day_range") is None or off.get("low") is None:
+        assert "VIX range" not in sub
+    else:
+        where = "inside" if row["official_inside_day_range"] else "outside"
+        rng = f"{dash._fmt(float(off['low']), '.2f')}–{dash._fmt(float(off['high']), '.2f')}"
+        assert f"{where} the day’s VIX range {rng}" in sub
+
+
+def test_an_unreplicated_vix_says_why_on_its_tiles(dash):
+    """Found on the bot's 2026-10-27 session: no stored Cboe expiry pair bracketed
+    30 days, so the VIX had no replicated level, and the tiles printed 'VIX
+    replicated —' and 'gap —' with no reason. They now say it is not replicated and
+    why, and keep the Cboe close."""
+    row = {"headline_method": None, "official": {"close": 17.52, "low": 17.43, "high": 18.55},
+           "cboe_rules": {"constant_maturity_days": 30, "extrapolated": True, "near_weight": 1.022}}
+    assert dash.vix_not_replicated_why(row) == "no stored expiry pair brackets 30 days"
+    assert dash.vix_not_replicated_why({"cboe_rules": {"reason": "fewer than two terms"}}) \
+        == "see the VIX family table"
+    cm = [{"label": "1M", "days": 30, "atmf": 13.7, "rr25": -4.4, "bf25": 0.7, "vs": 17.7,
+           "vs_minus_atmf": 3.9, "available": True, "lower": "2026-11-25", "upper": "2026-11-27"},
+          {"label": "1Y", "days": 365, "atmf": 16.7, "available": True, "lower": "a", "upper": "b"}]
+    tiles = dash.surface_state_tiles(cm, [{"T_days": 10}, {"T_days": 400}], vix_rep={"indices": {"VIX": row}})
+    vs = next(t for t in tiles if t["label"] == "1M VS − ATMF")
+    assert "VIX not replicated · Cboe close 17.52" in vs["sub"]
+    assert "VIX replicated —" not in vs["sub"]
+
+
+def test_the_vix_tile_names_the_reason_when_the_newest_session_has_no_replicated_vix(dash, pages):
+    """The page side of the test above, on whichever session is newest: a VIX with
+    no replicated level says 'not replicated' and why, and prints no gap."""
+    from bs4 import BeautifulSoup
+    vx = json.loads(_surface_file("vix_replication.json").read_text())
+    row = (vx.get("indices") or {}).get("VIX") or {}
+    soup = BeautifulSoup(pages["/surface"], "lxml")
+    tile = next((k for k in soup.select("#surface-scores .kpi")
+                 if k.select_one(".kpi-label").get_text(strip=True) == "VIX from this chain"), None)
+    if tile is None or row.get("replicated") is not None:
+        pytest.skip("the newest surface session replicates the VIX")
+    sub = " ".join(tile.select_one(".kpi-sub").get_text(" ", strip=True).split())
+    assert sub.startswith(f"not replicated: {dash.vix_not_replicated_why(row)} · Cboe close ")
+    assert "gap" not in sub
+
+
+def test_the_sigma_panel_stays_while_the_headline_fits_diagnostics_are_pending(dash, monkeypatch):
+    """Found when the bot's diagnostics for 2026-10-27 timed out twice: the σ
+    trade-off panel needed the headline fit's own σ profile, so it vanished, and
+    the Overview, Risk and Calibration links to #sigma-tradeoff broke (the bot's
+    presentation gate failed on them, and the site was not redeployed). While
+    the headline's diagnostics are pending the panel shows the newest diagnosed
+    fit before it and names it; every session's frontier and trade-off stay."""
+    from bs4 import BeautifulSoup
+    files = sorted(s for s, d in _diag_files(SHIPPED / "calibrations" / "diagnostics").items()
+                   if (d.get("sigma_profile") or {}).get("rows"))
+    assert files
+    _, cal = dash.load_headline_calibration()
+    headline = dash._calibration_session(cal, "")
+    real = dash.artifacts.calibration_diagnostics
+
+    def pending(c, data_dir, session):              # the headline's file not written yet
+        out = real(c, data_dir, session)
+        return {**out, "sigma_profile": [], "kappa_max": None} if session == headline else out
+
+    monkeypatch.setattr(dash.artifacts, "calibration_diagnostics", pending)
+    d = dash.load_page2()
+    prior = [s for s in files if s < headline]
+    sv = d["sigma_view"]
+    assert sv is not None
+    assert sv["pending"] is True
+    assert sv["session"] == prior[-1]
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    soup = BeautifulSoup(html, "lxml")
+    panel = soup.select_one("#sigma-tradeoff")
+    assert panel is not None
+    note = " ".join(panel.select_one("#sigma-pending").get_text().split())
+    assert note == (f"The {headline} fit has no σ profile yet: its diagnostics "
+                    f"(scripts/calibration_diagnostics.py) have not completed. "
+                    f"Shown: {prior[-1]}, the newest diagnosed fit.")
+    assert f"σ profile of the {prior[-1]} fit" in panel.select_one("#sigma-profile caption").get_text()
+    assert len(panel.select("#sigma-profile tbody tr")) == len(sv["rows"]) > 0
+    assert panel.select_one("#vvix-tradeoff") is not None
+    spec = _spec(html, "sigma-frontier")
+    assert [s["name"] for s in spec["series"] if s["color"] == "headline"] == [prior[-1]]
+
+
+def test_an_expiry_left_out_of_the_scored_universe_is_named_on_the_surface_page(dash, monkeypatch):
+    """report.drop_unfittable_expiries leaves out an expiry with no fit-set quote
+    (it used to cost the session its whole surface report). The Surface page names
+    each one with its quote count beside the repair that caused it, and says
+    nothing when none was left out."""
+    from bs4 import BeautifulSoup
+    client = dash.app.test_client()
+    soup = BeautifulSoup(client.get("/surface").get_data(as_text=True), "lxml")
+    sj = dash.artifacts.load_surface(dash.DATA).get("surface") or {}
+    if (sj.get("universe") or {}).get("dropped_expiries"):
+        pytest.skip("the newest surface session already left an expiry out")
+    assert soup.select_one("#arb-dropped") is None
+    real = dash.artifacts.load_surface
+
+    def with_drop(*args, **kwargs):
+        out = real(*args, **kwargs)
+        uni = dict((out.get("surface") or {}).get("universe") or {})
+        uni["dropped_expiries"] = [{"expiry": "2030-01-18", "T_days": 1180.0, "n_quotes": 1234,
+                                    "reason": "test"}]
+        return {**out, "surface": {**(out.get("surface") or {}), "universe": uni}}
+
+    monkeypatch.setattr(dash.artifacts, "load_surface", with_drop)
+    soup = BeautifulSoup(client.get("/surface").get_data(as_text=True), "lxml")
+    note = soup.select_one("#arbitrage #arb-dropped")
+    assert note is not None
+    text = " ".join(note.get_text().split())
+    assert text.startswith("Left out of the scored universe: 2030-01-18 (1,234 quotes).")
+    assert "outside its spread" in text

@@ -24,7 +24,7 @@ FAST_TESTS = joint_vol_calibration/tests/test_heston.py \
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-any test test-fast test-thorough lint typecheck baselines \
-        bench bench-smoke freeze a11y reproduce reproduce-full mutation demo audit \
+        bench bench-smoke freeze a11y recompute-audit reproduce reproduce-full mutation demo audit \
         docker-build docker-test clean
 
 help:  ## list the targets
@@ -70,6 +70,9 @@ a11y: freeze  ## axe-core (WCAG 2.2 AA) + overflow check on the frozen site (nee
 	cd scripts/ci/a11y && npm ci --no-audit --no-fund && npx playwright install chromium
 	node scripts/ci/a11y/a11y.mjs $(SITE)
 	node scripts/ci/a11y/interact.mjs $(SITE)
+
+recompute-audit: freeze  ## every number on the Overview and Surface, recomputed from data_store independently
+	$(PYTHON) scripts/ci/recompute_audit.py $(SITE)
 
 reproduce:  ## rebuild backtest, Greeks, C7 and the v2 calibrations in a scratch copy; diff vs committed
 	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT)

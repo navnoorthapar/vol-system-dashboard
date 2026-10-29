@@ -41,10 +41,12 @@ import math
 import os
 import pickle
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Iterable, Iterator, Sequence
+import tempfile
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -265,14 +267,68 @@ def _staleness(component: str, label: str, date: str | None, ref: str | None) ->
 
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
+# The database the pages read: DATA/vol_system.db unless record_db() has pushed a
+# scratch copy of it brought up to the committed record (data root, copy).
+_DB_OVERRIDE: list[tuple[Path, Path]] = []
+
+
+def db_file() -> Path:
+    for root, copy in reversed(_DB_OVERRIDE):
+        if root == DATA:
+            return copy
+    return DATA / "vol_system.db"
+
+
 def _db() -> sqlite3.Connection:
     """Read-only connection: the display layer must never write to the DB.
 
     mode=ro also refuses to create an empty database when the file is missing,
     so a missing DB surfaces as a loader error instead of an empty page.
     """
-    path = (DATA / "vol_system.db").resolve()
+    path = db_file().resolve()
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+@contextlib.contextmanager
+def record_db(scratch_dir: str | Path | None = None) -> Iterator[dict]:
+    """Render from the committed record, not from the checkout's SQLite cache.
+
+    data_store/vol_system.db is git-tracked but the daily job never commits it:
+    each run first loads the committed parquet record (market partitions under
+    DATA/market, option chains under DATA/options) into it, then renders. A
+    clean checkout's cache therefore lags the record by every session since it
+    was last committed, so `make freeze`, CI and a reviewer's local build showed
+    a different site from the deployed one (other prices, other Model Risk
+    statuses). Here a scratch copy of the cache gets the same upserts the job
+    does, and every loader (and β's chain table) reads the copy until the block
+    exits; the tracked file is never written. Yields the rows upserted."""
+    from joint_vol_calibration.data import database as dbm
+
+    rb = _import_run_backtest()
+    tmp = Path(tempfile.mkdtemp(prefix="record_db_", dir=scratch_dir))
+    copy = tmp / "vol_system.db"
+    saved = (dbm.DB_PATH, rb.DB_PATH)
+    pushed = False
+    try:
+        shutil.copy2(db_file(), copy)
+        dbm.DB_PATH = rb.DB_PATH = copy
+        counts: dict = {}
+        if (DATA / "market").is_dir():
+            counts.update(dbm.import_market_partitions(DATA / "market"))
+        if (DATA / "options").is_dir():
+            counts["options"] = dbm.import_options_snapshots(DATA / "options")
+        _DB_OVERRIDE.append((DATA, copy))
+        pushed = True
+        _CHROME_CACHE.clear()
+        _BACKLINK_CACHE.clear()
+        yield counts
+    finally:
+        dbm.DB_PATH, rb.DB_PATH = saved
+        if pushed:
+            _DB_OVERRIDE.pop()
+        _CHROME_CACHE.clear()
+        _BACKLINK_CACHE.clear()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _record_error(d: dict, component: str, exc: Any) -> None:
@@ -451,6 +507,24 @@ def date_nowrap(text: Any) -> Any:
 
 
 app.jinja_env.filters["dates"] = date_nowrap
+
+# a value range as printed: '12.51–25.79', '−9.62 to −3.48', '67–97' (numbers with
+# an optional sign, %, ×), the pair kept on one line
+_VALUE_RANGE = re.compile(r"[+\u2212-]?[\d.,]+%?(?:–| to )[+\u2212-]?[\d.,]+%?")
+
+
+def range_nowrap(text: Any) -> Any:
+    """A range line with each value pair in a no-wrap span (R3-D11: at 320 px a KPI
+    range broke inside '12.51–25.79' and '−9.62 to −3.48'); the text is unchanged."""
+    from markupsafe import Markup, escape
+
+    if text is None:
+        return ""
+    return Markup(_VALUE_RANGE.sub(lambda m: f'<span class="nowrap">{m.group(0)}</span>',  # noqa: S704
+                                   str(escape(text))))
+
+
+app.jinja_env.filters["ranges"] = range_nowrap
 
 
 def monitored_for(element_id: str) -> list[dict]:
@@ -2098,7 +2172,7 @@ def beta_estimation(regimes: pd.Series | None = None) -> dict:
     from joint_vol_calibration.backtest.backtest_engine import BETA_ESTIMATION_SESSIONS
 
     rb = _import_run_backtest()
-    db = Path(rb.DB_PATH)
+    db = Path(rb.DB_PATH)       # record_db() points it at the synced copy too
     st = db.stat()
     key = (str(db.resolve()), st.st_mtime_ns, st.st_size)
     if key not in _BETA_CACHE:            # ~1.5 s; the test-suite renders the page many times
@@ -2804,6 +2878,31 @@ def box_refit_note(tr: Sequence[dict], session: str | None) -> str:
             f"VVIX {_fmt(tp['vvix_model'], '.1f')} vs {_fmt(tp['vvix_market'], '.1f')}{scope}.")
 
 
+def sigma_view(diag: dict, session: str | None, profiles: Sequence[dict], d: dict) -> dict | None:
+    """The σ profile the Calibration page's trade-off panel shows: this fit's
+    (``diag``, calibration_diagnostics), or, while its diagnostics are pending
+    (the bot builds them after the fit and can time out), the newest diagnosed
+    fit before it, marked ``pending`` so the page names it. None when no
+    session before this one has a σ profile. ``profiles`` is
+    load_sigma_profiles()["sessions"], oldest first; ``d`` takes a read error."""
+    if diag.get("state") == "ok" and diag.get("sigma_profile"):
+        return {"session": session, "rows": diag["sigma_profile"], "kappa_max": diag.get("kappa_max"),
+                "pending": False}
+    prior = [x["session"] for x in profiles if session is None or x["session"] < session]
+    if not prior:
+        return None
+    try:
+        # the earlier file's identifiability stands in for the pickle's; only its profile is read
+        older = artifacts.calibration_diagnostics({}, DATA, prior[-1])
+    except artifacts.ArtifactError as e:
+        _record_error(d, f"calibration diagnostics σ profile (diagnostics/{prior[-1]}.json)", e)
+        return None
+    if older.get("state") != "ok" or not older.get("sigma_profile"):
+        return None
+    return {"session": prior[-1], "rows": older["sigma_profile"], "kappa_max": older.get("kappa_max"),
+            "pending": True}
+
+
 def sigma_frontier_spec(tr_profiles: Sequence[dict], headline: str | None) -> dict | None:
     """The σ frontier: SPX out-of-sample RMSE against model VVIX − market, one line per session.
 
@@ -3172,7 +3271,9 @@ def calibration_extras(d: dict, cal: dict) -> None:
     profiles = (sp.get("sessions") or []) if sp.get("state") == "ok" else []
     d["vvix_tradeoff"] = vvix_tradeoff(profiles)
     d["vvix_sentence"] = vvix_tradeoff_sentence(d["vvix_tradeoff"])
-    frontier = sigma_frontier_spec(profiles, session)
+    d["sigma_view"] = sigma_view(diag, session, profiles, d)
+    shown = (d["sigma_view"] or {}).get("session")
+    frontier = sigma_frontier_spec(profiles, shown)
     if frontier:
         d["charts"]["frontier"] = frontier
     # the published fit's model VVIX (its own diagnostics file, when it names this fit)
@@ -3181,7 +3282,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     d["vvix"] = ({"model": sf["vvix_model"], "market": sf["vvix_market"]}
                  if sf.get("file") == d.get("calib_file") and None not in (sf.get("vvix_model"),
                                                                            sf.get("vvix_market")) else None)
-    d["sigma_profile_market"] = next((r["vvix_market"] for r in (own or {}).get("rows") or []
+    shown_p = next((x for x in profiles if x["session"] == shown), None)
+    d["sigma_profile_market"] = next((r["vvix_market"] for r in (shown_p or {}).get("rows") or []
                                       if r["vvix_market"] is not None), None)
     # where this fit ranks among the gated fits (lower error is better), one tile each:
     # its own unrounded history row (the tiles' values are rounded for display)
@@ -3221,6 +3323,7 @@ def calibration_extras(d: dict, cal: dict) -> None:
         desk_inputs, sk = [], None
     # the chain this fit's session was fitted on, as the surface report records it
     own_chain = next((s for s in desk_inputs if s["session"] == session), None)
+    d["chain_sentence"] = chain_sentence(own_chain["surface"]) if own_chain else None
     if own_chain:
         d["chain_badge"] = chain_badge(own_chain["surface"], [
             n for s in desk_inputs if s["session"] != session for n in [session_expiries(s["surface"])]
@@ -4583,10 +4686,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
         fit_in = artifacts.surface_fit_inputs(DATA, sr["session"])
         held = ("alternate strikes held out" if str(fit_in.get("rule") or "").startswith("alternate strikes")
                 else "held-out strikes")
-        src = str(fit_in.get("source") or "").lower()
-        qt = fit_in.get("quote_time")
-        snap = (" Yahoo close snapshot, no quote time." if src in ("yfinance", "yahoo") and not qt
-                else (f" Quotes as of {qt}." if qt else ""))
+        pv = chain_provenance({"inputs": fit_in})
+        snap = f" {pv['name']}, {pv['time']}." if pv else ""
         out.append({
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
@@ -5129,17 +5230,10 @@ def heston_model_key(models: Iterable[str]) -> str | None:
 
 
 # the quote inspector's footnote: where the chain's quotes come from and when
-CHAIN_SHORT = {"yfinance": "Yahoo close", "yahoo": "Yahoo close", "cboe": "Cboe"}
-
-
 def quote_source_note(surface_json: dict) -> str:
-    """'Yahoo close, no quote time': the chain's vendor and quote time (surface.json inputs)."""
-    inp = surface_json.get("inputs") or {}
-    uni = surface_json.get("universe") or {}
-    src = str(inp.get("source") or uni.get("source") or "").strip()
-    qt = inp.get("quote_time") or uni.get("quote_time")
-    name = CHAIN_SHORT.get(src.lower(), src) if src else "Chain source not recorded"
-    return f"{name}, " + (f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time")
+    """'Yahoo close, no quote time': the chain's vendor and quote time (chain_provenance)."""
+    pv = chain_provenance(surface_json)
+    return f"{pv['short']}, {pv['time']}" if pv else "Chain source not recorded, no quote time"
 
 
 def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | None],
@@ -5328,7 +5422,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
 # ── the risk-neutral density of the SVI-cal slices (desk_density.py, B9) ──────
 RND_HEADS = ("Expiry", "Days", "Quoted K/F", *(lab for _, lab, _, _ in desk_density.THRESHOLDS[:2]),
              "Outside 0.95–1.05 F", desk_density.THRESHOLDS[2][1], "Mass below quoted", "Mass above quoted",
-             "∫p", "E[S_T/F]", "g_min")
+             "Distribution check", "g_min")
 RND_BEYOND = "beyond quoted strikes"
 RND_TABLE_K = (-0.30, -0.25, -0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15)
 RND_TAIL_DASH: dict[str, bool | str | None] = {"lt80": "dotted", "lt90": None, "gt110": True}
@@ -5361,7 +5455,10 @@ def rnd_view(sj: dict, res: Any, session: str) -> dict | None:
                       _rnd_pct(pr["lt80"]), _rnd_pct(pr["lt90"]), _rnd_pct(pr["out5"]), _rnd_pct(pr["gt110"]),
                       _fmt(100 * r["below_quoted"], ".2f") if r["below_quoted"] is not None else "—",
                       _fmt(100 * r["above_quoted"], ".2f") if r["above_quoted"] is not None else "—",
-                      _fmt(r["mass"], ".4f"), _fmt(r["mean"], ".4f"), desk_density.fmt_g(r["g_min"])]})
+                      # one check instead of ∫p and E[S_T/F], which printed 1.0000 in every
+                      # row (C3): the larger of their errors, at the precision it has
+                      desk_density.fmt_g(max(abs(r["mass"] - 1.0), abs(r["mean"] - 1.0))),
+                      desk_density.fmt_g(r["g_min"])]})
     out: dict[str, Any] = {"heads": list(RND_HEADS), "rows": view_rows, "picks": [
         {"label": p["label"], "tenor": p["tenor"], "expiry": p["row"]["expiry"], "days": p["row"]["T_days"],
          "kf_lo": p["row"]["kf_lo"], "kf_hi": p["row"]["kf_hi"]} for p in picks],
@@ -5545,6 +5642,18 @@ def official_close(index_row: dict) -> float | None:
     return _num(off.get("close")) if isinstance(off, dict) else _num(off)
 
 
+def vix_not_replicated_why(index_row: Mapping) -> str:
+    """Why an index of vix_replication.json has no replicated level, short enough
+    for a tile: the Cboe-rules expiry pair would extrapolate (no stored pair
+    brackets the index's maturity), or the VIX family table below has the reason."""
+    terms = index_row.get("cboe_rules")
+    terms = terms if isinstance(terms, Mapping) else {}
+    days = _num(terms.get("constant_maturity_days"))
+    if terms.get("extrapolated") and days is not None:
+        return f"no stored expiry pair brackets {days:.0f} days"
+    return "see the VIX family table"
+
+
 def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
                         all_cm: Sequence[Sequence[dict]] = (), vix_rep: dict | None = None) -> list[dict]:
     """The 'surface state' KPI row: 1M ATMF, RR25, BF25, VS − ATMF and the ATMF
@@ -5568,8 +5677,9 @@ def surface_state_tiles(cm: Sequence[dict], listed: Sequence[dict],
     vs_sub = (f"VS {_fmt(m1['vs'], '.2f')}% (the bracketing strips at 30 days) over ATMF: the skew premium"
               if m1.get("vs") is not None else "variance-swap vol over ATMF: the skew premium")
     if vix:
-        vs_sub += (f" · VIX replicated {_fmt(_num(vix.get('replicated')), '.2f')}"
-                   f" · Cboe close {_fmt(official_close(vix), '.2f')}")
+        rep = _num(vix.get("replicated"))
+        vs_sub += (f" · VIX replicated {_fmt(rep, '.2f')}" if rep is not None else " · VIX not replicated")
+        vs_sub += f" · Cboe close {_fmt(official_close(vix), '.2f')}"
     return [
         {"label": "1M ATMF", "value": _fmt(m1.get("atmf"), ".2f"), "unit": "%",
          "sub": f"SVI-cal at 30 days, {where}", "range": rng("atmf")},
@@ -5600,18 +5710,76 @@ def surface_state_line(cm: Sequence[dict], session: str | None, ref: str | None)
 # what the stored chain is, as the page badge names it (surface.json inputs.source)
 CHAIN_SOURCES = {"yfinance": "Yahoo Finance close snapshot", "yahoo": "Yahoo Finance close snapshot",
                  "cboe": "Cboe"}
+YAHOO = ("yfinance", "yahoo")
+
+
+def _utc_text(ts: Any) -> str:
+    """'2026-10-27T05:26:50Z' -> '2026-10-27 05:26 UTC'; other strings as written, 'T' spaced."""
+    t = str(ts)
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)", t)
+    return f"{m.group(1)} {m.group(2)} UTC" if m else t.replace("T", " ")
+
+
+def chain_provenance(surface_json: dict) -> dict | None:
+    """What a stored chain is, from surface.json inputs (and universe).
+
+    A Yahoo download carries no quote times. Until 2026-10-27 the job stamped
+    the download instant into its quote_time, and a download inside Global
+    Trading Hours was then treated as a timed book, T measured from it
+    (option_chain.t_origin; VALIDATOR-01, QUANT-01): such a chain is named a
+    download with its fetch time, never 'quotes at'. A Cboe book records the
+    time of its quotes. Keys: vendor ('yahoo', 'cboe' or the raw source), name,
+    short, time (the quote-time clause), badge (that clause in parts short
+    enough to set unbroken on a 320 px phone), fetched_as_quote_time."""
+    inp = surface_json.get("inputs") or {}
+    uni = surface_json.get("universe") or {}
+    src = str(inp.get("source") or uni.get("source") or "").strip().lower()
+    if not src:
+        return None
+    qt = inp.get("quote_time") or uni.get("quote_time")
+    if src in YAHOO:
+        if qt:
+            from_fetch = str(inp.get("t_origin_basis") or "").startswith("quote_time")
+            badge = [f"fetched {_utc_text(qt)}", "Yahoo reports no quote times",
+                     *(["T measured from the fetch"] if from_fetch else [])]
+            return {"vendor": "yahoo", "name": "Yahoo Finance download", "short": "Yahoo download",
+                    "time": f"{badge[0]}; {', '.join(badge[1:])}", "badge": badge,
+                    "fetched_as_quote_time": True}
+        return {"vendor": "yahoo", "name": CHAIN_SOURCES[src], "short": "Yahoo close",
+                "time": "no quote time", "badge": ["no quote time"], "fetched_as_quote_time": False}
+    name = CHAIN_SOURCES.get(src, src)
+    time = f"quotes at {_utc_text(qt)}" if qt else "no quote time"
+    return {"vendor": src, "name": name, "short": name, "time": time, "badge": [time],
+            "fetched_as_quote_time": False}
+
+
+def _chain_clause(surface_json: dict) -> str:
+    """'Yahoo Finance close snapshot, no quote time' (chain_provenance), for a note."""
+    pv = chain_provenance(surface_json)
+    return f"{pv['name']}, {pv['time']}" if pv else "chain source not recorded"
+
+
+def chain_sentence(surface_json: dict) -> str:
+    """The chain in a sentence: 'a Yahoo Finance close snapshot with no quote time',
+    'a Yahoo Finance download fetched 2026-10-27 05:26 UTC (Yahoo reports no quote
+    times; T measured from the fetch)', 'a Cboe book with quotes at …'."""
+    pv = chain_provenance(surface_json)
+    if not pv:
+        return "a chain whose source is not recorded"
+    if pv["fetched_as_quote_time"]:
+        when, _, rest = pv["time"].partition("; ")
+        return f"a {pv['name']} {when} ({rest.replace(', ', '; ')})"
+    if pv["time"] == "no quote time":
+        return f"a {pv['name']} with no quote time"
+    if pv["vendor"] == "cboe":
+        return f"a {pv['name']} book with {pv['time']}"
+    return f"a {pv['name']}, {pv['time']}"
 
 
 def chain_source(surface_json: dict) -> list[str] | None:
     """['Yahoo Finance close snapshot', 'no quote time'] from surface.json inputs and universe."""
-    inp = surface_json.get("inputs") or {}
-    uni = surface_json.get("universe") or {}
-    src = str(inp.get("source") or uni.get("source") or "").strip()
-    if not src:
-        return None
-    qt = inp.get("quote_time") or uni.get("quote_time")
-    return [CHAIN_SOURCES.get(src.lower(), src),
-            f"quotes at {str(qt).replace('T', ' ')}" if qt else "no quote time"]
+    pv = chain_provenance(surface_json)
+    return [pv["name"], *pv["badge"]] if pv else None
 
 
 def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str | None:
@@ -5623,7 +5791,7 @@ def chain_badge(surface_json: dict, other_expiries: Sequence[int] = ()) -> str |
     src = chain_source(surface_json)
     if not src:
         return None
-    parts = [f"Chain: {src[0]}", src[1]]
+    parts = [f"Chain: {src[0]}", *src[1:]]
     rows, scored = _num(inp.get("chain_rows")), _num(uni.get("n_universe"))
     if rows is not None and scored is not None:
         parts.append(f"{_fmt(int(rows), ',')} rows → {_fmt(int(scored), ',')} scored")
@@ -5981,7 +6149,9 @@ def surface_extras(d: dict, surf: dict) -> None:
         for m in overlay:
             qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
             qm = qm[~qm.index.duplicated()]
-            by_model[m] = [(round(float(v) * 100, 2) if _num(v) is not None else None)
+            # unrounded: the table's median of rounded IVs was off by 0.01 in 99 of
+            # 796 cells, when an even count's middle pair straddled a rounding step
+            by_model[m] = [(float(v) * 100 if _num(v) is not None else None)
                            for v in qm.reindex(q["k"].to_numpy())]
         # the same expiry as a table: medians by ln(K/F) bucket (the chart's data
         # equivalent; desk.js shows the selected expiry's, every one without JS)
@@ -6136,6 +6306,9 @@ def surface_extras(d: dict, surf: dict) -> None:
                              for k, v in ((surf.get("surface") or {}).get("surfaces") or {}).items()]
         d["fit_set"] = (surf.get("surface") or {}).get("fit_set") or {}
         d["universe"] = (surf.get("surface") or {}).get("universe") or {}
+        # expiries the report left out of the scored universe (report.drop_unfittable_expiries)
+        d["dropped_expiries"] = [x for x in d["universe"].get("dropped_expiries") or []
+                                 if isinstance(x, dict)]
         d["inputs"] = (surf.get("surface") or {}).get("inputs") or {}
 
     # VIX replicated from the same chain (vix_replication.json)
@@ -6147,7 +6320,9 @@ def surface_extras(d: dict, surf: dict) -> None:
             if not row:
                 continue
             off = row.get("official")
-            d["vix_rows"].append({"ticker": tick, "replicated": _num(row.get("replicated")),
+            rep = _num(row.get("replicated"))
+            d["vix_rows"].append({"ticker": tick, "replicated": rep,
+                                  "why": vix_not_replicated_why(row) if rep is None else None,
                                   "official": official_close(row), "gap": _num(row.get("gap_vs_official")),
                                   "method": row.get("headline_method"),
                                   "in_range": row.get("official_inside_day_range"),
@@ -6666,7 +6841,7 @@ def load_model_risk() -> dict[str, Any]:
     mon = []
 
     def add(mid, check, value, text, limits_key, artifact, note, status=None, limits_text=None, key=None,
-            history=None, digits=".2f"):
+            history=None, digits=".2f", two_sided=False):
         lim = MONITOR_LIMITS.get(limits_key)
         st = status if status is not None else _rag(value, lim) if lim else "na"
         page, anchor = CHECK_EVIDENCE.get(key or limits_key, (None, None))
@@ -6679,7 +6854,7 @@ def load_model_risk() -> dict[str, Any]:
                     "id": "check-" + desk_monitor.slug(key or limits_key or check),
                     "href": f"{page}#{anchor}" if page else None, "page": page, "anchor": anchor,
                     "bullet": desk_monitor.bullet(value, lim, digits) if lim else None,
-                    "history": (desk_monitor.history_view(history, lim, digits)
+                    "history": (desk_monitor.history_view(history, lim, digits, two_sided=two_sided)
                                 if (lim and history) else None)})
     # the gated fits: today's values and each session's, from one function of the pickle
     gated: list[tuple[str, dict]] = []
@@ -6802,7 +6977,8 @@ def load_model_risk() -> dict[str, Any]:
             today["median_abs_hs"],
             f"{_fmt(today['median_abs_hs'], '.1f')} ({_fmt(today['inside_pct'], '.1f')}% inside)",
             "median_abs_hs", sart + ("scorecard.json" if today["scorecard"] else "residuals.parquet"),
-            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; Yahoo quotes carry no quote time.",
+            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
+            + _chain_clause(surf.get("surface") or {}) + ".",
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",
@@ -6810,7 +6986,7 @@ def load_model_risk() -> dict[str, Any]:
             "vix_rep_gap", sart + "vix_replication.json",
             f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
             "a gap points at a thin or stale strip.",
-            history=surf_hist("vix_rep_gap"))
+            history=surf_hist("rep_gap"), two_sided=True)
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
         legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
@@ -6855,7 +7031,7 @@ def monitor_backlinks() -> dict[str, dict[str, list[dict]]]:
     """{page file: {element id: [check, ...]}}: the Model Risk checks whose evidence
     each panel shows, for its 'Monitored' chips (the Model Risk loader, cached on
     the inputs' modification times)."""
-    key = (*_stat_key(DATA / "vol_system.db", DATA / "calibrations", DATA / "surface",
+    key = (*_stat_key(db_file(), DATA / "calibrations", DATA / "surface",
                       DATA / "signals" / "regime_labels.parquet", DATA / "greeks" / "greeks_surface.parquet",
                       DATA / "backtest" / "full_results.pkl", INVENTORY_PATH), str(DATA))
     if key in _BACKLINK_CACHE:
@@ -6912,7 +7088,7 @@ def load_chrome() -> dict:
     page's own loader owns its errors, and any page error blocks the publish.
     """
     cal_dir = DATA / "calibrations"
-    key = (*_stat_key(DATA / "vol_system.db", DATA / "signals" / "regime_labels.parquet", cal_dir,
+    key = (*_stat_key(db_file(), DATA / "signals" / "regime_labels.parquet", cal_dir,
                       DATA / "greeks" / "greeks_surface.parquet", DATA / "backtest" / "full_results.parquet",
                       DATA / "surface", DATA / "backtest" / "inference"), str(DATA))
     if key in _CHROME_CACHE:
@@ -7024,12 +7200,17 @@ def load_chrome() -> dict:
         ("VX", "VX futures settlements", vx_date, VX_TABLE, True),
     ]
     reference_only = {"VX"}
+    fixed = {"BACKTEST"}                  # a closed window: its age is not news
     for short, label, date, art, aged in rows:
-        age = session_age(date, ref) if (aged and date) else None
-        level = (stale_level(age) if aged else "ok") if date else ("missing" if aged else "unknown")
+        # every dated source but the fixed backtest window shows its age (C2: the
+        # surface's read '—'); only the 'aged' ones set the page's state, so the
+        # surface, as old as the fit it was scored with, does not count twice
+        age = session_age(date, ref) if (date and short not in fixed) else None
+        level = ((stale_level(age) if age is not None else "ok") if date
+                 else ("missing" if aged else "unknown"))
         c["sources"].append({"short": short, "label": label, "date": date, "age": age, "level": level,
                              "artifact": art, "aged": aged, "bar": short not in reference_only})
-        if short in reference_only:
+        if short in reference_only or not aged:
             continue
         if level in ("error", "missing"):
             c["worst"] = "error"

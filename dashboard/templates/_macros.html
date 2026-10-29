@@ -28,7 +28,7 @@
 <div class="kpi">
   <div class="kpi-label">{{ label|sym }}</div>
   <div class="kpi-value{% if tone %} {{ tone }}{% endif %}">{{ value }}{% if unit and value|string != '—' %}<span class="unit">{{ unit }}</span>{% endif %}</div>
-  {% if ci %}<div class="kpi-ci{% if ci_kind == 'range' %} kpi-range" title="A range across sessions, not a sampling interval{% endif %}">{{ ci }}</div>{% endif %}
+  {% if ci %}<div class="kpi-ci{% if ci_kind == 'range' %} kpi-range" title="A range across sessions, not a sampling interval{% endif %}">{{ ci|ranges if ci_kind == 'range' else ci }}</div>{% endif %}
   {% if sub %}<div class="kpi-sub">{{ sub }}</div>{% endif %}
 </div>
 {%- endmacro %}

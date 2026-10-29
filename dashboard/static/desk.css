@@ -220,6 +220,9 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 
 /* 12-column grid */
 .g { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }
+/* a pair whose panels grow at different rates (a table that gains a row a session
+   beside a fixed one): each ends with its content instead of stretching to the row */
+.g.top { align-items: start; }
 .g > * { min-width: 0; }
 .s2 { grid-column: span 2; } .s3 { grid-column: span 3; } .s4 { grid-column: span 4; }
 .s5 { grid-column: span 5; } .s6 { grid-column: span 6; } .s7 { grid-column: span 7; }
@@ -314,6 +317,9 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .kpi-range { border-left: 2px dashed var(--line2); padding-left: 6px; }
 /* a tile whose caveat needs two tracks of a KPI strip (the hedge's Taylor check) */
 .kpi-wide { grid-column: span 2; }
+/* phones: a strip of two columns with an odd count, its last tile alone in the row, takes
+   the whole row instead of leaving the strip's grey background showing (R3-D11) */
+@media (max-width: 599px) { .kpis > .kpi:last-child:nth-child(odd):not(.kpi-wide) { grid-column: 1 / -1; } }
 
 /* parameter tiles */
 .param { background: var(--surface); padding: 8px 10px; min-width: 0; }
@@ -483,7 +489,8 @@ code { overflow-wrap: anywhere; }
 .charts-failed [data-load-3d], .charts-failed [data-legend-for], .charts-failed [data-zoom-for] { display: none !important; }
 .charts-failed .chart-fallback { display: block; padding: 6px 10px; border: 1px dashed var(--line2); border-radius: var(--radius); font-size: 11.5px; color: var(--watch); }
 .charts-failed .chart-data.sr-only, .no-js .chart-data.sr-only {
-  position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal;
+  position: static !important; width: auto; max-width: 100%; height: auto; margin: 6px 0 0;
+  overflow-x: auto; overflow-y: visible; clip: auto; white-space: normal;   /* A3: a wide table scrolls, not the page */
 }
 
 /* ── banners and states ──────────────────────────────────────────────── */
@@ -730,6 +737,12 @@ dialog.keys .dl { font-size: 12px; }
     content: attr(data-label); content: attr(data-label) / "";
     float: left; width: 106px; margin-left: -114px; padding-top: 1px;
     font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text3);
+  }
+  /* a label with a lower-case Greek symbol keeps its case: β must not become B (cf. .sym) */
+  .tbl.cards td:is([data-label*="α"], [data-label*="β"], [data-label*="γ"], [data-label*="δ"], [data-label*="θ"],
+                   [data-label*="κ"], [data-label*="λ"], [data-label*="ν"], [data-label*="ρ"], [data-label*="σ"],
+                   [data-label*="τ"], [data-label*="φ"], [data-label*="ψ"], [data-label*="ω"])::before {
+    text-transform: none; letter-spacing: 0;
   }
   .tbl.cards td:first-child { padding: 0 0 4px; font-weight: 600; color: var(--text); }
   .tbl.cards td:first-child::before { content: none; }

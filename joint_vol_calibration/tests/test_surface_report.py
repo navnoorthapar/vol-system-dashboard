@@ -337,3 +337,37 @@ def test_committed_residuals_are_the_compact_writers_output(session, tmp_path):
         again = tmp_path / "again.parquet"
         report.write_residuals(df, again)
         assert again.read_bytes() == path.read_bytes()
+
+
+def test_an_expiry_with_no_fit_set_quote_is_dropped_not_fatal(monkeypatch, tmp_path):
+    """Found by simulate_next_session.py (2026-10-29): on a book whose expiries a
+    day apart carried independent noise, the l1 repair moved 186 of 188 quotes of
+    one expiry outside their spread, so it had no fit-set quote and the scorecard
+    raised 'surface fit set misses 1 quoted expiries': the session lost its whole
+    surface report, and the deploy gate failed on the missing smiles. Such an
+    expiry now leaves the scored universe with its reason; the rest is scored."""
+    real = report.arb.screen
+    victim: dict = {}
+
+    def screen(q):
+        out = real(q)
+        exps = list(dict.fromkeys(q["expiry"]))
+        victim.setdefault("expiry", exps[len(exps) // 2])
+        hit = (q["expiry"] == victim["expiry"]).to_numpy()
+        if hit.any():
+            out.quote_flags.loc[hit, "repair_outside_spread"] = True
+        return out
+
+    monkeypatch.setattr(report.arb, "screen", screen)
+    arts = report.run_session(SESSION)
+    uni = arts["surface"]["universe"]
+    e = victim["expiry"]
+    assert [d["expiry"] for d in uni["dropped_expiries"]] == [e]
+    assert "outside its spread" in uni["dropped_expiries"][0]["reason"]
+    res = arts["residuals"]
+    assert e not in set(res["expiry"])
+    n_scored = len(res[res["model"] == res["model"].iloc[0]])
+    assert uni["n_universe"] == n_scored == arts["scorecard"]["n_quotes"]
+    assert uni["n_dropped_no_fit_set"] == uni["dropped_expiries"][0]["n_quotes"] > 0
+    assert uni["n_expiries"] == res["expiry"].nunique()
+    assert e not in {t["expiry"] for t in arts["surface"]["term_structure"]}

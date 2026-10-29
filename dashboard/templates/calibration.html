@@ -20,7 +20,7 @@
 {% if d.kappa is not none %}
 <p class="note" style="margin-bottom:8px;">
   The headline is the newest fit that passes the quality gate (<code>{{ d.calib_file }}</code>), not the lowest-RMSE fit in the archive: ranking by RMSE rewards the days the data broke.{% if d.optimizer %} Optimiser: {{ d.optimizer }}.{% endif %}
-  {% if d.archive %}Of {{ d.archive.n_total }} stored fits, {{ d.archive.n_current_ok }} of {{ d.archive.n_current }} current-schema (model_version 2) fits pass the gate; {{ d.archive.n_legacy|plural('pre-C22 fit') }} {{ 'is' if d.archive.n_legacy == 1 else 'are' }} labelled legacy and never ranked.{% endif %}
+  {% if d.archive %}Of {{ d.archive.n_total }} stored fits, {{ d.archive.n_current|plural('current-schema (model_version 2) fit') }} {{ 'is' if d.archive.n_current == 1 else 'are' }} stored{% if d.archive.n_current_ok != d.archive.n_current %}, {{ d.archive.n_current_ok }} of them passing the current gate{% endif %} (the job stores only fits that pass the gate; a rejected fit is recorded in its run log, not stored); {{ d.archive.n_legacy|plural('pre-C22 fit') }} {{ 'is' if d.archive.n_legacy == 1 else 'are' }} labelled legacy and never ranked.{% endif %}
 </p>
 
 <h2 class="section-title">Parameters <span class="sym">κ θ σ ρ v₀</span></h2>
@@ -113,7 +113,7 @@
       <div>
         <h3 class="sub-head">VIX indices · {{ d.session }} · in the objective</h3>
         {% if d.charts.vix %}{{ m.chart(d.charts.vix, 'h260') }}
-        <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's expected average vol to each horizon. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
+        <p class="note">The Cboe spot indices (9/30/93/184 days) against the model's index to each horizon: 100·√(expected average variance over the horizon), the variance-swap rate the Cboe formula replicates, not an expected average vol. Model below market in {{ d.vix_rows|selectattr('diff', 'lt', 0)|list|length }} of {{ d.vix_rows|length }} tenors.</p>
         {% else %}<p class="note">No VIX leg recorded.</p>{% endif %}
       </div>
       <div id="vx-leg">
@@ -137,7 +137,7 @@
       </div>
     </div>
     {% if (d.vx_leg or {}).views %}{% set vl = d.vx_leg %}
-    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is a close snapshot with no quote time and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
+    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is {{ d.chain_sentence or 'a chain with no surface report to name its source' }} and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
     {% endif %}
   {% endcall %}
 </div>
@@ -201,7 +201,7 @@
   {% endfor %}
 </div>
 
-<div class="g pair">
+<div class="g pair top">
   {% call m.panel('identifiability', 'Identifiability · multi-start and Jacobian', 's7') %}
     {% set idn = d.ident or {} %}
     {% if idn.state == 'ok' %}{% set I = idn.ident %}
@@ -244,22 +244,24 @@
 </div>
 
 {% set idn = d.ident or {} %}
-{% if idn.state == 'ok' and idn.sigma_profile and d.param_tiles %}
+{% set sv = d.sigma_view %}
+{% if sv and d.param_tiles %}
 <div class="g">
-  {% call m.panel('sigma-tradeoff', 'Joint SPX/VIX trade-off · σ profile and VVIX', 's12', d.session ~ ' · ' ~ (d.vvix_tradeoff|length|plural('diagnosed session'))) %}
+  {% call m.panel('sigma-tradeoff', 'Joint SPX/VIX trade-off · σ profile and VVIX', 's12', sv.session ~ ' · ' ~ (d.vvix_tradeoff|length|plural('diagnosed session'))) %}
+    {% if sv.pending %}<p class="note" id="sigma-pending">The {{ d.session }} fit has no σ profile yet: its diagnostics (<code>scripts/calibration_diagnostics.py</code>) have not completed. Shown: {{ sv.session }}, the newest diagnosed fit.</p>{% endif %}
     <div class="split">
       <div>
         <div class="tbl-wrap" tabindex="0" role="region" aria-label="Sigma profile (scrollable)">
-        <table class="tbl dense" id="sigma-profile"><caption>σ profile of the {{ d.session }} fit: the joint loss refitted under each cap on σ (κ ≤ {{ idn.kappa_max|fmt('.0f') }}). SPX errors in vol pts; VIX and VVIX in index pts. VVIX is the model's 30-day vol of VIX at each refit against the ^VVIX close of {{ d.sigma_profile_market|fmt('.0f') }}; VVIX − mkt = model − market.</caption>
+        <table class="tbl dense" id="sigma-profile"><caption>σ profile of the {{ sv.session }} fit: the joint loss refitted under each cap on σ (κ ≤ {{ sv.kappa_max|fmt('.0f') }}). SPX errors in vol pts; VIX and VVIX in index pts. VVIX is the model's 30-day vol of VIX at each refit against the ^VVIX close of {{ d.sigma_profile_market|fmt('.0f') }}; VVIX − mkt = model − market.</caption>
           <thead><tr><th scope="col" class="num">{{ 'σ cap'|sym }}</th><th scope="col" class="num">{{ 'σ'|sym }}</th><th scope="col" class="num">{{ 'κ'|sym }}</th><th scope="col" class="num">Loss</th><th scope="col" class="num">In sample</th><th scope="col" class="num">OOS</th><th scope="col" class="num">Put wing</th><th scope="col" class="num">VIX</th><th scope="col" class="num">VVIX model</th><th scope="col" class="num">VVIX − mkt</th></tr></thead>
-          <tbody>{% for r in idn.sigma_profile %}<tr{% if r.sigma_cap == d.param_tiles[2].hi %} class="em"{% endif %}><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td><td class="num">{{ r.vvix_model|fmt('.0f') }}</td><td class="num">{{ (r.vvix_model - r.vvix_market if r.vvix_model is not none and r.vvix_market is not none else none)|signed('.0f') }}</td></tr>{% endfor %}</tbody>
+          <tbody>{% for r in sv.rows %}<tr{% if r.sigma_cap == d.param_tiles[2].hi %} class="em"{% endif %}><td class="num">{{ r.sigma_cap|fmt('g') }}</td><td class="num">{{ r.params.sigma|fmt('.2f') }}{% if r.sigma_at_cap %} {{ m.chip('at cap', 'watch') }}{% endif %}</td><td class="num">{{ r.params.kappa|fmt('.1f') }}{% if r.kappa_at_max %} {{ m.chip('at max', 'watch') }}{% endif %}</td><td class="num">{{ r.loss|fmt('.3e') }}</td><td class="num">{{ (r.spx_iv_rmse_exact if r.spx_iv_rmse_exact is not none else r.spx_iv_rmse)|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_iv_rmse|fmt('.2f') }}</td><td class="num">{{ r.spx_oos_put_wing_rmse|fmt('.2f') }}</td><td class="num">{{ r.vix_index_rmse|fmt('.2f') }}</td><td class="num">{{ r.vvix_model|fmt('.0f') }}</td><td class="num">{{ (r.vvix_model - r.vvix_market if r.vvix_model is not none and r.vvix_market is not none else none)|signed('.0f') }}</td></tr>{% endfor %}</tbody>
         </table>
         </div>
         <p class="note">Each row is a diagnostic refit and the published fit is unchanged; the highlighted row refits under the production box. The production box is kept at σ ≤ {{ d.param_tiles[2].hi|fmt('g') }}: the NN pricer's training domain, {{ m.cite('the risk monitor’s vomma shock', 'risk.html#scenario') }} and the bound chips are tied to it, and widening it is filed, not done (<code>config.HESTON_BOUNDS</code>; <a href="corrections.html#c23">Corrections C23-M1</a>).</p>
       </div>
       <div>
         {% if d.charts.frontier %}{{ m.chart(d.charts.frontier, 'h300') }}
-        <p class="note">x: SPX out-of-sample IV RMSE; y: model VVIX minus the ^VVIX close. One line per diagnosed session ({{ d.session }} in white, the others grey), one point per σ cap, labelled; the production cap's point is larger and caps above it are hollow.</p>{% endif %}
+        <p class="note">x: SPX out-of-sample IV RMSE; y: model VVIX minus the ^VVIX close. One line per diagnosed session ({{ sv.session }} in white, the others grey), one point per σ cap, labelled; the production cap's point is larger and caps above it are hollow.</p>{% endif %}
       </div>
     </div>
     {% if d.vvix_sentence %}<p class="prose" id="vvix-tradeoff">{{ d.vvix_sentence }}</p>{% endif %}
@@ -342,7 +344,7 @@
       </tbody>
     </table>
     </div>
-    <p class="note">Counts in brackets are quotes. ¹ Model E[VIX_T] against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets (Quintic: <code class="path">{{ ('data_store/calibrations/' ~ q.file)|path }}</code>; Heston: <code class="path">{{ ('data_store/calibrations/' ~ h.file)|path }}</code>{% if h.baseline_file %}; Heston re-priced on the Quintic targets: <code class="path">{{ ('data_store/calibrations/' ~ h.baseline_file)|path }}</code>{% endif %}).
+    <p class="note">Counts in brackets are quotes. ¹ Model {{ 'E[VIX_T]'|subs }} against the VIX-option put–call-parity forward. Δ = Quintic − Heston on the same targets (Quintic: <code class="path">{{ ('data_store/calibrations/' ~ q.file)|path }}</code>; Heston: <code class="path">{{ ('data_store/calibrations/' ~ h.file)|path }}</code>{% if h.baseline_file %}; Heston re-priced on the Quintic targets: <code class="path">{{ ('data_store/calibrations/' ~ h.baseline_file)|path }}</code>{% endif %}).
     {% if not h.gate_ok %}That Heston fit fails today's quality gate ({{ h.gate_reason }}), so it is not the page headline.{% endif %}</p>
     {% else %}<p class="note">No Heston fit exists for the Quintic session ({{ q.as_of|fmt }}), so no like-for-like comparison is shown.</p>{% endif %}
     {% call m.method('Reading this honestly') %}

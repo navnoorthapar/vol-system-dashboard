@@ -15,9 +15,10 @@ Packing (``encode``), per expiry:
     strikes' grid step, their greatest common divisor), K0 and dK (the first
     strike and the gaps to the next one in steps), r (one 'P' / 'C' per quote);
   * mid: mid IV in units of 10⁻⁵ vol pts (IV % × 10⁵, an integer); db, da: mid
-    − bid and ask − mid in 10⁻⁶ vol pts (the half-spread divides every z, so it
-    is kept one digit finer); m[model]: model − mid in 10⁻⁴ vol pts (None where
-    the model has no value);
+    − bid and ask − mid in 10⁻⁸ vol pts (the half-spread divides every z, so its
+    relative error multiplies |z|: at 10⁻⁶ a 1,456-half-spread quote decoded
+    0.06 away from its error_hs); m[model]: model − mid in 10⁻⁴ vol pts (None
+    where the model has no value);
   * s[model]: one digit per quote, a bit mask: 1 = the model was fitted to it
     (in_sample), 2 = the model lies inside its bid–ask (inside_spread; the
     producer's flag, not recomputed from the packed IVs, which could flip it
@@ -28,7 +29,8 @@ Packing (``encode``), per expiry:
     outside its bid–ask by it (arb_flag: left out of the surfaces' fitted set).
 At these units the forward delta from the packed mid differs from the one on
 the parquet's own values by about 10⁻⁷, and z from its error_hs by under 0.01
-(tested on every stored session).
+for any |z| up to 10⁴ (model − mid contributes ≤ 0.005, the half-spread
+≤ |z| · 5·10⁻⁷; tested on every stored session).
 
 Conventions (the producer's, joint_vol_calibration.surface.quotes / metrics):
 k = ln(K/F); T in years = days / 365; forward delta = N(d₁) for a call, N(d₁) −
@@ -47,7 +49,7 @@ import numpy as np
 from scipy.special import ndtr
 
 IV_SCALE = 100_000                  # packed mid IV: vol pts × 10⁵ (10⁻⁵ vol pts)
-SPREAD_SCALE = 1_000_000            # packed mid − bid, ask − mid: vol pts × 10⁶
+SPREAD_SCALE = 100_000_000          # packed mid − bid, ask − mid: vol pts × 10⁸
 MODEL_SCALE = 10_000                # packed model − mid: vol pts × 10⁴ (10⁻⁴ vol pts)
 DAYS_PER_YEAR = 365.0               # the producer's clock (quotes.py: T_days = T · 365)
 H_FLOOR_VP = 0.01                   # metrics.H_FLOOR_VP: z's half-spread floor (a test checks they agree)

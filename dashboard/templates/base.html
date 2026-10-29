@@ -31,7 +31,7 @@
   <!-- Without JavaScript there are no charts: every chart's data table is shown instead -->
   <noscript><style>
     .chart { display: none !important; }
-    .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip: auto; white-space: normal; }
+    .chart-data.sr-only { position: static !important; width: auto; max-width: 100%; height: auto; margin: 6px 0 0; overflow-x: auto; overflow-y: visible; clip: auto; white-space: normal; }
     .js-only { display: none !important; }
     [role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }   /* no tabs: every panel in turn */
     .banner-body.fold-body { display: block !important; } .find-list.fold-body { display: flex !important; }   /* nothing folds (Q20) */
@@ -51,7 +51,7 @@
   <details class="sb-phone">
     <summary class="sb-item">{% if o %}<span class="sb-k">{{ o.short }}</span><span class="sb-v lvl-{{ o.level }}">{% if o.level == 'missing' %}missing{% elif o.age %}{{ o.age|plural('session') }} old{% else %}current{% endif %}</span>{% else %}<span class="sb-v">sources</span>{% endif %}<span class="sr-only">: every source’s date</span></summary>
     <ul class="sb-list">
-      {% for s in c.sources if s.bar %}<li><span class="sb-k">{{ s.short }}</span><span class="sb-v lvl-{{ s.level }}">{{ (('≤' if s.short == 'BACKTEST' else '') ~ s.date) if s.date else ('n/a' if s.aged else 'pending') }}</span>{% if s.aged and s.age is not none %}<span class="sb-age">{{ s.age|plural('session') }}</span>{% endif %}</li>
+      {% for s in c.sources if s.bar %}<li><span class="sb-k">{{ s.short }}</span><span class="sb-v lvl-{{ s.level }}">{{ (('≤' if s.short == 'BACKTEST' else '') ~ s.date) if s.date else ('n/a' if s.aged else 'pending') }}</span>{% if s.age is not none %}<span class="sb-age">{{ s.age|plural('session') }}</span>{% endif %}</li>
       {% endfor %}<li><span class="sb-k">MODEL</span><span class="sb-v">v{{ c.model_version|fmt }}</span></li>
       <li><span class="sb-k">BUILD</span><span class="sb-v">{{ c.build.short or 'unknown' }}</span></li>
       <li><span class="sb-k">VIEW</span><span class="sb-v" data-freshness-copy>as of {{ c.latest|fmt }}</span></li>
@@ -138,7 +138,7 @@
         <tbody>
           {% for s in c.sources %}
           <tr><td>{{ s.label }}</td><td class="lvl-{{ s.level }} nowrap">{{ s.date or ('missing' if s.aged else 'not yet generated') }}</td>
-            <td class="num">{% if s.aged and s.age is not none %}{{ s.age }}{% else %}—{% endif %}</td><td><code class="path">{{ s.artifact|path }}</code></td></tr>
+            <td class="num">{% if s.age is not none %}{{ s.age }}{% else %}—{% endif %}</td><td><code class="path">{{ s.artifact|path }}</code></td></tr>
           {% endfor %}
         </tbody>
       </table>

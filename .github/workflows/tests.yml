@@ -78,6 +78,14 @@ jobs:
       - name: Render the static site
         run: python dashboard/freeze_site.py "$RUNNER_TEMP/site"
 
+      # Every number the Overview and Surface print, recomputed from data_store by
+      # a code path of its own (scripts/ci/recompute/, which imports nothing from
+      # dashboard/ or joint_vol_calibration/), against the rendered HTML; the table
+      # of checks and the coverage go to the job summary. A mismatch beyond
+      # display rounding fails the job.
+      - name: Recompute audit
+        run: python scripts/ci/recompute_audit.py "$RUNNER_TEMP/site" --md "$GITHUB_STEP_SUMMARY" --json "$RUNNER_TEMP/recompute.json"
+
       # The suite works on a private copy of data_store (tests/conftest.py); nothing
       # it or the render does may change a tracked file.
       - name: Working tree is clean
@@ -93,6 +101,7 @@ jobs:
           path: |
             ${{ runner.temp }}/coverage.xml
             ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/recompute.json
             ${{ runner.temp }}/site
           if-no-files-found: ignore
           retention-days: 14
