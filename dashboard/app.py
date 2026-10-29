@@ -3331,8 +3331,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     if sk:
         rv = d.get("rough_vs_heston")
         jr = rv.get("result") if isinstance(rv, dict) else None
-        sk["rough_H"] = ({"H": jr.get("rough_H"), "on_floor": jr.get("rough_H_on_bound"),
-                          "session": jr["session"]} if jr else None)
+        sk["rough_H"] = ({"H": jr.get("rough_H"), "side": jr.get("rough_H_side"),
+                          "floor": jr.get("rough_H_floor"), "session": jr["session"]} if jr else None)
         sk["sentence"] = skew_term_sentence(sk)
         sk["compare"] = skew_term_compare(sk)
         d["skew_term"] = sk
@@ -4658,11 +4658,18 @@ def joint_fit_result(diag: dict, session: str | None) -> dict | None:
     if not rows:
         return None
     cur = next((r for r in rows if r["session"] == session), rows[-1])
+    from joint_vol_calibration.config import ROUGH_HESTON_H_BOUNDS
+    h_lo, h_hi = (float(x) for x in ROUGH_HESTON_H_BOUNDS)
+    h_cur = _num(cur["joint_rough_H"])
+    # which bound H is on: the 0.02 floor (rough), or ½ (the rough model is then Heston)
+    side = (None if "H" not in cur["joint_rough_on_bound"] or h_cur is None
+            else "floor" if h_cur <= 0.5 * (h_lo + h_hi) else "ceiling")
     lower = sum(1 for r in rows if r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01)
     same = sum(1 for r in rows if r["joint_rough_H"] is not None and r["joint_rough_H"] >= 0.5 - 1e-9)
     return {"session": cur["session"], "n_sessions": len(rows), "heston_oos": cur["sigma_cap2_oos"],
             "rough_oos": cur["joint_rough_oos"], "rough_H": cur["joint_rough_H"],
-            "rough_H_on_bound": "H" in cur["joint_rough_on_bound"], "heston_on_bound": cur["on_bound"],
+            "rough_H_on_bound": "H" in cur["joint_rough_on_bound"], "rough_H_side": side,
+            "rough_H_floor": h_lo, "heston_on_bound": cur["on_bound"],
             "heston_vix": cur["joint_heston_vix_index"], "rough_vix": cur["joint_rough_vix_index"],
             "kappa_rse": _num((cur["relative_standard_errors"] or {}).get("kappa")),
             "n_lower": lower, "n_same": same,
@@ -4715,8 +4722,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
     jr = joint_fit_result(diag, p2.get("session"))
     if jr:
         bound = " (σ on its box cap)" if "sigma" in (jr["heston_on_bound"] or []) else ""
-        h_txt = (f"H {_fmt(jr['rough_H'], '.2f')}{' on its floor' if jr['rough_H_on_bound'] else ''}"
-                 if jr["rough_H"] is not None else "H —")
+        side = {"floor": " on its floor", "ceiling": " (= Heston)"}.get(jr["rough_H_side"] or "", "")
+        h_txt = f"H {_fmt(jr['rough_H'], '.2f')}{side}" if jr["rough_H"] is not None else "H —"
         n_txt = f"the {_fmt(p2.get('n_oos'), ',')}" if p2.get("session") == jr["session"] else "the"
         out.append({
             "key": "Joint SPX/VIX fit · out of sample",
@@ -4931,11 +4938,13 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         "before any later price exists."))
     jr = joint_fit_result(diag, p2.get("session"))
     if jr:
-        h_txt = "sits on its 0.02 floor" if jr["rough_H_on_bound"] else "is weakly identified"
+        h_txt = {"floor": f"but H sits on its {_fmt(jr['rough_H_floor'], 'g')} floor ({jr['session']})",
+                 "ceiling": f"and on {jr['session']} it returns H = ½, which is Heston"}.get(
+            jr["rough_H_side"] or "", f"but H is weakly identified ({jr['session']})")
         nxt.append(item(
             "Rough Heston in production", "calibration.html#rough-vs-heston",
             f"not adopted: lower out-of-sample error on {jr['n_lower']} of {jr['n_sessions']} sessions, "
-            f"but H {h_txt} ({jr['session']})."))
+            f"{h_txt}."))
     # the VX futures leg: scored out of sample only, and not at all where none is stored
     vl = p2.get("vx_leg") or {}
     legs = [v["leg"] for v in vl.get("views") or [] if v.get("leg")]
