@@ -6136,7 +6136,9 @@ def test_vx_leg_is_each_fits_own_out_of_sample_score(dash, pages):
     settlements of its own session: the RMSE it prints is the fit's recorded
     losses.vx_futures_rmse_oos (to 1e-6), a fit with no settlements on its
     session gets the empty state and no futures series, and nothing is spliced
-    from an earlier session."""
+    from an earlier session. A fit that ran before its session's settlements
+    were stored (the daily job fills the table from its newest session) recorded
+    no score: its leg is drawn from them and the page says the fit recorded none."""
     d = dash.load_page2()
     views = {v["session"]: v for v in d["vx_leg"]["views"]}
     last = _vx_last()
@@ -6149,10 +6151,14 @@ def test_vx_leg_is_each_fits_own_out_of_sample_score(dash, pages):
         panel = html[a:min(i for i in (html.find('<div id="vx-', a + 10), html.find('id="vx-caption"', a))
                            if i > 0)]
         if v["leg"] is not None:
-            assert rec is not None, session
-            assert abs(v["leg"]["rmse"] - rec) <= 1e-6, session
             assert f'id="chart-vx-{session}"' in panel
-            assert f"RMSE {rec:.2f} index pts" in _html_unescape(panel)
+            text = _html_unescape(re.sub(r"<[^>]+>", "", panel))
+            assert f"RMSE {v['leg']['rmse']:.2f} index pts" in text, session
+            if rec is not None:
+                assert abs(v["leg"]["rmse"] - rec) <= 1e-6, session
+                assert "Equal to the fit’s recorded out-of-sample VX RMSE" in text, session
+            else:
+                assert "The fit recorded no VX score." in text, session
         else:
             assert f"chart-vx-{session}" not in html, session
             assert v["empty"] in _html_unescape(re.sub(r"</?span[^>]*>", "", panel))
@@ -6913,7 +6919,11 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     badge = re.search(r'<p class="note" id="vx-curve-age"><span class="age-(\w+)">(.*?)</span>;', html,
                       re.DOTALL)
     assert badge.group(1) == dash.stale_level(age)
-    assert f"{age} NYSE session" in _html_unescape(re.sub(r"<[^>]+>", "", badge.group(2)))
+    said = _html_unescape(re.sub(r"<[^>]+>", "", badge.group(2)))
+    if age:
+        assert f"{age} NYSE session" in said
+    else:                                            # a current table (the bot's close slot) names no count
+        assert said.startswith(f"Settlements of {last}, the newest session"), said
     ts = _spec(html, "chart-ts")
     assert not any("settlement" in s["name"] for s in ts["series"])
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
