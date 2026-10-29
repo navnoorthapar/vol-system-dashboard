@@ -185,6 +185,43 @@ def test_theta_v0_derivatives_are_exact():
             np.testing.assert_allclose(dj[:, col], fj, rtol=1e-6, atol=1e-6 * np.abs(fj).max())
 
 
+def test_far_tail_noise_past_the_decay_floor_is_masked_per_slice():
+    """Past the frequencies the Riccati steps resolve, the sweep returns noise
+    whose real part lands anywhere, not only above 0. Every node of a slice at
+    or above the lowest frequency where ln|phi| < _LOG_CF_FLOOR is masked (the
+    CF does not come back); nothing below it, and not another slice's nodes."""
+    u = np.arange(0.0, 2000.0)
+    fast = -0.1 * u - 0.3j * u                  # below the floor from u = 501
+    slow = -0.01 * u - 0.3j * u                 # never below it on this range
+    noisy = fast.copy()
+    noisy[1500] = -5.0 + 2.0j                    # |phi| = e^-5: noise, not decay
+    assert rh._mask_unresolved(noisy)[1500] == noisy[1500]   # the |phi| > 1 rule alone
+    out = rh._mask_unresolved(noisy, u)
+    cut = u > -rh._LOG_CF_FLOOR / 0.1
+    np.testing.assert_array_equal(out[~cut], noisy[~cut])
+    assert np.all(out[cut].real == -np.inf)
+    both = rh._mask_unresolved(np.r_[noisy, slow], np.r_[u, u], np.r_[u * 0, u * 0 + 1])
+    np.testing.assert_array_equal(both[:len(u)], out)
+    np.testing.assert_array_equal(both[len(u):], slow)
+
+
+def test_the_2026_10_27_slice_prices_on_an_ordinary_grid():
+    """The diagnostics of 2026-10-27 timed out (1,200 s) in the SPX-only rough
+    fit: one start converged where noise at |phi| ~ 1e-12 near u = 9e5 read as
+    an undecayed tail, the Lewis scan sized the 2027-04-16 slice at ~975,000
+    nodes (205 at the neighbouring optimum), and each frozen-grid residual took
+    26 s. With the tail masked the slice prices on an ordinary grid, to the
+    800-step prices well inside the 200-step accuracy."""
+    p = (3.49951, 0.05163, 1.2528, -0.68472, 0.02258, 0.48788)
+    T, F, D = 0.46628510273972607, 7867.365493592704, 0.9779507991330129
+    K = F * np.exp(np.linspace(-0.26, 0.17, 9))
+    r = -math.log(D) / T
+    calls, grid = rh.rough_heston_call_batch_grid(F, K, T, r, r, *p)
+    assert grid.n < 1000
+    fine = rh.rough_heston_call_batch(F, K, T, r, r, *p, n_steps=800)
+    np.testing.assert_allclose(calls, fine, rtol=0, atol=1e-6 * F)
+
+
 # ── 5. shape ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("H", [0.05, 0.15, 0.35])
@@ -308,31 +345,3 @@ def test_lifting_error_at_the_floor_where_the_joint_fit_lands():
         exact = theta * T - (theta - v0) * T * _mittag_leffler(a, 2.0, -kappa * T ** a)
         lifted = rh.rough_heston_expected_variance_integral(T, kappa, theta, v0, 0.02)
         assert abs(100 * math.sqrt(lifted / T) - 100 * math.sqrt(exact / T)) < 0.02
-
-
-def test_an_unresolved_far_frequency_does_not_inflate_the_lewis_grid():
-    """Found when the 2026-10-27 calibration diagnostics timed out on the bot
-    (20 min, then 12 min): near H = 1/2 the time grid cannot resolve one
-    truncation-scan frequency (u = 4.95e5, |phi| = 8.6e-4 where the true value is
-    ~0), which pushed the Lewis truncation of the 1-year slice to u = 5e4 and its
-    grid to 80,293 nodes (1.02 million on 2026-10-26's parameters), so each
-    residual evaluation took seconds. phi is zero above a frequency where it has
-    decayed below e^-70; the prices do not move."""
-    F, T, r = 7740.0, 0.9649, 0.04
-    K = F * np.linspace(0.72, 1.27, 8)
-    p = (3.8304, 0.0576, 1.6295, -0.6851, 0.0249)          # the 2026-10-27 joint fit
-    calls, grid = rh.rough_heston_call_batch_grid(F, K, T, r, r, *p, 0.4888)
-    assert grid is not None
-    assert grid.n < 2_000
-    # the same prices as a run with four times the Riccati steps (which resolves it)
-    fine, _ = rh.rough_heston_call_batch_grid(F, K, T, r, r, *p, 0.4888,
-                                              n_steps=4 * rh.ROUGH_HESTON_TIME_STEPS)
-    np.testing.assert_allclose(calls, fine, atol=1e-6 * F)
-    # the mask leaves a CF that decays monotonically, and anything below the floor, alone
-    z = np.array([1.0, 2.0, 3.0, 4.0]) - 0.5j
-    lc = np.array([-0.1, -80.0, -5.0, -90.0]) + 0j
-    out = rh._mask_rebound(lc, z)
-    assert np.array_equal(out[:2], lc[:2])
-    assert np.isneginf(out[2:].real).all()
-    smooth = np.array([-0.1, -1.0, -10.0, -60.0]) + 0j
-    assert np.array_equal(rh._mask_rebound(smooth, z), smooth)
