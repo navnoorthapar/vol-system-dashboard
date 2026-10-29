@@ -190,6 +190,7 @@
     </div>
     {% set rp = d.arb_repair %}
     {% if rp %}<p class="note">An l1 repair (linear programme, HiGHS) moves {{ rp.n_perturbed|fmt(',') }} quotes, {{ rp.n_perturbed_outside_spread|fmt(',') }} of them outside their bid–ask (largest move {{ rp.max_abs_dprice_half_spreads|fmt('.0f') }} half-spreads); those are flagged and left out of the surfaces' fitted set.</p>{% endif %}
+    {% set dx = d.dropped_expiries %}{% if dx %}<p class="note" id="arb-dropped">Left out of the scored universe: {% for x in dx %}<span class="nowrap">{{ x.expiry }}</span> ({{ x.n_quotes|fmt(',') }} quotes){{ ', ' if not loop.last else '' }}{% endfor %}. The repair moves every fit-set quote of {{ 'that expiry' if dx|length == 1 else 'each' }} outside its spread, so no slice can be fitted to it; the rest of the session is scored.</p>{% endif %}
     {% if d.largest_violations %}{% set lv = d.largest_violations %}{% set lv_k = d.lv_shown %}{% set lv_more = lv|length - lv_k %}
     {% macro lv_table(rows, tid, caption) %}<table class="tbl dense wrap-head" id="{{ tid }}"><caption>{{ caption }}</caption>
       <thead><tr><th scope="col">Constraint</th><th scope="col">Legs</th><th scope="col" class="num">Shortfall (idx pts)</th><th scope="col" class="num">$ per contract</th><th scope="col">At bid/ask</th></tr></thead>

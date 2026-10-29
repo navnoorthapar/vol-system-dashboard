@@ -1483,6 +1483,18 @@ def arbitrage(a: Audit, c: Ctx) -> None:
                 cell(a, P_ARB, f"{k} {blk}", td[1 + i], M.num((arb.get(blk) or {}).get(k)))
             a.equal(P_ARB, f"{k} bid/ask cell marked when violated", "neg" in (td[3].get("class") or []),
                     bool((arb.get("executable_violations") or {}).get(k)))
+    # expiries the report left out of the scored universe: each named with its quote
+    # count, and none of them in the residual table
+    drop = [x for x in (c.sj.get("universe") or {}).get("dropped_expiries") or [] if isinstance(x, dict)]
+    dn = a.soup.select_one("#arb-dropped")
+    a.equal(P_ARB, "left-out expiries note shown (surface.json universe.dropped_expiries)",
+            dn is not None, bool(drop))
+    if drop and dn is not None:
+        nums(a, P_ARB, "left-out expiries and their quote counts", dn,
+             [M.num(x.get("n_quotes")) for x in drop], dates=[str(x.get("expiry"))[:10] for x in drop])
+        left_out = {str(x.get("expiry"))[:10] for x in drop}
+        a.equal(P_ARB, "no left-out expiry in the residual table",
+                sorted(left_out & set(mk["expiry"].astype(str).str[:10])), [])
     rp = arb.get("repair") or {}
     note = next((p for p in a.soup.select("#arbitrage p.note") if "l1 repair" in text_of(p)), None)
     a.equal(P_ARB, "repair note shown", note is not None, bool(rp))
@@ -1749,10 +1761,14 @@ def varswap(a: Audit, c: Ctx) -> None:
         d = M.num(rec.get("constant_maturity_days")) if isinstance(rec, dict) else None
         marks.append((t, d if d is not None else float(days), off))
     sp = spec(a, "chart-strip-spec")
+    # a line has a point only where the strip has a value (an expiry left out of the
+    # scored universe has no ATM vol from quotes); the table above prints its '—'
+    def points(key: str) -> list:
+        pts = [[M.num(r.get("days")), M.num(r.get(key))] for r in strip]
+        return [p for p in pts if None not in p]
     approx(a, P_VS, "chart-strip series VS vol", series(sp, "Variance-swap vol (Cboe formula)"),
-           [[M.num(r.get("days")), M.num(r.get("var_swap_vol"))] for r in strip])
-    approx(a, P_VS, "chart-strip series ATM vol", series(sp, "ATM vol (quotes)"),
-           [[M.num(r.get("days")), M.num(r.get("atm_vol_quotes"))] for r in strip])
+           points("var_swap_vol"))
+    approx(a, P_VS, "chart-strip series ATM vol", series(sp, "ATM vol (quotes)"), points("atm_vol_quotes"))
     names = ["Variance-swap vol (Cboe formula)", "ATM vol (quotes)"]
     if marks:
         name = "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M"
