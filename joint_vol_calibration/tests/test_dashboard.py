@@ -2305,6 +2305,224 @@ def test_a_surface_session_without_a_heston_fit_renders_everywhere(dash, tmp_pat
                      _visible_text(pages["/model-risk"]))
 
 
+# ── a synthetic surface session of any size (the Surface page at 17, 45, 80 expiries) ──
+#
+# A stored session lists 17 expiries (a Yahoo chain) or about 45 (a full Cboe book),
+# and the daily bot replaces the newest one, so a test of how the page scales with the
+# expiry count cannot pin either. _surface_store writes SESSION's surface artifacts for
+# n synthetic expiries into the artifact store: a Cboe-like calendar (weekdays at the
+# short end, third Fridays further out); each expiry's quotes on one arbitrage-free
+# SSVI slice (Gatheral–Jacquier power law with η(1 + |ρ|) ≤ 2), whose raw-SVI
+# parameters are its SVI-cal slice; the four models' residuals; the VIX strip and the
+# term structure of the same expiries. roots=True: each line carries its OCC root
+# (SPX, AM-settled, on third Fridays beyond SYN_AM_AFTER_DAYS; SPXW, PM, elsewhere) and
+# a Cboe book's T (timed 22:30 ET); roots=False: no root and whole days, as a Yahoo
+# close-to-close chain has.
+
+SYN_MODELS = ("essvi", "svi", "svi_cal", "heston_v2")      # the fixture session's models, in its order
+SYN_SPOT, SYN_RATE, SYN_RHO, SYN_ETA = 7650.0, 0.04, -0.7, 1.0
+SYN_PM = (16.0 - 22.5) / 24.0       # T past whole days to a 16:00 ET PM settlement from a 22:30 ET book
+SYN_AM = SYN_PM - 6.5 / 24.0        # ... to the 09:30 ET AM settlement (SOQ)
+SYN_AM_AFTER_DAYS = 150             # third Fridays beyond this are the AM SPX line, as on a Cboe book
+SYN_STEP = 5                        # strike grid (index points)
+
+
+def _syn_calendar(n: int, roots: bool) -> list[tuple[str, float, str | None]]:
+    """n listed expiries after SESSION, log-spaced in days from 7 to 600 and snapped
+    to free weekdays (third Fridays past 120 days): (expiry, T_days, root)."""
+    s = pd.Timestamp(SESSION)
+    pool = list(pd.bdate_range(s + pd.Timedelta(days=7), s + pd.Timedelta(days=730)))
+    third = {d for d in pool if d.weekday() == 4 and 15 <= d.day <= 21}
+    taken: set = set()
+    for t in np.geomspace(7.0, 600.0, n):
+        cands = [d for d in pool if d not in taken and (t <= 120 or d in third)]
+        cands = cands or [d for d in pool if d not in taken]
+        taken.add(min(cands, key=lambda d: (abs((d - s).days - t), d)))
+    out: list[tuple[str, float, str | None]] = []
+    for d in sorted(taken):
+        days = float((d - s).days)
+        if not roots:
+            out.append((d.strftime("%Y-%m-%d"), days, None))
+            continue
+        am = d in third and days > SYN_AM_AFTER_DAYS
+        out.append((d.strftime("%Y-%m-%d"), days + (SYN_AM if am else SYN_PM), "SPX" if am else "SPXW"))
+    return out
+
+
+def _syn_slice(T: float) -> dict:
+    """Raw-SVI parameters of the SSVI slice at T years: ATM total variance θ rising
+    with T, φ(θ) = η / √(θ(1 + θ)) (butterfly- and calendar-free for η(1 + |ρ|) ≤ 2)."""
+    atm = 0.13 + 0.05 * T / (T + 0.5)
+    theta = atm * atm * T
+    phi = SYN_ETA / np.sqrt(theta * (1.0 + theta))
+    r = SYN_RHO
+    return {"a": theta / 2 * (1 - r * r), "b": theta * phi / 2, "rho": r, "m": -r / phi,
+            "sigma": float(np.sqrt(1 - r * r) / phi)}
+
+
+def _syn_w(k, p: dict):
+    """The raw-SVI total variance w(k), and its first two derivatives."""
+    x = np.asarray(k, dtype=float) - p["m"]
+    r = np.sqrt(x * x + p["sigma"] ** 2)
+    w = p["a"] + p["b"] * (p["rho"] * x + r)
+    return w, p["b"] * (p["rho"] + x / r), p["b"] * p["sigma"] ** 2 / r ** 3
+
+
+def _syn_black(F, K, T, iv, call, D):
+    from scipy.special import ndtr
+    sd = iv * np.sqrt(T)
+    d1 = np.log(F / K) / sd + sd / 2
+    d2 = d1 - sd
+    return D * np.where(call, F * ndtr(d1) - K * ndtr(d2), K * ndtr(-d2) - F * ndtr(-d1)), d1
+
+
+def _syn_session(n: int, roots: bool, seed: int = 7) -> dict:
+    """The synthetic session's residual table, SVI-cal slices, term structure and VIX strip."""
+    rng = np.random.default_rng(seed)
+    frames, slices, terms, strip = [], [], [], []
+    for i, (e, days, root) in enumerate(_syn_calendar(n, roots)):
+        T = days / 365.0
+        p = _syn_slice(T)
+        F, D = SYN_SPOT * np.exp(0.25 * SYN_RATE * T), float(np.exp(-SYN_RATE * T))
+        kw = min(0.35, 0.05 + 0.3 * np.sqrt(T))
+        nq = 60 + (i * 37) % 140                       # 60–199 quotes, as uneven as a real book
+        K = np.unique(np.round(F * np.exp(np.linspace(-kw, 0.5 * kw, nq)) / SYN_STEP) * SYN_STEP)
+        k = np.log(K / F)
+        iv = np.sqrt(_syn_w(k, p)[0] / T)
+        mid = iv + rng.normal(0.0, 4e-4, len(K))       # quote noise, 0.04 vol pts
+        hs = 0.03 + 0.3 * np.abs(k) / kw + 0.2 / np.sqrt(days)            # vol pts
+        bid_iv, ask_iv = mid - hs / 100, mid + hs / 100
+        call = K >= F
+        pos = np.arange(len(K))
+        bid_px, _ = _syn_black(F, K, T, bid_iv, call, D)
+        ask_px, d1 = _syn_black(F, K, T, mid + hs / 100, call, D)
+        from scipy.special import ndtr
+        delta = np.where(call, ndtr(d1), ndtr(d1) - 1.0)
+        arb_exec = (i % 7 == 3) & (pos == 1)
+        arb_flag = (i % 11 == 5) & (pos == 2)
+        market = {
+            "session": SESSION, "expiry": e, "T_days": days, "strike": K, "right": np.where(call, "C", "P"),
+            "k": k, "forward": F, "bid": bid_px, "ask": ask_px,
+            "bid_iv": bid_iv, "mid_iv": mid, "ask_iv": ask_iv,
+            "vega": D * F * np.sqrt(T) * np.exp(-d1 * d1 / 2) / np.sqrt(2 * np.pi) / 100,
+            "half_spread_vp": hs, "delta_bucket": np.where(
+                np.abs(delta) <= 0.10, np.where(call, "10C", "10P"),
+                np.where(np.abs(delta) <= 0.25, np.where(call, "25C", "25P"),
+                         np.where(call, "ATM-C", "ATM-P"))),
+            "tenor_bucket": "7-30d" if days <= 30 else "30-90d" if days <= 90 else "90-180d" if days <= 180
+            else "180-365d" if days <= 365 else "365-730d",
+            "arb_flag": arb_flag, "arb_exec": arb_exec, "arb_mid": arb_exec | ((i % 5 == 1) & (pos == 3)),
+            "repair_dprice": np.where(arb_flag, 2.5, np.where(arb_exec, 0.05, 0.0))}
+        if roots:
+            market["root"] = root
+        model_iv = {"essvi": iv + 0.004 * k, "svi": iv + rng.normal(0.0, 2e-4, len(K)), "svi_cal": iv,
+                    "heston_v2": iv + 0.02 * k * k - 0.001}
+        for m in SYN_MODELS:
+            err = (model_iv[m] - mid) * 100
+            fit = (pos % 5 == 0) & (i % 3 == 0) if m.startswith("heston") else pos % 2 == 0
+            frames.append(pd.DataFrame({
+                **market, "model": m, "model_iv": model_iv[m], "error_vp": err,
+                "error_hs": err / np.maximum(hs, 0.01),
+                "inside_spread": (model_iv[m] >= bid_iv) & (model_iv[m] <= ask_iv),
+                "outside_spread_vp": np.maximum(0.0, np.abs(err) - hs), "in_sample": fit}))
+        g = _syn_w(np.linspace(-3.0, 2.0, 5001), p)
+        w, w1, w2 = g
+        dur = (1 - np.linspace(-3.0, 2.0, 5001) * w1 / (2 * w)) ** 2 - w1 ** 2 / 4 * (1 / w + 0.25) + w2 / 2
+        slices.append({"T": T, **{x: float(v) for x, v in p.items()}, "certified": True, "expiry": e,
+                       "g_min": float(dur.min()), "success": True})
+        atm = float(np.sqrt(_syn_w(0.0, p)[0] / T)) * 100
+        terms.append({"T_days": days, "atm_skew_essvi": float(_syn_w(0.0, p)[1]) / (2 * atm / 100 * T),
+                      "atm_vol_essvi": atm + 0.4, "atm_vol_mid_quotes": float(np.interp(0.0, k, mid)) * 100,
+                      "atm_vol_svi_cal": atm, "carry_method": "parity_fixed_D", "discount": D, "expiry": e,
+                      "forward": float(F), "median_half_spread_vp": float(np.median(hs)), "n_quotes": len(K),
+                      "q": 0.75 * SYN_RATE, "r": SYN_RATE})
+        vs = atm * 1.3
+        strip.append({"F": float(F), "atm_over_vs": atm / vs, "atm_vol_quotes": atm, "days": days,
+                      "expiry": e, "n_calls": int(call.sum()), "n_puts": int((~call).sum()), "ok": True,
+                      "settlement": "AM" if root == "SPX" else "PM", "var_swap_vol": vs,
+                      "vs_minus_atm_vp": vs - atm})
+    res = pd.concat(frames, ignore_index=True)
+    res["model"] = pd.Categorical(res["model"], categories=list(SYN_MODELS), ordered=True)
+    res = res.sort_values(["model", "T_days", "strike"], kind="mergesort").reset_index(drop=True)
+    res["model"] = res["model"].astype(str)
+    return {"residuals": res, "slices": slices, "terms": terms, "strip": strip}
+
+
+def _surface_store(tmp_path: Path, n: int, roots: bool = False) -> Path:
+    """The artifact store (_artifact_store) with SESSION's surface replaced by n
+    synthetic expiries (see above); the other artifacts are the fixtures'."""
+    data = _artifact_store(tmp_path)
+    d = data / "surface" / SESSION
+    syn = _syn_session(n, roots)
+    res = syn["residuals"]
+    res.to_parquet(d / "residuals.parquet", index=False)
+    mkt = res[res["model"] == SYN_MODELS[0]]
+    sj = json.loads((d / "surface.json").read_text())
+    sj["universe"].update({"n_expiries": n, "n_universe": len(mkt), "T_days_min": float(mkt["T_days"].min()),
+                           "T_days_max": float(mkt["T_days"].max()),
+                           "median_half_spread_vp": float(mkt["half_spread_vp"].median())})
+    fit = res[(res["model"] == "svi_cal") & res["in_sample"]]
+    sj["fit_set"].update({"n": len(fit), "n_universe": len(mkt)})
+    arb = sj["arbitrage"]
+    arb.update({"n_quotes": len(mkt), "n_quotes_in_executable_violation": int(mkt["arb_exec"].sum()),
+                "n_quotes_in_mid_violation": int(mkt["arb_mid"].sum())})
+    out = mkt[mkt["arb_flag"]]
+    arb["quotes_repaired_outside_spread"] = {"by_expiry": out.groupby("expiry").size().astype(int).to_dict(),
+                                             "largest": [], "n": len(out)}
+    arb["calendar_total_variance_mid"].update({"n_crossing": 0, "n_pairs_crossing": 0, "worst_pairs": []})
+    sj["term_structure"] = syn["terms"]
+    sj["surfaces"]["svi_cal"]["params"] = {"model": "SVI-cal", "slices": syn["slices"]}
+    (d / "surface.json").write_text(json.dumps(sj))
+    vx = json.loads((d / "vix_replication.json").read_text())
+    vx["strip"] = syn["strip"]
+    (d / "vix_replication.json").write_text(json.dumps(vx))
+    return data
+
+
+def test_synthetic_surface_store_round_trips_through_the_quote_packing(dash, tmp_path, monkeypatch):
+    """The synthetic sessions the Surface scaling tests render (17, 45 and 80
+    expiries, with and without OCC roots) are what the producer writes: every model
+    on the same quotes, whole-point strikes, and each expiry packs (desk_quotes.encode)
+    and unpacks (decode) to its own rows: strike, right, ln(K/F), bid / mid / ask IV,
+    each model's IV, z and fit / inside flags. The 45-expiry store renders a Surface
+    page with no loader error and one smile tab per expiry."""
+    dq = dash.desk_quotes
+    for n, roots in ((17, False), (45, True), (80, True)):
+        syn = _syn_session(n, roots)
+        res = syn["residuals"]
+        assert res["expiry"].nunique() == n
+        assert ("root" in res.columns) == roots
+        if roots:
+            assert set(res["root"]) == {"SPX", "SPXW"}               # both settlements on the book
+            am = res.loc[res["root"] == "SPX", "T_days"] % 1
+            assert np.allclose(am, 1 + SYN_AM)                     # the AM line's T, 6.5 h short of the PM's
+        sizes = res.groupby("model").size()
+        assert (sizes == sizes.iloc[0]).all()
+        assert [s["expiry"] for s in syn["slices"]] == sorted(res["expiry"].unique())
+        assert min(s["g_min"] for s in syn["slices"]) >= 0         # butterfly-free slices
+        groups = dq.encode(res, list(SYN_MODELS))
+        assert list(groups) == sorted(res["expiry"].unique())
+        for e, g in groups.items():
+            rows = dq.decode(g)
+            q = res[(res["model"] == SYN_MODELS[0]) & (res["expiry"] == e)].sort_values("k")
+            assert [r["strike"] for r in rows] == q["strike"].astype(int).tolist()
+            assert "".join(r["right"] for r in rows) == "".join(q["right"])
+            assert np.allclose([r["k"] for r in rows], q["k"], atol=1e-12)
+            for col, key, tol in (("mid_iv", "mid", 1e-5), ("bid_iv", "bid", 1e-5), ("ask_iv", "ask", 1e-5)):
+                assert np.allclose([r[key] for r in rows], q[col] * 100, atol=tol), (e, col)
+            for m in SYN_MODELS:
+                qm = res[(res["model"] == m) & (res["expiry"] == e)].sort_values("k")
+                got = [r["models"][m] for r in rows]
+                assert np.allclose([x["iv"] for x in got], qm["model_iv"] * 100, atol=1e-4), (e, m)
+                assert np.allclose([x["z"] for x in got], qm["error_hs"], atol=0.01), (e, m)
+                assert [x["fit"] for x in got] == qm["in_sample"].tolist(), (e, m)
+                assert [x["inside"] for x in got] == qm["inside_spread"].tolist(), (e, m)
+    monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path, 45, roots=True))
+    resp, html = _get(dash, "/surface")
+    assert _errors(resp) == 0
+    assert len(re.findall(r'aria-controls="slices-panel" data-value="', html)) == 45
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
