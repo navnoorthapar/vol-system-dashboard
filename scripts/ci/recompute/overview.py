@@ -969,9 +969,22 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     pv = dict(zip(prev["expiry_date"], prev["price"])) if not prev.empty else {}
     dashed = [prev_date] if prev_date and not prev.empty else []
     a.date(P_VX, "panel date (futures table's newest)", sec.select_one(".panel-meta"), last)
+    # one age on every page: NYSE sessions to the newest session (the later of the
+    # market database's close and the rule labels' date), named as such, with the
+    # other source's date when the two disagree
     age = sessions_between(last, f["ref_mkt"])
     el = sec.select_one("#vx-curve-age")
-    said(a, P_VX, "age of the futures table", el, [last, float(age), f["ref_mkt"]])
+    age_parts: Parts = [last] if age == 0 else [last, float(age), f["ref_mkt"]]
+    if f["spx_date"] != f["label_date"]:
+        age_parts.append(f["spx_date"] if f["ref_mkt"] == f["label_date"] else f["label_date"])
+    said(a, P_VX, "age of the futures table", el, age_parts)
+    says(a, P_VX, "age of the futures table", el,
+         f"{last}, the newest session" if age == 0 else f"before the newest session, {f['ref_mkt']}", True)
+    if f["spx_date"] != f["label_date"]:
+        says(a, P_VX, "age of the futures table", el,
+             (f"the rule labels’ date; the market database ends {f['spx_date']}"
+              if f["ref_mkt"] == f["label_date"]
+              else f"the market database’s newest close; the rule labels end {f['label_date']}"), True)
     a.equal(P_VX, "age level", classes(el.select_one("span[class^='age-']") if el else None),
             [f"age-{om.stale_level(age)}"])
     a.equal(P_VX, "chart title (aria-label)", attr(sec.select_one("div#chart-vx-curve"), "aria-label"),

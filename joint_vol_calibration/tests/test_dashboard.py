@@ -6174,20 +6174,88 @@ def test_gated_fits_table_has_the_vx_out_of_sample_column(dash, pages):
     assert got == want
 
 
-def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
-    """P3.1: a Model Risk check on the VX futures table's lag behind the market
-    DB, in NYSE sessions, with the existing label-lag limits (no new threshold)."""
-    d = dash.load_model_risk()
-    row = next(m for m in d["monitors"]
-               if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
+def _newest_session() -> str:
+    """The newest session the site has data for: the later of the market database's
+    newest close and the newest rule label (the reference of every age on the site)."""
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         db_date = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
-    lag = dash.session_age(_vx_last(), db_date)
+    rl = pd.read_parquet(SHIPPED / "signals" / "regime_labels.parquet", columns=["regime"])["regime"].dropna()
+    return max(db_date, str(pd.Timestamp(rl.index[-1]).date()))
+
+
+def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
+    """P3.1: a Model Risk check on the VX futures table's lag behind the newest
+    session, in NYSE sessions, with the existing label-lag limits (no new threshold)."""
+    d = dash.load_model_risk()
+    row = next(m for m in d["monitors"]
+               if m["check"] == "VX futures table lag behind the newest session (NYSE sessions)")
+    lag = dash.session_age(_vx_last(), _newest_session())
     assert row["model"] == "M5"
     assert row["value"] == str(lag)
     assert row["status"] == dash._rag(float(lag), dash.MONITOR_LIMITS["label_lag"])
     assert row["limits"] == "OK ≤ 0 · watch ≤ 1 · breach above"
-    assert "VX futures table lag behind the market DB" in _html_unescape(pages["/model-risk"])
+    assert "VX futures table lag behind the newest session" in _html_unescape(pages["/model-risk"])
+
+
+def _write_vx_table(path: Path, sessions: list[str], expiries: tuple[str, ...], seed: int = 5) -> None:
+    """vix_futures_daily (the data layer's DDL) with one monthly row per (session,
+    contract still trading on it), settlements at Cboe's 4 dp."""
+    rng = np.random.default_rng(seed)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS vix_futures_daily (date TEXT NOT NULL, "
+                "expiry_date TEXT NOT NULL, expiry_month TEXT NOT NULL, symbol TEXT, "
+                "is_weekly INTEGER NOT NULL DEFAULT 0, open REAL, "
+                "high REAL, low REAL, close REAL, settle REAL, volume INTEGER, open_interest INTEGER, "
+                "days_to_expiry INTEGER, source TEXT, PRIMARY KEY (date, expiry_date))")
+    rows = []
+    for s in sessions:
+        level = 15.0 + float(rng.normal(0.0, 0.5))
+        for i, e in enumerate(expiries):
+            days = (pd.Timestamp(e) - pd.Timestamp(s)).days
+            if days <= 0:
+                continue
+            px = round(level + 0.6 * i + float(rng.normal(0.0, 0.05)), 4)
+            rows.append((s, e, e[:7], None, 0, None, None, None, None, px, None, None, days, "cboe"))
+    con.executemany("INSERT INTO vix_futures_daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+
+
+# the 2024 VX monthly final settlement dates (Cboe; June moved to Tuesday by Juneteenth)
+VX_EXPIRIES_2024 = ("2024-06-18", "2024-07-17", "2024-08-21", "2024-09-18", "2024-10-16", "2024-11-20",
+                    "2024-12-18")
+
+
+def test_vx_lag_is_one_number_on_every_page_when_labels_lead_the_db(dash, synth):
+    """CODE-10 / VALIDATOR-18: the Overview's VX age was counted to the later of the
+    market DB's close and the rule labels' date and called 'the market
+    database's', while Model Risk M5 counted to the DB's own close: 12 and 11 on
+    one build. With the labels one session ahead of the DB, the Overview, M5 and
+    the footer's freshness table give one age (to the newest session, the rule
+    labels' date here), and the Overview names that date for what it is."""
+    data, dates = synth["data"], synth["dates"]
+    extra = _sessions(dash, str((dates[-1] + pd.Timedelta(days=1)).date()),
+                      str((dates[-1] + pd.Timedelta(days=10)).date()))[0]
+    _write_labels(data / "signals" / "regime_labels.parquet", dates.append(pd.DatetimeIndex([extra])))
+    db_date, lab_date = str(dates[-1].date()), str(pd.Timestamp(extra).date())
+    vx_last = str(dates[-4].date())
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-30:-3]], VX_EXPIRIES_2024)
+    age = dash.session_age(vx_last, lab_date)
+    assert age == dash.session_age(vx_last, db_date) + 1            # the case the two definitions split
+    ov = dash.load_overview()["vx_curve"]
+    assert (ov["date"], ov["age"], ov["ref"]) == (vx_last, age, lab_date)
+    m5 = next(m for m in dash.load_model_risk()["monitors"] if m["key"] == "vx_lag")
+    assert m5["value"] == str(age)
+    assert f"newest session {lab_date}" in m5["note"]
+    assert f"market database ends {db_date}" in m5["note"]
+    foot = next(s for s in dash.load_chrome()["sources"] if s["short"] == "VX")
+    assert (foot["date"], foot["age"]) == (vx_last, age)
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-curve-age">(.*?)</p>',
+                                                            html, re.DOTALL).group(1)))
+    assert f"{age} NYSE sessions before the newest session, {lab_date}" in line
+    assert f"market database ends {db_date}" in line
+    assert f"market database’s {lab_date}" not in line
 
 
 def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
@@ -6647,7 +6715,6 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
         px = [r[0] for r in con.execute(
             "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
             "AND is_weekly = 0 AND days_to_expiry > 0 ORDER BY expiry_date", (last, last))]
-        db_last = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0][:10]
     html = pages["/"]
     line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
                                                             re.DOTALL).group(1)))
@@ -6656,7 +6723,7 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     spec = _spec(html, "chart-vx-curve")
     assert spec["series"][0]["name"] == f"{last} settlements"
     assert spec["series"][0]["data"] == pytest.approx(px)
-    age = dash.session_age(last, db_last)
+    age = dash.session_age(last, _newest_session())
     badge = re.search(r'<p class="note" id="vx-curve-age"><span class="age-(\w+)">(.*?)</span>;', html,
                       re.DOTALL)
     assert badge.group(1) == dash.stale_level(age)

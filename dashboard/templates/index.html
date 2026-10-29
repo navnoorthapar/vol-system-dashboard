@@ -139,7 +139,7 @@
 <div class="g pair">
   {% call m.panel('vx-curve', 'VX futures curve · on its own date', 's6', vc.date if vc else None) %}
     {% if vc and d.charts.vx_curve %}
-    <p class="note" id="vx-curve-age"><span class="age-{{ vc.level if vc.level in ('ok', 'warn', 'error') else 'ok' }}">Settlements of <span class="nowrap">{{ vc.date }}</span>{% if vc.age is not none %}, {{ vc.age|plural('NYSE session') }} before the market database’s <span class="nowrap">{{ vc.ref }}</span>{% endif %}</span>; the daily job does not refresh the futures table.</p>
+    <p class="note" id="vx-curve-age"><span class="age-{{ vc.level if vc.level in ('ok', 'warn', 'error') else 'ok' }}">Settlements of <span class="nowrap">{{ vc.date }}</span>{% if vc.age == 0 %}, the newest session{% elif vc.age is not none %}, {{ vc.age|plural('NYSE session') }} before the newest session, <span class="nowrap">{{ vc.ref }}</span>{% endif %}{% if vc.ref_source and vc.age is not none %} ({{ vc.ref_source }}){% endif %}</span>; the daily job does not refresh the futures table.</p>
     {{ m.chart(d.charts.vx_curve, 'h220 grow') }}
     <p class="note" id="vx-m1m2"><strong>M1 → M2 {{ (vc.m1m2 * 100 if vc.m1m2 is not none else none)|signed('.2f') }}%</strong>{% if vc.m2 %} ({{ vc.m1.settle|fmt('.2f') }} → {{ vc.m2.settle|fmt('.2f') }}){% endif %}: VX2 / VX1 − 1, the second monthly contract over the first; positive is contango. Monthly contracts only (weeklies excluded), at Cboe’s daily settlement{% if vc.prev_date %}; dashed: <span class="nowrap">{{ vc.prev_date }}</span>{% endif %}. A future settles on VIX at its expiry, so this curve is not the spot term structure above and is not drawn on it.</p>
     {% else %}<p class="note">No VX futures settlements are stored.</p>{% endif %}

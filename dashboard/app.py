@@ -46,7 +46,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -646,27 +646,61 @@ def vx_session_rows(session: str) -> list[dict]:
     return cast("list[dict]", df.to_dict("records"))
 
 
-def _latest_market_session() -> str | None:
-    """Newest session any dashboard input knows about (DB close or rule label).
-
-    The reference date for every staleness age: an input is 'n sessions old'
-    relative to the newest session the site has data for.
-    """
-    dates = []
+def newest_session_parts() -> dict[str, str | None]:
+    """The newest session the site has data for and where it comes from:
+    ``db`` the market database's newest close (MAX spx_ohlcv.date), ``labels``
+    the newest rule label, ``ref`` the later of the two (None if neither)."""
+    db = labels = None
     try:
         with _db() as con:
             row = con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()
         if row and row[0]:
-            dates.append(str(row[0])[:10])
+            db = str(row[0])[:10]
     except Exception as exc:  # reported by the loaders that need the DB
         _logger.info("latest session: DB unavailable (%s)", exc)
     try:
-        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet", columns=["regime"])
+        rl = pd.read_parquet(DATA / "signals" / "regime_labels.parquet",
+                             columns=["regime"])["regime"].dropna()
         if len(rl):
-            dates.append(str(pd.Timestamp(rl.index[-1]).date()))
+            labels = str(pd.Timestamp(rl.index[-1]).date())
     except Exception as exc:
         _logger.info("latest session: regime labels unavailable (%s)", exc)
-    return max(dates) if dates else None
+    return {"ref": max((x for x in (db, labels) if x), default=None), "db": db, "labels": labels}
+
+
+def _latest_market_session() -> str | None:
+    """Newest session any dashboard input knows about (DB close or rule label).
+
+    The reference date for every staleness age (the footer's freshness table,
+    the page badges, the VX futures lag): an input is 'n sessions old'
+    relative to the newest session the site has data for.
+    """
+    return newest_session_parts()["ref"]
+
+
+def newest_session_source(parts: Mapping[str, str | None]) -> str | None:
+    """What the newest session is when the market database and the rule labels
+    disagree on it (None when they agree): its source and the other one's date."""
+    ref, db, labels = parts.get("ref"), parts.get("db"), parts.get("labels")
+    if ref is None or db == labels:
+        return None
+    if ref == labels:
+        return f"the rule labels’ date; the market database ends {db}" if db else "the rule labels’ date"
+    return (f"the market database’s newest close; the rule labels end {labels}" if labels
+            else "the market database’s newest close")
+
+
+def vx_freshness(vx_date: str | None = None) -> dict:
+    """The VX futures table's age: NYSE sessions from its newest date to the newest
+    session the site has data for (_latest_market_session). The one definition
+    the Overview (#vx-curve-age), Model Risk M5 and the footer's freshness table
+    use, so the three never disagree. ``vx_date`` defaults to vx_last_date()."""
+    parts = newest_session_parts()
+    date = vx_last_date() if vx_date is None else vx_date
+    age = session_age(date, parts["ref"]) if date and parts["ref"] else None
+    return {"date": date, "ref": parts["ref"], "db": parts["db"], "labels": parts["labels"],
+            "age": age, "level": stale_level(age) if age is not None else None,
+            "ref_source": newest_session_source(parts)}
 
 
 # ── Calibration selection ──────────────────────────────────────────────────────
@@ -5005,10 +5039,10 @@ def overview_vix_complex(d: dict) -> None:
         prev_date = vx_prev_date(last)
         prev = desk_market.vx_curve(vx_session_rows(prev_date)) if prev_date else None
         if cur:
-            ref = _latest_market_session()
-            age = session_age(last, ref)
+            fr = vx_freshness(last)
             d["vx_curve"] = {**cur, "date": last, "prev_date": prev_date if prev else None, "prev": prev,
-                             "age": age, "level": stale_level(age), "ref": ref}
+                             "age": fr["age"], "level": stale_level(fr["age"]), "ref": fr["ref"],
+                             "ref_source": fr["ref_source"]}
             pv = {r["expiry"]: r["settle"] for r in (prev or {}).get("rows") or []}
             cats = [r["expiry"] for r in cur["rows"]]
             series = [{"name": f"{last} settlements", "type": "line", "role": "market", "color": "headline",
@@ -6617,7 +6651,7 @@ INVENTORY_PATH = DASH / "model_inventory.json"
 # "M4" was the rule labeller here and the joint calibrator in the pack.
 INV_CALIBRATOR, INV_GREEKS, INV_BETA, INV_LABELS, INV_CLASSIFIER = "M4", "M6", "M7", "M10", "M11"
 INV_VX = "M5"
-VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
+VX_LAG_CHECK = "VX futures table lag behind the newest session (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
 
@@ -6852,17 +6886,17 @@ def load_model_risk() -> dict[str, Any]:
             "label_lag",
             ["data_store/signals/regime_labels.parquet", "data_store/vol_system.db"],
             f"Labels {lab_date}; market DB {db_date}.", digits=".0f")
-    # M5: the VX futures table behind the market DB (the fits' out-of-sample VX leg)
-    with _loader_boundary(d, "VX futures table / market DB"):
-        vx_date = vx_last_date()
-        with _db() as con:
-            db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
-        vx_lag = session_age(vx_date, db_date) if vx_date else None
+    # M5: the VX futures table behind the newest session (the fits' out-of-sample VX
+    # leg); vx_freshness, the age the Overview and the footer's freshness table print
+    with _loader_boundary(d, "VX futures table / newest session"):
+        vx = vx_freshness()
+        vx_date, vx_lag = vx["date"], vx["age"]
+        src = f" ({vx['ref_source']})" if vx["ref_source"] else ""
         add(INV_VX, VX_LAG_CHECK, _num(vx_lag),
             _fmt(vx_lag) if vx_date else "no futures table", "label_lag", VX_TABLE,
-            f"vix_futures_daily through {vx_date or '—'}; market DB {db_date}. Only the fits' out-of-sample "
-            f"VX score reads them, so a fit after {vx_date or 'the table'} has none.", key="vx_lag",
-            digits=".0f")
+            f"vix_futures_daily through {vx_date or '—'}; newest session {vx['ref'] or '—'}{src}. Only the "
+            f"fits' out-of-sample VX score reads them, so a fit after {vx_date or 'the table'} has none.",
+            key="vx_lag", digits=".0f")
     # M2: Greeks surface built from the headline fit
     g = load_page3()
     for e in g.get("errors") or []:
@@ -7104,7 +7138,9 @@ def load_chrome() -> dict:
         vx_date = vx_last_date()
     except (sqlite3.Error, OSError) as exc:
         _logger.info("chrome: VX futures unavailable (%s)", exc)
-    ref = max([x for x in (spx_date, labels_date) if x], default=None)
+    # the newest session the site has data for: the reference of every age in the
+    # freshness table, the same one the Overview's VX age and Model Risk M5 use
+    ref = _latest_market_session()
     c["latest"] = ref
     if surf_sessions:
         try:
