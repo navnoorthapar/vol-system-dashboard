@@ -3,11 +3,19 @@ test_readme.py — every number the README front door quotes is the committed ar
 
 The README's first screen quotes three results with their intervals, and its
 calibration and backtest sections quote tables. Each figure is recomputed here
-from the file it names and must appear in the README exactly as printed. The
-results are pinned to the five sessions C23 measured (2026-03-24 ... 2026-10-16),
-so the daily job adding a session does not change them; a regenerated artifact
-that moves a number fails here until the README (and the docs that quote the
-same number) say the new one.
+from the file it names and must appear in the README exactly as printed.
+
+The results lead with the range over the sessions the README names (VALIDATOR-06,
+CODE-04, CIO-05: it led with one near-best session, 2026-10-16, and said 'no
+ledger entry' after one was committed). The README states the span of those
+sessions (2026-03-24 -> its last date); RESULT_SESSIONS is every stored session
+in that span with a surface scorecard and a model_version 2 fit, so a session the
+daily job adds after the span does not move a number, while a session missing
+from the README's count inside it fails here. A single value names its session
+and is read from that session's artifact. C23_SESSIONS are the five sessions the
+C23 round measured; the claims about that round (the DE timings, the Data table's
+option counts, the article's C23 note) stay pinned to them. test_readme.py is in
+no gate of the daily job (daily_refresh.yml).
 
 The Data table's row counts are counted as of the end date each row states,
 so the daily job appending a session does not move them (CLM-03: the Data
@@ -38,9 +46,41 @@ FIRST_SCREEN_RAW = README_RAW.split("\n---\n")[0]
 # whitespace-collapsed copies: a re-wrapped paragraph must not fail a number check
 README = " ".join(README_RAW.split())
 FIRST_SCREEN = " ".join(FIRST_SCREEN_RAW.split())
-SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16")
-HEADLINE = "2026-10-16"
+C23_SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16")
+C23_HEADLINE = "2026-10-16"
+FIGURE = "2026-10-16"                       # the session docs/figures/smile_<session>.png draws
 MINUS = "−"
+WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+
+def _result_sessions(text: str) -> tuple[str, ...]:
+    """Every stored session in the span ``text`` states ('... an accepted fit,
+    <first> → <last>'), with a surface scorecard and a model_version 2 fit."""
+    m = re.search(r"accepted fit, (\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", text)
+    assert m, "the text does not state the span of its sessions"
+    out = []
+    for d in sorted((DATA / "surface").iterdir()):
+        s = d.name
+        pkl = DATA / "calibrations" / f"joint_cal_{s}.pkl"
+        if not (m.group(1) <= s <= m.group(2) and (d / "scorecard.json").exists() and pkl.exists()):
+            continue
+        with open(pkl, "rb") as fh:
+            if pickle.load(fh).get("model_version") == 2:
+                out.append(s)
+    assert out[0] == m.group(1)
+    assert out[-1] == m.group(2)
+    return tuple(out)
+
+
+RESULT_SESSIONS = _result_sessions(FIRST_SCREEN)
+LAST = RESULT_SESSIONS[-1]
+PACK_RAW = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+PACK = " ".join(PACK_RAW.split())
+
+
+def _cal(s: str) -> dict:
+    with open(DATA / "calibrations" / f"joint_cal_{s}.pkl", "rb") as fh:
+        return pickle.load(fh)
 
 
 def fmt(x: float, spec: str) -> str:
@@ -64,7 +104,7 @@ def _script(name: str):
 @pytest.fixture(scope="module")
 def scorecards():
     out = {}
-    for s in SESSIONS:
+    for s in RESULT_SESSIONS:
         sc = json.loads((DATA / "surface" / s / "scorecard.json").read_text())
         out[s] = {m["model"]: m for m in sc["models"]}
     return out
@@ -74,7 +114,7 @@ def scorecards():
 def diag():
     rows = json.loads((DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
     by = {r["session"]: r for r in rows}
-    return [by[s] for s in SESSIONS]
+    return [by[s] for s in RESULT_SESSIONS]
 
 
 @pytest.fixture(scope="module")
@@ -88,7 +128,10 @@ def test_first_screen_is_short_and_names_its_parts():
     body = re.sub(r"\]\([^)]*\)", "]", body)
     words = re.findall(r"[A-Za-z0-9][\w.,'’%·−/-]*", body)
     assert len(words) <= 340, len(words)
-    for part in ("**Three results**", "**Limitations.**", "**Links.**", "docs/figures/smile_2026-10-16.png",
+    for part in ("**What it is, and is not.**", "A model-validation record", "It is not an alpha claim",
+                 "the backtest result is negative and no signal is deployable", "**Three results**",
+                 "**Limitations.**", "**Links.**",
+                 f"docs/figures/smile_{FIGURE}.png",
                  "https://navnoorbawa.me", "docs/model_validation/README.md", "docs/reproduce.md",
                  "docs/corrections.md", "docs/free_resources_scorecard.md", "CITATION.cff",
                  "docs/install.md"):
@@ -98,61 +141,86 @@ def test_first_screen_is_short_and_names_its_parts():
         assert word not in FIRST_SCREEN, word
 
 
-def test_first_screen_limitations_are_the_records(diag):
-    on_cap = sum("sigma" in r["on_bound"] for r in diag)
-    assert f"Heston's vol-of-vol sits on its cap in {on_cap} of {len(diag)} fits" in FIRST_SCREEN
+def test_first_screen_limitations_are_the_records():
     first = min(json.loads(p.read_text())["session"] for p in (DATA / "options" / "cboe").glob("spx_*.json"))
     assert f"Cboe's timestamped books are stored from {first}" in FIRST_SCREEN
     assert f"Cboe's timestamped books are stored from {first}" in README.split("## Known limitations")[1]
     assert "VIX options are a research leg, not in the fit" in FIRST_SCREEN
-    for s in SESSIONS:                                  # ... because every committed fit has w3 = 0
-        with open(DATA / "calibrations" / f"joint_cal_{s}.pkl", "rb") as fh:
-            assert pickle.load(fh)["weights"]["w3"] == 0.0, s
+    for s in RESULT_SESSIONS:                           # ... because every committed fit has w3 = 0
+        assert _cal(s)["weights"]["w3"] == 0.0, s
+    # the forward ledger: its first registered session, never 'no entry' once one is committed
+    ledgers = sorted(p.stem.removeprefix("ledger_") for p in (DATA / "forward").glob("ledger_*.json"))
+    sources = " ".join((ROOT / "DATA_SOURCES.md").read_text().split())
+    if ledgers:
+        assert f"the forward ledger at executable prices starts on {ledgers[0]}" in FIRST_SCREEN
+        assert f"Its first entry is {ledgers[0]}" in README
+        assert f"first entry {ledgers[0]}" in sources
+        for text in (README, sources):
+            assert "no entry yet" not in text
+
+
+def test_results_lead_with_the_range_over_the_named_sessions():
+    """The results' preamble counts the sessions it ranges over, and names the
+    live site for the newest one."""
+    n = len(RESULT_SESSIONS)
+    preamble = f"ranges over the {WORDS.get(n, n)} sessions with a stored chain and an accepted fit"
+    assert preamble in FIRST_SCREEN
+    assert f"{LAST}, not confidence intervals" in FIRST_SCREEN
+    live = "[live site](https://navnoorbawa.me) shows the newest session"
+    assert live in FIRST_SCREEN_RAW.replace("\n", " ")
 
 
 def test_result_1_quote_grade_surface(scorecards):
-    oos = {s: scorecards[s]["svi_cal"]["metrics"]["out_of_sample"] for s in SESSIONS}
-    h = oos[HEADLINE]
-    assert f"**{fmt(h['median_abs_hs'], '.2f')} half-spreads**" in FIRST_SCREEN
-    assert f"({fmt(h['inside_spread_pct'], '.1f')}% inside it)" in FIRST_SCREEN
-    assert f"**{rng((o['median_abs_hs'] for o in oos.values()), '.2f')}** half-spreads" in FIRST_SCREEN
-    dg = scorecards[HEADLINE]["svi_cal"]["dense_grid"]
-    assert dg["butterfly_violations"] == 0
-    assert dg["calendar_violations"] == 0          # "arbitrage-free" on its dense grid
+    oos = {s: scorecards[s]["svi_cal"]["metrics"]["out_of_sample"] for s in RESULT_SESSIONS}
+    h = oos[LAST]
+    assert f"**{rng((o['median_abs_hs'] for o in oos.values()), '.2f')} half-spreads**" in FIRST_SCREEN
+    assert f"{rng((o['inside_spread_pct'] for o in oos.values()), '.1f')}% inside the bid–ask" in FIRST_SCREEN
+    assert (f"({LAST}: {fmt(h['median_abs_hs'], '.2f')}, {fmt(h['inside_spread_pct'], '.1f')}% inside)"
+            in FIRST_SCREEN)
+    for s in RESULT_SESSIONS:
+        dg = scorecards[s]["svi_cal"]["dense_grid"]
+        assert dg["butterfly_violations"] == 0, s
+        assert dg["calendar_violations"] == 0, s   # "arbitrage-free" on its dense grid
     # CLM-15: compared on the quotes no model was fitted to, not "the same quotes" each model held out
     common = {s: {m: scorecards[s][m]["metrics"]["common_out_of_sample"] for m in ("heston_v2", "svi_cal")}
-              for s in SESSIONS}
-    n = rng((common[s]["svi_cal"]["n"] for s in SESSIONS), ",d")
-    hes = rng((common[s]["heston_v2"]["median_abs_hs"] for s in SESSIONS), ".1f")
-    svi = rng((common[s]["svi_cal"]["median_abs_hs"] for s in SESSIONS), ".2f")
-    assert all(common[s]["svi_cal"]["n"] == common[s]["heston_v2"]["n"] for s in SESSIONS)
+              for s in RESULT_SESSIONS}
+    n = rng((common[s]["svi_cal"]["n"] for s in RESULT_SESSIONS), ",d")
+    hes = rng((common[s]["heston_v2"]["median_abs_hs"] for s in RESULT_SESSIONS), ".1f")
+    svi = rng((common[s]["svi_cal"]["median_abs_hs"] for s in RESULT_SESSIONS), ".2f")
+    assert all(common[s]["svi_cal"]["n"] == common[s]["heston_v2"]["n"] for s in RESULT_SESSIONS)
     claim = (f"On the {n} quotes per session that no model was fitted to (`data_store/surface/<session>/"
              f"scorecard.json`, `metrics.common_out_of_sample`), Heston's median |model − mid| is {hes} "
              f"half-spreads against {svi} for the certified arbitrage-free SVI surface")
     assert claim in README
-    for s in SESSIONS:                                  # "certified": the label follows the certificate
+    for s in RESULT_SESSIONS:                           # "certified": the label follows the certificate
         surf = json.loads((DATA / "surface" / s / "surface.json").read_text())
         assert surf["surfaces"]["svi_cal"]["arbitrage_free_certified"] is True, s
 
 
 def test_result_2_joint_calibration_heston_and_rough(diag):
-    cur = next(r for r in diag if r["session"] == HEADLINE)
-    with open(DATA / "calibrations" / f"joint_cal_{HEADLINE}.pkl", "rb") as fh:
-        cal = pickle.load(fh)
-    n_oos = cal["oos"]["n_spx_oos"]
-    heston_oos = fmt(cur["sigma_cap2_oos"], ".2f")
-    assert f"misses the other {n_oos:,} quotes by **{heston_oos} vol pts**" in FIRST_SCREEN
-    assert f"Rough Heston on the same quotes: **{fmt(cur['joint_rough_oos'], '.2f')}**" in FIRST_SCREEN
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    cals = {s: _cal(s) for s in RESULT_SESSIONS}
+    anchors = [sum(a["n"] for a in c["anchors_by_expiry"]) for c in cals.values()]
+    assert f"fitted to {rng(anchors, 'd')} SPX anchors and the four Cboe VIX indices" in FIRST_SCREEN
     heston = [r["sigma_cap2_oos"] for r in diag]
+    assert f"misses held-out quotes by **{rng(heston, '.2f')} vol pts** RMSE" in FIRST_SCREEN
+    # the single value names its session, and is that session's fit
+    last = cals[LAST]
+    on_bound = "no parameter on a bound" if not last.get("pinned_params") else "on a bound"
+    assert (f"({LAST}: {fmt(last['leg_losses']['spx_oos_iv_rmse'], '.2f')} on {last['oos']['n_spx_oos']:,} "
+            f"quotes, {on_bound})") in FIRST_SCREEN
+    cap = HESTON_BOUNDS["sigma"][1]
+    capped = [s for s, c in cals.items() if "sigma" in (c.get("pinned_params") or [])]
+    assert all(cals[s]["params"]["sigma"] == pytest.approx(cap) for s in capped)
+    assert (f"σ sits on its {cap:.1f} cap in {len(capped)} of the {len(cals)} fits ({', '.join(capped)})"
+            in FIRST_SCREEN)
     rough = [r["joint_rough_oos"] for r in diag]
-    assert f"Heston {rng(heston, '.2f')}, rough Heston {rng(rough, '.2f')}" in FIRST_SCREEN
+    assert f"Rough Heston: **{rng(rough, '.2f')}**" in FIRST_SCREEN
     lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in diag)
     same = sum(r["joint_rough_H"] >= 0.5 - 1e-9 for r in diag)
-    verdict = f"rough is lower on {lower} of {len(diag)} sessions and returns H = ½ (Heston) on {same}"
+    verdict = f"lower on {lower} of {len(diag)} sessions, H = ½ (Heston) on {same}"
     assert verdict in FIRST_SCREEN
-    assert "sigma" in cur["on_bound"]                  # "with σ on its 2.0 cap"
-    assert len(cal["anchors_by_expiry"]) == 6
-    assert sum(a["n"] for a in cal["anchors_by_expiry"]) == 53
 
 
 def test_result_3_backtest_interval_and_nulls(inference):
@@ -248,9 +316,9 @@ def test_data_table_counts_as_of_their_end_dates():
             assert f"{len(df):,} ({int((df['source'] == 'yfinance').sum())} Yahoo rows)" in line
         if table == "rates_daily":
             assert f"{len(df):,} ({df['series'].nunique()} series)" in line
-    opts = {s: pd.read_parquet(DATA / "options" / f"spx_{s}.parquet") for s in SESSIONS}
+    opts = {s: pd.read_parquet(DATA / "options" / f"spx_{s}.parquet") for s in C23_SESSIONS}
     assert f"| {sum(len(o) for o in opts.values()):,} |" in row("SPX options")
-    vix_sessions = SESSIONS[:4]
+    vix_sessions = C23_SESSIONS[:4]
     n_vix = sum(len(pd.read_parquet(DATA / "options" / f"vix_{s}.parquet")) for s in vix_sessions)
     assert f"| {n_vix:,} |" in row("VIX options")
     caps = sorted((DATA / "options" / "cboe").glob("*.json"),
@@ -288,7 +356,7 @@ def test_known_limitations_figures():
     lim = README.split("## Known limitations")[1].split("## References")[0]
     assert f"at one β ({ATM_TO_VIX_RATIO:.2f}) estimated from 2026 chains" in lim
     beta = rb.estimate_beta(include_live=False).set_index("session")["ratio"]
-    assert f"The first later chain ({HEADLINE}) gives {beta[HEADLINE]:.2f}" in lim
+    assert f"The first later chain ({C23_HEADLINE}) gives {beta[C23_HEADLINE]:.2f}" in lim
     bench = json.loads((DATA / "backtest" / "inference" / "benchmarks.json").read_text())
     bench = bench["implied_beta"]["PUT"]
     full = [v for y, v in bench["by_year"].items() if y not in bench["partial_years"]]
@@ -297,33 +365,61 @@ def test_known_limitations_figures():
         m = pickle.load(fh)["metrics"]
     assert (f"the portfolio loses {abs(m['cumulative_return']) * 100:.1f}% while T-bills earn "
             f"{m['cash_cum_return'] * 100:.1f}%") in lim
-    vx = []
-    for s in SESSIONS:
-        with open(DATA / "calibrations" / f"joint_cal_{s}.pkl", "rb") as fh:
-            v = pickle.load(fh)["leg_losses"].get("vx_futures_rmse_oos")
-        if v is not None:
-            vx.append(v)
+    vx = [v for s in RESULT_SESSIONS if (v := _cal(s)["leg_losses"].get("vx_futures_rmse_oos")) is not None]
     assert f"misses real VX futures by {rng(vx, '.1f')} pts out of sample" in lim
+    # σ on its cap and the boxed fits' VVIX, over the sessions the results name
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    rows = {r["session"]: r for r in json.loads(
+        (DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]}
+    diag = [rows[s] for s in RESULT_SESSIONS]
+    n, w = len(diag), WORDS.get(len(diag), len(diag))
+    capped = sum("sigma" in (_cal(s).get("pinned_params") or []) for s in RESULT_SESSIONS)
+    assert f"σ sits on its {HESTON_BOUNDS['sigma'][1]:.1f} cap in {capped} of the {n} fits to {LAST}" in lim
+    above = all(r["vvix_model_cap2"] > r["vvix_market"] for r in diag)
+    assert above                                       # "on all six"
+    model = rng((r["vvix_model_cap2"] for r in diag), ".0f")
+    market = rng((r["vvix_market"] for r in diag), ".0f")
+    assert f"the boxed fits price VVIX at {model} against a market ^VVIX of {market} on all {w}" in lim
+    q = sorted((DATA / "calibrations").glob("quintic_cal_*.pkl"))
+    with open(q[-1], "rb") as fh:
+        assert not pickle.load(fh)["success"]            # "The Quintic OU fit ... did not converge"
+    # quote quality: every chain the results name is a Yahoo download, each with executable static arbitrage
+    idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
+    for s in RESULT_SESSIONS:
+        surf = json.loads((DATA / "surface" / s / "surface.json").read_text())
+        assert surf["inputs"]["source"] == "yfinance", s
+        assert idx[s]["executable_arbitrage"] is True, s
+    assert (f"The {w} chains the surfaces are built from are Yahoo end-of-day downloads without a quote "
+            "time; static arbitrage that is executable at the quoted bid and ask is present on "
+            f"all {w}") in lim
 
 
 def test_regeneration_command_reproduces_the_committed_fits():
     """CLM-07: the README's command for joint_cal_<session>.pkl was a new TRF
     fit on the Treasury curve, not the committed DE fit on ^IRX. It is now the
-    refit make reproduce runs: the recorded inputs and the optimiser that made it."""
+    refit make reproduce runs: the recorded inputs and the optimiser that made it
+    (DE before C23, multi-start TRF from 2026-10-26)."""
     line = next(x for x in README_RAW.splitlines() if x.startswith("| `data_store/calibrations/joint_cal_"))
     assert "**recorded_inputs(ref)" in line
-    assert "c.calibrate(optimizer='de')" in line
+    choose = "'de' if ref.get('optimizer', 'de') == 'de' else 'trf'"
+    assert f"c.calibrate(optimizer={choose})" in line
     refit = (ROOT / "scripts" / "ci" / "reproduce.py").read_text()
     assert "**recorded_inputs(ref)" in refit
-    for s in SESSIONS:
-        with open(DATA / "calibrations" / f"joint_cal_{s}.pkl", "rb") as fh:
-            assert pickle.load(fh).get("optimizer", "de") == "de", s      # every committed fit is DE
+    assert f"opt = {choose}" in refit
+    for s in C23_SESSIONS:
+        assert _cal(s).get("optimizer", "de") == "de", s      # every fit C23 measured is DE
+    assert {_cal(s).get("optimizer", "de") for s in RESULT_SESSIONS} <= {"de", "trf_multistart"}
 
 
 def test_calibration_tables_are_the_pickles_and_the_diagnostics(diag):
-    for s in SESSIONS:
-        with open(DATA / "calibrations" / f"joint_cal_{s}.pkl", "rb") as fh:
-            cal = pickle.load(fh)
+    params = [_cal(s)["params"] for s in RESULT_SESSIONS]
+    n_feller = sum(2 * q["kappa"] * q["theta"] < q["sigma"] ** 2 for q in params)
+    assert n_feller == len(RESULT_SESSIONS)
+    assert f"Feller is violated in all {WORDS[n_feller]} and imposed in none" in README
+    assert f"The table stops at {LAST}" in README
+    for s in RESULT_SESSIONS:
+        cal = _cal(s)
         p, ll = cal["params"], cal["leg_losses"]
         cells = [f"{p['kappa']:.3f}", f"{p['theta']:.4f}", f"{p['sigma']:.3f}", fmt(p["rho"], ".3f"),
                  f"{p['v0']:.4f}", f"{ll['spx_iv_rmse']:.3f} / {ll['spx_oos_iv_rmse']:.3f}",
@@ -343,7 +439,7 @@ def test_calibration_tables_are_the_pickles_and_the_diagnostics(diag):
         cells = (fmt(r["sigma_cap2_oos"], ".2f"), fmt(r["joint_rough_oos"], ".2f"),
                  f"{r['joint_rough_H']:.2f}")
         assert rough_line == f"| {s} | {' | '.join(cells)} |"
-    cur = next(r for r in diag if r["session"] == HEADLINE)
+    cur = next(r for r in diag if r["session"] == C23_HEADLINE)
     assert (f"gives σ {cur['sigma_free']:.2f}, κ {cur['kappa_free']:.1f}, a loss "
             f"{abs(cur['sigma_free_loss_rel']) * 100:.1f}% lower and an out-of-sample RMSE of "
             f"{cur['sigma_free_oos']:.2f} instead of {cur['sigma_cap2_oos']:.2f}") in README
@@ -353,31 +449,37 @@ def test_calibration_tables_are_the_pickles_and_the_diagnostics(diag):
     assert (f"model's VVIX is {rng((r['vvix_model_cap2'] for r in diag), '.0f')} against a market ^VVIX of "
             f"{rng((r['vvix_market'] for r in diag), '.0f')}") in README
     cond = rng((r["rel_jtj_condition_number"] for r in diag), ".0f")
-    assert f"cond(JᵀJ) of the relative-sensitivity Jacobian is {cond}" in README
+    assert (f"cond(JᵀJ) of the relative-sensitivity Jacobian is {cond} over the "
+            f"{WORDS[len(diag)]} sessions") in README
     kse = rng((r["relative_standard_errors"]["kappa"] * 100 for r in diag), ".0f")
     assert f"standard error is {kse}% of κ" in README
-    worst = max(abs(r["trf_loss_rel_diff"]) for r in diag)
-    assert all(r["trf_loss_rel_diff"] <= 0 for r in diag)            # "slightly below them"
+    c23 = [r for r in diag if r["session"] in C23_SESSIONS]   # the DE optima C23 timed TRF against
+    worst = max(abs(r["trf_loss_rel_diff"]) for r in c23)
+    assert all(r["trf_loss_rel_diff"] <= 0 for r in c23)             # "slightly below them"
+    assert f"reaches the {WORDS[len(c23)]} stored differential-evolution optima" in README
     assert f"relative loss of at most {worst:.1e}".replace("e-0", "e-") in README
-    trf, de = rng((r["trf_seconds"] for r in diag), ".1f"), rng((r["de_serial_seconds"] for r in diag), ".1f")
+    trf, de = rng((r["trf_seconds"] for r in c23), ".1f"), rng((r["de_serial_seconds"] for r in c23), ".1f")
     assert f"in {trf} s, against {de} s" in README
     assert all(r["trf_basins"] == 1 for r in diag)        # "one basin on every session"
+    lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in diag)
+    assert f"error on {lower} of {len(diag)} sessions and returns H = ½ (Heston) on the other two" in README
     idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
-    gaps = [abs(idx[s]["vix_replicated"] - idx[s]["vix_official"]) for s in SESSIONS]
+    gaps = [abs(idx[s]["vix_replicated"] - idx[s]["vix_official"]) for s in RESULT_SESSIONS]
     assert f"within {rng(gaps, '.2f')} index points of the official close" in README
 
 
 def test_figure_is_drawn_from_the_surface_report():
     mrf = _script("make_readme_figure")
-    side = json.loads((ROOT / "docs" / "figures" / f"smile_{HEADLINE}.json").read_text())
+    side = json.loads((ROOT / "docs" / "figures" / f"smile_{FIGURE}.json").read_text())
     src = ROOT / side["source"]
     assert side["source_sha256"] == hashlib.sha256(src.read_bytes()).hexdigest()
     res = pd.read_parquet(src)
-    want = mrf.figure_numbers(res, HEADLINE, mrf.pick_expiries(res))
+    want = mrf.figure_numbers(res, FIGURE, mrf.pick_expiries(res))
     assert {k: side[k] for k in want} == want
-    png = (ROOT / "docs" / "figures" / f"smile_{HEADLINE}.png").read_bytes()
+    png = (ROOT / "docs" / "figures" / f"smile_{FIGURE}.png").read_bytes()
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
-    assert f"](docs/figures/smile_{HEADLINE}.png)" in FIRST_SCREEN
+    assert f"![SPX smiles on {FIGURE}:" in FIRST_SCREEN       # the caption names its session
+    assert f"](docs/figures/smile_{FIGURE}.png)" in FIRST_SCREEN
 
 
 def test_corrections_doc_is_the_render_of_the_registry():
@@ -487,14 +589,14 @@ def test_article_c23_note_carries_the_canonical_numbers(inference):
     assert f"{vvix} VVIX sessions missing" in note
     rows = {r["session"]: r for r in json.loads(
         (DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]}
-    diag = [rows[s] for s in SESSIONS]
+    diag = [rows[s] for s in C23_SESSIONS]
     sc = {s: {m["model"]: m for m in json.loads((DATA / "surface" / s / "scorecard.json").read_text())
-              ["models"]} for s in SESSIONS}
-    hes = rng((sc[s]["heston_v2"]["metrics"]["out_of_sample"]["median_abs_hs"] for s in SESSIONS), ".1f")
-    svi = rng((sc[s]["svi_cal"]["metrics"]["out_of_sample"]["median_abs_hs"] for s in SESSIONS), ".2f")
+              ["models"]} for s in C23_SESSIONS}
+    hes = rng((sc[s]["heston_v2"]["metrics"]["out_of_sample"]["median_abs_hs"] for s in C23_SESSIONS), ".1f")
+    svi = rng((sc[s]["svi_cal"]["metrics"]["out_of_sample"]["median_abs_hs"] for s in C23_SESSIONS), ".2f")
     assert f"misses by a median {hes} half-spreads" in note
     assert f"arbitrage-free SVI surface on the same sessions misses by {svi}" in note
-    cur = rows[HEADLINE]
+    cur = rows[C23_HEADLINE]
     assert (f"cuts its out-of-sample error from {cur['sigma_cap2_oos']:.2f} to {cur['sigma_free_oos']:.2f} "
             f"vol pts, at σ = {cur['sigma_free']:.1f}") in note
     lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in diag)
@@ -523,3 +625,111 @@ def test_citation_is_this_version():
     assert README_RAW.splitlines()[0] == f"# {title}"
     assert "no release tag" in " ".join(cff.split())       # nothing claims a tag or DOI that does not exist
     assert "doi" not in cff.lower()
+
+
+def _pack_row(model: str, outcome: str) -> str:
+    """The validation pack's §3 outcome row of ``model`` whose outcome cell starts with ``outcome``."""
+    rows = [x for x in PACK_RAW.splitlines() if x.startswith(f"| {model} | {outcome}")]
+    assert len(rows) == 1, (model, outcome, rows)
+    return rows[0]
+
+
+def test_validation_pack_counts_and_outcomes_are_the_artifacts():
+    """VALIDATOR-10: the validation pack was frozen at five sessions ('σ on its
+    2.0 box ceiling in 2 of 5', 'rough lower on 3 of 5', '32–80% inside', 'cond
+    150–293', 'no entry committed yet', '5 of the 13 checks breach … 7.46 vol pts')
+    and disagreed with the site. It now states the span of its sessions; every
+    count, range and §3 outcome row it touches is recomputed here from data_store
+    over the sessions in that span, and it copies no monitoring status."""
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    sessions = _result_sessions(PACK)
+    n, w, last = len(sessions), WORDS.get(len(sessions), len(sessions)), sessions[-1]
+    cals = {s: _cal(s) for s in sessions}
+    rows = {r["session"]: r for r in json.loads(
+        (DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]}
+    diag = [rows[s] for s in sessions]
+    sc = {s: {m["model"]: m for m in json.loads((DATA / "surface" / s / "scorecard.json").read_text())
+              ["models"]} for s in sessions}
+    assert f"the {w} sessions with a stored chain and an accepted fit, {sessions[0]} → {last}" in PACK
+    # §1 limitations
+    capped = [s for s, c in cals.items() if "sigma" in (c.get("pinned_params") or [])]
+    cap = HESTON_BOUNDS["sigma"][1]
+    params = [c["params"] for c in cals.values()]
+    feller = sum(2 * q["kappa"] * q["theta"] < q["sigma"] ** 2 for q in params)
+    assert (f"σ on its {cap:.1f} box ceiling in {len(capped)} of the {n} fits to {last} "
+            f"({', '.join(capped)}); Feller violated in all {feller}") in PACK
+    assert feller == n
+    half = sum(r["joint_rough_H"] >= 0.5 - 1e-9 for r in diag)
+    assert f"½ on {half} of the {n} sessions to {last}" in PACK
+    ledgers = sorted(p.stem.removeprefix("ledger_") for p in (DATA / "forward").glob("ledger_*.json"))
+    if ledgers:
+        assert f"first entry {ledgers[0]}, not yet evidence" in PACK
+        assert "no entry" not in PACK
+        assert f"first entry {ledgers[0]} (`data_store/forward/`)" in _pack_row("M18", "Forward test")
+    # §2: identifiability over the sessions, the common held-out counts, the replication's departures
+    cond = rng((r["rel_jtj_condition_number"] for r in diag), ".0f")
+    assert f"cond(JᵀJ) of the relative-sensitivity Jacobian is {cond} over the {w} sessions to {last}" in PACK
+    se = {k: rng((r["relative_standard_errors"][k] * 100 for r in diag), ".0f")
+          for k in ("kappa", "theta", "rho", "v0")}
+    assert f"κ {se['kappa']}%, θ {se['theta']}%, ρ {se['rho']}%, v₀ {se['v0']}%" in PACK
+    assert f"Gauss–Newton errors of {se['kappa']}% on κ" in PACK
+    common = " / ".join(f"{sc[s]['svi_cal']['metrics']['common_out_of_sample']['n']:,}" for s in sessions)
+    assert f"{common} quotes, {sessions[0]} → {last}" in PACK
+    vr = json.loads((DATA / "surface" / last / "vix_replication.json").read_text())
+    assert (f"on {last}, {len(vr.get('deviations') or [])} deviations from Cboe's rules and "
+            f"{len(vr.get('gap_notes') or [])} notes on the gap") in PACK
+    assert "(Cboe rules)" not in PACK
+    assert "with Cboe's rules" not in PACK
+    # §3 outcome rows
+    oos = " / ".join(fmt(c["leg_losses"]["spx_oos_iv_rmse"], ".2f") for c in cals.values())
+    dates = " / ".join([sessions[0], *(s[5:] for s in sessions[1:])])
+    assert f"| {oos} vp for {dates} (" in _pack_row("M4", "Out-of-sample SPX IV RMSE")
+    assert f", {w} v2 sessions |" in _pack_row("M4", "Out-of-sample SPX IV RMSE")
+    hes = [sc[s]["heston_v2"]["metrics"]["out_of_sample"] for s in sessions]
+    assert (f"{rng((h['median_abs_hs'] for h in hes), '.1f')} half-spreads; "
+            f"{rng((h['inside_spread_pct'] for h in hes), '.1f')}% inside, {w} sessions"
+            ) in _pack_row("M4", "Error in")
+    svi = {s: sc[s]["svi_cal"]["metrics"]["out_of_sample"] for s in sessions}
+    row = _pack_row("M14", "The certified")
+    assert (f"median {rng((o['median_abs_hs'] for o in svi.values()), '.2f')} half-spreads; "
+            f"{rng((o['inside_spread_pct'] for o in svi.values()), '.0f')}% inside the bid/ask, {w} sessions "
+            f"({last}: {fmt(svi[last]['median_abs_hs'], '.2f')}, "
+            f"{fmt(svi[last]['inside_spread_pct'], '.1f')}%)") in row
+    arb = [json.loads((DATA / "surface" / s / "surface.json").read_text())["arbitrage"] for s in sessions]
+    assert all(a["executable_arbitrage_certificate"]["executable_arbitrage"] for a in arb)
+    n_ex = rng((a["n_quotes_in_executable_violation"] for a in arb), ",d")
+    assert (f"executable at the bid/ask on all {n} sessions; {n_ex} quotes per session"
+            in _pack_row("M14", "Static arbitrage"))
+    idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
+    rep_ = " / ".join(fmt(idx[s]["vix_replicated"], ".2f") for s in sessions)
+    off = " / ".join(fmt(idx[s]["vix_official"], ".2f") for s in sessions)
+    assert f"| {rep_} against {off} (" in _pack_row("M14", "VIX replicated")
+    lower = [r for r in diag if r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01]
+    pairs = ", ".join(f"{fmt(r['joint_rough_oos'], '.2f')} vs {fmt(r['sigma_cap2_oos'], '.2f')}"
+                      for r in lower)
+    assert (f"rough lower on {len(lower)} of {n} sessions ({pairs} vp); H = ½, identical, on {half}"
+            in _pack_row("M4, M15", "Rough Heston"))
+    # §4 copies no monitoring status the daily job changes
+    mon = PACK.split("## 4. Ongoing monitoring")[1].split("## 5.")[0]
+    assert not re.search(r"\b\d+ of the \d+ checks breach", mon)
+
+
+def test_ui_plan_marks_its_withdrawn_acceptance_text_as_history():
+    """HANDOFF D: docs/roadmap/ui_plan.json still read 'the tile shows 95.0' as
+    P2.5's acceptance after R3-T4 withdrew that number (a single bad Yahoo quote,
+    not executable arbitrage). The plan is history: a superseded acceptance line
+    is marked, its item says why in a history_note, and the withdrawal it cites
+    is in the corrections register."""
+    plan = json.loads((ROOT / "docs" / "roadmap" / "ui_plan.json").read_text())
+    items = {i["id"]: i for pk in plan["packages"] for i in pk["items"]}
+    p25 = items["P2.5"]
+    line = next(x for x in p25["acceptance"].splitlines() if "95.0" in x)
+    assert "[Superseded, see history_note]" in line
+    assert "3da6928" in p25["history_note"]
+    for item in items.values():
+        if "[Superseded" in item.get("acceptance", ""):
+            assert item.get("history_note"), item["id"]
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    shas = [c for r in reg["rounds"] for c in r["commits"]]
+    assert any(c.startswith("3da6928") for c in shas)

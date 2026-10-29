@@ -86,6 +86,7 @@ import desk_charts as charts  # noqa: E402
 import desk_cone  # noqa: E402
 import desk_density  # noqa: E402
 import desk_glossary  # noqa: E402
+import desk_inventory  # noqa: E402
 import desk_market  # noqa: E402
 import desk_monitor  # noqa: E402
 import desk_quotes  # noqa: E402
@@ -157,7 +158,7 @@ NAV: list[tuple[str, str, str, str]] = [
     ("/research", "Research", "e",
      "The 2018–2025 delta-hedged straddle backtest (mark-to-model), its inference and β sensitivity."),
     ("/corrections", "Corrections", "x",
-     "Correction rounds C16–C23 as postmortems, each tied to commits and regression tests."),
+     "Every correction round from C16 on as a postmortem, each tied to commits and regression tests."),
     ("/model-risk", "Model Risk", "m", "Model inventory and monitoring checks with explicit thresholds."),
 ]
 
@@ -1506,6 +1507,7 @@ def load_page2() -> dict[str, Any]:
             d["r_ref_pct"] = round(float(cal["r_reference"]) * 100, 2)
             d["r_ref_source"] = cal.get("r_reference_source")
             kind = (cal.get("rate_reference") or {}).get("kind")
+            d["r_ref_kind"] = kind or "irx"
             if kind == "treasury_curve":
                 d["r_ref_label"] = "Treasury r(91d)"
                 d["r_ref_detail"] = ("Treasury zero curve, 91-day zero rate, continuously "
@@ -1640,6 +1642,9 @@ def load_page2() -> dict[str, Any]:
             q_date = _date_str(qprov.get("spot_date")) or _calibration_session(qcal, qpath)
             mc = qprov.get("mc") or {}
             quad = qprov.get("vix_quadrature") or {}
+            from joint_vol_calibration.models.quintic_ou import QUINTIC_BOUNDS
+            eps_lo = float(QUINTIC_BOUNDS[7][0])
+            qconv = qcal.get("convergence") or {}
             q = {
                 "as_of": q_date, "file": Path(qpath).name,
                 "lam_x": round(float(qp["lam_x"]), 3), "lam_y": round(float(qp["lam_y"]), 3),
@@ -1656,7 +1661,9 @@ def load_page2() -> dict[str, Any]:
                 "vix_opt_rmse": _num(ql.get("vix_options_rmse")),
                 "xi0_check": _num(ql.get("xi0_index_reproduction_rmse")),
                 "at_bound": [k for k, v in (qcal.get("at_bound") or {}).items() if v],
-                "eps_saturated": abs(float(qp["epsilon"]) + 0.99) < 0.02,
+                "eps_saturated": abs(float(qp["epsilon"]) - eps_lo) < 0.02, "eps_lo": eps_lo,
+                "stop_reason": (None if qcal.get("success") else desk_inventory.optimiser_stop_reason(
+                    [qconv.get("de_message"), qconv.get("polish_message")])),
                 "n_spx": qprov.get("n_spx_options"), "n_vix_opts": qprov.get("n_vix_options"),
                 "mc_paths": mc.get("n_paths"), "quad_points": quad.get("points_per_dim"),
                 "fit_time": _num(qcal.get("fit_time")), "n_evals": qcal.get("n_evals"),
@@ -2726,7 +2733,8 @@ def _gated_history() -> list[dict]:
                     "vix": _num(losses.get("vix_index_rmse")),
                     "wing": _num(losses.get("spx_oos_put_wing_rmse")),
                     "vx": _num(losses.get("vx_futures_rmse_oos")),
-                    "pinned": list(c.get("pinned_params") or [])})
+                    "pinned": list(c.get("pinned_params") or []),
+                    "w3": _num((c.get("weights") or {}).get("w3"))})
     return sorted(out, key=lambda r: r["session"])
 
 
@@ -3304,10 +3312,61 @@ def param_sub_line(key: str, value: float) -> str | None:
     return None
 
 
+def short_end_sentence(rows: list[dict], sigma_side: str | None, max_days: float = 30.0) -> str | None:
+    """The #oos caption's claim about the short end, from the fit's own
+    out-of-sample rows (oos_rows_of) and the side of the box σ sits on
+    ('upper', 'lower', 'bound' or None). The caption read 'the short end is
+    where a one-factor model with σ on its box ceiling fails' under a fit with
+    σ interior (VALIDATOR-09)."""
+    have = [r for r in rows if _num(r.get("rmse")) is not None]
+    if not have:
+        return None
+    w = max(have, key=lambda r: float(r["rmse"]))
+    days = _num(w.get("T_days"))
+    lead = (f"The worst expiry is {w['expiry']}"
+            + (f", {_fmt(days, '.0f')} days out" if days is not None else "")
+            + f" ({_fmt(float(w['rmse']), '.2f')} vol pts)")
+    if days is None or days > max_days:
+        return f"{lead}, not the short end (≤ {max_days:g} days)."
+    bound = {"upper": ", here with σ on its box ceiling", "lower": ", here with σ on its box floor",
+             "bound": ", here with σ on a box bound"}.get(sigma_side or "", "")
+    return f"{lead}: a one-factor model misses the short end{bound}."
+
+
+def bates_fits_note(paths: Sequence[str | Path]) -> str:
+    """What the stored Bates SVJ fits (bates_cal_<session>.pkl) show, for the
+    ρ-at-bound banner, which typed 'The one Bates SVJ fit did not converge'."""
+    fits = []
+    for p in sorted(str(x) for x in paths):
+        c = _load_pickle(p)
+        fits.append((Path(p).stem[len("bates_cal_"):], bool(c.get("success"))))
+    if not fits:
+        return "No Bates SVJ fit is stored."
+    bad = [s for s, ok in fits if not ok]
+    good = [s for s, ok in fits if ok]
+    if not good:
+        if len(fits) == 1:
+            return f"The one stored Bates SVJ fit ({bad[0]}) did not converge, so it is not a result."
+        return (f"None of the {len(fits)} stored Bates SVJ fits ({', '.join(bad)}) converged, "
+                "so none is a result.")
+    return (f"{plural(len(good), 'stored Bates SVJ fit')} converged ({', '.join(good)})"
+            + (f"; {len(bad)} did not ({', '.join(bad)})" if bad else "") + ".")
+
+
 def calibration_extras(d: dict, cal: dict) -> None:
     """Parameter tiles, history, OOS by expiry, VIX leg, smiles, identifiability."""
-    from joint_vol_calibration.config import HESTON_BOUNDS
+    from joint_vol_calibration.config import (
+        HESTON_BOUNDS,
+        PROFILE_KAPPA_MAX,
+        ROUGH_HESTON_H_BOUNDS,
+        SIGMA_PROFILE_CAPS,
+    )
 
+    # the boxes the captions name, from config (the template typed σ ≤ 2, σ ≤ 10, κ ≤ 60, H ∈ [0.02, ½])
+    d["boxes"] = {"sigma_hi": float(HESTON_BOUNDS["sigma"][1]), "free_sigma": float(max(SIGMA_PROFILE_CAPS)),
+                  "free_kappa": float(PROFILE_KAPPA_MAX), "h_lo": float(ROUGH_HESTON_H_BOUNDS[0]),
+                  "h_hi": float(ROUGH_HESTON_H_BOUNDS[1])}
+    d["bates_note"] = bates_fits_note(glob.glob(str(DATA / "calibrations" / "bates_cal_*.pkl")))
     p = cal["params"]
     session = d.get("session")
     hist = _gated_history()
@@ -3440,6 +3499,8 @@ def calibration_extras(d: dict, cal: dict) -> None:
     # OOS RMSE by expiry, with the in-sample RMSE as the reference line.
     rows = oos_rows_of(cal)
     d["oos_rows"] = rows
+    sigma_side = next((t["side"] for t in tiles if t["key"] == "sigma"), None)
+    d["oos_short_end"] = short_end_sentence(rows, str(sigma_side) if sigma_side else None)
     d["n_oos"] = (cal.get("oos") or {}).get("n_spx_oos")
     if rows:
         cats = [f"{r['expiry']} · {_fmt(r['T_days'], '.0f')}d" if r["T_days"] is not None else r["expiry"]
@@ -4990,7 +5051,9 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
         "before any later price exists."))
     jr = joint_fit_result(diag, p2.get("session"))
     if jr:
-        h_txt = "sits on its 0.02 floor" if jr["rough_H_on_bound"] else "is weakly identified"
+        from joint_vol_calibration.config import ROUGH_HESTON_H_BOUNDS
+        h_txt = (f"sits on its {_fmt(float(ROUGH_HESTON_H_BOUNDS[0]), 'g')} floor" if jr["rough_H_on_bound"]
+                 else "is weakly identified")
         nxt.append(item(
             "Rough Heston in production", "calibration.html#rough-vs-heston",
             f"not adopted: lower out-of-sample error on {jr['n_lower']} of {jr['n_sessions']} sessions, "
@@ -6776,7 +6839,7 @@ INVENTORY_PATH = DASH / "model_inventory.json"
 # the IDs docs/model_validation uses): the dashboard had its own numbering, so
 # "M4" was the rule labeller here and the joint calibrator in the pack.
 INV_CALIBRATOR, INV_GREEKS, INV_BETA, INV_LABELS, INV_CLASSIFIER = "M4", "M6", "M7", "M10", "M11"
-INV_VX = "M5"
+INV_VX, INV_SURFACE, INV_LEDGER, INV_RATES = "M5", "M14", "M18", "M19"
 VX_LAG_CHECK = "VX futures table lag behind the market DB (NYSE sessions)"
 CHAIN_VENDORS = {"yfinance": "V1", "yahoo": "V1", "cboe": "V2"}
 
@@ -6802,7 +6865,47 @@ MONITOR_LIMITS = {
     "median_abs_hs": (2.0, 5.0),    # half-spreads, Heston out-of-sample median |model − mid|
     "vix_rep_gap": (0.5, 1.5),      # index pts, |VIX replicated from the chain − Cboe close|
     "arb_exec_share": (2.0, 5.0),   # % of scored quotes in a row failing static arbitrage at bid/ask
+    "vx_lag": (0, 1),               # NYSE sessions the VX futures table lags the market DB
 }
+
+# Checks over their limit for a reason that does not change from session to session
+# (CIO-14: half the breaches were permanent, which trains a reader to ignore red).
+# They carry the status 'design', with the reason, after the live statuses; the
+# limits and the bullet still show by how much.
+BY_DESIGN_CHECKS = {
+    "vx_lag": ("the daily job does not refresh vix_futures_daily (scripts/cloud_refresh.py has no VX futures "
+               "step); only the fits' out-of-sample VX score reads it"),
+}
+RESEARCH_BY_DESIGN = ("research tier: the model feeds no published number and never trades, so falling short "
+                      "of its baseline is the published negative result, not a failure")
+
+
+def curve_max_age_days() -> int:
+    """The age (calendar days) past which the calibrator refuses the Treasury
+    curve and falls back to ^IRX: the default of rates.get_zero_curve, which
+    joint_calibrator.reference_rate calls without overriding it. Model Risk
+    typed '7 days'."""
+    import inspect
+
+    from joint_vol_calibration.data import rates
+    return int(inspect.signature(rates.get_zero_curve).parameters["max_age_days"].default)
+
+
+def by_design(checks: Sequence[dict], tiers: dict[str, str]) -> list[dict]:
+    """``checks`` with each watch or breach that holds by design set to status
+    'design', with the reason (by_design) and the status its limits give
+    (limit_status): every check of a research-tier model (``tiers``: inventory
+    id -> tier) and each check in BY_DESIGN_CHECKS. A production or backtest
+    model's breach stays a breach."""
+    out = []
+    for check in checks:
+        c = dict(check)
+        why = (RESEARCH_BY_DESIGN if tiers.get(str(c.get("model"))) == "research"
+               else BY_DESIGN_CHECKS.get(str(c.get("key") or "")))
+        if why and c.get("status") in ("watch", "breach"):
+            c.update(status="design", limit_status=c["status"], by_design=why)
+        out.append(c)
+    return out
 
 
 def _rag(value: float | None, limits: tuple) -> str:
@@ -6855,6 +6958,9 @@ CHECK_EVIDENCE = {
     "classifier": ("research.html", "research-classifier"),
     "vix_rep_gap": ("surface.html", "vix-replication"),
     "arb_exec_share": ("surface.html", "arbitrage"),
+    "svi_certificate": ("surface.html", "scorecard"),
+    "ledger_chain": ("research.html", "forward"),
+    "rate_reference": ("calibration.html", "carry"),
 }
 
 # Each check's short name, for the 'Monitored' chip on its evidence panel: a panel
@@ -6874,6 +6980,9 @@ CHECK_SHORT = {
     "classifier": "classifier skill",
     "vix_rep_gap": "VIX replication",
     "arb_exec_share": "static arbitrage",
+    "svi_certificate": "SVI certificates",
+    "ledger_chain": "ledger chain",
+    "rate_reference": "rate reference",
 }
 
 
@@ -6943,20 +7052,85 @@ def reproduce_status(path: Path | None = None) -> dict | None:
             "failed": [str(f.get("artifact")) for f in rec.get("failed") or [] if isinstance(f, dict)]}
 
 
+def _output_written(outputs: Any) -> bool:
+    """Every output path exists and, for a directory, holds a file (the inventory
+    prints an output's 'pending' note until then). 'data_store/...' resolves
+    under DATA, the record the pages read."""
+    outs = [outputs] if isinstance(outputs, str) else list(outputs or [])
+
+    def one(rel: str) -> bool:
+        p = DATA / rel[len("data_store/"):] if rel.startswith("data_store/") else ROOT / rel
+        return any(x.is_file() for x in p.iterdir()) if p.is_dir() else p.is_file()
+    return bool(outs) and all(one(o) for o in outs)
+
+
+def inventory_values(greeks: dict, beta_later: list[dict] | None,
+                     classifier_eval: dict | None) -> dict[str, str]:
+    """The model inventory's {placeholders}, each from its artifact (desk_inventory).
+    ``greeks`` is load_page3's result, ``beta_later`` beta_estimation's later
+    chains and ``classifier_eval`` the research classifier's stored evaluation;
+    the rest is read here."""
+    from joint_vol_calibration.config import (
+        HESTON_BOUNDS,
+        PROFILE_KAPPA_MAX,
+        ROUGH_HESTON_H_BOUNDS,
+        SIGMA_PROFILE_CAPS,
+    )
+
+    s_lo, s_hi = (float(x) for x in HESTON_BOUNDS["sigma"])
+    hist = _gated_history()
+
+    def side(h: dict) -> str | None:
+        if "sigma" not in h["pinned"]:
+            return None
+        return "ceiling" if float(h["params"]["sigma"]) >= (s_lo + s_hi) / 2 else "floor"
+    diag = artifacts.load_diagnostics_summary(DATA)
+    rows = (diag.get("rows") or []) if diag.get("state") == "ok" else []
+    prov = greeks.get("provenance") or {}
+    g_sigma = _num((prov.get("params") or {}).get("sigma"))
+    qpaths = sorted(glob.glob(str(DATA / "calibrations" / "quintic_cal_*.pkl")))
+    q = _load_pickle(qpaths[-1]) if qpaths else {}
+    q_par = q.get("params_dict") or {}
+    q_names = {"a0": "alpha0", "a1": "alpha1", "a3": "alpha3", "a5": "alpha5"}
+    conv = q.get("convergence") or {}
+    inf = artifacts.load_inference(DATA)
+    ev = classifier_eval or {}
+    return {
+        "vx_futures_oos_rmse": vx_futures_oos_text(),
+        "sigma_box": desk_inventory.sigma_box_text([(h["session"], side(h)) for h in hist]),
+        "sigma_box_cost": desk_inventory.sigma_box_cost_text(
+            rows, {h["session"]: h["params"] for h in hist}, max(SIGMA_PROFILE_CAPS), PROFILE_KAPPA_MAX),
+        "vvix_boxed": desk_inventory.vvix_boxed_text(rows),
+        "vix_options_leg": desk_inventory.vix_options_leg_text([h["w3"] for h in hist]),
+        "greeks_sigma": desk_inventory.greeks_sigma_text(
+            _date_str(prov.get("as_of_date")), g_sigma, (s_lo, s_hi),
+            _bound_side(g_sigma, s_lo, s_hi) if g_sigma is not None else None),
+        "beta_later": desk_inventory.beta_later_text([(c["session"], c["ratio"]) for c in beta_later or []]),
+        "pdv_rank": desk_inventory.pdv_rank_text(
+            pdv_forecast_rank(inf.get("forecast")) if inf.get("state") == "ok" else None),
+        "classifier_skill": desk_inventory.classifier_text(
+            None if ev.get("oos_acc") is None else float(ev["oos_acc"]) * 100,
+            None if ev.get("persistence_acc") is None else float(ev["persistence_acc"]) * 100),
+        "quintic_fit": desk_inventory.quintic_text(
+            bool(qpaths), bool(q.get("success")), [conv.get("de_message"), conv.get("polish_message")],
+            [(k, q_par.get(q_names.get(k, k))) for k, on in (q.get("at_bound") or {}).items() if on]),
+        "rough_h": desk_inventory.rough_h_text(rows, *(float(x) for x in ROUGH_HESTON_H_BOUNDS)),
+        "ledger_record": desk_inventory.ledger_text(artifacts.load_forward_ledger(DATA)),
+    }
+
+
 def load_model_risk() -> dict[str, Any]:
     d: dict[str, Any] = {"errors": [], "stale": [], "charts": {}, "inventory": [], "monitors": [],
                          "reproduced": reproduce_status()}
+    inv_models: list[dict] = []
     with _loader_boundary(d, "model inventory (dashboard/model_inventory.json)"):
         inv = json.loads(INVENTORY_PATH.read_text())
-        # numbers in the inventory's prose are computed from the artifacts, never typed
-        vx_txt = None
-        for m in inv["models"]:
-            if "{vx_futures_oos_rmse}" in m.get("limitations", ""):
-                vx_txt = vx_txt or vx_futures_oos_text()
-                m["limitations"] = m["limitations"].replace("{vx_futures_oos_rmse}", vx_txt)
+        inv_models = inv["models"]
         d["inventory"] = inv["models"]
         d["vendor_inputs"] = inv.get("vendor_inputs") or []
         d["inventory_about"] = inv.get("about")
+    beta_later: list[dict] | None = None
+    clf_eval: dict | None = None
     p2 = load_page2()
     for e in p2.get("errors") or []:
         d["errors"].append(e)
@@ -7015,12 +7189,23 @@ def load_model_risk() -> dict[str, Any]:
     add(INV_CALIBRATOR, "Feller condition (diagnostic, not imposed)", None,
         f"{p2.get('feller_state') or '—'}, margin {_fmt(p2.get('feller_margin'), '+.2f')}", "", fit_art,
         "Not a no-arbitrage condition; reported, not limited.", status="info", key="feller")
+    # M19: the rate reference of the headline fit: the Treasury zero curve, or ^IRX if the curve was refused
+    rk = p2.get("r_ref_kind")
+    rk_text = {"treasury_curve": "Treasury zero curve", "irx": "^IRX"}.get(str(rk), str(rk))
+    add(INV_RATES, "Rate reference of the headline fit (the Treasury zero curve, or the ^IRX fallback)", None,
+        rk_text if rk else "not recorded", "", fit_art,
+        (str(p2.get("r_ref_source") or "") + ". " if p2.get("r_ref_source") else "")
+        + f"The curve is refused when missing or older than {_fmt(curve_max_age_days(), '.0f')} days; "
+        "the fit then falls back to ^IRX and records it.",
+        status="ok" if rk == "treasury_curve" else ("watch" if rk else "na"),
+        limits_text="OK on the curve · watch on ^IRX", key="rate_reference")
     # M3: β drift — the newest stored chain against the frozen backtest β
     with _loader_boundary(d, "β estimation chains"):
         st = _load_pickle(DATA / "backtest" / "full_results.pkl")
         beta = _num(st.get("atm_to_vix_ratio", (st.get("metrics") or {}).get("atm_to_vix_ratio")))
         be = beta_estimation(None)
         later = be.get("later") or []
+        beta_later = later
         newest = later[-1] if later else None
         drift = abs(newest["ratio"] - beta) if (newest and beta is not None) else None
         chains = sorted((c for c in be.get("chains") or [] if c["role"] in ("estimation", "later")
@@ -7051,7 +7236,7 @@ def load_model_risk() -> dict[str, Any]:
             db_date = str(con.execute("SELECT MAX(date) FROM spx_ohlcv").fetchone()[0])[:10]
         vx_lag = session_age(vx_date, db_date) if vx_date else None
         add(INV_VX, VX_LAG_CHECK, _num(vx_lag),
-            _fmt(vx_lag) if vx_date else "no futures table", "label_lag", VX_TABLE,
+            _fmt(vx_lag) if vx_date else "no futures table", "vx_lag", VX_TABLE,
             f"vix_futures_daily through {vx_date or '—'}; market DB {db_date}. Only the fits' out-of-sample "
             f"VX score reads them, so a fit after {vx_date or 'the table'} has none.", key="vx_lag",
             digits=".0f")
@@ -7070,6 +7255,7 @@ def load_model_risk() -> dict[str, Any]:
     with _loader_boundary(d, "research classifier (regime_classifier.pkl)"):
         clf = _load_pickle(DATA / "signals" / "regime_classifier.pkl")
         ev = (getattr(clf, "metadata_", None) or {}).get("evaluation") or {}
+        clf_eval = ev
         if ev.get("oos_acc") is not None:
             gap = (float(ev["oos_acc"]) - float(ev["persistence_acc"])) * 100
             add(INV_CLASSIFIER, "Classifier accuracy minus the persistence baseline (percentage pts)", gap,
@@ -7117,6 +7303,14 @@ def load_model_risk() -> dict[str, Any]:
             f"Cboe VIX formula on the stored two-sided chain{vix_departures_tail(surf.get('vix'))}; "
             "a gap points at a thin or stale strip.",
             history=surf_hist("rep_gap"), two_sided=True)
+        cert = (((surf.get("surface") or {}).get("surfaces") or {}).get("svi_cal") or {}).get(
+            "arbitrage_free_certified")
+        add(INV_SURFACE, "SVI-cal surface carries its butterfly and calendar certificates", None,
+            "yes" if cert else ("no" if cert is False else "not recorded"), "", sart + "surface.json",
+            "The label 'arbitrage-free', the density and tails (M21) and the desk coordinates (M22) "
+            "rest on them.",
+            status="ok" if cert else ("breach" if cert is False else "na"),
+            limits_text="OK if yes · breach if no", key="svi_certificate")
         share = today["arb_exec_share"]
         lv = arb_violations((surf.get("surface") or {}).get("arbitrage") or {})
         legs = list(dict.fromkeys(v["bad_quote"] for v in lv if v["bad_quote"]))
@@ -7136,20 +7330,45 @@ def load_model_risk() -> dict[str, Any]:
                                  "median_abs_hs"),
                                 ("Data", "VIX replicated from the stored chain − Cboe close (index pts)",
                                  "vix_rep_gap"),
-                                ("Data", ARB_CHECK, "arb_exec_share")):
+                                ("Data", ARB_CHECK, "arb_exec_share"),
+                                (INV_SURFACE,
+                                 "SVI-cal surface carries its butterfly and calendar certificates",
+                                 "svi_certificate")):
             add(mid_, chk, None, "artifact not yet generated", "", "data_store/surface/<session>/",
                 "Shown once the surface report has run.", status="na", limits_text="—", key=key_)
+    # M18: the forward ledger's hash chain (each entry names the SHA-256 of the one before)
+    try:
+        led = artifacts.load_forward_ledger(DATA)
+        broken = None
+    except artifacts.ArtifactError as e:
+        led, broken = {"state": "error"}, str(e)
+    n_led = led.get("n") if led.get("state") == "ok" else None
+    add(INV_LEDGER, "Forward ledger hash chain intact", None,
+        f"yes, {plural(n_led, 'session')}" if n_led else ("no" if broken else "no entry yet"), "",
+        "data_store/forward/",
+        broken or "Each entry names the SHA-256 of the one before it, so an edited entry breaks the chain.",
+        status="ok" if n_led else ("breach" if broken else "na"),
+        limits_text="OK if intact · breach if broken",
+        key="ledger_chain")
+    # every count, session and state in the inventory's prose is computed from the
+    # artifacts (desk_inventory), never typed; an unknown placeholder fails the build
+    with _loader_boundary(d, "model inventory prose (dashboard/model_inventory.json placeholders)"):
+        d["inventory"] = desk_inventory.fill_models(
+            inv_models, inventory_values(g, beta_later, clf_eval), _output_written)
     # worst first: BREACH, WATCH, OK, INFO, then N/A; within a status, in inventory
     # order (the vendor-data checks last), the order they were added within a model
     order = [m["id"] for m in d["inventory"]] + [v.get("id") for v in d.get("vendor_inputs") or []] + ["Data"]
+    mon = by_design(mon, {m["id"]: m.get("tier") for m in d["inventory"]})
     mon = desk_monitor.order_checks(mon, order)
+    for m in d["inventory"]:
+        m["monitors"] = [{"id": c["id"], "short": c["short"], "status": c["status"]} for c in mon
+                         if c["model"] == m["id"]]
     names = {m["id"]: m["name"] for m in d["inventory"]}
     names.update({v.get("id"): v.get("source") for v in d.get("vendor_inputs") or []})
     for m in mon:
         m["model_name"] = names.get(m["model"])
     d["monitors"] = mon
-    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k)
-                       for k in ("ok", "watch", "breach", "info", "na")}
+    d["rag_counts"] = {k: sum(1 for m in mon if m["status"] == k) for k in desk_monitor.SEVERITY}
     d["limits"] = MONITOR_LIMITS
     return _clean_keep(d)
 

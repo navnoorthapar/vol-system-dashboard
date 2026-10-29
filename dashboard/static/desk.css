@@ -541,7 +541,7 @@ details.method > .prose, details.method > .note, details.method > .tbl-wrap { ma
 /* Model Risk: the status strip, value bullets, history dots and the evidence chips */
 .mon-strip { display: flex; flex-wrap: wrap; gap: 4px; }
 .mon-filter.mon-breach { color: var(--breach); } .mon-filter.mon-watch { color: var(--watch); }
-.mon-filter.mon-ok { color: var(--ok); } .mon-filter.mon-info, .mon-filter.mon-na { color: var(--text2); }
+.mon-filter.mon-ok { color: var(--ok); } .mon-filter.mon-info, .mon-filter.mon-design, .mon-filter.mon-na { color: var(--text2); }
 svg.bullet { display: block; margin: 4px 0 0 auto; overflow: visible; max-width: 100%; }
 .mon-link { white-space: normal; }
 .mon-value { white-space: normal; }
@@ -559,6 +559,8 @@ svg.hist .h-na { fill: var(--text3); }
 .mon-link:hover, .mon-link:focus-visible { text-decoration: underline; }
 .rag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
 .rag-ok { color: var(--ok); } .rag-watch { color: var(--watch); } .rag-breach { color: var(--breach); } .rag-na { color: var(--text3); }
+.rag-design { color: var(--text2); }
+.inv-mon { display: block; margin-top: 4px; font-size: 11px; color: var(--text2); }
 
 /* timeline (corrections) */
 .timeline { display: flex; flex-direction: column; gap: var(--gap); }

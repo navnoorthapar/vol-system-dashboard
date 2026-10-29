@@ -1342,7 +1342,9 @@ def test_backtest_audit_heading_counts_its_rows(pages):
     heading = re.search(r'id="audit-title">([^<]+)<', cp).group(1)
     assert heading == (f"{arts[0]}–{arts[-1]} corrections — {len(statuses)} findings, "
                        f"{n_fixed} fixed, {n_quant} quantified")
-    assert arts == [f"C{i}" for i in range(16, 24)]
+    # every round of the registry, in its order (the register is append-only: C24 followed C23)
+    registry = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    assert arts == [r["id"] for r in registry["rounds"]]
     assert "Ten Flaws Found" not in cp
     assert "C17 pipeline" not in cp
 
@@ -2691,11 +2693,25 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     assert freezer.freeze(str(out), dash) == 0
     # research.html: 400 kB until B12 added every portfolio round trip (206 points), two
     # histograms and the trade and drawdown tables, about 30 kB raw (404 kB with them)
+    # corrections.html: 120 kB until C24 added eight findings (about 20 kB raw, 4 kB gzipped);
+    # the register is append-only, so the page grows by a round at a time
     budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 120_000,
-              "model-risk.html": 80_000}
+              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 150_000,
+              "model-risk.html": 100_000}
+    # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
+    # monitoring line per production model (about 88 kB). Its history strips draw one dot
+    # per stored session, about 150 bytes each, and the daily job adds a session a day:
+    # they are budgeted per dot (200 bytes) and the rest of the page as a whole, so the
+    # budget does not fail the bot's gate a few weeks of sessions from now.
     for name, cap in budget.items():
-        size = (out / name).stat().st_size
+        html = (out / name).read_text(encoding="utf-8")
+        size = len(html.encode("utf-8"))
+        if name == "model-risk.html":
+            strips = re.findall(r'<svg class="hist".*?</svg>', html, re.DOTALL)
+            hist = sum(len(x.encode("utf-8")) for x in strips)
+            dots = html.count('<circle class="h-')
+            assert hist <= 200 * dots, (name, hist, dots)
+            size -= hist
         assert size <= cap, (name, size)
     # shared assets: the chart library is the only large script, fonts are subsets
     import gzip
@@ -2865,7 +2881,9 @@ def test_model_risk_v1_counts_the_single_quote_outliers_apart(dash):
 def test_model_risk_without_artifacts_marks_their_checks_not_applicable(dash, no_art):
     d = dash.load_model_risk()
     na = [m for m in d["monitors"] if m["value"] == "artifact not yet generated"]
-    assert len(na) == 3
+    # the surface report's four checks: Heston's half-spreads, the VIX replication, the arbitrage share and
+    # the SVI-cal certificates (VALIDATOR-12)
+    assert {m["key"] for m in na} == {"median_abs_hs", "vix_rep_gap", "arb_exec_share", "svi_certificate"}
     assert all(m["status"] == "na" for m in na)
 
 
@@ -2895,7 +2913,7 @@ def test_every_correction_links_a_real_commit_and_existing_tests():
 
     reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
     rounds = [r["id"] for r in reg["rounds"]]
-    assert rounds == [f"C{i}" for i in range(16, 24)]
+    assert rounds == [f"C{i}" for i in range(16, 16 + len(rounds))]      # consecutive from C16
     shallow = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                              capture_output=True, text=True, check=False).stdout.strip() != "false"
     for r in reg["rounds"]:
@@ -4748,6 +4766,412 @@ def test_m5_vx_futures_range_is_computed_from_the_gated_fits(dash, pages):
     assert text in _visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row))
 
 
+def _inventory_row(pages: dict, mid: str) -> str:
+    hit = re.search(rf'<tr id="inv-{mid.lower()}">(.*?)</tr>', pages["/model-risk"], re.DOTALL)
+    assert hit, mid
+    row = hit.group(1)
+    return " ".join(_visible_text("<body>" + re.sub(r"</?span[^>]*>", "", row)).split())
+
+
+def test_inventory_prose_states_no_fact_the_data_can_change(dash, pages):
+    """VALIDATOR-04, CODE-03, CIO-04, QUANT-05, CITSEC-13: model_inventory.json typed
+    'σ sits on its box ceiling in 2 of 5 fits' (six are stored), 'on its 2.0 cap in
+    the headline fit' (σ 1.833) and 'No entry committed yet' (a ledger entry is
+    committed), and the page printed them beside checks that said otherwise.
+    The literal prose now states no count over fits or sessions, no session date,
+    no parameter on a bound and no artifact that does not exist yet
+    (desk_inventory.STALE_PROSE): each such fact is a placeholder the page fills
+    from the artifacts, and every placeholder the JSON uses is one it fills."""
+    di = dash.desk_inventory
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    used: set[str] = set()
+    for m in inv["models"]:
+        for field in di.PROSE_FIELDS:
+            text = m.get(field) or ""
+            assert di.stale_prose(text) == [], (m["id"], field, di.stale_prose(text))
+            used |= set(di.placeholders(text))
+        used |= set(di.placeholders(m.get("outputs_pending") or ""))
+    known = set(dash.inventory_values(dash.load_page3(), [], {}))
+    assert used <= known, sorted(used - known)
+    assert {"sigma_box", "greeks_sigma", "beta_later", "rough_h", "ledger_record"} <= used
+    tbl = re.search(r'id="inventory-table">(.*?)</table>', pages["/model-risk"], re.DOTALL).group(1)
+    assert not re.search(r"\{[a-z0-9_]+\}", tbl)
+
+
+def test_inventory_facts_are_the_artifacts(dash, pages):
+    """Each fact the inventory's placeholders fill is recomputed here from its
+    artifact (the gated pickles, diagnostics/summary.json, the Greeks surface's
+    provenance, the β chains, forecast_eval.json, the classifier and Quintic
+    pickles, the forward ledger files) and must be the rendered text, whichever
+    way the data fall."""
+    import pyarrow.parquet as pq
+
+    from joint_vol_calibration.backtest import run_backtest as rb
+    from joint_vol_calibration.config import HESTON_BOUNDS, ROUGH_HESTON_H_BOUNDS
+
+    def count(k: int, n: int, what: str) -> str:
+        if k == 0:
+            return f"no {what}" if n == 1 else f"none of the {n} {what}s"
+        if n == 1:
+            return f"the only {what}"
+        return f"all {n} {what}s" if k == n else f"{k} of {n} {what}s"
+
+    gated = []
+    for r in dash.scan_calibrations():
+        if r["legacy"] is False and r["ok"] and r["session"]:
+            with open(r["path"], "rb") as f:
+                gated.append((r["session"], pickle.load(f)))
+    gated.sort(key=lambda x: x[0])
+    n = len(gated)
+    assert n
+    m4 = _inventory_row(pages, "M4")
+    s_lo, s_hi = HESTON_BOUNDS["sigma"]
+    pinned = [(s, "ceiling" if c["params"]["sigma"] >= (s_lo + s_hi) / 2 else "floor") for s, c in gated
+              if "sigma" in (c.get("pinned_params") or [])]
+    for side in ("ceiling", "floor"):
+        on = [s for s, b in pinned if b == side]
+        if on:
+            what = count(len(on), n, "gate-passing fit")
+            assert f"σ sits on its box {side} in {what} ({', '.join(on)})" in m4
+        else:
+            assert f"box {side}" not in m4
+    if not pinned:
+        assert f"σ is inside its box in {count(n, n, 'gate-passing fit')}" in m4
+    w3 = [c["weights"]["w3"] for _, c in gated if (c.get("weights") or {}).get("w3") is not None]
+    if w3 and not any(w3):
+        assert f"the VIX-options leg has weight 0 in {count(len(w3), len(w3), 'gate-passing fit')}" in m4
+    elif w3:
+        what = count(sum(1 for w in w3 if w > 0), len(w3), "gate-passing fit")
+        assert f"the VIX-options leg is weighted in {what}" in m4
+    rows = json.loads((SHIPPED / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
+    prof = [r for r in rows if all(r.get(k) is not None for k in (
+        "sigma_free", "kappa_free", "sigma_free_oos", "sigma_cap2_oos", "sigma_free_loss_rel"))]
+    costliest = min(prof, key=lambda r: r["sigma_free_loss_rel"]) if prof else None
+    if costliest and costliest["sigma_free_loss_rel"] < -1e-6:
+        assert f"the {costliest['session']} fit moves" in m4
+        assert (f"to σ {costliest['sigma_free']:.2f}, κ {costliest['kappa_free']:.1f} "
+                "and its out-of-sample error "
+                f"from {costliest['sigma_cap2_oos']:.2f} to {costliest['sigma_free_oos']:.2f} vol pts") in m4
+    vv = [(r["vvix_model_cap2"], r["vvix_market"]) for r in rows
+          if r.get("vvix_model_cap2") is not None and r.get("vvix_market") is not None]
+    if vv:
+        mods, mkts = [a for a, _ in vv], [b for _, b in vv]
+        assert (f"(model {min(mods):.0f}–{max(mods):.0f} "
+                f"against ^VVIX {min(mkts):.0f}–{max(mkts):.0f})") in m4
+    # M6: the σ of the fit the Greeks surface was built from, and 'cap' only when σ is on it
+    meta = pq.read_schema(SHIPPED / "greeks" / "greeks_surface.parquet").metadata
+    prov = json.loads(meta[b"greeks_provenance"])
+    sig, (lo, hi) = float(prov["params"]["sigma"]), HESTON_BOUNDS["sigma"]
+    m6 = _inventory_row(pages, "M6")
+    assert f"{sig:.2f} in the {prov['as_of_date']} fit the surface is built from" in m6
+    assert ("cap" in m6) is (abs(sig - hi) <= 1e-4 * (hi - lo))
+    assert ("floor" in m6) is (abs(sig - lo) <= 1e-4 * (hi - lo))
+    # M7: every chain after β's estimation set
+    tab = rb.estimate_beta(include_live=False)
+    later = [(str(pd.Timestamp(r["session"]).date()), float(r["ratio"])) for r in tab.to_dict("records")
+             if str(r["status"]).startswith("out-of-sample") and pd.notna(r["ratio"])]
+    m7 = _inventory_row(pages, "M7")
+    for s, ratio in later:
+        assert f"{ratio:.2f} ({s})" in m7
+    assert ("holds no chain after the estimation set" in m7) is (not later)
+    assert "first later chain" not in m7
+    # M9: the PDV forecaster's rank on both losses
+    rank = json.loads((SHIPPED / "backtest" / "inference" / "forecast_eval.json").read_text())
+    rank = rank["backtest_window"]["rank"]
+    m9 = _inventory_row(pages, "M9")
+    for key, label in (("mse", "21-day MSE"), ("qlike", "QLIKE")):
+        assert f"{dash.ordinal(rank[key]['pdv'])} of {len(rank[key])} on {label}" in m9
+    # M11: the classifier's stored evaluation
+    ev = dash._load_pickle(SHIPPED / "signals" / "regime_classifier.pkl").metadata_["evaluation"]
+    m11 = _inventory_row(pages, "M11")
+    assert f"({ev['oos_acc'] * 100:.1f}% against {ev['persistence_acc'] * 100:.1f}% accuracy" in m11
+    assert ("Loses to" in m11) is (ev["oos_acc"] < ev["persistence_acc"])
+    # M13: the stored Quintic fit's own record
+    q = dash._load_pickle(max((SHIPPED / "calibrations").glob("quintic_cal_*.pkl")))
+    m13 = _inventory_row(pages, "M13")
+    assert ("Not converged" in m13) is (not q["success"])
+    if q["at_bound"].get("epsilon"):
+        assert f"ε on its {dash._fmt(q['params_dict']['epsilon'], 'g')} bound" in m13
+    # M15: rough Heston's H on its floor, and at ½ (Heston)
+    h_lo, h_hi = ROUGH_HESTON_H_BOUNDS
+    floor = [r["session"] for r in rows if r["joint_rough_H"] <= h_lo + 1e-6]
+    half = [r["session"] for r in rows if r["joint_rough_H"] >= h_hi - 1e-9]
+    m15 = _inventory_row(pages, "M15")
+    for s in floor:
+        assert s in m15.split("floor on ")[1].split(";")[0]
+    if half and len(rows) > 1:
+        assert f"{count(len(half), len(rows), 'diagnosed session')}: " in m15
+        assert all(s in m15 for s in half)
+    # M18: the ledger files, and no 'no entry' once one exists
+    files = sorted((SHIPPED / "forward").glob("ledger_*.json"))
+    m18 = _inventory_row(pages, "M18")
+    if files:
+        first, last = files[0].stem[len("ledger_"):], files[-1].stem[len("ledger_"):]
+        span = first if len(files) == 1 else f"{first} → {last}"
+        noun = "session" if len(files) == 1 else "sessions"
+        assert f"{len(files)} {noun} registered ({span}), its hash chain intact" in m18
+        assert "no entry" not in m18.lower()
+    else:
+        assert "No entry committed yet" in m18
+
+
+def test_short_end_sentence_names_the_box_only_when_sigma_is_on_it(dash):
+    """VALIDATOR-09: the #oos caption typed 'the short end is where a one-factor
+    model with σ on its box ceiling fails' under a fit with σ interior. The
+    sentence is now the fit's own worst expiry, and names the box only when σ
+    sits on it; both ways on synthetic rows."""
+    rows = [{"expiry": "2026-11-06", "T_days": 10.6, "rmse": 4.2},
+            {"expiry": "2026-12-18", "T_days": 52.6, "rmse": 1.7}]
+    interior = dash.short_end_sentence(rows, None)
+    assert interior == ("The worst expiry is 2026-11-06, 11 days out (4.20 vol pts): "
+                        "a one-factor model misses the short end.")
+    assert "box" not in interior
+    assert dash.short_end_sentence(rows, "upper").endswith(", here with σ on its box ceiling.")
+    assert dash.short_end_sentence(rows, "lower").endswith(", here with σ on its box floor.")
+    long_worst = [{**rows[0], "rmse": 1.0}, rows[1]]
+    assert dash.short_end_sentence(long_worst, "upper") == (
+        "The worst expiry is 2026-12-18, 53 days out (1.70 vol pts), not the short end (≤ 30 days).")
+    assert dash.short_end_sentence([], None) is None
+
+
+def test_oos_caption_matches_the_headline_fit(dash, pages):
+    """The rendered #oos caption against the headline pickle: 'box ceiling'
+    appears iff σ is pinned at the top of the production box, and the worst
+    expiry it names is the fit's own."""
+    from joint_vol_calibration.config import HESTON_BOUNDS
+
+    p2 = dash.load_page2()
+    with open(dash.DATA / "calibrations" / p2["calib_file"], "rb") as f:
+        cal = pickle.load(f)
+    lo, hi = HESTON_BOUNDS["sigma"]
+    on_ceiling = "sigma" in (cal.get("pinned_params") or []) and cal["params"]["sigma"] >= (lo + hi) / 2
+    oos = re.search(r'id="oos".*?</section>', pages["/calibration"], re.DOTALL)
+    assert oos
+    text = " ".join(_visible_text("<body>" + oos.group(0)).split())
+    assert ("box ceiling" in text) is on_ceiling
+    by_exp = (cal.get("oos") or {}).get("spx_oos_rmse_by_expiry") or {}
+    if by_exp:
+        worst = max(by_exp, key=lambda k: by_exp[k])
+        sentence = text.split("The worst expiry is ", 1)[1].split(". ", 1)[0]
+        assert sentence.startswith(worst)
+        assert f"({by_exp[worst]:.2f}" in sentence
+
+
+def test_bates_note_counts_the_stored_fits(dash, tmp_path):
+    """The ρ-at-bound banner typed 'The one Bates SVJ fit did not converge';
+    the note is now read from the stored bates_cal_<session>.pkl files."""
+    def fit(session, ok):
+        path = tmp_path / f"bates_cal_{session}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump({"success": ok, "params": {}}, f)
+        return path
+    one = [fit("2026-03-24", False)]
+    assert dash.bates_fits_note(one) == ("The one stored Bates SVJ fit (2026-03-24) did not converge, "
+                                         "so it is not a result.")
+    two = [*one, fit("2026-10-26", False)]
+    assert dash.bates_fits_note(two) == ("None of the 2 stored Bates SVJ fits (2026-03-24, 2026-10-26) "
+                                         "converged, so none is a result.")
+    mixed = [*one, fit("2026-10-27", True)]
+    assert dash.bates_fits_note(mixed) == ("1 stored Bates SVJ fit converged (2026-10-27); "
+                                           "1 did not (2026-03-24).")
+    assert dash.bates_fits_note([]) == "No Bates SVJ fit is stored."
+    shipped = sorted((SHIPPED / "calibrations").glob("bates_cal_*.pkl"))
+    assert dash.load_page2()["bates_note"] == dash.bates_fits_note(shipped)
+
+
+def test_calibration_captions_name_the_config_boxes(dash, monkeypatch):
+    """The Calibration captions typed σ ≤ 2, σ ≤ 10, κ ≤ 60 and H ∈ [0.02, ½];
+    they now print joint_vol_calibration.config's values, so a changed box
+    cannot leave the prose behind."""
+    from joint_vol_calibration import config
+
+    monkeypatch.setattr(config, "SIGMA_PROFILE_CAPS", (1.0, 2.0, 11.0))
+    monkeypatch.setattr(config, "PROFILE_KAPPA_MAX", 61.0)
+    monkeypatch.setattr(config, "ROUGH_HESTON_H_BOUNDS", (0.03, 0.5))
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    text = " ".join(_visible_text(html).split())
+    assert "free-σ OOS refits it with σ ≤ 11 and κ ≤ 61" in text
+    if 'id="rough-verdict"' in html:
+        assert "plus H ∈ [0.03, ½]" in text
+    assert "σ ≤ 10 and κ ≤ 60" not in text
+    assert "[0.02, ½]" not in text
+
+
+def test_quintic_stop_reason_is_the_fits_own(dash, pages):
+    """'The Quintic optimiser stopped at its iteration limits' was typed for any
+    non-converged fit; the reason is now the stored fit's own messages."""
+    q = dash.load_page2().get("quintic")
+    if not q:
+        return
+    qcal = dash._load_pickle(SHIPPED / "calibrations" / q["file"])
+    text = " ".join(_visible_text(pages["/calibration"]).split())
+    conv = qcal.get("convergence") or {}
+    msgs = [m for m in (conv.get("de_message"), conv.get("polish_message")) if m]
+    if qcal.get("success"):
+        assert "The Quintic optimiser stopped" not in text
+    else:
+        reason = "iteration limit" if any("iteration" in str(m).lower() for m in msgs) else None
+        assert "The Quintic optimiser stopped without meeting its tolerance" in text
+        if reason:
+            assert f"tolerance ({reason})" in text
+    assert "iteration limits without" not in text
+
+
+def test_model_risk_links_the_validation_pack(pages):
+    """VALIDATOR-10: Model Risk named 'docs/model_validation/README.md §1' as
+    plain text and no page linked the validation pack; the page header links it."""
+    a = re.search(r'<a id="validation-pack-link" href="([^"]+)"', pages["/model-risk"])
+    assert a
+    assert a.group(1).endswith("/docs/model_validation/README.md")
+    assert (ROOT / "docs" / "model_validation" / "README.md").exists()
+    assert a.group(1).startswith("https://github.com/navnoorthapar/vol-system-dashboard/")
+
+
+def test_every_production_model_names_its_checks_or_why_it_has_none(dash, pages):
+    """VALIDATOR-12: 8 of 12 production-tier models had no monitoring check and
+    the page did not say so. Each production model now has a check, or an
+    explicit 'not monitored' reason the page prints (never both, so a reason
+    cannot outlive a new check); every limits key a check uses is in
+    MONITOR_LIMITS (the VX lag reused label_lag's)."""
+    d = dash.load_model_risk()
+    html = pages["/model-risk"]
+    by_model: dict[str, list[dict]] = {}
+    for c in d["monitors"]:
+        by_model.setdefault(c["model"], []).append(c)
+        assert not c.get("limits_key") or c["limits_key"] in dash.MONITOR_LIMITS, c["check"]
+    prod = [m for m in d["inventory"] if m["tier"] == "production"]
+    assert len(prod) >= 12
+    for m in prod:
+        checks = by_model.get(m["id"], [])
+        reason = (m.get("not_monitored") or "").strip()
+        assert bool(checks) != bool(reason), (m["id"], [c["check"] for c in checks], reason)
+        row = re.search(rf'<tr id="inv-{m["id"].lower()}">(.*?)</tr>', html, re.DOTALL)
+        assert row, m["id"]
+        cell = row.group(1)
+        if checks:
+            assert 'data-monitoring="checks"' in cell, m["id"]
+            for c in checks:
+                assert f'href="#{c["id"]}"' in cell, (m["id"], c["id"])
+        else:
+            text = " ".join(_visible_text("<body>" + cell).split())
+            assert 'data-monitoring="none"' in cell, m["id"]
+            assert "Not monitored per session: " in text, m["id"]
+    # the checks VALIDATOR-12 asked for: the surface's certificates, the ledger's chain, the rate reference
+    assert {"svi_certificate", "ledger_chain", "rate_reference"} <= {c["key"] for c in d["monitors"]}
+
+
+def test_new_model_risk_checks_read_their_artifacts(dash):
+    """M14, M18 and M19 checks, each from its artifact: the newest surface
+    report's SVI-cal certificate flag, the forward ledger files, the headline
+    pickle's rate reference."""
+    d = {c["key"]: c for c in dash.load_model_risk()["monitors"]}
+    surf = dash.artifacts.load_surface(dash.DATA)
+    cert = surf["surface"]["surfaces"]["svi_cal"]["arbitrage_free_certified"]
+    assert d["svi_certificate"]["model"] == "M14"
+    assert (d["svi_certificate"]["value"], d["svi_certificate"]["status"]) == (
+        ("yes", "ok") if cert else ("no", "breach"))
+    files = sorted((dash.DATA / "forward").glob("ledger_*.json"))
+    assert d["ledger_chain"]["model"] == "M18"
+    if files:
+        assert d["ledger_chain"]["value"] == f"yes, {dash.plural(len(files), 'session')}"
+        assert d["ledger_chain"]["status"] == "ok"
+    p2 = dash.load_page2()
+    with open(dash.DATA / "calibrations" / p2["calib_file"], "rb") as f:
+        kind = (pickle.load(f).get("rate_reference") or {}).get("kind")
+    assert d["rate_reference"]["model"] == "M19"
+    assert d["rate_reference"]["status"] == ("ok" if kind == "treasury_curve" else "watch")
+
+
+def test_rate_reference_note_reads_the_curve_age_limit_from_the_code(dash, monkeypatch):
+    """M19's note typed 'refused when older than 7 days'. The limit is the
+    default of rates.get_zero_curve (the calibrator does not override it), so a
+    changed default must change the page: here it is moved to 5."""
+    import inspect
+
+    from joint_vol_calibration.data import rates
+
+    default = inspect.signature(rates.get_zero_curve).parameters["max_age_days"].default
+    assert dash.curve_max_age_days() == default
+    moved, original = default - 2, rates.get_zero_curve
+
+    def patched(as_of, *, max_age_days=moved, same_day=True, root=None):
+        return original(as_of, max_age_days=max_age_days, same_day=same_day, root=root)
+    monkeypatch.setattr(rates, "get_zero_curve", patched)
+    d = {c["key"]: c for c in dash.load_model_risk()["monitors"]}
+    assert f"missing or older than {moved} days" in d["rate_reference"]["note"]
+    assert f"older than {default} days" not in d["rate_reference"]["note"]
+
+
+def test_by_design_breaches_are_apart_from_live_ones(dash, pages):
+    """CIO-14: half the BREACH rows were permanent by design (the research
+    classifier below persistence, the VX futures table the daily job does not
+    refresh), which trains a reader to ignore red. A check of a research-tier
+    model, or one in BY_DESIGN_CHECKS, that is over its limit carries the status
+    'design' with its reason, listed after the live statuses; a production or
+    backtest model's breach stays a breach."""
+    rows = [{"model": "M4", "key": "oos_rmse", "status": "breach"},
+            {"model": "M11", "key": "classifier", "status": "breach"},
+            {"model": "M11", "key": "classifier", "status": "ok"},
+            {"model": "M5", "key": "vx_lag", "status": "watch"},
+            {"model": "M7", "key": "beta_drift", "status": "breach"}]
+    tiers = {"M4": "production", "M5": "production", "M7": "backtest", "M11": "research"}
+    out = dash.by_design(rows, tiers)
+    assert [r["status"] for r in out] == ["breach", "design", "ok", "design", "breach"]
+    assert out[1]["limit_status"] == "breach"
+    assert out[1]["by_design"] == dash.RESEARCH_BY_DESIGN
+    assert out[3]["by_design"] == dash.BY_DESIGN_CHECKS["vx_lag"]
+    assert rows[1]["status"] == "breach"                         # the input is not edited
+    # the reason is true: the daily job has no VX futures step
+    refresh = (ROOT / "scripts" / "cloud_refresh.py").read_text()
+    assert "vix_futures" not in refresh
+    # on the page: no research-tier model is a live watch or breach; each design row says why
+    d = dash.load_model_risk()
+    tier = {m["id"]: m["tier"] for m in d["inventory"]}
+    for c in d["monitors"]:
+        if tier.get(c["model"]) == "research":
+            assert c["status"] not in ("watch", "breach"), c["check"]
+    html = pages["/model-risk"]
+    designs = [c for c in d["monitors"] if c["status"] == "design"]
+    for c in designs:
+        row = re.search(rf'<tr id="{c["id"]}" data-status="design">(.*?)</tr>', html, re.DOTALL)
+        assert row, c["id"]
+        text = _html_unescape(" ".join(_visible_text("<body>" + row.group(1)).split()))
+        assert "BY DESIGN" in text
+        assert f"By design ({c['limit_status']} on its limits): {c['by_design']}." in text
+    if designs:
+        assert f"{len(designs)} by design" in _visible_text(html)
+
+
+def test_model_risk_badge_wraps_between_its_counts(pages):
+    """The status counts were one no-wrap span ('8 OK · 5 watch · 1 breach · 1
+    informational · 2 by design'), which scrolled Model Risk sideways at 320 px
+    once the by-design count joined it (a11y.mjs, letter-spacing stress). Each
+    count is its own no-wrap part, short enough for a phone, as the chain
+    badge's parts are."""
+    badge = re.search(r'<div class="page-badge"[^>]*>(.*?)</div>', pages["/model-risk"], re.DOTALL).group(1)
+    parts = [" ".join(_visible_text("<body>" + x).split())
+             for x in re.findall(r'<span class="nowrap"[^>]*>(.*?)</span>', badge, re.DOTALL)]
+    assert len(parts) >= 6, parts
+    assert all(len(x) <= 40 for x in parts), parts
+    text = " ".join(_visible_text("<body>" + badge).split())
+    assert re.search(r"\d+ OK · \d+ watch · \d+ breach · \d+ informational", text), text
+
+
+def test_dashboard_side_models_are_in_the_inventory():
+    """VALIDATOR-13: the dashboard's own models publish numbers (the density and
+    tail probabilities, the delta grid and constant maturity behind the ticker,
+    the realised-vol cone) and were missing from the inventory 'of every model
+    the system runs'. Each module is listed, with its limitations."""
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())
+    modules = {m["module"]: m for m in inv["models"]}
+    for mod in ("dashboard/desk_density.py", "dashboard/desk_surface.py", "dashboard/desk_cone.py"):
+        assert mod in modules, mod
+        m = modules[mod]
+        assert m["tier"] == "production"
+        assert len(m["limitations"]) > 80, mod
+        assert m["page"] == "/surface"
+
+
 def test_overview_first_result_names_the_surface_and_its_test(dash, pages):
     """P1.3e: the first Overview result read 'Quote-grade surface · held-out
     strikes'; it is the arbitrage-free SVI surface with alternate strikes held
@@ -5158,9 +5582,8 @@ def test_corrections_register_lists_every_finding(dash, pages):
     tbl = re.search(r'<table class="tbl dense cards" id="register-table">(.*?)</table>', html, re.DOTALL)
     assert tbl
     rows = re.findall(r'<tr data-status="(\w+)" data-tests="(\d+)">(.*?)</tr>', tbl.group(1), re.DOTALL)
-    assert len(rows) == len(fs) == 33
+    assert len(rows) == len(fs) >= 33
     assert [s for s, _, _ in rows] == [f["status"] for _, _, f in fs]
-    assert (sum(s == "fixed" for s, _, _ in rows), sum(s == "quantified" for s, _, _ in rows)) == (30, 3)
     gaps = [i for i, (_, n, _) in enumerate(rows) if n == "0"]
     assert gaps
     assert all("chip-breach\">gap</span>" in rows[i][2] for i in gaps)
@@ -5189,6 +5612,51 @@ def test_corrections_register_lists_every_finding(dash, pages):
     # the rounds are disclosures, the newest open; every finding stays in the page
     opened = re.findall(r'<details class="pm-details"( open)?>', html)
     assert opened == [""] * (len(reg["rounds"]) - 1) + [" open"]
+
+
+def test_the_newest_correction_round_renders_with_its_findings(dash, pages):
+    """VALIDATOR-11: the register stopped at C23 though later commits changed
+    published numbers and claims (the 95.0 idx pt 'executable arbitrage' tile,
+    the double-rounded fit tiles, the 'Cboe rules' claim, the smile-table
+    medians, the stale-cache render, the Yahoo-download labels). The newest
+    round renders on the page (title span, open postmortem, every finding in
+    the register with no bridge effect, its commits linked), in
+    docs/corrections.md and in the pack's findings log, and no page or doc
+    types the span of rounds."""
+    reg = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    last = reg["rounds"][-1]
+    assert last["id"] != "C23"
+    html = pages["/corrections"]
+    text = " ".join(_visible_text(html).split())
+    span = f"{reg['rounds'][0]['id']}–{last['id']}"
+    assert f"{span} corrections" in text
+    assert f'content="Corrections {span}' in html
+    for n, f in enumerate(last["findings"], 1):
+        assert f'id="{last["id"].lower()}-f{n}"' in html, f["id"]
+        assert not f.get("bridge_steps")                                        # no P&L change
+        assert not f.get("c23_bridge_steps")
+        assert f["commits"]
+        assert set(f["commits"]) <= set(last["commits"])
+    for c in last["commits"]:
+        assert f"/commit/{c}" in html, c
+    reg_rows = dash.findings_register(dash.load_corrections()["rounds"])
+    mine = [r for r in reg_rows if r["round"] == last["id"]]
+    assert [r["id"] for r in mine] == [f["id"] for f in last["findings"]]
+    assert all(r["pnl"] is None for r in mine)
+    doc = (ROOT / "docs" / "corrections.md").read_text()
+    pack = (ROOT / "docs" / "model_validation" / "README.md").read_text()
+    assert f"### {last['id']}" in doc
+    for f in last["findings"]:
+        assert f"| {f['id']} |" in pack
+    # the span of rounds is computed, never typed (C16–C22, the trials ledger's span, is fixed history)
+    typed = re.compile(r"C16[–-]C(?:2[3-9]|[3-9]\d)")
+    for path in ("dashboard/app.py", "dashboard/templates/corrections.html",
+                 "dashboard/templates/research.html", "README.md", "docs/README.md",
+                 "docs/model_validation/README.md", "docs/corrections.md"):
+        src = (ROOT / path).read_text()
+        if path == "docs/corrections.md":
+            src = src.split("<!-- BEGIN GENERATED")[0]
+        assert not typed.search(src), (path, typed.search(src).group(0))
 
 
 def test_browser_corrections_register_filters_links_and_height(site_browser):
@@ -6440,7 +6908,9 @@ def test_gated_fits_table_has_the_vx_out_of_sample_column(dash, pages):
 
 def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
     """P3.1: a Model Risk check on the VX futures table's lag behind the market
-    DB, in NYSE sessions, with the existing label-lag limits (no new threshold)."""
+    DB, in NYSE sessions, with limits of its own (VALIDATOR-12: it reused
+    label_lag's), equal to label_lag's; over them it is BY DESIGN (CIO-14), since
+    the daily job does not refresh the table."""
     d = dash.load_model_risk()
     row = next(m for m in d["monitors"]
                if m["check"] == "VX futures table lag behind the market DB (NYSE sessions)")
@@ -6449,7 +6919,9 @@ def test_model_risk_checks_the_vx_futures_table_lag(dash, pages):
     lag = dash.session_age(_vx_last(), db_date)
     assert row["model"] == "M5"
     assert row["value"] == str(lag)
-    assert row["status"] == dash._rag(float(lag), dash.MONITOR_LIMITS["label_lag"])
+    assert dash.MONITOR_LIMITS["vx_lag"] == dash.MONITOR_LIMITS["label_lag"]
+    by_limits = dash._rag(float(lag), dash.MONITOR_LIMITS["vx_lag"])
+    assert row["status"] == ("design" if by_limits in ("watch", "breach") else by_limits)
     assert row["limits"] == "OK ≤ 0 · watch ≤ 1 · breach above"
     assert "VX futures table lag behind the market DB" in _html_unescape(pages["/model-risk"])
 
@@ -6646,7 +7118,7 @@ def test_browser_resolves_compact_specs_as_the_server_does(site_browser):
 
 # ── P3.3: Model Risk as an exceptions view ────────────────────────────────────
 
-_SEVERITY = ("breach", "watch", "ok", "info", "na")
+_SEVERITY = ("breach", "watch", "ok", "info", "design", "na")
 
 
 def _monitor_rows(html: str) -> list[tuple[str, str, str]]:
@@ -6769,7 +7241,7 @@ def test_model_risk_values_link_to_their_evidence_and_the_evidence_links_back(da
         chip = re.search(rf'<a class="chip chip-\w+ mon-link" href="model-risk.html#{rid}"([^>]*)>(.+?)</a>',
                          target)
         assert chip, (rid, page)
-        word = {"ok": "OK", "na": "N/A"}.get(st, st.upper())
+        word = {"ok": "OK", "na": "N/A", "design": "BY DESIGN"}.get(st, st.upper())
         short = dash.CHECK_SHORT[d[rid]["key"]]
         text = _html_unescape(re.sub(r"<[^>]+>", "", chip.group(2)))
         assert text == f"{d[rid]['model']} {short} · {word}", rid
