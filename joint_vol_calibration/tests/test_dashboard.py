@@ -4896,6 +4896,21 @@ def test_by_design_breaches_are_apart_from_live_ones(dash, pages):
         assert f"{len(designs)} by design" in _visible_text(html)
 
 
+def test_model_risk_badge_wraps_between_its_counts(pages):
+    """The status counts were one no-wrap span ('8 OK · 5 watch · 1 breach · 1
+    informational · 2 by design'), which scrolled Model Risk sideways at 320 px
+    once the by-design count joined it (a11y.mjs, letter-spacing stress). Each
+    count is its own no-wrap part, short enough for a phone, as the chain
+    badge's parts are."""
+    badge = re.search(r'<div class="page-badge"[^>]*>(.*?)</div>', pages["/model-risk"], re.DOTALL).group(1)
+    parts = [" ".join(_visible_text("<body>" + x).split())
+             for x in re.findall(r'<span class="nowrap"[^>]*>(.*?)</span>', badge, re.DOTALL)]
+    assert len(parts) >= 6, parts
+    assert all(len(x) <= 40 for x in parts), parts
+    text = " ".join(_visible_text("<body>" + badge).split())
+    assert re.search(r"\d+ OK · \d+ watch · \d+ breach · \d+ informational", text), text
+
+
 def test_dashboard_side_models_are_in_the_inventory():
     """VALIDATOR-13: the dashboard's own models publish numbers (the density and
     tail probabilities, the delta grid and constant maturity behind the ticker,

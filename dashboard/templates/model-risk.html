@@ -9,7 +9,7 @@
 <div class="page-head">
   <h1 class="page-title">Model risk · inventory and monitoring</h1>
   <p class="page-sub">The structure of a model-risk review (an inventory, then outcome checks against stated limits) applied to a personal research system. The limits are this page's working thresholds, stated so a reader can disagree with them. The evidence behind each model (conceptual soundness, outcomes analysis, effective challenge) is in the <a id="validation-pack-link" href="https://github.com/navnoorthapar/vol-system-dashboard/blob/main/docs/model_validation/README.md">validation pack</a> (<code class="path">{{ 'docs/model_validation/README.md'|path }}</code>).</p>
-  <div class="page-badge"><span class="nowrap">{{ d.inventory|length }} models</span><span class="sep">·</span><span class="nowrap">{{ d.monitors|length }} checks</span><span class="sep">·</span><span class="nowrap">{{ rc.ok|fmt }} OK · {{ rc.watch|fmt }} watch · {{ rc.breach|fmt }} breach · {{ rc.info|fmt }} informational{% if rc.design %} · {{ rc.design|fmt }} by design{% endif %}</span></div>
+  <div class="page-badge"><span class="nowrap">{{ d.inventory|length }} models</span><span class="sep">·</span><span class="nowrap">{{ d.monitors|length }} checks</span><span class="sep">·</span><span class="nowrap">{{ rc.ok|fmt }} OK</span> · <span class="nowrap">{{ rc.watch|fmt }} watch</span> · <span class="nowrap">{{ rc.breach|fmt }} breach</span> · <span class="nowrap">{{ rc.info|fmt }} informational</span>{% if rc.design %} · <span class="nowrap">{{ rc.design|fmt }} by design</span>{% endif %}</div>
 </div>
 
 <div class="g">
