@@ -1342,7 +1342,9 @@ def test_backtest_audit_heading_counts_its_rows(pages):
     heading = re.search(r'id="audit-title">([^<]+)<', cp).group(1)
     assert heading == (f"{arts[0]}–{arts[-1]} corrections — {len(statuses)} findings, "
                        f"{n_fixed} fixed, {n_quant} quantified")
-    assert arts == [f"C{i}" for i in range(16, 24)]
+    # every round of the registry, in its order (the register is append-only: C24 followed C23)
+    registry = json.loads((ROOT / "dashboard" / "corrections.json").read_text())
+    assert arts == [r["id"] for r in registry["rounds"]]
     assert "Ten Flaws Found" not in cp
     assert "C17 pipeline" not in cp
 
@@ -2561,11 +2563,25 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     assert freezer.freeze(str(out), dash) == 0
     # research.html: 400 kB until B12 added every portfolio round trip (206 points), two
     # histograms and the trade and drawdown tables, about 30 kB raw (404 kB with them)
+    # corrections.html: 120 kB until C24 added eight findings (about 20 kB raw, 4 kB gzipped);
+    # the register is append-only, so the page grows by a round at a time
     budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 120_000,
-              "model-risk.html": 80_000}
+              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 150_000,
+              "model-risk.html": 100_000}
+    # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
+    # monitoring line per production model (about 88 kB). Its history strips draw one dot
+    # per stored session, about 150 bytes each, and the daily job adds a session a day:
+    # they are budgeted per dot (200 bytes) and the rest of the page as a whole, so the
+    # budget does not fail the bot's gate a few weeks of sessions from now.
     for name, cap in budget.items():
-        size = (out / name).stat().st_size
+        html = (out / name).read_text(encoding="utf-8")
+        size = len(html.encode("utf-8"))
+        if name == "model-risk.html":
+            strips = re.findall(r'<svg class="hist".*?</svg>', html, re.DOTALL)
+            hist = sum(len(x.encode("utf-8")) for x in strips)
+            dots = html.count('<circle class="h-')
+            assert hist <= 200 * dots, (name, hist, dots)
+            size -= hist
         assert size <= cap, (name, size)
     # shared assets: the chart library is the only large script, fonts are subsets
     import gzip
