@@ -21,6 +21,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -43,6 +44,7 @@ SPARK_N = 60                 # sessions in the spread's sparkline
 STRESS_DAY = "2020-03-16"    # the COVID stress test's date, as the page states it
 SKILL_EX_YEAR = "2020"       # the walk-forward R² is also given without this year
 SPEC_SIG = 6                 # chart specs carry floats at 6 significant figures
+VX_DP = 4                    # Cboe publishes VX daily settlements to 4 decimals
 VIX2_NOTE = " (risk-neutral, contains the variance premium)"
 FORECAST_NAMES = {"vix2": "VIX²", "pdv": "PDV", "vix_mz": "VIX (MZ)"}
 
@@ -1020,6 +1022,15 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
             p0 = pv.get(r["expiry_date"])
             parts += [p0, r["price"] - p0] if p0 is not None else []
         said(a, P_VX, f"table {r['expiry_date']}", tr, parts, "days = calendar days to the final settlement")
+        # settlements as Cboe publishes them (4 dp), so the change is their exact difference
+        cells = [numbers_in(text_of(td)) for td in tr.select("td")[3:]]
+        if all(len(c) == 1 for c in cells) and len(cells) >= 1:
+            a.equal(P_VX, f"table {r['expiry_date']}: settlement decimals", [c[0][1] for c in cells[:2]],
+                    [VX_DP] * min(len(cells), 2))
+            if len(cells) == 3:
+                new, old, chg = (Decimal(c[0][2].replace("−", "-").replace("+", "")) for c in cells)
+                a.equal(P_VX, f"table {r['expiry_date']}: change = printed difference", str(chg),
+                        str(new - old))
     said(a, P_VX, "M1 → M2", sec.select_one("#vx-m1m2"),
          [*([m1m2, s[0], s[1]] if m1m2 is not None else []), "VX2 / VX1 − 1", *dashed])
     spec = spec_json(a, "chart-vx-curve", P_VX)

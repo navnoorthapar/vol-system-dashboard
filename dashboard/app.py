@@ -608,6 +608,10 @@ def _read_vix_wide() -> pd.DataFrame:
 
 
 VX_TABLE = "data_store/vol_system.db"     # table vix_futures_daily
+# Cboe publishes VX daily settlements to 4 decimals (17.1186): printed at that
+# precision, a change is the exact difference of the two printed settlements
+VX_DP = 4
+VX_FMT = f".{VX_DP}f"
 
 
 def vx_last_date() -> str | None:
@@ -5037,6 +5041,7 @@ def overview_vix_complex(d: dict) -> None:
     # is left out and M1 is the first contract still trading (CIO-15)
     d["vx_curve"] = None
     d["vx_empty"] = "No VX futures settlements are stored."
+    d["vx_fmt"] = VX_FMT
     last = vx_last_date()
     if last:
         fr = vx_freshness(last)
@@ -5066,7 +5071,7 @@ def overview_vix_complex(d: dict) -> None:
                     f", with {prev_date}" if prev else ""),
                 x={"type": "category", "categories": cats,
                    "name": "Contract (final settlement)", "interval": 0, "rotate": 45},
-                y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
+                y={"name": "VX (index pts)", "digits": 1, "tipDigits": VX_DP},
                 series=series, xs=cats, csv=f"vx_curve_{last}.csv",
                 grid={"top": 12, "bottom": 64},
                 describe=(f"{cur['n']} monthly contracts on {last}"
@@ -5077,9 +5082,9 @@ def overview_vix_complex(d: dict) -> None:
                                    ["Contract", "Final settlement", "Days#", f"{last}#",
                                     *([f"{prev_date}#", "Change#"] if prev else [])],
                                    [[r["month"], r["expiry"], _fmt(r["days"], ".0f"),
-                                     _fmt(r["settle"], ".2f"),
-                                     *([_fmt(pv.get(r["expiry"]), ".2f"),
-                                        (signed(r["settle"] - pv[r["expiry"]], ".2f")
+                                     _fmt(r["settle"], VX_FMT),
+                                     *([_fmt(pv.get(r["expiry"]), VX_FMT),
+                                        (signed(r["settle"] - pv[r["expiry"]], VX_FMT)
                                          if r["expiry"] in pv else "—")]
                                        if prev else [])] for r in cur["rows"]]))
 

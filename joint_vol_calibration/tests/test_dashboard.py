@@ -36,6 +36,7 @@ import pickle
 import re
 import shutil
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -6297,6 +6298,45 @@ def test_vx_curve_leaves_out_contracts_settled_by_the_newest_session(dash, synth
     assert f"{len(live)} monthly contracts on {vx_last} still trading on {newest}" in spec["describe"]
 
 
+def _dec(cell: str) -> Decimal:
+    return Decimal(cell.replace("−", "-").replace("+", ""))
+
+
+def _assert_vx_changes_add_up(html: str, con: sqlite3.Connection) -> int:
+    """Every row of the VX curve's data table prints its two stored settlements to
+    the four decimals Cboe publishes, and its change equals the difference of the
+    two printed values exactly. Returns the number of rows with a change."""
+    caption = re.search(r'id="chart-vx-curve-data">.*?<caption>VX monthly settlements, ([\d-]+) and ([\d-]+)'
+                        r"</caption>", html, re.DOTALL)
+    assert caption is not None
+    last, prev = caption.groups()
+    n = 0
+    for month, expiry, _days, new, old, chg in _vx_table_rows(html):
+        want = dict(con.execute("SELECT date, COALESCE(settle, close) FROM vix_futures_daily "
+                                "WHERE expiry_date = ? AND date IN (?, ?)", (expiry, last, prev)).fetchall())
+        assert _dec(new) == Decimal(f"{want[last]:.4f}"), (expiry, new)
+        assert _dec(old) == Decimal(f"{want[prev]:.4f}"), (expiry, old)
+        assert _dec(chg) == _dec(new) - _dec(old), (month, new, old, chg)
+        n += 1
+    return n
+
+
+def test_vx_table_change_is_the_difference_of_the_printed_settlements(dash, synth):
+    """QUANT-11 / CODE-13: the VX table printed settlements to 2 dp and the change
+    from the unrounded 4-dp values, so 20.00 → 20.00 showed +0.01. Cboe publishes
+    the settlements to 4 dp: printed in full, each change is their exact difference."""
+    dates = synth["dates"]
+    _write_vx_table(synth["data"] / "vol_system.db", [str(d.date()) for d in dates[-12:]], VX_EXPIRIES_2024)
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    with sqlite3.connect(synth["data"] / "vol_system.db") as con:
+        assert _assert_vx_changes_add_up(html, con) >= 4
+    line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    m = re.match(r"M1 → M2 ([+−]\d+\.\d\d)% \((\d+\.\d{4}) → (\d+\.\d{4})\)", line)
+    assert m, line                     # M1 → M2 reproduces from the two settlements it prints
+    assert _signed2(float((Decimal(m.group(3)) / Decimal(m.group(2)) - 1) * 100)) == m.group(1)
+
+
 def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
     """P3.1: the footer's freshness table lists the VX futures settlements with
     their as-of date, their age in NYSE sessions and the staleness styling of
@@ -6770,6 +6810,8 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     assert f"{age} NYSE session" in _html_unescape(re.sub(r"<[^>]+>", "", badge.group(2)))
     ts = _spec(html, "chart-ts")
     assert not any("settlement" in s["name"] for s in ts["series"])
+    with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
+        _assert_vx_changes_add_up(html, con)
 
 
 def test_overview_vix_over_vix3m_share_and_percentile(dash, pages):
