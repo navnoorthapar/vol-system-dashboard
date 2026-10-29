@@ -6401,10 +6401,11 @@ def test_overview_vx_curve_and_basis_are_of_the_newest_session(dash, synth):
                            f"({live[0][1]:.4f} → {live[1][1]:.4f})")
     exp, settle, days = live[0]
     assert _vx_basis_line(html) == (
-        f"VX1 − VIX {_signed2(settle - vix)} pts ({settle:.4f} − {vix:.2f}): the front contract’s settlement "
-        f"(15:00 Chicago time) less VIX’s 16:15 ET close, both of {newest}; positive: the future prices VIX "
-        f"above its spot level. VX1 settles on VIX’s special opening quotation of {exp}, "
-        f"{days} calendar days later.")
+        f"VX1 − VIX {_signed2(settle - vix)} index pts ({settle:.4f} − {vix:.2f}): the front contract’s "
+        f"settlement (15:00 Chicago time) less VIX’s 16:15 ET close, both of {newest}; positive: the "
+        f"future prices VIX above its spot level. VX1 settles on VIX’s special opening quotation of "
+        f"{exp}, {days} calendar days later.")
+    assert unit_lint(html) == []          # an index-point difference says so (house style, P1.6)
 
 
 def test_overview_vx_basis_waits_for_a_current_futures_table(dash, synth):
@@ -6933,7 +6934,7 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     if age:
         assert basis == f"VX1 − VIX is shown for a curve of the newest session; this one is of {last}."
     else:
-        assert basis.startswith(f"VX1 − VIX {_signed2(px[0] - round(vix[0], 2))} pts "
+        assert basis.startswith(f"VX1 − VIX {_signed2(px[0] - round(vix[0], 2))} index pts "
                                 f"({px[0]:.4f} − {round(vix[0], 2):.2f})")
 
 

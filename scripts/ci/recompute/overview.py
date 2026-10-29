@@ -1051,6 +1051,7 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
              [s[0] - vix_last, s[0], vix_last, "15:00 Chicago time", "16:15 ET", last,
               str(cur["expiry_date"].iloc[0]), float(cur["days"].iloc[0])],
              "VX1 = the first monthly contract; VIX = vix_daily close of the curve's session")
+        says(a, P_VX, "VX1 − VIX", basis_el, "index pts", True)       # a difference of index levels
     spec = spec_json(a, "chart-vx-curve", P_VX)
     ser = spec.get("series") or []
     a.equal(P_VX, "chart categories (final settlement dates)", (spec.get("x") or {}).get("categories"),
