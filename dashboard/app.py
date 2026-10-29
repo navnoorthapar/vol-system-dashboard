@@ -5031,18 +5031,26 @@ def overview_vix_complex(d: dict) -> None:
                 table=charts.table("VIX / VIX3M by calendar year; the CSV has every session",
                                    ["Year", "Sessions#", "Above 1 (%)#", "Mean#"],
                                    [[y, n, _fmt(sh, ".1f"), _fmt(m_, ".3f")] for y, n, sh, m_ in by_year]))
-    # the VX futures curve: its own newest date, the session before as an overlay
+    # the VX futures curve: its own newest date, the session before as an overlay.
+    # It is read on the page's newest session: a contract whose final settlement is
+    # on or before that session (or the curve's own date) no longer trades, so it
+    # is left out and M1 is the first contract still trading (CIO-15)
     d["vx_curve"] = None
+    d["vx_empty"] = "No VX futures settlements are stored."
     last = vx_last_date()
     if last:
-        cur = desk_market.vx_curve(vx_session_rows(last))
+        fr = vx_freshness(last)
+        cut = max(last, fr["ref"] or last)
+        cur = desk_market.vx_curve(vx_session_rows(last), trading_after=cut)
         prev_date = vx_prev_date(last)
-        prev = desk_market.vx_curve(vx_session_rows(prev_date)) if prev_date else None
-        if cur:
-            fr = vx_freshness(last)
+        prev = desk_market.vx_curve(vx_session_rows(prev_date), trading_after=cut) if prev_date else None
+        if not cur:
+            d["vx_empty"] = f"No VX monthly contract stored on {last} is still trading on {cut}."
+        else:
+            settled = " and ".join(f"{r['month']} (final settlement {r['expiry']})" for r in cur["settled"])
             d["vx_curve"] = {**cur, "date": last, "prev_date": prev_date if prev else None, "prev": prev,
                              "age": fr["age"], "level": stale_level(fr["age"]), "ref": fr["ref"],
-                             "ref_source": fr["ref_source"]}
+                             "ref_source": fr["ref_source"], "cut": cut, "settled_text": settled}
             pv = {r["expiry"]: r["settle"] for r in (prev or {}).get("rows") or []}
             cats = [r["expiry"] for r in cur["rows"]]
             series = [{"name": f"{last} settlements", "type": "line", "role": "market", "color": "headline",
@@ -5061,7 +5069,8 @@ def overview_vix_complex(d: dict) -> None:
                 y={"name": "VX (index pts)", "digits": 1, "tipDigits": 2},
                 series=series, xs=cats, csv=f"vx_curve_{last}.csv",
                 grid={"top": 12, "bottom": 64},
-                describe=(f"{cur['n']} monthly contracts on {last}, front month first; "
+                describe=(f"{cur['n']} monthly contracts on {last}"
+                          + (f" still trading on {cut}" if cut > last else "") + ", front month first; "
                           "M1 → M2 "
                           f"{_fmt(cur['m1m2'] * 100 if cur['m1m2'] is not None else None, '+.2f')}%."),
                 table=charts.table(f"VX monthly settlements, {last}" + (f" and {prev_date}" if prev else ""),

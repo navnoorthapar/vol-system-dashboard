@@ -961,7 +961,12 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     sessions, the session before (dashed), M1 → M2, the table and the chart series."""
     sec = a.one("section#vx-curve")
     last = vx_last(store)
-    cur = vx_rows(store, last) if last else pd.DataFrame()
+    # read on the newest session: a contract whose final settlement is on or before
+    # it (or the table's own date) no longer trades, so the page leaves it out
+    cut: str = max(last, f["ref_mkt"]) if last else ""
+    every = vx_rows(store, last) if last else pd.DataFrame()
+    cur = every[every["expiry_date"] > cut].reset_index(drop=True) if last else every
+    gone = every[every["expiry_date"] <= cut] if last else every
     if not present(a, P_VX, "VX curve panel", sec, not cur.empty) or sec is None or last is None or cur.empty:
         return
     prev_date = vx_last(store, last)
@@ -987,6 +992,12 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
               else f"the market database’s newest close; the rule labels end {f['label_date']}"), True)
     a.equal(P_VX, "age level", classes(el.select_one("span[class^='age-']") if el else None),
             [f"age-{om.stale_level(age)}"])
+    left = sec.select_one("#vx-settled")
+    if present(a, P_VX, "contracts settled by the newest session", left, not gone.empty) and left is not None:
+        said(a, P_VX, "contracts settled by the newest session", left,
+             [p for _, g in gone.iterrows() for p in (str(g["expiry_month"]), g["expiry_date"])] + [cut])
+        says(a, P_VX, "contracts settled by the newest session", left,
+             "M1 is the first contract still trading on it", True)
     a.equal(P_VX, "chart title (aria-label)", attr(sec.select_one("div#chart-vx-curve"), "aria-label"),
             f"VX monthly futures settlements on {last}" + "".join(f", with {d}" for d in dashed))
     names = [f"{last} settlements"] + [f"{d} settlements" for d in dashed]
@@ -997,7 +1008,7 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     s = cur["price"].to_numpy(float)
     m1m2 = (s[1] / s[0] - 1.0) * 100.0 if len(s) >= 2 else None
     said(a, P_VX, "chart description", sec.select_one("#chart-vx-curve-desc"),
-         [float(len(s)), last, *([m1m2] if m1m2 is not None else [])])
+         [float(len(s)), last, *([cut] if cut > last else []), *([m1m2] if m1m2 is not None else [])])
     tbl = sec.select_one("#chart-vx-curve-data table")
     said(a, P_VX, "table caption", tbl.caption if tbl else None, [last, *dashed])
     said(a, P_VX, "table header", tbl.thead if tbl else None, [last, *dashed])

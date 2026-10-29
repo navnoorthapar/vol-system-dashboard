@@ -6258,6 +6258,45 @@ def test_vx_lag_is_one_number_on_every_page_when_labels_lead_the_db(dash, synth)
     assert f"market database’s {lab_date}" not in line
 
 
+def _vx_table_rows(html: str) -> list[list[str]]:
+    """The cells of the Overview VX curve's data table, row by row (tags stripped)."""
+    tbl = re.search(r'id="chart-vx-curve-data">.*?<tbody>(.*?)</tbody>', html, re.DOTALL)
+    assert tbl is not None
+    return [[_html_unescape(re.sub(r"<[^>]+>", "", c))
+             for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
+            for tr in re.findall(r"<tr>(.*?)</tr>", tbl.group(1), re.DOTALL)]
+
+
+def test_vx_curve_leaves_out_contracts_settled_by_the_newest_session(dash, synth):
+    """CIO-15: the Overview's VX curve led with the 2026-10 contract on a page whose
+    newest session was 2026-10-27, after that contract's final settlement
+    (2026-10-21). Read on the newest session, the curve, its table and M1 → M2
+    leave out every contract settled on or before it, and the panel names them."""
+    dates = synth["dates"]
+    newest = str(dates[-1].date())
+    vx_sessions = [str(d.date()) for d in dates[-40:-12]]
+    vx_last = vx_sessions[-1]
+    _write_vx_table(synth["data"] / "vol_system.db", vx_sessions, VX_EXPIRIES_2024)
+    gone = [e for e in VX_EXPIRIES_2024 if vx_last < e <= newest]
+    assert gone                          # the case: a contract trading on the table's date has settled since
+    with sqlite3.connect(synth["data"] / "vol_system.db") as con:
+        live = con.execute("SELECT expiry_date, settle FROM vix_futures_daily WHERE date = ? "
+                           "AND expiry_date > ? ORDER BY expiry_date", (vx_last, newest)).fetchall()
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    spec = _spec(html, "chart-vx-curve")
+    assert spec["x"]["categories"] == [e for e, _ in live]
+    assert spec["series"][0]["data"] == pytest.approx([p for _, p in live])
+    assert [r[1] for r in _vx_table_rows(html)] == [e for e, _ in live]
+    m1m2 = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    assert m1m2.startswith(f"M1 → M2 {_signed2((live[1][1] / live[0][1] - 1) * 100)}%")
+    note = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-settled">(.*?)</p>', html,
+                                                           re.DOTALL).group(1)))
+    assert note == ("Left out: " + " and ".join(f"{e[:7]} (final settlement {e})" for e in gone)
+                    + f", settled by {newest}; M1 is the first contract still trading on it.")
+    assert f"{len(live)} monthly contracts on {vx_last} still trading on {newest}" in spec["describe"]
+
+
 def test_freshness_table_lists_vx_futures_on_their_own_date(dash, pages):
     """P3.1: the footer's freshness table lists the VX futures settlements with
     their as-of date, their age in NYSE sessions and the staleness styling of
@@ -6712,9 +6751,10 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     the spot chart."""
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
+        cut = max(last, _newest_session())     # CIO-15: only contracts still trading on the newest session
         px = [r[0] for r in con.execute(
             "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
-            "AND is_weekly = 0 AND days_to_expiry > 0 ORDER BY expiry_date", (last, last))]
+            "AND is_weekly = 0 AND days_to_expiry > 0 ORDER BY expiry_date", (last, cut))]
     html = pages["/"]
     line = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
                                                             re.DOTALL).group(1)))
