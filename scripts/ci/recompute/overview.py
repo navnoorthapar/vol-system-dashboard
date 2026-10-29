@@ -495,6 +495,15 @@ def fails_items(store: Store, f: Facts) -> list[Item]:
     return items
 
 
+def h_side(row: dict[str, Any]) -> str | None:
+    """Which bound the joint rough-Heston H is on in a diagnostics row: 'floor' (rough,
+    H at its lower bound) or 'ceiling' (H = ½: the rough model is Heston), else None."""
+    h = om.finite(row.get("joint_rough_H"))
+    if "H" not in (row.get("joint_rough_on_bound") or []) or h is None:
+        return None
+    return "floor" if h < 0.25 else "ceiling"
+
+
 def next_items(store: Store, f: Facts) -> list[Item]:
     """'Next': the forward test, rough Heston, the VX leg, a wider σ box."""
     led = om.forward_ledger(store)
@@ -502,10 +511,10 @@ def next_items(store: Store, f: Facts) -> list[Item]:
                           [float(led["n"] if led else 0)], "forward/ledger_*.json, hash chain checked")]
     jr = joint_result(f)
     if jr:
-        on_floor = "H" in (jr["cur"].get("joint_rough_on_bound") or [])
+        side = h_side(jr["cur"])
         items.append(("calibration.html#rough-vs-heston", "Rough Heston in production",
                       [float(jr["lower"]), float(jr["n"]),
-                       *([jr["cur"]["joint_rough_H"]] if on_floor else []), jr["cur"]["session"]],
+                       *([jr["cur"]["joint_rough_H"]] if side == "floor" else []), jr["cur"]["session"]],
                       "diagnostics/summary.json rows"))
     legs = f["legs"]
     with_leg = [v["leg"] for v in legs["views"] if v["leg"]]
@@ -568,9 +577,10 @@ def check_finding_words(a: Audit, f: Facts) -> None:
     jr = joint_result(f)
     li = by_text(a.one("#find-list-next"), "li", "Rough Heston")
     if li is not None and jr:
-        on_floor = "H" in (jr["cur"].get("joint_rough_on_bound") or [])
+        want = {"floor": "but H sits on its 0.02 floor",
+                "ceiling": f"and on {jr['cur']['session']} it returns H = ½, which is Heston"}
         a.text(P_FIND, "rough Heston: H wording", li,
-               "but H sits on its 0.02 floor" if on_floor else "but H is weakly identified", contains=True)
+               want.get(h_side(jr["cur"]) or "", "but H is weakly identified"), contains=True)
     li = by_text(a.one("#find-list-next"), "li", "VX futures in the joint objective")
     if li is not None and vx_empty(f):
         a.text(P_FIND, "VX leg: why the headline fit has none", inline_text(li), vx_empty(f), contains=True)
@@ -650,7 +660,8 @@ def joint_card(a: Audit, f: Facts, jr: dict[str, Any], c: Tag | None) -> None:
     el = part(c, ".result-d")
     said(a, P_KEY, "joint fit card: detail", el, detail, "diagnostics/summary.json")
     says(a, P_KEY, "joint fit card", el, "(σ on its box cap)", "sigma" in (cur.get("on_bound") or []))
-    says(a, P_KEY, "joint fit card", el, "on its floor", "H" in (cur.get("joint_rough_on_bound") or []))
+    says(a, P_KEY, "joint fit card", el, "on its floor", h_side(cur) == "floor")
+    says(a, P_KEY, "joint fit card", el, "(= Heston)", h_side(cur) == "ceiling")
     rse = om.finite((cur.get("relative_standard_errors") or {}).get("kappa"))
     said(a, P_KEY, "joint fit card: ranges", part(c, ".kpi-ci"),
          [float(jr["n"]), min(jr["h"]), max(jr["h"]), min(jr["rough"]), max(jr["rough"]),

@@ -2867,7 +2867,11 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         assert dash.model_label(key) == s["legendKey"]
         q = res[(res["model"] == key) & (res["expiry"] == e)].sort_values("k", kind="mergesort")
         assert [p[0] for p in s["data"]] == [m[0] for m in mids], s["name"]
-        assert [m[0] for m in mids] == [round(float(k), 6) for k in q["k"]], s["name"]
+        # the packed block carries K and F and the page takes k = ln(K/F) from them, so
+        # it agrees with the residual table's k (10 significant digits) to rounding:
+        # an exact compare after rounding both to 6 decimals failed at a ...5 boundary
+        # (the bot's 2026-10-28 session: −0.180998 against −0.180999)
+        assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
         assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
@@ -5992,24 +5996,39 @@ def test_fit_losses_reach_the_tiles_unrounded(dash):
             assert d[key] == float(losses[src]), key
 
 
+def _renderings_in_blocks(html: str, v: float, words: tuple[str, ...]) -> set[str]:
+    """Each rendering of ``v`` at 2-4 decimals inside a block (a paragraph, list item,
+    table row, KPI tile or caption) whose text names the metric (any of ``words``).
+    Scanning whole pages read unrelated figures with the same digits as the metric's:
+    '−1.659' on Calibration (another table), and κ's standard error '± 1.597' beside
+    the 2026-10-28 SVI-cal median |z| 1.5966."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    found: set[str] = set()
+    for block in soup.select("main p, main li, main tr, main .kpi, main caption, main figcaption"):
+        text = " ".join(block.get_text(" ", strip=True).split())
+        if not any(w in text for w in words):
+            continue
+        for p in (2, 3, 4):
+            if re.search(r"(?<![\d.\u2212+-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text):
+                found.add(f"{v:.{p}f}")
+    return found
+
+
 def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_page(dash, pages):
     """P2.6: Calibration printed the Heston OOS RMSE as 2.955 where the Overview
     and Model Risk print 2.96. Every page renders it, and the SVI-cal median |z|,
-    at one precision."""
+    at one precision, wherever it is named."""
     _, cal = dash.load_headline_calibration()
     heston = dash._cal_losses(cal)["spx_oos_iv_rmse"]
     sc = json.loads(_surface_file("scorecard.json").read_text())
     svi_m = next(m for m in sc["models"] if m["model"] == "svi_cal")
     svi = svi_m["metrics"]["out_of_sample"]["median_abs_hs"]
-    for name, v, must in (("Heston OOS RMSE", heston, ("/", "/calibration", "/model-risk")),
-                          ("SVI-cal median |z|", svi, ("/", "/surface"))):
-        seen = {}
-        for route, html in pages.items():
-            text = _visible_text(html)
-            found = {f"{v:.{p}f}" for p in (2, 3, 4)
-                     if re.search(r"(?<![\d.\u2212-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
-            if found:
-                seen[route] = found
+    for name, v, must, words in (
+            ("Heston OOS RMSE", heston, ("/", "/calibration", "/model-risk"),
+             ("RMSE", "out of sample", "Out of sample", "OOS")),
+            ("SVI-cal median |z|", svi, ("/", "/surface"), ("|z|", "half-spread"))):
+        seen = {route: f for route, html in pages.items() if (f := _renderings_in_blocks(html, v, words))}
         assert set(must) <= set(seen), (name, seen)
         assert set().union(*seen.values()) == {f"{v:.2f}"}, (name, seen)
 
@@ -9155,3 +9174,36 @@ def test_an_expiry_left_out_of_the_scored_universe_is_named_on_the_surface_page(
     text = " ".join(note.get_text().split())
     assert text.startswith("Left out of the scored universe: 2030-01-18 (1,234 quotes).")
     assert "outside its spread" in text
+
+
+def test_the_rough_heston_bound_is_named_by_its_side(dash, pages):
+    """Found by the bot's 2026-10-28 deploy gate (the recompute audit): the joint
+    rough-Heston fit returned H = ½, its upper bound, where the model is Heston, and
+    the Overview and Calibration said 'H sits on its 0.02 floor', because any bound
+    was read as the floor. The side is decided from H against the configured bounds."""
+    from joint_vol_calibration.config import ROUGH_HESTON_H_BOUNDS
+    lo, hi = (float(x) for x in ROUGH_HESTON_H_BOUNDS)
+
+    def row(session, h, on_bound):
+        return {"session": session, "sigma_cap2_oos": 1.5, "joint_rough_oos": 1.4, "joint_rough_H": h,
+                "joint_rough_on_bound": on_bound, "on_bound": [], "joint_heston_vix_index": 0.4,
+                "joint_rough_vix_index": 0.4, "relative_standard_errors": {}}
+    for h, on_bound, side in ((lo, ["H"], "floor"), (hi, ["H"], "ceiling"), (0.3, [], None)):
+        jr = dash.joint_fit_result({"state": "ok", "rows": [row("2030-01-02", h, on_bound)]}, "2030-01-02")
+        assert jr["rough_H_side"] == side, h
+        assert jr["rough_H_floor"] == lo
+    # the published pages, on whichever side today's fit is
+    from bs4 import BeautifulSoup
+    jr = dash.load_page2().get("rough_vs_heston", {}).get("result")
+    if not jr:
+        pytest.skip("no diagnosed session")
+    li = next(x for x in BeautifulSoup(pages["/"], "lxml").select("#find-list-next li")
+              if "Rough Heston" in x.get_text())
+    text = " ".join(li.get_text(" ", strip=True).split())
+    cal = BeautifulSoup(pages["/calibration"], "lxml")
+    verdict = " ".join(cal.select_one("#rough-verdict").get_text().split())
+    if jr["rough_H_side"] == "ceiling":
+        assert "it returns H = ½, which is Heston" in text
+        assert "returns H = ½, which is Heston" in verdict.split("H is weakly identified")[1]
+    for t in (text, verdict):
+        assert ("floor" in t) is (jr["rough_H_side"] == "floor"), t
