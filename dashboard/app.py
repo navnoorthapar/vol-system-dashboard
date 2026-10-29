@@ -614,14 +614,25 @@ VX_DP = 4
 VX_FMT = f".{VX_DP}f"
 
 
-def vx_last_date() -> str | None:
-    """The newest session the market DB stores VX futures for (None: no futures table)."""
+def vx_last_date(on_or_before: str | None = None) -> str | None:
+    """The newest session the market DB stores VX futures for, on or before
+    ``on_or_before`` when given (None: no futures table, or no row by then)."""
     with _db() as con:
         try:
-            row = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()
+            row = con.execute("SELECT MAX(date) FROM vix_futures_daily WHERE substr(date, 1, 10) <= ?",
+                              (on_or_before or "9999-12-31",)).fetchone()
         except sqlite3.OperationalError:          # a market DB without the futures table
             return None
     return str(row[0])[:10] if row and row[0] else None
+
+
+def vix_close_on(session: str) -> float | None:
+    """VIX's close of exactly ``session`` (vix_daily: Cboe's 16:15 ET print), to the
+    2 dp Cboe publishes (a float32 copy of a print reads 18.389999389648438), or
+    None when the market DB has none for that session."""
+    with _db() as con:
+        row = con.execute("SELECT close FROM vix_daily WHERE substr(date, 1, 10) = ?", (session,)).fetchone()
+    return round(float(row[0]), 2) if row and row[0] is not None else None
 
 
 def vx_prev_date(before: str) -> str | None:
@@ -5042,7 +5053,9 @@ def overview_vix_complex(d: dict) -> None:
     d["vx_curve"] = None
     d["vx_empty"] = "No VX futures settlements are stored."
     d["vx_fmt"] = VX_FMT
-    last = vx_last_date()
+    # at the newest session once the table is current, never after it (a session the
+    # table holds beyond the newest session the site has data for is not drawn)
+    last = vx_last_date(_latest_market_session())
     if last:
         fr = vx_freshness(last)
         cut = max(last, fr["ref"] or last)
@@ -5053,9 +5066,13 @@ def overview_vix_complex(d: dict) -> None:
             d["vx_empty"] = f"No VX monthly contract stored on {last} is still trading on {cut}."
         else:
             settled = " and ".join(f"{r['month']} (final settlement {r['expiry']})" for r in cur["settled"])
+            # the front basis: VX1's settlement less VIX's close of the curve's session, shown
+            # when that is the newest session (a stale curve's VX1 need not be its own front)
+            vix = vix_close_on(last) if fr["age"] == 0 else None
             d["vx_curve"] = {**cur, "date": last, "prev_date": prev_date if prev else None, "prev": prev,
                              "age": fr["age"], "level": stale_level(fr["age"]), "ref": fr["ref"],
-                             "ref_source": fr["ref_source"], "cut": cut, "settled_text": settled}
+                             "ref_source": fr["ref_source"], "cut": cut, "settled_text": settled,
+                             "vix": vix, "basis": cur["m1"]["settle"] - vix if vix is not None else None}
             pv = {r["expiry"]: r["settle"] for r in (prev or {}).get("rows") or []}
             cats = [r["expiry"] for r in cur["rows"]]
             series = [{"name": f"{last} settlements", "type": "line", "role": "market", "color": "headline",

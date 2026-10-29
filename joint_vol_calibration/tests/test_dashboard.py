@@ -6364,6 +6364,69 @@ def test_record_db_renders_the_vx_settlements_the_bot_recorded(dash, synth):
                     "Cboe settlements after its close.")
 
 
+def _vx_basis_line(html: str) -> str:
+    m = re.search(r'<p class="note" id="vx-basis">(.*?)</p>', html, re.DOTALL)
+    assert m is not None, "no #vx-basis line"
+    return _html_unescape(re.sub(r"<[^>]+>", "", m.group(1)))
+
+
+def test_overview_vx_curve_and_basis_are_of_the_newest_session(dash, synth):
+    """FUND_GRADE_PLAN 1.12, item 3: with the futures table current, the Overview's
+    VX panel is of the newest session the site has data for (a session the table
+    holds beyond it is not drawn), with M1 → M2 and the front basis VX1 − VIX:
+    VX1's settlement less VIX's close of that session (2 dp, as Cboe prints it),
+    every number derived here from the tables."""
+    dates, data = synth["dates"], synth["data"]
+    newest = str(dates[-1].date())
+    ahead = str(pd.bdate_range(dates[-1] + pd.Timedelta(days=1), periods=1)[0].date())
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-25:]] + [ahead], VX_EXPIRIES_2024)
+    with sqlite3.connect(data / "vol_system.db") as con:
+        live = con.execute("SELECT expiry_date, settle, days_to_expiry FROM vix_futures_daily WHERE date = ? "
+                           "AND expiry_date > ? AND is_weekly = 0 ORDER BY expiry_date",
+                           (newest, newest)).fetchall()
+        vix = round(con.execute("SELECT close FROM vix_daily WHERE date = ?", (newest,)).fetchone()[0], 2)
+    ov = dash.load_overview()["vx_curve"]
+    assert (ov["date"], ov["age"], ov["cut"]) == (newest, 0, newest)
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert _spec(html, "chart-vx-curve")["x"]["categories"] == [e for e, _, _ in live]
+    m1m2 = _html_unescape(re.sub(r"<[^>]+>", "", re.search(r'<p class="note" id="vx-m1m2">(.*?)</p>', html,
+                                                            re.DOTALL).group(1)))
+    assert m1m2.startswith(f"M1 → M2 {_signed2((live[1][1] / live[0][1] - 1) * 100)}% "
+                           f"({live[0][1]:.4f} → {live[1][1]:.4f})")
+    exp, settle, days = live[0]
+    assert _vx_basis_line(html) == (
+        f"VX1 − VIX {_signed2(settle - vix)} pts ({settle:.4f} − {vix:.2f}): the front contract’s settlement "
+        f"(15:00 Chicago time) less VIX’s 16:15 ET close, both of {newest}; positive: the future prices VIX "
+        f"above its spot level. VX1 settles on VIX’s special opening quotation of {exp}, "
+        f"{days} calendar days later.")
+
+
+def test_overview_vx_basis_waits_for_a_current_futures_table(dash, synth):
+    """A curve older than the newest session gets no basis: its VX1 (the first
+    contract still trading on the newest session) need not be its own front
+    month, and VIX has moved since. The panel says so and of which session the curve is."""
+    dates = synth["dates"]
+    vx_last = str(dates[-3].date())
+    _write_vx_table(synth["data"] / "vol_system.db", [str(d.date()) for d in dates[-20:-2]], VX_EXPIRIES_2024)
+    assert dash.load_overview()["vx_curve"]["basis"] is None
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert _vx_basis_line(html) == (f"VX1 − VIX is shown for a curve of the newest session; "
+                                    f"this one is of {vx_last}.")
+
+
+def test_overview_vx_basis_says_when_the_sessions_vix_close_is_missing(dash, synth):
+    """A current curve whose session has no VIX close in the market database gets
+    no basis from a nearby close: the panel says which close is missing."""
+    dates, data = synth["dates"], synth["data"]
+    newest = str(dates[-1].date())
+    _write_vx_table(data / "vol_system.db", [str(d.date()) for d in dates[-5:]], VX_EXPIRIES_2024)
+    with sqlite3.connect(data / "vol_system.db") as con:
+        assert con.execute("DELETE FROM vix_daily WHERE substr(date, 1, 10) = ?", (newest,)).rowcount == 1
+    assert dash.load_overview()["vx_curve"]["date"] == newest
+    html = dash.app.test_client().get("/").get_data(as_text=True)
+    assert _vx_basis_line(html) == f"VX1 − VIX: the market database has no VIX close of {newest}."
+
+
 def _vx_curve_rows(session: str, expiries: tuple[str, ...]) -> pd.DataFrame:
     """One session's monthly VX rows as the bot records them (the settlement file:
     symbol and settle, no OHLC), in contango at 4 dp."""
@@ -6831,7 +6894,9 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     sessions is shown in the stale styling of that age, and the curve is not on
     the spot chart."""
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
-        last = con.execute("SELECT MAX(date) FROM vix_futures_daily").fetchone()[0]
+        # the table's newest session, but never one after the newest session the site has
+        last = con.execute("SELECT MAX(date) FROM vix_futures_daily WHERE date <= ?",
+                           (_newest_session(),)).fetchone()[0]
         cut = max(last, _newest_session())     # CIO-15: only contracts still trading on the newest session
         px = [r[0] for r in con.execute(
             "SELECT COALESCE(settle, close) FROM vix_futures_daily WHERE date = ? AND expiry_date > ? "
@@ -6853,6 +6918,13 @@ def test_overview_vx_curve_is_on_its_own_date_with_its_m1_m2(dash, pages):
     assert not any("settlement" in s["name"] for s in ts["series"])
     with sqlite3.connect(f"file:{_market_db()}?mode=ro", uri=True) as con:
         _assert_vx_changes_add_up(html, con)
+        vix = con.execute("SELECT close FROM vix_daily WHERE date = ?", (last,)).fetchone()
+    basis = _vx_basis_line(html)                     # VX1 − VIX: only on a curve of the newest session
+    if age:
+        assert basis == f"VX1 − VIX is shown for a curve of the newest session; this one is of {last}."
+    else:
+        assert basis.startswith(f"VX1 − VIX {_signed2(px[0] - round(vix[0], 2))} pts "
+                                f"({px[0]:.4f} − {round(vix[0], 2):.2f})")
 
 
 def test_overview_vix_over_vix3m_share_and_percentile(dash, pages):

@@ -962,7 +962,8 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     """The VX monthly curve on the futures table's own newest date, its age in NYSE
     sessions, the session before (dashed), M1 → M2, the table and the chart series."""
     sec = a.one("section#vx-curve")
-    last = vx_last(store)
+    # the table's newest session on or before the newest session the site has data for
+    last = vx_last(store, (pd.Timestamp(f["ref_mkt"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
     # read on the newest session: a contract whose final settlement is on or before
     # it (or the table's own date) no longer trades, so the page leaves it out
     cut: str = max(last, f["ref_mkt"]) if last else ""
@@ -1033,6 +1034,23 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
                         str(new - old))
     said(a, P_VX, "M1 → M2", sec.select_one("#vx-m1m2"),
          [*([m1m2, s[0], s[1]] if m1m2 is not None else []), "VX2 / VX1 − 1", *dashed])
+    # VX1 − VIX: the front settlement less VIX's close of the curve's session (Cboe
+    # prints VIX to 2 dp), shown only when the curve is of the newest session
+    basis_el = sec.select_one("#vx-basis")
+    vix = store.vix_close()
+    vix_last = round(float(vix[last]), 2) if last in vix.index and np.isfinite(vix[last]) else None
+    if age != 0:
+        said(a, P_VX, "VX1 − VIX", basis_el, [last])
+        says(a, P_VX, "VX1 − VIX", basis_el,
+             "is shown for a curve of the newest session; this one is of", True)
+    elif vix_last is None:
+        said(a, P_VX, "VX1 − VIX", basis_el, [last])
+        says(a, P_VX, "VX1 − VIX", basis_el, "the market database has no VIX close", True)
+    else:
+        said(a, P_VX, "VX1 − VIX", basis_el,
+             [s[0] - vix_last, s[0], vix_last, "15:00 Chicago time", "16:15 ET", last,
+              str(cur["expiry_date"].iloc[0]), float(cur["days"].iloc[0])],
+             "VX1 = the first monthly contract; VIX = vix_daily close of the curve's session")
     spec = spec_json(a, "chart-vx-curve", P_VX)
     ser = spec.get("series") or []
     a.equal(P_VX, "chart categories (final settlement dates)", (spec.get("x") or {}).get("categories"),
