@@ -2,7 +2,7 @@
 report.py — run the surface layer on one stored session and write its
 artifacts under data_store/surface/<session>/.
 
-Artifacts (schema_version 1; floats rounded to 10 significant digits, keys
+Artifacts (schema_version 1, report_version REPORT_VERSION; floats rounded to 10 significant digits, keys
 sorted, no wall-clock fields, so a rerun on the same inputs reproduces the
 files byte for byte on the same machine):
 
@@ -18,8 +18,13 @@ residuals.parquet — one row per (model, quote) of the scoring universe:
     (leg of a row violated at mids), repair_dprice (LP price change, index
     points). Sorted by model order, then T, strike.
 
-surface.json — inputs (chain path and SHA-256, spot, rate, T origin,
-    source), universe counts, the static-arbitrage screen (row counts and
+surface.json — inputs (which book and why: the session's newest stored
+    Cboe capture when it passes the forward ledger's quote-state gates, else
+    its Yahoo chain (quotes.select_session_chain); its path and SHA-256, the
+    capture's payload SHA-256, the books refused and why, spot, rate, T
+    origin, source, quote time (None for a Yahoo chain: it records none),
+    the download instant fetched_at, book_state, the near-ATM two-sided share),
+    universe counts, the static-arbitrage screen (row counts and
     violations per CRW row type, mid and executable; the bid / ask box
     certificate; the total-variance calendar diagnostic), the l1-BA repair
     summary with the largest violating rows and the quotes it moves outside
@@ -55,10 +60,9 @@ index.json (in data_store/surface/) — one summary row per session written.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +70,6 @@ import numpy as np
 import pandas as pd
 
 from joint_vol_calibration.config import DATA_DIR
-from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
 from joint_vol_calibration.surface import arbitrage as arb
 from joint_vol_calibration.surface import essvi as es
@@ -77,7 +80,29 @@ from joint_vol_calibration.surface import vix as vx
 from joint_vol_calibration.surface._blas import single_thread_blas
 
 SCHEMA_VERSION = 1
+# The methodology version of a session's artifacts: report_version in
+# surface.json, scorecard.json, vix_replication.json and the index row. Raise
+# it with any change to what a committed session's artifacts would say. The
+# bot's backfill (scripts/cloud_refresh.artifact_gaps) then rebuilds every
+# committed session stored under an older version, MAX_BACKFILL_SESSIONS a
+# run, so a method change reaches the whole record, not only new sessions.
+#   1  (no field) to C23f: the session's Yahoo chain; a Yahoo download's run
+#      clock stored as its quote time
+#   2  plan 0.7: the session's Cboe book when it passes the quote-state
+#      gates, else the Yahoo chain (no quote time; T from the close), and
+#      the choice recorded in surface.json inputs
+#   3  a VIX bracket outside Cboe's 23-37 day term window is a deviation
+#      (indices.VIX.cboe_term_window); a session without an accepted
+#      Heston fit gets a surface, its Heston row unavailable with a reason
+REPORT_VERSION = 3
 SURFACE_DIR = DATA_DIR / "surface"
+
+
+def stored_report_version(doc: Any) -> int:
+    """The report_version a stored artifact (a parsed JSON object) was written
+    under; 1 for one that predates the field."""
+    v = doc.get("report_version") if isinstance(doc, dict) else None
+    return int(v) if isinstance(v, int) and not isinstance(v, bool) else 1
 SIG_DIGITS = 10
 WIDE_K_GRID = np.linspace(-3.0, 2.0, 2001)      # eSSVI g check (its conditions are analytic)
 
@@ -179,16 +204,6 @@ def write_residuals(df: pd.DataFrame, path: Path) -> None:
                   use_byte_stream_split=floats, use_dictionary=others, **kw)
 
 
-def _sha256(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 # ── per-session computation ───────────────────────────────────────────────────
 
 def _calc_time_ny(sq: sqm.SessionQuotes) -> datetime:
@@ -266,6 +281,57 @@ def _repaired_quotes(q: pd.DataFrame, flags: pd.DataFrame, n: int = 25) -> dict:
             "largest": d.head(n).to_dict(orient="records")}
 
 
+def _quote_source_note(sq: sqm.SessionQuotes) -> str:
+    """The scorecard's line on what the quotes are, from the chain's own record."""
+    d, inp = sq.diagnostics, sq.inputs
+    src = d.get("source")
+    if src == "cboe":
+        return (f"Quotes are Cboe's delayed SPX book ({inp.get('chain')}) as of {d.get('quote_time')} "
+                f"({inp.get('book_state') or 'book state not recorded'}): every model is scored "
+                "against the exchange's own bid and ask at one instant.")
+    if not oc.records_quote_time(src):
+        return ("Quotes are the session's Yahoo chain, which records no quote time"
+                + (f" (downloaded {inp['fetched_at']})" if inp.get("fetched_at") else "")
+                + ": part of every model's spread misses can be stale quotes rather than model error.")
+    return (f"Quotes are from {src or 'an unrecorded source'}"
+            + (f", as of {d['quote_time']}." if d.get("quote_time") else ", with no quote time."))
+
+
+def _vix_term_window(rep: dict, terms: list, calc: datetime) -> dict | None:
+    """vx.cboe_term_window of the replication the VIX headline uses (its
+    headline_method; cboe_rules when none is headline, so an extrapolated
+    pair is still checked)."""
+    return vx.cboe_term_window(rep.get(rep.get("headline_method") or "cboe_rules") or {}, terms, calc)
+
+
+def _heston_note(models: list) -> str:
+    """The scorecard's line on the Heston row: its in- and out-of-sample sets,
+    or why the session has none (the surface does not wait for a fit)."""
+    row = next((m for m in models if str(m.get("model", "")).startswith("heston")), None)
+    if row is not None and row.get("available"):
+        return ("Heston's in-sample set is its calibration anchors, fitted jointly with the VIX "
+                "index leg, and its out-of-sample set is every other quote.")
+    if row is not None:
+        return f"Heston is not scored on this session: {row.get('reason') or 'no stored fit'}"
+    return "Heston is not in this scorecard."
+
+
+def _timing_deviation(sq: sqm.SessionQuotes, calc: datetime) -> str:
+    """The calculation-time departure, from the chain's T origin and record."""
+    d, inp = sq.clean_diagnostics, sq.inputs
+    if str(d.get("t_origin_basis", "")).startswith("quote_time"):
+        return (f"Calculation time is the book's quote time, {calc:%Y-%m-%d %H:%M} ET "
+                f"({inp.get('book_state') or 'GTH'} book; Cboe's delayed feed, payload timestamp "
+                "minus 15 minutes), not the 16:15 ET close the official index is compared with: "
+                "the gap mixes the replication with the market's move between the two instants.")
+    if d.get("quote_time"):
+        return (f"Calculation time is the session's 16:00 ET close; the book was quoted at "
+                f"{d['quote_time']} (its closing book) and the official close is the 16:15 ET print.")
+    return ("Calculation time is the session's 16:00 ET close: the chain records no quote time "
+            "(Yahoo)" + (f"; it was downloaded {inp['fetched_at']}" if inp.get("fetched_at") else "")
+            + ". The official close is the 16:15 ET print.")
+
+
 def _settlement_deviations(terms: list) -> list:
     """Deviation lines for the settlement each stored term was given."""
     out = []
@@ -312,17 +378,9 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                      "unmeasured.")
     v = vixrep.get("cboe_rules", {})
     if v.get("ok"):
+        # a bracket outside Cboe's 23-37 day window is a deviation
+        # (vx.term_window_deviation), not a note
         near, nxt = v["near"], v["next"]
-        target = date.fromisoformat(sq.session) + timedelta(days=30)
-        exp_dates = {t["expiry"] for t in terms}
-        d = target + timedelta(days=1)
-        while not vx.is_end_of_week_expiry(d.isoformat()):
-            d += timedelta(days=1)
-        if d.isoformat() not in exp_dates:
-            notes.append(f"The first Cboe candidate expiry after 30 days ({d.isoformat()}) is not "
-                         f"in the stored chain (the bot stores calibration expiries and "
-                         f"neighbours), so the bracket is {near['expiry']} ({near['days']:.1f}d) - "
-                         f"{nxt['expiry']} ({nxt['days']:.1f}d) instead of a <= 7-day bracket.")
         for lab, t in (("near", near), ("next", nxt)):
             notes.append(f"{lab}-term {t['expiry']}: {t['n_puts']} puts / {t['n_calls']} calls, "
                          f"strip K/F {t['lowest_K_over_F']:.3f}-{t['highest_K_over_F']:.3f}"
@@ -365,12 +423,17 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
 
 
 def run_session(session: str, *, calibrations_dir: Path | None = None,
-                chain: pd.DataFrame | None = None, models: list | None = None) -> dict:
+                chain: pd.DataFrame | None = None, models: list | None = None,
+                source: str = "auto") -> dict:
     """Compute every artifact of ``session``. Returns {'residuals': frame,
-    'surface': dict, 'scorecard': dict, 'vix_replication': dict}."""
+    'surface': dict, 'scorecard': dict, 'vix_replication': dict}.
+
+    The quotes are the session's newest stored Cboe book when it passes the
+    quote-state gates, else its Yahoo chain (quotes.select_session_chain;
+    ``source`` forces one); surface.json inputs record which and why."""
     session = str(pd.Timestamp(session).date())
     with single_thread_blas():
-        sq = sqm.load_session_quotes(session, chain=chain)
+        sq = sqm.load_session_quotes(session, chain=chain, source=source)
         q = sq.quotes
         screen = arb.screen(q)
         flags = screen.quote_flags
@@ -415,14 +478,23 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                          "atm_vol_mid_quotes": 100.0 * float(np.interp(
                              0.0, np.sort(g["k"].to_numpy(float)),
                              g["mid_iv"].to_numpy(float)[np.argsort(g["k"].to_numpy(float))]))})
-        chain_path = db.options_snapshot_path(session, "SPX")
+        src = sq.inputs
         surface_doc = {
-            "schema_version": SCHEMA_VERSION, "session": session,
+            "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "inputs": {
-                "chain": f"data_store/options/spx_{session}.parquet" if chain is None else "argument",
-                "chain_sha256": _sha256(chain_path) if chain is None else None,
+                # which book (the session's Cboe capture when it passes the
+                # quote-state gates, else its Yahoo chain) and why
+                "chain": src.get("chain"), "chain_sha256": src.get("chain_sha256"),
+                "raw_sha256": src.get("raw_sha256"),
                 "chain_rows": len(sq.raw), "source": sq.diagnostics.get("source"),
+                "source_reason": src.get("source_reason"),
+                "refused_books": list(src.get("refused") or []),
+                # None for a Yahoo chain (it records none); fetched_at is when it
+                # was downloaded and never a T origin
                 "quote_time": sq.diagnostics.get("quote_time"),
+                "fetched_at": src.get("fetched_at"),
+                "book_state": src.get("book_state"),
+                "near_atm_two_sided_share": sq.diagnostics.get("near_atm_two_sided_share"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),
                 "spot": sq.spot, "r_ref_cc": sq.r_ref, "r_ref_source": sq.r_ref_source,
@@ -454,7 +526,8 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                           key=lambda r: (r["oos_median_abs_hs"] is None, r["oos_median_abs_hs"]))
         common = card["common_out_of_sample"]
         own_n = ", ".join(f"{m['model']} {m['metrics']['out_of_sample'].get('n', 0):,}" for m in avail)
-        scorecard_doc = {"schema_version": SCHEMA_VERSION, "session": session,
+        scorecard_doc = {"schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION,
+                         "session": session,
                          "n_quotes": len(q), "models": card["models"],
                          "common_out_of_sample": common,
                          "ranking_by_oos_median_abs_hs": _rank("out_of_sample"),
@@ -467,12 +540,10 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                               f"({own_n}); metrics.common_out_of_sample scores every model on "
                               f"the same {common['n']:,} quotes, those no model was fitted to."),
                              ("Surfaces are fitted to alternate strikes, so their out-of-sample "
-                              "quotes are the strikes in between (an interpolation test); Heston's "
-                              "in-sample set is its calibration anchors, fitted jointly with the "
-                              "VIX index leg, and its out-of-sample set is every other quote."),
+                              "quotes are the strikes in between (an interpolation test); "
+                              + _heston_note(card["models"])),
                              _svi_cal_note(surfaces.get("svi_cal")),
-                             ("Yahoo snapshots carry no quote time: part of every model's spread "
-                              "misses can be stale quotes rather than model error.")]}
+                             _quote_source_note(sq)]}
 
         # vix_replication.json
         calc = _calc_time_ny(sq)
@@ -501,6 +572,8 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                     if "low" in off:
                         rep["official_inside_day_range"] = bool(off["low"] <= head["level"] <= off["high"])
             indices[name] = rep
+        # Cboe's near and next terms have more than 23 and fewer than 37 days
+        indices["VIX"]["cboe_term_window"] = _vix_term_window(indices["VIX"], terms, calc)
         model_surfaces = {n: o for n, o in objs.items() if o is not None}
         strip = vx.variance_swap_strip(terms, sq.r_ref, q, carry=carry_map,
                                        surfaces=model_surfaces)
@@ -541,7 +614,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
             if atm30:
                 beta["atm_over_vix_replicated"] = atm30 / indices["VIX"]["replicated"]
         vix_doc = {
-            "schema_version": SCHEMA_VERSION, "session": session,
+            "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "calculation_time_ny": calc.isoformat(timespec="minutes"),
             "rate": {"R_cc": sq.r_ref,
                      "source": ("^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"
@@ -554,7 +627,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                  if sq.r_ref_source == sqm.IRX_SOURCE else
                  "R is the Treasury zero curve's 91-day rate (cc) for both terms, not Cboe's "
                  "CMT spline per expiry; dVIX/dR ~ VIX T / 2."),
-                "Calculation time is the chain's T origin; Yahoo snapshots carry no quote time.",
+                _timing_deviation(sq, calc),
                 ("parity_forward replaces the single-strike forward with the cleaned chain's "
                  "parity-regression F and D (robust to one stale strike)."),
                 ("K0 falls back to the nearest lower strike with both sides quoted when the listed "
@@ -562,6 +635,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 ("VIX9D/VIX3M/VIX6M use the VIX candidate set and bracket rule at 9/93/184 days "
                  "(analogues, not Cboe's index-specific series sets)."),
                 *_settlement_deviations(terms),
+                *filter(None, [vx.term_window_deviation(indices["VIX"]["cboe_term_window"])]),
             ],
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,
@@ -601,7 +675,10 @@ def index_row(out: dict) -> dict:
                               "calendar_violations": m["dense_grid"]["calendar_violations"]}
     v = vx_doc["indices"]["VIX"]
     arbd = out["surface"]["arbitrage"]
+    inp = out["surface"].get("inputs") or {}
     return {"session": sc_doc["session"], "n_quotes": sc_doc["n_quotes"],
+            "report_version": out["surface"].get("report_version"),
+            "source": inp.get("source"), "quote_time": inp.get("quote_time"),
             "arbitrage_quotes_outside_spread": arbd["repair"].get("n_perturbed_outside_spread"),
             "executable_arbitrage": arbd["executable_arbitrage_certificate"].get("executable_arbitrage"),
             "vix_gap_attribution": {k: v.get("gap_attribution", {}).get(k) for k in

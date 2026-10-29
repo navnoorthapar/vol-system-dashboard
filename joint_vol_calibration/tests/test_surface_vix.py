@@ -339,3 +339,54 @@ def test_headline_method_refuses_an_extrapolated_bracket():
     assert "2026-10-30 (14.0d) / 2026-11-13 (28.0d)" in why
     assert "1.357" in why
     assert vix.headline_method({"cboe_rules": _rep(ok=False), "parity_forward": _rep(ok=False)})[0] is None
+
+
+# ── the VIX bracket against Cboe's 23-37 day window (CITSEC-03, QUANT-02, VALIDATOR-05)
+
+def _window_terms(expiries, calc):
+    """term_tables-like rows for ``expiries`` (all candidates) at ``calc``."""
+    out = []
+    for e in expiries:
+        sett = "AM" if vix.is_spx_am_settlement_date(e) else "PM"
+        m = vix.minutes_to_settlement(calc, e, sett)
+        out.append({"expiry": e, "settlement": sett, "minutes": m, "candidate": True})
+    return out
+
+
+def test_a_bracket_outside_cboes_term_window_is_a_listed_deviation():
+    """A chain without the candidates 23-37 days out (the 2026-10-26 Yahoo
+    chain bracketed 10.6 d / 31.6 d): the window check says so, names the
+    missing candidates with their days, and the deviation line carries both
+    terms' days. With the full listing the bracket is Cboe's and no line is
+    written."""
+    calc = datetime(2026, 10, 26, 16, 0, tzinfo=oc.NY_TZ).replace(tzinfo=None)   # naive NY, as the report
+    full = ["2026-11-06", "2026-11-13", "2026-11-20", "2026-11-27", "2026-12-04"]
+    terms = _window_terms(full, calc)
+    rep = {"ok": True, "near": None, "next": None}
+    near, nxt = vix.bracket(terms, 30 * 1440.0)
+    rep.update(near={"expiry": near["expiry"], "days": near["minutes"] / 1440.0},
+               next={"expiry": nxt["expiry"], "days": nxt["minutes"] / 1440.0})
+    win = vix.cboe_term_window(rep, terms, calc)
+    assert (win["near"]["expiry"], win["next"]["expiry"]) == ("2026-11-20", "2026-11-27")
+    assert win["inside"]
+    assert win["missing_candidates"] == []
+    assert vix.term_window_deviation(win) is None
+    sparse = _window_terms(["2026-11-06", "2026-11-27", "2026-12-18"], calc)
+    near, nxt = vix.bracket(sparse, 30 * 1440.0)
+    rep = {"ok": True, "near": {"expiry": near["expiry"], "days": near["minutes"] / 1440.0},
+           "next": {"expiry": nxt["expiry"], "days": nxt["minutes"] / 1440.0}}
+    win = vix.cboe_term_window(rep, sparse, calc)
+    assert not win["inside"]
+    # the SPX monthly 24.7 d out; 2026-11-13 (18 d) and 2026-12-04 (39 d) are outside the window
+    assert [m["expiry"] for m in win["missing_candidates"]] == ["2026-11-20"]
+    assert win["missing_candidates"][0]["settlement"] == "AM"            # the SPX monthly
+    for m in win["missing_candidates"]:
+        assert 23.0 < m["days"] < 37.0
+    line = vix.term_window_deviation(win)
+    assert line.startswith(f"VIX bracket 2026-11-06 ({rep['near']['days']:.1f} d) / 2026-11-27 "
+                           f"({rep['next']['days']:.1f} d) is not Cboe's")
+    days = win["missing_candidates"][0]["days"]
+    assert line.endswith(f"and the stored chain lacks the candidate expiry 2026-11-20 ({days:.1f} d); "
+                         "the level interpolates a wider bracket.")
+    assert vix.cboe_term_window({"ok": False}, sparse, calc) is None
+    assert vix.term_window_deviation(None) is None

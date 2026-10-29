@@ -140,6 +140,41 @@ def test_recorded_inputs_of_curve_and_argument_fits():
     assert jc.recorded_inputs(arg) == {"vix_targets": {"^VIX": 20.0}, "r": 0.031}
 
 
+def test_recorded_inputs_rebuild_a_fit_on_the_quote_time_it_recorded():
+    """QUANT-01: the cleaner no longer reads a Yahoo chain's stored time as a
+    quote time (it is the download instant). A fit that measured T from a
+    recorded quote time (the bot's 2026-10-26 fit did, from its Yahoo
+    download instant) is rebuilt on that time, so its reproduction and its
+    diagnostics refit the objective it was fitted on."""
+    vix = [{"ticker": "^VIX", "market": 20.0}]
+    gth = {"vix_index": vix, "chain_diagnostics": {"quote_time": "2026-10-27T05:26:50Z",
+                                                   "t_origin_basis": "quote_time (Cboe GTH book)"}}
+    close = {"vix_index": vix, "chain_diagnostics": {"quote_time": None,
+                                                     "t_origin_basis": "session close 16:00 ET"}}
+    assert jc.recorded_inputs(gth)["spx_quote_time"] == "2026-10-27T05:26:50Z"
+    assert "spx_quote_time" not in jc.recorded_inputs(close)
+    import pickle
+
+    import pandas as pd
+
+    from joint_vol_calibration.config import DATA_DIR
+    from joint_vol_calibration.data import database as db
+    for path in sorted((DATA_DIR / "calibrations").glob("joint_cal_*.pkl")):
+        with open(path, "rb") as f:
+            ref = pickle.load(f)
+        diag = ref.get("chain_diagnostics") if isinstance(ref, dict) else None
+        if not diag or not str(diag.get("t_origin_basis", "")).startswith("quote_time"):
+            continue
+        session = str(ref["spot_date"])
+        chain = pd.read_parquet(db.options_snapshot_path(session, "SPX"))   # the committed chain
+        again = jc.JointCalibrator(as_of_date=session, spx_chain=chain, **jc.recorded_inputs(ref))
+        assert again.spx_chain_diagnostics["t_origin"] == diag["t_origin"], path.name
+        plain = jc.JointCalibrator(as_of_date=session, spx_chain=chain,
+                                   rate_reference=jc.recorded_rate_reference(ref))
+        if plain.spx_chain_diagnostics.get("source") in ("yfinance", "yahoo"):
+            assert plain.spx_chain_diagnostics["t_origin_basis"] == "session close 16:00 ET"
+
+
 def test_session_rate_reference_reads_the_sessions_own_fit(tmp_path):
     v2 = {"model_version": 2, "spot_date": "2026-10-16",
           "rate_reference": {"kind": "treasury_curve", "r_91d": 0.04, "label": "x"}}

@@ -37,9 +37,12 @@ fail-soft: a failure is reported (exit 1) but never undoes what was captured,
 and the workflow commits captures and derived artifacts behind separate test
 gates (refresh_session_artifacts). Every run with the calibrate step then
 backfills what an earlier run failed to build or commit: a committed accepted
-fit without its surface report or diagnostics, or a Greeks surface / scenario
-grid built from another fit than the headline (backfill_session_artifacts, at
-most MAX_BACKFILL_SESSIONS sessions a run).
+fit without its surface report or diagnostics, a session whose stored Cboe
+book passes the quote-state gates and has no surface report (fit accepted or
+not: the market surface does not wait for the Heston gate), a surface report written
+under an older method (surface.report.REPORT_VERSION), or a Greeks surface /
+scenario grid built from another fit than the headline
+(backfill_session_artifacts, at most MAX_BACKFILL_SESSIONS sessions a run).
 
 Persistence (unless --no-persist): the SQLite DB is a rebuildable cache and
 is not what the bot commits. At the start of every run (freeze-only
@@ -699,7 +702,8 @@ def _ledger_books(session: str, yahoo: "dict | None"):
                         "rows": len(raw)}}
     if yahoo and yahoo.get("raw") is not None and len(yahoo["raw"]):
         yield {"raw": yahoo["raw"], "quote_time": yahoo.get("quote_time"), "symbol": yahoo.get("symbol"),
-               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"])}}
+               "meta": {"source": "yahoo", "symbol": yahoo.get("symbol"), "rows": len(yahoo["raw"]),
+                        "fetched_at": yahoo.get("fetched_at")}}
 
 
 def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3, pause: float = 2.0):
@@ -737,6 +741,7 @@ def _with_open_expiries(raw, expiries, symbol, ticker_factory, attempts: int = 3
             part = legs.copy()
             part["expiration"] = exp
             part["option_type"] = side
+            part["source"] = "yfinance"        # as option_chain.fetch_spx_chain labels it
             frames.append(part)
         info["extra_expiries"].append(exp)
     return pd.concat(frames, ignore_index=True), info
@@ -751,7 +756,8 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
 
     The book is the first of _ledger_books (the session's full Cboe capture,
     else the Yahoo chain plus the open positions' expiries) that is quoted at
-    or after the 16:00 ET close and passes the calibration's own quote-state
+    or after the 16:00 ET close (a Yahoo chain records no quote time: it must
+    have been downloaded after the close) and passes the calibration's own quote-state
     gate (near-ATM two-sided share >= option_chain.MIN_TWO_SIDED_SHARE). The
     caller has checked that ``session`` is the last closed session and that
     the DB holds it; the capture and the calibrate step only store or hand on
@@ -783,21 +789,23 @@ def record_forward_ledger(session: str, yahoo: "dict | None" = None, directory=N
         for cand in _ledger_books(session, yahoo):
             meta, raw = dict(cand["meta"]), cand["raw"]
             label = meta.get("file") or meta["source"]
-            try:
-                fl.quote_after_close(session, cand["quote_time"])
-            except ValueError as e:
-                refused.append(f"{label}: {e}")
+            # the quote-state gates (forward_ledger.book_time_refusal and
+            # book_share_refusal), which the session's surface applies alike
+            why = fl.book_time_refusal(session, cand["quote_time"], meta.get("fetched_at"))
+            if why:
+                refused.append(f"{label}: {why}")
                 continue
             if meta["source"] == "yahoo":
                 raw, extra = _with_open_expiries(raw, open_exps, cand["symbol"], ticker_factory)
                 meta.update(extra)
             clean = oc.clean_option_chain(raw, session, spot, r_ref=ref.for_clean(),
-                                          quote_time=cand["quote_time"])
-            share = float(clean.diagnostics.get("near_atm_two_sided_share") or 0.0)
-            if share < oc.MIN_TWO_SIDED_SHARE:
-                refused.append(f"{label}: not a live book ({share:.0%} of near-ATM lines two-sided)")
+                                          quote_time=cand["quote_time"],
+                                          fetched_at=meta.get("fetched_at"))
+            why = fl.book_share_refusal(clean)
+            if why:
+                refused.append(f"{label}: {why}")
                 continue
-            meta["near_atm_two_sided_share"] = share
+            meta["near_atm_two_sided_share"] = float(clean.diagnostics["near_atm_two_sided_share"])
             out = fl.record_session(session, raw, clean=clean, spot=spot, r_ref=ref.r_91d,
                                     quote_time=cand["quote_time"], directory=d, book_meta=meta)
             led = fl.load_ledger(out)
@@ -834,7 +842,8 @@ def refresh_session_artifacts(session: str, headline_path: "str | None",
                               diagnostics_timeout: float = DIAGNOSTICS_TIMEOUT_S,
                               parts=ARTIFACT_PARTS) -> dict:
     """Rebuild what derives from an accepted session's fit (``parts``, default
-    all four, in this order), each part fail-soft:
+    all four, in this order; the surface alone for a session with a stored Cboe
+    book and no accepted fit, artifact_gaps), each part fail-soft:
 
       surface      data_store/surface/<session>/ (residuals, surface, scorecard,
                    VIX replication) and index.json (surface.report)
@@ -938,12 +947,30 @@ def _artifact_source(path: pathlib.Path, key: bytes) -> "str | None":
         return None
 
 
+def _stale_surface(sess: str) -> bool:
+    """True when data_store/surface/<sess>/ was written under an older method
+    than surface.report.REPORT_VERSION (or its surface.json or
+    vix_replication.json cannot be read): the backfill rebuilds it."""
+    from joint_vol_calibration.surface import report
+    for name in ("surface.json", "vix_replication.json"):
+        try:
+            doc = json.loads((DATA / "surface" / sess / name).read_text())
+        except (OSError, ValueError):
+            return True
+        if report.stored_report_version(doc) < report.REPORT_VERSION:
+            return True
+    return False
+
+
 def artifact_gaps(headline_path: "str | None") -> dict:
     """What is missing or stale among the artifacts derived from the committed
     accepted fits: {session: [parts]}, newest session first.
 
-      surface      data_store/surface/<s>/surface.json missing, or index.json
-                   does not list <s>
+      surface      data_store/surface/<s>/surface.json missing, index.json
+                   does not list <s>, or its surface.json / vix_replication.json
+                   was written under an older report_version than
+                   surface.report.REPORT_VERSION (a method change: the
+                   backfill rebuilds the committed record over its next runs)
       diagnostics  data_store/calibrations/diagnostics/<s>.json missing
       greeks,      (the headline session) the parquet is missing, unreadable,
       scenario     or its provenance names another calibration than the
@@ -951,7 +978,14 @@ def artifact_gaps(headline_path: "str | None") -> dict:
                    previous headline next to a new one)
 
     Only sessions whose SPX chain is stored (data_store/options/spx_<s>.parquet)
-    are checked: the surface report and the diagnostics are built from it."""
+    are checked: the surface report and the diagnostics are built from it.
+
+    The surface does not wait for the Heston fit (CITSEC-05): a session with a
+    stored Cboe SPX capture that passes the quote-state gates
+    (surface.quotes.cboe_book_refusal) needs 'surface' when its report is
+    missing or stale, accepted fit or not (its scorecard then has no Heston
+    row and says why). Diagnostics need a fit and are asked for only for
+    accepted ones."""
     from joint_vol_calibration.data import database as dbm
     gaps: dict = {}
     idx = DATA / "surface" / "index.json"
@@ -964,12 +998,28 @@ def artifact_gaps(headline_path: "str | None") -> dict:
         if not dbm.options_snapshot_path(sess, "SPX").exists():
             continue
         need = []
-        if sess not in listed or not (DATA / "surface" / sess / "surface.json").exists():
+        if (sess not in listed or not (DATA / "surface" / sess / "surface.json").exists()
+                or _stale_surface(sess)):
             need.append("surface")
         if not (DATA / "calibrations" / "diagnostics" / f"{sess}.json").exists():
             need.append("diagnostics")
         if need:
             gaps[sess] = need
+    from joint_vol_calibration.surface import quotes as sqm
+    for sess in sqm.captured_sessions():
+        if sess in gaps or (sess in acc and dbm.options_snapshot_path(sess, "SPX").exists()):
+            continue                          # checked above, with its diagnostics
+        if (sess in listed and (DATA / "surface" / sess / "surface.json").exists()
+                and not _stale_surface(sess)):
+            continue
+        try:
+            why = sqm.cboe_book_refusal(sess)
+        except Exception as e:  # noqa: BLE001 (a session whose book cannot be checked is no gap; logged)
+            why = f"{type(e).__name__}: {e}"
+        if why is None:
+            gaps[sess] = ["surface"]
+        else:
+            log.info("  %s: no surface report (%s)", sess, why)
     if headline_path:
         head = pathlib.Path(headline_path)
         sess = next((s_ for s_, p_ in acc.items() if pathlib.Path(p_).name == head.name), None)
@@ -1030,7 +1080,11 @@ def _persist_snapshot(raw, clean, session: str, spot: float,
     stored for the session in one transaction (re-runs never duplicate).
     ``quote_time`` (ISO UTC, database.utc_iso) is stored with every row: it
     sets the T origin when the snapshot is cleaned again (option_chain.t_origin),
-    so it must be the exact value the live clean used.
+    so it must be the exact value the live clean used. A Yahoo chain has none
+    (None, the default): its download instant is ``fetched_at`` in the fit's
+    chain_diagnostics and the run status, and no T is measured from it.
+    (options_snapshots has no fetched_at column: adding one migrates the
+    shipped database, which the bot never commits.)
     """
     from joint_vol_calibration.data import database as dbm
     from joint_vol_calibration.data import option_chain as oc
@@ -1061,7 +1115,8 @@ def _save_rejected_chain(raw, session: str, reason: str) -> "str | None":
 
 
 def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
-                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None) -> dict:
+                       calibrate_kwargs: "dict | None" = None, book_out: "dict | None" = None,
+                       clock=None) -> dict:
     """Download the SPX chain for the last closed session and fit the joint model.
 
     Returns a status dict: {"status": accepted|rejected|skipped|exists|failed,
@@ -1072,8 +1127,17 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
 
     ``book_out`` (a dict), when given, receives the downloaded chain as soon
     as it is in hand, whatever the fit then does: {"source": "yahoo", "raw",
-    "quote_time", "symbol"} — the forward ledger's fallback book
-    (record_forward_ledger), which does not depend on the calibration.
+    "quote_time" (None: Yahoo records none), "fetched_at", "symbol"} — the
+    forward ledger's fallback book (record_forward_ledger), which does not
+    depend on the calibration.
+
+    ``clock`` () -> datetime: the run's clock, read when the download
+    returns (``fetched_at``); default ``now_utc``. A Yahoo chain carries no
+    quote time, so its T runs from the session's 16:00 ET close
+    (option_chain.t_origin) and the download instant is recorded as
+    ``fetched_at`` (status, the fit's chain_diagnostics), never stored as
+    ``quote_time`` (the 2026-10-26 chain carried the run's start as its quote
+    time and was labelled a GTH book).
     """
     import pandas as pd
 
@@ -1117,29 +1181,30 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     # The calibrator's default reference: the Treasury zero curve r(T) of the
     # session (^IRX when the curve is missing or stale; recorded in the fit).
     ref = reference_rate(spot_date)
-    # One string for the live clean and the stored snapshot, so a refit from
-    # the stored chain measures T from exactly the same origin.
-    quote_time = utc_iso(now_utc)
 
     try:
         raw, meta = oc.fetch_spx_chain(spot_date, ticker_factory=ticker_factory)
     except Exception as e:
         st.update(status="failed", reason=f"option chain download failed: {e}")
         return st
+    # One string for the live clean and the stored snapshot. Yahoo records no
+    # quote time: T runs from the close, and this is when the chain arrived.
+    fetched_at = utc_iso((clock or (lambda: now_utc))())
     st["chain"] = {"symbol": meta.get("symbol"), "n_listed": len(meta.get("listed", [])),
                    "requested": meta.get("requested", []), "failed": meta.get("failed", [])}
     if raw.empty:
         st["reason"] = "no SPX option chain returned"
         return st
     if book_out is not None:
-        book_out.update(source="yahoo", raw=raw, quote_time=quote_time, symbol=meta.get("symbol"))
+        book_out.update(source="yahoo", raw=raw, quote_time=None, fetched_at=fetched_at,
+                        symbol=meta.get("symbol"))
 
-    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), quote_time=quote_time)
+    clean = oc.clean_option_chain(raw, spot_date, S, r_ref=ref.for_clean(), fetched_at=fetched_at)
     d = clean.diagnostics
     st["chain"].update({k: d.get(k) for k in ("n_raw", "n_two_sided", "n_near_atm",
                                               "near_atm_two_sided_share", "n_clean",
-                                              "n_expiries_with_carry", "quote_time",
-                                              "t_origin", "t_origin_basis")})
+                                              "n_expiries_with_carry", "source", "quote_time",
+                                              "fetched_at", "t_origin", "t_origin_basis")})
     log.info("  Chain hygiene: %s raw -> %s two-sided -> %s clean rows; near-ATM two-sided "
              "share %.0f%%; T from %s (%s)", d.get("n_raw"), d.get("n_two_sided"),
              d.get("n_clean", 0), 100 * (d.get("near_atm_two_sided_share") or 0),
@@ -1192,7 +1257,7 @@ def recalibrate_heston(now_utc: "datetime | None" = None, ticker_factory=None,
     with open(out, "wb") as f:
         pickle.dump(result, f)
     try:
-        n_opt = _persist_snapshot(raw, clean, spot_date, S, quote_time)
+        n_opt = _persist_snapshot(raw, clean, spot_date, S)       # Yahoo: no quote time
         log.info("  Saved %d observed two-sided quotes as the %s SPX snapshot", n_opt, spot_date)
     except Exception as e:     # the fit stands, but its input record is missing
         st["snapshot_error"] = f"could not store the accepted {spot_date} chain: {e}"
@@ -1715,8 +1780,11 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
         with _Group("option chain + joint calibration", timings, "calibrate"):
             if market_ok:
                 try:
+                    run_start = now_utc
                     cal = recalibrate_heston(now_utc, ticker_factory, calibrate_kwargs,
-                                             book_out=yahoo_book)
+                                             book_out=yahoo_book,
+                                             clock=lambda: run_start + timedelta(
+                                                 seconds=time.monotonic() - run_t0))
                 except Exception as e:
                     cal = {"status": "failed", "reason": f"calibrate step crashed: {e}"}
                     log.exception("calibrate step crashed")

@@ -2239,6 +2239,70 @@ def test_surface_page_renders_the_producers_numbers(dash, art):
     assert "2026-06-18" in html
 
 
+def _no_fit_surface_store(tmp_path: Path) -> Path:
+    """The artifact store with SESSION's surface as the producer writes it for a
+    session with a live Cboe book and no accepted Heston fit (CITSEC-05): no
+    joint_cal_<SESSION>.pkl and no diagnostics, the scorecard's Heston row
+    unavailable with its reason, no Heston residuals, the rankings and index row
+    without it. The headline fit is then an earlier session's."""
+    data = _artifact_store(tmp_path, diagnostics=False)
+    (data / "calibrations" / f"joint_cal_{SESSION}.pkl").unlink()
+    d = data / "surface" / SESSION
+    res = pd.read_parquet(d / "residuals.parquet")
+    heston = [m for m in res["model"].unique() if str(m).startswith("heston")]
+    kept = res[~res["model"].isin(heston)].reset_index(drop=True)
+    kept.to_parquet(d / "residuals.parquet", index=False)
+    sc = json.loads((d / "scorecard.json").read_text())
+    why = (f"no joint SPX/VIX Heston fit is stored for {SESSION} (data_store/calibrations/"
+           f"joint_cal_{SESSION}.pkl): the calibration was rejected by its gate or not run on this session.")
+    sc["models"] = [{"model": m["model"], "available": False, "reason": why} if m["model"] in heston else m
+                    for m in sc["models"]]
+    for key in ("ranking_by_oos_median_abs_hs", "ranking_by_common_oos_median_abs_hs"):
+        if key in sc:
+            sc[key] = [r for r in sc[key] if r["model"] not in heston]
+    if "models" in (sc.get("common_out_of_sample") or {}):
+        sc["common_out_of_sample"]["models"] = [m for m in sc["common_out_of_sample"]["models"]
+                                                if m not in heston]
+    sc["notes"][1] = ("Surfaces are fitted to alternate strikes, so their out-of-sample quotes are the "
+                      "strikes in between (an interpolation test); Heston is not scored on this "
+                      "session: " + why)
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    idx = json.loads((data / "surface" / "index.json").read_text())
+    for row in idx["sessions"]:
+        if row["session"] == SESSION:
+            row["models"] = {m: v for m, v in row["models"].items() if m not in heston}
+    (data / "surface" / "index.json").write_text(json.dumps(idx))
+    return data
+
+
+def test_a_surface_session_without_a_heston_fit_renders_everywhere(dash, tmp_path, monkeypatch):
+    """CITSEC-05: the bot now builds a session's surface from its Cboe book
+    whatever the Heston gate did, so the newest surface session can have no
+    fit and a scorecard whose Heston row is unavailable. Every page still
+    publishes with no loader error; the Surface scorecard lists the models it
+    scored and says why Heston is absent; no page prints a Heston error for
+    that session."""
+    data = _no_fit_surface_store(tmp_path)
+    monkeypatch.setattr(dash, "DATA", data)
+    sc = json.loads((data / "surface" / SESSION / "scorecard.json").read_text())
+    pages = {}
+    for route in ("/", "/surface", "/calibration", "/risk", "/research", "/corrections", "/model-risk"):
+        resp, pages[route] = _get(dash, route)
+        assert _errors(resp) == 0, route
+    html = pages["/surface"]
+    assert 'data-artifact-state="ok"' in html or 'id="scorecard-table"' in html
+    table = re.search(r'<table class="tbl dense[^"]*" id="scorecard-table">(.*?)</table>', html,
+                      re.DOTALL).group(1)
+    rows = re.findall(r"<tr[^>]*><td[^>]*>([^<]+)</td>", table.split("<tbody>")[1])
+    assert rows == [dash.model_label(r["model"]) for r in sc["ranking_by_oos_median_abs_hs"]]
+    assert dash.model_label("heston_v2") not in rows
+    assert sc["notes"][1] in _visible_text(html)
+    # Model Risk's calibrator check reads the session's scorecard: no Heston number, and why
+    why = next(m["reason"] for m in sc["models"] if m.get("available") is False)
+    assert re.search(rf"Heston is not scored on {SESSION}\s*:\s*{re.escape(why)}",
+                     _visible_text(pages["/model-risk"]))
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
@@ -2976,7 +3040,11 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
         assert dash.model_label(key) == s["legendKey"]
         q = res[(res["model"] == key) & (res["expiry"] == e)].sort_values("k", kind="mergesort")
         assert [p[0] for p in s["data"]] == [m[0] for m in mids], s["name"]
-        assert [m[0] for m in mids] == [round(float(k), 6) for k in q["k"]], s["name"]
+        # the packed block carries K and F and the page takes k = ln(K/F) from them, so
+        # it agrees with the residual table's k (10 significant digits) to rounding:
+        # an exact compare after rounding both to 6 decimals failed at a ...5 boundary
+        # once the Cboe book (8,819 quotes) was scored
+        assert [m[0] for m in mids] == pytest.approx([float(k) for k in q["k"]], abs=1e-6), s["name"]
         assert [p[1] for p in s["data"]] == pytest.approx([float(v) * 100 for v in q["model_iv"]], abs=1e-4)
         assert [v for p in by[(e, "ba")]["data"] for v in p[1:]] == pytest.approx(
             [v for b, a in zip(q["bid_iv"], q["ask_iv"]) for v in (b * 100, a * 100)], abs=1e-5)
@@ -5036,7 +5104,13 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(p
         return
     n = len(re.findall(r"<li>", m.group(1)))
     assert n > 0
-    assert n >= len(rep.get("deviations") or [])
+    # QUANT-02 / VALIDATOR-05: the departures are the artifact's deviations; its gap
+    # notes (strip coverage, model variance swaps, the attribution) are listed
+    # apart and not counted
+    assert n == len(rep.get("deviations") or [])
+    notes = re.search(r"<summary>Notes on the replication \(not departures\)</summary>(.*?)</details>",
+                      pages["/surface"], re.DOTALL)
+    assert (notes is not None) == bool(rep.get("gap_notes"))
     tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
     works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
     if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
@@ -5844,8 +5918,12 @@ def test_vix_replication_prose_gives_the_gap_split_with_the_tables_signs(dash, p
     vix = json.loads((SHIPPED / "surface" / session / "vix_replication.json").read_text())
     head = re.search(r'<table[^>]*id="vix-terms-table".*?</thead>', html, re.DOTALL).group(0)
     assert "Missing-strike shortfall (replicated − full strip)" in _visible_text("<body>" + head)
-    prose = _visible_text("<body>" + re.search(r'<ul class="prose"[^>]*>.*?</ul>', html[html.index(
-        'id="vix-terms-table"'):], re.DOTALL).group(0))
+    # the replication's method lists under the terms table: its departures, then its
+    # notes (the gap attribution is a note, not a departure)
+    panel = html[html.index('id="vix-terms-table"'):]
+    panel = panel[:panel.index("</section>")] if "</section>" in panel else panel
+    prose = " ".join(_visible_text("<body>" + u) for u in
+                     re.findall(r'<ul class="prose"[^>]*>.*?</ul>', panel, re.DOTALL))
     assert "official − replicated" not in prose
     assert "official - replicated" not in prose
     row = {r[0]: r for r in _table_rows(html, "vix-terms-table")}.get("VIX")
@@ -6169,8 +6247,10 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
         seen = {}
         for route, html in pages.items():
             text = _visible_text(html)
+            # both are non-negative: a signed number that shares the digits is another
+            # figure (2026-10-26's Cboe-sourced 1.659 met a '−1.659' on Calibration)
             found = {f"{v:.{p}f}" for p in (2, 3, 4)
-                     if re.search(r"(?<![\d.\u2212-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
+                     if re.search(r"(?<![\d.\u2212+-])" + re.escape(f"{v:.{p}f}") + r"(?!\d)", text)}
             if found:
                 seen[route] = found
         assert set(must) <= set(seen), (name, seen)
@@ -9081,7 +9161,7 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
                           "t_origin_basis": "quote_time (Cboe GTH book)"}}
     pv = dash.chain_provenance(fetched)
     assert pv["vendor"] == "yahoo"
-    assert pv["fetched_as_quote_time"]
+    assert pv["download"]
     for text in (" · ".join(dash.chain_source(fetched)), dash.quote_source_note(fetched),
                  dash.chain_sentence(fetched)):
         assert "quotes at" not in text
@@ -9090,6 +9170,15 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
         assert "T measured from the fetch" in text
     # the badge sets each part unbroken: every part fits a 320 px phone (at most 40 characters)
     assert all(len(p) <= 40 for p in dash.chain_source(fetched)), dash.chain_source(fetched)
+    # the producer now keeps the fetch instant in fetched_at and runs T from the close
+    later = {"inputs": {"source": "yfinance", "quote_time": None, "fetched_at": "2026-10-28T08:50:33Z",
+                        "t_origin_basis": "session close 16:00 ET"}}
+    assert dash.chain_source(later) == ["Yahoo Finance download", "fetched 2026-10-28 08:50 UTC",
+                                        "Yahoo reports no quote times", "T from the 16:00 ET close"]
+    assert dash.chain_sentence(later) == ("a Yahoo Finance download fetched 2026-10-28 08:50 UTC "
+                                          "(Yahoo reports no quote times; T from the 16:00 ET close)")
+    assert dash.chain_source({"inputs": {"source": "yfinance", "t_origin_basis": "session close 16:00 ET"}}) \
+        == ["Yahoo Finance close snapshot", "no quote time"]
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
     assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
     # every page that names the newest surface session's chain says what it is
@@ -9098,7 +9187,7 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
     for route in ("/", "/surface", "/model-risk"):
         text = _visible_text(pages[route])
         assert "Quotes as of" not in text, route
-        if want and want["fetched_as_quote_time"]:
+        if want and want["download"]:
             assert "close snapshot · quotes at" not in text, route
             assert want["time"].split(";")[0] in text, route
 

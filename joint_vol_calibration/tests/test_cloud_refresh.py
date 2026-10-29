@@ -307,16 +307,21 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     assert res["r_reference"] == pytest.approx(0.0400, abs=1e-12)
     assert res["r_reference_source"].startswith("^IRX") and "cc" in res["r_reference_source"]
     assert res["chain_diagnostics"]["r_ref"] == res["r_reference"]     # one rate, cleaning and fit
-    # Wed 21:30 ET: the live book is the Cboe GTH session trading for Thursday,
-    # so T runs from the quote time (not the 16:00 close), and the stored
-    # snapshot records that time for a refit.
-    assert cal["chain"]["quote_time"] == "2026-09-24T01:30:00Z"
-    assert cal["chain"]["t_origin"] == "2026-09-23T21:30:00-04:00"
-    assert res["methods"]["T_origin"] == "2026-09-23T21:30:00-04:00"
-    assert "Global Trading Hours" in res["methods"]["T"]
-    assert "residual timing mismatch" in res["methods"]["vix_leg_timing"]
-    assert res["anchors_by_expiry"][0]["T_days"] < (date.fromisoformat(
-        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days
+    # Wed 21:30 ET, inside the GTH window, but Yahoo records no quote time
+    # (QUANT-01): the run used to stamp its own clock as the quote time and
+    # measure T from it. The download instant is fetched_at, T runs from the
+    # 16:00 close, and the stored snapshot records no quote time.
+    fetched = cal["chain"]["fetched_at"]
+    assert NOW <= datetime.fromisoformat(fetched) < NOW + timedelta(minutes=10)
+    assert cal["chain"]["quote_time"] is None
+    assert cal["chain"]["source"] == "yfinance"
+    assert cal["chain"]["t_origin"] == "2026-09-23T16:00:00-04:00"
+    assert res["methods"]["T_origin"] == "2026-09-23T16:00:00-04:00"
+    assert f"records no quote time; downloaded {fetched}" in res["methods"]["T"]
+    assert "Global Trading Hours" not in res["methods"]["T"]
+    assert "residual timing mismatch" not in res["methods"]["vix_leg_timing"]
+    assert res["anchors_by_expiry"][0]["T_days"] == pytest.approx((date.fromisoformat(
+        res["anchors_by_expiry"][0]["expiry"]) - date.fromisoformat(SESSION)).days, abs=1e-9)
     # Stored: the observed two-sided quotes (incl. the one too wide for the
     # cleaner), never a one-sided line.
     n, n_two_sided = _spx_snapshot_rows(SESSION)
@@ -332,7 +337,9 @@ def test_accepted_calibration_end_to_end(env, monkeypatch, tmp_path):
     chain_file = dbm.options_snapshot_path(SESSION, "SPX")
     assert chain_file.exists() and str(chain_file) in st["persisted"]
     assert len(pd.read_parquet(chain_file)) == n
-    assert set(pd.read_parquet(chain_file)["quote_time"]) == {"2026-09-24T01:30:00Z"}
+    stored = pd.read_parquet(chain_file)
+    assert stored["quote_time"].isna().all()                   # never the download instant
+    assert res["chain_diagnostics"]["fetched_at"] == fetched   # which the fit records
     # The committed chain reproduces the committed fit's inputs: a calibrator
     # built from the stored snapshot (fresh DB loaded from the parquet) has the
     # same carry, anchors and out-of-sample surface as the live run.
@@ -369,8 +376,11 @@ def test_an_accepted_session_is_recorded_in_the_forward_ledger(env):
     ledger = fl.load_ledger(path)
     fl.validate_ledger(ledger)
     assert ledger["previous"] is None
-    assert ledger["inputs"]["quote_after_close"] is True       # the GTH book, after the 16:00 close
-    assert ledger["inputs"]["quote_time"] == "2026-09-24T01:30:00Z"
+    # Yahoo records no quote time (QUANT-01): none is claimed; the book was
+    # downloaded after the 16:00 close (a pre-close download is refused)
+    assert ledger["inputs"]["quote_after_close"] is None
+    assert ledger["inputs"]["quote_time"] is None
+    assert ledger["inputs"]["book"]["fetched_at"] == st["calibration"]["chain"]["fetched_at"]
     assert [p["sleeve"] for p in ledger["positions"]] == ["s4"]
     assert led["actions"] == ["s4 open"]
     # the ledger's chain hash is the committed snapshot's
@@ -574,6 +584,22 @@ def test_a_book_quoted_before_the_close_is_not_the_ledgers(env, monkeypatch):
     assert led["status"] == "recorded"
     assert led["book"] == "yahoo"                          # the next candidate
     assert any("before the 2026-09-23 close" in r for r in led["refused_books"])
+
+
+def test_a_yahoo_book_downloaded_before_the_close_is_not_the_ledgers(env):
+    """Yahoo records no quote time (QUANT-01), so the ledger can no longer
+    read one off the Yahoo book; a book downloaded before the 16:00 ET close
+    still cannot hold the closing quotes and is refused on its fetched_at."""
+    from joint_vol_calibration.data import option_chain as oc
+
+    code, _ = _run(env, "market")
+    assert code == 0
+    raw, meta = oc.fetch_spx_chain(SESSION, ticker_factory=_DailyBookTicker)
+    early = {"source": "yahoo", "raw": raw, "symbol": meta["symbol"], "quote_time": None,
+             "fetched_at": "2026-09-23T19:45:00Z"}                      # 15:45 ET
+    led = env.record_forward_ledger(SESSION, early, ticker_factory=_DailyBookTicker)
+    assert led["status"] == "no_live_book"
+    assert "downloaded at 2026-09-23T19:45:00Z, before the 2026-09-23 close" in led["reason"]
 
 
 def _capture(und, session=SESSION, rows=4):
@@ -817,6 +843,111 @@ def test_a_failed_artifact_is_rebuilt_by_the_next_run(env, monkeypatch):
     assert calls == [SESSION, SESSION]
     code, st = _run(env, "market,labels")                      # the close slot never backfills
     assert "artifact_backfill" not in st
+
+
+def _committed_surface(env, sess, version=None, vix_version=None):
+    """data_store/surface/<sess>/ as a committed session holds it (surface.json
+    and vix_replication.json stamped ``version``; None: no report_version, as
+    every artifact written before the field), its chain, its diagnostics and
+    its index row."""
+    from joint_vol_calibration.data import database as dbm
+    d = env.DATA / "surface" / sess
+    d.mkdir(parents=True, exist_ok=True)
+    for name, v in (("surface.json", version), ("vix_replication.json", vix_version or version)):
+        doc = {"schema_version": 1, "session": sess}
+        if v is not None:
+            doc["report_version"] = v
+        (d / name).write_text(json.dumps(doc))
+    chain = dbm.options_snapshot_path(sess, "SPX")
+    chain.parent.mkdir(parents=True, exist_ok=True)
+    chain.write_bytes(b"chain")
+    diag = env.DATA / "calibrations" / "diagnostics" / f"{sess}.json"
+    diag.parent.mkdir(parents=True, exist_ok=True)
+    diag.write_text("{}")
+    idx = env.DATA / "surface" / "index.json"
+    rows = json.loads(idx.read_text())["sessions"] if idx.exists() else []
+    idx.write_text(json.dumps({"sessions": [*[r for r in rows if r["session"] != sess],
+                                            {"session": sess}]}))
+
+
+def test_a_surface_written_under_an_older_method_is_rebuilt(env, monkeypatch):
+    """0.7 changed what a session's surface report says (its book, its T
+    origin, its provenance). artifact_gaps rebuilt only MISSING surfaces, so
+    a method change reached new sessions only. A committed surface.json or
+    vix_replication.json stored under an older report_version (none: the
+    artifacts before the field) is now a 'surface' gap, which the backfill
+    rebuilds MAX_BACKFILL_SESSIONS a run; a current one is not."""
+    from joint_vol_calibration.surface import report
+    cur = report.REPORT_VERSION
+    old, mixed, fresh = "2026-09-17", "2026-09-18", "2026-09-21"
+    monkeypatch.setattr(env, "accepted_sessions",
+                        lambda: {s: f"joint_cal_{s}.pkl" for s in (old, mixed, fresh)})
+    _committed_surface(env, old)                                # predates report_version
+    _committed_surface(env, mixed, cur, vix_version=cur - 1)    # one file left behind
+    _committed_surface(env, fresh, cur)
+    assert env.artifact_gaps(None) == {mixed: ["surface"], old: ["surface"]}
+    (env.DATA / "surface" / old / "surface.json").write_text("{not json")
+    assert env.artifact_gaps(None)[old] == ["surface"]          # unreadable: rebuilt too
+    assert report.stored_report_version({}) == 1
+    assert report.stored_report_version({"report_version": cur}) == cur
+    _committed_surface(env, old, cur)
+    _committed_surface(env, mixed, cur)
+    assert env.artifact_gaps(None) == {}
+    _committed_surface(env, fresh, cur + 1)                     # written by newer code: left alone
+    assert env.artifact_gaps(None) == {}
+
+
+def test_a_captured_session_without_an_accepted_fit_gets_its_surface(env, monkeypatch):
+    """CITSEC-05: the surface was built only after an accepted Heston fit, so a
+    session with a full Cboe book and a rejected (or no) fit had none. Now a
+    session whose stored Cboe capture passes the quote-state gates
+    (surface.quotes.cboe_book_refusal) is a 'surface' gap without a fit (no
+    diagnostics: they need one); a session whose captures all fail the gates
+    is not, and a current surface is left alone."""
+    from joint_vol_calibration.surface import quotes as sqm
+    from joint_vol_calibration.surface import report
+    live, empty, done = "2026-09-17", "2026-09-18", "2026-09-21"
+    cdir = env.DATA / "options" / "cboe"
+    cdir.mkdir(parents=True)
+    for s_ in (live, empty, done):
+        (cdir / f"spx_{s_}_013000Z.parquet").write_bytes(b"capture")
+        (cdir / f"vix_{s_}_013001Z.parquet").write_bytes(b"capture")
+    monkeypatch.setattr(env, "accepted_sessions", dict)
+    asked = []
+
+    def refusal(s_):
+        asked.append(s_)
+        return "not a live book (12% of near-ATM lines two-sided)" if s_ == empty else None
+    monkeypatch.setattr(sqm, "cboe_book_refusal", refusal)
+    _committed_surface(env, done, report.REPORT_VERSION)
+    assert sqm.captured_sessions() == [done, empty, live]
+    assert env.artifact_gaps(None) == {live: ["surface"]}
+    assert sorted(asked) == [live, empty]                      # a current surface is not re-checked
+    _committed_surface(env, done)                              # ... a stale one is
+    assert env.artifact_gaps(None) == {done: ["surface"], live: ["surface"]}
+    # what the backfill then builds for it: the surface alone
+    seen = []
+    monkeypatch.setattr(env, "refresh_session_artifacts",
+                        lambda s_, h, parts=None, **kw: seen.append((s_, parts)) or
+                        {p: {"ok": True} for p in parts})
+    env.backfill_session_artifacts(None)
+    assert seen == [(done, ("surface",)), (live, ("surface",))]
+
+
+def test_a_capture_whose_check_raises_is_no_gap_and_no_crash(env, monkeypatch):
+    """artifact_gaps runs on every calibrate run: a capture whose quote-state
+    check raises (an unforeseen read error) must not crash the backfill (which
+    fails the run) on every run after it; the session is logged and skipped."""
+    from joint_vol_calibration.surface import quotes as sqm
+    cdir = env.DATA / "options" / "cboe"
+    cdir.mkdir(parents=True)
+    (cdir / "spx_2026-09-17_013000Z.parquet").write_bytes(b"capture")
+    monkeypatch.setattr(env, "accepted_sessions", dict)
+
+    def boom(s_):
+        raise KeyError("strike")
+    monkeypatch.setattr(sqm, "cboe_book_refusal", boom)
+    assert env.artifact_gaps(None) == {}
 
 
 def test_greeks_of_another_fit_are_rebuilt_from_the_headline(env, monkeypatch):

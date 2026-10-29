@@ -3,6 +3,7 @@ Surface report artifacts (surface/report.py, scripts/surface_report.py): the
 schema, byte-for-byte determinism, and agreement of the committed
 data_store/surface artifacts with a recomputation.
 """
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import pytest
 
 from joint_vol_calibration.surface import report
 from joint_vol_calibration.surface import svi as sv
+from joint_vol_calibration.surface import vix as vix_mod
 
 REPO = Path(__file__).resolve().parents[2]
 SESSION = "2026-10-16"
@@ -47,6 +49,14 @@ def test_artifacts_and_schema(written):
     assert surf["session"] == SESSION
     assert surf["inputs"]["chain"] == f"data_store/options/spx_{SESSION}.parquet"
     assert len(surf["inputs"]["chain_sha256"]) == 64
+    # provenance (CITSEC-02): the vendor, when it was quoted (a Yahoo chain:
+    # never; T from the close) and downloaded, and the quote-state gate's share
+    inp = surf["inputs"]
+    assert inp["source"] == "yfinance"
+    assert inp["quote_time"] is None
+    assert {"fetched_at", "book_state"} <= set(inp)
+    assert inp["t_origin_basis"] == "session close 16:00 ET"
+    assert 0.8 <= inp["near_atm_two_sided_share"] <= 1.0
     assert set(surf["surfaces"]) == {"essvi", "svi", "svi_cal"}
     ess = surf["surfaces"]["essvi"]
     assert ess["analytic_conditions"]["butterfly_ok"]
@@ -72,13 +82,24 @@ def test_artifacts_and_schema(written):
     vixd = json.loads((d / "vix_replication.json").read_text())
     assert set(vixd["indices"]) == {"VIX9D", "VIX", "VIX3M", "VIX6M"}
     assert vixd["indices"]["VIX"]["headline_method"] == "cboe_rules"
-    assert any("2026-11-20" in n for n in vixd["gap_notes"])
+    # the Yahoo chain lacks the SPX monthly 2026-11-20: the bracket is wider than
+    # Cboe's 23-37 day window, a listed deviation (not a gap note)
+    win = vixd["indices"]["VIX"]["cboe_term_window"]
+    assert not win["inside"]
+    assert "2026-11-20" in [m["expiry"] for m in win["missing_candidates"]]
+    assert [d for d in vixd["deviations"] if d.startswith("VIX bracket ")] == [
+        vix_mod.term_window_deviation(win)]
+    assert not any("2026-11-20" in n for n in vixd["gap_notes"])
     ga = vixd["indices"]["VIX"]["gap_attribution"]
     assert ga["available"]
     assert ga["surface"] == "svi_cal"
     assert ga["residual_pts"] + ga["gap_pts"] + ga["truncation_pts"] == pytest.approx(0.0, abs=1e-8)
     idx = json.loads((out / "index.json").read_text())
     assert [r["session"] for r in idx["sessions"]] == [SESSION]
+    # the method version the bot's backfill compares (cloud_refresh.artifact_gaps)
+    for doc in (surf, card, vixd, idx["sessions"][0]):
+        assert doc["report_version"] == report.REPORT_VERSION
+        assert report.stored_report_version(doc) == report.REPORT_VERSION
 
 
 def test_spread_unit_claims_hold(written):
@@ -337,3 +358,222 @@ def test_committed_residuals_are_the_compact_writers_output(session, tmp_path):
         again = tmp_path / "again.parquet"
         report.write_residuals(df, again)
         assert again.read_bytes() == path.read_bytes()
+
+
+# ── 0.7: the session's Cboe book is the surface's source; Yahoo the fallback ──
+
+def _capture_store(tmp_path, monkeypatch, quote_time, *, book_state="closing", empty_atm=False):
+    """A data_store/options/ with SESSION's committed Yahoo chain and a Cboe
+    capture of SESSION made of the same quotes in the capture layout
+    (cboe_downloader.parse_cboe_options_payload: no 'underlying', Cboe's own
+    IV in implied_vol, nullable integer counts), stamped ``quote_time``."""
+    import shutil
+
+    from joint_vol_calibration.data import database as db
+
+    opts = tmp_path / "options"
+    (opts / "cboe").mkdir(parents=True)
+    yahoo = db.options_snapshot_path(SESSION, "SPX")
+    shutil.copy2(yahoo, opts / yahoo.name)
+    frame = pd.read_parquet(yahoo).drop(columns=["underlying"])
+    frame = frame.assign(source="cboe", quote_time=quote_time, implied_vol=0.5,
+                         open_interest=frame["open_interest"].round().astype("Int64"),
+                         volume=frame["volume"].round().astype("Int64"))
+    if empty_atm:                                   # an empty book: no near-ATM bids
+        near = (frame["strike"] / frame["underlying_price"] - 1.0).abs() < 0.03
+        frame.loc[near, "bid"] = 0.0
+    stem = f"spx_{SESSION}_013000Z"
+    frame.to_parquet(opts / "cboe" / f"{stem}.parquet", index=False)
+    side = {"underlying": "SPX", "session": SESSION, "quote_time": quote_time,
+            "book_state": book_state, "fetched_at": "2026-10-17T01:30:00Z",
+            "sha256": hashlib.sha256(b"payload").hexdigest(), "rows": len(frame),
+            "two_sided_rows": int(((frame["bid"] > 0) & (frame["ask"] >= frame["bid"])).sum())}
+    (opts / "cboe" / f"{stem}.json").write_text(json.dumps(side))
+    monkeypatch.setattr(db, "OPTIONS_DIR", opts)
+    return opts / "cboe" / f"{stem}.parquet", side
+
+
+def test_the_surface_is_built_from_the_sessions_cboe_book(tmp_path, monkeypatch):
+    """CITSEC-01 / QUANT-03 / VALIDATOR-02: the surface was built from the
+    Yahoo chain while the session's Cboe book sat next to it. With a stored
+    capture that passes the forward ledger's quote-state gates, the report
+    reads the capture (mapped to the stored-chain layout), measures T from its
+    quote time, and surface.json, the scorecard notes, the Heston row and the
+    VIX timing line say so."""
+    from joint_vol_calibration.surface import quotes as sqm
+    from joint_vol_calibration.surface import scorecard as sc
+
+    qt = "2026-10-17T00:30:00Z"                                       # Fri 20:30 ET: closing book
+    path, side = _capture_store(tmp_path, monkeypatch, qt)
+    out = report.run_session(SESSION, models=["essvi", "heston_v2"])
+    inp = out["surface"]["inputs"]
+    assert inp["source"] == "cboe"
+    assert inp["chain"] == f"data_store/options/cboe/{path.name}"
+    assert inp["chain_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert inp["raw_sha256"] == side["sha256"]
+    assert inp["quote_time"] == qt
+    assert inp["fetched_at"] == side["fetched_at"]
+    assert inp["book_state"] == side["book_state"]
+    assert inp["source_reason"].startswith("the newest stored Cboe book of the session")
+    assert inp["refused_books"] == []
+    assert inp["chain_rows"] == side["rows"]
+    # a closing book (after the close, outside the next GTH window): T from the close
+    assert inp["t_origin_basis"] == "session close 16:00 ET"
+    assert any(n.startswith("Quotes are Cboe's delayed SPX book") for n in out["scorecard"]["notes"])
+    heston = {m["model"]: m for m in out["scorecard"]["models"]}["heston_v2"]
+    assert "The fit was made on the session's Yahoo chain" in heston["description"]
+    assert heston["fit"]["scored_on_fit_chain"] is False
+    assert any(d.startswith("Calculation time is the session's 16:00 ET close; the book was quoted "
+                            f"at {qt}") for d in out["vix_replication"]["deviations"])
+    assert not any("Yahoo" in d for d in out["vix_replication"]["deviations"])
+    # the mapping: Cboe's IV is not read as this repository's
+    raw = sqm.stored_chain_from_capture(pd.read_parquet(path))
+    assert set(raw["underlying"]) == {"SPX"}
+    assert raw["implied_vol"].isna().all()
+    assert (raw["vendor_iv"] == 0.5).all()
+    # the same quotes from the Yahoo chain (forced): the universe is identical
+    yq = sqm.load_session_quotes(SESSION, source="yahoo")
+    cq = sqm.load_session_quotes(SESSION)
+    pd.testing.assert_frame_equal(yq.quotes, cq.quotes)
+    assert yq.inputs["source"] == "yfinance"
+    assert "Yahoo chain requested" in yq.inputs["source_reason"]
+    none = np.zeros(len(yq.quotes), dtype=bool)
+    ctx = sc.ScoreContext(yq, none, sc.surface_fit_mask(yq.quotes, none))
+    assert "The fit was made" not in sc.heston_v2_factory(ctx).description
+
+
+@pytest.mark.parametrize(("quote_time", "empty_atm", "why"), [
+    ("2026-10-16T19:00:00Z", False, "before the 2026-10-16 close"),        # 15:00 ET
+    ("2026-10-17T00:30:00Z", True, "not a live book"),                     # no near-ATM bids
+])
+def test_a_cboe_book_failing_the_quote_state_gates_falls_back_to_yahoo(
+        tmp_path, monkeypatch, quote_time, empty_atm, why):
+    """The forward ledger's gates decide (forward_ledger.book_time_refusal,
+    book_share_refusal): a capture quoted before the close, or an empty book,
+    is not the session's; the Yahoo chain is used and the report says why."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, quote_time, empty_atm=empty_atm)
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["source"] == "yfinance"
+    assert sq.inputs["chain"] == f"data_store/options/spx_{SESSION}.parquet"
+    assert why in sq.inputs["source_reason"]
+    assert sq.inputs["source_reason"].endswith("the session's Yahoo chain (the calibration's "
+                                               "download) is the fallback")
+    assert len(sq.inputs["refused"]) == 1
+    with pytest.raises(ValueError, match="no stored Cboe book"):
+        sqm.load_session_quotes(SESSION, source="cboe")
+
+
+def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
+    """Every session with a stored Cboe capture that passes the quote-state
+    gates is read from that capture, with its quote time as the T origin of a
+    GTH book (whatever sessions the bot has captured)."""
+    from joint_vol_calibration.backtest import forward_ledger as fl
+    from joint_vol_calibration.data import database as db
+    from joint_vol_calibration.data import option_chain as oc
+    from joint_vol_calibration.surface import quotes as sqm
+
+    sessions = sorted({p.name.split("_")[1] for p in (db.OPTIONS_DIR / "cboe").glob("spx_*.parquet")})
+    for s in sessions:
+        try:
+            sqm.session_spot(s)
+        except ValueError:
+            continue                                  # the test database lacks the session's close
+        path, side = sqm.session_captures(s)[0]
+        if fl.book_time_refusal(s, side.get("quote_time")):
+            continue
+        sq = sqm.load_session_quotes(s)
+        if sq.inputs["source"] != "cboe":            # refused by the near-ATM gate: said so
+            assert "no stored Cboe book passes" in sq.inputs["source_reason"], s
+            continue
+        assert sq.inputs["chain"] == f"data_store/options/cboe/{path.name}"
+        assert sq.diagnostics["quote_time"] == side["quote_time"]
+        gth = oc.t_origin(side["quote_time"], s) != oc.session_close(s)
+        assert sq.diagnostics["t_origin_basis"] == (oc.GTH_BASIS if gth else oc.CLOSE_BASIS)
+        assert sq.diagnostics["n_expiries"] > 17                      # the full listing
+        # CITSEC-03: with the full listing the VIX bracket is Cboe's (both terms 23-37 days out)
+        calc = report._calc_time_ny(sq)
+        terms = vix_mod.term_tables(sq.raw, s, calc)
+        rep = vix_mod.replicate_index(terms, sq.r_ref, 30, spot=sq.spot)
+        win = vix_mod.cboe_term_window(rep, terms, calc)
+        assert win["inside"], (s, win)
+        assert win["missing_candidates"] == []
+
+
+def test_a_session_with_a_live_cboe_book_and_no_fit_gets_a_surface(tmp_path, monkeypatch):
+    """CITSEC-05: the surface was built only after the Heston fit passed its
+    gate (2026-10-20 has a full Cboe book, no accepted fit and no surface).
+    With no stored fit, the report is still written from the session's Cboe
+    book; the scorecard's Heston row is absent and says why, and the other
+    models, the arbitrage screen and the VIX replication are unchanged."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z")
+    assert sqm.captured_sessions() == [SESSION]
+    assert sqm.cboe_book_refusal(SESSION) is None
+    nofit = tmp_path / "calibrations"
+    nofit.mkdir()
+    out = report.run_session(SESSION, calibrations_dir=nofit, models=["essvi", "heston_v2"])
+    assert out["surface"]["inputs"]["source"] == "cboe"
+    rows = {m["model"]: m for m in out["scorecard"]["models"]}
+    assert rows["essvi"]["available"]
+    assert rows["heston_v2"]["available"] is False
+    assert rows["heston_v2"]["reason"].startswith(f"no joint SPX/VIX Heston fit is stored for {SESSION}")
+    assert set(out["residuals"]["model"]) == {"essvi"}
+    assert out["scorecard"]["common_out_of_sample"]["models"] == ["essvi"]
+    assert any(n.endswith("Heston is not scored on this session: " + rows["heston_v2"]["reason"])
+               for n in out["scorecard"]["notes"])
+    assert out["vix_replication"]["indices"]["VIX"].get("replicated") is not None
+    row = report.index_row(out)
+    assert set(row["models"]) == {"essvi"}
+    with_fit = report.run_session(SESSION, models=["essvi", "heston_v2"])
+    assert {m["model"]: m for m in with_fit["scorecard"]["models"]}["heston_v2"]["available"]
+    assert with_fit["vix_replication"]["indices"] == out["vix_replication"]["indices"]
+    assert with_fit["surface"]["arbitrage"] == out["surface"]["arbitrage"]
+
+
+def test_a_session_whose_books_fail_the_gates_has_no_cboe_surface(tmp_path, monkeypatch):
+    from joint_vol_calibration.surface import quotes as sqm
+
+    _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z", empty_atm=True)
+    assert "not a live book" in sqm.cboe_book_refusal(SESSION)
+    assert sqm.cboe_book_refusal("2026-10-15").startswith("no stored Cboe capture")
+
+
+def test_a_capture_that_cannot_be_read_is_refused_not_a_crash(tmp_path, monkeypatch):
+    """A truncated capture parquet or sidecar (a disk or commit gone wrong)
+    crashed the session's surface report, and through
+    cloud_refresh.artifact_gaps every backfill run. It is now a refused book:
+    the report falls back to the Yahoo chain and says why, and the Cboe-only
+    check gives a reason instead of raising."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    path, _side = _capture_store(tmp_path, monkeypatch, "2026-10-17T00:30:00Z")
+    path.write_bytes(b"PAR1 truncated")
+    path.with_suffix(".json").write_text("{not json")
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["source"] == "yfinance"
+    assert f"options/cboe/{path.name}: unreadable (" in sq.inputs["source_reason"]
+    assert "unreadable" in sqm.cboe_book_refusal(SESSION)
+
+
+def test_the_bracket_checked_is_the_one_the_vix_headline_uses():
+    """The term-window deviation read cboe_rules alone: when its single-strike
+    forward is refused and the headline is parity_forward, the replication the
+    page prints was not checked against Cboe's window."""
+    from datetime import datetime
+
+    from joint_vol_calibration.data import option_chain as oc
+
+    calc = datetime(2026, 10, 26, 16, 0, tzinfo=oc.NY_TZ).replace(tzinfo=None)
+    terms = [{"expiry": e, "candidate": True} for e in ("2026-11-06", "2026-11-27")]
+    pf = {"ok": True, "near": {"expiry": "2026-11-06", "days": 10.6},
+          "next": {"expiry": "2026-11-27", "days": 31.6}}
+    rep = {"cboe_rules": {"ok": False, "reason": "implausible forward"}, "parity_forward": pf,
+           "headline_method": "parity_forward"}
+    win = report._vix_term_window(rep, terms, calc)
+    assert win is not None
+    assert not win["inside"]
+    assert win["near"] == {"expiry": "2026-11-06", "days": 10.6}
+    assert report._vix_term_window({**rep, "headline_method": None}, terms, calc) is None

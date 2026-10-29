@@ -4874,8 +4874,9 @@ def pdv_forecast_rank(fe: dict | None, model: str = "pdv", level: str = "90") ->
 def vix_departures_tail(vix_rep: dict | None) -> str:
     """', with N listed departures (Surface)' after 'the Cboe formula': the
     replication departs from Cboe's rules (rate, quote time, forward, AM/PM
-    lines, ...), and the Overview and Model Risk say how many lines Surface's
-    #vix-replication lists, counted as that list counts them."""
+    lines, a bracket outside Cboe's term window, ...), and the Overview and
+    Model Risk say how many departures Surface's #vix-replication lists: the
+    artifact's deviations, not its descriptive gap notes."""
     n = desk_surface.vix_departure_count(vix_rep)
     return f", with {plural(n, 'listed departure')} (Surface)" if n else ""
 
@@ -5814,11 +5815,14 @@ def chain_provenance(surface_json: dict) -> dict | None:
     A Yahoo download carries no quote times. Until 2026-10-27 the job stamped
     the download instant into its quote_time, and a download inside Global
     Trading Hours was then treated as a timed book, T measured from it
-    (option_chain.t_origin; VALIDATOR-01, QUANT-01): such a chain is named a
-    download with its fetch time, never 'quotes at'. A Cboe book records the
-    time of its quotes. Keys: vendor ('yahoo', 'cboe' or the raw source), name,
-    short, time (the quote-time clause), badge (that clause in parts short
-    enough to set unbroken on a 320 px phone), fetched_as_quote_time."""
+    (option_chain.t_origin; VALIDATOR-01, QUANT-01); the producer now records
+    that instant as fetched_at and measures T from the 16:00 ET close. Either
+    way such a chain is named a download with its fetch time and where its T
+    runs from, never 'quotes at'. A Cboe book records the time of its quotes.
+    Keys: vendor ('yahoo', 'cboe' or the raw source), name, short, time (the
+    quote-time clause), badge (that clause in parts short enough to set
+    unbroken on a 320 px phone), download (a Yahoo chain with a known fetch
+    instant)."""
     inp = surface_json.get("inputs") or {}
     uni = surface_json.get("universe") or {}
     src = str(inp.get("source") or uni.get("source") or "").strip().lower()
@@ -5826,19 +5830,20 @@ def chain_provenance(surface_json: dict) -> dict | None:
         return None
     qt = inp.get("quote_time") or uni.get("quote_time")
     if src in YAHOO:
-        if qt:
-            from_fetch = str(inp.get("t_origin_basis") or "").startswith("quote_time")
-            badge = [f"fetched {_utc_text(qt)}", "Yahoo reports no quote times",
-                     *(["T measured from the fetch"] if from_fetch else [])]
+        fetched = qt or inp.get("fetched_at") or uni.get("fetched_at")
+        if fetched:
+            basis = str(inp.get("t_origin_basis") or uni.get("t_origin_basis") or "")
+            t_from = ("T measured from the fetch" if qt and basis.startswith("quote_time")
+                      else "T from the 16:00 ET close" if basis.startswith("session close") else None)
+            badge = [f"fetched {_utc_text(fetched)}", "Yahoo reports no quote times",
+                     *([t_from] if t_from else [])]
             return {"vendor": "yahoo", "name": "Yahoo Finance download", "short": "Yahoo download",
-                    "time": f"{badge[0]}; {', '.join(badge[1:])}", "badge": badge,
-                    "fetched_as_quote_time": True}
+                    "time": f"{badge[0]}; {', '.join(badge[1:])}", "badge": badge, "download": True}
         return {"vendor": "yahoo", "name": CHAIN_SOURCES[src], "short": "Yahoo close",
-                "time": "no quote time", "badge": ["no quote time"], "fetched_as_quote_time": False}
+                "time": "no quote time", "badge": ["no quote time"], "download": False}
     name = CHAIN_SOURCES.get(src, src)
     time = f"quotes at {_utc_text(qt)}" if qt else "no quote time"
-    return {"vendor": src, "name": name, "short": name, "time": time, "badge": [time],
-            "fetched_as_quote_time": False}
+    return {"vendor": src, "name": name, "short": name, "time": time, "badge": [time], "download": False}
 
 
 def _chain_clause(surface_json: dict) -> str:
@@ -5854,7 +5859,7 @@ def chain_sentence(surface_json: dict) -> str:
     pv = chain_provenance(surface_json)
     if not pv:
         return "a chain whose source is not recorded"
-    if pv["fetched_as_quote_time"]:
+    if pv["download"]:
         when, _, rest = pv["time"].partition("; ")
         return f"a {pv['name']} {when} ({rest.replace(', ', '; ')})"
     if pv["time"] == "no quote time":
@@ -7090,12 +7095,20 @@ def load_model_risk() -> dict[str, Any]:
 
         def surf_hist(k):
             return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
+        # a session's surface is built whatever its Heston fit did: its scorecard
+        # then has no Heston row and says why (surface.scorecard.UNAVAILABLE_REASONS)
+        unscored = next((str(m.get("reason") or "no stored fit")
+                         for m in ((surf.get("scorecard") or {}).get("models") or [])
+                         if isinstance(m, dict) and str(m.get("model", "")).startswith("heston")
+                         and m.get("available") is False), None)
         add(INV_CALIBRATOR, "Heston median |model − mid|, out of sample (half-spreads)",
             today["median_abs_hs"],
             f"{_fmt(today['median_abs_hs'], '.1f')} ({_fmt(today['inside_pct'], '.1f')}% inside)",
-            "median_abs_hs", sart + ("scorecard.json" if today["scorecard"] else "residuals.parquet"),
-            f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
-            + _chain_clause(surf.get("surface") or {}) + ".",
+            "median_abs_hs",
+            sart + ("scorecard.json" if today["scorecard"] or unscored else "residuals.parquet"),
+            (f"Heston is not scored on {surf['session']}: {unscored}" if unscored else
+             f"{_fmt(today['n_hs'], ',.0f')} quotes of {surf['session']}; "
+             + _chain_clause(surf.get("surface") or {}) + "."),
             history=surf_hist("median_abs_hs"), digits=".1f")
         vendor = chain_vendor(((surf.get("surface") or {}).get("inputs") or {}).get("source"))
         add(vendor, "VIX replicated from the stored chain − Cboe close (index pts)",

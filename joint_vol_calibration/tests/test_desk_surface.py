@@ -476,6 +476,18 @@ def test_the_gap_attribution_sentence_restates_the_tables_split_on_its_sign(sess
     assert ("overstates" in rebuilt) == (v["far_wing"] <= -0.005)
 
 
+def test_the_departure_count_is_the_deviations_not_the_gap_notes():
+    """QUANT-02 / VALIDATOR-05: the Overview cited '12 listed departures' for
+    2026-10-26, its 6 deviations plus 6 gap notes, four of which (strip
+    coverage per term, the model variance swaps, the gap attribution) describe
+    the replication and depart from nothing. The count is the deviations."""
+    rep = {"deviations": ["R is the bill rate", "VIX bracket 2026-11-06 (10.6 d) / ..."],
+           "gap_notes": ["near-term ...", "next-term ...", "Model variance swaps ..."]}
+    assert ds.vix_departure_count(rep) == 2
+    assert ds.vix_departure_count({"gap_notes": ["near-term ..."]}) == 0
+    assert ds.vix_departure_count(None) == 0
+
+
 def test_the_rebuilt_gap_sentence_reads_only_what_the_row_holds():
     """No split, no sentence (the producer's is still dropped); a row without
     far-wing or fit-inside figures gives the split alone."""

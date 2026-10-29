@@ -433,8 +433,14 @@ def _fetch_yf_options(ticker_symbol: str, underlying_name: str,
         "contract_symbol":  symbols.values,
         "settlement":       settlement,
         "underlying_price": _underlying_close(ticker, session),
-        "quote_time":       db.utc_iso(fetched_at),
+        # Yahoo publishes no quote time: the download instant is recorded as
+        # what it is, never as the time the quotes were made (option_chain
+        # then measures T from the session's 16:00 ET close). fetched_at is
+        # not an options_snapshots column: insert_options_snapshot keeps the
+        # schema's columns only.
+        "quote_time":       None,
         "source":           "yfinance",
+        "fetched_at":       db.utc_iso(fetched_at),
     })
 
     # Drop expired and zero-strike rows
