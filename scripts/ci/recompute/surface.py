@@ -41,7 +41,7 @@ SPEC_SIG = 6                        # chart specs carry 6 significant figures (d
 SPEC_ATOL = 1e-12                   # ... and float noise of a value that is zero
 CONE_SIG = 4                        # the cone's series: 4 significant figures (app.vol_cone_view)
 FULL_SIG = 10                       # a spec value stored unrounded
-PACK_MID, PACK_SPREAD, PACK_MODEL = 1e5, 1e6, 1e4  # the packed quotes' units per vol pt
+PACK_MID, PACK_SPREAD, PACK_MODEL = 1e5, 1e8, 1e4  # the packed quotes' units per vol pt
 QUAD_NOISE = 1e-10                  # two quadratures of ∫p agree to about this
 SUPER = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
 
@@ -1306,7 +1306,7 @@ def packed_quotes(a: Audit, c: Ctx) -> None:
 
 def packed_group(c: Ctx, e: str, g: dict) -> dict[str, bool]:
     """One expiry's packed block, field by field: does it unpack to the residual table?
-    IVs are packed as integers (mid in 10⁻⁵ vol pts, bid / ask off the mid in 10⁻⁶,
+    IVs are packed as integers (mid in 10⁻⁵ vol pts, bid / ask off the mid in 10⁻⁸,
     each model off the mid in 10⁻⁴), so each must agree to half its unit."""
     q = c.mkt[c.mkt["expiry"] == e].sort_values("k", kind="mergesort")
     strikes = [int(g["K0"])]

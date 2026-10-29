@@ -92,11 +92,14 @@ def test_every_certified_slice_is_a_distribution_with_the_forward_as_its_mean(ta
 def test_the_density_is_the_second_strike_derivative_of_the_slices_call(session):
     """Breeden–Litzenberger by finite differences: with C(K)/F = c(k), K = F·eᵏ,
     the density of ln(S_T/F) is K·∂²C/∂K² = e⁻ᵏ·(c″(k) − c′(k)) (independent of
-    Durrleman's g); compared inside each expiry's quoted strikes."""
+    Durrleman's g); compared inside each expiry's quoted strikes. The step is a
+    fiftieth of the slice's SVI σ at most: σ is the width of the smile's turn, and
+    a fixed 10⁻³ missed the 22.5 peak of a σ = 0.0054 slice (a simulated session)
+    by 0.4%."""
     sj, res = _inputs(session)
     kr = ds.quoted_k_range(res)
-    h = 1e-3
     for sl in sj["surfaces"]["svi_cal"]["params"]["slices"]:
+        h = min(1e-3, float(sl["sigma"]) / 50.0)
         lo, hi = kr[str(sl["expiry"])[:10]]
         ks = np.linspace(lo, hi, 9)
         c0, cp, cm = _black_call(ks, sl), _black_call(ks + h, sl), _black_call(ks - h, sl)

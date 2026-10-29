@@ -6880,7 +6880,7 @@ def _client_quotes(g: dict) -> list[dict]:
     for i in range(len(g["mid"])):
         if i:
             K += g["dK"][i - 1] * g["step"]
-        mid, db, da = g["mid"][i] / 1e5, g["db"][i] / 1e6, g["da"][i] / 1e6
+        mid, db, da = g["mid"][i] / 1e5, g["db"][i] / 1e8, g["da"][i] / 1e8
         hs = (db + da) / 2
         k = np.log(K / g["F"])
         sw = np.sqrt((mid / 100) ** 2 * g["T"] / 365.0)
@@ -6913,7 +6913,7 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     model's z. Three quotes per expiry (first, middle, last) of every smile on
     Surface and Calibration, unpacked with the client's formulas from the page's
     own spec, give residuals.parquet's strike (exactly), right, the producer's
-    forward delta (1e-6) and each model's error_hs (±0.05), in_sample and
+    forward delta (1e-6) and each model's error_hs (±0.01), in_sample and
     inside_spread."""
     res = pd.read_parquet(_surface_file("residuals.parquet"))
     specs = _smile_specs(pages)
@@ -6935,7 +6935,7 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
                     if mm is None:
                         assert not np.isfinite(p.model_iv)
                         continue
-                    assert abs(mm["z"] - p.error_hs) <= 0.05, (route, e, m, i, mm["z"], p.error_hs)
+                    assert abs(mm["z"] - p.error_hs) <= 0.01, (route, e, m, i, mm["z"], p.error_hs)
                     flags = (bool(mm["st"] & 1), bool(mm["st"] & 2))
                     assert flags == (bool(p.in_sample), bool(p.inside_spread)), (route, e, m, i)
                     n += 1

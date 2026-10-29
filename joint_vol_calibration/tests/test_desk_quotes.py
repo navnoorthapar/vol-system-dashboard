@@ -52,7 +52,9 @@ def test_the_half_spread_floor_is_the_producers():
 def test_decoded_quotes_reproduce_the_residual_table(session):
     """Every quote of every expiry and model: strike exact, right, forward delta
     within 1e-6 of the producer's formula on the parquet's own values, error_hs
-    within 0.05 (the floor included: a locked quote divides by 0.01 vol pts),
+    within 0.01 at any |z| (the floor included: a locked quote divides by 0.01
+    vol pts; found on a simulated session, where a 1,456-half-spread quote
+    decoded 0.06 away while the half-spread was packed at 10⁻⁶ vol pts),
     model IV within 10⁻⁴ vol pts, and the producer's in_sample / inside_spread."""
     res = pd.read_parquet(SURFACE / session / "residuals.parquet")
     models = list(res["model"].unique())
@@ -84,7 +86,7 @@ def test_decoded_quotes_reproduce_the_residual_table(session):
                 assert row["ask"] == pytest.approx(p.ask_iv * 100.0, abs=1e-5)
                 assert row["half_spread"] == pytest.approx(p.half_spread_vp, abs=1e-5)
     assert worst["delta"] <= 1e-6, worst
-    assert worst["z"] <= 0.05, worst
+    assert worst["z"] <= 0.01, worst
     assert worst["iv"] <= 1e-4, worst
 
 
@@ -119,8 +121,8 @@ def test_delta_axis_puts_left_calls_right_and_matches_the_delta():
 
 def test_series_data_of_each_field():
     g = {"F": 100.0, "T": 30.0, "step": 5, "K0": 90, "dK": [2, 2], "r": "PCC",
-         "mid": [2_500_000, 2_000_000, 1_800_000], "db": [500_000, 400_000, 100_000],
-         "da": [500_000, 400_000, 300_000],
+         "mid": [2_500_000, 2_000_000, 1_800_000], "db": [50_000_000, 40_000_000, 10_000_000],
+         "da": [50_000_000, 40_000_000, 30_000_000],
          "m": {"a": [10_000, None, -150_000]}, "s": {"a": "301"}, "f": "014"}
     rows = dq.decode(g)
     assert [r["strike"] for r in rows] == [90, 100, 110]
