@@ -288,7 +288,7 @@
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="β estimation chains (scrollable)">
     <table class="tbl dense" id="beta-chains">
       <thead><tr><th scope="col">Chain</th><th scope="col">Session</th><th scope="col">Rule regime</th><th scope="col" class="num">ATM 30d / VIX</th><th scope="col">Use</th></tr></thead>
-      <tbody>{% for c in be.chains %}<tr{% if c.role != 'estimation' %} class="muted"{% endif %}><td>{{ c.kind }}</td><td class="nowrap">{{ c.session }}</td><td>{{ c.regime or '—' }}</td><td class="num">{{ c.ratio|fmt('.3f') }}</td><td>{% if c.role == 'estimation' %}estimation{% elif c.role == 'later' %}later, out of sample{% else %}excluded: {{ c.status[10:] }}{% endif %}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for c in be.chains %}<tr{% if c.role != 'estimation' %} class="muted"{% endif %}><td>{{ c.kind }}</td><td class="nowrap">{{ c.session }}</td><td>{{ c.regime or '—' }}</td><td class="num">{{ c.ratio|fmt('.3f') }}</td><td>{% if c.role == 'estimation' %}estimation{% elif c.role == 'later' %}later, out of sample{% else %}excluded: {{ c.status[10:]|prose }}{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     </div>
     <p class="note">{{ beta_src_txt }}; {{ beta_check_txt }}. 30-day ATM-forward implied vol (Black-76 on put–call-parity forwards) over the same-time VIX; no ATM-IV history exists before 2026, so β is assumed constant over {{ yrs }}.</p>

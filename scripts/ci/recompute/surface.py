@@ -1850,10 +1850,8 @@ def history(a: Audit, c: Ctx) -> None:
              M.num(r.get("atm_over_vix_official")))
         if beta:
             be = beta.get(name)
-            cell(a, P_HIST, f"{name} β estimator on the DB chain", td[j + 3], be["ratio"] if be else None)
-            if be:
-                a.equal(P_HIST, f"{name} β chain's implied spot within 0.5% of the close",
-                        abs(be["spot_gap"]) <= M.BETA_SPOT_TOL, True)
+            cell(a, P_HIST, f"{name} β estimator on the DB chain (— when its implied spot is off the close)",
+                 td[j + 3], be["ratio"] if be else None)
     nums(a, P_HIST, "note (sessions)", a.one("#surface-history p.note"), [len(idx)])
 
 
