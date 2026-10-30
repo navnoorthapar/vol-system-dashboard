@@ -132,7 +132,7 @@
 <div class="g pair">
   {% call m.panel('iv-heat', 'Implied vol by expiry and ln(K/F) · market mids', 's7', d.n_quotes|fmt(',') ~ ' quotes') %}
     {{ m.heatmap(d.iv_heat, 'iv-heatmap', 'Median mid implied vol (%) of the quotes in each expiry (rows) and log-moneyness bucket (columns; heads are bucket midpoints)', 'Expiry',
-                 m.ramp_bar(cividis, d.iv_heat.lo|fmt('.1f') ~ '%', d.iv_heat.hi|fmt('.1f') ~ '%', 'mid implied vol')) }}
+                 m.ramp_bar(cividis, d.iv_heat.lo|fmt('.1f') ~ '%', d.iv_heat.hi|fmt('.1f') ~ '%', 'mid implied vol'), cap=True) }}
     {% if d.surface3d %}
     <p><button class="btn js-only" type="button" data-load-3d="surface3d" data-src="{{ vendored['echarts-gl'].src }}" data-sri="{{ vendored['echarts-gl'].sri }}">Show 3D view (WebGL, loads echarts-gl)</button></p>
     <div class="chart h440" id="surface3d" data-spec3d="surface3d-spec" role="img" aria-label="3D view of the implied-vol grid above (same numbers as the table)" hidden></div>
@@ -145,7 +145,8 @@
       {% for e in d.expiries %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if e.expiry == d.default_exp else 'false' }}" aria-controls="slices-panel" data-value="{{ e.expiry }}">{{ e.T_days|fmt('.0f') }}d</button>{% endfor %}
     </div>
     <div class="seg js-only" role="group" aria-label="x axis of the smile chart"><button class="btn" type="button" data-xmode-for="chart-slices" data-xmode="k" aria-pressed="true">ln(K/F)</button><button class="btn" type="button" data-xmode-for="chart-slices" data-xmode="delta" aria-pressed="false">forward Δ</button></div>
-    <div id="slices-panel" role="tabpanel" class="grow-col">{{ m.chart(d.charts.slices, 'h440 grow') }}</div>
+    {# a fixed height (P4.1 layout): a grown smile matched the 45-row IV grid beside it, 1,164 px tall #}
+    <div id="slices-panel" role="tabpanel" class="grow-col">{{ m.chart(d.charts.slices, 'h440') }}</div>
   {% endcall %}
 </div>
 
@@ -176,7 +177,7 @@
     {% for r in d.resid_heat %}
     <div id="resid-{{ r.key }}" role="tabpanel" class="grow-col"{% if not loop.first %} hidden{% endif %}>
       {{ m.heatmap(r, 'resid-heat-' ~ r.key, r.label ~ ': median (model − mid) / half-spread of its ' ~ (r.n|fmt(',')) ~ ' out-of-sample quotes by expiry and log-moneyness bucket (column heads are bucket midpoints); |value| ≤ 1 is inside the spread', 'Expiry',
-                   m.ramp_bar(diverge, '−5', '+5', 'half-spreads · model below mid ◀ 0 ▶ model above mid'), grow=True) }}
+                   m.ramp_bar(diverge, '−5', '+5', 'half-spreads · model below mid ◀ 0 ▶ model above mid'), grow=True, cap=True) }}
     </div>
     {% endfor %}
   {% endcall %}

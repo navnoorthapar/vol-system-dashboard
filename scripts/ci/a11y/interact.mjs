@@ -20,8 +20,9 @@
 //     60 px unused (an s7 + s5 row became 12 + 6 below 1181 px: half-empty rows);
 //   * panel bottoms: no .panel ends more than 96 px below its last visible content
 //     (a short panel stretched beside a tall one), every chart drawn first; the body
-//     of a closed <details> is not visible content; #carry and #forward are left to
-//     their own fixes;
+//     of a closed <details> is not visible content, nor is a .grow-col box itself
+//     (it stretches to its panel: only what it holds is content; counting it hid a
+//     440 px smile in a 1,446 px panel); #carry and #forward are left to their own fixes;
 //   * heatmap row heads: at 390 px a heatmap's row header stays in view after its
 //     region is scrolled sideways;
 //   * Model Risk status filters: each chip of the summary strip shows exactly the
@@ -33,6 +34,10 @@
 //     the keyboard readout says the same; the residual strip shares the smile's
 //     x range; the forward-delta switch renames the axis and keeps the expiry; a
 //     Calibration smile's tooltip names its quote the same way;
+//   * the smile's height (P4.1 layout): at 1024, 1280, 1440 and 1920 px the Surface
+//     smile is as tall as its height class says (h440: 440 px), whatever the expiry
+//     count: a grown smile matched the 45-row IV grid beside it, 1,164 px tall, and
+//     the quote the inspector check hovers was below the screen;
 //   * the smile's expiry switch is fast (P4.2): the median of five expiry-tab
 //     clicks, timed by the Event Timing API (PerformanceObserver 'event',
 //     durationThreshold 16, from the input to the next paint), is at most 50 ms,
@@ -290,7 +295,8 @@ async function checkLayout() {
           if (!vis(p) || exempt.includes(p.id)) return;
           let last = -Infinity;
           p.querySelectorAll('.panel-body *').forEach(el => {
-            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)) return;
+            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)
+                || el.classList.contains('grow-col')) return;
             last = Math.max(last, el.getBoundingClientRect().bottom);
           });
           if (last === -Infinity) return;
@@ -449,6 +455,29 @@ async function checkQuoteInspector() {
   return check;
 }
 
+// -- the smile's height (P4.1 layout) ----
+const SMILE_WIDTHS = [1024, 1280, 1440, 1920];
+async function checkSmileLayout() {
+  const check = { name: 'the smile keeps its own height', views: [], failures: [] };
+  for (const width of SMILE_WIDTHS) {
+    const { ctx, page, errors } = await openPage('surface.html', { width, height: 900 });
+    const id = 'chart-slices';
+    if (!(await page.locator('#' + id).count())) { await ctx.close(); continue; }
+    await page.locator('#' + id).scrollIntoViewIfNeeded();
+    if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id} @${width}px: not drawn`); await ctx.close(); continue; }
+    const r = await page.evaluate(cid => {
+      const el = document.getElementById(cid), m = el.className.match(/\bh(\d+)\b/);
+      return { height: el.getBoundingClientRect().height, want: m ? Number(m[1]) : null };
+    }, id);
+    check.views.push({ width, ...r });
+    if (r.want === null) check.failures.push(`surface.html #${id}: no height class`);
+    else if (Math.abs(r.height - r.want) > 1) check.failures.push(`surface.html #${id} @${width}px: ${Math.round(r.height)} px tall, its class says ${r.want} px`);
+    for (const e of errors) check.failures.push(`surface.html @${width}px: JavaScript error: ${e}`);
+    await ctx.close();
+  }
+  return check;
+}
+
 // -- the smile's expiry switch (P4.2) ----
 const SWITCH_MAX_MS = { 1: 50, 4: 150 };
 const DRAWN_MAX_MS = { 1: 100, 4: 300 };
@@ -515,7 +544,7 @@ async function checkSwitchSpeed() {
 
 const ONLY = process.env.INTERACT_ONLY ? process.env.INTERACT_ONLY.split(',') : null;
 for (const run of [checkSignedBars, checkKpiTones, checkKpiStrips, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
-  checkQuoteInspector, checkSwitchSpeed]) {
+  checkQuoteInspector, checkSmileLayout, checkSwitchSpeed]) {
   if (ONLY && !ONLY.includes(run.name)) continue;
   const c = await run();
   report.checks.push(c);

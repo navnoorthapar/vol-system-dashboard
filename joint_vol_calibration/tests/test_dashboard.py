@@ -3945,6 +3945,105 @@ def test_browser_slice_is_drawn_once_and_tables_follow_the_tab(site_browser):
     ctx.close()
 
 
+# The synthetic session (_surface_store) at the expiry counts the Surface page must
+# hold: 17 (a Yahoo chain: no OCC root), about 45 (a full Cboe book, with roots) and
+# 80 (headroom). Its pages, not a stored session's, carry the scaling tests: the
+# daily bot replaces the stored sessions and with them the expiry count.
+SYN_SITES = {17: False, 45: True, 80: True}
+
+
+@pytest.fixture(scope="module")
+def syn_browser(dash, freezer, site_browser, tmp_path_factory):
+    """The synthetic session's Surface page at each SYN_SITES size, frozen as
+    surface-<n>.html beside static/ (freeze_site's link rewrites applied) and served
+    on loopback, in site_browser's Chromium (one Playwright per process)."""
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    out = tmp_path_factory.mktemp("syn_site")
+    shutil.copytree(freezer.STATIC, out / "static", ignore=shutil.ignore_patterns("__pycache__", ".*"))
+    html, old = {}, dash.DATA
+    try:
+        for n, roots in SYN_SITES.items():
+            dash.DATA = _surface_store(tmp_path_factory.mktemp(f"syn{n}"), n, roots)
+            resp, page = _get(dash, "/surface")
+            assert _errors(resp) == 0, (n, resp.headers.get("X-Dashboard-Error-Components"))
+            for a, b in freezer._rewrites(dash):
+                page = page.replace(a, b)
+            html[n] = page
+            (out / f"surface-{n}.html").write_text(page, encoding="utf-8")
+    finally:
+        dash.DATA = old
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(out)))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield {"base": f"http://127.0.0.1:{httpd.server_address[1]}/", "browser": site_browser["browser"],
+           "site": out, "html": html}
+    httpd.shutdown()
+
+
+def _syn_page(sb, n: int, width: int, height: int = 900):
+    ctx, page = _page(sb, width, height)
+    page.goto(f"{sb['base']}surface-{n}.html", wait_until="load")
+    return ctx, page
+
+
+# the smile's box and the screen position of its middle quote (the one the quote
+# inspector check hovers), from the chart's own coordinate system
+_SMILE_MIDDLE_QUOTE_JS = """(id) => {
+  const c = Desk.charts[id], keys = Object.keys(c.spec._rows);
+  const rows = c.spec._rows[keys.length > 1 ? Desk.filters[id] : keys[0]];
+  const q = rows[Math.floor((rows.length - 1) / 2)];
+  const px = c.chart.convertToPixel({xAxisIndex: 0, yAxisIndex: 0}, [q.k, q.mid]);
+  const r = c.el.getBoundingClientRect();
+  return {height: r.height, x: r.left + px[0], y: r.top + px[1], vw: innerWidth, vh: innerHeight};
+}"""
+
+def test_browser_the_smile_keeps_its_height_beside_a_45_expiry_grid(syn_browser):
+    """D3 / P4.1 layout: on a 45-expiry book the smile grew to the height of the
+    45-row IV grid beside it (1,164 px), so its quotes sat below the screen (the
+    quote inspector found no tooltip), and the 45-row residual grid stretched the
+    arbitrage panel beside it, which ended 214 px below its content. At 1024–1920 px
+    the smile is as tall as its h440 class says, 360 px on a phone, and its middle
+    quote is on screen once the chart is scrolled to; neither row ends a panel in
+    blank space: the IV and residual grids take their row's height and scroll
+    inside it under their sticky column heads."""
+    sb = syn_browser
+    for width, want in ((1024, 440), (1440, 440), (1920, 440), (390, 360)):
+        ctx, page = _syn_page(sb, 45, width, 844 if width < 600 else 900)
+        page.locator("#chart-slices").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-slices")
+        r = page.evaluate(_SMILE_MIDDLE_QUOTE_JS, "chart-slices")
+        assert abs(r["height"] - want) <= 1, (width, r)
+        assert 0 <= r["x"] <= r["vw"], (width, r)
+        assert 0 <= r["y"] <= r["vh"], (width, r)
+        if width > 1180:                          # side by side: each row is as tall as its taller panel
+            r = page.evaluate(_LAYOUT_JS, [60, 96, []])
+            rows = ("iv-heat", "slices", "residuals", "arbitrage")
+            assert [b for b in r["blanks"] if b.split()[0] in rows] == [], (width, r)
+            heads = page.evaluate("""() => [...document.querySelectorAll('.heat-wrap.capped')]
+                .filter(w => !w.closest('[hidden]')).map(w => {
+                  w.scrollTop = w.scrollHeight;
+                  const h = w.querySelector('thead th').getBoundingClientRect();
+                  const b = w.getBoundingClientRect();
+                  return [w.querySelector('table').id, w.scrollHeight > w.clientHeight,
+                          Math.round(h.top - b.top)]; })""")
+            by_id = {h[0]: h[1:] for h in heads}
+            assert "iv-heatmap" in by_id, heads
+            assert any(i.startswith("resid-heat-") for i in by_id), heads
+            # the 45-row IV grid is taller than the smile's row: it scrolls inside it, and
+            # every grid that scrolls keeps its column heads in view at its bottom
+            assert by_id["iv-heatmap"][0], (width, heads)
+            assert all(0 <= top <= 2 for scrolls, top in by_id.values() if scrolls), (width, heads)
+        ctx.close()
+
+
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
     """UI-8 / UI-15: no layout shift after first paint; at 390 px no caption runs
     past its scroll region; at 1440 px the surface history table fits."""
@@ -7022,7 +7121,8 @@ _LAYOUT_JS = """([maxUnused, maxBlank, exempt]) => {
     if (!vis(p) || exempt.includes(p.id)) return;
     let last = -Infinity;
     p.querySelectorAll('.panel-body *').forEach(el => {
-      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)) return;
+      if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)
+          || el.classList.contains('grow-col')) return;
       last = Math.max(last, el.getBoundingClientRect().bottom);
     });
     if (last !== -Infinity && p.getBoundingClientRect().bottom - last > maxBlank)
@@ -7040,7 +7140,9 @@ def test_browser_grid_rows_are_full_and_panels_end_with_their_content(site_brows
     have their own fixes in flight). The body of a closed <details> is not
     visible content: Chromium keeps a layout box for it, and counting it hid
     the blank below the replication panel's closed disclosure (135 px at 1440)
-    and the scenario grid's (111 px at 1920)."""
+    and the scenario grid's (111 px at 1920). Nor is a .grow-col box itself: it
+    stretches to its panel, so only what it holds is content (counting it hid a
+    440 px smile in a 1,446 px panel)."""
     ctx, page = _page(site_browser, width, 900)
     try:
         for name in ("index.html", "surface.html", "calibration.html", "risk.html", "research.html",

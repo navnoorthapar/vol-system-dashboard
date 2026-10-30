@@ -643,6 +643,13 @@ dialog.keys .dl { font-size: 12px; }
   .g:is(.pair, .level) .panel-body .chart.grow { flex: 1 1 auto; }
   .g:is(.pair, .level) .panel-body .heat-wrap.grow { flex: 1 1 auto; display: flex; flex-direction: column; }
   .g:is(.pair, .level) .panel-body .heat-wrap.grow > table.heat { flex: 1 1 auto; height: 100%; }
+  /* a heatmap whose rows grow with the expiry count (Surface's IV grid beside the
+     smile, its residual grids beside the arbitrage screen) never sets its row's
+     height: size containment leaves it out of the row's sizing, so it takes the
+     height the row has and scrolls inside it under its sticky head. A 45-expiry grid
+     stretched the smile beside it to 1,164 px, its quotes below the screen, and
+     left the arbitrage panel 214 px of blank. */
+  .g:is(.pair, .level) .panel-body .heat-wrap.capped { contain: size; flex: 1 1 0; min-height: 280px; overflow: auto; }
   .g:is(.pair, .level) .grow-col[hidden] { display: none; }
   .g.pair.start { align-items: start; }
   /* an open disclosure makes its panel taller than the row was laid out for; the
@@ -661,10 +668,15 @@ dialog.keys .dl { font-size: 12px; }
 @media (max-width: 1180px) {
   .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }
   .g.evenfill > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .heat-wrap.capped { max-height: 60vh; overflow: auto; }   /* stacked: a capped grid scrolls inside 60% of the screen */
 }
+/* a heatmap's column heads stay in view while a capped region scrolls (above) */
+table.heat thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); }
 /* phones: a heatmap's row header (the expiry) stays in view while its region scrolls sideways */
 @media (max-width: 599px) {
   table.heat th[scope="row"] { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+  table.heat thead th:first-child { left: 0; z-index: 3; }
+  .chart.h440 { height: 360px; }          /* the smile slice: its residual strip shares the height */
 }
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
@@ -717,7 +729,6 @@ dialog.keys .dl { font-size: 12px; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
   .chart.h300, .chart.h340, .chart.h400 { height: 260px; }
-  .chart.h440 { height: 340px; }          /* the smile slice: its residual strip shares the height */
   .chart.tall-narrow { height: 680px; }      /* one row per category (the C22 waterfall): three lines of a wrapped step name */
 }
 /* Text-heavy tables (.tbl.cards) in a region narrower than 640 px (a phone, or a
@@ -777,6 +788,7 @@ dialog.keys .dl { font-size: 12px; }
   .panel, .banner, .pm, .kpis { break-inside: avoid; }
   .tbl-wrap, .heat-wrap { overflow: visible !important; }
   .tbl-wrap.capped { max-height: none !important; overflow-y: visible !important; }   /* a capped table overlapped the chart below it */
+  .heat-wrap.capped { max-height: none !important; contain: none !important; }        /* every row of a capped grid prints */
   .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 4px 0 0; overflow: visible; clip: auto; white-space: normal; }
   /* heat cells, ramps and swatches print in their colours (browsers drop
      backgrounds by default, which left faint grey numbers on white) */
