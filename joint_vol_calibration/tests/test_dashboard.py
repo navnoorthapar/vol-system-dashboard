@@ -2523,6 +2523,63 @@ def test_synthetic_surface_store_round_trips_through_the_quote_packing(dash, tmp
     assert len(re.findall(r'aria-controls="slices-panel" data-value="', html)) == 45
 
 
+def _syn_expected_strip(n: int, roots: bool) -> dict[str, dict]:
+    """The synthetic session's smile tabs and status lines, computed here from its
+    residual table: {expiry: T, tab text, settlement, whether it opens a month,
+    status line} (date · weekday · AM/PM · days · F · quotes · median half-spread)."""
+    res = _syn_session(n, roots)["residuals"]
+    mkt = res[res["model"] == SYN_MODELS[0]]
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    out: dict[str, dict] = {}
+    prev = None
+    for e, q in mkt.groupby("expiry", sort=True):
+        T, day = float(q["T_days"].median()), pd.Timestamp(e)
+        settle = {"SPX": "AM", "SPXW": "PM"}[q["root"].iloc[0]] if roots else None
+        tag = [settle] if settle else []
+        out[e] = {"T": T, "settle": settle, "mo": prev is not None and prev[:7] != e[:7],
+                  "label": " · ".join([f"{months[day.month - 1]} {day.day}", f"{T:.0f}d", *tag]),
+                  "status": " · ".join([e, day.day_name()[:3], *tag, f"{T:.0f} days",
+                                        f"F {q['forward'].iloc[0]:,.2f}", f"{len(q)} quotes",
+                                        f"median half-spread {q['half_spread_vp'].median():.2f} vol pts"])}
+        prev = e
+    return out
+
+
+SMILE_TAB = re.compile(r'<button class="btn( mo)?" type="button" role="tab" aria-selected="(true|false)" '
+                       r'aria-controls="slices-panel" data-value="([\d-]+)"'
+                       r'(?: data-settle="(AM|PM)")?>(.*?)</button>')
+
+
+def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root(dash, tmp_path, monkeypatch):
+    """D3 / A2: a smile tab named its expiry by days alone ('30d'): on a full Cboe book
+    of ~45 tabs a reader counted along the strip to find a date, and an AM (SPX) line
+    looked like a PM (SPXW) one. A tab now reads 'Nov 25 · 30d', with ' · AM' or
+    ' · PM' only where the residual table carries the line's OCC root (a Cboe book's:
+    never a Yahoo chain's, never guessed from the date); a month's first expiry opens
+    a group (.mo); and one status line under the tabs names the selected expiry
+    (date · weekday · AM/PM · days · F · quotes · median half-spread), the server's
+    for the default expiry, from its row of 'Quotes per expiry', which now holds F."""
+    for n, roots in ((17, False), (45, True)):
+        (tmp_path / f"n{n}").mkdir()
+        monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / f"n{n}", n, roots))
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        want = _syn_expected_strip(n, roots)
+        tabs = SMILE_TAB.findall(html)
+        assert [t[2] for t in tabs] == list(want)
+        for mo, _sel, e, settle, inner in tabs:
+            assert _html_unescape(re.sub(r"<[^>]+>", "", inner)) == want[e]["label"], e
+            assert (settle or None) == want[e]["settle"], e
+            assert bool(mo) == want[e]["mo"], e
+        assert {t[3] for t in tabs} == ({"AM", "PM"} if roots else {""})
+        default = [t[2] for t in tabs if t[1] == "true"]
+        assert default == [min(want, key=lambda e: abs(want[e]["T"] - 30.0))]
+        st = re.search(r'<p class="exp-status js-only" id="slices-status" role="status" '
+                       r'data-from="chart-slices-data">(.*?)</p>', html)
+        assert st, n
+        assert _html_unescape(st.group(1)) == want[default[0]]["status"]
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
@@ -2938,9 +2995,12 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # P4.1: the quote inspector, the residual strip and the linked chart groups
     # raised the page script from 51 KB; it is served gzipped like the pages. F4's keyboard
     # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped; R3-T9's table CSV
-    # numbers (one-number cells parsed, block children spaced) past 31 KB
+    # numbers (one-number cells parsed, block children spaced) past 31 KB. 31,500 to 32,000
+    # (D3): the Surface smile's one-line expiry strip keeps its selected tab in view and
+    # one status line names the selected expiry (31,324 to 31,726 B), within the 1 KB
+    # the 45-expiry plan allows desk.js in all (its book-file loading takes the rest)
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 31_500
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 32_000
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -3296,7 +3356,7 @@ def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
     block = re.search(r'<div class="chart-data sr-only" id="chart-slices-data">(.*?)\n</div>', html,
                       re.DOTALL).group(1)
     groups = re.findall(r'<div class="chart-data-group" data-group="([^"]+)"( hidden)?>', block)
-    exps = re.findall(r'data-value="(\d{4}-\d{2}-\d{2})">\d+d</button>', html)
+    exps = re.findall(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"', html)
     assert [g for g, _ in groups] == exps
     assert sum(1 for _, h in groups if not h) == 1
     head = re.search(r'data-group="[^"]+"[^>]*><table>\s*<caption>[^<]+</caption>\s*<thead><tr>(.*?)</tr>',
@@ -4042,6 +4102,82 @@ def test_browser_the_smile_keeps_its_height_beside_a_45_expiry_grid(syn_browser)
             assert by_id["iv-heatmap"][0], (width, heads)
             assert all(0 <= top <= 2 for scrolls, top in by_id.values() if scrolls), (width, heads)
         ctx.close()
+
+
+# the smile's expiry strip after a step of ``step`` expiries (Desk.stepExpiry: what
+# '[' / ']' and a table row's head do, choosing a tab without focusing it)
+_STRIP_JS = """async (step) => {
+  const list = document.querySelector('[role="tablist"][data-state-key="exp"]');
+  const tabs = [...list.querySelectorAll('[role="tab"]')];
+  if (step) Desk.stepExpiry(step);
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const sel = tabs.find(t => t.getAttribute('aria-selected') === 'true');
+  const l = list.getBoundingClientRect(), t = sel.getBoundingClientRect();
+  return {lines: new Set(tabs.map(x => Math.round(x.getBoundingClientRect().top))).size,
+          scrolls: list.scrollWidth > list.clientWidth, selected: sel.dataset.value,
+          inView: t.left >= l.left - 1 && t.right <= l.right + 1, scrollY: Math.round(scrollY),
+          status: (document.getElementById('slices-status') || {}).textContent,
+          overflow: document.documentElement.scrollWidth - innerWidth};
+}"""
+
+
+def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_view(syn_browser):
+    """D3: a full Cboe book's ~45 smile tabs wrapped to four or five lines above the
+    chart. At 1024–1920 px the strip is one line for 17, 45 and 80 expiries and
+    scrolls sideways when it must; the selected expiry is in view at load, after a
+    step to the last or the first expiry without focusing its tab (the strip
+    scrolls, not the page) and on a link to the last (exp= in the hash); the status
+    line under it names the selected expiry as the server names the default."""
+    sb = syn_browser
+    for n, roots in SYN_SITES.items():
+        want = _syn_expected_strip(n, roots)
+        exps = list(want)
+        for width in (1024, 1280, 1440, 1920):
+            ctx, page = _syn_page(sb, n, width)
+            page.locator("#chart-slices").scroll_into_view_if_needed()
+            _wait_for_chart(page, "chart-slices")
+            r0 = page.evaluate(_STRIP_JS, 0)
+            assert r0["lines"] == 1, (n, width, r0)
+            assert r0["inView"], (n, width, r0)
+            assert r0["status"] == want[r0["selected"]]["status"], (n, width, r0)
+            assert r0["overflow"] <= 0, (n, width, r0)
+            if n >= 45:
+                assert r0["scrolls"], (n, width, r0)
+            for step, e in ((n, exps[-1]), (-n, exps[0])):
+                r = page.evaluate(_STRIP_JS, step)
+                assert r["selected"] == e, (n, width, r)
+                assert r["inView"], (n, width, r)
+                assert r["scrollY"] == r0["scrollY"], (n, width, r)
+                assert r["status"] == want[e]["status"], (n, width, r)
+            ctx.close()
+    exps = list(_syn_expected_strip(45, True))
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(f"{sb['base']}surface-45.html#slices&exp={exps[-1]}", wait_until="load")
+    r = page.evaluate(_STRIP_JS, 0)
+    assert r["selected"] == exps[-1], r
+    assert r["inView"], r
+    assert r["status"].startswith(exps[-1] + " · "), r
+    ctx.close()
+
+
+_TAB_STOPS_JS = """() => [...document.querySelectorAll(
+    'a[href], button, input, select, textarea, summary, [tabindex]')]
+  .filter(el => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length > 0
+    && !el.closest('[hidden], [inert], details:not([open]) > :not(summary)')
+    && getComputedStyle(el).visibility !== 'hidden').length"""
+
+
+def test_browser_surface_has_as_many_tab_stops_at_45_expiries_as_at_17(syn_browser):
+    """A2: a keyboard reader tabs through the Surface page in as many stops on a full
+    Cboe book (45 expiries) as on a 17-expiry chain: the expiry strip, each heatmap's
+    row heads and each table are one stop each, whatever the expiry count."""
+    counts = {}
+    for n in (17, 45):
+        ctx, page = _syn_page(syn_browser, n, 1440)
+        page.wait_for_timeout(300)
+        counts[n] = page.evaluate(_TAB_STOPS_JS)
+        ctx.close()
+    assert counts[17] == counts[45], counts
 
 
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
@@ -8208,10 +8344,12 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     click on an IV-heatmap row head selects that expiry's smile tab, writes exp=
     into the hash, marks its rows aria-current in the IV heatmap, every residual
     heatmap and the delta grid (only those), draws a line at its category on
-    #chart-by-expiry and names it in the readout; ']' and '[' step to the next
-    and previous expiry; a click on a by-expiry category selects it. Without
-    JavaScript the row heads stay plain text. Expiries are read from the page:
-    the daily bot replaces them."""
+    #chart-by-expiry and names it once, in the status line under the smile's tabs
+    (D3: it was written into the readout of every heatmap and the delta grid, six
+    live regions announcing one switch); ']' and '[' step to the next and previous
+    expiry; a click on a by-expiry category selects it. Without JavaScript the row
+    heads stay plain text. Expiries are read from the page: the daily bot replaces
+    them."""
     sb = site_browser
     ctx, page = _page(sb)
     page.goto(sb["base"] + "surface.html", wait_until="load")
@@ -8236,7 +8374,8 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
       tables: [...new Set([...document.querySelectorAll('tr[data-exp]')].map(r => r.closest('table').id))],
       lines: Desk.charts['chart-by-expiry'].chart.getOption().series
         .flatMap(s => ((s.markLine || {}).data || []).map(d => d.xAxis)).filter(x => x !== undefined),
-      readout: document.getElementById('iv-heatmap-readout').textContent })""")
+      readout: document.getElementById('iv-heatmap-readout').textContent,
+      status: document.getElementById('slices-status').textContent })""")
     assert st["sel"] == [exp]
     assert f"exp={exp}" in st["hash"]
     assert "iv-heatmap" in st["tables"]
@@ -8245,7 +8384,8 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     assert sorted(c[0] for c in st["current"]) == sorted(st["tables"])     # one row per table
     assert all(c[1] == exp and c[2] == "true" for c in st["current"]), st["current"]
     assert st["lines"] == [label], st["lines"]
-    assert exp in st["readout"]
+    assert st["status"].startswith(exp + " · "), st["status"]
+    assert exp not in st["readout"], st["readout"]
     # ']' steps to the next expiry, '[' back
     page.keyboard.press("]")
     page.wait_for_timeout(200)
@@ -9855,6 +9995,29 @@ def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(r
     rows = recompute_audit.overview.scorecards(recompute_audit.Store(tmp_path), [session])
     assert sorted(r["model"] for r in rows) == sorted(m["model"] for m in sc["models"][:-1])
     assert all(r["session"] == session and r["n"] > 0 for r in rows)
+
+
+def test_the_audit_fails_a_wrong_number_in_an_expiry_tab_or_the_status_line(recompute_audit, frozen_site,
+                                                                            tmp_path):
+    """D3: the audit reads every smile tab ('Nov 25 · 30d') and the status line under
+    the tabs from the residual table: one day more on a tab, or the forward moved by
+    a cent on the status line, in a copy of the frozen page is a mismatch."""
+    site = tmp_path / "site"
+    shutil.copytree(frozen_site, site)
+    page = site / "surface.html"
+    html = page.read_text(encoding="utf-8")
+    m = re.search(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"[^>]*>'
+                  r'[A-Z][a-z]{2} \d+ · (\d+)d', html)
+    assert m
+    html = html[:m.start(2)] + str(int(m.group(2)) + 1) + html[m.end(2):]
+    f = re.search(r'id="slices-status"[^>]*>[^<]* · F [\d,]+\.(\d\d) ', html)
+    assert f
+    html = html[:f.start(1)] + f"{(int(f.group(1)) + 1) % 100:02d}" + html[f.end(1):]
+    page.write_text(html, encoding="utf-8")
+    res = recompute_audit.run(site, SHIPPED)
+    failed = {c.label for c in res["checks"] if not c.ok and c.page == "Surface"}
+    assert f"tab {m.group(1)}: day of the month, days [1]" in failed
+    assert "status line: days, F, quotes, median half-spread [1]" in failed
 
 
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):

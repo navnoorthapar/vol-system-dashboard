@@ -26,7 +26,7 @@ from bs4 import Tag
 
 from . import surface_math as M
 from .chrome import labels as regime_labels
-from .core import DATE, Audit, Check, norm, numbers_in, rounds_to, text_of
+from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
 from .data import Store, chain_words, sessions_between
 
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
@@ -1216,27 +1216,67 @@ def residual_table(a: Audit, c: Ctx) -> None:
 
 # ── smile slices ──────────────────────────────────────────────────────────────
 P_SL = "#slices"
+MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def settlements(mkt: pd.DataFrame) -> dict[str, str]:
+    """{expiry: 'AM' | 'PM'} read off the OCC root of its lines (SPX: the opening
+    SOQ; SPXW: the close); none without a root column or where an expiry's lines mix."""
+    if "root" not in mkt.columns:
+        return {}
+    out: dict[str, str] = {}
+    for e, roots in mkt.groupby("expiry")["root"]:
+        st = {{"SPX": "AM", "SPXW": "PM"}.get(str(r).strip().upper()) for r in roots.unique()}
+        if len(st) == 1 and None not in st:
+            out[str(e)] = str(st.pop())
+    return out
+
+
+def masked(txt: str) -> str:
+    """A text's wording with its dates as 'D' and its numbers as '#' (checked apart)."""
+    return NUM.sub("#", DATE.sub("D", txt))
 
 
 def slices_panel(a: Audit, c: Ctx) -> None:
-    """Tabs, quotes and median half-spread per expiry, and each expiry's bucket table of
-    bid / mid / ask and every model's median IV; the packed quotes against the table."""
+    """Tabs (date, days, AM / PM from the OCC root, month boundaries), the selected
+    expiry's status line, the forward, quotes and median half-spread per expiry, and
+    each expiry's bucket table of bid / mid / ask and every model's median IV; the
+    packed quotes against the table."""
     tabs = a.soup.select('#slices [role="tab"]')
     a.equal(P_SL, "expiry tabs", [t.get("data-value") for t in tabs], list(c.exps))
     default = min(c.exps.items(), key=lambda kv: abs(kv[1] - M.CM_TENORS[0][0]))[0] if c.exps else None
     a.equal(P_SL, "selected tab: the expiry nearest 30 days",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [default])
+    settle = settlements(c.mkt)
     for t, (e, T) in zip(tabs, c.exps.items()):
-        days_nums(a, P_SL, f"tab {e} days", t, [T])
+        st = settle.get(e)
+        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)),
+                f"{MONTH_ABBR[int(e[5:7]) - 1]} # · #d" + (f" · {st}" if st else ""))
+        days_nums(a, P_SL, f"tab {e}: day of the month, days", t, [float(int(e[8:10])), T])
+        a.equal(P_SL, f"tab {e}: settlement (OCC root)", t.get("data-settle"), st)
+    a.equal(P_SL, "tabs opening a month (.mo)",
+            [t.get("data-value") for t in tabs if "mo" in (t.get("class") or [])],
+            [e for e, prev in zip(list(c.exps)[1:], list(c.exps)) if e[:7] != prev[:7]])
     hs = c.mkt.groupby("expiry")["half_spread_vp"].median()
+    fwd = c.mkt.groupby("expiry")["forward"].first()
+    n_q = c.mkt.groupby("expiry").size()
     trs = rows(chart_table(a, "chart-slices"))
     if same_len(a, P_SL, "quotes per expiry rows", trs, c.exps):
         for tr, (e, T) in zip(trs, c.exps.items()):
             td = tds(tr)
             a.date(P_SL, f"{e} expiry", td[0], e)
             cell(a, P_SL, f"{e} days", td[1], T)
-            cell(a, P_SL, f"{e} quotes", td[2], float((c.mkt["expiry"] == e).sum()))
-            cell(a, P_SL, f"{e} median half-spread", td[3], float(hs[e]))
+            cell(a, P_SL, f"{e} forward F", td[2], float(fwd[e]))
+            cell(a, P_SL, f"{e} quotes", td[3], float(n_q[e]))
+            cell(a, P_SL, f"{e} median half-spread", td[4], float(hs[e]))
+    status = a.one("#slices-status")
+    if default is not None:
+        st = settle.get(default)
+        a.equal(P_SL, "status line: wording", masked(text_of(status)),
+                f"D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
+                + " · # days · F # · # quotes · median half-spread # vol pts")
+        nums(a, P_SL, "status line: days, F, quotes, median half-spread", status,
+             [c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])], [default])
     for e, T in c.exps.items():
         tbl = chart_group(a, "chart-slices", e)
         nums(a, P_SL, f"{e} group caption", tbl.find("caption") if tbl else None, [T], [e])

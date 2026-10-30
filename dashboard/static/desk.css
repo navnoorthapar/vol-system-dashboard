@@ -299,6 +299,23 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .chip-info   { color: var(--info);   border-color: rgba(138, 187, 255, 0.45); background: var(--tint-info); }
 .chip-muted  { color: var(--text3); }
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+/* The smile's expiry strip: one line that scrolls sideways (a full Cboe book lists
+   ~45 expiries, four to five wrapped lines above the chart). Edge shadows show the
+   side with more tabs, as on a scroll region; desk.js keeps the selected tab in view.
+   A month's first expiry opens a group (.mo); the focus ring sits inside the strip,
+   which clips anything outside it. */
+.tabs.exp-strip { flex-wrap: nowrap; overflow-x: auto; min-width: 0; padding: 2px 0 3px; overscroll-behavior-x: contain; scrollbar-width: thin;
+  background:
+    linear-gradient(to right, var(--surface) 30%, rgba(28, 33, 39, 0)) left center / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--surface) 30%, rgba(28, 33, 39, 0)) right center / 32px 100% no-repeat local,
+    linear-gradient(to right, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) left center / 10px 100% no-repeat scroll,
+    linear-gradient(to left, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) right center / 10px 100% no-repeat scroll; }
+.exp-strip .btn { flex: none; }
+.exp-strip .btn.mo { margin-left: 8px; }
+.exp-strip .btn:focus-visible { outline-offset: -2px; }
+.exp-strip .settle { color: var(--text3); }
+.exp-strip .btn[aria-selected="true"] .settle { color: var(--text2); }
+.exp-status { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text2); margin: 2px 0 0; min-height: 18px; }
 /* a region shown in one of two units (the scenario grid: idx pts, or $ per SPX
    contract); without JavaScript the base unit shows */
 .units:not([data-show="alt"]) [data-unit="alt"], .units[data-show="alt"] [data-unit="base"] { display: none; }

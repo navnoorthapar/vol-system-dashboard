@@ -37,7 +37,10 @@
 //   * the smile's height (P4.1 layout): at 1024, 1280, 1440 and 1920 px the Surface
 //     smile is as tall as its height class says (h440: 440 px), whatever the expiry
 //     count: a grown smile matched the 45-row IV grid beside it, 1,164 px tall, and
-//     the quote the inspector check hovers was below the screen;
+//     the quote the inspector check hovers was below the screen; its expiry tabs are
+//     one line (a full Cboe book's ~45 wrapped to four or five lines above it), and
+//     the last expiry, chosen without focusing its tab ('[' / ']' or a table row), is
+//     scrolled into the strip and named by the status line under it;
 //   * the smile's expiry switch is fast (P4.2): the median of five expiry-tab
 //     clicks, timed by the Event Timing API (PerformanceObserver 'event',
 //     durationThreshold 16, from the input to the next paint), is at most 50 ms,
@@ -458,7 +461,7 @@ async function checkQuoteInspector() {
 // -- the smile's height (P4.1 layout) ----
 const SMILE_WIDTHS = [1024, 1280, 1440, 1920];
 async function checkSmileLayout() {
-  const check = { name: 'the smile keeps its own height', views: [], failures: [] };
+  const check = { name: 'the smile keeps its own height; its expiry tabs are one line', views: [], failures: [] };
   for (const width of SMILE_WIDTHS) {
     const { ctx, page, errors } = await openPage('surface.html', { width, height: 900 });
     const id = 'chart-slices';
@@ -469,9 +472,23 @@ async function checkSmileLayout() {
       const el = document.getElementById(cid), m = el.className.match(/\bh(\d+)\b/);
       return { height: el.getBoundingClientRect().height, want: m ? Number(m[1]) : null };
     }, id);
-    check.views.push({ width, ...r });
+    const strip = await page.evaluate(async () => {
+      const list = document.querySelector('[role="tablist"][data-state-key="exp"]');
+      const tabs = [...list.querySelectorAll('[role="tab"]')], last = tabs[tabs.length - 1];
+      const lines = new Set(tabs.map(t => Math.round(t.getBoundingClientRect().top))).size;
+      Desk.stepExpiry(tabs.length);
+      await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const l = list.getBoundingClientRect(), t = last.getBoundingClientRect();
+      const status = document.getElementById(list.getAttribute('data-status') || '');
+      return { tabs: tabs.length, lines, exp: last.getAttribute('data-value'), selected: last.getAttribute('aria-selected') === 'true',
+        inView: t.left >= l.left - 1 && t.right <= l.right + 1, status: status ? status.textContent : null };
+    });
+    check.views.push({ width, ...r, strip });
     if (r.want === null) check.failures.push(`surface.html #${id}: no height class`);
     else if (Math.abs(r.height - r.want) > 1) check.failures.push(`surface.html #${id} @${width}px: ${Math.round(r.height)} px tall, its class says ${r.want} px`);
+    if (strip.lines !== 1) check.failures.push(`surface.html @${width}px: the ${strip.tabs} expiry tabs take ${strip.lines} lines`);
+    if (!strip.selected || !strip.inView) check.failures.push(`surface.html @${width}px: the last expiry ${strip.exp} is ${strip.selected ? '' : 'not selected and '}${strip.inView ? 'in view' : 'outside the strip'}`);
+    if (!strip.status || !strip.status.startsWith(strip.exp + ' \u00b7 ')) check.failures.push(`surface.html @${width}px: the status line says '${strip.status}', not ${strip.exp}`);
     for (const e of errors) check.failures.push(`surface.html @${width}px: JavaScript error: ${e}`);
     await ctx.close();
   }

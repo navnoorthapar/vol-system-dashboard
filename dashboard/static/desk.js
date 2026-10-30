@@ -1110,6 +1110,25 @@
     window.addEventListener('load', function () { if (Math.abs(window.scrollY - y) < 2) el.scrollIntoView(); }, { once: true });
   }
 
+  // -- the smile's expiry strip: one line; a selected tab out of view centred in it
+  // (not scrollIntoView: that scrolls the page), and the status line copied from the
+  // expiry's row of the audited 'Quotes per expiry' table, as the server writes it
+  function keepInView(list, tab) {
+    requestAnimationFrame(function () {
+      var l = list.getBoundingClientRect(), t = tab.getBoundingClientRect();
+      if (t.left < l.left || t.right > l.right) list.scrollLeft += (t.left + t.right - l.left - l.right) / 2;
+    });
+  }
+  function expiryStatus(out, tab) {
+    var e = tab.getAttribute('data-value'), p = e.split('-'), s = tab.getAttribute('data-settle');
+    var r = $$('#' + out.getAttribute('data-from') + ' > table > tbody > tr').filter(function (tr) { return tr.cells[0].textContent === e; })[0];
+    if (!r) return;
+    var c = r.cells, t = [e, 'SunMonTueWedThuFriSat'.substr(3 * new Date(Date.UTC(+p[0], p[1] - 1, +p[2])).getUTCDay(), 3)]
+      .concat(s ? [s] : [], c[1].textContent + ' days', 'F ' + c[2].textContent, c[3].textContent + ' quotes',
+        'median half-spread ' + c[4].textContent + ' vol pts').join(' \u00b7 ');
+    if (out.textContent !== t) out.textContent = t;
+  }
+
   // -- tabs (heatmap metric switch, smile expiry) ----
   function initTabs() {
     $$('[role="tablist"]').forEach(function (list) {
@@ -1117,6 +1136,9 @@
       // every tab drives one panel (the smile slices), or each its own (the session
       // comparison, which also filters charts: data-chart-filter lists their ids)
       var shared = tabs.every(function (t) { return t.getAttribute('aria-controls') === tabs[0].getAttribute('aria-controls'); });
+      // the status line: the server wrote the one of the tab it selected
+      var strip = list.classList.contains('exp-strip'), status = doc.getElementById(list.getAttribute('data-status') || '');
+      var served = tabs.filter(function (t) { return t.getAttribute('aria-selected') === 'true'; })[0];
       // init: the page's first selection. It writes no state (a plain load keeps
       // its URL and its #panel anchor) and leaves charts the IntersectionObserver
       // has not reached to it (the smile slices were drawn twice).
@@ -1129,6 +1151,8 @@
           if (p && !shared) p.hidden = !on;
         });
         if (focus) tab.focus();
+        if (strip) keepInView(list, tab);
+        if (status && !(init && tab === served)) expiryStatus(status, tab);
         if (key && !init) state.set(key, tab.getAttribute('data-value'));
         if (key === 'exp' && Desk.onExpiry) Desk.onExpiry(tab.getAttribute('data-value'), !!init);
         var target = list.getAttribute('data-chart-filter');
@@ -1407,7 +1431,8 @@
   // the tables are as they were), a click on a by-expiry category or '[' / ']'
   // selects the expiry's smile tab, which writes exp= into the hash; every row of
   // it is then aria-current, the by-expiry chart draws a line at it and the
-  // heatmap readouts name it. The smile is scrolled to only when it is offscreen.
+  // status line under the smile's tabs names it. The smile is scrolled to only
+  // when it is offscreen.
   function expiryTabs() {
     var list = $('[role="tablist"][data-state-key="exp"]');
     return list ? $$('[role="tab"]', list) : [];
@@ -1438,13 +1463,6 @@
         if (c.spec && c.spec.exps) c.chart.setOption({ series: [cursorSeries(c.spec, c.T)] });
       });
     }
-    if (init) return;
-    var tab = expiryTabs().filter(function (t) { return t.getAttribute('data-value') === exp; })[0];
-    var text = 'Selected expiry ' + exp + (tab ? ' \u00b7 ' + tab.textContent.trim() : '') + ': the smile, these rows and the by-expiry chart show it.';
-    tables.forEach(function (t) {
-      var out = doc.getElementById(t.getAttribute('data-readout'));
-      if (out) out.textContent = text;
-    });
   }
   function pickExpiry(exp) {
     var tab = expiryTabs().filter(function (t) { return t.getAttribute('data-value') === exp; })[0];
