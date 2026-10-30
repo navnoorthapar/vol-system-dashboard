@@ -505,6 +505,25 @@ def test_the_rebuilt_gap_sentence_reads_only_what_the_row_holds():
         assert absent not in out
 
 
+def test_the_rate_is_named_as_a_cause_only_where_it_is_not_cboes():
+    """Tier 0.5: every term was priced at one 91-day rate, so the unexplained
+    part of the gap named the rate among its causes. A replication that priced
+    each term at Cboe's rate (rate.method: its CMT spline) no longer names it;
+    one that fell back to one rate for both terms, and an artifact written
+    before (no method), still do. The rebuilt sentence names what it is given."""
+    cboe = {"rate": {"method": ds.CBOE_RATE_METHOD, "curve_date": "2026-10-15"}}
+    assert ds.vix_unexplained_causes(cboe) == [ds.CAUSE_TIMING, ds.CAUSE_STALE]
+    for rep in ({"rate": {"method": "one_rate_for_both_terms", "R_cc": 0.04}}, {"rate": {"R_cc": 0.04}},
+                {}, None):
+        assert ds.vix_unexplained_causes(rep) == [ds.CAUSE_TIMING, ds.CAUSE_STALE, ds.CAUSE_RATE]
+    row = {"ticker": "VIX", "gap": -0.30, "truncation": -0.05, "unexplained": -0.25, "surface": "svi_cal"}
+    (out,) = ds.vix_gap_notes([], [row], causes=ds.vix_unexplained_causes(cboe))
+    assert out.endswith("Unexplained by the chain: −0.25, 83% of the gap (snapshot timing against the "
+                        "16:15 ET print, stale quotes).")
+    (old,) = ds.vix_gap_notes([], [row])
+    assert old.endswith("(snapshot timing against the 16:15 ET print, stale quotes, the rate).")
+
+
 def test_a_gap_split_that_does_not_add_up_is_not_shown():
     """The split is printed only when the artifact records it and its parts add
     up to the stored gap; otherwise both parts are None, never a residual

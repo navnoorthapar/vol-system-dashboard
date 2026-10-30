@@ -13,6 +13,7 @@ holds the same number, against that too.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 import re
@@ -1617,6 +1618,50 @@ def vix_terms(ix: dict) -> dict:
     return tm if isinstance(tm, dict) else {}
 
 
+# vix_replication.json rate.method when each term was priced at Cboe's rate (report_version 4 on)
+CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
+# what the page names as the causes of a gap's unexplained part
+CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE = ("snapshot timing against the 16:15 ET print", "stale quotes",
+                                         "the rate")
+
+
+def vix_rates(a: Audit, c: Ctx) -> list[str]:
+    """Where the replication says it priced each term at Cboe's rate, every such term's R
+    against Cboe's spline recomputed from the record's Treasury par yields (the newest
+    date before the session, the term's calendar days from it); the parity-forward terms
+    use the parity's own discount and are not checked. Returns what the unexplained part
+    can then come from: the rate only where the replication did not use Cboe's."""
+    raw = c.vx.get("rate")
+    rate: dict = raw if isinstance(raw, dict) else {}
+    if rate.get("method") != CBOE_RATE_METHOD:
+        return [CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE]
+    own = M.cmt_curve(c.store, c.session)
+    a.equal(P_VIX, "Treasury par curve the rates read (newest before the session)",
+            rate.get("curve_date"), own[0] if own else None)
+    if own is None:
+        return [CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE]
+    day, curve = own
+    got, want = [], []
+    for _, ix in vix_rows(c):
+        for method in ("cboe_rules", "parity_forward", "any_expiry_parity_forward"):
+            rep = ix.get(method)
+            if not isinstance(rep, dict) or not rep.get("ok"):
+                continue
+            for term in (rep.get("near"), rep.get("next")):
+                if isinstance(term, dict) and term.get("forward_method") == "cboe_single_strike":
+                    days = (dt.date.fromisoformat(str(term["expiry"])[:10]) - dt.date.fromisoformat(day)).days
+                    got.append(M.num(term.get("R")))
+                    want.append(M.cboe_cmt_rate(curve, float(days)))
+    ok = approx(a, P_VIX, "each single-strike term's rate: Cboe's CMT spline on the record's par yields",
+                got, want, sig=FULL_SIG)
+    return [CAUSE_TIMING, CAUSE_STALE] + ([] if ok and got else [CAUSE_RATE])
+
+
+def or_list(items: Sequence[str]) -> str:
+    """'a, b or c'."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
+
+
 def vix_replication(a: Audit, c: Ctx) -> None:
     """Replicated VIX-family levels against the DB's Cboe closes, each index's terms and
     near weight, the gap split, ATM / VIX and the β estimator on the same chain."""
@@ -1657,7 +1702,8 @@ def vix_replication(a: Audit, c: Ctx) -> None:
             sp = splits[t]
             cell(a, P_VIX, f"{t} missing-strike shortfall", td[3], sp.short if sp else None)
             cell(a, P_VIX, f"{t} unexplained", td[4], sp.unexp if sp else None)
-    vix_terms_note(a, vr, splits)
+    causes = vix_rates(a, c)
+    vix_terms_note(a, vr, splits, causes)
     beta = c.vx.get("beta") or {}
     note = a.one("#atm-vix-note")
     a.equal(P_VIX, "ATM / VIX note shown (vix_replication.json beta)", note is not None,
@@ -1670,12 +1716,14 @@ def vix_replication(a: Audit, c: Ctx) -> None:
         nums(a, P_VIX, "ATM / VIX: the VIX terms' ATM mid over the DB close; β estimator (30-day, Black-76)",
              note, want)
         a.num(P_VIX, "ATM / VIX (vix_replication.json)", note, M.num(beta.get("atm_over_vix_official")))
-    deviations(a, c, splits.get("VIX"))
+    deviations(a, c, splits.get("VIX"), causes)
 
 
-def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None]) -> None:
-    """'[0, 1]', each index that is not replicated and why, and with a split the 16:15 ET
-    print and the far-wing differences, positive ones first."""
+def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None],
+                   causes: list[str]) -> None:
+    """'[0, 1]', each index that is not replicated and why, and with a split the causes the
+    unexplained part can come from (vix_rates), the 16:15 ET print among them, and the
+    far-wing differences, positive ones first."""
     note = a.one("#vix-terms-note")
     want: list[float | None] = [0, 1]
     for t, ix in vr:
@@ -1689,13 +1737,16 @@ def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSp
     shown = [sp for sp in splits.values() if sp]
     far = [sp.far for sp in shown if sp.far is not None]
     if shown:
+        a.text(P_VIX, "terms note: what the unexplained part can come from", note,
+               f"({or_list(causes)}; not measured)", contains=True)
         want += [16, 15, *(f for f in far if f > 0), *(f for f in far if f < 0)]
     nums(a, P_VIX, "terms note (not replicated, far-wing market − model per index)", note, want)
 
 
-def deviations(a: Audit, c: Ctx, vix: GapSplit | None) -> None:
+def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> None:
     """'Where the replication departs from Cboe': the producer's deviations and notes as
-    written, and the gap-attribution sentence rebuilt from the recompute."""
+    written, and the gap-attribution sentence rebuilt from the recompute, naming the causes
+    vix_rates leaves."""
     lis = a.soup.select("#vix-replication details.method ul.prose > li")
     devs = [prose(x) for x in c.vx.get("deviations") or []]
     notes = [prose(x) for x in c.vx.get("gap_notes") or [] if not str(x).startswith("Gap attribution (")]
@@ -1714,6 +1765,8 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None) -> None:
         if vix.gap is not None and abs(vix.gap) > 1e-12:
             sentence += [100.0 * vix.unexp / vix.gap]
         nums(a, P_VIX, "gap attribution sentence (rebuilt from the split)", lis[-1], [*sentence, 16, 15])
+        a.text(P_VIX, "gap attribution sentence: what the unexplained part can come from", lis[-1],
+               f"({', '.join(causes)}).", contains=True)
     near_next_notes(a, c, lis[len(devs):len(devs) + len(notes)])
 
 

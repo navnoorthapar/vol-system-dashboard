@@ -67,6 +67,12 @@ ARB_LABELS = {"C1_outright": "Outright bounds", "C2_vertical_bound": "Vertical b
               "C4_calendar_spread": "Calendar spread", "C5_calendar_vertical_spread": "Calendar vertical",
               "C6_calendar_butterfly": "Calendar butterfly"}
 VIX_FAMILY = (("VIX9D", 9), ("VIX", 30), ("VIX3M", 93), ("VIX6M", 184))
+# Cboe's rate (VIX Mathematics Methodology sec. 2.1): the Treasury CMT tenors of its table,
+# in days (the 1.5- and 4-month par yields the Treasury also publishes are not in it), and
+# how old the newest curve before a session may be (calendar days)
+CBOE_CMT_DAYS = {"1M": 30, "2M": 60, "3M": 91, "6M": 182, "1Y": 365, "2Y": 730, "3Y": 1095,
+                 "5Y": 1825, "7Y": 2555, "10Y": 3650, "20Y": 7300, "30Y": 10950}
+CMT_MAX_AGE_DAYS = 7
 
 
 def label(m: str) -> str:
@@ -600,6 +606,57 @@ def beta_by_session(store: Store) -> dict[str, dict]:
         out[session] = {"ratio": atm30 / (float(mk["vix"].iloc[0]) / 100.0),
                         "spot_gap": spot / float(mk["spx"].iloc[0]) - 1.0}
     return out
+
+
+# ── Cboe's rate per VIX term ──────────────────────────────────────────────────
+def cmt_curve(store: Store, session: str) -> tuple[str, dict[int, float]] | None:
+    """(date, {days: bond-equivalent yield}): the Treasury par yields of the newest date
+    before ``session`` in the record's rates_daily partitions, at Cboe's tenors; None
+    when that date is more than CMT_MAX_AGE_DAYS calendar days before the session."""
+    root = store.root / "market" / "rates_daily"
+    parts = [store.parquet(f"market/rates_daily/{f.name}")
+             for f in sorted(root.glob("rates_daily_*.parquet"))]
+    if not parts:
+        return None
+    df = pd.concat(parts, ignore_index=True).drop_duplicates(["date", "series"], keep="last")
+    df = df[df["series"].astype(str).str.startswith("UST_PAR_") & (df["date"].astype(str) < session)
+            & np.isfinite(df["value"].astype(float))]
+    if df.empty:
+        return None
+    day = str(df["date"].max())
+    if (pd.Timestamp(session) - pd.Timestamp(day)).days > CMT_MAX_AGE_DAYS:
+        return None
+    row = df[df["date"] == day]
+    pts = {CBOE_CMT_DAYS[s[len("UST_PAR_"):]]: float(v) for s, v in zip(row["series"], row["value"])
+           if s[len("UST_PAR_"):] in CBOE_CMT_DAYS}
+    return day, dict(sorted(pts.items()))
+
+
+def cboe_cmt_rate(curve: dict[int, float], days: float) -> float:
+    """Cboe's continuously compounded rate ``days`` calendar days after the curve's date:
+    the natural cubic spline through the CMT yields, held between two consecutive tenors
+    within their yields, and before the first tenor (t1, y1) between the line to the next
+    tenor whose yield is at or above y1 (from below) and the line to the next one at or
+    below it (from above), each flat where there is none; past the last tenor its yield.
+    Then APY = (1 + BEY/2)² − 1 and r = ln(1 + APY)."""
+    from scipy.interpolate import CubicSpline
+    t = np.array(sorted(curve), dtype=float)
+    y = np.array([curve[int(x)] for x in t], dtype=float)
+    if days >= t[-1]:
+        bey = float(y[-1])
+    else:
+        bey = float(CubicSpline(t, y, bc_type="natural")(days))
+        if days >= t[0]:
+            j = int(np.searchsorted(t, days, side="right")) - 1
+            lo, hi = float(min(y[j], y[j + 1])), float(max(y[j], y[j + 1]))
+        else:
+            def line(reaches: Callable[[float], bool]) -> float:
+                j = next((i for i in range(1, len(t)) if reaches(float(y[i]))), None)
+                slope = 0.0 if j is None else float((y[j] - y[0]) / (t[j] - t[0]))
+                return float(y[0] + slope * (days - t[0]))
+            lo, hi = line(lambda v: v >= y[0]), line(lambda v: v <= y[0])
+        bey = min(max(bey, lo), hi)
+    return 2.0 * math.log1p(bey / 2.0)
 
 
 # ── the page's number formats ─────────────────────────────────────────────────

@@ -403,14 +403,38 @@ def _fit_range(fr: Any) -> tuple[float, float] | None:
 # the producer's gap-attribution sentence (surface/report.py gap notes): it
 # states the split as official − replicated, against the page's convention
 GAP_NOTE_PREFIX = "Gap attribution ("
+# vix_replication.json rate.method when every term was priced at Cboe's rate
+# (surface/report.py CMT_RATE_METHOD, report_version 4 on)
+CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
+# what the unexplained part of a replication gap can come from, in the order
+# the page names them (vix_unexplained_causes)
+CAUSE_TIMING = "snapshot timing against the 16:15 ET print"
+CAUSE_STALE = "stale quotes"
+CAUSE_RATE = "the rate"
 
 
-def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list[str]:
+def vix_unexplained_causes(vix_rep: Mapping | None) -> list[str]:
+    """What the unexplained part of vix_replication.json ``vix_rep``'s gaps
+    can come from, read from its own record: the snapshot's timing against
+    the 16:15 ET print, stale quotes, and the rate unless every term was
+    priced at Cboe's (rate.method: its bounded spline on the Treasury CMT
+    yields at the term's expiration). An artifact written before
+    report_version 4 (one rate for both terms), or for a session whose
+    Treasury curve was missing, names the rate."""
+    rate = (vix_rep or {}).get("rate")
+    cboe_rate = isinstance(rate, Mapping) and rate.get("method") == CBOE_RATE_METHOD
+    return [CAUSE_TIMING, CAUSE_STALE, *([] if cboe_rate else [CAUSE_RATE])]
+
+
+def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping], *,
+                  causes: Sequence[str] | None = None) -> list[str]:
     """vix_replication.json's gap_notes with the producer's gap-attribution
     sentence rebuilt from ``terms`` (vix_terms rows, optionally carrying a
     ``surface_label``), so the prose gives the VIX split the #vix-terms-table
     prints, on the page's convention: gap = replicated − Cboe close =
     missing-strike shortfall (replicated − full strip) + unexplained.
+    ``causes``: what the unexplained part is named as coming from
+    (vix_unexplained_causes; default: all three).
 
     The producer's sentence is dropped whatever the split; the rebuilt one is
     added only where vix_terms shows the VIX split (it adds up to the gap)."""
@@ -440,8 +464,8 @@ def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list
         s += (f" Inside {fitted}, market minus surface is {signed(fi)}; with the far-wing "
               f"term it sets the replication against the surface and is not part of the gap.")
     share = f", {100.0 * unexp / gap:.0f}% of the gap" if abs(gap) > 1e-12 else ""
-    s += (f" Unexplained by the chain: {signed(unexp)}{share} (snapshot timing against the "
-          f"16:15 ET print, stale quotes, the rate).")
+    why = ", ".join(causes if causes is not None else (CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE))
+    s += f" Unexplained by the chain: {signed(unexp)}{share} ({why})."
     out.append(s)
     return out
 

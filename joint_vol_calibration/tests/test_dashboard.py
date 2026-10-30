@@ -6424,7 +6424,7 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
              "next": {"expiry": "2030-08-16", "days": 216.7291667}, "near_weight": 0.935, "gap": -0.10,
              "truncation": -0.01, "unexplained": -0.09, "far_wing": -0.40, "surface": "svi_cal",
              "surface_label": "SVI-cal"}]
-    html = str(macros.vix_terms(rows))
+    html = str(macros.vix_terms(rows, ["snapshot timing against the 16:15 ET print", "stale quotes"]))
     got = _table_rows(html, "vix-terms-table")
     assert got[0] == ["VIX9D", "—", "—", "—", "—"]
     assert got[1] == ["VIX", "28 / 49", "0.905", "−0.05", "−0.25"]
@@ -6435,6 +6435,12 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
     assert "The stored quotes beyond the surface’s fitted range price below that wing (VIX6M −0.40" in note
     assert "likely understates" not in note
     assert "None" not in note
+    # tier 0.5: the causes the unexplained part is named as coming from are the ones
+    # given (desk_surface.vix_unexplained_causes: the rate only where it is not Cboe's)
+    assert ("Unexplained: what the chain leaves of the gap (snapshot timing against the 16:15 ET "
+            "print or stale quotes; not measured).") in note
+    three = str(macros.vix_terms(rows, ["a", "b", "c"]))
+    assert "the gap (a, b or c; not measured)" in _visible_text("<body>" + three)
 
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no

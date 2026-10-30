@@ -94,6 +94,23 @@ def test_artifacts_and_schema(written):
     assert ga["available"]
     assert ga["surface"] == "svi_cal"
     assert ga["residual_pts"] + ga["gap_pts"] + ga["truncation_pts"] == pytest.approx(0.0, abs=1e-8)
+    # plan 0.5: each term at Cboe's rate (the CMT spline of the par curve before the
+    # session), not one 91-day rate for both, and no rate departure listed
+    rate = vixd["rate"]
+    cmt = vix_mod.cmt_rates(SESSION)
+    assert rate["method"] == report.CMT_RATE_METHOD
+    assert rate["curve_date"] == cmt.curve_date < SESSION
+    assert rate["cmt_yields_by_days"] == pytest.approx(cmt.record()["cmt_yields_by_days"], rel=1e-9)
+    for name, ix in vixd["indices"].items():
+        for meth in ("cboe_rules", "any_expiry_parity_forward"):
+            rep = ix.get(meth) or {}
+            for t in (rep.get("near"), rep.get("next")) if rep.get("ok") else ():
+                if t["forward_method"] == "cboe_single_strike":
+                    assert t["R"] == pytest.approx(cmt(t["expiry"]), rel=1e-9), (name, meth, t["expiry"])
+    head = vixd["indices"]["VIX"]["cboe_rules"]
+    assert head["near"]["R"] != head["next"]["R"]
+    assert not any(d.startswith(("R is", "The rate is")) for d in vixd["deviations"])
+    assert vixd["gap_notes"][-1].endswith("snapshot timing vs the 16:15 ET print, stale quotes.")
     idx = json.loads((out / "index.json").read_text())
     assert [r["session"] for r in idx["sessions"]] == [SESSION]
     # the method version the bot's backfill compares (cloud_refresh.artifact_gaps)
@@ -158,9 +175,13 @@ def test_committed_artifacts_match_a_recomputation(written):
                     assert a == pytest.approx(b, rel=1e-4), (name, split, key)
     vn = json.loads((out / SESSION / "vix_replication.json").read_text())
     vo = json.loads((COMMITTED / SESSION / "vix_replication.json").read_text())
-    for name in ("VIX9D", "VIX", "VIX3M", "VIX6M"):
-        a, b = vn["indices"][name].get("replicated"), vo["indices"][name].get("replicated")
-        assert (a is None and b is None) or a == pytest.approx(b, rel=1e-9)
+    # the replicated levels moved at report_version 4 (Cboe's rate per term): a
+    # committed artifact written before is stale until the bot's backfill
+    # rebuilds it (cloud_refresh.artifact_gaps), and is compared from then on
+    if report.stored_report_version(vo) >= 4:
+        for name in ("VIX9D", "VIX", "VIX3M", "VIX6M"):
+            a, b = vn["indices"][name].get("replicated"), vo["indices"][name].get("replicated")
+            assert (a is None and b is None) or a == pytest.approx(b, rel=1e-9)
     rn = pd.read_parquet(out / SESSION / "residuals.parquet")
     ro = pd.read_parquet(COMMITTED / SESSION / "residuals.parquet")
     assert list(rn.columns) == list(ro.columns)
@@ -611,3 +632,34 @@ def test_an_expiry_with_no_fit_set_quote_is_dropped_not_fatal(monkeypatch, tmp_p
     assert uni["n_dropped_no_fit_set"] == uni["dropped_expiries"][0]["n_quotes"] > 0
     assert uni["n_expiries"] == res["expiry"].nunique()
     assert e not in {t["expiry"] for t in arts["surface"]["term_structure"]}
+
+
+def test_a_session_without_a_recent_treasury_curve_lists_the_rate_departure(monkeypatch):
+    """plan 0.5: when the stored Treasury par curve has no date within the
+    allowed age before the session, the replication falls back to the
+    session's reference rate for both terms and the deviations say so and
+    why; with the curve, the rate is Cboe's per term and no line is listed."""
+    from types import SimpleNamespace
+
+    from joint_vol_calibration.data import database as db
+    from joint_vol_calibration.surface import quotes as sqm
+
+    sq = SimpleNamespace(session=SESSION, r_ref=0.0415, r_ref_source=sqm.IRX_SOURCE)
+    rate, doc, line = report._vix_rate(sq)
+    assert isinstance(rate, vix_mod.CMTRates)
+    assert line is None
+    assert doc["method"] == report.CMT_RATE_METHOD
+
+    def stale(session, **kw):
+        raise db.StaleDataError(f"newest Treasury par curve before {session} is 2026-10-01 (15 days old; "
+                                "allowed 7)")
+    monkeypatch.setattr(vix_mod, "cmt_rates", stale)
+    rate, doc, line = report._vix_rate(sq)
+    assert rate == sq.r_ref
+    assert doc == {"method": "one_rate_for_both_terms", "R_cc": sq.r_ref, "source": sq.r_ref_source,
+                   "cmt_unavailable": f"newest Treasury par curve before {SESSION} is 2026-10-01 "
+                                      "(15 days old; allowed 7)"}
+    assert line.startswith("The rate is the ^IRX bill rate for both terms, not Cboe's spline on the "
+                           "Treasury CMT yields at each term's expiration: newest Treasury par curve")
+    zc = SimpleNamespace(session=SESSION, r_ref=0.0415, r_ref_source="Treasury zero curve 2026-10-16")
+    assert report._vix_rate(zc)[2].startswith("The rate is the Treasury zero curve's 91-day rate")

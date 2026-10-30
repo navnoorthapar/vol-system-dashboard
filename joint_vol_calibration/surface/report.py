@@ -47,8 +47,10 @@ scorecard.json — every model of scorecard.MODEL_REGISTRY on the same quote
 
 vix_replication.json — official closes, the replicated VIX (Cboe rules;
     parity-forward variant; any-weekday bracket) and VIX9D/3M/6M analogues,
-    each with a gap attribution (wing truncation measured on the SVI-cal
-    surface, residual = official - replicated - truncation); the
+    each term with the rate it used (Cboe's CMT spline per term; rate: the
+    Treasury par curve it read), each index with a gap attribution (wing
+    truncation measured on the SVI-cal surface, residual = official -
+    replicated - truncation); the
     variance-swap strip by expiry (Cboe single-term formula on the stored
     quotes) with the model-free ATM vol and the ATM / VS ratio (the
     empirical beta), model variance swaps from the eSSVI, SVI and SVI-cal
@@ -70,6 +72,7 @@ import numpy as np
 import pandas as pd
 
 from joint_vol_calibration.config import DATA_DIR
+from joint_vol_calibration.data import database as db
 from joint_vol_calibration.data import option_chain as oc
 from joint_vol_calibration.surface import arbitrage as arb
 from joint_vol_calibration.surface import essvi as es
@@ -94,7 +97,11 @@ SCHEMA_VERSION = 1
 #   3  a VIX bracket outside Cboe's 23-37 day term window is a deviation
 #      (indices.VIX.cboe_term_window); a session without an accepted
 #      Heston fit gets a surface, its Heston row unavailable with a reason
-REPORT_VERSION = 3
+#   4  plan 0.5: the VIX replication's rate is Cboe's, per term (the bounded
+#      CMT spline on the Treasury par curve before the session, vix.cmt_rates),
+#      not one 91-day rate for both terms; the rate departure is listed only
+#      when that curve is missing or stale
+REPORT_VERSION = 4
 SURFACE_DIR = DATA_DIR / "surface"
 
 
@@ -316,6 +323,37 @@ def _heston_note(models: list) -> str:
     return "Heston is not in this scorecard."
 
 
+# vix_replication.json rate.method: Cboe's rate per term, or the fallback
+CMT_RATE_METHOD = "cboe_cmt_bounded_spline"
+
+
+def _vix_rate(sq: sqm.SessionQuotes) -> tuple:
+    """(rate, rate record, deviation line) of the session's VIX replication.
+
+    Cboe's rate per term (vx.cmt_rates: its bounded spline on the Treasury
+    par curve before the session) and no deviation; when that curve is
+    missing or stale, the session's reference rate for both terms (the ^IRX
+    bill, or the zero curve's 91-day rate) and a deviation saying why."""
+    try:
+        cmt = vx.cmt_rates(sq.session)
+    except (LookupError, db.StaleDataError) as e:
+        src = ("the ^IRX bill rate" if sq.r_ref_source == sqm.IRX_SOURCE else
+               "the Treasury zero curve's 91-day rate")
+        return sq.r_ref, {"method": "one_rate_for_both_terms", "R_cc": sq.r_ref,
+                          "source": sq.r_ref_source, "cmt_unavailable": str(e)}, (
+            f"The rate is {src} for both terms, not Cboe's spline on the Treasury CMT yields at "
+            f"each term's expiration: {e}. A rate 25 bp off moves the 30-day index by about "
+            "0.002 points.")
+    return cmt, {"method": CMT_RATE_METHOD, **cmt.record(),
+                 "source": (f"U.S. Treasury par yield curve (CMT) of {cmt.curve_date}, the newest "
+                            "before the session, at Cboe's tenors; each term's rate is Cboe's "
+                            "bounded natural cubic spline at its expiration date (days from the "
+                            "curve's date), the bond-equivalent yield taken to an annual "
+                            "percentage yield and then to continuous compounding (Cboe Volatility "
+                            "Index Mathematics Methodology sec. 2.1); the rate each term used is "
+                            "its R")}, None
+
+
 def _timing_deviation(sq: sqm.SessionQuotes, calc: datetime) -> str:
     """The calculation-time departure, from the chain's T origin and record."""
     d, inp = sq.clean_diagnostics, sq.inputs
@@ -352,7 +390,7 @@ def _settlement_deviations(terms: list) -> list:
 def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                svi_surface, essvi_surface: es.ESSVISurface, calc: datetime,
                svi_cal_surface=None, attribution: dict | None = None,
-               indices: dict | None = None) -> list:
+               indices: dict | None = None, cboe_rate: bool = True) -> list:
     notes = []
     for name, rep in (indices or {}).items():
         if rep.get("headline_method") is None:
@@ -418,7 +456,8 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                      + (f"; {100.0 * a['residual_share_of_official_minus_replicated']:.0f}% of "
                         "official - replicated"
                         if a.get("residual_share_of_official_minus_replicated") is not None else "")
-                     + "): snapshot timing vs the 16:15 ET print, stale quotes, rate.")
+                     + "): snapshot timing vs the 16:15 ET print, stale quotes"
+                     + ("." if cboe_rate else ", the rate."))
     return notes
 
 
@@ -593,16 +632,17 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         # vix_replication.json
         calc = _calc_time_ny(sq)
         terms = vx.term_tables(sq.raw, session, calc)
+        rate, rate_doc, rate_deviation = _vix_rate(sq)
         carry_map = {e: (float(f), float(d)) for e, f, d in
                      zip(sq.carry["expiry"], sq.carry["forward"], sq.carry["discount"])}
         official = vx.official_closes(session)
         indices: dict[str, dict[str, Any]] = {}
         for name, days in vx.CONSTANT_MATURITY_DAYS.items():
-            rep: dict[str, Any] = {"cboe_rules": vx.replicate_index(terms, sq.r_ref, days, spot=sq.spot),
-                   "parity_forward": vx.replicate_index(terms, sq.r_ref, days, carry=carry_map,
+            rep: dict[str, Any] = {"cboe_rules": vx.replicate_index(terms, rate, days, spot=sq.spot),
+                   "parity_forward": vx.replicate_index(terms, rate, days, carry=carry_map,
                                                         spot=sq.spot),
                    "any_expiry_parity_forward": vx.replicate_index(
-                       terms, sq.r_ref, days, candidates_only=False, carry=carry_map, spot=sq.spot)}
+                       terms, rate, days, candidates_only=False, carry=carry_map, spot=sq.spot)}
             off = official.get(name)
             rep["official"] = off
             method, why = vx.headline_method(rep)
@@ -620,7 +660,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         # Cboe's near and next terms have more than 23 and fewer than 37 days
         indices["VIX"]["cboe_term_window"] = _vix_term_window(indices["VIX"], terms, calc)
         model_surfaces = {n: o for n, o in objs.items() if o is not None}
-        strip = vx.variance_swap_strip(terms, sq.r_ref, q, carry=carry_map,
+        strip = vx.variance_swap_strip(terms, rate, q, carry=carry_map,
                                        surfaces=model_surfaces)
         fitted_expiries = set(q["expiry"].astype(str))
         for name in vx.CONSTANT_MATURITY_DAYS:
@@ -631,7 +671,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 continue
             head = rep[rep["headline_method"]]
             rep["gap_attribution"] = (
-                vx.gap_attribution(head, terms, sq.r_ref, svi_cal_surface, fitted_expiries, off,
+                vx.gap_attribution(head, terms, rate, svi_cal_surface, fitted_expiries, off,
                                    carry=carry_map)
                 if svi_cal_surface is not None
                 else {"available": False, "reason": "no SVI-cal surface"})
@@ -661,17 +701,10 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         vix_doc = {
             "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "calculation_time_ny": calc.isoformat(timespec="minutes"),
-            "rate": {"R_cc": sq.r_ref,
-                     "source": ("^IRX 13-week bill (Cboe: CMT cubic spline per expiry)"
-                                if sq.r_ref_source == sqm.IRX_SOURCE else
-                                f"{sq.r_ref_source}; its 91-day rate for both terms "
-                                "(Cboe: CMT cubic spline per expiry)")},
+            "rate": rate_doc,
             "indices": indices, "strip": strip, "beta": beta,
             "deviations": [
-                ("R is the ^IRX bill rate (cc), not Cboe's CMT spline; dVIX/dR ~ VIX T / 2."
-                 if sq.r_ref_source == sqm.IRX_SOURCE else
-                 "R is the Treasury zero curve's 91-day rate (cc) for both terms, not Cboe's "
-                 "CMT spline per expiry; dVIX/dR ~ VIX T / 2."),
+                *filter(None, [rate_deviation]),
                 _timing_deviation(sq, calc),
                 ("parity_forward replaces the single-strike forward with the cleaned chain's "
                  "parity-regression F and D (robust to one stale strike)."),
@@ -684,7 +717,8 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
             ],
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,
-                                    indices["VIX"].get("gap_attribution"), indices),
+                                    indices["VIX"].get("gap_attribution"), indices,
+                                    cboe_rate=rate_deviation is None),
         }
     resid_cols = list(resid.columns)
     return {"residuals": resid[resid_cols].reset_index(drop=True), "surface": surface_doc,

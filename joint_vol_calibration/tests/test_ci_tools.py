@@ -624,6 +624,35 @@ class TestRecomputeAudit:
             assert data.fwd_call_delta(k, w) == pytest.approx(want, abs=1e-12)
         assert data.svi_vol(0.0, sl) ** 2 * sl["T"] == pytest.approx(float(data.svi_total_variance(0.0, sl)))
 
+    def test_its_cboe_rate_reproduces_the_methodology_sample_from_the_record(self, monkeypatch, tmp_path):
+        """Tier 0.5: the page names the rate as a cause of the unexplained gap only
+        where the replication priced each term at Cboe's rate, and the audit checks
+        that claim with its own code: Cboe's bounded spline on the Treasury par
+        yields of the newest date before the session in the record. On the
+        methodology's sample curve (the yields of 2022-09-26, terms 25 and 32 days
+        on) it gives the published R1 = 0.031664% and R2 = 0.028797%."""
+        import importlib
+
+        import pandas as pd
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        data = importlib.import_module("recompute.data")
+        pct = dict(zip(("1M", "2M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"),
+                       (0.03, 0.02, 0.04, 0.05, 0.08, 0.11, 0.22, 0.59, 1.00, 1.37, 2.03, 2.21)))
+        rows = [("2022-09-23", f"UST_PAR_{t}", v / 100.0 + 0.01) for t, v in pct.items()]
+        rows += [("2022-09-26", f"UST_PAR_{t}", v / 100.0) for t, v in pct.items()]
+        rows += [("2022-09-26", "UST_PAR_4M", 0.0005), ("2022-09-27", "UST_PAR_1M", 0.05)]
+        part = tmp_path / "market" / "rates_daily"
+        part.mkdir(parents=True)
+        pd.DataFrame(rows, columns=["date", "series", "value"]).assign(source="treasury").to_parquet(
+            part / "rates_daily_2022.parquet")
+        day, curve = M.cmt_curve(data.Store(tmp_path), "2022-09-27")
+        assert day == "2022-09-26"                     # the newest before the session, not its own
+        assert curve == {M.CBOE_CMT_DAYS[t]: v / 100.0 for t, v in pct.items()}    # no 4-month point
+        assert round(100.0 * M.cboe_cmt_rate(curve, 25.0), 6) == 0.031664
+        assert round(100.0 * M.cboe_cmt_rate(curve, 32.0), 6) == 0.028797
+        assert M.cmt_curve(data.Store(tmp_path), "2022-10-10") is None           # 14 days old
+
     def test_ci_runs_it_on_the_rendered_site(self):
         wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
         step = wf[wf.index("- name: Recompute audit"):]

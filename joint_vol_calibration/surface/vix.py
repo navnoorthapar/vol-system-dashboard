@@ -4,7 +4,7 @@ strip by expiry, and the ATM-vol / variance-swap-vol ratio (the empirical
 beta the backtest's beta x VIX mark assumes).
 
 Methodology implemented (Cboe Volatility Index Methodology v6.0, 2026-02-26,
-and the Cboe Volatility Index Mathematics Methodology, sec. 3):
+and the Cboe Volatility Index Mathematics Methodology, sec. 2.1 and 3):
   T        minutes from the calculation time to settlement (09:30 ET for
            AM-settled SPX, 16:00 ET for PM-settled SPXW), rounded down,
            / 525,600
@@ -31,15 +31,33 @@ and the Cboe Volatility Index Mathematics Methodology, sec. 3):
            [0, 1]) is not replicated from the stored chain: headline_method
            returns no method, and the extrapolated level stays in its
            method's record, flagged.
+  R        per term (cmt_rates; Mathematics Methodology sec. 2.1): the
+           Treasury par yields (CMT, bond-equivalent) of the newest Treasury
+           date before the session, at the twelve tenors of Cboe's table
+           (1, 2, 3, 6 months, 1, 2, 3, 5, 7, 10, 20, 30 years as 30, 60,
+           91, 182, 365, ..., 10,950 days; the 1.5- and 4-month yields the
+           Treasury now also publishes are not in the table and are not
+           used); a natural cubic spline in days, evaluated at the term's
+           expiration date counted in calendar days from the curve's date,
+           held between two consecutive tenors within their two yields and,
+           before the first tenor, between Cboe's two lines through it;
+           then APY = (1 + BEY/2)^2 - 1 and R = ln(1 + APY). The curve is
+           the previous business day's, as in the sample (it computes on
+           2022-09-27 with the curve "available on September 26th at the
+           end of the day", its expiries 25 and 32 days from that date):
+           the one the session's official 16:15 ET close was computed with.
 The sample calculation in the methodology's appendices is a test fixture
 (tests/fixtures/surface_cboe_vix_sample.csv): this code reproduces its
-sigma^2 values and VIX = 13.93 (tests/test_surface_vix.py).
+rates R1 = 0.031664% and R2 = 0.028797% from its yield curve, its sigma^2
+values and VIX = 13.93 (tests/test_surface_vix.py).
 
 Deviations forced by the stored data (reported per session, never hidden):
-  * R: Cboe interpolates Treasury CMT yields with a bounded cubic spline per
-    expiry; here R = the ^IRX 13-week bill rate of the session (cc), the
-    only rate the database stores. dVIX/dR ~ VIX T / 2: a 25 bp error moves
-    the 30-day index by ~0.002 points.
+  * R: when the stored Treasury par curve has no date within 7 days before
+    the session, R is the session's reference rate (the ^IRX bill or the
+    zero curve's 91-day rate, cc) for both terms, and the session's
+    deviations say so. dVIX/dR ~ VIX T / 2: a 25 bp error moves the 30-day
+    index by ~0.002 points. Beyond the 30-year tenor Cboe states no rule;
+    the yield is held at the last one (no VIX-family term reaches it).
   * timing: a stored chain has no quote time unless it is a GTH capture, so
     the calculation time is option_chain.t_origin (16:00 ET on the session);
     the official close is the 16:15 ET print. The snapshot's own timing is
@@ -73,6 +91,8 @@ Deviations forced by the stored data (reported per session, never hidden):
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, cast
 
@@ -85,6 +105,104 @@ from joint_vol_calibration.data import option_chain as oc
 MINUTES_PER_YEAR = 525_600.0
 CONSTANT_MATURITY_DAYS = {"VIX9D": 9, "VIX": 30, "VIX3M": 93, "VIX6M": 184}
 OFFICIAL_TICKERS = {"VIX9D": "^VIX9D", "VIX": "^VIX", "VIX3M": "^VIX3M", "VIX6M": "^VIX6M"}
+
+
+# ── risk-free rate per term (Mathematics Methodology sec. 2.1) ────────────────
+
+# The CMT tenors of Cboe's spline and the number of days it gives each (the
+# methodology's table). The 1.5- and 4-month par yields the Treasury file has
+# carried since 2025-02-18 and 2022-10-19 are not in the table, so not used.
+CBOE_CMT_DAYS = {"UST_PAR_1M": 30, "UST_PAR_2M": 60, "UST_PAR_3M": 91, "UST_PAR_6M": 182,
+                 "UST_PAR_1Y": 365, "UST_PAR_2Y": 730, "UST_PAR_3Y": 1095, "UST_PAR_5Y": 1825,
+                 "UST_PAR_7Y": 2555, "UST_PAR_10Y": 3650, "UST_PAR_20Y": 7300, "UST_PAR_30Y": 10950}
+# How old the newest par curve before a session may be (calendar days), as
+# for the calibrator's zero curve (rates.get_zero_curve).
+CMT_MAX_AGE_DAYS = 7
+
+
+def cboe_bounded_spline_bey(days, bey, t: float) -> float:
+    """The bond-equivalent yield at ``t`` days by Cboe's bounded cubic spline
+    (Mathematics Methodology sec. 2.1) through the CMT points (days, bey).
+
+    A natural cubic spline in days, bounded: between two tenors by the lower
+    and the higher of their yields; before the shortest tenor (t1, y1) from
+    below by the line through it and the next tenor whose yield is >= y1,
+    from above by the line through it and the next tenor whose yield is
+    <= y1 (a bound with no such tenor is flat at y1). Beyond the longest
+    tenor the methodology states no rule; the last yield is held."""
+    from scipy.interpolate import CubicSpline
+    d, y = np.asarray(days, dtype=float), np.asarray(bey, dtype=float)
+    o = np.argsort(d, kind="mergesort")
+    d, y = d[o], y[o]
+    if len(d) < 2:
+        raise ValueError("Cboe's spline needs at least two CMT points")
+    t = float(t)
+    if t >= d[-1]:
+        return float(y[-1])
+    val = float(CubicSpline(d, y, bc_type="natural")(t))
+    if t >= d[0]:
+        i = int(np.searchsorted(d, t, side="right")) - 1          # d[i] <= t < d[i + 1]
+        lo, hi = min(y[i], y[i + 1]), max(y[i], y[i + 1])
+    else:
+        def slope(reaches) -> float:
+            j = next((j for j in range(1, len(d)) if reaches(y[j])), None)
+            return 0.0 if j is None else float((y[j] - y[0]) / (d[j] - d[0]))
+        lo = float(y[0] + slope(lambda v: v >= y[0]) * (t - d[0]))
+        hi = float(y[0] + slope(lambda v: v <= y[0]) * (t - d[0]))
+    return float(min(max(val, lo), hi))
+
+
+def bey_to_cc(bey: float) -> float:
+    """Cboe's conversion of a bond-equivalent yield to the continuously
+    compounded rate: APY = (1 + BEY/2)^2 - 1, then r = ln(1 + APY)."""
+    apy = (1.0 + bey / 2.0) ** 2 - 1.0
+    return math.log1p(apy)
+
+
+@dataclass(frozen=True)
+class CMTRates:
+    """The risk-free rate of each term by Cboe's rule: the CMT par yields of
+    one Treasury date (days -> bond-equivalent yield, Cboe's tenors only), a
+    term's rate the bounded spline at its expiration date, counted in days
+    from that date, converted to continuous compounding. Called with an
+    expiry (YYYY-MM-DD) it returns that rate."""
+    curve_date: str
+    days: tuple
+    bey: tuple
+
+    def t_days(self, expiry: str) -> int:
+        return (date.fromisoformat(str(expiry)[:10]) - date.fromisoformat(self.curve_date)).days
+
+    def __call__(self, expiry: str) -> float:
+        return bey_to_cc(cboe_bounded_spline_bey(self.days, self.bey, self.t_days(expiry)))
+
+    def record(self) -> dict:
+        return {"curve_date": self.curve_date,
+                "cmt_yields_by_days": {str(int(d)): float(v) for d, v in zip(self.days, self.bey)}}
+
+
+def cmt_rates(session: str, *, root=None) -> CMTRates:
+    """Cboe's rate input for ``session``'s replication: the stored Treasury
+    par yields (rates.par_yields) of the newest Treasury date before the
+    session, at most CMT_MAX_AGE_DAYS old, at Cboe's tenors. The session's
+    own curve is not used: the methodology's sample computes on 2022-09-27
+    with the curve of 2022-09-26. Raises LookupError (no curve, or fewer than
+    two of Cboe's tenors) or database.StaleDataError (too old)."""
+    from joint_vol_calibration.data import rates
+    curve_date, par = rates.par_yields(str(session)[:10], same_day=False,
+                                       max_age_days=CMT_MAX_AGE_DAYS, root=root)
+    pts = sorted((CBOE_CMT_DAYS[s], v) for s, v in par.items() if s in CBOE_CMT_DAYS)
+    if len(pts) < 2:
+        raise LookupError(f"the Treasury par curve of {curve_date} has {len(pts)} of Cboe's CMT tenors")
+    return CMTRates(curve_date, tuple(float(d) for d, _ in pts), tuple(float(v) for _, v in pts))
+
+
+Rate = float | Callable[[str], float]
+
+
+def _rate(R: Rate, expiry: str) -> float:
+    """The rate of ``expiry``'s term: R itself, or R(expiry) for a rate per term (CMTRates)."""
+    return float(R(str(expiry)[:10])) if callable(R) else float(R)
 
 
 # ── single term ───────────────────────────────────────────────────────────────
@@ -173,7 +291,7 @@ def single_term_variance(strikes, call_bid, call_ask, put_bid, put_ask,
     sigma2 = 2.0 / T * float(contrib.sum()) - (F / K0 - 1.0) ** 2 / T
     return {
         "ok": True, "sigma2": sigma2, "F": F, "K0": K0, "atm_strike": atm_strike,
-        "T": float(T), "growth": growth,
+        "T": float(T), "R": float(R), "growth": growth,
         "forward_method": f_method, "k0_fallback": fallback, "literal_K0": literal_K0,
         "n_puts": len(puts), "n_calls": len(calls),
         "lowest_strike": float(Ks[0]), "highest_strike": float(Ks[-1]),
@@ -261,11 +379,12 @@ def term_tables(raw: pd.DataFrame, session: str, calc_time_ny: datetime) -> list
     return out
 
 
-def _variance_of(term: dict, R: float, carry: dict | None = None) -> dict:
+def _variance_of(term: dict, R: Rate, carry: dict | None = None) -> dict:
     """Single-term variance of one term. With ``carry`` (expiry -> (F, D) of
     the cleaned chain's parity regression) and the expiry in it, F and the
     discount come from there ("parity_regression"); otherwise the Cboe
-    single-strike forward with rate R."""
+    single-strike forward with the term's rate (R, or R(expiry) for a rate
+    per term)."""
     tab = term["table"]
     args = (tab.index.to_numpy(float), tab["bid_c"].to_numpy(float), tab["ask_c"].to_numpy(float),
             tab["bid_p"].to_numpy(float), tab["ask_p"].to_numpy(float), term["T"])
@@ -275,7 +394,7 @@ def _variance_of(term: dict, R: float, carry: dict | None = None) -> dict:
         if out["ok"]:
             out["forward_method"] = "parity_regression"
         return out
-    return single_term_variance(*args, R)
+    return single_term_variance(*args, _rate(R, term["expiry"]))
 
 
 def bracket(terms: list, M_cm: float) -> tuple:
@@ -292,7 +411,7 @@ def bracket(terms: list, M_cm: float) -> tuple:
 def _term_summary(t: dict, v: dict) -> dict:
     return {"expiry": t["expiry"], "settlement": t["settlement"], "minutes": t["minutes"],
             "am_date_pm_proxy": bool(t.get("am_date_pm_proxy", False)),
-            "days": t["minutes"] / 1440.0, "F": v["F"], "K0": v["K0"],
+            "days": t["minutes"] / 1440.0, "R": v["R"], "F": v["F"], "K0": v["K0"],
             "forward_method": v["forward_method"], "k0_fallback": v["k0_fallback"],
             "sigma2": v["sigma2"], "single_term_vol": 100.0 * math.sqrt(max(v["sigma2"], 0.0)),
             "n_puts": v["n_puts"], "n_calls": v["n_calls"],
@@ -300,10 +419,13 @@ def _term_summary(t: dict, v: dict) -> dict:
             "highest_K_over_F": v["highest_strike"] / v["F"]}
 
 
-def replicate_index(terms: list, R: float, days: int, *, candidates_only: bool = True,
+def replicate_index(terms: list, R: Rate, days: int, *, candidates_only: bool = True,
                     carry: dict | None = None, spot: float | None = None) -> dict:
     """One constant-maturity index from ``terms`` (term_tables output).
 
+    R     : the risk-free rate, one for every term or a function of the
+            term's expiry (CMTRates: Cboe's rate per term); each term's rate
+            is recorded in its summary
     carry : expiry -> (F, D) to use the parity forwards (see _variance_of)
     spot  : when given, a term whose forward lies outside [0.8, 1.25] x spot
             is rejected (a stale strike can make the single-strike rule pick
@@ -448,7 +570,7 @@ def surface_variance_swap(surface, T: float, k_lo: float = -3.0, k_hi: float = 2
     return 2.0 * total / T
 
 
-def variance_swap_strip(terms: list, R: float, quotes: pd.DataFrame | None = None,
+def variance_swap_strip(terms: list, R: Rate, quotes: pd.DataFrame | None = None,
                         carry: dict | None = None, surfaces: dict | None = None) -> list:
     """Per expiry: the Cboe single-term variance-swap vol from the stored
     quotes (on the parity forward when ``carry`` has the expiry), the
@@ -474,7 +596,7 @@ def variance_swap_strip(terms: list, R: float, quotes: pd.DataFrame | None = Non
             rows.append(row)
             continue
         vs = 100.0 * math.sqrt(max(v["sigma2"], 0.0))
-        row.update({"F": v["F"], "forward_method": v["forward_method"], "K0": v["K0"],
+        row.update({"R": v["R"], "F": v["F"], "forward_method": v["forward_method"], "K0": v["K0"],
                     "k0_fallback": v["k0_fallback"], "n_puts": v["n_puts"], "n_calls": v["n_calls"],
                     "lowest_K_over_F": v["lowest_strike"] / v["F"],
                     "highest_K_over_F": v["highest_strike"] / v["F"], "var_swap_vol": vs})
@@ -520,7 +642,7 @@ def _model_strip(v: dict, surface, T_surface: float, lo_kf: float, hi_kf: float)
     return s_mixed, s_model
 
 
-def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
+def gap_attribution(rep: dict, terms: list, R: Rate, surface, fitted_expiries,
                     official: float | None, *, carry: dict | None = None,
                     name: str = "svi_cal") -> dict:
     """Decompose one replicated index against a fitted arbitrage-free surface
@@ -546,7 +668,8 @@ def gap_attribution(rep: dict, terms: list, R: float, surface, fitted_expiries,
     the surface's wing; with a positive far-wing difference the surface's
     wing is thinner than the market's, so this likely understates the
     truncation), and residual_pts = official - L0 - truncation_pts (snapshot
-    timing vs the 16:15 ET print, stale quotes, rate, missing Cboe series).
+    timing vs the 16:15 ET print, stale quotes, a rate other than Cboe's,
+    missing Cboe series).
 
     The surface is evaluated at each term's own T (minutes to its Cboe
     settlement / 525,600): on a third Friday the VIX uses the AM SPX lines
