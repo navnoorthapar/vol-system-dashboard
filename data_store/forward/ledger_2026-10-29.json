@@ -1,0 +1,293 @@
+{
+ "actions": [
+  {
+   "action": "hold",
+   "id": "s1:2026-10-26:SPXW:2026-11-25:7710",
+   "sleeve": "s1"
+  },
+  {
+   "action": "hold",
+   "id": "s1c:2026-10-27:SPXW:2026-11-27:7750",
+   "sleeve": "s1c"
+  }
+ ],
+ "closed": [],
+ "inputs": {
+  "beta": 0.82,
+  "book": {
+   "book_state": "gth",
+   "file": "options/cboe/spx_2026-10-29_085136Z.parquet",
+   "near_atm_two_sided_share": 0.9977505112,
+   "raw_sha256": "afdf96a9faacc964c0a23e45b9c22c7d29884d7896982b5e6a28898a5d4351d7",
+   "rows": 28734,
+   "source": "cboe"
+  },
+  "chain_expiries": 54,
+  "chain_rows_two_sided": 23597,
+  "chain_sha256": "a3aa29cc8b779772efff45a2b9d63ecacb5e09efa9ee26a707db8b08994393c4",
+  "open_expiries_not_in_book": [],
+  "quote_after_close": true,
+  "quote_time": "2026-10-30T08:36:08Z",
+  "r_ref": 0.04076197905,
+  "spot": 7720.390137,
+  "t_origin": "2026-10-30T04:36:08-04:00"
+ },
+ "positions": [
+  {
+   "contract": {
+    "expiry": "2026-11-25",
+    "root": "SPXW",
+    "settlement": "PM",
+    "strike": 7710.0
+   },
+   "contracts_per_1m": 5,
+   "direction": -1,
+   "entry": {
+    "ask": 246.2,
+    "bid": 243.9,
+    "call": {
+     "ask": 123.6,
+     "bid": 122.4,
+     "mid": 123.0
+    },
+    "days_to_expiry": 30,
+    "delta_F": 0.01834873458,
+    "forward": 7710.953556,
+    "iv_mid": 0.1401059267,
+    "price_exec": 243.9,
+    "price_mid": 245.05,
+    "put": {
+     "ask": 122.6,
+     "bid": 121.5,
+     "mid": 122.05
+    },
+    "session": "2026-10-26"
+   },
+   "hedge": {
+    "forward": 7663.346057,
+    "pnl": -4005.431335,
+    "units": -0.1143670358
+   },
+   "id": "s1:2026-10-26:SPXW:2026-11-25:7710",
+   "k_mult": null,
+   "kelly": 0.1437666701,
+   "kelly_base": 0.1437666701,
+   "mark": {
+    "T": 0.0725339929,
+    "ask": 232.2,
+    "bid": 230.1,
+    "call": {
+     "ask": 92.8,
+     "bid": 91.8,
+     "mid": 92.3
+    },
+    "close_value_exec": 232.2,
+    "commission": 6.5,
+    "delta_F": -0.1143670358,
+    "forward": 7663.346057,
+    "iv_mid": 0.138431343,
+    "mid": 231.15,
+    "model_minus_mid": 3.267628298,
+    "model_sigma": 0.1404404511,
+    "model_value": 234.4176283,
+    "pnl_exec": 5850.0,
+    "pnl_exec_per_straddle": 1170.0,
+    "pnl_mid": 6950.0,
+    "pnl_mid_per_straddle": 1390.0,
+    "put": {
+     "ask": 139.4,
+     "bid": 138.3,
+     "mid": 138.85
+    },
+    "session": "2026-10-29",
+    "status": "marked"
+   },
+   "sessions_marked": 3,
+   "sessions_unmarked": 0,
+   "sleeve": "s1"
+  },
+  {
+   "contract": {
+    "expiry": "2026-11-27",
+    "root": "SPXW",
+    "settlement": "PM",
+    "strike": 7750.0
+   },
+   "contracts_per_1m": 4,
+   "direction": 1,
+   "entry": {
+    "ask": 243.1,
+    "bid": 241.8,
+    "call": {
+     "ask": 121.4,
+     "bid": 120.7,
+     "mid": 121.05
+    },
+    "days_to_expiry": 31,
+    "delta_F": 0.0147269556,
+    "forward": 7749.648673,
+    "iv_mid": 0.13621736,
+    "price_exec": 243.1,
+    "price_mid": 242.45,
+    "put": {
+     "ask": 121.7,
+     "bid": 121.1,
+     "mid": 121.4
+    },
+    "session": "2026-10-27"
+   },
+   "hedge": {
+    "forward": 7665.794614,
+    "pnl": 115.9544046,
+    "units": 0.219060214
+   },
+   "id": "s1c:2026-10-27:SPXW:2026-11-27:7750",
+   "k_mult": 0.6687780403,
+   "kelly": 0.1108308766,
+   "kelly_base": 0.1657214649,
+   "mark": {
+    "T": 0.07801344495,
+    "ask": 236.2,
+    "bid": 234.1,
+    "call": {
+     "ask": 76.1,
+     "bid": 75.1,
+     "mid": 75.6
+    },
+    "close_value_exec": 234.1,
+    "commission": 5.2,
+    "delta_F": -0.219060214,
+    "forward": 7665.794614,
+    "iv_mid": 0.1315464707,
+    "mid": 235.15,
+    "model_minus_mid": 15.20155868,
+    "model_sigma": 0.1407991374,
+    "model_value": 250.3515587,
+    "pnl_exec": -3600.0,
+    "pnl_exec_per_straddle": -900.0,
+    "pnl_mid": -2920.0,
+    "pnl_mid_per_straddle": -730.0,
+    "put": {
+     "ask": 160.1,
+     "bid": 159.0,
+     "mid": 159.55
+    },
+    "session": "2026-10-29",
+    "status": "marked"
+   },
+   "sessions_marked": 2,
+   "sessions_unmarked": 0,
+   "sleeve": "s1c"
+  }
+ ],
+ "previous": {
+  "session": "2026-10-28",
+  "sha256": "600785f28336e72ee73963f43051721ac74ed58844daafb98f11db98223bdb2b"
+ },
+ "schema": "forward_ledger/1",
+ "session": "2026-10-29",
+ "signals": {
+  "s1": {
+   "k_mult": null,
+   "kelly": 0.1437666701,
+   "kelly_base": 0.1437666701,
+   "position": -1,
+   "straddle_direction": -1
+  },
+  "s1c": {
+   "k_mult": 0.6654022502,
+   "kelly": 0.1102714357,
+   "kelly_base": 0.1657214649,
+   "position": 1,
+   "straddle_direction": 1
+  },
+  "s2": {
+   "k_mult": null,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s3": {
+   "k_mult": 0.998788622,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  },
+  "s4": {
+   "k_mult": 0.7785160628,
+   "kelly": 0.0,
+   "kelly_base": 0.0,
+   "position": 0,
+   "straddle_direction": 0
+  }
+ },
+ "summary": {
+  "s1": {
+   "n_closed": 0,
+   "n_opened": 1,
+   "open_id": "s1:2026-10-26:SPXW:2026-11-25:7710",
+   "open_pnl_exec": 5850.0,
+   "open_pnl_mid": 6950.0,
+   "open_reason_code": null,
+   "open_status": "marked",
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s1c": {
+   "n_closed": 0,
+   "n_opened": 1,
+   "open_id": "s1c:2026-10-27:SPXW:2026-11-27:7750",
+   "open_pnl_exec": -3600.0,
+   "open_pnl_mid": -2920.0,
+   "open_reason_code": null,
+   "open_status": "marked",
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s2": {
+   "n_closed": 0,
+   "n_opened": 0,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s3": {
+   "n_closed": 0,
+   "n_opened": 0,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  },
+  "s4": {
+   "n_closed": 0,
+   "n_opened": 0,
+   "open_id": null,
+   "open_pnl_exec": null,
+   "open_pnl_mid": null,
+   "open_reason_code": null,
+   "open_status": null,
+   "realised_hedge_pnl": 0.0,
+   "realised_pnl_exec": 0.0,
+   "realised_pnl_mid": 0.0,
+   "realised_pnl_net": 0.0
+  }
+ }
+}
