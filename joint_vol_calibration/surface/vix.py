@@ -58,10 +58,14 @@ Deviations forced by the stored data (reported per session, never hidden):
     deviations say so. dVIX/dR ~ VIX T / 2: a 25 bp error moves the 30-day
     index by ~0.002 points. Beyond the 30-year tenor Cboe states no rule;
     the yield is held at the last one (no VIX-family term reaches it).
-  * timing: a stored chain has no quote time unless it is a GTH capture, so
-    the calculation time is option_chain.t_origin (16:00 ET on the session);
-    the official close is the 16:15 ET print. The snapshot's own timing is
-    unknown (Yahoo), which is the largest unquantified gap.
+  * timing: a chain that records no quote time (Yahoo) is calculated at
+    option_chain.t_origin (16:00 ET on the session); the official close is
+    the 16:15 ET print. The snapshot's own timing is unknown, which is the
+    largest unquantified gap. A Cboe book is calculated at the instant its
+    quotes stand at (report._calc_time_ny: its quote time, or a closing
+    book's 16:15 ET close), as Cboe times its own calculation: no departure,
+    though a book quoted in Global Trading Hours is still compared with the
+    previous 16:15 ET print (a gap note).
   * zero bids: the C22 pipeline stores two-sided lines only (bid > 0), so on
     those chains the two-consecutive-zero-bid stop cannot trigger and the
     strip runs to the last stored strike. Older (pre-C22) snapshots keep

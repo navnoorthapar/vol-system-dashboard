@@ -411,19 +411,37 @@ CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
 CAUSE_TIMING = "snapshot timing against the 16:15 ET print"
 CAUSE_STALE = "stale quotes"
 CAUSE_RATE = "the rate"
+# vix_replication.json calculation_time_basis (surface/report.py CALC_*,
+# report_version 5 on) and how the page names each Cboe book's: a chain with
+# no quote time is calculated at its T origin, a listed departure, unnamed here
+CALC_CLOSING_BOOK_CLOSE = "closing_book_close"
+CALC_BASIS_WORDS = {"book_quote_time": "the book’s quote time",
+                    CALC_CLOSING_BOOK_CLOSE: "the close its closing book’s quotes were left at"}
 
 
 def vix_unexplained_causes(vix_rep: Mapping | None) -> list[str]:
     """What the unexplained part of vix_replication.json ``vix_rep``'s gaps
     can come from, read from its own record: the snapshot's timing against
-    the 16:15 ET print, stale quotes, and the rate unless every term was
-    priced at Cboe's (rate.method: its bounded spline on the Treasury CMT
-    yields at the term's expiration). An artifact written before
-    report_version 4 (one rate for both terms), or for a session whose
+    the 16:15 ET print unless the replication is calculated at that close (a
+    closing Cboe book, calculation_time_basis), stale quotes, and the rate
+    unless every term was priced at Cboe's (rate.method: its bounded spline
+    on the Treasury CMT yields at the term's expiration). An artifact written
+    before report_version 4 (one rate for both terms), or for a session whose
     Treasury curve was missing, names the rate."""
-    rate = (vix_rep or {}).get("rate")
+    rep = vix_rep or {}
+    rate = rep.get("rate")
     cboe_rate = isinstance(rate, Mapping) and rate.get("method") == CBOE_RATE_METHOD
-    return [CAUSE_TIMING, CAUSE_STALE, *([] if cboe_rate else [CAUSE_RATE])]
+    at_close = rep.get("calculation_time_basis") == CALC_CLOSING_BOOK_CLOSE
+    return [*([] if at_close else [CAUSE_TIMING]), CAUSE_STALE, *([] if cboe_rate else [CAUSE_RATE])]
+
+
+def vix_calc_time_words(vix_rep: Mapping | None) -> str | None:
+    """What the replication's calculation time is, in the page's words, from
+    vix_replication.json calculation_time_basis: a Cboe book's quote time, or
+    the 16:15 ET close a closing book's quotes were left at. None for a chain
+    with no quote time (its timing is a listed departure) and for an artifact
+    written before report_version 5."""
+    return CALC_BASIS_WORDS.get(str((vix_rep or {}).get("calculation_time_basis")))
 
 
 def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping], *,

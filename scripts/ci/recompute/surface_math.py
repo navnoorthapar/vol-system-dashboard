@@ -15,11 +15,13 @@ Nothing here imports dashboard/ or joint_vol_calibration/.
 """
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -27,7 +29,7 @@ from scipy.integrate import quad
 from scipy.optimize import brentq
 from scipy.stats import norm
 
-from .data import Store, strike_at_delta, svi_total_variance
+from .data import Store, is_session, strike_at_delta, svi_total_variance
 
 DAYS = 365.0
 PILLARS = (("10P", -0.10), ("25P", -0.25), ("ATM", None), ("25C", 0.25), ("10C", 0.10))
@@ -73,6 +75,13 @@ VIX_FAMILY = (("VIX9D", 9), ("VIX", 30), ("VIX3M", 93), ("VIX6M", 184))
 CBOE_CMT_DAYS = {"1M": 30, "2M": 60, "3M": 91, "6M": 182, "1Y": 365, "2Y": 730, "3Y": 1095,
                  "5Y": 1825, "7Y": 2555, "10Y": 3650, "20Y": 7300, "30Y": 10950}
 CMT_MAX_AGE_DAYS = 7
+# when a Cboe book's quotes are live (New York): the session's regular hours to the 16:15
+# data cutoff, and the next session's Global Trading Hours (20:15 the evening before it
+# to 09:15) and the 09:15-09:30 pause before its open; otherwise the book is the
+# session's closing book, its quotes the ones the 16:15 close left
+NY = ZoneInfo("America/New_York")
+RTH, CUTOFF = dt.time(9, 30), dt.time(16, 15)
+GTH_OPEN = dt.time(20, 15)
 
 
 def label(m: str) -> str:
@@ -657,6 +666,33 @@ def cboe_cmt_rate(curve: dict[int, float], days: float) -> float:
             lo, hi = line(lambda v: v >= y[0]), line(lambda v: v <= y[0])
         bey = min(max(bey, lo), hi)
     return 2.0 * math.log1p(bey / 2.0)
+
+
+# ── the VIX replication's calculation time ───────────────────────────────────
+def replication_instant(inputs: dict, session: str) -> tuple[str, str] | None:
+    """(New York time to the minute, basis) the VIX replication is calculated at, from
+    surface.json's record of the chain: a Cboe book at its quote time while its quotes
+    are live ('book_quote_time'), a closing book at the session's 16:15 ET close
+    ('closing_book_close'); any other chain at the time its expiries are measured from
+    (t_origin, 'chain_t_origin'). None when the record has neither."""
+    qt = inputs.get("quote_time")
+    if inputs.get("source") == "cboe" and qt:
+        at = dt.datetime.fromisoformat(str(qt)).astimezone(NY)
+        day = dt.date.fromisoformat(session)
+        nxt = day + dt.timedelta(days=1)
+        while not is_session(nxt):
+            nxt += dt.timedelta(days=1)
+        gth = (dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY),
+               dt.datetime.combine(nxt, RTH, NY))         # GTH and the pause before the open
+        live = ((at.date() == day and RTH <= at.time() < CUTOFF) or gth[0] <= at < gth[1])
+        if live:
+            return at.replace(tzinfo=None).isoformat(timespec="minutes"), "book_quote_time"
+        return dt.datetime.combine(day, CUTOFF).isoformat(timespec="minutes"), "closing_book_close"
+    t0 = inputs.get("t_origin")
+    if not t0:
+        return None
+    at = dt.datetime.fromisoformat(str(t0)).astimezone(NY)
+    return at.replace(tzinfo=None).isoformat(timespec="minutes"), "chain_t_origin"
 
 
 # ── the page's number formats ─────────────────────────────────────────────────

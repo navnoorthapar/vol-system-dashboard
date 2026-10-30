@@ -653,6 +653,30 @@ class TestRecomputeAudit:
         assert round(100.0 * M.cboe_cmt_rate(curve, 32.0), 6) == 0.028797
         assert M.cmt_curve(data.Store(tmp_path), "2022-10-10") is None           # 14 days old
 
+    def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
+        """Tier 0.5: the audit rebuilds the replication's calculation time from
+        surface.json's record of the chain by its own calendar: a Cboe book at its
+        quote time while its quotes are live (regular hours to the 16:15 cutoff,
+        the next session's Global Trading Hours and the pause before its open), a
+        closing book at the session's 16:15 ET close, a Yahoo chain at its T origin."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        cboe = {"source": "cboe", "t_origin": "2026-10-16T16:00:00-04:00"}
+        cases = {"2026-10-19T02:30:00Z": ("2026-10-18T22:30", "book_quote_time"),    # Sun 22:30 ET, GTH
+                 "2026-10-19T13:20:00Z": ("2026-10-19T09:20", "book_quote_time"),    # Mon 09:20 ET, pause
+                 "2026-10-16T20:10:00Z": ("2026-10-16T16:10", "book_quote_time"),    # Fri 16:10 ET
+                 "2026-10-17T00:30:00Z": ("2026-10-16T16:15", "closing_book_close"),  # Fri 20:30 ET
+                 "2026-10-18T16:00:00Z": ("2026-10-16T16:15", "closing_book_close")}  # Sunday noon
+        for qt, want in cases.items():
+            assert M.replication_instant({**cboe, "quote_time": qt}, "2026-10-16") == want, qt
+        # Monday 2026-10-12 to 13 (Columbus Day trades): GTH for the Tuesday
+        assert M.replication_instant({**cboe, "quote_time": "2026-10-13T01:00:00Z"}, "2026-10-12") == (
+            "2026-10-12T21:00", "book_quote_time")
+        yahoo = {"source": "yfinance", "quote_time": None, "t_origin": "2026-10-16T16:00:00-04:00"}
+        assert M.replication_instant(yahoo, "2026-10-16") == ("2026-10-16T16:00", "chain_t_origin")
+        assert M.replication_instant({"source": "yfinance"}, "2026-10-16") is None
+
     def test_ci_runs_it_on_the_rendered_site(self):
         wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
         step = wf[wf.index("- name: Recompute audit"):]

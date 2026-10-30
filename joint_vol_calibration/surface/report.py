@@ -48,7 +48,9 @@ scorecard.json — every model of scorecard.MODEL_REGISTRY on the same quote
 vix_replication.json — official closes, the replicated VIX (Cboe rules;
     parity-forward variant; any-weekday bracket) and VIX9D/3M/6M analogues,
     each term with the rate it used (Cboe's CMT spline per term; rate: the
-    Treasury par curve it read), each index with a gap attribution (wing
+    Treasury par curve it read), the calculation time and its basis (a Cboe
+    book's quote time, a closing book's 16:15 ET close, or the chain's T
+    origin), each index with a gap attribution (wing
     truncation measured on the SVI-cal surface, residual = official -
     replicated - truncation); the
     variance-swap strip by expiry (Cboe single-term formula on the stored
@@ -64,7 +66,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +103,12 @@ SCHEMA_VERSION = 1
 #      CMT spline on the Treasury par curve before the session, vix.cmt_rates),
 #      not one 91-day rate for both terms; the rate departure is listed only
 #      when that curve is missing or stale
-REPORT_VERSION = 4
+#   5  plan 0.5: a session built from a Cboe book is calculated at the instant
+#      its quotes stand at (the book's quote time; a closing book's 16:15 ET
+#      close), not the chain's T origin, recorded as calculation_time_basis;
+#      that is Cboe's own timing rule, so it is no longer a listed departure,
+#      and its comparison with the 16:15 ET print is a gap note
+REPORT_VERSION = 5
 SURFACE_DIR = DATA_DIR / "surface"
 
 
@@ -213,9 +220,39 @@ def write_residuals(df: pd.DataFrame, path: Path) -> None:
 
 # ── per-session computation ───────────────────────────────────────────────────
 
-def _calc_time_ny(sq: sqm.SessionQuotes) -> datetime:
+# vix_replication.json calculation_time_basis: what the replication's
+# calculation time is (_calc_time_ny)
+CALC_BOOK_QUOTE_TIME = "book_quote_time"
+CALC_CLOSING_BOOK_CLOSE = "closing_book_close"
+CALC_T_ORIGIN = "chain_t_origin"
+
+
+def _calc_time_ny(sq: sqm.SessionQuotes) -> tuple:
+    """(calculation time, basis): the VIX replication's calculation time (New
+    York, naive) and which of CALC_* it is.
+
+    Cboe measures each term's T from the time of the calculation, on the
+    quotes standing at that instant. A session built from a Cboe book is
+    calculated at the instant its quotes stand at: the book's quote time (the
+    delayed feed's payload timestamp less 15 minutes), when the book is live
+    then (a Global Trading Hours book trading for the next session, or one
+    quoted before the 16:15 ET data cutoff); for a closing book (quoted after
+    the cutoff and outside the next Global Trading Hours session: weekend and
+    holiday runs) the session's 16:15 ET close, when its quotes were left and
+    the official close is computed, not the later instant the feed showed
+    them at. Not the chain's T origin, which for a closing book is the 16:00
+    ET close the surface measures T from. A chain that records no quote time
+    (Yahoo) is calculated at its T origin, the session's 16:00 ET close."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    qt = sq.clean_diagnostics.get("quote_time")
+    if sq.inputs.get("source") == "cboe" and qt:
+        at = datetime.fromisoformat(str(qt))
+        if cd.book_state_at(at, sq.session) == "closing":
+            return (datetime.combine(date.fromisoformat(sq.session), db.CLOSE_DATA_CUTOFF),
+                    CALC_CLOSING_BOOK_CLOSE)
+        return at.astimezone(oc.NY_TZ).replace(tzinfo=None), CALC_BOOK_QUOTE_TIME
     t0 = datetime.fromisoformat(sq.clean_diagnostics["t_origin"])
-    return t0.astimezone(oc.NY_TZ).replace(tzinfo=None)
+    return t0.astimezone(oc.NY_TZ).replace(tzinfo=None), CALC_T_ORIGIN
 
 
 def _surface_section(model_row: dict, surface) -> dict:
@@ -354,8 +391,42 @@ def _vix_rate(sq: sqm.SessionQuotes) -> tuple:
                             "its R")}, None
 
 
+def _calc_time_record(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str:
+    """vix_replication.json calculation_time_source: what the calculation time
+    is, in words, from the chain's record (_calc_time_ny)."""
+    d, inp = sq.clean_diagnostics, sq.inputs
+    if basis == CALC_BOOK_QUOTE_TIME:
+        return (f"the Cboe book's quote time {d.get('quote_time')} (the delayed feed's payload "
+                f"timestamp less 15 minutes; {inp.get('book_state') or 'book state not recorded'} "
+                "book, live at that instant)")
+    if basis == CALC_CLOSING_BOOK_CLOSE:
+        return (f"the session's 16:15 ET close: the Cboe book is its closing book, quoted at "
+                f"{d.get('quote_time')} after the close, its quotes the ones the close left")
+    return f"the chain's T origin ({d.get('t_origin_basis') or 'the session close'})"
+
+
+def _timing_note(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str | None:
+    """The gap note on a Cboe book's timing: the replication follows Cboe's
+    rule at the book's instant, and the official close it is set against is
+    the 16:15 ET print (None for a chain with no quote time: that is a
+    departure, _timing_deviation)."""
+    if basis == CALC_BOOK_QUOTE_TIME:
+        return (f"The replication is timed at the book's quote time, {calc:%Y-%m-%d %H:%M} ET, as "
+                "Cboe times a calculation on the quotes standing then; the Cboe close it is "
+                f"compared with is the 16:15 ET print of {sq.session}, so the gap includes the "
+                "market's move between the two instants.")
+    if basis == CALC_CLOSING_BOOK_CLOSE:
+        quoted = datetime.fromisoformat(str(sq.clean_diagnostics.get("quote_time"))).astimezone(oc.NY_TZ)
+        return (f"The book is the session's closing book, quoted at {quoted:%Y-%m-%d %H:%M} ET after "
+                f"the close: the replication is timed at the 16:15 ET close of {sq.session}, when its "
+                "quotes were left, the instant the Cboe close it is compared with is computed.")
+    return None
+
+
 def _timing_deviation(sq: sqm.SessionQuotes, calc: datetime) -> str:
-    """The calculation-time departure, from the chain's T origin and record."""
+    """The calculation-time departure of a chain that is not a Cboe book, from
+    its T origin and record (a Cboe book is calculated at its own instant,
+    _calc_time_ny, and departs from nothing)."""
     d, inp = sq.clean_diagnostics, sq.inputs
     if str(d.get("t_origin_basis", "")).startswith("quote_time"):
         return (f"Calculation time is the book's quote time, {calc:%Y-%m-%d %H:%M} ET "
@@ -390,7 +461,8 @@ def _settlement_deviations(terms: list) -> list:
 def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                svi_surface, essvi_surface: es.ESSVISurface, calc: datetime,
                svi_cal_surface=None, attribution: dict | None = None,
-               indices: dict | None = None, cboe_rate: bool = True) -> list:
+               indices: dict | None = None, cboe_rate: bool = False,
+               calc_basis: str = CALC_T_ORIGIN) -> list:
     notes = []
     for name, rep in (indices or {}).items():
         if rep.get("headline_method") is None:
@@ -406,6 +478,9 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
     else:
         notes.append(f"The stored chain keeps {n_zero} zero-bid lines; the zero-bid stop rule "
                      "is applied as published.")
+    timing = _timing_note(sq, calc, calc_basis)
+    if timing:
+        notes.append(timing)
     if not sq.clean_diagnostics.get("quote_time"):
         o = official.get("VIX", {})
         rng = (f" (the official index traded {o['low']:.2f}-{o['high']:.2f} that session)"
@@ -456,8 +531,10 @@ def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                      + (f"; {100.0 * a['residual_share_of_official_minus_replicated']:.0f}% of "
                         "official - replicated"
                         if a.get("residual_share_of_official_minus_replicated") is not None else "")
-                     + "): snapshot timing vs the 16:15 ET print, stale quotes"
-                     + ("." if cboe_rate else ", the rate."))
+                     + "): " + ", ".join(
+                         (["snapshot timing vs the 16:15 ET print"]
+                          if calc_basis != CALC_CLOSING_BOOK_CLOSE else [])
+                         + ["stale quotes"] + ([] if cboe_rate else ["the rate"])) + ".")
     return notes
 
 
@@ -630,7 +707,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                              _quote_source_note(sq)]}
 
         # vix_replication.json
-        calc = _calc_time_ny(sq)
+        calc, calc_basis = _calc_time_ny(sq)
         terms = vx.term_tables(sq.raw, session, calc)
         rate, rate_doc, rate_deviation = _vix_rate(sq)
         carry_map = {e: (float(f), float(d)) for e, f, d in
@@ -701,11 +778,15 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
         vix_doc = {
             "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "calculation_time_ny": calc.isoformat(timespec="minutes"),
+            "calculation_time_basis": calc_basis,
+            "calculation_time_source": _calc_time_record(sq, calc, calc_basis),
             "rate": rate_doc,
             "indices": indices, "strip": strip, "beta": beta,
             "deviations": [
                 *filter(None, [rate_deviation]),
-                _timing_deviation(sq, calc),
+                # a Cboe book is calculated at its own instant, as Cboe would: no departure
+                # (its comparison with the 16:15 ET print is a gap note, _timing_note)
+                *([_timing_deviation(sq, calc)] if calc_basis == CALC_T_ORIGIN else []),
                 ("parity_forward replaces the single-strike forward with the cleaned chain's "
                  "parity-regression F and D (robust to one stale strike)."),
                 ("K0 falls back to the nearest lower strike with both sides quoted when the listed "
@@ -718,7 +799,7 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,
                                     indices["VIX"].get("gap_attribution"), indices,
-                                    cboe_rate=rate_deviation is None),
+                                    cboe_rate=rate_deviation is None, calc_basis=calc_basis),
         }
     resid_cols = list(resid.columns)
     return {"residuals": resid[resid_cols].reset_index(drop=True), "surface": surface_doc,

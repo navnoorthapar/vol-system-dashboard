@@ -524,6 +524,25 @@ def test_the_rate_is_named_as_a_cause_only_where_it_is_not_cboes():
     assert old.endswith("(snapshot timing against the 16:15 ET print, stale quotes, the rate).")
 
 
+def test_a_closing_books_replication_at_the_close_drops_the_timing_cause():
+    """Tier 0.5: a closing Cboe book is calculated at the 16:15 ET close, the
+    instant of the Cboe print, so its snapshot timing is no cause of the gap;
+    a book calculated at its Global Trading Hours quote time, a chain with no
+    quote time and an artifact written before (no basis) keep it. The timing
+    line names a Cboe book's basis and nothing else."""
+    closing = {"calculation_time_basis": "closing_book_close",
+               "rate": {"method": ds.CBOE_RATE_METHOD}}
+    assert ds.vix_unexplained_causes(closing) == [ds.CAUSE_STALE]
+    assert ds.vix_unexplained_causes({**closing, "rate": {}}) == [ds.CAUSE_STALE, ds.CAUSE_RATE]
+    for basis in ("book_quote_time", "chain_t_origin", None):
+        assert ds.vix_unexplained_causes({"calculation_time_basis": basis})[0] == ds.CAUSE_TIMING
+    assert ds.vix_calc_time_words({"calculation_time_basis": "book_quote_time"}) == "the book’s quote time"
+    assert ds.vix_calc_time_words(closing) == "the close its closing book’s quotes were left at"
+    for rep in ({"calculation_time_basis": "chain_t_origin"}, {"calculation_time_ny": "2026-10-16T16:00"},
+                None):
+        assert ds.vix_calc_time_words(rep) is None
+
+
 def test_a_gap_split_that_does_not_add_up_is_not_shown():
     """The split is printed only when the artifact records it and its parts add
     up to the stored gap; otherwise both parts are None, never a residual

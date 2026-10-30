@@ -109,6 +109,12 @@ def test_artifacts_and_schema(written):
                     assert t["R"] == pytest.approx(cmt(t["expiry"]), rel=1e-9), (name, meth, t["expiry"])
     head = vixd["indices"]["VIX"]["cboe_rules"]
     assert head["near"]["R"] != head["next"]["R"]
+    # tier 0.5: a chain with no quote time is calculated at its T origin, the 16:00 ET
+    # close, and that stays a listed departure
+    assert vixd["calculation_time_basis"] == report.CALC_T_ORIGIN
+    assert vixd["calculation_time_ny"] == f"{SESSION}T16:00"
+    assert sum(d.startswith("Calculation time is the session's 16:00 ET close: the chain records no "
+                            "quote time (Yahoo)") for d in vixd["deviations"]) == 1
     assert not any(d.startswith(("R is", "The rate is")) for d in vixd["deviations"])
     assert vixd["gap_notes"][-1].endswith("snapshot timing vs the 16:15 ET print, stale quotes.")
     idx = json.loads((out / "index.json").read_text())
@@ -444,9 +450,21 @@ def test_the_surface_is_built_from_the_sessions_cboe_book(tmp_path, monkeypatch)
     heston = {m["model"]: m for m in out["scorecard"]["models"]}["heston_v2"]
     assert "The fit was made on the session's Yahoo chain" in heston["description"]
     assert heston["fit"]["scored_on_fit_chain"] is False
-    assert any(d.startswith("Calculation time is the session's 16:00 ET close; the book was quoted "
-                            f"at {qt}") for d in out["vix_replication"]["deviations"])
-    assert not any("Yahoo" in d for d in out["vix_replication"]["deviations"])
+    # tier 0.5: the replication is calculated at the instant the book's quotes stand at,
+    # Cboe's own timing: for a closing book the 16:15 ET close, not the chain's 16:00 ET
+    # T origin, and that is no departure; the note says when the book was quoted
+    vixd = out["vix_replication"]
+    assert vixd["calculation_time_ny"] == f"{SESSION}T16:15"
+    assert vixd["calculation_time_basis"] == report.CALC_CLOSING_BOOK_CLOSE
+    assert qt in vixd["calculation_time_source"]
+    assert not any(d.startswith("Calculation time") for d in vixd["deviations"])
+    assert not any("Yahoo" in d for d in vixd["deviations"])
+    assert sum(n.startswith("The book is the session's closing book, quoted at 2026-10-16 20:30 ET after "
+                            f"the close: the replication is timed at the 16:15 ET close of {SESSION}")
+               for n in vixd["gap_notes"]) == 1
+    # the snapshot's timing against the 16:15 ET print is then no cause of the gap
+    att = [n for n in vixd["gap_notes"] if n.startswith("Gap attribution (")]
+    assert all("snapshot timing" not in n for n in att)
     # the mapping: Cboe's IV is not read as this repository's
     raw = sqm.stored_chain_from_capture(pd.read_parquet(path))
     assert set(raw["underlying"]) == {"SPX"}
@@ -461,6 +479,32 @@ def test_the_surface_is_built_from_the_sessions_cboe_book(tmp_path, monkeypatch)
     none = np.zeros(len(yq.quotes), dtype=bool)
     ctx = sc.ScoreContext(yq, none, sc.surface_fit_mask(yq.quotes, none))
     assert "The fit was made" not in sc.heston_v2_factory(ctx).description
+
+
+def test_a_gth_book_is_calculated_at_its_quote_time_and_departs_from_nothing(tmp_path, monkeypatch):
+    """Tier 0.5: a Global Trading Hours book (the Mon-Thu book slots) is
+    calculated at its quote time, as Cboe times a calculation on the quotes
+    standing then, and vix_replication.json says so: the timing is no listed
+    departure; the note says the Cboe close it is compared with is the earlier
+    16:15 ET print, and the gap attribution keeps that timing among its causes."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    qt = "2026-10-19T02:30:00Z"                     # Sun 22:30 ET: GTH for Monday 2026-10-19
+    _capture_store(tmp_path, monkeypatch, qt, book_state="gth")
+    out = report.run_session(SESSION, models=["essvi"])
+    vixd = out["vix_replication"]
+    ny = datetime.fromisoformat(qt).astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    assert out["surface"]["inputs"]["t_origin_basis"].startswith("quote_time")
+    assert vixd["calculation_time_ny"] == ny.isoformat(timespec="minutes")
+    assert vixd["calculation_time_basis"] == report.CALC_BOOK_QUOTE_TIME
+    assert vixd["calculation_time_source"].startswith(f"the Cboe book's quote time {qt}")
+    assert not any(d.startswith("Calculation time") for d in vixd["deviations"])
+    assert sum(n.startswith(f"The replication is timed at the book's quote time, {ny:%Y-%m-%d %H:%M} ET")
+               and n.endswith(f"16:15 ET print of {SESSION}, so the gap includes the market's move "
+                              "between the two instants.") for n in vixd["gap_notes"]) == 1
+    att = [n for n in vixd["gap_notes"] if n.startswith("Gap attribution (")]
+    assert all("snapshot timing vs the 16:15 ET print" in n for n in att)
 
 
 @pytest.mark.parametrize(("quote_time", "empty_atm", "why"), [
@@ -514,7 +558,10 @@ def test_committed_cboe_books_are_the_surface_source_of_their_sessions():
         assert sq.diagnostics["t_origin_basis"] == (oc.GTH_BASIS if gth else oc.CLOSE_BASIS)
         assert sq.diagnostics["n_expiries"] > 17                      # the full listing
         # CITSEC-03: with the full listing the VIX bracket is Cboe's (both terms 23-37 days out)
-        calc = report._calc_time_ny(sq)
+        calc, basis = report._calc_time_ny(sq)
+        if gth:                                       # tier 0.5: a GTH book at its quote time
+            assert basis == report.CALC_BOOK_QUOTE_TIME
+            assert calc.isoformat() == sq.diagnostics["t_origin"][:19]
         terms = vix_mod.term_tables(sq.raw, s, calc)
         rep = vix_mod.replicate_index(terms, sq.r_ref, 30, spot=sq.spot)
         win = vix_mod.cboe_term_window(rep, terms, calc)

@@ -6507,6 +6507,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["vix_deviations"] = list(vx.get("deviations") or [])
         d["vix_markers"] = vix_official_markers(vx)
         d["vix_calc_time"] = vx.get("calculation_time_ny")
+        d["vix_calc_words"] = desk_surface.vix_calc_time_words(vx)
         # each index's two terms and its gap split as gap_attribution splits it (#vix-terms-table)
         d["vix_terms"] = [{**r, "surface_label": model_short(r["surface"]) if r["surface"] else None}
                           for r in desk_surface.vix_terms(vx)]
