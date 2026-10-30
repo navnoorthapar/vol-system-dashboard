@@ -9837,6 +9837,26 @@ def test_the_recompute_audit_fails_on_one_wrong_digit(recompute_audit, frozen_si
     assert ("ticker", "1M ATMF (SVI-cal, 30 days), %") in failed
 
 
+def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(recompute_audit, tmp_path):
+    """A session whose Heston fit was rejected stores Heston in its scorecard as
+    {available: false, reason} with no metrics (the Cboe-rebuilt 2026-10-20 does).
+    The page leaves that row out (desk_artifacts.scorecard_rows); the audit read its
+    metrics, raised KeyError and so ran no Overview check on such a store. Its
+    scorecard history now holds the session's scored models only."""
+    sc = json.loads(_surface_file("scorecard.json").read_text())
+    session = sc["session"]
+    gone = sc["models"][-1]["model"]
+    sc["models"][-1] = {"available": False, "model": gone, "reason": "no accepted fit is stored"}
+    sc["ranking_by_oos_median_abs_hs"] = [r for r in sc.get("ranking_by_oos_median_abs_hs") or []
+                                          if r.get("model") != gone]
+    d = tmp_path / "surface" / session
+    d.mkdir(parents=True)
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    rows = recompute_audit.overview.scorecards(recompute_audit.Store(tmp_path), [session])
+    assert sorted(r["model"] for r in rows) == sorted(m["model"] for m in sc["models"][:-1])
+    assert all(r["session"] == session and r["n"] > 0 for r in rows)
+
+
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     """T11: every dot of the VIX-replication check's history is the signed gap
     (replicated − Cboe close) of its session's vix_replication.json, not |gap|;

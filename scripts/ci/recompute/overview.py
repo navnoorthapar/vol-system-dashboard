@@ -156,7 +156,9 @@ def fmt_signed(x: float, spec: str = ".2f") -> str:
 # ── the store, read once ─────────────────────────────────────────────────────
 def scorecards(store: Store, sessions: list[str]) -> list[dict[str, Any]]:
     """(session, model) out-of-sample rows of every scorecard, each session's in its
-    ranking order (by out-of-sample median |model − mid| in half-spreads)."""
+    ranking order (by out-of-sample median |model − mid| in half-spreads). A model the
+    producer marks ``available: false`` (Heston on a session with no accepted fit:
+    no metrics, a reason instead) has no row, as on the page."""
     out = []
     for s in sessions:
         if not (store.root / "surface" / s / "scorecard.json").exists():
@@ -164,8 +166,9 @@ def scorecards(store: Store, sessions: list[str]) -> list[dict[str, Any]]:
         sc = store.json(f"surface/{s}/scorecard.json")
         rank = [r.get("model") for r in sc.get("ranking_by_oos_median_abs_hs") or [] if isinstance(r, dict)]
         order = {m["model"]: i for i, m in enumerate(sc["models"])}
-        for m in sorted(sc["models"], key=lambda m: (rank.index(m["model"]) if m["model"] in rank
-                                                     else len(rank) + order[m["model"]])):
+        scored = [m for m in sc["models"] if m.get("available") is not False]
+        for m in sorted(scored, key=lambda m: (rank.index(m["model"]) if m["model"] in rank
+                                               else len(rank) + order[m["model"]])):
             o = m["metrics"]["out_of_sample"]
             dg = m.get("dense_grid") or {}
             out.append({"session": s, "model": m["model"], "n": int(o["n"]),
