@@ -262,6 +262,25 @@ def test_vx_curve_on_a_fixture_day_is_front_first_monthly_and_its_contango():
     assert dm.vx_curve([]) is None
 
 
+def test_vx_curve_read_on_a_later_session_leaves_out_the_settled_contracts():
+    """CIO-15: read on a later session than its own (a page whose newest session is
+    past the futures table's), the curve leaves out every contract whose final
+    settlement is on or before that session; M1 is the first contract still trading."""
+    rows = [{"expiry_date": e, "expiry_month": e[:7], "is_weekly": 0, "price": px, "days_to_expiry": d}
+            for e, px, d in (("2026-10-21", 17.1186, 12), ("2026-11-18", 17.8517, 40),
+                             ("2026-12-16", 18.4448, 68))]
+    c = dm.vx_curve(rows, trading_after="2026-10-27")
+    assert [r["expiry"] for r in c["rows"]] == ["2026-11-18", "2026-12-16"]
+    assert [r["expiry"] for r in c["settled"]] == ["2026-10-21"]
+    assert c["m1"]["expiry"] == "2026-11-18"
+    assert c["m1m2"] == pytest.approx(18.4448 / 17.8517 - 1)
+    on_expiry = dm.vx_curve(rows, trading_after="2026-10-21")        # on its final settlement day
+    assert [r["expiry"] for r in on_expiry["settled"]] == ["2026-10-21"]
+    assert dm.vx_curve(rows, trading_after="2026-10-20")["settled"] == []
+    assert dm.vx_curve(rows, trading_after="2026-12-16") is None
+    assert dm.vx_curve(rows)["n"] == 3
+
+
 def test_vx_curve_m1_m2_on_the_committed_db():
     """Acceptance 2: M1 → M2 = +4.28% on 2026-10-09 (17.12 → 17.85)."""
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)

@@ -18,7 +18,10 @@ committed. Here a new session happens before merge:
        market     Yahoo, Cboe and Treasury return the stored window plus one
                   row per series for the new session (the last value carried
                   forward; the VIX indices are the model values of the
-                  session's parameters below, so the joint fit is consistent)
+                  session's parameters below, so the joint fit is consistent);
+                  Cboe's VX settlement file of each session the futures table
+                  lacks, up to the new one, prices the nine monthly contracts
+                  at the model's E^Q[VIX_T] for those parameters (vx_file)
        capture    the newest committed Cboe books, re-dated to the new session
        calibrate  a Yahoo-format book priced at the new spot by Heston with
                   the session's parameters: the headline fit's moved by a
@@ -279,6 +282,26 @@ def drive(status_file: Path) -> int:
     _patch(rates, download_treasury_year=treasury,
            download_nyfed_sofr=lambda start=None, end=None: quotes[quotes["source"] == "nyfed"].copy())
 
+    from joint_vol_calibration.models.heston import heston_vix_future_exact
+    codes = "FGHJKMNQUVXZ"
+
+    def vx_file(trade_date):
+        """The CFE settlement file of ``trade_date`` (the close slot asks for every
+        session the VX table lacks): the nine monthly contracts from its month on,
+        at the model's E^Q[VIX_T] for the session's parameters, to Cboe's 4 dp."""
+        if trade_date > session:
+            raise OSError(f"no VX settlements after the simulated session ({trade_date})")
+        y, m = int(trade_date[:4]), int(trade_date[5:7])
+        exps = [e for e in (dbm.vx_monthly_expiry(y + (m - 1 + k) // 12, (m - 1 + k) % 12 + 1)
+                            for k in range(11)) if e >= trade_date][:9]
+        T = np.array([(pd.Timestamp(e) - pd.Timestamp(trade_date)).days / 365.0 for e in exps])
+        px = heston_vix_future_exact(p["kappa"], p["theta"], p["sigma"], p["v0"], T)
+        lines = ["Product,Symbol,Expiration Date,Price"] + [
+            f"VX,VX/{codes[int(e[5:7]) - 1]}{e[3]},{e},{v:.4f}" for e, v in zip(exps, px)]
+        return cboe.parse_vx_settlement_csv("\n".join(lines) + "\n", trade_date)
+    _patch(cboe, download_vx_settlements=vx_file,
+           download_vix_futures_daily_history=lambda start=None, end=None, expiries=None: pd.DataFrame())
+
     cap_dir = root / "data_store" / "options" / "cboe"
     replay = {}
     for und in ("SPX", "VIX"):
@@ -426,6 +449,10 @@ def main(argv=None) -> int:
         problems.append(f"forward ledger: {st.get('forward_ledger')}")
     if (st.get("capture") or {}).get("status") != "captured":
         problems.append(f"capture: {st.get('capture')}")
+    vx = (st.get("market") or {}).get("vx_futures") or {}
+    if vx.get("last") != sim.get("session") or not any(
+            (tree / "data_store" / "market" / "vix_futures_daily").glob("vix_futures_daily_*.parquet")):
+        problems.append(f"VX settlements of the session not stored and persisted: {vx}")
     for name, res in (st.get("artifacts") or {}).items():
         if not res.get("ok"):
             problems.append(f"artifact {name}: {res.get('error')}")

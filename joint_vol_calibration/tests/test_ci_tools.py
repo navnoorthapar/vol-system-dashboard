@@ -432,6 +432,10 @@ class TestRepoGrowth:
         assert growth.kind_of("data_store/runs/run_20261028T023000Z_book.json") == "run records"   # 0.9
         manifest = "data_store/options/cboe_manifest/spx_2026-10-27_023000Z.json"
         assert growth.kind_of(manifest) == "cboe manifests"
+        # the VX settlements' partitions (FUND_GRADE_PLAN 1.12) apart from the other market tables
+        assert growth.kind_of("data_store/market/vix_futures_daily/vix_futures_daily_2026.parquet") == \
+            "VX futures partitions"
+        assert growth.kind_of("data_store/market/spx_ohlcv/spx_ohlcv_2026.parquet") == "market partitions"
         assert growth.kind_of("README.md") == "other"
 
     def test_the_pull_request_gate_fails_on_data_store_files_and_growth(self, tmp_path, monkeypatch):
@@ -659,6 +663,40 @@ class TestRecomputeAudit:
         r = data.cache_vs_record(data.Store(root), "spx_ohlcv", ("close",))
         assert r["record_ahead"] == ["2026-10-26"]
         assert r["not_in_record"] == 1                                    # 2026-10-22 is only cached
+
+    def test_its_record_view_holds_the_recorded_vx_settlements(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 1.12: the bot records VX settlements under
+        market/vix_futures_daily/; the audit's view applies them on (date,
+        expiry_date) as app.record_db does, so it recomputes the Overview's VX
+        panel from the sessions the page shows, not from the cache's older ones."""
+        import sqlite3
+
+        import pandas as pd
+        data = _recompute(monkeypatch).data
+        root = tmp_path / "data_store"
+        (root / "market" / "vix_futures_daily").mkdir(parents=True)
+        cols = ("date", "expiry_date", "expiry_month", "symbol", "is_weekly", "open", "high", "low", "close",
+                "settle", "volume", "open_interest", "days_to_expiry", "source")
+        con = sqlite3.connect(root / "vol_system.db")
+        con.execute(f"CREATE TABLE vix_futures_daily ({', '.join(cols)})")
+        con.executemany("INSERT INTO vix_futures_daily VALUES "
+                        "(?, ?, ?, NULL, 0, 1, 1, 1, 1, ?, 5, 5, 9, 'cboe')",
+                        [("2026-10-09", "2026-10-21", "2026-10", 17.1186),
+                         ("2026-10-09", "2026-11-18", "2026-11", 17.8517)])
+        con.commit()
+        con.close()
+        pd.DataFrame({"date": ["2026-10-09", "2026-10-28"], "expiry_date": ["2026-11-18", "2026-11-18"],
+                      "expiry_month": ["2026-11", "2026-11"], "symbol": ["VX/X6", "VX/X6"],
+                      "is_weekly": [0, 0], "settle": [17.8500, 18.5982], "days_to_expiry": [40, 21],
+                      "source": ["cboe_settlement"] * 2}).to_parquet(
+            root / "market" / "vix_futures_daily" / "vix_futures_daily_2026.parquet")
+        vx = data.Store(root).vx_futures()
+        assert list(zip(vx["date"], vx["expiry_date"], vx["settle"])) == [
+            ("2026-10-09", "2026-10-21", 17.1186),
+            ("2026-10-09", "2026-11-18", 17.85),                  # the record's value wins
+            ("2026-10-28", "2026-11-18", 18.5982)]                # the record's own session
+
+
 # ── pip_audit_gate.py ─────────────────────────────────────────────────────────
 
 @pytest.fixture

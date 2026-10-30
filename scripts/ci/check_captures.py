@@ -33,6 +33,11 @@ by its name and read back:
                                                     run_record): its schema, and the
                                                     run time and slot of its name
 
+The market partitions (data_store/market, the VX settlements' included) are
+not captures: Cboe and Yahoo serve them again, so they go in the data commit
+and are re-derived from the run's database on a rebase conflict
+(commit_and_push.sh REDERIVE).
+
 The paths that pass are written to LIST (one per line) for
 scripts/ci/commit_and_push.sh. A file that fails is reported (::error::) and
 left out, a file with another name is left to the data commit; the exit status
