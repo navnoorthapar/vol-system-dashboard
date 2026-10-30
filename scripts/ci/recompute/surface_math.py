@@ -575,7 +575,9 @@ def spx_chains(store: Store) -> dict[str, pd.DataFrame]:
 
 def beta_by_session(store: Store) -> dict[str, dict]:
     """{session: {ratio, spot_gap}} of every stored SPX chain, matched to the last
-    session on or before its snapshot date with a VIX and an SPX close."""
+    session on or before its snapshot date with a VIX and an SPX close, whose
+    parity-implied spot is within BETA_SPOT_TOL of that close (a chain further off
+    holds another time's quotes, so it has no ratio against the session's VIX)."""
     out: dict[str, dict] = {}
     for d, chain in spx_chains(store).items():
         mk = store.sql("SELECT v.date, v.close AS vix, s.close AS spx FROM vix_term_structure v "
@@ -597,8 +599,10 @@ def beta_by_session(store: Store) -> dict[str, dict]:
         atm30 = math.sqrt((w1 + (w2 - w1) * (T30 - a["T"]) / (b["T"] - a["T"])) / T30)
         nearest = min(term, key=lambda t: abs(t["T"] - T30))
         spot = nearest["F"] * math.exp(-(r - BETA_Q) * nearest["T"])
-        out[session] = {"ratio": atm30 / (float(mk["vix"].iloc[0]) / 100.0),
-                        "spot_gap": spot / float(mk["spx"].iloc[0]) - 1.0}
+        gap = spot / float(mk["spx"].iloc[0]) - 1.0
+        if abs(gap) > BETA_SPOT_TOL:
+            continue
+        out[session] = {"ratio": atm30 / (float(mk["vix"].iloc[0]) / 100.0), "spot_gap": gap}
     return out
 
 

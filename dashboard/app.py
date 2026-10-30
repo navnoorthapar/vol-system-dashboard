@@ -6342,11 +6342,15 @@ def surface_extras(d: dict, surf: dict) -> None:
         # The replication's ATM / VIX interpolates the ATM mids of the VIX's own
         # two terms with its constant-maturity weights; the backtest's β (Research)
         # is the 30-day ATM-forward Black-76 vol over the VIX. Both are shown,
-        # each under its own name, so no two pages give one label two values.
+        # each under its own name, so no two pages give one label two values. A chain
+        # the backtest excludes (its parity-implied spot is off the session's close, so
+        # its quotes are not that session's) has no β here either: its ratio sets one
+        # time's ATM vol against another time's VIX.
         d["beta_estimator"] = {}
         try:
             d["beta_estimator"] = {c["session"]: c["ratio"] for c in beta_estimation(None)["chains"]
-                                   if c["kind"] == "DB chain" and c["ratio"] is not None}
+                                   if c["kind"] == "DB chain" and c["role"] != "excluded"
+                                   and c["ratio"] is not None}
         except (OSError, ValueError, KeyError, ImportError, sqlite3.Error) as exc:
             # supplementary: the replication's own figure stands, the comparison is left out
             _logger.warning("β estimator ratios unavailable for the surface page: %s", exc)
