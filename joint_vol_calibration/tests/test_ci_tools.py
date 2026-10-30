@@ -229,6 +229,30 @@ class TestSimulatedSession:
                                          .splitlines(), 1) if dated.search(line)]
         assert hits == []
 
+    def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
+        """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
+        typed every book 'gth', but 22:15 ET on a Friday is the closing book (Monday's
+        GTH opens on Sunday evening), and test_cboe_downloader checks each committed
+        capture's state against book_state_at."""
+        from datetime import UTC, datetime
+
+        import pandas as pd
+
+        from joint_vol_calibration.data import cboe_downloader as cb
+        from joint_vol_calibration.data import option_chain as oc
+        meta = {"underlying_price": 7000.0, "url": "u", "sha256": "0" * 64, "n_bytes": 1}
+        frame = pd.DataFrame({"snapshot_date": ["2026-10-01"], "quote_time": ["x"]})
+        states = {}
+        for session in ("2026-10-29", "2026-10-30"):                  # a Thursday, a Friday
+            now = datetime.fromisoformat(f"{session}T22:30:00").replace(tzinfo=oc.NY_TZ).astimezone(UTC)
+            cap = sim.replayed_capture(cb, "SPX", frame, meta, session, now)
+            quoted = datetime.fromisoformat(cap.quote_time)
+            assert cap.book_state == cb.book_state_at(quoted, session)
+            assert list(cap.frame["quote_time"]) == [cap.quote_time]
+            assert list(cap.frame["snapshot_date"]) == [session]
+            states[session] = cap.book_state
+        assert states == {"2026-10-29": "gth", "2026-10-30": "closing"}
+
     def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
         import inspect
         src = inspect.getsource(sim.drive)

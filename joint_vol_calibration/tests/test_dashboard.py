@@ -1805,6 +1805,38 @@ def test_stress_windows_are_measured_from_the_prior_close(dash, pages):
 LIVE_BETA_CAPTURE = ROOT / "joint_vol_calibration" / "tests" / "fixtures" / "spx_chain_live_20261012.json"
 
 
+def test_a_chain_the_backtest_excludes_has_no_surface_beta_and_a_true_minus(dash, monkeypatch):
+    """2026-10-29: the stored chain's parity-implied spot was 0.9% under the session's
+    close, so the backtest excluded it, yet the Surface history printed its β (that
+    chain's ATM vol over another time's VIX) and Research printed the reason as
+    '(-0.9%)' with a hyphen. The newest surface session's chain is made an excluded
+    one here, whatever the stored chains say."""
+    rb = dash._import_run_backtest()
+    real = rb.estimate_beta(include_live=False)
+    index = json.loads((SHIPPED / "surface" / "index.json").read_text())
+    session = max(r["session"] for r in index["sessions"])
+    off = {"source": f"db:{session}", "session": session, "ratio": 0.815, "spot_gap": -0.0093,
+           "status": "excluded: implied spot 7648 vs close 7720 (-0.9%) — quotes not from this session"}
+    table = pd.concat([real[real["session"].astype(str).str[:10] != session], pd.DataFrame([off])],
+                      ignore_index=True)
+    monkeypatch.setattr(rb, "estimate_beta", lambda include_live=False: table)
+    monkeypatch.setattr(dash, "_BETA_CACHE", {})
+    client = dash.app.test_client()
+
+    research = _visible_text(client.get("/research").get_data(as_text=True))
+    assert "(−0.9%) — quotes not from this session" in research
+    assert "(-0.9%)" not in research
+
+    html = client.get("/surface").get_data(as_text=True)
+    tbl = re.search(r'<table[^>]*id="surface-history-table".*?</table>', html, re.DOTALL).group(0)
+    cells = (re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)
+             for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.DOTALL))
+    rows = {re.sub(r"<[^>]+>", "", tds[0]).strip(): tds for tds in cells if tds}
+    assert re.sub(r"<[^>]+>", "", rows[session][-1]).strip() == "—"
+    note = re.search(r'<p class="note" id="atm-vix-note">(.*?)</p>', html, re.DOTALL)
+    assert note is None or "β estimator" not in note.group(1)
+
+
 def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
     """'β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84)': the five
     were 4 DB chains and a live capture, the range was typed in, and the later
@@ -2953,9 +2985,9 @@ def test_surface_atm_over_vix_is_named_by_its_method(dash, pages):
     else:
         assert f"VIX-term ATM / VIX on this chain: {vb['atm_over_vix_official']:.3f}" in surf
         session = _surface_file("residuals.parquet").parent.name
-        row = re.search(rf'<td class="nowrap">{session}</td><td>[^<]*</td><td class="num">([0-9.]+)</td>',
-                        res)
-        if row:     # the session's chain is one the β estimator read
+        row = re.search(rf'<td class="nowrap">{session}</td><td>[^<]*</td><td class="num">([0-9.]+)</td>'
+                        r"<td>([^<]*)</td>", res)
+        if row and not row.group(2).startswith("excluded"):     # a chain the β estimator kept
             assert f"gives {row.group(1)} on the same chain" in surf
         else:
             assert "on the same chain" not in surf
