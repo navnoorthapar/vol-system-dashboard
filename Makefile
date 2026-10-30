@@ -27,7 +27,7 @@ FAST_TESTS = joint_vol_calibration/tests/test_heston.py \
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-any test test-fast test-thorough lint typecheck baselines \
-        bench bench-smoke freeze a11y recompute-audit reproduce reproduce-full mutation demo audit \
+        bench bench-smoke freeze a11y recompute-audit readme-results reproduce reproduce-full mutation demo audit \
         docker-build docker-test clean
 
 help:  ## list the targets
@@ -76,6 +76,9 @@ a11y: freeze  ## axe-core (WCAG 2.2 AA) + overflow check on the frozen site (nee
 
 recompute-audit: freeze  ## every number on the Overview and Surface, recomputed from data_store independently
 	$(PYTHON) scripts/ci/recompute_audit.py $(SITE)
+
+readme-results:  ## the README's figures from data_store (docs/results/readme_results.json); THROUGH=newest moves the span
+	$(PYTHON) scripts/readme_results.py --update-docs $(if $(THROUGH),--through $(THROUGH))
 
 reproduce:  ## rebuild backtest, Greeks, C7 and the v2 calibrations in a scratch copy; diff vs committed
 	$(DETERMINISM) $(PYTHON) scripts/ci/reproduce.py --out $(OUT) $(if $(STATUS),--status $(STATUS))

@@ -1,0 +1,1438 @@
+{
+ "schema_version": 1,
+ "about": "Every figure README.md quotes, and the validation pack's and DATA_SOURCES.md's figures that range over the sessions, as printed, with the artifacts each was computed from. Written by scripts/readme_results.py; joint_vol_calibration/tests/test_readme.py checks the documents against it and it against data_store.",
+ "generated": {
+  "date": "2026-10-30",
+  "commit": "dbc2ad19dd94a45cbbeef3ce8c6f9f4b631434f4",
+  "command": "make readme-results"
+ },
+ "params": {
+  "sessions_through": "2026-10-26",
+  "data_through": "2026-10-19"
+ },
+ "sessions": [
+  "2026-03-24",
+  "2026-03-27",
+  "2026-05-29",
+  "2026-06-18",
+  "2026-10-16",
+  "2026-10-26"
+ ],
+ "artifacts": {
+  "data_store/backtest/beta_sensitivity.csv": {
+   "sha256": "d6924f0e020211c3a912d2c49a0375b4e2ce0d50ffa150705ffcda08f3a2c87e",
+   "report_version": null
+  },
+  "data_store/backtest/full_results.parquet": {
+   "sha256": "88ebceec7302fe6ec4261c0409ce83b921048cecb5a49bc5185f465755ff32a1",
+   "report_version": null
+  },
+  "data_store/backtest/full_results.pkl": {
+   "sha256": "5525ce400e9825b359e3c5313a94e8f97662cdf911a45464a0c828309267600b",
+   "report_version": null
+  },
+  "data_store/backtest/inference/benchmarks.json": {
+   "sha256": "776b503a827e55b1d564cbe341e49adf8335cfaa34e14f85780356ec385dd412",
+   "report_version": null
+  },
+  "data_store/backtest/inference/summary.json": {
+   "sha256": "033b637ef02d0a2a4c98a50aaca90ced2032d0e568af5909c42bf58cc96ff627",
+   "report_version": null
+  },
+  "data_store/benchmarks/manifest.json": {
+   "sha256": "c6acae7802f4a171cadf9fe029a128bc78a5bbebb2646bd25cd1c60729a07a02",
+   "report_version": null
+  },
+  "data_store/calibrations/diagnostics/summary.json#session=2026-03-24": {
+   "sha256": "5a77ec377a519ed68bd56fa48dbe536b059b1b5684a21fc2719a622a158be76f",
+   "report_version": null
+  },
+  "data_store/calibrations/diagnostics/summary.json#session=2026-03-27": {
+   "sha256": "e45f5fe7a39dc566c2af5f19a5324ab1a3f56d41387f5915dccbb2efe9c2f0c8",
+   "report_version": null
+  },
+  "data_store/calibrations/diagnostics/summary.json#session=2026-05-29": {
+   "sha256": "87c7f9478d3037901272ca19171687eb3a5b0d7576fcd380bb12fb017087b69d",
+   "report_version": null
+  },
+  "data_store/calibrations/diagnostics/summary.json#session=2026-06-18": {
+   "sha256": "059bd097a0818774fadb8a79f4133d04b76091882c6e4d359f356ba850cc66c1",
+   "report_version": null
+  },
+  "data_store/calibrations/diagnostics/summary.json#session=2026-10-16": {
+   "sha256": "e930df59a6cd4c6768d5e64b04b7d249dab492d06b0748bfe74794eeaa69eb38",
+   "report_version": null
+  },
+  "data_store/calibrations/diagnostics/summary.json#session=2026-10-26": {
+   "sha256": "759ead45089cff2af91dd35d40ecb86d454a9d7839576e4ed1e65a6c249591dc",
+   "report_version": null
+  },
+  "data_store/calibrations/joint_cal_2026-03-24.pkl": {
+   "sha256": "ca0703852e7cc0ad7a32fc735df83c3fca5d36cae50516c6f773885fe65b4e7f",
+   "report_version": null
+  },
+  "data_store/calibrations/joint_cal_2026-03-27.pkl": {
+   "sha256": "92922992289d52d14ecfdb9d09f2759a508143e715dfffd18655bd2801a71ec6",
+   "report_version": null
+  },
+  "data_store/calibrations/joint_cal_2026-05-29.pkl": {
+   "sha256": "a7d332ea3cc2a5ccf6609f4b87d8ac6ba2251bfb33d366baa2c009a6d0032d95",
+   "report_version": null
+  },
+  "data_store/calibrations/joint_cal_2026-06-18.pkl": {
+   "sha256": "2509e6bfcdde6dc10c72e098c61a456d8d01775d2f4e419d6428bef773b6152b",
+   "report_version": null
+  },
+  "data_store/calibrations/joint_cal_2026-10-16.pkl": {
+   "sha256": "7b51506e1027d49fea6f2a0b6c024346d74fdf0384902ab9783f2743a13eed8a",
+   "report_version": null
+  },
+  "data_store/calibrations/joint_cal_2026-10-26.pkl": {
+   "sha256": "eb9d276ac8e099bf6d251120e7faf72c9a4747a3c43331003a94ae4be76be06d",
+   "report_version": null
+  },
+  "data_store/calibrations/quintic_cal_2026-03-24.pkl": {
+   "sha256": "901d453efb225587447a12674096b4ff42ee39423b81f2c9b0c2e94d9e8a5fbf",
+   "report_version": null
+  },
+  "data_store/forward#first ledger": {
+   "sha256": "b276af09e6827fa8b1dc69d1546e581bce69b6ea8f8468ded102b32bb9c764a8",
+   "report_version": null
+  },
+  "data_store/market/rates_daily#date<=2026-10-19": {
+   "sha256": "4e6ac4275b649d1fcfebc9cce53631dbae62f652bc2ace3c2e7b6f1a46c701c8",
+   "report_version": null
+  },
+  "data_store/market/spx_ohlcv#date<=2026-10-19": {
+   "sha256": "014b1e5c1869f1b60fbfb3cdc79df6c439e72af876c67f836913962b4bbd5165",
+   "report_version": null
+  },
+  "data_store/market/tbill_rates#date<=2026-10-19": {
+   "sha256": "1fda78df4fcd20feeac841ceaa5b18382f75c17bfe34ecd07e56ee9eee8720fe",
+   "report_version": null
+  },
+  "data_store/market/vix_daily#date<=2026-10-19": {
+   "sha256": "dd6ddb0b77b09d21b70facabddfc1bac925714a65c6da63c871d582de5c478ba",
+   "report_version": null
+  },
+  "data_store/market/vix_futures_daily#date<=2026-10-19": {
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "report_version": null
+  },
+  "data_store/market/vix_term_structure#date<=2026-10-19": {
+   "sha256": "c8e3d85f8fb2a3bacbe78ce86f4be4a7e4c0d30c45218dfaf94cdf0cad9f9e38",
+   "report_version": null
+  },
+  "data_store/options/cboe#first captures": {
+   "sha256": "b3c276007720fc048ff935702f88ddc9103637304012c41e88a07493f578b44a",
+   "report_version": null
+  },
+  "data_store/options/spx_2026-03-24.parquet": {
+   "sha256": "44622e4a5a4cdba05daaf4ad5aae28e73905cca997f3ade981fdf1e21806c29d",
+   "report_version": null
+  },
+  "data_store/options/spx_2026-03-27.parquet": {
+   "sha256": "5f1ebfb5735e3f283e76478d98c4b8330c923847bee3bb33bb3ae529651ab6bc",
+   "report_version": null
+  },
+  "data_store/options/spx_2026-05-29.parquet": {
+   "sha256": "f045f42b59a5db9b63eac82cd9080a3f6bd011f852ff70086057ac2ad87007b6",
+   "report_version": null
+  },
+  "data_store/options/spx_2026-06-18.parquet": {
+   "sha256": "fe61b01f1dcfad25c05012269848374238bd20f114e9716792cbcc32e49e303c",
+   "report_version": null
+  },
+  "data_store/options/spx_2026-10-16.parquet": {
+   "sha256": "4917eefa6a24bbb9cb144a147b9507f5e606b05f5e289a3556c4c49c269229ff",
+   "report_version": null
+  },
+  "data_store/options/vix_2026-03-24.parquet": {
+   "sha256": "4a70cdad53edf15889ba60adcf14aecfa02ac5caa1c40b423e3aaeea05179507",
+   "report_version": null
+  },
+  "data_store/options/vix_2026-03-27.parquet": {
+   "sha256": "8ba54064f4c539f20b9e5e3d4d5cc2f78c836fa910e6996dc781943f16313812",
+   "report_version": null
+  },
+  "data_store/options/vix_2026-05-29.parquet": {
+   "sha256": "a092a566b299709a81cc580556dbe5c87431f8c7acd293f0e0df23424048f7fb",
+   "report_version": null
+  },
+  "data_store/options/vix_2026-06-18.parquet": {
+   "sha256": "c29851b6bd9a0dd7cb8a5966c152e244982f21bba2c45be7c0bf71d72e5c61b8",
+   "report_version": null
+  },
+  "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26": {
+   "sha256": "1dbce6db7e4742b4c7af2bd0085a246f63621e870a9461b11603a267b725d5ed",
+   "report_version": null
+  },
+  "data_store/surface/2026-03-24/scorecard.json": {
+   "sha256": "aee8105179d008cf700e940f259ed09a6654959fbf8d5e0f0bdac7fa7d1b48fa",
+   "report_version": 1
+  },
+  "data_store/surface/2026-03-24/surface.json": {
+   "sha256": "f5fa7c32c713a57f29dc69ddea47cceb2960ebbdc85f8a312860a5e79b160231",
+   "report_version": 1
+  },
+  "data_store/surface/2026-03-27/scorecard.json": {
+   "sha256": "2ef3d507a14c1cc6a3f234a1337539d1987f350af81f87614033226f0fa29c7e",
+   "report_version": 1
+  },
+  "data_store/surface/2026-03-27/surface.json": {
+   "sha256": "72cc13a5f62bfcb7ae3001042771aa805c648de823c9399996a953e1d8033e6a",
+   "report_version": 1
+  },
+  "data_store/surface/2026-05-29/scorecard.json": {
+   "sha256": "d68b4cc85478da24c5f9061bd79b656ba27d1e429f0e6b5ec6905f534ddd3d8d",
+   "report_version": 1
+  },
+  "data_store/surface/2026-05-29/surface.json": {
+   "sha256": "7801abd28eb5bc29f112047a6304cc500df771a6ff52182a330c654dcde6fd9f",
+   "report_version": 1
+  },
+  "data_store/surface/2026-06-18/scorecard.json": {
+   "sha256": "046190363520644f08907a99e2a10935bea04091077da5a3dadb2fb1d7b29cbd",
+   "report_version": 1
+  },
+  "data_store/surface/2026-06-18/surface.json": {
+   "sha256": "e137986c970b921f859df7b327255c22b183894e8989dca3cc0fefa05b661515",
+   "report_version": 1
+  },
+  "data_store/surface/2026-10-16/scorecard.json": {
+   "sha256": "d47f88be4a593578ccd0f4222967c0ee9bbb2493c95826d607e0bb14ff7272b5",
+   "report_version": 1
+  },
+  "data_store/surface/2026-10-16/surface.json": {
+   "sha256": "7a4c84814d18a1a9a6484e9b9d1142ba4d6080819e2775634db2d48d6c3cf328",
+   "report_version": 1
+  },
+  "data_store/surface/2026-10-26/scorecard.json": {
+   "sha256": "4afc4062103e5d2ec23b0a2426a19a17ea62ba742ab044cf8e36acb1a4ac0044",
+   "report_version": 1
+  },
+  "data_store/surface/2026-10-26/surface.json": {
+   "sha256": "7c2609c415dd5ad71d903fa4cf10615163978a385a5a570e3ab2b8cc718b83fe",
+   "report_version": 1
+  },
+  "data_store/surface/2026-10-26/vix_replication.json": {
+   "sha256": "2ff45306e00dc5c7bcea0b68a01bbd7e104c9b3a8b39aed89f8f12d44b62e140",
+   "report_version": 1
+  },
+  "data_store/surface/index.json#session=2026-03-24": {
+   "sha256": "30cd2352f7b249156cf228d54a55cd507a238ee7a9595da021beb2456b0efaf4",
+   "report_version": 1
+  },
+  "data_store/surface/index.json#session=2026-03-27": {
+   "sha256": "c791e8d781005cb534154513ba87ef5cd7526bac0fb8be46828b3b5fe54136aa",
+   "report_version": 1
+  },
+  "data_store/surface/index.json#session=2026-05-29": {
+   "sha256": "76437e7c817a38d55ef7f59882e13a70adbe17d71117beef46ad681e60dbc27f",
+   "report_version": 1
+  },
+  "data_store/surface/index.json#session=2026-06-18": {
+   "sha256": "2606917df29e41c9c6de8dcf53258563e263df0a751dd8a99d1c16d473454e68",
+   "report_version": 1
+  },
+  "data_store/surface/index.json#session=2026-10-16": {
+   "sha256": "ee18e254d3c5150ba6fb408ea80a17420e3e35bc750dfab6e3b3988f647adbf8",
+   "report_version": 1
+  },
+  "data_store/surface/index.json#session=2026-10-26": {
+   "sha256": "8338a0b8edcf4d5aa2d598a39cfd10c339a85821d15ad956fa623fdd1653eed0",
+   "report_version": 1
+  },
+  "data_store/vol_system.db": {
+   "sha256": "1a46f01e99bbcd36a704e626dbbdf15e43c9b22cd09d1063407c343a3c5d5d45",
+   "report_version": null
+  },
+  "data_store/vol_system.db#vix_futures_daily dated on or before 2026-10-19": {
+   "sha256": "2975d26ea18c3c518286d35da521ccfbcb20cd63f140fd2410c06b3c28dafe8c",
+   "report_version": null
+  },
+  "data_store/vol_system.db#vix_futures_settlements settled on or before 2026-10-19": {
+   "sha256": "a1af1cc06a217e629cb733e00802e4f7730fda5a93449d757ad4ba3d95d6eb3d",
+   "report_version": null
+  }
+ },
+ "claims": [
+  {
+   "id": "span/results",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "ranges over the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26, not confidence intervals",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "records/cboe_books_from/first_screen",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "Cboe's timestamped books are stored from 2026-10-20",
+   "sources": [
+    "data_store/options/cboe#first captures"
+   ]
+  },
+  {
+   "id": "records/cboe_books_from/limitations",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "Cboe's timestamped books are stored from 2026-10-20",
+   "sources": [
+    "data_store/options/cboe#first captures"
+   ]
+  },
+  {
+   "id": "records/vix_options_leg",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "VIX options are a research leg, not in the fit",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "records/ledger/first_screen",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "the forward ledger at executable prices starts on 2026-10-26",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "records/ledger/backtest",
+   "doc": "README.md",
+   "text": "Its first entry is 2026-10-26",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "records/ledger/data_sources",
+   "doc": "DATA_SOURCES.md",
+   "text": "first entry 2026-10-26",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "records/ledger/no_entry/README.md",
+   "doc": "README.md",
+   "absent": true,
+   "text": "no entry yet",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "records/ledger/no_entry/DATA_SOURCES.md",
+   "doc": "DATA_SOURCES.md",
+   "absent": true,
+   "text": "no entry yet",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "result_1/median",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "**0.45–1.98 half-spreads**",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "result_1/inside",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "31.0–80.0% inside the bid–ask",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "result_1/last",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "(2026-10-26: 1.60, 31.0% inside)",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "result_1/certified",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "A certified arbitrage-free, calendar-ordered SVI surface",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/scorecard.json",
+    "data_store/surface/2026-10-26/surface.json"
+   ]
+  },
+  {
+   "id": "result_1/common_out_of_sample",
+   "doc": "README.md",
+   "text": "On the 1,473–3,695 quotes per session that no model was fitted to (`data_store/surface/<session>/scorecard.json`, `metrics.common_out_of_sample`), Heston's median |model − mid| is 4.4–15.6 half-spreads against 0.45–1.98 for the certified arbitrage-free SVI surface",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/scorecard.json",
+    "data_store/surface/2026-10-26/surface.json"
+   ]
+  },
+  {
+   "id": "result_2/anchors",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "fitted to 46–53 SPX anchors and the four Cboe VIX indices",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "result_2/heston",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "misses held-out quotes by **1.28–2.96 vol pts** RMSE",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "result_2/last",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "(2026-10-26: 1.72 on 3,049 quotes, no parameter on a bound)",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "result_2/sigma_cap",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "σ sits on its 2.0 cap in 2 of the 6 fits (2026-03-24, 2026-10-16)",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "result_2/rough",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "Rough Heston: **1.09–1.83**",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "result_2/verdict",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "lower on 4 of 6 sessions, H = ½ (Heston) on 2",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "result_3/sharpe",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "Portfolio Sharpe **−0.99**",
+   "sources": [
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "result_3/interval",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "95% CI **−1.81 to −0.30**",
+   "sources": [
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "result_3/spa",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "(Hansen SPA p 0.65)",
+   "sources": [
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "result_3/s3_timing",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "S3's entry timing has p 0.078",
+   "sources": [
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "result_3/s3_shifts",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "against 3,550 exposure-matched circular shifts (Holm over six series 0.47)",
+   "sources": [
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/portfolio",
+   "doc": "README.md",
+   "text": "| Portfolio (S1C + S3 + S4) | −$222,177 | −0.99 | −1.81 to −0.30 | 206 |",
+   "sources": [
+    "data_store/backtest/full_results.pkl",
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/s1c",
+   "doc": "README.md",
+   "text": "| S1C contrarian PDV | −$453,845 | −0.69 | −1.52 to −0.05 | 121 |",
+   "sources": [
+    "data_store/backtest/full_results.pkl",
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/s3",
+   "doc": "README.md",
+   "text": "| S3 dispersion, index leg | +$61,047 | 0.19 | −0.40 to 0.87 | 39 |",
+   "sources": [
+    "data_store/backtest/full_results.pkl",
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/s4",
+   "doc": "README.md",
+   "text": "| S4 volatility risk premium | −$273,733 | −0.79 | −1.42 to −0.18 | 46 |",
+   "sources": [
+    "data_store/backtest/full_results.pkl",
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/s1",
+   "doc": "README.md",
+   "text": "| S1 PDV short-VRP (reference) | −$306,779 | −0.17 | −0.70 to 0.47 | 69 |",
+   "sources": [
+    "data_store/backtest/full_results.pkl",
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/s2",
+   "doc": "README.md",
+   "text": "| S2 VIX term structure (reference) | −$148,436 | −0.38 | −0.86 to 0.27 | 44 |",
+   "sources": [
+    "data_store/backtest/full_results.pkl",
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "backtest_table/nav",
+   "doc": "README.md",
+   "text": "NAV $777,823 (−22.2%)",
+   "sources": [
+    "data_store/backtest/full_results.pkl"
+   ]
+  },
+  {
+   "id": "backtest_table/cash",
+   "doc": "README.md",
+   "text": "T-bills earned 19.1%",
+   "sources": [
+    "data_store/backtest/full_results.pkl"
+   ]
+  },
+  {
+   "id": "backtest_table/beta_grid",
+   "doc": "README.md",
+   "text": "moves S1 from +$2,509,627 at β = 1.00 to −$554,935 at β = 0.78, and the portfolio is negative at every β from 0.78 to 1.00",
+   "sources": [
+    "data_store/backtest/beta_sensitivity.csv"
+   ]
+  },
+  {
+   "id": "backtest_table/implied_beta",
+   "doc": "README.md",
+   "text": "implies β = 0.80 for both",
+   "sources": [
+    "data_store/backtest/inference/benchmarks.json"
+   ]
+  },
+  {
+   "id": "backtest_prose/window",
+   "doc": "README.md",
+   "text": "2018-01-02 → 2025-03-24 (1,816 sessions)",
+   "sources": [
+    "data_store/backtest/full_results.parquet"
+   ]
+  },
+  {
+   "id": "backtest_prose/first_screen",
+   "doc": "README.md",
+   "within": "first screen",
+   "text": "Backtest, 2018-01-02 → 2025-03-24, straddles marked at β·VIX",
+   "sources": [
+    "data_store/backtest/full_results.parquet"
+   ]
+  },
+  {
+   "id": "backtest_prose/beta",
+   "doc": "README.md",
+   "text": "β = 0.82 estimated from",
+   "sources": []
+  },
+  {
+   "id": "backtest_prose/dsr",
+   "doc": "README.md",
+   "text": "S3's deflated Sharpe ratio is 0.000–0.019 at the ledger's trial counts (N 147–210); it reaches 0.27 only if the search is counted as 4.6 independent trials",
+   "sources": [
+    "data_store/backtest/inference/summary.json"
+   ]
+  },
+  {
+   "id": "data_table/spx_ohlcv",
+   "doc": "README.md",
+   "within": "| SPX OHLCV |",
+   "text": "| 2010-01-04 → 2026-10-19 | 4,224 |",
+   "sources": [
+    "data_store/market/spx_ohlcv#date<=2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/vix_daily",
+   "doc": "README.md",
+   "within": "| VIX daily |",
+   "text": "| 2010-01-04 → 2026-10-19 | 4,224 |",
+   "sources": [
+    "data_store/market/vix_daily#date<=2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/vix_term_structure",
+   "doc": "README.md",
+   "within": "| VIX term structure |",
+   "text": "| 2010-01-04 → 2026-10-19 | 20,867 (2 Yahoo rows) |",
+   "sources": [
+    "data_store/market/vix_term_structure#date<=2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/tbill_rates",
+   "doc": "README.md",
+   "within": "| T-bill rate |",
+   "text": "| 2010-01-04 → 2026-10-19 | 4,222 |",
+   "sources": [
+    "data_store/market/tbill_rates#date<=2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/rates_daily",
+   "doc": "README.md",
+   "within": "| Treasury curve and SOFR |",
+   "text": "| 2010-01-04 → 2026-10-19 | 92,208 (29 series) |",
+   "sources": [
+    "data_store/market/rates_daily#date<=2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/spx_options",
+   "doc": "README.md",
+   "within": "| SPX options |",
+   "text": "| 68,006 |",
+   "sources": [
+    "data_store/options/spx_2026-03-24.parquet",
+    "data_store/options/spx_2026-03-27.parquet",
+    "data_store/options/spx_2026-05-29.parquet",
+    "data_store/options/spx_2026-06-18.parquet",
+    "data_store/options/spx_2026-10-16.parquet"
+   ]
+  },
+  {
+   "id": "data_table/vix_options",
+   "doc": "README.md",
+   "within": "| VIX options |",
+   "text": "| 1,896 |",
+   "sources": [
+    "data_store/options/vix_2026-03-24.parquet",
+    "data_store/options/vix_2026-03-27.parquet",
+    "data_store/options/vix_2026-05-29.parquet",
+    "data_store/options/vix_2026-06-18.parquet"
+   ]
+  },
+  {
+   "id": "data_table/cboe_books",
+   "doc": "README.md",
+   "within": "| SPX and VIX option books (C23) |",
+   "text": "from 2026-10-20 | 28,980 SPX + 1,520 VIX lines (first capture)",
+   "sources": [
+    "data_store/options/cboe#first captures"
+   ]
+  },
+  {
+   "id": "data_table/vx_futures",
+   "doc": "README.md",
+   "within": "| VX futures |",
+   "text": "(174 monthly contracts expiring 2013-01 → 2027-06) | 2013-01-02 → 2026-10-09 | 30,963 |",
+   "sources": [
+    "data_store/market/vix_futures_daily#date<=2026-10-19",
+    "data_store/vol_system.db#vix_futures_daily dated on or before 2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/vx_settlements",
+   "doc": "README.md",
+   "within": "| VX final settlements |",
+   "text": "| 2010-01-20 → 2026-09-16 | 201 |",
+   "sources": [
+    "data_store/vol_system.db#vix_futures_settlements settled on or before 2026-10-19"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "| 2017-01-03 → 2026-10-19 |",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/BFLY",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "BFLY",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/BXM",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "BXM",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/CNDR",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "CNDR",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/PUT",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "PUT",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/SET",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "SET",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/VXTH",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "VXTH",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "data_table/strategy_indices/WPUT",
+   "doc": "README.md",
+   "within": "| Cboe strategy indices |",
+   "text": "WPUT",
+   "sources": [
+    "data_store/benchmarks/manifest.json"
+   ]
+  },
+  {
+   "id": "limitations/beta",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "at one β (0.82) estimated from 2026 chains",
+   "sources": []
+  },
+  {
+   "id": "limitations/later_chain",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "The first later chain (2026-10-16) gives 0.70",
+   "sources": [
+    "data_store/vol_system.db"
+   ]
+  },
+  {
+   "id": "limitations/put_index",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "the Cboe PUT index implies 0.63–0.90 by full year",
+   "sources": [
+    "data_store/backtest/inference/benchmarks.json"
+   ]
+  },
+  {
+   "id": "limitations/loss",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "the portfolio loses 22.2% while T-bills earn 19.1%",
+   "sources": [
+    "data_store/backtest/full_results.pkl"
+   ]
+  },
+  {
+   "id": "limitations/vx_futures",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "misses real VX futures by 1.9–3.2 pts out of sample",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "limitations/sigma_cap",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "σ sits on its 2.0 cap in 2 of the 6 fits to 2026-10-26",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "limitations/vvix",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "the boxed fits price VVIX at 160–211 against a market ^VVIX of 86–133 on all six",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "limitations/quintic",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "The Quintic OU fit that prices VIX options did not converge",
+   "sources": [
+    "data_store/calibrations/quintic_cal_2026-03-24.pkl"
+   ]
+  },
+  {
+   "id": "limitations/quote_quality",
+   "doc": "README.md",
+   "within": "## Known limitations",
+   "text": "The six chains the surfaces are built from are Yahoo end-of-day downloads without a quote time; static arbitrage that is executable at the quoted bid and ask is present on all six",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/surface.json",
+    "data_store/surface/index.json#session=2026-03-24",
+    "data_store/surface/index.json#session=2026-03-27",
+    "data_store/surface/index.json#session=2026-05-29",
+    "data_store/surface/index.json#session=2026-06-18",
+    "data_store/surface/index.json#session=2026-10-16",
+    "data_store/surface/index.json#session=2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/feller",
+   "doc": "README.md",
+   "text": "Feller is violated in all six and imposed in none",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/table_stops",
+   "doc": "README.md",
+   "text": "The table stops at 2026-10-26",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/heston_row/2026-03-24",
+   "doc": "README.md",
+   "text": "| 2026-03-24 | 6.142 | 0.0653 | 2.000\\* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.66 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/joint_cal_2026-03-24.pkl"
+   ]
+  },
+  {
+   "id": "calibration/rough_row/2026-03-24",
+   "doc": "README.md",
+   "text": "| 2026-03-24 | 1.98 | 1.42 | 0.28 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24"
+   ]
+  },
+  {
+   "id": "calibration/heston_row/2026-03-27",
+   "doc": "README.md",
+   "text": "| 2026-03-27 | 4.290 | 0.0733 | 1.834 | −0.785 | 0.0928 | 1.365 / 1.538 | 0.852 | 3.18 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl"
+   ]
+  },
+  {
+   "id": "calibration/rough_row/2026-03-27",
+   "doc": "README.md",
+   "text": "| 2026-03-27 | 1.54 | 1.41 | 0.36 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27"
+   ]
+  },
+  {
+   "id": "calibration/heston_row/2026-05-29",
+   "doc": "README.md",
+   "text": "| 2026-05-29 | 5.233 | 0.0595 | 1.707 | −0.656 | 0.0130 | 0.911 / 1.285 | 0.523 | 2.56 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl"
+   ]
+  },
+  {
+   "id": "calibration/rough_row/2026-05-29",
+   "doc": "README.md",
+   "text": "| 2026-05-29 | 1.28 | 1.28 | 0.50 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29"
+   ]
+  },
+  {
+   "id": "calibration/heston_row/2026-06-18",
+   "doc": "README.md",
+   "text": "| 2026-06-18 | 4.999 | 0.0614 | 1.592 | −0.697 | 0.0173 | 0.855 / 1.833 | 0.510 | 1.85 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl"
+   ]
+  },
+  {
+   "id": "calibration/rough_row/2026-06-18",
+   "doc": "README.md",
+   "text": "| 2026-06-18 | 1.83 | 1.83 | 0.50 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18"
+   ]
+  },
+  {
+   "id": "calibration/heston_row/2026-10-16",
+   "doc": "README.md",
+   "text": "| 2026-10-16 | 4.992 | 0.0499 | 2.000\\* | −0.753 | 0.0344 | 1.336 / 2.955 | 0.823 | n/a† |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl"
+   ]
+  },
+  {
+   "id": "calibration/rough_row/2026-10-16",
+   "doc": "README.md",
+   "text": "| 2026-10-16 | 2.96 | 1.09 | 0.02 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16"
+   ]
+  },
+  {
+   "id": "calibration/heston_row/2026-10-26",
+   "doc": "README.md",
+   "text": "| 2026-10-26 | 4.370 | 0.0550 | 1.833 | −0.691 | 0.0276 | 1.105 / 1.723 | 0.624 | n/a† |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl"
+   ]
+  },
+  {
+   "id": "calibration/rough_row/2026-10-26",
+   "doc": "README.md",
+   "text": "| 2026-10-26 | 1.72 | 1.42 | 0.37 |",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/free_sigma",
+   "doc": "README.md",
+   "text": "gives σ 6.90, κ 27.4, a loss 27.7% lower and an out-of-sample RMSE of 1.19 instead of 2.96",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16"
+   ]
+  },
+  {
+   "id": "calibration/box_cost",
+   "doc": "README.md",
+   "text": "on 2026-03-24 the box costs 2.1% of the loss",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/vvix",
+   "doc": "README.md",
+   "text": "model's VVIX is 160–211 against a market ^VVIX of 86–133",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/condition",
+   "doc": "README.md",
+   "text": "cond(JᵀJ) of the relative-sensitivity Jacobian is 150–345 over the six sessions",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/kappa_se",
+   "doc": "README.md",
+   "text": "standard error is 12–30% of κ",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/one_basin",
+   "doc": "README.md",
+   "text": "finds one basin on every session",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/de_optima",
+   "doc": "README.md",
+   "text": "reaches the five stored differential-evolution optima to a relative loss of at most 3.6e-7 (slightly below them) in 1.7–2.1 s, against 19.8–28.3 s",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/rough_lower",
+   "doc": "README.md",
+   "text": "error on 4 of 6 sessions and returns H = ½ (Heston) on the other two",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "calibration/vix_gap",
+   "doc": "README.md",
+   "text": "within 0.09–0.78 index points of the official close",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/index.json#session=2026-03-24",
+    "data_store/surface/index.json#session=2026-03-27",
+    "data_store/surface/index.json#session=2026-05-29",
+    "data_store/surface/index.json#session=2026-06-18",
+    "data_store/surface/index.json#session=2026-10-16",
+    "data_store/surface/index.json#session=2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/span",
+   "doc": "docs/model_validation/README.md",
+   "text": "the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/sigma_cap",
+   "doc": "docs/model_validation/README.md",
+   "text": "σ on its 2.0 box ceiling in 2 of the 6 fits to 2026-10-26 (2026-03-24, 2026-10-16); Feller violated in all 6",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/rough_half",
+   "doc": "docs/model_validation/README.md",
+   "text": "½ on 2 of the 6 sessions to 2026-10-26",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/ledger",
+   "doc": "docs/model_validation/README.md",
+   "text": "first entry 2026-10-26, not yet evidence",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "pack/ledger/m18",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M18 | Forward test",
+   "text": "first entry 2026-10-26 (`data_store/forward/`)",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "pack/ledger/no_entry",
+   "doc": "docs/model_validation/README.md",
+   "absent": true,
+   "text": "no entry",
+   "sources": [
+    "data_store/forward#first ledger"
+   ]
+  },
+  {
+   "id": "pack/condition",
+   "doc": "docs/model_validation/README.md",
+   "text": "cond(JᵀJ) of the relative-sensitivity Jacobian is 150–345 over the six sessions to 2026-10-26",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/standard_errors",
+   "doc": "docs/model_validation/README.md",
+   "text": "κ 12–30%, θ 3–9%, ρ 2–4%, v₀ 2–6%",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/gauss_newton",
+   "doc": "docs/model_validation/README.md",
+   "text": "Gauss–Newton errors of 12–30% on κ",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/common_quotes",
+   "doc": "docs/model_validation/README.md",
+   "text": "3,440 / 2,746 / 3,369 / 3,695 / 1,473 / 1,545 quotes, 2026-03-24 → 2026-10-26",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "pack/vix_departures",
+   "doc": "docs/model_validation/README.md",
+   "text": "on 2026-10-26, 6 deviations from Cboe's rules and 6 notes on the gap",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-10-26/vix_replication.json"
+   ]
+  },
+  {
+   "id": "pack/m4_oos",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M4 | Out-of-sample SPX IV RMSE",
+   "text": "| 1.98 / 1.54 / 1.28 / 1.83 / 2.96 / 1.72 vp for 2026-03-24 / 03-27 / 05-29 / 06-18 / 10-16 / 10-26 (",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/m4_oos/sessions",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M4 | Out-of-sample SPX IV RMSE",
+   "text": ", six v2 sessions |",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/m4_half_spreads",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M4 | Error in",
+   "text": "4.4–15.6 half-spreads; 3.0–12.3% inside, six sessions",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "pack/m14_certified",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M14 | The certified",
+   "text": "median 0.45–1.98 half-spreads; 31–80% inside the bid/ask, six sessions (2026-10-26: 1.60, 31.0%)",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/scorecard.json",
+    "data_store/surface/2026-10-26/surface.json"
+   ]
+  },
+  {
+   "id": "pack/m14_common",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M14 | The certified",
+   "text": "on the common held-out quotes 0.45–1.98 against Heston's 4.4–15.6",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "pack/m14_arbitrage",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M14 | Static arbitrage",
+   "text": "executable at the bid/ask on all 6 sessions; 114–629 quotes per session",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/surface.json"
+   ]
+  },
+  {
+   "id": "pack/m14_vix",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M14 | VIX replicated",
+   "text": "| 26.66 / 30.27 / 15.02 / 16.49 / 19.70 / 18.05 against 26.95 / 31.05 / 15.32 / 16.40 / 19.99 / 18.39 (",
+   "sources": [
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface/index.json#session=2026-03-24",
+    "data_store/surface/index.json#session=2026-03-27",
+    "data_store/surface/index.json#session=2026-05-29",
+    "data_store/surface/index.json#session=2026-06-18",
+    "data_store/surface/index.json#session=2026-10-16",
+    "data_store/surface/index.json#session=2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/m4_m15_rough",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M4, M15 | Rough Heston",
+   "text": "rough lower on 4 of 6 sessions (1.42 vs 1.98, 1.41 vs 1.54, 1.09 vs 2.96, 1.42 vs 1.72 vp); H = ½, identical, on 2",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+   ]
+  }
+ ]
+}
