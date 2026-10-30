@@ -56,6 +56,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -135,6 +136,23 @@ def gate_tests(workflow: Path) -> dict:
             raise SystemExit(f"{workflow}: no step {name!r}")
         out[name] = re.findall(r"\btest_\w+\.py\b", m.group(1))
     return out
+
+
+def replayed_capture(cboe, und: str, frame, meta: dict, session: str, now):
+    """A committed Cboe book replayed as ``session``'s capture, fetched at ``now``
+    (tz-aware): the delayed feed's quotes are 15 minutes old, and the book state is
+    what cboe.book_state_at gives for them, the rule test_cboe_downloader checks on
+    every committed capture. The replay had typed 'gth', which is wrong on a Friday
+    evening: that is the closing book, since Monday's GTH opens on Sunday evening."""
+    quoted = now - timedelta(minutes=15)
+    qt = quoted.strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return cboe.ChainCapture(
+        underlying=und, frame=frame.assign(snapshot_date=session, quote_time=qt), session=session,
+        quote_time=qt, book_state=cboe.book_state_at(quoted, session), fetched_at=stamp,
+        payload_timestamp=stamp, underlying_last_trade_time=None,
+        underlying_price=float(meta["underlying_price"]), url=meta["url"], sha256=meta["sha256"],
+        n_bytes=int(meta["n_bytes"]))
 
 
 def copy_checkout(src: Path, dst: Path) -> None:
@@ -288,15 +306,7 @@ def drive(status_file: Path) -> int:
         if und not in replay:
             raise OSError(f"no committed {und} capture to replay")
         frame, meta = replay[und]
-        frame = frame.assign(snapshot_date=session)
-        qt = (now - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        frame["quote_time"] = qt
-        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        return cboe.ChainCapture(
-            underlying=und, frame=frame, session=session, quote_time=qt, book_state="gth",
-            fetched_at=stamp, payload_timestamp=stamp,
-            underlying_last_trade_time=None, underlying_price=float(meta["underlying_price"]),
-            url=meta["url"], sha256=meta["sha256"], n_bytes=int(meta["n_bytes"]))
+        return replayed_capture(cboe, und, frame, meta, session, now)
     _patch(cboe, capture_option_chain=capture)
 
     r = float(cal.get("r_reference") or 0.04)
