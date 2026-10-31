@@ -1600,9 +1600,13 @@
           b.textContent = 'WebGL unavailable: the 2D heatmap is the full view'; b.disabled = true; return;
         }
         b.disabled = true; b.textContent = 'Loading 3D view\u2026';
+        var fail = function () { b.textContent = '3D view failed to load: the 2D heatmap is the full view'; };
+        // the points: the session's data file (Surface), or the spec's own (a model grid)
+        var pts = spec.src ? Desk.data(spec.src, spec.integrity, spec.session).then(function (j) { return j.surface3d.points; }) : Promise.resolve(spec.points);
         var s = doc.createElement('script');
         s.src = b.getAttribute('data-src'); s.integrity = b.getAttribute('data-sri'); s.crossOrigin = 'anonymous';
-        s.onload = function () {
+        Promise.all([pts, new Promise(function (ok, no) { s.onload = ok; s.onerror = no; })]).then(function (r) {
+          var points = r[0];
           target.hidden = false;
           var T = theme(false);
           var inst = window.echarts.init(target, null, { renderer: 'canvas' });
@@ -1614,12 +1618,11 @@
             visualMap: { show: true, min: spec.zmin, max: spec.zmax, dimension: 2, right: 6, top: 10, itemHeight: 120, calculable: false, textStyle: { color: T.text2, fontFamily: T.mono, fontSize: 10 }, inRange: { color: stops } },
             grid3D: { viewControl: { projection: 'orthographic', alpha: 22, beta: 38, autoRotate: false, distance: 220 }, boxWidth: 120, boxDepth: 90, boxHeight: 60, environment: 'none', light: { main: { intensity: 1.1 }, ambient: { intensity: 0.45 } } },
             xAxis3D: Object.assign(ax('ln(K/F)'), { type: 'value' }), yAxis3D: Object.assign(ax('T (days)'), { type: 'value', min: 0 }), zAxis3D: Object.assign(ax('IV %'), { type: 'value', min: 0 }),
-            series: [{ type: 'surface', data: spec.points.map(function (q) { return [q[0], q[1], q[2] === null ? '-' : q[2]]; }), shading: 'color', wireframe: { show: true, lineStyle: { color: 'rgba(229,232,235,0.18)', width: 1 } }, itemStyle: { opacity: 0.94 } }],
+            series: [{ type: 'surface', data: points.map(function (q) { return [q[0], q[1], q[2] === null ? '-' : q[2]]; }), shading: 'color', wireframe: { show: true, lineStyle: { color: 'rgba(229,232,235,0.18)', width: 1 } }, itemStyle: { opacity: 0.94 } }],
           });
           Desk.charts[target.id] = { el: target, chart: inst, spec: spec };
           b.textContent = '3D view loaded (drag to rotate)';
-        };
-        s.onerror = function () { b.textContent = '3D view failed to load: the 2D heatmap is the full view'; };
+        }, fail);
         doc.body.appendChild(s);
       });
     });

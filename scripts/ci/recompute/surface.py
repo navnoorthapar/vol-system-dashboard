@@ -1149,7 +1149,8 @@ def iv_heat(a: Audit, c: Ctx) -> None:
 def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
     """The 3D view: one point per expiry and bucket at the bucket's midpoint (an open
     wing at its quotes' median k), the expiry's T_days and the cell's median mid IV;
-    shown from 9 filled cells."""
+    shown from 9 filled cells. Its points are in the session's data file (D2), read
+    and verified (Audit.data_file); the spec holds the colour scale."""
     sp = spec(a, "surface3d-spec")
     qb = c.mkt.assign(kb=M.bucket(c.mkt["k"]))
     x3 = {b: ((M.K_EDGES[b - 1] + M.K_EDGES[b]) / 2 if 0 < b < M.N_BUCKETS - 1 else
@@ -1163,7 +1164,11 @@ def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
             sum(1 for p in pts if p[2] is not None) >= 9)
     if sp is None:
         return
-    got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3 for p in sp.get("points") or []]
+    a.equal(P_IV, "3D view: points in the session data file, not the page",
+            ["points" in sp, sp.get("session")], [False, c.session])
+    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity")) or {}
+    got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3
+           for p in (book.get("surface3d") or {}).get("points") or []]
     if same_len(a, P_IV, "3D view points", got, pts):
         for i, (what, dec) in enumerate((("bucket x (4 decimals)", 4), ("T_days", None),
                                          ("median mid IV % (3 decimals)", 3))):

@@ -419,6 +419,24 @@ def with_unit(text: Any, unit: str) -> str:
 
 app.jinja_env.filters["u"] = with_unit
 
+# A chart spec's fields the page renders as HTML from it (the chart's aria-label,
+# its description, legend bar and data table) and desk.js never reads: left out of
+# its JSON (D2: 209 KB of a 45-expiry Surface page, 51 KB of Research's)
+SPEC_HTML_FIELDS = ("table", "describe", "legend_items", "title")
+
+
+def spec_json(spec: Any) -> Any:
+    """A chart spec as the page's JSON block: compact, UTF-8, keys sorted, HTML-safe
+    (<, >, & and ' as JSON escapes, as Flask's tojson), without SPEC_HTML_FIELDS."""
+    from jinja2.utils import htmlsafe_json_dumps
+
+    if isinstance(spec, dict):
+        spec = {k: v for k, v in spec.items() if k not in SPEC_HTML_FIELDS}
+    return htmlsafe_json_dumps(spec, dumps=app.json.dumps, separators=(",", ":"), ensure_ascii=False)
+
+
+app.jinja_env.filters["spec_json"] = spec_json
+
 
 _GREEK = re.compile(r"([\u0370-\u03ff\u1f00-\u1fff]+)")
 
@@ -6379,6 +6397,15 @@ def surface_extras(d: dict, surf: dict) -> None:
             f"{e} ({_fmt(exps[e], '.0f')} days): median implied vol (%) by ln(K/F) bucket",
             ["ln(K/F)", "Quotes#", "Bid#", "Mid#", "Ask#"] + [model_short(m) + "#" for m in overlay],
             rows_e)})
+    # the session's data file: every expiry's packed quotes and the 3D view's points
+    # (its spec keeps the colour scale), fetched once the smile is drawn or the 3D
+    # view is asked for
+    file_: dict = {"quotes": {"order": list(qblock), "groups": qblock}}
+    if d.get("surface3d"):
+        file_["surface3d"] = {"points": d["surface3d"].pop("points")}
+    book = publish_json("surface", session, file_)
+    if d.get("surface3d"):
+        d["surface3d"].update(book, session=session)
     hs_by_exp = mkt.groupby("expiry")["half_spread_vp"].median()
     f_by_exp = mkt.groupby("expiry")["forward"].first()
     # one row per expiry; the status line under the tabs is its selected row
@@ -6407,8 +6434,7 @@ def surface_extras(d: dict, surf: dict) -> None:
         table=slice_tbl,
         quotes={**smile_quotes_meta({e: g for e, g in qblock.items() if e == d["default_exp"]}, overlay,
                                     hkey if n_anchor else None, surf.get("surface") or {}),
-                "template": True, "order": list(qblock), "session": session,
-                **publish_json("surface", session, {"quotes": {"order": list(qblock), "groups": qblock}})})
+                "template": True, "order": list(qblock), "session": session, **book})
 
     # out-of-sample median |model − mid| by expiry, one line per model, on the
     # same quotes as the scorecard beside it (the scorecard's by_expiry rows mix

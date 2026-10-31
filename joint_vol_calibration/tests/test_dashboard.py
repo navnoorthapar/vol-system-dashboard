@@ -72,6 +72,7 @@ def dash():
     the committed record as the daily job and freeze_site do (app.record_db), not
     the checkout's cache, which the job never commits."""
     mod = _load("dashboard_app_under_test", "dashboard/app.py")
+    _record_html_fields(mod)
     with mod.record_db():
         _ACTIVE_APP.append(mod)
         try:
@@ -81,6 +82,41 @@ def dash():
 
 
 _ACTIVE_APP: list = []
+
+# C5 (D2): a chart's JSON block leaves out the fields its page renders as HTML from
+# the spec (app.SPEC_HTML_FIELDS: its aria-label, description, legend bar and data
+# table). The tests that read them read the spec the server rendered them from,
+# recorded here by the dash fixture under the sha256 of the JSON block it wrote, with
+# the description it renders (two renders can write one JSON block and differ in a
+# description: Research's VRP bars name a session count their data does not hold).
+# test_each_chart_renders_its_html_fields_from_its_spec ties the two together.
+_HTML_FIELDS: dict[str, list[tuple[str, dict]]] = {}
+
+
+def _record_html_fields(mod) -> None:
+    from markupsafe import escape
+
+    write = mod.app.jinja_env.filters.get("spec_json")
+    if write is None:                     # an app before C5: its JSON blocks hold every field
+        return
+
+    def recorded(spec):
+        out = write(spec)
+        if isinstance(spec, dict):
+            seen = _HTML_FIELDS.setdefault(hashlib.sha256(str(out).encode()).hexdigest(), [])
+            desc = f'-desc">{escape(mod.subs_text(spec.get("describe")))}</p>'
+            fields = {k: spec[k] for k in mod.SPEC_HTML_FIELDS if k in spec}
+            if (desc, fields) not in seen:
+                seen.append((desc, fields))
+        return out
+    mod.app.jinja_env.filters["spec_json"] = recorded
+
+
+def _html_fields(html: str, cid: str, block: str) -> dict:
+    """The HTML-rendered fields of the chart whose JSON block is ``block`` on ``html``:
+    the latest render of that block whose description the page carries."""
+    seen = _HTML_FIELDS.get(hashlib.sha256(block.encode()).hexdigest(), [])
+    return next((f for desc, f in reversed(seen) if f'id="{cid}{desc}' in html), seen[-1][1] if seen else {})
 
 
 def _market_db() -> Path:
@@ -1331,8 +1367,12 @@ def test_regime_and_calibration_copy_state_the_actual_rules(pages):
 
 
 def _raw_specs(html: str) -> dict:
-    return {m.group(1): json.loads(_html_unescape(m.group(2))) for m in re.finditer(
-        r'<script type="application/json" id="([\w-]+)-spec">(.*?)</script>', html, re.DOTALL)}
+    """Each chart's spec as the server built it: its JSON block, with the fields the
+    page renders as HTML (_HTML_FIELDS) put back."""
+    return {m.group(1): {**json.loads(_html_unescape(m.group(2))),
+                         **_html_fields(html, m.group(1), m.group(2))}
+            for m in re.finditer(r'<script type="application/json" id="([\w-]+)-spec">(.*?)</script>', html,
+                                 re.DOTALL)}
 
 
 def _spec(html: str, chart_id: str, site: Path | None = None) -> dict:
@@ -2684,6 +2724,91 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
         assert _html_unescape(st.group(1)) == want[default[0]]["status"]
 
 
+def test_every_json_block_on_every_page_is_compact_and_leaves_out_its_html_fields(dash, pages):
+    """D2: the chart specs were pretty-printed ASCII JSON (', ', ': ', '\\u2013') that
+    also carried each chart's title, description, legend and data table: the page
+    renders those four as HTML and desk.js never reads them from the spec (209 KB of
+    a 45-expiry Surface page, 51 KB of Research's). Every JSON block on every page is
+    now compact UTF-8 with sorted keys, its <, >, & and ' as JSON escapes (so no
+    block can close its script element), and none of the four fields."""
+    from jinja2.utils import htmlsafe_json_dumps
+
+    n = 0
+    for route, html in pages.items():
+        for sid, raw in re.findall(r'<script type="application/json" id="([\w-]+)">(.*?)</script>', html,
+                                   re.DOTALL):
+            obj = json.loads(raw)
+            assert raw == str(htmlsafe_json_dumps(obj, separators=(",", ":"), ensure_ascii=False,
+                                                  sort_keys=True)), (route, sid)
+            assert not re.search(r"[<>&']", raw), (route, sid)
+            assert not set(dash.SPEC_HTML_FIELDS) & set(obj), (route, sid, set(obj))
+            n += 1
+        assert html.count('<script type="application/json"') == len(re.findall(
+            r'<script type="application/json" id="[\w-]+">', html)), route
+    assert n >= 20
+
+
+def test_each_chart_renders_its_html_fields_from_its_spec(dash, pages):
+    """C5: the fields a chart's JSON leaves out are on the page as HTML, rendered from
+    the spec the server built (the one the tests read through _raw_specs): its title
+    as the chart's accessible name, its description, one legend button per legend
+    item (pressed unless hidden) and its data table, a row per table row and an
+    expiry's group per group."""
+    from bs4 import BeautifulSoup
+
+    subs = dash.app.jinja_env.filters["subs_text"]
+    n = 0
+    for route, html in pages.items():
+        soup = BeautifulSoup(html, "lxml")
+        for cid, sp in _raw_specs(html).items():
+            el = soup.find(id=cid)
+            if el is None or "data-spec" not in el.attrs:
+                continue
+            assert el["aria-label"] == subs(sp["title"]), (route, cid)
+            assert soup.find(id=f"{cid}-desc").get_text() == subs(sp["describe"]), (route, cid)
+            keys = soup.select(f'[data-legend-for="{cid}"]')
+            if keys:
+                want = [(it["name"], "false" if it.get("hidden") else "true") for it in sp["legend_items"]]
+                assert [(b["data-series"], b["aria-pressed"]) for b in keys] == want, (route, cid)
+            data = soup.find(id=f"{cid}-data")
+            t = sp.get("table") or {}
+            if t.get("rows"):
+                assert len(data.find("table").select("tbody > tr")) == len(t["rows"]), (route, cid)
+                assert [g["data-group"] for g in data.select("[data-group]")] == [
+                    g["group"] for g in t.get("groups") or []], (route, cid)
+            n += 1
+    assert n >= 20
+
+
+def test_the_3d_view_reads_its_points_from_the_session_data_file(dash, tmp_path, monkeypatch):
+    """D2: the Surface 3D view's points (16 KB of a 45-expiry page) sat in the page for
+    a view few readers open. They are in the session's data file beside the smile's
+    quotes (one file, one fetch); the 3D spec keeps the colour scale and names the
+    file. Each point is an IV heatmap cell: its row's days, and its median mid IV or a
+    gap where the cell is empty."""
+    monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path, 17))
+    resp, html = _get(dash, "/surface")
+    assert _errors(resp) == 0
+    sp = json.loads(re.search(r'<script type="application/json" id="surface3d-spec">(.*?)</script>', html,
+                              re.DOTALL).group(1))
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    assert "points" not in sp
+    assert (sp["src"], sp["integrity"], sp["session"]) == (q["src"], q["integrity"], q["session"])
+    assert {"zmin", "zmax", "stops", "kind"} <= set(sp)
+    pts = json.loads(dash.DATA_FILES[sp["src"].split("/", 1)[1]])["surface3d"]["points"]
+    d = dash.load_surface()
+    cells = [(r, c) for r in d["iv_heat"]["rows"] for c in r["cells"]]
+    assert len(pts) == len(cells) == 17 * len(d["iv_heat"]["cols"])
+    days = {x["expiry"]: x["T_days"] for x in d["expiries"]}
+    for (_x, t_days, z), (r, c) in zip(pts, cells, strict=True):
+        assert t_days == pytest.approx(days[r["exp"]]), r["exp"]
+        assert (z is None) == (c["n"] == 0), r["exp"]
+        if z is not None:
+            assert abs(z - float(c["text"])) <= 0.05 + 1e-9, (r["exp"], z, c["text"])
+    zs = [p[2] for p in pts if p[2] is not None]                  # 3 decimals: the scale is unrounded
+    assert (sp["zmin"], sp["zmax"]) == (pytest.approx(min(zs), abs=5e-4), pytest.approx(max(zs), abs=5e-4))
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
@@ -3074,8 +3199,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # histograms and the trade and drawdown tables, about 30 kB raw (404 kB with them)
     # corrections.html: 120 kB until C24 added eight findings (about 20 kB raw, 4 kB gzipped);
     # the register is append-only, so the page grows by a round at a time
+    # research.html: 430 kB to 400 kB again (D2): its specs are compact and leave out the
+    # fields the page renders as HTML (app.spec_json; about 409 to 358 kB)
     budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 430_000, "corrections.html": 150_000,
+              "risk.html": 300_000, "research.html": 400_000, "corrections.html": 150_000,
               "model-risk.html": 100_000}
     # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
     # monitoring line per production model (about 88 kB). Its history strips draw one dot
@@ -4376,6 +4503,48 @@ def test_browser_a_book_smile_draws_its_default_inline_and_fetches_the_session_f
     csv = Path(dl.value.path()).read_text()
     assert len(csv.strip().split("\n")) == 1 + total
     ctx.close()
+
+
+def test_browser_the_3d_view_draws_the_session_files_points(syn_browser):
+    """D2: the 3D view's points are in the session data file (the smile's): "Show 3D"
+    draws every point of the file (one fetch however the view and the smile share
+    it), and a file that fails to load leaves the button saying so, the 2D heatmap
+    being the full view, with no script error."""
+    sb = syn_browser
+    sp = json.loads(re.search(r'<script type="application/json" id="surface3d-spec">(.*?)</script>',
+                              sb["html"][17], re.DOTALL).group(1))
+    pts = json.loads((sb["site"] / sp["src"]).read_bytes())["surface3d"]["points"]
+    for how in ("ok", "abort"):
+        ctx, page = _page(sb, 1440, 900)
+        reqs, errors = [], []
+        page.on("request", lambda r, reqs=reqs: reqs.append(r.url) if "/data/" in r.url else None)
+        page.on("pageerror", lambda e, errors=errors: errors.append(str(e)))
+        if how == "abort":
+            page.route("**/data/**", lambda r: r.abort())
+        page.goto(sb["base"] + "surface-17.html", wait_until="load")
+        if not page.evaluate("() => { const c = document.createElement('canvas'); "
+                             "return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }"):
+            ctx.close()
+            pytest.skip("no WebGL in this Chromium")
+        page.click("[data-load-3d='surface3d']")
+        page.evaluate("""() => new Promise(done => { (function poll() {
+          if (!/Loading/.test(document.querySelector('[data-load-3d]').textContent)) return done();
+          setTimeout(poll, 50); })(); })""")
+        st = page.evaluate("""() => { const c = Desk.charts.surface3d;
+          return { text: document.querySelector('[data-load-3d]').textContent,
+                   n: c ? c.chart.getOption().series[0].data.length : null,
+                   hidden: document.getElementById('surface3d').hidden }; }""")
+        if how == "ok":
+            assert st["n"] == len(pts), st
+            assert not st["hidden"], st
+            assert len(reqs) == 1, reqs
+        else:
+            assert st["n"] is None, st
+            assert st["hidden"], st
+            assert "failed to load" in st["text"], st
+            assert "2D heatmap is the full view" in st["text"], st
+        assert errors == [], (how, errors)
+        ctx.close()
 
 
 def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(syn_browser):
@@ -8947,7 +9116,8 @@ def test_browser_calibration_smiles_are_small_multiples(site_browser):
     page.click(f"#smile-group-tools [data-series='{hk}']")
     page.wait_for_timeout(400)
     left = page.evaluate("""([ids, hk]) => ids.map(id => Desk.charts[id].chart.getOption().series
-        .filter(s => s && s.name.endsWith(' ' + hk)).reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
+        .filter(s => s && s.name.endsWith(' ' + hk))
+        .reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
     assert left == [0] * len(ids), left
     with page.expect_download() as dl:
         page.click("[data-csv-group]")
@@ -10432,6 +10602,21 @@ def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_a
     bad = failed("gone", gone_and_stray)
     assert ("Surface", f"data file {src}") in bad
     assert ("data", "every file under data/ read by an audited page") in bad
+
+    def one_point(site):                    # C5: the 3D view's points are in the same file
+        book = json.loads(body)
+        p = next(p for p in book["surface3d"]["points"] if p[2] is not None)
+        p[2] += 0.01
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+
+    bad = failed("point", one_point)
+    assert ("Surface", "3D view points: median mid IV % (3 decimals)") in bad
+    assert not [x for x in bad if "data file" in x[1] or "packed" in x[1]], bad
 
 
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
