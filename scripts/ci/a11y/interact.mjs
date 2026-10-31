@@ -391,7 +391,7 @@ async function waitChart(page, id) {
 }
 async function hoverQuote(page, id, frac) {
   const pos = await page.evaluate(([cid, f]) => {
-    const c = Desk.charts[cid], rows = c.spec._rows[Object.keys(c.spec._rows).length > 1 ? Desk.filters[cid] : Object.keys(c.spec._rows)[0]];
+    const c = Desk.charts[cid], rows = Desk.rowsOf(c.spec, Desk.filters[cid]);
     const q = rows[Math.floor((rows.length - 1) * f)];
     const px = c.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [q.k, q.mid]);
     const r = c.el.getBoundingClientRect();

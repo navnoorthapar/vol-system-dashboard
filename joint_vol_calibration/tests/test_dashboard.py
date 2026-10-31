@@ -2997,10 +2997,12 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # readout of the per-trade strip took it from 29.8 to 30.5 KB gzipped; R3-T9's table CSV
     # numbers (one-number cells parsed, block children spaced) past 31 KB. 31,500 to 32,000
     # (D3): the Surface smile's one-line expiry strip keeps its selected tab in view and
-    # one status line names the selected expiry (31,324 to 31,726 B), within the 1 KB
-    # the 45-expiry plan allows desk.js in all (its book-file loading takes the rest)
+    # one status line names the selected expiry (31,324 to 31,726 B). 32,000 to 32,500
+    # (D2 / D3): the smile decodes an expiry when it is shown and reads a session's
+    # other expiries from its data file (fetch with integrity, a failure note, the CSV
+    # waiting for the file); the rest of the 1 KB the 45-expiry plan allows desk.js
     assert (static / "desk.js").stat().st_size < 110_000
-    assert len(gzip.compress((static / "desk.js").read_bytes())) < 32_000
+    assert len(gzip.compress((static / "desk.js").read_bytes())) < 32_500
     assert (static / "desk.css").stat().st_size < 60_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
@@ -4034,6 +4036,7 @@ def syn_browser(dash, freezer, site_browser, tmp_path_factory):
                 page = page.replace(a, b)
             html[n] = page
             (out / f"surface-{n}.html").write_text(page, encoding="utf-8")
+        (out / "surface-45-book.html").write_text(_book_form(html[45], out, SESSION), encoding="utf-8")
     finally:
         dash.DATA = old
 
@@ -4048,17 +4051,53 @@ def syn_browser(dash, freezer, site_browser, tmp_path_factory):
     httpd.shutdown()
 
 
-def _syn_page(sb, n: int, width: int, height: int = 900):
+def _syn_page(sb, n: int | str, width: int, height: int = 900):
     ctx, page = _page(sb, width, height)
     page.goto(f"{sb['base']}surface-{n}.html", wait_until="load")
     return ctx, page
 
 
+def _htmlsafe_json(obj) -> str:
+    """json as Flask's tojson writes it into a page (sorted keys, <>&' escaped)."""
+    out = json.dumps(obj, sort_keys=True)
+    for a, b in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("'", "\\u0027")):
+        out = out.replace(a, b)
+    return out
+
+
+def _book_form(html: str, out: Path, session: str) -> str:
+    """The page with its smile's quotes in a session file (data/…, named by its
+    sha256, checked by its sha384): the spec keeps the default expiry and one
+    series per role (quotes.template), quotes.order names every expiry."""
+    import base64
+
+    m = re.search(r'(<script type="application/json" id="chart-slices-spec">)(.*?)(</script>)', html,
+                  re.DOTALL)
+    assert m is not None
+    spec = json.loads(m.group(2))
+    q = spec["quotes"]
+    order = list(q["groups"])
+    default = next(g["group"] for g in spec["table"]["groups"] if g["shown"])
+    body = json.dumps({"schema": 1, "session": session, "quotes": {"order": order, "groups": q["groups"]}},
+                      separators=(",", ":"), sort_keys=True).encode()
+    name = f"data/surface-{session}-{hashlib.sha256(body).hexdigest()[:16]}.json"
+    (out / "data").mkdir(exist_ok=True)
+    (out / name).write_bytes(body)
+    tpl = [{**{k: v for k, v in s.items() if k != "group"}, "name": s["name"][len(default) + 1:]}
+           for s in spec["series"] if s.get("group") == default]
+    spec["series"] = tpl
+    spec["quotes"] = {**q, "groups": {default: q["groups"][default]}, "order": order, "template": True,
+                      "session": session, "src": name,
+                      "integrity": "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()}
+    page = html[:m.start(2)] + _htmlsafe_json(spec) + html[m.end(2):]
+    note = '<p class="quote-note" id="chart-slices-note" role="status"></p>'
+    return page.replace('<p class="quote-readout', note + '<p class="quote-readout', 1)
+
+
 # the smile's box and the screen position of its middle quote (the one the quote
 # inspector check hovers), from the chart's own coordinate system
 _SMILE_MIDDLE_QUOTE_JS = """(id) => {
-  const c = Desk.charts[id], keys = Object.keys(c.spec._rows);
-  const rows = c.spec._rows[keys.length > 1 ? Desk.filters[id] : keys[0]];
+  const c = Desk.charts[id], rows = Desk.rowsOf(c.spec, Desk.filters[id]);
   const q = rows[Math.floor((rows.length - 1) / 2)];
   const px = c.chart.convertToPixel({xAxisIndex: 0, yAxisIndex: 0}, [q.k, q.mid]);
   const r = c.el.getBoundingClientRect();
@@ -4179,6 +4218,141 @@ def test_browser_surface_has_as_many_tab_stops_at_45_expiries_as_at_17(syn_brows
         ctx.close()
     assert counts[17] == counts[45], counts
 
+
+# a click on an expiry tab, resolved once the smile has drawn it (its 'finished'
+# event, then a frame); the expiry's quotes and what the smile now draws
+_PICK_JS = """(e) => new Promise(done => {
+  const c = Desk.charts['chart-slices'], ch = c.chart;
+  const fin = () => { ch.off('finished', fin); requestAnimationFrame(() => done(state())); };
+  const state = () => { const o = ch.getOption(), rows = Desk.rowsOf(c.spec, e);
+    const mid = o.series.find(s => s.name === 'mid' || s.name === e + ' mid')
+      || {};
+    return { filter: Desk.filters['chart-slices'], decoded: Object.keys(c.spec._rows).sort(),
+             rows: rows.length, mids: (mid.data || []).length, x: [o.xAxis[0].min, o.xAxis[0].max],
+             k: rows.length ? [rows[0].k, rows[rows.length - 1].k] : null }; };
+  ch.on('finished', fin);
+  document.querySelector(`[data-chart-filter="chart-slices"] [data-value="${e}"]`).click();
+})"""
+
+
+_SHOWN_MIDS_JS = ("Desk.charts['chart-slices'].chart.getOption().series"
+                  ".find(s => s.name === 'mid').data.length")
+
+
+def _syn_tabs(sb, n) -> list[str]:
+    html = sb["html"][45 if n == "45-book" else n]
+    return re.findall(r'aria-controls="slices-panel" data-value="([\d-]+)"', html)
+
+
+def test_browser_the_smile_decodes_an_expiry_only_when_it_is_shown(syn_browser):
+    """D3: desk.js decoded every expiry's packed quotes when the page loaded (45 on a
+    full Cboe book: a 174 ms task at 4× CPU before the smile drew). It decodes the
+    shown expiry only: one after the first draw, one more for each expiry shown,
+    with the quotes inline (Calibration's form) or in a session file."""
+    sb = syn_browser
+    for n in (45, "45-book"):
+        ctx, page = _syn_page(sb, n, 1440)
+        page.locator("#chart-slices").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-slices")
+        first = page.evaluate("Desk.filters['chart-slices']")
+        assert page.evaluate("Object.keys(Desk.charts['chart-slices'].spec._rows)") == [first], n
+        page.evaluate("Desk.quotesReady('chart-slices')")
+        picks = [e for e in _syn_tabs(sb, n) if e != first][::15][:3]
+        for k, e in enumerate(picks, 1):
+            st = page.evaluate(_PICK_JS, e)
+            assert st["decoded"] == sorted([first, *picks[:k]]), (n, st)
+            assert st["mids"] == st["rows"] > 0, (n, st)
+        ctx.close()
+
+
+def test_browser_a_book_smile_draws_its_default_inline_and_fetches_the_session_file_once(syn_browser):
+    """D2 / D3: the smile's default expiry is in the page, the session's other
+    expiries in one data file. Nothing is fetched while the smile is off screen; the
+    file is requested within 3 s of the smile's first draw with no input, once for
+    any number of switches; each expiry then draws all its quotes; the CSV, asked
+    for before the file arrived, holds every quote of every expiry."""
+    import time
+
+    sb = syn_browser
+    book = json.loads(next((sb["site"] / "data").glob("surface-*.json")).read_bytes())
+    total = sum(len(g["mid"]) for g in book["quotes"]["groups"].values())
+    ctx, page = _page(sb, 1440, 900)
+    reqs, errors = [], []
+    page.on("request", lambda r: reqs.append(time.monotonic()) if "/data/" in r.url else None)
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(sb["base"] + "surface-45-book.html", wait_until="load")
+    page.wait_for_timeout(1500)
+    assert reqs == [], "a data file was fetched before the smile was drawn"
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    t0 = time.monotonic()
+    first = page.evaluate("Desk.filters['chart-slices']")
+    assert page.evaluate(_SHOWN_MIDS_JS) == len(book["quotes"]["groups"][first]["mid"])
+    while not reqs and time.monotonic() - t0 < 5:
+        page.wait_for_timeout(100)
+    assert reqs, "the data file was not requested"
+    assert reqs[0] - t0 <= 3.0, reqs
+    for e in [e for e in _syn_tabs(sb, "45-book") if e != first][::9][:5]:
+        st = page.evaluate(_PICK_JS, e)
+        assert st["filter"] == e
+        assert st["mids"] == st["rows"] == len(book["quotes"]["groups"][e]["mid"]), (e, st)
+        assert st["x"][0] <= st["k"][0], (e, st)
+        assert st["x"][1] >= st["k"][1], (e, st)
+    assert len(reqs) == 1, reqs
+    assert errors == []
+    ctx.close()
+    ctx, page = _page(sb, 1440, 900)
+    page.goto(sb["base"] + "surface-45-book.html", wait_until="load")
+    with page.expect_download() as dl:
+        page.click("[data-csv-for='chart-slices']")
+    csv = Path(dl.value.path()).read_text()
+    assert len(csv.strip().split("\n")) == 1 + total
+    ctx.close()
+
+
+def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(syn_browser):
+    """D2: a page left open across a deploy names a data file the deploy removed, and
+    a file:// preview cannot fetch one; a file whose bytes are not its integrity hash
+    is refused. The default expiry still draws from the page; a switch to another
+    shows a status note saying the quotes did not load and opens the expiry's table
+    of medians; no script error."""
+    sb = syn_browser
+    for how in ("abort", "tampered"):
+        ctx, page = _page(sb, 1440, 900)
+        errors: list[str] = []
+        page.on("pageerror", lambda e, errors=errors: errors.append(str(e)))
+
+        def handler(route, how=how):
+            if how == "abort":
+                return route.abort()
+            body = (sb["site"] / route.request.url.split("/", 3)[3]).read_bytes()
+            return route.fulfill(status=200, body=body.replace(b'"mid":[', b'"mid":[1,', 1),
+                                 headers={"content-type": "application/json"})
+
+        page.route("**/data/**", handler)
+        page.goto(sb["base"] + "surface-45-book.html", wait_until="load")
+        page.locator("#chart-slices").scroll_into_view_if_needed()
+        _wait_for_chart(page, "chart-slices")
+        first = page.evaluate("Desk.filters['chart-slices']")
+        assert page.evaluate(_SHOWN_MIDS_JS)
+        page.wait_for_timeout(2500)
+        other = next(e for e in _syn_tabs(sb, "45-book") if e != first)
+        page.click(f"[data-chart-filter='chart-slices'] [data-value='{other}']")
+        page.wait_for_timeout(1500)
+        st = page.evaluate("""() => { const n = document.getElementById('chart-slices-note');
+          return { note: n && n.textContent, role: n && n.getAttribute('role'),
+            table: document.getElementById('chart-slices-data').classList.contains('show'),
+            expanded: document.querySelector('[data-table-for="chart-slices-data"]')
+              .getAttribute('aria-expanded'),
+            shown: [...document.querySelectorAll('#chart-slices-data [data-group]')].filter(g => !g.hidden)
+              .map(g => g.dataset.group) }; }""")
+        assert "did not load" in (st["note"] or ""), (how, st)
+        assert st["role"] == "status", (how, st)
+        assert st["table"], (how, st)
+        assert st["expanded"] == "true", (how, st)
+        assert st["shown"] == [other], (how, st)
+        assert errors == [], (how, errors)
+        ctx.close()
 
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
     """UI-8 / UI-15: no layout shift after first paint; at 390 px no caption runs

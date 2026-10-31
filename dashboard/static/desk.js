@@ -125,16 +125,54 @@
     });
     return out;
   }
-  // every quote series of the spec in one x coordinate: 'k' = ln(K/F), 'delta' = N(−d₁)
-  function fillQuotes(spec, xmode) {
+  // the quote series of expiry f (no f: every group's) in one x coordinate: 'k' = ln(K/F), 'delta' = N(−d₁)
+  function fillQuotes(spec, xmode, f) {
     spec._xmode = xmode;
-    var clip = spec.quotes.zClip || 10;
+    var Q = spec.quotes, clip = Q.zClip || 10, all = f === undefined || f === null;
     (spec.series || []).forEach(function (s) {
-      if (s.quote) s.data = quotePoints(spec._rows[String(s.group)] || [], s, xmode, clip);
+      if (s.quote && (Q.template || all || String(s.group) === String(f))) s.data = quotePoints(rowsOf(spec, Q.template ? f : s.group), s, xmode, clip);
     });
   }
-  // the group a quote chart shows: the tab's, or its only one
-  function quoteGroup(spec, f) { return f !== undefined && f !== null ? String(f) : Object.keys(spec._rows)[0]; }
+  // the group a quote chart shows: the tab's, or its first
+  function quoteGroup(spec, f) { return f !== undefined && f !== null ? String(f) : Object.keys(spec.quotes.groups)[0]; }
+  // one expiry's quotes, decoded when first used (all 45 at load: 174 ms at 4× CPU)
+  function rowsOf(spec, f) {
+    var g = quoteGroup(spec, f), b = spec.quotes.groups[g];
+    return spec._rows[g] || (b ? spec._rows[g] = decodeQuotes(b) : []);
+  }
+  Desk.rowsOf = rowsOf;
+  // a same-origin data file (named by its sha256), checked by its sha384, schema and
+  // session; fetched once, and again after a failure
+  var files = {};
+  Desk.data = function (src, sri, session) {
+    if (!files[src]) {
+      files[src] = fetch(src, { integrity: sri }).then(function (r) { if (!r.ok) throw Error('HTTP ' + r.status); return r.json(); })
+        .then(function (j) { if (j.schema !== 1 || j.session !== session) throw Error('another session’s file'); return j; });
+      files[src].catch(function () { delete files[src]; });
+    }
+    return files[src];
+  };
+  // a book (Surface): the page holds the default expiry and one series per role
+  // (quotes.template); its file, quotes.src, every expiry of quotes.order
+  function loadBook(spec) {
+    var Q = spec.quotes;
+    return !Q.src ? Promise.resolve(spec) : Desk.data(Q.src, Q.integrity, Q.session).then(function (j) {
+      if (j.quotes.order.join() !== Q.order.join()) throw Error('other expiries');
+      Q.order.forEach(function (g) { Q.groups[g] = Q.groups[g] || j.quotes.groups[g]; });
+      return spec;
+    });
+  }
+  function hasRows(spec, f) { return !!spec.quotes.groups[quoteGroup(spec, f)]; }
+  // no file (a tab open across a deploy, a file:// preview): a note, and the expiry's table
+  function bookFailed(id, err) {
+    var n = doc.getElementById(id + '-note'), t = doc.getElementById(id + '-data');
+    if (n) n.textContent = err ? 'This expiry’s quotes did not load (' + err.message + '): its medians are in the table below. Reload the page to try again.' : '';
+    if (err && t && !t.classList.contains('show')) $('[data-table-for="' + id + '-data"]').click();
+  }
+  Desk.quotesReady = function (id) {
+    var c = Desk.charts[id], el = doc.getElementById(id), spec = c ? c.spec : el && specOf(el);
+    return spec && spec.quotes ? loadBook(spec).then(function () { return true; }) : Promise.resolve(false);
+  };
   // the x range of the shown group, shared by the smile and its residual strip:
   // the quotes' extent padded and rounded out to a tick step (a spec's x.min /
   // x.max, set on the server for small multiples, wins)
@@ -142,7 +180,7 @@
     if (spec._xmode === 'delta') return [0, 1];
     var x = spec.x || {};
     if (x.min !== undefined && x.min !== null && x.max !== undefined && x.max !== null) return [x.min, x.max];
-    var rows = spec._rows[quoteGroup(spec, f)] || [];
+    var rows = rowsOf(spec, f);
     if (!rows.length) return [null, null];
     var lo = rows[0].k, hi = rows[rows.length - 1].k, span = Math.max(hi - lo, 0.02);
     var raw = span / 5, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), step = mag;
@@ -158,7 +196,7 @@
   }
   // the quote nearest to x (the pointer's axis value) among the shown group's quotes
   function nearestQuote(spec, f, x) {
-    var rows = spec._rows[quoteGroup(spec, f)] || [], best = null, bd = Infinity;
+    var rows = rowsOf(spec, f), best = null, bd = Infinity;
     rows.forEach(function (q) { var d = Math.abs((spec._xmode === 'delta' ? q.xd : q.k) - x); if (d < bd) { bd = d; best = q; } });
     return best;
   }
@@ -263,19 +301,15 @@
         renderItem: function (params, api) {
           var x = api.value(0), lo = api.coord([x, api.value(1)]), hi = api.coord([x, api.value(2)]);
           var w = 3;
-          // one polyline per bar (the lower cap, up the bar, the upper cap; the cap
-          // is retraced, which draws nothing new): a quarter of the elements a
-          // group of three lines took, so a smile redraws faster
+          // one polyline per bar: lower cap, the bar, upper cap (a quarter of the elements of three lines)
           return { type: 'polyline', style: { stroke: c, lineWidth: 1.2, fill: null }, shape: { points: [
             [lo[0] - w, lo[1]], [lo[0] + w, lo[1]], [lo[0], lo[1]], [hi[0], hi[1]], [hi[0] - w, hi[1]], [hi[0] + w, hi[1]]] } };
         },
       });
     }
     if (s.type === 'scatter') {
-      // a residual-strip point beyond the strip's ±clip is drawn at the edge as a
-      // triangle pointing the way it is cut off (its value stays in the tooltip):
-      // on a model's strip those triangles are a series of their own (buildOption)
-      // and the strip keeps a gap there, so the strip draws as one path
+      // a residual-strip point beyond ±clip: a triangle at the edge pointing the way
+      // it is cut off (a series of its own on a model's strip, which keeps a gap there)
       var clipped = null;
       if (s.strip && spec.quotes) {
         var clip = spec.quotes.zClip || 10;
@@ -289,15 +323,9 @@
         type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6, symbolRotate: s.rotate || 0,
         itemStyle: s.hollow ? { color: 'transparent', borderColor: c, borderWidth: 1.4, opacity: s.opacity || 1 } : { color: c, opacity: s.opacity || 0.9 },
       });
-      // a quote smile's points are drawn as one path per series (a large scatter):
-      // a symbol element per quote made an expiry switch take twice as long. Not
-      // when it has none (the large path then fails to paint) or when a point
-      // carries its own symbol (the strip's clip triangles)
-      // a quote smile's mids and z strips are drawn as one path per series (a
-      // large scatter): a symbol element per quote made an expiry switch take
-      // twice as long. Not when it is empty (the large path then fails to paint),
-      // and not the few fit anchors (some expiries have none: a series that
-      // changed draw mode on a switch would have to be rebuilt)
+      // a quote smile's mids and z strips: one path per series (a large scatter; a
+      // symbol per quote doubled a switch). Not when empty (it fails to paint), nor
+      // the fit anchors (none on some expiries: a series changing mode is rebuilt)
       if (spec.quotes) {
         sc.large = (s.quote === 'mid' || s.quote === 'z') && data.length > 0 && !data.some(function (p) { return p && !Array.isArray(p); });
         sc.largeThreshold = 0;
@@ -318,9 +346,7 @@
       var bar = Object.assign(base, { type: 'bar', data: data, barMaxWidth: s.barMaxWidth || 28, stack: s.stack || undefined });
       if (s.invisible) { bar.itemStyle = { color: 'transparent' }; bar.tooltip = { show: false }; bar.silent = true; return bar; }
       if (s.signed) {
-        // buildOption swaps a horizontal chart's points to [value, category], so
-        // the value is p.value[0] there (p.value[1] was the category string, and
-        // every bar took the gain colour, the losing sleeves included)
+        // a horizontal chart's points are [value, category] (buildOption swaps them)
         var hz = !!spec.horizontal;
         bar.itemStyle = { color: function (p) { var v = Array.isArray(p.value) ? p.value[hz ? 0 : 1] : p.value; return v < 0 ? T.colors.neg : T.colors.pos; } };
       } else { bar.itemStyle = { color: s.fill ? alpha(c, s.fill) : c, borderColor: c, borderWidth: s.fill ? 1 : 0 }; }
@@ -358,9 +384,8 @@
     return line;
   }
 
-  // The series that carries the mark lines: on a tab-filtered chart (the smile
-  // slices) the first series of the group on show, so the marks are never
-  // attached to a series the filter hides.
+  // The series that carries the mark lines: on a tab-filtered chart the first of
+  // the group on show (never one the filter hides).
   function markTarget(spec, filter) {
     var t = 0;
     if (filter !== undefined) {
@@ -401,10 +426,9 @@
     }
   }
 
-  // The tooltip grammar (P4.5): the head carries the x value with its unit and,
-  // where the spec names the point (x.tipNames: a VIX-family tenor), its name
-  // ('VIX3M \u00b7 93 d'); every row carries its unit ('3.89 vol pts'). A unit is the
-  // axis's own (a.unit), else the one its name ends with in parentheses.
+  // The tooltip grammar (P4.5): the head is the x value with its unit and its name
+  // where x.tipNames has one ('VIX3M \u00b7 93 d'); every row carries its unit, the
+  // axis's (a.unit) or the one its name ends with in parentheses.
   var UNIT_WORDS = { '%': '%', 'vol pts': ' vol pts', 'index pts': ' index pts', 'index points': ' index points',
     'half-spreads': ' half-spreads', 'calendar days': ' d', 'days': ' d', '$000s': ' $000s', 'bp': ' bp' };
   function axisUnit(a) {
@@ -469,14 +493,10 @@
     };
   }
 
-  // -- category names longer than a horizontal chart's label column (the C22
-  //    waterfall's steps) --
-  // Each name wraps at its spaces into the lines its band holds, in a column no
-  // wider than the longest name needs, up to labelShare of the chart and labelMax
-  // px. A name that would need more lines falls back to its concise form
-  // (spec.labelsShort: the name without its trailing parenthetical; the tooltip and
-  // the table keep the full name); if one still does not fit, the column widens,
-  // up to 0.6 of the chart. Nothing is cut with an ellipsis.
+  // -- a horizontal chart's long category names (the C22 waterfall's steps): each
+  // wraps at its spaces into its band, in a column up to labelShare of the chart and
+  // labelMax px; one that needs more lines takes its short form (spec.labelsShort),
+  // then the column widens up to 0.6 of the chart. No ellipsis --
   var LABEL_SIZE = 10.5, LABEL_LINE = 13, measureCtx = null;
   function textWidth(s, font) {
     if (!measureCtx) measureCtx = doc.createElement('canvas').getContext('2d');
@@ -522,12 +542,10 @@
     return L;
   }
 
-  // -- category labels under a vertical chart's bars that name periods (x.fit:
-  //    the annual return's '2025 YTD', the half-year Sharpe's '2025-H1 (partial)') --
-  // A label wider than its band wraps at its spaces; where even the widest line
-  // does not fit its band, every step-th label is drawn counting back from the
-  // last, so the newest period (a partial one) is always labelled in full. No
-  // label overlaps another or is cut.
+  // -- period labels under a vertical chart's bars (x.fit: '2025 YTD'): a label wider
+  // than its band wraps at its spaces; where the widest line still does not fit,
+  // every step-th label is drawn counting back from the last (the newest period is
+  // always labelled). None overlaps or is cut --
   var LABEL_GAP = 6;
   function xLabelLayout(spec, T, width, grid) {
     var cats = ((spec.x && spec.x.categories) || spec.xs || []).map(String);
@@ -634,11 +652,9 @@
         data: i < 0 || cats[i] === undefined ? [] : [{ xAxis: cats[i] }] } };
   }
 
-  // A quote smile (spec.quotes): the inspector's tooltip, the x range of the
-  // shown expiry, the forward-delta axis and, under the smile, the residual
-  // strip: each shown model's z = (model − mid) / half-spread per quote on a
-  // second grid sharing the x axis, ±1 (inside the spread) shaded, ±2 dashed,
-  // |z| beyond the clip drawn at the edge.
+  // A quote smile: the inspector's tooltip, the shown expiry's x range, the delta
+  // axis and the residual strip under the smile (each shown model's z per quote on
+  // a second grid; ±1, inside the spread, shaded, ±2 dashed, beyond ±clip at the edge).
   function quoteOption(spec, T, opt, filter, width, height) {
     var Q = spec.quotes, id = spec.id, delta = spec._xmode === 'delta';
     var rng = quoteRange(spec, filter);
@@ -760,8 +776,8 @@
     ms.forEach(function (m) { head.push(m.label + ' IV (%)', m.label + ' z', m.label + ' fitted', m.label + ' inside'); });
     head.push('arb_exec', 'repaired', 'repaired_outside_spread');
     var lines = [head.map(csvCell).join(',')];
-    Object.keys(spec._rows).forEach(function (g) {
-      spec._rows[g].forEach(function (q) {
+    (spec.quotes.order || Object.keys(spec.quotes.groups)).forEach(function (g) {
+      rowsOf(spec, g).forEach(function (q) {
         var r = [g, fx(q.T, 4), q.strike, q.right, fx(q.k, 6), fx(q.delta, 6), fx(q.bid, 6), fx(q.mid, 5), fx(q.ask, 6), fx(q.hs, 6)];
         ms.forEach(function (m) {
           var mm = q.models[m.key] || {};
@@ -810,13 +826,8 @@
         return v === null || v === undefined || w === null || w === undefined ? null : Math.round((k * v - w) * f) / f;
       });
     });
-    // a quote smile: every expiry's packed quotes decoded, its series filled
-    var qg = spec.quotes && spec.quotes.groups;
-    if (qg) {
-      spec._rows = {};
-      Object.keys(qg).forEach(function (g) { spec._rows[g] = decodeQuotes(qg[g]); });
-      fillQuotes(spec, 'k');
-    }
+    // a quote smile: its expiries are decoded when drawn or exported (rowsOf)
+    if (spec.quotes && spec.quotes.groups) { spec._rows = {}; spec._xmode = 'k'; }
     return spec;
   }
   Desk.resolveSpec = resolveSpec;
@@ -844,27 +855,29 @@
     });
     return sel;
   }
-  // A full draw: the spec is parsed once and kept (Desk.charts[id].spec), the
-  // option built from it; a tab switch or a legend toggle then only merges what
-  // changes (applyFilter, initTools). Each series gets an id for those merges.
+  // A full draw: the spec is parsed once and kept (Desk.charts[id].spec); a tab
+  // switch or a legend toggle then merges what changes, by series id.
   function render(el, print) {
     if (!window.echarts) return null;
     var prev = Desk.charts[el.id];
     var spec = prev && prev.spec ? prev.spec : specOf(el);
     if (!spec) return null;
     var mode = Desk.xmode[el.id] === 'delta' ? 'delta' : 'k';
-    if (spec.quotes && spec._xmode !== mode) fillQuotes(spec, mode);
-    var inst = window.echarts.getInstanceByDom(el) || window.echarts.init(el, null, { renderer: 'canvas' });
     var f = Desk.filters[el.id], T = theme(print);
+    if (spec.quotes) fillQuotes(spec, mode, f);
+    var inst = window.echarts.getInstanceByDom(el) || window.echarts.init(el, null, { renderer: 'canvas' });
     var built = {};
     var off = legendOff(el.id);
     var opt = buildOption(spec, T, f, el.clientWidth, el.clientHeight, built, off);
     opt.legend.selected = selection(spec, el.id, f, off);
     delete opt._idx; delete opt._pos;
+    // a book: fetched when the page is idle after the first draw ('finished' fires
+    // inside setOption, so it is listened for first)
+    var book = spec.quotes && spec.quotes.src;
+    if (book && !prev) inst.on('finished', function pre() { inst.off('finished', pre); idle(function () { loadBook(spec).catch(noop); }); });
     inst.setOption(opt, true);
-    // linked charts (the same x values) zoom and point together
-    // a chart group (data-chart-group, else spec.link): echarts.connect links the
-    // pointer and tooltip of its members; their zoom is kept equal by bindGroupZoom
+    // a chart group (data-chart-group, else spec.link): pointer and tooltip linked
+    // by echarts.connect, the zoom kept equal by bindGroupZoom
     var grp = el.getAttribute('data-chart-group') || spec.link;
     if (grp && window.echarts.connect) { inst.group = grp; window.echarts.connect(grp); bindGroupZoom(inst, el.id, grp); }
     if (spec.exps) bindExpiryPick(inst, el.id);
@@ -873,7 +886,17 @@
     Desk.charts[el.id] = { el: el, chart: inst, spec: spec, T: T, early: !fontsReady,
       labels: built.labels, qi: prev ? prev.qi : null };
     if (grp) joinGroupZoom(el.id, grp);
+    if (book && !hasRows(spec, f)) needBook(Desk.charts[el.id]);    // an expiry not inline: at once
     return inst;
+  }
+  function noop() {}
+  function idle(fn) { if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 }); else setTimeout(fn, 50); }
+  // an expiry not yet in hand: drawn empty under a loading mask until the book is
+  function needBook(c) {
+    var ch = c.chart;
+    ch.showLoading({ text: 'Loading quotes\u2026', color: c.T.colors.info, textColor: c.T.text2, maskColor: alpha(c.T.surface, 0.6) });
+    loadBook(c.spec).then(function () { bookFailed(c.el.id, null); ch.hideLoading(); queueRedraw(c.el.id); },
+      function (err) { ch.hideLoading(); bookFailed(c.el.id, err); });
   }
   // A tab switch on a drawn chart (the smile's expiry), or a model toggled on a
   // quote smile: one merge of the series the new state draws (by id: the same
@@ -882,6 +905,10 @@
   // grids. The spec is not parsed again and nothing else is rebuilt.
   function applyFilter(c) {
     var spec = c.spec, el = c.el, f = Desk.filters[el.id], off = legendOff(el.id);
+    if (spec.quotes) {
+      if (spec.quotes.src && !hasRows(spec, f)) needBook(c);     // drawn empty meanwhile
+      fillQuotes(spec, spec._xmode, f);
+    }
     // the drawn size, not the element's: reading that would lay the page out again
     // in the middle of a tab switch (the tables of the new group just shown)
     var opt = buildOption(spec, c.T, f, c.chart.getWidth(), c.chart.getHeight(), {}, off);
@@ -889,10 +916,8 @@
     if (spec.quotes) up.xAxis = opt.xAxis;
     c.chart.setOption(up, { replaceMerge: ['series'] });
   }
-  // The tab (or toggle) shows its new state in the next frame and the chart is
-  // drawn in the task after that frame: the reader sees the click land at once,
-  // and a run of switches (an arrow key held on the expiry tabs) draws the last
-  // one only, not every expiry it passed.
+  // The tab (or toggle) shows its new state in the next frame, the chart is drawn
+  // in the task after it: a run of switches (an arrow key held) draws the last only.
   var queued = {};
   function afterPaint(key, fn) {
     if (queued[key]) return;
@@ -995,7 +1020,7 @@
       if (c.spec.quotes) queueRedraw(id);
       else c.chart.setOption({ legend: { selected: selection(c.spec, id, f) } });
       if (c.spec.quotes && c.qi !== null && c.qi !== undefined) {       // the readout's model rows follow
-        var q = (c.spec._rows[quoteGroup(c.spec, f)] || [])[c.qi];
+        var q = rowsOf(c.spec, f)[c.qi];
         if (q) showReadout(id, quoteLines(c.spec, q, legendOff(id)));
       }
     }
@@ -1017,31 +1042,29 @@
         zoomTo(id, from, xs[xs.length - 1], b);
       });
     });
-    // a group's CSV: every member's rows under one header (the quote smiles' rows
-    // carry their expiry)
-    $$('[data-csv-group]').forEach(function (b) {
+    // a chart's CSV, or a group's (every member's rows under one header); a quote
+    // smile's rows carry their expiry, every expiry's (its book first)
+    $$('[data-csv-for],[data-csv-group]').forEach(function (b) {
       b.addEventListener('click', function () {
-        var out = [];
-        b.getAttribute('data-csv-group').split(/\s+/).forEach(function (id) {
-          var el = doc.getElementById(id), c = el && Desk.charts[id], spec = c ? c.spec : (el && specOf(el));
-          if (!spec) return;
-          var lines = specCsv(spec).replace(/\n$/, '').split('\n');
-          out = out.length ? out.concat(lines.slice(1)) : lines;
+        var one = b.getAttribute('data-csv-for'), ids = (one || b.getAttribute('data-csv-group')).split(/\s+/);
+        var specs = ids.map(function (id) { var el = doc.getElementById(id), c = Desk.charts[id]; return c ? c.spec : el && specOf(el); }).filter(Boolean);
+        Promise.all(specs.map(function (sp) { return sp.quotes ? loadBook(sp) : sp; })).then(function () {
+          var out = [];
+          specs.forEach(function (spec) {
+            var lines = specCsv(spec).replace(/\n$/, '').split('\n');
+            out = out.length ? out.concat(lines.slice(1)) : lines;
+          });
+          if (out.length) download(b.getAttribute('data-filename') || (one ? one + '.csv' : 'charts.csv'), out.join('\n') + '\n');
+        }, function (err) {
+          flash(b, 'Unavailable');
+          specs.forEach(function (sp) { if (sp.quotes) bookFailed(sp.id, err); });
         });
-        if (out.length) download(b.getAttribute('data-filename') || 'charts.csv', out.join('\n') + '\n');
       });
     });
     $$('[data-zoom-year-for]').forEach(function (sel) {
       sel.addEventListener('change', function () {
         var v = sel.value.split('|');
         if (v.length === 2) zoomTo(sel.getAttribute('data-zoom-year-for'), v[0], v[1], sel);
-      });
-    });
-    $$('[data-csv-for]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        var el = doc.getElementById(b.getAttribute('data-csv-for')), c = el && Desk.charts[el.id];
-        var spec = c ? c.spec : (el && specOf(el));
-        if (spec) download(b.getAttribute('data-filename') || (el.id + '.csv'), specCsv(spec));
       });
     });
     $$('[data-table-for]').forEach(function (b) {
@@ -1157,9 +1180,8 @@
         if (key === 'exp' && Desk.onExpiry) Desk.onExpiry(tab.getAttribute('data-value'), !!init);
         var target = list.getAttribute('data-chart-filter');
         if (target) target.split(/\s+/).forEach(function (id) { filterChart(id, tab.getAttribute('data-value')); });
-        // a chart drawn while its panel was hidden has the wrong size; a resize
-        // of one that has not changed size would redraw it for nothing. The tabs
-        // of one shared panel (the smile's expiries) never hide it: nothing to check
+        // a chart drawn in a hidden panel is resized if its size changed (the tabs of
+        // one shared panel, the smile's, never hide it)
         $$('.chart[data-spec]', doc.getElementById(tab.getAttribute('aria-controls')) || doc.body).forEach(function (el) {
           var c = Desk.charts[el.id];
           if (c) { if (!shared && (c.chart.getWidth() !== el.clientWidth || c.chart.getHeight() !== el.clientHeight)) c.chart.resize(); }
@@ -1196,10 +1218,8 @@
     if (Desk.charts[id]) queueRedraw(id);     // not yet drawn: render() applies the filter when it is
   }
 
-  // -- quote smiles: the keyboard readout and the x-axis switch ----
-  // A canvas tooltip cannot be reached from the keyboard: the readout under the
-  // chart (focusable) steps through the shown expiry's quotes with the arrow
-  // keys, says what the tooltip says and shows the tooltip at that quote.
+  // -- quote smiles: the keyboard readout (focusable: arrow keys step through the
+  // shown expiry's quotes, it says what the tooltip says and shows it) and the x axis ----
   var READOUT_KEYS = { ArrowRight: 1, ArrowLeft: -1, PageDown: 10, PageUp: -10 };
   function showReadout(id, lines) {
     var r = doc.getElementById(id + '-readout');
@@ -1213,7 +1233,7 @@
   function stepQuote(id, key) {
     var c = Desk.charts[id];
     if (!c || !c.spec.quotes) return false;
-    var spec = c.spec, f = Desk.filters[id], rows = spec._rows[quoteGroup(spec, f)] || [];
+    var spec = c.spec, f = Desk.filters[id], rows = rowsOf(spec, f);
     if (!rows.length) return false;
     var i;
     if (key === 'Home') i = 0;
@@ -1246,10 +1266,8 @@
       if (b.getAttribute('data-xmode') === 'delta' && state.get('x') === 'delta') setXmode(b.getAttribute('data-xmode-for'), 'delta', true);
     });
   }
-  // -- scatter strips: the keyboard readout of every shown point (F4) ----
-  // The per-trade strip is a canvas: its readout (focusable) steps through the
-  // shown series' points in order of x (the entry date), reads the series, the
-  // date and the value, and shows the tooltip at that point.
+  // -- scatter strips (F4): the readout steps through the shown points by x (the
+  // entry date), reads series, date and value and shows the tooltip there ----
   function stripPoints(id) {
     var c = Desk.charts[id];
     if (!c) return [];
@@ -1339,13 +1357,10 @@
     });
   }
 
-  // -- chart groups: one zoom for every member ----
-  // A chart group's members share their x values (the server gives them one
-  // domain). A zoom on one (its slider, the wheel, a preset, the year menu, a
-  // click on a year's bar) is applied to the others as the same window of x
-  // values, each member in a task of its own after the zoomed chart's frame
-  // (all three in one task made a 150 ms long task). echarts.connect may carry
-  // a drag to the others first; a member already at the window is left alone.
+  // -- chart groups: one zoom for every member (they share their x values). A zoom
+  // on one is applied to each other as the same window, each in a task of its own
+  // after the zoomed chart's frame (one task for three was 150 ms); a member
+  // already at the window (echarts.connect may carry a drag) is left alone ----
   function groupMembers(grp) {
     return $$('.chart[data-chart-group="' + grp + '"]').map(function (el) { return el.id; });
   }
@@ -1424,15 +1439,10 @@
     zr.on('mousemove', function (e) { zr.setCursorStyle(at(e) ? 'pointer' : 'default'); });
   }
 
-  // -- the expiry as the shared cursor of Surface ----
-  // The smile's expiry tabs, the rows of the IV and residual heatmaps and of the
-  // delta grid (tr[data-exp]) and the categories of #chart-by-expiry (spec.exps)
-  // select one another: a row head (a button, added here: without JavaScript
-  // the tables are as they were), a click on a by-expiry category or '[' / ']'
-  // selects the expiry's smile tab, which writes exp= into the hash; every row of
-  // it is then aria-current, the by-expiry chart draws a line at it and the
-  // status line under the smile's tabs names it. The smile is scrolled to only
-  // when it is offscreen.
+  // -- the expiry as the shared cursor of Surface: a row head of a heatmap or the
+  // delta grid (tr[data-exp]; a button added here), a #chart-by-expiry category or
+  // '[' / ']' selects the expiry's smile tab; its rows are then aria-current and the
+  // by-expiry chart draws a line at it. The smile is scrolled to only when offscreen ----
   function expiryTabs() {
     var list = $('[role="tablist"][data-state-key="exp"]');
     return list ? $$('[role="tab"]', list) : [];
