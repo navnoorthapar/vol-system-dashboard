@@ -3421,9 +3421,13 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # the register is append-only, so the page grows by a round at a time
     # research.html: 430 kB to 400 kB again (D2): its specs are compact and leave out the
     # fields the page renders as HTML (app.spec_json; about 409 to 358 kB)
-    budget = {"index.html": 120_000, "surface.html": 600_000, "calibration.html": 300_000,
-              "risk.html": 300_000, "research.html": 400_000, "corrections.html": 150_000,
-              "model-risk.html": 100_000}
+    # surface.html: 600 kB, flat, until D2 held it to CI's formula (page_budget.py: 450 kB
+    # at 45 expiries, 5.5 kB less an expiry short), read off the page as CI reads it
+    pb = _load("page_budget_for_fixtures", "scripts/ci/page_budget.py")
+    surf = (out / "surface.html").read_text(encoding="utf-8")
+    budget = {"index.html": 120_000, "surface.html": pb.budget(len(pb.TAB.findall(surf))),
+              "calibration.html": 300_000, "risk.html": 300_000, "research.html": 400_000,
+              "corrections.html": 150_000, "model-risk.html": 100_000}
     # model-risk.html: 80 kB until VALIDATOR-12/13 added M21–M23, three checks and a
     # monitoring line per production model (about 88 kB). Its history strips draw one dot
     # per stored session, about 150 bytes each, and the daily job adds a session a day:

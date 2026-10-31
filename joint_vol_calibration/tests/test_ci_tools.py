@@ -27,10 +27,12 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
   * deploy_streak.py (the daily workflow, before the freeze): consecutive NYSE
     sessions with a deploy commit on gh-pages, across holidays.
   * page_budget.py (CI's a11y job): the Surface page's weight against 450,000
-    bytes plus 7,000 an expiry past 45, the expiry count read from the page.
+    bytes plus 7,000 an expiry past 45 and less 5,500 an expiry short of it, the
+    expiry count read from the page; its gzipped size at a stated level.
 """
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import re
@@ -1342,15 +1344,18 @@ def _surface_page(n: int, pad: int) -> str:
 
 class TestPageBudget:
     """D2: a full Cboe book made the Surface page 1.67 MB. The a11y job holds it to
-    450,000 bytes at 45 listed expiries plus 7,000 for each expiry past 45, counting
-    the expiries on the page (its smile's tabs), so a day that lists more expiries
-    moves the budget with the page; the bot's deploy never runs this."""
+    450,000 bytes at 45 listed expiries plus 7,000 for each expiry past 45 and less
+    5,500 for each one short (a flat budget below 45 let a 17-expiry page grow by
+    150 kB unnoticed), counting the expiries on the page (its smile's tabs), so a
+    day that lists more expiries moves the budget with the page; the bot's deploy
+    never runs this. It prints the gzipped size at its stated level, ungated."""
 
     def test_the_budget_moves_with_the_expiry_count_on_the_page(self, monkeypatch, tmp_path):
         pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)
-        assert [pb.budget(n) for n in (17, 45, 46, 80)] == [450_000, 450_000, 457_000, 695_000]
+        assert [pb.budget(n) for n in (0, 17, 44, 45, 46, 80)] == [
+            202_500, 296_000, 444_500, 450_000, 457_000, 695_000]
         for n, size, ok in ((45, 450_000, True), (45, 450_001, False), (50, 485_000, True),
-                            (50, 485_001, False), (17, 300_000, True)):
+                            (50, 485_001, False), (17, 296_000, True), (17, 296_001, False)):
             site = tmp_path / f"{n}-{size}"
             site.mkdir()
             (site / "surface.html").write_text(_surface_page(n, size), encoding="utf-8")
@@ -1358,6 +1363,9 @@ class TestPageBudget:
             got, msg = pb.check(site)
             assert got is ok, msg
             assert f"at {n} listed expiries" in msg
+            raw = (site / "surface.html").read_bytes()
+            gz = len(gzip.compress(raw, compresslevel=pb.GZIP_LEVEL, mtime=0))
+            assert f"{gz:,} bytes gzipped at level {pb.GZIP_LEVEL}" in msg, msg
             assert pb.main([str(site)]) == (0 if ok else 1)
 
     def test_its_tab_pattern_is_the_surface_templates(self, monkeypatch):
@@ -1374,7 +1382,7 @@ class TestPageBudget:
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
         steps = wf["jobs"]["a11y"]["steps"]
         names = [s.get("name") for s in steps]
-        i = names.index("Surface page weight (450 kB at 45 expiries, + 7 kB an expiry past)")
+        i = next(j for j, n in enumerate(names) if str(n).startswith("Surface page weight"))
         assert names.index("Render the static site") < i
         assert steps[i]["run"] == 'python scripts/ci/page_budget.py "$RUNNER_TEMP/site"'
         assert "continue-on-error" not in steps[i]
