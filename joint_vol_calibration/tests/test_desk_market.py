@@ -78,7 +78,9 @@ def gated():
 def test_vx_leg_reproduces_each_fits_recorded_out_of_sample_rmse(gated):
     """Acceptance 1: for every gated fit that recorded a VX score, the model curve
     recomputed from its parameters against the stored settlements of its own
-    session gives losses.vx_futures_rmse_oos to 1e-6."""
+    session gives losses.vx_futures_rmse_oos to 1e-6. A fit that recorded none
+    ran before its session's settlements were stored; once the daily job stores
+    them (FUND_GRADE_PLAN 1.12) its leg is drawn from them, as Calibration says."""
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     checked = 0
     for session, cal in gated:
@@ -86,7 +88,6 @@ def test_vx_leg_reproduces_each_fits_recorded_out_of_sample_rmse(gated):
         rows = _settles(con, session)
         leg = dm.vx_model_leg(cal["params"], rows)
         if rec is None:
-            assert leg is None, session          # a fit with no record had nothing to score
             continue
         assert leg is not None, session
         p = cal["params"]
