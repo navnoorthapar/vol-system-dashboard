@@ -66,10 +66,8 @@
     return 'rgba(' + parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16) + ',' + parseInt(h.slice(4, 6), 16) + ',' + a + ')';
   }
 
-  // -- quote-level smiles: the packed quotes of desk_quotes.py ----
-  // spec.quotes.groups[expiry] holds one expiry's quotes; decodeQuotes is the
-  // twin of desk_quotes.decode (the browser tests compare the two), quotePoints
-  // of desk_quotes.series_data. A series with s.quote holds no data until then.
+  // -- quote-level smiles: spec.quotes.groups[expiry], packed by desk_quotes.py;
+  // decodeQuotes / quotePoints are the twins of its decode / series_data ----
   var QP = { iv: 1e5, spread: 1e8, model: 1e4, floor: 0.01, days: 365 };
   // the standard normal CDF to double precision (Hart 1968, as given by West 2005)
   function ndtr(x) {
@@ -288,9 +286,8 @@
     if (spec.quotes) { base.silent = true; base.emphasis = { disabled: true }; }
     if (s.strip) base.xAxisIndex = 1;               // the residual strip under a quote smile
     var data = seriesData(s, spec);
-    // a quote smile's bid–ask bars: one line series, each bar its lower cap, the
-    // bar and its upper cap, then a break (quoteOption sizes the caps). A custom
-    // series built an element per quote on every expiry switch.
+    // a quote smile's bid–ask bars: one line series, each bar its caps and a break
+    // (quoteOption); a custom series built an element per quote on every switch
     if (s.type === 'errorbar' && spec.quotes) {
       return Object.assign(base, { type: 'line', data: data, _bars: true, showSymbol: false, connectNulls: false,
         lineStyle: { color: c, width: 1.2 }, itemStyle: { color: c } });
@@ -573,28 +570,23 @@
       legend: { show: false },
       series: [],
     };
-    // on a tab-filtered chart (the smile's 17 expiries) only the shown group's
-    // series are drawn: ECharts processes every series of an option on each
-    // update, hidden or not, and 205 of them made an expiry switch take 100 ms
+    // on a tab-filtered chart only the shown group's series are drawn
     opt._idx = groupIdx(spec, filter);
-    // Each grouped series is named by its place in the group ('g0', 'g1', ...)
-    // and its draw mode, so an expiry switch merges the new data into the series
-    // already drawn. On a quote smile a series toggled off carries no data: ECharts
-    // still processes a hidden series on every update, and the two models behind
-    // their toggles made each update twice as slow. opt._pos: a spec index's place
-    // among the drawn series
-    var slot = 0, empty = !!(spec.quotes && off);
+    // A grouped series is named by its place in the group ('g0', ...) and draw mode, so
+    // a switch merges into the series drawn. A quote smile leaves out what is toggled
+    // off and empty clip triangles (ECharts updates hidden series too). opt._pos: a spec
+    // index's place among the drawn
+    var slot = 0, drop = spec.quotes && off ? off : {};
     opt._pos = {};
     opt._idx.forEach(function (i) {
-      var s = spec.series[i], b = buildSeries(s, spec, T, i);
-      if (empty && off[legendKey(s)]) {
-        b.data = []; b.large = false;
-        if (b._clip) { b._clip.data = []; }
-      }
+      var s = spec.series[i];
+      if (drop[legendKey(s)]) return;
+      var b = buildSeries(s, spec, T, i), cl = b._clip;
       b.id = (filter !== undefined && s.group !== undefined ? 'g' + (slot++) : 's' + i) + (b.large ? 'L' : '');
       opt._pos[i] = opt.series.length;
       opt.series.push(b);
-      if (b._clip) { b._clip.id = b.id + 'c'; opt.series.push(b._clip); delete b._clip; }
+      delete b._clip;
+      if (cl && cl.data.length) { cl.id = b.id + 'c'; opt.series.push(cl); }
     });
     if (spec.y2) { var a2 = axis(spec.y2, T, false, spec); a2.splitLine = { show: false }; opt.yAxis.push(a2); }
     if (!spec.horizontal && spec.x && spec.x.fit && width) {
@@ -640,9 +632,8 @@
     return opt;
   }
 
-  // The selected expiry on a chart whose categories are expiries (spec.exps, the
-  // Surface #chart-by-expiry): a vertical line at its category, carried by a
-  // series of its own (merged by id when the selection moves)
+  // The selected expiry on a chart of expiries (spec.exps, #chart-by-expiry): a
+  // line at its category, a series of its own (merged by id)
   function cursorSeries(spec, T) {
     if (!spec.exps || Desk.expCursor === undefined) return null;
     var i = spec.exps.indexOf(Desk.expCursor), cats = (spec.x && spec.x.categories) || spec.xs || [];
@@ -660,9 +651,10 @@
     var rng = quoteRange(spec, filter);
     var x0 = opt.xAxis;
     x0.min = rng[0]; x0.max = rng[1]; x0.scale = false;
-    // the bid–ask bars' caps: 3 px either side, in x units
+    // the bid–ask bars' caps: 3 px either side, in x units; none under 8 px a quote
+    // (they would touch, and cost a fifth of a switch at 4× CPU)
     var plotW = Math.max(40, (width || 600) - (opt.grid.left || 0) - (opt.grid.right || 0));
-    var cap = rng[0] === null ? 0 : 3 * (rng[1] - rng[0]) / plotW;
+    var cap = rng[0] === null || plotW < 8 * rowsOf(spec, filter).length ? 0 : 3 * (rng[1] - rng[0]) / plotW;
     opt.series.forEach(function (s) {
       if (!s._bars) return;
       delete s._bars;
@@ -670,7 +662,10 @@
       s.data.forEach(function (p) {
         var x = p[0], lo = p[1], hi = p[2];
         if (x === null || lo === null || hi === null) return;
-        pts.push([x - cap, lo], [x + cap, lo], [x, lo], [x, hi], [x - cap, hi], [x + cap, hi], [x, null]);
+        if (cap) pts.push([x - cap, lo], [x + cap, lo]);
+        pts.push([x, lo], [x, hi]);
+        if (cap) pts.push([x - cap, hi], [x + cap, hi]);
+        pts.push([x, null]);
       });
       s.data = pts;
     });
@@ -692,7 +687,7 @@
         var q = nearestQuote(sp, f, ps[0].axisValue);
         if (!q) return '';
         var lines = quoteLines(sp, q, legendOff(id));
-        if (c) { c.qi = q.i; showReadout(id, lines); }
+        if (c && c.qi !== q.i) { c.qi = q.i; showReadout(id, lines); }      // only when the quote changes
         return quoteHtml(lines, T);
       },
     };
@@ -869,7 +864,7 @@
     var built = {};
     var off = legendOff(el.id);
     var opt = buildOption(spec, T, f, el.clientWidth, el.clientHeight, built, off);
-    opt.legend.selected = selection(spec, el.id, f, off);
+    if (!spec.quotes) opt.legend.selected = selection(spec, el.id, f, off);
     delete opt._idx; delete opt._pos;
     // a book: fetched when the page is idle after the first draw ('finished' fires
     // inside setOption, so it is listened for first)
@@ -884,7 +879,7 @@
     if (spec.zoomTo) bindZoomTo(inst, el.id);
     // drawn before the web fonts arrived: drawn again once they have (canvas text keeps its font)
     Desk.charts[el.id] = { el: el, chart: inst, spec: spec, T: T, early: !fontsReady,
-      labels: built.labels, qi: prev ? prev.qi : null };
+      labels: built.labels, qi: prev ? prev.qi : null, cursorAt: Desk.expCursor };
     if (grp) joinGroupZoom(el.id, grp);
     if (book && !hasRows(spec, f)) needBook(Desk.charts[el.id]);    // an expiry not inline: at once
     return inst;
@@ -898,11 +893,9 @@
     loadBook(c.spec).then(function () { bookFailed(c.el.id, null); ch.hideLoading(); queueRedraw(c.el.id); },
       function (err) { ch.hideLoading(); bookFailed(c.el.id, err); });
   }
-  // A tab switch on a drawn chart (the smile's expiry), or a model toggled on a
-  // quote smile: one merge of the series the new state draws (by id: the same
-  // place in the group keeps its series, its mark lines with it; the others are
-  // replaced), the legend state and, on a quote smile, the x range of both
-  // grids. The spec is not parsed again and nothing else is rebuilt.
+  // A tab switch on a drawn chart, or a model toggled on a quote smile: one merge of
+  // the series now drawn (by id), the legend state or, on a quote smile, the x range
+  // of both grids. The spec is not parsed again.
   function applyFilter(c) {
     var spec = c.spec, el = c.el, f = Desk.filters[el.id], off = legendOff(el.id);
     if (spec.quotes) {
@@ -912,8 +905,8 @@
     // the drawn size, not the element's: reading that would lay the page out again
     // in the middle of a tab switch (the tables of the new group just shown)
     var opt = buildOption(spec, c.T, f, c.chart.getWidth(), c.chart.getHeight(), {}, off);
-    var up = { series: opt.series, legend: { selected: selection(spec, el.id, f, off) } };
-    if (spec.quotes) up.xAxis = opt.xAxis;
+    var up = { series: opt.series };
+    if (spec.quotes) up.xAxis = opt.xAxis; else up.legend = { selected: selection(spec, el.id, f, off) };
     c.chart.setOption(up, { replaceMerge: ['series'] });
   }
   // The tab (or toggle) shows its new state in the next frame, the chart is drawn
@@ -1014,9 +1007,7 @@
     function toggleLegend(id) {
       var c = Desk.charts[id], f = Desk.filters[id];
       if (!c) return;              // not drawn yet: render() reads the buttons when it is
-      // one merge for every series of the key (a model's curve on 17 expiries
-      // was 17 dispatches, each a full update); another expiry's stay hidden.
-      // A quote smile draws no data for a series toggled off: its series are set again
+      // one merge for every series of the key; a quote smile is drawn again (it leaves out what is off)
       if (c.spec.quotes) queueRedraw(id);
       else c.chart.setOption({ legend: { selected: selection(c.spec, id, f) } });
       if (c.spec.quotes && c.qi !== null && c.qi !== undefined) {       // the readout's model rows follow
@@ -1164,18 +1155,19 @@
       var served = tabs.filter(function (t) { return t.getAttribute('aria-selected') === 'true'; })[0];
       // init: the page's first selection. It writes no state (a plain load keeps
       // its URL and its #panel anchor) and leaves charts the IntersectionObserver
-      // has not reached to it (the smile slices were drawn twice).
+      // has not reached to it. A switch writes the old and the new tab only (45 tabs
+      // written twice were 90 DOM mutations); the status line after the click's frame
       function select(tab, focus, init) {
         tabs.forEach(function (t) {
-          var on = t === tab;
-          t.setAttribute('aria-selected', on ? 'true' : 'false');
-          t.tabIndex = on ? 0 : -1;
-          var p = doc.getElementById(t.getAttribute('aria-controls'));
-          if (p && !shared) p.hidden = !on;
+          var on = t === tab, p = !shared && doc.getElementById(t.getAttribute('aria-controls'));
+          if (t.getAttribute('aria-selected') !== String(on)) t.setAttribute('aria-selected', String(on));
+          if (t.tabIndex !== (on ? 0 : -1)) t.tabIndex = on ? 0 : -1;
+          if (p && p.hidden === on) p.hidden = !on;
         });
         if (focus) tab.focus();
         if (strip) keepInView(list, tab);
-        if (status && !(init && tab === served)) expiryStatus(status, tab);
+        if (status && init && tab !== served) expiryStatus(status, tab);
+        else if (status && !init) afterPaint('status', function () { expiryStatus(status, $('[aria-selected="true"]', list)); });
         if (key && !init) state.set(key, tab.getAttribute('data-value'));
         if (key === 'exp' && Desk.onExpiry) Desk.onExpiry(tab.getAttribute('data-value'), !!init);
         var target = list.getAttribute('data-chart-filter');
@@ -1206,16 +1198,14 @@
   // A tab list can filter one chart's series by a "group" key (the smile slices).
   function filterChart(id, value) {
     Desk.filters[id] = value;
-    // a legend button of one group's series (an earlier session's line) shows with its group only
-    $$('[data-legend-for="' + id + '"][data-group]').forEach(function (b) {
-      b.hidden = String(b.getAttribute('data-group')) !== String(value);
+    // its legend buttons of one group (an earlier session's line) and its per-group tables
+    // follow; only those that change are written
+    $$('[data-legend-for="' + id + '"][data-group], #' + id + '-data [data-group]').forEach(function (b) {
+      var h = String(b.getAttribute('data-group')) !== String(value);
+      if (b.hidden !== h) b.hidden = h;
     });
-    // the chart's per-group tables (its data equivalent) follow the same tab
-    $$('[data-group]', doc.getElementById(id + '-data') || doc.createElement('div')).forEach(function (g) {
-      g.hidden = String(g.getAttribute('data-group')) !== String(value);
-    });
-    resetReadout(id);
-    if (Desk.charts[id]) queueRedraw(id);     // not yet drawn: render() applies the filter when it is
+    var c = Desk.charts[id];
+    if (c) { c.qi = null; queueRedraw(id); afterPaint(id + '-r', function () { resetReadout(id); }); }    // not yet drawn: render() applies the filter
   }
 
   // -- quote smiles: the keyboard readout (focusable: arrow keys step through the
@@ -1226,9 +1216,9 @@
     if (r) r.textContent = quoteText(lines);
   }
   function resetReadout(id) {
-    var r = doc.getElementById(id + '-readout'), c = Desk.charts[id];
+    var r = doc.getElementById(id + '-readout'), c = Desk.charts[id], t = r && r.getAttribute('data-idle');
     if (c) c.qi = null;
-    if (r && r.getAttribute('data-idle')) r.textContent = r.getAttribute('data-idle');
+    if (t && r.textContent !== t) r.textContent = t;
   }
   function stepQuote(id, key) {
     var c = Desk.charts[id];
@@ -1447,32 +1437,51 @@
     var list = $('[role="tablist"][data-state-key="exp"]');
     return list ? $$('[role="tab"]', list) : [];
   }
+  // A switch marks its rows after the click's frame; their tables' tab stops, each
+  // capped grid's scroll to its row and the by-expiry line (on screen only) wait for idle
+  var marked = null, cursorIO = 'IntersectionObserver' in window && new IntersectionObserver(function (es) {
+    es.forEach(function (e) { if (e.isIntersecting) moveCursor(Desk.charts[e.target.id]); });
+  });
+  function expRows(e) { return e ? $$('tr[data-exp="' + e + '"]') : []; }
+  function markRows() {
+    var e = Desk.expCursor, rows = expRows(e);
+    if (e !== marked) {
+      expRows(marked).forEach(function (tr) { tr.removeAttribute('aria-current'); });
+      rows.forEach(function (tr) { tr.setAttribute('aria-current', 'true'); });
+      marked = e;
+    }
+    return rows;
+  }
   function syncExpiry(exp, init) {
     Desk.expCursor = exp;
-    var tables = [];
-    // only the rows that change are touched (each attribute write restyles a table)
-    $$('tr[data-exp]').forEach(function (tr) {
-      var on = tr.getAttribute('data-exp') === exp, was = tr.hasAttribute('aria-current');
-      if (on && !was) tr.setAttribute('aria-current', 'true');
-      else if (!on && was) tr.removeAttribute('aria-current');
-      var t = tr.closest('table');
-      if (t && tables.indexOf(t) < 0) tables.push(t);
-    });
+    if (!init) return afterPaint('exp', function () { var rows = markRows(); idle(function () { settle(rows); }); });
+    markRows();
     // one tab stop per table: the selected row's head, else the first
-    tables.forEach(function (t) {
+    $$('table').forEach(function (t) {
       var b = t.querySelector('tr[aria-current="true"] .row-pick') || t.querySelector('.row-pick');
-      $$('.row-pick', t).forEach(function (o) { var want = o === b ? 0 : -1; if (o.tabIndex !== want) o.tabIndex = want; });
+      if (b) b.tabIndex = 0;
     });
-    // the by-expiry chart's line: drawn once the page is idle after the click
-    // (after the smile, which is drawn in the task after the click's frame)
-    var idle = window.requestIdleCallback || function (f) { return setTimeout(f, 50); };
-    if (!init) idle(function () { cursorNow(); }); else cursorNow();
-    function cursorNow() {
-      Object.keys(Desk.charts).forEach(function (k) {
-        var c = Desk.charts[k];
-        if (c.spec && c.spec.exps) c.chart.setOption({ series: [cursorSeries(c.spec, c.T)] });
-      });
+    idle(function () { settle(expRows(exp)); });
+  }
+  function settle(rows) {
+    var moves = rows.map(function (tr) {
+      var w = tr.closest('.heat-wrap.capped'), h = tr.closest('table').tHead;
+      if (!w || w.scrollHeight <= w.clientHeight) return 0;
+      var a = w.getBoundingClientRect(), r = tr.getBoundingClientRect(), top = a.top + (h ? h.offsetHeight : 0);
+      return r.top < top || r.bottom > a.bottom ? r.top - top - (a.bottom - top - r.height) / 2 : 0;
+    });
+    rows.forEach(function (tr, i) {
+      var b = tr.querySelector('.row-pick'), o = tr.closest('table').querySelector('.row-pick[tabindex="0"]');
+      if (b && o !== b) { if (o) o.tabIndex = -1; b.tabIndex = 0; }
+      if (moves[i]) tr.closest('.heat-wrap').scrollTop += moves[i];
+    });
+    for (var k in Desk.charts) {
+      var c = Desk.charts[k], r = c.spec.exps && c.el.getBoundingClientRect();
+      if (r && (!cursorIO || (r.bottom > 0 && r.top < innerHeight))) moveCursor(c);
     }
+  }
+  function moveCursor(c) {
+    if (c && c.cursorAt !== Desk.expCursor) { c.cursorAt = Desk.expCursor; c.chart.setOption({ series: [cursorSeries(c.spec, c.T)] }); }
   }
   function pickExpiry(exp) {
     var tab = expiryTabs().filter(function (t) { return t.getAttribute('data-value') === exp; })[0];
@@ -1488,6 +1497,7 @@
   function bindExpiryPick(inst, id) {
     if (inst.__expPick) return;
     inst.__expPick = true;
+    if (cursorIO) cursorIO.observe(inst.getDom());
     var zr = inst.getZr();
     var at = function (e) {
       var c = Desk.charts[id], p = [e.offsetX, e.offsetY];
@@ -1622,7 +1632,7 @@
       var set = function (open) { links.classList.toggle('open', open); btn.setAttribute('aria-expanded', open ? 'true' : 'false'); };
       btn.addEventListener('click', function () { set(!links.classList.contains('open')); });
       doc.addEventListener('keydown', function (e) { if (e.key === 'Escape' && links.classList.contains('open')) { set(false); btn.focus(); } });
-      doc.addEventListener('click', function (e) { if (!btn.contains(e.target) && !links.contains(e.target)) set(false); });
+      doc.addEventListener('click', function (e) { if (links.classList.contains('open') && !btn.contains(e.target) && !links.contains(e.target)) set(false); });
     }
     // the phone strip's source list (Q20) closes like the menu; a tap on no
     // control fires no click in iOS Safari, so pointerdown too

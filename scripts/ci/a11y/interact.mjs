@@ -56,6 +56,11 @@
 //     100 ms, 300 ms at 4×. (It re-parsed a 250 KB spec and rebuilt every series
 //     on each click: 160 ms, 640 ms at 4×, measured on the previous desk.js.) The
 //     data file is loaded first (Desk.quotesReady): the check times a switch, not a download.
+//     The work of a switch, which does not depend on the runner's load, is checked too
+//     (D3): each click's own task writes at most 6 DOM nodes (the old and new tab, the
+//     old and new table; 45 tabs, 45 tables and 270 rows were rewritten), the smile then
+//     draws at most 16 series with a legend map of at most 16 keys, and it is never
+//     resized (no ResizeObserver entry over the five switches);
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -528,7 +533,7 @@ async function checkSessionFile() {
     const st = await page.evaluate(([cid, e]) => new Promise(done => {
       const c = Desk.charts[cid], ch = c.chart;
       const fin = () => { ch.off('finished', fin); requestAnimationFrame(() => {
-        const mid = ch.getOption().series.find(s => s.name === 'mid');
+        const mid = ch.getOption().series.find(s => s && s.name === 'mid');      // replaceMerge leaves holes
         done({ exp: e, mids: mid ? mid.data.length : null, quotes: Desk.rowsOf(c.spec, e).length }); }); };
       ch.on('finished', fin);
       document.querySelector(`[data-chart-filter="${cid}"] [data-value="${e}"]`).click();
@@ -565,6 +570,30 @@ async function timed(page, act, id) {
   return { ms: timing.length ? Math.max(...timing.map(e => e.d)) : 16,
            drawn: drawn !== null && click ? Math.round(drawn - click.t) : null };
 }
+// five switches by script (no pointer): the DOM mutations of each click's own task,
+// then, once drawn, the smile's series and legend keys; the ResizeObserver entries
+// on the smile over all five
+const SWITCH_WORK_JS = async ([id, picks]) => {
+  const c = Desk.charts[id], ch = c.chart, frame = () => new Promise(r => requestAnimationFrame(r));
+  let ro = -1;
+  const obs = new ResizeObserver(es => { ro += ro < 0 ? 1 : es.length; });
+  obs.observe(c.el);
+  await frame(); await frame();
+  const out = [];
+  for (const e of picks) {
+    const mo = new MutationObserver(() => {});
+    mo.observe(document, { subtree: true, attributes: true, childList: true, characterData: true });
+    const drawn = new Promise(done => { const fin = () => { ch.off('finished', fin); frame().then(done); }; ch.on('finished', fin); });
+    document.querySelector(`[data-chart-filter="${id}"] [data-value="${e}"]`).click();
+    const click = mo.takeRecords().map(r => `${r.type} ${r.attributeName || ''} ${r.target.id || r.target.tagName}`);
+    mo.disconnect();
+    await drawn;
+    const o = ch.getOption();
+    out.push({ exp: e, click, series: o.series.filter(Boolean).length, legend: Object.keys((o.legend[0] || {}).selected || {}).length });
+  }
+  obs.disconnect();
+  return { out, ro };
+};
 async function checkSwitchSpeed() {
   const check = { name: 'the smile switches expiry and toggles a model quickly', views: [], failures: [] };
   for (const rate of [1, 4]) {
@@ -588,6 +617,14 @@ async function checkSwitchSpeed() {
     for (const v of picks) runs.push(await timed(page, () => page.click(`[data-chart-filter="${id}"] [data-value="${v}"]`), id));
     const clicks = runs.map(r => r.ms), drawn = runs.map(r => r.drawn);
     const view = { rate, clicks, median: median(clicks), drawn };
+    if (rate === 1) {
+      view.work = await page.evaluate(SWITCH_WORK_JS, [id, picks]);
+      for (const w of view.work.out) {
+        if (w.click.length > 6) check.failures.push(`surface.html #${id} ${w.exp}: the click's task wrote ${w.click.length} DOM nodes (${w.click.slice(0, 8).join('; ')}), limit 6`);
+        if (w.series > 16 || w.legend > 16) check.failures.push(`surface.html #${id} ${w.exp}: ${w.series} series and ${w.legend} legend keys drawn, limit 16 each`);
+      }
+      if (view.work.ro) check.failures.push(`surface.html #${id}: resized ${view.work.ro} time(s) by five expiry switches`);
+    }
     if (view.median > SWITCH_MAX_MS[rate]) check.failures.push(`surface.html #${id} at ${rate}× CPU: median expiry switch ${view.median} ms (${clicks.join(', ')}), limit ${SWITCH_MAX_MS[rate]} ms`);
     if (drawn.some(d => d === null)) check.failures.push(`surface.html #${id} at ${rate}× CPU: an expiry switch did not draw the chart again (${drawn.join(', ')})`);
     else {

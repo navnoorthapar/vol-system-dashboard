@@ -4294,7 +4294,7 @@ _PICK_JS = """(e) => new Promise(done => {
   const c = Desk.charts['chart-slices'], ch = c.chart;
   const fin = () => { ch.off('finished', fin); requestAnimationFrame(() => done(state())); };
   const state = () => { const o = ch.getOption(), rows = Desk.rowsOf(c.spec, e);
-    const mid = o.series.find(s => s.name === 'mid' || s.name === e + ' mid')
+    const mid = o.series.find(s => s && (s.name === 'mid' || s.name === e + ' mid'))
       || {};
     return { filter: Desk.filters['chart-slices'], decoded: Object.keys(c.spec._rows).sort(),
              rows: rows.length, mids: (mid.data || []).length, x: [o.xAxis[0].min, o.xAxis[0].max],
@@ -4305,7 +4305,7 @@ _PICK_JS = """(e) => new Promise(done => {
 
 
 _SHOWN_MIDS_JS = ("Desk.charts['chart-slices'].chart.getOption().series"
-                  ".find(s => s.name === 'mid').data.length")
+                  ".find(s => s && s.name === 'mid').data.length")
 
 
 def _syn_tabs(sb, n: int) -> list[str]:
@@ -4421,6 +4421,128 @@ def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(
         assert st["shown"] == [other], (how, st)
         assert errors == [], (how, errors)
         ctx.close()
+
+# five expiry switches on a drawn smile: the DOM mutations of each click's own task,
+# then (the chart drawn, the deferred work done) what the smile draws; and the
+# ResizeObserver entries on the smile over all five
+_SWITCH_WORK_JS = """async (picks) => {
+  const id = 'chart-slices', c = Desk.charts[id], ch = c.chart;
+  const frame = () => new Promise(r => requestAnimationFrame(r));
+  let ro = -1;
+  const obs = new ResizeObserver(es => { ro += ro < 0 ? 1 : es.length; });
+  obs.observe(c.el);
+  await frame(); await frame();
+  const out = [];
+  for (const e of picks) {
+    const mo = new MutationObserver(() => {});
+    mo.observe(document, { subtree: true, attributes: true, childList: true, characterData: true });
+    const drawn = new Promise(done => {
+      const fin = () => { ch.off('finished', fin); frame().then(done); };
+      ch.on('finished', fin); });
+    document.querySelector(`[data-chart-filter="${id}"] [data-value="${e}"]`).click();
+    const click = mo.takeRecords()
+      .map(r => r.type + ' ' + (r.attributeName || '') + ' ' + (r.target.id || r.target.tagName));
+    mo.disconnect();
+    await drawn;
+    await new Promise(r => setTimeout(r, 150));
+    const o = ch.getOption(), g = o.grid[0], ser = o.series.filter(Boolean);    // replaceMerge leaves holes
+    const len = n => ((ser.find(s => s.name === n) || {}).data || []).length;
+    out.push({ exp: e, click, series: ser.length,
+      legend: Object.keys((o.legend[0] || {}).selected || {}).length,
+      quotes: Desk.rowsOf(c.spec, e).length, mids: len('mid'), bars: len('bid–ask'),
+      plotW: ch.getWidth() - g.left - g.right,
+      status: document.getElementById('slices-status').textContent,
+      current: [...document.querySelectorAll('tr[aria-current]')].map(r => r.dataset.exp) });
+  }
+  obs.disconnect();
+  return { out, ro };
+}"""
+
+
+def test_browser_an_expiry_switch_writes_six_nodes_in_its_click_and_draws_one_expiry(syn_browser):
+    """D3: an expiry click wrote aria-selected and tabindex on all 45 tabs, hid 45
+    bucket tables, rewrote the status line and the aria-current of 270 heatmap rows in
+    its own task (about 150 DOM mutations before the next paint), and the smile drew
+    17 series, the models toggled off among them. On the synthetic 45-expiry page each
+    click's task now writes at most 6 nodes (the old and new tab, the old and new
+    table); after the frame the status line names the expiry and only its rows are
+    aria-current. The smile draws at most 16 series with a legend map of at most 16
+    keys, every quote of the expiry, bid–ask caps only with 8 px a quote (7 points a
+    bar, else 3), and never changes size (no ResizeObserver entry over the 5 switches)."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1440)
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    page.evaluate("Desk.quotesReady('chart-slices')")
+    first = page.evaluate("Desk.filters['chart-slices']")
+    book = _with_book(_raw_specs(sb["html"][45])["chart-slices"], sb["site"])["quotes"]["groups"]
+    by_n = sorted((len(g["mid"]), e) for e, g in book.items() if e != first)
+    picks = [by_n[0][1], by_n[-1][1], by_n[len(by_n) // 2][1], by_n[1][1], first]
+    r = page.evaluate(_SWITCH_WORK_JS, picks)
+    assert r["ro"] == 0, r["ro"]
+    caps = set()
+    for st in r["out"]:
+        assert len(st["click"]) <= 6, "; ".join(st["click"])
+        assert st["series"] <= 16, st
+        assert st["legend"] <= 16, st
+        assert st["mids"] == st["quotes"] == len(book[st["exp"]]["mid"]), st
+        cap = st["plotW"] >= 8 * st["quotes"]
+        caps.add(cap)
+        assert st["bars"] == (7 if cap else 3) * st["quotes"], st
+        assert st["status"].startswith(st["exp"] + " · "), st
+        assert set(st["current"]) == {st["exp"]}, st
+    assert caps == {True, False}           # both kinds of expiry were drawn
+    ctx.close()
+
+
+def test_browser_the_quote_readout_is_written_only_when_the_quote_changes(syn_browser):
+    """D3: the tooltip rewrote the quote readout (an aria-live region) on every pointer
+    move over the smile, the same text each time. It is written when the nearest
+    quote changes: moving the pointer within one quote writes nothing."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1440)
+    page.locator("#chart-slices").scroll_into_view_if_needed()
+    _wait_for_chart(page, "chart-slices")
+    pos = page.evaluate(_SMILE_MIDDLE_QUOTE_JS, "chart-slices")
+    page.mouse.move(pos["x"], pos["y"])
+    page.wait_for_timeout(250)
+    page.evaluate("""() => { window.__ro = 0; new MutationObserver(r => { window.__ro += r.length; })
+      .observe(document.getElementById('chart-slices-readout'),
+               {subtree: true, childList: true, characterData: true}); }""")
+    for dx, dy in ((0.4, 0), (0, 3), (-0.4, -3)):
+        page.mouse.move(pos["x"] + dx, pos["y"] + dy)
+        page.wait_for_timeout(150)
+    assert page.locator("#chart-slices-readout").inner_text().startswith("K ")
+    assert page.evaluate("window.__ro") == 0
+    ctx.close()
+
+
+def test_browser_a_capped_grid_scrolls_its_own_rows_to_the_selected_expiry(syn_browser):
+    """D3: from 1181 px the 45-row IV and residual grids scroll inside their rows
+    (C1), so the row of an expiry picked on the smile's strip could sit out of view
+    in its grid. Once the page is idle each capped grid scrolls itself (its own
+    scrollTop, never the page) to show that row below its sticky head."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1440)
+    tabs = _syn_tabs(sb, 45)
+    y0 = page.evaluate("scrollY")
+    for e in (tabs[-1], tabs[len(tabs) // 2], tabs[0]):
+        page.evaluate("(e) => document.querySelector("
+                      "`[data-chart-filter='chart-slices'] [data-value='${e}']`).click()", e)
+        page.wait_for_timeout(2500)
+        st = page.evaluate("""(e) => [...document.querySelectorAll('.heat-wrap.capped')]
+          .filter(w => w.offsetParent && w.scrollHeight > w.clientHeight + 1)
+          .map(w => { const tr = w.querySelector(`tr[data-exp="${e}"]`), a = w.getBoundingClientRect();
+            if (!tr) return null;
+            const r = tr.getBoundingClientRect(), head = w.querySelector('thead').getBoundingClientRect();
+            return { id: w.querySelector('table').id, top: r.top - head.bottom,
+                     bottom: a.bottom - r.bottom }; })
+          .filter(Boolean)""", e)
+        assert st, e
+        assert all(x["top"] >= -1 and x["bottom"] >= -1 for x in st), (e, st)
+    assert page.evaluate("scrollY") == y0
+    ctx.close()
+
 
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
     """UI-8 / UI-15: no layout shift after first paint; at 390 px no caption runs
@@ -8551,11 +8673,12 @@ def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_on
       const off = [...document.querySelectorAll('[data-legend-for="chart-slices"][aria-pressed="false"]')]
         .map(b => b.dataset.series);
       const keyOf = n => (c.spec.series.find(x => x.name === n || x.name + ' beyond the clip' === n) || {});
-      const drawn = o.series.filter(s => s.id !== 'zband');
+      const drawn = o.series.filter(s => s && s.id !== 'zband');
       const clip = c.spec.quotes.zClip || 10;
-      const len = n => ((o.series.find(s => s.name === n) || {}).data || []).length;
+      const len = n => ((drawn.find(s => s.name === n) || {}).data || []).length, g = o.grid[0];
       return {
         kept: c.spec.__kept === true, filter: Desk.filters['chart-slices'],
+        plotW: c.chart.getWidth() - g.left - g.right,
         names: drawn.map(s => s.name), template: c.spec.series.map(s => s.name),
         marked: drawn.filter(s => s.markLine && (s.markLine.data || []).length).map(s => s.name),
         offWithData: drawn.filter(s => (s.data || []).length).map(s => s.name)
@@ -8563,7 +8686,7 @@ def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_on
         rows: rows.length, mids: len('mid'), bars: len('bid–ask'),
         clipped: rows.filter(q => Object.values(q.models)
           .some(m => m.z !== null && Math.abs(m.z) > clip)).length,
-        triangles: o.series.filter(s => / beyond the clip$/.test(s.name))
+        triangles: drawn.filter(s => / beyond the clip$/.test(s.name))
           .reduce((n, s) => n + (s.data || []).filter(p => p.symbol === 'triangle').length, 0) }; }"""
     for exp in [*[e for e in exps if e != first][:3], first]:
         page.click(f"[data-chart-filter='chart-slices'] [data-value='{exp}']")
@@ -8577,8 +8700,9 @@ def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_on
         assert st["marked"], st
         assert not st["offWithData"], st["offWithData"]
         assert st["mids"] == st["rows"] == len(spec["quotes"]["groups"][exp]["mid"]), st
-        # one bar per quote: lower cap, the bar, upper cap and a break (7 points)
-        assert st["bars"] == 7 * st["rows"]
+        # one bar per quote: lower cap, the bar, upper cap and a break (7 points); no caps
+        # under 8 px a quote (3 points)
+        assert st["bars"] == (7 if st["plotW"] >= 8 * st["rows"] else 3) * st["rows"]
         assert st["triangles"] <= st["clipped"] * len(spec["quotes"]["models"])
     ctx.close()
 
@@ -8823,7 +8947,7 @@ def test_browser_calibration_smiles_are_small_multiples(site_browser):
     page.click(f"#smile-group-tools [data-series='{hk}']")
     page.wait_for_timeout(400)
     left = page.evaluate("""([ids, hk]) => ids.map(id => Desk.charts[id].chart.getOption().series
-        .filter(s => s.name.endsWith(' ' + hk)).reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
+        .filter(s => s && s.name.endsWith(' ' + hk)).reduce((n, s) => n + (s.data || []).length, 0))""", [ids, hk])
     assert left == [0] * len(ids), left
     with page.expect_download() as dl:
         page.click("[data-csv-group]")
