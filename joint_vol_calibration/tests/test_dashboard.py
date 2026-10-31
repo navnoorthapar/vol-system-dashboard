@@ -1946,6 +1946,57 @@ def test_a_chain_the_backtest_excludes_has_no_surface_beta_and_a_true_minus(dash
     assert note is None or "β estimator" not in note.group(1)
 
 
+def test_the_vix_gap_is_given_by_the_book_each_session_was_built_from(dash, pages):
+    """FUND_GRADE_PLAN 0.8: the history listed every session's VIX replication gap,
+    and the VIX tile ranged over all of them, whether the replication was set
+    against the 16:15 ET close at the instant it is computed (a Cboe closing book),
+    hours after it (the overnight book) or at no recorded instant (a Yahoo chain).
+    Each history row now names its book from the session's surface.json record, a
+    table gives the gap's sessions, median and range per book, and the tile ranges
+    over the sessions of this session's book only. Expected values are derived from
+    the stored artifacts, whatever sessions the bot has added."""
+    import html as _html
+
+    ds = dash.desk_surface
+    index = json.loads((SHIPPED / "surface" / "index.json").read_text())["sessions"]
+    books, gaps = {}, {}
+    for r in index:
+        sj = SHIPPED / "surface" / r["session"] / "surface.json"
+        if sj.exists():
+            books[r["session"]] = ds.replication_book(json.loads(sj.read_text()).get("inputs"))
+        if r.get("vix_replicated") is not None and r.get("vix_official") is not None:
+            gaps[r["session"]] = r["vix_replicated"] - r["vix_official"]
+    html = pages["/surface"]
+
+    def cells(table_id):
+        tbl = re.search(rf'<table[^>]*id="{table_id}".*?</table>', html, re.DOTALL)
+        assert tbl, table_id
+        return [[_html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
+                for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tbl.group(0), re.DOTALL)
+                if "<td" in tr]
+
+    hist = {row[0]: row for row in cells("surface-history-table")}
+    assert set(hist) == {r["session"] for r in index}
+    for session, row in hist.items():
+        assert row[1] == ds.BOOK_LABELS.get(books.get(session) or "", "—"), session
+    want = ds.gap_by_book([{"book": books.get(s), "gap": g} for s, g in gaps.items()])
+    got = cells("vix-gap-by-book")
+    assert [r[0] for r in got] == [w["label"] for w in want]
+    for row, w in zip(got, want):
+        assert row[1] == f"{w['n']:,}"
+        assert row[2] == dash.signed(w["median"], ".2f")
+        assert row[3] == ("—" if w["lo"] is None else
+                          f"{dash.signed(w['lo'], '.2f')} to {dash.signed(w['hi'], '.2f')}")
+    # the tile: the range over the sessions of the page's own book
+    newest = max(s for s in hist)
+    own = books.get(newest)
+    same = [g for s, g in gaps.items() if own is None or books.get(s) == own]
+    tile = _visible_text(html)
+    if len(same) > 1:
+        assert f"gap, {len(same)} {ds.BOOK_SESSIONS.get(own or '', 'sessions')}: " in tile
+
+
 def test_beta_copy_names_its_chains_and_the_later_check(dash, pages):
     """'β = 0.82, estimated from five real 2026 SPX chains (0.80–0.84)': the five
     were 4 DB chains and a live capture, the range was typed in, and the later

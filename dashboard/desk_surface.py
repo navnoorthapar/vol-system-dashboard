@@ -483,6 +483,56 @@ def vix_calc_time_words(vix_rep: Mapping | None) -> str | None:
     return CALC_BASIS_WORDS.get(str((vix_rep or {}).get("calculation_time_basis")))
 
 
+# The book a session's surface, and so its VIX replication, was built from, as
+# the page names it (FUND_GRADE_PLAN 0.8): a Cboe closing book's quotes stand at
+# the close the Cboe print is computed at, so its gap is the replication's own;
+# an overnight (Global Trading Hours) book was quoted hours after that print, so
+# its gap also holds the overnight move; a Yahoo chain records no quote time.
+BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER = "closing", "overnight", "yahoo", "other"
+BOOK_LABELS = {BOOK_CLOSING: "Closing book", BOOK_OVERNIGHT: "Overnight book",
+               BOOK_YAHOO: "Yahoo chain", BOOK_OTHER: "Other Cboe book"}
+# the sessions of one book, counted ('4 overnight-book sessions')
+BOOK_SESSIONS = {BOOK_CLOSING: "closing-book sessions", BOOK_OVERNIGHT: "overnight-book sessions",
+                 BOOK_YAHOO: "Yahoo-chain sessions", BOOK_OTHER: "other Cboe-book sessions"}
+# surface.json inputs.book_state (cboe_downloader.book_state_at) -> the page's book
+_BOOK_OF_STATE = {"closing": BOOK_CLOSING, "gth": BOOK_OVERNIGHT}
+
+
+def replication_book(inputs: Mapping | None) -> str | None:
+    """Which book (BOOK_*) a session was built from, read from its surface.json
+    ``inputs``: a Cboe book by the state its capture recorded (closing,
+    overnight, or another instant: 'other'); a chain of any other source is a
+    Yahoo chain. None when the record names no source."""
+    inp = inputs or {}
+    src = inp.get("source")
+    if not src:
+        return None
+    if src != "cboe":
+        return BOOK_YAHOO
+    return _BOOK_OF_STATE.get(str(inp.get("book_state")), BOOK_OTHER)
+
+
+def gap_by_book(rows: Iterable[Mapping]) -> list[dict]:
+    """The replication gap's distribution by book over the stored sessions:
+    [{"book", "label", "n", "median", "lo", "hi"}] from rows carrying "book"
+    (replication_book) and "gap" (replicated − Cboe close), one entry per book
+    with at least one session, in BOOK_LABELS order; lo and hi are None for a
+    single session (a range needs two)."""
+    by: dict[str, list[float]] = {}
+    for r in rows:
+        g = _num(r.get("gap"))
+        if r.get("book") in BOOK_LABELS and g is not None:
+            by.setdefault(str(r["book"]), []).append(g)
+    out = []
+    for book, label in BOOK_LABELS.items():
+        xs = sorted(by.get(book, []))
+        if xs:
+            two = len(xs) > 1
+            out.append({"book": book, "label": label, "n": len(xs), "median": float(np.median(xs)),
+                        "lo": xs[0] if two else None, "hi": xs[-1] if two else None})
+    return out
+
+
 def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping], *,
                   causes: Sequence[str] | None = None) -> list[str]:
     """vix_replication.json's gap_notes with the producer's gap-attribution

@@ -6365,6 +6365,7 @@ def surface_extras(d: dict, surf: dict) -> None:
     # var-swap vol per listed expiry and at constant maturity (desk_surface.py).
     # A slice whose delta cannot be inverted raises: the page fails closed.
     sj = surf.get("surface") or {}
+    desk_inputs = None
     if (((sj.get("surfaces") or {}).get("svi_cal") or {}).get("params") or {}).get("slices"):
         listed = desk_surface.delta_grid(sj, res, surf.get("vix"))
         cm = desk_surface.constant_maturity(listed)
@@ -6749,17 +6750,32 @@ def surface_extras(d: dict, surf: dict) -> None:
     idx = surf.get("index") or []
     if idx:
         mk = list(models)
+        # the book each session was built from (its surface.json record): only a
+        # closing book's gap sets the replication against the Cboe close at one instant
+        if desk_inputs is None:
+            desk_inputs = artifacts.load_surface_desk_inputs(DATA)
+        books = {s["session"]: desk_surface.replication_book((s["surface"] or {}).get("inputs"))
+                 for s in desk_inputs}
         d["history_models"] = [{"key": m, "label": model_short(m)} for m in mk]
         d["surface_history"] = [{"session": r["session"], "n": r.get("n_quotes"),
                                  "arb_out": r.get("arbitrage_quotes_outside_spread"),
                                  "vix_rep": _num(r.get("vix_replicated")),
                                  "vix_off": _num(r.get("vix_official")),
                                  "beta": _num(r.get("atm_over_vix_official")),
+                                 "book": books.get(r["session"]),
                                  # the out-of-sample median |z| of the scorecard, as every headline
                                  "oos": {m: oos_by.get((r["session"], m)) for m in mk}} for r in idx]
-        d["vix_gap_range"] = session_range(
-            (h["vix_rep"] - h["vix_off"]) for h in d["surface_history"]
-            if h["vix_rep"] is not None and h["vix_off"] is not None)
+        for h in d["surface_history"]:
+            h["gap"] = (h["vix_rep"] - h["vix_off"]
+                        if h["vix_rep"] is not None and h["vix_off"] is not None else None)
+            h["book_label"] = desk_surface.BOOK_LABELS.get(h["book"] or "")
+        # FUND_GRADE_PLAN 0.8: the gap's median and range by book, and the tile's range
+        # over the sessions of this session's own book, so a range never mixes a
+        # same-instant gap with one that holds the overnight move
+        d["vix_gap_by_book"] = desk_surface.gap_by_book(d["surface_history"])
+        own = books.get(session)
+        same = [h["gap"] for h in d["surface_history"] if own is None or h["book"] == own]
+        d["vix_gap_range"] = session_range(same, what=desk_surface.BOOK_SESSIONS.get(own or "", "sessions"))
 
 
 def _clean_keep(d: dict) -> dict:

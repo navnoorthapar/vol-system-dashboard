@@ -709,6 +709,39 @@ def replication_instant(inputs: dict, session: str) -> tuple[str, str] | None:
     return at.replace(tzinfo=None).isoformat(timespec="minutes"), "chain_t_origin"
 
 
+# which book a session's replication sets against the Cboe close, as the page names it
+BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER = "closing", "overnight", "yahoo", "other"
+BOOK_ORDER = (BOOK_CLOSING, BOOK_OVERNIGHT, BOOK_YAHOO, BOOK_OTHER)
+GTH_CLOSE = dt.time(9, 15)
+
+
+def replication_book(inputs: dict | None, session: str) -> str | None:
+    """The book a session was built from, from surface.json's record of its chain and
+    this audit's own clock rules: a Cboe book quoted after the session's close and
+    outside the next session's Global Trading Hours (20:15 ET the evening before it to
+    09:15) is its closing book; one quoted inside them its overnight book; any other
+    Cboe instant (the session's own hours, the 09:15-09:30 pause) 'other'; a chain of
+    another source a Yahoo chain. None without a recorded source."""
+    inp = inputs or {}
+    src, qt = inp.get("source"), inp.get("quote_time")
+    if src is None:
+        return None
+    if src != "cboe":
+        return BOOK_YAHOO
+    if not qt:
+        return BOOK_OTHER
+    at = dt.datetime.fromisoformat(str(qt)).astimezone(NY)
+    day = dt.date.fromisoformat(session)
+    nxt = day + dt.timedelta(days=1)
+    while not is_session(nxt):
+        nxt += dt.timedelta(days=1)
+    if dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY) <= at < dt.datetime.combine(
+            nxt, GTH_CLOSE, NY):
+        return BOOK_OVERNIGHT
+    after_close = at >= dt.datetime.combine(day, cboe_close_time(session), NY)
+    return BOOK_CLOSING if after_close and at < dt.datetime.combine(nxt, GTH_CLOSE, NY) else BOOK_OTHER
+
+
 # ── the page's number formats ─────────────────────────────────────────────────
 def session_range(values: list[float | None]) -> tuple[int, float, float] | None:
     """(n, lo, hi) over the finite values, None with fewer than two."""

@@ -825,6 +825,46 @@ class TestRecomputeAudit:
             S.deviations(a, ctx, split, [S.CAUSE_TIMING, S.CAUSE_STALE])
             assert [c.label for c in a.checks if not c.ok] == [], far
 
+    def test_it_rebuilds_the_overnight_books_quote_time_and_hours_after_the_close(self, monkeypatch):
+        """FUND_GRADE_PLAN 0.8: a replication built from an overnight book says when the
+        book was quoted and how many hours after the session's 16:15 ET print. The
+        audit rebuilds both from surface.json's quote time and its own calendar, and,
+        from report_version 6, requires the note exactly on an overnight book."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+
+        def note(quoted, hours):
+            return (f"{S.OVERNIGHT_NOTE} (no closing book of the session is stored: Cboe’s delayed feed "
+                    f"shows it only until Global Trading Hours open at 20:15 ET), quoted at {quoted} ET, "
+                    f"{hours} hours after the 16:15 ET print of 2026-10-29 it is compared with: the gap "
+                    "mixes the replication’s error with the market’s move overnight.")
+
+        def failed(notes, quote_time="2026-10-30T08:36:08Z", version=6):
+            ctx = types.SimpleNamespace(
+                vx={"report_version": version}, session="2026-10-29",
+                sj={"inputs": {"source": "cboe", "quote_time": quote_time, "book_state": "gth"}})
+            html = "".join(f"<li>{n}</li>" for n in notes)
+            a = rc.core.Audit("t", BeautifulSoup(f"<ul>{html}</ul>", "lxml"))
+            S.overnight_note(a, ctx, a.soup.select("li"))
+            return [c.label for c in a.checks if not c.ok]
+
+        # Fri 04:36:08 ET: 12 h 21 min after Thursday's 16:15 ET print
+        assert failed([note("2026-10-30 04:36", "12.4")]) == []
+        assert failed([note("2026-10-30 04:36", "12.3")]) == [
+            "overnight-book note: hours from the Cboe close to the book's quote time"]
+        assert failed([note("2026-10-30 04:46", "12.4")]) == [
+            "overnight-book note: when the book was quoted (surface.json quote time, ET)"]
+        shown = "overnight-book note shown (the chain is an overnight book by this audit's clock)"
+        assert failed([]) == [shown]
+        assert failed([], version=5) == []                  # written before the note existed
+        # Thu 17:52 ET: the closing book, which has no such note
+        assert failed([], quote_time="2026-10-29T21:52:00Z") == []
+        assert failed([note("2026-10-29 17:52", "1.6")], quote_time="2026-10-29T21:52:00Z")[0] == shown
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its
@@ -848,6 +888,34 @@ class TestRecomputeAudit:
         yahoo = {"source": "yfinance", "quote_time": None, "t_origin": "2026-10-16T16:00:00-04:00"}
         assert M.replication_instant(yahoo, "2026-10-16") == ("2026-10-16T16:00", "chain_t_origin")
         assert M.replication_instant({"source": "yfinance"}, "2026-10-16") is None
+
+    def test_it_names_each_sessions_book_by_its_own_clock(self, monkeypatch):
+        """FUND_GRADE_PLAN 0.8: the Surface page names the book each session's VIX gap
+        was measured on and gives the gap's median and range per book. The audit
+        classifies each session from surface.json's source and quote time by its own
+        calendar (not the capture's recorded state): a Cboe book quoted after the
+        session's close and before the next Global Trading Hours open is its closing
+        book (a Friday's lasts the weekend), one inside those hours its overnight book,
+        any other Cboe instant 'other', any other source a Yahoo chain."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        cases = {"2026-10-19T02:30:00Z": M.BOOK_OVERNIGHT,        # Sun 22:30 ET: Monday's GTH
+                 "2026-10-17T00:30:00Z": M.BOOK_CLOSING,          # Fri 20:30 ET
+                 "2026-10-18T16:00:00Z": M.BOOK_CLOSING,          # Sunday noon
+                 "2026-10-16T21:55:00Z": M.BOOK_CLOSING,          # Fri 17:55 ET, the close slot
+                 "2026-10-16T20:10:00Z": M.BOOK_OTHER,            # Fri 16:10 ET, before the cutoff
+                 "2026-10-19T13:20:00Z": M.BOOK_OTHER}            # Mon 09:20 ET, the pause
+        for qt, want in cases.items():
+            assert M.replication_book({"source": "cboe", "quote_time": qt}, "2026-10-16") == want, qt
+        # a weekday: the closing book until 20:15 ET, the overnight one from then
+        assert M.replication_book({"source": "cboe", "quote_time": "2026-10-28T00:10:00Z"},
+                                  "2026-10-27") == M.BOOK_CLOSING            # Tue 20:10 ET
+        assert M.replication_book({"source": "cboe", "quote_time": "2026-10-28T00:20:00Z"},
+                                  "2026-10-27") == M.BOOK_OVERNIGHT          # Tue 20:20 ET
+        assert M.replication_book({"source": "yfinance", "quote_time": "2026-10-27T05:26:50Z"},
+                                  "2026-10-26") == M.BOOK_YAHOO
+        assert M.replication_book({}, "2026-10-26") is None
 
     def test_its_calendar_times_an_early_closes_closing_book_at_1315(self, monkeypatch):
         """Tier 0.5 review: on an NYSE early close SPX options and the VIX close at

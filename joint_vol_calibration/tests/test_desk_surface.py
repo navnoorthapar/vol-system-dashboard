@@ -630,3 +630,33 @@ def test_a_gap_split_that_does_not_add_up_is_not_shown():
     assert r["reason"] == "fewer than two usable terms"
     assert ds.vix_terms(None) == []
     assert ds.vix_terms({"indices": {}}) == []
+
+
+def test_each_session_names_the_book_its_vix_gap_was_measured_on():
+    """FUND_GRADE_PLAN 0.8: the Surface page listed every session's VIX replication
+    gap, and the tile ranged over all of them, whether the replication was set
+    against the 16:15 ET close at the instant it is computed (a Cboe closing book)
+    or hours after it (the overnight book) or at no recorded instant (a Yahoo
+    chain). Each session's book is read from its surface.json record, and the gap's
+    distribution is given per book: sessions, median, and a range from two."""
+    assert ds.replication_book({"source": "cboe", "book_state": "closing"}) == ds.BOOK_CLOSING
+    assert ds.replication_book({"source": "cboe", "book_state": "gth"}) == ds.BOOK_OVERNIGHT
+    assert ds.replication_book({"source": "cboe", "book_state": "pre_open"}) == ds.BOOK_OTHER
+    assert ds.replication_book({"source": "cboe"}) == ds.BOOK_OTHER
+    for src in ("yfinance", "yahoo"):              # a report_version 1 record names the vendor
+        assert ds.replication_book({"source": src, "quote_time": "2026-10-27T05:26:50Z"}) == ds.BOOK_YAHOO
+    assert ds.replication_book({}) is None
+    assert ds.replication_book(None) is None
+    rows = [{"book": ds.BOOK_YAHOO, "gap": -0.29}, {"book": ds.BOOK_OVERNIGHT, "gap": 1.32},
+            {"book": ds.BOOK_YAHOO, "gap": 0.09}, {"book": ds.BOOK_CLOSING, "gap": -0.05},
+            {"book": ds.BOOK_OVERNIGHT, "gap": -0.35}, {"book": ds.BOOK_OVERNIGHT, "gap": 0.28},
+            {"book": ds.BOOK_YAHOO, "gap": None}, {"book": None, "gap": 0.5}]
+    got = ds.gap_by_book(rows)
+    assert [g["book"] for g in got] == [ds.BOOK_CLOSING, ds.BOOK_OVERNIGHT, ds.BOOK_YAHOO]
+    for g in got:
+        xs = sorted(r["gap"] for r in rows if r["book"] == g["book"] and r["gap"] is not None)
+        assert g["label"] == ds.BOOK_LABELS[g["book"]]
+        assert g["n"] == len(xs)
+        assert g["median"] == pytest.approx(float(np.median(xs)))
+        assert (g["lo"], g["hi"]) == ((xs[0], xs[-1]) if len(xs) > 1 else (None, None))
+    assert ds.gap_by_book([]) == []
