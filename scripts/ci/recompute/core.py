@@ -127,11 +127,13 @@ class Audit:
         if el is not None:
             self.covered.add(id(el))
 
-    def data_file(self, panel: str, src: Any, integrity: Any) -> Any:
+    def data_file(self, panel: str, src: Any, integrity: Any, session: str) -> Any:
         """A session data file the page names (``src``, under the site's data/) and the
         integrity value it fetches it with, parsed; None, with a failed check, when it
-        is missing, outside data/, or its sha384 or the sha256 in its name disagree
-        with its bytes. A file the audit cannot read fails, it is never skipped."""
+        is missing, outside data/, its sha384 or the sha256 in its name disagree with
+        its bytes, or it is not schema 1 of ``session`` (checked for every reader, as
+        desk.js checks it on every fetch). A file the audit cannot read fails, it is
+        never skipped."""
         label = f"data file {src}"
         m = DATA_FILE.fullmatch(src) if isinstance(src, str) else None
         if self.site is None or m is None:
@@ -148,7 +150,11 @@ class Audit:
         ok = self.equal(panel, f"{label}: sha384 = the page's integrity value", sri, integrity)
         sha = hashlib.sha256(body).hexdigest()[:16]
         ok &= self.equal(panel, f"{label}: name = its sha256", m.group(1), sha)
-        return json.loads(body) if ok else None
+        if not ok:
+            return None
+        obj = json.loads(body)
+        head = [obj.get("schema"), obj.get("session")] if isinstance(obj, dict) else [None, None]
+        return obj if self.equal(panel, f"{label}: schema 1, this session", head, [1, session]) else None
 
     # ── recording ─────────────────────────────────────────────────────────────
     def fail(self, panel: str, label: str, expected: str, printed: str, note: str = "") -> None:

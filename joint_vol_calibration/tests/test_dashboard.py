@@ -11296,6 +11296,51 @@ def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_a
     assert not [x for x in bad if "data file" in x[1] and "readout" not in x[1]], bad
 
 
+def test_the_audit_checks_the_data_file_for_every_reader_and_typed_readout_numbers(recompute_audit,
+                                                                                  frozen_site, tmp_path):
+    """D2 review: the audit checked the session data file's schema and session for
+    the smile only, and passed a heatmap readout number written as a string or a
+    boolean (float() took it; desk.js prints a quote count as it is, so "37" or
+    true would show). In copies of the frozen site, the file re-hashed with the page
+    updated so only the content is wrong: another session's file fails its schema
+    and session check in every panel that reads it; a quote count written "37" and a
+    mid IV written as text each fail their readout check."""
+    import base64
+
+    html = (frozen_site / "surface.html").read_text(encoding="utf-8")
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    src, sri = q["src"], q["integrity"]
+    body = (frozen_site / src).read_bytes()
+
+    def failed(name, change) -> set[tuple[str, str]]:
+        site = tmp_path / name
+        shutil.copytree(frozen_site, site)
+        book = json.loads(body)
+        change(book)
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+        checks = recompute_audit.run(site, SHIPPED)["checks"]
+        return {(c.panel, c.label.replace(new_src, "<file>")) for c in checks
+                if not c.ok and c.page == "Surface"}
+
+    bad = failed("session", lambda book: book.update(session="2000-01-03"))
+    panels = {p for p, label in bad if label == "data file <file>: schema 1, this session"}
+    assert {"#iv-heat", "#slices"} <= panels, bad
+    assert len(panels) >= 3, panels                       # the residual grid's panel too
+
+    def cell(book):
+        return next(v for r in book["heat"]["iv-heatmap"]["cells"] for v in r if v)
+
+    bad = failed("count", lambda book: cell(book).__setitem__(1, str(cell(book)[1])))
+    assert ("#iv-heat", "mid IV readout number 2 (data file) = recompute, every cell") in bad
+    bad = failed("text", lambda book: cell(book).__setitem__(0, str(cell(book)[0])))
+    assert ("#iv-heat", "mid IV readout number 1 (data file) = recompute, every cell") in bad
+
+
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):
     """T11: every dot of the VIX-replication check's history is the signed gap
     (replicated − Cboe close) of its session's vix_replication.json, not |gap|;

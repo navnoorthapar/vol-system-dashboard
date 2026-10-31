@@ -1143,7 +1143,7 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
     if not same_len(a, panel, f"{what} rows", trs, c.exps):
         return out
     src = tbl.get("data-src") if tbl is not None else None
-    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None) or {}
+    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None, c.session) or {}
     a.equal(panel, f"{what} data file: this session", tbl.get("data-session") if tbl is not None else None,
             c.session)
     heat = (book.get("heat") or {}).get(tbl.get("id") if tbl is not None else "") or {}
@@ -1177,8 +1177,11 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
                 bad.setdefault("cell's numbers", []).append(f"{e} {M.bucket_label(b, True)}")
                 continue
             for j, (x, w, dec) in enumerate(zip(fv, want, decs)):
-                if not spec_ok(x, w, FULL_SIG, dec):
-                    bad.setdefault(f"number {j + 1}", []).append(f"{e} {M.bucket_label(b, True)}: {x} vs {w}")
+                # desk.js prints a number with no decimals ({1}: a quote count) as it is
+                kind = int if dec is None else (int, float)
+                if isinstance(x, bool) or not isinstance(x, kind) or not spec_ok(x, w, FULL_SIG, dec):
+                    at = f"{e} {M.bucket_label(b, True)}"
+                    bad.setdefault(f"number {j + 1}", []).append(f"{at}: {x!r} vs {w}")
     for name in ["cell's numbers", *(f"number {j + 1}" for j in range(len(decs)))]:
         a.equal(panel, f"{what} readout {name} (data file) = recompute, every cell",
                 bad.get(name, [])[:3], [])
@@ -1226,7 +1229,7 @@ def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
         return
     a.equal(P_IV, "3D view: points in the session data file, not the page",
             ["points" in sp, sp.get("session")], [False, c.session])
-    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity")) or {}
+    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity"), c.session) or {}
     got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3
            for p in (book.get("surface3d") or {}).get("points") or []]
     if same_len(a, P_IV, "3D view points", got, pts):
@@ -1404,9 +1407,7 @@ def packed_quotes(a: Audit, c: Ctx, default: str | None) -> None:
     q = sp.get("quotes") or {}
     groups = q.get("groups") or {}
     if q.get("template"):
-        book = a.data_file(P_SL, q.get("src"), q.get("integrity")) or {}
-        a.equal(P_SL, "data file: schema 1, this session", [book.get("schema"), book.get("session")],
-                [1, c.session])
+        book = a.data_file(P_SL, q.get("src"), q.get("integrity"), c.session) or {}
         a.equal(P_SL, "spec: session", q.get("session"), c.session)
         a.equal(P_SL, "spec: expiry order = the residual table's", q.get("order"), list(c.exps))
         bq = book.get("quotes") or {}
