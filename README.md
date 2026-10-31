@@ -120,8 +120,8 @@ why. Every committed SPX chain is fitted by the same calibrator (`data_store/cal
 | 2026-10-26 | 4.370 | 0.0550 | 1.833 | −0.691 | 0.0276 | 1.105 / 1.723 | 0.624 | n/a† |
 
 \* σ on its box ceiling, reported by the fit as an active constraint; Feller is violated in all six and imposed in none.
-† The Cboe VX history in the database ends 2026-10-09, before these sessions. The fits to 2026-10-16 are differential
-evolution; 2026-10-26 is the daily job's multi-start trust-region fit. The table stops at 2026-10-26; the
+† When these were fitted the database held no VX futures settlement for their session (each fit records none). The
+fits to 2026-10-16 are differential evolution; 2026-10-26 is the daily job's multi-start trust-region fit. The table stops at 2026-10-26; the
 [Calibration page](https://navnoorbawa.me/calibration.html) lists every later fit.
 
 What C23 measured about the five fits to 2026-10-16, and the diagnostics of 2026-10-26

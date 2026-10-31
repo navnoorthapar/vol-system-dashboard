@@ -94,14 +94,20 @@ AS_OF = ((README, FIRST_SCREEN), (PACK, ""))
 # artifact moves: scripts/ci/simulate_next_session.py runs the suite on the
 # tree the job leaves.
 JOB_CACHE = ("data_store/vol_system.db",)
-# The five sessions the C23 round measured: the claims about that round (the DE
-# timings, the Data table's option counts) stay pinned to them.
 # the fits the results range over (with a surface scorecard)
 RESULT_MODEL_VERSION = 2
+# The five sessions the C23 round measured: the claims about that round (the DE
+# timings, the Data table's option counts) stay pinned to them.
 C23_SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16")
 C23_HEADLINE = "2026-10-16"
 MINUS = "−"
 WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+# The causes the VIX replication's gap note names for the part of the gap the
+# stored chain does not explain ('Left unexplained by the chain: ...: <causes>.'),
+# in the validation pack's words. A cause not listed here stops the
+# regeneration, so the pack's sentence is reworded instead of misquoted.
+GAP_CAUSES = {"snapshot timing vs the 16:15 ET print": "snapshot timing against 16:15",
+              "stale quotes": "stale quotes", "rate": "the rate", "the rate": "the rate"}
 MARKET_ROWS = (("SPX OHLCV", "spx_ohlcv"), ("VIX daily", "vix_daily"),
                ("VIX term structure", "vix_term_structure"), ("T-bill rate", "tbill_rates"),
                ("Treasury curve and SOFR", "rates_daily"))
@@ -532,6 +538,45 @@ class Claims:
             raise Untrue(f"the VIX gap of {s} is not attributed ({ga.get('reason', 'no attribution')})")
         return dict(ga)
 
+    def gap_causes(self, s: str) -> tuple[str, ...]:
+        """What the replication's own gap note names as the causes of the part
+        of the VIX gap the stored chain does not explain (vix_replication.json,
+        the gap_notes entry 'Left unexplained by the chain: ...: <causes>.'),
+        in the pack's words (GAP_CAUSES)."""
+        notes = self.store.json(f"surface/{s}/vix_replication.json").get("gap_notes") or []
+        hits = [m for n in notes if (m := re.search(r"Left unexplained by the chain: .*\): (.+)\.$", n))]
+        if len(hits) != 1:
+            raise Untrue(f"the VIX gap notes of {s} do not name the causes of the unexplained part once")
+        causes = hits[0].group(1).split(", ")
+        unknown = [x for x in causes if x not in GAP_CAUSES]
+        if unknown:
+            raise Untrue(f"the VIX gap note of {s} names causes the pack has no words for: {unknown}")
+        return tuple(GAP_CAUSES[x] for x in causes)
+
+    def rough_floor(self, s: str) -> float:
+        """The lower bound of H that the joint rough Heston fit of ``s`` sits
+        on (the diagnostics: joint_rough_H at its bound, 'H' in
+        joint_rough_on_bound)."""
+        from joint_vol_calibration.config import ROUGH_HESTON_H_BOUNDS
+        floor = ROUGH_HESTON_H_BOUNDS[0]
+        r = self.diag(s)
+        if "H" not in (r.get("joint_rough_on_bound") or []) or abs(r["joint_rough_H"] - floor) > 1e-9:
+            raise Untrue(f"the joint rough Heston fit of {s} has H = {r['joint_rough_H']:.3f}, not its "
+                         f"{floor} floor")
+        return floor
+
+    def vix_options_off(self) -> None:
+        """Every fit the results range over gives the VIX-options leg no
+        weight (w3 = 0)."""
+        weighted = [s for s in self.sessions if self.cal(s)["weights"]["w3"] != 0.0]
+        if weighted:
+            raise Untrue(f"the VIX-options leg has weight in the fits of {weighted}")
+
+    def backtest_years(self) -> tuple[int, int]:
+        """The first and last year of the canonical backtest's window."""
+        eq = self.store.parquet("backtest/full_results.parquet")
+        return pd.Timestamp(eq.index[0]).year, pd.Timestamp(eq.index[-1]).year
+
     def common(self) -> dict[str, dict[str, Any]]:
         """Heston's and SVI's scores on the quotes no model was fitted to
         (CLM-15), which must be the same quotes."""
@@ -557,9 +602,7 @@ def _records(c: Claims) -> None:
         with c.claim(f"records/cboe_books_from/{name}", within=within) as k:
             k.text = f"Cboe's timestamped books are stored from {c.first_captures()['first_spx_session']}"
     with c.claim("records/vix_options_leg", within=FIRST_SCREEN) as k:
-        weighted = [s for s in c.sessions if c.cal(s)["weights"]["w3"] != 0.0]
-        if weighted:
-            raise Untrue(f"the VIX-options leg has weight in the fits of {weighted}")
+        c.vix_options_off()
         k.text = "VIX options are a research leg, not in the fit"
     with c.claim("records/ledger/first_screen", within=FIRST_SCREEN) as k:
         k.text = f"the forward ledger at executable prices starts on {c.first_ledger()}"
@@ -802,6 +845,17 @@ def _calibration(c: Claims) -> None:
         k.text = f"Feller is violated in all {word(c.feller_violated())} and imposed in none"
     with c.claim("calibration/table_stops") as k:
         k.text = f"The table stops at {c.last}"
+    with c.claim("calibration/vx_footnote") as k:
+        # the 'n/a†' cells: a fit with no VX futures settlement on its session
+        # has no out-of-sample VX error; the fit records how many it had
+        na = [s for s in c.sessions if c.cal(s)["leg_losses"].get("vx_futures_rmse_oos") is None]
+        if not na:
+            raise Untrue("every fit in the span has an out-of-sample VX futures error: no 'n/a' cell")
+        held = [s for s in na if c.cal(s).get("n_vx_futures") != 0]
+        if held:
+            raise Untrue(f"the fits of {held} held VX futures but have no out-of-sample VX error")
+        k.text = ("† When these were fitted the database held no VX futures settlement for their session "
+                  "(each fit records none)")
     for s in c.sessions:
         with c.claim(f"calibration/heston_row/{s}") as k:
             cal = c.cal(s)
@@ -859,6 +913,8 @@ def _calibration(c: Claims) -> None:
                          f"{len(c.sessions)} sessions: 'the other' sessions are not all H = ½")
         k.text = (f"error on {len(lower)} of {len(c.sessions)} sessions and returns H = ½ (Heston) on the "
                   f"other {word(same)}")
+    with c.claim("calibration/rough_floor") as k:
+        k.text = f"sits on its {c.rough_floor(C23_HEADLINE):.2f} floor on {C23_HEADLINE}"
     with c.claim("calibration/vix_gap") as k:
         gaps = [abs(rep - off) for rep, off in c.vix().values()]
         k.text = f"within {rng(gaps, '.2f')} index points of the official close"
@@ -874,10 +930,13 @@ def _calibration(c: Claims) -> None:
 
 def _pack(c: Claims) -> None:
     """The validation pack's figures that count or range over the sessions or
-    are read from an artifact the daily job writes (VALIDATOR-10): its span,
-    the §1 limitations of M4, M5, M7, M15 and M18, §2's figures for M4 (except
-    the optimiser's C23 timings), M7 and M14 (the VIX gap's attribution on the
-    C23 sessions included), and the §3 rows of M4, M5, M7, M14, M15 and M18."""
+    are read from an artifact the daily job writes (VALIDATOR-10): its span;
+    the §1 limitations of M4, M5, M7, M15 and M18; in §2, M4's identifiability
+    over the sessions, σ box and known weaknesses, M7, and M14's figures over
+    the sessions (the VIX gap's attribution on the C23 sessions and the causes
+    its notes name included); and the §3 rows of M4, M5, M7, M14, M15 and M18.
+    Not claimed: M4's optimiser evidence on the five C23 fits and its profile
+    check, and the certificate failures before the review round (history)."""
     from joint_vol_calibration.backtest.backtest_engine import ATM_TO_VIX_RATIO
     from joint_vol_calibration.config import HESTON_BOUNDS
 
@@ -909,8 +968,15 @@ def _pack(c: Claims) -> None:
         k.text = f"Heston misses real VX futures by {rng(c.vx_oos(), '.2f')} pts out of sample"
     with claim("m5_outcome", within="| M5 | VX futures at their settlement") as k:
         k.text = f"| {rng(c.vx_oos(), '.2f')} pts |"
+    with claim("m4_vix_options", within="| M4 | Joint Heston calibrator") as k:
+        c.vix_options_off()
+        k.text = "VIX-options leg off (w3 = 0)"
+    with claim("m15_floor", within="| M15 | Rough Heston") as k:
+        k.text = f"on its {c.rough_floor(C23_HEADLINE):.2f} floor on {C23_HEADLINE}"
     with claim("m7", within="| M7 | β = ATM vol") as k:
-        k.text = f"the first later chain ({C23_HEADLINE}) gives {c.later_beta():.2f}"
+        y0, y1 = c.backtest_years()
+        k.text = (f"held constant over {y0}–{y1}; the first later chain ({C23_HEADLINE}) gives "
+                  f"{c.later_beta():.2f}")
     with claim("m7_beta", within="| M7 | β = ATM vol") as k:
         k.text = (f"β = ATM vol / VIX proxy ({ATM_TO_VIX_RATIO:.2f}, from four 2026 chains plus one live "
                   "capture)")
@@ -962,6 +1028,9 @@ def _pack(c: Claims) -> None:
                   "optima "
                   f"the model's VVIX is {rng((r['vvix_model_cap2'] for r in diag), '.0f')} against a market "
                   f"^VVIX of {rng((r['vvix_market'] for r in diag), '.0f')}")
+    with claim("known_weaknesses/vix_options") as k:
+        c.vix_options_off()
+        k.text = "The VIX-options leg is off (w3 = 0): VIX options are a research leg, not in the fit."
     with claim("condition") as k:
         _, w, last = ses()
         cond = rng((c.diag(s)["rel_jtj_condition_number"] for s in c.sessions), ".0f")
@@ -1012,6 +1081,11 @@ def _pack(c: Claims) -> None:
         k.text = (f"the rest, {signed(min(rest))} to {signed(max(rest))} pts and "
                   f"{rng((v * 100 for v in most.values()), '.0f')}% of the gap on {day_list(most)}, is not "
                   "explained by the stored chain")
+    with claim("vix_residual_causes") as k:
+        causes = {s: c.gap_causes(s) for s in C23_SESSIONS}
+        if len(set(causes.values())) != 1:
+            raise Untrue(f"the C23 sessions' VIX gap notes name different causes: {causes}")
+        k.text = f"not explained by the stored chain ({', '.join(causes[C23_HEADLINE])})"
     with claim("vix_departures") as k:
         vr = c.store.json(f"surface/{c.last}/vix_replication.json")
         k.text = (f"on {c.last}, {len(vr.get('deviations') or [])} deviations from Cboe's rules and "

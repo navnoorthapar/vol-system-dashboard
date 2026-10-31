@@ -7,10 +7,11 @@ daily job's first multi-start trust-region fit). Every number here is quoted fro
 it), a test that pins it, or a run recorded in `docs/`. A number over sessions names its sessions; the
 [Model Risk page](https://navnoorbawa.me/model-risk.html) computes the current values at every build, while this
 document quotes them as of a committed snapshot ([as of 2026-10-31](../results/readme_results.json)) that names the
-artifacts each was computed from. `tests/test_readme.py` checks the §1 limitations of M4, M5, M7, M15 and M18, §2's
-figures for M4 (except the optimiser's timings), M7 and M14, and the §3 rows of M4, M5, M7, M14, M15 and M18 against
-that snapshot, and the snapshot against its artifacts: a figure that the daily job's rebuild of an artifact has moved
-is reported, not failed. The rest of this document is not checked number by number.
+artifacts each was computed from. `tests/test_readme.py` checks against that snapshot the §1 limitations of M4, M5,
+M7, M15 and M18; in §2, M4's identifiability over the sessions, σ box and known weaknesses, all of M7, and M14's
+figures over the sessions; and the §3 rows of M4, M5, M7, M14, M15 and M18. It checks the snapshot against its
+artifacts: a figure that the daily job's rebuild of an artifact has moved is reported, not failed. The rest of this
+document, M4's optimiser evidence on the five C23 fits and its profile check included, is not checked number by number.
 
 ## What this document is, and is not
 
@@ -118,7 +119,8 @@ monitors cite these IDs.
   VVIX of 113 against the market's 110 (205 at the cap). On 2026-03-24 the cap costs 2.1%. The box is kept because the
   NN domain, the vomma shock sizing and the gate constants depend on it; its cost is published instead.
 - **Known weaknesses.** Feller is violated in all six fits to 2026-10-26; at the boxed optima the model's VVIX is
-  160–211 against a market ^VVIX of 86–133. The VIX-options leg is off (w3 = 0) because only four sessions of VIX option quotes are stored.
+  160–211 against a market ^VVIX of 86–133. The VIX-options leg is off (w3 = 0): VIX options are a research leg, not in
+  the fit.
 
 ### M7 β proxy
 
@@ -148,8 +150,9 @@ monitors cite these IDs.
   the Cboe formula, with its listed departures (Surface lists them per session: on 2026-10-26, 6 deviations from Cboe's
   rules and 6 notes on the gap), minus the official close is −0.78 to +0.09 pts. On the five C23 sessions, truncation
   under the SVI-cal wing explains 0.03–0.24 pts of it (0.036 / 0.143 / 0.243 / 0.025 / 0.042); the rest, −0.11 to
-  +0.64 pts and 82–88% of the gap on 2026-03-24, 03-27 and 10-16, is not explained by the stored chain (snapshot timing against 16:15, stale quotes, the rate). The far-wing,
-  fit and discretisation terms decompose the replication against the surface, not the gap
+  +0.64 pts and 82–88% of the gap on 2026-03-24, 03-27 and 10-16, is not explained by the stored chain (snapshot
+  timing against 16:15, stale quotes, the rate). The far-wing, fit and discretisation terms decompose the replication
+  against the surface, not the gap
   (`vix_replication.json` `gap_attribution.identity`).
 
 ### M15 Rough Heston

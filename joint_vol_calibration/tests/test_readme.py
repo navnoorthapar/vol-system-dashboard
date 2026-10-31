@@ -240,6 +240,94 @@ def test_the_packs_figures_a_surface_rebuild_moves_follow_the_snapshot(store_cop
     assert [p.split(":")[0] for p in problems] == ["pack/vix_truncation"]
 
 
+def _rewrite_gap_causes(store: Path, sessions, causes: str) -> None:
+    """The causes the gap notes of ``sessions`` name, rewritten to ``causes``."""
+    for s in sessions:
+        rel = f"surface/{s}/vix_replication.json"
+        doc = json.loads((store / rel).read_text())
+        notes = doc["gap_notes"]
+        i = next(i for i, n in enumerate(notes) if "Left unexplained by the chain: " in n)
+        notes[i], n = re.subn(r"\): [^()]+\.$", f"): {causes}.", notes[i])
+        assert n == 1, notes[i]
+        (store / rel).write_text(json.dumps(doc))
+
+
+def test_the_packs_gap_causes_follow_the_replications_notes(store_copy):
+    """VALIDATOR-10: the pack named the causes of the part of the VIX gap the
+    stored chain does not explain ('snapshot timing against 16:15, stale
+    quotes, the rate') from no artifact and no check, so the surface rebuild
+    that prices the VIX at Cboe's rate (report_version 5), and drops the rate
+    from the notes, would have left it naming a cause the notes no longer give.
+    It is a claim now, in the notes' own list: a rebuild that drops a cause
+    warns, naming the figure; causes that differ between the C23 sessions, or
+    one the pack has no words for, stop the regeneration; a pack that
+    disagrees with the snapshot fails."""
+    claim = _claim("pack/vix_residual_causes")
+    timing, stale = "snapshot timing vs the 16:15 ET print", "stale quotes"
+    _rewrite_gap_causes(store_copy, C23_SESSIONS, f"{timing}, {stale}")       # the rate dropped
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["pack"]) == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    want = f"not explained by the stored chain ({rr.GAP_CAUSES[timing]}, {rr.GAP_CAUSES[stale]})"
+    assert f"  pack/vix_residual_causes now reads {want!r}" in message
+    _rewrite_gap_causes(store_copy, C23_SESSIONS[:1], stale)              # one session differs
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    assert "name different causes" in {k.id: k.error for k in bad}["pack/vix_residual_causes"]
+    _rewrite_gap_causes(store_copy, C23_SESSIONS, f"{stale}, the weather")   # words the pack lacks
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    assert "['the weather']" in {k.id: k.error for k in bad}["pack/vix_residual_causes"]
+    pattern = r"\s+".join(map(re.escape, claim["text"].split()))
+    edited, n = re.subn(pattern, claim["text"][:-1] + ", the weather)", PACK_RAW)
+    assert n == 1
+    problems = rr.doc_problems(SNAP, lambda d: edited if d == rr.PACK else rr.read_doc(d))
+    assert [p.split(":")[0] for p in problems] == ["pack/vix_residual_causes"]
+
+
+def test_the_figures_the_documents_say_are_checked_are_claims(store_copy):
+    """VALIDATOR-10: the pack said test_readme.py checked its §1 limitations
+    and §2's figures for M4, yet nothing checked 'VIX-options leg off (w3 = 0)',
+    M15's H on its floor on the C23 headline session, M7's 'held constant over'
+    the backtest's years, or the known weakness 'only four sessions of VIX
+    option quotes are stored', which the daily job's Cboe VIX book of every
+    session has made false. Nor did anything check the README's footnote that
+    the database's VX history ends 2026-10-09, which the job's VX futures store
+    makes false. Each is a claim now, guarded by the fact that makes it true;
+    the count and the date are gone. Here the fits and diagnostics the job
+    writes stop holding those facts: the claims warn, and the regeneration
+    refuses each one, naming it."""
+    assert not re.search(r"only \w+ sessions of VIX option quotes", PACK)
+    assert "VX history in the database ends" not in README
+    claims = {"records/vix_options_leg": "the VIX-options leg has weight",
+              "pack/m4_vix_options": "the VIX-options leg has weight",
+              "pack/known_weaknesses/vix_options": "the VIX-options leg has weight",
+              "calibration/rough_floor": "not its", "pack/m15_floor": "not its",
+              "calibration/vx_footnote": "held VX futures"}
+    assert set(claims) <= {k["id"] for k in SNAP["claims"]}
+    years = (f"{pd.Timestamp(pd.read_parquet(DATA / 'backtest' / 'full_results.parquet').index[i]).year}"
+             for i in (0, -1))
+    assert f"held constant over {'–'.join(years)};" in _claim("pack/m7")["text"]
+    na = [s for s in RESULT_SESSIONS if _cal(s)["leg_losses"].get("vx_futures_rmse_oos") is None]
+    assert na                                            # the footnote marks a cell
+    rel = f"calibrations/joint_cal_{na[-1]}.pkl"
+    cal = _cal(na[-1])
+    cal["weights"]["w3"] = 0.1
+    cal["n_vx_futures"] = 3
+    with open(store_copy / rel, "wb") as fh:
+        pickle.dump(cal, fh)
+    doc = json.loads((store_copy / "calibrations" / "diagnostics" / "summary.json").read_text())
+    row = next(r for r in doc["rows"] if r["session"] == C23_HEADLINE)
+    row["joint_rough_H"], row["joint_rough_on_bound"] = 0.1, []
+    (store_copy / "calibrations" / "diagnostics" / "summary.json").write_text(json.dumps(doc))
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["records", "calibration", "pack"]) == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    errors = {k.id: k.error for k in bad}
+    for cid, why in claims.items():
+        assert f"  {cid} could not be recomputed " in message, cid
+        assert why in (errors.get(cid) or ""), (cid, errors.get(cid))
+
+
 def test_snapshot_names_each_artifact_with_its_hash_and_method():
     gen = SNAP["generated"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", gen["date"])

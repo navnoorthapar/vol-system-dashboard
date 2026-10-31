@@ -3,7 +3,7 @@
  "about": "Every figure README.md quotes, and the validation pack's and DATA_SOURCES.md's figures that range over the sessions, as printed, with the artifacts each was computed from. Written by scripts/readme_results.py; joint_vol_calibration/tests/test_readme.py checks the documents against it and it against data_store.",
  "generated": {
   "date": "2026-10-31",
-  "commit": "7523bccbca3fd7750b0bae85aa0662c9eab96263",
+  "commit": "11f121dd99f66b4ee6a2dbdb4c9a5011581845e4",
   "command": "make readme-results"
  },
  "params": {
@@ -992,6 +992,20 @@
    ]
   },
   {
+   "id": "calibration/vx_footnote",
+   "doc": "README.md",
+   "text": "† When these were fitted the database held no VX futures settlement for their session (each fit records none)",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
    "id": "calibration/heston_row/2026-03-24",
    "doc": "README.md",
    "text": "| 2026-03-24 | 6.142 | 0.0653 | 2.000\\* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.66 |",
@@ -1194,6 +1208,14 @@
    ]
   },
   {
+   "id": "calibration/rough_floor",
+   "doc": "README.md",
+   "text": "sits on its 0.02 floor on 2026-10-16",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16"
+   ]
+  },
+  {
    "id": "calibration/vix_gap",
    "doc": "README.md",
    "text": "within 0.09–0.78 index points of the official close",
@@ -1314,11 +1336,36 @@
    ]
   },
   {
+   "id": "pack/m4_vix_options",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M4 | Joint Heston calibrator",
+   "text": "VIX-options leg off (w3 = 0)",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
+   "id": "pack/m15_floor",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M15 | Rough Heston",
+   "text": "on its 0.02 floor on 2026-10-16",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16"
+   ]
+  },
+  {
    "id": "pack/m7",
    "doc": "docs/model_validation/README.md",
    "within": "| M7 | β = ATM vol",
-   "text": "the first later chain (2026-10-16) gives 0.70",
+   "text": "held constant over 2018–2025; the first later chain (2026-10-16) gives 0.70",
    "sources": [
+    "data_store/backtest/full_results.parquet",
     "data_store/vol_system.db"
    ]
   },
@@ -1398,6 +1445,20 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
+   "id": "pack/known_weaknesses/vix_options",
+   "doc": "docs/model_validation/README.md",
+   "text": "The VIX-options leg is off (w3 = 0): VIX options are a research leg, not in the fit.",
+   "sources": [
     "data_store/calibrations/joint_cal_2026-03-24.pkl",
     "data_store/calibrations/joint_cal_2026-03-27.pkl",
     "data_store/calibrations/joint_cal_2026-05-29.pkl",
@@ -1533,6 +1594,18 @@
    "id": "pack/vix_residual",
    "doc": "docs/model_validation/README.md",
    "text": "the rest, −0.11 to +0.64 pts and 82–88% of the gap on 2026-03-24, 03-27 and 10-16, is not explained by the stored chain",
+   "sources": [
+    "data_store/surface/2026-03-24/vix_replication.json",
+    "data_store/surface/2026-03-27/vix_replication.json",
+    "data_store/surface/2026-05-29/vix_replication.json",
+    "data_store/surface/2026-06-18/vix_replication.json",
+    "data_store/surface/2026-10-16/vix_replication.json"
+   ]
+  },
+  {
+   "id": "pack/vix_residual_causes",
+   "doc": "docs/model_validation/README.md",
+   "text": "not explained by the stored chain (snapshot timing against 16:15, stale quotes, the rate)",
    "sources": [
     "data_store/surface/2026-03-24/vix_replication.json",
     "data_store/surface/2026-03-27/vix_replication.json",
