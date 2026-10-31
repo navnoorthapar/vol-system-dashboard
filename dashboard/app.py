@@ -31,6 +31,7 @@ Run a local preview (read-only, bound to 127.0.0.1):
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import glob
 import hashlib
@@ -5433,48 +5434,50 @@ def quote_source_note(surface_json: dict) -> str:
     return f"{pv['short']}, {pv['time']}" if pv else "Chain source not recorded, no quote time"
 
 
-def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | None],
+def smile_quote_series(group: str | None, models: Sequence[str], shown: Iterable[str | None],
                        anchor_model: str | None, oos_mids: bool = False, strip: bool = True) -> list[dict]:
     """One expiry's smile series (desk_quotes): bid–ask bars, mids, each model at
     the quoted strikes, the anchor model's fitted quotes as diamonds and, under
     the smile, each model's z per quote. They hold no data: desk.js fills them
     from the chart's packed quotes (``quote`` names the field). ``oos_mids``: the
     mids split into the anchor model's out-of-sample quotes (hollow) and its
-    anchors, as the Calibration smiles draw them."""
+    anchors, as the Calibration smiles draw them. ``group`` None: the template a
+    book smile (Surface) fills with the shown expiry, its names without a date."""
     shown = set(shown)
-    g = str(group)
-    out: list[dict] = [{"name": f"{g} bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
-                        "role": "bidask", "color": "muted", "group": g, "quote": "ba"}]
+    g = None if group is None else str(group)
+    pre, tag = (f"{g} ", {"group": g}) if g is not None else ("", {})
+    out: list[dict] = [{"name": f"{pre}bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
+                        "role": "bidask", "color": "muted", **tag, "quote": "ba"}]
     if oos_mids and anchor_model:
         # market mids are 'headline' everywhere (P4.5): hollow, the anchors filled diamonds
-        out.append({"name": f"{g} mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
+        out.append({"name": f"{pre}mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
                     "type": "scatter", "role": "market", "color": "headline", "hollow": True, "size": 4,
                     "opacity": 0.6,
-                    "group": g, "quote": "oos", "model": anchor_model})
+                    **tag, "quote": "oos", "model": anchor_model})
     else:
-        out.append({"name": f"{g} mid", "legendKey": "Mid", "legend": True, "type": "scatter",
-                    "role": "market", "color": "headline", "size": 4, "group": g, "quote": "mid"})
-    out.extend({"name": f"{g} {model_label(m)}", "legendKey": model_label(m), "legend": True,
+        out.append({"name": f"{pre}mid", "legendKey": "Mid", "legend": True, "type": "scatter",
+                    "role": "market", "color": "headline", "size": 4, **tag, "quote": "mid"})
+    out.extend({"name": f"{pre}{model_label(m)}", "legendKey": model_label(m), "legend": True,
                 "hidden": m not in shown, "type": "line", "role": "model", "color": model_colour(m),
                 "width": 1.5,
-                "group": g, "quote": "model", "model": m} for m in models)
+                **tag, "quote": "model", "model": m} for m in models)
     anchor_key = "Mid (fit anchor)" if oos_mids else "Heston fit anchors"
     if anchor_model:
-        out.append({"name": f"{g} {'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
+        out.append({"name": f"{pre}{'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
                     "legendKey": anchor_key, "legend": True, "type": "scatter", "symbol": "diamond",
                     "size": 9 if oos_mids else 8, "z": 4, "role": "anchor", "color": ANCHOR_COLOUR,
-                    "group": g,
+                    **tag,
                     "quote": "fit", "model": anchor_model})
     if strip:
-        out.extend({"name": f"{g} {model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
-                    "size": 4, "role": "model", "color": model_colour(m), "group": g, "quote": "z",
+        out.extend({"name": f"{pre}{model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
+                    "size": 4, "role": "model", "color": model_colour(m), **tag, "quote": "z",
                     "model": m,
                     "strip": True} for m in models)
         if anchor_model:
-            out.append({"name": f"{g} {model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
+            out.append({"name": f"{pre}{model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
                         "type": "scatter", "symbol": "diamond", "size": 7, "z": 4, "role": "anchor",
                         "color": ANCHOR_COLOUR,
-                        "group": g, "quote": "zfit", "model": anchor_model, "strip": True})
+                        **tag, "quote": "zfit", "model": anchor_model, "strip": True})
     return out
 
 
@@ -6341,16 +6344,18 @@ def surface_extras(d: dict, surf: dict) -> None:
     d["slice_shown"] = [model_label(m) for m in overlay if m in shown]
     d["default_exp"] = (min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"]
                         if d["expiries"] else None)
-    series, groups = [], []
+    groups: list[dict] = []
     hres = res[res["model"] == hkey] if hkey else None
     n_anchor = int(hres["in_sample"].astype(bool).sum()) if (hres is not None and "in_sample" in hres) else 0
-    # every quote of every expiry, packed once (desk_quotes): the chart's series
-    # below hold no data, desk.js unpacks them from this block, and the quote
-    # inspector reads strike, right, delta and each model's z from it
+    # every quote of every expiry, packed once (desk_quotes): desk.js unpacks the
+    # shown expiry's into one dateless set of series (the template) and the quote
+    # inspector reads strike, right, delta and each model's z from it. The page
+    # holds the default expiry's; the session's data file every expiry's, fetched
+    # once the smile is drawn (D2: 0.5 MB of a full Cboe book's 1.7 MB page)
     qblock = desk_quotes.encode(res, overlay, list(exps.index))
+    series = smile_quote_series(None, overlay, shown, hkey if n_anchor else None)
     for e in exps.index:
         q = mkt[mkt["expiry"] == e].sort_values("k")
-        series += smile_quote_series(e, overlay, shown, hkey if n_anchor else None)
         by_model = {}
         for m in overlay:
             qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
@@ -6400,7 +6405,10 @@ def surface_extras(d: dict, surf: dict) -> None:
                     "(model − mid) / half-spread per quote, the band ±1 is inside the spread. "
                     "The readout under the chart steps through the quotes with the arrow keys."),
         table=slice_tbl,
-        quotes=smile_quotes_meta(qblock, overlay, hkey if n_anchor else None, surf.get("surface") or {}))
+        quotes={**smile_quotes_meta({e: g for e, g in qblock.items() if e == d["default_exp"]}, overlay,
+                                    hkey if n_anchor else None, surf.get("surface") or {}),
+                "template": True, "order": list(qblock), "session": session,
+                **publish_json("surface", session, {"quotes": {"order": list(qblock), "groups": qblock}})})
 
     # out-of-sample median |model − mid| by expiry, one line per model, on the
     # same quotes as the scorecard beside it (the scorecard's by_expiry rows mix
@@ -7765,6 +7773,28 @@ def own_asset(rel: str) -> dict:
     return {"src": f"{rel}?v={hashlib.sha256(data).hexdigest()[:12]}", "bytes": len(data)}
 
 
+# Session data files (D2): what a page reads only when a reader uses it (every
+# expiry's quotes behind the Surface smile, 0.5 MB on a full Cboe book) is one
+# same-origin JSON file per session, data/<kind>-<session>-<sha256[:16]>.json,
+# that desk.js fetches with its sha384 as the integrity value. The name changes
+# with the bytes (Pages ignores ?v=, so a cached page can never read newer data).
+# Rendering a page registers the exact bytes here; /data/<name> serves them, and
+# freeze_site.py writes every file a page references, and no other, to data/.
+DATA_FILES: dict[str, bytes] = {}
+DATA_SCHEMA = 1
+
+
+def publish_json(kind: str, session: str, obj: dict) -> dict:
+    """Register {schema, session, **obj} (compact, keys sorted) as a data file:
+    {"src": its path from a page, "integrity": its sha384 SRI value}."""
+    body = json.dumps({"schema": DATA_SCHEMA, "session": session, **obj}, separators=(",", ":"),
+                      sort_keys=True, allow_nan=False).encode("utf-8")
+    name = f"{kind}-{session}-{hashlib.sha256(body).hexdigest()[:16]}.json"
+    DATA_FILES[name] = body
+    return {"src": f"data/{name}",
+            "integrity": "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()}
+
+
 @app.context_processor
 def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
@@ -7845,6 +7875,17 @@ def page_corrections():
 @app.route("/model-risk")
 def page_model_risk():
     return _render("model-risk.html", load_model_risk())
+
+
+@app.route("/data/<name>")
+def data_file(name: str):
+    """A session data file a rendered page references (publish_json); 404 for any other."""
+    body = DATA_FILES.get(name)
+    if body is None:
+        return make_response("not found", 404)
+    resp = make_response(body)
+    resp.headers["Content-Type"] = "application/json"
+    return resp
 
 
 @app.route("/greeks")

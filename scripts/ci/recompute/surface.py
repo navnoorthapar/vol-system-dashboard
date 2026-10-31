@@ -1306,7 +1306,7 @@ def slices_panel(a: Audit, c: Ctx) -> None:
                 cell(a, P_SL, f"{lab} median {M.label(m)} IV", td[5 + i] if 5 + i < len(td) else None,
                      M.num(v))
     slices_prose(a, c)
-    packed_quotes(a, c)
+    packed_quotes(a, c, default)
 
 
 def slices_prose(a: Audit, c: Ctx) -> None:
@@ -1325,11 +1325,30 @@ def slices_prose(a: Audit, c: Ctx) -> None:
     statics(a, P_SL, "quote readout", a.one("#chart-slices-readout"), [READOUT_PAGE])
 
 
-def packed_quotes(a: Audit, c: Ctx) -> None:
+def packed_quotes(a: Audit, c: Ctx, default: str | None) -> None:
     """The smile chart's packed quotes (the quote inspector's data) against the residual
-    table: forward, days, strikes, rights, bid / mid / ask IV, each model's IV and flags."""
-    sp = spec(a, "chart-slices-spec")
-    groups = ((sp or {}).get("quotes") or {}).get("groups") or {}
+    table: forward, days, strikes, rights, bid / mid / ask IV, each model's IV and flags.
+    A book smile (D2) holds the default expiry inline, one dateless series set (its
+    template) and every expiry in the session's data file: the file is read and
+    verified (Audit.data_file), its expiries and the spec's order are the table's, and
+    the inline block is the file's."""
+    sp = spec(a, "chart-slices-spec") or {}
+    q = sp.get("quotes") or {}
+    groups = q.get("groups") or {}
+    if q.get("template"):
+        book = a.data_file(P_SL, q.get("src"), q.get("integrity")) or {}
+        a.equal(P_SL, "data file: schema 1, this session", [book.get("schema"), book.get("session")],
+                [1, c.session])
+        a.equal(P_SL, "spec: session", q.get("session"), c.session)
+        a.equal(P_SL, "spec: expiry order = the residual table's", q.get("order"), list(c.exps))
+        bq = book.get("quotes") or {}
+        a.equal(P_SL, "data file: expiry order = the residual table's", bq.get("order"), list(c.exps))
+        a.equal(P_SL, "inline expiries: the selected tab's", list(groups), [default])
+        a.equal(P_SL, "inline quotes = the data file's", all(g == (bq.get("groups") or {}).get(e)
+                                                              for e, g in groups.items()), True)
+        a.equal(P_SL, "series: one dateless set (no group)", [s_.get("group") for s_ in sp.get("series") or []
+                                                              if s_.get("group") is not None], [])
+        groups = bq.get("groups") or {}
     a.equal(P_SL, "packed expiries", list(groups), list(c.exps))
     bad: dict[str, list[str]] = {}
     for e in c.exps:

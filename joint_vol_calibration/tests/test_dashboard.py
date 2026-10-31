@@ -856,6 +856,44 @@ def test_freeze_copies_static_and_refuses_a_script_that_fails_its_sri(dash, free
         monkeypatch.undo()
 
 
+def test_freeze_writes_each_referenced_data_file_and_fails_closed_on_a_bad_one(dash, freezer, tmp_path,
+                                                                              monkeypatch):
+    """D2: the frozen Surface page names its session data file (desk.js fetches it).
+    Freeze writes that file, its bytes those /data/<name> serves, their sha384 the
+    page's integrity value and their sha256 in its name, and nothing else under data/
+    (an earlier build's file goes; a registered file no page names is not written).
+    It writes nothing at all when a page names a file /data/<name> does not serve
+    (404) or whose bytes changed after the page was rendered, and a data/ path in a
+    page without its integrity value is a problem."""
+    out = tmp_path / "site"
+    (out / "data").mkdir(parents=True)
+    (out / "data" / "surface-1999-01-01-0123456789abcdef.json").write_text("{}")
+    monkeypatch.setitem(dash.DATA_FILES, "surface-stray-0123456789abcdef.json", b"{}")
+    assert freezer.freeze(str(out), dash) == 0
+    refs = freezer.data_refs((out / "surface.html").read_text())[0]
+    assert len(refs) == 1
+    ((src, sri),) = refs.items()
+    body = (out / src).read_bytes()
+    assert freezer.sri_of(body) == sri
+    assert src.endswith(hashlib.sha256(body).hexdigest()[:16] + ".json")
+    assert sorted(p.relative_to(out).as_posix() for p in (out / "data").iterdir()) == [src]
+    assert freezer.data_refs("<p>data/surface-x-0123456789abcdef.json</p>")[1]
+
+    class Lost(dict):                     # rendered, never served: /data/<name> is a 404
+        def __setitem__(self, k, v):
+            pass
+
+    class Changed(dict):                  # served with other bytes than the page was given
+        def __setitem__(self, k, v):
+            super().__setitem__(k, v + b" ")
+
+    for cls in (Lost, Changed):
+        monkeypatch.setattr(dash, "DATA_FILES", cls())
+        out2 = tmp_path / cls.__name__
+        assert freezer.freeze(str(out2), dash) == 1, cls.__name__
+        assert not out2.exists() or not any(out2.iterdir())
+
+
 # ── Greeks page ───────────────────────────────────────────────────────────────
 
 def test_heatmap_draws_every_node(dash):
@@ -1297,12 +1335,31 @@ def _raw_specs(html: str) -> dict:
         r'<script type="application/json" id="([\w-]+)-spec">(.*?)</script>', html, re.DOTALL)}
 
 
-def _spec(html: str, chart_id: str) -> dict:
+def _spec(html: str, chart_id: str, site: Path | None = None) -> dict:
     """A chart's spec as desk.js draws it: compact x values expanded, shared x values
-    and derived series filled in (desk_charts.resolve, the twin of desk.js resolveSpec)."""
+    and derived series filled in (desk_charts.resolve, the twin of desk.js resolveSpec);
+    a book smile (Surface) with every expiry's quotes and series, from its data file."""
     raw = _raw_specs(html)
     assert chart_id in raw, chart_id
-    return _charts().resolve(raw[chart_id], raw)
+    return _charts().resolve(raw[chart_id], raw, _book(raw[chart_id], site))
+
+
+def _book(spec: dict, site: Path | None = None) -> dict | None:
+    """The session data file a book smile's spec names (quotes.src), parsed: from the
+    frozen ``site``, else from the app's registry (what /data/<name> serves)."""
+    src = (spec.get("quotes") or {}).get("src")
+    if not src:
+        return None
+    body = (site / src).read_bytes() if site else _ACTIVE_APP[-1].DATA_FILES[src.split("/", 1)[1]]
+    return json.loads(body)
+
+
+def _with_book(spec: dict, site: Path | None = None) -> dict:
+    """A smile spec with every expiry's packed quotes (its data file's, when it has one)."""
+    book = _book(spec, site)
+    if book is None:
+        return spec
+    return {**spec, "quotes": {**spec["quotes"], "groups": book["quotes"]["groups"]}}
 
 
 def _charts():
@@ -2521,6 +2578,53 @@ def test_synthetic_surface_store_round_trips_through_the_quote_packing(dash, tmp
     resp, html = _get(dash, "/surface")
     assert _errors(resp) == 0
     assert len(re.findall(r'aria-controls="slices-panel" data-value="', html)) == 45
+
+
+def test_the_smile_spec_is_a_template_and_its_quotes_one_session_data_file(dash, tmp_path, monkeypatch):
+    """D2: the smile's spec held every expiry's packed quotes and 12 dated series per
+    expiry (729 KB of a 1.67 MB page on a full Cboe book). It now holds one dateless
+    set of series (quotes.template), its tabs' expiry order and the selected tab's
+    block; every expiry's block is in one session data file, data/surface-<session>-
+    <sha256[:16]>.json, that /data/<name> serves with the sha384 the spec gives and
+    that unpacks to the residual table. The synthetic 17- and 45-expiry sessions draw
+    the same series."""
+    import base64
+
+    dq, client, series = dash.desk_quotes, dash.app.test_client(), {}
+    for n, roots in ((17, False), (45, True)):
+        (tmp_path / str(n)).mkdir()
+        monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / str(n), n, roots))
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        sp = _raw_specs(html)["chart-slices"]
+        q = sp["quotes"]
+        tabs = re.findall(r'aria-controls="slices-panel" data-value="([\d-]+)"', html)
+        sel = re.findall(r'aria-selected="true" aria-controls="slices-panel" data-value="([\d-]+)"', html)
+        assert q["template"] is True
+        assert q["order"] == tabs
+        assert list(q["groups"]) == sel
+        assert q["session"] == SESSION
+        assert not [s for s in sp["series"] if "group" in s or re.match(r"\d{4}-", s["name"])]
+        series[n] = [s["name"] for s in sp["series"]]
+        m = re.fullmatch(rf"data/surface-{SESSION}-([0-9a-f]{{16}})\.json", q["src"])
+        assert m, q["src"]
+        r = client.get("/" + q["src"])
+        assert r.status_code == 200
+        body = r.get_data()
+        assert hashlib.sha256(body).hexdigest()[:16] == m.group(1)
+        assert q["integrity"] == "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()
+        book = json.loads(body)
+        assert (book["schema"], book["session"]) == (1, SESSION)
+        assert book["quotes"]["order"] == list(book["quotes"]["groups"]) == tabs
+        assert book["quotes"]["groups"][sel[0]] == q["groups"][sel[0]]
+        res = _syn_session(n, roots)["residuals"]
+        mkt = res[res["model"] == SYN_MODELS[0]]
+        for e, g in book["quotes"]["groups"].items():
+            rows, qe = dq.decode(g), mkt[mkt["expiry"] == e].sort_values("k")
+            assert [r_["strike"] for r_ in rows] == qe["strike"].astype(int).tolist(), e
+            assert np.allclose([r_["mid"] for r_ in rows], qe["mid_iv"] * 100, atol=1e-5), e
+    assert series[17] == series[45]
+    assert client.get(f"/data/surface-{SESSION}-0123456789abcdef.json").status_code == 404
 
 
 def _syn_expected_strip(n: int, roots: bool) -> dict[str, dict]:
@@ -4036,7 +4140,9 @@ def syn_browser(dash, freezer, site_browser, tmp_path_factory):
                 page = page.replace(a, b)
             html[n] = page
             (out / f"surface-{n}.html").write_text(page, encoding="utf-8")
-        (out / "surface-45-book.html").write_text(_book_form(html[45], out, SESSION), encoding="utf-8")
+            for src in freezer.data_refs(page)[0]:          # its session data file, as freeze writes it
+                (out / src).parent.mkdir(exist_ok=True)
+                (out / src).write_bytes(dash.DATA_FILES[src.split("/", 1)[1]])
     finally:
         dash.DATA = old
 
@@ -4051,47 +4157,10 @@ def syn_browser(dash, freezer, site_browser, tmp_path_factory):
     httpd.shutdown()
 
 
-def _syn_page(sb, n: int | str, width: int, height: int = 900):
+def _syn_page(sb, n: int, width: int, height: int = 900):
     ctx, page = _page(sb, width, height)
     page.goto(f"{sb['base']}surface-{n}.html", wait_until="load")
     return ctx, page
-
-
-def _htmlsafe_json(obj) -> str:
-    """json as Flask's tojson writes it into a page (sorted keys, <>&' escaped)."""
-    out = json.dumps(obj, sort_keys=True)
-    for a, b in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("'", "\\u0027")):
-        out = out.replace(a, b)
-    return out
-
-
-def _book_form(html: str, out: Path, session: str) -> str:
-    """The page with its smile's quotes in a session file (data/…, named by its
-    sha256, checked by its sha384): the spec keeps the default expiry and one
-    series per role (quotes.template), quotes.order names every expiry."""
-    import base64
-
-    m = re.search(r'(<script type="application/json" id="chart-slices-spec">)(.*?)(</script>)', html,
-                  re.DOTALL)
-    assert m is not None
-    spec = json.loads(m.group(2))
-    q = spec["quotes"]
-    order = list(q["groups"])
-    default = next(g["group"] for g in spec["table"]["groups"] if g["shown"])
-    body = json.dumps({"schema": 1, "session": session, "quotes": {"order": order, "groups": q["groups"]}},
-                      separators=(",", ":"), sort_keys=True).encode()
-    name = f"data/surface-{session}-{hashlib.sha256(body).hexdigest()[:16]}.json"
-    (out / "data").mkdir(exist_ok=True)
-    (out / name).write_bytes(body)
-    tpl = [{**{k: v for k, v in s.items() if k != "group"}, "name": s["name"][len(default) + 1:]}
-           for s in spec["series"] if s.get("group") == default]
-    spec["series"] = tpl
-    spec["quotes"] = {**q, "groups": {default: q["groups"][default]}, "order": order, "template": True,
-                      "session": session, "src": name,
-                      "integrity": "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()}
-    page = html[:m.start(2)] + _htmlsafe_json(spec) + html[m.end(2):]
-    note = '<p class="quote-note" id="chart-slices-note" role="status"></p>'
-    return page.replace('<p class="quote-readout', note + '<p class="quote-readout', 1)
 
 
 # the smile's box and the screen position of its middle quote (the one the quote
@@ -4239,18 +4308,17 @@ _SHOWN_MIDS_JS = ("Desk.charts['chart-slices'].chart.getOption().series"
                   ".find(s => s.name === 'mid').data.length")
 
 
-def _syn_tabs(sb, n) -> list[str]:
-    html = sb["html"][45 if n == "45-book" else n]
-    return re.findall(r'aria-controls="slices-panel" data-value="([\d-]+)"', html)
+def _syn_tabs(sb, n: int) -> list[str]:
+    return re.findall(r'aria-controls="slices-panel" data-value="([\d-]+)"', sb["html"][n])
 
 
 def test_browser_the_smile_decodes_an_expiry_only_when_it_is_shown(syn_browser):
     """D3: desk.js decoded every expiry's packed quotes when the page loaded (45 on a
     full Cboe book: a 174 ms task at 4× CPU before the smile drew). It decodes the
-    shown expiry only: one after the first draw, one more for each expiry shown,
-    with the quotes inline (Calibration's form) or in a session file."""
+    shown expiry only: one after the first draw, one more for each expiry shown
+    (17 and 45 expiries; the others come from the session data file)."""
     sb = syn_browser
-    for n in (45, "45-book"):
+    for n in (17, 45):
         ctx, page = _syn_page(sb, n, 1440)
         page.locator("#chart-slices").scroll_into_view_if_needed()
         _wait_for_chart(page, "chart-slices")
@@ -4274,13 +4342,13 @@ def test_browser_a_book_smile_draws_its_default_inline_and_fetches_the_session_f
     import time
 
     sb = syn_browser
-    book = json.loads(next((sb["site"] / "data").glob("surface-*.json")).read_bytes())
+    book = json.loads((sb["site"] / _raw_specs(sb["html"][45])["chart-slices"]["quotes"]["src"]).read_bytes())
     total = sum(len(g["mid"]) for g in book["quotes"]["groups"].values())
     ctx, page = _page(sb, 1440, 900)
     reqs, errors = [], []
     page.on("request", lambda r: reqs.append(time.monotonic()) if "/data/" in r.url else None)
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.goto(sb["base"] + "surface-45-book.html", wait_until="load")
+    page.goto(sb["base"] + "surface-45.html", wait_until="load")
     page.wait_for_timeout(1500)
     assert reqs == [], "a data file was fetched before the smile was drawn"
     page.locator("#chart-slices").scroll_into_view_if_needed()
@@ -4292,7 +4360,7 @@ def test_browser_a_book_smile_draws_its_default_inline_and_fetches_the_session_f
         page.wait_for_timeout(100)
     assert reqs, "the data file was not requested"
     assert reqs[0] - t0 <= 3.0, reqs
-    for e in [e for e in _syn_tabs(sb, "45-book") if e != first][::9][:5]:
+    for e in [e for e in _syn_tabs(sb, 45) if e != first][::9][:5]:
         st = page.evaluate(_PICK_JS, e)
         assert st["filter"] == e
         assert st["mids"] == st["rows"] == len(book["quotes"]["groups"][e]["mid"]), (e, st)
@@ -4302,7 +4370,7 @@ def test_browser_a_book_smile_draws_its_default_inline_and_fetches_the_session_f
     assert errors == []
     ctx.close()
     ctx, page = _page(sb, 1440, 900)
-    page.goto(sb["base"] + "surface-45-book.html", wait_until="load")
+    page.goto(sb["base"] + "surface-45.html", wait_until="load")
     with page.expect_download() as dl:
         page.click("[data-csv-for='chart-slices']")
     csv = Path(dl.value.path()).read_text()
@@ -4330,13 +4398,13 @@ def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(
                                  headers={"content-type": "application/json"})
 
         page.route("**/data/**", handler)
-        page.goto(sb["base"] + "surface-45-book.html", wait_until="load")
+        page.goto(sb["base"] + "surface-45.html", wait_until="load")
         page.locator("#chart-slices").scroll_into_view_if_needed()
         _wait_for_chart(page, "chart-slices")
         first = page.evaluate("Desk.filters['chart-slices']")
         assert page.evaluate(_SHOWN_MIDS_JS)
         page.wait_for_timeout(2500)
-        other = next(e for e in _syn_tabs(sb, "45-book") if e != first)
+        other = next(e for e in _syn_tabs(sb, 45) if e != first)
         page.click(f"[data-chart-filter='chart-slices'] [data-value='{other}']")
         page.wait_for_timeout(1500)
         st = page.evaluate("""() => { const n = document.getElementById('chart-slices-note');
@@ -8260,7 +8328,7 @@ def _producer_delta(p) -> float:
 
 
 def _smile_specs(pages) -> list[tuple[str, dict]]:
-    out = [("/surface", _raw_specs(pages["/surface"])["chart-slices"])]
+    out = [("/surface", _with_book(_raw_specs(pages["/surface"])["chart-slices"]))]
     cal = _raw_specs(pages["/calibration"])
     out += [("/calibration", s) for cid, s in cal.items()
             if cid.startswith("chart-smile-") and s.get("quotes")]
@@ -8410,8 +8478,10 @@ def test_browser_quote_inspector_hover_keyboard_and_delta_axis(site_browser):
     assert page.evaluate("Desk.filters['chart-slices']") == exp
     assert "x=delta" in page.url
     assert q["k"] < 0 or q["x_delta"] > 0                       # (the quote exists on the delta axis too)
+    page.evaluate("Desk.quotesReady('chart-slices')")          # every expiry's quotes, from the data file
     csv = page.evaluate("Desk.specCsv(Desk.charts['chart-slices'].spec)")
-    assert len(csv.strip().split("\n")) == 1 + sum(len(g["mid"]) for g in spec["quotes"]["groups"].values())
+    book = _with_book(spec, sb["site"])["quotes"]["groups"]
+    assert len(csv.strip().split("\n")) == 1 + sum(len(g["mid"]) for g in book.values())
     ctx.close()
 
 
@@ -8461,37 +8531,37 @@ def test_browser_smile_axis_labels_clear_the_residual_strip_labels(site_browser)
 def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_only(site_browser):
     """P4.2: every expiry-tab click re-parsed the 250 KB smile spec and rebuilt all
     17 × 12 series (64–112 ms, 304–448 ms at 4× CPU). A switch now keeps the parsed
-    spec, draws the shown expiry's series only (a model toggled off carries no
-    data), keeps the forward line on a drawn series of that expiry, draws the strip's
-    clipped points as triangles and leaves no earlier expiry marked shown in the
-    legend. (The timing itself is the interact.mjs gate.)"""
+    spec and fills one dateless set of series (D2: the spec's template) with the
+    shown expiry's quotes, every quote of it (a model toggled off carries no data),
+    keeps the forward line on a drawn series and draws the strip's clipped points as
+    triangles. (The timing itself is the interact.mjs gate.)"""
     sb = site_browser
     html = (sb["site"] / "surface.html").read_text()
-    spec = _raw_specs(html)["chart-slices"]
+    spec = _with_book(_raw_specs(html)["chart-slices"], sb["site"])
     exps = list(spec["quotes"]["groups"])
     ctx, page = _page(sb)
     page.goto(sb["base"] + "surface.html", wait_until="load")
     page.locator("#chart-slices").scroll_into_view_if_needed()
     _wait_for_chart(page, "chart-slices")
+    page.evaluate("Desk.quotesReady('chart-slices')")
     page.evaluate("Desk.charts['chart-slices'].spec.__kept = true")
     first = page.evaluate("Desk.filters['chart-slices']")
     state_js = """(exp) => {
-      const c = Desk.charts['chart-slices'], o = c.chart.getOption(), sel = o.legend[0].selected;
+      const c = Desk.charts['chart-slices'], o = c.chart.getOption(), rows = Desk.rowsOf(c.spec, exp);
       const off = [...document.querySelectorAll('[data-legend-for="chart-slices"][aria-pressed="false"]')]
         .map(b => b.dataset.series);
       const keyOf = n => (c.spec.series.find(x => x.name === n || x.name + ' beyond the clip' === n) || {});
       const drawn = o.series.filter(s => s.id !== 'zband');
       const clip = c.spec.quotes.zClip || 10;
+      const len = n => ((o.series.find(s => s.name === n) || {}).data || []).length;
       return {
         kept: c.spec.__kept === true, filter: Desk.filters['chart-slices'],
-        names: drawn.map(s => s.name),
+        names: drawn.map(s => s.name), template: c.spec.series.map(s => s.name),
         marked: drawn.filter(s => s.markLine && (s.markLine.data || []).length).map(s => s.name),
-        shownElsewhere: Object.keys(sel).filter(k => sel[k] && !k.startsWith(exp + ' ')),
         offWithData: drawn.filter(s => (s.data || []).length).map(s => s.name)
           .filter(n => off.includes(keyOf(n).legendKey || keyOf(n).name)),
-        rows: c.spec._rows[exp].length,
-        bars: ((o.series.find(s => s.name === exp + ' bid–ask') || {}).data || []).length,
-        clipped: c.spec._rows[exp].filter(q => Object.values(q.models)
+        rows: rows.length, mids: len('mid'), bars: len('bid–ask'),
+        clipped: rows.filter(q => Object.values(q.models)
           .some(m => m.z !== null && Math.abs(m.z) > clip)).length,
         triangles: o.series.filter(s => / beyond the clip$/.test(s.name))
           .reduce((n, s) => n + (s.data || []).filter(p => p.symbol === 'triangle').length, 0) }; }"""
@@ -8502,11 +8572,11 @@ def test_browser_smile_expiry_switch_keeps_the_spec_and_draws_the_shown_group_on
         assert st["kept"], "the spec was parsed again"
         assert st["filter"] == exp
         assert st["names"], st
-        assert all(n.startswith(exp + " ") for n in st["names"]), st["names"]
+        assert set(st["names"]) <= set(st["template"]) | {n + " beyond the clip" for n in st["template"]}, st
+        assert not any(re.match(r"\d{4}-\d{2}-\d{2} ", n) for n in st["template"]), st["template"]
         assert st["marked"], st
-        assert all(n.startswith(exp + " ") for n in st["marked"]), st["marked"]
-        assert not st["shownElsewhere"], st["shownElsewhere"]
         assert not st["offWithData"], st["offWithData"]
+        assert st["mids"] == st["rows"] == len(spec["quotes"]["groups"][exp]["mid"]), st
         # one bar per quote: lower cap, the bar, upper cap and a break (7 points)
         assert st["bars"] == 7 * st["rows"]
         assert st["triangles"] <= st["clipped"] * len(spec["quotes"]["models"])
@@ -10192,6 +10262,52 @@ def test_the_audit_fails_a_wrong_number_in_an_expiry_tab_or_the_status_line(reco
     failed = {c.label for c in res["checks"] if not c.ok and c.page == "Surface"}
     assert f"tab {m.group(1)}: day of the month, days [1]" in failed
     assert "status line: days, F, quotes, median half-spread [1]" in failed
+
+
+def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_audit, frozen_site, tmp_path):
+    """D2: the smile's quotes are in a session data file; the audit reads it (under
+    data/, its sha384 against the page's integrity value, its sha256 against its name)
+    and checks every expiry in it against the residual table. In a copy of the frozen
+    site each of these is a mismatch: one packed mid IV a unit off (the file renamed
+    and the page's hashes updated, so only the number is wrong); the file's bytes
+    changed under the old hashes; the file deleted, and a stray file under data/."""
+    import base64
+
+    html = (frozen_site / "surface.html").read_text(encoding="utf-8")
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    src, sri = q["src"], q["integrity"]
+    body = (frozen_site / src).read_bytes()
+
+    def failed(name, change) -> set[tuple[str, str]]:
+        site = tmp_path / name
+        shutil.copytree(frozen_site, site)
+        change(site)
+        return {(c.page, c.label) for c in recompute_audit.run(site, SHIPPED)["checks"] if not c.ok}
+
+    def one_mid(site):
+        book = json.loads(body)
+        book["quotes"]["groups"][next(e for e in q["order"] if e not in q["groups"])]["mid"][0] += 1
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+
+    bad = failed("mid", one_mid)
+    assert ("Surface", "packed quotes: mid IV = residual table, every expiry") in bad
+    assert not [x for x in bad if "data file" in x[1]], bad
+    bad = failed("bytes", lambda site: (site / src).write_bytes(body.replace(b'"mid":[', b'"mid":[1', 1)))
+    assert ("Surface", f"data file {src}: sha384 = the page's integrity value") in bad
+    assert ("Surface", f"data file {src}: name = its sha256") in bad
+
+    def gone_and_stray(site):
+        (site / src).unlink()
+        (site / "data" / "surface-2000-01-03-0123456789abcdef.json").write_bytes(b"{}")
+
+    bad = failed("gone", gone_and_stray)
+    assert ("Surface", f"data file {src}") in bad
+    assert ("data", "every file under data/ read by an audited page") in bad
 
 
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):

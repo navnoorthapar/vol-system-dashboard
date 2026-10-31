@@ -17,9 +17,10 @@ The report is a table of every check (page, panel, what, printed, recomputed)
 and a coverage line per page: how many of the numbers and dates printed inside
 <main> sit in an element a check verified, and where the rest are.
 
-Exit 1 on any mismatch, on any number a check expected and the page lacks, or
-when the SQLite cache the site renders from disagrees with the committed parquet
-record on a row both hold.
+Exit 1 on any mismatch, on any number a check expected and the page lacks, on
+a file under the site's data/ no audited page reads and verifies (the session data
+files, app.publish_json, hold numbers the pages draw), or when the SQLite cache
+the site renders from disagrees with the committed parquet record on a row both hold.
 """
 from __future__ import annotations
 
@@ -48,9 +49,10 @@ def run(site: Path, data: Path) -> dict:
     store = Store(data)
     checks: list[Check] = []
     coverage: dict[str, dict] = {}
+    read: set[str] = set()
     for fname, name, fns in PAGES:
         soup = BeautifulSoup((site / fname).read_text(encoding="utf-8"), "lxml")
-        audit = Audit(name, soup)
+        audit = Audit(name, soup, site)
         for fn in fns:
             try:
                 fn(audit, store)
@@ -59,6 +61,14 @@ def run(site: Path, data: Path) -> dict:
                            f"{type(exc).__name__}: {exc}")
         checks.extend(audit.checks)
         coverage[name] = audit.coverage()
+        read |= audit.data_read
+    # every published data file was read and verified by a page's checks
+    files = sorted(p.relative_to(site).as_posix() for p in (site / "data").rglob("*") if p.is_file()) \
+        if (site / "data").is_dir() else []
+    stray = [f for f in files if f not in read]
+    checks.append(Check("data", "data files", "every file under data/ read by an audited page",
+                        f"{len(stray)} not read" + (f": {', '.join(stray[:3])}" if stray else ""),
+                        "0 not read", not stray, f"{len(files)} file(s)"))
     for table, cols in CACHE_TABLES:
         r = cache_vs_record(store, table, cols)
         # the pages render from the record (app.record_db), so a cached value the

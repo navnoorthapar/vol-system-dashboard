@@ -41,6 +41,11 @@
 //     one line (a full Cboe book's ~45 wrapped to four or five lines above it), and
 //     the last expiry, chosen without focusing its tab ('[' / ']' or a table row), is
 //     scrolled into the strip and named by the status line under it;
+//   * the session data file (D2): the smile's other expiries are one data file
+//     (data/surface-<session>-<sha>.json) that is not fetched before the smile is
+//     drawn, is requested within 3 s of its first draw with no input, loads with its
+//     integrity value, and is fetched once for any number of switches, each of which
+//     draws every quote of its expiry;
 //   * the smile's expiry switch is fast (P4.2): the median of five expiry-tab
 //     clicks, timed by the Event Timing API (PerformanceObserver 'event',
 //     durationThreshold 16, from the input to the next paint), is at most 50 ms,
@@ -49,7 +54,8 @@
 //     from the input to the frame that shows the new expiry's chart is measured
 //     too (the chart's 'finished' event, then the next frame): its median at most
 //     100 ms, 300 ms at 4×. (It re-parsed a 250 KB spec and rebuilt every series
-//     on each click: 160 ms, 640 ms at 4×, measured on the previous desk.js.)
+//     on each click: 160 ms, 640 ms at 4×, measured on the previous desk.js.) The
+//     data file is loaded first (Desk.quotesReady): the check times a switch, not a download.
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -89,11 +95,12 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const browser = await chromium.launch();
 const report = { site, checks: [], failures: [] };
 
-async function openPage(name, viewport = { width: 1440, height: 900 }) {
+async function openPage(name, viewport = { width: 1440, height: 900 }, onRequest = null) {
   const ctx = await browser.newContext({ viewport, reducedMotion: 'reduce' });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
+  if (onRequest) page.on('request', onRequest);
   await page.route('**/*', route => {
     const u = route.request().url();
     return (u.startsWith(base) || u.startsWith('data:')) ? route.continue() : route.abort();
@@ -495,6 +502,47 @@ async function checkSmileLayout() {
   return check;
 }
 
+// -- the session data file (D2) ----
+const BOOK_WAIT_MS = 3000;
+async function checkSessionFile() {
+  const check = { name: 'the smile fetches its session data file once, soon after its first draw', views: [], failures: [] };
+  const id = 'chart-slices', reqs = [];
+  const { ctx, page, errors } = await openPage('surface.html', undefined,
+    r => { if (new URL(r.url()).pathname.startsWith('/data/')) reqs.push({ url: r.url(), t: Date.now() }); });
+  const src = await page.evaluate(cid => { const s = document.getElementById(cid + '-spec'); return s ? JSON.parse(s.textContent).quotes.src || null : null; }, id);
+  if (!src) { await ctx.close(); return check; }             // no smile, or its quotes all inline
+  await page.waitForTimeout(1000);
+  if (!(await page.evaluate(cid => !!Desk.charts[cid], id)) && reqs.length) check.failures.push(`surface.html: ${src} was fetched before the smile was drawn`);
+  await page.locator('#' + id).scrollIntoViewIfNeeded();
+  if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id}: not drawn`); await ctx.close(); return check; }
+  const t0 = Date.now();
+  while (!reqs.length && Date.now() - t0 < BOOK_WAIT_MS + 1000) await page.waitForTimeout(100);
+  const delay = reqs.length ? reqs[0].t - t0 : null;
+  if (delay === null || delay > BOOK_WAIT_MS) check.failures.push(`surface.html: ${src} not requested within ${BOOK_WAIT_MS / 1000} s of the smile's first draw (${delay === null ? 'never' : delay + ' ms'})`);
+  const ready = await page.evaluate(cid => Desk.quotesReady(cid).then(() => 'ok', e => String(e)), id);
+  if (ready !== 'ok') check.failures.push(`surface.html: ${src} did not load: ${ready}`);
+  const tabs = await page.evaluate(cid => [...document.querySelectorAll(`[data-chart-filter="${cid}"] [role="tab"]`)]
+    .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('data-value')), id);
+  const drawn = [];
+  for (const v of [0.2, 0.5, 0.8].map(f => tabs[Math.floor(f * (tabs.length - 1))]).filter(Boolean)) {
+    const st = await page.evaluate(([cid, e]) => new Promise(done => {
+      const c = Desk.charts[cid], ch = c.chart;
+      const fin = () => { ch.off('finished', fin); requestAnimationFrame(() => {
+        const mid = ch.getOption().series.find(s => s.name === 'mid');
+        done({ exp: e, mids: mid ? mid.data.length : null, quotes: Desk.rowsOf(c.spec, e).length }); }); };
+      ch.on('finished', fin);
+      document.querySelector(`[data-chart-filter="${cid}"] [data-value="${e}"]`).click();
+    }), [id, v]);
+    drawn.push(st);
+    if (!(st.quotes > 0 && st.mids === st.quotes)) check.failures.push(`surface.html #${id} ${v}: ${st.mids} mids drawn of its ${st.quotes} quotes`);
+  }
+  if (reqs.length !== 1) check.failures.push(`surface.html: ${reqs.length} data file requests (${reqs.map(r => r.url).join(', ')}), not 1`);
+  check.views.push({ src, delay, requests: reqs.length, drawn });
+  for (const e of errors) check.failures.push(`surface.html: JavaScript error: ${e}`);
+  await ctx.close();
+  return check;
+}
+
 // -- the smile's expiry switch (P4.2) ----
 const SWITCH_MAX_MS = { 1: 50, 4: 150 };
 const DRAWN_MAX_MS = { 1: 100, 4: 300 };
@@ -524,6 +572,8 @@ async function checkSwitchSpeed() {
     const id = 'chart-slices';
     await page.locator('#' + id).scrollIntoViewIfNeeded();
     if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id}: not drawn`); await ctx.close(); continue; }
+    const ready = await page.evaluate(cid => Desk.quotesReady(cid).then(() => 'ok', e => String(e)), id);
+    if (ready !== 'ok') { check.failures.push(`surface.html #${id}: the quotes did not load (${ready})`); await ctx.close(); continue; }
     if (rate > 1) { const cdp = await ctx.newCDPSession(page); await cdp.send('Emulation.setCPUThrottlingRate', { rate }); }
     await page.evaluate(() => {
       new PerformanceObserver(l => { for (const e of l.getEntries()) (window.__ev = window.__ev || []).push({ n: e.name + ' (timing)', d: e.duration }); })
@@ -561,7 +611,7 @@ async function checkSwitchSpeed() {
 
 const ONLY = process.env.INTERACT_ONLY ? process.env.INTERACT_ONLY.split(',') : null;
 for (const run of [checkSignedBars, checkKpiTones, checkKpiStrips, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
-  checkQuoteInspector, checkSmileLayout, checkSwitchSpeed]) {
+  checkQuoteInspector, checkSmileLayout, checkSessionFile, checkSwitchSpeed]) {
   if (ONLY && !ONLY.includes(run.name)) continue;
   const c = await run();
   report.checks.push(c);
