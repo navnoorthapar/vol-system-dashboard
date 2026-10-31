@@ -13,8 +13,9 @@ reports a mark-to-model straddle backtest with its statistical inference.
 **What it is, and is not.** A model-validation record: each published number is computed from a committed artifact
 and each correction is logged. It is not an alpha claim: the backtest result is negative and no signal is deployable.
 
-**Three results** (ranges over the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26,
-not confidence intervals; the [live site](https://navnoorbawa.me) shows the newest session):
+**Three results** ([as of 2026-10-31](docs/results/readme_results.json): ranges over the six sessions with a stored
+chain and an accepted fit, 2026-03-24 → 2026-10-26, not confidence intervals; the [live site](https://navnoorbawa.me)
+shows the newest session):
 
 1. **Interpolation floor.** A certified arbitrage-free, calendar-ordered SVI surface prices held-out strikes, which lie
    between fitted ones, to a median **0.45–1.98 half-spreads**, 31.0–80.0% inside the bid–ask (2026-10-26: 1.60, 31.0%
@@ -111,7 +112,7 @@ why. Every committed SPX chain is fitted by the same calibrator (`data_store/cal
 
 | Session | κ | θ | σ | ρ | v₀ | SPX in-sample / OOS (vp) | VIX index (pts) | VX futures, OOS (pts) |
 |---|---|---|---|---|---|---|---|---|
-| 2026-03-24 | 6.142 | 0.0653 | 2.000* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.66 |
+| 2026-03-24 | 6.142 | 0.0653 | 2.000\* | −0.823 | 0.0732 | 1.207 / 1.980 | 0.888 | 2.66 |
 | 2026-03-27 | 4.290 | 0.0733 | 1.834 | −0.785 | 0.0928 | 1.365 / 1.538 | 0.852 | 3.18 |
 | 2026-05-29 | 5.233 | 0.0595 | 1.707 | −0.656 | 0.0130 | 0.911 / 1.285 | 0.523 | 2.56 |
 | 2026-06-18 | 4.999 | 0.0614 | 1.592 | −0.697 | 0.0173 | 0.855 / 1.833 | 0.510 | 1.85 |
@@ -119,8 +120,8 @@ why. Every committed SPX chain is fitted by the same calibrator (`data_store/cal
 | 2026-10-26 | 4.370 | 0.0550 | 1.833 | −0.691 | 0.0276 | 1.105 / 1.723 | 0.624 | n/a† |
 
 \* σ on its box ceiling, reported by the fit as an active constraint; Feller is violated in all six and imposed in none.
-† The Cboe VX history in the database ends 2026-10-09, before these sessions. The fits to 2026-10-16 are differential
-evolution; 2026-10-26 is the daily job's multi-start trust-region fit. The table stops at 2026-10-26; the
+† When these were fitted the database held no VX futures settlement for their session (each fit records none). The
+fits to 2026-10-16 are differential evolution; 2026-10-26 is the daily job's multi-start trust-region fit. The table stops at 2026-10-26; the
 [Calibration page](https://navnoorbawa.me/calibration.html) lists every later fit.
 
 What C23 measured about the five fits to 2026-10-16, and the diagnostics of 2026-10-26
@@ -222,6 +223,7 @@ committed publicly; the owner's decision is recorded there).
 | `data_store/calibrations/quintic_cal_2026-03-24.pkl` | `python -m joint_vol_calibration.calibration.quintic_calibrator` |
 | `docs/figures/smile_2026-10-16.png` (the figure above) | `python scripts/make_readme_figure.py` |
 | `docs/corrections.md` (from `dashboard/corrections.json`) | `python scripts/render_corrections.py` |
+| `docs/results/readme_results.json` (the figures this README and the validation pack quote, as of its date) | `make readme-results` (`python scripts/readme_results.py --update-docs`, which also rewrites the figures that moved in both; `THROUGH=newest` moves the sessions and the Data table to the newest data) |
 | Daily refresh | `python scripts/cloud_refresh.py --steps market,capture,calibrate,freeze` |
 
 `make reproduce` rebuilds the backtest, the Greeks surface and scenario grid, the C7 study, the five calibrations and
@@ -241,9 +243,12 @@ violations required), a simulation of the daily job's next session, and a benchm
 **tests** badge above is that run. The suite works on a private copy of `data_store/` and fails if anything under it
 changes. It includes look-ahead tests that poison the data two opposite ways, Heston prices against independent
 quadratures, Hypothesis property tests of the no-arbitrage invariants over the whole parameter box, a curated mutation
-check (`make mutation`, weekly), and `test_readme.py`, which recomputes from its artifact every result, table cell,
-data count and limitation figure this README quotes. **QuantLib is used only as a dev-only test oracle** (with Let's Be
-Rational for implied vols; `test_external_oracles.py`): no runtime code imports it.
+check (`make mutation`, weekly), and `test_readme.py`. That test checks every result, table cell, data count and
+limitation figure this README quotes, and the validation pack's per-session figures, against a committed snapshot
+(`docs/results/readme_results.json`, written by `make readme-results`), and the snapshot against the artifacts it
+names: a figure whose artifacts are unchanged must match, and one whose artifact the daily job has rebuilt since is
+reported as a warning to regenerate the snapshot, not a failure. **QuantLib is used only as a dev-only test oracle**
+(with Let's Be Rational for implied vols; `test_external_oracles.py`): no runtime code imports it.
 
 ## Requirements
 

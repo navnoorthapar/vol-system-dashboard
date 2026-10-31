@@ -2,24 +2,36 @@
 test_readme.py — every number the README front door quotes is the committed artifact's.
 
 The README's first screen quotes three results with their intervals, and its
-calibration and backtest sections quote tables. Each figure is recomputed here
-from the file it names and must appear in the README exactly as printed.
+calibration, backtest, data and limitation sections quote tables and figures;
+the validation pack quotes per-session figures. They are a committed snapshot,
+docs/results/readme_results.json, written by scripts/readme_results.py from
+data_store: every figure as the documents print it, the artifacts it was
+computed from (path, sha256, report_version) and the date and commit it was
+taken at. The documents say 'as of <date>' and name the live site for the
+newest session.
 
-The results lead with the range over the sessions the README names (VALIDATOR-06,
-CODE-04, CIO-05: it led with one near-best session, 2026-10-16, and said 'no
-ledger entry' after one was committed). The README states the span of those
-sessions (2026-03-24 -> its last date); RESULT_SESSIONS is every stored session
-in that span with a surface scorecard and a model_version 2 fit, so a session the
-daily job adds after the span does not move a number, while a session missing
-from the README's count inside it fails here. A single value names its session
-and is read from that session's artifact. C23_SESSIONS are the five sessions the
-C23 round measured; the claims about that round (the DE timings, the Data table's
-option counts, the article's C23 note) stay pinned to them. test_readme.py is in
-no gate of the daily job (daily_refresh.yml).
+It used to be recomputed here from data_store directly, so the daily job
+rebuilding a quoted artifact (the surface method's report_version 3 backfill
+moves 2026-10-26 from 1.60 to 1.66 half-spreads, rebuilt from its Cboe book)
+turned every pull request red until someone edited the README. Now:
 
-The Data table's row counts are counted as of the end date each row states,
-so the daily job appending a session does not move them (CLM-03: the Data
-table, the VX column and the limitation figures were outside the tested set).
+  (a) every figure is in its document as the snapshot holds it, and both
+      documents state its date: always;
+  (b) the snapshot is what the current data_store gives: a figure that moved
+      fails when none of its artifacts changed (the code changed) or when one
+      the daily job never writes changed (a commit did); when only artifacts
+      the job writes changed (what its commit steps stage, and the cache every
+      run rewrites), it is a StaleSnapshot warning naming them and
+      `make readme-results`, never a failure.
+
+The results range over every stored session in the span the snapshot names
+with a surface scorecard and a model_version 2 fit (VALIDATOR-06, CODE-04,
+CIO-05), so a session the job adds after the span moves nothing. C23_SESSIONS
+are the five sessions the C23 round measured: the claims about that round (the
+DE timings, the Data table's option counts, the article's C23 note) stay pinned
+to them, and the article's note is still recomputed here. The Data table's rows
+are counted as of the end date each states (CLM-03). test_readme.py is in no
+gate of the daily job (daily_refresh.yml).
 
 Also: the figure is drawn from the surface report it names (its sidecar's
 numbers and source hash), docs/corrections.md and the validation pack's
@@ -29,11 +41,16 @@ test oracle.
 """
 from __future__ import annotations
 
+import copy
+import datetime as dt
 import hashlib
 import importlib.util
 import json
 import pickle
 import re
+import shutil
+import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -50,32 +67,29 @@ C23_SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10
 C23_HEADLINE = "2026-10-16"
 FIGURE = "2026-10-16"                       # the session docs/figures/smile_<session>.png draws
 MINUS = "−"
-WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
-
-
-def _result_sessions(text: str) -> tuple[str, ...]:
-    """Every stored session in the span ``text`` states ('... an accepted fit,
-    <first> → <last>'), with a surface scorecard and a model_version 2 fit."""
-    m = re.search(r"accepted fit, (\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", text)
-    assert m, "the text does not state the span of its sessions"
-    out = []
-    for d in sorted((DATA / "surface").iterdir()):
-        s = d.name
-        pkl = DATA / "calibrations" / f"joint_cal_{s}.pkl"
-        if not (m.group(1) <= s <= m.group(2) and (d / "scorecard.json").exists() and pkl.exists()):
-            continue
-        with open(pkl, "rb") as fh:
-            if pickle.load(fh).get("model_version") == 2:
-                out.append(s)
-    assert out[0] == m.group(1)
-    assert out[-1] == m.group(2)
-    return tuple(out)
-
-
-RESULT_SESSIONS = _result_sessions(FIRST_SCREEN)
-LAST = RESULT_SESSIONS[-1]
 PACK_RAW = (ROOT / "docs" / "model_validation" / "README.md").read_text()
 PACK = " ".join(PACK_RAW.split())
+# claims computed from a code constant (the backtest's β), with no artifact
+CONSTANT_CLAIMS = {"backtest_prose/beta", "limitations/beta", "pack/m7_beta", "pack/m7_design"}
+
+
+def _script(name: str):
+    """scripts/<name>.py as a module (registered, so its dataclasses resolve)."""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    assert spec is not None
+    assert spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+rr = _script("readme_results")
+SNAP = json.loads(rr.SNAPSHOT.read_text())
+RESULT_SESSIONS = tuple(SNAP["sessions"])
+LAST = RESULT_SESSIONS[-1]
 
 
 def _cal(s: str) -> dict:
@@ -92,35 +106,541 @@ def rng(values, spec: str) -> str:
     return f"{fmt(min(v), spec)}–{fmt(max(v), spec)}"
 
 
-def _script(name: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
-    assert spec is not None
-    assert spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def _claim(cid: str) -> dict:
+    return next(k for k in SNAP["claims"] if k["id"] == cid)
 
 
-@pytest.fixture(scope="module")
-def scorecards():
-    out = {}
-    for s in RESULT_SESSIONS:
-        sc = json.loads((DATA / "surface" / s / "scorecard.json").read_text())
-        out[s] = {m["model"]: m for m in sc["models"]}
+def _moved(text: str) -> str:
+    """``text`` with its first decimal figure moved by one."""
+    def up(m: re.Match) -> str:
+        return f"{float(m.group()) + 1:.{len(m.group().split('.')[1])}f}"
+
+    out = re.sub(r"\d+\.\d+", up, text, count=1)
+    assert out != text, text
     return out
 
 
-@pytest.fixture(scope="module")
-def diag():
-    rows = json.loads((DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]
-    by = {r["session"]: r for r in rows}
-    return [by[s] for s in RESULT_SESSIONS]
+@pytest.fixture
+def store_copy(tmp_path):
+    """A private copy of data_store/ to change; the snapshot's Store reads it."""
+    dst = tmp_path / "data_store"
+    shutil.copytree(DATA, dst)
+    return dst
 
 
 @pytest.fixture(scope="module")
 def inference():
     return json.loads((DATA / "backtest" / "inference" / "summary.json").read_text())
 
+
+# ── (a) the documents say what the snapshot says ──────────────────────────────
+
+def test_documents_quote_the_snapshot():
+    """Every figure the README, the validation pack and DATA_SOURCES.md quote
+    is in its place as the snapshot holds it, and both documents state the
+    snapshot's date."""
+    assert rr.doc_problems(SNAP) == []
+
+
+def test_a_document_that_disagrees_with_the_snapshot_fails():
+    claim = _claim("result_1/last")
+    pattern = r"\s+".join(map(re.escape, claim["text"].split()))
+    moved, n = re.subn(pattern, lambda m: _moved(claim["text"]), README_RAW)
+    assert n == 1
+
+    def read(doc: str) -> str:
+        return moved if doc == rr.README else rr.read_doc(doc)
+
+    problems = rr.doc_problems(SNAP, read)
+    assert [p.split(":")[0] for p in problems] == ["result_1/last"]
+    asof = f"as of {SNAP['generated']['date']}"
+    undated = README_RAW.replace(asof, "as of 1999-01-01")
+
+    def read_undated(doc: str) -> str:
+        return undated if doc == rr.README else rr.read_doc(doc)
+
+    assert [p for p in rr.doc_problems(SNAP, read_undated) if p.startswith("generated")]
+
+
+def test_results_name_their_date_and_the_live_site():
+    """The results' preamble links the snapshot it quotes with its date, and
+    names the live site for the newest session; the pack links it too."""
+    date = SNAP["generated"]["date"]
+    assert f"[as of {date}](docs/results/readme_results.json)" in FIRST_SCREEN
+    assert f"[as of {date}](../results/readme_results.json)" in PACK
+    live = "[live site](https://navnoorbawa.me) shows the newest session"
+    assert live in FIRST_SCREEN_RAW.replace("\n", " ")
+    assert dt.date.fromisoformat(date) >= dt.date.fromisoformat(SNAP["params"]["sessions_through"])
+    assert dt.date.fromisoformat(date) >= dt.date.fromisoformat(SNAP["params"]["data_through"])
+
+
+# ── (b) the snapshot is what the artifacts give ───────────────────────────────
+
+def test_snapshot_is_what_the_artifacts_give():
+    """A figure whose artifacts are unchanged since the snapshot recomputes to
+    its text; one the daily job's rebuilds moved is a StaleSnapshot warning
+    (naming the artifacts and make readme-results), not a failure."""
+    assert rr.check(SNAP) == []
+
+
+def _part_problems(topic: str) -> list[str]:
+    """(a) and (b) for the claims of one part of the documents."""
+    part = {**SNAP, "claims": [k for k in SNAP["claims"] if k["id"].startswith(f"{topic}/")]}
+    assert part["claims"], topic
+    return rr.doc_problems(part) + rr.check(SNAP, topics=[topic])
+
+
+def test_result_2_joint_calibration_heston_and_rough():
+    """Result 2 (C24-I1 cites this test): the joint Heston fit's held-out
+    range, the newest session's fit, the σ cap and rough Heston, over the
+    sessions the README names, are the snapshot's and the snapshot is the
+    fits' and the diagnostics'."""
+    assert _part_problems("result_2") == []
+
+
+def test_validation_pack_counts_and_outcomes_are_the_artifacts():
+    """VALIDATOR-10 (C24-I1 cites this test): the pack was frozen at five
+    sessions and disagreed with the site. Its span, the §1 limitations of M4,
+    M5, M7, M15 and M18, §2's figures for M4 (except the optimiser's timings),
+    M7 and M14, and the §3 rows of M4, M5, M7, M14, M15 and M18 are the
+    snapshot's, and the snapshot is the artifacts'."""
+    assert _part_problems("pack") == []
+
+
+def test_the_packs_figures_a_surface_rebuild_moves_follow_the_snapshot(store_copy, fresh):
+    """VALIDATOR-10: the pack's M14 evidence quoted figures the daily job's
+    surface rebuild changes (the certificates over the sessions, the
+    replicated VIX against the official close, and, on the five C23 sessions,
+    the truncation under the SVI-cal wing and the rest of the gap) with no
+    check at all, so a rebuild left them silently stale. They are in the
+    snapshot: a rebuilt replication warns, naming the figures that moved, and a
+    pack that disagrees with the snapshot fails."""
+    ids = {"pack/certificates", "pack/dense_grid", "pack/vix_gap", "pack/vix_truncation", "pack/vix_residual",
+           "pack/m5", "pack/m5_outcome", "pack/m7_outcome", "pack/sigma_box", "pack/known_weaknesses"}
+    assert ids <= {k["id"] for k in SNAP["claims"]}
+    rel = f"surface/{C23_SESSIONS[1]}/vix_replication.json"
+    doc = json.loads((store_copy / rel).read_text())
+    ga = doc["indices"]["VIX"]["gap_attribution"]
+    ga["truncation_pts"] += 0.1                       # the rebuild moves the gap's split
+    ga["residual_pts"] -= 0.1
+    (store_copy / rel).write_text(json.dumps(doc))
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["pack"]) == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    assert f"  data_store/{rel}" in message
+    for cid in ("pack/vix_truncation", "pack/vix_residual"):
+        # named as moved; 'could not be recomputed' only where the current
+        # data_store cannot give the figure either (the job's rebuild left
+        # the session without an attribution)
+        computable = next(k["text"] for k in fresh["claims"] if k["id"] == cid) is not None
+        assert f"  {cid} {'now reads' if computable else 'could not be recomputed'} " in message, cid
+    claim = _claim("pack/vix_truncation")["text"]
+    edited = PACK_RAW.replace(claim.split("(")[1][:5], _moved(claim.split("(")[1][:5]), 1)
+    problems = rr.doc_problems(SNAP, lambda d: edited if d == rr.PACK else rr.read_doc(d))
+    assert [p.split(":")[0] for p in problems] == ["pack/vix_truncation"]
+
+
+def _rewrite_gap_causes(store: Path, sessions, causes: str) -> None:
+    """The causes the gap notes of ``sessions`` name, rewritten to ``causes``."""
+    for s in sessions:
+        rel = f"surface/{s}/vix_replication.json"
+        doc = json.loads((store / rel).read_text())
+        notes = doc["gap_notes"]
+        i = next(i for i, n in enumerate(notes) if "Left unexplained by the chain: " in n)
+        notes[i], n = re.subn(r"\): [^()]+\.$", f"): {causes}.", notes[i])
+        assert n == 1, notes[i]
+        (store / rel).write_text(json.dumps(doc))
+
+
+def test_the_packs_gap_causes_follow_the_replications_notes(store_copy):
+    """VALIDATOR-10: the pack named the causes of the part of the VIX gap the
+    stored chain does not explain ('snapshot timing against 16:15, stale
+    quotes, the rate') from no artifact and no check, so the surface rebuild
+    that prices the VIX at Cboe's rate (report_version 5), and drops the rate
+    from the notes, would have left it naming a cause the notes no longer give.
+    It is a claim now, in the notes' own list: a rebuild that drops a cause
+    warns, naming the figure; causes that differ between the C23 sessions, or
+    one the pack has no words for, stop the regeneration; a pack that
+    disagrees with the snapshot fails."""
+    claim = _claim("pack/vix_residual_causes")
+    timing, stale = "snapshot timing vs the 16:15 ET print", "stale quotes"
+    _rewrite_gap_causes(store_copy, C23_SESSIONS, f"{timing}, {stale}")       # the rate dropped
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["pack"]) == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    want = f"not explained by the stored chain ({rr.GAP_CAUSES[timing]}, {rr.GAP_CAUSES[stale]})"
+    assert f"  pack/vix_residual_causes now reads {want!r}" in message
+    _rewrite_gap_causes(store_copy, C23_SESSIONS[:1], stale)              # one session differs
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    assert "name different causes" in {k.id: k.error for k in bad}["pack/vix_residual_causes"]
+    _rewrite_gap_causes(store_copy, C23_SESSIONS, f"{stale}, the weather")   # words the pack lacks
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    assert "['the weather']" in {k.id: k.error for k in bad}["pack/vix_residual_causes"]
+    pattern = r"\s+".join(map(re.escape, claim["text"].split()))
+    edited, n = re.subn(pattern, claim["text"][:-1] + ", the weather)", PACK_RAW)
+    assert n == 1
+    problems = rr.doc_problems(SNAP, lambda d: edited if d == rr.PACK else rr.read_doc(d))
+    assert [p.split(":")[0] for p in problems] == ["pack/vix_residual_causes"]
+
+
+def test_the_figures_the_documents_say_are_checked_are_claims(store_copy):
+    """VALIDATOR-10: the pack said test_readme.py checked its §1 limitations
+    and §2's figures for M4, yet nothing checked 'VIX-options leg off (w3 = 0)',
+    M15's H on its floor on the C23 headline session, M7's 'held constant over'
+    the backtest's years, or the known weakness 'only four sessions of VIX
+    option quotes are stored', which the daily job's Cboe VIX book of every
+    session has made false. Nor did anything check the README's footnote that
+    the database's VX history ends 2026-10-09, which the job's VX futures store
+    makes false. Each is a claim now, guarded by the fact that makes it true;
+    the count and the date are gone. Here the fits and diagnostics the job
+    writes stop holding those facts: the claims warn, and the regeneration
+    refuses each one, naming it."""
+    assert not re.search(r"only \w+ sessions of VIX option quotes", PACK)
+    assert "VX history in the database ends" not in README
+    claims = {"records/vix_options_leg": "the VIX-options leg has weight",
+              "pack/m4_vix_options": "the VIX-options leg has weight",
+              "pack/known_weaknesses/vix_options": "the VIX-options leg has weight",
+              "calibration/rough_floor": "not its", "pack/m15_floor": "not its",
+              "calibration/vx_footnote": "held VX futures"}
+    assert set(claims) <= {k["id"] for k in SNAP["claims"]}
+    years = (f"{pd.Timestamp(pd.read_parquet(DATA / 'backtest' / 'full_results.parquet').index[i]).year}"
+             for i in (0, -1))
+    assert f"held constant over {'–'.join(years)};" in _claim("pack/m7")["text"]
+    na = [s for s in RESULT_SESSIONS if _cal(s)["leg_losses"].get("vx_futures_rmse_oos") is None]
+    assert na                                            # the footnote marks a cell
+    rel = f"calibrations/joint_cal_{na[-1]}.pkl"
+    cal = _cal(na[-1])
+    cal["weights"]["w3"] = 0.1
+    cal["n_vx_futures"] = 3
+    with open(store_copy / rel, "wb") as fh:
+        pickle.dump(cal, fh)
+    doc = json.loads((store_copy / "calibrations" / "diagnostics" / "summary.json").read_text())
+    row = next(r for r in doc["rows"] if r["session"] == C23_HEADLINE)
+    row["joint_rough_H"], row["joint_rough_on_bound"] = 0.1, []
+    (store_copy / "calibrations" / "diagnostics" / "summary.json").write_text(json.dumps(doc))
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["records", "calibration", "pack"]) == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    errors = {k.id: k.error for k in bad}
+    for cid, why in claims.items():
+        assert f"  {cid} could not be recomputed " in message, cid
+        assert why in (errors.get(cid) or ""), (cid, errors.get(cid))
+
+
+def test_snapshot_names_each_artifact_with_its_hash_and_method():
+    gen = SNAP["generated"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", gen["date"])
+    assert re.fullmatch(r"[0-9a-f]{40}", gen["commit"])
+    assert gen["command"] == rr.COMMAND == "make readme-results"
+    assert "readme-results:" in (ROOT / "Makefile").read_text()
+    assert SNAP["schema_version"] == rr.SCHEMA_VERSION
+    assert SNAP["sessions"]
+    assert SNAP["claims"]
+    for key, entry in SNAP["artifacts"].items():
+        assert key.startswith("data_store/"), key
+        assert re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]), key
+        if key.startswith("data_store/surface/"):
+            assert isinstance(entry["report_version"], int), key
+        else:
+            assert entry["report_version"] is None, key
+    ids = [k["id"] for k in SNAP["claims"]]
+    assert len(ids) == len(set(ids))
+    for k in SNAP["claims"]:
+        assert k["text"], k["id"]
+        assert k["sources"] or k["id"] in CONSTANT_CLAIMS, k["id"]
+        assert set(k["sources"]) <= set(SNAP["artifacts"]), k["id"]
+        assert k["doc"] in {rr.README, rr.PACK, rr.SOURCES_DOC}, k["id"]
+
+
+def test_a_figure_whose_artifacts_are_unchanged_must_recompute():
+    """An edited snapshot (or code that now computes another figure) fails:
+    nothing it was computed from changed."""
+    snap = copy.deepcopy(SNAP)
+    k = next(c for c in snap["claims"] if c["id"] == "result_3/sharpe")
+    k["text"] = _moved(k["text"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", rr.StaleSnapshot)
+        failures = rr.check(snap, topics=["result_3"])
+    assert len(failures) == 1
+    assert failures[0].startswith("result_3/sharpe ")
+    assert "every artifact it reads unchanged" in failures[0]
+
+
+@pytest.fixture(scope="module")
+def fresh():
+    """A snapshot of the current data_store over the committed snapshot's
+    span. The code-change tests compare against it, not the committed one, so
+    they hold in the tree the daily job leaves too, where artifacts the
+    committed snapshot names may have been rebuilt."""
+    snap, _ = rr.build(SNAP["params"], rr.Store(), date=SNAP["generated"]["date"],
+                       commit=SNAP["generated"]["commit"])
+    return snap
+
+
+def _code_change(snap: dict, topics: list[str]) -> tuple[list[str], list[str]]:
+    """check() of ``snap`` under a monkeypatched generator: the failures, and
+    the claims a StaleSnapshot warning names as moved."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        failures = rr.check(snap, topics=topics)
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    return failures, re.findall(r"^  (\S+/\S+) (?:now reads|could not be recomputed)", message, re.MULTILINE)
+
+
+def _failed(failures: list[str], cid: str) -> str:
+    hit = [f for f in failures if f.split(" ")[0] == cid]
+    assert len(hit) == 1, (cid, failures)
+    return hit[0]
+
+
+def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch, fresh):
+    """A code change that makes a claim stop before it reads its artifacts
+    (here, reading surface/index.json's rows) is a failure. The rows it never
+    read are not 'changed' because the run has no digest of them: counted as
+    changed, they made the broken claims a stale-snapshot warning under the
+    surface paths the daily job writes, and the suite passed."""
+    def broken(self, s):
+        raise RuntimeError("the index reader is broken")
+
+    monkeypatch.setattr(rr.Claims, "index", broken)
+    failures, moved = _code_change(fresh, ["calibration", "pack"])
+    readers = [k["id"] for k in fresh["claims"] if k["id"].startswith(("calibration/", "pack/"))
+               and any("surface/index.json#" in key for key in k["sources"])]
+    assert {"calibration/vix_gap", "pack/m14_vix"} <= set(readers)
+    for cid in readers:
+        f = _failed(failures, cid)
+        assert "could not be recomputed (RuntimeError: the index reader is broken)" in f
+        assert "every artifact it reads unchanged" in f
+    assert moved == []
+
+
+def test_a_code_change_to_which_sessions_qualify_fails(monkeypatch, fresh):
+    """Which sessions the results range over is code (a stored fit's
+    model_version, a scorecard) applied to data. Digested as its result, the
+    list changed whenever the code did, under data_store/surface, so a code
+    change that left no session qualifying was a stale-snapshot warning. The
+    digest is now of the data the rule reads, so the claims fail."""
+    monkeypatch.setattr(rr, "RESULT_MODEL_VERSION", 1, raising=False)
+    failures, moved = _code_change(fresh, ["span"])
+    assert "every artifact it reads unchanged" in _failed(failures, "span/results")
+    assert moved == []
+
+
+def test_a_code_change_to_a_cache_query_fails(monkeypatch, fresh):
+    """The Data table's VX settlements are read from the cache
+    (vol_system.db), which every run of the daily job rewrites. Digested as
+    the query's result, a changed query looked like a rewritten cache and
+    warned; the digest is now of the table's rows up to the Data table's end
+    date, whatever the claim selects from them, so a changed query fails. (The
+    VX futures row also merges the partitions the job commits, which can hold
+    every row the query dropped.)"""
+    orig = rr.Store.sql
+
+    def limited(self, *args):
+        return orig(self, *(a + " LIMIT 100" if isinstance(a, str) and a.startswith("SELECT") else a
+                            for a in args))
+
+    monkeypatch.setattr(rr.Store, "sql", limited)
+    failures, moved = _code_change(fresh, ["data_table"])
+    assert "every artifact it reads unchanged" in _failed(failures, "data_table/vx_settlements")
+    assert moved == []
+
+
+def test_a_claim_computed_from_other_artifacts_than_the_snapshot_names_fails(monkeypatch, fresh):
+    """The snapshot names what each figure is computed from, so a rebuild of
+    it warns. Code that reads something else for the same figure (here the VX
+    row from the cache alone, the partitions the daily job commits dropped)
+    leaves the snapshot naming the wrong artifacts: the job's first stored
+    session would then move the figure with none of them changed, a failure
+    in the bot's tree. It fails now, on the code change."""
+    orig = rr.Store.market
+
+    def market(self, table, through):
+        if table == "vix_futures_daily":
+            return pd.DataFrame({"date": [], "expiry_date": [], "expiry_month": []})
+        return orig(self, table, through)
+
+    monkeypatch.setattr(rr.Store, "market", market)
+    failures, moved = _code_change(fresh, ["data_table"])
+    f = _failed(failures, "data_table/vx_futures")
+    was = next(k["text"] for k in fresh["claims"] if k["id"] == "data_table/vx_futures")
+    now = next(k.text for k in rr.compute(fresh["params"], rr.Store(), ["data_table"])
+               if k.id == "data_table/vx_futures")
+    if now == was:          # the partitions add no row to the cache's yet: the same figure, from other reads
+        assert (f"no longer from data_store/market/vix_futures_daily#date<={fresh['params']['data_through']}"
+                in f)
+    else:                   # they do (a clean checkout of the job's commit): the figure moved
+        assert f"data_table/vx_futures now reads {now!r}" in f
+    assert moved == []
+
+
+def test_a_session_row_the_daily_job_dropped_warns(store_copy):
+    """A row the daily job removed from an aggregate file (a session its
+    rebuild no longer lists in surface/index.json) is a change of that row,
+    not an unread one: the claims over it warn, naming it."""
+    rel = "surface/index.json"
+    doc = json.loads((store_copy / rel).read_text())
+    doc["sessions"] = [r for r in doc["sessions"] if r["session"] != LAST]
+    (store_copy / rel).write_text(json.dumps(doc))
+    with pytest.warns(rr.StaleSnapshot, match=re.escape(f"data_store/{rel}#session={LAST}")):
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["calibration", "pack"]) == []
+
+
+def test_an_artifact_changed_outside_the_daily_job_fails(store_copy):
+    """The daily job never writes the backtest's inference: a change there that
+    moves a figure is a commit that must regenerate the snapshot."""
+    rel = "backtest/inference/summary.json"
+    doc = json.loads((store_copy / rel).read_text())
+    doc["bootstrap"]["portfolio"]["sharpe"]["point"] += 1.0
+    (store_copy / rel).write_text(json.dumps(doc))
+    assert not any(f"data_store/{rel}".startswith(p) for p in rr.bot_written())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", rr.StaleSnapshot)
+        failures = rr.check(SNAP, rr.Store(store_copy), topics=["result_3"])
+    assert [f.split(" ")[0] for f in failures] == ["result_3/sharpe"]
+    assert f"data_store/{rel} changed, which the daily job never writes" in failures[0]
+    assert rr.COMMAND in failures[0]
+
+
+def test_an_artifact_the_daily_job_rebuilt_warns_and_passes(store_copy):
+    """The report_version backfill rebuilds the newest session's surface from
+    its Cboe book: its figures move and its chain is no longer a Yahoo
+    download. The test warns, naming the rebuilt artifacts and the command,
+    and passes; the snapshot cannot be regenerated until the Yahoo sentence
+    is reworded."""
+    rebuilt = {}
+    for name in ("scorecard.json", "surface.json"):
+        rel = f"surface/{LAST}/{name}"
+        doc = json.loads((store_copy / rel).read_text())
+        was = SNAP["artifacts"][f"data_store/{rel}"]["report_version"]
+        doc["report_version"] = max(was, doc.get("report_version") or 1) + 1
+        rebuilt[f"data_store/{rel}"] = (was, doc["report_version"])
+        if name == "scorecard.json":
+            svi = next(m for m in doc["models"] if m["model"] == "svi_cal")
+            svi["metrics"]["out_of_sample"]["median_abs_hs"] += 0.5
+        else:
+            doc["inputs"]["source"] = "cboe"
+        (store_copy / rel).write_text(json.dumps(doc))
+    store = rr.Store(store_copy)
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        failures = rr.check(SNAP, store, topics=["result_1", "limitations", "pack"])
+    assert failures == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    for key, (was, now) in rebuilt.items():
+        assert f"{key} (report_version {was} → {now})" in message
+    for cid in ("result_1/last", "limitations/quote_quality", "pack/m14_certified"):
+        assert f"  {cid} " in message, cid
+    assert rr.COMMAND in message
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    assert "limitations/quote_quality" in [k.id for k in bad]
+
+
+def test_a_session_without_a_replicated_vix_is_named(store_copy):
+    """A session the daily job adds can have no replicated VIX (2026-10-27:
+    no candidate expiries on both sides of 30 days). A span over it stops the
+    regeneration on the two sentences that list or range over the replicated
+    values and names the session, instead of a TypeError on a missing number;
+    checked against the snapshot, the rebuilt row is a warning."""
+    rel = "surface/index.json"
+    doc = json.loads((store_copy / rel).read_text())
+    row = next(r for r in doc["sessions"] if r["session"] == LAST)
+    row["vix_replicated"] = None
+    (store_copy / rel).write_text(json.dumps(doc))
+    _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
+    errors = {k.id: k.error for k in bad}            # other claims may refuse after a rebuild too
+    for cid in ("calibration/vix_gap", "pack/m14_vix"):
+        # the job's own rebuild may have left another session unreplicated too
+        assert re.fullmatch(rf"the VIX is not replicated on \[.*'{LAST}'\]", errors.get(cid) or ""), cid
+    with pytest.warns(rr.StaleSnapshot, match=f"data_store/{rel}#session={LAST}"):
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["calibration", "pack"]) == []
+
+
+def test_the_daily_job_writes_the_surface_and_fit_artifacts():
+    """bot_written() reads the paths from the workflow's commit steps (a
+    workflow change that hid them would turn a routine rebuild into a failure)
+    and adds the cache every run rewrites without committing it."""
+    bot = rr.bot_written()
+    for key in SNAP["artifacts"]:
+        if key.startswith(("data_store/surface", "data_store/calibrations", "data_store/market",
+                           "data_store/options", "data_store/forward", "data_store/vol_system.db")):
+            assert rr._under(key, bot), key
+        if key.startswith(("data_store/backtest", "data_store/benchmarks")):
+            assert not rr._under(key, bot), key
+
+
+@pytest.mark.parametrize("cache", [True, False], ids=["the job's tree", "a clean checkout of its commit"])
+def test_a_vx_session_the_daily_job_stores_warns_and_passes(store_copy, tmp_path, monkeypatch, cache):
+    """FUND_GRADE_PLAN 1.12: the daily job stores each session's VX
+    settlements in its cache (vol_system.db, rewritten by every run and never
+    committed) and commits them as data_store/market/vix_futures_daily/.
+    Counted from the cache alone, the Data table's VX row would fail in the
+    tree the job leaves (the suite simulate_next_session.py runs) as a change
+    to a file the job never writes, and a clean checkout of the job's commit
+    would go on quoting the cache's rows without a word. It counts the record
+    (the cache's rows and the partitions, as app.record_db merges them), so
+    both trees warn, naming the figure that moved, and pass."""
+    from joint_vol_calibration.data import database as dbm
+
+    through = SNAP["params"]["data_through"]
+    record = f"data_store/market/vix_futures_daily#date<={through}"
+    assert record in _claim("data_table/vx_futures")["sources"]   # read while empty: the first one moves it
+    # whatever the record holds already (the job may have stored sessions since
+    # the snapshot): one contract listed after its newest, on its last session
+    before = rr.Claims(rr.Store(store_copy), SNAP["params"]).vx_futures(through)
+    month = str(pd.Period(max(m for _, m in before), "M") + 1)
+    row = pd.DataFrame({"date": [max(d for d, _ in before)], "expiry_date": [f"{month}-15"],
+                        "expiry_month": [month], "is_weekly": [0], "settle": [20.0]})
+    job = tmp_path / "job.db"
+    shutil.copy2(store_copy / "vol_system.db", job)
+    monkeypatch.setattr(dbm, "DB_PATH", job)
+    assert dbm.insert_vix_futures_daily(row) == 1                      # the market step
+    assert dbm.export_market_partitions(store_copy / "market", tables=["vix_futures_daily"])  # the commit
+    if cache:
+        shutil.copy2(job, store_copy / "vol_system.db")
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        failures = rr.check(SNAP, rr.Store(store_copy), topics=["data_table"])
+    assert failures == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    cache_key = f"data_store/vol_system.db#vix_futures_daily#date<={through}"
+    assert f"  {record}\n" in message                    # the job's commit, listed with no note
+    assert f"  {cache_key} (" not in message              # and its cache, when changed, the same way
+    if cache:
+        assert f"  {cache_key}\n" in message
+    assert "  data_table/vx_futures now reads " in message
+    now = next(k for k in rr.compute(SNAP["params"], rr.Store(store_copy), ["data_table"])
+               if k.id == "data_table/vx_futures")
+    assert now.text.endswith(f"| {len(before) + 1:,} |")
+    assert f" → {month}) | " in now.text
+
+
+def test_regeneration_rewrites_only_the_figures_that_moved(tmp_path):
+    """make readme-results rewrites a moved figure in the part of the document
+    its claim names (keeping the line breaks) and the 'as of' dates."""
+    for doc in (rr.README, rr.PACK, rr.SOURCES_DOC):
+        (tmp_path / doc).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / doc, tmp_path / doc)
+    old_last = _claim("result_1/last")["text"]
+    # the same words outside the first screen are not the claim's
+    with open(tmp_path / rr.README, "a") as fh:
+        fh.write(f"\n## Elsewhere\n\n{old_last}\n")
+    new = copy.deepcopy(SNAP)
+    new["generated"]["date"] = "2099-12-31"
+    for k in new["claims"]:
+        if k["id"] in ("result_1/last", "pack/m14_certified"):
+            k["text"] = _moved(k["text"])
+    done = rr.update_docs(SNAP, new, root=tmp_path)
+    assert len(done) == 4, done
+    assert rr.doc_problems(new, lambda doc: (tmp_path / doc).read_text()) == []
+    text = (tmp_path / rr.README).read_text()
+    assert text.endswith(f"\n## Elsewhere\n\n{old_last}\n")
+    before, after = README_RAW.splitlines(), text.splitlines()[:len(README_RAW.splitlines())]
+    assert len(before) == len(after)                     # line breaks kept
+    changed = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+    assert 1 <= len(changed) <= 4, changed
+
+
+# ── what the snapshot does not hold ───────────────────────────────────────────
 
 def test_first_screen_is_short_and_names_its_parts():
     body = re.sub(r"\[!\[.*?\]\(.*?\)\]\(.*?\)", "", FIRST_SCREEN_RAW)
@@ -141,260 +661,6 @@ def test_first_screen_is_short_and_names_its_parts():
         assert word not in FIRST_SCREEN, word
 
 
-def test_first_screen_limitations_are_the_records():
-    first = min(json.loads(p.read_text())["session"] for p in (DATA / "options" / "cboe").glob("spx_*.json"))
-    assert f"Cboe's timestamped books are stored from {first}" in FIRST_SCREEN
-    assert f"Cboe's timestamped books are stored from {first}" in README.split("## Known limitations")[1]
-    assert "VIX options are a research leg, not in the fit" in FIRST_SCREEN
-    for s in RESULT_SESSIONS:                           # ... because every committed fit has w3 = 0
-        assert _cal(s)["weights"]["w3"] == 0.0, s
-    # the forward ledger: its first registered session, never 'no entry' once one is committed
-    ledgers = sorted(p.stem.removeprefix("ledger_") for p in (DATA / "forward").glob("ledger_*.json"))
-    sources = " ".join((ROOT / "DATA_SOURCES.md").read_text().split())
-    if ledgers:
-        assert f"the forward ledger at executable prices starts on {ledgers[0]}" in FIRST_SCREEN
-        assert f"Its first entry is {ledgers[0]}" in README
-        assert f"first entry {ledgers[0]}" in sources
-        for text in (README, sources):
-            assert "no entry yet" not in text
-
-
-def test_results_lead_with_the_range_over_the_named_sessions():
-    """The results' preamble counts the sessions it ranges over, and names the
-    live site for the newest one."""
-    n = len(RESULT_SESSIONS)
-    preamble = f"ranges over the {WORDS.get(n, n)} sessions with a stored chain and an accepted fit"
-    assert preamble in FIRST_SCREEN
-    assert f"{LAST}, not confidence intervals" in FIRST_SCREEN
-    live = "[live site](https://navnoorbawa.me) shows the newest session"
-    assert live in FIRST_SCREEN_RAW.replace("\n", " ")
-
-
-def test_result_1_quote_grade_surface(scorecards):
-    oos = {s: scorecards[s]["svi_cal"]["metrics"]["out_of_sample"] for s in RESULT_SESSIONS}
-    h = oos[LAST]
-    assert f"**{rng((o['median_abs_hs'] for o in oos.values()), '.2f')} half-spreads**" in FIRST_SCREEN
-    assert f"{rng((o['inside_spread_pct'] for o in oos.values()), '.1f')}% inside the bid–ask" in FIRST_SCREEN
-    assert (f"({LAST}: {fmt(h['median_abs_hs'], '.2f')}, {fmt(h['inside_spread_pct'], '.1f')}% inside)"
-            in FIRST_SCREEN)
-    for s in RESULT_SESSIONS:
-        dg = scorecards[s]["svi_cal"]["dense_grid"]
-        assert dg["butterfly_violations"] == 0, s
-        assert dg["calendar_violations"] == 0, s   # "arbitrage-free" on its dense grid
-    # CLM-15: compared on the quotes no model was fitted to, not "the same quotes" each model held out
-    common = {s: {m: scorecards[s][m]["metrics"]["common_out_of_sample"] for m in ("heston_v2", "svi_cal")}
-              for s in RESULT_SESSIONS}
-    n = rng((common[s]["svi_cal"]["n"] for s in RESULT_SESSIONS), ",d")
-    hes = rng((common[s]["heston_v2"]["median_abs_hs"] for s in RESULT_SESSIONS), ".1f")
-    svi = rng((common[s]["svi_cal"]["median_abs_hs"] for s in RESULT_SESSIONS), ".2f")
-    assert all(common[s]["svi_cal"]["n"] == common[s]["heston_v2"]["n"] for s in RESULT_SESSIONS)
-    claim = (f"On the {n} quotes per session that no model was fitted to (`data_store/surface/<session>/"
-             f"scorecard.json`, `metrics.common_out_of_sample`), Heston's median |model − mid| is {hes} "
-             f"half-spreads against {svi} for the certified arbitrage-free SVI surface")
-    assert claim in README
-    for s in RESULT_SESSIONS:                           # "certified": the label follows the certificate
-        surf = json.loads((DATA / "surface" / s / "surface.json").read_text())
-        assert surf["surfaces"]["svi_cal"]["arbitrage_free_certified"] is True, s
-
-
-def test_result_2_joint_calibration_heston_and_rough(diag):
-    from joint_vol_calibration.config import HESTON_BOUNDS
-
-    cals = {s: _cal(s) for s in RESULT_SESSIONS}
-    anchors = [sum(a["n"] for a in c["anchors_by_expiry"]) for c in cals.values()]
-    assert f"fitted to {rng(anchors, 'd')} SPX anchors and the four Cboe VIX indices" in FIRST_SCREEN
-    heston = [r["sigma_cap2_oos"] for r in diag]
-    assert f"misses held-out quotes by **{rng(heston, '.2f')} vol pts** RMSE" in FIRST_SCREEN
-    # the single value names its session, and is that session's fit
-    last = cals[LAST]
-    on_bound = "no parameter on a bound" if not last.get("pinned_params") else "on a bound"
-    assert (f"({LAST}: {fmt(last['leg_losses']['spx_oos_iv_rmse'], '.2f')} on {last['oos']['n_spx_oos']:,} "
-            f"quotes, {on_bound})") in FIRST_SCREEN
-    cap = HESTON_BOUNDS["sigma"][1]
-    capped = [s for s, c in cals.items() if "sigma" in (c.get("pinned_params") or [])]
-    assert all(cals[s]["params"]["sigma"] == pytest.approx(cap) for s in capped)
-    assert (f"σ sits on its {cap:.1f} cap in {len(capped)} of the {len(cals)} fits ({', '.join(capped)})"
-            in FIRST_SCREEN)
-    rough = [r["joint_rough_oos"] for r in diag]
-    assert f"Rough Heston: **{rng(rough, '.2f')}**" in FIRST_SCREEN
-    lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in diag)
-    same = sum(r["joint_rough_H"] >= 0.5 - 1e-9 for r in diag)
-    verdict = f"lower on {lower} of {len(diag)} sessions, H = ½ (Heston) on {same}"
-    assert verdict in FIRST_SCREEN
-
-
-def test_result_3_backtest_interval_and_nulls(inference):
-    b = inference["bootstrap"]["portfolio"]["sharpe"]
-    assert f"Portfolio Sharpe **{fmt(b['point'], '.2f')}**" in FIRST_SCREEN
-    assert f"95% CI **{fmt(b['ci95'][0], '.2f')} to {fmt(b['ci95'][1], '.2f')}**" in FIRST_SCREEN
-    spa = inference["multiple_testing"]["spa_published"]["p_consistent"]
-    assert f"(Hansen SPA p {spa:.2f})" in FIRST_SCREEN
-    s3 = inference["nulls"]["sleeves"]["s3"]["circular"]["total_pnl"]
-    assert f"S3's entry timing has p {s3['p_value']:.3f}" in FIRST_SCREEN
-    holm = f"(Holm over six series {s3['p_holm_6_sleeves']:.2f})"
-    assert f"against {s3['n_paths']:,} exposure-matched circular shifts {holm}" in FIRST_SCREEN
-
-
-def test_backtest_table_is_the_canonical_run(inference):
-    with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
-        m = pickle.load(fh)["metrics"]
-
-    def usd(x):
-        return f"{MINUS if x < 0 else '+'}${abs(x):,.0f}"
-
-    total = m["cumulative_return"] * 1_000_000
-    rows = {"Portfolio (S1C + S3 + S4)": (total, m["sharpe"], "portfolio", m["n_trades"])}
-    for key, label in (("s1c", "S1C contrarian PDV"), ("s3", "S3 dispersion, index leg"),
-                       ("s4", "S4 volatility risk premium"), ("s1", "S1 PDV short-VRP (reference)"),
-                       ("s2", "S2 VIX term structure (reference)")):
-        rows[label] = (m[f"{key}_total_pnl"], m[f"{key}_sharpe"], key, m[f"{key}_n_trades"])
-    for label, (pnl, sharpe, series, trades) in rows.items():
-        ci = inference["bootstrap"][series]["sharpe"]["ci95"]
-        interval = f"{fmt(ci[0], '.2f')} to {fmt(ci[1], '.2f')}"
-        line = f"| {label} | {usd(pnl)} | {fmt(sharpe, '.2f')} | {interval} | {trades} |"
-        assert line in README_RAW, line
-    nav = 1_000_000 * (1 + m["cumulative_return"])
-    assert f"NAV ${nav:,.0f} ({fmt(m['cumulative_return'] * 100, '.1f')}%)" in README
-    assert f"T-bills earned {m['cash_cum_return'] * 100:.1f}%" in README
-    grid = pd.read_csv(DATA / "backtest" / "beta_sensitivity.csv").set_index("beta")
-    assert f"+${grid.loc[1.0, 's1_pnl']:,.0f} at β = 1.00" in README
-    assert f"{MINUS}${abs(grid.loc[0.78, 's1_pnl']):,.0f} at β = 0.78" in README
-    assert (grid["pnl"] < 0).all()                        # "negative at every β"
-    bench = json.loads((DATA / "backtest" / "inference" / "benchmarks.json").read_text())["implied_beta"]
-    assert round(bench["PUT"]["overall"], 2) == round(bench["WPUT"]["overall"], 2) == 0.80
-
-
-def test_backtest_prose_is_the_canonical_run_and_its_inference(inference):
-    from joint_vol_calibration.backtest.backtest_engine import ATM_TO_VIX_RATIO
-
-    eq = pd.read_parquet(DATA / "backtest" / "full_results.parquet")
-    start, end = (str(pd.Timestamp(x).date()) for x in (eq.index[0], eq.index[-1]))
-    assert f"2018-01-02 → 2025-03-24 ({len(eq):,} sessions)" in README
-    assert (start, end) == ("2018-01-02", "2025-03-24")
-    assert f"Backtest, {start} → {end}, straddles marked at β·VIX" in FIRST_SCREEN
-    assert f"β = {ATM_TO_VIX_RATIO:.2f} estimated from" in README
-    # STATS-3: the DSR at the ledger's counts, and the lenient bound with its basis
-    t = inference["trials"]
-    s3 = t["dsr_range"]["s3"]
-    led = s3["at_ledger_counts"]
-    n = t["n_choices"]
-    counts = [n[k] for k in t["n_choices_ledger_based"]]
-    assert (f"S3's deflated Sharpe ratio is {led['min']:.3f}–{led['max']:.3f} at the ledger's trial counts "
-            f"(N {min(counts):.0f}–{max(counts):.0f}); it reaches {s3['max']:.2f} only if the search is "
-            f"counted as {n['n_eigen_participation']:.1f} independent trials") in README
-    assert s3["argmax"].endswith("n_eigen_participation")
-
-
-def test_data_table_counts_as_of_their_end_dates():
-    """Each row's count is recomputed for the coverage it states, so the daily
-    job appending sessions after it does not move the number."""
-    import sqlite3
-
-    def row(name: str) -> str:
-        return next(x for x in README_RAW.splitlines() if x.startswith(f"| {name} |"))
-
-    def span(line: str) -> tuple[str, str]:
-        m = re.search(r"(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", line)
-        assert m is not None, line
-        return m.group(1), m.group(2)
-
-    def market(table: str) -> pd.DataFrame:
-        df = pd.concat([pd.read_parquet(f) for f in sorted((DATA / "market" / table).glob("*.parquet"))])
-        df["date"] = pd.to_datetime(df["date"])
-        return df
-
-    for name, table in (("SPX OHLCV", "spx_ohlcv"), ("VIX daily", "vix_daily"),
-                        ("VIX term structure", "vix_term_structure"), ("T-bill rate", "tbill_rates"),
-                        ("Treasury curve and SOFR", "rates_daily")):
-        line = row(name)
-        a, b = span(line)
-        df = market(table)
-        df = df[df["date"] <= b]
-        assert str(df["date"].min().date()) == a, (name, a)
-        assert f"| {len(df):,}" in line, (name, len(df), line)
-        if table == "vix_term_structure":
-            assert f"{len(df):,} ({int((df['source'] == 'yfinance').sum())} Yahoo rows)" in line
-        if table == "rates_daily":
-            assert f"{len(df):,} ({df['series'].nunique()} series)" in line
-    opts = {s: pd.read_parquet(DATA / "options" / f"spx_{s}.parquet") for s in C23_SESSIONS}
-    assert f"| {sum(len(o) for o in opts.values()):,} |" in row("SPX options")
-    vix_sessions = C23_SESSIONS[:4]
-    n_vix = sum(len(pd.read_parquet(DATA / "options" / f"vix_{s}.parquet")) for s in vix_sessions)
-    assert f"| {n_vix:,} |" in row("VIX options")
-    caps = sorted((DATA / "options" / "cboe").glob("*.json"),
-                  key=lambda q: json.loads(q.read_text())["fetched_at"])
-    first = {}
-    for q in caps:
-        rec = json.loads(q.read_text())
-        first.setdefault(rec["underlying"], rec)
-    spx, vix = first["SPX"], first["VIX"]
-    assert (f"from {spx['session']} | {spx['rows']:,} SPX + {vix['rows']:,} VIX lines "
-            "(first capture)") in row("SPX and VIX option books (C23)")
-    with sqlite3.connect(f"file:{DATA / 'vol_system.db'}?mode=ro", uri=True) as con:
-        a, b = span(row("VX futures"))
-        cnt, lo, k, e0, e1 = con.execute(
-            "SELECT COUNT(*), MIN(date), COUNT(DISTINCT expiry_month), MIN(expiry_month), MAX(expiry_month) "
-            "FROM vix_futures_daily WHERE date <= ?", (b,)).fetchone()
-        assert lo == a
-        assert f"({k} monthly contracts expiring {e0} → {e1}) | {a} → {b} | {cnt:,} |" in row("VX futures")
-        a, b = span(row("VX final settlements"))
-        cnt, lo = con.execute("SELECT COUNT(*), MIN(settlement_date) FROM vix_futures_settlements "
-                              "WHERE settlement_date <= ?", (b,)).fetchone()
-        assert lo == a
-        assert f"| {cnt:,} |" in row("VX final settlements")
-    man = json.loads((DATA / "benchmarks" / "manifest.json").read_text())["files"]
-    a, b = span(row("Cboe strategy indices"))
-    assert {f["first_date"] for f in man.values()} == {a}
-    assert {f["last_date"] for f in man.values()} == {b}
-    assert all(name in row("Cboe strategy indices") for name in man)
-
-
-def test_known_limitations_figures():
-    from joint_vol_calibration.backtest import run_backtest as rb
-    from joint_vol_calibration.backtest.backtest_engine import ATM_TO_VIX_RATIO
-
-    lim = README.split("## Known limitations")[1].split("## References")[0]
-    assert f"at one β ({ATM_TO_VIX_RATIO:.2f}) estimated from 2026 chains" in lim
-    beta = rb.estimate_beta(include_live=False).set_index("session")["ratio"]
-    assert f"The first later chain ({C23_HEADLINE}) gives {beta[C23_HEADLINE]:.2f}" in lim
-    bench = json.loads((DATA / "backtest" / "inference" / "benchmarks.json").read_text())
-    bench = bench["implied_beta"]["PUT"]
-    full = [v for y, v in bench["by_year"].items() if y not in bench["partial_years"]]
-    assert f"the Cboe PUT index implies {rng(full, '.2f')} by full year" in lim
-    with open(DATA / "backtest" / "full_results.pkl", "rb") as fh:
-        m = pickle.load(fh)["metrics"]
-    assert (f"the portfolio loses {abs(m['cumulative_return']) * 100:.1f}% while T-bills earn "
-            f"{m['cash_cum_return'] * 100:.1f}%") in lim
-    vx = [v for s in RESULT_SESSIONS if (v := _cal(s)["leg_losses"].get("vx_futures_rmse_oos")) is not None]
-    assert f"misses real VX futures by {rng(vx, '.1f')} pts out of sample" in lim
-    # σ on its cap and the boxed fits' VVIX, over the sessions the results name
-    from joint_vol_calibration.config import HESTON_BOUNDS
-
-    rows = {r["session"]: r for r in json.loads(
-        (DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]}
-    diag = [rows[s] for s in RESULT_SESSIONS]
-    n, w = len(diag), WORDS.get(len(diag), len(diag))
-    capped = sum("sigma" in (_cal(s).get("pinned_params") or []) for s in RESULT_SESSIONS)
-    assert f"σ sits on its {HESTON_BOUNDS['sigma'][1]:.1f} cap in {capped} of the {n} fits to {LAST}" in lim
-    above = all(r["vvix_model_cap2"] > r["vvix_market"] for r in diag)
-    assert above                                       # "on all six"
-    model = rng((r["vvix_model_cap2"] for r in diag), ".0f")
-    market = rng((r["vvix_market"] for r in diag), ".0f")
-    assert f"the boxed fits price VVIX at {model} against a market ^VVIX of {market} on all {w}" in lim
-    q = sorted((DATA / "calibrations").glob("quintic_cal_*.pkl"))
-    with open(q[-1], "rb") as fh:
-        assert not pickle.load(fh)["success"]            # "The Quintic OU fit ... did not converge"
-    # quote quality: every chain the results name is a Yahoo download, each with executable static arbitrage
-    idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
-    for s in RESULT_SESSIONS:
-        surf = json.loads((DATA / "surface" / s / "surface.json").read_text())
-        assert surf["inputs"]["source"] == "yfinance", s
-        assert idx[s]["executable_arbitrage"] is True, s
-    assert (f"The {w} chains the surfaces are built from are Yahoo end-of-day downloads without a quote "
-            "time; static arbitrage that is executable at the quoted bid and ask is present on "
-            f"all {w}") in lim
-
-
 def test_regeneration_command_reproduces_the_committed_fits():
     """CLM-07: the README's command for joint_cal_<session>.pkl was a new TRF
     fit on the Treasury curve, not the committed DE fit on ^IRX. It is now the
@@ -412,60 +678,14 @@ def test_regeneration_command_reproduces_the_committed_fits():
     assert {_cal(s).get("optimizer", "de") for s in RESULT_SESSIONS} <= {"de", "trf_multistart"}
 
 
-def test_calibration_tables_are_the_pickles_and_the_diagnostics(diag):
-    params = [_cal(s)["params"] for s in RESULT_SESSIONS]
-    n_feller = sum(2 * q["kappa"] * q["theta"] < q["sigma"] ** 2 for q in params)
-    assert n_feller == len(RESULT_SESSIONS)
-    assert f"Feller is violated in all {WORDS[n_feller]} and imposed in none" in README
-    assert f"The table stops at {LAST}" in README
-    for s in RESULT_SESSIONS:
-        cal = _cal(s)
-        p, ll = cal["params"], cal["leg_losses"]
-        cells = [f"{p['kappa']:.3f}", f"{p['theta']:.4f}", f"{p['sigma']:.3f}", fmt(p["rho"], ".3f"),
-                 f"{p['v0']:.4f}", f"{ll['spx_iv_rmse']:.3f} / {ll['spx_oos_iv_rmse']:.3f}",
-                 f"{ll['vix_index_rmse']:.3f}"]
-        line = next(x for x in README_RAW.splitlines() if x.startswith((f"| {s} |", f"| **{s}** |")))
-        for c in cells:
-            assert c in line, (s, c, line)
-        vx = ll.get("vx_futures_rmse_oos")                # the 'VX futures, OOS' column
-        last_cell = line.rstrip(" |").split("|")[-1].strip().strip("*")
-        assert last_cell == (f"{vx:.2f}" if vx is not None else "n/a†"), (s, last_cell)
-        on_cap = "sigma" in next(r for r in diag if r["session"] == s)["on_bound"]
-        starred = re.search(re.escape(f"{p['sigma']:.3f}") + r"\\?\*", line) is not None
-        assert starred is on_cap, (s, "σ on the box ceiling is starred")
-        r = next(x for x in diag if x["session"] == s)
-        rough_line = next(x for x in README_RAW.splitlines()
-                          if x.startswith(f"| {s} | {fmt(r['sigma_cap2_oos'], '.2f')} |"))
-        cells = (fmt(r["sigma_cap2_oos"], ".2f"), fmt(r["joint_rough_oos"], ".2f"),
-                 f"{r['joint_rough_H']:.2f}")
-        assert rough_line == f"| {s} | {' | '.join(cells)} |"
-    cur = next(r for r in diag if r["session"] == C23_HEADLINE)
-    assert (f"gives σ {cur['sigma_free']:.2f}, κ {cur['kappa_free']:.1f}, a loss "
-            f"{abs(cur['sigma_free_loss_rel']) * 100:.1f}% lower and an out-of-sample RMSE of "
-            f"{cur['sigma_free_oos']:.2f} instead of {cur['sigma_cap2_oos']:.2f}") in README
-    first = diag[0]
-    cost = f"{abs(first['sigma_free_loss_rel']) * 100:.1f}%"
-    assert f"on {first['session']} the box costs {cost} of the loss" in README
-    assert (f"model's VVIX is {rng((r['vvix_model_cap2'] for r in diag), '.0f')} against a market ^VVIX of "
-            f"{rng((r['vvix_market'] for r in diag), '.0f')}") in README
-    cond = rng((r["rel_jtj_condition_number"] for r in diag), ".0f")
-    assert (f"cond(JᵀJ) of the relative-sensitivity Jacobian is {cond} over the "
-            f"{WORDS[len(diag)]} sessions") in README
-    kse = rng((r["relative_standard_errors"]["kappa"] * 100 for r in diag), ".0f")
-    assert f"standard error is {kse}% of κ" in README
-    c23 = [r for r in diag if r["session"] in C23_SESSIONS]   # the DE optima C23 timed TRF against
-    worst = max(abs(r["trf_loss_rel_diff"]) for r in c23)
-    assert all(r["trf_loss_rel_diff"] <= 0 for r in c23)             # "slightly below them"
-    assert f"reaches the {WORDS[len(c23)]} stored differential-evolution optima" in README
-    assert f"relative loss of at most {worst:.1e}".replace("e-0", "e-") in README
-    trf, de = rng((r["trf_seconds"] for r in c23), ".1f"), rng((r["de_serial_seconds"] for r in c23), ".1f")
-    assert f"in {trf} s, against {de} s" in README
-    assert all(r["trf_basins"] == 1 for r in diag)        # "one basin on every session"
-    lower = sum(r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01 for r in diag)
-    assert f"error on {lower} of {len(diag)} sessions and returns H = ½ (Heston) on the other two" in README
-    idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
-    gaps = [abs(idx[s]["vix_replicated"] - idx[s]["vix_official"]) for s in RESULT_SESSIONS]
-    assert f"within {rng(gaps, '.2f')} index points of the official close" in README
+def test_validation_pack_keeps_monitoring_status_and_rule_claims_out():
+    """VALIDATOR-10 and T3: the pack copies no monitoring status the daily job
+    changes, and says 'the Cboe formula, with its listed departures', never
+    that the replication follows Cboe's rules."""
+    mon = PACK.split("## 4. Ongoing monitoring")[1].split("## 5.")[0]
+    assert not re.search(r"\b\d+ of the \d+ checks breach", mon)
+    assert "(Cboe rules)" not in PACK
+    assert "with Cboe's rules" not in PACK
 
 
 def test_figure_is_drawn_from_the_surface_report():
@@ -625,94 +845,6 @@ def test_citation_is_this_version():
     assert README_RAW.splitlines()[0] == f"# {title}"
     assert "no release tag" in " ".join(cff.split())       # nothing claims a tag or DOI that does not exist
     assert "doi" not in cff.lower()
-
-
-def _pack_row(model: str, outcome: str) -> str:
-    """The validation pack's §3 outcome row of ``model`` whose outcome cell starts with ``outcome``."""
-    rows = [x for x in PACK_RAW.splitlines() if x.startswith(f"| {model} | {outcome}")]
-    assert len(rows) == 1, (model, outcome, rows)
-    return rows[0]
-
-
-def test_validation_pack_counts_and_outcomes_are_the_artifacts():
-    """VALIDATOR-10: the validation pack was frozen at five sessions ('σ on its
-    2.0 box ceiling in 2 of 5', 'rough lower on 3 of 5', '32–80% inside', 'cond
-    150–293', 'no entry committed yet', '5 of the 13 checks breach … 7.46 vol pts')
-    and disagreed with the site. It now states the span of its sessions; every
-    count, range and §3 outcome row it touches is recomputed here from data_store
-    over the sessions in that span, and it copies no monitoring status."""
-    from joint_vol_calibration.config import HESTON_BOUNDS
-
-    sessions = _result_sessions(PACK)
-    n, w, last = len(sessions), WORDS.get(len(sessions), len(sessions)), sessions[-1]
-    cals = {s: _cal(s) for s in sessions}
-    rows = {r["session"]: r for r in json.loads(
-        (DATA / "calibrations" / "diagnostics" / "summary.json").read_text())["rows"]}
-    diag = [rows[s] for s in sessions]
-    sc = {s: {m["model"]: m for m in json.loads((DATA / "surface" / s / "scorecard.json").read_text())
-              ["models"]} for s in sessions}
-    assert f"the {w} sessions with a stored chain and an accepted fit, {sessions[0]} → {last}" in PACK
-    # §1 limitations
-    capped = [s for s, c in cals.items() if "sigma" in (c.get("pinned_params") or [])]
-    cap = HESTON_BOUNDS["sigma"][1]
-    params = [c["params"] for c in cals.values()]
-    feller = sum(2 * q["kappa"] * q["theta"] < q["sigma"] ** 2 for q in params)
-    assert (f"σ on its {cap:.1f} box ceiling in {len(capped)} of the {n} fits to {last} "
-            f"({', '.join(capped)}); Feller violated in all {feller}") in PACK
-    assert feller == n
-    half = sum(r["joint_rough_H"] >= 0.5 - 1e-9 for r in diag)
-    assert f"½ on {half} of the {n} sessions to {last}" in PACK
-    ledgers = sorted(p.stem.removeprefix("ledger_") for p in (DATA / "forward").glob("ledger_*.json"))
-    if ledgers:
-        assert f"first entry {ledgers[0]}, not yet evidence" in PACK
-        assert "no entry" not in PACK
-        assert f"first entry {ledgers[0]} (`data_store/forward/`)" in _pack_row("M18", "Forward test")
-    # §2: identifiability over the sessions, the common held-out counts, the replication's departures
-    cond = rng((r["rel_jtj_condition_number"] for r in diag), ".0f")
-    assert f"cond(JᵀJ) of the relative-sensitivity Jacobian is {cond} over the {w} sessions to {last}" in PACK
-    se = {k: rng((r["relative_standard_errors"][k] * 100 for r in diag), ".0f")
-          for k in ("kappa", "theta", "rho", "v0")}
-    assert f"κ {se['kappa']}%, θ {se['theta']}%, ρ {se['rho']}%, v₀ {se['v0']}%" in PACK
-    assert f"Gauss–Newton errors of {se['kappa']}% on κ" in PACK
-    common = " / ".join(f"{sc[s]['svi_cal']['metrics']['common_out_of_sample']['n']:,}" for s in sessions)
-    assert f"{common} quotes, {sessions[0]} → {last}" in PACK
-    vr = json.loads((DATA / "surface" / last / "vix_replication.json").read_text())
-    assert (f"on {last}, {len(vr.get('deviations') or [])} deviations from Cboe's rules and "
-            f"{len(vr.get('gap_notes') or [])} notes on the gap") in PACK
-    assert "(Cboe rules)" not in PACK
-    assert "with Cboe's rules" not in PACK
-    # §3 outcome rows
-    oos = " / ".join(fmt(c["leg_losses"]["spx_oos_iv_rmse"], ".2f") for c in cals.values())
-    dates = " / ".join([sessions[0], *(s[5:] for s in sessions[1:])])
-    assert f"| {oos} vp for {dates} (" in _pack_row("M4", "Out-of-sample SPX IV RMSE")
-    assert f", {w} v2 sessions |" in _pack_row("M4", "Out-of-sample SPX IV RMSE")
-    hes = [sc[s]["heston_v2"]["metrics"]["out_of_sample"] for s in sessions]
-    assert (f"{rng((h['median_abs_hs'] for h in hes), '.1f')} half-spreads; "
-            f"{rng((h['inside_spread_pct'] for h in hes), '.1f')}% inside, {w} sessions"
-            ) in _pack_row("M4", "Error in")
-    svi = {s: sc[s]["svi_cal"]["metrics"]["out_of_sample"] for s in sessions}
-    row = _pack_row("M14", "The certified")
-    assert (f"median {rng((o['median_abs_hs'] for o in svi.values()), '.2f')} half-spreads; "
-            f"{rng((o['inside_spread_pct'] for o in svi.values()), '.0f')}% inside the bid/ask, {w} sessions "
-            f"({last}: {fmt(svi[last]['median_abs_hs'], '.2f')}, "
-            f"{fmt(svi[last]['inside_spread_pct'], '.1f')}%)") in row
-    arb = [json.loads((DATA / "surface" / s / "surface.json").read_text())["arbitrage"] for s in sessions]
-    assert all(a["executable_arbitrage_certificate"]["executable_arbitrage"] for a in arb)
-    n_ex = rng((a["n_quotes_in_executable_violation"] for a in arb), ",d")
-    assert (f"executable at the bid/ask on all {n} sessions; {n_ex} quotes per session"
-            in _pack_row("M14", "Static arbitrage"))
-    idx = {r["session"]: r for r in json.loads((DATA / "surface" / "index.json").read_text())["sessions"]}
-    rep_ = " / ".join(fmt(idx[s]["vix_replicated"], ".2f") for s in sessions)
-    off = " / ".join(fmt(idx[s]["vix_official"], ".2f") for s in sessions)
-    assert f"| {rep_} against {off} (" in _pack_row("M14", "VIX replicated")
-    lower = [r for r in diag if r["joint_rough_oos"] < r["sigma_cap2_oos"] - 0.01]
-    pairs = ", ".join(f"{fmt(r['joint_rough_oos'], '.2f')} vs {fmt(r['sigma_cap2_oos'], '.2f')}"
-                      for r in lower)
-    assert (f"rough lower on {len(lower)} of {n} sessions ({pairs} vp); H = ½, identical, on {half}"
-            in _pack_row("M4, M15", "Rough Heston"))
-    # §4 copies no monitoring status the daily job changes
-    mon = PACK.split("## 4. Ongoing monitoring")[1].split("## 5.")[0]
-    assert not re.search(r"\b\d+ of the \d+ checks breach", mon)
 
 
 def test_ui_plan_marks_its_withdrawn_acceptance_text_as_history():
