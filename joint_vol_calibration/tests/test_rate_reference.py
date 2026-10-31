@@ -159,10 +159,9 @@ def test_recorded_inputs_rebuild_a_fit_on_the_quote_time_it_recorded(tmp_path, m
     assert jc.recorded_inputs(gth)["spx_quote_time"] == "2026-10-27T05:26:50Z"
     assert "spx_quote_time" not in jc.recorded_inputs(close)
     import pickle
+    import shutil
 
     import pandas as pd
-
-    import shutil
 
     from joint_vol_calibration.config import DATA_DIR
     from joint_vol_calibration.data import database as db
