@@ -42,10 +42,17 @@ and the Cboe Volatility Index Mathematics Methodology, sec. 2.1 and 3):
            held between two consecutive tenors within their two yields and,
            before the first tenor, between Cboe's two lines through it;
            then APY = (1 + BEY/2)^2 - 1 and R = ln(1 + APY). The curve is
-           the previous business day's, as in the sample (it computes on
-           2022-09-27 with the curve "available on September 26th at the
-           end of the day", its expiries 25 and 32 days from that date):
-           the one the session's official 16:15 ET close was computed with.
+           the session close's: the previous business day's, as in the
+           sample (it computes on 2022-09-27 with the curve "available on
+           September 26th at the end of the day", its expiries 25 and 32
+           days from that date), the one the session's official close was
+           computed with. Days are counted from the curve's date, the
+           reading under which the sample reproduces (there each term's
+           days to expiration + 1). A replication timed after the close (a
+           Global Trading Hours book, its T from its quote time) keeps the
+           close's curve and day count: its rate is the one the Cboe close
+           it is compared with used, not the curve Cboe would read at the
+           book's own instant.
 The sample calculation in the methodology's appendices is a test fixture
 (tests/fixtures/surface_cboe_vix_sample.csv): this code reproduces its
 rates R1 = 0.031664% and R2 = 0.028797% from its yield curve, its sigma^2

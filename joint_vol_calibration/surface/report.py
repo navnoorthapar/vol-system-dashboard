@@ -385,13 +385,17 @@ def _vix_rate(sq: sqm.SessionQuotes) -> tuple:
             f"each term's expiration: {e}. A rate 25 bp off moves the 30-day index by about "
             "0.002 points.")
     return cmt, {"method": CMT_RATE_METHOD, **cmt.record(),
-                 "source": (f"U.S. Treasury par yield curve (CMT) of {cmt.curve_date}, the newest "
-                            "before the session, at Cboe's tenors; each term's rate is Cboe's "
-                            "bounded natural cubic spline at its expiration date (days from the "
-                            "curve's date), the bond-equivalent yield taken to an annual "
-                            "percentage yield and then to continuous compounding (Cboe Volatility "
-                            "Index Mathematics Methodology sec. 2.1); the rate each term used is "
-                            "its R")}, None
+                 "source": (f"The session close's curve: the U.S. Treasury par yield curve (CMT) "
+                            f"of {cmt.curve_date}, the newest before the session, the one Cboe "
+                            "computes the session's close with, at Cboe's tenors. Each term's rate "
+                            "is Cboe's bounded natural cubic spline at its expiration, in calendar "
+                            "days counted from that curve's date as Cboe's published sample counts "
+                            "them, the bond-equivalent yield taken to an annual percentage yield "
+                            "and then to continuous compounding (Cboe Volatility Index Mathematics "
+                            "Methodology sec. 2.1). A book timed after the close (in Global Trading "
+                            "Hours) keeps this curve and this day count, so each term's rate is "
+                            "the one the Cboe close it is compared with used; each term records "
+                            "the rate it used")}, None
 
 
 def _calc_time_record(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str:

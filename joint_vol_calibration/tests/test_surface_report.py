@@ -102,6 +102,10 @@ def test_artifacts_and_schema(written):
     assert rate["method"] == report.CMT_RATE_METHOD
     assert rate["curve_date"] == cmt.curve_date < SESSION
     assert rate["cmt_yields_by_days"] == pytest.approx(cmt.record()["cmt_yields_by_days"], rel=1e-9)
+    # review 5: the note says the rate is the close's curve, whatever instant the book is timed at
+    assert rate["source"].startswith(f"The session close's curve: the U.S. Treasury par yield curve "
+                                     f"(CMT) of {rate['curve_date']}, the newest before the session")
+    assert "keeps this curve and this day count" in rate["source"]
     for name, ix in vixd["indices"].items():
         for meth in ("cboe_rules", "any_expiry_parity_forward"):
             rep = ix.get(meth) or {}
