@@ -243,6 +243,38 @@ def test_a_figure_whose_artifacts_are_unchanged_must_recompute():
     assert "every artifact it reads unchanged" in failures[0]
 
 
+def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch):
+    """A code change that makes a claim stop before it reads its artifacts
+    (here, reading surface/index.json's rows) is a failure. The rows it never
+    read are not 'changed' because the run has no digest of them: counted as
+    changed, they made the broken claims a stale-snapshot warning under the
+    surface paths the daily job writes, and the suite passed."""
+    def broken(self, s):
+        raise RuntimeError("the index reader is broken")
+
+    monkeypatch.setattr(rr.Claims, "index", broken)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        failures = rr.check(SNAP, topics=["calibration", "pack"])
+    assert [f.split(" ")[0] for f in failures] == ["calibration/vix_gap", "pack/m14_vix"]
+    for f in failures:
+        assert "could not be recomputed (RuntimeError: the index reader is broken)" in f
+        assert "every artifact it reads unchanged" in f
+    assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
+
+
+def test_a_session_row_the_daily_job_dropped_warns(store_copy):
+    """A row the daily job removed from an aggregate file (a session its
+    rebuild no longer lists in surface/index.json) is a change of that row,
+    not an unread one: the claims over it warn, naming it."""
+    rel = "surface/index.json"
+    doc = json.loads((store_copy / rel).read_text())
+    doc["sessions"] = [r for r in doc["sessions"] if r["session"] != LAST]
+    (store_copy / rel).write_text(json.dumps(doc))
+    with pytest.warns(rr.StaleSnapshot, match=re.escape(f"data_store/{rel}#session={LAST}")):
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["calibration", "pack"]) == []
+
+
 def test_an_artifact_changed_outside_the_daily_job_fails(store_copy):
     """The daily job never writes the backtest's inference: a change there that
     moves a figure is a commit that must regenerate the snapshot."""

@@ -221,10 +221,12 @@ class Store:
         are added (surface/index.json, the diagnostics summary)."""
         doc = self._load(rel, lambda p: json.loads(p.read_text()))
         hit = [r for r in doc[rows] if r.get("session") == session]
+        key = f"data_store/{rel}#session={session}"
         if len(hit) != 1:
+            # a row dropped or doubled is a change of the row, not an unread one
+            self._note(key, _sha(_canonical(hit)))
             raise KeyError(f"{rel} has {len(hit)} rows for {session}")
-        self._note(f"data_store/{rel}#session={session}", _sha(_canonical(hit[0])),
-                   self._report_version(rel, hit[0]))
+        self._note(key, _sha(_canonical(hit[0])), self._report_version(rel, hit[0]))
         return hit[0]
 
     def market(self, table: str, through: str) -> pd.DataFrame:
@@ -268,14 +270,18 @@ class Store:
         return self._parsed[key]
 
     def digest(self, key: str) -> dict[str, Any] | None:
-        """The current digest of ``key`` if this run read it; for a whole file,
-        the file's (None: missing, or a part no claim of this run read)."""
+        """The current digest of ``key``: what this run read; for a whole file
+        no claim of this run read, the file's (sha256 None: the file is
+        missing). None: a part of a file (a '#' key) no claim of this run read,
+        whose digest is unknown, not changed (a claim that stopped before it
+        read its artifacts is a code change, not a rebuild)."""
         if key in self._digests:
             return self._digests[key]
-        path = self.data / key.removeprefix("data_store/")
-        if "#" in key or not path.is_file():
+        if "#" in key:
             return None
-        return {"sha256": _sha(path.read_bytes()), "report_version": None}
+        path = self.data / key.removeprefix("data_store/")
+        sha = _sha(path.read_bytes()) if path.is_file() else None
+        return {"sha256": sha, "report_version": None}
 
 
 # ── claims ────────────────────────────────────────────────────────────────────
@@ -1042,12 +1048,11 @@ class Finding:
     changed: list[str] = field(default_factory=list)
 
 
-def _sha_was(snapshot: dict[str, Any], key: str) -> str | None:
-    return (snapshot["artifacts"].get(key) or {}).get("sha256")
-
-
-def _sha_now(store: Store, key: str) -> str | None:
-    return (store.digest(key) or {}).get("sha256")
+def _changed(snapshot: dict[str, Any], store: Store, key: str) -> bool:
+    """True when ``key``'s current digest is known and is not the snapshot's
+    (a missing file is a change; a part no claim of this run read is not)."""
+    now = store.digest(key)
+    return now is not None and now.get("sha256") != (snapshot["artifacts"].get(key) or {}).get("sha256")
 
 
 def compare(snapshot: dict[str, Any], claims: list[Claim], store: Store,
@@ -1078,7 +1083,7 @@ def compare(snapshot: dict[str, Any], claims: list[Claim], store: Store,
             continue
         if not now.error and was["text"] == now.text:
             continue
-        changed = sorted(key for key in was["sources"] if _sha_was(snapshot, key) != _sha_now(store, key))
+        changed = sorted(key for key in was["sources"] if _changed(snapshot, store, key))
         what = (f"could not be recomputed ({now.error})" if now.error
                 else f"now reads {now.text!r}, the snapshot {was['text']!r}")
         if changed and all(_under(key, bot) for key in changed):
@@ -1095,7 +1100,7 @@ def compare(snapshot: dict[str, Any], claims: list[Claim], store: Store,
 
 def changed_artifacts(snapshot: dict[str, Any], store: Store) -> list[str]:
     """The snapshot's artifacts whose sha256 is no longer the current one."""
-    return sorted(key for key in snapshot["artifacts"] if _sha_was(snapshot, key) != _sha_now(store, key))
+    return sorted(key for key in snapshot["artifacts"] if _changed(snapshot, store, key))
 
 
 def stale_message(snapshot: dict[str, Any], findings: list[Finding], changed: list[str], store: Store,
