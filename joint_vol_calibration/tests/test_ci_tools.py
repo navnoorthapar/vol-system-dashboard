@@ -262,6 +262,30 @@ class TestSimulatedSession:
         assert "run_record_problems(" in main
         assert "check_captures.py" in main
 
+    def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
+        """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay
+        typed every book 'gth', but 22:15 ET on a Friday is the closing book (Monday's
+        GTH opens on Sunday evening), and test_cboe_downloader checks each committed
+        capture's state against book_state_at."""
+        from datetime import UTC, datetime
+
+        import pandas as pd
+
+        from joint_vol_calibration.data import cboe_downloader as cb
+        from joint_vol_calibration.data import option_chain as oc
+        meta = {"underlying_price": 7000.0, "url": "u", "sha256": "0" * 64, "n_bytes": 1}
+        frame = pd.DataFrame({"snapshot_date": ["2026-10-01"], "quote_time": ["x"]})
+        states = {}
+        for session in ("2026-10-29", "2026-10-30"):                  # a Thursday, a Friday
+            now = datetime.fromisoformat(f"{session}T22:30:00").replace(tzinfo=oc.NY_TZ).astimezone(UTC)
+            cap = sim.replayed_capture(cb, "SPX", frame, meta, session, now)
+            quoted = datetime.fromisoformat(cap.quote_time)
+            assert cap.book_state == cb.book_state_at(quoted, session)
+            assert list(cap.frame["quote_time"]) == [cap.quote_time]
+            assert list(cap.frame["snapshot_date"]) == [session]
+            states[session] = cap.book_state
+        assert states == {"2026-10-29": "gth", "2026-10-30": "closing"}
+
     def test_the_driver_prices_book_and_vix_indices_with_the_moved_parameters(self, sim):
         import inspect
         src = inspect.getsource(sim.drive)
@@ -432,6 +456,10 @@ class TestRepoGrowth:
         assert growth.kind_of("data_store/runs/run_20261028T023000Z_book.json") == "run records"   # 0.9
         manifest = "data_store/options/cboe_manifest/spx_2026-10-27_023000Z.json"
         assert growth.kind_of(manifest) == "cboe manifests"
+        # the VX settlements' partitions (FUND_GRADE_PLAN 1.12) apart from the other market tables
+        assert growth.kind_of("data_store/market/vix_futures_daily/vix_futures_daily_2026.parquet") == \
+            "VX futures partitions"
+        assert growth.kind_of("data_store/market/spx_ohlcv/spx_ohlcv_2026.parquet") == "market partitions"
         assert growth.kind_of("README.md") == "other"
 
     def test_the_pull_request_gate_fails_on_data_store_files_and_growth(self, tmp_path, monkeypatch):
@@ -712,6 +740,40 @@ class TestRecomputeAudit:
         r = data.cache_vs_record(data.Store(root), "spx_ohlcv", ("close",))
         assert r["record_ahead"] == ["2026-10-26"]
         assert r["not_in_record"] == 1                                    # 2026-10-22 is only cached
+
+    def test_its_record_view_holds_the_recorded_vx_settlements(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 1.12: the bot records VX settlements under
+        market/vix_futures_daily/; the audit's view applies them on (date,
+        expiry_date) as app.record_db does, so it recomputes the Overview's VX
+        panel from the sessions the page shows, not from the cache's older ones."""
+        import sqlite3
+
+        import pandas as pd
+        data = _recompute(monkeypatch).data
+        root = tmp_path / "data_store"
+        (root / "market" / "vix_futures_daily").mkdir(parents=True)
+        cols = ("date", "expiry_date", "expiry_month", "symbol", "is_weekly", "open", "high", "low", "close",
+                "settle", "volume", "open_interest", "days_to_expiry", "source")
+        con = sqlite3.connect(root / "vol_system.db")
+        con.execute(f"CREATE TABLE vix_futures_daily ({', '.join(cols)})")
+        con.executemany("INSERT INTO vix_futures_daily VALUES "
+                        "(?, ?, ?, NULL, 0, 1, 1, 1, 1, ?, 5, 5, 9, 'cboe')",
+                        [("2026-10-09", "2026-10-21", "2026-10", 17.1186),
+                         ("2026-10-09", "2026-11-18", "2026-11", 17.8517)])
+        con.commit()
+        con.close()
+        pd.DataFrame({"date": ["2026-10-09", "2026-10-28"], "expiry_date": ["2026-11-18", "2026-11-18"],
+                      "expiry_month": ["2026-11", "2026-11"], "symbol": ["VX/X6", "VX/X6"],
+                      "is_weekly": [0, 0], "settle": [17.8500, 18.5982], "days_to_expiry": [40, 21],
+                      "source": ["cboe_settlement"] * 2}).to_parquet(
+            root / "market" / "vix_futures_daily" / "vix_futures_daily_2026.parquet")
+        vx = data.Store(root).vx_futures()
+        assert list(zip(vx["date"], vx["expiry_date"], vx["settle"])) == [
+            ("2026-10-09", "2026-10-21", 17.1186),
+            ("2026-10-09", "2026-11-18", 17.85),                  # the record's value wins
+            ("2026-10-28", "2026-11-18", 18.5982)]                # the record's own session
+
+
 # ── pip_audit_gate.py ─────────────────────────────────────────────────────────
 
 @pytest.fixture

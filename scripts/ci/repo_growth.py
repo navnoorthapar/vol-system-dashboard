@@ -53,6 +53,7 @@ KINDS = [
     ("Greeks / scenario", r"^data_store/greeks/"),
     ("forward ledger", r"^data_store/forward/"),
     ("run records", r"^data_store/runs/"),
+    ("VX futures partitions", r"^data_store/market/vix_futures_daily/"),
     ("market partitions", r"^data_store/market/"),
     ("labels", r"^data_store/signals/"),
     ("other", r""),

@@ -21,6 +21,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -43,6 +44,7 @@ SPARK_N = 60                 # sessions in the spread's sparkline
 STRESS_DAY = "2020-03-16"    # the COVID stress test's date, as the page states it
 SKILL_EX_YEAR = "2020"       # the walk-forward R² is also given without this year
 SPEC_SIG = 6                 # chart specs carry floats at 6 significant figures
+VX_DP = 4                    # Cboe publishes VX daily settlements to 4 decimals
 VIX2_NOTE = " (risk-neutral, contains the variance premium)"
 FORECAST_NAMES = {"vix2": "VIX²", "pdv": "PDV", "vix_mz": "VIX (MZ)"}
 
@@ -971,8 +973,14 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     """The VX monthly curve on the futures table's own newest date, its age in NYSE
     sessions, the session before (dashed), M1 → M2, the table and the chart series."""
     sec = a.one("section#vx-curve")
-    last = vx_last(store)
-    cur = vx_rows(store, last) if last else pd.DataFrame()
+    # the table's newest session on or before the newest session the site has data for
+    last = vx_last(store, (pd.Timestamp(f["ref_mkt"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+    # read on the newest session: a contract whose final settlement is on or before
+    # it (or the table's own date) no longer trades, so the page leaves it out
+    cut: str = max(last, f["ref_mkt"]) if last else ""
+    every = vx_rows(store, last) if last else pd.DataFrame()
+    cur = every[every["expiry_date"] > cut].reset_index(drop=True) if last else every
+    gone = every[every["expiry_date"] <= cut] if last else every
     if not present(a, P_VX, "VX curve panel", sec, not cur.empty) or sec is None or last is None or cur.empty:
         return
     prev_date = vx_last(store, last)
@@ -980,11 +988,30 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     pv = dict(zip(prev["expiry_date"], prev["price"])) if not prev.empty else {}
     dashed = [prev_date] if prev_date and not prev.empty else []
     a.date(P_VX, "panel date (futures table's newest)", sec.select_one(".panel-meta"), last)
+    # one age on every page: NYSE sessions to the newest session (the later of the
+    # market database's close and the rule labels' date), named as such, with the
+    # other source's date when the two disagree
     age = sessions_between(last, f["ref_mkt"])
     el = sec.select_one("#vx-curve-age")
-    said(a, P_VX, "age of the futures table", el, [last, float(age), f["ref_mkt"]])
+    age_parts: Parts = [last] if age == 0 else [last, float(age), f["ref_mkt"]]
+    if f["spx_date"] != f["label_date"]:
+        age_parts.append(f["spx_date"] if f["ref_mkt"] == f["label_date"] else f["label_date"])
+    said(a, P_VX, "age of the futures table", el, age_parts)
+    says(a, P_VX, "age of the futures table", el,
+         f"{last}, the newest session" if age == 0 else f"before the newest session, {f['ref_mkt']}", True)
+    if f["spx_date"] != f["label_date"]:
+        says(a, P_VX, "age of the futures table", el,
+             (f"the rule labels’ date; the market database ends {f['spx_date']}"
+              if f["ref_mkt"] == f["label_date"]
+              else f"the market database’s newest close; the rule labels end {f['label_date']}"), True)
     a.equal(P_VX, "age level", classes(el.select_one("span[class^='age-']") if el else None),
             [f"age-{om.stale_level(age)}"])
+    left = sec.select_one("#vx-settled")
+    if present(a, P_VX, "contracts settled by the newest session", left, not gone.empty) and left is not None:
+        said(a, P_VX, "contracts settled by the newest session", left,
+             [p for _, g in gone.iterrows() for p in (str(g["expiry_month"]), g["expiry_date"])] + [cut])
+        says(a, P_VX, "contracts settled by the newest session", left,
+             "M1 is the first contract still trading on it", True)
     a.equal(P_VX, "chart title (aria-label)", attr(sec.select_one("div#chart-vx-curve"), "aria-label"),
             f"VX monthly futures settlements on {last}" + "".join(f", with {d}" for d in dashed))
     names = [f"{last} settlements"] + [f"{d} settlements" for d in dashed]
@@ -995,7 +1022,7 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
     s = cur["price"].to_numpy(float)
     m1m2 = (s[1] / s[0] - 1.0) * 100.0 if len(s) >= 2 else None
     said(a, P_VX, "chart description", sec.select_one("#chart-vx-curve-desc"),
-         [float(len(s)), last, *([m1m2] if m1m2 is not None else [])])
+         [float(len(s)), last, *([cut] if cut > last else []), *([m1m2] if m1m2 is not None else [])])
     tbl = sec.select_one("#chart-vx-curve-data table")
     said(a, P_VX, "table caption", tbl.caption if tbl else None, [last, *dashed])
     said(a, P_VX, "table header", tbl.thead if tbl else None, [last, *dashed])
@@ -1007,8 +1034,35 @@ def check_vx_curve(a: Audit, store: Store, f: Facts) -> None:
             p0 = pv.get(r["expiry_date"])
             parts += [p0, r["price"] - p0] if p0 is not None else []
         said(a, P_VX, f"table {r['expiry_date']}", tr, parts, "days = calendar days to the final settlement")
+        # settlements as Cboe publishes them (4 dp), so the change is their exact difference
+        cells = [numbers_in(text_of(td)) for td in tr.select("td")[3:]]
+        if all(len(c) == 1 for c in cells) and len(cells) >= 1:
+            a.equal(P_VX, f"table {r['expiry_date']}: settlement decimals", [c[0][1] for c in cells[:2]],
+                    [VX_DP] * min(len(cells), 2))
+            if len(cells) == 3:
+                new, old, chg = (Decimal(c[0][2].replace("−", "-").replace("+", "")) for c in cells)
+                a.equal(P_VX, f"table {r['expiry_date']}: change = printed difference", str(chg),
+                        str(new - old))
     said(a, P_VX, "M1 → M2", sec.select_one("#vx-m1m2"),
          [*([m1m2, s[0], s[1]] if m1m2 is not None else []), "VX2 / VX1 − 1", *dashed])
+    # VX1 − VIX: the front settlement less VIX's close of the curve's session (Cboe
+    # prints VIX to 2 dp), shown only when the curve is of the newest session
+    basis_el = sec.select_one("#vx-basis")
+    vix = store.vix_close()
+    vix_last = round(float(vix[last]), 2) if last in vix.index and np.isfinite(vix[last]) else None
+    if age != 0:
+        said(a, P_VX, "VX1 − VIX", basis_el, [last])
+        says(a, P_VX, "VX1 − VIX", basis_el,
+             "is shown for a curve of the newest session; this one is of", True)
+    elif vix_last is None:
+        said(a, P_VX, "VX1 − VIX", basis_el, [last])
+        says(a, P_VX, "VX1 − VIX", basis_el, "the market database has no VIX close", True)
+    else:
+        said(a, P_VX, "VX1 − VIX", basis_el,
+             [s[0] - vix_last, s[0], vix_last, "15:00 Chicago time", "16:15 ET", last,
+              str(cur["expiry_date"].iloc[0]), float(cur["days"].iloc[0])],
+             "VX1 = the first monthly contract; VIX = vix_daily close of the curve's session")
+        says(a, P_VX, "VX1 − VIX", basis_el, "index pts", True)       # a difference of index levels
     spec = spec_json(a, "chart-vx-curve", P_VX)
     ser = spec.get("series") or []
     a.equal(P_VX, "chart categories (final settlement dates)", (spec.get("x") or {}).get("categories"),
