@@ -4,6 +4,7 @@ schema, byte-for-byte determinism, and agreement of the committed
 data_store/surface artifacts with a recomputation.
 """
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -188,6 +189,16 @@ def test_committed_artifacts_match_a_recomputation(written):
         for name in ("VIX9D", "VIX", "VIX3M", "VIX6M"):
             a, b = vn["indices"][name].get("replicated"), vo["indices"][name].get("replicated")
             assert (a is None and b is None) or a == pytest.approx(b, rel=1e-9)
+    else:
+        # the comparison waits only while the bot's backfill has the session queued for
+        # a rebuild: an artifact it would never rebuild would skip it for good
+        spec = importlib.util.spec_from_file_location("cloud_refresh_gaps",
+                                                      REPO / "scripts" / "cloud_refresh.py")
+        cr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cr)
+        assert "surface" in cr.artifact_gaps(None).get(SESSION, []), (
+            f"{SESSION}'s vix_replication.json predates report_version 4 and the backfill "
+            "does not rebuild it")
     rn = pd.read_parquet(out / SESSION / "residuals.parquet")
     ro = pd.read_parquet(COMMITTED / SESSION / "residuals.parquet")
     assert list(rn.columns) == list(ro.columns)
