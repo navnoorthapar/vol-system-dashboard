@@ -742,6 +742,39 @@ class TestRecomputeAudit:
         vx["rate"] = {"method": "one_rate_for_both_terms"}
         assert S.vix_rates(rc.core.Audit("t", BeautifulSoup("", "lxml")), ctx) == set()
 
+    def test_its_gap_sentence_reads_the_fitted_range_of_a_far_wing_in_line(self, monkeypatch):
+        """Found freezing a rebuilt 2026-05-29: where the stored quotes beyond the
+        fitted range price in line with the surface's wing, the page's gap sentence
+        still names that range ('beyond the fitted K/F 0.70–1.30 price in line'),
+        and the audit, expecting its numbers only beside a far-wing figure, failed
+        the sentence (12 numbers printed, 10 recomputed)."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        sentence = ("Gap attribution (VIX, SVI-cal surface; gap = replicated − Cboe close): −0.30 = "
+                    "missing-strike shortfall −0.24 + unexplained −0.05 (each part rounded on its own). "
+                    "Missing-strike shortfall (replicated − full strip): what the replication lacks "
+                    "without the strikes beyond the stored strip, valued on the surface’s wing.{wing} "
+                    "Inside the fitted K/F 0.70–1.30, market minus surface is +0.01; with the far-wing "
+                    "term it sets the replication against the surface and is not part of the gap. "
+                    "Unexplained by the chain: −0.05, 18% of the gap (snapshot timing against the "
+                    "16:15 ET print, stale quotes).")
+        ctx = types.SimpleNamespace(vx={"deviations": [], "gap_notes": []})
+        cases = {0.003: " The stored quotes beyond the fitted K/F 0.70–1.30 price in line with that wing.",
+                 0.21: (" The stored quotes beyond the fitted K/F 0.70–1.30 price 0.21 index points above "
+                        "that wing, so the shortfall likely understates what the strip lacks.")}
+        for far, wing in cases.items():
+            html = ('<section id="vix-replication"><details class="method"><ul class="prose"><li>'
+                    + sentence.format(wing=wing) + "</li></ul></details></section>")
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            split = S.GapSplit(gap=-0.2953, short=-0.2425, unexp=-0.0528, far=far, inside=0.0115,
+                               fit=(0.70, 1.30))
+            S.deviations(a, ctx, split, [S.CAUSE_TIMING, S.CAUSE_STALE])
+            assert [c.label for c in a.checks if not c.ok] == [], far
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

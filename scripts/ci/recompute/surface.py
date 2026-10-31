@@ -1799,8 +1799,9 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> Non
     if vix:
         fit = list(vix.fit or ())
         sentence: list[float | None] = [vix.gap, vix.short, vix.unexp]
-        if vix.far is not None and abs(vix.far) >= FAR_WING_IN_LINE:
-            sentence += [*fit, abs(vix.far)]
+        if vix.far is not None:
+            # 'beyond the fitted K/F lo–hi price in line with that wing' or '… price x above/below'
+            sentence += [*fit, *([abs(vix.far)] if abs(vix.far) >= FAR_WING_IN_LINE else [])]
         if vix.inside is not None:
             sentence += [*fit, vix.inside]
         sentence += [vix.unexp]
