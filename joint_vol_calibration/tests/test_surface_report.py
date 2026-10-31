@@ -710,3 +710,22 @@ def test_a_session_without_a_recent_treasury_curve_lists_the_rate_departure(monk
                            "Treasury CMT yields at each term's expiration: newest Treasury par curve")
     zc = SimpleNamespace(session=SESSION, r_ref=0.0415, r_ref_source="Treasury zero curve 2026-10-16")
     assert report._vix_rate(zc)[2].startswith("The rate is the Treasury zero curve's 91-day rate")
+
+
+def test_the_vix_sentence_names_the_rate_when_its_terms_took_the_parity_forward():
+    """Tier 0.5 review: the producer's gap-attribution sentence dropped the
+    rate from the causes of the VIX's unexplained part whenever the session
+    had Cboe's curve, but a VIX replicated on the parity forward discounts each
+    term at its parity regression's D (R = -ln D / T), not at that curve. The
+    rate is left out only when both of the VIX's headline terms took Cboe's
+    single-strike forward."""
+    ss, par = "cboe_single_strike", "parity_regression"
+
+    def ix(method, near, nxt):
+        return {"headline_method": method,
+                method: {"near": {"forward_method": near}, "next": {"forward_method": nxt}}}
+    assert report._headline_at_cboe_rate(ix("cboe_rules", ss, ss))
+    assert report._headline_at_cboe_rate(ix("parity_forward", ss, ss))     # no parity fit for either
+    assert not report._headline_at_cboe_rate(ix("parity_forward", par, par))
+    assert not report._headline_at_cboe_rate(ix("parity_forward", ss, par))
+    assert not report._headline_at_cboe_rate({"headline_method": None, "not_replicated_reason": "..."})

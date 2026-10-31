@@ -458,11 +458,27 @@ def _settlement_deviations(terms: list) -> list:
     return out
 
 
+def _headline_at_cboe_rate(rep: dict) -> bool:
+    """Whether both terms of an index's headline replication were discounted at
+    the rate _vix_rate gave: each took Cboe's single-strike forward. A
+    parity_forward term discounts at its parity regression's D (R = -ln D / T),
+    not at Cboe's rate, so an index replicated on it can owe part of its gap to
+    the rate."""
+    head = rep.get(rep.get("headline_method") or "") or {}
+    return all((head.get(t) or {}).get("forward_method") == "cboe_single_strike"
+               for t in ("near", "next"))
+
+
 def _gap_notes(sq: sqm.SessionQuotes, terms: list, vixrep: dict, official: dict,
                svi_surface, essvi_surface: es.ESSVISurface, calc: datetime,
                svi_cal_surface=None, attribution: dict | None = None,
                indices: dict | None = None, cboe_rate: bool = False,
                calc_basis: str = CALC_T_ORIGIN) -> list:
+    """The VIX replication's gap notes. ``cboe_rate``: the VIX's two headline
+    terms were discounted at Cboe's rate (_vix_rate's spline and
+    _headline_at_cboe_rate), so the rate is not named among the causes of the
+    unexplained part of its gap; ``calc_basis``: _calc_time_ny's basis, a
+    closing book's leaving out the snapshot's timing."""
     notes = []
     for name, rep in (indices or {}).items():
         if rep.get("headline_method") is None:
@@ -799,7 +815,9 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
             "gap_notes": _gap_notes(sq, terms, indices["VIX"], official,
                                     svi_surface, essvi_surface, calc, svi_cal_surface,
                                     indices["VIX"].get("gap_attribution"), indices,
-                                    cboe_rate=rate_deviation is None, calc_basis=calc_basis),
+                                    cboe_rate=(rate_deviation is None
+                                               and _headline_at_cboe_rate(indices["VIX"])),
+                                    calc_basis=calc_basis),
         }
     resid_cols = list(resid.columns)
     return {"residuals": resid[resid_cols].reset_index(drop=True), "surface": surface_doc,

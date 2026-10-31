@@ -524,6 +524,54 @@ def test_the_rate_is_named_as_a_cause_only_where_it_is_not_cboes():
     assert old.endswith("(snapshot timing against the 16:15 ET print, stale quotes, the rate).")
 
 
+def _index_on(method, *forwards, unexplained=0.25, split=True):
+    """A vix_replication.json index replicated by ``method`` whose near and next
+    terms took the given forward methods, its gap split shown when ``split``."""
+    term = {"near": {"expiry": "2027-01-15", "days": 80.0, "forward_method": forwards[0], "R": 0.04},
+            "next": {"expiry": "2027-02-19", "days": 115.0, "forward_method": forwards[1], "R": 0.04},
+            "near_weight": 0.4, "constant_maturity_days": 93}
+    ga = ({"available": True, "truncation_pts": 0.05, "residual_pts": unexplained,
+           "surface": "svi_cal"} if split else {"available": False})
+    return {"headline_method": method, method: term, "replicated": 20.0,
+            "gap_vs_official": -0.05 - unexplained, "gap_attribution": ga}
+
+
+def test_an_index_on_the_parity_forward_names_the_rate_on_a_cboe_rate_session():
+    """Tier 0.5 review: an index whose headline replication is parity_forward
+    discounts each term at its parity regression's D (R = −ln D / T), not at
+    Cboe's rate, yet the page dropped the rate from the causes of its
+    unexplained part whenever rate.method was Cboe's spline (a rebuilt
+    2026-05-29: VIX3M and VIX6M on the parity forward, unexplained +0.03 and
+    −0.42, named only timing and stale quotes). The rate is now left out only
+    when every term of each index whose split is shown took Cboe's
+    single-strike forward; the VIX's sentence reads the VIX's own terms."""
+    ss, par = "cboe_single_strike", "parity_regression"
+    rep = {"rate": {"method": ds.CBOE_RATE_METHOD, "curve_date": "2026-05-28"},
+           "calculation_time_basis": "chain_t_origin",
+           "indices": {"VIX": _index_on("cboe_rules", ss, ss),
+                       "VIX3M": _index_on("parity_forward", par, par, unexplained=-0.03),
+                       "VIX6M": _index_on("parity_forward", par, par, unexplained=0.42)}}
+    shown = [r["ticker"] for r in ds.vix_terms(rep) if r["unexplained"] is not None]
+    assert shown == ["VIX", "VIX3M", "VIX6M"]
+    every = [ds.CAUSE_TIMING, ds.CAUSE_STALE, ds.CAUSE_RATE]
+    assert ds.vix_unexplained_causes(rep) == every
+    assert ds.vix_unexplained_causes(rep, ("VIX",)) == every[:2]
+    assert ds.vix_unexplained_causes(rep, ("VIX3M",)) == every
+    # one parity term is enough; a parity_forward index whose terms both fell back to
+    # the single-strike forward (no parity fit for the expiry) was priced at Cboe's rate
+    for v3m, rate_named in ((_index_on("parity_forward", ss, par), True),
+                            (_index_on("parity_forward", ss, ss), False),
+                            (_index_on("cboe_rules", ss, ss), False),
+                            (_index_on("parity_forward", par, par, split=False), False)):
+        got = ds.vix_unexplained_causes({**rep, "indices": {"VIX": rep["indices"]["VIX"], "VIX3M": v3m}})
+        assert (ds.CAUSE_RATE in got) is rate_named, v3m
+    # no Cboe rate in the record: the rate stays named whatever the forwards
+    assert ds.vix_unexplained_causes({**rep, "rate": {"method": "one_rate_for_both_terms"}},
+                                     ("VIX",)) == every
+    # an index the record lacks cannot vouch for its rate
+    assert ds.vix_unexplained_causes({**rep, "indices": {}}, ("VIX",)) == every
+
+
 def test_a_closing_books_replication_at_the_close_drops_the_timing_cause():
     """Tier 0.5: a closing Cboe book is calculated at the 16:15 ET close, the
     instant of the Cboe print, so its snapshot timing is no cause of the gap;

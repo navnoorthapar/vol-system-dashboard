@@ -681,6 +681,67 @@ class TestRecomputeAudit:
         assert round(100.0 * M.cboe_cmt_rate(curve, 32.0), 6) == 0.028797
         assert M.cmt_curve(data.Store(tmp_path), "2022-10-10") is None           # 14 days old
 
+    def test_it_names_the_rate_for_an_index_on_the_parity_forward(self, monkeypatch, tmp_path):
+        """Tier 0.5 review: the audit left the rate out of the causes of every
+        index's unexplained gap once the single-strike terms' rates were Cboe's,
+        but an index replicated on the parity forward discounts at its parity's
+        own D (a rebuilt 2026-05-29: VIX3M and VIX6M). It now leaves the rate out
+        only for indices whose two headline terms were each discounted at the rate
+        it recomputes from the record's par yields."""
+        import importlib
+        import types
+
+        import pandas as pd
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        S = importlib.import_module("recompute.surface")
+        pct = dict(zip(("1M", "2M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"),
+                       (0.03, 0.02, 0.04, 0.05, 0.08, 0.11, 0.22, 0.59, 1.00, 1.37, 2.03, 2.21)))
+        part = tmp_path / "market" / "rates_daily"
+        part.mkdir(parents=True)
+        pd.DataFrame([("2022-09-26", f"UST_PAR_{t}", v / 100.0) for t, v in pct.items()],
+                     columns=["date", "series", "value"]).assign(source="treasury").to_parquet(
+            part / "rates_daily_2022.parquet")
+        curve = {M.CBOE_CMT_DAYS[t]: v / 100.0 for t, v in pct.items()}
+
+        def term(expiry, days, forward, R=None):
+            return {"expiry": expiry, "forward_method": forward,
+                    "R": M.cboe_cmt_rate(curve, float(days)) if R is None else R}
+
+        def index(method, near, nxt):
+            return {"headline_method": method, method: {"ok": True, "near": near, "next": nxt}}
+
+        ss = "cboe_single_strike"
+        vix = index("cboe_rules", term("2022-10-21", 25, ss), term("2022-10-28", 32, ss))
+        v3m = index("parity_forward", term("2022-12-16", 81, "parity_regression", 0.0081),
+                    term("2023-01-20", 116, "parity_regression", 0.0093))
+        v3m["cboe_rules"] = {"ok": True, "near": term("2022-12-16", 81, ss),
+                             "next": term("2023-01-20", 116, ss)}
+        vx = {"rate": {"method": S.CBOE_RATE_METHOD, "curve_date": "2022-09-26"},
+              "indices": {"VIX": vix, "VIX3M": v3m}}
+        ctx = types.SimpleNamespace(vx=vx, store=rc.data.Store(tmp_path), session="2022-09-27")
+        a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
+        at = S.vix_rates(a, ctx)
+        assert len(a.checks) == 2
+        assert all(c.ok for c in a.checks)
+        assert at == {"VIX"}
+        T, St, R = S.CAUSE_TIMING, S.CAUSE_STALE, S.CAUSE_RATE
+        assert S.vix_causes("book_quote_time", at, ["VIX"]) == [T, St]
+        assert S.vix_causes("book_quote_time", at, ["VIX", "VIX3M"]) == [T, St, R]
+        assert S.vix_causes("closing_book_close", at, ["VIX3M"]) == [St, R]
+        # both 3-month terms on the single-strike forward at Cboe's rate: no rate cause
+        v3m["headline_method"] = "cboe_rules"
+        assert S.vix_rates(rc.core.Audit("t", BeautifulSoup("", "lxml")), ctx) == {"VIX", "VIX3M"}
+        # a single-strike rate that is not Cboe's fails a check and vouches for no index
+        vix["cboe_rules"]["next"]["R"] *= 1.01
+        a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
+        assert S.vix_rates(a, ctx) == set()
+        assert not all(c.ok for c in a.checks)
+        # the record claims one rate for both terms: nothing to check, the rate is named
+        vx["rate"] = {"method": "one_rate_for_both_terms"}
+        assert S.vix_rates(rc.core.Audit("t", BeautifulSoup("", "lxml")), ctx) == set()
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

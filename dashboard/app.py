@@ -6581,11 +6581,13 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["vix_terms"] = [{**r, "surface_label": model_short(r["surface"]) if r["surface"] else None}
                           for r in desk_surface.vix_terms(vx)]
         # what the unexplained part can come from, read from the artifact's own record
-        # (the rate is named only where a term was not priced at Cboe's)
+        # (the rate is named unless every term of each index with a split shown was
+        # priced at Cboe's rate)
         d["vix_causes"] = desk_surface.vix_unexplained_causes(vx)
-        # the gap-attribution sentence restated from that table, on its sign
+        # the gap-attribution sentence restated from that table, on its sign: the VIX's
+        # split, so the VIX's own terms decide whether the rate is named
         d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"],
-                                                    causes=d["vix_causes"])
+                                                    causes=desk_surface.vix_unexplained_causes(vx, ("VIX",)))
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
                        "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),

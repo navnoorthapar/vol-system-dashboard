@@ -1643,25 +1643,29 @@ def vix_timing(a: Audit, c: Ctx) -> str | None:
     return basis
 
 
-def vix_rates(a: Audit, c: Ctx, basis: str | None) -> list[str]:
-    """Where the replication says it priced each term at Cboe's rate, every such term's R
-    against Cboe's spline recomputed from the record's Treasury par yields (the newest
-    date before the session, the term's calendar days from it); the parity-forward terms
-    use the parity's own discount and are not checked. Returns what the unexplained part
-    can then come from: the snapshot's timing unless the replication is calculated at the
-    16:15 ET close (``basis``, vix_timing), stale quotes, and the rate only where the
-    replication did not use Cboe's."""
-    timing = [] if basis == "closing_book_close" else [CAUSE_TIMING]
+def vix_rates(a: Audit, c: Ctx) -> set[str]:
+    """Where the replication says it priced its terms at Cboe's rate, every single-strike
+    term's R (any method) against Cboe's spline recomputed from the record's Treasury par
+    yields (the newest date before the session, the term's calendar days from it). Returns
+    the indices whose two headline terms were each discounted at that recomputed rate: a
+    parity-forward term discounts at its parity's own D (R = −ln D / T), which is not
+    Cboe's, so its index is left out. Empty when the record claims no Cboe rate, has no
+    curve, or a single-strike term's rate is not Cboe's."""
     raw = c.vx.get("rate")
     rate: dict = raw if isinstance(raw, dict) else {}
     if rate.get("method") != CBOE_RATE_METHOD:
-        return [*timing, CAUSE_STALE, CAUSE_RATE]
+        return set()
     own = M.cmt_curve(c.store, c.session)
     a.equal(P_VIX, "Treasury par curve the rates read (newest before the session)",
             rate.get("curve_date"), own[0] if own else None)
     if own is None:
-        return [*timing, CAUSE_STALE, CAUSE_RATE]
+        return set()
     day, curve = own
+
+    def cboe(term: dict) -> float:
+        days = (dt.date.fromisoformat(str(term["expiry"])[:10]) - dt.date.fromisoformat(day)).days
+        return M.cboe_cmt_rate(curve, float(days))
+
     got, want = [], []
     for _, ix in vix_rows(c):
         for method in ("cboe_rules", "parity_forward", "any_expiry_parity_forward"):
@@ -1670,12 +1674,27 @@ def vix_rates(a: Audit, c: Ctx, basis: str | None) -> list[str]:
                 continue
             for term in (rep.get("near"), rep.get("next")):
                 if isinstance(term, dict) and term.get("forward_method") == "cboe_single_strike":
-                    days = (dt.date.fromisoformat(str(term["expiry"])[:10]) - dt.date.fromisoformat(day)).days
                     got.append(M.num(term.get("R")))
-                    want.append(M.cboe_cmt_rate(curve, float(days)))
+                    want.append(cboe(term))
     ok = approx(a, P_VIX, "each single-strike term's rate: Cboe's CMT spline on the record's par yields",
                 got, want, sig=FULL_SIG)
-    return [*timing, CAUSE_STALE] + ([] if ok and got else [CAUSE_RATE])
+    at_cboe: set[str] = set()
+    for t, ix in vix_rows(c):
+        head = vix_terms(ix) if ix.get("headline_method") else {}
+        terms = [head.get("near"), head.get("next")]
+        if ok and got and all(isinstance(x, dict) and x.get("expiry")
+                              and spec_ok(M.num(x.get("R")), cboe(x), FULL_SIG) for x in terms):
+            at_cboe.add(t)
+    return at_cboe
+
+
+def vix_causes(basis: str | None, at_cboe_rate: set[str], tickers: Iterable[str]) -> list[str]:
+    """What the unexplained part of the gaps of ``tickers`` can come from: the snapshot's
+    timing unless the replication is calculated at the 16:15 ET close (``basis``,
+    vix_timing), stale quotes, and the rate unless every one of them was discounted at
+    Cboe's (vix_rates)."""
+    timing = [] if basis == "closing_book_close" else [CAUSE_TIMING]
+    return [*timing, CAUSE_STALE] + ([] if set(tickers) <= at_cboe_rate else [CAUSE_RATE])
 
 
 def or_list(items: Sequence[str]) -> str:
@@ -1723,8 +1742,9 @@ def vix_replication(a: Audit, c: Ctx) -> None:
             sp = splits[t]
             cell(a, P_VIX, f"{t} missing-strike shortfall", td[3], sp.short if sp else None)
             cell(a, P_VIX, f"{t} unexplained", td[4], sp.unexp if sp else None)
-    causes = vix_rates(a, c, vix_timing(a, c))
-    vix_terms_note(a, vr, splits, causes)
+    basis, at_cboe = vix_timing(a, c), vix_rates(a, c)
+    # the terms note describes every index with a split; the gap sentence the VIX's
+    vix_terms_note(a, vr, splits, vix_causes(basis, at_cboe, [t for t, sp in splits.items() if sp]))
     beta = c.vx.get("beta") or {}
     note = a.one("#atm-vix-note")
     a.equal(P_VIX, "ATM / VIX note shown (vix_replication.json beta)", note is not None,
@@ -1737,13 +1757,13 @@ def vix_replication(a: Audit, c: Ctx) -> None:
         nums(a, P_VIX, "ATM / VIX: the VIX terms' ATM mid over the DB close; β estimator (30-day, Black-76)",
              note, want)
         a.num(P_VIX, "ATM / VIX (vix_replication.json)", note, M.num(beta.get("atm_over_vix_official")))
-    deviations(a, c, splits.get("VIX"), causes)
+    deviations(a, c, splits.get("VIX"), vix_causes(basis, at_cboe, ["VIX"]))
 
 
 def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None],
                    causes: list[str]) -> None:
     """'[0, 1]', each index that is not replicated and why, and with a split the causes the
-    unexplained part can come from (vix_rates), the 16:15 ET print among them, and the
+    unexplained part can come from (vix_causes), the 16:15 ET print among them, and the
     far-wing differences, positive ones first."""
     note = a.one("#vix-terms-note")
     want: list[float | None] = [0, 1]
@@ -1768,7 +1788,7 @@ def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSp
 def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> None:
     """'Where the replication departs from Cboe': the producer's deviations and notes as
     written, and the gap-attribution sentence rebuilt from the recompute, naming the causes
-    vix_rates leaves."""
+    vix_causes leaves for the VIX."""
     lis = a.soup.select("#vix-replication details.method ul.prose > li")
     devs = [prose(x) for x in c.vx.get("deviations") or []]
     notes = [prose(x) for x in c.vx.get("gap_notes") or [] if not str(x).startswith("Gap attribution (")]

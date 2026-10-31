@@ -406,6 +406,10 @@ GAP_NOTE_PREFIX = "Gap attribution ("
 # vix_replication.json rate.method when every term was priced at Cboe's rate
 # (surface/report.py CMT_RATE_METHOD, report_version 4 on)
 CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
+# a replicated term's forward_method when it took Cboe's single-strike forward
+# (surface/vix.py), and so the record's rate; a parity-forward term's is
+# "parity_regression", discounted at its own parity's D
+SINGLE_STRIKE_FORWARD = "cboe_single_strike"
 # what the unexplained part of a replication gap can come from, in the order
 # the page names them (vix_unexplained_causes)
 CAUSE_TIMING = "snapshot timing against the 16:15 ET print"
@@ -419,18 +423,42 @@ CALC_BASIS_WORDS = {"book_quote_time": "the book’s quote time",
                     CALC_CLOSING_BOOK_CLOSE: "the close its closing book’s quotes were left at"}
 
 
-def vix_unexplained_causes(vix_rep: Mapping | None) -> list[str]:
+def _headline_at_record_rate(ix: Any) -> bool:
+    """Whether both terms of a vix_replication.json index's headline
+    replication were discounted at the artifact's rate: each priced with Cboe's
+    single-strike forward (forward_method). A parity-forward term discounts at
+    its own parity regression's D (R = −ln D / T), not at the record's rate."""
+    if not isinstance(ix, Mapping):
+        return False
+    method = ix.get("headline_method")
+    rep = ix.get(method) if method else None
+    if not isinstance(rep, Mapping):
+        return False
+    return all(isinstance(t, Mapping) and t.get("forward_method") == SINGLE_STRIKE_FORWARD
+               for t in (rep.get("near"), rep.get("next")))
+
+
+def vix_unexplained_causes(vix_rep: Mapping | None, tickers: Iterable[str] | None = None) -> list[str]:
     """What the unexplained part of vix_replication.json ``vix_rep``'s gaps
     can come from, read from its own record: the snapshot's timing against
     the 16:15 ET print unless the replication is calculated at that close (a
     closing Cboe book, calculation_time_basis), stale quotes, and the rate
-    unless every term was priced at Cboe's (rate.method: its bounded spline
-    on the Treasury CMT yields at the term's expiration). An artifact written
-    before report_version 4 (one rate for both terms), or for a session whose
-    Treasury curve was missing, names the rate."""
+    unless the artifact priced its terms at Cboe's rate (rate.method: its
+    bounded spline on the Treasury CMT yields at the term's expiration) AND
+    every term of each index in ``tickers`` used it: its headline replication
+    took Cboe's single-strike forward (a parity-forward index discounts at
+    its parity's own rate). ``tickers``: the indices whose unexplained part
+    is described (default: those vix_terms shows a split for). An artifact
+    written before report_version 4 (one rate for both terms), or for a
+    session whose Treasury curve was missing, names the rate."""
     rep = vix_rep or {}
     rate = rep.get("rate")
-    cboe_rate = isinstance(rate, Mapping) and rate.get("method") == CBOE_RATE_METHOD
+    ixs = rep.get("indices")
+    indices: Mapping = ixs if isinstance(ixs, Mapping) else {}
+    shown = ([r["ticker"] for r in vix_terms(rep) if r["unexplained"] is not None]
+             if tickers is None else list(tickers))
+    cboe_rate = (isinstance(rate, Mapping) and rate.get("method") == CBOE_RATE_METHOD
+                 and all(_headline_at_record_rate(indices.get(t)) for t in shown))
     at_close = rep.get("calculation_time_basis") == CALC_CLOSING_BOOK_CLOSE
     return [*([] if at_close else [CAUSE_TIMING]), CAUSE_STALE, *([] if cboe_rate else [CAUSE_RATE])]
 
