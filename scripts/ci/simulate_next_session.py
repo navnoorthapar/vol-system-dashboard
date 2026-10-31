@@ -38,6 +38,13 @@ committed. Here a new session happens before merge:
                   only (Greeks nodes, scenario P&L, the model VIX term),
                   passed here and failed in the bot. The run fails unless
                   every parameter of the new fit moved by MIN_PARAM_MOVE.
+     Before it the close slot runs its workflow steps at 18:07 ET: market data,
+     labels and the closebook step, which must store the session's closing books;
+     the book slot must still capture the Global Trading Hours book after them
+     (after a Friday, when the feed still shows the closing book, find the close
+     slot's books stored instead), the forward ledger must trade on the book
+     slot's book and the session's surface report must be built from the
+     closing book (slot_capture_problems).
      Each slot writes its run record (data_store/runs/, REFRESH_SLOT close and
      book), which must be complete and agree with the slot's status, and the
      capture commit's integrity check (scripts/ci/check_captures.py) must pass
@@ -143,6 +150,14 @@ def gate_tests(workflow: Path) -> dict:
             raise SystemExit(f"{workflow}: no step {name!r}")
         out[name] = re.findall(r"\btest_\w+\.py\b", m.group(1))
     return out
+
+
+def slot_steps(workflow: Path, slot: str) -> str:
+    """The --steps the daily workflow's "Choose steps" case gives a scheduled slot."""
+    m = re.search(rf'\)\s*steps="([a-z,]+)"; slot="{re.escape(slot)}"', workflow.read_text())
+    if not m:
+        raise SystemExit(f"{workflow}: no {slot} slot in the steps case")
+    return m.group(1)
 
 
 def replayed_capture(cboe, und: str, frame, meta: dict, session: str, now):
@@ -329,11 +344,15 @@ def drive(status_file: Path) -> int:
     for old in cap_dir.glob(f"*_{session}_*"):   # the copy only: the session's capture must happen
         old.unlink()
 
+    # the instant of the slot running: each slot's replayed book is the one the
+    # delayed feed shows then (the close slot's closing book, the book slot's GTH book)
+    clock = {"now": now}
+
     def capture(und, now_=None, **kw):
         if und not in replay:
             raise OSError(f"no committed {und} capture to replay")
         frame, meta = replay[und]
-        return replayed_capture(cboe, und, frame, meta, session, now)
+        return replayed_capture(cboe, und, frame, meta, session, clock["now"])
     _patch(cboe, capture_option_chain=capture)
 
     r = float(cal.get("r_reference") or 0.04)
@@ -360,21 +379,26 @@ def drive(status_file: Path) -> int:
             return type("Chain", (), {"calls": calls, "puts": puts})()
 
     t0 = time.perf_counter()
-    # The day as production runs it: the close slot (22:07 UTC) stores the
-    # session's market data and label, then the book slot (02:30 UTC).
+    # The day as production runs it: the close slot (22:07 UTC, its steps read from
+    # the workflow) stores the session's market data, label and closing books, then
+    # the book slot (02:30 UTC) the Global Trading Hours book, the fit and the rest.
     close = datetime.combine(oc.next_session(last), datetime.min.time()).replace(
         hour=18, minute=7, tzinfo=oc.NY_TZ).astimezone(UTC)
     # Each slot writes its run record (data_store/runs/) as the workflow's slots do.
     os.environ["REFRESH_SLOT"] = "close"
-    code_close = cr.main(["--steps", "market,labels", "--status-file", str(status_file.with_name(
-        "status_close.json"))], now_utc=close)
+    clock["now"] = close
+    code_close = cr.main(["--steps", slot_steps(root / ".github" / "workflows" / "daily_refresh.yml",
+                                                "close"),
+                          "--status-file", str(status_file.with_name("status_close.json"))], now_utc=close)
     print(f"close slot exit {code_close}", flush=True)
     os.environ["REFRESH_SLOT"] = "book"
+    clock["now"] = now
     code = cr.main(["--steps", "market,capture,calibrate,freeze", "--status-file", str(status_file)],
                    now_utc=now, ticker_factory=Ticker)
     code = max(code, code_close)
     st = json.loads(status_file.read_text())
     st["simulated"] = {"session": session, "after": last, "now_utc": now.isoformat(),
+                       "book_slot_state": cboe.feed_book_state(now, session),
                        "headline_before": head["date"], "headline_params": cal["params"],
                        "book_params": p, "noise_vp": NOISE_VP,
                        "seconds": round(time.perf_counter() - t0, 1)}
@@ -403,6 +427,48 @@ def run_record_problems(tree: Path, statuses: dict) -> list[str]:
             problems.append(f"the {slot} run record (complete {r.get('complete')}, exit "
                             f"{r.get('exit_code')}, calibration {got}) is not the run's "
                             f"(exit {st.get('exit_code')}, calibration {want})")
+    return problems
+
+
+def _file(st: dict, und: str) -> str | None:
+    """The name of the book a slot's capture step stored, or found stored, for ``und``."""
+    f = ((((st.get("capture") or {}).get("captures") or {}).get(und)) or {}).get("file")
+    return Path(f).name if f else None
+
+
+def slot_capture_problems(close_st: dict, st: dict, book_state: str | None,
+                          chain: str | None) -> list[str]:
+    """The simulated session's books (FUND_GRADE_PLAN 0.8), from the close slot's
+    status, the book slot's status, the state the delayed feed shows at the book
+    slot's instant (``book_state``: drive records it) and the chain the session's
+    surface.json records. The close slot must store the session's closing books.
+    After a Monday-Thursday session the book slot must capture the Global Trading
+    Hours books beside them; after a Friday or a holiday eve the feed still shows
+    the closing book (no Global Trading Hours until the next session's evening
+    before), so it must find the close slot's books stored and fetch nothing. The
+    forward ledger trades on the book slot's SPX book, and the surface, with its
+    VIX replication, is built from the closing one."""
+    problems = []
+
+    def states(s: dict) -> set:
+        return {c.get("book_state") for c in ((s.get("capture") or {}).get("captures") or {}).values()}
+
+    close_capt, capt = close_st.get("capture") or {}, st.get("capture") or {}
+    if close_capt.get("status") != "captured" or states(close_st) != {"closing"}:
+        problems.append(f"close slot capture (want the closing books captured): {close_capt}")
+    if book_state == "closing":
+        stored = {u: _file(close_st, u) for u in (close_capt.get("captures") or {})}
+        if capt.get("status") != "exists" or {u: _file(st, u) for u in stored} != stored:
+            problems.append("book slot capture (the feed still shows the closing book: want the close "
+                            f"slot's books found stored, {sorted(map(str, stored.values()))}): {capt}")
+    elif capt.get("status") != "captured" or states(st) != {"gth"}:
+        problems.append(f"book slot capture (want the gth books captured): {capt}")
+    led_book = (st.get("forward_ledger") or {}).get("book_file")
+    if _file(st, "SPX") and led_book != f"options/cboe/{_file(st, 'SPX')}":
+        problems.append(f"the forward ledger traded on {led_book}, not the book slot's {_file(st, 'SPX')}")
+    closing = _file(close_st, "SPX")
+    if closing and chain != f"data_store/options/cboe/{closing}":
+        problems.append(f"the session's surface was built from {chain}, not its closing book {closing}")
     return problems
 
 
@@ -457,8 +523,11 @@ def main(argv=None) -> int:
                         "a test pinning the headline would not be caught")
     if (st.get("forward_ledger") or {}).get("status") != "recorded":
         problems.append(f"forward ledger: {st.get('forward_ledger')}")
-    if (st.get("capture") or {}).get("status") != "captured":
-        problems.append(f"capture: {st.get('capture')}")
+    close_file = status_file.with_name("status_close.json")
+    close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
+    sj = tree / "data_store" / "surface" / str(sim.get("session")) / "surface.json"
+    chain = (json.loads(sj.read_text()).get("inputs") or {}).get("chain") if sj.exists() else None
+    problems += slot_capture_problems(close_st, st, sim.get("book_slot_state"), chain)
     vx = (st.get("market") or {}).get("vx_futures") or {}
     if vx.get("last") != sim.get("session") or not any(
             (tree / "data_store" / "market" / "vix_futures_daily").glob("vix_futures_daily_*.parquet")):
@@ -468,8 +537,6 @@ def main(argv=None) -> int:
             problems.append(f"artifact {name}: {res.get('error')}")
     if not st.get("publishable"):
         problems.append(f"not publishable: {st.get('publish_blockers')}")
-    close_file = status_file.with_name("status_close.json")
-    close_st = json.loads(close_file.read_text()) if close_file.exists() else {}
     problems += run_record_problems(tree, {"close": close_st, "book": st})
     # the capture commit's integrity gate, on what the simulated runs wrote
     ok_list = out / "captures.ok"

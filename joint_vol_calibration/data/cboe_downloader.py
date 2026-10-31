@@ -778,6 +778,15 @@ def book_state_at(at: datetime, session: str | None) -> str:
     return "closing"
 
 
+def feed_book_state(now: datetime, session: str | None) -> str:
+    """The book state (book_state_at) of the quotes the delayed feed shows for
+    ``session`` when fetched at ``now``: they are QUOTE_DELAY old. Read off the
+    clock before a download, so a slot can tell whether the book it would
+    fetch is one it has stored already (the payload's own timestamp, when it
+    comes, decides the stored state)."""
+    return book_state_at(now - QUOTE_DELAY, session)
+
+
 def capture_option_chain(underlying: str, now: datetime | None = None, *,
                          include_extras: bool = False, timeout: float = 60.0) -> ChainCapture:
     """
@@ -949,14 +958,39 @@ def find_books(underlying: str, session: str, data_dir=None, env=None) -> list:
     return [seen[n] for n in sorted(seen)]
 
 
-def book_captured(underlying: str, session: str, data_dir=None, env=None) -> str | None:
+def recorded_book_state(path) -> str | None:
+    """The book_state a raw book's JSON beside it, or a manifest, records (None:
+    unreadable, or no state recorded)."""
+    from pathlib import Path
+    p = Path(path)
+    try:
+        rec = json.loads((p.with_suffix(".json") if p.suffix == ".parquet" else p).read_text())
+    except (OSError, ValueError):
+        return None
+    return rec.get("book_state") if isinstance(rec, dict) else None
+
+
+def book_captured(underlying: str, session: str, data_dir=None, env=None,
+                  book_state: str | None = None) -> str | None:
     """Where a capture of ``underlying`` for ``session`` is recorded (a raw book
     or a manifest of one held privately), or None: the retry slot's test of
-    whether a book is already stored."""
-    books = find_books(underlying, session, data_dir, env)
+    whether a book is already stored.
+
+    ``book_state`` counts only a capture in that state (book_state_at), or one
+    that records none: a session can have two books worth keeping, its closing
+    book (the close slot, 16:15 to 20:15 ET) and its Global Trading Hours book
+    (the book slot), and the first must not stop the second being captured."""
+    def counts(p) -> bool:
+        if book_state is None:
+            return True
+        got = recorded_book_state(p)
+        return got is None or got == book_state
+
+    books = [p for p in find_books(underlying, session, data_dir, env) if counts(p)]
     if books:
         return str(books[-1])
-    man = sorted(manifest_dir(data_dir).glob(f"{underlying.lower()}_{session}_*.json"))
+    man = [p for p in sorted(manifest_dir(data_dir).glob(f"{underlying.lower()}_{session}_*.json"))
+           if counts(p)]
     return str(man[-1]) if man else None
 
 

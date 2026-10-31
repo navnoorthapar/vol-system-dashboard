@@ -22,6 +22,15 @@ Steps (run all, or a subset with --steps):
   capture    Capture Cboe's delayed-quotes SPX and VIX chains of the last CLOSED
              session (every line, timestamped) under data_store/options/cboe/,
              independent of the calibration and its gate (capture_cboe_chains)
+  closebook  The same capture, of the session's closing books only: the
+             regular session's last quotes, which Cboe's delayed feed can show
+             from the 16:15 ET close until Global Trading Hours open at 20:15
+             ET. Skipped when the feed shows another book. The session's
+             surface and VIX replication are built from this book when it is
+             stored and passes the quote-state gates
+             (surface.quotes.select_session_chain), so the replicated VIX is
+             set against the official 16:15 ET close at the instant that close
+             is computed; no forward ledger (it trades on the book slot's book)
   freeze     Freeze the Flask app to static HTML -> .site-build/
 
 Whenever capture or calibrate runs and the DB holds the last closed session,
@@ -56,15 +65,21 @@ back to those files (the export_* helpers merge and never drop a stored
 row). The workflow commits both directories, so a session Yahoo later drops,
 or a chain that is only quoted once, survives later runs and clean clones.
 
-The option step needs a book with live two-sided quotes. After the 16:15 ET
-close Cboe's book empties until Global Trading Hours open (20:15 ET; Friday
-evenings keep the closing book), so the workflow should run `market,labels`
-after the close and `calibrate` when the book is live; a mistimed run fails
-closed at the quote-state gate instead of fitting a stale/empty book.
-The Mon-Thu book slots therefore see the Global Trading Hours book, which
-trades for the NEXT session: T is measured from the quote time for such a
-book and from the 16:00 ET close for a closing book (option_chain.t_origin);
-the VIX index leg still uses the session's 16:15 ET closes.
+The calibrate step needs a book with live two-sided quotes, and Yahoo's chain
+has none once the session has closed and no Global Trading Hours session is
+open (after a Friday: on 2026-10-23 and 2026-10-30 the Saturday book slot found
+1% of near-ATM lines two-sided). So the workflow runs `market,labels,closebook`
+after the close and `calibrate` in the Global Trading Hours book slots (20:15
+ET to 09:15 ET); a mistimed run fails closed at the quote-state gate instead
+of fitting a stale/empty book. Cboe's delayed feed kept the regular session's
+closing quotes on the Friday evening of 2026-10-30 (its book generated at 20:04
+ET: 27,269 of 27,760 lines two-sided); the closebook step stores that book, and
+on a weekday it can stand only until Global Trading Hours open (not yet
+observed: a closing book that fails the quote-state gates is not used). The
+Mon-Thu book slots see the Global Trading Hours book, which trades
+for the NEXT session: T is measured from the quote time for such a book and
+from the 16:00 ET close for a closing book (option_chain.t_origin); the VIX
+index leg still uses the session's 16:15 ET closes.
 
 Exit status (main() returns it):
   0  success, or a calibration REJECTED/SKIPPED while the newest accepted
@@ -118,7 +133,7 @@ log = logging.getLogger("cloud_refresh")
 LABEL_LOOKBACK_DAYS = 900
 _ADAPTIVE_WINDOW = 252
 DEFAULT_MAX_CAL_AGE_SESSIONS = 3
-ALL_STEPS = ("market", "labels", "capture", "calibrate", "freeze")
+ALL_STEPS = ("market", "labels", "capture", "closebook", "calibrate", "freeze")
 # The calibration diagnostics of a new session (scripts/calibration_diagnostics.py:
 # multi-start TRF, DE check, identifiability, sigma profile, rough Heston) take
 # about 3 min on 4 idle CPUs; this bounds them so the job keeps its time budget.
@@ -684,7 +699,11 @@ def capture_dir() -> pathlib.Path:
     return DATA / "options" / "cboe"
 
 
-def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
+CLOSING_BOOK = "closing"         # cboe_downloader.book_state_at: the session's closing book
+
+
+def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None,
+                        closing_only: bool = False) -> dict:
     """Capture Cboe's delayed-quotes SPX and VIX chains for session ``expected``
     (cboe_downloader.capture_option_chain) and store them, timestamped, under
     data_store/options/cboe/: <und>_<session>_<HHMMSS>Z.parquet (every line of
@@ -697,8 +716,17 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
     book replaces it), so it is stored whether or not a fit is accepted.
     Refused, like the calibration, when the live book cannot be ``expected``'s
     (session_guard); a capture whose own session (the underlying's last
-    trade) is not ``expected`` is not stored. One capture per underlying and
-    session: the retry slot skips an underlying already captured.
+    trade) is not ``expected`` is not stored. One capture per underlying,
+    session and book state: the retry slot skips an underlying already
+    captured in the state the feed shows now (cboe_downloader.feed_book_state),
+    and the closing book the close slot stores does not stop the book slot
+    capturing the Global Trading Hours book after it.
+
+    ``closing_only`` (the closebook step): capture only the session's closing
+    book, the regular session's last quotes, which the feed can show from the
+    16:15 ET close until Global Trading Hours open at 20:15 ET (all weekend
+    after a Friday): "skipped" when the clock says the feed shows another
+    book, and a download that turns out to be another book is not stored.
 
     Returns {"status": captured|exists|partial|skipped|failed, "reason",
     "session", "files", "captures": {und: {...}}}. Never raises: a failure
@@ -719,13 +747,24 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
         st["reason"] = refused
         return st
     from joint_vol_calibration.data import cboe_downloader as cboe
+    from joint_vol_calibration.data import option_chain as oc
+    state = cboe.feed_book_state(now_utc, expected)
+    if closing_only and state != CLOSING_BOOK:
+        shown = (now_utc - cboe.QUOTE_DELAY).astimezone(oc.NY_TZ)
+        st["reason"] = (f"the delayed feed shows the {state} book of {expected} (quotes of "
+                        f"{shown:%Y-%m-%d %H:%M} ET), not its closing book: that stands from the "
+                        "16:15 ET close to the 20:15 ET Global Trading Hours open; the book slot "
+                        "captures the book it finds")
+        return st
     for und in CAPTURE_UNDERLYINGS:
         # stored here, in the private store (CBOE_BOOKS_DIR) or recorded by a
-        # manifest of a book moved there: the retry slot does not capture it again
+        # manifest of a book moved there, in the state the feed shows now: the
+        # retry slot does not capture it again
         if out_dir is None:
-            found = cboe.book_captured(und, expected, data_dir=DATA)
+            found = cboe.book_captured(und, expected, data_dir=DATA, book_state=state)
         else:
-            have = sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
+            have = [p for p in sorted(d.glob(f"{und.lower()}_{expected}_*.parquet"))
+                    if cboe.recorded_book_state(p) in (None, state)]
             found = str(have[-1]) if have else None
         if found:
             st["captures"][und] = {"status": "exists", "file": found}
@@ -743,6 +782,13 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
                        f"the live {und} book is session {cap.session}'s, not {expected}'s")
                 st["captures"][und] = {"status": "rejected", "reason": why, "summary": summ}
                 log.warning("  Cboe %s capture not stored: %s", und, why)
+                continue
+            if closing_only and cap.book_state != CLOSING_BOOK:
+                # the payload is newer than the clock said: left to the book slot
+                why = (f"the feed's {und} book is the {cap.book_state} book (quoted "
+                       f"{cap.quote_time}), not the session's closing book")
+                st["captures"][und] = {"status": "skipped", "reason": why, "summary": summ}
+                log.info("  Cboe %s capture not stored: %s", und, why)
                 continue
             pq_path, js_path = cboe.save_capture(cap, d)
             st["captures"][und] = {"status": "captured", "file": str(pq_path),
@@ -765,6 +811,8 @@ def capture_cboe_chains(now_utc: datetime, expected: str, out_dir=None) -> dict:
         st["status"] = "captured"
     elif kinds & {"captured", "exists"}:
         st["status"] = "partial"
+    elif kinds == {"skipped"}:
+        st["status"] = "skipped"
     else:
         st["status"] = "failed"
     st["reason"] = "; ".join(f"{u} {c['status']}" + (f" ({c['reason']})" if c.get("reason") else "")
@@ -793,11 +841,18 @@ def _ledger_books(session: str, yahoo: "dict | None"):
     open straddle can have), oldest first, wherever it is stored
     (cboe_downloader.find_books: the private store named by CBOE_BOOKS_DIR,
     then data_store/options/cboe), then the Yahoo chain the calibrate step
-    downloaded (``yahoo``: recalibrate_heston's ``book_out``)."""
+    downloaded (``yahoo``: recalibrate_heston's ``book_out``).
+
+    A closing book comes after the session's other Cboe books: the ledger
+    trades on the book slot's book, quoted after the close its signals use
+    (the Global Trading Hours book; after a Friday or a holiday eve that is
+    the closing book), not on the closing book the close slot stores for the
+    session's surface and VIX replication, whose quotes are the close's own."""
     import pandas as pd
 
     from joint_vol_calibration.data import cboe_downloader as cboe
-    for pq_path in cboe.find_books("SPX", session, data_dir=DATA):
+    books = cboe.find_books("SPX", session, data_dir=DATA)
+    for pq_path in sorted(books, key=lambda p: cboe.recorded_book_state(p) == CLOSING_BOOK):
         js = pq_path.with_suffix(".json")
         side = json.loads(js.read_text()) if js.exists() else {}
         raw = pd.read_parquet(pq_path)
@@ -1834,11 +1889,13 @@ def main(argv=None, now_utc: "datetime | None" = None, ticker_factory=None,
                 log.exception(msg)
 
     # First, before anything slower: the Cboe book can only be fetched while it is
-    # live, and it is captured whatever the Yahoo chain or the fit do later.
-    if "capture" in steps:
+    # live, and it is captured whatever the Yahoo chain or the fit do later. The
+    # closebook step (the close slot) stores only the session's closing book.
+    if "capture" in steps or "closebook" in steps:
         with _Group("Cboe option-chain capture", timings, "capture"):
             try:
-                capt = capture_cboe_chains(now_utc, closed.isoformat())
+                capt = capture_cboe_chains(now_utc, closed.isoformat(),
+                                           closing_only="capture" not in steps)
             except Exception as e:  # it should not raise; the market and fit steps must run
                 log.exception("capture step crashed")
                 capt = {"status": "failed", "reason": f"capture step crashed: {type(e).__name__}: {e}",

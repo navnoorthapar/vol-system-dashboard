@@ -2,8 +2,24 @@ name: Daily Market Refresh
 
 # Two jobs a day, split by what each data source needs (scripts/cloud_refresh.py --steps):
 #
-#   close  22:07 UTC Mon-Fri   market,labels
+#   close  22:07 UTC Mon-Fri   market,labels,closebook
 #          After the 16:15 ET VIX settle in both EDT (20:15 UTC) and EST (21:15 UTC).
+#          `closebook` stores Cboe's closing SPX and VIX books (data_store/options/cboe/,
+#          book state 'closing'): the regular session's last quotes. The delayed feed
+#          still showed them on the Friday evening of 2026-10-30 (generated 20:04 ET:
+#          27,269 of 27,760 lines two-sided); on a weekday they can stand only until
+#          Global Trading Hours open at 20:15 ET (fetched by 00:30 UTC under EDT, 01:30
+#          UTC under EST, with the feed's 15-minute delay), which no capture has
+#          observed yet. The session's surface and VIX replication are built from that
+#          book when it passes the quote-state gates, so the replicated VIX is set
+#          against the 16:15 ET print at the instant that print is computed. A run that
+#          GitHub starts after the feed has moved to the overnight book stores nothing
+#          (skipped, with the reason in the run record), and a closing book that fails
+#          the gates is not used: the session is built from its book slot's book and
+#          the gap is labelled as an overnight book against the close. GitHub started
+#          this slot 109-228 min late on its 14 runs of 2026-10-14 to 10-31 (23:56-01:54
+#          UTC; the capture runs about 2 min after the start): inside the closing book
+#          on 3 of them (EDT); with the same delays under EST it would be 11 of 14.
 #          Yahoo publishes the session's ^GSPC/^IRX bars within minutes of the close.
 #          The VIX index family (^VIX9D/^VIX/^VIX3M/^VIX6M/^VVIX) is Cboe's official
 #          files; a session Cboe has not posted yet keeps Yahoo's row as provisional
@@ -17,10 +33,11 @@ name: Daily Market Refresh
 #          vix_futures_daily included).
 #
 #   book   02:30 UTC Tue-Sat   market,capture,calibrate,freeze   (+ retry 04:30 UTC)
-#          The SPX option chain needs live two-sided quotes. After 16:15 ET Cboe's book
-#          is empty until Global Trading Hours open at 20:15 ET (00:15 UTC under EDT,
-#          01:15 UTC under EST); Friday evening keeps the closing book, hence Saturday
-#          UTC. 02:30 UTC leaves 75 min after the EST open for Yahoo's ~15-min delayed
+#          The SPX option chain needs live two-sided quotes. After 16:15 ET Yahoo's chain
+#          has none until Global Trading Hours open at 20:15 ET (00:15 UTC under EDT,
+#          01:15 UTC under EST); Friday evening it has none all weekend (Cboe's feed keeps
+#          the closing book, which this slot captures on Saturday UTC unless the close
+#          slot has). 02:30 UTC leaves 75 min after the EST open for Yahoo's ~15-min delayed
 #          quotes (01:30 left 15 min); GTH runs to 09:15 ET, so a late start is still
 #          inside the live book. A mistimed run fails closed at the quote-state gate.
 #          `capture` stores Cboe's full delayed SPX and VIX books (data_store/options/
@@ -50,7 +67,7 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: "cloud_refresh.py --steps (any of market,labels,capture,calibrate,freeze)"
+        description: "cloud_refresh.py --steps (any of market,labels,capture,closebook,calibrate,freeze)"
         default: "market,capture,calibrate,freeze"
         type: string
 
@@ -103,7 +120,7 @@ jobs:
           INPUT_STEPS: ${{ inputs.steps }}
         run: |
           case "$SCHEDULE" in
-            "7 22 * * 1-5") steps="market,labels"; slot="close" ;;
+            "7 22 * * 1-5") steps="market,labels,closebook"; slot="close" ;;
             "")             steps="${INPUT_STEPS:-market,capture,calibrate,freeze}"; slot="manual" ;;
             *)              steps="market,capture,calibrate,freeze"; slot="book" ;;
           esac

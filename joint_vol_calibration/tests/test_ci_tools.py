@@ -258,11 +258,59 @@ class TestSimulatedSession:
         bad = {**book, "calibration": {"status": "rejected"}}
         assert "is not the run's" in sim.run_record_problems(tmp_path, {"book": bad})[0]
         src = inspect.getsource(sim.drive)
-        assert src.index('os.environ["REFRESH_SLOT"] = "close"') < src.index('"market,labels"')
+        assert src.index('os.environ["REFRESH_SLOT"] = "close"') < src.index('slot_steps(')
         assert src.index('os.environ["REFRESH_SLOT"] = "book"') < src.index('"market,capture,calibrate')
         main = inspect.getsource(sim.main)
         assert "run_record_problems(" in main
         assert "check_captures.py" in main
+
+    def test_the_close_slot_runs_the_workflows_steps_and_must_store_the_closing_book(self, sim):
+        """FUND_GRADE_PLAN 0.8: the simulation ran the close slot as 'market,labels'
+        written into the driver, so a close-slot step the workflow added was never run
+        before merge. It now reads the close slot's steps from the workflow (with the
+        closebook step), replays each slot's book at that slot's instant, and fails
+        unless the close slot stored the closing books, the book slot captured the
+        overnight ones (after a Friday, when the feed still shows the closing book,
+        found the close slot's stored instead), the forward ledger traded on the book
+        slot's book and the session's surface was built from the closing book."""
+        import inspect
+        steps = sim.slot_steps(ROOT / ".github" / "workflows" / "daily_refresh.yml", "close")
+        assert "closebook" in steps.split(",")
+        src = inspect.getsource(sim.drive)
+        assert 'clock["now"] = close' in src
+        assert 'replayed_capture(cboe, und, frame, meta, session, clock["now"])' in src
+        assert '"book_slot_state": cboe.feed_book_state(now, session)' in src
+        assert "slot_capture_problems(" in inspect.getsource(sim.main)
+
+        d = "/x/data_store/options/cboe"
+
+        def slot(status, state, stamp, ledger=None):
+            caps = {u: {"status": status, "file": f"{d}/{u.lower()}_2026-10-29_{stamp}.parquet",
+                        **({"book_state": state} if status == "captured" else {})} for u in ("SPX", "VIX")}
+            return {"capture": {"status": status, "captures": caps},
+                    **({"forward_ledger": {"book_file": f"options/cboe/{ledger}"}} if ledger else {})}
+
+        close = slot("captured", "closing", "220700Z")
+        surface = "data_store/options/cboe/spx_2026-10-29_220700Z.parquet"
+        # a Monday-Thursday session: the book slot captures the overnight books
+        gth = slot("captured", "gth", "023000Z", ledger="spx_2026-10-29_023000Z.parquet")
+        assert sim.slot_capture_problems(close, gth, "gth", surface) == []
+        # after a Friday the feed still shows the closing book: found stored, not fetched again
+        fri = slot("exists", None, "220700Z", ledger="spx_2026-10-29_220700Z.parquet")
+        assert sim.slot_capture_problems(close, fri, "closing", surface) == []
+        assert "want the gth books captured" in sim.slot_capture_problems(close, fri, "gth", surface)[0]
+        assert "want the close slot's books found stored" in sim.slot_capture_problems(
+            close, gth, "closing", surface)[0]
+        # the close slot stored nothing, the ledger or the surface on the wrong book
+        assert "close slot capture" in sim.slot_capture_problems({}, gth, "gth", surface)[0]
+        other = slot("captured", "gth", "023000Z", ledger="spx_x.parquet")
+        assert sim.slot_capture_problems(close, other, "gth", surface) == [
+            ("the forward ledger traded on options/cboe/spx_x.parquet, not the book slot's "
+             "spx_2026-10-29_023000Z.parquet")]
+        yahoo = "data_store/options/spx_2026-10-29.parquet"
+        assert sim.slot_capture_problems(close, gth, "gth", yahoo) == [
+            (f"the session's surface was built from {yahoo}, not its closing book "
+             "spx_2026-10-29_220700Z.parquet")]
 
     def test_a_replayed_book_has_the_state_its_quote_time_gives(self, sim):
         """The simulated 2026-10-30 session (a Friday) failed the data gate: the replay

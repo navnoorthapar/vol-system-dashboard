@@ -16,7 +16,7 @@ import pathlib
 import pickle
 import sqlite3
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -686,6 +686,104 @@ def test_the_cboe_books_are_captured_whatever_the_fit_does(env, monkeypatch, cap
     assert "persisted" not in st or not st["persisted"]
 
 
+def _capture_fetched_at(cap, fetched):
+    """``cap`` as the delayed feed serves it when fetched at ``fetched`` (UTC): its
+    quotes QUOTE_DELAY older, in the book state those quotes are in."""
+    import dataclasses
+    quoted = fetched - cboe.QUOTE_DELAY
+    qt = quoted.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dataclasses.replace(
+        cap, frame=cap.frame.assign(quote_time=qt), quote_time=qt,
+        book_state=cboe.book_state_at(quoted, cap.session),
+        fetched_at=fetched.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        payload_timestamp=fetched.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def test_the_close_slot_stores_the_closing_book_and_the_book_slot_the_overnight_one(env, monkeypatch):
+    """FUND_GRADE_PLAN 0.8: the close slot (market,labels,closebook) stores the
+    session's closing books, the regular session's last quotes, which Cboe's
+    delayed feed shows until Global Trading Hours open at 20:15 ET; GitHub starts
+    that slot hours late, here at 20:05 ET, past midnight UTC. The book slot
+    after it must still capture the overnight book (a closing book is not the
+    book its retry skips), its retry must skip that one, and the forward ledger
+    must trade on the book slot's book as before, not on the closing book, whose
+    file name now sorts first."""
+    clock = {"now": datetime(2026, 9, 24, 0, 5, 5, tzinfo=UTC)}     # Wed 20:05:05 ET
+    calls = []
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        cap = _full_spx_capture() if und == "SPX" else _capture(und)
+        return _capture_fetched_at(cap, clock["now"])
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    _fit_fails(monkeypatch)
+    _accepted_pickle(env, "2026-09-22")
+    monkeypatch.setattr(env, "extend_regime_labels", lambda as_of: 1)
+    status = env.DATA.parent / "status_close.json"
+    code = env.main(["--steps", "market,labels,closebook", "--status-file", str(status)],
+                    now_utc=clock["now"])
+    st = json.loads(status.read_text())
+    assert code == 0
+    capt = st["capture"]
+    assert capt["status"] == "captured", capt
+    d = env.DATA / "options" / "cboe"
+    closing = d / f"spx_{SESSION}_000505Z.parquet"
+    assert capt["captures"]["SPX"]["file"] == str(closing)
+    assert capt["captures"]["SPX"]["book_state"] == capt["captures"]["VIX"]["book_state"] == "closing"
+    assert str(closing) in st["persisted"]
+    assert "forward_ledger" not in st                     # the ledger waits for the book slot
+    # the book slot: Wednesday 21:30 ET, the Global Trading Hours book
+    clock["now"] = NOW + timedelta(seconds=5)
+    code, st = _run(env, "market,capture,calibrate", ticker=_DailyBookTicker)
+    capt = st["capture"]
+    assert capt["status"] == "captured", capt             # not "exists": the closing book is another
+    overnight = d / f"spx_{SESSION}_013005Z.parquet"
+    assert capt["captures"]["SPX"]["file"] == str(overnight)
+    assert capt["captures"]["SPX"]["book_state"] == "gth"
+    assert calls == ["SPX", "VIX", "SPX", "VIX"]
+    assert sorted(p.name for p in d.glob("spx_*.parquet")) == [closing.name, overnight.name]
+    led = st["forward_ledger"]
+    assert led["status"] == "recorded", led
+    assert led["book_file"] == f"options/cboe/{overnight.name}"
+    assert fl.load_ledger(led["path"])["inputs"]["book"]["book_state"] == "gth"
+    # the retry slot: both books stored, nothing fetched again
+    clock["now"] = NOW + timedelta(hours=2)
+    code, st = _run(env, "capture")
+    assert st["capture"]["status"] == "exists"
+    assert calls == ["SPX", "VIX", "SPX", "VIX"]
+
+
+def test_the_closebook_step_stores_nothing_once_the_feed_shows_another_book(env, monkeypatch):
+    """A close slot that GitHub starts after the feed has moved to the Global
+    Trading Hours book stores nothing (skipped, with the reason): the book slot
+    captures that book as before. A download that turns out to be newer than
+    the clock said is not stored as the closing book either."""
+    calls = []
+    served = {"at": NOW}
+
+    def fake(und, now=None, **kw):
+        calls.append(und)
+        return _capture_fetched_at(_capture(und), served["at"])
+    monkeypatch.setattr(cboe, "capture_option_chain", fake)
+    status = env.DATA.parent / "status.json"
+    env.main(["--steps", "closebook", "--status-file", str(status)], now_utc=NOW)     # 21:30 ET
+    capt = json.loads(status.read_text())["capture"]
+    assert capt["status"] == "skipped"
+    assert "not its closing book" in capt["reason"]
+    assert "(quotes of 2026-09-23 21:15 ET)" in capt["reason"]
+    assert calls == []
+    # the clock says closing book (20:20 ET: quotes of 20:05), the payload is 20:31's
+    at = datetime(2026, 9, 24, 0, 20, tzinfo=UTC)
+    served["at"] = at + timedelta(minutes=11)
+    env.main(["--steps", "closebook", "--status-file", str(status)], now_utc=at)
+    capt = json.loads(status.read_text())["capture"]
+    assert capt["status"] == "skipped", capt
+    assert {c["status"] for c in capt["captures"].values()} == {"skipped"}
+    assert "is the gth book" in capt["captures"]["SPX"]["reason"]
+    assert calls == ["SPX", "VIX"]
+    assert not list((env.DATA / "options" / "cboe").glob("*.parquet"))
+
+
 def test_a_capture_of_another_session_or_a_failed_download_is_not_stored(env, monkeypatch, capsys):
     def fake(und, now=None, **kw):
         if und == "VIX":
@@ -746,7 +844,7 @@ def test_a_capture_write_error_fails_that_capture_not_the_run(env, monkeypatch, 
 
 
 def test_a_crash_in_the_capture_step_does_not_skip_the_run(env, monkeypatch, capsys):
-    def crash(now_utc, expected, out_dir=None):
+    def crash(now_utc, expected, out_dir=None, **kw):
         raise RuntimeError("unexpected")
     monkeypatch.setattr(env, "capture_cboe_chains", crash)
     _accepted_pickle(env, "2026-09-22")
