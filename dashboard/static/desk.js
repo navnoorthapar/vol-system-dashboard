@@ -1151,6 +1151,8 @@
           if (t.tabIndex !== (on ? 0 : -1)) t.tabIndex = on ? 0 : -1;
           if (p && p.hidden === on) p.hidden = !on;
         });
+        // a grid shown by its tab scrolls to the selected expiry (hidden, it measured 0)
+        if (!shared && !init) idle(function () { settle($$('tr[aria-current]', doc.getElementById(tab.getAttribute('aria-controls')) || doc.body)); });
         if (focus) tab.focus();
         if (strip) keepInView(list, tab);
         if (status && init && tab !== served) expiryStatus(status, tab, tabs);
@@ -1455,9 +1457,10 @@
     idle(function () { settle(expRows(exp)); });
   }
   function settle(rows) {
-    var moves = rows.map(function (tr) {
+    var f = doc.activeElement, moves = rows.map(function (tr) {
       var w = tr.closest('.heat-wrap.capped'), h = tr.closest('table').tHead;
-      if (!w || w.scrollHeight <= w.clientHeight) return 0;
+      // a grid holding the focus, on another row, stays where the reader is
+      if (!w || w.scrollHeight <= w.clientHeight || w.contains(f) && !tr.contains(f)) return 0;
       var a = w.getBoundingClientRect(), r = tr.getBoundingClientRect(), top = a.top + (h ? h.offsetHeight : 0);
       return r.top < top || r.bottom > a.bottom ? r.top - top - (a.bottom - top - r.height) / 2 : 0;
     });

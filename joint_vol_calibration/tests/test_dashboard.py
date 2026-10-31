@@ -5101,6 +5101,76 @@ def test_browser_a_capped_grid_scrolls_its_own_rows_to_the_selected_expiry(syn_b
     ctx.close()
 
 
+# each shown capped grid's row of expiry e (below the sticky head and above the
+# bottom when top and bottom are >= -1), polled for up to 5 s (the grids scroll when idle)
+_ROW_IN_GRID_JS = """(e) => new Promise(done => { const t0 = Date.now(); (function poll() {
+  const st = [...document.querySelectorAll('.heat-wrap.capped')]
+    .filter(w => w.offsetParent && w.scrollHeight > w.clientHeight + 1)
+    .map(w => { const tr = w.querySelector(`tr[data-exp="${e}"]`), a = w.getBoundingClientRect();
+      const r = tr.getBoundingClientRect(), head = w.querySelector('thead').getBoundingClientRect();
+      return { id: w.querySelector('table').id, top: r.top - head.bottom, bottom: a.bottom - r.bottom }; });
+  if ((st.length && st.every(x => x.top >= -1 && x.bottom >= -1)) || Date.now() - t0 > 5000) return done(st);
+  setTimeout(poll, 100); })(); })"""
+
+
+def test_browser_a_residual_grid_shown_by_its_tab_scrolls_to_the_selected_expiry(syn_browser):
+    """D3 review: below 1181 px the residual grids are tabs, and a grid on a hidden tab
+    could not be scrolled to the expiry picked meanwhile (a hidden row measures 0):
+    shown by its tab, it sat at its top with the selected row out of view. A grid
+    shown by its tab now scrolls itself to that row once the page is idle."""
+    sb = syn_browser
+    ctx, page = _syn_page(sb, 45, 1024)
+    e = _syn_tabs(sb, 45)[-3]
+    page.evaluate("(e) => document.querySelector("
+                  "`[data-chart-filter='chart-slices'] [data-value='${e}']`).click()", e)
+    page.wait_for_timeout(1500)
+    tabs = page.evaluate("""() => [...document.querySelectorAll('#residuals [role=tab]')]
+      .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('aria-controls'))""")
+    assert tabs
+    for ctl in tabs:
+        page.click(f'#residuals [role=tab][aria-controls="{ctl}"]')
+        st = page.evaluate(_ROW_IN_GRID_JS, e)
+        assert st, ctl
+        assert all(x["top"] >= -1 and x["bottom"] >= -1 for x in st), (ctl, st)
+    ctx.close()
+
+
+def test_browser_a_focused_heat_cell_stays_in_view(syn_browser):
+    """D3 review: ']' (the next expiry) scrolled every capped grid to the new row, the
+    one holding the focus too, so a focused cell left the screen; and a cell focused
+    with ↑ stopped under the sticky column heads (19 of its 26 px hidden). A grid that
+    holds the focus on another row now stays where it is, and a capped grid keeps a
+    focused cell below its heads (scroll-padding-top)."""
+    sb = syn_browser
+    for width in (1440, 1024):
+        ctx, page = _syn_page(sb, 45, width)
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        page.evaluate("""() => { const t = document.getElementById('iv-heatmap');
+          [...t.tBodies[0].rows[1].cells].slice(1).find(x => x.className !== 'empty').focus(); }""")
+        top0 = page.evaluate("document.getElementById('iv-heatmap').parentElement.scrollTop")
+        page.keyboard.press("]")
+        page.wait_for_timeout(1500)
+        st = page.evaluate("""() => { const c = document.activeElement, w = c.closest('.heat-wrap');
+          const a = w.getBoundingClientRect(), r = c.getBoundingClientRect();
+          const h = w.querySelector('thead').getBoundingClientRect();
+          return { tag: c.tagName, top: w.scrollTop, under: h.bottom - r.top,
+                   below: r.bottom - a.bottom }; }""")
+        assert st["tag"] == "TD", (width, st)
+        assert st["top"] == top0, (width, st)
+        assert st["under"] <= 1, (width, st)
+        assert st["below"] <= 1, (width, st)
+        # down the grid, then back up a row at a time: the focused cell clears the heads
+        for _ in range(12):
+            page.keyboard.press("ArrowDown")
+        for _ in range(8):
+            page.keyboard.press("ArrowUp")
+            st = page.evaluate("""() => { const c = document.activeElement, w = c.closest('.heat-wrap');
+              const h = w.querySelector('thead').getBoundingClientRect();
+              return h.bottom - c.getBoundingClientRect().top; }""")
+            assert st <= 1, (width, st)
+        ctx.close()
+
+
 def test_browser_layout_is_stable_and_fits_at_desk_and_phone_widths(site_browser):
     """UI-8 / UI-15: no layout shift after first paint; at 390 px no caption runs
     past its scroll region; at 1440 px the surface history table fits."""

@@ -691,8 +691,10 @@ dialog.keys .dl { font-size: 12px; }
   .g.evenfill > :last-child:nth-child(odd) { grid-column: 1 / -1; }
   .heat-wrap.capped { max-height: 60vh; overflow: auto; }   /* stacked: a capped grid scrolls inside 60% of the screen */
 }
-/* a heatmap's column heads stay in view while a capped region scrolls (above) */
+/* a heatmap's column heads stay in view while a capped region scrolls (above); a cell
+   focused with ↑ stops below them */
 table.heat thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+.heat-wrap.capped { scroll-padding-top: 24px; }
 /* phones: a heatmap's row header (the expiry) stays in view while its region scrolls sideways */
 @media (max-width: 599px) {
   table.heat th[scope="row"] { position: sticky; left: 0; z-index: 1; background: var(--surface); }
