@@ -4863,6 +4863,57 @@ def test_browser_a_surface_heatmap_reads_its_cells_details_from_the_session_file
         ctx.close()
 
 
+# a stand-in for Desk.data that counts its calls and resolves with `file` (after 50
+# calls it never resolves, so a page that keeps asking cannot hang the test)
+_HEAT_STUB_JS = """(file) => { window.__dataCalls = 0; window.__errs = [];
+  window.addEventListener('error', e => window.__errs.push(String(e.message)));
+  Desk.data = () => ++window.__dataCalls > 50 ? new Promise(() => {}) : Promise.resolve(file); }"""
+
+
+def test_browser_a_heatmap_whose_file_lacks_its_details_reads_the_cell_and_does_not_hang(syn_browser):
+    """D2 review: a heatmap cell's readout asked the data file for its table's entry
+    and, when the file had none (heat[id] undefined), asked again for ever: the tab
+    hung on the first hover. A file without the entry, or with fewer rows than the
+    grid, now leaves the readout at the cell's row, column and printed value, after
+    one request (the old code made 50 here, the stub's limit) and without an error.
+    freeze_site refuses such a file (the next test)."""
+    sb = syn_browser
+    for file in ({"heat": {}}, {}, {"heat": {"iv-heatmap": {"detail": "{0:2}", "cells": []}}}):
+        ctx, page = _syn_page(sb, 17, 1440)
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        page.evaluate(_HEAT_STUB_JS, file)
+        at = page.evaluate("""() => { const rows = [...document.getElementById('iv-heatmap').tBodies[0].rows];
+          for (const [ri, r] of rows.entries()) for (const c of [...r.cells].slice(1))
+            if (c.className !== 'empty') return [ri, c.cellIndex - 1]; }""")
+        page.evaluate(_HEAT_FOCUS_JS, at)
+        page.wait_for_timeout(300)
+        st = page.evaluate(_HEAT_FOCUS_JS, at)
+        calls, errs = page.evaluate("[window.__dataCalls, window.__errs]")
+        assert calls <= 2, (file, calls)          # the grid's, and the smile's beside it
+        assert errs == [], (file, errs)
+        assert st["readout"] == st["head"] + st["text"], (file, st)
+        ctx.close()
+
+
+def test_freeze_refuses_a_data_file_without_a_heatmaps_details(dash, freezer, tmp_path, monkeypatch):
+    """D2 review: a Surface heatmap (data-src) reads its cells' numbers from the
+    session data file's heat entry under its table id. Freeze checked the file's
+    hashes, not that the entry is there: a file without it published, and desk.js
+    then hung on the first hover. Freeze now fails closed and writes nothing."""
+    orig = dash.publish_json
+
+    def drop(kind, session, obj):
+        heat = {k: v for k, v in (obj.get("heat") or {}).items() if k != "iv-heatmap"}
+        return orig(kind, session, {**obj, "heat": heat} if "heat" in obj else obj)
+
+    monkeypatch.setattr(dash, "publish_json", drop)
+    out = tmp_path / "site"
+    assert freezer.freeze(str(out), dash) == 1
+    assert not out.exists() or not any(out.iterdir())
+    page = '<table class="heat" id="iv-heatmap" data-src="data/x-0123456789abcdef.json" data-integrity="a">'
+    assert freezer._heat_ids(page + '<p data-id="no">', "data/x-0123456789abcdef.json") == ["iv-heatmap"]
+
+
 def test_browser_a_smile_whose_session_file_fails_keeps_its_default_and_says_so(syn_browser):
     """D2: a page left open across a deploy names a data file the deploy removed, and
     a file:// preview cannot fetch one; a file whose bytes are not its integrity hash

@@ -1322,9 +1322,9 @@
         last = c;
         if (src && heat === undefined) {
           heat = null;
-          Desk.data(src, tbl.getAttribute('data-integrity'), tbl.getAttribute('data-session')).then(function (j) { heat = j.heat[tbl.id]; show(last); }, function () {});
+          Desk.data(src, tbl.getAttribute('data-integrity'), tbl.getAttribute('data-session')).then(function (j) { heat = (j.heat || {})[tbl.id] || null; show(last); }, function () {});
         }
-        v = heat && heat.cells[c.parentNode.sectionRowIndex][c.cellIndex - 1];
+        v = heat && ((heat.cells || [])[c.parentNode.sectionRowIndex] || [])[c.cellIndex - 1];
         if (out) out.textContent = (withHeads ? heads(c) : '') + (!src ? alt || c.getAttribute('data-detail') : c.className === 'empty' ? tbl.getAttribute('data-empty')
           : v ? heat.detail.replace(/\{(\d)(:(\+?)(\d))?\}/g, function (m, i, x, sg, dg) { return x ? num(v[i], { digits: +dg, signed: !!sg }) : v[i]; }) : c.textContent);
       }
