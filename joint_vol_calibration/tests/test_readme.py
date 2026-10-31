@@ -263,6 +263,64 @@ def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch):
     assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
 
 
+def test_a_code_change_to_which_sessions_qualify_fails(monkeypatch):
+    """Which sessions the results range over is code (a stored fit's
+    model_version, a scorecard) applied to data. Digested as its result, the
+    list changed whenever the code did, under data_store/surface, so a code
+    change that left no session qualifying was a stale-snapshot warning. The
+    digest is now of the data the rule reads, so the claims fail."""
+    monkeypatch.setattr(rr, "RESULT_MODEL_VERSION", 1, raising=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        failures = rr.check(SNAP, topics=["span"])
+    assert [f.split(" ")[0] for f in failures] == ["span/results"]
+    assert "every artifact it reads unchanged" in failures[0]
+    assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
+
+
+def test_a_code_change_to_a_cache_query_fails(monkeypatch):
+    """The Data table's VX rows are read from the cache (vol_system.db), which
+    every run of the daily job rewrites. Digested as the query's result, a
+    changed query looked like a rewritten cache and warned; the digest is now
+    of the table's rows up to the Data table's end date, whatever the claim
+    selects from them, so a changed query fails."""
+    orig = rr.Store.sql
+
+    def limited(self, *args):
+        return orig(self, *(a + " LIMIT 100" if isinstance(a, str) and a.startswith("SELECT") else a
+                            for a in args))
+
+    monkeypatch.setattr(rr.Store, "sql", limited)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        failures = rr.check(SNAP, topics=["data_table"])
+    assert sorted(f.split(" ")[0] for f in failures) == ["data_table/vx_futures", "data_table/vx_settlements"]
+    for f in failures:
+        assert "every artifact it reads unchanged" in f
+    assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
+
+
+def test_a_claim_computed_from_other_artifacts_than_the_snapshot_names_fails(monkeypatch):
+    """The snapshot names what each figure is computed from, so a rebuild of
+    it warns. Code that reads something else for the same figure (here the VX
+    row from the cache alone, the partitions the daily job commits dropped)
+    leaves the snapshot naming the wrong artifacts: the job's first stored
+    session would then move the figure with none of them changed, a failure
+    in the bot's tree. It fails now, on the code change."""
+    orig = rr.Store.market
+
+    def market(self, table, through):
+        if table == "vix_futures_daily":
+            return pd.DataFrame({"date": [], "expiry_date": [], "expiry_month": []})
+        return orig(self, table, through)
+
+    monkeypatch.setattr(rr.Store, "market", market)
+    failures = rr.check(SNAP, topics=["data_table"])
+    assert [f.split(" ")[0] for f in failures] == ["data_table/vx_futures"]
+    assert f"no longer from data_store/market/vix_futures_daily#date<={SNAP['params']['data_through']}" \
+        in failures[0]
+
+
 def test_a_session_row_the_daily_job_dropped_warns(store_copy):
     """A row the daily job removed from an aggregate file (a session its
     rebuild no longer lists in surface/index.json) is a change of that row,
@@ -389,7 +447,7 @@ def test_a_vx_session_the_daily_job_stores_warns_and_passes(store_copy, tmp_path
         failures = rr.check(SNAP, rr.Store(store_copy), topics=["data_table"])
     assert failures == []
     message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
-    cache_key = f"data_store/vol_system.db#vix_futures_daily dated on or before {through}"
+    cache_key = f"data_store/vol_system.db#vix_futures_daily#date<={through}"
     assert f"  {record}\n" in message                    # the job's commit, listed with no note
     assert f"  {cache_key} (" not in message              # and its cache, when changed, the same way
     if cache:

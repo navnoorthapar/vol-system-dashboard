@@ -8,7 +8,7 @@ it), a test that pins it, or a run recorded in `docs/`. A number over sessions n
 [Model Risk page](https://navnoorbawa.me/model-risk.html) computes the current values at every build, and this
 document does not copy what the daily job changes. `tests/test_readme.py` checks the numbers the README also quotes,
 the §1 limitations that count sessions, §2's identifiability, held-out and replication counts and the §3 outcome rows
-against a committed snapshot ([as of 2026-10-30](../results/readme_results.json)), and the snapshot against the
+against a committed snapshot ([as of 2026-10-31](../results/readme_results.json)), and the snapshot against the
 artifacts it names; the rest of this document is not checked number by number.
 
 ## What this document is, and is not

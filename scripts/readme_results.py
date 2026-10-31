@@ -96,6 +96,8 @@ AS_OF = ((README, FIRST_SCREEN), (PACK, ""))
 JOB_CACHE = ("data_store/vol_system.db",)
 # The five sessions the C23 round measured: the claims about that round (the DE
 # timings, the Data table's option counts) stay pinned to them.
+# the fits the results range over (with a surface scorecard)
+RESULT_MODEL_VERSION = 2
 C23_SESSIONS = ("2026-03-24", "2026-03-27", "2026-05-29", "2026-06-18", "2026-10-16")
 C23_HEADLINE = "2026-10-16"
 MINUS = "−"
@@ -247,21 +249,30 @@ class Store:
         self._note(f"data_store/{key}", self._digests[f"data_store/{key}"]["sha256"])
         return self._parsed[key]
 
-    def sql(self, name: str, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
-        """Rows of the database cache (data_store/vol_system.db), read only."""
-        key = f"vol_system.db#{name}"
-        if key not in self._parsed:
-            uri = f"file:{self.data / 'vol_system.db'}?mode=ro"
-            with sqlite3.connect(uri, uri=True) as con:
-                rows = [tuple(r) for r in con.execute(query, params).fetchall()]
-            self._parsed[key] = rows
-            self._digests[f"data_store/{key}"] = {"sha256": _sha(_canonical(rows)), "report_version": None}
-        self._note(f"data_store/{key}", self._digests[f"data_store/{key}"]["sha256"])
-        return self._parsed[key]
+    def sql(self, table: str, date_col: str, through: str, query: str,
+            params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+        """The rows ``query`` selects from the database cache
+        (data_store/vol_system.db, read only). The digest is of ``table``'s
+        rows dated on or before ``through``, every column, not of what the
+        query selects: a changed query is a code change (a claim that moves
+        fails), a rewritten cache a change of the data (it warns)."""
+        key = f"data_store/vol_system.db#{table}#{date_col}<={through}"
+        uri = f"file:{self.data / 'vol_system.db'}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as con:
+            if key not in self._digests:
+                raw = con.execute(f"SELECT * FROM {table} WHERE {date_col} <= ?",  # noqa: S608 (constants)
+                                  (through,)).fetchall()
+                self._digests[key] = {"sha256": _sha(_canonical(sorted((list(r) for r in raw), key=repr))),
+                                      "report_version": None}
+            rows = [tuple(r) for r in con.execute(query, params).fetchall()]
+        self._note(key, self._digests[key]["sha256"])
+        return rows
 
     def derived(self, key: str, compute: Callable[[], Any]) -> Any:
-        """A fact derived from a directory listing (which sessions qualify, the
-        first capture): the digest is of the fact itself."""
+        """What a directory listing gives (each session's stored fit and
+        scorecard, the first capture, the first ledger entry): the digest is
+        of those facts. A rule a claim applies to them is code, kept out of
+        ``compute``, so changing it fails instead of looking like new data."""
         if key not in self._parsed:
             self._parsed[key] = compute()
             self._digests[f"data_store/{key}"] = {"sha256": _sha(_canonical(self._parsed[key])),
@@ -344,25 +355,28 @@ class Claims:
     @property
     def sessions(self) -> tuple[str, ...]:
         """Every stored session through params['sessions_through'] with a
-        surface scorecard and a model_version 2 fit: the sessions the results
-        range over."""
+        surface scorecard and a model_version RESULT_MODEL_VERSION fit: the
+        sessions the results range over."""
         through = self.params["sessions_through"]
 
-        def listing() -> list[str]:
+        def listing() -> list[list[Any]]:
+            """Each session through ``through`` with a surface directory and a
+            stored fit: whether it has a scorecard, and the fit's model_version."""
             out = []
             for d in sorted((self.store.data / "surface").iterdir()):
                 pkl = self.store.data / "calibrations" / f"joint_cal_{d.name}.pkl"
-                if not (d.name <= through and (d / "scorecard.json").exists() and pkl.exists()):
-                    continue
-                with open(pkl, "rb") as fh:
-                    if pickle.load(fh).get("model_version") == 2:  # noqa: S301 (the repository's own fits)
-                        out.append(d.name)
+                if d.name <= through and pkl.exists():
+                    with open(pkl, "rb") as fh:
+                        version = pickle.load(fh).get("model_version")  # noqa: S301 (the repository's own fits)
+                    out.append([d.name, (d / "scorecard.json").exists(), version])
             return out
-        out = self.store.derived(
-            f"surface#sessions with a scorecard and a model_version 2 fit, through {through}", listing)
+        facts = self.store.derived(f"surface#sessions with a fit through {through}: scorecard, model_version",
+                                   listing)
+        out = tuple(s for s, card, version in facts if card and version == RESULT_MODEL_VERSION)
         if not out:
-            raise Untrue(f"no session through {through} has a scorecard and a model_version 2 fit")
-        return tuple(out)
+            raise Untrue(f"no session through {through} has a scorecard and a model_version "
+                         f"{RESULT_MODEL_VERSION} fit")
+        return out
 
     @property
     def last(self) -> str:
@@ -398,7 +412,7 @@ class Claims:
         stored its first VX session: a clean checkout never sees the sessions
         the job commits, while the job's own runs add them to it."""
         rows = {(d, e): m for d, e, m in self.store.sql(
-            f"vix_futures_daily dated on or before {through}",
+            "vix_futures_daily", "date", through,
             "SELECT date, expiry_date, expiry_month FROM vix_futures_daily WHERE date <= ? "
             "ORDER BY date, expiry_date", (through,))}
         part = self.store.market("vix_futures_daily", through)
@@ -671,7 +685,7 @@ def _data_table(c: Claims) -> None:
         k.text = (f"({len(months)} monthly contracts expiring {months[0]} → {months[-1]}) | "
                   f"{min(days)} → {max(days)} | {len(rows):,} |")
     with c.claim("data_table/vx_settlements", within="| VX final settlements |") as k:
-        rows = c.store.sql(f"vix_futures_settlements settled on or before {through}",
+        rows = c.store.sql("vix_futures_settlements", "settlement_date", through,
                            "SELECT settlement_date FROM vix_futures_settlements WHERE settlement_date <= ? "
                            "ORDER BY settlement_date", (through,))
         k.text = f"| {rows[0][0]} → {rows[-1][0]} | {len(rows):,} |"
@@ -1081,9 +1095,19 @@ def compare(snapshot: dict[str, Any], claims: list[Claim], store: Store,
             out.append(Finding(cid, False, f"{cid} is now placed at {(now.doc, now.within, now.absent)}, the "
                                            f"snapshot at {place}: regenerate with {COMMAND}"))
             continue
-        if not now.error and was["text"] == now.text:
-            continue
         changed = sorted(key for key in was["sources"] if _changed(snapshot, store, key))
+        if not now.error and was["text"] == now.text:
+            if not changed and set(now.sources) != set(was["sources"]):
+                # same figure, same data, other reads: the snapshot no longer
+                # names what the figure is computed from, so a later rebuild of
+                # what it now reads would go unseen
+                reads, named = set(now.sources), set(was["sources"])
+                new_reads = ", ".join(sorted(reads - named)) or "nothing new"
+                gone = ", ".join(sorted(named - reads)) or "nothing"
+                why = (f"{cid} is now computed from {new_reads}, no longer from {gone}, with every artifact "
+                       f"the snapshot names unchanged (the code changed): regenerate with {COMMAND}")
+                out.append(Finding(cid, False, why))
+            continue
         what = (f"could not be recomputed ({now.error})" if now.error
                 else f"now reads {now.text!r}, the snapshot {was['text']!r}")
         if changed and all(_under(key, bot) for key in changed):

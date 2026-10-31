@@ -2,8 +2,8 @@
  "schema_version": 1,
  "about": "Every figure README.md quotes, and the validation pack's and DATA_SOURCES.md's figures that range over the sessions, as printed, with the artifacts each was computed from. Written by scripts/readme_results.py; joint_vol_calibration/tests/test_readme.py checks the documents against it and it against data_store.",
  "generated": {
-  "date": "2026-10-30",
-  "commit": "dbc2ad19dd94a45cbbeef3ce8c6f9f4b631434f4",
+  "date": "2026-10-31",
+  "commit": "556e4d27eedcc3659b090e432e9e570503bb023b",
   "command": "make readme-results"
  },
  "params": {
@@ -163,8 +163,8 @@
    "sha256": "c29851b6bd9a0dd7cb8a5966c152e244982f21bba2c45be7c0bf71d72e5c61b8",
    "report_version": null
   },
-  "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26": {
-   "sha256": "1dbce6db7e4742b4c7af2bd0085a246f63621e870a9461b11603a267b725d5ed",
+  "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version": {
+   "sha256": "42a9c898167e213ecd97b5a33b8b12beb94c2301debe5ea7c69b8725fb826623",
    "report_version": null
   },
   "data_store/surface/2026-03-24/scorecard.json": {
@@ -247,12 +247,12 @@
    "sha256": "1a46f01e99bbcd36a704e626dbbdf15e43c9b22cd09d1063407c343a3c5d5d45",
    "report_version": null
   },
-  "data_store/vol_system.db#vix_futures_daily dated on or before 2026-10-19": {
-   "sha256": "2975d26ea18c3c518286d35da521ccfbcb20cd63f140fd2410c06b3c28dafe8c",
+  "data_store/vol_system.db#vix_futures_daily#date<=2026-10-19": {
+   "sha256": "b0c20ac93a0714b54fd3c89e32bb6ceb7c6b684898a10bf67b0bb3231f29ea77",
    "report_version": null
   },
-  "data_store/vol_system.db#vix_futures_settlements settled on or before 2026-10-19": {
-   "sha256": "a1af1cc06a217e629cb733e00802e4f7730fda5a93449d757ad4ba3d95d6eb3d",
+  "data_store/vol_system.db#vix_futures_settlements#settlement_date<=2026-10-19": {
+   "sha256": "4c28e614523456be4f0f8385271111a24b178cc8b99ce6dbdf009efc5d3a0b6d",
    "report_version": null
   }
  },
@@ -263,7 +263,7 @@
    "within": "first screen",
    "text": "ranges over the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26, not confidence intervals",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -296,7 +296,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -348,7 +348,7 @@
    "within": "first screen",
    "text": "**0.45–1.98 half-spreads**",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-27/scorecard.json",
     "data_store/surface/2026-05-29/scorecard.json",
@@ -363,7 +363,7 @@
    "within": "first screen",
    "text": "31.0–80.0% inside the bid–ask",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-27/scorecard.json",
     "data_store/surface/2026-05-29/scorecard.json",
@@ -378,7 +378,7 @@
    "within": "first screen",
    "text": "(2026-10-26: 1.60, 31.0% inside)",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-10-26/scorecard.json"
    ]
   },
@@ -388,7 +388,7 @@
    "within": "first screen",
    "text": "A certified arbitrage-free, calendar-ordered SVI surface",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-24/surface.json",
     "data_store/surface/2026-03-27/scorecard.json",
@@ -408,7 +408,7 @@
    "doc": "README.md",
    "text": "On the 1,473–3,695 quotes per session that no model was fitted to (`data_store/surface/<session>/scorecard.json`, `metrics.common_out_of_sample`), Heston's median |model − mid| is 4.4–15.6 half-spreads against 0.45–1.98 for the certified arbitrage-free SVI surface",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-24/surface.json",
     "data_store/surface/2026-03-27/scorecard.json",
@@ -435,7 +435,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -450,7 +450,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -460,7 +460,7 @@
    "text": "(2026-10-26: 1.72 on 3,049 quotes, no parameter on a bound)",
    "sources": [
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -475,7 +475,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -490,7 +490,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -505,7 +505,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -756,7 +756,7 @@
    "text": "(174 monthly contracts expiring 2013-01 → 2027-06) | 2013-01-02 → 2026-10-09 | 30,963 |",
    "sources": [
     "data_store/market/vix_futures_daily#date<=2026-10-19",
-    "data_store/vol_system.db#vix_futures_daily dated on or before 2026-10-19"
+    "data_store/vol_system.db#vix_futures_daily#date<=2026-10-19"
    ]
   },
   {
@@ -765,7 +765,7 @@
    "within": "| VX final settlements |",
    "text": "| 2010-01-20 → 2026-09-16 | 201 |",
    "sources": [
-    "data_store/vol_system.db#vix_futures_settlements settled on or before 2026-10-19"
+    "data_store/vol_system.db#vix_futures_settlements#settlement_date<=2026-10-19"
    ]
   },
   {
@@ -886,7 +886,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -901,7 +901,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -916,7 +916,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -934,7 +934,7 @@
    "within": "## Known limitations",
    "text": "The six chains the surfaces are built from are Yahoo end-of-day downloads without a quote time; static arbitrage that is executable at the quoted bid and ask is present on all six",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/surface.json",
     "data_store/surface/2026-03-27/surface.json",
     "data_store/surface/2026-05-29/surface.json",
@@ -960,7 +960,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -968,7 +968,7 @@
    "doc": "README.md",
    "text": "The table stops at 2026-10-26",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1087,7 +1087,7 @@
    "text": "on 2026-03-24 the box costs 2.1% of the loss",
    "sources": [
     "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1101,7 +1101,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1115,7 +1115,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1129,7 +1129,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1143,7 +1143,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1156,7 +1156,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1170,7 +1170,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1178,7 +1178,7 @@
    "doc": "README.md",
    "text": "within 0.09–0.78 index points of the official close",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/index.json#session=2026-03-24",
     "data_store/surface/index.json#session=2026-03-27",
     "data_store/surface/index.json#session=2026-05-29",
@@ -1192,7 +1192,7 @@
    "doc": "docs/model_validation/README.md",
    "text": "the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1206,7 +1206,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1220,7 +1220,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1260,7 +1260,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1274,7 +1274,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1288,7 +1288,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1296,7 +1296,7 @@
    "doc": "docs/model_validation/README.md",
    "text": "3,440 / 2,746 / 3,369 / 3,695 / 1,473 / 1,545 quotes, 2026-03-24 → 2026-10-26",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-27/scorecard.json",
     "data_store/surface/2026-05-29/scorecard.json",
@@ -1310,7 +1310,7 @@
    "doc": "docs/model_validation/README.md",
    "text": "on 2026-10-26, 6 deviations from Cboe's rules and 6 notes on the gap",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-10-26/vix_replication.json"
    ]
   },
@@ -1326,7 +1326,7 @@
     "data_store/calibrations/joint_cal_2026-06-18.pkl",
     "data_store/calibrations/joint_cal_2026-10-16.pkl",
     "data_store/calibrations/joint_cal_2026-10-26.pkl",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1335,7 +1335,7 @@
    "within": "| M4 | Out-of-sample SPX IV RMSE",
    "text": ", six v2 sessions |",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   },
   {
@@ -1344,7 +1344,7 @@
    "within": "| M4 | Error in",
    "text": "4.4–15.6 half-spreads; 3.0–12.3% inside, six sessions",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-27/scorecard.json",
     "data_store/surface/2026-05-29/scorecard.json",
@@ -1359,7 +1359,7 @@
    "within": "| M14 | The certified",
    "text": "median 0.45–1.98 half-spreads; 31–80% inside the bid/ask, six sessions (2026-10-26: 1.60, 31.0%)",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-24/surface.json",
     "data_store/surface/2026-03-27/scorecard.json",
@@ -1380,7 +1380,7 @@
    "within": "| M14 | The certified",
    "text": "on the common held-out quotes 0.45–1.98 against Heston's 4.4–15.6",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/scorecard.json",
     "data_store/surface/2026-03-27/scorecard.json",
     "data_store/surface/2026-05-29/scorecard.json",
@@ -1395,7 +1395,7 @@
    "within": "| M14 | Static arbitrage",
    "text": "executable at the bid/ask on all 6 sessions; 114–629 quotes per session",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/2026-03-24/surface.json",
     "data_store/surface/2026-03-27/surface.json",
     "data_store/surface/2026-05-29/surface.json",
@@ -1410,7 +1410,7 @@
    "within": "| M14 | VIX replicated",
    "text": "| 26.66 / 30.27 / 15.02 / 16.49 / 19.70 / 18.05 against 26.95 / 31.05 / 15.32 / 16.40 / 19.99 / 18.39 (",
    "sources": [
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
     "data_store/surface/index.json#session=2026-03-24",
     "data_store/surface/index.json#session=2026-03-27",
     "data_store/surface/index.json#session=2026-05-29",
@@ -1431,7 +1431,7 @@
     "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
     "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
-    "data_store/surface#sessions with a scorecard and a model_version 2 fit, through 2026-10-26"
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
    ]
   }
  ]
