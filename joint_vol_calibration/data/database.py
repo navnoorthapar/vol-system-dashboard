@@ -145,6 +145,13 @@ SESSION_CLOSE = dtime(16, 0)
 # 16:00 bell (SPX options trade to 16:15). A session counts as "closed" for
 # data purposes only from here on.
 CLOSE_DATA_CUTOFF = dtime(16, 15)
+# On an NYSE early close the exchange closes at 13:00 ET and Cboe's SPX
+# options (and the VIX index) trade to 13:15 ET: that session's quotes are
+# left, and its VIX close computed, at 13:15 (close_data_cutoff). The early
+# closes, by the exchange's standing rule (is_early_close): the Friday after
+# Thanksgiving, and July 3 and December 24 when they fall Monday to Thursday
+# (on a Friday each is the observed holiday itself, a closure).
+EARLY_CLOSE_DATA_CUTOFF = dtime(13, 15)
 
 _NYSE_SPECIAL_CLOSURES = (
     "2001-09-11", "2001-09-12", "2001-09-13", "2001-09-14",   # September 11
@@ -218,6 +225,26 @@ def is_nyse_session(d) -> bool:
     """True if ``d`` (any date-like) is an NYSE trading session."""
     ts = _day(d)
     return ts.weekday() < 5 and ts not in _holiday_index()
+
+
+def is_early_close(d) -> bool:
+    """True if ``d`` is an NYSE session that closes early (13:00 ET; SPX
+    options to 13:15): the day after Thanksgiving, or July 3 or December 24
+    on a Monday to Thursday. Checked against the exchange's published early
+    closes in tests/test_data_layer.py."""
+    ts = _day(d)
+    if not is_nyse_session(ts):
+        return False
+    if (ts.month, ts.day) in ((7, 3), (12, 24)):
+        return ts.weekday() <= 3
+    # the Friday after the fourth Thursday of November (the 22nd to the 28th)
+    return ts.month == 11 and ts.weekday() == 4 and 23 <= ts.day <= 29
+
+
+def close_data_cutoff(d) -> dtime:
+    """The instant session ``d``'s quotes are left and its index closes print:
+    16:15 ET (CLOSE_DATA_CUTOFF), or 13:15 ET on an early close."""
+    return EARLY_CLOSE_DATA_CUTOFF if is_early_close(d) else CLOSE_DATA_CUTOFF
 
 
 def previous_session(d) -> str:

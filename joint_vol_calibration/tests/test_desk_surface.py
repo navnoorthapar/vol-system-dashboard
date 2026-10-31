@@ -572,6 +572,17 @@ def test_an_index_on_the_parity_forward_names_the_rate_on_a_cboe_rate_session():
     assert ds.vix_unexplained_causes({**rep, "indices": {}}, ("VIX",)) == every
 
 
+def test_the_cboe_close_time_is_the_records():
+    """Tier 0.5 review: the strip's markers said the Cboe closes print at 16:15
+    ET on every session; on an early close they print at 13:15, as
+    vix_replication.json cboe_close_ny records. A record written before the
+    field reads 16:15 (no stored session is an early close)."""
+    assert ds.cboe_close_hm({"cboe_close_ny": "2026-11-27T13:15"}) == "13:15"
+    assert ds.cboe_close_hm({"cboe_close_ny": "2026-10-30T16:15"}) == "16:15"
+    for rep in ({}, None, {"cboe_close_ny": None}, {"cboe_close_ny": "2026-11-27"}):
+        assert ds.cboe_close_hm(rep) == "16:15"
+
+
 def test_a_closing_books_replication_at_the_close_drops_the_timing_cause():
     """Tier 0.5: a closing Cboe book is calculated at the 16:15 ET close, the
     instant of the Cboe print, so its snapshot timing is no cause of the gap;

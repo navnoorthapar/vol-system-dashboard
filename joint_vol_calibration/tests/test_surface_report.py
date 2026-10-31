@@ -113,6 +113,7 @@ def test_artifacts_and_schema(written):
     # tier 0.5: a chain with no quote time is calculated at its T origin, the 16:00 ET
     # close, and that stays a listed departure
     assert vixd["calculation_time_basis"] == report.CALC_T_ORIGIN
+    assert vixd["cboe_close_ny"] == f"{SESSION}T16:15"           # an ordinary session's 16:15 ET print
     assert vixd["calculation_time_ny"] == f"{SESSION}T16:00"
     assert sum(d.startswith("Calculation time is the session's 16:00 ET close: the chain records no "
                             "quote time (Yahoo)") for d in vixd["deviations"]) == 1
@@ -740,3 +741,37 @@ def test_the_vix_sentence_names_the_rate_when_its_terms_took_the_parity_forward(
     assert not report._headline_at_cboe_rate(ix("parity_forward", par, par))
     assert not report._headline_at_cboe_rate(ix("parity_forward", ss, par))
     assert not report._headline_at_cboe_rate({"headline_method": None, "not_replicated_reason": "..."})
+
+
+def test_a_closing_book_of_an_early_close_is_timed_at_its_1315_close():
+    """Tier 0.5 review: half-day closes were not modelled, so the closing Cboe
+    book of the early close 2026-11-27 (NYSE 13:00 ET, SPX options and the VIX
+    to 13:15) would have been timed at 16:15 ET, three hours after its quotes
+    were left and the Cboe closes printed. It is timed at that session's 13:15
+    cutoff, a book quoted between 13:15 and 16:15 is its closing book, and the
+    record and its notes say 13:15 and that it was an early close."""
+    from types import SimpleNamespace
+
+    def book(session, quote_time):
+        return SimpleNamespace(session=session, inputs={"source": "cboe"},
+                               clean_diagnostics={"quote_time": quote_time})
+    for qt in ("2026-11-28T02:30:00Z", "2026-11-27T19:00:00Z"):        # 21:30 and 14:00 EST
+        sq = book("2026-11-27", qt)
+        calc, basis = report._calc_time_ny(sq)
+        assert (f"{calc:%Y-%m-%dT%H:%M}", basis) == ("2026-11-27T13:15", report.CALC_CLOSING_BOOK_CLOSE), qt
+        assert ("the replication is timed at the 13:15 ET close of 2026-11-27 (an early close), when "
+                "its quotes were left") in report._timing_note(sq, calc, basis)
+        assert report._calc_time_record(sq, calc, basis).startswith(
+            "the session's 13:15 ET close (an early close): the Cboe book is its closing book")
+    assert report._cboe_close_ny("2026-11-27") == "2026-11-27T13:15"
+    # an ordinary Friday's closing book: the 16:15 ET close, no early-close words
+    sq = book("2026-10-30", "2026-10-31T02:30:00Z")
+    calc, basis = report._calc_time_ny(sq)
+    assert (f"{calc:%Y-%m-%dT%H:%M}", basis) == ("2026-10-30T16:15", report.CALC_CLOSING_BOOK_CLOSE)
+    assert "early close" not in report._timing_note(sq, calc, basis)
+    assert report._cboe_close_ny("2026-10-30") == "2026-10-30T16:15"
+    # a live book of the early close is compared with that session's 13:15 ET print
+    sq = book("2026-11-27", "2026-11-27T17:00:00Z")                    # 12:00 EST
+    calc, basis = report._calc_time_ny(sq)
+    assert (f"{calc:%Y-%m-%dT%H:%M}", basis) == ("2026-11-27T12:00", report.CALC_BOOK_QUOTE_TIME)
+    assert "the 13:15 ET print of 2026-11-27 (an early close)" in report._timing_note(sq, calc, basis)

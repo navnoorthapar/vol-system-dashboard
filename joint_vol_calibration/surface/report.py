@@ -49,8 +49,9 @@ vix_replication.json — official closes, the replicated VIX (Cboe rules;
     parity-forward variant; any-weekday bracket) and VIX9D/3M/6M analogues,
     each term with the rate it used (Cboe's CMT spline per term; rate: the
     Treasury par curve it read), the calculation time and its basis (a Cboe
-    book's quote time, a closing book's 16:15 ET close, or the chain's T
-    origin), each index with a gap attribution (wing
+    book's quote time, a closing book's close, or the chain's T origin), the
+    instant the session's Cboe closes print (cboe_close_ny: 16:15 ET, 13:15
+    on an NYSE early close), each index with a gap attribution (wing
     truncation measured on the SVI-cal surface, residual = official -
     replicated - truncation); the
     variance-swap strip by expiry (Cboe single-term formula on the stored
@@ -104,10 +105,11 @@ SCHEMA_VERSION = 1
 #      not one 91-day rate for both terms; the rate departure is listed only
 #      when that curve is missing or stale
 #   5  plan 0.5: a session built from a Cboe book is calculated at the instant
-#      its quotes stand at (the book's quote time; a closing book's 16:15 ET
-#      close), not the chain's T origin, recorded as calculation_time_basis;
-#      that is Cboe's own timing rule, so it is no longer a listed departure,
-#      and its comparison with the 16:15 ET print is a gap note
+#      its quotes stand at (the book's quote time; a closing book's close,
+#      16:15 ET or 13:15 on an early close), not the chain's T origin,
+#      recorded as calculation_time_basis; that is Cboe's own timing rule, so
+#      it is no longer a listed departure, and its comparison with the Cboe
+#      print (cboe_close_ny) is a gap note
 REPORT_VERSION = 5
 SURFACE_DIR = DATA_DIR / "surface"
 
@@ -236,19 +238,20 @@ def _calc_time_ny(sq: sqm.SessionQuotes) -> tuple:
     calculated at the instant its quotes stand at: the book's quote time (the
     delayed feed's payload timestamp less 15 minutes), when the book is live
     then (a Global Trading Hours book trading for the next session, or one
-    quoted before the 16:15 ET data cutoff); for a closing book (quoted after
-    the cutoff and outside the next Global Trading Hours session: weekend and
-    holiday runs) the session's 16:15 ET close, when its quotes were left and
-    the official close is computed, not the later instant the feed showed
-    them at. Not the chain's T origin, which for a closing book is the 16:00
-    ET close the surface measures T from. A chain that records no quote time
+    quoted before the session's data cutoff, 16:15 ET or 13:15 on an early
+    close); for a closing book (quoted after the cutoff and outside the next
+    Global Trading Hours session: weekend and holiday runs) the session's
+    cutoff (database.close_data_cutoff), when its quotes were left and the
+    official close is computed, not the later instant the feed showed them
+    at. Not the chain's T origin, which for a closing book is the 16:00 ET
+    close the surface measures T from. A chain that records no quote time
     (Yahoo) is calculated at its T origin, the session's 16:00 ET close."""
     from joint_vol_calibration.data import cboe_downloader as cd
     qt = sq.clean_diagnostics.get("quote_time")
     if sq.inputs.get("source") == "cboe" and qt:
         at = datetime.fromisoformat(str(qt))
         if cd.book_state_at(at, sq.session) == "closing":
-            return (datetime.combine(date.fromisoformat(sq.session), db.CLOSE_DATA_CUTOFF),
+            return (datetime.combine(date.fromisoformat(sq.session), db.close_data_cutoff(sq.session)),
                     CALC_CLOSING_BOOK_CLOSE)
         return at.astimezone(oc.NY_TZ).replace(tzinfo=None), CALC_BOOK_QUOTE_TIME
     t0 = datetime.fromisoformat(sq.clean_diagnostics["t_origin"])
@@ -400,26 +403,43 @@ def _calc_time_record(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str:
                 f"timestamp less 15 minutes; {inp.get('book_state') or 'book state not recorded'} "
                 "book, live at that instant)")
     if basis == CALC_CLOSING_BOOK_CLOSE:
-        return (f"the session's 16:15 ET close: the Cboe book is its closing book, quoted at "
-                f"{d.get('quote_time')} after the close, its quotes the ones the close left")
+        return (f"the session's {calc:%H:%M} ET close{_early(sq.session)}: the Cboe book is its "
+                f"closing book, quoted at {d.get('quote_time')} after the close, its quotes the ones "
+                "the close left")
     return f"the chain's T origin ({d.get('t_origin_basis') or 'the session close'})"
+
+
+def _cboe_close_ny(session: str) -> str:
+    """vix_replication.json cboe_close_ny: when the session's Cboe closes print
+    (New York, to the minute), its data cutoff: 16:15 ET, 13:15 on an early
+    close (database.close_data_cutoff)."""
+    return datetime.combine(date.fromisoformat(session),
+                            db.close_data_cutoff(session)).isoformat(timespec="minutes")
+
+
+def _early(session: str) -> str:
+    """' (an early close)' for a session that closes early, else ''."""
+    return " (an early close)" if db.is_early_close(session) else ""
 
 
 def _timing_note(sq: sqm.SessionQuotes, calc: datetime, basis: str) -> str | None:
     """The gap note on a Cboe book's timing: the replication follows Cboe's
     rule at the book's instant, and the official close it is set against is
-    the 16:15 ET print (None for a chain with no quote time: that is a
-    departure, _timing_deviation)."""
+    the session's print at its data cutoff, 16:15 ET or 13:15 on an early
+    close (None for a chain with no quote time: that is a departure,
+    _timing_deviation)."""
     if basis == CALC_BOOK_QUOTE_TIME:
         return (f"The replication is timed at the book's quote time, {calc:%Y-%m-%d %H:%M} ET, as "
                 "Cboe times a calculation on the quotes standing then; the Cboe close it is "
-                f"compared with is the 16:15 ET print of {sq.session}, so the gap includes the "
-                "market's move between the two instants.")
+                f"compared with is the {db.close_data_cutoff(sq.session):%H:%M} ET print of "
+                f"{sq.session}{_early(sq.session)}, so the gap includes the market's move between "
+                "the two instants.")
     if basis == CALC_CLOSING_BOOK_CLOSE:
         quoted = datetime.fromisoformat(str(sq.clean_diagnostics.get("quote_time"))).astimezone(oc.NY_TZ)
         return (f"The book is the session's closing book, quoted at {quoted:%Y-%m-%d %H:%M} ET after "
-                f"the close: the replication is timed at the 16:15 ET close of {sq.session}, when its "
-                "quotes were left, the instant the Cboe close it is compared with is computed.")
+                f"the close: the replication is timed at the {calc:%H:%M} ET close of {sq.session}"
+                f"{_early(sq.session)}, when its quotes were left, the instant the Cboe close it is "
+                "compared with is computed.")
     return None
 
 
@@ -795,6 +815,8 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
             "schema_version": SCHEMA_VERSION, "report_version": REPORT_VERSION, "session": session,
             "calculation_time_ny": calc.isoformat(timespec="minutes"),
             "calculation_time_basis": calc_basis,
+            # when the session's Cboe closes print: its data cutoff (13:15 ET on an early close)
+            "cboe_close_ny": _cboe_close_ny(session),
             "calculation_time_source": _calc_time_record(sq, calc, calc_basis),
             "rate": rate_doc,
             "indices": indices, "strip": strip, "beta": beta,

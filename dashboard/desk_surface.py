@@ -463,10 +463,21 @@ def vix_unexplained_causes(vix_rep: Mapping | None, tickers: Iterable[str] | Non
     return [*([] if at_close else [CAUSE_TIMING]), CAUSE_STALE, *([] if cboe_rate else [CAUSE_RATE])]
 
 
+def cboe_close_hm(vix_rep: Mapping | None) -> str:
+    """The New York time ('16:15') the session's Cboe closes print, from
+    vix_replication.json cboe_close_ny: the session's data cutoff, 13:15 on an
+    NYSE early close. An artifact that does not record it was written before
+    any early close was stored and printed at 16:15."""
+    rec = str((vix_rep or {}).get("cboe_close_ny") or "")
+    hm = rec.partition("T")[2][:5]
+    return hm if len(hm) == 5 and hm[2] == ":" else "16:15"
+
+
 def vix_calc_time_words(vix_rep: Mapping | None) -> str | None:
     """What the replication's calculation time is, in the page's words, from
     vix_replication.json calculation_time_basis: a Cboe book's quote time, or
-    the 16:15 ET close a closing book's quotes were left at. None for a chain
+    the close a closing book's quotes were left at (16:15 ET, 13:15 on an
+    early close). None for a chain
     with no quote time (its timing is a listed departure) and for an artifact
     written before report_version 5."""
     return CALC_BASIS_WORDS.get(str((vix_rep or {}).get("calculation_time_basis")))

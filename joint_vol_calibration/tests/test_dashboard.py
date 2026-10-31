@@ -6345,7 +6345,11 @@ def test_atm_term_forward_steps_and_a_calendar_flag_marker(dash, pages):
 def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     html = pages["/surface"]
     spec = _spec(html, "chart-strip")
-    mk = [s for s in spec["series"] if s["name"].startswith("Cboe close (16:15 ET)")]
+    # the closes print at the session's cutoff as the record states it: 13:15 ET on an NYSE
+    # early close; 16:15 for a record written before it said
+    rec = json.loads(_surface_file("vix_replication.json").read_text()).get("cboe_close_ny")
+    hm = rec[11:16] if rec else "16:15"
+    mk = [s for s in spec["series"] if s["name"].startswith(f"Cboe close ({hm} ET)")]
     assert len(mk) == 1
     assert mk[0]["type"] == "scatter"
     assert mk[0].get("hollow") is True
@@ -6356,6 +6360,7 @@ def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     legend = {it["name"] for it in spec["legend_items"]}
     assert {"Variance-swap vol (Cboe formula)", mk[0]["name"]} <= legend
     assert re.search(r'id="vix-markers">', html)
+    assert f"Hollow circles: the Cboe closes ({hm} ET" in _visible_text(html)
 
 
 

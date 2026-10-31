@@ -799,6 +799,31 @@ class TestRecomputeAudit:
         assert M.replication_instant(yahoo, "2026-10-16") == ("2026-10-16T16:00", "chain_t_origin")
         assert M.replication_instant({"source": "yfinance"}, "2026-10-16") is None
 
+    def test_its_calendar_times_an_early_closes_closing_book_at_1315(self, monkeypatch):
+        """Tier 0.5 review: on an NYSE early close SPX options and the VIX close at
+        13:15 ET. The audit's own calendar holds the exchange's published early
+        closes; a closing book of 2026-11-27 (or one quoted between 13:15 and 16:15)
+        is calculated at 13:15, and the Cboe closes print then."""
+        import datetime as dt
+        import importlib
+        rc = _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        published = {
+            "2018-07-03", "2018-11-23", "2018-12-24", "2019-07-03", "2019-11-29", "2019-12-24",
+            "2020-11-27", "2020-12-24", "2021-11-26", "2022-11-25", "2023-07-03", "2023-11-24",
+            "2024-07-03", "2024-11-29", "2024-12-24", "2025-07-03", "2025-11-28", "2025-12-24",
+            "2026-11-27", "2026-12-24"}
+        assert {str(d) for y in range(2018, 2027) for d in rc.data.nyse_early_closes(y)} == published
+        cboe = {"source": "cboe", "t_origin": "2026-11-27T16:00:00-05:00"}
+        cases = {"2026-11-28T02:30:00Z": ("2026-11-27T13:15", "closing_book_close"),   # Fri 21:30 EST
+                 "2026-11-27T19:00:00Z": ("2026-11-27T13:15", "closing_book_close"),   # 14:00, after 13:15
+                 "2026-11-27T17:00:00Z": ("2026-11-27T12:00", "book_quote_time"),      # 12:00, live
+                 "2026-11-30T02:00:00Z": ("2026-11-29T21:00", "book_quote_time")}      # Sun 21:00, GTH
+        for qt, want in cases.items():
+            assert M.replication_instant({**cboe, "quote_time": qt}, "2026-11-27") == want, qt
+        assert M.cboe_close_time("2026-11-27") == dt.time(13, 15)
+        assert M.cboe_close_time("2026-10-30") == dt.time(16, 15)
+
     def test_ci_runs_it_on_the_rendered_site(self):
         wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
         step = wf[wf.index("- name: Recompute audit"):]

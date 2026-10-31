@@ -1632,7 +1632,8 @@ def vix_timing(a: Audit, c: Ctx) -> str | None:
     """The basis of the replication's calculation time as the record states it, checked
     with the time, where the record states a basis (report_version 5 on), against the
     instant rebuilt from surface.json's record of the chain (M.replication_instant): a
-    Cboe book's quote time while its quotes are live, a closing book's 16:15 ET close."""
+    Cboe book's quote time while its quotes are live, a closing book's close (16:15 ET,
+    13:15 on an NYSE early close)."""
     basis = c.vx.get("calculation_time_basis")
     if basis is not None:
         own = M.replication_instant(c.sj.get("inputs") or {}, c.session)
@@ -1690,7 +1691,7 @@ def vix_rates(a: Audit, c: Ctx) -> set[str]:
 
 def vix_causes(basis: str | None, at_cboe_rate: set[str], tickers: Iterable[str]) -> list[str]:
     """What the unexplained part of the gaps of ``tickers`` can come from: the snapshot's
-    timing unless the replication is calculated at the 16:15 ET close (``basis``,
+    timing unless the replication is calculated at the session's close (``basis``,
     vix_timing), stale quotes, and the rate unless every one of them was discounted at
     Cboe's (vix_rates)."""
     timing = [] if basis == "closing_book_close" else [CAUSE_TIMING]
@@ -1867,8 +1868,10 @@ def varswap(a: Audit, c: Ctx) -> None:
            points("var_swap_vol"))
     approx(a, P_VS, "chart-strip series ATM vol", series(sp, "ATM vol (quotes)"), points("atm_vol_quotes"))
     names = ["Variance-swap vol (Cboe formula)", "ATM vol (quotes)"]
+    # the Cboe closes print at the session's data cutoff: 13:15 ET on an NYSE early close
+    close = M.cboe_close_time(c.session)
     if marks:
-        name = "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M"
+        name = f"Cboe close ({close:%H:%M} ET): VIX9D, VIX, VIX3M, VIX6M"
         approx(a, P_VS, "chart-strip Cboe close markers (DB)", series(sp, name),
                [[d, v] for _, d, v in marks])
         names.append(name)
@@ -1881,8 +1884,10 @@ def varswap(a: Audit, c: Ctx) -> None:
         words = CALC_WORDS.get(str(c.vx.get("calculation_time_basis")))   # checked by vix_timing
         timed = (f"; the replication is timed {str(ct).replace('T', ' ')} ET"
                  + (f", {words}" if words else "") if ct else "")
-        a.text(P_VS, "Cboe close time and the replication's", note, f"(16:15 ET{timed})", contains=True)
-        want = [16, 15, *(v for v, _, _ in numbers_in(timed)), *(x for _, d, v in marks for x in (v, d))]
+        a.text(P_VS, "Cboe close time (the session's cutoff) and the replication's", note,
+               f"({close:%H:%M} ET{timed})", contains=True)
+        want = [close.hour, close.minute, *(v for v, _, _ in numbers_in(timed)),
+                *(x for _, d, v in marks for x in (v, d))]
         nums(a, P_VS, "Cboe closes (DB) at their constant maturities, calculation time", note, want,
              [m.group(0) for m in DATE.finditer(timed)])
     statics(a, P_VS, "skew-premium note", next((p for p in a.soup.select("#varswap p.note")

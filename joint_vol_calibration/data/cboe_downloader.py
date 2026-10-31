@@ -752,7 +752,8 @@ def book_state_at(at: datetime, session: str | None) -> str:
     Pass the instant the quotes show (a delayed feed's quote_time, see
     delayed_quote_time), not the fetch time.
 
-    'intraday'  09:30 ET to the 16:15 data cutoff of ``session`` itself
+    'intraday'  09:30 ET to the data cutoff of ``session`` itself (16:15 ET;
+                13:15 on an early close, database.close_data_cutoff)
     'gth'       inside the Global Trading Hours window (20:15 ET the evening
                 before, to 09:15 ET) of the session AFTER ``session``: these
                 quotes trade for the next session (option_chain.t_origin
@@ -765,7 +766,8 @@ def book_state_at(at: datetime, session: str | None) -> str:
     if session is None:
         return "closing"
     ny = db._now_ny(at)
-    if db.is_intraday(at) and ny.date().isoformat() == session:
+    if (ny.date().isoformat() == session and db.is_nyse_session(ny.date())
+            and db.SESSION_OPEN <= ny.time() < db.close_data_cutoff(ny.date())):
         return "intraday"
     nxt = oc.next_session(session)
     lo, hi = oc.gth_window(nxt)

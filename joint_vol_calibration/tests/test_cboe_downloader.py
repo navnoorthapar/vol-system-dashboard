@@ -513,6 +513,19 @@ def test_book_state(utc, state):
     assert cb.book_state_at(when, "2026-10-09") == state
 
 
+@pytest.mark.parametrize(("utc", "state"), [
+    ("2026-11-27T17:00:00Z", "intraday"),      # Fri 12:00 EST, the day after Thanksgiving
+    ("2026-11-27T18:10:00Z", "intraday"),      # 13:10, before the early close's 13:15 cutoff
+    ("2026-11-27T18:20:00Z", "closing"),       # 13:20: the early close's quotes are left
+    ("2026-11-27T20:00:00Z", "closing"),       # 15:00, intraday on an ordinary Friday
+    ("2026-11-28T02:30:00Z", "closing"),       # 21:30, the bot's book slot
+])
+def test_book_state_on_an_early_close(utc, state):
+    """Tier 0.5 review: on an NYSE early close SPX options trade to 13:15 ET; a
+    book quoted after that is the session's closing book, not a live one."""
+    assert cb.book_state_at(datetime.fromisoformat(utc), "2026-11-27") == state
+
+
 def test_book_state_gth_agrees_with_the_calibrators_t_origin():
     """The capture's 'gth' label and option_chain.t_origin (which measures T
     from the quote time for a GTH book) must classify every instant alike."""
