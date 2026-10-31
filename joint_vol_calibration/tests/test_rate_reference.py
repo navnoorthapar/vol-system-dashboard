@@ -140,12 +140,17 @@ def test_recorded_inputs_of_curve_and_argument_fits():
     assert jc.recorded_inputs(arg) == {"vix_targets": {"^VIX": 20.0}, "r": 0.031}
 
 
-def test_recorded_inputs_rebuild_a_fit_on_the_quote_time_it_recorded():
+def test_recorded_inputs_rebuild_a_fit_on_the_quote_time_it_recorded(tmp_path, monkeypatch):
     """QUANT-01: the cleaner no longer reads a Yahoo chain's stored time as a
     quote time (it is the download instant). A fit that measured T from a
     recorded quote time (the bot's 2026-10-26 fit did, from its Yahoo
     download instant) is rebuilt on that time, so its reproduction and its
-    diagnostics refit the objective it was fitted on."""
+    diagnostics refit the objective it was fitted on.
+
+    The fits are rebuilt on the committed record, as the bot's run does: the
+    git-tracked SQLite cache is never committed by the bot and lags it, so on
+    the cache alone a 2026-10-27 chain was matched to the 2026-10-26 session
+    and its T measured from the wrong close."""
     vix = [{"ticker": "^VIX", "market": 20.0}]
     gth = {"vix_index": vix, "chain_diagnostics": {"quote_time": "2026-10-27T05:26:50Z",
                                                    "t_origin_basis": "quote_time (Cboe GTH book)"}}
@@ -157,8 +162,14 @@ def test_recorded_inputs_rebuild_a_fit_on_the_quote_time_it_recorded():
 
     import pandas as pd
 
+    import shutil
+
     from joint_vol_calibration.config import DATA_DIR
     from joint_vol_calibration.data import database as db
+    copy = tmp_path / "vol_system.db"
+    shutil.copy2(db.DB_PATH, copy)
+    monkeypatch.setattr(db, "DB_PATH", copy)
+    db.import_market_partitions(DATA_DIR / "market")
     for path in sorted((DATA_DIR / "calibrations").glob("joint_cal_*.pkl")):
         with open(path, "rb") as f:
             ref = pickle.load(f)
