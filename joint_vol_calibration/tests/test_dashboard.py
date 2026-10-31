@@ -3319,6 +3319,30 @@ def test_surface_key_result_shows_its_range_caveat(dash, pages):
     assert 'class="kpi-ci kpi-range"' in pages["/"]
 
 
+def test_a_calibration_smile_without_quotes_says_why_and_keeps_its_own_height(dash, monkeypatch):
+    """A simulated next session fitted an expiry its surface held no quotes for: that
+    smile panel drew the Heston line alone, with no legend or note, and its row
+    stretched it 108-157 px below its content (interact.mjs). It now says why it
+    has no quotes, and the smile grid aligns its panels to the top."""
+    first = dash.load_page2()["anchors_by_expiry"][0]["expiry"]
+    real = dash.artifacts.load_surface
+
+    def without_first_anchor(data, session):
+        surf = real(data, session)
+        if surf.get("state") != "ok":
+            return surf
+        res = surf["residuals"]
+        assert (res["expiry"] == first).any(), "the fit's first anchor expiry has no quotes already"
+        return {**surf, "residuals": res[res["expiry"] != first]}
+    monkeypatch.setattr(dash.artifacts, "load_surface", without_first_anchor)
+    html = dash.app.test_client().get("/calibration").get_data(as_text=True)
+    panel = re.search(rf'<section[^>]*id="smile-{first}".*?</section>', html, re.DOTALL).group(0)
+    why = "has no quotes at this expiry; the line is the Heston smile alone."
+    assert why in _visible_text("<body>" + panel)
+    grid = html[html.rfind('<div class="g', 0, html.index(f'id="smile-{first}"')):]
+    assert re.match(r'<div class="g evenfill top"', grid)
+
+
 def test_calibration_smile_anchors_stand_apart_from_the_out_of_sample_mids(dash, pages):
     """UI-12: the 9 fit anchors were filled dots the colour of 338 hollow mids,
     and both legend swatches were the same white dot."""

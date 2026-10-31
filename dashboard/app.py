@@ -3679,7 +3679,12 @@ def calibration_extras(d: dict, cal: dict) -> None:
                            "data": [[k, v * 100] for k, v in zip(sm["lm"], sm["iv"])]})
             tbl_rows = [[_fmt(k, "+.3f"), _fmt(v * 100, ".2f")] for k, v in zip(sm["lm"], sm["iv"])]
             source = "model"
-            note = None
+            # say why: a panel without quotes, its legend or a note sat short of
+            # its row and read as broken
+            note = (f"The {session} surface has no quotes at this expiry; the line is the Heston smile alone"
+                    if res is not None else
+                    f"No {session} surface to read quotes from; the line is the Heston smile alone")
+            note_short = "No quotes at this expiry: the Heston smile alone"
             k_rng = (float(min(sm["lm"])), float(max(sm["lm"])))
             y_rng = (float(min(sm["iv"])) * 100.0, float(max(sm["iv"])) * 100.0)
             badge = None

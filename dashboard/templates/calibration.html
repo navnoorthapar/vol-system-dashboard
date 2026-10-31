@@ -192,7 +192,7 @@
 </div>
 {{ m.data_table(sg.table, 'smile-group-data') }}
 {% endif %}
-<div class="g evenfill" style="margin-top:8px;">
+<div class="g evenfill top" style="margin-top:8px;">
   {% for s in d.smiles %}
   {% call m.panel('smile-' ~ s.expiry, s.expiry ~ ' · ' ~ (s.T_days|fmt('.0f')) ~ ' d', 's4', (s.badge if sg and s.badge else (((s.n|fmt) ~ ' anchors') if s.n else None))) %}
     {{ m.chart(s.spec, 'h300', tools=not sg) }}
