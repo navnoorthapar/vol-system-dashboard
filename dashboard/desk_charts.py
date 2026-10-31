@@ -36,7 +36,12 @@ packed block of desk_quotes.encode}, source, strip, models}; a series with
 no data: it is that field of its group's quotes (desk_quotes.series_data). The
 block is kept at full precision (round_sig would move the forward by up to
 5·10⁻⁶ of itself, and the forward delta with it); ``strip`` series ('z',
-'zfit') draw in the residual strip under the smile.
+'zfit') draw in the residual strip under the smile. A book smile (Surface, D2)
+holds ``quotes.template`` = True, its series one dateless set that desk.js fills
+with the shown expiry, ``quotes.order`` (every expiry), the default expiry's
+block inline and the rest in a session data file (``quotes.src``,
+``quotes.integrity``: app.publish_json); ``resolve`` given that file expands the
+template into one dated set per expiry, as the inline form holds them.
 """
 from __future__ import annotations
 
@@ -119,9 +124,10 @@ def expand_dates(c: Mapping) -> list[str]:
     return out
 
 
-def resolve(spec: dict, others: Mapping[str, dict] | None = None) -> dict:
+def resolve(spec: dict, others: Mapping[str, dict] | None = None, book: Mapping | None = None) -> dict:
     """The spec as desk.js draws it: compact x values expanded, shared x values and
-    derived series filled in (``others``: the page's other specs by chart id)."""
+    derived series filled in (``others``: the page's other specs by chart id); a book
+    smile with its session data file (``book``) as one set of series per expiry."""
     out = copy.deepcopy(spec)
     others = others or {}
     if "xsDates" in out:
@@ -137,12 +143,18 @@ def resolve(spec: dict, others: Mapping[str, dict] | None = None) -> dict:
         a, b, k, n = by[d["a"]], (by[d["b"]] if d.get("b") else None), d.get("k", 1), d.get("digits", 2)
         s["data"] = [None if (v is None or (b is not None and b[i] is None))
                      else round(k * v - (b[i] if b is not None else 0), n) for i, v in enumerate(a)]
-    groups = (out.get("quotes") or {}).get("groups") or {}
+    q = out.get("quotes") or {}
+    if q.get("template") and book is not None:
+        q["groups"] = {g: book["quotes"]["groups"][g] for g in q["order"]}
+        out["series"] = [{**s, "name": f"{g} {s['name']}", "group": g}
+                         for g in q["order"] for s in out.get("series") or []]
+    groups = q.get("groups") or {}
     if groups:
         dec = {g: desk_quotes.decode(b) for g, b in groups.items()}
         for s in out.get("series") or []:
-            if s.get("quote"):
-                s["data"] = desk_quotes.series_data(dec[str(s["group"])], s["quote"], s.get("model"))
+            if s.get("quote"):      # a template without its file: the inline expiry, as first drawn
+                s["data"] = desk_quotes.series_data(dec[str(s.get("group", next(iter(dec))))], s["quote"],
+                                                    s.get("model"))
     return out
 
 

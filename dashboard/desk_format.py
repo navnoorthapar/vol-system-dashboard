@@ -258,20 +258,47 @@ def ramp(stops: Iterable[str], t: float) -> str:
     return "#" + "".join(f"{round(x + (y - x) * f):02x}" for x, y in zip(a, b))
 
 
+# A heatmap cell's colour is one of HEAT_STEPS + 1 steps of its ramp (0.5% of the
+# scale apart), each a desk.css class with its text colour (D2: an inline style on
+# every cell was 35 B, 100 KB of a 45-expiry Surface page)
+HEAT_STEPS = 100
+
+
+def _step(t: float) -> float:
+    return round(min(max(float(t), 0.0), 1.0) * HEAT_STEPS) / HEAT_STEPS
+
+
 def seq_colour(value: Any, lo: float, hi: float) -> str | None:
-    """Cividis colour of `value` on [lo, hi] (None when the value is missing)."""
+    """Cividis colour of `value` on [lo, hi], to the step (None when it is missing)."""
     x = _num(value)
     if x is None:
         return None
-    return ramp(CIVIDIS_11, 0.5 if hi <= lo else (x - lo) / (hi - lo))
+    return ramp(CIVIDIS_11, _step(0.5 if hi <= lo else (x - lo) / (hi - lo)))
 
 
 def div_colour(value: Any, limit: float) -> str | None:
-    """DIVERGE_11 colour of a signed value, symmetric on [−limit, +limit], dark at 0."""
+    """DIVERGE_11 colour of a signed value, symmetric on [−limit, +limit], dark at 0, to the step."""
     x = _num(value)
     if x is None or limit <= 0:
         return None
-    return ramp(DIVERGE_11, 0.5 + 0.5 * max(-1.0, min(1.0, x / limit)))
+    return ramp(DIVERGE_11, _step(0.5 + 0.5 * max(-1.0, min(1.0, x / limit))))
+
+
+# each step's class: q0 … q100 on cividis, d0 … d100 on the diverging ramp (d50: zero)
+HEAT_CLASSES: dict[str, str] = {
+    **{ramp(CIVIDIS_11, i / HEAT_STEPS): f"q{i}" for i in range(HEAT_STEPS + 1)},
+    **{ramp(DIVERGE_11, i / HEAT_STEPS): f"d{i}" for i in range(HEAT_STEPS + 1)}}
+
+
+def heat_class_css() -> str:
+    """The desk.css block of HEAT_CLASSES (dashboard/heat_css.py writes it): each
+    class's background, then the classes whose text is white (_text_colour_on; a
+    heatmap or delta-grid cell's is black otherwise: desk.css .heat td, .dgrid td.t)."""
+    by = {c: bg for bg, c in HEAT_CLASSES.items()}
+    names = sorted(by, key=lambda c: (c[0] == "d", int(c[1:])))
+    white = [c for c in names if _text_colour_on(by[c]) == "#ffffff"]
+    return ("".join(f".{c}{{background:{by[c]}}}" for c in names)
+            + f"\n:is(.heat,.dgrid) td:is({','.join('.' + c for c in white)}){{color:#fff}}\n")
 
 
 # Greeks heatmap: the vomma P&L ratio from 0 to its flag threshold, on the
@@ -295,8 +322,8 @@ def cell(value_text: str, bg: str | None, detail: str = "", flag: bool = False,
     """One heatmap cell: text, colours (text colour chosen for contrast) and detail."""
     if bg is None:
         return {"empty": True, "text": value_text or "—", "detail": detail, "sr": sr}
-    return {"text": value_text, "bg": bg, "fg": _text_colour_on(bg), "detail": detail,
-            "flag": flag, "sr": sr}
+    return {"text": value_text, "bg": bg, "fg": _text_colour_on(bg), "cls": HEAT_CLASSES.get(bg),
+            "detail": detail, "flag": flag, "sr": sr}
 
 
 # ── JSON payloads ─────────────────────────────────────────────────────────────

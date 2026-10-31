@@ -27,7 +27,7 @@ from bs4 import Tag
 
 from . import surface_math as M
 from .chrome import labels as regime_labels
-from .core import DATE, Audit, Check, norm, numbers_in, rounds_to, text_of
+from .core import DATE, NUM, Audit, Check, norm, numbers_in, rounds_to, text_of
 from .data import Store, chain_words, sessions_between
 
 STALE_WARN = 2                      # the page's amber banner from this age (NYSE sessions) on
@@ -185,6 +185,12 @@ def chart_table(a: Audit, cid: str) -> Tag | None:
 
 def chart_group(a: Audit, cid: str, group: str) -> Tag | None:
     return a.one(f'div#{cid}-data div.chart-data-group[data-group="{group}"] > table')
+
+
+def group_rows(a: Audit, cid: str, group: str) -> tuple[Tag | None, Tag | None]:
+    """A one-table group (the smile's expiries, D2): its row-group header and its tbody."""
+    tb = a.one(f'div#{cid}-data div.chart-groups > table > tbody[data-group="{group}"]')
+    return (tb.select_one(':scope > tr > th[scope="rowgroup"]') if tb is not None else None), tb
 
 
 def spec(a: Audit, sid: str) -> dict | None:
@@ -1091,11 +1097,19 @@ def certified_slices(a: Audit, c: Ctx, tr_: list[dict]) -> None:
 P_IV, P_RES = "#iv-heat", "#residuals"
 
 
+# a heatmap cell's readout: its numbers in the session data file, this template (app.HEAT_DETAIL_*)
+HEAT_DETAIL_IV = "mid IV {0:2}% (median of {1}) · half-spread {2:2} vol pts"
+HEAT_DETAIL_RESID = "{0:+2} half-spreads (median of {1}) · {2:0}% inside"
+EMPTY_CELL = "a dot: no quotes in the bucket"
+
+
 def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, what: str,
               value: Callable[[pd.DataFrame], float],
-              detail: Callable[[pd.DataFrame, float], list[float]]) -> list[float]:
+              detail: Callable[[pd.DataFrame, float], list[float]], template: str) -> list[float]:
     """A bucket heatmap: column heads, one row per expiry, each cell the value of its
-    quotes (or empty), with its detail; returns the cell values."""
+    quotes (or empty: blank, the caption saying what that means), and its readout's
+    numbers, read from the session's data file (D2) and verified (Audit.data_file),
+    each at the decimals its template prints; returns the cell values."""
     hd = heads(tbl)
     texts(a, panel, f"{what} column heads", hd[1:], [M.bucket_label(b, True) for b in c.used])
     trs = rows(tbl)
@@ -1103,26 +1117,46 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
     qb = q.assign(kb=M.bucket(q["k"]))
     if not same_len(a, panel, f"{what} rows", trs, c.exps):
         return out
-    for tr, (e, T) in zip(trs, c.exps.items()):
+    src = tbl.get("data-src") if tbl is not None else None
+    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None) or {}
+    a.equal(panel, f"{what} data file: this session", tbl.get("data-session") if tbl is not None else None,
+            c.session)
+    heat = (book.get("heat") or {}).get(tbl.get("id") if tbl is not None else "") or {}
+    a.equal(panel, f"{what} readout template", heat.get("detail"), template)
+    a.text(panel, f"{what} caption: empty cells", tbl.find("caption") if tbl is not None else None,
+           EMPTY_CELL, contains=True)
+    fcells = heat.get("cells") or []
+    decs = [int(x[-1]) if x else None for x in re.findall(r"\{\d(?::(\+?\d))?\}", template)]
+    bad: dict[str, list[str]] = {}
+    if not same_len(a, panel, f"{what} data file rows", fcells, c.exps):
+        fcells = [[]] * len(trs)
+    for tr, frow, (e, T) in zip(trs, fcells, c.exps.items()):
         a.equal(panel, f"{what} {e} data-exp", tr.get("data-exp"), e)
         days_nums(a, panel, f"{what} {e} row head (median T_days)", tr.find("th"), [T], [e])
         td = tds(tr)
         if not same_len(a, panel, f"{what} {e} cells", td, c.used):
             continue
-        for t, b in zip(td, c.used):
+        for i, (t, b) in enumerate(zip(td, c.used)):
             g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
             lab = f"{what} {e} {M.bucket_label(b, True)}"
+            fv = frow[i] if i < len(frow) else "missing"
             if g.empty:
-                a.equal(panel, f"{lab} empty", "empty" in (t.get("class") or []), True)
-                a.text(panel, f"{lab} empty-cell detail", t.select_one(".sr-only"),
-                       f"{e} · ln(K/F) {M.bucket_label(b, False)}: no quotes")
-                a.equal(panel, f"{lab} data-detail", t.get("data-detail"),
-                        f"{e} · ln(K/F) {M.bucket_label(b, False)}: no quotes")
+                a.equal(panel, f"{lab} empty: blank, no numbers in the file",
+                        ["empty" in (t.get("class") or []), text_of(t), fv], [True, "", None])
                 continue
             v = value(g)
             out.append(v)
             a.num(panel, lab, t, v)
-            text_nums(a, panel, f"{lab} detail", str(t.get("data-detail") or ""), detail(g, v))
+            want = detail(g, v)
+            if not (isinstance(fv, list) and len(fv) == len(want)):
+                bad.setdefault("cell's numbers", []).append(f"{e} {M.bucket_label(b, True)}")
+                continue
+            for j, (x, w, dec) in enumerate(zip(fv, want, decs)):
+                if not spec_ok(x, w, FULL_SIG, dec):
+                    bad.setdefault(f"number {j + 1}", []).append(f"{e} {M.bucket_label(b, True)}: {x} vs {w}")
+    for name in ["cell's numbers", *(f"number {j + 1}" for j in range(len(decs)))]:
+        a.equal(panel, f"{what} readout {name} (data file) = recompute, every cell",
+                bad.get(name, [])[:3], [])
     return out
 
 
@@ -1131,7 +1165,7 @@ def iv_heat(a: Audit, c: Ctx) -> None:
     nums(a, P_IV, "panel meta (quotes)", meta(a, "iv-heat"), [len(c.mkt)])
     vals = heat_rows(a, P_IV, a.one("#iv-heatmap"), c, c.mkt, "mid IV",
                      lambda g: float(g["mid_iv"].median() * 100),
-                     lambda g, v: [v, len(g), float(g["half_spread_vp"].median())])
+                     lambda g, v: [v, len(g), float(g["half_spread_vp"].median())], HEAT_DETAIL_IV)
     if vals:
         nums(a, P_IV, "colour ramp lo/hi (cells shown)", a.one("#iv-heat .ramp"), [min(vals), max(vals)])
     note = a.one("#iv-heat p.note")
@@ -1150,7 +1184,8 @@ def iv_heat(a: Audit, c: Ctx) -> None:
 def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
     """The 3D view: one point per expiry and bucket at the bucket's midpoint (an open
     wing at its quotes' median k), the expiry's T_days and the cell's median mid IV;
-    shown from 9 filled cells."""
+    shown from 9 filled cells. Its points are in the session's data file (D2), read
+    and verified (Audit.data_file); the spec holds the colour scale."""
     sp = spec(a, "surface3d-spec")
     qb = c.mkt.assign(kb=M.bucket(c.mkt["k"]))
     x3 = {b: ((M.K_EDGES[b - 1] + M.K_EDGES[b]) / 2 if 0 < b < M.N_BUCKETS - 1 else
@@ -1164,7 +1199,11 @@ def surface_3d(a: Audit, c: Ctx, vals: list[float]) -> None:
             sum(1 for p in pts if p[2] is not None) >= 9)
     if sp is None:
         return
-    got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3 for p in sp.get("points") or []]
+    a.equal(P_IV, "3D view: points in the session data file, not the page",
+            ["points" in sp, sp.get("session")], [False, c.session])
+    book = a.data_file(P_IV, sp.get("src"), sp.get("integrity")) or {}
+    got = [p if isinstance(p, list) and len(p) == 3 else [None] * 3
+           for p in (book.get("surface3d") or {}).get("points") or []]
     if same_len(a, P_IV, "3D view points", got, pts):
         for i, (what, dec) in enumerate((("bucket x (4 decimals)", 4), ("T_days", None),
                                          ("median mid IV % (3 decimals)", 3))):
@@ -1184,7 +1223,8 @@ def residual_heat(a: Audit, c: Ctx) -> None:
         nums(a, P_RES, f"{M.label(m)} caption (out-of-sample quotes; |value| ≤ 1)", cap, [len(q), 1])
         heat_rows(a, P_RES, a.one(f"#resid-heat-{m}"), c, q, M.label(m),
                   lambda g: float(g["error_hs"].median()),
-                  lambda g, v: [v, len(g), float(g["inside_spread"].astype(bool).mean() * 100)])
+                  lambda g, v: [v, len(g), float(g["inside_spread"].astype(bool).mean() * 100)],
+                  HEAT_DETAIL_RESID)
     for r in a.soup.select("#residuals .ramp"):
         statics(a, P_RES, "colour ramp ±5 half-spreads, 0 at mid", r, [-RESID_RAMP, RESID_RAMP, 0])
 
@@ -1217,32 +1257,74 @@ def residual_table(a: Audit, c: Ctx) -> None:
 
 # ── smile slices ──────────────────────────────────────────────────────────────
 P_SL = "#slices"
+MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def settlements(mkt: pd.DataFrame) -> dict[str, str]:
+    """{expiry: 'AM' | 'PM'} read off the OCC root of its lines (SPX: the opening
+    SOQ; SPXW: the close); none without a root column or where an expiry's lines mix."""
+    if "root" not in mkt.columns:
+        return {}
+    out: dict[str, str] = {}
+    for e, roots in mkt.groupby("expiry")["root"]:
+        st = {{"SPX": "AM", "SPXW": "PM"}.get(str(r).strip().upper()) for r in roots.unique()}
+        if len(st) == 1 and None not in st:
+            out[str(e)] = str(st.pop())
+    return out
+
+
+def masked(txt: str) -> str:
+    """A text's wording with its dates as 'D' and its numbers as '#' (checked apart)."""
+    return NUM.sub("#", DATE.sub("D", txt))
 
 
 def slices_panel(a: Audit, c: Ctx) -> None:
-    """Tabs, quotes and median half-spread per expiry, and each expiry's bucket table of
-    bid / mid / ask and every model's median IV; the packed quotes against the table."""
+    """Tabs (date, days, AM / PM from the OCC root, month boundaries), the selected
+    expiry's status line, the forward, quotes and median half-spread per expiry, and
+    each expiry's bucket table of bid / mid / ask and every model's median IV; the
+    packed quotes against the table."""
     tabs = a.soup.select('#slices [role="tab"]')
     a.equal(P_SL, "expiry tabs", [t.get("data-value") for t in tabs], list(c.exps))
     default = min(c.exps.items(), key=lambda kv: abs(kv[1] - M.CM_TENORS[0][0]))[0] if c.exps else None
     a.equal(P_SL, "selected tab: the expiry nearest 30 days",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [default])
+    settle = settlements(c.mkt)
     for t, (e, T) in zip(tabs, c.exps.items()):
-        days_nums(a, P_SL, f"tab {e} days", t, [T])
+        st = settle.get(e)
+        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)),
+                f"{MONTH_ABBR[int(e[5:7]) - 1]} # · #d" + (f" · {st}" if st else ""))
+        days_nums(a, P_SL, f"tab {e}: day of the month, days", t, [float(int(e[8:10])), T])
+        a.equal(P_SL, f"tab {e}: settlement (OCC root)", t.get("data-settle"), st)
+    a.equal(P_SL, "tabs opening a month (.mo)",
+            [t.get("data-value") for t in tabs if "mo" in (t.get("class") or [])],
+            [e for e, prev in zip(list(c.exps)[1:], list(c.exps)) if e[:7] != prev[:7]])
     hs = c.mkt.groupby("expiry")["half_spread_vp"].median()
+    fwd = c.mkt.groupby("expiry")["forward"].first()
+    n_q = c.mkt.groupby("expiry").size()
     trs = rows(chart_table(a, "chart-slices"))
     if same_len(a, P_SL, "quotes per expiry rows", trs, c.exps):
         for tr, (e, T) in zip(trs, c.exps.items()):
             td = tds(tr)
             a.date(P_SL, f"{e} expiry", td[0], e)
             cell(a, P_SL, f"{e} days", td[1], T)
-            cell(a, P_SL, f"{e} quotes", td[2], float((c.mkt["expiry"] == e).sum()))
-            cell(a, P_SL, f"{e} median half-spread", td[3], float(hs[e]))
+            cell(a, P_SL, f"{e} forward F", td[2], float(fwd[e]))
+            cell(a, P_SL, f"{e} quotes", td[3], float(n_q[e]))
+            cell(a, P_SL, f"{e} median half-spread", td[4], float(hs[e]))
+    status = a.one("#slices-status")
+    if default is not None:
+        st = settle.get(default)
+        a.equal(P_SL, "status line: wording", masked(text_of(status)),
+                f"D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
+                + " · # days · F # · # quotes · median half-spread # vol pts")
+        nums(a, P_SL, "status line: days, F, quotes, median half-spread", status,
+             [c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])], [default])
+    gt = a.one("div#chart-slices-data div.chart-groups > table")
+    texts(a, P_SL, "bucket table model columns", heads(gt)[5:], [M.label(m) for m in c.overlay])
+    a.equal(P_SL, "bucket table: a row group per expiry",
+            [tb.get("data-group") for tb in (gt.select(":scope > tbody") if gt else [])], list(c.exps))
     for e, T in c.exps.items():
-        tbl = chart_group(a, "chart-slices", e)
-        nums(a, P_SL, f"{e} group caption", tbl.find("caption") if tbl else None, [T], [e])
-        hd = heads(tbl)
-        texts(a, P_SL, f"{e} group model columns", hd[5:], [M.label(m) for m in c.overlay])
+        head, tb = group_rows(a, "chart-slices", e)
+        nums(a, P_SL, f"{e} row group header", head, [T], [e])
         q = c.mkt[c.mkt["expiry"] == e].sort_values("k", kind="mergesort")
         kb = M.bucket(q["k"])
         model_iv = {}
@@ -1250,7 +1332,7 @@ def slices_panel(a: Audit, c: Ctx) -> None:
             qm = c.s.res[(c.s.res["model"] == m) & (c.s.res["expiry"] == e)].set_index("k")["model_iv"]
             model_iv[m] = qm[~qm.index.duplicated()].reindex(q["k"].to_numpy()).to_numpy(float) * 100.0
         bs = [b for b in c.used if (kb == b).any()]
-        trs = rows(tbl)
+        trs = [tr for tr in (tb.find_all("tr", recursive=False) if tb is not None else []) if tds(tr)]
         if not same_len(a, P_SL, f"{e} bucket rows", trs, bs):
             continue
         for tr, b in zip(trs, bs):
@@ -1267,7 +1349,7 @@ def slices_panel(a: Audit, c: Ctx) -> None:
                 cell(a, P_SL, f"{lab} median {M.label(m)} IV", td[5 + i] if 5 + i < len(td) else None,
                      M.num(v))
     slices_prose(a, c)
-    packed_quotes(a, c)
+    packed_quotes(a, c, default)
 
 
 def slices_prose(a: Audit, c: Ctx) -> None:
@@ -1286,11 +1368,30 @@ def slices_prose(a: Audit, c: Ctx) -> None:
     statics(a, P_SL, "quote readout", a.one("#chart-slices-readout"), [READOUT_PAGE])
 
 
-def packed_quotes(a: Audit, c: Ctx) -> None:
+def packed_quotes(a: Audit, c: Ctx, default: str | None) -> None:
     """The smile chart's packed quotes (the quote inspector's data) against the residual
-    table: forward, days, strikes, rights, bid / mid / ask IV, each model's IV and flags."""
-    sp = spec(a, "chart-slices-spec")
-    groups = ((sp or {}).get("quotes") or {}).get("groups") or {}
+    table: forward, days, strikes, rights, bid / mid / ask IV, each model's IV and flags.
+    A book smile (D2) holds the default expiry inline, one dateless series set (its
+    template) and every expiry in the session's data file: the file is read and
+    verified (Audit.data_file), its expiries and the spec's order are the table's, and
+    the inline block is the file's."""
+    sp = spec(a, "chart-slices-spec") or {}
+    q = sp.get("quotes") or {}
+    groups = q.get("groups") or {}
+    if q.get("template"):
+        book = a.data_file(P_SL, q.get("src"), q.get("integrity")) or {}
+        a.equal(P_SL, "data file: schema 1, this session", [book.get("schema"), book.get("session")],
+                [1, c.session])
+        a.equal(P_SL, "spec: session", q.get("session"), c.session)
+        a.equal(P_SL, "spec: expiry order = the residual table's", q.get("order"), list(c.exps))
+        bq = book.get("quotes") or {}
+        a.equal(P_SL, "data file: expiry order = the residual table's", bq.get("order"), list(c.exps))
+        a.equal(P_SL, "inline expiries: the selected tab's", list(groups), [default])
+        a.equal(P_SL, "inline quotes = the data file's", all(g == (bq.get("groups") or {}).get(e)
+                                                              for e, g in groups.items()), True)
+        a.equal(P_SL, "series: one dateless set (no group)", [s_.get("group") for s_ in sp.get("series") or []
+                                                              if s_.get("group") is not None], [])
+        groups = bq.get("groups") or {}
     a.equal(P_SL, "packed expiries", list(groups), list(c.exps))
     bad: dict[str, list[str]] = {}
     for e in c.exps:

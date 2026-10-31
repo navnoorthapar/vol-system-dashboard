@@ -31,6 +31,7 @@ Run a local preview (read-only, bound to 127.0.0.1):
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import glob
 import hashlib
@@ -99,6 +100,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     BERLIN_11,
     CIVIDIS_11,
     DIVERGE_11,
+    HEAT_CLASSES,
     MINUS,
     SPX_MULTIPLIER,
     _fmt,
@@ -417,6 +419,24 @@ def with_unit(text: Any, unit: str) -> str:
 
 
 app.jinja_env.filters["u"] = with_unit
+
+# A chart spec's fields the page renders as HTML from it (the chart's aria-label,
+# its description, legend bar and data table) and desk.js never reads: left out of
+# its JSON (D2: 209 KB of a 45-expiry Surface page, 51 KB of Research's)
+SPEC_HTML_FIELDS = ("table", "describe", "legend_items", "title")
+
+
+def spec_json(spec: Any) -> Any:
+    """A chart spec as the page's JSON block: compact, UTF-8, keys sorted, HTML-safe
+    (<, >, & and ' as JSON escapes, as Flask's tojson), without SPEC_HTML_FIELDS."""
+    from jinja2.utils import htmlsafe_json_dumps
+
+    if isinstance(spec, dict):
+        spec = {k: v for k, v in spec.items() if k not in SPEC_HTML_FIELDS}
+    return htmlsafe_json_dumps(spec, dumps=app.json.dumps, separators=(",", ":"), ensure_ascii=False)
+
+
+app.jinja_env.filters["spec_json"] = spec_json
 
 
 _GREEK = re.compile(r"([\u0370-\u03ff\u1f00-\u1fff]+)")
@@ -5458,6 +5478,44 @@ def heston_model_key(models: Iterable[str]) -> str | None:
     return next((m for m in models if str(m).lower().startswith("heston")), None)
 
 
+# ── the smile's expiry strip and the selected expiry's status line ─────────────
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+# the OCC root of an SPX option line: the monthly SPX settles at the open (the SOQ),
+# SPXW at the close
+SETTLEMENT_OF_ROOT = {"SPX": "AM", "SPXW": "PM"}
+
+
+def expiry_settlements(mkt: pd.DataFrame) -> dict[str, str]:
+    """{expiry: 'AM' | 'PM'} from the OCC root of its lines, where the residual table
+    carries one; none for a chain without roots (a Yahoo chain), nor for an expiry
+    whose lines mix settlements: a tag is read, never guessed from the date."""
+    if "root" not in mkt.columns:
+        return {}
+    out: dict[str, str] = {}
+    for e, roots in mkt.groupby("expiry")["root"]:
+        st = {SETTLEMENT_OF_ROOT.get(str(r).strip().upper(), "") for r in roots.unique()}
+        if len(st) == 1 and "" not in st:
+            out[str(e)] = st.pop()
+    return out
+
+
+def expiry_tab_label(expiry: str, T_days: float) -> str:
+    """An expiry tab's text: 'Nov 25 · 30d' (month, day, days to expiry)."""
+    day = pd.Timestamp(str(expiry)[:10])
+    return f"{MONTHS[day.month - 1]} {day.day} · {_fmt(T_days, '.0f')}d"
+
+
+def expiry_status(expiry: str, settle: str | None, row: Sequence[Any]) -> str:
+    """The selected expiry's status line, from its row of the smile's 'Quotes per
+    expiry' table (expiry, days, F, quotes, median half-spread; desk.js builds the
+    line for another expiry from the same row):
+    '2026-11-25 · Wed · PM · 30 days · F 6,950.12 · 109 quotes · median half-spread 0.06 vol pts'."""
+    wd = WEEKDAYS[pd.Timestamp(str(expiry)[:10]).weekday()]
+    return " · ".join([str(expiry), wd, *([settle] if settle else []), f"{row[1]} days", f"F {row[2]}",
+                       f"{row[3]} quotes", f"median half-spread {row[4]} vol pts"])
+
+
 # the quote inspector's footnote: where the chain's quotes come from and when
 def quote_source_note(surface_json: dict) -> str:
     """'Yahoo close, no quote time': the chain's vendor and quote time (chain_provenance)."""
@@ -5465,48 +5523,50 @@ def quote_source_note(surface_json: dict) -> str:
     return f"{pv['short']}, {pv['time']}" if pv else "Chain source not recorded, no quote time"
 
 
-def smile_quote_series(group: str, models: Sequence[str], shown: Iterable[str | None],
+def smile_quote_series(group: str | None, models: Sequence[str], shown: Iterable[str | None],
                        anchor_model: str | None, oos_mids: bool = False, strip: bool = True) -> list[dict]:
     """One expiry's smile series (desk_quotes): bid–ask bars, mids, each model at
     the quoted strikes, the anchor model's fitted quotes as diamonds and, under
     the smile, each model's z per quote. They hold no data: desk.js fills them
     from the chart's packed quotes (``quote`` names the field). ``oos_mids``: the
     mids split into the anchor model's out-of-sample quotes (hollow) and its
-    anchors, as the Calibration smiles draw them."""
+    anchors, as the Calibration smiles draw them. ``group`` None: the template a
+    book smile (Surface) fills with the shown expiry, its names without a date."""
     shown = set(shown)
-    g = str(group)
-    out: list[dict] = [{"name": f"{g} bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
-                        "role": "bidask", "color": "muted", "group": g, "quote": "ba"}]
+    g = None if group is None else str(group)
+    pre, tag = (f"{g} ", {"group": g}) if g is not None else ("", {})
+    out: list[dict] = [{"name": f"{pre}bid–ask", "legendKey": "Bid–ask", "legend": True, "type": "errorbar",
+                        "role": "bidask", "color": "muted", **tag, "quote": "ba"}]
     if oos_mids and anchor_model:
         # market mids are 'headline' everywhere (P4.5): hollow, the anchors filled diamonds
-        out.append({"name": f"{g} mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
+        out.append({"name": f"{pre}mid (out of sample)", "legendKey": "Mid (out of sample)", "legend": True,
                     "type": "scatter", "role": "market", "color": "headline", "hollow": True, "size": 4,
                     "opacity": 0.6,
-                    "group": g, "quote": "oos", "model": anchor_model})
+                    **tag, "quote": "oos", "model": anchor_model})
     else:
-        out.append({"name": f"{g} mid", "legendKey": "Mid", "legend": True, "type": "scatter",
-                    "role": "market", "color": "headline", "size": 4, "group": g, "quote": "mid"})
-    out.extend({"name": f"{g} {model_label(m)}", "legendKey": model_label(m), "legend": True,
+        out.append({"name": f"{pre}mid", "legendKey": "Mid", "legend": True, "type": "scatter",
+                    "role": "market", "color": "headline", "size": 4, **tag, "quote": "mid"})
+    out.extend({"name": f"{pre}{model_label(m)}", "legendKey": model_label(m), "legend": True,
                 "hidden": m not in shown, "type": "line", "role": "model", "color": model_colour(m),
                 "width": 1.5,
-                "group": g, "quote": "model", "model": m} for m in models)
+                **tag, "quote": "model", "model": m} for m in models)
     anchor_key = "Mid (fit anchor)" if oos_mids else "Heston fit anchors"
     if anchor_model:
-        out.append({"name": f"{g} {'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
+        out.append({"name": f"{pre}{'mid (fit anchor)' if oos_mids else 'Heston fit anchor'}",
                     "legendKey": anchor_key, "legend": True, "type": "scatter", "symbol": "diamond",
                     "size": 9 if oos_mids else 8, "z": 4, "role": "anchor", "color": ANCHOR_COLOUR,
-                    "group": g,
+                    **tag,
                     "quote": "fit", "model": anchor_model})
     if strip:
-        out.extend({"name": f"{g} {model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
-                    "size": 4, "role": "model", "color": model_colour(m), "group": g, "quote": "z",
+        out.extend({"name": f"{pre}{model_label(m)} z", "legendKey": model_label(m), "type": "scatter",
+                    "size": 4, "role": "model", "color": model_colour(m), **tag, "quote": "z",
                     "model": m,
                     "strip": True} for m in models)
         if anchor_model:
-            out.append({"name": f"{g} {model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
+            out.append({"name": f"{pre}{model_label(anchor_model)} fit anchor z", "legendKey": anchor_key,
                         "type": "scatter", "symbol": "diamond", "size": 7, "z": 4, "role": "anchor",
                         "color": ANCHOR_COLOUR,
-                        "group": g, "quote": "zfit", "model": anchor_model, "strip": True})
+                        **tag, "quote": "zfit", "model": anchor_model, "strip": True})
     return out
 
 
@@ -5546,12 +5606,31 @@ def _model_surface_heat(params: dict) -> dict:
     return {"cols": [_fmt(k, "+.2f") for k in lm], "rows": out_rows, "lo": lo, "hi": hi, "points": pts}
 
 
-def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
+# A Surface heatmap cell's details (D2): numbers in the session's data file, written
+# into the cell's readout by desk.js with its grid's template: {i:d} is number i to
+# d decimals ({i:+d} signed), {i} as it is. Until the file is loaded the readout
+# names the cell's row, column and printed value.
+HEAT_DETAIL_IV = "mid IV {0:2}% (median of {1}) · half-spread {2:2} vol pts"
+HEAT_DETAIL_RESID = "{0:+2} half-spreads (median of {1}) · {2:0}% inside"
+
+
+def heat_detail(template: str, vals: Sequence[Any]) -> str:
+    """A HEAT_DETAIL_* template filled as desk.js fills it (the readout's text)."""
+    def one(m: re.Match) -> str:
+        v, spec = vals[int(m.group(1))], m.group(2)
+        if spec is None:
+            return str(v)
+        return signed(v, f".{spec[-1]}f") if spec.startswith("+") else _fmt(float(v), f".{spec}f")
+    return re.sub(r"\{(\d)(?::(\+?\d))?\}", one, template)
+
+
+def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, nums,
                  used: Sequence[int] | None = None) -> list[dict]:
     """Heatmap rows: one per expiry, one cell per ln(K/F) bucket in ``used`` (K_BINS).
 
     Each cell records how many quotes it holds (``n``), so the cells of a grid
-    add up to the quotes it shows."""
+    add up to the quotes it shows, and its detail numbers (``vals``, nums(g, v):
+    the session data file's, rounded as the readout prints them)."""
     qb = q.assign(kb=k_bucket(q["k"]))
     used = list(used) if used is not None else k_buckets_used(q["k"])
     rows = []
@@ -5561,11 +5640,10 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
         for b in used:
             g = qe[qe["kb"] == b]
             if g.empty:
-                empty = cell("", None, detail=f"{e} · ln(K/F) {k_bucket_label(b)}: no quotes")
-                cells.append({**empty, "n": 0})
+                cells.append({**cell("", None), "n": 0, "vals": None})
                 continue
             v = value(g)
-            cells.append({**cell(v["text"], colour(v["value"]), detail=detail(g, v)), "n": len(g)})
+            cells.append({**cell(v["text"], colour(v["value"])), "n": len(g), "vals": nums(g, v)})
         # exp: the row's expiry (Surface selects it across the heatmaps, the delta
         # grid, the by-expiry chart and the smile: desk.js initExpiryCursor)
         rows.append({"label": f"{e} · {_fmt(exps[e], '.0f')}d", "exp": str(e), "cells": cells})
@@ -5602,7 +5680,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
     def tint(text: str, bg: str | None, title: str = "", xp: bool = False) -> dict:
         c = {"text": text, "title": title, "xp": xp}
         if bg is not None:
-            c.update(bg=bg, fg=_text_colour_on(bg))
+            c.update(bg=bg, fg=_text_colour_on(bg), cls=HEAT_CLASSES.get(bg))
         return c
 
     def row(r: dict, head: str, sub: str = "") -> dict:
@@ -6273,8 +6351,13 @@ def surface_extras(d: dict, surf: dict) -> None:
     n_scored = {(r.get("oos") or {}).get("n") for r in d["score_rows"]}
     d["same_quotes"] = len(n_scored) == 1 and None not in n_scored
     exps = mkt.groupby("expiry")["T_days"].median().sort_values()
-    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum())}
-                     for e, t in exps.items()]
+    settles = expiry_settlements(mkt)
+    # the smile's tabs: 'Nov 25 · 30d', AM / PM where the OCC root says, and the
+    # first expiry of each month after the first marks a month boundary (desk.css .mo)
+    d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum()),
+                      "label": expiry_tab_label(str(e), t), "settle": settles.get(str(e)),
+                      "month_start": i > 0 and str(e)[:7] != str(exps.index[i - 1])[:7]}
+                     for i, (e, t) in enumerate(exps.items())]
     d["n_quotes"] = len(mkt)
     d["median_half_spread"] = float(mkt["half_spread_vp"].median())
 
@@ -6318,9 +6401,9 @@ def surface_extras(d: dict, surf: dict) -> None:
             value=lambda g: {"value": float(g["mid_iv"].median() * 100),
                              "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
             colour=lambda v: seq_colour(v, lo, hi),
-            detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
-                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vol pts"), used=used),
-        "compact": True}
+            nums=lambda g, v: [round(v["value"], 2), len(g), round(float(g["half_spread_vp"].median()), 2)],
+            used=used),
+        "compact": True, "id": "iv-heatmap", "detail": HEAT_DETAIL_IV}
     d["iv_heat"]["n"] = sum(c["n"] for r in d["iv_heat"]["rows"] for c in r["cells"])
     pts = []
     # 3D x of a bucket: its midpoint; of an open wing, the median ln(K/F) of its quotes
@@ -6344,15 +6427,15 @@ def surface_extras(d: dict, surf: dict) -> None:
         q = q[pd.to_numeric(q["model_iv"], errors="coerce").notna()]
         d["resid_heat"].append({
             "key": m, "label": model_label(m), "cols": [k_bucket_label(b, compact=True) for b in used],
-            "n": len(q), "compact": True,
+            "n": len(q), "compact": True, "id": f"resid-heat-{m}", "detail": HEAT_DETAIL_RESID,
             "rows": _bucket_grid(
                 q, exps,
                 value=lambda g: {"value": float(g["error_hs"].median()),
                                  "text": signed(float(g["error_hs"].median()), ".1f")},
                 colour=lambda v: div_colour(v, 5.0),
-                detail=lambda g, v: (f"{signed(v['value'], '.2f')} half-spreads (median of {len(g)}) · "
-                                     f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% "
-                                     "inside"), used=used)})
+                nums=lambda g, v: [round(v["value"], 2), len(g),
+                                   round(float(g["inside_spread"].astype(bool).mean() * 100))],
+                used=used)})
 
     # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); every
     # model at the quoted strikes, each with one legend toggle across expiries
@@ -6368,16 +6451,18 @@ def surface_extras(d: dict, surf: dict) -> None:
     d["slice_shown"] = [model_label(m) for m in overlay if m in shown]
     d["default_exp"] = (min(d["expiries"], key=lambda x: abs(x["T_days"] - 30.0))["expiry"]
                         if d["expiries"] else None)
-    series, groups = [], []
+    groups: list[dict] = []
     hres = res[res["model"] == hkey] if hkey else None
     n_anchor = int(hres["in_sample"].astype(bool).sum()) if (hres is not None and "in_sample" in hres) else 0
-    # every quote of every expiry, packed once (desk_quotes): the chart's series
-    # below hold no data, desk.js unpacks them from this block, and the quote
-    # inspector reads strike, right, delta and each model's z from it
+    # every quote of every expiry, packed once (desk_quotes): desk.js unpacks the
+    # shown expiry's into one dateless set of series (the template) and the quote
+    # inspector reads strike, right, delta and each model's z from it. The page
+    # holds the default expiry's; the session's data file every expiry's, fetched
+    # once the smile is drawn (D2: 0.5 MB of a full Cboe book's 1.7 MB page)
     qblock = desk_quotes.encode(res, overlay, list(exps.index))
+    series = smile_quote_series(None, overlay, shown, hkey if n_anchor else None)
     for e in exps.index:
         q = mkt[mkt["expiry"] == e].sort_values("k")
-        series += smile_quote_series(e, overlay, shown, hkey if n_anchor else None)
         by_model = {}
         for m in overlay:
             qm = res[(res["model"] == m) & (res["expiry"] == e)].set_index("k")["model_iv"]
@@ -6398,15 +6483,37 @@ def surface_extras(d: dict, surf: dict) -> None:
                           + [_fmt(pd.Series([v for v, s_ in zip(by_model[m], sel) if s_],
                                             dtype=float).median(), ".2f") for m in overlay])
         groups.append({"group": e, "shown": e == d["default_exp"], **charts.table(
-            f"{e} ({_fmt(exps[e], '.0f')} days): median implied vol (%) by ln(K/F) bucket",
+            f"{e} ({_fmt(exps[e], '.0f')} days)",
             ["ln(K/F)", "Quotes#", "Bid#", "Mid#", "Ask#"] + [model_short(m) + "#" for m in overlay],
             rows_e)})
+    # the session's data file: every expiry's packed quotes, each heatmap cell's
+    # detail numbers (its readout's; null for an empty cell) and the 3D view's points
+    # (its spec keeps the colour scale), fetched once the smile is drawn, a heatmap
+    # cell is hovered or focused, or the 3D view is asked for
+    heats = [d["iv_heat"], *d["resid_heat"]]
+    file_: dict = {"quotes": {"order": list(qblock), "groups": qblock},
+                   "heat": {h["id"]: {"detail": h["detail"], "cells": [[c["vals"] for c in r["cells"]]
+                                                                       for r in h["rows"]]} for h in heats}}
+    if d.get("surface3d"):
+        file_["surface3d"] = {"points": d["surface3d"].pop("points")}
+    book = publish_json("surface", session, file_)
+    for x in [*heats, d.get("surface3d")]:
+        if x:
+            x.update(book, session=session)
     hs_by_exp = mkt.groupby("expiry")["half_spread_vp"].median()
+    f_by_exp = mkt.groupby("expiry")["forward"].first()
+    # one row per expiry; the status line under the tabs is its selected row
+    # (expiry_status here for the default, desk.js for the others)
+    per_exp = [[x["expiry"], _fmt(x["T_days"], ".0f"), _fmt(float(f_by_exp[x["expiry"]]), ",.2f"), x["n"],
+                _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]]
+    d["exp_status"] = next((expiry_status(x["expiry"], x["settle"], r) for x, r in zip(d["expiries"], per_exp)
+                            if x["expiry"] == d["default_exp"]), "")
     slice_tbl = charts.table("Quotes per expiry",
-                             ["Expiry", "Days#", "Quotes#", "Median half-spread (vol pts)#"],
-                             [[x["expiry"], _fmt(x["T_days"], ".0f"), x["n"],
-                               _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]])
+                             ["Expiry", "Days#", "Forward F#", "Quotes#", "Median half-spread (vol pts)#"],
+                             per_exp)
     slice_tbl["groups"] = groups
+    # one table, a row group per expiry (D2: 45 tables, each with its caption and head)
+    slice_tbl["group_caption"] = "Median implied vol (%) by ln(K/F) bucket, a row group per expiry"
     d["charts"]["slices"] = charts.xy(
         "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
         x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
@@ -6421,7 +6528,9 @@ def surface_extras(d: dict, surf: dict) -> None:
                     "(model − mid) / half-spread per quote, the band ±1 is inside the spread. "
                     "The readout under the chart steps through the quotes with the arrow keys."),
         table=slice_tbl,
-        quotes=smile_quotes_meta(qblock, overlay, hkey if n_anchor else None, surf.get("surface") or {}))
+        quotes={**smile_quotes_meta({e: g for e, g in qblock.items() if e == d["default_exp"]}, overlay,
+                                    hkey if n_anchor else None, surf.get("surface") or {}),
+                "template": True, "order": list(qblock), "session": session, **book})
 
     # out-of-sample median |model − mid| by expiry, one line per model, on the
     # same quotes as the scorecard beside it (the scorecard's by_expiry rows mix
@@ -7802,6 +7911,28 @@ def own_asset(rel: str) -> dict:
     return {"src": f"{rel}?v={hashlib.sha256(data).hexdigest()[:12]}", "bytes": len(data)}
 
 
+# Session data files (D2): what a page reads only when a reader uses it (every
+# expiry's quotes behind the Surface smile, 0.5 MB on a full Cboe book) is one
+# same-origin JSON file per session, data/<kind>-<session>-<sha256[:16]>.json,
+# that desk.js fetches with its sha384 as the integrity value. The name changes
+# with the bytes (Pages ignores ?v=, so a cached page can never read newer data).
+# Rendering a page registers the exact bytes here; /data/<name> serves them, and
+# freeze_site.py writes every file a page references, and no other, to data/.
+DATA_FILES: dict[str, bytes] = {}
+DATA_SCHEMA = 1
+
+
+def publish_json(kind: str, session: str, obj: dict) -> dict:
+    """Register {schema, session, **obj} (compact, keys sorted) as a data file:
+    {"src": its path from a page, "integrity": its sha384 SRI value}."""
+    body = json.dumps({"schema": DATA_SCHEMA, "session": session, **obj}, separators=(",", ":"),
+                      sort_keys=True, allow_nan=False).encode("utf-8")
+    name = f"{kind}-{session}-{hashlib.sha256(body).hexdigest()[:16]}.json"
+    DATA_FILES[name] = body
+    return {"src": f"data/{name}",
+            "integrity": "sha384-" + base64.b64encode(hashlib.sha384(body).digest()).decode()}
+
+
 @app.context_processor
 def _page_context() -> dict:
     route = request.path if request.path in ROUTES else "/"
@@ -7882,6 +8013,17 @@ def page_corrections():
 @app.route("/model-risk")
 def page_model_risk():
     return _render("model-risk.html", load_model_risk())
+
+
+@app.route("/data/<name>")
+def data_file(name: str):
+    """A session data file a rendered page references (publish_json); 404 for any other."""
+    body = DATA_FILES.get(name)
+    if body is None:
+        return make_response("not found", 404)
+    resp = make_response(body)
+    resp.headers["Content-Type"] = "application/json"
+    return resp
 
 
 @app.route("/greeks")

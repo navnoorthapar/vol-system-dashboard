@@ -20,8 +20,9 @@
 //     60 px unused (an s7 + s5 row became 12 + 6 below 1181 px: half-empty rows);
 //   * panel bottoms: no .panel ends more than 96 px below its last visible content
 //     (a short panel stretched beside a tall one), every chart drawn first; the body
-//     of a closed <details> is not visible content; #carry and #forward are left to
-//     their own fixes;
+//     of a closed <details> is not visible content, nor is a .grow-col box itself
+//     (it stretches to its panel: only what it holds is content; counting it hid a
+//     440 px smile in a 1,446 px panel); #carry and #forward are left to their own fixes;
 //   * heatmap row heads: at 390 px a heatmap's row header stays in view after its
 //     region is scrolled sideways;
 //   * Model Risk status filters: each chip of the summary strip shows exactly the
@@ -33,6 +34,18 @@
 //     the keyboard readout says the same; the residual strip shares the smile's
 //     x range; the forward-delta switch renames the axis and keeps the expiry; a
 //     Calibration smile's tooltip names its quote the same way;
+//   * the smile's height (P4.1 layout): at 1024, 1280, 1440 and 1920 px the Surface
+//     smile is as tall as its height class says (h440: 440 px), whatever the expiry
+//     count: a grown smile matched the 45-row IV grid beside it, 1,164 px tall, and
+//     the quote the inspector check hovers was below the screen; its expiry tabs are
+//     one line (a full Cboe book's ~45 wrapped to four or five lines above it), and
+//     the last expiry, chosen without focusing its tab ('[' / ']' or a table row), is
+//     scrolled into the strip and named by the status line under it;
+//   * the session data file (D2): the smile's other expiries are one data file
+//     (data/surface-<session>-<sha>.json) that is not fetched before the smile is
+//     drawn, is requested within 3 s of its first draw with no input, loads with its
+//     integrity value, and is fetched once for any number of switches, each of which
+//     draws every quote of its expiry;
 //   * the smile's expiry switch is fast (P4.2): the median of five expiry-tab
 //     clicks, timed by the Event Timing API (PerformanceObserver 'event',
 //     durationThreshold 16, from the input to the next paint), is at most 50 ms,
@@ -41,7 +54,13 @@
 //     from the input to the frame that shows the new expiry's chart is measured
 //     too (the chart's 'finished' event, then the next frame): its median at most
 //     100 ms, 300 ms at 4×. (It re-parsed a 250 KB spec and rebuilt every series
-//     on each click: 160 ms, 640 ms at 4×, measured on the previous desk.js.)
+//     on each click: 160 ms, 640 ms at 4×, measured on the previous desk.js.) The
+//     data file is loaded first (Desk.quotesReady): the check times a switch, not a download.
+//     The work of a switch, which does not depend on the runner's load, is checked too
+//     (D3): each click's own task writes at most 6 DOM nodes (the old and new tab, the
+//     old and new table; 45 tabs, 45 tables and 270 rows were rewritten), the smile then
+//     draws at most 16 series with a legend map of at most 16 keys, and it is never
+//     resized (no ResizeObserver entry over the five switches);
 // Values are read from each chart's own JSON spec and colours from the CSS tokens,
 // so the checks hold on every daily rebuild.
 import { createServer } from 'node:http';
@@ -81,11 +100,12 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const browser = await chromium.launch();
 const report = { site, checks: [], failures: [] };
 
-async function openPage(name, viewport = { width: 1440, height: 900 }) {
+async function openPage(name, viewport = { width: 1440, height: 900 }, onRequest = null) {
   const ctx = await browser.newContext({ viewport, reducedMotion: 'reduce' });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
+  if (onRequest) page.on('request', onRequest);
   await page.route('**/*', route => {
     const u = route.request().url();
     return (u.startsWith(base) || u.startsWith('data:')) ? route.continue() : route.abort();
@@ -290,7 +310,8 @@ async function checkLayout() {
           if (!vis(p) || exempt.includes(p.id)) return;
           let last = -Infinity;
           p.querySelectorAll('.panel-body *').forEach(el => {
-            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)) return;
+            if (!vis(el) || el.closest('[hidden]') || el.closest('.sr-only') || shut(el)
+                || el.classList.contains('grow-col')) return;
             last = Math.max(last, el.getBoundingClientRect().bottom);
           });
           if (last === -Infinity) return;
@@ -382,7 +403,7 @@ async function waitChart(page, id) {
 }
 async function hoverQuote(page, id, frac) {
   const pos = await page.evaluate(([cid, f]) => {
-    const c = Desk.charts[cid], rows = c.spec._rows[Object.keys(c.spec._rows).length > 1 ? Desk.filters[cid] : Object.keys(c.spec._rows)[0]];
+    const c = Desk.charts[cid], rows = Desk.rowsOf(c.spec, Desk.filters[cid]);
     const q = rows[Math.floor((rows.length - 1) * f)];
     const px = c.chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [q.k, q.mid]);
     const r = c.el.getBoundingClientRect();
@@ -449,6 +470,84 @@ async function checkQuoteInspector() {
   return check;
 }
 
+// -- the smile's height (P4.1 layout) ----
+const SMILE_WIDTHS = [1024, 1280, 1440, 1920];
+async function checkSmileLayout() {
+  const check = { name: 'the smile keeps its own height; its expiry tabs are one line', views: [], failures: [] };
+  for (const width of SMILE_WIDTHS) {
+    const { ctx, page, errors } = await openPage('surface.html', { width, height: 900 });
+    const id = 'chart-slices';
+    if (!(await page.locator('#' + id).count())) { await ctx.close(); continue; }
+    await page.locator('#' + id).scrollIntoViewIfNeeded();
+    if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id} @${width}px: not drawn`); await ctx.close(); continue; }
+    const r = await page.evaluate(cid => {
+      const el = document.getElementById(cid), m = el.className.match(/\bh(\d+)\b/);
+      return { height: el.getBoundingClientRect().height, want: m ? Number(m[1]) : null };
+    }, id);
+    const strip = await page.evaluate(async () => {
+      const list = document.querySelector('[role="tablist"][data-state-key="exp"]');
+      const tabs = [...list.querySelectorAll('[role="tab"]')], last = tabs[tabs.length - 1];
+      const lines = new Set(tabs.map(t => Math.round(t.getBoundingClientRect().top))).size;
+      Desk.stepExpiry(tabs.length);
+      await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const l = list.getBoundingClientRect(), t = last.getBoundingClientRect();
+      const status = document.getElementById(list.getAttribute('data-status') || '');
+      return { tabs: tabs.length, lines, exp: last.getAttribute('data-value'), selected: last.getAttribute('aria-selected') === 'true',
+        inView: t.left >= l.left - 1 && t.right <= l.right + 1, status: status ? status.textContent : null };
+    });
+    check.views.push({ width, ...r, strip });
+    if (r.want === null) check.failures.push(`surface.html #${id}: no height class`);
+    else if (Math.abs(r.height - r.want) > 1) check.failures.push(`surface.html #${id} @${width}px: ${Math.round(r.height)} px tall, its class says ${r.want} px`);
+    if (strip.lines !== 1) check.failures.push(`surface.html @${width}px: the ${strip.tabs} expiry tabs take ${strip.lines} lines`);
+    if (!strip.selected || !strip.inView) check.failures.push(`surface.html @${width}px: the last expiry ${strip.exp} is ${strip.selected ? '' : 'not selected and '}${strip.inView ? 'in view' : 'outside the strip'}`);
+    if (!strip.status || !strip.status.startsWith(strip.exp + ' \u00b7 ')) check.failures.push(`surface.html @${width}px: the status line says '${strip.status}', not ${strip.exp}`);
+    for (const e of errors) check.failures.push(`surface.html @${width}px: JavaScript error: ${e}`);
+    await ctx.close();
+  }
+  return check;
+}
+
+// -- the session data file (D2) ----
+const BOOK_WAIT_MS = 3000;
+async function checkSessionFile() {
+  const check = { name: 'the smile fetches its session data file once, soon after its first draw', views: [], failures: [] };
+  const id = 'chart-slices', reqs = [];
+  const { ctx, page, errors } = await openPage('surface.html', undefined,
+    r => { if (new URL(r.url()).pathname.startsWith('/data/')) reqs.push({ url: r.url(), t: Date.now() }); });
+  const src = await page.evaluate(cid => { const s = document.getElementById(cid + '-spec'); return s ? JSON.parse(s.textContent).quotes.src || null : null; }, id);
+  if (!src) { await ctx.close(); return check; }             // no smile, or its quotes all inline
+  await page.waitForTimeout(1000);
+  if (!(await page.evaluate(cid => !!Desk.charts[cid], id)) && reqs.length) check.failures.push(`surface.html: ${src} was fetched before the smile was drawn`);
+  await page.locator('#' + id).scrollIntoViewIfNeeded();
+  if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id}: not drawn`); await ctx.close(); return check; }
+  const t0 = Date.now();
+  while (!reqs.length && Date.now() - t0 < BOOK_WAIT_MS + 1000) await page.waitForTimeout(100);
+  const delay = reqs.length ? reqs[0].t - t0 : null;
+  if (delay === null || delay > BOOK_WAIT_MS) check.failures.push(`surface.html: ${src} not requested within ${BOOK_WAIT_MS / 1000} s of the smile's first draw (${delay === null ? 'never' : delay + ' ms'})`);
+  const ready = await page.evaluate(cid => Desk.quotesReady(cid).then(() => 'ok', e => String(e)), id);
+  if (ready !== 'ok') check.failures.push(`surface.html: ${src} did not load: ${ready}`);
+  const tabs = await page.evaluate(cid => [...document.querySelectorAll(`[data-chart-filter="${cid}"] [role="tab"]`)]
+    .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('data-value')), id);
+  const drawn = [];
+  for (const v of [0.2, 0.5, 0.8].map(f => tabs[Math.floor(f * (tabs.length - 1))]).filter(Boolean)) {
+    const st = await page.evaluate(([cid, e]) => new Promise(done => {
+      const c = Desk.charts[cid], ch = c.chart;
+      const fin = () => { ch.off('finished', fin); requestAnimationFrame(() => {
+        const mid = ch.getOption().series.find(s => s && s.name === 'mid');      // replaceMerge leaves holes
+        done({ exp: e, mids: mid ? mid.data.length : null, quotes: Desk.rowsOf(c.spec, e).length }); }); };
+      ch.on('finished', fin);
+      document.querySelector(`[data-chart-filter="${cid}"] [data-value="${e}"]`).click();
+    }), [id, v]);
+    drawn.push(st);
+    if (!(st.quotes > 0 && st.mids === st.quotes)) check.failures.push(`surface.html #${id} ${v}: ${st.mids} mids drawn of its ${st.quotes} quotes`);
+  }
+  if (reqs.length !== 1) check.failures.push(`surface.html: ${reqs.length} data file requests (${reqs.map(r => r.url).join(', ')}), not 1`);
+  check.views.push({ src, delay, requests: reqs.length, drawn });
+  for (const e of errors) check.failures.push(`surface.html: JavaScript error: ${e}`);
+  await ctx.close();
+  return check;
+}
+
 // -- the smile's expiry switch (P4.2) ----
 const SWITCH_MAX_MS = { 1: 50, 4: 150 };
 const DRAWN_MAX_MS = { 1: 100, 4: 300 };
@@ -471,6 +570,30 @@ async function timed(page, act, id) {
   return { ms: timing.length ? Math.max(...timing.map(e => e.d)) : 16,
            drawn: drawn !== null && click ? Math.round(drawn - click.t) : null };
 }
+// five switches by script (no pointer): the DOM mutations of each click's own task,
+// then, once drawn, the smile's series and legend keys; the ResizeObserver entries
+// on the smile over all five
+const SWITCH_WORK_JS = async ([id, picks]) => {
+  const c = Desk.charts[id], ch = c.chart, frame = () => new Promise(r => requestAnimationFrame(r));
+  let ro = -1;
+  const obs = new ResizeObserver(es => { ro += ro < 0 ? 1 : es.length; });
+  obs.observe(c.el);
+  await frame(); await frame();
+  const out = [];
+  for (const e of picks) {
+    const mo = new MutationObserver(() => {});
+    mo.observe(document, { subtree: true, attributes: true, childList: true, characterData: true });
+    const drawn = new Promise(done => { const fin = () => { ch.off('finished', fin); frame().then(done); }; ch.on('finished', fin); });
+    document.querySelector(`[data-chart-filter="${id}"] [data-value="${e}"]`).click();
+    const click = mo.takeRecords().map(r => `${r.type} ${r.attributeName || ''} ${r.target.id || r.target.tagName}`);
+    mo.disconnect();
+    await drawn;
+    const o = ch.getOption();
+    out.push({ exp: e, click, series: o.series.filter(Boolean).length, legend: Object.keys((o.legend[0] || {}).selected || {}).length });
+  }
+  obs.disconnect();
+  return { out, ro };
+};
 async function checkSwitchSpeed() {
   const check = { name: 'the smile switches expiry and toggles a model quickly', views: [], failures: [] };
   for (const rate of [1, 4]) {
@@ -478,6 +601,8 @@ async function checkSwitchSpeed() {
     const id = 'chart-slices';
     await page.locator('#' + id).scrollIntoViewIfNeeded();
     if (!(await waitChart(page, id))) { check.failures.push(`surface.html #${id}: not drawn`); await ctx.close(); continue; }
+    const ready = await page.evaluate(cid => Desk.quotesReady(cid).then(() => 'ok', e => String(e)), id);
+    if (ready !== 'ok') { check.failures.push(`surface.html #${id}: the quotes did not load (${ready})`); await ctx.close(); continue; }
     if (rate > 1) { const cdp = await ctx.newCDPSession(page); await cdp.send('Emulation.setCPUThrottlingRate', { rate }); }
     await page.evaluate(() => {
       new PerformanceObserver(l => { for (const e of l.getEntries()) (window.__ev = window.__ev || []).push({ n: e.name + ' (timing)', d: e.duration }); })
@@ -492,6 +617,14 @@ async function checkSwitchSpeed() {
     for (const v of picks) runs.push(await timed(page, () => page.click(`[data-chart-filter="${id}"] [data-value="${v}"]`), id));
     const clicks = runs.map(r => r.ms), drawn = runs.map(r => r.drawn);
     const view = { rate, clicks, median: median(clicks), drawn };
+    if (rate === 1) {
+      view.work = await page.evaluate(SWITCH_WORK_JS, [id, picks]);
+      for (const w of view.work.out) {
+        if (w.click.length > 6) check.failures.push(`surface.html #${id} ${w.exp}: the click's task wrote ${w.click.length} DOM nodes (${w.click.slice(0, 8).join('; ')}), limit 6`);
+        if (w.series > 16 || w.legend > 16) check.failures.push(`surface.html #${id} ${w.exp}: ${w.series} series and ${w.legend} legend keys drawn, limit 16 each`);
+      }
+      if (view.work.ro) check.failures.push(`surface.html #${id}: resized ${view.work.ro} time(s) by five expiry switches`);
+    }
     if (view.median > SWITCH_MAX_MS[rate]) check.failures.push(`surface.html #${id} at ${rate}× CPU: median expiry switch ${view.median} ms (${clicks.join(', ')}), limit ${SWITCH_MAX_MS[rate]} ms`);
     if (drawn.some(d => d === null)) check.failures.push(`surface.html #${id} at ${rate}× CPU: an expiry switch did not draw the chart again (${drawn.join(', ')})`);
     else {
@@ -515,7 +648,7 @@ async function checkSwitchSpeed() {
 
 const ONLY = process.env.INTERACT_ONLY ? process.env.INTERACT_ONLY.split(',') : null;
 for (const run of [checkSignedBars, checkKpiTones, checkKpiStrips, checkKeysDialog, checkLayout, checkStickyHeatHeads, checkMonitorFilters,
-  checkQuoteInspector, checkSwitchSpeed]) {
+  checkQuoteInspector, checkSmileLayout, checkSessionFile, checkSwitchSpeed]) {
   if (ONLY && !ONLY.includes(run.name)) continue;
   const c = await run();
   report.checks.push(c);

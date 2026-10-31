@@ -12,7 +12,9 @@
 //     carries no title with the whole text, at any of those widths: the overflow check
 //     cannot see it, since the page itself does not scroll;
 //   * with JavaScript off (every chart replaced by its data table), a page scrolls
-//     horizontally at 320, 390 or 1440 px;
+//     horizontally at 320, 390 or 1440 px, or a chart's per-group rows (the Surface
+//     smile's expiries, D2) are not one row group per tab in a keyboard-focusable,
+//     labelled region bounded to 60% of the screen;
 //   * a page throws a JavaScript error;
 //   * a page needs the network: every request to another origin is aborted, so the
 //     published pages must work from their own files (the CDN fallback for the
@@ -134,6 +136,20 @@ for (const name of PAGES) {
     const { page } = await openPage(ctx, name);
     const sw = await page.evaluate(() => document.documentElement.scrollWidth);
     if (sw > width + 1) entry.nojs.push({ width, scrollWidth: sw });
+    // each expiry strip's chart (the smile): its rows of every expiry in one bounded region
+    const groups = await page.evaluate(() => [...document.querySelectorAll('.exp-strip[data-chart-filter]')].map(list => {
+      const id = list.getAttribute('data-chart-filter'), r = document.querySelector(`#${id}-data .chart-groups`);
+      if (!r) return `#${id}: no region of row groups`;
+      const s = getComputedStyle(r), tabs = list.querySelectorAll('[role="tab"]').length;
+      const bodies = [...r.querySelectorAll('tbody[data-group]')];
+      const bad = [];
+      if (r.getAttribute('role') !== 'region' || r.tabIndex !== 0 || !r.getAttribute('aria-labelledby')) bad.push('not a focusable, labelled region');
+      if (s.overflowY !== 'auto' || r.clientHeight > 0.6 * innerHeight + 1) bad.push(`not bounded (${r.clientHeight} px, overflow ${s.overflowY})`);
+      if (bodies.length !== tabs) bad.push(`${bodies.length} row groups for ${tabs} tabs`);
+      if (bodies.some(b => getComputedStyle(b).display !== 'table-row-group')) bad.push('a row group is not shown');
+      return bad.length ? `#${id}: ${bad.join('; ')}` : null;
+    }).filter(Boolean));
+    for (const g of groups) entry.nojs.push({ width, groups: g });
     await ctx.close();
   }
   entry.blocked = [...new Set(entry.blocked)];
@@ -144,8 +160,8 @@ for (const name of PAGES) {
     (o.stressed ? ` with letter-spacing +${STRESS_SPACING}` : '') + ` (scrollWidth ${o.scrollWidth})`);
   for (const t of entry.truncated) report.failures.push(`${name} @${t.width}px: ${t.what} is cut short ` +
     'with an ellipsis and has no title');
-  for (const o of entry.nojs) report.failures.push(`${name}: with JavaScript off, scrolls horizontally at ` +
-    `${o.width}px (scrollWidth ${o.scrollWidth})`);
+  for (const o of entry.nojs) report.failures.push(`${name}: with JavaScript off, ` + (o.groups
+    ? `at ${o.width}px the per-group rows of ${o.groups}` : `scrolls horizontally at ${o.width}px (scrollWidth ${o.scrollWidth})`));
   for (const e of entry.errors) report.failures.push(`${name}: JavaScript error: ${e}`);
   for (const b of entry.blocked) report.failures.push(`${name}: requests another origin: ${b}`);
   const status = entry.axe.length + entry.overflow.length + entry.truncated.length + entry.errors.length +

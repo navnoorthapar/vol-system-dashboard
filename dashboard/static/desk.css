@@ -299,6 +299,21 @@ button.disclose { background: none; border: 0; padding: 0; margin: 0; font: inhe
 .chip-info   { color: var(--info);   border-color: rgba(138, 187, 255, 0.45); background: var(--tint-info); }
 .chip-muted  { color: var(--text3); }
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+/* The smile's expiry strip: one line that scrolls sideways (~45 expiries on a Cboe
+   book); edge shadows show the side with more tabs; desk.js keeps the selected tab in
+   view. A month's first expiry opens a group (.mo); the focus ring sits inside. */
+.tabs.exp-strip { flex-wrap: nowrap; overflow-x: auto; min-width: 0; padding: 2px 0 3px; overscroll-behavior-x: contain; scrollbar-width: thin;
+  background:
+    linear-gradient(to right, var(--surface) 30%, rgba(28, 33, 39, 0)) left center / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--surface) 30%, rgba(28, 33, 39, 0)) right center / 32px 100% no-repeat local,
+    linear-gradient(to right, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) left center / 10px 100% no-repeat scroll,
+    linear-gradient(to left, rgba(138, 187, 255, 0.28), rgba(138, 187, 255, 0)) right center / 10px 100% no-repeat scroll; }
+.exp-strip .btn { flex: none; }
+.exp-strip .btn.mo { margin-left: 8px; }
+.exp-strip .btn:focus-visible { outline-offset: -2px; }
+.exp-strip .settle { color: var(--text3); }
+.exp-strip .btn[aria-selected="true"] .settle { color: var(--text2); }
+.exp-status { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text2); margin: 2px 0 0; min-height: 18px; }
 /* a region shown in one of two units (the scenario grid: idx pts, or $ per SPX
    contract); without JavaScript the base unit shows */
 .units:not([data-show="alt"]) [data-unit="alt"], .units[data-show="alt"] [data-unit="base"] { display: none; }
@@ -365,18 +380,15 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .result-v { font-size: 24px; font-weight: 600; line-height: 1.2; letter-spacing: -0.01em; }
 .result-v .unit { font-size: 0.55em; font-weight: 500; color: var(--text2); margin-left: 3px; }
 .result-d { font-size: 12px; color: var(--text2); }
-/* A signed value's tone. The value rules above (.kpi-value: --text) come after
-   .pos / .neg at the same specificity, so the tone class never showed; these
-   win. The sign glyph stays in the text, so colour is never the only cue. */
+/* A signed value's tone (these win over .kpi-value's --text); the sign glyph stays
+   in the text, so colour is never the only cue. */
 .kpi-value.pos, .result-v.pos, .param-val.pos { color: var(--pos); }
 .kpi-value.neg, .result-v.neg, .param-val.neg { color: var(--neg); }
 
 /* ── tables ──────────────────────────────────────────────────────────── */
-/* Horizontal scroll regions: keyboard-focusable (tabindex=0) and visibly
-   scrollable. Edge shadows appear on the side that has more content (the
-   covers scroll with the content, the shadows do not), and desk.js adds a
-   text hint when a region overflows. position: relative keeps the visually
-   hidden spans inside cells within the scroll box. */
+/* Horizontal scroll regions: keyboard-focusable and visibly scrollable: edge shadows
+   on the side with more content (the covers scroll, the shadows do not); desk.js adds
+   a hint when one overflows. position: relative keeps sr-only spans inside the box. */
 .tbl-wrap, .heat-wrap {
   overflow-x: auto; max-width: 100%; position: relative;
   background:
@@ -391,9 +403,8 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .scroll-hint.show { display: block; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
 .tbl caption { text-align: left; font-size: 11px; color: var(--text3); padding: 0 0 4px; }
-/* A caption inside a horizontal scroll region is as wide as its table, so on a
-   phone the middle of each line was off-screen: it wraps to the region's
-   visible width (a size container) and stays put while the table scrolls. */
+/* A caption in a horizontal scroll region wraps to the region's visible width (a
+   size container) and stays put while the table scrolls. */
 .tbl-wrap, .heat-wrap { container-type: inline-size; }
 .tbl-wrap > table > caption, .heat-wrap > table > caption { position: sticky; left: 0; max-width: 100cqw; }
 .tbl th {
@@ -404,7 +415,7 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .tbl td:first-child { color: var(--text); }
 .tbl .num, .tbl th.num { text-align: right; white-space: nowrap; }
 .tbl td.num { color: var(--text); }
-.tbl tbody tr:hover td { background: var(--surface2); }
+.tbl tbody tr:hover td:not(.t) { background: var(--surface2); }
 .tbl tr:last-child td { border-bottom: none; }
 .tbl tr.muted td { color: var(--text3); }
 .tbl tr.muted td.num { color: var(--text2); }
@@ -413,6 +424,9 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .tbl td.wrap { white-space: normal; min-width: 180px; }
 .tbl.spec td.wrap { min-width: 12ch; }   /* nine text columns (Research #sleeve-spec) share the width */
 .tbl.dense td, .tbl.dense th { padding: 3px 6px; }
+/* every column but the first is a number: aligned from the table's class (D2) */
+.tbl.nr :where(td:not(:first-child), th:not(:first-child)) { text-align: right; white-space: nowrap; }
+.tbl.nr :where(td:not(:first-child)) { color: var(--text); }
 .tbl.wrap-head th { white-space: normal; vertical-align: bottom; min-width: 7ch; }   /* long heads wrap, the numbers do not */
 /* the delta-quoted grid (Surface #delta-grid): tinted vol and RR/BF cells, the
    expiry or tenor as the row header (sticky while the region scrolls sideways),
@@ -422,8 +436,10 @@ svg.dots .dp-blabel { fill: var(--breach); }
 .dgrid thead th { vertical-align: bottom; }
 .dgrid th[scope="row"] { position: sticky; left: 0; z-index: 1; text-transform: none; letter-spacing: 0; font-size: 11.5px; font-weight: 600; color: var(--text); white-space: nowrap; background: var(--surface); }
 .dgrid .dg-sub { display: block; font-weight: 400; font-size: 10px; color: var(--text3); }
-.dgrid td.tint { border-bottom-color: var(--surface); }
-.dgrid tbody tr:hover td.tint { filter: brightness(1.08); }
+.dgrid td { text-align: right; white-space: nowrap; color: var(--text); }
+.dgrid td.t { border-bottom-color: var(--surface); color: #000; }   /* a ramp step's class may make it white */
+.dgrid tbody tr:hover td.t { filter: brightness(1.08); }
+.dgrid tr.muted td { color: var(--text2); }
 .dgrid .xp-tag { display: block; font-family: var(--sans); font-size: 9.5px; font-weight: 600; white-space: nowrap; }
 .dgrid tr.muted th[scope="row"] { color: var(--text3); }
 /* a model's name stays on one line in a desktop-wide region; in a narrower one (a
@@ -442,12 +458,17 @@ code { overflow-wrap: anywhere; }
 .heat caption { text-align: left; font-family: var(--sans); font-size: 11px; color: var(--text3); padding-bottom: 4px; }
 .heat th { font-weight: 500; color: var(--text3); padding: 2px 4px; white-space: nowrap; text-align: center; }
 .heat th[scope="row"] { text-align: left; padding-right: 8px; color: var(--text2); }
-.heat td { min-width: 40px; height: 26px; text-align: center; vertical-align: middle; border-radius: 1px; padding: 0 3px; white-space: nowrap; }
+.heat td { min-width: 40px; height: 26px; text-align: center; vertical-align: middle; border-radius: 1px; padding: 0 3px; white-space: nowrap; color: #000; }
 /* two-tone focus ring: black and white, so one of the two reaches 3:1 on any
    cell colour (the single --focus ring vanished on the light ends of the ramps) */
 .heat td:focus-visible { outline: 2px solid #000; outline-offset: -2px; box-shadow: inset 0 0 0 4px #fff; }
 .heat td.flag:focus-visible { box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 6px var(--breach); }
 .heat td.empty { background: var(--bg); color: var(--text3); }
+.heat td.empty::before { content: "·"; content: "·" / ""; }   /* shown, not read: the caption says it */
+/* heat classes: written by dashboard/heat_css.py from desk_format.HEAT_CLASSES */
+.q0{background:#00224e}.q1{background:#012451}.q2{background:#022555}.q3{background:#022758}.q4{background:#03295c}.q5{background:#042a5f}.q6{background:#052c62}.q7{background:#062e66}.q8{background:#063069}.q9{background:#07316d}.q10{background:#083370}.q11{background:#0d3570}.q12{background:#11376f}.q13{background:#16386f}.q14{background:#1a3a6e}.q15{background:#1e3c6e}.q16{background:#233e6e}.q17{background:#28406d}.q18{background:#2c416d}.q19{background:#30436c}.q20{background:#35456c}.q21{background:#38476c}.q22{background:#3a496c}.q23{background:#3d4a6c}.q24{background:#3f4c6c}.q25{background:#424e6c}.q26{background:#45506c}.q27{background:#47526c}.q28{background:#4a536c}.q29{background:#4c556c}.q30{background:#4f576c}.q31{background:#51596c}.q32{background:#545b6d}.q33{background:#565c6d}.q34{background:#585e6e}.q35{background:#5a606e}.q36{background:#5d626e}.q37{background:#5f646f}.q38{background:#61656f}.q39{background:#646770}.q40{background:#666970}.q41{background:#686b71}.q42{background:#6b6d72}.q43{background:#6d6f72}.q44{background:#6f7173}.q45{background:#727274}.q46{background:#747475}.q47{background:#767676}.q48{background:#787876}.q49{background:#7b7a77}.q50{background:#7d7c78}.q51{background:#7f7e78}.q52{background:#828078}.q53{background:#848178}.q54{background:#868378}.q55{background:#888578}.q56{background:#8b8777}.q57{background:#8d8977}.q58{background:#8f8a77}.q59{background:#928c77}.q60{background:#948e77}.q61{background:#979076}.q62{background:#999276}.q63{background:#9c9475}.q64{background:#9e9675}.q65{background:#a19874}.q66{background:#a49b73}.q67{background:#a69d73}.q68{background:#a99f72}.q69{background:#aba172}.q70{background:#aea371}.q71{background:#b1a570}.q72{background:#b3a76f}.q73{background:#b6a96e}.q74{background:#b8ab6d}.q75{background:#bbae6c}.q76{background:#beb06a}.q77{background:#c0b269}.q78{background:#c3b468}.q79{background:#c5b667}.q80{background:#c8b866}.q81{background:#cbba64}.q82{background:#cebd62}.q83{background:#d1bf60}.q84{background:#d4c15e}.q85{background:#d6c45c}.q86{background:#d9c65a}.q87{background:#dcc858}.q88{background:#dfca56}.q89{background:#e2cd54}.q90{background:#e5cf52}.q91{background:#e8d24f}.q92{background:#ead44d}.q93{background:#edd74a}.q94{background:#efd948}.q95{background:#f2dc45}.q96{background:#f4de42}.q97{background:#f6e040}.q98{background:#f9e33d}.q99{background:#fce63b}.q100{background:#fee838}.d0{background:#d4a0ff}.d1{background:#cf9efe}.d2{background:#cb9bfc}.d3{background:#c698fa}.d4{background:#c296f9}.d5{background:#bd94f8}.d6{background:#b891f6}.d7{background:#b48ef4}.d8{background:#af8cf3}.d9{background:#ab8af2}.d10{background:#a687f0}.d11{background:#a283ec}.d12{background:#9e80e8}.d13{background:#9a7ce4}.d14{background:#9679e0}.d15{background:#9275dc}.d16{background:#8f71d8}.d17{background:#8b6ed4}.d18{background:#876ad0}.d19{background:#8367cc}.d20{background:#7f63c8}.d21{background:#7b60c3}.d22{background:#775dbd}.d23{background:#7359b8}.d24{background:#6f56b3}.d25{background:#6b53ae}.d26{background:#6750a8}.d27{background:#634da3}.d28{background:#5f499e}.d29{background:#5b4698}.d30{background:#574393}.d31{background:#53408d}.d32{background:#503e88}.d33{background:#4c3b82}.d34{background:#49397c}.d35{background:#453676}.d36{background:#413371}.d37{background:#3e316b}.d38{background:#3a2e65}.d39{background:#372c60}.d40{background:#33295a}.d41{background:#312855}.d42{background:#2e2750}.d43{background:#2c274b}.d44{background:#2a2646}.d45{background:#282540}.d46{background:#25243b}.d47{background:#232336}.d48{background:#212331}.d49{background:#1e222c}.d50{background:#1c2127}.d51{background:#1c2429}.d52{background:#1c272b}.d53{background:#1c292d}.d54{background:#1c2c2f}.d55{background:#1c2f30}.d56{background:#1d3232}.d57{background:#1d3534}.d58{background:#1d3736}.d59{background:#1d3a38}.d60{background:#1d3d3a}.d61{background:#1e403d}.d62{background:#1e4440}.d63{background:#1e4844}.d64{background:#1f4b47}.d65{background:#204e4a}.d66{background:#20524d}.d67{background:#205650}.d68{background:#215954}.d69{background:#225c57}.d70{background:#22605a}.d71{background:#23645d}.d72{background:#246861}.d73{background:#256b64}.d74{background:#266f68}.d75{background:#26736b}.d76{background:#27776e}.d77{background:#287b72}.d78{background:#297e75}.d79{background:#2a8279}.d80{background:#2b867c}.d81{background:#2e8a80}.d82{background:#308e83}.d83{background:#339286}.d84{background:#35968a}.d85{background:#389a8e}.d86{background:#3b9d91}.d87{background:#3da194}.d88{background:#40a598}.d89{background:#42a99c}.d90{background:#45ad9f}.d91{background:#4bb1a3}.d92{background:#51b5a6}.d93{background:#56b8aa}.d94{background:#5cbcae}.d95{background:#62c0b2}.d96{background:#68c4b5}.d97{background:#6ec8b9}.d98{background:#73cbbd}.d99{background:#79cfc0}.d100{background:#7fd3c4}
+:is(.heat,.dgrid) td:is(.q0,.q1,.q2,.q3,.q4,.q5,.q6,.q7,.q8,.q9,.q10,.q11,.q12,.q13,.q14,.q15,.q16,.q17,.q18,.q19,.q20,.q21,.q22,.q23,.q24,.q25,.q26,.q27,.q28,.q29,.q30,.q31,.q32,.q33,.q34,.q35,.q36,.q37,.q38,.q39,.q40,.q41,.q42,.q43,.q44,.q45,.q46,.d20,.d21,.d22,.d23,.d24,.d25,.d26,.d27,.d28,.d29,.d30,.d31,.d32,.d33,.d34,.d35,.d36,.d37,.d38,.d39,.d40,.d41,.d42,.d43,.d44,.d45,.d46,.d47,.d48,.d49,.d50,.d51,.d52,.d53,.d54,.d55,.d56,.d57,.d58,.d59,.d60,.d61,.d62,.d63,.d64,.d65,.d66,.d67,.d68,.d69,.d70,.d71,.d72,.d73,.d74,.d75,.d76,.d77,.d78,.d79){color:#fff}
+/* end of heat classes */
 /* a total column on its own colour scale (Research #monthly's Year) sits 6 px
    apart: a transparent border the fill stops at; its focus ring is drawn inside
    that border, where the fill starts */
@@ -463,6 +484,9 @@ code { overflow-wrap: anywhere; }
    for a quote's lines at desk width, so a hover does not move the page below */
 .quote-readout { font-family: var(--mono); font-size: 11px; color: var(--text2); min-height: 4.6em; margin: 4px 0 0; padding: 2px 4px; border-radius: 3px; }
 .quote-readout:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+/* a book smile's other expiries did not load (desk.js bookFailed): empty, it takes no room */
+.quote-note { font-size: 12px; color: var(--watch); margin: 4px 0 0; }
+.quote-note:empty { margin: 0; }
 .point-readout { min-height: 2.4em; }
 /* a segmented control: one choice of two or three (aria-pressed buttons) */
 .seg { display: inline-flex; margin: 6px 0 2px; }
@@ -482,6 +506,8 @@ code { overflow-wrap: anywhere; }
 .chart-data th, .chart-data td { padding: 2px 8px; border-bottom: 1px solid var(--line); text-align: left; font-feature-settings: var(--num-features); }
 .chart-data th { color: var(--text3); font-weight: 600; }
 .chart-data caption { text-align: left; color: var(--text3); font-size: 11px; padding-bottom: 3px; }
+.chart-data .nr td + td, .chart-data .nr th + th { text-align: right; }   /* every column but the first a number */
+.chart-groups thead th { position: sticky; top: 0; background: var(--surface); }
 .chart-fallback { display: none; }
 .charts-failed .chart, .no-js .chart { display: none; }
 /* controls that only drive a chart do nothing without one (the smile's expiry
@@ -622,14 +648,11 @@ dialog.keys h2 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 dialog.keys .dl { font-size: 12px; }
 
 /* ── responsive ──────────────────────────────────────────────────────── */
-/* Paired rows (P2.7). The template marks a row of two panels .pair (three:
-   .trio) instead of relying on :has(). Up to 1180 px the members of a pair
-   stack at full width (an s7 + s5 row used to become 12 + 6, a half-empty row);
-   a trio goes 6 + 6 + 12. From 1181 px the shorter panel's own content fills
-   the row's height: a .grow chart or heatmap grows, so no panel ends in blank
-   space; a .start row lets each panel end with its content where nothing can
-   grow. A .level row (two equal halves that stay side by side down to 861 px)
-   fills the same way from 1181 px without stacking. */
+/* Paired rows (P2.7): a row of two panels is .pair (three: .trio). Up to 1180 px a
+   pair stacks at full width, a trio goes 6 + 6 + 12. From 1181 px the shorter panel's
+   content fills the row: a .grow chart or heatmap grows; a .start row lets each panel
+   end with its content. A .level row (two halves side by side down to 861 px) fills
+   the same way from 1181 px. */
 .sub-head { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text2); margin-top: 14px; }
 .sub-head .sub-meta { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text3); margin-left: 6px; }
 .split > * > .sub-head:first-child { margin-top: 0; }
@@ -643,11 +666,14 @@ dialog.keys .dl { font-size: 12px; }
   .g:is(.pair, .level) .panel-body .chart.grow { flex: 1 1 auto; }
   .g:is(.pair, .level) .panel-body .heat-wrap.grow { flex: 1 1 auto; display: flex; flex-direction: column; }
   .g:is(.pair, .level) .panel-body .heat-wrap.grow > table.heat { flex: 1 1 auto; height: 100%; }
+  /* a heatmap whose rows grow with the expiry count never sets its row's height (size
+     containment): it takes the row's height and scrolls inside it under its sticky
+     head (a 45-expiry grid stretched the smile beside it to 1,164 px) */
+  .g:is(.pair, .level) .panel-body .heat-wrap.capped { contain: size; flex: 1 1 0; min-height: 280px; overflow: auto; }
   .g:is(.pair, .level) .grow-col[hidden] { display: none; }
   .g.pair.start { align-items: start; }
-  /* an open disclosure makes its panel taller than the row was laid out for; the
-     panel beside it then ends with its own content instead of stretching a chart
-     (a 0.55–0.95 β range drawn 1,359 px tall) or a blank 1,250 px body (F3) */
+  /* an open disclosure makes its panel taller: the panel beside it then ends with its
+     own content instead of stretching a chart or a blank body (F3) */
   .g:is(.pair, .level):has(details[open]) { align-items: start; }
 }
 /* a trio's shorter panel ends with its disclosure, not with blank space (side by
@@ -661,10 +687,15 @@ dialog.keys .dl { font-size: 12px; }
 @media (max-width: 1180px) {
   .g.pair > *, .g.trio > :last-child { grid-column: 1 / -1; }
   .g.evenfill > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .heat-wrap.capped { max-height: 60vh; overflow: auto; }   /* stacked: a capped grid scrolls inside 60% of the screen */
 }
+/* a heatmap's column heads stay in view while a capped region scrolls (above) */
+table.heat thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); }
 /* phones: a heatmap's row header (the expiry) stays in view while its region scrolls sideways */
 @media (max-width: 599px) {
   table.heat th[scope="row"] { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+  table.heat thead th:first-child { left: 0; z-index: 3; }
+  .chart.h440 { height: 360px; }          /* the smile slice: its residual strip shares the height */
 }
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
@@ -717,16 +748,13 @@ dialog.keys .dl { font-size: 12px; }
   .result-v { font-size: 21px; }
   .chart { height: 220px; }
   .chart.h300, .chart.h340, .chart.h400 { height: 260px; }
-  .chart.h440 { height: 340px; }          /* the smile slice: its residual strip shares the height */
   .chart.tall-narrow { height: 680px; }      /* one row per category (the C22 waterfall): three lines of a wrapped step name */
 }
-/* Text-heavy tables (.tbl.cards) in a region narrower than 640 px (a phone, or a
-   narrow panel): each row a card, each cell a field labelled from its data-label,
-   instead of rows scrolled sideways. The region (.tbl-wrap) is the size container.
-   The header row stays in the accessibility tree (visually hidden); desk.js gives
-   the rows and cells explicit table roles, since some browsers drop them with
-   display: block. The label is generated content with an empty alternative, so it
-   is not read twice beside the column header. */
+/* Text-heavy tables (.tbl.cards) in a region under 640 px: each row a card, each cell
+   a field labelled from its data-label (the .tbl-wrap is the size container). The head
+   row stays in the accessibility tree, visually hidden; desk.js gives rows and cells
+   table roles (some browsers drop them with display: block). The label is generated
+   content with an empty alternative, so it is not read twice. */
 @container (max-width: 640px) {
   .tbl.cards, .tbl.cards tbody, .tbl.cards tr { display: block; }
   /* a table-caption in a block table is boxed at min-content width (a word a line) */
@@ -777,6 +805,7 @@ dialog.keys .dl { font-size: 12px; }
   .panel, .banner, .pm, .kpis { break-inside: avoid; }
   .tbl-wrap, .heat-wrap { overflow: visible !important; }
   .tbl-wrap.capped { max-height: none !important; overflow-y: visible !important; }   /* a capped table overlapped the chart below it */
+  .heat-wrap.capped { max-height: none !important; contain: none !important; }        /* every row of a capped grid prints */
   .chart-data.sr-only { position: static !important; width: auto; height: auto; margin: 4px 0 0; overflow: visible; clip: auto; white-space: normal; }
   /* heat cells, ramps and swatches print in their colours (browsers drop
      backgrounds by default, which left faint grey numbers on white) */
