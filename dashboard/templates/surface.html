@@ -61,7 +61,7 @@
 
 {% if d.compare or d.charts.atm_ts %}{% set cp = d.compare %}
 <div class="g pair">
-  {% if cp %}{% call m.panel('surface-change', 'Against an earlier session · constant maturity', 's5', cp.views|length|plural('earlier session')) %}
+  {% if cp %}{% call m.panel('surface-change', 'Against an earlier session · constant maturity', 's5', (cp.views|length) ~ ' of ' ~ (cp.n_earlier|plural('earlier session'))) %}
     <div class="tabs js-only" role="tablist" aria-label="Earlier session compared" data-state-key="vs" data-chart-filter="chart-atm-ts chart-rr-term" hidden>
       {% for v in cp.views %}<button class="btn" type="button" role="tab" aria-selected="{{ 'true' if v.session == cp.default else 'false' }}" aria-controls="vs-{{ v.session }}" data-value="{{ v.session }}">{{ v.session }}</button>{% endfor %}
     </div>
@@ -70,9 +70,10 @@
       {{ m.vs_table(cp.head, v) }}
     </div>
     {% endfor %}
-    {% if d.charts.rr_term %}<h3 class="sub-head" id="rr-term">25Δ risk reversal by expiry, every stored session</h3>
+    <p class="note" id="surface-change-picks">Compared: the newest earlier session and the newest stored at least {% for g in cp.lags %}{{ g }}{{ ', ' if loop.revindex > 2 else (' and ' if not loop.last else '') }}{% endfor %} NYSE sessions back (about a week, a month and a quarter), {{ cp.views|length }} of the {{ cp.n_earlier }} earlier sessions stored. At most {{ cp.lags|length + 1 }} are compared, so the page keeps one size as sessions accrue; the ranges under the tiles at the top use every stored session.</p>
+    {% if d.charts.rr_term %}<h3 class="sub-head" id="rr-term">25Δ risk reversal by expiry, this session and those compared</h3>
     {{ m.chart(d.charts.rr_term, 'h260 grow') }}
-    <p class="note" id="rr-term-note">SVI-cal surface, listed expiries; {{ d.session }} solid, the others grey, the session chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endif %}
+    <p class="note" id="rr-term-note">SVI-cal surface, listed expiries; {{ d.session }} solid, the sessions compared grey, the one chosen under “Against an earlier session” dashed. A gap is a wing extrapolated beyond the quoted strikes.</p>{% endif %}
     <p class="note">The stored sessions are irregular (the surface report runs on sessions with a stored chain), so a change spans the gap shown, not a day. “—”: a session without that tenor among its listed expiries (never extrapolated), or an RR / BF with a wing beyond the quoted strikes. The tabs also set the dashed lines of the ATM and RR25 charts.</p>
   {% endcall %}{% endif %}
   {% if d.charts.atm_ts %}{% call m.panel('atm-term', 'ATM term structure · quotes, eSSVI and SVI-cal', 's7' if cp else 's5') %}{{ m.chart(d.charts.atm_ts, 'h300 grow') }}

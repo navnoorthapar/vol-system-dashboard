@@ -234,6 +234,21 @@ def range_nums(r: tuple[int, float, float] | None) -> list[float]:
 
 
 # ── the session in view ───────────────────────────────────────────────────────
+# the earlier sessions the page compares (D2): the newest, and the newest at least this
+# many NYSE sessions before the headline, each once (the page's own rule, restated)
+COMPARE_LAGS = (5, 21, 63)
+
+
+def compared(head: str, earlier: Sequence[Any]) -> list[Any]:
+    """The compared sessions, newest first, from sessions newest first."""
+    out = list(earlier[:1])
+    for lag in COMPARE_LAGS:
+        pick = next((x for x in earlier if sessions_between(x.name, head) >= lag), None)
+        if pick is not None and pick not in out:
+            out.append(pick)
+    return sorted(out, key=lambda x: x.name, reverse=True)
+
+
 class Ctx:
     """The newest stored session, its recompute, and every other stored session."""
 
@@ -252,6 +267,7 @@ class Ctx:
         # the comparison with earlier sessions (and the charts that draw them) needs this
         # session's SVI-cal slices and at least one earlier session with a surface.json
         self.earlier = sorted((x for x in self.desk if x.name < s.name), key=lambda x: x.name, reverse=True)
+        self.compared = compared(s.name, self.earlier)
         self.compare = bool(self.listed) and bool(self.earlier)
         self.cm = M.cm_grid(s)
         self.by_cm = {r["label"]: r for r in self.cm}
@@ -693,10 +709,13 @@ def surface_change(a: Audit, c: Ctx) -> None:
     a.equal(P_CHG, "panel shown", a.one("section#surface-change") is not None, c.compare)
     if not c.compare:
         return
-    earlier = c.earlier
-    nums(a, P_CHG, "panel meta (earlier sessions)", meta(a, "surface-change"), [len(earlier)])
+    earlier = c.compared
+    nums(a, P_CHG, "panel meta (compared of the earlier sessions)", meta(a, "surface-change"),
+         [len(earlier), len(c.earlier)])
+    nums(a, P_CHG, "which sessions are compared", a.one("#surface-change-picks"),
+         [*COMPARE_LAGS, len(earlier), len(c.earlier), len(COMPARE_LAGS) + 1])
     tabs = a.soup.select('#surface-change [role="tab"]')
-    a.equal(P_CHG, "tabs: earlier sessions, newest first", [t.get("data-value") for t in tabs],
+    a.equal(P_CHG, "tabs: the compared sessions, newest first", [t.get("data-value") for t in tabs],
             [x.name for x in earlier])
     a.equal(P_CHG, "default tab: the most recent earlier session",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [earlier[0].name])
@@ -731,8 +750,10 @@ def surface_change(a: Audit, c: Ctx) -> None:
 
 
 def rr_term(a: Audit, c: Ctx) -> None:
-    """RR25 of every listed expiry of every stored session: the chart's table and series."""
-    want = [(x.name, r) for x in sorted(c.desk, key=lambda x: x.name) for r in M.listed_grid(x)]
+    """RR25 of every listed expiry of this session and the compared ones: the chart's
+    table and series."""
+    shown = sorted([c.s, *c.compared], key=lambda x: x.name)
+    want = [(x.name, r) for x in shown for r in M.listed_grid(x)]
     trs = rows(chart_table(a, "chart-rr-term"))
     if same_len(a, P_CHG, "RR25 table rows", trs, want):
         for tr, (sname, r) in zip(trs, want):
@@ -746,12 +767,16 @@ def rr_term(a: Audit, c: Ctx) -> None:
     name = f"SVI-cal RR25 {c.session}"
     approx(a, P_CHG, f"chart-rr-term series {name}", series(sp, name),
            [[r["T_days"], r["rr25"]] for r in c.listed])
-    names = (["Every stored session"] if len(c.desk) > 1 else []) + [
-        f"SVI-cal RR25 {x.name}" for x in sorted(c.desk, key=lambda x: x.name) if x.name != c.session]
+    names = (["Sessions compared"] if c.compared else []) + [
+        f"SVI-cal RR25 {x.name}" for x in shown if x.name != c.session]
     legend(a, P_CHG, "chart-rr-term", [*names, f"SVI-cal RR25 {c.session}"])
-    for x in c.desk:
-        if x.name != c.session:
-            name = f"SVI-cal RR25 {x.name}"
+    others = [x for x in shown if x.name != c.session]
+    each = [f"SVI-cal RR25 {x.name}" for x in others] + [f"RR25 {x.name} (grey)" for x in others]
+    a.equal(P_CHG, "chart-rr-term series: this session's, and two per session compared",
+            sorted(str(x.get("name")) for x in (sp or {}).get("series") or []),
+            sorted([f"SVI-cal RR25 {c.session}", *each]))
+    for x in others:
+        for name in (f"SVI-cal RR25 {x.name}", f"RR25 {x.name} (grey)"):
             approx(a, P_CHG, f"chart-rr-term series {name}", series(sp, name),
                    [[r["T_days"], r["rr25"]] for r in M.listed_grid(x)])
 
@@ -791,7 +816,7 @@ def atm_term(a: Audit, c: Ctx) -> None:
             cell(a, P_ATM, f"{e} parity r (surface.json)", td[5], M.num(t.get("r")), scale=100.0)
             cell(a, P_ATM, f"{e} parity q (surface.json)", td[6], M.num(t.get("q")), scale=100.0)
             cell(a, P_ATM, f"{e} quotes (residual table)", td[7], float(nq.get(e, 0)))
-    earlier = c.earlier if c.compare else []
+    earlier = c.compared if c.compare else []
     for x in earlier:
         lst = M.listed_grid(x)
         tbl = chart_group(a, "chart-atm-ts", x.name)

@@ -2969,6 +2969,66 @@ def test_surface_page_weight_grows_at_most_7000_bytes_an_expiry(dash, tmp_path, 
     assert size[17] <= 300_000, size
 
 
+def _earlier_copies(data: Path, ages: list[int], ref: str, dash) -> list[str]:
+    """Copies of the store's SESSION as earlier stored sessions, one per age in NYSE
+    sessions before ref (dash.session_age), each JSON artifact's session renamed."""
+    out = []
+    for age in ages:
+        day = pd.Timestamp(ref)
+        while dash.session_age(day.strftime("%Y-%m-%d"), ref) < age or day.weekday() > 4:
+            day -= pd.Timedelta(days=1)
+        name = day.strftime("%Y-%m-%d")
+        shutil.copytree(data / "surface" / SESSION, data / "surface" / name)
+        for f in (data / "surface" / name).glob("*.json"):
+            obj = json.loads(f.read_text())
+            obj["session"] = name
+            f.write_text(json.dumps(obj))
+        out.append(name)
+    return out
+
+
+def test_surface_page_does_not_grow_past_its_compared_sessions(dash, tmp_path, monkeypatch):
+    """D2: #surface-change compared the headline with every earlier stored session, and
+    the ATM and RR25 term charts drew them all: about 11 kB a session at 45 expiries,
+    so the page outgrew its 450 kB budget at eight earlier sessions and kept growing a
+    session a day. It compares at most len(COMPARE_LAGS) + 1 (the newest earlier one
+    and the newest at least each lag back). On synthetic 45-expiry stores with N
+    earlier sessions that fill every lag and with one more, the page has the same
+    views and the same size, give or take a digit."""
+    lags = getattr(dash, "COMPARE_LAGS", (5, 21, 63))
+    size, views = {}, {}
+    for extra in (False, True):
+        root = tmp_path / str(extra)
+        root.mkdir()
+        data = _surface_store(root, 45, roots=True)
+        _earlier_copies(data, [1, *lags] + ([2] if extra else []), SESSION, dash)
+        monkeypatch.setattr(dash, "DATA", data)
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        size[extra] = len(html.encode("utf-8"))
+        views[extra] = re.findall(r'role="tab" aria-selected="(?:true|false)" aria-controls="vs-([\d-]+)"',
+                                  html)
+    assert len(views[False]) == len(lags) + 1, views
+    assert views[True] == views[False], views
+    assert abs(size[True] - size[False]) <= 64, size
+
+
+def test_compared_sessions_are_the_newest_and_the_newest_past_each_lag_once(dash):
+    """D2: the newest earlier session, then per lag the newest at least that many NYSE
+    sessions back; one session past two lags is compared once, a lag none reaches adds
+    none, and the rest of the store is left out."""
+    head, lags = "2026-10-28", dash.COMPARE_LAGS
+    day, by_age = pd.Timestamp(head), {}
+    while len(by_age) < lags[-1] + 40:
+        day -= pd.Timedelta(days=1)
+        by_age.setdefault(dash.session_age(day.strftime("%Y-%m-%d"), head), day.strftime("%Y-%m-%d"))
+    ages = [1, 2, lags[0] + 1, lags[-1] + 30, lags[-1] + 35]   # one past every lag but the first
+    got = dash.compared_sessions(head, [by_age[a] for a in ages])
+    want = [by_age[1], by_age[lags[0] + 1]] + ([by_age[lags[-1] + 30]] if len(lags) > 1 else [])
+    assert got == sorted(dict.fromkeys(want), reverse=True)
+    assert dash.compared_sessions(head, []) == []
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
@@ -7410,16 +7470,21 @@ def _cm_of(ds, s: dict) -> list[dict]:
     return ds.constant_maturity(ds.delta_grid(s["surface"], s["quotes"], s["vix"]))
 
 
-def test_surface_change_against_every_earlier_session_states_its_gap(dash, pages):
-    """P2.3: the headline's constant-maturity grid against each earlier stored
-    session (newest first, the newest selected), each table headed with the gap
-    in NYSE sessions (session_age) and its Δ cells the differences of the two
-    grids desk_surface computes from the artifacts."""
+def test_surface_change_against_the_compared_sessions_states_its_gap(dash, pages):
+    """P2.3: the headline's constant-maturity grid against each compared earlier
+    session (newest first, the newest selected; D2: the newest earlier one and the
+    newest at least each COMPARE_LAGS back), each table headed with the gap in NYSE
+    sessions (session_age) and its Δ cells the differences of the two grids
+    desk_surface computes from the artifacts."""
     ds = _desk_module()
     html = pages["/surface"]
     inputs = dash.artifacts.load_surface_desk_inputs(SHIPPED)
     head = _surface_file("surface.json").parent.name
-    earlier = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    stored = sorted((s["session"] for s in inputs if s["session"] < head), reverse=True)
+    earlier = dash.compared_sessions(head, stored)
+    assert earlier[:1] == stored[:1]
+    assert set(earlier) <= set(stored)
+    assert len(earlier) <= len(dash.COMPARE_LAGS) + 1
     sec = re.search(r'id="surface-change".*?</section>', html, re.DOTALL).group(0)
     tabs = re.findall(r'role="tab" aria-selected="(true|false)" aria-controls="vs-([\d-]+)"', sec)
     assert [t for _, t in tabs] == earlier
