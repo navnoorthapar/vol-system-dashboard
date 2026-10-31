@@ -267,7 +267,27 @@ def _fit_book_note(cal: dict, ctx: ScoreContext) -> str:
             f"{diag.get('t_origin_basis') or 'recorded origin'}), not on the "
             f"{name.get(here, here)} book scored here: its anchors are re-selected on this book "
             "by the calibrator's rule, so its in-sample and out-of-sample errors here are not the "
-            "fit's stored RMSEs")
+            "fit's stored RMSEs" + _fit_time_note(diag, ctx))
+
+
+def _fit_time_note(diag: dict, ctx: ScoreContext) -> str:
+    """'' unless the book scored here is the session's closing book and the fit's
+    chain was downloaded once the feed had left it (the bot fits the overnight
+    Yahoo chain): then part of the fit's error here is the market's move
+    between the two (FUND_GRADE_PLAN 0.8)."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    # fits before QUANT-01 stored the Yahoo download's clock as its quote_time
+    when = diag.get("fetched_at") or diag.get("quote_time")
+    if ctx.sq.inputs.get("book_state") != "closing" or not when:
+        return ""
+    fetched = pd.to_datetime(str(when), errors="coerce", utc=True)
+    if pd.isna(fetched):
+        return ""
+    if cd.book_state_at(fetched.to_pydatetime() - cd.QUOTE_DELAY, ctx.sq.session) == "closing":
+        return ""
+    return (f"; that chain was downloaded at {fetched:%Y-%m-%d %H:%M} UTC, after the closing book "
+            "scored here had given way to the overnight one, so part of its error here is the "
+            "market's move between the two")
 
 
 def heston_v2_factory(ctx: ScoreContext) -> ModelSpec | None:

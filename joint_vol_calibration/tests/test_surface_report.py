@@ -457,7 +457,8 @@ def test_the_surface_is_built_from_the_sessions_cboe_book(tmp_path, monkeypatch)
     assert inp["quote_time"] == qt
     assert inp["fetched_at"] == side["fetched_at"]
     assert inp["book_state"] == side["book_state"]
-    assert inp["source_reason"].startswith("the newest stored Cboe book of the session")
+    assert inp["source_reason"].startswith("the session's closing book (its quotes the ones standing "
+                                           "at the 16:15 ET close")
     assert inp["refused_books"] == []
     assert inp["chain_rows"] == side["rows"]
     # a closing book (after the close, outside the next GTH window): T from the close
@@ -501,8 +502,11 @@ def test_a_gth_book_is_calculated_at_its_quote_time_and_departs_from_nothing(tmp
     """Tier 0.5: a Global Trading Hours book (the Mon-Thu book slots) is
     calculated at its quote time, as Cboe times a calculation on the quotes
     standing then, and vix_replication.json says so: the timing is no listed
-    departure; the note says the Cboe close it is compared with is the earlier
-    16:15 ET print, and the gap attribution keeps that timing among its causes."""
+    departure; the note says plainly (FUND_GRADE_PLAN 0.8) that the book is the
+    overnight one, how many hours after the 16:15 ET print it was quoted, that
+    the gap therefore mixes the replication's error with the overnight move, and
+    why no closing book was used; the gap attribution keeps that timing among
+    its causes."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -516,11 +520,103 @@ def test_a_gth_book_is_calculated_at_its_quote_time_and_departs_from_nothing(tmp
     assert vixd["calculation_time_basis"] == report.CALC_BOOK_QUOTE_TIME
     assert vixd["calculation_time_source"].startswith(f"the Cboe book's quote time {qt}")
     assert not any(d.startswith("Calculation time") for d in vixd["deviations"])
-    assert sum(n.startswith(f"The replication is timed at the book's quote time, {ny:%Y-%m-%d %H:%M} ET")
-               and n.endswith(f"16:15 ET print of {SESSION}, so the gap includes the market's move "
-                              "between the two instants.") for n in vixd["gap_notes"]) == 1
+    hours = (ny - datetime.fromisoformat(f"{SESSION}T16:15")).total_seconds() / 3600.0
+    assert sum(n.startswith("The book is the overnight (Global Trading Hours) book (no closing book of "
+                            "the session is stored")
+               and f"quoted at {ny:%Y-%m-%d %H:%M} ET, {hours:.1f} hours after the 16:15 ET print of "
+                   f"{SESSION} it is compared with: the gap mixes the replication's error with the "
+                   "market's move overnight." in n for n in vixd["gap_notes"]) == 1
+    assert out["surface"]["inputs"]["source_reason"].startswith(
+        "the newest stored Cboe book of the session (no closing book of the session is stored)")
     att = [n for n in vixd["gap_notes"] if n.startswith("Gap attribution (")]
     assert all("snapshot timing vs the 16:15 ET print" in n for n in att)
+
+
+def _second_capture(store_path, stem, quote_time, book_state, fetched_at, *, empty_atm=False):
+    """Another capture of SESSION beside the one _capture_store wrote: the same
+    quotes stamped ``quote_time``, in ``book_state``, fetched at ``fetched_at``."""
+    frame = pd.read_parquet(store_path).assign(quote_time=quote_time)
+    if empty_atm:
+        near = (frame["strike"] / frame["underlying_price"] - 1.0).abs() < 0.03
+        frame.loc[near, "bid"] = 0.0
+    out = store_path.parent / f"{stem}.parquet"
+    frame.to_parquet(out, index=False)
+    side = json.loads(store_path.with_suffix(".json").read_text())
+    side.update(quote_time=quote_time, book_state=book_state, fetched_at=fetched_at,
+                two_sided_rows=int(((frame["bid"] > 0) & (frame["ask"] >= frame["bid"])).sum()))
+    out.with_suffix(".json").write_text(json.dumps(side))
+    return out
+
+
+def test_a_sessions_closing_book_is_preferred_to_its_later_overnight_book(tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.8: the replicated VIX was set against the 16:15 ET print on
+    an overnight book, so its gap mixed the replication's error with the overnight
+    move. With the close slot's closing book stored beside the book slot's later
+    Global Trading Hours book, the session is built from the closing book (newest
+    no longer wins): the replication is timed at the 16:15 ET close the print is
+    computed at, its timing is no cause of the gap, and the record says why that
+    book. A closing book that fails the quote-state gates leaves the overnight
+    book, and the note says so."""
+    from joint_vol_calibration.surface import quotes as sqm
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
+                              "2026-10-16T22:10:00Z")          # 17:55 ET, before the overnight one
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["chain"] == f"data_store/options/cboe/{closing.name}"
+    assert sq.inputs["book_state"] == "closing"
+    assert sq.inputs["closing_books"] == 1
+    assert sq.inputs["source_reason"].startswith(
+        "the session's closing book (its quotes the ones standing at the 16:15 ET close, when the "
+        "official VIX-family closes are computed); it passes the quote-state gates")
+    out = report.run_session(SESSION, models=["essvi"])
+    vixd = out["vix_replication"]
+    assert out["surface"]["inputs"]["chain"] == sq.inputs["chain"]
+    assert vixd["calculation_time_basis"] == report.CALC_CLOSING_BOOK_CLOSE
+    assert vixd["calculation_time_ny"] == vixd["cboe_close_ny"] == f"{SESSION}T16:15"
+    att = [n for n in vixd["gap_notes"] if n.startswith("Gap attribution (")]
+    assert all("snapshot timing" not in n for n in att)
+    # the closing book fails the gates (an emptied book): the overnight book, and why
+    _second_capture(path, closing.stem, "2026-10-16T21:55:00Z", "closing", "2026-10-16T22:10:00Z",
+                    empty_atm=True)
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["chain"] == f"data_store/options/cboe/{path.name}"
+    assert sq.inputs["source_reason"].startswith("the newest stored Cboe book of the session; it passes")
+    assert f"refused: options/cboe/{closing.name}: not a live book" in sq.inputs["source_reason"]
+    out = report.run_session(SESSION, models=["essvi"])
+    notes = out["vix_replication"]["gap_notes"]
+    assert sum(n.startswith("The book is the overnight (Global Trading Hours) book (the session's "
+                            "closing book did not pass the quote-state gates), quoted at ")
+               for n in notes) == 1
+
+
+def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):
+    """FUND_GRADE_PLAN 0.8 with the private book store (DATA_SOURCES.md): the close
+    slot's run moves its closing book to the private repository when it ends, so the
+    book slot that builds the session's surface finds it only in that checkout
+    (CBOE_BOOKS_DIR), beside its own overnight book still in the public tree. The
+    surface read the public tree alone, so it was built from the overnight book and
+    said no closing book was stored."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    from joint_vol_calibration.surface import quotes as sqm
+
+    gth = "2026-10-19T02:30:00Z"            # Sun 22:30 ET: GTH for Monday, after Friday SESSION
+    path, _ = _capture_store(tmp_path, monkeypatch, gth, book_state="gth")
+    closing = _second_capture(path, f"spx_{SESSION}_221000Z", "2026-10-16T21:55:00Z", "closing",
+                              "2026-10-16T22:10:00Z")
+    private = tmp_path / "private" / "options" / "cboe"
+    private.mkdir(parents=True)
+    for f in (closing, closing.with_suffix(".json")):
+        f.rename(private / f.name)
+    monkeypatch.setenv(cd.BOOKS_DIR_ENV, str(private))
+    assert [p.name for p, _ in sqm.session_captures(SESSION)] == [path.name, closing.name]
+    assert sqm.captured_sessions() == [SESSION]
+    sq = sqm.load_session_quotes(SESSION)
+    assert sq.inputs["book_state"] == "closing"
+    assert sq.inputs["chain"] == f"data_store/options/cboe/{closing.name}"
+    assert sq.inputs["chain_sha256"] == hashlib.sha256((private / closing.name).read_bytes()).hexdigest()
+    assert sq.inputs["closing_books"] == 1
 
 
 @pytest.mark.parametrize(("quote_time", "empty_atm", "why"), [

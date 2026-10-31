@@ -222,10 +222,10 @@ def t_origin(quote_time: QuoteTimeLike, session: DateLike) -> datetime:
     (``gth_window(next_session(session))``) is a Global Trading Hours book —
     what the Mon-Thu book slots download at 21:30-00:30 ET — and T runs from
     the quote time. Anything else is the session's closing book (weekend and
-    holiday runs; on weekday evenings the book is empty 16:15-20:15 ET and
-    the quote-state gate fails the run closed) and T runs from the 16:00 ET
-    close, as does a chain with no recorded quote time (every snapshot stored
-    before quote times were recorded).
+    holiday runs, and the close slot's Cboe capture on a weekday evening,
+    16:15-20:15 ET) and T runs from the 16:00 ET close, as does a chain with
+    no recorded quote time (every snapshot stored before quote times were
+    recorded).
     """
     close = session_close(session)
     qt = _as_instant(quote_time)

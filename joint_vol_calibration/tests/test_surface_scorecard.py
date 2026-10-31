@@ -120,3 +120,31 @@ def test_surface_fit_mask_alternates_strikes_and_drops_flagged(sq):
     pos = np.arange(len(first))
     assert m[first.index.to_numpy()][1:].tolist() == list((pos % 2 == 0)[1:])
     assert 0.45 < m.mean() < 0.55
+
+
+@pytest.mark.parametrize(("book_state", "chain", "noted"), [
+    ("closing", {"quote_time": "2026-10-30T08:51:33Z"}, True),    # a pre-QUANT-01 fit: its download clock
+    ("closing", {"fetched_at": "2026-10-30T08:51:33Z"}, True),    # Fri 04:51 ET: the overnight book
+    ("closing", {"fetched_at": "2026-10-29T22:00:00Z"}, False),   # Thu 18:00 ET: still the closing book
+    ("gth", {"fetched_at": "2026-10-30T08:51:33Z"}, False),       # scored on the overnight book itself
+    ("closing", {}, False),                                       # no download time recorded
+])
+def test_a_fit_made_overnight_and_scored_on_the_closing_book_says_so(book_state, chain, noted):
+    """FUND_GRADE_PLAN 0.8: a session's surface is now built from its closing book
+    when one is stored, while the bot still fits Heston to the Yahoo chain it
+    downloads overnight. The Heston row then says the fit's chain was downloaded
+    after the closing book had given way to the overnight one, so part of its error
+    on these quotes is the market's move between the two."""
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(sq=SimpleNamespace(session="2026-10-29", inputs={"book_state": book_state},
+                                             diagnostics={"source": "cboe"}))
+    note = sc._fit_time_note(chain, ctx)
+    assert bool(note) is noted
+    if noted:
+        assert note.startswith("; that chain was downloaded at 2026-10-30 08:51 UTC, after the closing "
+                               "book scored here had given way to the overnight one")
+    # the Heston row's note on a fit made on another book carries it
+    row = sc._fit_book_note({"chain_diagnostics": {"source": "yfinance", **chain}}, ctx)
+    assert row.startswith(". The fit was made on the session's Yahoo chain")
+    assert row.endswith(note)

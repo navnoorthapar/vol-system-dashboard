@@ -25,9 +25,10 @@ Added per quote:
                    180-365d, 365-730d (right-closed)
 
 Inputs are read through the repo's look-ahead-gated getters: the session's
-newest stored Cboe book (data_store/options/cboe/spx_<session>_<HHMMSS>Z
-.parquet, its sidecar's quote time, the full listing) when it passes the
-forward ledger's quote-state gates, else the session's Yahoo chain
+closing Cboe book, else its newest stored one (data_store/options/cboe/
+spx_<session>_<HHMMSS>Z.parquet, its sidecar's quote time and book state, the
+full listing) when it passes the forward ledger's quote-state gates, else the
+session's Yahoo chain
 data_store/options/spx_<session>.parquet (database.options_snapshot_path;
 select_session_chain records which and why), the session's SPX close
 (get_spx_ohlcv(as_of_date=session)) and the reference rate the session's
@@ -110,32 +111,52 @@ CAPTURE_EXTRA_COLUMNS = ("bid_size", "ask_size", "theo", "rho", "last_trade_pric
                          "option_last_trade_time")
 
 
-def cboe_capture_dir() -> Path:
-    """data_store/options/cboe/ (follows database.OPTIONS_DIR)."""
-    return Path(db.OPTIONS_DIR) / "cboe"
+def _book_files(pattern: str) -> list:
+    """The stored Cboe books matching ``pattern``, wherever they are: the private
+    store the daily workflow checks out (cboe_downloader.BOOKS_DIR_ENV) first, then
+    data_store/options/cboe/; a book in both is taken once, from the first. The
+    close slot's closing book is moved to the private store when its run ends, so
+    the book slot that builds the session's surface finds it only there.
+    data_store/ is the parent of database.OPTIONS_DIR."""
+    from joint_vol_calibration.data import cboe_downloader as cd
+    seen: dict = {}
+    for d in cd.book_dirs(Path(db.OPTIONS_DIR).parent):
+        for p in sorted(d.glob(pattern)):
+            seen.setdefault(p.name, p)
+    return [seen[n] for n in sorted(seen)]
+
+
+# cboe_downloader.book_state_at: the session's closing book, quoted after its close
+CLOSING_BOOK = "closing"
+
+
+def _fetched(cap: tuple) -> tuple:
+    """session_captures' sort key: (fetched_at, file name)."""
+    return (str(cap[1].get("fetched_at") or ""), cap[0].name)
 
 
 def session_captures(session: str, underlying: str = "SPX") -> list:
-    """Every stored Cboe capture of ``session``, newest first by fetch time:
+    """Every stored Cboe capture of ``session`` (_book_files: the private store
+    and the public tree), newest first by fetch time:
     [(parquet path, sidecar dict)] (cloud_refresh.capture_cboe_chains writes
     <und>_<session>_<HHMMSS>Z.parquet and .json; the sidecar holds quote_time,
     book_state, fetched_at, rows, two_sided_rows and the raw payload's sha256)."""
     import json
 
     out = []
-    for p in cboe_capture_dir().glob(f"{underlying.lower()}_{session}_*.parquet"):
+    for p in _book_files(f"{underlying.lower()}_{session}_*.parquet"):
         js = p.with_suffix(".json")
         try:
             side = json.loads(js.read_text()) if js.exists() else {}
         except (OSError, ValueError):
             side = {}                 # no sidecar record: the frame's own quote_time is read
         out.append((p, side if isinstance(side, dict) else {}))
-    return sorted(out, key=lambda x: (str(x[1].get("fetched_at") or ""), x[0].name), reverse=True)
+    return sorted(out, key=_fetched, reverse=True)
 
 
 def captured_sessions(underlying: str = "SPX") -> list:
     """Every session with a stored Cboe capture of ``underlying``, newest first."""
-    names = (p.name for p in cboe_capture_dir().glob(f"{underlying.lower()}_*.parquet"))
+    names = (p.name for p in _book_files(f"{underlying.lower()}_*.parquet"))
     return sorted({n.split("_")[1] for n in names if len(n.split("_")) == 3}, reverse=True)
 
 
@@ -201,21 +222,29 @@ def select_session_chain(session: str, spot: float, r_clean, *,
                          source: str = "auto") -> tuple:
     """(raw, clean, inputs): the chain ``session``'s surface is built from.
 
-    The newest stored Cboe SPX capture of the session (session_captures)
-    that passes the forward ledger's quote-state gates
-    (forward_ledger.book_time_refusal: quoted at or after the 16:00 ET close;
-    book_share_refusal: >= option_chain.MIN_TWO_SIDED_SHARE of near-ATM lines
-    two-sided) and cleans, with T from its quote time (option_chain.t_origin);
-    else the session's Yahoo chain data_store/options/spx_<session>.parquet,
-    the calibration's download, as the labelled fallback. ``source``:
-    "auto" (that order), "cboe" (the capture or ValueError), "yahoo" (the
-    stored Yahoo chain only). ``inputs`` records which and why."""
+    The session's closing book when one is stored (session_captures, book
+    state 'closing': the regular session's last quotes, standing at the 16:15
+    ET close, 13:15 on an early close, when the official VIX-family closes are
+    computed, so the VIX replication is set against them at one instant;
+    FUND_GRADE_PLAN 0.8), else its newest stored Cboe SPX capture (the
+    overnight Global Trading Hours book), the first of them that passes the
+    forward ledger's quote-state gates (forward_ledger.book_time_refusal:
+    quoted at or after the 16:00 ET close; book_share_refusal: >=
+    option_chain.MIN_TWO_SIDED_SHARE of near-ATM lines two-sided) and cleans,
+    with T from its quote time (option_chain.t_origin); else the session's
+    Yahoo chain data_store/options/spx_<session>.parquet, the calibration's
+    download, as the labelled fallback. ``source``: "auto" (that order),
+    "cboe" (a capture or ValueError), "yahoo" (the stored Yahoo chain only).
+    ``inputs`` records which and why."""
     from joint_vol_calibration.backtest import forward_ledger as fl
 
     if source not in ("auto", "cboe", "yahoo"):
         raise ValueError(f"source must be 'auto', 'cboe' or 'yahoo', got {source!r}")
     refused: list[str] = []
-    caps = session_captures(session) if source != "yahoo" else []
+    # closing books first, each kind newest first
+    caps = sorted(session_captures(session) if source != "yahoo" else [],
+                  key=lambda c: c[1].get("book_state") != CLOSING_BOOK)
+    n_closing = sum(c[1].get("book_state") == CLOSING_BOOK for c in caps)
     for path, side in caps:
         label = f"options/cboe/{path.name}"
         try:
@@ -237,10 +266,17 @@ def select_session_chain(session: str, spot: float, r_clean, *,
         if why:
             refused.append(f"{label}: {why}")
             continue
-        newest = "the newest" if path == caps[0][0] else "an earlier"
+        if side.get("book_state") == CLOSING_BOOK:
+            which = (f"the session's closing book (its quotes the ones standing at the "
+                     f"{db.close_data_cutoff(session):%H:%M} ET close, when the official VIX-family "
+                     "closes are computed)")
+        else:
+            newest = "the newest" if path == max(caps, key=_fetched)[0] else "an earlier"
+            which = (f"{newest} stored Cboe book of the session"
+                     + ("" if n_closing else " (no closing book of the session is stored)"))
         return raw, clean, {
             "source": "cboe",
-            "source_reason": (f"{newest} stored Cboe book of the session; it passes the "
+            "source_reason": (f"{which}; it passes the "
                               "quote-state gates (quoted at or after the 16:00 ET close, "
                               f"{clean.diagnostics['near_atm_two_sided_share']:.1%} of near-ATM "
                               "lines two-sided)"
@@ -248,7 +284,8 @@ def select_session_chain(session: str, spot: float, r_clean, *,
             "chain": f"data_store/options/cboe/{path.name}", "chain_sha256": file_sha256(path),
             "raw_sha256": side.get("sha256"), "book_state": side.get("book_state"),
             "fetched_at": side.get("fetched_at"), "capture_rows": side.get("rows"),
-            "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused}
+            "capture_two_sided_rows": side.get("two_sided_rows"), "refused": refused,
+            "closing_books": n_closing}
     if source == "cboe":
         raise ValueError(f"no stored Cboe book of {session} passes the quote-state gates"
                          + (f": {'; '.join(refused)}" if refused else ""))
@@ -265,7 +302,8 @@ def select_session_chain(session: str, spot: float, r_clean, *,
         "source": clean.diagnostics.get("source"),
         "source_reason": f"{why}; the session's Yahoo chain (the calibration's download) is the fallback",
         "chain": f"data_store/options/spx_{session}.parquet", "chain_sha256": file_sha256(path),
-        "raw_sha256": None, "book_state": None, "fetched_at": None, "refused": refused}
+        "raw_sha256": None, "book_state": None, "fetched_at": None, "refused": refused,
+        "closing_books": n_closing}
 
 
 def read_stored_chain(session: str, underlying: str = "SPX") -> pd.DataFrame:
