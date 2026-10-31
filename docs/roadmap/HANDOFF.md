@@ -71,9 +71,16 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
 - **D2 (page weight):** surface.html is ~704 KB and research.html ~407 KB, over its old 400 KB budget.
   - Cut inline chart JSON without changing any displayed value: round to display precision plus one digit, dedupe, drop unused fields.
   - Targets: surface ≤ 450 KB, research ≤ 400 KB. Update the page-budget test.
+  - **Measured on w3/surface (C0–C7, 2026-10-31), not yet on main.** A full Cboe book (45 expiries) had made surface.html 1.67 MB.
+    - surface.html, rebuilt Cboe store 2026-10-26 (45 expiries): 1,670,137 → 441,347 B raw, 336,416 → 78,066 B gzipped.
+    - surface.html, committed store (17 expiries): 777,649 → 290,854 B raw, 158,573 → 57,954 B gzipped.
+    - research.html 409,472 → 352,817 B; calibration.html 345,279 → 252,687 B (17-expiry store).
+    - How: the smile's every-expiry quotes, the heatmap cells' readout numbers and the 3D points moved to one hashed session data file (`data/surface-<session>-<sha256[:16]>.json`, 527,509 B / 209,006 B gzipped at 45 expiries), fetched once after the smile's first draw; compact spec JSON without the fields the page renders as HTML; colour classes; one bucket table. No displayed number changed.
+    - Budgets: pytest on synthetic 17/45/80-expiry sessions (≤ 7,000 B an expiry, ≤ 300,000 B at 17; research ≤ 400,000 B); CI's a11y job runs `scripts/ci/page_budget.py`: 450,000 + 7,000·max(0, n − 45) B, n read from the page. The bot's deploy is not gated on it.
 - **A3 (no-JS):** With JS off, surface.html is wider than the viewport.
   - Every page at 320, 390 and 1440 px with JS off must have scrollWidth ≤ innerWidth.
   - Add that check to scripts/ci/a11y/a11y.mjs.
+  - **w3/surface (2026-10-31):** no page overflows with JS off at 320/390/1440 px on the 17- and 45-expiry builds. Without JS the smile's per-expiry bucket rows are one table, a row group per expiry, in a labelled, focusable region bounded to 60% of the screen; a11y.mjs checks it (one row group per tab).
 - **A2 (tab stops):** Calibration has ~105 tab stops; the target is 60 or fewer.
   - Use roving tabindex per legend group, tab list and small-multiple group, like the cone tabs.
   - The test must not depend on the expiry count.
@@ -83,6 +90,9 @@ All five (R3-D3, R3-D2, T3, T2, R3-D6) shipped on 2026-10-27; see the status log
   - Set budgets at the measured value plus 10%.
   - Add it as a step in the accessibility job of tests.yml.
 - **D3 (expiry switch):** Click-to-chart is ~41 ms, and 151–198 ms at 4× CPU. Profile it; the target is under 100 ms at 4×.
+  - **Measured on w3/surface (2026-10-31), 45 expiries.** A switch now writes 6 DOM nodes in its click task (about 160 before), draws at most 16 series (10 here; 17 before, the models toggled off among them), 0 legend keys and 0 chart resizes, and decodes an expiry only when shown (all 45 were decoded at load).
+    - Switch / click-to-chart: 16 / 41 ms at 1× CPU, 48 / 190 ms at 4× (load average 1.0–1.7 on 4 shared CPUs; the gate's limits are 50 / 100 and 150 / 300 ms). At 17 expiries: 16 / 45 and 48 / 196 ms.
+    - The < 100 ms at 4× target is not met: ECharts `setOption` alone is 70–300 ms at 4×. Restating D3 is an owner decision; the 4× timings still need three consecutive CI runs.
 
 ### C. Round-3 critic findings still open (low)
 - **T11:** Model Risk V1 history drops the sign, because app.py stores abs(gap). Store the signed gap and apply abs only in the limit check.

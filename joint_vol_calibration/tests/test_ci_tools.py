@@ -26,6 +26,8 @@ that are not part of the daily bot's gates (those are in test_infra_config.py).
     scheduled runs in a row open, or comment on, one bot-failure issue.
   * deploy_streak.py (the daily workflow, before the freeze): consecutive NYSE
     sessions with a deploy commit on gh-pages, across holidays.
+  * page_budget.py (CI's a11y job): the Surface page's weight against 450,000
+    bytes plus 7,000 an expiry past 45, the expiry count read from the page.
 """
 from __future__ import annotations
 
@@ -1093,3 +1095,52 @@ class TestReproduceStatus:
         assert "reproduce" not in tests["jobs"]
         assert "make reproduce" not in "\n".join(ln for ln in (ROOT / ".github" / "workflows" / "tests.yml")
                                                  .read_text().splitlines() if not ln.lstrip().startswith("#"))
+
+
+# ── page_budget.py (CI's a11y job) ────────────────────────────────────────────
+
+def _surface_page(n: int, pad: int) -> str:
+    tab = ('<button class="btn" type="button" role="tab" aria-selected="false" '
+           'aria-controls="slices-panel" data-value="2026-11-{:02d}">x</button>')
+    body = "".join(tab.format(i % 28 + 1) for i in range(n))
+    return "<html>" + body + " " * max(0, pad - len(body) - 13) + "</html>"
+
+
+class TestPageBudget:
+    """D2: a full Cboe book made the Surface page 1.67 MB. The a11y job holds it to
+    450,000 bytes at 45 listed expiries plus 7,000 for each expiry past 45, counting
+    the expiries on the page (its smile's tabs), so a day that lists more expiries
+    moves the budget with the page; the bot's deploy never runs this."""
+
+    def test_the_budget_moves_with_the_expiry_count_on_the_page(self, monkeypatch, tmp_path):
+        pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)
+        assert [pb.budget(n) for n in (17, 45, 46, 80)] == [450_000, 450_000, 457_000, 695_000]
+        for n, size, ok in ((45, 450_000, True), (45, 450_001, False), (50, 485_000, True),
+                            (50, 485_001, False), (17, 300_000, True)):
+            site = tmp_path / f"{n}-{size}"
+            site.mkdir()
+            (site / "surface.html").write_text(_surface_page(n, size), encoding="utf-8")
+            assert len((site / "surface.html").read_bytes()) == size
+            got, msg = pb.check(site)
+            assert got is ok, msg
+            assert f"at {n} listed expiries" in msg
+            assert pb.main([str(site)]) == (0 if ok else 1)
+
+    def test_its_tab_pattern_is_the_surface_templates(self, monkeypatch):
+        pb = _load("scripts/ci/page_budget.py", "page_budget_under_test", monkeypatch)
+        tpl = (ROOT / "dashboard" / "templates" / "surface.html").read_text()
+        line = next(ln for ln in tpl.splitlines() if 'aria-controls="slices-panel"' in ln)
+        rendered = (line.replace("{% if e.month_start %} mo{% endif %}", " mo")
+                    .replace("{{ 'true' if e.expiry == d.default_exp else 'false' }}", "true")
+                    .replace("{{ e.expiry }}", "2026-11-25"))
+        assert len(pb.TAB.findall(rendered)) == 1
+
+    def test_ci_runs_it_in_the_a11y_job(self):
+        import yaml
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
+        steps = wf["jobs"]["a11y"]["steps"]
+        names = [s.get("name") for s in steps]
+        i = names.index("Surface page weight (450 kB at 45 expiries, + 7 kB an expiry past)")
+        assert names.index("Render the static site") < i
+        assert steps[i]["run"] == 'python scripts/ci/page_budget.py "$RUNNER_TEMP/site"'
+        assert "continue-on-error" not in steps[i]
