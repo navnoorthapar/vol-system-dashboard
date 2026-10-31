@@ -23,9 +23,10 @@ It FAILS CLOSED: nothing is written and the script exits 1 if any page
   * carries an inline executable <script> (the pages declare a CSP of
     script-src 'self'; only type="application/json" data blocks are inline);
   * references a session data file (data/<kind>-<session>-<sha256[:16]>.json,
-    app.publish_json: the Surface smile's every expiry) that /data/<name> does
-    not serve, whose bytes' sha384 is not the integrity value the page gives it,
-    or whose name is not its sha256; only the referenced files are written;
+    app.publish_json: the Surface smile's every expiry, its heatmaps' cell
+    details) that /data/<name> does not serve, whose bytes' sha384 is not the
+    integrity value the page gives it, or whose name is not its sha256; only the
+    referenced files are written;
 or if a vendored file under dashboard/static/vendor no longer matches the SRI
 hash the pages carry (app.VENDORED). scripts/cloud_refresh.py then stops before
 the deploy step, so the previous good build stays live.
@@ -184,22 +185,28 @@ def sri_of(body: bytes) -> str:
 
 _JSON_BLOCK = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.DOTALL)
 _DATA_PATH = re.compile(r"\bdata/[\w.-]+\.json\b")
+# an element that reads a data file names it and its integrity value (a heatmap table)
+_DATA_ATTR = re.compile(r'<[^<>]*\bdata-src="(data/[^"]*)"[^<>]*>')
+_INTEGRITY_ATTR = re.compile(r'\bdata-integrity="([^"]*)"')
 _DATA_NAME = re.compile(r"data/[\w.-]+-([0-9a-f]{16})\.json")
 
 
 def data_refs(html: str) -> tuple[dict[str, str], list[str]]:
     """The session data files a page references, {path: integrity}: each object of
-    its JSON blocks with a src under data/ and an integrity value; and the problems
-    (a data/ path named anywhere else, or with two integrity values)."""
+    its JSON blocks with a src under data/ and an integrity value, and each element
+    with a data-src under data/ and a data-integrity; and the problems (a data/ path
+    named anywhere else, or with two integrity values)."""
     refs: dict[str, str] = {}
     problems: list[str] = []
 
+    def ref(src: Any, sri: Any) -> None:
+        if (isinstance(src, str) and src.startswith("data/") and isinstance(sri, str)
+                and refs.setdefault(src, sri) != sri):
+            problems.append(f"data file {src} has two integrity values")
+
     def walk(x: Any) -> None:
         if isinstance(x, dict):
-            src, sri = x.get("src"), x.get("integrity")
-            if (isinstance(src, str) and src.startswith("data/") and isinstance(sri, str)
-                    and refs.setdefault(src, sri) != sri):
-                problems.append(f"data file {src} has two integrity values")
+            ref(x.get("src"), x.get("integrity"))
             for v in x.values():
                 walk(v)
         elif isinstance(x, list):
@@ -210,6 +217,9 @@ def data_refs(html: str) -> tuple[dict[str, str], list[str]]:
             walk(json.loads(block))
         except ValueError:
             problems.append("a JSON data block does not parse")
+    for m in _DATA_ATTR.finditer(html):
+        sri = _INTEGRITY_ATTR.search(m.group(0))
+        ref(m.group(1), sri.group(1) if sri else None)
     problems += [f"names data file {p} without its integrity value"
                  for p in sorted(set(_DATA_PATH.findall(html)) - set(refs))]
     return refs, problems

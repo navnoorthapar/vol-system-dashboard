@@ -186,6 +186,12 @@ def chart_group(a: Audit, cid: str, group: str) -> Tag | None:
     return a.one(f'div#{cid}-data div.chart-data-group[data-group="{group}"] > table')
 
 
+def group_rows(a: Audit, cid: str, group: str) -> tuple[Tag | None, Tag | None]:
+    """A one-table group (the smile's expiries, D2): its row-group header and its tbody."""
+    tb = a.one(f'div#{cid}-data div.chart-groups > table > tbody[data-group="{group}"]')
+    return (tb.select_one(':scope > tr > th[scope="rowgroup"]') if tb is not None else None), tb
+
+
 def spec(a: Audit, sid: str) -> dict | None:
     el = a.one(f"script#{sid}")
     return json.loads(el.get_text()) if el is not None else None
@@ -1090,11 +1096,19 @@ def certified_slices(a: Audit, c: Ctx, tr_: list[dict]) -> None:
 P_IV, P_RES = "#iv-heat", "#residuals"
 
 
+# a heatmap cell's readout: its numbers in the session data file, this template (app.HEAT_DETAIL_*)
+HEAT_DETAIL_IV = "mid IV {0:2}% (median of {1}) · half-spread {2:2} vol pts"
+HEAT_DETAIL_RESID = "{0:+2} half-spreads (median of {1}) · {2:0}% inside"
+EMPTY_CELL = "a dot: no quotes in the bucket"
+
+
 def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, what: str,
               value: Callable[[pd.DataFrame], float],
-              detail: Callable[[pd.DataFrame, float], list[float]]) -> list[float]:
+              detail: Callable[[pd.DataFrame, float], list[float]], template: str) -> list[float]:
     """A bucket heatmap: column heads, one row per expiry, each cell the value of its
-    quotes (or empty), with its detail; returns the cell values."""
+    quotes (or empty: blank, the caption saying what that means), and its readout's
+    numbers, read from the session's data file (D2) and verified (Audit.data_file),
+    each at the decimals its template prints; returns the cell values."""
     hd = heads(tbl)
     texts(a, panel, f"{what} column heads", hd[1:], [M.bucket_label(b, True) for b in c.used])
     trs = rows(tbl)
@@ -1102,26 +1116,46 @@ def heat_rows(a: Audit, panel: str, tbl: Tag | None, c: Ctx, q: pd.DataFrame, wh
     qb = q.assign(kb=M.bucket(q["k"]))
     if not same_len(a, panel, f"{what} rows", trs, c.exps):
         return out
-    for tr, (e, T) in zip(trs, c.exps.items()):
+    src = tbl.get("data-src") if tbl is not None else None
+    book = a.data_file(panel, src, tbl.get("data-integrity") if tbl is not None else None) or {}
+    a.equal(panel, f"{what} data file: this session", tbl.get("data-session") if tbl is not None else None,
+            c.session)
+    heat = (book.get("heat") or {}).get(tbl.get("id") if tbl is not None else "") or {}
+    a.equal(panel, f"{what} readout template", heat.get("detail"), template)
+    a.text(panel, f"{what} caption: empty cells", tbl.find("caption") if tbl is not None else None,
+           EMPTY_CELL, contains=True)
+    fcells = heat.get("cells") or []
+    decs = [int(x[-1]) if x else None for x in re.findall(r"\{\d(?::(\+?\d))?\}", template)]
+    bad: dict[str, list[str]] = {}
+    if not same_len(a, panel, f"{what} data file rows", fcells, c.exps):
+        fcells = [[]] * len(trs)
+    for tr, frow, (e, T) in zip(trs, fcells, c.exps.items()):
         a.equal(panel, f"{what} {e} data-exp", tr.get("data-exp"), e)
         days_nums(a, panel, f"{what} {e} row head (median T_days)", tr.find("th"), [T], [e])
         td = tds(tr)
         if not same_len(a, panel, f"{what} {e} cells", td, c.used):
             continue
-        for t, b in zip(td, c.used):
+        for i, (t, b) in enumerate(zip(td, c.used)):
             g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
             lab = f"{what} {e} {M.bucket_label(b, True)}"
+            fv = frow[i] if i < len(frow) else "missing"
             if g.empty:
-                a.equal(panel, f"{lab} empty", "empty" in (t.get("class") or []), True)
-                a.text(panel, f"{lab} empty-cell detail", t.select_one(".sr-only"),
-                       f"{e} · ln(K/F) {M.bucket_label(b, False)}: no quotes")
-                a.equal(panel, f"{lab} data-detail", t.get("data-detail"),
-                        f"{e} · ln(K/F) {M.bucket_label(b, False)}: no quotes")
+                a.equal(panel, f"{lab} empty: blank, no numbers in the file",
+                        ["empty" in (t.get("class") or []), text_of(t), fv], [True, "", None])
                 continue
             v = value(g)
             out.append(v)
             a.num(panel, lab, t, v)
-            text_nums(a, panel, f"{lab} detail", str(t.get("data-detail") or ""), detail(g, v))
+            want = detail(g, v)
+            if not (isinstance(fv, list) and len(fv) == len(want)):
+                bad.setdefault("cell's numbers", []).append(f"{e} {M.bucket_label(b, True)}")
+                continue
+            for j, (x, w, dec) in enumerate(zip(fv, want, decs)):
+                if not spec_ok(x, w, FULL_SIG, dec):
+                    bad.setdefault(f"number {j + 1}", []).append(f"{e} {M.bucket_label(b, True)}: {x} vs {w}")
+    for name in ["cell's numbers", *(f"number {j + 1}" for j in range(len(decs)))]:
+        a.equal(panel, f"{what} readout {name} (data file) = recompute, every cell",
+                bad.get(name, [])[:3], [])
     return out
 
 
@@ -1130,7 +1164,7 @@ def iv_heat(a: Audit, c: Ctx) -> None:
     nums(a, P_IV, "panel meta (quotes)", meta(a, "iv-heat"), [len(c.mkt)])
     vals = heat_rows(a, P_IV, a.one("#iv-heatmap"), c, c.mkt, "mid IV",
                      lambda g: float(g["mid_iv"].median() * 100),
-                     lambda g, v: [v, len(g), float(g["half_spread_vp"].median())])
+                     lambda g, v: [v, len(g), float(g["half_spread_vp"].median())], HEAT_DETAIL_IV)
     if vals:
         nums(a, P_IV, "colour ramp lo/hi (cells shown)", a.one("#iv-heat .ramp"), [min(vals), max(vals)])
     note = a.one("#iv-heat p.note")
@@ -1188,7 +1222,8 @@ def residual_heat(a: Audit, c: Ctx) -> None:
         nums(a, P_RES, f"{M.label(m)} caption (out-of-sample quotes; |value| ≤ 1)", cap, [len(q), 1])
         heat_rows(a, P_RES, a.one(f"#resid-heat-{m}"), c, q, M.label(m),
                   lambda g: float(g["error_hs"].median()),
-                  lambda g, v: [v, len(g), float(g["inside_spread"].astype(bool).mean() * 100)])
+                  lambda g, v: [v, len(g), float(g["inside_spread"].astype(bool).mean() * 100)],
+                  HEAT_DETAIL_RESID)
     for r in a.soup.select("#residuals .ramp"):
         statics(a, P_RES, "colour ramp ±5 half-spreads, 0 at mid", r, [-RESID_RAMP, RESID_RAMP, 0])
 
@@ -1282,11 +1317,13 @@ def slices_panel(a: Audit, c: Ctx) -> None:
                 + " · # days · F # · # quotes · median half-spread # vol pts")
         nums(a, P_SL, "status line: days, F, quotes, median half-spread", status,
              [c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])], [default])
+    gt = a.one("div#chart-slices-data div.chart-groups > table")
+    texts(a, P_SL, "bucket table model columns", heads(gt)[5:], [M.label(m) for m in c.overlay])
+    a.equal(P_SL, "bucket table: a row group per expiry",
+            [tb.get("data-group") for tb in (gt.select(":scope > tbody") if gt else [])], list(c.exps))
     for e, T in c.exps.items():
-        tbl = chart_group(a, "chart-slices", e)
-        nums(a, P_SL, f"{e} group caption", tbl.find("caption") if tbl else None, [T], [e])
-        hd = heads(tbl)
-        texts(a, P_SL, f"{e} group model columns", hd[5:], [M.label(m) for m in c.overlay])
+        head, tb = group_rows(a, "chart-slices", e)
+        nums(a, P_SL, f"{e} row group header", head, [T], [e])
         q = c.mkt[c.mkt["expiry"] == e].sort_values("k", kind="mergesort")
         kb = M.bucket(q["k"])
         model_iv = {}
@@ -1294,7 +1331,7 @@ def slices_panel(a: Audit, c: Ctx) -> None:
             qm = c.s.res[(c.s.res["model"] == m) & (c.s.res["expiry"] == e)].set_index("k")["model_iv"]
             model_iv[m] = qm[~qm.index.duplicated()].reindex(q["k"].to_numpy()).to_numpy(float) * 100.0
         bs = [b for b in c.used if (kb == b).any()]
-        trs = rows(tbl)
+        trs = [tr for tr in (tb.find_all("tr", recursive=False) if tb is not None else []) if tds(tr)]
         if not same_len(a, P_SL, f"{e} bucket rows", trs, bs):
             continue
         for tr, b in zip(trs, bs):

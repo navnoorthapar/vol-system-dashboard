@@ -914,6 +914,15 @@ def test_freeze_writes_each_referenced_data_file_and_fails_closed_on_a_bad_one(d
     assert src.endswith(hashlib.sha256(body).hexdigest()[:16] + ".json")
     assert sorted(p.relative_to(out).as_posix() for p in (out / "data").iterdir()) == [src]
     assert freezer.data_refs("<p>data/surface-x-0123456789abcdef.json</p>")[1]
+    # C6: the Surface heatmaps name the file on their tables (data-src, data-integrity)
+    surf = (out / "surface.html").read_text()
+    grids = re.findall(r'<table class="heat" id="(?:iv-heatmap|resid-heat-[\w-]+)"[^>]*>', surf)
+    assert len(grids) >= 2
+    assert all(f' data-src="{src}" data-integrity="{sri}"' in g for g in grids)
+    one = '<table class="heat" data-src="data/surface-x-0123456789abcdef.json" data-integrity="sha384-a">'
+    assert freezer.data_refs(one) == ({"data/surface-x-0123456789abcdef.json": "sha384-a"}, [])
+    assert freezer.data_refs(one.replace(' data-integrity="sha384-a"', ""))[1]
+    assert freezer.data_refs(one + one.replace("sha384-a", "sha384-b"))[1]
 
     class Lost(dict):                     # rendered, never served: /data/<name> is a 404
         def __setitem__(self, k, v):
@@ -1122,7 +1131,7 @@ def test_every_chart_has_an_accessible_name_and_a_data_alternative(pages):
             assert desc and len(desc.group(1).strip()) > 20, (route, cid)
             m = re.search(rf'<div class="chart-data sr-only" id="{re.escape(cid)}-data">(.*?)</div>', html,
                           re.DOTALL)
-            assert m and "<table>" in m.group(1) and "<caption>" in m.group(1), (route, cid)
+            assert m and re.search(r"<table[ >]", m.group(1)) and "<caption>" in m.group(1), (route, cid)
             assert re.search(r"<td[^>]*>[^<]*\d", m.group(1)), (route, cid)        # it carries numbers
             spec = json.loads(_html_unescape(re.search(
                 rf'<script type="application/json" id="{re.escape(a["data-spec"])}">(.*?)</script>', html,
@@ -2001,11 +2010,10 @@ def test_displayed_numbers_are_rounded_once(dash, pages):
     for col, name in (("nav", "Portfolio"), ("nav_s1c", "S1C contrarian"),
                       ("nav_s3", "S3 short SPX straddle"), ("nav_s4", "S4 VRP"), ("nav_s1", "S1 PDV (ref)")):
         rel = eq[col] / eq[col].iloc[0] - 1
-        want = "".join(f'<td class="num">{dash._pct_prose(x)}</td>'
-                       for x in (rel.iloc[-1], rel.min(), rel.max()))
+        want = "".join(f'<td>{dash._pct_prose(x)}</td>' for x in (rel.iloc[-1], rel.min(), rel.max()))
         assert f"<tr><td>{name}</td>{want}</tr>" in table, name
     # the C22 case (+5.647% printed as +5.7%) is now +6.105% on the C23 record
-    assert '<tr><td>S3 short SPX straddle</td><td class="num">+6.1%</td>' in table
+    assert '<tr><td>S3 short SPX straddle</td><td>+6.1%</td>' in table
     # model smile table: the Heston smile of the headline fit, formatted once
     _, cal = dash.load_headline_calibration()
     smile = {s["T"]: s for s in dash.heston_model_smile(cal["params"])}
@@ -2809,6 +2817,125 @@ def test_the_3d_view_reads_its_points_from_the_session_data_file(dash, tmp_path,
     assert (sp["zmin"], sp["zmax"]) == (pytest.approx(min(zs), abs=5e-4), pytest.approx(max(zs), abs=5e-4))
 
 
+def test_surface_heatmap_details_are_numbers_in_the_session_data_file(dash, tmp_path, monkeypatch):
+    """D2: each of the five Surface heatmap cells carried its readout text in a
+    data-detail attribute (68 B a cell, 186 KB of a 45-expiry page) and each empty one
+    its 'no quotes' twice. The grids now name the session data file (data-src,
+    data-integrity, data-session, the smile's); the file holds each cell's numbers,
+    rounded as the readout prints them, and the grid's template, and desk.js fills
+    the readout from them. An empty cell is blank, a null in the file, and the
+    caption says what its dot means. Filled, the template gives the old text,
+    recomputed here from the residual table."""
+    monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path, 17))
+    resp, html = _get(dash, "/surface")
+    assert _errors(resp) == 0
+    q = _raw_specs(html)["chart-slices"]["quotes"]
+    book = json.loads(dash.DATA_FILES[q["src"].split("/", 1)[1]])
+    res = _syn_session(17, False)["residuals"]
+    mkt = res[res["model"] == SYN_MODELS[0]]
+    used = dash.k_buckets_used(mkt["k"])
+    exps = mkt.groupby("expiry")["T_days"].median().sort_values().index
+
+    def old_iv(g):
+        return (f"mid IV {dash._fmt(g['mid_iv'].median() * 100, '.2f')}% (median of {len(g)}) · half-spread "
+                f"{dash._fmt(g['half_spread_vp'].median(), '.2f')} vol pts")
+
+    def old_resid(g):
+        return (f"{dash.signed(g['error_hs'].median(), '.2f')} half-spreads (median of {len(g)}) · "
+                f"{dash._fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% inside")
+
+    grids = {"iv-heatmap": (mkt, old_iv)}
+    for m in SYN_MODELS:
+        r = res[(res["model"] == m) & ~res["in_sample"].astype(bool)]
+        grids[f"resid-heat-{m}"] = (r[pd.to_numeric(r["model_iv"], errors="coerce").notna()], old_resid)
+    assert set(book["heat"]) == set(grids)
+    n_filled = n_empty = 0
+    for tid, (qq, old) in grids.items():
+        tag = re.search(rf'<table class="heat" id="{tid}"[^>]*>', html).group(0)
+        a = _attrs(tag)
+        assert (a["data-src"], a["data-integrity"], a["data-session"]) == (q["src"], q["integrity"], SESSION)
+        assert a["data-empty"] == "no quotes"
+        body = re.search(rf'id="{tid}".*?</table>', html, re.DOTALL).group(0)
+        assert "data-detail" not in body, tid
+        assert "a dot: no quotes in the bucket</caption>" in body, tid
+        trs = re.findall(r"<tr data-exp[^>]*>(.*?)</tr>", body, re.DOTALL)
+        assert len(trs) == len(exps) == len(book["heat"][tid]["cells"])
+        qb = qq.assign(kb=dash.k_bucket(qq["k"]).to_numpy())
+        for tr, e, frow in zip(trs, exps, book["heat"][tid]["cells"], strict=True):
+            tds = re.findall(r"<td[^>]*>[^<]*</td>", tr)
+            assert len(tds) == len(frow) == len(used)
+            for td, b, v in zip(tds, used, frow, strict=True):
+                g = qb[(qb["expiry"] == e) & (qb["kb"] == b)]
+                if g.empty:
+                    assert (td, v) == ('<td class="empty"></td>', None), (tid, e, b)
+                    n_empty += 1
+                else:
+                    assert dash.heat_detail(book["heat"][tid]["detail"], v) == old(g), (tid, e, b)
+                    n_filled += 1
+    assert n_filled > 100
+    assert n_empty > 10
+    assert not re.search(r"\bvp\b", dash.HEAT_DETAIL_IV + dash.HEAT_DETAIL_RESID)    # the unit house style
+
+
+def test_heat_cells_take_their_ramp_steps_class(dash, pages):
+    """D2: a heatmap or delta-grid cell's colour was an inline style (35 B a cell, 100
+    KB of a 45-expiry Surface page). Cividis and the diverging ramp are now 101 steps
+    each (0.5% of a scale apart), each a desk.css class with the text colour that
+    contrasts more with it (dashboard/heat_css.py writes the block from
+    desk_format.HEAT_CLASSES); a cell takes its step's class. The P&L ramp keeps
+    its inline style (Risk's scenario grids, Research's monthly returns)."""
+    import importlib
+
+    _charts()                                         # dashboard/ on sys.path
+    fmt, heat_css = importlib.import_module("desk_format"), importlib.import_module("heat_css")
+    assert heat_css.block() in DESK_CSS.read_text()
+    by = {c: bg for bg, c in fmt.HEAT_CLASSES.items()}
+    assert set(by) == {f"{r}{i}" for r in "qd" for i in range(101)}
+    for i in range(101):
+        assert by[f"q{i}"] == fmt.ramp(fmt.CIVIDIS_11, i / 100)
+        assert by[f"d{i}"] == fmt.ramp(fmt.DIVERGE_11, i / 100)
+    css = DESK_CSS.read_text()
+    white = set(re.search(r":is\(\.heat,\.dgrid\) td:is\(([^)]*)\)\{color:#fff\}", css).group(1)
+                .replace(".", "").split(","))
+    for c, bg in by.items():
+        fg = "#ffffff" if c in white else "#000000"
+        assert max(fmt.contrast_ratio(x, bg) for x in ("#000000", "#ffffff")) == fmt.contrast_ratio(fg, bg), c
+        assert fmt.contrast_ratio(fg, bg) >= 4.5, c
+    # a value's colour is its step's
+    assert dash.seq_colour(12.3456, 10.0, 20.0) == by["q23"]
+    assert dash.div_colour(-1.0, 5.0) == by["d40"]
+    html = pages["/surface"]
+    n = 0
+    tables = re.findall(r'<table class="(?:heat|tbl dense dgrid)" id="([^"]+)"[^>]*>(.*?)</table>', html,
+                        re.DOTALL)
+    for tid, body in tables:
+        assert 'style="background' not in body, tid
+        for cls in re.findall(r'<td class="([^"]+)"', body):
+            k = [x for x in cls.split() if re.fullmatch(r"[qd]\d+", x)]
+            if k:
+                assert k[0] in by, (tid, cls)
+                n += 1
+    assert n > 100
+
+
+def test_surface_page_weight_grows_at_most_7000_bytes_an_expiry(dash, tmp_path, monkeypatch):
+    """D2: a full Cboe book (~45 expiries) made the Surface page 1.67 MB. On the
+    synthetic sessions (the same pages at 17, 45 and 80 expiries, so no stored
+    session's count is pinned) each expiry past 17 adds at most 7,000 bytes of
+    HTML, and the 17-expiry page is at most 300,000 bytes. The CI accessibility
+    job holds the real page to 450,000 + 7,000 a listed expiry past 45 (C7)."""
+    size = {}
+    for n, roots in SYN_SITES.items():
+        (tmp_path / str(n)).mkdir()
+        monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / str(n), n, roots))
+        resp, html = _get(dash, "/surface")
+        assert _errors(resp) == 0
+        size[n] = len(html.encode("utf-8"))
+    slope = [(size[b] - size[a]) / (b - a) for a, b in itertools.pairwise(sorted(size))]
+    assert max(slope) <= 7_000, (size, slope)
+    assert size[17] <= 300_000, size
+
+
 def _card(html: str, href: str) -> str:
     card = re.search(rf'<a class="result" href="{re.escape(href)}"(.*?)</a>', html, re.DOTALL)
     assert card, href
@@ -3234,7 +3361,10 @@ def test_valid_artifacts_freeze_and_stay_within_the_page_budget(dash, freezer, a
     # waiting for the file); the rest of the 1 KB the 45-expiry plan allows desk.js
     assert (static / "desk.js").stat().st_size < 110_000
     assert len(gzip.compress((static / "desk.js").read_bytes())) < 32_500
-    assert (static / "desk.css").stat().st_size < 60_000
+    # desk.css: 60,000 to 64,000 (D2): every heatmap and delta-grid cell's colour is a
+    # class of its ramp step, 202 of them (5.4 KB; dashboard/heat_css.py), not an inline
+    # style on each cell (100 KB of a 45-expiry Surface page)
+    assert (static / "desk.css").stat().st_size < 64_000
     assert sum(p.stat().st_size for p in (static / "fonts").glob("*.woff2")) < 80_000
 
 
@@ -3582,22 +3712,39 @@ def test_smile_slice_model_points_share_the_quotes_x_values(dash, pages):
 
 def test_smile_slice_has_a_per_expiry_table_of_its_data(dash, pages):
     """UI-17: without the chart the slice offered 'the values listed below', a
-    table of quote counts. Its data block now has one table per expiry (bid,
-    mid, ask and every model's IV by ln(K/F) bucket); the default expiry's is
-    shown, the others are hidden until their tab is chosen (all show without JS)."""
+    table of quote counts. Its data block has a row group per expiry (bid, mid, ask
+    and every model's IV by ln(K/F) bucket); the default expiry's is shown, the others
+    are hidden until their tab is chosen (all show without JS). D2: the expiries were
+    45 tables, each with its caption and head; they are one table with one head, a
+    tbody per expiry under a header row naming its date and days, in a region that
+    scrolls inside 60% of the screen without JavaScript (desk.js drops its tab stop:
+    one group shows at a time)."""
     html = pages["/surface"]
     block = re.search(r'<div class="chart-data sr-only" id="chart-slices-data">(.*?)\n</div>', html,
                       re.DOTALL).group(1)
-    groups = re.findall(r'<div class="chart-data-group" data-group="([^"]+)"( hidden)?>', block)
+    region = re.search(r'<div class="chart-groups" tabindex="0" role="region" '
+                       r'aria-labelledby="chart-slices-data-gcap"><table class="nr">'
+                       r'<caption id="chart-slices-data-gcap">[^<]+</caption>\s*<thead><tr>(.*?)</tr></thead>'
+                       r'(.*?)</table></div>', block, re.DOTALL)
+    assert region
+    assert block.count("<table") == 2                 # 'Quotes per expiry', then the expiries'
+    groups = re.findall(r'<tbody data-group="([^"]+)"( hidden)?><tr><th scope="rowgroup" colspan="(\d+)">'
+                        r'([^<]+)</th></tr>', region.group(2))
     exps = re.findall(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"', html)
-    assert [g for g, _ in groups] == exps
-    assert sum(1 for _, h in groups if not h) == 1
-    head = re.search(r'data-group="[^"]+"[^>]*><table>\s*<caption>[^<]+</caption>\s*<thead><tr>(.*?)</tr>',
-                     block, re.DOTALL).group(1)
+    assert [g[0] for g in groups] == exps
+    assert sum(1 for g in groups if not g[1]) == 1
+    days = dict(re.findall(r"<tr><td>(\d{4}-\d{2}-\d{2})</td><td>(\d+)</td>", block))
+    for e, _h, span, head in groups:
+        assert head == f"{e} ({days[e]} days)", head
+        assert int(span) == region.group(1).count("<th ")
     for col in ("Bid", "Mid", "Ask", "Heston", "SVI-cal", "SVI", "eSSVI"):
-        assert f">{col}</th>" in head, col
-    assert ('[role="tabpanel"][hidden], .chart-data [data-group][hidden] { display: block !important; }'
+        assert f">{col}</th>" in region.group(1), col
+    assert ('[role="tabpanel"][hidden], .chart-data div[data-group][hidden] { display: block !important; }'
             in html)
+    assert ".chart-data tbody[data-group][hidden] { display: table-row-group !important; }" in html
+    assert ".chart-groups { max-height: 60vh; overflow: auto; }" in html
+    js = DESK_JS.read_text()
+    assert "$$('.chart-groups').forEach(function (g) { g.removeAttribute('tabindex'); });" in js
 
 
 def test_iv_and_residual_grids_hold_every_quote(dash, pages):
@@ -4544,6 +4691,54 @@ def test_browser_the_3d_view_draws_the_session_files_points(syn_browser):
             assert "failed to load" in st["text"], st
             assert "2D heatmap is the full view" in st["text"], st
         assert errors == [], (how, errors)
+        ctx.close()
+
+
+_HEAT_FOCUS_JS = """([ri, ci]) => {
+  const t = document.getElementById('iv-heatmap'), td = t.tBodies[0].rows[ri].cells[ci + 1];
+  td.focus();
+  return { head: td.parentNode.cells[0].textContent.trim() + ' \u00b7 '
+             + t.tHead.rows[0].cells[ci + 1].textContent.trim() + ' \u00b7 ',
+           text: td.textContent, readout: document.getElementById('iv-heatmap-readout').textContent }; }"""
+
+
+def test_browser_a_surface_heatmap_reads_its_cells_details_from_the_session_file(dash, syn_browser):
+    """D2: a Surface heatmap cell's readout was its data-detail attribute. Its numbers
+    are now in the session data file: until the file is in (here: never, its request
+    refused) a focused cell reads its row, column and printed value; once it is in,
+    the cell's numbers in its grid's template (the text the attribute held), and an
+    empty cell reads 'no quotes'. The file is the smile's: one request for both."""
+    sb = syn_browser
+    tag = _attrs(re.search(r'<table class="heat" id="iv-heatmap"[^>]*>', sb["html"][17]).group(0))
+    heat = json.loads((sb["site"] / tag["data-src"]).read_bytes())["heat"]["iv-heatmap"]
+    filled = next((ri, ci) for ri, r in enumerate(heat["cells"]) for ci, v in enumerate(r) if v)
+    empty = next((ri, ci) for ri, r in enumerate(heat["cells"]) for ci, v in enumerate(r) if v is None)
+    for how in ("abort", "ok"):
+        ctx, page = _page(sb, 1440, 900)
+        reqs: list[str] = []
+        page.on("request", lambda r, reqs=reqs: reqs.append(r.url) if "/data/" in r.url else None)
+        if how == "abort":
+            page.route("**/data/**", lambda r: r.abort())
+        page.goto(sb["base"] + "surface-17.html", wait_until="load")
+        page.locator("#iv-heatmap").scroll_into_view_if_needed()
+        st = page.evaluate(_HEAT_FOCUS_JS, list(filled))
+        if how == "abort":
+            page.wait_for_timeout(800)
+            st = page.evaluate(_HEAT_FOCUS_JS, list(filled))
+            assert st["readout"] == st["head"] + st["text"], st
+        else:
+            want = st["head"] + dash.heat_detail(heat["detail"], heat["cells"][filled[0]][filled[1]])
+            page.evaluate("""(want) => new Promise(done => { const t0 = Date.now(); (function poll() {
+              const out = document.getElementById('iv-heatmap-readout');
+              if (out.textContent === want || Date.now() - t0 > 10000) return done();
+              setTimeout(poll, 50); })(); })""", want)
+            assert page.evaluate("document.getElementById('iv-heatmap-readout').textContent") == want
+            st = page.evaluate(_HEAT_FOCUS_JS, list(empty))
+            assert st["readout"] == st["head"] + "no quotes", st
+            page.locator("#chart-slices").scroll_into_view_if_needed()
+            _wait_for_chart(page, "chart-slices")
+            page.wait_for_timeout(1500)
+            assert len(reqs) == 1, reqs
         ctx.close()
 
 
@@ -9395,9 +9590,12 @@ def test_heat_ramps_one_meaning_numeric_keys_and_no_small_text(dash, pages, site
     heatmap is under 10.5 px (the vomma cells' second line was 9.5 px)."""
     pnl_tables = {"scenario-grid", "monthly-grid"}
     n = collections.Counter()
+    by = {c: bg for bg, c in dash.HEAT_CLASSES.items()}
     for route, html in pages.items():
         for tid, body in re.findall(r'<table class="heat" id="([^"]+)"[^>]*>(.*?)</table>', html, re.DOTALL):
-            for bg in re.findall(r'<td[^>]*style="background:(#[0-9a-fA-F]{6})', body):
+            # a cell on cividis or the diverging ramp takes its step's class (D2), a P&L one its style
+            steps = [by[k] for c in re.findall(r'<td class="([^"]+)"', body) for k in c.split() if k in by]
+            for bg in re.findall(r'<td[^>]*style="background:(#[0-9a-fA-F]{6})', body) + steps:
                 if tid in pnl_tables or tid.startswith("scenario"):
                     n["pnl"] += 1
                     assert _on_ramp(bg, dash.PNL_DIV), (route, tid, bg)
@@ -10617,6 +10815,21 @@ def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_a
     bad = failed("point", one_point)
     assert ("Surface", "3D view points: median mid IV % (3 decimals)") in bad
     assert not [x for x in bad if "data file" in x[1] or "packed" in x[1]], bad
+
+    def one_heat(site):                     # C6: so are the heatmap cells' readout numbers
+        book = json.loads(body)
+        row = next(r for r in book["heat"]["iv-heatmap"]["cells"] if any(r))
+        next(v for v in row if v)[2] += 0.01
+        new = json.dumps(book, separators=(",", ":"), sort_keys=True).encode()
+        new_src = src[:-21] + hashlib.sha256(new).hexdigest()[:16] + ".json"
+        (site / src).unlink()
+        (site / new_src).write_bytes(new)
+        new_sri = "sha384-" + base64.b64encode(hashlib.sha384(new).digest()).decode()
+        (site / "surface.html").write_text(html.replace(src, new_src).replace(sri, new_sri), encoding="utf-8")
+
+    bad = failed("heat", one_heat)
+    assert ("Surface", "mid IV readout number 3 (data file) = recompute, every cell") in bad
+    assert not [x for x in bad if "data file" in x[1] and "readout" not in x[1]], bad
 
 
 def test_model_risk_vix_gap_history_keeps_the_sign(dash):

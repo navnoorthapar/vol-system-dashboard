@@ -171,9 +171,8 @@
     var c = Desk.charts[id], el = doc.getElementById(id), spec = c ? c.spec : el && specOf(el);
     return spec && spec.quotes ? loadBook(spec).then(function () { return true; }) : Promise.resolve(false);
   };
-  // the x range of the shown group, shared by the smile and its residual strip:
-  // the quotes' extent padded and rounded out to a tick step (a spec's x.min /
-  // x.max, set on the server for small multiples, wins)
+  // the x range of the shown group (the smile and its residual strip): the quotes'
+  // extent padded and rounded out to a tick step; a spec's x.min / x.max wins
   function quoteRange(spec, f) {
     if (spec._xmode === 'delta') return [0, 1];
     var x = spec.x || {};
@@ -320,9 +319,8 @@
         type: 'scatter', data: data, symbol: s.symbol || 'circle', symbolSize: s.size || 6, symbolRotate: s.rotate || 0,
         itemStyle: s.hollow ? { color: 'transparent', borderColor: c, borderWidth: 1.4, opacity: s.opacity || 1 } : { color: c, opacity: s.opacity || 0.9 },
       });
-      // a quote smile's mids and z strips: one path per series (a large scatter; a
-      // symbol per quote doubled a switch). Not when empty (it fails to paint), nor
-      // the fit anchors (none on some expiries: a series changing mode is rebuilt)
+      // a quote smile's mids and z strips: one path per series (large), not when empty
+      // (it fails to paint) nor for the fit anchors (a series changing mode is rebuilt)
       if (spec.quotes) {
         sc.large = (s.quote === 'mid' || s.quote === 'z') && data.length > 0 && !data.some(function (p) { return p && !Array.isArray(p); });
         sc.largeThreshold = 0;
@@ -423,9 +421,8 @@
     }
   }
 
-  // The tooltip grammar (P4.5): the head is the x value with its unit and its name
-  // where x.tipNames has one ('VIX3M \u00b7 93 d'); every row carries its unit, the
-  // axis's (a.unit) or the one its name ends with in parentheses.
+  // The tooltip grammar (P4.5): the head is the x value with its unit and x.tipNames'
+  // name ('VIX3M \u00b7 93 d'); a row carries its axis's unit or its name's '(unit)'.
   var UNIT_WORDS = { '%': '%', 'vol pts': ' vol pts', 'index pts': ' index pts', 'index points': ' index points',
     'half-spreads': ' half-spreads', 'calendar days': ' d', 'days': ' d', '$000s': ' $000s', 'bp': ' bp' };
   function axisUnit(a) {
@@ -490,10 +487,9 @@
     };
   }
 
-  // -- a horizontal chart's long category names (the C22 waterfall's steps): each
-  // wraps at its spaces into its band, in a column up to labelShare of the chart and
-  // labelMax px; one that needs more lines takes its short form (spec.labelsShort),
-  // then the column widens up to 0.6 of the chart. No ellipsis --
+  // -- a horizontal chart's long category names wrap at spaces into their band (a
+  // column up to labelShare, labelMax px); one needing more lines takes spec.labelsShort,
+  // then the column widens to 0.6 of the chart. No ellipsis --
   var LABEL_SIZE = 10.5, LABEL_LINE = 13, measureCtx = null;
   function textWidth(s, font) {
     if (!measureCtx) measureCtx = doc.createElement('canvas').getContext('2d');
@@ -539,10 +535,9 @@
     return L;
   }
 
-  // -- period labels under a vertical chart's bars (x.fit: '2025 YTD'): a label wider
-  // than its band wraps at its spaces; where the widest line still does not fit,
-  // every step-th label is drawn counting back from the last (the newest period is
-  // always labelled). None overlaps or is cut --
+  // -- period labels under vertical bars (x.fit) wrap at spaces; if the widest line
+  // still does not fit, every step-th label is drawn back from the newest. None
+  // overlaps or is cut --
   var LABEL_GAP = 6;
   function xLabelLayout(spec, T, width, grid) {
     var cats = ((spec.x && spec.x.categories) || spec.xs || []).map(String);
@@ -572,10 +567,9 @@
     };
     // on a tab-filtered chart only the shown group's series are drawn
     opt._idx = groupIdx(spec, filter);
-    // A grouped series is named by its place in the group ('g0', ...) and draw mode, so
-    // a switch merges into the series drawn. A quote smile leaves out what is toggled
-    // off and empty clip triangles (ECharts updates hidden series too). opt._pos: a spec
-    // index's place among the drawn
+    // A grouped series is named by its place in the group ('g0', …) and draw mode, so a
+    // switch merges into the series drawn; a quote smile leaves out what is toggled off
+    // and empty clip triangles. opt._pos: a spec index's place among the drawn
     var slot = 0, drop = spec.quotes && off ? off : {};
     opt._pos = {};
     opt._idx.forEach(function (i) {
@@ -643,9 +637,8 @@
         data: i < 0 || cats[i] === undefined ? [] : [{ xAxis: cats[i] }] } };
   }
 
-  // A quote smile: the inspector's tooltip, the shown expiry's x range, the delta
-  // axis and the residual strip under the smile (each shown model's z per quote on
-  // a second grid; ±1, inside the spread, shaded, ±2 dashed, beyond ±clip at the edge).
+  // A quote smile: the inspector's tooltip, the expiry's x range, the delta axis and
+  // the residual strip (each shown model's z on a second grid; ±1 shaded, ±2 dashed).
   function quoteOption(spec, T, opt, filter, width, height) {
     var Q = spec.quotes, id = spec.id, delta = spec._xmode === 'delta';
     var rng = quoteRange(spec, filter);
@@ -837,9 +830,8 @@
     return off;
   }
   var fontsReady = !doc.fonts || doc.fonts.status === 'loaded';
-  // shown = in the tab's group (the smile expiry) and not toggled off; every
-  // series of the spec is named (ECharts merges the map: another group's names
-  // must not keep an earlier 'shown')
+  // shown = in the tab's group and not toggled off; every series is named (ECharts
+  // merges the map: another group's must not keep an earlier 'shown')
   function selection(spec, id, f, off) {
     var sel = {}, inGroup = {};
     off = off || legendOff(id);
@@ -893,9 +885,8 @@
     loadBook(c.spec).then(function () { bookFailed(c.el.id, null); ch.hideLoading(); queueRedraw(c.el.id); },
       function (err) { ch.hideLoading(); bookFailed(c.el.id, err); });
   }
-  // A tab switch on a drawn chart, or a model toggled on a quote smile: one merge of
-  // the series now drawn (by id), the legend state or, on a quote smile, the x range
-  // of both grids. The spec is not parsed again.
+  // A tab switch or a smile's model toggle: one merge of the series now drawn (by id),
+  // the legend state or a smile's x range. The spec is not parsed again.
   function applyFilter(c) {
     var spec = c.spec, el = c.el, f = Desk.filters[el.id], off = legendOff(el.id);
     if (spec.quotes) {
@@ -1111,9 +1102,8 @@
   };
   Desk.state = state;
 
-  // A '#panel&k=v' fragment names no element, so the browser does not scroll:
-  // scroll to the anchor once the tabs are set, and again at 'load' unless the
-  // reader has scrolled since.
+  // a '#panel&k=v' fragment names no element: scroll to the anchor once the tabs are
+  // set, and again at 'load' unless the reader has scrolled since
   function scrollToAnchor() {
     var a = state.anchor();
     if (!a || !state.pairs().length) return;
@@ -1124,9 +1114,9 @@
     window.addEventListener('load', function () { if (Math.abs(window.scrollY - y) < 2) el.scrollIntoView(); }, { once: true });
   }
 
-  // -- the smile's expiry strip: one line; a selected tab out of view centred in it
-  // (not scrollIntoView: that scrolls the page), and the status line copied from the
-  // expiry's row of the audited 'Quotes per expiry' table, as the server writes it
+  // -- the smile's one-line expiry strip: a selected tab out of view is centred in it
+  // (scrollIntoView scrolls the page); the status line is the expiry's row of the
+  // audited 'Quotes per expiry' table, as the server writes it
   function keepInView(list, tab) {
     requestAnimationFrame(function () {
       var l = list.getBoundingClientRect(), t = tab.getBoundingClientRect();
@@ -1153,10 +1143,9 @@
       // the status line: the server wrote the one of the tab it selected
       var strip = list.classList.contains('exp-strip'), status = doc.getElementById(list.getAttribute('data-status') || '');
       var served = tabs.filter(function (t) { return t.getAttribute('aria-selected') === 'true'; })[0];
-      // init: the page's first selection. It writes no state (a plain load keeps
-      // its URL and its #panel anchor) and leaves charts the IntersectionObserver
-      // has not reached to it. A switch writes the old and the new tab only (45 tabs
-      // written twice were 90 DOM mutations); the status line after the click's frame
+      // init: the first selection writes no state (a load keeps its URL and anchor) and
+      // leaves undrawn charts to the IntersectionObserver. A switch writes the old and
+      // new tab only; the status line after the click's frame
       function select(tab, focus, init) {
         tabs.forEach(function (t) {
           var on = t === tab, p = !shared && doc.getElementById(t.getAttribute('aria-controls'));
@@ -1312,11 +1301,14 @@
     if (el && Desk.charts[id]) render(el);
   }
 
-  // -- heatmap cells: arrow-key navigation and a readout line ----
+  // -- heatmap cells: arrow-key navigation and a readout line. A Surface grid's
+  // (data-src) numbers are in the session's data file with its template ({i:d}: number
+  // i to d decimals, + signed); until it is in, a cell reads its row, column and text ----
   function initHeatmaps() {
     $$('table.heat').forEach(function (tbl) {
       var out = doc.getElementById(tbl.getAttribute('data-readout'));
-      var cells = $$('td[data-detail]', tbl);
+      var src = tbl.getAttribute('data-src'), sel = src ? 'tbody td' : 'td[data-detail]', heat, last;
+      var cells = $$(sel, tbl);
       if (!cells.length) return;
       cells.forEach(function (c, i) { c.tabIndex = i === 0 ? 0 : -1; });
       var withHeads = tbl.getAttribute('data-prefix') === 'headers';
@@ -1326,11 +1318,18 @@
       }
       function show(c) {
         // the readout follows the units toggle of the region the table is in
-        var u = c.closest('.units'), alt = u && u.getAttribute('data-show') === 'alt' && c.getAttribute('data-detail-alt');
-        if (out) out.textContent = (withHeads ? heads(c) : '') + (alt || c.getAttribute('data-detail'));
+        var u = c.closest('.units'), alt = u && u.getAttribute('data-show') === 'alt' && c.getAttribute('data-detail-alt'), v;
+        last = c;
+        if (src && heat === undefined) {
+          heat = null;
+          Desk.data(src, tbl.getAttribute('data-integrity'), tbl.getAttribute('data-session')).then(function (j) { heat = j.heat[tbl.id]; show(last); }, function () {});
+        }
+        v = heat && heat.cells[c.parentNode.sectionRowIndex][c.cellIndex - 1];
+        if (out) out.textContent = (withHeads ? heads(c) : '') + (!src ? alt || c.getAttribute('data-detail') : c.className === 'empty' ? tbl.getAttribute('data-empty')
+          : v ? heat.detail.replace(/\{(\d)(:(\+?)(\d))?\}/g, function (m, i, x, sg, dg) { return x ? num(v[i], { digits: +dg, signed: !!sg }) : v[i]; }) : c.textContent);
       }
-      tbl.addEventListener('mouseover', function (e) { var c = e.target.closest('td[data-detail]'); if (c) show(c); });
-      tbl.addEventListener('focusin', function (e) { var c = e.target.closest('td[data-detail]'); if (c) show(c); });
+      tbl.addEventListener('mouseover', function (e) { var c = e.target.closest(sel); if (c) show(c); });
+      tbl.addEventListener('focusin', function (e) { var c = e.target.closest(sel); if (c) show(c); });
       tbl.addEventListener('keydown', function (e) {
         var c = e.target.closest('td'); if (!c) return;
         var row = c.parentNode, ri = Array.prototype.indexOf.call(row.parentNode.rows, row), ci = c.cellIndex, next = null;
@@ -1347,9 +1346,8 @@
     });
   }
 
-  // -- chart groups: one zoom for every member (they share their x values). A zoom
-  // on one is applied to each other as the same window, each in a task of its own
-  // after the zoomed chart's frame (one task for three was 150 ms); a member
+  // -- chart groups share one zoom (and their x values): a zoom on one is applied to
+  // each other, a task each after the zoomed chart's frame; a member
   // already at the window (echarts.connect may carry a drag) is left alone ----
   function groupMembers(grp) {
     return $$('.chart[data-chart-group="' + grp + '"]').map(function (el) { return el.id; });
@@ -1429,10 +1427,9 @@
     zr.on('mousemove', function (e) { zr.setCursorStyle(at(e) ? 'pointer' : 'default'); });
   }
 
-  // -- the expiry as the shared cursor of Surface: a row head of a heatmap or the
-  // delta grid (tr[data-exp]; a button added here), a #chart-by-expiry category or
-  // '[' / ']' selects the expiry's smile tab; its rows are then aria-current and the
-  // by-expiry chart draws a line at it. The smile is scrolled to only when offscreen ----
+  // -- Surface's shared expiry cursor: a heatmap or delta-grid row head (a button added
+  // here), a #chart-by-expiry category or '[' / ']' picks the smile tab; its rows go
+  // aria-current, the by-expiry chart draws a line; the smile scrolls in if offscreen ----
   function expiryTabs() {
     var list = $('[role="tablist"][data-state-key="exp"]');
     return list ? $$('[role="tab"]', list) : [];
@@ -1759,9 +1756,8 @@
   }
   initNarrowDisclosure();
 
-  // -- sortable, copyable tables (D12): a head of a rectangular .tbl sorts up,
-  // down, then back to the published order (aria-sort); Copy = TSV of the shown
-  // rows as written, CSV = a download. Without JavaScript nothing changes.
+  // -- sortable, copyable tables (D12): a .tbl head sorts up, down, then back to the
+  // published order (aria-sort); Copy = TSV of the shown rows, CSV = a download.
   var SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹', DASH = /^[—–-]+$/;
   // U+2212, $, %, $k / $M, 'm × 10⁻ⁿ', the first of 'a / b', 'a–b', 'a to b'; null for text
   // (and, whole === true, for anything but one number: not a map's index)
@@ -1857,6 +1853,7 @@
 
   function boot() {
     root.classList.add('has-js');
+    $$('.chart-groups').forEach(function (g) { g.removeAttribute('tabindex'); });   // it scrolls only without JS
     initNav(); initFreshness(); initTools(); initCharts(); initTabs(); initQuotes(); initPointReadouts(); initHeatmaps(); initExpiryCursor(); initUnits(); initFilters(); init3d(); initTableRoles(); initTableTools(); initScrollHints();
     initPrint(); openTarget(); scrollToAnchor();
     window.addEventListener('hashchange', openTarget);

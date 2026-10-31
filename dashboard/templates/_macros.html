@@ -40,23 +40,35 @@
 <span class="rag rag-{{ 'na' if status == 'info' else status }}"><span aria-hidden="true">{{ m[status][0] }}</span>{{ m[status][1] }}</span>
 {%- endmacro %}
 
+{# A chart's data table. nr: every column but the first is a number, right-aligned
+   from the table's class (desk.css); a number cell carries no class (D2: 12 B a cell,
+   85 KB of a 45-expiry Surface page, that changed nothing a chart-data table shows) #}
 {% macro _table(t) -%}
-<table>
-    <caption>{{ t.caption|subs }}</caption>
-    <thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num %} class="num"{% endif %}>{{ c.label|subs|sym }}</th>{% endfor %}</tr></thead>
-    <tbody>{% for r in t.rows %}<tr>{% for v in r %}<td{% if t.columns[loop.index0] and t.columns[loop.index0].num %} class="num"{% endif %}>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
-  </table>
+{%- set nr = t.columns|length > 1 and not t.columns[0].num and not (t.columns[1:]|rejectattr('num')|list) -%}
+<table{% if nr %} class="nr"{% endif %}><caption>{{ t.caption|subs }}</caption>
+<thead><tr>{% for c in t.columns %}<th scope="col"{% if c.num and not nr %} class="num"{% endif %}>{{ c.label|subs|sym }}</th>{% endfor %}</tr></thead>
+<tbody>{% for r in t.rows %}<tr>{% for v in r %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table>
 {%- endmacro %}
 
-{# t.groups: one more table per tab group (the smile slices' expiries); desk.js
-   shows the selected group's, and every group shows without JavaScript #}
+{# t.groups: one more set of rows per tab group (the smile's expiries); desk.js shows
+   the selected group's, and every group shows without JavaScript. With
+   t.group_caption the groups are one table, a row group each under a shared head
+   (a header row names the group), in a region that scrolls inside a bounded height
+   without JavaScript (desk.js drops its tab stop: one group shows at a time) #}
 {% macro data_table(t, id, sr=True) -%}
 <div class="chart-data{% if sr %} sr-only{% endif %}" id="{{ id }}">
-  {% if t and t.rows %}
-  {{ _table(t) }}
-  {% for g in t.groups or [] %}<div class="chart-data-group" data-group="{{ g.group }}"{% if not g.shown %} hidden{% endif %}>{{ _table(g) }}</div>
-  {% endfor %}
-  {% else %}No data.{% endif %}
+{%- if t and t.rows %}{{ _table(t) }}
+{%- if t.group_caption %}{% set g0 = t.groups[0] %}
+<div class="chart-groups" tabindex="0" role="region" aria-labelledby="{{ id }}-gcap"><table class="nr"><caption id="{{ id }}-gcap">{{ t.group_caption|subs }}</caption>
+<thead><tr>{% for c in g0.columns %}<th scope="col">{{ c.label|subs|sym }}</th>{% endfor %}</tr></thead>
+{%- for g in t.groups %}
+<tbody data-group="{{ g.group }}"{% if not g.shown %} hidden{% endif %}><tr><th scope="rowgroup" colspan="{{ g0.columns|length }}">{{ g.caption|subs }}</th></tr>{% for r in g.rows %}<tr>{% for v in r %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+{%- endfor %}</table></div>
+{%- else %}{% for g in t.groups or [] %}
+<div class="chart-data-group" data-group="{{ g.group }}"{% if not g.shown %} hidden{% endif %}>{{ _table(g) }}</div>
+{%- endfor %}{% endif %}
+{%- else %}No data.{% endif %}
 </div>
 {%- endmacro %}
 
@@ -84,20 +96,25 @@
 {%- endmacro %}
 
 {# cap: a grid whose rows grow with the expiry count takes its row's height and
-   scrolls inside it (desk.css .heat-wrap.capped) instead of setting that height #}
+   scrolls inside it (desk.css .heat-wrap.capped) instead of setting that height.
+   h.src: its cells' details are in the session's data file (D2; desk.js writes them
+   into the readout), not on each cell; an empty cell is blank (desk.css draws its
+   dot), the caption says what it means. A cell's colour is a class of its ramp
+   step (desk_format.HEAT_CLASSES), or an inline style off those two ramps #}
 {% macro heatmap(h, id, caption, row_head='T', ramp=None, grow=False, cap=False) -%}
 <div class="heat-wrap{% if grow %} grow{% endif %}{% if cap %} capped{% endif %}" tabindex="0" role="region" aria-labelledby="{{ id }}-cap">
-  <table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}{% if h.total %} data-total{% endif %}>
-    <caption id="{{ id }}-cap">{{ caption }}</caption>
-    <thead><tr><th scope="col">{{ row_head }}</th>{% for c in h.cols %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>
-    <tbody>
-      {% for row in h.rows %}
-      <tr{% if row.exp %} data-exp="{{ row.exp }}"{% endif %}><th scope="row">{{ row.label }}</th>
-        {% for cell in row.cells %}{% if cell.empty %}<td class="empty" data-detail="{{ cell.detail }}"><span aria-hidden="true">·</span><span class="sr-only">{{ cell.detail or 'no data' }}</span></td>{% else %}<td{% if cell.flag %} class="flag"{% endif %} style="background:{{ cell.bg }};color:{{ cell.fg }}" data-detail="{{ cell.detail }}"{% if cell.alt %} data-detail-alt="{{ cell.alt_detail }}"{% endif %}>{% if cell.alt %}<span data-unit="base">{{ cell.text }}</span><span data-unit="alt">{{ cell.alt }}</span>{% else %}{{ cell.text }}{% endif %}{% if not h.compact %}{% if cell.alt %}<span class="sr-only" data-unit="base">; {{ cell.detail }}</span><span class="sr-only" data-unit="alt">; {{ cell.alt_detail }}</span>{% else %}<span class="sr-only">; {{ cell.detail }}</span>{% endif %}{% endif %}</td>{% endif %}{% endfor %}
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<table class="heat" id="{{ id }}" data-readout="{{ id }}-readout"{% if h.compact %} data-prefix="headers"{% endif %}{% if h.total %} data-total{% endif %}{% if h.src %} data-src="{{ h.src }}" data-integrity="{{ h.integrity }}" data-session="{{ h.session }}" data-empty="no quotes"{% endif %}>
+<caption id="{{ id }}-cap">{{ caption }}{% if h.src %}; a dot: no quotes in the bucket{% endif %}</caption>
+<thead><tr><th scope="col">{{ row_head }}</th>{% for c in h.cols %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>
+<tbody>
+{%- for row in h.rows %}
+<tr{% if row.exp %} data-exp="{{ row.exp }}"{% endif %}><th scope="row">{{ row.label }}</th>
+{%- for cell in row.cells %}{% if cell.empty %}{% if h.src %}<td class="empty"></td>{% else %}<td class="empty" data-detail="{{ cell.detail }}"><span class="sr-only">{{ cell.detail or 'no data' }}</span></td>{% endif %}
+{%- else %}{% set cls = [('flag' if cell.flag else ''), (cell.cls or '')]|select|join(' ') %}<td{% if cls %} class="{{ cls }}"{% endif %}{% if not cell.cls %} style="background:{{ cell.bg }};color:{{ cell.fg }}"{% endif %}{% if not h.src %} data-detail="{{ cell.detail }}"{% if cell.alt %} data-detail-alt="{{ cell.alt_detail }}"{% endif %}{% endif %}>{% if cell.alt %}<span data-unit="base">{{ cell.text }}</span><span data-unit="alt">{{ cell.alt }}</span>{% else %}{{ cell.text }}{% endif %}{% if not h.compact %}{% if cell.alt %}<span class="sr-only" data-unit="base">; {{ cell.detail }}</span><span class="sr-only" data-unit="alt">; {{ cell.alt_detail }}</span>{% else %}<span class="sr-only">; {{ cell.detail }}</span>{% endif %}{% endif %}</td>{% endif %}
+{%- endfor %}</tr>
+{%- endfor %}
+</tbody>
+</table>
 </div>
 <p class="heat-readout" id="{{ id }}-readout" aria-live="polite">Hover or focus a cell (arrow keys move) for its details.</p>
 {# ramp: one key, or a list of keys (a total column on its own scale has its own) #}
@@ -139,13 +156,14 @@
 {% endif %}
 {%- endmacro %}
 
-{# the delta-quoted surface grid (Surface #delta-grid): g from app.desk_grid_view #}
+{# the delta-quoted surface grid (Surface #delta-grid): g from app.desk_grid_view; every
+   cell a number (desk.css .dgrid td), a tinted one (t) its ramp step's class #}
 {% macro desk_grid(g, rows, id, caption, label) -%}
 <div class="tbl-wrap" tabindex="0" role="region" aria-label="{{ label }} (scrollable)">
 <table class="tbl dense dgrid" id="{{ id }}">
   <caption>{{ caption }}</caption>
   <thead><tr>{% for h in g.heads %}<th scope="col"{% if not loop.first %} class="num"{% endif %}>{% if g.links and g.links.get(h) %}<a href="{{ g.links[h] }}">{{ h }}</a>{% else %}{{ h }}{% endif %}</th>{% endfor %}</tr></thead>
-  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}{% if r.sub2 %}<span class="dg-sub">{{ r.sub2 }}</span>{% endif %}</th>{% for c in r.cells %}<td class="num{% if c.bg %} tint{% endif %}{% if c.xp %} xp{% endif %}"{% if c.bg %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  <tbody>{% for r in rows %}<tr{% if not r.available %} class="muted"{% endif %}{% if r.exp %} data-exp="{{ r.exp }}"{% endif %}><th scope="row">{{ r.head }}{% if r.sub %}<span class="dg-sub">{{ r.sub }}</span>{% endif %}{% if r.sub2 %}<span class="dg-sub">{{ r.sub2 }}</span>{% endif %}</th>{% for c in r.cells %}{% set k = [('t ' ~ (c.cls or '')) if c.bg else '', 'xp' if c.xp else '']|select|join(' ')|trim %}<td{% if k %} class="{{ k }}"{% endif %}{% if c.bg and not c.cls %} style="background:{{ c.bg }};color:{{ c.fg }}"{% endif %}{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.xp %}<span class="xp-tag">{{ g.extrap_tag }}</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
 </table>
 </div>
 {%- endmacro %}
@@ -172,10 +190,10 @@
    #surface-change): v from app.surface_comparison's views #}
 {% macro vs_table(head, v) -%}
       <div class="tbl-wrap" tabindex="0" role="region" aria-label="Change against {{ v.session }} (scrollable)">
-      <table class="tbl dense dgrid" id="vs-table-{{ v.session }}">
+      <table class="tbl dense dgrid nr" id="vs-table-{{ v.session }}">
         <caption><strong class="vs-head">vs {{ v.session }}, {{ v.gap|plural('NYSE session') }} earlier</strong>: the SVI-cal surface at constant maturity, each cell {{ v.session }} → {{ head }} (ATMF in %; RR, BF and Δ in vol pts); Δ = {{ head }} − {{ v.session }}</caption>
         <thead><tr><th scope="col">Tenor</th><th scope="col" class="num">ATMF</th><th scope="col" class="num">Δ ATMF</th><th scope="col" class="num">RR25</th><th scope="col" class="num">Δ RR25</th><th scope="col" class="num">BF25</th><th scope="col" class="num">Δ BF25</th></tr></thead>
-        <tbody>{% for r in v.rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.label }}</th>{% for k in ('atmf', 'rr25', 'bf25') %}{% set c = r[k] %}<td class="num">{{ c.old|fmt('.2f') if k == 'atmf' else c.old|signed('.2f') }} → {{ c.new|fmt('.2f') if k == 'atmf' else c.new|signed('.2f') }}</td><td class="num">{{ c.delta|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        <tbody>{% for r in v.rows %}<tr{% if not r.available %} class="muted"{% endif %}><th scope="row">{{ r.label }}</th>{% for k in ('atmf', 'rr25', 'bf25') %}{% set c = r[k] %}<td>{{ c.old|fmt('.2f') if k == 'atmf' else c.old|signed('.2f') }} → {{ c.new|fmt('.2f') if k == 'atmf' else c.new|signed('.2f') }}</td><td>{{ c.delta|signed('.2f') }}</td>{% endfor %}</tr>{% endfor %}</tbody>
       </table>
       </div>
 {%- endmacro %}

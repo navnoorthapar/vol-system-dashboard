@@ -100,6 +100,7 @@ from desk_format import (  # noqa: E402, F401  (re-exported: tests and templates
     BERLIN_11,
     CIVIDIS_11,
     DIVERGE_11,
+    HEAT_CLASSES,
     MINUS,
     SPX_MULTIPLIER,
     _fmt,
@@ -5535,12 +5536,31 @@ def _model_surface_heat(params: dict) -> dict:
     return {"cols": [_fmt(k, "+.2f") for k in lm], "rows": out_rows, "lo": lo, "hi": hi, "points": pts}
 
 
-def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
+# A Surface heatmap cell's details (D2): numbers in the session's data file, written
+# into the cell's readout by desk.js with its grid's template: {i:d} is number i to
+# d decimals ({i:+d} signed), {i} as it is. Until the file is loaded the readout
+# names the cell's row, column and printed value.
+HEAT_DETAIL_IV = "mid IV {0:2}% (median of {1}) · half-spread {2:2} vol pts"
+HEAT_DETAIL_RESID = "{0:+2} half-spreads (median of {1}) · {2:0}% inside"
+
+
+def heat_detail(template: str, vals: Sequence[Any]) -> str:
+    """A HEAT_DETAIL_* template filled as desk.js fills it (the readout's text)."""
+    def one(m: re.Match) -> str:
+        v, spec = vals[int(m.group(1))], m.group(2)
+        if spec is None:
+            return str(v)
+        return signed(v, f".{spec[-1]}f") if spec.startswith("+") else _fmt(float(v), f".{spec}f")
+    return re.sub(r"\{(\d)(?::(\+?\d))?\}", one, template)
+
+
+def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, nums,
                  used: Sequence[int] | None = None) -> list[dict]:
     """Heatmap rows: one per expiry, one cell per ln(K/F) bucket in ``used`` (K_BINS).
 
     Each cell records how many quotes it holds (``n``), so the cells of a grid
-    add up to the quotes it shows."""
+    add up to the quotes it shows, and its detail numbers (``vals``, nums(g, v):
+    the session data file's, rounded as the readout prints them)."""
     qb = q.assign(kb=k_bucket(q["k"]))
     used = list(used) if used is not None else k_buckets_used(q["k"])
     rows = []
@@ -5550,11 +5570,10 @@ def _bucket_grid(q: pd.DataFrame, exps: pd.Series, value, colour, detail,
         for b in used:
             g = qe[qe["kb"] == b]
             if g.empty:
-                empty = cell("", None, detail=f"{e} · ln(K/F) {k_bucket_label(b)}: no quotes")
-                cells.append({**empty, "n": 0})
+                cells.append({**cell("", None), "n": 0, "vals": None})
                 continue
             v = value(g)
-            cells.append({**cell(v["text"], colour(v["value"]), detail=detail(g, v)), "n": len(g)})
+            cells.append({**cell(v["text"], colour(v["value"])), "n": len(g), "vals": nums(g, v)})
         # exp: the row's expiry (Surface selects it across the heatmaps, the delta
         # grid, the by-expiry chart and the smile: desk.js initExpiryCursor)
         rows.append({"label": f"{e} · {_fmt(exps[e], '.0f')}d", "exp": str(e), "cells": cells})
@@ -5591,7 +5610,7 @@ def desk_grid_view(listed: Sequence[dict], cm: Sequence[dict]) -> dict:
     def tint(text: str, bg: str | None, title: str = "", xp: bool = False) -> dict:
         c = {"text": text, "title": title, "xp": xp}
         if bg is not None:
-            c.update(bg=bg, fg=_text_colour_on(bg))
+            c.update(bg=bg, fg=_text_colour_on(bg), cls=HEAT_CLASSES.get(bg))
         return c
 
     def row(r: dict, head: str, sub: str = "") -> dict:
@@ -6312,9 +6331,9 @@ def surface_extras(d: dict, surf: dict) -> None:
             value=lambda g: {"value": float(g["mid_iv"].median() * 100),
                              "text": _fmt(float(g["mid_iv"].median() * 100), ".1f")},
             colour=lambda v: seq_colour(v, lo, hi),
-            detail=lambda g, v: (f"mid IV {_fmt(v['value'], '.2f')}% (median of {len(g)}) · half-spread "
-                                 f"{_fmt(float(g['half_spread_vp'].median()), '.2f')} vol pts"), used=used),
-        "compact": True}
+            nums=lambda g, v: [round(v["value"], 2), len(g), round(float(g["half_spread_vp"].median()), 2)],
+            used=used),
+        "compact": True, "id": "iv-heatmap", "detail": HEAT_DETAIL_IV}
     d["iv_heat"]["n"] = sum(c["n"] for r in d["iv_heat"]["rows"] for c in r["cells"])
     pts = []
     # 3D x of a bucket: its midpoint; of an open wing, the median ln(K/F) of its quotes
@@ -6338,15 +6357,15 @@ def surface_extras(d: dict, surf: dict) -> None:
         q = q[pd.to_numeric(q["model_iv"], errors="coerce").notna()]
         d["resid_heat"].append({
             "key": m, "label": model_label(m), "cols": [k_bucket_label(b, compact=True) for b in used],
-            "n": len(q), "compact": True,
+            "n": len(q), "compact": True, "id": f"resid-heat-{m}", "detail": HEAT_DETAIL_RESID,
             "rows": _bucket_grid(
                 q, exps,
                 value=lambda g: {"value": float(g["error_hs"].median()),
                                  "text": signed(float(g["error_hs"].median()), ".1f")},
                 colour=lambda v: div_colour(v, 5.0),
-                detail=lambda g, v: (f"{signed(v['value'], '.2f')} half-spreads (median of {len(g)}) · "
-                                     f"{_fmt(g['inside_spread'].astype(bool).mean() * 100, '.0f')}% "
-                                     "inside"), used=used)})
+                nums=lambda g, v: [round(v["value"], 2), len(g),
+                                   round(float(g["inside_spread"].astype(bool).mean() * 100))],
+                used=used)})
 
     # smile slices: one chart, the expiry chosen by tabs (hash state "exp"); every
     # model at the quoted strikes, each with one legend toggle across expiries
@@ -6394,18 +6413,23 @@ def surface_extras(d: dict, surf: dict) -> None:
                           + [_fmt(pd.Series([v for v, s_ in zip(by_model[m], sel) if s_],
                                             dtype=float).median(), ".2f") for m in overlay])
         groups.append({"group": e, "shown": e == d["default_exp"], **charts.table(
-            f"{e} ({_fmt(exps[e], '.0f')} days): median implied vol (%) by ln(K/F) bucket",
+            f"{e} ({_fmt(exps[e], '.0f')} days)",
             ["ln(K/F)", "Quotes#", "Bid#", "Mid#", "Ask#"] + [model_short(m) + "#" for m in overlay],
             rows_e)})
-    # the session's data file: every expiry's packed quotes and the 3D view's points
-    # (its spec keeps the colour scale), fetched once the smile is drawn or the 3D
-    # view is asked for
-    file_: dict = {"quotes": {"order": list(qblock), "groups": qblock}}
+    # the session's data file: every expiry's packed quotes, each heatmap cell's
+    # detail numbers (its readout's; null for an empty cell) and the 3D view's points
+    # (its spec keeps the colour scale), fetched once the smile is drawn, a heatmap
+    # cell is hovered or focused, or the 3D view is asked for
+    heats = [d["iv_heat"], *d["resid_heat"]]
+    file_: dict = {"quotes": {"order": list(qblock), "groups": qblock},
+                   "heat": {h["id"]: {"detail": h["detail"], "cells": [[c["vals"] for c in r["cells"]]
+                                                                       for r in h["rows"]]} for h in heats}}
     if d.get("surface3d"):
         file_["surface3d"] = {"points": d["surface3d"].pop("points")}
     book = publish_json("surface", session, file_)
-    if d.get("surface3d"):
-        d["surface3d"].update(book, session=session)
+    for x in [*heats, d.get("surface3d")]:
+        if x:
+            x.update(book, session=session)
     hs_by_exp = mkt.groupby("expiry")["half_spread_vp"].median()
     f_by_exp = mkt.groupby("expiry")["forward"].first()
     # one row per expiry; the status line under the tabs is its selected row
@@ -6418,6 +6442,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                              ["Expiry", "Days#", "Forward F#", "Quotes#", "Median half-spread (vol pts)#"],
                              per_exp)
     slice_tbl["groups"] = groups
+    # one table, a row group per expiry (D2: 45 tables, each with its caption and head)
+    slice_tbl["group_caption"] = "Median implied vol (%) by ln(K/F) bucket, a row group per expiry"
     d["charts"]["slices"] = charts.xy(
         "chart-slices", f"Smile slice with bid–ask quotes and model overlays, {session}",
         x={"type": "value", "name": "ln(K/F)", "digits": 2, "signed": True},
