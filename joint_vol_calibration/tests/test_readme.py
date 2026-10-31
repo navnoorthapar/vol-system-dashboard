@@ -207,7 +207,7 @@ def test_validation_pack_counts_and_outcomes_are_the_artifacts():
     assert _part_problems("pack") == []
 
 
-def test_the_packs_figures_a_surface_rebuild_moves_follow_the_snapshot(store_copy):
+def test_the_packs_figures_a_surface_rebuild_moves_follow_the_snapshot(store_copy, fresh):
     """VALIDATOR-10: the pack's M14 evidence quoted figures the daily job's
     surface rebuild changes (the certificates over the sessions, the
     replicated VIX against the official close, and, on the five C23 sessions,
@@ -229,7 +229,11 @@ def test_the_packs_figures_a_surface_rebuild_moves_follow_the_snapshot(store_cop
     message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
     assert f"  data_store/{rel}" in message
     for cid in ("pack/vix_truncation", "pack/vix_residual"):
-        assert f"  {cid} now reads " in message, cid
+        # named as moved; 'could not be recomputed' only where the current
+        # data_store cannot give the figure either (the job's rebuild left
+        # the session without an attribution)
+        computable = next(k["text"] for k in fresh["claims"] if k["id"] == cid) is not None
+        assert f"  {cid} {'now reads' if computable else 'could not be recomputed'} " in message, cid
     claim = _claim("pack/vix_truncation")["text"]
     edited = PACK_RAW.replace(claim.split("(")[1][:5], _moved(claim.split("(")[1][:5]), 1)
     problems = rr.doc_problems(SNAP, lambda d: edited if d == rr.PACK else rr.read_doc(d))
@@ -275,7 +279,34 @@ def test_a_figure_whose_artifacts_are_unchanged_must_recompute():
     assert "every artifact it reads unchanged" in failures[0]
 
 
-def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch):
+@pytest.fixture(scope="module")
+def fresh():
+    """A snapshot of the current data_store over the committed snapshot's
+    span. The code-change tests compare against it, not the committed one, so
+    they hold in the tree the daily job leaves too, where artifacts the
+    committed snapshot names may have been rebuilt."""
+    snap, _ = rr.build(SNAP["params"], rr.Store(), date=SNAP["generated"]["date"],
+                       commit=SNAP["generated"]["commit"])
+    return snap
+
+
+def _code_change(snap: dict, topics: list[str]) -> tuple[list[str], list[str]]:
+    """check() of ``snap`` under a monkeypatched generator: the failures, and
+    the claims a StaleSnapshot warning names as moved."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        failures = rr.check(snap, topics=topics)
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    return failures, re.findall(r"^  (\S+/\S+) (?:now reads|could not be recomputed)", message, re.MULTILINE)
+
+
+def _failed(failures: list[str], cid: str) -> str:
+    hit = [f for f in failures if f.split(" ")[0] == cid]
+    assert len(hit) == 1, (cid, failures)
+    return hit[0]
+
+
+def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch, fresh):
     """A code change that makes a claim stop before it reads its artifacts
     (here, reading surface/index.json's rows) is a failure. The rows it never
     read are not 'changed' because the run has no digest of them: counted as
@@ -285,40 +316,37 @@ def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch):
         raise RuntimeError("the index reader is broken")
 
     monkeypatch.setattr(rr.Claims, "index", broken)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        failures = rr.check(SNAP, topics=["calibration", "pack"])
-    readers = [k["id"] for k in SNAP["claims"] if k["id"].startswith(("calibration/", "pack/"))
+    failures, moved = _code_change(fresh, ["calibration", "pack"])
+    readers = [k["id"] for k in fresh["claims"] if k["id"].startswith(("calibration/", "pack/"))
                and any("surface/index.json#" in key for key in k["sources"])]
     assert {"calibration/vix_gap", "pack/m14_vix"} <= set(readers)
-    assert [f.split(" ")[0] for f in failures] == sorted(readers)
-    for f in failures:
+    for cid in readers:
+        f = _failed(failures, cid)
         assert "could not be recomputed (RuntimeError: the index reader is broken)" in f
         assert "every artifact it reads unchanged" in f
-    assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
+    assert moved == []
 
 
-def test_a_code_change_to_which_sessions_qualify_fails(monkeypatch):
+def test_a_code_change_to_which_sessions_qualify_fails(monkeypatch, fresh):
     """Which sessions the results range over is code (a stored fit's
     model_version, a scorecard) applied to data. Digested as its result, the
     list changed whenever the code did, under data_store/surface, so a code
     change that left no session qualifying was a stale-snapshot warning. The
     digest is now of the data the rule reads, so the claims fail."""
     monkeypatch.setattr(rr, "RESULT_MODEL_VERSION", 1, raising=False)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        failures = rr.check(SNAP, topics=["span"])
-    assert [f.split(" ")[0] for f in failures] == ["span/results"]
-    assert "every artifact it reads unchanged" in failures[0]
-    assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
+    failures, moved = _code_change(fresh, ["span"])
+    assert "every artifact it reads unchanged" in _failed(failures, "span/results")
+    assert moved == []
 
 
-def test_a_code_change_to_a_cache_query_fails(monkeypatch):
-    """The Data table's VX rows are read from the cache (vol_system.db), which
-    every run of the daily job rewrites. Digested as the query's result, a
-    changed query looked like a rewritten cache and warned; the digest is now
-    of the table's rows up to the Data table's end date, whatever the claim
-    selects from them, so a changed query fails."""
+def test_a_code_change_to_a_cache_query_fails(monkeypatch, fresh):
+    """The Data table's VX settlements are read from the cache
+    (vol_system.db), which every run of the daily job rewrites. Digested as
+    the query's result, a changed query looked like a rewritten cache and
+    warned; the digest is now of the table's rows up to the Data table's end
+    date, whatever the claim selects from them, so a changed query fails. (The
+    VX futures row also merges the partitions the job commits, which can hold
+    every row the query dropped.)"""
     orig = rr.Store.sql
 
     def limited(self, *args):
@@ -326,16 +354,12 @@ def test_a_code_change_to_a_cache_query_fails(monkeypatch):
                             for a in args))
 
     monkeypatch.setattr(rr.Store, "sql", limited)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        failures = rr.check(SNAP, topics=["data_table"])
-    assert sorted(f.split(" ")[0] for f in failures) == ["data_table/vx_futures", "data_table/vx_settlements"]
-    for f in failures:
-        assert "every artifact it reads unchanged" in f
-    assert not [w for w in caught if issubclass(w.category, rr.StaleSnapshot)]
+    failures, moved = _code_change(fresh, ["data_table"])
+    assert "every artifact it reads unchanged" in _failed(failures, "data_table/vx_settlements")
+    assert moved == []
 
 
-def test_a_claim_computed_from_other_artifacts_than_the_snapshot_names_fails(monkeypatch):
+def test_a_claim_computed_from_other_artifacts_than_the_snapshot_names_fails(monkeypatch, fresh):
     """The snapshot names what each figure is computed from, so a rebuild of
     it warns. Code that reads something else for the same figure (here the VX
     row from the cache alone, the partitions the daily job commits dropped)
@@ -350,10 +374,17 @@ def test_a_claim_computed_from_other_artifacts_than_the_snapshot_names_fails(mon
         return orig(self, table, through)
 
     monkeypatch.setattr(rr.Store, "market", market)
-    failures = rr.check(SNAP, topics=["data_table"])
-    assert [f.split(" ")[0] for f in failures] == ["data_table/vx_futures"]
-    assert f"no longer from data_store/market/vix_futures_daily#date<={SNAP['params']['data_through']}" \
-        in failures[0]
+    failures, moved = _code_change(fresh, ["data_table"])
+    f = _failed(failures, "data_table/vx_futures")
+    was = next(k["text"] for k in fresh["claims"] if k["id"] == "data_table/vx_futures")
+    now = next(k.text for k in rr.compute(fresh["params"], rr.Store(), ["data_table"])
+               if k.id == "data_table/vx_futures")
+    if now == was:          # the partitions add no row to the cache's yet: the same figure, from other reads
+        assert (f"no longer from data_store/market/vix_futures_daily#date<={fresh['params']['data_through']}"
+                in f)
+    else:                   # they do (a clean checkout of the job's commit): the figure moved
+        assert f"data_table/vx_futures now reads {now!r}" in f
+    assert moved == []
 
 
 def test_a_session_row_the_daily_job_dropped_warns(store_copy):
@@ -431,7 +462,8 @@ def test_a_session_without_a_replicated_vix_is_named(store_copy):
     _, bad = rr.build(SNAP["params"], rr.Store(store_copy), date="2000-01-01", commit="0" * 40)
     errors = {k.id: k.error for k in bad}            # other claims may refuse after a rebuild too
     for cid in ("calibration/vix_gap", "pack/m14_vix"):
-        assert errors.get(cid) == f"the VIX is not replicated on ['{LAST}']", cid
+        # the job's own rebuild may have left another session unreplicated too
+        assert re.fullmatch(rf"the VIX is not replicated on \[.*'{LAST}'\]", errors.get(cid) or ""), cid
     with pytest.warns(rr.StaleSnapshot, match=f"data_store/{rel}#session={LAST}"):
         assert rr.check(SNAP, rr.Store(store_copy), topics=["calibration", "pack"]) == []
 
