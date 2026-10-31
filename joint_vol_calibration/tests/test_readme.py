@@ -69,6 +69,8 @@ FIGURE = "2026-10-16"                       # the session docs/figures/smile_<se
 MINUS = "−"
 PACK_RAW = (ROOT / "docs" / "model_validation" / "README.md").read_text()
 PACK = " ".join(PACK_RAW.split())
+# claims computed from a code constant (the backtest's β), with no artifact
+CONSTANT_CLAIMS = {"backtest_prose/beta", "limitations/beta", "pack/m7_beta", "pack/m7_design"}
 
 
 def _script(name: str):
@@ -198,10 +200,40 @@ def test_result_2_joint_calibration_heston_and_rough():
 
 def test_validation_pack_counts_and_outcomes_are_the_artifacts():
     """VALIDATOR-10 (C24-I1 cites this test): the pack was frozen at five
-    sessions and disagreed with the site. Its span, the §1 limitations that
-    count sessions, §2's identifiability, held-out and replication counts and
-    the §3 outcome rows are the snapshot's, and the snapshot is the artifacts'."""
+    sessions and disagreed with the site. Its span, the §1 limitations of M4,
+    M5, M7, M15 and M18, §2's figures for M4 (except the optimiser's timings),
+    M7 and M14, and the §3 rows of M4, M5, M7, M14, M15 and M18 are the
+    snapshot's, and the snapshot is the artifacts'."""
     assert _part_problems("pack") == []
+
+
+def test_the_packs_figures_a_surface_rebuild_moves_follow_the_snapshot(store_copy):
+    """VALIDATOR-10: the pack's M14 evidence quoted figures the daily job's
+    surface rebuild changes (the certificates over the sessions, the
+    replicated VIX against the official close, and, on the five C23 sessions,
+    the truncation under the SVI-cal wing and the rest of the gap) with no
+    check at all, so a rebuild left them silently stale. They are in the
+    snapshot: a rebuilt replication warns, naming the figures that moved, and a
+    pack that disagrees with the snapshot fails."""
+    ids = {"pack/certificates", "pack/dense_grid", "pack/vix_gap", "pack/vix_truncation", "pack/vix_residual",
+           "pack/m5", "pack/m5_outcome", "pack/m7_outcome", "pack/sigma_box", "pack/known_weaknesses"}
+    assert ids <= {k["id"] for k in SNAP["claims"]}
+    rel = f"surface/{C23_SESSIONS[1]}/vix_replication.json"
+    doc = json.loads((store_copy / rel).read_text())
+    ga = doc["indices"]["VIX"]["gap_attribution"]
+    ga["truncation_pts"] += 0.1                       # the rebuild moves the gap's split
+    ga["residual_pts"] -= 0.1
+    (store_copy / rel).write_text(json.dumps(doc))
+    with pytest.warns(rr.StaleSnapshot) as caught:
+        assert rr.check(SNAP, rr.Store(store_copy), topics=["pack"]) == []
+    message = "\n".join(str(w.message) for w in caught if issubclass(w.category, rr.StaleSnapshot))
+    assert f"  data_store/{rel}" in message
+    for cid in ("pack/vix_truncation", "pack/vix_residual"):
+        assert f"  {cid} now reads " in message, cid
+    claim = _claim("pack/vix_truncation")["text"]
+    edited = PACK_RAW.replace(claim.split("(")[1][:5], _moved(claim.split("(")[1][:5]), 1)
+    problems = rr.doc_problems(SNAP, lambda d: edited if d == rr.PACK else rr.read_doc(d))
+    assert [p.split(":")[0] for p in problems] == ["pack/vix_truncation"]
 
 
 def test_snapshot_names_each_artifact_with_its_hash_and_method():
@@ -224,7 +256,7 @@ def test_snapshot_names_each_artifact_with_its_hash_and_method():
     assert len(ids) == len(set(ids))
     for k in SNAP["claims"]:
         assert k["text"], k["id"]
-        assert k["sources"] or k["id"] in {"backtest_prose/beta", "limitations/beta"}, k["id"]
+        assert k["sources"] or k["id"] in CONSTANT_CLAIMS, k["id"]
         assert set(k["sources"]) <= set(SNAP["artifacts"]), k["id"]
         assert k["doc"] in {rr.README, rr.PACK, rr.SOURCES_DOC}, k["id"]
 
@@ -256,7 +288,10 @@ def test_a_claim_that_stops_before_it_reads_its_artifacts_fails(monkeypatch):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         failures = rr.check(SNAP, topics=["calibration", "pack"])
-    assert [f.split(" ")[0] for f in failures] == ["calibration/vix_gap", "pack/m14_vix"]
+    readers = [k["id"] for k in SNAP["claims"] if k["id"].startswith(("calibration/", "pack/"))
+               and any("surface/index.json#" in key for key in k["sources"])]
+    assert {"calibration/vix_gap", "pack/m14_vix"} <= set(readers)
+    assert [f.split(" ")[0] for f in failures] == sorted(readers)
     for f in failures:
         assert "could not be recomputed (RuntimeError: the index reader is broken)" in f
         assert "every artifact it reads unchanged" in f

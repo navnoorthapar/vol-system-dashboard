@@ -5,11 +5,12 @@ data, statistics and engineering work, and the fixes of an independent review of
 extended to the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26 (the last of them the
 daily job's first multi-start trust-region fit). Every number here is quoted from a committed artifact (named beside
 it), a test that pins it, or a run recorded in `docs/`. A number over sessions names its sessions; the
-[Model Risk page](https://navnoorbawa.me/model-risk.html) computes the current values at every build, and this
-document does not copy what the daily job changes. `tests/test_readme.py` checks the numbers the README also quotes,
-the §1 limitations that count sessions, §2's identifiability, held-out and replication counts and the §3 outcome rows
-against a committed snapshot ([as of 2026-10-31](../results/readme_results.json)), and the snapshot against the
-artifacts it names; the rest of this document is not checked number by number.
+[Model Risk page](https://navnoorbawa.me/model-risk.html) computes the current values at every build, while this
+document quotes them as of a committed snapshot ([as of 2026-10-31](../results/readme_results.json)) that names the
+artifacts each was computed from. `tests/test_readme.py` checks the §1 limitations of M4, M5, M7, M15 and M18, §2's
+figures for M4 (except the optimiser's timings), M7 and M14, and the §3 rows of M4, M5, M7, M14, M15 and M18 against
+that snapshot, and the snapshot against its artifacts: a figure that the daily job's rebuild of an artifact has moved
+is reported, not failed. The rest of this document is not checked number by number.
 
 ## What this document is, and is not
 

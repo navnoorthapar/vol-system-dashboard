@@ -3,7 +3,7 @@
  "about": "Every figure README.md quotes, and the validation pack's and DATA_SOURCES.md's figures that range over the sessions, as printed, with the artifacts each was computed from. Written by scripts/readme_results.py; joint_vol_calibration/tests/test_readme.py checks the documents against it and it against data_store.",
  "generated": {
   "date": "2026-10-31",
-  "commit": "556e4d27eedcc3659b090e432e9e570503bb023b",
+  "commit": "7523bccbca3fd7750b0bae85aa0662c9eab96263",
   "command": "make readme-results"
  },
  "params": {
@@ -175,12 +175,20 @@
    "sha256": "f5fa7c32c713a57f29dc69ddea47cceb2960ebbdc85f8a312860a5e79b160231",
    "report_version": 1
   },
+  "data_store/surface/2026-03-24/vix_replication.json": {
+   "sha256": "12fdfe0e40f661af1a6e0e1b115dc21e009927574934bbc075b93cb4604dcf52",
+   "report_version": 1
+  },
   "data_store/surface/2026-03-27/scorecard.json": {
    "sha256": "2ef3d507a14c1cc6a3f234a1337539d1987f350af81f87614033226f0fa29c7e",
    "report_version": 1
   },
   "data_store/surface/2026-03-27/surface.json": {
    "sha256": "72cc13a5f62bfcb7ae3001042771aa805c648de823c9399996a953e1d8033e6a",
+   "report_version": 1
+  },
+  "data_store/surface/2026-03-27/vix_replication.json": {
+   "sha256": "1d6339c9a89fee73e988f12933d42ccde767c9ea6ffefdc459576d22b3c25a20",
    "report_version": 1
   },
   "data_store/surface/2026-05-29/scorecard.json": {
@@ -191,6 +199,10 @@
    "sha256": "7801abd28eb5bc29f112047a6304cc500df771a6ff52182a330c654dcde6fd9f",
    "report_version": 1
   },
+  "data_store/surface/2026-05-29/vix_replication.json": {
+   "sha256": "ae91c0d9952cd8f37d7902260d1d5ca05a4f9b503740072fa4756ccc7d594d15",
+   "report_version": 1
+  },
   "data_store/surface/2026-06-18/scorecard.json": {
    "sha256": "046190363520644f08907a99e2a10935bea04091077da5a3dadb2fb1d7b29cbd",
    "report_version": 1
@@ -199,12 +211,20 @@
    "sha256": "e137986c970b921f859df7b327255c22b183894e8989dca3cc0fefa05b661515",
    "report_version": 1
   },
+  "data_store/surface/2026-06-18/vix_replication.json": {
+   "sha256": "b49b0ef6aa3992b7aa66fe93d7ad4ed8b0aebad0e044e3a56bec60870f759e7f",
+   "report_version": 1
+  },
   "data_store/surface/2026-10-16/scorecard.json": {
    "sha256": "d47f88be4a593578ccd0f4222967c0ee9bbb2493c95826d607e0bb14ff7272b5",
    "report_version": 1
   },
   "data_store/surface/2026-10-16/surface.json": {
    "sha256": "7a4c84814d18a1a9a6484e9b9d1142ba4d6080819e2775634db2d48d6c3cf328",
+   "report_version": 1
+  },
+  "data_store/surface/2026-10-16/vix_replication.json": {
+   "sha256": "afe275dfc2f59051b5ad3099b82378fa78fb8dbb7d4e02d94b587be67bd969ce",
    "report_version": 1
   },
   "data_store/surface/2026-10-26/scorecard.json": {
@@ -1188,6 +1208,20 @@
    ]
   },
   {
+   "id": "calibration/vix_gap_unexplained",
+   "doc": "README.md",
+   "text": "most of that gap is not explained by the stored chain",
+   "sources": [
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
+    "data_store/surface/2026-03-24/vix_replication.json",
+    "data_store/surface/2026-03-27/vix_replication.json",
+    "data_store/surface/2026-05-29/vix_replication.json",
+    "data_store/surface/2026-06-18/vix_replication.json",
+    "data_store/surface/2026-10-16/vix_replication.json",
+    "data_store/surface/2026-10-26/vix_replication.json"
+   ]
+  },
+  {
    "id": "pack/span",
    "doc": "docs/model_validation/README.md",
    "text": "the six sessions with a stored chain and an accepted fit, 2026-03-24 → 2026-10-26",
@@ -1250,6 +1284,130 @@
    ]
   },
   {
+   "id": "pack/m5",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M5 | VIX index and VX futures",
+   "text": "Heston misses real VX futures by 1.85–3.18 pts out of sample",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
+   "id": "pack/m5_outcome",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M5 | VX futures at their settlement",
+   "text": "| 1.85–3.18 pts |",
+   "sources": [
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
+   "id": "pack/m7",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M7 | β = ATM vol",
+   "text": "the first later chain (2026-10-16) gives 0.70",
+   "sources": [
+    "data_store/vol_system.db"
+   ]
+  },
+  {
+   "id": "pack/m7_beta",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M7 | β = ATM vol",
+   "text": "β = ATM vol / VIX proxy (0.82, from four 2026 chains plus one live capture)",
+   "sources": []
+  },
+  {
+   "id": "pack/m7_design",
+   "doc": "docs/model_validation/README.md",
+   "text": "ATM 30-day implied vol = β × VIX, β = 0.82 from real 2026 chains",
+   "sources": []
+  },
+  {
+   "id": "pack/m7_inside",
+   "doc": "docs/model_validation/README.md",
+   "text": "The constant 0.82 sits inside both ranges",
+   "sources": [
+    "data_store/backtest/inference/benchmarks.json"
+   ]
+  },
+  {
+   "id": "pack/m7_later_chain",
+   "doc": "docs/model_validation/README.md",
+   "text": "The first chain after the estimation set gives 0.70.",
+   "sources": [
+    "data_store/vol_system.db"
+   ]
+  },
+  {
+   "id": "pack/m7_put_wput",
+   "doc": "docs/model_validation/README.md",
+   "text": "implies β = 0.80 over the window, 0.63–0.90 by full year (2018–2024, within-year standard error about 0.05); WPUT 0.80, 0.75–0.89",
+   "sources": [
+    "data_store/backtest/inference/benchmarks.json"
+   ]
+  },
+  {
+   "id": "pack/m7_grid",
+   "doc": "docs/model_validation/README.md",
+   "text": "S1 moves from +$2,509,627 at β = 1.00 to −$554,935 at β = 0.78; the portfolio is negative at every β tested",
+   "sources": [
+    "data_store/backtest/beta_sensitivity.csv"
+   ]
+  },
+  {
+   "id": "pack/m7_outcome",
+   "doc": "docs/model_validation/README.md",
+   "within": "| M7 | β on the first chain",
+   "text": "| 0.70; 0.80 / 0.80 overall, 0.63–0.90 / 0.75–0.89 by full year |",
+   "sources": [
+    "data_store/backtest/inference/benchmarks.json",
+    "data_store/vol_system.db"
+   ]
+  },
+  {
+   "id": "pack/sigma_box",
+   "doc": "docs/model_validation/README.md",
+   "text": "On 2026-10-16 the σ profile (caps 1 to 10, κ ≤ 60) shows the cap costs 27.7% of the loss: freed, σ 6.90 and κ 27.4 give an out-of-sample RMSE of 1.19 instead of 2.96 vol pts and a model VVIX of 113 against the market's 110 (205 at the cap). On 2026-03-24 the cap costs 2.1%.",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
+   "id": "pack/known_weaknesses",
+   "doc": "docs/model_validation/README.md",
+   "text": "Feller is violated in all six fits to 2026-10-26; at the boxed optima the model's VVIX is 160–211 against a market ^VVIX of 86–133",
+   "sources": [
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-24",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-03-27",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-05-29",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-06-18",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-16",
+    "data_store/calibrations/diagnostics/summary.json#session=2026-10-26",
+    "data_store/calibrations/joint_cal_2026-03-24.pkl",
+    "data_store/calibrations/joint_cal_2026-03-27.pkl",
+    "data_store/calibrations/joint_cal_2026-05-29.pkl",
+    "data_store/calibrations/joint_cal_2026-06-18.pkl",
+    "data_store/calibrations/joint_cal_2026-10-16.pkl",
+    "data_store/calibrations/joint_cal_2026-10-26.pkl",
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version"
+   ]
+  },
+  {
    "id": "pack/condition",
    "doc": "docs/model_validation/README.md",
    "text": "cond(JᵀJ) of the relative-sensitivity Jacobian is 150–345 over the six sessions to 2026-10-26",
@@ -1303,6 +1461,84 @@
     "data_store/surface/2026-06-18/scorecard.json",
     "data_store/surface/2026-10-16/scorecard.json",
     "data_store/surface/2026-10-26/scorecard.json"
+   ]
+  },
+  {
+   "id": "pack/certificates",
+   "doc": "docs/model_validation/README.md",
+   "text": "pass both certificates in all six sessions to 2026-10-26 (0 slices with g < 0, 0 unordered pairs;",
+   "sources": [
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/scorecard.json",
+    "data_store/surface/2026-10-26/surface.json"
+   ]
+  },
+  {
+   "id": "pack/dense_grid",
+   "doc": "docs/model_validation/README.md",
+   "text": "the dense-grid checks find 0 butterfly and 0 calendar violations",
+   "sources": [
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
+    "data_store/surface/2026-03-24/scorecard.json",
+    "data_store/surface/2026-03-24/surface.json",
+    "data_store/surface/2026-03-27/scorecard.json",
+    "data_store/surface/2026-03-27/surface.json",
+    "data_store/surface/2026-05-29/scorecard.json",
+    "data_store/surface/2026-05-29/surface.json",
+    "data_store/surface/2026-06-18/scorecard.json",
+    "data_store/surface/2026-06-18/surface.json",
+    "data_store/surface/2026-10-16/scorecard.json",
+    "data_store/surface/2026-10-16/surface.json",
+    "data_store/surface/2026-10-26/scorecard.json",
+    "data_store/surface/2026-10-26/surface.json"
+   ]
+  },
+  {
+   "id": "pack/vix_gap",
+   "doc": "docs/model_validation/README.md",
+   "text": "minus the official close is −0.78 to +0.09 pts",
+   "sources": [
+    "data_store/surface#sessions with a fit through 2026-10-26: scorecard, model_version",
+    "data_store/surface/index.json#session=2026-03-24",
+    "data_store/surface/index.json#session=2026-03-27",
+    "data_store/surface/index.json#session=2026-05-29",
+    "data_store/surface/index.json#session=2026-06-18",
+    "data_store/surface/index.json#session=2026-10-16",
+    "data_store/surface/index.json#session=2026-10-26"
+   ]
+  },
+  {
+   "id": "pack/vix_truncation",
+   "doc": "docs/model_validation/README.md",
+   "text": "On the five C23 sessions, truncation under the SVI-cal wing explains 0.03–0.24 pts of it (0.036 / 0.143 / 0.243 / 0.025 / 0.042)",
+   "sources": [
+    "data_store/surface/2026-03-24/vix_replication.json",
+    "data_store/surface/2026-03-27/vix_replication.json",
+    "data_store/surface/2026-05-29/vix_replication.json",
+    "data_store/surface/2026-06-18/vix_replication.json",
+    "data_store/surface/2026-10-16/vix_replication.json"
+   ]
+  },
+  {
+   "id": "pack/vix_residual",
+   "doc": "docs/model_validation/README.md",
+   "text": "the rest, −0.11 to +0.64 pts and 82–88% of the gap on 2026-03-24, 03-27 and 10-16, is not explained by the stored chain",
+   "sources": [
+    "data_store/surface/2026-03-24/vix_replication.json",
+    "data_store/surface/2026-03-27/vix_replication.json",
+    "data_store/surface/2026-05-29/vix_replication.json",
+    "data_store/surface/2026-06-18/vix_replication.json",
+    "data_store/surface/2026-10-16/vix_replication.json"
    ]
   },
   {

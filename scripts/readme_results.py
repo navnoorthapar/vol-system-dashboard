@@ -120,6 +120,18 @@ def word(n: int) -> str:
     return WORDS.get(n, str(n))
 
 
+def signed(x: float, spec: str = "+.2f") -> str:
+    """A figure with its sign, '+' or '−'."""
+    return fmt(x, spec)
+
+
+def day_list(sessions: Iterable[str]) -> str:
+    """'2026-03-24, 03-27 and 10-16': the first in full, the rest month-day."""
+    v = list(sessions)
+    short = [v[0], *(s[5:] if s[:4] == v[0][:4] else s for s in v[1:])]
+    return short[0] if len(short) == 1 else f"{', '.join(short[:-1])} and {short[-1]}"
+
+
 def usd(x: float) -> str:
     return f"{MINUS if x < 0 else '+'}${abs(x):,.0f}"
 
@@ -484,6 +496,42 @@ class Claims:
             raise Untrue(f"the VIX is not replicated on {missing}")
         return out
 
+    def vx_oos(self) -> list[float]:
+        """Each session's out-of-sample VX futures RMSE (pts), where the fit has
+        one (no settled VX futures after a session: none)."""
+        losses = [self.cal(s)["leg_losses"] for s in self.sessions]
+        vx = [v for ll in losses if (v := ll.get("vx_futures_rmse_oos")) is not None]
+        if not vx:
+            raise Untrue("no fit in the span has an out-of-sample VX futures RMSE")
+        return vx
+
+    def later_beta(self) -> float:
+        """β on the first chain after the estimation set (C23_HEADLINE). The
+        estimate reads the stored chains from the cache (config.DB_PATH: the
+        suite's private copy under pytest)."""
+        from joint_vol_calibration.backtest import run_backtest as rb
+        self.store.file("vol_system.db")
+        if not hasattr(self, "_later_beta"):
+            beta = rb.estimate_beta(include_live=False).set_index("session")["ratio"]
+            self._later_beta = float(beta[C23_HEADLINE])
+        return self._later_beta
+
+    def implied_beta(self, index: str) -> tuple[float, list[float]]:
+        """β implied by replicating a Cboe put-write index: over the window, and
+        each full year's."""
+        b = self.store.json("backtest/inference/benchmarks.json")["implied_beta"][index]
+        return b["overall"], [v for y, v in b["by_year"].items() if y not in b["partial_years"]]
+
+    def gap(self, s: str) -> dict[str, Any]:
+        """The replicated VIX's gap to the official close split into the
+        truncation under the SVI-cal wing and the rest (vix_replication.json,
+        indices.VIX.gap_attribution)."""
+        vix = self.store.json(f"surface/{s}/vix_replication.json")["indices"]["VIX"]
+        ga = vix.get("gap_attribution") or {}
+        if not ga.get("available"):
+            raise Untrue(f"the VIX gap of {s} is not attributed ({ga.get('reason', 'no attribution')})")
+        return dict(ga)
+
     def common(self) -> dict[str, dict[str, Any]]:
         """Heston's and SVI's scores on the quotes no model was fitted to
         (CLM-15), which must be the same quotes."""
@@ -704,27 +752,21 @@ def _data_table(c: Claims) -> None:
 
 
 def _limitations(c: Claims) -> None:
-    from joint_vol_calibration.backtest import run_backtest as rb
     from joint_vol_calibration.backtest.backtest_engine import ATM_TO_VIX_RATIO
     from joint_vol_calibration.config import HESTON_BOUNDS
 
     with c.claim("limitations/beta", within=LIMITATIONS) as k:
         k.text = f"at one β ({ATM_TO_VIX_RATIO:.2f}) estimated from 2026 chains"
     with c.claim("limitations/later_chain", within=LIMITATIONS) as k:
-        c.store.file("vol_system.db")              # the estimate reads the stored chains from the cache
-        beta = rb.estimate_beta(include_live=False).set_index("session")["ratio"]
-        k.text = f"The first later chain ({C23_HEADLINE}) gives {beta[C23_HEADLINE]:.2f}"
+        k.text = f"The first later chain ({C23_HEADLINE}) gives {c.later_beta():.2f}"
     with c.claim("limitations/put_index", within=LIMITATIONS) as k:
-        put = c.store.json("backtest/inference/benchmarks.json")["implied_beta"]["PUT"]
-        full = [v for y, v in put["by_year"].items() if y not in put["partial_years"]]
-        k.text = f"the Cboe PUT index implies {rng(full, '.2f')} by full year"
+        k.text = f"the Cboe PUT index implies {rng(c.implied_beta('PUT')[1], '.2f')} by full year"
     with c.claim("limitations/loss", within=LIMITATIONS) as k:
         m = c.metrics()
         k.text = (f"the portfolio loses {abs(m['cumulative_return']) * 100:.1f}% while T-bills earn "
                   f"{m['cash_cum_return'] * 100:.1f}%")
     with c.claim("limitations/vx_futures", within=LIMITATIONS) as k:
-        vx = [v for s in c.sessions if (v := c.cal(s)["leg_losses"].get("vx_futures_rmse_oos")) is not None]
-        k.text = f"misses real VX futures by {rng(vx, '.1f')} pts out of sample"
+        k.text = f"misses real VX futures by {rng(c.vx_oos(), '.1f')} pts out of sample"
     with c.claim("limitations/sigma_cap", within=LIMITATIONS) as k:
         k.text = (f"σ sits on its {HESTON_BOUNDS['sigma'][1]:.1f} cap in {len(c.capped())} of the "
                   f"{len(c.sessions)} fits to {c.last}")
@@ -820,12 +862,23 @@ def _calibration(c: Claims) -> None:
     with c.claim("calibration/vix_gap") as k:
         gaps = [abs(rep - off) for rep, off in c.vix().values()]
         k.text = f"within {rng(gaps, '.2f')} index points of the official close"
+    with c.claim("calibration/vix_gap_unexplained") as k:
+        ga = [c.gap(s) for s in c.sessions]
+        rest = sum(g["residual_pts"] for g in ga)
+        gap = sum(g["truncation_pts"] + g["residual_pts"] for g in ga)
+        if not rest > 0.5 * gap:
+            raise Untrue(f"what the stored chain does not explain is {rest:.2f} of {gap:.2f} pts of the VIX "
+                         "gap over the sessions, not most of it")
+        k.text = "most of that gap is not explained by the stored chain"
 
 
 def _pack(c: Claims) -> None:
-    """The validation pack's figures that count or range over the sessions
-    (VALIDATOR-10): its span, the §1 limitations, §2's identifiability and
-    replication counts, and the §3 outcome rows."""
+    """The validation pack's figures that count or range over the sessions or
+    are read from an artifact the daily job writes (VALIDATOR-10): its span,
+    the §1 limitations of M4, M5, M7, M15 and M18, §2's figures for M4 (except
+    the optimiser's C23 timings), M7 and M14 (the VIX gap's attribution on the
+    C23 sessions included), and the §3 rows of M4, M5, M7, M14, M15 and M18."""
+    from joint_vol_calibration.backtest.backtest_engine import ATM_TO_VIX_RATIO
     from joint_vol_calibration.config import HESTON_BOUNDS
 
     def claim(cid: str, within: str = "", absent: bool = False) -> _Computing:
@@ -852,6 +905,63 @@ def _pack(c: Claims) -> None:
     with claim("ledger/no_entry", absent=True) as k:
         c.first_ledger()
         k.text = "no entry"
+    with claim("m5", within="| M5 | VIX index and VX futures") as k:
+        k.text = f"Heston misses real VX futures by {rng(c.vx_oos(), '.2f')} pts out of sample"
+    with claim("m5_outcome", within="| M5 | VX futures at their settlement") as k:
+        k.text = f"| {rng(c.vx_oos(), '.2f')} pts |"
+    with claim("m7", within="| M7 | β = ATM vol") as k:
+        k.text = f"the first later chain ({C23_HEADLINE}) gives {c.later_beta():.2f}"
+    with claim("m7_beta", within="| M7 | β = ATM vol") as k:
+        k.text = (f"β = ATM vol / VIX proxy ({ATM_TO_VIX_RATIO:.2f}, from four 2026 chains plus one live "
+                  "capture)")
+    with claim("m7_design") as k:
+        k.text = f"ATM 30-day implied vol = β × VIX, β = {ATM_TO_VIX_RATIO:.2f} from real 2026 chains"
+    with claim("m7_inside") as k:
+        ranges = {i: c.implied_beta(i)[1] for i in ("PUT", "WPUT")}
+        outside = [i for i, v in ranges.items() if not min(v) <= ATM_TO_VIX_RATIO <= max(v)]
+        if outside:
+            raise Untrue(f"β = {ATM_TO_VIX_RATIO} is outside the full-year range implied by {outside}")
+        k.text = f"The constant {ATM_TO_VIX_RATIO:.2f} sits inside both ranges"
+    with claim("m7_later_chain") as k:
+        k.text = f"The first chain after the estimation set gives {c.later_beta():.2f}."
+    with claim("m7_put_wput") as k:
+        (put, put_y), (wput, wput_y) = c.implied_beta("PUT"), c.implied_beta("WPUT")
+        b = c.store.json("backtest/inference/benchmarks.json")["implied_beta"]["PUT"]
+        years = sorted(y for y in b["by_year"] if y not in b["partial_years"])
+        std_err = b["full_year_dispersion"]["median_se_approx"]
+        k.text = (f"implies β = {put:.2f} over the window, {rng(put_y, '.2f')} by full year ({years[0]}–"
+                  f"{years[-1]}, within-year standard error about {std_err:.2f}); WPUT {wput:.2f}, "
+                  f"{rng(wput_y, '.2f')}")
+    with claim("m7_grid") as k:
+        grid = c.store.csv("backtest/beta_sensitivity.csv").set_index("beta").sort_index()
+        if not (grid["pnl"] < 0).all():
+            raise Untrue("the portfolio is not negative at every β of the grid")
+        lo, hi = grid.index[0], grid.index[-1]
+        k.text = (f"S1 moves from {usd(grid.loc[hi, 's1_pnl'])} at β = {hi:.2f} to "
+                  f"{usd(grid.loc[lo, 's1_pnl'])} at β = {lo:.2f}; the portfolio is negative at every β "
+                  "tested")
+    with claim("m7_outcome", within="| M7 | β on the first chain") as k:
+        (put, put_y), (wput, wput_y) = c.implied_beta("PUT"), c.implied_beta("WPUT")
+        k.text = (f"| {c.later_beta():.2f}; {put:.2f} / {wput:.2f} overall, {rng(put_y, '.2f')} / "
+                  f"{rng(wput_y, '.2f')} by full year |")
+    with claim("sigma_box") as k:
+        cur, first = c.diag(C23_HEADLINE), c.diag(c.sessions[0])
+        k.text = (f"On {C23_HEADLINE} the σ profile (caps 1 to 10, κ ≤ 60) shows the cap costs "
+                  f"{abs(cur['sigma_free_loss_rel']) * 100:.1f}% of the loss: freed, σ "
+                  f"{cur['sigma_free']:.2f} and κ {cur['kappa_free']:.1f} give an out-of-sample RMSE of "
+                  f"{cur['sigma_free_oos']:.2f} instead of {cur['sigma_cap2_oos']:.2f} vol pts and a model "
+                  f"VVIX of {cur['vvix_model_free']:.0f} against the market's {cur['vvix_market']:.0f} "
+                  f"({cur['vvix_model_cap2']:.0f} at the cap). On {first['session']} the cap costs "
+                  f"{abs(first['sigma_free_loss_rel']) * 100:.1f}%.")
+    with claim("known_weaknesses") as k:
+        diag = [c.diag(s) for s in c.sessions]
+        below = [r["session"] for r in diag if not r["vvix_model_cap2"] > r["vvix_market"]]
+        if below:
+            raise Untrue(f"the boxed fit's VVIX is not above the market's on {below}")
+        k.text = (f"Feller is violated in all {word(c.feller_violated())} fits to {c.last}; at the boxed "
+                  "optima "
+                  f"the model's VVIX is {rng((r['vvix_model_cap2'] for r in diag), '.0f')} against a market "
+                  f"^VVIX of {rng((r['vvix_market'] for r in diag), '.0f')}")
     with claim("condition") as k:
         _, w, last = ses()
         cond = rng((c.diag(s)["rel_jtj_condition_number"] for s in c.sessions), ".0f")
@@ -868,6 +978,40 @@ def _pack(c: Claims) -> None:
         common = c.common()
         k.text = (" / ".join(f"{common[s]['svi_cal']['n']:,}" for s in c.sessions)
                   + f" quotes, {c.sessions[0]} → {c.last}")
+    with claim("certificates") as k:
+        c.certified()
+        cards = [c.surface(s)["surfaces"]["svi_cal"] for s in c.sessions]
+        bad = [s for s, v in zip(c.sessions, cards)
+               if not (v["butterfly_certificate"]["certified"] and v["calendar_ordering"]["ordered"])]
+        if bad:
+            raise Untrue(f"the SVI-cal parameters of {bad} do not pass both certificates")
+        g = sum(v["butterfly_certificate"]["slices_with_g_negative"] for v in cards)
+        n_pairs = sum(len(v["calendar_ordering"]["pairs_unordered"]) for v in cards)
+        k.text = (f"pass both certificates in all {word(len(cards))} sessions to {c.last} ({g} slices with "
+                  f"g < 0, {n_pairs} unordered pairs;")
+    with claim("dense_grid") as k:
+        c.certified()
+        dg = [c.scorecard(s)["svi_cal"]["dense_grid"] for s in c.sessions]
+        k.text = (f"the dense-grid checks find {sum(d['butterfly_violations'] for d in dg)} butterfly and "
+                  f"{sum(d['calendar_violations'] for d in dg)} calendar violations")
+    with claim("vix_gap") as k:
+        diff = [rep - off for rep, off in c.vix().values()]
+        k.text = f"minus the official close is {signed(min(diff))} to {signed(max(diff))} pts"
+    with claim("vix_truncation") as k:
+        trunc = [c.gap(s)["truncation_pts"] for s in C23_SESSIONS]
+        k.text = (f"On the {word(len(trunc))} C23 sessions, truncation under the SVI-cal wing explains "
+                  f"{rng(trunc, '.2f')} pts of it ({' / '.join(f'{t:.3f}' for t in trunc)})")
+    with claim("vix_residual") as k:
+        ga = {s: c.gap(s) for s in C23_SESSIONS}
+        rest = [g["residual_pts"] for g in ga.values()]
+        # the sessions where the rest is most, but not more than all, of the gap
+        most = {s: g["residual_share_of_official_minus_replicated"] for s, g in ga.items()
+                if 0.5 < g["residual_share_of_official_minus_replicated"] <= 1}
+        if not most:
+            raise Untrue("on no C23 session is most of the VIX gap left unexplained by the stored chain")
+        k.text = (f"the rest, {signed(min(rest))} to {signed(max(rest))} pts and "
+                  f"{rng((v * 100 for v in most.values()), '.0f')}% of the gap on {day_list(most)}, is not "
+                  "explained by the stored chain")
     with claim("vix_departures") as k:
         vr = c.store.json(f"surface/{c.last}/vix_replication.json")
         k.text = (f"on {c.last}, {len(vr.get('deviations') or [])} deviations from Cboe's rules and "
