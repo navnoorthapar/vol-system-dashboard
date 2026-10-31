@@ -5500,20 +5500,23 @@ def expiry_settlements(mkt: pd.DataFrame) -> dict[str, str]:
     return out
 
 
-def expiry_tab_label(expiry: str, T_days: float) -> str:
-    """An expiry tab's text: 'Nov 25 · 30d' (month, day, days to expiry)."""
+def expiry_tab_label(expiry: str, year: bool = False) -> str:
+    """An expiry tab's date: 'Nov 25', or "Jan 15 '27" on the first tab of a year
+    (year=True), so 'Nov 19' a year out is told from this November's. The template
+    adds the days to expiry ('· 30', desk.css prints 'd' and names it 'days')."""
     day = pd.Timestamp(str(expiry)[:10])
-    return f"{MONTHS[day.month - 1]} {day.day} · {_fmt(T_days, '.0f')}d"
+    return f"{MONTHS[day.month - 1]} {day.day}" + (f" ’{day.year % 100:02d}" if year else "")
 
 
-def expiry_status(expiry: str, settle: str | None, row: Sequence[Any]) -> str:
+def expiry_status(expiry: str, settle: str | None, row: Sequence[Any], k: int, n: int) -> str:
     """The selected expiry's status line, from its row of the smile's 'Quotes per
     expiry' table (expiry, days, F, quotes, median half-spread; desk.js builds the
-    line for another expiry from the same row):
-    '2026-11-25 · Wed · PM · 30 days · F 6,950.12 · 109 quotes · median half-spread 0.06 vol pts'."""
+    line for another expiry from the same row) and its place among the n tabs:
+    'Expiry 7 of 45 · 2026-11-25 · Wed · PM · 30 days · F 6,950.12 · 109 quotes ·
+    median half-spread 0.06 vol pts'."""
     wd = WEEKDAYS[pd.Timestamp(str(expiry)[:10]).weekday()]
-    return " · ".join([str(expiry), wd, *([settle] if settle else []), f"{row[1]} days", f"F {row[2]}",
-                       f"{row[3]} quotes", f"median half-spread {row[4]} vol pts"])
+    return " · ".join([f"Expiry {k} of {n}", str(expiry), wd, *([settle] if settle else []), f"{row[1]} days",
+                       f"F {row[2]}", f"{row[3]} quotes", f"median half-spread {row[4]} vol pts"])
 
 
 # the quote inspector's footnote: where the chain's quotes come from and when
@@ -6382,11 +6385,14 @@ def surface_extras(d: dict, surf: dict) -> None:
     d["same_quotes"] = len(n_scored) == 1 and None not in n_scored
     exps = mkt.groupby("expiry")["T_days"].median().sort_values()
     settles = expiry_settlements(mkt)
-    # the smile's tabs: 'Nov 25 · 30d', AM / PM where the OCC root says, and the
-    # first expiry of each month after the first marks a month boundary (desk.css .mo)
+    # the smile's tabs: 'Nov 25 · 30d' ("Jan 15 '27 · 81d" on the first of a year past the
+    # session's), AM / PM where the OCC root says, and the first expiry of each month
+    # after the first marks a month boundary (desk.css .mo)
+    prev = [str(session)[:7], *(str(e)[:7] for e in exps.index)]
     d["expiries"] = [{"expiry": e, "T_days": float(t), "n": int((mkt["expiry"] == e).sum()),
-                      "label": expiry_tab_label(str(e), t), "settle": settles.get(str(e)),
-                      "month_start": i > 0 and str(e)[:7] != str(exps.index[i - 1])[:7]}
+                      "label": expiry_tab_label(str(e), str(e)[:4] != prev[i][:4]),
+                      "days": _fmt(t, ".0f"), "settle": settles.get(str(e)),
+                      "month_start": i > 0 and str(e)[:7] != prev[i]}
                      for i, (e, t) in enumerate(exps.items())]
     d["n_quotes"] = len(mkt)
     d["median_half_spread"] = float(mkt["half_spread_vp"].median())
@@ -6536,7 +6542,8 @@ def surface_extras(d: dict, surf: dict) -> None:
     # (expiry_status here for the default, desk.js for the others)
     per_exp = [[x["expiry"], _fmt(x["T_days"], ".0f"), _fmt(float(f_by_exp[x["expiry"]]), ",.2f"), x["n"],
                 _fmt(float(hs_by_exp[x["expiry"]]), ".2f")] for x in d["expiries"]]
-    d["exp_status"] = next((expiry_status(x["expiry"], x["settle"], r) for x, r in zip(d["expiries"], per_exp)
+    d["exp_status"] = next((expiry_status(x["expiry"], x["settle"], r, i + 1, len(per_exp))
+                            for i, (x, r) in enumerate(zip(d["expiries"], per_exp))
                             if x["expiry"] == d["default_exp"]), "")
     slice_tbl = charts.table("Quotes per expiry",
                              ["Expiry", "Days#", "Forward F#", "Quotes#", "Median half-spread (vol pts)#"],

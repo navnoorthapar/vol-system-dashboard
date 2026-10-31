@@ -2710,21 +2710,25 @@ def test_the_smile_spec_is_a_template_and_its_quotes_one_session_data_file(dash,
 
 def _syn_expected_strip(n: int, roots: bool) -> dict[str, dict]:
     """The synthetic session's smile tabs and status lines, computed here from its
-    residual table: {expiry: T, tab text, settlement, whether it opens a month,
-    status line} (date · weekday · AM/PM · days · F · quotes · median half-spread)."""
+    residual table: {expiry: T, tab text (the days without desk.css's 'd'), settlement,
+    whether it opens a month, status line} (expiry k of N · date · weekday · AM/PM ·
+    days · F · quotes · median half-spread); the first tab of a year past the
+    session's carries it ("Jan 15 ’27")."""
     res = _syn_session(n, roots)["residuals"]
     mkt = res[res["model"] == SYN_MODELS[0]]
     months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
     out: dict[str, dict] = {}
     prev = None
-    for e, q in mkt.groupby("expiry", sort=True):
+    groups = list(mkt.groupby("expiry", sort=True))
+    for k, (e, q) in enumerate(groups, 1):
         T, day = float(q["T_days"].median()), pd.Timestamp(e)
         settle = {"SPX": "AM", "SPXW": "PM"}[q["root"].iloc[0]] if roots else None
         tag = [settle] if settle else []
-        out[e] = {"T": T, "settle": settle, "mo": prev is not None and prev[:7] != e[:7],
-                  "label": " · ".join([f"{months[day.month - 1]} {day.day}", f"{T:.0f}d", *tag]),
-                  "status": " · ".join([e, day.day_name()[:3], *tag, f"{T:.0f} days",
-                                        f"F {q['forward'].iloc[0]:,.2f}", f"{len(q)} quotes",
+        year = f" ’{e[2:4]}" if e[:4] != (prev or SESSION)[:4] else ""
+        out[e] = {"T": T, "settle": settle, "mo": prev is not None and prev[:7] != e[:7], "days": f"{T:.0f}",
+                  "label": " · ".join([f"{months[day.month - 1]} {day.day}{year}", f"{T:.0f}", *tag]),
+                  "status": " · ".join([f"Expiry {k} of {len(groups)}", e, day.day_name()[:3], *tag,
+                                        f"{T:.0f} days", f"F {q['forward'].iloc[0]:,.2f}", f"{len(q)} quotes",
                                         f"median half-spread {q['half_spread_vp'].median():.2f} vol pts"])}
         prev = e
     return out
@@ -2743,7 +2747,14 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
     never a Yahoo chain's, never guessed from the date); a month's first expiry opens
     a group (.mo); and one status line under the tabs names the selected expiry
     (date · weekday · AM/PM · days · F · quotes · median half-spread), the server's
-    for the default expiry, from its row of 'Quotes per expiry', which now holds F."""
+    for the default expiry, from its row of 'Quotes per expiry', which now holds F.
+    D3 review: 'Nov 19 · 24d' and 'Nov 19 · 388d' were told apart only by the days, and
+    the strip showed 5-7 tabs with no sign of the rest: the first tab of each year past
+    the session's carries it ("Jan 15 ’27 · 81d"), the status line starts 'Expiry k of
+    N', and the days sit in an <i> whose 'd' desk.css writes and names ' days' (a
+    screen reader read '30d')."""
+    css = (ROOT / "dashboard" / "static" / "desk.css").read_text()
+    assert re.search(r'\.exp-strip i::after\s*\{\s*content:\s*"d"\s*/\s*" days";\s*\}', css)
     for n, roots in ((17, False), (45, True)):
         (tmp_path / f"n{n}").mkdir()
         monkeypatch.setattr(dash, "DATA", _surface_store(tmp_path / f"n{n}", n, roots))
@@ -2752,8 +2763,10 @@ def test_the_smile_tabs_name_each_expiry_and_a_settlement_only_from_its_occ_root
         want = _syn_expected_strip(n, roots)
         tabs = SMILE_TAB.findall(html)
         assert [t[2] for t in tabs] == list(want)
+        assert any("’" in w["label"] for w in want.values())
         for mo, _sel, e, settle, inner in tabs:
             assert _html_unescape(re.sub(r"<[^>]+>", "", inner)) == want[e]["label"], e
+            assert re.search(r"<i>(\d+)</i>", inner).group(1) == want[e]["days"], e
             assert (settle or None) == want[e]["settle"], e
             assert bool(mo) == want[e]["mo"], e
         assert {t[3] for t in tabs} == ({"AM", "PM"} if roots else {""})
@@ -4616,19 +4629,26 @@ _STRIP_JS = """async (step) => {
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   const sel = tabs.find(t => t.getAttribute('aria-selected') === 'true');
   const l = list.getBoundingClientRect(), t = sel.getBoundingClientRect();
-  return {lines: new Set(tabs.map(x => Math.round(x.getBoundingClientRect().top))).size,
-          scrolls: list.scrollWidth > list.clientWidth, selected: sel.dataset.value,
-          inView: t.left >= l.left - 1 && t.right <= l.right + 1, scrollY: Math.round(scrollY),
+  const inside = x => { const r = x.getBoundingClientRect();
+    return r.left >= l.left - 1 && r.right <= l.right + 1
+      && r.top >= l.top - 1 && r.bottom <= l.bottom + 1; };
+  const tops = tabs.map(x => Math.round(x.getBoundingClientRect().top));
+  const shown = new Set(tabs.filter(inside).map(x => Math.round(x.getBoundingClientRect().top)));
+  return {lines: new Set(tops).size, shownLines: shown.size, shown: tabs.filter(inside).length,
+          onShownLines: tops.filter(x => shown.has(x)).length,
+          scrolls: list.scrollHeight > list.clientHeight, selected: sel.dataset.value,
+          inView: inside(sel), scrollY: Math.round(scrollY),
           status: (document.getElementById('slices-status') || {}).textContent,
           overflow: document.documentElement.scrollWidth - innerWidth};
 }"""
 
 
-def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_view(syn_browser):
+def test_browser_the_expiry_strip_shows_two_lines_and_keeps_the_selected_expiry_in_view(syn_browser):
     """D3: a full Cboe book's ~45 smile tabs wrapped to four or five lines above the
-    chart. At 1024–1920 px the strip is one line for 17, 45 and 80 expiries and
-    scrolls sideways when it must; the selected expiry is in view at load, after a
-    step to the last or the first expiry without focusing its tab (the strip
+    chart; one line that scrolled sideways then showed 5-7 of them with no sign of
+    the rest. At 1024–1920 px the strip shows two full lines of tabs for 17, 45 and
+    80 expiries and scrolls when it has more; the selected expiry is in view at load,
+    after a step to the last or the first expiry without focusing its tab (the strip
     scrolls, not the page) and on a link to the last (exp= in the hash); the status
     line under it names the selected expiry as the server names the default."""
     sb = syn_browser
@@ -4640,7 +4660,8 @@ def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_v
             page.locator("#chart-slices").scroll_into_view_if_needed()
             _wait_for_chart(page, "chart-slices")
             r0 = page.evaluate(_STRIP_JS, 0)
-            assert r0["lines"] == 1, (n, width, r0)
+            assert r0["shownLines"] == min(2, r0["lines"]), (n, width, r0)
+            assert r0["shown"] == r0["onShownLines"], (n, width, r0)
             assert r0["inView"], (n, width, r0)
             assert r0["status"] == want[r0["selected"]]["status"], (n, width, r0)
             assert r0["overflow"] <= 0, (n, width, r0)
@@ -4659,7 +4680,7 @@ def test_browser_the_expiry_strip_is_one_line_and_keeps_the_selected_expiry_in_v
     r = page.evaluate(_STRIP_JS, 0)
     assert r["selected"] == exps[-1], r
     assert r["inView"], r
-    assert r["status"].startswith(exps[-1] + " · "), r
+    assert r["status"].startswith(f"Expiry {len(exps)} of {len(exps)} · {exps[-1]} · "), r
     ctx.close()
 
 
@@ -5025,7 +5046,7 @@ def test_browser_an_expiry_switch_writes_six_nodes_in_its_click_and_draws_one_ex
         cap = st["plotW"] >= 8 * st["quotes"]
         caps.add(cap)
         assert st["bars"] == (7 if cap else 3) * st["quotes"], st
-        assert st["status"].startswith(st["exp"] + " · "), st
+        assert re.match(rf"Expiry \d+ of \d+ · {st['exp']} · ", st["status"]), st
         assert set(st["current"]) == {st["exp"]}, st
     assert caps == {True, False}           # both kinds of expiry were drawn
     ctx.close()
@@ -9561,6 +9582,9 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     page.wait_for_timeout(300)
     page.locator("#chart-by-expiry").scroll_into_view_if_needed()
     _wait_for_chart(page, "chart-by-expiry")
+    # a chart drawn off screen before the pick moves its line when it comes into view
+    # (an IntersectionObserver entry, delivered after a frame or two)
+    page.wait_for_timeout(500)
     st = page.evaluate("""() => ({
       sel: [...document.querySelectorAll('[data-chart-filter="chart-slices"] [aria-selected=true]')]
         .map(t => t.dataset.value),
@@ -9580,7 +9604,7 @@ def test_browser_expiry_is_the_shared_cursor_on_surface(site_browser):
     assert sorted(c[0] for c in st["current"]) == sorted(st["tables"])     # one row per table
     assert all(c[1] == exp and c[2] == "true" for c in st["current"]), st["current"]
     assert st["lines"] == [label], st["lines"]
-    assert st["status"].startswith(exp + " · "), st["status"]
+    assert re.match(rf"Expiry \d+ of \d+ · {exp} · ", st["status"]), st["status"]
     assert exp not in st["readout"], st["readout"]
     # ']' steps to the next expiry, '[' back
     page.keyboard.press("]")
@@ -11200,24 +11224,28 @@ def test_the_audit_leaves_out_a_scorecard_model_the_producer_marks_unavailable(r
 def test_the_audit_fails_a_wrong_number_in_an_expiry_tab_or_the_status_line(recompute_audit, frozen_site,
                                                                             tmp_path):
     """D3: the audit reads every smile tab ('Nov 25 · 30d') and the status line under
-    the tabs from the residual table: one day more on a tab, or the forward moved by
-    a cent on the status line, in a copy of the frozen page is a mismatch."""
+    the tabs from the residual table: one day more on a tab, the forward moved by a
+    cent or the expiry's place among the tabs off by one on the status line, in a
+    copy of the frozen page is a mismatch."""
     site = tmp_path / "site"
     shutil.copytree(frozen_site, site)
     page = site / "surface.html"
     html = page.read_text(encoding="utf-8")
     m = re.search(r'aria-controls="slices-panel" data-value="(\d{4}-\d{2}-\d{2})"[^>]*>'
-                  r'[A-Z][a-z]{2} \d+ · (\d+)d', html)
+                  r'[A-Z][a-z]{2} \d+ · <i>(\d+)</i>', html)
     assert m
     html = html[:m.start(2)] + str(int(m.group(2)) + 1) + html[m.end(2):]
-    f = re.search(r'id="slices-status"[^>]*>[^<]* · F [\d,]+\.(\d\d) ', html)
+    f = re.search(r'id="slices-status"[^>]*>Expiry (\d+) of \d+ · [^<]* · F [\d,]+\.(\d\d) ', html)
     assert f
-    html = html[:f.start(1)] + f"{(int(f.group(1)) + 1) % 100:02d}" + html[f.end(1):]
+    html = (html[:f.start(1)] + str(int(f.group(1)) + 1) + html[f.end(1):f.start(2)]
+            + f"{(int(f.group(2)) + 1) % 100:02d}" + html[f.end(2):])
     page.write_text(html, encoding="utf-8")
     res = recompute_audit.run(site, SHIPPED)
     failed = {c.label for c in res["checks"] if not c.ok and c.page == "Surface"}
-    assert f"tab {m.group(1)}: day of the month, days [1]" in failed
-    assert "status line: days, F, quotes, median half-spread [1]" in failed
+    assert f"tab {m.group(1)}: day of the month, year, days [1]" in failed
+    assert f"tab {m.group(1)}: days (<i>) [0]" in failed
+    assert "status line: place among the tabs, days, F, quotes, median half-spread [0]" in failed
+    assert "status line: place among the tabs, days, F, quotes, median half-spread [3]" in failed
 
 
 def test_the_audit_reads_the_smile_quotes_from_the_session_data_file(recompute_audit, frozen_site, tmp_path):

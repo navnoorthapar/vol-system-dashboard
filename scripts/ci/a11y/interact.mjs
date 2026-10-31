@@ -37,15 +37,18 @@
 //   * the smile's height (P4.1 layout): at 1024, 1280, 1440 and 1920 px the Surface
 //     smile is as tall as its height class says (h440: 440 px), whatever the expiry
 //     count: a grown smile matched the 45-row IV grid beside it, 1,164 px tall, and
-//     the quote the inspector check hovers was below the screen; its expiry tabs are
-//     one line (a full Cboe book's ~45 wrapped to four or five lines above it), and
-//     the last expiry, chosen without focusing its tab ('[' / ']' or a table row), is
-//     scrolled into the strip and named by the status line under it;
+//     the quote the inspector check hovers was below the screen; its expiry strip
+//     shows at most two lines of tabs and two full lines when it has them (one line
+//     showed 5-7 of 17 with no sign of the rest), a vertical wheel over it scrolls it,
+//     and the first, middle and last expiry, chosen without focusing a tab ('[' / ']'),
+//     are each scrolled into it and named by the status line ('Expiry k of N · date'),
+//     which keeps one height (a line one or two lines long by expiry moved the smile);
 //   * the session data file (D2): the smile's other expiries are one data file
 //     (data/surface-<session>-<sha>.json) that is not fetched before the smile is
 //     drawn, is requested within 3 s of its first draw with no input, loads with its
 //     integrity value, and is fetched once for any number of switches, each of which
-//     draws every quote of its expiry;
+//     draws every quote of its expiry; one expiry is decoded once it is in, and one
+//     more per expiry switched to;
 //   * the smile's expiry switch is fast (P4.2): the median of five expiry-tab
 //     clicks, timed by the Event Timing API (PerformanceObserver 'event',
 //     durationThreshold 16, from the input to the next paint), is at most 50 ms,
@@ -472,8 +475,31 @@ async function checkQuoteInspector() {
 
 // -- the smile's height (P4.1 layout) ----
 const SMILE_WIDTHS = [1024, 1280, 1440, 1920];
+// the expiry strip: its lines and the tabs fully inside it, then the first, middle and
+// last expiry chosen without focusing a tab ('[' / ']'), each in view and named by the
+// status line ('Expiry k of N · date · …')
+const STRIP_JS = async () => {
+  const list = document.querySelector('[role="tablist"][data-state-key="exp"]');
+  const tabs = [...list.querySelectorAll('[role="tab"]')], frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const inside = t => { const l = list.getBoundingClientRect(), r = t.getBoundingClientRect(); return r.left >= l.left - 1 && r.right <= l.right + 1 && r.top >= l.top - 1 && r.bottom <= l.bottom + 1; };
+  const tops = tabs.map(t => Math.round(t.getBoundingClientRect().top)), shown = tabs.filter(inside);
+  const lines = new Set(shown.map(t => Math.round(t.getBoundingClientRect().top)));
+  const out = { tabs: tabs.length, lines: new Set(tops).size, shown: shown.length, shownLines: lines.size,
+    onShownLines: tops.filter(x => lines.has(x)).length,
+    height: list.getBoundingClientRect().height, tabHeight: tabs[0].getBoundingClientRect().height, picks: [] };
+  const status = document.getElementById(list.getAttribute('data-status') || '');
+  for (const k of [1, Math.ceil(tabs.length / 2), tabs.length]) {
+    const cur = tabs.findIndex(t => t.getAttribute('aria-selected') === 'true');
+    Desk.stepExpiry(k - 1 - cur);
+    await frame();
+    const t = tabs[k - 1];
+    out.picks.push({ k, exp: t.getAttribute('data-value'), selected: t.getAttribute('aria-selected') === 'true', inView: inside(t),
+      status: status ? status.textContent : null, statusHeight: status ? status.getBoundingClientRect().height : null });
+  }
+  return out;
+};
 async function checkSmileLayout() {
-  const check = { name: 'the smile keeps its own height; its expiry tabs are one line', views: [], failures: [] };
+  const check = { name: 'the smile keeps its own height; its expiry strip shows two lines and the selected tab', views: [], failures: [] };
   for (const width of SMILE_WIDTHS) {
     const { ctx, page, errors } = await openPage('surface.html', { width, height: 900 });
     const id = 'chart-slices';
@@ -484,23 +510,29 @@ async function checkSmileLayout() {
       const el = document.getElementById(cid), m = el.className.match(/\bh(\d+)\b/);
       return { height: el.getBoundingClientRect().height, want: m ? Number(m[1]) : null };
     }, id);
-    const strip = await page.evaluate(async () => {
-      const list = document.querySelector('[role="tablist"][data-state-key="exp"]');
-      const tabs = [...list.querySelectorAll('[role="tab"]')], last = tabs[tabs.length - 1];
-      const lines = new Set(tabs.map(t => Math.round(t.getBoundingClientRect().top))).size;
-      Desk.stepExpiry(tabs.length);
-      await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
-      const l = list.getBoundingClientRect(), t = last.getBoundingClientRect();
-      const status = document.getElementById(list.getAttribute('data-status') || '');
-      return { tabs: tabs.length, lines, exp: last.getAttribute('data-value'), selected: last.getAttribute('aria-selected') === 'true',
-        inView: t.left >= l.left - 1 && t.right <= l.right + 1, status: status ? status.textContent : null };
-    });
+    const strip = await page.evaluate(STRIP_JS);
     check.views.push({ width, ...r, strip });
     if (r.want === null) check.failures.push(`surface.html #${id}: no height class`);
     else if (Math.abs(r.height - r.want) > 1) check.failures.push(`surface.html #${id} @${width}px: ${Math.round(r.height)} px tall, its class says ${r.want} px`);
-    if (strip.lines !== 1) check.failures.push(`surface.html @${width}px: the ${strip.tabs} expiry tabs take ${strip.lines} lines`);
-    if (!strip.selected || !strip.inView) check.failures.push(`surface.html @${width}px: the last expiry ${strip.exp} is ${strip.selected ? '' : 'not selected and '}${strip.inView ? 'in view' : 'outside the strip'}`);
-    if (!strip.status || !strip.status.startsWith(strip.exp + ' \u00b7 ')) check.failures.push(`surface.html @${width}px: the status line says '${strip.status}', not ${strip.exp}`);
+    const at = `surface.html @${width}px (${strip.tabs} expiries)`;
+    if (strip.shownLines > 2 || strip.height > 2 * strip.tabHeight + 12) check.failures.push(`${at}: the strip shows ${strip.shownLines} lines, ${Math.round(strip.height)} px tall`);
+    if (strip.shownLines < Math.min(strip.lines, 2) || strip.shown < strip.onShownLines) check.failures.push(`${at}: ${strip.shown} tabs in view on ${strip.shownLines} line(s), not two full lines (${strip.onShownLines} tabs)`);
+    for (const p of strip.picks) {
+      if (!p.selected || !p.inView) check.failures.push(`${at}: expiry ${p.k} of ${strip.tabs} (${p.exp}) is ${p.selected ? '' : 'not selected and '}${p.inView ? 'in view' : 'outside the strip'}`);
+      if (!p.status || !p.status.startsWith(`Expiry ${p.k} of ${strip.tabs} \u00b7 ${p.exp} \u00b7 `)) check.failures.push(`${at}: the status line says '${p.status}', not expiry ${p.k} of ${strip.tabs}, ${p.exp}`);
+    }
+    const hs = new Set(strip.picks.map(p => Math.round(p.statusHeight)));
+    if (hs.size > 1) check.failures.push(`${at}: the status line is ${[...hs].join(' or ')} px tall by expiry: a switch moves the smile`);
+    if (strip.lines > 2) {                 // a vertical wheel over the strip scrolls it
+      await page.evaluate(() => { const l = document.querySelector('[role="tablist"][data-state-key="exp"]'); l.scrollTop = 0; });
+      const box = await page.locator('[role="tablist"][data-state-key="exp"]').boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(0, 60);
+      await page.waitForTimeout(300);
+      const top = await page.evaluate(() => document.querySelector('[role="tablist"][data-state-key="exp"]').scrollTop);
+      strip.wheel = top;
+      if (!(top > 0)) check.failures.push(`${at}: a vertical wheel over the strip did not scroll it`);
+    }
     for (const e of errors) check.failures.push(`surface.html @${width}px: JavaScript error: ${e}`);
     await ctx.close();
   }
@@ -526,6 +558,10 @@ async function checkSessionFile() {
   if (delay === null || delay > BOOK_WAIT_MS) check.failures.push(`surface.html: ${src} not requested within ${BOOK_WAIT_MS / 1000} s of the smile's first draw (${delay === null ? 'never' : delay + ' ms'})`);
   const ready = await page.evaluate(cid => Desk.quotesReady(cid).then(() => 'ok', e => String(e)), id);
   if (ready !== 'ok') check.failures.push(`surface.html: ${src} did not load: ${ready}`);
+  // an expiry is decoded when first shown: the default only, until a switch (D3)
+  const decoded = () => page.evaluate(cid => Object.keys(Desk.charts[cid].spec._rows || {}).length, id);
+  const atLoad = await decoded();
+  if (atLoad !== 1) check.failures.push(`surface.html #${id}: ${atLoad} expiries decoded once the data file is in, not 1`);
   const tabs = await page.evaluate(cid => [...document.querySelectorAll(`[data-chart-filter="${cid}"] [role="tab"]`)]
     .filter(t => t.getAttribute('aria-selected') !== 'true').map(t => t.getAttribute('data-value')), id);
   const drawn = [];
@@ -541,8 +577,10 @@ async function checkSessionFile() {
     drawn.push(st);
     if (!(st.quotes > 0 && st.mids === st.quotes)) check.failures.push(`surface.html #${id} ${v}: ${st.mids} mids drawn of its ${st.quotes} quotes`);
   }
+  const after = await decoded(), want = 1 + new Set(drawn.map(d => d.exp)).size;
+  if (after !== want) check.failures.push(`surface.html #${id}: ${after} expiries decoded after ${drawn.length} switches, not ${want}`);
   if (reqs.length !== 1) check.failures.push(`surface.html: ${reqs.length} data file requests (${reqs.map(r => r.url).join(', ')}), not 1`);
-  check.views.push({ src, delay, requests: reqs.length, drawn });
+  check.views.push({ src, delay, requests: reqs.length, drawn, decoded: [atLoad, after] });
   for (const e of errors) check.failures.push(`surface.html: JavaScript error: ${e}`);
   await ctx.close();
   return check;

@@ -1317,11 +1317,17 @@ def slices_panel(a: Audit, c: Ctx) -> None:
     a.equal(P_SL, "selected tab: the expiry nearest 30 days",
             [t.get("data-value") for t in tabs if t.get("aria-selected") == "true"], [default])
     settle = settlements(c.mkt)
-    for t, (e, T) in zip(tabs, c.exps.items()):
+    # D3 review: the first tab of each year past the session's carries it ("Jan 15 ’27"),
+    # and the days sit in an <i> (desk.css prints 'd' and names it 'days')
+    years = [c.session[:4], *(e[:4] for e in c.exps)]
+    for i, (t, (e, T)) in enumerate(zip(tabs, c.exps.items())):
         st = settle.get(e)
-        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)),
-                f"{MONTH_ABBR[int(e[5:7]) - 1]} # · #d" + (f" · {st}" if st else ""))
-        days_nums(a, P_SL, f"tab {e}: day of the month, days", t, [float(int(e[8:10])), T])
+        yr = years[i + 1] != years[i]
+        word = f"{MONTH_ABBR[int(e[5:7]) - 1]} #{' ’#' if yr else ''} · #" + (f" · {st}" if st else "")
+        a.equal(P_SL, f"tab {e}: wording", re.sub(r"\d+", "#", text_of(t)), word)
+        nums(a, P_SL, f"tab {e}: day of the month, year, days", t,
+             [float(int(e[8:10])), *([float(int(e[2:4]))] if yr else []), T])
+        nums(a, P_SL, f"tab {e}: days (<i>)", t.find("i"), [T])
         a.equal(P_SL, f"tab {e}: settlement (OCC root)", t.get("data-settle"), st)
     a.equal(P_SL, "tabs opening a month (.mo)",
             [t.get("data-value") for t in tabs if "mo" in (t.get("class") or [])],
@@ -1342,10 +1348,12 @@ def slices_panel(a: Audit, c: Ctx) -> None:
     if default is not None:
         st = settle.get(default)
         a.equal(P_SL, "status line: wording", masked(text_of(status)),
-                f"D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
+                f"Expiry # of # · D · {pd.Timestamp(default).day_name()[:3]}" + (f" · {st}" if st else "")
                 + " · # days · F # · # quotes · median half-spread # vol pts")
-        nums(a, P_SL, "status line: days, F, quotes, median half-spread", status,
-             [c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])], [default])
+        place = [float(list(c.exps).index(default) + 1), float(len(c.exps))]
+        nums(a, P_SL, "status line: place among the tabs, days, F, quotes, median half-spread", status,
+             [*place, c.exps[default], float(fwd[default]), float(n_q[default]), float(hs[default])],
+             [default])
     gt = a.one("div#chart-slices-data div.chart-groups > table")
     texts(a, P_SL, "bucket table model columns", heads(gt)[5:], [M.label(m) for m in c.overlay])
     a.equal(P_SL, "bucket table: a row group per expiry",
