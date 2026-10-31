@@ -224,7 +224,7 @@
     </table>
     </div>
     {% endif %}
-    {{ m.vix_terms(d.vix_terms) }}
+    {{ m.vix_terms(d.vix_terms, d.vix_causes) }}
     {% set vb = d.vix_beta or {} %}
     {% set be_ = (d.beta_estimator or {}).get(d.session) %}
     {% if vb.atm_over_vix_official is defined %}<p class="note" id="atm-vix-note">VIX-term ATM / VIX on this chain: {{ vb.atm_over_vix_official|fmt('.3f') }} (the ATM mids of the VIX's own two expiries, combined with its constant-maturity weights).{% if be_ is not none %} The backtest's β estimator (30-day ATM-forward Black-76 vol / VIX) gives {{ be_|fmt('.3f') }} on the same chain.{% endif %} The backtest marks every straddle at one fixed β; see {{ m.cite('the β chains on Research', 'research.html#beta-chains') }}.</p>{% endif %}
@@ -238,7 +238,7 @@
   {% call m.panel('varswap', 'Variance-swap strip · same chain', 's7') %}
     {% if d.charts.strip %}{{ m.chart(d.charts.strip, 'h260 grow') }}{% endif %}
     <p class="note">Var-swap minus ATM vol is the skew premium in the 30-day VIX: the reason a straddle is not worth the VIX.</p>
-    {% if d.vix_markers %}<p class="note" id="vix-markers">Hollow circles: the Cboe closes (16:15 ET{% if d.vix_calc_time %}; the replication is timed {{ d.vix_calc_time|replace('T', ' ') }} ET{% endif %}) at their constant maturities, {% for mk in d.vix_markers %}<span class="nowrap">{{ mk.ticker }} {{ mk.close|fmt('.2f') }} at {{ mk.days|fmt('.0f') }} d</span>{{ ', ' if not loop.last else '' }}{% endfor %}: against the single-expiry strip they show the replication gaps of the table beside.</p>{% endif %}
+    {% if d.vix_markers %}<p class="note" id="vix-markers">Hollow circles: the Cboe closes ({{ d.vix_close_hm }} ET{% if d.vix_calc_time %}; the replication is timed {{ d.vix_calc_time|replace('T', ' ') }} ET{% if d.vix_calc_words %}, {{ d.vix_calc_words }}{% endif %}{% endif %}) at their constant maturities, {% for mk in d.vix_markers %}<span class="nowrap">{{ mk.ticker }} {{ mk.close|fmt('.2f') }} at {{ mk.days|fmt('.0f') }} d</span>{{ ', ' if not loop.last else '' }}{% endfor %}: against the single-expiry strip they show the replication gaps of the table beside.</p>{% endif %}
   {% endcall %}
 </div>
 {% endif %}

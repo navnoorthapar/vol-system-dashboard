@@ -505,6 +505,103 @@ def test_the_rebuilt_gap_sentence_reads_only_what_the_row_holds():
         assert absent not in out
 
 
+def test_the_rate_is_named_as_a_cause_only_where_it_is_not_cboes():
+    """Tier 0.5: every term was priced at one 91-day rate, so the unexplained
+    part of the gap named the rate among its causes. A replication that priced
+    each term at Cboe's rate (rate.method: its CMT spline) no longer names it;
+    one that fell back to one rate for both terms, and an artifact written
+    before (no method), still do. The rebuilt sentence names what it is given."""
+    cboe = {"rate": {"method": ds.CBOE_RATE_METHOD, "curve_date": "2026-10-15"}}
+    assert ds.vix_unexplained_causes(cboe) == [ds.CAUSE_TIMING, ds.CAUSE_STALE]
+    for rep in ({"rate": {"method": "one_rate_for_both_terms", "R_cc": 0.04}}, {"rate": {"R_cc": 0.04}},
+                {}, None):
+        assert ds.vix_unexplained_causes(rep) == [ds.CAUSE_TIMING, ds.CAUSE_STALE, ds.CAUSE_RATE]
+    row = {"ticker": "VIX", "gap": -0.30, "truncation": -0.05, "unexplained": -0.25, "surface": "svi_cal"}
+    (out,) = ds.vix_gap_notes([], [row], causes=ds.vix_unexplained_causes(cboe))
+    assert out.endswith("Unexplained by the chain: −0.25, 83% of the gap (snapshot timing against the "
+                        "16:15 ET print, stale quotes).")
+    (old,) = ds.vix_gap_notes([], [row])
+    assert old.endswith("(snapshot timing against the 16:15 ET print, stale quotes, the rate).")
+
+
+def _index_on(method, *forwards, unexplained=0.25, split=True):
+    """A vix_replication.json index replicated by ``method`` whose near and next
+    terms took the given forward methods, its gap split shown when ``split``."""
+    term = {"near": {"expiry": "2027-01-15", "days": 80.0, "forward_method": forwards[0], "R": 0.04},
+            "next": {"expiry": "2027-02-19", "days": 115.0, "forward_method": forwards[1], "R": 0.04},
+            "near_weight": 0.4, "constant_maturity_days": 93}
+    ga = ({"available": True, "truncation_pts": 0.05, "residual_pts": unexplained,
+           "surface": "svi_cal"} if split else {"available": False})
+    return {"headline_method": method, method: term, "replicated": 20.0,
+            "gap_vs_official": -0.05 - unexplained, "gap_attribution": ga}
+
+
+def test_an_index_on_the_parity_forward_names_the_rate_on_a_cboe_rate_session():
+    """Tier 0.5 review: an index whose headline replication is parity_forward
+    discounts each term at its parity regression's D (R = −ln D / T), not at
+    Cboe's rate, yet the page dropped the rate from the causes of its
+    unexplained part whenever rate.method was Cboe's spline (a rebuilt
+    2026-05-29: VIX3M and VIX6M on the parity forward, unexplained +0.03 and
+    −0.42, named only timing and stale quotes). The rate is now left out only
+    when every term of each index whose split is shown took Cboe's
+    single-strike forward; the VIX's sentence reads the VIX's own terms."""
+    ss, par = "cboe_single_strike", "parity_regression"
+    rep = {"rate": {"method": ds.CBOE_RATE_METHOD, "curve_date": "2026-05-28"},
+           "calculation_time_basis": "chain_t_origin",
+           "indices": {"VIX": _index_on("cboe_rules", ss, ss),
+                       "VIX3M": _index_on("parity_forward", par, par, unexplained=-0.03),
+                       "VIX6M": _index_on("parity_forward", par, par, unexplained=0.42)}}
+    shown = [r["ticker"] for r in ds.vix_terms(rep) if r["unexplained"] is not None]
+    assert shown == ["VIX", "VIX3M", "VIX6M"]
+    every = [ds.CAUSE_TIMING, ds.CAUSE_STALE, ds.CAUSE_RATE]
+    assert ds.vix_unexplained_causes(rep) == every
+    assert ds.vix_unexplained_causes(rep, ("VIX",)) == every[:2]
+    assert ds.vix_unexplained_causes(rep, ("VIX3M",)) == every
+    # one parity term is enough; a parity_forward index whose terms both fell back to
+    # the single-strike forward (no parity fit for the expiry) was priced at Cboe's rate
+    for v3m, rate_named in ((_index_on("parity_forward", ss, par), True),
+                            (_index_on("parity_forward", ss, ss), False),
+                            (_index_on("cboe_rules", ss, ss), False),
+                            (_index_on("parity_forward", par, par, split=False), False)):
+        got = ds.vix_unexplained_causes({**rep, "indices": {"VIX": rep["indices"]["VIX"], "VIX3M": v3m}})
+        assert (ds.CAUSE_RATE in got) is rate_named, v3m
+    # no Cboe rate in the record: the rate stays named whatever the forwards
+    assert ds.vix_unexplained_causes({**rep, "rate": {"method": "one_rate_for_both_terms"}},
+                                     ("VIX",)) == every
+    # an index the record lacks cannot vouch for its rate
+    assert ds.vix_unexplained_causes({**rep, "indices": {}}, ("VIX",)) == every
+
+
+def test_the_cboe_close_time_is_the_records():
+    """Tier 0.5 review: the strip's markers said the Cboe closes print at 16:15
+    ET on every session; on an early close they print at 13:15, as
+    vix_replication.json cboe_close_ny records. A record written before the
+    field reads 16:15 (no stored session is an early close)."""
+    assert ds.cboe_close_hm({"cboe_close_ny": "2026-11-27T13:15"}) == "13:15"
+    assert ds.cboe_close_hm({"cboe_close_ny": "2026-10-30T16:15"}) == "16:15"
+    for rep in ({}, None, {"cboe_close_ny": None}, {"cboe_close_ny": "2026-11-27"}):
+        assert ds.cboe_close_hm(rep) == "16:15"
+
+
+def test_a_closing_books_replication_at_the_close_drops_the_timing_cause():
+    """Tier 0.5: a closing Cboe book is calculated at the 16:15 ET close, the
+    instant of the Cboe print, so its snapshot timing is no cause of the gap;
+    a book calculated at its Global Trading Hours quote time, a chain with no
+    quote time and an artifact written before (no basis) keep it. The timing
+    line names a Cboe book's basis and nothing else."""
+    closing = {"calculation_time_basis": "closing_book_close",
+               "rate": {"method": ds.CBOE_RATE_METHOD}}
+    assert ds.vix_unexplained_causes(closing) == [ds.CAUSE_STALE]
+    assert ds.vix_unexplained_causes({**closing, "rate": {}}) == [ds.CAUSE_STALE, ds.CAUSE_RATE]
+    for basis in ("book_quote_time", "chain_t_origin", None):
+        assert ds.vix_unexplained_causes({"calculation_time_basis": basis})[0] == ds.CAUSE_TIMING
+    assert ds.vix_calc_time_words({"calculation_time_basis": "book_quote_time"}) == "the book’s quote time"
+    assert ds.vix_calc_time_words(closing) == "the close its closing book’s quotes were left at"
+    for rep in ({"calculation_time_basis": "chain_t_origin"}, {"calculation_time_ny": "2026-10-16T16:00"},
+                None):
+        assert ds.vix_calc_time_words(rep) is None
+
+
 def test_a_gap_split_that_does_not_add_up_is_not_shown():
     """The split is printed only when the artifact records it and its parts add
     up to the stored gap; otherwise both parts are None, never a residual

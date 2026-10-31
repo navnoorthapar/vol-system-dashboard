@@ -6345,7 +6345,11 @@ def test_atm_term_forward_steps_and_a_calendar_flag_marker(dash, pages):
 def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     html = pages["/surface"]
     spec = _spec(html, "chart-strip")
-    mk = [s for s in spec["series"] if s["name"].startswith("Cboe close (16:15 ET)")]
+    # the closes print at the session's cutoff as the record states it: 13:15 ET on an NYSE
+    # early close; 16:15 for a record written before it said
+    rec = json.loads(_surface_file("vix_replication.json").read_text()).get("cboe_close_ny")
+    hm = rec[11:16] if rec else "16:15"
+    mk = [s for s in spec["series"] if s["name"].startswith(f"Cboe close ({hm} ET)")]
     assert len(mk) == 1
     assert mk[0]["type"] == "scatter"
     assert mk[0].get("hollow") is True
@@ -6356,6 +6360,7 @@ def test_varswap_strip_marks_the_four_official_closes(dash, pages):
     legend = {it["name"] for it in spec["legend_items"]}
     assert {"Variance-swap vol (Cboe formula)", mk[0]["name"]} <= legend
     assert re.search(r'id="vix-markers">', html)
+    assert f"Hollow circles: the Cboe closes ({hm} ET" in _visible_text(html)
 
 
 
@@ -6461,7 +6466,7 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
              "next": {"expiry": "2030-08-16", "days": 216.7291667}, "near_weight": 0.935, "gap": -0.10,
              "truncation": -0.01, "unexplained": -0.09, "far_wing": -0.40, "surface": "svi_cal",
              "surface_label": "SVI-cal"}]
-    html = str(macros.vix_terms(rows))
+    html = str(macros.vix_terms(rows, ["snapshot timing against the 16:15 ET print", "stale quotes"]))
     got = _table_rows(html, "vix-terms-table")
     assert got[0] == ["VIX9D", "—", "—", "—", "—"]
     assert got[1] == ["VIX", "28 / 49", "0.905", "−0.05", "−0.25"]
@@ -6472,6 +6477,12 @@ def test_vix_terms_table_renders_a_partial_artifact_without_inventing_a_split(da
     assert "The stored quotes beyond the surface’s fitted range price below that wing (VIX6M −0.40" in note
     assert "likely understates" not in note
     assert "None" not in note
+    # tier 0.5: the causes the unexplained part is named as coming from are the ones
+    # given (desk_surface.vix_unexplained_causes: the rate only where it is not Cboe's)
+    assert ("Unexplained: what the chain leaves of the gap (snapshot timing against the 16:15 ET "
+            "print or stale quotes; not measured).") in note
+    three = str(macros.vix_terms(rows, ["a", "b", "c"]))
+    assert "the gap (a, b or c; not measured)" in _visible_text("<body>" + three)
 
 def test_chain_badge_names_the_source_and_the_quote_time(dash):
     """P2.5: the badge is generic: a Yahoo snapshot says so and that it has no

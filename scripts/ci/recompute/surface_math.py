@@ -15,11 +15,13 @@ Nothing here imports dashboard/ or joint_vol_calibration/.
 """
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -27,7 +29,7 @@ from scipy.integrate import quad
 from scipy.optimize import brentq
 from scipy.stats import norm
 
-from .data import Store, strike_at_delta, svi_total_variance
+from .data import Store, is_session, nyse_early_closes, strike_at_delta, svi_total_variance
 
 DAYS = 365.0
 PILLARS = (("10P", -0.10), ("25P", -0.25), ("ATM", None), ("25C", 0.25), ("10C", 0.10))
@@ -67,6 +69,20 @@ ARB_LABELS = {"C1_outright": "Outright bounds", "C2_vertical_bound": "Vertical b
               "C4_calendar_spread": "Calendar spread", "C5_calendar_vertical_spread": "Calendar vertical",
               "C6_calendar_butterfly": "Calendar butterfly"}
 VIX_FAMILY = (("VIX9D", 9), ("VIX", 30), ("VIX3M", 93), ("VIX6M", 184))
+# Cboe's rate (VIX Mathematics Methodology sec. 2.1): the Treasury CMT tenors of its table,
+# in days (the 1.5- and 4-month par yields the Treasury also publishes are not in it), and
+# how old the newest curve before a session may be (calendar days)
+CBOE_CMT_DAYS = {"1M": 30, "2M": 60, "3M": 91, "6M": 182, "1Y": 365, "2Y": 730, "3Y": 1095,
+                 "5Y": 1825, "7Y": 2555, "10Y": 3650, "20Y": 7300, "30Y": 10950}
+CMT_MAX_AGE_DAYS = 7
+# when a Cboe book's quotes are live (New York): the session's regular hours to the 16:15
+# data cutoff, and the next session's Global Trading Hours (20:15 the evening before it
+# to 09:15) and the 09:15-09:30 pause before its open; otherwise the book is the
+# session's closing book, its quotes the ones the 16:15 close left
+NY = ZoneInfo("America/New_York")
+RTH, CUTOFF = dt.time(9, 30), dt.time(16, 15)
+EARLY_CUTOFF = dt.time(13, 15)          # SPX options and the VIX close on an NYSE early close
+GTH_OPEN = dt.time(20, 15)
 
 
 def label(m: str) -> str:
@@ -604,6 +620,93 @@ def beta_by_session(store: Store) -> dict[str, dict]:
             continue
         out[session] = {"ratio": atm30 / (float(mk["vix"].iloc[0]) / 100.0), "spot_gap": gap}
     return out
+
+
+# ── Cboe's rate per VIX term ──────────────────────────────────────────────────
+def cmt_curve(store: Store, session: str) -> tuple[str, dict[int, float]] | None:
+    """(date, {days: bond-equivalent yield}): the Treasury par yields of the newest date
+    before ``session`` in the record's rates_daily partitions, at Cboe's tenors; None
+    when that date is more than CMT_MAX_AGE_DAYS calendar days before the session."""
+    root = store.root / "market" / "rates_daily"
+    parts = [store.parquet(f"market/rates_daily/{f.name}")
+             for f in sorted(root.glob("rates_daily_*.parquet"))]
+    if not parts:
+        return None
+    df = pd.concat(parts, ignore_index=True).drop_duplicates(["date", "series"], keep="last")
+    df = df[df["series"].astype(str).str.startswith("UST_PAR_") & (df["date"].astype(str) < session)
+            & np.isfinite(df["value"].astype(float))]
+    if df.empty:
+        return None
+    day = str(df["date"].max())
+    if (pd.Timestamp(session) - pd.Timestamp(day)).days > CMT_MAX_AGE_DAYS:
+        return None
+    row = df[df["date"] == day]
+    pts = {CBOE_CMT_DAYS[s[len("UST_PAR_"):]]: float(v) for s, v in zip(row["series"], row["value"])
+           if s[len("UST_PAR_"):] in CBOE_CMT_DAYS}
+    return day, dict(sorted(pts.items()))
+
+
+def cboe_cmt_rate(curve: dict[int, float], days: float) -> float:
+    """Cboe's continuously compounded rate ``days`` calendar days after the curve's date:
+    the natural cubic spline through the CMT yields, held between two consecutive tenors
+    within their yields, and before the first tenor (t1, y1) between the line to the next
+    tenor whose yield is at or above y1 (from below) and the line to the next one at or
+    below it (from above), each flat where there is none; past the last tenor its yield.
+    Then APY = (1 + BEY/2)² − 1 and r = ln(1 + APY)."""
+    from scipy.interpolate import CubicSpline
+    t = np.array(sorted(curve), dtype=float)
+    y = np.array([curve[int(x)] for x in t], dtype=float)
+    if days >= t[-1]:
+        bey = float(y[-1])
+    else:
+        bey = float(CubicSpline(t, y, bc_type="natural")(days))
+        if days >= t[0]:
+            j = int(np.searchsorted(t, days, side="right")) - 1
+            lo, hi = float(min(y[j], y[j + 1])), float(max(y[j], y[j + 1]))
+        else:
+            def line(reaches: Callable[[float], bool]) -> float:
+                j = next((i for i in range(1, len(t)) if reaches(float(y[i]))), None)
+                slope = 0.0 if j is None else float((y[j] - y[0]) / (t[j] - t[0]))
+                return float(y[0] + slope * (days - t[0]))
+            lo, hi = line(lambda v: v >= y[0]), line(lambda v: v <= y[0])
+        bey = min(max(bey, lo), hi)
+    return 2.0 * math.log1p(bey / 2.0)
+
+
+# ── the VIX replication's calculation time ───────────────────────────────────
+def cboe_close_time(session: str) -> dt.time:
+    """When a session's quotes are left and its Cboe index closes print: 16:15 ET, 13:15
+    on an NYSE early close."""
+    day = dt.date.fromisoformat(session[:10])
+    return EARLY_CUTOFF if day in nyse_early_closes(day.year) else CUTOFF
+
+
+def replication_instant(inputs: dict, session: str) -> tuple[str, str] | None:
+    """(New York time to the minute, basis) the VIX replication is calculated at, from
+    surface.json's record of the chain: a Cboe book at its quote time while its quotes
+    are live ('book_quote_time'), a closing book at the session's close
+    ('closing_book_close'): 16:15 ET, 13:15 on an NYSE early close; any other chain at
+    the time its expiries are measured from (t_origin, 'chain_t_origin'). None when the
+    record has neither."""
+    qt = inputs.get("quote_time")
+    if inputs.get("source") == "cboe" and qt:
+        at = dt.datetime.fromisoformat(str(qt)).astimezone(NY)
+        day = dt.date.fromisoformat(session)
+        cutoff = cboe_close_time(session)
+        nxt = day + dt.timedelta(days=1)
+        while not is_session(nxt):
+            nxt += dt.timedelta(days=1)
+        gth = (dt.datetime.combine(nxt - dt.timedelta(days=1), GTH_OPEN, NY),
+               dt.datetime.combine(nxt, RTH, NY))         # GTH and the pause before the open
+        live = ((at.date() == day and RTH <= at.time() < cutoff) or gth[0] <= at < gth[1])
+        if live:
+            return at.replace(tzinfo=None).isoformat(timespec="minutes"), "book_quote_time"
+        return dt.datetime.combine(day, cutoff).isoformat(timespec="minutes"), "closing_book_close"
+    t0 = inputs.get("t_origin")
+    if not t0:
+        return None
+    at = dt.datetime.fromisoformat(str(t0)).astimezone(NY)
+    return at.replace(tzinfo=None).isoformat(timespec="minutes"), "chain_t_origin"
 
 
 # ── the page's number formats ─────────────────────────────────────────────────

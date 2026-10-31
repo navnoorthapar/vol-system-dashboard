@@ -152,8 +152,9 @@
 {% macro _term_days(x) %}{{ x|fmt('.0f') if (x % 1 < 1e-6 or x % 1 > 1 - 1e-6) else x|fmt('.1f') }}{% endmacro %}
 
 {# each VIX-family index's two terms and its gap split (Surface #vix-replication):
-   vt from desk_surface.vix_terms, each row with a surface_label #}
-{% macro vix_terms(vt) -%}
+   vt from desk_surface.vix_terms, each row with a surface_label; causes from
+   desk_surface.vix_unexplained_causes (what the unexplained part can come from) #}
+{% macro vix_terms(vt, causes) -%}
     {% if vt %}{% set split = vt|selectattr('truncation', 'ne', none)|list %}
     <div class="tbl-wrap" tabindex="0" role="region" aria-label="Terms and gap split of the replicated indices (scrollable)">
     <table class="tbl dense wrap-head" id="vix-terms-table"><caption>The two listed expiries each index interpolates and the near term’s weight; the gap above split as gap = missing-strike shortfall + unexplained (index points; each part rounded on its own)</caption>
@@ -162,7 +163,7 @@
     </table>
     </div>
     {% set fw = split|selectattr('far_wing', 'ne', none)|list %}{% set above = fw|selectattr('far_wing', 'gt', 0)|list %}{% set below = fw|selectattr('far_wing', 'lt', 0)|list %}
-    <p class="note" id="vix-terms-note">Near weight: the near term’s share of the constant-maturity combination; outside [0, 1] it would extrapolate.{% for r in vt if not r.replicated %} {{ r.ticker }} is not replicated{% if r.extrapolated %}: its nearest candidate pair would extrapolate{% elif r.reason %}: {{ r.reason }}{% endif %}.{% endfor %}{% if split %} Missing-strike shortfall: the replication on the stored strip less the same on the full strip, valued on the {{ split[0].surface_label or 'fitted' }} surface’s wing (negative: the strip lacks strikes that add variance). Unexplained: what the chain leaves of the gap (snapshot timing against the 16:15 ET print, stale quotes or the rate; not measured).{% if above %} The stored quotes beyond the surface’s fitted range price above that wing ({% for r in above %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the shortfall there likely understates.{% endif %}{% if below %} {{ 'They price below it' if above else 'The stored quotes beyond the surface’s fitted range price below that wing' }} ({% for r in below %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the shortfall there likely overstates.{% endif %}{% endif %}</p>
+    <p class="note" id="vix-terms-note">Near weight: the near term’s share of the constant-maturity combination; outside [0, 1] it would extrapolate.{% for r in vt if not r.replicated %} {{ r.ticker }} is not replicated{% if r.extrapolated %}: its nearest candidate pair would extrapolate{% elif r.reason %}: {{ r.reason }}{% endif %}.{% endfor %}{% if split %} Missing-strike shortfall: the replication on the stored strip less the same on the full strip, valued on the {{ split[0].surface_label or 'fitted' }} surface’s wing (negative: the strip lacks strikes that add variance). Unexplained: what the chain leaves of the gap ({{ causes[:-1]|join(', ') }}{{ ' or ' if causes|length > 1 else '' }}{{ causes[-1] }}; not measured).{% if above %} The stored quotes beyond the surface’s fitted range price above that wing ({% for r in above %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the shortfall there likely understates.{% endif %}{% if below %} {{ 'They price below it' if above else 'The stored quotes beyond the surface’s fitted range price below that wing' }} ({% for r in below %}{{ r.ticker }} {{ r.far_wing|signed('.2f') }}{{ ', ' if not loop.last else '' }}{% endfor %} index points), so the shortfall there likely overstates.{% endif %}{% endif %}</p>
     {% endif %}
 {%- endmacro %}
 

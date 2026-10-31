@@ -276,6 +276,15 @@ def is_session(d: dt.date) -> bool:
     return d.weekday() < 5 and d not in nyse_closures(d.year)
 
 
+@cache
+def nyse_early_closes(year: int) -> frozenset[dt.date]:
+    """The NYSE sessions that close at 13:00 ET (SPX options and the VIX index at 13:15):
+    the day after Thanksgiving, and July 3 and December 24 on a Monday to Thursday (on a
+    Friday each is the observed holiday, a closure)."""
+    days = [_nth(year, 11, 3, 4) + dt.timedelta(days=1), dt.date(year, 7, 3), dt.date(year, 12, 24)]
+    return frozenset(d for d in days if is_session(d) and (d.month == 11 or d.weekday() <= 3))
+
+
 def sessions_between(a: str, b: str) -> int:
     """NYSE sessions in (a, b]: the age of a date ``a`` seen from ``b`` (0 when b ≤ a)."""
     da, db = dt.date.fromisoformat(a[:10]), dt.date.fromisoformat(b[:10])

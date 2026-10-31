@@ -16,6 +16,7 @@ import pickle
 import shutil
 import sqlite3
 from datetime import UTC, datetime
+from datetime import time as dtime
 from pathlib import Path
 
 import numpy as np
@@ -152,6 +153,23 @@ class TestSessionCalendar:
         assert db.nyse_holidays("2026-01-01", "2026-12-31") == [
             "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
             "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
+
+    def test_early_closes_are_the_exchanges(self):
+        """Tier 0.5 review: an NYSE early close (13:00 ET; SPX options and the VIX
+        index to 13:15) was an ordinary session here, so a closing Cboe book of
+        2026-11-27 would have been timed at 16:15 ET, three hours after its
+        quotes were left. The rule reproduces the exchange's published early
+        closes 2018-2026, and the data cutoff of those sessions is 13:15 ET."""
+        published = {
+            "2018-07-03", "2018-11-23", "2018-12-24", "2019-07-03", "2019-11-29", "2019-12-24",
+            "2020-11-27", "2020-12-24", "2021-11-26", "2022-11-25", "2023-07-03", "2023-11-24",
+            "2024-07-03", "2024-11-29", "2024-12-24", "2025-07-03", "2025-11-28", "2025-12-24",
+            "2026-11-27", "2026-12-24"}
+        days = pd.date_range("2018-01-01", "2026-12-31")
+        assert {d.strftime("%Y-%m-%d") for d in days if db.is_early_close(d)} == published
+        assert db.close_data_cutoff("2026-11-27") == db.EARLY_CLOSE_DATA_CUTOFF == dtime(13, 15)
+        for ordinary in ("2026-11-25", "2026-11-26", "2026-07-02", "2026-12-31"):
+            assert db.close_data_cutoff(ordinary) == db.CLOSE_DATA_CUTOFF == dtime(16, 15)
 
     @pytest.mark.parametrize(("now", "last_closed", "quote"), [
         ("2026-05-31T15:00:00Z", "2026-05-29", "2026-05-29"),   # Sunday

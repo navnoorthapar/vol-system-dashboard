@@ -13,6 +13,7 @@ holds the same number, against that too.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 import re
@@ -1617,6 +1618,91 @@ def vix_terms(ix: dict) -> dict:
     return tm if isinstance(tm, dict) else {}
 
 
+# vix_replication.json rate.method when each term was priced at Cboe's rate (report_version 4 on)
+CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
+# what the page names as the causes of a gap's unexplained part
+CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE = ("snapshot timing against the 16:15 ET print", "stale quotes",
+                                         "the rate")
+# how the page names the calculation time of a Cboe book (report_version 5 on)
+CALC_WORDS = {"book_quote_time": "the book’s quote time",
+              "closing_book_close": "the close its closing book’s quotes were left at"}
+
+
+def vix_timing(a: Audit, c: Ctx) -> str | None:
+    """The basis of the replication's calculation time as the record states it, checked
+    with the time, where the record states a basis (report_version 5 on), against the
+    instant rebuilt from surface.json's record of the chain (M.replication_instant): a
+    Cboe book's quote time while its quotes are live, a closing book's close (16:15 ET,
+    13:15 on an NYSE early close)."""
+    basis = c.vx.get("calculation_time_basis")
+    if basis is not None:
+        own = M.replication_instant(c.sj.get("inputs") or {}, c.session)
+        a.equal(P_VIX, "replication calculation time (rebuilt from the chain's record)",
+                c.vx.get("calculation_time_ny"), own[0] if own else None)
+        a.equal(P_VIX, "replication calculation time basis (rebuilt from the chain's record)", basis,
+                own[1] if own else None)
+    return basis
+
+
+def vix_rates(a: Audit, c: Ctx) -> set[str]:
+    """Where the replication says it priced its terms at Cboe's rate, every single-strike
+    term's R (any method) against Cboe's spline recomputed from the record's Treasury par
+    yields (the newest date before the session, the term's calendar days from it). Returns
+    the indices whose two headline terms were each discounted at that recomputed rate: a
+    parity-forward term discounts at its parity's own D (R = −ln D / T), which is not
+    Cboe's, so its index is left out. Empty when the record claims no Cboe rate, has no
+    curve, or a single-strike term's rate is not Cboe's."""
+    raw = c.vx.get("rate")
+    rate: dict = raw if isinstance(raw, dict) else {}
+    if rate.get("method") != CBOE_RATE_METHOD:
+        return set()
+    own = M.cmt_curve(c.store, c.session)
+    a.equal(P_VIX, "Treasury par curve the rates read (newest before the session)",
+            rate.get("curve_date"), own[0] if own else None)
+    if own is None:
+        return set()
+    day, curve = own
+
+    def cboe(term: dict) -> float:
+        days = (dt.date.fromisoformat(str(term["expiry"])[:10]) - dt.date.fromisoformat(day)).days
+        return M.cboe_cmt_rate(curve, float(days))
+
+    got, want = [], []
+    for _, ix in vix_rows(c):
+        for method in ("cboe_rules", "parity_forward", "any_expiry_parity_forward"):
+            rep = ix.get(method)
+            if not isinstance(rep, dict) or not rep.get("ok"):
+                continue
+            for term in (rep.get("near"), rep.get("next")):
+                if isinstance(term, dict) and term.get("forward_method") == "cboe_single_strike":
+                    got.append(M.num(term.get("R")))
+                    want.append(cboe(term))
+    ok = approx(a, P_VIX, "each single-strike term's rate: Cboe's CMT spline on the record's par yields",
+                got, want, sig=FULL_SIG)
+    at_cboe: set[str] = set()
+    for t, ix in vix_rows(c):
+        head = vix_terms(ix) if ix.get("headline_method") else {}
+        terms = [head.get("near"), head.get("next")]
+        if ok and got and all(isinstance(x, dict) and x.get("expiry")
+                              and spec_ok(M.num(x.get("R")), cboe(x), FULL_SIG) for x in terms):
+            at_cboe.add(t)
+    return at_cboe
+
+
+def vix_causes(basis: str | None, at_cboe_rate: set[str], tickers: Iterable[str]) -> list[str]:
+    """What the unexplained part of the gaps of ``tickers`` can come from: the snapshot's
+    timing unless the replication is calculated at the session's close (``basis``,
+    vix_timing), stale quotes, and the rate unless every one of them was discounted at
+    Cboe's (vix_rates)."""
+    timing = [] if basis == "closing_book_close" else [CAUSE_TIMING]
+    return [*timing, CAUSE_STALE] + ([] if set(tickers) <= at_cboe_rate else [CAUSE_RATE])
+
+
+def or_list(items: Sequence[str]) -> str:
+    """'a, b or c'."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
+
+
 def vix_replication(a: Audit, c: Ctx) -> None:
     """Replicated VIX-family levels against the DB's Cboe closes, each index's terms and
     near weight, the gap split, ATM / VIX and the β estimator on the same chain."""
@@ -1657,7 +1743,9 @@ def vix_replication(a: Audit, c: Ctx) -> None:
             sp = splits[t]
             cell(a, P_VIX, f"{t} missing-strike shortfall", td[3], sp.short if sp else None)
             cell(a, P_VIX, f"{t} unexplained", td[4], sp.unexp if sp else None)
-    vix_terms_note(a, vr, splits)
+    basis, at_cboe = vix_timing(a, c), vix_rates(a, c)
+    # the terms note describes every index with a split; the gap sentence the VIX's
+    vix_terms_note(a, vr, splits, vix_causes(basis, at_cboe, [t for t, sp in splits.items() if sp]))
     beta = c.vx.get("beta") or {}
     note = a.one("#atm-vix-note")
     a.equal(P_VIX, "ATM / VIX note shown (vix_replication.json beta)", note is not None,
@@ -1670,12 +1758,14 @@ def vix_replication(a: Audit, c: Ctx) -> None:
         nums(a, P_VIX, "ATM / VIX: the VIX terms' ATM mid over the DB close; β estimator (30-day, Black-76)",
              note, want)
         a.num(P_VIX, "ATM / VIX (vix_replication.json)", note, M.num(beta.get("atm_over_vix_official")))
-    deviations(a, c, splits.get("VIX"))
+    deviations(a, c, splits.get("VIX"), vix_causes(basis, at_cboe, ["VIX"]))
 
 
-def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None]) -> None:
-    """'[0, 1]', each index that is not replicated and why, and with a split the 16:15 ET
-    print and the far-wing differences, positive ones first."""
+def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSplit | None],
+                   causes: list[str]) -> None:
+    """'[0, 1]', each index that is not replicated and why, and with a split the causes the
+    unexplained part can come from (vix_causes), the 16:15 ET print among them, and the
+    far-wing differences, positive ones first."""
     note = a.one("#vix-terms-note")
     want: list[float | None] = [0, 1]
     for t, ix in vr:
@@ -1689,13 +1779,17 @@ def vix_terms_note(a: Audit, vr: list[tuple[str, dict]], splits: dict[str, GapSp
     shown = [sp for sp in splits.values() if sp]
     far = [sp.far for sp in shown if sp.far is not None]
     if shown:
-        want += [16, 15, *(f for f in far if f > 0), *(f for f in far if f < 0)]
+        a.text(P_VIX, "terms note: what the unexplained part can come from", note,
+               f"({or_list(causes)}; not measured)", contains=True)
+        want += [*([16, 15] if CAUSE_TIMING in causes else []), *(f for f in far if f > 0),
+                 *(f for f in far if f < 0)]
     nums(a, P_VIX, "terms note (not replicated, far-wing market − model per index)", note, want)
 
 
-def deviations(a: Audit, c: Ctx, vix: GapSplit | None) -> None:
+def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> None:
     """'Where the replication departs from Cboe': the producer's deviations and notes as
-    written, and the gap-attribution sentence rebuilt from the recompute."""
+    written, and the gap-attribution sentence rebuilt from the recompute, naming the causes
+    vix_causes leaves for the VIX."""
     lis = a.soup.select("#vix-replication details.method ul.prose > li")
     devs = [prose(x) for x in c.vx.get("deviations") or []]
     notes = [prose(x) for x in c.vx.get("gap_notes") or [] if not str(x).startswith("Gap attribution (")]
@@ -1706,14 +1800,18 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None) -> None:
     if vix:
         fit = list(vix.fit or ())
         sentence: list[float | None] = [vix.gap, vix.short, vix.unexp]
-        if vix.far is not None and abs(vix.far) >= FAR_WING_IN_LINE:
-            sentence += [*fit, abs(vix.far)]
+        if vix.far is not None:
+            # 'beyond the fitted K/F lo–hi price in line with that wing' or '… price x above/below'
+            sentence += [*fit, *([abs(vix.far)] if abs(vix.far) >= FAR_WING_IN_LINE else [])]
         if vix.inside is not None:
             sentence += [*fit, vix.inside]
         sentence += [vix.unexp]
         if vix.gap is not None and abs(vix.gap) > 1e-12:
             sentence += [100.0 * vix.unexp / vix.gap]
-        nums(a, P_VIX, "gap attribution sentence (rebuilt from the split)", lis[-1], [*sentence, 16, 15])
+        nums(a, P_VIX, "gap attribution sentence (rebuilt from the split)", lis[-1],
+             [*sentence, *([16, 15] if CAUSE_TIMING in causes else [])])
+        a.text(P_VIX, "gap attribution sentence: what the unexplained part can come from", lis[-1],
+               f"({', '.join(causes)}).", contains=True)
     near_next_notes(a, c, lis[len(devs):len(devs) + len(notes)])
 
 
@@ -1770,8 +1868,10 @@ def varswap(a: Audit, c: Ctx) -> None:
            points("var_swap_vol"))
     approx(a, P_VS, "chart-strip series ATM vol", series(sp, "ATM vol (quotes)"), points("atm_vol_quotes"))
     names = ["Variance-swap vol (Cboe formula)", "ATM vol (quotes)"]
+    # the Cboe closes print at the session's data cutoff: 13:15 ET on an NYSE early close
+    close = M.cboe_close_time(c.session)
     if marks:
-        name = "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M"
+        name = f"Cboe close ({close:%H:%M} ET): VIX9D, VIX, VIX3M, VIX6M"
         approx(a, P_VS, "chart-strip Cboe close markers (DB)", series(sp, name),
                [[d, v] for _, d, v in marks])
         names.append(name)
@@ -1781,9 +1881,13 @@ def varswap(a: Audit, c: Ctx) -> None:
     a.equal(P_VS, "Cboe markers note shown", note is not None, bool(marks))
     if note is not None:
         ct = c.vx.get("calculation_time_ny")
-        timed = f"; the replication is timed {str(ct).replace('T', ' ')} ET" if ct else ""
-        a.text(P_VS, "Cboe close time and the replication's", note, f"(16:15 ET{timed})", contains=True)
-        want = [16, 15, *(v for v, _, _ in numbers_in(timed)), *(x for _, d, v in marks for x in (v, d))]
+        words = CALC_WORDS.get(str(c.vx.get("calculation_time_basis")))   # checked by vix_timing
+        timed = (f"; the replication is timed {str(ct).replace('T', ' ')} ET"
+                 + (f", {words}" if words else "") if ct else "")
+        a.text(P_VS, "Cboe close time (the session's cutoff) and the replication's", note,
+               f"({close:%H:%M} ET{timed})", contains=True)
+        want = [close.hour, close.minute, *(v for v, _, _ in numbers_in(timed)),
+                *(x for _, d, v in marks for x in (v, d))]
         nums(a, P_VS, "Cboe closes (DB) at their constant maturities, calculation time", note, want,
              [m.group(0) for m in DATE.finditer(timed)])
     statics(a, P_VS, "skew-premium note", next((p for p in a.soup.select("#varswap p.note")

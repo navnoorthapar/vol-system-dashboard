@@ -652,6 +652,178 @@ class TestRecomputeAudit:
             assert data.fwd_call_delta(k, w) == pytest.approx(want, abs=1e-12)
         assert data.svi_vol(0.0, sl) ** 2 * sl["T"] == pytest.approx(float(data.svi_total_variance(0.0, sl)))
 
+    def test_its_cboe_rate_reproduces_the_methodology_sample_from_the_record(self, monkeypatch, tmp_path):
+        """Tier 0.5: the page names the rate as a cause of the unexplained gap only
+        where the replication priced each term at Cboe's rate, and the audit checks
+        that claim with its own code: Cboe's bounded spline on the Treasury par
+        yields of the newest date before the session in the record. On the
+        methodology's sample curve (the yields of 2022-09-26, terms 25 and 32 days
+        on) it gives the published R1 = 0.031664% and R2 = 0.028797%."""
+        import importlib
+
+        import pandas as pd
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        data = importlib.import_module("recompute.data")
+        pct = dict(zip(("1M", "2M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"),
+                       (0.03, 0.02, 0.04, 0.05, 0.08, 0.11, 0.22, 0.59, 1.00, 1.37, 2.03, 2.21)))
+        rows = [("2022-09-23", f"UST_PAR_{t}", v / 100.0 + 0.01) for t, v in pct.items()]
+        rows += [("2022-09-26", f"UST_PAR_{t}", v / 100.0) for t, v in pct.items()]
+        rows += [("2022-09-26", "UST_PAR_4M", 0.0005), ("2022-09-27", "UST_PAR_1M", 0.05)]
+        part = tmp_path / "market" / "rates_daily"
+        part.mkdir(parents=True)
+        pd.DataFrame(rows, columns=["date", "series", "value"]).assign(source="treasury").to_parquet(
+            part / "rates_daily_2022.parquet")
+        day, curve = M.cmt_curve(data.Store(tmp_path), "2022-09-27")
+        assert day == "2022-09-26"                     # the newest before the session, not its own
+        assert curve == {M.CBOE_CMT_DAYS[t]: v / 100.0 for t, v in pct.items()}    # no 4-month point
+        assert round(100.0 * M.cboe_cmt_rate(curve, 25.0), 6) == 0.031664
+        assert round(100.0 * M.cboe_cmt_rate(curve, 32.0), 6) == 0.028797
+        assert M.cmt_curve(data.Store(tmp_path), "2022-10-10") is None           # 14 days old
+
+    def test_it_names_the_rate_for_an_index_on_the_parity_forward(self, monkeypatch, tmp_path):
+        """Tier 0.5 review: the audit left the rate out of the causes of every
+        index's unexplained gap once the single-strike terms' rates were Cboe's,
+        but an index replicated on the parity forward discounts at its parity's
+        own D (a rebuilt 2026-05-29: VIX3M and VIX6M). It now leaves the rate out
+        only for indices whose two headline terms were each discounted at the rate
+        it recomputes from the record's par yields."""
+        import importlib
+        import types
+
+        import pandas as pd
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        S = importlib.import_module("recompute.surface")
+        pct = dict(zip(("1M", "2M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"),
+                       (0.03, 0.02, 0.04, 0.05, 0.08, 0.11, 0.22, 0.59, 1.00, 1.37, 2.03, 2.21)))
+        part = tmp_path / "market" / "rates_daily"
+        part.mkdir(parents=True)
+        pd.DataFrame([("2022-09-26", f"UST_PAR_{t}", v / 100.0) for t, v in pct.items()],
+                     columns=["date", "series", "value"]).assign(source="treasury").to_parquet(
+            part / "rates_daily_2022.parquet")
+        curve = {M.CBOE_CMT_DAYS[t]: v / 100.0 for t, v in pct.items()}
+
+        def term(expiry, days, forward, R=None):
+            return {"expiry": expiry, "forward_method": forward,
+                    "R": M.cboe_cmt_rate(curve, float(days)) if R is None else R}
+
+        def index(method, near, nxt):
+            return {"headline_method": method, method: {"ok": True, "near": near, "next": nxt}}
+
+        ss = "cboe_single_strike"
+        vix = index("cboe_rules", term("2022-10-21", 25, ss), term("2022-10-28", 32, ss))
+        v3m = index("parity_forward", term("2022-12-16", 81, "parity_regression", 0.0081),
+                    term("2023-01-20", 116, "parity_regression", 0.0093))
+        v3m["cboe_rules"] = {"ok": True, "near": term("2022-12-16", 81, ss),
+                             "next": term("2023-01-20", 116, ss)}
+        vx = {"rate": {"method": S.CBOE_RATE_METHOD, "curve_date": "2022-09-26"},
+              "indices": {"VIX": vix, "VIX3M": v3m}}
+        ctx = types.SimpleNamespace(vx=vx, store=rc.data.Store(tmp_path), session="2022-09-27")
+        a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
+        at = S.vix_rates(a, ctx)
+        assert len(a.checks) == 2
+        assert all(c.ok for c in a.checks)
+        assert at == {"VIX"}
+        T, St, R = S.CAUSE_TIMING, S.CAUSE_STALE, S.CAUSE_RATE
+        assert S.vix_causes("book_quote_time", at, ["VIX"]) == [T, St]
+        assert S.vix_causes("book_quote_time", at, ["VIX", "VIX3M"]) == [T, St, R]
+        assert S.vix_causes("closing_book_close", at, ["VIX3M"]) == [St, R]
+        # both 3-month terms on the single-strike forward at Cboe's rate: no rate cause
+        v3m["headline_method"] = "cboe_rules"
+        assert S.vix_rates(rc.core.Audit("t", BeautifulSoup("", "lxml")), ctx) == {"VIX", "VIX3M"}
+        # a single-strike rate that is not Cboe's fails a check and vouches for no index
+        vix["cboe_rules"]["next"]["R"] *= 1.01
+        a = rc.core.Audit("t", BeautifulSoup("", "lxml"))
+        assert S.vix_rates(a, ctx) == set()
+        assert not all(c.ok for c in a.checks)
+        # the record claims one rate for both terms: nothing to check, the rate is named
+        vx["rate"] = {"method": "one_rate_for_both_terms"}
+        assert S.vix_rates(rc.core.Audit("t", BeautifulSoup("", "lxml")), ctx) == set()
+
+    def test_its_gap_sentence_reads_the_fitted_range_of_a_far_wing_in_line(self, monkeypatch):
+        """Found freezing a rebuilt 2026-05-29: where the stored quotes beyond the
+        fitted range price in line with the surface's wing, the page's gap sentence
+        still names that range ('beyond the fitted K/F 0.70–1.30 price in line'),
+        and the audit, expecting its numbers only beside a far-wing figure, failed
+        the sentence (12 numbers printed, 10 recomputed)."""
+        import importlib
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        sentence = ("Gap attribution (VIX, SVI-cal surface; gap = replicated − Cboe close): −0.30 = "
+                    "missing-strike shortfall −0.24 + unexplained −0.05 (each part rounded on its own). "
+                    "Missing-strike shortfall (replicated − full strip): what the replication lacks "
+                    "without the strikes beyond the stored strip, valued on the surface’s wing.{wing} "
+                    "Inside the fitted K/F 0.70–1.30, market minus surface is +0.01; with the far-wing "
+                    "term it sets the replication against the surface and is not part of the gap. "
+                    "Unexplained by the chain: −0.05, 18% of the gap (snapshot timing against the "
+                    "16:15 ET print, stale quotes).")
+        ctx = types.SimpleNamespace(vx={"deviations": [], "gap_notes": []})
+        cases = {0.003: " The stored quotes beyond the fitted K/F 0.70–1.30 price in line with that wing.",
+                 0.21: (" The stored quotes beyond the fitted K/F 0.70–1.30 price 0.21 index points above "
+                        "that wing, so the shortfall likely understates what the strip lacks.")}
+        for far, wing in cases.items():
+            html = ('<section id="vix-replication"><details class="method"><ul class="prose"><li>'
+                    + sentence.format(wing=wing) + "</li></ul></details></section>")
+            a = rc.core.Audit("t", BeautifulSoup(html, "lxml"))
+            split = S.GapSplit(gap=-0.2953, short=-0.2425, unexp=-0.0528, far=far, inside=0.0115,
+                               fit=(0.70, 1.30))
+            S.deviations(a, ctx, split, [S.CAUSE_TIMING, S.CAUSE_STALE])
+            assert [c.label for c in a.checks if not c.ok] == [], far
+
+    def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
+        """Tier 0.5: the audit rebuilds the replication's calculation time from
+        surface.json's record of the chain by its own calendar: a Cboe book at its
+        quote time while its quotes are live (regular hours to the 16:15 cutoff,
+        the next session's Global Trading Hours and the pause before its open), a
+        closing book at the session's 16:15 ET close, a Yahoo chain at its T origin."""
+        import importlib
+        _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        cboe = {"source": "cboe", "t_origin": "2026-10-16T16:00:00-04:00"}
+        cases = {"2026-10-19T02:30:00Z": ("2026-10-18T22:30", "book_quote_time"),    # Sun 22:30 ET, GTH
+                 "2026-10-19T13:20:00Z": ("2026-10-19T09:20", "book_quote_time"),    # Mon 09:20 ET, pause
+                 "2026-10-16T20:10:00Z": ("2026-10-16T16:10", "book_quote_time"),    # Fri 16:10 ET
+                 "2026-10-17T00:30:00Z": ("2026-10-16T16:15", "closing_book_close"),  # Fri 20:30 ET
+                 "2026-10-18T16:00:00Z": ("2026-10-16T16:15", "closing_book_close")}  # Sunday noon
+        for qt, want in cases.items():
+            assert M.replication_instant({**cboe, "quote_time": qt}, "2026-10-16") == want, qt
+        # Monday 2026-10-12 to 13 (Columbus Day trades): GTH for the Tuesday
+        assert M.replication_instant({**cboe, "quote_time": "2026-10-13T01:00:00Z"}, "2026-10-12") == (
+            "2026-10-12T21:00", "book_quote_time")
+        yahoo = {"source": "yfinance", "quote_time": None, "t_origin": "2026-10-16T16:00:00-04:00"}
+        assert M.replication_instant(yahoo, "2026-10-16") == ("2026-10-16T16:00", "chain_t_origin")
+        assert M.replication_instant({"source": "yfinance"}, "2026-10-16") is None
+
+    def test_its_calendar_times_an_early_closes_closing_book_at_1315(self, monkeypatch):
+        """Tier 0.5 review: on an NYSE early close SPX options and the VIX close at
+        13:15 ET. The audit's own calendar holds the exchange's published early
+        closes; a closing book of 2026-11-27 (or one quoted between 13:15 and 16:15)
+        is calculated at 13:15, and the Cboe closes print then."""
+        import datetime as dt
+        import importlib
+        rc = _recompute(monkeypatch)
+        M = importlib.import_module("recompute.surface_math")
+        published = {
+            "2018-07-03", "2018-11-23", "2018-12-24", "2019-07-03", "2019-11-29", "2019-12-24",
+            "2020-11-27", "2020-12-24", "2021-11-26", "2022-11-25", "2023-07-03", "2023-11-24",
+            "2024-07-03", "2024-11-29", "2024-12-24", "2025-07-03", "2025-11-28", "2025-12-24",
+            "2026-11-27", "2026-12-24"}
+        assert {str(d) for y in range(2018, 2027) for d in rc.data.nyse_early_closes(y)} == published
+        cboe = {"source": "cboe", "t_origin": "2026-11-27T16:00:00-05:00"}
+        cases = {"2026-11-28T02:30:00Z": ("2026-11-27T13:15", "closing_book_close"),   # Fri 21:30 EST
+                 "2026-11-27T19:00:00Z": ("2026-11-27T13:15", "closing_book_close"),   # 14:00, after 13:15
+                 "2026-11-27T17:00:00Z": ("2026-11-27T12:00", "book_quote_time"),      # 12:00, live
+                 "2026-11-30T02:00:00Z": ("2026-11-29T21:00", "book_quote_time")}      # Sun 21:00, GTH
+        for qt, want in cases.items():
+            assert M.replication_instant({**cboe, "quote_time": qt}, "2026-11-27") == want, qt
+        assert M.cboe_close_time("2026-11-27") == dt.time(13, 15)
+        assert M.cboe_close_time("2026-10-30") == dt.time(16, 15)
+
     def test_ci_runs_it_on_the_rendered_site(self):
         wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
         step = wf[wf.index("- name: Recompute audit"):]

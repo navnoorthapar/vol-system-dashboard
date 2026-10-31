@@ -6576,11 +6576,21 @@ def surface_extras(d: dict, surf: dict) -> None:
         d["vix_deviations"] = list(vx.get("deviations") or [])
         d["vix_markers"] = vix_official_markers(vx)
         d["vix_calc_time"] = vx.get("calculation_time_ny")
+        # when the session's Cboe closes print (13:15 ET on an early close; 16:15 for a
+        # record written before vix_replication.json recorded it, none on an early close)
+        d["vix_close_hm"] = desk_surface.cboe_close_hm(vx)
+        d["vix_calc_words"] = desk_surface.vix_calc_time_words(vx)
         # each index's two terms and its gap split as gap_attribution splits it (#vix-terms-table)
         d["vix_terms"] = [{**r, "surface_label": model_short(r["surface"]) if r["surface"] else None}
                           for r in desk_surface.vix_terms(vx)]
-        # the gap-attribution sentence restated from that table, on its sign
-        d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"])
+        # what the unexplained part can come from, read from the artifact's own record
+        # (the rate is named unless every term of each index with a split shown was
+        # priced at Cboe's rate)
+        d["vix_causes"] = desk_surface.vix_unexplained_causes(vx)
+        # the gap-attribution sentence restated from that table, on its sign: the VIX's
+        # split, so the VIX's own terms decide whether the rate is named
+        d["vix_notes"] = desk_surface.vix_gap_notes(vx.get("gap_notes"), d["vix_terms"],
+                                                    causes=desk_surface.vix_unexplained_causes(vx, ("VIX",)))
         d["strip"] = [{"expiry": r.get("expiry"), "days": _num(r.get("days")),
                        "vs": _num(r.get("var_swap_vol")), "atm": _num(r.get("atm_vol_quotes")), "diff": _num(r.get("vs_minus_atm_vp")),
                        "ratio": _num(r.get("atm_over_vs")), "settlement": r.get("settlement"),
@@ -6602,7 +6612,8 @@ def surface_extras(d: dict, surf: dict) -> None:
                          "size": 5, "width": 1.5, "dash": True, "legend": True,
                          "data": [[r["days"], r["atm"]] for r in d["strip"]
                                   if r["atm"] is not None and r["days"] is not None]}]
-                + ([{"name": "Cboe close (16:15 ET): VIX9D, VIX, VIX3M, VIX6M", "type": "scatter",
+                + ([{"name": f"Cboe close ({d['vix_close_hm']} ET): VIX9D, VIX, VIX3M, VIX6M",
+                     "type": "scatter",
                      "role": "cboe", "color": "headline", "hollow": True, "size": 10, "legend": True, "z": 4,
                      "data": [[m_["days"], m_["close"]] for m_ in d["vix_markers"]]}]
                    if d["vix_markers"] else []),

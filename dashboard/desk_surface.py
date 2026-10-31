@@ -403,14 +403,95 @@ def _fit_range(fr: Any) -> tuple[float, float] | None:
 # the producer's gap-attribution sentence (surface/report.py gap notes): it
 # states the split as official − replicated, against the page's convention
 GAP_NOTE_PREFIX = "Gap attribution ("
+# vix_replication.json rate.method when every term was priced at Cboe's rate
+# (surface/report.py CMT_RATE_METHOD, report_version 4 on)
+CBOE_RATE_METHOD = "cboe_cmt_bounded_spline"
+# a replicated term's forward_method when it took Cboe's single-strike forward
+# (surface/vix.py), and so the record's rate; a parity-forward term's is
+# "parity_regression", discounted at its own parity's D
+SINGLE_STRIKE_FORWARD = "cboe_single_strike"
+# what the unexplained part of a replication gap can come from, in the order
+# the page names them (vix_unexplained_causes)
+CAUSE_TIMING = "snapshot timing against the 16:15 ET print"
+CAUSE_STALE = "stale quotes"
+CAUSE_RATE = "the rate"
+# vix_replication.json calculation_time_basis (surface/report.py CALC_*,
+# report_version 5 on) and how the page names each Cboe book's: a chain with
+# no quote time is calculated at its T origin, a listed departure, unnamed here
+CALC_CLOSING_BOOK_CLOSE = "closing_book_close"
+CALC_BASIS_WORDS = {"book_quote_time": "the book’s quote time",
+                    CALC_CLOSING_BOOK_CLOSE: "the close its closing book’s quotes were left at"}
 
 
-def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list[str]:
+def _headline_at_record_rate(ix: Any) -> bool:
+    """Whether both terms of a vix_replication.json index's headline
+    replication were discounted at the artifact's rate: each priced with Cboe's
+    single-strike forward (forward_method). A parity-forward term discounts at
+    its own parity regression's D (R = −ln D / T), not at the record's rate."""
+    if not isinstance(ix, Mapping):
+        return False
+    method = ix.get("headline_method")
+    rep = ix.get(method) if method else None
+    if not isinstance(rep, Mapping):
+        return False
+    return all(isinstance(t, Mapping) and t.get("forward_method") == SINGLE_STRIKE_FORWARD
+               for t in (rep.get("near"), rep.get("next")))
+
+
+def vix_unexplained_causes(vix_rep: Mapping | None, tickers: Iterable[str] | None = None) -> list[str]:
+    """What the unexplained part of vix_replication.json ``vix_rep``'s gaps
+    can come from, read from its own record: the snapshot's timing against
+    the 16:15 ET print unless the replication is calculated at that close (a
+    closing Cboe book, calculation_time_basis), stale quotes, and the rate
+    unless the artifact priced its terms at Cboe's rate (rate.method: its
+    bounded spline on the Treasury CMT yields at the term's expiration) AND
+    every term of each index in ``tickers`` used it: its headline replication
+    took Cboe's single-strike forward (a parity-forward index discounts at
+    its parity's own rate). ``tickers``: the indices whose unexplained part
+    is described (default: those vix_terms shows a split for). An artifact
+    written before report_version 4 (one rate for both terms), or for a
+    session whose Treasury curve was missing, names the rate."""
+    rep = vix_rep or {}
+    rate = rep.get("rate")
+    ixs = rep.get("indices")
+    indices: Mapping = ixs if isinstance(ixs, Mapping) else {}
+    shown = ([r["ticker"] for r in vix_terms(rep) if r["unexplained"] is not None]
+             if tickers is None else list(tickers))
+    cboe_rate = (isinstance(rate, Mapping) and rate.get("method") == CBOE_RATE_METHOD
+                 and all(_headline_at_record_rate(indices.get(t)) for t in shown))
+    at_close = rep.get("calculation_time_basis") == CALC_CLOSING_BOOK_CLOSE
+    return [*([] if at_close else [CAUSE_TIMING]), CAUSE_STALE, *([] if cboe_rate else [CAUSE_RATE])]
+
+
+def cboe_close_hm(vix_rep: Mapping | None) -> str:
+    """The New York time ('16:15') the session's Cboe closes print, from
+    vix_replication.json cboe_close_ny: the session's data cutoff, 13:15 on an
+    NYSE early close. An artifact that does not record it was written before
+    any early close was stored and printed at 16:15."""
+    rec = str((vix_rep or {}).get("cboe_close_ny") or "")
+    hm = rec.partition("T")[2][:5]
+    return hm if len(hm) == 5 and hm[2] == ":" else "16:15"
+
+
+def vix_calc_time_words(vix_rep: Mapping | None) -> str | None:
+    """What the replication's calculation time is, in the page's words, from
+    vix_replication.json calculation_time_basis: a Cboe book's quote time, or
+    the close a closing book's quotes were left at (16:15 ET, 13:15 on an
+    early close). None for a chain
+    with no quote time (its timing is a listed departure) and for an artifact
+    written before report_version 5."""
+    return CALC_BASIS_WORDS.get(str((vix_rep or {}).get("calculation_time_basis")))
+
+
+def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping], *,
+                  causes: Sequence[str] | None = None) -> list[str]:
     """vix_replication.json's gap_notes with the producer's gap-attribution
     sentence rebuilt from ``terms`` (vix_terms rows, optionally carrying a
     ``surface_label``), so the prose gives the VIX split the #vix-terms-table
     prints, on the page's convention: gap = replicated − Cboe close =
     missing-strike shortfall (replicated − full strip) + unexplained.
+    ``causes``: what the unexplained part is named as coming from
+    (vix_unexplained_causes; default: all three).
 
     The producer's sentence is dropped whatever the split; the rebuilt one is
     added only where vix_terms shows the VIX split (it adds up to the gap)."""
@@ -440,8 +521,8 @@ def vix_gap_notes(notes: Iterable[Any] | None, terms: Sequence[Mapping]) -> list
         s += (f" Inside {fitted}, market minus surface is {signed(fi)}; with the far-wing "
               f"term it sets the replication against the surface and is not part of the gap.")
     share = f", {100.0 * unexp / gap:.0f}% of the gap" if abs(gap) > 1e-12 else ""
-    s += (f" Unexplained by the chain: {signed(unexp)}{share} (snapshot timing against the "
-          f"16:15 ET print, stale quotes, the rate).")
+    why = ", ".join(causes if causes is not None else (CAUSE_TIMING, CAUSE_STALE, CAUSE_RATE))
+    s += f" Unexplained by the chain: {signed(unexp)}{share} ({why})."
     out.append(s)
     return out
 
