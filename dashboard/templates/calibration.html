@@ -102,7 +102,7 @@
 <div class="g">
   {% call m.panel('oos', 'Out-of-sample error by expiry', 's12', (d.n_oos|fmt(',')) ~ ' quotes') %}
     {% if d.charts.oos %}{{ m.chart(d.charts.oos, 'h260') }}
-    <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors.{% if d.oos_short_end %} <span id="oos-short-end">{{ d.oos_short_end }}</span>{% endif %} In half-spreads on the same chain, see {{ m.cite('the Surface scorecard', 'surface.html#scorecard') }}.</p>
+    <p class="note">Bars: RMSE of the quotes the fit did not use, per expiry; dashed line: the in-sample RMSE on the {{ d.n_spx_options|fmt }} anchors.{% if d.oos_short_end %} <span id="oos-short-end">{{ d.oos_short_end }}</span>{% endif %} {% set oh = d.oos_hs %}{% if oh %} In half-spreads{% if oh.same %} on the same chain{% else %} on the session’s {{ oh.book }} quotes, not the chain fitted here{% endif %}, see {% if oh.shown %}{{ m.cite('the Surface scorecard', 'surface.html#scorecard') }}{% else %}the {{ d.session|fmt }} row of {{ m.cite('the Surface history', 'surface.html#surface-history') }}{% endif %}.{% endif %}</p>
     {% else %}<p class="note">This fit stores no out-of-sample errors by expiry.</p>{% endif %}
   {% endcall %}
 </div>
@@ -137,7 +137,7 @@
       </div>
     </div>
     {% if (d.vx_leg or {}).views %}{% set vl = d.vx_leg %}
-    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is {{ d.chain_sentence or 'a chain with no surface report to name its source' }} and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
+    <p class="note" id="vx-caption">Not in the objective: the loss has no VX-futures term (weight 0), so this is a test on prices the fit never saw. Model: E<sup>Q</sup>[VIX<sub>T</sub>] of the fitted Heston parameters, exact under the CIR law of v<sub>T</sub>, T = days to expiry / 365; market: Cboe’s daily settlement of each monthly contract (weeklies excluded), set at 15:00 Chicago time, while the fit’s SPX chain is {{ d.chain_sentence or 'a chain whose source the fit does not record' }} and its VIX indices are the 16:15 ET closes. Labels: model − settlement, index pts. {{ vl.n_with }} of {{ vl.views|length }} gated fits have settlements stored on their session{% if vl.last %}; the futures table ends {{ vl.last }}{% endif %}.</p>
     {% endif %}
   {% endcall %}
 </div>
@@ -177,6 +177,7 @@
 <h2 class="section-title">Smiles by anchor expiry</h2>
 {% set src = d.smile_source or {} %}
 {% if src.state != 'ok' %}{{ m.missing(src, 'Market bid–ask quotes and the model at the quoted strikes need the per-quote residual table for ' ~ (d.session or 'this session') ~ '; until it exists each panel shows the model smile only.') }}{% endif %}
+{% if d.smile_book and src.state == 'ok' %}<p class="note" id="smile-book">These panels draw the {{ d.session|fmt }} surface’s quotes, {{ d.smile_book.book }}, not the {{ d.smile_book.fit or 'chain' }} the fit was made on. The diamonds are the strikes the fit’s anchor rule picks on that book, so the errors here are not the fit’s stored RMSEs.</p>{% endif %}
 {% set sg = d.smile_group %}
 {% if sg %}
 {# one legend and one Table / CSV for the six panels (small multiples: one

@@ -283,6 +283,9 @@ def scorecard_rows(obj: dict, session: str) -> list[dict]:
             "by_tenor": met.get("by_tenor") if isinstance(met.get("by_tenor"), dict) else {},
             "dense": m.get("dense_grid") if isinstance(m.get("dense_grid"), dict) else {},
             "params": m.get("params") if isinstance(m.get("params"), dict) else {},
+            # a model's own fit: Heston's records the chain it was fitted on and
+            # whether that is the book scored here (surface.scorecard._fit_book_note)
+            "fit": m.get("fit") if isinstance(m.get("fit"), dict) else {},
         })
     rank = [r.get("model") for r in obj.get("ranking_by_oos_median_abs_hs") or [] if isinstance(r, dict)]
     pos = {m: i for i, m in enumerate(rank)}
@@ -663,7 +666,11 @@ def surface_oos_by_session(data_dir: Path) -> list[dict]:
         out.extend({"session": s, "model": r["model"],
                     **{k: r["oos"].get(k) for k in ("n", "median_abs_hs", "inside_spread_pct", "rmse_vp")},
                     "butterfly": (r["dense"] or {}).get("butterfly_violations"),
-                    "calendar": (r["dense"] or {}).get("calendar_violations")}
+                    "calendar": (r["dense"] or {}).get("calendar_violations"),
+                    # the vendor of the chain the model was fitted on, when that is not
+                    # the book this scorecard scores (Heston fitted on Yahoo, scored on Cboe)
+                    "fit_chain": (r["fit"].get("fit_chain_source")
+                                  if r["fit"].get("scored_on_fit_chain") is False else None)}
                    for r in scorecard_rows(obj, s))
     return out
 

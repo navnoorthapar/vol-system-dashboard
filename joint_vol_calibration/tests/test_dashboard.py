@@ -7998,23 +7998,20 @@ def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifac
     sj = next(s["surface"] for s in inputs if s["session"] == head)
     others = [dash.session_expiries(s["surface"]) for s in inputs if s["session"] != head]
     want = dash.chain_badge(sj, others)
-    fit = _fit_session(dash)
-    fit_sj = next((s["surface"] for s in inputs if s["session"] == fit), None)
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
     for route in ("/surface", "/calibration"):
         badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', pages[route], re.DOTALL)
-        if route == "/calibration":
-            # the fit's own session's chain (a newer surface session without a fit has
-            # another), when that session has a surface report
-            assert (badge is not None) == (fit_sj is not None and dash.chain_source(fit_sj) is not None)
-            if badge is None:
-                continue
-            route_want = dash.chain_badge(fit_sj, [dash.session_expiries(s["surface"]) for s in inputs
-                                                   if s["session"] != fit])
-        else:
-            route_want = want
         assert badge, route
         text = re.sub(r"\s+", " ", _visible_text("<body>" + badge.group(1))).strip()
-        assert text == route_want, route
+        if route == "/calibration":
+            # the chain the fit was made on, from the fit and its stored chain (its
+            # session's surface may be built from another book, a Cboe capture)
+            assert text.startswith("Chain: "), text
+            for part in _fit_chain_parts(SHIPPED, cal, fit):
+                assert part in text, (part, text)
+            continue
+        assert text == want, route
         if sj["inputs"]["source"] == "yfinance" and not sj["inputs"].get("quote_time"):
             assert "Yahoo" in text
             assert "no quote time" in text
@@ -8443,8 +8440,9 @@ def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_n
     """The rule for a newest surface session without a fit: the Overview's surface
     item and key result cite the headline fit's session (so the surface and Heston are
     scored on one session's quotes) and name the newer session Surface shows;
-    Calibration is about the headline fit, so its smiles and chain badge are the fit's
-    chain. On the copy of the record with 2026-10-30 built without a fit, the Overview
+    Calibration is about the headline fit: its smiles are its session's surface quotes
+    and its chain badge is the chain the fit was made on, read from the fit. On the copy
+    of the record with 2026-10-30 built without a fit, the Overview
     printed 2026-10-29's SVI-cal median (1.74) with nothing to say it was not the
     session Surface shows (1.56)."""
     data, newest, fit = no_fit["data"], no_fit["session"], no_fit["fit"]
@@ -8466,11 +8464,145 @@ def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_n
         sj = json.loads(fit_sj.read_text())
         assert smiles
         assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
-        badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', cal, re.DOTALL)
-        assert badge
-        assert dash.chain_source(sj)[1] in _visible_text("<body>" + badge.group(1))
     else:
         assert not smiles
+    # the badge names the chain the fit was made on, read from the fit, not its surface's book
+    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', cal, re.DOTALL)
+    assert badge
+    text = _visible_text("<body>" + badge.group(1))
+    fit_cal = dash._load_pickle(data / "calibrations" / f"joint_cal_{fit}.pkl")
+    for part in _fit_chain_parts(data, fit_cal, fit):
+        assert part in text, (part, text)
+
+
+def _fit_chain_parts(data: Path, cal: dict, session: str) -> list[str]:
+    """What a page must say of the chain a joint fit was made on, read from the fit's
+    chain_diagnostics (vendor, quote or fetch time, where T runs from) and the stored
+    chain it was fitted on (options/spx_<session>.parquet): its rows, the quotes the
+    fit scored (its anchors and its out-of-sample quotes) and its listed expiries."""
+    diag = cal.get("chain_diagnostics") or {}
+    chain = pd.read_parquet(data / "options" / f"spx_{session}.parquet")
+    src = str(diag.get("source") or chain["source"].dropna().iloc[0]).lower()
+    when = str(diag.get("quote_time") or diag.get("fetched_at") or "")
+    stamp = f"{when[:10]} {when[11:16]} UTC"
+    scored = int(cal["n_spx_options"]) + int(cal["oos"]["n_spx_oos"])
+    parts = [f"{len(chain):,} rows → {scored:,} scored", f"{chain['expiry'].nunique()} expiries"]
+    if src not in ("yfinance", "yahoo"):
+        return [*parts, f"quotes at {stamp}"]
+    if not when:
+        return [*parts, "Yahoo Finance close snapshot", "no quote time"]
+    basis = str(diag.get("t_origin_basis") or "")
+    return [*parts, "Yahoo Finance download", f"fetched {stamp}", "Yahoo reports no quote times",
+            *(["T measured from the fetch"] if basis.startswith("quote_time") else
+              ["T from the 16:00 ET close"] if basis.startswith("session close") else [])]
+
+
+def _cboe_surface_store(tmp_path: Path, fit: str) -> Path:
+    """The committed record with the headline fit's session's surface built from a Cboe
+    book, as tier 0.7 builds it whenever that book passes the quote-state gates, while
+    the fit stays on the session's Yahoo download: surface.json names the book (vendor,
+    file, quote time, rows, scored quotes, expiries) and the scorecard's Heston row says
+    it was not scored on its fit's chain, as the producer writes them. The book's
+    record is made up for the view, different from the fit's chain in every figure."""
+    data = tmp_path / "data_store"
+    data.mkdir()
+    for child in SHIPPED.iterdir():
+        if child.name != "surface":
+            (data / child.name).symlink_to(child)
+    (data / "surface").mkdir()
+    for child in (SHIPPED / "surface").iterdir():
+        if child.name != fit:
+            (data / "surface" / child.name).symlink_to(child)
+    d = data / "surface" / fit
+    shutil.copytree(SHIPPED / "surface" / fit, d)
+    sj = json.loads((d / "surface.json").read_text())
+    stamp = f"{fit}T23:49:50Z"
+    book = {"source": "cboe", "quote_time": stamp, "fetched_at": stamp, "book_state": "closing",
+            "t_origin_basis": "session close 16:00 ET"}
+    sj["inputs"] = {**sj["inputs"], **book, "chain": f"data_store/options/cboe/spx_{fit}_234950Z.parquet",
+                    "chain_rows": 4 * int(sj["inputs"].get("chain_rows") or 1) + 7}
+    uni = sj["universe"]
+    sj["universe"] = {**uni, **book, "n_universe": 2 * int(uni.get("n_universe") or 1) + 3,
+                      "n_expiries": int(uni.get("n_expiries") or 1) + 28}
+    (d / "surface.json").write_text(json.dumps(sj))
+    sc = json.loads((d / "scorecard.json").read_text())
+    for m in sc["models"]:
+        if str(m["model"]).startswith("heston") and m.get("available") is not False:
+            m["fit"] = {**(m.get("fit") or {}), "fit_chain_source": "yahoo", "scored_on_fit_chain": False}
+    (d / "scorecard.json").write_text(json.dumps(sc))
+    return data
+
+
+@pytest.fixture(scope="module")
+def cboe_surface(dash, tmp_path_factory):
+    """The Overview, Calibration and Model Risk pages rendered from _cboe_surface_store,
+    with the fit, its session and the data dir."""
+    path, cal = dash.load_headline_calibration()
+    fit = dash._calibration_session(cal, path)
+    if not (SHIPPED / "surface" / fit / "surface.json").exists():
+        pytest.skip(f"no surface is stored for the headline fit's session {fit}")
+    data = _cboe_surface_store(tmp_path_factory.mktemp("cboe_surface"), fit)
+    out = {"data": data, "fit": fit, "cal": cal}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dash, "DATA", data)
+        out["newest"] = dash.artifacts.surface_sessions(data)[-1]
+        client = dash.app.test_client()
+        for route in ("/", "/calibration", "/model-risk"):
+            r = client.get(route)
+            assert r.status_code == 200, route
+            out[route] = r.get_data(as_text=True)
+    return out
+
+
+def test_calibration_names_the_chain_the_fit_was_made_on_not_its_surfaces_book(dash, cboe_surface):
+    """Since tier 0.7 a session's surface is built from its Cboe book while the bot
+    fits the session's Yahoo download. Calibration took the fit's chain from the
+    surface's surface.json, so on the 2026-10-29 fit with its surface rebuilt from the
+    Cboe book it said 'Chain: Cboe · quotes at 2026-10-30 08:36 UTC · 28,734 rows' and
+    'the fit's SPX chain is a Cboe book', of a fit made on a 6,422-row Yahoo download
+    fetched at 08:51. The badge and the VX caption now name the fit's own chain (its
+    chain_diagnostics and stored chain); the smiles, drawn from the surface's quotes,
+    name that book and say the fit was not made on it, and so do the half-spread
+    figures of Heston on the Overview and Model Risk."""
+    data, fit, cal = cboe_surface["data"], cboe_surface["fit"], cboe_surface["cal"]
+    sj = json.loads((data / "surface" / fit / "surface.json").read_text())
+    book = dash.chain_provenance(sj)
+    assert book["vendor"] == "cboe"
+    html = cboe_surface["/calibration"]
+    badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', html, re.DOTALL)
+    assert badge
+    text = _visible_text("<body>" + badge.group(1))
+    parts = _fit_chain_parts(data, cal, fit)
+    for part in parts:
+        assert part in text, (part, text)
+    assert "Cboe" not in text
+    assert book["time"] not in text
+    cap = _visible_text("<body>" + re.search(r'<p class="note" id="vx-caption">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    fit_name = next(p for p in parts if p.startswith(("Yahoo", "quotes at")))
+    when = next(p for p in parts if p.startswith(("fetched", "quotes at")))
+    lead = fit_name if fit_name.startswith("Yahoo") else "Cboe book with"
+    assert f"the fit’s SPX chain is a {lead}" in cap, cap
+    assert when in cap
+    assert book["time"] not in cap
+    # the smiles are the surface's quotes: their footnote and a note name that book
+    smiles = [s_ for cid, s_ in _raw_specs(html).items()
+              if cid.startswith("chart-smile-") and s_.get("quotes")]
+    assert smiles
+    assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
+    note = _visible_text("<body>" + re.search(r'<p class="note" id="smile-book">(.*?)</p>', html,
+                                              re.DOTALL).group(1))
+    assert (f"These panels draw the {fit} surface’s quotes, a Cboe book with {book['time']}, not the "
+            f"{fit_name} the fit was made on.") in note
+    oos = _visible_text("<body>" + re.search(r'id="oos".*?<p class="note">(.*?)</p>', html,
+                                             re.DOTALL).group(1))
+    assert "In half-spreads on the session’s Cboe quotes, not the chain fitted here, see" in oos
+    assert "on the same chain" not in oos
+    # Heston's half-spreads on that book, on the Overview (the fit's session) and Model Risk
+    clause = "the fit was made on the session’s Yahoo download, not on this book"
+    assert f"inside ({clause})." in _tight(_card(cboe_surface["/"], "surface.html#scorecard"))
+    mr = _visible_text(cboe_surface["/model-risk"])
+    assert (clause in mr) == (cboe_surface["newest"] == fit)
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
