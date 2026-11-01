@@ -8329,9 +8329,10 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     the same (tier 0.7 item 4), so the newest surface session has no stored fit: its
     scorecard lists Heston as not scored, with the producer's reason and note, and its
     residual table and index row hold no Heston rows; the headline fit is an earlier
-    session's. Made from the newest committed surface session by leaving out its fit
-    and its Heston rows, with the run record the bot writes for a fit its gate
-    rejected. Returns (data dir, that session)."""
+    session's. Made from the newest committed surface session by leaving out its Heston
+    rows and every fit on or after it (a newer fit whose surface build failed, which the
+    bot's fail-soft step allows, would otherwise be the headline), with the run record
+    the bot writes for a fit its gate rejected. Returns (data dir, that session)."""
     from types import SimpleNamespace
     from typing import Any
 
@@ -8343,7 +8344,10 @@ def _no_fit_store(tmp_path: Path) -> tuple[Path, str]:
     for child in SHIPPED.iterdir():
         if child.name not in ("calibrations", "surface", "runs"):
             (data / child.name).symlink_to(child)
-    for sub, keep in (("calibrations", lambda c: c.name != f"joint_cal_{newest}.pkl"),
+
+    def no_later_fit(c: Path) -> bool:
+        return not (c.name.startswith("joint_cal_") and c.stem[len("joint_cal_"):] >= newest)
+    for sub, keep in (("calibrations", no_later_fit),
                       ("surface", lambda c: c.name not in (newest, "index.json")),
                       ("runs", lambda c: True)):
         (data / sub).mkdir()
