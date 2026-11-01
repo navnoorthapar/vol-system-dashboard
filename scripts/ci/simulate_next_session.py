@@ -50,7 +50,7 @@ With --no-fit the book slot finds Yahoo's book empty, as the Saturday slot
 does after every Friday session, so the calibration is skipped and no fit is
 stored. The session's surface is still built from its Cboe book (the
 backfill: tier 0.7 item 4), and the gates then run on a newest surface
-session whose scorecard has no Heston row, beside an older headline fit. The
+session whose scorecard marks Heston not available, beside an older headline fit. The
 run must skip the fit, record the forward ledger from the Cboe book, build
 that surface with Heston marked not scored, stay publishable and exit 0. A
 Friday session built that way failed ten presentation tests (pages and tests

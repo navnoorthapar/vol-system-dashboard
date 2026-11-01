@@ -7669,8 +7669,9 @@ def load_model_risk() -> dict[str, Any]:
 
         def surf_hist(k):
             return [(s_, v[k]) for s_, v in shist] if shist and shist[-1][0] == surf["session"] else None
-        # a session's surface is built whatever its Heston fit did: its scorecard
-        # then has no Heston row and says why (surface.scorecard.UNAVAILABLE_REASONS)
+        # a session's surface is built whatever its Heston fit did: its scorecard.json
+        # then marks Heston not available, with the producer's reason (as
+        # surface.scorecard.UNAVAILABLE_REASONS gives it)
         # the chain Heston was fitted on, when the scorecard says it is not the book scored
         fit_chain = next((str((m.get("fit") or {}).get("fit_chain_source") or "")
                           for m in ((surf.get("scorecard") or {}).get("models") or [])

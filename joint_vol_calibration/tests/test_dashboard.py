@@ -8477,6 +8477,28 @@ def test_the_surface_history_gives_the_run_records_reason_for_a_session_without_
     assert dash.unfitted_causes(["2026-10-30"], []) == ""
 
 
+def test_the_inventory_says_what_a_scorecard_without_a_fit_holds(dash, no_fit):
+    """M14 said a session without a fit gets a scorecard that 'has no Heston row and
+    says why'. scorecard.json has the row, marked not available with the producer's
+    reason; it is the page's scorecard table that has none. The inventory now says so,
+    and both halves are checked on the no-fit view."""
+    data, newest = no_fit["data"], no_fit["session"]
+    sc = json.loads((data / "surface" / newest / "scorecard.json").read_text())
+    rows = [m for m in sc["models"] if str(m["model"]).startswith("heston")]
+    assert rows
+    assert all(m.get("available") is False and m.get("reason") for m in rows)
+    heads = [_visible_text("<body>" + r[0]) for r in re.findall(
+        r"<tr[^>]*>\s*<t[hd][^>]*>(.*?)</t[hd]>", re.search(
+            r'id="scorecard-table">(.*?)</table>', no_fit["/surface"], re.DOTALL).group(1), re.DOTALL)]
+    assert heads
+    assert not any("Heston" in h for h in heads), heads
+    inv = json.loads((ROOT / "dashboard" / "model_inventory.json").read_text())["models"]
+    use = next(m["use"] for m in inv if m["id"] == "M14")
+    assert "has no Heston row and says why" not in use
+    assert ("its scorecard.json then marks Heston not available, with the producer's reason, and the "
+            "page's scorecard table has no Heston row") in use
+
+
 def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_none(dash, no_fit):
     """The rule for a newest surface session without a fit: the Overview's surface
     item and key result cite the headline fit's session (so the surface and Heston are
