@@ -860,6 +860,28 @@ class TestRecomputeAudit:
         assert S.history_models(ns(s=own, all=[own])) == ["essvi", "svi", "svi_cal"]
         assert "the model is not scored on that session" in S.HIST_DASH
 
+    def test_its_overview_cites_the_fit_and_names_a_newer_surface_session(self, monkeypatch):
+        """The Overview's surface item and key result cite the headline fit's session (the
+        surface and Heston on one session's quotes). When a newer surface session has no
+        fit, the page names it ('the headline fit's session (Surface shows the newer …)'),
+        so the audit expects that date after the cited one, and the clause only then."""
+        import importlib
+
+        _recompute(monkeypatch)
+        ov = importlib.import_module("recompute.overview")
+
+        def row(s, m, mhs):
+            return {"session": s, "model": m, "n": 10, "mhs": mhs, "inside": 30.0, "butterfly": 0,
+                    "calendar": 0}
+        scores = [row("2026-10-29", "svi_cal", 1.74), row("2026-10-29", "heston_v2", 10.1),
+                  row("2026-10-30", "svi_cal", 1.56)]
+        sh = ov.surface_headline({"scores": scores, "head": {"session": "2026-10-29"}})
+        assert (sh["sess"], sh["cur"]["mhs"], sh["heston"]["mhs"], sh["newer"]) == (
+            "2026-10-29", 1.74, 10.1, "2026-10-30")
+        sh = ov.surface_headline({"scores": scores[:2], "head": {"session": "2026-10-29"}})
+        assert sh["newer"] is None
+        assert ov.NEWER.startswith("the headline fit’s session (Surface shows the newer")
+
     def test_its_replication_instant_follows_the_books_record(self, monkeypatch):
         """Tier 0.5: the audit rebuilds the replication's calculation time from
         surface.json's record of the chain by its own calendar: a Cboe book at its

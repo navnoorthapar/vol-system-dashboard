@@ -4836,6 +4836,21 @@ def surface_result(surf_oos: list[dict], session: str | None) -> dict | None:
     }
 
 
+def newer_surface_clause(sr: dict, surf_oos: list[dict]) -> str:
+    """', the headline fit's session (Surface shows the newer 2026-10-30)' after the
+    session surface_result cites, when a newer session has a surface.
+
+    The Overview cites the headline fit's session, so the surface and Heston are
+    scored on the same session's quotes. A newer surface session is one without
+    an accepted Heston fit (its calibration was skipped or rejected; its surface
+    is built from its book all the same), and the Surface page shows it: the
+    Overview names both, so its figure does not pass for the newer session's."""
+    newest = max(r["session"] for r in surf_oos)
+    if newest == sr["session"]:
+        return ""
+    return f", the headline fit’s session (Surface shows the newer {newest})"
+
+
 def joint_fit_result(diag: dict, session: str | None) -> dict | None:
     """Key result 2: the joint SPX/VIX fit out of sample, Heston and rough Heston.
 
@@ -4892,7 +4907,8 @@ def key_results(p2: dict, p4: dict | None, surf_oos: list[dict], diag: dict, inf
             "key": f"Arbitrage-free SVI surface · {held}",
             "value": _fmt(sr["median_abs_hs"], ".2f"), "unit": "half-spreads",
             "detail": (f"Median |model − mid| of the arbitrage-free, calendar-ordered SVI surface on "
-                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}; "
+                       f"{_fmt(sr['n'], ',')} held-out quotes of {sr['session']}"
+                       f"{newer_surface_clause(sr, surf_oos)}; "
                        f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask{cert}."
                        + (f" Heston on its own held-out quotes of that session: "
                           f"{_fmt(h['median_abs_hs'], '.1f')} half-spreads, "
@@ -5041,11 +5057,12 @@ def findings_at_a_glance(p2: dict, p4: dict | None, surf_oos: list[dict], diag: 
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     sr = surface_result(surf_oos, p2.get("session"))
     if sr and _num(sr["median_abs_hs"]) is not None:
+        newer = newer_surface_clause(sr, surf_oos)
         works.append(item(
             "Arbitrage-free SVI surface", "surface.html#scorecard",
             f"median {_fmt(sr['median_abs_hs'], '.2f')} half-spreads from the mid, "
             f"{_fmt(sr['inside_spread_pct'], '.1f')}% inside the bid–ask, on the held-out strikes of "
-            f"{sr['session']}."))
+            f"{sr['session']}{newer}."))
         try:
             rep = artifacts.load_surface(DATA, sr["session"])
         except artifacts.ArtifactError:

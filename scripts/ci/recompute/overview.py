@@ -292,8 +292,15 @@ def surface_headline(f: Facts) -> dict[str, Any] | None:
     sess = head if head in sessions else sessions[-1]
     same = [r for r in f["scores"] if r["session"] == sess]
     hkey = next((r["model"] for r in same if r["model"].lower().startswith("heston")), None)
+    newest = max(r["session"] for r in f["scores"])
     return {"sess": sess, "cur": next(r for r in rows if r["session"] == sess), "rows": rows,
-            "n_sessions": len(sessions), "heston": next((r for r in same if r["model"] == hkey), None)}
+            "n_sessions": len(sessions), "heston": next((r for r in same if r["model"] == hkey), None),
+            # a newer surface session (no accepted Heston fit) is the one Surface shows: the
+            # Overview names it beside the headline fit's session it cites
+            "newer": newest if newest != sess else None}
+
+
+NEWER = "the headline fit’s session (Surface shows the newer"
 
 
 def joint_result(f: Facts) -> dict[str, Any] | None:
@@ -416,7 +423,8 @@ def works_items(a: Audit, store: Store, f: Facts) -> list[Item]:
     if sh and sh["cur"]["mhs"] is not None:
         c = sh["cur"]
         items.append(("surface.html#scorecard", "Arbitrage-free SVI surface",
-                      [c["mhs"], c["inside"], sh["sess"]], "scorecard.json out_of_sample"))
+                      [c["mhs"], c["inside"], sh["sess"], *([sh["newer"]] if sh["newer"] else [])],
+                      "scorecard.json out_of_sample of the headline fit's session"))
         rp = f"surface/{sh['sess']}/vix_replication.json"
         rep = store.json(rp) if (store.root / rp).exists() else {}
         ix = (rep.get("indices") or {}).get("VIX") or {}
@@ -575,6 +583,10 @@ def check_finding_words(a: Audit, f: Facts) -> None:
     the headline fit has no VX leg), and the backtest's stored cumulative return
     against the one its NAV gives."""
     head = f["head"]
+    sh = surface_headline(f)
+    li = by_text(a.one("#find-list-works"), "li", "Arbitrage-free SVI surface")
+    if li is not None and sh:
+        says(a, P_FIND, "surface: names the newer session Surface shows", li, NEWER, bool(sh["newer"]))
     li = by_text(a.one("#find-list-fails"), "li", "One-factor Heston")
     if li is not None and head:
         pinned = head["cal"].get("pinned_params") or []
@@ -633,7 +645,7 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
            f"Arbitrage-free SVI surface · {held}")
     said(a, P_KEY, "surface card: median |model − mid|, half-spreads", part(c, ".result-v"), [cur["mhs"]])
     words = chain_words(inputs)
-    detail: Parts = [float(cur["n"]), sh["sess"], cur["inside"]]
+    detail: Parts = [float(cur["n"]), sh["sess"], *([sh["newer"]] if sh["newer"] else []), cur["inside"]]
     if cur["butterfly"] is not None and cur["calendar"] is not None:
         detail += [float(cur["butterfly"]), float(cur["calendar"])]
     if hes:
@@ -641,6 +653,7 @@ def surface_card(a: Audit, store: Store, sh: dict[str, Any], c: Tag | None) -> N
     detail += [f" {words[0]}, {words[1]}."] if words else []  # (name, time clause, badge parts)
     el = part(c, ".result-d")
     said(a, P_KEY, "surface card: detail", el, detail, "scorecard.json, surface.json inputs")
+    says(a, P_KEY, "surface card: detail", el, NEWER, bool(sh["newer"]))
     if words:
         says(a, P_KEY, "surface card: detail", el, f"{words[0]}, {words[1]}.", True)
     rng = part(c, ".kpi-ci.kpi-range")

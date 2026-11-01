@@ -66,6 +66,26 @@ def _scored(sc: dict) -> list[str]:
     return [m["model"] for m in sc["models"] if m.get("available") is not False]
 
 
+def _fit_session(dash) -> str:
+    """The headline fit's session: what the Overview's surface figures and the
+    Calibration page's chain and smiles cite (the newest surface session may be a
+    newer one without a fit)."""
+    path, cal = dash.load_headline_calibration()
+    return dash._calibration_session(cal, path)
+
+
+def _overview_surface_file(dash, name: str) -> Path:
+    """``name`` of the session the Overview's surface figures cite (app.surface_result):
+    the headline fit's session when it has a scorecard, else the newest surface session."""
+    d = SHIPPED / "surface" / _fit_session(dash)
+    return d / name if (d / "scorecard.json").exists() else _surface_file(name)
+
+
+def _tight(text: str) -> str:
+    """Visible text without the space a no-wrap span (a date) leaves before ',', '.', ';', ')'."""
+    return re.sub(r"\s+([,.;)])", r"\1", text)
+
+
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec is not None
@@ -6958,11 +6978,16 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     # works: the arbitrage-free surface on held-out strikes, the VIX replication, the gate
     path, cal = dash.load_headline_calibration()
     session = dash._calibration_session(cal, path)
-    sc = json.loads(_surface_file("scorecard.json").read_text())
+    # the surface item cites the headline fit's session (the surface and Heston on the
+    # same session's quotes) and names the newer session Surface shows, if there is one
+    sc = json.loads(_overview_surface_file(dash, "scorecard.json").read_text())
     svi = next(m for m in sc["models"] if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    cited, newest = sc["session"], _surface_file("scorecard.json").parent.name
     assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, "
-            f"{svi['inside_spread_pct']:.1f}% inside") in works
-    rep = json.loads(_surface_file("vix_replication.json").read_text())
+            f"{svi['inside_spread_pct']:.1f}% inside the bid–ask, on the held-out strikes of {cited}"
+            + (f", the headline fit’s session (Surface shows the newer {newest})." if cited != newest
+               else ".")) in _tight(works)
+    rep = json.loads(_overview_surface_file(dash, "vix_replication.json").read_text())
     gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
     if gap is None:     # a session whose chain does not replicate the VIX: no replication line
         assert "index pts from the Cboe close" not in works
@@ -7007,17 +7032,26 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
     assert all(t.split(": ", 1)[1].startswith(("not ", "not yet")) for t in text["→ Next · not done yet"])
 
 
-def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(pages):
+def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(dash, pages):
     """R3-T3: the Overview and Model Risk said the VIX was replicated 'by the
     Cboe rules' while Surface's 'Where the replication departs from Cboe' lists
     the departures (the rate, the quote time, the forward, PM lines for AM
     monthlies, ...). Both now say 'the Cboe formula, with N listed departures
-    (Surface)', N counted from that list on the rendered Surface page."""
+    (Surface)', N counted from that list on the rendered Surface page. The
+    Overview's item is on the headline fit's session (the newest surface session
+    unless that one has no fit), so its N is that session's replication's."""
     m = re.search(r"<summary>Where the replication departs from Cboe</summary>(.*?)</details>",
                   pages["/surface"], re.DOTALL)
     rep = json.loads(_surface_file("vix_replication.json").read_text())
+    ov = json.loads(_overview_surface_file(dash, "vix_replication.json").read_text())
+    n_ov = len(ov.get("deviations") or [])
+    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
+    if (ov["indices"].get("VIX") or {}).get("gap_vs_official") is not None and n_ov:
+        assert f"by the Cboe formula, with {dash.plural(n_ov, 'listed departure')} (Surface)." in works
+    else:
+        assert "listed departure" not in works
     if m is None:       # no replication on this session: no claim either way
-        assert "listed departure" not in pages["/"] + pages["/model-risk"]
+        assert "listed departure" not in pages["/model-risk"]
         return
     n = len(re.findall(r"<li>", m.group(1)))
     assert n > 0
@@ -7029,9 +7063,6 @@ def test_vix_replication_is_called_the_cboe_formula_with_its_listed_departures(p
                       pages["/surface"], re.DOTALL)
     assert (notes is not None) == bool(rep.get("gap_notes"))
     tail = f"with {n} listed departure{'' if n == 1 else 's'} (Surface)"
-    works = " ".join(_visible_text("<body>" + it) for it in _findings(pages["/"])[0][2])
-    if (rep["indices"].get("VIX") or {}).get("gap_vs_official") is not None:
-        assert f"by the Cboe formula, {tail}." in works
     mr = _visible_text(pages["/model-risk"])
     assert f"Cboe VIX formula on the stored two-sided chain, {tail}; a gap points" in mr
     for html in (pages["/"], pages["/model-risk"]):
@@ -7967,13 +7998,23 @@ def test_surface_and_calibration_badges_and_the_expiries_column_read_the_artifac
     sj = next(s["surface"] for s in inputs if s["session"] == head)
     others = [dash.session_expiries(s["surface"]) for s in inputs if s["session"] != head]
     want = dash.chain_badge(sj, others)
+    fit = _fit_session(dash)
+    fit_sj = next((s["surface"] for s in inputs if s["session"] == fit), None)
     for route in ("/surface", "/calibration"):
         badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', pages[route], re.DOTALL)
-        if route == "/calibration" and dash.load_page2().get("session") != head:
-            continue                       # the fit's own session's chain, when it has a surface report
+        if route == "/calibration":
+            # the fit's own session's chain (a newer surface session without a fit has
+            # another), when that session has a surface report
+            assert (badge is not None) == (fit_sj is not None and dash.chain_source(fit_sj) is not None)
+            if badge is None:
+                continue
+            route_want = dash.chain_badge(fit_sj, [dash.session_expiries(s["surface"]) for s in inputs
+                                                   if s["session"] != fit])
+        else:
+            route_want = want
         assert badge, route
         text = re.sub(r"\s+", " ", _visible_text("<body>" + badge.group(1))).strip()
-        assert text == want, route
+        assert text == route_want, route
         if sj["inputs"]["source"] == "yfinance" and not sj["inputs"].get("quote_time"):
             assert "Yahoo" in text
             assert "no quote time" in text
@@ -8236,13 +8277,19 @@ def test_one_rendering_of_the_heston_oos_rmse_and_the_svi_cal_median_z_on_every_
     at one precision, wherever it is named."""
     _, cal = dash.load_headline_calibration()
     heston = dash._cal_losses(cal)["spx_oos_iv_rmse"]
-    sc = json.loads(_surface_file("scorecard.json").read_text())
-    svi_m = next(m for m in sc["models"] if m["model"] == "svi_cal")
-    svi = svi_m["metrics"]["out_of_sample"]["median_abs_hs"]
+
+    def svi_cal(path):
+        row = next(m for m in json.loads(path.read_text())["models"] if m["model"] == "svi_cal")
+        return row["metrics"]["out_of_sample"]["median_abs_hs"]
+    # the Overview cites the headline fit's session, Surface the newest (the same
+    # session unless the newest has no fit)
+    svi_ov = svi_cal(_overview_surface_file(dash, "scorecard.json"))
+    svi = svi_cal(_surface_file("scorecard.json"))
     for name, v, must, words in (
             ("Heston OOS RMSE", heston, ("/", "/calibration", "/model-risk"),
              ("RMSE", "out of sample", "Out of sample", "OOS")),
-            ("SVI-cal median |z|", svi, ("/", "/surface"), ("|z|", "half-spread"))):
+            ("SVI-cal median |z| (the Overview's session)", svi_ov, ("/",), ("|z|", "half-spread")),
+            ("SVI-cal median |z|", svi, ("/surface",), ("|z|", "half-spread"))):
         seen = {route: f for route, html in pages.items() if (f := _renderings_in_blocks(html, v, words))}
         assert set(must) <= set(seen), (name, seen)
         assert set().union(*seen.values()) == {f"{v:.2f}"}, (name, seen)
@@ -8390,6 +8437,40 @@ def test_a_surface_session_without_a_fit_keeps_heston_in_the_history(dash, no_fi
         assert rows[s_][col] == dash._fmt(oos.get((s_, "heston_v2")), ".2f"), s_
     note = re.search(r'id="surface-history".*?<p class="note">(.*?)</p>', html, re.DOTALL).group(1)
     assert "A dash in a model’s column: the model is not scored on that session" in _html_unescape(note)
+
+
+def test_the_overview_and_calibration_cite_the_fit_when_the_newest_surface_has_none(dash, no_fit):
+    """The rule for a newest surface session without a fit: the Overview's surface
+    item and key result cite the headline fit's session (so the surface and Heston are
+    scored on one session's quotes) and name the newer session Surface shows;
+    Calibration is about the headline fit, so its smiles and chain badge are the fit's
+    chain. On the copy of the record with 2026-10-30 built without a fit, the Overview
+    printed 2026-10-29's SVI-cal median (1.74) with nothing to say it was not the
+    session Surface shows (1.56)."""
+    data, newest, fit = no_fit["data"], no_fit["session"], no_fit["fit"]
+    assert fit < newest
+    ov = no_fit["/"]
+    works = _tight(" ".join(_visible_text("<body>" + it) for it in _findings(ov)[0][2]))
+    cited = fit if (data / "surface" / fit / "scorecard.json").exists() else newest
+    svi = next(m for m in json.loads((data / "surface" / cited / "scorecard.json").read_text())["models"]
+               if m["model"] == "svi_cal")["metrics"]["out_of_sample"]
+    newer = f", the headline fit’s session (Surface shows the newer {newest})" if cited != newest else ""
+    assert (f"median {svi['median_abs_hs']:.2f} half-spreads from the mid, {svi['inside_spread_pct']:.1f}% "
+            f"inside the bid–ask, on the held-out strikes of {cited}{newer}.") in works
+    assert f"held-out quotes of {cited}{newer};" in _tight(_card(ov, "surface.html#scorecard"))
+    cal = no_fit["/calibration"]
+    smiles = [s_ for cid, s_ in _raw_specs(cal).items()
+              if cid.startswith("chart-smile-") and s_.get("quotes")]
+    fit_sj = data / "surface" / fit / "surface.json"
+    if fit_sj.exists():
+        sj = json.loads(fit_sj.read_text())
+        assert smiles
+        assert {s_["quotes"]["source"] for s_ in smiles} == {dash.quote_source_note(sj)}
+        badge = re.search(r'<div class="page-badge" id="chain-badge">(.*?)</div>', cal, re.DOTALL)
+        assert badge
+        assert dash.chain_source(sj)[1] in _visible_text("<body>" + badge.group(1))
+    else:
+        assert not smiles
 
 
 # ── P2.7: no half-empty grid rows, no blank panel bottoms ────────────────────
@@ -9535,6 +9616,14 @@ def _producer_delta(p) -> float:
     return float(norm.cdf(-p.k / np.sqrt(w) + np.sqrt(w) / 2)) - (1.0 if p.right == "P" else 0.0)
 
 
+def _smile_chain(dash, route: str) -> Path:
+    """The surface session directory a page's smiles are drawn from: Surface's the
+    newest surface session, Calibration's the headline fit's own session."""
+    if route == "/surface":
+        return _surface_file("surface.json").parent
+    return SHIPPED / "surface" / _fit_session(dash)
+
+
 def _smile_specs(pages) -> list[tuple[str, dict]]:
     out = [("/surface", _with_book(_raw_specs(pages["/surface"])["chart-slices"]))]
     cal = _raw_specs(pages["/calibration"])
@@ -9550,11 +9639,11 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
     own spec, give residuals.parquet's strike (exactly), right, the producer's
     forward delta (1e-6) and each model's error_hs (±0.01), in_sample and
     inside_spread."""
-    res = pd.read_parquet(_surface_file("residuals.parquet"))
     specs = _smile_specs(pages)
     assert len(specs) >= 2, [r for r, _ in specs]
     n = 0
     for route, spec in specs:
+        res = pd.read_parquet(_smile_chain(dash, route) / "residuals.parquet")
         groups = spec["quotes"]["groups"]
         assert groups, route
         for e, g in groups.items():
@@ -9579,13 +9668,15 @@ def test_quote_inspector_formulas_reproduce_the_residual_table(dash, pages):
 
 def test_quote_inspector_footnote_names_the_chain_and_its_quote_time(dash, pages):
     """The tooltip's footnote is the chain's own source and quote time (surface.json),
-    'Yahoo close, no quote time' for a Yahoo snapshot without one."""
-    sj = json.loads(_surface_file("surface.json").read_text())
-    want = dash.quote_source_note(sj)
-    inp = sj.get("inputs") or {}
-    if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
-        assert want == "Yahoo close, no quote time"
+    'Yahoo close, no quote time' for a Yahoo snapshot without one. Each smile's chain
+    is its page's: the newest surface session's on Surface, the headline fit's on
+    Calibration (a newer session without a fit has another book and quote time)."""
     for route, spec in _smile_specs(pages):
+        sj = json.loads((_smile_chain(dash, route) / "surface.json").read_text())
+        want = dash.quote_source_note(sj)
+        inp = sj.get("inputs") or {}
+        if str(inp.get("source")).lower() in ("yfinance", "yahoo") and not inp.get("quote_time"):
+            assert want == "Yahoo close, no quote time"
         assert spec["quotes"]["source"] == want, route
     assert dash.quote_source_note({"inputs": {"source": "cboe", "quote_time": "2026-10-16T15:45:00"}}) \
         == "Cboe, quotes at 2026-10-16 15:45:00"
@@ -11756,10 +11847,12 @@ def test_a_yahoo_download_is_never_called_a_timed_book_or_a_close_snapshot(dash,
         == ["Yahoo Finance close snapshot", "no quote time"]
     cboe = {"inputs": {"source": "cboe", "quote_time": "2026-10-27T02:33:38Z"}}
     assert dash.chain_source(cboe) == ["Cboe", "quotes at 2026-10-27 02:33 UTC"]
-    # every page that names the newest surface session's chain says what it is
-    sj = json.loads(_surface_file("surface.json").read_text())
-    want = dash.chain_provenance(sj)
+    # every page that names a surface session's chain says what it is (the Overview's
+    # surface result is the headline fit's session's, the others the newest session's)
     for route in ("/", "/surface", "/model-risk"):
+        sj = json.loads((_overview_surface_file(dash, "surface.json") if route == "/"
+                         else _surface_file("surface.json")).read_text())
+        want = dash.chain_provenance(sj)
         text = _visible_text(pages[route])
         assert "Quotes as of" not in text, route
         if want and want["download"]:
