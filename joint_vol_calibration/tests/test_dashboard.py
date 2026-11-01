@@ -6987,12 +6987,15 @@ def test_overview_findings_at_a_glance_are_computed_and_linked(dash, pages):
             f"{svi['inside_spread_pct']:.1f}% inside the bid–ask, on the held-out strikes of {cited}"
             + (f", the headline fit’s session (Surface shows the newer {newest})." if cited != newest
                else ".")) in _tight(works)
-    rep = json.loads(_overview_surface_file(dash, "vix_replication.json").read_text())
+    # the replication item cites the session Surface shows (it links to that page's
+    # #vix-replication; no Heston figure is paired with it)
+    rep = json.loads(_surface_file("vix_replication.json").read_text())
     gap = (rep["indices"].get("VIX") or {}).get("gap_vs_official")
     if gap is None:     # a session whose chain does not replicate the VIX: no replication line
         assert "index pts from the Cboe close" not in works
     else:
-        assert f"{dash.signed(gap, '.2f')} index pts from the Cboe close" in works
+        assert (f"{dash.signed(gap, '.2f')} index pts from the Cboe close (replicated − official) on "
+                f"{newest}") in _tight(works)
     rows = dash.scan_calibrations()
     n_legacy = sum(1 for r in rows if r["legacy"])
     assert f"{n_legacy:,} pre-C22 fit" in works
