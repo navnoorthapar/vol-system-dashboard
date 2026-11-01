@@ -117,7 +117,8 @@ SCHEMA_VERSION = 1
 #      overnight (Global Trading Hours) book says in its timing note that the
 #      gap mixes the replication's error with the overnight move, how many
 #      hours after the print the book was quoted, and why no closing book was
-#      used
+#      used (none stored, or it failed the gates: inputs.closing_books counts
+#      the session's stored closing books)
 REPORT_VERSION = 6
 SURFACE_DIR = DATA_DIR / "surface"
 
@@ -715,6 +716,9 @@ def run_session(session: str, *, calibrations_dir: Path | None = None,
                 "quote_time": sq.diagnostics.get("quote_time"),
                 "fetched_at": src.get("fetched_at"),
                 "book_state": src.get("book_state"),
+                # how many closing books of the session are stored (0 for a session
+                # built from its overnight book: none, so the timing note says why)
+                "closing_books": src.get("closing_books"),
                 "near_atm_two_sided_share": sq.diagnostics.get("near_atm_two_sided_share"),
                 "t_origin": sq.diagnostics.get("t_origin"),
                 "t_origin_basis": sq.diagnostics.get("t_origin_basis"),

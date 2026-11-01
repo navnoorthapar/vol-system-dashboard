@@ -291,7 +291,8 @@ class TestSimulatedSession:
 
         def problems(close, book, feed_state, chain):
             """book_problems on the files the simulated run would leave."""
-            status.write_text(json.dumps({**book, "simulated": {"session": s, "book_slot_state": feed_state}}))
+            sim_rec = {"session": s, "book_slot_state": feed_state}
+            status.write_text(json.dumps({**book, "simulated": sim_rec}))
             close_file = status.with_name("status_close.json")
             close_file.unlink(missing_ok=True)
             if close is not None:
@@ -835,28 +836,39 @@ class TestRecomputeAudit:
             S.deviations(a, ctx, split, [S.CAUSE_TIMING, S.CAUSE_STALE])
             assert [c.label for c in a.checks if not c.ok] == [], far
 
-    def test_it_rebuilds_the_overnight_books_quote_time_and_hours_after_the_close(self, monkeypatch):
+    def test_it_rebuilds_the_overnight_books_quote_time_and_hours_after_the_close(
+            self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a replication built from an overnight book says when the
         book was quoted and how many hours after the session's 16:15 ET print. The
         audit rebuilds both from surface.json's quote time and its own calendar, and,
-        from report_version 6, requires the note exactly on an overnight book."""
+        from report_version 6, requires the note exactly on an overnight book. Why no
+        closing book was used (none stored, or it failed the quote-state gates) was
+        copied through; the audit now counts the session's stored closing books by its
+        own clock, checks surface.json's closing_books against that count and the
+        note's reason clause against it."""
         import importlib
         import types
 
         from bs4 import BeautifulSoup
         rc = _recompute(monkeypatch)
         S = importlib.import_module("recompute.surface")
+        root = tmp_path / "data_store"
+        (root / "options" / "cboe").mkdir(parents=True)
+        store = rc.data.Store(root)
+        none_stored = ("(no closing book of the session is stored: Cboe’s delayed feed shows it only until "
+                       "Global Trading Hours open at 20:15 ET)")
+        failed_gates = "(the session’s closing book did not pass the quote-state gates)"
 
-        def note(quoted, hours):
-            return (f"{S.OVERNIGHT_NOTE} (no closing book of the session is stored: Cboe’s delayed feed "
-                    f"shows it only until Global Trading Hours open at 20:15 ET), quoted at {quoted} ET, "
+        def note(quoted, hours, why=none_stored):
+            return (f"{S.OVERNIGHT_NOTE} {why}, quoted at {quoted} ET, "
                     f"{hours} hours after the 16:15 ET print of 2026-10-29 it is compared with: the gap "
                     "mixes the replication’s error with the market’s move overnight.")
 
-        def failed(notes, quote_time="2026-10-30T08:36:08Z", version=6):
-            ctx = types.SimpleNamespace(
-                vx={"report_version": version}, session="2026-10-29",
-                sj={"inputs": {"source": "cboe", "quote_time": quote_time, "book_state": "gth"}})
+        def failed(notes, quote_time="2026-10-30T08:36:08Z", version=6, closing_books=None):
+            inputs = {"source": "cboe", "quote_time": quote_time, "book_state": "gth",
+                      **({"closing_books": closing_books} if closing_books is not None else {})}
+            ctx = types.SimpleNamespace(vx={"report_version": version}, session="2026-10-29",
+                                        sj={"inputs": inputs}, store=store)
             html = "".join(f"<li>{n}</li>" for n in notes)
             a = rc.core.Audit("t", BeautifulSoup(f"<ul>{html}</ul>", "lxml"))
             S.overnight_note(a, ctx, a.soup.select("li"))
@@ -874,6 +886,57 @@ class TestRecomputeAudit:
         # Thu 17:52 ET: the closing book, which has no such note
         assert failed([], quote_time="2026-10-29T21:52:00Z") == []
         assert failed([note("2026-10-29 17:52", "1.6")], quote_time="2026-10-29T21:52:00Z")[0] == shown
+        # the reason clause and surface.json's count follow the stored records
+        why = "overnight-book note: why no closing book was used (the stored records)"
+        count = "surface.json closing_books = the session's stored closing books (this audit's clock)"
+        assert failed([note("2026-10-30 04:36", "12.4", failed_gates)]) == [why]
+        assert failed([note("2026-10-30 04:36", "12.4")], closing_books=0) == []
+        (root / "options" / "cboe" / "spx_2026-10-29_220705Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": "2026-10-29", "quote_time": "2026-10-29T21:52:05Z"}))
+        (root / "options" / "cboe" / "spx_2026-10-29_085136Z.json").write_text(json.dumps(
+            {"underlying": "SPX", "session": "2026-10-29", "quote_time": "2026-10-30T08:36:08Z"}))
+        assert failed([note("2026-10-30 04:36", "12.4", failed_gates)], closing_books=1) == []
+        assert failed([note("2026-10-30 04:36", "12.4")], closing_books=0) == [count, why]
+
+    def test_it_rebuilds_the_heston_rows_fit_time_clause_from_the_fits_record(self, monkeypatch, tmp_path):
+        """FUND_GRADE_PLAN 0.8: a session scored on its closing book whose Heston fit was
+        made on a chain downloaded after that book gave way says so in the Heston row,
+        with the download's UTC minute. The audit compared the row with scorecard.json
+        only; it now rebuilds the clause from the fit's chain record and its own clock."""
+        import importlib
+        import pickle
+        import types
+
+        from bs4 import BeautifulSoup
+        rc = _recompute(monkeypatch)
+        S = importlib.import_module("recompute.surface")
+        M = importlib.import_module("recompute.surface_math")
+        root = tmp_path / "data_store"
+        (root / "calibrations").mkdir(parents=True)
+        clause = ("; that chain was downloaded at 2026-10-30 08:51 UTC, after the closing book scored here "
+                  "had given way to the overnight one, so part of its error here is the market's move "
+                  "between the two")
+        row = ("Heston at the stored model_version-2 joint SPX/VIX-index fit. The fit was made on the "
+               "Yahoo chain")
+
+        def failed(text, fetched="2026-10-30T08:51:33Z", book=M.BOOK_CLOSING, version=6):
+            with open(root / "calibrations" / "joint_cal_2026-10-29.pkl", "wb") as fh:
+                pickle.dump({"chain_diagnostics": {"source": "yfinance", "fetched_at": fetched}}, fh)
+            ctx = types.SimpleNamespace(vx={"report_version": version}, session="2026-10-29", s=None,
+                                        store=rc.data.Store(root), book=lambda s: book)
+            a = rc.core.Audit("t", BeautifulSoup(f"<dd>{text}</dd>", "lxml"))
+            S.heston_fit_time_note(a, ctx, a.soup.select_one("dd"))
+            return [c.label for c in a.checks if not c.ok]
+
+        shown = ("Heston row: fit-time clause shown (scored on the closing book, fit downloaded after it "
+                 "gave way, by the fit's record and this audit's clock)")
+        assert failed(row + clause) == []                                   # Fri 04:36 ET quotes
+        assert failed(row) == [shown]
+        assert failed(row + clause.replace("08:51", "08:41")) == [
+            "Heston row: when the fit's chain was downloaded (its record, UTC)"]
+        assert failed(row, fetched="2026-10-29T22:00:00Z") == []            # Thu 17:45 ET: still closing
+        assert failed(row + clause, book=M.BOOK_OVERNIGHT) == [shown]        # scored on the overnight book
+        assert failed(row, version=5) == []
 
     def test_it_checks_every_book_of_the_newest_session_on_the_overview(self, monkeypatch, tmp_path):
         """FUND_GRADE_PLAN 0.8: a weekday session can hold its closing book (the close

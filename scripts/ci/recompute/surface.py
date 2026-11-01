@@ -1546,6 +1546,40 @@ def scorecard(a: Audit, c: Ctx) -> None:
     for i, m in enumerate(c.score_models):
         a.text(P_SC, f"{M.label(m)} description (scorecard.json)", dds[i] if i < len(dds) else None,
                prose((c.sc_model(m) or {}).get("description") or "—"))
+        if m == "heston_v2":
+            heston_fit_time_note(a, c, dds[i] if i < len(dds) else None)
+
+
+FIT_TIME_NOTE = "after the closing book scored here had given way to the overnight one"
+
+
+def heston_fit_time_note(a: Audit, c: Ctx, dd: Tag | None) -> None:
+    """FUND_GRADE_PLAN 0.8: when the session is scored on its closing book and its Heston
+    fit was made on a chain downloaded once the feed had moved to the next session's
+    overnight book, the Heston row says so, with the download's UTC minute. Rebuilt from
+    the fit's own record (calibrations/joint_cal_<session>.pkl, chain_diagnostics:
+    fetched_at, or quote_time for fits before QUANT-01, which stored the download's
+    clock there) and this audit's clock, not copied from scorecard.json. From
+    report_version 6, which writes it, the clause is there exactly when they call for it."""
+    rel = f"calibrations/joint_cal_{c.session}.pkl"
+    diag: dict = {}
+    if (c.store.root / rel).is_file():
+        cal = c.store.pickle(rel)
+        diag = (cal.get("chain_diagnostics") or {}) if isinstance(cal, dict) else {}
+    when = diag.get("fetched_at") or diag.get("quote_time")
+    fit_on_cboe = str(diag.get("source") or "yfinance").strip().lower() == "cboe"
+    want = (c.book(c.s) == M.BOOK_CLOSING and not fit_on_cboe
+            and bool(M.fit_left_the_closing_book(when, c.session)))
+    shown = FIT_TIME_NOTE in text_of(dd)
+    version = c.vx.get("report_version")
+    if isinstance(version, int) and version >= OVERNIGHT_NOTE_VERSION:
+        a.equal(P_SC, "Heston row: fit-time clause shown (scored on the closing book, fit downloaded "
+                "after it gave way, by the fit's record and this audit's clock)", shown, want)
+    if shown and want:
+        at = dt.datetime.fromisoformat(str(when))
+        at = at.replace(tzinfo=dt.UTC) if at.tzinfo is None else at.astimezone(dt.UTC)
+        a.text(P_SC, "Heston row: when the fit's chain was downloaded (its record, UTC)", dd,
+               f"that chain was downloaded at {at:%Y-%m-%d %H:%M} UTC, {FIT_TIME_NOTE}", contains=True)
 
 
 def scorecard_note_counts(a: Audit, c: Ctx, note: str) -> None:
@@ -1966,6 +2000,9 @@ def deviations(a: Audit, c: Ctx, vix: GapSplit | None, causes: list[str]) -> Non
 
 OVERNIGHT_NOTE = "The book is the overnight (Global Trading Hours) book"
 OVERNIGHT_NOTE_VERSION = 6          # the report_version that writes it
+OVERNIGHT_WHY_NONE = ("(no closing book of the session is stored: Cboe’s delayed feed shows it only until "
+                      "Global Trading Hours open at 20:15 ET)")
+OVERNIGHT_WHY_FAILED = "(the session’s closing book did not pass the quote-state gates)"
 
 
 def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
@@ -1994,6 +2031,13 @@ def overnight_note(a: Audit, c: Ctx, lis: list[Tag]) -> None:
     m = re.search(r"ET, (\S+) hours after", text_of(li))
     a.num(P_VIX, "overnight-book note: hours from the Cboe close to the book's quote time", m.group(1) if m
           else None, (at - close).total_seconds() / 3600.0)
+    # why no closing book was used: none of the session is stored, or it failed the gates
+    stored = M.closing_books(c.store, c.session)
+    if "closing_books" in inp:
+        a.equal(P_VIX, "surface.json closing_books = the session's stored closing books (this audit's clock)",
+                inp.get("closing_books"), stored)
+    a.text(P_VIX, "overnight-book note: why no closing book was used (the stored records)", li,
+           OVERNIGHT_WHY_FAILED if stored else OVERNIGHT_WHY_NONE, contains=True)
 
 
 def near_next_notes(a: Audit, c: Ctx, lis: list[Tag]) -> None:

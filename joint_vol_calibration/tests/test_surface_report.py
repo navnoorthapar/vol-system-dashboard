@@ -589,6 +589,8 @@ def test_a_sessions_closing_book_is_preferred_to_its_later_overnight_book(tmp_pa
     assert sum(n.startswith("The book is the overnight (Global Trading Hours) book (the session's "
                             "closing book did not pass the quote-state gates), quoted at ")
                for n in notes) == 1
+    # surface.json records the count the note's reason rests on, for the recompute audit
+    assert out["surface"]["inputs"]["closing_books"] == 1
 
 
 def test_a_closing_book_in_the_private_store_is_found(tmp_path, monkeypatch):
